@@ -194,12 +194,12 @@ type CreateHiveRequest struct {
 	PrimaryRepo    string `json:"primary_repo"`
 	ProjectName    string `json:"project_name"`
 	ACMMLevel      int    `json:"acmm_level"`
+	ClusterID      string `json:"cluster_id"`
 	GitHubToken    string `json:"github_token"`
 	AuthMethod     string `json:"auth_method"`
 	AppID          string `json:"app_id"`
 	InstallationID string `json:"installation_id"`
 	AppPrivateKey  string `json:"app_private_key"`
-	ClusterID      string `json:"cluster_id"`
 	IsPublic       bool   `json:"is_public"`
 }
 
