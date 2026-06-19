@@ -49,6 +49,8 @@ type PullRequest struct {
 	CreatedAt time.Time `json:"created_at"`
 	URL       string    `json:"url"`
 	Mergeable bool      `json:"mergeable"`
+	CIStatus  string    `json:"ci_status"`
+	HeadSHA   string    `json:"head_sha,omitempty"`
 }
 
 type ActionableResult struct {
@@ -250,12 +252,20 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time) (a
 		ListOptions: gh.ListOptions{PerPage: 100},
 	}
 
-	issues, _, err := c.client.Issues.ListByRepo(ctx, owner, repoName, opts)
-	if err != nil {
-		return nil, nil, 0, fmt.Errorf("listing issues for %s/%s: %w", owner, repoName, err)
+	var allIssues []*gh.Issue
+	for {
+		issues, resp, err := c.client.Issues.ListByRepo(ctx, owner, repoName, opts)
+		if err != nil {
+			return nil, nil, 0, fmt.Errorf("listing issues for %s/%s: %w", owner, repoName, err)
+		}
+		allIssues = append(allIssues, issues...)
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.ListOptions.Page = resp.NextPage
 	}
 
-	for _, issue := range issues {
+	for _, issue := range allIssues {
 		if issue.IsPullRequest() {
 			continue
 		}
@@ -303,12 +313,20 @@ func (c *Client) fetchPRs(ctx context.Context, repo string) (actionable []PullRe
 		ListOptions: gh.ListOptions{PerPage: 100},
 	}
 
-	prs, _, err := c.client.PullRequests.List(ctx, owner, repoName, opts)
-	if err != nil {
-		return nil, nil, 0, fmt.Errorf("listing PRs for %s/%s: %w", owner, repoName, err)
+	var allPRs []*gh.PullRequest
+	for {
+		prs, resp, err := c.client.PullRequests.List(ctx, owner, repoName, opts)
+		if err != nil {
+			return nil, nil, 0, fmt.Errorf("listing PRs for %s/%s: %w", owner, repoName, err)
+		}
+		allPRs = append(allPRs, prs...)
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.ListOptions.Page = resp.NextPage
 	}
 
-	for _, pr := range prs {
+	for _, pr := range allPRs {
 		totalPRs++
 		labels := extractPRLabels(pr.Labels)
 
@@ -330,6 +348,11 @@ func (c *Client) fetchPRs(ctx context.Context, repo string) (actionable []PullRe
 			continue
 		}
 
+		headSHA := ""
+		if pr.GetHead() != nil {
+			headSHA = pr.GetHead().GetSHA()
+		}
+
 		actionable = append(actionable, PullRequest{
 			Repo:      repo,
 			Number:    pr.GetNumber(),
@@ -340,10 +363,59 @@ func (c *Client) fetchPRs(ctx context.Context, repo string) (actionable []PullRe
 			CreatedAt: pr.GetCreatedAt().Time,
 			URL:       pr.GetHTMLURL(),
 			Mergeable: pr.GetMergeable(),
+			HeadSHA:   headSHA,
 		})
 	}
 
 	return actionable, held, totalPRs, nil
+}
+
+// EnrichCIStatus fetches check-run results for each PR's HEAD commit
+// and sets the CIStatus field to "success", "failure", or "pending".
+func (c *Client) EnrichCIStatus(ctx context.Context, prs []PullRequest) {
+	const ciStatusSuccess = "success"
+	const ciStatusFailure = "failure"
+	const ciStatusPending = "pending"
+
+	for i := range prs {
+		if prs[i].HeadSHA == "" {
+			prs[i].CIStatus = ciStatusPending
+			continue
+		}
+		owner, repoName := c.splitRepo(prs[i].Repo)
+		checkRuns, _, err := c.client.Checks.ListCheckRunsForRef(ctx, owner, repoName, prs[i].HeadSHA, &gh.ListCheckRunsOptions{
+			ListOptions: gh.ListOptions{PerPage: 100},
+		})
+		if err != nil {
+			c.logger.Warn("failed to fetch check runs", "repo", prs[i].Repo, "pr", prs[i].Number, "error", err)
+			prs[i].CIStatus = ciStatusPending
+			continue
+		}
+		if checkRuns.GetTotal() == 0 {
+			prs[i].CIStatus = ciStatusPending
+			continue
+		}
+		hasFail := false
+		allDone := true
+		for _, cr := range checkRuns.CheckRuns {
+			if cr.GetStatus() != "completed" {
+				allDone = false
+				continue
+			}
+			conclusion := cr.GetConclusion()
+			if conclusion == "failure" || conclusion == "action_required" {
+				hasFail = true
+			}
+		}
+		switch {
+		case hasFail:
+			prs[i].CIStatus = ciStatusFailure
+		case allDone:
+			prs[i].CIStatus = ciStatusSuccess
+		default:
+			prs[i].CIStatus = ciStatusPending
+		}
+	}
 }
 
 func extractLabels(labels []*gh.Label) []string {
