@@ -112,10 +112,11 @@ Skip any PR with hold labels or `do-not-merge`.
 The CI_FAILING list below contains PRs with failed `build-gate` checks. These PRs are **excluded from merge-eligible** until CI passes. Your job is to fix them.
 
 For each PR in CI_FAILING:
-1. **Read the CI log** — use MCP `list_workflow_runs_for_repo` to find the failed run, then `download_workflow_run_logs` to get the log
-2. **Identify the error** — lint errors, type errors, build failures, import issues
-3. **Fix it** — push a fixup commit to the PR branch using MCP `create_or_update_file` or by checking out the branch in a worktree, fixing, and pushing
-4. **Move on** — do NOT wait for CI to re-run. The next kick cycle will check again.
+1. **Check for DCO failure first** — if the PR fails only the DCO check (missing `Signed-off-by`), fix it by checking out the branch in a worktree and pushing a signed fixup commit: `git commit --allow-empty -s -m "fix: add DCO sign-off"`. Do NOT analyze code or read CI logs for DCO-only failures — just sign and move on.
+2. **Read the CI log** — use MCP `list_workflow_runs_for_repo` to find the failed run, then `download_workflow_run_logs` to get the log
+3. **Identify the error** — lint errors, type errors, build failures, import issues
+4. **Fix it** — push a fixup commit to the PR branch using MCP `create_or_update_file` or by checking out the branch in a worktree, fixing, and pushing
+5. **Move on** — do NOT wait for CI to re-run. The next kick cycle will check again.
 
 If a PR has failed CI **3 or more times** (check commit count on the PR), close it as unfixable and reopen the linked issue.
 
