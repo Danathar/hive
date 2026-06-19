@@ -42,7 +42,9 @@ func (s *HubServer) handleLogin(w http.ResponseWriter, r *http.Request) {
 		redirect = r.URL.Query().Get("rd")
 	}
 	if redirect != "" && (!strings.HasPrefix(redirect, "/") || strings.HasPrefix(redirect, "//")) {
-		redirect = "/dashboard"
+		if !isTrustedOrigin(redirect) {
+			redirect = "/dashboard"
+		}
 	}
 	state := url.QueryEscape(redirect)
 	authURL := fmt.Sprintf("%s?client_id=%s&scope=read:user&redirect_uri=%s&state=%s",
@@ -146,7 +148,7 @@ func (s *HubServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request) 
 	redirect := "/dashboard"
 	if state := r.URL.Query().Get("state"); state != "" {
 		if decoded, err := url.QueryUnescape(state); err == nil && decoded != "" {
-			if strings.HasPrefix(decoded, "/") && !strings.HasPrefix(decoded, "//") {
+			if (strings.HasPrefix(decoded, "/") && !strings.HasPrefix(decoded, "//")) || isTrustedOrigin(decoded) {
 				redirect = decoded
 			}
 		}

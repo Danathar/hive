@@ -1667,6 +1667,7 @@
   if(m==='light'){document.body.classList.add('light-mode','has-info-sidebar')}
   document.body.style.opacity='0';
   document.body.style.transition='opacity 0.15s ease-in';
+  setTimeout(function(){ document.body.style.opacity='1'; }, 3000);
 })();
 
 </script>
