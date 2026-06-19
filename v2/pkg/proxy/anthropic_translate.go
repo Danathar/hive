@@ -13,7 +13,8 @@ import (
 
 // translateAnthropicToOpenAI converts an Anthropic Messages API request body
 // into an OpenAI Chat Completions API request body, overriding the model.
-func translateAnthropicToOpenAI(body []byte, targetModel string) ([]byte, error) {
+// maxContextLen is the model's max context window (0 = no cap).
+func translateAnthropicToOpenAI(body []byte, targetModel string, maxContextLen int) ([]byte, error) {
 	var req anthropicRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("unmarshal anthropic request: %w", err)
@@ -21,7 +22,7 @@ func translateAnthropicToOpenAI(body []byte, targetModel string) ([]byte, error)
 
 	openaiReq := openaiRequest{
 		Model:     targetModel,
-		MaxTokens: req.MaxTokens,
+		MaxTokens: capMaxTokens(req.MaxTokens, maxContextLen),
 		Stream:    req.Stream,
 	}
 
@@ -238,7 +239,7 @@ func mapFinishReason(reason string) string {
 // endpoint, translating the request and response formats. It writes the
 // translated response directly to the provided http.ResponseWriter.
 func forwardToInference(clientReq *http.Request, clientBody []byte, w http.ResponseWriter, route *InferenceRoute) error {
-	openaiBody, err := translateAnthropicToOpenAI(clientBody, route.Model)
+	openaiBody, err := translateAnthropicToOpenAI(clientBody, route.Model, route.MaxContextLen)
 	if err != nil {
 		return fmt.Errorf("translate request: %w", err)
 	}
