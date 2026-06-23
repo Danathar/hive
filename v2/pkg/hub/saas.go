@@ -2058,15 +2058,14 @@ func (s *HubServer) triggerAutoUpgrades() {
 		ns := "hive-hosted-" + h.ID
 		cmd := kubectlForCluster(hiveCluster, "rollout", "restart", "deployment/hive", "-n", ns)
 		if out, err := cmd.CombinedOutput(); err != nil {
-			s.logger.Warn("auto-upgrade failed (will retry via heartbeat)", "hive", h.ID, "cluster", hiveCluster.ID, "output", string(out))
+			s.logger.Warn("auto-upgrade kubectl failed, falling back to heartbeat",
+				"hive", h.ID, "cluster", hiveCluster.ID, "target", latestSHA, "output", string(out))
+			// kubectl can't reach the cluster — fall back to heartbeat-based
+			// upgrade (path 3). The next heartbeat from this hive will include
+			// UpgradeTo, causing the spoke to self-restart.
 			s.mu.Lock()
-			for i := range s.registry.Hives {
-				if s.registry.Hives[i].ID == h.ID {
-					s.registry.Hives[i].Upgrading = false
-					s.registry.Hives[i].UpgradeTarget = ""
-					break
-				}
-			}
+			s.heartbeatUpgrade[h.ID] = latestSHA
+			// Keep Upgrading=true so the dashboard shows the correct state.
 			s.mu.Unlock()
 		}
 	}

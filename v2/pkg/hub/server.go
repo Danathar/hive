@@ -122,6 +122,12 @@ type HubServer struct {
 	clusters       map[string]ClusterConfig
 	heartbeatHealth   map[string]*HeartbeatHealthEntry // cluster ID → latest health from spoke heartbeat
 	heartbeatHealthMu sync.RWMutex
+
+	// heartbeatUpgrade tracks hives that should be upgraded via heartbeat
+	// UpgradeTo because kubectl rollout restart failed (cluster unreachable).
+	// Key: hive ID, value: target SHA.  Cleared when the spoke reports the
+	// target SHA, proving the upgrade completed.
+	heartbeatUpgrade map[string]string
 }
 
 func NewHubServer(port int, logger *slog.Logger, gitHash string) *HubServer {
@@ -143,13 +149,14 @@ func NewHubServer(port int, logger *slog.Logger, gitHash string) *HubServer {
 		logger.Info("generated hub secret", "path", "/data/saas/hub-secret.key")
 	}
 	s := &HubServer{
-		mux:             http.NewServeMux(),
-		logger:          logger,
-		saveCh:          make(chan struct{}, 1),
-		hubGitHash:      gitHash,
-		hubSecret:       secret,
-		clusters:        loadClusters(logger),
-		heartbeatHealth: make(map[string]*HeartbeatHealthEntry),
+		mux:              http.NewServeMux(),
+		logger:           logger,
+		saveCh:           make(chan struct{}, 1),
+		hubGitHash:       gitHash,
+		hubSecret:        secret,
+		clusters:         loadClusters(logger),
+		heartbeatHealth:  make(map[string]*HeartbeatHealthEntry),
+		heartbeatUpgrade: make(map[string]string),
 	}
 
 	s.loadRegistry()
@@ -483,20 +490,46 @@ func (s *HubServer) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check if the hive should self-upgrade via heartbeat response.
-	// Only spoke-managed hives (unreachable by kubectl) should get UpgradeTo.
-	// Hub-managed SaaS hives are upgraded via "kubectl rollout restart" in
-	// triggerAutoUpgrades() — telling them to os.Exit(0) via UpgradeTo causes
-	// the old pod to die before the new pod is Ready, producing a 503 window.
+	//
+	// Three upgrade paths, all controlled by a single toggle:
+	//   1. Spoke-managed: ConfigMap auto_upgrade=true, hub has no SaaS record.
+	//      Hub sends UpgradeTo in every heartbeat when SHA differs.
+	//   2. Hub-managed (kubectl reachable): SaaS AutoUpgrade=true.
+	//      triggerAutoUpgrades() does "kubectl rollout restart". No UpgradeTo
+	//      sent — avoids pod dying before replacement is Ready (503 window).
+	//   3. Hub-managed (kubectl unreachable): SaaS AutoUpgrade=true but
+	//      kubectl failed. triggerAutoUpgrades() adds hive to
+	//      s.heartbeatUpgrade; the next heartbeat sends UpgradeTo as fallback.
 	spokeManaged := payload.AutoUpgrade
 	if sh := loadSaaSHive(payload.HiveID); sh != nil && sh.AutoUpgrade {
 		spokeManaged = false
 	}
+
+	// Fallback for hub-managed hives where kubectl failed (path 3).
+	s.mu.RLock()
+	hbTarget := s.heartbeatUpgrade[payload.HiveID]
+	s.mu.RUnlock()
+	if hbTarget != "" && payload.GitHash == hbTarget {
+		// Spoke already upgraded — clear the fallback entry.
+		s.mu.Lock()
+		delete(s.heartbeatUpgrade, payload.HiveID)
+		s.mu.Unlock()
+		hbTarget = ""
+	}
+
 	if spokeManaged && latestSHA != "" && payload.GitHash != "" && payload.GitHash != latestSHA {
 		resp.UpgradeTo = latestSHA
 		s.logger.Info("heartbeat: instructing spoke-managed hive to upgrade",
 			"hive_id", payload.HiveID,
 			"from", payload.GitHash,
 			"to", latestSHA,
+		)
+	} else if hbTarget != "" && payload.GitHash != hbTarget {
+		resp.UpgradeTo = hbTarget
+		s.logger.Info("heartbeat: instructing hub-managed hive to upgrade (kubectl fallback)",
+			"hive_id", payload.HiveID,
+			"from", payload.GitHash,
+			"to", hbTarget,
 		)
 	}
 
