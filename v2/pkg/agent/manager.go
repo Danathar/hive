@@ -2231,9 +2231,11 @@ func (m *Manager) ensureClaudeSettings(agentName string, uid int) {
 	// Also write the standalone settings file for --settings flag
 	_ = os.WriteFile(claudeInferenceSettingsPath, []byte(settings), 0o666)
 	// Pre-populate .claude.json to skip first-run setup (GrowthBook, migrations)
+	// and pre-approve the inference API key so the CLI sends tools immediately.
 	userConfig := filepath.Join(homePath, ".claude.json")
 	if _, err := os.Stat(userConfig); err != nil {
-		cfg := `{"hasCompletedOnboarding":true,"opusProMigrationComplete":true,"sonnet1m45MigrationComplete":true,"migrationVersion":13}`
+		apiKey := "sk-hive-" + agentName
+		cfg := fmt.Sprintf(`{"hasCompletedOnboarding":true,"opusProMigrationComplete":true,"sonnet1m45MigrationComplete":true,"migrationVersion":13,"customApiKeyResponses":{"approved":[%q],"rejected":[]}}`, apiKey)
 		_ = os.WriteFile(userConfig, []byte(cfg), 0o666)
 	}
 	m.ensureWorldWritable(homePath)
