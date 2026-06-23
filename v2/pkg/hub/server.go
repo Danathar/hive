@@ -386,9 +386,13 @@ func (s *HubServer) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 			if entry.SnapshotURL == "" {
 				entry.SnapshotURL = h.SnapshotURL
 			}
-			if h.Upgrading && !payload.Upgrading {
-				// Non-upgrading heartbeat from a hive previously marked upgrading —
-				// the pod restarted and is healthy, clear the stale flag.
+			if h.Upgrading && !payload.Upgrading && payload.GitHash == h.UpgradeTarget {
+				// Non-upgrading heartbeat reporting the target SHA — upgrade
+				// completed, pod restarted successfully on the new image.
+				entry.Upgrading = false
+				entry.UpgradeTarget = ""
+			} else if h.Upgrading && !payload.Upgrading && h.UpgradeTarget == "" {
+				// Upgrading with no target (stale flag from config-only restart).
 				entry.Upgrading = false
 				entry.UpgradeTarget = ""
 			} else if h.Upgrading && h.UpgradeTarget != "" {
