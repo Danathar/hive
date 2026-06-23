@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
@@ -918,7 +919,18 @@ func (p *GitHubProxy) StartInferenceTranslator() error {
 			return
 		}
 
-		p.logger.Info("inference request body", "agent", agentName, "len", len(body), "preview", truncateBytes(body, 200))
+		// Diagnostic: count tools in original Anthropic request.
+		var toolDiag struct {
+			Tools json.RawMessage `json:"tools"`
+		}
+		toolCount := -1 // -1 = no tools key
+		if json.Unmarshal(body, &toolDiag) == nil && toolDiag.Tools != nil {
+			var arr []json.RawMessage
+			if json.Unmarshal(toolDiag.Tools, &arr) == nil {
+				toolCount = len(arr)
+			}
+		}
+		p.logger.Info("inference request body", "agent", agentName, "len", len(body), "tool_count", toolCount, "preview", truncateBytes(body, 200))
 
 		openaiBody, err := translateAnthropicToOpenAI(body, route.Model, route.MaxContextLen, resolveInferencePreamble(route))
 		if err != nil {
