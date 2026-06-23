@@ -243,9 +243,9 @@ func main() {
 			num, err := ghClient.EnsureAdvisoryIssue(ctx, primaryRepo)
 			if err != nil {
 				logger.Error("failed to ensure advisory issue", "repo", primaryRepo, "error", err)
-				if strings.Contains(err.Error(), "403") {
+				if strings.Contains(err.Error(), "403") || strings.Contains(err.Error(), "401") {
 					githubAppRequired = true
-					logger.Warn("GitHub App not installed — issue creation returned 403, setting githubAppRequired flag")
+					logger.Warn("GitHub App not installed or credentials invalid — setting githubAppRequired flag", "error", err)
 				}
 			} else {
 				advisoryIssues[primaryRepo] = num
@@ -733,7 +733,7 @@ func main() {
 				num, err := ghClient.EnsureAdvisoryIssue(ctx, newPrimaryRepo)
 				if err != nil {
 					logger.Error("failed to create advisory issue on new primary repo", "repo", newPrimaryRepo, "error", err)
-					if strings.Contains(err.Error(), "403") {
+					if strings.Contains(err.Error(), "403") || strings.Contains(err.Error(), "401") {
 						dashSrv.SetGitHubAppRequired(true)
 					}
 				} else {
@@ -1532,7 +1532,7 @@ func runEvalCycle(
 							dashSrv.SetGitHubAppPermIssue("The GitHub App is installed but lacks Issues: Read & Write permission. The org owner must approve updated permissions at the app installation settings page.")
 							dashSrv.SetGitHubAppRequired(true)
 							logger.Warn("GitHub App installed but insufficient permissions — cannot write issue comments", "repo", primaryRepo)
-						} else if strings.Contains(err.Error(), "403") {
+						} else if strings.Contains(err.Error(), "403") || strings.Contains(err.Error(), "401") {
 							dashSrv.SetGitHubAppRequired(true)
 						}
 					} else {
