@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	cryptoRand "crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -78,45 +79,56 @@ const clustersConfigPath = "/data/saas/clusters.json"
 // hive spokes onto. Each cluster has its own kubeconfig, storage backend,
 // ingress style, and optional platform-specific settings (OCI, OpenShift).
 type ClusterConfig struct {
-	ID              string `json:"id" yaml:"id"`
-	Name            string `json:"name" yaml:"name"`
-	KubeconfigPath  string `json:"kubeconfig_path,omitempty" yaml:"kubeconfig_path,omitempty"`
-	Context         string `json:"context" yaml:"context"`
-	InCluster       bool   `json:"in_cluster" yaml:"in_cluster"`
-	StorageClass    string `json:"storage_class" yaml:"storage_class"`
-	StorageType     string `json:"storage_type" yaml:"storage_type"`
-	NFSMountIP      string `json:"nfs_mount_ip,omitempty" yaml:"nfs_mount_ip,omitempty"`
-	IngressType     string `json:"ingress_type" yaml:"ingress_type"`
-	IngressClass    string `json:"ingress_class,omitempty" yaml:"ingress_class,omitempty"`
-	CertIssuer      string `json:"cert_issuer,omitempty" yaml:"cert_issuer,omitempty"`
-	Domain          string `json:"domain" yaml:"domain"`
-	DomainPrefix    string `json:"domain_prefix,omitempty" yaml:"domain_prefix,omitempty"`
-	OCICompartment  string `json:"oci_compartment,omitempty" yaml:"oci_compartment,omitempty"`
-	OCIAvailDomain  string `json:"oci_avail_domain,omitempty" yaml:"oci_avail_domain,omitempty"`
-	OCIMountTarget  string `json:"oci_mount_target,omitempty" yaml:"oci_mount_target,omitempty"`
-	OCIExportSet    string `json:"oci_export_set,omitempty" yaml:"oci_export_set,omitempty"`
-	RequiresSCC     bool   `json:"requires_scc" yaml:"requires_scc"`
-	SCCName         string `json:"scc_name,omitempty" yaml:"scc_name,omitempty"`
-	HasGPU              bool   `json:"has_gpu" yaml:"has_gpu"`
-	Arch                string `json:"arch" yaml:"arch"`
-	ImageTag            string `json:"image_tag" yaml:"image_tag"`
-	ImagePullPolicy     string `json:"image_pull_policy,omitempty" yaml:"image_pull_policy,omitempty"`
-	InferenceEndpoint   string `json:"inference_endpoint,omitempty" yaml:"inference_endpoint,omitempty"`
-	GitHubBaseURL       string `json:"github_base_url,omitempty" yaml:"github_base_url,omitempty"`
-	GitHubAPIURL        string `json:"github_api_url,omitempty" yaml:"github_api_url,omitempty"`
-	OAuthClientID       string `json:"oauth_client_id,omitempty" yaml:"oauth_client_id,omitempty"`
+	ID                          string `json:"id" yaml:"id"`
+	Name                        string `json:"name" yaml:"name"`
+	KubeconfigPath              string `json:"kubeconfig_path,omitempty" yaml:"kubeconfig_path,omitempty"`
+	Context                     string `json:"context" yaml:"context"`
+	InCluster                   bool   `json:"in_cluster" yaml:"in_cluster"`
+	StorageClass                string `json:"storage_class" yaml:"storage_class"`
+	StorageType                 string `json:"storage_type" yaml:"storage_type"`
+	NFSMountIP                  string `json:"nfs_mount_ip,omitempty" yaml:"nfs_mount_ip,omitempty"`
+	IngressType                 string `json:"ingress_type" yaml:"ingress_type"`
+	IngressClass                string `json:"ingress_class,omitempty" yaml:"ingress_class,omitempty"`
+	CertIssuer                  string `json:"cert_issuer,omitempty" yaml:"cert_issuer,omitempty"`
+	Domain                      string `json:"domain" yaml:"domain"`
+	DomainPrefix                string `json:"domain_prefix,omitempty" yaml:"domain_prefix,omitempty"`
+	OCICompartment              string `json:"oci_compartment,omitempty" yaml:"oci_compartment,omitempty"`
+	OCIAvailDomain              string `json:"oci_avail_domain,omitempty" yaml:"oci_avail_domain,omitempty"`
+	OCIMountTarget              string `json:"oci_mount_target,omitempty" yaml:"oci_mount_target,omitempty"`
+	OCIExportSet                string `json:"oci_export_set,omitempty" yaml:"oci_export_set,omitempty"`
+	RequiresSCC                 bool   `json:"requires_scc" yaml:"requires_scc"`
+	SCCName                     string `json:"scc_name,omitempty" yaml:"scc_name,omitempty"`
+	HasGPU                      bool   `json:"has_gpu" yaml:"has_gpu"`
+	Arch                        string `json:"arch" yaml:"arch"`
+	ImageTag                    string `json:"image_tag" yaml:"image_tag"`
+	ImagePullPolicy             string `json:"image_pull_policy,omitempty" yaml:"image_pull_policy,omitempty"`
+	InferenceEndpoint           string `json:"inference_endpoint,omitempty" yaml:"inference_endpoint,omitempty"`
+	GitHubBaseURL               string `json:"github_base_url,omitempty" yaml:"github_base_url,omitempty"`
+	GitHubAPIURL                string `json:"github_api_url,omitempty" yaml:"github_api_url,omitempty"`
+	OAuthClientID               string `json:"oauth_client_id,omitempty" yaml:"oauth_client_id,omitempty"`
+	ClusterHealthTimeoutSeconds int    `json:"cluster_health_timeout_seconds,omitempty" yaml:"cluster_health_timeout_seconds,omitempty"`
 }
 
 // kubectlForCluster builds an exec.Cmd that targets a specific cluster.
 // For in-cluster configs (InCluster == true) it runs plain kubectl;
 // for remote clusters it injects --kubeconfig and --context flags.
 func kubectlForCluster(cluster *ClusterConfig, args ...string) *exec.Cmd {
+	return exec.Command("kubectl", kubectlArgsForCluster(cluster, args...)...)
+}
+
+// kubectlForClusterContext is like kubectlForCluster but lets callers bound the
+// command lifetime with a context.
+func kubectlForClusterContext(ctx context.Context, cluster *ClusterConfig, args ...string) *exec.Cmd {
+	return exec.CommandContext(ctx, "kubectl", kubectlArgsForCluster(cluster, args...)...)
+}
+
+func kubectlArgsForCluster(cluster *ClusterConfig, args ...string) []string {
 	fullArgs := []string{}
 	if !cluster.InCluster {
 		fullArgs = append(fullArgs, "--kubeconfig", cluster.KubeconfigPath, "--context", cluster.Context)
 	}
 	fullArgs = append(fullArgs, args...)
-	return exec.Command("kubectl", fullArgs...)
+	return fullArgs
 }
 
 // loadClusters reads the clusters config file and returns a validated
@@ -129,16 +141,16 @@ func loadClusters(logger *slog.Logger) map[string]ClusterConfig {
 	if err != nil {
 		logger.Info("no clusters config found, using default hive-oke cluster", "path", clustersConfigPath)
 		clusters[defaultClusterID] = ClusterConfig{
-			ID:          defaultClusterID,
-			Name:        "OKE (default)",
-			InCluster:   true,
-			StorageType: "nfs",
-			IngressType: "nginx",
+			ID:           defaultClusterID,
+			Name:         "OKE (default)",
+			InCluster:    true,
+			StorageType:  "nfs",
+			IngressType:  "nginx",
 			IngressClass: "nginx",
-			CertIssuer:  "letsencrypt-prod",
-			Domain:      "hive.kubestellar.io",
-			Arch:        "arm64",
-			ImageTag:    "v2-latest",
+			CertIssuer:   "letsencrypt-prod",
+			Domain:       "hive.kubestellar.io",
+			Arch:         "arm64",
+			ImageTag:     "v2-latest",
 		}
 		return clusters
 	}
@@ -354,14 +366,11 @@ func provisionHive(h *SaaSHive, req *CreateHiveRequest, cluster *ClusterConfig, 
 	dashboardHost := h.ID + "." + cluster.Domain
 	dashboardURL := "https://" + dashboardHost
 
-	// Determine image pull policy: explicit config wins, then remote clusters default to Always.
+	// Determine image pull policy: explicit config wins, otherwise Always
+	// (mutable tags like v2-latest require Always to pick up upgrades).
 	imagePullPolicy := cluster.ImagePullPolicy
 	if imagePullPolicy == "" {
-		if !cluster.InCluster {
-			imagePullPolicy = "Always"
-		} else {
-			imagePullPolicy = "IfNotPresent"
-		}
+		imagePullPolicy = "Always"
 	}
 
 	// Determine image tag from cluster config, falling back to v2-latest.
@@ -413,23 +422,23 @@ func provisionHive(h *SaaSHive, req *CreateHiveRequest, cluster *ClusterConfig, 
 			return ""
 		}(),
 		// Cluster-aware fields.
-		"DashboardHost":     dashboardHost,
-		"DashboardURL":      dashboardURL,
-		"DashboardPort":     dashboardPort,
-		"TerminalPort":      terminalPort,
-		"ImagePullPolicy":   imagePullPolicy,
-		"ImageTag":          imageTag,
-		"IsOpenShiftRoute":  cluster.IngressType == ingressTypeOpenShiftRoute,
-		"IsNginxIngress":    cluster.IngressType != ingressTypeOpenShiftRoute,
-		"IsDynamicStorage":  cluster.StorageType == storageTypeDynamic,
-		"IsNFSStorage":      cluster.StorageType == storageTypeNFS || cluster.StorageType == "",
-		"StorageClass":      cluster.StorageClass,
-		"DynamicPVCStorage": dynamicPVCStorage,
+		"DashboardHost":      dashboardHost,
+		"DashboardURL":       dashboardURL,
+		"DashboardPort":      dashboardPort,
+		"TerminalPort":       terminalPort,
+		"ImagePullPolicy":    imagePullPolicy,
+		"ImageTag":           imageTag,
+		"IsOpenShiftRoute":   cluster.IngressType == ingressTypeOpenShiftRoute,
+		"IsNginxIngress":     cluster.IngressType != ingressTypeOpenShiftRoute,
+		"IsDynamicStorage":   cluster.StorageType == storageTypeDynamic,
+		"IsNFSStorage":       cluster.StorageType == storageTypeNFS || cluster.StorageType == "",
+		"StorageClass":       cluster.StorageClass,
+		"DynamicPVCStorage":  dynamicPVCStorage,
 		"NFSStorageCapacity": nfsStorageCapacity,
-		"NFSMountTargetIP":  nfsMountTargetIP,
-		"NFSExportPath":     nfsExportPathPrefix + h.ID,
-		"PVName":            "hive-" + h.ID + "-fss-pv",
-		"RequiresSCC":       cluster.RequiresSCC,
+		"NFSMountTargetIP":   nfsMountTargetIP,
+		"NFSExportPath":      nfsExportPathPrefix + h.ID,
+		"PVName":             "hive-" + h.ID + "-fss-pv",
+		"RequiresSCC":        cluster.RequiresSCC,
 		"SCCName": func() string {
 			if cluster.SCCName != "" {
 				return cluster.SCCName
@@ -454,10 +463,10 @@ func provisionHive(h *SaaSHive, req *CreateHiveRequest, cluster *ClusterConfig, 
 			}
 			return ""
 		}(),
-		"CertIssuer":        cluster.CertIssuer,
-		"IngressClass":      cluster.IngressClass,
-		"Domain":            cluster.Domain,
-		"InCluster":         cluster.InCluster,
+		"CertIssuer":   cluster.CertIssuer,
+		"IngressClass": cluster.IngressClass,
+		"Domain":       cluster.Domain,
+		"InCluster":    cluster.InCluster,
 	}
 
 	// For NFS storage: auto-create OCI File System + NFS export.
