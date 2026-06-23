@@ -2053,6 +2053,32 @@ func (s *HubServer) triggerAutoUpgrades() {
 		}
 		s.mu.RUnlock()
 		if alreadyUpgrading {
+			// For hives on unreachable clusters, ensure the heartbeat upgrade
+			// map is populated so the UpgradeTo instruction is delivered.
+			// This handles the case where the hub restarted and lost the
+			// in-memory heartbeatUpgrade map while the hive is still upgrading.
+			// Also advances the target to the latest SHA if new commits arrived.
+			hiveCluster := s.clusterForHive(&h)
+			if hiveCluster != nil && !hiveCluster.InCluster {
+				latestSHA := getLatestSHAForBranch(func() string {
+					if branch != "" {
+						return branch
+					}
+					return "v2"
+				}())
+				if latestSHA != "" && latestSHA != currentSHA {
+					s.mu.Lock()
+					s.heartbeatUpgrade[h.ID] = latestSHA
+					// Update registry target to latest
+					for i := range s.registry.Hives {
+						if s.registry.Hives[i].ID == h.ID {
+							s.registry.Hives[i].UpgradeTarget = latestSHA
+							break
+						}
+					}
+					s.mu.Unlock()
+				}
+			}
 			continue
 		}
 		if branch == "" {
