@@ -2486,6 +2486,9 @@ func (m *Manager) agentEnvPairs(agent *AgentProcess) []agentEnvPair {
 		baseURL := fmt.Sprintf("http://127.0.0.1:%d", inferenceTranslatePort)
 		vars = append(vars, agentEnvPair{"ANTHROPIC_BASE_URL", baseURL, false})
 		vars = append(vars, agentEnvPair{"NO_PROXY", "127.0.0.1,localhost", false})
+		// Open-source models may generate verbose output; raise the CLI
+		// output-token cap to avoid "exceeded maximum" errors.
+		vars = append(vars, agentEnvPair{"CLAUDE_CODE_MAX_OUTPUT_TOKENS", "128000", false})
 	}
 	if m.copilotAuthToken != "" {
 		vars = append(vars, agentEnvPair{"COPILOT_GITHUB_TOKEN", m.copilotAuthToken, true})
