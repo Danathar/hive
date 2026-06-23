@@ -380,8 +380,10 @@ func (m *Manager) tmuxPaneHasCLI(session string) bool {
 }
 
 // tmuxPaneHasCLIForAgent checks for CLI markers using the agent's tmux socket.
+// Uses visible pane only (no scrollback) to avoid false positives from stale
+// markers left in scroll history after a CLI exits.
 func (m *Manager) tmuxPaneHasCLIForAgent(agent *AgentProcess) bool {
-	output := m.captureTmuxPaneForAgent(agent)
+	output := m.captureVisiblePaneForAgent(agent)
 	if output == "" {
 		return false
 	}
