@@ -569,3 +569,97 @@ func TestTranslateAnthropicToOpenAI_PreambleNoSystem(t *testing.T) {
 		t.Errorf("system content = %q, want preamble", req.Messages[0].Content)
 	}
 }
+
+func TestTranslateAnthropicToOpenAI_DefaultToolInjection(t *testing.T) {
+	// When preamble is set and CLI sends no tools, default tools should be injected.
+	body := `{
+		"model": "claude-sonnet-4-6",
+		"max_tokens": 200,
+		"messages": [{"role": "user", "content": "List files"}]
+	}`
+	preamble := "You are an agent.\n\n"
+
+	result, err := translateAnthropicToOpenAI([]byte(body), "qwen-72b", 0, preamble)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var req openaiRequest
+	if err := json.Unmarshal(result, &req); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(req.Tools) != len(DefaultInferenceTools) {
+		t.Fatalf("tools count = %d, want %d (default tools injected)", len(req.Tools), len(DefaultInferenceTools))
+	}
+
+	// Verify specific tools are present.
+	toolNames := make(map[string]bool)
+	for _, tool := range req.Tools {
+		toolNames[tool.Function.Name] = true
+	}
+	for _, expected := range []string{"Bash", "Read", "Write", "Edit", "Glob", "Grep"} {
+		if !toolNames[expected] {
+			t.Errorf("missing expected tool %q in injected tools", expected)
+		}
+	}
+
+	// tool_choice should be "auto".
+	var tc string
+	if err := json.Unmarshal(req.ToolChoice, &tc); err != nil {
+		t.Fatal(err)
+	}
+	if tc != "auto" {
+		t.Errorf("tool_choice = %q, want auto", tc)
+	}
+}
+
+func TestTranslateAnthropicToOpenAI_NoToolInjectionWithoutPreamble(t *testing.T) {
+	// When preamble is empty (non-inference path), no tools should be injected.
+	body := `{
+		"model": "claude-sonnet-4-6",
+		"max_tokens": 200,
+		"messages": [{"role": "user", "content": "Hello"}]
+	}`
+
+	result, err := translateAnthropicToOpenAI([]byte(body), "claude-sonnet-4-6", 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var req openaiRequest
+	if err := json.Unmarshal(result, &req); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(req.Tools) != 0 {
+		t.Errorf("tools count = %d, want 0 (no injection without preamble)", len(req.Tools))
+	}
+}
+
+func TestTranslateAnthropicToOpenAI_CLIToolsPreserved(t *testing.T) {
+	// When CLI sends its own tools, they should be used (not replaced with defaults).
+	body := `{
+		"model": "claude-sonnet-4-6",
+		"max_tokens": 200,
+		"messages": [{"role": "user", "content": "Hello"}],
+		"tools": [{"name": "MyCustomTool", "description": "Custom tool", "input_schema": {"type": "object"}}]
+	}`
+
+	result, err := translateAnthropicToOpenAI([]byte(body), "qwen-72b", 0, "preamble\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var req openaiRequest
+	if err := json.Unmarshal(result, &req); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(req.Tools) != 1 {
+		t.Fatalf("tools count = %d, want 1 (CLI tools preserved)", len(req.Tools))
+	}
+	if req.Tools[0].Function.Name != "MyCustomTool" {
+		t.Errorf("tool name = %q, want MyCustomTool", req.Tools[0].Function.Name)
+	}
+}

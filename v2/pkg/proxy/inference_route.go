@@ -36,6 +36,60 @@ CRITICAL RULES:
 
 `
 
+// DefaultInferenceTools are injected into inference-backed requests when the
+// CLI sends no tools (Claude CLI in bare mode omits tool definitions).
+// These match the built-in Claude Code tools that the CLI knows how to execute.
+var DefaultInferenceTools = []openaiTool{
+	{
+		Type: "function",
+		Function: openaiToolFunction{
+			Name:        "Bash",
+			Description: "Run a bash command in the user's shell. Use for system commands, file operations, builds, tests, and any task requiring shell access. Commands run in the agent's working directory.",
+			Parameters:  json.RawMessage(`{"type":"object","properties":{"command":{"type":"string","description":"The bash command to execute"},"timeout":{"type":"integer","description":"Optional timeout in milliseconds (max 600000)"}},"required":["command"]}`),
+		},
+	},
+	{
+		Type: "function",
+		Function: openaiToolFunction{
+			Name:        "Read",
+			Description: "Read the contents of a file. Use to examine source code, config files, logs, or any text file. Returns the file content with line numbers. For large files, use offset and limit to read specific sections.",
+			Parameters:  json.RawMessage(`{"type":"object","properties":{"file_path":{"type":"string","description":"Absolute path to the file to read"},"offset":{"type":"integer","description":"Line number to start reading from (0-indexed)"},"limit":{"type":"integer","description":"Maximum number of lines to read"}},"required":["file_path"]}`),
+		},
+	},
+	{
+		Type: "function",
+		Function: openaiToolFunction{
+			Name:        "Write",
+			Description: "Write content to a file. Creates the file if it doesn't exist, or overwrites it if it does. Use for creating new files or completely rewriting existing ones. For partial edits, prefer the Edit tool.",
+			Parameters:  json.RawMessage(`{"type":"object","properties":{"file_path":{"type":"string","description":"Absolute path to the file to write"},"content":{"type":"string","description":"The full content to write to the file"}},"required":["file_path","content"]}`),
+		},
+	},
+	{
+		Type: "function",
+		Function: openaiToolFunction{
+			Name:        "Edit",
+			Description: "Make a targeted edit to a file by replacing a specific string with new content. The old_string must match exactly one location in the file. Include enough surrounding context to make the match unique.",
+			Parameters:  json.RawMessage(`{"type":"object","properties":{"file_path":{"type":"string","description":"Absolute path to the file to edit"},"old_string":{"type":"string","description":"The exact string to find and replace (must match exactly one location)"},"new_string":{"type":"string","description":"The replacement string"}},"required":["file_path","old_string","new_string"]}`),
+		},
+	},
+	{
+		Type: "function",
+		Function: openaiToolFunction{
+			Name:        "Glob",
+			Description: "Find files matching a glob pattern. Use to discover files in the codebase. Returns matching file paths.",
+			Parameters:  json.RawMessage(`{"type":"object","properties":{"pattern":{"type":"string","description":"Glob pattern to match files (e.g. '**/*.go', 'src/**/*.ts')"},"path":{"type":"string","description":"Base directory for the search (defaults to working directory)"}},"required":["pattern"]}`),
+		},
+	},
+	{
+		Type: "function",
+		Function: openaiToolFunction{
+			Name:        "Grep",
+			Description: "Search file contents using a regular expression pattern. Returns matching lines with file paths and line numbers.",
+			Parameters:  json.RawMessage(`{"type":"object","properties":{"pattern":{"type":"string","description":"Regular expression pattern to search for"},"path":{"type":"string","description":"Directory or file to search in (defaults to working directory)"},"include":{"type":"string","description":"Glob pattern to filter files (e.g. '*.go', '*.ts')"}},"required":["pattern"]}`),
+		},
+	},
+}
+
 // inferenceRouter manages per-agent inference backend routing.
 type inferenceRouter struct {
 	mu     sync.RWMutex

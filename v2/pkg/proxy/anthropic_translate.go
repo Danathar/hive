@@ -68,6 +68,13 @@ func translateAnthropicToOpenAI(body []byte, targetModel string, maxContextLen i
 	if len(req.Tools) > 0 {
 		openaiReq.Tools = translateAnthropicTools(req.Tools)
 		openaiReq.ToolChoice = translateAnthropicToolChoice(req.ToolChoice)
+	} else if preamble != "" {
+		// CLI sent no tools (common with Claude CLI in bare mode).
+		// Inject default tools so the model can make structured tool calls
+		// that the CLI knows how to execute.
+		openaiReq.Tools = DefaultInferenceTools
+		autoJSON, _ := json.Marshal("auto")
+		openaiReq.ToolChoice = autoJSON
 	}
 
 	openaiReq.MaxTokens = capMaxTokensForInput(req.MaxTokens, maxContextLen, totalChars)
