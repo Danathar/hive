@@ -126,9 +126,30 @@ func kubectlArgsForCluster(cluster *ClusterConfig, args ...string) []string {
 	fullArgs := []string{}
 	if !cluster.InCluster {
 		fullArgs = append(fullArgs, "--kubeconfig", cluster.KubeconfigPath, "--context", cluster.Context)
+	} else {
+		// Explicitly pass in-cluster credentials so kubectl does not fall back
+		// to localhost:8080 when exec.Command inherits an empty KUBECONFIG path.
+		host := os.Getenv("KUBERNETES_SERVICE_HOST")
+		port := os.Getenv("KUBERNETES_SERVICE_PORT")
+		if host != "" && port != "" {
+			fullArgs = append(fullArgs,
+				"--server", fmt.Sprintf("https://%s:%s", host, port),
+				"--certificate-authority", "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
+				"--token", readSAToken(),
+			)
+		}
 	}
 	fullArgs = append(fullArgs, args...)
 	return fullArgs
+}
+
+// readSAToken reads the current service account token from the projected volume.
+func readSAToken() string {
+	data, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/token")
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 // loadClusters reads the clusters config file and returns a validated
