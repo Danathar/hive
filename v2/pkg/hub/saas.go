@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -26,12 +27,12 @@ const hubAdminUsername = "clubanderson"
 
 type SaaSUser struct {
 	GitHubUsername string            `json:"github_username"`
-	CreatedAt      string           `json:"created_at"`
-	LastLogin      string           `json:"last_login"`
+	CreatedAt      string            `json:"created_at"`
+	LastLogin      string            `json:"last_login"`
 	Hives          map[string]string `json:"hives"`
-	SaaSQuota      int              `json:"saas_quota"`
-	Blocked        bool             `json:"blocked"`
-	EncryptedToken string           `json:"encrypted_token,omitempty"`
+	SaaSQuota      int               `json:"saas_quota"`
+	Blocked        bool              `json:"blocked"`
+	EncryptedToken string            `json:"encrypted_token,omitempty"`
 }
 
 const hmacKeyPath = "/data/saas/hmac.key"
@@ -326,10 +327,10 @@ func ensureSaaSUser(username string) *SaaSUser {
 	}
 	u = &SaaSUser{
 		GitHubUsername: username,
-		CreatedAt:     now,
-		LastLogin:     now,
-		Hives:         map[string]string{},
-		SaaSQuota:     quota,
+		CreatedAt:      now,
+		LastLogin:      now,
+		Hives:          map[string]string{},
+		SaaSQuota:      quota,
 	}
 	saveSaaSUser(u)
 	return u
@@ -493,17 +494,17 @@ const bytesPerMB = 1024 * 1024
 const percentMultiplier = 100
 
 type ClusterHealthNode struct {
-	Name            string   `json:"name"`
-	CPUCores        int      `json:"cpu_cores"`
-	CPUUsedMillis   int64    `json:"cpu_used_millicores"`
-	CPUPercent      int      `json:"cpu_percent"`
-	MemTotalMB      int64    `json:"mem_total_mb"`
-	MemUsedMB       int64    `json:"mem_used_mb"`
-	MemPercent      int      `json:"mem_percent"`
-	DiskPressure    bool     `json:"disk_pressure"`
-	Pods            int      `json:"pods"`
-	PodCapacity     int      `json:"pod_capacity"`
-	Conditions      []string `json:"conditions"`
+	Name          string   `json:"name"`
+	CPUCores      int      `json:"cpu_cores"`
+	CPUUsedMillis int64    `json:"cpu_used_millicores"`
+	CPUPercent    int      `json:"cpu_percent"`
+	MemTotalMB    int64    `json:"mem_total_mb"`
+	MemUsedMB     int64    `json:"mem_used_mb"`
+	MemPercent    int      `json:"mem_percent"`
+	DiskPressure  bool     `json:"disk_pressure"`
+	Pods          int      `json:"pods"`
+	PodCapacity   int      `json:"pod_capacity"`
+	Conditions    []string `json:"conditions"`
 }
 
 type ClusterHealthSummary struct {
@@ -523,9 +524,9 @@ type GPUSummary struct {
 
 // PerClusterHealth holds health data for a single cluster.
 type PerClusterHealth struct {
-	ID         string              `json:"id"`
-	Name       string              `json:"name"`
-	Nodes      []ClusterHealthNode `json:"nodes"`
+	ID         string               `json:"id"`
+	Name       string               `json:"name"`
+	Nodes      []ClusterHealthNode  `json:"nodes"`
 	Summary    ClusterHealthSummary `json:"summary"`
 	GPUSummary *GPUSummary          `json:"gpu_summary,omitempty"`
 	HiveCount  int                  `json:"hive_count"`
@@ -537,10 +538,10 @@ type PerClusterHealth struct {
 
 type ClusterHealthResponse struct {
 	// Flat fields for backward compatibility (aggregate across all clusters).
-	Nodes    []ClusterHealthNode  `json:"nodes"`
-	Summary  ClusterHealthSummary `json:"summary"`
+	Nodes   []ClusterHealthNode  `json:"nodes"`
+	Summary ClusterHealthSummary `json:"summary"`
 	// Per-cluster breakdown.
-	Clusters []PerClusterHealth   `json:"clusters,omitempty"`
+	Clusters []PerClusterHealth `json:"clusters,omitempty"`
 }
 
 var (
@@ -576,9 +577,14 @@ func (s *HubServer) handleClusterHealth(w http.ResponseWriter, r *http.Request) 
 	json.NewEncoder(w).Encode(resp)
 }
 
-// clusterHealthQueryTimeout limits how long we wait for any single cluster's
-// kubectl calls before giving up.
-const clusterHealthQueryTimeout = 15 * time.Second
+const (
+	// defaultClusterHealthQueryTimeout limits how long we wait for in-cluster
+	// health queries when the cluster config does not override it.
+	defaultClusterHealthQueryTimeout = 30 * time.Second
+	// remoteClusterHealthQueryTimeout gives remote clusters more time because
+	// they traverse an external network path from the hub pod.
+	remoteClusterHealthQueryTimeout = 60 * time.Second
+)
 
 // gpuResourceKey is the extended resource name for NVIDIA GPUs on Kubernetes nodes.
 const gpuResourceKey = "nvidia.com/gpu"
@@ -605,10 +611,14 @@ func buildClusterHealth(s *HubServer) (*ClusterHealthResponse, error) {
 		health PerClusterHealth
 		err    error
 	}
-	results := make(map[string]chan clusterResult)
+	type clusterQuery struct {
+		cluster ClusterConfig
+		ch      chan clusterResult
+	}
+	results := make(map[string]clusterQuery)
 	for _, c := range s.clusters {
 		ch := make(chan clusterResult, 1)
-		results[c.ID] = ch
+		results[c.ID] = clusterQuery{cluster: c, ch: ch}
 		go func(cluster ClusterConfig) {
 			health, err := buildSingleClusterHealth(&cluster, hiveCounts[cluster.ID], s.logger)
 			ch <- clusterResult{health: health, err: err}
@@ -624,9 +634,10 @@ func buildClusterHealth(s *HubServer) (*ClusterHealthResponse, error) {
 	var aggMemAlloc int64
 	var aggMemUsed int64
 
-	for cID, ch := range results {
+	for cID, query := range results {
+		timeout := clusterHealthQueryTimeoutFor(&query.cluster)
 		select {
-		case res := <-ch:
+		case res := <-query.ch:
 			if res.err != nil {
 				s.logger.Warn("cluster health query failed", "cluster", cID, "error", res.err)
 				// Fall back to heartbeat-reported health if available.
@@ -659,8 +670,8 @@ func buildClusterHealth(s *HubServer) (*ClusterHealthResponse, error) {
 			aggCPUAlloc += int64(pch.Summary.TotalCPUCores) * millicoresPerCore
 			aggMemAlloc += int64(pch.Summary.TotalMemGB) * giToBytes
 			aggMemUsed += int64(pch.Summary.TotalMemPct) * int64(pch.Summary.TotalMemGB) * giToBytes / percentMultiplier
-		case <-time.After(clusterHealthQueryTimeout):
-			s.logger.Warn("cluster health query timed out", "cluster", cID)
+		case <-time.After(timeout):
+			s.logger.Warn("cluster health query timed out", "cluster", cID, "timeout", timeout.String())
 			// Fall back to heartbeat-reported health if available.
 			if hbHealth := s.getHeartbeatHealthForCluster(cID); hbHealth != nil {
 				pch := convertHeartbeatToPerClusterHealth(cID, s.clusterNameForID(cID), hbHealth, hiveCounts[cID])
@@ -745,16 +756,30 @@ func buildClusterHealth(s *HubServer) (*ClusterHealthResponse, error) {
 	}, nil
 }
 
+func clusterHealthQueryTimeoutFor(cluster *ClusterConfig) time.Duration {
+	if cluster != nil && cluster.ClusterHealthTimeoutSeconds > 0 {
+		return time.Duration(cluster.ClusterHealthTimeoutSeconds) * time.Second
+	}
+	if cluster != nil && !cluster.InCluster {
+		return remoteClusterHealthQueryTimeout
+	}
+	return defaultClusterHealthQueryTimeout
+}
+
 // buildSingleClusterHealth queries a single cluster for node health data.
 func buildSingleClusterHealth(cluster *ClusterConfig, hiveCount int, logger *slog.Logger) (PerClusterHealth, error) {
+	timeout := clusterHealthQueryTimeoutFor(cluster)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
 	// Run kubectl top nodes
-	topOut, err := kubectlForCluster(cluster, "top", "nodes", "--no-headers").Output()
+	topOut, err := kubectlForClusterContext(ctx, cluster, "--request-timeout", timeout.String(), "top", "nodes", "--no-headers").Output()
 	if err != nil {
 		return PerClusterHealth{}, fmt.Errorf("kubectl top nodes on %s: %w", cluster.ID, err)
 	}
 
 	// Run kubectl get nodes -o json
-	getOut, err := kubectlForCluster(cluster, "get", "nodes", "-o", "json").Output()
+	getOut, err := kubectlForClusterContext(ctx, cluster, "--request-timeout", timeout.String(), "get", "nodes", "-o", "json").Output()
 	if err != nil {
 		return PerClusterHealth{}, fmt.Errorf("kubectl get nodes on %s: %w", cluster.ID, err)
 	}
@@ -781,13 +806,13 @@ func buildSingleClusterHealth(cluster *ClusterConfig, hiveCount int, logger *slo
 
 	// Build a map of node info from kubectl get.
 	type nodeInfo struct {
-		cpuAllocatable  int64 // millicores
-		memAllocatable  int64 // bytes
-		podCapacity     int
-		diskPressure    bool
-		conditions      []string
-		gpuCapacity     int
-		gpuAllocatable  int
+		cpuAllocatable int64 // millicores
+		memAllocatable int64 // bytes
+		podCapacity    int
+		diskPressure   bool
+		conditions     []string
+		gpuCapacity    int
+		gpuAllocatable int
 	}
 	nodeMap := make(map[string]*nodeInfo)
 	var totalGPUCapacity, totalGPUAllocatable int
@@ -971,8 +996,8 @@ func convertHeartbeatToPerClusterHealth(clusterID, clusterName string, entry *He
 	}
 
 	pch := PerClusterHealth{
-		ID:   clusterID,
-		Name: clusterName,
+		ID:    clusterID,
+		Name:  clusterName,
 		Nodes: nodes,
 		Summary: ClusterHealthSummary{
 			TotalNodes:    report.Summary.TotalNodes,
@@ -982,8 +1007,8 @@ func convertHeartbeatToPerClusterHealth(clusterID, clusterName string, entry *He
 			TotalMemPct:   report.Summary.TotalMemPct,
 			HiveCount:     hiveCount,
 		},
-		HiveCount:    hiveCount,
-		DataSource:   "heartbeat",
+		HiveCount:  hiveCount,
+		DataSource: "heartbeat",
 	}
 
 	// Mark staleness if heartbeat data is too old.
@@ -1232,10 +1257,10 @@ func (s *HubServer) handleMyHives(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := map[string]any{
-		"hives":            result,
-		"saas_quota":       user.SaaSQuota,
-		"saas_used":        saasCount,
-		"is_admin":         isAdmin,
+		"hives":               result,
+		"saas_quota":          user.SaaSQuota,
+		"saas_used":           saasCount,
+		"is_admin":            isAdmin,
 		"latest_sha":          getLatestSHA(),
 		"latest_shas":         getLatestSHAs(),
 		"latest_sha_messages": getLatestSHAMessages(),
@@ -1917,7 +1942,7 @@ type branchSHAInfo struct {
 }
 
 var (
-	latestSHAMu    sync.RWMutex
+	latestSHAMu       sync.RWMutex
 	latestSHAByBranch = map[string]branchSHAInfo{}
 	// commitMsgBySHA caches the first line of each commit message, keyed by short SHA.
 	commitMsgBySHA = map[string]string{}
