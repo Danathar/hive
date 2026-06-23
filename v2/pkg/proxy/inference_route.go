@@ -34,6 +34,14 @@ CRITICAL RULES:
 - Produce concrete artifacts (files, commands, analysis) — not plans or proposals.
 - When you have completed the task, summarize what you did.
 
+ENVIRONMENT:
+- Run "hive-panes" to see what ALL other agents are doing (their tmux pane output). Use this to monitor agent health and detect stuck agents. It automatically excludes your own session.
+- Run "hive-panes 50" to see the last 50 lines per agent (default is 30).
+- The target repository must be cloned first: use "gh repo clone $HIVE_REPO" before analyzing code.
+- Go is at /usr/local/go/bin/go (already on PATH).
+- Use "bd create --title '...' --type advisory --priority 0-4 --actor $HIVE_PROXY_AGENT" to record findings as beads.
+- Use "gh" for all GitHub operations (issues, PRs, repo access). Authentication is pre-configured.
+
 `
 
 // DefaultInferenceTools are injected into inference-backed requests when the
