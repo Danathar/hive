@@ -773,15 +773,17 @@ func buildSingleClusterHealth(cluster *ClusterConfig, hiveCount int, logger *slo
 	defer cancel()
 
 	// Run kubectl top nodes
-	topOut, err := kubectlForClusterContext(ctx, cluster, "--request-timeout", timeout.String(), "top", "nodes", "--no-headers").Output()
+	topCmd := kubectlForClusterContext(ctx, cluster, "--request-timeout", timeout.String(), "top", "nodes", "--no-headers")
+	topOut, err := topCmd.CombinedOutput()
 	if err != nil {
-		return PerClusterHealth{}, fmt.Errorf("kubectl top nodes on %s: %w", cluster.ID, err)
+		return PerClusterHealth{}, fmt.Errorf("kubectl top nodes on %s: exit status 1: %s", cluster.ID, string(topOut))
 	}
 
 	// Run kubectl get nodes -o json
-	getOut, err := kubectlForClusterContext(ctx, cluster, "--request-timeout", timeout.String(), "get", "nodes", "-o", "json").Output()
+	getCmd := kubectlForClusterContext(ctx, cluster, "--request-timeout", timeout.String(), "get", "nodes", "-o", "json")
+	getOut, err := getCmd.CombinedOutput()
 	if err != nil {
-		return PerClusterHealth{}, fmt.Errorf("kubectl get nodes on %s: %w", cluster.ID, err)
+		return PerClusterHealth{}, fmt.Errorf("kubectl get nodes on %s: %w: %s", cluster.ID, err, string(getOut))
 	}
 
 	// Parse kubectl get nodes output
