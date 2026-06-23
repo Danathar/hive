@@ -85,7 +85,7 @@ func TestForwardToInference_NonStreaming(t *testing.T) {
 	req, _ := http.NewRequest("POST", "https://api.anthropic.com/v1/messages", strings.NewReader(anthropicBody))
 	w := httptest.NewRecorder()
 
-	err := forwardToInference(req, []byte(anthropicBody), w, route)
+	err := forwardToInference(req, []byte(anthropicBody), w, route, "test-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +143,7 @@ func TestForwardToInference_Streaming(t *testing.T) {
 	req, _ := http.NewRequest("POST", "https://api.anthropic.com/v1/messages", strings.NewReader(anthropicBody))
 	w := httptest.NewRecorder()
 
-	err := forwardToInference(req, []byte(anthropicBody), w, route)
+	err := forwardToInference(req, []byte(anthropicBody), w, route, "test-agent")
 	if err != nil {
 		t.Fatal(err)
 	}

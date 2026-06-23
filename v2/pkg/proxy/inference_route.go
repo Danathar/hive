@@ -35,12 +35,18 @@ CRITICAL RULES:
 - When you have completed the task, summarize what you did.
 
 ENVIRONMENT:
-- Run "hive-panes" to see what ALL other agents are doing (their tmux pane output). Use this to monitor agent health and detect stuck agents. It automatically excludes your own session.
-- Run "hive-panes 50" to see the last 50 lines per agent (default is 30).
 - The target repository must be cloned first: use "gh repo clone $HIVE_REPO" before analyzing code.
 - Go is at /usr/local/go/bin/go (already on PATH).
 - Use "bd create --title '...' --type advisory --priority 0-4 --actor $HIVE_PROXY_AGENT" to record findings as beads.
 - Use "gh" for all GitHub operations (issues, PRs, repo access). Authentication is pre-configured.
+
+`
+
+// SupervisorInferencePreamble extends the default preamble with supervisor-only
+// tooling (hive-panes). Applied only when the agent name is "supervisor".
+const SupervisorInferencePreamble = DefaultInferencePreamble + `SUPERVISOR TOOLS:
+- Run "hive-panes" to see what ALL other agents are doing (their tmux pane output). Use this to monitor agent health and detect stuck agents. It automatically excludes your own session.
+- Run "hive-panes 50" to see the last 50 lines per agent (default is 30).
 
 `
 
@@ -257,13 +263,17 @@ func capMaxTokensForInput(maxTokens, maxContextLen, totalInputChars int) int {
 
 // resolveInferencePreamble returns the preamble string to inject into the
 // system prompt for inference-backed requests. If the route has an explicit
-// Preamble it is used; otherwise DefaultInferencePreamble is returned.
-func resolveInferencePreamble(route *InferenceRoute) string {
+// Preamble it is used; the supervisor agent gets SupervisorInferencePreamble;
+// otherwise DefaultInferencePreamble is returned.
+func resolveInferencePreamble(route *InferenceRoute, agentName string) string {
 	if route == nil {
 		return ""
 	}
 	if route.Preamble != "" {
 		return route.Preamble
+	}
+	if agentName == "supervisor" {
+		return SupervisorInferencePreamble
 	}
 	return DefaultInferencePreamble
 }

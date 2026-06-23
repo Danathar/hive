@@ -508,8 +508,8 @@ func mapFinishReason(reason string) string {
 // forwardToInference sends an Anthropic Messages API request to a vLLM/llm-d
 // endpoint, translating the request and response formats. It writes the
 // translated response directly to the provided http.ResponseWriter.
-func forwardToInference(clientReq *http.Request, clientBody []byte, w http.ResponseWriter, route *InferenceRoute) error {
-	openaiBody, err := translateAnthropicToOpenAI(clientBody, route.Model, route.MaxContextLen, resolveInferencePreamble(route))
+func forwardToInference(clientReq *http.Request, clientBody []byte, w http.ResponseWriter, route *InferenceRoute, agentName string) error {
+	openaiBody, err := translateAnthropicToOpenAI(clientBody, route.Model, route.MaxContextLen, resolveInferencePreamble(route, agentName))
 	if err != nil {
 		return fmt.Errorf("translate request: %w", err)
 	}
