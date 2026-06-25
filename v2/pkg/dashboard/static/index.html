@@ -1666,6 +1666,7 @@
       color: var(--muted); padding: 2px 6px; margin-left: 6px; border-radius: 4px;
     }
     .agent-card .compact-toggle:hover { background: rgba(255,255,255,0.06); }
+    #kb-graph-container:fullscreen { width: 100vw; height: 100vh; border: none; border-radius: 0; }
   </style>
 </head>
 <body>
@@ -3075,7 +3076,7 @@
         `<circle cx="${lastPt[0]}" cy="${lastPt[1]}" r="2" fill="#2563eb"/>` +
         `</svg></span>`;
     }
-    fetchFactHistory();
+    // fetchFactHistory() — deferred to _deferredInit
 
     async function fetchHistory() {
       try {
@@ -3140,10 +3141,8 @@
         historyData = evalEntries || [];
       } catch (e) { /* ignore */ }
     }
-    // Fetch history on load, then every 30s
-    fetchHistory();
+    // fetchHistory() — deferred to _deferredInit
     const HISTORY_REFRESH_MS = 30000;
-    setInterval(fetchHistory, HISTORY_REFRESH_MS);
 
     function formatAge(sec) {
       if (sec < 0) return '—';
@@ -3168,10 +3167,8 @@
         }
       } catch (_) { /* non-fatal — cost display is optional */ }
     }
-    // Fetch on load, then every 60s (matches token-collector cadence)
-    fetchIssueCosts();
+    // fetchIssueCosts() — deferred to _deferredInit
     const ISSUE_COSTS_REFRESH_MS = 60000;
-    setInterval(fetchIssueCosts, ISSUE_COSTS_REFRESH_MS);
 
     function resolveStatValue(stat, name) {
       const src = stat.source;
@@ -3932,7 +3929,7 @@
     }
 
     let budgetIgnored = false;
-    fetch('/api/budget-ignore').then(r => r.json()).then(d => { budgetIgnored = d.ignored; }).catch(() => {});
+    // fetch('/api/budget-ignore') — deferred to _deferredInit
 
     function toggleBudgetIgnore() {
       budgetIgnored = !budgetIgnored;
@@ -5293,8 +5290,7 @@ function burnAreaChart() {
       if (e.target === e.currentTarget) closeNousConfig();
     });
 
-    fetchNousStatus();
-    setInterval(fetchNousStatus, NOUS_POLL_MS);
+    // fetchNousStatus() — deferred to _deferredInit
 
     // ── Knowledge Base ──
     let _kbCache = null;
@@ -5402,7 +5398,7 @@ function burnAreaChart() {
         const standardLayers = ['personal','project','org','community'];
         if (layer.startsWith('doc:')) {
           const docSlug = layer.slice(4);
-          url = '/api/knowledge/search?q=' + encodeURIComponent(docSlug) + '&limit=50&type=reference';
+          url = '/api/knowledge/search?tag=' + encodeURIComponent(docSlug) + '&limit=50';
         } else if (!standardLayers.includes(layer) && !layer.startsWith('git_source:')) {
           url = '/api/knowledge/vaults/' + encodeURIComponent(layer) + '/facts';
         } else {
@@ -5452,7 +5448,17 @@ function burnAreaChart() {
       } catch (e) { console.error('graph fetch failed', e); }
     }
 
+    let _kbGraphAnimFrame = null;
+    let _kbGraphCleanup = null;
     function renderKnowledgeGraphCanvas() {
+      if (_kbGraphAnimFrame) {
+        cancelAnimationFrame(_kbGraphAnimFrame);
+        _kbGraphAnimFrame = null;
+      }
+      if (_kbGraphCleanup) {
+        _kbGraphCleanup();
+        _kbGraphCleanup = null;
+      }
       const container = document.getElementById('kb-graph-container');
       if (!container || !_kbGraphData) return;
       const nodes = _kbGraphData.nodes || [];
@@ -5464,8 +5470,8 @@ function burnAreaChart() {
 
       const canvas = document.createElement('canvas');
       const dpr = window.devicePixelRatio || 1;
-      const w = container.clientWidth;
-      const h = container.clientHeight;
+      let w = container.clientWidth;
+      let h = container.clientHeight;
       canvas.width = w * dpr;
       canvas.height = h * dpr;
       canvas.style.width = w + 'px';
@@ -5473,16 +5479,17 @@ function burnAreaChart() {
       container.innerHTML = '';
       container.appendChild(canvas);
       const ctx = canvas.getContext('2d');
-      ctx.scale(dpr, dpr);
 
       const GRAPH_NODE_RADIUS_MIN = 6;
       const GRAPH_NODE_RADIUS_MAX = 18;
       const GRAPH_REPULSION_STRENGTH = 500;
       const GRAPH_ATTRACTION_STRENGTH = 0.05;
+      const GRAPH_SPRING_REST_LENGTH = 100;
       const GRAPH_GRAVITY_STRENGTH = 0.02;
-      const GRAPH_SIMULATION_STEPS = 100;
       const GRAPH_LABEL_TRUNCATE_LEN = 24;
       const GRAPH_DAMPING = 0.9;
+      const GRAPH_MIN_VELOCITY = 0.1;
+      const GRAPH_EDGE_HOVER_DIST = 20;
 
       const layerColors = {
         personal: getComputedStyle(document.documentElement).getPropertyValue('--blue').trim() || '#58a6ff',
@@ -5491,10 +5498,24 @@ function burnAreaChart() {
         community: getComputedStyle(document.documentElement).getPropertyValue('--purple').trim() || '#bc8cff',
       };
 
+      // Zoom/pan state
+      let zoomLevel = 1;
+      let panX = 0, panY = 0;
+      const ZOOM_MIN = 0.2;
+      const ZOOM_MAX = 5;
+      const ZOOM_STEP = 0.1;
+
+      function screenToWorld(sx, sy) {
+        return { x: (sx - panX) / zoomLevel, y: (sy - panY) / zoomLevel };
+      }
+      function worldToScreen(wx, wy) {
+        return { x: wx * zoomLevel + panX, y: wy * zoomLevel + panY };
+      }
+
       const slugIdx = {};
+      const maxUsage = Math.max(1, ...nodes.map(x => x.usage_count || 0));
       const simNodes = nodes.map((n, i) => {
         slugIdx[n.slug] = i;
-        const maxUsage = Math.max(1, ...nodes.map(x => x.usage_count || 0));
         const ratio = (n.usage_count || 0) / maxUsage;
         return {
           x: w / 2 + (Math.cos(i * 2.399) * w * 0.3),
@@ -5507,14 +5528,26 @@ function burnAreaChart() {
             : (n.title || n.slug),
           slug: n.slug,
           data: n,
+          pinned: false,
         };
       });
 
       const simEdges = (edges || []).filter(e => slugIdx[e.from] !== undefined && slugIdx[e.to] !== undefined)
         .map(e => ({ from: slugIdx[e.from], to: slugIdx[e.to], pred: e.predicate }));
 
-      for (let step = 0; step < GRAPH_SIMULATION_STEPS; step++) {
+      let simRunning = true;
+      let simSteps = 0;
+      const GRAPH_MAX_SIM_STEPS = 300;
+      let dragNode = null;
+      let hoveredNode = null;
+      let isPanning = false;
+      let panStartX = 0, panStartY = 0;
+      let panStartPanX = 0, panStartPanY = 0;
+
+      function simulationStep() {
+        let totalKE = 0;
         for (let i = 0; i < simNodes.length; i++) {
+          if (simNodes[i].pinned) continue;
           for (let j = i + 1; j < simNodes.length; j++) {
             let dx = simNodes[j].x - simNodes[i].x;
             let dy = simNodes[j].y - simNodes[i].y;
@@ -5522,92 +5555,280 @@ function burnAreaChart() {
             let force = GRAPH_REPULSION_STRENGTH / (dist * dist);
             let fx = (dx / dist) * force;
             let fy = (dy / dist) * force;
-            simNodes[i].vx -= fx; simNodes[i].vy -= fy;
-            simNodes[j].vx += fx; simNodes[j].vy += fy;
+            if (!simNodes[i].pinned) { simNodes[i].vx -= fx; simNodes[i].vy -= fy; }
+            if (!simNodes[j].pinned) { simNodes[j].vx += fx; simNodes[j].vy += fy; }
           }
         }
         for (const e of simEdges) {
-          let dx = simNodes[e.to].x - simNodes[e.from].x;
-          let dy = simNodes[e.to].y - simNodes[e.from].y;
+          let a = simNodes[e.from], b = simNodes[e.to];
+          let dx = b.x - a.x;
+          let dy = b.y - a.y;
           let dist = Math.sqrt(dx * dx + dy * dy) || 1;
-          let force = (dist - 100) * GRAPH_ATTRACTION_STRENGTH;
+          let force = (dist - GRAPH_SPRING_REST_LENGTH) * GRAPH_ATTRACTION_STRENGTH;
           let fx = (dx / dist) * force;
           let fy = (dy / dist) * force;
-          simNodes[e.from].vx += fx; simNodes[e.from].vy += fy;
-          simNodes[e.to].vx -= fx; simNodes[e.to].vy -= fy;
+          if (!a.pinned) { a.vx += fx; a.vy += fy; }
+          if (!b.pinned) { b.vx -= fx; b.vy -= fy; }
         }
         for (const n of simNodes) {
+          if (n.pinned) { n.vx = 0; n.vy = 0; continue; }
           n.vx += (w / 2 - n.x) * GRAPH_GRAVITY_STRENGTH;
           n.vy += (h / 2 - n.y) * GRAPH_GRAVITY_STRENGTH;
           n.vx *= GRAPH_DAMPING; n.vy *= GRAPH_DAMPING;
           n.x += n.vx; n.y += n.vy;
-          const pad = n.r + 2;
-          n.x = Math.max(pad, Math.min(w - pad, n.x));
-          n.y = Math.max(pad, Math.min(h - pad, n.y));
+          totalKE += n.vx * n.vx + n.vy * n.vy;
         }
+        return totalKE;
       }
 
       function draw() {
+        ctx.save();
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         ctx.clearRect(0, 0, w, h);
-        ctx.strokeStyle = 'rgba(88,166,255,0.15)';
-        ctx.lineWidth = 1;
+        ctx.translate(panX, panY);
+        ctx.scale(zoomLevel, zoomLevel);
+
+        // Edges
         for (const e of simEdges) {
           const a = simNodes[e.from], b = simNodes[e.to];
+          ctx.strokeStyle = 'rgba(88,166,255,0.2)';
+          ctx.lineWidth = 1 / zoomLevel;
           ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
           const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
           ctx.fillStyle = 'rgba(139,148,158,0.5)';
-          ctx.font = '9px monospace';
+          ctx.font = (9 / zoomLevel) + 'px monospace';
           ctx.textAlign = 'center';
-          ctx.fillText(e.pred, mx, my - 4);
+          ctx.fillText(e.pred, mx, my - 4 / zoomLevel);
         }
+
+        // Nodes
         for (const n of simNodes) {
+          const isHovered = n === hoveredNode;
+          const isDragged = n === dragNode;
           ctx.beginPath(); ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
-          ctx.fillStyle = n.color; ctx.fill();
-          ctx.strokeStyle = 'rgba(255,255,255,0.3)'; ctx.lineWidth = 1; ctx.stroke();
-          ctx.fillStyle = 'var(--text, #e6edf3)';
-          ctx.font = '10px monospace';
+          ctx.fillStyle = n.color;
+          ctx.globalAlpha = isHovered || isDragged ? 1 : 0.85;
+          ctx.fill();
+          ctx.globalAlpha = 1;
+          ctx.strokeStyle = isHovered || isDragged ? '#ffffff' : 'rgba(255,255,255,0.3)';
+          ctx.lineWidth = (isHovered || isDragged ? 2 : 1) / zoomLevel;
+          ctx.stroke();
+          if (isDragged) {
+            ctx.beginPath(); ctx.arc(n.x, n.y, n.r + 4, 0, Math.PI * 2);
+            ctx.strokeStyle = 'rgba(255,255,255,0.2)'; ctx.lineWidth = 2 / zoomLevel; ctx.stroke();
+          }
+          ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--text').trim() || '#e6edf3';
+          ctx.font = (10 / zoomLevel) + 'px monospace';
           ctx.textAlign = 'center';
-          ctx.fillText(n.label, n.x, n.y + n.r + 12);
+          ctx.fillText(n.label, n.x, n.y + n.r + 12 / zoomLevel);
+        }
+        ctx.restore();
+      }
+
+      function tick() {
+        simSteps++;
+        const ke = simulationStep();
+        draw();
+        if (simRunning && (ke > GRAPH_MIN_VELOCITY || dragNode) && simSteps < GRAPH_MAX_SIM_STEPS) {
+          _kbGraphAnimFrame = requestAnimationFrame(tick);
+        } else {
+          simRunning = false;
+          _kbGraphAnimFrame = null;
+          draw();
         }
       }
-      draw();
 
-      let hoveredNode = null;
+      function restartSim() {
+        if (!simRunning) {
+          simRunning = true;
+          simSteps = 0;
+          tick();
+        }
+      }
+
+      // Tooltip
       const tooltip = document.createElement('div');
-      tooltip.style.cssText = 'position:absolute;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:8px 12px;font-size:0.72rem;color:var(--text);pointer-events:none;display:none;z-index:10;max-width:250px';
+      tooltip.style.cssText = 'position:absolute;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:8px 12px;font-size:0.72rem;color:var(--text);pointer-events:none;display:none;z-index:10;max-width:280px;box-shadow:0 4px 12px rgba(0,0,0,0.3)';
       container.appendChild(tooltip);
 
+      function findNodeAt(sx, sy) {
+        const world = screenToWorld(sx, sy);
+        for (let i = simNodes.length - 1; i >= 0; i--) {
+          const n = simNodes[i];
+          const dx = world.x - n.x, dy = world.y - n.y;
+          const hitR = n.r + 4;
+          if (dx * dx + dy * dy < hitR * hitR) return n;
+        }
+        return null;
+      }
+
+      // Mouse: hover + tooltip
       canvas.addEventListener('mousemove', (evt) => {
         const rect = canvas.getBoundingClientRect();
-        const mx = evt.clientX - rect.left;
-        const my = evt.clientY - rect.top;
-        hoveredNode = null;
-        for (const n of simNodes) {
-          const dx = mx - n.x, dy = my - n.y;
-          if (dx * dx + dy * dy < n.r * n.r + 16) { hoveredNode = n; break; }
+        const sx = evt.clientX - rect.left;
+        const sy = evt.clientY - rect.top;
+
+        if (isPanning) {
+          panX = panStartPanX + (evt.clientX - panStartX);
+          panY = panStartPanY + (evt.clientY - panStartY);
+          draw();
+          return;
         }
+
+        if (dragNode) {
+          const world = screenToWorld(sx, sy);
+          dragNode.x = world.x;
+          dragNode.y = world.y;
+          dragNode.vx = 0; dragNode.vy = 0;
+          return;
+        }
+
+        hoveredNode = findNodeAt(sx, sy);
         if (hoveredNode) {
-          canvas.style.cursor = 'pointer';
+          canvas.style.cursor = 'grab';
           const d = hoveredNode.data;
           const confPct = Math.round((d.confidence || 0) * 100);
-          tooltip.innerHTML = `<strong>${escapeHtml(d.title || d.slug)}</strong><br>Type: ${escapeHtml(d.type || 'pattern')}<br>Layer: ${escapeHtml(d.layer || 'personal')}<br>Confidence: ${confPct}%`;
+          const tags = (d.tags || []).slice(0, 5).map(t => escapeHtml(t)).join(', ');
+          tooltip.innerHTML = `<strong>${escapeHtml(d.title || d.slug)}</strong><br>` +
+            `<span style="color:var(--muted)">Type:</span> ${escapeHtml(d.type || 'pattern')}<br>` +
+            `<span style="color:var(--muted)">Layer:</span> ${escapeHtml(d.layer || 'personal')}<br>` +
+            `<span style="color:var(--muted)">Confidence:</span> ${confPct}%` +
+            (tags ? `<br><span style="color:var(--muted)">Tags:</span> ${tags}` : '') +
+            (d.usage_count ? `<br><span style="color:var(--muted)">Used:</span> ${d.usage_count}x` : '');
           tooltip.style.display = 'block';
-          tooltip.style.left = (hoveredNode.x + hoveredNode.r + 8) + 'px';
-          tooltip.style.top = (hoveredNode.y - 10) + 'px';
+          tooltip.style.left = (sx + 12) + 'px';
+          tooltip.style.top = (sy - 10) + 'px';
         } else {
           canvas.style.cursor = 'default';
           tooltip.style.display = 'none';
         }
+        draw();
       });
 
+      // Mouse: drag start
+      canvas.addEventListener('mousedown', (evt) => {
+        const rect = canvas.getBoundingClientRect();
+        const sx = evt.clientX - rect.left;
+        const sy = evt.clientY - rect.top;
+        const node = findNodeAt(sx, sy);
+        if (node) {
+          dragNode = node;
+          dragNode.pinned = true;
+          canvas.style.cursor = 'grabbing';
+          tooltip.style.display = 'none';
+          restartSim();
+        } else {
+          isPanning = true;
+          panStartX = evt.clientX;
+          panStartY = evt.clientY;
+          panStartPanX = panX;
+          panStartPanY = panY;
+          canvas.style.cursor = 'move';
+        }
+        evt.preventDefault();
+      });
+
+      // Mouse: drag end
+      const onMouseUp = () => {
+        if (dragNode) {
+          dragNode.pinned = false;
+          dragNode = null;
+          canvas.style.cursor = hoveredNode ? 'grab' : 'default';
+        }
+        if (isPanning) {
+          isPanning = false;
+          canvas.style.cursor = 'default';
+        }
+      };
+      canvas.addEventListener('mouseup', onMouseUp);
+      canvas.addEventListener('mouseleave', () => {
+        onMouseUp();
+        tooltip.style.display = 'none';
+        hoveredNode = null;
+        draw();
+      });
+
+      // Click: open fact detail
       canvas.addEventListener('click', (evt) => {
-        if (hoveredNode) {
+        if (isPanning) return;
+        const rect = canvas.getBoundingClientRect();
+        const node = findNodeAt(evt.clientX - rect.left, evt.clientY - rect.top);
+        if (node && !dragNode) {
           _kbGraphView = false;
           _kbSelectedLayer = 'all';
-          kbReadFact(hoveredNode.slug);
+          kbReadFact(node.slug);
           renderKnowledge();
         }
       });
+
+      // Zoom: mouse wheel
+      canvas.addEventListener('wheel', (evt) => {
+        evt.preventDefault();
+        const rect = canvas.getBoundingClientRect();
+        const sx = evt.clientX - rect.left;
+        const sy = evt.clientY - rect.top;
+        const oldZoom = zoomLevel;
+        const delta = evt.deltaY > 0 ? -ZOOM_STEP : ZOOM_STEP;
+        zoomLevel = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, zoomLevel + delta * zoomLevel));
+        // Zoom toward cursor position
+        panX = sx - (sx - panX) * (zoomLevel / oldZoom);
+        panY = sy - (sy - panY) * (zoomLevel / oldZoom);
+        draw();
+      }, { passive: false });
+
+      // Zoom controls overlay
+      const controlBtnStyle = 'width:28px;height:28px;border:1px solid var(--border);border-radius:4px;background:var(--surface);color:var(--fg);cursor:pointer;display:flex;align-items:center;justify-content:center';
+      const zoomControls = document.createElement('div');
+      zoomControls.style.cssText = 'position:absolute;top:10px;right:10px;display:flex;flex-direction:column;gap:4px;z-index:5';
+      zoomControls.innerHTML = `
+        <button onclick="this.parentElement._zoomIn()" style="${controlBtnStyle};font-size:16px" title="Zoom in">+</button>
+        <button onclick="this.parentElement._zoomReset()" style="${controlBtnStyle};font-size:10px" title="Reset zoom">&#x27F2;</button>
+        <button onclick="this.parentElement._zoomOut()" style="${controlBtnStyle};font-size:16px" title="Zoom out">&minus;</button>
+        <button onclick="this.parentElement._toggleFullscreen()" style="${controlBtnStyle};font-size:13px" title="Toggle fullscreen">&#x26F6;</button>
+      `;
+      zoomControls._zoomIn = () => { zoomLevel = Math.min(ZOOM_MAX, zoomLevel * 1.25); draw(); };
+      zoomControls._zoomOut = () => { zoomLevel = Math.max(ZOOM_MIN, zoomLevel / 1.25); draw(); };
+      zoomControls._zoomReset = () => { zoomLevel = 1; panX = 0; panY = 0; draw(); };
+      zoomControls._toggleFullscreen = () => {
+        if (document.fullscreenElement === container) {
+          document.exitFullscreen();
+        } else {
+          container.requestFullscreen().catch(() => {});
+        }
+      };
+      container.appendChild(zoomControls);
+
+      // Resize canvas on fullscreen change
+      function resizeCanvas() {
+        const newW = container.clientWidth;
+        const newH = container.clientHeight;
+        if (newW === 0 || newH === 0) return;
+        canvas.width = newW * dpr;
+        canvas.height = newH * dpr;
+        canvas.style.width = newW + 'px';
+        canvas.style.height = newH + 'px';
+        w = newW; h = newH;
+        draw();
+      }
+      const onFullscreenChange = () => {
+        setTimeout(resizeCanvas, 50);
+      };
+      document.addEventListener('fullscreenchange', onFullscreenChange);
+      container._cleanupFullscreen = () => document.removeEventListener('fullscreenchange', onFullscreenChange);
+
+      _kbGraphCleanup = () => {
+        if (container._cleanupFullscreen) container._cleanupFullscreen();
+      };
+
+      const GRAPH_STATIC_THRESHOLD = 150;
+      if (simNodes.length > GRAPH_STATIC_THRESHOLD) {
+        const GRAPH_PRECOMPUTE_STEPS = 80;
+        for (let s = 0; s < GRAPH_PRECOMPUTE_STEPS; s++) simulationStep();
+        simRunning = false;
+        draw();
+      } else {
+        tick();
+      }
     }
 
     // Setup view state: 'choose' (default), 'git', 'webhook', or 'none' (skip setup, show full KB)
@@ -6808,8 +7029,7 @@ function burnAreaChart() {
       } catch (e) { _kbFacts = []; renderKnowledgeFacts(); }
     }
 
-    fetchKnowledgeStats();
-    setInterval(fetchKnowledgeStats, KB_POLL_MS);
+    // fetchKnowledgeStats() — deferred to _deferredInit
 
     // --- Audit Log ---
     const AUDIT_POLL_MS = 30000;
@@ -6905,8 +7125,7 @@ function burnAreaChart() {
         filterAuditLog();
       } catch(e) {}
     }
-    fetchAuditLog();
-    setInterval(fetchAuditLog, AUDIT_POLL_MS);
+    // fetchAuditLog() — deferred to _deferredInit
 
     // --- Contributors & Leaderboard ---
     const CONTRIBUTOR_POLL_MS = 10000;
@@ -7192,10 +7411,7 @@ function burnAreaChart() {
       }
     }
 
-    fetchContributors();
-    fetchLeaderboard();
-    setInterval(fetchContributors, CONTRIBUTOR_POLL_MS);
-    setInterval(fetchLeaderboard, LEADERBOARD_POLL_MS);
+    // fetchContributors() + fetchLeaderboard() — deferred to _deferredInit
 
     // ── System resource gauge history for sparklines ──
     const SYS_GAUGE_HISTORY_MAX = 60;
@@ -8316,7 +8532,7 @@ function burnAreaChart() {
     }
 
     document.getElementById('logs-agent-select')?.addEventListener('change', () => { _logsData = {}; fetchAgentLogs(); });
-    setInterval(fetchAgentLogs, LOGS_REFRESH_MS);
+    // setInterval(fetchAgentLogs) — deferred to _deferredInit
 
     const MODE_EMOJIS = {'ADVISORY':'📝','ISSUES_ONLY':'🎫','ISSUES_AND_PRS':'🔧','ISSUES_PRS_MERGE':'🚀'};
     function modeEmoji(mode) { return MODE_EMOJIS[mode] || ''; }
@@ -8697,8 +8913,7 @@ function burnAreaChart() {
         if (ocEl) ocEl.innerHTML = html;
       } catch (_) {}
     }
-    fetchGitVersion();
-    setInterval(fetchGitVersion, GIT_VERSION_POLL_MS);
+    // fetchGitVersion() — deferred to _deferredInit
 
     // SSE connection
     var _upgradeInProgress = false;
@@ -8745,7 +8960,7 @@ function burnAreaChart() {
         }).catch(function() {});
       }, VERSION_CHECK_INTERVAL_MS);
     }
-    startVersionCheck();
+    // startVersionCheck() — deferred to _deferredInit
 
     function connect() {
       const source = new EventSource('/api/events');
@@ -8851,7 +9066,7 @@ function burnAreaChart() {
       if (repoDisplay) window._primaryRepo = repoDisplay;
     }).catch(() => {});
 
-    // Initial fetch then SSE
+    // Initial fetch then SSE — these two are critical for first paint
     fetch('/api/status').then(r => r.json()).then(render).catch(console.error);
     // Fetch persistent trends for sparklines (day/week)
     window._trendData = [];
@@ -8862,20 +9077,13 @@ function burnAreaChart() {
       // Cache token history from server for merging into historyData
       window._serverTokenHistory = d && d.tokenHistory ? d.tokenHistory : [];
     }
-    fetch('/api/trends?range=week').then(r => r.json()).then(applyTrends).catch(() => {});
-    // Refresh trends every 15 min
+    // fetch('/api/trends') + fetchTimeline() — deferred to _deferredInit
     const TREND_REFRESH_MS = 900000;
-    setInterval(() => {
-      fetch('/api/trends?range=week').then(r => r.json()).then(applyTrends).catch(() => {});
-    }, TREND_REFRESH_MS);
-    // Fetch 24h timeline for governor mode strip
     window._timelineData = [];
     function fetchTimeline() {
       fetch('/api/timeline').then(r => r.json()).then(d => { window._timelineData = d; }).catch(() => {});
     }
-    fetchTimeline();
     const TIMELINE_REFRESH_MS = 60000;
-    setInterval(fetchTimeline, TIMELINE_REFRESH_MS);
     // ── Configuration Dialog ──────────────────────────────────────────
     let _configState = { type: null, agent: null, tab: null, data: {}, dirty: {} };
     const _configTabMemory = {};
@@ -11297,7 +11505,29 @@ function burnAreaChart() {
     });
 
     connect();
-    setTimeout(fetchAgentLogs, 2000);
+
+    // Deferred initialization — non-critical fetches staggered after first paint
+    const DEFERRED_INIT_DELAY_MS = 1500;
+    const DEFERRED_STAGGER_MS = 200;
+    setTimeout(() => {
+      const deferred = [
+        () => { fetchFactHistory(); },
+        () => { fetchHistory(); setInterval(fetchHistory, HISTORY_REFRESH_MS); },
+        () => { fetchIssueCosts(); setInterval(fetchIssueCosts, ISSUE_COSTS_REFRESH_MS); },
+        () => { fetch('/api/budget-ignore').then(r => r.json()).then(d => { budgetIgnored = d.ignored; }).catch(() => {}); },
+        () => { fetchNousStatus(); setInterval(fetchNousStatus, NOUS_POLL_MS); },
+        () => { fetchKnowledgeStats(); setInterval(fetchKnowledgeStats, KB_POLL_MS); },
+        () => { fetchAuditLog(); setInterval(fetchAuditLog, AUDIT_POLL_MS); },
+        () => { fetchContributors(); setInterval(fetchContributors, CONTRIBUTOR_POLL_MS); },
+        () => { fetchLeaderboard(); setInterval(fetchLeaderboard, LEADERBOARD_POLL_MS); },
+        () => { fetchGitVersion(); setInterval(fetchGitVersion, GIT_VERSION_POLL_MS); },
+        () => { startVersionCheck(); },
+        () => { fetch('/api/trends?range=week').then(r => r.json()).then(applyTrends).catch(() => {}); setInterval(() => { fetch('/api/trends?range=week').then(r => r.json()).then(applyTrends).catch(() => {}); }, TREND_REFRESH_MS); },
+        () => { fetchTimeline(); setInterval(fetchTimeline, TIMELINE_REFRESH_MS); },
+        () => { fetchAgentLogs(); setInterval(fetchAgentLogs, LOGS_REFRESH_MS); },
+      ];
+      deferred.forEach((fn, i) => setTimeout(fn, i * DEFERRED_STAGGER_MS));
+    }, DEFERRED_INIT_DELAY_MS);
   </script>
 </body>
 </html>
