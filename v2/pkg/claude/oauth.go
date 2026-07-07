@@ -112,16 +112,19 @@ func BuildAuthorizeURL(codeChallenge, redirectURI, state string) string {
 
 // ExchangeCode trades an authorization code for access + refresh tokens using PKCE.
 func ExchangeCode(code, codeVerifier, redirectURI string) (*OAuthTokens, error) {
-	data := url.Values{
-		"grant_type":    {"authorization_code"},
-		"code":          {code},
-		"redirect_uri":  {redirectURI},
-		"client_id":     {ClientID},
-		"code_verifier": {codeVerifier},
+	reqBody, err := json.Marshal(map[string]string{
+		"grant_type":    "authorization_code",
+		"code":          code,
+		"redirect_uri":  redirectURI,
+		"client_id":     ClientID,
+		"code_verifier": codeVerifier,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal token request: %w", err)
 	}
 
 	client := &http.Client{Timeout: TokenExchangeTimeout}
-	resp, err := client.PostForm(TokenURL, data)
+	resp, err := client.Post(TokenURL, "application/json", strings.NewReader(string(reqBody)))
 	if err != nil {
 		return nil, fmt.Errorf("token exchange request: %w", err)
 	}
