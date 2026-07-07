@@ -567,7 +567,15 @@
     .agent-card.idle { border-color: var(--border); }
     .agent-card.stopped { border-color: var(--red); }
     .agent-card.needs-login { border-color: #ef4444; }
-    .login-warning { background: rgba(239,68,68,0.15); color: #ef4444; font-size: 0.75rem; font-weight: 700; text-align: center; padding: 4px 8px; border-radius: 4px; margin-top: 6px; }
+    .cli-login-btn { border: none; padding: 2px 10px; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 0.75rem; display: inline-flex; align-items: center; gap: 4px; }
+    .cli-login-btn.claude { background: #d97706; color: #fff; }
+    .cli-login-btn.claude:hover { background: #f59e0b; }
+    .cli-login-btn.copilot { background: #238636; color: #fff; }
+    .cli-login-btn.copilot:hover { background: #2ea043; }
+    .cli-login-btn.disabled { background: #555; color: #999; cursor: not-allowed; opacity: 0.5; }
+    .cli-login-btn .cli-icon { width: 14px; height: 14px; vertical-align: middle; }
+    .cli-login-btn.logged-in { background: transparent; color: var(--green, #22c55e); cursor: default; border: 1px solid var(--green, #22c55e); }
+    .cli-login-btn.logged-in:hover { background: transparent; }
     .gh-auth-banner { background: linear-gradient(135deg, #1a1a2e, #16213e); color: #fff; padding: 12px 24px; display: flex; align-items: center; justify-content: center; gap: 12px; font-size: 0.9rem; z-index: 200; }
     .gh-auth-banner .gh-auth-btn { background: #238636; color: #fff; border: none; padding: 6px 16px; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 0.85rem; }
     .gh-auth-banner .gh-auth-btn:hover { background: #2ea043; }
@@ -1700,9 +1708,6 @@
 <div id="gh-auth-banner" class="gh-auth-banner" style="display:none">
   <span id="gh-auth-msg">GitHub login required for advisory posting</span>
   <button class="gh-auth-btn" id="gh-auth-btn" onclick="startGHLogin()">Sign in with GitHub</button>
-  <span style="color:#30363d;margin:0 4px">|</span>
-  <button class="claude-auth-btn" id="claude-auth-btn" onclick="startClaudeLogin()">Login Claude</button>
-  <span class="claude-auth-status" id="claude-auth-status"></span>
 </div>
 <div id="gh-auth-modal-overlay" class="gh-auth-overlay" style="display:none">
   <div class="gh-auth-modal">
@@ -1931,8 +1936,6 @@
         </div>
       </div>
       <button class="gh-auth-btn" id="oc-gh-login-btn" onclick="startGHLogin()" style="display:none;font-size:0.75rem;padding:3px 10px">Sign in</button>
-      <button class="claude-auth-btn" id="oc-claude-login-btn" onclick="startClaudeLogin()" style="font-size:0.75rem;padding:3px 10px">Login Claude</button>
-      <span class="claude-auth-status" id="oc-claude-status" style="font-size:0.72rem"></span>
     </div>
   </header>
 
@@ -3504,7 +3507,18 @@
           <div class="agent-field"><span class="label" title="When the governor will next kick this agent based on its cadence interval.">next run</span><span class="value">${isOnDemand ? 'on demand' : isPaused ? 'paused' : isOff ? 'off' : (a.nextKick || '—')}</span></div>
           ${agentTokenRow(a.name, a.cadence)}
           <div class="agent-field"><span class="label" title="Number of times this agent has been restarted in the last 24 hours. High counts may indicate instability or rate limiting.">restarts</span><span class="value${(a.restarts || 0) > 5 ? ' restart-high' : (a.restarts || 0) > 0 ? ' restart-warn' : ''}">${a.restarts || 0}<span class="restart-label">24h</span>${(a.restarts || 0) > 0 ? `<button class="restart-reset" data-action="resetRestarts" data-agent="${esc(a.name)}" title="Reset the restart counter to zero — does not affect the agent">✕</button>` : ''}<span class="restart-spark">${restartSparkSvg(a.name)}</span></span></div>
-          ${needsLogin ? '<div class="login-warning">⚠ NOT LOGGED IN — run /login</div>' : ''}
+          <div class="agent-field"><span class="label" title="CLI authentication status — log in to authenticate the agent's CLI tool">auth</span><span class="value">${(() => {
+            const isClaude = a.cli === 'claude';
+            const isCopilot = a.cli === 'copilot';
+            const claudeIcon = '<svg class="cli-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.22.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/></svg>';
+            const copilotIcon = '<svg class="cli-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>';
+            if (needsLogin) {
+              if (isClaude) return '<button class="cli-login-btn claude" onclick="event.stopPropagation();loginAgent(\x27' + esc(a.name) + '\x27,\x27claude\x27)" title="Authenticate Claude Code CLI">' + claudeIcon + ' Login</button>';
+              if (isCopilot) return '<button class="cli-login-btn copilot" onclick="event.stopPropagation();loginAgent(\x27' + esc(a.name) + '\x27,\x27copilot\x27)" title="Authenticate GitHub Copilot CLI">' + copilotIcon + ' Login</button>';
+              return '<button class="cli-login-btn disabled" disabled title="This backend requires manual /login in the terminal">Login</button>';
+            }
+            return '<span class="cli-login-btn logged-in" title="CLI is authenticated">✓ logged in</span>';
+          })()}</span></div>
           ${summaryEl}${indEl}
           <div class="agent-actions">
             <input type="text" class="kick-prompt" id="kick-prompt-${esc(a.name)}" placeholder="custom prompt (optional)" data-enter-action="kick" data-agent="${esc(a.name)}" title="Type a custom prompt to send to this agent instead of its default kick prompt. Press Enter to send." />
@@ -12517,30 +12531,22 @@ function burnAreaChart() {
     // ESC for GH auth/setup handled by consolidated keydown listener above
 
     // --- Claude Code OAuth login ---
+    // loginAgent dispatches to the right login flow based on CLI backend.
+    function loginAgent(agentName, cli) {
+      if (cli === 'claude') {
+        startClaudeLogin();
+      } else if (cli === 'copilot') {
+        startGHLogin();
+      } else {
+        showToast('Manual login required for ' + cli + ' — open the terminal and run /login', 'info');
+      }
+    }
+
     async function checkClaudeAuth() {
-      try {
-        var resp = await fetch('/api/claude-auth/status');
-        var data = await resp.json();
-        // Update both the banner button and the top-bar button
-        var pairs = [
-          ['claude-auth-btn', 'claude-auth-status'],
-          ['oc-claude-login-btn', 'oc-claude-status']
-        ];
-        for (var i = 0; i < pairs.length; i++) {
-          var btnEl = document.getElementById(pairs[i][0]);
-          var statusEl = document.getElementById(pairs[i][1]);
-          if (!btnEl) continue;
-          if (data.logged_in) {
-            if (statusEl) { statusEl.textContent = '✓ Claude'; statusEl.className = 'claude-auth-status logged-in'; }
-            btnEl.textContent = 'Logout Claude';
-            btnEl.onclick = logoutClaude;
-          } else {
-            if (statusEl) { statusEl.textContent = ''; statusEl.className = 'claude-auth-status'; }
-            btnEl.textContent = 'Login Claude';
-            btnEl.onclick = startClaudeLogin;
-          }
-        }
-      } catch (e) { /* ignore */ }
+      // No UI elements to update — the agent cards show login state
+      // via needsLogin from the SSE status stream. This just keeps
+      // the status endpoint warm for the paste-modal flow.
+      try { await fetch('/api/claude-auth/status'); } catch (e) { /* ignore */ }
     }
 
     async function startClaudeLogin() {
