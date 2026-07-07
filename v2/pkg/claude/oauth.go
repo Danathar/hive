@@ -17,7 +17,8 @@ import (
 
 const (
 	// AuthorizeURL is the Claude OAuth authorization endpoint.
-	AuthorizeURL = "https://claude.ai/oauth/authorize"
+	// Uses claude.com/cai/oauth path which supports the hosted code callback.
+	AuthorizeURL = "https://claude.com/cai/oauth/authorize"
 
 	// TokenURL is the Claude OAuth token endpoint.
 	TokenURL = "https://claude.ai/v1/oauth/token"

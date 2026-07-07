@@ -24,11 +24,9 @@ const (
 	// claudeOAuthFlowExpiryMin is how long a started PKCE flow remains valid.
 	claudeOAuthFlowExpiryMin = 10
 
-	// claudeRedirectURI is the redirect URI for the paste-back flow.
-	// The UUID client_id requires a port. Nothing listens here — the
-	// user's browser shows "can't be reached" and they paste the URL
-	// back into the dashboard modal.
-	claudeRedirectURI = "http://localhost:19280/callback"
+	// claudeRedirectURI uses Claude's hosted callback page which displays
+	// the authorization code directly — no localhost listener needed.
+	claudeRedirectURI = "https://platform.claude.com/oauth/code/callback"
 )
 
 // claudeOAuthFlow holds server-side PKCE state for an in-progress login.
