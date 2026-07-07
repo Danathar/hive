@@ -12568,43 +12568,36 @@ function burnAreaChart() {
       try { await fetch('/api/claude-auth/status'); } catch (e) { /* ignore */ }
     }
 
+    const CLAUDE_AUTH_TAB_DELAY_MS = 5000;
+
     async function startClaudeLogin() {
-      // Open the tab synchronously in the user-gesture context to avoid
-      // popup blockers, then navigate it to the authorize URL after the
-      // API call returns.
-      var authTab = window.open('about:blank', '_blank');
       try {
         var resp = await fetch('/api/claude-auth/start', { method: 'POST' });
         var data = await resp.json();
         if (data.error) {
-          if (authTab) authTab.close();
           showToast('Claude login error: ' + data.error, 'error');
           return;
         }
-        // Show the paste-back modal first so the user sees instructions
-        showClaudePasteModal();
-        // Then navigate the tab to Claude's authorize page
-        if (authTab) {
-          authTab.location.href = data.authorize_url;
-        } else {
-          window.open(data.authorize_url, '_blank');
-        }
+        // Show the paste-back modal with countdown, then open the auth tab
+        showClaudePasteModal(data.authorize_url);
       } catch (e) {
-        if (authTab) authTab.close();
         showToast('Claude login error: ' + e.message, 'error');
       }
     }
 
-    function showClaudePasteModal() {
+    function showClaudePasteModal(authorizeUrl) {
       var overlay = document.getElementById('claude-auth-overlay');
-      if (overlay) { overlay.style.display = 'flex'; return; }
+      if (overlay) { overlay.remove(); }
       overlay = document.createElement('div');
       overlay.id = 'claude-auth-overlay';
       overlay.className = 'gh-auth-overlay';
+      var countdownSec = CLAUDE_AUTH_TAB_DELAY_MS / 1000;
       overlay.innerHTML = '<div class="gh-auth-modal" style="max-width:560px;text-align:left">' +
         '<h3 style="color:#d97706;text-align:center">Login Claude Code</h3>' +
+        '<div id="claude-countdown" style="text-align:center;color:#d97706;font-weight:600;font-size:0.9rem;margin:8px 0">' +
+          'Opening Claude login in ' + countdownSec + 's…</div>' +
         '<ol style="color:#6b7280;font-size:0.85rem;line-height:1.8;padding-left:1.5em;margin:12px 0">' +
-          '<li>Authorize in the tab that just opened</li>' +
+          '<li>A new tab will open with the Claude authorization page</li>' +
           '<li>After authorizing, the page will show "This site can\'t be reached"</li>' +
           '<li>Copy the <strong>entire URL</strong> from the address bar and paste it below</li>' +
         '</ol>' +
@@ -12618,6 +12611,21 @@ function burnAreaChart() {
       '</div>';
       document.body.appendChild(overlay);
       overlay.style.display = 'flex';
+      // Countdown timer
+      var remaining = countdownSec;
+      var cdEl = document.getElementById('claude-countdown');
+      var countdownInterval = setInterval(function() {
+        remaining--;
+        if (remaining <= 0) {
+          clearInterval(countdownInterval);
+          if (cdEl) cdEl.textContent = 'Claude login tab opened';
+          if (authorizeUrl) window.open(authorizeUrl, '_blank');
+        } else if (cdEl) {
+          cdEl.textContent = 'Opening Claude login in ' + remaining + 's…';
+        }
+      }, 1000);
+      // Store interval ID so cancel can clear it
+      overlay._countdownInterval = countdownInterval;
       // Allow pressing Enter to submit
       var input = document.getElementById('claude-callback-input');
       if (input) input.addEventListener('keydown', function(e) { if (e.key === 'Enter') submitClaudeCode(); });
@@ -12665,7 +12673,10 @@ function burnAreaChart() {
 
     function cancelClaudeLogin() {
       var overlay = document.getElementById('claude-auth-overlay');
-      if (overlay) overlay.style.display = 'none';
+      if (overlay) {
+        if (overlay._countdownInterval) clearInterval(overlay._countdownInterval);
+        overlay.remove();
+      }
     }
 
     async function logoutClaude() {
