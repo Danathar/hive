@@ -62,13 +62,24 @@ type OAuthTokens struct {
 
 // tokenResponse is the raw response from the Claude token endpoint.
 type tokenResponse struct {
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
-	ExpiresIn    int    `json:"expires_in"`
-	TokenType    string `json:"token_type"`
-	Scope        string `json:"scope"`
-	Error        string `json:"error"`
-	ErrorDesc    string `json:"error_description"`
+	AccessToken  string          `json:"access_token"`
+	RefreshToken string          `json:"refresh_token"`
+	ExpiresIn    int             `json:"expires_in"`
+	TokenType    string          `json:"token_type"`
+	Scope        string          `json:"scope"`
+	Error        json.RawMessage `json:"error"`
+	ErrorDesc    string          `json:"error_description"`
+}
+
+func (t *tokenResponse) ErrorString() string {
+	if len(t.Error) == 0 {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(t.Error, &s) == nil {
+		return s
+	}
+	return string(t.Error)
 }
 
 // GeneratePKCE creates a code_verifier and its S256 code_challenge.
@@ -124,8 +135,8 @@ func ExchangeCode(code, codeVerifier, redirectURI string) (*OAuthTokens, error) 
 	if err := json.Unmarshal(body, &tok); err != nil {
 		return nil, fmt.Errorf("parse token response: %w", err)
 	}
-	if tok.Error != "" {
-		return nil, fmt.Errorf("token error: %s — %s", tok.Error, tok.ErrorDesc)
+	if errStr := tok.ErrorString(); errStr != "" {
+		return nil, fmt.Errorf("token error: %s — %s", errStr, tok.ErrorDesc)
 	}
 	if tok.AccessToken == "" {
 		return nil, fmt.Errorf("empty access token in response")
