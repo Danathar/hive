@@ -4060,7 +4060,7 @@
     const KNOWN_BACKENDS = ['claude', 'copilot', 'bob', 'gemini', 'codex', 'amazonq', 'goose', 'aider', 'vllm', 'llm-d'];
     const FREE_BACKENDS = ['copilot', 'goose'];
     const INFERENCE_BACKENDS = ['vllm', 'llm-d'];
-    const KNOWN_MODELS = [
+    const CLAUDE_CLI_MODELS = [
       { value: 'claude-opus-4-8', label: 'Opus 4.8' },
       { value: 'claude-opus-4-7', label: 'Opus 4.7' },
       { value: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
@@ -4068,6 +4068,15 @@
       { value: 'claude-haiku-4-5', label: 'Haiku 4.5' },
       { value: 'claude-fable-5', label: 'Fable 5' },
     ];
+    const COPILOT_CLI_MODELS = [
+      { value: 'claude-opus-4-6', label: 'Opus 4.6' },
+      { value: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
+      { value: 'claude-sonnet-4-5', label: 'Sonnet 4.5' },
+      { value: 'claude-haiku-4-5', label: 'Haiku 4.5' },
+      { value: 'gpt-5.4', label: 'GPT-5.4' },
+      { value: 'gpt-5.2', label: 'GPT-5.2' },
+    ];
+    const KNOWN_MODELS = COPILOT_CLI_MODELS;
     const INFERENCE_MODELS = {};
     const INFERENCE_MODEL_CACHE_TTL_MS = 30000;
     const _inferenceModelCache = {};
@@ -4077,7 +4086,8 @@
     }
     function modelsForBackend(backend) {
       if (INFERENCE_BACKENDS.includes(backend)) return INFERENCE_MODELS[backend] || [];
-      return KNOWN_MODELS;
+      if (backend === 'claude') return CLAUDE_CLI_MODELS;
+      return COPILOT_CLI_MODELS;
     }
     async function fetchInferenceModels(backend) {
       const now = Date.now();
