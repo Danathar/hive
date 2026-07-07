@@ -80,6 +80,7 @@ type AgentProcess struct {
 	BootstrapOverride   string // when set, replaces buildBootstrapPrompt output
 	LastError           string // captured from bare copilot diagnostic launch
 	lastTokenRestart    time.Time // cooldown for auto-restart after token detection
+	NeedsLogin          bool   // true when pane shows a login prompt
 }
 
 // ProjectContext holds project-level config injected into agent boot prompts.
@@ -780,15 +781,18 @@ func (m *Manager) pollTmuxOutputForAgent(agent *AgentProcess, ctx context.Contex
 				continue
 			}
 
+			showsLogin := paneShowsLoginPrompt(filtered)
+
 			agent.paneMu.Lock()
 			agent.lastPaneCapture = filtered
+			agent.NeedsLogin = showsLogin
 			agent.paneMu.Unlock()
 
 			// Auto-restart agents stuck on the login prompt when a valid
 			// token exists in the shared config.json. This handles the case
 			// where a user authenticates via one agent's terminal and other
 			// agents don't pick up the new token automatically.
-			if paneShowsLoginPrompt(filtered) && configHasTokens() {
+			if showsLogin && configHasTokens() {
 				sinceLastRestart := time.Since(agent.lastTokenRestart).Seconds()
 				if sinceLastRestart >= float64(tokenRestartCooldownSec) {
 					m.logger.Info("auto-restarting agent after token detected in shared config",
