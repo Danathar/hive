@@ -22,8 +22,10 @@ const (
 	// TokenURL is the Claude OAuth token endpoint.
 	TokenURL = "https://claude.ai/v1/oauth/token"
 
-	// ClientID is the public Claude Code OAuth client identifier (UUID form).
-	ClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+	// ClientID is the public Claude Code OAuth client identifier (metadata URL form).
+	// The metadata document at this URL lists http://localhost/callback as an
+	// allowed redirect URI, which is needed for the paste-back flow.
+	ClientID = "https://claude.ai/oauth/claude-code-client-metadata"
 
 	// DefaultScopes are the scopes requested for agent authentication.
 	DefaultScopes = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
