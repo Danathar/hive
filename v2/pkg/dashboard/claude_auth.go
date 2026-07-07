@@ -25,10 +25,10 @@ const (
 	claudeOAuthFlowExpiryMin = 10
 
 	// claudeRedirectURI is the redirect URI for the paste-back flow.
-	// Listed in the client metadata document's redirect_uris array.
-	// Localhost is unreachable from the user's browser, so they paste
-	// the resulting URL back into the dashboard modal.
-	claudeRedirectURI = "http://localhost/callback"
+	// The UUID client_id requires a port. Nothing listens here — the
+	// user's browser shows "can't be reached" and they paste the URL
+	// back into the dashboard modal.
+	claudeRedirectURI = "http://localhost:19280/callback"
 )
 
 // claudeOAuthFlow holds server-side PKCE state for an in-progress login.
