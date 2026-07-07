@@ -17,10 +17,10 @@ import (
 
 const (
 	// AuthorizeURL is the Claude OAuth authorization endpoint.
-	AuthorizeURL = "https://claude.ai/oauth/authorize"
+	AuthorizeURL = "https://platform.claude.com/oauth/authorize"
 
 	// TokenURL is the Claude OAuth token endpoint.
-	TokenURL = "https://claude.ai/v1/oauth/token"
+	TokenURL = "https://platform.claude.com/v1/oauth/token"
 
 	// ClientID is the public Claude Code OAuth client identifier.
 	ClientID = "https://claude.ai/oauth/claude-code-client-metadata"
