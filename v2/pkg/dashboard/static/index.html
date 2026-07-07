@@ -2618,6 +2618,21 @@
           <div class="oc-detail-field"><div class="label" title="Average tokens consumed per work pass (kick session). Lower is more efficient.">Avg/Pass</div><div class="value">${_tokAvg > 0 ? fmtTokens(_tokAvg) : '—'}</div></div>
           <div class="oc-detail-field"><div class="label" title="Number of separate CLI sessions this agent has had in the last 24 hours.">Sessions</div><div class="value">${_tok.sessions ?? '—'}</div></div>
           <div class="oc-detail-field"><div class="label" title="Total number of messages (prompts + responses) across all sessions in the last 24 hours.">Messages</div><div class="value">${_tok.messages ?? '—'}</div></div>
+          <div class="oc-detail-field"><div class="label" title="CLI authentication status — log in to authenticate the agent's CLI tool">Auth</div><div class="value">${(() => {
+            const isClaude = a.cli === 'claude';
+            const isCopilot = a.cli === 'copilot';
+            const _needsLogin = a.needsLogin === true;
+            const claudeIcon = '<svg class="cli-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.22.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/></svg>';
+            const copilotIcon = '<svg class="cli-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>';
+            if (_needsLogin) {
+              if (isClaude) return '<button class="cli-login-btn claude" onclick="event.stopPropagation();loginAgent(\x27' + esc(a.name) + '\x27,\x27claude\x27)" title="Authenticate Claude Code CLI">' + claudeIcon + ' Login</button>';
+              if (isCopilot) return '<button class="cli-login-btn copilot" onclick="event.stopPropagation();loginAgent(\x27' + esc(a.name) + '\x27,\x27copilot\x27)" title="Authenticate GitHub Copilot CLI">' + copilotIcon + ' Login</button>';
+              return '<button class="cli-login-btn disabled" disabled title="This backend requires manual /login in the terminal">Login</button>';
+            }
+            if (isClaude) return '<span class="cli-login-btn logged-in" title="Claude CLI is authenticated">' + claudeIcon + ' ✓ logged in</span>';
+            if (isCopilot) return '<span class="cli-login-btn logged-in" title="Copilot CLI is authenticated">' + copilotIcon + ' ✓ logged in</span>';
+            return '<span class="cli-login-btn logged-in" title="CLI is authenticated">✓ logged in</span>';
+          })()}</div></div>
         </div>
         <div class="oc-detail-indicators">${agentIndicators(a.name)}</div>
         <div class="oc-detail-summary-wrap">
