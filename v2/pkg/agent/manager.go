@@ -490,7 +490,7 @@ func (m *Manager) launchInTmux(ctx context.Context, agent *AgentProcess) error {
 	if agent.ModelOverride != "" {
 		model = agent.ModelOverride
 	}
-	model = normalizeModelName(model)
+	model = normalizeModelName(model, backend)
 
 	bootstrapPrompt := agent.BootstrapOverride
 	if bootstrapPrompt != "" {
@@ -2428,10 +2428,13 @@ func (m *Manager) ensureWorldWritable(root string) {
 	})
 }
 
-// normalizeModelName converts YAML-friendly model names (claude-sonnet-4-6) to
-// the format CLIs expect (claude-sonnet-4.6). The last hyphen before a trailing
-// digit group becomes a dot.
-func normalizeModelName(model string) string {
+// normalizeModelName converts YAML-friendly model names to the format each
+// CLI backend expects. Claude CLI uses hyphens (claude-opus-4-7), while
+// Copilot and other backends use dots (claude-opus-4.7).
+func normalizeModelName(model, backend string) string {
+	if backend == "claude" {
+		return model
+	}
 	idx := strings.LastIndex(model, "-")
 	if idx < 0 || idx == len(model)-1 {
 		return model
