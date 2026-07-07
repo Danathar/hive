@@ -1931,6 +1931,8 @@
         </div>
       </div>
       <button class="gh-auth-btn" id="oc-gh-login-btn" onclick="startGHLogin()" style="display:none;font-size:0.75rem;padding:3px 10px">Sign in</button>
+      <button class="claude-auth-btn" id="oc-claude-login-btn" onclick="startClaudeLogin()" style="font-size:0.75rem;padding:3px 10px">Login Claude</button>
+      <span class="claude-auth-status" id="oc-claude-status" style="font-size:0.72rem"></span>
     </div>
   </header>
 
@@ -12519,19 +12521,24 @@ function burnAreaChart() {
       try {
         var resp = await fetch('/api/claude-auth/status');
         var data = await resp.json();
-        var statusEl = document.getElementById('claude-auth-status');
-        var btnEl = document.getElementById('claude-auth-btn');
-        if (!statusEl || !btnEl) return;
-        if (data.logged_in) {
-          statusEl.textContent = '✓ Claude authenticated';
-          statusEl.className = 'claude-auth-status logged-in';
-          btnEl.textContent = 'Logout Claude';
-          btnEl.onclick = logoutClaude;
-        } else {
-          statusEl.textContent = '';
-          statusEl.className = 'claude-auth-status';
-          btnEl.textContent = 'Login Claude';
-          btnEl.onclick = startClaudeLogin;
+        // Update both the banner button and the top-bar button
+        var pairs = [
+          ['claude-auth-btn', 'claude-auth-status'],
+          ['oc-claude-login-btn', 'oc-claude-status']
+        ];
+        for (var i = 0; i < pairs.length; i++) {
+          var btnEl = document.getElementById(pairs[i][0]);
+          var statusEl = document.getElementById(pairs[i][1]);
+          if (!btnEl) continue;
+          if (data.logged_in) {
+            if (statusEl) { statusEl.textContent = '✓ Claude'; statusEl.className = 'claude-auth-status logged-in'; }
+            btnEl.textContent = 'Logout Claude';
+            btnEl.onclick = logoutClaude;
+          } else {
+            if (statusEl) { statusEl.textContent = ''; statusEl.className = 'claude-auth-status'; }
+            btnEl.textContent = 'Login Claude';
+            btnEl.onclick = startClaudeLogin;
+          }
         }
       } catch (e) { /* ignore */ }
     }
