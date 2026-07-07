@@ -66,6 +66,8 @@ type Server struct {
 	deviceFlowMu    sync.Mutex
 	deviceFlowState *github.DeviceFlowState
 
+	claudeOAuthFlow claudeOAuthFlow
+
 	audit *AuditLog
 
 	versionMu           sync.RWMutex

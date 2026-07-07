@@ -595,6 +595,10 @@
     .gh-auth-modal .gh-cancel { background: none; border: 1px solid #d1d5db; padding: 6px 16px; border-radius: 6px; cursor: pointer; color: #6b7280; margin-top: 12px; }
     .gh-auth-modal .gh-cancel:hover { background: #f3f4f6; }
     .gh-setup-modal { background: #fff; border-radius: 12px; padding: 32px; max-width: 560px; width: 92%; text-align: left; box-shadow: 0 20px 60px rgba(0,0,0,0.3); max-height: 85vh; overflow-y: auto; }
+    .claude-auth-btn { background: #d97706; color: #fff; border: none; padding: 6px 16px; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 0.85rem; }
+    .claude-auth-btn:hover { background: #f59e0b; }
+    .claude-auth-status { font-size: 0.8rem; color: #6b7280; }
+    .claude-auth-status.logged-in { color: #16a34a; font-weight: 600; }
     .gh-setup-modal h3 { margin: 0 0 16px; font-size: 1.2rem; color: #1a1a2e; text-align: center; }
     .gh-setup-modal p { color: #6b7280; font-size: 0.85rem; margin: 8px 0; line-height: 1.5; }
     .gh-setup-modal .setup-option { background: #f9fafb; border: 2px solid #e5e7eb; border-radius: 8px; padding: 16px; margin: 12px 0; cursor: pointer; transition: border-color 0.15s; }
@@ -1696,6 +1700,9 @@
 <div id="gh-auth-banner" class="gh-auth-banner" style="display:none">
   <span id="gh-auth-msg">GitHub login required for advisory posting</span>
   <button class="gh-auth-btn" id="gh-auth-btn" onclick="startGHLogin()">Sign in with GitHub</button>
+  <span style="color:#30363d;margin:0 4px">|</span>
+  <button class="claude-auth-btn" id="claude-auth-btn" onclick="startClaudeLogin()">Login Claude</button>
+  <span class="claude-auth-status" id="claude-auth-status"></span>
 </div>
 <div id="gh-auth-modal-overlay" class="gh-auth-overlay" style="display:none">
   <div class="gh-auth-modal">
@@ -12507,8 +12514,134 @@ function burnAreaChart() {
 
     // ESC for GH auth/setup handled by consolidated keydown listener above
 
+    // --- Claude Code OAuth login ---
+    async function checkClaudeAuth() {
+      try {
+        var resp = await fetch('/api/claude-auth/status');
+        var data = await resp.json();
+        var statusEl = document.getElementById('claude-auth-status');
+        var btnEl = document.getElementById('claude-auth-btn');
+        if (!statusEl || !btnEl) return;
+        if (data.logged_in) {
+          statusEl.textContent = '✓ Claude authenticated';
+          statusEl.className = 'claude-auth-status logged-in';
+          btnEl.textContent = 'Logout Claude';
+          btnEl.onclick = logoutClaude;
+        } else {
+          statusEl.textContent = '';
+          statusEl.className = 'claude-auth-status';
+          btnEl.textContent = 'Login Claude';
+          btnEl.onclick = startClaudeLogin;
+        }
+      } catch (e) { /* ignore */ }
+    }
+
+    async function startClaudeLogin() {
+      try {
+        var resp = await fetch('/api/claude-auth/start', { method: 'POST' });
+        var data = await resp.json();
+        if (data.error) {
+          showToast('Claude login error: ' + data.error, 'error');
+          return;
+        }
+        // Open the Claude authorize URL. After the user authenticates,
+        // Claude redirects to http://localhost/callback which won't load.
+        // We show a modal asking the user to paste the URL from their address bar.
+        window.open(data.authorize_url, '_blank');
+        showClaudePasteModal();
+      } catch (e) {
+        showToast('Claude login error: ' + e.message, 'error');
+      }
+    }
+
+    function showClaudePasteModal() {
+      var overlay = document.getElementById('claude-auth-overlay');
+      if (overlay) { overlay.style.display = 'flex'; return; }
+      overlay = document.createElement('div');
+      overlay.id = 'claude-auth-overlay';
+      overlay.className = 'gh-auth-overlay';
+      overlay.innerHTML = '<div class="gh-auth-modal">' +
+        '<h3 style="color:#d97706">Login Claude Code</h3>' +
+        '<p style="color:#6b7280;font-size:0.85rem;line-height:1.5">' +
+          '1. Authorize in the tab that just opened<br>' +
+          '2. After authorizing, the page will show "This site can\'t be reached"<br>' +
+          '3. Copy the <strong>entire URL</strong> from the address bar and paste it below' +
+        '</p>' +
+        '<input id="claude-callback-input" type="text" placeholder="Paste the localhost/callback?code=... URL here" ' +
+          'style="width:100%;padding:10px;border:1px solid #d1d5db;border-radius:6px;font-size:0.9rem;margin:12px 0;box-sizing:border-box">' +
+        '<div id="claude-exchange-status" style="color:#6b7280;font-size:0.8rem;min-height:20px;margin-bottom:8px"></div>' +
+        '<div style="display:flex;gap:8px;justify-content:center">' +
+          '<button onclick="submitClaudeCode()" style="background:#d97706;color:#fff;border:none;padding:8px 20px;border-radius:6px;font-weight:600;cursor:pointer">Submit</button>' +
+          '<button onclick="cancelClaudeLogin()" class="gh-cancel">Cancel</button>' +
+        '</div>' +
+      '</div>';
+      document.body.appendChild(overlay);
+      overlay.style.display = 'flex';
+      // Allow pressing Enter to submit
+      var input = document.getElementById('claude-callback-input');
+      if (input) input.addEventListener('keydown', function(e) { if (e.key === 'Enter') submitClaudeCode(); });
+    }
+
+    async function submitClaudeCode() {
+      var input = document.getElementById('claude-callback-input');
+      var statusEl = document.getElementById('claude-exchange-status');
+      if (!input || !input.value.trim()) {
+        if (statusEl) { statusEl.textContent = 'Please paste the callback URL'; statusEl.style.color = '#ef4444'; }
+        return;
+      }
+      var value = input.value.trim();
+      // Accept either a full URL or just the code
+      var payload = {};
+      if (value.startsWith('http')) {
+        payload.callback_url = value;
+      } else {
+        payload.code = value;
+      }
+      if (statusEl) { statusEl.textContent = 'Exchanging code for token...'; statusEl.style.color = '#6b7280'; }
+      try {
+        var resp = await fetch('/api/claude-auth/exchange', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        var data = await resp.json();
+        if (data.error) {
+          if (statusEl) { statusEl.textContent = data.error; statusEl.style.color = '#ef4444'; }
+          return;
+        }
+        if (statusEl) { statusEl.textContent = 'Authenticated!'; statusEl.style.color = '#16a34a'; }
+        showToast('Claude Code authenticated!', 'success');
+        var CLAUDE_SUCCESS_DISMISS_MS = 1500;
+        setTimeout(function() {
+          var overlay = document.getElementById('claude-auth-overlay');
+          if (overlay) overlay.style.display = 'none';
+          checkClaudeAuth();
+        }, CLAUDE_SUCCESS_DISMISS_MS);
+      } catch (e) {
+        if (statusEl) { statusEl.textContent = 'Error: ' + e.message; statusEl.style.color = '#ef4444'; }
+      }
+    }
+
+    function cancelClaudeLogin() {
+      var overlay = document.getElementById('claude-auth-overlay');
+      if (overlay) overlay.style.display = 'none';
+    }
+
+    async function logoutClaude() {
+      try {
+        await fetch('/api/claude-auth/logout', { method: 'POST' });
+        showToast('Claude Code logged out', 'success');
+        checkClaudeAuth();
+      } catch (e) {
+        showToast('Logout error: ' + e.message, 'error');
+      }
+    }
+
     checkGHAuth();
     setInterval(checkGHAuth, GH_AUTH_CHECK_INTERVAL_MS);
+    checkClaudeAuth();
+    var CLAUDE_AUTH_CHECK_INTERVAL_MS = 60000;
+    setInterval(checkClaudeAuth, CLAUDE_AUTH_CHECK_INTERVAL_MS);
 
     window.addEventListener('hashchange', function() {
       var section = _ocSectionFromHash();

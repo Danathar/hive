@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/kubestellar/hive/v2/pkg/claude"
 	"github.com/kubestellar/hive/v2/pkg/config"
 	ghpkg "github.com/kubestellar/hive/v2/pkg/github"
 )
@@ -98,6 +99,7 @@ type Manager struct {
 	workDir          string
 	project          ProjectContext
 	copilotAuthToken string
+	claudeAuthToken  string
 	uidMap           *UIDMap
 	appAuth          AppTokenMinter
 
@@ -114,6 +116,14 @@ type AppTokenMinter interface {
 // backend (vllm, llm-d) rather than a CLI tool.
 func IsInferenceBackend(backend string) bool {
 	return backend == "vllm" || backend == "llm-d"
+}
+
+// ReloadClaudeToken re-reads the Claude credentials file and updates the
+// cached token. Called by the dashboard after a successful OAuth login.
+func (m *Manager) ReloadClaudeToken() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.claudeAuthToken = claude.ReadAccessToken(claude.CredentialsPath)
 }
 
 // SetInferenceCallbacks registers callbacks that the manager uses to
@@ -208,6 +218,7 @@ func NewManager(agents map[string]config.AgentConfig, logger *slog.Logger, proje
 	// The token stays in the process env so all agents can authenticate for AI
 	// completions; write access is gated by --enable-all-github-mcp-tools flag.
 	copilotToken := os.Getenv("COPILOT_GITHUB_TOKEN")
+	claudeToken := claude.ReadAccessToken(claude.CredentialsPath)
 
 	var uidMap *UIDMap
 	if loaded, err := LoadUIDMap(UIDMapPath); err == nil {
@@ -224,6 +235,7 @@ func NewManager(agents map[string]config.AgentConfig, logger *slog.Logger, proje
 		workDir:          workDir,
 		project:          project,
 		copilotAuthToken: copilotToken,
+		claudeAuthToken:  claudeToken,
 		uidMap:           uidMap,
 	}
 
@@ -2084,6 +2096,7 @@ func backendBinary(backend string) (string, error) {
 
 const (
 	sharedCopilotConfigPath    = "/data/home/.copilot/config.json"
+	sharedClaudeCredentialPath = "/data/home/.claude/.credentials.json"
 	sharedConfigDesiredMode    = 0o660
 	tokenRestartCooldownSec    = 60  // minimum seconds between token-triggered restarts per agent
 	expiredTokenHangTimeoutSec = 180 // blank pane after this many seconds triggers token purge + restart
@@ -2125,10 +2138,20 @@ func paneShowsFatalNetworkError(lines []string) bool {
 	return false
 }
 
-// configHasTokens reads the shared Copilot config.json, strips single-line
+// configHasTokens returns true if either the Copilot config or Claude
+// credentials file contains a valid token. Used to decide whether an agent
+// stuck on a login prompt can be auto-restarted.
+func configHasTokens() bool {
+	if claude.HasValidToken(sharedClaudeCredentialPath) {
+		return true
+	}
+	return copilotConfigHasTokens()
+}
+
+// copilotConfigHasTokens reads the shared Copilot config.json, strips single-line
 // // comments (which Copilot CLI sometimes writes), parses the JSON, and returns
 // true if the "copilotTokens" field has at least one entry.
-func configHasTokens() bool {
+func copilotConfigHasTokens() bool {
 	data, err := os.ReadFile(sharedCopilotConfigPath)
 	if err != nil {
 		return false
@@ -2644,6 +2667,9 @@ func (m *Manager) agentEnvPairs(agent *AgentProcess) []agentEnvPair {
 	}
 	if m.copilotAuthToken != "" {
 		vars = append(vars, agentEnvPair{"COPILOT_GITHUB_TOKEN", m.copilotAuthToken, true})
+	}
+	if m.claudeAuthToken != "" && backend == "claude" {
+		vars = append(vars, agentEnvPair{"CLAUDE_CODE_OAUTH_TOKEN", m.claudeAuthToken, true})
 	}
 	// BD_DIR tells the `bd` CLI where to read/write beads. Without this,
 	// bd falls back to cwd (/data/agents/<name>) instead of the configured
