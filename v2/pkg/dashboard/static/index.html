@@ -12567,19 +12567,26 @@ function burnAreaChart() {
     }
 
     async function startClaudeLogin() {
+      // Open the tab synchronously in the user-gesture context to avoid
+      // popup blockers, then navigate it to the authorize URL after the
+      // API call returns.
+      var authTab = window.open('about:blank', '_blank');
       try {
         var resp = await fetch('/api/claude-auth/start', { method: 'POST' });
         var data = await resp.json();
         if (data.error) {
+          if (authTab) authTab.close();
           showToast('Claude login error: ' + data.error, 'error');
           return;
         }
-        // Open the Claude authorize URL. After the user authenticates,
-        // Claude redirects to http://localhost/callback which won't load.
-        // We show a modal asking the user to paste the URL from their address bar.
-        window.open(data.authorize_url, '_blank');
+        if (authTab) {
+          authTab.location.href = data.authorize_url;
+        } else {
+          window.open(data.authorize_url, '_blank');
+        }
         showClaudePasteModal();
       } catch (e) {
+        if (authTab) authTab.close();
         showToast('Claude login error: ' + e.message, 'error');
       }
     }
@@ -12590,19 +12597,19 @@ function burnAreaChart() {
       overlay = document.createElement('div');
       overlay.id = 'claude-auth-overlay';
       overlay.className = 'gh-auth-overlay';
-      overlay.innerHTML = '<div class="gh-auth-modal">' +
-        '<h3 style="color:#d97706">Login Claude Code</h3>' +
-        '<p style="color:#6b7280;font-size:0.85rem;line-height:1.5">' +
-          '1. Authorize in the tab that just opened<br>' +
-          '2. After authorizing, the page will show "This site can\'t be reached"<br>' +
-          '3. Copy the <strong>entire URL</strong> from the address bar and paste it below' +
-        '</p>' +
+      overlay.innerHTML = '<div class="gh-auth-modal" style="max-width:560px;text-align:left">' +
+        '<h3 style="color:#d97706;text-align:center">Login Claude Code</h3>' +
+        '<ol style="color:#6b7280;font-size:0.85rem;line-height:1.8;padding-left:1.5em;margin:12px 0">' +
+          '<li>Authorize in the tab that just opened</li>' +
+          '<li>After authorizing, the page will show "This site can\'t be reached"</li>' +
+          '<li>Copy the <strong>entire URL</strong> from the address bar and paste it below</li>' +
+        '</ol>' +
         '<input id="claude-callback-input" type="text" placeholder="Paste the localhost/callback?code=... URL here" ' +
           'style="width:100%;padding:10px;border:1px solid #d1d5db;border-radius:6px;font-size:0.9rem;margin:12px 0;box-sizing:border-box">' +
         '<div id="claude-exchange-status" style="color:#6b7280;font-size:0.8rem;min-height:20px;margin-bottom:8px"></div>' +
         '<div style="display:flex;gap:8px;justify-content:center">' +
-          '<button onclick="submitClaudeCode()" style="background:#d97706;color:#fff;border:none;padding:8px 20px;border-radius:6px;font-weight:600;cursor:pointer">Submit</button>' +
-          '<button onclick="cancelClaudeLogin()" class="gh-cancel">Cancel</button>' +
+          '<button onclick="submitClaudeCode()" style="background:#d97706;color:#fff;border:none;padding:6px 16px;border-radius:6px;font-weight:600;cursor:pointer">Submit</button>' +
+          '<button onclick="cancelClaudeLogin()" class="gh-cancel" style="margin-top:0">Cancel</button>' +
         '</div>' +
       '</div>';
       document.body.appendChild(overlay);
