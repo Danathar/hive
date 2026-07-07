@@ -17,16 +17,16 @@ import (
 
 const (
 	// AuthorizeURL is the Claude OAuth authorization endpoint.
-	AuthorizeURL = "https://platform.claude.com/oauth/authorize"
+	AuthorizeURL = "https://claude.ai/oauth/authorize"
 
 	// TokenURL is the Claude OAuth token endpoint.
-	TokenURL = "https://platform.claude.com/v1/oauth/token"
+	TokenURL = "https://claude.ai/v1/oauth/token"
 
-	// ClientID is the public Claude Code OAuth client identifier.
-	ClientID = "https://claude.ai/oauth/claude-code-client-metadata"
+	// ClientID is the public Claude Code OAuth client identifier (UUID form).
+	ClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
 	// DefaultScopes are the scopes requested for agent authentication.
-	DefaultScopes = "user:inference user:profile user:sessions:claude_code"
+	DefaultScopes = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
 
 	// CredentialsPath is where Claude Code stores its credentials on the pod.
 	CredentialsPath = "/data/home/.claude/.credentials.json"
@@ -86,6 +86,7 @@ func GeneratePKCE() (verifier, challenge string, err error) {
 // BuildAuthorizeURL constructs the full authorization URL with PKCE parameters.
 func BuildAuthorizeURL(codeChallenge, redirectURI, state string) string {
 	v := url.Values{
+		"code":                  {"true"},
 		"client_id":             {ClientID},
 		"response_type":        {"code"},
 		"redirect_uri":         {redirectURI},
