@@ -1195,6 +1195,7 @@
     /* .config-field inputs — shared input recipe (end of style block) */
     .config-field input[type="text"],
     .config-field input[type="number"],
+    .config-field textarea,
     .config-field select { width: 100%; }
     .config-field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
     .config-field-row4 { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 12px; }
@@ -1818,6 +1819,7 @@
        remap makes this white-on-gray in light mode), var(--radius), and a
        subtle 2px amber focus ring. Grouped selectors — no renames. */
     .config-field input[type="text"], .config-field input[type="number"], .config-field select,
+    .config-field textarea,
     .nous-config-section textarea, .nous-config-section input[type="text"], .nous-config-section input[type="number"],
     .config-list-add input,
     .kick-prompt, .kb-search-box, .oc-chat-input, .hive-chat-input, .backend-select {
@@ -1831,13 +1833,15 @@
       outline: none;
     }
     .config-field input[type="text"]:focus, .config-field input[type="number"]:focus, .config-field select:focus,
+    .config-field textarea:focus,
     .nous-config-section textarea:focus, .nous-config-section input[type="text"]:focus, .nous-config-section input[type="number"]:focus,
     .config-list-add input:focus,
     .kick-prompt:focus, .kb-search-box:focus, .oc-chat-input:focus, .hive-chat-input:focus, .backend-select:focus {
       border-color: color-mix(in srgb, var(--amber) 60%, var(--line));
       box-shadow: 0 0 0 2px color-mix(in srgb, var(--amber) 22%, transparent);
     }
-    .config-field input::placeholder, .nous-config-section textarea::placeholder,
+    .config-field input::placeholder, .config-field textarea::placeholder,
+    .nous-config-section textarea::placeholder,
     .nous-config-section input::placeholder, .config-list-add input::placeholder,
     .kick-prompt::placeholder, .kb-search-box::placeholder,
     .oc-chat-input::placeholder, .hive-chat-input::placeholder { color: var(--muted); }
