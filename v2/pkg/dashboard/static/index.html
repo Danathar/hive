@@ -549,6 +549,26 @@
       .oc-topbar { left: 0; }
       body { padding-left: 16px; }
     }
+    @media (max-width: 600px) {
+      /* The fixed 48px topbar can't hold its content at phone widths —
+         wrapped buttons were painting over the page. Let it wrap and
+         grow, and drop low-value chrome. flex-shrink:0 makes the three
+         groups wrap to a new row instead of squishing their contents off
+         the right edge. Top clearance lives in the mobile body-padding
+         rule further down (it wins the cascade over this block). */
+      .oc-topbar { flex-wrap: wrap; height: auto; min-height: 48px; padding: 6px 12px; row-gap: 4px; }
+      .oc-topbar-left, .oc-topbar-center, .oc-topbar-right { flex-shrink: 0; }
+      /* center grows to fill row 1, so the health/right group always
+         drops to its own row instead of half-fitting at the edge */
+      .oc-topbar-center { flex-grow: 1; justify-content: center; }
+      .oc-topbar-ts, #oc-git-version, .widget-dl { display: none; }
+      /* keep the pill one line so the right group wraps as a unit
+         instead of being clipped at the viewport edge */
+      .oc-health-badge { white-space: nowrap; }
+      /* the nowrap Install button was pushing the app banner past the
+         viewport — let the banner's items wrap instead */
+      .gh-app-install-banner { flex-wrap: wrap; }
+    }
 
     /* Agent cards */
     .agents { display: grid; grid-template-columns: 1fr; gap: 12px; margin-bottom: 24px; }
@@ -1099,9 +1119,12 @@
     @keyframes toast-in { from { opacity: 0; transform: translateX(40px); } to { opacity: 1; transform: translateX(0); } }
     @keyframes toast-out { from { opacity: 1; } to { opacity: 0; transform: translateY(-10px); } }
 
-    /* Mobile: prevent title and sessions from overflowing viewport */
+    /* Mobile: prevent title and sessions from overflowing viewport.
+       Top padding must clear the fixed topbar, which wraps to ~2 rows
+       at phone widths (see the topbar mobile block earlier) — a plain
+       10px here put the first ~75px of content underneath it. */
     @media (max-width: 600px) {
-      body { padding: 10px; }
+      body { padding: 104px 10px 10px; }
       h1 { flex-wrap: wrap; font-size: 1rem; gap: 4px; }
       .timestamp { margin-left: 0; }
       .git-version { margin-left: 0; width: 100%; }
