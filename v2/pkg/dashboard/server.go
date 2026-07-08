@@ -68,6 +68,8 @@ type Server struct {
 
 	claudeOAuthFlow claudeOAuthFlow
 
+	copilotAuthFlow copilotAuthFlow
+
 	audit *AuditLog
 
 	versionMu           sync.RWMutex

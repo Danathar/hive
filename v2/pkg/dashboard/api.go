@@ -70,6 +70,7 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	s.mux.HandleFunc("GET /api/gh-user-auth/session", s.handleGHUserAuthSession)
 
 	s.registerClaudeAuthRoutes()
+	s.registerCopilotAuthRoutes()
 	s.mux.HandleFunc("GET /api/summaries", s.handleSummaries)
 
 	s.mux.HandleFunc("GET /api/config/agent/{name}", s.handleAgentConfigGet)

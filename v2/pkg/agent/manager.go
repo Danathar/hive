@@ -127,6 +127,15 @@ func (m *Manager) ReloadClaudeToken() {
 	m.claudeAuthToken = claude.ReadAccessToken(claude.CredentialsPath)
 }
 
+// SetCopilotToken updates the cached Copilot token injected into agent
+// environments as COPILOT_GITHUB_TOKEN. Called by the dashboard after a
+// successful device-flow login.
+func (m *Manager) SetCopilotToken(token string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.copilotAuthToken = token
+}
+
 // SetInferenceCallbacks registers callbacks that the manager uses to
 // configure/clear inference routing on the proxy when launching agents.
 func (m *Manager) SetInferenceCallbacks(
@@ -219,6 +228,12 @@ func NewManager(agents map[string]config.AgentConfig, logger *slog.Logger, proje
 	// The token stays in the process env so all agents can authenticate for AI
 	// completions; write access is gated by --enable-all-github-mcp-tools flag.
 	copilotToken := os.Getenv("COPILOT_GITHUB_TOKEN")
+	if copilotToken == "" {
+		// Fall back to the token persisted by the dashboard's device-flow login.
+		if data, err := os.ReadFile(CopilotUserTokenPath); err == nil {
+			copilotToken = strings.TrimSpace(string(data))
+		}
+	}
 	claudeToken := claude.ReadAccessToken(claude.CredentialsPath)
 
 	var uidMap *UIDMap
@@ -2106,6 +2121,10 @@ const (
 	expiredTokenHangTimeoutSec = 180 // blank pane after this many seconds triggers token purge + restart
 	tlsErrorRestartCooldownSec = 120 // minimum seconds between TLS-error-triggered restarts per agent
 )
+
+// CopilotUserTokenPath is where the dashboard's device-flow login persists
+// the Copilot OAuth token; injected into agents as COPILOT_GITHUB_TOKEN.
+const CopilotUserTokenPath = "/data/copilot-user-token"
 
 // loginPromptPatterns are substrings that indicate an agent is stuck on the
 // Copilot login/authentication screen.
