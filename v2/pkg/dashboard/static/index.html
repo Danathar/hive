@@ -263,7 +263,7 @@
       display: flex; align-items: center; justify-content: space-between;
       padding: 0 20px; z-index: 99;
     }
-    .oc-topbar-left { font-size: 0.85rem; color: var(--muted); }
+    .oc-topbar-left { font-size: 0.85rem; color: var(--muted); display: flex; align-items: center; gap: 4px; }
     .oc-topbar-center { display: flex; align-items: center; gap: 6px; }
     .oc-topbar-center .oc-tb-link {
       font-size: 0.72rem; color: var(--muted); cursor: pointer; padding: 4px 10px;
@@ -2135,6 +2135,7 @@
   <header id="oc-topbar" class="oc-topbar">
     <div class="oc-topbar-left">
       <span id="oc-project-name"></span>
+      <span id="oc-git-version" class="git-version"></span>
     </div>
     <div class="oc-topbar-center">
       <span class="oc-tb-link" onclick="openConfigDialog('governor')">⚙️ Config</span>
@@ -2146,7 +2147,6 @@
       <span class="oc-health-badge" id="oc-health">● Health OK</span>
       <span id="oc-hive-id" class="git-version" title="Hive Instance ID" style="cursor:pointer;border:1px solid var(--border);padding:2px 8px;border-radius:4px" onclick="openConfigDialog('governor')"></span>
       <span class="oc-topbar-ts" id="oc-ts"></span>
-      <span id="oc-git-version" class="git-version"></span>
       <a href="/api/widget" class="widget-dl" title="Download Übersicht widget">⬇ Widget</a>
       <div id="oc-gh-avatar-wrap" style="display:none;position:relative">
         <img id="oc-gh-avatar" src="" alt="" style="width:28px;height:28px;border-radius:50%;cursor:pointer;border:2px solid var(--green);vertical-align:middle" onclick="toggleGHUserMenu()">
