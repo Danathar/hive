@@ -1007,6 +1007,10 @@
     .advisor-bar-fill { height: 100%; border-radius: 4px; transition: width 0.5s ease; }
     .advisor-pct { min-width: 30px; text-align: right; color: var(--muted); }
     .advisor-burn { min-width: 80px; text-align: right; color: var(--muted); font-size: 0.65rem; }
+    /* Paused/off agents project zero — greyed row, note instead of a bar. */
+    .advisor-row-inactive { opacity: 0.55; }
+    .advisor-row-inactive .advisor-agent { color: var(--muted); font-weight: 400; }
+    .advisor-inactive-note { flex: 1; color: var(--muted); font-style: italic; font-size: 0.65rem; }
     .advisor-tips { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
     .advisor-tip { font-size: 0.72rem; color: var(--text); padding: 4px 8px; background: rgba(210,153,34,0.08); border-left: 2px solid var(--yellow); border-radius: 0 4px 4px 0; }
     .advisor-tip b { color: var(--cyan); }
@@ -4413,12 +4417,16 @@
         const avg = tokenData.avgPerSession || 0;
         const cadenceMin = parseCadenceMinutes(agentData.cadence);
         const isOff = agentData.offByCadence === true;
-        const isPaused = !cadenceMin && !isOff;
+        const isOnDemand = agentData.onDemand === true;
+        // paused = the live paused flag (governor-mode pauses keep the
+        // configured cadence string, so the string alone is not enough)
+        // OR a non-numeric cadence ('paused'/'off'/'on demand').
+        const isPaused = (agentData.paused === true && !isOff) || (!cadenceMin && !isOff);
         const passesPerHour = (isPaused || isOff) ? 0 : MINUTES_PER_HOUR / cadenceMin;
         const weeklyBurn = avg * passesPerHour * HOURS_PER_WEEK;
         totalWeeklyBurn += weeklyBurn;
 
-        rows.push({ name, avg, cadenceMin, isPaused, isOff, passesPerHour, weeklyBurn, cli: agentData.cli });
+        rows.push({ name, avg, cadenceMin, isPaused, isOff, isOnDemand, passesPerHour, weeklyBurn, cli: agentData.cli });
       }
 
       if (totalWeeklyBurn === 0) return '';
@@ -4449,7 +4457,7 @@
       }
 
       for (const r of rows) {
-        if (r.cli === 'copilot' && r.avg === 0 && !r.isPaused) {
+        if (r.cli === 'copilot' && r.avg === 0 && !r.isPaused && !r.isOff) {
           tips.push(`<b>${r.name}</b> runs on copilot (unlimited tokens, no metering). Token burn unknown — consider switching to claude CLI for visibility.`);
         }
       }
@@ -4486,15 +4494,23 @@
         }
       }
 
-      const barRows = rows.filter(r => r.weeklyBurn > 0 || (!r.isPaused && !r.isOff)).map(r => {
+      const barRows = rows.map(r => {
+        if (r.isPaused || r.isOff) {
+          const note = r.isOff ? 'off in current mode' : r.isOnDemand ? 'on demand' : 'paused';
+          return `<div class="advisor-bar-row advisor-row-inactive">
+            <span class="advisor-agent">${r.name}</span>
+            <span class="advisor-inactive-note">${note} — projects 0</span>
+            <span class="advisor-pct">—</span>
+            <span class="advisor-burn">0/wk</span>
+          </div>`;
+        }
         const pct = totalWeeklyBurn > 0 ? Math.round((r.weeklyBurn / totalWeeklyBurn) * 100) : 0;
         const barColor = _getAgentColor(r.name);
-        const label = r.isPaused ? 'paused' : r.isOff ? 'off' : `${fmtTokens(r.weeklyBurn)}/wk`;
         return `<div class="advisor-bar-row">
           <span class="advisor-agent">${r.name}</span>
           <div class="advisor-bar-track"><div class="advisor-bar-fill" style="width:${Math.max(pct, 2)}%;background:${barColor}"></div></div>
-          <span class="advisor-pct">${(r.isPaused || r.isOff) ? '—' : pct + '%'}</span>
-          <span class="advisor-burn">${label}</span>
+          <span class="advisor-pct">${pct + '%'}</span>
+          <span class="advisor-burn">${fmtTokens(r.weeklyBurn)}/wk</span>
         </div>`;
       }).join('');
 
