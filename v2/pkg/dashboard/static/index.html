@@ -65,17 +65,10 @@
     .git-version .git-behind { color: var(--yellow); font-weight: 600; }
     .git-version .git-dirty { color: var(--yellow); }
     .header-spacer { flex: 1; }
-    .widget-dl {
-      font-size: 0.75rem; color: var(--cyan); text-decoration: none;
-      border: 1px solid var(--cyan); border-radius: 6px; padding: 4px 10px;
-      transition: background 0.2s, color 0.2s; margin-left: auto; margin-right: auto;
-    }
-    .widget-dl:hover { background: var(--cyan); color: var(--bg); }
-
-    /* Layout toggle */
-    .layout-toggle { font-size: 0.7rem; color: var(--muted); border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; cursor: pointer; background: var(--surface); transition: all 0.2s; margin-left: 12px; margin-right: 8px; font-family: inherit; }
-    .layout-toggle:hover { border-color: var(--text); color: var(--text); }
-    .layout-toggle.active { border-color: var(--cyan); color: var(--cyan); }
+    /* .widget-dl / .layout-toggle — ghost buttons (system recipe at end of
+       the style block); only placement-specific properties live here. */
+    .widget-dl { display: inline-block; text-decoration: none; margin-left: auto; margin-right: auto; }
+    .layout-toggle { margin-left: 12px; margin-right: 8px; }
 
     /* ── Light mode ── */
     body.light-mode {
@@ -163,13 +156,7 @@
       padding: 16px 20px; border-top: 1px solid var(--border);
       margin-top: auto;
     }
-    .oc-sidebar-footer .layout-toggle {
-      width: 100%; text-align: center;
-      background: var(--bg); border: 1px solid var(--border);
-      color: var(--muted); font-size: 0.76rem; padding: 8px;
-      border-radius: 8px; cursor: pointer;
-    }
-    .oc-sidebar-footer .layout-toggle:hover { background: var(--surface); color: var(--text); }
+    .oc-sidebar-footer .layout-toggle { width: 100%; text-align: center; padding: 8px; margin: 0; }
 
     /* System resource gauges */
     .system-gauges {
@@ -249,11 +236,6 @@
     }
     .oc-topbar-ts { font-size: 0.75rem; color: var(--muted); }
     .oc-topbar .git-version { color: var(--muted); }
-    .oc-topbar .widget-dl {
-      font-size: 0.72rem; color: var(--oc-accent); border-color: var(--oc-accent);
-      padding: 3px 10px; border-radius: 6px;
-    }
-    .oc-topbar .widget-dl:hover { background: var(--oc-accent); color: var(--bg); }
 
     /* Light main content area */
     body.light-mode {
@@ -463,13 +445,14 @@
     }
     .sum-table tr:last-child td { border-bottom: none; }
     .sum-table tr:hover td { background: rgba(99,102,241,0.08); }
+    /* icon-button (see button system): floating follow-scroll circle */
     .oc-summary-follow-btn {
       position: absolute; bottom: 10px; right: 10px;
       width: 28px; height: 28px; border-radius: 50%;
-      background: rgba(0,0,0,0.6); color: #fff; border: none;
-      cursor: pointer; font-size: 0.75rem; display: none;
+      background: rgba(0,0,0,0.6); color: #fff;
+      font-size: 0.75rem; display: none;
       align-items: center; justify-content: center;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.3); transition: opacity 0.15s;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
     }
     .oc-summary-follow-btn:hover { background: rgba(0,0,0,0.8); }
     .oc-summary-follow-btn.visible { display: flex; }
@@ -517,9 +500,6 @@
 
     /* Light typography now shares --font-ui with dark mode; .doing stays mono in both. */
 
-    /* Light button overrides */
-    body.light-mode .terminal-link { border-color: var(--accent); color: var(--accent); }
-    body.light-mode .terminal-link:hover { background: var(--accent); color: var(--bg); }
 
 
     /* Light governor gauge */
@@ -561,18 +541,15 @@
     .cli-login-btn.logged-in { background: transparent; color: var(--green); cursor: pointer; border: 1px solid var(--green); }
     .cli-login-btn.logged-in:hover { background: rgba(34,197,94,0.1); }
     .gh-auth-banner { background: linear-gradient(135deg, #1a1a2e, #16213e); color: #fff; padding: 12px 24px; display: flex; align-items: center; justify-content: center; gap: 12px; font-size: 0.9rem; z-index: 200; }
-    .gh-auth-banner .gh-auth-btn { background: #238636; color: #fff; border: none; padding: 6px 16px; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 0.85rem; }
-    .gh-auth-banner .gh-auth-btn:hover { background: #2ea043; }
+    /* .gh-auth-btn — primary button (system recipe at end of style block) */
     .gh-auth-banner .gh-auth-user { color: #58a6ff; font-weight: 600; }
     .gh-app-install-banner { background: color-mix(in srgb, var(--red) 12%, var(--panel)); border: 1px solid var(--red); border-radius: 8px; padding: 16px; margin-bottom: 16px; display: flex; align-items: center; gap: 12px; }
     .gh-app-install-banner .gh-app-title { font-weight: 600; margin-bottom: 4px; color: var(--text); }
     .gh-app-install-banner .gh-app-desc { font-size: 0.85rem; color: var(--text); }
-    .gh-app-install-banner .gh-app-btn { padding: 8px 16px; background: var(--red); color: var(--bg); border-radius: 6px; font-weight: 600; text-decoration: none; white-space: nowrap; border: none; cursor: pointer; font-size: 0.85rem; }
-    .gh-app-install-banner .gh-app-btn:hover { background: color-mix(in srgb, var(--red) 85%, #fff); }
+    /* .gh-app-btn — primary button (system recipe); banner tint carries severity */
+    .gh-app-install-banner .gh-app-btn { display: inline-block; text-decoration: none; white-space: nowrap; }
     .gh-app-install-banner.perm-issue { background: color-mix(in srgb, var(--yellow) 12%, var(--panel)); border-color: var(--yellow); }
     .gh-app-install-banner.perm-issue .gh-app-desc { color: var(--text); }
-    .gh-app-install-banner.perm-issue .gh-app-btn { background: var(--yellow); }
-    .gh-app-install-banner.perm-issue .gh-app-btn:hover { background: color-mix(in srgb, var(--yellow) 85%, #fff); }
     .gh-app-perm-details { font-size: 0.8rem; margin-top: 6px; color: var(--text); }
     .gh-app-perm-details .perm-ok { color: var(--green); }
     .gh-app-perm-details .perm-missing { color: var(--red); font-weight: 600; }
@@ -584,8 +561,7 @@
     .gh-auth-modal .gh-verify-link { display: inline-block; margin: 12px 0; padding: 8px 20px; background: var(--green); color: var(--bg); text-decoration: none; border-radius: 6px; font-weight: 600; }
     .gh-auth-modal .gh-verify-link:hover { background: color-mix(in srgb, var(--green) 85%, #fff); }
     .gh-auth-modal .gh-poll-status { color: var(--muted); font-size: 0.8rem; margin-top: 12px; }
-    .gh-auth-modal .gh-cancel { background: none; border: 1px solid var(--line); padding: 6px 16px; border-radius: 6px; cursor: pointer; color: var(--muted); margin-top: 12px; }
-    .gh-auth-modal .gh-cancel:hover { background: var(--panel-strong); }
+    .gh-auth-modal .gh-cancel { margin-top: 12px; } /* ghost button (system recipe) */
     .gh-setup-modal { background: var(--panel); border-radius: 12px; padding: 32px; max-width: 560px; width: 92%; text-align: left; box-shadow: var(--shadow-modal); max-height: 85vh; overflow-y: auto; }
     .claude-auth-btn { background: #d97706; color: #fff; border: none; padding: 6px 16px; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 0.85rem; }
     .claude-auth-btn:hover { background: #f59e0b; }
@@ -605,8 +581,7 @@
     .gh-setup-modal .setup-perms h5 { margin: 0 0 6px; font-size: 0.85rem; color: var(--text); }
     .gh-setup-modal .setup-perms ul { margin: 4px 0; padding-left: 18px; font-size: 0.78rem; color: var(--muted); }
     .gh-setup-modal .setup-perms li { margin: 3px 0; }
-    .gh-setup-modal .gh-cancel { background: none; border: 1px solid var(--line); padding: 6px 16px; border-radius: 6px; cursor: pointer; color: var(--muted); margin-top: 12px; display: block; width: 100%; text-align: center; }
-    .gh-setup-modal .gh-cancel:hover { background: var(--panel-strong); }
+    .gh-setup-modal .gh-cancel { margin-top: 12px; display: block; width: 100%; text-align: center; } /* ghost button (system recipe) */
     .agent-state { text-align: right; font-size: 0.75rem; font-weight: 600; margin-top: 6px; }
     .agent-state.working { color: var(--green); }
     .agent-state.idle { color: var(--muted); }
@@ -660,12 +635,7 @@
     }
     .kick-prompt:focus { border-color: var(--accent); }
     .kick-prompt::placeholder { color: var(--muted); }
-    .btn-toggle { cursor: pointer; font-size: 0.7rem; padding: 3px 8px; border-radius: 4px; border: 1px solid var(--border); background: var(--surface); color: var(--muted); transition: all 0.2s; }
-    .btn-toggle:hover { border-color: var(--accent); color: var(--text); }
-    .btn-toggle.paused { background: var(--red-bg); border-color: var(--red); color: var(--red); }
-    .btn-toggle.on-demand { background: rgba(99,102,241,0.15); border-color: var(--indigo); color: var(--indigo); }
-    .btn-toggle.running { background: var(--green-bg); border-color: var(--green); color: var(--green); }
-    .btn-toggle.off { background: rgba(72,79,88,0.15); border-color: color-mix(in srgb, var(--muted) 60%, var(--bg)); color: var(--muted); }
+    /* .btn-toggle — ghost button with status states (system recipe at end of style block) */
     .agent-card.paused { border-color: var(--red); opacity: 0.7; }
     .agent-card.paused .agent-state { color: var(--red); }
     .agent-card.on-demand { border-color: var(--indigo); opacity: 0.85; }
@@ -697,27 +667,7 @@
     .health-ci.good { color: var(--green); }
     .health-ci.warn { color: var(--yellow); }
     .health-ci.bad { color: var(--red); }
-    .btn {
-      font-size: 0.7rem; padding: 3px 8px; border-radius: 4px;
-      border: 1px solid var(--border); background: var(--surface);
-      color: var(--muted); cursor: pointer; font-family: inherit;
-      transition: all 0.2s;
-    }
-    .btn:hover { background: var(--border); color: var(--text); }
-    .terminal-link {
-      font-size: 0.7rem; padding: 3px 8px; border-radius: 4px;
-      border: 1px solid var(--cyan); background: transparent;
-      color: var(--cyan); cursor: pointer; font-family: inherit;
-      text-decoration: none; transition: all 0.2s; display: inline-block;
-    }
-    .terminal-link:hover { background: var(--cyan); color: var(--bg); }
-    .restart-btn {
-      font-size: 0.7rem; padding: 3px 8px; border-radius: 4px;
-      border: 1px solid var(--yellow); background: transparent;
-      color: var(--yellow); cursor: pointer; font-family: inherit;
-      transition: all 0.2s; display: inline-block;
-    }
-    .restart-btn:hover { background: var(--yellow); color: var(--bg); }
+    /* .btn / .terminal-link / .restart-btn — button system recipes at end of style block */
     .backend-select {
       appearance: none; -webkit-appearance: none;
       background: var(--surface); color: var(--muted);
@@ -1152,16 +1102,7 @@
     .hive-dialog-title { font-size: var(--fs-lg); font-weight: 600; color: var(--text); margin-bottom: 12px; }
     .hive-dialog-body { font-size: 0.9rem; color: var(--muted); line-height: 1.5; white-space: pre-wrap; margin-bottom: 20px; }
     .hive-dialog-buttons { display: flex; gap: 10px; justify-content: flex-end; }
-    .hive-dialog-btn {
-      padding: 8px 20px; border-radius: 6px; border: 1px solid var(--border);
-      font-size: 0.85rem; font-weight: 500; cursor: pointer;
-      transition: background 0.15s, border-color 0.15s;
-    }
-    .hive-dialog-btn:hover { border-color: var(--blue); }
-    .hive-dialog-btn.primary { background: var(--blue); color: var(--bg); border-color: var(--blue); }
-    .hive-dialog-btn.primary:hover { background: color-mix(in srgb, var(--blue) 85%, #000); }
-    .hive-dialog-btn.cancel { background: var(--panel-strong); color: var(--muted); border-color: var(--line); }
-    .hive-dialog-btn.cancel:hover { background: var(--line); }
+    /* .hive-dialog-btn(.primary/.cancel) — primary/ghost buttons (system recipe) */
     .config-modal {
       background: var(--surface); border: 1px solid var(--border);
       border-radius: 12px; width: 900px; max-width: 95vw;
@@ -1197,11 +1138,7 @@
       display: flex; gap: 8px; justify-content: flex-end;
       padding: 12px 20px; border-top: 1px solid var(--border);
     }
-    .config-footer .btn { padding: 6px 16px; font-size: 0.8rem; border-radius: 6px; cursor: pointer; }
-    .config-footer .config-save { background: var(--blue); color: var(--bg); border: none; font-weight: 600; }
-    .config-footer .config-save:hover { opacity: 0.9; }
-    .config-footer .config-cancel { background: transparent; color: var(--muted); border: 1px solid var(--border); }
-    .config-footer .config-cancel:hover { color: var(--text); border-color: var(--text); }
+    /* .config-save / .config-cancel — primary/ghost buttons (system recipe) */
 
     .config-field { margin-bottom: 14px; }
     .config-field label { display: block; font-size: var(--fs-xs); color: var(--muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
@@ -1241,13 +1178,8 @@
     .config-stat-row .config-field label { font-size: 0.65rem; margin-bottom: 2px; }
     .config-stat-row .config-field input,
     .config-stat-row .config-field select { padding: 4px 6px; font-size: 0.75rem; }
-    .btn-sm { padding: 2px 6px; font-size: 0.7rem; background: var(--surface); border: 1px solid var(--border); border-radius: 3px; cursor: pointer; color: var(--text); }
-    .btn-sm:hover { background: var(--border); }
+    /* .btn-sm / .btn-danger / .btn-add — ghost/danger/secondary buttons (system recipe) */
     .btn-sm:disabled { opacity: 0.3; cursor: default; }
-    .btn-sm.btn-danger { color: var(--red); border-color: var(--red); }
-    .btn-sm.btn-danger:hover { background: rgba(248,81,73,0.15); }
-    .btn-add { padding: 6px 14px; font-size: 0.8rem; background: var(--surface); border: 1px solid var(--blue); border-radius: 4px; cursor: pointer; color: var(--blue); }
-    .btn-add:hover { background: rgba(88,166,255,0.1); }
     .config-stats-list { max-height: 400px; overflow-y: auto; padding-right: 12px; }
 
     .config-info {
@@ -1337,9 +1269,10 @@
       color: var(--red); cursor: pointer; font-size: 0.9rem;
     }
 
+    /* icon-button (see button system): bare glyph button */
     .config-gear {
-      background: none; border: none; cursor: pointer;
-      font-size: 0.9rem; opacity: 0.5; transition: opacity 0.2s;
+      background: none;
+      font-size: 0.9rem; opacity: 0.5;
       padding: 2px 4px; vertical-align: middle;
     }
     .config-gear:hover { opacity: 1; }
@@ -1432,11 +1365,13 @@
     .nous-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin-bottom: 12px; }
     .nous-card h3 { font-size: var(--fs-md); margin: 0 0 8px 0; color: var(--fg); }
     .nous-mode-toggle { display: flex; gap: 0; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin-bottom: 14px; }
-    .nous-mode-btn { flex: 1; padding: 8px 12px; text-align: center; font-size: 0.78rem; cursor: pointer; border: none; background: var(--surface); color: var(--muted); transition: all 0.2s; }
+    /* Segmented mode toggle — active states are tints + colored label
+       (button-system convention), not solid semantic fills. */
+    .nous-mode-btn { flex: 1; padding: 8px 12px; text-align: center; font-size: var(--fs-sm); font-family: var(--font-ui); cursor: pointer; border: none; background: var(--surface); color: var(--muted); transition: all 0.2s; }
     .nous-mode-btn:not(:last-child) { border-right: 1px solid var(--border); }
-    .nous-mode-btn.active-observe { background: var(--blue); color: var(--bg); }
-    .nous-mode-btn.active-suggest { background: var(--yellow); color: var(--bg); }
-    .nous-mode-btn.active-evolve { background: var(--green); color: var(--bg); }
+    .nous-mode-btn.active-observe { background: color-mix(in srgb, var(--blue) 15%, transparent); color: var(--blue); font-weight: 700; }
+    .nous-mode-btn.active-suggest { background: color-mix(in srgb, var(--yellow) 15%, transparent); color: var(--yellow); font-weight: 700; }
+    .nous-mode-btn.active-evolve { background: color-mix(in srgb, var(--green) 15%, transparent); color: var(--green); font-weight: 700; }
     .nous-mode-btn:hover:not([class*="active-"]) { background: var(--panel-strong); }
     .nous-progress { height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; margin: 8px 0; }
     .nous-progress-fill { height: 100%; border-radius: 3px; transition: width 0.5s; }
@@ -1456,11 +1391,8 @@
     .nous-pending-card h4 { margin: 0 0 6px 0; font-size: 0.82rem; color: var(--text); }
     .nous-pending-params { font-size: 0.75rem; margin: 6px 0; }
     .nous-pending-params td { padding: 2px 8px; }
-    .nous-btn { padding: 6px 14px; border: none; border-radius: 6px; font-size: 0.78rem; cursor: pointer; font-weight: 600; }
-    .nous-btn-approve { background: var(--green); color: var(--bg); }
-    .nous-btn-reject { background: var(--red); color: var(--bg); margin-left: 8px; }
-    .nous-btn-abort { background: var(--red); color: var(--bg); }
-    .nous-btn:hover { opacity: 0.85; }
+    /* .nous-btn(-approve/-reject/-abort) — primary/danger buttons (system recipe) */
+    .nous-btn-reject { margin-left: 8px; }
     .nous-experiment-live { background: var(--green-bg); border: 1px solid var(--green); border-radius: 8px; padding: 12px; margin-bottom: 10px; }
     .nous-experiment-live h4 { margin: 0 0 6px 0; font-size: 0.82rem; color: var(--text); }
 
@@ -1491,14 +1423,10 @@
     .nous-config-output-modes { display: flex; gap: 0; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin-bottom: 10px; }
     .nous-config-output-mode { flex: 1; padding: 8px 10px; text-align: center; font-size: 0.76rem; cursor: pointer; border: none; background: var(--bg); color: var(--muted); transition: all 0.2s; }
     .nous-config-output-mode:not(:last-child) { border-right: 1px solid var(--border); }
-    .nous-config-output-mode.active { background: var(--purple); color: var(--bg); }
+    .nous-config-output-mode.active { background: color-mix(in srgb, var(--purple) 15%, transparent); color: var(--purple); font-weight: 700; }
     .nous-config-output-mode:hover:not(.active) { background: rgba(124,58,237,0.1); }
     .nous-config-btn-bar { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
-    .nous-config-btn { padding: 8px 18px; border: none; border-radius: 6px; font-size: 0.82rem; cursor: pointer; font-weight: 600; }
-    .nous-config-btn-save { background: var(--purple); color: var(--bg); }
-    .nous-config-btn-save:hover { background: color-mix(in srgb, var(--purple) 85%, #000); }
-    .nous-config-btn-cancel { background: var(--bg); color: var(--muted); border: 1px solid var(--border); }
-    .nous-config-btn-cancel:hover { color: var(--fg); }
+    /* .nous-config-btn(-save/-cancel) — primary/ghost buttons (system recipe) */
     .nous-config-principle-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 0.78rem; }
     .nous-config-principle-row:last-child { border-bottom: none; }
     .nous-config-principle-row .conf { width: 40px; text-align: right; color: var(--muted); font-size: 0.72rem; flex-shrink: 0; }
@@ -1518,11 +1446,10 @@
     .kb-layout { display: grid; grid-template-columns: 240px 1fr; gap: 16px; min-height: 320px; }
     .kb-sidebar { display: flex; flex-direction: column; gap: 10px; }
     .kb-layer-list { display: flex; flex-direction: column; gap: 4px; }
-    .kb-layer-btn { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--fg); font-size: 0.78rem; cursor: pointer; transition: all 0.15s; white-space: nowrap; overflow: hidden; gap: 6px; }
+    /* .kb-layer-btn — ghost button (system recipe); layout + active state here */
+    .kb-layer-btn { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; white-space: nowrap; overflow: hidden; gap: 6px; }
     .kb-layer-btn .kb-layer-label { display: flex; align-items: center; gap: 5px; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
     .kb-layer-btn .kb-health-indicator { width: 8px; height: 8px; min-width: 8px; border-radius: 50%; display: inline-block; }
-    .kb-layer-btn:hover { border-color: var(--accent); }
-    .kb-layer-btn.active { background: rgba(88,166,255,0.12); border-color: var(--accent); color: var(--accent); font-weight: 600; }
     .kb-layer-count { font-size: 0.7rem; color: var(--muted); padding: 2px 6px; background: var(--bg); border-radius: 4px; }
     .kb-search-box { width: 100%; padding: 7px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); font-size: 0.78rem; }
     .kb-search-box:focus { outline: none; border-color: var(--accent); }
@@ -1665,6 +1592,105 @@
     }
     .agent-card .compact-toggle:hover { background: rgba(255,255,255,0.06); }
     #kb-graph-container:fullscreen { width: 100vw; height: 100vh; border: none; border-radius: 0; }
+
+    /* ══ Button system (Phase 2) — one recipe, four variants ══
+       Existing selectors are grouped here by role; NO classes are renamed
+       (JS reads them). Variants follow the hub identity:
+         primary   = amber CTA (hub .button.primary; label uses --bg so it
+                     stays dark-on-amber in dark mode and light-on-amber in
+                     light mode, where --amber remaps darker)
+         secondary = blue tint bg + blue border (hub .button.secondary)
+         ghost     = line border + muted label, amber affordance on hover
+                     (hub .button.tertiary)
+         danger    = red tint + red border + red label (destructive)
+       Status-flavored one-offs (.btn-toggle states, .restart-btn warning,
+       .terminal-link cyan) keep their semantic colors on the shared base.
+       This block sits last in the style block on purpose: earlier retained
+       rules hold only placement/layout, so the recipes win ties. */
+    .btn, .btn-sm, .btn-add, .btn-toggle, .layout-toggle, .widget-dl,
+    .terminal-link, .restart-btn, .hive-dialog-btn, .kb-layer-btn,
+    .nous-btn, .nous-config-btn,
+    .gh-auth-banner .gh-auth-btn, .gh-app-install-banner .gh-app-btn,
+    .gh-auth-modal .gh-cancel, .gh-setup-modal .gh-cancel,
+    .config-footer .config-save, .config-footer .config-cancel {
+      font-family: var(--font-ui);
+      border: 1px solid transparent;
+      border-radius: var(--radius);
+      line-height: 1.2;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s, border-color 0.15s, opacity 0.15s;
+    }
+    /* Size steps on the --fs ramp: compact for card/table actions,
+       regular for dialog footers and banner CTAs. */
+    .btn, .btn-toggle, .layout-toggle, .widget-dl, .terminal-link, .restart-btn {
+      font-size: var(--fs-sm); padding: 3px 9px; min-height: 22px;
+    }
+    .btn-sm { font-size: var(--fs-xs); padding: 2px 6px; min-height: 20px; }
+    .btn-add, .nous-btn, .nous-config-btn, .hive-dialog-btn,
+    .gh-auth-banner .gh-auth-btn, .gh-app-install-banner .gh-app-btn,
+    .gh-auth-modal .gh-cancel, .gh-setup-modal .gh-cancel,
+    .config-footer .config-save, .config-footer .config-cancel {
+      font-size: var(--fs-base); padding: 7px 16px; min-height: 32px; font-weight: 600;
+    }
+    .kb-layer-btn { font-size: var(--fs-sm); } /* list button: keeps its own padding */
+    /* ghost */
+    .btn, .btn-sm, .btn-toggle, .layout-toggle, .widget-dl, .kb-layer-btn,
+    .hive-dialog-btn, .nous-btn,
+    .gh-auth-modal .gh-cancel, .gh-setup-modal .gh-cancel,
+    .config-footer .config-cancel, .nous-config-btn-cancel {
+      background: transparent; border-color: var(--line); color: var(--muted);
+    }
+    .btn:hover, .btn-sm:hover, .btn-toggle:hover, .layout-toggle:hover,
+    .widget-dl:hover, .kb-layer-btn:hover, .hive-dialog-btn:hover, .nous-btn:hover,
+    .gh-auth-modal .gh-cancel:hover, .gh-setup-modal .gh-cancel:hover,
+    .config-footer .config-cancel:hover, .nous-config-btn-cancel:hover {
+      border-color: var(--amber); color: var(--text);
+    }
+    /* primary */
+    .hive-dialog-btn.primary, .config-footer .config-save,
+    .nous-config-btn-save, .nous-btn-approve,
+    .gh-auth-banner .gh-auth-btn, .gh-app-install-banner .gh-app-btn {
+      background: var(--amber); border-color: transparent; color: var(--bg); font-weight: 600;
+    }
+    .hive-dialog-btn.primary:hover, .config-footer .config-save:hover,
+    .nous-config-btn-save:hover, .nous-btn-approve:hover,
+    .gh-auth-banner .gh-auth-btn:hover, .gh-app-install-banner .gh-app-btn:hover {
+      background: color-mix(in srgb, var(--amber) 85%, #fff); color: var(--bg);
+    }
+    /* secondary */
+    .btn-add {
+      background: color-mix(in srgb, var(--blue) 10%, transparent);
+      border-color: color-mix(in srgb, var(--blue) 45%, transparent);
+      color: var(--blue);
+    }
+    .btn-add:hover { background: color-mix(in srgb, var(--blue) 18%, transparent); color: var(--blue); border-color: color-mix(in srgb, var(--blue) 45%, transparent); }
+    /* danger */
+    .btn-sm.btn-danger, .nous-btn-reject, .nous-btn-abort {
+      background: color-mix(in srgb, var(--red) 10%, transparent);
+      border-color: color-mix(in srgb, var(--red) 55%, transparent);
+      color: var(--red);
+    }
+    .btn-sm.btn-danger:hover, .nous-btn-reject:hover, .nous-btn-abort:hover {
+      background: color-mix(in srgb, var(--red) 20%, transparent);
+      border-color: color-mix(in srgb, var(--red) 55%, transparent);
+      color: var(--red);
+    }
+    /* status-flavored one-offs on the shared base (semantic colors kept) */
+    .terminal-link { border-color: var(--cyan); color: var(--cyan); text-decoration: none; display: inline-block; }
+    .terminal-link:hover { background: var(--cyan); border-color: var(--cyan); color: var(--bg); }
+    .restart-btn { border-color: var(--yellow); color: var(--yellow); display: inline-block; }
+    .restart-btn:hover { background: var(--yellow); border-color: var(--yellow); color: var(--bg); }
+    .layout-toggle.active { border-color: var(--amber); color: var(--amber); }
+    .btn-toggle.paused { background: var(--red-bg); border-color: var(--red); color: var(--red); }
+    .btn-toggle.on-demand { background: color-mix(in srgb, var(--indigo) 15%, transparent); border-color: var(--indigo); color: var(--indigo); }
+    .btn-toggle.running { background: var(--green-bg); border-color: var(--green); color: var(--green); }
+    .btn-toggle.off { background: color-mix(in srgb, var(--muted) 12%, transparent); border-color: color-mix(in srgb, var(--muted) 60%, var(--bg)); color: var(--muted); }
+    .kb-layer-btn.active { background: color-mix(in srgb, var(--accent) 12%, transparent); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+    /* icon-button variant — bare glyph buttons (.config-gear stays this) */
+    .config-gear, .oc-summary-follow-btn {
+      border: none; cursor: pointer; font-family: var(--font-ui);
+      transition: opacity 0.15s, background 0.15s;
+    }
   </style>
 </head>
 <body>
@@ -1937,7 +1963,7 @@
       <div class="gh-app-title">GitHub App Not Installed</div>
       <div class="gh-app-desc">This hive cannot create issues or advisory reports. Install the Hive Hub GitHub App on your repository to enable full functionality.</div>
     </div>
-    <button onclick="recheckGitHubApp()" class="gh-app-btn" style="background:#374151;margin-right:8px" id="gh-app-recheck-btn">Re-check</button>
+    <button onclick="recheckGitHubApp()" class="gh-app-btn" style="background:transparent;border-color:var(--line);color:var(--muted);margin-right:8px" id="gh-app-recheck-btn">Re-check</button>
     <a id="gh-app-install-link" href="" target="_blank" rel="noopener" class="gh-app-btn">Install GitHub App</a>
   </div>
   <div id="hub-banner" style="display:none"></div>
