@@ -1821,6 +1821,32 @@
     }
     .oc-detail-summary .sum-table th,
     .oc-detail-summary .sum-table td { border-bottom-color: var(--terminal-line); }
+
+    /* ══ Utility classes (Phase 4) ══
+       Extracted from the repeated inline-style recipes in the JS templates
+       (Knowledge Base + setup instructions, ACMM dialogs). Static literals
+       only — conditional style="...${...}" fragments are never touched. */
+    .stack { display: flex; flex-direction: column; gap: 8px; }
+    .row { display: flex; align-items: center; gap: 8px; }
+    .row-end { display: flex; justify-content: flex-end; gap: 8px; }
+    .row-between { display: flex; align-items: center; justify-content: space-between; }
+    .muted { color: var(--muted); }
+    .muted-note { font-size: 0.78rem; color: var(--muted); }
+    .muted-xs { font-size: 0.72rem; color: var(--muted); }
+    .title-sm { font-size: 0.92rem; font-weight: 600; color: var(--fg); }
+    .modal-h { font-size: 0.92rem; margin: 0 0 8px 0; color: var(--accent); }
+    .summary-label { cursor: pointer; font-size: 0.78rem; font-weight: 600; color: var(--fg); }
+    .card-inset { padding: 8px; border: 1px solid var(--border); border-radius: 6px; }
+    .empty-dashed { text-align: center; padding: 12px; color: var(--muted); font-size: 0.75rem; border: 1px dashed var(--border); border-radius: 6px; }
+    .field-input { padding: 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); font-size: 0.78rem; }
+    .field-input-block { width: 100%; margin-top: 4px; }
+    .code-chip { background: var(--surface); padding: 1px 4px; border-radius: 3px; }
+    .tag-chip { font-size: 0.68rem; color: var(--muted); background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; }
+    /* filled-blue / surface button tints (sit after the button-system ghost
+       recipe so they win ties on .nous-btn etc.) */
+    .btn-blue { background: var(--blue); border-color: transparent; color: var(--bg); }
+    .btn-blue:hover { background: color-mix(in srgb, var(--blue) 85%, #fff); border-color: transparent; color: var(--bg); }
+    .btn-surface { background: var(--surface); border: 1px solid var(--border); color: var(--fg); }
   </style>
 </head>
 <body>
@@ -6165,9 +6191,9 @@ function burnAreaChart() {
       html += '<div style="font-size:0.92rem;font-weight:700;color:var(--fg);margin-bottom:12px">🔗 Connect via Git Repo</div>';
       html += '<ol>';
       html += '<li><strong>Install the "Obsidian Git" community plugin</strong><br>';
-      html += '<span style="color:var(--muted)">Settings &rarr; Community Plugins &rarr; Browse &rarr; search "Obsidian Git"</span></li>';
+      html += '<span class="muted">Settings &rarr; Community Plugins &rarr; Browse &rarr; search "Obsidian Git"</span></li>';
       html += '<li><strong>Initialize your vault as a git repo</strong> (or use an existing one)<br>';
-      html += '<span style="color:var(--muted)">The plugin can auto-commit and push on a configurable interval.</span></li>';
+      html += '<span class="muted">The plugin can auto-commit and push on a configurable interval.</span></li>';
       html += '<li><strong>Set the git repo URL on your Hive server:</strong><br>';
       html += '<div style="margin-top:6px"><em>Option A:</em> Set the <code>HIVE_WIKI_GIT_URL</code> environment variable before starting Hive</div>';
       html += '<div style="margin-top:6px"><em>Option B:</em> Use the API:</div>';
@@ -6176,7 +6202,7 @@ function burnAreaChart() {
       html += '  -H "Authorization: Bearer &lt;token&gt;" \\\n';
       html += '  -d \'{"path": "/data/vaults/hive-wiki", "name": "hive-wiki"}\'</pre></li>';
       html += '<li><strong>Hive auto-syncs every 60 seconds</strong> via <code>git pull</code><br>';
-      html += '<span style="color:var(--muted)">Changes appear in the Knowledge Base within ~30s of pushing.</span></li>';
+      html += '<span class="muted">Changes appear in the Knowledge Base within ~30s of pushing.</span></li>';
       html += '</ol>';
       html += '<div class="kb-tip"><strong>Recommended plugin settings:</strong><br>';
       html += '&bull; Auto pull interval: 1 minute<br>';
@@ -6207,7 +6233,7 @@ function burnAreaChart() {
       html += '<div style="font-size:0.92rem;font-weight:700;color:var(--fg);margin-bottom:12px">⚡ Connect via Webhook</div>';
       html += '<ol>';
       html += '<li><strong>Install the "Post Webhook" community plugin</strong><br>';
-      html += '<span style="color:var(--muted)">Settings &rarr; Community Plugins &rarr; Browse &rarr; search "Post Webhook"</span></li>';
+      html += '<span class="muted">Settings &rarr; Community Plugins &rarr; Browse &rarr; search "Post Webhook"</span></li>';
       html += '<li><strong>Add a webhook in the plugin settings:</strong>';
       html += '<div style="margin-top:6px;padding:10px 14px;background:var(--bg);border:1px solid var(--border);border-radius:6px;font-size:0.74rem">';
       html += '<div><strong>Name:</strong> Hive Knowledge Sync</div>';
@@ -6222,7 +6248,7 @@ function burnAreaChart() {
       html += '</div></div>';
       html += '</div></li>';
       html += '<li><strong>Use it:</strong><br>';
-      html += '<span style="color:var(--muted)">Command palette &rarr; "Post Webhook: Send current note"<br>';
+      html += '<span class="muted">Command palette &rarr; "Post Webhook: Send current note"<br>';
       html += 'Or bind to a hotkey (e.g., Ctrl+Shift+S)</span></li>';
       html += '<li><strong>Your note\'s frontmatter controls how it\'s stored:</strong>';
       html += '<pre>---\n';
@@ -6232,7 +6258,7 @@ function burnAreaChart() {
       html += 'layer: project      # personal, project, org, community\n';
       html += 'confidence: 0.85\n';
       html += '---</pre>';
-      html += '<span style="color:var(--muted)">Notes are upserted by filename -- saving the same note updates it.</span></li>';
+      html += '<span class="muted">Notes are upserted by filename -- saving the same note updates it.</span></li>';
       html += '</ol>';
       html += '<div class="kb-tip"><strong>Tip:</strong> The webhook endpoint is always available at <code>http://' + escapeHtml(hiveHost) + '/api/knowledge/obsidian/sync</code>. You can start sending notes immediately -- no vault connection required. Facts will appear in the Knowledge Base as soon as they arrive.</div>';
       html += '</div>';
@@ -6358,11 +6384,11 @@ function burnAreaChart() {
 
       // Action buttons
       html += '<div style="display:flex;gap:8px;margin-bottom:14px">';
-      html += '<button class="nous-btn" style="background:var(--blue);color:var(--bg)" onclick="kbOpenCreate()" title="Create a new knowledge fact manually. Choose a layer (personal, project, org, community), type, and enter the fact content.">+ New Fact</button>';
-      html += '<button class="nous-btn" style="background:var(--surface);color:var(--fg);border:1px solid var(--border)" onclick="kbOpenSubscriptions()" title="Manage knowledge sources: git repos, wiki subscriptions, document imports, and fact imports.">🔗 Knowledge Sources</button>';
-      html += '<button class="nous-btn" style="background:var(--surface);color:var(--fg);border:1px solid var(--border)" onclick="kbOpenVaults()" title="Manage knowledge vaults — collections of facts organized by topic or project. Vaults can be shared across hive instances.">📂 Vaults</button>';
-      html += '<button class="nous-btn" style="background:var(--surface);color:var(--fg);border:1px solid var(--border)" onclick="kbOpenHowItWorks()">📖 How it works</button>';
-      html += '<button class="nous-btn" style="background:var(--surface);color:var(--fg);border:1px solid var(--border)" onclick="kbOpenObsidianSetup()" title="View step-by-step instructions for connecting Obsidian via Git sync or webhook.">🔮 Obsidian Setup</button>';
+      html += '<button class="nous-btn btn-blue" onclick="kbOpenCreate()" title="Create a new knowledge fact manually. Choose a layer (personal, project, org, community), type, and enter the fact content.">+ New Fact</button>';
+      html += '<button class="nous-btn btn-surface" onclick="kbOpenSubscriptions()" title="Manage knowledge sources: git repos, wiki subscriptions, document imports, and fact imports.">🔗 Knowledge Sources</button>';
+      html += '<button class="nous-btn btn-surface" onclick="kbOpenVaults()" title="Manage knowledge vaults — collections of facts organized by topic or project. Vaults can be shared across hive instances.">📂 Vaults</button>';
+      html += '<button class="nous-btn btn-surface" onclick="kbOpenHowItWorks()">📖 How it works</button>';
+      html += '<button class="nous-btn btn-surface" onclick="kbOpenObsidianSetup()" title="View step-by-step instructions for connecting Obsidian via Git sync or webhook.">🔮 Obsidian Setup</button>';
       html += `<button class="nous-btn" style="background:${_kbGraphView ? 'var(--cyan)' : 'var(--surface)'};color:${_kbGraphView ? 'var(--bg)' : 'var(--fg)'};border:1px solid ${_kbGraphView ? 'var(--cyan)' : 'var(--border)'}" onclick="kbToggleGraph()" title="Toggle knowledge graph visualization showing relationships between facts.">🕸️ Graph</button>`;
       html += '</div>';
 
@@ -6573,30 +6599,30 @@ function burnAreaChart() {
       }
 
       const html = `
-        <div style="display:flex;flex-direction:column;gap:10px">
-          <label style="font-size:0.78rem;color:var(--muted)">Title
+        <div class="stack">
+          <label class="muted-note">Title
             <input id="kb-create-title" type="text" class="kb-search-box" style="margin-top:4px" placeholder="Guard .join() against undefined">
           </label>
-          <label style="font-size:0.78rem;color:var(--muted)">Body
+          <label class="muted-note">Body
             <textarea id="kb-create-body" rows="6" style="width:100%;margin-top:4px;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:0.8rem;font-family:inherit;resize:vertical" placeholder="Always use (arr || []).join(',') — hooks can return undefined when endpoints fail."></textarea>
           </label>
           <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
-            <label style="font-size:0.78rem;color:var(--muted)">Layer
-              <select id="kb-create-layer" style="width:100%;margin-top:4px;padding:6px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:0.78rem">${layerOpts}</select>
+            <label class="muted-note">Layer
+              <select id="kb-create-layer" class="field-input field-input-block">${layerOpts}</select>
             </label>
-            <label style="font-size:0.78rem;color:var(--muted)">Type
-              <select id="kb-create-type" style="width:100%;margin-top:4px;padding:6px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:0.78rem">${typeOpts}</select>
+            <label class="muted-note">Type
+              <select id="kb-create-type" class="field-input field-input-block">${typeOpts}</select>
             </label>
-            <label style="font-size:0.78rem;color:var(--muted)">Confidence
-              <input id="kb-create-conf" type="number" min="0" max="1" step="0.1" value="0.7" style="width:100%;margin-top:4px;padding:6px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:0.78rem">
+            <label class="muted-note">Confidence
+              <input id="kb-create-conf" type="number" min="0" max="1" step="0.1" value="0.7" class="field-input field-input-block">
             </label>
           </div>
-          <label style="font-size:0.78rem;color:var(--muted)">Tags (comma-separated)
+          <label class="muted-note">Tags (comma-separated)
             <input id="kb-create-tags" type="text" class="kb-search-box" style="margin-top:4px" placeholder="react, testing, hooks">
           </label>
-          <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px">
+          <div class="row-end" style="margin-top:8px">
             <button class="nous-btn nous-config-btn-cancel" onclick="kbCloseModal()">Cancel</button>
-            <button class="nous-btn" style="background:var(--blue);color:var(--bg)" onclick="kbSubmitCreate()">Create Fact</button>
+            <button class="nous-btn btn-blue" onclick="kbSubmitCreate()">Create Fact</button>
           </div>
         </div>`;
       kbShowModal('New Fact', html);
@@ -6636,36 +6662,36 @@ function burnAreaChart() {
       }
 
       const html = `
-        <div style="display:flex;flex-direction:column;gap:10px">
-          <label style="font-size:0.78rem;color:var(--muted)">Title
+        <div class="stack">
+          <label class="muted-note">Title
             <input id="kb-edit-title" type="text" class="kb-search-box" style="margin-top:4px" value="${escapeHtml(f.title || '')}">
           </label>
-          <label style="font-size:0.78rem;color:var(--muted)">Body
+          <label class="muted-note">Body
             <textarea id="kb-edit-body" rows="8" style="width:100%;margin-top:4px;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:0.8rem;font-family:inherit;resize:vertical">${escapeHtml(f.body || '')}</textarea>
           </label>
           <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
-            <label style="font-size:0.78rem;color:var(--muted)">Type
-              <select id="kb-edit-type" style="width:100%;margin-top:4px;padding:6px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:0.78rem">${typeOpts}</select>
+            <label class="muted-note">Type
+              <select id="kb-edit-type" class="field-input field-input-block">${typeOpts}</select>
             </label>
-            <label style="font-size:0.78rem;color:var(--muted)">Status
-              <select id="kb-edit-status" style="width:100%;margin-top:4px;padding:6px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:0.78rem">
+            <label class="muted-note">Status
+              <select id="kb-edit-status" class="field-input field-input-block">
                 <option value="draft"${f.status === 'draft' ? ' selected' : ''}>Draft</option>
                 <option value="verified"${f.status === 'verified' ? ' selected' : ''}>Verified</option>
                 <option value="stale"${f.status === 'stale' ? ' selected' : ''}>Stale</option>
                 <option value="archived"${f.status === 'archived' ? ' selected' : ''}>Archived</option>
               </select>
             </label>
-            <label style="font-size:0.78rem;color:var(--muted)">Confidence
-              <input id="kb-edit-conf" type="number" min="0" max="1" step="0.1" value="${f.confidence || 0.7}" style="width:100%;margin-top:4px;padding:6px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:0.78rem">
+            <label class="muted-note">Confidence
+              <input id="kb-edit-conf" type="number" min="0" max="1" step="0.1" value="${f.confidence || 0.7}" class="field-input field-input-block">
             </label>
           </div>
-          <label style="font-size:0.78rem;color:var(--muted)">Tags (comma-separated)
+          <label class="muted-note">Tags (comma-separated)
             <input id="kb-edit-tags" type="text" class="kb-search-box" style="margin-top:4px" value="${escapeHtml((f.tags || []).join(', '))}">
           </label>
-          <div style="font-size:0.7rem;color:var(--muted)">Layer: ${escapeHtml(f.layer || '')} · Slug: ${escapeHtml(f.slug || '')}</div>
-          <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px">
+          <div class="muted-xs">Layer: ${escapeHtml(f.layer || '')} · Slug: ${escapeHtml(f.slug || '')}</div>
+          <div class="row-end" style="margin-top:8px">
             <button class="nous-btn nous-config-btn-cancel" onclick="kbCloseModal()">Cancel</button>
-            <button class="nous-btn" style="background:var(--blue);color:var(--bg)" onclick="kbSubmitEdit()">Save Changes</button>
+            <button class="nous-btn btn-blue" onclick="kbSubmitEdit()">Save Changes</button>
           </div>
         </div>`;
       kbShowModal('Edit Fact', html);
@@ -6731,20 +6757,20 @@ function burnAreaChart() {
       if (!layerOpts) layerOpts = '<option value="project">Project</option>';
 
       const html = `
-        <div style="display:flex;flex-direction:column;gap:10px">
+        <div class="stack">
           <p style="font-size:0.78rem;color:var(--muted);margin:0">Paste markdown or JSON content. Markdown headings (# or ##) become separate facts. JSON should be an array of {title, body, type, tags} objects.</p>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-            <label style="font-size:0.78rem;color:var(--muted)">Layer
-              <select id="kb-import-layer" style="width:100%;margin-top:4px;padding:6px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:0.78rem">${layerOpts}</select>
+            <label class="muted-note">Layer
+              <select id="kb-import-layer" class="field-input field-input-block">${layerOpts}</select>
             </label>
-            <label style="font-size:0.78rem;color:var(--muted)">Format
-              <select id="kb-import-format" style="width:100%;margin-top:4px;padding:6px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:0.78rem">
+            <label class="muted-note">Format
+              <select id="kb-import-format" class="field-input field-input-block">
                 <option value="markdown" selected>Markdown</option>
                 <option value="json">JSON</option>
               </select>
             </label>
           </div>
-          <label style="font-size:0.78rem;color:var(--muted)">Content
+          <label class="muted-note">Content
             <textarea id="kb-import-content" rows="24" style="width:100%;margin-top:4px;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:0.78rem;font-family:var(--font-mono);resize:vertical;min-height:320px" placeholder="# Guard .join() against undefined\n\nAlways use (arr || []).join(',')..."></textarea>
           </label>
           <div style="display:flex;align-items:center;gap:10px;margin-top:4px">
@@ -6753,9 +6779,9 @@ function burnAreaChart() {
               <input type="file" accept=".md,.json,.txt" style="font-size:0.72rem" onchange="kbLoadFile(this)">
             </label>
           </div>
-          <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px">
+          <div class="row-end" style="margin-top:8px">
             <button class="nous-btn nous-config-btn-cancel" onclick="kbCloseModal()">Cancel</button>
-            <button class="nous-btn" style="background:var(--blue);color:var(--bg)" onclick="kbSubmitImport()">Import</button>
+            <button class="nous-btn btn-blue" onclick="kbSubmitImport()">Import</button>
           </div>
         </div>`;
       kbShowModal('📥 Import Facts', html, { width: 'min(700px, 80vw)', maxHeight: '85vh' });
@@ -6831,17 +6857,17 @@ function burnAreaChart() {
 
         // ── Git Sources section ──
         html += '<div style="margin-bottom:20px">';
-        html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">';
-        html += '<span style="font-size:0.92rem;font-weight:600;color:var(--fg)">Git Sources</span>';
-        html += '<span style="font-size:0.68rem;color:var(--muted);background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:1px 6px">cloned &amp; indexed locally</span>';
+        html += '<div class="row" style="margin-bottom:8px">';
+        html += '<span class="title-sm">Git Sources</span>';
+        html += '<span class="tag-chip">cloned &amp; indexed locally</span>';
         html += '</div>';
-        html += '<div style="font-size:0.72rem;color:var(--muted);margin-bottom:10px">Clone a GitHub repo locally. Hive indexes the markdown with Fisher-Rao scored search and syncs every 5 minutes.</div>';
+        html += '<div class="muted-xs" style="margin-bottom:10px">Clone a GitHub repo locally. Hive indexes the markdown with Fisher-Rao scored search and syncs every 5 minutes.</div>';
 
         if (gitSources && gitSources.length > 0) {
           for (const gs of gitSources) {
             const statusColor = gs.ready ? 'var(--green)' : '#eab308';
             const statusText = gs.ready ? 'ready' : 'initializing';
-            html += '<div style="display:flex;align-items:center;justify-content:space-between;padding:8px;border:1px solid var(--border);border-radius:6px;margin-bottom:6px">';
+            html += '<div class="card-inset row-between" style="margin-bottom:6px">';
             html += '<div style="min-width:0;flex:1">';
             html += `<div style="font-size:0.82rem;font-weight:600;color:var(--fg);display:flex;align-items:center;gap:6px;white-space:nowrap;overflow:hidden">`;
             html += `<span style="width:7px;height:7px;min-width:7px;border-radius:50%;background:${statusColor};display:inline-block"></span>`;
@@ -6857,58 +6883,58 @@ function burnAreaChart() {
             html += '</div>';
           }
         } else {
-          html += '<div style="text-align:center;padding:12px;color:var(--muted);font-size:0.75rem;border:1px dashed var(--border);border-radius:6px">No git sources yet.</div>';
+          html += '<div class="empty-dashed">No git sources yet.</div>';
         }
 
-        html += '<details open style="margin-top:10px"><summary style="cursor:pointer;font-size:0.78rem;font-weight:600;color:var(--fg)">Add Git Source</summary>';
-        html += '<div style="display:flex;flex-direction:column;gap:8px;margin-top:8px">';
+        html += '<details open style="margin-top:10px"><summary class="summary-label">Add Git Source</summary>';
+        html += '<div class="stack" style="margin-top:8px">';
         html += '<input id="kb-gs-url" type="text" class="kb-search-box" placeholder="https://github.com/org/repo">';
         html += '<input id="kb-gs-name" type="text" class="kb-search-box" placeholder="Display name">';
         html += '<input id="kb-gs-subpath" type="text" class="kb-search-box" placeholder="Subpath (e.g. docs/skills)">';
         html += '<input id="kb-gs-branch" type="text" class="kb-search-box" placeholder="Branch (default: main)">';
-        html += `<select id="kb-gs-layer" style="padding:7px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:0.78rem">
+        html += `<select id="kb-gs-layer" class="field-input">
           <option value="project">Project</option>
           <option value="org">Org</option>
           <option value="community">Community</option>
           <option value="personal">Personal</option>
         </select>`;
-        html += '<div style="display:flex;justify-content:flex-end">';
-        html += '<button class="nous-btn" style="background:var(--blue);color:var(--bg);padding:8px 20px" onclick="kbAddGitSource()">Clone &amp; Index</button>';
+        html += '<div class="row-end">';
+        html += '<button class="nous-btn btn-blue" style="padding:8px 20px" onclick="kbAddGitSource()">Clone &amp; Index</button>';
         html += '</div></div></details>';
         html += '</div>';
 
         // ── Wiki Subscriptions section ──
         html += '<div>';
-        html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">';
-        html += '<span style="font-size:0.92rem;font-weight:600;color:var(--fg)">Wiki Subscriptions</span>';
-        html += '<span style="font-size:0.68rem;color:var(--muted);background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:1px 6px">remote llm-wiki endpoint</span>';
+        html += '<div class="row" style="margin-bottom:8px">';
+        html += '<span class="title-sm">Wiki Subscriptions</span>';
+        html += '<span class="tag-chip">remote llm-wiki endpoint</span>';
         html += '</div>';
-        html += '<div style="font-size:0.72rem;color:var(--muted);margin-bottom:10px">A running llm-wiki HTTP service. Hive queries it via MCP at prime time &mdash; facts stay remote, only search results are fetched.</div>';
+        html += '<div class="muted-xs" style="margin-bottom:10px">A running llm-wiki HTTP service. Hive queries it via MCP at prime time &mdash; facts stay remote, only search results are fetched.</div>';
 
         if (subs && subs.length > 0) {
           for (const s of subs) {
-            html += '<div style="display:flex;align-items:center;justify-content:space-between;padding:8px;border:1px solid var(--border);border-radius:6px;margin-bottom:6px">';
+            html += '<div class="card-inset row-between" style="margin-bottom:6px">';
             html += `<div><div style="font-size:0.82rem;font-weight:600;color:var(--fg)">${escapeHtml(s.name || s.url)}</div>`;
-            html += `<div style="font-size:0.7rem;color:var(--muted)">${escapeHtml(s.url)} &middot; ${escapeHtml(s.layer || 'org')}</div></div>`;
+            html += `<div class="muted-xs">${escapeHtml(s.url)} &middot; ${escapeHtml(s.layer || 'org')}</div></div>`;
             html += `<button class="nous-btn" style="background:var(--red);color:var(--bg);font-size:0.7rem;padding:4px 8px;flex-shrink:0;margin-left:8px" onclick="kbRemoveSub('${escapeHtml(s.url)}')">Remove</button>`;
             html += '</div>';
           }
         } else {
-          html += '<div style="text-align:center;padding:12px;color:var(--muted);font-size:0.75rem;border:1px dashed var(--border);border-radius:6px">No subscriptions yet.</div>';
+          html += '<div class="empty-dashed">No subscriptions yet.</div>';
         }
 
-        html += '<details open style="margin-top:10px"><summary style="cursor:pointer;font-size:0.78rem;font-weight:600;color:var(--fg)">Add Subscription</summary>';
-        html += '<div style="display:flex;flex-direction:column;gap:8px;margin-top:8px">';
+        html += '<details open style="margin-top:10px"><summary class="summary-label">Add Subscription</summary>';
+        html += '<div class="stack" style="margin-top:8px">';
         html += '<input id="kb-sub-url" type="text" class="kb-search-box" placeholder="https://wiki.example.com/mcp">';
         html += `<input id="kb-sub-name" type="text" class="kb-search-box" placeholder="Display name">`;
-        html += `<select id="kb-sub-layer" style="padding:7px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:0.78rem">
+        html += `<select id="kb-sub-layer" class="field-input">
           <option value="project">Project</option>
           <option value="org">Org</option>
           <option value="community">Community</option>
           <option value="personal">Personal</option>
         </select>`;
-        html += '<div style="display:flex;justify-content:flex-end">';
-        html += '<button class="nous-btn" style="background:var(--blue);color:var(--bg);padding:8px 20px" onclick="kbAddSub()">Add</button>';
+        html += '<div class="row-end">';
+        html += '<button class="nous-btn btn-blue" style="padding:8px 20px" onclick="kbAddSub()">Add</button>';
         html += '</div></div></details>';
         html += '</div>';
 
@@ -6919,18 +6945,18 @@ function burnAreaChart() {
 
         // ── Import Documents section ──
         html += '<div style="margin-bottom:20px">';
-        html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">';
-        html += '<span style="font-size:0.92rem;font-weight:600;color:var(--fg)">Documents</span>';
-        html += '<span style="font-size:0.68rem;color:var(--muted);background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:1px 6px">PDF, HTML, DOCX, text</span>';
+        html += '<div class="row" style="margin-bottom:8px">';
+        html += '<span class="title-sm">Documents</span>';
+        html += '<span class="tag-chip">PDF, HTML, DOCX, text</span>';
         html += '</div>';
-        html += '<div style="font-size:0.72rem;color:var(--muted);margin-bottom:10px">Import external documents from a URL. Content is parsed into chunks and stored as knowledge facts that agents can search and cite.</div>';
+        html += '<div class="muted-xs" style="margin-bottom:10px">Import external documents from a URL. Content is parsed into chunks and stored as knowledge facts that agents can search and cite.</div>';
 
         if (documents && documents.length > 0) {
           for (const d of documents) {
             const dIcon = DOC_CONTENT_ICONS[d.content_type] || '📄';
             const dSource = d.source_url || d.source_file || '';
             const dFacts = d.fact_count || 0;
-            html += '<div style="display:flex;align-items:center;justify-content:space-between;padding:8px;border:1px solid var(--border);border-radius:6px;margin-bottom:6px">';
+            html += '<div class="card-inset row-between" style="margin-bottom:6px">';
             html += '<div style="min-width:0;flex:1">';
             html += `<div style="font-size:0.82rem;font-weight:600;color:var(--fg);display:flex;align-items:center;gap:6px">${dIcon} <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(d.slug || d.title || 'unnamed')}</span></div>`;
             html += `<div style="font-size:0.7rem;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(dSource)} &middot; ${dFacts} facts</div>`;
@@ -6941,25 +6967,25 @@ function burnAreaChart() {
             html += '</div></div>';
           }
         } else {
-          html += '<div style="text-align:center;padding:12px;color:var(--muted);font-size:0.75rem;border:1px dashed var(--border);border-radius:6px">No documents imported yet.</div>';
+          html += '<div class="empty-dashed">No documents imported yet.</div>';
         }
 
-        html += '<details open style="margin-top:10px"><summary style="cursor:pointer;font-size:0.78rem;font-weight:600;color:var(--fg)">Import Document</summary>';
-        html += '<div style="display:flex;flex-direction:column;gap:8px;margin-top:8px">';
+        html += '<details open style="margin-top:10px"><summary class="summary-label">Import Document</summary>';
+        html += '<div class="stack" style="margin-top:8px">';
         html += '<input id="kb-doc-url" type="text" class="kb-search-box" placeholder="https://arxiv.org/pdf/2309.06180">';
         html += '<input id="kb-doc-name" type="text" class="kb-search-box" placeholder="Name (optional, derived from URL)">';
-        html += `<select id="kb-doc-layer" style="padding:7px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:0.78rem">
+        html += `<select id="kb-doc-layer" class="field-input">
           <option value="project">Project</option>
           <option value="org">Org</option>
           <option value="community">Community</option>
           <option value="personal">Personal</option>
         </select>`;
-        html += '<div style="display:flex;justify-content:flex-end">';
-        html += '<button class="nous-btn" style="background:var(--blue);color:var(--bg);padding:8px 20px" onclick="kbImportDocFromModal()">Import</button>';
+        html += '<div class="row-end">';
+        html += '<button class="nous-btn btn-blue" style="padding:8px 20px" onclick="kbImportDocFromModal()">Import</button>';
         html += '</div></div></details>';
 
-        html += '<details open style="margin-top:10px"><summary style="cursor:pointer;font-size:0.78rem;font-weight:600;color:var(--fg)">📚 Import from Context7</summary>';
-        html += '<div style="display:flex;flex-direction:column;gap:8px;margin-top:8px">';
+        html += '<details open style="margin-top:10px"><summary class="summary-label">📚 Import from Context7</summary>';
+        html += '<div class="stack" style="margin-top:8px">';
         html += '<div style="font-size:0.72rem;color:var(--muted)">Search Context7 for library documentation (e.g. "vllm", "next.js", "kubernetes").</div>';
         html += '<div style="display:flex;gap:8px">';
         html += '<input id="kb-ctx7-query" type="text" class="kb-search-box" placeholder="Search libraries..." style="flex:1">';
@@ -6976,23 +7002,23 @@ function burnAreaChart() {
         }).join('') || '<option value="project">Project</option>';
 
         html += '<div>';
-        html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">';
-        html += '<span style="font-size:0.92rem;font-weight:600;color:var(--fg)">Import Facts</span>';
-        html += '<span style="font-size:0.68rem;color:var(--muted);background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:1px 6px">markdown or JSON</span>';
+        html += '<div class="row" style="margin-bottom:8px">';
+        html += '<span class="title-sm">Import Facts</span>';
+        html += '<span class="tag-chip">markdown or JSON</span>';
         html += '</div>';
-        html += '<div style="font-size:0.72rem;color:var(--muted);margin-bottom:10px">Paste markdown or JSON directly. Headings (# or ##) become separate facts. JSON should be an array of {title, body, type, tags} objects.</div>';
+        html += '<div class="muted-xs" style="margin-bottom:10px">Paste markdown or JSON directly. Headings (# or ##) become separate facts. JSON should be an array of {title, body, type, tags} objects.</div>';
 
-        html += '<details open style="margin-top:10px"><summary style="cursor:pointer;font-size:0.78rem;font-weight:600;color:var(--fg)">Paste Content</summary>';
-        html += '<div style="display:flex;flex-direction:column;gap:8px;margin-top:8px">';
-        html += `<select id="kb-import-layer" style="padding:7px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:0.78rem">${layerOpts2}</select>`;
-        html += `<select id="kb-import-format" style="padding:7px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:0.78rem">
+        html += '<details open style="margin-top:10px"><summary class="summary-label">Paste Content</summary>';
+        html += '<div class="stack" style="margin-top:8px">';
+        html += `<select id="kb-import-layer" class="field-input">${layerOpts2}</select>`;
+        html += `<select id="kb-import-format" class="field-input">
           <option value="markdown" selected>Markdown</option>
           <option value="json">JSON</option>
         </select>`;
         html += '<textarea id="kb-import-content" rows="8" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:0.78rem;font-family:var(--font-mono);resize:vertical;min-height:120px;box-sizing:border-box" placeholder="# Guard .join() against undefined\n\nAlways use (arr || []).join(\',\')..."></textarea>';
         html += '<div style="display:flex;align-items:center;justify-content:space-between">';
         html += '<label style="font-size:0.72rem;color:var(--muted);cursor:pointer;display:flex;align-items:center;gap:4px"><span>or load from file:</span><input type="file" accept=".md,.json,.txt" style="font-size:0.72rem" onchange="kbLoadFile(this)"></label>';
-        html += '<button class="nous-btn" style="background:var(--blue);color:var(--bg);padding:8px 20px" onclick="kbSubmitImport()">Import</button>';
+        html += '<button class="nous-btn btn-blue" style="padding:8px 20px" onclick="kbSubmitImport()">Import</button>';
         html += '</div></div></details>';
         html += '</div>';
 
@@ -7190,58 +7216,58 @@ function burnAreaChart() {
       const body = `
         <div style="max-height:70vh;overflow-y:auto;font-size:0.82rem;line-height:1.6;color:var(--fg);padding-right:16px">
           <div style="margin-bottom:18px">
-            <h3 style="font-size:0.92rem;margin:0 0 8px 0;color:var(--accent)">How Knowledge Works</h3>
+            <h3 class="modal-h">How Knowledge Works</h3>
             <p style="margin:0 0 6px 0">Hive organizes knowledge into <strong>4 layers</strong>, listed from highest to lowest priority:</p>
             <div style="display:flex;gap:6px;margin:8px 0;flex-wrap:wrap">
               <span style="background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:3px 8px;font-size:0.75rem">personal (highest)</span>
-              <span style="color:var(--muted)">&rarr;</span>
+              <span class="muted">&rarr;</span>
               <span style="background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:3px 8px;font-size:0.75rem">project</span>
-              <span style="color:var(--muted)">&rarr;</span>
+              <span class="muted">&rarr;</span>
               <span style="background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:3px 8px;font-size:0.75rem">org</span>
-              <span style="color:var(--muted)">&rarr;</span>
+              <span class="muted">&rarr;</span>
               <span style="background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:3px 8px;font-size:0.75rem">community (lowest)</span>
             </div>
-            <p style="margin:0;color:var(--muted);font-size:0.78rem">When the same page exists in multiple layers, the higher-priority layer wins. Each page is a Markdown file with optional tags.</p>
+            <p class="muted-note" style="margin:0">When the same page exists in multiple layers, the higher-priority layer wins. Each page is a Markdown file with optional tags.</p>
           </div>
 
           <div style="margin-bottom:18px">
-            <h3 style="font-size:0.92rem;margin:0 0 8px 0;color:var(--accent)">Knowledge Sources</h3>
+            <h3 class="modal-h">Knowledge Sources</h3>
             <p style="margin:0 0 6px 0">Knowledge comes from four types of sources, all managed through the <strong>Knowledge Sources</strong> modal:</p>
             <p style="margin:0 0 4px 0"><strong>Wiki pages</strong> — Created directly in Hive with <strong>+ New Fact</strong>. Give each page a title, layer, tags, and content. Bulk-add with the <strong>Import</strong> button.</p>
-            <p style="margin:0 0 4px 0"><strong>Obsidian vaults</strong> — Connect a vault or any directory of markdown files. Hive reads all <code style="background:var(--surface);padding:1px 4px;border-radius:3px">.md</code> files, picks up <code style="background:var(--surface);padding:1px 4px;border-radius:3px">#tags</code>, and re-scans every 30 seconds.</p>
-            <p style="margin:0 0 4px 0"><strong>Git sources</strong> — Clone a GitHub repo (or a subdirectory within it) and index its markdown files locally. Configure git sources in <code style="background:var(--surface);padding:1px 4px;border-radius:3px">hive.yaml</code> or add them through the Knowledge Sources modal. Git sources sync every 5 minutes to pick up upstream changes.</p>
-            <p style="margin:0;color:var(--muted);font-size:0.78rem"><strong>Wiki subscriptions</strong> — Follow a remote Hive instance or knowledge feed. New content syncs automatically on a periodic schedule.</p>
+            <p style="margin:0 0 4px 0"><strong>Obsidian vaults</strong> — Connect a vault or any directory of markdown files. Hive reads all <code class="code-chip">.md</code> files, picks up <code class="code-chip">#tags</code>, and re-scans every 30 seconds.</p>
+            <p style="margin:0 0 4px 0"><strong>Git sources</strong> — Clone a GitHub repo (or a subdirectory within it) and index its markdown files locally. Configure git sources in <code class="code-chip">hive.yaml</code> or add them through the Knowledge Sources modal. Git sources sync every 5 minutes to pick up upstream changes.</p>
+            <p class="muted-note" style="margin:0"><strong>Wiki subscriptions</strong> — Follow a remote Hive instance or knowledge feed. New content syncs automatically on a periodic schedule.</p>
           </div>
 
           <div style="margin-bottom:18px">
-            <h3 style="font-size:0.92rem;margin:0 0 8px 0;color:var(--accent)">Linting & Promotion</h3>
+            <h3 class="modal-h">Linting & Promotion</h3>
             <p style="margin:0">Every page starts as a <strong>draft</strong>. The system automatically checks quality (title, tags, body length) and promotes pages through <strong>draft</strong> &rarr; <strong>reviewed</strong> &rarr; <strong>canonical</strong>. No action needed on your part — just write good content and the system handles the rest.</p>
           </div>
 
           <div style="margin-bottom:18px">
-            <h3 style="font-size:0.92rem;margin:0 0 8px 0;color:var(--accent)">Fisher-Rao Scoring</h3>
+            <h3 class="modal-h">Fisher-Rao Scoring</h3>
             <p style="margin:0 0 6px 0">Search uses <strong>Fisher-Rao geodesic distance</strong> on diagonal Gaussian embeddings to find the most relevant facts. This replaces simple substring matching with a richer geometric similarity measure.</p>
-            <p style="margin:0;color:var(--muted);font-size:0.78rem">Cold facts (fewer than 10 accesses) use cosine similarity. As facts are accessed more frequently, they graduate to the full Fisher-Rao distance, which captures both the direction and uncertainty of the embedding for more accurate ranking.</p>
+            <p class="muted-note" style="margin:0">Cold facts (fewer than 10 accesses) use cosine similarity. As facts are accessed more frequently, they graduate to the full Fisher-Rao distance, which captures both the direction and uncertainty of the embedding for more accurate ranking.</p>
           </div>
 
           <div style="margin-bottom:18px">
-            <h3 style="font-size:0.92rem;margin:0 0 8px 0;color:var(--accent)">How Sources Combine</h3>
+            <h3 class="modal-h">How Sources Combine</h3>
             <p style="margin:0 0 6px 0">Pages from all sources (wiki pages, vaults, git sources, and subscriptions) are merged together. If two pages share the same title, the one from the higher-priority layer is used.</p>
-            <p style="margin:0;color:var(--muted);font-size:0.78rem">Priority order: personal &gt; project &gt; org &gt; community.</p>
+            <p class="muted-note" style="margin:0">Priority order: personal &gt; project &gt; org &gt; community.</p>
           </div>
 
           <div style="margin-bottom:18px">
-            <h3 style="font-size:0.92rem;margin:0 0 8px 0;color:var(--accent)">Sharing Knowledge</h3>
+            <h3 class="modal-h">Sharing Knowledge</h3>
             <p style="margin:0">Point multiple Hive instances at the same vault folder, use wiki subscriptions to share across teams, or add shared git sources so every instance indexes the same upstream docs. Everyone sees the same facts without copying files around.</p>
           </div>
 
           <div style="margin-bottom:4px">
-            <h3 style="font-size:0.92rem;margin:0 0 8px 0;color:var(--accent)">How Agents Use Knowledge (Priming)</h3>
+            <h3 class="modal-h">How Agents Use Knowledge (Priming)</h3>
             <p style="margin:0 0 6px 0">Before each agent kick, the <strong>knowledge primer</strong> runs a pipeline to inject relevant facts into the agent's context:</p>
             <p style="margin:0 0 4px 0"><strong>1. Keyword extraction</strong> — The primer extracts keywords from the issue title assigned to the agent.</p>
             <p style="margin:0 0 4px 0"><strong>2. Fisher-Rao search</strong> — Those keywords are searched across all connected sources (wiki layers, vaults, git sources) using Fisher-Rao scoring to find the most relevant facts.</p>
-            <p style="margin:0 0 4px 0"><strong>3. Injection</strong> — Matching facts are injected into the kick message via the <code style="background:var(--surface);padding:1px 4px;border-radius:3px">\${KNOWLEDGE}</code> template variable. The agent receives a "Relevant Knowledge" section containing patterns, gotchas, and decisions relevant to its current work.</p>
-            <p style="margin:0;color:var(--muted);font-size:0.78rem">This means your agents get smarter as you add knowledge — no prompt editing required. Add a fact about a common mistake and every agent working on a related issue will see it automatically.</p>
+            <p style="margin:0 0 4px 0"><strong>3. Injection</strong> — Matching facts are injected into the kick message via the <code class="code-chip">\${KNOWLEDGE}</code> template variable. The agent receives a "Relevant Knowledge" section containing patterns, gotchas, and decisions relevant to its current work.</p>
+            <p class="muted-note" style="margin:0">This means your agents get smarter as you add knowledge — no prompt editing required. Add a fact about a common mistake and every agent working on a related issue will see it automatically.</p>
           </div>
         </div>
       `;
@@ -7282,7 +7308,7 @@ function burnAreaChart() {
             html += `<div style="padding:10px;border:1px solid var(--border);border-radius:6px;margin-bottom:8px">`;
             html += `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">`;
             html += `<div><div style="font-size:0.82rem;font-weight:600;color:var(--fg)">📂 ${escapeHtml(v.name)}</div>`;
-            html += `<div style="font-size:0.7rem;color:var(--muted)">${escapeHtml(v.root_dir)} · ${v.pages} pages</div></div>`;
+            html += `<div class="muted-xs">${escapeHtml(v.root_dir)} · ${v.pages} pages</div></div>`;
             html += `<div style="display:flex;gap:4px">`;
             html += `<button class="nous-btn" style="background:var(--surface);color:var(--fg);border:1px solid var(--border);font-size:0.7rem;padding:4px 8px" onclick="kbReindexVault('${escapeHtml(v.root_dir)}')">↻ Reindex</button>`;
             html += `<button class="nous-btn" style="background:var(--red);color:var(--bg);font-size:0.7rem;padding:4px 8px" onclick="kbDisconnectVault('${escapeHtml(v.root_dir)}')">Disconnect</button>`;
@@ -7303,8 +7329,8 @@ function burnAreaChart() {
         html += '<input id="kb-vault-path" type="text" class="kb-search-box" placeholder="/data/vaults/my-obsidian-vault">';
         html += '<input id="kb-vault-name" type="text" class="kb-search-box" placeholder="Display name">';
         html += '</div>';
-        html += '<div style="display:flex;justify-content:flex-end">';
-        html += '<button class="nous-btn" style="background:var(--blue);color:var(--bg)" onclick="kbConnectVault()">Connect</button>';
+        html += '<div class="row-end">';
+        html += '<button class="nous-btn btn-blue" onclick="kbConnectVault()">Connect</button>';
         html += '</div></div>';
 
         el.innerHTML = html;
