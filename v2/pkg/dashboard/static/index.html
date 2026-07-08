@@ -1207,9 +1207,9 @@
     .config-info {
       display: inline-flex; align-items: center; justify-content: center;
       width: 15px; height: 15px; border-radius: 50%;
-      background: color-mix(in srgb, var(--blue) 12%, transparent);
-      border: 1px solid color-mix(in srgb, var(--blue) 45%, transparent);
-      color: var(--blue); font-size: 0.6rem; line-height: 1;
+      background: color-mix(in srgb, var(--blue) 18%, var(--panel));
+      border: 1px solid color-mix(in srgb, var(--blue) 60%, transparent);
+      color: var(--blue); font-size: 0.62rem; line-height: 1;
       font-weight: 700; cursor: help; margin-left: 4px; position: relative;
       vertical-align: middle; flex-shrink: 0;
     }
@@ -11030,6 +11030,7 @@ function burnAreaChart() {
           <div class="config-field">
             <label>Color <span class="config-info">i<span class="config-tooltip">The agent's identity color, used to represent it in token charts and sparklines. Does not affect card or status styling.</span></span></label>
             <input type="color" id="cfg-agent-color" value="${esc(g.color || '#3498db')}" style="height:34px" onchange="markDirty('general','color',this.value)">
+            <div style="font-size:0.65rem;color:var(--muted);margin-top:2px">Identity color for this agent's token charts and sparklines.</div>
           </div>
         </div>
         <div class="config-field-row">
