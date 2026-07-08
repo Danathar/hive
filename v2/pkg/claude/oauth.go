@@ -20,8 +20,9 @@ const (
 	// Uses claude.com/cai/oauth path which supports the hosted code callback.
 	AuthorizeURL = "https://claude.com/cai/oauth/authorize"
 
-	// TokenURL is the Claude OAuth token endpoint.
-	TokenURL = "https://claude.ai/v1/oauth/token"
+	// TokenURL is the Claude OAuth token endpoint, on the same host
+	// as the hosted code callback page.
+	TokenURL = "https://platform.claude.com/v1/oauth/token"
 
 	// ClientID is the public Claude Code OAuth client identifier (UUID).
 	ClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
@@ -35,8 +36,9 @@ const (
 	// PKCEVerifierLength is the byte length of the PKCE code verifier (produces 43-char base64url).
 	PKCEVerifierLength = 32
 
-	// TokenExchangeTimeout limits how long we wait for the token endpoint.
-	TokenExchangeTimeout = 30 * time.Second
+	// TokenExchangeTimeout limits how long we wait for the token endpoint,
+	// which can take 40-60s to respond.
+	TokenExchangeTimeout = 120 * time.Second
 )
 
 // OAuthState holds the server-side state for an in-progress PKCE authorization flow.
@@ -111,20 +113,25 @@ func BuildAuthorizeURL(codeChallenge, redirectURI, state string) string {
 }
 
 // ExchangeCode trades an authorization code for access + refresh tokens using PKCE.
+// The hosted callback page displays the code as "<code>#<state>" — split it
+// and send both parts, matching what the Claude CLI does on paste.
 func ExchangeCode(code, codeVerifier, redirectURI string) (*OAuthTokens, error) {
-	reqBody, err := json.Marshal(map[string]string{
-		"grant_type":    "authorization_code",
-		"code":          code,
-		"redirect_uri":  redirectURI,
-		"client_id":     ClientID,
-		"code_verifier": codeVerifier,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("marshal token request: %w", err)
+	state := ""
+	if idx := strings.Index(code, "#"); idx >= 0 {
+		state = code[idx+1:]
+		code = code[:idx]
+	}
+	data := url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {code},
+		"state":         {state},
+		"redirect_uri":  {redirectURI},
+		"client_id":     {ClientID},
+		"code_verifier": {codeVerifier},
 	}
 
 	client := &http.Client{Timeout: TokenExchangeTimeout}
-	resp, err := client.Post(TokenURL, "application/json", strings.NewReader(string(reqBody)))
+	resp, err := client.PostForm(TokenURL, data)
 	if err != nil {
 		return nil, fmt.Errorf("token exchange request: %w", err)
 	}
