@@ -1202,12 +1202,14 @@
 
     .config-info {
       display: inline-flex; align-items: center; justify-content: center;
-      width: 14px; height: 14px; border-radius: 50%;
-      background: var(--border); color: var(--muted); font-size: 0.55rem;
+      width: 15px; height: 15px; border-radius: 50%;
+      background: color-mix(in srgb, var(--blue) 12%, transparent);
+      border: 1px solid color-mix(in srgb, var(--blue) 45%, transparent);
+      color: var(--blue); font-size: 0.6rem; line-height: 1;
       font-weight: 700; cursor: help; margin-left: 4px; position: relative;
       vertical-align: middle; flex-shrink: 0;
     }
-    .config-info:hover { background: var(--blue); color: var(--bg); }
+    .config-info:hover { background: var(--blue); border-color: var(--blue); color: var(--bg); }
     .config-info .config-tooltip {
       display: none; position: fixed; background: var(--bg); border: 1px solid var(--border);
       border-radius: 6px; padding: 6px 10px;
@@ -11010,7 +11012,7 @@ function burnAreaChart() {
             <input type="text" id="cfg-agent-emoji" value="${esc(g.emoji || '')}" placeholder="🤖" onchange="markDirty('general','emoji',this.value)">
           </div>
           <div class="config-field">
-            <label>Color <span class="config-info">i<span class="config-tooltip">Agent color used in the dashboard for visual distinction.</span></span></label>
+            <label>Color <span class="config-info">i<span class="config-tooltip">The agent's identity color, used to represent it in token charts and sparklines. Does not affect card or status styling.</span></span></label>
             <input type="color" id="cfg-agent-color" value="${esc(g.color || '#3498db')}" style="height:34px" onchange="markDirty('general','color',this.value)">
           </div>
         </div>
