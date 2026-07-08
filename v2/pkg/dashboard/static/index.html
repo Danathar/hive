@@ -1455,8 +1455,12 @@
     /* .kb-layer-btn — ghost button (system recipe); layout + active state here */
     .kb-layer-btn { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; white-space: nowrap; overflow: hidden; gap: 6px; }
     .kb-layer-btn .kb-layer-label { display: flex; align-items: center; gap: 5px; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-    .kb-layer-btn .kb-health-indicator { width: 8px; height: 8px; min-width: 8px; border-radius: 50%; display: inline-block; }
-    .kb-layer-count { font-size: 0.7rem; color: var(--muted); padding: 2px 6px; background: var(--bg); border-radius: 4px; }
+    .kb-layer-count { font-size: 0.7rem; color: var(--muted); padding: 2px 6px; background: var(--bg); border-radius: 4px; flex-shrink: 0; }
+    /* Knowledge Sources type pills — pill recipe; each source type gets its own tint */
+    .kb-src-type { font-weight: 600; text-transform: uppercase; flex-shrink: 0; margin-left: auto; }
+    .kb-src-type.wiki { --pill-c: var(--blue); }
+    .kb-src-type.vault { --pill-c: var(--purple); }
+    .kb-src-type.doc { --pill-c: var(--cyan); }
     .kb-search-box { width: 100%; } /* shared input recipe (end of style block) */
     .kb-filter-row { display: flex; gap: 4px; flex-wrap: wrap; }
     .kb-filter-pill { padding: 3px 8px; border: 1px solid var(--border); border-radius: 4px; font-size: 0.68rem; cursor: pointer; background: var(--bg); color: var(--muted); transition: all 0.15s; }
@@ -1498,8 +1502,7 @@
     .kb-stat { text-align: center; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
     .kb-stat .val { font-size: 1.2rem; font-weight: 700; color: var(--fg); }
     .kb-stat .lbl { font-size: 0.68rem; color: var(--muted); margin-top: 2px; }
-    .kb-health-item { display: flex; align-items: center; gap: 8px; font-size: 0.75rem; padding: 4px 0; }
-    .kb-health-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .kb-health-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; display: inline-block; }
     .kb-empty { text-align: center; padding: 40px 20px; color: var(--muted); font-size: 0.82rem; }
     .kb-empty-icon { font-size: 2rem; margin-bottom: 8px; }
     .kb-disabled { text-align: center; padding: 40px 20px; color: var(--muted); }
@@ -1705,7 +1708,7 @@
        are grouped — no class renames. */
     .status-badge, .model-chip, .token-model-chip, .repo-issue-pill, .repo-pr-pill,
     .ind-tag, .pause-badge, .off-badge, .on-demand-badge, .oc-health-badge,
-    .nous-config-pill, .kb-type-badge, .kb-layer-badge, .summary-age, .oc-nav-count {
+    .nous-config-pill, .kb-type-badge, .kb-layer-badge, .kb-src-type, .summary-age, .oc-nav-count {
       display: inline-flex; align-items: center; gap: 4px;
       font-size: var(--fs-xs); line-height: 1.5;
       padding: 1px 8px; border-radius: 999px;
@@ -6366,25 +6369,50 @@ function burnAreaChart() {
       // Main layout: sidebar + content
       html += '<div class="kb-layout">';
 
-      // Left sidebar: layers + search + filters
+      // Left sidebar: one consolidated Knowledge Sources list + search + filters.
+      // Every source (wiki layer, vault, imported document) is ONE row here:
+      // health dot (tooltip = health detail) + name + type pill + count pill.
       html += '<div class="kb-sidebar">';
+      html += '<div class="section-label" style="margin:0">Knowledge Sources</div>';
       html += '<div class="kb-layer-list" id="kb-layer-btns">';
-      html += `<button class="kb-layer-btn${_kbSelectedLayer === 'all' ? ' active' : ''}" onclick="kbSelectLayer('all')">📋 All Layers</button>`;
+      // Aggregate row stays on top as the filter reset (kbSelectLayer keys on the 'All Layers' text)
+      html += `<button class="kb-layer-btn${_kbSelectedLayer === 'all' ? ' active' : ''}" onclick="kbSelectLayer('all')"><span class="kb-layer-label">📋 All Layers</span><span class="kb-layer-count">${totalPages}</span></button>`;
       for (const l of layers) {
         const icon = KB_LAYER_ICONS[l.type] || '📄';
         const label = KB_LAYER_LABELS[l.type] || l.type;
         const active = _kbSelectedLayer === l.type ? ' active' : '';
         const count = l.total_pages || 0;
         const dotColor = l.healthy ? 'var(--green)' : 'var(--red)';
+        const healthTip = `${escapeHtml(label)}: ${l.healthy ? 'healthy' : 'unreachable'}`;
         const isGitSource = l.type && l.type.startsWith('git_source:');
         const repoUrl = isGitSource && l.url ? (l.subpath ? l.url + '/tree/' + 'main/' + l.subpath : l.url) : '';
-        html += `<button class="kb-layer-btn${active}" onclick="kbSelectLayer('${escapeHtml(l.type)}')">`;
-        html += `<span class="kb-layer-label">${icon} ${escapeHtml(label)}</span>`;
-        html += `<span class="kb-health-indicator" style="background:${dotColor}"></span>`;
+        html += `<button class="kb-layer-btn${active}" onclick="kbSelectLayer('${escapeHtml(l.type)}')" title="${healthTip}">`;
+        html += `<span class="kb-layer-label"><span class="kb-health-dot" style="background:${dotColor}" title="${healthTip}"></span>${icon} ${escapeHtml(label)}</span>`;
         if (isGitSource && repoUrl) {
           html += `<a href="${escapeHtml(repoUrl)}" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="color:var(--accent);text-decoration:none;font-size:0.82rem;flex-shrink:0" title="Open source repo in new tab">↗</a>`;
         }
+        html += `<span class="kb-src-type wiki">wiki</span>`;
         html += `<span class="kb-layer-count">${count}</span>`;
+        html += `</button>`;
+      }
+      // Vault rows — same list, type pill 'vault'; click behavior unchanged
+      for (const v of connectedVaults) {
+        const vTip = `${escapeHtml(v.name)}: connected — ${escapeHtml(v.root_dir)}`;
+        html += `<button class="kb-layer-btn${_kbSelectedLayer === 'vault:'+v.name ? ' active' : ''}" onclick="_kbSelectedLayer='vault:${escapeHtml(v.name)}';kbSearchVault('${escapeHtml(v.name)}')" title="${vTip}">`;
+        html += `<span class="kb-layer-label"><span class="kb-health-dot" style="background:var(--green)" title="${vTip}"></span>📂 ${escapeHtml(v.name)}</span>`;
+        html += `<span class="kb-src-type vault">vault</span>`;
+        html += `<span class="kb-layer-count">${v.pages}</span>`;
+        html += `</button>`;
+      }
+      // Imported documents — rows of type 'doc' in the same list; click behavior unchanged
+      for (const d of (_kbCache._documents || [])) {
+        const dIcon = DOC_CONTENT_ICONS[d.content_type] || '📄';
+        const dFacts = d.fact_count || 0;
+        const dTip = `${escapeHtml(d.title || d.slug)}: imported — ${escapeHtml(d.source_url || d.source_file || d.slug)}`;
+        html += `<button class="kb-layer-btn${_kbSelectedLayer === 'doc:'+d.slug ? ' active' : ''}" onclick="kbSelectLayer('doc:${escapeHtml(d.slug)}')" title="${dTip}">`;
+        html += `<span class="kb-layer-label"><span class="kb-health-dot" style="background:var(--green)" title="${dTip}"></span>${dIcon} ${escapeHtml(d.title || d.slug)}</span>`;
+        html += `<span class="kb-src-type doc">doc</span>`;
+        html += `<span class="kb-layer-count">${dFacts}</span>`;
         html += `</button>`;
       }
       html += '</div>';
@@ -6400,41 +6428,6 @@ function burnAreaChart() {
         html += `<span class="kb-filter-pill${active}" onclick="kbSelectType('${escapeHtml(t)}')">${escapeHtml(t)}</span>`;
       }
       html += '</div>';
-
-      // Health
-      html += '<div style="margin-top:8px;font-size:0.72rem;color:var(--muted)">';
-      for (const l of layers) {
-        const dot = l.healthy ? 'var(--green)' : 'var(--red)';
-        html += `<div class="kb-health-item"><span class="kb-health-dot" style="background:${dot}"></span>${escapeHtml(KB_LAYER_LABELS[l.type] || l.type)}: ${l.healthy ? 'healthy' : 'unreachable'}</div>`;
-      }
-      html += '</div>';
-
-      // Vaults section in sidebar
-      const vaults = (_kbCache.vaults || []);
-      if (vaults.length > 0) {
-        html += '<div style="margin-top:12px;font-size:0.72rem;color:var(--muted)"><strong>📂 Connected Vaults</strong></div>';
-        html += '<div class="kb-layer-list" style="margin-top:4px">';
-        for (const v of vaults) {
-          html += `<button class="kb-layer-btn${_kbSelectedLayer === 'vault:'+v.name ? ' active' : ''}" onclick="_kbSelectedLayer='vault:${escapeHtml(v.name)}';kbSearchVault('${escapeHtml(v.name)}')" title="${escapeHtml(v.root_dir)}">📂 ${escapeHtml(v.name)}<span class="kb-layer-count">${v.pages}</span></button>`;
-        }
-        html += '</div>';
-      }
-
-      // Documents section in sidebar
-      const docs = (_kbCache._documents || []);
-      if (docs.length > 0) {
-        html += '<div style="margin-top:12px;font-size:0.72rem;color:var(--muted)"><strong>📄 Imported Documents</strong></div>';
-        html += '<div class="kb-layer-list" style="margin-top:4px">';
-        for (const d of docs) {
-          const dIcon = DOC_CONTENT_ICONS[d.content_type] || '📄';
-          const dFacts = d.fact_count || 0;
-          html += `<button class="kb-layer-btn${_kbSelectedLayer === 'doc:'+d.slug ? ' active' : ''}" onclick="kbSelectLayer('doc:${escapeHtml(d.slug)}')" title="${escapeHtml(d.source_url || d.source_file || d.slug)}">`;
-          html += `<span class="kb-layer-label">${dIcon} ${escapeHtml(d.title || d.slug)}</span>`;
-          html += `<span class="kb-layer-count">${dFacts}</span>`;
-          html += `</button>`;
-        }
-        html += '</div>';
-      }
 
       html += '</div>'; // kb-sidebar
 
