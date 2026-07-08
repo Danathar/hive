@@ -26,6 +26,9 @@
       --shadow-modal: 0 20px 60px rgba(0, 0, 0, 0.5);
       --font-ui: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
       --font-mono: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+      /* Type ramp — section headers / card titles / labels only; body-copy sizes stay. */
+      --fs-xs: .68rem; --fs-sm: .75rem; --fs-base: .82rem;
+      --fs-md: .92rem; --fs-lg: 1.05rem; --fs-xl: 1.25rem;
       /* Layout */
       --sidebar-w: 302px;
       /* ── Legacy aliases — every old token name keeps working ── */
@@ -40,16 +43,25 @@
       --red-bg: rgba(255, 126, 126, 0.15); --red-border: rgba(255, 126, 126, 0.35);
     }
     * { margin: 0; padding: 0; box-sizing: border-box; }
+    /* ── Deliberate monospace: data surfaces only. UI chrome uses --font-ui. ── */
+    code, pre { font-family: var(--font-mono); }
+    .mono { font-family: var(--font-mono); }
+    #audit-panel { font-family: var(--font-mono); }
+    /* Section eyebrow label — hub convention (amber, uppercase, tracked). */
+    .section-label {
+      font-family: var(--font-ui); font-size: var(--fs-xs); font-weight: 800;
+      letter-spacing: 0.12em; text-transform: uppercase; color: var(--amber);
+    }
     body {
-      font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+      font-family: var(--font-ui);
       background: var(--bg); color: var(--text);
       padding: 64px 20px 24px calc(var(--sidebar-w) + 20px);
       margin: 0; min-height: 100vh; max-width: 100vw; overflow-x: hidden;
     }
-    h1 { font-size: 1.4rem; margin-bottom: 20px; display: flex; align-items: center; }
+    h1 { font-size: var(--fs-xl); margin-bottom: 20px; display: flex; align-items: center; }
     h1 span.bee { font-size: 1.6rem; margin-right: 8px; }
     .timestamp { color: var(--muted); font-size: 0.8rem; margin-left: 12px; }
-    .git-version { font-size: 0.65rem; color: var(--muted); margin-left: 10px; font-weight: 400; font-family: monospace; }
+    .git-version { font-size: 0.65rem; color: var(--muted); margin-left: 10px; font-weight: 400; font-family: var(--font-mono); }
     .git-version .git-behind { color: var(--yellow); font-weight: 600; }
     .git-version .git-dirty { color: var(--yellow); }
     .header-spacer { flex: 1; }
@@ -82,7 +94,6 @@
       --oc-accent-light: rgba(220,38,38,0.08);
       --green-bg: #f0fdf4; --green-border: #bbf7d0;
       --red-bg: #fef2f2; --red-border: #fecaca;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
       background: var(--bg); color: var(--text);
     }
     body.light-mode .connection { display: none; }
@@ -111,8 +122,9 @@
     .oc-logo-sub { font-size: 0.55rem; color: var(--muted); letter-spacing: 0.5px; text-transform: uppercase; }
     .oc-nav-group { padding: 12px 0; }
     .oc-nav-label {
-      font-size: 0.65rem; font-weight: 600; color: var(--muted);
-      text-transform: uppercase; letter-spacing: 0.8px;
+      /* .section-label convention */
+      font-size: var(--fs-xs); font-weight: 800; color: var(--amber);
+      text-transform: uppercase; letter-spacing: 0.12em;
       padding: 10px 14px 4px; user-select: none;
       display: flex; align-items: center; gap: 8px;
     }
@@ -270,8 +282,8 @@
       padding-bottom: 12px; border-bottom: 1px solid var(--border);
     }
     .oc-agent-detail-header .agent-name-big {
-      font-size: 1.2rem; font-weight: 700; color: var(--text);
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: var(--fs-xl); font-weight: 700; color: var(--text);
+      font-family: var(--font-ui);
     }
     .oc-agent-detail-header .status-dot {
       width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0;
@@ -404,7 +416,7 @@
       border-radius: 8px; border: 1px solid var(--line);
       min-height: calc(1.3em * 20 + 28px); max-height: 70vh; overflow-y: auto;
       resize: vertical;
-      font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+      font-family: var(--font-mono);
       font-size: 0.65rem;
       white-space: pre-wrap;
       word-break: break-word;
@@ -420,12 +432,13 @@
       background: var(--indigo); color: var(--bg); padding: 1px 5px; border-radius: 3px;
     }
     .sum-cmd {
-      font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+      font-family: var(--font-mono);
       font-size: 0.6rem; color: var(--muted); padding: 4px 10px 4px 14px;
       border-left: 2px solid var(--line); margin: 0; line-height: 1.4;
       word-break: break-all;
     }
     .sum-tree {
+      font-family: var(--font-mono);
       font-size: 0.58rem; color: var(--muted); padding: 1px 10px 1px 20px;
       font-style: italic;
     }
@@ -502,11 +515,7 @@
       border-radius: 8px; box-shadow: 0 1px 2px rgba(0,0,0,0.04);
     }
 
-    /* Light typography */
-    body.light-mode h1, body.light-mode h2,
-    body.light-mode .gov-title, body.light-mode .token-title,
-    body.light-mode .agent-name { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
-    body.light-mode .doing { font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace; }
+    /* Light typography now shares --font-ui with dark mode; .doing stays mono in both. */
 
     /* Light button overrides */
     body.light-mode .terminal-link { border-color: var(--accent); color: var(--accent); }
@@ -569,9 +578,9 @@
     .gh-app-perm-details .perm-missing { color: var(--red); font-weight: 600; }
     .gh-auth-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 9999; display: flex; align-items: center; justify-content: center; }
     .gh-auth-modal { background: var(--panel); border-radius: 12px; padding: 32px; max-width: 420px; width: 90%; text-align: center; box-shadow: var(--shadow-modal); }
-    .gh-auth-modal h3 { margin: 0 0 8px; font-size: 1.2rem; color: var(--text); }
+    .gh-auth-modal h3 { margin: 0 0 8px; font-size: var(--fs-xl); color: var(--text); }
     .gh-auth-modal p { color: var(--muted); font-size: 0.85rem; margin: 4px 0; }
-    .gh-auth-modal .device-code { font-family: monospace; font-size: 2rem; font-weight: 800; color: var(--green); letter-spacing: 4px; padding: 16px; background: var(--green-bg); border-radius: 8px; margin: 16px 0; user-select: all; }
+    .gh-auth-modal .device-code { font-family: var(--font-mono); font-size: 2rem; font-weight: 800; color: var(--green); letter-spacing: 4px; padding: 16px; background: var(--green-bg); border-radius: 8px; margin: 16px 0; user-select: all; }
     .gh-auth-modal .gh-verify-link { display: inline-block; margin: 12px 0; padding: 8px 20px; background: var(--green); color: var(--bg); text-decoration: none; border-radius: 6px; font-weight: 600; }
     .gh-auth-modal .gh-verify-link:hover { background: color-mix(in srgb, var(--green) 85%, #fff); }
     .gh-auth-modal .gh-poll-status { color: var(--muted); font-size: 0.8rem; margin-top: 12px; }
@@ -582,7 +591,7 @@
     .claude-auth-btn:hover { background: #f59e0b; }
     .claude-auth-status { font-size: 0.8rem; color: var(--muted); }
     .claude-auth-status.logged-in { color: var(--green); font-weight: 600; }
-    .gh-setup-modal h3 { margin: 0 0 16px; font-size: 1.2rem; color: var(--text); text-align: center; }
+    .gh-setup-modal h3 { margin: 0 0 16px; font-size: var(--fs-xl); color: var(--text); text-align: center; }
     .gh-setup-modal p { color: var(--muted); font-size: 0.85rem; margin: 8px 0; line-height: 1.5; }
     .gh-setup-modal .setup-option { background: var(--bg); border: 2px solid var(--line); border-radius: 8px; padding: 16px; margin: 12px 0; cursor: pointer; transition: border-color 0.15s; }
     .gh-setup-modal .setup-option:hover { border-color: var(--green); }
@@ -638,7 +647,7 @@
     .value.copilot { color: var(--cyan); }
     .value.claude { color: var(--purple); }
     .value.pi { color: var(--green); }
-    .doing { font-size: 0.65rem; color: var(--cyan); margin-top: 6px; word-break: break-word; white-space: pre-wrap; line-height: 1.3; min-height: 5.6em; max-height: 30em; overflow-y: auto; width: 100%; }
+    .doing { font-family: var(--font-mono); font-size: 0.65rem; color: var(--cyan); margin-top: 6px; word-break: break-word; white-space: pre-wrap; line-height: 1.3; min-height: 5.6em; max-height: 30em; overflow-y: auto; width: 100%; }
     .summary-age { display: inline-block; font-size: 0.6rem; font-style: normal; border-radius: 3px; padding: 1px 5px; margin-right: 5px; vertical-align: middle; white-space: nowrap; }
     .summary-age.age-recent { background: rgba(210,153,34,0.15); color: var(--yellow); border: 1px solid rgba(210,153,34,0.3); }
     .summary-age.age-stale  { background: var(--red-bg);  color: var(--red); border: 1px solid var(--red-border); }
@@ -672,7 +681,7 @@
 
     /* Health status panel */
     .health { margin-bottom: 24px; }
-    .health h2 { font-size: 0.95rem; margin-bottom: 8px; color: var(--muted); }
+    .health h2 { font-size: var(--fs-xs); font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase; color: var(--amber); margin-bottom: 8px; }
     .health-grid { display: flex; flex-wrap: wrap; gap: 12px; }
     .health-item {
       background: var(--surface); border: 1px solid var(--border);
@@ -731,7 +740,7 @@
     .governor.dead { border-color: var(--red); }
     .governor.starting { border-color: var(--yellow); }
     .governor.active { border-color: var(--green); }
-    .gov-title { font-size: 1rem; font-weight: 700; margin-bottom: 8px; }
+    .gov-title { font-size: var(--fs-lg); font-weight: 700; margin-bottom: 8px; }
     .gov-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; }
     .gov-stat { font-size: 0.85rem; }
     .gov-stat .label { color: var(--muted); font-size: 0.75rem; }
@@ -742,7 +751,7 @@
 
     /* Repos */
     .repos { margin-bottom: 24px; }
-    .repos h2 { font-size: 0.95rem; margin-bottom: 8px; color: var(--muted); }
+    .repos h2 { font-size: var(--fs-xs); font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase; color: var(--amber); margin-bottom: 8px; }
     .repo-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 8px; }
     .repo-card {
       background: var(--surface); border: 1px solid var(--border);
@@ -972,7 +981,7 @@
       background: var(--surface); border: 1px solid var(--border);
       border-radius: 8px; padding: 16px;
     }
-    .token-title { font-size: 1rem; font-weight: 700; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+    .token-title { font-size: var(--fs-lg); font-weight: 700; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
     .token-title .lookback { font-size: 0.7rem; color: var(--muted); font-weight: 400; }
     .token-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin-bottom: 12px; }
     .token-stat { text-align: left; }
@@ -980,6 +989,7 @@
     .token-stat .tlabel { font-size: 0.65rem; color: var(--muted); }
     .token-models { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
     .token-model-chip {
+      font-family: var(--font-mono);
       background: rgba(188,140,255,0.1); border: 1px solid rgba(188,140,255,0.25);
       border-radius: 6px; padding: 6px 10px; font-size: 0.72rem;
     }
@@ -987,8 +997,8 @@
     .token-model-chip .mcount { color: var(--muted); margin-left: 6px; }
     .token-sessions { font-size: 0.7rem; color: var(--muted); }
     .token-sessions summary { cursor: pointer; font-weight: 600; color: var(--text); margin-bottom: 4px; }
-    .token-session-row { display: flex; gap: 8px; padding: 2px 0; align-items: baseline; }
-    .token-session-row .sid { color: var(--cyan); font-family: monospace; min-width: 90px; }
+    .token-session-row { font-family: var(--font-mono); display: flex; gap: 8px; padding: 2px 0; align-items: baseline; }
+    .token-session-row .sid { color: var(--cyan); font-family: var(--font-mono); min-width: 90px; }
     .token-session-row .sagent { font-weight: 600; min-width: 70px; font-size: 0.65rem; }
     /* Agent colors injected dynamically from status payload via injectAgentStyles() */
     .token-session-row .sagent.a-unknown { color: var(--muted); font-style: italic; }
@@ -1000,7 +1010,7 @@
     /* Token burn rate chart */
     .burn-chart-wrap { margin: 8px 0 12px; }
     .burn-chart-title { font-size: 0.7rem; color: var(--muted); margin-bottom: 4px; }
-    .burn-context { display: flex; justify-content: space-between; margin-top: 6px; font-size: 0.7rem; font-family: monospace; }
+    .burn-context { display: flex; justify-content: space-between; margin-top: 6px; font-size: 0.7rem; font-family: var(--font-mono); }
     .burn-context .bc-stat { display: flex; flex-direction: column; align-items: center; }
     .burn-context .bc-val { font-weight: 700; font-size: 0.85rem; }
     .burn-context .bc-label { color: var(--muted); font-size: 0.6rem; }
@@ -1034,7 +1044,7 @@
     /* Model chip on agent cards */
     .pin-toggle { cursor: pointer; background: none; border: none; font-size: 0.7rem; padding: 0 2px; opacity: 0.6; transition: opacity 0.2s; }
     .pin-toggle:hover { opacity: 1; }
-    .model-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 0.65rem; padding: 2px 6px; border-radius: 4px; }
+    .model-chip { font-family: var(--font-mono); display: inline-flex; align-items: center; gap: 4px; font-size: 0.65rem; padding: 2px 6px; border-radius: 4px; }
     .model-chip.free { background: var(--green-bg); color: var(--green); }
     .model-chip.paid { background: rgba(210,153,34,0.12); color: var(--yellow); }
     .model-chip.haiku { background: rgba(88,166,255,0.12); color: var(--blue); }
@@ -1139,7 +1149,7 @@
       box-shadow: var(--shadow-modal);
       padding: 24px;
     }
-    .hive-dialog-title { font-size: 1rem; font-weight: 600; color: var(--text); margin-bottom: 12px; }
+    .hive-dialog-title { font-size: var(--fs-lg); font-weight: 600; color: var(--text); margin-bottom: 12px; }
     .hive-dialog-body { font-size: 0.9rem; color: var(--muted); line-height: 1.5; white-space: pre-wrap; margin-bottom: 20px; }
     .hive-dialog-buttons { display: flex; gap: 10px; justify-content: flex-end; }
     .hive-dialog-btn {
@@ -1194,7 +1204,7 @@
     .config-footer .config-cancel:hover { color: var(--text); border-color: var(--text); }
 
     .config-field { margin-bottom: 14px; }
-    .config-field label { display: block; font-size: 0.7rem; color: var(--muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .config-field label { display: block; font-size: var(--fs-xs); color: var(--muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
     .config-field input[type="text"],
     .config-field input[type="number"],
     .config-field select {
@@ -1251,7 +1261,7 @@
     .config-info .config-tooltip {
       display: none; position: fixed; background: var(--bg); border: 1px solid var(--border);
       border-radius: 6px; padding: 6px 10px;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      font-family: var(--font-ui);
       font-size: 0.7rem; font-weight: 400; text-transform: none; letter-spacing: normal;
       color: var(--text); white-space: normal; width: 240px; z-index: 10001;
       box-shadow: 0 4px 12px rgba(0,0,0,0.4); line-height: 1.4;
@@ -1280,6 +1290,7 @@
     .config-list-add button:hover { background: var(--blue); }
 
     .config-pre {
+      font-family: var(--font-mono);
       background: var(--bg); border: 1px solid var(--border);
       border-radius: 6px; padding: 12px; font-size: 0.75rem;
       overflow-x: auto; white-space: pre-wrap; color: var(--muted);
@@ -1419,7 +1430,7 @@
 
     /* Strategy Lab (Nous) */
     .nous-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin-bottom: 12px; }
-    .nous-card h3 { font-size: 0.85rem; margin: 0 0 8px 0; color: var(--fg); }
+    .nous-card h3 { font-size: var(--fs-md); margin: 0 0 8px 0; color: var(--fg); }
     .nous-mode-toggle { display: flex; gap: 0; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin-bottom: 14px; }
     .nous-mode-btn { flex: 1; padding: 8px 12px; text-align: center; font-size: 0.78rem; cursor: pointer; border: none; background: var(--surface); color: var(--muted); transition: all 0.2s; }
     .nous-mode-btn:not(:last-child) { border-right: 1px solid var(--border); }
@@ -1459,7 +1470,7 @@
     .nous-config-dialog > h2 { flex-shrink: 0; padding: 24px 24px 0; }
     .nous-config-dialog > .nous-config-body { flex: 1; overflow-y: auto; padding: 16px 24px; }
     .nous-config-dialog > .nous-config-footer { flex-shrink: 0; padding: 12px 24px; border-top: 1px solid var(--border); }
-    .nous-config-dialog h2 { font-size: 1.1rem; margin: 0 0 16px 0; display: flex; align-items: center; gap: 8px; }
+    .nous-config-dialog h2 { font-size: var(--fs-lg); margin: 0 0 16px 0; display: flex; align-items: center; gap: 8px; }
     .nous-config-section { margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid var(--border); }
     .nous-config-section:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
     .nous-config-section h3 { font-size: 0.85rem; color: var(--accent); margin: 0 0 10px 0; display: flex; align-items: center; gap: 6px; }
@@ -1565,12 +1576,12 @@
     .kb-setup-card { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); padding: 20px; cursor: pointer; transition: all 0.2s; text-align: left; }
     .kb-setup-card:hover { border-color: var(--accent); box-shadow: 0 2px 12px rgba(88,166,255,0.12); }
     .kb-setup-card-icon { font-size: 1.8rem; margin-bottom: 10px; }
-    .kb-setup-card-title { font-size: 0.88rem; font-weight: 700; color: var(--fg); margin-bottom: 6px; }
+    .kb-setup-card-title { font-size: var(--fs-md); font-weight: 700; color: var(--fg); margin-bottom: 6px; }
     .kb-setup-card-desc { font-size: 0.74rem; color: var(--muted); line-height: 1.5; }
     .kb-setup-instructions { margin-top: 16px; text-align: left; font-size: 0.78rem; line-height: 1.7; color: var(--fg); }
     .kb-setup-instructions ol { padding-left: 20px; margin: 10px 0; }
     .kb-setup-instructions li { margin-bottom: 10px; }
-    .kb-setup-instructions code { background: var(--bg); padding: 2px 6px; border-radius: 4px; font-size: 0.74rem; font-family: monospace; }
+    .kb-setup-instructions code { background: var(--bg); padding: 2px 6px; border-radius: 4px; font-size: 0.74rem; font-family: var(--font-mono); }
     .kb-setup-instructions pre { background: var(--bg); padding: 10px 14px; border-radius: 6px; overflow-x: auto; font-size: 0.72rem; line-height: 1.5; margin: 8px 0; border: 1px solid var(--border); }
     .kb-setup-instructions .kb-tip { background: rgba(88,166,255,0.08); border: 1px solid rgba(88,166,255,0.2); border-radius: 6px; padding: 8px 12px; font-size: 0.72rem; color: var(--muted); margin-top: 10px; }
     .kb-setup-back { display: inline-flex; align-items: center; gap: 4px; background: none; border: none; color: var(--accent); cursor: pointer; font-size: 0.78rem; padding: 0; margin-bottom: 12px; }
@@ -1588,7 +1599,7 @@
       padding: 20px 16px; box-sizing: border-box; z-index: 100;
       overflow-y: auto; font-size: 0.82rem; color: var(--fg);
     }
-    #hive-info-sidebar h3 { font-size: 0.95rem; margin: 0 0 10px 0; color: var(--text); }
+    #hive-info-sidebar h3 { font-size: var(--fs-md); margin: 0 0 10px 0; color: var(--text); }
     #hive-info-sidebar p { line-height: 1.5; margin: 0 0 16px 0; color: var(--muted); }
     #hive-info-sidebar .sidebar-links { list-style: none; padding: 0; margin: 0; }
     #hive-info-sidebar .sidebar-links li { margin-bottom: 10px; }
@@ -1934,7 +1945,7 @@
   <div class="governor" id="governor"></div>
 
   <div id="advisory-section" style="margin-top: 16px; margin-bottom: 24px; display: none;">
-    <h2 class="advisory-collapse-header section-header-toggle" style="font-size: 0.95rem; color: var(--muted); margin-bottom: 8px; cursor: pointer; user-select: none;" onclick="toggleAdvisorySection('advisory-digest-main')">
+    <h2 class="section-label advisory-collapse-header section-header-toggle" style="margin-bottom: 8px; cursor: pointer; user-select: none;" onclick="toggleAdvisorySection('advisory-digest-main')">
       <span id="advisory-digest-main-chevron" class="collapse-chevron">▼</span> 📋 Advisory Digest
     </h2>
     <div class="section-body">
@@ -1952,14 +1963,14 @@
   </div>
 
   <div id="beads-section" style="margin-top: 16px; margin-bottom: 24px;">
-    <h2 style="font-size: 0.95rem; color: var(--muted); margin-bottom: 8px;" class="section-header-toggle" onclick="toggleSection('beads-section')"><span class="section-chevron">▼</span> Beads</h2>
+    <h2 style="margin-bottom: 8px;" class="section-label section-header-toggle" onclick="toggleSection('beads-section')"><span class="section-chevron">▼</span> Beads</h2>
     <div class="section-body">
       <div class="beads" id="beads"></div>
     </div>
   </div>
 
   <div id="acmm-eval-section" style="margin-top: 16px; margin-bottom: 24px;">
-    <h2 style="font-size: 0.95rem; color: var(--muted); margin-bottom: 8px;" class="section-header-toggle" onclick="toggleSection('acmm-eval-section')"><span class="section-chevron">▼</span> 🎯 ACMM Evaluation</h2>
+    <h2 style="margin-bottom: 8px;" class="section-label section-header-toggle" onclick="toggleSection('acmm-eval-section')"><span class="section-chevron">▼</span> 🎯 ACMM Evaluation</h2>
     <div class="section-body">
       <div id="acmm-eval-card" style="background:var(--card-bg);border:1px solid var(--border);border-radius:8px;padding:16px">
         <div class="kb-stat-grid" id="acmm-eval-stats">
@@ -1983,7 +1994,7 @@
   </div>
 
   <div id="audit-section" style="margin-top: 16px; margin-bottom: 24px;">
-    <h2 style="font-size: 0.95rem; color: var(--muted); margin-bottom: 8px;" class="section-header-toggle" onclick="toggleSection('audit-section')"><span class="section-chevron">▼</span> 📋 Audit Log</h2>
+    <h2 style="margin-bottom: 8px;" class="section-label section-header-toggle" onclick="toggleSection('audit-section')"><span class="section-chevron">▼</span> 📋 Audit Log</h2>
     <div class="section-body">
       <div style="margin-bottom:8px;display:flex;align-items:center;gap:8px">
         <div style="flex:1;position:relative">
@@ -2001,7 +2012,7 @@
   </div>
 
   <div id="nous-section" style="display:none; margin-top: 16px; margin-bottom: 24px;">
-    <h2 style="font-size: 0.95rem; color: var(--muted); margin-bottom: 8px;" class="section-header-toggle" onclick="toggleSection('nous-section')"><span class="section-chevron">▼</span> 🧪 Strategy Lab <span id="nous-mode-badge" style="font-size:0.75rem;padding:2px 8px;border-radius:9999px;margin-left:8px"></span> <button onclick="event.stopPropagation();openNousConfig()" style="background:none;border:none;cursor:pointer;font-size:1rem;color:var(--muted);margin-left:6px;padding:2px" title="Strategy Lab Configuration">⚙️</button></h2>
+    <h2 style="margin-bottom: 8px;" class="section-label section-header-toggle" onclick="toggleSection('nous-section')"><span class="section-chevron">▼</span> 🧪 Strategy Lab <span id="nous-mode-badge" style="font-size:0.75rem;padding:2px 8px;border-radius:9999px;margin-left:8px"></span> <button onclick="event.stopPropagation();openNousConfig()" style="background:none;border:none;cursor:pointer;font-size:1rem;color:var(--muted);margin-left:6px;padding:2px" title="Strategy Lab Configuration">⚙️</button></h2>
     <div class="section-body">
       <div id="nous-panel"></div>
       <div id="nous-config-overlay" class="nous-config-overlay" style="display:none"></div>
@@ -2009,14 +2020,14 @@
   </div>
 
   <div id="inception-section" style="margin-top: 16px; margin-bottom: 24px;">
-    <h2 style="font-size: 0.95rem; color: var(--muted); margin-bottom: 8px;" class="section-header-toggle" onclick="toggleSection('inception-section')"><span class="section-chevron">▼</span> 💡 Project Inception</h2>
+    <h2 style="margin-bottom: 8px;" class="section-label section-header-toggle" onclick="toggleSection('inception-section')"><span class="section-chevron">▼</span> 💡 Project Inception</h2>
     <div class="section-body">
       <div id="inception-panel" style="height:800px;overflow-y:auto;overflow-x:hidden;"></div>
     </div>
   </div>
 
   <div id="knowledge-section" style="margin-top: 16px; margin-bottom: 24px;">
-    <h2 style="font-size: 0.95rem; color: var(--muted); margin-bottom: 8px;" class="section-header-toggle" onclick="toggleSection('knowledge-section')"><span class="section-chevron">▼</span> 📚 Knowledge Base <span id="kb-status-badge" style="font-size:0.7rem;padding:2px 8px;border-radius:9999px;margin-left:8px"></span></h2>
+    <h2 style="margin-bottom: 8px;" class="section-label section-header-toggle" onclick="toggleSection('knowledge-section')"><span class="section-chevron">▼</span> 📚 Knowledge Base <span id="kb-status-badge" style="font-size:0.7rem;padding:2px 8px;border-radius:9999px;margin-left:8px"></span></h2>
     <div class="section-body">
       <div id="knowledge-panel"></div>
     </div>
@@ -2025,7 +2036,7 @@
   <div id="contributors-section" style="margin-top: 16px; margin-bottom: 24px;">
     <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap" class="section-header-toggle" onclick="toggleSection('contributors-section')">
       <span class="section-chevron">▼</span>
-      <h2 style="font-size: 0.95rem; color: var(--muted); margin:0;">👥 Contributors <span id="contributors-status-badge" style="font-size:0.7rem;padding:2px 8px;border-radius:9999px;margin-left:8px"></span></h2>
+      <h2 class="section-label" style="margin:0;">👥 Contributors <span id="contributors-status-badge" style="font-size:0.7rem;padding:2px 8px;border-radius:9999px;margin-left:8px"></span></h2>
       <a href="/contribute" target="_blank" onclick="event.stopPropagation()" style="font-size:0.75rem;padding:4px 12px;background:#238636;color:#fff;border-radius:6px;text-decoration:none;font-weight:600">Share /contribute link &rarr;</a>
       <a href="/leaderboard" target="_blank" onclick="event.stopPropagation()" style="font-size:0.75rem;padding:4px 12px;background:transparent;color:#58a6ff;border:1px solid #58a6ff;border-radius:6px;text-decoration:none">🏆 Leaderboard</a>
     </div>
@@ -2038,14 +2049,14 @@
   </div>
 
   <div id="debug-section" style="margin-top: 16px; margin-bottom: 24px;">
-    <h2 style="font-size: 0.95rem; color: var(--muted); margin-bottom: 12px;" class="section-header-toggle" onclick="toggleSection('debug-section')"><span class="section-chevron">▼</span> 🔍 System Diagnostics</h2>
+    <h2 style="margin-bottom: 12px;" class="section-label section-header-toggle" onclick="toggleSection('debug-section')"><span class="section-chevron">▼</span> 🔍 System Diagnostics</h2>
     <div class="section-body">
       <div id="debug-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px;"></div>
     </div>
   </div>
 
   <div id="logs-section" style="display: none; margin-top: 16px; margin-bottom: 24px;">
-    <h2 style="font-size: 0.95rem; color: var(--muted); margin-bottom: 12px;" class="section-header-toggle" onclick="toggleSection('logs-section')"><span class="section-chevron">▼</span> 📋 Agent Logs</h2>
+    <h2 style="margin-bottom: 12px;" class="section-label section-header-toggle" onclick="toggleSection('logs-section')"><span class="section-chevron">▼</span> 📋 Agent Logs</h2>
     <div class="section-body">
       <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
         <select id="logs-agent-select" style="padding: 6px 12px; border: 1px solid var(--border); border-radius: 6px; font-size: 0.82rem; background: var(--surface); color: var(--text); cursor: pointer;" title="Filter logs to a specific agent or view all agents combined">
@@ -2055,7 +2066,7 @@
           <input type="checkbox" id="logs-follow" checked> Follow
         </label>
       </div>
-      <div id="logs-output" style="background: #1a1a2e; color: #e2e8f0; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.75rem; line-height: 1.5; padding: 14px; border-radius: 8px; max-height: 500px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;"></div>
+      <div id="logs-output" style="background: #1a1a2e; color: #e2e8f0; font-family: var(--font-mono); font-size: 0.75rem; line-height: 1.5; padding: 14px; border-radius: 8px; max-height: 500px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;"></div>
     </div>
   </div>
 
@@ -2063,7 +2074,7 @@
   <div id="oc-agent-detail" class="oc-agent-detail"></div>
   <div id="agents-section">
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-      <h2 style="font-size: 0.95rem; color: var(--muted); margin:0; cursor:pointer" class="section-header-toggle" onclick="toggleSection('agents-section')"><span class="section-chevron">▼</span> Agents</h2>
+      <h2 style="margin:0; cursor:pointer" class="section-label section-header-toggle" onclick="toggleSection('agents-section')"><span class="section-chevron">▼</span> Agents</h2>
       <button id="agents-compact-all-btn" onclick="event.stopPropagation();toggleAllAgentsCompact()" style="font-size:0.7rem;padding:2px 10px;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--muted);cursor:pointer" title="Toggle all agent cards between compact and expanded view"></button>
     </div>
     <div class="section-body">
@@ -4385,7 +4396,7 @@ function intensityGauge() {
       </svg>
       <div style="position:absolute;left:${dotLeftPct}%;top:${dotTopPct}%;width:6px;height:6px;border-radius:50%;background:${color};border:1px solid #0d1117;transform:translate(-50%,-50%)"></div>
     </div>
-    <div style="display:flex;justify-content:space-between;font-size:0.6rem;color:var(--muted);margin-top:1px;font-family:monospace">
+    <div style="display:flex;justify-content:space-between;font-size:0.6rem;color:var(--muted);margin-top:1px;font-family:var(--font-mono)">
       <span>${tStart}</span><span>${tEnd}</span>
     </div>
     <div class="burn-context">
@@ -4394,7 +4405,7 @@ function intensityGauge() {
       <div class="bc-stat"><span class="bc-val" style="color:#f85149">${fmtTokens(peak)}</span><span class="bc-label">peak/hr</span></div>
       <div class="bc-stat"><span class="bc-val" style="color:${color}">${fmtTokens(now)}</span><span class="bc-label">current/hr</span></div>
     </div>
-    <div style="color:${color};font-size:11px;font-family:monospace;margin-top:2px">${label}</div>
+    <div style="color:${color};font-size:11px;font-family:var(--font-mono);margin-top:2px">${label}</div>
   </div>`;
 }
 
@@ -6565,7 +6576,7 @@ function burnAreaChart() {
             </label>
           </div>
           <label style="font-size:0.78rem;color:var(--muted)">Content
-            <textarea id="kb-import-content" rows="24" style="width:100%;margin-top:4px;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:0.78rem;font-family:'SF Mono','Fira Code',monospace;resize:vertical;min-height:320px" placeholder="# Guard .join() against undefined\n\nAlways use (arr || []).join(',')..."></textarea>
+            <textarea id="kb-import-content" rows="24" style="width:100%;margin-top:4px;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:0.78rem;font-family:var(--font-mono);resize:vertical;min-height:320px" placeholder="# Guard .join() against undefined\n\nAlways use (arr || []).join(',')..."></textarea>
           </label>
           <div style="display:flex;align-items:center;gap:10px;margin-top:4px">
             <label style="font-size:0.72rem;color:var(--muted);cursor:pointer;display:flex;align-items:center;gap:4px">
@@ -6809,7 +6820,7 @@ function burnAreaChart() {
           <option value="markdown" selected>Markdown</option>
           <option value="json">JSON</option>
         </select>`;
-        html += '<textarea id="kb-import-content" rows="8" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:0.78rem;font-family:\'SF Mono\',\'Fira Code\',monospace;resize:vertical;min-height:120px;box-sizing:border-box" placeholder="# Guard .join() against undefined\n\nAlways use (arr || []).join(\',\')..."></textarea>';
+        html += '<textarea id="kb-import-content" rows="8" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:0.78rem;font-family:var(--font-mono);resize:vertical;min-height:120px;box-sizing:border-box" placeholder="# Guard .join() against undefined\n\nAlways use (arr || []).join(\',\')..."></textarea>';
         html += '<div style="display:flex;align-items:center;justify-content:space-between">';
         html += '<label style="font-size:0.72rem;color:var(--muted);cursor:pointer;display:flex;align-items:center;gap:4px"><span>or load from file:</span><input type="file" accept=".md,.json,.txt" style="font-size:0.72rem" onchange="kbLoadFile(this)"></label>';
         html += '<button class="nous-btn" style="background:#2563eb;color:white;padding:8px 20px" onclick="kbSubmitImport()">Import</button>';
@@ -7935,7 +7946,7 @@ function burnAreaChart() {
       html += 'background:' + COLORS.bg + ';';
       html += 'border:1px solid ' + COLORS.border + ';';
       html += 'border-radius:8px;';
-      html += 'font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Noto Sans,Helvetica,Arial,sans-serif;';
+      html += 'font-family:var(--font-ui);';
       html += 'position:relative;';
       html += 'margin-bottom:16px;';
       html += '">';
@@ -8134,7 +8145,7 @@ function burnAreaChart() {
             <div style="font-size:0.72rem;color:var(--muted);margin-left:auto">Phase: ${phase}</div>
           </div>
           <div style="position:relative">
-          <div id="inception-activity" style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:16px;font-family:'SF Mono','Cascadia Code',monospace;font-size:0.75rem;height:450px;overflow-y:auto;white-space:pre-wrap;color:var(--muted);resize:vertical;min-height:150px;max-height:calc(100vh - 200px)" onscroll="onInceptionScroll()">Waiting for brainstorm agent...</div>
+          <div id="inception-activity" style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:16px;font-family:var(--font-mono);font-size:0.75rem;height:450px;overflow-y:auto;white-space:pre-wrap;color:var(--muted);resize:vertical;min-height:150px;max-height:calc(100vh - 200px)" onscroll="onInceptionScroll()">Waiting for brainstorm agent...</div>
           <button id="inception-follow-btn" class="oc-summary-follow-btn" onclick="inceptionResumeTail()" title="Follow new output">⬇</button>
           </div>
           <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
@@ -8238,7 +8249,7 @@ function burnAreaChart() {
             <div style="font-size:0.72rem;color:var(--muted);margin-left:auto">Phase: structure</div>
           </div>
           <div style="position:relative">
-          <div id="inception-activity" style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:16px;font-family:'SF Mono','Cascadia Code',monospace;font-size:0.75rem;height:450px;overflow-y:auto;white-space:pre-wrap;color:var(--muted);resize:vertical;min-height:150px;max-height:calc(100vh - 200px)" onscroll="onInceptionScroll()">Brainstorm agent is producing vision, constitution, requirements, and acceptance criteria...</div>
+          <div id="inception-activity" style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:16px;font-family:var(--font-mono);font-size:0.75rem;height:450px;overflow-y:auto;white-space:pre-wrap;color:var(--muted);resize:vertical;min-height:150px;max-height:calc(100vh - 200px)" onscroll="onInceptionScroll()">Brainstorm agent is producing vision, constitution, requirements, and acceptance criteria...</div>
           <button id="inception-follow-btn" class="oc-summary-follow-btn" onclick="inceptionResumeTail()" title="Follow new output">⬇</button>
           </div>
           <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
@@ -8369,7 +8380,7 @@ function burnAreaChart() {
           if (entry._file) {
             const f = entry._file;
             html += '<details style="margin:0;border:none">';
-            html += '<summary style="padding:2px 0;cursor:pointer;font-family:monospace;font-size:0.8rem;list-style:none;display:flex;align-items:center;gap:4px">';
+            html += '<summary style="padding:2px 0;cursor:pointer;font-family:var(--font-mono);font-size:0.8rem;list-style:none;display:flex;align-items:center;gap:4px">';
             html += '<span style="color:var(--muted);white-space:pre">' + escapeHtml(prefix + connector) + '</span>';
             html += '<span>📄 ' + escapeHtml(name) + '</span>';
             html += '<span style="font-size:0.68rem;color:var(--muted);margin-left:4px">' + f.content.length + ' chars</span>';
@@ -8377,7 +8388,7 @@ function burnAreaChart() {
             html += '<pre style="padding:12px 12px 12px 40px;margin:0;font-size:0.72rem;overflow-x:auto;background:var(--bg);white-space:pre-wrap;border-left:2px solid var(--border);margin-left:' + (prefix.length * 8 + 24) + 'px">' + escapeHtml(f.content) + '</pre>';
             html += '</details>';
           } else {
-            html += '<div style="padding:2px 0;font-family:monospace;font-size:0.8rem;display:flex;align-items:center;gap:4px">';
+            html += '<div style="padding:2px 0;font-family:var(--font-mono);font-size:0.8rem;display:flex;align-items:center;gap:4px">';
             html += '<span style="color:var(--muted);white-space:pre">' + escapeHtml(prefix + connector) + '</span>';
             html += '<span>📁 <strong>' + escapeHtml(name) + '/</strong></span>';
             html += '</div>';
@@ -8387,7 +8398,7 @@ function burnAreaChart() {
         return html;
       }
 
-      let html = '<div style="background:var(--card-bg);border:1px solid var(--border);border-radius:8px;padding:16px;font-family:monospace">';
+      let html = '<div style="background:var(--card-bg);border:1px solid var(--border);border-radius:8px;padding:16px;font-family:var(--font-mono)">';
       html += '<div style="font-size:0.82rem;font-weight:600;margin-bottom:8px">📦 Project Files (' + files.length + ')</div>';
       html += renderNode(root, '', true);
       html += '</div>';
@@ -9189,7 +9200,7 @@ function burnAreaChart() {
     function acmmCriterionRow(c, repoName) {
       const icon = c.passed ? '✅' : '❌';
       const tip = ACMM_CRITERION_TIPS[c.id] || '';
-      const patternItems = (c.patterns || []).map(p => '<span style="display:inline-block;font-size:0.68rem;background:var(--bg);padding:1px 6px;border-radius:3px;border:1px solid var(--border);margin:1px 2px;font-family:monospace">' + escapeHtml(p) + '</span>').join('');
+      const patternItems = (c.patterns || []).map(p => '<span style="display:inline-block;font-size:0.68rem;background:var(--bg);padding:1px 6px;border-radius:3px;border:1px solid var(--border);margin:1px 2px;font-family:var(--font-mono)">' + escapeHtml(p) + '</span>').join('');
       let issueBtn = '';
       if (!c.passed) {
         const repo = repoName || _acmmSelectedRepo || '';
@@ -10315,7 +10326,7 @@ function burnAreaChart() {
         '</div>' +
         '<div class="config-field" style="margin-bottom:12px">' +
           '<label>Or paste agent definition</label>' +
-          '<textarea id="import-paste-input" rows="20" style="width:100%;font-family:monospace;font-size:0.75rem;resize:vertical;min-height:300px" placeholder="apiVersion: hive.kubestellar.io/v1\nkind: AgentDefinition\n..."></textarea>' +
+          '<textarea id="import-paste-input" rows="20" style="width:100%;font-family:var(--font-mono);font-size:0.75rem;resize:vertical;min-height:300px" placeholder="apiVersion: hive.kubestellar.io/v1\nkind: AgentDefinition\n..."></textarea>' +
           '<div style="text-align:right;margin-top:6px"><button onclick="previewImportFromPaste()" style="padding:6px 16px;border-radius:6px;cursor:pointer;font-weight:600;border:none;background:var(--cyan);color:#fff">Preview</button></div>' +
         '</div>' +
         '<div id="import-preview" style="display:none;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-top:16px">' +
@@ -11194,7 +11205,7 @@ function burnAreaChart() {
           html += '<span style="font-size:1.1rem">'+icon+'</span>';
           html += '<div style="flex:1">';
           html += '<div style="font-weight:600">'+esc(c.name)+' <span style="font-size:0.65rem;padding:1px 6px;border-radius:8px;background:var(--surface);border:1px solid var(--border);color:var(--muted);text-transform:uppercase;font-weight:400;margin-left:4px">'+esc(c.type)+'</span></div>';
-          if (c.uri) html += '<div style="font-size:0.72rem;color:var(--muted);font-family:monospace;overflow:hidden;text-overflow:ellipsis;max-width:400px" title="'+esc(c.uri)+'">'+esc(c.uri)+'</div>';
+          if (c.uri) html += '<div style="font-size:0.72rem;color:var(--muted);font-family:var(--font-mono);overflow:hidden;text-overflow:ellipsis;max-width:400px" title="'+esc(c.uri)+'">'+esc(c.uri)+'</div>';
           if (c.auth) html += '<div style="font-size:0.68rem;color:var(--muted)">🔒 '+esc(c.auth.type)+': '+(c.auth.env_var||c.auth.file||'')+'</div>';
           html += '</div>';
           html += '<button style="background:none;border:none;color:#dc2626;cursor:pointer;font-size:1rem;padding:0 4px" onclick="removeConnection('+i+')">✕</button>';
@@ -11277,7 +11288,7 @@ function burnAreaChart() {
               for (const sf of (data.sourceFiles || [])) {
                 const note = sf.note ? ' <span style="color:var(--muted)">(' + esc(sf.note) + ')</span>' : '';
                 items += '<li style="margin:3px 0"><strong style="color:var(--muted);min-width:80px;display:inline-block">' + esc(sf.label) + ':</strong> '
-                  + '<a href="' + esc(sf.url) + '" target="_blank" rel="noopener" style="color:var(--cyan);text-decoration:none;font-family:\'SF Mono\',\'Cascadia Code\',monospace;font-size:0.75rem">' + esc(sf.path) + '</a>'
+                  + '<a href="' + esc(sf.url) + '" target="_blank" rel="noopener" style="color:var(--cyan);text-decoration:none;font-family:var(--font-mono);font-size:0.75rem">' + esc(sf.path) + '</a>'
                   + note + '</li>';
               }
               srcEl.innerHTML = '<ul style="list-style:none;padding:0;margin:0">' + items + '</ul>';
@@ -11320,7 +11331,7 @@ function burnAreaChart() {
           <div style="flex:1"></div>
           <button onclick="savePromptTemplate()" style="font-size:0.72rem;padding:4px 14px;border-radius:4px;cursor:pointer;font-weight:600;border:none;background:var(--green);color:#fff">Save Template</button>
         </div>
-        <textarea id="${editorId}" style="flex:1;min-height:300px;font-family:'SF Mono','Cascadia Code',monospace;font-size:0.75rem;padding:12px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;resize:vertical;white-space:pre;tab-size:2" placeholder="Enter your agent's kick template here. Use \${VARIABLE} placeholders from the picker below.">${agentName ? '' : ''}</textarea>
+        <textarea id="${editorId}" style="flex:1;min-height:300px;font-family:var(--font-mono);font-size:0.75rem;padding:12px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;resize:vertical;white-space:pre;tab-size:2" placeholder="Enter your agent's kick template here. Use \${VARIABLE} placeholders from the picker below.">${agentName ? '' : ''}</textarea>
         <div id="${previewId}" class="config-pre config-pre-fill" style="display:none;flex:1;min-height:300px;overflow-y:auto"></div>
         <div style="margin-top:8px;flex-shrink:0">
           <div style="font-size:0.7rem;font-weight:600;color:var(--text);margin-bottom:6px">Variable Picker <span style="font-weight:400;color:var(--muted)">(click to insert at cursor)</span></div>
@@ -11412,7 +11423,7 @@ function burnAreaChart() {
         + '<button onclick="copyExportYaml()" style="font-size:0.72rem;padding:4px 14px;border-radius:4px;cursor:pointer;font-weight:600;border:none;background:var(--cyan);color:#fff">Copy to Clipboard</button>'
         + '<button onclick="downloadExportYaml()" style="font-size:0.72rem;padding:4px 14px;border-radius:4px;cursor:pointer;font-weight:600;border:1px solid var(--border);background:var(--surface);color:var(--text)">Download YAML</button>'
         + '</div>'
-        + '<textarea id="' + yamlId + '" readonly style="flex:1;min-height:300px;font-family:\'SF Mono\',\'Cascadia Code\',monospace;font-size:0.75rem;padding:12px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;resize:vertical;white-space:pre;tab-size:2">Loading...</textarea>'
+        + '<textarea id="' + yamlId + '" readonly style="flex:1;min-height:300px;font-family:var(--font-mono);font-size:0.75rem;padding:12px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;resize:vertical;white-space:pre;tab-size:2">Loading...</textarea>'
         + '</div>';
     }
 
@@ -11487,7 +11498,7 @@ function burnAreaChart() {
             html += '</pre>';
             inCode = false;
           } else {
-            html += '<pre style="margin:8px 0;padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;font-family:monospace;font-size:0.72rem;white-space:pre-wrap;overflow-x:auto;color:var(--text)">';
+            html += '<pre style="margin:8px 0;padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;font-family:var(--font-mono);font-size:0.72rem;white-space:pre-wrap;overflow-x:auto;color:var(--text)">';
             inCode = true;
           }
           continue;
@@ -11909,7 +11920,7 @@ function burnAreaChart() {
           <div class="config-list">
             ${ghPatterns || '<div style="font-size:0.75rem;color:var(--muted);margin-bottom:6px">No patterns configured</div>'}
             <div class="config-list-add">
-              <input type="text" id="cfg-sensing-gh-input" placeholder="e.g. 403.*rate limit" style="font-family:monospace;font-size:0.75rem" title="Regular expression to match against agent tmux pane output. When matched, the governor triggers a rate-limit pullback for that agent.">
+              <input type="text" id="cfg-sensing-gh-input" placeholder="e.g. 403.*rate limit" style="font-family:var(--font-mono);font-size:0.75rem" title="Regular expression to match against agent tmux pane output. When matched, the governor triggers a rate-limit pullback for that agent.">
               <button onclick="addSensingItem('ghRatePatterns','cfg-sensing-gh-input')" title="Add this regex pattern to the GitHub rate limit detection list">+ Add</button>
             </div>
           </div>
@@ -11919,7 +11930,7 @@ function burnAreaChart() {
           <div class="config-list">
             ${cliPatterns || '<div style="font-size:0.75rem;color:var(--muted);margin-bottom:6px">No exclude patterns</div>'}
             <div class="config-list-add">
-              <input type="text" id="cfg-sensing-cli-input" placeholder="e.g. out of extra usage" style="font-family:monospace;font-size:0.75rem" title="Lines matching these patterns are filtered out before rate-limit detection. Use for known false positives in agent output.">
+              <input type="text" id="cfg-sensing-cli-input" placeholder="e.g. out of extra usage" style="font-family:var(--font-mono);font-size:0.75rem" title="Lines matching these patterns are filtered out before rate-limit detection. Use for known false positives in agent output.">
               <button onclick="addSensingItem('cliExcludePatterns','cfg-sensing-cli-input')" title="Add this pattern to the CLI exclusion list">+ Add</button>
             </div>
           </div>
@@ -11929,7 +11940,7 @@ function burnAreaChart() {
           <div class="config-list">
             ${loginPatterns || '<div style="font-size:0.75rem;color:var(--muted);margin-bottom:6px">No login patterns configured</div>'}
             <div class="config-list-add">
-              <input type="text" id="cfg-sensing-login-input" placeholder="e.g. session expired" style="font-family:monospace;font-size:0.75rem" title="Regular expression to match against agent tmux pane output. When matched, the agent is paused and a notification is sent prompting you to log in.">
+              <input type="text" id="cfg-sensing-login-input" placeholder="e.g. session expired" style="font-family:var(--font-mono);font-size:0.75rem" title="Regular expression to match against agent tmux pane output. When matched, the agent is paused and a notification is sent prompting you to log in.">
               <button onclick="addSensingItem('loginPatterns','cfg-sensing-login-input')" title="Add this regex pattern to the login detection list">+ Add</button>
             </div>
           </div>
