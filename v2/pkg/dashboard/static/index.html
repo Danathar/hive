@@ -229,11 +229,7 @@
     }
     .oc-topbar-center .oc-tb-link:hover { background: var(--bg); color: var(--text); border-color: var(--border); }
     .oc-topbar-right { display: flex; align-items: center; gap: 14px; }
-    .oc-health-badge {
-      font-size: 0.78rem; font-weight: 600; color: var(--green);
-      background: var(--green-bg); border: 1px solid var(--green-border);
-      padding: 4px 12px; border-radius: 20px;
-    }
+    .oc-health-badge { --pill-c: var(--green); font-weight: 600; } /* pill recipe at end of style block */
     .oc-topbar-ts { font-size: 0.75rem; color: var(--muted); }
     .oc-topbar .git-version { color: var(--muted); }
 
@@ -588,11 +584,12 @@
     .agent-state.paused { color: var(--red); }
     .agent-state.on-demand { color: var(--indigo); }
     .agent-state.off { color: color-mix(in srgb, var(--muted) 60%, var(--bg)); }
-    .status-badge { display: inline-block; font-size: 0.65rem; font-weight: 700; padding: 2px 6px; border-radius: 4px; margin-left: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
-    .status-badge.blocked { background: var(--red-bg); color: var(--red); border: 1px solid var(--red-border); }
-    .status-badge.needs-context { background: rgba(210,153,34,0.2); color: var(--yellow); border: 1px solid rgba(210,153,34,0.4); }
-    .status-badge.done-concerns { background: rgba(227,139,44,0.2); color: #e38b2c; border: 1px solid rgba(227,139,44,0.4); }
-    .status-badge.done { background: var(--green-bg); color: var(--green); border: 1px solid var(--green-border); }
+    /* .status-badge — pill recipe; variants pick the color via --pill-c */
+    .status-badge { font-weight: 700; margin-left: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .status-badge.blocked { --pill-c: var(--red); }
+    .status-badge.needs-context { --pill-c: var(--yellow); }
+    .status-badge.done-concerns { --pill-c: #e38b2c; } /* distinct orange — no token yet */
+    .status-badge.done { --pill-c: var(--green); }
     .agent-card.status-blocked { border-color: var(--red) !important; }
     .agent-card.status-needs-context { border-color: var(--yellow) !important; }
     @keyframes pulse-amber { 0%,100% { border-color: rgba(210,153,34,0.3); } 50% { border-color: rgba(210,153,34,0.8); } }
@@ -623,9 +620,9 @@
     .value.claude { color: var(--purple); }
     .value.pi { color: var(--green); }
     .doing { font-family: var(--font-mono); font-size: 0.65rem; color: var(--cyan); margin-top: 6px; word-break: break-word; white-space: pre-wrap; line-height: 1.3; min-height: 5.6em; max-height: 30em; overflow-y: auto; width: 100%; }
-    .summary-age { display: inline-block; font-size: 0.6rem; font-style: normal; border-radius: 3px; padding: 1px 5px; margin-right: 5px; vertical-align: middle; white-space: nowrap; }
-    .summary-age.age-recent { background: rgba(210,153,34,0.15); color: var(--yellow); border: 1px solid rgba(210,153,34,0.3); }
-    .summary-age.age-stale  { background: var(--red-bg);  color: var(--red); border: 1px solid var(--red-border); }
+    .summary-age { font-style: normal; margin-right: 5px; vertical-align: middle; white-space: nowrap; } /* pill recipe */
+    .summary-age.age-recent { --pill-c: var(--yellow); }
+    .summary-age.age-stale  { --pill-c: var(--red); }
     /* Agent metric gauges — removed, replaced by health panel */
     .agent-actions { margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
     .kick-prompt {
@@ -642,12 +639,12 @@
     .agent-card.on-demand .agent-state { color: var(--indigo); }
     .agent-card.off { border-color: color-mix(in srgb, var(--muted) 60%, var(--bg)); opacity: 0.6; }
     .agent-card.off .agent-state { color: color-mix(in srgb, var(--muted) 60%, var(--bg)); }
-    .pause-badge { display: inline-block; font-size: 0.6rem; background: var(--red-bg); color: var(--red); border: 1px solid var(--red-border); border-radius: 3px; padding: 1px 5px; margin-left: 4px; vertical-align: middle; }
+    .pause-badge { --pill-c: var(--red); margin-left: 4px; vertical-align: middle; } /* pill recipe */
     .pause-info { cursor: help; font-size: 0.7rem; margin-left: 4px; opacity: 0.8; position: relative; display: inline-block; }
     .pause-info:hover .pause-tooltip { display: block; }
     .pause-tooltip { display: none; position: absolute; bottom: 120%; left: 50%; transform: translateX(-50%); background: var(--panel-strong); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; font-size: 0.7rem; white-space: nowrap; z-index: 100; box-shadow: 0 2px 8px rgba(0,0,0,0.4); }
-    .off-badge { display: inline-block; font-size: 0.6rem; background: rgba(72,79,88,0.25); color: var(--muted); border: 1px solid rgba(72,79,88,0.4); border-radius: 3px; padding: 1px 5px; margin-left: 4px; vertical-align: middle; }
-    .on-demand-badge { display: inline-block; font-size: 0.6rem; background: rgba(99,102,241,0.15); color: var(--indigo); border: 1px solid rgba(99,102,241,0.3); border-radius: 3px; padding: 1px 5px; margin-left: 4px; vertical-align: middle; }
+    .off-badge { margin-left: 4px; vertical-align: middle; } /* pill recipe (default muted) */
+    .on-demand-badge { --pill-c: var(--indigo); margin-left: 4px; vertical-align: middle; } /* pill recipe */
 
     /* Health status panel */
     .health { margin-bottom: 24px; }
@@ -685,7 +682,6 @@
     }
     @media (max-width: 480px) {
       .governor { padding: 10px; }
-      .pause-badge { font-size: 0.55rem; padding: 0px 3px; margin-left: 2px; }
     }
     .governor.dead { border-color: var(--red); }
     .governor.starting { border-color: var(--yellow); }
@@ -715,28 +711,14 @@
     .repo-stat a:hover { text-decoration: underline !important; }
     .repo-stat a:hover .label { color: var(--fg); }
     .repo-issues { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--border); }
-    .repo-issue-pill {
-      display: inline-flex; align-items: center; gap: 3px;
-      font-size: 0.65rem; padding: 2px 6px; border-radius: 4px;
-      background: rgba(88,166,255,0.12); color: var(--blue);
-      border: 1px solid rgba(88,166,255,0.25);
-      text-decoration: none; max-width: 100%;
-      transition: background 0.15s;
-    }
-    .repo-issue-pill:hover { background: rgba(88,166,255,0.25); text-decoration: none; }
+    /* .repo-issue-pill / .repo-pr-pill — pill recipe; link hovers deepen the tint */
+    .repo-issue-pill { --pill-c: var(--blue); text-decoration: none; max-width: 100%; transition: background 0.15s; }
+    .repo-issue-pill:hover { background: color-mix(in srgb, var(--pill-c) 24%, transparent); text-decoration: none; }
     .repo-issue-pill .pill-num { font-weight: 700; white-space: nowrap; }
     .repo-issue-pill .pill-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .repo-pr-pill {
-      display: inline-flex; align-items: center; gap: 3px;
-      font-size: 0.65rem; padding: 2px 6px; border-radius: 4px;
-      background: rgba(188,140,255,0.12); color: var(--purple);
-      border: 1px solid rgba(188,140,255,0.25);
-      text-decoration: none; max-width: 100%;
-      transition: background 0.15s;
-    }
-    .repo-pr-pill:hover { background: rgba(188,140,255,0.25); text-decoration: none; }
-    .repo-pr-pill.mergeable { border-color: rgba(63,185,80,0.6); background: rgba(63,185,80,0.1); color: var(--green); }
-    .repo-pr-pill.mergeable:hover { background: rgba(63,185,80,0.22); }
+    .repo-pr-pill { --pill-c: var(--purple); text-decoration: none; max-width: 100%; transition: background 0.15s; }
+    .repo-pr-pill:hover { background: color-mix(in srgb, var(--pill-c) 24%, transparent); text-decoration: none; }
+    .repo-pr-pill.mergeable { --pill-c: var(--green); }
     .repo-pr-pill .pill-num { font-weight: 700; white-space: nowrap; }
     .repo-pr-pill .pill-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .repo-pr-pill .pill-merge-icon { font-size: 0.6rem; margin-left: 1px; }
@@ -895,20 +877,14 @@
     .ind-label { color: var(--muted); font-size: 0.65rem; }
     .ind-empty { color: var(--muted); font-style: italic; font-size: 0.7rem; }
     .ind-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
-    .ind-tag {
-      background: rgba(31,111,235,0.15); color: var(--blue); border: 1px solid rgba(31,111,235,0.3);
-      border-radius: 4px; padding: 1px 6px; font-size: 0.65rem; text-decoration: none;
-    }
-    .ind-tag:hover { background: rgba(31,111,235,0.3); }
+    /* .ind-tag family — pill recipe; variants pick --pill-c, hover deepens tint */
+    .ind-tag { --pill-c: var(--blue); text-decoration: none; }
+    .ind-tag:hover { background: color-mix(in srgb, var(--pill-c) 26%, transparent); }
     .ind-pair { display: flex; align-items: center; gap: 4px; margin-top: 3px; }
-    .ind-issue { background: rgba(35,134,54,0.15); color: var(--green); border-color: rgba(35,134,54,0.3); }
-    .ind-issue:hover { background: rgba(35,134,54,0.3); }
-    .ind-pr { background: rgba(138,99,210,0.15); color: var(--purple); border-color: rgba(138,99,210,0.3); }
-    .ind-pr:hover { background: rgba(138,99,210,0.3); }
-    .ind-merged { background: rgba(63,185,80,0.15); color: var(--green); border-color: rgba(63,185,80,0.3); }
-    .ind-merged:hover { background: rgba(63,185,80,0.3); }
-    .ind-wip { background: rgba(210,153,34,0.15); color: var(--yellow); border-color: rgba(210,153,34,0.3); }
-    .ind-wip:hover { background: rgba(210,153,34,0.3); }
+    .ind-issue { --pill-c: var(--green); }
+    .ind-pr { --pill-c: var(--purple); }
+    .ind-merged { --pill-c: var(--green); }
+    .ind-wip { --pill-c: var(--yellow); }
     .ind-arrow { color: var(--muted); font-size: 0.7rem; }
     .ind-dots { display: flex; flex-wrap: wrap; gap: 8px; }
     .ind-dot-item { display: flex; align-items: center; gap: 3px; }
@@ -938,11 +914,8 @@
     .token-stat .tval { font-size: 1.3rem; font-weight: 700; }
     .token-stat .tlabel { font-size: 0.65rem; color: var(--muted); }
     .token-models { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
-    .token-model-chip {
-      font-family: var(--font-mono);
-      background: rgba(188,140,255,0.1); border: 1px solid rgba(188,140,255,0.25);
-      border-radius: 6px; padding: 6px 10px; font-size: 0.72rem;
-    }
+    /* .token-model-chip — pill recipe (purple, mono; size step in the recipe block) */
+    .token-model-chip { --pill-c: var(--purple); font-family: var(--font-mono); }
     .token-model-chip .mname { color: var(--purple); font-weight: 600; }
     .token-model-chip .mcount { color: var(--muted); margin-left: 6px; }
     .token-sessions { font-size: 0.7rem; color: var(--muted); }
@@ -994,17 +967,18 @@
     /* Model chip on agent cards */
     .pin-toggle { cursor: pointer; background: none; border: none; font-size: 0.7rem; padding: 0 2px; opacity: 0.6; transition: opacity 0.2s; }
     .pin-toggle:hover { opacity: 1; }
-    .model-chip { font-family: var(--font-mono); display: inline-flex; align-items: center; gap: 4px; font-size: 0.65rem; padding: 2px 6px; border-radius: 4px; }
-    .model-chip.free { background: var(--green-bg); color: var(--green); }
-    .model-chip.paid { background: rgba(210,153,34,0.12); color: var(--yellow); }
-    .model-chip.haiku { background: rgba(88,166,255,0.12); color: var(--blue); }
-    .model-chip.sonnet { background: rgba(210,153,34,0.12); color: var(--yellow); }
-    .model-chip.opus { background: var(--red-bg); color: var(--red); }
-    /* Non-Claude model tiers */
-    .model-chip.gpt { background: rgba(16,163,127,0.12); color: #10a37f; }
-    .model-chip.gemini { background: rgba(66,133,244,0.12); color: #4285f4; }
-    .model-chip.deepseek { background: var(--green-bg); color: var(--green); }
-    .model-chip.unknown { background: rgba(139,148,158,0.12); color: var(--muted); }
+    /* .model-chip — pill recipe; tiers pick --pill-c (mono for model ids) */
+    .model-chip { font-family: var(--font-mono); }
+    .model-chip.free { --pill-c: var(--green); }
+    .model-chip.paid { --pill-c: var(--yellow); }
+    .model-chip.haiku { --pill-c: var(--blue); }
+    .model-chip.sonnet { --pill-c: var(--yellow); }
+    .model-chip.opus { --pill-c: var(--red); }
+    /* Non-Claude model tiers (brand colors stay literal) */
+    .model-chip.gpt { --pill-c: #10a37f; }
+    .model-chip.gemini { --pill-c: #4285f4; }
+    .model-chip.deepseek { --pill-c: var(--green); }
+    .model-chip.unknown { --pill-c: var(--muted); }
 
     /* Health dots (reused inside ci-maintainer indicators) */
     .health-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; display: inline-block; }
@@ -1416,9 +1390,9 @@
     .nous-config-row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 8px; }
     .nous-config-check { display: flex; align-items: center; gap: 8px; font-size: 0.8rem; color: var(--fg); cursor: pointer; padding: 4px 0; }
     .nous-config-check input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent); }
-    .nous-config-pill { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: 6px; font-size: 0.75rem; border: 1px solid var(--border); margin: 2px; cursor: pointer; transition: all 0.15s; }
-    .nous-config-pill.active { background: rgba(88,166,255,0.15); border-color: var(--accent); color: var(--accent); }
-    .nous-config-pill:not(.active) { background: var(--bg); color: var(--muted); }
+    /* .nous-config-pill — toggleable pill on the recipe; active picks the accent */
+    .nous-config-pill { margin: 2px; cursor: pointer; transition: all 0.15s; }
+    .nous-config-pill.active { --pill-c: var(--accent); }
     .nous-config-pill:hover { border-color: var(--accent); }
     .nous-config-output-modes { display: flex; gap: 0; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin-bottom: 10px; }
     .nous-config-output-mode { flex: 1; padding: 8px 10px; text-align: center; font-size: 0.76rem; cursor: pointer; border: none; background: var(--bg); color: var(--muted); transition: all 0.2s; }
@@ -1471,19 +1445,20 @@
     .kb-fact-title { font-size: 0.82rem; font-weight: 600; color: var(--fg); margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .kb-fact-snippet { font-size: 0.72rem; color: var(--muted); line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
     .kb-fact-tags { display: flex; gap: 4px; margin-top: 4px; }
-    .kb-type-badge { font-size: 0.62rem; padding: 1px 6px; border-radius: 3px; font-weight: 600; text-transform: uppercase; }
-    .kb-type-pattern { background: #dbeafe; color: #1d4ed8; }
-    .kb-type-gotcha { background: #fef3c7; color: #92400e; }
-    .kb-type-regression { background: #fee2e2; color: #991b1b; }
-    .kb-type-decision { background: #e0e7ff; color: #3730a3; }
-    .kb-type-test_scaffold { background: #d1fae5; color: #065f46; }
-    .kb-type-integration { background: #ede9fe; color: #5b21b6; }
-    .kb-type-coverage_rule { background: #fce7f3; color: #9d174d; }
-    .kb-layer-badge { font-size: 0.62rem; padding: 1px 6px; border-radius: 3px; }
-    .kb-layer-personal { background: #dbeafe; color: #1d4ed8; }
-    .kb-layer-project { background: #d1fae5; color: #065f46; }
-    .kb-layer-org { background: #fef3c7; color: #92400e; }
-    .kb-layer-community { background: #ede9fe; color: #5b21b6; }
+    /* kb-type / kb-layer chips — pill recipe; the Phase-0 hardcoded pastel
+       pairs become token tints so they read in BOTH modes. */
+    .kb-type-badge { font-weight: 600; text-transform: uppercase; }
+    .kb-type-pattern { --pill-c: var(--blue); }
+    .kb-type-gotcha { --pill-c: var(--yellow); }
+    .kb-type-regression { --pill-c: var(--red); }
+    .kb-type-decision { --pill-c: var(--indigo); }
+    .kb-type-test_scaffold { --pill-c: var(--green); }
+    .kb-type-integration { --pill-c: var(--purple); }
+    .kb-type-coverage_rule { --pill-c: var(--cyan); }
+    .kb-layer-personal { --pill-c: var(--blue); }
+    .kb-layer-project { --pill-c: var(--green); }
+    .kb-layer-org { --pill-c: var(--yellow); }
+    .kb-layer-community { --pill-c: var(--purple); }
     .kb-detail { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); padding: 16px; }
     .kb-detail-title { font-size: 1rem; font-weight: 700; color: var(--fg); margin-bottom: 8px; }
     .kb-detail-body { font-size: 0.8rem; color: var(--fg); line-height: 1.6; margin-bottom: 12px; white-space: pre-wrap; }
@@ -1691,6 +1666,30 @@
       border: none; cursor: pointer; font-family: var(--font-ui);
       transition: opacity 0.15s, background 0.15s;
     }
+
+    /* ══ Pill/badge system (Phase 2) ══
+       One recipe: 999px radius, --fs-xs, faint tint bg + colored border.
+       Each pill declares its color once via --pill-c (default: muted);
+       status pills keep readable colored labels on the faint tint (the
+       neutral-text rule applies to banners/toasts, not chips). Selectors
+       are grouped — no class renames. */
+    .status-badge, .model-chip, .token-model-chip, .repo-issue-pill, .repo-pr-pill,
+    .ind-tag, .pause-badge, .off-badge, .on-demand-badge, .oc-health-badge,
+    .nous-config-pill, .kb-type-badge, .kb-layer-badge, .summary-age {
+      display: inline-flex; align-items: center; gap: 4px;
+      font-size: var(--fs-xs); line-height: 1.5;
+      padding: 1px 8px; border-radius: 999px;
+      background: color-mix(in srgb, var(--pill-c, var(--muted)) 12%, transparent);
+      border: 1px solid color-mix(in srgb, var(--pill-c, var(--muted)) 40%, transparent);
+      color: var(--pill-c, var(--muted));
+    }
+    /* pill size steps */
+    .token-model-chip { padding: 4px 10px; font-size: var(--fs-sm); }
+    .nous-config-pill { padding: 3px 10px; font-size: var(--fs-sm); }
+    .oc-health-badge { padding: 3px 12px; font-size: var(--fs-sm); }
+    @media (max-width: 480px) {
+      .pause-badge { font-size: 0.55rem; padding: 0 5px; margin-left: 2px; }
+    }
   </style>
 </head>
 <body>
@@ -1854,7 +1853,7 @@
       </div>
     </div>
     <div style="padding:4px 16px 8px;text-align:center">
-      <span id="acmm-sidebar-badge" title="ACMM Maturity Level — click to change" style="cursor:pointer;display:inline-block;padding:4px 12px;border-radius:12px;font-size:0.7rem;font-weight:700;background:linear-gradient(135deg,#3498db,#2ecc71);color:#fff;letter-spacing:0.5px" onclick="openACMMDialog()"></span>
+      <span id="acmm-sidebar-badge" title="ACMM Maturity Level — click to change" style="cursor:pointer;display:inline-block;padding:3px 12px;border-radius:999px;font-size:0.7rem;font-weight:700;background:color-mix(in srgb, var(--amber) 14%, transparent);border:1px solid color-mix(in srgb, var(--amber) 45%, transparent);color:var(--amber);letter-spacing:0.5px" onclick="openACMMDialog()"></span>
     </div>
     <div class="oc-nav-group">
       <div class="oc-nav-label">Control</div>
@@ -1952,7 +1951,7 @@
   <h1><span class="bee">🐝</span> KubeStellar Hive Dashboard&nbsp;<span id="project-name">for KubeStellar/Console</span> <span class="timestamp" id="ts"></span>
     <span class="git-version" id="git-version"></span>
     <span class="git-version" id="hive-id-badge" title="Hive Instance ID" style="cursor:pointer;border:1px solid var(--border);padding:2px 8px;border-radius:4px" onclick="openConfigDialog('governor')"></span>
-    <span class="git-version" id="acmm-badge" title="ACMM Maturity Level — click to change" style="cursor:pointer;border:1px solid var(--border);padding:2px 8px;border-radius:4px;background:linear-gradient(135deg,#3498db,#2ecc71);color:#fff;font-weight:600" onclick="openACMMDialog()"></span>
+    <span class="git-version" id="acmm-badge" title="ACMM Maturity Level — click to change" style="cursor:pointer;border:1px solid color-mix(in srgb, var(--amber) 45%, transparent);padding:2px 8px;border-radius:999px;background:color-mix(in srgb, var(--amber) 14%, transparent);color:var(--amber);font-weight:600" onclick="openACMMDialog()"></span>
     <button class="layout-toggle" id="layout-toggle" onclick="toggleLayout()" title="Switch between Light mode (sidebar + detail panel) and Dark mode (dark theme grid). Your preference is saved in the browser.">☰ Dark Mode</button>
     <a href="/api/widget" class="widget-dl" title="Download Übersicht widget">⬇ Widget</a>
   </h1>
