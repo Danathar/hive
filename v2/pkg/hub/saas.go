@@ -510,8 +510,16 @@ type ClusterHealthNode struct {
 	DiskPressure  bool     `json:"disk_pressure"`
 	Pods          int      `json:"pods"`
 	PodCapacity   int      `json:"pod_capacity"`
-	Conditions    []string `json:"conditions"`
+	// HiveCount is the number of distinct hive-hosted-* namespaces with a
+	// running pod on this node (namespaces, not pods, so a hive briefly
+	// running two pods during a rollout is counted once).
+	HiveCount  int      `json:"hive_count"`
+	Conditions []string `json:"conditions"`
 }
+
+// hiveHostedNamespacePrefix is the namespace prefix used for SaaS-provisioned
+// hives; pods in these namespaces identify hives running on a node.
+const hiveHostedNamespacePrefix = "hive-hosted-"
 
 type ClusterHealthSummary struct {
 	TotalNodes    int `json:"total_nodes"`
@@ -901,6 +909,9 @@ func buildSingleClusterHealth(cluster *ClusterConfig, hiveCount int, logger *slo
 	if len(podOut) > 0 {
 		var podsJSON struct {
 			Items []struct {
+				Metadata struct {
+					Namespace string `json:"namespace"`
+				} `json:"metadata"`
 				Spec struct {
 					NodeName string `json:"nodeName"`
 				} `json:"spec"`
@@ -908,11 +919,21 @@ func buildSingleClusterHealth(cluster *ClusterConfig, hiveCount int, logger *slo
 		}
 		if json.Unmarshal(podOut, &podsJSON) == nil {
 			podCounts := make(map[string]int)
+			// hiveNamespacesPerNode tracks distinct hive-hosted-* namespaces per
+			// node so each hive is counted once even with multiple pods.
+			hiveNamespacesPerNode := make(map[string]map[string]bool)
 			for _, p := range podsJSON.Items {
 				podCounts[p.Spec.NodeName]++
+				if strings.HasPrefix(p.Metadata.Namespace, hiveHostedNamespacePrefix) {
+					if hiveNamespacesPerNode[p.Spec.NodeName] == nil {
+						hiveNamespacesPerNode[p.Spec.NodeName] = make(map[string]bool)
+					}
+					hiveNamespacesPerNode[p.Spec.NodeName][p.Metadata.Namespace] = true
+				}
 			}
 			for i := range nodes {
 				nodes[i].Pods = podCounts[nodes[i].Name]
+				nodes[i].HiveCount = len(hiveNamespacesPerNode[nodes[i].Name])
 			}
 		}
 	}
@@ -999,6 +1020,7 @@ func convertHeartbeatToPerClusterHealth(clusterID, clusterName string, entry *He
 			DiskPressure:  n.DiskPressure,
 			Pods:          n.Pods,
 			PodCapacity:   n.PodCapacity,
+			HiveCount:     n.HiveCount,
 			Conditions:    n.Conditions,
 		}
 	}
@@ -4556,10 +4578,13 @@ const dashboardHTML = `<!DOCTYPE html>
       var cpuUsed = (n.cpu_used_millicores / 1000).toFixed(1);
       var memUsedGB = (n.mem_used_mb / 1024).toFixed(1);
       var memTotalGB = Math.round(n.mem_total_mb / 1024);
+      var hiveCount = n.hive_count || 0;
+      var hivePill = '<span style="padding:2px 8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;font-size:0.65rem;color:var(--muted)">' + hiveCount + (hiveCount === 1 ? ' hive' : ' hives') + '</span>';
       return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px">' +
         '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">' +
         '<span style="font-family:monospace;font-size:0.8rem;color:var(--text)">' + esc(nk) + '</span>' +
         '<span style="display:flex;align-items:center;gap:6px">' + readyBadge +
+        hivePill +
         '<span style="padding:2px 8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;font-size:0.65rem;color:var(--muted)">' + (n.pods || 0) + '/' + (n.pod_capacity || 0) + ' pods</span>' +
         '</span></div>' +
         renderHealthMetric('CPU', cpuUsed, n.cpu_cores, 'cores', n.cpu_percent, CLUSTER_CPU_WARN_PCT, CLUSTER_CPU_DANGER_PCT, nk, 'cpu') +
