@@ -1737,7 +1737,13 @@
 </head>
 <body>
 <script>
-// Apply layout immediately and hide content until first data render
+// Apply layout immediately and hide content until first data render.
+// NOTE: only body classes are set here — the .layout-toggle buttons do NOT
+// exist in the DOM yet at this point, so any label write here is a no-op.
+// applyLayout() (defined in the main script) is the single source of truth
+// for toggle labels; the DOMContentLoaded hook below guarantees it runs
+// once the topbar/sidebar buttons exist, so the label and body class always
+// sync from storage.
 (function(){
   var m=localStorage.getItem('hive-layout-mode');
   if(m==='openclaw')m='light';
@@ -1748,8 +1754,11 @@
   document.body.style.opacity='0';
   document.body.style.transition='opacity 0.15s ease-in';
   setTimeout(function(){ document.body.style.opacity='1'; }, 3000);
-  var lbl=m==='dark'?'☰ Light Mode':'☰ Dark Mode';
-  document.querySelectorAll('.layout-toggle').forEach(function(b){b.textContent=lbl});
+  document.addEventListener('DOMContentLoaded', function(){
+    if (typeof applyLayout === 'function' && typeof getLayout === 'function') {
+      applyLayout(getLayout());
+    }
+  });
 })();
 
 </script>
@@ -1965,7 +1974,7 @@
       <span class="oc-tb-link" onclick="openConfigDialog('governor')">⚙️ Config</span>
       <span class="oc-tb-link" onclick="ocNavigate('debug-section')">🔍 Debug</span>
       <!-- Agent Logs hidden (redundant with per-agent output) -->
-      <button class="layout-toggle" onclick="toggleLayout()" title="Switch to Dark mode — dark theme with compact agent cards in a grid. Best for quick overview of all agents at once.">☰ Dark Mode</button>
+      <button class="layout-toggle" onclick="toggleLayout()" title="Switch to Dark mode — dark theme with compact agent cards in a grid. Best for quick overview of all agents at once.">☾ Switch to Dark Mode</button>
     </div>
     <div class="oc-topbar-right">
       <span class="oc-health-badge" id="oc-health">● Health OK</span>
@@ -1995,7 +2004,7 @@
     <span class="git-version" id="git-version"></span>
     <span class="git-version" id="hive-id-badge" title="Hive Instance ID" style="cursor:pointer;border:1px solid var(--border);padding:2px 8px;border-radius:4px" onclick="openConfigDialog('governor')"></span>
     <span class="git-version" id="acmm-badge" title="ACMM Maturity Level — click to change" style="cursor:pointer;border:1px solid color-mix(in srgb, var(--amber) 45%, transparent);padding:2px 8px;border-radius:999px;background:color-mix(in srgb, var(--amber) 14%, transparent);color:var(--amber);font-weight:600" onclick="openACMMDialog()"></span>
-    <button class="layout-toggle" id="layout-toggle" onclick="toggleLayout()" title="Switch between Light mode (sidebar + detail panel) and Dark mode (dark theme grid). Your preference is saved in the browser.">☰ Dark Mode</button>
+    <button class="layout-toggle" id="layout-toggle" onclick="toggleLayout()" title="Switch between Light mode (sidebar + detail panel) and Dark mode (dark theme grid). Your preference is saved in the browser.">☾ Switch to Dark Mode</button>
     <a href="/api/widget" class="widget-dl" title="Download Übersicht widget">⬇ Widget</a>
   </h1>
 
@@ -2305,7 +2314,9 @@
     // ── Layout mode (Dark / Light) ──
     const LAYOUT_KEY = 'hive-layout-mode';
     const LAYOUT_MODES = ['dark', 'light'];
-    const LAYOUT_LABELS = { dark: '☰ Light Mode', light: '☰ Dark Mode' };
+    // State-explicit labels: the button names the ACTION ("Switch to …"),
+    // never the current mode, so it cannot be misread as a state indicator.
+    const LAYOUT_LABELS = { dark: '☀ Switch to Light Mode', light: '☾ Switch to Dark Mode' };
     function getLayout() {
       let stored = localStorage.getItem(LAYOUT_KEY) || 'light';
       if (stored === 'openclaw') { stored = 'light'; setLayout(stored); }
