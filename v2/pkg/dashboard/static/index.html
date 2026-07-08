@@ -2703,7 +2703,11 @@
       // summary text + status dot to avoid full DOM rebuild (prevents scroll jumps).
       // Only update summary when detailSummary is available — never replace long
       // ring buffer content with short liveSummary fallback.
-      if (existingSummary && detail.dataset.agent === a.name) {
+      // The fingerprint guards the fields only the full template renders
+      // (method/model/pins): without it a CLI or model switch stayed stale
+      // in the focused panel until a hard refresh.
+      const cfgSig = [a.cli || '', a.model || '', a.pinnedCli ? 1 : 0, a.pinnedModel ? 1 : 0, a.pinnedBoth ? 1 : 0].join('|');
+      if (existingSummary && detail.dataset.agent === a.name && detail.dataset.cfgSig === cfgSig) {
         if (a.detailSummary) {
           const newText = escBlock(a.detailSummary);
           if (existingSummary.innerHTML !== newText) {
@@ -2721,6 +2725,7 @@
         return;
       }
       detail.dataset.agent = a.name;
+      detail.dataset.cfgSig = cfgSig;
 
       const gov = window._lastStatus?.governor || {};
       const govMode = (gov.mode || 'unknown').toLowerCase();
@@ -8016,6 +8021,9 @@ function burnAreaChart() {
         applyPinOverrides(data.agents || []);
         renderAgents(data.agents || []);
         renderGovernor(data.governor || {}, data.cadenceMatrix || [], data);
+        // Keep the focused agent detail in sync with fresh payloads — its
+        // fast path only rebuilds when the config fingerprint changes.
+        if (_ocSelectedAgent) ocRenderAgentDetail();
       }
       renderTokens(data.tokens || {});
       renderAdvisoryDigest(data.advisoryDigest || null);
@@ -9277,6 +9285,12 @@ function burnAreaChart() {
         const a = window._lastAgents.find(x => x.name === agent);
         if (a) { a.cli = backend; renderAgents(window._lastAgents); }
       }
+      // Reflect the switch everywhere it is shown (focused detail panel,
+      // cadence-matrix method column), then confirm against the server.
+      ocRenderAgentDetail();
+      const lastData = window._lastStatus || {};
+      renderGovernor(lastData.governor || {}, lastData.cadenceMatrix || [], lastData);
+      fetch('/api/status').then(r => r.json()).then(render).catch(() => {});
     }
 
     async function updateModelDropdown(agent, backend) {
@@ -9312,6 +9326,12 @@ function burnAreaChart() {
         const a = window._lastAgents.find(x => x.name === agent);
         if (a) { a.model = model; renderAgents(window._lastAgents); }
       }
+      // Reflect the switch everywhere it is shown (focused detail panel,
+      // cadence-matrix model column), then confirm against the server.
+      ocRenderAgentDetail();
+      const lastData = window._lastStatus || {};
+      renderGovernor(lastData.governor || {}, lastData.cadenceMatrix || [], lastData);
+      fetch('/api/status').then(r => r.json()).then(render).catch(() => {});
     }
 
     const PIN_OVERRIDE_TTL_MS = 60000;
