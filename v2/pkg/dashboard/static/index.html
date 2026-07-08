@@ -103,10 +103,10 @@
     }
     body.light-mode .connection { display: none; }
 
-    /* Light sidebar */
+    /* Sidebar — --bg-soft surface (hub identity), amber chrome accents */
     .oc-sidebar {
       position: fixed; top: 0; left: 0; bottom: 0; width: var(--sidebar-w);
-      background: var(--surface); border-right: 1px solid var(--border);
+      background: var(--bg-soft); border-right: 1px solid var(--line);
       display: flex; flex-direction: column; padding: 0;
       z-index: 100; overflow-y: auto;
     }
@@ -116,7 +116,7 @@
       cursor: col-resize; z-index: 101;
     }
     .oc-sidebar-resize:hover, .oc-sidebar-resize.dragging {
-      background: rgba(220,38,38,0.25);
+      background: color-mix(in srgb, var(--amber) 30%, transparent);
     }
     .oc-sidebar-logo {
       display: flex; align-items: center; gap: 10px;
@@ -161,8 +161,15 @@
     .oc-nav-actions button:hover { background: var(--border); color: var(--text); }
     .oc-nav-actions .oc-nav-delete:hover { background: var(--oc-accent-light); color: var(--oc-accent); }
     .mode-badge { font-size: 0.7rem; margin-left: 2px; opacity: 0.8; }
+    /* Active nav — amber accent bar (brand chrome), both modes.
+       --oc-accent stays red for non-nav uses (delete affordances). */
     .oc-nav-item.active {
-      background: var(--oc-accent-light); color: var(--oc-accent); font-weight: 600;
+      background: color-mix(in srgb, var(--amber) 12%, transparent);
+      color: var(--text); font-weight: 600;
+    }
+    .oc-nav-item.active::before {
+      content: ''; position: absolute; left: 0; top: 4px; bottom: 4px;
+      width: 3px; border-radius: 0 2px 2px 0; background: var(--amber);
     }
     .oc-sidebar-footer {
       padding: 16px 20px; border-top: 1px solid var(--border);
@@ -226,10 +233,14 @@
       transition: width 0.5s ease, background 0.5s ease;
     }
 
-    /* Light top bar */
+    /* Topbar — sticky blurred header (hub .site-header recipe). Fixed
+       positioning kept (functionally sticky: content scrolls under it)
+       because the sidebar offset layout depends on it. */
     .oc-topbar {
       position: fixed; top: 0; left: var(--sidebar-w); right: 0; height: 48px;
-      background: var(--surface); border-bottom: 1px solid var(--border);
+      background: color-mix(in srgb, var(--bg) 85%, transparent);
+      -webkit-backdrop-filter: blur(18px); backdrop-filter: blur(18px);
+      border-bottom: 1px solid var(--line);
       display: flex; align-items: center; justify-content: space-between;
       padding: 0 20px; z-index: 99;
     }
@@ -327,10 +338,11 @@
 
     /* Sidebar agent tree */
     .oc-tree-toggle {
+      /* .section-label convention */
       display: flex; align-items: center; gap: 8px;
-      padding: 10px 20px 6px; font-size: 0.65rem; color: var(--muted);
+      padding: 10px 20px 6px; font-size: var(--fs-xs); color: var(--amber);
       cursor: pointer; user-select: none;
-      text-transform: uppercase; letter-spacing: 0.8px; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.12em; font-weight: 800;
     }
     .oc-tree-toggle:hover { color: var(--text); }
     .oc-tree-arrow { font-size: 0.55rem; transition: transform 0.15s; }
@@ -353,9 +365,10 @@
     .oc-nav-item.dragging { opacity: 0.4; }
     .oc-sidebar-group { position: relative; }
     .oc-sidebar-group-header {
+      /* .section-label convention */
       display: flex; align-items: center; gap: 6px;
-      padding: 8px 14px 4px; font-size: 0.65rem; color: var(--muted);
-      text-transform: uppercase; letter-spacing: 0.8px; font-weight: 600;
+      padding: 8px 14px 4px; font-size: var(--fs-xs); color: var(--amber);
+      text-transform: uppercase; letter-spacing: 0.12em; font-weight: 800;
       cursor: pointer; user-select: none;
     }
     .oc-sidebar-group-header { cursor: grab; }
