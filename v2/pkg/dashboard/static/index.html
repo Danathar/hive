@@ -24,6 +24,7 @@
       /* Radii / shadows / fonts — defined in Phase 0, applied in later phases. */
       --radius-sm: 4px; --radius: 6px; --radius-lg: 12px;
       --shadow-modal: 0 20px 60px rgba(0, 0, 0, 0.5);
+      --shadow-raised: 0 4px 16px rgba(0, 0, 0, 0.45); /* toasts / floating chrome */
       --font-ui: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
       --font-mono: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
       /* Type ramp — section headers / card titles / labels only; body-copy sizes stay. */
@@ -83,6 +84,7 @@
       --indigo: #4f46e5;
       --cyan: #0891b2; --purple: #7c3aed;
       --shadow-modal: 0 20px 60px rgba(0, 0, 0, 0.15);
+      --shadow-raised: 0 4px 16px rgba(0, 0, 0, 0.12);
       --accent: var(--red); /* light mode accent is red (openclaw identity) */
       --oc-accent-light: rgba(220,38,38,0.08);
       --green-bg: #f0fdf4; --green-border: #bbf7d0;
@@ -301,14 +303,8 @@
       display: flex; gap: 8px; align-items: flex-end;
       padding-top: 12px; border-top: 1px solid var(--border);
     }
-    .oc-chat-input {
-      flex: 1; padding: 10px 14px; border: 1px solid var(--border);
-      border-radius: 8px; font-size: 0.85rem; color: var(--text);
-      background: var(--surface); font-family: inherit; resize: none;
-      min-height: 40px; outline: none;
-    }
-    .oc-chat-input:focus { border-color: var(--oc-accent); box-shadow: 0 0 0 2px var(--oc-accent-light); }
-    .oc-chat-input::placeholder { color: var(--muted); }
+    /* .oc-chat-input — shared input recipe (end of style block) */
+    .oc-chat-input { flex: 1; resize: none; min-height: 40px; }
     .oc-chat-send {
       padding: 10px 18px; background: var(--red); color: var(--bg); border: none;
       border-radius: 8px; font-size: 0.82rem; font-weight: 600;
@@ -625,13 +621,8 @@
     .summary-age.age-stale  { --pill-c: var(--red); }
     /* Agent metric gauges — removed, replaced by health panel */
     .agent-actions { margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
-    .kick-prompt {
-      flex: 1 1 100%; background: var(--bg); border: 1px solid var(--border);
-      color: var(--text); padding: 4px 8px; border-radius: 4px; font-size: 0.75rem;
-      font-family: inherit; outline: none; min-width: 0;
-    }
-    .kick-prompt:focus { border-color: var(--accent); }
-    .kick-prompt::placeholder { color: var(--muted); }
+    /* .kick-prompt — shared input recipe (end of style block) */
+    .kick-prompt { flex: 1 1 100%; min-width: 0; }
     /* .btn-toggle — ghost button with status states (system recipe at end of style block) */
     .agent-card.paused { border-color: var(--red); opacity: 0.7; }
     .agent-card.paused .agent-state { color: var(--red); }
@@ -665,13 +656,9 @@
     .health-ci.warn { color: var(--yellow); }
     .health-ci.bad { color: var(--red); }
     /* .btn / .terminal-link / .restart-btn — button system recipes at end of style block */
-    .backend-select {
-      appearance: none; -webkit-appearance: none;
-      background: var(--surface); color: var(--muted);
-      font-size: 0.7rem; padding: 3px 8px; border-radius: 4px;
-      border: 1px solid var(--border); cursor: pointer; font-family: inherit;
-    }
-    .backend-select:hover { background: var(--border); color: var(--text); }
+    /* .backend-select — shared input recipe (end of style block) */
+    .backend-select { appearance: none; -webkit-appearance: none; cursor: pointer; }
+    .backend-select:hover { color: var(--text); border-color: var(--text); }
     .backend-select option { background: var(--surface); color: var(--text); }
     .backend-select option:disabled { color: var(--muted); }
 
@@ -1022,10 +1009,18 @@
       text-overflow: ellipsis; white-space: nowrap; flex: 1;
     }
     #toast-container { position: fixed; top: 16px; right: 16px; z-index: 10001; display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
-    .toast { pointer-events: auto; padding: 10px 16px; border-radius: 6px; font-size: 0.78rem; color: var(--text); box-shadow: 0 4px 12px rgba(0,0,0,0.4); animation: toast-in 0.25s ease-out; max-width: 360px; }
-    .toast.success { background: color-mix(in srgb, var(--green) 15%, var(--panel)); border: 1px solid var(--green); }
-    .toast.error { background: color-mix(in srgb, var(--red) 15%, var(--panel)); border: 1px solid var(--red); }
-    .toast.info { background: color-mix(in srgb, var(--blue) 15%, var(--panel)); border: 1px solid var(--blue); }
+    /* Toasts — neutral --text copy (Phase 0 rule); severity lives in the
+       tint, the subtle border, and a 3px colored left edge. */
+    .toast {
+      pointer-events: auto; padding: 10px 16px;
+      border-radius: var(--radius); font-size: 0.78rem; color: var(--text);
+      border: 1px solid var(--line); border-left: 3px solid var(--muted);
+      background: var(--panel);
+      box-shadow: var(--shadow-raised); animation: toast-in 0.25s ease-out; max-width: 360px;
+    }
+    .toast.success { background: color-mix(in srgb, var(--green) 14%, var(--panel)); border-color: color-mix(in srgb, var(--green) 35%, var(--line)); border-left-color: var(--green); }
+    .toast.error { background: color-mix(in srgb, var(--red) 14%, var(--panel)); border-color: color-mix(in srgb, var(--red) 35%, var(--line)); border-left-color: var(--red); }
+    .toast.info { background: color-mix(in srgb, var(--blue) 14%, var(--panel)); border-color: color-mix(in srgb, var(--blue) 35%, var(--line)); border-left-color: var(--blue); }
     .toast-spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid color-mix(in srgb, var(--text) 30%, transparent); border-top-color: var(--text); border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 8px; vertical-align: middle; }
     @keyframes spin { to { transform: rotate(360deg); } }
     @keyframes toast-in { from { opacity: 0; transform: translateX(40px); } to { opacity: 1; transform: translateX(0); } }
@@ -1101,16 +1096,10 @@
 
     .config-field { margin-bottom: 14px; }
     .config-field label { display: block; font-size: var(--fs-xs); color: var(--muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+    /* .config-field inputs — shared input recipe (end of style block) */
     .config-field input[type="text"],
     .config-field input[type="number"],
-    .config-field select {
-      width: 100%; background: var(--bg); border: 1px solid var(--border);
-      color: var(--text); padding: 8px 10px; border-radius: 6px;
-      font-family: inherit; font-size: 0.8rem;
-    }
-    .config-field input:focus, .config-field select:focus {
-      outline: none; border-color: var(--accent);
-    }
+    .config-field select { width: 100%; }
     .config-field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
     .config-field-row4 { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 12px; }
 
@@ -1135,8 +1124,7 @@
     .config-stat-row .config-field-row { display: flex; gap: 6px; flex-wrap: wrap; }
     .config-stat-row .config-field { min-width: 0; }
     .config-stat-row .config-field label { font-size: 0.65rem; margin-bottom: 2px; }
-    .config-stat-row .config-field input,
-    .config-stat-row .config-field select { padding: 4px 6px; font-size: 0.75rem; }
+    /* compact stat-row inputs — size step re-declared after the input recipe */
     /* .btn-sm / .btn-danger / .btn-add — ghost/danger/secondary buttons (system recipe) */
     .btn-sm:disabled { opacity: 0.3; cursor: default; }
     .config-stats-list { max-height: 400px; overflow-y: auto; padding-right: 12px; }
@@ -1297,13 +1285,8 @@
       display: flex; gap: 8px; padding: 10px 14px;
       border-top: 1px solid var(--border); background: var(--surface);
     }
-    .hive-chat-input {
-      flex: 1; background: var(--bg); color: var(--text);
-      border: 1px solid var(--border); border-radius: 8px;
-      padding: 8px 12px; font-size: 0.75rem; font-family: inherit;
-      outline: none; resize: none; min-height: 36px; max-height: 80px;
-    }
-    .hive-chat-input:focus { border-color: var(--purple); }
+    /* .hive-chat-input — shared input recipe (end of style block) */
+    .hive-chat-input { flex: 1; resize: none; min-height: 36px; max-height: 80px; }
     .hive-chat-send {
       background: var(--purple); color: var(--bg); border: none; border-radius: 8px;
       padding: 0 14px; cursor: pointer; font-size: 0.8rem; font-weight: 600;
@@ -1368,11 +1351,10 @@
     .nous-config-section:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
     .nous-config-section h3 { font-size: 0.85rem; color: var(--accent); margin: 0 0 10px 0; display: flex; align-items: center; gap: 6px; }
     .nous-config-section label { display: block; font-size: 0.78rem; color: var(--muted); margin-bottom: 4px; }
+    /* nous-config inputs — shared input recipe (end of style block) */
     .nous-config-section textarea, .nous-config-section input[type="text"], .nous-config-section input[type="number"] {
-      width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg);
-      color: var(--fg); font-size: 0.8rem; font-family: inherit; resize: vertical;
+      width: 100%; resize: vertical;
     }
-    .nous-config-section textarea:focus, .nous-config-section input:focus { outline: none; border-color: var(--accent); }
     .nous-config-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-bottom: 8px; }
     .nous-config-row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 8px; }
     .nous-config-check { display: flex; align-items: center; gap: 8px; font-size: 0.8rem; color: var(--fg); cursor: pointer; padding: 4px 0; }
@@ -1412,9 +1394,7 @@
     .kb-layer-btn .kb-layer-label { display: flex; align-items: center; gap: 5px; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
     .kb-layer-btn .kb-health-indicator { width: 8px; height: 8px; min-width: 8px; border-radius: 50%; display: inline-block; }
     .kb-layer-count { font-size: 0.7rem; color: var(--muted); padding: 2px 6px; background: var(--bg); border-radius: 4px; }
-    .kb-search-box { width: 100%; padding: 7px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); font-size: 0.78rem; }
-    .kb-search-box:focus { outline: none; border-color: var(--accent); }
-    .kb-search-box::placeholder { color: var(--muted); }
+    .kb-search-box { width: 100%; } /* shared input recipe (end of style block) */
     .kb-filter-row { display: flex; gap: 4px; flex-wrap: wrap; }
     .kb-filter-pill { padding: 3px 8px; border: 1px solid var(--border); border-radius: 4px; font-size: 0.68rem; cursor: pointer; background: var(--bg); color: var(--muted); transition: all 0.15s; }
     .kb-filter-pill:hover { border-color: var(--accent); }
@@ -1705,6 +1685,44 @@
     @media (max-width: 600px) {
       .config-modal { border-radius: 0; } /* fullscreen on mobile (see mobile block above) */
     }
+
+    /* ══ Input system (Phase 2) ══
+       One recipe for text inputs/selects/textareas (derived from the old
+       .config-field input): --bg-soft field on --line border (the token
+       remap makes this white-on-gray in light mode), var(--radius), and a
+       subtle 2px amber focus ring. Grouped selectors — no renames. */
+    .config-field input[type="text"], .config-field input[type="number"], .config-field select,
+    .nous-config-section textarea, .nous-config-section input[type="text"], .nous-config-section input[type="number"],
+    .config-list-add input,
+    .kick-prompt, .kb-search-box, .oc-chat-input, .hive-chat-input, .backend-select {
+      background: var(--bg-soft);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      color: var(--text);
+      font-family: var(--font-ui);
+      font-size: var(--fs-base);
+      padding: 8px 10px;
+      outline: none;
+    }
+    .config-field input[type="text"]:focus, .config-field input[type="number"]:focus, .config-field select:focus,
+    .nous-config-section textarea:focus, .nous-config-section input[type="text"]:focus, .nous-config-section input[type="number"]:focus,
+    .config-list-add input:focus,
+    .kick-prompt:focus, .kb-search-box:focus, .oc-chat-input:focus, .hive-chat-input:focus, .backend-select:focus {
+      border-color: color-mix(in srgb, var(--amber) 60%, var(--line));
+      box-shadow: 0 0 0 2px color-mix(in srgb, var(--amber) 22%, transparent);
+    }
+    .config-field input::placeholder, .nous-config-section textarea::placeholder,
+    .nous-config-section input::placeholder, .config-list-add input::placeholder,
+    .kick-prompt::placeholder, .kb-search-box::placeholder,
+    .oc-chat-input::placeholder, .hive-chat-input::placeholder { color: var(--muted); }
+    /* input size steps (compact contexts keep their scale) */
+    .kick-prompt { padding: 4px 8px; font-size: var(--fs-sm); }
+    .backend-select { padding: 3px 8px; font-size: var(--fs-sm); color: var(--muted); }
+    .kb-search-box { padding: 7px 10px; font-size: var(--fs-sm); }
+    .hive-chat-input { padding: 8px 12px; font-size: var(--fs-sm); }
+    .oc-chat-input { padding: 10px 14px; }
+    .config-stat-row .config-field input,
+    .config-stat-row .config-field select { padding: 4px 6px; font-size: var(--fs-sm); }
   </style>
 </head>
 <body>
