@@ -2771,7 +2771,6 @@
       if (govOuter) {
         const itm = window._lastStatus?.issueToMerge || {};
         const itmMedian = itm.median_minutes || 0;
-        const MTTR_COLOR = '#d2a8ff';
         const govThresh = gov.thresholds || {};
         const OC_THRESH_QUIET = govThresh.quiet ?? 2;
         const OC_THRESH_BUSY = govThresh.busy ?? 10;
@@ -2783,8 +2782,8 @@
           <div class="gov-metric"><span class="gm-label">mode</span><span class="gm-val ${govModeClass}">${esc(gov.mode || '—')}</span></div>
           <div class="gov-metric"><span class="gm-label">actionable</span><span class="gm-val">${govActionable}</span></div>
           <div class="gov-metric"><span class="gm-label">PRs</span><span class="gm-val">${govPrs}</span></div>
-          <div class="gov-metric"><span class="gm-label">MTTR</span><span class="gm-val" style="color:${MTTR_COLOR}">${formatFixTime(itmMedian)}</span></div>
-          <div class="gov-metric" title="${esc((window._lastStatus?.hold?.items || []).map(h => (h.type === 'pr' ? 'PR' : 'Issue') + ' ' + h.repo + '#' + h.number + ': ' + h.title).join('\n') || 'No items on hold')}"><span class="gm-label">on hold</span><span class="gm-val" style="color:var(--yellow)">${window._lastStatus?.hold?.total || 0}</span></div>
+          <div class="gov-metric"><span class="gm-label">MTTR</span><span class="gm-val">${formatFixTime(itmMedian)}</span></div>
+          <div class="gov-metric" title="${esc((window._lastStatus?.hold?.items || []).map(h => (h.type === 'pr' ? 'PR' : 'Issue') + ' ' + h.repo + '#' + h.number + ': ' + h.title).join('\n') || 'No items on hold')}"><span class="gm-label">on hold</span><span class="gm-val">${window._lastStatus?.hold?.total || 0}</span></div>
           <div class="oc-gov-gauge">
             <div class="temp-gauge-track" style="background:linear-gradient(to right, var(--green) 0%, var(--green) ${OC_THRESH_QUIET/OC_GAUGE_MAX*100}%, var(--blue) ${OC_THRESH_QUIET/OC_GAUGE_MAX*100}%, var(--blue) ${OC_THRESH_BUSY/OC_GAUGE_MAX*100}%, var(--yellow) ${OC_THRESH_BUSY/OC_GAUGE_MAX*100}%, var(--yellow) ${OC_THRESH_SURGE/OC_GAUGE_MAX*100}%, var(--red) ${OC_THRESH_SURGE/OC_GAUGE_MAX*100}%, var(--red) 100%)">
               <div class="temp-gauge-glow" style="width:100%"></div>
@@ -3652,12 +3651,12 @@
         return `<div class="agent-field"><span class="label">tokens (24h)</span><span class="value" style="color:var(--muted)">${t.sessions} sess · ${t.messages} msgs</span></div>`;
       }
       const avg = t.avgPerSession || (t.sessions > 0 ? Math.floor(total / t.sessions) : 0);
-      let rows = `<div class="agent-field"><span class="label">tokens (24h)</span><span class="value" style="color:var(--cyan)">${fmtTokens(total)} <span style="color:var(--muted);font-size:0.65rem">(${t.sessions} sess)</span></span></div>`;
+      let rows = `<div class="agent-field"><span class="label">tokens (24h)</span><span class="value">${fmtTokens(total)} <span style="color:var(--muted);font-size:0.65rem">(${t.sessions} sess)</span></span></div>`;
       rows += `<div class="agent-field"><span class="label">avg/pass</span><span class="value">${fmtTokens(avg)}</span></div>`;
       const issueCount = getAgentIssueCount(name);
       if (issueCount > 0) {
         const tokensPerIssue = Math.floor(total / issueCount);
-        rows += `<div class="agent-field"><span class="label">avg/issue</span><span class="value" style="color:var(--green)">${fmtTokens(tokensPerIssue)} <span style="color:var(--muted);font-size:0.65rem">(${issueCount} today)</span></span></div>`;
+        rows += `<div class="agent-field"><span class="label">avg/issue</span><span class="value">${fmtTokens(tokensPerIssue)} <span style="color:var(--muted);font-size:0.65rem">(${issueCount} today)</span></span></div>`;
       }
       const intervalMin = parseCadenceMinutes(cadence);
       if (intervalMin > 0 && avg > 0) {
@@ -3666,7 +3665,7 @@
         const passesPerHour = MINUTES_PER_HOUR / intervalMin;
         const tokensPerHour = avg * passesPerHour;
         const tokensPerWeek = tokensPerHour * HOURS_PER_WEEK;
-        rows += `<div class="agent-field"><span class="label">burn rate</span><span class="value" style="color:var(--yellow)">${fmtTokens(tokensPerHour)}/hr · ${fmtTokens(tokensPerWeek)}/wk</span></div>`;
+        rows += `<div class="agent-field"><span class="label">burn rate</span><span class="value">${fmtTokens(tokensPerHour)}/hr · ${fmtTokens(tokensPerWeek)}/wk</span></div>`;
       }
       return rows;
     }
@@ -3979,7 +3978,7 @@
       const itmAvg = itm.avg_minutes || 0;
       const itmMedian = itm.median_minutes || 0;
       const itmCount = itm.count || 0;
-      const FIX_TIME_SPARK_COLOR = '#d2a8ff';
+      const FIX_TIME_SPARK_COLOR = 'var(--muted)'; /* sparkline tint only — the value itself is neutral */
       const itmHistory = (itm.history || []).map(h => h.median || h.avg);
       const itmSpark = sparkSvg(itmHistory, FIX_TIME_SPARK_COLOR);
       const itmTitle = itmCount > 0 ? `MTTR (Mean Time to Resolution) — median: ${formatFixTime(itmMedian)} | avg: ${formatFixTime(itmAvg)} | p90: ${formatFixTime(itm.p90_minutes)} | fastest: ${formatFixTime(itm.fastest_minutes)} | slowest: ${formatFixTime(itm.slowest_minutes)} | ${itmCount} fixes in last 30d` : 'MTTR — no data yet';
@@ -3987,7 +3986,7 @@
       const holdData = data.hold || {};
       const holdTotal = holdData.total || 0;
       const holdItems = holdData.items || [];
-      const HOLD_COLOR = 'var(--yellow)';
+      const HOLD_COLOR = 'var(--muted)'; /* sparkline tint only — the count itself is neutral */
       const holdTooltip = holdItems.length > 0 ? escapeHtml(holdItems.map(h => `${h.type === 'pr' ? 'PR' : 'Issue'} ${h.repo}#${h.number}: ${h.title}`).join('\n')) : 'No items on hold';
       const holdSpark = sparkSvg(getHistorySeries('govHold'), HOLD_COLOR);
 
@@ -3998,8 +3997,8 @@
           <div class="gov-stat" title="Current governor mode based on actionable issue count. Modes: idle (few issues), quiet (normal), busy (high load), surge (critical). Each mode has different agent cadences."><div class="label">mode</div><div class="val" style="color:${modeColor}">${escapeHtml(gov.mode)}</div></div>
           <div class="gov-stat" title="Number of open GitHub issues that are actionable (not labeled as hold, wontfix, etc.). This count determines the governor mode."><div class="label">actionable issues</div><div class="spark-row"><span class="val">${issueCount}</span>${issuesSpark}</div></div>
           <div class="gov-stat" title="Number of open pull requests across all monitored repositories."><div class="label">PRs</div><div class="spark-row"><span class="val">${gov.prs}</span>${prsSpark}</div></div>
-          <div class="gov-stat" title="${itmTitle}"><div class="label">MTTR</div><div class="spark-row"><span class="val" style="color:${FIX_TIME_SPARK_COLOR}">${formatFixTime(itmMedian)}</span>${itmSpark}</div></div>
-          <div class="gov-stat" title="${holdTooltip}"><div class="label">on hold</div><div class="spark-row"><span class="val" style="color:${HOLD_COLOR}">${holdTotal}</span>${holdSpark}</div></div>
+          <div class="gov-stat" title="${itmTitle}"><div class="label">MTTR</div><div class="spark-row"><span class="val">${formatFixTime(itmMedian)}</span>${itmSpark}</div></div>
+          <div class="gov-stat" title="${holdTooltip}"><div class="label">on hold</div><div class="spark-row"><span class="val">${holdTotal}</span>${holdSpark}</div></div>
           <div class="gov-stat" title="When the governor will next evaluate mode and kick agents based on cadence schedules."><div class="label">next run</div><div class="val">${escapeHtml(gov.nextKick || '—')}</div></div>
         </div>
         <div class="temp-gauge" style="cursor:pointer" onclick="openConfigDialog('governor',null,'Thresholds')" title="Click to adjust governor thresholds">
@@ -4541,7 +4540,7 @@
 
       return `<div class="advisor-section">
         <div class="advisor-title">Cadence Advisor <span style="color:var(--muted);font-size:0.7rem">weekly projection at current cadence</span></div>
-        <div class="advisor-total">Projected: <b style="color:var(--cyan)">${fmtTokens(totalWeeklyBurn)}</b> tokens/week</div>
+        <div class="advisor-total">Projected: <b>${fmtTokens(totalWeeklyBurn)}</b> tokens/week</div>
         <div class="advisor-bars">${barRows}</div>
         ${tipsHtml}
       </div>`;
@@ -4831,7 +4830,7 @@ function burnAreaChart() {
         const aTotal = aData ? (aData.input || 0) + (aData.output || 0) + (aData.cacheRead || 0) : 0;
         const clr = _getAgentColor(name);
         const aSpark = sparkSvg(historyData.map(s => s.tokens?.[name] ?? 0), clr);
-        return `<div class="token-stat"><div class="spark-row"><span class="tval" style="color:${clr}">${fmtTokens(aTotal)}</span>${aSpark}</div><div class="tlabel">${name}</div></div>`;
+        return `<div class="token-stat"><div class="spark-row"><span class="tval">${fmtTokens(aTotal)}</span>${aSpark}</div><div class="tlabel">${name}</div></div>`;
       }).join('');
 
       el.innerHTML = `<div class="token-panel">
@@ -4841,11 +4840,11 @@ function burnAreaChart() {
           <div style="flex:1;min-width:0">${burnAreaChart()}</div>
         </div>
         <div class="token-grid">
-          <div class="token-stat"><div class="spark-row"><span class="tval" style="color:var(--cyan)">${fmtTokens(totalTokens)}</span>${totalSpark}</div><div class="tlabel">total tokens</div></div>
-          <div class="token-stat"><div class="spark-row"><span class="tval" style="color:var(--blue)">${fmtTokens(t.input)}</span>${sparkSvg(getHistorySeries('tokenInput'), 'var(--blue)')}</div><div class="tlabel">input</div></div>
-          <div class="token-stat"><div class="spark-row"><span class="tval" style="color:var(--purple)">${fmtTokens(t.output)}</span>${sparkSvg(getHistorySeries('tokenOutput'), 'var(--purple)')}</div><div class="tlabel">output</div></div>
-          <div class="token-stat"><div class="spark-row"><span class="tval" style="color:var(--green)">${fmtTokens(t.cacheRead)}</span>${sparkSvg(getHistorySeries('tokenCacheRead'), 'var(--green)')}</div><div class="tlabel">cache read</div></div>
-          <div class="token-stat"><div class="spark-row"><span class="tval" style="color:var(--yellow)">${fmtTokens(t.cacheCreate)}</span>${sparkSvg(getHistorySeries('tokenCacheCreate'), 'var(--yellow)')}</div><div class="tlabel">cache create</div></div>
+          <div class="token-stat"><div class="spark-row"><span class="tval">${fmtTokens(totalTokens)}</span>${totalSpark}</div><div class="tlabel">total tokens</div></div>
+          <div class="token-stat"><div class="spark-row"><span class="tval">${fmtTokens(t.input)}</span>${sparkSvg(getHistorySeries('tokenInput'), 'var(--blue)')}</div><div class="tlabel">input</div></div>
+          <div class="token-stat"><div class="spark-row"><span class="tval">${fmtTokens(t.output)}</span>${sparkSvg(getHistorySeries('tokenOutput'), 'var(--purple)')}</div><div class="tlabel">output</div></div>
+          <div class="token-stat"><div class="spark-row"><span class="tval">${fmtTokens(t.cacheRead)}</span>${sparkSvg(getHistorySeries('tokenCacheRead'), 'var(--green)')}</div><div class="tlabel">cache read</div></div>
+          <div class="token-stat"><div class="spark-row"><span class="tval">${fmtTokens(t.cacheCreate)}</span>${sparkSvg(getHistorySeries('tokenCacheCreate'), 'var(--yellow)')}</div><div class="tlabel">cache create</div></div>
           <div class="token-stat"><div class="spark-row"><span class="tval">${t.messages}</span>${sparkSvg(getHistorySeries('tokenMessages'), 'var(--muted)')}</div><div class="tlabel">messages</div></div>
         </div>
         ${agentSparkRows ? `<div class="token-grid" style="margin-top:4px">${agentSparkRows}</div>` : ''}
