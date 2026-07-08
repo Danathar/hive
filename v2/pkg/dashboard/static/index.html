@@ -30,6 +30,15 @@
       /* Type ramp — section headers / card titles / labels only; body-copy sizes stay. */
       --fs-xs: .68rem; --fs-sm: .75rem; --fs-base: .82rem;
       --fs-md: .92rem; --fs-lg: 1.05rem; --fs-xl: 1.25rem;
+      /* Terminal surface — terminals always read as terminals: near-black
+         in dark mode, deep neutral (never white) in light mode. The
+         fg/muted/cyan companions are mode-independent because the
+         surface stays dark in both modes. */
+      --terminal-bg: #05070a;
+      --terminal-line: #2a3442;
+      --terminal-fg: #d7dfe9;
+      --terminal-muted: #8b98a9;
+      --terminal-cyan: #7bd8cd;
       /* Layout */
       --sidebar-w: 302px;
       /* ── Legacy aliases — every old token name keeps working ── */
@@ -88,6 +97,7 @@
       --oc-accent-light: rgba(220,38,38,0.08);
       --green-bg: #f0fdf4; --green-border: #bbf7d0;
       --red-bg: #fef2f2; --red-border: #fecaca;
+      --terminal-bg: #1d2430; /* deep neutral — terminals never go white */
       /* Legacy aliases MUST be re-declared here: a var() inside a custom
          property resolves on the element that DECLARES it, so the :root
          alias copies freeze to the dark values and descendants inherit
@@ -1129,7 +1139,7 @@
       white-space: nowrap; transition: color 0.2s, border-color 0.2s;
     }
     .config-tab:hover { color: var(--text); }
-    .config-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+    .config-tab.active { color: var(--amber); border-bottom-color: var(--amber); }
     .config-body {
       flex: 1; overflow-y: auto; padding: 20px;
       scrollbar-width: thin; scrollbar-color: var(--border) transparent;
@@ -1227,15 +1237,19 @@
     .thresh-bar-wrap { margin: 10px 0; }
     .thresh-bar-track {
       position: relative; height: 28px; border-radius: 14px;
-      border: 1px solid rgba(255,255,255,0.08); cursor: default;
+      border: 1px solid var(--line); cursor: default;
     }
     .thresh-handle {
       position: absolute; top: -4px; width: 6px; height: 36px;
-      background: #fff; border-radius: 3px; cursor: ew-resize; z-index: 3;
-      box-shadow: 0 0 8px rgba(255,255,255,0.7), 0 0 16px rgba(255,255,255,0.3);
+      background: var(--text); border-radius: 3px; cursor: ew-resize; z-index: 3;
+      box-shadow: 0 0 8px color-mix(in srgb, var(--text) 70%, transparent),
+                  0 0 16px color-mix(in srgb, var(--text) 30%, transparent);
       transform: translateX(-50%); touch-action: none;
     }
-    .thresh-handle:hover { background: #e0e0e0; box-shadow: 0 0 12px rgba(255,255,255,0.9); }
+    .thresh-handle:hover {
+      background: color-mix(in srgb, var(--text) 88%, var(--bg));
+      box-shadow: 0 0 12px color-mix(in srgb, var(--text) 90%, transparent);
+    }
     .thresh-bar-labels {
       position: relative; margin-top: 6px; height: 1.2em;
       font-size: 0.75rem; font-weight: 600;
@@ -1769,6 +1783,35 @@
     .oc-chat-input { padding: 10px 14px; }
     .config-stat-row .config-field input,
     .config-stat-row .config-field select { padding: 4px 6px; font-size: var(--fs-sm); }
+
+    /* ══ Terminal surface (Phase 3) ══
+       Log/pane/audit/activity surfaces read as terminals in both modes:
+       slightly-inset dark bg (--terminal-bg), mono type, subtle border.
+       Surface props were stripped from the #logs-output / #audit-panel /
+       #inception-activity inline styles so these rules can apply. */
+    #logs-output, #audit-panel, #inception-activity, .oc-detail-summary, .doing {
+      background: var(--terminal-bg);
+      color: var(--terminal-fg);
+      border: 1px solid var(--terminal-line);
+      border-radius: var(--radius);
+      font-family: var(--font-mono);
+      box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.35);
+    }
+    .doing { color: var(--terminal-cyan); padding: 8px 10px; }
+    .oc-detail-summary, #inception-activity { color: var(--terminal-cyan); }
+    /* Children of the always-dark pane capture can't use mode-remapped
+       colors — pin them to the terminal companions. */
+    .oc-detail-summary .sum-text, .oc-detail-summary .sum-tool,
+    .oc-detail-summary .sum-table th { color: var(--terminal-fg); }
+    .oc-detail-summary .sum-cmd, .oc-detail-summary .sum-tree,
+    .oc-detail-summary .sum-table td { color: var(--terminal-muted); }
+    .oc-detail-summary .sum-cmd { border-left-color: var(--terminal-line); }
+    .oc-detail-summary .sum-table-wrap {
+      background: color-mix(in srgb, var(--terminal-fg) 4%, transparent);
+      border-color: var(--terminal-line);
+    }
+    .oc-detail-summary .sum-table th,
+    .oc-detail-summary .sum-table td { border-bottom-color: var(--terminal-line); }
   </style>
 </head>
 <body>
@@ -2118,7 +2161,7 @@
         <button onclick="clearAuditSearches()" title="Clear saved searches" style="padding:4px 8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--muted);cursor:pointer;font-size:0.75rem">✕</button>
         <span id="audit-match-count" style="font-size:0.7rem;color:var(--muted);white-space:nowrap"></span>
       </div>
-      <div id="audit-panel" style="background:var(--card-bg);border:1px solid var(--border);border-radius:8px;padding:12px;max-height:320px;overflow-y:auto">
+      <div id="audit-panel" style="padding:12px;max-height:320px;overflow-y:auto">
         <div class="loading">Loading audit log...</div>
       </div>
     </div>
@@ -2179,7 +2222,7 @@
           <input type="checkbox" id="logs-follow" checked> Follow
         </label>
       </div>
-      <div id="logs-output" style="background: var(--panel-strong); color: var(--text); font-family: var(--font-mono); font-size: 0.75rem; line-height: 1.5; padding: 14px; border-radius: 8px; max-height: 500px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;"></div>
+      <div id="logs-output" style="font-size: 0.75rem; line-height: 1.5; padding: 14px; max-height: 500px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;"></div>
     </div>
   </div>
 
@@ -7321,21 +7364,21 @@ function burnAreaChart() {
       var t = e.ts ? new Date(e.ts) : null;
       var timeStr = t ? t.toLocaleString() : '—';
       var user = esc(e.user||'ghost');
-      return '<tr style="border-bottom:1px solid var(--border)">' +
-        '<td style="padding:4px 8px;white-space:nowrap;color:var(--muted)">' + timeStr + '</td>' +
+      return '<tr style="border-bottom:1px solid var(--terminal-line)">' +
+        '<td style="padding:4px 8px;white-space:nowrap;color:var(--terminal-muted)">' + timeStr + '</td>' +
         '<td style="padding:4px 8px"><img src="https://github.com/' + user + '.png?s=32" style="width:16px;height:16px;border-radius:50%;vertical-align:middle;margin-right:4px">' + esc(e.user||'—') + '</td>' +
         '<td style="padding:4px 8px;font-weight:600">' + esc(e.action||'—') + '</td>' +
         '<td style="padding:4px 8px">' + esc(e.agent||'—') + '</td>' +
-        '<td style="padding:4px 8px;color:var(--muted)">' + esc(e.detail||'') + '</td>' +
+        '<td style="padding:4px 8px;color:var(--terminal-muted)">' + esc(e.detail||'') + '</td>' +
         '</tr>';
     }
 
     function renderAuditTable(entries) {
       var panel = document.getElementById('audit-panel');
       if (!panel) return;
-      if (!entries.length) { panel.innerHTML = '<div style="color:var(--muted);font-size:0.82rem;padding:8px">No audit entries yet</div>'; return; }
+      if (!entries.length) { panel.innerHTML = '<div style="color:var(--terminal-muted);font-size:0.82rem;padding:8px">No audit entries yet</div>'; return; }
       panel.innerHTML = '<table style="width:100%;border-collapse:collapse;font-size:0.78rem">' +
-        '<thead><tr style="color:var(--muted);font-size:0.7rem;border-bottom:1px solid var(--border)"><th style="text-align:left;padding:4px 8px">Time</th><th style="text-align:left;padding:4px 8px">User</th><th style="text-align:left;padding:4px 8px">Action</th><th style="text-align:left;padding:4px 8px">Agent</th><th style="text-align:left;padding:4px 8px">Details</th></tr></thead>' +
+        '<thead><tr style="color:var(--terminal-muted);font-size:0.7rem;border-bottom:1px solid var(--terminal-line)"><th style="text-align:left;padding:4px 8px">Time</th><th style="text-align:left;padding:4px 8px">User</th><th style="text-align:left;padding:4px 8px">Action</th><th style="text-align:left;padding:4px 8px">Agent</th><th style="text-align:left;padding:4px 8px">Details</th></tr></thead>' +
         '<tbody>' + entries.map(renderAuditRow).join('') + '</tbody></table>';
     }
 
@@ -8260,7 +8303,7 @@ function burnAreaChart() {
             <div style="font-size:0.72rem;color:var(--muted);margin-left:auto">Phase: ${phase}</div>
           </div>
           <div style="position:relative">
-          <div id="inception-activity" style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:16px;font-family:var(--font-mono);font-size:0.75rem;height:450px;overflow-y:auto;white-space:pre-wrap;color:var(--muted);resize:vertical;min-height:150px;max-height:calc(100vh - 200px)" onscroll="onInceptionScroll()">Waiting for brainstorm agent...</div>
+          <div id="inception-activity" style="padding:16px;font-size:0.75rem;height:450px;overflow-y:auto;white-space:pre-wrap;resize:vertical;min-height:150px;max-height:calc(100vh - 200px)" onscroll="onInceptionScroll()">Waiting for brainstorm agent...</div>
           <button id="inception-follow-btn" class="oc-summary-follow-btn" onclick="inceptionResumeTail()" title="Follow new output">⬇</button>
           </div>
           <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
@@ -8364,7 +8407,7 @@ function burnAreaChart() {
             <div style="font-size:0.72rem;color:var(--muted);margin-left:auto">Phase: structure</div>
           </div>
           <div style="position:relative">
-          <div id="inception-activity" style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:16px;font-family:var(--font-mono);font-size:0.75rem;height:450px;overflow-y:auto;white-space:pre-wrap;color:var(--muted);resize:vertical;min-height:150px;max-height:calc(100vh - 200px)" onscroll="onInceptionScroll()">Brainstorm agent is producing vision, constitution, requirements, and acceptance criteria...</div>
+          <div id="inception-activity" style="padding:16px;font-size:0.75rem;height:450px;overflow-y:auto;white-space:pre-wrap;resize:vertical;min-height:150px;max-height:calc(100vh - 200px)" onscroll="onInceptionScroll()">Brainstorm agent is producing vision, constitution, requirements, and acceptance criteria...</div>
           <button id="inception-follow-btn" class="oc-summary-follow-btn" onclick="inceptionResumeTail()" title="Follow new output">⬇</button>
           </div>
           <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
