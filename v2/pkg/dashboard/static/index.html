@@ -156,7 +156,10 @@
     }
     .oc-nav-emoji { display: inline-flex; width: 18px; font-size: 0.9rem; flex-shrink: 0; justify-content: center; }
     .oc-nav-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
-    .oc-nav-mode { flex-shrink: 0; font-size: 0.9rem; margin-left: 2px; }
+    .oc-nav-mode { flex-shrink: 0; font-size: 0.9rem; margin-left: 2px; transition: opacity 0.15s; }
+    /* The hover-revealed row actions (⚙/✕) take the right edge — fade the
+       passive mode icon out so they never overlap it at any sidebar width. */
+    .oc-nav-item:hover .oc-nav-mode { opacity: 0; }
     .oc-nav-item:hover { background: var(--bg); color: var(--text); }
     .oc-nav-item .oc-nav-actions {
       display: none; position: absolute; right: 4px; top: 50%;
