@@ -1465,7 +1465,6 @@
     .kb-layer-count { font-size: 0.7rem; color: var(--muted); padding: 2px 6px; background: var(--bg); border-radius: 4px; flex-shrink: 0; }
     /* Knowledge Sources type pills — pill recipe; each source type gets its own tint */
     .kb-src-type { font-weight: 600; text-transform: uppercase; flex-shrink: 0; margin-left: auto; }
-    .kb-src-type.wiki { --pill-c: var(--blue); }
     .kb-src-type.vault { --pill-c: var(--purple); }
     .kb-src-type.doc { --pill-c: var(--cyan); }
     .kb-search-box { width: 100%; } /* shared input recipe (end of style block) */
@@ -6413,33 +6412,38 @@ function burnAreaChart() {
       html += '<div class="kb-layout">';
 
       // Left sidebar: one consolidated Knowledge Sources list + search + filters.
-      // Every source (wiki layer, vault, imported document) is ONE row here:
-      // health dot (tooltip = health detail) + name + type pill + count pill.
+      // Every source is ONE row here: health dot (tooltip = health detail) +
+      // name + type pill (vault / doc) + count pill. The backend already
+      // reports each connected vault as a layer (knowledge.Stats appends
+      // vaults to the layers list), so the separate vaults array is only
+      // rendered for entries NOT already present as a layer.
       html += '<div class="kb-sidebar">';
       html += '<div class="section-label" style="margin:0">Knowledge Sources</div>';
       html += '<div class="kb-layer-list" id="kb-layer-btns">';
       // Aggregate row stays on top as the filter reset (kbSelectLayer keys on the 'All Layers' text)
       html += `<button class="kb-layer-btn${_kbSelectedLayer === 'all' ? ' active' : ''}" onclick="kbSelectLayer('all')"><span class="kb-layer-label">📋 All Layers</span><span class="kb-layer-count">${totalPages}</span></button>`;
       for (const l of layers) {
-        const icon = KB_LAYER_ICONS[l.type] || '📄';
+        const isGitSource = l.type && l.type.startsWith('git_source:');
+        const icon = KB_LAYER_ICONS[l.type] || (isGitSource ? '📄' : '📂');
         const label = KB_LAYER_LABELS[l.type] || l.type;
         const active = _kbSelectedLayer === l.type ? ' active' : '';
         const count = l.total_pages || 0;
         const dotColor = l.healthy ? 'var(--green)' : 'var(--red)';
         const healthTip = `${escapeHtml(label)}: ${l.healthy ? 'healthy' : 'unreachable'}`;
-        const isGitSource = l.type && l.type.startsWith('git_source:');
         const repoUrl = isGitSource && l.url ? (l.subpath ? l.url + '/tree/' + 'main/' + l.subpath : l.url) : '';
         html += `<button class="kb-layer-btn${active}" onclick="kbSelectLayer('${escapeHtml(l.type)}')" title="${healthTip}">`;
         html += `<span class="kb-layer-label"><span class="kb-health-dot" style="background:${dotColor}" title="${healthTip}"></span>${icon} ${escapeHtml(label)}</span>`;
         if (isGitSource && repoUrl) {
           html += `<a href="${escapeHtml(repoUrl)}" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="color:var(--accent);text-decoration:none;font-size:0.82rem;flex-shrink:0" title="Open source repo in new tab">↗</a>`;
         }
-        html += `<span class="kb-src-type wiki">wiki</span>`;
+        html += `<span class="kb-src-type vault">vault</span>`;
         html += `<span class="kb-layer-count">${count}</span>`;
         html += `</button>`;
       }
-      // Vault rows — same list, type pill 'vault'; click behavior unchanged
-      for (const v of connectedVaults) {
+      // Vaults not already mirrored into the layers list (dedupe by name);
+      // same row shape, click behavior unchanged
+      const layerTypes = new Set(layers.map(l => l.type));
+      for (const v of connectedVaults.filter(v => !layerTypes.has(v.name))) {
         const vTip = `${escapeHtml(v.name)}: connected — ${escapeHtml(v.root_dir)}`;
         html += `<button class="kb-layer-btn${_kbSelectedLayer === 'vault:'+v.name ? ' active' : ''}" onclick="_kbSelectedLayer='vault:${escapeHtml(v.name)}';kbSearchVault('${escapeHtml(v.name)}')" title="${vTip}">`;
         html += `<span class="kb-layer-label"><span class="kb-health-dot" style="background:var(--green)" title="${vTip}"></span>📂 ${escapeHtml(v.name)}</span>`;
