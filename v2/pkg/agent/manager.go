@@ -138,6 +138,28 @@ func (m *Manager) SetCopilotToken(token string) {
 	m.copilotAuthToken = token
 }
 
+// BackendAuthAvailable reports whether shared credentials exist for a CLI
+// backend, so the dashboard can show honest auth state even for agents with
+// no running pane (e.g. on-demand agents that never launched). Claude checks
+// the credentials file (with expiry); Copilot checks the cached token. For
+// backends we cannot introspect it returns (false, false) = unknown.
+func (m *Manager) BackendAuthAvailable(backend string) (available, known bool) {
+	switch backend {
+	case "claude":
+		return claude.HasValidToken(claude.CredentialsPath), true
+	case "copilot":
+		m.mu.RLock()
+		tok := m.copilotAuthToken
+		m.mu.RUnlock()
+		if tok != "" {
+			return true, true
+		}
+		return configHasTokens(), true
+	default:
+		return false, false
+	}
+}
+
 // SetInferenceCallbacks registers callbacks that the manager uses to
 // configure/clear inference routing on the proxy when launching agents.
 func (m *Manager) SetInferenceCallbacks(
@@ -2134,8 +2156,10 @@ const (
 // the Copilot OAuth token; injected into agents as COPILOT_GITHUB_TOKEN.
 const CopilotUserTokenPath = "/data/copilot-user-token"
 
-// loginPromptPatterns are substrings that indicate an agent is stuck on the
-// Copilot login/authentication screen.
+// loginPromptPatterns are substrings that indicate an agent is stuck on a
+// login/authentication screen (Copilot text prompts, Claude Code OAuth flow,
+// GitHub device flow). Each must be distinctive enough to never appear in
+// ordinary agent output.
 var loginPromptPatterns = []string{
 	"/login",
 	"sign in to use",
@@ -2144,6 +2168,14 @@ var loginPromptPatterns = []string{
 	"Authenticate to use",
 	"log in to use",
 	"Log in to use",
+	// Claude Code OAuth sign-in screen
+	"Use the url below to sign in",
+	"Paste code here if prompted",
+	"Select login method",
+	"/cai/oauth/authorize",
+	// GitHub device-flow screen (Copilot CLI)
+	"Enter one-time code",
+	"github.com/login/device",
 }
 
 // fatalNetworkErrorPatterns are substrings that indicate a transient TLS or
@@ -3113,8 +3145,12 @@ func (m *Manager) SetModelOverride(name, model string) error {
 		return fmt.Errorf("agent %s not found", name)
 	}
 
+	// A pin blocks the governor's auto-selection, never a user's explicit
+	// switch: retarget the pin to the new model so the pin state is
+	// unchanged (still pinned) while the change takes effect.
 	if agent.PinnedModel != "" {
-		return fmt.Errorf("agent %s model is pinned to %s", name, agent.PinnedModel)
+		agent.PinnedModel = model
+		m.logger.Info("agent model pin retargeted by user switch", "name", name, "model", model)
 	}
 
 	agent.ModelOverride = model

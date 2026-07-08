@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
@@ -36,6 +37,7 @@ type SaaSUser struct {
 }
 
 var hmacKeyPath = "/data/saas/hmac.key"
+
 const hmacKeySize = 32
 
 func loadOrCreateHMACKey() ([]byte, error) {
@@ -508,8 +510,16 @@ type ClusterHealthNode struct {
 	DiskPressure  bool     `json:"disk_pressure"`
 	Pods          int      `json:"pods"`
 	PodCapacity   int      `json:"pod_capacity"`
-	Conditions    []string `json:"conditions"`
+	// HiveCount is the number of distinct hive-hosted-* namespaces with a
+	// running pod on this node (namespaces, not pods, so a hive briefly
+	// running two pods during a rollout is counted once).
+	HiveCount  int      `json:"hive_count"`
+	Conditions []string `json:"conditions"`
 }
+
+// hiveHostedNamespacePrefix is the namespace prefix used for SaaS-provisioned
+// hives; pods in these namespaces identify hives running on a node.
+const hiveHostedNamespacePrefix = "hive-hosted-"
 
 type ClusterHealthSummary struct {
 	TotalNodes    int `json:"total_nodes"`
@@ -518,6 +528,12 @@ type ClusterHealthSummary struct {
 	TotalMemGB    int `json:"total_mem_gb"`
 	TotalMemPct   int `json:"total_mem_percent"`
 	HiveCount     int `json:"hive_count"`
+	// HiveCapacityRemaining estimates how many MORE hives the cluster can
+	// hold: per Ready, schedulable node, the per-hive request footprint
+	// (see hive_capacity.go) bin-packed into allocatable-minus-requested
+	// capacity, summed across nodes. Pointer so it is omitted entirely when
+	// pod request data was unavailable (nil = no data, 0 = cluster full).
+	HiveCapacityRemaining *int `json:"hive_capacity_remaining,omitempty"`
 }
 
 // GPUSummary reports aggregate GPU counts for a cluster.
@@ -594,21 +610,36 @@ const (
 const gpuResourceKey = "nvidia.com/gpu"
 
 func buildClusterHealth(s *HubServer) (*ClusterHealthResponse, error) {
-	// Count hives per cluster from SaaS records.
-	hiveCounts := make(map[string]int)
-	for _, sh := range listSaaSHives() {
-		cid := clusterIDForSaaSHive(sh)
-		hiveCounts[cid]++
+	// Count hives per cluster, deduplicated by hive ID. A hosted hive appears
+	// both as a SaaS record and as a registry entry with a ClusterID (they
+	// share the same ID), so counting both sources naively doubles the count.
+	hiveIDsByCluster := make(map[string]map[string]bool)
+	allHiveIDs := make(map[string]bool)
+	addHive := func(clusterID, hiveID string) {
+		if hiveIDsByCluster[clusterID] == nil {
+			hiveIDsByCluster[clusterID] = make(map[string]bool)
+		}
+		hiveIDsByCluster[clusterID][hiveID] = true
+		allHiveIDs[hiveID] = true
 	}
-	// Also count registry hives that have a ClusterID.
+	for _, sh := range listSaaSHives() {
+		addHive(clusterIDForSaaSHive(sh), sh.ID)
+	}
 	s.mu.RLock()
-	totalHiveCount := len(s.registry.Hives)
 	for _, h := range s.registry.Hives {
 		if h.ClusterID != "" {
-			hiveCounts[h.ClusterID]++
+			addHive(h.ClusterID, h.ID)
+		} else {
+			// Self-hosted hives without a cluster still count globally.
+			allHiveIDs[h.ID] = true
 		}
 	}
 	s.mu.RUnlock()
+	hiveCounts := make(map[string]int, len(hiveIDsByCluster))
+	for cid, ids := range hiveIDsByCluster {
+		hiveCounts[cid] = len(ids)
+	}
+	totalHiveCount := len(allHiveIDs)
 
 	// Query all clusters in parallel.
 	type clusterResult struct {
@@ -796,6 +827,9 @@ func buildSingleClusterHealth(cluster *ClusterConfig, hiveCount int, logger *slo
 			Metadata struct {
 				Name string `json:"name"`
 			} `json:"metadata"`
+			Spec struct {
+				Unschedulable bool `json:"unschedulable"`
+			} `json:"spec"`
 			Status struct {
 				Allocatable map[string]string `json:"allocatable"`
 				Capacity    map[string]string `json:"capacity"`
@@ -816,6 +850,8 @@ func buildSingleClusterHealth(cluster *ClusterConfig, hiveCount int, logger *slo
 		memAllocatable int64 // bytes
 		podCapacity    int
 		diskPressure   bool
+		ready          bool
+		unschedulable  bool // cordoned; excluded from hive capacity estimates
 		conditions     []string
 		gpuCapacity    int
 		gpuAllocatable int
@@ -824,11 +860,14 @@ func buildSingleClusterHealth(cluster *ClusterConfig, hiveCount int, logger *slo
 	var totalGPUCapacity, totalGPUAllocatable int
 	for _, item := range nodesJSON.Items {
 		ni := &nodeInfo{}
+		// Allocatable (not raw capacity) is what the scheduler can place
+		// pods against, so hive capacity math below uses these values.
 		ni.cpuAllocatable = parseK8sCPU(item.Status.Allocatable["cpu"])
 		ni.memAllocatable = parseK8sMemory(item.Status.Allocatable["memory"])
 		ni.podCapacity = parseInt(item.Status.Capacity["pods"])
 		ni.gpuCapacity = parseInt(item.Status.Capacity[gpuResourceKey])
 		ni.gpuAllocatable = parseInt(item.Status.Allocatable[gpuResourceKey])
+		ni.unschedulable = item.Spec.Unschedulable
 		totalGPUCapacity += ni.gpuCapacity
 		totalGPUAllocatable += ni.gpuAllocatable
 		for _, cond := range item.Status.Conditions {
@@ -836,6 +875,7 @@ func buildSingleClusterHealth(cluster *ClusterConfig, hiveCount int, logger *slo
 				ni.diskPressure = true
 			}
 			if cond.Type == "Ready" && cond.Status == "True" {
+				ni.ready = true
 				ni.conditions = append(ni.conditions, "Ready")
 			} else if cond.Type == "Ready" && cond.Status != "True" {
 				ni.conditions = append(ni.conditions, "NotReady")
@@ -894,25 +934,69 @@ func buildSingleClusterHealth(cluster *ClusterConfig, hiveCount int, logger *slo
 		})
 	}
 
-	// Count running pods per node.
+	// Count running pods per node and sum their container resource REQUESTS
+	// (requests, not usage — that is what the scheduler bin-packs against).
+	// Listing only Running pods slightly undercounts requests (Pending pods
+	// already assigned to a node are missed), so the capacity estimate below
+	// can be marginally optimistic.
+	var cpuRequestedPerNode, memRequestedPerNode map[string]int64
 	podOut, _ := kubectlForCluster(cluster, "get", "pods", "--all-namespaces", "--field-selector=status.phase=Running", "-o", "json").Output()
 	if len(podOut) > 0 {
 		var podsJSON struct {
 			Items []struct {
+				Metadata struct {
+					Namespace string `json:"namespace"`
+				} `json:"metadata"`
 				Spec struct {
-					NodeName string `json:"nodeName"`
+					NodeName   string `json:"nodeName"`
+					Containers []struct {
+						Resources struct {
+							Requests map[string]string `json:"requests"`
+						} `json:"resources"`
+					} `json:"containers"`
 				} `json:"spec"`
 			} `json:"items"`
 		}
 		if json.Unmarshal(podOut, &podsJSON) == nil {
 			podCounts := make(map[string]int)
+			cpuRequestedPerNode = make(map[string]int64)
+			memRequestedPerNode = make(map[string]int64)
+			// hiveNamespacesPerNode tracks distinct hive-hosted-* namespaces per
+			// node so each hive is counted once even with multiple pods.
+			hiveNamespacesPerNode := make(map[string]map[string]bool)
 			for _, p := range podsJSON.Items {
 				podCounts[p.Spec.NodeName]++
+				for _, c := range p.Spec.Containers {
+					cpuRequestedPerNode[p.Spec.NodeName] += parseK8sCPU(c.Resources.Requests["cpu"])
+					memRequestedPerNode[p.Spec.NodeName] += parseK8sMemory(c.Resources.Requests["memory"])
+				}
+				if strings.HasPrefix(p.Metadata.Namespace, hiveHostedNamespacePrefix) {
+					if hiveNamespacesPerNode[p.Spec.NodeName] == nil {
+						hiveNamespacesPerNode[p.Spec.NodeName] = make(map[string]bool)
+					}
+					hiveNamespacesPerNode[p.Spec.NodeName][p.Metadata.Namespace] = true
+				}
 			}
 			for i := range nodes {
 				nodes[i].Pods = podCounts[nodes[i].Name]
+				nodes[i].HiveCount = len(hiveNamespacesPerNode[nodes[i].Name])
 			}
 		}
+	}
+
+	// Estimate remaining hive capacity: bin-pack the per-hive request
+	// footprint into each Ready, schedulable node's free (allocatable minus
+	// requested) capacity. Only computed when the pod listing above parsed,
+	// since without per-node requests the estimate would be meaningless.
+	var hiveCapacityRemaining *int
+	if cpuRequestedPerNode != nil {
+		var totalSlots int64
+		for name, ni := range nodeMap {
+			totalSlots += hiveSlotsForNode(ni.cpuAllocatable, ni.memAllocatable,
+				cpuRequestedPerNode[name], memRequestedPerNode[name], ni.ready, ni.unschedulable)
+		}
+		slots := int(totalSlots)
+		hiveCapacityRemaining = &slots
 	}
 
 	// Build summary.
@@ -944,12 +1028,13 @@ func buildSingleClusterHealth(cluster *ClusterConfig, hiveCount int, logger *slo
 	result := PerClusterHealth{
 		Nodes: nodes,
 		Summary: ClusterHealthSummary{
-			TotalNodes:    len(nodes),
-			TotalCPUCores: totalCPUCores,
-			TotalCPUPct:   totalCPUPct,
-			TotalMemGB:    totalMemGB,
-			TotalMemPct:   totalMemPct,
-			HiveCount:     hiveCount,
+			TotalNodes:            len(nodes),
+			TotalCPUCores:         totalCPUCores,
+			TotalCPUPct:           totalCPUPct,
+			TotalMemGB:            totalMemGB,
+			TotalMemPct:           totalMemPct,
+			HiveCount:             hiveCount,
+			HiveCapacityRemaining: hiveCapacityRemaining,
 		},
 		HiveCount: hiveCount,
 	}
@@ -997,6 +1082,7 @@ func convertHeartbeatToPerClusterHealth(clusterID, clusterName string, entry *He
 			DiskPressure:  n.DiskPressure,
 			Pods:          n.Pods,
 			PodCapacity:   n.PodCapacity,
+			HiveCount:     n.HiveCount,
 			Conditions:    n.Conditions,
 		}
 	}
@@ -1012,6 +1098,8 @@ func convertHeartbeatToPerClusterHealth(clusterID, clusterName string, entry *He
 			TotalMemGB:    report.Summary.TotalMemGB,
 			TotalMemPct:   report.Summary.TotalMemPct,
 			HiveCount:     hiveCount,
+			// nil for spokes running older builds that do not report it.
+			HiveCapacityRemaining: report.Summary.HiveCapacityRemaining,
 		},
 		HiveCount:  hiveCount,
 		DataSource: "heartbeat",
@@ -1476,6 +1564,10 @@ func (s *HubServer) handleCreateHive(w http.ResponseWriter, r *http.Request) {
 		Status:      "provisioning",
 		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
 		Subdomain:   subdomain,
+		// Default to public when the request omits is_public — matches
+		// the pre-#1604 template that hardcoded is_public: true. Owners
+		// can toggle visibility later from My Hives.
+		IsPublic: req.IsPublic == nil || *req.IsPublic,
 	}
 
 	if err := saveSaaSHive(h); err != nil {
@@ -1821,7 +1913,9 @@ func (s *HubServer) handleSwitchBranch(w http.ResponseWriter, r *http.Request) {
 	ns := "hive-hosted-" + id
 	imageTag := body.Branch + "-latest"
 	image := "ghcr.io/kubestellar/hive:" + imageTag
-	cmd := kubectlForCluster(cluster, "set", "image", "deployment/hive", "hive="+image, "-n", ns)
+	// "*=" updates every container including init containers (copy-config,
+	// init-permissions) — pinning only "hive" left inits on the old branch tag.
+	cmd := kubectlForCluster(cluster, "set", "image", "deployment/hive", "*="+image, "-n", ns)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		s.logger.Warn("branch switch failed", "hive", id, "branch", body.Branch, "output", string(out))
@@ -2118,16 +2212,100 @@ func getCommitMessages() map[string]string {
 	return cp
 }
 
+// latestSHAsPath persists the last-known-good branch→SHA cache across hub
+// restarts (PVC-backed, like the rest of /data/saas). The hub restarts on
+// every auto-upgrade; without this file the cache starts empty, and if the
+// unauthenticated GitHub branches API is rate-limited for one branch at
+// startup, that branch silently disappears from "Latest images" until a
+// later poll succeeds (up to an hour under rate limiting).
+var latestSHAsPath = "/data/saas/latest-shas.json"
+
+// snapshotBranchSHAs returns a copy of the full branch→info cache.
+func snapshotBranchSHAs() map[string]branchSHAInfo {
+	latestSHAMu.RLock()
+	defer latestSHAMu.RUnlock()
+	cp := make(map[string]branchSHAInfo, len(latestSHAByBranch))
+	for k, v := range latestSHAByBranch {
+		cp[k] = v
+	}
+	return cp
+}
+
+// loadPersistedSHAs restores the last-known-good SHA cache from disk so a
+// freshly restarted hub serves the previous values while live fetches are
+// failing or rate-limited. Branches no longer in trackedBranches are dropped;
+// branches already populated by a live fetch are never overwritten.
+func loadPersistedSHAs(logger *slog.Logger) {
+	data, err := os.ReadFile(latestSHAsPath)
+	if err != nil {
+		return // first run or no PVC — nothing to restore
+	}
+	var persisted map[string]branchSHAInfo
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		logger.Warn("SHA poll: persisted SHA cache unreadable, ignoring", "path", latestSHAsPath, "error", err)
+		return
+	}
+	latestSHAMu.Lock()
+	defer latestSHAMu.Unlock()
+	for _, branch := range trackedBranches {
+		info, ok := persisted[branch]
+		if !ok || info.SHA == "" {
+			continue
+		}
+		if _, exists := latestSHAByBranch[branch]; exists {
+			continue // live fetch already populated this branch
+		}
+		latestSHAByBranch[branch] = info
+		if info.Message != "" {
+			commitMsgBySHA[info.SHA] = info.Message
+		}
+		logger.Info("SHA poll: restored last-known SHA from disk", "branch", branch, "sha", info.SHA)
+	}
+}
+
+// persistLatestSHAs writes the current SHA cache to disk (atomic tmp+rename,
+// same pattern as the other /data/saas state files).
+func persistLatestSHAs(logger *slog.Logger) {
+	snapshot := snapshotBranchSHAs()
+	if len(snapshot) == 0 {
+		return // never overwrite a good file with an empty cache
+	}
+	data, err := json.MarshalIndent(snapshot, "", "  ")
+	if err != nil {
+		logger.Warn("SHA poll: persist marshal failed", "error", err)
+		return
+	}
+	os.MkdirAll(filepath.Dir(latestSHAsPath), 0o755)
+	tmpPath := latestSHAsPath + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
+		logger.Warn("SHA poll: persist write failed", "path", latestSHAsPath, "error", err)
+		return
+	}
+	if err := os.Rename(tmpPath, latestSHAsPath); err != nil {
+		logger.Warn("SHA poll: persist rename failed", "path", latestSHAsPath, "error", err)
+	}
+}
+
 func (s *HubServer) StartLatestSHAPoller() {
+	// Serve last-known-good SHAs immediately; live fetches below refresh them.
+	loadPersistedSHAs(s.logger)
+	prevInfos := snapshotBranchSHAs()
 	fetchAllBranchSHAs(s.logger)
+	if cur := snapshotBranchSHAs(); !maps.Equal(cur, prevInfos) {
+		persistLatestSHAs(s.logger)
+	}
 	// On first poll, check if any auto-upgrade hives are behind
 	s.triggerAutoUpgrades()
 	ticker := time.NewTicker(latestSHAPollInterval)
 	defer ticker.Stop()
 	for range ticker.C {
 		oldSHAs := getLatestSHAs()
+		oldInfos := snapshotBranchSHAs()
 		fetchAllBranchSHAs(s.logger)
 		newSHAs := getLatestSHAs()
+		if !maps.Equal(snapshotBranchSHAs(), oldInfos) {
+			persistLatestSHAs(s.logger)
+		}
 		// Always check for pending auto-upgrades (retries failed/missed hives).
 		s.triggerAutoUpgrades()
 		changed := false
@@ -3316,7 +3494,7 @@ const dashboardHTML = `<!DOCTYPE html>
       padding: .72rem 1rem;
       font-weight: 700;
     }
-    #hub-version { margin-left: 8px; }
+    .header-right { display: flex; align-items: center; gap: .8rem; justify-self: end; }
     .nav-user { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; color: var(--text); }
     .nav-avatar { width: 28px; height: 28px; border-radius: 50%; }
 
@@ -3426,7 +3604,6 @@ const dashboardHTML = `<!DOCTYPE html>
       <span class="brand-mark">🐝</span>
       <span>Hive</span>
       <span onclick="window.open(&#39;https://github.com/kubestellar/hive&#39;,&#39;_blank&#39;)" title="Source Code" style="opacity:0.6;margin-left:2px;cursor:pointer;display:inline-flex"><svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg></span>
-      <span id="hub-version"></span>
     </a>
     <nav>
       <a href="/">Hives</a>
@@ -3436,7 +3613,10 @@ const dashboardHTML = `<!DOCTYPE html>
       <a href="/api/docs" target="_blank">API</a>
       <span id="nav-user" class="nav-user"></span>
     </nav>
-    <a href="#" class="header-link" onclick="fetch('/api/auth/logout',{method:'POST'}).then(function(){location.href='/'});return false;">Logout</a>
+    <div class="header-right">
+      <span id="hub-version"></span>
+      <a href="#" class="header-link" onclick="fetch('/api/auth/logout',{method:'POST'}).then(function(){location.href='/'});return false;">Logout</a>
+    </div>
   </header>
 
   <div class="content">
@@ -3945,6 +4125,8 @@ const dashboardHTML = `<!DOCTYPE html>
           var upgradeIcon = '';
           if (isUpgrading) {
             upgradeIcon = ' <span title="Upgrading to ' + esc(branchLatest || h.upgradeTarget || '?') + '" style="display:inline-block;padding:3px 10px;background:var(--surface);border:1px solid var(--border);border-radius:4px;font-size:0.7rem;margin-left:6px;white-space:nowrap;opacity:0.8"><span style="display:inline-block;width:12px;height:12px;border:2px solid rgba(255,255,255,0.3);border-top-color:#fff;border-radius:50%;animation:spin 1s linear infinite;vertical-align:middle;margin-right:4px"></span>Upgrading</span>';
+          } else if (!isCurrent && !latestUnknown && isHosted && h.role === 'owner' && h.autoUpgrade) {
+            upgradeIcon = ' <span id="upgrade-' + esc(h.id) + '" onclick="upgradeHive(\'' + esc(h.id) + '\',\'' + esc(sha) + '\',\'' + esc(branchName) + '\')" title="Auto-upgrade will apply ' + esc(branchLatest) + ' shortly — click to upgrade now" style="display:inline-block;padding:3px 10px;background:var(--surface);color:var(--muted);border:1px dashed var(--border);border-radius:4px;cursor:pointer;font-size:0.7rem;margin-left:6px;white-space:nowrap">queued</span>';
           } else if (!isCurrent && !latestUnknown && isHosted && h.role === 'owner') {
             upgradeIcon = ' <button id="upgrade-' + esc(h.id) + '" onclick="upgradeHive(\'' + esc(h.id) + '\',\'' + esc(sha) + '\',\'' + esc(branchName) + '\')" title="Current: ' + esc(sha) + ' → Latest: ' + esc(branchLatest) + '" style="padding:3px 10px;background:var(--green);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:0.7rem;margin-left:6px;white-space:nowrap">Upgrade</button>';
           } else if (latestUnknown && isHosted && h.role === 'owner') {
@@ -4466,10 +4648,13 @@ const dashboardHTML = `<!DOCTYPE html>
       var cpuUsed = (n.cpu_used_millicores / 1000).toFixed(1);
       var memUsedGB = (n.mem_used_mb / 1024).toFixed(1);
       var memTotalGB = Math.round(n.mem_total_mb / 1024);
+      var hiveCount = n.hive_count || 0;
+      var hivePill = '<span style="padding:2px 8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;font-size:0.65rem;color:var(--muted)">' + hiveCount + (hiveCount === 1 ? ' hive' : ' hives') + '</span>';
       return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px">' +
         '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">' +
         '<span style="font-family:monospace;font-size:0.8rem;color:var(--text)">' + esc(nk) + '</span>' +
         '<span style="display:flex;align-items:center;gap:6px">' + readyBadge +
+        hivePill +
         '<span style="padding:2px 8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;font-size:0.65rem;color:var(--muted)">' + (n.pods || 0) + '/' + (n.pod_capacity || 0) + ' pods</span>' +
         '</span></div>' +
         renderHealthMetric('CPU', cpuUsed, n.cpu_cores, 'cores', n.cpu_percent, CLUSTER_CPU_WARN_PCT, CLUSTER_CPU_DANGER_PCT, nk, 'cpu') +
@@ -4528,6 +4713,13 @@ const dashboardHTML = `<!DOCTYPE html>
             if (c.gpu_summary) {
               gpuLine = ' · <span style="color:var(--green)">' + c.gpu_summary.allocatable_gpus + '/' + c.gpu_summary.total_gpus + ' GPUs</span>';
             }
+            // Remaining hive capacity: omitted entirely when the collector had
+            // no pod request data (field absent); 0 means the cluster is full.
+            var capacityLine = '';
+            if (cs.hive_capacity_remaining != null) {
+              var capRemaining = cs.hive_capacity_remaining;
+              capacityLine = ' · <span title="Estimated headroom: per-hive CPU/memory request footprint bin-packed into free (allocatable minus requested) capacity on Ready, schedulable nodes only">room for ~' + capRemaining + ' more hive' + (capRemaining === 1 ? '' : 's') + '</span>';
+            }
             var errorLine = c.error ? '<div style="margin:8px 0;padding:6px 10px;background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:6px;font-size:0.75rem;color:var(--red)">' + esc(c.error) + '</div>' : '';
             var headerHtml = '<div style="display:flex;align-items:center;gap:8px;margin:16px 0 8px">' +
               clusterBadge(c.id, c.name) +
@@ -4536,7 +4728,7 @@ const dashboardHTML = `<!DOCTYPE html>
               (cs.total_nodes || 0) + ' nodes · ' + (cs.total_cpu_cores || 0) + ' vCPU · ' +
               '<span style="color:' + cCpuColor + '">' + (cs.total_cpu_percent || 0) + '% cpu</span> · ' +
               '<span style="color:' + cMemColor + '">' + (cs.total_mem_percent || 0) + '% mem</span> · ' +
-              (c.hive_count || 0) + ' hives' + gpuLine +
+              (c.hive_count || 0) + ' hives' + capacityLine + gpuLine +
               '</span></div>';
             var nodesHtml = (c.nodes || []).length > 0
               ? '<div style="display:grid;grid-template-columns:repeat(2,1fr);gap:12px">' + (c.nodes || []).map(renderNodeCard).join('') + '</div>'
@@ -4875,7 +5067,7 @@ const dashboardHTML = `<!DOCTYPE html>
       if (method === 'later') { method = 'app'; appId = '3568013'; installId = ''; appKey = ''; }
 
       try {
-        var body = {org: org, repos: repos, primary_repo: primary || repos.split(',')[0].trim(), project_name: name, acmm_level: level, cluster_id: clusterId, auth_method: method};
+        var body = {org: org, repos: repos, primary_repo: primary || repos.split(',')[0].trim(), project_name: name, acmm_level: level, cluster_id: clusterId, auth_method: method, is_public: document.getElementById('f-public').checked};
         if (method === 'pat') body.github_token = token;
         else { body.app_id = appId.trim(); body.installation_id = installId.trim(); body.app_private_key = appKey.trim(); }
 
@@ -5063,6 +5255,9 @@ const dashboardHTML = `<!DOCTYPE html>
             <option value="">Loading clusters...</option>
           </select>
         </div>
+      </div>
+      <div style="margin-bottom:12px">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:0.8rem;color:var(--muted)"><input type="checkbox" id="f-public" checked> Publicly visible in the hive registry <span style="font-size:0.7rem">(owners can toggle later from My Hives)</span></label>
       </div>
       <div style="margin-bottom:12px">
         <label style="display:block;font-size:0.8rem;color:var(--muted);margin-bottom:4px">Authentication Method</label>

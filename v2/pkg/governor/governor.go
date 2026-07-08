@@ -66,7 +66,40 @@ type BudgetInfo struct {
 	ByAgent       map[string]int64 `json:"by_agent"`
 	ByModel       map[string]int64 `json:"by_model"`
 	IgnoredAgents []string         `json:"ignored_agents"`
-	ResetAt       time.Time        `json:"reset_at"`
+	// IgnoreAll disables budget kick-suppression for every agent while
+	// keeping the limit, window, and alerts intact (the dashboard's
+	// global "ignore budget" toggle).
+	IgnoreAll bool `json:"ignore_all"`
+	// ResetAt is the START of the current budget window; the window ends
+	// at ResetAt + BudgetWindowDuration.
+	ResetAt time.Time `json:"reset_at"`
+	// WindowBaseline is the lifetime token total observed when the current
+	// window opened. Spend inside the window is lifetime total minus this.
+	WindowBaseline int64 `json:"window_baseline"`
+}
+
+// BudgetWindowDuration is the length of one budget accounting window; the
+// "weekly" limit applies to spend accumulated within it.
+const BudgetWindowDuration = 7 * 24 * time.Hour
+
+// BudgetWarnPct is the percent of the weekly limit at which the soft
+// budget warning fires.
+const BudgetWarnPct = 90
+
+// percentDenominator converts a percentage into a fraction of a whole.
+const percentDenominator = 100
+
+// BudgetTransitions reports budget threshold state from a single
+// UpdateBudgetFromTotals call. WarnCrossed and ExhaustedCrossed are
+// one-shot: they fire at most once per window (flags reset when the window
+// rolls). The Active fields reflect the current spend level every call so
+// callers can clear alerts that no longer apply.
+type BudgetTransitions struct {
+	WarnCrossed      bool
+	ExhaustedCrossed bool
+	Rolled           bool
+	WarnActive       bool
+	ExhaustedActive  bool
 }
 
 type State struct {
@@ -78,6 +111,10 @@ type State struct {
 	LastKick      map[string]time.Time    `json:"last_kick"`
 	LastEval      time.Time               `json:"last_eval"`
 	SLAViolations int                     `json:"sla_violations"`
+	// BudgetExhausted mirrors the budget gate as of the last eval: the
+	// weekly limit is set and window spend has reached it, so kicks for
+	// non-exempt agents are suppressed.
+	BudgetExhausted bool `json:"budget_exhausted"`
 }
 
 const (
@@ -97,6 +134,11 @@ type Governor struct {
 	evalHistory []EvalSnapshot
 	kickHistory []KickRecord
 	budget      BudgetInfo
+
+	// One-shot alert flags for the current budget window; reset when the
+	// window rolls so each window alerts at most once per threshold.
+	budgetWarned           bool
+	budgetExhaustedAlerted bool
 }
 
 func New(cfg config.GovernorConfig, agents map[string]config.AgentConfig, logger *slog.Logger) *Governor {
@@ -182,6 +224,8 @@ func (g *Governor) Evaluate(queueIssues, queuePRs, queueHold, slaViolations int)
 			}
 		}
 	}
+
+	g.state.BudgetExhausted = g.budgetExhausted()
 
 	due := g.agentsDueForKick()
 
@@ -281,9 +325,25 @@ func (g *Governor) updateCadences() {
 	}
 }
 
+// budgetExhausted reports whether the weekly budget gate is closed.
+// WeeklyLimit == 0 means budgeting is entirely off; IgnoreAll keeps the
+// limit and alerts but opens the kick gate. Caller must hold g.mu.
+func (g *Governor) budgetExhausted() bool {
+	return g.budget.WeeklyLimit > 0 && !g.budget.IgnoreAll && g.budget.CurrentSpend >= g.budget.WeeklyLimit
+}
+
 func (g *Governor) agentsDueForKick() []string {
 	now := time.Now()
 	var due []string
+
+	exhausted := g.budgetExhausted()
+	// IgnoredAgents are exempt from budget suppression: they keep getting
+	// kicked even when the weekly budget is exhausted.
+	exempt := make(map[string]bool, len(g.budget.IgnoredAgents))
+	for _, name := range g.budget.IgnoredAgents {
+		exempt[name] = true
+	}
+	suppressed := 0
 
 	for agentName, cadence := range g.state.Cadences {
 		if cadence.Paused {
@@ -298,11 +358,23 @@ func (g *Governor) agentsDueForKick() []string {
 		if ac, ok := g.agents[agentName]; ok && !ac.UsesGovernorKick() {
 			continue
 		}
+		if exhausted && !exempt[agentName] {
+			suppressed++
+			continue
+		}
 
 		lastKick, kicked := g.state.LastKick[agentName]
 		if !kicked || now.Sub(lastKick) >= cadence.Interval {
 			due = append(due, agentName)
 		}
+	}
+
+	if exhausted {
+		g.logger.Info("budget exhausted — suppressing kicks",
+			"spend", g.budget.CurrentSpend,
+			"limit", g.budget.WeeklyLimit,
+			"suppressed", suppressed,
+		)
 	}
 
 	return due
@@ -329,14 +401,15 @@ func (g *Governor) GetState() State {
 		lastKick[k] = v
 	}
 	return State{
-		Mode:          g.state.Mode,
-		QueueIssues:   g.state.QueueIssues,
-		QueuePRs:      g.state.QueuePRs,
-		QueueHold:     g.state.QueueHold,
-		Cadences:      cadences,
-		LastKick:      lastKick,
-		LastEval:      g.state.LastEval,
-		SLAViolations: g.state.SLAViolations,
+		Mode:            g.state.Mode,
+		QueueIssues:     g.state.QueueIssues,
+		QueuePRs:        g.state.QueuePRs,
+		QueueHold:       g.state.QueueHold,
+		Cadences:        cadences,
+		LastKick:        lastKick,
+		LastEval:        g.state.LastEval,
+		SLAViolations:   g.state.SLAViolations,
+		BudgetExhausted: g.state.BudgetExhausted,
 	}
 }
 
@@ -525,31 +598,99 @@ func (g *Governor) GetBudget() BudgetInfo {
 	ignored := make([]string, len(g.budget.IgnoredAgents))
 	copy(ignored, g.budget.IgnoredAgents)
 	return BudgetInfo{
-		WeeklyLimit:   g.budget.WeeklyLimit,
-		CurrentSpend:  g.budget.CurrentSpend,
-		ByAgent:       byAgent,
-		ByModel:       byModel,
-		IgnoredAgents: ignored,
-		ResetAt:       g.budget.ResetAt,
+		WeeklyLimit:    g.budget.WeeklyLimit,
+		CurrentSpend:   g.budget.CurrentSpend,
+		ByAgent:        byAgent,
+		ByModel:        byModel,
+		IgnoredAgents:  ignored,
+		IgnoreAll:      g.budget.IgnoreAll,
+		ResetAt:        g.budget.ResetAt,
+		WindowBaseline: g.budget.WindowBaseline,
 	}
 }
 
-func (g *Governor) UpdateBudget(totalTokens int64, byAgent map[string]int64, byModel map[string]int64) {
+// UpdateBudgetFromTotals refreshes budget spend from the token collector's
+// lifetime totals. Session-file scans are cumulative, so window spend is
+// derived by subtracting the baseline captured when the window opened.
+// Rolls the window forward once BudgetWindowDuration has elapsed and
+// reports threshold crossings so callers can alert exactly once per window.
+func (g *Governor) UpdateBudgetFromTotals(totalTokens int64, byAgent map[string]int64, byModel map[string]int64) BudgetTransitions {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.budget.CurrentSpend = totalTokens
+
+	var trans BudgetTransitions
+	now := time.Now()
+	if g.budget.ResetAt.IsZero() {
+		// First run or legacy snapshot without a window: open one now.
+		g.budget.ResetAt = now
+		g.budget.WindowBaseline = totalTokens
+	} else if now.Sub(g.budget.ResetAt) >= BudgetWindowDuration {
+		g.budget.ResetAt = now
+		g.budget.WindowBaseline = totalTokens
+		g.budgetWarned = false
+		g.budgetExhaustedAlerted = false
+		trans.Rolled = true
+		if g.logger != nil {
+			g.logger.Info("budget window rolled",
+				"reset_at", now,
+				"baseline", totalTokens,
+			)
+		}
+	}
+
+	if totalTokens < g.budget.WindowBaseline {
+		// Lifetime totals shrank (session files pruned); re-baseline so
+		// spend never goes negative.
+		g.budget.WindowBaseline = totalTokens
+	}
+	g.budget.CurrentSpend = totalTokens - g.budget.WindowBaseline
+
+	// ByAgent/ByModel remain lifetime totals: window-relative breakdowns
+	// would need per-key baselines and these maps are informational only.
 	for k, v := range byAgent {
 		g.budget.ByAgent[k] = v
 	}
 	for k, v := range byModel {
 		g.budget.ByModel[k] = v
 	}
+
+	// WeeklyLimit == 0 disables budgeting entirely: no thresholds, no alerts.
+	if g.budget.WeeklyLimit > 0 {
+		warnThreshold := g.budget.WeeklyLimit * BudgetWarnPct / percentDenominator
+		trans.WarnActive = g.budget.CurrentSpend >= warnThreshold
+		trans.ExhaustedActive = g.budget.CurrentSpend >= g.budget.WeeklyLimit
+		if trans.WarnActive && !g.budgetWarned {
+			g.budgetWarned = true
+			trans.WarnCrossed = true
+		}
+		if trans.ExhaustedActive && !g.budgetExhaustedAlerted {
+			g.budgetExhaustedAlerted = true
+			trans.ExhaustedCrossed = true
+		}
+	}
+
+	return trans
+}
+
+// SeedBudgetWindowBaseline restores the window baseline from a persisted
+// snapshot so the current window's spend survives restarts.
+func (g *Governor) SeedBudgetWindowBaseline(baseline int64) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.budget.WindowBaseline = baseline
 }
 
 func (g *Governor) SetBudgetLimit(limit int64) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.budget.WeeklyLimit = limit
+}
+
+// SetBudgetIgnoreAll toggles the global budget-suppression bypass.
+func (g *Governor) SetBudgetIgnoreAll(ignore bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.budget.IgnoreAll = ignore
 }
 
 func (g *Governor) SetBudgetIgnored(agents []string) {

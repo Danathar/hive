@@ -1611,6 +1611,17 @@
       max-height: 0 !important;
       padding: 0;
     }
+    #advisory-digest {
+      background: var(--card-bg); border: 1px solid var(--border);
+      border-radius: 8px; padding: 16px;
+    }
+    /* When the main digest is collapsed, hide the empty card shell too —
+       otherwise a blank bordered box lingers under the header. */
+    #advisory-digest.card-collapsed {
+      border: none;
+      padding: 0;
+      background: transparent;
+    }
 
     /* ── Collapsible sections (#1533) ── */
     .section-header-toggle {
@@ -2189,7 +2200,7 @@
       <span id="advisory-digest-main-chevron" class="collapse-chevron">▼</span> 📋 Advisory Digest
     </h2>
     <div class="section-body">
-      <div id="advisory-digest" style="background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 16px;"></div>
+      <div id="advisory-digest"></div>
     </div>
   </div>
 
@@ -4114,6 +4125,10 @@
         body.classList.add('collapsed');
         chevron.classList.add('collapsed');
       }
+      if (sectionId === 'advisory-digest-main') {
+        const card = document.getElementById('advisory-digest');
+        if (card) card.classList.toggle('card-collapsed', !isCollapsed);
+      }
       setAdvisoryCollapsed(sectionId, !isCollapsed);
     }
 
@@ -4122,16 +4137,20 @@
       if (isAdvisoryCollapsed('advisory-digest-main')) {
         const body = document.getElementById('advisory-digest-main-body');
         const chevron = document.getElementById('advisory-digest-main-chevron');
+        const card = document.getElementById('advisory-digest');
         if (body) body.classList.add('collapsed');
         if (chevron) chevron.classList.add('collapsed');
+        if (card) card.classList.add('card-collapsed');
       }
     }
 
     function renderAdvisoryDigest(digest) {
       const el = document.getElementById('advisory-digest');
       if (!el) return;
+      el.classList.toggle('card-collapsed', isAdvisoryCollapsed('advisory-digest-main'));
       if (!digest || !digest.total_count) {
-        setIfChanged(el, '<div id="advisory-digest-main-body" style="color:var(--muted);font-size:0.82rem;text-align:center;padding:20px">No advisory findings yet. Agents will post findings here as they analyze the codebase.</div>');
+        const emptyCollapsed = isAdvisoryCollapsed('advisory-digest-main');
+        setIfChanged(el, `<div id="advisory-digest-main-body" class="advisory-agent-body${emptyCollapsed ? ' collapsed' : ''}" style="color:var(--muted);font-size:0.82rem;text-align:center;${emptyCollapsed ? 'max-height:0;padding:0' : 'padding:20px'}">No advisory findings yet. Agents will post findings here as they analyze the codebase.</div>`);
         return;
       }
       const sevIcon = s => ({ critical: '🔴', high: '🟠', medium: '🟡', low: '🔵' }[s] || '⚪');

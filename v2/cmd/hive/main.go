@@ -402,6 +402,9 @@ func main() {
 		if saved.BudgetLimit > 0 {
 			gov.SetBudgetLimit(saved.BudgetLimit)
 		}
+		if saved.BudgetIgnoreAll {
+			gov.SetBudgetIgnoreAll(true)
+		}
 		if len(saved.BudgetIgnored) > 0 {
 			gov.SetBudgetIgnored(saved.BudgetIgnored)
 		}
@@ -431,7 +434,8 @@ func main() {
 		}
 		if saved.BudgetSpend > 0 || !saved.BudgetResetAt.IsZero() || len(saved.BudgetByAgent) > 0 {
 			gov.SeedBudget(saved.BudgetSpend, saved.BudgetByAgent, saved.BudgetByModel, saved.BudgetResetAt)
-			logger.Info("budget state restored", "spend", saved.BudgetSpend, "reset_at", saved.BudgetResetAt)
+			gov.SeedBudgetWindowBaseline(saved.BudgetWindowBaseline)
+			logger.Info("budget state restored", "spend", saved.BudgetSpend, "reset_at", saved.BudgetResetAt, "window_baseline", saved.BudgetWindowBaseline)
 		}
 		if len(saved.KickHistory) > 0 {
 			records := make([]governor.KickRecord, len(saved.KickHistory))
@@ -1147,6 +1151,8 @@ func main() {
 		}
 	}
 
+	dashboard.SetBackendAuthProvider(agentMgr.BackendAuthAvailable)
+
 	githubProxy, err := proxy.NewGitHubProxy(logger, cfg.Project.Org, cfg.Project.Repos)
 	if err != nil {
 		logger.Error("failed to create github proxy", "error", err)
@@ -1635,6 +1641,40 @@ func main() {
 	}
 }
 
+// Dashboard system-alert IDs for the budget thresholds.
+const (
+	budgetWarnAlertID      = "budget-warn"
+	budgetExhaustedAlertID = "budget-exhausted"
+)
+
+// applyBudgetAlerts turns budget threshold crossings into dashboard system
+// alerts and notifications. Crossings fire once per window (governor tracks
+// the one-shot flags); alerts are cleared when the threshold no longer
+// applies (window rolled, limit raised, or budgeting disabled).
+func applyBudgetAlerts(gov *governor.Governor, trans governor.BudgetTransitions, dashSrv *dashboard.Server, notifier *notify.Notifier) {
+	if !trans.WarnActive {
+		dashSrv.ClearSystemAlert(budgetWarnAlertID)
+	}
+	if !trans.ExhaustedActive {
+		dashSrv.ClearSystemAlert(budgetExhaustedAlertID)
+	}
+
+	budget := gov.GetBudget()
+	if trans.WarnCrossed {
+		msg := fmt.Sprintf("token budget at %d%%+ of weekly limit: %d of %d tokens used",
+			governor.BudgetWarnPct, budget.CurrentSpend, budget.WeeklyLimit)
+		dashSrv.AddSystemAlert(budgetWarnAlertID, "warning", msg)
+		notifier.Send("Budget warning", msg, notify.PriorityDefault)
+	}
+	if trans.ExhaustedCrossed {
+		windowEnd := budget.ResetAt.Add(governor.BudgetWindowDuration)
+		msg := fmt.Sprintf("token budget exhausted: %d of %d tokens used — agent kicks suspended until %s (exempt agents keep running)",
+			budget.CurrentSpend, budget.WeeklyLimit, windowEnd.Format(time.RFC1123))
+		dashSrv.AddSystemAlert(budgetExhaustedAlertID, "error", msg)
+		notifier.Send("Budget exhausted", msg, notify.PriorityHigh)
+	}
+}
+
 func runEvalCycle(
 	ctx context.Context,
 	cfg *config.Config,
@@ -1698,6 +1738,15 @@ func runEvalCycle(
 			"unheld", shaResult.Unheld,
 			"skipped", shaResult.Skipped,
 		)
+	}
+
+	// Refresh budget spend from lifetime token totals before Evaluate so
+	// the kick gate sees current-window numbers.
+	if tokenCollector != nil {
+		if summary := tokenCollector.Summary(); summary != nil {
+			trans := gov.UpdateBudgetFromTotals(summary.TotalTokens, summary.ByAgent, summary.ByModel)
+			applyBudgetAlerts(gov, trans, dashSrv, notifier)
+		}
 	}
 
 	agentsDue := gov.Evaluate(
@@ -2167,12 +2216,14 @@ func persistState(agentMgr *agent.Manager, gov *governor.Governor, cfg *config.C
 		GovernorMode:     string(govState.Mode),
 		BudgetLimit:      budget.WeeklyLimit,
 		BudgetIgnored:    budget.IgnoredAgents,
+		BudgetIgnoreAll:  budget.IgnoreAll,
 		CadenceOverrides: cadenceOverrides,
 		LastKicks:        govState.LastKick,
-		BudgetSpend:      budget.CurrentSpend,
-		BudgetResetAt:    budget.ResetAt,
-		BudgetByAgent:    budget.ByAgent,
-		BudgetByModel:    budget.ByModel,
+		BudgetSpend:          budget.CurrentSpend,
+		BudgetResetAt:        budget.ResetAt,
+		BudgetByAgent:        budget.ByAgent,
+		BudgetByModel:        budget.ByModel,
+		BudgetWindowBaseline: budget.WindowBaseline,
 		KickHistory:      kickEntries,
 		IssueCosts:       issueCosts,
 		LastEval:         govState.LastEval,

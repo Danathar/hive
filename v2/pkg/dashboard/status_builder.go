@@ -39,7 +39,25 @@ func getProxyViolationsFn() func() map[string]int {
 	return proxyViolationsFn
 }
 
+// SetBackendAuthProvider registers a function reporting whether shared
+// credentials exist for a CLI backend (available, known). Lets the status
+// build show honest auth state for agents with no running pane.
+func SetBackendAuthProvider(fn func(backend string) (bool, bool)) {
+	backendAuthMu.Lock()
+	defer backendAuthMu.Unlock()
+	backendAuthFn = fn
+}
+
+func getBackendAuthFn() func(backend string) (bool, bool) {
+	backendAuthMu.RLock()
+	defer backendAuthMu.RUnlock()
+	return backendAuthFn
+}
+
 var (
+	backendAuthMu sync.RWMutex
+	backendAuthFn func(backend string) (bool, bool)
+
 	cachedHealth   map[string]any
 	cachedHealthMu sync.RWMutex
 
@@ -249,6 +267,11 @@ func buildAgents(statuses map[string]*agent.AgentProcess, cfg *config.Config, go
 		a.DefaultMode = defaultMode.String()
 		a.IsCustomMode = mode != defaultMode
 		a.NeedsLogin = proc.NeedsLogin
+		if authFn := getBackendAuthFn(); authFn != nil {
+			avail, known := authFn(cli)
+			a.AuthAvailable = avail
+			a.AuthKnown = known
+		}
 		a.NeedsRestart = proc.HasLaunched && proc.LaunchedMode != mode
 		a.OnDemand = agentCfg.OnDemand || onDemandSet[name]
 		if pvFn := getProxyViolationsFn(); pvFn != nil {
@@ -757,7 +780,10 @@ func buildBudget(gov *governor.Governor, tokenCollector *tokens.Collector) Front
 	}
 
 	used := totalTokens
-	if budget.CurrentSpend > 0 {
+	if !budget.ResetAt.IsZero() {
+		// Governor window is open: CurrentSpend is the live window-relative
+		// spend. The collector lifetime total remains the fallback for
+		// limit-less tracking before any window exists.
 		used = budget.CurrentSpend
 	}
 
@@ -788,6 +814,11 @@ func buildBudget(gov *governor.Governor, tokenCollector *tokens.Collector) Front
 			}
 		}
 		fb.HoursElapsed = hoursElapsed
+
+		fb.Exhausted = used >= budget.WeeklyLimit
+		if !budget.ResetAt.IsZero() {
+			fb.WindowEndsAt = budget.ResetAt.Add(governor.BudgetWindowDuration).UTC().Format(time.RFC3339)
+		}
 	}
 
 	return fb

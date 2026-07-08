@@ -67,6 +67,10 @@ type HeartbeatNodeMetric struct {
 	MemPercent     int      `json:"mem_percent"`
 	Pods           int      `json:"pods"`
 	PodCapacity    int      `json:"pod_capacity"`
+	// HiveCount is the number of distinct hive-hosted-* namespaces with a
+	// running pod on this node (namespaces, not pods, so a hive briefly
+	// running two pods during a rollout is counted once).
+	HiveCount      int      `json:"hive_count,omitempty"`
 	Ready          bool     `json:"ready"`
 	Conditions     []string `json:"conditions"`
 	DiskPressure   bool     `json:"disk_pressure"`
@@ -83,6 +87,10 @@ type HeartbeatClusterSummary struct {
 	TotalMemGB    int `json:"total_mem_gb"`
 	TotalMemPct   int `json:"total_mem_percent"`
 	TotalPods     int `json:"total_pods"`
+	// HiveCapacityRemaining estimates how many MORE hives the cluster can
+	// hold (see hive_capacity.go). Pointer so old spokes that do not report
+	// it are distinguishable from a genuinely full cluster (nil vs 0).
+	HiveCapacityRemaining *int `json:"hive_capacity_remaining,omitempty"`
 }
 
 // HeartbeatGPUSummary reports aggregate GPU counts collected on the spoke.
