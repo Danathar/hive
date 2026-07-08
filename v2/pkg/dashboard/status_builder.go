@@ -248,6 +248,7 @@ func buildAgents(statuses map[string]*agent.AgentProcess, cfg *config.Config, go
 		a.ModeEmoji = mode.Emoji()
 		a.DefaultMode = defaultMode.String()
 		a.IsCustomMode = mode != defaultMode
+		a.NeedsLogin = proc.NeedsLogin
 		a.NeedsRestart = proc.HasLaunched && proc.LaunchedMode != mode
 		a.OnDemand = agentCfg.OnDemand || onDemandSet[name]
 		if pvFn := getProxyViolationsFn(); pvFn != nil {

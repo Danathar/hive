@@ -1069,7 +1069,7 @@ func TestNormalizeModelName_EdgeCases(t *testing.T) {
 		{"model", "model"},
 	}
 	for _, tt := range tests {
-		got := normalizeModelName(tt.input)
+		got := normalizeModelName(tt.input, "copilot")
 		if got != tt.want {
 			t.Errorf("normalizeModelName(%q) = %q, want %q", tt.input, got, tt.want)
 		}

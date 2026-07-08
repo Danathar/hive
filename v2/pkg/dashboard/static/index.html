@@ -567,7 +567,17 @@
     .agent-card.idle { border-color: var(--border); }
     .agent-card.stopped { border-color: var(--red); }
     .agent-card.needs-login { border-color: #ef4444; }
-    .login-warning { background: rgba(239,68,68,0.15); color: #ef4444; font-size: 0.75rem; font-weight: 700; text-align: center; padding: 4px 8px; border-radius: 4px; margin-top: 6px; }
+    .cli-login-btn { border: none; padding: 2px 10px; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 0.75rem; display: inline-flex; align-items: center; gap: 4px; }
+    .cli-login-btn.claude { background: #d97706; color: #fff; }
+    .cli-login-btn.claude:hover { background: #f59e0b; }
+    .cli-login-btn.copilot { background: #238636; color: #fff; }
+    .cli-login-btn.copilot:hover { background: #2ea043; }
+    .cli-login-btn.disabled { background: #555; color: #999; cursor: not-allowed; opacity: 0.5; }
+    .cli-login-btn .cli-icon { width: 14px; height: 14px; vertical-align: middle; display: inline-block; background-size: contain; background-repeat: no-repeat; background-position: center; border-radius: 2px; }
+    .cli-login-btn .cli-icon.claude-icon { background-image: url('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAMAAAAoLQ9TAAAABGdBTUEAALGPC/xhBQAAACBjSFJNAAB6JgAAgIQAAPoAAACA6AAAdTAAAOpgAAA6mAAAF3CculE8AAABU1BMVEUAAADad1jadlnVgFXYdljjcVXZd1fZd1f/VVXYeFbZd1bYd1fYdljYeFfZdlfdd1XZd1fad1jXd1jad1bWc1rXeVHad1fYd1f/AADZd1jZeFffcFDZd1faeFbbeFjZd1fZd1jYeFnYdlfadlfZdlfaeFjZeFfZd1jZd1fZd1fad1fZeFfZdlbZd1fRdF3/gIDZdlfZd1fZd1fZd1fZeFfZd1fadlfZdlfYeFnZeFjadljZdljYdljZd1fZd1fZd1fad1jZd1bWelfXeFjad1fYeFjaeFbadlbZd1fZdlfZd1fZeVbceFXZd1fZdlfYd1fZeFbZd1fYdlfZd1bZd1fZd1fYd1fZeVm/gEDZeFfYd1fYeFfZdlfZd1fYd1fMZmbbeVXZdlbYd1jVdVXZd1fZd1bSeFrZd1jWelzVcVXaeFbaeFbZeFjVgFXeelnZd1f///+GnZeHAAAAb3RSTlMAdEUGNAn73gNi5phUhMQey1o6qx8T7s0BmpUQ11kx7+xIcFK1ZrOjwf6P4LfVCwJs9Pj8NS9hjEKAbl1OWN/6zJQsIGd3gojqmV5KJK3isnP2irTk66UoBNFpVZunuQU5f4MY7boRaxkSRFNXDBdqCrImAAAAAWJLR0Rw2ABsdAAAAAlwSFlzAAAA8wAAAPMBRvLPbQAAAAd0SU1FB+gEHhUwIfpH8hUAAADZSURBVBjTY2AAAkYmBgZmFgY4YGVj52Dg5EIIMHDn8zDw8jHwCwiCeELCIqJi4hKSUtIy+bIgATl5BUWlfGUVVbV8dYgGEQ1NLW1xcZ18XT2oEfoGhvn5RvnGJqZm5hYMipZW1ja2dvn5+WyG9g6OTgzOLq5u7lrsQAEPTy9vFgmwHh9fP+P8fAFXf7H8AJC7zAODfINDNEPDmPXDI4ACupEsUeLRMbG6UnEQa0zjE0J9EpOSU5I4UyHWpmnbMKilM9iyZSRDBDKzGBi4shkYcnKR/OeSB2UAAL9MJSEszd09AAAAJXRFWHRkYXRlOmNyZWF0ZQAyMDI0LTA0LTMwVDIxOjQ4OjMzKzAwOjAwyl6QtAAAACV0RVh0ZGF0ZTptb2RpZnkAMjAyNC0wNC0zMFQyMTo0ODozMyswMDowMLsDKAgAAAAZdEVYdFNvZnR3YXJlAHd3dy5pbmtzY2FwZS5vcmeb7jwaAAAAV3pUWHRSYXcgcHJvZmlsZSB0eXBlIGlwdGMAAHic4/IMCHFWKCjKT8vMSeVSAAMjCy5jCxMjE0uTFAMTIESANMNkAyOzVCDL2NTIxMzEHMQHy4BIoEouAOoXEXTyQjWVAAAAAElFTkSuQmCC'); }
+    .cli-login-btn .cli-icon.copilot-icon { background-color: #24292f; border-radius: 50%; background-size: 11px; background-image: url('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAACXBIWXMAAAsTAAALEwEAmpwYAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAHdSURBVHgBvVeLbYNADDVdoHSDG4ENwgjpBMkG6QbtBkknIBtEnaDdADoBbEA6gWuXQ3GR7wOc8qSnSPhvkzuTQSQQMaefLXFDLIiGmFvxldgRG+IX8SPLsiukAAU2xDOxx3mo2BaWgismHnE9jrZ7s6tuMR1ajO0GKRaYNrhMorh35VoSBjwzbxWDCy5Lil/ailgrPnMtAe2F2wn5Hm+J9Nbxp2AvZNKuVPwetdZrKJQuGfCPMI/0baTSOai0EJ4EKlmVC3tYCdRHwOBR5Q8wHK8aOhiO1bVorK8phqPd0/4dJIKnCxULa4dw3vEZTkK7S2oegVH0u2S3mfCpPDOcQNJKPdAK+nsJ7wW10Ixn4xA+pRwDD1x5fOUOdA6bDaQLXjpEHSfw7RC+QDrsHc+b8ZJxYXUS5OPg8b8bj2LfvvcKCxEIzshHRXkavhG3+H8HaK2zMiJoYXXrQPBKGplJsK3tjObk4gl+wXiYqfFJCHublLailZ4EysjgJ814upKdRHc4uYp4gPAIQmjRdc8oFRcwExHBjdTPFAcclOc8Kp5huNN/iI90Or5DIAGHqCM+k30DEVU41/MI26jKo4DDX3JtAidcs1vg7eM0NoEeb98EBlIBAyu50DNzKv4F8Mg9kvfoSM0AAAAASUVORK5CYII='); }
+    .cli-login-btn.logged-in { background: transparent; color: var(--green, #22c55e); cursor: pointer; border: 1px solid var(--green, #22c55e); }
+    .cli-login-btn.logged-in:hover { background: rgba(34,197,94,0.1); }
     .gh-auth-banner { background: linear-gradient(135deg, #1a1a2e, #16213e); color: #fff; padding: 12px 24px; display: flex; align-items: center; justify-content: center; gap: 12px; font-size: 0.9rem; z-index: 200; }
     .gh-auth-banner .gh-auth-btn { background: #238636; color: #fff; border: none; padding: 6px 16px; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 0.85rem; }
     .gh-auth-banner .gh-auth-btn:hover { background: #2ea043; }
@@ -595,6 +605,10 @@
     .gh-auth-modal .gh-cancel { background: none; border: 1px solid #d1d5db; padding: 6px 16px; border-radius: 6px; cursor: pointer; color: #6b7280; margin-top: 12px; }
     .gh-auth-modal .gh-cancel:hover { background: #f3f4f6; }
     .gh-setup-modal { background: #fff; border-radius: 12px; padding: 32px; max-width: 560px; width: 92%; text-align: left; box-shadow: 0 20px 60px rgba(0,0,0,0.3); max-height: 85vh; overflow-y: auto; }
+    .claude-auth-btn { background: #d97706; color: #fff; border: none; padding: 6px 16px; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 0.85rem; }
+    .claude-auth-btn:hover { background: #f59e0b; }
+    .claude-auth-status { font-size: 0.8rem; color: #6b7280; }
+    .claude-auth-status.logged-in { color: #16a34a; font-weight: 600; }
     .gh-setup-modal h3 { margin: 0 0 16px; font-size: 1.2rem; color: #1a1a2e; text-align: center; }
     .gh-setup-modal p { color: #6b7280; font-size: 0.85rem; margin: 8px 0; line-height: 1.5; }
     .gh-setup-modal .setup-option { background: #f9fafb; border: 2px solid #e5e7eb; border-radius: 8px; padding: 16px; margin: 12px 0; cursor: pointer; transition: border-color 0.15s; }
@@ -2606,6 +2620,21 @@
           <div class="oc-detail-field"><div class="label" title="Average tokens consumed per work pass (kick session). Lower is more efficient.">Avg/Pass</div><div class="value">${_tokAvg > 0 ? fmtTokens(_tokAvg) : '—'}</div></div>
           <div class="oc-detail-field"><div class="label" title="Number of separate CLI sessions this agent has had in the last 24 hours.">Sessions</div><div class="value">${_tok.sessions ?? '—'}</div></div>
           <div class="oc-detail-field"><div class="label" title="Total number of messages (prompts + responses) across all sessions in the last 24 hours.">Messages</div><div class="value">${_tok.messages ?? '—'}</div></div>
+          <div class="oc-detail-field"><div class="label" title="CLI authentication status — log in to authenticate the agent's CLI tool">Auth</div><div class="value">${(() => {
+            const isClaude = a.cli === 'claude';
+            const isCopilot = a.cli === 'copilot';
+            const _needsLogin = a.needsLogin === true;
+            const claudeIcon = '<span class="cli-icon claude-icon"></span>';
+            const copilotIcon = '<span class="cli-icon copilot-icon"></span>';
+            if (_needsLogin) {
+              if (isClaude) return '<button class="cli-login-btn claude" onclick="event.stopPropagation();loginAgent(\x27' + esc(a.name) + '\x27,\x27claude\x27)" title="Authenticate Claude Code CLI">' + claudeIcon + ' Login</button>';
+              if (isCopilot) return '<button class="cli-login-btn copilot" onclick="event.stopPropagation();loginAgent(\x27' + esc(a.name) + '\x27,\x27copilot\x27)" title="Authenticate GitHub Copilot CLI">' + copilotIcon + ' Login</button>';
+              return '<button class="cli-login-btn disabled" disabled title="This backend requires manual /login in the terminal">Login</button>';
+            }
+            if (isClaude) return '<button class="cli-login-btn logged-in" onclick="event.stopPropagation();loginAgent(\x27' + esc(a.name) + '\x27,\x27claude\x27)" title="Re-authenticate Claude Code CLI">' + claudeIcon + ' ✓ logged in</button>';
+            if (isCopilot) return '<button class="cli-login-btn logged-in" onclick="event.stopPropagation();loginAgent(\x27' + esc(a.name) + '\x27,\x27copilot\x27)" title="Re-authenticate GitHub Copilot CLI">' + copilotIcon + ' ✓ logged in</button>';
+            return '<button class="cli-login-btn disabled" disabled title="This backend requires manual /login in the terminal">✓ logged in</button>';
+          })()}</div></div>
         </div>
         <div class="oc-detail-indicators">${agentIndicators(a.name)}</div>
         <div class="oc-detail-summary-wrap">
@@ -3495,7 +3524,20 @@
           <div class="agent-field"><span class="label" title="When the governor will next kick this agent based on its cadence interval.">next run</span><span class="value">${isOnDemand ? 'on demand' : isPaused ? 'paused' : isOff ? 'off' : (a.nextKick || '—')}</span></div>
           ${agentTokenRow(a.name, a.cadence)}
           <div class="agent-field"><span class="label" title="Number of times this agent has been restarted in the last 24 hours. High counts may indicate instability or rate limiting.">restarts</span><span class="value${(a.restarts || 0) > 5 ? ' restart-high' : (a.restarts || 0) > 0 ? ' restart-warn' : ''}">${a.restarts || 0}<span class="restart-label">24h</span>${(a.restarts || 0) > 0 ? `<button class="restart-reset" data-action="resetRestarts" data-agent="${esc(a.name)}" title="Reset the restart counter to zero — does not affect the agent">✕</button>` : ''}<span class="restart-spark">${restartSparkSvg(a.name)}</span></span></div>
-          ${needsLogin ? '<div class="login-warning">⚠ NOT LOGGED IN — run /login</div>' : ''}
+          <div class="agent-field"><span class="label" title="CLI authentication status — log in to authenticate the agent's CLI tool">auth</span><span class="value">${(() => {
+            const isClaude = a.cli === 'claude';
+            const isCopilot = a.cli === 'copilot';
+            const claudeIcon = '<span class="cli-icon claude-icon"></span>';
+            const copilotIcon = '<span class="cli-icon copilot-icon"></span>';
+            if (needsLogin) {
+              if (isClaude) return '<button class="cli-login-btn claude" onclick="event.stopPropagation();loginAgent(\x27' + esc(a.name) + '\x27,\x27claude\x27)" title="Authenticate Claude Code CLI">' + claudeIcon + ' Login</button>';
+              if (isCopilot) return '<button class="cli-login-btn copilot" onclick="event.stopPropagation();loginAgent(\x27' + esc(a.name) + '\x27,\x27copilot\x27)" title="Authenticate GitHub Copilot CLI">' + copilotIcon + ' Login</button>';
+              return '<button class="cli-login-btn disabled" disabled title="This backend requires manual /login in the terminal">Login</button>';
+            }
+            if (isClaude) return '<button class="cli-login-btn logged-in" onclick="event.stopPropagation();loginAgent(\x27' + esc(a.name) + '\x27,\x27claude\x27)" title="Re-authenticate Claude Code CLI">' + claudeIcon + ' ✓ logged in</button>';
+            if (isCopilot) return '<button class="cli-login-btn logged-in" onclick="event.stopPropagation();loginAgent(\x27' + esc(a.name) + '\x27,\x27copilot\x27)" title="Re-authenticate GitHub Copilot CLI">' + copilotIcon + ' ✓ logged in</button>';
+            return '<button class="cli-login-btn disabled" disabled title="This backend requires manual /login in the terminal">✓ logged in</button>';
+          })()}</span></div>
           ${summaryEl}${indEl}
           <div class="agent-actions">
             <input type="text" class="kick-prompt" id="kick-prompt-${esc(a.name)}" placeholder="custom prompt (optional)" data-enter-action="kick" data-agent="${esc(a.name)}" title="Type a custom prompt to send to this agent instead of its default kick prompt. Press Enter to send." />
@@ -4018,14 +4060,25 @@
     const KNOWN_BACKENDS = ['claude', 'copilot', 'bob', 'gemini', 'codex', 'amazonq', 'goose', 'aider', 'vllm', 'llm-d'];
     const FREE_BACKENDS = ['copilot', 'goose'];
     const INFERENCE_BACKENDS = ['vllm', 'llm-d'];
-    const KNOWN_MODELS = [
+    const CLAUDE_CLI_MODELS = [
+      { value: 'claude-opus-4-8', label: 'Opus 4.8' },
+      { value: 'claude-opus-4-7', label: 'Opus 4.7' },
       { value: 'claude-opus-4-6', label: 'Opus 4.6' },
       { value: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
       { value: 'claude-sonnet-4-5', label: 'Sonnet 4.5' },
       { value: 'claude-haiku-4-5', label: 'Haiku 4.5' },
+      { value: 'claude-fable-5', label: 'Fable 5' },
+    ];
+    const COPILOT_CLI_MODELS = [
+      { value: 'claude-opus-4.6', label: 'Opus 4.6' },
+      { value: 'claude-sonnet-4.6', label: 'Sonnet 4.6' },
+      { value: 'claude-sonnet-4.5', label: 'Sonnet 4.5' },
+      { value: 'claude-haiku-4.5', label: 'Haiku 4.5' },
+      { value: 'gemini-flash-3.5', label: 'Gemini Flash 3.5' },
       { value: 'gpt-5.4', label: 'GPT-5.4' },
       { value: 'gpt-5.2', label: 'GPT-5.2' },
     ];
+    const KNOWN_MODELS = COPILOT_CLI_MODELS;
     const INFERENCE_MODELS = {};
     const INFERENCE_MODEL_CACHE_TTL_MS = 30000;
     const _inferenceModelCache = {};
@@ -4035,7 +4088,8 @@
     }
     function modelsForBackend(backend) {
       if (INFERENCE_BACKENDS.includes(backend)) return INFERENCE_MODELS[backend] || [];
-      return KNOWN_MODELS;
+      if (backend === 'claude') return CLAUDE_CLI_MODELS;
+      return COPILOT_CLI_MODELS;
     }
     async function fetchInferenceModels(backend) {
       const now = Date.now();
@@ -9824,8 +9878,8 @@ function burnAreaChart() {
     let _configState = { type: null, agent: null, tab: null, data: {}, dirty: {} };
     const _configTabMemory = {};
 
-    const AGENT_CONFIG_TABS = ['General', 'Cadences', 'Pipeline', 'Hooks', 'Restrictions', 'Stats', 'Prompt Template', 'Last Prompt', 'Export'];
-    const AGENT_CREATE_TABS = ['Import', 'General', 'Cadences', 'Prompt Template'];
+    const AGENT_CONFIG_TABS = ['General', 'Cadences', 'Pipeline', 'Hooks', 'Restrictions', 'Channels', 'Tools', 'Connections', 'Stats', 'Prompt Template', 'Last Prompt', 'Export'];
+    const AGENT_CREATE_TABS = ['Import', 'General', 'Cadences', 'Channels', 'Tools', 'Prompt Template'];
     const GOVERNOR_CONFIG_TABS = ['General', 'Agents', 'Thresholds', 'Labels', 'Repos', 'Budget', 'Notifications', 'Health', 'Sensing', 'Logging', 'Hub'];
     const PIPELINE_STAGES = ['resolve-beads', 'track-prs', 'stale-check', 'repo-scan', 'coverage-gate', 'prompt-compose', 'budget-check', 'api-collect', 'final-compose'];
     const PIPELINE_STAGE_TIPS = {
@@ -10284,6 +10338,9 @@ function burnAreaChart() {
       html += '<tr><td style="padding:4px 8px;color:var(--muted)">Mode</td><td style="padding:4px 8px">' + (spec.mode || '?') + '</td></tr>';
       html += '<tr><td style="padding:4px 8px;color:var(--muted)">Role</td><td style="padding:4px 8px">' + (spec.role || '') + '</td></tr>';
       if (spec.promptTemplate) html += '<tr><td style="padding:4px 8px;color:var(--muted)">Template</td><td style="padding:4px 8px;font-size:0.7rem;color:var(--muted)">' + spec.promptTemplate.substring(0,120) + '...</td></tr>';
+      if (spec.channels && spec.channels.length) html += '<tr><td style="padding:4px 8px;color:var(--muted)">Channels</td><td style="padding:4px 8px">' + spec.channels.map(function(c){return c.type}).join(', ') + '</td></tr>';
+      if (spec.tools) html += '<tr><td style="padding:4px 8px;color:var(--muted)">Tools</td><td style="padding:4px 8px">' + (spec.tools.preset || 'custom rules') + '</td></tr>';
+      if (spec.connections && spec.connections.length) html += '<tr><td style="padding:4px 8px;color:var(--muted)">Connections</td><td style="padding:4px 8px">' + spec.connections.map(function(c){return c.name}).join(', ') + '</td></tr>';
       html += '</table>';
       document.getElementById('import-preview-content').innerHTML = html;
       document.getElementById('import-preview').style.display = 'block';
@@ -10312,6 +10369,9 @@ function burnAreaChart() {
         case 'Pipeline': return renderAgentPipeline(d.pipeline || {});
         case 'Hooks': return renderAgentHooks(d.hooks || {});
         case 'Restrictions': return renderAgentRestrictions(d.restrictions || {});
+        case 'Channels': return renderAgentChannels(d.channels || []);
+        case 'Tools': return renderAgentTools(d.tools || null);
+        case 'Connections': return renderAgentConnections(d.connections || []);
         case 'Stats': return renderAgentStatsTab(d.stats || []);
         case 'Prompt Template': return renderAgentPromptTemplate();
         case 'Last Prompt': return renderAgentLastPrompt(d.prompt || '');
@@ -10841,6 +10901,265 @@ function burnAreaChart() {
       html += '</div>';
       return html;
     }
+
+    // --- Channels tab ---
+
+    const CHANNEL_COLORS = {kick:'#2563eb',webhook:'#16a34a',discord:'#7c3aed',schedule:'#ea580c',bead:'#0891b2'};
+    const CHANNEL_TYPES = ['kick','webhook','discord','schedule','bead'];
+
+    function renderAgentChannels(channels) {
+      let html = '<p style="font-size:0.75rem;color:var(--muted);margin-bottom:14px">Declare how this agent gets triggered. When empty, the agent uses governor timer kicks by default.</p>';
+      if (!channels || channels.length === 0) {
+        html += '<div style="font-size:0.8rem;color:var(--muted);padding:16px 0;text-align:center;border:1px dashed var(--border);border-radius:8px">No explicit channels — this agent uses governor timer kicks by default.</div>';
+      } else {
+        for (let i = 0; i < channels.length; i++) {
+          const ch = channels[i];
+          const color = CHANNEL_COLORS[ch.type] || 'var(--muted)';
+          const enabled = ch.enabled !== false;
+          html += '<div style="font-size:0.78rem;padding:8px 10px;margin-bottom:6px;background:var(--bg);border-left:3px solid '+color+';border-radius:0 4px 4px 0;display:flex;align-items:center;gap:8px;opacity:'+(enabled?'1':'0.5')+'">';
+          html += '<span style="font-weight:600;color:'+color+';text-transform:uppercase;font-size:0.7rem;min-width:60px">'+esc(ch.type)+'</span>';
+          html += '<div style="flex:1;font-size:0.75rem;color:var(--muted)">';
+          if (ch.events && ch.events.length) html += 'events: '+ch.events.map(e => '<code>'+esc(e)+'</code>').join(', ');
+          if (ch.patterns && ch.patterns.length) html += 'patterns: '+ch.patterns.map(p => '<code>'+esc(p)+'</code>').join(', ');
+          if (ch.schedule) html += 'schedule: <code>'+esc(ch.schedule)+'</code>';
+          if (ch.match) html += 'match: '+Object.entries(ch.match).map(([k,v]) => '<code>'+esc(k)+'='+esc(v)+'</code>').join(', ');
+          if (ch.repos && ch.repos.length) html += ' (repos: '+ch.repos.join(', ')+')';
+          html += '</div>';
+          html += '<label style="font-size:0.7rem;display:flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" '+(enabled?'checked':'')+' onchange="toggleChannel('+i+',this.checked)"> on</label>';
+          html += '<button style="background:none;border:none;color:#dc2626;cursor:pointer;font-size:1rem;padding:0 4px" onclick="removeChannel('+i+')">✕</button>';
+          html += '</div>';
+        }
+      }
+      html += '<div style="margin-top:12px;padding:12px;border:1px solid var(--border);border-radius:8px;background:var(--surface)">';
+      html += '<div style="font-size:0.72rem;font-weight:600;margin-bottom:8px;text-transform:uppercase;color:var(--muted)">+ Add Channel</div>';
+      html += '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:end">';
+      html += '<div><label style="font-size:0.7rem;color:var(--muted)">Type</label><select id="ch-add-type" style="display:block;padding:6px 8px;border:1px solid var(--border);border-radius:4px;font-size:0.78rem;background:var(--bg);color:var(--fg)" onchange="channelTypeChanged()">'+CHANNEL_TYPES.map(t => '<option value="'+t+'">'+t+'</option>').join('')+'</select></div>';
+      html += '<div id="ch-add-fields" style="display:flex;gap:6px;flex:1;flex-wrap:wrap"></div>';
+      html += '<button onclick="addChannel()" style="padding:6px 14px;border:1px solid var(--border);border-radius:4px;background:var(--surface);color:var(--fg);cursor:pointer;font-size:0.78rem;white-space:nowrap;height:32px">Add</button>';
+      html += '</div></div>';
+      setTimeout(channelTypeChanged, 0);
+      return html;
+    }
+
+    function channelTypeChanged() {
+      const type = (document.getElementById('ch-add-type') || {}).value;
+      const el = document.getElementById('ch-add-fields');
+      if (!el) return;
+      let h = '';
+      if (type === 'webhook') h = '<div><label style="font-size:0.7rem;color:var(--muted)">Events (comma-sep)</label><input id="ch-add-events" type="text" placeholder="issues.opened, push" style="display:block;padding:6px 8px;border:1px solid var(--border);border-radius:4px;font-size:0.78rem;background:var(--bg);color:var(--fg);min-width:200px"></div><div><label style="font-size:0.7rem;color:var(--muted)">Repos (optional)</label><input id="ch-add-repos" type="text" placeholder="repo1, repo2" style="display:block;padding:6px 8px;border:1px solid var(--border);border-radius:4px;font-size:0.78rem;background:var(--bg);color:var(--fg);min-width:120px"></div>';
+      else if (type === 'discord') h = '<div><label style="font-size:0.7rem;color:var(--muted)">Patterns</label><input id="ch-add-patterns" type="text" placeholder="!deploy*" style="display:block;padding:6px 8px;border:1px solid var(--border);border-radius:4px;font-size:0.78rem;background:var(--bg);color:var(--fg);min-width:200px"></div>';
+      else if (type === 'schedule') h = '<div><label style="font-size:0.7rem;color:var(--muted)">Cron expression</label><input id="ch-add-schedule" type="text" placeholder="0 */6 * * *" style="display:block;padding:6px 8px;border:1px solid var(--border);border-radius:4px;font-size:0.78rem;background:var(--bg);color:var(--fg);min-width:160px"></div>';
+      else if (type === 'bead') h = '<div><label style="font-size:0.7rem;color:var(--muted)">Match key=value</label><input id="ch-add-match" type="text" placeholder="nudge_target=scanner" style="display:block;padding:6px 8px;border:1px solid var(--border);border-radius:4px;font-size:0.78rem;background:var(--bg);color:var(--fg);min-width:200px"></div>';
+      el.innerHTML = h;
+    }
+
+    function addChannel() {
+      const type = (document.getElementById('ch-add-type') || {}).value;
+      const ch = {type: type};
+      if (type === 'webhook') {
+        const evts = (document.getElementById('ch-add-events') || {}).value || '';
+        ch.events = evts.split(',').map(s => s.trim()).filter(Boolean);
+        const repos = (document.getElementById('ch-add-repos') || {}).value || '';
+        if (repos.trim()) ch.repos = repos.split(',').map(s => s.trim()).filter(Boolean);
+      } else if (type === 'discord') {
+        const pats = (document.getElementById('ch-add-patterns') || {}).value || '';
+        ch.patterns = pats.split(',').map(s => s.trim()).filter(Boolean);
+      } else if (type === 'schedule') {
+        ch.schedule = (document.getElementById('ch-add-schedule') || {}).value || '';
+      } else if (type === 'bead') {
+        const matchStr = (document.getElementById('ch-add-match') || {}).value || '';
+        ch.match = {};
+        matchStr.split(',').forEach(pair => { const [k,v] = pair.split('='); if (k && v) ch.match[k.trim()] = v.trim(); });
+      }
+      const channels = (_configState.data.channels || []).slice();
+      channels.push(ch);
+      _configState.data.channels = channels;
+      saveChannels(channels);
+    }
+
+    function removeChannel(idx) {
+      const channels = (_configState.data.channels || []).slice();
+      channels.splice(idx, 1);
+      _configState.data.channels = channels;
+      saveChannels(channels);
+    }
+
+    function toggleChannel(idx, enabled) {
+      const channels = (_configState.data.channels || []).slice();
+      if (channels[idx]) channels[idx].enabled = enabled;
+      _configState.data.channels = channels;
+      saveChannels(channels);
+    }
+
+    function saveChannels(channels) {
+      const name = _configState.agent;
+      fetch('/api/config/agent/' + name + '/channels', {method:'PUT', headers:_inceptionAuthHeaders(), body:JSON.stringify({channels:channels})})
+        .then(r => { if (!r.ok) throw new Error('save failed'); return r.json(); })
+        .then(() => { showToast('Channels saved', 'success'); renderConfigTab('Channels'); })
+        .catch(e => showToast('Save error: ' + e.message, 'error'));
+    }
+
+    // --- Tools tab ---
+
+    const TOOL_PRESETS = ['advisory','issues-only','issues-prs','full'];
+    const TOOL_PRESET_DENIES = {
+      'advisory': ['mcp__github__create_pull_request','mcp__github__create_issue','mcp__github__update_issue','mcp__github__merge_pull_request'],
+      'issues-only': ['mcp__github__create_pull_request','mcp__github__merge_pull_request'],
+      'issues-prs': [],
+      'full': []
+    };
+
+    function renderAgentTools(tools) {
+      let html = '<p style="font-size:0.75rem;color:var(--muted);margin-bottom:14px">Declarative tool permissions. When set, these override Mode-based restrictions from the General tab.</p>';
+      if (!tools) {
+        html += '<div style="font-size:0.8rem;color:var(--muted);padding:16px 0;text-align:center;border:1px dashed var(--border);border-radius:8px">No explicit tool config — using Mode-based restrictions from the General tab. <a href="#" onclick="switchConfigTab(\'General\');return false" style="color:var(--accent)">Go to General</a></div>';
+        html += '<div style="margin-top:12px;text-align:center"><button onclick="enableToolsConfig()" style="padding:8px 16px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--fg);cursor:pointer;font-size:0.78rem">Enable Declarative Tools</button></div>';
+        return html;
+      }
+      const preset = tools.preset || '';
+      const rules = tools.rules || [];
+      html += '<div style="margin-bottom:14px"><div style="font-size:0.72rem;font-weight:600;text-transform:uppercase;color:var(--muted);margin-bottom:6px">Preset</div>';
+      html += '<div style="display:flex;gap:6px;flex-wrap:wrap">';
+      TOOL_PRESETS.forEach(p => {
+        const active = preset === p;
+        html += '<button onclick="setToolPreset(\''+p+'\')" style="padding:6px 14px;border-radius:16px;font-size:0.75rem;cursor:pointer;border:1px solid '+(active?'var(--accent)':'var(--border)')+';background:'+(active?'var(--accent)':'var(--surface)')+';color:'+(active?'#fff':'var(--fg)')+';font-weight:'+(active?'600':'400')+'">'+p+'</button>';
+      });
+      html += '</div>';
+      if (preset && TOOL_PRESET_DENIES[preset]) {
+        const denies = TOOL_PRESET_DENIES[preset];
+        if (denies.length > 0) {
+          html += '<div style="margin-top:8px;display:flex;gap:4px;flex-wrap:wrap">';
+          denies.forEach(d => {
+            const overridden = rules.some(r => r.pattern === d && r.action === 'allow');
+            html += '<span style="font-size:0.7rem;padding:2px 8px;border-radius:10px;background:'+(overridden?'#16a34a':'#dc2626')+';color:#fff;text-decoration:'+(overridden?'line-through':'none')+'">'+esc(d.replace('mcp__github__',''))+'</span>';
+          });
+          html += '</div>';
+        }
+      }
+      html += '</div>';
+      html += '<div style="margin-bottom:12px"><div style="font-size:0.72rem;font-weight:600;text-transform:uppercase;color:var(--muted);margin-bottom:6px">Rules</div>';
+      if (rules.length === 0) {
+        html += '<div style="font-size:0.75rem;color:var(--muted);padding:4px 0">No custom rules</div>';
+      }
+      rules.forEach((r, i) => {
+        const color = r.action === 'allow' ? '#16a34a' : '#dc2626';
+        html += '<div style="font-size:0.78rem;padding:6px 8px;margin-bottom:4px;background:var(--bg);border-left:3px solid '+color+';border-radius:0 4px 4px 0;display:flex;align-items:start;gap:8px">';
+        html += '<span style="font-size:0.7rem;padding:1px 8px;border-radius:8px;background:'+color+';color:#fff;text-transform:uppercase;font-weight:600">'+r.action+'</span>';
+        html += '<div style="flex:1"><code style="font-size:0.75rem">'+esc(r.pattern)+'</code>';
+        if (r.reason) html += '<div style="font-size:0.7rem;color:var(--muted);margin-top:2px">'+esc(r.reason)+'</div>';
+        html += '</div>';
+        html += '<button style="background:none;border:none;color:#dc2626;cursor:pointer;font-size:1rem;padding:0 4px" onclick="removeToolRule('+i+')">✕</button>';
+        html += '</div>';
+      });
+      html += '<div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;align-items:end">';
+      html += '<input type="text" id="tool-rule-pattern" placeholder="mcp__github__delete_*" style="flex:2;min-width:180px;padding:6px 8px;border:1px solid var(--border);border-radius:4px;font-size:0.78rem;background:var(--bg);color:var(--fg)">';
+      html += '<select id="tool-rule-action" style="padding:6px 8px;border:1px solid var(--border);border-radius:4px;font-size:0.78rem;background:var(--bg);color:var(--fg)"><option value="deny">deny</option><option value="allow">allow</option></select>';
+      html += '<input type="text" id="tool-rule-reason" placeholder="reason (optional)" style="flex:1;min-width:100px;padding:6px 8px;border:1px solid var(--border);border-radius:4px;font-size:0.78rem;background:var(--bg);color:var(--fg)">';
+      html += '<button onclick="addToolRule()" style="padding:6px 14px;border:1px solid var(--border);border-radius:4px;background:var(--surface);color:var(--fg);cursor:pointer;font-size:0.78rem;white-space:nowrap">+ Add</button>';
+      html += '</div></div>';
+      return html;
+    }
+
+    function enableToolsConfig() {
+      _configState.data.tools = {preset:'', rules:[]};
+      renderConfigTab('Tools');
+    }
+
+    function setToolPreset(preset) {
+      const tools = _configState.data.tools || {rules:[]};
+      tools.preset = preset;
+      _configState.data.tools = tools;
+      saveTools(tools);
+    }
+
+    function addToolRule() {
+      const pattern = (document.getElementById('tool-rule-pattern') || {}).value;
+      const action = (document.getElementById('tool-rule-action') || {}).value;
+      const reason = (document.getElementById('tool-rule-reason') || {}).value;
+      if (!pattern) { showToast('Pattern is required', 'error'); return; }
+      const tools = _configState.data.tools || {preset:'', rules:[]};
+      if (!tools.rules) tools.rules = [];
+      tools.rules.push({pattern:pattern, action:action, reason:reason||undefined});
+      _configState.data.tools = tools;
+      saveTools(tools);
+    }
+
+    function removeToolRule(idx) {
+      const tools = _configState.data.tools || {preset:'', rules:[]};
+      if (tools.rules) tools.rules.splice(idx, 1);
+      _configState.data.tools = tools;
+      saveTools(tools);
+    }
+
+    function saveTools(tools) {
+      const name = _configState.agent;
+      fetch('/api/config/agent/' + name + '/tools', {method:'PUT', headers:_inceptionAuthHeaders(), body:JSON.stringify(tools)})
+        .then(r => { if (!r.ok) throw new Error('save failed'); return r.json(); })
+        .then(() => { showToast('Tools saved', 'success'); renderConfigTab('Tools'); })
+        .catch(e => showToast('Save error: ' + e.message, 'error'));
+    }
+
+    // --- Connections tab ---
+
+    const CONN_ICONS = {mcp:'🔌', api:'🌐', knowledge:'📚'};
+    const CONN_TYPES = ['mcp','api','knowledge'];
+
+    function renderAgentConnections(connections) {
+      let html = '<p style="font-size:0.75rem;color:var(--muted);margin-bottom:14px">External service integrations: MCP servers, APIs, and knowledge sources.</p>';
+      if (!connections || connections.length === 0) {
+        html += '<div style="font-size:0.8rem;color:var(--muted);padding:16px 0;text-align:center;border:1px dashed var(--border);border-radius:8px">No external connections configured.</div>';
+      } else {
+        connections.forEach((c, i) => {
+          const icon = CONN_ICONS[c.type] || '';
+          html += '<div style="font-size:0.78rem;padding:8px 10px;margin-bottom:6px;background:var(--bg);border:1px solid var(--border);border-radius:6px;display:flex;align-items:center;gap:8px">';
+          html += '<span style="font-size:1.1rem">'+icon+'</span>';
+          html += '<div style="flex:1">';
+          html += '<div style="font-weight:600">'+esc(c.name)+' <span style="font-size:0.65rem;padding:1px 6px;border-radius:8px;background:var(--surface);border:1px solid var(--border);color:var(--muted);text-transform:uppercase;font-weight:400;margin-left:4px">'+esc(c.type)+'</span></div>';
+          if (c.uri) html += '<div style="font-size:0.72rem;color:var(--muted);font-family:monospace;overflow:hidden;text-overflow:ellipsis;max-width:400px" title="'+esc(c.uri)+'">'+esc(c.uri)+'</div>';
+          if (c.auth) html += '<div style="font-size:0.68rem;color:var(--muted)">🔒 '+esc(c.auth.type)+': '+(c.auth.env_var||c.auth.file||'')+'</div>';
+          html += '</div>';
+          html += '<button style="background:none;border:none;color:#dc2626;cursor:pointer;font-size:1rem;padding:0 4px" onclick="removeConnection('+i+')">✕</button>';
+          html += '</div>';
+        });
+      }
+      html += '<div style="margin-top:12px;padding:12px;border:1px solid var(--border);border-radius:8px;background:var(--surface)">';
+      html += '<div style="font-size:0.72rem;font-weight:600;margin-bottom:8px;text-transform:uppercase;color:var(--muted)">+ Add Connection</div>';
+      html += '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:end">';
+      html += '<div><label style="font-size:0.7rem;color:var(--muted)">Name</label><input id="conn-add-name" type="text" placeholder="jira-api" style="display:block;padding:6px 8px;border:1px solid var(--border);border-radius:4px;font-size:0.78rem;background:var(--bg);color:var(--fg);min-width:100px"></div>';
+      html += '<div><label style="font-size:0.7rem;color:var(--muted)">Type</label><select id="conn-add-type" style="display:block;padding:6px 8px;border:1px solid var(--border);border-radius:4px;font-size:0.78rem;background:var(--bg);color:var(--fg)">'+CONN_TYPES.map(t => '<option value="'+t+'">'+t+'</option>').join('')+'</select></div>';
+      html += '<div><label style="font-size:0.7rem;color:var(--muted)">URI</label><input id="conn-add-uri" type="text" placeholder="stdio:///usr/local/bin/mcp-github" style="display:block;padding:6px 8px;border:1px solid var(--border);border-radius:4px;font-size:0.78rem;background:var(--bg);color:var(--fg);min-width:250px"></div>';
+      html += '<button onclick="addConnection()" style="padding:6px 14px;border:1px solid var(--border);border-radius:4px;background:var(--surface);color:var(--fg);cursor:pointer;font-size:0.78rem;white-space:nowrap;height:32px">Add</button>';
+      html += '</div></div>';
+      return html;
+    }
+
+    function addConnection() {
+      const name = (document.getElementById('conn-add-name') || {}).value;
+      const type = (document.getElementById('conn-add-type') || {}).value;
+      const uri = (document.getElementById('conn-add-uri') || {}).value;
+      if (!name) { showToast('Name is required', 'error'); return; }
+      const connections = (_configState.data.connections || []).slice();
+      connections.push({name:name, type:type, uri:uri||undefined});
+      _configState.data.connections = connections;
+      saveConnections(connections);
+    }
+
+    function removeConnection(idx) {
+      const connections = (_configState.data.connections || []).slice();
+      connections.splice(idx, 1);
+      _configState.data.connections = connections;
+      saveConnections(connections);
+    }
+
+    function saveConnections(connections) {
+      const name = _configState.agent;
+      fetch('/api/config/agent/' + name + '/connections', {method:'PUT', headers:_inceptionAuthHeaders(), body:JSON.stringify({connections:connections})})
+        .then(r => { if (!r.ok) throw new Error('save failed'); return r.json(); })
+        .then(() => { showToast('Connections saved', 'success'); renderConfigTab('Connections'); })
+        .catch(e => showToast('Save error: ' + e.message, 'error'));
+    }
+
+    // --- Import preview extension ---
 
     var TEMPLATE_VARS = [
       {name: '${AGENT_NAME}', desc: 'Agent internal name'},
@@ -12242,8 +12561,224 @@ function burnAreaChart() {
 
     // ESC for GH auth/setup handled by consolidated keydown listener above
 
+    // --- Claude Code OAuth login ---
+    // loginAgent dispatches to the right login flow based on CLI backend.
+    function loginAgent(agentName, cli) {
+      if (cli === 'claude') {
+        startClaudeLogin();
+      } else if (cli === 'copilot') {
+        startCopilotLogin();
+      } else {
+        showToast('Manual login required for ' + cli + ' — open the terminal and run /login', 'info');
+      }
+    }
+
+    const COPILOT_AUTH_POLL_MS = 3000;
+
+    async function startCopilotLogin() {
+      try {
+        var resp = await fetch('/api/copilot-auth/start', { method: 'POST' });
+        var data = await resp.json();
+        if (data.error) {
+          showToast('Copilot login error: ' + data.error, 'error');
+          return;
+        }
+        showCopilotDeviceModal(data.user_code, data.verification_uri);
+      } catch (e) {
+        showToast('Copilot login error: ' + e.message, 'error');
+      }
+    }
+
+    function showCopilotDeviceModal(userCode, verificationUri) {
+      var overlay = document.getElementById('copilot-auth-overlay');
+      if (overlay) { overlay.remove(); }
+      overlay = document.createElement('div');
+      overlay.id = 'copilot-auth-overlay';
+      overlay.className = 'gh-auth-overlay';
+      overlay.innerHTML = '<div class="gh-auth-modal" style="max-width:480px;text-align:center">' +
+        '<h3 style="color:#238636">Login GitHub Copilot</h3>' +
+        '<p style="color:#6b7280;font-size:0.85rem;margin:12px 0">Enter this one-time code at github.com/login/device:</p>' +
+        '<div id="copilot-user-code" style="font-size:1.8rem;font-weight:700;letter-spacing:4px;color:#238636;' +
+          'background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:14px;margin:12px 0;cursor:pointer" ' +
+          'title="Click to copy" onclick="copyCopilotCode()">' + userCode + '</div>' +
+        '<div id="copilot-auth-status" style="color:#6b7280;font-size:0.8rem;min-height:20px;margin:8px 0">Waiting for authorization…</div>' +
+        '<div style="display:flex;gap:8px;justify-content:center;margin-top:8px">' +
+          '<button onclick="window.open(\x27' + verificationUri + '\x27, \x27_blank\x27)" ' +
+            'style="background:#238636;color:#fff;border:none;padding:6px 16px;border-radius:6px;font-weight:600;cursor:pointer">Open GitHub</button>' +
+          '<button onclick="cancelCopilotLogin()" class="gh-cancel" style="margin-top:0">Cancel</button>' +
+        '</div>' +
+      '</div>';
+      document.body.appendChild(overlay);
+      overlay.style.display = 'flex';
+      overlay._pollInterval = setInterval(pollCopilotAuth, COPILOT_AUTH_POLL_MS);
+    }
+
+    function copyCopilotCode() {
+      var el = document.getElementById('copilot-user-code');
+      if (!el) return;
+      navigator.clipboard.writeText(el.textContent.trim()).then(function() {
+        showToast('Code copied to clipboard', 'success');
+      });
+    }
+
+    async function pollCopilotAuth() {
+      var statusEl = document.getElementById('copilot-auth-status');
+      try {
+        var resp = await fetch('/api/copilot-auth/status');
+        var data = await resp.json();
+        if (data.error) {
+          if (statusEl) { statusEl.textContent = data.error; statusEl.style.color = '#ef4444'; }
+          cancelCopilotLogin(true);
+          return;
+        }
+        if (data.logged_in && !data.pending) {
+          if (statusEl) { statusEl.textContent = '✓ Logged in!'; statusEl.style.color = '#238636'; }
+          showToast('GitHub Copilot authenticated', 'success');
+          setTimeout(function() { cancelCopilotLogin(); }, 1500);
+        }
+      } catch (e) { /* keep polling */ }
+    }
+
+    function cancelCopilotLogin(keepOverlay) {
+      var overlay = document.getElementById('copilot-auth-overlay');
+      if (!overlay) return;
+      if (overlay._pollInterval) clearInterval(overlay._pollInterval);
+      if (!keepOverlay) overlay.remove();
+    }
+
+    async function checkClaudeAuth() {
+      // No UI elements to update — the agent cards show login state
+      // via needsLogin from the SSE status stream. This just keeps
+      // the status endpoint warm for the paste-modal flow.
+      try { await fetch('/api/claude-auth/status'); } catch (e) { /* ignore */ }
+    }
+
+    const CLAUDE_AUTH_TAB_DELAY_MS = 5000;
+
+    async function startClaudeLogin() {
+      try {
+        var resp = await fetch('/api/claude-auth/start', { method: 'POST' });
+        var data = await resp.json();
+        if (data.error) {
+          showToast('Claude login error: ' + data.error, 'error');
+          return;
+        }
+        // Show the paste-back modal with countdown, then open the auth tab
+        showClaudePasteModal(data.authorize_url);
+      } catch (e) {
+        showToast('Claude login error: ' + e.message, 'error');
+      }
+    }
+
+    function showClaudePasteModal(authorizeUrl) {
+      var overlay = document.getElementById('claude-auth-overlay');
+      if (overlay) { overlay.remove(); }
+      overlay = document.createElement('div');
+      overlay.id = 'claude-auth-overlay';
+      overlay.className = 'gh-auth-overlay';
+      var countdownSec = CLAUDE_AUTH_TAB_DELAY_MS / 1000;
+      overlay.innerHTML = '<div class="gh-auth-modal" style="max-width:560px;text-align:left">' +
+        '<h3 style="color:#d97706;text-align:center">Login Claude Code</h3>' +
+        '<div id="claude-countdown" style="text-align:center;color:#d97706;font-weight:600;font-size:0.9rem;margin:8px 0">' +
+          'Opening Claude login in ' + countdownSec + 's…</div>' +
+        '<ol style="color:#6b7280;font-size:0.85rem;line-height:1.8;padding-left:1.5em;margin:12px 0">' +
+          '<li>A new tab will open with the Claude authorization page</li>' +
+          '<li>Click <strong>Authorize</strong></li>' +
+          '<li>Copy the <strong>authorization code</strong> shown on the next page and paste it below</li>' +
+        '</ol>' +
+        '<input id="claude-callback-input" type="text" placeholder="Paste the authorization code here" ' +
+          'style="width:100%;padding:10px;border:1px solid #d1d5db;border-radius:6px;font-size:0.9rem;margin:12px 0;box-sizing:border-box">' +
+        '<div id="claude-exchange-status" style="color:#6b7280;font-size:0.8rem;min-height:20px;margin-bottom:8px"></div>' +
+        '<div style="display:flex;gap:8px;justify-content:center">' +
+          '<button onclick="submitClaudeCode()" style="background:#d97706;color:#fff;border:none;padding:6px 16px;border-radius:6px;font-weight:600;cursor:pointer">Submit</button>' +
+          '<button onclick="cancelClaudeLogin()" class="gh-cancel" style="margin-top:0">Cancel</button>' +
+        '</div>' +
+      '</div>';
+      document.body.appendChild(overlay);
+      overlay.style.display = 'flex';
+      // Countdown timer
+      var remaining = countdownSec;
+      var cdEl = document.getElementById('claude-countdown');
+      var countdownInterval = setInterval(function() {
+        remaining--;
+        if (remaining <= 0) {
+          clearInterval(countdownInterval);
+          if (cdEl) cdEl.textContent = 'Claude login tab opened';
+          if (authorizeUrl) window.open(authorizeUrl, '_blank');
+        } else if (cdEl) {
+          cdEl.textContent = 'Opening Claude login in ' + remaining + 's…';
+        }
+      }, 1000);
+      // Store interval ID so cancel can clear it
+      overlay._countdownInterval = countdownInterval;
+      // Allow pressing Enter to submit
+      var input = document.getElementById('claude-callback-input');
+      if (input) input.addEventListener('keydown', function(e) { if (e.key === 'Enter') submitClaudeCode(); });
+    }
+
+    async function submitClaudeCode() {
+      var input = document.getElementById('claude-callback-input');
+      var statusEl = document.getElementById('claude-exchange-status');
+      if (!input || !input.value.trim()) {
+        if (statusEl) { statusEl.textContent = 'Please paste the callback URL'; statusEl.style.color = '#ef4444'; }
+        return;
+      }
+      var value = input.value.trim();
+      // Accept either a full URL or just the code
+      var payload = {};
+      if (value.startsWith('http')) {
+        payload.callback_url = value;
+      } else {
+        payload.code = value;
+      }
+      if (statusEl) { statusEl.textContent = 'Exchanging code for token...'; statusEl.style.color = '#6b7280'; }
+      try {
+        var resp = await fetch('/api/claude-auth/exchange', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        var data = await resp.json();
+        if (data.error) {
+          if (statusEl) { statusEl.textContent = data.error; statusEl.style.color = '#ef4444'; }
+          return;
+        }
+        if (statusEl) { statusEl.textContent = 'Authenticated!'; statusEl.style.color = '#16a34a'; }
+        showToast('Claude Code authenticated!', 'success');
+        var CLAUDE_SUCCESS_DISMISS_MS = 1500;
+        setTimeout(function() {
+          var overlay = document.getElementById('claude-auth-overlay');
+          if (overlay) overlay.style.display = 'none';
+          checkClaudeAuth();
+        }, CLAUDE_SUCCESS_DISMISS_MS);
+      } catch (e) {
+        if (statusEl) { statusEl.textContent = 'Error: ' + e.message; statusEl.style.color = '#ef4444'; }
+      }
+    }
+
+    function cancelClaudeLogin() {
+      var overlay = document.getElementById('claude-auth-overlay');
+      if (overlay) {
+        if (overlay._countdownInterval) clearInterval(overlay._countdownInterval);
+        overlay.remove();
+      }
+    }
+
+    async function logoutClaude() {
+      try {
+        await fetch('/api/claude-auth/logout', { method: 'POST' });
+        showToast('Claude Code logged out', 'success');
+        checkClaudeAuth();
+      } catch (e) {
+        showToast('Logout error: ' + e.message, 'error');
+      }
+    }
+
     checkGHAuth();
     setInterval(checkGHAuth, GH_AUTH_CHECK_INTERVAL_MS);
+    checkClaudeAuth();
+    var CLAUDE_AUTH_CHECK_INTERVAL_MS = 60000;
+    setInterval(checkClaudeAuth, CLAUDE_AUTH_CHECK_INTERVAL_MS);
 
     window.addEventListener('hashchange', function() {
       var section = _ocSectionFromHash();

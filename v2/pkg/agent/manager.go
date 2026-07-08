@@ -16,7 +16,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/kubestellar/hive/v2/pkg/claude"
 	"github.com/kubestellar/hive/v2/pkg/config"
+	ghpkg "github.com/kubestellar/hive/v2/pkg/github"
 )
 
 type ProcessState string
@@ -78,6 +80,7 @@ type AgentProcess struct {
 	BootstrapOverride   string // when set, replaces buildBootstrapPrompt output
 	LastError           string // captured from bare copilot diagnostic launch
 	lastTokenRestart    time.Time // cooldown for auto-restart after token detection
+	NeedsLogin          bool   // true when pane shows a login prompt
 }
 
 // ProjectContext holds project-level config injected into agent boot prompts.
@@ -97,16 +100,40 @@ type Manager struct {
 	workDir          string
 	project          ProjectContext
 	copilotAuthToken string
+	claudeAuthToken  string
 	uidMap           *UIDMap
+	appAuth          AppTokenMinter
 
 	inferenceRouteCallback      func(agentName, backend, model string)
 	clearInferenceRouteCallback func(agentName string)
+}
+
+// AppTokenMinter is implemented by github.AppAuth to mint per-agent scoped tokens.
+type AppTokenMinter interface {
+	WriteAgentToken(ctx context.Context, agentName, tier string, agentUID int) error
 }
 
 // IsInferenceBackend returns true if the backend is a self-hosted inference
 // backend (vllm, llm-d) rather than a CLI tool.
 func IsInferenceBackend(backend string) bool {
 	return backend == "vllm" || backend == "llm-d"
+}
+
+// ReloadClaudeToken re-reads the Claude credentials file and updates the
+// cached token. Called by the dashboard after a successful OAuth login.
+func (m *Manager) ReloadClaudeToken() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.claudeAuthToken = claude.ReadAccessToken(claude.CredentialsPath)
+}
+
+// SetCopilotToken updates the cached Copilot token injected into agent
+// environments as COPILOT_GITHUB_TOKEN. Called by the dashboard after a
+// successful device-flow login.
+func (m *Manager) SetCopilotToken(token string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.copilotAuthToken = token
 }
 
 // SetInferenceCallbacks registers callbacks that the manager uses to
@@ -119,6 +146,54 @@ func (m *Manager) SetInferenceCallbacks(
 	defer m.mu.Unlock()
 	m.inferenceRouteCallback = setRoute
 	m.clearInferenceRouteCallback = clearRoute
+}
+
+// SetAppAuth injects the GitHub App auth provider for per-agent scoped tokens.
+func (m *Manager) SetAppAuth(auth AppTokenMinter) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.appAuth = auth
+}
+
+const agentTokenRefreshInterval = 40 * time.Minute
+
+// StartAgentTokenRefresh refreshes per-agent scoped tokens for all running
+// agents on a timer. Tokens expire after 1 hour; this refreshes at 40-minute
+// intervals so there's always a valid token on disk.
+func (m *Manager) StartAgentTokenRefresh(ctx context.Context) {
+	ticker := time.NewTicker(agentTokenRefreshInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			m.refreshAgentTokens(ctx)
+		}
+	}
+}
+
+func (m *Manager) refreshAgentTokens(ctx context.Context) {
+	m.mu.RLock()
+	auth := m.appAuth
+	agents := make([]*AgentProcess, 0, len(m.agents))
+	for _, a := range m.agents {
+		if a.State == StateRunning && a.UID > 0 {
+			agents = append(agents, a)
+		}
+	}
+	m.mu.RUnlock()
+
+	if auth == nil {
+		return
+	}
+
+	for _, a := range agents {
+		tier := m.agentMode(a).TokenTier()
+		if err := auth.WriteAgentToken(ctx, a.Name, tier, a.UID); err != nil {
+			m.logger.Warn("agent token refresh failed", "agent", a.Name, "error", err)
+		}
+	}
 }
 
 func truncateStr(s string, maxRunes int) string {
@@ -153,6 +228,13 @@ func NewManager(agents map[string]config.AgentConfig, logger *slog.Logger, proje
 	// The token stays in the process env so all agents can authenticate for AI
 	// completions; write access is gated by --enable-all-github-mcp-tools flag.
 	copilotToken := os.Getenv("COPILOT_GITHUB_TOKEN")
+	if copilotToken == "" {
+		// Fall back to the token persisted by the dashboard's device-flow login.
+		if data, err := os.ReadFile(CopilotUserTokenPath); err == nil {
+			copilotToken = strings.TrimSpace(string(data))
+		}
+	}
+	claudeToken := claude.ReadAccessToken(claude.CredentialsPath)
 
 	var uidMap *UIDMap
 	if loaded, err := LoadUIDMap(UIDMapPath); err == nil {
@@ -169,6 +251,7 @@ func NewManager(agents map[string]config.AgentConfig, logger *slog.Logger, proje
 		workDir:          workDir,
 		project:          project,
 		copilotAuthToken: copilotToken,
+		claudeAuthToken:  claudeToken,
 		uidMap:           uidMap,
 	}
 
@@ -246,6 +329,14 @@ func (m *Manager) Start(ctx context.Context, name string) error {
 		} else {
 			agent.State = StatePaused
 			return nil
+		}
+	}
+
+	if m.appAuth != nil && agent.UID > 0 {
+		tier := m.agentMode(agent).TokenTier()
+		if err := m.appAuth.WriteAgentToken(ctx, agent.Name, tier, agent.UID); err != nil {
+			m.logger.Warn("failed to mint per-agent token, agent will use shared cache",
+				"agent", agent.Name, "tier", tier, "error", err)
 		}
 	}
 
@@ -414,7 +505,7 @@ func (m *Manager) launchInTmux(ctx context.Context, agent *AgentProcess) error {
 	if agent.ModelOverride != "" {
 		model = agent.ModelOverride
 	}
-	model = normalizeModelName(model)
+	model = normalizeModelName(model, backend)
 
 	bootstrapPrompt := agent.BootstrapOverride
 	if bootstrapPrompt != "" {
@@ -446,56 +537,67 @@ func (m *Manager) launchInTmux(ctx context.Context, agent *AgentProcess) error {
 		m.installCavemanForAgent(agent, backend)
 	}
 
-	switch backend {
-	case "claude":
-		bareFlag := ""
-		if isInference {
-			bareFlag = fmt.Sprintf(" --bare --settings %s", claudeInferenceSettingsPath)
+	if agent.Config.Tools != nil {
+		launchCmd = toolRulesToLaunchCmd(binary, model, backend, agent.Config.Tools, isInference)
+		if agent.Config.Tools != nil && agent.Config.Mode != "" {
+			m.logger.Warn("agent has both tools and mode set; tools takes precedence", "agent", agent.Name)
 		}
-		base := fmt.Sprintf("%s --model %s --dangerously-skip-permissions%s", binary, model, bareFlag)
-		switch {
-		case mode >= ModeIssuesAndPRs:
-			launchCmd = base
-		case mode == ModeIssuesOnly:
-			launchCmd = base +
-				" --disallowed-tools 'mcp__github__create_pull_request'" +
-				" --disallowed-tools 'mcp__github__merge_pull_request'"
+	} else {
+		switch backend {
+		case "claude":
+			bareFlag := ""
+			if isInference {
+				bareFlag = fmt.Sprintf(" --bare --settings %s", claudeInferenceSettingsPath)
+			}
+			base := fmt.Sprintf("%s --model %s --dangerously-skip-permissions%s", binary, model, bareFlag)
+			switch {
+			case mode >= ModeIssuesAndPRs:
+				launchCmd = base
+			case mode == ModeIssuesOnly:
+				launchCmd = base +
+					" --disallowed-tools 'mcp__github__create_pull_request'" +
+					" --disallowed-tools 'mcp__github__merge_pull_request'"
+			default:
+				launchCmd = base +
+					" --disallowed-tools 'mcp__github__create_pull_request'" +
+					" --disallowed-tools 'mcp__github__create_issue'" +
+					" --disallowed-tools 'mcp__github__update_issue'" +
+					" --disallowed-tools 'mcp__github__merge_pull_request'"
+			}
+		case "copilot":
+			switch {
+			case mode >= ModeIssuesAndPRs:
+				launchCmd = fmt.Sprintf("%s --model %s --no-auto-update --allow-all --enable-all-github-mcp-tools",
+					binary, model)
+			case mode == ModeIssuesOnly:
+				launchCmd = fmt.Sprintf("%s --model %s --no-auto-update --allow-all --enable-all-github-mcp-tools"+
+					" --deny-tool='github(create_pull_request)'"+
+					" --deny-tool='github(merge_pull_request)'",
+					binary, model)
+			default:
+				launchCmd = fmt.Sprintf("%s --model %s --no-auto-update --allow-all"+
+					" --deny-tool='github(create_pull_request)'"+
+					" --deny-tool='github(create_issue)'"+
+					" --deny-tool='github(update_issue)'"+
+					" --deny-tool='github(merge_pull_request)'",
+					binary, model)
+			}
+		case "gemini":
+			launchCmd = fmt.Sprintf("%s --model %s", binary, model)
+		case "goose":
+			launchCmd = fmt.Sprintf("%s run -s", binary)
+			if model != "" {
+				launchCmd = fmt.Sprintf("%s --model %s", launchCmd, model)
+			}
+		case "bob":
+			launchCmd = binary
 		default:
-			launchCmd = base +
-				" --disallowed-tools 'mcp__github__create_pull_request'" +
-				" --disallowed-tools 'mcp__github__create_issue'" +
-				" --disallowed-tools 'mcp__github__update_issue'" +
-				" --disallowed-tools 'mcp__github__merge_pull_request'"
+			launchCmd = binary
 		}
-	case "copilot":
-		switch {
-		case mode >= ModeIssuesAndPRs:
-			launchCmd = fmt.Sprintf("%s --model %s --no-auto-update --allow-all --enable-all-github-mcp-tools",
-				binary, model)
-		case mode == ModeIssuesOnly:
-			launchCmd = fmt.Sprintf("%s --model %s --no-auto-update --allow-all --enable-all-github-mcp-tools"+
-				" --deny-tool='github(create_pull_request)'"+
-				" --deny-tool='github(merge_pull_request)'",
-				binary, model)
-		default:
-			launchCmd = fmt.Sprintf("%s --model %s --no-auto-update --allow-all"+
-				" --deny-tool='github(create_pull_request)'"+
-				" --deny-tool='github(create_issue)'"+
-				" --deny-tool='github(update_issue)'"+
-				" --deny-tool='github(merge_pull_request)'",
-				binary, model)
-		}
-	case "gemini":
-		launchCmd = fmt.Sprintf("%s --model %s", binary, model)
-	case "goose":
-		launchCmd = fmt.Sprintf("%s run -s", binary)
-		if model != "" {
-			launchCmd = fmt.Sprintf("%s --model %s", launchCmd, model)
-		}
-	case "bob":
-		launchCmd = binary
-	default:
-		launchCmd = binary
+	}
+
+	if mcpFlags := connectionMCPFlags(agent.Config.Connections, backend); mcpFlags != "" {
+		launchCmd += mcpFlags
 	}
 
 	if bootstrapPrompt == "" && isInference {
@@ -694,15 +796,18 @@ func (m *Manager) pollTmuxOutputForAgent(agent *AgentProcess, ctx context.Contex
 				continue
 			}
 
+			showsLogin := paneShowsLoginPrompt(filtered)
+
 			agent.paneMu.Lock()
 			agent.lastPaneCapture = filtered
+			agent.NeedsLogin = showsLogin
 			agent.paneMu.Unlock()
 
 			// Auto-restart agents stuck on the login prompt when a valid
 			// token exists in the shared config.json. This handles the case
 			// where a user authenticates via one agent's terminal and other
 			// agents don't pick up the new token automatically.
-			if paneShowsLoginPrompt(filtered) && configHasTokens() {
+			if showsLogin && configHasTokens() {
 				sinceLastRestart := time.Since(agent.lastTokenRestart).Seconds()
 				if sinceLastRestart >= float64(tokenRestartCooldownSec) {
 					m.logger.Info("auto-restarting agent after token detected in shared config",
@@ -2010,11 +2115,16 @@ func backendBinary(backend string) (string, error) {
 
 const (
 	sharedCopilotConfigPath    = "/data/home/.copilot/config.json"
+	sharedClaudeCredentialPath = "/data/home/.claude/.credentials.json"
 	sharedConfigDesiredMode    = 0o660
 	tokenRestartCooldownSec    = 60  // minimum seconds between token-triggered restarts per agent
 	expiredTokenHangTimeoutSec = 180 // blank pane after this many seconds triggers token purge + restart
 	tlsErrorRestartCooldownSec = 120 // minimum seconds between TLS-error-triggered restarts per agent
 )
+
+// CopilotUserTokenPath is where the dashboard's device-flow login persists
+// the Copilot OAuth token; injected into agents as COPILOT_GITHUB_TOKEN.
+const CopilotUserTokenPath = "/data/copilot-user-token"
 
 // loginPromptPatterns are substrings that indicate an agent is stuck on the
 // Copilot login/authentication screen.
@@ -2051,10 +2161,20 @@ func paneShowsFatalNetworkError(lines []string) bool {
 	return false
 }
 
-// configHasTokens reads the shared Copilot config.json, strips single-line
+// configHasTokens returns true if either the Copilot config or Claude
+// credentials file contains a valid token. Used to decide whether an agent
+// stuck on a login prompt can be auto-restarted.
+func configHasTokens() bool {
+	if claude.HasValidToken(sharedClaudeCredentialPath) {
+		return true
+	}
+	return copilotConfigHasTokens()
+}
+
+// copilotConfigHasTokens reads the shared Copilot config.json, strips single-line
 // // comments (which Copilot CLI sometimes writes), parses the JSON, and returns
 // true if the "copilotTokens" field has at least one entry.
-func configHasTokens() bool {
+func copilotConfigHasTokens() bool {
 	data, err := os.ReadFile(sharedCopilotConfigPath)
 	if err != nil {
 		return false
@@ -2327,10 +2447,13 @@ func (m *Manager) ensureWorldWritable(root string) {
 	})
 }
 
-// normalizeModelName converts YAML-friendly model names (claude-sonnet-4-6) to
-// the format CLIs expect (claude-sonnet-4.6). The last hyphen before a trailing
-// digit group becomes a dot.
-func normalizeModelName(model string) string {
+// normalizeModelName converts YAML-friendly model names to the format each
+// CLI backend expects. Claude CLI uses hyphens (claude-opus-4-7), while
+// Copilot and other backends use dots (claude-opus-4.7).
+func normalizeModelName(model, backend string) string {
+	if backend == "claude" {
+		return model
+	}
 	idx := strings.LastIndex(model, "-")
 	if idx < 0 || idx == len(model)-1 {
 		return model
@@ -2528,7 +2651,15 @@ func (m *Manager) agentEnvPairs(agent *AgentProcess) []agentEnvPair {
 	vars = append(vars, agentEnvPair{"HIVE_ACMM_LEVEL", fmt.Sprintf("%d", m.project.ACMMLevel), false})
 
 	mode := m.agentMode(agent)
-	vars = append(vars, agentEnvPair{"HIVE_AGENT_MODE", mode.String(), false})
+	if agent.Config.Tools != nil {
+		if effectiveMode := agent.Config.Tools.EffectiveMode(); effectiveMode != "" {
+			vars = append(vars, agentEnvPair{"HIVE_AGENT_MODE", effectiveMode, false})
+		} else {
+			vars = append(vars, agentEnvPair{"HIVE_AGENT_MODE", mode.String(), false})
+		}
+	} else {
+		vars = append(vars, agentEnvPair{"HIVE_AGENT_MODE", mode.String(), false})
+	}
 	modeFile := fmt.Sprintf("/tmp/.hive-mode-%s", agent.Name)
 	if err := os.WriteFile(modeFile, []byte(mode.String()), 0o644); err != nil {
 		m.logger.Warn("agentBootstrapEnv: mode file write failed", "file", modeFile, "error", err)
@@ -2563,6 +2694,9 @@ func (m *Manager) agentEnvPairs(agent *AgentProcess) []agentEnvPair {
 	if m.copilotAuthToken != "" {
 		vars = append(vars, agentEnvPair{"COPILOT_GITHUB_TOKEN", m.copilotAuthToken, true})
 	}
+	if m.claudeAuthToken != "" && backend == "claude" {
+		vars = append(vars, agentEnvPair{"CLAUDE_CODE_OAUTH_TOKEN", m.claudeAuthToken, true})
+	}
 	// BD_DIR tells the `bd` CLI where to read/write beads. Without this,
 	// bd falls back to cwd (/data/agents/<name>) instead of the configured
 	// beads_dir (/data/beads/<name>), causing a path mismatch with the
@@ -2576,12 +2710,32 @@ func (m *Manager) agentEnvPairs(agent *AgentProcess) []agentEnvPair {
 	// GIT_SSL_CAINFO only — NOT SSL_CERT_FILE (that breaks Copilot API TLS)
 	vars = append(vars, agentEnvPair{"GIT_SSL_CAINFO", proxyCACertPath, false})
 	if agent.UID > 0 {
+		vars = append(vars, agentEnvPair{"HIVE_AGENT_TOKEN_CACHE", ghpkg.AgentTokenCachePath(agent.Name), false})
+	}
+	if agent.UID > 0 {
 		home := "/data/home"
 		if IsInferenceBackend(backend) {
 			home = inferenceHomePath(agent.Name)
 		}
 		vars = append(vars, agentEnvPair{"HOME", home, false})
 	}
+
+	for _, conn := range agent.Config.Connections {
+		if conn.Type != "api" {
+			continue
+		}
+		envName := conn.EnvName
+		if envName == "" {
+			envName = "HIVE_CONN_" + strings.ToUpper(strings.ReplaceAll(conn.Name, "-", "_")) + "_URL"
+		}
+		vars = append(vars, agentEnvPair{envName, conn.URI, false})
+		if conn.Auth != nil && conn.Auth.Type == "env" && conn.Auth.EnvVar != "" {
+			if tokenVal := os.Getenv(conn.Auth.EnvVar); tokenVal != "" {
+				vars = append(vars, agentEnvPair{conn.Auth.EnvVar, tokenVal, true})
+			}
+		}
+	}
+
 	return vars
 }
 
@@ -3055,4 +3209,63 @@ func (m *Manager) TmuxSession(name string) string {
 		return ""
 	}
 	return agent.tmuxSession
+}
+
+// toolRulesToLaunchCmd builds a backend-specific CLI command from ToolsConfig.
+func toolRulesToLaunchCmd(binary, model, backend string, tools *config.ToolsConfig, isInference bool) string {
+	denies := tools.DenyPatterns()
+
+	switch backend {
+	case "claude":
+		bareFlag := ""
+		if isInference {
+			bareFlag = fmt.Sprintf(" --bare --settings %s", claudeInferenceSettingsPath)
+		}
+		cmd := fmt.Sprintf("%s --model %s --dangerously-skip-permissions%s", binary, model, bareFlag)
+		for _, p := range denies {
+			cmd += fmt.Sprintf(" --disallowed-tools '%s'", p)
+		}
+		return cmd
+	case "copilot":
+		hasGHDeny := false
+		for _, p := range denies {
+			if strings.Contains(p, "github") {
+				hasGHDeny = true
+				break
+			}
+		}
+		cmd := fmt.Sprintf("%s --model %s --no-auto-update --allow-all", binary, model)
+		if !hasGHDeny {
+			cmd += " --enable-all-github-mcp-tools"
+		}
+		for _, p := range denies {
+			copilotPattern := strings.ReplaceAll(p, "mcp__github__", "github(")
+			if strings.HasPrefix(copilotPattern, "github(") {
+				copilotPattern += ")"
+			}
+			cmd += fmt.Sprintf(" --deny-tool='%s'", copilotPattern)
+		}
+		return cmd
+	default:
+		cmd := binary
+		if model != "" {
+			cmd = fmt.Sprintf("%s --model %s", binary, model)
+		}
+		return cmd
+	}
+}
+
+// connectionMCPFlags builds MCP-related launch flags from connection configs.
+func connectionMCPFlags(conns []config.ConnectionConfig, backend string) string {
+	var flags string
+	for _, conn := range conns {
+		if conn.Type != "mcp" || conn.URI == "" {
+			continue
+		}
+		switch backend {
+		case "claude":
+			flags += fmt.Sprintf(" --mcp-server '%s'", conn.URI)
+		}
+	}
+	return flags
 }

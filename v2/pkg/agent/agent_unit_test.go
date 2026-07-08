@@ -672,13 +672,16 @@ func TestDefaultAgentModeByRole(t *testing.T) {
 }
 
 func TestNormalizeModelNameUnit(t *testing.T) {
-	// Just verify it returns something and doesn't panic
-	got := normalizeModelName("claude-sonnet-4-6")
-	if got == "" {
-		t.Error("should return non-empty")
+	// Claude CLI keeps hyphens: claude-opus-4-7 must pass through unchanged.
+	if got := normalizeModelName("claude-opus-4-7", "claude"); got != "claude-opus-4-7" {
+		t.Errorf("claude backend: got %q, want claude-opus-4-7", got)
 	}
-	// Verify it's deterministic
-	if normalizeModelName("test") != normalizeModelName("test") {
-		t.Error("should be deterministic")
+	// Copilot and other backends convert the trailing hyphen-digit group to a dot.
+	if got := normalizeModelName("claude-sonnet-4-6", "copilot"); got != "claude-sonnet-4.6" {
+		t.Errorf("copilot backend: got %q, want claude-sonnet-4.6", got)
+	}
+	// No trailing digit group — unchanged for any backend.
+	if got := normalizeModelName("gpt-next", "copilot"); got != "gpt-next" {
+		t.Errorf("no digit suffix: got %q, want gpt-next", got)
 	}
 }

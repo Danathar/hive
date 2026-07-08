@@ -73,6 +73,10 @@ RUN ARCH=$(uname -m) && \
     chmod +x /opt/hive/bin/gh-real
 
 # --- Layer 3: GitHub Copilot CLI (frequent updates) ---
+# Pinned: 1.0.6x drops the Node.js fallback — the CLI becomes native-only,
+# and the Rust binary's embedded TLS stack rejects the MITM proxy CA.
+# 1.0.59 is the last version where removing the binary falls back to the
+# Node.js path, which respects NODE_EXTRA_CA_CERTS.
 ARG COPILOT_VERSION=1.0.59
 RUN npm install -g @github/copilot@${COPILOT_VERSION} && npm cache clean --force || \
     echo "WARN: GitHub Copilot CLI install failed — skipping"

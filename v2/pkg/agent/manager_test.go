@@ -706,22 +706,26 @@ func TestBackendBinary_KnownBackendMissingFromPath(t *testing.T) {
 
 func TestNormalizeModelName_HyphenToDotsForVersionSuffix(t *testing.T) {
 	tests := []struct {
-		input string
-		want  string
+		input   string
+		backend string
+		want    string
 	}{
-		{"claude-sonnet-4-6", "claude-sonnet-4.6"},
-		{"claude-opus-4-6", "claude-opus-4.6"},
-		{"claude-haiku-4-5", "claude-haiku-4.5"},
-		{"gemini-pro", "gemini-pro"},
-		{"claude-3-5-sonnet", "claude-3-5-sonnet"},
-		{"", ""},
+		{"claude-sonnet-4-6", "copilot", "claude-sonnet-4.6"},
+		{"claude-opus-4-6", "copilot", "claude-opus-4.6"},
+		{"claude-haiku-4-5", "copilot", "claude-haiku-4.5"},
+		{"gemini-pro", "copilot", "gemini-pro"},
+		{"claude-3-5-sonnet", "copilot", "claude-3-5-sonnet"},
+		{"", "copilot", ""},
+		// Claude CLI requires hyphenated names — no conversion.
+		{"claude-sonnet-4-6", "claude", "claude-sonnet-4-6"},
+		{"claude-opus-4-7", "claude", "claude-opus-4-7"},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			got := normalizeModelName(tt.input)
+		t.Run(tt.backend+"/"+tt.input, func(t *testing.T) {
+			got := normalizeModelName(tt.input, tt.backend)
 			if got != tt.want {
-				t.Errorf("normalizeModelName(%q) = %q, want %q", tt.input, got, tt.want)
+				t.Errorf("normalizeModelName(%q, %q) = %q, want %q", tt.input, tt.backend, got, tt.want)
 			}
 		})
 	}
