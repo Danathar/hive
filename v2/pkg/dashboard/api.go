@@ -212,11 +212,34 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 var (
 	versionHash  = "unknown"
 	versionShort = "unknown"
+	// versionBranch is the branch this binary was built from (ldflags via
+	// cmd/hive). The self-version check compares against the tip of THIS
+	// branch — a spoke running v3 must not be told it is "behind" v2.
+	versionBranch = "unknown"
 )
+
+// defaultUpstreamBranch is the fallback branch for the self-version check
+// when the build did not inject a branch (e.g. local `go run`).
+const defaultUpstreamBranch = "v2"
 
 func SetGitVersion(hash, short string) {
 	versionHash = hash
 	versionShort = short
+}
+
+// SetGitBranch records the branch the running binary was built from so the
+// version check and Upgrade affordance compare against the right upstream.
+func SetGitBranch(branch string) {
+	versionBranch = branch
+}
+
+// upstreamBranch returns the branch to compare against for the self-version
+// check: the build's own branch when known, else defaultUpstreamBranch.
+func upstreamBranch() string {
+	if versionBranch != "" && versionBranch != "unknown" {
+		return versionBranch
+	}
+	return defaultUpstreamBranch
 }
 
 func jsonResponse(w http.ResponseWriter, data interface{}) {
@@ -371,6 +394,7 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 		"go":      "1.25",
 		"hash":    versionHash,
 		"short":   versionShort,
+		"branch":  upstreamBranch(),
 	}
 
 	s.versionMu.RLock()
@@ -420,7 +444,7 @@ func (s *Server) fetchLatestRemoteHash() (string, error) {
 	if ctx == nil {
 		return "", fmt.Errorf("no context")
 	}
-	return s.deps.GHClient.LatestCommitHash(ctx, "kubestellar", "hive", "v2")
+	return s.deps.GHClient.LatestCommitHash(ctx, "kubestellar", "hive", upstreamBranch())
 }
 
 // fetchCommitMessage returns the first line of the commit message for a given SHA.
