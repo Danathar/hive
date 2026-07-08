@@ -1705,7 +1705,7 @@
        are grouped — no class renames. */
     .status-badge, .model-chip, .token-model-chip, .repo-issue-pill, .repo-pr-pill,
     .ind-tag, .pause-badge, .off-badge, .on-demand-badge, .oc-health-badge,
-    .nous-config-pill, .kb-type-badge, .kb-layer-badge, .summary-age {
+    .nous-config-pill, .kb-type-badge, .kb-layer-badge, .summary-age, .oc-nav-count {
       display: inline-flex; align-items: center; gap: 4px;
       font-size: var(--fs-xs); line-height: 1.5;
       padding: 1px 8px; border-radius: 999px;
@@ -1713,6 +1713,9 @@
       border: 1px solid color-mix(in srgb, var(--pill-c, var(--muted)) 40%, transparent);
       color: var(--pill-c, var(--muted));
     }
+    /* sidebar resource count pills (Repos/Beads/Knowledge/Contributors) —
+       one look, JS toggles display + textContent by id */
+    .oc-nav-count { --pill-c: var(--blue); margin-left: auto; flex-shrink: 0; font-weight: 700; }
     /* pill size steps */
     .token-model-chip { padding: 4px 10px; font-size: var(--fs-sm); }
     .nous-config-pill { padding: 3px 10px; font-size: var(--fs-sm); }
@@ -2014,11 +2017,11 @@
     </div>
     <div class="oc-nav-group">
       <div class="oc-nav-label">Resources</div>
-      <a class="oc-nav-item" data-section="repos-section" onclick="ocNavigate('repos-section')"><span class="oc-nav-emoji">📦</span><span class="oc-nav-text">Repos</span><span id="repos-sidebar-badge" style="display:none;margin-left:auto;padding:2px 8px;border-radius:9999px;font-size:0.65rem;font-weight:700;background:rgba(88,166,255,0.15);color:var(--blue);border:1px solid rgba(88,166,255,0.3)"></span></a>
-      <a class="oc-nav-item" data-section="beads-section" onclick="ocNavigate('beads-section')"><span class="oc-nav-emoji">🔮</span><span class="oc-nav-text">Beads</span></a>
+      <a class="oc-nav-item" data-section="repos-section" onclick="ocNavigate('repos-section')"><span class="oc-nav-emoji">📦</span><span class="oc-nav-text">Repos</span><span id="repos-sidebar-badge" class="oc-nav-count" style="display:none"></span></a>
+      <a class="oc-nav-item" data-section="beads-section" onclick="ocNavigate('beads-section')"><span class="oc-nav-emoji">🔮</span><span class="oc-nav-text">Beads</span><span id="beads-sidebar-badge" class="oc-nav-count" style="display:none"></span></a>
       <a class="oc-nav-item" data-section="inception-section" onclick="ocNavigate('inception-section')"><span class="oc-nav-emoji">💡</span><span class="oc-nav-text">Inception</span></a>
-      <a class="oc-nav-item" data-section="knowledge-section" onclick="ocNavigate('knowledge-section')"><span class="oc-nav-emoji">📚</span><span class="oc-nav-text">Knowledge</span></a>
-      <a class="oc-nav-item" data-section="contributors-section" onclick="ocNavigate('contributors-section')"><span class="oc-nav-emoji">👥</span><span class="oc-nav-text">Contributors</span><span id="contributors-sidebar-badge" style="display:none;margin-left:auto;padding:2px 8px;border-radius:9999px;font-size:0.65rem;font-weight:700;background:var(--green);color:var(--bg)"></span></a>
+      <a class="oc-nav-item" data-section="knowledge-section" onclick="ocNavigate('knowledge-section')"><span class="oc-nav-emoji">📚</span><span class="oc-nav-text">Knowledge</span><span id="knowledge-sidebar-badge" class="oc-nav-count" style="display:none"></span></a>
+      <a class="oc-nav-item" data-section="contributors-section" onclick="ocNavigate('contributors-section')"><span class="oc-nav-emoji">👥</span><span class="oc-nav-text">Contributors</span><span id="contributors-sidebar-badge" class="oc-nav-count" style="display:none"></span></a>
       <a class="oc-nav-item" data-section="audit-section" onclick="ocNavigate('audit-section')"><span class="oc-nav-emoji">📋</span><span class="oc-nav-text">Audit Log</span></a>
       <a class="oc-nav-item" data-section="nous-section" onclick="ocNavigate('nous-section')"><span class="oc-nav-emoji">🧪</span><span class="oc-nav-text">Strategy Lab</span></a>
       <a class="oc-nav-item" href="/api/docs" target="_blank"><span class="oc-nav-emoji">📘</span><span class="oc-nav-text">API Spec (Redoc)</span></a>
@@ -5575,6 +5578,18 @@ function burnAreaChart() {
         const prev = _kbCache;
         _kbCache = await r.json();
         _kbCache._documents = (docsR && docsR.ok) ? await docsR.json() : [];
+        var kbBadge = document.getElementById('knowledge-sidebar-badge');
+        if (kbBadge) {
+          var kbFacts = 0;
+          ((_kbCache && _kbCache.layers) || []).forEach(function(l) {
+            if (l && typeof l.total_pages === 'number') kbFacts += l.total_pages;
+          });
+          if (_kbCache && _kbCache.enabled && kbFacts > 0) {
+            kbBadge.style.display = 'inline-flex';
+            kbBadge.textContent = kbFacts;
+            kbBadge.title = kbFacts + ' knowledge facts';
+          } else { kbBadge.style.display = 'none'; }
+        }
         if (_kbInitialLoad && _kbCache && _kbCache.enabled) {
           _kbSetupView = 'none';
         }
@@ -7724,9 +7739,9 @@ function burnAreaChart() {
       const activeCount = pool.active || 0;
       const totalCount = pool.registered || 0;
       if (sidebarBadge) {
-        if (activeCount > 0) {
-          sidebarBadge.style.display = 'inline-block';
-          sidebarBadge.textContent = activeCount;
+        if (totalCount > 0) {
+          sidebarBadge.style.display = 'inline-flex';
+          sidebarBadge.textContent = totalCount;
           sidebarBadge.title = `${activeCount} active of ${totalCount} registered`;
         } else {
           sidebarBadge.style.display = 'none';
@@ -7966,8 +7981,19 @@ function burnAreaChart() {
       renderAdvisoryDigest(data.advisoryDigest || null);
       renderRepos(data.repos || []);
       var reposBadge = document.getElementById('repos-sidebar-badge');
-      if (reposBadge) { var rc = (data.repos || []).length; if (rc > 0) { reposBadge.style.display = 'inline-block'; reposBadge.textContent = rc; } else { reposBadge.style.display = 'none'; } }
+      if (reposBadge) { var rc = (data.repos || []).length; if (rc > 0) { reposBadge.style.display = 'inline-flex'; reposBadge.textContent = rc; } else { reposBadge.style.display = 'none'; } }
       renderBeads(data.beads || {});
+      var beadsBadge = document.getElementById('beads-sidebar-badge');
+      if (beadsBadge) {
+        var bWorkers = (data.beads && data.beads.workers >= 0) ? data.beads.workers : 0;
+        var bSupervisor = (data.beads && data.beads.supervisor >= 0) ? data.beads.supervisor : 0;
+        var bTotal = bWorkers + bSupervisor;
+        if (bTotal > 0) {
+          beadsBadge.style.display = 'inline-flex';
+          beadsBadge.textContent = bTotal;
+          beadsBadge.title = bWorkers + ' worker / ' + bSupervisor + ' supervisor beads';
+        } else { beadsBadge.style.display = 'none'; }
+      }
       updateContributorBadge(data.contributorPool || null);
       renderSystemGauges(data.systemResources || null);
       ocUpdateSidebarAgents();
