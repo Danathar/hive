@@ -331,7 +331,8 @@
       background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
       margin-bottom: 12px; font-size: 0.72rem; flex-wrap: wrap;
     }
-    body.oc-agent-focused #oc-gov-strip-outer { display: flex; }
+    /* Compact governor strip no longer needed: the full Governor section
+       remains visible while an agent is focused (see focus-mode rules). */
     .oc-gov-strip .gov-metric { display: flex; flex-direction: column; gap: 1px; }
     .oc-gov-strip .gov-metric .gm-label { font-size: 0.6rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.3px; }
     .oc-gov-strip .gov-metric .gm-val { font-weight: 700; font-size: 0.8rem; }
@@ -495,18 +496,9 @@
     .oc-summary-follow-btn:hover { background: rgba(0,0,0,0.8); }
     .oc-summary-follow-btn.visible { display: flex; }
 
-    /* Hide non-agent sections when an agent is focused in Light */
-    body.oc-agent-focused .governor,
-    body.oc-agent-focused .token-usage,
-    body.oc-agent-focused .repos,
-    body.oc-agent-focused #beads-section,
-    body.oc-agent-focused #nous-section,
-    body.oc-agent-focused #knowledge-section,
-    body.oc-agent-focused #contributors-section,
-    body.oc-agent-focused #audit-section,
-    body.oc-agent-focused #acmm-eval-section,
-    body.oc-agent-focused #leaderboard-section { display: none; }
-    body.oc-strategy-focused #nous-section { display: block; }
+    /* Sections stay visible when an agent is focused so scrolling up from
+       the agent detail still reaches Governor, Token Usage, etc. (previously
+       these were display:none, forcing a click on the nav to get back). */
     body.oc-agent-focused .agent-card.oc-hidden { display: none; }
 
     /* Light card overrides — surface/border/state come from the token
