@@ -1113,6 +1113,8 @@
     .config-overlay.hidden { display: none; }
     @keyframes config-fade-in { from { opacity: 0; } to { opacity: 1; } }
     .hive-dialog-overlay { z-index: 20000; }
+    .acmm-dialog-overlay { z-index: 10000; } /* JS toggles inline display flex/none */
+    .acmm-dialog { padding: 20px; max-width: 600px; width: 92%; max-height: 80vh; overflow-y: auto; }
     .hive-dialog { width: 460px; max-width: 92vw; padding: 24px; } /* modal panel recipe */
     .hive-dialog-title { font-size: var(--fs-lg); font-weight: 700; color: var(--text); margin-bottom: 12px; }
     .hive-dialog-body { font-size: 0.9rem; color: var(--muted); line-height: 1.5; white-space: pre-wrap; margin-bottom: 20px; }
@@ -1733,7 +1735,7 @@
        DOM untouched, z-indexes retained at each pattern's rule (they
        encode stacking intent). The acmm JS-built overlay keeps its inline
        styles until the Phase 4 template sweep. */
-    .gh-auth-overlay, .config-overlay, .hive-dialog-overlay, .nous-config-overlay {
+    .gh-auth-overlay, .config-overlay, .hive-dialog-overlay, .nous-config-overlay, .acmm-dialog-overlay {
       position: fixed; inset: 0;
       background: rgba(0, 0, 0, 0.55);
       -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px);
@@ -1743,7 +1745,7 @@
     /* Glass panel — hub recipe linear-gradient(#17212deb,#0c1219eb) +
        border #ffffff1a, expressed in tokens so the light-mode remap
        (panel-strong #eef1f5 → white, near-black text border) just works. */
-    .gh-auth-modal, .gh-setup-modal, .config-modal, .hive-dialog, .nous-config-dialog {
+    .gh-auth-modal, .gh-setup-modal, .config-modal, .hive-dialog, .nous-config-dialog, .acmm-dialog {
       background: linear-gradient(
         color-mix(in srgb, var(--panel-strong) 92%, transparent),
         color-mix(in srgb, var(--bg-soft) 92%, transparent));
@@ -1847,6 +1849,15 @@
     .btn-blue { background: var(--blue); border-color: transparent; color: var(--bg); }
     .btn-blue:hover { background: color-mix(in srgb, var(--blue) 85%, #fff); border-color: transparent; color: var(--bg); }
     .btn-surface { background: var(--surface); border: 1px solid var(--border); color: var(--fg); }
+    /* ACMM dialog/card utilities */
+    .dialog-note { font-size: 0.82rem; color: var(--muted); margin: 0 0 12px; }
+    .text-base { font-size: var(--fs-base); }
+    .stat-num { font-size: 1.2rem; font-weight: 700; }
+    .dialog-btn { padding: 6px 14px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; cursor: pointer; color: var(--muted); font-size: 0.78rem; }
+    .card-tile { flex: 1; padding: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; text-align: center; cursor: pointer; }
+    .row-card { cursor: pointer; padding: 8px; margin-bottom: 4px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; transition: border-color .15s; }
+    .error-note { color: var(--red); font-size: 0.82rem; }
+    .repo-chip-btn { padding: 2px 8px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg); cursor: pointer; font-size: 0.72rem; color: var(--text); }
   </style>
 </head>
 <body>
@@ -2171,8 +2182,8 @@
           <div class="kb-stat" onclick="acmmShowAllCriteriaDialog()" style="cursor:pointer"><div class="val" id="acmm-criteria-ratio">--</div><div class="lbl">Criteria Passed</div></div>
         </div>
         <div id="acmm-repo-selector" style="display:none;margin-top:8px;font-size:0.75rem;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
-          <span style="color:var(--muted)">Repo:</span>
-          <button onclick="acmmSelectRepo(null)" id="acmm-repo-btn-all" style="padding:2px 8px;border-radius:4px;border:1px solid var(--border);background:var(--bg);cursor:pointer;font-size:0.72rem;color:var(--text);font-weight:600">All (aggregate)</button>
+          <span class="muted">Repo:</span>
+          <button onclick="acmmSelectRepo(null)" id="acmm-repo-btn-all" class="repo-chip-btn" style="font-weight:600">All (aggregate)</button>
         </div>
         <div id="acmm-level-bars" style="margin-top:12px"></div>
         <div id="acmm-eval-meta" style="margin-top:10px;font-size:0.7rem;color:var(--muted);display:flex;justify-content:space-between">
@@ -9413,7 +9424,7 @@ function burnAreaChart() {
         const issueKey = repo + ':' + c.id;
         const existing = _acmmOpenedIssues[issueKey];
         if (existing) {
-          issueBtn = '<span style="margin-left:auto;padding:3px 10px;font-size:0.7rem;border:1px solid var(--green);border-radius:4px;color:var(--muted);white-space:nowrap">✅ <a href="' + escapeHtml(existing.url) + '" target="_blank" style="color:var(--muted);font-size:0.68rem">#' + existing.number + '</a></span>';
+          issueBtn = '<span style="margin-left:auto;padding:3px 10px;font-size:0.7rem;border:1px solid var(--green);border-radius:4px;color:var(--muted);white-space:nowrap">✅ <a href="' + escapeHtml(existing.url) + '" target="_blank" class="muted-xs">#' + existing.number + '</a></span>';
         } else {
           const escapedId = escapeHtml(c.id).replace(/'/g, "\\'");
           const escapedRepo = escapeHtml(repo).replace(/'/g, "\\'");
@@ -9465,7 +9476,7 @@ function burnAreaChart() {
         }
         const data = await r.json();
         _acmmOpenedIssues[repo + ':' + criterionId] = {number: data.issue_number, url: data.issue_url};
-        btn.innerHTML = '✅ <a href="' + escapeHtml(data.issue_url) + '" target="_blank" style="color:var(--muted);font-size:0.68rem">#' + data.issue_number + '</a>';
+        btn.innerHTML = '✅ <a href="' + escapeHtml(data.issue_url) + '" target="_blank" class="muted-xs">#' + data.issue_number + '</a>';
         btn.style.borderColor = 'var(--green)';
       } catch (e) {
         btn.textContent = '⚠ Error';
@@ -9475,7 +9486,7 @@ function burnAreaChart() {
 
     function acmmShowRepoPickerForIssue(criterionId, level) {
       const repos = (_acmmEvalData.repo_results || []).map(r => r.repo);
-      let html = '<p style="font-size:0.82rem;color:var(--muted);margin:0 0 12px">Which repository should this issue be opened on?</p>';
+      let html = '<p class="dialog-note">Which repository should this issue be opened on?</p>';
       for (const repo of repos) {
         const repoData = (_acmmEvalData.repo_results || []).find(r => r.repo === repo);
         const criterion = repoData ? (repoData.criteria_results || []).find(c => c.id === criterionId) : null;
@@ -9484,13 +9495,13 @@ function burnAreaChart() {
         const escapedRepo = escapeHtml(repo).replace(/'/g, "\\'");
         if (already) {
           html += '<div style="padding:8px;margin-bottom:4px;background:var(--bg);border-radius:6px;border:1px solid var(--border);opacity:0.5">' +
-            '<span style="font-size:0.82rem">✅ ' + escapeHtml(repo) + '</span>' +
+            '<span class="text-base">✅ ' + escapeHtml(repo) + '</span>' +
             '<span style="font-size:0.72rem;color:var(--muted);margin-left:8px">(already passing)</span></div>';
         } else {
           html += '<div onclick="acmmCloseDialog();acmmCreateIssueDirectFromPicker(\'' + escapedRepo + '\',\'' + escapedId + '\',' + level + ')" ' +
-            'style="cursor:pointer;padding:8px;margin-bottom:4px;background:var(--bg);border-radius:6px;border:1px solid var(--border);transition:border-color .15s" ' +
+            'class="row-card" ' +
             'onmouseover="this.style.borderColor=\'var(--muted)\'" onmouseout="this.style.borderColor=\'var(--border)\'">' +
-            '<span style="font-size:0.82rem">❌ ' + escapeHtml(repo) + '</span></div>';
+            '<span class="text-base">❌ ' + escapeHtml(repo) + '</span></div>';
         }
       }
       acmmShowDialog('Open Issue — Select Repository', html);
@@ -9505,14 +9516,14 @@ function burnAreaChart() {
         });
         if (!r.ok) {
           const errText = await r.text();
-          acmmShowDialog('Issue Creation Failed', '<p style="color:#da3633;font-size:0.82rem">' + escapeHtml(errText) + '</p>');
+          acmmShowDialog('Issue Creation Failed', '<p class="error-note">' + escapeHtml(errText) + '</p>');
           return;
         }
         const data = await r.json();
         _acmmOpenedIssues[repo + ':' + criterionId] = {number: data.issue_number, url: data.issue_url};
-        acmmShowDialog('Issue Created', '<p style="font-size:0.82rem">Issue <a href="' + escapeHtml(data.issue_url) + '" target="_blank" style="color:var(--blue)">#' + data.issue_number + '</a> created on <strong>' + escapeHtml(repo) + '</strong> with <code>acmm</code> and <code>ai-fix-requested</code> labels.</p>');
+        acmmShowDialog('Issue Created', '<p class="text-base">Issue <a href="' + escapeHtml(data.issue_url) + '" target="_blank" style="color:var(--blue)">#' + data.issue_number + '</a> created on <strong>' + escapeHtml(repo) + '</strong> with <code>acmm</code> and <code>ai-fix-requested</code> labels.</p>');
       } catch (e) {
-        acmmShowDialog('Issue Creation Failed', '<p style="color:#da3633;font-size:0.82rem">Network error: ' + escapeHtml(e.message) + '</p>');
+        acmmShowDialog('Issue Creation Failed', '<p class="error-note">Network error: ' + escapeHtml(e.message) + '</p>');
       }
     }
 
@@ -9528,27 +9539,27 @@ function burnAreaChart() {
       const alreadyOpened = criteria.length - newCriteria.length;
       let html = '';
       if (newCriteria.length === 0) {
-        html += '<p style="font-size:0.82rem;color:var(--muted);margin:0 0 12px">All ' + criteria.length + ' failing criteria already have issues opened.</p>';
-        html += '<div style="display:flex;gap:8px;justify-content:flex-end">' +
-          '<button onclick="acmmCloseDialog()" style="padding:6px 14px;background:var(--bg);border:1px solid var(--border);border-radius:6px;cursor:pointer;color:var(--muted);font-size:0.78rem">Close</button></div>';
+        html += '<p class="dialog-note">All ' + criteria.length + ' failing criteria already have issues opened.</p>';
+        html += '<div class="row-end">' +
+          '<button onclick="acmmCloseDialog()" class="dialog-btn">Close</button></div>';
       } else {
-        html += '<p style="font-size:0.82rem;color:var(--muted);margin:0 0 12px">This will create ' + newCriteria.length + ' issue(s) for failing criteria at L' + level + '.' +
+        html += '<p class="dialog-note">This will create ' + newCriteria.length + ' issue(s) for failing criteria at L' + level + '.' +
           (alreadyOpened > 0 ? ' (' + alreadyOpened + ' already opened, will be skipped)' : '') + '</p>';
         if (hasMultiRepo && !_acmmSelectedRepo) {
-          html += '<p style="font-size:0.82rem;color:var(--muted);margin:0 0 12px">Select a target repo first, or issues will be created for each repo where the criterion fails.</p>';
+          html += '<p class="dialog-note">Select a target repo first, or issues will be created for each repo where the criterion fails.</p>';
         }
         html += '<div style="max-height:200px;overflow-y:auto;margin-bottom:12px">';
         for (const c of criteria) {
           const opened = _acmmOpenedIssues[(targetRepo || '') + ':' + c.id];
           if (opened) {
-            html += '<div style="font-size:0.78rem;padding:2px 0;color:var(--muted)">✅ ' + escapeHtml(c.name) + ' <a href="' + escapeHtml(opened.url) + '" target="_blank" style="color:var(--muted);font-size:0.68rem">#' + opened.number + '</a></div>';
+            html += '<div style="font-size:0.78rem;padding:2px 0;color:var(--muted)">✅ ' + escapeHtml(c.name) + ' <a href="' + escapeHtml(opened.url) + '" target="_blank" class="muted-xs">#' + opened.number + '</a></div>';
           } else {
             html += '<div style="font-size:0.78rem;padding:2px 0">❌ ' + escapeHtml(c.name) + '</div>';
           }
         }
         html += '</div>';
-        html += '<div style="display:flex;gap:8px;justify-content:flex-end">' +
-          '<button onclick="acmmCloseDialog()" style="padding:6px 14px;background:var(--bg);border:1px solid var(--border);border-radius:6px;cursor:pointer;color:var(--muted);font-size:0.78rem">Cancel</button>' +
+        html += '<div class="row-end">' +
+          '<button onclick="acmmCloseDialog()" class="dialog-btn">Cancel</button>' +
           '<button onclick="acmmBatchCreateIssues(' + level + ')" style="padding:6px 14px;background:var(--green);border:none;border-radius:6px;cursor:pointer;color:var(--bg);font-size:0.78rem;font-weight:600">Create ' + newCriteria.length + ' Issue(s)</button></div>';
       }
       acmmShowDialog('Open Issues for L' + level + ' ' + (ACMM_LEVEL_NAMES[level] || ''), html);
@@ -9561,7 +9572,7 @@ function burnAreaChart() {
       const targetRepo = _acmmSelectedRepo || (repos.length === 1 ? repos[0].repo : null);
 
       let created = 0, failed = 0, skipped = 0;
-      acmmShowDialog('Creating Issues...', '<p id="acmm-batch-progress" style="font-size:0.82rem">0/' + criteria.length + ' created...</p>');
+      acmmShowDialog('Creating Issues...', '<p id="acmm-batch-progress" class="text-base">0/' + criteria.length + ' created...</p>');
 
       for (const c of criteria) {
         if (targetRepo) {
@@ -9601,7 +9612,7 @@ function burnAreaChart() {
         const prog = document.getElementById('acmm-batch-progress');
         if (prog) prog.textContent = created + '/' + criteria.length + ' created' + (failed > 0 ? ' (' + failed + ' failed)' : '') + (skipped > 0 ? ' (' + skipped + ' skipped)' : '') + '...';
       }
-      acmmShowDialog('Issues Created', '<p style="font-size:0.82rem">' + created + ' issue(s) created' + (failed > 0 ? ', ' + failed + ' failed' : '') + (skipped > 0 ? ', ' + skipped + ' already existed' : '') + ' with <code>acmm</code> + <code>ai-fix-requested</code> labels.</p>');
+      acmmShowDialog('Issues Created', '<p class="text-base">' + created + ' issue(s) created' + (failed > 0 ? ', ' + failed + ' failed' : '') + (skipped > 0 ? ', ' + skipped + ' already existed' : '') + ' with <code>acmm</code> + <code>ai-fix-requested</code> labels.</p>');
     }
 
     function acmmShowLevelDialog(level, repoName) {
@@ -9646,7 +9657,7 @@ function burnAreaChart() {
         '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">' +
         '<span style="font-size:1.5rem;font-weight:700;color:' + statusColor + '">' + pct + '%</span>' +
         '<span style="font-size:0.82rem;color:' + statusColor + ';font-weight:600">' + statusText + '</span>' +
-        '<span style="font-size:0.72rem;color:var(--muted)">(threshold: ' + threshold + '%)</span>' +
+        '<span class="muted-xs">(threshold: ' + threshold + '%)</span>' +
         batchBtn +
         '</div>' +
         '<p style="font-size:0.8rem;color:var(--muted);margin:0 0 8px">' + escapeHtml(desc) + '</p>' +
@@ -9703,7 +9714,7 @@ function burnAreaChart() {
             html += '<div onclick="event.stopPropagation();acmmShowLevelDialog(' + lvl.level + ',\'' + safeRepo + '\')" ' +
               'style="cursor:pointer;padding:5px 6px;margin-bottom:3px;background:var(--bg);border-radius:4px;border:1px solid var(--border);transition:border-color .15s" ' +
               'onmouseover="this.style.borderColor=\'var(--muted)\'" onmouseout="this.style.borderColor=\'var(--border)\'">' +
-              '<div style="display:flex;align-items:center;justify-content:space-between">' +
+              '<div class="row-between">' +
               '<span style="font-size:0.75rem;font-weight:500">' + (lvl.passed ? '✓' : '✗') + ' L' + lvl.level + ' ' + escapeHtml(lvl.name) + '</span>' +
               '<span style="font-size:0.7rem;color:' + color + ';font-weight:600">' + lvl.matched + '/' + lvl.total + '</span></div>' +
               '<div style="margin-top:3px;height:3px;background:var(--border);border-radius:2px;overflow:hidden"><div style="width:' + pct + '%;height:100%;background:' + color + ';border-radius:2px"></div></div></div>';
@@ -9716,8 +9727,8 @@ function burnAreaChart() {
         for (const lvl of levels) {
           const pct = Math.round(lvl.score * 100);
           const color = lvl.passed ? 'var(--green)' : (pct > 40 ? 'var(--yellow)' : '#da3633');
-          html += '<div onclick="acmmShowLevelDialog(' + lvl.level + ')" style="cursor:pointer;padding:8px;margin-bottom:4px;background:var(--bg);border-radius:6px;border:1px solid var(--border);transition:border-color .15s" onmouseover="this.style.borderColor=\'var(--muted)\'" onmouseout="this.style.borderColor=\'var(--border)\'">' +
-            '<div style="display:flex;align-items:center;justify-content:space-between">' +
+          html += '<div onclick="acmmShowLevelDialog(' + lvl.level + ')" class="row-card" onmouseover="this.style.borderColor=\'var(--muted)\'" onmouseout="this.style.borderColor=\'var(--border)\'">' +
+            '<div class="row-between">' +
             '<span style="font-size:0.82rem;font-weight:600">' + (lvl.passed ? '✓' : '✗') + ' L' + lvl.level + ' ' + escapeHtml(lvl.name) + '</span>' +
             '<span style="font-size:0.75rem;color:' + color + ';font-weight:600">' + lvl.matched + '/' + lvl.total + ' (' + pct + '%)</span></div>' +
             '<div style="margin-top:4px;height:4px;background:var(--bg);border-radius:2px;overflow:hidden"><div style="width:' + pct + '%;height:100%;background:' + color + ';border-radius:2px"></div></div></div>';
@@ -9743,7 +9754,7 @@ function burnAreaChart() {
       };
       const desc = opsDescriptions[d.operational_level] || 'Level not recognized.';
       acmmShowDialog('Operational Autonomy — L' + d.operational_level + ' ' + escapeHtml(name),
-        '<p style="font-size:0.82rem;color:var(--muted);margin:0 0 12px">Operational autonomy reflects the hive\'s current pack configuration — how much the system automates without human intervention.</p>' +
+        '<p class="dialog-note">Operational autonomy reflects the hive\'s current pack configuration — how much the system automates without human intervention.</p>' +
         '<div style="padding:12px;background:var(--bg);border-radius:6px;border:1px solid var(--border)">' +
         '<div style="font-size:1.1rem;font-weight:700;margin-bottom:4px">L' + d.operational_level + ' — ' + escapeHtml(name) + '</div>' +
         '<div style="font-size:0.82rem;color:var(--muted)">' + escapeHtml(desc) + '</div></div>' +
@@ -9757,12 +9768,12 @@ function burnAreaChart() {
       const overallName = ACMM_LEVEL_NAMES[d.overall_level] || 'None';
       const lower = d.codebase_level <= d.operational_level ? 'codebase readiness' : 'operational autonomy';
       acmmShowDialog('Overall ACMM Level — L' + d.overall_level + ' ' + escapeHtml(overallName),
-        '<p style="font-size:0.82rem;color:var(--muted);margin:0 0 12px">The overall ACMM level is the <strong>minimum</strong> of codebase readiness and operational autonomy. Both dimensions must align — a high operational level means nothing if the repo lacks foundational tooling, and vice versa.</p>' +
+        '<p class="dialog-note">The overall ACMM level is the <strong>minimum</strong> of codebase readiness and operational autonomy. Both dimensions must align — a high operational level means nothing if the repo lacks foundational tooling, and vice versa.</p>' +
         '<div style="display:flex;gap:12px;margin-bottom:12px">' +
-        '<div style="flex:1;padding:12px;background:var(--bg);border-radius:6px;border:1px solid var(--border);text-align:center;cursor:pointer" onclick="acmmCloseDialog();acmmShowCodebaseDialog()">' +
-        '<div style="font-size:1.2rem;font-weight:700">L' + d.codebase_level + '</div><div style="font-size:0.72rem;color:var(--muted)">Codebase</div></div>' +
-        '<div style="flex:1;padding:12px;background:var(--bg);border-radius:6px;border:1px solid var(--border);text-align:center;cursor:pointer" onclick="acmmCloseDialog();acmmShowOpsDialog()">' +
-        '<div style="font-size:1.2rem;font-weight:700">L' + d.operational_level + '</div><div style="font-size:0.72rem;color:var(--muted)">Operational</div></div>' +
+        '<div class="card-tile" onclick="acmmCloseDialog();acmmShowCodebaseDialog()">' +
+        '<div class="stat-num">L' + d.codebase_level + '</div><div class="muted-xs">Codebase</div></div>' +
+        '<div class="card-tile" onclick="acmmCloseDialog();acmmShowOpsDialog()">' +
+        '<div class="stat-num">L' + d.operational_level + '</div><div class="muted-xs">Operational</div></div>' +
         '</div>' +
         '<div style="padding:10px;background:var(--bg);border-radius:6px;border:1px solid var(--border);font-size:0.8rem">' +
         '→ Overall is <strong>L' + d.overall_level + '</strong> because ' + lower + ' is the limiting factor.</div>'
@@ -9778,7 +9789,7 @@ function burnAreaChart() {
       const totalPassed = results.filter(c => c.passed).length;
       const hasMultiRepo = (d.repo_results || []).length > 1;
 
-      let html = '<p style="font-size:0.82rem;color:var(--muted);margin:0 0 12px">' + totalPassed + ' of ' + results.length + ' criteria detected' + (hasMultiRepo ? ' (aggregate across ' + d.repo_results.length + ' repos)' : '') + '. Click a level row to see details.</p>';
+      let html = '<p class="dialog-note">' + totalPassed + ' of ' + results.length + ' criteria detected' + (hasMultiRepo ? ' (aggregate across ' + d.repo_results.length + ' repos)' : '') + '. Click a level row to see details.</p>';
 
       for (const lvl of levels) {
         const criteria = results.filter(c => c.level === lvl.level);
@@ -9808,14 +9819,14 @@ function burnAreaChart() {
       if (!overlay) {
         overlay = document.createElement('div');
         overlay.id = 'acmm-dialog-overlay';
-        overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:10000;display:flex;align-items:center;justify-content:center';
+        overlay.className = 'acmm-dialog-overlay'; // modal recipe (Phase 2); z-index kept in its own rule
         overlay.addEventListener('click', (e) => { if (e.target === overlay) acmmCloseDialog(); });
         document.body.appendChild(overlay);
       }
       overlay.style.display = 'flex';
       document.body.style.overflow = 'hidden';
-      overlay.innerHTML = '<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px;max-width:600px;width:92%;max-height:80vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,0.3)">' +
-        '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">' +
+      overlay.innerHTML = '<div class="acmm-dialog">' +
+        '<div class="row-between" style="margin-bottom:12px">' +
         '<h3 style="margin:0;font-size:1rem;font-weight:700;color:var(--text)">' + title + '</h3>' +
         '<button onclick="acmmCloseDialog()" style="background:none;border:none;cursor:pointer;font-size:1.1rem;color:var(--muted);padding:4px">✕</button></div>' +
         '<div>' + bodyHtml + '</div></div>';
@@ -9838,14 +9849,14 @@ function burnAreaChart() {
 
       const fmtLevel = (lvl) => {
         const name = ACMM_LEVEL_NAMES[lvl] || ('L'+lvl);
-        return '<span style="font-size:1.2rem;font-weight:700">L' + lvl + '</span><br><span style="font-size:0.7rem;color:var(--muted)">' + escapeHtml(name) + '</span>';
+        return '<span class="stat-num">L' + lvl + '</span><br><span style="font-size:0.7rem;color:var(--muted)">' + escapeHtml(name) + '</span>';
       };
 
       setIfChanged(document.getElementById('acmm-codebase-level'), fmtLevel(d.codebase_level));
       setIfChanged(document.getElementById('acmm-ops-level'), fmtLevel(d.operational_level));
       setIfChanged(document.getElementById('acmm-overall-level'), fmtLevel(d.overall_level));
       setIfChanged(document.getElementById('acmm-criteria-ratio'),
-        '<span style="font-size:1.2rem;font-weight:700">' + d.criteria_passed + '/' + d.criteria_total + '</span>');
+        '<span class="stat-num">' + d.criteria_passed + '/' + d.criteria_total + '</span>');
 
       // Repo selector
       const selectorEl = document.getElementById('acmm-repo-selector');
@@ -9859,9 +9870,8 @@ function burnAreaChart() {
           let btn = selectorEl.querySelector('[data-acmm-repo="' + rr.repo + '"]');
           if (!btn) {
             btn = document.createElement('button');
-            btn.className = 'acmm-repo-btn-repo';
+            btn.className = 'acmm-repo-btn-repo repo-chip-btn';
             btn.setAttribute('data-acmm-repo', rr.repo);
-            btn.style.cssText = 'padding:2px 8px;border-radius:4px;border:1px solid var(--border);background:var(--bg);cursor:pointer;font-size:0.72rem;color:var(--text)';
             btn.onclick = () => acmmSelectRepo(rr.repo);
             selectorEl.appendChild(btn);
           }
