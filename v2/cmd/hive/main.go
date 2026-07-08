@@ -60,6 +60,7 @@ func main() {
 	configPath := flag.String("config", defaultConfig, "path to hive.yaml config file")
 	flag.Parse()
 	dashboard.SetGitVersion(gitHash, gitShort)
+	dashboard.SetGitBranch(gitBranch)
 
 	logger := slog.New(logscrub.NewHandler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	slog.SetDefault(logger)
