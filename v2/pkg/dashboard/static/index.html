@@ -1607,12 +1607,20 @@
       background: var(--card-bg); border: 1px solid var(--border);
       border-radius: 8px; padding: 16px;
     }
-    /* When the main digest is collapsed, hide the empty card shell too —
-       otherwise a blank bordered box lingers under the header. */
+    /* When the main digest is collapsed, the empty card shell must not
+       linger: children are hidden and a muted hint invites expanding.
+       (No !important needed here — the card carries no inline styles.) */
     #advisory-digest.card-collapsed {
       border: none;
-      padding: 0;
+      padding: 2px 0;
       background: transparent;
+    }
+    #advisory-digest.card-collapsed > * { display: none; }
+    #advisory-digest.card-collapsed::before {
+      content: 'Expand to see advisory findings.';
+      color: var(--muted);
+      font-size: 0.8rem;
+      font-style: italic;
     }
 
     /* ── Collapsible sections (#1533) ── */
