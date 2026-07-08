@@ -14,6 +14,10 @@
       --bg: #080b0f; --bg-soft: #0d1218;
       --panel: #121922; --panel-strong: #17212d;
       --text: #f6f8fb; --muted: #a8b3c2; --line: #263545;
+      /* Ghost-button / clickable-tile outlines. Same as --line in dark;
+         remapped a step darker in light mode where --line hairlines all
+         but vanish on white. */
+      --line-strong: #263545;
       /* --amber is brand/chrome ONLY — never use it for status. */
       --amber: #f4c75f;
       /* Semantic status colors (agent + governor state) — must stay distinct. */
@@ -86,6 +90,7 @@
       --bg: #f7f8fa; --bg-soft: #ffffff;
       --panel: #ffffff; --panel-strong: #eef1f5;
       --text: #111827; --muted: #6b7280; --line: #e5e7eb;
+      --line-strong: #c6cdd6; /* visible ghost outlines on white */
       --amber: #b45309; /* brand amber darkened for readability on white */
       --green: #16a34a; --blue: #2563eb; --red: #dc2626;
       --yellow: #a16207;
@@ -1652,7 +1657,7 @@
     .hive-dialog-btn, .nous-btn,
     .gh-auth-modal .gh-cancel, .gh-setup-modal .gh-cancel,
     .config-footer .config-cancel, .nous-config-btn-cancel {
-      background: transparent; border-color: var(--line); color: var(--muted);
+      background: transparent; border-color: var(--line-strong); color: var(--muted);
     }
     .btn:hover, .btn-sm:hover, .btn-toggle:hover, .layout-toggle:hover,
     .widget-dl:hover, .kb-layer-btn:hover, .hive-dialog-btn:hover, .nous-btn:hover,
@@ -1857,11 +1862,11 @@
     .dialog-note { font-size: 0.82rem; color: var(--muted); margin: 0 0 12px; }
     .text-base { font-size: var(--fs-base); }
     .stat-num { font-size: 1.2rem; font-weight: 700; }
-    .dialog-btn { padding: 6px 14px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; cursor: pointer; color: var(--muted); font-size: 0.78rem; }
-    .card-tile { flex: 1; padding: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; text-align: center; cursor: pointer; }
-    .row-card { cursor: pointer; padding: 8px; margin-bottom: 4px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; transition: border-color .15s; }
+    .dialog-btn { padding: 6px 14px; background: var(--bg); border: 1px solid var(--line-strong); border-radius: 6px; cursor: pointer; color: var(--muted); font-size: 0.78rem; }
+    .card-tile { flex: 1; padding: 12px; background: var(--bg); border: 1px solid var(--line-strong); border-radius: 6px; text-align: center; cursor: pointer; }
+    .row-card { cursor: pointer; padding: 8px; margin-bottom: 4px; background: var(--bg); border: 1px solid var(--line-strong); border-radius: 6px; transition: border-color .15s; }
     .error-note { color: var(--red); font-size: 0.82rem; }
-    .repo-chip-btn { padding: 2px 8px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg); cursor: pointer; font-size: 0.72rem; color: var(--text); }
+    .repo-chip-btn { padding: 2px 8px; border-radius: 4px; border: 1px solid var(--line-strong); background: var(--bg); cursor: pointer; font-size: 0.72rem; color: var(--text); }
   </style>
 </head>
 <body>
@@ -10342,7 +10347,7 @@ function burnAreaChart() {
           </div>`
         ).join('');
 
-        return `<div style="border:2px solid ${isCurrent ? color : 'var(--border)'};border-radius:10px;padding:16px;${isCurrent ? 'background:var(--surface);box-shadow:0 0 12px ' + color + '40' : ''}">
+        return `<div style="border:2px solid ${isCurrent ? color : 'var(--line-strong)'};border-radius:10px;padding:16px;${isCurrent ? 'background:var(--surface);box-shadow:0 0 12px ' + color + '40' : ''}">
           <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
             <span style="font-size:1.5rem;font-weight:800;color:${color};min-width:32px">L${p.level}</span>
             <div style="flex:1">
