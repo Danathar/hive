@@ -19,6 +19,7 @@
       /* Semantic status colors (agent + governor state) — must stay distinct. */
       --green: #74df9a; --blue: #80bfff; --red: #ff7e7e;
       --yellow: #d29922; /* status warning — warm ochre, distinguishable from brand amber */
+      --orange: #e38b2c; /* status alert — between warning yellow and critical red */
       --indigo: #818cf8; /* on-demand agent state */
       --cyan: #7bd8cd; --purple: #c0a6f0; /* desaturated toward the hub palette */
       /* Radii / shadows / fonts — defined in Phase 0, applied in later phases. */
@@ -56,7 +57,6 @@
     /* ── Deliberate monospace: data surfaces only. UI chrome uses --font-ui. ── */
     code, pre { font-family: var(--font-mono); }
     .mono { font-family: var(--font-mono); }
-    #audit-panel { font-family: var(--font-mono); }
     /* Section eyebrow label — hub convention (amber, uppercase, tracked). */
     .section-label {
       font-family: var(--font-ui); font-size: var(--fs-xs); font-weight: 800;
@@ -89,6 +89,7 @@
       --amber: #b45309; /* brand amber darkened for readability on white */
       --green: #16a34a; --blue: #2563eb; --red: #dc2626;
       --yellow: #a16207;
+      --orange: #c2570f; /* status alert darkened for readability on white */
       --indigo: #4f46e5;
       --cyan: #0891b2; --purple: #7c3aed;
       --shadow-modal: 0 20px 60px rgba(0, 0, 0, 0.15);
@@ -279,9 +280,13 @@
     body.light-mode .agents { grid-template-columns: 1fr; }
 
     /* Light agent detail panel (shown when agent selected in sidebar) */
-    .oc-agent-detail {
-      display: none; background: var(--surface); border: 2px solid var(--border);
-      border-radius: 10px; padding: 20px; margin-bottom: 16px;
+    .oc-agent-detail { /* glass panel — same recipe as .agent-card */
+      display: none;
+      background: linear-gradient(
+        color-mix(in srgb, var(--panel-strong) 92%, transparent),
+        color-mix(in srgb, var(--bg-soft) 92%, transparent));
+      border: 2px solid color-mix(in srgb, var(--text) 10%, transparent);
+      border-radius: var(--radius-lg); padding: 20px; margin-bottom: 16px;
       box-shadow: 0 1px 3px rgba(0,0,0,0.06);
     }
     .oc-agent-detail.active { display: block; }
@@ -393,12 +398,12 @@
     .oc-sidebar-group-children { padding-left: 0; min-height: 28px; }
     .oc-sidebar-group-children.collapsed { display: none; min-height: 0; }
     .oc-sidebar-group.drag-over > .oc-sidebar-group-children {
-      outline: 2px dashed var(--red); outline-offset: -2px;
-      border-radius: 6px; background: rgba(220,38,38,0.05);
+      outline: 2px dashed var(--amber); outline-offset: -2px;
+      border-radius: 6px; background: color-mix(in srgb, var(--amber) 6%, transparent);
     }
     .oc-sidebar-group.dragging-group { opacity: 0.4; }
     .oc-group-drop-indicator {
-      height: 2px; background: var(--red); border-radius: 1px; margin: 2px 0;
+      height: 2px; background: var(--amber); border-radius: 1px; margin: 2px 0;
     }
     .oc-sidebar-group-header .oc-group-actions {
       margin-left: auto; display: none; gap: 4px;
@@ -410,11 +415,11 @@
     }
     .oc-sidebar-group-header .oc-group-actions button:hover { color: var(--text); }
     .oc-drop-indicator {
-      height: 2px; background: var(--red); margin: 0 10px;
+      height: 2px; background: var(--amber); margin: 0 10px;
       border-radius: 1px; pointer-events: none;
     }
     .oc-drop-indicator-group {
-      border: 2px dashed var(--red); border-radius: 8px;
+      border: 2px dashed var(--amber); border-radius: 8px;
       margin: 2px 10px; padding: 4px; opacity: 0.5;
     }
 
@@ -625,7 +630,7 @@
     .status-badge { font-weight: 700; margin-left: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
     .status-badge.blocked { --pill-c: var(--red); }
     .status-badge.needs-context { --pill-c: var(--yellow); }
-    .status-badge.done-concerns { --pill-c: #e38b2c; } /* distinct orange — no token yet */
+    .status-badge.done-concerns { --pill-c: var(--orange); }
     .status-badge.done { --pill-c: var(--green); }
     .agent-card.status-blocked { border-left-color: var(--red) !important; }
     .agent-card.status-needs-context { border-left-color: var(--yellow) !important; }
@@ -2190,7 +2195,7 @@
           <span id="acmm-eval-source"></span>
           <span id="acmm-eval-timestamp"></span>
         </div>
-        <div id="acmm-eval-warning" style="display:none;margin-top:8px;padding:6px 10px;border-radius:6px;background:#fef3c7;color:#92400e;font-size:0.75rem"></div>
+        <div id="acmm-eval-warning" style="display:none;margin-top:8px;padding:6px 10px;border-radius:6px;background:color-mix(in srgb, var(--yellow) 15%, transparent);border:1px solid color-mix(in srgb, var(--yellow) 40%, transparent);color:var(--text);font-size:0.75rem"></div>
       </div>
     </div>
   </div>
@@ -2820,7 +2825,7 @@
         </div>
         <div class="oc-detail-indicators">${agentIndicators(a.name)}</div>
         <div class="oc-detail-summary-wrap">
-          <div class="oc-detail-summary" id="oc-summary-scroll">${(a.detailSummary || a.liveSummary) ? escBlock(a.detailSummary || a.liveSummary) : '<span style="color:#9ca3af">No activity summary</span>'}</div>
+          <div class="oc-detail-summary" id="oc-summary-scroll">${(a.detailSummary || a.liveSummary) ? escBlock(a.detailSummary || a.liveSummary) : '<span style="color:var(--muted)">No activity summary</span>'}</div>
           <button class="oc-summary-follow-btn" id="oc-summary-follow" title="Follow new output" onclick="ocSummaryResumeTail()">⬇</button>
         </div>
         <div class="oc-chat-prompt">
@@ -3799,10 +3804,11 @@
     }
 
     var _hubBannerColorMap = {
-      green: {bg: 'rgba(22,163,74,0.12)', border: 'rgba(22,163,74,0.3)', color: '#4ade80'},
-      blue:  {bg: 'rgba(59,130,246,0.12)', border: 'rgba(59,130,246,0.3)', color: '#93c5fd'},
-      amber: {bg: 'rgba(245,158,11,0.12)', border: 'rgba(245,158,11,0.3)', color: '#fcd34d'},
-      gray:  {bg: 'rgba(107,114,128,0.12)', border: 'rgba(107,114,128,0.3)', color: '#d1d5db'}
+      /* banner copy stays neutral (--text); the semantic color lives in the tint/border */
+      green: {bg: 'rgba(22,163,74,0.12)', border: 'rgba(22,163,74,0.3)', color: 'var(--text)'},
+      blue:  {bg: 'rgba(59,130,246,0.12)', border: 'rgba(59,130,246,0.3)', color: 'var(--text)'},
+      amber: {bg: 'rgba(245,158,11,0.12)', border: 'rgba(245,158,11,0.3)', color: 'var(--text)'},
+      gray:  {bg: 'rgba(107,114,128,0.12)', border: 'rgba(107,114,128,0.3)', color: 'var(--text)'}
     };
 
     function renderHubBanner(banner) {
@@ -3836,9 +3842,9 @@
       }
       banner.style.display = 'block';
       banner.innerHTML = alerts.map(function(a) {
-        var bg = a.severity === 'error' ? '#7f1d1d' : '#78350f';
-        var border = a.severity === 'error' ? 'var(--red)' : '#d97706';
-        var textColor = a.severity === 'error' ? '#fca5a5' : '#fcd34d';
+        var bg = a.severity === 'error' ? 'color-mix(in srgb, var(--red) 14%, transparent)' : 'color-mix(in srgb, var(--yellow) 14%, transparent)';
+        var border = a.severity === 'error' ? 'var(--red)' : 'var(--yellow)';
+        var textColor = 'var(--text)'; // banner copy stays neutral; severity lives in the tint/border
         return '<div style="background:' + bg + ';border:1px solid ' + border + ';border-radius:8px;padding:12px 16px;margin-bottom:8px;display:flex;align-items:center;gap:10px;font-size:0.85rem">'
           + '<span style="font-size:1.3rem">⚠️</span>'
           + '<span style="color:' + textColor + '">' + a.message.replace(/</g, '&lt;') + '</span>'
@@ -4110,7 +4116,7 @@
           <div id="${agentKey}-body" class="advisory-agent-body${agentCollapsed ? ' collapsed' : ''}" style="display:flex;flex-direction:column;gap:4px;${agentCollapsed ? 'max-height:0' : 'max-height:none'}">`;
         for (const f of findings) {
           const loc = f.file ? ` <code style="font-size:0.72rem;color:var(--muted)">${escapeHtml(f.file)}${f.line ? ':' + f.line : ''}</code>` : '';
-          html += `<div style="font-size:0.8rem;padding:6px 10px;background:var(--bg);border-radius:4px;border-left:3px solid ${f.severity === 'critical' ? 'var(--red)' : f.severity === 'high' ? '#ea580c' : f.severity === 'medium' ? 'var(--yellow)' : 'var(--muted)'}">
+          html += `<div style="font-size:0.8rem;padding:6px 10px;background:var(--bg);border-radius:4px;border-left:3px solid ${f.severity === 'critical' ? 'var(--red)' : f.severity === 'high' ? 'var(--orange)' : f.severity === 'medium' ? 'var(--yellow)' : 'var(--muted)'}">
             ${sevIcon(f.severity)} <strong>[${escapeHtml(f.type || 'finding')}]</strong> ${escapeHtml(f.title)}${loc}
             ${f.detail ? `<div style="margin-top:4px;color:var(--muted);font-size:0.75rem">${escapeHtml(f.detail)}</div>` : ''}
           </div>`;
@@ -4932,7 +4938,7 @@ function burnAreaChart() {
       const scope = s.scope || 'governor';
       const phases = s.phases || {};
 
-      const modeColors = { observe: 'var(--blue)', suggest: '#d97706', evolve: 'var(--green)' };
+      const modeColors = { observe: 'var(--blue)', suggest: 'var(--yellow)', evolve: 'var(--green)' };
       const modeLabels = { observe: 'Observing', suggest: 'Suggesting', evolve: 'Evolving' };
       if (badge) {
         badge.textContent = `${modeLabels[mode] || mode} · ${scope}`;
@@ -5117,7 +5123,7 @@ function burnAreaChart() {
           html += '</tbody></table>';
         }
         if (p.predicted) {
-          html += `<div style="font-size:0.72rem;color:#92400e">Predicted: ${escapeHtml(JSON.stringify(p.predicted))}</div>`;
+          html += `<div style="font-size:0.72rem;color:var(--yellow)">Predicted: ${escapeHtml(JSON.stringify(p.predicted))}</div>`;
         }
         html += '<div style="margin-top:10px">';
         html += '<button class="nous-btn nous-btn-approve" onclick="nousApprove()" title="Approve this experiment proposal and start running it. The governor will apply the proposed parameter changes for the configured experiment duration.">Apply</button>';
@@ -5132,7 +5138,7 @@ function burnAreaChart() {
         const sorted = [...principles].sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
         for (const p of sorted) {
           const conf = Math.round((p.confidence || 0) * 100);
-          const barColor = conf >= 80 ? 'var(--green)' : conf >= 50 ? '#d97706' : 'var(--red)';
+          const barColor = conf >= 80 ? 'var(--green)' : conf >= 50 ? 'var(--yellow)' : 'var(--red)';
           html += '<div class="nous-principle">';
           html += `<div class="nous-confidence-bar"><div class="nous-confidence-fill" style="width:${conf}%;background:${barColor}"></div></div>`;
           html += `<div class="nous-principle-text">${escapeHtml(p.text || p.id)}</div>`;
@@ -5150,14 +5156,14 @@ function burnAreaChart() {
         const TIMELINE_MAX_BARS = 30;
         const recent = ledger.slice(-TIMELINE_MAX_BARS);
         for (const entry of recent) {
-          const colors = { dry_run: '#94a3b8', active: 'var(--blue)', completed: 'var(--green)', aborted: 'var(--red)', analysis: '#7c3aed', shadow_analysis: '#a78bfa' };
-          const color = colors[entry.type] || '#94a3b8';
+          const colors = { dry_run: 'var(--muted)', active: 'var(--blue)', completed: 'var(--green)', aborted: 'var(--red)', analysis: '#7c3aed', shadow_analysis: '#a78bfa' };
+          const color = colors[entry.type] || 'var(--muted)';
           const outcome = entry.outcome || entry.type;
           html += `<div class="nous-timeline-bar" style="height:${20 + Math.random() * 20}px;background:${color}" title="${escapeHtml((entry.id || '?') + ': ' + outcome)}"></div>`;
         }
         html += '</div>';
         html += '<div style="font-size:0.65rem;color:var(--muted);margin-top:4px;display:flex;gap:12px">';
-        html += '<span><span style="color:#94a3b8">■</span> dry run</span>';
+        html += '<span><span style="color:var(--muted)">■</span> dry run</span>';
         html += '<span><span style="color:var(--blue)">■</span> active</span>';
         html += '<span><span style="color:var(--green)">■</span> completed</span>';
         html += '<span><span style="color:var(--red)">■</span> aborted</span>';
@@ -5298,7 +5304,7 @@ function burnAreaChart() {
       h += '<div class="nous-trust-ladder">';
       const trustSteps = [
         { id: 'observe', label: 'Observe', desc: 'Data collection only', color: 'var(--blue)' },
-        { id: 'suggest', label: 'Suggest', desc: 'Experiments need approval', color: '#d97706' },
+        { id: 'suggest', label: 'Suggest', desc: 'Experiments need approval', color: 'var(--yellow)' },
         { id: 'evolve', label: 'Evolve', desc: 'Fully autonomous', color: 'var(--green)' },
       ];
       for (const step of trustSteps) {
@@ -5579,7 +5585,7 @@ function burnAreaChart() {
 
     function confColor(c) {
       if (c >= 0.9) return 'var(--green)';
-      if (c >= 0.7) return '#d97706';
+      if (c >= 0.7) return 'var(--yellow)';
       return 'var(--red)';
     }
 
@@ -6146,7 +6152,7 @@ function burnAreaChart() {
     function renderKnowledgeSetup(panel, badge) {
       if (badge) {
         badge.textContent = 'setup';
-        badge.style.background = '#d97706';
+        badge.style.background = 'var(--yellow)';
         badge.style.color = 'white';
       }
 
@@ -6365,7 +6371,7 @@ function burnAreaChart() {
       const healthyCount = layers.filter(l => l.healthy).length;
       if (badge) {
         badge.textContent = healthyCount + '/' + layers.length + ' layers';
-        badge.style.background = healthyCount === layers.length ? 'var(--green)' : (healthyCount > 0 ? '#d97706' : 'var(--red)');
+        badge.style.background = healthyCount === layers.length ? 'var(--green)' : (healthyCount > 0 ? 'var(--yellow)' : 'var(--red)');
         badge.style.color = 'white';
       }
 
@@ -6373,8 +6379,8 @@ function burnAreaChart() {
       const synthRunning = _beadSynthStatus && _beadSynthStatus.running;
       let html = '<div style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:8px">';
       if (synthEnabled) {
-        html += `<span style="font-size:0.72rem;color:var(--green);display:flex;align-items:center;gap:4px" title="Bead synthesizer is ${synthRunning ? 'running' : 'enabled but not running'}. Schedule: ${escapeHtml((_beadSynthStatus||{}).schedule||'hourly')}"><span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:${synthRunning ? 'var(--green)' : '#d97706'}"></span> Synth ${synthRunning ? 'active' : 'idle'}</span>`;
-        html += '<button onclick="toggleBeadSynth(false)" style="padding:4px 12px;background:none;border:1px solid #d97706;color:#d97706;border-radius:4px;cursor:pointer;font-size:0.72rem" title="Disable the bead synthesizer. Completed beads will no longer be automatically converted to wiki facts.">Pause Synth</button>';
+        html += `<span style="font-size:0.72rem;color:var(--green);display:flex;align-items:center;gap:4px" title="Bead synthesizer is ${synthRunning ? 'running' : 'enabled but not running'}. Schedule: ${escapeHtml((_beadSynthStatus||{}).schedule||'hourly')}"><span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:${synthRunning ? 'var(--green)' : 'var(--yellow)'}"></span> Synth ${synthRunning ? 'active' : 'idle'}</span>`;
+        html += '<button onclick="toggleBeadSynth(false)" style="padding:4px 12px;background:none;border:1px solid var(--yellow);color:var(--yellow);border-radius:4px;cursor:pointer;font-size:0.72rem" title="Disable the bead synthesizer. Completed beads will no longer be automatically converted to wiki facts.">Pause Synth</button>';
       } else {
         html += '<button onclick="toggleBeadSynth(true)" style="padding:4px 12px;background:var(--blue);color:var(--bg);border:none;border-radius:4px;cursor:pointer;font-size:0.72rem" title="Enable the bead synthesizer. Completed beads will be automatically scanned and converted to wiki facts on an hourly schedule.">Enable Synth</button>';
       }
@@ -6389,7 +6395,7 @@ function burnAreaChart() {
       html += `<div class="kb-stat"><div class="val">${totalPages}</div><div class="lbl">Total Facts</div>${factSparkSvg()}</div>`;
       html += `<div class="kb-stat"><div class="val">${healthyCount}/${layers.length}</div><div class="lbl">Layers Online</div></div>`;
       html += `<div class="kb-stat"><div class="val">${escapeHtml(_kbCache.engine || 'n/a')}</div><div class="lbl">Engine</div></div>`;
-      if (staleTotal > 0) html += `<div class="kb-stat"><div class="val" style="color:#d97706">${staleTotal}</div><div class="lbl">Stale</div></div>`;
+      if (staleTotal > 0) html += `<div class="kb-stat"><div class="val" style="color:var(--yellow)">${staleTotal}</div><div class="lbl">Stale</div></div>`;
       if (orphanedTotal > 0) html += `<div class="kb-stat"><div class="val" style="color:var(--red)">${orphanedTotal}</div><div class="lbl">Orphaned</div></div>`;
       html += '</div>';
 
@@ -7798,9 +7804,9 @@ function burnAreaChart() {
     const SYS_GAUGE_SPARK_H = 8;       // sparkline height in px
 
     function sysGaugeColor(pct) {
-      if (pct < SYS_GAUGE_NORMAL_MAX) return '#4b5563';  // muted gray — healthy
-      if (pct < SYS_GAUGE_AMBER_MAX) return '#d97706';   // amber — elevated
-      if (pct < SYS_GAUGE_ORANGE_MAX) return '#ea580c';   // orange — high
+      if (pct < SYS_GAUGE_NORMAL_MAX) return 'var(--muted)'; // muted gray — healthy
+      if (pct < SYS_GAUGE_AMBER_MAX) return 'var(--yellow)'; // warning — elevated
+      if (pct < SYS_GAUGE_ORANGE_MAX) return 'var(--orange)'; // orange — high
       return 'var(--red)';                                     // red — critical
     }
 
@@ -9625,7 +9631,7 @@ function burnAreaChart() {
       const desc = ACMM_LEVEL_DESCRIPTIONS[level] || '';
       const pct = lvlData ? Math.round(lvlData.score * 100) : 0;
       const passed = lvlData ? lvlData.passed : false;
-      const statusColor = passed ? 'var(--green)' : (pct > 40 ? 'var(--yellow)' : '#da3633');
+      const statusColor = passed ? 'var(--green)' : (pct > 40 ? 'var(--yellow)' : 'var(--red)');
       const statusText = passed ? '✓ Passed' : '✗ Not passed';
       const threshold = lvlData ? Math.round(lvlData.threshold * 100) : 70;
       const failCount = criteria.filter(c => !c.passed).length;
@@ -9698,7 +9704,7 @@ function burnAreaChart() {
         for (let ri = 0; ri < d.repo_results.length; ri++) {
           const rr = d.repo_results[ri];
           const rPct = rr.criteria_total > 0 ? Math.round(rr.criteria_passed / rr.criteria_total * 100) : 0;
-          const rColor = rr.codebase_level >= 2 ? 'var(--green)' : (rr.criteria_passed > rr.criteria_total * 0.5 ? 'var(--yellow)' : '#da3633');
+          const rColor = rr.codebase_level >= 2 ? 'var(--green)' : (rr.criteria_passed > rr.criteria_total * 0.5 ? 'var(--yellow)' : 'var(--red)');
           const expandId = 'acmm-repo-expand-' + ri;
           html += '<div style="margin-bottom:3px">' +
             '<div onclick="var el=document.getElementById(\'' + expandId + '\');el.style.display=el.style.display===\'none\'?\'block\':\'none\'" ' +
@@ -9709,7 +9715,7 @@ function burnAreaChart() {
             '<div id="' + expandId + '" style="display:none;padding:6px 8px 8px;border:1px solid var(--border);border-top:none;border-radius:0 0 6px 6px;background:var(--surface)">';
           for (const lvl of (rr.levels || [])) {
             const pct = Math.round(lvl.score * 100);
-            const color = lvl.passed ? 'var(--green)' : (pct > 40 ? 'var(--yellow)' : '#da3633');
+            const color = lvl.passed ? 'var(--green)' : (pct > 40 ? 'var(--yellow)' : 'var(--red)');
             const safeRepo = escapeHtml(rr.repo).replace(/'/g, "\\'");
             html += '<div onclick="event.stopPropagation();acmmShowLevelDialog(' + lvl.level + ',\'' + safeRepo + '\')" ' +
               'style="cursor:pointer;padding:5px 6px;margin-bottom:3px;background:var(--bg);border-radius:4px;border:1px solid var(--border);transition:border-color .15s" ' +
@@ -9726,7 +9732,7 @@ function burnAreaChart() {
         // Single repo: show level bars directly
         for (const lvl of levels) {
           const pct = Math.round(lvl.score * 100);
-          const color = lvl.passed ? 'var(--green)' : (pct > 40 ? 'var(--yellow)' : '#da3633');
+          const color = lvl.passed ? 'var(--green)' : (pct > 40 ? 'var(--yellow)' : 'var(--red)');
           html += '<div onclick="acmmShowLevelDialog(' + lvl.level + ')" class="row-card" onmouseover="this.style.borderColor=\'var(--muted)\'" onmouseout="this.style.borderColor=\'var(--border)\'">' +
             '<div class="row-between">' +
             '<span style="font-size:0.82rem;font-weight:600">' + (lvl.passed ? '✓' : '✗') + ' L' + lvl.level + ' ' + escapeHtml(lvl.name) + '</span>' +
@@ -9794,7 +9800,7 @@ function burnAreaChart() {
       for (const lvl of levels) {
         const criteria = results.filter(c => c.level === lvl.level);
         const pct = Math.round(lvl.score * 100);
-        const color = lvl.passed ? 'var(--green)' : (pct > 40 ? 'var(--yellow)' : '#da3633');
+        const color = lvl.passed ? 'var(--green)' : (pct > 40 ? 'var(--yellow)' : 'var(--red)');
         const failCount = criteria.filter(c => !c.passed).length;
         html += '<div style="margin-bottom:8px">' +
           '<div onclick="acmmCloseDialog();acmmShowLevelDialog(' + lvl.level + ')" style="cursor:pointer;display:flex;align-items:center;justify-content:space-between;padding:6px 8px;background:var(--bg);border-radius:6px;border:1px solid var(--border);transition:border-color .15s" onmouseover="this.style.borderColor=\'var(--muted)\'" onmouseout="this.style.borderColor=\'var(--border)\'">' +
@@ -9890,7 +9896,7 @@ function burnAreaChart() {
         let html = '';
         for (const lvl of levels) {
           const pct = Math.round(lvl.score * 100);
-          const color = lvl.passed ? 'var(--green)' : (pct > 40 ? 'var(--yellow)' : '#da3633');
+          const color = lvl.passed ? 'var(--green)' : (pct > 40 ? 'var(--yellow)' : 'var(--red)');
           html += '<div onclick="acmmShowLevelDialog(' + lvl.level + ')" style="display:flex;align-items:center;gap:8px;margin-bottom:4px;font-size:0.75rem;cursor:pointer;padding:2px 4px;border-radius:4px;transition:background .15s" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">' +
             '<span style="width:100px;color:var(--muted)">' + escapeHtml(lvl.name) + '</span>' +
             '<div style="flex:1;height:8px;background:var(--bg);border-radius:4px;overflow:hidden">' +
@@ -9947,12 +9953,12 @@ function burnAreaChart() {
           _upgradeInProgress = false;
           _upgradeTargetHash = null;
           showToast('Upgrade complete!', 'success');
-          html += ' <span style="color:#22c55e" title="Up to date with remote">✓</span>';
+          html += ' <span style="color:var(--green)" title="Up to date with remote">✓</span>';
         } else if (v.behind) {
           html += ` <span class="git-behind" title="Current: ${escapeHtml(v.short || '?')} → Latest: ${escapeHtml(v.latestShort || '?')}">⬆ behind</span>`;
           html += ` <button id="spoke-upgrade-btn" onclick="selfUpgrade('${escapeHtml(v.latestHash || '')}')" style="padding:3px 10px;font-size:0.7rem;background:var(--green);color:var(--bg);border:none;border-radius:4px;cursor:pointer;margin-left:6px;white-space:nowrap" title="Current: ${escapeHtml(v.short || '?')} → Latest: ${escapeHtml(v.latestShort || '?')}">Upgrade</button>`;
         } else if (v.latestHash) {
-          html += ' <span style="color:#22c55e" title="Up to date with remote">✓</span>';
+          html += ' <span style="color:var(--green)" title="Up to date with remote">✓</span>';
         }
         el.innerHTML = html;
         if (ocEl) ocEl.innerHTML = html;
@@ -10778,7 +10784,7 @@ function burnAreaChart() {
 
         <div class="config-field">
           <label>Allowed Models <span class="config-info">i<span class="config-tooltip">Models matching these patterns are accepted. Supports wildcards (*) and regex (/pattern/). Empty = allow all.</span></span></label>
-          <div id="hub-allow-models" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px">${allowModels.map(function(m) { return '<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:9999px;font-size:0.72rem;background:rgba(34,197,94,0.15);color:#4ade80;border:1px solid rgba(34,197,94,0.3)">' + esc(m) + ' <span onclick="removeHubFilter(\'contribute_allow_models\',\'' + esc(m).replace(/'/g,"\\'") + '\')" style="cursor:pointer;opacity:0.7">✕</span></span>'; }).join('')}</div>
+          <div id="hub-allow-models" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px">${allowModels.map(function(m) { return '<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:9999px;font-size:0.72rem;background:rgba(34,197,94,0.15);color:var(--green);border:1px solid rgba(34,197,94,0.3)">' + esc(m) + ' <span onclick="removeHubFilter(\'contribute_allow_models\',\'' + esc(m).replace(/'/g,"\\'") + '\')" style="cursor:pointer;opacity:0.7">✕</span></span>'; }).join('')}</div>
           <div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px">
             <button onclick="addModelPreset('claude-opus*')" style="padding:2px 8px;background:var(--bg);border:1px solid var(--border);border-radius:9999px;color:var(--muted);cursor:pointer;font-size:0.65rem">+ opus</button>
             <button onclick="addModelPreset('claude-sonnet*')" style="padding:2px 8px;background:var(--bg);border:1px solid var(--border);border-radius:9999px;color:var(--muted);cursor:pointer;font-size:0.65rem">+ sonnet</button>
@@ -10794,7 +10800,7 @@ function burnAreaChart() {
 
         <div class="config-field">
           <label>Allow Labels <span class="config-info">i<span class="config-tooltip">Only issues with these labels will be queued for contributors. Leave empty to allow all.</span></span></label>
-          <div id="hub-allow-labels" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px">${allowLabels.map(function(l) { return '<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:9999px;font-size:0.72rem;background:rgba(34,197,94,0.15);color:#4ade80;border:1px solid rgba(34,197,94,0.3)">' + esc(l) + ' <span onclick="removeHubLabel(\'allow\',' + "'" + esc(l) + "'" + ')" style="cursor:pointer;opacity:0.7">✕</span></span>'; }).join('')}</div>
+          <div id="hub-allow-labels" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px">${allowLabels.map(function(l) { return '<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:9999px;font-size:0.72rem;background:rgba(34,197,94,0.15);color:var(--green);border:1px solid rgba(34,197,94,0.3)">' + esc(l) + ' <span onclick="removeHubLabel(\'allow\',' + "'" + esc(l) + "'" + ')" style="cursor:pointer;opacity:0.7">✕</span></span>'; }).join('')}</div>
           <div style="display:flex;gap:4px"><input type="text" id="hub-allow-label-input" placeholder="e.g. good-first-issue, help-wanted" style="flex:1" onkeydown="if(event.key==='Enter'){addHubLabel('allow');event.preventDefault()}"><button onclick="addHubLabel('allow')" style="padding:4px 12px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--muted);cursor:pointer;font-size:0.75rem">Add</button></div>
         </div>
 
@@ -11074,10 +11080,10 @@ function burnAreaChart() {
           <label>Aliases <span class="config-info">i<span class="config-tooltip">Comma-separated short aliases for Discord commands.</span></span></label>
           <input type="text" id="cfg-agent-aliases" value="${esc((g.aliases || []).join(', '))}" placeholder="e.g. sc, scan" onchange="markDirty('general','aliases',this.value.split(',').map(s=>s.trim()).filter(Boolean))">
         </div>
-        ${isCreate ? '' : `<div style="margin-top:24px;padding-top:16px;border-top:1px solid #fecaca">
+        ${isCreate ? '' : `<div style="margin-top:24px;padding-top:16px;border-top:1px solid var(--red-border)">
           <label style="color:#b91c1c;font-weight:600;font-size:0.75rem;margin-bottom:8px;display:block">Danger Zone</label>
           <button data-action="deleteAgentFromConfig" data-agent="${esc(agentName)}" style="background:var(--red);color:var(--bg);border:none;padding:6px 16px;border-radius:6px;font-size:0.75rem;cursor:pointer;font-weight:600" title="Permanently remove this agent from the hive. Deletes its config file, env file, and sidebar entry. Cannot be undone.">Delete Agent</button>
-          <span style="color:#9ca3af;font-size:0.65rem;margin-left:8px">Removes agent config, env file, and sidebar entry</span>
+          <span style="color:var(--muted);font-size:0.65rem;margin-left:8px">Removes agent config, env file, and sidebar entry</span>
         </div>`}`;
       return html;
     }
@@ -11210,7 +11216,7 @@ function burnAreaChart() {
 
     // --- Channels tab ---
 
-    const CHANNEL_COLORS = {kick:'var(--blue)',webhook:'var(--green)',discord:'#7c3aed',schedule:'#ea580c',bead:'#0891b2'};
+    const CHANNEL_COLORS = {kick:'var(--blue)',webhook:'var(--green)',discord:'#7c3aed',schedule:'var(--orange)',bead:'#0891b2'};
     const CHANNEL_TYPES = ['kick','webhook','discord','schedule','bead'];
 
     function renderAgentChannels(channels) {
@@ -11639,7 +11645,7 @@ function burnAreaChart() {
         + '<button onclick="copyExportYaml()" style="font-size:0.72rem;padding:4px 14px;border-radius:4px;cursor:pointer;font-weight:600;border:none;background:var(--cyan);color:var(--bg)">Copy to Clipboard</button>'
         + '<button onclick="downloadExportYaml()" style="font-size:0.72rem;padding:4px 14px;border-radius:4px;cursor:pointer;font-weight:600;border:1px solid var(--border);background:var(--surface);color:var(--text)">Download YAML</button>'
         + '</div>'
-        + '<textarea id="' + yamlId + '" readonly style="flex:1;min-height:300px;font-family:var(--font-mono);font-size:0.75rem;padding:12px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;resize:vertical;white-space:pre;tab-size:2">Loading...</textarea>'
+        + '<textarea id="' + yamlId + '" readonly style="flex:1;min-height:300px;font-family:var(--font-mono);font-size:0.75rem;padding:12px;background:var(--terminal-bg);color:var(--terminal-fg);border:1px solid var(--terminal-line);border-radius:6px;resize:vertical;white-space:pre;tab-size:2">Loading...</textarea>'
         + '</div>';
     }
 
@@ -11943,7 +11949,7 @@ function burnAreaChart() {
       const list = repos.map((r, i) => {
         const isDefault = r === primary;
         const starStyle = isDefault
-          ? 'color:#f59e0b;cursor:pointer;font-size:1rem;margin-right:6px'
+          ? 'color:var(--amber);cursor:pointer;font-size:1rem;margin-right:6px'
           : 'color:var(--muted);cursor:pointer;font-size:1rem;margin-right:6px;opacity:0.4';
         const starTitle = isDefault
           ? 'Default repo (advisory issue lives here)'
@@ -12884,7 +12890,7 @@ function burnAreaChart() {
           clearInterval(ghPollTimer);
           ghPollTimer = null;
           document.getElementById('gh-poll-status').textContent = 'Error: ' + (data.error || 'unknown');
-          document.getElementById('gh-poll-status').style.color = '#ef4444';
+          document.getElementById('gh-poll-status').style.color = 'var(--red)';
         }
       } catch (e) {
         // network hiccup — keep polling
@@ -12964,7 +12970,7 @@ function burnAreaChart() {
         var resp = await fetch('/api/copilot-auth/status');
         var data = await resp.json();
         if (data.error) {
-          if (statusEl) { statusEl.textContent = data.error; statusEl.style.color = '#ef4444'; }
+          if (statusEl) { statusEl.textContent = data.error; statusEl.style.color = 'var(--red)'; }
           cancelCopilotLogin(true);
           return;
         }
@@ -13057,7 +13063,7 @@ function burnAreaChart() {
       var input = document.getElementById('claude-callback-input');
       var statusEl = document.getElementById('claude-exchange-status');
       if (!input || !input.value.trim()) {
-        if (statusEl) { statusEl.textContent = 'Please paste the callback URL'; statusEl.style.color = '#ef4444'; }
+        if (statusEl) { statusEl.textContent = 'Please paste the callback URL'; statusEl.style.color = 'var(--red)'; }
         return;
       }
       var value = input.value.trim();
@@ -13077,7 +13083,7 @@ function burnAreaChart() {
         });
         var data = await resp.json();
         if (data.error) {
-          if (statusEl) { statusEl.textContent = data.error; statusEl.style.color = '#ef4444'; }
+          if (statusEl) { statusEl.textContent = data.error; statusEl.style.color = 'var(--red)'; }
           return;
         }
         if (statusEl) { statusEl.textContent = 'Authenticated!'; statusEl.style.color = 'var(--green)'; }
@@ -13089,7 +13095,7 @@ function burnAreaChart() {
           checkClaudeAuth();
         }, CLAUDE_SUCCESS_DISMISS_MS);
       } catch (e) {
-        if (statusEl) { statusEl.textContent = 'Error: ' + e.message; statusEl.style.color = '#ef4444'; }
+        if (statusEl) { statusEl.textContent = 'Error: ' + e.message; statusEl.style.color = 'var(--red)'; }
       }
     }
 
