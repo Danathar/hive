@@ -1923,6 +1923,14 @@ func (s *HubServer) handleUpgradeHive(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(`{"status":"upgrading"}`))
 }
 
+// branchToTag converts a git branch name into a valid Docker image tag.
+// Branch names may contain '/' (e.g. feat/x) which is illegal in a tag; the
+// docker.yml build sanitizes the same way (feat/x -> feat-x-latest), so the
+// hub must match to find the image.
+func branchToTag(branch string) string {
+	return strings.ReplaceAll(branch, "/", "-")
+}
+
 func (s *HubServer) handleSwitchBranch(w http.ResponseWriter, r *http.Request) {
 	origin := r.Header.Get("Origin")
 	if isTrustedOrigin(origin) {
@@ -1981,7 +1989,7 @@ func (s *HubServer) handleSwitchBranch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ns := "hive-hosted-" + id
-	imageTag := body.Branch + "-latest"
+	imageTag := branchToTag(body.Branch) + "-latest"
 	image := "ghcr.io/kubestellar/hive:" + imageTag
 	// "*=" updates every container including init containers (copy-config,
 	// init-permissions) — pinning only "hive" left inits on the old branch tag.
@@ -2003,7 +2011,7 @@ func (s *HubServer) handleSwitchBranch(w http.ResponseWriter, r *http.Request) {
 	for i := range s.registry.Hives {
 		if s.registry.Hives[i].ID == id {
 			s.registry.Hives[i].Upgrading = true
-			s.registry.Hives[i].UpgradeTarget = body.Branch + "-latest"
+			s.registry.Hives[i].UpgradeTarget = branchToTag(body.Branch) + "-latest"
 			s.registry.Hives[i].UpgradeStartedAt = time.Now()
 			break
 		}
@@ -2268,21 +2276,104 @@ var trackedBranches = []string{"v2", "v3"}
 func (s *HubServer) trackedBranchList() []string {
 	seen := make(map[string]bool, len(trackedBranches))
 	out := make([]string, 0, len(trackedBranches))
-	for _, b := range trackedBranches {
-		if !seen[b] {
+	add := func(b string) {
+		if b != "" && !seen[b] {
 			seen[b] = true
 			out = append(out, b)
 		}
 	}
+	for _, b := range trackedBranches {
+		add(b)
+	}
+	// Branches already assigned to a hive.
 	s.mu.RLock()
 	for _, h := range s.registry.Hives {
-		if b := h.GitBranch; b != "" && !seen[b] {
-			seen[b] = true
-			out = append(out, b)
-		}
+		add(h.GitBranch)
 	}
 	s.mu.RUnlock()
+	// Any branch that has a published <branch>-latest image on GHCR, even
+	// with no hive assigned yet — so the UI lists every assignable branch
+	// and a user can switch to one before any hive uses it.
+	for _, b := range discoveredImageBranches() {
+		add(b)
+	}
 	return out
+}
+
+var (
+	imageBranchMu       sync.RWMutex
+	imageBranchCache    []string
+	imageBranchCachedAt time.Time
+)
+
+const imageBranchCacheTTL = 5 * time.Minute
+
+// discoveredImageBranches returns branch names inferred from published
+// ghcr.io/kubestellar/hive:<branch>-latest tags (cached). A tag with a '-'
+// that our sanitizer would have produced can't be reversed unambiguously, so
+// we only surface tags that round-trip: the tag minus the "-latest" suffix.
+// Slashless branches (v2, v3, mk) round-trip exactly; slashed branches
+// (feat/x → feat-x-latest) surface as "feat-x", which is still a valid
+// switch target because switch-branch/branchToTag normalize both to the same
+// image tag.
+func discoveredImageBranches() []string {
+	imageBranchMu.RLock()
+	if time.Since(imageBranchCachedAt) < imageBranchCacheTTL && imageBranchCache != nil {
+		cp := append([]string(nil), imageBranchCache...)
+		imageBranchMu.RUnlock()
+		return cp
+	}
+	imageBranchMu.RUnlock()
+
+	const listTimeout = 8 * time.Second
+	client := &http.Client{Timeout: listTimeout}
+	branches := listLatestImageBranches(client)
+
+	imageBranchMu.Lock()
+	imageBranchCache = branches
+	imageBranchCachedAt = time.Now()
+	imageBranchMu.Unlock()
+	return branches
+}
+
+// listLatestImageBranches queries the GHCR tag list for
+// ghcr.io/kubestellar/hive and returns the branch name of every "<x>-latest"
+// tag (the "<x>" part).
+func listLatestImageBranches(client *http.Client) []string {
+	tokenResp, err := client.Get("https://ghcr.io/token?scope=repository:kubestellar/hive:pull")
+	if err != nil {
+		return nil
+	}
+	defer tokenResp.Body.Close()
+	var tok struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(tokenResp.Body).Decode(&tok); err != nil {
+		return nil
+	}
+	req, _ := http.NewRequest("GET", "https://ghcr.io/v2/kubestellar/hive/tags/list?n=200", nil)
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	var body struct {
+		Tags []string `json:"tags"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil
+	}
+	var branches []string
+	for _, t := range body.Tags {
+		if strings.HasSuffix(t, "-latest") {
+			branches = append(branches, strings.TrimSuffix(t, "-latest"))
+		}
+	}
+	return branches
 }
 
 // provisionWG tracks async hive-provisioning goroutines so tests (which swap
@@ -4238,7 +4329,7 @@ const dashboardHTML = `<!DOCTYPE html>
           } else if (_latestSHA) {
             lines = '<span style="font-family:monospace;color:var(--muted)">' + esc(_latestSHA) + '</span>';
           }
-          shaEl.innerHTML = lines ? '<div style="font-size:0.7rem;color:var(--muted);margin-bottom:2px">Latest images:</div>' + lines : '<div style="display:flex;align-items:center;gap:6px;font-size:0.7rem;color:var(--muted)"><span style="display:inline-block;width:12px;height:12px;border:2px solid rgba(255,255,255,0.2);border-top-color:var(--accent);border-radius:50%;animation:spin 1s linear infinite"></span>Resolving latest images…</div>';
+          shaEl.innerHTML = lines ? '<div style="font-size:0.7rem;color:var(--muted);margin-bottom:2px">Latest available images:</div>' + lines : '<div style="display:flex;align-items:center;gap:6px;font-size:0.7rem;color:var(--muted)"><span style="display:inline-block;width:12px;height:12px;border:2px solid rgba(255,255,255,0.2);border-top-color:var(--accent);border-radius:50%;animation:spin 1s linear infinite"></span>Resolving latest available images…</div>';
         }
         var hubHash = data.hub_git_hash || '';
         var hubBranch = data.hub_git_branch || 'v2';
@@ -5277,7 +5368,7 @@ const dashboardHTML = `<!DOCTYPE html>
           '<td>' + blocked + '</td>' +
           '<td><input type="number" min="0" max="10" value="' + (u.saas_quota || 0) + '" style="width:50px;padding:4px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);text-align:center" onchange="updateUser(\'' + esc(u.github_username) + '\',{saas_quota:parseInt(this.value)||0})"></td>' +
           '<td>' + (hiveCount > 0 ? '<a href="#" onclick="toggleAdminExpand(\'' + esc(u.github_username) + '\');return false" style="color:var(--blue);font-size:0.8rem">' + hiveCount + ' hive' + (hiveCount > 1 ? 's' : '') + '</a>' : '<span style="color:var(--muted)">0</span>') + '</td>' +
-          '<td>' + (isAdmin ? '' : '<button onclick="updateUser(\'' + esc(u.github_username) + '\',{blocked:' + (!u.blocked) + '})" style="padding:3px 10px;background:' + (u.blocked ? 'var(--green)' : 'var(--amber)') + ';color:' + (u.blocked ? '#fff' : '#1a1a1a') + ';border:none;border-radius:4px;cursor:pointer;font-size:0.7rem">' + (u.blocked ? 'Unblock' : 'Block') + '</button> <button onclick="deleteUser(\'' + esc(u.github_username) + '\',' + hiveCount + ')" style="padding:3px 10px;background:var(--red);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:0.7rem">Delete</button>') + '</td>' +
+          '<td>' + (isAdmin ? '' : '<button onclick="updateUser(\'' + esc(u.github_username) + '\',{blocked:' + (!u.blocked) + '})" style="padding:3px 10px;background:' + (u.blocked ? 'var(--green)' : 'var(--amber)') + ';color:' + (u.blocked ? '#fff' : '#1a1a1a') + ';border:none;border-radius:4px;cursor:pointer;font-size:0.7rem">' + (u.blocked ? 'Unblock' : 'Block') + '</button> <button onclick="deleteUser(\'' + esc(u.github_username) + '\',' + hiveCount + ')" style="padding:3px 10px;background:#b02a2a;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:0.7rem">Delete</button>') + '</td>' +
           '</tr>' + hiveRows;
       }).join('');
       document.getElementById('users-container').innerHTML =

@@ -2,12 +2,15 @@ name: Build and Push Docker Image
 
 on:
   push:
+    # Build an image for EVERY branch: any branch can be assigned to a hive
+    # via the hub's branch switcher (v2/v3 releases, plus experimental dev
+    # branches like mk), and each needs a <branch>-latest image to roll out.
+    # Exclude bot branches so dependency PRs don't consume image CI — they
+    # build on the base branch when merged.
     branches:
-      - v2
-      - v3
-      # Personal dev branches: hives can be assigned to these via the hub's
-      # branch switcher; each needs an image build to roll out.
-      - mk
+      - '**'
+      - '!dependabot/**'
+      - '!copilot/**'
   workflow_dispatch:
 
 # Serialize Docker builds per branch so concurrent merges don't race.
@@ -115,6 +118,11 @@ jobs:
         id: meta
         run: |
           echo "git_short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          # Docker tags can't contain '/', but branch names can (feat/x).
+          # Use the github.ref_name expression (reliably populated) and
+          # sanitize '/' -> '-' so feat/x becomes tag feat-x-latest.
+          REF_NAME='${{ github.ref_name }}'
+          echo "branch_tag=${REF_NAME//\//-}" >> "$GITHUB_OUTPUT"
 
       - name: Create manifest list and push
         if: steps.head-check.outputs.stale != 'true'
@@ -127,7 +135,7 @@ jobs:
             exit 0
           fi
           docker buildx imagetools create \
-            -t ghcr.io/kubestellar/hive:${{ github.ref_name }}-latest \
+            -t ghcr.io/kubestellar/hive:${{ steps.meta.outputs.branch_tag }}-latest \
             -t ghcr.io/kubestellar/hive:${{ steps.meta.outputs.git_short }} \
             $(printf 'ghcr.io/kubestellar/hive@sha256:%s ' "${digests[@]}")
 
@@ -223,6 +231,11 @@ jobs:
         id: meta
         run: |
           echo "git_short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          # Docker tags can't contain '/', but branch names can (feat/x).
+          # Use the github.ref_name expression (reliably populated) and
+          # sanitize '/' -> '-' so feat/x becomes tag feat-x-latest.
+          REF_NAME='${{ github.ref_name }}'
+          echo "branch_tag=${REF_NAME//\//-}" >> "$GITHUB_OUTPUT"
 
       - name: Create contributor manifest list and push
         if: steps.head-check.outputs.stale != 'true'
@@ -236,7 +249,7 @@ jobs:
           fi
           docker buildx imagetools create \
             -t ghcr.io/kubestellar/hive-contributor:latest \
-            -t ghcr.io/kubestellar/hive-contributor:${{ github.ref_name }}-latest \
+            -t ghcr.io/kubestellar/hive-contributor:${{ steps.meta.outputs.branch_tag }}-latest \
             -t ghcr.io/kubestellar/hive-contributor:${{ steps.meta.outputs.git_short }} \
             $(printf 'ghcr.io/kubestellar/hive-contributor@sha256:%s ' "${digests[@]}")
 
@@ -334,6 +347,11 @@ jobs:
         id: meta
         run: |
           echo "git_short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          # Docker tags can't contain '/', but branch names can (feat/x).
+          # Use the github.ref_name expression (reliably populated) and
+          # sanitize '/' -> '-' so feat/x becomes tag feat-x-latest.
+          REF_NAME='${{ github.ref_name }}'
+          echo "branch_tag=${REF_NAME//\//-}" >> "$GITHUB_OUTPUT"
 
       - name: Create hub manifest list and push
         if: steps.head-check.outputs.stale != 'true'
@@ -347,6 +365,6 @@ jobs:
           fi
           docker buildx imagetools create \
             -t ghcr.io/kubestellar/hive-hub:latest \
-            -t ghcr.io/kubestellar/hive-hub:${{ github.ref_name }}-latest \
+            -t ghcr.io/kubestellar/hive-hub:${{ steps.meta.outputs.branch_tag }}-latest \
             -t ghcr.io/kubestellar/hive-hub:${{ steps.meta.outputs.git_short }} \
             $(printf 'ghcr.io/kubestellar/hive-hub@sha256:%s ' "${digests[@]}")
