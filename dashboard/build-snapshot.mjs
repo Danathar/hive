@@ -33,7 +33,18 @@ async function fetchJson(endpoint, fallback = '{}') {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
     const headers = {};
-    if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+    if (authToken) {
+      // The snapshot builder is trusted server-to-server automation running
+      // inside the hive pod. Authenticate with X-Hive-Internal, NOT
+      // `Authorization: Bearer`: on a direct-route spoke (one with a per-hive
+      // authorized_users allowlist) the Bearer/shared-token path is disabled by
+      // the dashboard auth middleware, so a Bearer request to /api/status is
+      // rejected 401 and the snapshot bakes `render({"error":"unauthorized"})`
+      // → every stat renders as "--". X-Hive-Internal is honored regardless of
+      // direct-route mode. Bearer is kept as a fallback for older servers.
+      headers['X-Hive-Internal'] = authToken;
+      headers['Authorization'] = `Bearer ${authToken}`;
+    }
     const res = await fetch(`${dashboardUrl}${endpoint}`, { signal: controller.signal, headers });
     clearTimeout(timer);
     return await res.text();
@@ -45,7 +56,7 @@ async function fetchJson(endpoint, fallback = '{}') {
 async function main() {
   console.log(`Fetching data from ${dashboardUrl} (mode: ${snapshotMode})...`);
 
-  const [statusRaw, historyRaw, trendsRaw, timelineRaw, configRaw, versionRaw, nousStatusRaw, nousLedgerRaw, nousPrinciplesRaw, kbStatsRaw, kbFactsRaw, contributorsRaw, leaderboardRaw] = await Promise.all([
+  const [statusRaw, historyRaw, trendsRaw, timelineRaw, configRaw, versionRaw, nousStatusRaw, nousLedgerRaw, nousPrinciplesRaw, kbStatsRaw, kbFactsRaw, contributorsRaw, leaderboardRaw, auditRaw, inceptionRaw] = await Promise.all([
     fetchJson('/api/status'),
     fetchJson('/api/history', '[]'),
     fetchJson('/api/trends?range=week', '[]'),
@@ -59,6 +70,11 @@ async function main() {
     fetchJson('/api/knowledge', '{"facts":[]}'),
     fetchJson('/api/contributors', '[]'),
     fetchJson('/api/leaderboard', '{"leaderboard":[]}'),
+    // Audit Log and Project Inception load from their own endpoints on the
+    // live dashboard (via _deferredInit, which the snapshot strips), so bake
+    // them here or they sit at "Loading…" forever in the read-only preview.
+    fetchJson('/api/audit', '{"entries":[]}'),
+    fetchJson('/api/inception/state', '{}'),
   ]);
 
   // Validate status
@@ -269,6 +285,28 @@ async function main() {
     var _snapLeaderboard = ${leaderboardRaw};
     var _lbEntries = _snapLeaderboard && _snapLeaderboard.leaderboard ? _snapLeaderboard.leaderboard : (Array.isArray(_snapLeaderboard) ? _snapLeaderboard : []);
     renderLeaderboard(_lbEntries);
+
+    // Audit Log — the live dashboard fetches /api/audit in _deferredInit (which
+    // the snapshot strips), so bake the entries in and render the table once, or
+    // the panel is stuck on "Loading audit log…" in the read-only preview.
+    try {
+      var _snapAudit = ${auditRaw};
+      if (typeof _auditEntries !== 'undefined') {
+        _auditEntries = (_snapAudit && _snapAudit.entries) ? _snapAudit.entries : [];
+        if (typeof renderAuditTable === 'function') renderAuditTable(_auditEntries);
+      }
+    } catch (e) {}
+
+    // Project Inception — same story: /api/inception/state loads via
+    // _deferredInit. Bake the state and render the panel once (statically).
+    try {
+      var _snapInception = ${inceptionRaw};
+      // Mirror loadInceptionState(): only an active inception has a state.
+      if (typeof _inceptionState !== 'undefined') {
+        _inceptionState = (_snapInception && _snapInception.active) ? _snapInception.state : null;
+      }
+      if (typeof renderInception === 'function') renderInception();
+    } catch (e) {}
 
     // Fix leaderboard link to use snapshot base path
     document.querySelectorAll('a[href="/leaderboard"]').forEach(function(a) {
