@@ -31,6 +31,7 @@ import (
 	"github.com/kubestellar/hive/v2/pkg/classify"
 	"github.com/kubestellar/hive/v2/pkg/config"
 	"github.com/kubestellar/hive/v2/pkg/dashboard"
+	"github.com/kubestellar/hive/v2/pkg/defsrc"
 	"github.com/kubestellar/hive/v2/pkg/discord"
 	"github.com/kubestellar/hive/v2/pkg/github"
 	"github.com/kubestellar/hive/v2/pkg/governor"
@@ -39,6 +40,7 @@ import (
 	"github.com/kubestellar/hive/v2/pkg/logscrub"
 	"github.com/kubestellar/hive/v2/pkg/notify"
 	"github.com/kubestellar/hive/v2/pkg/policies"
+	"github.com/kubestellar/hive/v2/pkg/promptsrc"
 	"github.com/kubestellar/hive/v2/pkg/proxy"
 	"github.com/kubestellar/hive/v2/pkg/scheduler"
 	"github.com/kubestellar/hive/v2/pkg/snapshot"
@@ -208,6 +210,40 @@ func main() {
 
 	gov := governor.New(cfg.Governor, cfg.EnabledAgents(), logger)
 	sched := scheduler.New(cfg, logger)
+
+	// Wire the GitHub prompt-source resolver so agents may source their kick
+	// prompt from a repo (agent.prompt_source). Fetching reuses the hive's App
+	// token via ghClient and is gated to the seed-only allowlist — the closure
+	// captures cfg so a live config reload updates the allowlist on the next kick.
+	// A nil ghClient must be passed as a nil Fetcher interface (not a typed-nil
+	// *github.Client) so the resolver's nil-fetcher fallback path triggers.
+	var promptFetcher promptsrc.Fetcher
+	if ghClient != nil {
+		promptFetcher = ghClient
+	}
+	sched.SetGitHubPromptResolver(promptsrc.NewResolver(
+		promptFetcher,
+		func(slug string) bool { return cfg.GitHubPromptAllowed(slug) },
+		logger,
+	))
+
+	// Wire the whole-agent definition_source resolver so agents imported with
+	// "keep linked" re-fetch their portable AgentDefinition from the repo on
+	// reload/kick and re-apply its operator-safe fields (never security/seed-only
+	// fields — see pkg/defsrc). Same seed-only allowlist gate and graceful
+	// fallback as the prompt resolver.
+	var defFetcher defsrc.Fetcher
+	if ghClient != nil {
+		defFetcher = ghClient
+	}
+	definitionResolver := defsrc.NewResolver(
+		defFetcher,
+		func(slug string) bool { return cfg.GitHubDefinitionAllowed(slug) },
+		logger,
+	)
+	// Apply live definitions once at startup so a repo edit made while the hive
+	// was down is reflected before the first kick.
+	defsrc.ApplyToConfig(context.Background(), cfg, definitionResolver, logger)
 
 	// Restore sparkline history from disk so it survives container restarts
 	const sparklinePath = "/data/sparkline-history.json"
@@ -1174,6 +1210,13 @@ func main() {
 			uc.SetRepos(cfg.Project.Repos)
 		}
 		gov.UpdateConfig(cfg.Governor)
+
+		// Re-apply live agent definitions (definition_source) on reload so an
+		// operator's edit to a linked repo propagates. Merges only operator-safe
+		// fields; a fetch failure keeps each agent's baked definition. Runs before
+		// initAgentConfigDrivenSystems so downstream systems see the merged config.
+		defsrc.ApplyToConfig(context.Background(), cfg, definitionResolver, logger)
+
 		initAgentConfigDrivenSystems(cfg)
 
 		// Rebuild GitHub App auth when its identity changed. AppAuth captures
