@@ -67,6 +67,8 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	s.mux.HandleFunc("GET /api/tokens", s.handleTokens)
 	s.mux.HandleFunc("GET /api/cost", s.handleCost)
 	s.mux.HandleFunc("GET /api/cost/history", s.handleCostHistory)
+	s.mux.HandleFunc("GET /api/trend/history", s.handleTrendHistory)
+	s.mux.HandleFunc("GET /api/timeseries", s.handleTimeSeries)
 	s.mux.HandleFunc("GET /api/issue-costs", s.handleIssueCosts)
 	s.mux.HandleFunc("GET /api/model-advisor", s.handleModelAdvisor)
 	s.mux.HandleFunc("GET /api/budget-ignore", s.handleBudgetIgnoreGet)
@@ -2276,6 +2278,25 @@ func (s *Server) handleAgentConfigGeneral(w http.ResponseWriter, r *http.Request
 			agentCfg.CLIPinned = b
 		}
 	}
+	// model / cliPinValue: the dialog's Model and CLI-Pin selects. These were
+	// historically dropped here (the handler only read a fixed allowlist), so
+	// changes made in the config dialog silently never persisted. Track whether
+	// they changed so we can apply them live after the config write, the same
+	// way the card dropdowns do (SetModelOverride + restart) — otherwise a stale
+	// live override would mask the freshly-saved value and it still wouldn't stick.
+	modelChanged, backendChanged := false, false
+	if v, ok := body["model"]; ok {
+		if str, ok := v.(string); ok {
+			agentCfg.Model = sanitizeString(str)
+			modelChanged = true
+		}
+	}
+	if v, ok := body["cliPinValue"]; ok {
+		if str, ok := v.(string); ok && str != "" {
+			agentCfg.Backend = sanitizeString(str)
+			backendChanged = true
+		}
+	}
 	if v, ok := body["emoji"]; ok {
 		if s, ok := v.(string); ok {
 			agentCfg.Emoji = sanitizeString(s)
@@ -2442,6 +2463,26 @@ func (s *Server) handleAgentConfigGeneral(w http.ResponseWriter, r *http.Request
 			s.logger.Error("failed to persist agent overlay after update", "agent", name, "error", err)
 		}
 	}
+	// Apply model/backend live so the change takes effect immediately and isn't
+	// masked by a pre-existing override from a card dropdown. SetModelOverride
+	// with the saved value (or "" to clear back to the launch-command default)
+	// keeps the dialog and the card in sync; a single restart applies both.
+	if modelChanged {
+		if err := s.deps.AgentMgr.SetModelOverride(name, agentCfg.Model); err != nil {
+			s.logger.Warn("failed to apply model from config dialog", "agent", name, "error", err)
+		}
+	}
+	if backendChanged {
+		if err := s.deps.AgentMgr.SetBackendOverride(name, agentCfg.Backend); err != nil {
+			s.logger.Warn("failed to apply backend from config dialog", "agent", name, "error", err)
+		}
+	}
+	if modelChanged || backendChanged {
+		if err := s.deps.AgentMgr.Restart(s.deps.Ctx, name); err != nil {
+			s.logger.Warn("restart after config-dialog model/backend change failed", "agent", name, "error", err)
+		}
+	}
+
 	s.auditFromRequest(r, "config_agent_general", auditDetail("section", "general"), name)
 	s.refreshAndPersist()
 	okResponse(w, map[string]string{"status": "updated", "agent": name})
@@ -4885,6 +4926,28 @@ func (s *Server) handleFactHistory(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCostHistory(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, s.CostHistory())
+}
+
+func (s *Server) handleTrendHistory(w http.ResponseWriter, r *http.Request) {
+	jsonResponse(w, s.TrendHistory())
+}
+
+// handleTimeSeries is the unified read endpoint over the sparkline histories.
+// GET /api/timeseries?series=<name> returns the same JSON the dedicated
+// endpoint returns (token → /api/tokens history, fact → /api/knowledge/
+// fact-history, cost → /api/cost/history), so it's an additive alias rather
+// than a replacement — the existing endpoints stay for back-compat.
+func (s *Server) handleTimeSeries(w http.ResponseWriter, r *http.Request) {
+	switch r.URL.Query().Get("series") {
+	case "token", "tokens":
+		jsonResponse(w, s.TokenSparklineHistory())
+	case "fact", "facts":
+		jsonResponse(w, s.FactHistory())
+	case "cost":
+		jsonResponse(w, s.CostHistory())
+	default:
+		http.Error(w, `{"error":"unknown series; valid: token, fact, cost"}`, http.StatusBadRequest)
+	}
 }
 
 func (s *Server) handleKnowledgeGraph(w http.ResponseWriter, r *http.Request) {

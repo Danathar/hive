@@ -28,12 +28,28 @@ func TestEstimateCostUSD_KnownModel(t *testing.T) {
 }
 
 func TestEstimateCostUSD_UnknownModel(t *testing.T) {
-	usd, priced := EstimateCostUSD("some-unknown-model-9000", 1_000_000, 1_000_000, 0, 0)
-	if priced {
-		t.Fatalf("expected unknown model to be unpriced")
+	// Unknown models are now tier-estimated, never $0: exact=false but usd>0.
+	usd, exact := EstimateCostUSD("some-unknown-model-9000", 1_000_000, 1_000_000, 0, 0)
+	if exact {
+		t.Fatalf("expected unknown model to be a tier estimate (exact=false)")
 	}
-	if usd != 0 {
-		t.Fatalf("expected $0 for unknown model, got $%.6f", usd)
+	if usd <= 0 {
+		t.Fatalf("expected a non-zero tier estimate for an unknown model, got $%.6f", usd)
+	}
+}
+
+// TestFallbackTierOrdering guards the "smaller/older cheaper, bigger/newer
+// pricier" heuristic: a mini/flash model must estimate cheaper than an
+// opus/flagship one for identical token counts.
+func TestFallbackTierOrdering(t *testing.T) {
+	cheap, _ := EstimateCostUSD("mystery-flash-mini", 1_000_000, 1_000_000, 0, 0)
+	big, _ := EstimateCostUSD("mystery-opus-max", 1_000_000, 1_000_000, 0, 0)
+	mid, _ := EstimateCostUSD("mystery-model-x", 1_000_000, 1_000_000, 0, 0)
+	if !(cheap < mid && mid < big) {
+		t.Fatalf("tier ordering broken: cheap=%.4f mid=%.4f big=%.4f (want cheap<mid<big)", cheap, mid, big)
+	}
+	if cheap <= 0 {
+		t.Fatalf("cheap tier must still be non-zero, got %.6f", cheap)
 	}
 }
 
@@ -99,19 +115,22 @@ func TestEstimateFromSummary(t *testing.T) {
 
 	est := EstimateFromSummary(agg)
 
-	// Only the priced model contributes: opus-4-8 1M+1M = $30.
-	if !approxEqual(est.TotalUSD, 30.0) {
-		t.Fatalf("expected total $30.00, got $%.6f", est.TotalUSD)
+	// Both models contribute now: opus-4-8 1M+1M = $30 (exact) plus
+	// mystery-model 1M+1M at the mid tier ($1.25 in + $10 out = $11.25).
+	if !approxEqual(est.TotalUSD, 41.25) {
+		t.Fatalf("expected total $41.25 (exact + tier estimate), got $%.6f", est.TotalUSD)
 	}
 
 	if mc := est.ByModel["claude-opus-4-8"]; !mc.Priced || !approxEqual(mc.USD, 30.0) {
 		t.Fatalf("claude-opus-4-8 model cost wrong: %+v", mc)
 	}
-	if mc := est.ByModel["mystery-model"]; mc.Priced || mc.USD != 0 {
-		t.Fatalf("mystery-model should be unpriced with $0, got %+v", mc)
+	// mystery-model: tier-estimated (Priced=false) but non-zero and included.
+	if mc := est.ByModel["mystery-model"]; mc.Priced || !approxEqual(mc.USD, 11.25) {
+		t.Fatalf("mystery-model should be tier-estimated ~$11.25, got %+v", mc)
 	}
 
-	// Unpriced list must contain the mystery model.
+	// UnpricedModels now means "tier-estimated" (still surfaced so the UI can
+	// mark it ~approximate), not "excluded".
 	foundUnpriced := false
 	for _, m := range est.UnpricedModels {
 		if m == "mystery-model" {
@@ -119,7 +138,7 @@ func TestEstimateFromSummary(t *testing.T) {
 		}
 	}
 	if !foundUnpriced {
-		t.Fatalf("expected mystery-model in UnpricedModels, got %v", est.UnpricedModels)
+		t.Fatalf("expected mystery-model in UnpricedModels (tier-estimated list), got %v", est.UnpricedModels)
 	}
 
 	// Per-agent: scanner used opus-4-8 (1M input) -> $5.
@@ -139,5 +158,75 @@ func TestEstimateFromSummary_Nil(t *testing.T) {
 	}
 	if est.ByModel == nil || est.ByAgent == nil {
 		t.Fatalf("nil summary should still return initialized maps")
+	}
+}
+
+// TestGPT53CodexPriced guards the auto-mode routing target so it stops being
+// excluded from the estimated total.
+func TestGPT53CodexPriced(t *testing.T) {
+	for _, id := range []string{"gpt-5.3-codex", "gpt-5-3-codex", "openai/gpt-5.3-codex"} {
+		if _, priced := EstimateCostUSD(id, 1_000_000, 0, 0, 0); !priced {
+			t.Errorf("%q should be priced (auto-mode routes here)", id)
+		}
+	}
+}
+
+// TestEstimateFromSummary_ModelDedup verifies dotted/dashed spellings of the
+// same model collapse into one cost row (they must stay distinct for CLI
+// launch, but not for cost).
+func TestEstimateFromSummary_ModelDedup(t *testing.T) {
+	agg := &AggregateSummary{
+		ByModelDetail: map[string]*AgentModelBucket{
+			"claude-opus-4.7": {Input: 1_000_000, Output: 0}, // Copilot spelling
+			"claude-opus-4-7": {Input: 0, Output: 1_000_000}, // Claude CLI spelling
+		},
+		Sessions: []SessionSummary{},
+	}
+	est := EstimateFromSummary(agg)
+	// Exactly one merged row for the two spellings.
+	if n := len(est.ByModel); n != 1 {
+		t.Fatalf("expected 1 merged model row, got %d: %v", n, est.ByModel)
+	}
+	var mc ModelCost
+	for _, v := range est.ByModel {
+		mc = v
+	}
+	// Tokens summed across both spellings.
+	if mc.Input != 1_000_000 || mc.Output != 1_000_000 {
+		t.Errorf("merged tokens wrong: in=%d out=%d, want 1M/1M", mc.Input, mc.Output)
+	}
+	// opus 1M in + 1M out = $5 + $25 = $30.
+	if !approxEqual(mc.USD, 30.0) {
+		t.Errorf("merged cost = $%.4f, want $30 (opus 1M in + 1M out)", mc.USD)
+	}
+}
+
+// TestEstimateFromSummary_DropsRoutingAliases verifies "auto"/"default" are
+// excluded from the cost table (they're selection modes, not models).
+func TestEstimateFromSummary_DropsRoutingAliases(t *testing.T) {
+	agg := &AggregateSummary{
+		ByModelDetail: map[string]*AgentModelBucket{
+			"auto":            {Input: 0, Output: 0},
+			"default":         {Input: 0, Output: 0},
+			"claude-opus-4-8": {Input: 1_000_000, Output: 0},
+		},
+	}
+	est := EstimateFromSummary(agg)
+	if _, ok := est.ByModel["auto"]; ok {
+		t.Error("'auto' must not appear as a cost row")
+	}
+	if _, ok := est.ByModel["default"]; ok {
+		t.Error("'default' must not appear as a cost row")
+	}
+	if _, ok := est.ByModel["claude-opus-4-8"]; !ok {
+		t.Error("real model dropped")
+	}
+	if len(est.ByModel) != 1 {
+		t.Errorf("expected only the real model, got %d rows: %v", len(est.ByModel), est.ByModel)
+	}
+	for _, m := range est.UnpricedModels {
+		if m == "auto" || m == "default" {
+			t.Errorf("routing alias %q leaked into UnpricedModels", m)
+		}
 	}
 }
