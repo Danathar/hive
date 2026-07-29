@@ -1137,13 +1137,13 @@ func TestHandleAssignHiveWithFilesystem(t *testing.T) {
 	// pushed), so the ONLY thing projectConfigForHiveID still delivers is the
 	// vanity URL — until the spoke reports it back, then it goes quiet.
 	// URL not yet adopted -> still delivering (carries the vanity URL).
-	if pc := projectConfigForHiveID("hosted-assign-fs", "neworg", []string{"repoa", "repob"}, "repoa", 3, ""); pc == nil {
+	if pc := projectConfigForHiveID("hosted-assign-fs", "neworg", []string{"repoa", "repob"}, "repoa", 3, "", ""); pc == nil {
 		t.Error("expected non-nil config while spoke has not yet adopted the vanity URL")
 	} else if pc.DashboardURL != h.VanityURL {
 		t.Errorf("project config DashboardURL = %q, want the vanity URL %q", pc.DashboardURL, h.VanityURL)
 	}
 	// Spoke now reports the vanity URL -> nothing left to push -> nil.
-	if pc := projectConfigForHiveID("hosted-assign-fs", "neworg", []string{"repoa", "repob"}, "repoa", 3, h.VanityURL); pc != nil {
+	if pc := projectConfigForHiveID("hosted-assign-fs", "neworg", []string{"repoa", "repob"}, "repoa", 3, h.VanityURL, ""); pc != nil {
 		t.Errorf("expected nil project config once spoke reports the vanity URL, got %+v", pc)
 	}
 
@@ -1183,9 +1183,20 @@ func TestHandleDenyProvisionWithFilesystem(t *testing.T) {
 		t.Errorf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
 	}
 
-	// Verify deleted
-	if loadProvisionRequest("deny-prov-target") != nil {
-		t.Error("provision request should be deleted")
+	// A denial is RETAINED, not deleted: the admin request-history table needs
+	// to show that this user was turned down and by whom. Deleting made a denial
+	// indistinguishable from a request that was never made. The record must be
+	// marked denied (not left pending), so it neither blocks a fresh request nor
+	// reappears in the pending queue.
+	got := loadProvisionRequest("deny-prov-target")
+	if got == nil {
+		t.Fatal("denied provision request should be retained for the history table")
+	}
+	if got.Status != provisionStatusDenied {
+		t.Errorf("status = %q, want %q", got.Status, provisionStatusDenied)
+	}
+	if got.DecidedBy == "" || got.DecidedAt == "" {
+		t.Errorf("denial should record who decided and when: by=%q at=%q", got.DecidedBy, got.DecidedAt)
 	}
 }
 
@@ -1296,6 +1307,57 @@ func TestHandleSaaSAuthCheckWithFilesystem(t *testing.T) {
 	}
 	if w.Header().Get("X-Hive-Role") != "read" {
 		t.Errorf("X-Hive-Role = %q", w.Header().Get("X-Hive-Role"))
+	}
+}
+
+// TestHandleSaaSAuthCheckProxyAuthHeader asserts the F2 hub-half proof header:
+// on the authenticated SUCCESS path the hub sets X-Hive-Proxy-Auth to the
+// hive's dashboard token (the spoke's own authToken), and it is NEVER set on
+// the unauthenticated (401) path.
+func TestHandleSaaSAuthCheckProxyAuthHeader(t *testing.T) {
+	cleanup := helperSetupTempDirs(t)
+	defer cleanup()
+
+	// Fake kubectl so loadSpokeAuthToken resolves the dashboard token.
+	const wantToken = "proxy-auth-dash-token"
+	installSecretKubectl(t, "-----BEGIN X-----", wantToken)
+
+	authCleanup := helperSetupAuthUser(t, "ghp_proxyauth", "proxyauth-user")
+	defer authCleanup()
+
+	u := ensureSaaSUser("proxyauth-user")
+	u.Hives["proxy-hive"] = "admin"
+	saveSaaSUser(u)
+
+	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	// The hive must be in the registry with a known cluster so the hub can
+	// resolve its dashboard token in the auth-check handler.
+	srv.registry.Hives = []RegistryEntry{{ID: "proxy-hive", ClusterID: "hive-oke"}}
+	srv.clusters = map[string]ClusterConfig{"hive-oke": {ID: "hive-oke"}}
+
+	// SUCCESS path: header set to the dashboard token.
+	req := httptest.NewRequest("GET", "/api/saas/auth-check?hive=proxy-hive", nil)
+	req.Header.Set("Authorization", "Bearer ghp_proxyauth")
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if got := w.Header().Get("X-Hive-Proxy-Auth"); got != wantToken {
+		t.Errorf("X-Hive-Proxy-Auth = %q, want %q", got, wantToken)
+	}
+
+	// FAILURE path: no credentials → 401 and NO proof header.
+	reqNoAuth := httptest.NewRequest("GET", "/api/saas/auth-check?hive=proxy-hive", nil)
+	wNoAuth := httptest.NewRecorder()
+	srv.mux.ServeHTTP(wNoAuth, reqNoAuth)
+
+	if wNoAuth.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", wNoAuth.Code)
+	}
+	if got := wNoAuth.Header().Get("X-Hive-Proxy-Auth"); got != "" {
+		t.Errorf("X-Hive-Proxy-Auth set on 401 path = %q, want empty", got)
 	}
 }
 
