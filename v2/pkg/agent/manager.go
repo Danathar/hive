@@ -21,6 +21,8 @@ import (
 	"github.com/kubestellar/hive/v2/pkg/claude"
 	"github.com/kubestellar/hive/v2/pkg/config"
 	ghpkg "github.com/kubestellar/hive/v2/pkg/github"
+	"github.com/kubestellar/hive/v2/pkg/tracing"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 type ProcessState string
@@ -2327,6 +2329,14 @@ func (m *Manager) bobAgentsAwaitingKey() []string {
 }
 
 func (m *Manager) SendKick(name string, message string) error {
+	// Agent-kick span. No-op with zero export cost when tracing is disabled
+	// (the default). SendKick has no context parameter, so this span roots at
+	// Background; it still captures the kick leg of the governor→agent
+	// lifecycle. Ended before delivery bookkeeping via defer.
+	_, span := tracing.StartSpan(context.Background(), "agent.send_kick",
+		attribute.String("agent.name", name))
+	defer span.End()
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 

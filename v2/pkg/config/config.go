@@ -41,8 +41,28 @@ type Config struct {
 	HiveID        string                 `yaml:"hive_id"`
 	ACMMLevel     *int                   `yaml:"acmm_level,omitempty" json:"acmm_level"`
 	Variables     VariablesConfig        `yaml:"variables,omitempty"`
+	Tracing       TracingConfig          `yaml:"tracing,omitempty"`
 
 	SourcePath string `yaml:"-" json:"-"`
+}
+
+// TracingConfig configures OpenTelemetry distributed tracing. It is additive
+// and OFF by default: a config with no `tracing:` block (or with
+// `tracing.enabled: false`) yields a zero-overhead no-op tracer. When enabled,
+// spans are exported over OTLP/HTTP to Endpoint (or the standard
+// OTEL_EXPORTER_OTLP_ENDPOINT env var when Endpoint is empty).
+type TracingConfig struct {
+	// Enabled turns tracing on. Default false — the zero value keeps every
+	// existing config a no-op with no exporter and no network activity.
+	Enabled bool `yaml:"enabled,omitempty"`
+	// Endpoint is the OTLP/HTTP collector endpoint (host:port or full URL).
+	// When empty, the exporter falls back to OTEL_EXPORTER_OTLP_ENDPOINT.
+	// Never hardcode a default here — an unset endpoint means "use the env".
+	Endpoint string `yaml:"endpoint,omitempty"`
+	// SampleRatio is the head-based sampling ratio in [0.0, 1.0]. The zero
+	// value is treated as "sample everything" (1.0) so an operator who only
+	// sets enabled:true gets full traces; set explicitly to sample less.
+	SampleRatio float64 `yaml:"sample_ratio,omitempty"`
 }
 
 // VariablesConfig declares operator-defined ${VAR} substitutions and the trust

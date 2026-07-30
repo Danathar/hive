@@ -48,7 +48,9 @@ import (
 	"github.com/kubestellar/hive/v2/pkg/scheduler"
 	"github.com/kubestellar/hive/v2/pkg/snapshot"
 	"github.com/kubestellar/hive/v2/pkg/tokens"
+	"github.com/kubestellar/hive/v2/pkg/tracing"
 	"github.com/kubestellar/hive/v2/pkg/trajectory"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 var (
@@ -76,6 +78,11 @@ var (
 // spokeAppKeyFileMode is rw------- : signing material must never be readable by
 // anything else sharing the PVC or the pod.
 const spokeAppKeyFileMode = 0o600
+
+// traceShutdownTimeout bounds how long we wait for the OTel exporter to flush
+// pending spans during shutdown, so a slow/unreachable collector can't hang
+// process exit.
+const traceShutdownTimeout = 5 * time.Second
 
 // reportedAppKeyFingerprint returns the non-secret fingerprint of the App key
 // this spoke is ACTUALLY using, for the heartbeat payload. It fingerprints the
@@ -421,6 +428,29 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Initialize OpenTelemetry tracing. Off by default: with no tracing block
+	// (or tracing.enabled=false) this installs a no-op provider with zero
+	// export overhead. Never fatal — a tracing setup error must not stop hive.
+	traceShutdown, traceErr := tracing.Init(ctx, tracing.Config{
+		Enabled:     cfg.Tracing.Enabled,
+		Endpoint:    cfg.Tracing.Endpoint,
+		SampleRatio: cfg.Tracing.SampleRatio,
+		HiveID:      cfg.HiveID,
+		Branch:      cfg.Policies.Branch,
+	})
+	if traceErr != nil {
+		logger.Warn("tracing init failed; continuing without tracing", "error", traceErr)
+	} else if cfg.Tracing.Enabled {
+		logger.Info("tracing enabled", "endpoint", cfg.Tracing.Endpoint)
+	}
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), traceShutdownTimeout)
+		defer shutdownCancel()
+		if err := traceShutdown(shutdownCtx); err != nil {
+			logger.Warn("tracing shutdown error", "error", err)
+		}
+	}()
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -2714,6 +2744,12 @@ func runEvalCycle(
 	restartedAgents []string,
 	logger *slog.Logger,
 ) {
+	// Governor eval-cycle span. When tracing is disabled (the default) this is
+	// a no-op span with no allocation of note and no export — see pkg/tracing.
+	ctx, span := tracing.StartSpan(ctx, "governor.eval_cycle",
+		attribute.String("hive.id", cfg.HiveID))
+	defer span.End()
+
 	// A hive running without GitHub credentials (placeholder app_id, or a real
 	// App whose key could not be read) has nothing to enumerate. Return before
 	// the first API call rather than logging a misleading enumeration failure
@@ -2738,7 +2774,9 @@ func runEvalCycle(
 		}
 	}
 
-	actionable, err := ghClient.EnumerateActionable(ctx)
+	enumCtx, enumSpan := tracing.StartSpan(ctx, "governor.enumerate_actionable")
+	actionable, err := ghClient.EnumerateActionable(enumCtx)
+	enumSpan.End()
 	if err != nil {
 		logger.Error("failed to enumerate actionable items", "error", err)
 		return
