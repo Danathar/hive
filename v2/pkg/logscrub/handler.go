@@ -6,10 +6,17 @@ import (
 	"regexp"
 )
 
-var tokenPattern = regexp.MustCompile(
+// TokenPattern matches GitHub token forms (ghs_/ghp_/gho_/github_pat_) and
+// JWT-shaped triples. It is exported so other packages (e.g. pkg/ioscan) can
+// reuse the same secret-detection regex instead of duplicating it; keep this
+// the single source of truth for these shapes.
+var TokenPattern = regexp.MustCompile(
 	`(ghs_|ghp_|gho_|github_pat_)[A-Za-z0-9_]{10,}` +
 		`|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}`,
 )
+
+// tokenPattern is the unexported alias retained for the handler's internal use.
+var tokenPattern = TokenPattern
 
 const redacted = "[REDACTED]"
 
