@@ -1,0 +1,82 @@
+package scheduler
+
+import (
+	"fmt"
+
+	"github.com/kubestellar/hive/v2/pkg/ioscan"
+)
+
+// AuditFunc records a security-relevant enforcement event. It is deliberately a
+// plain function (action, detail, agent) so pkg/scheduler and pkg/ioscan never
+// import pkg/dashboard: the dashboard/server passes its own
+// (*Server).AuditLog-backed closure in via SetAuditFunc. A nil AuditFunc is a
+// safe no-op — enforcement records nothing but never panics.
+type AuditFunc func(action, detail, agent string)
+
+const (
+	// auditActionIoscanBlock is the audit-log action recorded when ioscan blocks
+	// untrusted input (the raw text is withheld from the kick).
+	auditActionIoscanBlock = "ioscan_block"
+	// ioscanAuditUser is the audit-log user/agent attribution for kick-path
+	// enforcement events. Untrusted issue text has no single owning agent at
+	// list-assembly time, so events are attributed to the scheduler itself.
+	ioscanAuditUser = "scheduler"
+)
+
+// SetAuditFunc attaches an audit-logging callback used by ioscan input
+// enforcement. When nil (the default) enforcement still redacts blocked text
+// but records no audit entry. The dashboard server wires this to its AuditLog so
+// blocks surface in the existing audit-trail UI with no new sink.
+func (s *Scheduler) SetAuditFunc(f AuditFunc) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.auditFunc = f
+}
+
+// auditLogger returns the attached audit callback, or nil if none is set.
+func (s *Scheduler) auditLogger() AuditFunc {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.auditFunc
+}
+
+// ioscanEnabled reports whether input/output scanning is turned on for this
+// hive. Default false — an absent `ioscan:` block leaves the kick path
+// byte-identical.
+func (s *Scheduler) ioscanEnabled() bool {
+	return s.cfg != nil && s.cfg.Ioscan.Enabled
+}
+
+// enforceIssueText runs ioscan over one piece of untrusted external text (an
+// issue title about to be injected into a kick) and returns the text that is
+// safe to inject. When ioscan is disabled it is a strict no-op — the input is
+// returned unchanged with no scan and no allocation. When enabled and the input
+// is blocked, the raw text is replaced with a secret-safe annotation and the
+// event is written to the existing dashboard audit log (when an AuditFunc is
+// attached). Enforcement is fail-safe: it never errors and never drops the item,
+// only the untrusted text is withheld.
+func (s *Scheduler) enforceIssueText(text string) string {
+	if !s.ioscanEnabled() {
+		return text
+	}
+	sanitized, v := ioscan.EnforceInput(text)
+	if v.Blocked {
+		s.recordIoscanBlock(v)
+	}
+	return sanitized
+}
+
+// recordIoscanBlock writes one audit entry per blocked verdict, one line per
+// finding, in the same `key=value, ...` detail shape the dashboard's own
+// auditDetail helper produces. A nil audit callback is a no-op.
+func (s *Scheduler) recordIoscanBlock(v ioscan.Verdict) {
+	log := s.auditLogger()
+	if log == nil {
+		return
+	}
+	for _, f := range v.Findings {
+		detail := fmt.Sprintf("rule=%s, severity=%s, kind=%s",
+			f.Rule, f.Severity.String(), string(f.Kind))
+		log(auditActionIoscanBlock, detail, ioscanAuditUser)
+	}
+}

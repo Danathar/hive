@@ -41,6 +41,7 @@ import (
 	"github.com/kubestellar/hive/v2/pkg/hub"
 	"github.com/kubestellar/hive/v2/pkg/knowledge"
 	"github.com/kubestellar/hive/v2/pkg/logscrub"
+	"github.com/kubestellar/hive/v2/pkg/mint"
 	"github.com/kubestellar/hive/v2/pkg/notify"
 	"github.com/kubestellar/hive/v2/pkg/planning"
 	"github.com/kubestellar/hive/v2/pkg/policies"
@@ -348,6 +349,36 @@ func startDocsTokenRefresh(ctx context.Context, cfg *config.Config, appKeyFile s
 			}
 		}
 	}()
+}
+
+// buildAgentMinter constructs the opt-in per-agent mint credential issuer from
+// config. It loads (or creates) the signing key at cfg.Mint.KeyPath, builds a
+// Minter with the configured issuer/hive-id/TTL, and wraps it as an AgentMinter.
+// Callers gate on cfg.Mint.Enabled before calling. The signing key path comes
+// from config (never hardcoded); a missing key file is created with 0600 perms
+// by the mint package.
+func buildAgentMinter(cfg *config.Config, logger *slog.Logger) (*mint.AgentMinter, error) {
+	if cfg.Mint.KeyPath == "" {
+		return nil, fmt.Errorf("mint.key_path is required when mint is enabled")
+	}
+	if cfg.Mint.Issuer == "" {
+		return nil, fmt.Errorf("mint.issuer is required when mint is enabled")
+	}
+	key, err := mint.LoadOrCreateKey(cfg.Mint.KeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("loading mint signing key: %w", err)
+	}
+	maxTTL := time.Duration(cfg.Mint.MaxTTLSeconds) * time.Second
+	minter, err := mint.NewMinter(key, cfg.Mint.Issuer,
+		mint.WithHiveID(cfg.HiveID),
+		mint.WithMaxTTL(maxTTL),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("building minter: %w", err)
+	}
+	logger.Debug("mint signing key loaded", "key_path", cfg.Mint.KeyPath)
+	// ttl<=0 lets the minter fall back to its configured max on each Mint.
+	return mint.NewAgentMinter(minter, maxTTL), nil
 }
 
 // processStartedAt is when this hive process began. Reported over the heartbeat
@@ -728,6 +759,20 @@ func main() {
 		ghClient.StartPRRequestWatcher(ctx, nil)
 	}
 
+	// Opt-in mint credential: when mint.enabled, build a Minter from the config
+	// (signing key + issuer + TTL) and attach it so each per-agent token refresh
+	// ALSO issues a scoped short-lived OIDC token alongside the GitHub App token.
+	// Default off — an absent/disabled `mint:` block leaves the credential path
+	// byte-identical. Fail-safe: a mint setup error is logged, never fatal.
+	if cfg.Mint.Enabled {
+		if agentMinter, err := buildAgentMinter(cfg, logger); err != nil {
+			logger.Warn("mint enabled but minter setup failed; agents keep App token only", "error", err)
+		} else {
+			agentMgr.SetAgentMint(agentMinter)
+			logger.Info("mint credential enabled", "issuer", cfg.Mint.Issuer, "hive_id", cfg.HiveID)
+		}
+	}
+
 	go agent.StartPermissionsWatcher(logger)
 
 	const statePath = "/data/hive-state.json"
@@ -889,6 +934,14 @@ func main() {
 	}
 
 	dashSrv := dashboard.NewServerWithAuth(cfg.Dashboard.Port, cfg.Dashboard.AuthToken, logger)
+
+	// Wire ioscan input enforcement (opt-in via ioscan.enabled) to the dashboard
+	// audit log so a blocked/redacted issue title surfaces in the existing
+	// audit-trail UI with no new sink. The closure keeps pkg/scheduler decoupled
+	// from pkg/dashboard — the scheduler only knows a func(action, detail, agent).
+	sched.SetAuditFunc(func(action, detail, agent string) {
+		dashSrv.AuditLog(agent, action, detail, agent)
+	})
 
 	// Persist per-user dashboard sessions on the PVC (/data) so direct-route
 	// users aren't logged out by pod restarts. NOTE: use /data explicitly, NOT

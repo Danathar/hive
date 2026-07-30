@@ -48,6 +48,7 @@ type Config struct {
 	// Default empty → existing label/governor triggering is unchanged.
 	Triggers   []TriggerRule    `yaml:"triggers,omitempty" json:"triggers,omitempty"`
 	Mint       MintConfig       `yaml:"mint,omitempty"`
+	Ioscan     IoscanConfig     `yaml:"ioscan,omitempty" json:"ioscan,omitempty"`
 	Classifier ClassifierConfig `yaml:"classifier,omitempty" json:"classifier,omitempty"`
 	Planning   PlanningConfig   `yaml:"planning,omitempty" json:"planning,omitempty"`
 
@@ -103,6 +104,20 @@ type MintConfig struct {
 	// MaxTTLSeconds bounds a minted token's lifetime. 0 uses the package default
 	// (15m). The value is clamped to the package hard cap (1h) regardless.
 	MaxTTLSeconds int `yaml:"max_ttl_seconds,omitempty"`
+}
+
+// IoscanConfig gates the pkg/ioscan input/output security scanner (prompt-
+// injection + secret/dangerous-directive detection). It is additive and
+// DISABLED by default: an absent `ioscan:` block, or Enabled=false, leaves the
+// kick/eval path byte-identical to before. When enabled, untrusted external
+// text (issue titles/bodies) is scanned before it is injected into an agent
+// kick, and blocked text is redacted/annotated rather than passed through. The
+// scanner is pure (no I/O, no network) and enforcement fails safe — a scan is
+// only ever advisory to the caller, never a reason to crash a kick.
+type IoscanConfig struct {
+	// Enabled turns input/output scanning on. Default false (opt-in) so it can
+	// never destabilize a running hive until an operator asks for it.
+	Enabled bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 }
 
 // PlanningConfig gates the Phase 4 planning entry points that fire automatically

@@ -139,6 +139,7 @@ type Manager struct {
 	claudeAuthToken  string
 	uidMap           *UIDMap
 	appAuth          AppTokenMinter
+	agentMint        AgentMintIssuer // optional, opt-in mint credential (nil ⇒ off)
 
 	// bobAPIKeyResolver resolves the IBM bobshell API key at LAUNCH time (not
 	// boot), so a key an operator adds via a Secret/PVC file or the config UI
@@ -222,6 +223,18 @@ func (m *Manager) recordPrompt(agent, trigger, prompt string) {
 // AppTokenMinter is implemented by github.AppAuth to mint per-agent scoped tokens.
 type AppTokenMinter interface {
 	WriteAgentToken(ctx context.Context, agentName, tier string, agentUID int) error
+}
+
+// AgentMintIssuer is implemented by mint.AgentMinter. It is the OPT-IN,
+// ADDITIONAL short-lived-credential path: when the mint is enabled it issues a
+// scoped OIDC/JWT for an agent (subject=agent, scopes from its tier) that the
+// agent can present ALONGSIDE its GitHub App token to a WIF broker. It never
+// replaces WriteAgentToken. Enabled() reports false (and MintAgentToken returns
+// "" with no error) when the mint is off, so wiring stays a strict no-op by
+// default.
+type AgentMintIssuer interface {
+	Enabled() bool
+	MintAgentToken(agentName, tier string) (string, error)
 }
 
 // IsInferenceBackend returns true if the backend is a self-hosted inference
@@ -373,6 +386,92 @@ func (m *Manager) SetAppAuth(auth AppTokenMinter) {
 	m.appAuth = auth
 }
 
+// SetAgentMint injects the opt-in mint issuer for additional short-lived
+// scoped OIDC tokens. Passing a disabled/nil issuer keeps the mint path a strict
+// no-op — the GitHub App token path is unaffected either way.
+func (m *Manager) SetAgentMint(issuer AgentMintIssuer) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.agentMint = issuer
+}
+
+// agentMintIssuer returns the attached mint issuer, or nil if none is set.
+func (m *Manager) agentMintIssuer() AgentMintIssuer {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.agentMint
+}
+
+const (
+	// agentTokenCacheDir is the directory holding per-agent credential caches. It
+	// mirrors the App-token cache dir (pkg/github) so both credentials live under
+	// one agent-owned tree.
+	agentTokenCacheDir = "/var/run/hive-metrics/agent-tokens"
+	// agentTokenCachePerms restricts a per-agent credential file to owner-only.
+	agentTokenCachePerms = 0o600
+)
+
+// AgentMintTokenCachePath returns the per-agent mint-token cache file path. It
+// sits beside the GitHub App token cache but is a distinct file so the two
+// credentials never collide — an agent reads the App token for GitHub and the
+// mint token for WIF exchange.
+func AgentMintTokenCachePath(agentName string) string {
+	return agentTokenCacheDir + "/mint-token-" + agentName + ".cache"
+}
+
+// issueAgentMintToken mints an additional scoped OIDC token for the agent (when
+// the mint is enabled) and writes it to a per-agent, agent-owned cache file. It
+// is fail-safe and additive: a disabled mint, a mint error, or a write error is
+// logged and swallowed — it NEVER blocks the GitHub App token path or the
+// launch. tier is the same trust tier used for the App token, so scopes stay
+// consistent across both credentials.
+func (m *Manager) issueAgentMintToken(agentName, tier string, agentUID int) {
+	issuer := m.agentMintIssuer()
+	if issuer == nil || !issuer.Enabled() {
+		return
+	}
+	token, err := issuer.MintAgentToken(agentName, tier)
+	if err != nil {
+		m.logger.Warn("mint token issuance failed (App token unaffected)",
+			"agent", agentName, "tier", tier, "error", err)
+		return
+	}
+	if token == "" {
+		return
+	}
+	if err := writeAgentCredFile(AgentMintTokenCachePath(agentName), token, agentUID); err != nil {
+		m.logger.Warn("writing mint token cache failed (App token unaffected)",
+			"agent", agentName, "error", err)
+		return
+	}
+	m.logger.Info("per-agent mint token issued", "agent", agentName, "tier", tier, "uid", agentUID)
+}
+
+// writeAgentCredFile atomically writes a credential to path with 0600 perms,
+// chowning to agentUID (>0) so only that agent can read it. It mirrors the
+// App-token write path (temp file + chown + rename) so a partial write is never
+// left in place.
+func writeAgentCredFile(path, token string, agentUID int) error {
+	if err := os.MkdirAll(agentTokenCacheDir, 0o755); err != nil {
+		return fmt.Errorf("creating agent token dir: %w", err)
+	}
+	tmpPath := path + ".tmp"
+	if err := os.WriteFile(tmpPath, []byte(token), agentTokenCachePerms); err != nil {
+		return fmt.Errorf("writing cred cache: %w", err)
+	}
+	if agentUID > 0 {
+		if err := os.Chown(tmpPath, agentUID, -1); err != nil {
+			os.Remove(tmpPath)
+			return fmt.Errorf("chown cred cache: %w", err)
+		}
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("rename cred cache: %w", err)
+	}
+	return nil
+}
+
 const agentTokenRefreshInterval = 40 * time.Minute
 
 // StartAgentTokenRefresh refreshes per-agent scoped tokens for all running
@@ -412,6 +511,8 @@ func (m *Manager) refreshAgentTokens(ctx context.Context) {
 			m.logger.Warn("agent token refresh failed", "agent", a.Name, "error", err)
 			continue
 		}
+		// Refresh the opt-in mint token alongside the App token (no-op when off).
+		m.issueAgentMintToken(a.Name, tier, a.UID)
 		// Re-inject the freshly-minted App token into the running session so the
 		// GitHub MCP server keeps authenticating as the App bot. The scoped token
 		// expires hourly; WriteAgentToken above rewrites the cache FILE (which the
@@ -595,6 +696,9 @@ func (m *Manager) Start(ctx context.Context, name string) error {
 			m.logger.Warn("failed to mint per-agent token, agent will use shared cache",
 				"agent", agent.Name, "tier", tier, "error", err)
 		}
+		// Additionally issue an opt-in short-lived mint token (no-op when the mint
+		// is disabled). This is additive and fail-safe — it never blocks launch.
+		m.issueAgentMintToken(agent.Name, tier, agent.UID)
 	}
 
 	return m.launchInTmux(ctx, agent)

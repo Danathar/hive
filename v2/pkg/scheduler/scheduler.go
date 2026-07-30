@@ -27,6 +27,7 @@ type Scheduler struct {
 	lastActionable *github.ActionableResult
 	logger         *slog.Logger
 	promptResolver *promptsrc.Resolver
+	auditFunc      AuditFunc
 	mu             sync.RWMutex
 }
 
@@ -257,7 +258,11 @@ func (s *Scheduler) formatIssueList(issues []github.Issue) string {
 		if shown >= maxIssuesPerKick {
 			break
 		}
-		title := issue.Title
+		// The issue title is untrusted external text about to be injected into an
+		// agent kick. Gate it through ioscan (opt-in via ioscan.enabled): a blocked
+		// title is redacted/annotated rather than injected raw, and the block is
+		// recorded to the dashboard audit log. Disabled → strict no-op passthrough.
+		title := s.enforceIssueText(issue.Title)
 		const maxTitleRunes = 60
 		if runes := []rune(title); len(runes) > maxTitleRunes {
 			title = string(runes[:maxTitleRunes])
