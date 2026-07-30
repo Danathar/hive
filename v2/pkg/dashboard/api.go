@@ -27,6 +27,7 @@ import (
 	"github.com/kubestellar/hive/v2/pkg/knowledge"
 	"github.com/kubestellar/hive/v2/pkg/policies"
 	"github.com/kubestellar/hive/v2/pkg/resolve"
+	"github.com/kubestellar/hive/v2/pkg/timeline"
 )
 
 func (s *Server) RegisterAPI(deps *Dependencies) {
@@ -51,6 +52,7 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	s.mux.HandleFunc("GET /api/history", s.handleHistory)
 	s.mux.HandleFunc("GET /api/trends", s.handleTrends)
 	s.mux.HandleFunc("GET /api/timeline", s.handleTimeline)
+	s.mux.HandleFunc("GET /api/lifecycle-timeline", s.handleLifecycleTimeline)
 	s.mux.HandleFunc("GET /api/widget", s.handleWidget)
 	s.mux.HandleFunc("GET /api/pane/{agent}", s.handlePane)
 
@@ -927,6 +929,66 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 		"kicks": kicks,
 		"modes": modes,
 	})
+}
+
+// lifecycleTimelineOnce/lifecycleStore back the lazily-constructed lifecycle
+// timeline Store. Lazy construction keeps the zero-value Server valid (no
+// constructor change) and keeps memory bounded via timeline.MaxEvents.
+//
+// TODO(timeline): the governor eval loop should Record() real lifecycle events
+// into LifecycleTimeline() (issue enumerated → classified → kicked → pr_opened
+// → merged/blocked), e.g. via a tracing SpanProcessor adapter that calls
+// timeline.FromSpan. Until then the store is present but empty, and the
+// endpoint safely returns empty arrays.
+var (
+	lifecycleTimelineOnce sync.Once
+	lifecycleStore        *timeline.Store
+)
+
+// LifecycleTimeline returns the process-wide lifecycle timeline Store,
+// constructing it on first use. Never returns nil.
+func (s *Server) LifecycleTimeline() *timeline.Store {
+	lifecycleTimelineOnce.Do(func() {
+		lifecycleStore = timeline.NewStore()
+	})
+	return lifecycleStore
+}
+
+// lifecycleTimelineDefaultLimit bounds how many recent events the
+// /api/lifecycle-timeline endpoint returns by default when the caller does not
+// pass ?limit=.
+const lifecycleTimelineDefaultLimit = 200
+
+// handleLifecycleTimeline serves the issue→PR lifecycle timeline plus derived
+// fleet health as JSON. It is additive and read-only; an empty store yields
+// empty arrays (never null), so the dashboard can render unconditionally.
+//
+// Query params:
+//
+//	limit  — max recent events to return (default lifecycleTimelineDefaultLimit)
+//	window — fleet-health look-back, in minutes (default timeline.DefaultFleetWindow)
+func (s *Server) handleLifecycleTimeline(w http.ResponseWriter, r *http.Request) {
+	limit := lifecycleTimelineDefaultLimit
+	if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+
+	var window time.Duration // zero → timeline.DefaultFleetWindow
+	if v := strings.TrimSpace(r.URL.Query().Get("window")); v != "" {
+		if mins, err := strconv.Atoi(v); err == nil && mins > 0 {
+			window = time.Duration(mins) * time.Minute
+		}
+	}
+
+	dto := s.LifecycleTimeline().Snapshot(limit, window)
+	// Defensive nil-guard: Snapshot already guarantees a non-nil slice, but
+	// keep the endpoint's array-always contract explicit.
+	if dto.Events == nil {
+		dto.Events = []timeline.Event{}
+	}
+	jsonResponse(w, dto)
 }
 
 func (s *Server) handleWidget(w http.ResponseWriter, r *http.Request) {
