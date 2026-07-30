@@ -1,12 +1,18 @@
 package mint
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/rsa"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"math/big"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -313,5 +319,253 @@ func TestLoadOrCreateKey(t *testing.T) {
 
 	if _, err := LoadOrCreateKey(""); err == nil {
 		t.Error("expected error for empty key path")
+	}
+}
+
+// --- Additional coverage: key load/generate/persist paths ---
+
+func TestLoadOrCreateKeyCorruptFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "corrupt.pem")
+	if err := os.WriteFile(path, []byte("this is not a PEM block at all"), keyFilePerms); err != nil {
+		t.Fatalf("seed corrupt file: %v", err)
+	}
+	if _, err := LoadOrCreateKey(path); err == nil {
+		t.Fatal("expected error loading a corrupt key file")
+	} else if !strings.Contains(err.Error(), "parsing key") {
+		t.Errorf("unexpected error %q, want a parse error", err)
+	}
+}
+
+func TestLoadOrCreateKeyUnreadableFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix permission semantics")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses file permissions")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "noread.pem")
+	// A valid-looking file that we make unreadable so ReadFile returns a
+	// non-IsNotExist error (the default: branch).
+	if err := os.WriteFile(path, []byte("x"), 0o000); err != nil {
+		t.Fatalf("seed unreadable file: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, keyFilePerms) })
+	if _, err := LoadOrCreateKey(path); err == nil {
+		t.Fatal("expected error reading an unreadable key file")
+	} else if !strings.Contains(err.Error(), "reading key") {
+		t.Errorf("unexpected error %q, want a read error", err)
+	}
+}
+
+func TestLoadOrCreateKeyWriteFailsWhenDirMissing(t *testing.T) {
+	// Path whose parent directory does not exist forces writeKeyPEM to fail on
+	// the temp WriteFile, exercising its error branch (no partial file left).
+	dir := t.TempDir()
+	path := filepath.Join(dir, "no-such-subdir", "mint.pem")
+	if _, err := LoadOrCreateKey(path); err == nil {
+		t.Fatal("expected error persisting key into a missing directory")
+	} else if !strings.Contains(err.Error(), "writing key") {
+		t.Errorf("unexpected error %q, want a write error", err)
+	}
+	if _, statErr := os.Stat(path + ".tmp"); statErr == nil {
+		t.Error("a partial temp file was left behind")
+	}
+}
+
+func TestParsePEMKeyPKCS1RoundTrip(t *testing.T) {
+	// A key written in PKCS#1 (as other tooling might) must load via the
+	// fallback path in parsePEMKey.
+	key, err := GenerateKey()
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	der := x509.MarshalPKCS1PrivateKey(key)
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: der})
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pkcs1.pem")
+	if err := os.WriteFile(path, pemBytes, keyFilePerms); err != nil {
+		t.Fatalf("write PKCS1 pem: %v", err)
+	}
+	loaded, err := LoadOrCreateKey(path)
+	if err != nil {
+		t.Fatalf("LoadOrCreateKey (PKCS1): %v", err)
+	}
+	if loaded.N.Cmp(key.N) != 0 {
+		t.Error("PKCS1-loaded key differs from original")
+	}
+}
+
+func TestParsePEMKeyEmptyBlock(t *testing.T) {
+	if _, err := parsePEMKey([]byte("garbage without pem")); err == nil {
+		t.Fatal("expected error for missing PEM block")
+	} else if !strings.Contains(err.Error(), "no PEM block") {
+		t.Errorf("unexpected error %q", err)
+	}
+}
+
+func TestParsePEMKeyNonRSAPKCS8(t *testing.T) {
+	// A valid PKCS#8 key that is NOT RSA (an EC key) must be rejected.
+	ec, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("ec keygen: %v", err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(ec)
+	if err != nil {
+		t.Fatalf("marshal ec pkcs8: %v", err)
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
+	if _, err := parsePEMKey(pemBytes); err == nil {
+		t.Fatal("expected error for non-RSA PKCS8 key")
+	} else if !strings.Contains(err.Error(), "not RSA") {
+		t.Errorf("unexpected error %q", err)
+	}
+}
+
+func TestParsePEMKeyBadDER(t *testing.T) {
+	// A PEM block whose bytes are neither valid PKCS8 nor PKCS1.
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte{0x00, 0x01, 0x02, 0x03}})
+	if _, err := parsePEMKey(pemBytes); err == nil {
+		t.Fatal("expected error for undecodable DER")
+	} else if !strings.Contains(err.Error(), "PKCS8 and PKCS1 both failed") {
+		t.Errorf("unexpected error %q", err)
+	}
+}
+
+// --- Additional coverage: TTL policy edges ---
+
+func TestWithMaxTTLClamps(t *testing.T) {
+	// Non-positive falls back to DefaultMaxTTL.
+	m1, _ := newTestMinter(t, WithMaxTTL(0))
+	if m1.MaxTTL() != DefaultMaxTTL {
+		t.Errorf("MaxTTL(0) = %v, want default %v", m1.MaxTTL(), DefaultMaxTTL)
+	}
+	m1n, _ := newTestMinter(t, WithMaxTTL(-5*time.Minute))
+	if m1n.MaxTTL() != DefaultMaxTTL {
+		t.Errorf("MaxTTL(negative) = %v, want default %v", m1n.MaxTTL(), DefaultMaxTTL)
+	}
+	// Below MinTTL floors up to MinTTL.
+	m2, _ := newTestMinter(t, WithMaxTTL(1*time.Second))
+	if m2.MaxTTL() != MinTTL {
+		t.Errorf("MaxTTL(1s) = %v, want floor %v", m2.MaxTTL(), MinTTL)
+	}
+	// A normal value in range is preserved and returned by MaxTTL directly.
+	m3, _ := newTestMinter(t, WithMaxTTL(7*time.Minute))
+	if m3.MaxTTL() != 7*time.Minute {
+		t.Errorf("MaxTTL(7m) = %v, want 7m", m3.MaxTTL())
+	}
+}
+
+func TestClampTTLFloorApplied(t *testing.T) {
+	// With a max of exactly MinTTL, requesting a tiny positive ttl clamps up to
+	// MinTTL (exercises the ttl < MinTTL branch on an in-range request).
+	m, _ := newTestMinter(t, WithMaxTTL(MinTTL))
+	got := m.clampTTL(1 * time.Second)
+	if got != MinTTL {
+		t.Errorf("clampTTL(1s) = %v, want %v", got, MinTTL)
+	}
+	// A request equal to the ceiling is honored unchanged.
+	m2, _ := newTestMinter(t, WithMaxTTL(10*time.Minute))
+	if got := m2.clampTTL(5 * time.Minute); got != 5*time.Minute {
+		t.Errorf("clampTTL(5m) = %v, want 5m", got)
+	}
+}
+
+func TestMintJTIUnique(t *testing.T) {
+	m, _ := newTestMinter(t)
+	t1, err := m.Mint(testSub, testAud, nil, time.Minute)
+	if err != nil {
+		t.Fatalf("Mint 1: %v", err)
+	}
+	t2, err := m.Mint(testSub, testAud, nil, time.Minute)
+	if err != nil {
+		t.Fatalf("Mint 2: %v", err)
+	}
+	c1, err := m.Verify(t1)
+	if err != nil {
+		t.Fatalf("Verify 1: %v", err)
+	}
+	c2, err := m.Verify(t2)
+	if err != nil {
+		t.Fatalf("Verify 2: %v", err)
+	}
+	if c1.ID == "" || c2.ID == "" {
+		t.Fatal("jti empty")
+	}
+	if c1.ID == c2.ID {
+		t.Errorf("jti not unique across mints: %q", c1.ID)
+	}
+}
+
+// --- Additional coverage: Verify failure branches ---
+
+func TestVerifyMalformedToken(t *testing.T) {
+	m, _ := newTestMinter(t)
+	for _, tok := range []string{"", "not.a.jwt", "aaa.bbb.ccc", "onlyonesegment"} {
+		if _, err := m.Verify(tok); err == nil {
+			t.Errorf("expected malformed token %q to be rejected", tok)
+		}
+	}
+}
+
+func TestVerifyTamperedSignature(t *testing.T) {
+	m, _ := newTestMinter(t)
+	tok, err := m.Mint(testSub, testAud, nil, time.Minute)
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	parts := strings.Split(tok, ".")
+	if len(parts) != 3 {
+		t.Fatalf("unexpected token shape")
+	}
+	// Decode the signature, flip a byte, and re-encode so the change survives
+	// base64 canonicalization (flipping a raw base64 char can decode to the
+	// same bytes and leave the signature unchanged).
+	rawSig, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		t.Fatalf("decode sig: %v", err)
+	}
+	rawSig[0] ^= 0xFF
+	tampered := parts[0] + "." + parts[1] + "." + base64.RawURLEncoding.EncodeToString(rawSig)
+	if _, err := m.Verify(tampered); err == nil {
+		t.Fatal("expected tampered-signature token to be rejected")
+	}
+}
+
+func TestVerifyWrongKeyRejected(t *testing.T) {
+	m, _ := newTestMinter(t)
+	// A verifier with a different key but the same issuer must reject.
+	otherKey, _ := GenerateKey()
+	verifier, err := NewMinter(otherKey, testIssuer, WithHiveID(testHiveID))
+	if err != nil {
+		t.Fatalf("NewMinter: %v", err)
+	}
+	tok, err := m.Mint(testSub, testAud, nil, time.Minute)
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	if _, err := verifier.Verify(tok); err == nil {
+		t.Fatal("expected token verified with wrong key to be rejected")
+	}
+}
+
+func TestVerifyUnexpectedSigningMethodHMAC(t *testing.T) {
+	m, _ := newTestMinter(t)
+	// Forge an HMAC (HS256) token — Verify must reject the non-RSA method.
+	claims := Claims{RegisteredClaims: jwt.RegisteredClaims{
+		Issuer:    testIssuer,
+		Subject:   testSub,
+		Audience:  jwt.ClaimStrings{testAud},
+		ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+	}}
+	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	signed, err := tok.SignedString([]byte("attacker-hmac-secret"))
+	if err != nil {
+		t.Fatalf("sign hs256: %v", err)
+	}
+	if _, err := m.Verify(signed); err == nil {
+		t.Fatal("expected HS256 token to be rejected by RSA verifier")
 	}
 }

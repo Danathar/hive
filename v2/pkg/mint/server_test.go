@@ -172,3 +172,100 @@ func TestJWKSHandlerServesKeys(t *testing.T) {
 		t.Fatalf("Verify: %v", err)
 	}
 }
+
+func TestJWKSHandlerSetsCacheControl(t *testing.T) {
+	srv, _ := newTestServer(t)
+	h := srv.Handler()
+	req := httptest.NewRequest(http.MethodGet, JWKSPath, nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	cc := rr.Header().Get("Cache-Control")
+	if cc == "" {
+		t.Fatal("missing Cache-Control header")
+	}
+	// jwksCacheMaxAge is 5m -> 300s.
+	if want := "public, max-age=300"; cc != want {
+		t.Errorf("Cache-Control = %q, want %q", cc, want)
+	}
+}
+
+func TestJWKSHandlerMethodNotAllowed(t *testing.T) {
+	srv, _ := newTestServer(t)
+	h := srv.Handler()
+	req := httptest.NewRequest(http.MethodPost, JWKSPath, strings.NewReader("{}"))
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("status = %d, want 405", rr.Code)
+	}
+}
+
+func TestMintHandlerRejectsUnknownFields(t *testing.T) {
+	srv, _ := newTestServer(t)
+	h := srv.Handler()
+	// DisallowUnknownFields -> a stray field yields a decode error -> 400.
+	raw := `{"subject":"s","audience":"a","surprise":"nope"}`
+	req := httptest.NewRequest(http.MethodPost, MintPath, strings.NewReader(raw))
+	req.Header.Set("Authorization", "Bearer "+testSecret)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for unknown field", rr.Code)
+	}
+}
+
+func TestMintHandlerRejectsOversizedBody(t *testing.T) {
+	srv, _ := newTestServer(t)
+	h := srv.Handler()
+	// Build a syntactically valid JSON object larger than maxMintBodyBytes so
+	// MaxBytesReader trips during decode -> 400.
+	huge := strings.Repeat("x", (16<<10)+1024)
+	raw := `{"subject":"s","audience":"a","scopes":["` + huge + `"]}`
+	req := httptest.NewRequest(http.MethodPost, MintPath, strings.NewReader(raw))
+	req.Header.Set("Authorization", "Bearer "+testSecret)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for oversized body", rr.Code)
+	}
+}
+
+func TestMintHandlerEmptyBearer(t *testing.T) {
+	srv, _ := newTestServer(t)
+	h := srv.Handler()
+	// "Bearer " with an empty secret must not match the non-empty configured
+	// secret (constant-time compare returns 0 on length mismatch).
+	body, _ := json.Marshal(MintRequest{Subject: testSub, Audience: testAud})
+	req := httptest.NewRequest(http.MethodPost, MintPath, bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer ")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401 for empty bearer", rr.Code)
+	}
+}
+
+func TestMintHandlerZeroTTLUsesMax(t *testing.T) {
+	srv, m := newTestServer(t)
+	h := srv.Handler()
+	// TTLSeconds omitted (0) -> honored TTL is the configured max.
+	body, _ := json.Marshal(MintRequest{Subject: testSub, Audience: testAud})
+	req := httptest.NewRequest(http.MethodPost, MintPath, bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+testSecret)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	var resp MintResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if want := int(m.MaxTTL().Seconds()); resp.ExpiresInSecs != want {
+		t.Errorf("expires_in = %d, want %d (max ttl)", resp.ExpiresInSecs, want)
+	}
+}
