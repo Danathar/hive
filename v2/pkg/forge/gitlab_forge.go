@@ -1,6 +1,7 @@
 package forge
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -218,6 +219,93 @@ func (f *gitLabForge) ListOpenChangeRequests(ctx context.Context, repo string) (
 		return nil, fmt.Errorf("gitlab: list merge requests for %q: %w", slug, err)
 	}
 	return out, nil
+}
+
+// --- Write path ---
+//
+// The GitLab write endpoints below target the ISSUE resource. GitLab models
+// issue notes and issue labels via /projects/:id/issues/:iid/...; merge-request
+// writes live under a parallel /merge_requests/:iid tree. Hive's hold gate and
+// triage comments operate on issues, so the issue endpoints are what the neutral
+// interface needs first. Comment/label semantics are identical on both trees, so
+// extending to MRs later is a mechanical endpoint swap.
+
+// CreateIssueComment posts a note on an issue via
+// POST /projects/:id/issues/:iid/notes.
+func (f *gitLabForge) CreateIssueComment(ctx context.Context, repo string, number int, body string) error {
+	slug := f.projectSlug(repo)
+	endpoint := fmt.Sprintf("/projects/%s/issues/%d/notes", url.PathEscape(slug), number)
+	payload := map[string]string{"body": body}
+	if err := f.doWrite(ctx, http.MethodPost, endpoint, payload); err != nil {
+		return fmt.Errorf("gitlab: comment on %q#%d: %w", slug, number, err)
+	}
+	return nil
+}
+
+// AddLabels adds labels to an issue via PUT /projects/:id/issues/:iid with the
+// add_labels field (a comma-separated list). It is a no-op when labels is empty.
+func (f *gitLabForge) AddLabels(ctx context.Context, repo string, number int, labels []string) error {
+	if len(labels) == 0 {
+		return nil
+	}
+	slug := f.projectSlug(repo)
+	endpoint := fmt.Sprintf("/projects/%s/issues/%d", url.PathEscape(slug), number)
+	payload := map[string]string{"add_labels": strings.Join(labels, ",")}
+	if err := f.doWrite(ctx, http.MethodPut, endpoint, payload); err != nil {
+		return fmt.Errorf("gitlab: add labels to %q#%d: %w", slug, number, err)
+	}
+	return nil
+}
+
+// RemoveLabel removes a single label from an issue via PUT with remove_labels.
+// GitLab treats removing an absent label as success, matching the interface
+// contract.
+func (f *gitLabForge) RemoveLabel(ctx context.Context, repo string, number int, label string) error {
+	slug := f.projectSlug(repo)
+	endpoint := fmt.Sprintf("/projects/%s/issues/%d", url.PathEscape(slug), number)
+	payload := map[string]string{"remove_labels": label}
+	if err := f.doWrite(ctx, http.MethodPut, endpoint, payload); err != nil {
+		return fmt.Errorf("gitlab: remove label from %q#%d: %w", slug, number, err)
+	}
+	return nil
+}
+
+// SetHold applies or clears the hold gate label using AddLabels/RemoveLabel.
+func (f *gitLabForge) SetHold(ctx context.Context, repo string, number int, hold bool) error {
+	if hold {
+		return f.AddLabels(ctx, repo, number, []string{holdLabel})
+	}
+	return f.RemoveLabel(ctx, repo, number, holdLabel)
+}
+
+// doWrite issues a POST/PUT with a JSON body and discards a successful response.
+func (f *gitLabForge) doWrite(ctx context.Context, method, endpoint string, payload any) error {
+	buf, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encoding request: %w", err)
+	}
+	u := f.baseURL + gitLabAPIPath + endpoint
+	req, err := http.NewRequestWithContext(ctx, method, u, bytes.NewReader(buf))
+	if err != nil {
+		return fmt.Errorf("building request: %w", err)
+	}
+	if f.token != "" {
+		req.Header.Set(gitLabTokenHeader, f.token)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := f.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("request to %s: %w", endpoint, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	data, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("gitlab API %s returned status %d: %s", endpoint, resp.StatusCode, truncate(string(data), 200))
+	}
+	return nil
 }
 
 // pageFunc processes one page body and returns an error. The paginate loop

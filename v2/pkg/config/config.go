@@ -34,6 +34,7 @@ type Config struct {
 	Governor      GovernorConfig         `yaml:"governor"`
 	GitHub        GitHubConfig           `yaml:"github"`
 	GitLab        GitLabConfig           `yaml:"gitlab,omitempty"`
+	Gitea         GiteaConfig            `yaml:"gitea,omitempty"`
 	Notifications NotificationsConfig    `yaml:"notifications"`
 	Dashboard     DashboardConfig        `yaml:"dashboard"`
 	Data          DataConfig             `yaml:"data"`
@@ -45,10 +46,10 @@ type Config struct {
 	Tracing       TracingConfig          `yaml:"tracing,omitempty"`
 	// Triggers is an additive list of CEL-based declarative agent triggers.
 	// Default empty → existing label/governor triggering is unchanged.
-	Triggers []TriggerRule `yaml:"triggers,omitempty" json:"triggers,omitempty"`
-	Mint          MintConfig             `yaml:"mint,omitempty"`
-	Classifier    ClassifierConfig       `yaml:"classifier,omitempty" json:"classifier,omitempty"`
-	Planning      PlanningConfig         `yaml:"planning,omitempty" json:"planning,omitempty"`
+	Triggers   []TriggerRule    `yaml:"triggers,omitempty" json:"triggers,omitempty"`
+	Mint       MintConfig       `yaml:"mint,omitempty"`
+	Classifier ClassifierConfig `yaml:"classifier,omitempty" json:"classifier,omitempty"`
+	Planning   PlanningConfig   `yaml:"planning,omitempty" json:"planning,omitempty"`
 
 	SourcePath string `yaml:"-" json:"-"`
 }
@@ -379,6 +380,8 @@ const (
 	ForgeGitHub = "github"
 	// ForgeGitLab selects the GitLab forge (gitlab.com or self-managed).
 	ForgeGitLab = "gitlab"
+	// ForgeGitea selects the Gitea/Forgejo forge (self-managed or Codeberg).
+	ForgeGitea = "gitea"
 )
 
 // ForgeKind returns the configured forge kind, defaulting to ForgeGitHub when
@@ -646,9 +649,9 @@ type GovernorConfig struct {
 	// Bob holds the IBM bobshell CLI backend's API-key location. Required for
 	// agents with backend "bob": bobshell's browser SSO flow cannot complete in
 	// a headless pod.
-	Bob BobConfig `yaml:"bob"`
-	Trajectory    TrajectoryConfig      `yaml:"trajectory"`
-	Replan        ReplanConfig          `yaml:"replan"`
+	Bob        BobConfig        `yaml:"bob"`
+	Trajectory TrajectoryConfig `yaml:"trajectory"`
+	Replan     ReplanConfig     `yaml:"replan"`
 	// Gateways is the list of named model gateways (OpenAI-compatible endpoints
 	// like OpenRouter, a LiteLLM proxy, vLLM, or llm-d). An agent routes through
 	// a gateway by naming it as its backend. When empty, a single implicit
@@ -1401,6 +1404,47 @@ func (g GitLabConfig) InstanceURL() string {
 func (g GitLabConfig) TokenEnvName() string {
 	if g.TokenEnv == "" {
 		return DefaultGitLabTokenEnv
+	}
+	return g.TokenEnv
+}
+
+// GiteaConfig configures the Gitea/Forgejo forge (used when project.forge ==
+// "gitea"). Like GitLabConfig it is entirely additive: a config that never
+// mentions gitea is unaffected.
+//
+// Gitea has no single public SaaS host, so URL has no default and must be set
+// when the Gitea forge is selected. Following Hive's no-hardcoded-secrets rule,
+// the token itself is NOT stored here: TokenEnv names the environment variable
+// to read the Gitea access token from at runtime (default GITEA_TOKEN).
+type GiteaConfig struct {
+	// URL is the Gitea/Forgejo instance root, e.g. "https://codeberg.org" or a
+	// self-managed "https://gitea.example.com". The "/api/v1" path is appended by
+	// the client. There is no default; it must be supplied for the Gitea forge.
+	URL string `yaml:"gitea_url,omitempty"`
+	// TokenEnv is the environment variable holding the Gitea access token.
+	// Defaults to DefaultGiteaTokenEnv. The token value is resolved via
+	// os.Getenv at runtime and never persisted in config.
+	TokenEnv string `yaml:"token_env,omitempty"`
+}
+
+const (
+	// DefaultGiteaTokenEnv is the default env var name for the Gitea token.
+	DefaultGiteaTokenEnv = "GITEA_TOKEN"
+)
+
+// InstanceURL returns the configured Gitea instance root. Unlike GitLab there is
+// no public default, so this returns whatever was configured (possibly empty);
+// selecting the Gitea forge with an empty URL is a configuration error surfaced
+// at client construction.
+func (g GiteaConfig) InstanceURL() string {
+	return g.URL
+}
+
+// TokenEnvName returns the env var name to read the Gitea token from, defaulting
+// to DefaultGiteaTokenEnv when unset.
+func (g GiteaConfig) TokenEnvName() string {
+	if g.TokenEnv == "" {
+		return DefaultGiteaTokenEnv
 	}
 	return g.TokenEnv
 }

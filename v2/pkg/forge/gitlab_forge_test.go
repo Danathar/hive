@@ -2,6 +2,7 @@ package forge
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -695,5 +696,201 @@ func TestGitLabProjectSlug(t *testing.T) {
 				t.Errorf("projectSlug(%q) = %q, want %q", tt.repo, got, tt.want)
 			}
 		})
+	}
+}
+
+// --- Write-path tests ---
+
+// TestGitLabCreateIssueComment verifies the note-create request: method, path,
+// PRIVATE-TOKEN header, JSON body, and success on 201.
+func TestGitLabCreateIssueComment(t *testing.T) {
+	var gotMethod, gotAuth, gotCT, gotBody, gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotAuth = r.Header.Get(gitLabTokenHeader)
+		gotCT = r.Header.Get("Content-Type")
+		gotPath = r.RequestURI
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":1}`))
+	}))
+	defer srv.Close()
+
+	f := newTestGitLab(t, srv.URL, "kubestellar")
+	if err := f.CreateIssueComment(context.Background(), "hive", 7, "hello world"); err != nil {
+		t.Fatalf("CreateIssueComment: %v", err)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("method = %q, want POST", gotMethod)
+	}
+	if gotAuth != "test-token" {
+		t.Errorf("PRIVATE-TOKEN = %q", gotAuth)
+	}
+	if gotCT != "application/json" {
+		t.Errorf("Content-Type = %q", gotCT)
+	}
+	if !strings.Contains(gotPath, "kubestellar%2Fhive/issues/7/notes") {
+		t.Errorf("path = %q, want .../issues/7/notes", gotPath)
+	}
+	if !strings.Contains(gotBody, `"body":"hello world"`) {
+		t.Errorf("body = %q, want body field", gotBody)
+	}
+}
+
+// TestGitLabAddLabels verifies the PUT with add_labels, and the empty-slice
+// no-op (no request made).
+func TestGitLabAddLabels(t *testing.T) {
+	var requests int
+	var gotMethod, gotBody, gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		gotMethod = r.Method
+		gotPath = r.RequestURI
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"iid":7}`))
+	}))
+	defer srv.Close()
+
+	f := newTestGitLab(t, srv.URL, "kubestellar")
+
+	// Empty labels => no-op, no HTTP call.
+	if err := f.AddLabels(context.Background(), "hive", 7, nil); err != nil {
+		t.Fatalf("AddLabels(empty): %v", err)
+	}
+	if requests != 0 {
+		t.Errorf("empty AddLabels made %d requests, want 0", requests)
+	}
+
+	if err := f.AddLabels(context.Background(), "hive", 7, []string{"triage/accepted", "kind/bug"}); err != nil {
+		t.Fatalf("AddLabels: %v", err)
+	}
+	if gotMethod != http.MethodPut {
+		t.Errorf("method = %q, want PUT", gotMethod)
+	}
+	if !strings.Contains(gotPath, "kubestellar%2Fhive/issues/7") {
+		t.Errorf("path = %q", gotPath)
+	}
+	if !strings.Contains(gotBody, `"add_labels":"triage/accepted,kind/bug"`) {
+		t.Errorf("body = %q, want comma-joined add_labels", gotBody)
+	}
+}
+
+// TestGitLabRemoveLabel verifies the PUT with remove_labels.
+func TestGitLabRemoveLabel(t *testing.T) {
+	var gotMethod, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"iid":7}`))
+	}))
+	defer srv.Close()
+
+	f := newTestGitLab(t, srv.URL, "kubestellar")
+	if err := f.RemoveLabel(context.Background(), "hive", 7, "hold"); err != nil {
+		t.Fatalf("RemoveLabel: %v", err)
+	}
+	if gotMethod != http.MethodPut {
+		t.Errorf("method = %q, want PUT", gotMethod)
+	}
+	if !strings.Contains(gotBody, `"remove_labels":"hold"`) {
+		t.Errorf("body = %q, want remove_labels", gotBody)
+	}
+}
+
+// TestGitLabSetHold verifies SetHold(true) adds the hold label and SetHold(false)
+// removes it, hitting the right verbs/bodies.
+func TestGitLabSetHold(t *testing.T) {
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"iid":7}`))
+	}))
+	defer srv.Close()
+
+	f := newTestGitLab(t, srv.URL, "kubestellar")
+
+	if err := f.SetHold(context.Background(), "hive", 7, true); err != nil {
+		t.Fatalf("SetHold(true): %v", err)
+	}
+	if !strings.Contains(gotBody, `"add_labels":"hold"`) {
+		t.Errorf("SetHold(true) body = %q, want add_labels hold", gotBody)
+	}
+
+	if err := f.SetHold(context.Background(), "hive", 7, false); err != nil {
+		t.Fatalf("SetHold(false): %v", err)
+	}
+	if !strings.Contains(gotBody, `"remove_labels":"hold"`) {
+		t.Errorf("SetHold(false) body = %q, want remove_labels hold", gotBody)
+	}
+}
+
+// TestGitLabWriteErrorStatus verifies non-2xx responses on each write op surface
+// an error mentioning the status.
+func TestGitLabWriteErrorStatus(t *testing.T) {
+	statuses := []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusInternalServerError}
+	for _, status := range statuses {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte(`{"message":"boom"}`))
+			}))
+			defer srv.Close()
+
+			f := newTestGitLab(t, srv.URL, "kubestellar")
+			ctx := context.Background()
+
+			if err := f.CreateIssueComment(ctx, "hive", 7, "x"); err == nil {
+				t.Errorf("CreateIssueComment: expected error for %d", status)
+			} else if !strings.Contains(err.Error(), strconv.Itoa(status)) {
+				t.Errorf("error should mention %d: %v", status, err)
+			}
+			if err := f.AddLabels(ctx, "hive", 7, []string{"x"}); err == nil {
+				t.Errorf("AddLabels: expected error for %d", status)
+			}
+			if err := f.RemoveLabel(ctx, "hive", 7, "x"); err == nil {
+				t.Errorf("RemoveLabel: expected error for %d", status)
+			}
+		})
+	}
+}
+
+// TestGitLabWriteRequestBuildError forces http.NewRequestWithContext to fail via
+// a control character in the base URL, covering the doWrite build-error branch.
+func TestGitLabWriteRequestBuildError(t *testing.T) {
+	f := &gitLabForge{
+		baseURL: "http://example.com/\x7f",
+		http:    &http.Client{},
+	}
+	if err := f.CreateIssueComment(context.Background(), "a/b", 1, "x"); err == nil {
+		t.Fatal("expected request-build error, got nil")
+	}
+}
+
+// TestGitLabWriteNoToken verifies the PRIVATE-TOKEN header is omitted on writes
+// when no token is configured.
+func TestGitLabWriteNoToken(t *testing.T) {
+	var sawHeader bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawHeader = r.Header.Get(gitLabTokenHeader) != ""
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	f, err := newGitLabForge("", Options{BaseURL: srv.URL, Org: "kubestellar"})
+	if err != nil {
+		t.Fatalf("newGitLabForge: %v", err)
+	}
+	if err := f.CreateIssueComment(context.Background(), "hive", 7, "x"); err != nil {
+		t.Fatalf("CreateIssueComment: %v", err)
+	}
+	if sawHeader {
+		t.Error("PRIVATE-TOKEN header should be absent with empty token")
 	}
 }

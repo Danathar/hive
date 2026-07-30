@@ -18,6 +18,17 @@ type githubReader interface {
 	EnumerateActionable(ctx context.Context) (*github.ActionableResult, error)
 }
 
+// githubWriter is the subset of go-github's *gh.IssuesService the write path
+// delegates to. Both issue and pull-request comments/labels flow through the
+// Issues endpoints on GitHub, so this one service covers all write ops. Using an
+// interface keeps the adapter thin (it forwards straight to go-github, no logic)
+// and lets tests inject a stub without a real HTTP client.
+type githubWriter interface {
+	CreateComment(ctx context.Context, owner, repo string, number int, comment *gh.IssueComment) (*gh.IssueComment, *gh.Response, error)
+	AddLabelsToIssue(ctx context.Context, owner, repo string, number int, labels []string) ([]*gh.Label, *gh.Response, error)
+	RemoveLabelForIssue(ctx context.Context, owner, repo string, number int, label string) (*gh.Response, error)
+}
+
 // gitHubForge adapts the existing pkg/github client to the Forge interface.
 //
 // It is deliberately thin: read operations delegate to the underlying client
@@ -27,6 +38,7 @@ type githubReader interface {
 // path (see TODOs on the Forge interface) lands.
 type gitHubForge struct {
 	client githubReader
+	writer githubWriter
 	org    string
 }
 
@@ -37,13 +49,22 @@ func newGitHubForge(token string, opts Options) *gitHubForge {
 	// go through the go-github client via GetRepo. The org is used to resolve
 	// bare repo names.
 	client := github.NewClient(token, opts.Org, nil, slog.Default(), opts.BaseURL)
-	return &gitHubForge{client: client, org: opts.Org}
+	// Write ops delegate to go-github's Issues service directly (the pkg/github
+	// client's own hold/comment helpers are private and log-and-swallow errors,
+	// which the Forge write path must surface). GoGitHub() exposes the same
+	// underlying client those helpers use, so no logic is duplicated.
+	return &gitHubForge{client: client, writer: client.GoGitHub().Issues, org: opts.Org}
 }
 
 // newGitHubForgeWithReader is a test seam: it builds the adapter over an
-// arbitrary githubReader (e.g. a stub), bypassing real client construction.
+// arbitrary githubReader (e.g. a stub), bypassing real client construction. The
+// same stub may also satisfy githubWriter, so it is used for both seams.
 func newGitHubForgeWithReader(r githubReader, org string) *gitHubForge {
-	return &gitHubForge{client: r, org: org}
+	f := &gitHubForge{client: r, org: org}
+	if w, ok := r.(githubWriter); ok {
+		f.writer = w
+	}
+	return f
 }
 
 func (f *gitHubForge) Kind() Kind { return KindGitHub }
@@ -127,6 +148,54 @@ func (f *gitHubForge) ListOpenChangeRequests(ctx context.Context, repo string) (
 		})
 	}
 	return out, nil
+}
+
+// --- Write path ---
+//
+// All four write ops delegate straight to go-github's Issues service. GitHub
+// models pull-request comments and labels through the Issues endpoints, so a
+// single service covers issues and change requests alike.
+
+// CreateIssueComment posts a comment on an issue or pull request.
+func (f *gitHubForge) CreateIssueComment(ctx context.Context, repo string, number int, body string) error {
+	owner, name := splitRepo(repo, f.org)
+	_, _, err := f.writer.CreateComment(ctx, owner, name, number, &gh.IssueComment{Body: gh.Ptr(body)})
+	if err != nil {
+		return fmt.Errorf("github: comment on %s/%s#%d: %w", owner, name, number, err)
+	}
+	return nil
+}
+
+// AddLabels adds labels to an issue or pull request. Empty label sets are a
+// no-op so callers need not guard the call site.
+func (f *gitHubForge) AddLabels(ctx context.Context, repo string, number int, labels []string) error {
+	if len(labels) == 0 {
+		return nil
+	}
+	owner, name := splitRepo(repo, f.org)
+	_, _, err := f.writer.AddLabelsToIssue(ctx, owner, name, number, labels)
+	if err != nil {
+		return fmt.Errorf("github: add labels to %s/%s#%d: %w", owner, name, number, err)
+	}
+	return nil
+}
+
+// RemoveLabel removes a single label from an issue or pull request.
+func (f *gitHubForge) RemoveLabel(ctx context.Context, repo string, number int, label string) error {
+	owner, name := splitRepo(repo, f.org)
+	_, err := f.writer.RemoveLabelForIssue(ctx, owner, name, number, label)
+	if err != nil {
+		return fmt.Errorf("github: remove label from %s/%s#%d: %w", owner, name, number, err)
+	}
+	return nil
+}
+
+// SetHold applies or clears the hold gate label via AddLabels/RemoveLabel.
+func (f *gitHubForge) SetHold(ctx context.Context, repo string, number int, hold bool) error {
+	if hold {
+		return f.AddLabels(ctx, repo, number, []string{holdLabel})
+	}
+	return f.RemoveLabel(ctx, repo, number, holdLabel)
 }
 
 // Compile-time assertion that the adapter satisfies the interface.
