@@ -230,9 +230,27 @@ type graphQLRequest struct {
 
 var graphQLMutationRe = regexp.MustCompile(`(?m)^\s*mutation\b`)
 
+// graphQLMergeMutationRe matches mutations that merge a pull request. Merging is
+// the highest-privilege write and must require the same mode as the REST
+// `PUT /pulls/{n}/merge` rule (ModeIssuesPRsMerge) — otherwise an ISSUES_ONLY
+// agent could bypass merge-gating entirely via GraphQL (CWE-863).
+var graphQLMergeMutationRe = regexp.MustCompile(`(?i)\b(mergePullRequest|mergeBranch|enablePullRequestAutoMerge)\b`)
+
+// graphQLPRWriteMutationRe matches mutations that create/modify PRs or push code
+// (refs/commits/branches). These mirror the REST rules that require
+// ModeIssuesAndPRs — an ISSUES_ONLY agent must not open PRs or write code via
+// GraphQL any more than it can over REST.
+var graphQLPRWriteMutationRe = regexp.MustCompile(`(?i)\b(createPullRequest|createCommitOnBranch|createRef|updateRef|deleteRef|createBranchProtectionRule|updateBranchProtectionRule|markPullRequestReadyForReview|convertPullRequestToDraft|addPullRequestReview|submitPullRequestReview)\b`)
+
 // GraphQLAllowed inspects a GraphQL request body and returns whether the
 // operation is allowed for the given mode. Queries (reads) are allowed at
-// ADVISORY and above. Mutations (writes) require ISSUES_ONLY and above.
+// ADVISORY and above. Mutations are classified by the capability they exercise
+// and require the SAME minimum mode as the equivalent REST route, so GraphQL
+// cannot be used to bypass the REST rule table:
+//   - merge mutations                → ModeIssuesPRsMerge
+//   - PR-create / code-write mutations → ModeIssuesAndPRs
+//   - all other mutations (issues, comments, labels, …) → ModeIssuesOnly
+//
 // Returns (allowed, isMutation). Body must be the raw JSON request body.
 func GraphQLAllowed(mode agent.AgentMode, body []byte) (bool, bool) {
 	if mode < agent.ModeAdvisory {
@@ -245,10 +263,17 @@ func GraphQLAllowed(mode agent.AgentMode, body []byte) (bool, bool) {
 	}
 
 	query := strings.TrimSpace(req.Query)
-	isMutation := graphQLMutationRe.MatchString(query)
+	if !graphQLMutationRe.MatchString(query) {
+		return true, false // read-only query
+	}
 
-	if isMutation {
+	// Classify the mutation and require the matching capability tier.
+	switch {
+	case graphQLMergeMutationRe.MatchString(query):
+		return mode >= agent.ModeIssuesPRsMerge, true
+	case graphQLPRWriteMutationRe.MatchString(query):
+		return mode >= agent.ModeIssuesAndPRs, true
+	default:
 		return mode >= agent.ModeIssuesOnly, true
 	}
-	return true, false
 }

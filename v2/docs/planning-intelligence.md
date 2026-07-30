@@ -38,12 +38,17 @@ the next eval cycle Hive:
 When the architect finishes, the plan appears in the plan-review view for your
 approval. Remove/re-add the label at will — the epic is keyed to the issue.
 
-The label trigger is gated so low-maturity hives stay advisory-only. By default
-it is **on at ACMM L4 and above**; you can force it on or off explicitly:
+The label trigger is **OFF by default** and must be enabled explicitly. The
+label path feeds a raw issue body into the architect's kick prompt with no
+per-kick review, so a maintainer merely labeling an attacker's issue would
+otherwise auto-fire attacker-controlled text into the highest-autonomy agent.
+Making it opt-in forces an operator to consciously accept that. When enabled, it
+still only fires at ACMM **L5+** (where the decomposing architect is scheduled),
+so enabling it below L5 is inert.
 
 ```yaml
 planning:
-  plan_from_label: true   # force on regardless of ACMM level (omit to use the L4+ default)
+  plan_from_label: true   # opt in — fires at ACMM L5+; omit/false = off (default)
 ```
 
 ### 2. The **⧉ Plan** button (dashboard)

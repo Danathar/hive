@@ -239,7 +239,12 @@ if [ "$(id -u)" = "0" ]; then
   # Fix permissions on bind-mounted secret files (host may own them as
   # a different UID with mode 600, making them unreadable by dev/UID 1001)
   chown dev:node /secrets/*.pem 2>/dev/null || true
-  chmod 644 /secrets/*.pem 2>/dev/null || true
+  # Owner-only (0600): the GitHub App private key is consumed IN-PROCESS by the
+  # Go binary, ttyd, and git — all running as dev (the owner) — so 0600 keeps
+  # every legitimate reader while removing group/other read. Agents run as
+  # separate UIDs (2001+) and MUST NOT be able to read the org-level App key
+  # (a prompt-injected agent could otherwise exfiltrate it). Was 0644.
+  chmod 600 /secrets/*.pem 2>/dev/null || true
   # API-key files are not .pem, so they need the same treatment. Without this
   # a host-side mode-600 file owned by a foreign UID reads as EACCES from the
   # Go binary (uid 1001), and every key-file read swallows the error — the key

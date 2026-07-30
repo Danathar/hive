@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -134,6 +135,48 @@ func TestGraphQLAllowedMutation(t *testing.T) {
 	allowed2, _ := GraphQLAllowed(agent.ModeIssuesOnly, body)
 	if !allowed2 {
 		t.Error("ISSUES_ONLY should allow GraphQL mutations")
+	}
+}
+
+// TestGraphQLAllowedMutationTiers verifies that GraphQL mutations are gated by
+// the same capability tier as the equivalent REST route, so an ISSUES_ONLY
+// agent cannot bypass merge-gating (or open PRs / push code) via GraphQL.
+func TestGraphQLAllowedMutationTiers(t *testing.T) {
+	cases := []struct {
+		name       string
+		query      string
+		minAllowed agent.AgentMode // lowest mode that should be allowed
+	}{
+		{"mergePullRequest needs merge mode", `mutation { mergePullRequest(input: {pullRequestId: "x"}) { pullRequest { id } } }`, agent.ModeIssuesPRsMerge},
+		{"enablePullRequestAutoMerge needs merge mode", `mutation { enablePullRequestAutoMerge(input: {pullRequestId: "x"}) { clientMutationId } }`, agent.ModeIssuesPRsMerge},
+		{"createPullRequest needs PR mode", `mutation { createPullRequest(input: {}) { pullRequest { id } } }`, agent.ModeIssuesAndPRs},
+		{"createCommitOnBranch needs PR mode", `mutation { createCommitOnBranch(input: {}) { commit { oid } } }`, agent.ModeIssuesAndPRs},
+		{"updateRef needs PR mode", `mutation { updateRef(input: {}) { clientMutationId } }`, agent.ModeIssuesAndPRs},
+		{"addComment stays at issues", `mutation { addComment(input: {}) { clientMutationId } }`, agent.ModeIssuesOnly},
+		{"addLabelsToLabelable stays at issues", `mutation { addLabelsToLabelable(input: {}) { clientMutationId } }`, agent.ModeIssuesOnly},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Marshal so the query's inner quotes are escaped into valid JSON.
+			body, err := json.Marshal(graphQLRequest{Query: tc.query})
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			// Just below the required tier → denied.
+			if tc.minAllowed > agent.ModeAdvisory {
+				if ok, _ := GraphQLAllowed(tc.minAllowed-1, body); ok {
+					t.Errorf("mode %d should be DENIED (needs %d)", tc.minAllowed-1, tc.minAllowed)
+				}
+			}
+			// At the required tier → allowed, and flagged as a mutation.
+			ok, isMut := GraphQLAllowed(tc.minAllowed, body)
+			if !ok {
+				t.Errorf("mode %d should be ALLOWED", tc.minAllowed)
+			}
+			if !isMut {
+				t.Error("should be flagged as a mutation")
+			}
+		})
 	}
 }
 

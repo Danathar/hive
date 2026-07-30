@@ -143,16 +143,20 @@ type PlanningConfig struct {
 const planFromLabelMinACMM = 5
 
 // PlanFromLabelEnabled reports whether the label trigger should fire, given the
-// hive's ACMM level. Explicit config wins; otherwise the trigger is on at ACMM
-// L5 and above (where the architect that decomposes epics is scheduled). Note:
-// even when this returns true because of an explicit override, planning's own
-// PlanIssuesFromLabels applies a hard L5+ no-op — the architect cadence gate is
-// defense-in-depth and cannot be overridden away.
+// hive's ACMM level. The trigger is OFF by default and must be explicitly
+// enabled (`plan_from_label: true`): the label path pipes a raw issue body into
+// the architect's kick prompt with no per-kick review, so a maintainer merely
+// labeling an attacker's issue would otherwise auto-fire attacker-controlled
+// text into the highest-autonomy agent. Making it opt-in forces an operator to
+// consciously accept that. When explicitly enabled, planning's own
+// PlanIssuesFromLabels still applies a hard L5+ no-op (the architect that
+// decomposes epics only has a cadence at L5/L6), so enabling it below L5 is
+// inert — defense in depth that cannot be overridden away.
 func (p PlanningConfig) PlanFromLabelEnabled(acmmLevel int) bool {
 	if p.PlanFromLabel != nil {
-		return *p.PlanFromLabel
+		return *p.PlanFromLabel && acmmLevel >= planFromLabelMinACMM
 	}
-	return acmmLevel >= planFromLabelMinACMM
+	return false
 }
 
 // ClassifierConfig makes the tier-classification keyword lists (pkg/classify)
