@@ -22,8 +22,15 @@ import (
 	"github.com/kubestellar/hive/v2/pkg/governor"
 	"github.com/kubestellar/hive/v2/pkg/planning"
 	"github.com/kubestellar/hive/v2/pkg/resolve"
+	"github.com/kubestellar/hive/v2/pkg/skillreg"
 	"github.com/kubestellar/hive/v2/pkg/tokens"
 )
+
+// skillsConventionalDir is the conventional on-disk location the dashboard
+// probes for a skills registry. The skills registry (pkg/skillreg) is not yet
+// wired into the runtime, so this is a best-effort, optional load: an absent
+// directory reports "not configured" rather than an error.
+const skillsConventionalDir = dataVolumePath + "/skills"
 
 const defaultLookbackHours = 24
 
@@ -146,8 +153,81 @@ func BuildFrontendStatus(
 		ACMMLevel:       detectACMMLevel(cfg),
 		ACMMPackAgents:  buildACMMPackAgents(cfg),
 		SystemResources: collectSystemResources(),
+		Platform:        buildPlatform(cfg),
 	}
 	return payload
+}
+
+// buildPlatform surfaces the v4 spoke capabilities (forge, mint, skills) from
+// config. It is nil-safe and never panics: a nil config yields a zero-value
+// block (github forge, mint off, skills unavailable), matching the additive
+// contract that a github-only, mint-off hive sees no behavior change. No secret
+// or key material is ever exposed — the mint block reports only enabled/issuer/
+// keyPresent.
+func buildPlatform(cfg *config.Config) *FrontendPlatform {
+	p := &FrontendPlatform{
+		Forge:  FrontendForge{Kind: config.ForgeGitHub, Repos: []string{}},
+		Skills: buildSkills(),
+	}
+	if cfg == nil {
+		return p
+	}
+
+	// --- Forge ---
+	p.Forge.Kind = cfg.Project.ForgeKind()
+	p.Forge.PrimaryRepo = cfg.Project.PrimaryRepo
+	repos := cfg.Project.Repos
+	if repos == nil {
+		repos = []string{}
+	}
+	p.Forge.Repos = repos
+	p.Forge.RepoCount = len(repos)
+	// InstanceURL is reported only for a non-default self-managed instance;
+	// the public SaaS defaults (github.com / gitlab.com) stay empty so the UI
+	// shows a URL only when it is meaningful.
+	switch p.Forge.Kind {
+	case config.ForgeGitLab:
+		if url := cfg.GitLab.InstanceURL(); url != "" && url != config.DefaultGitLabURL {
+			p.Forge.InstanceURL = url
+		}
+	case config.ForgeGitea:
+		// Gitea has no public default, so any configured URL is meaningful.
+		p.Forge.InstanceURL = cfg.Gitea.InstanceURL()
+	}
+
+	// --- Mint --- (never expose key material — enabled/issuer/keyPresent only)
+	p.Mint = FrontendMint{
+		Enabled: cfg.Mint.Enabled,
+		Issuer:  cfg.Mint.Issuer,
+	}
+	if cfg.Mint.KeyPath != "" {
+		if _, err := os.Stat(cfg.Mint.KeyPath); err == nil {
+			p.Mint.KeyPresent = true
+		}
+	}
+
+	return p
+}
+
+// buildSkills probes the conventional skills directory and reports the registry
+// state. The registry is not wired into the runtime yet, so this is best-effort
+// and honest-empty: when the directory does not exist it reports available=false
+// / loaded=0 ("not configured") rather than fabricating a count. When the dir is
+// present, skillreg.Load tolerates unreadable/malformed files and returns the
+// number of skills successfully loaded.
+func buildSkills() FrontendSkills {
+	dir := skillsConventionalDir
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		return FrontendSkills{Available: false, Loaded: 0}
+	}
+	// Load tolerates a missing/unreadable dir and bad files; a returned error is
+	// only for a truly unexpected condition, so treat any error as "unavailable".
+	loaded, lErr := skillreg.NewRegistry().Load(dir, nil)
+	if lErr != nil {
+		return FrontendSkills{Available: false, Loaded: 0, Dir: dir}
+	}
+	return FrontendSkills{Available: true, Loaded: loaded, Dir: dir}
 }
 
 func buildAgents(statuses map[string]*agent.AgentProcess, cfg *config.Config, govState governor.State) []FrontendAgent {

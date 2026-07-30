@@ -202,6 +202,49 @@ type StatusPayload struct {
 	InferenceBackends   []InferenceBackend     `json:"inferenceBackends,omitempty"`
 	SystemAlerts        []SystemAlert          `json:"systemAlerts,omitempty"`
 	HubBanner           *HubBannerState        `json:"hubBanner,omitempty"`
+	// Platform surfaces the v4 spoke capabilities — the configured forge, the
+	// mint token service state, and the skills registry. It is additive and
+	// nil-safe: a github-only, mint-off hive with no skills dir still gets a
+	// populated (all-zero) block, so existing status output is unchanged.
+	Platform *FrontendPlatform `json:"platform,omitempty"`
+}
+
+// FrontendPlatform reports the v4 spoke capabilities (forge, mint, skills) for
+// the dashboard Platform card. Every field is honest-empty when unconfigured;
+// building it never panics on a nil or zero-value config.
+type FrontendPlatform struct {
+	Forge  FrontendForge  `json:"forge"`
+	Mint   FrontendMint   `json:"mint"`
+	Skills FrontendSkills `json:"skills"`
+}
+
+// FrontendForge describes the configured source forge. Kind is one of
+// "github" | "gitlab" | "gitea". InstanceURL is set only for a non-default
+// self-managed instance (empty for github.com / gitlab.com defaults).
+type FrontendForge struct {
+	Kind        string   `json:"kind"`
+	InstanceURL string   `json:"instanceUrl,omitempty"`
+	PrimaryRepo string   `json:"primaryRepo,omitempty"`
+	Repos       []string `json:"repos"`
+	RepoCount   int      `json:"repoCount"`
+}
+
+// FrontendMint reports the mint token-service state. No secret or key material
+// is ever exposed — only whether it is enabled, its issuer, and whether the
+// signing key file is present on disk.
+type FrontendMint struct {
+	Enabled    bool   `json:"enabled"`
+	Issuer     string `json:"issuer,omitempty"`
+	KeyPresent bool   `json:"keyPresent"`
+}
+
+// FrontendSkills reports the skills registry. Available is false with Loaded=0
+// when no skills directory is configured/derivable, so the UI can honestly show
+// "not configured" rather than a fabricated count.
+type FrontendSkills struct {
+	Available bool   `json:"available"`
+	Loaded    int    `json:"loaded"`
+	Dir       string `json:"dir,omitempty"`
 }
 
 // HubBannerState is a banner message from the hub admin displayed on spoke dashboards.

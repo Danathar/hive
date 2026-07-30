@@ -2706,6 +2706,15 @@
     </div>
   </div>
 
+  <div id="platform-section" style="margin-top: 16px; margin-bottom: 24px; display: none;">
+    <h2 style="margin-bottom: 8px;" class="section-label section-header-toggle" onclick="toggleSection('platform-section')"><span class="section-chevron">▼</span> 🧩 Platform</h2>
+    <div class="section-body">
+      <div id="platform-card" style="background:var(--card-bg);border:1px solid var(--border);border-radius:8px;padding:16px">
+        <div class="kb-stat-grid" id="platform-stats"></div>
+      </div>
+    </div>
+  </div>
+
   <div id="acmm-reco-section" style="margin-top: 16px; margin-bottom: 24px; display: none;">
     <h2 style="margin-bottom: 8px;" class="section-label section-header-toggle" onclick="toggleSection('acmm-reco-section')"><span class="section-chevron">▼</span> ⬆️ Ready to level up? <span style="font-size:0.6em;font-weight:600;vertical-align:middle;padding:2px 7px;border-radius:10px;margin-left:6px;background:color-mix(in srgb, var(--muted) 18%, transparent);color:var(--muted)">advisory</span></h2>
     <div class="section-body">
@@ -6723,6 +6732,77 @@ function burnAreaChart() {
     }
 
     // PANEL A — "Ready to level up?" — advisory ACMM recommendation.
+    // PANEL — Platform: surfaces the v4 spoke capabilities (forge, mint,
+    // skills) from the main status payload the page already polls. Every field
+    // is guarded: a missing sub-block hides gracefully rather than erroring, and
+    // the section stays hidden until a platform block is present.
+    function renderPlatform(plat) {
+      const section = document.getElementById('platform-section');
+      const stats = document.getElementById('platform-stats');
+      if (!section || !stats) return;
+      if (!plat) { section.style.display = 'none'; return; }
+
+      const tiles = [];
+
+      // Forge tile — icon + name, instance URL (if self-managed), repo count.
+      const forge = plat.forge || {};
+      const forgeKind = (forge.kind || 'github').toLowerCase();
+      const FORGE_META = {
+        github: { icon: '🐙', name: 'GitHub' },
+        gitlab: { icon: '🦊', name: 'GitLab' },
+        gitea:  { icon: '🍵', name: 'Gitea' }
+      };
+      const fm = FORGE_META[forgeKind] || { icon: '🔀', name: forgeKind || 'Forge' };
+      const repoCount = Number(forge.repoCount) || 0;
+      const forgeSub = forge.instanceUrl
+        ? escapeHtml(forge.instanceUrl.replace(/^https?:\/\//, ''))
+        : (repoCount > 0 ? repoCount + ' repo' + (repoCount === 1 ? '' : 's') : 'Forge');
+      const forgeTitle = forge.instanceUrl
+        ? escapeHtml(forge.instanceUrl) + ' — ' + repoCount + ' repo' + (repoCount === 1 ? '' : 's')
+        : repoCount + ' repo' + (repoCount === 1 ? '' : 's') + ' monitored';
+      tiles.push(`<div class="kb-stat" title="${forgeTitle}">
+        <div class="val">${fm.icon} ${escapeHtml(fm.name)}</div>
+        <div class="lbl">${forgeSub}</div>
+      </div>`);
+
+      // Mint tile — enabled/disabled badge; issuer + key indicator when on.
+      const mint = plat.mint || {};
+      if (mint.enabled) {
+        const keyMark = mint.keyPresent ? 'key ✓' : 'key —';
+        const issuer = mint.issuer
+          ? escapeHtml(mint.issuer.replace(/^https?:\/\//, ''))
+          : keyMark;
+        tiles.push(`<div class="kb-stat" title="Mint token service enabled${mint.issuer ? ' — issuer ' + escapeHtml(mint.issuer) : ''}; signing ${mint.keyPresent ? 'key present' : 'key not found'}">
+          <div class="val" style="color:var(--green)">Mint on</div>
+          <div class="lbl">${issuer} · ${keyMark}</div>
+        </div>`);
+      } else {
+        tiles.push(`<div class="kb-stat" title="Mint token service disabled">
+          <div class="val" style="color:var(--muted)">Mint off</div>
+          <div class="lbl">token service</div>
+        </div>`);
+      }
+
+      // Skills tile — loaded count, or "not configured" when unavailable.
+      const skills = plat.skills || {};
+      if (skills.available) {
+        const loaded = Number(skills.loaded) || 0;
+        tiles.push(`<div class="kb-stat" title="Skills registry loaded from ${escapeHtml(skills.dir || 'the skills directory')}">
+          <div class="val">${loaded}</div>
+          <div class="lbl">skill${loaded === 1 ? '' : 's'} loaded</div>
+        </div>`);
+      } else {
+        tiles.push(`<div class="kb-stat" title="No skills directory configured">
+          <div class="val" style="color:var(--muted)">—</div>
+          <div class="lbl">skills not configured</div>
+        </div>`);
+      }
+
+      stats.innerHTML = tiles.join('');
+      section.style.display = '';
+      applySectionCollapse('platform-section');
+    }
+
     function renderACMMReco(rec) {
       const section = document.getElementById('acmm-reco-section');
       const card = document.getElementById('acmm-reco-card');
@@ -10255,14 +10335,16 @@ function burnAreaChart() {
         } else { beadsBadge.style.display = 'none'; }
       }
       updateContributorBadge(data.contributorPool || null);
+      renderPlatform(data.platform || null);
       renderSystemGauges(data.systemResources || null);
       ocUpdateSidebarAgents();
       renderDebugSection();
       // Restore persisted collapsed state for all collapsible sections
       const COLLAPSIBLE_SECTION_IDS = [
         'advisory-section', 'repos-section', 'beads-section', 'acmm-eval-section',
-        'audit-section', 'nous-section', 'inception-section', 'knowledge-section',
-        'contributors-section', 'debug-section', 'logs-section', 'agents-section'
+        'platform-section', 'audit-section', 'nous-section', 'inception-section',
+        'knowledge-section', 'contributors-section', 'debug-section', 'logs-section',
+        'agents-section'
       ];
       COLLAPSIBLE_SECTION_IDS.forEach(applySectionCollapse);
       // Update compact-all button text

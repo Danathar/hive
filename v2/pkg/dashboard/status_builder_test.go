@@ -343,19 +343,19 @@ func TestBuildAgents(t *testing.T) {
 
 	statuses := map[string]*agent.AgentProcess{
 		"scanner": {
-			Name:     "scanner",
-			Config:   config.AgentConfig{Backend: "claude", Model: "sonnet"},
-			State:    agent.StateRunning,
-			LastKick: &now,
+			Name:         "scanner",
+			Config:       config.AgentConfig{Backend: "claude", Model: "sonnet"},
+			State:        agent.StateRunning,
+			LastKick:     &now,
 			OutputBuffer: buf,
 		},
 		"supervisor": {
-			Name:     "supervisor",
-			Config:   config.AgentConfig{Backend: "claude", Model: "opus"},
-			State:    agent.StatePaused,
-			Paused:   true,
-			PinnedCLI:   "claude",
-			PinnedModel: "opus",
+			Name:         "supervisor",
+			Config:       config.AgentConfig{Backend: "claude", Model: "opus"},
+			State:        agent.StatePaused,
+			Paused:       true,
+			PinnedCLI:    "claude",
+			PinnedModel:  "opus",
 			OutputBuffer: agent.NewRingBuffer(10),
 		},
 	}
@@ -409,9 +409,9 @@ func TestBuildFrontendStatus(t *testing.T) {
 
 	statuses := map[string]*agent.AgentProcess{
 		"scanner": {
-			Name:   "scanner",
-			Config: config.AgentConfig{Backend: "claude", Model: "sonnet"},
-			State:  agent.StateRunning,
+			Name:         "scanner",
+			Config:       config.AgentConfig{Backend: "claude", Model: "sonnet"},
+			State:        agent.StateRunning,
 			OutputBuffer: agent.NewRingBuffer(10),
 		},
 	}
@@ -924,5 +924,88 @@ func TestCollectSystemResources_DoesNotPanic(t *testing.T) {
 	// CPU percentage should be in [0, 100] range (not 354%)
 	if res.CpuPct < 0 || res.CpuPct > 100 {
 		t.Errorf("CpuPct = %.1f, want [0, 100]", res.CpuPct)
+	}
+}
+
+func TestBuildPlatform_NilConfigIsZeroValue(t *testing.T) {
+	p := buildPlatform(nil)
+	if p == nil {
+		t.Fatal("expected non-nil FrontendPlatform for nil config")
+	}
+	if p.Forge.Kind != config.ForgeGitHub {
+		t.Errorf("nil config forge kind = %q, want %q", p.Forge.Kind, config.ForgeGitHub)
+	}
+	if p.Forge.Repos == nil {
+		t.Error("Forge.Repos must be non-nil (empty slice) so JSON is [] not null")
+	}
+	if p.Mint.Enabled {
+		t.Error("nil config must report mint disabled")
+	}
+	if p.Skills.Available {
+		t.Error("nil config must report skills unavailable")
+	}
+}
+
+func TestBuildPlatform_ForgeMintSkills(t *testing.T) {
+	// A mint key that exists on disk → KeyPresent true; a self-managed GitLab
+	// instance URL is surfaced; skills stay unavailable (no /data/skills dir).
+	dir := t.TempDir()
+	keyPath := dir + "/mint.pem"
+	if err := os.WriteFile(keyPath, []byte("-----BEGIN KEY-----\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{}
+	cfg.Project.Forge = config.ForgeGitLab
+	cfg.Project.Repos = []string{"org/repo-a", "org/repo-b"}
+	cfg.Project.PrimaryRepo = "org/repo-a"
+	cfg.GitLab.URL = "https://gitlab.example.com"
+	cfg.Mint.Enabled = true
+	cfg.Mint.Issuer = "https://mint.example.com"
+	cfg.Mint.KeyPath = keyPath
+
+	p := buildPlatform(cfg)
+
+	if p.Forge.Kind != config.ForgeGitLab {
+		t.Errorf("forge kind = %q, want %q", p.Forge.Kind, config.ForgeGitLab)
+	}
+	if p.Forge.InstanceURL != "https://gitlab.example.com" {
+		t.Errorf("instance URL = %q, want self-managed gitlab url", p.Forge.InstanceURL)
+	}
+	if p.Forge.RepoCount != 2 {
+		t.Errorf("repo count = %d, want 2", p.Forge.RepoCount)
+	}
+	if p.Forge.PrimaryRepo != "org/repo-a" {
+		t.Errorf("primary repo = %q, want org/repo-a", p.Forge.PrimaryRepo)
+	}
+	if !p.Mint.Enabled {
+		t.Error("mint should be enabled")
+	}
+	if p.Mint.Issuer != "https://mint.example.com" {
+		t.Errorf("mint issuer = %q, want https://mint.example.com", p.Mint.Issuer)
+	}
+	if !p.Mint.KeyPresent {
+		t.Error("mint key file exists on disk, KeyPresent should be true")
+	}
+	if p.Skills.Available {
+		t.Error("skills should be unavailable when no skills dir is present")
+	}
+	if p.Skills.Loaded != 0 {
+		t.Errorf("skills loaded = %d, want 0 when unavailable", p.Skills.Loaded)
+	}
+}
+
+func TestBuildPlatform_DefaultGitLabURLNotSurfaced(t *testing.T) {
+	// Default gitlab.com SaaS instance → InstanceURL stays empty (only
+	// self-managed instances are meaningful to show).
+	cfg := &config.Config{}
+	cfg.Project.Forge = config.ForgeGitLab
+	p := buildPlatform(cfg)
+	if p.Forge.InstanceURL != "" {
+		t.Errorf("default gitlab.com should not surface instance URL, got %q", p.Forge.InstanceURL)
+	}
+	// Mint key path unset → KeyPresent false, never a panic on os.Stat("").
+	if p.Mint.KeyPresent {
+		t.Error("unset mint key path must report KeyPresent=false")
 	}
 }
