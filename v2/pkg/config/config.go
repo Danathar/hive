@@ -41,8 +41,24 @@ type Config struct {
 	HiveID        string                 `yaml:"hive_id"`
 	ACMMLevel     *int                   `yaml:"acmm_level,omitempty" json:"acmm_level"`
 	Variables     VariablesConfig        `yaml:"variables,omitempty"`
+	// Triggers is an additive list of CEL-based declarative agent triggers.
+	// Default empty → existing label/governor triggering is unchanged.
+	Triggers []TriggerRule `yaml:"triggers,omitempty" json:"triggers,omitempty"`
 
 	SourcePath string `yaml:"-" json:"-"`
+}
+
+// TriggerRule is one CEL-based declarative agent trigger. When Expr (a CEL
+// expression over the normalized event, exposed as `event`) evaluates true for
+// an incoming event, Agent is kicked. Priority orders competing rules (higher
+// first). This is additive: an empty Triggers list preserves the existing
+// label/governor triggering behavior. Evaluation is handled by pkg/celtrigger,
+// which fails closed on malformed expressions.
+type TriggerRule struct {
+	Name     string `yaml:"name" json:"name"`
+	Expr     string `yaml:"expr" json:"expr"`
+	Agent    string `yaml:"agent" json:"agent"`
+	Priority int    `yaml:"priority,omitempty" json:"priority,omitempty"`
 }
 
 // VariablesConfig declares operator-defined ${VAR} substitutions and the trust
