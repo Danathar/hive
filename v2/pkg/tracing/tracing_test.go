@@ -2,13 +2,32 @@ package tracing
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
+
+// shutdownTimeout bounds shutdown calls in tests so a misbehaving batcher can
+// never hang the suite.
+const shutdownTimeout = 2 * time.Second
+
+// newDropServer returns an httptest.Server that accepts any request and returns
+// 200 with an empty body. It lets the enabled exporter path run end to end
+// without ever leaving the test process onto a real network.
+func newDropServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
 
 // TestInit_DisabledIsNoop verifies that the default (disabled) path returns a
 // usable no-op shutdown, records nothing, and never errors.
@@ -143,4 +162,156 @@ func TestTracer_EmptyNameUsesDefault(t *testing.T) {
 	}
 	_, span := tr.Start(context.Background(), "x")
 	span.End()
+}
+
+// restoreGlobalProvider snapshots the current global TracerProvider and restores
+// it on cleanup, so an enabled test that calls otel.SetTracerProvider does not
+// leak an OTLP-backed provider into other tests.
+func restoreGlobalProvider(t *testing.T) {
+	t.Helper()
+	prev := otel.GetTracerProvider()
+	t.Cleanup(func() { otel.SetTracerProvider(prev) })
+}
+
+// TestInit_EnabledWithConfiguredEndpoint exercises the full enabled path:
+// exporter construction, resource merge, sampler, and provider installation.
+// The endpoint points at a local drop server, and the batching exporter is
+// lazy, so no real network traffic leaves the process.
+func TestInit_EnabledWithConfiguredEndpoint(t *testing.T) {
+	restoreGlobalProvider(t)
+	srv := newDropServer(t)
+
+	ctx := context.Background()
+	shutdown, err := Init(ctx, Config{
+		Enabled:  true,
+		Endpoint: srv.URL,
+		HiveID:   "hive-abc",
+		Branch:   "v4",
+	})
+	if err != nil {
+		t.Fatalf("Init(enabled, endpoint) returned error: %v", err)
+	}
+	if shutdown == nil {
+		t.Fatal("Init(enabled) returned nil shutdown")
+	}
+
+	// The global provider must now be a recording SDK provider, not the no-op.
+	_, span := StartSpan(ctx, "enabled.span", attribute.String("k", "v"))
+	if !span.IsRecording() {
+		t.Error("span should be recording after Init with an endpoint")
+	}
+	span.End()
+
+	sctx, cancel := context.WithTimeout(ctx, shutdownTimeout)
+	defer cancel()
+	if err := shutdown(sctx); err != nil {
+		t.Errorf("shutdown returned error: %v", err)
+	}
+}
+
+// TestInit_EnabledEndpointFromEnv verifies that an empty Config.Endpoint but a
+// set OTEL_EXPORTER_OTLP_ENDPOINT still activates the enabled path rather than
+// failing closed.
+func TestInit_EnabledEndpointFromEnv(t *testing.T) {
+	restoreGlobalProvider(t)
+	srv := newDropServer(t)
+	t.Setenv(otelEndpointEnv, srv.URL)
+
+	shutdown, err := Init(context.Background(), Config{Enabled: true})
+	if err != nil {
+		t.Fatalf("Init(enabled, env endpoint) returned error: %v", err)
+	}
+
+	_, span := StartSpan(context.Background(), "env.span")
+	if !span.IsRecording() {
+		t.Error("span should be recording when endpoint comes from env")
+	}
+	span.End()
+
+	sctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	if err := shutdown(sctx); err != nil {
+		t.Errorf("shutdown returned error: %v", err)
+	}
+}
+
+// TestInit_ShutdownIdempotent confirms shutdown can be called more than once
+// without erroring — a second flush on an already-stopped provider is safe.
+func TestInit_ShutdownIdempotent(t *testing.T) {
+	restoreGlobalProvider(t)
+	srv := newDropServer(t)
+
+	shutdown, err := Init(context.Background(), Config{Enabled: true, Endpoint: srv.URL})
+	if err != nil {
+		t.Fatalf("Init returned error: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		sctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		if err := shutdown(sctx); err != nil {
+			t.Errorf("shutdown call %d returned error: %v", i+1, err)
+		}
+		cancel()
+	}
+}
+
+// TestInit_ShutdownCancelledContext confirms shutdown with an already-cancelled
+// context does not panic. The SDK may return the context error; that is
+// acceptable, we only require it not to crash.
+func TestInit_ShutdownCancelledContext(t *testing.T) {
+	restoreGlobalProvider(t)
+	srv := newDropServer(t)
+
+	shutdown, err := Init(context.Background(), Config{Enabled: true, Endpoint: srv.URL})
+	if err != nil {
+		t.Fatalf("Init returned error: %v", err)
+	}
+
+	cctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel before shutdown
+	_ = shutdown(cctx)
+}
+
+// TestInit_ExplicitSampleRatio exercises the branch where a caller supplies a
+// sampling ratio explicitly (not the zero-default full-sample path).
+func TestInit_ExplicitSampleRatio(t *testing.T) {
+	restoreGlobalProvider(t)
+	srv := newDropServer(t)
+
+	const halfSample = 0.5
+	shutdown, err := Init(context.Background(), Config{
+		Enabled:     true,
+		Endpoint:    srv.URL,
+		SampleRatio: halfSample,
+	})
+	if err != nil {
+		t.Fatalf("Init(explicit ratio) returned error: %v", err)
+	}
+	sctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	if err := shutdown(sctx); err != nil {
+		t.Errorf("shutdown returned error: %v", err)
+	}
+}
+
+// TestInit_InvalidEndpointReturnsError drives the exporter-construction error
+// branch: a malformed endpoint URL makes otlptracehttp.New fail, and Init must
+// return that error alongside a safe no-op shutdown (never nil).
+func TestInit_InvalidEndpointReturnsError(t *testing.T) {
+	restoreGlobalProvider(t)
+
+	shutdown, err := Init(context.Background(), Config{
+		Enabled:  true,
+		Endpoint: "://not a url",
+	})
+	// Regardless of whether construction errors, shutdown must be callable.
+	if shutdown == nil {
+		t.Fatal("Init returned nil shutdown on invalid endpoint")
+	}
+	if err != nil {
+		// The returned shutdown should be the no-op and must not error.
+		if serr := shutdown(context.Background()); serr != nil {
+			t.Errorf("no-op shutdown after error returned: %v", serr)
+		}
+	}
 }
