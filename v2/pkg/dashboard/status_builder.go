@@ -20,6 +20,7 @@ import (
 	"github.com/kubestellar/hive/v2/pkg/config"
 	"github.com/kubestellar/hive/v2/pkg/github"
 	"github.com/kubestellar/hive/v2/pkg/governor"
+	"github.com/kubestellar/hive/v2/pkg/planning"
 	"github.com/kubestellar/hive/v2/pkg/resolve"
 	"github.com/kubestellar/hive/v2/pkg/tokens"
 )
@@ -127,20 +128,21 @@ func BuildFrontendStatus(
 	issueToMerge := buildIssueToMerge(metricsCollector)
 
 	payload := &StatusPayload{
-		Timestamp:    time.Now().UTC().Format(time.RFC3339),
-		HiveID:       cfg.HiveID,
-		Agents:       buildAgents(agentStatuses, cfg, govState),
-		Governor:     buildGovernor(govState, cfg),
-		Tokens:       buildTokens(tokenCollector),
-		Repos:        buildRepos(cfg, actionable),
-		Beads:        BuildBeadsFromConfig(beadStores, cfg),
-		Health:       buildHealth(ghClient, ctx),
-		Budget:       buildBudget(gov, tokenCollector),
-		CadenceMatrix: buildCadenceMatrix(cfg, agentStatuses),
-		GHRateLimits: buildGHRateLimits(ghClient, ctx, cfg),
-		AgentMetrics: agentMetrics,
-		Hold:         buildHold(actionable),
-		IssueToMerge: issueToMerge,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339),
+		HiveID:          cfg.HiveID,
+		Agents:          buildAgents(agentStatuses, cfg, govState),
+		Governor:        buildGovernor(govState, cfg),
+		Tokens:          buildTokens(tokenCollector),
+		Repos:           buildRepos(cfg, actionable),
+		Beads:           BuildBeadsFromConfig(beadStores, cfg),
+		Planning:        BuildPlanning(beadStores, architectPausedFromStatuses(agentStatuses), detectACMMLevel(cfg)),
+		Health:          buildHealth(ghClient, ctx),
+		Budget:          buildBudget(gov, tokenCollector),
+		CadenceMatrix:   buildCadenceMatrix(cfg, agentStatuses),
+		GHRateLimits:    buildGHRateLimits(ghClient, ctx, cfg),
+		AgentMetrics:    agentMetrics,
+		Hold:            buildHold(actionable),
+		IssueToMerge:    issueToMerge,
 		ACMMLevel:       detectACMMLevel(cfg),
 		ACMMPackAgents:  buildACMMPackAgents(cfg),
 		SystemResources: collectSystemResources(),
@@ -697,12 +699,12 @@ func buildTokens(collector *tokens.Collector) FrontendTokens {
 	// Per-agent breakdown with full detail
 	for agentName, detail := range summary.ByAgentDetail {
 		bucket := FrontendTokenBucket{
-			Input:     detail.Input,
-			Output:    detail.Output,
-			CacheRead: detail.CacheRead,
+			Input:       detail.Input,
+			Output:      detail.Output,
+			CacheRead:   detail.CacheRead,
 			CacheCreate: detail.CacheCreate,
-			Messages:  detail.Messages,
-			Sessions:  detail.Sessions,
+			Messages:    detail.Messages,
+			Sessions:    detail.Sessions,
 		}
 		if detail.Sessions > 0 {
 			totalForAgent := detail.Input + detail.Output + detail.CacheRead + detail.CacheCreate
@@ -714,12 +716,12 @@ func buildTokens(collector *tokens.Collector) FrontendTokens {
 	// Per-model breakdown with full detail
 	for modelName, detail := range summary.ByModelDetail {
 		bucket := FrontendTokenBucket{
-			Input:     detail.Input,
-			Output:    detail.Output,
-			CacheRead: detail.CacheRead,
+			Input:       detail.Input,
+			Output:      detail.Output,
+			CacheRead:   detail.CacheRead,
 			CacheCreate: detail.CacheCreate,
-			Messages:  detail.Messages,
-			Sessions:  detail.Sessions,
+			Messages:    detail.Messages,
+			Sessions:    detail.Sessions,
 		}
 		if detail.Sessions > 0 {
 			totalForModel := detail.Input + detail.Output + detail.CacheRead + detail.CacheCreate
@@ -847,6 +849,87 @@ func buildBeads(stores map[string]*beads.Store) FrontendBeads {
 		}
 	}
 	return fb
+}
+
+// BuildPlanning computes the governor PLANNING metric block from bead metadata
+// across all stores (Phase 2 planning intelligence). An epic is "active" once it
+// carries a plan_status; "awaiting review" while that status is draft; and
+// "decomposing" (executing) when approved with at least one open child. Replans24h
+// (Phase 3) counts epics whose last_replan_at metadata falls within the last 24h,
+// so the tile reflects real governor stall-replans purely from bead state.
+// PendingDecompose (Phase 4) counts issue-sourced epics not yet built by the
+// architect; architectPaused says whether that queue is blocked on a paused
+// architect (so the tile can show the "resume the architect" message).
+func BuildPlanning(stores map[string]*beads.Store, architectPaused bool, acmmLevel int) FrontendPlanning {
+	return buildPlanningAt(stores, architectPaused, acmmLevel, time.Now())
+}
+
+// buildPlanningAt is BuildPlanning with an injected `now`, so the replans_24h
+// window is unit-testable with backdated last_replan_at timestamps.
+func buildPlanningAt(stores map[string]*beads.Store, architectPaused bool, acmmLevel int, now time.Time) FrontendPlanning {
+	fp := FrontendPlanning{Available: planning.PlanningAllowedAtLevel(acmmLevel)}
+	cutoff := now.Add(-planningReplanWindow)
+	for _, store := range stores {
+		all := store.List(beads.ListFilter{})
+
+		// Count open children per epic so we can tell executing plans apart from
+		// fully-completed ones.
+		openChildrenByEpic := make(map[string]int)
+		for _, b := range all {
+			if epicID := b.Meta(planning.MetaParentEpic); epicID != "" {
+				if b.Status == beads.StatusOpen || b.Status == beads.StatusInProgress {
+					openChildrenByEpic[epicID]++
+				}
+			}
+		}
+
+		for _, b := range all {
+			if b.Type != beads.TypeEpic {
+				continue
+			}
+			status := b.Meta(planning.MetaPlanStatus)
+			if status == "" {
+				continue // never decomposed
+			}
+			fp.ActivePlans++
+			switch status {
+			case planning.PlanStatusDraft:
+				fp.AwaitingReview++
+			case planning.PlanStatusApproved:
+				if openChildrenByEpic[b.ID] > 0 {
+					fp.Decomposing++
+				}
+			}
+			// Phase 4: an issue-sourced epic still marked decompose_pending is
+			// queued for the architect (children not yet materialized).
+			if planning.DecomposePending(b) {
+				fp.PendingDecompose++
+			}
+			if raw := b.Meta(planning.MetaLastReplanAt); raw != "" {
+				if t, err := time.Parse(time.RFC3339, raw); err == nil && t.After(cutoff) {
+					fp.Replans24h++
+				}
+			}
+		}
+	}
+	// Only flag the paused-architect condition when it actually matters: there is
+	// queued work AND the architect is paused. Otherwise the tile stays quiet.
+	fp.ArchitectPaused = fp.PendingDecompose > 0 && architectPaused
+	return fp
+}
+
+// planningReplanWindow is the trailing window over which replans_24h counts
+// re-decomposed plans (matches the tile label "24h").
+const planningReplanWindow = 24 * time.Hour
+
+// architectPausedFromStatuses reads the architect's paused state from the
+// already-collected agent statuses, so the PLANNING tile can flag a queue
+// blocked on a paused architect WITHOUT taking the agent-manager lock.
+func architectPausedFromStatuses(statuses map[string]*agent.AgentProcess) bool {
+	if ap, ok := statuses[planning.ArchitectAgentName]; ok && ap != nil {
+		return ap.Paused
+	}
+	return false
 }
 
 // BuildBeadsFromConfig uses agent config bead_role to partition bead counts.
@@ -1352,7 +1435,7 @@ func roundTo(f float64, decimals int) float64 {
 	return math.Round(f*shift) / shift
 }
 
-var statusTokenRedactor = regexp.MustCompile(`(ghp_|gho_|ghs_|github_pat_)[A-Za-z0-9_]{10,}`)
+var statusTokenRedactor = regexp.MustCompile(`(ghp_|gho_|ghs_|ghu_|ghr_|github_pat_)[A-Za-z0-9_]{10,}`)
 var deviceCodeRedactor = regexp.MustCompile(`(?i)(one-time code:\s*)[A-Z0-9]{4}-[A-Z0-9]{4}`)
 var deviceCodeLineRedactor = regexp.MustCompile(`(?m)^.*(?:login/device|Waiting for authorization|one-time code:|Press any key to copy).*$`)
 

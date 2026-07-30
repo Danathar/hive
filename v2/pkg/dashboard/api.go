@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/kubestellar/hive/v2/pkg/beads"
+	"github.com/kubestellar/hive/v2/pkg/classify"
 	"github.com/kubestellar/hive/v2/pkg/config"
 	"github.com/kubestellar/hive/v2/pkg/github"
 	"github.com/kubestellar/hive/v2/pkg/hub"
@@ -204,6 +205,15 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	s.mux.HandleFunc("GET /api/inception/has-files", s.handleInceptionHasFiles)
 	s.mux.HandleFunc("PUT /api/inception/wiki-name", s.handleInceptionRenameWiki)
 	s.mux.HandleFunc("POST /api/inception/import", s.handleInceptionImport)
+
+	// Plan-review gate (Phase 2 planning intelligence). Mirrors /api/inception/*.
+	// Phase 4 adds the issue entry point: mint an epic from a GitHub issue and
+	// request its decomposition (the "Plan this issue" dashboard action).
+	s.mux.HandleFunc("POST /api/plan/from-issue", s.handlePlanFromIssue)
+	s.mux.HandleFunc("GET /api/plan/{epicID}", s.handlePlanTree)
+	s.mux.HandleFunc("POST /api/plan/{epicID}/approve", s.handlePlanApprove)
+	s.mux.HandleFunc("POST /api/plan/{epicID}/reject", s.handlePlanReject)
+	s.mux.HandleFunc("POST /api/plan/{epicID}/child/{childID}", s.handlePlanChild)
 
 	s.mux.HandleFunc("POST /api/chat", s.handleChat)
 
@@ -392,7 +402,7 @@ func stringField(m map[string]interface{}, key string) string {
 
 var envVarEscapePattern = regexp.MustCompile(`\$\{[^}]*\}`)
 
-var tokenRedactor = regexp.MustCompile(`(ghp_|gho_|ghs_|github_pat_)[A-Za-z0-9_]{10,}`)
+var tokenRedactor = regexp.MustCompile(`(ghp_|gho_|ghs_|ghu_|ghr_|github_pat_)[A-Za-z0-9_]{10,}`)
 
 func redactTokensInLine(s string) string {
 	return tokenRedactor.ReplaceAllStringFunc(s, func(m string) string {
@@ -3399,6 +3409,7 @@ func (s *Server) handleGovernorConfigGet(w http.ResponseWriter, r *http.Request)
 		},
 		"litellm":    litellmSectionResponse(&cfg.Governor.LiteLLM),
 		"trajectory": trajectorySectionResponse(&cfg.Governor),
+		"classifier": classifierSectionResponse(),
 		"hub": map[string]interface{}{
 			"enabled":                          cfg.Hub.Enabled,
 			"url":                              cfg.Hub.URL,
@@ -4010,6 +4021,21 @@ func litellmSectionResponse(lc *config.LiteLLMConfig) map[string]interface{} {
 		// redactSecret guards the pathological case of a key-like env var
 		// NAME appearing in the source string.
 		"keySource": redactSecret(lc.ResolveAPIKeySource(), key),
+	}
+}
+
+// classifierSectionResponse surfaces the effective tier-classification keyword
+// lists (Phase 4 Part C) to the dashboard governor-config view. It returns the
+// keywords actually in force — config-driven when a `classifier:` block is set,
+// else the built-in defaults — so operators can see and (via hive.yaml) edit
+// which title keywords map issues to the Simple/Complex tiers. classify.SetLanes
+// already surfaces per-agent lane_keywords per-agent; these are the analogous
+// global tier lists.
+func classifierSectionResponse() map[string]interface{} {
+	simple, complex := classify.TierKeywords()
+	return map[string]interface{}{
+		"simpleKeywords": simple,
+		"complexSignals": complex,
 	}
 }
 
@@ -6379,15 +6405,18 @@ func (s *Server) handleAuthToken(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "not available on this hive", http.StatusNotFound)
 		return
 	}
+	// SECURITY: never return the token VALUE. On a self-hosted (non-direct-route)
+	// hive the dashboard token IS the API credential, so handing it to any
+	// same-origin caller made "authentication" meaningless (an unauthenticated
+	// visitor could GET it and then mutate). This endpoint now only reports
+	// WHETHER a token is configured; a browser that needs to authenticate an
+	// operator obtains the token by having the operator paste it (see the SPA's
+	// token prompt), never by reading it back from the server.
 	token := s.authToken
 	if token == "" {
 		token = os.Getenv("HIVE_DASHBOARD_TOKEN")
 	}
-	if token == "" {
-		okResponse(w, map[string]string{"token": "(not set)", "configured": "false"})
-		return
-	}
-	okResponse(w, map[string]string{"token": token, "configured": "true"})
+	okResponse(w, map[string]string{"configured": strconv.FormatBool(token != "")})
 }
 
 // maskToken replaces all but the last 4 characters with bullet characters.

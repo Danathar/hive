@@ -18,6 +18,7 @@ import (
 	"github.com/kubestellar/hive/v2/pkg/github"
 	"github.com/kubestellar/hive/v2/pkg/hub"
 	"github.com/kubestellar/hive/v2/pkg/openrouter"
+	"github.com/kubestellar/hive/v2/pkg/planning"
 )
 
 //go:embed static
@@ -95,6 +96,10 @@ type Server struct {
 
 	advisoryMu     sync.RWMutex
 	advisoryDigest any
+
+	// decomposeKickerOverride is a test-only seam for the Phase 4 plan-from-issue
+	// decompose handoff; production leaves it nil and uses deps.AgentMgr.
+	decomposeKickerOverride planning.DecomposeKicker
 
 	deviceFlowMu    sync.Mutex
 	deviceFlowState *github.DeviceFlowState
@@ -176,6 +181,7 @@ type StatusPayload struct {
 	Tokens              FrontendTokens         `json:"tokens"`
 	Repos               []FrontendRepo         `json:"repos"`
 	Beads               FrontendBeads          `json:"beads"`
+	Planning            FrontendPlanning       `json:"planning"`
 	Health              map[string]any         `json:"health"`
 	Budget              FrontendBudget         `json:"budget"`
 	CadenceMatrix       []FrontendCadence      `json:"cadenceMatrix"`
@@ -348,6 +354,38 @@ type FrontendRepo struct {
 type FrontendBeads struct {
 	Workers    int `json:"workers"`
 	Supervisor int `json:"supervisor"`
+}
+
+// FrontendPlanning is the governor-facing PLANNING metric block (Phase 2
+// planning intelligence). It is computed from bead metadata (parent_epic +
+// plan_status) across all bead stores.
+type FrontendPlanning struct {
+	// Available is true only when planning is usable at the current ACMM level
+	// (>= 5, where the architect that decomposes plans is scheduled). The
+	// governor PLANNING tile renders only when this is true, so it never shows a
+	// misleading "0 plans" at levels where planning can't run at all.
+	Available bool `json:"available"`
+	// ActivePlans counts epics that have been decomposed (carry a plan_status),
+	// i.e. plans currently in flight (draft or approved).
+	ActivePlans int `json:"active_plans"`
+	// AwaitingReview counts epics whose plan_status is draft — the
+	// human-action-required state the governor tile highlights.
+	AwaitingReview int `json:"awaiting_review"`
+	// Decomposing counts approved plans that still have open (unfinished)
+	// children — plans actively being executed by agents.
+	Decomposing int `json:"decomposing"`
+	// Replans24h counts plans re-decomposed in the last 24h by the Phase 3
+	// governor stall-replan loop, derived from each epic's last_replan_at
+	// metadata.
+	Replans24h int `json:"replans_24h"`
+	// PendingDecompose counts epics minted from an issue (Phase 4) that are
+	// accepted but not yet decomposed by the architect (decompose_pending). While
+	// >0 there is planning work queued for the architect.
+	PendingDecompose int `json:"pending_decompose"`
+	// ArchitectPaused is true when >=1 plan is pending AND the architect is paused,
+	// so nothing will be built until the operator resumes it. The tile shows the
+	// "architect is paused" message when this is set.
+	ArchitectPaused bool `json:"architect_paused"`
 }
 
 type FrontendBudget struct {

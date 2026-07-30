@@ -50,6 +50,12 @@ var WatchedHomeDirs = []string{
 	// created root-owned underneath is corrected on the next tick anyway.
 	"/data/home/.bob",
 	"/data/agents",
+	// Per-agent bead stores (/data/beads/<agent>) must be group-writable so the
+	// dashboard/hub process can mint an issue-sourced epic into an agent's store
+	// (e.g. the architect's) even though that dir is owned by the agent's UID.
+	// Without this an existing spoke's beads dirs stay 0755 and "Plan this issue"
+	// fails with EACCES on beads.json.tmp.
+	"/data/beads",
 }
 
 // GooseLogsDir is the rolling log directory goose 1.37 creates on startup.

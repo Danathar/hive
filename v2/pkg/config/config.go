@@ -47,6 +47,8 @@ type Config struct {
 	// Default empty → existing label/governor triggering is unchanged.
 	Triggers []TriggerRule `yaml:"triggers,omitempty" json:"triggers,omitempty"`
 	Mint          MintConfig             `yaml:"mint,omitempty"`
+	Classifier    ClassifierConfig       `yaml:"classifier,omitempty" json:"classifier,omitempty"`
+	Planning      PlanningConfig         `yaml:"planning,omitempty" json:"planning,omitempty"`
 
 	SourcePath string `yaml:"-" json:"-"`
 }
@@ -100,6 +102,56 @@ type MintConfig struct {
 	// MaxTTLSeconds bounds a minted token's lifetime. 0 uses the package default
 	// (15m). The value is clamped to the package hard cap (1h) regardless.
 	MaxTTLSeconds int `yaml:"max_ttl_seconds,omitempty"`
+}
+
+// PlanningConfig gates the Phase 4 planning entry points that fire automatically
+// (as opposed to the explicit dashboard "Plan this issue" click, which is always
+// available). Today that is the `plan`/`epic` label trigger: an actionable issue
+// carrying one of those labels auto-mints an epic and requests decomposition.
+type PlanningConfig struct {
+	// PlanFromLabel enables the label trigger. Pointer so an omitted key is
+	// distinguishable from an explicit false: when nil, the trigger falls back to
+	// an ACMM-level gate (on at L5+), so mature hives get it without extra config
+	// while low-maturity hives stay advisory-only. An explicit value overrides the
+	// ACMM gate in either direction — but see the note below: even an explicit
+	// true is a no-op below L5, because the architect that decomposes the minted
+	// epics is not scheduled there.
+	PlanFromLabel *bool `yaml:"plan_from_label,omitempty" json:"plan_from_label,omitempty"`
+}
+
+// planFromLabelMinACMM is the lowest ACMM level at which the label trigger fires
+// by default. It matches planning.PlanningMinACMMLevel: the architect agent that
+// decomposes the minted epics only has a cadence at L5 (4h) and L6 (15m), so
+// below L5 a minted epic would sit in decompose_pending forever. It is duplicated
+// here (rather than imported) to avoid a config→planning import cycle.
+const planFromLabelMinACMM = 5
+
+// PlanFromLabelEnabled reports whether the label trigger should fire, given the
+// hive's ACMM level. Explicit config wins; otherwise the trigger is on at ACMM
+// L5 and above (where the architect that decomposes epics is scheduled). Note:
+// even when this returns true because of an explicit override, planning's own
+// PlanIssuesFromLabels applies a hard L5+ no-op — the architect cadence gate is
+// defense-in-depth and cannot be overridden away.
+func (p PlanningConfig) PlanFromLabelEnabled(acmmLevel int) bool {
+	if p.PlanFromLabel != nil {
+		return *p.PlanFromLabel
+	}
+	return acmmLevel >= planFromLabelMinACMM
+}
+
+// ClassifierConfig makes the tier-classification keyword lists (pkg/classify)
+// config-driven and dashboard-visible, mirroring how per-agent lane_keywords
+// drive lane routing. Both fields are optional: when a list is empty, the
+// classifier keeps its built-in default for that tier, so an absent
+// `classifier:` block is byte-for-byte the old hardcoded behavior. Wired via
+// classify.SetTierKeywords from cmd/hive.
+type ClassifierConfig struct {
+	// SimpleKeywords are title substrings that classify an issue as Tier
+	// "Simple" (→ haiku). Empty keeps the built-in default set.
+	SimpleKeywords []string `yaml:"simple_keywords,omitempty" json:"simple_keywords,omitempty"`
+	// ComplexSignals are title substrings that classify an issue as Tier
+	// "Complex" (→ opus). Empty keeps the built-in default set.
+	ComplexSignals []string `yaml:"complex_signals,omitempty" json:"complex_signals,omitempty"`
 }
 
 // VariablesConfig declares operator-defined ${VAR} substitutions and the trust
@@ -596,6 +648,7 @@ type GovernorConfig struct {
 	// a headless pod.
 	Bob BobConfig `yaml:"bob"`
 	Trajectory    TrajectoryConfig      `yaml:"trajectory"`
+	Replan        ReplanConfig          `yaml:"replan"`
 	// Gateways is the list of named model gateways (OpenAI-compatible endpoints
 	// like OpenRouter, a LiteLLM proxy, vLLM, or llm-d). An agent routes through
 	// a gateway by naming it as its backend. When empty, a single implicit
@@ -754,6 +807,33 @@ type TrajectoryConfig struct {
 	// ExemptAgents are never reviewed (e.g. advisory-only agents that open no
 	// PRs and touch no infrastructure).
 	ExemptAgents []string `yaml:"exempt_agents"`
+}
+
+// ReplanConfig governs the Phase 3 stall-replan lane: a periodic check that
+// finds approved plans whose sub-tasks have stopped progressing and re-kicks the
+// architect to revise them, bounded by a per-plan replan cap. It runs off the
+// governor tick on its own cadence (like the trajectory lane). On by default; it
+// is a no-op when there are no approved plans, so "on" is always safe.
+type ReplanConfig struct {
+	// Enabled turns the stall-replan lane on. Pointer so an omitted key defaults
+	// to enabled, while an explicit "false" disables it.
+	Enabled *bool `yaml:"enabled"`
+	// IntervalS is how often (seconds) the lane scans for stalled plans. It runs
+	// off the governor tick, so the effective floor is the governor eval
+	// interval. 0 → default (30m).
+	IntervalS int `yaml:"interval_s"`
+	// StallThresholdS is how long (seconds) a plan may go without any child
+	// progressing before it is considered stalled. 0 → default (6h).
+	StallThresholdS int `yaml:"stall_threshold_s"`
+	// MaxReplans caps replans per plan before the lane stops and escalates to a
+	// human. 0 → default (5).
+	MaxReplans int `yaml:"max_replans"`
+}
+
+// IsEnabled reports whether the stall-replan lane is on. Default is ON: a nil
+// Enabled (key omitted) counts as enabled, only an explicit false disables it.
+func (r ReplanConfig) IsEnabled() bool {
+	return r.Enabled == nil || *r.Enabled
 }
 
 // IsEnabled reports whether the trajectory-review lane is on. Default is ON:
@@ -1436,7 +1516,13 @@ func (g GitHubConfig) ResolvedAppSlug() string {
 // actually authors PRs and commits when the hive authenticates as an
 // installation rather than a personal token.
 func (g GitHubConfig) BotLogin() string {
-	if g.AppID == 0 {
+	// Only a REAL, installed App has a bot that can author anything. A bare
+	// `AppID != 0` also passes for the placeholder sentinel (PlaceholderAppID)
+	// and for a real app_id that was never installed (installation_id: 0) —
+	// neither can mint a token or author a PR, so neither has a bot login. Using
+	// HasUsableApp() keeps EffectiveAIAuthor() empty for those, so the UI shows
+	// "-" (no author) rather than a phantom "<slug>[bot]" for an App-less hive.
+	if !g.HasUsableApp() {
 		return ""
 	}
 	return g.ResolvedAppSlug() + "[bot]"
@@ -1504,6 +1590,13 @@ type DiscordConfig struct {
 	Webhook   string `yaml:"webhook"`
 	BotToken  string `yaml:"bot_token"`
 	ChannelID string `yaml:"channel_id"`
+	// AllowedUsers is an allowlist of Discord user IDs permitted to issue bot
+	// COMMANDS (!kick, !pause, agent actions — anything that drives an agent).
+	// SECURITY: without it, any member of the guild who can post in the channel
+	// can inject prompts into the agents. When empty, command handling is
+	// DISABLED (fail closed) — the bot still posts status but accepts no
+	// commands — so an operator must opt in by listing the trusted user IDs.
+	AllowedUsers []string `yaml:"allowed_users,omitempty"`
 }
 
 type HubConfig struct {

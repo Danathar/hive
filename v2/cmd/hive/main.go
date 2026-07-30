@@ -42,6 +42,7 @@ import (
 	"github.com/kubestellar/hive/v2/pkg/knowledge"
 	"github.com/kubestellar/hive/v2/pkg/logscrub"
 	"github.com/kubestellar/hive/v2/pkg/notify"
+	"github.com/kubestellar/hive/v2/pkg/planning"
 	"github.com/kubestellar/hive/v2/pkg/policies"
 	"github.com/kubestellar/hive/v2/pkg/promptsrc"
 	"github.com/kubestellar/hive/v2/pkg/proxy"
@@ -1896,6 +1897,7 @@ func main() {
 			ChannelID:      cfg.Notifications.Discord.ChannelID,
 			DashboardURL:   fmt.Sprintf("http://localhost:%d", cfg.Dashboard.Port),
 			DashboardToken: os.Getenv("HIVE_DASHBOARD_TOKEN"),
+			AllowedUsers:   cfg.Notifications.Discord.AllowedUsers,
 		}, logger)
 		var agentNameList []string
 		for name := range cfg.EnabledAgents() {
@@ -2522,6 +2524,34 @@ func main() {
 	// enabled AND no reviewer resolves; clears when off or configured).
 	dashSrv.ReconcileTrajectoryAlert(&cfg.Governor)
 
+	// Stall-replan lane (Phase 3 planning intelligence): periodically detects
+	// approved plans whose sub-tasks have stopped progressing and re-kicks the
+	// architect to revise them, bounded by a per-plan replan cap. It runs off the
+	// governor tick, gated by its own Due() cadence (no goroutine of its own), and
+	// drives the architect only through SendKick (agentKicker) from this tick —
+	// never from the agent-launch path — so it cannot touch the manager lock
+	// unsafely. On by default; a no-op when there are no approved plans.
+	var replanLane *planning.ReplanLane
+	if cfg.Governor.Replan.IsEnabled() {
+		rc := cfg.Governor.Replan
+		replanLane = planning.NewReplanLane(
+			beadStores,
+			agentKicker{mgr: agentMgr},
+			gov,
+			dashboard.NewReplanSink(dashSrv, notifier),
+			planning.ReplanLaneConfig{
+				IntervalS: rc.IntervalS,
+				Stall: planning.StallConfig{
+					StallThreshold: time.Duration(rc.StallThresholdS) * time.Second,
+					MaxReplans:     rc.MaxReplans,
+				},
+			}, logger)
+		logger.Info("stall-replan lane enabled",
+			"interval_s", rc.IntervalS,
+			"stall_threshold_s", rc.StallThresholdS,
+			"max_replans", rc.MaxReplans)
+	}
+
 	logger.Info("entering governor loop", "interval_seconds", cfg.Governor.EvalIntervalS)
 	lastEvalInterval := cfg.Governor.EvalIntervalS
 	ticker := time.NewTicker(time.Duration(cfg.Governor.EvalIntervalS) * time.Second)
@@ -2592,6 +2622,14 @@ func main() {
 			if trajLane != nil && trajLane.Due(time.Now()) {
 				trajLane.Run(ctx)
 			}
+			// Stall-replan runs on the same tick, gated by its own Due() cadence.
+			// It is synchronous and adds no goroutine; kicks go through the same
+			// out-of-band SendKick path as the eval cycle above.
+			if replanLane != nil && replanLane.Due(time.Now()) {
+				if n := replanLane.Run(ctx); n > 0 {
+					logger.Info("stall-replan lane re-kicked stalled plans", "replans", n)
+				}
+			}
 			persistState(agentMgr, gov, cfg, tokenCollector, statePath, logger, dashSrv)
 			if cfg.Governor.EvalIntervalS != lastEvalInterval && cfg.Governor.EvalIntervalS > 0 {
 				logger.Info("eval interval changed, resetting ticker",
@@ -2640,6 +2678,84 @@ func applyBudgetAlerts(gov *governor.Governor, trans governor.BudgetTransitions,
 		dashSrv.AddSystemAlert(budgetExhaustedAlertID, "error", msg)
 		notifier.Send("Budget exhausted", msg, notify.PriorityHigh)
 	}
+}
+
+// agentKicker adapts *agent.Manager to planning.Kicker for the Phase 3
+// stall-replan lane. Kick delegates to SendKick, which takes the manager lock
+// ITSELF and is only ever called here from the governor tick (never from the
+// agent-launch path), so it cannot re-enter a held manager lock. This is the
+// same out-of-band kick path the eval loop already uses for governor kicks.
+type agentKicker struct{ mgr *agent.Manager }
+
+func (k agentKicker) Kick(agent, message string) error {
+	return k.mgr.SendKick(agent, message)
+}
+
+// planFromLabeledIssues is Phase 4 Part B: for each actionable issue carrying a
+// `plan`/`epic` label, mint an epic (idempotent) and hand it to the architect,
+// RESPECTING the architect's pause. It is a plain synchronous call on the eval
+// tick — no goroutine — and only ever touches the manager via SendKick/IsPaused,
+// exactly like every governor kick, so it never re-enters the launch-path mutex.
+// Epics are minted into the architect store (falling back to any store) so the
+// dashboard plan-review flow and replan lane find them the same way.
+//
+// A minted epic is decompose_pending (plan_status=draft). While the architect is
+// paused, the request stays queued and visible (the PLANNING tile shows it as
+// pending) — we never force-unpause. Once the architect is available, we kick it
+// each cycle until it decomposes and clears the pending marker.
+func planFromLabeledIssues(
+	actionable *github.ActionableResult,
+	beadStores map[string]*beads.Store,
+	agentMgr *agent.Manager,
+	gov *governor.Governor,
+	dashSrv *dashboard.Server,
+	logger *slog.Logger,
+	acmmLevel int,
+) {
+	if actionable == nil || len(beadStores) == 0 {
+		return
+	}
+	store, ok := beadStores[planning.ArchitectAgentName]
+	if !ok {
+		for name := range beadStores {
+			store = beadStores[name]
+			break
+		}
+	}
+	if store == nil {
+		return
+	}
+
+	sink := labelPlanSink{gov: gov, dashSrv: dashSrv, logger: logger}
+	planning.PlanIssuesFromLabels(store, agentMgr, actionable.Issues.Items, sink,
+		func(ref string, err error) {
+			logger.Warn("plan-from-label: minting epic failed", "issue", ref, "error", err)
+		}, acmmLevel)
+}
+
+// labelPlanSink adapts the governor/dashboard/logger to planning.LabelPlanSink so
+// the label-trigger core lives (and is tested) in pkg/planning.
+type labelPlanSink struct {
+	gov     *governor.Governor
+	dashSrv *dashboard.Server
+	logger  *slog.Logger
+}
+
+func (s labelPlanSink) KickedPlan(epic *beads.Bead) {
+	s.gov.RecordKick(planning.ArchitectAgentName)
+	if s.dashSrv != nil {
+		s.dashSrv.AuditLog("planning", "plan_from_label", "epic="+epic.ID+" ref="+epic.ExternalRef, planning.ArchitectAgentName)
+	}
+	s.logger.Info("audit: plan requested from labeled issue", "epic", epic.ID, "ref", epic.ExternalRef)
+}
+
+func (s labelPlanSink) QueuedPlan(epic *beads.Bead, paused bool) {
+	if paused {
+		// Architect deliberately paused — queue, do not unpause, log once.
+		s.logger.Info("plan-from-label: architect paused, plan queued", "epic", epic.ID, "ref", epic.ExternalRef)
+		return
+	}
+	s.logger.Warn("plan-from-label: architect unavailable, plan queued", "epic", epic.ID, "ref", epic.ExternalRef)
 }
 
 // diagnoseGitHubAppWrite returns "" when the configured GitHub App
@@ -2964,6 +3080,17 @@ func runEvalCycle(
 		if err := store.Reload(); err != nil {
 			logger.Warn("failed to reload beads from disk", "agent", name, "error", err)
 		}
+	}
+
+	// Phase 4 Part B: `plan`/`epic` label trigger. An actionable issue carrying a
+	// plan label auto-mints an epic and requests decomposition — the same flow as
+	// the dashboard "Plan this issue" click, but triggered by the label. It runs
+	// AFTER the store reload so FindByExternalRef sees current state (idempotent:
+	// no duplicate epic if one already exists). Cheap, synchronous, adds NO
+	// goroutine, and drives the architect only via SendKick (never the launch
+	// path). Gated by config/ACMM so low-maturity hives stay advisory-only.
+	if acmmLvl := inferACMMLevel(cfg); cfg.Planning.PlanFromLabelEnabled(acmmLvl) {
+		planFromLabeledIssues(actionable, beadStores, agentMgr, gov, dashSrv, logger, acmmLvl)
 	}
 
 	// Advisory digest: build from beads (the source of truth) before status broadcast.
@@ -3822,6 +3949,11 @@ func initAgentConfigDrivenSystems(cfg *config.Config) {
 	if len(lanes) > 0 {
 		classify.SetLanes(lanes)
 	}
+	// Tier-classification keywords (config-driven, mirroring SetLanes). Empty
+	// lists leave the built-in defaults in force, so an absent classifier block
+	// keeps behavior unchanged. Always call so a reload that CLEARS the block
+	// restores defaults.
+	classify.SetTierKeywords(cfg.Classifier.SimpleKeywords, cfg.Classifier.ComplexSignals)
 	if len(detectKeywords) > 0 {
 		tokens.SetDetectKeywords(detectKeywords)
 	}
