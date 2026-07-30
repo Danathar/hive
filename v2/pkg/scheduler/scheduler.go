@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kubestellar/hive/v2/pkg/agentsmd"
 	"github.com/kubestellar/hive/v2/pkg/classify"
 	"github.com/kubestellar/hive/v2/pkg/config"
 	"github.com/kubestellar/hive/v2/pkg/github"
@@ -184,6 +185,17 @@ func (s *Scheduler) substituteTemplate(template string, actionable *github.Actio
 		agentIssues = actionable.Issues.Items
 	}
 	knowledgeSection := s.primeKnowledge(agentIssues)
+
+	// Additive: prepend the repo's AGENTS.md instructions + requested skills to
+	// the injected knowledge, when a local checkout root is available. This is a
+	// guarded, single call point — it returns "" (and never errors) when no
+	// AGENTS.md exists, so it is a no-op for repos that don't use the convention.
+	// TODO(agentsmd): thread a per-repo checkout root here (e.g. from the git
+	// source's LocalDir) and, once file-level targeting exists, prefer
+	// agentsmd.ParseNearest for closest-wins nested AGENTS.md.
+	if agentsSection := s.primeAgentsMd(s.agentsRepoRoot()); agentsSection != "" {
+		knowledgeSection = agentsSection + "\n" + knowledgeSection
+	}
 
 	inceptionIdea, inceptionPhase, inceptionMode, inceptionAnswers, inceptionSlug, inceptionRepoURL := s.inceptionVars()
 
@@ -837,6 +849,41 @@ func filterByLane(issues []github.Issue, lane string) []github.Issue {
 }
 
 const maxIssuesToPrime = 5
+
+// agentsRepoRoot returns the local filesystem root of the primary repo's
+// checkout, or "" if no local checkout is configured. Hive agents operate over
+// GitHub rather than local clones, so this is usually empty today; the hook
+// exists so that when a checkout root becomes available (e.g. a git source's
+// LocalDir) the AGENTS.md convention is honored without further wiring.
+func (s *Scheduler) agentsRepoRoot() string {
+	// Intentionally conservative: only wired sources expose a root. Returning ""
+	// makes primeAgentsMd a no-op. See the TODO(agentsmd) at the call site.
+	return ""
+}
+
+// primeAgentsMd reads the repository's AGENTS.md (the cross-tool convention for
+// per-repo agent instructions) plus its requested skills and returns text to
+// prepend to the kick. It is tolerant: a missing or malformed file yields "".
+func (s *Scheduler) primeAgentsMd(repoRoot string) string {
+	if repoRoot == "" {
+		return ""
+	}
+	cfg, err := agentsmd.Parse(repoRoot, s.logger)
+	if err != nil {
+		// Parse is tolerant and should not error; log defensively and skip.
+		s.logger.Warn("agentsmd: parse failed, skipping injection", "root", repoRoot, "error", err)
+		return ""
+	}
+	section := cfg.InjectionText(nil)
+	if section != "" {
+		s.logger.Info("agentsmd: injecting repo instructions into kick",
+			"root", repoRoot,
+			"requested_skills", len(cfg.RequestedSkills),
+			"chars", len(section),
+		)
+	}
+	return section
+}
 
 // primeKnowledge queries the wiki layers for facts relevant to the given issues
 // and returns a formatted section for injection into the kick message.
