@@ -49,6 +49,7 @@ import (
 	"github.com/kubestellar/hive/v2/pkg/proxy"
 	"github.com/kubestellar/hive/v2/pkg/scheduler"
 	"github.com/kubestellar/hive/v2/pkg/snapshot"
+	"github.com/kubestellar/hive/v2/pkg/timeline"
 	"github.com/kubestellar/hive/v2/pkg/tokens"
 	"github.com/kubestellar/hive/v2/pkg/tracing"
 	"github.com/kubestellar/hive/v2/pkg/trajectory"
@@ -2906,6 +2907,76 @@ func diagnoseGitHubAppWrite(ctx context.Context, appAuth *github.AppAuth, expect
 	return msg
 }
 
+// maxTimelineEnumeratePerCycle bounds how many enumerated-issue events a single
+// eval cycle records into the lifecycle timeline. The timeline Store is a
+// bounded ring (timeline.MaxEvents); capping per-cycle enumeration keeps a large
+// actionable backlog from evicting the entire ring in one pass and keeps the
+// recording loop O(1)-bounded so it never slows the eval cycle.
+const maxTimelineEnumeratePerCycle = 50
+
+// lifecycleRecorder narrows *dashboard.Server to just the timeline accessor the
+// recording helpers need, so they stay trivially testable with a fake and never
+// depend on the rest of the Server surface.
+type lifecycleRecorder interface {
+	LifecycleTimeline() *timeline.Store
+}
+
+// recordEnumeratedIssues records a KindEnumerated event for each enumerated
+// actionable issue, bounded by maxTimelineEnumeratePerCycle. It is fully
+// guarded: a nil recorder, nil store, or nil actionable set is a no-op, and
+// Record itself is nil-safe. This must never slow or break the eval loop, so it
+// does no I/O and touches only the in-memory bounded ring.
+//
+// TODO(timeline-pr): also record KindPROpened / KindMerged once the eval loop
+// has cheap access to per-issue PR-open and merge transitions (the enumerate
+// result exposes open PRs but not the open→merged edge without extra state).
+func recordEnumeratedIssues(rec lifecycleRecorder, actionable *github.ActionableResult) {
+	if rec == nil || actionable == nil {
+		return
+	}
+	store := rec.LifecycleTimeline()
+	if store == nil {
+		return
+	}
+	limit := maxTimelineEnumeratePerCycle
+	if len(actionable.Issues.Items) < limit {
+		limit = len(actionable.Issues.Items)
+	}
+	for i := 0; i < limit; i++ {
+		issue := actionable.Issues.Items[i]
+		store.Record(timeline.Event{
+			IssueRef: issueRef(issue.Repo, issue.Number),
+			Kind:     timeline.KindEnumerated,
+		})
+	}
+}
+
+// recordKick records a KindKicked event for the given agent. Guarded and
+// nil-safe; no I/O.
+func recordKick(rec lifecycleRecorder, agent string) {
+	if rec == nil {
+		return
+	}
+	store := rec.LifecycleTimeline()
+	if store == nil {
+		return
+	}
+	store.Record(timeline.Event{
+		Kind:  timeline.KindKicked,
+		Agent: agent,
+	})
+}
+
+// issueRef renders the canonical "repo#number" reference the timeline uses to
+// group events by issue. An empty repo yields an empty ref (the store tolerates
+// it).
+func issueRef(repo string, number int) string {
+	if repo == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s#%d", repo, number)
+}
+
 func runEvalCycle(
 	ctx context.Context,
 	cfg *config.Config,
@@ -2978,6 +3049,13 @@ func runEvalCycle(
 	if data, err := json.Marshal(actionable); err == nil {
 		atomicWrite("/data/last-actionable.json", data)
 	}
+
+	// Record enumerated issues into the lifecycle timeline so the dashboard's
+	// lifecycle view has real data. Cheap and fully guarded: a nil dashboard or
+	// nil store is a no-op (timeline.Store.Record is nil-safe), the loop is
+	// bounded by maxTimelineEnumeratePerCycle so a huge backlog never floods the
+	// bounded ring in one cycle, and no I/O happens on this path.
+	recordEnumeratedIssues(dashSrv, actionable)
 
 	writeMergeEligible(actionable, actionable.Hold, cfg.Project.Org, logger)
 
@@ -3063,6 +3141,12 @@ func runEvalCycle(
 			}
 			gov.RecordKick(msg.Agent)
 			dashSrv.AuditLog("governor", "kick", "trigger=governor-eval", msg.Agent)
+
+			// Record the kick into the lifecycle timeline. Cheap, guarded, and
+			// nil-safe (Record no-ops on a nil dashboard/store). A kick is not
+			// tied to a single issue at this layer, so IssueRef is left empty;
+			// the event still records which agent was kicked and when.
+			recordKick(dashSrv, msg.Agent)
 
 			// Log token state at time of kick for cost attribution
 			if tokenCollector != nil {
