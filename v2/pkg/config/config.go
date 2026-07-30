@@ -33,6 +33,7 @@ type Config struct {
 	Agents        map[string]AgentConfig `yaml:"agents"`
 	Governor      GovernorConfig         `yaml:"governor"`
 	GitHub        GitHubConfig           `yaml:"github"`
+	GitLab        GitLabConfig           `yaml:"gitlab,omitempty"`
 	Notifications NotificationsConfig    `yaml:"notifications"`
 	Dashboard     DashboardConfig        `yaml:"dashboard"`
 	Data          DataConfig             `yaml:"data"`
@@ -258,6 +259,27 @@ type ProjectConfig struct {
 	AIAuthor    string   `yaml:"ai_author"`
 	PrimaryRepo string   `yaml:"primary_repo"`
 	OpenPRs     *bool    `yaml:"open_prs,omitempty"`
+	// Forge selects the source forge for this project: "github" (default) or
+	// "gitlab". It is additive — an absent value means GitHub, so existing
+	// GitHub-only configs are unaffected. Use ForgeKind() to read it with the
+	// default applied.
+	Forge string `yaml:"forge,omitempty"`
+}
+
+const (
+	// ForgeGitHub is the default forge kind (GitHub / GHE).
+	ForgeGitHub = "github"
+	// ForgeGitLab selects the GitLab forge (gitlab.com or self-managed).
+	ForgeGitLab = "gitlab"
+)
+
+// ForgeKind returns the configured forge kind, defaulting to ForgeGitHub when
+// unset so existing GitHub-only configs keep working unchanged.
+func (p *ProjectConfig) ForgeKind() string {
+	if p.Forge == "" {
+		return ForgeGitHub
+	}
+	return p.Forge
 }
 
 // PRsAllowed returns whether agents may open pull requests. Defaults to true.
@@ -1203,6 +1225,49 @@ const (
 	// still sign in with a github.com identity. No secret; safe to hardcode.
 	DefaultOAuthClientID = "Ov23ligE2p0gjXg6xAUf"
 )
+
+// GitLabConfig configures the GitLab forge (used when project.forge == "gitlab").
+// It is entirely additive: a config that never mentions gitlab is unaffected,
+// and the zero value points at public gitlab.com.
+//
+// The token itself is NOT stored here. Following Hive's no-hardcoded-secrets
+// rule, TokenEnv names the environment variable to read the GitLab access token
+// from at runtime (default GITLAB_TOKEN); the secret is never written to config.
+type GitLabConfig struct {
+	// URL is the GitLab instance root, e.g. "https://gitlab.com" (default) or a
+	// self-managed instance "https://gitlab.example.com". The "/api/v4" path is
+	// appended by the client.
+	URL string `yaml:"gitlab_url,omitempty"`
+	// TokenEnv is the environment variable holding the GitLab access token.
+	// Defaults to DefaultGitLabTokenEnv. The token value is resolved via
+	// os.Getenv at runtime and never persisted in config.
+	TokenEnv string `yaml:"token_env,omitempty"`
+}
+
+const (
+	// DefaultGitLabURL is the public GitLab SaaS instance root.
+	DefaultGitLabURL = "https://gitlab.com"
+	// DefaultGitLabTokenEnv is the default env var name for the GitLab token.
+	DefaultGitLabTokenEnv = "GITLAB_TOKEN"
+)
+
+// InstanceURL returns the configured GitLab instance root, defaulting to
+// DefaultGitLabURL when unset.
+func (g GitLabConfig) InstanceURL() string {
+	if g.URL == "" {
+		return DefaultGitLabURL
+	}
+	return g.URL
+}
+
+// TokenEnvName returns the env var name to read the GitLab token from,
+// defaulting to DefaultGitLabTokenEnv when unset.
+func (g GitLabConfig) TokenEnvName() string {
+	if g.TokenEnv == "" {
+		return DefaultGitLabTokenEnv
+	}
+	return g.TokenEnv
+}
 
 // IsPlaceholderApp reports whether app_id is the "no real App yet" sentinel.
 func (g GitHubConfig) IsPlaceholderApp() bool {
