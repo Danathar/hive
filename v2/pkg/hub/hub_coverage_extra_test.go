@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -1111,6 +1112,10 @@ func TestHandleContributeProxyBadURL(t *testing.T) {
 // ============================================================
 
 func TestHandleProxyHiveConfigUpstreamError(t *testing.T) {
+	orig := hiveConfigSSRFGuard
+	hiveConfigSSRFGuard = func(context.Context, string) bool { return false }
+	defer func() { hiveConfigSSRFGuard = orig }()
+
 	srv := NewHubServer(0, slog.Default(), "test", "v2")
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

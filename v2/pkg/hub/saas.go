@@ -3912,13 +3912,20 @@ func ghcrTagExists(client *http.Client, repo, tag string, logger *slog.Logger) b
 	return resp.StatusCode == http.StatusOK
 }
 
+// hiveConfigSSRFGuard is the SSRF check for handleProxyHiveConfig. It is a var
+// (not a direct isPrivateURL call) solely so tests can override it to reach a
+// loopback httptest server; production always uses isPrivateURL.
+var hiveConfigSSRFGuard = isPrivateURL
+
 func (s *HubServer) handleProxyHiveConfig(w http.ResponseWriter, r *http.Request) {
 	hiveID := r.PathValue("hiveID")
+	caller := s.getAuthUser(r)
 	s.mu.RLock()
-	var dashURL string
+	var dashURL, owner string
 	for _, h := range s.registry.Hives {
 		if h.ID == hiveID && h.DashboardURL != "" {
 			dashURL = h.DashboardURL
+			owner = h.Owner
 			break
 		}
 	}
@@ -3927,9 +3934,30 @@ func (s *HubServer) handleProxyHiveConfig(w http.ResponseWriter, r *http.Request
 		http.Error(w, `{"error":"hive not found or no dashboard URL"}`, http.StatusNotFound)
 		return
 	}
+	// Ownership: a hive's config is private to its owner (and site admins). This
+	// endpoint proxies a server-side fetch of a self-reported DashboardURL, so
+	// without this any authenticated user could pull any hive's config.
+	if owner != "" && caller != owner && caller != hubAdminUsername {
+		http.Error(w, `{"error":"not authorized for this hive"}`, http.StatusForbidden)
+		return
+	}
+	// SSRF guard: DashboardURL is self-reported by the spoke, so refuse to fetch
+	// internal / link-local / private targets (e.g. 169.254.169.254 cloud
+	// metadata, cluster-internal services). Uses the same guard as the public
+	// registry (see registry rendering ~server.go:1626). Indirected through a
+	// var so tests can point at a loopback httptest server.
+	if hiveConfigSSRFGuard(r.Context(), dashURL) {
+		http.Error(w, `{"error":"dashboard URL not permitted"}`, http.StatusForbidden)
+		return
+	}
 	const proxyConfigTimeout = 10 * time.Second
 	const maxConfigResponseBytes = 1 << 20
-	client := &http.Client{Timeout: proxyConfigTimeout}
+	client := &http.Client{
+		Timeout: proxyConfigTimeout,
+		// Do NOT follow redirects — a 30x could send us from a public
+		// DashboardURL to an internal host, re-opening the SSRF the guard closes.
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 	resp, err := client.Get(strings.TrimRight(dashURL, "/") + "/api/config/download")
 	if err != nil {
 		slog.Warn("hive config proxy failed", "hiveID", hiveID, "error", err)

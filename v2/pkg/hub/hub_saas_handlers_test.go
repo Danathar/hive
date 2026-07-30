@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -535,6 +536,12 @@ func TestHandleProxyHiveConfigNotInRegistry(t *testing.T) {
 }
 
 func TestHandleProxyHiveConfigWithDashboardURL(t *testing.T) {
+	// The SSRF guard blocks loopback (the httptest server address) in
+	// production; override it here so the proxy pass-through can be exercised.
+	orig := hiveConfigSSRFGuard
+	hiveConfigSSRFGuard = func(context.Context, string) bool { return false }
+	defer func() { hiveConfigSSRFGuard = orig }()
+
 	srv := NewHubServer(0, slog.Default(), "test", "v2")
 	srv.hubSecret = ""
 
@@ -1089,5 +1096,36 @@ func TestIsCSRFSafeGetAlwaysPasses(t *testing.T) {
 		if !isCSRFSafe(req) {
 			t.Errorf("%s should always pass CSRF", method)
 		}
+	}
+}
+
+// TestHandleProxyHiveConfigSSRFAndOwnership verifies the N4 hardening:
+// a private/loopback DashboardURL is refused, and a non-owner (non-admin)
+// caller is refused even for a public URL.
+func TestHandleProxyHiveConfigSSRFAndOwnership(t *testing.T) {
+	// 1) SSRF guard active (default) → a loopback DashboardURL is rejected 403.
+	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv.mu.Lock()
+	srv.registry.Hives = []RegistryEntry{{ID: "ssrf-hive", DashboardURL: "http://127.0.0.1:1/x"}}
+	srv.mu.Unlock()
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/saas/hive-config/{hiveID}", srv.handleProxyHiveConfig)
+	req := httptest.NewRequest("GET", "/api/saas/hive-config/ssrf-hive", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("private DashboardURL: expected 403, got %d (%s)", w.Code, w.Body.String())
+	}
+
+	// 2) Ownership: an owned hive with a public URL, called by a non-owner
+	//    (no auth user in this test → caller ""), is refused 403.
+	srv.mu.Lock()
+	srv.registry.Hives = []RegistryEntry{{ID: "owned-hive", DashboardURL: "https://example.com", Owner: "alice"}}
+	srv.mu.Unlock()
+	req2 := httptest.NewRequest("GET", "/api/saas/hive-config/owned-hive", nil)
+	w2 := httptest.NewRecorder()
+	mux.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusForbidden {
+		t.Errorf("non-owner: expected 403, got %d (%s)", w2.Code, w2.Body.String())
 	}
 }
