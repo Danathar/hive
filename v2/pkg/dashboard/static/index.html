@@ -847,6 +847,56 @@
        the "N Issues" / on-hold indicators. */
     .gov-stat .val.planning-alert { color: var(--yellow); }
 
+    /* ── ACMM level-up recommendation (advisory) + lifecycle timeline ── */
+    .reco-badge {
+      display: inline-block; font-size: 0.62rem; font-weight: 700; letter-spacing: 0.06em;
+      text-transform: uppercase; padding: 2px 8px; border-radius: 10px; vertical-align: middle;
+    }
+    .reco-badge.stay { background: color-mix(in srgb, var(--muted) 18%, transparent); color: var(--muted); border: 1px solid color-mix(in srgb, var(--muted) 35%, transparent); }
+    .reco-badge.raise { background: color-mix(in srgb, var(--yellow) 18%, transparent); color: var(--yellow); border: 1px solid color-mix(in srgb, var(--yellow) 45%, transparent); }
+    .reco-level-flow { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 1.05rem; }
+    .reco-level-flow .arrow { color: var(--muted); font-weight: 400; }
+    .reco-rationale { color: var(--muted); font-size: 0.8rem; margin-top: 8px; line-height: 1.4; }
+    .reco-ready { margin-top: 10px; padding: 8px 12px; border-radius: 6px; font-size: 0.8rem;
+      background: var(--green-bg); border: 1px solid var(--green-border); color: var(--text); }
+    .reco-checklist { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+    .reco-crit { display: flex; align-items: flex-start; gap: 8px; font-size: 0.8rem; padding: 6px 10px;
+      border-radius: 6px; background: var(--bg); border: 1px solid var(--border); }
+    .reco-crit .mark { flex: 0 0 auto; font-weight: 700; line-height: 1.3; }
+    .reco-crit.met .mark { color: var(--green); }
+    .reco-crit.unmet .mark { color: var(--red); }
+    .reco-crit .crit-body { flex: 1 1 auto; min-width: 0; }
+    .reco-crit .crit-name { font-weight: 600; color: var(--text); }
+    .reco-crit .crit-cmp { color: var(--muted); font-size: 0.75rem; margin-top: 2px; }
+    .reco-crit .crit-cmp .actual { color: var(--text); font-weight: 600; }
+    .reco-crit .crit-detail { color: var(--muted); font-size: 0.72rem; margin-top: 3px; }
+    .reco-advisory-note { margin-top: 12px; font-size: 0.68rem; color: var(--muted); font-style: italic; }
+    .reco-calm { color: var(--muted); font-size: 0.85rem; }
+
+    .lc-fleet { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+    .lc-fleet-stat { flex: 1 1 100px; min-width: 90px; background: var(--bg); border: 1px solid var(--border);
+      border-radius: 6px; padding: 8px 12px; }
+    .lc-fleet-stat .val { font-size: 1.3rem; font-weight: 700; }
+    .lc-fleet-stat .val.inflight { color: var(--blue); }
+    .lc-fleet-stat .val.merged { color: var(--green); }
+    .lc-fleet-stat .val.blocked { color: var(--red); }
+    .lc-fleet-stat .lbl { font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-top: 2px; }
+    .lc-events { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px;
+      max-height: 320px; overflow-y: auto; }
+    .lc-event { display: flex; align-items: center; gap: 8px; font-size: 0.78rem; padding: 5px 8px;
+      border-radius: 6px; background: var(--bg); border: 1px solid var(--border); }
+    .lc-kind { flex: 0 0 auto; font-size: 0.6rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+      padding: 2px 7px; border-radius: 8px; }
+    .lc-kind.neutral { background: color-mix(in srgb, var(--muted) 16%, transparent); color: var(--muted); }
+    .lc-kind.blue { background: color-mix(in srgb, var(--blue) 18%, transparent); color: var(--blue); }
+    .lc-kind.green { background: var(--green-bg); color: var(--green); }
+    .lc-kind.red { background: var(--red-bg); color: var(--red); }
+    .lc-event .lc-ref { color: var(--text); font-weight: 600; font-family: var(--font-mono); font-size: 0.72rem;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .lc-event .lc-agent { color: var(--muted); font-size: 0.72rem; }
+    .lc-event .lc-time { color: var(--muted); font-size: 0.7rem; margin-left: auto; flex: 0 0 auto; }
+    .lc-empty { color: var(--muted); font-size: 0.85rem; padding: 6px 0; }
+
     /* Repos */
     .repos { margin-bottom: 24px; }
     .repos h2 { font-size: var(--fs-xs); font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase; color: var(--amber); margin-bottom: 8px; }
@@ -2653,6 +2703,20 @@
         </div>
         <div id="acmm-eval-warning" style="display:none;margin-top:8px;padding:6px 10px;border-radius:6px;background:color-mix(in srgb, var(--yellow) 15%, transparent);border:1px solid color-mix(in srgb, var(--yellow) 40%, transparent);color:var(--text);font-size:0.75rem"></div>
       </div>
+    </div>
+  </div>
+
+  <div id="acmm-reco-section" style="margin-top: 16px; margin-bottom: 24px; display: none;">
+    <h2 style="margin-bottom: 8px;" class="section-label section-header-toggle" onclick="toggleSection('acmm-reco-section')"><span class="section-chevron">▼</span> ⬆️ Ready to level up? <span style="font-size:0.6em;font-weight:600;vertical-align:middle;padding:2px 7px;border-radius:10px;margin-left:6px;background:color-mix(in srgb, var(--muted) 18%, transparent);color:var(--muted)">advisory</span></h2>
+    <div class="section-body">
+      <div id="acmm-reco-card" style="background:var(--card-bg);border:1px solid var(--border);border-radius:8px;padding:16px"></div>
+    </div>
+  </div>
+
+  <div id="lifecycle-section" style="margin-top: 16px; margin-bottom: 24px; display: none;">
+    <h2 style="margin-bottom: 8px;" class="section-label section-header-toggle" onclick="toggleSection('lifecycle-section')"><span class="section-chevron">▼</span> 🔀 Lifecycle Timeline</h2>
+    <div class="section-body">
+      <div id="lifecycle-card" style="background:var(--card-bg);border:1px solid var(--border);border-radius:8px;padding:16px"></div>
     </div>
   </div>
 
@@ -6622,6 +6686,170 @@ function burnAreaChart() {
     }
     fetchCost();
     setInterval(fetchCost, COST_POLL_MS);
+
+    // ── v4: ACMM level-up recommendation (advisory) + lifecycle timeline ──
+    // Both are additive, read-only panels polled on their own modest interval.
+    // They fail quietly: a transient error leaves the last render in place and
+    // never blocks the main status poll. Every JSON field is guarded so a
+    // freshly-booted hive (nil status, empty timeline) renders calmly, not a
+    // stack trace.
+    const V4_PANELS_POLL_MS = 20000;
+
+    // Format a UnixMilli timestamp as a compact relative "time ago" string.
+    function v4RelTime(ms) {
+      const n = Number(ms);
+      if (!Number.isFinite(n) || n <= 0) return '';
+      const diff = Date.now() - n;
+      if (diff < 0) return 'just now';
+      const sec = Math.floor(diff / 1000);
+      if (sec < 60) return sec + 's ago';
+      const min = Math.floor(sec / 60);
+      if (min < 60) return min + 'm ago';
+      const hr = Math.floor(min / 60);
+      if (hr < 24) return hr + 'h ago';
+      const day = Math.floor(hr / 24);
+      return day + 'd ago';
+    }
+
+    // Map a lifecycle event kind to a badge color class.
+    function v4KindClass(kind) {
+      switch (kind) {
+        case 'kicked':
+        case 'pr_opened': return 'blue';
+        case 'merged': return 'green';
+        case 'blocked': return 'red';
+        default: return 'neutral'; // enumerated / classified / unknown
+      }
+    }
+
+    // PANEL A — "Ready to level up?" — advisory ACMM recommendation.
+    function renderACMMReco(rec) {
+      const section = document.getElementById('acmm-reco-section');
+      const card = document.getElementById('acmm-reco-card');
+      if (!section || !card) return;
+      rec = rec || {};
+      const advise = rec.Advise === 'raise' ? 'raise' : 'stay';
+      const cur = Number.isFinite(Number(rec.CurrentLevel)) ? Number(rec.CurrentLevel) : null;
+      const tgt = Number.isFinite(Number(rec.TargetLevel)) ? Number(rec.TargetLevel) : null;
+      const met = Array.isArray(rec.Met) ? rec.Met : [];
+      const unmet = Array.isArray(rec.Unmet) ? rec.Unmet : [];
+
+      // Minimal calm state: no criteria to show and already advising stay
+      // (e.g. topped out at L6 or a nil-status hive). Keep it quiet.
+      if (advise === 'stay' && met.length === 0 && unmet.length === 0) {
+        section.style.display = '';
+        const flow = (cur !== null)
+          ? `<div class="reco-level-flow">L${cur} <span class="reco-badge stay">stay</span></div>`
+          : '';
+        card.innerHTML = `${flow}<div class="reco-calm">${escapeHtml(rec.Rationale || 'No level-up recommendation right now.')}</div>`;
+        applySectionCollapse('acmm-reco-section');
+        return;
+      }
+
+      section.style.display = '';
+      const badgeLabel = advise === 'raise' ? 'raise' : 'stay';
+      const flowHtml = (cur !== null && tgt !== null)
+        ? `<div class="reco-level-flow">L${cur} <span class="arrow">→</span> L${tgt} <span class="reco-badge ${advise}">${badgeLabel}</span></div>`
+        : `<div class="reco-level-flow"><span class="reco-badge ${advise}">${badgeLabel}</span></div>`;
+
+      const critHtml = (list, isMet) => list.map((c) => {
+        c = c || {};
+        const name = escapeHtml(c.Name || '');
+        const cmp = escapeHtml(c.Comparator || '');
+        const req = escapeHtml(c.Required || '');
+        const act = escapeHtml(c.Actual || '');
+        const detail = escapeHtml(c.Detail || '');
+        const cmpLine = (req !== '' || act !== '')
+          ? `<div class="crit-cmp"><span class="actual">${act || '—'}</span> ${cmp} ${req || '—'}</div>`
+          : '';
+        const detailLine = detail ? `<div class="crit-detail">${detail}</div>` : '';
+        return `<li class="reco-crit ${isMet ? 'met' : 'unmet'}">
+          <span class="mark">${isMet ? '✓' : '✗'}</span>
+          <div class="crit-body"><div class="crit-name">${name}</div>${cmpLine}${detailLine}</div>
+        </li>`;
+      }).join('');
+
+      const readyHtml = rec.Ready
+        ? `<div class="reco-ready">✓ Eligible to raise${tgt !== null ? ` to L${tgt}` : ''} — a human approves the change.</div>`
+        : '';
+      const rationaleHtml = rec.Rationale
+        ? `<div class="reco-rationale">${escapeHtml(rec.Rationale)}</div>`
+        : '';
+      const checklistHtml = (unmet.length || met.length)
+        ? `<ul class="reco-checklist">${critHtml(unmet, false)}${critHtml(met, true)}</ul>`
+        : '';
+
+      card.innerHTML = `${flowHtml}${rationaleHtml}${readyHtml}${checklistHtml}
+        <div class="reco-advisory-note">Advisory only — this does not change the maturity level.</div>`;
+      applySectionCollapse('acmm-reco-section');
+    }
+
+    async function fetchACMMReco() {
+      try {
+        const r = await fetch('/api/acmm-recommendation');
+        if (!r.ok) return;
+        const rec = await r.json();
+        renderACMMReco(rec);
+      } catch (e) { /* transient — leave last render in place */ }
+    }
+
+    // PANEL B — lifecycle timeline + fleet health.
+    function renderLifecycle(dto) {
+      const section = document.getElementById('lifecycle-section');
+      const card = document.getElementById('lifecycle-card');
+      if (!section || !card) return;
+      dto = dto || {};
+      const fleet = dto.fleet || {};
+      const events = Array.isArray(dto.events) ? dto.events : [];
+
+      section.style.display = '';
+
+      const inFlight = Number(fleet.inFlight) || 0;
+      const merged = Number(fleet.merged) || 0;
+      const blocked = Number(fleet.blocked) || 0;
+      const fleetHtml = `<div class="lc-fleet">
+        <div class="lc-fleet-stat"><div class="val inflight">${inFlight}</div><div class="lbl">In flight</div></div>
+        <div class="lc-fleet-stat"><div class="val merged">${merged}</div><div class="lbl">Merged</div></div>
+        <div class="lc-fleet-stat"><div class="val blocked">${blocked}</div><div class="lbl">Blocked</div></div>
+      </div>`;
+
+      let listHtml;
+      if (events.length === 0) {
+        listHtml = `<div class="lc-empty">No lifecycle events yet — the governor only recently started recording them.</div>`;
+      } else {
+        listHtml = `<ul class="lc-events">${events.map((e) => {
+          e = e || {};
+          const kind = e.kind || '';
+          const ref = escapeHtml(e.issueRef || '');
+          const agent = e.agent ? escapeHtml(e.agent) : '';
+          const rel = v4RelTime(e.at);
+          const agentHtml = agent ? `<span class="lc-agent">${agent}</span>` : '';
+          const timeHtml = rel ? `<span class="lc-time">${escapeHtml(rel)}</span>` : '';
+          return `<li class="lc-event">
+            <span class="lc-kind ${v4KindClass(kind)}">${escapeHtml(kind || '—')}</span>
+            <span class="lc-ref">${ref || '—'}</span>${agentHtml}${timeHtml}
+          </li>`;
+        }).join('')}</ul>`;
+      }
+
+      card.innerHTML = fleetHtml + listHtml;
+      applySectionCollapse('lifecycle-section');
+    }
+
+    async function fetchLifecycle() {
+      try {
+        const r = await fetch('/api/lifecycle-timeline?limit=50');
+        if (!r.ok) return;
+        const dto = await r.json();
+        renderLifecycle(dto);
+      } catch (e) { /* transient — leave last render in place */ }
+    }
+
+    // Prime both panels and poll them on a modest independent interval. Do not
+    // block initial paint: these run after the main poll is already wired.
+    function v4RefreshPanels() { fetchACMMReco(); fetchLifecycle(); }
+    v4RefreshPanels();
+    setInterval(v4RefreshPanels, V4_PANELS_POLL_MS);
 
     // Cost range pills: switch hourly/daily/weekly/monthly and re-render the
     // trend chart from the already-fetched history (no network round-trip).
