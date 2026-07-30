@@ -2,6 +2,8 @@ package forge
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -154,5 +156,93 @@ func TestGitHubForgeListIssuesAndCRs(t *testing.T) {
 	allIssues, _ := f.ListOpenIssues(context.Background(), "")
 	if len(allIssues) != 2 {
 		t.Errorf("unfiltered issues = %d, want 2", len(allIssues))
+	}
+
+	// Empty repo filter also returns all change requests.
+	allCRs, _ := f.ListOpenChangeRequests(context.Background(), "")
+	if len(allCRs) != 2 {
+		t.Errorf("unfiltered change requests = %d, want 2", len(allCRs))
+	}
+}
+
+// errStub is an underlying-client error injected to exercise the adapter's
+// error-wrapping branches.
+var errStub = errors.New("boom from underlying client")
+
+// TestGitHubForgeGetRepoError verifies GetRepo wraps the underlying client
+// error rather than panicking.
+func TestGitHubForgeGetRepoError(t *testing.T) {
+	f := newGitHubForgeWithReader(&stubGitHub{err: errStub}, "acme")
+	_, err := f.GetRepo(context.Background(), "acme/widget")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, errStub) {
+		t.Errorf("error should wrap underlying error, got %v", err)
+	}
+}
+
+// TestGitHubForgeGetRepoNil covers the branch where the underlying client
+// returns a nil repository with no error.
+func TestGitHubForgeGetRepoNil(t *testing.T) {
+	f := newGitHubForgeWithReader(&stubGitHub{repo: nil}, "acme")
+	_, err := f.GetRepo(context.Background(), "acme/widget")
+	if err == nil {
+		t.Fatal("expected error for nil repository, got nil")
+	}
+	if !strings.Contains(err.Error(), "empty response") {
+		t.Errorf("error should mention empty response, got %v", err)
+	}
+}
+
+// TestGitHubForgeListErrors covers the error-wrapping branches on the list
+// operations.
+func TestGitHubForgeListErrors(t *testing.T) {
+	f := newGitHubForgeWithReader(&stubGitHub{err: errStub}, "acme")
+
+	if _, err := f.ListOpenIssues(context.Background(), "acme/widget"); err == nil {
+		t.Error("ListOpenIssues: expected error")
+	} else if !errors.Is(err, errStub) {
+		t.Errorf("ListOpenIssues error should wrap underlying, got %v", err)
+	}
+
+	if _, err := f.ListOpenChangeRequests(context.Background(), "acme/widget"); err == nil {
+		t.Error("ListOpenChangeRequests: expected error")
+	} else if !errors.Is(err, errStub) {
+		t.Errorf("ListOpenChangeRequests error should wrap underlying, got %v", err)
+	}
+}
+
+// TestGitHubForgeNilResult covers the branch where EnumerateActionable returns a
+// nil result with no error: the adapter returns nil, nil.
+func TestGitHubForgeNilResult(t *testing.T) {
+	f := newGitHubForgeWithReader(&stubGitHub{result: nil}, "acme")
+
+	issues, err := f.ListOpenIssues(context.Background(), "acme/widget")
+	if err != nil {
+		t.Fatalf("ListOpenIssues: %v", err)
+	}
+	if issues != nil {
+		t.Errorf("issues = %v, want nil for nil result", issues)
+	}
+
+	crs, err := f.ListOpenChangeRequests(context.Background(), "acme/widget")
+	if err != nil {
+		t.Fatalf("ListOpenChangeRequests: %v", err)
+	}
+	if crs != nil {
+		t.Errorf("change requests = %v, want nil for nil result", crs)
+	}
+}
+
+// TestNewGitHubForgeReal constructs the real GitHub adapter (no network is
+// touched by construction) to cover newGitHubForge and its Kind.
+func TestNewGitHubForgeReal(t *testing.T) {
+	f := newGitHubForge("test-token", Options{Org: "acme", BaseURL: ""})
+	if f.Kind() != KindGitHub {
+		t.Errorf("Kind() = %q, want %q", f.Kind(), KindGitHub)
+	}
+	if f.org != "acme" {
+		t.Errorf("org = %q, want acme", f.org)
 	}
 }

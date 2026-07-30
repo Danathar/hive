@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -273,6 +274,405 @@ func TestGitLabErrorStatus(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "404") {
 		t.Errorf("error should mention status: %v", err)
+	}
+}
+
+// TestGitLabNewForgeBaseURL exercises base-URL normalization: the public
+// default, self-managed with and without a trailing slash, and an invalid URL.
+func TestGitLabNewForgeBaseURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		baseURL string
+		want    string
+		wantErr bool
+	}{
+		{"empty defaults to gitlab.com", "", defaultGitLabBaseURL, false},
+		{"self-managed no trailing slash", "https://gitlab.example.com", "https://gitlab.example.com", false},
+		{"self-managed trailing slash trimmed", "https://gitlab.example.com/", "https://gitlab.example.com", false},
+		{"self-managed multiple trailing slashes trimmed", "https://gitlab.example.com///", "https://gitlab.example.com", false},
+		{"gitlab.com explicit", "https://gitlab.com", "https://gitlab.com", false},
+		{"invalid url errors", "://missing-scheme", "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f, err := newGitLabForge("test-token", Options{BaseURL: tt.baseURL})
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for base URL %q, got nil", tt.baseURL)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("newGitLabForge(%q): %v", tt.baseURL, err)
+			}
+			if f.baseURL != tt.want {
+				t.Errorf("baseURL = %q, want %q", f.baseURL, tt.want)
+			}
+		})
+	}
+}
+
+// TestGitLabAPIPathAppended asserts the /api/v4 path is appended to the instance
+// root exactly once, regardless of a trailing slash on the base URL.
+func TestGitLabAPIPathAppended(t *testing.T) {
+	for _, base := range []string{"", "/"} {
+		var gotURI string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotURI = r.RequestURI
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(cankedProjectJSON))
+		}))
+		// Point the adapter at the test server, optionally with a trailing slash.
+		f := newTestGitLab(t, srv.URL+base, "kubestellar")
+		if _, err := f.GetRepo(context.Background(), "hive"); err != nil {
+			srv.Close()
+			t.Fatalf("GetRepo (base suffix %q): %v", base, err)
+		}
+		srv.Close()
+		if !strings.HasPrefix(gotURI, gitLabAPIPath+"/projects/") {
+			t.Errorf("base suffix %q: request URI = %q, want prefix %q/projects/", base, gotURI, gitLabAPIPath)
+		}
+		if strings.Contains(gotURI, gitLabAPIPath+gitLabAPIPath) {
+			t.Errorf("base suffix %q: /api/v4 doubled in %q", base, gotURI)
+		}
+	}
+}
+
+// TestGitLabNestedNamespaceEncoding verifies a nested-namespace slug
+// (group/subgroup/repo) is URL-encoded as a single path segment on the wire.
+func TestGitLabNestedNamespaceEncoding(t *testing.T) {
+	var gotURI string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotURI = r.RequestURI
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(cankedProjectJSON))
+	}))
+	defer srv.Close()
+
+	f := newTestGitLab(t, srv.URL, "")
+	if _, err := f.GetRepo(context.Background(), "group/subgroup/repo"); err != nil {
+		t.Fatalf("GetRepo: %v", err)
+	}
+	// All slashes in the slug must be percent-encoded (%2F), leaving exactly one
+	// literal slash separating /projects/ from the encoded segment.
+	if !strings.Contains(gotURI, "/projects/group%2Fsubgroup%2Frepo") {
+		t.Errorf("request URI = %q, want encoded group%%2Fsubgroup%%2Frepo", gotURI)
+	}
+}
+
+// TestGitLabErrorStatuses covers the range of non-2xx responses across all read
+// operations: each must return an error mentioning the status, never panic.
+func TestGitLabErrorStatuses(t *testing.T) {
+	statuses := []int{
+		http.StatusUnauthorized,        // 401
+		http.StatusForbidden,           // 403
+		http.StatusNotFound,            // 404
+		http.StatusInternalServerError, // 500
+	}
+	for _, status := range statuses {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte(`{"message":"boom"}`))
+			}))
+			defer srv.Close()
+
+			f := newTestGitLab(t, srv.URL, "kubestellar")
+			ctx := context.Background()
+
+			if _, err := f.GetRepo(ctx, "kubestellar/hive"); err == nil {
+				t.Errorf("GetRepo: expected error for status %d", status)
+			} else if !strings.Contains(err.Error(), strconv.Itoa(status)) {
+				t.Errorf("GetRepo error should mention %d: %v", status, err)
+			}
+			if _, err := f.ListOpenIssues(ctx, "kubestellar/hive"); err == nil {
+				t.Errorf("ListOpenIssues: expected error for status %d", status)
+			}
+			if _, err := f.ListOpenChangeRequests(ctx, "kubestellar/hive"); err == nil {
+				t.Errorf("ListOpenChangeRequests: expected error for status %d", status)
+			}
+		})
+	}
+}
+
+// TestGitLabMalformedJSON ensures a malformed or empty response body surfaces a
+// decode error rather than panicking, on every read operation.
+func TestGitLabMalformedJSON(t *testing.T) {
+	bodies := map[string]string{
+		"garbage":         "not json at all",
+		"empty":           "",
+		"truncated array": "[{",
+		"wrong type":      `{"not":"an array"}`,
+	}
+	for name, body := range bodies {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(body))
+			}))
+			defer srv.Close()
+
+			f := newTestGitLab(t, srv.URL, "kubestellar")
+			ctx := context.Background()
+
+			// GetRepo decodes an object; list ops decode arrays. "wrong type"
+			// (a valid object) only breaks the array decoders, so skip GetRepo
+			// there. Every other body must break all three.
+			if name != "wrong type" {
+				if _, err := f.GetRepo(ctx, "kubestellar/hive"); err == nil {
+					t.Errorf("GetRepo: expected decode error for %q body", name)
+				}
+			}
+			if _, err := f.ListOpenIssues(ctx, "kubestellar/hive"); err == nil {
+				t.Errorf("ListOpenIssues: expected decode error for %q body", name)
+			}
+			if _, err := f.ListOpenChangeRequests(ctx, "kubestellar/hive"); err == nil {
+				t.Errorf("ListOpenChangeRequests: expected decode error for %q body", name)
+			}
+		})
+	}
+}
+
+// TestGitLabPaginationCap asserts the pagination loop stops after
+// gitLabMaxPages even when the server always advertises a further page, and
+// that per_page is set on every request.
+func TestGitLabPaginationCap(t *testing.T) {
+	var requests int
+	var maxPageSeen int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Query().Get("per_page") != strconv.Itoa(gitLabPerPage) {
+			t.Errorf("per_page = %q, want %d", r.URL.Query().Get("per_page"), gitLabPerPage)
+		}
+		if p, _ := strconv.Atoi(r.URL.Query().Get("page")); p > maxPageSeen {
+			maxPageSeen = p
+		}
+		w.Header().Set("Content-Type", "application/json")
+		// Always advertise another page: without the cap this would loop forever.
+		w.Header().Set("X-Next-Page", strconv.Itoa(1000))
+		_, _ = w.Write([]byte(`[{"iid":1,"title":"t","state":"opened","author":{"username":"a"}}]`))
+	}))
+	defer srv.Close()
+
+	f := newTestGitLab(t, srv.URL, "kubestellar")
+	issues, err := f.ListOpenIssues(context.Background(), "kubestellar/hive")
+	if err != nil {
+		t.Fatalf("ListOpenIssues: %v", err)
+	}
+	if requests != gitLabMaxPages {
+		t.Errorf("made %d requests, want exactly gitLabMaxPages=%d", requests, gitLabMaxPages)
+	}
+	if len(issues) != gitLabMaxPages {
+		t.Errorf("collected %d issues, want %d (one per capped page)", len(issues), gitLabMaxPages)
+	}
+}
+
+// TestGitLabPaginationBadNextPage ensures a non-numeric X-Next-Page header is
+// treated as "no more pages" (nextPage stays 0) rather than erroring.
+func TestGitLabPaginationBadNextPage(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Next-Page", "not-a-number")
+		_, _ = w.Write([]byte(`[{"iid":1,"title":"t","state":"opened","author":{"username":"a"}}]`))
+	}))
+	defer srv.Close()
+
+	f := newTestGitLab(t, srv.URL, "kubestellar")
+	issues, err := f.ListOpenIssues(context.Background(), "kubestellar/hive")
+	if err != nil {
+		t.Fatalf("ListOpenIssues: %v", err)
+	}
+	if requests != 1 {
+		t.Errorf("made %d requests, want 1 (bad X-Next-Page => stop)", requests)
+	}
+	if len(issues) != 1 {
+		t.Errorf("collected %d issues, want 1", len(issues))
+	}
+}
+
+// TestGitLabGetRepoFallbacks covers the GetRepo field-derivation fallbacks used
+// when the project JSON omits path_with_namespace / path / namespace.full_path:
+// the code derives them from the requested slug instead.
+func TestGitLabGetRepoFallbacks(t *testing.T) {
+	// Minimal project JSON: only id + web_url, everything else empty.
+	const sparse = `{"id":1,"web_url":"https://gitlab.example.com/group/sub/proj"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(sparse))
+	}))
+	defer srv.Close()
+
+	f := newTestGitLab(t, srv.URL, "")
+	repo, err := f.GetRepo(context.Background(), "group/sub/proj")
+	if err != nil {
+		t.Fatalf("GetRepo: %v", err)
+	}
+	if repo.FullName != "group/sub/proj" {
+		t.Errorf("FullName fallback = %q, want group/sub/proj", repo.FullName)
+	}
+	if repo.Name != "proj" {
+		t.Errorf("Name fallback = %q, want proj (last segment)", repo.Name)
+	}
+	if repo.Owner != "group/sub" {
+		t.Errorf("Owner fallback = %q, want group/sub (everything before last slash)", repo.Owner)
+	}
+}
+
+// TestGitLabReadBodyError exercises the getRaw read-error branch: a 2xx status
+// whose body is truncated below its advertised Content-Length, so io.ReadAll
+// fails with an unexpected EOF.
+func TestGitLabReadBodyError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("ResponseWriter is not a Hijacker")
+			return
+		}
+		conn, _, err := hj.Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		// Advertise 1000 bytes but send only a few, then slam the connection.
+		_, _ = conn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\nshort"))
+		_ = conn.Close()
+	}))
+	defer srv.Close()
+
+	f := newTestGitLab(t, srv.URL, "kubestellar")
+	_, err := f.GetRepo(context.Background(), "kubestellar/hive")
+	if err == nil {
+		t.Fatal("expected read error for truncated body, got nil")
+	}
+	if !strings.Contains(err.Error(), "reading body") {
+		t.Errorf("error should mention reading body: %v", err)
+	}
+}
+
+// TestGitLabRequestBuildError forces http.NewRequestWithContext to fail by
+// giving the adapter a base URL containing a control character, which is
+// invalid in a request target.
+func TestGitLabRequestBuildError(t *testing.T) {
+	f := &gitLabForge{
+		baseURL: "http://example.com/\x7f", // DEL control char is not a valid URL byte
+		http:    &http.Client{},
+	}
+	_, err := f.GetRepo(context.Background(), "a/b")
+	if err == nil {
+		t.Fatal("expected request-build error, got nil")
+	}
+}
+
+// TestGitLabNoTokenNoHeader confirms an empty token means the PRIVATE-TOKEN
+// header is not sent (unauthenticated public reads), while a token is sent.
+func TestGitLabTokenHeaderPresence(t *testing.T) {
+	tests := []struct {
+		name       string
+		token      string
+		wantHeader bool
+	}{
+		{"with token", "test-token", true},
+		{"empty token", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var sawHeader bool
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// http.Header canonicalizes keys, so use Get which handles that.
+				sawHeader = r.Header.Get(gitLabTokenHeader) != ""
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(cankedProjectJSON))
+			}))
+			defer srv.Close()
+
+			f, err := newGitLabForge(tt.token, Options{BaseURL: srv.URL, Org: "kubestellar"})
+			if err != nil {
+				t.Fatalf("newGitLabForge: %v", err)
+			}
+			if _, err := f.GetRepo(context.Background(), "hive"); err != nil {
+				t.Fatalf("GetRepo: %v", err)
+			}
+			if sawHeader != tt.wantHeader {
+				t.Errorf("PRIVATE-TOKEN header present = %v, want %v", sawHeader, tt.wantHeader)
+			}
+		})
+	}
+}
+
+// TestSplitRepoLastAndOwnerLast covers the slug-splitting helpers, including the
+// no-slash edge case.
+func TestSplitRepoLastAndOwnerLast(t *testing.T) {
+	tests := []struct {
+		full      string
+		wantOwner string
+		wantName  string
+	}{
+		{"group/sub/proj", "group/sub", "proj"},
+		{"owner/repo", "owner", "repo"},
+		{"noslash", "", "noslash"},
+		{"", "", ""},
+		{"trailing/", "trailing", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.full, func(t *testing.T) {
+			owner, name := splitRepoLast(tt.full)
+			if owner != tt.wantOwner || name != tt.wantName {
+				t.Errorf("splitRepoLast(%q) = %q,%q want %q,%q", tt.full, owner, name, tt.wantOwner, tt.wantName)
+			}
+			// splitOwnerLast delegates to splitRepoLast; owner must agree.
+			gotOwner, _ := splitOwnerLast(tt.full)
+			if gotOwner != tt.wantOwner {
+				t.Errorf("splitOwnerLast(%q) owner = %q, want %q", tt.full, gotOwner, tt.wantOwner)
+			}
+		})
+	}
+}
+
+// TestTruncate covers both branches of truncate: short strings pass through
+// unchanged, long strings are cut with an ellipsis.
+func TestTruncate(t *testing.T) {
+	if got := truncate("short", 200); got != "short" {
+		t.Errorf("truncate short = %q, want unchanged", got)
+	}
+	long := strings.Repeat("x", 250)
+	got := truncate(long, 200)
+	if len(got) != 203 { // 200 chars + "..."
+		t.Errorf("truncated length = %d, want 203", len(got))
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Errorf("truncated string should end with ..., got %q", got[len(got)-5:])
+	}
+}
+
+// TestNormalizeLabels covers the nil and non-nil label guard paths directly.
+func TestNormalizeLabels(t *testing.T) {
+	if got := normalizeLabels(nil); got == nil || len(got) != 0 {
+		t.Errorf("normalizeLabels(nil) = %v, want non-nil empty slice", got)
+	}
+	in := []string{"a", "b"}
+	if got := normalizeLabels(in); len(got) != 2 || got[0] != "a" {
+		t.Errorf("normalizeLabels(%v) = %v, want passthrough", in, got)
+	}
+}
+
+// TestGitLabTruncatedErrorBody ensures a very long error body is truncated in
+// the returned error message (exercises truncate via getRaw's error path).
+func TestGitLabTruncatedErrorBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(strings.Repeat("E", 500)))
+	}))
+	defer srv.Close()
+
+	f := newTestGitLab(t, srv.URL, "kubestellar")
+	_, err := f.GetRepo(context.Background(), "kubestellar/hive")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "...") {
+		t.Errorf("long error body should be truncated with ...: %v", err)
 	}
 }
 
