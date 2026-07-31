@@ -71,11 +71,17 @@ var (
 //   - spokeAppKeyPath is on the PVC and is where a hub-delivered (cluster
 //     default) key lands. It is also what cfg.GitHub.KeyFile is repointed at
 //     once the hub delivers one, so it takes effect over the provisioned mount.
+//
 // Vars rather than consts so tests can point them at a temp dir and exercise
 // the real resolution order; production never reassigns them.
 var (
 	spokeProvisionedAppKeyPath = "/secrets/gh-app-key.pem"
 	spokeAppKeyPath            = "/data/gh-app-key.pem"
+	// spokeAppKeyDir is where per-app-id keys the hub delivers land, one file per
+	// App the fleet knows: gh-app-key-<appid>.pem. It is the PVC directory that
+	// already holds spokeAppKeyPath, so both survive restarts. A var so tests can
+	// redirect it; production never reassigns it.
+	spokeAppKeyDir = "/data"
 )
 
 // spokeAppKeyFileMode is rw------- : signing material must never be readable by
@@ -87,6 +93,116 @@ const spokeAppKeyFileMode = 0o600
 // process exit.
 const traceShutdownTimeout = 5 * time.Second
 
+// perAppIDKeyPath returns the on-disk path of the key file a spoke uses for a
+// specific app_id — /data/gh-app-key-<appid>.pem. This is what lets one spoke
+// hold BOTH the github.com App key AND its cluster's GitHub Enterprise App key
+// at once and sign with whichever matches its configured app_id.
+//
+// Returns "" for a non-positive app_id (0 = unknown/unset, the placeholder
+// sentinel, or a hand-corrupted value): there is no meaningful per-app file for
+// those, and the caller falls back to the existing single-file behaviour.
+func perAppIDKeyPath(appID int64) string {
+	if appID <= 0 {
+		return ""
+	}
+	return filepath.Join(spokeAppKeyDir, fmt.Sprintf("gh-app-key-%d.pem", appID))
+}
+
+// perAppIDKeyFilePrefix / Suffix bracket the per-app-id key filename so a scan
+// can recover the app_id from the name. Named so the format lives in exactly one
+// place alongside perAppIDKeyPath.
+const (
+	perAppIDKeyFilePrefix = "gh-app-key-"
+	perAppIDKeyFileSuffix = ".pem"
+)
+
+// heldPerAppIDKeyFingerprints scans the PVC for per-app-id key files
+// (gh-app-key-<appid>.pem) and returns app_id (decimal string) → fingerprint for
+// every one that holds a usable key. It is what the spoke reports so the hub
+// delivers the fleet's additional keys idempotently: a key already present with
+// the right fingerprint is not re-sent.
+//
+// It never returns key material — only fingerprints. A missing directory,
+// unreadable file, or unparseable key is silently skipped: the worst case is the
+// hub re-delivers a key the spoke already writes idempotently, never a crash.
+func heldPerAppIDKeyFingerprints() map[string]string {
+	entries, err := os.ReadDir(spokeAppKeyDir)
+	if err != nil {
+		return nil
+	}
+	var held map[string]string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasPrefix(name, perAppIDKeyFilePrefix) || !strings.HasSuffix(name, perAppIDKeyFileSuffix) {
+			continue
+		}
+		idStr := strings.TrimSuffix(strings.TrimPrefix(name, perAppIDKeyFilePrefix), perAppIDKeyFileSuffix)
+		id, convErr := strconv.ParseInt(idStr, 10, 64)
+		if convErr != nil || id <= 0 {
+			continue
+		}
+		fp, fpErr := config.AppKeyFingerprintFromFile(filepath.Join(spokeAppKeyDir, name))
+		if fpErr != nil || fp == "" {
+			continue
+		}
+		if held == nil {
+			held = make(map[string]string)
+		}
+		held[idStr] = fp
+	}
+	return held
+}
+
+// writePerAppIDKey persists a hub-delivered per-app-id key to its PVC file
+// atomically (temp file in the same dir, then rename) with a restrictive 0600
+// mode from creation, so a spoke can never sign with a half-written key. Returns
+// the resulting fingerprint (never the key) for auditable logging, or an error.
+func writePerAppIDKey(appID int64, pemData string) (string, error) {
+	path := perAppIDKeyPath(appID)
+	if path == "" {
+		return "", fmt.Errorf("refusing to write key for non-positive app_id %d", appID)
+	}
+	trimmed := strings.TrimSpace(pemData)
+	if !strings.HasPrefix(trimmed, "-----BEGIN") {
+		return "", fmt.Errorf("app key for app_id %d is not PEM", appID)
+	}
+	fp, err := config.AppKeyFingerprint(trimmed)
+	if err != nil {
+		return "", fmt.Errorf("app key for app_id %d is unusable: %w", appID, err)
+	}
+	if err := os.MkdirAll(spokeAppKeyDir, 0o700); err != nil {
+		return "", fmt.Errorf("create app key dir: %w", err)
+	}
+	tmp, err := os.CreateTemp(spokeAppKeyDir, "."+filepath.Base(path)+".tmp*")
+	if err != nil {
+		return "", fmt.Errorf("create temp app key file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op once the rename below succeeds
+	if err := tmp.Chmod(spokeAppKeyFileMode); err != nil {
+		tmp.Close()
+		return "", fmt.Errorf("chmod temp app key file: %w", err)
+	}
+	if _, err := tmp.WriteString(trimmed + "\n"); err != nil {
+		tmp.Close()
+		return "", fmt.Errorf("write temp app key file: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return "", fmt.Errorf("sync temp app key file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return "", fmt.Errorf("close temp app key file: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return "", fmt.Errorf("rename app key into place: %w", err)
+	}
+	return fp, nil
+}
+
 // reportedAppKeyFingerprint returns the non-secret fingerprint of the App key
 // this spoke is ACTUALLY using, for the heartbeat payload. It fingerprints the
 // resolved key file rather than a hard-coded path so the hub compares against
@@ -96,11 +212,12 @@ const traceShutdownTimeout = 5 * time.Second
 // unparseable contents. All three mean the same thing to the hub ("this spoke
 // cannot authenticate") and are repaired identically. The private key itself is
 // never returned, and never enters the payload.
-func reportedAppKeyFingerprint(keyFile string) string {
+func reportedAppKeyFingerprint(keyFile string, appID int64) string {
 	// Lead with the same path resolveAppKeyFile would sign with, so the hub is
 	// told about the key actually in effect and never about a shadowed one.
 	candidates := []string{
-		resolveAppKeyFile(keyFile, os.Getenv("GH_APP_KEY_FILE")),
+		resolveAppKeyFile(keyFile, os.Getenv("GH_APP_KEY_FILE"), appID),
+		perAppIDKeyPath(appID),
 		keyFile, spokeAppKeyPath, spokeProvisionedAppKeyPath,
 	}
 	for _, p := range candidates {
@@ -122,7 +239,7 @@ func reportedAppKeyFingerprint(keyFile string) string {
 // When BOTH exist the hub-delivered PVC key is the one in effect (the callback
 // repoints cfg.GitHub.KeyFile at it), so this only claims an override while the
 // provisioned key is genuinely the one being used.
-func hasPerHiveAppKey(keyFile string) bool {
+func hasPerHiveAppKey(keyFile string, appID int64) bool {
 	fp, err := config.AppKeyFingerprintFromFile(spokeProvisionedAppKeyPath)
 	if err != nil || fp == "" {
 		return false
@@ -130,8 +247,9 @@ func hasPerHiveAppKey(keyFile string) bool {
 	// The provisioned key exists. It is the effective credential only if the
 	// resolved key file still points at it — resolveAppKeyFile is the single
 	// authority on that, so an unconfigured hive that has already taken delivery
-	// of a /data key correctly stops claiming a per-hive override.
-	return resolveAppKeyFile(keyFile, os.Getenv("GH_APP_KEY_FILE")) == spokeProvisionedAppKeyPath
+	// of a /data key (or a per-app-id key) correctly stops claiming a per-hive
+	// override.
+	return resolveAppKeyFile(keyFile, os.Getenv("GH_APP_KEY_FILE"), appID) == spokeProvisionedAppKeyPath
 }
 
 // resolveAppKeyFile picks which App private key this process will actually sign
@@ -153,17 +271,38 @@ func hasPerHiveAppKey(keyFile string) bool {
 // preferred over the provisioning mount. An EXPLICIT key_file or env override
 // still wins outright: those are deliberate, and this must not silently redirect
 // an operator who named a path.
-func resolveAppKeyFile(configured, envOverride string) string {
+//
+// PER-APP-ID SELECTION (the both-keys fix)
+//
+// appID is the App this process is configured to authenticate AS
+// (cfg.GitHub.AppID). When the hub has delivered a per-app-id key for exactly
+// that App — /data/gh-app-key-<appID>.pem — it is preferred over the generic
+// single-file paths, because it is provably the RIGHT key for the app_id we
+// claim. This is what lets a github.com hive on a GitHub-Enterprise cluster sign
+// with the github.com key even though its cluster default (and its single
+// /data/gh-app-key.pem) is the GHE key. It sits just below an explicit
+// key_file/env override — an operator who named a path still wins — and above
+// the generic fallbacks. appID <= 0 disables it entirely, so nothing changes for
+// a hive that reports no app_id.
+func resolveAppKeyFile(configured, envOverride string, appID int64) string {
 	if v := strings.TrimSpace(envOverride); v != "" {
 		return v
 	}
 	if v := strings.TrimSpace(configured); v != "" {
 		return v
 	}
-	// Nothing configured. Prefer a usable hub-delivered key on the PVC; fall
-	// back to the provisioning mount only when /data has no parseable key. The
-	// fingerprint check (not mere existence) keeps an empty or truncated /data
-	// file from shadowing a good provisioned key.
+	// Nothing explicitly configured. Prefer a per-app-id key matching the App we
+	// claim — the only key that is CORRECT-by-construction for this app_id — over
+	// the generic cluster/provisioned files. The fingerprint check (not mere
+	// existence) keeps an empty or truncated per-app file from shadowing a good
+	// generic key.
+	if p := perAppIDKeyPath(appID); p != "" {
+		if fp, err := config.AppKeyFingerprintFromFile(p); err == nil && fp != "" {
+			return p
+		}
+	}
+	// Prefer a usable hub-delivered key on the PVC; fall back to the provisioning
+	// mount only when /data has no parseable key.
 	if fp, err := config.AppKeyFingerprintFromFile(spokeAppKeyPath); err == nil && fp != "" {
 		return spokeAppKeyPath
 	}
@@ -237,7 +376,7 @@ type githubAuth struct {
 // config.PlaceholderAppID.
 func initGitHubAuth(ctx context.Context, cfg *config.Config, logger *slog.Logger) githubAuth {
 	var out githubAuth
-	appKeyFile := resolveAppKeyFile(cfg.GitHub.KeyFile, os.Getenv("GH_APP_KEY_FILE"))
+	appKeyFile := resolveAppKeyFile(cfg.GitHub.KeyFile, os.Getenv("GH_APP_KEY_FILE"), cfg.GitHub.AppID)
 
 	// HasUsableApp() rejects config.PlaceholderAppID. A placeholder paired with
 	// a real installation_id — exactly what happens the instant an owner
@@ -292,10 +431,17 @@ func initGitHubAuth(ctx context.Context, cfg *config.Config, logger *slog.Logger
 		// Real App, unusable key. Already logged; leave Client nil so nothing
 		// tries to act on GitHub with credentials that do not work.
 	case cfg.GitHub.IsPlaceholderApp():
-		// User-actionable: this hive was provisioned ahead of its App, and
-		// installing the App is exactly what resolves it.
-		out.Failure = "This hive carries a placeholder github.app_id and is not yet linked to a GitHub App. Install the GitHub App on your org to enable agents."
-		out.State = github.AppStateNotInstalled
+		// OPERATOR-actionable, not user-actionable. This hive was provisioned as
+		// a placeholder and never assigned a real app_id, so the JWT it signs
+		// names no App and fails before any installation is consulted. Nothing
+		// the owner enters in the installation-ID box can fix it — reporting this
+		// as AppStateNotInstalled sent owners to re-install an App that was
+		// already installed and to re-enter an installation_id that was already
+		// correct.
+		out.Failure = "This hive was never assigned a GitHub App ID: it still carries the placeholder github.app_id, " +
+			"which does not name a real GitHub App. Setting an installation ID cannot resolve this — " +
+			"the hub operator must assign the real App ID."
+		out.State = github.AppStateNoAppAssigned
 		logger.Warn("placeholder github.app_id — hive starting in dashboard-only mode",
 			"placeholder_app_id", config.PlaceholderAppID,
 			"installation_id", cfg.GitHub.InstallationID,
@@ -414,9 +560,23 @@ func main() {
 	// previous version.
 	const upgradeMarkerStartupPath = "/data/upgrade-requested"
 	if markerData, err := os.ReadFile(upgradeMarkerStartupPath); err == nil {
-		if !strings.Contains(string(markerData), fmt.Sprintf(`"current_sha":"%s"`, gitShort)) {
+		m := parseUpgradeMarker(markerData)
+		if m.CurrentSHA != gitShort {
+			// We booted on a different SHA than the one that requested the
+			// upgrade: it landed. Drop the marker so the attempt budget resets.
 			os.Remove(upgradeMarkerStartupPath)
-			logger.Info("cleared stale upgrade marker (SHA changed)", "current", gitShort)
+			logger.Info("upgrade landed, cleared marker",
+				"current", gitShort, "previous", m.CurrentSHA, "target", m.TargetSHA)
+		} else {
+			// Same SHA as the attempt that ran before this boot: the image never
+			// changed, so that attempt FAILED. Say so at startup — previously
+			// this restart looked completely routine in the logs.
+			logger.Error("previous self-upgrade attempt did not land (still on the same image)",
+				"current", gitShort,
+				"target", m.TargetSHA,
+				"attempts", m.Attempts,
+				"last_error", m.LastError,
+			)
 		}
 	}
 
@@ -661,21 +821,29 @@ func main() {
 				// GitHub returns 403 for rate limiting too — a transient
 				// condition that must not raise the "App Not Installed"
 				// banner (matches the guard on the repo-change path).
-				if strings.Contains(err.Error(), "rate limit") {
+				if isGitHubRateLimitText(err) {
 					logger.Warn("GitHub API rate limit hit during advisory issue ensure", "repo", primaryRepo)
-				} else if strings.Contains(err.Error(), "403") || strings.Contains(err.Error(), "401") {
-					githubAppRequired = true
-					// Classify WHY before the banner renders. A bare 401/403
-					// here used to become "GitHub App Not Installed", which is
-					// wrong — and actively misleading — when the real cause is
-					// a key the operator has not delivered. Classification is
-					// on the live API response, and a missing key file
-					// short-circuits without any API call.
-					githubAppDiag, githubAppState = diagnoseGitHubApp(ctx, ghClient.AppAuth(), cfg.Project.Org)
-					logger.Warn("GitHub App authentication failed at startup",
-						"state", githubAppState.String(),
-						"operator_actionable", githubAppState.OperatorActionable(),
-						"error", err)
+				} else {
+					// Do NOT decide from the error string. This call site used
+					// to raise the banner on a substring match for "403"/"401"
+					// and set githubAppRequired=true BEFORE classifying, then
+					// never lower it again when classification came back OK or
+					// inconclusive — which is why the banner showed on boot and
+					// vanished on the first Re-check with nothing fixed.
+					// classifyGitHubAppFailure is the same verdict Re-check
+					// uses, and it declines to raise on AppStateUnknown.
+					raise, diag, state := classifyGitHubAppFailure(ctx, ghClient.AppAuth(), cfg.Project.Org, logger)
+					if raise {
+						githubAppRequired = true
+						githubAppDiag, githubAppState = diag, state
+						logger.Warn("GitHub App authentication failed at startup",
+							"state", state.String(),
+							"operator_actionable", state.OperatorActionable(),
+							"error", err)
+					} else {
+						logger.Warn("advisory issue ensure failed but GitHub App auth verified healthy — not raising the App banner",
+							"repo", primaryRepo, "state", state.String(), "error", err)
+					}
 				}
 			} else {
 				advisoryIssues[primaryRepo] = num
@@ -1439,10 +1607,25 @@ func main() {
 				num, err := ghClient.EnsureAdvisoryIssue(ctx, newPrimaryRepo)
 				if err != nil {
 					logger.Error("failed to create advisory issue on new primary repo", "repo", newPrimaryRepo, "error", err)
-					if strings.Contains(err.Error(), "rate limit") {
+					if isGitHubRateLimitText(err) {
 						logger.Warn("GitHub API rate limit hit during advisory issue creation", "repo", newPrimaryRepo)
-					} else if strings.Contains(err.Error(), "403") || strings.Contains(err.Error(), "401") {
-						dashSrv.SetGitHubAppRequired(true)
+					} else {
+						// #2224 replaced error-string classification everywhere
+						// else but missed this site, which raised the banner on
+						// a bare "403"/"401" substring and recorded no state at
+						// all — so the UI fell back to "App Not Installed" even
+						// for an operator-side key fault. Classify properly.
+						raise, diag, state := classifyGitHubAppFailure(ctx, ghClient.AppAuth(), cfg.Project.Org, logger)
+						if raise {
+							dashSrv.SetGitHubAppRequired(true)
+							dashSrv.SetGitHubAppState(state.String())
+							if diag != "" {
+								dashSrv.SetGitHubAppPermIssue(diag)
+							}
+							logger.Warn("GitHub App authentication failed creating advisory issue",
+								"repo", newPrimaryRepo, "state", state.String(),
+								"operator_actionable", state.OperatorActionable())
+						}
 					}
 				} else {
 					advisoryIssues[newPrimaryRepo] = num
@@ -1532,7 +1715,12 @@ func main() {
 				// this is the exact case rediscovery exists for. Cached by TTL,
 				// so a repeated re-check does not re-hit the API.
 				healGitHubAppInstallation(ctx, ghClient.AppAuth(), cfg, logger)
-				if diag, state := diagnoseGitHubApp(ctx, ghClient.AppAuth(), cfg.Project.Org); diag != "" {
+				// Shared verdict with the boot and advisory-digest paths. Re-check
+				// previously branched on `diag != ""` while boot branched on the
+				// error string, which is how the two came to disagree about the
+				// same hive; routing both through classifyGitHubAppFailure means
+				// they cannot drift again.
+				if raise, diag, state := classifyGitHubAppFailure(ctx, ghClient.AppAuth(), cfg.Project.Org, logger); raise {
 					dashSrv.SetGitHubAppPermIssue(diag)
 					dashSrv.SetGitHubAppState(state.String())
 					logger.Warn("github app recheck: app detected but write not verified",
@@ -1995,32 +2183,65 @@ func main() {
 	dashSrv.AuditLog("system", "hive_restart",
 		fmt.Sprintf("build=%s version=%s; restoring %d paused agent(s)", gitShort, "3.0.0", pausedCount), "")
 
-	const agentLaunchDelaySec = 15
-	agentIndex := 0
-	for name, ac := range cfg.EnabledAgents() {
-		isOnDemand := ac.OnDemand || onDemandFromPack[name]
-		if isOnDemand {
-			logger.Info("skipping on-demand agent at startup", "name", name)
-			continue
-		}
-		if agentIndex > 0 {
-			logger.Info("staggering agent launch", "name", name, "delay_sec", agentLaunchDelaySec)
-			time.Sleep(time.Duration(agentLaunchDelaySec) * time.Second)
-		}
-		logger.Info("audit: starting agent", "name", name, "trigger", "startup")
-		if err := agentMgr.Start(ctx, name); err != nil {
-			logger.Warn("failed to start agent", "name", name, "error", err)
-		} else {
-			// Surface whether a persisted operator pause was honored on this
-			// restart, so the audit log shows pause state survived (or didn't).
-			detail := "trigger=startup"
-			if ac.Paused {
-				detail = "trigger=startup; restored paused (persisted)"
+	// Mark the dashboard READY as soon as the HTTP server can serve requests —
+	// which is NOW: config is loaded, GitHub client/App auth are wired, the
+	// dashboard deps are set, and the listener (go dashSrv.Start() above) is up.
+	// None of /api/*, /sso, /open, /api/livez or /api/health depend on the agent
+	// fleet being up; the frontend already handles agents appearing over time.
+	//
+	// This MUST precede the staggered agent-launch loop below. That loop sleeps
+	// ~15s per agent (× the whole fleet = several minutes) and previously ran
+	// BEFORE MarkReady, so /api/livez returned 503 "starting" for the entire
+	// launch window. The liveness probe (period 30s × failureThreshold 3 ≈ 90s)
+	// then SIGKILLed the container (exit 137) before readiness was ever reached
+	// on cold start, and rolling upgrades left the Service with no Ready endpoint
+	// for minutes → 503s on /open and /sso. Flipping ready here makes the pod
+	// Ready in seconds and moves the fleet spin-up entirely off the critical path.
+	dashSrv.MarkReady()
+
+	// Launch the persistent (non-on-demand) agents in the BACKGROUND so the
+	// staggered start no longer gates pod readiness. The loop honors ctx: on
+	// shutdown the ctx-aware stagger returns immediately instead of leaking a
+	// goroutine parked in a bare time.Sleep.
+	go func() {
+		const agentLaunchDelaySec = 15
+		agentIndex := 0
+		for name, ac := range cfg.EnabledAgents() {
+			isOnDemand := ac.OnDemand || onDemandFromPack[name]
+			if isOnDemand {
+				logger.Info("skipping on-demand agent at startup", "name", name)
+				continue
 			}
-			dashSrv.AuditLog("system", "agent_start", detail, name)
+			if agentIndex > 0 {
+				logger.Info("staggering agent launch", "name", name, "delay_sec", agentLaunchDelaySec)
+				select {
+				case <-time.After(time.Duration(agentLaunchDelaySec) * time.Second):
+				case <-ctx.Done():
+					logger.Info("aborting staggered agent launch: shutting down")
+					return
+				}
+			}
+			// Bail before starting another agent if we are already shutting down,
+			// so a SIGTERM during the launch window doesn't spawn fresh processes.
+			if ctx.Err() != nil {
+				logger.Info("aborting staggered agent launch: shutting down")
+				return
+			}
+			logger.Info("audit: starting agent", "name", name, "trigger", "startup")
+			if err := agentMgr.Start(ctx, name); err != nil {
+				logger.Warn("failed to start agent", "name", name, "error", err)
+			} else {
+				// Surface whether a persisted operator pause was honored on this
+				// restart, so the audit log shows pause state survived (or didn't).
+				detail := "trigger=startup"
+				if ac.Paused {
+					detail = "trigger=startup; restored paused (persisted)"
+				}
+				dashSrv.AuditLog("system", "agent_start", detail, name)
+			}
+			agentIndex++
 		}
-		agentIndex++
-	}
+	}()
 
 	// Start hub heartbeat push if configured (env var or config)
 	hubURL := cfg.Hub.URL
@@ -2064,9 +2285,17 @@ func main() {
 			// successful compute — nil pointers until then, so the hub never
 			// aggregates a not-yet-computed zero into the public fleet total.
 			var prsMerged, prsRejected, cvesClosed *int
+			fleetStatsCollectedAt := ""
 			if fc, ok := fleetStatsCollector.Snapshot(); ok {
 				m, rj, cv := fc.PRsMerged, fc.PRsRejected, fc.CVEsClosed
 				prsMerged, prsRejected, cvesClosed = &m, &rj, &cv
+				// Report WHEN these were computed, not when this beat was sent.
+				// The hub carries counts forward across spoke restarts, so this
+				// timestamp is the only way it can tell a fresh contribution
+				// from one frozen by a collector that has started failing.
+				if t := fleetStatsCollector.CollectedAt(); !t.IsZero() {
+					fleetStatsCollectedAt = t.UTC().Format(time.RFC3339)
+				}
 			}
 			// Count agents with a method/model assigned for the hub's
 			// user-journey stage detection. Always a non-nil pointer from a
@@ -2074,17 +2303,34 @@ func main() {
 			// "genuinely zero agents configured" from "old spoke, unknown".
 			agentsWithModel := agentMgr.CountAgentsWithModel()
 			return &hub.HeartbeatPayload{
-				AgentsWithModel: &agentsWithModel,
-				HiveID:          cfg.HiveID,
-				Org:             cfg.Project.Org,
+				AgentsWithModel:   &agentsWithModel,
+				HiveID:            cfg.HiveID,
+				Org:               cfg.Project.Org,
 				AIAuthor:          cfg.Project.AIAuthor,
 				AIAuthorEffective: cfg.EffectiveAIAuthor(),
 				StartedAt:         processStartedAt.UTC().Format(time.RFC3339),
-				Repos:           cfg.Project.Repos,
-				PrimaryRepo:     cfg.Project.PrimaryRepo,
-				ACMMLevel:       acmmLvl,
-				Agents:          agents,
-				Governor:        hub.GovernorSummary{Mode: string(govState.Mode), Issues: govState.QueueIssues, PRs: govState.QueuePRs},
+				// Advisory-staleness signal (mirrors StartedAt/uptime). Report the
+				// last successful digest-post time only if the spoke has actually
+				// posted one — a zero time is left as an empty string so the hub
+				// reads it as UNKNOWN (not-advisory-mode / old spoke), never a
+				// false stale alarm. The last post error rides alongside so a
+				// working-App-but-failing-post hive can be flagged with its cause.
+				AdvisoryLastPostedAt: func() string {
+					postedAt, _, _ := dashSrv.AdvisoryState()
+					if postedAt.IsZero() {
+						return ""
+					}
+					return postedAt.UTC().Format(time.RFC3339)
+				}(),
+				AdvisoryError: func() string {
+					_, _, errMsg := dashSrv.AdvisoryState()
+					return errMsg
+				}(),
+				Repos:       cfg.Project.Repos,
+				PrimaryRepo: cfg.Project.PrimaryRepo,
+				ACMMLevel:   acmmLvl,
+				Agents:      agents,
+				Governor:    hub.GovernorSummary{Mode: string(govState.Mode), Issues: govState.QueueIssues, PRs: govState.QueuePRs},
 				// Tokens carries the spoke's authoritative cumulative token
 				// total (same store the dashboard token panel and governor
 				// budget read). It flows to the hub's My Hives token column so
@@ -2164,7 +2410,7 @@ func main() {
 				// is the only way to distinguish a hive pinned to an immutable
 				// SHA tag (which can never receive a rolling upgrade) from one
 				// riding <branch>-latest. Empty off-cluster — never guessed.
-				ImageRef:                hub.SelfDeploymentImage(),
+				ImageRef: hub.SelfDeploymentImage(),
 				// The GitHub instance this spoke actually runs against. Only
 				// the spoke knows this for certain: a hive's GitHub can differ
 				// from its cluster's default, so the hub cannot infer it.
@@ -2184,22 +2430,31 @@ func main() {
 					}
 					return hub.CollectClusterHealth(logger)
 				}(),
-				PRsMerged90d:   prsMerged,
-				PRsRejected90d: prsRejected,
-				CVEsClosed:     cvesClosed,
+				PRsMerged90d:          prsMerged,
+				PRsRejected90d:        prsRejected,
+				CVEsClosed:            cvesClosed,
+				FleetStatsCollectedAt: fleetStatsCollectedAt,
 				// Report WHICH App key we hold, never the key. The hub compares
 				// this against its per-cluster key and pushes a correction only
 				// on a mismatch, so a spoke already holding the right key costs
 				// nothing and a spoke holding the wrong one self-heals.
-				GitHubAppKeyFingerprint: reportedAppKeyFingerprint(cfg.GitHub.KeyFile),
-				GitHubAppKeyPerHive:     hasPerHiveAppKey(cfg.GitHub.KeyFile),
+				GitHubAppKeyFingerprint: reportedAppKeyFingerprint(cfg.GitHub.KeyFile, cfg.GitHub.AppID),
+				GitHubAppKeyPerHive:     hasPerHiveAppKey(cfg.GitHub.KeyFile, cfg.GitHub.AppID),
 				// Report the App this hive believes it authenticates as. The hub
 				// pairs it with the fingerprint above to tell a per-hive key that
 				// is WRONG for this App from one that is deliberately for another.
 				GitHubAppID: cfg.GitHub.AppID,
+				// Report the fingerprint of every ADDITIONAL per-app-id key already
+				// on the PVC, so the hub delivers the fleet's other App keys once
+				// and then stops re-sending them.
+				GitHubAppKeysHeld: heldPerAppIDKeyFingerprints(),
 			}
 		}, heartbeatSendInterval, logger, hub.UpgradeCallback(func(targetSHA string) {
 			const upgradeMarkerPath = "/data/upgrade-requested"
+
+			// attemptCount carries the number of PREVIOUS failed attempts for this
+			// (current_sha → target_sha) pair, read from the marker below.
+			attemptCount := 0
 
 			// Never self-upgrade to the commit we are already running. The hub
 			// may instruct an upgrade to a short SHA that is a prefix of our
@@ -2218,17 +2473,59 @@ func main() {
 				}
 			}
 
-			// If a previous process already attempted an upgrade and we booted
-			// with the same git hash, the image tag didn't actually change.
-			// Skip to avoid an infinite restart loop.
+			// A previous process attempted an upgrade and we booted with the same
+			// git hash, so the image did not actually change: the attempt FAILED.
+			// Back off rather than retrying instantly (that was a crash-loop), but
+			// do NOT latch forever — "image unchanged" is the signature of a failed
+			// upgrade, not a reason to stop trying. The latch is keyed on
+			// (current_sha → target_sha) and bounded to selfUpgradeMaxAttempts, so a
+			// NEW target always gets a fresh budget and a transient failure (an RBAC
+			// Role that showed up late, a registry blip) still converges.
 			if markerData, err := os.ReadFile(upgradeMarkerPath); err == nil {
-				if strings.Contains(string(markerData), fmt.Sprintf(`"current_sha":"%s"`, gitShort)) {
-					logger.Info("self-upgrade skipped: already attempted from this SHA (image unchanged)",
+				m := parseUpgradeMarker(markerData)
+				if m.CurrentSHA == gitShort && sameUpgradeTarget(m.TargetSHA, targetSHA) {
+					if m.Attempts >= selfUpgradeMaxAttempts {
+						// Terminal: report it LOUDLY and tell the hub, so the UI stops
+						// claiming "Upgrading" forever and a human sees the real cause.
+						logger.Error("self-upgrade FAILED: giving up after repeated attempts (image never changed)",
+							"target", targetSHA,
+							"current", gitShort,
+							"attempts", m.Attempts,
+							"max_attempts", selfUpgradeMaxAttempts,
+							"last_error", m.LastError,
+							"hint", "the spoke must be able to get/patch its own Deployment; check the hive-self-upgrade Role/RoleBinding in this namespace",
+						)
+						hub.ReportUpgradeFailure(hubURL, cfg.HiveID, targetSHA, gitShort,
+							fmt.Sprintf("self-upgrade failed after %d attempts: %s", m.Attempts, m.LastError), logger)
+						return
+					}
+					// Exponential backoff between attempts so a hard failure does not
+					// spin every heartbeat while a recoverable one still retries.
+					backoff := selfUpgradeBaseBackoff << (m.Attempts - 1)
+					if backoff > selfUpgradeMaxBackoff {
+						backoff = selfUpgradeMaxBackoff
+					}
+					if since := time.Since(m.RequestedAt); since < backoff {
+						logger.Warn("self-upgrade retry deferred: backing off after a failed attempt",
+							"target", targetSHA,
+							"current", gitShort,
+							"attempts", m.Attempts,
+							"retry_in", (backoff - since).Round(time.Second),
+							"last_error", m.LastError,
+						)
+						return
+					}
+					logger.Warn("self-upgrade retrying after a failed attempt (image unchanged)",
 						"target", targetSHA,
 						"current", gitShort,
+						"attempt", m.Attempts+1,
+						"max_attempts", selfUpgradeMaxAttempts,
+						"last_error", m.LastError,
 					)
+					attemptCount = m.Attempts
+				} else {
+					// Different SHA or a different target — the old marker is stale.
 					os.Remove(upgradeMarkerPath)
-					return
 				}
 			}
 
@@ -2245,11 +2542,15 @@ func main() {
 				return
 			}
 
-			marker := fmt.Sprintf(`{"target_sha":"%s","current_sha":"%s","requested_at":"%s"}`,
-				targetSHA, gitShort, time.Now().UTC().Format(time.RFC3339))
-			if err := os.WriteFile(upgradeMarkerPath, []byte(marker), 0o644); err != nil {
-				logger.Warn("failed to write upgrade marker", "path", upgradeMarkerPath, "error", err)
-			}
+			// Record the attempt BEFORE acting: if the process dies mid-upgrade the
+			// next boot must still see an incremented count, otherwise a crash loop
+			// would retry without ever exhausting the budget.
+			writeUpgradeMarker(upgradeMarkerPath, upgradeMarker{
+				TargetSHA:   targetSHA,
+				CurrentSHA:  gitShort,
+				RequestedAt: time.Now().UTC(),
+				Attempts:    attemptCount + 1,
+			}, logger)
 
 			logger.Info("self-upgrade triggered: sending upgrading heartbeat then exiting",
 				"current", gitShort,
@@ -2296,14 +2597,32 @@ func main() {
 			if err != nil {
 				logger.Warn("pinned-image upgrade failed, falling back to rolling restart",
 					"target", targetSHA, "error", err)
+				recordUpgradeError(upgradeMarkerPath, err, logger)
 				needsRestart = true
 			}
 			if needsRestart {
 				if err := hub.RolloutRestartSelf(logger); err != nil {
-					logger.Warn("rolling restart failed, falling back to os.Exit",
+					// This is the wedge. os.Exit here restarts the pod onto the
+					// SAME image, so the upgrade silently never lands. It is an
+					// ERROR, not a Warn, and the cause (typically a 403 because
+					// the spoke lacks patch on its own Deployment) must be both
+					// persisted for the next attempt and reported to the hub so
+					// the UI stops showing a permanent "Upgrading".
+					logger.Error("self-upgrade FAILED: could not patch own Deployment, restarting onto the same image",
+						"target", targetSHA,
+						"current", gitShort,
 						"error", err,
+						"hint", "grant get/patch on deployments/hive in this namespace (hive-self-upgrade Role/RoleBinding)",
 					)
-					os.Exit(0)
+					recordUpgradeError(upgradeMarkerPath, err, logger)
+					hub.ReportUpgradeFailure(hubURL, cfg.HiveID, targetSHA, gitShort, err.Error(), logger)
+					// Exit NON-ZERO. Exiting 0 on a failed upgrade told Kubernetes
+					// the process had completed successfully, so the restart looked
+					// routine and nothing — not the pod's exit code, not an event,
+					// not a probe — recorded that an upgrade had just failed. A
+					// non-zero code makes the failure visible in the pod's
+					// lastState.terminated and in `kubectl describe`.
+					os.Exit(selfUpgradeFailureExitCode)
 				}
 			}
 			// Rolling restart initiated — K8s will start a new pod and
@@ -2356,6 +2675,46 @@ func main() {
 				}
 			}
 
+			// Persist the fleet's ADDITIONAL App keys — every OTHER App's key,
+			// keyed by app_id — so this spoke can sign for the App it is actually
+			// configured as even when that is NOT its cluster's default. This is
+			// the both-keys fix: a github.com hive on a GHE cluster now receives
+			// and stores the github.com key here, and resolveAppKeyFile selects it
+			// by matching cfg.GitHub.AppID.
+			//
+			// Written to distinct /data/gh-app-key-<appid>.pem files, so they never
+			// collide with the primary /data/gh-app-key.pem above. Writing one that
+			// matches our OWN app_id must take effect immediately: flip keyChanged
+			// so the client is rebuilt below, exactly as a primary-key change does.
+			for _, ak := range ghCfg.AdditionalKeys {
+				if ak.PrivateKey == "" || ak.AppID <= 0 {
+					continue
+				}
+				perAppPath := perAppIDKeyPath(ak.AppID)
+				beforeFP, _ := config.AppKeyFingerprintFromFile(perAppPath)
+				fp, err := writePerAppIDKey(ak.AppID, ak.PrivateKey)
+				if err != nil {
+					logger.Error("failed to write additional github app key from heartbeat",
+						"app_id", ak.AppID, "error", err)
+					continue
+				}
+				changed := fp != "" && fp != beforeFP
+				logger.Info("additional github app private key written via heartbeat",
+					"app_id", ak.AppID,
+					"path", perAppPath,
+					"from_fingerprint", beforeFP,
+					"to_fingerprint", fp,
+					"key_changed", changed,
+				)
+				// If this additional key is for the App we ourselves authenticate
+				// as, it is now the key resolveAppKeyFile will pick — treat it like
+				// a primary-key rotation so the client rebuild below uses it.
+				if changed && ak.AppID == cfg.GitHub.AppID {
+					keyChanged = true
+					appAuth.DropCachedToken()
+				}
+			}
+
 			// Adopt a hub-delivered app_id only when it names a REAL App. Zero
 			// means "not speaking to this field"; the placeholder sentinel is
 			// what a pre-provisioned hive already carries, so re-adopting it
@@ -2383,12 +2742,41 @@ func main() {
 				cfg.GitHub.AppSlug = ghCfg.AppSlug
 			}
 
-			if cfg.GitHub.HasUsableApp() && cfg.GitHub.KeyFile != "" {
-				newAppAuth, err := github.NewAppAuth(cfg.GitHub.AppID, cfg.GitHub.InstallationID, cfg.GitHub.KeyFile, logger, cfg.GitHub.ResolvedAPIURL())
+			// Persist the adopted App IDENTITY to the PVC overlay, exactly as the
+			// claimed-project-config callback persists what it adopts.
+			//
+			// Without this the adoption lived only in memory. The key files are
+			// written to /data (durable), but app_id/app_slug/installation_id were
+			// not, so on every pod restart the entrypoint re-merged the ConfigMap
+			// seed and the spoke reverted to whatever App it was provisioned with —
+			// silently undoing a completed repair and making the hub's push look
+			// like it had never happened. That is how a GHE hive kept re-appearing
+			// with the github.com app_id and an empty slug across restarts.
+			//
+			// Saved even when the App is not yet usable (installation_id still 0):
+			// the corrected app_id and slug are precisely what the owner needs on
+			// disk so the dashboard renders a working install link BEFORE they have
+			// installed anything.
+			if err := cfg.Save(); err != nil {
+				logger.Error("failed to persist github app config from heartbeat", "error", err)
+			}
+
+			// Resolve the key file the same way startup does, so a hive whose
+			// only correct key arrived as an ADDITIONAL per-app-id key (no
+			// primary key_file configured — the exact vllm-d state) still finds
+			// it: resolveAppKeyFile prefers /data/gh-app-key-<appid>.pem for the
+			// app_id we now claim. An explicit key_file still wins outright.
+			rebuildKeyFile := resolveAppKeyFile(cfg.GitHub.KeyFile, os.Getenv("GH_APP_KEY_FILE"), cfg.GitHub.AppID)
+			if cfg.GitHub.HasUsableApp() && rebuildKeyFile != "" {
+				newAppAuth, err := github.NewAppAuth(cfg.GitHub.AppID, cfg.GitHub.InstallationID, rebuildKeyFile, logger, cfg.GitHub.ResolvedAPIURL())
 				if err != nil {
 					logger.Error("github app auth init via heartbeat failed", "error", err)
 					return
 				}
+				// Record the key file actually in effect so subsequent config
+				// reads and heartbeat fingerprint reports reflect the resolved
+				// per-app-id key rather than an empty configured value.
+				cfg.GitHub.KeyFile = rebuildKeyFile
 				// Hub-delivered creds can carry a wrong installation_id just as
 				// easily as a hand-edited config; correct (and persist) it
 				// before building a client that would 403 on every write.
@@ -2450,7 +2838,25 @@ func main() {
 			// possible. The hub keeps sending this every beat until we report the
 			// matching project back, so an idempotent no-op when already matched
 			// is expected and cheap.
-			if pc == nil || pc.Org == "" {
+			if pc == nil {
+				return
+			}
+			// A URL-only push (org empty, dashboard_url set) delivers the vanity
+			// dashboard URL to an already-claimed hive whose meta project is stale/
+			// empty on the hub — we must still adopt+report it, or the hub keeps
+			// showing the raw placeholder host forever. Handle it BEFORE the
+			// org-empty bail below, which exists so an empty project never blanks a
+			// working config: with no org there is nothing to reconcile except the
+			// URL, so adopt it, persist, and return without touching the project.
+			if pc.Org == "" {
+				if pc.DashboardURL != "" && cfg.Hub.DashboardURL != pc.DashboardURL {
+					logger.Info("adopting vanity dashboard URL from hub heartbeat (url-only push)",
+						"was", cfg.Hub.DashboardURL, "now", pc.DashboardURL)
+					cfg.Hub.DashboardURL = pc.DashboardURL
+					if err := cfg.Save(); err != nil {
+						logger.Error("failed to save adopted vanity dashboard URL", "error", err)
+					}
+				}
 				return
 			}
 			curACMM := 0
@@ -2587,8 +2993,9 @@ func main() {
 				"on_divergence", cfg.Governor.Trajectory.OnDivergence)
 		}
 	}
-	// Reconcile the not-configured alert from actual state (raises only when
-	// enabled AND no reviewer resolves; clears when off or configured).
+	// Clear any legacy "not configured" banner alert persisted by an older
+	// build. The half-configured state is shown inline in Governor Config →
+	// General, not in the top banner.
 	dashSrv.ReconcileTrajectoryAlert(&cfg.Governor)
 
 	// Stall-replan lane (Phase 3 planning intelligence): periodically detects
@@ -2631,7 +3038,11 @@ func main() {
 		logger.Info("fast agent status enabled", "interval_seconds", cfg.Dashboard.AgentPollIntervalS)
 	}
 
-	dashSrv.MarkReady()
+	// NOTE: dashSrv.MarkReady() was previously HERE, after the staggered agent
+	// launch and the heartbeat/trajectory/ticker setup. It has been moved to
+	// immediately after the HTTP listener starts (before the agent-launch loop),
+	// so the pod becomes Ready in seconds instead of minutes. See the MarkReady
+	// call and comment above the agent-launch goroutine.
 
 	const cliStartupDelay = 10 * time.Second
 	logger.Info("waiting for CLI startup before first eval", "delay", cliStartupDelay)
@@ -2977,6 +3388,87 @@ func issueRef(repo string, number int) string {
 	return fmt.Sprintf("%s#%d", repo, number)
 }
 
+// githubRateLimitErrText is the substring GitHub's client surfaces on a rate or
+// abuse limit. Matching text is acceptable ONLY here: a rate limit is a reason
+// to skip classification entirely, never a reason to accuse anyone of anything,
+// so a false negative costs one extra (correct) classification round-trip.
+const githubRateLimitErrText = "rate limit"
+
+// isGitHubRateLimitText reports whether an error looks like a GitHub rate limit.
+func isGitHubRateLimitText(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), githubRateLimitErrText)
+}
+
+// githubAppBannerAttempts is how many times classifyGitHubAppFailure probes
+// before accepting an unclassifiable (AppStateUnknown) verdict. A cold start
+// races the cluster's DNS/egress-proxy readiness, so the FIRST App call a pod
+// makes is the one most likely to fail for reasons that have nothing to do
+// with the App. One retry converts that transient into a correct verdict.
+const githubAppBannerAttempts = 2
+
+// githubAppBannerRetryDelay spaces those attempts. Short enough not to stall
+// boot, long enough for an egress proxy or DNS cache to come up.
+const githubAppBannerRetryDelay = 3 * time.Second
+
+// classifyGitHubAppFailure is the SINGLE decision point for "should the GitHub
+// App banner be raised?" — used by the boot path, the advisory-digest path and
+// the manual Re-check button alike, so those three can never again disagree
+// about the same hive.
+//
+// It exists because they DID disagree. The boot path used to raise the banner
+// on a substring match for "403"/"401" in a formatted error string (the exact
+// pattern #2224 replaced), set githubAppRequired=true UNCONDITIONALLY, and
+// then classify — never lowering the flag again when classification came back
+// healthy or inconclusive. Re-check ran the very same diagnoseGitHubApp probe
+// but treated an empty diagnosis as success and cleared the banner. Same
+// evidence, opposite conclusion: the banner appeared on every cold start whose
+// first advisory-issue call blipped, and vanished the moment the user clicked
+// Re-check without anything having been fixed.
+//
+// Two rules make the verdict trustworthy:
+//
+//  1. Only a state that is genuinely actionable raises the banner. AppStateOK
+//     obviously does not, and neither does AppStateUnknown — #2224 defines it
+//     as "we could not reach a conclusion", and escalating on it is precisely
+//     the false accusation that design was meant to prevent.
+//  2. An unknown verdict is retried before it is accepted, so a transient
+//     startup network failure is not mistaken for a definitive one.
+//
+// Returns raise=false with an empty message when the App is fine or when we
+// simply cannot tell.
+func classifyGitHubAppFailure(ctx context.Context, appAuth *github.AppAuth, expectedOwner string, logger *slog.Logger) (raise bool, msg string, state github.AppAuthState) {
+	for attempt := 1; attempt <= githubAppBannerAttempts; attempt++ {
+		msg, state = diagnoseGitHubApp(ctx, appAuth, expectedOwner)
+		if state != github.AppStateUnknown {
+			break
+		}
+		if attempt < githubAppBannerAttempts {
+			logger.Debug("github app classification inconclusive — retrying before accepting a verdict",
+				"attempt", attempt, "owner", expectedOwner)
+			select {
+			case <-ctx.Done():
+				return false, "", github.AppStateUnknown
+			case <-time.After(githubAppBannerRetryDelay):
+			}
+		}
+	}
+
+	// AppStateUnknown must never raise the banner: we did not get an answer
+	// from GitHub, and a hive whose App is perfectly healthy would otherwise
+	// be told to reinstall it because of a momentary network fault. The
+	// self-heal loop and the next eval cycle both re-probe, so deferring the
+	// verdict costs nothing but a delay on a hive that IS genuinely broken.
+	if state == github.AppStateUnknown {
+		logger.Warn("github app state could not be determined — leaving the banner down rather than guessing",
+			"owner", expectedOwner)
+		return false, "", github.AppStateUnknown
+	}
+	if state == github.AppStateOK {
+		return false, "", github.AppStateOK
+	}
+	return true, msg, state
+}
+
 func runEvalCycle(
 	ctx context.Context,
 	cfg *config.Config,
@@ -3299,10 +3791,23 @@ func runEvalCycle(
 						// the digest still gets posted. A user-fallback success
 						// does NOT clear the App banner — the App error below is
 						// what decides the banner state.
+						postedViaFallback := false
 						if uc := userGHClient.Load(); uc != nil {
 							if uerr := uc.PostAdvisoryDigest(ctx, primaryRepo, issueNum, md); uerr == nil {
 								logger.Info("posted advisory digest", "repo", primaryRepo, "issue", issueNum, "findings", digest.TotalCount, "via", "user-fallback")
+								postedViaFallback = true
 							}
+						}
+						// Record the outcome for the heartbeat's advisory-staleness
+						// signal. A user-fallback success still counts as a fresh
+						// digest post (the issue DID get updated); otherwise record the
+						// App error so the hub can flag the digest as stale with its
+						// specific cause. err.Error() is the same string logged just
+						// below — log-safe, never key material.
+						if postedViaFallback {
+							dashSrv.RecordAdvisoryPost(digest.TotalCount)
+						} else {
+							dashSrv.RecordAdvisoryError(err.Error())
 						}
 						logger.Warn("failed to post advisory digest via app", "repo", primaryRepo, "issue", issueNum, "error", err)
 						if strings.Contains(err.Error(), "403") && strings.Contains(err.Error(), "Resource not accessible by integration") {
@@ -3321,24 +3826,29 @@ func runEvalCycle(
 							logger.Warn("GitHub App write failed — cannot write issue comments",
 								"repo", primaryRepo, "state", state.String(),
 								"operator_actionable", state.OperatorActionable(), "detail", msg)
-						} else if strings.Contains(err.Error(), "rate limit") {
+						} else if isGitHubRateLimitText(err) {
 							logger.Warn("GitHub API rate limit hit, skipping advisory digest post", "repo", primaryRepo)
-						} else if strings.Contains(err.Error(), "403") || strings.Contains(err.Error(), "401") {
-							// Same reasoning as the startup path: classify
-							// before raising a banner, so an operator-side key
-							// failure is never rendered as "not installed".
-							msg, state := diagnoseGitHubApp(ctx, ghClient.AppAuth(), cfg.Project.Org)
-							dashSrv.SetGitHubAppRequired(true)
-							if msg != "" {
-								dashSrv.SetGitHubAppPermIssue(msg)
+						} else {
+							// Same verdict function as boot and Re-check, so a
+							// healthy or unclassifiable probe cannot raise the
+							// banner here either.
+							raise, msg, state := classifyGitHubAppFailure(ctx, ghClient.AppAuth(), cfg.Project.Org, logger)
+							if raise {
+								dashSrv.SetGitHubAppRequired(true)
+								if msg != "" {
+									dashSrv.SetGitHubAppPermIssue(msg)
+								}
+								dashSrv.SetGitHubAppState(state.String())
+								logger.Warn("GitHub App authentication failed posting advisory digest",
+									"repo", primaryRepo, "state", state.String(),
+									"operator_actionable", state.OperatorActionable())
 							}
-							dashSrv.SetGitHubAppState(state.String())
-							logger.Warn("GitHub App authentication failed posting advisory digest",
-								"repo", primaryRepo, "state", state.String(),
-								"operator_actionable", state.OperatorActionable())
 						}
 					} else {
 						logger.Info("posted advisory digest", "repo", primaryRepo, "issue", issueNum, "findings", digest.TotalCount, "via", "app")
+						// Record the fresh, successful digest post so the hub's
+						// advisory-staleness gate stays satisfied for this hive.
+						dashSrv.RecordAdvisoryPost(digest.TotalCount)
 						// A successful write proves the app is installed AND has
 						// write access — clear BOTH the perm issue and the
 						// app-required banner flag. Previously only the perm
@@ -3490,6 +4000,88 @@ func convertKnowledgeLayers(cfgLayers []config.KnowledgeLayer) []knowledge.Layer
 const hiveIDFilePath = "/data/hive-id"
 
 // loadOrGenerateHiveID reads the Hive ID from disk, or generates and persists a new one.
+const (
+	// selfUpgradeMaxAttempts bounds how many times a spoke retries an upgrade
+	// that keeps leaving the image unchanged. Bounded rather than unlimited so a
+	// genuinely broken hive (e.g. missing RBAC) stops thrashing its pod, and
+	// bounded rather than "never again" so a transient failure still converges.
+	selfUpgradeMaxAttempts = 5
+	// selfUpgradeBaseBackoff is the delay before retry #2; it doubles per
+	// attempt up to selfUpgradeMaxBackoff.
+	selfUpgradeBaseBackoff = 2 * time.Minute
+	// selfUpgradeMaxBackoff caps the exponential backoff between retries.
+	selfUpgradeMaxBackoff = 30 * time.Minute
+	// selfUpgradeFailureExitCode marks a process exit caused by a FAILED
+	// self-upgrade. Distinct from 0 so the failure is visible in the container's
+	// termination state instead of looking like a clean shutdown.
+	selfUpgradeFailureExitCode = 17
+)
+
+// upgradeMarker is the on-PVC record at /data/upgrade-requested. It survives
+// pod restarts (that is the whole point: the process exits as part of an
+// upgrade), so it is the only place attempt bookkeeping can live.
+type upgradeMarker struct {
+	TargetSHA   string    `json:"target_sha"`
+	CurrentSHA  string    `json:"current_sha"`
+	RequestedAt time.Time `json:"requested_at"`
+	Attempts    int       `json:"attempts"`
+	LastError   string    `json:"last_error,omitempty"`
+}
+
+// parseUpgradeMarker decodes a marker, tolerating the legacy format that had no
+// attempts/last_error fields. A legacy marker counts as one prior attempt so an
+// already-wedged hive gets retries under the new budget instead of being
+// treated as fresh.
+func parseUpgradeMarker(data []byte) upgradeMarker {
+	var m upgradeMarker
+	if err := json.Unmarshal(data, &m); err != nil {
+		return upgradeMarker{}
+	}
+	if m.Attempts < 1 {
+		m.Attempts = 1
+	}
+	return m
+}
+
+// sameUpgradeTarget reports whether two target SHAs refer to the same commit,
+// tolerating short/full SHA length mismatch the way the hub's sameCommit does.
+// A DIFFERENT target must reset the attempt budget, so this comparison is what
+// keeps the latch from outliving the upgrade it was created for.
+func sameUpgradeTarget(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	return strings.EqualFold(a[:n], b[:n])
+}
+
+func writeUpgradeMarker(path string, m upgradeMarker, logger *slog.Logger) {
+	data, err := json.Marshal(m)
+	if err != nil {
+		logger.Warn("failed to encode upgrade marker", "error", err)
+		return
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		logger.Warn("failed to write upgrade marker", "path", path, "error", err)
+	}
+}
+
+// recordUpgradeError annotates the existing marker with the cause of the failed
+// attempt so the NEXT boot can log why the previous one did not land — without
+// it the reason dies with the process and the failure is invisible.
+func recordUpgradeError(path string, upgradeErr error, logger *slog.Logger) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	m := parseUpgradeMarker(data)
+	m.LastError = upgradeErr.Error()
+	writeUpgradeMarker(path, m, logger)
+}
+
 func loadOrGenerateHiveID(logger *slog.Logger) string {
 	if envID := os.Getenv("HIVE_ID"); envID != "" {
 		if err := os.WriteFile(hiveIDFilePath, []byte(envID+"\n"), 0o644); err == nil {

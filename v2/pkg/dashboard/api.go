@@ -46,6 +46,10 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	s.mux.HandleFunc("GET /api/audit", s.handleAuditLog)
 	s.mux.HandleFunc("GET /api/prompt-history", s.handlePromptHistory)
 	s.mux.HandleFunc("POST /api/self-upgrade", s.handleSelfUpgrade)
+	// Self-service, owner-only spoke backup (encrypted; includes the bead
+	// ledger the fleet-wide hub backup excludes — see issue #2318).
+	s.mux.HandleFunc("GET /api/backup/status", s.handleBackupStatus)
+	s.mux.HandleFunc("POST /api/backup", s.handleBackupDownload)
 	s.mux.HandleFunc("POST /api/banner-dismissed", s.handleBannerDismissed)
 	s.mux.HandleFunc("GET /api/snapshot", s.handleSnapshotAPI)
 	s.mux.HandleFunc("GET /snapshot", s.handleSnapshotPage)
@@ -584,10 +588,13 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	if primaryRepo != "" && cfg.Project.Org != "" && !strings.Contains(primaryRepo, "/") {
 		primaryRepo = cfg.Project.Org + "/" + primaryRepo
 	}
-	githubBaseURL := cfg.GitHub.BaseURL
-	if githubBaseURL == "" {
-		githubBaseURL = "https://github.com"
-	}
+	// ResolvedBaseURL (not the raw BaseURL) so pooled/placeholder GHE hives —
+	// which legitimately carry base_url: "" but api_url: https://github.ibm.com/api/v3
+	// — report github.ibm.com, not github.com. Reading BaseURL alone made the
+	// Repos config show bare org/repo with no GHE hint, so operators mistook a
+	// github.ibm.com hive for github.com. ResolvedBaseURL falls back to the api_url
+	// host in exactly that case (mirrors HostLabel).
+	githubBaseURL := cfg.GitHub.ResolvedBaseURL()
 	jsonResponse(w, map[string]interface{}{
 		"org":       cfg.Project.Org,
 		"repos":     cfg.Project.Repos,
@@ -1091,6 +1098,77 @@ func (s *Server) handleKick(w http.ResponseWriter, r *http.Request) {
 	okResponse(w, map[string]string{"status": "kicked", "agent": name})
 }
 
+// claimAgentFieldOwnership writes an operator's model and/or backend choice
+// into hive.yaml and marks those fields operator-owned. Empty arguments leave
+// the corresponding field untouched.
+//
+// This is the durability half of the model/method revert fix. The in-memory
+// ModelOverride/BackendOverride on the agent process is replayed from
+// /data/hive-state.json on restart, but hive.yaml still carried the PACK's
+// model — and ApplyPack re-reconciles from the pack on every restart. Writing
+// the operator's value to the same layer the pack writes, plus an ownership
+// marker, is what makes the choice actually survive.
+func (s *Server) claimAgentFieldOwnership(name, model, backend string) {
+	if s.deps == nil || s.deps.Config == nil {
+		return
+	}
+	ac, ok := s.deps.Config.Agents[name]
+	if !ok {
+		return
+	}
+	if model != "" {
+		ac.Model = model
+		ac.ModelOwner = config.FieldOwnerOperator
+	}
+	if backend != "" {
+		ac.Backend = backend
+		ac.BackendOwner = config.FieldOwnerOperator
+	}
+	s.deps.Config.Agents[name] = ac
+	_ = s.deps.AgentMgr.UpdateConfig(name, ac)
+	if err := s.saveConfig(); err != nil {
+		s.deps.Logger.Error("failed to persist agent model/method choice", "agent", name, "error", err)
+		s.AddSystemAlert("agent-field-save-failed", "error",
+			"Could not save the model/method choice for "+name+" — it will revert on the next restart: "+err.Error())
+		return
+	}
+	s.ClearSystemAlert("agent-field-save-failed")
+}
+
+// validateModelForAgent rejects a model the agent's effective backend does not
+// offer, so an unhonorable choice surfaces as a 400 the operator can see
+// instead of silently degrading to a default at launch time.
+//
+// Backends whose model list cannot be enumerated (no reachable endpoint, or a
+// backend that accepts free-form model ids) are allowed through: refusing a
+// value we simply cannot verify would block legitimate configurations.
+func (s *Server) validateModelForAgent(name, model string) error {
+	if model == "" {
+		return fmt.Errorf("model must not be empty")
+	}
+	proc, err := s.deps.AgentMgr.GetStatus(name)
+	if err != nil || proc == nil {
+		// Agent lookup failures are reported by the caller's SetModelOverride.
+		return nil
+	}
+	backend := proc.Config.Backend
+	if proc.BackendOverride != "" {
+		backend = proc.BackendOverride
+	}
+
+	known := s.modelIDsForBackend(backend)
+	if len(known) == 0 {
+		return nil // cannot enumerate — do not block
+	}
+	for _, id := range known {
+		if id == model {
+			return nil
+		}
+	}
+	return fmt.Errorf("model %q is not available for backend %q (available: %s)",
+		model, backend, strings.Join(known, ", "))
+}
+
 func (s *Server) handleSwitch(w http.ResponseWriter, r *http.Request) {
 	name := s.resolveAgentParam(r.PathValue("agent"))
 	backend := sanitizeString(r.PathValue("backend"))
@@ -1099,6 +1177,10 @@ func (s *Server) handleSwitch(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	// Persist to hive.yaml and mark the field operator-owned so the next pack
+	// apply (which runs on every restart) does not reconcile it away.
+	s.claimAgentFieldOwnership(name, "", backend)
 
 	s.deps.Logger.Info("audit: backend switched", "agent", name, "backend", backend, "trigger", "dashboard-api")
 	s.auditFromRequest(r, "switch_backend", auditDetail("backend", backend), name)
@@ -1116,10 +1198,23 @@ func (s *Server) handleModelSet(w http.ResponseWriter, r *http.Request) {
 	name := s.resolveAgentParam(r.PathValue("agent"))
 	model := sanitizeString(r.PathValue("model"))
 
+	// Reject a model the effective backend cannot serve BEFORE storing it.
+	// Silently accepting an unusable value and then falling back at launch is
+	// what made this class of bug invisible: the grid showed the choice, the
+	// agent ran on something else, and the value appeared to "revert".
+	if err := s.validateModelForAgent(name, model); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	if err := s.deps.AgentMgr.SetModelOverride(name, model); err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	// Persist to hive.yaml and mark the field operator-owned so the next pack
+	// apply (which runs on every restart) does not reconcile it away.
+	s.claimAgentFieldOwnership(name, model, "")
 
 	s.deps.Logger.Info("audit: model set", "agent", name, "model", model, "trigger", "dashboard-api")
 	s.auditFromRequest(r, "set_model", auditDetail("model", model), name)
@@ -1204,6 +1299,18 @@ func (s *Server) handlePin(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+
+	// A pin is a stronger statement of intent than a plain switch, so it must
+	// at least be as durable. Previously a pin lived only on the agent process
+	// (replayed from /data/hive-state.json) while hive.yaml kept the pack's
+	// value, so the pin did not protect the field from the pack re-apply that
+	// runs on every restart — the pin icon was effectively decorative.
+	switch dimension {
+	case "model":
+		s.claimAgentFieldOwnership(name, body.Value, "")
+	case "cli":
+		s.claimAgentFieldOwnership(name, "", body.Value)
 	}
 
 	s.deps.Logger.Info("audit: agent pinned", "agent", name, "dimension", dimension, "value", body.Value, "trigger", "dashboard-api")
@@ -2468,15 +2575,19 @@ func (s *Server) handleAgentConfigGeneral(w http.ResponseWriter, r *http.Request
 	// way the card dropdowns do (SetModelOverride + restart) — otherwise a stale
 	// live override would mask the freshly-saved value and it still wouldn't stick.
 	modelChanged, backendChanged := false, false
+	// Both are operator edits, so they claim ownership of the field — without
+	// the marker the next pack apply (every restart) reconciles them away.
 	if v, ok := body["model"]; ok {
 		if str, ok := v.(string); ok {
 			agentCfg.Model = sanitizeString(str)
+			agentCfg.ModelOwner = config.FieldOwnerOperator
 			modelChanged = true
 		}
 	}
 	if v, ok := body["cliPinValue"]; ok {
 		if str, ok := v.(string); ok && str != "" {
 			agentCfg.Backend = sanitizeString(str)
+			agentCfg.BackendOwner = config.FieldOwnerOperator
 			backendChanged = true
 		}
 	}
@@ -2725,11 +2836,15 @@ func (s *Server) handleAgentConfigModels(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Operator edits claim ownership so the pack apply that runs on every
+	// restart cannot reconcile the choice back to the pack default.
 	if body.Backend != "" {
 		agentCfg.Backend = sanitizeString(body.Backend)
+		agentCfg.BackendOwner = config.FieldOwnerOperator
 	}
 	if body.Model != "" {
 		agentCfg.Model = sanitizeString(body.Model)
+		agentCfg.ModelOwner = config.FieldOwnerOperator
 	}
 	s.deps.Config.Agents[name] = agentCfg
 
@@ -3659,30 +3774,52 @@ func (s *Server) handleGovernorLabels(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGovernorBudget(w http.ResponseWriter, r *http.Request) {
+	// Pointer fields distinguish "field absent from the JSON" (nil) from
+	// "field explicitly set to 0". The dashboard sends only the inputs the
+	// user actually touched, so editing Total Tokens alone POSTs
+	// {"totalTokens":N} with no periodDays/criticalPct. With plain ints
+	// those absent fields decoded to 0 and were rejected by validation as
+	// out-of-range. Nil now means "leave the stored value alone", while an
+	// explicit 0 is still honored (totalTokens: 0 disables budget tracking).
 	var body struct {
-		TotalTokens int64 `json:"totalTokens"`
-		PeriodDays  int   `json:"periodDays"`
-		CriticalPct int   `json:"criticalPct"`
+		TotalTokens *int64 `json:"totalTokens"`
+		PeriodDays  *int   `json:"periodDays"`
+		CriticalPct *int   `json:"criticalPct"`
 	}
 	if err := decodeBody(r, &body); err != nil {
 		jsonError(w, "invalid body", http.StatusBadRequest)
 		return
 	}
 
-	if err := validateGovernorBudget(body.TotalTokens, body.PeriodDays, body.CriticalPct); err != nil {
+	// Validate against the effective post-update values: supplied fields use
+	// the incoming value, omitted fields keep what is already stored. This
+	// keeps a partial update from being judged against a phantom zero.
+	current := s.deps.Config.Governor.Budget
+	totalTokens, periodDays, criticalPct := current.TotalTokens, current.PeriodDays, current.CriticalPct
+	if body.TotalTokens != nil {
+		totalTokens = *body.TotalTokens
+	}
+	if body.PeriodDays != nil {
+		periodDays = *body.PeriodDays
+	}
+	if body.CriticalPct != nil {
+		criticalPct = *body.CriticalPct
+	}
+
+	if err := validateGovernorBudget(totalTokens, periodDays, criticalPct); err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	if body.TotalTokens > 0 {
-		s.deps.Config.Governor.Budget.TotalTokens = body.TotalTokens
-		s.deps.Governor.SetBudgetLimit(body.TotalTokens)
+	if body.TotalTokens != nil {
+		s.deps.Config.Governor.Budget.TotalTokens = totalTokens
+		s.deps.Governor.SetBudgetLimit(totalTokens)
 	}
-	if body.PeriodDays > 0 {
-		s.deps.Config.Governor.Budget.PeriodDays = body.PeriodDays
+	if body.PeriodDays != nil {
+		s.deps.Config.Governor.Budget.PeriodDays = periodDays
 	}
-	if body.CriticalPct > 0 {
-		s.deps.Config.Governor.Budget.CriticalPct = body.CriticalPct
+	if body.CriticalPct != nil {
+		s.deps.Config.Governor.Budget.CriticalPct = criticalPct
 	}
 
 	if err := s.saveConfig(); err != nil {

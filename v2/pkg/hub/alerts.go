@@ -77,6 +77,10 @@ const (
 	AlertTypeOffline = "offline"
 	// AlertTypeStuckUpgrade — Upgrading has been true past staleUpgradeTimeout.
 	AlertTypeStuckUpgrade = "stuck-upgrade"
+	// AlertTypeFailedUpgrade — the spoke explicitly reported an upgrade it could
+	// not complete. Distinct from stuck-upgrade: this one has a known cause the
+	// spoke told us, so it is Critical and carries the underlying error.
+	AlertTypeFailedUpgrade = "failed-upgrade"
 	// AlertTypeHealthCheckFailing — a named check inside Health reports "fail".
 	AlertTypeHealthCheckFailing = "health-check-failing"
 	// AlertTypeTokenBurn — token consumption is anomalous versus the fleet
@@ -84,6 +88,19 @@ const (
 	AlertTypeTokenBurn = "token-burn"
 	// AlertTypeProvisionError — the SaaS provisioning record is in "error".
 	AlertTypeProvisionError = "provision-error"
+	// AlertTypeAdvisoryStale — the hive should be posting advisory digests but
+	// its digest has quietly gone stale. The condition is NOT re-derived here:
+	// it is the AdvisoryStale flag advisoryStale() already computed on read,
+	// so the panel, the facet and the row pill can never disagree about which
+	// hives are affected.
+	AlertTypeAdvisoryStale = "advisory-stale"
+	// AlertTypeURLUnreachable — the PUBLIC dashboard URL the hub links users to
+	// did not serve. Distinct from every other alert here in that it is the only
+	// one measured from OUTSIDE the spoke: a hive can be online, heartbeating and
+	// reporting every health check green while its vanity Route/Ingress, DNS or
+	// certificate is broken and the link in the hub table returns 503. Raised by
+	// the auth-audit loop, which already makes this HTTPS request.
+	AlertTypeURLUnreachable = "url-unreachable"
 )
 
 // --- Thresholds. Every one is a named constant with a rationale. ---
@@ -432,10 +449,18 @@ type alertHive struct {
 	Upgrading        bool
 	UpgradeStartedAt time.Time
 	UpgradeTarget    string
+	UpgradeFailed    bool
+	UpgradeError     string
 	TotalTokens24h   int64
 	Health           map[string]any
 	ProvStatus       string
 	ProvError        string
+	// AdvisoryStale / AdvisoryStaleReason are carried through verbatim from
+	// the entry rather than recomputed. advisoryStale() owns the threshold and
+	// the advisory-mode + app-can-write gating; duplicating either here is
+	// exactly how the panel and the row pill would start disagreeing.
+	AdvisoryStale       bool
+	AdvisoryStaleReason string
 }
 
 // alertHiveFromEntry projects a MyHiveEntry into the evaluator's view.
@@ -451,10 +476,15 @@ func alertHiveFromEntry(h MyHiveEntry) alertHive {
 		Upgrading:        h.Upgrading,
 		UpgradeStartedAt: h.UpgradeStartedAt,
 		UpgradeTarget:    h.UpgradeTarget,
+		UpgradeFailed:    h.UpgradeFailed,
+		UpgradeError:     h.UpgradeError,
 		TotalTokens24h:   h.TotalTokens24h,
 		Health:           h.Health,
 		ProvStatus:       h.ProvStatus,
 		ProvError:        h.ProvError,
+
+		AdvisoryStale:       h.AdvisoryStale,
+		AdvisoryStaleReason: h.AdvisoryStaleReason,
 	}
 }
 
@@ -684,6 +714,20 @@ func evaluateAlerts(state *alertState, hives []alertHive, driftAlerts []Alert, n
 		// --- Rule: upgrade in flight past staleUpgradeTimeout. Reuses the
 		// EXISTING constant rather than introducing a second, divergent notion
 		// of "stuck upgrade". ---
+		// --- Rule: the spoke told us the upgrade FAILED. Reported ahead of the
+		// stuck-upgrade rule below because a known cause beats a timeout guess,
+		// and Critical because it never resolves on its own. ---
+		if h.UpgradeFailed {
+			reason := "Upgrade failed"
+			if t := strings.TrimSpace(h.UpgradeTarget); t != "" {
+				reason += " (target " + t + ")"
+			}
+			if e := strings.TrimSpace(h.UpgradeError); e != "" {
+				reason += ": " + e
+			}
+			add(h.ID, h.Name, AlertTypeFailedUpgrade, AlertSeverityCritical, reason)
+		}
+
 		if h.Upgrading && !h.UpgradeStartedAt.IsZero() {
 			if age := now.Sub(h.UpgradeStartedAt); age > staleUpgradeTimeout {
 				reason := "Upgrade in flight for " + roundedDuration(age) +
@@ -709,6 +753,23 @@ func evaluateAlerts(state *alertState, hives []alertHive, driftAlerts []Alert, n
 			}
 			add(h.ID, h.Name, AlertTypeHealthCheckFailing, AlertSeverityWarning,
 				itoa(len(failing))+" health "+noun+" failing: "+strings.Join(shown, ", ")+suffix)
+		}
+
+		// --- Rule: the advisory digest has gone stale. ---
+		// The flag is precomputed by advisoryStale(), which already gates on
+		// advisory-mode participation AND app-can-write, and already excludes
+		// unknown timestamps — so there is nothing to re-check here beyond the
+		// placeholder guard every claimed-hive rule applies. Severity is
+		// warning, not critical: the hive is still running and doing work, but
+		// the digest path a human relies on has quietly wedged.
+		if !h.IsPlaceholder && h.AdvisoryStale {
+			reason := h.AdvisoryStaleReason
+			if reason == "" {
+				// Only reached if a spoke reports the flag without a reason.
+				// The server-supplied reason is preferred wherever it exists.
+				reason = "Advisory digest has gone stale"
+			}
+			add(h.ID, h.Name, AlertTypeAdvisoryStale, AlertSeverityWarning, reason)
 		}
 
 		// --- Rule: token burn anomaly. Claimed hives only — an unassigned
@@ -862,7 +923,16 @@ func (s *HubServer) fleetAlerts(entries []MyHiveEntry) AlertSummary {
 	// driftAlerts is nil today. When the config-drift evaluator lands, its
 	// signals are passed here and flow through the same ordering, ack and
 	// counting pipeline — see the file header.
-	return evaluateAlerts(s.alerts, hives, nil, time.Now())
+	//
+	// urlUnreachableAlerts is exactly such a signal: it is measured by the
+	// auth-audit loop from OUTSIDE the spoke, so it cannot be re-derived from
+	// the spoke-reported fields the evaluator sees.
+	now := time.Now()
+	regs := make([]RegistryEntry, 0, len(entries))
+	for _, e := range entries {
+		regs = append(regs, e.RegistryEntry)
+	}
+	return evaluateAlerts(s.alerts, hives, s.urlUnreachableAlerts(regs, now), now)
 }
 
 // saveAlertAcks persists acknowledgements to the PVC so a silenced alert stays
@@ -927,20 +997,26 @@ type alertAckRequest struct {
 // handleAlertAck acknowledges (or clears) one alert for one hive. Admin-only:
 // silencing a fleet-wide signal is an operator action, not something a hive
 // owner should be able to do to the admin's view.
+//
+// Failures go through writeJSONError, not http.Error. http.Error forces
+// Content-Type: text/plain even when the body is JSON, so the dashboard's
+// `await resp.json()` threw, its .catch() swallowed the reason, and the
+// operator got a generic "Failed to update alert" that never said why. The
+// reason is the whole point of the message when an ack silently does nothing.
 func (s *HubServer) handleAlertAck(w http.ResponseWriter, r *http.Request) {
 	var req alertAckRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxPayloadBytes)).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	req.HiveID = strings.TrimSpace(req.HiveID)
 	req.Type = strings.TrimSpace(req.Type)
 	if req.HiveID == "" || req.Type == "" {
-		http.Error(w, `{"error":"hiveId and type are required"}`, http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "hiveId and type are required")
 		return
 	}
 	if !isKnownAlertType(req.Type) {
-		http.Error(w, `{"error":"unknown alert type"}`, http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "unknown alert type: "+req.Type)
 		return
 	}
 
@@ -954,7 +1030,7 @@ func (s *HubServer) handleAlertAck(w http.ResponseWriter, r *http.Request) {
 	// Acknowledging requires a LIVE condition. Refusing otherwise prevents a
 	// client from pre-silencing an alert that has not fired yet.
 	if !s.alerts.setAck(req.HiveID, req.Type, s.getAuthUser(r), time.Now()) {
-		http.Error(w, `{"error":"no active alert of that type for this hive"}`, http.StatusConflict)
+		writeJSONError(w, http.StatusConflict, "no active alert of that type for this hive")
 		return
 	}
 	s.saveAlertAcks()
@@ -969,12 +1045,20 @@ func writeAlertAckOK(w http.ResponseWriter, acked bool) {
 // knownAlertTypes is the closed set of types the ack endpoint accepts, so a
 // client cannot wedge arbitrary keys into the persisted ack map.
 var knownAlertTypes = map[string]bool{
-	AlertTypeCrashLoop:          true,
-	AlertTypeOffline:            true,
-	AlertTypeStuckUpgrade:       true,
+	AlertTypeCrashLoop:    true,
+	AlertTypeOffline:      true,
+	AlertTypeStuckUpgrade: true,
+	// AlertTypeFailedUpgrade was omitted when the type was introduced (#2308),
+	// so acking a genuinely failed upgrade returned 400 and the row stayed in
+	// the panel. Every AlertType* constant MUST appear here — see
+	// TestKnownAlertTypesCoversEveryAlertType, which fails if one is added
+	// without being registered.
+	AlertTypeFailedUpgrade:      true,
 	AlertTypeHealthCheckFailing: true,
 	AlertTypeTokenBurn:          true,
 	AlertTypeProvisionError:     true,
+	AlertTypeAdvisoryStale:      true,
+	AlertTypeURLUnreachable:     true,
 }
 
 func isKnownAlertType(t string) bool { return knownAlertTypes[t] }

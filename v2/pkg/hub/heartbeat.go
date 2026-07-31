@@ -161,8 +161,14 @@ type HeartbeatNodeMetric struct {
 	MemTotalMB    int64  `json:"mem_total_mb"`
 	MemUsedMB     int64  `json:"mem_used_mb"`
 	MemPercent    int    `json:"mem_percent"`
-	Pods          int    `json:"pods"`
-	PodCapacity   int    `json:"pod_capacity"`
+	// Disk fields are pointers so a spoke that could not read kubelet stats
+	// (or an older spoke build that does not report them at all) leaves them
+	// absent, and the hub renders unknown rather than a misleading 0%.
+	DiskTotalMB *int64 `json:"disk_total_mb,omitempty"`
+	DiskUsedMB  *int64 `json:"disk_used_mb,omitempty"`
+	DiskPercent *int   `json:"disk_percent,omitempty"`
+	Pods        int    `json:"pods"`
+	PodCapacity int    `json:"pod_capacity"`
 	// HiveCount is the number of distinct hive-hosted-* namespaces with a
 	// running pod on this node (namespaces, not pods, so a hive briefly
 	// running two pods during a rollout is counted once).
@@ -182,7 +188,11 @@ type HeartbeatClusterSummary struct {
 	TotalCPUPct   int `json:"total_cpu_percent"`
 	TotalMemGB    int `json:"total_mem_gb"`
 	TotalMemPct   int `json:"total_mem_percent"`
-	TotalPods     int `json:"total_pods"`
+	// Disk totals cover only the nodes that reported live usage; nil when no
+	// node did, so the hub omits disk instead of showing a false 0%.
+	TotalDiskGB  *int `json:"total_disk_gb,omitempty"`
+	TotalDiskPct *int `json:"total_disk_percent,omitempty"`
+	TotalPods    int  `json:"total_pods"`
 	// HiveCapacityRemaining estimates how many MORE hives the cluster can
 	// hold (see hive_capacity.go). Pointer so old spokes that do not report
 	// it are distinguishable from a genuinely full cluster (nil vs 0).
@@ -235,17 +245,37 @@ type HeartbeatPayload struct {
 	// as an uptime pill so a hive that is quietly crash-looping — 1/1 Running
 	// but restarted 35 times — is visible in My Hives instead of looking
 	// healthy. A short uptime that keeps resetting is the tell.
-	StartedAt    string         `json:"started_at,omitempty"`
-	Health       map[string]any `json:"health"`
-	DashboardURL string         `json:"dashboard_url"`
-	SnapshotURL  string         `json:"snapshot_url"`
-	Owner        string         `json:"owner,omitempty"`
-	HiveType     string         `json:"hive_type,omitempty"`
-	ClusterID    string         `json:"cluster_id,omitempty"`
-	IsPublic     bool           `json:"is_public"`
-	Version      string         `json:"version"`
-	GitHash      string         `json:"git_hash"`
-	GitBranch    string         `json:"git_branch,omitempty"`
+	StartedAt string `json:"started_at,omitempty"`
+	// AdvisoryLastPostedAt is when this spoke last SUCCESSFULLY posted/updated
+	// its advisory-digest issue (RFC3339). It is the mirror of StartedAt for the
+	// advisory path: the hub renders a "stale advisory" pill so a hive that
+	// SHOULD be posting advisory digests but has quietly stopped (working App,
+	// advisory agents, but the digest went stale) becomes visible in My Hives
+	// instead of needing a per-hive log sweep.
+	//
+	// Empty means the spoke has NEVER posted a digest — either it is not in the
+	// advisory-posting business at all (pure PR/merge mode, no advisory agents,
+	// so it never reaches the post path) or it is too old to report this field.
+	// BOTH must be read by the hub as UNKNOWN and NEVER as a stale alarm — the
+	// same rule the codebase already applies to StartedAt/GitHubAPIURL. Only a
+	// hive that HAS posted at least once, and then stopped, can trip staleness.
+	AdvisoryLastPostedAt string `json:"advisory_last_posted_at,omitempty"`
+	// AdvisoryError is the log-safe error string from the spoke's most recent
+	// FAILED advisory-post attempt (403 issues:write, rate limit, auth failure),
+	// or empty when the last attempt succeeded. It is the same string the spoke
+	// already logs, so it never carries key material. Set = the hub flags the
+	// digest as stale (gated on advisory-mode + app-can-write) with this cause.
+	AdvisoryError string         `json:"advisory_error,omitempty"`
+	Health        map[string]any `json:"health"`
+	DashboardURL  string         `json:"dashboard_url"`
+	SnapshotURL   string         `json:"snapshot_url"`
+	Owner         string         `json:"owner,omitempty"`
+	HiveType      string         `json:"hive_type,omitempty"`
+	ClusterID     string         `json:"cluster_id,omitempty"`
+	IsPublic      bool           `json:"is_public"`
+	Version       string         `json:"version"`
+	GitHash       string         `json:"git_hash"`
+	GitBranch     string         `json:"git_branch,omitempty"`
 	// ImageRef is the container image this spoke's own Deployment runs, read
 	// in-cluster from the Deployment spec. GitHash says which commit the
 	// BINARY was built from; ImageRef says which TAG the deployment tracks —
@@ -271,10 +301,16 @@ type HeartbeatPayload struct {
 	// The hub uses it to avoid nudging — let alone threatening de-provisioning
 	// — a hive whose credentials the OPERATOR has not delivered. Empty from a
 	// spoke too old to report it, which must be read as "cannot tell".
-	GitHubAppState          string                        `json:"github_app_state,omitempty"`
-	AutoUpgrade             bool                          `json:"auto_upgrade,omitempty"`
-	Upgrading               bool                          `json:"upgrading,omitempty"`
-	UpgradeTargetSHA        string                        `json:"upgrade_target_sha,omitempty"`
+	GitHubAppState   string `json:"github_app_state,omitempty"`
+	AutoUpgrade      bool   `json:"auto_upgrade,omitempty"`
+	Upgrading        bool   `json:"upgrading,omitempty"`
+	UpgradeTargetSHA string `json:"upgrade_target_sha,omitempty"`
+	// UpgradeFailed / UpgradeError let a spoke tell the hub that an instructed
+	// upgrade did NOT land. Without them a failed upgrade is indistinguishable
+	// from a slow one: the hub keeps re-instructing and the UI shows a permanent
+	// "Upgrading" spinner that is simply a lie.
+	UpgradeFailed           bool                          `json:"upgrade_failed,omitempty"`
+	UpgradeError            string                        `json:"upgrade_error,omitempty"`
 	PendingGitHubAppInstall bool                          `json:"pending_github_app_install,omitempty"`
 	ClusterHealth           *HeartbeatClusterHealthReport `json:"cluster_health,omitempty"`
 	// Fleet contribution counts — the spoke's AI-author PR activity across its
@@ -287,6 +323,11 @@ type HeartbeatPayload struct {
 	PRsMerged90d   *int `json:"prs_merged_90d,omitempty"`
 	PRsRejected90d *int `json:"prs_rejected_90d,omitempty"`
 	CVEsClosed     *int `json:"cves_closed,omitempty"`
+	// FleetStatsCollectedAt (RFC3339) is when the counts above were last
+	// successfully computed, so the hub can age out a stale contribution
+	// instead of summing a frozen number forever. Empty from a spoke too old
+	// to report it, which the hub treats as "not stale".
+	FleetStatsCollectedAt string `json:"fleet_stats_collected_at,omitempty"`
 	// AgentsWithModel counts this hive's agents that have an effective method
 	// (backend) or model assigned — override first, then agent config, exactly
 	// as the launcher resolves it. The hub uses it for user-journey stage
@@ -331,6 +372,18 @@ type HeartbeatPayload struct {
 	// read as "unknown": the hub falls back to the conservative per-hive
 	// override and declines to overwrite. Never infer a mismatch from silence.
 	GitHubAppID int64 `json:"github_app_id,omitempty"`
+	// GitHubAppKeysHeld reports the NON-SECRET fingerprint of every ADDITIONAL
+	// per-app-id key file this spoke holds on its PVC, keyed by app_id as a
+	// decimal string (JSON object keys must be strings). It exists so the hub can
+	// deliver the fleet's OTHER App keys (see HeartbeatGitHubAppConfig.
+	// AdditionalKeys) exactly once and then stop: a key already present with the
+	// right fingerprint is not re-sent every beat.
+	//
+	// It carries fingerprints ONLY — never key material — exactly like
+	// GitHubAppKeyFingerprint above. Empty/nil means the spoke holds no per-app-id
+	// keys, or is too old to report; either way the hub falls back to delivering
+	// any additional keys it has, which the spoke writes idempotently.
+	GitHubAppKeysHeld map[string]string `json:"github_app_keys_held,omitempty"`
 }
 
 type StatusCollector func() *HeartbeatPayload
@@ -599,6 +652,52 @@ func SendUpgradingHeartbeat(hubURL string, collect StatusCollector, targetSHA st
 	logger.Info("upgrading heartbeat sent to hub", "target", targetSHA)
 }
 
+// ReportUpgradeFailure tells the hub that an instructed upgrade failed, with
+// the underlying cause. This is the counterpart to SendUpgradingHeartbeat: that
+// one says "I am upgrading", this one says "I could not". Without it the hub
+// only ever learns about upgrades that succeed, so a wedged spoke stays
+// "Upgrading" forever while the hub silently re-instructs it every heartbeat.
+//
+// Best-effort and non-fatal: the caller is usually seconds from exiting, and a
+// failure to report must never mask the upgrade failure itself.
+func ReportUpgradeFailure(hubURL, hiveID, targetSHA, currentSHA, cause string, logger *slog.Logger) {
+	if hubURL == "" || hiveID == "" {
+		return
+	}
+	payload := HeartbeatPayload{
+		HiveID:           hiveID,
+		GitHash:          currentSHA,
+		UpgradeTargetSHA: targetSHA,
+		UpgradeFailed:    true,
+		UpgradeError:     cause,
+		Timestamp:        time.Now().UTC().Format(time.RFC3339),
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), heartbeatTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, hubURL+"/api/heartbeat", bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if secret := os.Getenv("HIVE_HUB_SECRET"); secret != "" {
+		req.Header.Set("Authorization", "Bearer "+secret)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		logger.Warn("could not report upgrade failure to hub", "error", err)
+		return
+	}
+	defer resp.Body.Close()
+	logger.Info("reported upgrade failure to hub", "target", targetSHA, "cause", cause)
+}
+
 // HeartbeatGitHubAppConfig carries GitHub App credentials from the hub to
 // a spoke via the heartbeat response, bypassing OAuth proxies that block
 // direct HTTP pushes.
@@ -615,6 +714,45 @@ type HeartbeatGitHubAppConfig struct {
 	// Empty means "leave the spoke's slug unchanged" — never a way to blank a
 	// working value.
 	AppSlug string `json:"app_slug,omitempty"`
+	// AdditionalKeys carries EVERY OTHER GitHub App private key the fleet knows,
+	// keyed by its own app_id, so a spoke can hold both the github.com App key
+	// AND its cluster's GitHub Enterprise App key at once — and pick whichever
+	// one matches the app_id it is actually configured to authenticate as.
+	//
+	// WHY THIS EXISTS
+	//
+	// The AppID/PrivateKey pair above is the spoke's CLUSTER key: the key of the
+	// App registered on the cluster's GitHub host. That is wrong for a github.com
+	// hive that happens to land on a GitHub-Enterprise-default cluster (the live
+	// vllm-d case): it inherits the GHE app_id and GHE key, holds no github.com
+	// key at all, and every github.com repo call dies with "github auth token
+	// error". Delivering the OTHER app's key too — written to a distinct
+	// per-app-id file on the spoke — lets that hive authenticate as the App it is
+	// really pinned to, regardless of which cluster it runs on.
+	//
+	// It is purely additive: a spoke that only understands the single AppID/
+	// PrivateKey pair (an older build) ignores this field and behaves exactly as
+	// before. Each entry's PrivateKey is a SECRET value and travels only over the
+	// TLS heartbeat channel; it is never logged. nil/empty means "nothing extra
+	// to deliver".
+	AdditionalKeys []HeartbeatAppKey `json:"additional_keys,omitempty"`
+}
+
+// HeartbeatAppKey is one (app_id, private key) pair the hub delivers alongside
+// the spoke's primary cluster key so the spoke can authenticate as an App other
+// than its cluster's default. The spoke writes it to a per-app-id key file and
+// selects it when its own configured app_id matches AppID.
+type HeartbeatAppKey struct {
+	// AppID is the numeric GitHub App ID this key signs for. The spoke uses it
+	// both to name the on-disk key file and to decide which key to sign with.
+	AppID int64 `json:"app_id"`
+	// PrivateKey is the PEM private key VALUE for AppID. Secret — TLS-channel
+	// only, never logged, written to a 0600 file on the spoke.
+	PrivateKey string `json:"private_key"`
+	// Fingerprint is the NON-SECRET fingerprint of PrivateKey
+	// (config.AppKeyFingerprint). It rides along so the delivery is auditable
+	// from fingerprints alone, without the key ever appearing in a log line.
+	Fingerprint string `json:"fingerprint,omitempty"`
 }
 
 // HeartbeatProjectConfig carries a claimed project's real org/repos/ACMM from

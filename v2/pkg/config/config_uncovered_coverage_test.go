@@ -251,19 +251,46 @@ func TestGitHubConfig_IsGHE(t *testing.T) {
 	tests := []struct {
 		name    string
 		baseURL string
+		apiURL  string
 		want    bool
 	}{
-		{"empty base url is not GHE", "", false},
-		{"default github.com is not GHE", DefaultGitHubBaseURL, false},
-		{"custom base url is GHE", "https://github.mycorp.com", true},
+		{"empty base+api url is not GHE", "", "", false},
+		{"default github.com is not GHE", DefaultGitHubBaseURL, "", false},
+		{"custom base url is GHE", "https://github.mycorp.com", "", true},
+		// Pooled/placeholder GHE hives carry base_url:"" with a GHE api_url — they
+		// MUST be recognized as GHE (else the install URL points at github.com).
+		{"blank base url + GHE api url is GHE", "", "https://github.ibm.com/api/v3", true},
+		{"blank base url + github.com api url is not GHE", "", DefaultGitHubAPIURL, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			g := GitHubConfig{BaseURL: tt.baseURL}
+			g := GitHubConfig{BaseURL: tt.baseURL, APIURL: tt.apiURL}
 			if got := g.IsGHE(); got != tt.want {
 				t.Errorf("IsGHE() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestGitHubConfig_AppInstallURL_BlankBaseGHEApi is the exact zacburns bug: a GHE
+// hive whose overlay carries app_id/app_slug/api_url on github.ibm.com but an
+// empty base_url. The spoke UI must build the GHE /github-apps/ install URL, not
+// the github.com /apps/ one (which returns an empty page on GHE).
+func TestGitHubConfig_AppInstallURL_BlankBaseGHEApi(t *testing.T) {
+	g := GitHubConfig{
+		APIURL:  "https://github.ibm.com/api/v3",
+		BaseURL: "",
+		AppSlug: "kubestellar-hive-ghe",
+	}
+	want := "https://github.ibm.com/github-apps/kubestellar-hive-ghe/installations/new"
+	if got := g.AppInstallURL(); got != want {
+		t.Errorf("AppInstallURL() = %q, want %q", got, want)
+	}
+	if !g.IsGHE() {
+		t.Error("IsGHE() = false, want true for blank base_url + GHE api_url")
+	}
+	if got := g.ResolvedBaseURL(); got != "https://github.ibm.com" {
+		t.Errorf("ResolvedBaseURL() = %q, want https://github.ibm.com", got)
 	}
 }
 
@@ -323,19 +350,31 @@ func TestGitHubConfig_AppInstallURL_Table(t *testing.T) {
 			want:    "https://github.com/apps/acme-hive/installations/new",
 		},
 		{
-			name:    "GHE host uses the enterprise /github-apps/ path",
+			// The public default names an App that exists ONLY on github.com. On a
+			// GHE host it produced github.ibm.com/github-apps/kubestellar-hive/...,
+			// a live 404 a real user hit. Empty is the honest answer and callers
+			// render it as "install link unavailable" plus the missing config.
+			name:    "GHE host with no configured slug yields no link, not a 404",
 			baseURL: "https://github.ibm.com",
-			want:    "https://github.ibm.com/github-apps/" + DefaultGitHubAppSlug + "/installations/new",
+			want:    "",
 		},
 		{
 			name:    "GHE host with a trailing slash does not double up",
 			baseURL: "https://github.cisco.com/",
-			want:    "https://github.cisco.com/github-apps/" + DefaultGitHubAppSlug + "/installations/new",
+			appSlug: "acme-ghe",
+			want:    "https://github.cisco.com/github-apps/acme-ghe/installations/new",
 		},
 		{
 			name:    "GHE host with multiple trailing slashes",
 			baseURL: "https://github.cisco.com///",
-			want:    "https://github.cisco.com/github-apps/" + DefaultGitHubAppSlug + "/installations/new",
+			appSlug: "acme-ghe",
+			want:    "https://github.cisco.com/github-apps/acme-ghe/installations/new",
+		},
+		{
+			name:    "GHE slug that is only whitespace is treated as unset",
+			baseURL: "https://github.ibm.com",
+			appSlug: "   ",
+			want:    "",
 		},
 		{
 			name:    "GHE host honours a per-instance app slug",
@@ -356,7 +395,8 @@ func TestGitHubConfig_AppInstallURL_Table(t *testing.T) {
 			// broken link is the safer outcome than a plausible wrong one.
 			name:    "malformed base url is not rewritten to github.com",
 			baseURL: "not a url",
-			want:    "not a url/github-apps/" + DefaultGitHubAppSlug + "/installations/new",
+			appSlug: "acme-ghe",
+			want:    "not a url/github-apps/acme-ghe/installations/new",
 		},
 	}
 	for _, tt := range tests {

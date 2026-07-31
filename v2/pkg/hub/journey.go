@@ -30,7 +30,7 @@ import (
 //	4. GH / GHE App   — install the GitHub App. github.com App for a github.com
 //	                    primary repo, GitHub Enterprise App for a github.ibm.com
 //	                    primary repo. THIS IS THE WRITE GATE (below).
-//	5. Setup agents   — assign methods + models (or run the contributor relay),
+//	5. Setup agents   — assign methods + models (or run ClankeR, the contributor relay),
 //	                    then raise the ACMM level.
 //
 // The stall-detection stages below track the SPOKE-side steps (3-5): a
@@ -371,9 +371,13 @@ func appStateIsOperatorSide(state string) bool {
 //   - "key-missing" — no App private key reached this spoke at all.
 //   - "key-invalid" — a key is present but GitHub rejects the JWT it signs,
 //     i.e. it belongs to a different App than the hive claims to be.
+//   - "no-app-assigned" — the hive still carries the placeholder app_id and was
+//     never assigned a real App. The owner cannot fix this at all, so the
+//     journey must never nudge (or threaten de-provisioning) over it.
 var operatorSideAppStates = map[string]bool{
-	appStateKeyMissingToken: true,
-	appStateKeyInvalidToken: true,
+	appStateKeyMissingToken:    true,
+	appStateKeyInvalidToken:    true,
+	appStateNoAppAssignedToken: true,
 }
 
 const (
@@ -381,6 +385,8 @@ const (
 	// github.AppStateKeyMissing.String() and github.AppStateKeyInvalid.String().
 	appStateKeyMissingToken = "key-missing"
 	appStateKeyInvalidToken = "key-invalid"
+	// appStateNoAppAssignedToken mirrors github.AppStateNoAppAssigned.String().
+	appStateNoAppAssignedToken = "no-app-assigned"
 )
 
 // methodModelAssigned reports whether any agent on this hive has a method
@@ -397,7 +403,7 @@ func methodModelAssigned(h *RegistryEntry) (assigned bool, known bool) {
 	return *h.AgentsWithModel > 0, true
 }
 
-// relayInUse reports whether the contributor relay is carrying this hive's
+// relayInUse reports whether ClankeR, the contributor relay, is carrying this hive's
 // work, which the product accepts as a full substitute for a method/model.
 //
 // Two signals, strongest first:
@@ -543,7 +549,7 @@ func nextNudge(h *RegistryEntry, now time.Time) nudge {
 		return n
 	}
 
-	// ── Stage 2: method/model, or the contributor relay ────────────────────
+	// ── Stage 2: method/model, or ClankeR (the contributor relay) ──────────
 	//
 	// The relay is a first-class substitute: a hive whose humans are picking up
 	// tasks through /contribute has satisfied this stage as completely as one
@@ -562,7 +568,7 @@ func nextNudge(h *RegistryEntry, now time.Time) nudge {
 		case age >= stage2WarnAfter:
 			n.Severity = SeverityDeprovisionWarning
 			n.Message = fmt.Sprintf(
-				"Action required: after %s, none of your agents has a method or model assigned, and no one is picking up tasks through your contributor relay. "+
+				"Action required: after %s, none of your agents has a method or model assigned, and no one is picking up tasks through ClankeR, your contributor relay. "+
 					"Assign a backend and model to at least one agent (Agents → pick an agent → Model), or open your hive's /contribute page to your community — "+
 					"either one counts. Spokes that stay idle past this point are candidates for de-provisioning by an administrator.",
 				humanDuration(age))
@@ -571,7 +577,7 @@ func nextNudge(h *RegistryEntry, now time.Time) nudge {
 			n.Message = fmt.Sprintf(
 				"Your hive has been up for %s but no agent has a method or model assigned yet, so nothing is running. "+
 					"Pick a backend and model for an agent under Agents → Model. Prefer humans in the loop? "+
-					"Running the contributor relay from your hive's /contribute page satisfies this step just as well.",
+					"Running ClankeR, the contributor relay, from your hive's /contribute page satisfies this step just as well.",
 				humanDuration(age))
 		default:
 			return nudge{}

@@ -73,7 +73,18 @@ type RegistryEntry struct {
 	AIAuthorEffective string `json:"aiAuthorEffective,omitempty"`
 	// StartedAt is the spoke process start time, reported over the heartbeat.
 	// Rendered as an uptime pill in My Hives so a crash-looping hive is visible.
-	StartedAt          string         `json:"startedAt,omitempty"`
+	StartedAt string `json:"startedAt,omitempty"`
+	// AdvisoryLastPostedAt is when the spoke last SUCCESSFULLY posted its
+	// advisory digest (RFC3339), reported over the heartbeat. Empty means the
+	// hive has never posted one — not-advisory-mode or an old spoke — which the
+	// staleness gate reads as UNKNOWN, never as an alarm. My Hives renders a
+	// "stale advisory" pill (advisoryStaleSummary) when this ages past
+	// advisoryStaleThreshold on a hive whose App can write.
+	AdvisoryLastPostedAt string `json:"advisoryLastPostedAt,omitempty"`
+	// AdvisoryError is the log-safe error from the spoke's most recent failed
+	// advisory-post attempt ("" on success). When set on an app-can-write hive
+	// it trips the stale pill directly, carrying the specific cause.
+	AdvisoryError      string         `json:"advisoryError,omitempty"`
 	PrimaryRepo        string         `json:"primaryRepo"`
 	DashboardURL       string         `json:"dashboardUrl"`
 	SnapshotURL        string         `json:"snapshotUrl,omitempty"`
@@ -115,20 +126,46 @@ type RegistryEntry struct {
 	//      spokes too old to report it;
 	//   3. "github.com" at render time, so a chip is never blank.
 	// Empty here means "not reported" — resolved on read, never guessed.
-	GitHubHost                string             `json:"githubHost,omitempty"`
-	Agents                    []AgentSummary     `json:"agents,omitempty"`
-	Leaderboard               []LeaderboardEntry `json:"leaderboard,omitempty"`
-	Online                    bool               `json:"online"`
-	Upgrading                 bool               `json:"upgrading,omitempty"`
-	UpgradeTarget             string             `json:"upgradeTarget,omitempty"`
-	UpgradeStartedAt          time.Time          `json:"upgradeStartedAt,omitempty"`
-	IssueHistory              []SparkPoint       `json:"issueHistory,omitempty"`
-	PRHistory                 []SparkPoint       `json:"prHistory,omitempty"`
-	GitHubAppRequired         bool               `json:"githubAppRequired,omitempty"`
-	GitHubAppPermIssue        string             `json:"githubAppPermIssue,omitempty"`
-	GitHubAppState            string             `json:"githubAppState,omitempty"`
-	PendingGitHubAppInstall   bool               `json:"pendingGitHubAppInstall,omitempty"`
-	PendingGitHubAppInstallAt time.Time          `json:"pendingGitHubAppInstallAt,omitempty"`
+	GitHubHost       string             `json:"githubHost,omitempty"`
+	Agents           []AgentSummary     `json:"agents,omitempty"`
+	Leaderboard      []LeaderboardEntry `json:"leaderboard,omitempty"`
+	Online           bool               `json:"online"`
+	Upgrading        bool               `json:"upgrading,omitempty"`
+	UpgradeTarget    string             `json:"upgradeTarget,omitempty"`
+	UpgradeStartedAt time.Time          `json:"upgradeStartedAt,omitempty"`
+	// UpgradeFailed records that the spoke reported an upgrade it could not
+	// complete, with the cause. Distinct from Upgrading: "failed" is a terminal
+	// state a human must see, not an in-flight one.
+	UpgradeFailed   bool      `json:"upgradeFailed,omitempty"`
+	UpgradeError    string    `json:"upgradeError,omitempty"`
+	UpgradeFailedAt time.Time `json:"upgradeFailedAt,omitempty"`
+	// OrphanedUpgradeSweeps counts how many times the orphan sweep has cleared
+	// and re-armed an upgrade for this hive without it ever landing. A spoke
+	// that cannot advance (it restarts, comes back on a SHA that is neither the
+	// old one nor the target, and goes quiet again) would otherwise be swept and
+	// re-armed forever, which looks like progress but never is. Past
+	// maxOrphanedUpgradeSweeps the hub stops retrying and records a failure a
+	// human can see. Reset whenever the hive reaches a target.
+	OrphanedUpgradeSweeps int          `json:"orphanedUpgradeSweeps,omitempty"`
+	IssueHistory          []SparkPoint `json:"issueHistory,omitempty"`
+	PRHistory             []SparkPoint `json:"prHistory,omitempty"`
+	GitHubAppRequired     bool         `json:"githubAppRequired,omitempty"`
+	GitHubAppPermIssue    string       `json:"githubAppPermIssue,omitempty"`
+	GitHubAppState        string       `json:"githubAppState,omitempty"`
+	// GitHubAppID is the App ID the spoke reports it is authenticating AS.
+	//
+	// Carried into the registry so the hub can SEE a spoke running the
+	// placeholder sentinel (config.PlaceholderAppID) without waiting for that
+	// spoke to classify and report the fault itself. The spoke's own
+	// classification is the better signal when it arrives, but it depends on the
+	// spoke being new enough to produce it — and the sentinel's whole failure
+	// mode is that nothing said anything for weeks. A raw, hub-observed number
+	// cannot be silenced by a stale spoke.
+	//
+	// Zero means "not reported", never "no App".
+	GitHubAppID               int64     `json:"githubAppId,omitempty"`
+	PendingGitHubAppInstall   bool      `json:"pendingGitHubAppInstall,omitempty"`
+	PendingGitHubAppInstallAt time.Time `json:"pendingGitHubAppInstallAt,omitempty"`
 	// Fleet contribution counts reported by the spoke (nil = not reported /
 	// not yet computed). Aggregated across public, non-stale hives into the
 	// /api/fleet-stats total. Pointers preserve the nil-vs-zero distinction so
@@ -136,13 +173,21 @@ type RegistryEntry struct {
 	PRsMerged90d   *int `json:"prsMerged90d,omitempty"`
 	PRsRejected90d *int `json:"prsRejected90d,omitempty"`
 	CVEsClosed     *int `json:"cvesClosed,omitempty"`
+	// FleetStatsCollectedAt is when the spoke last SUCCESSFULLY computed the
+	// counts above — not when it last sent a heartbeat. The counts are carried
+	// forward across restarts, so without this the hub cannot tell a count
+	// gathered minutes ago from one frozen since a collector started failing.
+	// The aggregator refuses to count contributions older than
+	// fleetStatsMaxAge. Zero means the spoke is too old to report it, which is
+	// treated as "not stale" so an upgrade does not blank the strip.
+	FleetStatsCollectedAt time.Time `json:"fleetStatsCollectedAt,omitempty"`
 	// AgentsWithModel is the spoke-reported count of agents that have a method
 	// (backend) or model assigned. nil = the spoke is too old to report it, so
 	// journey stage 2 is treated as unknown rather than unsatisfied.
 	AgentsWithModel *int `json:"agentsWithModel,omitempty"`
 	// Journey is the computed user-journey status (which adoption stage this
 	// hive is stalled on, how hard it is being nudged, and whether stage 2 is
-	// satisfied via the contributor relay). Computed on read from the journey
+	// satisfied via ClankeR, the contributor relay). Computed on read from the journey
 	// state store — never persisted on the registry entry itself.
 	Journey *JourneyStatus `json:"journey,omitempty"`
 }
@@ -202,6 +247,71 @@ func sanitizeField(s string) string {
 
 func isValidName(s string) bool {
 	return safeNamePattern.MatchString(s) && len(s) <= 100
+}
+
+// publicGitHubHost is the bare hostname of public GitHub. A hive record stores
+// "" for public GitHub, but a REQUEST must name its forge explicitly, and this
+// is the label a requester types (or the picker submits) to mean "public".
+const publicGitHubHost = "github.com"
+
+// minForgeHostLabels is the fewest dot-separated labels a forge hostname can
+// have. A GitHub forge is always at least "host.tld" (github.com,
+// github.ibm.com); a single bare label like "github" is a typo, not a forge,
+// and accepting it would provision a hive against a host that resolves nowhere.
+const minForgeHostLabels = 2
+
+// normalizeForgeHost turns whatever a user typed into a "GitHub forge" field
+// into a bare hostname, and reports whether the result is a usable forge.
+//
+// It accepts every form the request modal advertises — with or without a
+// scheme, with or without a trailing slash — because those are what people
+// actually paste out of a browser address bar:
+//
+//	github.com            -> ("github.com",     true)
+//	https://github.com    -> ("github.com",     true)
+//	github.ibm.com        -> ("github.ibm.com", true)
+//	https://github.ibm.com/ -> ("github.ibm.com", true)
+//	""                    -> ("",               false)
+//	"not a host"          -> ("not a host",     false)
+//
+// Normalization runs BEFORE validation deliberately. isValidName rejects ":"
+// and "/", so validating the raw input would reject "https://github.ibm.com" —
+// a form the request form explicitly tells users to use. Callers must
+// normalize first and validate the result.
+//
+// githubHostLabel does the scheme/slash stripping and is reused here rather
+// than duplicated, so the hostname a request records and the hostname the
+// dashboard renders can never drift into two spellings.
+func normalizeForgeHost(s string) (string, bool) {
+	host := strings.ToLower(githubHostLabel(strings.TrimSpace(s)))
+	// githubHostLabel maps empty -> "github.com". For a REQUEST that default is
+	// wrong: an omitted forge must fail, not silently become public GitHub.
+	if strings.TrimSpace(s) == "" {
+		return "", false
+	}
+	// A pasted org URL ("github.ibm.com/my-org") carries a path; keep only the
+	// host so the forge field tolerates the same paste the org field does.
+	if i := strings.Index(host, "/"); i >= 0 {
+		host = host[:i]
+	}
+	if !isValidName(host) {
+		return host, false
+	}
+	// Every label must be non-empty and contain something other than dots, so
+	// "..", "../..", and ".github.com" are rejected. isValidName permits dots
+	// (legitimately — hostnames need them), which on its own would let a
+	// path-traversal prefix like "../../etc/passwd" survive truncation at the
+	// first slash and be stored as the forge "..".
+	labels := strings.Split(host, ".")
+	if len(labels) < minForgeHostLabels {
+		return host, false
+	}
+	for _, label := range labels {
+		if label == "" {
+			return host, false
+		}
+	}
+	return host, true
 }
 
 // normalizeOrgRef accepts what a user actually pastes into an "org" field and
@@ -387,12 +497,24 @@ type HubServer struct {
 	// the admin-triggered path. hubUpgradeTarget is the SHA being rolled to.
 	lastHubUpgradeTrigger time.Time
 	hubUpgradeTarget      string
-	hubUpgradeMu          sync.Mutex // guards lastHubUpgradeTrigger + hubUpgradeTarget
-	httpServer            *http.Server
-	httpMu                sync.Mutex // guards httpServer (Start runs in a goroutine; Shutdown races it)
-	clusters              map[string]ClusterConfig
-	heartbeatHealth       map[string]*HeartbeatHealthEntry // cluster ID → latest health from spoke heartbeat
-	heartbeatHealthMu     sync.RWMutex
+	// hubUpgradeFault holds a human-readable reason the last self-upgrade did
+	// not land: a refused (malformed) image tag, or a rollout that never became
+	// Ready. Empty means healthy. It exists so a stuck upgrade is visible in the
+	// dashboard instead of only in `kubectl describe` — the `target1` incident
+	// left the hub serving stale code for ~20 minutes with nothing surfaced.
+	hubUpgradeFault string
+	hubUpgradeMu    sync.Mutex // guards lastHubUpgradeTrigger + hubUpgradeTarget + hubUpgradeFault
+	httpServer      *http.Server
+	httpMu          sync.Mutex // guards httpServer (Start runs in a goroutine; Shutdown races it)
+	clusters        map[string]ClusterConfig
+
+	// vanityHostServable overrides how the retroactive vanity-URL repair makes a
+	// vanity host servable (see makeVanityHostServable). nil in production, where
+	// the real addVanityHostToIngress runs; set by tests, which have no cluster to
+	// kubectl to.
+	vanityHostServable func(hiveID, vanityHost string, cluster *ClusterConfig) error
+	heartbeatHealth    map[string]*HeartbeatHealthEntry // cluster ID → latest health from spoke heartbeat
+	heartbeatHealthMu  sync.RWMutex
 
 	// usageHistory is the sampled fleet-total token trend, appended on
 	// heartbeat at usageSnapshotInterval and bounded to
@@ -474,6 +596,13 @@ type HubServer struct {
 	// its own leaf mutex and is never touched while s.mu is held — see
 	// alerts.go.
 	alerts *alertState
+
+	// urlHealth remembers how many consecutive times each hive's PUBLIC
+	// dashboard URL failed to serve, so a transient blip can be told apart from
+	// a link that has been dead for hours. Populated by the auth-audit loop,
+	// which already probes those URLs. Carries its own leaf mutex and is never
+	// touched while s.mu is held — see url_reachability.go.
+	urlHealth *urlHealthState
 }
 
 // HubBannerEntry stores an admin banner targeted at a specific hive.
@@ -602,6 +731,7 @@ func NewHubServer(port int, logger *slog.Logger, gitHash, gitBranch string) *Hub
 		timeline:                newTimelineStore(),
 		journey:                 newJourneyStore(),
 		alerts:                  newAlertState(),
+		urlHealth:               newURLHealthState(),
 	}
 
 	s.loadRegistry()
@@ -780,9 +910,14 @@ func (s *HubServer) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		AIAuthor:          sanitizeField(payload.AIAuthor),
 		AIAuthorEffective: sanitizeField(payload.AIAuthorEffective),
 		StartedAt:         sanitizeField(payload.StartedAt),
-		DashboardURL:      payload.DashboardURL,
-		SnapshotURL:       payload.SnapshotURL,
-		ACMMLevel:         clampInt(payload.ACMMLevel, 0, 6),
+		// Advisory-staleness signal. Both are sanitized like every other
+		// spoke-reported string; an empty AdvisoryLastPostedAt is preserved as
+		// empty so the render/gate reads it as UNKNOWN rather than stale.
+		AdvisoryLastPostedAt: sanitizeField(payload.AdvisoryLastPostedAt),
+		AdvisoryError:        sanitizeField(payload.AdvisoryError),
+		DashboardURL:         payload.DashboardURL,
+		SnapshotURL:          payload.SnapshotURL,
+		ACMMLevel:            clampInt(payload.ACMMLevel, 0, 6),
 		AgentCount: func() int {
 			count := 0
 			for _, a := range payload.Agents {
@@ -851,6 +986,7 @@ func (s *HubServer) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		GitHubAppRequired:       payload.GitHubAppRequired,
 		GitHubAppPermIssue:      sanitizeHeartbeatField(payload.GitHubAppPermIssue),
 		GitHubAppState:          sanitizeHeartbeatField(payload.GitHubAppState),
+		GitHubAppID:             payload.GitHubAppID,
 		PendingGitHubAppInstall: payload.PendingGitHubAppInstall,
 		PendingGitHubAppInstallAt: func() time.Time {
 			if payload.PendingGitHubAppInstall {
@@ -861,6 +997,16 @@ func (s *HubServer) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		PRsMerged90d:   clampFleetCount(payload.PRsMerged90d),
 		PRsRejected90d: clampFleetCount(payload.PRsRejected90d),
 		CVEsClosed:     clampFleetCount(payload.CVEsClosed),
+		FleetStatsCollectedAt: func() time.Time {
+			if payload.FleetStatsCollectedAt == "" {
+				return time.Time{}
+			}
+			t, err := time.Parse(time.RFC3339, payload.FleetStatsCollectedAt)
+			if err != nil {
+				return time.Time{}
+			}
+			return t
+		}(),
 		// Preserve nil (old spoke, unknown) vs a real count — journey stage
 		// detection depends on telling those two apart.
 		AgentsWithModel: clampFleetCount(payload.AgentsWithModel),
@@ -884,6 +1030,27 @@ func (s *HubServer) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 
 	if payload.Upgrading {
 		entry.Upgrading = true
+	}
+
+	// A spoke that explicitly reports a FAILED upgrade must not be left showing
+	// the "Upgrading" spinner, and must not be re-instructed on a loop. Record
+	// the cause so operators can see WHY, and drop the pending instruction: the
+	// spoke has already exhausted its own retry budget, so re-sending the same
+	// target every heartbeat only reproduces the failure.
+	if payload.UpgradeFailed {
+		entry.Upgrading = false
+		entry.UpgradeFailed = true
+		entry.UpgradeError = sanitizeHeartbeatField(payload.UpgradeError)
+		entry.UpgradeFailedAt = time.Now()
+		s.mu.Lock()
+		delete(s.heartbeatUpgrade, payload.HiveID)
+		s.mu.Unlock()
+		s.logger.Error("heartbeat: spoke reported a FAILED upgrade",
+			"hive_id", payload.HiveID,
+			"from", payload.GitHash,
+			"to", payload.UpgradeTargetSHA,
+			"error", payload.UpgradeError,
+		)
 	}
 
 	// Timeline: capture the pre-heartbeat entry inside the lock (it is the only
@@ -910,11 +1077,48 @@ func (s *HubServer) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 			if h.IsPublic && !payload.IsPublic {
 				entry.IsPublic = h.IsPublic
 			}
+			// Carry the last known fleet-stat counts forward when this
+			// heartbeat does not carry them. The counts live only in the
+			// spoke's memory, so every restart reports nil until the periodic
+			// collector next succeeds. Overwriting the stored value with nil
+			// dropped the hive out of the public total for that whole gap —
+			// with a fleet-wide restart, that silently collapsed the landing
+			// page's numbers. Preserving the previous value (with its
+			// collection timestamp, which the aggregator ages out) keeps the
+			// total honest instead of quietly shrinking it.
+			if entry.PRsMerged90d == nil && h.PRsMerged90d != nil {
+				entry.PRsMerged90d = h.PRsMerged90d
+			}
+			if entry.PRsRejected90d == nil && h.PRsRejected90d != nil {
+				entry.PRsRejected90d = h.PRsRejected90d
+			}
+			if entry.CVEsClosed == nil && h.CVEsClosed != nil {
+				entry.CVEsClosed = h.CVEsClosed
+			}
+			if entry.FleetStatsCollectedAt.IsZero() {
+				entry.FleetStatsCollectedAt = h.FleetStatsCollectedAt
+			}
 			branchForLatest := payload.GitBranch
 			if branchForLatest == "" {
 				branchForLatest = "v2"
 			}
 			registryLatestSHA := getLatestSHAForBranch(branchForLatest)
+			// Carry a previously-reported upgrade failure forward across ordinary
+			// heartbeats (which do not repeat it), but clear it the moment the
+			// spoke actually reports a NEW git hash — that means it finally moved.
+			if h.UpgradeFailed && !payload.UpgradeFailed {
+				if entry.GitHash != "" && h.GitHash != "" && entry.GitHash != h.GitHash {
+					entry.UpgradeFailed = false
+					entry.UpgradeError = ""
+					entry.UpgradeFailedAt = time.Time{}
+					s.logger.Info("heartbeat: previously failed upgrade has landed",
+						"hive_id", payload.HiveID, "git_hash", entry.GitHash)
+				} else {
+					entry.UpgradeFailed = true
+					entry.UpgradeError = h.UpgradeError
+					entry.UpgradeFailedAt = h.UpgradeFailedAt
+				}
+			}
 			if h.Upgrading && !payload.Upgrading && (sameCommit(payload.GitHash, h.UpgradeTarget) || (registryLatestSHA != "" && sameCommit(payload.GitHash, registryLatestSHA))) {
 				// Non-upgrading heartbeat at the target SHA or at latest —
 				// upgrade completed (image may have advanced past the
@@ -924,8 +1128,21 @@ func (s *HubServer) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 				// full SHA and the target/latest was the 7-char short form.
 				entry.Upgrading = false
 				entry.UpgradeTarget = ""
+				// The upgrade landed, so any orphan-sweep retry budget spent
+				// getting here is no longer relevant. Reset it, or a hive that
+				// needed one sweep on each of three separate upgrades would be
+				// declared permanently faulty on the third.
+				entry.OrphanedUpgradeSweeps = 0
 			} else if h.Upgrading && !payload.Upgrading && h.UpgradeTarget == "" {
 				// Upgrading with no target (stale flag from config-only restart).
+				entry.Upgrading = false
+				entry.UpgradeTarget = ""
+			} else if payload.UpgradeFailed {
+				// The spoke just told us the upgrade FAILED. That is direct
+				// evidence and must beat the inference below, which would
+				// otherwise re-assert the stale Upgrading flag (same GitHash as
+				// before is exactly what a failed upgrade looks like) and put the
+				// permanent spinner straight back.
 				entry.Upgrading = false
 				entry.UpgradeTarget = ""
 			} else if h.Upgrading && h.UpgradeTarget != "" {
@@ -1085,6 +1302,23 @@ func (s *HubServer) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	// an unclaimed placeholder, or sits on a non-GHE cluster.
 	s.repairGitHubHostForHive(payload.HiveID)
 
+	// Close the FORGE handshake before building the project config, so the beat
+	// on which the spoke first reports the requested host is also the beat the
+	// push stops. Ordering matters for the same reason it does above: doing this
+	// after projectConfigForHiveID would re-send an api_url that has already
+	// landed. No-op (and silent) for every hive with no outstanding switch,
+	// which is all of them until an operator runs one.
+	s.adoptSpokeForge(payload.HiveID, payload.GitHubHost)
+
+	// Retroactively mint the vanity host for a hive CLAIMED BEFORE the vanity
+	// feature existed, also BEFORE building the project config, so the URL-only
+	// push below delivers it on this very beat. VanityURL is otherwise written
+	// only at assign time, so those hives would display and open their raw
+	// placeholder host forever. No-op (and silent) for unclaimed placeholders,
+	// hives that already have a vanity URL, and hives whose vanity host the hub
+	// cannot make servable (heartbeat-only clusters keep their placeholder).
+	s.repairVanityURLForHive(payload.HiveID)
+
 	if projCfg := projectConfigForHiveID(payload.HiveID, payload.Org, payload.Repos, payload.PrimaryRepo, payload.ACMMLevel, payload.DashboardURL, payload.GitHubAPIURL); projCfg != nil {
 		resp.ProjectConfig = projCfg
 		s.logger.Info("heartbeat: delivering claimed project config to spoke",
@@ -1193,6 +1427,17 @@ func (s *HubServer) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		// by the fleet-wide default.
 		resp.GitHubAppConfig = keyCfg
 	}
+
+	// Deliver the fleet's OTHER App keys so a spoke can authenticate as an App
+	// that is NOT its cluster's default — the github.com hive parked on a
+	// GitHub-Enterprise cluster (vllm-d) that inherits only the GHE key and can
+	// never sign for github.com. This runs on EVERY heartbeat, independent of the
+	// branches above: those decide the spoke's PRIMARY (cluster) key; this makes
+	// sure it also carries every other key it is missing. Delivering only the
+	// missing/stale ones (attachMissingAppKeys diffs against what the spoke
+	// reports it holds) keeps it idempotent — once the spoke has them all, nothing
+	// rides the wire.
+	s.attachMissingAppKeys(&resp, &payload)
 
 	s.hubBannersMu.RLock()
 	if banner, ok := s.hubBanners[payload.HiveID]; ok {
@@ -1379,7 +1624,40 @@ type FleetStats struct {
 	CVEsClosed   int    `json:"cves_closed"`
 	Hives        int    `json:"hives"`
 	UpdatedAt    string `json:"updated_at"`
+	// Reporting is the number of eligible hives that actually contributed a
+	// fresh count to the totals above; Eligible is how many were considered.
+	// Without this pair the totals are indistinguishable from a healthy fleet:
+	// summing 2 of 50 hives yields a small, confident, WRONG number and the
+	// page has no way to know. The landing page compares the two and refuses
+	// to present a total assembled from too little of the fleet.
+	Reporting int `json:"reporting"`
+	Eligible  int `json:"eligible"`
+	// Stale counts eligible hives whose newest successful collect is older
+	// than fleetStatsMaxAge — surfaced so a fleet quietly failing to collect
+	// is visible as degradation rather than as a shrinking total.
+	Stale int `json:"stale"`
+	// Trustworthy is false when too little of the fleet reported for the
+	// totals to stand as a fleet-wide figure. The landing page shows a
+	// "collecting" state instead of the numbers when this is false.
+	Trustworthy bool `json:"trustworthy"`
 }
+
+// fleetStatsMaxAge is how old a spoke's last successful collect may be and
+// still count toward the public total. The spoke recollects every 30 minutes,
+// so a contribution older than this means that hive's collector has been
+// failing for many consecutive cycles and its number is no longer current.
+// Generous enough to ride out a restart or a transient GitHub outage without
+// blanking the strip, short enough that a genuinely broken collector drops out
+// rather than freezing a stale figure on the public page forever.
+const fleetStatsMaxAge = 6 * time.Hour
+
+// fleetStatsMinReportingFraction is the share of eligible hives that must
+// report fresh counts before the aggregate is considered trustworthy enough to
+// display as a fleet-wide total. Below this the landing page shows a degraded
+// state instead of a confidently wrong number — the regression this guards
+// against is precisely a total silently assembled from a small minority of the
+// fleet (2 of 50) and rendered as though it were complete.
+const fleetStatsMinReportingFraction = 0.5
 
 // computeFleetStats aggregates fleet-wide contribution counts across public,
 // non-stale hives. A hive that never reported a given count (nil pointer) is
@@ -1409,6 +1687,26 @@ func (s *HubServer) computeFleetStats() FleetStats {
 			}
 			repoSet[key] = struct{}{}
 		}
+		// Only hives that could meaningfully report are counted as eligible.
+		// A placeholder with no repos has nothing to contribute and must not
+		// drag the reporting fraction down as though data were missing.
+		if len(h.Repos) == 0 {
+			continue
+		}
+		fs.Eligible++
+
+		hasCount := h.PRsMerged90d != nil || h.PRsRejected90d != nil || h.CVEsClosed != nil
+		if !hasCount {
+			continue
+		}
+		// Age out contributions whose last successful collect is too old. A
+		// zero timestamp means the spoke predates the field, so it is trusted
+		// rather than dropped — an upgrade must not blank the strip.
+		if !h.FleetStatsCollectedAt.IsZero() && time.Since(h.FleetStatsCollectedAt) > fleetStatsMaxAge {
+			fs.Stale++
+			continue
+		}
+		fs.Reporting++
 		if h.PRsMerged90d != nil {
 			fs.PRsMerged += *h.PRsMerged90d
 		}
@@ -1423,6 +1721,17 @@ func (s *HubServer) computeFleetStats() FleetStats {
 	return fs
 }
 
+// FleetStatsTrustworthy reports whether enough of the eligible fleet
+// contributed fresh counts for the totals to be presented as a fleet-wide
+// figure. A total built from a small minority is worse than no total at all:
+// it renders as a confident, precise, badly wrong number.
+func (fs FleetStats) FleetStatsTrustworthy() bool {
+	if fs.Eligible == 0 || fs.Reporting == 0 {
+		return false
+	}
+	return float64(fs.Reporting)/float64(fs.Eligible) >= fleetStatsMinReportingFraction
+}
+
 func (s *HubServer) handleFleetStats(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	offlineEvents := s.markStaleHives()
@@ -1433,25 +1742,76 @@ func (s *HubServer) handleFleetStats(w http.ResponseWriter, r *http.Request) {
 	fs := s.computeFleetStats()
 	s.mu.RUnlock()
 	fs.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	fs.Trustworthy = fs.FleetStatsTrustworthy()
+
+	// Make the degraded case loud on the server too. The landing page hides the
+	// numbers, but a silent hide is how this regressed unnoticed before: with
+	// no log line, a fleet-wide collector failure looks identical to a quiet
+	// day. This is the operator-visible signal that the data, not the fleet,
+	// is what shrank.
+	if !fs.Trustworthy {
+		s.logger.Warn("fleet stats degraded: too few hives reporting to publish a fleet total",
+			"reporting", fs.Reporting,
+			"eligible", fs.Eligible,
+			"stale", fs.Stale,
+			"min_fraction", fleetStatsMinReportingFraction,
+		)
+	}
 
 	data, _ := json.Marshal(fs)
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(data)
 }
 
-// removeRegistryEntry removes a hive from the in-memory registry by ID.
+// removeRegistryEntry removes a hive from the in-memory registry by ID and
+// flushes the registry to disk before returning.
+//
+// The flush is synchronous rather than going through requestSave because
+// requestSave defers the write by registrySaveDelay. A hub restart inside that
+// window would reload the pre-delete registry from disk and the deleted hive
+// would reappear in "My Hives" — the in-memory removal alone is not durable.
+// Deletion is rare and user-initiated, so paying the write cost inline is fine.
 func (s *HubServer) removeRegistryEntry(id, by string) {
 	s.mu.Lock()
+	removed := false
 	for i, h := range s.registry.Hives {
 		if h.ID == id {
 			s.registry.Hives = append(s.registry.Hives[:i], s.registry.Hives[i+1:]...)
-			s.mu.Unlock()
-			s.requestSave()
-			s.logger.Info("audit: registry entry removed", "id", id, "by", by)
-			return
+			removed = true
+			break
 		}
 	}
 	s.mu.Unlock()
+	if !removed {
+		return
+	}
+	if err := s.saveRegistryNow(); err != nil {
+		// The in-memory removal already happened, so the listing is correct for
+		// this process. Log loudly: only a restart before the next periodic save
+		// would resurrect the entry.
+		s.logger.Error("registry entry removed in memory but persist failed", "id", id, "error", err)
+		s.requestSave()
+	}
+	s.logger.Info("audit: registry entry removed", "id", id, "by", by)
+}
+
+// saveRegistryNow marshals and writes the registry to disk immediately, via a
+// temp file plus atomic rename so a crash mid-write cannot truncate it.
+func (s *HubServer) saveRegistryNow() error {
+	s.mu.RLock()
+	data, err := json.MarshalIndent(s.registry, "", "  ")
+	s.mu.RUnlock()
+	if err != nil {
+		return fmt.Errorf("marshal hub registry: %w", err)
+	}
+	tmpPath := registryPath + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
+		return fmt.Errorf("write hub registry: %w", err)
+	}
+	if err := os.Rename(tmpPath, registryPath); err != nil {
+		return fmt.Errorf("rename hub registry: %w", err)
+	}
+	return nil
 }
 
 func (s *HubServer) handleRegistryDelete(w http.ResponseWriter, r *http.Request) {
@@ -1471,7 +1831,11 @@ func (s *HubServer) handleRegistryDelete(w http.ResponseWriter, r *http.Request)
 	}
 	s.mu.Unlock()
 	if removed {
-		s.requestSave()
+		// Synchronous flush for the same durability reason as removeRegistryEntry.
+		if err := s.saveRegistryNow(); err != nil {
+			s.logger.Error("admin registry removal persist failed", "id", id, "error", err)
+			s.requestSave()
+		}
 		s.logger.Info("audit: admin removed registry entry", "id", id, "admin", hubAdminUsername)
 	}
 	w.Header().Set("Content-Type", "application/json")

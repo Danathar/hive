@@ -500,9 +500,26 @@ type AgentConfig struct {
 	// Paused persists an operator pause across restarts/upgrades. Without
 	// this, every pod restart rebuilt agents un-paused (Go zero value), so
 	// an operator pause was silently undone on the next upgrade.
-	Paused          bool   `yaml:"paused" json:"paused,omitempty"`
-	ClearOnKick     bool   `yaml:"clear_on_kick" json:"clear_on_kick"`
-	CLIPinned       bool   `yaml:"cli_pinned" json:"cli_pinned,omitempty"`
+	Paused      bool `yaml:"paused" json:"paused,omitempty"`
+	ClearOnKick bool `yaml:"clear_on_kick" json:"clear_on_kick"`
+	CLIPinned   bool `yaml:"cli_pinned" json:"cli_pinned,omitempty"`
+
+	// ModelOwner / BackendOwner record WHO last set Model / Backend. An ACMM
+	// pack owns these fields until an operator changes them in the Governor
+	// grid; from that point the operator owns them and ApplyPack must not
+	// reconcile them back to the pack value.
+	//
+	// Without this, a pack re-apply — which happens on EVERY hive restart
+	// (cmd/hive/main.go "merging pack updates") — rewrote Model back to the
+	// pack default, so an operator's model choice silently reverted on the
+	// next restart. That is the "I've deleted those 4 times, they always come
+	// back" report: the revert was a restart, not a propagation delay.
+	//
+	// Stored as a string owner rather than a bool so "never set" (empty),
+	// "pack-owned" and "operator-owned" stay distinguishable across upgrades
+	// of hives whose config predates this field.
+	ModelOwner      string `yaml:"model_owner" json:"model_owner,omitempty"`
+	BackendOwner    string `yaml:"backend_owner" json:"backend_owner,omitempty"`
 	StaleTimeout    int    `yaml:"stale_timeout" json:"stale_timeout,omitempty"`
 	RestartStrategy string `yaml:"restart_strategy" json:"restart_strategy,omitempty"`
 	LaunchCmd       string `yaml:"launch_cmd" json:"launch_cmd,omitempty"`
@@ -646,6 +663,28 @@ func (a *AgentConfig) UnmarshalYAML(value *yaml.Node) error {
 		}
 	}
 	return nil
+}
+
+// Ownership markers for AgentConfig.ModelOwner / BackendOwner.
+const (
+	// FieldOwnerPack marks a value written by an ACMM pack. Pack-owned values
+	// are reconciled to the current pack on every apply.
+	FieldOwnerPack = "pack"
+	// FieldOwnerOperator marks a value an operator chose in the Governor grid.
+	// Operator-owned values are never overwritten by a pack apply.
+	FieldOwnerOperator = "operator"
+)
+
+// ModelIsOperatorOwned reports whether an operator explicitly chose this
+// agent's model, which makes it immune to pack reconciliation.
+func (a AgentConfig) ModelIsOperatorOwned() bool {
+	return a.ModelOwner == FieldOwnerOperator
+}
+
+// BackendIsOperatorOwned reports whether an operator explicitly chose this
+// agent's backend (the grid's "method" column).
+func (a AgentConfig) BackendIsOperatorOwned() bool {
+	return a.BackendOwner == FieldOwnerOperator
 }
 
 // EnabledExplicitlySet returns true when the user's YAML explicitly set the
@@ -1541,17 +1580,32 @@ func (g GitHubConfig) ResolvedAPIURL() string {
 	return DefaultGitHubAPIURL
 }
 
-// ResolvedBaseURL returns the configured base URL or the default for github.com.
+// ResolvedBaseURL returns the base URL of the GitHub the hive's App/repos live
+// on, as a full "https://host" URL. It prefers an explicit base_url, but falls
+// back to the host of api_url when base_url is blank — pooled/placeholder GHE
+// hives legitimately carry base_url: "" with api_url: https://github.ibm.com/api/v3,
+// and resolving those to github.com breaks App-host-derived URLs (notably the
+// App install link, which would point at github.com/apps/... instead of the GHE
+// github.ibm.com/github-apps/... path). This mirrors HostLabel()'s base-or-api
+// derivation. Login/device-flow paths deliberately do NOT use this — see
+// OAuthBaseURL, which is always public github.com.
 func (g GitHubConfig) ResolvedBaseURL() string {
 	if g.BaseURL != "" {
 		return g.BaseURL
 	}
+	// base_url blank: derive from api_url's host if it points at a GHE instance.
+	if host := g.HostLabel(); host != DefaultGitHubBaseURL[len("https://"):] {
+		return "https://" + host
+	}
 	return DefaultGitHubBaseURL
 }
 
-// IsGHE returns true if the configured base URL points to a GitHub Enterprise instance.
+// IsGHE returns true if the hive's App/repos live on a GitHub Enterprise instance
+// rather than public github.com. It looks at BOTH base_url and api_url (via
+// HostLabel), so a hive carrying only a GHE api_url (base_url: "") is still
+// correctly recognized as GHE — matching ResolvedBaseURL and HostLabel.
 func (g GitHubConfig) IsGHE() bool {
-	return g.BaseURL != "" && g.BaseURL != DefaultGitHubBaseURL
+	return g.HostLabel() != DefaultGitHubBaseURL[len("https://"):]
 }
 
 // HostLabel returns the bare GitHub hostname this hive's App/repos live on:
@@ -1666,13 +1720,35 @@ func (g GitHubConfig) AppAuthoredPRsEnabled() bool {
 // AppInstallURL returns the full URL to install the GitHub App.
 // For GHE: {base_url}/github-apps/{slug}/installations/new
 // For github.com: https://github.com/apps/{slug}/installations/new
+//
+// It returns "" for a GitHub Enterprise host whose App slug is not configured.
+//
+// WHY EMPTY RATHER THAN A BEST-EFFORT URL
+//
+// DefaultGitHubAppSlug ("kubestellar-hive") names the App registered on PUBLIC
+// github.com. GitHub Enterprise hosts a SEPARATE App registry, and an enterprise
+// registration is rarely given the same slug — so falling back to the default on
+// a GHE host emits a link to an App that provably does not exist there, and the
+// user lands on a GitHub 404. That is strictly worse than no link: a dead link
+// reads as "this product is broken", and it sent a real user to
+// github.ibm.com/github-apps/kubestellar-hive/installations/new.
+//
+// The empty string is the honest answer — "this host's App slug was never
+// recorded" — and callers render it as a legible message naming the missing
+// config instead of a button that 404s. Public github.com keeps the default,
+// where it is correct by construction.
 func (g GitHubConfig) AppInstallURL() string {
 	base := strings.TrimRight(g.ResolvedBaseURL(), "/")
-	slug := g.ResolvedAppSlug()
 	if g.IsGHE() {
+		// No default is admissible here: only an explicitly configured slug can
+		// name an App on this enterprise host.
+		slug := strings.TrimSpace(g.AppSlug)
+		if slug == "" {
+			return ""
+		}
 		return base + "/github-apps/" + slug + "/installations/new"
 	}
-	return base + "/apps/" + slug + "/installations/new"
+	return base + "/apps/" + g.ResolvedAppSlug() + "/installations/new"
 }
 
 type NotificationsConfig struct {

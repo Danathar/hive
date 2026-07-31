@@ -193,6 +193,10 @@ func (s *HubServer) registerSaaSRoutes() {
 	s.mux.HandleFunc("POST /api/saas/hives/{id}/switch-branch", s.requireAuth(s.handleSwitchBranch))
 	s.mux.HandleFunc("PUT /api/saas/hives/{id}/visibility", s.requireAuth(s.handleToggleVisibility))
 	s.mux.HandleFunc("PUT /api/saas/hives/{id}/auto-upgrade", s.requireAuth(s.handleToggleAutoUpgrade))
+	// Move a hive between forges (github.com <-> a GitHub Enterprise host).
+	// requireAuth plus an inner owner-or-admin check, exactly like
+	// switch-branch and auto-upgrade above.
+	s.mux.HandleFunc("POST /api/saas/hives/{id}/forge", s.requireAuth(s.handleSwitchForge))
 	s.mux.HandleFunc("GET /api/saas/hive-config/{hiveID}", s.requireAuth(s.handleProxyHiveConfig))
 	s.mux.HandleFunc("GET /api/saas/latest-sha", s.handleLatestSHA)
 	s.mux.HandleFunc("POST /api/saas/hub/upgrade", s.requireAdmin(s.handleHubSelfUpgrade))
@@ -211,7 +215,13 @@ func (s *HubServer) registerSaaSRoutes() {
 	s.mux.HandleFunc("PUT /api/saas/hives/{id}/approve-access/{username}", s.requireAuth(s.handleApproveAccess))
 	s.mux.HandleFunc("DELETE /api/saas/hives/{id}/deny-access/{username}", s.requireAuth(s.handleDenyAccess))
 	s.mux.HandleFunc("GET /api/saas/access-status", s.handleAccessStatus)
-	s.mux.HandleFunc("GET /api/saas/repos", s.requireAuth(s.handleSaaSRepos))
+	// GET /api/saas/repos is deliberately gone. Repo discovery ran on the
+	// requester's github.com OAuth token, so it could only ever see public
+	// GitHub — invisible to GitHub Enterprise, and structurally unable to list
+	// a GitLab or Gitea repo when those forges arrive. The request flow now
+	// takes a typed repository URL, which works for every forge without new
+	// code, and that is what let the login drop to an empty OAuth scope.
+	// Restoring this endpoint would also require restoring that scope.
 	s.mux.HandleFunc("POST /api/saas/request-provision", s.requireAuth(s.handleRequestProvision))
 	s.mux.HandleFunc("PUT /api/saas/approve-provision/{username}", s.requireAdmin(s.handleApproveProvision))
 	s.mux.HandleFunc("DELETE /api/saas/deny-provision/{username}", s.requireAdmin(s.handleDenyProvision))
@@ -234,6 +244,14 @@ func (s *HubServer) registerSaaSRoutes() {
 	s.mux.HandleFunc("DELETE /api/saas/admin/hub-banner", s.requireAdmin(s.handleClearHubBanner))
 	s.mux.HandleFunc("GET /api/saas/admin/hub-banner", s.requireAdmin(s.handleGetHubBanner))
 	s.registerBulkRoutes()
+	// Slack messaging. The single-user and hive-owner routes are admin-or-owner
+	// (checked inside each handler, like switch-branch); the BROADCAST is
+	// admin-only, because it reaches every user with a slack_id and cannot be
+	// recalled. It additionally requires a typed confirmation and offers a dry
+	// run — see slack.go.
+	s.mux.HandleFunc("POST /api/saas/slack/user/{username}", s.requireAuth(s.handleSlackMessageUser))
+	s.mux.HandleFunc("POST /api/saas/hives/{id}/slack", s.requireAuth(s.handleSlackMessageHiveOwner))
+	s.mux.HandleFunc("POST /api/saas/admin/slack/broadcast", s.requireAdmin(s.handleSlackBroadcast))
 	s.mux.HandleFunc("POST /api/saas/admin/journey-snooze", s.requireAdmin(s.handleJourneySnooze))
 	s.mux.HandleFunc("GET /api/saas/admin/journey-status", s.requireAdmin(s.handleJourneyStatus))
 
@@ -602,6 +620,35 @@ func clusterIDForSaaSHive(sh SaaSHive) string {
 	return defaultClusterID
 }
 
+// ensureClusterIDForClaim stamps a non-blank cluster_id onto a hive that is
+// about to be persisted by a claim/assign. This is the data-integrity guard
+// for the observed bug where CLAIMED hives lost cluster_id in their meta.json
+// and then fell back to defaultClusterID (hive-oke) in clusterForHive — which
+// mis-routed App/host resolution for hives that actually run on vllm-d.
+//
+// Precedence, most-trusted first:
+//  1. The hive's OWN non-blank ClusterID (the placeholder already belongs to a
+//     cluster — always the most authoritative source; never override it).
+//  2. poolFallback — the pool the claim was drawn from, when the caller knows
+//     it (e.g. handleApproveProvision picks a pool by auth_method), but only
+//     when it names a cluster the hub actually has.
+//  3. defaultClusterID — last resort, matching clusterForHive's own fallback.
+//
+// The result is always non-blank, so with omitempty on the json tag it still
+// serializes to a concrete "cluster_id" value rather than vanishing.
+func (s *HubServer) ensureClusterIDForClaim(h *SaaSHive, poolFallback string) {
+	if h.ClusterID != "" {
+		return
+	}
+	if poolFallback != "" {
+		if _, ok := s.clusters[poolFallback]; ok {
+			h.ClusterID = poolFallback
+			return
+		}
+	}
+	h.ClusterID = defaultClusterID
+}
+
 // clusterNameForID returns the human-readable name for a cluster ID.
 // Returns empty string when the cluster is not found.
 func (s *HubServer) clusterNameForID(clusterID string) string {
@@ -697,6 +744,27 @@ const clusterHealthMemWarnPct = 60
 // clusterHealthMemDangerPct is the memory usage percentage threshold for danger state.
 const clusterHealthMemDangerPct = 80
 
+// Disk thresholds are anchored to kubelet's own behaviour rather than to
+// round numbers, so a coloured bar means something concrete is about to
+// happen on the node:
+//
+//	evictionHard: nodefs.available<10%  -> kubelet starts evicting pods at
+//	                                       90% used, so that is the danger line.
+//	imageGCHighThresholdPercent: 85     -> kubelet begins garbage-collecting
+//	                                       images at 85% used. That is the
+//	                                       first automatic reaction to disk
+//	                                       filling up, which makes it the
+//	                                       right moment to warn an operator
+//	                                       while there is still headroom.
+//
+// clusterHealthDiskWarnPct is the disk usage percentage at which kubelet's
+// image garbage collection kicks in (imageGCHighThresholdPercent).
+const clusterHealthDiskWarnPct = 85
+
+// clusterHealthDiskDangerPct is the disk usage percentage at which kubelet's
+// hard eviction threshold fires (nodefs.available<10%).
+const clusterHealthDiskDangerPct = 90
+
 // kubectlTopTimeoutSec is the timeout for kubectl top nodes commands.
 const kubectlTopTimeoutSec = 10
 
@@ -733,8 +801,16 @@ type ClusterHealthNode struct {
 	MemUsedMB     int64  `json:"mem_used_mb"`
 	MemPercent    int    `json:"mem_percent"`
 	DiskPressure  bool   `json:"disk_pressure"`
-	Pods          int    `json:"pods"`
-	PodCapacity   int    `json:"pod_capacity"`
+	// Disk fields describe the node filesystem (nodefs) that kubelet applies
+	// its eviction thresholds to. They are pointers because live disk usage
+	// comes from the kubelet stats/summary endpoint, which a hub may not be
+	// able to reach; nil means "unknown" and must render as dashes rather
+	// than as 0 (which would read as healthy).
+	DiskTotalMB *int64 `json:"disk_total_mb,omitempty"`
+	DiskUsedMB  *int64 `json:"disk_used_mb,omitempty"`
+	DiskPercent *int   `json:"disk_percent,omitempty"`
+	Pods        int    `json:"pods"`
+	PodCapacity int    `json:"pod_capacity"`
 	// HiveCount is the number of distinct hive-hosted-* namespaces with a
 	// running pod on this node (namespaces, not pods, so a hive briefly
 	// running two pods during a rollout is counted once).
@@ -752,7 +828,12 @@ type ClusterHealthSummary struct {
 	TotalCPUPct   int `json:"total_cpu_percent"`
 	TotalMemGB    int `json:"total_mem_gb"`
 	TotalMemPct   int `json:"total_mem_percent"`
-	HiveCount     int `json:"hive_count"`
+	// Disk totals cover only the nodes that reported live disk usage. They
+	// are pointers so a cluster with no reachable kubelet stats endpoint
+	// omits them entirely instead of reporting a misleading 0%.
+	TotalDiskGB  *int `json:"total_disk_gb,omitempty"`
+	TotalDiskPct *int `json:"total_disk_percent,omitempty"`
+	HiveCount    int  `json:"hive_count"`
 	// HiveCapacityRemaining estimates how many MORE hives the cluster can
 	// hold: per Ready, schedulable node, the per-hive request footprint
 	// (see hive_capacity.go) bin-packed into allocatable-minus-requested
@@ -1002,6 +1083,12 @@ func buildClusterHealth(s *HubServer) (*ClusterHealthResponse, error) {
 		return perCluster[i].ID < perCluster[j].ID
 	})
 
+	// Every collection path above appends its nodes to allNodes, so the fleet
+	// disk total is derived from them directly. Nodes with no disk data are
+	// skipped, so an unreachable cluster lowers coverage without skewing the
+	// percentage; if no node anywhere reported, disk is omitted entirely.
+	aggDiskGB, aggDiskPct := summarizeDisk(allNodes)
+
 	return &ClusterHealthResponse{
 		Nodes: allNodes,
 		Summary: ClusterHealthSummary{
@@ -1010,6 +1097,8 @@ func buildClusterHealth(s *HubServer) (*ClusterHealthResponse, error) {
 			TotalCPUPct:   aggCPUPct,
 			TotalMemGB:    aggMemGB,
 			TotalMemPct:   aggMemPct,
+			TotalDiskGB:   aggDiskGB,
+			TotalDiskPct:  aggDiskPct,
 			HiveCount:     totalHiveCount,
 		},
 		Clusters: perCluster,
@@ -1159,6 +1248,26 @@ func buildSingleClusterHealth(cluster *ClusterConfig, hiveCount int, logger *slo
 		})
 	}
 
+	// Collect LIVE node filesystem usage from each kubelet's stats/summary
+	// endpoint. This is best-effort per node: a node whose kubelet proxy is
+	// unreachable simply keeps nil disk fields and renders as unknown, which
+	// must never degrade the rest of this cluster's health data.
+	for i := range nodes {
+		rawStats, statsErr := kubectlForClusterContext(ctx, cluster,
+			"--request-timeout", timeout.String(),
+			"get", "--raw", nodeStatsSummaryPath(nodes[i].Name)).Output()
+		if statsErr != nil {
+			if logger != nil {
+				logger.Debug("cluster health: node disk stats unavailable",
+					"cluster", cluster.ID, "node", nodes[i].Name, "error", statsErr)
+			}
+			continue
+		}
+		if usage, ok := parseNodeStatsSummaryDisk(rawStats); ok {
+			applyNodeDiskUsage(&nodes[i], usage)
+		}
+	}
+
 	// Count running pods per node and sum their container resource REQUESTS
 	// (requests, not usage — that is what the scheduler bin-packs against).
 	// Listing only Running pods slightly undercounts requests (Pending pods
@@ -1249,6 +1358,7 @@ func buildSingleClusterHealth(cluster *ClusterConfig, hiveCount int, logger *slo
 		totalMemPct = int(totalMemUsed * percentMultiplier / totalMemAlloc)
 	}
 	totalMemGB := int(totalMemAlloc / giToBytes)
+	totalDiskGB, totalDiskPct := summarizeDisk(nodes)
 
 	result := PerClusterHealth{
 		Nodes: nodes,
@@ -1258,6 +1368,8 @@ func buildSingleClusterHealth(cluster *ClusterConfig, hiveCount int, logger *slo
 			TotalCPUPct:           totalCPUPct,
 			TotalMemGB:            totalMemGB,
 			TotalMemPct:           totalMemPct,
+			TotalDiskGB:           totalDiskGB,
+			TotalDiskPct:          totalDiskPct,
 			HiveCount:             hiveCount,
 			HiveCapacityRemaining: hiveCapacityRemaining,
 		},
@@ -1305,6 +1417,9 @@ func convertHeartbeatToPerClusterHealth(clusterID, clusterName string, entry *He
 			MemUsedMB:     n.MemUsedMB,
 			MemPercent:    n.MemPercent,
 			DiskPressure:  n.DiskPressure,
+			DiskTotalMB:   n.DiskTotalMB,
+			DiskUsedMB:    n.DiskUsedMB,
+			DiskPercent:   n.DiskPercent,
 			Pods:          n.Pods,
 			PodCapacity:   n.PodCapacity,
 			HiveCount:     n.HiveCount,
@@ -1322,7 +1437,10 @@ func convertHeartbeatToPerClusterHealth(clusterID, clusterName string, entry *He
 			TotalCPUPct:   report.Summary.TotalCPUPct,
 			TotalMemGB:    report.Summary.TotalMemGB,
 			TotalMemPct:   report.Summary.TotalMemPct,
-			HiveCount:     hiveCount,
+			// nil for spokes that could not read kubelet disk stats.
+			TotalDiskGB:  report.Summary.TotalDiskGB,
+			TotalDiskPct: report.Summary.TotalDiskPct,
+			HiveCount:    hiveCount,
 			// nil for spokes running older builds that do not report it.
 			HiveCapacityRemaining: report.Summary.HiveCapacityRemaining,
 		},
@@ -1348,6 +1466,75 @@ func convertHeartbeatToPerClusterHealth(clusterID, clusterName string, entry *He
 	}
 
 	return pch
+}
+
+// nodeDiskUsage holds live node filesystem usage for one node.
+type nodeDiskUsage struct {
+	usedBytes     int64
+	capacityBytes int64
+}
+
+// nodeStatsSummaryPath builds the kubelet stats/summary proxy path for a node.
+// This endpoint is the only source of LIVE disk usage: the node object's
+// capacity/allocatable["ephemeral-storage"] reports the declared size only and
+// says nothing about how full the filesystem actually is.
+func nodeStatsSummaryPath(nodeName string) string {
+	return "/api/v1/nodes/" + nodeName + "/proxy/stats/summary"
+}
+
+// parseNodeStatsSummaryDisk extracts node filesystem usage from a kubelet
+// stats/summary response. node.fs is the nodefs that kubelet's
+// evictionHard nodefs.available threshold applies to.
+func parseNodeStatsSummaryDisk(raw []byte) (nodeDiskUsage, bool) {
+	var summary struct {
+		Node struct {
+			FS struct {
+				UsedBytes     *int64 `json:"usedBytes"`
+				CapacityBytes *int64 `json:"capacityBytes"`
+			} `json:"fs"`
+		} `json:"node"`
+	}
+	if err := json.Unmarshal(raw, &summary); err != nil {
+		return nodeDiskUsage{}, false
+	}
+	fs := summary.Node.FS
+	// Both values are required: without capacity there is no percentage, and
+	// a missing usedBytes must not be treated as zero usage.
+	if fs.UsedBytes == nil || fs.CapacityBytes == nil || *fs.CapacityBytes <= 0 {
+		return nodeDiskUsage{}, false
+	}
+	return nodeDiskUsage{usedBytes: *fs.UsedBytes, capacityBytes: *fs.CapacityBytes}, true
+}
+
+// applyNodeDiskUsage fills the disk fields on a health node from live usage.
+// Nodes with no usable stats keep nil disk fields and render as unknown.
+func applyNodeDiskUsage(n *ClusterHealthNode, d nodeDiskUsage) {
+	totalMB := d.capacityBytes / bytesPerMB
+	usedMB := d.usedBytes / bytesPerMB
+	pct := int(d.usedBytes * percentMultiplier / d.capacityBytes)
+	n.DiskTotalMB = &totalMB
+	n.DiskUsedMB = &usedMB
+	n.DiskPercent = &pct
+}
+
+// summarizeDisk aggregates per-node disk usage into cluster totals, counting
+// only nodes that actually reported usage. Returns nil,nil when no node did,
+// so the UI omits disk for that cluster rather than showing a false 0%.
+func summarizeDisk(nodes []ClusterHealthNode) (*int, *int) {
+	var totalBytes, usedBytes int64
+	for _, n := range nodes {
+		if n.DiskTotalMB == nil || n.DiskUsedMB == nil {
+			continue
+		}
+		totalBytes += *n.DiskTotalMB * bytesPerMB
+		usedBytes += *n.DiskUsedMB * bytesPerMB
+	}
+	if totalBytes <= 0 {
+		return nil, nil
+	}
+	totalGB := int(totalBytes / giToBytes)
+	pct := int(usedBytes * percentMultiplier / totalBytes)
+	return &totalGB, &pct
 }
 
 // parseK8sCPU parses Kubernetes CPU resource strings (e.g. "4", "4000m", "5866711668n").
@@ -1487,6 +1674,26 @@ type MyHiveEntry struct {
 	// guards. The full 200-event history stays behind that endpoint and its
 	// modal; this is only the hover preview.
 	RecentEvents []TimelineEvent `json:"recentEvents,omitempty"`
+
+	// AdvisoryStale is true when this hive SHOULD be posting advisory digests
+	// but its digest has quietly gone stale — computed on read by advisoryStale()
+	// so the browser never re-derives the threshold or the gating (advisory-mode
+	// + app-can-write) and cannot drift from the Go rule. AdvisoryStaleReason is
+	// the tooltip cause. Both stay zero/empty for hives that are not in advisory
+	// mode, whose App cannot write, or that report an unknown timestamp — those
+	// must never show the pill.
+	AdvisoryStale       bool   `json:"advisoryStale,omitempty"`
+	AdvisoryStaleReason string `json:"advisoryStaleReason,omitempty"`
+
+	// URLUnreachable is true when this hive's PUBLIC dashboard URL failed to
+	// serve on the last several probes — the link in this very table is dead.
+	// Computed on read from the auth-audit loop's observations, so the browser
+	// never re-derives the failure threshold. Stays zero/empty for a hive that
+	// is serving, that is too new to have converged, or whose whole cluster is
+	// out (an outage is one condition, not N broken hives) — those must never
+	// show the pill.
+	URLUnreachable       bool   `json:"urlUnreachable,omitempty"`
+	URLUnreachableReason string `json:"urlUnreachableReason,omitempty"`
 }
 
 // myHivesRecentEventCount is how many timeline events ride the My Hives
@@ -1552,6 +1759,15 @@ func (s *HubServer) handleMyHives(w http.ResponseWriter, r *http.Request) {
 		entry.ProvStatus = sh.Status
 		if sh.Status == statusAvailable || (entry.ACMMLevel == 0 && sh.ACMMLevel > 0) {
 			entry.ACMMLevel = sh.ACMMLevel
+		}
+		// Show the friendly vanity host for a claimed hive the instant it is
+		// claimed, rather than waiting for the spoke to adopt+report it back over
+		// the heartbeat. Until then entry.DashboardURL (spoke-reported) is still the
+		// raw placeholder host, which is the placeholder-URL-persists bug in My
+		// Hives / the row's Open link. Only overlays a validated meta vanity_url;
+		// an unclaimed placeholder or a hive with no vanity keeps its own URL.
+		if v := claimedVanityURL(sh); v != "" {
+			entry.DashboardURL = v
 		}
 		switch sh.Status {
 		case "provisioning":
@@ -1783,6 +1999,25 @@ func (s *HubServer) handleMyHives(w http.ResponseWriter, r *http.Request) {
 	// misread as a claimed hive and flagged for having no App).
 	annotateDrift(result, getDisplaySHAs(), time.Now())
 
+	// Dead-link pill, computed once over the full visible set for the same
+	// reason as drift: the cluster-outage suppression is a property of the SET
+	// (most of a cluster failing is an outage, not N broken hives), so it
+	// cannot be decided one row at a time. Derived from the same alert list the
+	// panel renders, so pill and panel always agree.
+	{
+		regs := make([]RegistryEntry, 0, len(result))
+		for i := range result {
+			regs = append(regs, result[i].RegistryEntry)
+		}
+		urlAlerts := s.urlUnreachableAlerts(regs, time.Now())
+		for i := range result {
+			if bad, reason := urlUnreachableFacet(urlAlerts, result[i].ID); bad {
+				result[i].URLUnreachable = true
+				result[i].URLUnreachableReason = reason
+			}
+		}
+	}
+
 	// Attach the user-journey stage to every row so the table can show who is
 	// stalled where. Derived on read; never persisted on the registry entry.
 	journeyNow := time.Now()
@@ -1790,6 +2025,14 @@ func (s *HubServer) handleMyHives(w http.ResponseWriter, r *http.Request) {
 		st := s.journey.get(result[i].ID)
 		status := JourneyStatusFor(&result[i].RegistryEntry, st, journeyNow)
 		result[i].Journey = &status
+
+		// Advisory-staleness pill, computed on read (same as Journey) so the
+		// gating — advisory-mode participation, app-can-write, past-threshold —
+		// lives ONLY in Go and the browser just renders the flag.
+		if stale, reason := advisoryStale(result[i].RegistryEntry, journeyNow); stale {
+			result[i].AdvisoryStale = true
+			result[i].AdvisoryStaleReason = reason
+		}
 
 		// Sparkline history dominated this payload: at 42 hives the two series
 		// were ~755 KB of an 818 KB response (92%), yet they are drawn into a
@@ -2146,6 +2389,14 @@ func (s *HubServer) handleOpenHive(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.mu.RUnlock()
+	// For a claimed hive, hand the SSO handoff off to its vanity host rather than
+	// the raw placeholder host the spoke may still be reporting — the vanity URL
+	// is the validated, user-facing host (and the one the spoke will settle on).
+	// Only a validated meta vanity_url is used; unclaimed placeholders are left on
+	// their working placeholder host.
+	if v := claimedVanityURL(loadSaaSHive(id)); v != "" {
+		base = v
+	}
 	if base == "" && (strings.HasPrefix(id, "hosted-") || strings.HasPrefix(id, "saas-")) {
 		base = "https://" + id + ".hive.kubestellar.io"
 	}
@@ -2202,7 +2453,7 @@ func (s *HubServer) handleDeleteHive(w http.ResponseWriter, r *http.Request) {
 		// so the hive disappears from the listing immediately.
 		s.removeRegistryEntry(id, username)
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"status":"deleted"}`))
+		json.NewEncoder(w).Encode(map[string]string{"status": deleteStatusDeleted})
 		return
 	}
 	if h.Owner != username && username != hubAdminUsername {
@@ -2211,19 +2462,49 @@ func (s *HubServer) handleDeleteHive(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Full de-provisioning: namespace, PV, OCI export, OCI file system, disk record, user cleanup.
+	//
+	// The registry entry is removed unconditionally, even when the cluster
+	// teardown cannot run or only partially succeeds. A hive whose namespace is
+	// already gone (or whose cluster config has been removed) would otherwise be
+	// permanently un-deletable: the handler used to return 500 before reaching
+	// removeRegistryEntry, stranding a ghost row in "My Hives" that no amount of
+	// re-clicking Delete could clear. Leaving a stranded row is strictly worse
+	// than leaving cloud resources behind, because the row is what the user sees
+	// and it is the only thing they can act on. Partial failures are reported in
+	// the response so the user knows manual cleanup may still be needed.
 	cluster := s.clusterForHive(h)
-	if cluster == nil {
-		s.logger.Error("no cluster config for deprovision", "hive_id", id, "cluster_id", h.ClusterID)
-		http.Error(w, `{"error":"no cluster config — cannot deprovision"}`, http.StatusInternalServerError)
-		return
+	if cluster != nil {
+		deprovisionHive(h, cluster, s.logger)
+	} else {
+		s.logger.Error("no cluster config for deprovision; removing registry entry anyway",
+			"hive_id", id, "cluster_id", h.ClusterID)
 	}
-	deprovisionHive(h, cluster, s.logger)
 	s.removeRegistryEntry(id, username)
 
-	s.logger.Info("audit: hosted hive deleted", "hive_id", id, "by", username)
+	s.logger.Info("audit: hosted hive deleted", "hive_id", id, "by", username,
+		"deprovisioned", cluster != nil)
 	w.Header().Set("Content-Type", "application/json")
-	w.Write([]byte(`{"status":"deleted"}`))
+	if cluster == nil {
+		// deleteStatusPartial tells the UI the registry row is gone but cloud
+		// resources may survive and need manual cleanup.
+		json.NewEncoder(w).Encode(map[string]string{
+			"status":  deleteStatusPartial,
+			"warning": "removed from the hub registry, but no cluster config was available to delete the namespace, PV, or OCI storage — these may need manual cleanup",
+		})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]string{"status": deleteStatusDeleted})
 }
+
+// Delete outcome statuses returned by handleDeleteHive.
+const (
+	// deleteStatusDeleted means the registry entry was removed and the cluster
+	// teardown ran.
+	deleteStatusDeleted = "deleted"
+	// deleteStatusPartial means the registry entry was removed but the cluster
+	// teardown could not run; cloud resources may need manual cleanup.
+	deleteStatusPartial = "partially_deleted"
+)
 
 // MigrateRequest is the JSON body for POST /api/saas/hives/{id}/migrate.
 type MigrateRequest struct {
@@ -2392,6 +2673,21 @@ func (s *HubServer) rolloutHubToSHA(sha string) error {
 	if sha == "" {
 		return fmt.Errorf("empty target SHA")
 	}
+	// Shape-check the tag BEFORE it can reach a live Deployment. Writing an
+	// unresolvable tag (the `target1` incident — a test fixture SHA that escaped
+	// to the real cluster) leaves the new ReplicaSet in ImagePullBackOff while
+	// the old one keeps serving: the hub stays "up" but silently runs stale
+	// code. Refusing here leaves the last good image running and makes the
+	// failure loud instead of invisible.
+	if err := validateImageTag(sha); err != nil {
+		s.logger.Error("hub self-upgrade REFUSED: invalid image tag",
+			"tag", sha,
+			"deployment", hubDeploymentName,
+			"namespace", hubNamespace,
+			"error", err)
+		s.setHubUpgradeFault(fmt.Sprintf("refused invalid image tag %q: %v", sha, err))
+		return err
+	}
 	if !hubImageExists(sha, s.logger) {
 		return fmt.Errorf("hub image %s:%s not published yet", ghcrRepoHub, sha)
 	}
@@ -2404,8 +2700,98 @@ func (s *HubServer) rolloutHubToSHA(sha string) error {
 	s.hubUpgradeMu.Lock()
 	s.lastHubUpgradeTrigger = time.Now()
 	s.hubUpgradeTarget = sha
+	s.hubUpgradeFault = "" // a fresh, validated rollout clears any prior refusal
 	s.hubUpgradeMu.Unlock()
+	// Watch the rollout land. Detect-and-report only: an auto-rollback would
+	// race the upgrade poller (which re-triggers the same target every cycle),
+	// so a rollback could fight the upgrade loop and flap the deployment. See
+	// watchHubRollout.
+	go s.watchHubRollout(sha, image)
 	return nil
+}
+
+// hubRolloutWatchTimeout bounds how long we wait for a self-upgrade we just
+// triggered to become Ready before flagging it as stuck. The hub's own image is
+// a few hundred MB and a cold node has to pull it, so this is generous enough
+// to avoid false alarms while still catching an ImagePullBackOff — which
+// back-off-retries indefinitely and would otherwise never surface.
+const hubRolloutWatchTimeout = 5 * time.Minute
+
+// hubRolloutPollInterval is how often watchHubRollout re-checks rollout status.
+const hubRolloutPollInterval = 15 * time.Second
+
+// watchHubRollout confirms a self-upgrade actually became Ready, and records a
+// loud, user-visible fault if it did not.
+//
+// It deliberately does NOT roll back. The auto-upgrade poller re-evaluates the
+// same target every cycle, so an automatic rollback would immediately be undone
+// and re-applied, flapping the deployment during an already-degraded window.
+// Detect and report is the safe half of the loop: the operator sees the stuck
+// upgrade in the UI and in the logs, and decides.
+func (s *HubServer) watchHubRollout(sha, image string) {
+	deadline := time.Now().Add(hubRolloutWatchTimeout)
+	for time.Now().Before(deadline) {
+		time.Sleep(hubRolloutPollInterval)
+		// `rollout status --timeout=0s` returns non-zero while a rollout is
+		// still progressing and zero once it has fully succeeded.
+		cmd := kubectlForCluster(s.hubCluster(), "rollout", "status",
+			"deployment/"+hubDeploymentName, "-n", hubNamespace, "--timeout=0s")
+		if err := cmd.Run(); err == nil {
+			s.hubUpgradeMu.Lock()
+			s.hubUpgradeFault = ""
+			s.hubUpgradeMu.Unlock()
+			s.logger.Info("hub self-upgrade rollout completed", "sha", sha, "image", image)
+			return
+		}
+	}
+	// Still not Ready. Pull the pod-level reason so the log names the actual
+	// cause (ImagePullBackOff / ErrImagePull / CrashLoopBackOff) rather than
+	// just "timed out".
+	reason := s.hubRolloutFailureReason()
+	s.logger.Error("hub self-upgrade STUCK: new ReplicaSet not Ready — hub is still serving the OLD image",
+		"sha", sha,
+		"image", image,
+		"deployment", hubDeploymentName,
+		"namespace", hubNamespace,
+		"waited", hubRolloutWatchTimeout.String(),
+		"reason", reason)
+	s.setHubUpgradeFault(fmt.Sprintf("upgrade to %s stuck after %s: %s (still serving the previous image)",
+		image, hubRolloutWatchTimeout, reason))
+}
+
+// hubRolloutFailureReason best-effort extracts why the hub's pods are not
+// Ready, so the stuck-rollout log/status names the real cause.
+func (s *HubServer) hubRolloutFailureReason() string {
+	const reasonJSONPath = `{range .items[*].status.containerStatuses[*]}{.state.waiting.reason}{" "}{.state.waiting.message}{"\n"}{end}`
+	cmd := kubectlForCluster(s.hubCluster(), "get", "pods",
+		"-n", hubNamespace, "-l", "app="+hubDeploymentName,
+		"-o", "jsonpath="+reasonJSONPath)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "unknown (could not read pod status)"
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			return line
+		}
+	}
+	return "unknown (no waiting container state reported)"
+}
+
+// setHubUpgradeFault records a self-upgrade failure for the dashboard so a
+// stuck or refused upgrade is visible in the UI, not only in `kubectl describe`.
+func (s *HubServer) setHubUpgradeFault(msg string) {
+	s.hubUpgradeMu.Lock()
+	s.hubUpgradeFault = msg
+	s.hubUpgradeMu.Unlock()
+}
+
+// HubUpgradeFault returns the current self-upgrade fault message, or "" when
+// the last upgrade attempt was healthy.
+func (s *HubServer) HubUpgradeFault() string {
+	s.hubUpgradeMu.Lock()
+	defer s.hubUpgradeMu.Unlock()
+	return s.hubUpgradeFault
 }
 
 // hubUpgradeState reports the hub's own upgrade status for the dashboard badge:
@@ -2415,6 +2801,9 @@ func (s *HubServer) rolloutHubToSHA(sha string) error {
 //   - "queued"    — behind latest, auto-upgrade ON, no rollout in flight yet
 //     (the poller will trigger one shortly)
 //   - "behind"    — behind latest, auto-upgrade OFF (admin must click Upgrade)
+//   - "failed"    — an upgrade was REFUSED (malformed image tag) or its rollout
+//     never became Ready. The hub is behind and cannot self-heal;
+//     an operator must look. HubUpgradeFault() carries the reason.
 //   - "unknown"   — latest SHA not resolved yet
 //
 // This is the field the badge needs: previously the frontend could only tell an
@@ -2434,7 +2823,14 @@ func (s *HubServer) hubUpgradeState() string {
 	s.hubUpgradeMu.Lock()
 	inFlight := s.hubUpgradeTarget != "" &&
 		time.Since(s.lastHubUpgradeTrigger) < hubUpgradeDebounce
+	fault := s.hubUpgradeFault
 	s.hubUpgradeMu.Unlock()
+	// A refused or stuck upgrade outranks "upgrading"/"queued": the hub is
+	// behind AND cannot get there on its own, which needs an operator. Without
+	// this the badge showed a reassuring "queued" while the rollout was wedged.
+	if fault != "" {
+		return hubUpgradeStateFailed
+	}
 	if inFlight {
 		return "upgrading"
 	}
@@ -2582,6 +2978,28 @@ func (s *HubServer) handleSwitchBranch(w http.ResponseWriter, r *http.Request) {
 	ns := "hive-hosted-" + id
 	imageTag := branchToTag(body.Branch) + "-latest"
 	image := "ghcr.io/kubestellar/hive:" + imageTag
+	// Refuse a branch name that sanitizes into something that is not a valid
+	// channel tag, rather than stranding the spoke on ImagePullBackOff behind a
+	// still-serving old ReplicaSet.
+	if err := validateImageTag(imageTag); err != nil {
+		s.logger.Error("branch switch REFUSED: invalid image tag",
+			"hive", id, "branch", body.Branch, "tag", imageTag, "error", err)
+		http.Error(w, `{"error":"branch does not map to a valid image tag"}`, http.StatusBadRequest)
+		return
+	}
+	// Shape is not existence. A DEPRECATED branch (v3 was retired while hives
+	// were still pointed at it) keeps a perfectly well-formed "<branch>-latest"
+	// tag that CI no longer publishes, so validateImageTag passes and the pull
+	// then fails with an opaque "manifest unknown". Kubernetes keeps the old
+	// ReplicaSet serving, so the hive looks alive while silently running stale
+	// code. Verify the tag is actually pullable before writing it.
+	if !spokeImageExists(imageTag, s.logger) {
+		s.logger.Error("branch switch REFUSED: image tag not published on GHCR",
+			"hive", id, "branch", body.Branch, "tag", imageTag,
+			"hint", "branch may be deprecated or its CI image build never completed")
+		http.Error(w, `{"error":"no published image for that branch (deprecated branch, or its image build has not completed)"}`, http.StatusBadRequest)
+		return
+	}
 	// "*=" updates every container including init containers (copy-config,
 	// init-permissions) — pinning only "hive" left inits on the old branch tag.
 	cmd := kubectlForCluster(cluster, "set", "image", "deployment/hive", "*="+image, "-n", ns)
@@ -2822,7 +3240,8 @@ func (s *HubServer) handleToggleAutoUpgrade(w http.ResponseWriter, r *http.Reque
 	// is delivered via the heartbeat response.
 	// Daily mode deliberately does NOT kick an upgrade here: the whole point of
 	// choosing it is that turning auto-upgrade on should not immediately
-	// restart a working hive. It will roll at the next 17:00 ET window. The
+	// restart a working hive. It will roll at the next daily ET window
+	// (autoUpgradeDailyHour, currently 13:00 / 1pm ET). The
 	// operator who wants it now still has the explicit Upgrade button, which
 	// goes through handleUpgradeHive and is never gated by mode.
 	if body.AutoUpgrade && normalizeAutoUpgradeMode(body.Mode) == AutoUpgradeModeInstant {
@@ -2915,6 +3334,11 @@ const (
 	hubDeploymentName = "hive-hub"
 	hubContainerName  = "hub"
 	hubNamespace      = "hive-hub"
+
+	// hubUpgradeStateFailed is the hubUpgradeState() value meaning the hub is
+	// behind latest AND its last upgrade attempt was refused or wedged, so it
+	// cannot reach latest without operator action.
+	hubUpgradeStateFailed = "failed"
 )
 
 // hubImageExists reports whether the hub's own container image is published on
@@ -2923,6 +3347,16 @@ const (
 var hubImageExists = func(sha string, logger *slog.Logger) bool {
 	client := &http.Client{Timeout: 10 * time.Second}
 	return ghcrTagExists(client, ghcrRepoHub, sha, logger)
+}
+
+// spokeImageExists is the ghcrRepoSpoke counterpart of hubImageExists: it
+// reports whether a SPOKE tag (a "<branch>-latest" channel tag or a SHA) is
+// actually published. Separate from hubImageExists because the two repos are
+// independent build jobs — the hub image for a SHA can exist while the spoke
+// image for that same SHA does not. A var so tests can stub the GHCR round-trip.
+var spokeImageExists = func(tag string, logger *slog.Logger) bool {
+	client := &http.Client{Timeout: 10 * time.Second}
+	return ghcrTagExists(client, ghcrRepoSpoke, tag, logger)
 }
 
 var (
@@ -3383,6 +3817,11 @@ func (s *HubServer) StartLatestSHAPoller(ctx context.Context) {
 	}
 	// On first poll, check if any auto-upgrade hives are behind
 	s.triggerAutoUpgrades()
+	// Clear Upgrading flags orphaned by spoke pods that vanished mid-upgrade.
+	// Runs alongside — not inside — triggerAutoUpgrades because that function
+	// only ever considers hives with AutoUpgrade enabled, while the flag is set
+	// by the admin and bulk upgrade paths for any hive.
+	s.sweepOrphanedUpgrades()
 	ticker := time.NewTicker(latestSHAPollInterval)
 	defer ticker.Stop()
 	for {
@@ -3402,6 +3841,7 @@ func (s *HubServer) StartLatestSHAPoller(ctx context.Context) {
 		}
 		// Always check for pending auto-upgrades (retries failed/missed hives).
 		s.triggerAutoUpgrades()
+		s.sweepOrphanedUpgrades()
 		changed := false
 		for branch, sha := range newSHAs {
 			if sha != "" && sha != oldSHAs[branch] {
@@ -4718,6 +5158,19 @@ func (s *HubServer) handleRequestProvision(w http.ResponseWriter, r *http.Reques
 	if ghHost != "" {
 		body.GitHubHost = ghHost
 	}
+	// The forge is REQUIRED. A bare org name ("z-innersource") does not say
+	// whether the org lives on github.com or on a GitHub Enterprise instance,
+	// and the hub cannot guess: the wrong choice provisions the hive against
+	// the wrong GitHub and points the App-install link at a forge the org
+	// admin never sees. Normalize FIRST — the field accepts
+	// "https://github.ibm.com/" and isValidName rejects ":" and "/", so
+	// validating the raw value would reject a form the form itself advertises.
+	forgeHost, ok := normalizeForgeHost(body.GitHubHost)
+	if !ok {
+		http.Error(w, `{"error":"a GitHub forge is required — enter the host your org lives on (e.g. github.com or github.ibm.com); without it we cannot tell which GitHub to provision against"}`, http.StatusBadRequest)
+		return
+	}
+	body.GitHubHost = forgeHost
 	// Single-host-per-spoke: every repo (and the primary) must be on the same
 	// GitHub host as the org. Check BEFORE normalizeRepoRef strips the host off
 	// each pasted repo. Reject a mixed request up front with a clear message —
@@ -4741,7 +5194,10 @@ func (s *HubServer) handleRequestProvision(w http.ResponseWriter, r *http.Reques
 		http.Error(w, fmt.Sprintf(`{"error":"invalid org name %q — use the org name or its URL (e.g. github.ibm.com/my-org)"}`, body.Org), http.StatusBadRequest)
 		return
 	}
-	if body.GitHubHost != "" && !isValidName(body.GitHubHost) {
+	// Defence in depth: normalizeForgeHost above already guaranteed this, but
+	// keep the check so a future edit that reorders the handler cannot let an
+	// unvalidated host reach the stored request.
+	if !isValidName(body.GitHubHost) {
 		http.Error(w, `{"error":"invalid github host"}`, http.StatusBadRequest)
 		return
 	}
@@ -4752,11 +5208,16 @@ func (s *HubServer) handleRequestProvision(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	const minACMMLevel = 1
-	const maxACMMLevel = 6
+	// A hive is never REQUESTED above L3 Measured. L4-L6 are real levels, but
+	// they are reached after provisioning, from the hive's own dashboard, once
+	// the project has the coverage and CI history to justify them. The
+	// get-started wizard only offers L1-L3, but the wizard is one client: clamp
+	// here so a crafted request cannot provision straight into auto-merge.
+	// Admin paths (assign/provision) keep the full 0..6 range on purpose — an
+	// operator setting a level deliberately is not the case being guarded.
 	acmm := body.ACMMLevel
-	if acmm < minACMMLevel || acmm > maxACMMLevel {
-		acmm = minACMMLevel
+	if acmm < minRequestACMMLevel || acmm > maxRequestACMMLevel {
+		acmm = minRequestACMMLevel
 	}
 
 	primaryRepo := body.PrimaryRepo
@@ -4883,8 +5344,25 @@ func (s *HubServer) handleApproveProvision(w http.ResponseWriter, r *http.Reques
 	h.Repos = repos
 	h.PrimaryRepo = primaryRepo
 	h.ACMMLevel = acmm
+	// Record the level as REQUESTED, not merely as current. ACMMLevel is
+	// overwritten the moment the spoke reports the level it was minted at, so it
+	// cannot be the source of truth for "what did the owner ask for". Keeping the
+	// requested value in its own field is what lets the delivery reconcile below
+	// remain correct — and idempotent — across any number of heartbeats.
+	h.RequestedACMMLevel = acmm
+	// Re-arm the level handshake for this claim. A placeholder is reused across
+	// assignments, so a flag left true by a previous tenancy would suppress
+	// delivery for the new owner.
+	h.ACMMDelivered = false
 	h.Status = ""
 	h.Error = ""
+	// Preserve the placeholder's real cluster before ANY cluster-derived
+	// resolution below (host backfill uses s.clusterForHive(h), which silently
+	// returns hive-oke when ClusterID is blank). The placeholder was picked
+	// from `pool`, so a blank cluster_id here can only mean the placeholder was
+	// created without one — stamp the pool it came from rather than leaving a
+	// blank that later resolves to the wrong (default) cluster's App/host.
+	s.ensureClusterIDForClaim(h, pool)
 	// The requester already told us which GitHub their org lives on (parsed
 	// from the org URL they pasted, or picked explicitly), so honour it. Before
 	// this, approve dropped github_host entirely — only the manual assign path
@@ -5123,9 +5601,66 @@ func (s *HubServer) adoptSpokeProjectConfig(hiveID, org string, repos []string, 
 	changed := false
 	prevLevel := h.ACMMLevel
 
-	// ACMM is operator-owned from the start — always adopt a non-zero level.
-	if level > 0 && level != h.ACMMLevel {
+	// ACMM runs its OWN delivery handshake (ACMMDelivered), not the org/repos
+	// one (ClaimDelivered).
+	//
+	// #2061 made ACMM "operator-owned from the start — always adopt", which fixed
+	// the spyre revert but left a gap on the ASSIGN path: a freshly-claimed
+	// placeholder keeps reporting the level it was MINTED at, and adopting that
+	// pre-delivery report overwrote the level the requester asked for. #2333
+	// closed that by gating on ClaimDelivered — correct for hives claimed after
+	// it shipped, but a no-op for every hive claimed BEFORE, whose
+	// ClaimDelivered was already true from the old org/repos-only rule. Those
+	// hives adopt the stale report on the very first beat after upgrade and the
+	// push stays disabled, which is why the live oke-11 hive is still L2 against
+	// an approved L3 request.
+	//
+	// The dedicated flag defaults to false on those hives, so the level is
+	// delivered exactly once, then ownership passes to the spoke as #2061
+	// intended.
+
+	// Backfill the requested level for hives assigned before the field existed.
+	// Without this the reconcile has no target on exactly the hives that need
+	// it. ACMMLevel is the best available record of the assignment at this
+	// point, and using it is safe: if the spoke already agrees, the delivery is
+	// a no-op that simply marks itself done.
+	if h.RequestedACMMLevel == 0 && h.ACMMLevel > 0 {
+		h.RequestedACMMLevel = h.ACMMLevel
+		changed = true
+	}
+
+	// Delivery is complete once the spoke reports the level the hub asked for.
+	// A level-0 report means "too old / mid-boot to say", never a mismatch.
+	if !h.ACMMDelivered && h.RequestedACMMLevel > 0 && level == h.RequestedACMMLevel {
+		h.ACMMDelivered = true
+		changed = true
+		s.logger.Info("acmm level delivered to spoke",
+			"hive_id", hiveID, "acmm_level", level)
+	}
+
+	switch {
+	case level <= 0:
+		// Nothing reported — say nothing, change nothing.
+	case !h.ACMMDelivered && h.RequestedACMMLevel > 0:
+		// Pre-delivery the REQUESTED level is authoritative. Hold meta at it so
+		// the stale spoke report cannot overwrite the target the push below is
+		// still working toward — the exact loop that lost the L3.
+		if h.ACMMLevel != h.RequestedACMMLevel {
+			h.ACMMLevel = h.RequestedACMMLevel
+			changed = true
+		}
+		if level != h.RequestedACMMLevel {
+			s.logger.Info("acmm level not yet applied on spoke; holding requested level",
+				"hive_id", hiveID,
+				"spoke_reports", level,
+				"requested", h.RequestedACMMLevel)
+		}
+	case level != h.ACMMLevel:
+		// Post-delivery the spoke's dashboard owns the level: adopt operator
+		// edits, and keep the requested level in step so a later re-delivery
+		// never reverts the operator's choice.
 		h.ACMMLevel = level
+		h.RequestedACMMLevel = level
 		changed = true
 	}
 
@@ -5137,6 +5672,13 @@ func (s *HubServer) adoptSpokeProjectConfig(hiveID, org string, repos []string, 
 	orgMatches := org != "" && strings.EqualFold(org, h.Org)
 	reposMatch := len(repos) > 0 && sameStringSliceFold(repos, h.Repos)
 	primaryMatches := primary == "" || strings.EqualFold(primary, h.PrimaryRepo)
+	// ACMM is NO LONGER part of this condition. #2333 added it here so the claim
+	// could not be declared delivered while the level was outstanding, but that
+	// coupled two independent deliveries: a hive whose level lagged would also
+	// have its org/repos pushed forever, and — worse — the level had no way to
+	// re-arm on a hive whose ClaimDelivered was already true. ACMMDelivered
+	// above now tracks the level on its own, so this returns to being purely
+	// about the project payload.
 	if !h.ClaimDelivered {
 		if orgMatches && reposMatch && primaryMatches {
 			h.ClaimDelivered = true
@@ -5182,6 +5724,28 @@ func (s *HubServer) adoptSpokeProjectConfig(hiveID, org string, repos []string, 
 		"acmm_was", prevLevel, "acmm_now", h.ACMMLevel)
 }
 
+// claimedVanityURL returns the vanity dashboard URL the hub should SHOW and LINK
+// for a hive (My Hives, the SSO /open handoff, config proxy), or "" to fall back
+// to the spoke-reported placeholder host.
+//
+// The rule is deliberately narrow so it never resurrects the 503 bug:
+//   - Unclaimed placeholder (statusAvailable): "" — it has no project yet, so its
+//     placeholder host is the only correct URL. Leave it.
+//   - Claimed hive with a non-empty meta VanityURL: return it. A vanity URL is
+//     only non-empty because it was VALIDATED as servable at provision/assign
+//     time (addVanityHostToIngress succeeded, or a cluster wildcard/OpenShift
+//     route already serves it, e.g. vllm-d's hosted-...apps.fmaas-vllm-d... host).
+//     Trusting it here means the hub shows/links the friendly host the instant a
+//     hive is claimed, instead of waiting for the spoke to adopt+report it back.
+//   - Claimed hive with an empty VanityURL: "" — never mint an unvalidated host
+//     here; the placeholder still works.
+func claimedVanityURL(h *SaaSHive) string {
+	if h == nil || h.Status == statusAvailable {
+		return ""
+	}
+	return h.VanityURL
+}
+
 // curAPIURL is the GitHub API base URL the spoke reports it is CURRENTLY using
 // (HeartbeatPayload.GitHubAPIURL). Empty means the spoke is too old to report
 // it — treated as UNKNOWN, never as a mismatch.
@@ -5208,7 +5772,34 @@ func projectConfigForHiveID(hiveID, curOrg string, curRepos []string, curPrimary
 	}
 	claimComplete := h.Org != "" && len(h.Repos) > 0 && primary != "" && h.ACMMLevel > 0
 	if !claimComplete {
-		// Incomplete/stale record (a pre-claim hive) — leave the spoke alone.
+		// Incomplete/stale record (a pre-claim hive) — leave the spoke's PROJECT
+		// (org/repos/ACMM) alone; reconciling from a stale record wiped/downgraded
+		// live hives. BUT the vanity URL is independent of project completeness: a
+		// claimed hive can carry a validated meta vanity_url (set at provision,
+		// e.g. vllmd-10's hosted-...apps.fmaas-vllm-d... route) while its meta's
+		// org/repos/ACMM are still stale/empty. Without pushing it, the spoke never
+		// adopts the vanity URL and the hub keeps showing the raw placeholder host
+		// forever (the placeholder-URL-persists bug). Push the URL alone — never
+		// the stale project — until the spoke reports the vanity back.
+		//
+		// Safety: only a NON-EMPTY VanityURL is ever pushed. A vanity URL is only
+		// non-empty because it was validated/served at provision or assign time
+		// (addVanityHostToIngress succeeded, or a cluster wildcard route already
+		// serves it), so this never pushes an unserved host and never reintroduces
+		// the 503.
+		//
+		// A pending FORGE SWITCH is likewise independent of project
+		// completeness — a hive can be moved between forges whether or not its
+		// meta carries a complete claim, and the switch is precisely the
+		// operator action that must not be silently dropped. Push the API URL
+		// alone (never the stale project) until the spoke reports the requested
+		// host back.
+		if apiURL := pendingForgeAPIURL(h, curAPIURL); apiURL != "" {
+			return &HeartbeatProjectConfig{GitHubAPIURL: apiURL}
+		}
+		if h.VanityURL != "" && curURL != h.VanityURL {
+			return &HeartbeatProjectConfig{DashboardURL: h.VanityURL}
+		}
 		return nil
 	}
 	// What the hub still PUSHES to the spoke, and until when:
@@ -5216,15 +5807,28 @@ func projectConfigForHiveID(hiveID, curOrg string, curRepos []string, curPrimary
 	//     spoke first reports the assigned project). After delivery the spoke's
 	//     dashboard owns them and the caller adopts operator edits instead.
 	//   - vanity URL: pushed until the spoke first reports it back.
-	//   - ACMM level: NEVER pushed — operator-owned from the start, always
-	//     adopted by the caller. Including it here (as the old code did) made any
-	//     dashboard level change get reverted every beat (the spyre bug).
-	// curACMM is unused for the push decision (kept for signature/back-compat).
-	_ = curACMM
+	//   - ACMM level: pushed on its OWN handshake (ACMMDelivered), until the
+	//     spoke reports the requested level back. After that it is never pushed
+	//     again — the spoke's dashboard owns it and the caller adopts operator
+	//     edits, exactly as #2061 intended.
+	//
+	//     #2061 removed the ACMM push entirely because pushing it FOREVER
+	//     reverted every dashboard level change (the spyre bug). Dropping it
+	//     altogether meant a freshly-assigned placeholder was never told the
+	//     level its owner requested. #2333 bounded the push by ClaimDelivered,
+	//     which is right in principle but dead in practice for every hive
+	//     claimed before it shipped: their ClaimDelivered was already true, so
+	//     the push never fires. Bounding by the level's own flag is what makes
+	//     the delivery reachable for those hives — and it is self-limiting, so
+	//     re-running it is harmless.
 	needClaimPush := !h.ClaimDelivered &&
 		!(strings.EqualFold(curOrg, h.Org) &&
 			sameStringSliceFold(curRepos, h.Repos) &&
 			strings.EqualFold(curPrimary, primary))
+	// Independent of the project claim: deliver the requested level until the
+	// spoke confirms it. curACMM == 0 means the spoke did not report a level, so
+	// there is nothing to correct yet.
+	needACMMPush := !h.ACMMDelivered && h.RequestedACMMLevel > 0 && curACMM != h.RequestedACMMLevel
 	needURLPush := h.VanityURL != "" && curURL != h.VanityURL
 	// A spoke reporting a repo that fails isValidRepoRef is wedged: the hub 400s
 	// its every heartbeat ("invalid repo name"), /api/livez then fails on the
@@ -5252,7 +5856,15 @@ func projectConfigForHiveID(hiveID, curOrg string, curRepos []string, curPrimary
 	// would re-send on every beat with no read-back to ever stop it.
 	wantAPIURL := gheAPIURLForHost(h.GitHubHost)
 	needGHEAPIPush := wantAPIURL != "" && curAPIURL != "" && curAPIURL != wantAPIURL
-	if !needClaimPush && !needURLPush && !needRepoRepair && !needGHEAPIPush {
+	// A pending FORGE SWITCH pushes on its own handshake. It cannot ride
+	// needGHEAPIPush: that gate is deliberately conservative about an empty
+	// curAPIURL (unknown, not a mismatch) and — more importantly — it can never
+	// deliver a switch TO public github.com, whose wantAPIURL is "" by
+	// definition. An operator moving a hive back to github.com must be able to,
+	// so the switch carries its own target and its own read-back.
+	forgeAPIURL := pendingForgeAPIURL(h, curAPIURL)
+	needForgePush := forgeAPIURL != ""
+	if !needClaimPush && !needURLPush && !needRepoRepair && !needGHEAPIPush && !needACMMPush && !needForgePush {
 		return nil // nothing left to push
 	}
 	// Sanitize before pushing. A repo pasted as a URL
@@ -5276,17 +5888,36 @@ func projectConfigForHiveID(hiveID, curOrg string, curRepos []string, curPrimary
 		pushPrimary = primary
 	}
 
+	// Pre-delivery the REQUESTED level is what goes down the wire. The adopt path
+	// also holds h.ACMMLevel at that value, so the two normally agree — but
+	// stating it here means a push cannot deliver a stale level if this function
+	// ever runs against a record the adopt path has not touched yet.
+	pushACMM := h.ACMMLevel
+	if !h.ACMMDelivered && h.RequestedACMMLevel > 0 {
+		pushACMM = h.RequestedACMMLevel
+	}
+
 	return &HeartbeatProjectConfig{
 		Org:          h.Org,
 		Repos:        pushRepos,
 		PrimaryRepo:  pushPrimary,
-		ACMMLevel:    h.ACMMLevel,
+		ACMMLevel:    pushACMM,
 		DashboardURL: h.VanityURL,
 		// Point a GHE hive at its enterprise API. jjs-world
 		// (hosted-open-source-osscar) is the working reference: a bare
 		// primary_repo plus github.api_url = https://<host>/api/v3. Empty host
 		// pushes nothing, so a github.com hive keeps the spoke's own default.
-		GitHubAPIURL: gheAPIURLForHost(h.GitHubHost),
+		// A pending forge switch wins: forgeAPIURL is the host the operator
+		// asked for and is only non-empty while that delivery is outstanding.
+		// Once the spoke reports the requested host, ForgeDelivered latches and
+		// this falls back to the ordinary host-derived value — which by then
+		// derives from the SAME host, so the two agree and nothing flaps.
+		GitHubAPIURL: func() string {
+			if forgeAPIURL != "" {
+				return forgeAPIURL
+			}
+			return gheAPIURLForHost(h.GitHubHost)
+		}(),
 		// AIAuthor is deliberately left empty here. Provisioning state never
 		// knows the agents' GitHub account — the spoke owns it — and the spoke
 		// treats an empty author as "leave mine alone". Setting it from this
@@ -5452,6 +6083,12 @@ func (s *HubServer) handleAssignHive(w http.ResponseWriter, r *http.Request) {
 	// (and any stale error) alone makes it show under the new owner in My Hives.
 	h.Owner = body.Owner
 	h.Org = body.Org
+	// Preserve the placeholder's real cluster before the host backfill below,
+	// which resolves via s.clusterForHive(h) and would fall back to hive-oke on
+	// a blank cluster_id. The admin assigns a specific placeholder, so its own
+	// ClusterID is authoritative; only a placeholder created without one lands
+	// on the default here (never a silent blank that mis-routes to hive-oke).
+	s.ensureClusterIDForClaim(h, "")
 	// Record the GHE host (if any) so the heartbeat can point this spoke at the
 	// right GitHub API. Never blank an existing value with an empty one.
 	//
@@ -5488,6 +6125,11 @@ func (s *HubServer) handleAssignHive(w http.ResponseWriter, r *http.Request) {
 		h.ProjectName = body.ProjectName
 	}
 	h.ACMMLevel = acmm
+	// Same as the approve-provision path: the admin-assigned level is what the
+	// hub must deliver, and it needs its own field because the spoke will
+	// overwrite ACMMLevel with whatever it is currently running.
+	h.RequestedACMMLevel = acmm
+	h.ACMMDelivered = false
 	h.IsPublic = body.IsPublic
 	h.Status = ""
 	h.Error = ""
@@ -5504,22 +6146,39 @@ func (s *HubServer) handleAssignHive(w http.ResponseWriter, r *http.Request) {
 	if h.VanityURL == "" {
 		if cluster := s.clusterForHive(h); cluster != nil && cluster.Domain != "" {
 			vanityHost := generateHiveID(body.Org, primaryRepo) + "." + cluster.Domain
-			// Only adopt the vanity hostname once the spoke's Ingress actually
-			// serves it. Nothing else creates a route for this host: provisioning
-			// templates a single DashboardHost, so a vanity URL minted here
-			// resolves to no backend and every hub link to it — including the SSO
-			// handoff — returns 503, while the raw placeholder host works fine.
-			// Create the route FIRST, then adopt the URL. VanityURL doubles as
-			// the "placeholder is claimed" marker (projectConfigForHiveID keeps
-			// pushing until the spoke reports it back), so it is always set —
-			// but a failed route is logged at Warn rather than swallowed, since
-			// the symptom is a 503 on every hub link to this hive.
-			if err := s.addVanityHostToIngress(hiveID, vanityHost, cluster); err != nil {
+			// Make the vanity host servable, then adopt it. Nothing else creates a
+			// route for this host: provisioning templates a single DashboardHost, so
+			// a vanity URL minted here resolves to no backend and every hub link to
+			// it — including the SSO handoff — returns 503, while the raw placeholder
+			// host works fine. Create the route FIRST, then adopt the URL.
+			//
+			// VanityURL doubles as the "placeholder is claimed" marker
+			// (projectConfigForHiveID keeps pushing until the spoke reports it
+			// back), so it is always set once we have a domain to derive it from —
+			// but a failed create is logged at Warn rather than swallowed, since the
+			// symptom is a 503 on every hub link to this hive until the route is
+			// reconciled (cert-manager on nginx, or the cluster wildcard on the
+			// heartbeat-only OpenShift pool where the hub cannot kubectl to create
+			// it, so the create "fails" yet the *.apps.<domain> wildcard still
+			// serves the host — the vllm-d case).
+			// Goes through the same seam as the retroactive repair so both
+			// adoption paths share one definition of "servable" (and so tests,
+			// which have no kubectl, can exercise the success path).
+			if err := s.makeVanityHostServable(hiveID, vanityHost, cluster); err != nil {
+				// Do NOT adopt a host we could not make servable. This used to
+				// assume an OpenShift cluster wildcard would serve the host
+				// anyway and adopt it regardless; on vllm-d that assumption is
+				// false — only explicitly created *-vanity Routes are served, so
+				// the hub advertised a hostname that returned 503 while the raw
+				// placeholder host worked fine. Leaving VanityURL empty makes
+				// every read path fall back to the working placeholder, and the
+				// heartbeat repair re-attempts adoption once a route exists.
 				s.logger.Warn("vanity host is not served: could not add it to the spoke ingress/route — "+
-					"hub links to this hive will 503 until it is added by hand",
-					"hive", hiveID, "host", vanityHost, "error", err)
+					"keeping the working placeholder host; the heartbeat repair will retry",
+					"hive", hiveID, "host", vanityHost, "cluster", cluster.ID, "error", err)
+			} else {
+				h.VanityURL = "https://" + vanityHost
 			}
-			h.VanityURL = "https://" + vanityHost
 		}
 	}
 	if err := saveSaaSHive(h); err != nil {
@@ -6030,6 +6689,22 @@ const dashboardHTML = `<!DOCTYPE html>
     .alert-rows { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
     .alert-row { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; font-size: 0.74rem; padding: 5px 8px; border-radius: 6px; background: rgba(255,255,255,0.03); }
     .alert-row.acked { opacity: 0.55; }
+    /* An alert row is a real button: clicking it jumps to that hive's row in the
+       table below. Styled to look clickable (pointer, hover lift, focus ring)
+       because the previous inert <div> gave no hint that anything would happen.
+       width:100%/text-align:left undo the <button> defaults so the row lays out
+       exactly as the old div did. */
+    /* The jump button and the Acknowledge button are siblings (a button cannot
+       nest inside a button), so this wrapper keeps them on one visual line. */
+    .alert-row-wrap { display: flex; align-items: center; gap: 6px; }
+    .alert-row-wrap .alert-ack-btn { flex: 0 0 auto; }
+    button.alert-row { flex: 1 1 auto; min-width: 0; width: 100%; text-align: left; font-family: inherit; color: inherit; border: 1px solid transparent; cursor: pointer; }
+    button.alert-row:hover { background: rgba(255,255,255,0.07); border-color: var(--border); }
+    button.alert-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    /* Target highlight: a brief ring on the hive row the operator was sent to,
+       so it is obvious WHICH row answered the click after the scroll settles. */
+    .hive-row-targeted > td { background: rgba(88,166,255,0.16) !important; }
+    .hive-row-targeted > td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
     .alert-row-hive { font-weight: 700; color: var(--text); }
     .alert-row-reason { color: var(--muted); }
     .alert-row-age { color: var(--muted); font-size: 0.68rem; margin-left: auto; white-space: nowrap; }
@@ -6294,7 +6969,7 @@ const dashboardHTML = `<!DOCTYPE html>
       <div style="display:flex;gap:8px;align-items:center">
         <button class="btn-primary" id="btn-send-banner-top" style="display:none;background:#d97706" onclick="_bannerTargetHive=null;document.getElementById('banner-modal').style.display='flex';loadBannerHiveList()">Send Banner</button>
         <button class="btn-primary" id="btn-add-hive" disabled onclick="document.getElementById('create-modal').style.display='flex'">+ Add Hosted Hive</button>
-        <button class="btn-primary" id="btn-request-hive" style="display:none;background:var(--blue)" onclick="document.getElementById('request-modal').style.display='flex'">Request a Hive</button>
+        <button class="btn-primary" id="btn-request-hive" style="display:none;background:var(--blue)" onclick="openRequestHiveModal()">Request a Hive</button>
       </div>
     </div>
 
@@ -6566,6 +7241,21 @@ const dashboardHTML = `<!DOCTYPE html>
     });
 
     var ACMM_LABELS = {1:'L1 Assisted',2:'L2 Instructed',3:'L3 Measured',4:'L4 Adaptive',5:'L5 Semi-Automated',6:'L6 Autonomous'};
+    /* One-line "what this level actually does" per ACMM level, hoisted out of
+       acmmBadge so the badge tooltip and the Request-a-Hive level picker read
+       from the SAME strings. They used to be a local inside acmmBadge, and the
+       request modal carried its own hand-written copy that had drifted into
+       plain wrong ("L3 CI/CD", "L4 Auto PR", "L6 Fully Autonomous") — L4 in
+       particular is NOT fully autonomous, it opens hold-gated PRs for human
+       review. Anything describing a level must use this object. */
+    var ACMM_TIPS = {1:'L1 Assisted — Advisory only.',2:'L2 Instructed — Advisory beads, no GitHub writes.',3:'L3 Measured — Hold-gated PRs, CI gates.',4:'L4 Adaptive — Agents open issues, sec-check.',5:'L5 Semi-Automated — PRs with hold label, batch review.',6:'L6 Autonomous — Auto-merge on green CI.'};
+    /* The tip strings above lead with the level label; the picker renders the
+       label separately, so strip the redundant "Lx Name — " prefix there. */
+    function acmmTipDetail(level) {
+      var tip = ACMM_TIPS[level] || '';
+      var dash = tip.indexOf('—');
+      return dash >= 0 ? tip.slice(dash + 1).trim() : tip;
+    }
     function sparkline(points, color, w, h) {
       if (!points || points.length < 2) return '';
       var vals = points.map(function(p) { return p.v; });
@@ -6583,8 +7273,7 @@ const dashboardHTML = `<!DOCTYPE html>
 
     function acmmBadge(level) {
       var l = level || 0;
-      var tips = {1:'L1 Assisted — Advisory only.',2:'L2 Instructed — Advisory beads, no GitHub writes.',3:'L3 Measured — Hold-gated PRs, CI gates.',4:'L4 Adaptive — Agents open issues, sec-check.',5:'L5 Semi-Automated — PRs with hold label, batch review.',6:'L6 Autonomous — Auto-merge on green CI.'};
-      return '<span class="acmm-badge acmm-' + l + '" title="' + esc(tips[l] || '') + '">' + (ACMM_LABELS[l] || 'L' + l) + '</span>';
+      return '<span class="acmm-badge acmm-' + l + '" title="' + esc(ACMM_TIPS[l] || '') + '">' + (ACMM_LABELS[l] || 'L' + l) + '</span>';
     }
     /* Classified GitHub App auth states, matching github.AppAuthState.String()
        on the spoke and operatorSideAppStates in journey.go. The two OPERATOR
@@ -6614,7 +7303,7 @@ const dashboardHTML = `<!DOCTYPE html>
     var JOURNEY_STAGE_TIPS = {
       'none': 'No outstanding adoption steps.',
       'github-app': 'Stage 1 — the GitHub App is not installed, so no agent can open issues or PRs.',
-      'method-model': 'Stage 2 — no agent has a method/model assigned and the contributor relay is not in use.',
+      'method-model': 'Stage 2 — no agent has a method/model assigned and ClankeR (the contributor relay) is not in use.',
       'acmm-level': 'Stage 3 — running steadily; due a gentle suggestion to consider the next ACMM level. Never a de-provision risk.',
     };
     /* Rank a journey status for sorting. Snoozed hives rank lowest — an admin
@@ -6649,9 +7338,9 @@ const dashboardHTML = `<!DOCTYPE html>
         if (sev === 'deprovision-warning') text = label + ' ⚠';
       }
       var html = '<span class="journey-badge ' + cls + '" title="' + esc(tip) + '">' + esc(text) + '</span>';
-      /* Stage 2 satisfied via the contributor relay gets its own visible badge. */
+      /* Stage 2 satisfied via ClankeR gets its own visible badge. */
       if (j.viaRelay) {
-        html += '<span class="journey-relay" title="' + esc('Stage 2 is satisfied through the contributor relay (human contributors picking up tasks), not by an assigned method/model.') + '">relay</span>';
+        html += '<span class="journey-relay" title="' + esc('Stage 2 is satisfied through ClankeR, the contributor relay (human contributors picking up tasks), not by an assigned method/model.') + '">relay</span>';
       }
       return html;
     }
@@ -6937,7 +7626,44 @@ const dashboardHTML = `<!DOCTYPE html>
         esc(label) + '</span>';
     }
 
-    /* ---- Contributor relay (hover panel) ------------------------------
+    /* advisoryStaleSummary renders a small "stale advisory" pill next to the
+       failing-check pill when the hub has flagged this hive's advisory digest as
+       stale. The flag (h.advisoryStale) and its reason are computed server-side
+       by advisoryStale() — gated on advisory-mode participation AND app-can-write
+       AND past-threshold — so this renderer never re-derives the rule and a
+       not-installed or PR-mode hive is already filtered out before it gets here.
+       Amber, matching the "worth noticing" band of the uptime pill: a stale
+       digest is an operator nudge, not a hard row failure. */
+    function advisoryStaleSummary(h) {
+      if (!h || !h.advisoryStale) return '';
+      var col = '#d29922';
+      var title = h.advisoryStaleReason || 'Advisory digest has gone stale';
+      return '<span title="' + esc(title) + '" style="display:inline-block;margin-left:6px;padding:0 6px;' +
+        'border-radius:9999px;font-size:0.62rem;font-weight:600;line-height:1.5;cursor:help;white-space:nowrap;' +
+        'color:' + col + ';background:rgba(210,153,34,0.12);border:1px solid rgba(210,153,34,0.35)">' +
+        'stale advisory</span>';
+    }
+
+    /* deadLinkSummary renders a "dead link" pill when this hive's own public
+       URL did not serve on the last several probes. Red, not amber: unlike a
+       stale digest this is user-facing breakage — the link in this very row
+       returns an error page, and because the spoke itself is healthy and
+       heartbeating, NOTHING else on the row indicates a problem.
+       h.urlUnreachable and its reason are computed server-side from the same
+       alert list the panel renders (see urlUnreachableFacet), gated on
+       consecutive failures AND minimum age AND cluster-outage suppression, so
+       this renderer never re-derives the rule and a converging or
+       whole-cluster-out hive is filtered out before it gets here. */
+    function deadLinkSummary(h) {
+      if (!h || !h.urlUnreachable) return '';
+      var title = h.urlUnreachableReason || 'This hive public URL did not respond';
+      return '<span title="' + esc(title) + '" style="display:inline-block;margin-left:6px;padding:0 6px;' +
+        'border-radius:9999px;font-size:0.62rem;font-weight:600;line-height:1.5;cursor:help;white-space:nowrap;' +
+        'color:#f85149;background:rgba(248,81,73,0.12);border:1px solid rgba(248,81,73,0.35)">' +
+        'dead link</span>';
+    }
+
+    /* ---- ClankeR, the contributor relay (hover panel) ------------------
        The relay is a first-class SUBSTITUTE for assigning a method/model:
        when humans are picking up this hive's tasks through /contribute, the
        "tokens for an agent" requirement is satisfied. The product rule is
@@ -6977,7 +7703,7 @@ const dashboardHTML = `<!DOCTYPE html>
         who = 'task in progress';
       }
       return '<div style="padding:1px 0;color:' + RELAY_COLOR + '">' +
-        esc('◆ Contributor relay · ' + who) + '</div>' +
+        esc('◆ ClankeR · ' + who) + '</div>' +
         '<div style="padding:0 0 1px 12px;color:var(--muted);font-size:0.65rem">' +
         esc('satisfies the method/model requirement') + '</div>';
     }
@@ -7099,7 +7825,7 @@ const dashboardHTML = `<!DOCTYPE html>
       if (!access.length) {
         var plainLines = lines.slice();
         if ((h.journey || {}).viaRelay) {
-          plainLines.push('◆ Contributor relay in use — satisfies the method/model requirement');
+          plainLines.push('◆ ClankeR (contributor relay) in use — satisfies the method/model requirement');
         }
         return '<span title="' + esc(plainLines.join('\n')) + '" style="display:inline-flex;align-items:center;gap:4px;cursor:help;white-space:pre-line">' + dotMarkup + '</span>';
       }
@@ -7178,6 +7904,7 @@ const dashboardHTML = `<!DOCTYPE html>
       'app-missing':     'GitHub App not installed',
       'app-perm-issue':  'GitHub App permissions',
       'app-creds-operator': 'GitHub App key (operator)',
+      'app-id-placeholder': 'Placeholder App ID (operator)',
       'health-degraded': 'Health degraded',
       'upgrade-stuck':   'Upgrade stuck',
       'acmm-unset':      'ACMM level unset',
@@ -7280,6 +8007,56 @@ const dashboardHTML = `<!DOCTYPE html>
       return '';
     }
 
+    /* SSO_NAV_ATTR marks an anchor whose href is a DISPLAY url (the friendly
+       vanity host) but whose click must actually go through the hub's /open
+       handoff. The real navigation target is carried here rather than in href
+       because browsers show the raw href in the status bar on hover, and the
+       placeholder-id /open path is exactly what we do not want a user to read
+       there. Named so the delegated click listener below and the builder agree
+       on one string. */
+    var SSO_NAV_ATTR = 'data-sso-open';
+
+    /* ssoDisplayLink builds the hive-name anchor.
+
+       href      = displayUrl (vanity) when we have one, so the status bar, the
+                   context menu's "Copy link address" and middle-click all show
+                   and use the friendly host.
+       data attr = openUrl, the hub /open endpoint that mints the 90s HMAC SSO
+                   handoff token. A plain left-click is intercepted and sent
+                   there instead, so the normal path still lands authenticated.
+
+       The cmd-click / middle-click divergence is DELIBERATE and safe: the spoke
+       serves a real "Sign in with GitHub" device-flow page at its root, so a
+       token-less arrival on the vanity host is an ordinary login, not a dead
+       end. Trading a rare extra sign-in for a readable URL on every hover is
+       the intended bargain.
+
+       When displayUrl is empty (unclaimed placeholder, or vanity adoption
+       skipped) there is nothing friendlier to show, so href stays the /open
+       url and behavior is byte-for-byte what it was before. */
+    function ssoDisplayLink(openUrl, displayUrl, text, cls) {
+      var shown = displayUrl || openUrl;
+      var navAttr = displayUrl ? ' ' + SSO_NAV_ATTR + '="' + esc(openUrl) + '"' : '';
+      return '<a href="' + esc(shown) + '" target="_blank"' + navAttr +
+        ' class="' + cls + '" title="Open dashboard">' + esc(text) + '</a>';
+    }
+
+    /* One delegated listener rather than per-row handlers: the table is
+       re-rendered wholesale on every refresh, so inline handlers would be
+       re-attached constantly. Only a plain primary-button click is taken over;
+       cmd/ctrl/shift/alt-click and middle-click fall through to the browser so
+       "open in new tab" keeps its native meaning (landing on the vanity login
+       page, per the note above). */
+    document.addEventListener('click', function(ev) {
+      var a = ev.target && ev.target.closest ? ev.target.closest('[' + SSO_NAV_ATTR + ']') : null;
+      if (!a) return;
+      if (ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
+      var target = a.getAttribute(SSO_NAV_ATTR);
+      if (!target) return;
+      ev.preventDefault();
+      window.open(target, '_blank');
+    });
+
     async function loadUser() {
       try {
         var resp = await fetch('/api/auth/user');
@@ -7322,7 +8099,12 @@ const dashboardHTML = `<!DOCTYPE html>
     var _clusterList = [];
     var _commitMessages = {};
     var _allDashHives = [];
-    var _dashSortKey = '', _dashSortAsc = true;
+    /* Seeded to the A-Z default rather than '' (registry/arrival order) so the
+       very first paint — including paintCachedHives, which runs before any
+       network call — is already alphabetical. loadHiveSortPrefs overwrites both
+       from localStorage when the operator has a stored choice; see
+       HIVE_SORT_DEFAULT_KEY for why a stored choice wins over this default. */
+    var _dashSortKey = 'name', _dashSortAsc = true;
     var _hivesLoading = false;
     var _lastHivesJSON = '';
     var _lastUsersJSON = '';
@@ -7475,6 +8257,64 @@ const dashboardHTML = `<!DOCTYPE html>
       return false;
     }
 
+    /* ── Upgrade-state filter ──
+       Which upgrade state the list is narrowed to, or '' for none. Single-
+       select like the drift filter, not multi-select: "upgrading" and "queued"
+       are successive stages of one lifecycle, so a hive is in exactly one of
+       them and an OR across both would just mean "any pending upgrade" — which
+       is what clearing the filter already shows.
+
+       This exists so an operator can WATCH an upgrade roll across the fleet,
+       and — the reason it was asked for — pull up every wedged hive at once
+       when a rollout stalls. */
+    var UPGRADE_FILTER_UPGRADING = 'upgrading';
+    var UPGRADE_FILTER_QUEUED = 'queued';
+    var _dashUpgradeFilter = '';
+
+    /* hiveUpgradeState classifies a hive as 'upgrading', 'queued' or '' (in
+       neither state).
+
+       The definitions mirror the Version cell's render conditions on purpose,
+       so the facet count and the rows can never disagree:
+         upgrading — the hub says an upgrade is in flight (h.upgrading).
+         queued    — auto-upgrade is on and the hive is BEHIND latest, but the
+                     hub has not instructed the upgrade yet. This is the state
+                     with no upgradeStartedAt, which is precisely why the
+                     elapsed counter must not claim to know one.
+       'upgrading' is tested FIRST because an in-flight upgrade outranks a
+       queued one; without that ordering a hive would be double-counted. */
+    function hiveUpgradeState(h) {
+      if (!h) return '';
+      if (h.upgrading) return UPGRADE_FILTER_UPGRADING;
+      if (h.autoUpgrade && h.upgradeTarget) return UPGRADE_FILTER_QUEUED;
+      return '';
+    }
+
+    /* hiveMatchesUpgradeFilter answers whether a hive survives the upgrade-
+       state filter. Composes by AND with the status chips and facets. */
+    function hiveMatchesUpgradeFilter(h) {
+      if (!_dashUpgradeFilter) return true;
+      return hiveUpgradeState(h) === _dashUpgradeFilter;
+    }
+
+    /* ── Stale-advisory filter ──
+       When true, the list is narrowed to hives whose advisory digest the hub
+       has flagged stale. A single boolean, not a value set: the underlying
+       signal is itself boolean, so there is no second value to OR against.
+       Composes by AND with the status chips and the facets, like the drift
+       filter above. */
+    var _dashAdvisoryStaleFilter = false;
+
+    /* hiveMatchesAdvisoryStaleFilter answers whether a hive survives the
+       stale-advisory filter. Reads the SERVER-computed h.advisoryStale flag —
+       the browser must never re-derive the threshold or the advisory-mode /
+       app-can-write gating, or the filter and the row pill would drift apart
+       (see advisoryStale() in advisory_staleness.go). */
+    function hiveMatchesAdvisoryStaleFilter(h) {
+      if (!_dashAdvisoryStaleFilter) return true;
+      return !!(h && h.advisoryStale);
+    }
+
     /* ────────────────────────────────────────────────────────────────────────
        Grouping and saved views for My Hives.
 
@@ -7503,6 +8343,35 @@ const dashboardHTML = `<!DOCTYPE html>
     var LS_HIVE_GROUP_COLLAPSED = 'hive-group-collapsed';
     var LS_HIVE_SAVED_VIEWS = 'hive-saved-views';
     var LS_HIVE_DEFAULT_VIEW = 'hive-default-view';
+    var LS_HIVE_SORT = 'hive-sort';
+    var LS_HIVE_SCROLL = 'hive-scroll';
+
+    /* HIVE_SORT_DEFAULT_KEY is the sort a FIRST-TIME visitor gets: the Hive
+       column, ascending — i.e. plain A-Z over the label the name cell actually
+       displays (see hiveNameSortValue / hiveLabel). Before this the table
+       rendered in registry order, which is arrival order and looks arbitrary.
+
+       This is a DEFAULT, not an override: loadHiveSortPrefs applies it only
+       when there is no usable stored choice, so an operator who sorted by
+       Tokens still returns to Tokens. */
+    var HIVE_SORT_DEFAULT_KEY = 'name';
+    var HIVE_SORT_DEFAULT_ASC = true;
+
+    /* HIVE_SORT_KEYS is every key a header can sort by — the allowlist that a
+       persisted value is validated against. A stored key that is no longer a
+       column (a renamed field, a hand-edited value, a downgrade) degrades to
+       the A-Z default instead of silently sorting on an absent property, which
+       reads as "sorting is broken" because every row compares equal. */
+    var HIVE_SORT_KEYS = ['name', 'clusterId', 'startedAt', 'acmmLevel', 'aiAuthor',
+      'journey', 'agentCount', 'totalTokens24h', 'governorMode', 'actionableIssues',
+      'actionablePRs', 'activeContributors', 'registeredAt'];
+
+    function isHiveSortKey(key) {
+      for (var i = 0; i < (HIVE_SORT_KEYS || []).length; i++) {
+        if (HIVE_SORT_KEYS[i] === key) return true;
+      }
+      return false;
+    }
 
     /* Cap on stored saved views. localStorage is a small shared budget and an
        unbounded list would let one runaway page fill it for every other
@@ -7841,6 +8710,8 @@ const dashboardHTML = `<!DOCTYPE html>
         if (!hit) return false;
       }
       if (!hiveMatchesDriftFilter(h)) return false;
+      if (!hiveMatchesUpgradeFilter(h)) return false;
+      if (!hiveMatchesAdvisoryStaleFilter(h)) return false;
       var active = Object.keys(_dashStatusFilters || {}).filter(function(k) { return _dashStatusFilters[k]; });
       if (!active.length) return true;
       var f = hiveStatusFlags(h);
@@ -7888,13 +8759,30 @@ const dashboardHTML = `<!DOCTYPE html>
       'stuck-upgrade': 'Stuck upgrade',
       'health-check-failing': 'Health check failing',
       'token-burn': 'Token burn',
-      'provision-error': 'Provision error'
+      'provision-error': 'Provision error',
+      /* Added by the hub in #2308. Without a label here the chip for a
+         genuinely failed upgrade would render as the raw key 'failed-upgrade'. */
+      'failed-upgrade': 'Failed upgrade',
+      'advisory-stale': 'Stale advisory'
     };
 
     /* How many alert rows are listed before the panel collapses the remainder
-       behind a "show all" affordance. Enough to act on, few enough that the
-       panel never pushes the hive list off the screen. */
-    var ALERT_ROWS_SHOWN = 6;
+       behind the "+N more" toggle. Enough to act on, few enough that the panel
+       never pushes the hive list off the screen. */
+    var ALERT_ROWS_SHOWN_MIN = 6;
+
+    /* Which halves of the panel are expanded past ALERT_ROWS_SHOWN_MIN. Keyed
+       'live'/'acked' so the two lists expand independently. Not persisted: an
+       expanded list is a momentary "show me the rest", not a view preference,
+       and a panel that reloads 50 rows deep would bury the hive table. */
+    var _alertRowsExpanded = {live: false, acked: false};
+
+    /* toggleAlertRowsExpanded flips one half of the panel open or closed. */
+    function toggleAlertRowsExpanded(which) {
+      var key = (which === 'acked') ? 'acked' : 'live';
+      _alertRowsExpanded[key] = !_alertRowsExpanded[key];
+      renderHives(_allDashHives, true);
+    }
 
     function alertTypeLabel(t) { return ALERT_TYPE_LABELS[t] || t || 'Unknown'; }
 
@@ -7940,6 +8828,8 @@ const dashboardHTML = `<!DOCTYPE html>
       _dashStatusFilters = {};
       _dashFailingCheckFilter = '';
       _dashDriftFilter = '';
+      _dashUpgradeFilter = '';
+      _dashAdvisoryStaleFilter = false;
       _alertTypeFilter = '';
       _dashFacets = {};
       _dashSearchQuery = '';
@@ -7987,6 +8877,88 @@ const dashboardHTML = `<!DOCTYPE html>
       } catch (e) {
         hiveToast('Error: ' + e.message, 'error');
       }
+    }
+
+    /* ── Jumping from an alert row to the hive's row in the table ──
+
+       hiveRowDomId builds the anchor id renderHives puts on each <tr>. Prefixed
+       so it can never collide with another element id, and encodeURIComponent'd
+       because a hive id is user-influenced and may contain characters that are
+       not valid raw in an id/selector. */
+    var HIVE_ROW_DOM_ID_PREFIX = 'hive-row-';
+    function hiveRowDomId(hiveId) {
+      return HIVE_ROW_DOM_ID_PREFIX + encodeURIComponent(String(hiveId || ''));
+    }
+
+    /* How long the targeted row stays highlighted. Long enough to find the row
+       after the smooth scroll finishes, short enough that a stale highlight does
+       not linger and get mistaken for a status. */
+    var HIVE_ROW_TARGET_HIGHLIGHT_MS = 2600;
+
+    /* Handle of the pending highlight-clear timer, so two jumps in quick
+       succession do not leave the first row highlighted forever. */
+    var _hiveRowTargetTimer = null;
+
+    /* focusHiveRow scrolls one hive's table row into view and highlights it.
+       Returns false when the row is not currently in the DOM. */
+    function focusHiveRow(hiveId) {
+      var row = document.getElementById(hiveRowDomId(hiveId));
+      if (!row) return false;
+      /* Clear any previous target first — only ever one highlighted row. */
+      if (_hiveRowTargetTimer) { clearTimeout(_hiveRowTargetTimer); _hiveRowTargetTimer = null; }
+      var prev = document.querySelectorAll('.hive-row-targeted');
+      (prev || []).forEach(function(el) { el.classList.remove('hive-row-targeted'); });
+
+      row.scrollIntoView({behavior: 'smooth', block: 'center'});
+      row.classList.add('hive-row-targeted');
+      /* Move keyboard focus to the row as well, so a keyboard user lands there
+         rather than being scrolled somewhere their focus ring is not. */
+      if (!row.hasAttribute('tabindex')) row.setAttribute('tabindex', '-1');
+      try { row.focus({preventScroll: true}); } catch (e) { /* focus is best-effort */ }
+
+      _hiveRowTargetTimer = setTimeout(function() {
+        row.classList.remove('hive-row-targeted');
+        _hiveRowTargetTimer = null;
+      }, HIVE_ROW_TARGET_HIGHLIGHT_MS);
+      return true;
+    }
+
+    /* jumpToHiveRow is what an "Attention needed" row does when clicked.
+
+       The hard case is a target the current view is HIDING. The hive list now
+       carries persisted filters, facets, a search box, an alert drill-down and
+       collapsible sections/groups (#2309, #2317), so the alerted hive may well
+       not be on screen. Scrolling to a row that is not in the DOM would look
+       like the click did nothing.
+
+       The choice made here: try the current view FIRST, and only if the row is
+       genuinely absent do we widen the view — clearing every narrowing control
+       and expanding the collapsed sections/groups. Filters are the user's state,
+       so they are never discarded silently: we clear them only when that is the
+       one thing that can satisfy the click, and we say so in a toast that names
+       the hive. The alternative (refusing to navigate and just warning) leaves
+       the operator to work out which of six controls is hiding the row, which is
+       the problem the panel exists to avoid. */
+    function jumpToHiveRow(hiveId, hiveName) {
+      if (!hiveId) return;
+      if (focusHiveRow(hiveId)) return;
+
+      /* Not rendered under the current view. Widen everything that can hide a
+         row, re-render synchronously, then try again. */
+      clearAllHiveFilters();
+      expandAllHiveSections();
+      _dashGroupCollapsed = {};
+      persistGroupCollapsed();
+      renderHives(_allDashHives, true);
+
+      if (focusHiveRow(hiveId)) {
+        hiveToast('Filters cleared to show ' + (hiveName || hiveId), 'info');
+        return;
+      }
+      /* Still absent: the hive is genuinely not in the loaded list (for example
+         it was deleted between the alert being evaluated and now). Say so rather
+         than leaving a click that silently did nothing. */
+      hiveToast('Could not find ' + (hiveName || hiveId) + ' in the hive list', 'error');
     }
 
     /* renderAlertsPanel draws the "Attention needed" panel above the hive list.
@@ -8112,7 +9084,11 @@ const dashboardHTML = `<!DOCTYPE html>
         rows = rows.filter(function(a) { return a.type === _alertTypeFilter; });
       }
       if (!rows.length) return '';
-      var shown = rows.slice(0, ALERT_ROWS_SHOWN);
+      /* Each half of the panel (live vs acknowledged) expands independently, so
+         expanding the acknowledged list does not also dump every live alert. */
+      var expanded = !!_alertRowsExpanded[acked ? 'acked' : 'live'];
+      var limit = expanded ? rows.length : ALERT_ROWS_SHOWN_MIN;
+      var shown = rows.slice(0, limit);
       var html = shown.map(function(a) {
         var color = ALERT_SEVERITY_COLORS[a.severity] || '#8b949e';
         var age = alertAge(a.firstSeen);
@@ -8121,24 +9097,51 @@ const dashboardHTML = `<!DOCTYPE html>
            error text), and the acking username. */
         var ackBtn = '';
         if (_isAdmin) {
+          /* jsArg for the same reason as the jump handler below: esc() leaves an
+             apostrophe intact, which would close the handler's quote early. */
           ackBtn = acked
-            ? '<button type="button" class="alert-ack-btn" onclick="ackAlert(\'' +
-              esc(a.hiveId) + '\',\'' + esc(a.type) + '\',true)">Restore</button>'
-            : '<button type="button" class="alert-ack-btn" onclick="ackAlert(\'' +
-              esc(a.hiveId) + '\',\'' + esc(a.type) + '\',false)">Acknowledge</button>';
+            ? '<button type="button" class="alert-ack-btn" onclick="ackAlert(' +
+              jsArg(a.hiveId) + ',' + jsArg(a.type) + ',true)">Restore</button>'
+            : '<button type="button" class="alert-ack-btn" onclick="ackAlert(' +
+              jsArg(a.hiveId) + ',' + jsArg(a.type) + ',false)">Acknowledge</button>';
         }
         var ackedBy = (acked && a.ackBy) ? '<span class="alert-row-reason">— ack by ' + esc(a.ackBy) + '</span>' : '';
-        return '<div class="alert-row' + (acked ? ' acked' : '') + '">' +
+        /* The row itself is a <button> that jumps to this hive's row in the
+           table below. A real button (not a div with role/tabindex) gets Enter,
+           Space and the focus ring for free.
+
+           The Acknowledge button is a SIBLING, not a child: nesting a button
+           inside a button is invalid HTML and browsers drop the inner one, which
+           would silently break acknowledging. Both sit in a flex wrapper so the
+           row still reads as one line. */
+        var label = a.hiveName || a.hiveId;
+        var jump = '<button type="button" class="alert-row' + (acked ? ' acked' : '') +
+          '" title="Show ' + escAttr(label) + ' in the hive list below"' +
+          /* jsArg, not esc: a hive or org name containing an apostrophe would
+             close the handler's quote early and break the click. */
+          ' onclick="jumpToHiveRow(' + jsArg(a.hiveId) + ',' + jsArg(label) + ')">' +
           '<span class="filter-chip-dot" style="background:' + color + '"></span>' +
-          '<span class="alert-row-hive">' + esc(a.hiveName || a.hiveId) + '</span>' +
+          '<span class="alert-row-hive">' + esc(label) + '</span>' +
           '<span class="alert-row-reason">' + esc(a.reason) + '</span>' + ackedBy +
-          '<span class="alert-row-age">' + esc(age) + '</span>' + ackBtn +
-        '</div>';
+          '<span class="alert-row-age">' + esc(age) + '</span>' +
+        '</button>';
+        return '<div class="alert-row-wrap">' + jump + ackBtn + '</div>';
       }).join('');
-      var more = rows.length > ALERT_ROWS_SHOWN
-        ? '<div class="alert-row-reason" style="font-size:0.7rem;padding-left:8px">+' +
-          (rows.length - ALERT_ROWS_SHOWN) + ' more</div>'
-        : '';
+      /* "+N more" used to be inert text, which was actively misleading once the
+         rows above it became clickable: it looked like the same kind of thing
+         and did nothing. It is now a real toggle that expands the full list in
+         place (and collapses it again), so every alerted hive is reachable —
+         which is the point, since the hive the operator needs is as likely to be
+         #7 as #1. */
+      var more = '';
+      if (rows.length > limit) {
+        more = '<button type="button" class="alert-panel-more" onclick="toggleAlertRowsExpanded(' +
+          jsArg(acked ? 'acked' : 'live') + ')">+' + (rows.length - limit) +
+          ' more</button>';
+      } else if (expanded && rows.length > ALERT_ROWS_SHOWN_MIN) {
+        more = '<button type="button" class="alert-panel-more" onclick="toggleAlertRowsExpanded(' +
+          jsArg(acked ? 'acked' : 'live') + ')">Show fewer</button>';
+      }
       return '<div class="alert-rows">' + html + more + '</div>';
     }
 
@@ -8167,6 +9170,20 @@ const dashboardHTML = `<!DOCTYPE html>
       localStorage.getItem(LS_SECTION_ASSIGNED_COLLAPSED) === 'true';
     _dashSectionCollapsed[HIVE_SECTION_UNASSIGNED] =
       localStorage.getItem(LS_SECTION_UNASSIGNED_COLLAPSED) !== 'false';
+
+    /* expandAllHiveSections opens both sections and PERSISTS that, matching
+       toggleHiveSection. An in-memory-only reset would silently re-collapse on
+       the next reload, so the row the operator was just sent to would vanish
+       again — the collapsed Unassigned pool is the default, so this matters for
+       any alert on an unassigned placeholder. */
+    function expandAllHiveSections() {
+      _dashSectionCollapsed[HIVE_SECTION_ASSIGNED] = false;
+      _dashSectionCollapsed[HIVE_SECTION_UNASSIGNED] = false;
+      try {
+        localStorage.setItem(LS_SECTION_ASSIGNED_COLLAPSED, 'false');
+        localStorage.setItem(LS_SECTION_UNASSIGNED_COLLAPSED, 'false');
+      } catch(e) {} /* private-browsing quota — expansion still works in-session */
+    }
 
     function toggleHiveSection(sectionKey) {
       _dashSectionCollapsed[sectionKey] = !_dashSectionCollapsed[sectionKey];
@@ -8264,6 +9281,19 @@ const dashboardHTML = `<!DOCTYPE html>
        They share _dashFacetCollapsed only for the collapse chrome. */
     var FACET_GROUP_HEALTH = 'health';
     var FACET_GROUP_FAILING_CHECK = 'failing-check';
+    /* Upgrade-state group. Follows the HEALTH/FAILING_CHECK pattern rather than
+       the derived-facet one: the values are a fixed, hand-written lifecycle
+       ('upgrading', 'queued') with their own matching rule and their own state
+       (_dashUpgradeFilter), not a dimension enumerated from the data like
+       cluster or branch, so it stays OUT of HIVE_FACET_GROUPS. */
+    var FACET_GROUP_UPGRADE = 'upgrade-state';
+    /* Stale-advisory group. Follows the HEALTH/FAILING_CHECK pattern rather
+       than the derived-facet one: "is this hive's advisory digest stale" is a
+       boolean health signal read off a server-computed flag, not an enumerated
+       dimension of the hive like cluster or branch, so it keeps its own state
+       (_dashAdvisoryStaleFilter) and its own matching rule and stays OUT of
+       HIVE_FACET_GROUPS. */
+    var FACET_GROUP_ADVISORY_STALE = 'advisory-stale';
 
     var HIVE_FACET_GROUPS = [
       {key: FACET_CLUSTER, label: 'Location'},
@@ -8324,6 +9354,8 @@ const dashboardHTML = `<!DOCTYPE html>
       n += Object.keys(_dashStatusFilters || {}).length;
       if (_dashFailingCheckFilter) n++;
       if (_dashDriftFilter) n++;
+      if (_dashUpgradeFilter) n++;
+      if (_dashAdvisoryStaleFilter) n++;
       if (_alertTypeFilter) n++;
       if (_dashSearchQuery) n++;
       var groups = Object.keys(_dashFacets || {});
@@ -8468,8 +9500,8 @@ const dashboardHTML = `<!DOCTYPE html>
       }).join('') +
       /* Group-scoped reset for the health + failing-check pair, so a user can
          undo just these without also dropping their search term and facets. */
-      (Object.keys(_dashStatusFilters || {}).length || _dashFailingCheckFilter || _dashDriftFilter
-        ? '<button type="button" class="facet-value" onclick="clearStatusFilters()" title="Clear the health, failing-check and drift filters">' +
+      (Object.keys(_dashStatusFilters || {}).length || _dashFailingCheckFilter || _dashDriftFilter || _dashUpgradeFilter || _dashAdvisoryStaleFilter
+        ? '<button type="button" class="facet-value" onclick="clearStatusFilters()" title="Clear the health, failing-check, drift, upgrade-state and stale-advisory filters">' +
           '<span class="facet-value-label">Clear health filters</span></button>'
         : '') + '</div>';
       return facetGroupShell(FACET_GROUP_HEALTH, 'Health',
@@ -8510,6 +9542,105 @@ const dashboardHTML = `<!DOCTYPE html>
         !!_dashFacetCollapsed[FACET_GROUP_FAILING_CHECK], body);
     }
 
+    /* How long a hive must have been upgrading before the facet's tooltip
+       calls the fleet out as wedged rather than busy. Same limit the counter
+       and the hub's stuck-upgrade alert use — one definition of "too long",
+       reused, so the rail, the row and the alert panel cannot disagree. */
+    var UPGRADE_FACET_STUCK_MS = UPGRADE_ELAPSED_RED_MS;
+
+    /* renderUpgradeFacetGroup renders the upgrade-state picker. Single-select,
+       ANDed against the health chips like the failing-check group.
+
+       The 'upgrading' value additionally reports how many of those hives are
+       past the stuck limit, because the whole point of this filter is catching
+       a rollout that has stopped moving — a bare count of 15 upgrading hives
+       looks identical whether they are 10 seconds or 40 minutes in.
+
+       Returns '' when nothing is upgrading or queued AND no filter is on, so a
+       settled fleet sees no extra chrome; renders while the filter is on even
+       at count 0 so it can always be clicked back off. */
+    function renderUpgradeFacetGroup(assignedNoPlaceholders) {
+      var hives = assignedNoPlaceholders || [];
+      var counts = {};
+      counts[UPGRADE_FILTER_UPGRADING] = 0;
+      counts[UPGRADE_FILTER_QUEUED] = 0;
+      var stuck = 0;
+      var now = Date.now();
+      for (var i = 0; i < hives.length; i++) {
+        var st = hiveUpgradeState(hives[i]);
+        if (!st) continue;
+        counts[st]++;
+        if (st === UPGRADE_FILTER_UPGRADING) {
+          var ms = upgradeElapsedMs(hives[i], now);
+          /* null (unknown start time) is NOT counted as stuck — an unknown
+             elapsed is not evidence of a fault, and inflating this number
+             would make the warning untrustworthy. */
+          if (ms !== null && ms >= UPGRADE_FACET_STUCK_MS) stuck++;
+        }
+      }
+      var total = counts[UPGRADE_FILTER_UPGRADING] + counts[UPGRADE_FILTER_QUEUED];
+      if (!total && !_dashUpgradeFilter) return '';
+
+      var values = [
+        {key: UPGRADE_FILTER_UPGRADING, label: 'Upgrading'},
+        {key: UPGRADE_FILTER_QUEUED, label: 'Queued'}
+      ];
+      var body = '<div class="facet-values">' + (values || []).map(function(v) {
+        var on = _dashUpgradeFilter === v.key;
+        var n = counts[v.key] || 0;
+        var tip;
+        if (v.key === UPGRADE_FILTER_UPGRADING) {
+          tip = n + (n === 1 ? ' hive is' : ' hives are') + ' upgrading now';
+          if (stuck) {
+            tip += ' — ' + stuck + ' past ' + Math.round(UPGRADE_FACET_STUCK_MS / 60000) +
+              ' minutes and likely wedged rather than slow';
+          }
+        } else {
+          tip = n + (n === 1 ? ' hive is' : ' hives are') +
+            ' behind latest with auto-upgrade on, waiting to be instructed';
+        }
+        /* The count turns red when any upgrade is past the stuck limit, so the
+           fault is visible in the rail without opening the filter. */
+        var countStyle = (v.key === UPGRADE_FILTER_UPGRADING && stuck)
+          ? ' style="color:var(--red);font-weight:600"' : '';
+        return '<button type="button" class="facet-value' + (on ? ' on' : '') +
+          '" aria-pressed="' + (on ? 'true' : 'false') + '" title="' + escAttr(tip) + '"' +
+          ' onclick="toggleUpgradeFilter(' + jsArg(v.key) + ')">' +
+          '<span class="facet-value-label">' + esc(v.label) + '</span>' +
+          '<span class="facet-value-count"' + countStyle + '>' + n + '</span></button>';
+      }).join('') + '</div>';
+      return facetGroupShell(FACET_GROUP_UPGRADE, 'Upgrade state (one at a time)',
+        !!_dashFacetCollapsed[FACET_GROUP_UPGRADE], body);
+    }
+
+    /* renderAdvisoryStaleFacetGroup renders the stale-advisory toggle as a
+       facet group. One value, because the signal is boolean: picking it means
+       "only hives whose advisory digest has gone stale".
+
+       Returns '' when no hive is affected AND the filter is off, so a fleet
+       with healthy digests sees no new chrome at all — the same self-
+       suppressing contract advisoryStaleSummary() uses for the row pill. When
+       the filter IS on the group always renders, even at count 0, so it can
+       always be clicked back off (the failing-check group does the same). */
+    function renderAdvisoryStaleFacetGroup(assignedNoPlaceholders) {
+      var n = (assignedNoPlaceholders || []).filter(function(h) {
+        return !!(h && h.advisoryStale);
+      }).length;
+      if (!n && !_dashAdvisoryStaleFilter) return '';
+      var on = _dashAdvisoryStaleFilter;
+      var tip = n === 1
+        ? '1 hive should be posting advisory digests but its digest has gone stale'
+        : n + ' hives should be posting advisory digests but their digests have gone stale';
+      var body = '<div class="facet-values">' +
+        '<button type="button" class="facet-value' + (on ? ' on' : '') +
+        '" aria-pressed="' + (on ? 'true' : 'false') + '" title="' + esc(tip) + '"' +
+        ' onclick="toggleAdvisoryStaleFilter()">' +
+        '<span class="facet-value-label">Stale advisory</span>' +
+        '<span class="facet-value-count">' + n + '</span></button></div>';
+      return facetGroupShell(FACET_GROUP_ADVISORY_STALE, 'Advisory digest',
+        !!_dashFacetCollapsed[FACET_GROUP_ADVISORY_STALE], body);
+    }
+
     /* renderFacetRail draws the tray's body: the health chips and failing-check
        picker moved in from the old standalone bar, then the derived facet
        groups. Derived-group counts are computed over the assigned hives after
@@ -8527,7 +9658,8 @@ const dashboardHTML = `<!DOCTYPE html>
          strip any placeholder defensively so the counts match the old bar. */
       var assignedReal = (assignedAll || []).filter(function(h) { return !isPlaceholderHive(h); });
       var base = (assignedAll || []).filter(hiveMatchesFilters).filter(hiveMatchesSearch);
-      var head = renderStatusFacetGroup(assignedReal) + renderFailingCheckFacetGroup(assignedReal);
+      var head = renderStatusFacetGroup(assignedReal) + renderFailingCheckFacetGroup(assignedReal) +
+        renderUpgradeFacetGroup(assignedReal) + renderAdvisoryStaleFacetGroup(assignedReal);
       if (!base.length && !Object.keys(_dashFacets || {}).length) {
         rail.innerHTML = head + clearFacetsButton();
         return;
@@ -8608,6 +9740,22 @@ const dashboardHTML = `<!DOCTYPE html>
          button look broken. */
       _dashFailingCheckFilter = '';
       _dashDriftFilter = '';
+      _dashUpgradeFilter = '';
+      _dashAdvisoryStaleFilter = false;
+      renderHives(_allDashHives, true);
+    }
+
+    /* toggleUpgradeFilter selects an upgrade state, or clears it when the
+       already-selected value is clicked again (single-select, like the drift
+       filter). */
+    function toggleUpgradeFilter(state) {
+      _dashUpgradeFilter = (_dashUpgradeFilter === state) ? '' : (state || '');
+      renderHives(_allDashHives, true);
+    }
+
+    /* toggleAdvisoryStaleFilter flips the stale-advisory narrowing on or off. */
+    function toggleAdvisoryStaleFilter() {
+      _dashAdvisoryStaleFilter = !_dashAdvisoryStaleFilter;
       renderHives(_allDashHives, true);
     }
 
@@ -8770,6 +9918,30 @@ const dashboardHTML = `<!DOCTYPE html>
       bar.innerHTML = '<div class="view-ctls">' + groupCtl + '</div><div class="view-ctls">' + viewCtl + '</div>';
     }
 
+    /* hiveProvisionTime returns when this hive came into existence, as epoch
+       ms, or null when that is genuinely unknown.
+
+       Why registeredAt and NOT the per-hive meta.json created_at: created_at is
+       declared on SaaSHive and written on exactly one provisioning path, so
+       every hive that predates it — or that was created any other way — carries
+       the empty string. On the live fleet at the time of writing, 26 of 50
+       meta.json files have "created_at": "", including long-running assigned
+       hives, while registeredAt was populated on 50 of 50 registry entries.
+       registeredAt is also preserved across heartbeats (server.go copies it
+       from the previous entry rather than restamping it), so it stays the
+       first-seen time instead of drifting to "now" on every beat.
+
+       Returns null — never NaN and never a rendered 'Invalid Date' — for a
+       missing or unparseable value, so the caller can order those rows
+       explicitly instead of comparing against NaN, which is false in both
+       directions and would make the sort non-deterministic. */
+    function hiveProvisionTime(h) {
+      var raw = h && h.registeredAt;
+      if (typeof raw !== 'string' || !raw) return null;
+      var t = Date.parse(raw);
+      return isNaN(t) ? null : t;
+    }
+
     /* sortedDashHives applies the CURRENT sort key/direction to the unfiltered
        cache. Split out of sortDashHives so restoring a saved view (which sets
        the key/direction directly rather than by clicking a header) reproduces
@@ -8786,6 +9958,23 @@ const dashboardHTML = `<!DOCTYPE html>
           var ja = journeySortValue(a && a.journey);
           var jb = journeySortValue(b && b.journey);
           return _dashSortAsc ? ja - jb : jb - ja;
+        }
+        if (key === 'registeredAt') {
+          /* Provision time. Compared as epoch ms, not as text: registeredAt is
+             RFC3339 so it happens to sort lexically today, but a value that
+             ever arrives with an offset ('...+02:00') or without the 'Z' would
+             collate wrong, and a string compare cannot express "unknown last".
+
+             Hives with no parseable timestamp sort LAST in both directions
+             rather than clumping at whichever end '' collates to — they are
+             the least informative rows, so they stay out of the way whether
+             the operator asked for oldest-first or newest-first. */
+          var ra = hiveProvisionTime(a);
+          var rb2 = hiveProvisionTime(b);
+          if (ra === null && rb2 === null) return 0;
+          if (ra === null) return 1;
+          if (rb2 === null) return -1;
+          return _dashSortAsc ? ra - rb2 : rb2 - ra;
         }
         var va = key === 'name' ? hiveNameSortValue(a) : ((a && a[key]) || '');
         var vb = key === 'name' ? hiveNameSortValue(b) : ((b && b[key]) || '');
@@ -8851,7 +10040,118 @@ const dashboardHTML = `<!DOCTYPE html>
 
     function sortDashHives(key) {
       if (_dashSortKey === key) { _dashSortAsc = !_dashSortAsc; } else { _dashSortKey = key; _dashSortAsc = true; }
+      persistHiveSort();
       renderHives(sortedDashHives(), true);
+    }
+
+    /* persistHiveSort records the operator's EXPLICIT sort choice. Written only
+       from sortDashHives (a header click), never from loadHiveSortPrefs, so
+       restoring a preference can't rewrite it and a first visit leaves the key
+       absent rather than storing the default — which is what lets
+       loadHiveSortPrefs tell "never chose" apart from "chose the default". */
+    function persistHiveSort() {
+      lsSetJSON(LS_HIVE_SORT, {key: _dashSortKey, asc: _dashSortAsc});
+    }
+
+    /* ---- Scroll position across refresh --------------------------------
+       "Location on page" is the WINDOW's scroll offset, not a container's:
+       .table-wrap is overflow:visible at desktop widths (it only becomes an
+       overflow-x scroller in the narrow media query, and that axis is
+       horizontal), so the hive list scrolls the document itself.
+
+       Writes are throttled through requestAnimationFrame because scroll fires
+       at input rate and localStorage.setItem is synchronous — persisting on
+       every event would jank the scroll it is trying to record. */
+    var HIVE_SCROLL_MAX_AGE_MS = 30 * 60 * 1000; /* 30 min — see readHiveScroll */
+    var HIVE_SCROLL_RESTORE_FRAMES = 3;          /* see restoreHiveScroll */
+    var _hiveScrollWritePending = false;
+    var _hiveScrollRestored = false;
+
+    function persistHiveScroll() {
+      if (_hiveScrollWritePending) return;
+      _hiveScrollWritePending = true;
+      window.requestAnimationFrame(function() {
+        _hiveScrollWritePending = false;
+        var y = window.pageYOffset || document.documentElement.scrollTop || 0;
+        lsSetJSON(LS_HIVE_SCROLL, {y: y, t: Date.now()});
+      });
+    }
+
+    /* readHiveScroll returns the stored offset, or 0 when there is nothing
+       usable. Stale entries are discarded: coming back to the dashboard after
+       hours, the fleet has changed underneath and the old offset points at
+       unrelated rows, so landing at the top is the honest result. Guards the
+       shape too — a hand-edited or truncated value must not yield NaN, which
+       window.scrollTo would silently treat as 0 anyway but which would also
+       poison the comparison below. */
+    function readHiveScroll() {
+      var s = lsGetJSON(LS_HIVE_SCROLL, null);
+      if (!s || typeof s !== 'object') return 0;
+      var y = Number(s.y), t = Number(s.t);
+      if (!isFinite(y) || y <= 0) return 0;
+      if (!isFinite(t) || (Date.now() - t) > HIVE_SCROLL_MAX_AGE_MS) return 0;
+      return y;
+    }
+
+    /* restoreHiveScroll re-applies the saved offset ONCE per page load.
+
+       Why not a single scrollTo at init: the rows are painted asynchronously
+       (paintCachedHives, then loadHives' await, then renderHives), and the
+       document is only as tall as what has been painted so far. Scrolling to
+       y before the table exists clamps to the current maximum — silently
+       landing at the top, which is exactly the bug this is meant to fix.
+
+       So it retries across a few animation frames and stops as soon as the
+       document is actually tall enough for the offset to survive, which is the
+       observable definition of "the rows have rendered". The frame budget is
+       small and bounded so a genuinely shorter list (hives removed since) costs
+       three frames and then gives up rather than fighting the user forever. */
+    function restoreHiveScroll() {
+      if (_hiveScrollRestored) return;
+      var y = readHiveScroll();
+      if (!y) { _hiveScrollRestored = true; return; }
+      var attempts = 0;
+      var tryScroll = function() {
+        var maxY = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+        if (maxY >= y) {
+          window.scrollTo(0, y);
+          _hiveScrollRestored = true;
+          return;
+        }
+        if (++attempts >= HIVE_SCROLL_RESTORE_FRAMES) {
+          /* Never tall enough — go as far as the page allows so the operator
+             at least lands near where they were. */
+          window.scrollTo(0, maxY);
+          _hiveScrollRestored = true;
+          return;
+        }
+        window.requestAnimationFrame(tryScroll);
+      };
+      window.requestAnimationFrame(tryScroll);
+    }
+
+    /* loadHiveSortPrefs resolves the stored sort against the A-Z default.
+
+       Precedence: a PERSISTED choice wins, the default applies only when there
+       is nothing usable stored — first visit, cleared storage, or a value that
+       no longer validates. Applying A-Z unconditionally would undo the operator's
+       choice on every refresh, which is the exact complaint this fixes.
+
+       Every failure mode degrades to the default rather than throwing: lsGetJSON
+       already swallows disabled storage and malformed JSON, and isHiveSortKey
+       rejects a stale key so a removed column cannot leave the table sorting on
+       a property no row has. */
+    function loadHiveSortPrefs() {
+      var stored = lsGetJSON(LS_HIVE_SORT, null);
+      if (stored && typeof stored === 'object' && isHiveSortKey(stored.key)) {
+        _dashSortKey = stored.key;
+        /* Only an explicit false flips direction — a stored object missing
+           'asc' still means ascending. */
+        _dashSortAsc = stored.asc !== false;
+        return;
+      }
+      _dashSortKey = HIVE_SORT_DEFAULT_KEY;
+      _dashSortAsc = HIVE_SORT_DEFAULT_ASC;
     }
 
     /* ---- Usage attribution panel ----------------------------------------
@@ -9428,7 +10728,7 @@ const dashboardHTML = `<!DOCTYPE html>
         '<button type="button" onclick="runBulkAction(\'restart\')" style="' + btn + '">Restart</button>' +
         '<button type="button" onclick="runBulkAction(\'upgrade\')" style="' + btn + '">Upgrade to latest</button>' +
         '<button type="button" onclick="runBulkAction(\'enable-auto-upgrade\')" style="' + btn + '">Auto: instant</button>' +
-        '<button type="button" onclick="runBulkAction(\'daily-auto-upgrade\')" style="' + btn + '" title="Upgrade at most once a day, after hours — keeps a stable hive from being restarted mid-work">Auto: daily 5pm ET</button>' +
+        '<button type="button" onclick="runBulkAction(\'daily-auto-upgrade\')" style="' + btn + '" title="Upgrade at most once a day, midday — keeps a stable hive from being restarted mid-work, and puts a bad roll in staffed hours">Auto: daily 1pm ET</button>' +
         '<button type="button" onclick="runBulkAction(\'disable-auto-upgrade\')" style="' + btn + '">Auto-upgrade off</button>' +
         branchPicker +
         '<button type="button" onclick="clearBulkSelection()" style="' + btn + ';color:var(--muted)">Clear</button>' +
@@ -9448,7 +10748,7 @@ const dashboardHTML = `<!DOCTYPE html>
       'restart': 'Restart',
       'upgrade': 'Upgrade to latest',
       'enable-auto-upgrade': 'Enable instant auto-upgrade on',
-      'daily-auto-upgrade': 'Enable daily 5pm ET auto-upgrade on',
+      'daily-auto-upgrade': 'Enable daily 1pm ET auto-upgrade on',
       'disable-auto-upgrade': 'Disable auto-upgrade on',
       'switch-branch': 'Switch branch for'
     };
@@ -9531,8 +10831,12 @@ const dashboardHTML = `<!DOCTYPE html>
          collapsing a section, switching group-by, collapsing a group or
          applying a saved view would all appear to do nothing. */
       var sig = JSON.stringify(allHives) + '|' + JSON.stringify(_dashStatusFilters) +
-        '|' + _dashFailingCheckFilter + '|' + _dashDriftFilter +
+        '|' + _dashFailingCheckFilter + '|' + _dashDriftFilter + '|' + _dashUpgradeFilter +
+        '|' + _dashAdvisoryStaleFilter +
         '|' + _alertTypeFilter + '|' + _alertShowAcked + '|' + JSON.stringify(_fleetAlerts) +
+        /* Without this, expanding "+N more" changes no hive data and the
+           early-return below would make the click a silent no-op. */
+        '|' + JSON.stringify(_alertRowsExpanded) +
         '|' + _dashSearchQuery + '|' + JSON.stringify(_dashFacets) +
         '|' + JSON.stringify(_dashFacetCollapsed) + '|' + JSON.stringify(_dashSectionCollapsed) +
         '|' + _dashGroupBy + '|' + JSON.stringify(_dashGroupCollapsed) +
@@ -9716,16 +11020,20 @@ const dashboardHTML = `<!DOCTYPE html>
             /* In-flight state is not clickable, so it loses the box entirely:
                a border around a non-target was the padding that made this the
                tall line. The spinner is the affordance-free progress signal. */
-            upgradeIcon = '<span title="' + progressTitle + '" style="font-size:0.7rem;white-space:nowrap;opacity:0.8;color:var(--muted)"><span style="display:inline-block;width:10px;height:10px;border:2px solid rgba(255,255,255,0.3);border-top-color:currentColor;border-radius:50%;animation:spin 1s linear infinite;vertical-align:middle;margin-right:4px"></span>' + progressLabel + '</span>';
+            /* The elapsed counter rides INSIDE the pill so a long-running
+               upgrade cannot be read as progress. It self-suppresses when the
+               start time is unknown or the rollout is still fast (see
+               renderUpgradeElapsed), so a healthy fleet looks unchanged. */
+            upgradeIcon = '<span title="' + progressTitle + '" style="font-size:0.7rem;white-space:nowrap;opacity:0.8;color:var(--muted)"><span style="display:inline-block;width:10px;height:10px;border:2px solid rgba(255,255,255,0.3);border-top-color:currentColor;border-radius:50%;animation:spin 1s linear infinite;vertical-align:middle;margin-right:4px"></span>' + progressLabel + '</span>' + renderUpgradeElapsed(h);
           } else if (!isCurrent && !latestUnknown && isHosted && h.role === 'owner' && h.autoUpgrade) {
             /* A daily-mode hive is NOT upgrading "shortly" — saying so would be
                a lie the operator would notice hours later. Name the window and
                keep the click-to-upgrade-now escape hatch, which is the manual
                path and is never gated by the schedule. */
             var queuedDaily = h.autoUpgradeMode === AUTO_UPGRADE_DAILY;
-            var queuedLabel = queuedDaily ? 'queued · 5pm ET' : 'queued';
+            var queuedLabel = queuedDaily ? 'queued · 1pm ET' : 'queued';
             var queuedTitle = queuedDaily
-              ? 'Auto-upgrade will apply ' + esc(branchLatest) + ' at the next 5pm ET window — click to upgrade now' + esc(buildingHint)
+              ? 'Auto-upgrade will apply ' + esc(branchLatest) + ' at the next 1pm ET window — click to upgrade now' + esc(buildingHint)
               : 'Auto-upgrade will apply ' + esc(branchLatest) + ' shortly — click to upgrade now' + esc(buildingHint);
             /* escAttr, not esc, for the title: esc() leaves quotes intact and a
                branch name or commit subject carrying one would break out of the
@@ -9783,7 +11091,7 @@ const dashboardHTML = `<!DOCTYPE html>
              its widest LINE, so as long as no two controls share a line the
              width collapses to the widest single element — which, now that the
              select is icon-only, is the 56px select rather than the ~150px
-             "[queued · 5pm ET] [Auto: daily 5pm ET]" pair that used to set it.
+             "[queued · 1pm ET] [Auto: daily 1pm ET]" pair that used to set it.
                1. the branch pill, which the owner can CHANGE (it is a switcher,
                   so it owns a line and stays a full tap target);
                2. the SHA and its current/behind glyph — two views of the same
@@ -9811,11 +11119,11 @@ const dashboardHTML = `<!DOCTYPE html>
           pendingPill = '<a href="#" onclick="togglePendingRow(\'' + esc(h.id) + '\');return false" style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;background:rgba(59,130,246,0.12);color:#60a5fa;border:1px solid rgba(59,130,246,0.3);border-radius:4px;font-size:0.7rem;text-decoration:none;cursor:pointer;white-space:nowrap">&#x1F514; ' + h.pendingRequestCount + ' pending</a>';
         }
         // 16 = the 13 original columns, plus Uptime, plus Drift, plus the
-        // bulk-select column, plus Journey, MINUS Public — visibility now
-        // stacks under Location instead of owning a column. Counted against
-        // the <th> cells in the header and the <td> cells emitted below
-        // (bulkCheckboxCell contributes one).
-        var TOTAL_COLUMNS = 17;
+        // bulk-select column, plus Journey, plus Provisioned, MINUS Public —
+        // visibility now stacks under Location instead of owning a column.
+        // Counted against the <th> cells in the header and the <td> cells
+        // emitted below (bulkCheckboxCell contributes one).
+        var TOTAL_COLUMNS = 18;
         /* Visibility moved OUT of its own column and under Location: "where
            does this hive run" and "who can see it" are both facts about the
            hive's placement, so they read as one cell, and folding them saves a
@@ -9891,10 +11199,13 @@ const dashboardHTML = `<!DOCTYPE html>
           }).join('');
           pendingExpandRow = '<tr id="pending-row-' + esc(h.id) + '" style="display:none"><td colspan="' + TOTAL_COLUMNS + '"><div style="padding:8px 16px;background:rgba(59,130,246,0.05);border-radius:6px;margin:4px 0">' + prItems + '</div></td></tr>';
         }
-        return '<tr>' +
+        /* Stable per-hive anchor so the "Attention needed" panel can scroll a
+           specific row into view and highlight it. Built from the hive id, which
+           is unique across both the assigned and unassigned sections. */
+        return '<tr id="' + escAttr(hiveRowDomId(h.id)) + '">' +
           bulkCheckboxCell(h, section || 'all') +
           '<td class="hive-menu-cell" style="position:relative;width:30px;text-align:center;overflow:visible">' + (h.migrationStatus === 'migrating' ? '<span style="font-size:1.1rem;color:var(--border);user-select:none;cursor:not-allowed" title="Disabled during migration">⋮</span>' : '<span style="cursor:pointer;font-size:1.1rem;color:var(--muted);user-select:none">⋮</span>' + pendingBadge + '<div class="hive-menu-dropdown" style="display:none;position:absolute;left:0;bottom:auto;background:#1c2128;border:1px solid #30363d;border-radius:8px;min-width:160px;padding:4px 0;z-index:1000;box-shadow:0 8px 24px rgba(0,0,0,0.5)">' + menuItems.join('') + '</div>') + '</td>' +
-          '<td style="text-align:left;line-height:1.4">' + (function() { var isHostedRow = h.hiveType === 'hosted' || (h.id && (h.id.startsWith('hosted-') || h.id.startsWith('saas-'))); var dh = isHostedRow && h.id ? ('/api/saas/hives/' + encodeURIComponent(h.id) + '/open') : (rb ? esc(rb) : ''); /* Label derived from the PROJECT (org + primary repo), not by splitting h.name — see hiveLabel. */ var label = hiveLabel(h); var orgName = label.line1; var repoName = label.line2; var rp = h.org && h.primaryRepo ? h.org + '/' + h.primaryRepo : ''; var ghIcon = rp ? '<a href="https://github.com/' + esc(rp) + '" target="_blank" style="opacity:0.5;vertical-align:middle" title="' + esc(rp) + '"><svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:middle"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg></a>' : ''; var link = function(text, bold) { if (dh) { return '<a href="' + dh + '" target="_blank" class="' + (bold ? 'hive-name-link' : 'hive-sub-link') + '" title="Open dashboard">' + esc(text) + '</a>'; } var s = bold ? 'font-weight:700;color:inherit' : 'color:#6b7280;font-weight:400'; return '<span style="' + s + '">' + esc(text) + '</span>'; }; var line1 = dot + ' ' + link(orgName, true); var fcPill = h.online ? failingCheckSummary(h) : ''; /* Inline access faces sit on the name cell's second line, immediately after this row's own role badge: the badge already answers "what am I on this hive", so the co-members read as the natural continuation of the same thought, in the one cell that is left-aligned and has room to grow. It also keeps them out of the 16 dense metric columns, none of which is about people. Empty string when the viewer is the only member, so those rows are pixel-identical to today. */ var accessFaces = hiveAccessAvatars(h); /* Keyed off repoName, not orgName: line 1 now always carries SOME identity, so the presence of a second line is decided purely by whether there is a repo to put on it. Without a repo the row still shows the GitHub icon, role badge, faces and failing-check pill on the compact variant. */ var line2 = repoName ? '<div style="padding-left:18px;font-size:0.8rem">' + link(repoName, false) + ' ' + ghIcon + ' ' + roleBadge(h.role) + accessFaces + fcPill + '</div>' : '<div style="padding-left:18px">' + ghIcon + ' ' + roleBadge(h.role) + accessFaces + fcPill + '</div>'; var line3 = pendingPill ? '<div style="margin-top:4px;padding-left:18px">' + pendingPill + '</div>' : ''; return line1 + line2 + line3; })() + '</td>' +
+          '<td style="text-align:left;line-height:1.4">' + (function() { var isHostedRow = h.hiveType === 'hosted' || (h.id && (h.id.startsWith('hosted-') || h.id.startsWith('saas-'))); var dh = isHostedRow && h.id ? ('/api/saas/hives/' + encodeURIComponent(h.id) + '/open') : (rb ? esc(rb) : ''); /* Label derived from the PROJECT (org + primary repo), not by splitting h.name — see hiveLabel. */ var label = hiveLabel(h); var orgName = label.line1; var repoName = label.line2; var rp = h.org && h.primaryRepo ? h.org + '/' + h.primaryRepo : ''; var ghIcon = rp ? '<a href="https://github.com/' + esc(rp) + '" target="_blank" style="opacity:0.5;vertical-align:middle" title="' + esc(rp) + '"><svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:middle"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg></a>' : ''; /* vanityDisplay is the friendly host shown in the status bar on hover. rb is resolvedBase(h), which the hub has already overlaid with the claimed vanity_url; it is only a DISPLAY url here, never the click target — see ssoDisplayLink. Empty for a row with no vanity host, which falls back to today's /open href. Only meaningful on hosted rows: a non-hosted row's dh IS rb already. */ var vanityDisplay = isHostedRow && rb ? rb : ''; var link = function(text, bold) { if (dh) { return ssoDisplayLink(dh, vanityDisplay, text, bold ? 'hive-name-link' : 'hive-sub-link'); } var s = bold ? 'font-weight:700;color:inherit' : 'color:#6b7280;font-weight:400'; return '<span style="' + s + '">' + esc(text) + '</span>'; }; var line1 = dot + ' ' + link(orgName, true); var fcPill = h.online ? failingCheckSummary(h) : ''; /* Advisory-staleness pill sits right beside the failing-check pill: both are "something is quietly wrong with this working hive" signals, and advisoryStaleSummary already self-suppresses (empty string) unless the hub flagged the digest stale, so unaffected rows are pixel-identical. */ var advPill = h.online ? advisoryStaleSummary(h) : ''; /* Dead-link pill is deliberately NOT gated on h.online: the entire point is a hive that IS online and heartbeating while its public URL is broken, so gating it the way the other pills are gated would hide exactly the case it exists to surface. */ var dlPill = deadLinkSummary(h); /* Inline access faces sit on the name cell's second line, immediately after this row's own role badge: the badge already answers "what am I on this hive", so the co-members read as the natural continuation of the same thought, in the one cell that is left-aligned and has room to grow. It also keeps them out of the 16 dense metric columns, none of which is about people. Empty string when the viewer is the only member, so those rows are pixel-identical to today. */ var accessFaces = hiveAccessAvatars(h); /* Keyed off repoName, not orgName: line 1 now always carries SOME identity, so the presence of a second line is decided purely by whether there is a repo to put on it. Without a repo the row still shows the GitHub icon, role badge, faces and failing-check pill on the compact variant. */ var line2 = repoName ? '<div style="padding-left:18px;font-size:0.8rem">' + link(repoName, false) + ' ' + ghIcon + ' ' + roleBadge(h.role) + accessFaces + fcPill + advPill + dlPill + '</div>' : '<div style="padding-left:18px">' + ghIcon + ' ' + roleBadge(h.role) + accessFaces + fcPill + advPill + dlPill + '</div>'; var line3 = pendingPill ? '<div style="margin-top:4px;padding-left:18px">' + pendingPill + '</div>' : ''; return line1 + line2 + line3; })() + '</td>' +
           '<td>' + locationCell + '</td>' +
           '<td style="white-space:nowrap">' + uptimeCell(h) + '</td>' +
           /* No white-space:nowrap on the cell itself: the stacked lines each
@@ -9933,6 +11244,13 @@ const dashboardHTML = `<!DOCTYPE html>
           '<td>' + sparkline(h.issueHistory, '#f59e0b', 50, 14) + (h.actionableIssues || 0) + '</td>' +
           '<td>' + sparkline(h.prHistory, '#3b82f6', 50, 14) + (h.actionablePRs || 0) + '</td>' +
           '<td>' + (h.activeContributors || 0) + '</td>' +
+          /* Provisioned. hiveProvisionTime is the single source of truth for
+             "is this timestamp usable" — reusing it here keeps the cell and the
+             comparator from ever disagreeing (a row showing a date but sorting
+             as unknown, or the reverse). An em dash, never 'Invalid Date', for
+             a hive whose registeredAt is missing or unparseable. */
+          '<td style="font-size:0.75rem;color:var(--muted);white-space:nowrap">' +
+            (hiveProvisionTime(h) === null ? '—' : esc(fmtUserTS(h.registeredAt))) + '</td>' +
           '</tr>' + pendingExpandRow;
       };
       /* Section-header row: a labeled separator spanning all columns, styled to
@@ -9940,9 +11258,10 @@ const dashboardHTML = `<!DOCTYPE html>
       /* Count of <th> cells in the hive table header below. The section-header
          row spans all of them; a stale value would leave the separator short
          and the table visibly ragged. 15 with the Drift column, plus the
-         bulk-select column, plus the Journey column, minus Public (visibility
-         is stacked under Location). Must stay equal to TOTAL_COLUMNS. */
-      var TOTAL_COLUMNS_HEADER = 17;
+         bulk-select column, plus the Journey column, plus the Provisioned
+         column, minus Public (visibility is stacked under Location). Must stay
+         equal to TOTAL_COLUMNS. */
+      var TOTAL_COLUMNS_HEADER = 18;
       /* The header is a click target that expands/collapses its section. The
          caret mirrors aria-expanded so the affordance and the a11y state can
          never disagree. sectionKey also scopes the select-all checkbox to THIS
@@ -10077,7 +11396,7 @@ const dashboardHTML = `<!DOCTYPE html>
         /* Non-admin lists have no section headers, so the flat list's
            select-all lives in the table head instead. */
         '<th style="width:26px;text-align:center">' + (_isAdmin ? '' : bulkSectionCheckbox('all')) + '</th>' +
-        '<th></th><th onclick="sortDashHives(\'name\')" style="cursor:pointer">Hive ⇅</th><th onclick="sortDashHives(\'clusterId\')" style="cursor:pointer" title="Where this hive runs, and whether it is listed publicly">Location / Public ⇅</th><th onclick="sortDashHives(\'startedAt\')" style="cursor:pointer" title="Process uptime since the last restart — a short value that keeps resetting means the pod is restarting">Uptime ⇅</th><th>Version</th><th>Repos</th><th onclick="sortDashHives(\'acmmLevel\')" style="cursor:pointer">ACMM ⇅</th><th onclick="sortDashHives(\'aiAuthor\')" style="cursor:pointer" title="The GitHub identity this hive\'s agents open PRs as — the configured ai_author, or the App bot (&lt;slug&gt;[bot]) in App-authored mode">AI Author ⇅</th><th onclick="sortDashHives(\'journey\')" style="cursor:pointer" title="Where this hive is on the adoption journey: install the GitHub App, assign a method/model (or run the contributor relay), then raise the ACMM level">Journey ⇅</th><th title="Configuration drift from the fleet norm — hover a value for the specific signals">Drift</th><th onclick="sortDashHives(\'agentCount\')" style="cursor:pointer">Agents ⇅</th><th onclick="sortDashHives(\'totalTokens24h\')" style="cursor:pointer" title="Cumulative tokens consumed, as of the last heartbeat">Tokens ⇅</th><th onclick="sortDashHives(\'governorMode\')" style="cursor:pointer">Mode ⇅</th><th onclick="sortDashHives(\'actionableIssues\')" style="cursor:pointer">Issues ⇅</th><th onclick="sortDashHives(\'actionablePRs\')" style="cursor:pointer">PRs ⇅</th><th onclick="sortDashHives(\'activeContributors\')" style="cursor:pointer">Contributors ⇅</th>' +
+        '<th></th><th onclick="sortDashHives(\'name\')" style="cursor:pointer">Hive ⇅</th><th onclick="sortDashHives(\'clusterId\')" style="cursor:pointer" title="Where this hive runs, and whether it is listed publicly">Location / Public ⇅</th><th onclick="sortDashHives(\'startedAt\')" style="cursor:pointer" title="Process uptime since the last restart — a short value that keeps resetting means the pod is restarting">Uptime ⇅</th><th>Version</th><th>Repos</th><th onclick="sortDashHives(\'acmmLevel\')" style="cursor:pointer">ACMM ⇅</th><th onclick="sortDashHives(\'aiAuthor\')" style="cursor:pointer" title="The GitHub identity this hive\'s agents open PRs as — the configured ai_author, or the App bot (&lt;slug&gt;[bot]) in App-authored mode">AI Author ⇅</th><th onclick="sortDashHives(\'journey\')" style="cursor:pointer" title="Where this hive is on the adoption journey: install the GitHub App, assign a method/model (or run ClankeR, the contributor relay), then raise the ACMM level">Journey ⇅</th><th title="Configuration drift from the fleet norm — hover a value for the specific signals">Drift</th><th onclick="sortDashHives(\'agentCount\')" style="cursor:pointer">Agents ⇅</th><th onclick="sortDashHives(\'totalTokens24h\')" style="cursor:pointer" title="Cumulative tokens consumed, as of the last heartbeat">Tokens ⇅</th><th onclick="sortDashHives(\'governorMode\')" style="cursor:pointer">Mode ⇅</th><th onclick="sortDashHives(\'actionableIssues\')" style="cursor:pointer">Issues ⇅</th><th onclick="sortDashHives(\'actionablePRs\')" style="cursor:pointer">PRs ⇅</th><th onclick="sortDashHives(\'activeContributors\')" style="cursor:pointer">Contributors ⇅</th><th onclick="sortDashHives(\'registeredAt\')" style="cursor:pointer" title="When this hive was first provisioned — the hub&apos;s first-seen time, preserved across restarts and heartbeats">Provisioned ⇅</th>' +
         '</tr></thead><tbody>' + rows + '</tbody></table></div>';
       /* Delegated, so binding once is enough no matter how often the table is
          re-rendered. The guard keeps repeated renders from stacking listeners. */
@@ -10142,7 +11461,7 @@ const dashboardHTML = `<!DOCTYPE html>
     var AUTO_UPGRADE_OPTIONS = [
       {value: AUTO_UPGRADE_OFF, label: '⦸ off', ariaLabel: 'Auto-upgrade: off'},
       {value: AUTO_UPGRADE_INSTANT, label: '⚡ instant', ariaLabel: 'Auto-upgrade: instantly when a new version lands'},
-      {value: AUTO_UPGRADE_DAILY, label: '🕔 5p', ariaLabel: 'Auto-upgrade: daily at 5pm ET'}
+      {value: AUTO_UPGRADE_DAILY, label: '🕐 1p', ariaLabel: 'Auto-upgrade: daily at 1pm ET'}
     ];
     /* Accessible name for the select itself, resolved from the CURRENT mode so
        the control announces what it is set to rather than only what it does. */
@@ -10181,7 +11500,7 @@ const dashboardHTML = `<!DOCTYPE html>
         });
         if (!resp.ok) { hiveToast('Failed to update auto-upgrade', 'error'); loadHives(); return; }
         var label = !enabled ? 'off'
-          : (mode === AUTO_UPGRADE_DAILY ? 'daily at 5pm ET' : 'instant');
+          : (mode === AUTO_UPGRADE_DAILY ? 'daily at 1pm ET' : 'instant');
         hiveToast(id + ' auto-upgrade: ' + label, 'success');
         loadHives();
       } catch(e) {
@@ -10237,6 +11556,113 @@ const dashboardHTML = `<!DOCTYPE html>
     var _switchStartedAt = {}; // hiveId → ms timestamp the switch was initiated
     var SWITCH_STALE_MS = 8 * 60 * 1000; // warn if a switch hasn't landed in 8 min
 
+    /* ── Upgrade elapsed-time counter ──
+       A hive that has been "Upgrading" for a long time is a FAULT SIGNAL, not
+       progress: the incident this exists to prevent had 15 hives pinned at
+       upgrading:true for 20+ minutes while their spokes exited 0 in a restart
+       loop, and a static spinner made a permanently-wedged fleet look
+       identical to a merely slow one.
+
+       The thresholds below escalate the counter's colour so that state is
+       obvious at a glance instead of requiring the operator to notice a
+       number. UPGRADE_ELAPSED_RED_MS deliberately equals staleUpgradeTimeout
+       in server.go (10m) — the same instant the hub raises its stuck-upgrade
+       alert. Turning red EARLIER would accuse a hive the hub still considers
+       healthy; turning red LATER would leave a window where the alert panel
+       says stuck and the row still looks fine. The amber step sits at half of
+       that, an early warning while the upgrade is still plausibly in flight. */
+    var UPGRADE_ELAPSED_RED_MS = 10 * 60 * 1000;  // == staleUpgradeTimeout (server.go): hub calls this stuck
+    var UPGRADE_ELAPSED_AMBER_MS = 5 * 60 * 1000; // half the stuck limit: early warning, still plausible
+
+    /* Below this the counter is suppressed entirely. Every upgrade begins at
+       0s, and a counter that flickers "1s, 2s…" on every healthy rollout would
+       train the operator to ignore it — which is exactly the habit that let the
+       incident go unnoticed. It only appears once an upgrade is slow enough to
+       be worth a human's attention. */
+    var UPGRADE_ELAPSED_MIN_SHOW_MS = 30 * 1000; // don't nag during a normal fast rollout
+
+    /* Clocks are not synchronised. The browser's Date.now() and the hub's
+       upgradeStartedAt can disagree by seconds, which yields a small NEGATIVE
+       elapsed on a freshly-started upgrade. Tolerate that as "just started"
+       rather than rendering a negative duration; anything more negative than
+       this is real clock skew and the counter is suppressed instead of shown
+       as a lie. */
+    var UPGRADE_ELAPSED_SKEW_TOLERANCE_MS = 60 * 1000; // treat small negatives as 0
+
+    /* upgradeElapsedMs returns how long a hive has been upgrading, in ms, or
+       null when that cannot be known — a MISSING, EMPTY or UNPARSEABLE
+       upgradeStartedAt, or a negative elapsed beyond the skew tolerance.
+       Callers must render nothing on null; they must never render NaN, a
+       negative duration, or a fabricated "0s" that implies the upgrade just
+       started when in truth the timestamp was lost.
+
+       Note a real server behaviour this relies on: upgradeStartedAt is stamped
+       ONLY where Upgrading is set true, so a hive that is merely QUEUED has no
+       timestamp and correctly gets null here rather than a bogus counter. */
+    function upgradeElapsedMs(h, nowMs) {
+      if (!h) return null;
+      var started = h.upgradeStartedAt;
+      if (!started || typeof started !== 'string') return null;
+      var t = Date.parse(started);
+      if (isNaN(t)) return null; /* unparseable timestamp — show nothing, never NaN */
+      var elapsed = (typeof nowMs === 'number' ? nowMs : Date.now()) - t;
+      if (elapsed < 0) {
+        /* Clock skew. A small negative is the browser being marginally behind
+           the hub on an upgrade that genuinely just started; clamp it to zero.
+           A large negative means the timestamp is not trustworthy at all. */
+        if (elapsed > -UPGRADE_ELAPSED_SKEW_TOLERANCE_MS) return 0;
+        return null;
+      }
+      return elapsed;
+    }
+
+    /* formatUpgradeElapsed renders a compact duration: "45s", "3m", "1h12m".
+       Minutes are the operator's working unit here, so past an hour it keeps
+       the minutes rather than collapsing to a bare "1h" that would hide a
+       72-minute wedge behind the same string as a 61-minute one. */
+    function formatUpgradeElapsed(ms) {
+      if (typeof ms !== 'number' || isNaN(ms) || ms < 0) return '';
+      var totalSec = Math.floor(ms / 1000);
+      if (totalSec < 60) return totalSec + 's';
+      var totalMin = Math.floor(totalSec / 60);
+      if (totalMin < 60) return totalMin + 'm';
+      var hours = Math.floor(totalMin / 60);
+      return hours + 'h' + (totalMin % 60) + 'm';
+    }
+
+    /* upgradeElapsedColor escalates the counter past the thresholds above.
+       Muted while the rollout is plausibly healthy, amber as an early warning,
+       red once the hub itself would call the upgrade stuck. */
+    function upgradeElapsedColor(ms) {
+      if (typeof ms !== 'number' || isNaN(ms)) return 'var(--muted)';
+      if (ms >= UPGRADE_ELAPSED_RED_MS) return 'var(--red)';
+      if (ms >= UPGRADE_ELAPSED_AMBER_MS) return 'var(--amber, #f59e0b)';
+      return 'var(--muted)';
+    }
+
+    /* renderUpgradeElapsed builds the counter fragment appended to the
+       "Upgrading" pill. Returns '' whenever the elapsed time is unknown or
+       still below the nag threshold, so the common healthy case renders
+       exactly what it renders today. */
+    function renderUpgradeElapsed(h, nowMs) {
+      var ms = upgradeElapsedMs(h, nowMs);
+      if (ms === null) return '';
+      if (ms < UPGRADE_ELAPSED_MIN_SHOW_MS) return '';
+      var label = formatUpgradeElapsed(ms);
+      if (!label) return '';
+      var stuck = ms >= UPGRADE_ELAPSED_RED_MS;
+      /* Past the red line the wording stops describing progress and names the
+         fault, because at that point the hub has raised its stuck-upgrade
+         alert and "still upgrading" would be the same misleading reassurance
+         the incident turned on. */
+      var tip = stuck
+        ? 'Upgrading for ' + label + ' — past the ' + Math.round(UPGRADE_ELAPSED_RED_MS / 60000) +
+          ' minute limit. This upgrade is almost certainly wedged, not slow; check the hive for a failed self-upgrade.'
+        : 'Upgrading for ' + label;
+      return '<span title="' + escAttr(tip) + '" style="margin-left:4px;font-variant-numeric:tabular-nums;color:' +
+        upgradeElapsedColor(ms) + (stuck ? ';font-weight:600' : '') + '">' + esc(label) + '</span>';
+    }
+
     /* Version and Location cells stack their contents vertically so neither
        column is forced as wide as the sum of its parts. The Version cell used
        to lay branch pill + SHA + status + upgrade affordance + auto-upgrade
@@ -10271,8 +11697,8 @@ const dashboardHTML = `<!DOCTYPE html>
        control height, which is taller.
 
        What actually sets the width now is the LONGEST upgrade label,
-       "queued · 5pm ET" at 90.4px — not the select, which measures 77px. The
-       old width was set by that label and the "Auto: daily 5pm ET" select
+       "queued · 1pm ET" at 90.4px — not the select, which measures 77px. The
+       old width was set by that label and the "Auto: daily 1pm ET" select
        sitting on ONE line together.
 
        Non-owner rows are UNCHANGED: they still get at most two lines (28.9px),
@@ -10303,7 +11729,7 @@ const dashboardHTML = `<!DOCTYPE html>
        to a glyph: 20px tall and at least 56px wide keeps it a comfortable
        pointer and touch target (the row is 63.8px tall, so 20px is roughly a
        third of it — visibly a control, not a decoration) while still being far
-       narrower than the "Auto: daily 5pm ET" string it replaces. Widening it
+       narrower than the "Auto: daily 1pm ET" string it replaces. Widening it
        would give back the column width this change exists to reclaim; making it
        smaller would make it fiddly to hit. */
     var AUTO_SELECT_H_PX = 20;
@@ -10612,8 +12038,7 @@ const dashboardHTML = `<!DOCTYPE html>
       if (status === 'approved') {
         icon = '&#x2705;';
         bg = 'rgba(34,197,94,0.12)'; border = 'rgba(34,197,94,0.3)';
-        msg = 'Your hive request for <strong>' + project + '</strong> has been approved! Click <strong>Provision</strong> to set up your hive.' +
-          ' <button onclick="openProvisionDialog(\'' + esc(req.org) + '\',\'' + esc(req.repos) + '\',\'' + esc(req.primary_repo || '') + '\',' + (req.acmm_level || 1) + ')" style="margin-left:8px;padding:4px 12px;background:#238636;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:0.8rem;font-weight:600">Provision</button>';
+        msg = 'Your hive request for <strong>' + project + '</strong> has been approved! An admin will assign your hive shortly.';
       } else if (status === 'denied') {
         icon = '&#x274C;';
         bg = 'rgba(239,68,68,0.12)'; border = 'rgba(239,68,68,0.3)';
@@ -10623,9 +12048,33 @@ const dashboardHTML = `<!DOCTYPE html>
         bg = 'rgba(245,158,11,0.12)'; border = 'rgba(245,158,11,0.3)';
         msg = 'Your hive request for <strong>' + project + '</strong> is pending admin approval.';
       }
+      /* The banner is purely informational in EVERY state now that the
+         Provision button is gone (hives are assigned by an admin), so all
+         three states are dismissable. The earlier carve-out that kept
+         'approved' non-dismissable existed only because that state carried the
+         Provision button — the sole place the action was offered — and
+         dismissals never expire (see dismissBanner: the stored timestamp is
+         written but no reader ever compares it), so a stray click would have
+         stranded the user. With no unique action left in any state, there is
+         nothing to strand and the carve-out no longer applies.
+
+         The key embeds BOTH the request identity and its status, so a
+         dismissed 'pending' banner re-raises on its own once the request flips
+         to approved or denied — a stray click can never permanently hide a
+         status change. ProvisionRequest carries no id, so identity is the
+         org/primary-repo pair it targets: the same thing the banner text
+         names. */
+      var dismissKey = ('provision:' + (req.org || '') + '/' +
+        (req.primary_repo || req.repos || '') + ':' + status).replace(/'/g, '');
+      var dismissedReqs = {};
+      try {
+        dismissedReqs = JSON.parse(localStorage.getItem('hive-dismissed-banners') || '{}') || {};
+      } catch (e) { dismissedReqs = {}; } /* corrupted value — show the banner */
+      if (dismissedReqs[dismissKey]) { el.style.display = 'none'; return; }
       el.innerHTML = '<div style="background:' + bg + ';border:1px solid ' + border + ';border-radius:8px;padding:12px 16px;margin-bottom:16px;display:flex;align-items:center;gap:10px">' +
         '<span style="font-size:1.1rem">' + icon + '</span>' +
         '<span style="flex:1;font-size:0.85rem;color:var(--text)">' + msg + '</span>' +
+        '<button onclick="dismissBanner(\'' + esc(dismissKey) + '\',this)" style="margin-left:auto;background:none;border:none;color:var(--muted);cursor:pointer;font-size:1rem;padding:0 4px" title="Dismiss">&times;</button>' +
         '</div>';
     }
 
@@ -11031,6 +12480,169 @@ const dashboardHTML = `<!DOCTYPE html>
       } catch(e) { hiveToast('Error: ' + e.message, 'error'); btn.disabled = false; btn.textContent = 'Deny'; }
     }
 
+    /* REQUEST_FORGE_CUSTOM is the sentinel option value that reveals the
+       free-text forge box. It is not a hostname and is never submitted. */
+    var REQUEST_FORGE_CUSTOM = '__custom__';
+
+    /* normalizeForgeInput mirrors the server's normalizeForgeHost: strip the
+       scheme, drop any pasted path, drop a trailing slash, lowercase. Keeping
+       the two in step means the live preview shows exactly the host the server
+       will store, instead of a spelling that changes on submit. */
+    function normalizeForgeInput(raw) {
+      var h = (raw || '').trim().toLowerCase();
+      h = h.replace(/^https?:\/\//, '');
+      var slash = h.indexOf('/');
+      if (slash >= 0) h = h.slice(0, slash);
+      return h;
+    }
+
+    /* renderRequestForgeOptions fills the Request-a-Hive forge picker from the
+       forges the hub's own clusters actually run on, plus public github.com and
+       an "other" escape hatch.
+
+       Hybrid rather than pure free-text: the listed forges are the ones the hub
+       can actually place a hive on, so the common path is a click that cannot
+       be typo'd, and the list self-documents what is supported. Pure free-text
+       invites "gihub.ibm.com"; a pure select would block a brand-new GHE
+       instance the hub has no cluster for yet, which is a real onboarding case
+       — hence "Other". */
+    function renderRequestForgeOptions() {
+      var sel = document.getElementById('rq-forge');
+      if (!sel) return;
+      var seen = {};
+      var hosts = [];
+      (_clusterList || []).forEach(function(c) {
+        var h = normalizeForgeInput((c && c.github_host) || '');
+        if (!h || seen[h]) return;
+        seen[h] = true;
+        hosts.push(h);
+      });
+      /* Public GitHub is always offered even when no cluster reports it, so the
+         picker is never empty before the cluster list loads. */
+      if (!seen[PUBLIC_GITHUB_HOST]) hosts.unshift(PUBLIC_GITHUB_HOST);
+      hosts.sort();
+      var prev = sel.value;
+      var opts = hosts.map(function(h) {
+        return '<option value="' + esc(h) + '">' + esc(h) + '</option>';
+      });
+      opts.push('<option value="' + esc(REQUEST_FORGE_CUSTOM) + '">Other GitHub Enterprise host&#x2026;</option>');
+      sel.innerHTML = opts.join('');
+      if (prev) sel.value = prev;
+      if (!sel.value) sel.value = PUBLIC_GITHUB_HOST;
+      /* Bind once. renderRequestForgeOptions re-runs whenever the cluster list
+         reloads, and re-adding these listeners each time would fire the
+         preview N times per keystroke. */
+      if (!sel._rqForgeWired) {
+        sel._rqForgeWired = true;
+        sel.addEventListener('change', syncRequestForgePreview);
+        var customEl = document.getElementById('rq-forge-custom');
+        if (customEl) customEl.addEventListener('input', syncRequestForgePreview);
+        var orgEl = document.getElementById('rq-org');
+        if (orgEl) orgEl.addEventListener('input', syncRequestForgePreview);
+      }
+      syncRequestForgePreview();
+    }
+
+    /* requestForgeValue returns the normalized forge host the modal will
+       submit, or '' when "Other" is selected and nothing has been typed. */
+    function requestForgeValue() {
+      var sel = document.getElementById('rq-forge');
+      if (!sel) return '';
+      if (sel.value !== REQUEST_FORGE_CUSTOM) return normalizeForgeInput(sel.value);
+      var custom = document.getElementById('rq-forge-custom');
+      return normalizeForgeInput(custom && custom.value);
+    }
+
+    /* syncRequestForgePreview shows the forge with the org affixed to it —
+       "github.ibm.com/z-innersource" — so the requester sees the exact target
+       they are asking for before they submit, rather than discovering after
+       provisioning that the org was resolved against the wrong GitHub. */
+    function syncRequestForgePreview() {
+      var sel = document.getElementById('rq-forge');
+      var custom = document.getElementById('rq-forge-custom');
+      var out = document.getElementById('rq-target-preview');
+      if (sel && custom) custom.style.display = sel.value === REQUEST_FORGE_CUSTOM ? 'block' : 'none';
+      if (!out) return;
+      var host = requestForgeValue();
+      var orgEl = document.getElementById('rq-org');
+      var org = orgEl ? orgEl.value.trim() : '';
+      /* The org field accepts a pasted URL too; show only its last segment so
+         the preview never renders "github.com/https://github.ibm.com/x". */
+      if (org) {
+        var parts = org.replace(/^https?:\/\//, '').replace(/\/+$/, '').split('/');
+        org = parts[parts.length - 1];
+      }
+      if (!host) {
+        out.textContent = 'Enter the GitHub forge your org lives on.';
+        out.style.color = 'var(--muted)';
+        return;
+      }
+      out.textContent = 'This hive will target ' + host + '/' + (org || '<org>') +
+        (host !== PUBLIC_GITHUB_HOST ? ' — the GitHub App must be installed on that org on ' + host + '.' : '');
+      out.style.color = host !== PUBLIC_GITHUB_HOST ? 'var(--accent, #58a6ff)' : 'var(--muted)';
+    }
+
+    /* REQUEST_DEFAULT_ACMM_LEVEL is where a new hive starts. L3 Measured is the
+       first level that produces useful output (hold-gated PRs that raise test
+       coverage) while still requiring a human on every merge, which is the
+       right default for someone who has not run a hive before. */
+    var REQUEST_DEFAULT_ACMM_LEVEL = 3;
+    /* ACMM levels offered on the request form, lowest to highest. Capped at L3
+       Measured, matching maxRequestACMMLevel on POST /api/saas/request-provision
+       and the get-started wizard: a hive is never REQUESTED above L3. L4-L6 are
+       real levels, reached after provisioning from the hive's own dashboard
+       once coverage and CI history have earned them. This form posts to the
+       same clamped endpoint as the wizard, so offering L4-L6 here would not
+       grant them — it would silently record L1 instead. */
+    var REQUEST_ACMM_LEVELS = [1, 2, 3];
+    /* Restated under the picker so the cap reads as "later", not "denied". */
+    var REQUEST_LEVELS_LATER_NOTE = 'L4 Adaptive, L5 Semi-Automated and L6 Autonomous become available after provisioning, from your hive dashboard.';
+
+    /* renderRequestLevelOptions builds the level picker from ACMM_LABELS and
+       ACMM_TIPS. Rendering rather than hardcoding is the point: the previous
+       hardcoded <option> list had drifted to names that appear nowhere else in
+       the product and described the wrong behaviour. */
+    function renderRequestLevelOptions() {
+      var sel = document.getElementById('rq-level');
+      if (!sel) return;
+      var prev = sel.value;
+      sel.innerHTML = (REQUEST_ACMM_LEVELS || []).map(function(l) {
+        var label = ACMM_LABELS[l] || ('L' + l);
+        var detail = acmmTipDetail(l);
+        /* Label and one-line description live in the option text itself: a
+           <select> shows only the selected option when closed, so a requester
+           browsing the list needs the description inline to compare levels. */
+        return '<option value="' + l + '">' + esc(label) + (detail ? ' &#x2014; ' + esc(detail) : '') + '</option>';
+      }).join('');
+      sel.value = prev || String(REQUEST_DEFAULT_ACMM_LEVEL);
+      if (!sel.value) sel.value = String(REQUEST_DEFAULT_ACMM_LEVEL);
+      if (!sel._rqLevelWired) {
+        sel._rqLevelWired = true;
+        sel.addEventListener('change', syncRequestLevelDesc);
+      }
+      syncRequestLevelDesc();
+    }
+
+    /* syncRequestLevelDesc restates the selected level's description under the
+       picker, so it stays readable once the dropdown is closed. */
+    function syncRequestLevelDesc() {
+      var sel = document.getElementById('rq-level');
+      var out = document.getElementById('rq-level-desc');
+      if (!sel || !out) return;
+      var lvl = parseInt(sel.value, 10) || REQUEST_DEFAULT_ACMM_LEVEL;
+      var tip = ACMM_TIPS[lvl] || '';
+      out.textContent = tip ? (tip + ' ' + REQUEST_LEVELS_LATER_NOTE) : REQUEST_LEVELS_LATER_NOTE;
+    }
+
+    /* openRequestHiveModal shows the modal with a freshly populated forge
+       picker, so a cluster list that loaded after page render is reflected. */
+    function openRequestHiveModal() {
+      renderRequestForgeOptions();
+      syncRequestForgePreview();
+      renderRequestLevelOptions();
+      document.getElementById('request-modal').style.display = 'flex';
+    }
+
     var _requestInProgress = false;
     async function submitProvisionRequest() {
       if (_requestInProgress) return;
@@ -11042,14 +12654,25 @@ const dashboardHTML = `<!DOCTYPE html>
       var repos = document.getElementById('rq-repos').value.trim();
       var primary = document.getElementById('rq-primary').value.trim();
       var level = parseInt(document.getElementById('rq-level').value) || 1;
+      var forge = requestForgeValue();
 
-      if (!org || !repos) { hiveToast('Org and repos are required', 'error'); _requestInProgress = false; btn.disabled = false; btn.textContent = 'Submit Request'; return; }
+      function abort(msg) {
+        hiveToast(msg, 'error');
+        _requestInProgress = false;
+        btn.disabled = false;
+        btn.textContent = 'Submit Request';
+      }
+
+      if (!org || !repos) { abort('Org and repos are required'); return; }
+      /* The forge is required client-side for a fast, in-context error; the
+         server enforces it independently — this check is UX, not security. */
+      if (!forge) { abort('A GitHub forge is required — pick one or enter the host your org lives on'); return; }
 
       try {
         var resp = await fetch('/api/saas/request-provision', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({org: org, repos: repos, primary_repo: primary || repos.split(',')[0].trim(), acmm_level: level})
+          body: JSON.stringify({org: org, github_host: forge, repos: repos, primary_repo: primary || repos.split(',')[0].trim(), acmm_level: level})
         });
         var data = await resp.json();
         if (!resp.ok) { hiveToast(data.error || 'Request failed', 'error'); return; }
@@ -11066,6 +12689,15 @@ const dashboardHTML = `<!DOCTYPE html>
     var CLUSTER_CPU_DANGER_PCT = 80;
     var CLUSTER_MEM_WARN_PCT = 60;
     var CLUSTER_MEM_DANGER_PCT = 80;
+    // Disk thresholds mirror kubelet's own behaviour on these nodes rather
+    // than round numbers: image garbage collection starts at
+    // imageGCHighThresholdPercent (85% used) and hard eviction fires at
+    // evictionHard nodefs.available<10% (90% used). Amber therefore means
+    // "kubelet is already reclaiming disk", red means "pods are being evicted".
+    var CLUSTER_DISK_WARN_PCT = 85;
+    var CLUSTER_DISK_DANGER_PCT = 90;
+    // MiB per GiB, for rendering disk_*_mb values as GiB.
+    var MB_PER_GB = 1024;
     var _clusterHealthCollapsed = localStorage.getItem('hive-cluster-health-collapsed') !== 'false';
 
     function toggleClusterHealth() {
@@ -11121,6 +12753,29 @@ const dashboardHTML = `<!DOCTYPE html>
         '</span></div>';
     }
 
+    // Renders a metric row whose value could not be collected. Deliberately
+    // dashed rather than 0%, so an unreachable node never reads as healthy.
+    function renderHealthMetricUnknown(label, reason) {
+      return '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px" title="' + esc(reason || 'No data') + '">' +
+        '<span style="font-size:0.7rem;color:var(--muted)">' + label + '</span>' +
+        '<span style="display:flex;align-items:center;gap:6px">' +
+        '<span style="font-family:monospace;font-size:0.75rem;color:var(--muted)">— / — GiB</span>' +
+        '<span style="font-size:0.7rem;min-width:28px;text-align:right;color:var(--muted)">—</span>' +
+        '</span></div>';
+    }
+
+    // Disk usage is optional: the collector omits it when the kubelet
+    // stats endpoint was unreachable, so absent means unknown, not zero.
+    function renderNodeDiskMetric(n, nk) {
+      if (n.disk_percent == null || n.disk_total_mb == null || n.disk_used_mb == null) {
+        return renderHealthMetricUnknown('DISK', 'Disk usage unavailable for this node');
+      }
+      var diskUsedGB = (n.disk_used_mb / MB_PER_GB).toFixed(1);
+      var diskTotalGB = Math.round(n.disk_total_mb / MB_PER_GB);
+      return renderHealthMetric('DISK', diskUsedGB, diskTotalGB, 'GiB', n.disk_percent,
+        CLUSTER_DISK_WARN_PCT, CLUSTER_DISK_DANGER_PCT, nk, 'disk');
+    }
+
     function renderNodeCard(n) {
       var nk = n.name;
       var readyBadge = (n.conditions || []).indexOf('Ready') >= 0
@@ -11143,6 +12798,7 @@ const dashboardHTML = `<!DOCTYPE html>
         '</span></div>' +
         renderHealthMetric('CPU', cpuUsed, n.cpu_cores, 'cores', n.cpu_percent, CLUSTER_CPU_WARN_PCT, CLUSTER_CPU_DANGER_PCT, nk, 'cpu') +
         renderHealthMetric('MEM', memUsedGB, memTotalGB, 'GB', n.mem_percent, CLUSTER_MEM_WARN_PCT, CLUSTER_MEM_DANGER_PCT, nk, 'mem') +
+        renderNodeDiskMetric(n, nk) +
         diskWarn +
         '</div>';
     }
@@ -11167,10 +12823,22 @@ const dashboardHTML = `<!DOCTYPE html>
           var cpuColor = healthBarColor(s.total_cpu_percent || 0, CLUSTER_CPU_WARN_PCT, CLUSTER_CPU_DANGER_PCT);
           var memColor = healthBarColor(s.total_mem_percent || 0, CLUSTER_MEM_WARN_PCT, CLUSTER_MEM_DANGER_PCT);
           var clusterCount = (data.clusters || []).length;
+          // Disk is omitted when no node reported usage; showing 0% there
+          // would claim the fleet is healthy on no evidence at all.
+          var diskSegment = '';
+          if (s.total_disk_percent != null) {
+            pushSparkPoint('_cluster', 'disk', s.total_disk_percent);
+            var diskColor = healthBarColor(s.total_disk_percent, CLUSTER_DISK_WARN_PCT, CLUSTER_DISK_DANGER_PCT);
+            diskSegment = renderUnicodeSparkline('_cluster', 'disk', diskColor) +
+              ' <span style="color:' + diskColor + '">' + s.total_disk_percent + '% disk</span> · ';
+          } else {
+            diskSegment = '<span style="color:var(--muted)" title="No node reported live disk usage">— disk</span> · ';
+          }
           summaryBar.innerHTML = clusterCount + ' cluster' + (clusterCount !== 1 ? 's' : '') + ' · ' +
             (s.total_nodes || 0) + ' nodes · ' + (s.total_cpu_cores || 0) + ' vCPU · ' +
             renderUnicodeSparkline('_cluster', 'cpu', cpuColor) + ' <span style="color:' + cpuColor + '">' + (s.total_cpu_percent || 0) + '% cpu</span> · ' +
             renderUnicodeSparkline('_cluster', 'mem', memColor) + ' <span style="color:' + memColor + '">' + (s.total_mem_percent || 0) + '% mem</span> · ' +
+            diskSegment +
             (s.hive_count || 0) + ' hives';
         }
 
@@ -11193,6 +12861,15 @@ const dashboardHTML = `<!DOCTYPE html>
             var cs = c.summary || {};
             var cCpuColor = healthBarColor(cs.total_cpu_percent || 0, CLUSTER_CPU_WARN_PCT, CLUSTER_CPU_DANGER_PCT);
             var cMemColor = healthBarColor(cs.total_mem_percent || 0, CLUSTER_MEM_WARN_PCT, CLUSTER_MEM_DANGER_PCT);
+            // Absent disk data (e.g. an unreachable cluster) renders dashed,
+            // never as 0% — a full disk and an unknown disk must not look alike.
+            var cDiskSegment;
+            if (cs.total_disk_percent != null) {
+              var cDiskColor = healthBarColor(cs.total_disk_percent, CLUSTER_DISK_WARN_PCT, CLUSTER_DISK_DANGER_PCT);
+              cDiskSegment = '<span style="color:' + cDiskColor + '">' + cs.total_disk_percent + '% disk</span> · ';
+            } else {
+              cDiskSegment = '<span style="color:var(--muted)" title="No node in this cluster reported live disk usage">— disk</span> · ';
+            }
             var gpuLine = '';
             if (c.gpu_summary) {
               gpuLine = ' · <span style="color:var(--green)">' + c.gpu_summary.allocatable_gpus + '/' + c.gpu_summary.total_gpus + ' GPUs</span>';
@@ -11212,6 +12889,7 @@ const dashboardHTML = `<!DOCTYPE html>
               (cs.total_nodes || 0) + ' nodes · ' + (cs.total_cpu_cores || 0) + ' vCPU · ' +
               '<span style="color:' + cCpuColor + '">' + (cs.total_cpu_percent || 0) + '% cpu</span> · ' +
               '<span style="color:' + cMemColor + '">' + (cs.total_mem_percent || 0) + '% mem</span> · ' +
+              cDiskSegment +
               (c.hive_count || 0) + ' hives' + capacityLine + gpuLine +
               '</span></div>';
             var nodesHtml = (c.nodes || []).length > 0
@@ -11241,6 +12919,10 @@ const dashboardHTML = `<!DOCTYPE html>
         if (!resp.ok) return;
         var clusters = await resp.json();
         _clusterList = clusters || [];
+        /* Refresh the Request-a-Hive forge picker: the cluster list usually
+           lands after first render, and the picker's whole value is listing the
+           forges the hub can actually place a hive on. */
+        renderRequestForgeOptions();
         var sel = document.getElementById('f-cluster');
         if (!sel || !clusters || !clusters.length) return;
         sel.innerHTML = clusters.map(function(c) {
@@ -11465,15 +13147,29 @@ const dashboardHTML = `<!DOCTYPE html>
          already reflects the operator's view rather than flashing the ungrouped
          list and then rearranging. */
       loadDashViewPrefs();
+      /* Sort is resolved AFTER loadDashViewPrefs because applying a default
+         saved view sets a key/direction of its own: the operator's explicitly
+         stored sort is the more specific signal and must have the last word.
+         Both run before the first paint so no render happens in the wrong
+         order. */
+      loadHiveSortPrefs();
       /* Progressive paint: put the last known fleet on screen immediately so a
          returning operator sees their hives instead of a spinner. The network
          path below still runs unconditionally and reconciles the list; this
          only changes what fills the gap while it is in flight. Must come after
          loadDashViewPrefs() so the cached rows honour the active view. */
       paintCachedHives();
+      /* Record the offset from here on. Attached before the awaits below so a
+         scroll during a slow load is still captured. */
+      window.addEventListener('scroll', persistHiveScroll, {passive: true});
       await loadUser();
       await autoRequestAccessFromUrl();
       await loadHives();
+      /* Restore AFTER the real rows are in the DOM — loadHives' renderHives is
+         what gives the document its full height, and restoreHiveScroll still
+         waits for that height before it commits (see its frame loop). Calling
+         it any earlier clamps the offset to a short page and lands at the top. */
+      restoreHiveScroll();
       await loadAdminUsers();
       if (!_adminLoaded) setTimeout(loadAdminUsers, 2000);
       loadClusterHealth();
@@ -11970,8 +13666,20 @@ const dashboardHTML = `<!DOCTYPE html>
         gtag('event','hive_deleted',{hive_id:id});
         hiveToast('Deleting ' + id + '...', 'info');
         var resp = await fetch('/api/saas/hives/' + encodeURIComponent(id), {method: 'DELETE'});
-        if (!resp.ok) { var d = await resp.json(); hiveToast(d.error || 'Delete failed', 'error'); return; }
-        hiveToast('Deleted ' + id, 'success');
+        if (!resp.ok) {
+          var d = await resp.json().catch(function(){ return {}; });
+          hiveToast(d.error || 'Delete failed', 'error');
+          // Refresh regardless: the hub removes the registry entry even when
+          // teardown fails, so the listing may already be correct.
+          loadHives();
+          return;
+        }
+        var ok = await resp.json().catch(function(){ return {}; });
+        if (ok.status === 'partially_deleted') {
+          hiveToast('Removed ' + id + ' from the hub, but cleanup was incomplete: ' + (ok.warning || 'cloud resources may need manual removal'), 'error');
+        } else {
+          hiveToast('Deleted ' + id, 'success');
+        }
         loadHives();
       } catch(e) { hiveToast('Error: ' + e.message, 'error'); }
       finally { btns.forEach(function(b) { b.disabled = false; b.textContent = 'Delete'; b.style.opacity = '1'; }); }
@@ -12323,15 +14031,6 @@ const dashboardHTML = `<!DOCTYPE html>
     }
 
     var _createInProgress = false;
-    function openProvisionDialog(org, repos, primaryRepo, acmmLevel) {
-      document.getElementById('f-org').value = org || '';
-      document.getElementById('f-repos').value = repos || '';
-      document.getElementById('f-primary').value = primaryRepo || '';
-      var levelSelect = document.getElementById('f-level');
-      if (levelSelect && acmmLevel) levelSelect.value = String(acmmLevel);
-      document.getElementById('create-modal').style.display = 'flex';
-    }
-
     async function createHive() {
       if (_createInProgress) return;
       _createInProgress = true;
@@ -12671,8 +14370,15 @@ const dashboardHTML = `<!DOCTYPE html>
       <div style="flex:1;overflow-y:auto;padding:0 32px">
         <p style="font-size:0.8rem;color:var(--muted);margin-bottom:16px">Submit a request for a hosted hive. An admin will review and approve it.</p>
         <div style="margin-bottom:12px">
+          <label style="display:block;font-size:0.8rem;color:var(--muted);margin-bottom:4px">GitHub Forge *</label>
+          <select id="rq-forge" style="width:100%;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.85rem"></select>
+          <input id="rq-forge-custom" type="text" placeholder="github.example.com" style="width:100%;margin-top:6px;display:none;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.85rem">
+          <div style="font-size:0.72rem;color:var(--muted);margin-top:4px">Which GitHub your org lives on. Required &#x2014; a bare org name does not say whether it is on github.com or a GitHub Enterprise instance.</div>
+        </div>
+        <div style="margin-bottom:12px">
           <label style="display:block;font-size:0.8rem;color:var(--muted);margin-bottom:4px">GitHub Organization *</label>
           <input id="rq-org" type="text" placeholder="my-org" style="width:100%;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.85rem">
+          <div id="rq-target-preview" style="font-size:0.75rem;color:var(--muted);margin-top:6px"></div>
         </div>
         <div style="margin-bottom:12px">
           <label style="display:block;font-size:0.8rem;color:var(--muted);margin-bottom:4px">Repositories * <span style="font-size:0.7rem">(comma-separated)</span></label>
@@ -12684,14 +14390,11 @@ const dashboardHTML = `<!DOCTYPE html>
         </div>
         <div style="margin-bottom:12px">
           <label style="display:block;font-size:0.8rem;color:var(--muted);margin-bottom:4px">ACMM Level</label>
-          <select id="rq-level" style="width:100%;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.85rem">
-            <option value="1">L1 &#x2014; Assisted</option>
-            <option value="2">L2 &#x2014; Instructed</option>
-            <option value="3" selected>L3 &#x2014; CI/CD</option>
-            <option value="4">L4 &#x2014; Auto PR</option>
-            <option value="5">L5 &#x2014; Self-Governing</option>
-            <option value="6">L6 &#x2014; Fully Autonomous</option>
-          </select>
+          <!-- Options are rendered by renderRequestLevelOptions() from
+               ACMM_LABELS/ACMM_TIPS so this picker can never drift from the
+               names the rest of the hub shows. Do not hardcode them here. -->
+          <select id="rq-level" style="width:100%;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.85rem"></select>
+          <div id="rq-level-desc" style="font-size:0.72rem;color:var(--muted);margin-top:6px"></div>
         </div>
       </div>
       <div style="display:flex;gap:12px;justify-content:flex-end;padding:16px 32px;border-top:1px solid var(--border);flex-shrink:0">
@@ -13266,116 +14969,4 @@ func (s *HubServer) handleGetHubBanner(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"banners": banners})
-}
-
-// handleSaaSRepos lists the repositories the requester can pick from in the
-// "Get a hosted hive" flow (step 3).
-//
-// The frontend has always called GET /api/saas/repos, but no handler was ever
-// registered — the fetch 404'd and the page fell through to "No repositories
-// found. Make sure the Hive GitHub App is installed on your org", which blamed
-// the user's App installation for a missing backend route. It failed for every
-// requester regardless of whether the App was installed.
-//
-// Repos come from the App installations the user's OAuth token can see, which
-// covers BOTH org installations and personal-account installations (the
-// original error text assumed orgs only — the first real report was a repo
-// under a personal account).
-//
-// Note this can only ever see public github.com. A GitHub Enterprise repo
-// (github.ibm.com, …) is invisible to a github.com OAuth token, so the UI also
-// lets the requester type a repo URL by hand; that path does not depend on this
-// endpoint.
-func (s *HubServer) handleSaaSRepos(w http.ResponseWriter, r *http.Request) {
-	username := s.getAuthUser(r)
-	if username == "" {
-		http.Error(w, `{"error":"not authenticated"}`, http.StatusUnauthorized)
-		return
-	}
-	user := loadSaaSUser(username)
-	if user == nil || user.EncryptedToken == "" {
-		// No stored token — return an empty list rather than an error so the UI
-		// shows its "install the App / paste a URL" guidance instead of a crash.
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"repos": []any{}})
-		return
-	}
-	token, err := decryptToken(user.EncryptedToken)
-	if err != nil {
-		s.logger.Warn("repos: failed to decrypt user token", "user", username, "error", err)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"repos": []any{}})
-		return
-	}
-
-	type repoOut struct {
-		FullName    string `json:"full_name"`
-		Name        string `json:"name"`
-		Description string `json:"description,omitempty"`
-	}
-	ghGet := func(url string, out any) error {
-		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, url, nil)
-		if err != nil {
-			return err
-		}
-		req.Header.Set("Authorization", "token "+token)
-		req.Header.Set("Accept", "application/vnd.github+json")
-		resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
-		if err != nil {
-			return err
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("github %s: status %d", url, resp.StatusCode)
-		}
-		return json.NewDecoder(resp.Body).Decode(out)
-	}
-
-	// 1. Which App installations can this user see? (orgs AND their own account)
-	var insts struct {
-		Installations []struct {
-			ID int64 `json:"id"`
-		} `json:"installations"`
-	}
-	if err := ghGet("https://api.github.com/user/installations?per_page=100", &insts); err != nil {
-		s.logger.Warn("repos: listing installations failed", "user", username, "error", err)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"repos": []any{}})
-		return
-	}
-
-	// 2. Repositories per installation, deduped by full_name.
-	seen := map[string]struct{}{}
-	repos := []repoOut{}
-	for _, inst := range insts.Installations {
-		for page := 1; page <= 5; page++ { // cap paging; 500 repos is plenty for a picker
-			var rr struct {
-				Repositories []struct {
-					FullName    string `json:"full_name"`
-					Name        string `json:"name"`
-					Description string `json:"description"`
-				} `json:"repositories"`
-			}
-			url := fmt.Sprintf("https://api.github.com/user/installations/%d/repositories?per_page=100&page=%d", inst.ID, page)
-			if err := ghGet(url, &rr); err != nil {
-				s.logger.Warn("repos: listing installation repos failed",
-					"user", username, "installation", inst.ID, "error", err)
-				break
-			}
-			for _, rp := range rr.Repositories {
-				if _, dup := seen[rp.FullName]; dup {
-					continue
-				}
-				seen[rp.FullName] = struct{}{}
-				repos = append(repos, repoOut{FullName: rp.FullName, Name: rp.Name, Description: rp.Description})
-			}
-			if len(rr.Repositories) < 100 {
-				break
-			}
-		}
-	}
-	sort.Slice(repos, func(i, j int) bool { return repos[i].FullName < repos[j].FullName })
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"repos": repos})
 }
