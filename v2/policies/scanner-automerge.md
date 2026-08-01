@@ -89,21 +89,21 @@ ${MERGE_ELIGIBLE}
 
 For each eligible PR:
 1. **Merge** — run:
-   `hive-merge --repo <owner/repo> --number <N> --method squash --update-branch`
-   `--update-branch` syncs the PR with main first (resolves "behind main"). The hive merges within ~10s and writes the outcome to a `.result.json` next to the request.
-2. **Check the result** — read `/var/run/hive-metrics/merge-requests/<...>.result.json` (path is printed by `hive-merge`). `ok:true` = merged. `ok:false` with an error means the PR is blocked (failing required check, true conflict) — do NOT retry blindly; move on and, if CI is failing, fix it in the CI Repair step.
-3. Move to the next PR — **do NOT batch merges**, each one must be sequential (each merge invalidates other PR branches).
+   `hive-merge --repo <owner/repo> --number <N> --method squash`
+   **Do NOT pass `--update-branch`.** Most repos do not require branches to be up-to-date (branch protection `strict: false`), so a PR that is merely *behind* main still merges on its own green checks. Updating the branch creates a new commit that RE-RUNS the required check (e.g. `build-gate`) from scratch — turning one merge into a cascade where every other open PR needs a fresh ~6-min gate run before it can merge. Only add `--update-branch` if a merge actually FAILS with a "branch is behind / not up to date" error (rare — only on `strict: true` repos). The hive merges within ~10s and writes the outcome to a `.result.json`.
+2. **Check the result** — read `/var/run/hive-metrics/merge-requests/<...>.result.json` (path is printed by `hive-merge`). `ok:true` = merged. `ok:false` with `"build-gate is in progress"` just means the gate is still running — the request auto-retries; leave it. `ok:false` with a real block (failing required check, true conflict) — do NOT retry blindly; move on and, if CI is failing, fix it in the CI Repair step.
+3. Move to the next PR sequentially. Because required checks re-run when main moves, merging one PR may briefly flip others to "check in progress" — that resolves on its own once their gate finishes; the merge-request watcher retries automatically. Do NOT force it with `--update-branch`.
 
 Do NOT use `gh pr merge`, `gh pr merge --admin`, or the GitHub MCP `merge_pull_request`/`update_pull_request_branch` tools. Use `hive-merge` for merging and its `--update-branch` flag for branch sync.
 
 ### Resolving Merge Conflicts on Actionable PRs
 
-For PRs in the PR_LIST that have merge conflicts:
-1. Run `hive-merge --repo <owner/repo> --number <N> --update-branch` — the `--update-branch` sync resolves conflicts when the PR branch is simply behind main
-2. If the result shows the branch still can't update (true conflict), examine the conflicting files via MCP `get_file_contents`
-3. For simple conflicts (import order, lockfile, formatting): fix via MCP `create_or_update_file` on the PR branch, then re-run `hive-merge`
-4. For complex conflicts: add a comment explaining the conflict, skip the PR
-5. **Merging goes through `hive-merge` (REST via the hive); reads/edits go through MCP.** Do NOT use `gh pr merge` or the MCP merge/update-branch tools.
+A PR that is merely *behind* main is NOT a conflict — on a `strict: false` repo it still merges; do not touch it. Only these are real conflicts:
+1. If `hive-merge` fails with a genuine "not mergeable" / "conflict" error, examine the conflicting files via MCP `get_file_contents`
+2. For simple conflicts (import order, lockfile, formatting): fix via MCP `create_or_update_file` on the PR branch, then re-run `hive-merge` (no `--update-branch`)
+3. For complex conflicts: add a comment explaining the conflict, skip the PR
+4. Only if a merge explicitly fails "branch is behind / not up to date" (a `strict: true` repo) add `--update-branch` for that ONE PR — never preemptively across the batch
+5. **Merging goes through `hive-merge` (REST via the hive); reads/edits go through MCP.** Do NOT use `gh pr merge`.
 
 Skip any PR with hold labels or `do-not-merge`.
 
