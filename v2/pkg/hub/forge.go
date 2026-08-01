@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // ============================================================================
@@ -338,11 +340,52 @@ func (s *HubServer) handleSwitchForge(w http.ResponseWriter, r *http.Request) {
 		h.GitHubAPIURL = target.APIURL
 	}
 
+	// Refuse to arm an identity whose components disagree about their forge.
+	// This handler already resolves the whole set up front and 409s rather than
+	// half-applying; this is the same guarantee expressed as a check, so it also
+	// covers a cluster config that names, say, a GHE slug with a public api_url.
+	wantIdentity := IdentitySet{
+		AppID:          appID,
+		AppSlug:        identity.AppSlug,
+		InstallationID: installID,
+		APIURL:         target.APIURL,
+		BaseURL:        target.BaseURL,
+	}
+	if reason := ValidateIdentityPush(wantIdentity); reason != "" {
+		s.logger.Warn("forge switch: refusing inconsistent identity",
+			"hive_id", id, "reason", reason)
+		writeJSONError(w, http.StatusConflict, reason)
+		return
+	}
+
 	// Re-arm delivery. This is the #2354 handshake: the requested host is
 	// authoritative until the spoke reports it back, at which point the push
 	// stops permanently and the spoke owns the value again.
 	h.RequestedGitHubHost = target.Host
 	h.ForgeDelivered = false
+
+	// Queue the identity DURABLY on the hive record. The in-memory one-shot map
+	// this replaced was dropped on the first beat that carried it and lost
+	// entirely on a hub restart, so a missed beat meant the change silently
+	// never happened. Persisting it means the push repeats until the spoke
+	// reports the identity back — which the app_slug/installation_id read-back
+	// fields make verifiable for the first time.
+	h.PendingAppConfig = &PendingAppIdentity{
+		AppID: appID,
+		// Only a supplied ID is sent. Zero means "leave it alone" on the
+		// wire; the operator note below tells the operator it must be
+		// installed or supplied, so the failure is never silent.
+		InstallationID: installID,
+		AppSlug:        identity.AppSlug,
+		APIURL:         target.APIURL,
+		BaseURL:        target.BaseURL,
+		ArmedAt:        time.Now().UTC().Format(time.RFC3339),
+		Reason:         "forge switch to " + target.Host,
+		// PrivateKey is deliberately absent, and this record never stores key
+		// material. The per-cluster key reconcile (cluster_app_key.go) delivers
+		// keys on its own schedule and gates every push on HasKey();
+		// duplicating it here would risk blanking a working key.
+	}
 
 	if err := saveSaaSHive(h); err != nil {
 		s.logger.Error("forge switch: failed to persist hive", "hive_id", id, "error", err)
@@ -377,18 +420,6 @@ func (s *HubServer) handleSwitchForge(w http.ResponseWriter, r *http.Request) {
 	// precondition above: identity.AppSlug is non-empty by construction here, so
 	// the spoke can never be left falling back to the github.com default slug on
 	// a GHE host — the state that produced the live install-link 404.
-	s.storePendingGitHubAppConfig(id, &HeartbeatGitHubAppConfig{
-		AppID: appID,
-		// Only a supplied ID is sent. Zero means "leave it alone" on the
-		// wire; the operator note below tells the operator it must be
-		// installed or supplied, so the failure is never silent.
-		InstallationID: installID,
-		AppSlug:        identity.AppSlug,
-		// PrivateKey is deliberately absent. The per-cluster key reconcile
-		// (cluster_app_key.go) delivers key material on its own schedule and
-		// gates every key push on HasKey(); duplicating it here would risk
-		// blanking a working key with an empty string.
-	})
 	deliveryPending := true
 
 	note := ""
@@ -452,10 +483,13 @@ const forgeIdentityRemedy = "populate the target cluster's entry in /data/saas/c
 // forgeIdentityForTarget resolves the FULL App identity for the target forge
 // from CLUSTER CONFIG ONLY, and reports everything that is missing.
 //
-// A cluster's configured App is correct exactly when the cluster's own GitHub
-// host matches the target — hive-oke is a github.com cluster naming its
-// github.com App, vllm-d is a github.ibm.com cluster naming its GHE App. A hive
-// switching to a forge its cluster does NOT serve has no App the hub can name.
+// PER-HIVE ELECTION. A cluster's forge is a DEFAULT, not a pin: a cluster may
+// carry identity for BOTH forges (see ClusterConfig.Forges) and a hive elects
+// one. So this refuses only a target the cluster has no identity FOR, rather
+// than every target differing from the cluster's own host. That is the change
+// that unblocks a public election on the GHE-default vllm-d cluster, which
+// previously 409'd with "the target forge identity is incomplete" — leaving
+// seven public hives that had already elected github.com unrepairable.
 //
 // # WHY MISSING FIELDS ARE AN ERROR AND NOT A DEFAULT
 //
@@ -469,43 +503,93 @@ const forgeIdentityRemedy = "populate the target cluster's entry in /data/saas/c
 // So this returns the missing field NAMES and the caller refuses the switch.
 // Nothing is hardcoded: both values come from ClusterConfig, the same
 // non-secret fields resolveProvisionAppID and the provisioning template read.
+//
+// The refusal itself is preserved exactly. An incomplete identity still returns
+// missing field names and still writes nothing: refusing rather than
+// half-applying is the property that stopped the 2026-07-31 incident from
+// getting worse, and it survives this change untouched.
 func (s *HubServer) forgeIdentityForTarget(cluster *ClusterConfig, target ForgeTarget) (forgeIdentity, []string) {
 	if cluster == nil {
 		return forgeIdentity{}, []string{"cluster config (this hive's cluster is unknown to the hub)"}
 	}
-	clusterHost := publicForgeHost
-	if cluster.GitHubBaseURL != "" {
-		clusterHost = strings.ToLower(githubHostLabel(cluster.GitHubBaseURL))
-	} else if cluster.GitHubAPIURL != "" {
-		clusterHost = strings.ToLower(githubHostLabel(cluster.GitHubAPIURL))
-	}
-	if !sameGitHubHost(clusterHost, target.Host) {
-		// The hub knows an App for this cluster, but it is registered on the
-		// WRONG forge. Naming the mismatch is far more useful than a bare
-		// "missing app_id", because the remedy is different: this cluster may
-		// simply not be able to host a hive on the requested forge.
-		return forgeIdentity{}, []string{
-			fmt.Sprintf("a GitHub App registered on %s (cluster %q serves %s)", target.Host, cluster.ID, clusterHost),
+	targetHost := forgeHostKey(target.Host)
+	forges := forgesForCluster(cluster)
+
+	// Look the target forge up directly. sameGitHubHost keeps the comparison
+	// tolerant of spelling (bare host vs URL) the way the old cluster-host
+	// comparison was.
+	var identity ClusterForgeIdentity
+	found := false
+	for host, id := range forges {
+		if sameGitHubHost(host, targetHost) {
+			identity, found = id, true
+			break
 		}
 	}
-	var missing []string
-	if cluster.GitHubAppID == 0 {
-		missing = append(missing, fmt.Sprintf("github_app_id for cluster %q", cluster.ID))
+	// NOTE ON THE ONE-RESOLVER RULE (#2383). Every other identity decision
+	// routes through ResolveHiveIdentity, and this one deliberately does not.
+	//
+	// ResolveHiveIdentity answers "what identity does this hive have NOW",
+	// resolving a hive's existing election against its cluster's default. This
+	// function answers a different question: "can the cluster serve the forge
+	// this hive is trying to elect, and with which App?" — asked BEFORE any
+	// election exists. Synthesising a SaaSHive from the target to feed the
+	// resolver would make it answer its own input, which is why the lookup over
+	// forgesForCluster above is the direct expression of the question.
+	//
+	// The resolver still owns the outcome: the elected host is written to the
+	// hive record and every later read — heartbeat answer, key lookup,
+	// provisioning — goes through ResolveHiveIdentity as normal.
+	if !found {
+		// The cluster names no App on the requested forge. This is the same
+		// class of refusal as before, but the remedy is now additive: name the
+		// forge in the cluster's `forges` map rather than move the whole
+		// cluster. Listing what the cluster CAN serve makes that actionable.
+		served := make([]string, 0, len(forges))
+		for host := range forges {
+			served = append(served, host)
+		}
+		sort.Strings(served)
+		if len(served) == 0 {
+			return forgeIdentity{}, []string{
+				fmt.Sprintf("a GitHub App registered on %s (cluster %q names no GitHub App at all)", target.Host, cluster.ID),
+			}
+		}
+		return forgeIdentity{}, []string{
+			fmt.Sprintf("a GitHub App registered on %s (cluster %q serves %s)",
+				target.Host, cluster.ID, strings.Join(served, ", ")),
+		}
 	}
-	if strings.TrimSpace(cluster.GitHubAppSlug) == "" {
-		// Deliberately required even for public github.com. The default slug
-		// happens to be right there, but accepting an unset value would mean the
-		// atomicity guarantee holds on one forge and not the other — and the
-		// operator would have no signal that the cluster entry is incomplete.
-		missing = append(missing, fmt.Sprintf("github_app_slug for cluster %q (an empty slug falls back to %q, which names no App on %s)",
-			cluster.ID, defaultPublicAppSlug, target.Host))
+
+	// An identity that exists must still be COMPLETE. Both halves are required
+	// on both forges: the public default slug happens to be correct on
+	// github.com, but accepting an unset value would mean the atomicity
+	// guarantee holds on one forge and not the other, and the operator would
+	// get no signal that the cluster entry is half-filled.
+	//
+	// Name the field the operator must actually edit. A legacy entry carries the
+	// identity in the flat github_app_id/github_app_slug keys; an entry using
+	// the per-forge map carries it under forges.<host>. Pointing at the wrong
+	// one sends the operator to a key that does not exist in their file.
+	idField, slugField := "github_app_id", "github_app_slug"
+	if _, viaMap := cluster.Forges[targetHost]; viaMap || clusterDefaultForge(cluster) != targetHost {
+		idField = fmt.Sprintf("forges.%s.app_id", targetHost)
+		slugField = fmt.Sprintf("forges.%s.app_slug", targetHost)
+	}
+	var missing []string
+	if identity.AppID == 0 {
+		missing = append(missing, fmt.Sprintf("%s for cluster %q", idField, cluster.ID))
+	}
+	if strings.TrimSpace(identity.AppSlug) == "" {
+		missing = append(missing, fmt.Sprintf("%s for cluster %q (an empty slug falls back to %q, which names no App on %s)",
+			slugField, cluster.ID, defaultPublicAppSlug, target.Host))
 	}
 	if len(missing) > 0 {
 		return forgeIdentity{}, missing
 	}
 	return forgeIdentity{
-		AppID:   cluster.GitHubAppID,
-		AppSlug: strings.TrimSpace(cluster.GitHubAppSlug),
+		AppID:   identity.AppID,
+		AppSlug: strings.TrimSpace(identity.AppSlug),
 	}, nil
 }
 

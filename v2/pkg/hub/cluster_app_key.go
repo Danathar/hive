@@ -181,8 +181,23 @@ func clusterAppKeyFingerprint(clusterID string) string {
 // authenticating as. Assembled from the cluster config (app_id, non-secret) and
 // the key store (the key itself, never in any config file).
 type clusterAppIdentity struct {
-	AppID       int64
-	AppSlug     string
+	AppID   int64
+	AppSlug string
+	// APIURL, BaseURL and Forge describe the forge THIS HIVE resolved to, which
+	// is not necessarily its cluster's default.
+	//
+	// They are carried here because dropping them is what made the hub refuse
+	// its own repair: the guard below re-read the URLs from the CLUSTER record,
+	// so a hive that elected github.com had its public app_id validated against
+	// the cluster's GHE api_url/base_url. That pair IS inconsistent, so
+	// RejectIdentitySet correctly refused it — and the push those hives needed
+	// was dropped every ~30s with the right answer already computed.
+	//
+	// Forge distinguishes "public, whose URLs are legitimately empty" from "no
+	// forge resolved"; the URLs alone cannot.
+	APIURL      string
+	BaseURL     string
+	Forge       string
 	PrivateKey  string
 	Fingerprint string
 }
@@ -226,6 +241,18 @@ func (i *clusterAppIdentity) HasKey() bool {
 // proceed, while every key-pushing decision still gates on HasKey() so a hub
 // holding no key can never blank a spoke's working one.
 func (s *HubServer) appIdentityForCluster(clusterID string) *clusterAppIdentity {
+	// No hive in hand: the cluster's own default identity. Callers that DO have
+	// a hive must use appIdentityForHive so the hive's election is honoured.
+	return s.appIdentityForHive(nil, clusterID)
+}
+
+// appIdentityForHive resolves the App identity the hub should answer with for a
+// specific hive, routing through ResolveHiveIdentity so this path cannot give a
+// different answer from provisioning or the forge endpoint.
+//
+// A nil hive means "no election known" and yields the cluster default, which is
+// exactly the previous behaviour of appIdentityForCluster.
+func (s *HubServer) appIdentityForHive(h *SaaSHive, clusterID string) *clusterAppIdentity {
 	if s == nil || s.clusters == nil {
 		return nil
 	}
@@ -233,12 +260,29 @@ func (s *HubServer) appIdentityForCluster(clusterID string) *clusterAppIdentity 
 	if !ok {
 		return nil
 	}
-	if c.GitHubAppID == 0 {
+	resolved := ResolveHiveIdentityInFleet(h, &c, s.forgeAppsAcrossFleet())
+	if resolved.AppID == 0 {
 		return nil
 	}
 	identity := &clusterAppIdentity{
-		AppID:   c.GitHubAppID,
-		AppSlug: c.GitHubAppSlug,
+		AppID:   resolved.AppID,
+		AppSlug: resolved.AppSlug,
+		APIURL:  resolved.APIURL,
+		BaseURL: resolved.BaseURL,
+		Forge:   resolved.Forge,
+	}
+	// The KEY must follow the APP, not the cluster. A hive that elected a forge
+	// its cluster does not default to needs that App's key; the cluster's key
+	// belongs to a different App and would fail auth even with a correct app_id.
+	if resolved.FromHiveIntent && resolved.AppID != c.GitHubAppID {
+		if k, found := s.appKeysByAppID()[resolved.AppID]; found && k.PrivateKey != "" {
+			identity.PrivateKey = k.PrivateKey
+			identity.Fingerprint = k.Fingerprint
+			if identity.AppSlug == "" {
+				identity.AppSlug = k.AppSlug
+			}
+		}
+		return identity
 	}
 	pem := loadClusterAppKey(clusterID)
 	if pem == "" {
@@ -733,8 +777,18 @@ func decideAppKeySync(spokeFingerprint string, hasPerHiveKey, hivePublicPinned, 
 // installation_id. Zero is passed through as zero — the spoke's callback only
 // rebuilds its client once app_id, installation_id and key file are all present,
 // so a key delivered ahead of an installation ID lands on disk and waits.
-func (s *HubServer) appKeyConfigForHeartbeat(hiveID, clusterID string, spokeFingerprint string, hasPerHiveKey, hivePublicPinned bool, spokeAppID int64, installationID int64, logger *slog.Logger) *HeartbeatGitHubAppConfig {
-	identity := s.appIdentityForCluster(clusterID)
+func (s *HubServer) appKeyConfigForHeartbeat(hiveID, clusterID string, spokeFingerprint string, hasPerHiveKey, hivePublicPinned bool, spokeAppID int64, installationID int64, logger *slog.Logger, hiveOpt ...*SaaSHive) *HeartbeatGitHubAppConfig {
+	// hiveOpt carries the hub's record for this hive, whose github_host is the
+	// hive's OWN elected forge. Without it this path answered from the cluster
+	// alone and overwrote correctly-repaired spokes on the next beat.
+	//
+	// Variadic so the existing callers/tests with no hive record keep compiling
+	// and keep their exact previous behaviour (no election -> cluster default).
+	var hive *SaaSHive
+	if len(hiveOpt) > 0 {
+		hive = hiveOpt[0]
+	}
+	identity := s.appIdentityForHive(hive, clusterID)
 	// Does this cluster's App live on a GitHub Enterprise host? Read from cluster
 	// config, never inferred from the App ID — an App ID is an opaque number and
 	// carries no forge information. Empty github_base_url means public github.com.
@@ -792,12 +846,100 @@ func (s *HubServer) appKeyConfigForHeartbeat(hiveID, clusterID string, spokeFing
 			"to_fingerprint", decision.ToFingerprint,
 		)
 	}
+	// WRITE-PATH GUARD, hub side. This struct is the exact channel that carried
+	// the 2026-07-31 breakage: it delivers app_id and app_slug and has no field
+	// for api_url, so a cluster whose github_app_id names one forge while its
+	// URLs name another pushes a half identity the spoke cannot reassemble.
+	// Refuse to construct it.
+	//
+	// Validated against the identity the CLUSTER declares — app_id and app_slug
+	// from the App identity, api_url and base_url from the cluster record — so a
+	// clusters.json entry naming a GHE App beside public-GitHub URLs is caught
+	// at the source. The spoke re-validates against its own current values,
+	// which is the half this side cannot see.
+	//
+	// GATED ON THE CLUSTER DECLARING A FORGE AT ALL. A cluster record with both
+	// URLs empty is UNDER-SPECIFIED, not public: several real records carry only
+	// github_app_id and github_app_slug, and clusterIsGHE above already treats
+	// empty github_base_url as "no forge information". Reading that silence as
+	// "public github.com" here would refuse every GHE cluster that has not
+	// backfilled its URLs and stop the key/app_id repair path fleet-wide — the
+	// same class of outage this guard exists to prevent, in the other direction.
+	// Silence is never evidence. When the cluster does declare a forge, the full
+	// set is checked.
+	// Validate against the forge THIS HIVE resolved to. The App and the URLs
+	// must come from the SAME resolution or the check compares two forges and
+	// refuses a set that is actually correct.
+	//
+	// Fall back to the cluster record only when the resolver named no forge at
+	// all. A public election legitimately resolves to EMPTY urls — that is how
+	// every healthy public spoke runs — so empty is not itself a reason to fall
+	// back; only an unresolved forge is.
+	clusterAPIURL := identity.APIURL
+	clusterBaseURL := identity.BaseURL
+	if identity.Forge == "" {
+		clusterAPIURL = clusterAPIURLForIdentity(s, clusterID)
+		clusterBaseURL = clusterBaseURLForIdentity(s, clusterID)
+	}
+	clusterDeclaresForge := clusterAPIURL != "" || clusterBaseURL != ""
+
+	if err := config.RejectIdentitySet(config.GitHubConfig{
+		AppID:   identity.AppID,
+		AppSlug: identity.AppSlug,
+		APIURL:  clusterAPIURL,
+		BaseURL: clusterBaseURL,
+	}); err != nil && clusterDeclaresForge {
+		if logger != nil {
+			logger.Error("REFUSING to push cluster github app config: the cluster's identity set is inconsistent and would half-apply on the spoke — nothing was sent",
+				"error", err,
+				"hive_id", hiveID,
+				"cluster_id", clusterID,
+				"app_id", identity.AppID,
+				"app_slug", identity.AppSlug,
+				"remedy", "correct github_app_id/github_app_slug/github_api_url/github_base_url for this cluster in clusters.json",
+			)
+		}
+		return nil
+	}
+
+	// Emit the COMPLETE set. The guard above validated app_id/app_slug against
+	// the forge URLs this hive resolved to; sending the App without those URLs
+	// would ship a set the spoke cannot reassemble, and leave it to be completed
+	// — or contradicted — by a ProjectConfig push on a different channel.
+	//
+	// The URLs are the RESOLVED ones (identity.APIURL/BaseURL), so what the
+	// spoke receives is byte-identical to what was just validated. A public
+	// election resolves to empty URLs, which the spoke reads as "unchanged" —
+	// correct, because empty is also how every healthy public spoke is stored.
 	return &HeartbeatGitHubAppConfig{
 		AppID:          identity.AppID,
 		InstallationID: installationID,
 		PrivateKey:     privateKey,
 		AppSlug:        identity.AppSlug,
+		APIURL:         identity.APIURL,
+		BaseURL:        identity.BaseURL,
 	}
+}
+
+// clusterAPIURLForIdentity and clusterBaseURLForIdentity read the cluster's
+// declared forge URLs so the hub-side guard validates the FULL identity set the
+// cluster declares, not just the two fields the heartbeat channel can carry.
+//
+// An unknown cluster, or one that declares neither URL, yields empty strings.
+// The caller reads that as "no forge declared" and skips the check entirely
+// rather than assuming public github.com — see clusterDeclaresForge.
+func clusterAPIURLForIdentity(s *HubServer, clusterID string) string {
+	if c, ok := s.clusters[clusterID]; ok {
+		return strings.TrimSpace(c.GitHubAPIURL)
+	}
+	return ""
+}
+
+func clusterBaseURLForIdentity(s *HubServer, clusterID string) string {
+	if c, ok := s.clusters[clusterID]; ok {
+		return strings.TrimSpace(c.GitHubBaseURL)
+	}
+	return ""
 }
 
 // --- Operator API ---
@@ -1021,5 +1163,6 @@ func (s *HubServer) appKeySyncForHeartbeat(payload *HeartbeatPayload) *Heartbeat
 		payload.GitHubAppID,
 		installationIDUnchanged,
 		s.logger,
+		sh,
 	)
 }

@@ -68,6 +68,21 @@ type SaaSUser struct {
 	FullName string `json:"full_name,omitempty"`
 	SlackID  string `json:"slack_id,omitempty"`
 	Notes    string `json:"notes,omitempty"`
+
+	// Engagement stats, admin-only (they ride /api/saas/admin/users, which is
+	// requireAdmin). Both omitempty ints so existing records round-trip
+	// byte-identical until the user first logs in / opens a hive after this ships.
+	//
+	// LoginCount is the number of completed hub OAuth logins. Incremented in
+	// exactly one place — handleOAuthCallback — never in ensureSaaSUser, whose
+	// other callers (my-hives poll, admin provisioning) would inflate it.
+	LoginCount int `json:"login_count,omitempty"`
+	// SessionSeconds is the cumulative time this user has had at least one live
+	// session on a hive dashboard, accumulated by the hub from the spoke's
+	// per-heartbeat active-session report (see handleHeartbeat). It is a sampled
+	// sum of inter-beat intervals, so it is accurate to roughly the beat interval,
+	// not to the second.
+	SessionSeconds int64 `json:"session_seconds,omitempty"`
 }
 
 // Length caps for the admin-editable contact fields. These are free text
@@ -525,7 +540,7 @@ func (s *HubServer) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request
 	username := r.PathValue("username")
 	u := loadSaaSUser(username)
 	if u == nil {
-		http.Error(w, `{"error":"user not found"}`, http.StatusNotFound)
+		writeJSONError(w, http.StatusNotFound, "user not found")
 		return
 	}
 	// Free-text fields land on a PVC, so bound the body before decoding it.
@@ -538,7 +553,7 @@ func (s *HubServer) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request
 		Notes     *string `json:"notes"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
 	if body.SaaSQuota != nil {
@@ -558,7 +573,14 @@ func (s *HubServer) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request
 	if body.Notes != nil {
 		u.Notes = truncateRunes(strings.TrimSpace(*body.Notes), maxContactNotesLen)
 	}
-	saveSaaSUser(u)
+	// A failed write is the one outcome the admin MUST hear about: the dashboard
+	// closes the editor on a 2xx, so reporting success here after the PVC write
+	// failed would silently discard the edit.
+	if err := saveSaaSUser(u); err != nil {
+		s.logger.Error("admin update user: save failed", "target", username, "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "failed to save user record")
+		return
+	}
 	// Do not log the note bodies — they are free text and may hold anything an
 	// admin jotted down. Log only that contact fields were touched.
 	s.logger.Info("audit: admin updated user", "target", username, "quota", u.SaaSQuota, "blocked", u.Blocked,
@@ -575,16 +597,16 @@ func (s *HubServer) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request
 func (s *HubServer) handleAdminDeleteUser(w http.ResponseWriter, r *http.Request) {
 	username := r.PathValue("username")
 	if username == hubAdminUsername {
-		http.Error(w, `{"error":"cannot delete the hub admin"}`, http.StatusForbidden)
+		writeJSONError(w, http.StatusForbidden, "cannot delete the hub admin")
 		return
 	}
 	if strings.Contains(username, "..") || strings.Contains(username, "/") || strings.Contains(username, "\\") {
-		http.Error(w, `{"error":"invalid username"}`, http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "invalid username")
 		return
 	}
 	u := loadSaaSUser(username)
 	if u == nil {
-		http.Error(w, `{"error":"user not found"}`, http.StatusNotFound)
+		writeJSONError(w, http.StatusNotFound, "user not found")
 		return
 	}
 	var ownedHives []string
@@ -594,14 +616,14 @@ func (s *HubServer) handleAdminDeleteUser(w http.ResponseWriter, r *http.Request
 		}
 	}
 	if len(ownedHives) > 0 {
-		msg, _ := json.Marshal(fmt.Sprintf("user still owns %d hive(s); delete or reassign them first: %s", len(ownedHives), strings.Join(ownedHives, ", ")))
-		http.Error(w, `{"error":`+string(msg)+`}`, http.StatusConflict)
+		writeJSONError(w, http.StatusConflict, fmt.Sprintf("user still owns %d hive(s); delete or reassign them first: %s",
+			len(ownedHives), strings.Join(ownedHives, ", ")))
 		return
 	}
 	path := filepath.Join(saasUsersDir, username+".json")
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		s.logger.Warn("admin delete user: remove failed", "target", username, "error", err)
-		http.Error(w, `{"error":"failed to delete user record"}`, http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, "failed to delete user record")
 		return
 	}
 	s.logger.Info("audit: admin deleted user", "target", username, "by", s.getAuthUser(r))
@@ -686,8 +708,11 @@ func clusterGitHubConfig(c *ClusterConfig) config.GitHubConfig {
 	}
 	base := c.GitHubBaseURL
 	// The cluster stores "" for public GitHub; config.GitHubConfig uses the
-	// same convention, so pass it through untouched.
-	return config.GitHubConfig{BaseURL: base, AppSlug: c.GitHubAppSlug}
+	// same convention, so pass it through untouched. Carry the api_url too so the
+	// derived config's HostLabel()/IsGHE()/AppInstallURL() resolve the forge
+	// base-or-api: a GHE cluster that records only an api_url (blank base_url —
+	// the common state) is still recognised as GHE, not mislabelled github.com.
+	return config.GitHubConfig{BaseURL: base, APIURL: c.GitHubAPIURL, AppSlug: c.GitHubAppSlug}
 }
 
 // githubHostLabel renders a GitHub base URL as a bare hostname for display.
@@ -716,7 +741,7 @@ func (s *HubServer) handleListClusters(w http.ResponseWriter, r *http.Request) {
 			Name:          c.Name,
 			HasGPU:        c.HasGPU,
 			Arch:          c.Arch,
-			GitHubHost:    githubHostLabel(c.GitHubBaseURL),
+			GitHubHost:    gh.HostLabel(),
 			AppInstallURL: gh.AppInstallURL(),
 		})
 	}
@@ -1685,6 +1710,20 @@ type MyHiveEntry struct {
 	AdvisoryStale       bool   `json:"advisoryStale,omitempty"`
 	AdvisoryStaleReason string `json:"advisoryStaleReason,omitempty"`
 
+	// InactiveAgents is how many of this hive's agents are RUNNING but not
+	// doing any work — session gone, sitting on a login prompt, or producing
+	// nothing while work is queued. Computed on read by
+	// evaluateInactiveAgents() so the browser never re-derives the thresholds
+	// or the paused/on-demand gating and cannot drift from the Go rule.
+	//
+	// Agents the operator deliberately PAUSED are excluded by that rule and
+	// never counted here: a pause is a choice, not a fault, and a facet that
+	// alarms on it would be wrong on every hive with a parked agent.
+	// InactiveAgentsReason is the tooltip cause. Both stay zero/empty for
+	// hives with nothing wrong, so the pill and the facet self-suppress.
+	InactiveAgents       int    `json:"inactiveAgents,omitempty"`
+	InactiveAgentsReason string `json:"inactiveAgentsReason,omitempty"`
+
 	// URLUnreachable is true when this hive's PUBLIC dashboard URL failed to
 	// serve on the last several probes — the link in this very table is dead.
 	// Computed on read from the auth-audit loop's observations, so the browser
@@ -1824,8 +1863,11 @@ func (s *HubServer) handleMyHives(w http.ResponseWriter, r *http.Request) {
 				entry.GitHubHost = githubHostLabel(sh.GitHubHost)
 				return
 			}
-			if c := s.clusterForHive(sh); c != nil && c.GitHubBaseURL != "" {
-				entry.GitHubHost = githubHostLabel(c.GitHubBaseURL)
+			if c := s.clusterForHive(sh); c != nil && (c.GitHubBaseURL != "" || c.GitHubAPIURL != "") {
+				// base-or-api so a GHE cluster recorded with only an api_url
+				// (blank base_url — the common state) is recognised as GHE, not
+				// mislabelled github.com.
+				entry.GitHubHost = clusterGitHubConfig(c).HostLabel()
 				return
 			}
 		}
@@ -1835,8 +1877,8 @@ func (s *HubServer) handleMyHives(w http.ResponseWriter, r *http.Request) {
 		// immutable after load, and taking s.mu here would nest inside callers
 		// that already hold it.
 		if entry.ClusterID != "" {
-			if c, ok := s.clusters[entry.ClusterID]; ok && c.GitHubBaseURL != "" {
-				entry.GitHubHost = githubHostLabel(c.GitHubBaseURL)
+			if c, ok := s.clusters[entry.ClusterID]; ok && (c.GitHubBaseURL != "" || c.GitHubAPIURL != "") {
+				entry.GitHubHost = clusterGitHubConfig(&c).HostLabel()
 			}
 		}
 	}
@@ -1963,11 +2005,21 @@ func (s *HubServer) handleMyHives(w http.ResponseWriter, r *http.Request) {
 		// old to report one. Done here, over the assembled set, so no entry
 		// construction site can be missed.
 		resolveGitHubHost(&result[i])
+		// The leaderboard carries per-USER task counts (who did what on this hive).
+		// The admin Users engagement card cross-references it by github_username, so
+		// it must reach the admin browser — but it is other people's activity, so a
+		// non-admin owner must NOT receive it. Scrub it for everyone but admin.
+		// (RegistryEntry.Leaderboard has no omitempty, so it would otherwise ship to
+		// every my-hives consumer.)
+		if !isAdmin {
+			result[i].Leaderboard = nil
+		}
 		// Who-has-access is shown only to owners (and admin), matching
 		// handleAccessList's rule. A read/read-write member is deliberately not
 		// told who else shares the hive.
 		if h.Role == "owner" || isAdmin {
-			result[i].Access = accessForHive(h.ID, allSaaSUsers)
+			// Notes is admin-only CRM text; a non-admin owner gets name+Slack only.
+			result[i].Access = accessForHive(h.ID, allSaaSUsers, isAdmin)
 			// Recent activity for the status hover, same owner/admin rule as
 			// the access list and as handleHiveTimeline itself. s.timeline is
 			// nil in tests that construct a bare HubServer, and recent() is a
@@ -2034,6 +2086,20 @@ func (s *HubServer) handleMyHives(w http.ResponseWriter, r *http.Request) {
 			result[i].AdvisoryStaleReason = reason
 		}
 
+		// Running-but-inactive agents, computed on read for the same reason:
+		// the thresholds and the paused/on-demand exclusions live ONLY in Go.
+		//
+		// The queue gate is the governor's own actionable backlog, which is
+		// what makes the idle rule safe on a genuinely quiet hive: with no
+		// issues and no PRs waiting, idle agents are CORRECT and nothing is
+		// reported. The two unambiguous faults (dead session, login prompt)
+		// are independent of it.
+		queuedWork := result[i].ActionableIssues + result[i].ActionablePRs
+		if rep := evaluateInactiveAgents(result[i].Agents, queuedWork, journeyNow); rep.Count > 0 {
+			result[i].InactiveAgents = rep.Count
+			result[i].InactiveAgentsReason = rep.Reason
+		}
+
 		// Sparkline history dominated this payload: at 42 hives the two series
 		// were ~755 KB of an 818 KB response (92%), yet they are drawn into a
 		// 50 px-wide SVG. Downsample on the WIRE only — the registry keeps the
@@ -2077,6 +2143,10 @@ func (s *HubServer) handleMyHives(w http.ResponseWriter, r *http.Request) {
 		// memberships and roles, so it must stay inside this branch. A non-admin
 		// caller never receives provision_requests at all.
 		resp["provision_requests"] = enrichProvisionRequests(listProvisionRequests())
+		// Who is logged into their hive RIGHT NOW, for the green-dashed avatar
+		// treatment. Presence data about other users → admin-only, same as the
+		// engagement stats it complements.
+		resp["live_hive_users"] = s.liveHiveUsernames()
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -2176,7 +2246,7 @@ func (s *HubServer) handleCreateHive(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxCreateHiveBodyBytes)
 	var req CreateHiveRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
 
@@ -2299,7 +2369,7 @@ func (s *HubServer) handleCreateHive(w http.ResponseWriter, r *http.Request) {
 			s.logger.Error("no cluster config for provisioning", "hive_id", hiveID, "cluster_id", h.ClusterID)
 			return
 		}
-		if err := provisionHive(h, &req, cluster, s.logger); err != nil {
+		if err := provisionHive(h, &req, cluster, s.appKeysByAppID(), s.logger); err != nil {
 			h.Status = "error"
 			h.Error = err.Error()
 			saveSaaSHive(h)
@@ -2541,7 +2611,7 @@ func (s *HubServer) handleMigrateHive(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, migrateMaxBodyBytes)
 	var req MigrateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
 
@@ -3619,6 +3689,37 @@ func getLatestHubSHAForBranch(branch string) string {
 	return latestHubSHAByBranch[branch].SHA
 }
 
+// getLatestHubSHAs returns a branch→SHA map of the newest commit per branch
+// whose HUB image is verified pullable. Exposed alongside getLatestSHAs so an
+// operator can see the two independent build results side by side: the hub and
+// spoke images are separate builds that can succeed in either order (or fail
+// independently) for the same commit, which is why the caches are separate.
+func getLatestHubSHAs() map[string]string {
+	latestSHAMu.RLock()
+	defer latestSHAMu.RUnlock()
+	cp := make(map[string]string, len(latestHubSHAByBranch))
+	for k, v := range latestHubSHAByBranch {
+		cp[k] = v.SHA
+	}
+	return cp
+}
+
+// getHeadSHAs returns a branch→HEAD-SHA map: the newest commit the poller has
+// seen on each branch, regardless of whether its images exist yet. Comparing
+// this against getLatestSHAs tells an operator WHY the advertised SHA is behind
+// HEAD — see getImageStatuses for the distinguishing signal.
+func getHeadSHAs() map[string]string {
+	latestSHAMu.RLock()
+	defer latestSHAMu.RUnlock()
+	cp := make(map[string]string, len(headSHAByBranch))
+	for k, v := range headSHAByBranch {
+		if v.SHA != "" {
+			cp[k] = v.SHA
+		}
+	}
+	return cp
+}
+
 // getLatestSHAs returns a branch→SHA map (backward-compatible string values).
 func getLatestSHAs() map[string]string {
 	latestSHAMu.RLock()
@@ -4450,6 +4551,16 @@ func authorizedUsersForHiveID(hiveID string) []string {
 type HiveAccessEntry struct {
 	Username string `json:"username"`
 	Role     string `json:"role"`
+	// Contact metadata copied from the user's record so the My Hives avatar hover
+	// can show WHO someone is, not just their GitHub handle. FullName and SlackID
+	// ride for every owner/admin-visible access row. Notes is admin-maintained CRM
+	// scratch text (see the SaaSUser doc) and is therefore delivered ONLY to a hub
+	// admin — accessForHive's includeNotes gate — so an owner never sees the
+	// admin's private commentary about a co-member. All omitempty: a user with no
+	// contact fields set renders exactly as before (handle — role).
+	FullName string `json:"full_name,omitempty"`
+	SlackID  string `json:"slack_id,omitempty"`
+	Notes    string `json:"notes,omitempty"`
 }
 
 // accessForHive returns who can sign in to a hive, newest-role-agnostic and
@@ -4457,11 +4568,23 @@ type HiveAccessEntry struct {
 // than reading h.Owner: a user's Hives map is the authoritative grant (see
 // handleApproveProvision / handleAssignHive, which write it), and an owner who
 // is missing from it genuinely cannot sign in.
-func accessForHive(hiveID string, users []SaaSUser) []HiveAccessEntry {
+// includeNotes controls whether the admin-maintained Notes field is copied onto
+// each entry: pass true ONLY for a hub admin. FullName/SlackID always ride (they
+// identify the person to a co-owner); Notes is private admin CRM text.
+func accessForHive(hiveID string, users []SaaSUser, includeNotes bool) []HiveAccessEntry {
 	access := make([]HiveAccessEntry, 0)
 	for _, u := range users {
 		if role, ok := u.Hives[hiveID]; ok {
-			access = append(access, HiveAccessEntry{Username: u.GitHubUsername, Role: role})
+			entry := HiveAccessEntry{
+				Username: u.GitHubUsername,
+				Role:     role,
+				FullName: u.FullName,
+				SlackID:  u.SlackID,
+			}
+			if includeNotes {
+				entry.Notes = u.Notes
+			}
+			access = append(access, entry)
 		}
 	}
 	sort.Slice(access, func(i, j int) bool {
@@ -4487,7 +4610,9 @@ func (s *HubServer) handleAccessList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"only the owner can view access"}`, http.StatusForbidden)
 		return
 	}
-	access := accessForHive(hiveID, listAllSaaSUsers())
+	// Notes is admin-only; a non-admin owner viewing their hive's access gets
+	// name+Slack but not the admin's private CRM notes.
+	access := accessForHive(hiveID, listAllSaaSUsers(), username == hubAdminUsername)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"access": access})
 }
@@ -4576,7 +4701,7 @@ func (s *HubServer) handleAccessRemove(w http.ResponseWriter, r *http.Request) {
 	}
 	target := loadSaaSUser(targetUsername)
 	if target == nil {
-		http.Error(w, `{"error":"user not found"}`, http.StatusNotFound)
+		writeJSONError(w, http.StatusNotFound, "user not found")
 		return
 	}
 	if target.Hives[hiveID] == "owner" {
@@ -4939,6 +5064,19 @@ type ProvisionRequest struct {
 	RequestedAt string `json:"requested_at"`
 	Status      string `json:"status"`
 
+	// Who is asking, as a person rather than as a GitHub login. Both reuse the
+	// SaaSUser contact fields of the same name and the same caps
+	// (maxContactNameLen / maxContactSlackIDLen) — deliberately NOT new keys.
+	// A second Slack key would split one fact across two names, with the
+	// request form writing one and the admin users panel reading the other.
+	//
+	// These are captured here and copied onto the SaaSUser record on approval
+	// (handleApproveProvision); asking and then dropping the answer would be
+	// worse than not asking. Both are omitempty so requests filed before these
+	// fields existed round-trip unchanged.
+	FullName string `json:"full_name,omitempty"`
+	SlackID  string `json:"slack_id,omitempty"`
+
 	// Decision audit. Previously a request only carried its final Status, so
 	// once it left "pending" there was no record of WHO decided, WHEN, or —
 	// for an approval — which hive the requester actually got. That made the
@@ -5058,6 +5196,33 @@ func enrichProvisionRequests(requests []ProvisionRequest) []ProvisionRequest {
 	return requests
 }
 
+// applyRequestContactToUser carries the requester's contact details from an
+// approved provision request onto their SaaSUser record.
+//
+// This is what makes asking for them worth anything. The admin users panel and
+// the Slack sender both read SaaSUser, NOT ProvisionRequest — a value that
+// stops at the request file is invisible to every consumer of it. Slack
+// messaging shipped with no user having a slack_id, settable only by hand one
+// user at a time; approval is the natural point of capture.
+//
+// It only ever FILLS A BLANK. An admin who has already curated these fields (or
+// a user who corrected them later) outranks whatever was typed into a request
+// form, and a re-approval must not silently revert that.
+//
+// Nil-safe on both sides: it runs on the approval path beside other work that
+// can legitimately leave either side absent, and must not panic there.
+func applyRequestContactToUser(user *SaaSUser, pr *ProvisionRequest) {
+	if user == nil || pr == nil {
+		return
+	}
+	if user.FullName == "" && pr.FullName != "" {
+		user.FullName = truncateRunes(strings.TrimSpace(pr.FullName), maxContactNameLen)
+	}
+	if user.SlackID == "" && pr.SlackID != "" {
+		user.SlackID = truncateRunes(strings.TrimSpace(pr.SlackID), maxContactSlackIDLen)
+	}
+}
+
 func loadProvisionRequest(username string) *ProvisionRequest {
 	if strings.Contains(username, "..") || strings.Contains(username, "/") || strings.Contains(username, "\\") {
 		return nil
@@ -5139,15 +5304,30 @@ func (s *HubServer) handleRequestProvision(w http.ResponseWriter, r *http.Reques
 		PrimaryRepo string `json:"primary_repo"`
 		ACMMLevel   int    `json:"acmm_level"`
 		AuthMethod  string `json:"auth_method"`
+		FullName    string `json:"full_name"`
+		SlackID     string `json:"slack_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
 	if body.Org == "" || body.Repos == "" {
 		http.Error(w, `{"error":"org and repos are required"}`, http.StatusBadRequest)
 		return
 	}
+	// Contact details for the person asking.
+	//
+	// No charset validation on purpose: isValidName() is for identifiers
+	// (org/repo/host names) and would reject spaces, apostrophes and every
+	// non-ASCII script. These are display strings — trimmed, rune-capped and
+	// escaped at every render site, exactly as the admin contact editor
+	// (handleAdminUpdateUser) already treats these same two fields. We also do
+	// NOT try to detect a "real" name: any pattern for that (two words,
+	// capitalised, Latin script) is wrong for a large fraction of the world's
+	// names, and a determined user types junk regardless. Human review is the
+	// check, not a regex.
+	body.FullName = truncateRunes(strings.TrimSpace(body.FullName), maxContactNameLen)
+	body.SlackID = truncateRunes(strings.TrimSpace(body.SlackID), maxContactSlackIDLen)
 	// Accept a pasted org/repo URL, not just a bare name. Users read
 	// "GitHub Organization" and paste the org's URL; the old validator rejected
 	// ":" and "/" and returned a bare "invalid org name" that explained nothing.
@@ -5208,6 +5388,45 @@ func (s *HubServer) handleRequestProvision(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	// Name is REQUIRED; Slack ID is optional.
+	//
+	// The name exists to map a GitHub login to a person an operator can talk
+	// to, which only works if it is actually populated — a field that is
+	// usually blank cannot be relied on and stops being read. Requesting a hive
+	// is a deliberate, one-per-user action already reviewed by a human, so one
+	// short field is negligible friction at the moment the requester is most
+	// motivated to answer.
+	//
+	// Checked AFTER the org/forge/repo validation above so the more specific
+	// "which GitHub is this org on?" errors keep their precedence — a request
+	// missing both should be told about the forge, not sent round the loop one
+	// field at a time.
+	//
+	// This does tighten an existing endpoint: a caller that posted no full_name
+	// now gets a 400 where it used to get a 200. That is intended — the whole
+	// point is that the field is reliably present.
+	//
+	// The get-started wizard (static/get-started.html) is now the only in-tree
+	// caller, but do not read that as "it always was". When this check landed
+	// (#2369) this comment claimed the wizard was the only caller and it was
+	// simply wrong: the hub dashboard had its own Request-a-Hive modal posting
+	// here, added later than the wizard, reachable by every logged-in user, and
+	// it went un-updated — so the button 400'd with no field on screen that
+	// could satisfy it. The modal has since been removed deliberately (the
+	// wizard is the single supported request path), which is what makes this
+	// sentence true today rather than aspirational.
+	//
+	// The modal was invisible to CI because it was inline JS inside the
+	// dashboardHTML raw string with no test naming any of its symbols. Before
+	// adding another required field here, re-run the caller audit rather than
+	// trusting this comment: TestRequestProvisionInTreeCallersSendRequiredFields
+	// greps the embedded JS and the static wizard for callers of this endpoint
+	// and fails on one that omits a required field.
+	if body.FullName == "" {
+		http.Error(w, `{"error":"your name is required — we use it to know who the request is from"}`, http.StatusBadRequest)
+		return
+	}
+
 	// A hive is never REQUESTED above L3 Measured. L4-L6 are real levels, but
 	// they are reached after provisioning, from the hive's own dashboard, once
 	// the project has the coverage and CI history to justify them. The
@@ -5236,6 +5455,8 @@ func (s *HubServer) handleRequestProvision(w http.ResponseWriter, r *http.Reques
 		PrimaryRepo: primaryRepo,
 		ACMMLevel:   acmm,
 		AuthMethod:  body.AuthMethod,
+		FullName:    body.FullName,
+		SlackID:     body.SlackID,
 		RequestedAt: time.Now().UTC().Format(time.RFC3339),
 		Status:      provisionStatusPending,
 	}
@@ -5283,7 +5504,7 @@ func (s *HubServer) handleApproveProvision(w http.ResponseWriter, r *http.Reques
 		// An empty body is valid (auto-pick); ignore EOF/empty decode errors and
 		// fall through to auto-pick. Any non-empty malformed body is rejected.
 		if err := json.NewDecoder(r.Body).Decode(&approveBody); err != nil && err != io.EOF {
-			http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
+			writeJSONError(w, http.StatusBadRequest, "invalid JSON")
 			return
 		}
 	}
@@ -5385,7 +5606,17 @@ func (s *HubServer) handleApproveProvision(w http.ResponseWriter, r *http.Reques
 			h.GitHubHost = host
 		}
 	} else if pr.GitHubHost != "" {
-		h.GitHubHost = pr.GitHubHost
+		// The request itself named a host. Honour a "public" sentinel here the SAME
+		// way the admin override does: the self-service onboarding form now sends
+		// "public" for an explicit github.com choice (never a blank), so a
+		// github.com request must be pinned public — NOT stored as the literal host
+		// "public", and NOT left blank for the cluster backfill below to re-GHE.
+		if strings.EqualFold(pr.GitHubHost, githubHostPublic) {
+			h.GitHubHost = ""
+			h.GitHubBaseURL = githubHostPublic
+		} else {
+			h.GitHubHost = pr.GitHubHost
+		}
 	}
 	// Same cluster backfill the manual assign path does: when neither the admin
 	// nor the request named a host, inherit the cluster's GHE default rather
@@ -5419,6 +5650,7 @@ func (s *HubServer) handleApproveProvision(w http.ResponseWriter, r *http.Reques
 	}
 	user.Hives[hiveID] = "owner"
 	user.SaaSQuota++
+	applyRequestContactToUser(user, pr)
 	if err := saveSaaSUser(user); err != nil {
 		s.logger.Warn("assigned placeholder but failed to grant owner access", "user", targetUsername, "hive", hiveID, "error", err)
 	}
@@ -5829,7 +6061,9 @@ func projectConfigForHiveID(hiveID, curOrg string, curRepos []string, curPrimary
 	// spoke confirms it. curACMM == 0 means the spoke did not report a level, so
 	// there is nothing to correct yet.
 	needACMMPush := !h.ACMMDelivered && h.RequestedACMMLevel > 0 && curACMM != h.RequestedACMMLevel
-	needURLPush := h.VanityURL != "" && curURL != h.VanityURL
+	// Vanity URL: the spoke always reports its dashboard URL, so observed is
+	// known and an empty one is a real "I have none" rather than silence.
+	needURLPush := needsPush(h.VanityURL, curURL, true)
 	// A spoke reporting a repo that fails isValidRepoRef is wedged: the hub 400s
 	// its every heartbeat ("invalid repo name"), /api/livez then fails on the
 	// stale heartbeat and the kubelet crash-loops the pod. Push a corrected
@@ -5855,7 +6089,11 @@ func projectConfigForHiveID(hiveID, curOrg string, curRepos []string, curPrimary
 	// to report its API URL, which is UNKNOWN, not a mismatch — pushing on it
 	// would re-send on every beat with no read-back to ever stop it.
 	wantAPIURL := gheAPIURLForHost(h.GitHubHost)
-	needGHEAPIPush := wantAPIURL != "" && curAPIURL != "" && curAPIURL != wantAPIURL
+	// The api_url is the field where unknown-vs-mismatch actually bites: a spoke
+	// too old to report it sends "", which is NOT "I am on api.github.com". The
+	// observedKnown argument carries that distinction explicitly instead of
+	// hiding it in a curAPIURL != "" conjunct that a later edit could drop.
+	needGHEAPIPush := needsPush(wantAPIURL, curAPIURL, curAPIURL != "")
 	// A pending FORGE SWITCH pushes on its own handshake. It cannot ride
 	// needGHEAPIPush: that gate is deliberately conservative about an empty
 	// curAPIURL (unknown, not a mismatch) and — more importantly — it can never
@@ -5979,7 +6217,7 @@ func (s *HubServer) handleAssignHive(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxAssignRequestBodyBytes)
 	var body AssignHiveRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
 
@@ -6279,7 +6517,7 @@ func (s *HubServer) handleUserToken(w http.ResponseWriter, r *http.Request) {
 
 	user := loadSaaSUser(body.Username)
 	if user == nil {
-		http.Error(w, `{"error":"user not found"}`, http.StatusNotFound)
+		writeJSONError(w, http.StatusNotFound, "user not found")
 		return
 	}
 
@@ -6969,7 +7207,6 @@ const dashboardHTML = `<!DOCTYPE html>
       <div style="display:flex;gap:8px;align-items:center">
         <button class="btn-primary" id="btn-send-banner-top" style="display:none;background:#d97706" onclick="_bannerTargetHive=null;document.getElementById('banner-modal').style.display='flex';loadBannerHiveList()">Send Banner</button>
         <button class="btn-primary" id="btn-add-hive" disabled onclick="document.getElementById('create-modal').style.display='flex'">+ Add Hosted Hive</button>
-        <button class="btn-primary" id="btn-request-hive" style="display:none;background:var(--blue)" onclick="openRequestHiveModal()">Request a Hive</button>
       </div>
     </div>
 
@@ -7026,10 +7263,17 @@ const dashboardHTML = `<!DOCTYPE html>
 
     <div id="admin-section" style="display:none;margin-top:48px">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
-        <h2 style="font-size:1.3rem;color:var(--accent)">Hub Admin — Users</h2>
+        <h2 id="admin-users-header" role="button" tabindex="0" aria-expanded="false" aria-controls="admin-users-body"
+            onclick="toggleAdminUsers()" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleAdminUsers();}"
+            style="font-size:1.3rem;color:var(--accent);margin:0;cursor:pointer;user-select:none;display:flex;align-items:center;gap:8px">
+          <span id="admin-users-toggle" aria-hidden="true" style="font-size:0.7rem">&#9656;</span><span>Hub Admin &mdash; Users</span>
+          <span id="admin-users-count" style="font-size:0.75rem;color:var(--muted);font-weight:400"></span>
+        </h2>
         <input type="text" id="user-search" placeholder="Search users..." oninput="filterUsers()" style="padding:8px 14px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.85rem;width:250px">
       </div>
-      <div id="users-container"><div class="loading">Loading users...</div></div>
+      <div id="admin-users-body" style="display:none">
+        <div id="users-container"><div class="loading">Loading users...</div></div>
+      </div>
     </div>
 
     <div id="hub-banner-section" style="display:none;margin-top:48px">
@@ -7142,11 +7386,28 @@ const dashboardHTML = `<!DOCTYPE html>
        a broken icon would read as a dead control. extraStyle appends to the
        inline style (borders, flex sizing) and defaults to nothing. */
     var AVATAR_HIDPI_SCALE = 2;
+    /* A user LOGGED INTO THEIR HIVE right now gets a thick green dashed ring, so
+       "who is active this moment" reads at a glance wherever a face appears. The
+       border is drawn on a wrapper (a border on the round <img> itself would clip
+       against border-radius and fight any per-call-site border in extraStyle). The
+       live set is admin-only, so non-admin views never ring anyone. */
+    function isUserLive(username) {
+      try { return _liveHiveUsers && _liveHiveUsers.has(String(username || '').toLowerCase()); }
+      catch (e) { return false; }
+    }
     function avatarImg(username, px, extraStyle) {
-      return '<img src="' + escAttr(ghProfileURL(username)) + '.png?size=' + (px * AVATAR_HIDPI_SCALE) + '" alt="" ' +
+      var img = '<img src="' + escAttr(ghProfileURL(username)) + '.png?size=' + (px * AVATAR_HIDPI_SCALE) + '" alt="" ' +
         'style="width:' + px + 'px;height:' + px + 'px;border-radius:50%;vertical-align:middle;' +
         (extraStyle || '') + '" ' +
         'onerror="this.style.visibility=\'hidden\'">';
+      if (isUserLive(username)) {
+        // 3px green dashed ring hugging the circle. inline-flex wrapper keeps the
+        // face's vertical-align and sizing identical to the un-ringed case.
+        return '<span title="Logged into their hive now" ' +
+          'style="display:inline-flex;border-radius:50%;padding:1px;border:3px dashed var(--green);vertical-align:middle;line-height:0">' +
+          img + '</span>';
+      }
+      return img;
     }
 
     /* The common case: a linked, round avatar for a github.com login. */
@@ -7230,8 +7491,6 @@ const dashboardHTML = `<!DOCTYPE html>
       if (e.key !== 'Escape') return;
       var createModal = document.getElementById('create-modal');
       if (createModal && createModal.style.display === 'flex') { createModal.style.display = 'none'; return; }
-      var requestModal = document.getElementById('request-modal');
-      if (requestModal && requestModal.style.display === 'flex') { requestModal.style.display = 'none'; return; }
       var accessOverlay = document.querySelector('.hive-confirm-overlay');
       if (accessOverlay) { accessOverlay.remove(); return; }
       var timelineModal = document.getElementById('timeline-modal');
@@ -7411,11 +7670,28 @@ const dashboardHTML = `<!DOCTYPE html>
        tooltip, not a panel.
 
        The role stays in the tooltip so the face still answers "who and at what
-       permission" on hover, exactly as before it became a link. */
+       permission" on hover, exactly as before it became a link. The title is
+       enriched with the person's contact metadata (full name, Slack handle, and
+       — for a hub admin only — notes) when the access entry carries it, so the
+       face answers "who IS this" and not just "which handle". Each field is a
+       separate line: title attributes render "\n" as a line break, and this stays
+       a native tooltip (never a custom panel) to preserve the single-hover-panel
+       invariant. The server only populates these fields for owner/admin-visible
+       rows and withholds notes from non-admins, so nothing here needs to re-gate
+       them — a field that is absent simply produces no line. */
+    function accessAvatarTitle(a) {
+      var uname = String(a.username || '');
+      var role = String(a.role || '');
+      var lines = [uname + (role ? ' — ' + role : '')];
+      if (a.full_name) lines.push(String(a.full_name));
+      if (a.slack_id) lines.push('Slack: ' + String(a.slack_id));
+      if (a.notes) lines.push('Notes: ' + String(a.notes));
+      return lines.join('\n');
+    }
     function inlineAccessAvatar(a) {
       var uname = String(a.username || '');
       var role = String(a.role || '');
-      return linkedAvatar(uname, INLINE_ACCESS_AVATAR_PX, uname + (role ? ' — ' + role : ''),
+      return linkedAvatar(uname, INLINE_ACCESS_AVATAR_PX, accessAvatarTitle(a),
         'border:1px solid ' + accessRoleColor(role) + ';background:var(--surface);flex:0 0 auto');
     }
 
@@ -7860,7 +8136,7 @@ const dashboardHTML = `<!DOCTYPE html>
            tooltip-free. */
         return '<div style="display:flex;align-items:center;gap:6px;padding:2px 0">' +
           linkedAvatar(a.username, PANEL_ACCESS_AVATAR_PX,
-            String(a.username || '') + (a.role ? ' — ' + a.role : ''), 'flex:0 0 auto') +
+            accessAvatarTitle(a), 'flex:0 0 auto') +
           '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(a.username) + '</span>' +
           '<span style="color:' + rc + ';font-size:0.62rem;font-weight:600;white-space:nowrap">' + esc(a.role) + '</span>' +
           '</div>';
@@ -8763,7 +9039,14 @@ const dashboardHTML = `<!DOCTYPE html>
       /* Added by the hub in #2308. Without a label here the chip for a
          genuinely failed upgrade would render as the raw key 'failed-upgrade'. */
       'failed-upgrade': 'Failed upgrade',
-      'advisory-stale': 'Stale advisory'
+      'advisory-stale': 'Stale advisory',
+      /* Agents that are up but doing nothing — a session that has gone, a
+         login prompt, or no output while work is queued. Deliberately paused
+         agents are excluded server-side and never counted here. */
+      'agents-inactive': 'Idle agents',
+      /* Raised by the auth-audit loop since #2306 but never labelled, so its
+         chip rendered the raw key. */
+      'url-unreachable': 'Dashboard URL unreachable'
     };
 
     /* How many alert rows are listed before the panel collapses the remainder
@@ -10317,6 +10600,10 @@ const dashboardHTML = `<!DOCTYPE html>
         _userUsed = data.saas_used || 0;
         _allDashHives = data.hives || [];
         _hiveRegistry = data.hives || [];
+        /* Who is logged into their hive right now (admin-only in the payload) →
+           the green-dashed avatar border. A Set of lowercased usernames so the
+           avatar lookup is case-insensitive, matching GitHub handle semantics. */
+        _liveHiveUsers = new Set((data.live_hive_users || []).map(function(n) { return String(n).toLowerCase(); }));
         /* Alerts ride along on the same payload — see handleMyHives. Normalise
            to the empty summary so every consumer can iterate without guarding. */
         _fleetAlerts = data.alerts || EMPTY_ALERT_SUMMARY;
@@ -10416,7 +10703,6 @@ const dashboardHTML = `<!DOCTYPE html>
         renderUserAccessBanner();
         renderProvisionRequestBanner(data.my_provision_request || null);
         renderAdminProvisionRequests(data.provision_requests || []);
-        renderRequestHiveButton(data);
         loadPublicHives(data.hives || []);
         loadUsage();
       } catch(e) {
@@ -10497,7 +10783,11 @@ const dashboardHTML = `<!DOCTYPE html>
         var accessMap = statusData.hives || {};
         var rows = otherHives.map(function(h) {
           var repoPath = h.org && h.primaryRepo ? h.org + '/' + h.primaryRepo : h.primaryRepo || '';
-          var repoLink = repoPath ? '<a href="https://github.com/' + esc(repoPath) + '" target="_blank" class="repo-link">' + esc(h.primaryRepo) + '</a>' : '';
+          // Link on the hive's own GitHub instance (github_host) — a GHE repo must
+          // point at github.ibm.com, not 404 on github.com. Falls back to plain
+          // text when there is no org/repo to build a valid link from.
+          var repoHref = ghRepoURL(h.github_host, h.org, h.primaryRepo);
+          var repoLink = repoPath ? (repoHref ? '<a href="' + repoHref + '" target="_blank" class="repo-link">' + esc(h.primaryRepo) + '</a>' : '<span class="repo-link">' + esc(h.primaryRepo) + '</span>') : '';
           var actionCell = '';
           var access = accessMap[h.id];
           if (access && access.status === 'accepted') {
@@ -10916,7 +11206,10 @@ const dashboardHTML = `<!DOCTYPE html>
       var buildRow = function(h, i, section) {
         var dot = h.online ? healthBadge(h) : '<span class="online-dot off"></span>';
         var rp = repoPath(h);
-        var repoLink = rp ? '<a href="https://github.com/' + esc(rp) + '" target="_blank" class="repo-link">' + esc(h.primaryRepo) + '</a>' : '';
+        // Link on the hive's own GitHub instance (github_host) so a GHE repo
+        // points at github.ibm.com, not 404 on github.com.
+        var repoHref = ghRepoURL(h.github_host, h.org, h.primaryRepo);
+        var repoLink = rp ? (repoHref ? '<a href="' + repoHref + '" target="_blank" class="repo-link">' + esc(h.primaryRepo) + '</a>' : '<span class="repo-link">' + esc(h.primaryRepo) + '</span>') : '';
         var repoCount = (h.repos || []).length;
         var isHosted = h.hiveType === 'hosted' || (h.id && (h.id.startsWith('hosted-') || h.id.startsWith('saas-')));
         var isLocal = !isHosted;
@@ -11205,7 +11498,7 @@ const dashboardHTML = `<!DOCTYPE html>
         return '<tr id="' + escAttr(hiveRowDomId(h.id)) + '">' +
           bulkCheckboxCell(h, section || 'all') +
           '<td class="hive-menu-cell" style="position:relative;width:30px;text-align:center;overflow:visible">' + (h.migrationStatus === 'migrating' ? '<span style="font-size:1.1rem;color:var(--border);user-select:none;cursor:not-allowed" title="Disabled during migration">⋮</span>' : '<span style="cursor:pointer;font-size:1.1rem;color:var(--muted);user-select:none">⋮</span>' + pendingBadge + '<div class="hive-menu-dropdown" style="display:none;position:absolute;left:0;bottom:auto;background:#1c2128;border:1px solid #30363d;border-radius:8px;min-width:160px;padding:4px 0;z-index:1000;box-shadow:0 8px 24px rgba(0,0,0,0.5)">' + menuItems.join('') + '</div>') + '</td>' +
-          '<td style="text-align:left;line-height:1.4">' + (function() { var isHostedRow = h.hiveType === 'hosted' || (h.id && (h.id.startsWith('hosted-') || h.id.startsWith('saas-'))); var dh = isHostedRow && h.id ? ('/api/saas/hives/' + encodeURIComponent(h.id) + '/open') : (rb ? esc(rb) : ''); /* Label derived from the PROJECT (org + primary repo), not by splitting h.name — see hiveLabel. */ var label = hiveLabel(h); var orgName = label.line1; var repoName = label.line2; var rp = h.org && h.primaryRepo ? h.org + '/' + h.primaryRepo : ''; var ghIcon = rp ? '<a href="https://github.com/' + esc(rp) + '" target="_blank" style="opacity:0.5;vertical-align:middle" title="' + esc(rp) + '"><svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:middle"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg></a>' : ''; /* vanityDisplay is the friendly host shown in the status bar on hover. rb is resolvedBase(h), which the hub has already overlaid with the claimed vanity_url; it is only a DISPLAY url here, never the click target — see ssoDisplayLink. Empty for a row with no vanity host, which falls back to today's /open href. Only meaningful on hosted rows: a non-hosted row's dh IS rb already. */ var vanityDisplay = isHostedRow && rb ? rb : ''; var link = function(text, bold) { if (dh) { return ssoDisplayLink(dh, vanityDisplay, text, bold ? 'hive-name-link' : 'hive-sub-link'); } var s = bold ? 'font-weight:700;color:inherit' : 'color:#6b7280;font-weight:400'; return '<span style="' + s + '">' + esc(text) + '</span>'; }; var line1 = dot + ' ' + link(orgName, true); var fcPill = h.online ? failingCheckSummary(h) : ''; /* Advisory-staleness pill sits right beside the failing-check pill: both are "something is quietly wrong with this working hive" signals, and advisoryStaleSummary already self-suppresses (empty string) unless the hub flagged the digest stale, so unaffected rows are pixel-identical. */ var advPill = h.online ? advisoryStaleSummary(h) : ''; /* Dead-link pill is deliberately NOT gated on h.online: the entire point is a hive that IS online and heartbeating while its public URL is broken, so gating it the way the other pills are gated would hide exactly the case it exists to surface. */ var dlPill = deadLinkSummary(h); /* Inline access faces sit on the name cell's second line, immediately after this row's own role badge: the badge already answers "what am I on this hive", so the co-members read as the natural continuation of the same thought, in the one cell that is left-aligned and has room to grow. It also keeps them out of the 16 dense metric columns, none of which is about people. Empty string when the viewer is the only member, so those rows are pixel-identical to today. */ var accessFaces = hiveAccessAvatars(h); /* Keyed off repoName, not orgName: line 1 now always carries SOME identity, so the presence of a second line is decided purely by whether there is a repo to put on it. Without a repo the row still shows the GitHub icon, role badge, faces and failing-check pill on the compact variant. */ var line2 = repoName ? '<div style="padding-left:18px;font-size:0.8rem">' + link(repoName, false) + ' ' + ghIcon + ' ' + roleBadge(h.role) + accessFaces + fcPill + advPill + dlPill + '</div>' : '<div style="padding-left:18px">' + ghIcon + ' ' + roleBadge(h.role) + accessFaces + fcPill + advPill + dlPill + '</div>'; var line3 = pendingPill ? '<div style="margin-top:4px;padding-left:18px">' + pendingPill + '</div>' : ''; return line1 + line2 + line3; })() + '</td>' +
+          '<td style="text-align:left;line-height:1.4">' + (function() { var isHostedRow = h.hiveType === 'hosted' || (h.id && (h.id.startsWith('hosted-') || h.id.startsWith('saas-'))); var dh = isHostedRow && h.id ? ('/api/saas/hives/' + encodeURIComponent(h.id) + '/open') : (rb ? esc(rb) : ''); /* Label derived from the PROJECT (org + primary repo), not by splitting h.name — see hiveLabel. */ var label = hiveLabel(h); var orgName = label.line1; var repoName = label.line2; var rp = h.org && h.primaryRepo ? h.org + '/' + h.primaryRepo : ''; var rpHref = ghRepoURL(h.github_host, h.org, h.primaryRepo); var ghIcon = (rp && rpHref) ? '<a href="' + rpHref + '" target="_blank" style="opacity:0.5;vertical-align:middle" title="' + esc(rp) + '"><svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:middle"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg></a>' : (rp ? '<span style="opacity:0.5;vertical-align:middle" title="' + esc(rp) + '"><svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:middle"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg></span>' : ''); /* vanityDisplay is the friendly host shown in the status bar on hover. rb is resolvedBase(h), which the hub has already overlaid with the claimed vanity_url; it is only a DISPLAY url here, never the click target — see ssoDisplayLink. Empty for a row with no vanity host, which falls back to today's /open href. Only meaningful on hosted rows: a non-hosted row's dh IS rb already. */ var vanityDisplay = isHostedRow && rb ? rb : ''; /* vanityDisplay is the friendly host shown in the status bar on hover. rb is resolvedBase(h), which the hub has already overlaid with the claimed vanity_url; it is only a DISPLAY url here, never the click target — see ssoDisplayLink. Empty for a row with no vanity host, which falls back to today's /open href. Only meaningful on hosted rows: a non-hosted row's dh IS rb already. */ var vanityDisplay = isHostedRow && rb ? rb : ''; var link = function(text, bold) { if (dh) { return ssoDisplayLink(dh, vanityDisplay, text, bold ? 'hive-name-link' : 'hive-sub-link'); } var s = bold ? 'font-weight:700;color:inherit' : 'color:#6b7280;font-weight:400'; return '<span style="' + s + '">' + esc(text) + '</span>'; }; var line1 = dot + ' ' + link(orgName, true); var fcPill = h.online ? failingCheckSummary(h) : ''; /* Advisory-staleness pill sits right beside the failing-check pill: both are "something is quietly wrong with this working hive" signals, and advisoryStaleSummary already self-suppresses (empty string) unless the hub flagged the digest stale, so unaffected rows are pixel-identical. */ var advPill = h.online ? advisoryStaleSummary(h) : ''; /* Dead-link pill is deliberately NOT gated on h.online: the entire point is a hive that IS online and heartbeating while its public URL is broken, so gating it the way the other pills are gated would hide exactly the case it exists to surface. */ var dlPill = deadLinkSummary(h); /* Inline access faces sit on the name cell's second line, immediately after this row's own role badge: the badge already answers "what am I on this hive", so the co-members read as the natural continuation of the same thought, in the one cell that is left-aligned and has room to grow. It also keeps them out of the 16 dense metric columns, none of which is about people. Empty string when the viewer is the only member, so those rows are pixel-identical to today. */ var accessFaces = hiveAccessAvatars(h); /* Keyed off repoName, not orgName: line 1 now always carries SOME identity, so the presence of a second line is decided purely by whether there is a repo to put on it. Without a repo the row still shows the GitHub icon, role badge, faces and failing-check pill on the compact variant. */ var line2 = repoName ? '<div style="padding-left:18px;font-size:0.8rem">' + link(repoName, false) + ' ' + ghIcon + ' ' + roleBadge(h.role) + accessFaces + fcPill + advPill + dlPill + '</div>' : '<div style="padding-left:18px">' + ghIcon + ' ' + roleBadge(h.role) + accessFaces + fcPill + advPill + dlPill + '</div>'; var line3 = pendingPill ? '<div style="margin-top:4px;padding-left:18px">' + pendingPill + '</div>' : ''; return line1 + line2 + line3; })() + '</td>' +
           '<td>' + locationCell + '</td>' +
           '<td style="white-space:nowrap">' + uptimeCell(h) + '</td>' +
           /* No white-space:nowrap on the cell itself: the stacked lines each
@@ -12021,12 +12314,6 @@ const dashboardHTML = `<!DOCTYPE html>
       } catch(e) {}
     }
 
-    function renderRequestHiveButton(data) {
-      var btn = document.getElementById('btn-request-hive');
-      if (!btn) return;
-      btn.style.display = '';
-    }
-
     function renderProvisionRequestBanner(req) {
       var el = document.getElementById('provision-request-banner');
       if (!el) return;
@@ -12181,6 +12468,28 @@ const dashboardHTML = `<!DOCTYPE html>
     // github.ibm.com means GitHub Enterprise — hardcoding github.com would send
     // an admin to a 404 (or worse, an unrelated public repo of the same name).
     // Requests with no repo recorded fall back to plain escaped text.
+    /* provisionRequesterLabel renders the requester's real name and Slack ID
+       beside their GitHub login on the review card. Mapping a login to a person
+       is the reason the wizard asks for a name at all, and this is where the
+       operator deciding the request needs it.
+
+       Both are free text a user typed. esc() everywhere, and the whole label is
+       built as a text node's escaped HTML rather than interpolated into an
+       attribute — nothing here is ever placed inside an inline handler, where
+       esc() alone would leave an apostrophe live. Older requests predate these
+       fields and simply render nothing. */
+    function provisionRequesterLabel(pr) {
+      if (!pr) return '';
+      var name = (pr.full_name || '').trim();
+      var slack = (pr.slack_id || '').trim();
+      if (!name && !slack) return '';
+      var bits = [];
+      if (name) bits.push(esc(name));
+      if (slack) bits.push('slack: ' + esc(slack));
+      return '<span style="font-size:0.75rem;color:var(--muted);margin-left:8px">' +
+        bits.join(' &middot; ') + '</span>';
+    }
+
     function provisionRepoLabel(pr) {
       if (!pr) return '';
       var org = pr.org || '';
@@ -12324,6 +12633,10 @@ const dashboardHTML = `<!DOCTYPE html>
           avatar +
           '<div>' +
           '<span style="font-size:0.85rem;font-weight:600">' + esc(pr.username) + '</span>' +
+          // Who the requester actually IS. Mapping a login to a person is the
+          // reason the wizard asks for a name, and this review card is where an
+          // operator needs it. esc() only — free text, never markup.
+          provisionRequesterLabel(pr) +
           // org/repo links to the repo on the instance the request targets.
           '<span style="font-size:0.75rem;color:var(--muted);margin-left:8px">' + provisionRepoLabel(pr) + '</span>' +
           // Show which GitHub instance the request targets — same pill the Past
@@ -12480,208 +12793,6 @@ const dashboardHTML = `<!DOCTYPE html>
       } catch(e) { hiveToast('Error: ' + e.message, 'error'); btn.disabled = false; btn.textContent = 'Deny'; }
     }
 
-    /* REQUEST_FORGE_CUSTOM is the sentinel option value that reveals the
-       free-text forge box. It is not a hostname and is never submitted. */
-    var REQUEST_FORGE_CUSTOM = '__custom__';
-
-    /* normalizeForgeInput mirrors the server's normalizeForgeHost: strip the
-       scheme, drop any pasted path, drop a trailing slash, lowercase. Keeping
-       the two in step means the live preview shows exactly the host the server
-       will store, instead of a spelling that changes on submit. */
-    function normalizeForgeInput(raw) {
-      var h = (raw || '').trim().toLowerCase();
-      h = h.replace(/^https?:\/\//, '');
-      var slash = h.indexOf('/');
-      if (slash >= 0) h = h.slice(0, slash);
-      return h;
-    }
-
-    /* renderRequestForgeOptions fills the Request-a-Hive forge picker from the
-       forges the hub's own clusters actually run on, plus public github.com and
-       an "other" escape hatch.
-
-       Hybrid rather than pure free-text: the listed forges are the ones the hub
-       can actually place a hive on, so the common path is a click that cannot
-       be typo'd, and the list self-documents what is supported. Pure free-text
-       invites "gihub.ibm.com"; a pure select would block a brand-new GHE
-       instance the hub has no cluster for yet, which is a real onboarding case
-       — hence "Other". */
-    function renderRequestForgeOptions() {
-      var sel = document.getElementById('rq-forge');
-      if (!sel) return;
-      var seen = {};
-      var hosts = [];
-      (_clusterList || []).forEach(function(c) {
-        var h = normalizeForgeInput((c && c.github_host) || '');
-        if (!h || seen[h]) return;
-        seen[h] = true;
-        hosts.push(h);
-      });
-      /* Public GitHub is always offered even when no cluster reports it, so the
-         picker is never empty before the cluster list loads. */
-      if (!seen[PUBLIC_GITHUB_HOST]) hosts.unshift(PUBLIC_GITHUB_HOST);
-      hosts.sort();
-      var prev = sel.value;
-      var opts = hosts.map(function(h) {
-        return '<option value="' + esc(h) + '">' + esc(h) + '</option>';
-      });
-      opts.push('<option value="' + esc(REQUEST_FORGE_CUSTOM) + '">Other GitHub Enterprise host&#x2026;</option>');
-      sel.innerHTML = opts.join('');
-      if (prev) sel.value = prev;
-      if (!sel.value) sel.value = PUBLIC_GITHUB_HOST;
-      /* Bind once. renderRequestForgeOptions re-runs whenever the cluster list
-         reloads, and re-adding these listeners each time would fire the
-         preview N times per keystroke. */
-      if (!sel._rqForgeWired) {
-        sel._rqForgeWired = true;
-        sel.addEventListener('change', syncRequestForgePreview);
-        var customEl = document.getElementById('rq-forge-custom');
-        if (customEl) customEl.addEventListener('input', syncRequestForgePreview);
-        var orgEl = document.getElementById('rq-org');
-        if (orgEl) orgEl.addEventListener('input', syncRequestForgePreview);
-      }
-      syncRequestForgePreview();
-    }
-
-    /* requestForgeValue returns the normalized forge host the modal will
-       submit, or '' when "Other" is selected and nothing has been typed. */
-    function requestForgeValue() {
-      var sel = document.getElementById('rq-forge');
-      if (!sel) return '';
-      if (sel.value !== REQUEST_FORGE_CUSTOM) return normalizeForgeInput(sel.value);
-      var custom = document.getElementById('rq-forge-custom');
-      return normalizeForgeInput(custom && custom.value);
-    }
-
-    /* syncRequestForgePreview shows the forge with the org affixed to it —
-       "github.ibm.com/z-innersource" — so the requester sees the exact target
-       they are asking for before they submit, rather than discovering after
-       provisioning that the org was resolved against the wrong GitHub. */
-    function syncRequestForgePreview() {
-      var sel = document.getElementById('rq-forge');
-      var custom = document.getElementById('rq-forge-custom');
-      var out = document.getElementById('rq-target-preview');
-      if (sel && custom) custom.style.display = sel.value === REQUEST_FORGE_CUSTOM ? 'block' : 'none';
-      if (!out) return;
-      var host = requestForgeValue();
-      var orgEl = document.getElementById('rq-org');
-      var org = orgEl ? orgEl.value.trim() : '';
-      /* The org field accepts a pasted URL too; show only its last segment so
-         the preview never renders "github.com/https://github.ibm.com/x". */
-      if (org) {
-        var parts = org.replace(/^https?:\/\//, '').replace(/\/+$/, '').split('/');
-        org = parts[parts.length - 1];
-      }
-      if (!host) {
-        out.textContent = 'Enter the GitHub forge your org lives on.';
-        out.style.color = 'var(--muted)';
-        return;
-      }
-      out.textContent = 'This hive will target ' + host + '/' + (org || '<org>') +
-        (host !== PUBLIC_GITHUB_HOST ? ' — the GitHub App must be installed on that org on ' + host + '.' : '');
-      out.style.color = host !== PUBLIC_GITHUB_HOST ? 'var(--accent, #58a6ff)' : 'var(--muted)';
-    }
-
-    /* REQUEST_DEFAULT_ACMM_LEVEL is where a new hive starts. L3 Measured is the
-       first level that produces useful output (hold-gated PRs that raise test
-       coverage) while still requiring a human on every merge, which is the
-       right default for someone who has not run a hive before. */
-    var REQUEST_DEFAULT_ACMM_LEVEL = 3;
-    /* ACMM levels offered on the request form, lowest to highest. Capped at L3
-       Measured, matching maxRequestACMMLevel on POST /api/saas/request-provision
-       and the get-started wizard: a hive is never REQUESTED above L3. L4-L6 are
-       real levels, reached after provisioning from the hive's own dashboard
-       once coverage and CI history have earned them. This form posts to the
-       same clamped endpoint as the wizard, so offering L4-L6 here would not
-       grant them — it would silently record L1 instead. */
-    var REQUEST_ACMM_LEVELS = [1, 2, 3];
-    /* Restated under the picker so the cap reads as "later", not "denied". */
-    var REQUEST_LEVELS_LATER_NOTE = 'L4 Adaptive, L5 Semi-Automated and L6 Autonomous become available after provisioning, from your hive dashboard.';
-
-    /* renderRequestLevelOptions builds the level picker from ACMM_LABELS and
-       ACMM_TIPS. Rendering rather than hardcoding is the point: the previous
-       hardcoded <option> list had drifted to names that appear nowhere else in
-       the product and described the wrong behaviour. */
-    function renderRequestLevelOptions() {
-      var sel = document.getElementById('rq-level');
-      if (!sel) return;
-      var prev = sel.value;
-      sel.innerHTML = (REQUEST_ACMM_LEVELS || []).map(function(l) {
-        var label = ACMM_LABELS[l] || ('L' + l);
-        var detail = acmmTipDetail(l);
-        /* Label and one-line description live in the option text itself: a
-           <select> shows only the selected option when closed, so a requester
-           browsing the list needs the description inline to compare levels. */
-        return '<option value="' + l + '">' + esc(label) + (detail ? ' &#x2014; ' + esc(detail) : '') + '</option>';
-      }).join('');
-      sel.value = prev || String(REQUEST_DEFAULT_ACMM_LEVEL);
-      if (!sel.value) sel.value = String(REQUEST_DEFAULT_ACMM_LEVEL);
-      if (!sel._rqLevelWired) {
-        sel._rqLevelWired = true;
-        sel.addEventListener('change', syncRequestLevelDesc);
-      }
-      syncRequestLevelDesc();
-    }
-
-    /* syncRequestLevelDesc restates the selected level's description under the
-       picker, so it stays readable once the dropdown is closed. */
-    function syncRequestLevelDesc() {
-      var sel = document.getElementById('rq-level');
-      var out = document.getElementById('rq-level-desc');
-      if (!sel || !out) return;
-      var lvl = parseInt(sel.value, 10) || REQUEST_DEFAULT_ACMM_LEVEL;
-      var tip = ACMM_TIPS[lvl] || '';
-      out.textContent = tip ? (tip + ' ' + REQUEST_LEVELS_LATER_NOTE) : REQUEST_LEVELS_LATER_NOTE;
-    }
-
-    /* openRequestHiveModal shows the modal with a freshly populated forge
-       picker, so a cluster list that loaded after page render is reflected. */
-    function openRequestHiveModal() {
-      renderRequestForgeOptions();
-      syncRequestForgePreview();
-      renderRequestLevelOptions();
-      document.getElementById('request-modal').style.display = 'flex';
-    }
-
-    var _requestInProgress = false;
-    async function submitProvisionRequest() {
-      if (_requestInProgress) return;
-      _requestInProgress = true;
-      var btn = document.getElementById('btn-request-go');
-      btn.disabled = true;
-      btn.textContent = 'Submitting...';
-      var org = document.getElementById('rq-org').value.trim();
-      var repos = document.getElementById('rq-repos').value.trim();
-      var primary = document.getElementById('rq-primary').value.trim();
-      var level = parseInt(document.getElementById('rq-level').value) || 1;
-      var forge = requestForgeValue();
-
-      function abort(msg) {
-        hiveToast(msg, 'error');
-        _requestInProgress = false;
-        btn.disabled = false;
-        btn.textContent = 'Submit Request';
-      }
-
-      if (!org || !repos) { abort('Org and repos are required'); return; }
-      /* The forge is required client-side for a fast, in-context error; the
-         server enforces it independently — this check is UX, not security. */
-      if (!forge) { abort('A GitHub forge is required — pick one or enter the host your org lives on'); return; }
-
-      try {
-        var resp = await fetch('/api/saas/request-provision', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({org: org, github_host: forge, repos: repos, primary_repo: primary || repos.split(',')[0].trim(), acmm_level: level})
-        });
-        var data = await resp.json();
-        if (!resp.ok) { hiveToast(data.error || 'Request failed', 'error'); return; }
-        document.getElementById('request-modal').style.display = 'none';
-        hiveToast('Provision request submitted — awaiting admin approval', 'success');
-        loadHives();
-      } catch(e) { hiveToast('Error: ' + e.message, 'error'); }
-      finally { _requestInProgress = false; btn.disabled = false; btn.textContent = 'Submit Request'; }
-    }
 
     // --- Cluster Health Panel ---
     var CLUSTER_HEALTH_POLL_MS = 30000;
@@ -12919,10 +13030,6 @@ const dashboardHTML = `<!DOCTYPE html>
         if (!resp.ok) return;
         var clusters = await resp.json();
         _clusterList = clusters || [];
-        /* Refresh the Request-a-Hive forge picker: the cluster list usually
-           lands after first render, and the picker's whole value is listing the
-           forges the hub can actually place a hive on. */
-        renderRequestForgeOptions();
         var sel = document.getElementById('f-cluster');
         if (!sel || !clusters || !clusters.length) return;
         sel.innerHTML = clusters.map(function(c) {
@@ -13194,7 +13301,73 @@ const dashboardHTML = `<!DOCTYPE html>
     var _adminLoaded = false;
     var _adminExpandedUsers = {};
     var _hiveRegistry = [];
+    /* Lowercased usernames with a live hive session right now (admin payload).
+       Drives the green-dashed avatar border via avatarImg. Empty for non-admins. */
+    var _liveHiveUsers = new Set();
     var _userSortKey = 'created_at', _userSortAsc = false;
+
+    /* --- Collapsible "Hub Admin — Users" section ---
+       The roster runs to ~90 records, so an expanded users table pushes the
+       Hub Banner and Cluster Health sections far below the fold. An operator
+       is normally here for hives, not for the roster, so this follows the same
+       convention as the other long admin sections (Past Requests, Cluster
+       Health): collapsed by default, remembered per browser under the same
+       'hive-*-collapsed' localStorage key convention. Absent key means
+       collapsed; only an explicit 'false' expands, so a first visit and a
+       corrupted value behave identically. */
+    var ADMIN_USERS_COLLAPSED_KEY = 'hive-admin-users-collapsed';
+    var _adminUsersCollapsed = localStorage.getItem(ADMIN_USERS_COLLAPSED_KEY) !== 'false';
+
+    /* applyAdminUsersCollapsed pushes _adminUsersCollapsed onto the DOM. Split
+       out from the toggle so the initial render and expandAdminUsersSection()
+       can restore state without duplicating the show/hide + aria bookkeeping. */
+    function applyAdminUsersCollapsed() {
+      var body = document.getElementById('admin-users-body');
+      var toggle = document.getElementById('admin-users-toggle');
+      var header = document.getElementById('admin-users-header');
+      if (body) body.style.display = _adminUsersCollapsed ? 'none' : '';
+      /* ▸ collapsed / ▾ expanded */
+      if (toggle) toggle.innerHTML = _adminUsersCollapsed ? '&#9656;' : '&#9662;';
+      if (header) header.setAttribute('aria-expanded', _adminUsersCollapsed ? 'false' : 'true');
+    }
+
+    /* persistAdminUsersCollapsed writes the current state. localStorage throws
+       under private-browsing quota; collapsing must still work in-session, so
+       the write is best-effort. */
+    function persistAdminUsersCollapsed() {
+      try {
+        localStorage.setItem(ADMIN_USERS_COLLAPSED_KEY, _adminUsersCollapsed ? 'true' : 'false');
+      } catch(e) {}
+    }
+
+    function toggleAdminUsers() {
+      _adminUsersCollapsed = !_adminUsersCollapsed;
+      persistAdminUsersCollapsed();
+      applyAdminUsersCollapsed();
+    }
+
+    /* expandAdminUsersSection opens the section and PERSISTS that, mirroring
+       expandAllHiveSections (#2348). Anything that reveals a row inside this
+       section must go through here rather than flipping display directly: an
+       in-memory-only expand silently re-collapses on the next reload, so the
+       row the operator was just sent to would vanish again. */
+    function expandAdminUsersSection() {
+      if (!_adminUsersCollapsed) return;
+      _adminUsersCollapsed = false;
+      persistAdminUsersCollapsed();
+      applyAdminUsersCollapsed();
+    }
+
+    /* The count beside the header is the only signal of roster size while the
+       section is collapsed, so it is kept current on every render. */
+    function updateAdminUsersCount(shown, total) {
+      var el = document.getElementById('admin-users-count');
+      if (!el) return;
+      var n = Number(total) || 0;
+      el.textContent = (Number(shown) === n)
+        ? '(' + n + ')'
+        : '(' + (Number(shown) || 0) + ' of ' + n + ')';
+    }
 
     function fmtUserTS(ts) {
       if (!ts) return '';
@@ -13239,6 +13412,7 @@ const dashboardHTML = `<!DOCTYPE html>
         if (typeof va === 'number' && typeof vb === 'number') return _userSortAsc ? va - vb : vb - va;
         return _userSortAsc ? String(va).localeCompare(String(vb)) : String(vb).localeCompare(String(va));
       });
+      updateAdminUsersCount(sorted.length, (_allUsers || []).length);
       renderUsers(sorted, true);
     }
 
@@ -13259,6 +13433,10 @@ const dashboardHTML = `<!DOCTYPE html>
         }
         _adminLoaded = true;
         document.getElementById('admin-section').style.display = '';
+        /* The section is display:none until the admin check passes, so this is
+           the first point at which the persisted collapse state can be pushed
+           onto real DOM. Idempotent, so running it on every poll is fine. */
+        applyAdminUsersCollapsed();
         document.getElementById('hub-banner-section').style.display = '';
         document.getElementById('btn-send-banner-top').style.display = '';
         loadActiveBanner();
@@ -13419,10 +13597,63 @@ const dashboardHTML = `<!DOCTYPE html>
       var summary = bits.length
         ? '<div style="display:flex;flex-direction:column;align-items:flex-start;text-align:left;gap:1px;max-width:220px;overflow:hidden">' + bits.join('') + '</div>'
         : '<span style="color:var(--muted);font-size:0.72rem">—</span>';
+      var open = !!(_contactExpandedUsers && _contactExpandedUsers[u.github_username]);
       var btn = '<button type="button" data-contact-toggle="' + escAttr(u.github_username) + '"' +
-        ' style="margin-top:2px;padding:1px 7px;background:none;border:1px solid var(--border);border-radius:4px;' +
-        'color:var(--muted);cursor:pointer;font-size:0.65rem">Edit</button>';
+        ' id="' + contactToggleId(u.github_username) + '"' +
+        ' aria-controls="' + contactPanelId(u.github_username) + '"' +
+        ' aria-expanded="' + (open ? 'true' : 'false') + '"' +
+        ' aria-label="' + escAttr(contactToggleAriaLabel(u.github_username, open)) + '"' +
+        ' style="' + contactToggleStyle(open) + '">' + contactToggleLabel(open) + '</button>';
       return summary + btn;
+    }
+
+    /* --- The Edit/Save toggle ---
+       The button in the CONTACT column is the operator's primary affordance:
+       "Edit" while the panel is shut, "Save" while it is open. Clicking Save
+       commits every pending field and closes the panel.
+
+       Save is styled as the primary action (accent border and text) so the eye
+       lands on it; the × and the Close button inside the panel remain the
+       escape hatches, and Escape still works. Making the row button the commit
+       is what gives an explicit save point WITHOUT fighting the per-field blur
+       saves: blur keeps storing silently as the admin tabs around, and this
+       button is the only thing that closes on success. */
+
+    /* Style is derived from state in one place so the initial markup and the
+       live in-place update below can never drift apart. */
+    function contactToggleStyle(open) {
+      var color = open ? 'var(--accent)' : 'var(--muted)';
+      return 'margin-top:2px;padding:1px 7px;background:none;border:1px solid ' + color +
+        ';border-radius:4px;color:' + color + ';cursor:pointer;font-size:0.65rem' +
+        (open ? ';font-weight:600' : '');
+    }
+
+    function contactToggleLabel(open) { return open ? 'Save' : 'Edit'; }
+
+    /* The accessible name carries the username as well as the verb, because a
+       screen-reader user tabbing a table of ~90 identical "Save" buttons needs
+       to know which row they are on. */
+    function contactToggleAriaLabel(username, open) {
+      return (open ? 'Save contact details for ' : 'Edit contact details for ') + String(username || '');
+    }
+
+    function contactToggleId(username) {
+      return 'contact-toggle-' + String(username || '').replace(/[^A-Za-z0-9_-]/g, '_');
+    }
+
+    /* refreshContactToggleLabel re-derives the button from _contactExpandedUsers
+       and writes label, style, aria-expanded and the accessible name TOGETHER.
+       Updating the visible text without the aria state would leave a screen
+       reader announcing "Edit, collapsed" over an open editor. */
+    function refreshContactToggleLabel(username) {
+      if (!username) return;
+      var btn = document.getElementById(contactToggleId(username));
+      if (!btn) return;
+      var open = !!(_contactExpandedUsers && _contactExpandedUsers[username]);
+      btn.textContent = contactToggleLabel(open);
+      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      btn.setAttribute('aria-label', contactToggleAriaLabel(username, open));
+      btn.setAttribute('style', contactToggleStyle(open));
     }
 
     // renderContactPanelRow is the expandable editor row that follows each user
@@ -13434,7 +13665,8 @@ const dashboardHTML = `<!DOCTYPE html>
       var lbl = 'display:block;font-size:0.66rem;color:var(--muted);margin-bottom:3px;text-transform:uppercase;letter-spacing:0.04em';
       var user = escAttr(u.github_username);
       return '<tr id="' + contactPanelId(u.github_username) + '" style="display:' + (open ? '' : 'none') + '">' +
-        '<td class="contact-panel-cell" colspan="' + USERS_TABLE_COLSPAN + '" style="background:var(--surface)">' +
+        /* position:relative anchors the absolutely-positioned × below. */
+        '<td class="contact-panel-cell" colspan="' + USERS_TABLE_COLSPAN + '" style="background:var(--surface);position:relative">' +
         '<div style="padding:10px 14px 12px 40px;display:flex;gap:14px;flex-wrap:wrap;align-items:flex-start">' +
           '<div style="flex:1 1 ' + CONTACT_W_NAME_BASIS + ';min-width:' + CONTACT_W_NAME_MIN + '">' +
             '<label style="' + lbl + '">Full name</label>' +
@@ -13451,9 +13683,137 @@ const dashboardHTML = `<!DOCTYPE html>
             '<textarea data-contact-user="' + user + '" data-contact-field="notes" rows="' + CONTACT_NOTES_ROWS + '"' +
               ' maxlength="' + CONTACT_MAX_NOTES + '" style="' + fld + ';resize:vertical;font-family:inherit">' + esc(u.notes || '') + '</textarea>' +
           '</div>' +
-          '<div style="align-self:flex-end;font-size:0.65rem;color:var(--muted);padding-bottom:6px">Saves on blur</div>' +
-        '</div></td></tr>';
+          '<div style="align-self:flex-end;display:flex;align-items:center;gap:10px;padding-bottom:4px">' +
+            '<span style="font-size:0.65rem;color:var(--muted)">Save closes &middot; Esc cancels</span>' +
+            '<button type="button" data-contact-close="' + user + '"' +
+              ' style="padding:4px 12px;background:var(--bg);border:1px solid var(--border);border-radius:4px;' +
+              'color:var(--muted);cursor:pointer;font-size:0.7rem">Cancel</button>' +
+          '</div>' +
+        '</div>' +
+        /* The × sits top-right of the panel, the conventional place to look for
+           a dismiss control, and duplicates the Close button so the affordance
+           is visible without reading to the end of a wide row. */
+        '<button type="button" data-contact-close="' + user + '" aria-label="Close editor for ' + user + '"' +
+          ' style="position:absolute;top:6px;right:10px;background:none;border:none;color:var(--muted);' +
+          'cursor:pointer;font-size:1rem;line-height:1;padding:2px 6px">&#10005;</button>' +
+        '</td></tr>';
     }
+
+    /* contactPanelHasUnsavedEdits reports whether anything in this user's panel
+       has been typed but not yet handed to the save path. The fields save on
+       blur, so text that has never been blurred lives ONLY in the DOM node —
+       closing the panel without a warning would be real data loss. */
+    function contactPanelHasUnsavedEdits(username) {
+      if (!username) return false;
+      for (var k in _contactDirty) {
+        if (Object.prototype.hasOwnProperty.call(_contactDirty, k) &&
+            k.indexOf(username + '::') === 0) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    /* closeContactPanel is the single exit for the editor: the ×, the Close
+       button, Escape, and a successful save all funnel through here.
+
+       Unsaved text is committed rather than discarded when the admin confirms:
+       blur normally saves, but Escape and the × can fire while a field still
+       has focus and has never blurred, so the value would otherwise be lost. */
+    async function closeContactPanel(username, opts) {
+      if (!username) return;
+      var force = !!(opts && opts.force);
+      if (!force && contactPanelHasUnsavedEdits(username)) {
+        var keep = await hiveConfirm('You have unsaved changes for ' + username +
+          '. Save them and close?');
+        if (!keep) return;
+        /* Save first, and close only if the save actually landed. A failed
+           save keeps the editor open with the typed text still in the fields
+           so the admin can read the toast, fix the cause and retry — closing
+           here would discard the very edit the server just rejected. */
+        var saved = await commitContactPanelEdits(username);
+        if (!saved) return;
+      }
+      setContactPanelOpen(username, false);
+    }
+
+    /* commitContactPanelEdits flushes every dirty field for one user through
+       the normal save path and resolves true only when every one succeeded.
+       saveContactField is a no-op for unchanged values, so this is safe to
+       call broadly. Dirty marks are cleared only for fields that saved, so a
+       rejected field stays dirty and the poll keeps backing off rather than
+       rebuilding the table over text the admin has not managed to store. */
+    async function commitContactPanelEdits(username) {
+      var prefix = username + '::';
+      var keys = Object.keys(_contactDirty || {}).filter(function(k) {
+        return k.indexOf(prefix) === 0;
+      });
+      /* Also flush whatever is currently in the panel's inputs. The commit can
+         be triggered by a click on Save while a field still holds focus and has
+         never blurred, so its text may not be in _contactDirty yet. */
+      var panel = document.getElementById(contactPanelId(username));
+      if (panel) {
+        var live = panel.querySelectorAll('[data-contact-field]');
+        Array.prototype.forEach.call(live || [], function(el) {
+          var f = el.getAttribute('data-contact-field');
+          if (!f) return;
+          var k = prefix + f;
+          _contactDirty[k] = el.value;
+          if (keys.indexOf(k) < 0) keys.push(k);
+        });
+      }
+      /* Saves are sequential, not Promise.all: the handler is a read-modify-write
+         over one JSON file per user, so three concurrent PUTs for the same user
+         can interleave and lose a field. */
+      var allOK = true;
+      for (var i = 0; i < (keys || []).length; i++) {
+        var k = keys[i];
+        var field = k.substring(prefix.length);
+        /* Not silent: this IS the explicit commit, so a failure here is exactly
+           what the admin needs to see. */
+        var ok = await saveContactField(username, field, _contactDirty[k]);
+        if (ok) { delete _contactDirty[k]; } else { allOK = false; }
+      }
+      /* A field can be clean here yet still have failed earlier during a silent
+         blur-save. Surface that recorded reason rather than closing on what
+         would look like a no-op success. */
+      if (allOK && _contactLastError[username]) {
+        hiveToast('Could not save ' + username + ': ' + _contactLastError[username], 'error');
+        return false;
+      }
+      return allOK;
+    }
+
+    /* openContactPanelUsername returns the username of the contact editor that
+       currently owns focus, or '' when focus is elsewhere. Escape must only
+       close the editor the admin is actually working in — a stray Escape with
+       focus on the page body should fall through to the global handler that
+       closes create-modal and friends (#2321). */
+    function openContactPanelUsername() {
+      var active = document.activeElement;
+      if (!active || !active.closest) return '';
+      var cell = active.closest('.contact-panel-cell');
+      if (!cell) return '';
+      var field = cell.querySelector('[data-contact-user]');
+      return field ? (field.getAttribute('data-contact-user') || '') : '';
+    }
+
+    /* Escape-to-close for the contact editor. Registered in the CAPTURE phase
+       so it can decide before the global Escape handler (#2321) runs, and it
+       stops propagation ONLY when it actually closed an editor — otherwise the
+       global handler keeps its existing behaviour for create-modal, the
+       request modal, the confirm overlay and the timeline/access modals. */
+    document.addEventListener('keydown', function(e) {
+      if (e.key !== 'Escape') return;
+      /* hiveConfirm puts a modal overlay on top and binds its own Escape; while
+         one is up it owns the key, so never steal it. */
+      if (document.querySelector('.hive-confirm-overlay')) return;
+      var username = openContactPanelUsername();
+      if (!username) return;
+      e.stopPropagation();
+      e.preventDefault();
+      closeContactPanel(username);
+    }, true);
 
     // bindContactPanels attaches listeners after renderUsers writes the table.
     // Listeners rather than inline on* attributes: esc() leaves apostrophes
@@ -13467,6 +13827,16 @@ const dashboardHTML = `<!DOCTYPE html>
       Array.prototype.forEach.call(toggles || [], function(btn) {
         btn.addEventListener('click', function() {
           toggleContactPanel(btn.getAttribute('data-contact-toggle'));
+        });
+      });
+      /* The × and the Close button share data-contact-close, so one binding
+         covers both. Bound here rather than as inline on* attributes for the
+         same reason as the toggles: nothing user-controlled is interpolated
+         into executable markup. */
+      var closers = container.querySelectorAll('[data-contact-close]');
+      Array.prototype.forEach.call(closers || [], function(btn) {
+        btn.addEventListener('click', function() {
+          closeContactPanel(btn.getAttribute('data-contact-close'));
         });
       });
       var fields = container.querySelectorAll('[data-contact-field]');
@@ -13493,42 +13863,96 @@ const dashboardHTML = `<!DOCTYPE html>
         el.addEventListener('focus', markContactEditing);
         // Save on blur so an admin can tab between fields and type freely
         // without a request per keystroke.
+        //
+        // Blur-saves are SILENT: no toast on success, and on failure the value
+        // stays dirty so the field keeps the typed text and the Save button
+        // keeps reading "Save". Blur fires constantly (tabbing between the
+        // three fields, clicking the Save button itself), so a toast per blur
+        // would be noise, and a blur-triggered error would fire while the
+        // admin is mid-sentence in the next field. The Save button is the
+        // explicit commit point where failures are reported — see
+        // commitContactPanelEdits.
         el.addEventListener('blur', function() {
           markContactEditing();
-          // Clear dirty only after handing the value to the save path, so
-          // there is no window where the value is neither dirty nor saved.
+          // Clear dirty only once the save has actually landed, so there is no
+          // window where the value is neither dirty nor stored. A rejected
+          // blur-save therefore leaves the panel dirty and Save still armed.
           var pending = el.value;
-          saveContactField(user, field, pending);
-          delete _contactDirty[key];
+          saveContactField(user, field, pending, {silent: true}).then(function(ok) {
+            if (ok && _contactDirty[key] === pending) delete _contactDirty[key];
+            refreshContactToggleLabel(user);
+          });
         });
       });
     }
 
-    function toggleContactPanel(username) {
+    /* The row button is stateful: "Edit" when shut, "Save" when open.
+
+       Shut  -> open the panel (a plain display flip, which is what keeps focus
+                and caret intact) and relabel to Save.
+       Open  -> this IS the Save action: commit every pending field, and close
+                only if the commit succeeded. A failure keeps the panel open,
+                keeps the label on Save, and lets the error toast stand — with
+                a visible Save button, a false success is the worst outcome, so
+                nothing here closes on an unverified save.
+
+       Note this deliberately does NOT go through closeContactPanel: that path
+       is for the escape hatches (×, Close, Escape), where the right question is
+       "you have unsaved changes, save them?". Pressing Save has already
+       answered that question. */
+    async function toggleContactPanel(username) {
       if (!username) return;
-      _contactExpandedUsers[username] = !_contactExpandedUsers[username];
+      if (_contactExpandedUsers[username]) {
+        var saved = await commitContactPanelEdits(username);
+        if (!saved) return;
+        setContactPanelOpen(username, false);
+        return;
+      }
+      setContactPanelOpen(username, true);
+    }
+
+    /* setContactPanelOpen is the ONLY place panel visibility changes, so the
+       row/panel display and the button's label + aria state can never fall out
+       of step with _contactExpandedUsers. */
+    function setContactPanelOpen(username, open) {
+      _contactExpandedUsers[username] = !!open;
       var row = document.getElementById(contactPanelId(username));
-      if (row) row.style.display = _contactExpandedUsers[username] ? '' : 'none';
+      if (row) row.style.display = open ? '' : 'none';
+      refreshContactToggleLabel(username);
     }
 
     // Last value saved per user+field, so a blur that changed nothing (tabbing
     // through, or a re-render restoring focus) does not fire a pointless PUT.
     var _contactLastSaved = {};
 
-    function saveContactField(username, field, value) {
-      if (!username || !field) return;
+    // Always returns a Promise<boolean> so callers can sequence on the outcome;
+    // a no-op resolves true because "nothing to do" is not a failure.
+    // opts.silent suppresses the failure toast, for blur-saves where the Save
+    // button is the reporting point. The boolean result is unaffected.
+    function saveContactField(username, field, value, opts) {
+      if (!username || !field) return Promise.resolve(true);
       var key = username + '::' + field;
       var current = _allUsers ? (_allUsers.find(function(x) { return x.github_username === username; }) || {}) : {};
       var previous = (_contactLastSaved[key] !== undefined) ? _contactLastSaved[key] : (current[field] || '');
       var next = (value || '').trim();
-      if (next === previous) return;
+      if (next === previous) return Promise.resolve(true);
       _contactLastSaved[key] = next;
       // Keep the in-memory copy in step so the next poll's signature check does
       // not treat our own edit as an external change and re-render mid-typing.
       if (current) current[field] = next;
       var payload = {};
       payload[field] = next;
-      updateUser(username, payload);
+      // On failure, roll the optimistic bookkeeping back to the previous value.
+      // Without this the cache claims the value was stored, so the
+      // next-equals-previous short-circuit above would skip the retry of the very
+      // same value — the edit could never be saved again without a reload.
+      return updateUser(username, payload, opts).then(function(ok) {
+        if (!ok) {
+          _contactLastSaved[key] = previous;
+          if (current) current[field] = previous;
+        }
+        return ok;
+      });
     }
 
     // scheduleDeferredUsersRender keeps re-checking until editing has stopped
@@ -13548,6 +13972,143 @@ const dashboardHTML = `<!DOCTYPE html>
         // current data and not whatever the poll saw minutes ago.
         try { applySortUsers(); } catch (e) { console.error('deferred renderUsers error:', e); }
       }, CONTACT_DEFER_RECHECK_MS);
+    }
+
+    /* ── User engagement / lifecycle card ────────────────────────────────
+       Shown on hover of a user's name in the admin Users table. It exists to
+       answer one operator question — "what should I DO with this person?" — from
+       real signals rather than a single last-login date:
+         • ELEVATE   — logging in, real time in their hive, tasks landing, and a
+                       hive resting at its ACMM level (ready to graduate).
+         • NEEDS HELP— logs in but stuck on an early journey stage or barely any
+                       activity; a journey nudge is the lever.
+         • AT RISK   — assigned a hive yet ~no logins, ~no hive time, no tasks, or
+                       a hive already at deprovision-warning; pressure / reclaim.
+       The verdict is ADVISORY: it classifies and points at existing levers (ACMM,
+       journey snooze/nudge, de-provision) — it changes no state. All inputs are
+       admin-only (this table is requireAdmin, and leaderboard is scrubbed for
+       non-admins server-side). */
+    var USERSTAT_ACTIVE_LOGIN_MIN = 3;        // logins that count as "engaged"
+    var USERSTAT_ACTIVE_HOURS_MIN = 1;        // hive-hours that count as "engaged"
+    var USERSTAT_SECS_PER_HOUR = 3600;
+
+    /* userTaskActivity sums this user's per-hive leaderboard entries across every
+       hive in _hiveRegistry, matching on github_username. leaderboard is present
+       only for an admin (scrubbed otherwise), so a non-admin simply gets zeros. */
+    function userTaskActivity(username) {
+      var done = 0, failed = 0, activeNow = false;
+      (_hiveRegistry || []).forEach(function(h) {
+        (h.leaderboard || []).forEach(function(e) {
+          if (e && e.github_username === username) {
+            done += (e.tasksCompleted || e.TasksCompleted || 0);
+            failed += (e.tasksFailed || e.TasksFailed || 0);
+            if (e.active || e.Active) activeNow = true;
+          }
+        });
+      });
+      return {done: done, failed: failed, activeNow: activeNow};
+    }
+
+    /* userHiveJourneys returns [{name, role, journey, acmm, worstSeverity}] for the
+       user's known hives, reusing _hiveRegistry (which carries journey + acmmLevel
+       per hive). Used both to render per-hive badges and to derive the verdict. */
+    function userHiveJourneys(u) {
+      var hivesObj = u.hives || {};
+      var out = [];
+      Object.keys(hivesObj).forEach(function(hid) {
+        var reg = (_hiveRegistry || []).find(function(h) { return h.id === hid; });
+        if (!reg) return;
+        out.push({
+          id: hid,
+          name: reg.name || hid,
+          role: hivesObj[hid],
+          journey: reg.journey || null,
+          acmm: reg.acmmLevel || reg.acmm_level || 0
+        });
+      });
+      return out;
+    }
+
+    /* userVerdict derives the lifecycle recommendation from the engagement signals
+       and the user's hives' journey stages. Returns {key, label, color, tip}. */
+    function userVerdict(u, act, hives) {
+      var logins = u.login_count || 0;
+      var hours = (u.session_seconds || 0) / USERSTAT_SECS_PER_HOUR;
+      var anyDeprovision = hives.some(function(h) { return h.journey && h.journey.severity === 'deprovision-warning'; });
+      var anyEarlyStage = hives.some(function(h) { return h.journey && (h.journey.stage === 'github-app' || h.journey.stage === 'method-model'); });
+      var anyRestingACMM = hives.some(function(h) { return h.journey && h.journey.stage === 'acmm-level'; });
+      var engaged = logins >= USERSTAT_ACTIVE_LOGIN_MIN && hours >= USERSTAT_ACTIVE_HOURS_MIN;
+      var dormant = hives.length > 0 && logins <= 1 && hours < 0.25 && act.done === 0;
+
+      if (dormant || anyDeprovision) {
+        return {key: 'at-risk', label: 'At risk — pressure or de-provision', color: 'var(--red)',
+          tip: 'Assigned a hive but little/no engagement (or already at a de-provision warning). Consider a firm nudge or reclaiming the spoke.'};
+      }
+      if (engaged && act.done > 0 && anyRestingACMM) {
+        return {key: 'elevate', label: 'Elevate — ready to graduate', color: 'var(--green)',
+          tip: 'Active, spending real time in their hive, and tasks are landing while a hive rests at its ACMM level. Good candidate to raise autonomy / quota.'};
+      }
+      if (anyEarlyStage || act.done === 0) {
+        return {key: 'needs-help', label: 'Needs help — nudge the journey', color: 'var(--accent)',
+          tip: 'Signed in but stuck early on the adoption path or barely any activity. A journey nudge (not auto-sent) is the lever.'};
+      }
+      return {key: 'on-track', label: 'On track', color: 'var(--muted)',
+        tip: 'Engaged and progressing; nothing to do.'};
+    }
+
+    function fmtHours(secs) {
+      var h = (secs || 0) / USERSTAT_SECS_PER_HOUR;
+      if (h <= 0) return '—';
+      if (h < 1) return (Math.round(h * 10) / 10) + ' h';
+      return (Math.round(h * 10) / 10).toString().replace(/\.0$/, '') + ' h';
+    }
+
+    function renderUserStatsCard(u, hasPendingReq) {
+      var act = userTaskActivity(u.github_username);
+      var hives = userHiveJourneys(u);
+      var verdict = userVerdict(u, act, hives);
+      var row = function(k, v) {
+        return '<div style="display:flex;justify-content:space-between;gap:12px;padding:1px 0">' +
+          '<span style="color:var(--muted)">' + esc(k) + '</span>' +
+          '<span style="color:var(--text);text-align:right">' + v + '</span></div>';
+      };
+      var liveDot = act.activeNow
+        ? '<span title="active on a task now" style="display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--green);margin-left:6px;vertical-align:middle"></span>'
+        : '';
+      var stats =
+        row('Hub logins', esc(String(u.login_count || 0)) + (u.last_login ? ' <span style="color:var(--muted)">(last ' + esc(fmtUserTS(u.last_login)) + ')</span>' : '')) +
+        row('Time in hive', esc(fmtHours(u.session_seconds))) +
+        row('Joined', esc(fmtUserTS(u.created_at))) +
+        row('Tasks', esc(String(act.done)) + ' done / ' + esc(String(act.failed)) + ' failed' + liveDot);
+
+      var hiveLines = hives.length
+        ? hives.map(function(h) {
+            return '<div style="display:flex;align-items:center;gap:6px;padding:2px 0">' +
+              '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(h.name) + '</span>' +
+              '<span style="color:var(--muted);font-size:0.62rem">' + esc(h.role) + '</span>' +
+              journeyBadge(h.journey) + '</div>';
+          }).join('')
+        : '<div style="color:var(--muted)">No hives assigned</div>';
+
+      var verdictBlock = '<div style="margin:6px 0 2px;padding:4px 6px;border-radius:6px;border:1px solid ' + verdict.color + ';color:' + verdict.color + ';font-weight:700" title="' + escAttr(verdict.tip) + '">' + esc(verdict.label) + '</div>';
+
+      // Assign flow relocated here as an explicit button — the click that used to
+      // live on the (now inert) name. Approve-vs-assign copy mirrors the old title.
+      var assignBtn = '<button onclick="openAssignForUser(\'' + escAttr(u.github_username) + '\');return false" ' +
+        'style="margin-top:6px;width:100%;padding:5px 8px;border:1px solid var(--accent);background:transparent;color:var(--accent);border-radius:6px;cursor:pointer;font-size:0.72rem;font-weight:600">' +
+        (hasPendingReq ? 'Approve request &amp; assign a hive' : 'Assign an available hive') + '</button>';
+
+      return '<span class="hive-access-pop" style="display:none;position:absolute;left:0;top:calc(100% + 6px);z-index:60;' +
+        'min-width:240px;max-width:320px;padding:9px 11px;border-radius:8px;border:1px solid var(--border);' +
+        'background:var(--surface);box-shadow:0 6px 20px rgba(0,0,0,0.35);font-size:0.72rem;text-align:left;font-weight:400;white-space:normal">' +
+        '<div style="font-weight:700;margin-bottom:4px">' + esc(u.github_username) + '</div>' +
+        verdictBlock +
+        stats +
+        '<span style="display:block;border-top:1px solid var(--border);margin:6px 0 4px"></span>' +
+        '<span style="display:block;color:var(--muted);font-size:0.62rem;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:4px">Hives &amp; journey</span>' +
+        hiveLines +
+        assignBtn +
+        '</span>';
     }
 
     function renderUsers(users, force) {
@@ -13593,20 +14154,21 @@ const dashboardHTML = `<!DOCTYPE html>
           hiveRows += '</tbody></table></div></td></tr>';
         }
 
-        /* Clicking the name opens the assign flow for this user (admin-only, and
-           the underlying endpoints re-check that server-side). The GitHub
-           profile is reachable via the avatar, so one click is not overloaded
-           with two destinations. The separate ↗ glyph that used to sit between
-           them is gone: it went to the same profile the face now links to, and
-           a 0.65rem arrow was a far smaller click target than the picture. A
-           pending provision request is called out because the click then
-           approves it rather than assigning a bare placeholder. */
+        /* The name no longer NAVIGATES. Hovering it opens an engagement/lifecycle
+           card (renderUserStatsCard) so an admin can read who is active enough to
+           elevate, who is stuck and needs a nudge, and who is dormant and at risk
+           of de-provision — WITHOUT a click that jumps somewhere. The old assign
+           flow moves INTO the card as an explicit button, so it is still one hover
+           away but never fires by accident. The GitHub profile stays on the avatar.
+           The wrapper reuses the hive-access-wrap/pop hover panel and carries NO
+           title= (TestUserStatsCardNoTitle / the single-hover-panel invariant). */
         var hasPendingReq = !!_provisionRequestsByUser[u.github_username];
         var nameCell = avatar +
-          '<a href="#" onclick="openAssignForUser(\'' + esc(u.github_username) + '\');return false" ' +
-          'title="' + (hasPendingReq ? 'Approve this user&#39;s pending request and assign a hive' : 'Assign an available hive to this user') + '" ' +
-          'style="color:var(--blue);cursor:pointer">' + esc(u.github_username) + '</a>' +
-          (hasPendingReq ? ' <span style="color:var(--accent);font-size:0.65rem" title="Has a pending provision request">&#9679; request</span>' : '');
+          '<span class="hive-access-wrap" style="position:relative;display:inline-flex;align-items:center;gap:4px;cursor:help">' +
+            '<span style="color:var(--text);font-weight:600">' + esc(u.github_username) + '</span>' +
+            (hasPendingReq ? ' <span style="color:var(--accent);font-size:0.65rem">&#9679; request</span>' : '') +
+            renderUserStatsCard(u, hasPendingReq) +
+          '</span>';
         return '<tr>' +
           '<td>' + nameCell + (isAdmin ? ' <span style="color:var(--accent);font-size:0.7rem">admin</span>' : '') + '</td>' +
           '<td style="font-size:0.75rem;color:var(--muted)">' + esc(fmtUserTS(u.created_at)) + '</td>' +
@@ -13629,15 +14191,68 @@ const dashboardHTML = `<!DOCTYPE html>
       bindContactPanels();
     }
 
-    async function updateUser(username, updates) {
+    /* updateUser previously ignored the response entirely: a 404/400/500 was
+       indistinguishable from success, so a rejected edit looked like it had
+       been saved until the next poll quietly reverted the field. It now checks
+       resp.ok and reports the server's reason, and returns a boolean so
+       callers can decide whether to close the editor.
+
+       readErrorMessage is used rather than a bare resp.json(): the handler
+       writes errors with writeJSONError so the body IS JSON, but a proxy or
+       middleware fault can still return HTML/plain text, and resp.json() on
+       that throws — which is exactly how #2348's handleAlertAck turned a real
+       cause into a generic "failed". */
+    async function readErrorMessage(resp, fallback) {
       try {
-        await fetch('/api/saas/admin/users/' + encodeURIComponent(username), {
+        var text = await resp.text();
+        if (text) {
+          try {
+            var parsed = JSON.parse(text);
+            if (parsed && parsed.error) return String(parsed.error);
+          } catch(je) {
+            /* Not JSON — show the raw text, which is still more useful than
+               a bare status code. */
+            return text.trim().substring(0, ERROR_TEXT_MAX_CHARS);
+          }
+        }
+      } catch(e) {}
+      return fallback + ' (HTTP ' + resp.status + ')';
+    }
+
+    /* Longest slice of a non-JSON error body shown in a toast. Long enough for
+       a real proxy/server message, short enough not to fill the screen. */
+    var ERROR_TEXT_MAX_CHARS = 200;
+
+    /* Reason for the most recent failed save, per user. A silent blur-save
+       records the cause here instead of toasting it, so the Save button can
+       report the REAL reason rather than a generic "failed" when the admin
+       finally commits. Cleared on any success for that user. */
+    var _contactLastError = {};
+
+    /* opts.silent suppresses the toast (blur-saves); the failure is still
+       recorded in _contactLastError and still returns false. */
+    async function updateUser(username, updates, opts) {
+      var silent = !!(opts && opts.silent);
+      function fail(reason) {
+        _contactLastError[username] = reason;
+        if (!silent) hiveToast('Could not save ' + username + ': ' + reason, 'error');
+        return false;
+      }
+      try {
+        var resp = await fetch('/api/saas/admin/users/' + encodeURIComponent(username), {
           method: 'PUT',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify(updates)
         });
+        if (!resp.ok) {
+          return fail(await readErrorMessage(resp, 'update failed'));
+        }
+        delete _contactLastError[username];
         loadAdminUsers();
-      } catch(e) { hiveToast('Error: ' + e.message, 'error'); }
+        return true;
+      } catch(e) {
+        return fail(e.message);
+      }
     }
 
     async function deleteUser(username, hiveCount) {
@@ -14364,45 +14979,6 @@ const dashboardHTML = `<!DOCTYPE html>
     </div>
   </div>
 
-  <div id="request-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:100;align-items:center;justify-content:center">
-    <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;max-width:540px;width:90%;max-height:90vh;display:flex;flex-direction:column">
-      <h2 style="font-size:1.3rem;padding:32px 32px 16px;margin:0;color:var(--accent);flex-shrink:0">Request a Hive</h2>
-      <div style="flex:1;overflow-y:auto;padding:0 32px">
-        <p style="font-size:0.8rem;color:var(--muted);margin-bottom:16px">Submit a request for a hosted hive. An admin will review and approve it.</p>
-        <div style="margin-bottom:12px">
-          <label style="display:block;font-size:0.8rem;color:var(--muted);margin-bottom:4px">GitHub Forge *</label>
-          <select id="rq-forge" style="width:100%;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.85rem"></select>
-          <input id="rq-forge-custom" type="text" placeholder="github.example.com" style="width:100%;margin-top:6px;display:none;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.85rem">
-          <div style="font-size:0.72rem;color:var(--muted);margin-top:4px">Which GitHub your org lives on. Required &#x2014; a bare org name does not say whether it is on github.com or a GitHub Enterprise instance.</div>
-        </div>
-        <div style="margin-bottom:12px">
-          <label style="display:block;font-size:0.8rem;color:var(--muted);margin-bottom:4px">GitHub Organization *</label>
-          <input id="rq-org" type="text" placeholder="my-org" style="width:100%;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.85rem">
-          <div id="rq-target-preview" style="font-size:0.75rem;color:var(--muted);margin-top:6px"></div>
-        </div>
-        <div style="margin-bottom:12px">
-          <label style="display:block;font-size:0.8rem;color:var(--muted);margin-bottom:4px">Repositories * <span style="font-size:0.7rem">(comma-separated)</span></label>
-          <input id="rq-repos" type="text" placeholder="repo1, repo2" style="width:100%;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.85rem">
-        </div>
-        <div style="margin-bottom:12px">
-          <label style="display:block;font-size:0.8rem;color:var(--muted);margin-bottom:4px">Primary Repository</label>
-          <input id="rq-primary" type="text" placeholder="defaults to first repo" style="width:100%;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.85rem">
-        </div>
-        <div style="margin-bottom:12px">
-          <label style="display:block;font-size:0.8rem;color:var(--muted);margin-bottom:4px">ACMM Level</label>
-          <!-- Options are rendered by renderRequestLevelOptions() from
-               ACMM_LABELS/ACMM_TIPS so this picker can never drift from the
-               names the rest of the hub shows. Do not hardcode them here. -->
-          <select id="rq-level" style="width:100%;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.85rem"></select>
-          <div id="rq-level-desc" style="font-size:0.72rem;color:var(--muted);margin-top:6px"></div>
-        </div>
-      </div>
-      <div style="display:flex;gap:12px;justify-content:flex-end;padding:16px 32px;border-top:1px solid var(--border);flex-shrink:0">
-        <button onclick="document.getElementById('request-modal').style.display='none'" style="padding:8px 20px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--muted);cursor:pointer">Cancel</button>
-        <button id="btn-request-go" onclick="submitProvisionRequest()" class="btn-primary" style="background:var(--blue)">Submit Request</button>
-      </div>
-    </div>
-  </div>
 
   <script>
     var _accessHiveId = '';
