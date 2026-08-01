@@ -404,10 +404,16 @@ func (m *Manager) SetAgentMint(issuer AgentMintIssuer) {
 	m.agentMint = issuer
 }
 
-// agentMintIssuer returns the attached mint issuer, or nil if none is set.
-func (m *Manager) agentMintIssuer() AgentMintIssuer {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+// agentMintIssuerLocked reads the attached mint issuer WITHOUT taking m.mu, so
+// it is safe from callers that already hold m.mu (e.g. Start holds
+// m.mu.Lock()). m.agentMint is injected once via SetAgentMint at wiring time —
+// before any agent Start — and never mutated afterward, so the lock-free read is
+// race-free. A locked accessor would DEADLOCK on the Start path: Start →
+// issueAgentMintToken → (locked read) re-locks a non-reentrant RWMutex on the
+// same goroutine, wedging every Manager operation (SendKick, AllStatuses/
+// heartbeat, ResolveAgent) behind the held write lock → heartbeat stall →
+// liveness 503 → crash-loop.
+func (m *Manager) agentMintIssuerLocked() AgentMintIssuer {
 	return m.agentMint
 }
 
@@ -434,8 +440,12 @@ func AgentMintTokenCachePath(agentName string) string {
 // logged and swallowed — it NEVER blocks the GitHub App token path or the
 // launch. tier is the same trust tier used for the App token, so scopes stay
 // consistent across both credentials.
+// issueAgentMintToken resolves the mint issuer WITHOUT holding m.mu itself, so
+// it is safe to call from Start (which holds m.mu.Lock()). m.agentMint is set
+// once at wiring time and never mutated after agents start, so the lock-free
+// read is race-free. See agentMintIssuerLocked for the deadlock this avoids.
 func (m *Manager) issueAgentMintToken(agentName, tier string, agentUID int) {
-	issuer := m.agentMintIssuer()
+	issuer := m.agentMintIssuerLocked()
 	if issuer == nil || !issuer.Enabled() {
 		return
 	}
