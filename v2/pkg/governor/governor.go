@@ -32,22 +32,22 @@ type ModeChange struct {
 }
 
 type EvalSnapshot struct {
-	Timestamp     int64             `json:"t"`
-	Mode          Mode              `json:"govMode"`
-	QueueIssues   int               `json:"govIssues"`
-	QueuePRs      int               `json:"govPrs"`
-	QueueTotal    int               `json:"govTotal"`
-	QueueHold     int               `json:"govHold"`
-	QueueActive   int               `json:"govActive"`
-	SLAViolations int               `json:"sla_violations,omitempty"`
-	AgentsKicked  []string          `json:"agents_kicked,omitempty"`
-	Actionable    int               `json:"actionableCount"`
-	OpenPRs       int               `json:"openPrCount"`
-	Mergeable     int               `json:"mergeableCount"`
-	BeadsWorkers  int               `json:"beadsWorkers"`
-	BeadsSupervisor int             `json:"beadsSupervisor"`
-	Repos         map[string]RepoSnapshot `json:"repos,omitempty"`
-	AgentStats    map[string]map[string]any `json:"agentStats,omitempty"`
+	Timestamp       int64                     `json:"t"`
+	Mode            Mode                      `json:"govMode"`
+	QueueIssues     int                       `json:"govIssues"`
+	QueuePRs        int                       `json:"govPrs"`
+	QueueTotal      int                       `json:"govTotal"`
+	QueueHold       int                       `json:"govHold"`
+	QueueActive     int                       `json:"govActive"`
+	SLAViolations   int                       `json:"sla_violations,omitempty"`
+	AgentsKicked    []string                  `json:"agents_kicked,omitempty"`
+	Actionable      int                       `json:"actionableCount"`
+	OpenPRs         int                       `json:"openPrCount"`
+	Mergeable       int                       `json:"mergeableCount"`
+	BeadsWorkers    int                       `json:"beadsWorkers"`
+	BeadsSupervisor int                       `json:"beadsSupervisor"`
+	Repos           map[string]RepoSnapshot   `json:"repos,omitempty"`
+	AgentStats      map[string]map[string]any `json:"agentStats,omitempty"`
 }
 
 type RepoSnapshot struct {
@@ -378,6 +378,55 @@ func (g *Governor) agentsDueForKick() []string {
 	}
 
 	return due
+}
+
+// AgentEligibleForCELKick reports whether an agent selected by an ADDITIVE CEL
+// trigger rule (see pkg/celtrigger) may be kicked this cycle. It applies the
+// SAME hard gates as agentsDueForKick — cadence-pause, exhausted budget (unless
+// the agent is budget-exempt), on-demand, and the kick channel — so a CEL match
+// can never bypass a paused agent or an exhausted budget.
+//
+// It deliberately does NOT apply the cadence-DUE (interval-elapsed) check that
+// agentsDueForKick uses: a CEL rule is event-driven — the matching event IS the
+// trigger — so requiring the periodic interval to have elapsed would defeat the
+// purpose of declarative event routing. The other gates (pause/budget/on-demand)
+// are unconditional and are all still enforced here. This keeps CEL strictly
+// additive: it can only ever add an agent the governor's own gates already allow.
+func (g *Governor) AgentEligibleForCELKick(agentName string) bool {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	// Cadence-pause: an agent paused by the current mode is never kicked.
+	if cadence, ok := g.state.Cadences[agentName]; ok && cadence.Paused {
+		return false
+	}
+
+	// On-demand and non-kick-channel agents are never governor/event-kicked.
+	if ac, ok := g.agents[agentName]; ok {
+		if ac.OnDemand {
+			return false
+		}
+		if !ac.UsesGovernorKick() {
+			return false
+		}
+	}
+
+	// Budget gate: when the weekly budget is exhausted, only budget-exempt
+	// agents may still be kicked — identical to agentsDueForKick.
+	if g.budgetExhausted() {
+		exempt := false
+		for _, name := range g.budget.IgnoredAgents {
+			if name == agentName {
+				exempt = true
+				break
+			}
+		}
+		if !exempt {
+			return false
+		}
+	}
+
+	return true
 }
 
 func (g *Governor) RecordKick(agentName string) {

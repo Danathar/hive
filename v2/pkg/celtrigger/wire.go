@@ -29,13 +29,14 @@ func CompileFromConfig(cfg *config.Config) (*Engine, error) {
 
 // MatchAgents returns the de-duplicated agent names to trigger for the given
 // event, in priority order (highest first). It is the light integration point
-// the governor/pipeline can call alongside — not instead of — Hive's built-in
+// the governor/pipeline calls alongside — not instead of — Hive's built-in
 // label/governor triggering.
 //
-// TODO(celtrigger wire-in): call MatchAgents from the governor/pipeline event
-// path and union its result with the existing label-based agent selection.
-// Kept separate deliberately so this ships without ripping out current
-// triggering; enable it behind the additive `triggers:` config once validated.
+// Wired in: the governor eval cycle (cmd/hive, celMatchedAgents/runEvalCycle)
+// calls this per enumerated actionable item and UNIONS the result into the
+// due-agents set, after applying the governor's own pause/budget/on-demand
+// gates. It is enabled purely by the additive `triggers:` config — an empty
+// list yields a nil engine and this is never reached.
 func (e *Engine) MatchAgents(event NormalizedEvent) []string {
 	matched := e.Match(event)
 	if len(matched) == 0 {

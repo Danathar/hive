@@ -3894,6 +3894,26 @@ func runEvalCycle(
 	}
 	agentsDue = filteredDue
 
+	// ADDITIVE CEL routing: evaluate operator-defined CEL trigger rules
+	// (cfg.Triggers, pkg/celtrigger) against the items enumerated this cycle and
+	// UNION any matched, gated agents into agentsDue. This runs alongside — never
+	// instead of — the label/governor selection above: unionAgents only ever adds
+	// names, and celMatchedAgents enforces the same pause/budget/on-demand gates,
+	// so a CEL match can neither remove a governor-selected agent nor bypass a
+	// paused agent or exhausted budget. Fully guarded/cheap: with no `triggers:`
+	// configured, celEngineFor returns nil and celMatchedAgents does zero work.
+	if celEngine := celEngineFor(cfg, logger); celEngine != nil {
+		celAgents := celMatchedAgents(celEngine, actionable, cfg, gov, agentMgr.IsPaused, logger)
+		if len(celAgents) > 0 {
+			before := len(agentsDue)
+			agentsDue = unionAgents(agentsDue, celAgents)
+			if len(agentsDue) > before {
+				logger.Info("celtrigger: unioned CEL-matched agents into due set",
+					"added", agentsDue[before:], "cel_matched", celAgents)
+			}
+		}
+	}
+
 	sched.SetLastActionable(actionable)
 	if len(agentsDue) > 0 {
 		messages := sched.BuildKickMessages(actionable, agentsDue)
