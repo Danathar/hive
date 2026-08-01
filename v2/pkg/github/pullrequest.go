@@ -84,6 +84,77 @@ func (c *Client) CreatePR(ctx context.Context, repo, head, base, title, body str
 	return CreatePRResult{Number: pr.GetNumber(), URL: pr.GetHTMLURL()}, nil
 }
 
+// MergePRResult is what MergePR returns after a successful merge.
+type MergePRResult struct {
+	SHA     string // the resulting merge commit SHA
+	Merged  bool
+	Message string
+}
+
+// MergePR merges an open pull request on behalf of THIS hive's GitHub App, over
+// REST (PUT /repos/{owner}/{repo}/pulls/{n}/merge).
+//
+// This exists because the GitHub GraphQL `mergePullRequest` mutation — which the
+// GitHub MCP server's merge_pull_request tool issues — returns "Resource not
+// accessible by integration" for App installation tokens even when the token
+// holds contents:write + pull_requests:write. The equivalent REST call with the
+// SAME token succeeds. Routing merges through the hive over REST (mirroring the
+// hive-open-pr authorship relay) makes the merge deterministic and App-authored,
+// and sidesteps that GraphQL limitation.
+//
+// It does NOT force-merge: with admin bypass disabled, GitHub still enforces
+// branch protection (required checks like build-gate), so a PR whose required
+// checks are not green returns an error here rather than merging. mergeMethod
+// defaults to "squash" when empty. When expectSHA is non-empty it is passed as
+// the required head SHA, so the merge fails cleanly (409) instead of merging an
+// unexpected commit if the head moved after eligibility was computed.
+func (c *Client) MergePR(ctx context.Context, repo string, number int, mergeMethod, expectSHA string) (MergePRResult, error) {
+	if c == nil || c.client == nil {
+		return MergePRResult{}, ErrNoGitHubClient
+	}
+	owner := c.org
+	if parts := strings.SplitN(repo, "/", 2); len(parts) == 2 {
+		owner, repo = parts[0], parts[1]
+	}
+	if number <= 0 {
+		return MergePRResult{}, fmt.Errorf("MergePR: pr number is required")
+	}
+	if mergeMethod = strings.TrimSpace(mergeMethod); mergeMethod == "" {
+		mergeMethod = "squash"
+	}
+
+	opts := &gh.PullRequestOptions{MergeMethod: mergeMethod}
+	if expectSHA = strings.TrimSpace(expectSHA); expectSHA != "" {
+		opts.SHA = expectSHA
+	}
+	res, _, err := c.client.PullRequests.Merge(ctx, owner, repo, number, "", opts)
+	if err != nil {
+		return MergePRResult{}, fmt.Errorf("merging PR %s/%s#%d (%s): %w", owner, repo, number, mergeMethod, err)
+	}
+	c.logger.Info("MergePR: merged PR as the App bot over REST",
+		slog.String("repo", owner+"/"+repo), slog.Int("number", number),
+		slog.String("method", mergeMethod), slog.String("sha", res.GetSHA()))
+	return MergePRResult{SHA: res.GetSHA(), Merged: res.GetMerged(), Message: res.GetMessage()}, nil
+}
+
+// UpdateBranch syncs a PR's head branch with its base (PUT
+// /repos/{owner}/{repo}/pulls/{n}/update-branch), resolving the common
+// "behind main" case before a merge. Like MergePR it goes over REST as the App.
+func (c *Client) UpdateBranch(ctx context.Context, repo string, number int) error {
+	if c == nil || c.client == nil {
+		return ErrNoGitHubClient
+	}
+	owner := c.org
+	if parts := strings.SplitN(repo, "/", 2); len(parts) == 2 {
+		owner, repo = parts[0], parts[1]
+	}
+	_, _, err := c.client.PullRequests.UpdateBranch(ctx, owner, repo, number, nil)
+	if err != nil {
+		return fmt.Errorf("updating branch for PR %s/%s#%d: %w", owner, repo, number, err)
+	}
+	return nil
+}
+
 // findOpenPRForHead returns the open PR whose head branch matches, or nil. The
 // head filter is "owner:branch" per the GitHub API.
 func (c *Client) findOpenPRForHead(ctx context.Context, owner, repo, head string) (*gh.PullRequest, error) {

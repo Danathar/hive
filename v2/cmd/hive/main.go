@@ -1077,6 +1077,12 @@ func main() {
 		// the direct `gh pr create` path — the request-file route grants no extra
 		// privilege. A denied request is quarantined, never opened.
 		ghClient.StartPRRequestWatcher(ctx, agentMgr.AuthorizePROpen, nil)
+		// Merge relay: agents request merges by dropping a file (hive-merge)
+		// instead of calling the GitHub MCP merge_pull_request tool, whose GraphQL
+		// mutation GitHub rejects for App tokens ("Resource not accessible by
+		// integration"). The hive merges over REST with the App token, gated by
+		// the same forge-resistance + a CanMerge ACMM check.
+		ghClient.StartMergeRequestWatcher(ctx, agentMgr.AuthorizeMerge, nil)
 	}
 
 	// Opt-in mint credential: when mint.enabled, build a Minter from the config

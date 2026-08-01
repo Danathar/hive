@@ -263,3 +263,61 @@ func TestAuthorizePROpenHonoursExplicitAdvisoryMode(t *testing.T) {
 		t.Errorf("error = %q, want it to report the agent is not push-capable", err)
 	}
 }
+
+// ── AuthorizeMerge ──────────────────────────────────────────────────────────
+
+// TestAuthorizeMergeAllowsMergeCapableAgent: an agent whose mode grants merge
+// (ISSUES_PRS_MERGE), owning its request file, is authorized to merge.
+func TestAuthorizeMergeAllowsMergeCapableAgent(t *testing.T) {
+	m := testManager(acmmLevelPushCapable)
+	m.agents["scanner"] = &AgentProcess{Name: "scanner", Config: config.AgentConfig{Mode: "ISSUES_PRS_MERGE"}}
+	m.uidMap = &UIDMap{BaseUID: testUIDBase, Agents: map[string]int{"scanner": testUIDBase}}
+
+	if err := m.AuthorizeMerge("scanner", testUIDBase); err != nil {
+		t.Errorf("AuthorizeMerge() = %v, want nil (scanner mode ISSUES_PRS_MERGE is merge-capable)", err)
+	}
+}
+
+// TestAuthorizeMergeRejectsNonMergeAgent: an agent that can open PRs but is only
+// ISSUES_AND_PRS (not merge) must be denied — merging is a strictly higher gate.
+func TestAuthorizeMergeRejectsNonMergeAgent(t *testing.T) {
+	m := testManager(acmmLevelPushCapable)
+	m.agents["quality"] = &AgentProcess{Name: "quality", Config: config.AgentConfig{Mode: "ISSUES_AND_PRS"}}
+	m.uidMap = &UIDMap{BaseUID: testUIDBase, Agents: map[string]int{"quality": testUIDBase}}
+
+	err := m.AuthorizeMerge("quality", testUIDBase)
+	if err == nil {
+		t.Fatal("AuthorizeMerge() = nil, want denial: ISSUES_AND_PRS is push-capable but not merge-capable")
+	}
+	if !strings.Contains(err.Error(), "not merge-capable") {
+		t.Errorf("error = %q, want it to report the agent is not merge-capable", err)
+	}
+}
+
+// TestAuthorizeMergeRejectsForgedAgentName: the same forge anchor as PR-open —
+// an agent may not merge using a request file owned by a different agent.
+func TestAuthorizeMergeRejectsForgedAgentName(t *testing.T) {
+	m := testManager(acmmLevelPushCapable)
+	m.agents["scanner"] = &AgentProcess{Name: "scanner", Config: config.AgentConfig{Mode: "ISSUES_PRS_MERGE"}}
+	m.agents["quality"] = &AgentProcess{Name: "quality", Config: config.AgentConfig{Mode: "ISSUES_PRS_MERGE"}}
+	m.uidMap = &UIDMap{BaseUID: testUIDBase, Agents: map[string]int{
+		"scanner": testUIDBase,
+		"quality": testUIDBase + 1,
+	}}
+
+	err := m.AuthorizeMerge("scanner", testUIDBase+1) // file owned by quality's UID
+	if err == nil {
+		t.Fatal("AuthorizeMerge() = nil, want a denial: file owned by a different agent")
+	}
+	if !strings.Contains(err.Error(), "quality") {
+		t.Errorf("error = %q, want it to name the real owning agent", err)
+	}
+}
+
+// TestAuthorizeMergeRejectsEmptyAgentName: a request naming no agent is denied.
+func TestAuthorizeMergeRejectsEmptyAgentName(t *testing.T) {
+	m := testManager(acmmLevelPushCapable)
+	if err := m.AuthorizeMerge("  ", testUIDBase); err == nil {
+		t.Fatal("AuthorizeMerge(\"  \") = nil, want an error")
+	}
+}

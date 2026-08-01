@@ -36,6 +36,10 @@ type Client struct {
 	// per-agent ACMM write-policy + forge-resistance. nil fails closed. Set by
 	// StartPRRequestWatcher.
 	prAuthz PRRequestAuthorizer
+	// mergeAuthz gates merge requests from the merge-request watcher against the
+	// per-agent ACMM merge-policy (CanMerge) + forge-resistance. nil fails
+	// closed. Set by StartMergeRequestWatcher.
+	mergeAuthz MergeRequestAuthorizer
 }
 
 // GoGitHub returns the underlying go-github client for direct API access.

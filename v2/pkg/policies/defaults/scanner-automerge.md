@@ -89,23 +89,25 @@ ${MERGE_ELIGIBLE}
 
 ### Merge Process (sequential — each merge invalidates other PR branches)
 
+**Merge via `hive-merge`, NOT the GitHub MCP `merge_pull_request` tool.** The MCP tool merges over GraphQL, which GitHub rejects for the App bot ("Resource not accessible by integration") even though the App can merge. `hive-merge` routes the merge through the hive over REST (the path that works) and merges as the App bot. It never admin-bypasses branch protection — a PR whose required checks (e.g. `build-gate`) are not green will not merge.
+
 For each eligible PR:
-1. **Update branch first** — use MCP `update_pull_request_branch` to sync with main
-2. **Wait 10-15 seconds** for the branch update to propagate
-3. **Merge** — use MCP `merge_pull_request` with `merge_method: "squash"`
-4. If merge fails with "merge conflicts":
-   - Check if the conflict is trivial (e.g., lockfile, auto-generated) — if so, create a fixup commit via MCP `create_or_update_file` to resolve it, then retry
-   - If the conflict is in substantive code, skip the PR and move on
-5. Move to the next PR — **do NOT batch merges**, each one must be sequential
+1. **Merge** — run:
+   `hive-merge --repo <owner/repo> --number <N> --method squash --update-branch`
+   `--update-branch` syncs the PR with main first (resolves "behind main"). The hive merges within ~10s and writes the outcome to a `.result.json` next to the request.
+2. **Check the result** — read `/var/run/hive-metrics/merge-requests/<...>.result.json` (path is printed by `hive-merge`). `ok:true` = merged. `ok:false` with an error means the PR is blocked (failing required check, true conflict) — do NOT retry blindly; move on and, if CI is failing, fix it in the CI Repair step.
+3. Move to the next PR — **do NOT batch merges**, each one must be sequential (each merge invalidates other PR branches).
+
+Do NOT use `gh pr merge`, `gh pr merge --admin`, or the GitHub MCP `merge_pull_request`/`update_pull_request_branch` tools. Use `hive-merge` for merging and its `--update-branch` flag for branch sync.
 
 ### Resolving Merge Conflicts on Actionable PRs
 
 For PRs in the PR_LIST that have merge conflicts:
-1. Use MCP `update_pull_request_branch` — this resolves conflicts when the PR branch is simply behind main
-2. If update fails (true conflict), examine the conflicting files via MCP `get_file_contents`
-3. For simple conflicts (import order, lockfile, formatting): fix via MCP `create_or_update_file` on the PR branch
+1. Run `hive-merge --repo <owner/repo> --number <N> --update-branch` — the `--update-branch` sync resolves conflicts when the PR branch is simply behind main
+2. If the result shows the branch still can't update (true conflict), examine the conflicting files via MCP `get_file_contents`
+3. For simple conflicts (import order, lockfile, formatting): fix via MCP `create_or_update_file` on the PR branch, then re-run `hive-merge`
 4. For complex conflicts: add a comment explaining the conflict, skip the PR
-5. **NEVER use the gh CLI** — all GitHub operations go through MCP
+5. **Merging goes through `hive-merge` (REST via the hive); reads/edits go through MCP.** Do NOT use `gh pr merge` or the MCP merge/update-branch tools.
 
 Skip any PR with hold labels or `do-not-merge`.
 

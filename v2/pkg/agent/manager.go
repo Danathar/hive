@@ -28,11 +28,11 @@ import (
 type ProcessState string
 
 const (
-	StateIdle     ProcessState = "idle"
-	StateRunning  ProcessState = "running"
-	StateStopped  ProcessState = "stopped"
-	StateFailed   ProcessState = "failed"
-	StatePaused   ProcessState = "paused"
+	StateIdle    ProcessState = "idle"
+	StateRunning ProcessState = "running"
+	StateStopped ProcessState = "stopped"
+	StateFailed  ProcessState = "failed"
+	StatePaused  ProcessState = "paused"
 )
 
 type KickRecord struct {
@@ -51,40 +51,40 @@ const (
 )
 
 type AgentProcess struct {
-	Name            string
-	ID              string
-	Config          config.AgentConfig
-	State           ProcessState
-	PID             int
-	UID             int
-	StartedAt       *time.Time
-	LastKick        *time.Time
-	Paused          bool
-	PausedAt        time.Time
-	PausedReason    string
-	PausedTrigger   string
-	PinnedCLI       string
-	PinnedModel     string
-	ModelOverride   string
-	BackendOverride string
-	RestartCount    int
-	OutputBuffer    *RingBuffer
-	lastPaneCapture []string
-	paneMu          sync.RWMutex
-	KickHistory     []KickRecord
-	LastKickMessage    string
-	KickRefused        bool
-	KickRefusalReason  string
-	LaunchedMode       AgentMode
-	HasLaunched     bool
-	tmuxSession     string
-	tmuxSocket      string
-	cancel context.CancelFunc
-	forceRelaunch       bool
-	BootstrapOverride   string // when set, replaces buildBootstrapPrompt output
-	LastError           string // captured from bare copilot diagnostic launch
-	lastTokenRestart    time.Time // cooldown for auto-restart after token detection
-	NeedsLogin          bool   // true when pane shows a login prompt
+	Name              string
+	ID                string
+	Config            config.AgentConfig
+	State             ProcessState
+	PID               int
+	UID               int
+	StartedAt         *time.Time
+	LastKick          *time.Time
+	Paused            bool
+	PausedAt          time.Time
+	PausedReason      string
+	PausedTrigger     string
+	PinnedCLI         string
+	PinnedModel       string
+	ModelOverride     string
+	BackendOverride   string
+	RestartCount      int
+	OutputBuffer      *RingBuffer
+	lastPaneCapture   []string
+	paneMu            sync.RWMutex
+	KickHistory       []KickRecord
+	LastKickMessage   string
+	KickRefused       bool
+	KickRefusalReason string
+	LaunchedMode      AgentMode
+	HasLaunched       bool
+	tmuxSession       string
+	tmuxSocket        string
+	cancel            context.CancelFunc
+	forceRelaunch     bool
+	BootstrapOverride string    // when set, replaces buildBootstrapPrompt output
+	LastError         string    // captured from bare copilot diagnostic launch
+	lastTokenRestart  time.Time // cooldown for auto-restart after token detection
+	NeedsLogin        bool      // true when pane shows a login prompt
 	// LastPaneChange is when the agent's tmux pane content last CHANGED, as
 	// observed by the 3s pane poller. It is the spoke's only evidence of an
 	// agent actually doing something: State says what the manager intends,
@@ -93,17 +93,17 @@ type AgentProcess struct {
 	// authenticated CLI sits there producing nothing. Written under paneMu by
 	// pollTmuxOutputForAgent alongside lastPaneCapture; zero until the poller
 	// has seen two differing captures, which reads as "unknown", never "idle".
-	LastPaneChange      time.Time
-	consentSeenAt       time.Time // watcher: when a consent screen was first seen in the pane
-	lastConsentDismiss  time.Time // watcher: cooldown for re-running dismissInferencePrompts
-	lastInferKickAt     time.Time // stall watchdog: when the last kick was delivered to an inference agent
-	lastInferKickPane   string    // stall watchdog: hash of the visible pane just after kick delivery
-	stallNudgeSent      bool      // stall watchdog: at most one nudge per kick
-	StallNudges         int       // total post-kick stall nudges sent (surfaced to the dashboard)
-	launchGen           int       // increments per launch; stale deliverStartupKick goroutines check it and drop
-	lastInferKickMarks  int       // no-action watchdog: tool-marker count in pane+scrollback just after kick delivery
-	actionNudgeSent     bool      // no-action watchdog: at most one action nudge per kick
-	ActionNudges        int       // total prose-only-response action nudges sent (surfaced to the dashboard)
+	LastPaneChange     time.Time
+	consentSeenAt      time.Time // watcher: when a consent screen was first seen in the pane
+	lastConsentDismiss time.Time // watcher: cooldown for re-running dismissInferencePrompts
+	lastInferKickAt    time.Time // stall watchdog: when the last kick was delivered to an inference agent
+	lastInferKickPane  string    // stall watchdog: hash of the visible pane just after kick delivery
+	stallNudgeSent     bool      // stall watchdog: at most one nudge per kick
+	StallNudges        int       // total post-kick stall nudges sent (surfaced to the dashboard)
+	launchGen          int       // increments per launch; stale deliverStartupKick goroutines check it and drop
+	lastInferKickMarks int       // no-action watchdog: tool-marker count in pane+scrollback just after kick delivery
+	actionNudgeSent    bool      // no-action watchdog: at most one action nudge per kick
+	ActionNudges       int       // total prose-only-response action nudges sent (surfaced to the dashboard)
 
 	// awaitingBobKey marks an agent that launchInTmux parked in StateFailed
 	// for the single, fully-recoverable reason "bob backend with no API key".
@@ -626,11 +626,11 @@ func NewManager(agents map[string]config.AgentConfig, logger *slog.Logger, proje
 			}
 		}
 		m.agents[name] = &AgentProcess{
-			Name:         name,
-			ID:           agentID,
-			Config:       cfg,
-			State:        StateStopped,
-			UID:          agentUID,
+			Name:   name,
+			ID:     agentID,
+			Config: cfg,
+			State:  StateStopped,
+			UID:    agentUID,
 			// Restore a persisted operator pause so a restart/upgrade
 			// doesn't silently un-pause the agent.
 			Paused:       cfg.Paused,
@@ -1029,7 +1029,6 @@ func paneShowsConsentScreen(pane string) bool {
 	}
 	return false
 }
-
 
 // backendDefersStartupKick reports whether a backend's bootstrap prompt is
 // delivered AFTER the CLI is ready (deliverStartupKick) instead of being
@@ -1779,7 +1778,6 @@ func (m *Manager) findACMMFragments() []string {
 	return files
 }
 
-
 func (m *Manager) buildProjectPreamble(agent *AgentProcess) string {
 	p := m.project
 	if p.Org == "" || len(p.Repos) == 0 {
@@ -2054,7 +2052,6 @@ func findOverlap(prev, curr []string) int {
 	}
 	return -1
 }
-
 
 // paneShowsInputPrompt reports whether the pane content shows a CLI input
 // prompt that is ready to accept a kick.
@@ -3258,13 +3255,13 @@ func (m *Manager) tmuxSendKeysForAgent(agent *AgentProcess, keys ...string) {
 }
 
 const (
-	clearBeforeKickDelay  = 2 * time.Second
-	enterCount            = 3
-	enterDelay            = 300 * time.Millisecond
-	textToEnterDelay      = 1 * time.Second
-	chunkSize             = 400
-	chunkDelay            = 1 * time.Second
-	staleCheckDelay       = 1 * time.Second
+	clearBeforeKickDelay    = 2 * time.Second
+	enterCount              = 3
+	enterDelay              = 300 * time.Millisecond
+	textToEnterDelay        = 1 * time.Second
+	chunkSize               = 400
+	chunkDelay              = 1 * time.Second
+	staleCheckDelay         = 1 * time.Second
 	cliReadyPollInterval    = 2 * time.Second
 	cliReadyTimeout         = 60 * time.Second
 	inputPromptPollInterval = 2 * time.Second
@@ -3916,8 +3913,8 @@ func (m *Manager) fixSharedConfigPerms(agent *AgentProcess) {
 }
 
 const (
-	claudeInferenceSettingsPath  = "/tmp/.claude-inference-settings.json"
-	claudeInferenceHomePrefix = "/tmp/.claude-inference-home-"
+	claudeInferenceSettingsPath = "/tmp/.claude-inference-settings.json"
+	claudeInferenceHomePrefix   = "/tmp/.claude-inference-home-"
 )
 
 // inferenceHomePath returns the per-agent inference HOME directory.
@@ -3974,11 +3971,11 @@ const bobBackend = "bob"
 //     by `["debug",...,"auth-method"].forEach(c=>t.hide(c))`. Verified by
 //     running the real 1.0.6 bundle: `--help` is 67 lines with 0 matches for
 //     auth-method, yet the parser distinguishes it from a typo —
-//       $ bob --definitely-not-a-flag x -p hi
-//       Unknown arguments: definitely-not-a-flag, definitelyNotAFlag
-//       $ bob --auth-method bogus-value -p hi
-//       Invalid values: Argument: auth-method, Given: "bogus-value",
-//                       Choices: "sso", "api-key"
+//     $ bob --definitely-not-a-flag x -p hi
+//     Unknown arguments: definitely-not-a-flag, definitelyNotAFlag
+//     $ bob --auth-method bogus-value -p hi
+//     Invalid values: Argument: auth-method, Given: "bogus-value",
+//     Choices: "sso", "api-key"
 //     while `--auth-method api-key` is accepted silently. An unknown flag under
 //     yargs .strict() would have errored, so the option is live.
 //
@@ -4488,6 +4485,42 @@ func (m *Manager) AuthorizePROpen(agentName string, fileUID int) error {
 	}
 	if !m.agentMode(agent).CanPush() {
 		return fmt.Errorf("agent %q is not push-capable at this ACMM level (mode %s) — advisory agents may not open PRs",
+			agentName, m.agentMode(agent).String())
+	}
+	return nil
+}
+
+// AuthorizeMerge enforces the policy for the hive-merges-PR watcher, mirroring
+// AuthorizePROpen but with the stricter CanMerge() gate: the request's agent
+// must own the request file (forge-resistance) AND be merge-capable at the
+// hive's current ACMM level (ModeIssuesPRsMerge). This keeps the file-based
+// merge relay under the exact same authority as a direct merge would require —
+// an issues/PRs agent that can open PRs still cannot merge them unless its mode
+// grants merge. A nil manager or unknown agent is denied.
+func (m *Manager) AuthorizeMerge(agentName string, fileUID int) error {
+	if strings.TrimSpace(agentName) == "" {
+		return fmt.Errorf("no agent named in the request")
+	}
+	// Forge check: when we have a UID map and a real owning UID, the file owner
+	// must BE this agent.
+	if m.uidMap != nil && fileUID > 0 {
+		owner := m.uidMap.LookupByUID(fileUID)
+		if owner == "" {
+			return fmt.Errorf("request file owned by unknown uid %d (not a registered agent)", fileUID)
+		}
+		if owner != agentName {
+			return fmt.Errorf("request claims agent %q but file is owned by agent %q (uid %d)", agentName, owner, fileUID)
+		}
+	}
+	// ACMM merge-gate: resolve the agent and check CanMerge.
+	m.mu.RLock()
+	agent := m.agents[agentName]
+	m.mu.RUnlock()
+	if agent == nil {
+		return fmt.Errorf("unknown agent %q", agentName)
+	}
+	if !m.agentMode(agent).CanMerge() {
+		return fmt.Errorf("agent %q is not merge-capable at this ACMM level (mode %s) — only ISSUES_PRS_MERGE agents may merge PRs",
 			agentName, m.agentMode(agent).String())
 	}
 	return nil
