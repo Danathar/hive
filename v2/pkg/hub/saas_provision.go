@@ -482,6 +482,14 @@ type SaaSHive struct {
 	// ForgeDelivered flips true once the spoke reports the requested forge host.
 	ForgeDelivered bool `json:"forge_delivered,omitempty"`
 
+	// Forge names the forge FAMILY this hive runs against: "" / "github" /
+	// "github-enterprise" (the GitHub App path), or "gitlab" / "gitea" (the
+	// pkg/forge adapter path, PRIVATE-TOKEN auth — no GitHub App). Empty means
+	// GitHub, preserving every existing hive. The spoke uses this to pick which
+	// pkg/forge adapter to execute against; it is delivered over the heartbeat
+	// alongside the host. GitLab/Gitea carry no PendingAppConfig (no App).
+	Forge string `json:"forge,omitempty"`
+
 	// PendingAppConfig is a GitHub App identity queued for delivery to the
 	// spoke over the heartbeat.
 	//

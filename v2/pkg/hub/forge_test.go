@@ -523,3 +523,44 @@ func TestSwitchForgeAuthorization(t *testing.T) {
 		t.Errorf("an invalid forge host must 400, got %d", rec.Code)
 	}
 }
+
+// TestParseForgeTargetWithKind covers the GitLab/Gitea explicit-kind path added
+// for spoke-side pkg/forge routing: a non-GitHub kind yields a bare-host BaseURL
+// and an EMPTY APIURL (the spoke adapter appends /api/v4 or /api/v1 itself),
+// while the GitHub kinds behave exactly as the host-only parse.
+func TestParseForgeTargetWithKind(t *testing.T) {
+	cases := []struct {
+		name        string
+		kind, host  string
+		wantKind    ForgeKind
+		wantHost    string
+		wantBaseURL string
+		wantAPIURL  string
+		wantErr     bool
+	}{
+		{"gitlab saas", "gitlab", "gitlab.com", ForgeGitLab, "gitlab.com", "https://gitlab.com", "", false},
+		{"gitlab self-managed from URL", "gitlab", "https://gitlab.example.com/group", ForgeGitLab, "gitlab.example.com", "https://gitlab.example.com", "", false},
+		{"gitea", "gitea", "codeberg.org", ForgeGitea, "codeberg.org", "https://codeberg.org", "", false},
+		{"gitlab requires a host", "gitlab", "", "", "", "", "", true},
+		{"gitlab rejects a non-host", "gitlab", "not a host", "", "", "", "", true},
+		{"empty kind → public github", "", "github.com", ForgeGitHub, "github.com", "", "", false},
+		{"github-enterprise host still works", "", "github.ibm.com", ForgeGitHubEnterprise, "github.ibm.com", "https://github.ibm.com", "https://github.ibm.com/api/v3", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseForgeTargetWithKind(tc.kind, tc.host)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("parseForgeTargetWithKind(%q,%q) = %+v, want error", tc.kind, tc.host, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got.Kind != tc.wantKind || got.Host != tc.wantHost || got.BaseURL != tc.wantBaseURL || got.APIURL != tc.wantAPIURL {
+				t.Fatalf("got %+v, want kind=%s host=%s base=%s api=%s", got, tc.wantKind, tc.wantHost, tc.wantBaseURL, tc.wantAPIURL)
+			}
+		})
+	}
+}

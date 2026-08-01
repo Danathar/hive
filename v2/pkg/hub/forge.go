@@ -36,6 +36,26 @@ const (
 	// It differs from ForgeGitHub only in host and API path shape, which is why
 	// both resolve through the same identity/credential machinery.
 	ForgeGitHubEnterprise ForgeKind = "github-enterprise"
+	// ForgeGitLab is a GitLab instance (gitlab.com or self-managed). Unlike the
+	// GitHub kinds it does NOT use the GitHub App identity machinery: the spoke
+	// executes against it via pkg/forge's GitLab adapter using a PRIVATE-TOKEN
+	// from the env. These values match pkg/forge.KindGitLab.
+	ForgeGitLab ForgeKind = "gitlab"
+	// ForgeGitea is a Gitea/Forgejo instance (self-managed or Codeberg). Same
+	// story as GitLab — executed via pkg/forge's Gitea adapter. Matches
+	// pkg/forge.KindGitea.
+	ForgeGitea ForgeKind = "gitea"
+)
+
+// gitLabAPIPathSuffix / giteaAPIPathSuffix are the REST API base paths for the
+// non-GitHub forges. The spoke-side pkg/forge adapters append these to the
+// instance root themselves (gitLabAPIPath="/api/v4", giteaAPIPath="/api/v1"), so
+// for these kinds a ForgeTarget carries the BARE instance URL in BaseURL and
+// leaves APIURL empty — the opposite of the GHE case, where the hub pre-appends
+// /api/v3. Kept here as documentation of that contract.
+const (
+	gitLabAPIPathSuffix = "/api/v4"
+	giteaAPIPathSuffix  = "/api/v1"
 )
 
 // publicForgeHost is the canonical host of public GitHub. A hive on this host
@@ -86,6 +106,80 @@ func (t ForgeTarget) IsPublic() bool { return t.Kind == ForgeGitHub }
 // is rejected with a message naming what is supported, rather than being
 // recorded and silently producing a spoke that talks to nothing.
 func parseForgeTarget(raw string) (ForgeTarget, error) {
+	return parseForgeTargetWithKind("", raw)
+}
+
+// parseForgeTargetWithKind is parseForgeTarget with an explicit forge kind.
+// An empty kind preserves the original behavior (public github.com, else GHE
+// inferred from the host). "gitlab"/"gitea" produce non-GitHub targets whose
+// BaseURL is the bare instance root and whose APIURL is left empty — the
+// spoke-side pkg/forge adapter appends the /api/v4 or /api/v1 suffix itself
+// (see the gitLabAPIPathSuffix/giteaAPIPathSuffix note). "github"/
+// "github-enterprise" fall through to the host-based GitHub path.
+func parseForgeTargetWithKind(kind, raw string) (ForgeTarget, error) {
+	switch ForgeKind(strings.ToLower(strings.TrimSpace(kind))) {
+	case ForgeGitLab, ForgeGitea:
+		fk := ForgeKind(strings.ToLower(strings.TrimSpace(kind)))
+		host := normalizeForgeHostInput(raw)
+		if host == "" {
+			return ForgeTarget{}, fmt.Errorf("forge host is required for %s (e.g. %q)", fk, defaultHostForKind(fk))
+		}
+		if len(host) > maxForgeHostLen {
+			return ForgeTarget{}, fmt.Errorf("forge host is too long (max %d characters)", maxForgeHostLen)
+		}
+		if !isValidForgeHostLabel(host) {
+			return ForgeTarget{}, fmt.Errorf("%q is not a valid %s host", raw, fk)
+		}
+		// BaseURL only; the spoke adapter appends the REST API path. APIURL empty.
+		return ForgeTarget{Kind: fk, Host: host, BaseURL: "https://" + host}, nil
+	}
+	// kind is empty or a GitHub kind → the original host-based GitHub resolution.
+	return parseGitHubForgeTarget(raw)
+}
+
+// normalizeForgeHostInput strips scheme, path, port, and userinfo from an
+// operator-supplied forge host/URL, returning the bare lower-cased host. Shared
+// by the GitHub and non-GitHub parse paths.
+func normalizeForgeHostInput(raw string) string {
+	host := strings.ToLower(strings.TrimSpace(raw))
+	host = strings.TrimPrefix(strings.TrimPrefix(host, "https://"), "http://")
+	host = strings.SplitN(host, "/", 2)[0]
+	host = strings.SplitN(host, ":", 2)[0]
+	if i := strings.LastIndex(host, "@"); i >= 0 {
+		host = host[i+1:]
+	}
+	return host
+}
+
+// defaultTokenEnvForKind names the env var the spoke reads its access token
+// from for a non-GitHub forge, used in the operator-facing switch note. These
+// match pkg/config's DefaultGitLabTokenEnv / the Gitea default.
+func defaultTokenEnvForKind(k ForgeKind) string {
+	switch k {
+	case ForgeGitLab:
+		return "GITLAB_TOKEN"
+	case ForgeGitea:
+		return "GITEA_TOKEN"
+	default:
+		return "GH_TOKEN"
+	}
+}
+
+// defaultHostForKind returns the public default host for a non-GitHub forge kind,
+// used only in error messages.
+func defaultHostForKind(k ForgeKind) string {
+	switch k {
+	case ForgeGitLab:
+		return "gitlab.com"
+	case ForgeGitea:
+		return "codeberg.org"
+	default:
+		return publicForgeHost
+	}
+}
+
+// parseGitHubForgeTarget is the original host-based GitHub/GHE resolution.
+func parseGitHubForgeTarget(raw string) (ForgeTarget, error) {
 	// Deliberately NOT githubHostLabel: that helper maps "" to "github.com",
 	// which would silently turn a missing/blank host into a switch to public
 	// GitHub — a destructive default for an endpoint whose whole job is to move
@@ -161,6 +255,12 @@ func isValidForgeHostLabel(s string) bool {
 
 // SwitchForgeRequest is the body of POST /api/saas/hives/{id}/forge.
 type SwitchForgeRequest struct {
+	// Kind optionally names the forge family: "github" / "github-enterprise"
+	// (the default when omitted, inferred from Host), or "gitlab" / "gitea".
+	// GitLab and Gitea MUST be selected explicitly here because a host alone
+	// cannot distinguish them from a GitHub Enterprise instance (they differ
+	// only in API path shape). Empty preserves the historical GitHub behavior.
+	Kind string `json:"kind,omitempty"`
 	// Host is the forge to move this hive to: "github.com" or a GitHub
 	// Enterprise host. Required.
 	Host string `json:"host"`
@@ -267,7 +367,7 @@ func (s *HubServer) handleSwitchForge(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
 		return
 	}
-	target, err := parseForgeTarget(body.Host)
+	target, err := parseForgeTargetWithKind(body.Kind, body.Host)
 	if err != nil {
 		http.Error(w, `{"error":`+strconv.Quote(err.Error())+`}`, http.StatusBadRequest)
 		return
@@ -288,6 +388,36 @@ func (s *HubServer) handleSwitchForge(w http.ResponseWriter, r *http.Request) {
 	fromHost := h.GitHubHost
 	if fromHost == "" {
 		fromHost = publicForgeHost // "" has always meant public github.com
+	}
+
+	// NON-GITHUB FORGES (GitLab / Gitea): these authenticate with a
+	// PRIVATE-TOKEN via pkg/forge, not a GitHub App, so the App-identity
+	// resolution, PendingAppConfig, and IdentitySet machinery below do not
+	// apply. Record the forge family + host durably and re-arm the same
+	// requested/delivered handshake used for GitHub, then return. GitHub App
+	// fields are cleared so a stale app_id/installation from a prior GitHub
+	// forge can't be sent to a spoke that no longer talks to GitHub.
+	if target.Kind == ForgeGitLab || target.Kind == ForgeGitea {
+		h.Forge = string(target.Kind)
+		h.GitHubHost = target.Host
+		h.GitHubBaseURL = target.BaseURL
+		h.GitHubAPIURL = "" // adapter appends /api/v4 or /api/v1 to BaseURL
+		h.RequestedGitHubHost = target.Host
+		h.ForgeDelivered = false
+		h.PendingAppConfig = nil // no GitHub App on GitLab/Gitea
+		if err := saveSaaSHive(h); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "failed to persist forge switch: "+err.Error())
+			return
+		}
+		s.logger.Info("forge switch queued (non-GitHub)",
+			"hive_id", id, "kind", target.Kind, "host", target.Host)
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":    true,
+			"kind":  string(target.Kind),
+			"host":  target.Host,
+			"note":  fmt.Sprintf("hive %s will switch to %s (%s) on its next heartbeat. Ensure the spoke has a %s access token in its environment.", id, target.Host, target.Kind, defaultTokenEnvForKind(target.Kind)),
+		})
+		return
 	}
 
 	// Resolve the App identity for the TARGET forge from CLUSTER CONFIG. No App
