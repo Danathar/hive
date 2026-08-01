@@ -123,6 +123,7 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	s.mux.HandleFunc("PUT /api/config/governor/hub", s.handleGovernorHub)
 	s.mux.HandleFunc("PUT /api/config/governor/litellm", s.handleGovernorLiteLLM)
 	s.mux.HandleFunc("PUT /api/config/governor/trajectory", s.handleGovernorTrajectory)
+	s.mux.HandleFunc("PUT /api/config/governor/features", s.handleGovernorFeatures)
 	// bob API key: PUT sets/replaces, DELETE revokes. Both are non-GET, so the
 	// roleEnforcement middleware already 403s a read-only role — no separate
 	// authorization rule is needed or wanted here.
@@ -3589,6 +3590,7 @@ func (s *Server) handleGovernorConfigGet(w http.ResponseWriter, r *http.Request)
 		"litellm":    litellmSectionResponse(&cfg.Governor.LiteLLM),
 		"trajectory": trajectorySectionResponse(&cfg.Governor),
 		"classifier": classifierSectionResponse(),
+		"features":   featuresSectionResponse(cfg),
 		"hub": map[string]interface{}{
 			"enabled":                          cfg.Hub.Enabled,
 			"url":                              cfg.Hub.URL,

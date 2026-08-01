@@ -13415,7 +13415,7 @@ function burnAreaChart() {
     // hub-synced user/role data. It sits next to Model Gateways because both
     // are backend configuration.
     const GOVERNOR_BOB_TAB = 'Bob';
-    const GOVERNOR_CONFIG_TABS = ['General', 'Agents', 'Thresholds', 'Labels', 'Repos', 'Budget', 'Notifications', 'Health', 'Sensing', 'Logging', 'Hub', 'Model Gateways', GOVERNOR_BOB_TAB, 'Variables', 'Access'];
+    const GOVERNOR_CONFIG_TABS = ['General', 'Agents', 'Thresholds', 'Labels', 'Repos', 'Budget', 'Notifications', 'Health', 'Sensing', 'Logging', 'Features', 'Hub', 'Model Gateways', GOVERNOR_BOB_TAB, 'Variables', 'Access'];
     const PIPELINE_STAGES = ['resolve-beads', 'track-prs', 'stale-check', 'repo-scan', 'coverage-gate', 'prompt-compose', 'budget-check', 'api-collect', 'final-compose'];
     const PIPELINE_STAGE_TIPS = {
       'resolve-beads': 'Fetch and inject knowledge beads (facts, patterns, gotchas) relevant to the agent\'s current task context.',
@@ -14006,6 +14006,7 @@ function burnAreaChart() {
         case 'Health': return renderGovHealth(d.health || {});
         case 'Sensing': return renderGovSensing(d.sensing || {});
         case 'Logging': return renderGovLogging(d.logging || {});
+        case 'Features': return renderGovFeatures(d.features || {});
         case 'Hub': return renderGovHub(d.hub || {});
         case 'Model Gateways': return renderGovGateways();
         case GOVERNOR_BOB_TAB: return renderGovBob();
@@ -16953,6 +16954,59 @@ function burnAreaChart() {
         <div class="config-toggle">
           <div class="config-toggle-switch ${l.compress !== false ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="logging" data-key="compress"></div>
           <span class="config-toggle-label">Compress Rotated Files <span class="config-info">i<span class="config-tooltip">Gzip-compress rotated log files to save disk space. Typically reduces log file size by ~90%. Enabled by default.</span></span></span>
+        </div>`;
+    }
+
+    // renderGovFeatures renders the "Features" tab: four already-functional
+    // opt-in capabilities exposed as toggles so operators need not hand-edit
+    // hive.yaml. Each control marks the shared 'features' dirty section, which
+    // saveConfig() PUTs to /api/config/governor/features as a single body whose
+    // keys match the handler's JSON fields (ioscanEnabled, tracingEnabled,
+    // tracingEndpoint, mintEnabled, mintIssuer, planFromLabel). The mint signing
+    // key is intentionally NOT surfaced — the overlay is secret-free.
+    function renderGovFeatures(f) {
+      f = f || {};
+      // planFromLabel is a tri-state on the wire: null = "default (ACMM gate)",
+      // true/false = explicit. The toggle shows on only for an explicit true.
+      const planOn = f.planFromLabel === true;
+      return `
+        <p style="font-size:0.75rem;color:var(--muted);margin-bottom:14px">Opt-in capabilities. Each is off by default and safe to leave off; toggling here writes the same setting you could set by hand in <code>hive.yaml</code>. Changes take effect on the next hive restart.</p>
+
+        <div class="config-toggle">
+          <div class="config-toggle-switch ${f.ioscanEnabled ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="features" data-key="ioscanEnabled"></div>
+          <span class="config-toggle-label">Input/Output Scanning (ioscan) <span class="config-info">i<span class="config-tooltip">Scans untrusted external text (issue titles/bodies) for prompt-injection and secret/dangerous directives before it is injected into an agent kick. Advisory and fail-safe — it never crashes a kick.</span></span></span>
+        </div>
+
+        <div style="margin:18px 0;padding-top:14px;border-top:1px solid var(--border)">
+          <div class="config-toggle">
+            <div class="config-toggle-switch ${f.tracingEnabled ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="features" data-key="tracingEnabled"></div>
+            <span class="config-toggle-label">Distributed Tracing (OpenTelemetry) <span class="config-info">i<span class="config-tooltip">Exports OTLP/HTTP spans for hub/agent activity. Zero overhead when off. When on, traces export to your OTLP collector — view them in Grafana/Jaeger.</span></span></span>
+          </div>
+          <div class="config-field" style="margin-top:10px">
+            <label>OTLP/HTTP Endpoint <span class="config-info">i<span class="config-tooltip">Collector endpoint (e.g. https://otel-collector:4318). Leave empty to fall back to the standard OTEL_EXPORTER_OTLP_ENDPOINT env var.</span></span></label>
+            <input type="text" value="${esc(f.tracingEndpoint || '')}" placeholder="https://otel-collector:4318" onchange="markDirty('features','tracingEndpoint',this.value.trim())">
+            <p style="font-size:0.72rem;color:var(--muted);margin:4px 0 0">Traces export to your OTLP collector — view them in Grafana/Jaeger.</p>
+          </div>
+        </div>
+
+        <div style="margin:18px 0;padding-top:14px;border-top:1px solid var(--border)">
+          <div class="config-toggle">
+            <div class="config-toggle-switch ${f.mintEnabled ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="features" data-key="mintEnabled"></div>
+            <span class="config-toggle-label">Token Mint (Workload Identity) <span class="config-info">i<span class="config-tooltip">Issues short-lived scoped JWTs that downstream cloud/registry WIF providers can trust via the issuer + JWKS.</span></span></span>
+          </div>
+          <div class="config-field" style="margin-top:10px">
+            <label>Issuer <span class="config-info">i<span class="config-tooltip">The 'iss' claim and the identity WIF providers are configured to trust — typically the mint's public URL.</span></span></label>
+            <input type="text" value="${esc(f.mintIssuer || '')}" placeholder="https://mint.example.com" onchange="markDirty('features','mintIssuer',this.value.trim())">
+            <p style="font-size:0.72rem;color:var(--muted);margin:4px 0 0">Signing key is provisioned on-disk, not here.</p>
+          </div>
+        </div>
+
+        <div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--border)">
+          <div class="config-toggle">
+            <div class="config-toggle-switch ${planOn ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="features" data-key="planFromLabel"></div>
+            <span class="config-toggle-label">Auto-plan from label <span class="config-info">i<span class="config-tooltip">When on, an actionable issue carrying the plan/epic label auto-mints an epic and requests decomposition — no per-kick review. Opt-in for safety.</span></span></span>
+          </div>
+          <p style="font-size:0.72rem;color:var(--muted);margin:6px 0 0">Auto-plan issues carrying the plan/epic label — L5+ only.</p>
         </div>`;
     }
 
