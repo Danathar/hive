@@ -53,15 +53,22 @@ func TestSelfDeploymentImageReadsContainerImage(t *testing.T) {
 // The namespace comes from the mounted ServiceAccount; without it the hub
 // cannot address its own Deployment and must error rather than guess.
 //
-// The mock rejects a request whose path carries an empty namespace segment, so
-// this fails if the blank-namespace guard is removed rather than silently
-// "succeeding" against a permissive stub.
+// The stub deliberately accepts everything and records the paths it is asked
+// for. An earlier version had the mock reject a "/namespaces//" path, which
+// meant the test still passed with the production guard deleted — it was
+// asserting the stub's behaviour. Asserting that no request is issued at all
+// pins the guard itself.
 func TestSelfDeploymentImageRequiresNamespace(t *testing.T) {
+	// The server must NOT be the thing that rejects an empty namespace.
+	// Previously it returned 400 for a "/namespaces//" path, so this test still
+	// passed when the production empty-namespace guard was deleted — it was
+	// asserting the fake server's behaviour, not the code under test. Here the
+	// server accepts everything and records what it was asked for, so the only
+	// way to get an error is for selfDeploymentImage to refuse locally, and the
+	// assertions below prove no request was ever issued.
+	var gotPaths []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "/namespaces//") {
-			http.Error(w, "empty namespace in request path", http.StatusBadRequest)
-			return
-		}
+		gotPaths = append(gotPaths, r.URL.Path)
 		w.Write([]byte(deploymentJSON("x")))
 	}))
 	defer srv.Close()
@@ -71,8 +78,12 @@ func TestSelfDeploymentImageRequiresNamespace(t *testing.T) {
 		old := k8sNamespacePath
 		k8sNamespacePath = filepath.Join(t.TempDir(), "absent")
 		t.Cleanup(func() { k8sNamespacePath = old })
+		gotPaths = nil
 		if _, err := selfDeploymentImage(); err == nil {
 			t.Fatal("a missing namespace file must be an error")
+		}
+		if len(gotPaths) != 0 {
+			t.Fatalf("must not call the API without a namespace, but requested %v", gotPaths)
 		}
 	})
 
@@ -84,8 +95,15 @@ func TestSelfDeploymentImageRequiresNamespace(t *testing.T) {
 		}
 		k8sNamespacePath = p
 		t.Cleanup(func() { k8sNamespacePath = old })
+		gotPaths = nil
 		if _, err := selfDeploymentImage(); err == nil {
 			t.Fatal("an empty namespace must be an error, not an empty API path")
+		}
+		// The specific failure this pins: building "/namespaces//deployments/..."
+		// and asking the API server about it. That path can match an unintended
+		// object, so the refusal has to happen before any request goes out.
+		if len(gotPaths) != 0 {
+			t.Fatalf("must reject an empty namespace locally, but requested %v", gotPaths)
 		}
 	})
 }
