@@ -130,6 +130,8 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	s.mux.HandleFunc("GET /api/config/governor/bob", s.handleGovernorBobStatus)
 	s.mux.HandleFunc("PUT /api/config/governor/bob", s.handleGovernorBobKey)
 	s.mux.HandleFunc("DELETE /api/config/governor/bob", s.handleGovernorBobKeyClear)
+	// Live key validation (pasted or saved key) — see bob_key_probe.go.
+	s.mux.HandleFunc("POST /api/config/governor/bob/test", s.handleGovernorBobKeyTest)
 	s.mux.HandleFunc("POST /api/config/governor/litellm/test", s.handleGovernorLiteLLMTest)
 	s.mux.HandleFunc("GET /api/config/governor/gateways", s.handleGovernorGatewaysList)
 	s.mux.HandleFunc("PUT /api/config/governor/gateways", s.handleGovernorGatewaysUpsert)
@@ -140,7 +142,14 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	s.mux.HandleFunc("POST /api/config/governor/agents", s.handleGovernorAddAgent)
 	s.mux.HandleFunc("DELETE /api/config/governor/agents/{name}", s.handleGovernorRemoveAgent)
 	s.mux.HandleFunc("PUT /api/config/governor/repos", s.handleGovernorRepos)
+	// Access probe run when the Repos tab adds a new repo: verifies the hive's
+	// GitHub App is installed on the new repo's org before the repo is accepted,
+	// and hands back the correct per-forge install URL when it is not.
+	s.mux.HandleFunc("POST /api/config/governor/repos/check-access", s.handleGovernorRepoCheckAccess)
 	s.mux.HandleFunc("PUT /api/config/github", s.handleConfigGitHub)
+	// Read-only inventory for the Forge App tab: every App credential this
+	// spoke holds (active config + per-app-id PVC keys), fingerprints only.
+	s.mux.HandleFunc("GET /api/config/github/forge-apps", s.handleConfigGitHubForgeApps)
 
 	s.mux.HandleFunc("GET /api/agents", s.handleAgentsList)
 	s.mux.HandleFunc("POST /api/agents", s.handleAgentCreate)
@@ -3592,7 +3601,15 @@ func (s *Server) handleGovernorConfigGet(w http.ResponseWriter, r *http.Request)
 		"classifier": classifierSectionResponse(),
 		"features":   featuresSectionResponse(cfg),
 		"hub": map[string]interface{}{
-			"enabled":                          cfg.Hub.Enabled,
+			"enabled": cfg.Hub.Enabled,
+			// namespace is read-only, runtime-derived display info (never
+			// persisted to hive.yaml, never accepted back on save) — the
+			// Kubernetes namespace this pod is actually running in. See
+			// podNamespace's doc comment for the POD_NAMESPACE/NAMESPACE/
+			// service-account-file fallback chain. Omitted (empty string)
+			// outside a cluster, which the Hub tab renders by skipping the
+			// line rather than showing a blank/"undefined" value.
+			"namespace":                        podNamespace(),
 			"url":                              cfg.Hub.URL,
 			"dashboard_url":                    cfg.Hub.DashboardURL,
 			"snapshot_url":                     cfg.Hub.SnapshotURL,
@@ -4467,6 +4484,15 @@ func (s *Server) handleGovernorBobKey(w http.ResponseWriter, r *http.Request) {
 			http.StatusBadRequest)
 		return
 	}
+	// A key with interior whitespace/newlines is always a broken paste, and
+	// storing one is a proven auth failure ("invalid jwt string" 401 → every
+	// bob agent parks at the auth prompt). Refuse at save time with the real
+	// explanation. Leading/trailing whitespace was already trimmed above.
+	if strings.ContainsAny(key, " \t\r\n") {
+		jsonError(w, "apiKey contains interior whitespace or line breaks — a bob API key is a single unbroken token; re-copy it from bob.ibm.com and paste it again",
+			http.StatusBadRequest)
+		return
+	}
 
 	cfg := s.deps.Config
 	// Apply to a copy so a store failure leaves config untouched.
@@ -4658,8 +4684,8 @@ func (s *Server) handleGovernorRemoveAgent(w http.ResponseWriter, r *http.Reques
 	//
 	// The tombstone closes both: MergeAgentOverrides skips and prunes it, and
 	// ApplyPack refuses to re-create it.
-	s.deps.Config.MarkAgentRemoved(name)
-	s.removeAgentOverlayFile(name)
+	tombstoned := s.deps.Config.MarkAgentRemoved(name)
+	overlayExisted, overlayDeleted := s.removeAgentOverlayFile(name)
 
 	if err := s.saveConfig(); err != nil {
 		s.logger.Error("failed to persist config after agent removal", "error", err)
@@ -4668,23 +4694,53 @@ func (s *Server) handleGovernorRemoveAgent(w http.ResponseWriter, r *http.Reques
 	s.refreshAndPersist()
 	s.logger.Info("agent removed and tombstoned", "agent", name,
 		"note", "will not be re-created by an ACMM pack apply until explicitly re-added")
+	// One greppable audit line for the whole removal action: whether the
+	// tombstone was newly written, whether a stale per-agent overlay file was
+	// present and whether it was deleted, and the resulting tombstone set so a
+	// grep by agent name tells the story of a non-sticking removal report
+	// (#2439) without exec'ing into the pod to diff config files.
+	s.logger.Info("audit: agent removed via dashboard",
+		"hive_id", s.deps.Config.HiveID,
+		"agent", name,
+		"tombstoned", tombstoned,
+		"overlay_file_existed", overlayExisted,
+		"overlay_file_deleted", overlayDeleted,
+		"removed_agents", s.deps.Config.RemovedAgents,
+	)
 	jsonResponse(w, agentDeletionResponse("removed", name, packLevelsDefining(name)))
 }
 
 // removeAgentOverlayFile deletes /data/agent-configs/<name>.yaml. A leftover
 // overlay file is re-merged by every config load, which is one of the two ways
 // a deleted agent used to come back.
-func (s *Server) removeAgentOverlayFile(name string) {
+//
+// Returns (existed, deleted) purely for the caller's audit log: existed reports
+// whether a per-agent overlay file was present before the delete (the stale-file
+// resurrection vector), and deleted reports whether the removal succeeded. The
+// deletion behavior itself is unchanged — an error is still non-fatal because the
+// tombstone already prevents the merge from resurrecting the agent.
+func (s *Server) removeAgentOverlayFile(name string) (existed, deleted bool) {
 	agentsDir := s.deps.Config.Data.AgentsDir
 	if agentsDir == "" {
-		return
+		return false, false
+	}
+	// Observe presence before deleting so the audit log can distinguish
+	// "no stale file" from "stale file removed". Stat errors other than
+	// not-exist leave existed false — we only claim a file was present when
+	// we positively saw one.
+	overlayPath := filepath.Join(agentsDir, name+".yaml")
+	if _, statErr := os.Stat(overlayPath); statErr == nil {
+		existed = true
 	}
 	if err := config.RemoveAgentFile(agentsDir, name); err != nil {
 		// Not fatal: the tombstone already prevents the merge from
-		// resurrecting the agent. Log it so a stale file is still visible.
-		s.logger.Error("failed to remove agent overlay file after delete (tombstone still applies)",
-			"agent", name, "error", err)
+		// resurrecting the agent. Log it at WARN so a stale file — the
+		// resurrection vector for #2439 — is loud and greppable with its path.
+		s.logger.Warn("failed to remove agent overlay file after delete (tombstone still applies)",
+			"hive_id", s.deps.Config.HiveID, "agent", name, "path", overlayPath, "error", err)
+		return existed, false
 	}
+	return existed, existed
 }
 
 // packLevelsDefining returns the ACMM levels whose pack defines this agent, so
@@ -4739,6 +4795,34 @@ func (s *Server) handleGovernorRepos(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	org := s.deps.Config.Project.Org
+
+	// Single-host-per-spoke (defence in depth; the Repos tab also checks this
+	// client-side so it fails fast). Every repo the user submits must live on
+	// this hive's forge — mixing github.com and a GHE instance silently breaks
+	// App auth for half the repos. Check the raw pasted values BEFORE the loop
+	// below strips the host off each one. hiveForgeHost() is this hive's own
+	// GitHub host (github.com or the GHE hostname), the same value the dashboard
+	// derives from github_base_url.
+	// Snapshot so a validation failure AFTER we mutate the in-memory config can
+	// restore it — the "always exactly one default" guard below runs once the
+	// final repos+primary are known, and a reject must not leave a half-applied
+	// config in memory (which would then be persisted on the next unrelated save).
+	prevRepos := append([]string(nil), s.deps.Config.Project.Repos...)
+	prevPrimary := s.deps.Config.Project.PrimaryRepo
+
+	spokeHost := s.hiveForgeHost()
+	for _, ref := range body.Repos {
+		if h := repoRefHostLabel(ref); h != "" && !sameForgeHost(h, spokeHost) {
+			jsonError(w, fmt.Sprintf("repo %q is on %s but this hive is on %s — a hive's repos must all be on one GitHub host. Remove the mismatched repo or use a repo on %s.", strings.TrimSpace(ref), h, spokeHost, spokeHost), http.StatusBadRequest)
+			return
+		}
+	}
+	if body.PrimaryRepo != nil {
+		if h := repoRefHostLabel(*body.PrimaryRepo); h != "" && !sameForgeHost(h, spokeHost) {
+			jsonError(w, fmt.Sprintf("default repo %q is on %s but this hive is on %s — the default must live on this hive's forge.", strings.TrimSpace(*body.PrimaryRepo), h, spokeHost), http.StatusBadRequest)
+			return
+		}
+	}
 
 	if len(body.Repos) > 0 {
 		stripped := make([]string, 0, len(body.Repos))
@@ -4795,6 +4879,31 @@ func (s *Server) handleGovernorRepos(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Always exactly one default: a hive with repos must name a primary_repo that
+	// is one of them — that is the repo the advisory issue is maintained in. The
+	// Repos tab disables Save until a star is chosen, but enforce it server-side
+	// too so no client (or a stale one) can persist repos with no default. Reject
+	// and restore the pre-mutation config so the in-memory state stays coherent.
+	if final := s.deps.Config.Project.Repos; len(final) > 0 {
+		primary := s.deps.Config.Project.PrimaryRepo
+		inList := false
+		for _, r := range final {
+			if r == primary {
+				inList = true
+				break
+			}
+		}
+		if primary == "" || !inList {
+			s.deps.Config.Project.Repos = prevRepos
+			s.deps.Config.Project.PrimaryRepo = prevPrimary
+			if s.deps.GHClient != nil {
+				s.deps.GHClient.SetRepos(prevRepos)
+			}
+			jsonError(w, "set a default repo before saving — one of the monitored repos must be marked as the default (the repo where the advisory issue is maintained)", http.StatusBadRequest)
+			return
+		}
+	}
+
 	if err := s.saveConfig(); err != nil {
 		s.logger.Error("failed to persist config", "error", err)
 	}
@@ -4804,6 +4913,152 @@ func (s *Server) handleGovernorRepos(w http.ResponseWriter, r *http.Request) {
 	s.auditFromRequest(r, "config_governor_repos", auditDetail("section", "repos"), "")
 	s.refreshAndPersist()
 	okResponse(w, map[string]string{"status": "updated"})
+}
+
+// hiveForgeHost returns the bare GitHub hostname this hive's repos and App live
+// on ("github.com" or a GHE hostname like "github.ibm.com"). It is the single
+// source of truth the single-host-per-spoke guard compares each submitted repo
+// against, and mirrors config.GitHubConfig.HostLabel() (the same value the
+// dashboard reads as github_base_url's host). Falls back to public github.com
+// when no config is loaded (tests/early boot).
+func (s *Server) hiveForgeHost() string {
+	if s.deps != nil && s.deps.Config != nil {
+		return s.deps.Config.GitHub.HostLabel()
+	}
+	return "github.com"
+}
+
+// repoRefHostLabel extracts the GitHub host a repo string was pasted with, or ""
+// when none was given (a bare "repo" or "owner/repo", which by definition belongs
+// to the hive's own forge). Mirrors hub.repoRefHost: a full URL or a leading
+// dotted segment ("github.ibm.com/org/repo") names an explicit host. Returned
+// lowercased for case-insensitive comparison in sameForgeHost.
+func repoRefHostLabel(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "https://")
+	s = strings.TrimPrefix(s, "http://")
+	s = strings.Trim(s, "/")
+	if s == "" {
+		return ""
+	}
+	parts := strings.Split(s, "/")
+	if len(parts) > 1 && strings.Contains(parts[0], ".") {
+		return strings.ToLower(parts[0])
+	}
+	return ""
+}
+
+// sameForgeHost reports whether two host labels refer to the same GitHub. Both
+// "" and "github.com" mean public GitHub; a GHE host equals only itself.
+// Case-insensitive. Mirrors hub.sameGitHubHost so the dashboard's single-host
+// rule matches the hub's request/assign validation exactly.
+func sameForgeHost(a, b string) bool {
+	norm := func(h string) string {
+		h = strings.ToLower(strings.TrimSpace(h))
+		if h == "" || h == "github.com" {
+			return "github.com"
+		}
+		return h
+	}
+	return norm(a) == norm(b)
+}
+
+// handleGovernorRepoCheckAccess verifies that this hive's GitHub App can access
+// a repo the operator is about to add, and — when it cannot — returns the
+// per-forge App install/authorize URL so the Repos tab can guide the user to
+// grant access before the repo is finally accepted (requirement #3).
+//
+// The check today probes at ORG granularity: DiscoverInstallationID(org) returns
+// ErrNoInstallationForOrg when the App is not installed on the repo's org at all,
+// which is the common "new org the App was never installed on" case and the one
+// that hard-blocks reads and writes. On a positive result we report ok:true.
+//
+// TODO(repo-access-probe): tighten to REPO granularity. An App installed on the
+// org "Only select repositories" may still lack THIS repo (see #2353's
+// write-forbidden case). The deeper probe should mint an installation token and
+// GET /repos/{org}/{repo} (s.deps.GHClient.GetRepo) — a 404/403 there means the
+// installation exists but this repo is not in its selected set, which needs the
+// same "manage installation" URL to add the repo to the selection. That probe is
+// scoped out of this change to keep it focused; the org-level check plus the
+// install workflow already covers the "App not installed on the org" footgun.
+func (s *Server) handleGovernorRepoCheckAccess(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Repo string `json:"repo"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		jsonError(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	ref := sanitizeString(body.Repo)
+	if ref == "" {
+		jsonError(w, "repo is required", http.StatusBadRequest)
+		return
+	}
+	// Single-host guard here too: an added repo on a different forge is rejected
+	// before we even probe access, with the same message as the save path.
+	spokeHost := s.hiveForgeHost()
+	if h := repoRefHostLabel(ref); h != "" && !sameForgeHost(h, spokeHost) {
+		jsonError(w, fmt.Sprintf("repo %q is on %s but this hive is on %s — a hive's repos must all be on one GitHub host.", ref, h, spokeHost), http.StatusBadRequest)
+		return
+	}
+	// Resolve the org the repo lives in. The paste may be "org/repo", a bare
+	// "repo" (org is the hive's configured org), or a full URL. Strip any host
+	// and pull the org segment when present.
+	org := s.deps.Config.Project.Org
+	stripped := ref
+	stripped = strings.TrimPrefix(stripped, "https://")
+	stripped = strings.TrimPrefix(stripped, "http://")
+	stripped = strings.Trim(stripped, "/")
+	parts := strings.Split(stripped, "/")
+	// Drop a leading host segment ("github.ibm.com/org/repo" -> "org/repo").
+	if len(parts) > 1 && strings.Contains(parts[0], ".") {
+		parts = parts[1:]
+	}
+	if len(parts) >= 2 && parts[0] != "" {
+		org = parts[0]
+	}
+	if org == "" {
+		jsonError(w, "cannot determine the org for this repo — use org/repo format", http.StatusBadRequest)
+		return
+	}
+
+	// An App-less hive (advisory-only, no private key) cannot and need not probe
+	// installation access: it never writes. Treat it as "no access check needed"
+	// so the add proceeds — the single-host guard above already ran.
+	if s.deps.GHAppAuth == nil || !s.deps.GHAppAuth.HasKey() {
+		okResponse(w, map[string]string{"status": "no-app"})
+		return
+	}
+
+	ctx := s.deps.Ctx
+	if ctx == nil {
+		ctx = r.Context()
+	}
+	if _, err := s.deps.GHAppAuth.DiscoverInstallationID(ctx, org); err != nil {
+		// Not installed on this org (or discovery failed). Surface the correct
+		// per-forge install URL and arm the existing pending-install mechanism so
+		// the banner/recheck plumbing the App-required flow already uses drives
+		// this to completion. AppInstallURL() returns "" for a GHE host whose App
+		// slug was never configured — the UI renders that as a config message
+		// rather than a dead link.
+		installURL := ""
+		if s.deps.Config != nil {
+			installURL = s.deps.Config.GitHub.AppInstallURL()
+		}
+		s.SetPendingGitHubAppInstall()
+		s.logger.Info("repo add blocked: app not installed on org", "org", org, "repo", ref, "error", err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"ok":           false,
+			"needsInstall": true,
+			"org":          org,
+			"installUrl":   installURL,
+			"error":        fmt.Sprintf("the Hive GitHub App is not installed on %q, so it cannot read or write %s. Install/authorize the App for %q, then re-check.", org, ref, org),
+		})
+		return
+	}
+	okResponse(w, map[string]string{"status": "ok", "org": org})
 }
 
 func (s *Server) handleGitHubAppInstallClicked(w http.ResponseWriter, r *http.Request) {
@@ -4832,6 +5087,16 @@ func (s *Server) handleConfigGitHub(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cfg := s.deps.Config
+
+	// saveConfig() silently no-ops when the config has no source path, so
+	// without this guard the handler would report "status":"updated" for a
+	// value that lives only in memory and is lost on the next restart (#2459).
+	// Refuse up front, before mutating anything, and name the cause.
+	if cfg.SourcePath == "" {
+		s.logger.Error("github config update rejected: config has no source path, save would be an in-memory no-op")
+		jsonError(w, "config not persisted: config has no source path, so the change would be lost on restart", http.StatusInternalServerError)
+		return
+	}
 
 	if body.PrivateKey != "" {
 		keyPath := body.KeyFile
@@ -4874,12 +5139,23 @@ func (s *Server) handleConfigGitHub(w http.ResponseWriter, r *http.Request) {
 		"key_file":        cfg.GitHub.KeyFile,
 	}
 
+	// Resolve the signing key the same way the boot and heartbeat-apply paths
+	// do, NOT from the raw config value: on hosted spokes the key is
+	// hub-delivered to the per-app-id path with key_file deliberately left
+	// empty, and gating reinit on cfg.GitHub.KeyFile alone made Set ID save the
+	// installation_id but never rebuild the client — banner never cleared,
+	// Re-check dead-ended on a nil client (#2459).
+	keyFile := cfg.GitHub.KeyFile
+	if s.deps.ResolveAppKeyFileFunc != nil {
+		keyFile = s.deps.ResolveAppKeyFileFunc(cfg.GitHub.KeyFile, cfg.GitHub.AppID)
+	}
+
 	// HasUsableApp() rejects the placeholder sentinel: reinitializing App auth
 	// against it would fail on every save and, before this guard, could not
 	// succeed no matter what installation_id the operator supplied.
-	if cfg.GitHub.HasUsableApp() && cfg.GitHub.KeyFile != "" {
+	if cfg.GitHub.HasUsableApp() && keyFile != "" {
 		if s.deps.ReinitGitHubFunc != nil {
-			if err := s.deps.ReinitGitHubFunc(cfg.GitHub.AppID, cfg.GitHub.InstallationID, cfg.GitHub.KeyFile); err != nil {
+			if err := s.deps.ReinitGitHubFunc(cfg.GitHub.AppID, cfg.GitHub.InstallationID, keyFile); err != nil {
 				s.logger.Error("github client reinit failed", "error", err)
 				result["reinit"] = "failed"
 				result["reinit_error"] = err.Error()

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -191,19 +192,32 @@ type Server struct {
 	hubBanner   *HubBannerState
 
 	githubAppRecheckFn func() bool
+
+	// forgeAppInventoryFn supplies the Forge App tab's key inventory from
+	// cmd/hive (resolved active key path + per-app-id PVC keys, fingerprints
+	// only). Set once at startup via SetForgeAppInventoryFn; nil in tests and
+	// early boot, which the handler tolerates.
+	forgeAppInventoryFn func() ForgeAppInventory
 }
 
 // StatusPayload matches the JSON contract the dashboard frontend render() expects.
 type StatusPayload struct {
-	Timestamp           string                 `json:"timestamp"`
-	HiveID              string                 `json:"hiveId"`
-	Agents              []FrontendAgent        `json:"agents"`
-	Governor            FrontendGovernor       `json:"governor"`
-	Tokens              FrontendTokens         `json:"tokens"`
-	Repos               []FrontendRepo         `json:"repos"`
-	Beads               FrontendBeads          `json:"beads"`
-	Planning            FrontendPlanning       `json:"planning"`
-	Health              map[string]any         `json:"health"`
+	Timestamp string           `json:"timestamp"`
+	HiveID    string           `json:"hiveId"`
+	Agents    []FrontendAgent  `json:"agents"`
+	Governor  FrontendGovernor `json:"governor"`
+	Tokens    FrontendTokens   `json:"tokens"`
+	Repos     []FrontendRepo   `json:"repos"`
+	Beads     FrontendBeads    `json:"beads"`
+	Planning  FrontendPlanning `json:"planning"`
+	Health    map[string]any   `json:"health"`
+	// DeepHealth carries the spoke's own deep health checks (HealthSummary:
+	// ready, github_auth, agents, …) — the same checks the heartbeat reports
+	// to the hub. The dashboard's header Health pill renders from these, NOT
+	// from the shallow /api/health liveness signal or the repo-workflow
+	// Health map above, so the pill can never show "Health OK" while the
+	// spoke's own agents are down (#2465).
+	DeepHealth          map[string]any         `json:"deepHealth,omitempty"`
 	Budget              FrontendBudget         `json:"budget"`
 	CadenceMatrix       []FrontendCadence      `json:"cadenceMatrix"`
 	GHRateLimits        map[string]any         `json:"ghRateLimits"`
@@ -710,6 +724,10 @@ func (s *Server) registerCoreRoutes() {
 	// second GitHub device-flow login. Public path (see isPublicPath) because
 	// the caller has no session yet — the token IS the credential.
 	s.mux.HandleFunc("GET /sso", s.handleSSO)
+	// /terminal → in-container ttyd, so the dashboard's "▶ terminal" links
+	// work even when the cluster route sends the whole host to this server
+	// (see registerTerminalProxy).
+	s.registerTerminalProxy()
 }
 
 func (s *Server) Start() error {
@@ -1106,6 +1124,17 @@ func (s *Server) UpdateStatus(status *StatusPayload) {
 
 	status.InferenceBackends = s.buildInferenceBackends()
 
+	// Deep checks travel inside the status payload so every dashboard surface
+	// (header pill included) renders the same truth the heartbeat sends the
+	// hub. Judged against the payload in hand: it becomes s.status moments
+	// from now, so "ready" must not fail merely because the first beat's
+	// payload has not been assigned yet. Computed before statusMu is taken
+	// below (healthSummaryFor must not run under it).
+	s.statusMu.RLock()
+	readyForDeep := s.ready
+	s.statusMu.RUnlock()
+	status.DeepHealth = s.healthSummaryFor(status, readyForDeep)
+
 	s.systemAlertsMu.RLock()
 	if len(s.systemAlerts) > 0 {
 		status.SystemAlerts = make([]SystemAlert, len(s.systemAlerts))
@@ -1229,6 +1258,23 @@ func (s *Server) handleBannerDismissed(w http.ResponseWriter, r *http.Request) {
 		s.logger.Info("hub banner dismissed", "banner_id", body.ID, "by", username, "role", role)
 	}
 	jsonResponse(w, map[string]bool{"ok": true})
+}
+
+// githubAppStateNotInstalledToken is the pkg/github AppAuthState wire token
+// for "genuinely not installed" (AppStateNotInstalled.String()), kept as the
+// string the setter receives so this package needs no classifier dependency.
+const githubAppStateNotInstalledToken = "not-installed"
+
+// githubAppNotInstalled reports the config-truth state that must fail
+// github_auth in BOTH health surfaces regardless of which client object still
+// exists: an App with no installation cannot mint, so any working client is
+// riding a cached token that cannot be renewed. Waiting for the first failed
+// mint kept the banner down and the hub green for up to an hour after an
+// installation was cleared — exactly when the operator needed the opposite.
+func (s *Server) githubAppNotInstalled() bool {
+	s.githubAppMu.RLock()
+	defer s.githubAppMu.RUnlock()
+	return s.githubAppRequired && s.githubAppState == githubAppStateNotInstalledToken
 }
 
 func (s *Server) SetGitHubAppRequired(required bool) {
@@ -1530,8 +1576,12 @@ func (s *Server) handleHealthDeep(w http.ResponseWriter, r *http.Request) {
 		failCount++
 	}
 
-	// 2. GitHub auth
-	if s.deps != nil && s.deps.GHAppAuth != nil {
+	// 2. GitHub auth — config truth first (see githubAppNotInstalled).
+	if s.githubAppNotInstalled() {
+		checks["github_auth"] = map[string]any{"status": "fail", "detail": "GitHub App not installed — no installation for this org"}
+		overall = "degraded"
+		failCount++
+	} else if s.deps != nil && s.deps.GHAppAuth != nil {
 		if _, err := s.deps.GHAppAuth.Token(s.deps.Ctx); err == nil {
 			checks["github_auth"] = map[string]any{"status": "pass"}
 		} else {
@@ -2081,14 +2131,92 @@ func (s *Server) RecordAdvisoryError(errMsg string) {
 // spoke has never posted one), the finding count that went out then, and the
 // most recent post error ("" when the last attempt succeeded). The heartbeat
 // builder reports these so the hub can flag a stale advisory digest.
+//
+// An inference-backend AUTH failure is folded into lastError so an advisory
+// digest that cannot be produced BECAUSE every inference call is 401'ing trips
+// the hub's staleness gate 3a IMMEDIATELY (with the auth cause) instead of
+// waiting 90 minutes for the last-post time to age out. This is deliberately
+// gated on the hive being an advisory PARTICIPANT — advisoryLastPostedAt
+// non-zero, i.e. it has successfully posted at least once — so a pure PR/merge
+// hive with no advisory agents (which never posts, so the hub reads it as
+// UNKNOWN) is never false-alarmed by an inference-auth blip on some other path.
+// A real advisory-post error already recorded takes precedence, since it is the
+// more specific cause; the inference-auth fold only fills an otherwise-empty
+// error. It self-clears the moment inference recovers, because the provider
+// stops reporting the signal.
 func (s *Server) AdvisoryState() (lastPostedAt time.Time, lastFindings int, lastError string) {
 	s.advisoryMu.RLock()
-	defer s.advisoryMu.RUnlock()
-	return s.advisoryLastPostedAt, s.advisoryLastFindings, s.advisoryLastError
+	postedAt, findings, errMsg := s.advisoryLastPostedAt, s.advisoryLastFindings, s.advisoryLastError
+	s.advisoryMu.RUnlock()
+
+	if errMsg == "" && !postedAt.IsZero() {
+		if infErr, _ := InferenceAuthError(); infErr != "" {
+			errMsg = infErr
+		}
+	}
+	return postedAt, findings, errMsg
+}
+
+// InferenceAuthState returns the spoke's current inference-backend auth-failure
+// signal — a non-empty, log-safe cause string and the time it first latched
+// while every inference call is being rejected (a stale gateway key), empty
+// otherwise. The heartbeat builder reports it as a DEDICATED field so the hub
+// can raise an "inference auth failing" alert whose ROOT cause an operator sees
+// directly, distinct from a GitHub-post advisory staleness. Unlike the
+// AdvisoryState fold, this is NOT gated on advisory participation: a hive whose
+// inference key is dead is broken whether or not it also posts advisories, and
+// the hub-side alert is the right place to surface that. Self-clears when
+// inference recovers.
+func (s *Server) InferenceAuthState() (errMsg string, since time.Time) {
+	return InferenceAuthError()
 }
 
 // HealthSummary returns a deep-health summary with individual check results for heartbeats.
+// agentCLIUnauthenticated reports whether an agent's CLI backend lacks working
+// credentials — the exact signal the agent panel uses to render its AUTH/Login
+// button: the pane poller saw a login prompt (proc.NeedsLogin), or the
+// shared-credential probe registered via SetBackendAuthProvider (wired to
+// agent.Manager.BackendAuthAvailable in main.go) reports the backend's auth
+// state as known-and-unavailable. Backend resolution mirrors buildAgents:
+// BackendOverride wins over the configured backend. For backends the probe
+// cannot introspect (known=false) this returns false — an unknown auth state
+// must not reclassify a genuinely crashed agent out of "down".
+// healthAgentStatuses returns the agent snapshots the health check classifies.
+// A test seam mirroring SetBackendAuthProvider: AllStatuses returns value
+// snapshots, so tests cannot stage states (running-at-login-prompt) by
+// mutating manager internals — they override this instead. nil ⇒ live manager.
+var healthAgentStatuses func() map[string]*agent.AgentProcess
+
+func agentCLIUnauthenticated(proc *agent.AgentProcess, authFn func(backend string) (available, known bool)) bool {
+	if proc.NeedsLogin {
+		return true
+	}
+	if authFn == nil {
+		return false
+	}
+	backend := proc.Config.Backend
+	if proc.BackendOverride != "" {
+		backend = proc.BackendOverride
+	}
+	available, known := authFn(backend)
+	return known && !available
+}
+
 func (s *Server) HealthSummary() map[string]any {
+	s.statusMu.RLock()
+	status := s.status
+	ready := s.status != nil && s.ready
+	s.statusMu.RUnlock()
+	return s.healthSummaryFor(status, ready)
+}
+
+// healthSummaryFor computes the deep-health checks against an explicit status
+// payload and readiness verdict, so UpdateStatus can embed a snapshot judged
+// against the payload it is ABOUT to install — judging s.status there would
+// report a false "ready: fail" on the first beat after boot, before any
+// payload has been assigned. Callers must not hold statusMu (the readiness
+// and queue inputs are passed in instead of read here).
+func (s *Server) healthSummaryFor(status *StatusPayload, ready bool) map[string]any {
 	type check struct {
 		Name   string `json:"name"`
 		Status string `json:"status"`
@@ -2099,9 +2227,6 @@ func (s *Server) HealthSummary() map[string]any {
 	warns := 0
 
 	// 1. Readiness
-	s.statusMu.RLock()
-	ready := s.status != nil && s.ready
-	s.statusMu.RUnlock()
 	if ready {
 		checks = append(checks, check{Name: "ready", Status: "pass"})
 	} else {
@@ -2109,8 +2234,11 @@ func (s *Server) HealthSummary() map[string]any {
 		fails++
 	}
 
-	// 2. GitHub auth
-	if s.deps != nil && s.deps.GHAppAuth != nil {
+	// 2. GitHub auth — config truth first (see githubAppNotInstalled).
+	if s.githubAppNotInstalled() {
+		checks = append(checks, check{Name: "github_auth", Status: "fail", Detail: "GitHub App not installed — no installation for this org"})
+		fails++
+	} else if s.deps != nil && s.deps.GHAppAuth != nil {
 		if _, err := s.deps.GHAppAuth.Token(s.deps.Ctx); err != nil {
 			// Surface the underlying error, not a bare "token error": this
 			// detail travels to the hub and into the dashboard tooltip, and a
@@ -2139,12 +2267,35 @@ func (s *Server) HealthSummary() map[string]any {
 		stalled := 0
 		unsubstituted := 0
 		down := 0
-		for _, proc := range s.deps.AgentMgr.AllStatuses() {
+		needLogin := 0
+		// The names behind the counts. "1 down" alone is unactionable — the
+		// operator's next question is always WHICH one, and the answer was
+		// dropped right here where it was known.
+		var downNames, stalledNames, needLoginNames []string
+		authFn := getBackendAuthFn()
+		statuses := s.deps.AgentMgr.AllStatuses()
+		if healthAgentStatuses != nil {
+			statuses = healthAgentStatuses()
+		}
+		for name, proc := range statuses {
 			if proc.Paused {
 				paused++
 				continue
 			}
 			if proc.State == agent.StateRunning {
+				// A RUNNING agent sitting at a login prompt is alive but cannot
+				// work — the pane poller has literally seen "/login" on its
+				// terminal (proc.NeedsLogin). Counting it as running rendered a
+				// wedged agent healthy (green dot, Health OK) while its pane
+				// begged for authentication. Only the pane-poller signal moves a
+				// running agent here: the shared-credential probe can lag a
+				// just-completed login, and a running agent that is actually
+				// working must never be reclassified by a stale probe.
+				if !grace && proc.NeedsLogin {
+					needLogin++
+					needLoginNames = append(needLoginNames, name)
+					continue
+				}
 				running++
 				if !grace && proc.LastKickMessage != "" {
 					for _, v := range []string{"${ISSUE_LIST}", "${PR_LIST}", "${HIVE_REPO}", "${KNOWLEDGE}"} {
@@ -2157,28 +2308,56 @@ func (s *Server) HealthSummary() map[string]any {
 				if !grace && proc.OutputBuffer != nil && proc.OutputBuffer.Count() == 0 && proc.LastKick != nil {
 					if time.Since(*proc.LastKick) > staleOutputThreshold {
 						stalled++
+						stalledNames = append(stalledNames, name)
 					}
 				}
 			} else if !grace {
-				down++
+				// A non-running agent whose CLI has no credentials is not
+				// crashed — it is waiting for a human to click Login on the
+				// agent panel. Bucket it separately so the operator reads an
+				// owner-actionable "need login" instead of chasing a "down"
+				// agent that will keep exiting until someone authenticates.
+				if agentCLIUnauthenticated(proc, authFn) {
+					needLogin++
+					needLoginNames = append(needLoginNames, name)
+				} else {
+					down++
+					downNames = append(downNames, name)
+				}
 			}
 		}
+		// Map iteration order is random; sorted names keep the detail line
+		// stable across beats so the hub does not see a "changed" status that
+		// is really the same agents in a different order.
+		sort.Strings(downNames)
+		sort.Strings(stalledNames)
+		sort.Strings(needLoginNames)
 		detail := fmt.Sprintf("%d running", running)
 		if paused > 0 {
 			detail += fmt.Sprintf(", %d paused", paused)
 		}
 		if down > 0 {
-			detail += fmt.Sprintf(", %d down", down)
+			detail += fmt.Sprintf(", %d down: %s", down, strings.Join(downNames, ", "))
+		}
+		if needLogin > 0 {
+			verb := "need"
+			if needLogin == 1 {
+				verb = "needs"
+			}
+			detail += fmt.Sprintf(", %d %s login: %s", needLogin, verb, strings.Join(needLoginNames, ", "))
 		}
 		st := "pass"
-		if down > 0 {
+		// need-login keeps the same fail semantics as down: the agent still
+		// cannot work, and the hub row must keep surfacing it until a human
+		// clicks Login — the detail line tells them which kind of broken it is.
+		if down > 0 || needLogin > 0 {
 			st = "fail"
 			fails++
 		}
 		checks = append(checks, check{Name: "agents", Status: st, Detail: detail})
 
 		if stalled > 0 {
-			checks = append(checks, check{Name: "stall_detection", Status: "warn", Detail: fmt.Sprintf("%d stalled (no output 30+ min)", stalled)})
+			checks = append(checks, check{Name: "stall_detection", Status: "warn", Detail: fmt.Sprintf("%d stalled (no output 30+ min): %s", stalled, strings.Join(stalledNames, ", "))})
 			warns++
 		} else {
 			checks = append(checks, check{Name: "stall_detection", Status: "pass"})
@@ -2227,15 +2406,13 @@ func (s *Server) HealthSummary() map[string]any {
 	}
 
 	// 7. Queue
-	s.statusMu.RLock()
-	if s.status != nil {
+	if status != nil {
 		total := 0
-		for _, repo := range s.status.Repos {
+		for _, repo := range status.Repos {
 			total += len(repo.ActionableIssues)
 		}
 		checks = append(checks, check{Name: "queue", Status: "pass", Detail: fmt.Sprintf("%d actionable", total)})
 	}
-	s.statusMu.RUnlock()
 
 	overall := "ok"
 	if fails > 2 {

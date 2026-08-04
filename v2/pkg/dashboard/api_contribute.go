@@ -42,17 +42,21 @@ func getFederationRegistryPath() string {
 }
 
 type ContributorProfile struct {
-	GitHubUsername    string                `json:"github_username"`
-	ContributorID     string                `json:"contributor_id"`
-	RegistrationToken string                `json:"registration_token"`
-	TokenPlain        string                `json:"registration_token_plain,omitempty"`
-	TrustTier         string                `json:"trust_tier"`
-	PreferredRole     string                `json:"preferred_role,omitempty"`
-	CLIBackend        string                `json:"cli_backend,omitempty"`
-	Model             string                `json:"model,omitempty"`
-	AvatarURL         string                `json:"avatar_url,omitempty"`
-	RegisteredAt      string                `json:"registered_at"`
-	TasksCompleted    int                   `json:"total_tasks_completed"`
+	GitHubUsername    string `json:"github_username"`
+	ContributorID     string `json:"contributor_id"`
+	RegistrationToken string `json:"registration_token"`
+	TokenPlain        string `json:"registration_token_plain,omitempty"`
+	TrustTier         string `json:"trust_tier"`
+	PreferredRole     string `json:"preferred_role,omitempty"`
+	CLIBackend        string `json:"cli_backend,omitempty"`
+	Model             string `json:"model,omitempty"`
+	AvatarURL         string `json:"avatar_url,omitempty"`
+	RegisteredAt      string `json:"registered_at"`
+	TasksCompleted    int    `json:"total_tasks_completed"`
+	// TasksWithPR counts only completions that reported a pull request.
+	// Auto-promotion reads this rather than TasksCompleted, so write access is
+	// never granted for completions where nothing was shown to have shipped.
+	TasksWithPR       int                   `json:"total_tasks_completed_with_pr"`
 	TasksFailed       int                   `json:"total_tasks_failed"`
 	LastActive        string                `json:"last_active,omitempty"`
 	LastCompletedTask *WSTaskAssign         `json:"last_completed_task,omitempty"`

@@ -88,6 +88,18 @@ ARG COPILOT_VERSION=1.0.78
 RUN npm install -g @github/copilot@${COPILOT_VERSION} && npm cache clean --force || \
     echo "WARN: GitHub Copilot CLI install failed — skipping"
 
+# --- Layer 3b: GitHub Copilot SDK (pinned; powers SDK-based model discovery) ---
+# The dashboard's copilot model discovery prefers a probe through the official
+# SDK (bin/copilot-models.mjs → /usr/local/bin/copilot-models.mjs) because it
+# rides the CLI's own auth and TLS handling. The helper pins the SDK's runtime
+# connection to the Layer 3 CLI entry above, so the newer @github/copilot the
+# SDK nests as its own dependency is never executed (its native binary would
+# reject the proxy CA). Tolerant of failure like the copilot layer: discovery
+# falls back to the raw HTTP probe when the SDK is absent.
+ARG COPILOT_SDK_VERSION=1.0.8
+RUN npm install -g @github/copilot-sdk@${COPILOT_SDK_VERSION} && npm cache clean --force || \
+    echo "WARN: GitHub Copilot SDK install failed — skipping"
+
 # --- Layer 7: Claude Code (most frequent updates) ---
 ARG CLAUDE_CODE_VERSION=latest
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} && npm cache clean --force
@@ -165,6 +177,9 @@ COPY bin/gh-app-token.sh bin/hive-config.sh bin/agent-launch.sh bin/git-credenti
 COPY bin/hive-open-pr.sh /usr/local/bin/hive-open-pr
 COPY bin/hive-merge.sh /usr/local/bin/hive-merge
 COPY bin/gh-wrapper.sh /usr/local/bin/gh
+# SDK-based copilot model discovery helper (see Layer 3b). Invoked as
+# `node /usr/local/bin/copilot-models.mjs` by the dashboard, so no exec bit.
+COPY bin/copilot-models.mjs /usr/local/bin/copilot-models.mjs
 COPY config/backends.conf /usr/local/etc/hive/backends.conf
 RUN chmod +x /usr/local/bin/ttyd-tmux.sh /usr/local/bin/hive-panes /usr/local/bin/gh-app-token.sh \
     /usr/local/bin/hive-config.sh /usr/local/bin/agent-launch.sh /usr/local/bin/gh \

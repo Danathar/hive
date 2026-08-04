@@ -212,6 +212,8 @@ func (s *HubServer) registerSaaSRoutes() {
 	// requireAuth plus an inner owner-or-admin check, exactly like
 	// switch-branch and auto-upgrade above.
 	s.mux.HandleFunc("POST /api/saas/hives/{id}/forge", s.requireAuth(s.handleSwitchForge))
+	s.mux.HandleFunc("POST /api/saas/hives/{id}/reset-app", s.requireAuth(s.handleResetApp))
+	s.mux.HandleFunc("POST /api/saas/hives/{id}/restart-spoke", s.requireAuth(s.handleRestartSpoke))
 	s.mux.HandleFunc("GET /api/saas/hive-config/{hiveID}", s.requireAuth(s.handleProxyHiveConfig))
 	s.mux.HandleFunc("GET /api/saas/latest-sha", s.handleLatestSHA)
 	s.mux.HandleFunc("POST /api/saas/hub/upgrade", s.requireAdmin(s.handleHubSelfUpgrade))
@@ -439,6 +441,16 @@ func loadSaaSUser(username string) *SaaSUser {
 	}
 	if u.Hives == nil {
 		u.Hives = make(map[string]string)
+	}
+	// Backfill LoginCount for records that predate the login counter (added with
+	// the admin engagement card). Those users have a real LastLogin but a zero
+	// LoginCount, which renders as the contradictory "0 logins (last <date>)" on
+	// the stats card. A user who has logged in at least once is, at minimum, one
+	// login — so a present LastLogin with a zero count normalizes to 1. This is a
+	// read-time floor only; the real counter keeps incrementing from here on the
+	// next OAuth login (handleOAuthCallback), and it never lowers a genuine count.
+	if u.LoginCount == 0 && strings.TrimSpace(u.LastLogin) != "" {
+		u.LoginCount = 1
 	}
 	return &u
 }
@@ -846,6 +858,15 @@ type ClusterHealthNode struct {
 // hiveHostedNamespacePrefix is the namespace prefix used for SaaS-provisioned
 // hives; pods in these namespaces identify hives running on a node.
 const hiveHostedNamespacePrefix = "hive-hosted-"
+
+// hostedAvailableIDPrefix is the ID prefix a pre-provisioned pool slot carries
+// while it is unclaimed inventory (e.g. "hosted-available-oke-01-placeholder-bb95").
+// It is the RegistryEntry-side marker for an available placeholder: unlike
+// MyHiveEntry, RegistryEntry has no ProvStatus field, so the ID prefix (paired
+// with the "available-" org prefix, placeholderOrgPrefix) is the reliable signal
+// that a slot is idle inventory rather than a claimed hive. A claimed hive keeps
+// neither marker.
+const hostedAvailableIDPrefix = "hosted-available-"
 
 type ClusterHealthSummary struct {
 	TotalNodes    int `json:"total_nodes"`
@@ -1710,6 +1731,13 @@ type MyHiveEntry struct {
 	AdvisoryStale       bool   `json:"advisoryStale,omitempty"`
 	AdvisoryStaleReason string `json:"advisoryStaleReason,omitempty"`
 
+	// The inference-backend auth-failure signal (InferenceAuthError) is NOT
+	// re-declared here: MyHiveEntry embeds RegistryEntry, which already carries
+	// the spoke-reported InferenceAuthError verbatim, so the promoted field is
+	// what both the alert evaluator (alertHiveFromEntry) and the JSON payload
+	// read. The spoke owns the consecutive-failure threshold and the self-heal,
+	// so there is nothing to compute on read the way AdvisoryStale is computed.
+
 	// InactiveAgents is how many of this hive's agents are RUNNING but not
 	// doing any work — session gone, sitting on a login prompt, or producing
 	// nothing while work is queued. Computed on read by
@@ -2044,6 +2072,14 @@ func (s *HubServer) handleMyHives(w http.ResponseWriter, r *http.Request) {
 			result[i].PendingRequests = pending
 		}
 	}
+
+	// Unassigned placeholder rows: auth-class check failures are the pool's
+	// DESIGNED state, not degradation, so neutralise them before anything
+	// downstream (drift, the fleet alerts, the browser's row dot and
+	// failing-checks pill) reads Health. Runs after enrichment for the same
+	// provStatus reason annotateDrift documents below, and before it so the
+	// drift health signal and the row agree. See placeholder_health.go.
+	sanitizePlaceholderRows(result)
 
 	// Config drift, computed once over the caller's full visible set — the
 	// fleet norm is derived from that set, so this must run AFTER every row has
@@ -2951,33 +2987,59 @@ func (s *HubServer) handleUpgradeHive(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"no cluster config for this hive"}`, http.StatusInternalServerError)
 		return
 	}
-	ns := "hive-hosted-" + id
-	cmd := kubectlForCluster(cluster, "rollout", "restart", "deployment/hive", "-n", ns)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		s.logger.Warn("upgrade failed", "hive", id, "cluster", cluster.ID, "output", string(out))
-		http.Error(w, `{"error":"upgrade failed — check hub logs for details"}`, http.StatusInternalServerError)
-		return
-	}
-	s.logger.Info("audit: hosted hive upgraded", "hive_id", id, "by", username, "cluster", cluster.ID)
-	s.recordTimeline(id, TimelineUpgradeStarted, "upgrade requested from the hub dashboard", username)
+
+	// kubectl is attempt one; the heartbeat fallback below is the ONLY path
+	// that works for a cluster the hub cannot route to (the spoke pulls, the
+	// hub answers). rolloutRestartHive bounds the attempt and honours the
+	// unreachable-cluster cache, so a firewalled cluster costs seconds here,
+	// not a gateway timeout.
+	delivered := s.rolloutRestartHive(cluster, id)
+
 	s.mu.Lock()
+	var latestSHA string
 	for i := range s.registry.Hives {
 		if s.registry.Hives[i].ID == id {
 			branch := s.registry.Hives[i].GitBranch
 			if branch == "" {
 				branch = "v2"
 			}
-			latestSHA := getLatestSHAForBranch(branch)
+			latestSHA = getLatestSHAForBranch(branch)
 			s.registry.Hives[i].Upgrading = true
 			s.registry.Hives[i].UpgradeTarget = latestSHA
 			s.registry.Hives[i].UpgradeStartedAt = time.Now()
 			break
 		}
 	}
+	if !delivered && latestSHA != "" {
+		// Arm the durable fallback: the spoke self-restarts onto the target
+		// when its next heartbeat carries UpgradeTo. The stale-upgrade sweep
+		// re-arms this if the spoke misses it, so the request cannot be lost.
+		if s.heartbeatUpgrade == nil {
+			s.heartbeatUpgrade = make(map[string]string)
+		}
+		s.heartbeatUpgrade[id] = latestSHA
+	}
 	s.mu.Unlock()
+
+	if !delivered && latestSHA == "" {
+		// kubectl failed AND no build target is known for the branch — there is
+		// nothing a heartbeat could deliver. This is the only remaining
+		// hard-failure case.
+		s.logger.Warn("upgrade failed: cluster unreachable and no build target known",
+			"hive", id, "cluster", cluster.ID)
+		http.Error(w, `{"error":"upgrade failed — cluster unreachable and no build target known"}`, http.StatusBadGateway)
+		return
+	}
+
+	mode := "kubectl"
+	if !delivered {
+		mode = "heartbeat"
+	}
+	s.logger.Info("audit: hosted hive upgrade requested",
+		"hive_id", id, "by", username, "cluster", cluster.ID, "mode", mode)
+	s.recordTimeline(id, TimelineUpgradeStarted, "upgrade requested from the hub dashboard ("+mode+")", username)
 	w.Header().Set("Content-Type", "application/json")
-	w.Write([]byte(`{"status":"upgrading"}`))
+	w.Write([]byte(`{"status":"upgrading","mode":"` + mode + `"}`))
 }
 
 // branchToTag converts a git branch name into a valid Docker image tag.
@@ -4001,6 +4063,9 @@ func (s *HubServer) markClusterUnreachable(clusterID string) {
 	}
 	s.clusterUnreachableMu.Lock()
 	defer s.clusterUnreachableMu.Unlock()
+	if s.clusterUnreachableUntil == nil {
+		s.clusterUnreachableUntil = make(map[string]time.Time)
+	}
 	s.clusterUnreachableUntil[clusterID] = time.Now().Add(clusterUnreachableTTL)
 }
 
@@ -4046,25 +4111,6 @@ func (s *HubServer) rolloutRestartHive(cluster *ClusterConfig, hiveID string) bo
 func (s *HubServer) triggerAutoUpgrades() {
 	hives := listSaaSHives()
 	for _, h := range hives {
-		if !h.AutoUpgrade {
-			continue
-		}
-		// Scheduling gate. Instant-mode hives (and every legacy record, whose
-		// mode is empty) pass straight through, so this changes nothing for the
-		// existing fleet. Daily-mode hives are held until the first cycle at or
-		// after autoUpgradeDailyHour ET and released only once per ET day.
-		// Evaluated BEFORE any of the work below so a held hive costs nothing.
-		decision := shouldAutoUpgradeNow(h.AutoUpgradeMode, h.AutoUpgradeLastFired, time.Now())
-		if !decision.Allowed {
-			s.logger.Debug("auto-upgrade held by schedule",
-				"hive_id", h.ID, "mode", h.AutoUpgradeMode, "reason", decision.Reason)
-			continue
-		}
-		// Skip hives that are actively provisioning or in error state.
-		// Empty status means the hive predates the provisioning system — treat as eligible.
-		if h.Status == "provisioning" || h.Status == "error" {
-			continue
-		}
 		s.mu.RLock()
 		var currentSHA, branch, upgradeTarget string
 		var alreadyUpgrading bool
@@ -4080,10 +4126,18 @@ func (s *HubServer) triggerAutoUpgrades() {
 			}
 		}
 		s.mu.RUnlock()
+		if branch == "" {
+			branch = "v2"
+		}
 		if alreadyUpgrading {
-			if branch == "" {
-				branch = "v2"
-			}
+			// Latched-upgrade recovery runs for EVERY hive, deliberately BEFORE
+			// the AutoUpgrade gate below (#2476). The registry latch
+			// (Upgrading/UpgradeTarget/UpgradeStartedAt) is durable, but
+			// heartbeatUpgrade — the map that actually delivers the instruction
+			// — is in-memory; when this recovery lived behind
+			// `if !h.AutoUpgrade { continue }`, a hub restart orphaned every
+			// manually upgraded hive forever: latched "Upgrading" in the
+			// registry, zero instructions on the wire.
 			upgradeAge := time.Since(upgradeStartedAt)
 			// Zero UpgradeStartedAt means the timestamp was lost (heartbeats
 			// used to wipe it on rebuild) — treat as stale so already-stuck
@@ -4105,13 +4159,21 @@ func (s *HubServer) triggerAutoUpgrades() {
 				// target advances. Previously, when the target already equalled
 				// latest, this branch was skipped entirely and the hive stayed
 				// latched-upgrading forever behind an unreachable kubectl.
-				latestSHA := getLatestSHAForBranch(branch)
 				recoverTarget := upgradeTarget
-				if latestSHA != "" && latestSHA != upgradeTarget {
+				if h.AutoUpgrade {
+					// Target advancement is an auto-upgrade behaviour: those
+					// hives always chase latest. A manual upgrade keeps exactly
+					// the target that was requested — with AutoUpgrade off,
+					// silently delivering a newer build than the one the owner
+					// clicked would override their setting.
+					if latestSHA := getLatestSHAForBranch(branch); latestSHA != "" && latestSHA != upgradeTarget {
+						recoverTarget = latestSHA
+					}
+				}
+				if recoverTarget != upgradeTarget {
 					s.logger.Warn("advancing upgrade target for stale upgrade",
 						"hive", h.ID, "stale_minutes", int(upgradeAge.Minutes()),
-						"old_target", upgradeTarget, "new_target", latestSHA)
-					recoverTarget = latestSHA
+						"old_target", upgradeTarget, "new_target", recoverTarget)
 				} else {
 					s.logger.Warn("re-arming heartbeat fallback for stale upgrade",
 						"hive", h.ID, "stale_minutes", int(upgradeAge.Minutes()),
@@ -4156,8 +4218,26 @@ func (s *HubServer) triggerAutoUpgrades() {
 				"hive", h.ID, "current", currentSHA)
 			continue
 		}
-		if branch == "" {
-			branch = "v2"
+		// Everything below STARTS a new upgrade, which only auto-upgrade hives
+		// opt into. The recovery above must stay ahead of this gate — see #2476.
+		if !h.AutoUpgrade {
+			continue
+		}
+		// Scheduling gate. Instant-mode hives (and every legacy record, whose
+		// mode is empty) pass straight through, so this changes nothing for the
+		// existing fleet. Daily-mode hives are held until the first cycle at or
+		// after autoUpgradeDailyHour ET and released only once per ET day.
+		// Evaluated BEFORE any of the work below so a held hive costs nothing.
+		decision := shouldAutoUpgradeNow(h.AutoUpgradeMode, h.AutoUpgradeLastFired, time.Now())
+		if !decision.Allowed {
+			s.logger.Debug("auto-upgrade held by schedule",
+				"hive_id", h.ID, "mode", h.AutoUpgradeMode, "reason", decision.Reason)
+			continue
+		}
+		// Skip hives that are actively provisioning or in error state.
+		// Empty status means the hive predates the provisioning system — treat as eligible.
+		if h.Status == "provisioning" || h.Status == "error" {
+			continue
 		}
 		if currentSHA == "" {
 			continue
@@ -4561,6 +4641,14 @@ type HiveAccessEntry struct {
 	FullName string `json:"full_name,omitempty"`
 	SlackID  string `json:"slack_id,omitempty"`
 	Notes    string `json:"notes,omitempty"`
+	// Engagement stats copied from the user's record so a co-member's My-Hives
+	// avatar hover can show the same logins / time-in-hive the admin Users card
+	// shows. Like Notes these are stats ABOUT a person, so they ride ONLY for a
+	// hub admin (accessForHive's includeAdminOnly gate) — a non-admin owner sees
+	// name/Slack but not another member's engagement numbers. omitempty so a user
+	// with no stats round-trips as today's handle — role tooltip.
+	LoginCount     int   `json:"login_count,omitempty"`
+	SessionSeconds int64 `json:"session_seconds,omitempty"`
 }
 
 // accessForHive returns who can sign in to a hive, newest-role-agnostic and
@@ -4568,10 +4656,11 @@ type HiveAccessEntry struct {
 // than reading h.Owner: a user's Hives map is the authoritative grant (see
 // handleApproveProvision / handleAssignHive, which write it), and an owner who
 // is missing from it genuinely cannot sign in.
-// includeNotes controls whether the admin-maintained Notes field is copied onto
-// each entry: pass true ONLY for a hub admin. FullName/SlackID always ride (they
-// identify the person to a co-owner); Notes is private admin CRM text.
-func accessForHive(hiveID string, users []SaaSUser, includeNotes bool) []HiveAccessEntry {
+// includeAdminOnly controls whether the admin-only fields — the CRM Notes and
+// the engagement stats (LoginCount/SessionSeconds) — are copied onto each entry:
+// pass true ONLY for a hub admin. FullName/SlackID always ride (they identify the
+// person to a co-owner); Notes and the stats are private to admins.
+func accessForHive(hiveID string, users []SaaSUser, includeAdminOnly bool) []HiveAccessEntry {
 	access := make([]HiveAccessEntry, 0)
 	for _, u := range users {
 		if role, ok := u.Hives[hiveID]; ok {
@@ -4581,8 +4670,10 @@ func accessForHive(hiveID string, users []SaaSUser, includeNotes bool) []HiveAcc
 				FullName: u.FullName,
 				SlackID:  u.SlackID,
 			}
-			if includeNotes {
+			if includeAdminOnly {
 				entry.Notes = u.Notes
+				entry.LoginCount = u.LoginCount
+				entry.SessionSeconds = u.SessionSeconds
 			}
 			access = append(access, entry)
 		}
@@ -5558,8 +5649,10 @@ func (s *HubServer) handleApproveProvision(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Rewrite the placeholder's meta.json to the requesting user's real project.
-	// Clearing status makes it show under the new owner in My Hives; the project
-	// config reaches the spoke via the heartbeat channel (projectConfigForHiveID).
+	// Flipping status to statusAssigned makes it show under the new owner in My
+	// Hives AND marks it as no-longer-available for the fleet counters; the
+	// project config reaches the spoke via the heartbeat channel
+	// (projectConfigForHiveID).
 	h.Owner = targetUsername
 	h.Org = pr.Org
 	h.Repos = repos
@@ -5575,7 +5668,18 @@ func (s *HubServer) handleApproveProvision(w http.ResponseWriter, r *http.Reques
 	// assignments, so a flag left true by a previous tenancy would suppress
 	// delivery for the new owner.
 	h.ACMMDelivered = false
-	h.Status = ""
+	// Re-arm the org/repos claim handshake too (#2372). ClaimDelivered gates
+	// both halves of adoptSpokeProjectConfig: the org/repos PUSH fires only
+	// while !ClaimDelivered, and the spoke's report is ADOPTED only once it is
+	// true. A RECYCLED placeholder (previously claimed, returned to the pool)
+	// carries the prior tenant's ClaimDelivered=true, so without this reset the
+	// hub never pushes the new owner's org/repos AND adopts the spoke's stale
+	// self-report — hub and spoke silently agree on the PREVIOUS tenant's
+	// project. The heartbeat is the only hub->spoke write channel, so the claim
+	// must re-arm on (re)assignment for exactly the same reason ACMMDelivered
+	// does above. (The assign path — handleAssignHive — already does this.)
+	h.ClaimDelivered = false
+	h.Status = statusAssigned
 	h.Error = ""
 	// Preserve the placeholder's real cluster before ANY cluster-derived
 	// resolution below (host backfill uses s.clusterForHive(h), which silently
@@ -5643,6 +5747,14 @@ func (s *HubServer) handleApproveProvision(w http.ResponseWriter, r *http.Reques
 		http.Error(w, `{"error":"failed to assign placeholder hive"}`, http.StatusInternalServerError)
 		return
 	}
+
+	// Entry point 2/3 for namespace identity: this is the moment a placeholder
+	// gets a real owner/org — the hive's identity is known here for the first
+	// time, so the namespace's labels/annotations MUST be (re)written now
+	// rather than left holding whatever provisionHive stamped at pool-creation
+	// time (typically just hive_id). Best-effort — see
+	// stampHostedNamespaceIdentity's doc comment.
+	stampHostedNamespaceIdentity(s.clusterForHive(h), hostedNamespaceForHive(h), h.ProjectName, h.Org, h.ID, s.logger)
 
 	// Ensure the user record exists, grant them owner access, and count this
 	// owned hive against a quota.
@@ -6250,10 +6362,15 @@ func (s *HubServer) handleAssignHive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Accept a pasted org/repo URL here too — an admin assigning a hive reaches
-	// for the same paste the requester did.
-	if h, o := normalizeOrgRef(body.Org); o != "" {
-		body.Org = o
-		if h != "" && body.GitHubHost == "" {
+	// for the same paste the requester did. normalizeOrgRef returns a non-empty
+	// host with an EMPTY org when the field held only a forge host
+	// ("github.ibm.com") and no org — clear body.Org in that case so the
+	// isValidName check below rejects it, instead of the raw hostname (which
+	// isValidName accepts, dots and all) silently becoming the org. That
+	// host-as-org bug produced the two broken github.ibm.com claims on vllm-d.
+	if h, o := normalizeOrgRef(body.Org); h != "" {
+		body.Org = o // may be "" for a bare-host paste — rejected just below
+		if body.GitHubHost == "" {
 			body.GitHubHost = h
 		}
 	}
@@ -6385,7 +6502,7 @@ func (s *HubServer) handleAssignHive(w http.ResponseWriter, r *http.Request) {
 	h.RequestedACMMLevel = acmm
 	h.ACMMDelivered = false
 	h.IsPublic = body.IsPublic
-	h.Status = ""
+	h.Status = statusAssigned
 	h.Error = ""
 	// A (re)assignment is a new claim payload: reset delivery so the hub pushes
 	// this project to the spoke until it reports the new org/repos back, before
@@ -6399,7 +6516,21 @@ func (s *HubServer) handleAssignHive(w http.ResponseWriter, r *http.Request) {
 	// registry's dashboardUrl becomes the vanity URL and stays that way.
 	if h.VanityURL == "" {
 		if cluster := s.clusterForHive(h); cluster != nil && cluster.Domain != "" {
-			vanityHost := generateHiveID(body.Org, primaryRepo) + "." + cluster.Domain
+			// Option B (namespace-identity operability): prefer a host built
+			// from the hive's OWN display name (h.ProjectName /
+			// body.ProjectName) when one is set — "TradingAsBuddies" reads as
+			// the hive an operator actually asked for, where
+			// "hosted-acme-repo-*" only reads as org/repo. Falls back to the
+			// existing org/repo-derived host (generateHiveID) when no display
+			// name is set, so a hive claimed without one behaves exactly as
+			// before. Both schemes share the same suffix length and the same
+			// "no route until makeVanityHostServable succeeds" adoption rule
+			// below — this only changes what the label PORTION of the host
+			// says, never the get-or-create/idempotency semantics.
+			vanityHost := hiveNameVanityHost(h.ProjectName, cluster.Domain)
+			if vanityHost == "" {
+				vanityHost = generateHiveID(body.Org, primaryRepo) + "." + cluster.Domain
+			}
 			// Make the vanity host servable, then adopt it. Nothing else creates a
 			// route for this host: provisioning templates a single DashboardHost, so
 			// a vanity URL minted here resolves to no backend and every hub link to
@@ -6439,6 +6570,14 @@ func (s *HubServer) handleAssignHive(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"failed to save hive assignment"}`, http.StatusInternalServerError)
 		return
 	}
+
+	// Entry point 3/3 for namespace identity: the (re)assignment path. A
+	// claimed placeholder can be reassigned to a different owner/org later
+	// (or an admin can assign directly, bypassing the approve-provision flow
+	// entirely), so the namespace's labels/annotations must be refreshed here
+	// too — same rationale as handleApproveProvision above. Best-effort — see
+	// stampHostedNamespaceIdentity's doc comment.
+	stampHostedNamespaceIdentity(s.clusterForHive(h), hostedNamespaceForHive(h), h.ProjectName, h.Org, h.ID, s.logger)
 
 	// Grant the assignee owner access. handleAccessList builds a hive's access
 	// list by scanning every user record for Hives[hiveID], NOT from h.Owner —
@@ -7239,11 +7378,14 @@ const dashboardHTML = `<!DOCTYPE html>
       <div id="past-requests-body" style="display:none;overflow-x:auto"><div id="admin-request-history"></div></div>
     </div>
 
+    <!-- Usage renders ABOVE the attention strip on purpose: the strip's drift
+         pills filter the hive list, so the strip and the list it narrows must
+         sit directly adjacent with no unrelated card between them. -->
+    <div id="usage-panel" style="display:none;margin-bottom:24px"></div>
     <div id="hive-drift-summary" style="display:none"></div>
     <div id="fleet-alerts-panel" style="display:none"></div>
     <div id="hive-view-bar" style="display:none"></div>
     <div id="hive-filter-bar" style="display:none"></div>
-    <div id="usage-panel" style="display:none;margin-bottom:24px"></div>
     <div id="bulk-action-bar" style="display:none"></div>
     <div class="hive-layout">
       <div class="facet-shell" id="hive-facet-shell">
@@ -7390,8 +7532,14 @@ const dashboardHTML = `<!DOCTYPE html>
     function avatarProfileLink(username, label, avatarHTML) {
       var uname = String(username || '');
       if (!uname) return avatarHTML;
+      // Fold "logged into their hive now" into the anchor's OWN tooltip for every
+      // avatar surface, so a live user's face reads identity (+ stats) AND the
+      // live state in one tooltip. The green ring wrapper deliberately carries no
+      // title of its own — a wrapper title would sit on top of this and hide it.
+      var title = label || uname;
+      if (isUserLive(uname)) title = title + '\n● Logged into their hive now';
       return '<a href="' + escAttr(ghProfileURL(uname)) + '" target="_blank" rel="noopener noreferrer" ' +
-        'title="' + escAttr(label || uname) + '" aria-label="' + escAttr(label || uname) + '" ' +
+        'title="' + escAttr(title) + '" aria-label="' + escAttr(label || uname) + '" ' +
         'style="display:inline-block;line-height:0;text-decoration:none">' + avatarHTML + '</a>';
     }
 
@@ -7417,11 +7565,17 @@ const dashboardHTML = `<!DOCTYPE html>
         (extraStyle || '') + '" ' +
         'onerror="this.style.visibility=\'hidden\'">';
       if (isUserLive(username)) {
-        // 3px green dashed ring hugging the circle. inline-flex wrapper keeps the
-        // face's vertical-align and sizing identical to the un-ringed case.
-        return '<span title="Logged into their hive now" ' +
-          'style="display:inline-flex;border-radius:50%;padding:1px;border:3px dashed var(--green);vertical-align:middle;line-height:0">' +
-          img + '</span>';
+        // Concentric green dashed ring. The wrapper is a fixed square exactly the
+        // face's size plus the ring gap+width on every side (px + 2*(gap+border)),
+        // with box-sizing:border-box and the ring drawn as its border, so the
+        // round border-radius stays perfectly centered on the round face — the
+        // earlier padding:1px inline-flex version drifted off-center. No title on
+        // the wrapper: the "logged in now" line lives in the face's OWN tooltip
+        // (accessAvatarTitle) so a wrapper title can't shadow the identity+stats.
+        var RING_GAP = 2, RING_W = 3, box = px + 2 * (RING_GAP + RING_W);
+        return '<span style="display:inline-block;box-sizing:border-box;width:' + box + 'px;height:' + box + 'px;' +
+          'padding:' + RING_GAP + 'px;border:' + RING_W + 'px dashed var(--green);border-radius:50%;' +
+          'vertical-align:middle;line-height:0">' + img + '</span>';
       }
       return img;
     }
@@ -7566,6 +7720,18 @@ const dashboardHTML = `<!DOCTYPE html>
     function ghAppIsOperatorSide(state) {
       return GH_APP_OPERATOR_STATES[String(state || '').trim()] === true;
     }
+    /* Popover label for a user-side App issue, from the classified state.
+       The blanket "permissions insufficient" wording is reserved for genuine
+       permission states (and for unclassified reports from older spokes);
+       the other states name their real cause so the hover stops sending an
+       admin to approve permissions when the installation_id is what's wrong. */
+    function ghAppPermIssueLabel(state) {
+      var s = String(state || '').trim();
+      if (s === 'wrong-installation') return 'wrong installation (installation_id points at another account)';
+      if (s === 'write-forbidden') return 'write forbidden (repo not in the App installation)';
+      if (s === 'no-app-assigned') return 'no App assigned yet';
+      return 'permissions insufficient';
+    }
 
     /* Labels for each journey stage, matching JourneyStage.String() on the hub. */
     var JOURNEY_STAGE_LABELS = {
@@ -7695,13 +7861,39 @@ const dashboardHTML = `<!DOCTYPE html>
        invariant. The server only populates these fields for owner/admin-visible
        rows and withholds notes from non-admins, so nothing here needs to re-gate
        them — a field that is absent simply produces no line. */
+    /* accessAvatarTitle builds the NATIVE multi-line tooltip for a co-member face.
+       It deliberately stays a title attribute (never a hive-access-pop custom
+       panel — see TestInlineAvatarsCarryNoCustomPanel; the status dot owns the
+       row's one panel). It carries the same engagement info the admin Users card
+       shows — identity, logins, time-in-hive, task activity, and the verdict — so
+       who-to-elevate/help reads on hover anywhere a face appears. The stat lines
+       are admin-only (accessForHive only fills login_count/session_seconds for an
+       admin) and each line is conditional, so a stat-less user degrades to today's
+       "handle — role". Newlines render as line breaks in a native title. */
     function accessAvatarTitle(a) {
       var uname = String(a.username || '');
       var role = String(a.role || '');
       var lines = [uname + (role ? ' — ' + role : '')];
+      // ("Logged into their hive now" is appended generically in avatarProfileLink
+      // for EVERY avatar surface, so it is not added here — doing both would
+      // double the line.)
       if (a.full_name) lines.push(String(a.full_name));
       if (a.slack_id) lines.push('Slack: ' + String(a.slack_id));
       if (a.notes) lines.push('Notes: ' + String(a.notes));
+      // Engagement stats (admin-only; absent → these lines are simply skipped).
+      if (a.login_count) lines.push('Logins: ' + a.login_count);
+      if (a.session_seconds) lines.push('Time in hive: ' + fmtHours(a.session_seconds));
+      var act = userTaskActivity(uname);
+      if (act.done || act.failed) lines.push('Tasks: ' + act.done + ' done / ' + act.failed + ' failed');
+      // The lifecycle verdict, from the same helper the admin card uses. It reads
+      // logins/time/tasks; a co-member's hive-journey list isn't on the access
+      // entry so pass empty — the verdict still classifies from engagement, only
+      // the ACMM-graduation refinement is unavailable here. Shown only when there
+      // is some signal to classify (any stat present), so a bare face stays bare.
+      if (a.login_count || a.session_seconds || act.done) {
+        var verdict = userVerdict({login_count: a.login_count || 0, session_seconds: a.session_seconds || 0}, act, []);
+        if (verdict && verdict.label) lines.push(verdict.label);
+      }
       return lines.join('\n');
     }
     function inlineAccessAvatar(a) {
@@ -7795,9 +7987,11 @@ const dashboardHTML = `<!DOCTYPE html>
       var st = hp.status || 'unknown';
       /* githubAppRequired means the spoke wants the App but it is not usable:
          with a perm issue it is installed-but-insufficient, without one it is
-         not installed at all. healthBadge() forces "degraded" in both cases. */
-      var appMissing = !!h.githubAppRequired && !h.githubAppPermIssue;
-      var degraded = !!h.githubAppRequired || st === 'degraded' || st === 'critical';
+         not installed at all. healthBadge() forces "degraded" in both cases —
+         EXCEPT on an unassigned placeholder, where having no usable App is the
+         pool's designed state (mirrored here so dot and chip never disagree). */
+      var appMissing = !isPlaceholderHive(h) && !!h.githubAppRequired && !h.githubAppPermIssue;
+      var degraded = (!isPlaceholderHive(h) && !!h.githubAppRequired) || st === 'degraded' || st === 'critical';
       /* An offline hive has no live reading at all, so it is not "OK" even if
          its last stored health snapshot said ok. */
       var ok = !degraded && st === 'ok' && !!h.online;
@@ -7955,6 +8149,27 @@ const dashboardHTML = `<!DOCTYPE html>
         'dead link</span>';
     }
 
+    /* inferenceAuthSummary renders an "inference auth" pill when this hive's
+       self-hosted inference backend is rejecting every call with 401 (a stale
+       gateway key). Red, like the dead-link pill: this is the ROOT cause of an
+       otherwise silent outage — the hive heartbeats and looks online while
+       every agent is dead in the water because no inference call succeeds, and
+       NOTHING else on the row indicates it. h.inferenceAuthError is the
+       spoke-reported, log-safe cause carried verbatim on the RegistryEntry (the
+       spoke latches it only after several consecutive 401s and clears it on the
+       next success), so this renderer never re-derives the rule and a healthy
+       or transiently-blipping hive is already filtered out before it gets here.
+       Deliberately NOT gated on h.online for the same reason as the dead-link
+       pill: the hive IS online, that is the whole point. */
+    function inferenceAuthSummary(h) {
+      if (!h || !h.inferenceAuthError) return '';
+      var title = h.inferenceAuthError || 'Inference backend is rejecting every call (401)';
+      return '<span title="' + esc(title) + '" style="display:inline-block;margin-left:6px;padding:0 6px;' +
+        'border-radius:9999px;font-size:0.62rem;font-weight:600;line-height:1.5;cursor:help;white-space:nowrap;' +
+        'color:#f85149;background:rgba(248,81,73,0.12);border:1px solid rgba(248,81,73,0.35)">' +
+        'inference auth</span>';
+    }
+
     /* ---- ClankeR, the contributor relay (hover panel) ------------------
        The relay is a first-class SUBSTITUTE for assigning a method/model:
        when humans are picking up this hive's tasks through /contribute, the
@@ -8069,7 +8284,15 @@ const dashboardHTML = `<!DOCTYPE html>
         if (ck.detail) line += ': ' + ck.detail;
         lines.push(line);
       }
-      if (h.githubAppRequired && ghAppIsOperatorSide(h.githubAppState)) {
+      if (isPlaceholderHive(h)) {
+        /* An UNASSIGNED pool slot has no GitHub auth BY DESIGN — credentials
+           only arrive when a project is claimed — so none of the App-degraded
+           rules below may fire here. The hub has already reclassified the
+           auth-class checks (sanitizePlaceholderRows, placeholder_health.go);
+           this line says WHY the row is green instead of claiming an App. */
+        lines.push('– Unassigned — GitHub auth not configured by design');
+      }
+      else if (h.githubAppRequired && ghAppIsOperatorSide(h.githubAppState)) {
         /* Operator-side: the key we distribute has not landed, or is for the
            wrong App. Still degraded — the hive genuinely cannot work — but the
            hover must name the real cause so an admin does not chase the user
@@ -8079,9 +8302,9 @@ const dashboardHTML = `<!DOCTYPE html>
           : '⚠ GitHub App: credentials not yet delivered by the hub (operator action)');
         st = 'degraded'; c = colors.degraded; ic = icons.degraded; statusLabel = 'Degraded'; lines[0] = statusLabel;
       }
-      else if (h.githubAppRequired && h.githubAppPermIssue) { lines.push('✓ GitHub App installed'); lines.push('⚠ GitHub App: permissions insufficient'); st = 'degraded'; c = colors.degraded; ic = icons.degraded; statusLabel = 'Degraded'; lines[0] = statusLabel; }
+      else if (h.githubAppRequired && h.githubAppPermIssue) { lines.push('✓ GitHub App installed'); lines.push('⚠ GitHub App: ' + ghAppPermIssueLabel(h.githubAppState)); st = 'degraded'; c = colors.degraded; ic = icons.degraded; statusLabel = 'Degraded'; lines[0] = statusLabel; }
       else if (h.githubAppRequired) { lines.push('✕ GitHub App not installed'); st = 'degraded'; c = colors.degraded; ic = icons.degraded; statusLabel = 'Degraded'; lines[0] = statusLabel; }
-      else if (!h.githubAppRequired) { lines.push('✓ GitHub App installed'); }
+      else if (!h.githubAppRequired) { lines.push('✓ GitHub App: not in use'); }
       if (!checks.length) lines.push('No check data');
       // Heartbeat freshness — so a reading that is minutes old isn't mistaken
       // for current health (the source of "stuck Degraded" reports: the last
@@ -8101,6 +8324,31 @@ const dashboardHTML = `<!DOCTYPE html>
             c = colors.warning; ic = icons.warning;
           }
         }
+      }
+      // Provisioned time. Moved here from a dedicated table column — it is
+      // low-frequency reference metadata (the hub's first-seen time for this
+      // hive, preserved across restarts), so it belongs in the on-demand hover
+      // beside the other temporal lines, not in a permanent column competing
+      // with live metrics. hiveProvisionTime is the single source of truth for
+      // "is registeredAt usable"; an em dash, never 'Invalid Date', when not.
+      if (hiveProvisionTime(h) !== null) {
+        lines.push('— provisioned ' + fmtUserTS(h.registeredAt));
+      }
+      // Kubernetes namespace. A hosted hive's namespace is the deterministic
+      // "hive-hosted-<id>" (see hostedNamespaceForHive in
+      // pkg/hub/hosted_namespace_identity.go) and — unlike the hive's
+      // name/org — NEVER changes after a claim: the namespace this hive was
+      // first provisioned into keeps its original (often placeholder) name
+      // forever, because Kubernetes has no atomic namespace rename. Surfacing
+      // it here is what lets an operator map "some namespace on the cluster"
+      // back to "this hive" without cross-referencing the registry by hand —
+      // exactly the gap the hive.kubestellar.io/* namespace labels close from
+      // the cluster side. Computed client-side (not a separate stored field)
+      // so it can never drift from the one place the namespace name is
+      // decided; omitted for a non-hosted row, which has no such namespace.
+      var hns = hiveNamespace(h);
+      if (hns) {
+        lines.push('Namespace: ' + hns);
       }
       var access = h.access || [];
       var dotMarkup = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + c + '"></span>' +
@@ -8200,7 +8448,9 @@ const dashboardHTML = `<!DOCTYPE html>
       'health-degraded': 'Health degraded',
       'upgrade-stuck':   'Upgrade stuck',
       'acmm-unset':      'ACMM level unset',
-      'no-agents':       'No agents running'
+      'no-agents':       'No agents running',
+      'duplicate-spoke': 'Duplicate spoke instances',
+      'status-flipping': 'Status flipping'
     };
 
     function driftKindLabel(kind) { return DRIFT_KIND_LABELS[kind] || kind || 'Unknown'; }
@@ -8236,13 +8486,36 @@ const dashboardHTML = `<!DOCTYPE html>
         s = s || {};
         var sc = DRIFT_SEVERITY_COLORS[s.severity] || DRIFT_SEVERITY_COLORS.info;
         var sevLabel = DRIFT_SEVERITY_LABELS[s.severity] || s.severity || 'Info';
+        /* First-seen: the server stamps when this (hive, kind) signal was
+           first observed and keeps it stable while the signal persists (see
+           stampDriftFirstSeen in drift.go). Rendered compactly ("since
+           3:42 PM" today, "since Jul 30, 3:42 PM" otherwise) with the full
+           absolute datetime as the title. An absent or unparseable stamp
+           (older hub, hand-built report) renders nothing rather than a
+           misleading "since Invalid Date". */
+        var since = '';
+        if (s.firstSeen) {
+          var fd = new Date(s.firstSeen);
+          if (!isNaN(fd.getTime())) {
+            var timeStr = fd.toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'});
+            var label = fd.toDateString() === new Date().toDateString()
+              ? timeStr
+              : fd.toLocaleDateString([], {month: 'short', day: 'numeric'}) + ', ' + timeStr;
+            since = '<div style="color:var(--muted);font-size:0.62rem;margin-top:2px" title="' +
+              esc(fd.toLocaleString()) + '">since ' + esc(label) + '</div>';
+          }
+        }
+        /* overflow-wrap on the reason: a signal can quote an unbroken token
+           (an image ref, a URL, a pod name) longer than the panel is wide,
+           and without a break opportunity it runs out of the dialog. */
         return '<div style="padding:4px 0;border-top:1px solid var(--border)">' +
           '<div style="display:flex;align-items:center;gap:6px;margin-bottom:2px">' +
           '<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:' + sc + ';flex:0 0 auto"></span>' +
           '<span style="color:' + sc + ';font-weight:600">' + esc(driftKindLabel(s.kind)) + '</span>' +
           '<span style="margin-left:auto;color:var(--muted);font-size:0.6rem;text-transform:uppercase;letter-spacing:0.04em">' + esc(sevLabel) + '</span>' +
           '</div>' +
-          '<div style="color:var(--muted);line-height:1.4">' + esc(s.reason || '') + '</div>' +
+          '<div style="color:var(--muted);line-height:1.4;overflow-wrap:anywhere;word-break:break-word">' + esc(s.reason || '') + '</div>' +
+          since +
           '</div>';
       }).join('');
 
@@ -8253,7 +8526,8 @@ const dashboardHTML = `<!DOCTYPE html>
         'color:' + c + ';background:rgba(255,255,255,0.04);border:1px solid ' + c + '">' + d.count + '</span>' +
         '<span class="hive-access-pop" style="display:none;position:absolute;right:0;top:calc(100% + 6px);z-index:60;' +
         'min-width:260px;max-width:380px;padding:8px 10px;border-radius:8px;border:1px solid var(--border);' +
-        'background:var(--surface);box-shadow:0 6px 20px rgba(0,0,0,0.35);font-size:0.72rem;text-align:left;font-weight:400;white-space:normal">' +
+        'background:var(--surface);box-shadow:0 6px 20px rgba(0,0,0,0.35);font-size:0.72rem;text-align:left;font-weight:400;' +
+        'white-space:normal;overflow-wrap:anywhere;word-break:break-word">' +
         '<span style="display:block;color:' + c + ';font-weight:600;margin-bottom:2px">' + esc(heading) + '</span>' +
         rows + '</span></span>';
     }
@@ -8537,6 +8811,14 @@ const dashboardHTML = `<!DOCTYPE html>
        It composes with the status chips by AND — the chips answer "which
        states", this answers "which specific misconfiguration". */
     var _dashDriftFilter = '';
+
+    /* Search text stashed away while a drift pill is selected, or null when no
+       stash is held. Clicking a pill clears the search box (a stale search
+       silently intersecting with the pill filter reads as hives having
+       disappeared) but remembers what was typed; deselecting the last pill
+       restores it. Typing WHILE a pill is active drops the stash — the new
+       text is what the user wants and must survive deselection. */
+    var _driftSearchStash = null;
 
     /* hiveMatchesDriftFilter answers whether a hive carries the selected drift
        kind. Guarded so a row with no drift report never throws. */
@@ -9062,7 +9344,11 @@ const dashboardHTML = `<!DOCTYPE html>
       'agents-inactive': 'Idle agents',
       /* Raised by the auth-audit loop since #2306 but never labelled, so its
          chip rendered the raw key. */
-      'url-unreachable': 'Dashboard URL unreachable'
+      'url-unreachable': 'Dashboard URL unreachable',
+      /* The hive's inference gateway is rejecting every call with 401 (a stale
+         key) — the ROOT cause of an otherwise silent outage where the hive
+         looks online but every agent is dead in the water. */
+      'inference-auth-failed': 'Inference auth failing'
     };
 
     /* How many alert rows are listed before the panel collapses the remainder
@@ -9127,6 +9413,9 @@ const dashboardHTML = `<!DOCTYPE html>
       _dashStatusFilters = {};
       _dashFailingCheckFilter = '';
       _dashDriftFilter = '';
+      /* Everything is being cleared, search included — a search stashed at
+         drift-pill-selection time must not come back later. */
+      _driftSearchStash = null;
       _dashUpgradeFilter = '';
       _dashAdvisoryStaleFilter = false;
       _alertTypeFilter = '';
@@ -9540,6 +9829,10 @@ const dashboardHTML = `<!DOCTYPE html>
       var el = document.getElementById('hive-search');
       var next = el ? el.value : '';
       if (_hiveSearchTimer) clearTimeout(_hiveSearchTimer);
+      /* Typing while a drift pill is active supersedes the search stashed at
+         pill-selection time: drop the stash immediately (not in the debounce)
+         so a quick type-then-deselect cannot resurrect the old text. */
+      if (_dashDriftFilter) _driftSearchStash = null;
       _hiveSearchTimer = setTimeout(function() {
         _dashSearchQuery = next;
         renderHives(_allDashHives, true);
@@ -9550,6 +9843,9 @@ const dashboardHTML = `<!DOCTYPE html>
       var el = document.getElementById('hive-search');
       if (el) el.value = '';
       _dashSearchQuery = '';
+      /* An explicit Clear is a statement the user wants NO search — do not
+         resurrect a stashed one when the drift pills are later deselected. */
+      _driftSearchStash = null;
       renderHives(_allDashHives, true);
     }
 
@@ -10039,6 +10335,9 @@ const dashboardHTML = `<!DOCTYPE html>
          button look broken. */
       _dashFailingCheckFilter = '';
       _dashDriftFilter = '';
+      /* The drift filter is being force-cleared without going through
+         toggleDriftFilter, so drop any stashed search with it. */
+      _driftSearchStash = null;
       _dashUpgradeFilter = '';
       _dashAdvisoryStaleFilter = false;
       renderHives(_allDashHives, true);
@@ -10059,9 +10358,32 @@ const dashboardHTML = `<!DOCTYPE html>
     }
 
     /* toggleDriftFilter selects (or deselects) one drift kind in the fleet
-       exceptions summary. */
+       exceptions summary.
+
+       Pill selection also owns the search box: selecting the first pill
+       stashes and clears the search (so a stale search cannot silently
+       intersect with the pill filter), switching between pills keeps the
+       stash, and deselecting the last pill restores the stashed text —
+       unless the user typed a new search while a pill was active, in which
+       case the stash was dropped and their new text wins. */
     function toggleDriftFilter(kind) {
+      var prev = _dashDriftFilter;
       _dashDriftFilter = (_dashDriftFilter === kind) ? '' : kind;
+      var searchEl = document.getElementById('hive-search');
+      if (!prev && _dashDriftFilter) {
+        /* First pill selected: stash the search and clear it. */
+        _driftSearchStash = _dashSearchQuery;
+        _dashSearchQuery = '';
+        if (searchEl) searchEl.value = '';
+      } else if (prev && !_dashDriftFilter) {
+        /* Last pill deselected: restore the stashed search, if it is still
+           ours to restore. */
+        if (_driftSearchStash !== null) {
+          _dashSearchQuery = _driftSearchStash;
+          if (searchEl) searchEl.value = _dashSearchQuery;
+        }
+        _driftSearchStash = null;
+      }
       renderHives(_allDashHives, true);
     }
 
@@ -10341,6 +10663,56 @@ const dashboardHTML = `<!DOCTYPE html>
       if (_dashSortKey === key) { _dashSortAsc = !_dashSortAsc; } else { _dashSortKey = key; _dashSortAsc = true; }
       persistHiveSort();
       renderHives(sortedDashHives(), true);
+    }
+
+    /* subSort renders ONE inline, clickable sort control for a combined-column
+       header. A folded column (Maturity, Activity) hosts two or three sort keys,
+       so the whole <th> can no longer own a single onclick — each key gets its
+       own ⇅ span instead, keeping every folded sort reachable directly from the
+       header exactly as the standalone columns' ⇅ were.
+
+       key      — the sortDashHives sort key (a fixed literal, never user input);
+       label    — the visible ⇅ text (e.g. 'Prov ⇅');
+       titleRaw — the hover text, inserted VERBATIM into the title attribute to
+                  match how the original standalone headers embedded literals
+                  (some carry pre-encoded entities like &apos;). Callers pass
+                  trusted string constants only.
+
+       event.stopPropagation() so a sub-sort inside a <th> that ALSO has its own
+       onclick (Uptime hosts the Prov sub-sort) fires only its own key, not the
+       parent's. jsArg supplies the quotes around the key so an apostrophe could
+       never break out of the handler. */
+    function subSort(key, label, titleRaw) {
+      return '<span onclick="event.stopPropagation();sortDashHives(' + jsArg(key) + ')" ' +
+        'style="cursor:pointer;font-weight:400;color:var(--muted);margin-left:2px"' +
+        (titleRaw ? ' title="' + titleRaw + '"' : '') + '>' + label + '</span>';
+    }
+
+    /* stackHeader lays a combined column's header out on TWO lines instead of one
+       inline string: the title on line 1, its sub-sort ⇅ chips on line 2. The
+       inline form ("Uptime ⇅ Prov ⇅", "Activity Iss ⇅ PRs ⇅ Ctr ⇅") set each
+       folded column's width from the full concatenated string, which made the
+       fleet table far wider than it needed to be. Stacking makes the column width
+       track the widest SINGLE line instead.
+
+       .hive-table th sets white-space:nowrap, which would keep everything on one
+       line; a flex column overrides that for layout, and the chip row is allowed
+       to wrap (flex-wrap) so three chips fold onto a further line on a truly
+       narrow table rather than forcing the column wide. Colours come from the
+       existing --muted token and the inherited th colour, so both themes track.
+
+       titleHTML    — the line-1 content. May be plain text (e.g. 'Maturity') or
+                      an already-built clickable span; inserted VERBATIM, callers
+                      pass trusted markup only.
+       subSortsHTML — the line-2 content: one or more subSort() spans (each already
+                      carries its own onclick + event.stopPropagation()). Passed
+                      through unchanged, so every folded sort stays reachable and
+                      the stopPropagation contract is untouched. */
+    function stackHeader(titleHTML, subSortsHTML) {
+      return '<span style="display:inline-flex;flex-direction:column;align-items:center;gap:1px;line-height:1.15">' +
+        '<span style="white-space:nowrap">' + titleHTML + '</span>' +
+        '<span style="display:inline-flex;flex-wrap:wrap;justify-content:center;gap:2px;font-size:0.9em;color:var(--muted)">' +
+        subSortsHTML + '</span></span>';
     }
 
     /* persistHiveSort records the operator's EXPLICIT sort choice. Written only
@@ -10895,6 +11267,19 @@ const dashboardHTML = `<!DOCTYPE html>
       return h.provStatus === 'available' || (!!h.org && h.org.indexOf('available-') === 0);
     }
 
+    /* hiveNamespace returns the Kubernetes namespace a hosted hive's spoke
+       runs in, or '' for a non-hosted (local) hive, which has no such
+       namespace. Mirrors hostedNamespaceForHive in
+       pkg/hub/hosted_namespace_identity.go — "hive-hosted-" + id — computed
+       here rather than shipped as its own field so it can never disagree
+       with the one place (server-side) that decides the namespace name. */
+    function hiveNamespace(h) {
+      if (!h || !h.id) return '';
+      var isHosted = h.hiveType === 'hosted' || h.id.indexOf('hosted-') === 0 || h.id.indexOf('saas-') === 0;
+      if (!isHosted) return '';
+      return 'hive-hosted-' + h.id;
+    }
+
     /* ---------- Bulk multi-select actions ----------
        _bulkSelected is the authoritative selection, keyed by hive id, so it
        survives re-render, re-sort and filter changes: the checkbox state is
@@ -11273,10 +11658,33 @@ const dashboardHTML = `<!DOCTYPE html>
         if (isHosted && (h.role === 'owner' || _isAdmin)) menuItems.push('<div onclick="openTimelineModal(\'' + esc(h.id) + '\',\'' + esc(h.name || h.id) + '\')" style="' + mi + '">Activity Timeline</div>');
         if (h.role === 'owner' || h.role === 'read-write' || _isAdmin) menuItems.push('<div onclick="openOpenRouterFundModal(\'' + esc(h.id) + '\',\'' + esc(h.name || h.id) + '\')" style="' + mi + '">⚡ Fund with OpenRouter</div>');
         if (_isAdmin && isHosted) menuItems.push('<div onclick="openBannerForHive(\'' + esc(h.id) + '\',\'' + esc(h.name || h.id) + '\')" style="' + mi + '">Send Banner</div>');
+        /* Reset App clears ONLY the spoke's installation_id, which makes
+           HasUsableApp() false and prompts the owner to install the App again.
+           Admin-only and hosted-only, matching the endpoint's own guard. The
+           case it exists for: a hive provisioned with its own GitHub App keeps
+           that App's installation_id after its identity is moved to the fleet
+           App, so every field reads correct while freshly minted tokens 404. */
+        if (_isAdmin && isHosted) menuItems.push('<div onclick="resetHiveApp(\'' + esc(h.id) + '\',\'' + esc(h.name || h.id) + '\')" style="' + mi + '">Reset Forge App</div>');
+        /* Restart Spoke rolling-restarts every instance reporting as this
+           hive. The case it exists for: two instances alternating as one hive
+           (conflictingReporters drift) on a cluster the hub cannot reach —
+           the heartbeat is the only channel, and a restart sheds the stale
+           instance while costing the healthy one a single rolling restart. */
+        if (_isAdmin && isHosted) menuItems.push('<div onclick="restartHiveSpoke(\'' + esc(h.id) + '\',\'' + esc(h.name || h.id) + '\')" style="' + mi + '">Restart Spoke</div>');
         if (isLocal && h.role === 'owner') menuItems.push('<div onclick="removeLocalHive(\'' + esc(h.id) + '\')" style="' + mi + '">Remove</div>');
         if (isHosted && h.role === 'owner' && _clusterList && _clusterList.length > 1 && h.migrationStatus !== 'migrating') menuItems.push('<div onclick="openMigrateModal(\'' + esc(h.id) + '\',\'' + esc(h.clusterId || '') + '\')" style="' + mi + '">Move to cluster</div>');
         if (isHosted && h.role === 'owner') menuItems.push('<div style="border-top:1px solid #30363d;margin:4px 0"></div><div onclick="deleteHive(\'' + esc(h.id) + '\')" style="' + mi + ';color:#f85149">Delete</div>');
         var sha = h.gitHash || '';
+        /* Drift folded ONTO Version: config drift is overwhelmingly "this hive's
+           version/branch differs from the fleet", so the drift indicator reads as
+           a property of the Version cell rather than earning its own column. Only
+           emitted when there IS drift (driftOf().count > 0); driftBadge() returns
+           its own colored count pill with the full per-signal hover panel, so no
+           datum is lost — hover the dot for every drift reason exactly as before.
+           A clean hive shows nothing here, keeping the cell as tight as it was.
+           driftBadge carries its own hive-access-pop panel and NO title, so the
+           single-hover-panel invariant holds (it is a badge, not an inline face). */
+        var driftDot = driftOf(h).count > 0 ? driftBadge(h) : '';
         var versionCell = '';
         if (sha) {
           var branchName = h.gitBranch || 'v2';
@@ -11412,14 +11820,20 @@ const dashboardHTML = `<!DOCTYPE html>
              Lines 3 and 4 are omitted entirely when empty — a read-only viewer
              gets two lines, not four with two blanks. Every fragment below is
              embedded verbatim, so ids, handlers and tooltips are preserved. */
-          var shaLine = '<span style="font-family:monospace;color:var(--muted)" title="' + escAttr(shaMsg) + '">' + esc(sha) + '</span>' + status;
+          /* The drift dot rides on the SHA line, right of the current/behind
+             glyph: "what commit is this hive on, and does it match the fleet" is
+             one thought. It sets no extra line, so a drifting hive is no taller. */
+          var shaLine = '<span style="font-family:monospace;color:var(--muted)" title="' + escAttr(shaMsg) + '">' + esc(sha) + '</span>' + status + (driftDot ? ' ' + driftDot : '');
           versionCell = '<div style="' + STACKED_CELL_STYLE + '">' +
             '<div style="' + STACKED_LINE_STYLE + '">' + branch + '</div>' +
             '<div style="' + STACKED_LINE_STYLE + '">' + shaLine + '</div>' +
             (upgradeIcon ? '<div style="' + STACKED_LINE_STYLE + '">' + upgradeIcon + '</div>' : '') +
             (autoUpgradeCheck ? '<div style="' + STACKED_LINE_STYLE + '">' + autoUpgradeCheck + '</div>' : '') +
             '</div>';
-        } else { versionCell = '<span style="color:var(--muted)">—</span>'; }
+        /* No version reported, but drift can still exist (e.g. heartbeat-stale on a
+           spoke too old to report a SHA) — surface the dot beside the dash so
+           folding Drift into Version never hides a signal. */
+        } else { versionCell = '<span style="color:var(--muted)">—</span>' + (driftDot ? ' ' + driftDot : ''); }
         var pendingBadge = (h.pendingRequestCount > 0 && (h.role === 'owner' || h.role === 'read-write'))
           ? '<span style="position:absolute;top:-2px;right:-2px;background:var(--blue);color:#fff;border-radius:50%;width:16px;height:16px;font-size:0.6rem;display:flex;align-items:center;justify-content:center;font-weight:700">' + h.pendingRequestCount + '</span>'
           : '';
@@ -11427,12 +11841,16 @@ const dashboardHTML = `<!DOCTYPE html>
         if (h.pendingRequestCount > 0 && (h.role === 'owner' || h.role === 'read-write')) {
           pendingPill = '<a href="#" onclick="togglePendingRow(\'' + esc(h.id) + '\');return false" style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;background:rgba(59,130,246,0.12);color:#60a5fa;border:1px solid rgba(59,130,246,0.3);border-radius:4px;font-size:0.7rem;text-decoration:none;cursor:pointer;white-space:nowrap">&#x1F514; ' + h.pendingRequestCount + ' pending</a>';
         }
-        // 16 = the 13 original columns, plus Uptime, plus Drift, plus the
-        // bulk-select column, plus Journey, plus Provisioned, MINUS Public —
-        // visibility now stacks under Location instead of owning a column.
-        // Counted against the <th> cells in the header and the <td> cells
-        // emitted below (bulkCheckboxCell contributes one).
-        var TOTAL_COLUMNS = 18;
+        // 12 columns after the 15-to-9 fold. The visible cells are: bulk-select,
+        // the ⋮ menu, Hive, Location, Uptime, Version, Repos, Maturity, Agents,
+        // Tokens, Mode, Activity. Four folds collapsed six columns:
+        //   PROV    → date lives in the status hover; sort rides the Uptime header
+        //   DRIFT   → dot on the Version cell (driftBadge, full hover preserved)
+        //   ACMM+JOURNEY  → one Maturity cell (both badges stacked, both sorts kept)
+        //   ISSUES+PRS+CONTRIB → one Activity cell (all 3 stats + sparklines, 3 sorts kept)
+        // Counted against the <th> cells in the header and the <td> cells emitted
+        // below (bulkCheckboxCell contributes one).
+        var TOTAL_COLUMNS = 12;
         /* Visibility moved OUT of its own column and under Location: "where
            does this hive run" and "who can see it" are both facts about the
            hive's placement, so they read as one cell, and folding them saves a
@@ -11514,7 +11932,7 @@ const dashboardHTML = `<!DOCTYPE html>
         return '<tr id="' + escAttr(hiveRowDomId(h.id)) + '">' +
           bulkCheckboxCell(h, section || 'all') +
           '<td class="hive-menu-cell" style="position:relative;width:30px;text-align:center;overflow:visible">' + (h.migrationStatus === 'migrating' ? '<span style="font-size:1.1rem;color:var(--border);user-select:none;cursor:not-allowed" title="Disabled during migration">⋮</span>' : '<span style="cursor:pointer;font-size:1.1rem;color:var(--muted);user-select:none">⋮</span>' + pendingBadge + '<div class="hive-menu-dropdown" style="display:none;position:absolute;left:0;bottom:auto;background:#1c2128;border:1px solid #30363d;border-radius:8px;min-width:160px;padding:4px 0;z-index:1000;box-shadow:0 8px 24px rgba(0,0,0,0.5)">' + menuItems.join('') + '</div>') + '</td>' +
-          '<td style="text-align:left;line-height:1.4">' + (function() { var isHostedRow = h.hiveType === 'hosted' || (h.id && (h.id.startsWith('hosted-') || h.id.startsWith('saas-'))); var dh = isHostedRow && h.id ? ('/api/saas/hives/' + encodeURIComponent(h.id) + '/open') : (rb ? esc(rb) : ''); /* Label derived from the PROJECT (org + primary repo), not by splitting h.name — see hiveLabel. */ var label = hiveLabel(h); var orgName = label.line1; var repoName = label.line2; var rp = h.org && h.primaryRepo ? h.org + '/' + h.primaryRepo : ''; var rpHref = ghRepoURL(h.github_host, h.org, h.primaryRepo); var ghIcon = (rp && rpHref) ? '<a href="' + rpHref + '" target="_blank" style="opacity:0.5;vertical-align:middle" title="' + esc(rp) + '"><svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:middle"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg></a>' : (rp ? '<span style="opacity:0.5;vertical-align:middle" title="' + esc(rp) + '"><svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:middle"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg></span>' : ''); /* vanityDisplay is the friendly host shown in the status bar on hover. rb is resolvedBase(h), which the hub has already overlaid with the claimed vanity_url; it is only a DISPLAY url here, never the click target — see ssoDisplayLink. Empty for a row with no vanity host, which falls back to today's /open href. Only meaningful on hosted rows: a non-hosted row's dh IS rb already. */ var vanityDisplay = isHostedRow && rb ? rb : ''; /* vanityDisplay is the friendly host shown in the status bar on hover. rb is resolvedBase(h), which the hub has already overlaid with the claimed vanity_url; it is only a DISPLAY url here, never the click target — see ssoDisplayLink. Empty for a row with no vanity host, which falls back to today's /open href. Only meaningful on hosted rows: a non-hosted row's dh IS rb already. */ var vanityDisplay = isHostedRow && rb ? rb : ''; var link = function(text, bold) { if (dh) { return ssoDisplayLink(dh, vanityDisplay, text, bold ? 'hive-name-link' : 'hive-sub-link'); } var s = bold ? 'font-weight:700;color:inherit' : 'color:#6b7280;font-weight:400'; return '<span style="' + s + '">' + esc(text) + '</span>'; }; var line1 = dot + ' ' + link(orgName, true); var fcPill = h.online ? failingCheckSummary(h) : ''; /* Advisory-staleness pill sits right beside the failing-check pill: both are "something is quietly wrong with this working hive" signals, and advisoryStaleSummary already self-suppresses (empty string) unless the hub flagged the digest stale, so unaffected rows are pixel-identical. */ var advPill = h.online ? advisoryStaleSummary(h) : ''; /* Dead-link pill is deliberately NOT gated on h.online: the entire point is a hive that IS online and heartbeating while its public URL is broken, so gating it the way the other pills are gated would hide exactly the case it exists to surface. */ var dlPill = deadLinkSummary(h); /* Inline access faces sit on the name cell's second line, immediately after this row's own role badge: the badge already answers "what am I on this hive", so the co-members read as the natural continuation of the same thought, in the one cell that is left-aligned and has room to grow. It also keeps them out of the 16 dense metric columns, none of which is about people. Empty string when the viewer is the only member, so those rows are pixel-identical to today. */ var accessFaces = hiveAccessAvatars(h); /* Keyed off repoName, not orgName: line 1 now always carries SOME identity, so the presence of a second line is decided purely by whether there is a repo to put on it. Without a repo the row still shows the GitHub icon, role badge, faces and failing-check pill on the compact variant. */ var line2 = repoName ? '<div style="padding-left:18px;font-size:0.8rem">' + link(repoName, false) + ' ' + ghIcon + ' ' + roleBadge(h.role) + accessFaces + fcPill + advPill + dlPill + '</div>' : '<div style="padding-left:18px">' + ghIcon + ' ' + roleBadge(h.role) + accessFaces + fcPill + advPill + dlPill + '</div>'; var line3 = pendingPill ? '<div style="margin-top:4px;padding-left:18px">' + pendingPill + '</div>' : ''; return line1 + line2 + line3; })() + '</td>' +
+          '<td style="text-align:left;line-height:1.4">' + (function() { var isHostedRow = h.hiveType === 'hosted' || (h.id && (h.id.startsWith('hosted-') || h.id.startsWith('saas-'))); var dh = isHostedRow && h.id ? ('/api/saas/hives/' + encodeURIComponent(h.id) + '/open') : (rb ? esc(rb) : ''); /* Label derived from the PROJECT (org + primary repo), not by splitting h.name — see hiveLabel. */ var label = hiveLabel(h); var orgName = label.line1; var repoName = label.line2; var rp = h.org && h.primaryRepo ? h.org + '/' + h.primaryRepo : ''; var rpHref = ghRepoURL(h.github_host, h.org, h.primaryRepo); var ghIcon = (rp && rpHref) ? '<a href="' + rpHref + '" target="_blank" style="opacity:0.5;vertical-align:middle" title="' + esc(rp) + '"><svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:middle"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg></a>' : (rp ? '<span style="opacity:0.5;vertical-align:middle" title="' + esc(rp) + '"><svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:middle"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg></span>' : ''); /* vanityDisplay is the friendly host shown in the status bar on hover. rb is resolvedBase(h), which the hub has already overlaid with the claimed vanity_url; it is only a DISPLAY url here, never the click target — see ssoDisplayLink. Empty for a row with no vanity host, which falls back to today's /open href. Only meaningful on hosted rows: a non-hosted row's dh IS rb already. */ var vanityDisplay = isHostedRow && rb ? rb : ''; /* vanityDisplay is the friendly host shown in the status bar on hover. rb is resolvedBase(h), which the hub has already overlaid with the claimed vanity_url; it is only a DISPLAY url here, never the click target — see ssoDisplayLink. Empty for a row with no vanity host, which falls back to today's /open href. Only meaningful on hosted rows: a non-hosted row's dh IS rb already. */ var vanityDisplay = isHostedRow && rb ? rb : ''; var link = function(text, bold) { if (dh) { return ssoDisplayLink(dh, vanityDisplay, text, bold ? 'hive-name-link' : 'hive-sub-link'); } var s = bold ? 'font-weight:700;color:inherit' : 'color:#6b7280;font-weight:400'; return '<span style="' + s + '">' + esc(text) + '</span>'; }; var line1 = dot + ' ' + link(orgName, true); var fcPill = h.online ? failingCheckSummary(h) : ''; /* Advisory-staleness pill sits right beside the failing-check pill: both are "something is quietly wrong with this working hive" signals, and advisoryStaleSummary already self-suppresses (empty string) unless the hub flagged the digest stale, so unaffected rows are pixel-identical. */ var advPill = h.online ? advisoryStaleSummary(h) : ''; /* Dead-link pill is deliberately NOT gated on h.online: the entire point is a hive that IS online and heartbeating while its public URL is broken, so gating it the way the other pills are gated would hide exactly the case it exists to surface. */ var dlPill = deadLinkSummary(h); /* Inference-auth pill: like the dead-link pill it is NOT gated on h.online, because the hive being online while every inference call 401s is exactly the case it surfaces. */ var iaPill = inferenceAuthSummary(h); /* Inline access faces sit on the name cell's second line, immediately after this row's own role badge: the badge already answers "what am I on this hive", so the co-members read as the natural continuation of the same thought, in the one cell that is left-aligned and has room to grow. It also keeps them out of the 16 dense metric columns, none of which is about people. Empty string when the viewer is the only member, so those rows are pixel-identical to today. */ var accessFaces = hiveAccessAvatars(h); /* Keyed off repoName, not orgName: line 1 now always carries SOME identity, so the presence of a second line is decided purely by whether there is a repo to put on it. Without a repo the row still shows the GitHub icon, role badge, faces and failing-check pill on the compact variant. */ var line2 = repoName ? '<div style="padding-left:18px;font-size:0.8rem">' + link(repoName, false) + ' ' + ghIcon + ' ' + roleBadge(h.role) + accessFaces + fcPill + advPill + dlPill + iaPill + '</div>' : '<div style="padding-left:18px">' + ghIcon + ' ' + roleBadge(h.role) + accessFaces + fcPill + advPill + dlPill + iaPill + '</div>'; var line3 = pendingPill ? '<div style="margin-top:4px;padding-left:18px">' + pendingPill + '</div>' : ''; return line1 + line2 + line3; })() + '</td>' +
           '<td>' + locationCell + '</td>' +
           '<td style="white-space:nowrap">' + uptimeCell(h) + '</td>' +
           /* No white-space:nowrap on the cell itself: the stacked lines each
@@ -11525,52 +11943,59 @@ const dashboardHTML = `<!DOCTYPE html>
           /* Repo count over the GitHub-instance pill: the host qualifies WHICH
              GitHub these repos live on, so the two belong together. Stacked
              rather than inline to keep the numeric column narrow. */
+          /* Repos cell. AI Author is stacked as the third line here (it used to own
+             a column): who this hive authors PRs as is naturally repo/identity
+             context, and folding it in reclaims a column. aiAuthorEffective already
+             folds in ai_author (it returns ai_author when set, else the App bot
+             "<slug>[bot]", else empty); a hive with no usable GitHub App renders
+             "—", never a stale personal ai_author it can't act as. Prefixed "as:"
+             so the line reads as the authoring identity, not another repo. */
           '<td title="' + esc((h.repos || []).join('\n')) + '" style="cursor:' + (repoCount > 0 ? 'help' : 'default') + '">' +
             '<div style="' + STACKED_CELL_STYLE + '">' +
               '<div style="' + STACKED_LINE_STYLE + '">' + repoCount + '</div>' +
               '<div style="' + STACKED_LINE_STYLE + '" title="GitHub instance these repos live on">' + githubHostPill(h.githubHost) + '</div>' +
+              '<div style="' + STACKED_LINE_STYLE + ';color:var(--muted)" title="GitHub identity this hive opens PRs/commits as (— = no GitHub App installed yet)">as: ' + esc(h.aiAuthorEffective || '—') + '</div>' +
             '</div>' +
           '</td>' +
-          '<td>' + acmmBadge(h.acmmLevel) + '</td>' +
-          /* AI Author: who this hive authors PRs as. aiAuthorEffective is the
-             App bot ("<slug>[bot]") in App-authored mode, else the configured
-             ai_author (falls back to aiAuthor for spokes too old to report the
-             effective value). A "[bot]" value is the informative case. */
-          /* aiAuthorEffective already folds in ai_author (it returns ai_author
-             when set, else the App bot, else empty). Do NOT fall back to a raw
-             ai_author here: a hive with no usable GitHub App has no author and
-             must render "—", not a stale personal ai_author it can't act as. */
-          '<td style="white-space:nowrap;font-size:0.75rem" title="GitHub identity for this hive\'s PRs/commits (— = no GitHub App installed yet)">' + esc(h.aiAuthorEffective || '—') + '</td>' +
-          '<td>' + journeyBadge(h.journey) + '</td>' +
-          /* Drift sits immediately right of Journey: both answer "how healthy
-             is this hive's configuration", so they read as one pair rather
-             than being separated by nine metric columns. Header index and body
-             index are both 10 of 16 — keep them in lockstep. */
-          '<td style="white-space:nowrap;text-align:right">' + driftBadge(h) + '</td>' +
+          /* MATURITY: the ACMM level badge and the Journey status stacked into
+             ONE cell. Both answer "how far along is this hive's adoption" — the
+             ACMM level is where it IS, the journey is the next step it OWES — so
+             they read as one column instead of two. Each badge keeps its own
+             hover (acmmBadge's title explains the level, journeyBadge's the
+             stage), so no datum is lost; both sorts stay reachable from the
+             MATURITY header's two ⇅ controls (acmmLevel and journey). */
+          '<td>' +
+            '<div style="' + STACKED_CELL_STYLE + '">' +
+              '<div style="' + STACKED_LINE_STYLE + '">' + acmmBadge(h.acmmLevel) + '</div>' +
+              '<div style="' + STACKED_LINE_STYLE + '">' + journeyBadge(h.journey) + '</div>' +
+            '</div>' +
+          '</td>' +
           '<td title="' + esc((h.agents || []).map(function(a){ var label = a.name + ' (' + a.state + ')'; if (a.mode === 'on_demand') label += ' — on demand'; return label; }).join('\n')) + '" style="cursor:' + ((h.agentCount || 0) > 0 ? 'help' : 'default') + '">' + (h.agentCount || 0) + '</td>' +
           '<td title="Cumulative tokens consumed, as of the last heartbeat" style="white-space:nowrap;cursor:help">' + fmtTokens(h.totalTokens24h || 0) + '</td>' +
           '<td>' + modeCell + '</td>' +
-          '<td>' + sparkline(h.issueHistory, '#f59e0b', 50, 14) + (h.actionableIssues || 0) + '</td>' +
-          '<td>' + sparkline(h.prHistory, '#3b82f6', 50, 14) + (h.actionablePRs || 0) + '</td>' +
-          '<td>' + (h.activeContributors || 0) + '</td>' +
-          /* Provisioned. hiveProvisionTime is the single source of truth for
-             "is this timestamp usable" — reusing it here keeps the cell and the
-             comparator from ever disagreeing (a row showing a date but sorting
-             as unknown, or the reverse). An em dash, never 'Invalid Date', for
-             a hive whose registeredAt is missing or unparseable. */
-          '<td style="font-size:0.75rem;color:var(--muted);white-space:nowrap">' +
-            (hiveProvisionTime(h) === null ? '—' : esc(fmtUserTS(h.registeredAt))) + '</td>' +
+          /* ACTIVITY: Issues, PRs and Contributors — three mini-stats that were
+             three columns — stacked densely into ONE cell. Every number and both
+             sparklines survive verbatim; each line is labelled (I/PR/C) and
+             carries a native title so a folded value is never ambiguous. All
+             three sorts stay reachable from the ACTIVITY header's three ⇅
+             controls (actionableIssues, actionablePRs, activeContributors). */
+          '<td style="font-size:0.72rem">' +
+            '<div style="' + STACKED_CELL_STYLE + ';align-items:flex-start">' +
+              '<div style="' + STACKED_LINE_STYLE + '" title="Actionable issues"><span style="color:var(--muted);min-width:24px;display:inline-block">Iss</span>' + sparkline(h.issueHistory, '#f59e0b', 40, 12) + (h.actionableIssues || 0) + '</div>' +
+              '<div style="' + STACKED_LINE_STYLE + '" title="Actionable PRs"><span style="color:var(--muted);min-width:24px;display:inline-block">PRs</span>' + sparkline(h.prHistory, '#3b82f6', 40, 12) + (h.actionablePRs || 0) + '</div>' +
+              '<div style="' + STACKED_LINE_STYLE + '" title="Active contributors"><span style="color:var(--muted);min-width:24px;display:inline-block">Ctr</span>' + (h.activeContributors || 0) + '</div>' +
+            '</div>' +
+          '</td>' +
           '</tr>' + pendingExpandRow;
       };
       /* Section-header row: a labeled separator spanning all columns, styled to
          match the table's muted uppercase heading treatment (see .hive-table th). */
       /* Count of <th> cells in the hive table header below. The section-header
          row spans all of them; a stale value would leave the separator short
-         and the table visibly ragged. 15 with the Drift column, plus the
-         bulk-select column, plus the Journey column, plus the Provisioned
-         column, minus Public (visibility is stacked under Location). Must stay
-         equal to TOTAL_COLUMNS. */
-      var TOTAL_COLUMNS_HEADER = 18;
+         and the table visibly ragged. 12 after the 15-to-9 fold (PROV, DRIFT,
+         ACMM/JOURNEY→Maturity, ISSUES/PRS/CONTRIB→Activity). Must stay equal to
+         TOTAL_COLUMNS. */
+      var TOTAL_COLUMNS_HEADER = 12;
       /* The header is a click target that expands/collapses its section. The
          caret mirrors aria-expanded so the affordance and the a11y state can
          never disagree. sectionKey also scopes the select-all checkbox to THIS
@@ -11705,7 +12130,23 @@ const dashboardHTML = `<!DOCTYPE html>
         /* Non-admin lists have no section headers, so the flat list's
            select-all lives in the table head instead. */
         '<th style="width:26px;text-align:center">' + (_isAdmin ? '' : bulkSectionCheckbox('all')) + '</th>' +
-        '<th></th><th onclick="sortDashHives(\'name\')" style="cursor:pointer">Hive ⇅</th><th onclick="sortDashHives(\'clusterId\')" style="cursor:pointer" title="Where this hive runs, and whether it is listed publicly">Location / Public ⇅</th><th onclick="sortDashHives(\'startedAt\')" style="cursor:pointer" title="Process uptime since the last restart — a short value that keeps resetting means the pod is restarting">Uptime ⇅</th><th>Version</th><th>Repos</th><th onclick="sortDashHives(\'acmmLevel\')" style="cursor:pointer">ACMM ⇅</th><th onclick="sortDashHives(\'aiAuthor\')" style="cursor:pointer" title="The GitHub identity this hive\'s agents open PRs as — the configured ai_author, or the App bot (&lt;slug&gt;[bot]) in App-authored mode">AI Author ⇅</th><th onclick="sortDashHives(\'journey\')" style="cursor:pointer" title="Where this hive is on the adoption journey: install the GitHub App, assign a method/model (or run ClankeR, the contributor relay), then raise the ACMM level">Journey ⇅</th><th title="Configuration drift from the fleet norm — hover a value for the specific signals">Drift</th><th onclick="sortDashHives(\'agentCount\')" style="cursor:pointer">Agents ⇅</th><th onclick="sortDashHives(\'totalTokens24h\')" style="cursor:pointer" title="Cumulative tokens consumed, as of the last heartbeat">Tokens ⇅</th><th onclick="sortDashHives(\'governorMode\')" style="cursor:pointer">Mode ⇅</th><th onclick="sortDashHives(\'actionableIssues\')" style="cursor:pointer">Issues ⇅</th><th onclick="sortDashHives(\'actionablePRs\')" style="cursor:pointer">PRs ⇅</th><th onclick="sortDashHives(\'activeContributors\')" style="cursor:pointer">Contributors ⇅</th><th onclick="sortDashHives(\'registeredAt\')" style="cursor:pointer" title="When this hive was first provisioned — the hub&apos;s first-seen time, preserved across restarts and heartbeats">Provisioned ⇅</th>' +
+        /* A combined-column header carries ONE sort control per folded field: the
+           header cell can no longer own a single onclick once it hosts two or three
+           sort keys, so each key gets its own inline clickable span. subSort() is
+           the shared helper; every folded sort therefore stays reachable directly
+           from the header, exactly as the standalone columns were. */
+        '<th></th><th onclick="sortDashHives(\'name\')" style="cursor:pointer">Hive ⇅</th><th onclick="sortDashHives(\'clusterId\')" style="cursor:pointer;vertical-align:middle" title="Where this hive runs, and whether it is listed publicly">' + stackHeader('Location /', 'Public ⇅') + '</th>' +
+        /* Uptime hosts BOTH temporal sorts: live uptime (startedAt) and the folded
+           provision-date sort (registeredAt, the old "Prov ⇅"). The date itself now
+           lives in the status hover; only its sort trigger rides here. */
+        '<th onclick="sortDashHives(\'startedAt\')" style="cursor:pointer;vertical-align:middle" title="Process uptime since the last restart — a short value that keeps resetting means the pod is restarting">' + stackHeader('Uptime ⇅', subSort('registeredAt', 'Prov ⇅', 'Sort by when this hive was first provisioned (the hub&apos;s first-seen time). The date itself now lives in the status hover.')) + '</th>' +
+        '<th title="Version, branch and any configuration drift from the fleet norm — a coloured dot appears beside the commit when this hive drifts; hover it for the specific signals">Version</th><th>Repos</th>' +
+        /* MATURITY folds ACMM (where it is) and Journey (what it owes next); both
+           sorts survive as inline ⇅ controls. */
+        '<th style="vertical-align:middle" title="Adoption maturity: ACMM level and the next journey step">' + stackHeader('Maturity', subSort('acmmLevel', 'ACMM ⇅', 'Sort by ACMM level') + subSort('journey', 'Journey ⇅', 'Where this hive is on the adoption journey: install the GitHub App, assign a method/model (or run ClankeR, the contributor relay), then raise the ACMM level')) + '</th>' +
+        '<th onclick="sortDashHives(\'agentCount\')" style="cursor:pointer">Agents ⇅</th><th onclick="sortDashHives(\'totalTokens24h\')" style="cursor:pointer" title="Cumulative tokens consumed, as of the last heartbeat">Tokens ⇅</th><th onclick="sortDashHives(\'governorMode\')" style="cursor:pointer">Mode ⇅</th>' +
+        /* ACTIVITY folds Issues, PRs and Contrib; each keeps its own sort ⇅. */
+        '<th style="vertical-align:middle" title="Actionable issues, actionable PRs and active contributors">' + stackHeader('Activity', subSort('actionableIssues', 'Iss ⇅', 'Sort by actionable issues') + subSort('actionablePRs', 'PRs ⇅', 'Sort by actionable PRs') + subSort('activeContributors', 'Ctr ⇅', 'Sort by active contributors')) + '</th>' +
         '</tr></thead><tbody>' + rows + '</tbody></table></div>';
       /* Delegated, so binding once is enough no matter how often the table is
          re-rendered. The guard keeps repeated renders from stacking listeners. */
@@ -11898,12 +12339,24 @@ const dashboardHTML = `<!DOCTYPE html>
        as a lie. */
     var UPGRADE_ELAPSED_SKEW_TOLERANCE_MS = 60 * 1000; // treat small negatives as 0
 
+    /* Go serialises a zero time.Time as "0001-01-01T00:00:00Z" and — because
+       json:"...,omitempty" does NOT omit a zero struct — the hub emits exactly
+       that string for a hive whose UpgradeStartedAt was never set or was reset.
+       Date.parse() accepts it happily, and now − year 0001 is ~17.7 MILLION
+       hours: the live "Upgrading 17755944h28m" wedge on ibm-alchemy. Any
+       upgradeStartedAt at or before this cutoff is not a real start time but a
+       lost/zero one, and the counter must be suppressed rather than rendered as
+       a two-thousand-year duration. 2020-01-01 predates the project itself, so
+       no genuine upgrade can legitimately fall before it. */
+    var UPGRADE_STARTED_MIN_SANE_MS = Date.UTC(2020, 0, 1); // any earlier start time is a lost/zero timestamp
+
     /* upgradeElapsedMs returns how long a hive has been upgrading, in ms, or
-       null when that cannot be known — a MISSING, EMPTY or UNPARSEABLE
-       upgradeStartedAt, or a negative elapsed beyond the skew tolerance.
-       Callers must render nothing on null; they must never render NaN, a
-       negative duration, or a fabricated "0s" that implies the upgrade just
-       started when in truth the timestamp was lost.
+       null when that cannot be known — a MISSING, EMPTY, UNPARSEABLE or
+       PRE-EPOCH (zero/lost) upgradeStartedAt, or a negative elapsed beyond the
+       skew tolerance. Callers must render nothing on null; they must never
+       render NaN, a negative duration, a two-thousand-year duration, or a
+       fabricated "0s" that implies the upgrade just started when in truth the
+       timestamp was lost.
 
        Note a real server behaviour this relies on: upgradeStartedAt is stamped
        ONLY where Upgrading is set true, so a hive that is merely QUEUED has no
@@ -11914,6 +12367,7 @@ const dashboardHTML = `<!DOCTYPE html>
       if (!started || typeof started !== 'string') return null;
       var t = Date.parse(started);
       if (isNaN(t)) return null; /* unparseable timestamp — show nothing, never NaN */
+      if (t < UPGRADE_STARTED_MIN_SANE_MS) return null; /* zero/lost start time (year 0001) — never a real "17.7M hour" upgrade */
       var elapsed = (typeof nowMs === 'number' ? nowMs : Date.now()) - t;
       if (elapsed < 0) {
         /* Clock skew. A small negative is the browser being marginally behind
@@ -12145,6 +12599,39 @@ const dashboardHTML = `<!DOCTYPE html>
     }
 
     var _switchTimers = {};
+    /* Reset App: clears the spoke's installation_id so the owner is prompted
+       to install the GitHub App again. Confirmed first because it costs the
+       owner a re-install, and the reset is delivered on the spoke's next
+       heartbeat rather than immediately. */
+    async function resetHiveApp(hiveId, hiveName) {
+      if (!confirm('Reset the Forge App for "' + hiveName + '"?\n\nThe spoke clears its installation ID on the next heartbeat and the owner is prompted to install the App again. The App ID, slug and key are left alone.')) return;
+      try {
+        var resp = await fetch('/api/saas/hives/' + encodeURIComponent(hiveId) + '/reset-app', {method: 'POST'});
+        var data = await resp.json().catch(function() { return {}; });
+        if (!resp.ok) { alert('Reset failed: ' + (data.error || resp.status)); return; }
+        alert('Forge App reset armed for "' + hiveName + '".\n\nThe spoke clears its installation on the next heartbeat (~30s), then shows the install prompt.');
+        if (typeof loadHives === 'function') loadHives();
+      } catch (e) {
+        alert('Reset failed: ' + e);
+      }
+    }
+
+    /* Restart Spoke: arms a rolling restart delivered to every spoke instance
+       reporting as this hive on their next heartbeats (bounded window). Used
+       to shed a stale duplicate instance the hub cannot delete directly. */
+    async function restartHiveSpoke(hiveId, hiveName) {
+      if (!confirm('Restart the spoke for "' + hiveName + '"?\n\nEvery instance reporting as this hive rolling-restarts on its next heartbeat (up to 5 minutes). The image and configuration are unchanged.')) return;
+      try {
+        var resp = await fetch('/api/saas/hives/' + encodeURIComponent(hiveId) + '/restart-spoke', {method: 'POST'});
+        var data = await resp.json().catch(function() { return {}; });
+        if (!resp.ok) { alert('Restart failed: ' + (data.error || resp.status)); return; }
+        alert('Spoke restart armed for "' + hiveName + '".\n\nInstances restart on their next heartbeat within the 5-minute window.');
+        if (typeof loadHives === 'function') loadHives();
+      } catch (e) {
+        alert('Restart failed: ' + e);
+      }
+    }
+
     function switchBranch(hiveId, newBranch, el) {
       if (el) el.closest('[id^="branch-menu-"]').style.display = 'none';
       if (_switchTimers[hiveId]) {
