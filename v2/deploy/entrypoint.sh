@@ -90,6 +90,15 @@ if [ "$IS_KUBERNETES" = "true" ]; then
       echo "[entrypoint] K8s mode — config path read-only, using $HIVE_CONFIG_BOOT directly"
     fi
   elif [ -f "$HIVE_CONFIG_PATH" ] && [ -s "$HIVE_CONFIG_PATH" ]; then
+    # FIRST BOOT ONLY. The copy-config init container now seeds the config path
+    # solely when the PVC has no runtime config, so reaching here means this
+    # hive has never written one.
+    #
+    # The overlay merge below is kept for one case that is real: a hive
+    # REPROVISIONED onto an existing PVC has a dashboard overlay but no runtime
+    # config, and dropping its overlay would silently discard the owner's agent
+    # roster and level. On a genuinely new hive there is no overlay and the
+    # merge is a no-op.
     # The copy-config init container re-seeded $HIVE_CONFIG_PATH from the
     # ConfigMap on this boot. Config saved via the dashboard (Config.Save
     # writes /etc/hive/hive.yaml, an emptyDir) would be silently lost —
@@ -735,6 +744,54 @@ git config --global user.name "kubestellar-hive"
 git config --global user.email "hive-bot@kubestellar.io"
 git config --global --replace-all credential.helper ""
 git config --global --replace-all "credential.https://github.com.helper" "/usr/local/bin/git-credential-hive.sh"
+
+# Also wire the credential helper for this hive's ACTUAL GitHub host when it
+# is NOT public github.com (a GitHub Enterprise instance, e.g. github.ibm.com).
+#
+# Without this, a hive whose repos/App live on GHE only ever gets the helper
+# registered for credential.https://github.com.helper (above). git matches
+# credential helpers by exact host, so `git clone https://github.ibm.com/...`
+# never invokes ANY helper for that host, falls through to an interactive
+# prompt, and fails in this non-interactive shell with "fatal: could not read
+# Username for 'https://github.ibm.com': terminal prompts disabled" — this was
+# reported live from a GHE hive (devx-prod/epx-vscode-ext-poc) where scanner
+# and quality (which talk to the GitHub API, not git-over-HTTPS) worked fine
+# while guide's `git clone` could not authenticate at all.
+#
+# The host is derived the same way the Go binary's GitHubConfig.HostLabel()
+# derives it (pkg/config/config.go): prefer github.base_url, fall back to the
+# host portion of github.api_url, strip scheme and a trailing /api/v3, default
+# to github.com. Reading it here (from the same hive.yaml the Go binary reads)
+# rather than hardcoding "github.ibm.com" keeps this general for ANY configured
+# GHE host, and a no-op for a plain github.com hive (GHE_GIT_HOST resolves to
+# "github.com", which already has its helper wired above).
+GHE_GIT_HOST=""
+if [ -f "${HIVE_CONFIG:-/etc/hive/hive.yaml}" ]; then
+  GHE_GIT_HOST=$(python3 -c "
+import sys, yaml
+try:
+    with open(sys.argv[1]) as f:
+        cfg = yaml.safe_load(f) or {}
+except Exception:
+    sys.exit(0)
+gh = cfg.get('github') or {}
+pick = (gh.get('base_url') or gh.get('api_url') or '').strip()
+if pick.startswith('https://'):
+    pick = pick[len('https://'):]
+elif pick.startswith('http://'):
+    pick = pick[len('http://'):]
+pick = pick.rstrip('/')
+if pick.endswith('/api/v3'):
+    pick = pick[: -len('/api/v3')]
+host = pick.split('/', 1)[0]
+if host and host.lower() != 'api.github.com' and host.lower() != 'github.com':
+    print(host)
+" "${HIVE_CONFIG:-/etc/hive/hive.yaml}" 2>/dev/null) || true
+fi
+if [ -n "$GHE_GIT_HOST" ]; then
+  git config --global --replace-all "credential.https://${GHE_GIT_HOST}.helper" "/usr/local/bin/git-credential-hive.sh"
+  echo "[entrypoint] git credential helper wired for GitHub Enterprise host: ${GHE_GIT_HOST}"
+fi
 
 # Generate initial GitHub App token if credentials are available
 if [ -x /usr/local/bin/hive-config.sh ]; then

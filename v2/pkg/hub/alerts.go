@@ -106,6 +106,17 @@ const (
 	// prompt, or they have produced nothing while work is queued. Deliberately
 	// paused agents are excluded by the rule itself, never reported here.
 	AlertTypeAgentsInactive = "agents-inactive"
+	// AlertTypeInferenceAuthFailed — the hive's self-hosted inference backend
+	// (LiteLLM/vLLM/llm-d gateway) is rejecting every call with 401, a stale or
+	// invalid gateway key. This is the ROOT cause an operator wants to see: the
+	// hive still heartbeats and looks online, but its agents are dead in the
+	// water because no inference call succeeds. Distinct from advisory-stale
+	// (which watches GitHub-POST ability, not inference) so the operator is
+	// pointed at the bad KEY, not just told "the digest is stale". Raised
+	// verbatim from the spoke-reported InferenceAuthError, which the spoke sets
+	// only after several consecutive 401s and clears on the next success — so
+	// the alert self-heals when the key is fixed.
+	AlertTypeInferenceAuthFailed = "inference-auth-failed"
 )
 
 // --- Thresholds. Every one is a named constant with a rationale. ---
@@ -474,6 +485,14 @@ type alertHive struct {
 	// would start disagreeing about which hives are affected.
 	InactiveAgents       int
 	InactiveAgentsReason string
+
+	// InferenceAuthError is the spoke-reported log-safe cause set when the
+	// hive's inference backend is rejecting every call with 401 (a stale
+	// gateway key). Carried verbatim from the entry: the spoke owns the
+	// consecutive-failure threshold and the self-heal, so the hub just raises
+	// the alert when it is non-empty and drops it when it clears. Never carries
+	// key material.
+	InferenceAuthError string
 }
 
 // alertHiveFromEntry projects a MyHiveEntry into the evaluator's view.
@@ -501,6 +520,8 @@ func alertHiveFromEntry(h MyHiveEntry) alertHive {
 
 		InactiveAgents:       h.InactiveAgents,
 		InactiveAgentsReason: h.InactiveAgentsReason,
+
+		InferenceAuthError: h.InferenceAuthError,
 	}
 }
 
@@ -622,7 +643,38 @@ const (
 	// reason string. A hive with everything failing should not produce a
 	// paragraph; the count still reflects the true total.
 	maxNamedFailingChecks = 3
+
+	// healthCheckGitHubAuth is the spoke's GitHub credential check
+	// (pkg/dashboard/server.go builds it in both HealthSummary and
+	// handleHealthDeep). It fails whenever no App or token is configured.
+	healthCheckGitHubAuth = "github_auth"
+	// healthCheckGitHubAppPrefix catches any GitHub-App-scoped check name a
+	// spoke version may report (e.g. a future github_app_key). Every check in
+	// that family verifies credentials a placeholder cannot have yet.
+	healthCheckGitHubAppPrefix = "github_app"
 )
+
+// isAuthClassHealthCheck reports whether a named health check verifies GitHub
+// credentials (App or token) rather than the spoke process itself. The split
+// matters for placeholders: an UNASSIGNED pool slot has no GitHub auth BY
+// DESIGN — credentials only arrive when a project is claimed — so an auth
+// check failing on a placeholder is the pool working as designed, not a fault.
+func isAuthClassHealthCheck(name string) bool {
+	return name == healthCheckGitHubAuth ||
+		strings.HasPrefix(name, healthCheckGitHubAppPrefix)
+}
+
+// withoutAuthClassChecks filters auth-class names out of a failing-checks list.
+// Used only for placeholders; a claimed hive's list passes through untouched.
+func withoutAuthClassChecks(names []string) []string {
+	kept := names[:0:0]
+	for _, n := range names {
+		if !isAuthClassHealthCheck(n) {
+			kept = append(kept, n)
+		}
+	}
+	return kept
+}
 
 // fleetMedianTokens returns the median TotalTokens24h across claimed, online
 // hives, and how many hives contributed. Placeholders are excluded — an idle
@@ -756,7 +808,18 @@ func evaluateAlerts(state *alertState, hives []alertHive, driftAlerts []Alert, n
 		}
 
 		// --- Rule: a named health check is failing. ---
-		if failing := failingHealthChecks(h.Health); len(failing) > 0 {
+		// Placeholders keep this rule — drift.go deliberately treats health as
+		// NOT claimed-only, because a pool slot runs a real spoke process that
+		// can genuinely be degraded — but auth-class checks are exempt for
+		// them, mirroring drift's rule 2 ("never flag a placeholder for a
+		// claimed-hive concern"): an unassigned slot has no GitHub auth by
+		// design, and every live placeholder alerting github_auth was burying
+		// a real alert under pool noise. A claimed hive's list is untouched.
+		failing := failingHealthChecks(h.Health)
+		if h.IsPlaceholder {
+			failing = withoutAuthClassChecks(failing)
+		}
+		if len(failing) > 0 {
 			shown := failing
 			suffix := ""
 			if len(shown) > maxNamedFailingChecks {
@@ -786,6 +849,23 @@ func evaluateAlerts(state *alertState, hives []alertHive, driftAlerts []Alert, n
 				reason = "Advisory digest has gone stale"
 			}
 			add(h.ID, h.Name, AlertTypeAdvisoryStale, AlertSeverityWarning, reason)
+		}
+
+		// --- Rule: the inference backend is failing auth. ---
+		// The condition is NOT re-derived here: the spoke reports
+		// InferenceAuthError only after several CONSECUTIVE 401s (a single blip
+		// never trips it) and clears it on the next successful inference call,
+		// so the alert self-heals with no threshold or window on the hub side to
+		// keep in sync. Non-placeholder only — an unassigned pool slot routes no
+		// inference. Critical because it is the ROOT cause of an otherwise
+		// silent outage: the hive heartbeats and looks online while every agent
+		// is dead in the water on a stale gateway key. This is the signal the
+		// advisory-stale detector could not give (it watches GitHub-POST
+		// ability, not inference), so an operator is pointed at the bad KEY.
+		if !h.IsPlaceholder {
+			if cause := strings.TrimSpace(h.InferenceAuthError); cause != "" {
+				add(h.ID, h.Name, AlertTypeInferenceAuthFailed, AlertSeverityCritical, cause)
+			}
 		}
 
 		// --- Rule: agents are running but not working. ---
@@ -1089,13 +1169,14 @@ var knownAlertTypes = map[string]bool{
 	// the panel. Every AlertType* constant MUST appear here — see
 	// TestKnownAlertTypesCoversEveryAlertType, which fails if one is added
 	// without being registered.
-	AlertTypeFailedUpgrade:      true,
-	AlertTypeHealthCheckFailing: true,
-	AlertTypeTokenBurn:          true,
-	AlertTypeProvisionError:     true,
-	AlertTypeAdvisoryStale:      true,
-	AlertTypeAgentsInactive:     true,
-	AlertTypeURLUnreachable:     true,
+	AlertTypeFailedUpgrade:       true,
+	AlertTypeHealthCheckFailing:  true,
+	AlertTypeTokenBurn:           true,
+	AlertTypeProvisionError:      true,
+	AlertTypeAdvisoryStale:       true,
+	AlertTypeAgentsInactive:      true,
+	AlertTypeURLUnreachable:      true,
+	AlertTypeInferenceAuthFailed: true,
 }
 
 func isKnownAlertType(t string) bool { return knownAlertTypes[t] }

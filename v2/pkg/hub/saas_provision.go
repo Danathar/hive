@@ -100,11 +100,26 @@ const gpuClusterID = "vllm-d"
 
 // Placeholder-hive lifecycle status values. A pre-provisioned placeholder sits
 // at statusAvailable until an admin assigns it to a requesting user, at which
-// point its status is cleared (empty) and it behaves like any owned hive.
+// point its status flips to statusAssigned and it behaves like any owned hive.
 const (
 	// statusAvailable marks a pre-provisioned placeholder hive that is idle and
 	// waiting to be claimed. Only such a hive may be assigned.
 	statusAvailable = "available"
+	// statusAssigned marks a placeholder that has been CLAIMED by a user. It is
+	// the authoritative "no longer available" signal.
+	//
+	// The claim paths (handleApproveProvision, handleAssignHive) previously set
+	// Status = "" here. That empty string is indistinguishable from "unknown",
+	// so every downstream availability check that keys off ProvStatus (the
+	// landing-page fleet tiles, computeFleetStats) fell back to the immutable
+	// "hosted-available-" ID prefix — which a claimed placeholder KEEPS forever
+	// — and mis-counted 22 claimed hives as still available (38 shown vs the
+	// true 17). Setting an explicit assigned status makes ProvStatus the single
+	// authoritative signal: a claimed hive reads provStatus!="available" without
+	// any prefix guessing. A live spoke later overwrites this with its real
+	// lifecycle status ("provisioning"/"running") on the next heartbeat; until
+	// then "assigned" is the correct, honest state.
+	statusAssigned = "assigned"
 )
 
 // ACMM level bounds for a claimed/assigned hive. The maturity model spans
@@ -478,6 +493,31 @@ type SaaSHive struct {
 	// stops for good and the spoke owns the value again. Both default to their
 	// zero values on every existing hive, so nothing is delivered to a hive
 	// nobody switched: the push is gated on a NON-EMPTY RequestedGitHubHost.
+	// RequestedAppReset asks the spoke to CLEAR its installation_id, so the
+	// hive falls back to "App not installed" and prompts the owner to install
+	// it again.
+	//
+	// WHY THIS NEEDS ITS OWN FIELD RATHER THAN JUST PUSHING ZERO
+	//
+	// The wire cannot express a clear. The spoke adopts a pushed installation
+	// only when it is non-zero (cmd/hive: `if ghCfg.InstallationID != 0`),
+	// deliberately — zero means "the hub is not speaking to this field", and
+	// treating it as "blank it" once turned a key-only fault into a total auth
+	// outage. So a reset has to be a distinct instruction, not a value.
+	//
+	// It is a REQUEST, persisted on the hive record, because the operator's
+	// intent has to survive a missed beat and a hub restart. Cleared when the
+	// spoke reports installation_id 0 back — read-back confirmation, the same
+	// contract the forge switch uses.
+	//
+	// The live case: a hive provisioned with its OWN GitHub App kept that App's
+	// installation_id after its identity was later moved to the fleet's public
+	// App. app_id, app_slug and key_file all named the public App while the
+	// installation belonged to another, so every freshly minted token returned
+	// "404 Not Found" while cached ones kept working — 84 failures in three
+	// hours on one hive, with no config field visibly wrong.
+	RequestedAppReset bool `json:"requested_app_reset,omitempty"`
+
 	RequestedGitHubHost string `json:"requested_github_host,omitempty"`
 	// ForgeDelivered flips true once the spoke reports the requested forge host.
 	ForgeDelivered bool `json:"forge_delivered,omitempty"`
@@ -512,6 +552,14 @@ type SaaSHive struct {
 	// nil means nothing is queued. It is CLEARED on confirmation, not on
 	// delivery (see AppIdentityDelivered), so a lost beat is retried.
 	PendingAppConfig *PendingAppIdentity `json:"pending_app_config,omitempty"`
+
+	// RequestedRestartAt (RFC3339) arms a rolling restart of this hive's spoke,
+	// delivered on every heartbeat inside spokeRestartDeliveryWindow and then
+	// cleared. Durable on the hive record for the same reason as
+	// PendingAppConfig: an in-memory flag dies with a hub restart and a missed
+	// beat, and the whole point of this switch is reaching spokes the hub
+	// cannot touch any other way.
+	RequestedRestartAt string `json:"requested_restart_at,omitempty"`
 
 	Error           string                 `json:"error,omitempty"`
 	AutoUpgrade     bool                   `json:"auto_upgrade"`
@@ -1472,6 +1520,15 @@ func provisionHive(h *SaaSHive, req *CreateHiveRequest, cluster *ClusterConfig, 
 		return fmt.Errorf("provisioning failed — check hub logs for details")
 	}
 
+	// Entry point 1/3 for namespace identity: stamp what's known at creation
+	// time. For a freshly-created pool placeholder this is often just the
+	// hive_id (h.Owner/h.Org are still the admin/placeholder values) — the
+	// claim (handleApproveProvision) and assign (handleAssignHive) paths
+	// overwrite these once the real owner/org are known. See
+	// hosted_namespace_identity.go for why the namespace itself is never
+	// renamed and must instead be kept self-describing via labels.
+	stampHostedNamespaceIdentity(cluster, data["Namespace"].(string), h.ProjectName, h.Org, h.ID, logger)
+
 	logger.Info("audit: saas hive provisioned", "hive_id", h.ID, "owner", h.Owner, "org", h.Org, "cluster", cluster.ID)
 	return nil
 }
@@ -2041,12 +2098,20 @@ spec:
       - name: copy-config
         image: ghcr.io/kubestellar/hive:{{.ImageTag}}
         imagePullPolicy: {{.ImagePullPolicy}}
-        # Seed-wins variant: the ConfigMap is copied over the config path and
-        # the PVC runtime config is only REPORTED, never restored here. The
-        # entrypoint does the real overlay merge. Both the new and legacy
-        # names are probed so the diagnostic stays truthful while hives that
-        # predate the hive.yaml.runtime rename still carry only the old file.
-        command: ["sh", "-c", "cp /etc/hive-seed/hive.yaml /etc/hive/hive.yaml && echo configmap-copied; if [ -f /data/hive.yaml.runtime ]; then echo runtime-config-exists-for-recovery; elif [ -f /data/hive.yaml.bak ]; then echo legacy-runtime-config-exists-for-recovery; fi"]
+        # SEED-ONLY variant (phase 3 of the layer collapse). The ConfigMap is
+        # copied ONLY when the PVC carries no runtime config — i.e. first boot.
+        #
+        # It used to copy unconditionally on every boot, which meant the frozen
+        # seed overwrote the config path before the entrypoint had a say. Phase
+        # 2 made the entrypoint prefer the runtime config, so that copy became
+        # redundant work that still had to be undone one line later; skipping it
+        # is what actually makes the ConfigMap a seed rather than a per-boot
+        # input.
+        #
+        # Both runtime names are probed: ~16 of 50 live spokes still carry only
+        # the legacy hive.yaml.bak, so keying on the new name alone would treat
+        # them as first-boot and re-seed a hive that has real config on its PVC.
+        command: ["sh", "-c", "if [ -s /data/hive.yaml.runtime ]; then echo runtime-config-exists-for-recovery; elif [ -s /data/hive.yaml.bak ]; then echo legacy-runtime-config-exists-for-recovery; else cp /etc/hive-seed/hive.yaml /etc/hive/hive.yaml && echo configmap-copied-first-boot; fi"]
         volumeMounts:
         - name: config
           mountPath: /etc/hive-seed
@@ -2134,6 +2199,17 @@ spec:
               key: dashboard-token
         - name: HIVE_ID
           value: "{{.ID}}"
+        # POD_NAMESPACE via the downward API — the spoke's OWN authoritative
+        # source for the namespace it runs in. Provisioning already computes
+        # this namespace (see .Namespace above) to create it, but the pod
+        # cannot read the template's own values at runtime, and re-deriving
+        # "hive-hosted-"+HIVE_ID client-side would silently break the day
+        # that convention changes. The downward API can never disagree with
+        # reality: it is the API server's own answer, not a guess.
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
         - name: HIVE_LEVEL
           value: "{{.ACMMLevel}}"
         - name: HIVE_HUB_URL

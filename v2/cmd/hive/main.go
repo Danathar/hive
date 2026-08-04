@@ -45,6 +45,7 @@ import (
 	"github.com/kubestellar/hive/v2/pkg/notify"
 	"github.com/kubestellar/hive/v2/pkg/planning"
 	"github.com/kubestellar/hive/v2/pkg/policies"
+	"github.com/kubestellar/hive/v2/pkg/proclock"
 	"github.com/kubestellar/hive/v2/pkg/promptsrc"
 	"github.com/kubestellar/hive/v2/pkg/proxy"
 	"github.com/kubestellar/hive/v2/pkg/scheduler"
@@ -175,6 +176,38 @@ func prospectiveGitHubIdentity(cur config.GitHubConfig, ghCfg *hub.HeartbeatGitH
 		return nil
 	}
 	return &next
+}
+
+// nextInstallationID decides what a hive's installation_id becomes after a
+// hub delivery, and reports whether the change is an operator RESET.
+//
+// Three cases, and the difference between the last two is load-bearing:
+//
+//	ResetInstallation  -> 0. The operator clicked "Reset App". Clearing makes
+//	                     HasUsableApp() false, which raises githubAppRequired:
+//	                     the owner is prompted to install the App again and the
+//	                     self-heal ticker starts, whose RediscoverAndAdopt
+//	                     adopts the correct installation for whatever they
+//	                     install.
+//	non-zero pushed    -> adopt it.
+//	zero pushed        -> KEEP the current value. Zero means "the hub is not
+//	                     speaking to this field", not "clear it". The
+//	                     cluster-wide key reconcile sends zero on every beat
+//	                     because it repairs KEYS on hives whose installation the
+//	                     hub does not track; reading that as a clear would blank
+//	                     a working installation fleet-wide and turn a key-only
+//	                     fault into a total auth outage.
+func nextInstallationID(current int64, ghCfg *hub.HeartbeatGitHubAppConfig) (next int64, reset bool) {
+	if ghCfg == nil {
+		return current, false
+	}
+	if ghCfg.ResetInstallation {
+		return 0, current != 0
+	}
+	if ghCfg.InstallationID != 0 {
+		return ghCfg.InstallationID, false
+	}
+	return current, false
 }
 
 func perAppIDKeyPath(appID int64) string {
@@ -673,6 +706,81 @@ func buildAgentMinter(cfg *config.Config, logger *slog.Logger) (*mint.AgentMinte
 // short uptime that keeps resetting is the only visible tell.
 var processStartedAt = time.Now()
 
+// reporterName identifies this spoke PROCESS to the hub (HeartbeatPayload
+// Reporter) as "<hostname>/<pid>". In-cluster the hostname IS the pod name;
+// the PID suffix exists because two hive processes were observed beating from
+// ONE pod (#2453, #2496) — bare os.Hostname() made them indistinguishable, so
+// the hub's duplicate-spoke detector (noteReporter) stayed silent through 11+
+// alternating beats while the dashboard flipped state every beat. With the
+// PID attached, same-pod duplicates alternate as "pod-x/123 ↔ pod-x/456" and
+// the detector names the exact culprits. The hub compares the whole string as
+// an opaque identity, so old spokes sending bare hostnames keep working; a
+// hostname failure yields empty, which the hub reads as "too old / cannot
+// report", never as data.
+var reporterName = func() string {
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s/%d", host, os.Getpid())
+}()
+
+// ── Process singleton (#2453, #2496) ────────────────────────────────────
+//
+// A spoke pod ran TWO hive processes concurrently: startedAt alternated
+// between two values beat to beat, the hub saw 4-5 heartbeat senders behind
+// one pod name, and one process's stale App-auth snapshot flipped the
+// dashboard every beat. The per-process StartHeartbeat guard (#2462) cannot
+// see across processes; only a kernel-level mutual exclusion can. main()
+// takes an exclusive flock before doing anything else — the second process
+// logs the holder's PID and exits instead of becoming a shadow sender. The
+// flock releases automatically on process death, so a crashed holder never
+// blocks a legitimate restart.
+const (
+	// singletonLockEnv overrides the lock file location (tests, unusual
+	// container layouts). Empty means the default resolution below.
+	singletonLockEnv = "HIVE_SINGLETON_LOCK"
+	// singletonLockDisable is the env value that skips the guard entirely —
+	// an escape hatch for deliberately running two instances on one host
+	// (local development with distinct configs).
+	singletonLockDisable = "off"
+	// singletonLockDir is the preferred lock directory: container-local tmpfs
+	// created by the entrypoint, shared by every process in the container but
+	// by NOTHING outside it. Deliberately NOT /data — the PVC is shared
+	// across PODS during a rolling update (maxSurge=1), and a pod-spanning
+	// lock would deadlock the surge pod against the terminating one.
+	singletonLockDir = "/var/run/hive-metrics"
+	// singletonLockName is the lock file's basename in whichever directory is
+	// chosen.
+	singletonLockName = "hive.singleton.lock"
+	// duplicateProcessExitCode marks an exit caused by refusing to run beside
+	// an already-running hive process. Distinct from 0 (clean) and 17
+	// (selfUpgradeFailureExitCode) so the refusal is legible in the
+	// container's termination state.
+	duplicateProcessExitCode = 18
+)
+
+// singletonLockPath resolves where the process singleton lock lives. Every
+// process in a container resolves the same path (the filesystem is shared),
+// so the choice is deterministic where it matters; the temp-dir fallback
+// covers bare-metal/dev runs where the entrypoint never created the
+// container dir.
+func singletonLockPath() string {
+	if p := os.Getenv(singletonLockEnv); p != "" {
+		return p
+	}
+	if st, err := os.Stat(singletonLockDir); err == nil && st.IsDir() {
+		return filepath.Join(singletonLockDir, singletonLockName)
+	}
+	return filepath.Join(os.TempDir(), singletonLockName)
+}
+
+// spokeRestartMinUptime is how old this process must be before it acts on a
+// hub-delivered restart. The hub delivers the instruction to every beat in a
+// multi-minute window so all instances hear it; without this guard the
+// restarted process would come back inside the same window and restart again.
+const spokeRestartMinUptime = 10 * time.Minute
+
 func main() {
 	startTime := time.Now()
 	defaultConfig := "/etc/hive/hive.yaml"
@@ -693,6 +801,28 @@ func main() {
 
 	logger := slog.New(logscrub.NewHandler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	slog.SetDefault(logger)
+
+	// Process singleton: refuse to become a second hive process in this
+	// container (#2453, #2496). Two concurrent processes beat as the same pod,
+	// alternate registry state every beat, and are invisible to both the
+	// in-process StartHeartbeat guard and the hub's duplicate-spoke detector.
+	// The flock releases on process death, so this never blocks a restart.
+	if os.Getenv(singletonLockEnv) != singletonLockDisable {
+		lockPath := singletonLockPath()
+		procLock, lockErr := proclock.Acquire(lockPath)
+		if lockErr != nil {
+			logger.Error("another hive process is already running in this container — refusing to start a duplicate (#2453, #2496)",
+				"lock", lockPath,
+				"pid", os.Getpid(),
+				"error", lockErr.Error(),
+			)
+			os.Exit(duplicateProcessExitCode)
+		}
+		// Held for the process lifetime; the kernel releases it on exit. Kept
+		// referenced so the *os.File is never garbage-collected (a collected
+		// file closes its descriptor, which would silently drop the flock).
+		defer procLock.Release()
+	}
 
 	// Clear stale upgrade marker if the current SHA differs from the marker's
 	// current_sha — this means the upgrade succeeded and the marker is from a
@@ -724,7 +854,14 @@ func main() {
 		return
 	}
 
-	cfg, err := config.Load(*configPath)
+	// Use LoadWithDashboardOverlay (not plain Load) so the dashboard overlay's
+	// removed_agents tombstones are populated into cfg.RemovedAgents at boot —
+	// BEFORE the startup ApplyPack below reconciles the ACMM roster. Plain Load
+	// never reads the overlay, so on restart the tombstone was invisible and
+	// ApplyPack re-added deleted pack agents (brainstorm/guide) every time
+	// (#2439). Same return signature as Load; falls back to the seed when no
+	// overlay exists or the pod is not in Kubernetes.
+	cfg, err := config.LoadWithDashboardOverlay(*configPath)
 	if err != nil {
 		logger.Error("failed to load config", "error", err)
 		os.Exit(1)
@@ -739,6 +876,16 @@ func main() {
 	// Load or generate a unique Hive ID for this instance
 	cfg.HiveID = loadOrGenerateHiveID(logger)
 	os.Setenv("HIVE_ID", cfg.HiveID)
+
+	// Observability (#2439): report the removed-agents tombstone LoadWithDashboardOverlay
+	// adopted from the dashboard overlay at boot, BEFORE the startup ApplyPack below. On
+	// a non-sticking-removal report this line is the first check — an empty set here on a
+	// hive that removed an agent means the tombstone did not persist across the restart.
+	logger.Info("boot: loaded removed-agents tombstone",
+		"hive_id", cfg.HiveID,
+		"count", len(cfg.RemovedAgents),
+		"agents", cfg.RemovedAgents,
+	)
 
 	// Surface config provenance: when the persisted runtime config exists, init
 	// containers restore it over the ConfigMap seed on restart, so edits made
@@ -953,6 +1100,17 @@ func main() {
 	// against a hive whose credentials the operator never delivered).
 	githubAppDiag := appAuthFailure
 	githubAppState := appAuthState
+	// Config truth outranks live probes: an App with no installation cannot
+	// mint, period. A cached token can keep clients green for up to an hour
+	// after an installation is cleared, and waiting for the first failed mint
+	// left the banner down and the hub green exactly when the operator needed
+	// the opposite (the fast-model-actuation incident).
+	if cfg.GitHub.ConfiguredButUninstalled() {
+		githubAppRequired = true
+		githubAppState = github.AppStateNotInstalled
+		githubAppDiag = "GitHub App " + strconv.FormatInt(cfg.GitHub.AppID, 10) +
+			" has no installation for this org — install it (the spoke adopts the installation automatically)"
+	}
 
 	// Find or create the pinned advisory issue. Any level can have advisory
 	// agents whose findings should be posted to this issue.
@@ -1407,6 +1565,12 @@ func main() {
 			"author", fleetStatsAuthor, "org", cfg.Project.Org)
 	}
 	fleetStatsCollector := dashboard.NewFleetStatsCollector(ghClient, fleetStatsAuthor, cfg.Project.Org, logger)
+	// Persist the collected counts on the /data PVC (same store as sessions and
+	// cost/fact history) so a restart resumes from the last-known counts instead
+	// of nil. Without this, a fleet-wide upgrade clears every spoke's in-memory
+	// counts and the public landing-page total collapses until all spokes
+	// re-collect (#2329, building on the hub-side #2328 defensive aging fix).
+	fleetStatsCollector.EnablePersistence("/data/fleet-stats.json")
 	go fleetStatsCollector.Start(ctx)
 
 	var lastActionable atomic.Pointer[github.ActionableResult]
@@ -1831,6 +1995,33 @@ func main() {
 			}
 			return nil
 		},
+		// Same key resolution as boot (initGitHubAuth) and the heartbeat apply
+		// path: without it, the dashboard Set ID handler gated reinit on the
+		// raw key_file, which is deliberately empty on hub-delivered per-app-id
+		// keys (#2459).
+		ResolveAppKeyFileFunc: func(configured string, appID int64) string {
+			return resolveAppKeyFile(configured, os.Getenv("GH_APP_KEY_FILE"), appID)
+		},
+	})
+
+	// Forge App tab inventory: the resolved active key path and the per-app-id
+	// PVC keys live here in cmd/hive, so they are injected as a provider (the
+	// SetGitHubAppRecheckFn pattern). Fingerprints and paths only — the
+	// provider never touches key material.
+	dashSrv.SetForgeAppInventoryFn(func() dashboard.ForgeAppInventory {
+		held := heldPerAppIDKeyFingerprints()
+		keys := make([]dashboard.ForgeAppKey, 0, len(held))
+		for idStr, fp := range held {
+			keys = append(keys, dashboard.ForgeAppKey{
+				AppID:       idStr,
+				Path:        filepath.Join(spokeAppKeyDir, perAppIDKeyFilePrefix+idStr+perAppIDKeyFileSuffix),
+				Fingerprint: fp,
+			})
+		}
+		return dashboard.ForgeAppInventory{
+			ActiveKeyFile: resolveAppKeyFile(cfg.GitHub.KeyFile, os.Getenv("GH_APP_KEY_FILE"), cfg.GitHub.AppID),
+			HeldKeys:      keys,
+		}
 	})
 
 	dashSrv.SetGitHubAppRequired(githubAppRequired)
@@ -1890,6 +2081,31 @@ func main() {
 						"repo", recheckRepo, "state", state.String(),
 						"operator_actionable", state.OperatorActionable(), "detail", diag)
 					dashSrv.AuditLog("system", "github_app_check", "result=installed but write NOT verified: "+diag, "")
+					return false
+				}
+				// #2353: the classifier above only proves the installation
+				// authenticates and grants issues:write — NOT that this repo can
+				// actually be written. Finding the advisory issue is a READ, which
+				// succeeds even when the repo is not in the App installation's
+				// selected repos. Perform a REAL write probe before clearing the
+				// banner, so re-check cannot falsely "verify write" for a repo the
+				// App can only read (the recheck false-positive).
+				if werr := ghClient.ProbeIssueWrite(ctx, recheckRepo, num); werr != nil {
+					if strings.Contains(werr.Error(), "403") && strings.Contains(werr.Error(), "Resource not accessible by integration") {
+						msg, state := classifyGitHubAppWriteForbidden(ctx, ghClient.AppAuth(), cfg.Project.Org, recheckRepo)
+						dashSrv.SetGitHubAppPermIssue(msg)
+						dashSrv.SetGitHubAppState(state.String())
+						logger.Warn("github app recheck: write probe returned 403 — not clearing the banner",
+							"repo", recheckRepo, "state", state.String(), "detail", msg)
+						dashSrv.AuditLog("system", "github_app_check", "result=write probe FORBIDDEN: "+msg, "")
+						return false
+					}
+					// A non-403 probe failure is inconclusive (rate limit,
+					// transient network). Do NOT clear the banner on a write we
+					// could not confirm, but also do NOT accuse anyone.
+					logger.Warn("github app recheck: write probe inconclusive — leaving banner as-is",
+						"repo", recheckRepo, "error", werr)
+					dashSrv.AuditLog("system", "github_app_check", "result=write probe inconclusive", "")
 					return false
 				}
 				logger.Info("github app recheck: app detected, write verified", "repo", recheckRepo, "number", num)
@@ -2054,6 +2270,28 @@ func main() {
 			newCfg.ACMMLevel = cfg.ACMMLevel
 		}
 
+		// Preserve removed-agent tombstones across the swap as a union of the
+		// live cfg and the incoming reload. LoadWithDashboardOverlay now carries
+		// the overlay's tombstones into newCfg, but a removal that landed in the
+		// live cfg after this reload's snapshot (or an overlay too short/stale to
+		// echo it back yet) must not be lost — otherwise the next persistState
+		// saver rewrites every layer tombstone-free and the deleted agents
+		// reappear (#2439). Union keeps any tombstone present in either side.
+		for _, name := range cfg.RemovedAgents {
+			newCfg.MarkAgentRemoved(name)
+		}
+		newCfg.PruneRemovedAgents()
+
+		// Observability (#2439): this is the ~2-min interval reload path, so keep it
+		// at DEBUG to avoid spamming a healthy hive. When a removal is not sticking,
+		// enabling DEBUG shows the tombstone surviving each swap — an empty count here
+		// while the agent keeps reappearing localizes the leak to this union-preserve.
+		logger.Debug("reload: preserved removed-agents",
+			"hive_id", cfg.HiveID,
+			"count", len(newCfg.RemovedAgents),
+			"agents", newCfg.RemovedAgents,
+		)
+
 		// Capture the outgoing GitHub App identity before the swap so we can
 		// tell whether the reload changed it.
 		prevGitHub := cfg.GitHub
@@ -2154,6 +2392,12 @@ func main() {
 		// configured key is entitled to, learned by the proxy from a key-info
 		// probe or a "team not allowed" 403.
 		dashboard.SetEntitledModelsProvider(githubProxy.EntitledModels)
+		// Surface a stale/invalid inference gateway key (repeated 401s on every
+		// inference call) as a hive health signal: the proxy latches the failure
+		// after several consecutive rejections and clears it on the next success,
+		// and the heartbeat builder reports it to the hub (both as an immediate
+		// advisory-staleness cause and as a dedicated inference-auth alert).
+		dashboard.SetInferenceAuthProvider(githubProxy.InferenceAuthError)
 
 		// Wire the inference token sink so the translator records per-agent
 		// usage (from the gateway's OpenAI usage block) into the same metrics
@@ -2255,12 +2499,36 @@ func main() {
 					if model == "" {
 						model = lc.DefaultModel
 					}
+					// Key source must MATCH the entitlement/probe path (gateways.go,
+					// cost.go, openrouter.go), which resolve the key from the gateway
+					// via ResolveGateway(backend).ResolveAPIKey(). When an EXPLICIT
+					// `gateways:` block names this backend, that gateway carries its
+					// own api_key_file (e.g. the key saved from the Model Gateways
+					// tab). Reading the legacy Governor.LiteLLM key file here instead
+					// would send a DIFFERENT (often stale) key than entitlement
+					// validated, causing inference 401s after a key rotation done via
+					// the Gateways tab. Resolve from the same gateway so inference and
+					// entitlement always agree on one key source.
+					//
+					// Only explicit gateways override: ResolvedGateways synthesizes an
+					// implicit "litellm" gateway from the legacy block when no
+					// `gateways:` are set, but that synthetic gateway lacks the
+					// multi-location file fallback of LiteLLMConfig.ResolveAPIKey
+					// (k8s Secret mount + PVC copy). For no-gateway hives we therefore
+					// keep the legacy resolver to preserve today's behavior.
+					apiKey := cfg.Governor.ResolveLiteLLMInferenceKey(backend)
+					caBundle := lc.CABundle
+					if len(cfg.Governor.Gateways) > 0 {
+						if gw := cfg.Governor.ResolveGateway(backend); gw != nil {
+							caBundle = gw.CABundle
+						}
+					}
 					githubProxy.SetInferenceRoute(agentName, &proxy.InferenceRoute{
 						Backend:  backend,
 						Endpoint: endpoint,
 						Model:    model,
-						APIKey:   lc.ResolveAPIKey(),
-						CABundle: lc.CABundle,
+						APIKey:   apiKey,
+						CABundle: caBundle,
 					})
 					return
 				}
@@ -2478,6 +2746,10 @@ func main() {
 				AIAuthor:          cfg.Project.AIAuthor,
 				AIAuthorEffective: cfg.EffectiveAIAuthor(),
 				StartedAt:         processStartedAt.UTC().Format(time.RFC3339),
+				// Reporter names THIS process (the pod) so the hub can tell two
+				// instances reporting as one hive apart — the pod name is the
+				// hostname inside the container.
+				Reporter: reporterName,
 				// Advisory-staleness signal (mirrors StartedAt/uptime). Report the
 				// last successful digest-post time only if the spoke has actually
 				// posted one — a zero time is left as an empty string so the hub
@@ -2493,6 +2765,17 @@ func main() {
 				}(),
 				AdvisoryError: func() string {
 					_, _, errMsg := dashSrv.AdvisoryState()
+					return errMsg
+				}(),
+				// Inference-backend auth-failure signal (repeated 401s from a
+				// stale gateway key). Reported as its own field so the hub can
+				// raise a dedicated inference-auth alert whose ROOT cause an
+				// operator sees directly — distinct from the advisory-staleness
+				// pill AdvisoryError also trips. Empty when inference auth is
+				// healthy or the hive routes to no inference backend; self-clears
+				// on the next successful inference call.
+				InferenceAuthError: func() string {
+					errMsg, _ := dashSrv.InferenceAuthState()
 					return errMsg
 				}(),
 				Repos:       cfg.Project.Repos,
@@ -2630,7 +2913,23 @@ func main() {
 				// and then stops re-sending them.
 				GitHubAppKeysHeld: heldPerAppIDKeyFingerprints(),
 			}
-		}, heartbeatSendInterval, logger, hub.UpgradeCallback(func(targetSHA string) {
+		}, heartbeatSendInterval, logger, hub.RestartSpokeCallback(func() {
+			if up := time.Since(processStartedAt); up < spokeRestartMinUptime {
+				logger.Info("hub requested a spoke restart; ignoring — this process just started",
+					"uptime", up.Round(time.Second))
+				return
+			}
+			logger.Warn("hub requested a spoke restart — rolling this deployment",
+				"reporter", reporterName)
+			if err := hub.RolloutRestartSelf(logger); err != nil {
+				// Do NOT exit here: without deployment-patch RBAC an exit would
+				// restart onto the same state every delivery and look like a
+				// crash-loop. The error names the missing Role instead.
+				logger.Error("spoke restart failed: could not patch own Deployment",
+					"error", err,
+					"hint", "grant get/patch on deployments/hive in this namespace (hive-self-upgrade Role/RoleBinding)")
+			}
+		}), hub.UpgradeCallback(func(targetSHA string) {
 			const upgradeMarkerPath = "/data/upgrade-requested"
 
 			// attemptCount carries the number of PREVIOUS failed attempts for this
@@ -2957,8 +3256,17 @@ func main() {
 			// KEY on hives whose installation_id is already correct (and which
 			// the hub does not track); assigning zero here would blank a working
 			// value and turn a key-only fault into a total auth outage.
-			if ghCfg.InstallationID != 0 {
-				cfg.GitHub.InstallationID = ghCfg.InstallationID
+			if next, cleared := nextInstallationID(cfg.GitHub.InstallationID, ghCfg); cleared {
+				// The banner and the hub must flip to not-installed NOW, not
+				// when the cached token dies an hour from now. Same config-truth
+				// rule as startup.
+				dashSrv.SetGitHubAppRequired(true)
+				dashSrv.SetGitHubAppState(github.AppStateNotInstalled.String())
+				logger.Info("clearing github app installation_id on operator request",
+					"was", cfg.GitHub.InstallationID)
+				cfg.GitHub.InstallationID = next
+			} else {
+				cfg.GitHub.InstallationID = next
 			}
 			// Deliberately NOT `cfg.GitHub.KeyFile = keyPath`.
 			//
@@ -3747,6 +4055,49 @@ func classifyGitHubAppFailure(ctx context.Context, appAuth *github.AppAuth, expe
 	return true, msg, state
 }
 
+// classifyGitHubAppWriteForbidden (#2353) is the verdict for a REAL write that
+// returned 403 "Resource not accessible by integration". Authentication-only
+// health checks (classifyGitHubAppFailure / diagnoseGitHubApp) inspect the
+// installation's granted PERMISSIONS but never whether the target repo is in
+// the installation's `selected` repositories — so they return AppStateOK for a
+// repo the App cannot write, and the write failure stayed invisible to health
+// (githubAppState=None) or, worse, got hard-overridden into a false "lacks
+// Issues: Read & Write" banner.
+//
+// The rule here keeps attribution honest:
+//
+//   - If diagnoseGitHubApp finds a genuine, classifiable App-auth problem
+//     (wrong installation, missing key, insufficient PERMISSION, etc.), report
+//     THAT — it is the real cause and its copy is already accurate.
+//   - If diagnoseGitHubApp reports the installation is healthy (AppStateOK:
+//     right owner, issues:write granted) OR could not reach a verdict
+//     (AppStateUnknown), the write 403 is still real and must NOT be silently
+//     healthy. Report AppStateWriteForbidden with copy that names the repo and
+//     the likeliest cause (repo not in the installation's selected repos),
+//     WITHOUT inventing a permission gap that the diagnosis just proved absent.
+//
+// It always raises: a write that returned 403 is a genuine, standing failure to
+// surface, distinct from the transient/unknown probe failures
+// classifyGitHubAppFailure guards against.
+func classifyGitHubAppWriteForbidden(ctx context.Context, appAuth *github.AppAuth, expectedOwner, repo string) (msg string, state github.AppAuthState) {
+	diagMsg, diagState := diagnoseGitHubApp(ctx, appAuth, expectedOwner)
+	if diagState != github.AppStateOK && diagState != github.AppStateUnknown {
+		// A real, classifiable App-auth problem — its message is the accurate
+		// one (e.g. wrong-installation, key-missing, or a genuine permission
+		// gap). Use it as-is rather than masking it with the repo-scope story.
+		return diagMsg, diagState
+	}
+	// Installation authenticates and (per the diagnosis) holds issues:write, yet
+	// the write was forbidden. Attribute it to the one thing the permission
+	// check cannot see — repo scope — and name the repo so the fix is concrete.
+	d := github.AppAuthDiagnosis{
+		State:           github.AppStateWriteForbidden,
+		ExpectedAccount: expectedOwner,
+		Repo:            repo,
+	}
+	return d.Message(), github.AppStateWriteForbidden
+}
+
 func runEvalCycle(
 	ctx context.Context,
 	cfg *config.Config,
@@ -4109,15 +4460,20 @@ func runEvalCycle(
 						}
 						logger.Warn("failed to post advisory digest via app", "repo", primaryRepo, "issue", issueNum, "error", err)
 						if strings.Contains(err.Error(), "403") && strings.Contains(err.Error(), "Resource not accessible by integration") {
-							// App is installed (we found the issue) but can't write.
-							// Resolve the actual cause — pending permission approval
-							// vs. an installation_id pointing at the wrong org — so
-							// the banner tells the user what to actually fix.
-							msg, state := diagnoseGitHubApp(ctx, ghClient.AppAuth(), cfg.Project.Org)
-							if msg == "" {
-								msg = "The GitHub App is installed but lacks Issues: Read & Write permission. The org owner must approve updated permissions at the app installation settings page."
-								state = github.AppStateInsufficientPerms
-							}
+							// App is installed (we found the issue) but a real
+							// WRITE was forbidden. #2353: attribute this honestly.
+							// diagnoseGitHubApp only inspects installation-level
+							// PERMISSIONS, so when it comes back healthy (issues:write
+							// granted, right owner) the previous code hard-overrode
+							// that "OK" into a false "lacks Issues: Read & Write"
+							// banner — the exact misattribution #2353 reports. When
+							// the diagnosis is genuinely a permission/installation
+							// problem, use it; otherwise surface a DISTINCT
+							// write-forbidden state naming the likeliest real cause
+							// (the repo is not in the App installation's selected
+							// repos), instead of leaving health at None or faking a
+							// permission gap the diagnosis just disproved.
+							msg, state := classifyGitHubAppWriteForbidden(ctx, ghClient.AppAuth(), cfg.Project.Org, primaryRepo)
 							dashSrv.SetGitHubAppRequired(true)
 							dashSrv.SetGitHubAppPermIssue(msg)
 							dashSrv.SetGitHubAppState(state.String())

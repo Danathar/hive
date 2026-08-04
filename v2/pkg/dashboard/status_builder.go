@@ -34,6 +34,15 @@ const skillsConventionalDir = dataVolumePath + "/skills"
 
 const defaultLookbackHours = 24
 
+// Cadence sentinel values: a per-mode cadence set to one of these means the
+// governor will not kick the agent on a timer in that mode. Kept as named
+// constants so the offByCadence detection and computeNextKick agree on the
+// exact spellings the config layer emits.
+const (
+	cadencePause = "pause"
+	cadenceOff   = "off"
+)
+
 // SetProxyViolationsProvider registers a function that returns per-agent
 // proxy violation counts, called during status builds.
 func SetProxyViolationsProvider(fn func() map[string]int) {
@@ -75,6 +84,9 @@ var (
 
 	entitledModelsMu sync.RWMutex
 	entitledModelsFn func(endpoint string) (models []string, source string, known bool)
+
+	inferenceAuthMu sync.RWMutex
+	inferenceAuthFn func() (errMsg string, since time.Time)
 )
 
 // SetEntitledModelsProvider registers a function that reports the per-key
@@ -91,6 +103,39 @@ func getEntitledModelsFn() func(endpoint string) (models []string, source string
 	entitledModelsMu.RLock()
 	defer entitledModelsMu.RUnlock()
 	return entitledModelsFn
+}
+
+// SetInferenceAuthProvider registers a function reporting the proxy's current
+// inference-backend auth-failure signal: a non-empty, log-safe cause string
+// (and the time it first latched) ONLY while the backend has been auth-failing
+// for several consecutive calls, empty otherwise. The heartbeat builder reports
+// it to the hub so a hive silently 401'ing on every inference call surfaces as
+// a health signal instead of merely looking quiet. Wired to the proxy's
+// InferenceAuthError; nil in tests and on spokes with no proxy, which the
+// accessors below tolerate.
+func SetInferenceAuthProvider(fn func() (errMsg string, since time.Time)) {
+	inferenceAuthMu.Lock()
+	defer inferenceAuthMu.Unlock()
+	inferenceAuthFn = fn
+}
+
+func getInferenceAuthFn() func() (errMsg string, since time.Time) {
+	inferenceAuthMu.RLock()
+	defer inferenceAuthMu.RUnlock()
+	return inferenceAuthFn
+}
+
+// InferenceAuthError returns the current inference-backend auth-failure signal
+// from the registered provider, or ("", zero) when none is registered or the
+// backend is healthy. It is the single source both heartbeat fields read (the
+// AdvisoryError fold and the dedicated inference-auth field) so they can never
+// disagree about whether a hive is auth-failing.
+func InferenceAuthError() (errMsg string, since time.Time) {
+	fn := getInferenceAuthFn()
+	if fn == nil {
+		return "", time.Time{}
+	}
+	return fn()
 }
 
 // AgentStatusPayload is a lightweight payload containing only agent metadata,
@@ -286,6 +331,17 @@ func buildAgents(statuses map[string]*agent.AgentProcess, cfg *config.Config, go
 		}
 		nextKick := computeNextKick(proc.LastKick, cadence)
 
+		// offByCadence: the agent's cadence for the CURRENT governor mode is a
+		// non-kicking value ("pause"/"off"), so the governor will never kick it
+		// even though the process itself may be perfectly healthy. This is how
+		// a hive stuck in SURGE (where surge:{scanner:pause,...}) leaves every
+		// agent alive-but-off. The dashboard surfaces this as a hollow-green
+		// dot so operators do not mistake a governor-paused agent for a running
+		// one. On-demand agents are excluded — they are intentionally not on a
+		// cadence and carry their own on-demand styling.
+		offByCadence := (cadence == cadencePause || cadence == cadenceOff) &&
+			!proc.Config.OnDemand && !onDemandSet[name]
+
 		pinnedCli := proc.PinnedCLI != "" || proc.Config.CLIPinned
 		pinnedModel := proc.PinnedModel != ""
 
@@ -334,6 +390,7 @@ func buildAgents(statuses map[string]*agent.AgentProcess, cfg *config.Config, go
 			PausedAt:      formatOptionalTime(proc.PausedAt),
 			PausedReason:  proc.PausedReason,
 			PausedTrigger: proc.PausedTrigger,
+			OffByCadence:  offByCadence,
 			CLI:           cli,
 			Model:         model,
 			Cadence:       cadence,
@@ -1421,6 +1478,17 @@ func collectSystemResources() *SystemResources {
 			}
 			cpuFraction := deltaUsec / (deltaSec * microsecondsPerSec * numCPUs)
 			res.CpuPct = roundTo(cpuFraction*pctMultiplierSysRes, 1)
+			// Clamp: on a noisy/oversubscribed host (e.g. a shared CI
+			// runner), scheduler bursts within the short cpuSampleDelayMs
+			// window can push the measured delta a hair past the
+			// theoretical 100% ceiling (observed: 100.1). CpuPct is a
+			// display/reporting value, so clamp rather than let a
+			// momentary sampling artifact read as over-100% or negative.
+			if res.CpuPct > pctMultiplierSysRes {
+				res.CpuPct = pctMultiplierSysRes
+			} else if res.CpuPct < 0 {
+				res.CpuPct = 0
+			}
 		}
 	}
 

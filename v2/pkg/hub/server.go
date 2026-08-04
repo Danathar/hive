@@ -29,8 +29,12 @@ import (
 //go:embed static/*
 var staticFS embed.FS
 
-// registryPath is the on-disk hub registry file. A var (not a const) so tests
-// can redirect it at a temp file; production keeps the default.
+// registryPath is the DEFAULT on-disk hub registry file. A var (not a const)
+// so tests can redirect it at a temp file before constructing a server;
+// production keeps the default. NewHubServer copies it into the per-instance
+// HubServer.registryPath at construction, and all production reads and writes
+// go through that field — never this global — so a saveLoop goroutine leaked
+// by one test's server can never race a later test reassigning this var.
 var registryPath = "/data/hub-registry.json"
 
 // hubBannersPath is the on-disk file where admin-sent banners are persisted so
@@ -111,29 +115,50 @@ type RegistryEntry struct {
 	// AdvisoryError is the log-safe error from the spoke's most recent failed
 	// advisory-post attempt ("" on success). When set on an app-can-write hive
 	// it trips the stale pill directly, carrying the specific cause.
-	AdvisoryError      string         `json:"advisoryError,omitempty"`
-	PrimaryRepo        string         `json:"primaryRepo"`
-	DashboardURL       string         `json:"dashboardUrl"`
-	SnapshotURL        string         `json:"snapshotUrl,omitempty"`
-	ACMMLevel          int            `json:"acmmLevel"`
-	AgentCount         int            `json:"agentCount"`
-	GovernorMode       string         `json:"governorMode"`
-	TotalTokens24h     int64          `json:"totalTokens24h"`
-	ActionableIssues   int            `json:"actionableIssues"`
-	ActionablePRs      int            `json:"actionablePRs"`
-	ContributorCount   int            `json:"contributorCount"`
-	ActiveContributors int            `json:"activeContributors"`
-	Owner              string         `json:"owner,omitempty"`
-	ClusterID          string         `json:"clusterId,omitempty"`
-	ClusterName        string         `json:"clusterName,omitempty"`
-	HiveType           string         `json:"hiveType,omitempty"`
-	IsPublic           bool           `json:"isPublic"`
-	RegisteredAt       string         `json:"registeredAt"`
-	LastHeartbeat      string         `json:"lastHeartbeat"`
-	Health             map[string]any `json:"health"`
-	Version            string         `json:"version"`
-	GitHash            string         `json:"gitHash,omitempty"`
-	GitBranch          string         `json:"gitBranch,omitempty"`
+	AdvisoryError string `json:"advisoryError,omitempty"`
+	// InferenceAuthError is the log-safe cause set when the spoke's inference
+	// backend has rejected several consecutive calls with 401 (a stale gateway
+	// key). Empty = inference auth healthy / no inference backend / old spoke,
+	// which the hub reads as no-signal. Non-empty raises the inference-auth
+	// alert (AlertTypeInferenceAuthFailed) and, on an advisory-participating
+	// hive, also trips advisory staleness immediately with this cause. Self-
+	// clears when inference recovers. Never carries key material.
+	InferenceAuthError string `json:"inferenceAuthError,omitempty"`
+	PrimaryRepo        string `json:"primaryRepo"`
+	DashboardURL       string `json:"dashboardUrl"`
+	SnapshotURL        string `json:"snapshotUrl,omitempty"`
+	ACMMLevel          int    `json:"acmmLevel"`
+	AgentCount         int    `json:"agentCount"`
+	GovernorMode       string `json:"governorMode"`
+	TotalTokens24h     int64  `json:"totalTokens24h"`
+	ActionableIssues   int    `json:"actionableIssues"`
+	ActionablePRs      int    `json:"actionablePRs"`
+	ContributorCount   int    `json:"contributorCount"`
+	ActiveContributors int    `json:"activeContributors"`
+	Owner              string `json:"owner,omitempty"`
+	ClusterID          string `json:"clusterId,omitempty"`
+	ClusterName        string `json:"clusterName,omitempty"`
+	HiveType           string `json:"hiveType,omitempty"`
+	// ProvStatus is the authoritative provisioning status copied from the hive's
+	// SaaSHive record (sh.Status) on the heartbeat path — statusAvailable
+	// ("available") for a genuinely-unclaimed pool placeholder, else a claimed
+	// status ("claimed", "assigned", …) or "" for a hive with no SaaSHive record.
+	//
+	// It exists because a CLAIMED placeholder KEEPS its "hosted-available-" ID and
+	// leftover pool org after assignment (the ID is minted at pool creation and
+	// never changes on claim), so the ID/org prefix alone OVER-counts available
+	// hives. computeFleetStats and isPlaceholderEntry both treat this field as
+	// authoritative, with the prefix used only as a fallback when it is empty, so
+	// the landing-page count and the dashboard's Assigned/Unassigned sections
+	// agree on what "available" means. A scalar status — no PII.
+	ProvStatus    string         `json:"provStatus,omitempty"`
+	IsPublic      bool           `json:"isPublic"`
+	RegisteredAt  string         `json:"registeredAt"`
+	LastHeartbeat string         `json:"lastHeartbeat"`
+	Health        map[string]any `json:"health"`
+	Version       string         `json:"version"`
+	GitHash       string         `json:"gitHash,omitempty"`
+	GitBranch     string         `json:"gitBranch,omitempty"`
 	// ImageRef is the container image this spoke's own Deployment runs, as
 	// read in-cluster by the spoke and reported over the heartbeat. The hub
 	// cannot see it any other way for firewalled/heartbeat-only spokes, and
@@ -179,6 +204,17 @@ type RegistryEntry struct {
 	GitHubAppRequired     bool         `json:"githubAppRequired,omitempty"`
 	GitHubAppPermIssue    string       `json:"githubAppPermIssue,omitempty"`
 	GitHubAppState        string       `json:"githubAppState,omitempty"`
+	// ConflictingReporters names two spoke instances that are BOTH reporting
+	// as this hive (e.g. "hive-abc… ↔ hive-def…"), set when their beats
+	// alternate. Non-empty is a critical drift signal: every field in this
+	// entry is only as trustworthy as whichever instance reported last.
+	ConflictingReporters string `json:"conflictingReporters,omitempty"`
+	// StatusFlipping is true while this hive's reported App-auth state keeps
+	// alternating between two values (status_flip.go) — the row cannot be
+	// trusted because each beat tells a different story. Works for spokes too
+	// old to report a Reporter; when both fire, duplicate-spoke names the
+	// culprit pods.
+	StatusFlipping bool `json:"statusFlipping,omitempty"`
 	// GitHubAppID is the App ID the spoke reports it is authenticating AS.
 	//
 	// Carried into the registry so the hub can SEE a spoke running the
@@ -370,6 +406,18 @@ func normalizeForgeHost(s string) (string, bool) {
 //	https://github.ibm.com/z-aiops-unite  -> ("github.ibm.com", "z-aiops-unite")
 //	github.ibm.com/z-aiops-unite          -> ("github.ibm.com", "z-aiops-unite")
 //	z-aiops-unite                         -> ("",               "z-aiops-unite")
+//	https://github.ibm.com                -> ("github.ibm.com", "")
+//	github.ibm.com                        -> ("github.ibm.com", "")
+//
+// The last two cases are the claim-path footgun this guards: a user who reads
+// "GitHub Organization" and pastes ONLY the forge host (no org segment) must
+// NOT have that hostname captured as the org. Before this, "github.ibm.com"
+// with no path fell through to the bare-name return and became org
+// "github.ibm.com" — the hive was then claimed against host-as-org, its vanity
+// URL minted from <host>-<repo>, and agents targeted github.ibm.com/<repo>.
+// Returning ("host", "") instead leaves the org empty, so the caller's
+// isValidName("") check rejects the paste with the "use the org name or its
+// URL" message rather than silently storing a broken project.
 func normalizeOrgRef(s string) (host, org string) {
 	s = strings.TrimSpace(s)
 	s = strings.TrimPrefix(s, "https://")
@@ -385,7 +433,33 @@ func normalizeOrgRef(s string) (host, org string) {
 	if len(parts) > 1 && strings.Contains(parts[0], ".") {
 		return parts[0], parts[1]
 	}
+	// A lone segment with no path that is itself a GitHub forge host is a host,
+	// not an org — the user pasted the forge URL into the org field and left the
+	// real org out. Recognise "github.<something>" (github.com, github.ibm.com,
+	// github.cisco.com, …) so the hostname is never mistaken for the org. A
+	// legitimate org that merely contains a dot ("my.org") does not start with
+	// "github." and is untouched.
+	if len(parts) == 1 && looksLikeGitHubForgeHost(parts[0]) {
+		return parts[0], ""
+	}
 	return "", parts[0]
+}
+
+// looksLikeGitHubForgeHost reports whether a bare label is a GitHub forge
+// hostname (github.com or a GitHub Enterprise host like github.ibm.com) rather
+// than an org name. GitHub Enterprise hosts are conventionally "github.<org
+// domain>", and the public host is "github.com"; both start with "github." and
+// carry at least two dot-separated labels. This is deliberately narrow: it must
+// never reclassify a real org that happens to contain a dot, so it keys on the
+// "github." prefix that only a forge host carries. Case-insensitive.
+func looksLikeGitHubForgeHost(label string) bool {
+	l := strings.ToLower(strings.TrimSpace(label))
+	if !strings.HasPrefix(l, "github.") {
+		return false
+	}
+	// "github." alone (a trailing-dot typo) is not a host; require a non-empty
+	// domain after the prefix, i.e. at least two labels total.
+	return len(strings.Split(l, ".")) >= minForgeHostLabels && !strings.HasSuffix(l, ".")
 }
 
 // normalizeRepoRef strips a GitHub URL or "org/repo" prefix down to the bare
@@ -521,11 +595,18 @@ type HeartbeatHealthEntry struct {
 }
 
 type HubServer struct {
-	mux          *http.ServeMux
-	registry     Registry
-	mu           sync.RWMutex
-	logger       *slog.Logger
-	saveCh       chan struct{}
+	mux      *http.ServeMux
+	registry Registry
+	mu       sync.RWMutex
+	logger   *slog.Logger
+	saveCh   chan struct{}
+	// registryPath is this server's on-disk registry file, captured from the
+	// package-level default at construction and immutable afterwards. It is a
+	// per-instance field (not a use-time read of the global) so the saveLoop
+	// goroutine — which outlives test servers, since nothing closes saveCh —
+	// only ever sees its own path and cannot race a test redirecting the
+	// global for the next server (the TestLoadRegistry -race failure).
+	registryPath string
 	hubGitHash   string
 	hubGitBranch string
 	hubSecret    string
@@ -589,6 +670,23 @@ type HubServer struct {
 	// the time after which kubectl may be retried.
 	clusterUnreachableUntil map[string]time.Time
 	clusterUnreachableMu    sync.Mutex
+	// reporterSeen tracks which spoke instance (payload.Reporter, the pod
+	// name) last reported as each hive, to catch two instances alternating
+	// under one hive_id. Guarded by reporterMu, not s.mu — it is touched on
+	// every beat and must never contend with the registry lock.
+	reporterSeen map[string]*reporterFlipState
+	reporterMu   sync.Mutex
+	// statusFlipSeen tracks each hive's reported App-auth state to catch
+	// oscillation (status_flip.go). Same shape as reporterSeen, separate
+	// mutex for the same reason: touched on every beat.
+	statusFlipSeen map[string]*reporterFlipState
+	statusFlipMu   sync.Mutex
+	// appKeyDelivery tracks, per hive, consecutive GitHub App key deliveries
+	// that the spoke never reflected, so a broken reporter cannot pull key
+	// material onto the wire every beat forever (app_key_backoff.go, #2496).
+	// Own mutex for the reporterSeen reason: touched on every beat.
+	appKeyDelivery   map[string]*appKeyDeliveryState
+	appKeyDeliveryMu sync.Mutex
 	// heartbeatSwitchTag tracks hives that should switch their deployment
 	// image to a specific tag (branch switch) via heartbeat, for clusters
 	// the hub can't reach over kubectl. Cleared once the spoke reports it.
@@ -765,6 +863,7 @@ func NewHubServer(port int, logger *slog.Logger, gitHash, gitBranch string) *Hub
 		mux:                     http.NewServeMux(),
 		logger:                  logger,
 		saveCh:                  make(chan struct{}, 1),
+		registryPath:            registryPath,
 		hubGitHash:              gitHash,
 		hubGitBranch:            gitBranch,
 		hubSecret:               secret,
@@ -785,6 +884,10 @@ func NewHubServer(port int, logger *slog.Logger, gitHash, gitBranch string) *Hub
 	}
 
 	s.loadRegistry()
+	// Rebuild the in-memory upgrade-delivery map from the durable registry
+	// BEFORE the server takes its first heartbeat, so a hub restart can never
+	// orphan an armed upgrade (#2476).
+	s.recoverArmedUpgrades()
 	s.loadHubBanners()
 	s.timeline.load()
 	if err := s.journey.load(time.Now()); err != nil {
@@ -960,14 +1063,24 @@ func (s *HubServer) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		AIAuthor:          sanitizeField(payload.AIAuthor),
 		AIAuthorEffective: sanitizeField(payload.AIAuthorEffective),
 		StartedAt:         sanitizeField(payload.StartedAt),
-		// Advisory-staleness signal. Both are sanitized like every other
-		// spoke-reported string; an empty AdvisoryLastPostedAt is preserved as
-		// empty so the render/gate reads it as UNKNOWN rather than stale.
+		// Duplicate-instance detection. noteReporter returns "" until two
+		// distinct reporters have ALTERNATED (A→B→A), so a normal rollout
+		// (A→B, B stays) never trips it.
+		ConflictingReporters: s.noteReporter(payload.HiveID, sanitizeField(payload.Reporter)),
+		// Advisory-staleness signal. The timestamp is an identifier-shaped
+		// string; the error is prose (a sentence shown to a human), so it takes
+		// the prose sanitizer — html.EscapeString here plus the dashboard's own
+		// esc() double-escaped it into "&amp;amp;" artifacts. An empty
+		// AdvisoryLastPostedAt is preserved as empty so the render/gate reads
+		// it as UNKNOWN rather than stale.
 		AdvisoryLastPostedAt: sanitizeField(payload.AdvisoryLastPostedAt),
-		AdvisoryError:        sanitizeField(payload.AdvisoryError),
-		DashboardURL:         payload.DashboardURL,
-		SnapshotURL:          payload.SnapshotURL,
-		ACMMLevel:            clampInt(payload.ACMMLevel, 0, 6),
+		AdvisoryError:        sanitizeProseField(payload.AdvisoryError),
+		// Inference-backend auth-failure signal. Sanitized like every other
+		// spoke-reported string; empty is preserved as empty (no signal).
+		InferenceAuthError: sanitizeField(payload.InferenceAuthError),
+		DashboardURL:       payload.DashboardURL,
+		SnapshotURL:        payload.SnapshotURL,
+		ACMMLevel:          clampInt(payload.ACMMLevel, 0, 6),
 		AgentCount: func() int {
 			count := 0
 			for _, a := range payload.Agents {
@@ -1033,14 +1146,21 @@ func (s *HubServer) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 			for i := range payload.Leaderboard {
 				payload.Leaderboard[i].HiveName = hiveName
 				payload.Leaderboard[i].GitHubUsername = sanitizeHeartbeatField(payload.Leaderboard[i].GitHubUsername)
-				payload.Leaderboard[i].CurrentTask = sanitizeHeartbeatField(payload.Leaderboard[i].CurrentTask)
+				// A task title is prose ("Fix the drift hover"), not an
+				// identifier — the strict sanitizer would strip its spaces.
+				payload.Leaderboard[i].CurrentTask = sanitizeProseField(payload.Leaderboard[i].CurrentTask)
 			}
 			return payload.Leaderboard
 		}(),
-		Online:                  true,
-		GitHubAppRequired:       payload.GitHubAppRequired,
-		GitHubAppPermIssue:      sanitizeHeartbeatField(payload.GitHubAppPermIssue),
+		Online:            true,
+		GitHubAppRequired: payload.GitHubAppRequired,
+		// GitHubAppPermIssue is a full sentence the drift hover renders
+		// verbatim ("The GitHub App is configured but has no installation.
+		// Install the app on your org to enable agents.") — the strict
+		// identifier sanitizer stripped every space out of it.
+		GitHubAppPermIssue:      sanitizeProseField(payload.GitHubAppPermIssue),
 		GitHubAppState:          sanitizeHeartbeatField(payload.GitHubAppState),
+		StatusFlipping:          s.noteStatusFlip(payload.HiveID, sanitizeHeartbeatField(payload.GitHubAppState)),
 		GitHubAppID:             payload.GitHubAppID,
 		GitHubAppSlug:           payload.GitHubAppSlug,
 		GitHubInstallationID:    payload.GitHubInstallationID,
@@ -1071,10 +1191,15 @@ func (s *HubServer) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		AgentsWithModel: clampFleetCount(payload.AgentsWithModel),
 	}
 
-	// Populate ClusterID from SaaS hive record, heartbeat payload, or default.
+	// Populate ClusterID and the authoritative ProvStatus from the SaaS hive
+	// record (a single load reused for both). ProvStatus is what lets
+	// computeFleetStats tell a genuinely-unclaimed placeholder (statusAvailable)
+	// from a CLAIMED one that still carries the "hosted-available-" ID — the ID
+	// prefix alone over-counts available hives because it never changes on claim.
 	clusterID := ""
 	if sh := loadSaaSHive(payload.HiveID); sh != nil {
 		clusterID = sh.ClusterID
+		entry.ProvStatus = sh.Status
 	}
 	if clusterID == "" && payload.ClusterID != "" {
 		clusterID = sanitizeHeartbeatField(payload.ClusterID)
@@ -1099,7 +1224,8 @@ func (s *HubServer) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if payload.UpgradeFailed {
 		entry.Upgrading = false
 		entry.UpgradeFailed = true
-		entry.UpgradeError = sanitizeHeartbeatField(payload.UpgradeError)
+		// An upgrade failure cause is a sentence, not an identifier.
+		entry.UpgradeError = sanitizeProseField(payload.UpgradeError)
 		entry.UpgradeFailedAt = time.Now()
 		s.mu.Lock()
 		delete(s.heartbeatUpgrade, payload.HiveID)
@@ -1483,6 +1609,11 @@ func (s *HubServer) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		)
 	}
 
+	if s.restartSpokeForHeartbeat(payload.HiveID) {
+		resp.RestartSpoke = true
+		s.logger.Info("heartbeat: delivering spoke restart", "hive_id", payload.HiveID, "reporter", payload.Reporter)
+	}
+
 	if ghCfg := s.pendingAppIdentityForHeartbeat(&payload); ghCfg != nil {
 		resp.GitHubAppConfig = ghCfg
 		s.logger.Info("heartbeat: delivering github app config to spoke",
@@ -1812,11 +1943,20 @@ func (s *HubServer) handleStats(w http.ResponseWriter, r *http.Request) {
 // hive, so the numbers are a true fleet total (every managed repo of every
 // live spoke) rather than a single org's figures.
 type FleetStats struct {
-	ReposManaged int    `json:"repos_managed"`
-	PRsMerged    int    `json:"prs_merged"`
-	PRsRejected  int    `json:"prs_rejected"`
-	CVEsClosed   int    `json:"cves_closed"`
-	Hives        int    `json:"hives"`
+	ReposManaged int `json:"repos_managed"`
+	PRsMerged    int `json:"prs_merged"`
+	PRsRejected  int `json:"prs_rejected"`
+	CVEsClosed   int `json:"cves_closed"`
+	// Hives is the number of ONLINE, ASSIGNED hives fleet-wide (the loop below
+	// skips offline and unassigned ones) — i.e. "hives up". TotalHives is every
+	// ASSIGNED hive, online or not. The landing page shows "hives up / total"
+	// (Hives/TotalHives) so the ratio reflects real fleet uptime rather than the
+	// public-list size, and unclaimed inventory doesn't inflate it. AvailableHives
+	// is the count of UNASSIGNED placeholders a user could still request. All
+	// three are anonymous scalars — no name/org/repo/owner/URL is derivable.
+	Hives          int `json:"hives"`
+	TotalHives     int `json:"total_hives"`
+	AvailableHives int `json:"available_hives"`
 	// AgentsRunning and Contributors are fleet-wide ANONYMOUS counts, summed
 	// over ALL online hives rather than only the public ones.
 	//
@@ -1826,9 +1966,9 @@ type FleetStats struct {
 	// public). Computing them here counts every hive while disclosing none: like
 	// every other field on this struct they are scalars, and no name, org, repo,
 	// owner or URL is derivable from them.
-	AgentsRunning int `json:"agents_running"`
-	Contributors  int `json:"contributors"`
-	UpdatedAt    string `json:"updated_at"`
+	AgentsRunning int    `json:"agents_running"`
+	Contributors  int    `json:"contributors"`
+	UpdatedAt     string `json:"updated_at"`
 	// Reporting is the number of eligible hives that actually contributed a
 	// fresh count to the totals above; Eligible is how many were considered.
 	// Without this pair the totals are indistinguishable from a healthy fleet:
@@ -1866,6 +2006,29 @@ type FleetStats struct {
 // rather than freezing a stale figure on the public page forever.
 const fleetStatsMaxAge = 6 * time.Hour
 
+// isAvailableRegistryEntry reports whether a registry entry is a genuinely
+// unclaimed pool placeholder — the "available"/"unassigned" bucket on the
+// landing page and dashboard. It mirrors the frontend's isPlaceholderHive and
+// drift.go's isPlaceholderEntry EXACTLY:
+//
+//	provStatus == "available"  OR  org has the "available-" prefix
+//
+// The "hosted-available-" ID prefix is deliberately NOT consulted. A claimed
+// placeholder KEEPS that ID forever (it is minted at pool-creation time and
+// never rewritten on assignment), so an ID-prefix fallback counted every
+// claimed placeholder as still available — 38 reported vs the true 17. The
+// claim paths rewrite the org OFF the "available-" prefix and now set an
+// explicit statusAssigned, so both remaining signals flip correctly on claim.
+// Keeping this in lockstep with the JS and drift.go is what lets the landing
+// tiles, the dashboard's Assigned/Unassigned split, and server-side drift never
+// disagree about what is claimed.
+func isAvailableRegistryEntry(h RegistryEntry) bool {
+	if h.ProvStatus == statusAvailable {
+		return true
+	}
+	return strings.HasPrefix(h.Org, placeholderOrgPrefix)
+}
+
 // computeFleetStats aggregates fleet-wide contribution counts across public,
 // non-stale hives. A hive that never reported a given count (nil pointer) is
 // skipped for that count — the aggregate reflects only hives with real data,
@@ -1878,7 +2041,39 @@ func (s *HubServer) computeFleetStats() FleetStats {
 	var fs FleetStats
 	repoSet := make(map[string]struct{})
 	for _, h := range s.registry.Hives {
-		// ALL hives count, public and private alike.
+		// An UNASSIGNED hive is a pre-provisioned placeholder nobody has claimed
+		// yet. It is counted as AVAILABLE and excluded from the assigned totals
+		// below: "hives up / total" and the contribution sums are about the
+		// working fleet, not idle inventory a user could still request.
+		//
+		// A placeholder is NOT detectable by an empty Org: an unclaimed slot
+		// keeps its "hosted-available-" ID prefix and frequently a leftover pool
+		// org (live example: id="hosted-available-oke-01-placeholder-bb95",
+		// org="TradingAsBuddies"). Testing Org=="" therefore matched zero
+		// placeholders AND counted every one as assigned.
+		//
+		// The ID/org PREFIX alone over-counts the other way: a CLAIMED placeholder
+		// KEEPS its "hosted-available-" ID and pool org after assignment (the ID is
+		// minted at pool creation and never changes on claim). ~21 of the 38
+		// "hosted-available-" hives are actually claimed, so the prefix reported 38
+		// "available" when the truth is 17 unclaimed / 33 assigned.
+		//
+		// Detect it the way the rest of the codebase does — see isPlaceholderEntry
+		// in drift.go and the dashboard's Assigned/Unassigned sections: the
+		// authoritative signal is ProvStatus==statusAvailable, with the
+		// "hosted-available-" ID prefix / "available-" org prefix used ONLY as a
+		// fallback when ProvStatus is unknown (empty — a hive with no SaaSHive
+		// record or one that predates the field). A claimed placeholder therefore
+		// counts as ASSIGNED, not available.
+		if isAvailableRegistryEntry(h) {
+			fs.AvailableHives++
+			continue
+		}
+		// TotalHives is every ASSIGNED hive (online or not) — the denominator of
+		// "hives up / total". Counted before the online skip below so a down hive
+		// still contributes to the total.
+		fs.TotalHives++
+		// ALL assigned hives count, public and private alike.
 		//
 		// These totals are ANONYMOUS SUMS: every field on FleetStats is a
 		// scalar — counts, a timestamp, booleans. No name, org, repo, owner or
@@ -2110,6 +2305,20 @@ func (s *HubServer) removeRegistryEntry(id, by string) {
 	s.logger.Info("audit: registry entry removed", "id", id, "by", by)
 }
 
+// regPath returns this server's registry file path: the per-instance field
+// captured at construction, or — for servers built directly in tests as bare
+// &HubServer{...} literals without one — the package-level default. The
+// fallback cannot reintroduce the registryPath data race: only NewHubServer
+// starts a saveLoop goroutine (the sole reader that outlives its test), and
+// NewHubServer always sets the field, so the global is only ever read from a
+// test's own goroutine, synchronously with any test redirecting it.
+func (s *HubServer) regPath() string {
+	if s.registryPath != "" {
+		return s.registryPath
+	}
+	return registryPath
+}
+
 // saveRegistryNow marshals and writes the registry to disk immediately, via a
 // temp file plus atomic rename so a crash mid-write cannot truncate it.
 func (s *HubServer) saveRegistryNow() error {
@@ -2119,11 +2328,12 @@ func (s *HubServer) saveRegistryNow() error {
 	if err != nil {
 		return fmt.Errorf("marshal hub registry: %w", err)
 	}
-	tmpPath := registryPath + ".tmp"
+	path := s.regPath()
+	tmpPath := path + ".tmp"
 	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
 		return fmt.Errorf("write hub registry: %w", err)
 	}
-	if err := os.Rename(tmpPath, registryPath); err != nil {
+	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("rename hub registry: %w", err)
 	}
 	return nil
@@ -2281,7 +2491,7 @@ func (s *HubServer) serveStatic(path string) http.HandlerFunc {
 }
 
 func (s *HubServer) loadRegistry() {
-	data, err := os.ReadFile(registryPath)
+	data, err := os.ReadFile(s.regPath())
 	if err != nil {
 		s.logger.Info("no existing hub registry, starting fresh")
 		return
@@ -2290,6 +2500,48 @@ func (s *HubServer) loadRegistry() {
 		s.logger.Warn("failed to parse hub registry", "error", err)
 	} else {
 		s.logger.Info("hub registry loaded", "hives", len(s.registry.Hives))
+	}
+}
+
+// recoverArmedUpgrades rebuilds s.heartbeatUpgrade — the in-memory map that
+// actually DELIVERS upgrade instructions on each heartbeat — from the durable
+// registry latch (Upgrading/UpgradeTarget), which survives a hub restart.
+//
+// Without this, a hub restart between arming an upgrade (handleUpgradeHive,
+// bulk upgrade, auto-upgrade fallback) and its completion silently dropped the
+// instruction: the registry kept saying "Upgrading" while the hub sent the
+// spoke nothing, forever, because the map died with the old process (#2476 —
+// four hives sat latched 15+ minutes with zero instructions after a hub
+// self-upgrade). The heartbeat path clears both the map entry and the registry
+// latch when the spoke reports the target SHA, so re-arming here is idempotent
+// and self-terminating.
+//
+// Called from NewHubServer immediately after loadRegistry; takes s.mu like
+// every other heartbeatUpgrade writer so it is also safe to invoke later.
+func (s *HubServer) recoverArmedUpgrades() {
+	type armed struct{ id, target string }
+	var recovered []armed
+	s.mu.Lock()
+	if s.heartbeatUpgrade == nil {
+		s.heartbeatUpgrade = make(map[string]string)
+	}
+	for i := range s.registry.Hives {
+		h := &s.registry.Hives[i]
+		if !h.Upgrading || h.UpgradeTarget == "" {
+			continue
+		}
+		// A recorded terminal failure must stay terminal — re-arming it would
+		// resurrect an upgrade the orphan sweep already gave up on and reported.
+		if h.UpgradeFailed {
+			continue
+		}
+		s.heartbeatUpgrade[h.ID] = h.UpgradeTarget
+		recovered = append(recovered, armed{id: h.ID, target: h.UpgradeTarget})
+	}
+	s.mu.Unlock()
+	for _, a := range recovered {
+		s.logger.Info("recovered armed upgrade from registry after restart",
+			"hive_id", a.id, "target", a.target)
 	}
 }
 
@@ -2310,12 +2562,12 @@ func (s *HubServer) saveLoop() {
 			s.logger.Warn("hub registry marshal failed", "error", err)
 			continue
 		}
-		tmpPath := registryPath + ".tmp"
+		tmpPath := s.registryPath + ".tmp"
 		if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
 			s.logger.Warn("hub registry save failed", "path", tmpPath, "error", err)
 			continue
 		}
-		if err := os.Rename(tmpPath, registryPath); err != nil {
+		if err := os.Rename(tmpPath, s.registryPath); err != nil {
 			s.logger.Warn("hub registry rename failed", "error", err)
 		}
 	}
@@ -2480,6 +2732,60 @@ func sanitizeHeartbeatField(s string) string {
 		}
 	}
 	return b.String()
+}
+
+// maxProseFieldRunes bounds a sanitized prose field. Prose fields carry full
+// sentences (an App-permission diagnosis, an upgrade failure cause), so the cap
+// is generous — but a hostile or broken spoke must still not be able to bloat
+// the registry with megabytes of "detail".
+const maxProseFieldRunes = 500
+
+// sanitizeProseField sanitizes a spoke-reported HUMAN-READABLE string — a
+// sentence the dashboard renders verbatim to a person, such as
+// GitHubAppPermIssue, UpgradeError, AdvisoryError, a leaderboard task title, or
+// a health-check detail.
+//
+// This is DELIBERATELY separate from sanitizeHeartbeatField. That allowlist is
+// for identifiers (hive IDs, branches, owners, agent states) where a space is
+// never legal — but applied to prose it deletes every space and renders
+// "The GitHub App is configured but has no installation." as
+// "TheGitHubAppisconfiguredbuthasnoinstallation.", which is exactly the
+// mangling this variant exists to end. Identifiers keep the strict sanitizer;
+// only fields whose value is a sentence go through this one.
+//
+// What it keeps: letters, digits, spaces, and normal punctuation — the text
+// stays a readable sentence.
+//
+// What it still neutralizes:
+//   - '<', '>' and '&' are dropped, so no tag and no entity can ever be formed
+//     even if a future render path forgets to escape;
+//   - backticks are dropped (they are fenced-code/template metacharacters in
+//     every surface this text could be pasted into);
+//   - newlines, carriage returns and tabs become single spaces (these fields
+//     are one-line UI strings and log fields);
+//   - all other control characters (including ESC, so ANSI sequences cannot
+//     ride along) are dropped;
+//   - runs of whitespace collapse to one space and the result is trimmed;
+//   - length is capped at maxProseFieldRunes.
+func sanitizeProseField(s string) string {
+	var b strings.Builder
+	for _, c := range s {
+		switch {
+		case c == '\n' || c == '\r' || c == '\t':
+			b.WriteRune(' ')
+		case c < 0x20 || c == 0x7f:
+			// Other control characters (incl. ESC): dropped entirely.
+		case c == '<' || c == '>' || c == '&' || c == '`':
+			// HTML/markup-dangerous: dropped.
+		default:
+			b.WriteRune(c)
+		}
+	}
+	out := strings.Join(strings.Fields(b.String()), " ")
+	if runes := []rune(out); len(runes) > maxProseFieldRunes {
+		out = string(runes[:maxProseFieldRunes])
+	}
+	return out
 }
 
 // sanitizeImageRef sanitizes a container image reference reported by a spoke.

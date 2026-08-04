@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kubestellar/hive/v2/pkg/config"
@@ -70,6 +71,13 @@ const (
 	// app-missing/app-perm-issue so operator work is never filed as an
 	// owner-facing adoption problem.
 	DriftKindAppCredsOperator = "app-creds-operator"
+	// DriftKindDuplicateSpoke: two spoke instances are alternating reports as
+	// this one hive, so every registry field flips with whichever spoke
+	// reported last.
+	DriftKindDuplicateSpoke = "duplicate-spoke"
+	// DriftKindStatusFlipping: the hive's reported status keeps alternating
+	// between two values on a heartbeat cadence — the row cannot be trusted.
+	DriftKindStatusFlipping = "status-flipping"
 	// DriftKindAppIDPlaceholder marks a hive still authenticating as the
 	// placeholder App sentinel (config.PlaceholderAppID). Distinct from
 	// app-creds-operator because the fault is the app_id itself, not the key:
@@ -101,6 +109,12 @@ type DriftSignal struct {
 	Kind     string        `json:"kind"`
 	Severity DriftSeverity `json:"severity"`
 	Reason   string        `json:"reason"`
+	// FirstSeen is when the hub first observed this (hive, kind) signal,
+	// RFC3339. It is stable while the signal persists across recomputes and
+	// resets only after the signal clears, so the hover can say "since 3:42 PM"
+	// instead of drifting to "now" on every beat. Empty on reports the tracker
+	// has not stamped (defensive: a caller that builds a DriftReport directly).
+	FirstSeen string `json:"firstSeen,omitempty"`
 }
 
 // DriftReport is the per-hive drift result attached to a My Hives row.
@@ -349,11 +363,18 @@ func healthFailingChecks(health map[string]any) []string {
 		if status == "" || status == "pass" || status == "skip" {
 			continue
 		}
+		// Health rides the heartbeat as a free-form map and is stored
+		// unsanitized, so the strings composed into a hub-rendered reason are
+		// neutralized here — with the PROSE sanitizer, because a check detail
+		// is a sentence and the identifier sanitizer would strip its spaces.
+		status = sanitizeProseField(status)
 		name, _ := ck["name"].(string)
+		name = sanitizeProseField(name)
 		if name == "" {
 			name = "unnamed check"
 		}
 		detail, _ := ck["detail"].(string)
+		detail = sanitizeProseField(detail)
 		if detail != "" {
 			out = append(out, fmt.Sprintf("%s (%s: %s)", name, status, detail))
 			continue
@@ -495,6 +516,27 @@ func computeDrift(h MyHiveEntry, norm fleetNorm, latestSHAs map[string]string, n
 				"github_app_id; the hive owner cannot fix this and should not be asked to")
 	}
 
+	// Two instances alternating as one hive poisons every other signal in
+	// this entry — each drift row below reflects whichever instance reported
+	// last, and the dashboard flips with them. Raised first and always (even
+	// on a placeholder): the fix is shedding the stale instance, and the hub
+	// has a delivered path for that (Restart Spoke arms RolloutRestartSelf on
+	// every instance via the heartbeat).
+	if h.ConflictingReporters != "" {
+		add(DriftKindDuplicateSpoke, DriftCritical,
+			"two spoke instances are reporting as this hive ("+h.ConflictingReporters+
+				") and their states alternate every beat — use Restart Spoke to shed the stale instance")
+	} else if h.StatusFlipping {
+		// Suppressed when duplicate-spoke already fired: that signal carries
+		// the same fact PLUS the culprit pod names, and two rows for one
+		// oscillation would double-count the hive in the summary strip.
+		add(DriftKindStatusFlipping, DriftWarn,
+			"reported status keeps flipping between two values on a heartbeat cadence — "+
+				"usually two spoke instances alternating as this hive (a spoke too old to report "+
+				"its pod name cannot be told apart) or an auth check oscillating; "+
+				"use Restart Spoke, or upgrade the spoke so the instances identify themselves")
+	}
+
 	// A placeholder legitimately has no App, no agents and ACMM 0. Flagging it
 	// for those would make the pool dominate the exceptions summary and hide
 	// the hives a human can actually fix.
@@ -613,6 +655,69 @@ func annotateDrift(hives []MyHiveEntry, latestSHAs map[string]string, now time.T
 	}
 	norm := computeFleetNorm(hives)
 	for i := range hives {
-		hives[i].Drift = computeDrift(hives[i], norm, latestSHAs, now)
+		report := computeDrift(hives[i], norm, latestSHAs, now)
+		stampDriftFirstSeen(hives[i].ID, &report, now)
+		hives[i].Drift = report
+	}
+}
+
+// driftFirstSeen tracks when each (hive, kind) drift signal was first observed,
+// keyed by driftFirstSeenKey. Guarded by driftFirstSeenMu: annotateDrift runs
+// on every My Hives request, and two requests may recompute concurrently.
+//
+// The map is IN-MEMORY ONLY — a hub restart re-baselines every "since" to the
+// first recompute after boot. That is an accepted trade: the timestamp is a
+// triage aid ("did this start before or after my change?"), not an audit
+// record, and persisting it would put a disk write on the hottest read path.
+var (
+	driftFirstSeenMu sync.Mutex
+	driftFirstSeen   = map[string]time.Time{}
+)
+
+// driftFirstSeenKeySep joins hive ID and signal kind into one map key. NUL can
+// appear in neither side (hive IDs are isValidName-validated, kinds are
+// compile-time constants), so the key can never be ambiguous.
+const driftFirstSeenKeySep = "\x00"
+
+func driftFirstSeenKey(hiveID, kind string) string {
+	return hiveID + driftFirstSeenKeySep + kind
+}
+
+// stampDriftFirstSeen annotates each signal in report with the time this
+// (hive, kind) was FIRST observed, keeping that instant stable across
+// recomputes for as long as the signal stays present. Entries for kinds that
+// no longer fire on this hive are cleared, so a signal that goes away and
+// later returns gets a fresh first-seen rather than resurrecting the old one.
+//
+// Keyed by kind, not by reason: a reason legitimately mutates while the
+// condition persists ("No heartbeat for 3 min" becomes "... for 4 min"), and
+// re-stamping on every wording change is exactly the drift-to-now this
+// tracker exists to prevent. Multiple same-kind signals (identity-split can
+// raise several) share one first-seen, which is the honest reading: the hub
+// first saw that KIND of trouble then.
+func stampDriftFirstSeen(hiveID string, report *DriftReport, now time.Time) {
+	if hiveID == "" {
+		return
+	}
+	driftFirstSeenMu.Lock()
+	defer driftFirstSeenMu.Unlock()
+	present := make(map[string]bool, len(report.Signals))
+	for i := range report.Signals {
+		kind := report.Signals[i].Kind
+		present[kind] = true
+		key := driftFirstSeenKey(hiveID, kind)
+		first, ok := driftFirstSeen[key]
+		if !ok {
+			first = now
+			driftFirstSeen[key] = now
+		}
+		report.Signals[i].FirstSeen = first.UTC().Format(time.RFC3339)
+	}
+	// Clear cleared signals so a future recurrence is dated to its recurrence.
+	prefix := hiveID + driftFirstSeenKeySep
+	for key := range driftFirstSeen {
+		if strings.HasPrefix(key, prefix) && !present[strings.TrimPrefix(key, prefix)] {
+			delete(driftFirstSeen, key)
+		}
 	}
 }

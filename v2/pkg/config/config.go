@@ -827,6 +827,35 @@ func (g GovernorConfig) ResolveGateway(name string) *GatewayConfig {
 	return nil
 }
 
+// ResolveLiteLLMInferenceKey resolves the API key an agent should present when
+// its inference routes through the legacy "litellm" backend. It MUST agree with
+// the key the entitlement/probe path validates (dashboard gateways.go/cost.go/
+// openrouter.go, which use ResolveGateway(name).ResolveAPIKey()) — otherwise a
+// key rotation performed via the Model Gateways tab updates only the gateway key
+// file, entitlement passes, but inference keeps sending the stale legacy key and
+// 401s.
+//
+// Resolution rule:
+//   - When an EXPLICIT `gateways:` block is configured, resolve the key from the
+//     gateway matching this backend (its own api_key_file — the file the Model
+//     Gateways tab writes), exactly as entitlement does. One source, no drift.
+//   - When NO explicit gateways are configured, fall back to the legacy
+//     Governor.LiteLLM resolver, which consults the k8s Secret mount and PVC copy
+//     in addition to api_key_file. The synthetic gateway from ResolvedGateways
+//     lacks that multi-location fallback, so we must not use it here — preserving
+//     today's behavior for classic single-`litellm:`-block hives.
+//
+// backend is the agent's backend name (typically "litellm"); it selects which
+// explicit gateway to consult.
+func (g GovernorConfig) ResolveLiteLLMInferenceKey(backend string) string {
+	if len(g.Gateways) > 0 {
+		if gw := g.ResolveGateway(backend); gw != nil {
+			return gw.ResolveAPIKey()
+		}
+	}
+	return g.LiteLLM.ResolveAPIKey()
+}
+
 // ResolveAPIKey returns this gateway's key value, preferring the env var when
 // set and falling back to the file. Returns "" when neither yields a value
 // (a keyless endpoint). Mirrors LiteLLMConfig key resolution.
@@ -1816,6 +1845,17 @@ func (g GitHubConfig) HasUsableApp() bool {
 	return g.HasApp() && g.InstallationID != 0
 }
 
+// ConfiguredButUninstalled reports the half-configured state that must NEVER
+// read as healthy: a real App is named but there is no installation to mint
+// tokens against. Every token this hive will ever hold is App-minted, so this
+// state means auth is a countdown — any client still working is riding a
+// cached token that cannot be renewed. Callers use this to raise the install
+// banner and fail github_auth from CONFIG truth, not from whether a residual
+// token still breathes.
+func (g GitHubConfig) ConfiguredButUninstalled() bool {
+	return g.HasApp() && g.InstallationID == 0
+}
+
 // ResolvedAPIURL returns the configured API URL or the default for github.com.
 func (g GitHubConfig) ResolvedAPIURL() string {
 	if g.APIURL != "" {
@@ -2073,19 +2113,25 @@ type HubConfig struct {
 	// filter regardless of mode (names kept for backward compatibility with
 	// existing on-disk config; the mode decides allow vs deny). ContributeAllowLabels
 	// is retained only for one-time migration into DenyLabels+LabelsMode.
-	ContributeTitlesMode          string              `yaml:"contribute_titles_mode,omitempty"`
-	ContributeAuthorsMode         string              `yaml:"contribute_authors_mode,omitempty"`
-	ContributeLabelsMode          string              `yaml:"contribute_labels_mode,omitempty"`
-	ContributeAllowLabels         []string            `yaml:"contribute_allow_labels"`
-	ContributeDenyLabels          []string            `yaml:"contribute_deny_labels"`
-	ContributeDenyTitles          []string            `yaml:"contribute_deny_titles"`
-	ContributeDenyAuthors         []string            `yaml:"contribute_deny_authors"`
-	ContributeAllowModels         []string            `yaml:"contribute_allow_models"`
-	ContributeRejectUnknownModels bool                `yaml:"contribute_reject_unknown_models"`
-	DisabledRepos                 []string            `yaml:"disabled_repos"`
-	DisabledTiers                 []string            `yaml:"disabled_tiers"`
-	TierLimits                    map[string]TierRate `yaml:"tier_limits"`
-	SnapshotIntervalMin           int                 `yaml:"snapshot_interval_min"`
+	ContributeTitlesMode          string   `yaml:"contribute_titles_mode,omitempty"`
+	ContributeAuthorsMode         string   `yaml:"contribute_authors_mode,omitempty"`
+	ContributeLabelsMode          string   `yaml:"contribute_labels_mode,omitempty"`
+	ContributeAllowLabels         []string `yaml:"contribute_allow_labels"`
+	ContributeDenyLabels          []string `yaml:"contribute_deny_labels"`
+	ContributeDenyTitles          []string `yaml:"contribute_deny_titles"`
+	ContributeDenyAuthors         []string `yaml:"contribute_deny_authors"`
+	ContributeAllowModels         []string `yaml:"contribute_allow_models"`
+	ContributeRejectUnknownModels bool     `yaml:"contribute_reject_unknown_models"`
+	// ContributeSkipAssignedToOthers, when true, makes the /contribute queue
+	// skip any issue that is already assigned to someone OTHER than the
+	// contributor requesting work. An issue assigned to the contributor
+	// themselves (or unassigned) is still eligible. Default false preserves the
+	// prior behavior of handing out issues regardless of assignment (#2357).
+	ContributeSkipAssignedToOthers bool                `yaml:"contribute_skip_assigned_to_others"`
+	DisabledRepos                  []string            `yaml:"disabled_repos"`
+	DisabledTiers                  []string            `yaml:"disabled_tiers"`
+	TierLimits                     map[string]TierRate `yaml:"tier_limits"`
+	SnapshotIntervalMin            int                 `yaml:"snapshot_interval_min"`
 }
 
 type TierRate struct {
@@ -2300,15 +2346,32 @@ func LoadWithDashboardOverlay(path string) (*Config, error) {
 	if err := yaml.Unmarshal([]byte(expandEnvVars(string(data))), &overlay); err != nil {
 		return cfg, nil // malformed overlay: fall back to seed, don't fail the reload
 	}
+	// Tombstones live in the dashboard overlay because that is the only agent
+	// source the dashboard can write. Adopt them BEFORE the fullness guard below
+	// so a short/empty overlay (one that has no agents yet, or only carries the
+	// removed_agents list) still yields the tombstone. Previously this ran AFTER
+	// the guard, so on a reload the guard's early return dropped RemovedAgents to
+	// empty; the ~2-min saver then rewrote every layer tombstone-free and the
+	// deleted agents reappeared on an interval (#2439). Merge already skips and
+	// prunes tombstoned agents, so adopting them early is safe even when we bail.
+	if len(overlay.RemovedAgents) > 0 {
+		cfg.RemovedAgents = overlay.RemovedAgents
+		cfg.PruneRemovedAgents()
+		// Observability (#2439): this runs on boot AND on every ~2-min config reload,
+		// so keep it at DEBUG. It confirms the reload adopted the overlay's tombstones
+		// BEFORE the fullness guard below — the exact ordering whose absence let the
+		// deleted agents reappear on an interval.
+		slog.Default().Debug("reload: adopted removed-agents from overlay",
+			"hive_id", cfg.HiveID,
+			"count", len(cfg.RemovedAgents),
+			"agents", cfg.RemovedAgents,
+		)
+	}
 	// Guard: the overlay must look like a full hive config (same check the
 	// entrypoint and validateSaveGuard apply) before we trust its agents.
 	if overlay.Project.Org == "" || len(overlay.Agents) == 0 {
 		return cfg, nil
 	}
-	// Tombstones live in the dashboard overlay because that is the only agent
-	// source the dashboard can write. Adopt them BEFORE merging so a deleted
-	// agent is neither re-merged from the overlay nor left behind by the seed.
-	cfg.RemovedAgents = overlay.RemovedAgents
 	// Overlay agents win — they carry the reconciled pack-behavior fields.
 	cfg.MergeAgentOverrides(overlay.Agents)
 	for name := range overlay.Agents {
