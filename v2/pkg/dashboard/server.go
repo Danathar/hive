@@ -158,6 +158,12 @@ type Server struct {
 
 	audit *AuditLog
 
+	// presenceEngagedAt maps a username to the last time their browser
+	// reported ENGAGED presence (tab visible + recent input; see presence.go).
+	// Lazily initialized under presenceMu, freshness-pruned on read.
+	presenceMu        sync.Mutex
+	presenceEngagedAt map[string]time.Time
+
 	// promptHistory stores the fully-expanded kick prompts delivered to each
 	// agent, so an owner can review what their agents were actually told.
 	promptHistory *PromptHistory
@@ -168,6 +174,22 @@ type Server struct {
 	cachedLatestAt      time.Time
 
 	contributeHub *ContributeWSHub
+
+	// contributeMetrics holds the persistent hourly time-series behind the
+	// Operations + Leaderboard sparklines (queue depth, tasks/hour, fleet size,
+	// per-user completions). Lazily built via contributeMetricsStore() so the
+	// zero-value Server needs no constructor change; the rollup goroutine is
+	// started by StartContributeMetrics(ctx). See contribute_metrics.go.
+	contributeMetricsOnce sync.Once
+	contributeMetrics     *metricsStore
+
+	// contributePRLink is the live, best-effort PR→issue link projection behind the
+	// Operations triage view + queue PR badges (#2612 part c). It memoises "does a
+	// Fixes/Closes PR exist for owner/repo#number, open or merged?" behind a short
+	// TTL over the hive's existing GitHub client — NO new persistent store. Lazily
+	// built via contributePRLinkResolver(); see contribute_prlink.go.
+	contributePRLinkOnce sync.Once
+	contributePRLink     *prLinkResolver
 
 	inferenceMu        sync.RWMutex
 	inferenceEndpoints map[string][]string // backend id → list of base URLs

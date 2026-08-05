@@ -1,7 +1,14 @@
 # Justfile — KubeStellar Hive contributor commands, for ClankeR (the contributor relay)
 #
 # Install just: brew install just (macOS) or cargo install just
-# Usage: just contribute-setup claude && just contribute-hive
+# Usage: just contribute-check claude (optional, read-only preflight) && \
+#        just contribute-setup claude && just contribute-hive
+#
+# Ordering (#2543): contribute-setup runs the backend-CLI preflight FIRST —
+# before the GH token is written to disk and before hub registration — so a
+# machine that isn't ready fails before it costs a credential write or a
+# contributor slot. `just contribute-check <cli>` runs the same preflight
+# standalone, any time, with zero side effects.
 
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
@@ -9,7 +16,9 @@ hive_image := env("HIVE_CONTRIBUTOR_IMAGE", "ghcr.io/kubestellar/hive-contributo
 hive_hub := env("HIVE_HUB", "wss://hive.kubestellar.io/contribute")
 config_dir := env("HOME") + "/.config/hive"
 # Container runtime for containerized mode. Empty = auto-detect (docker, then
-# podman). Set HIVE_CONTAINER_RUNTIME=podman to force podman.
+# podman — Docker wins on discovery order, not isolation posture; see the
+# posture note above the detect logic in contribute-hive, and #2535).
+# Set HIVE_CONTAINER_RUNTIME=podman to force rootless podman, or =docker.
 container_runtime := env("HIVE_CONTAINER_RUNTIME", "")
 
 # Show available commands
@@ -31,137 +40,16 @@ check-version skip="false":
     fi
     echo "✓ Up to date (${LOCAL})"
 
-# One-time setup: register with hub + authenticate GitHub + authenticate CLI
-contribute-setup backend="claude": check-version
+# Read-only preflight: is this machine ready to contribute? Checks the
+# agent backend CLI (the thing most likely to fail) BEFORE any credential is
+# written to disk or a contributor slot is registered with the hub. Safe to
+# run as many times as you like — it writes nothing.
+# Usage: just contribute-check claude
+[private]
+contribute-check-backend backend="claude":
     #!/usr/bin/env bash
     set -euo pipefail
-    if [[ "{{hive_hub}}" == "wss://hive.kubestellar.io/contribute" ]]; then
-      echo "HIVE_HUB not set — looking up your hives..."
-      echo ""
-      _TOKEN=$(gh auth token 2>/dev/null || echo "")
-      HIVE_LIST=""
-      if [[ -n "$_TOKEN" ]]; then
-        MY_HIVES=$(curl -sf -H "Authorization: Bearer ${_TOKEN}" "https://hive.kubestellar.io/api/saas/my-hives" 2>/dev/null || echo "")
-        if [[ -n "$MY_HIVES" ]]; then
-          HIVE_LIST=$(echo "$MY_HIVES" | jq -r '.hives[]? // .[] | "\(.id)|\(.name // .project_name)"' 2>/dev/null)
-        fi
-      fi
-      if [[ -z "$HIVE_LIST" ]]; then
-        HIVES_JSON=$(curl -sf "https://hive.kubestellar.io/api/registry" 2>/dev/null) || {
-          echo "ERROR: Could not reach hive.kubestellar.io"
-          echo "Set HIVE_HUB manually: export HIVE_HUB=wss://<hive>/contribute"
-          exit 1
-        }
-        HIVE_LIST=$(echo "$HIVES_JSON" | jq -r '.hives[] | select(.online==true) | "\(.id)|\(.name)"' 2>/dev/null)
-      fi
-      if [[ -z "$HIVE_LIST" ]]; then
-        echo "No hives available. Check https://hive.kubestellar.io"
-        exit 1
-      fi
-      echo "Your hives:"
-      echo ""
-      i=1
-      declare -a HIVE_IDS
-      while IFS='|' read -r hid hname; do
-        HIVE_IDS+=("$hid")
-        printf "  %d) %s (%s)\n" "$i" "$hname" "$hid"
-        i=$((i+1))
-      done <<< "$HIVE_LIST"
-      echo ""
-      read -p "Select a hive [1-$((i-1))]: " CHOICE
-      if [[ -z "$CHOICE" || "$CHOICE" -lt 1 || "$CHOICE" -gt $((i-1)) ]] 2>/dev/null; then
-        echo "Invalid selection."
-        exit 1
-      fi
-      SELECTED="${HIVE_IDS[$((CHOICE-1))]}"
-      if [[ "$SELECTED" == hosted-* ]]; then
-        export HIVE_HUB="wss://${SELECTED}.hive.kubestellar.io/contribute"
-      else
-        DASH_URL=$(echo "$HIVES_JSON" | jq -r --arg id "$SELECTED" '.hives[] | select(.id==$id) | .dashboardUrl' 2>/dev/null || echo "")
-        if [[ -n "$DASH_URL" ]]; then
-          DASH_URL=$(echo "$DASH_URL" | sed 's|^http://|ws://|;s|^https://|wss://|')
-          export HIVE_HUB="${DASH_URL}/contribute"
-        else
-          export HIVE_HUB="wss://${SELECTED}.hive.kubestellar.io/contribute"
-        fi
-      fi
-      echo ""
-      echo "Selected: ${HIVE_HUB}"
-      echo "TIP: Next time, run: export HIVE_HUB=${HIVE_HUB}"
-      echo ""
-    fi
-    mkdir -p "{{config_dir}}"
-    echo "=== Hive Contributor Setup (ClankeR) ==="
-    echo ""
-
-    # ── Step 1: GitHub authentication ──
-    echo "── Step 1/3: GitHub Authentication ──"
-    if ! command -v gh &>/dev/null; then
-      echo "ERROR: gh CLI not found. Install: brew install gh"
-      exit 1
-    fi
-    if gh auth status &>/dev/null; then
-      GH_USER=$(gh api user --jq '.login' 2>/dev/null || echo "")
-      echo "Already authenticated as: ${GH_USER}"
-    else
-      echo "Logging into GitHub..."
-      gh auth login --web --scopes "repo,read:org"
-      GH_USER=$(gh api user --jq '.login' 2>/dev/null || echo "")
-      echo "Authenticated as: ${GH_USER}"
-    fi
-    GH_TOKEN=$(gh auth token 2>/dev/null || echo "")
-    if [[ -n "$GH_TOKEN" ]]; then
-      echo "GH_TOKEN=${GH_TOKEN}" > "{{config_dir}}/gh-auth.env"
-      chmod 600 "{{config_dir}}/gh-auth.env"
-    fi
-    echo ""
-
-    # ── Step 2: Register with hive hub ──
-    echo "── Step 2/3: Hive Registration ──"
-    _HUB="${HIVE_HUB:-{{hive_hub}}}"
-    HUB_HTTP=$(echo "$_HUB" | sed 's|^wss://|https://|;s|^ws://|http://|;s|/contribute$||')
-    RESPONSE=$(curl -sf --max-time 15 -X POST "${HUB_HTTP}/api/contribute/register" \
-      -H "Content-Type: application/json" \
-      -H "Authorization: Bearer ${GH_TOKEN}" \
-      -d "{\"github_username\": \"${GH_USER}\"}" 2>/dev/null) || {
-        echo "ERROR: Registration failed. Is the hub running at ${HUB_HTTP}?"
-        echo "  Check: curl -sf ${HUB_HTTP}/api/contribute/status"
-        exit 1
-    }
-    if ! echo "$RESPONSE" | jq empty 2>/dev/null; then
-      echo "ERROR: Hub returned invalid response: ${RESPONSE:0:200}"
-      exit 1
-    fi
-    TOKEN=$(echo "$RESPONSE" | jq -r '.registration_token')
-    CID=$(echo "$RESPONSE" | jq -r '.contributor_id')
-    MSG=$(echo "$RESPONSE" | jq -r '.message')
-    if [[ -z "$TOKEN" || "$TOKEN" == "null" ]]; then
-      if echo "$MSG" | grep -qi "already registered"; then
-        if [[ -f "{{config_dir}}/contributor.env" ]]; then
-          source "{{config_dir}}/contributor.env"
-          echo "Already registered — ${GH_USER} (${CONTRIBUTOR_ID:-unknown})"
-        else
-          echo "ERROR: Already registered but no local config found."
-          exit 1
-        fi
-      else
-        echo "ERROR: ${MSG:-No token received}"
-        exit 1
-      fi
-    else
-      cat > "{{config_dir}}/contributor.env" <<EOF
-    HIVE_REGISTRATION_TOKEN=${TOKEN}
-    HIVE_HUB=${_HUB}
-    CONTRIBUTOR_ID=${CID}
-    CONTRIBUTOR_USERNAME=${GH_USER}
-    AGENT_BACKEND={{backend}}
-    EOF
-    fi
-    echo "${MSG} — ${GH_USER} (${CID})"
-    echo ""
-
-    # ── Step 3: CLI authentication ──
-    echo "── Step 3/3: {{backend}} CLI Authentication ──"
+    echo "── Preflight: {{backend}} CLI ──"
     case "{{backend}}" in
       claude)
         if ! command -v claude &>/dev/null; then
@@ -175,7 +63,7 @@ contribute-setup backend="claude": check-version
           echo "Claude Code needs authentication."
           echo "Run:  claude"
           echo "Then type /login and follow the prompts."
-          echo "Once logged in, exit Claude (Ctrl+C) and re-run this setup."
+          echo "Once logged in, exit Claude (Ctrl+C) and re-run this check."
           exit 1
         fi
         ;;
@@ -189,7 +77,7 @@ contribute-setup backend="claude": check-version
         ;;
       gemini)
         if command -v gemini &>/dev/null; then
-          gemini auth login 2>/dev/null || echo "Gemini login complete (or already authenticated)"
+          echo "Gemini CLI detected — run 'gemini auth login' if not already authenticated."
         else
           echo "ERROR: Gemini CLI not installed."
           exit 1
@@ -259,17 +147,187 @@ contribute-setup backend="claude": check-version
         echo "  Claude Code will run with ANTHROPIC_BASE_URL=${HIVE_LITELLM_ENDPOINT}"
         echo "  Set the model your proxy serves: export AGENT_MODEL=<model>"
         ;;
+      agy)
+        if command -v agy &>/dev/null; then
+          echo "agy CLI detected ($(agy --version 2>&1 | head -1))"
+          echo "  Models: gemini-3.6-flash, claude-sonnet-4-6, gpt-oss-120b, and more"
+          echo "  Set model: --model gemini-3.6-flash-high"
+        else
+          echo "ERROR: agy CLI not found. Install: https://antigravity.dev"
+          exit 1
+        fi
+        ;;
       *)
-        echo "ERROR: Unknown backend '{{backend}}'. Supported: claude, copilot, goose, codex, pi, bob, litellm"
+        echo "ERROR: Unknown backend '{{backend}}'. Supported: claude, copilot, goose, codex, pi, bob, agy, litellm"
         exit 1
         ;;
     esac
+    echo "✓ {{backend}} preflight passed."
+
+# Read-only preflight you can run standalone, any time, before setup — checks
+# the agent backend CLI without writing a credential or registering with the
+# hub. Run this FIRST if you're not sure your machine is ready.
+# Usage: just contribute-check claude
+contribute-check backend="claude": (contribute-check-backend backend)
+    @echo ""
+    @echo "✓ Machine looks ready for 'just contribute-setup {{backend}}'."
+
+# One-time setup: register with hub + authenticate GitHub + authenticate CLI
+# Ordering note (#2543): the backend-readiness preflight runs FIRST, before
+# any credential is written to disk or a contributor slot is registered —
+# so a machine that isn't ready fails before it costs a GH token write or a
+# hub registration. check-version still gates everything (it already did).
+contribute-setup backend="claude": check-version (contribute-check-backend backend)
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ "{{hive_hub}}" == "wss://hive.kubestellar.io/contribute" ]]; then
+      echo "HIVE_HUB not set — looking up your hives..."
+      echo ""
+      _TOKEN=$(gh auth token 2>/dev/null || echo "")
+      HIVE_LIST=""
+      if [[ -n "$_TOKEN" ]]; then
+        MY_HIVES=$(curl -sf -H "Authorization: Bearer ${_TOKEN}" "https://hive.kubestellar.io/api/saas/my-hives" 2>/dev/null || echo "")
+        if [[ -n "$MY_HIVES" ]]; then
+          HIVE_LIST=$(echo "$MY_HIVES" | jq -r '.hives[]? // .[] | "\(.id)|\(.name // .project_name)"' 2>/dev/null)
+        fi
+      fi
+      if [[ -z "$HIVE_LIST" ]]; then
+        HIVES_JSON=$(curl -sf "https://hive.kubestellar.io/api/registry" 2>/dev/null) || {
+          echo "ERROR: Could not reach hive.kubestellar.io"
+          echo "Set HIVE_HUB manually: export HIVE_HUB=wss://<hive>/contribute"
+          exit 1
+        }
+        HIVE_LIST=$(echo "$HIVES_JSON" | jq -r '.hives[] | select(.online==true) | "\(.id)|\(.name)"' 2>/dev/null)
+      fi
+      if [[ -z "$HIVE_LIST" ]]; then
+        echo "No hives available. Check https://hive.kubestellar.io"
+        exit 1
+      fi
+      echo "Your hives:"
+      echo ""
+      i=1
+      declare -a HIVE_IDS
+      while IFS='|' read -r hid hname; do
+        HIVE_IDS+=("$hid")
+        printf "  %d) %s (%s)\n" "$i" "$hname" "$hid"
+        i=$((i+1))
+      done <<< "$HIVE_LIST"
+      echo ""
+      read -p "Select a hive [1-$((i-1))]: " CHOICE
+      if [[ -z "$CHOICE" || "$CHOICE" -lt 1 || "$CHOICE" -gt $((i-1)) ]] 2>/dev/null; then
+        echo "Invalid selection."
+        exit 1
+      fi
+      SELECTED="${HIVE_IDS[$((CHOICE-1))]}"
+      if [[ "$SELECTED" == hosted-* ]]; then
+        export HIVE_HUB="wss://${SELECTED}.hive.kubestellar.io/contribute"
+      else
+        DASH_URL=$(echo "$HIVES_JSON" | jq -r --arg id "$SELECTED" '.hives[] | select(.id==$id) | .dashboardUrl' 2>/dev/null || echo "")
+        if [[ -n "$DASH_URL" ]]; then
+          DASH_URL=$(echo "$DASH_URL" | sed 's|^http://|ws://|;s|^https://|wss://|')
+          export HIVE_HUB="${DASH_URL}/contribute"
+        else
+          export HIVE_HUB="wss://${SELECTED}.hive.kubestellar.io/contribute"
+        fi
+      fi
+      echo ""
+      echo "Selected: ${HIVE_HUB}"
+      echo "TIP: Next time, run: export HIVE_HUB=${HIVE_HUB}"
+      echo ""
+    fi
+    mkdir -p "{{config_dir}}"
+    echo "=== Hive Contributor Setup (ClankeR) ==="
+    echo "✓ Preflight passed — {{backend}} CLI is ready. Proceeding to credential + registration."
+    echo ""
+
+    # ── Step 1: GitHub authentication ──
+    echo "── Step 1/2: GitHub Authentication ──"
+    if ! command -v gh &>/dev/null; then
+      echo "ERROR: gh CLI not found. Install: brew install gh"
+      exit 1
+    fi
+    if gh auth status &>/dev/null; then
+      GH_USER=$(gh api user --jq '.login' 2>/dev/null || echo "")
+      echo "Already authenticated as: ${GH_USER}"
+    else
+      echo "Logging into GitHub..."
+      gh auth login --web --scopes "repo,read:org"
+      GH_USER=$(gh api user --jq '.login' 2>/dev/null || echo "")
+      echo "Authenticated as: ${GH_USER}"
+    fi
+    GH_TOKEN=$(gh auth token 2>/dev/null || echo "")
+    if [[ -n "$GH_TOKEN" ]]; then
+      echo "GH_TOKEN=${GH_TOKEN}" > "{{config_dir}}/gh-auth.env"
+      chmod 600 "{{config_dir}}/gh-auth.env"
+    fi
+    echo ""
+
+    # ── Step 2: Register with hive hub ──
+    echo "── Step 2/2: Hive Registration ──"
+    _HUB="${HIVE_HUB:-{{hive_hub}}}"
+    HUB_HTTP=$(echo "$_HUB" | sed 's|^wss://|https://|;s|^ws://|http://|;s|/contribute$||')
+    RESPONSE=$(curl -sf --max-time 15 -X POST "${HUB_HTTP}/api/contribute/register" \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer ${GH_TOKEN}" \
+      -d "{\"github_username\": \"${GH_USER}\"}" 2>/dev/null) || {
+        echo "ERROR: Registration failed. Is the hub running at ${HUB_HTTP}?"
+        echo "  Check: curl -sf ${HUB_HTTP}/api/contribute/status"
+        exit 1
+    }
+    if ! echo "$RESPONSE" | jq empty 2>/dev/null; then
+      echo "ERROR: Hub returned invalid response: ${RESPONSE:0:200}"
+      exit 1
+    fi
+    TOKEN=$(echo "$RESPONSE" | jq -r '.registration_token')
+    CID=$(echo "$RESPONSE" | jq -r '.contributor_id')
+    MSG=$(echo "$RESPONSE" | jq -r '.message')
+    if [[ -z "$TOKEN" || "$TOKEN" == "null" ]]; then
+      if echo "$MSG" | grep -qi "already registered"; then
+        if [[ -f "{{config_dir}}/contributor.env" ]]; then
+          source "{{config_dir}}/contributor.env"
+          echo "Already registered — ${GH_USER} (${CONTRIBUTOR_ID:-unknown})"
+        else
+          echo "ERROR: Already registered but no local config found."
+          exit 1
+        fi
+      else
+        echo "ERROR: ${MSG:-No token received}"
+        exit 1
+      fi
+    else
+      cat > "{{config_dir}}/contributor.env" <<EOF
+    HIVE_REGISTRATION_TOKEN=${TOKEN}
+    HIVE_HUB=${_HUB}
+    CONTRIBUTOR_ID=${CID}
+    CONTRIBUTOR_USERNAME=${GH_USER}
+    AGENT_BACKEND={{backend}}
+    EOF
+      # contributor.env holds HIVE_REGISTRATION_TOKEN, the sole long-lived
+      # bearer credential for the contributor WebSocket. Match the 0600 perms
+      # of its sibling secret files (gh-auth.env, claude-config.json) so the
+      # token is not left world-readable at the default umask (0644).
+      chmod 600 "{{config_dir}}/contributor.env"
+    fi
+    # Re-tighten on every run: existing users may already have a 0644 file
+    # created before this fix. Fix it in place if present.
+    chmod 600 "{{config_dir}}/contributor.env" 2>/dev/null || true
+    echo "${MSG} — ${GH_USER} (${CID})"
+    echo ""
+
+    # ── {{backend}} CLI readiness was already verified in the preflight
+    # above, before the credential was written and before this registration
+    # ran (see #2543). Nothing left to check here — just finalize backend-
+    # specific local state.
+    echo "✓ {{backend}} CLI: verified during preflight."
 
     # Persist the LiteLLM endpoint (never the API key) for later runs
     if [[ "{{backend}}" == "litellm" && -f "{{config_dir}}/contributor.env" ]]; then
       grep -v '^HIVE_LITELLM_ENDPOINT=' "{{config_dir}}/contributor.env" > "{{config_dir}}/contributor.env.tmp" || true
       echo "HIVE_LITELLM_ENDPOINT=${HIVE_LITELLM_ENDPOINT}" >> "{{config_dir}}/contributor.env.tmp"
       mv "{{config_dir}}/contributor.env.tmp" "{{config_dir}}/contributor.env"
+      # The rewrite recreates the file at the default umask (0644), dropping
+      # the 0600 perms. Re-tighten so the token stays owner-only.
+      chmod 600 "{{config_dir}}/contributor.env"
     fi
 
     # Copy CLI config for Docker container (Colima can't bind-mount files)
@@ -291,7 +349,8 @@ contribute-setup backend="claude": check-version
 # Usage: just contribute-hive              (container, default CLI from setup)
 #        just contribute-hive copilot      (container, copilot backend)
 #        just contribute-hive claude local  (native mode, claude)
-# Runtime: auto-detects docker then podman; force with HIVE_CONTAINER_RUNTIME=podman
+# Runtime: auto-detects docker then podman (discovery order, not posture —
+# see v2/docs/podman-rootless-ci.md); force with HIVE_CONTAINER_RUNTIME=podman
 contribute-hive backend="" mode="docker": check-version
     #!/usr/bin/env bash
     set -euo pipefail
@@ -428,6 +487,18 @@ contribute-hive backend="" mode="docker": check-version
       # docker, else podman. Podman gets --userns=keep-id (rootless UID
       # mapping so the container's dev user can read the mounted configs)
       # and SELinux-friendly volume labels (,Z).
+      #
+      # Posture (#2535, Option B — this is a documentation note, the
+      # detect order below is UNCHANGED): when both engines are present,
+      # Docker wins by discovery order, not by isolation posture. Docker's
+      # daemon here runs rootful — docker-group membership is effectively
+      # root on the host. Podman here runs rootless, in a user namespace.
+      # A contributor who wants rootless-by-default should set
+      # HIVE_CONTAINER_RUNTIME=podman explicitly; the page selector does
+      # the same. Rootless Podman handling is exercised by hand, not yet
+      # by CI — see v2/docs/podman-rootless-ci.md (#2535 Option C) for the
+      # test-intent seam. We are deliberately NOT re-ordering this detect
+      # to prefer Podman (that's Option A) until that CI coverage exists.
       RUNTIME="{{container_runtime}}"
       if [[ -z "$RUNTIME" ]]; then
         if command -v docker >/dev/null 2>&1; then RUNTIME=docker
@@ -470,6 +541,12 @@ contribute-hive backend="" mode="docker": check-version
           ;;
         codex)
           [ -d "${HOME}/.codex" ] && CLI_MOUNTS="-v ${HOME}/.codex:/home/dev/.codex${VOLSUF}"
+          ;;
+        pi)
+          [ -d "${HOME}/.pi" ] && CLI_MOUNTS="-v ${HOME}/.pi:/home/dev/.pi${VOLSUF}"
+          ;;
+        agy)
+          [ -d "${HOME}/.antigravitycli" ] && CLI_MOUNTS="-v ${HOME}/.antigravitycli:/home/dev/.antigravitycli${VOLSUF}"
           ;;
       esac
       CONTAINER_NAME="hive-contributor-${BACKEND}-$(head -c 4 /dev/urandom | od -An -tx1 | tr -d ' ')"
@@ -662,19 +739,49 @@ contribute-stop:
     done
     $STOPPED && echo "Stopped." || echo "Not running."
 
-# Generate K8s ConfigMap + Secret YAML from contributor.env
+# Generate a runnable K8s contributor workload (Namespace + ConfigMap + Secret + Deployment)
 # Usage: just contribute-k8s                          (default namespace: hive-contributor)
 #        just contribute-k8s my-namespace              (custom namespace)
-#        just contribute-k8s my-namespace output.yaml  (write to file instead of stdout)
-contribute-k8s namespace="hive-contributor" outfile="":
+#        just contribute-k8s my-namespace out.yaml     (write to file instead of stdout)
+#        just contribute-k8s my-namespace "" v2        (pin a specific image tag, #2549)
+#
+# Unlike the earlier config-only generator, this now ALSO emits a Deployment that
+# actually RUNS the contributor relay in HEADLESS mode (kubestellar/hive#2660,
+# #2549): a headless pod has no TTY, so it sets CONTRIBUTOR_MODE=headless (the
+# interactive tmux path would stall forever waiting on a prompt nobody can type
+# into). Applying the output results in a running contributor, not three inert
+# config objects. Like before, it PRINTS YAML (or writes a file) and prints an
+# apply instruction — it never invokes kubectl itself.
+contribute-k8s namespace="hive-contributor" outfile="" image_tag="v2":
     #!/usr/bin/env bash
     set -euo pipefail
 
     # ── Constants ──
     readonly CONFIGMAP_NAME="hive-contributor-config"
     readonly SECRET_NAME="hive-contributor-secrets"
+    readonly DEPLOYMENT_NAME="hive-contributor"
     readonly ENV_FILE="{{config_dir}}/contributor.env"
     readonly GH_AUTH_FILE="{{config_dir}}/gh-auth.env"
+    # Published multi-arch image (.github/workflows/docker.yml build-contributor).
+    readonly IMAGE_REPO="ghcr.io/kubestellar/hive-contributor"
+    # CONTRIBUTOR_MODE selector values — must match bin/contributor-relay.sh.
+    readonly MODE_HEADLESS="headless"
+    # Where the headless relay writes its coarse lifecycle state as JSON
+    # (waiting/working/done/failed). Kept in step with HEADLESS_STATUS_FILE's
+    # default in bin/contributor-relay.sh; the probe below reads this exact path.
+    readonly HEADLESS_STATUS_FILE="/tmp/contributor-headless-status.json"
+    # Backends with a verified non-interactive (headless) entry point — must
+    # match HEADLESS_BACKENDS in bin/contributor-relay.sh. A headless pod on any
+    # OTHER backend (goose/bob/agy/pi) refuses work LOUDLY at startup, so we warn
+    # here rather than emit a manifest that will crash-loop with no explanation.
+    readonly HEADLESS_BACKENDS="claude litellm copilot codex"
+    # Memory sizing: the contributor image is ~2.7GiB unpacked and each task
+    # spawns a real coding-CLI + a repo build/test, so requests are deliberately
+    # generous. Named here so an operator can see and tune them, not magic YAML.
+    readonly MEM_REQUEST="1Gi"
+    readonly MEM_LIMIT="4Gi"
+    readonly CPU_REQUEST="500m"
+    readonly CPU_LIMIT="2"
 
     # ── Validate setup exists ──
     if [[ ! -f "$ENV_FILE" ]]; then
@@ -693,6 +800,27 @@ contribute-k8s namespace="hive-contributor" outfile="":
     fi
 
     NS="{{namespace}}"
+    IMAGE_TAG="{{image_tag}}"
+    IMAGE="${IMAGE_REPO}:${IMAGE_TAG}"
+    BACKEND="${AGENT_BACKEND:-claude}"
+
+    # ── Headless-backend preflight (#2549 / #2660) ──
+    # The workload runs headless. Only the backends in HEADLESS_BACKENDS have a
+    # verified non-interactive entry point; anything else makes the relay refuse
+    # work loudly at startup. Warn to STDERR (never stdout — stdout is the YAML
+    # that gets piped to kubectl) so the contributor is told BEFORE they apply,
+    # rather than debugging a crash-looping pod. We still emit the manifest so an
+    # operator switching AGENT_BACKEND to a supported one need not regenerate.
+    BACKEND_HEADLESS_OK=false
+    for b in $HEADLESS_BACKENDS; do
+      if [[ "$b" == "$BACKEND" ]]; then BACKEND_HEADLESS_OK=true; break; fi
+    done
+    if [[ "$BACKEND_HEADLESS_OK" != true ]]; then
+      echo "WARNING: AGENT_BACKEND='${BACKEND}' has no headless (non-interactive) mode." >&2
+      echo "         The headless Deployment supports only: ${HEADLESS_BACKENDS}." >&2
+      echo "         This backend would refuse work at startup. Re-run 'just contribute-setup <cli>'" >&2
+      echo "         with one of the supported backends before applying." >&2
+    fi
 
     # ── Helper: base64-encode a value (portable across macOS and Linux) ──
     b64() {
@@ -723,7 +851,14 @@ contribute-k8s namespace="hive-contributor" outfile="":
     YAML+="  HIVE_HUB: \"${HIVE_HUB:-}\""$'\n'
     YAML+="  CONTRIBUTOR_ID: \"${CONTRIBUTOR_ID:-}\""$'\n'
     YAML+="  CONTRIBUTOR_USERNAME: \"${CONTRIBUTOR_USERNAME:-}\""$'\n'
-    YAML+="  AGENT_BACKEND: \"${AGENT_BACKEND:-claude}\""$'\n'
+    YAML+="  AGENT_BACKEND: \"${BACKEND}\""$'\n'
+    # A pod has no TTY, so the relay MUST run headless (#2660/#2549); the
+    # interactive tmux path would stall forever. Carried in the ConfigMap so the
+    # Deployment picks it up via envFrom with everything else.
+    YAML+="  CONTRIBUTOR_MODE: \"${MODE_HEADLESS}\""$'\n'
+    # Path the headless relay writes its lifecycle state to; the Deployment's
+    # liveness/readiness probes read this same file.
+    YAML+="  HIVE_HEADLESS_STATUS_FILE: \"${HEADLESS_STATUS_FILE}\""$'\n'
     YAML+="---"$'\n'
     YAML+="# Sensitive credentials — treat as secret"$'\n'
     YAML+="apiVersion: v1"$'\n'
@@ -737,19 +872,145 @@ contribute-k8s namespace="hive-contributor" outfile="":
     YAML+="type: Opaque"$'\n'
     YAML+="data:"$'\n'
     YAML+="  HIVE_REGISTRATION_TOKEN: ${REG_TOKEN_B64}"$'\n'
-    YAML+="  GH_TOKEN: ${GH_TOKEN_B64}"
+    YAML+="  GH_TOKEN: ${GH_TOKEN_B64}"$'\n'
+
+    # ── Probe command (#2660 status file) ──
+    # The kubelet execs this against the pod. It reads the coarse lifecycle state
+    # the headless relay writes (waiting/working/done/failed):
+    #   file missing            -> exit 1  (relay not up yet / died before writing)
+    #   state == "failed"       -> exit 1  (task wedged & killed by the relay's
+    #                                        HEADLESS_TASK_TIMEOUT_MS, or a spawn
+    #                                        error — surface as unhealthy, NOT a
+    #                                        healthy-looking-but-stalled pod)
+    #   waiting|working|done    -> exit 0  (alive and connected)
+    # Emitted as a YAML block sequence (one arg per line) and written with a
+    # block scalar so shell quoting inside the command can't corrupt the YAML.
+    # We grep for the "state" line then test its VALUE — the relay only ever
+    # writes one of the four known values, so a plain grep on the file is enough
+    # and avoids needing jq. `grep -q failed` on the state line is the fail case;
+    # a matching known-good state is the pass case; anything else (no file, no
+    # recognised state) fails closed.
+    PROBE_STEP1='STATE=$(sed -n "s/.*\"state\"[^\"]*\"\\([a-z]*\\)\".*/\\1/p" '"${HEADLESS_STATUS_FILE}"' 2>/dev/null | head -1)'
+    PROBE_STEP2='case "$STATE" in waiting|working|done) exit 0 ;; *) exit 1 ;; esac'
+
+    # ── Deployment: the workload that actually runs the contributor (#2549) ──
+    YAML+="---"$'\n'
+    YAML+="# The contributor workload. Runs the relay HEADLESS (#2660): no TTY, one"$'\n'
+    YAML+="# one-shot CLI invocation per task. A long-lived Deployment (not a Job)"$'\n'
+    YAML+="# because the relay stays connected to the hub and pulls work over time;"$'\n'
+    YAML+="# Kubernetes restarts it on failure and keeps a stable identity — the"$'\n'
+    YAML+="# exact reason an operator wants a cluster over a laptop."$'\n'
+    YAML+="#"$'\n'
+    YAML+="# INTERIM CREDENTIAL NOTE (#2537): the Secret above carries a long-lived,"$'\n'
+    YAML+="# personal GH_TOKEN (scope repo,read:org). In a cluster it is base64 (NOT"$'\n'
+    YAML+="# encrypted), readable by anyone with 'get secrets' in this namespace and"$'\n'
+    YAML+="# by cluster-scoped operators/backups. This is materially more exposed"$'\n'
+    YAML+="# than a 0600 file on a laptop. Revoke any time with: gh auth logout (or"$'\n'
+    YAML+="# revoke the token in GitHub settings). Gating the credential on explicit"$'\n'
+    YAML+="# task acceptance is tracked in kubestellar/hive#2537 and is NOT solved"$'\n'
+    YAML+="# here — this path reuses the existing Secret rather than inventing new"$'\n'
+    YAML+="# long-lived credential plumbing."$'\n'
+    YAML+="apiVersion: apps/v1"$'\n'
+    YAML+="kind: Deployment"$'\n'
+    YAML+="metadata:"$'\n'
+    YAML+="  name: ${DEPLOYMENT_NAME}"$'\n'
+    YAML+="  namespace: ${NS}"$'\n'
+    YAML+="  labels:"$'\n'
+    YAML+="    app.kubernetes.io/name: hive-contributor"$'\n'
+    YAML+="    app.kubernetes.io/component: relay"$'\n'
+    YAML+="spec:"$'\n'
+    # Single replica: one relay per registration token / contributor identity.
+    # Scaling capacity means more (separately-registered) contributors, not more
+    # replicas of the same token — so a fixed 1 here, documented.
+    YAML+="  replicas: 1"$'\n'
+    YAML+="  selector:"$'\n'
+    YAML+="    matchLabels:"$'\n'
+    YAML+="      app.kubernetes.io/name: hive-contributor"$'\n'
+    YAML+="      app.kubernetes.io/component: relay"$'\n'
+    YAML+="  template:"$'\n'
+    YAML+="    metadata:"$'\n'
+    YAML+="      labels:"$'\n'
+    YAML+="        app.kubernetes.io/name: hive-contributor"$'\n'
+    YAML+="        app.kubernetes.io/component: relay"$'\n'
+    YAML+="    spec:"$'\n'
+    # Deployment pods are always restartPolicy: Always (the API rejects anything
+    # else) — the relay is meant to run forever and reconnect, so this is the
+    # right shape. Stated for the reader; not settable here.
+    YAML+="      restartPolicy: Always"$'\n'
+    YAML+="      containers:"$'\n'
+    YAML+="        - name: contributor"$'\n'
+    YAML+="          image: ${IMAGE}"$'\n'
+    # Pull the pinned tag on restart so a moved tag can't silently swap the code
+    # under a running contributor; a digest/pinned tag is recommended for repro.
+    YAML+="          imagePullPolicy: Always"$'\n'
+    # envFrom pulls the whole ConfigMap (incl. CONTRIBUTOR_MODE=headless) and the
+    # whole Secret — no per-key wiring to drift out of sync with the generator.
+    YAML+="          envFrom:"$'\n'
+    YAML+="            - configMapRef:"$'\n'
+    YAML+="                name: ${CONFIGMAP_NAME}"$'\n'
+    YAML+="            - secretRef:"$'\n'
+    YAML+="                name: ${SECRET_NAME}"$'\n'
+    YAML+="          resources:"$'\n'
+    YAML+="            requests:"$'\n'
+    YAML+="              memory: \"${MEM_REQUEST}\""$'\n'
+    YAML+="              cpu: \"${CPU_REQUEST}\""$'\n'
+    YAML+="            limits:"$'\n'
+    YAML+="              memory: \"${MEM_LIMIT}\""$'\n'
+    YAML+="              cpu: \"${CPU_LIMIT}\""$'\n'
+    # Readiness: gates the pod Ready only once the relay has authenticated and
+    # written a non-failed state. A wedged/failed relay drops out of Ready.
+    # emit_probe <indent> — appends an exec: command block sequence with the two
+    # probe steps as a single `sh -c` argument, block-scalar formatted so quoting
+    # inside the script can't corrupt the surrounding YAML.
+    emit_probe() {
+      local ind="$1"
+      YAML+="${ind}exec:"$'\n'
+      YAML+="${ind}  command:"$'\n'
+      YAML+="${ind}    - sh"$'\n'
+      YAML+="${ind}    - -c"$'\n'
+      YAML+="${ind}    - |"$'\n'
+      YAML+="${ind}      ${PROBE_STEP1}"$'\n'
+      YAML+="${ind}      ${PROBE_STEP2}"$'\n'
+    }
+
+    YAML+="          readinessProbe:"$'\n'
+    emit_probe "            "
+    YAML+="            initialDelaySeconds: 15"$'\n'
+    YAML+="            periodSeconds: 15"$'\n'
+    YAML+="            failureThreshold: 3"$'\n'
+    # Liveness: restarts the pod if the relay reports failed (a CLI killed by the
+    # HEADLESS_TASK_TIMEOUT_MS watchdog) or stops writing the file entirely.
+    # Longer initialDelay so a slow first authenticate isn't mistaken for death.
+    YAML+="          livenessProbe:"$'\n'
+    emit_probe "            "
+    YAML+="            initialDelaySeconds: 60"$'\n'
+    YAML+="            periodSeconds: 30"$'\n'
+    YAML+="            failureThreshold: 3"
 
     # ── Output ──
     OUTFILE="{{outfile}}"
     if [[ -n "$OUTFILE" ]]; then
       echo "$YAML" > "$OUTFILE"
-      echo "✓ K8s manifests written to ${OUTFILE}"
+      echo "✓ K8s contributor workload written to ${OUTFILE}"
+      echo "  Namespace + ConfigMap + Secret + Deployment (headless relay, image ${IMAGE})"
       echo ""
       echo "Apply with:"
       echo "  kubectl apply -f ${OUTFILE}"
+      echo ""
+      echo "Then watch it come up:"
+      echo "  kubectl -n ${NS} rollout status deploy/${DEPLOYMENT_NAME}"
+      echo ""
+      echo "Interim credential note (#2537): the Secret holds a long-lived personal"
+      echo "GH_TOKEN — base64, not encrypted, and cluster-readable. Revoke any time"
+      echo "with 'gh auth logout'. Pin the image with a 3rd arg, e.g.:"
+      echo "  just contribute-k8s ${NS} ${OUTFILE} <git-short-sha>"
     else
       echo "$YAML"
       echo ""
       echo "# Apply with: just contribute-k8s {{namespace}} | kubectl apply -f -"
       echo "# Or save:    just contribute-k8s {{namespace}} manifests.yaml"
+      echo "# Then:       kubectl -n {{namespace}} rollout status deploy/${DEPLOYMENT_NAME}"
+      echo "# Pin image:  just contribute-k8s {{namespace}} manifests.yaml <git-short-sha>"
+      echo "# Interim credential note (#2537): Secret holds a long-lived personal GH_TOKEN"
+      echo "#   (base64, cluster-readable). Revoke with 'gh auth logout'."
     fi
