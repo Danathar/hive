@@ -3732,7 +3732,7 @@
           <div class="oc-detail-field"><div class="label" title="CLI authentication status — log in to authenticate the agent's CLI tool">Auth</div><div class="value">${(() => {
             const isClaude = a.cli === 'claude';
             const isCopilot = a.cli === 'copilot';
-            const _needsLogin = a.needsLogin === true || (a.authKnown === true && a.authAvailable !== true);
+            const _needsLogin = _agentNeedsLogin(a);
             const claudeIcon = '<span class="cli-icon claude-icon"></span>';
             const copilotIcon = '<span class="cli-icon copilot-icon"></span>';
             if (_needsLogin) {
@@ -3771,7 +3771,7 @@
          (a.needsLogin) — alive-but-wedged must not render as healthy. The
          weaker probe-based inference stays stopped-only so a stale probe
          cannot repaint a genuinely working agent. */
-      const needsLoginDown = (isStopped && (a.needsLogin === true || (a.authKnown === true && a.authAvailable !== true))) || a.needsLogin === true;
+      const needsLoginDown = _agentNeedsLogin(a, isStopped);
       const isRunning = a.busy === 'working' && !isPaused && !isOff && !isStopped;
       const dotCls = needsLoginDown ? 'needs-login' : isStopped ? 'stopped' : isOnDemand ? 'on-demand' : isPaused ? 'paused' : isOff ? 'off' : isRunning ? 'running' : 'idle';
       // A healthy agent that is off *because of its governor cadence* (offByCadence,
@@ -4055,8 +4055,7 @@
       // panel's Login button; rendered amber with a "needs login" note. Only
       // applies when the agent is not running: a running authenticated agent
       // is green, a non-running authenticated agent is red (#2465).
-      const needsLogin = a.needsLogin === true || (a.authKnown === true && a.authAvailable !== true);
-      const needsLoginDown = (isDown && needsLogin) || a.needsLogin === true;
+      const needsLoginDown = _agentNeedsLogin(a, isDown);
       const isRunning = a.busy === 'working' && !isPaused && !isOff && !isDown;
       const isOnDemandIdle = isOnDemand && !isRunning;
       const dotCls = needsLoginDown ? 'needs-login' : isDown ? 'stopped' : isOnDemandIdle ? 'on-demand' : isPaused ? 'paused' : isOff ? 'off' : isRunning ? 'running' : 'idle';
@@ -5400,6 +5399,32 @@
       return `${proto}//${host}/terminal/?arg=${encodeURIComponent(session)}${tokenParam}`;
     }
 
+    /* SINGLE source of truth for the 🔑 "needs login" badge. Mirrors the
+       server-side precedence rule in pkg/agent/authprobe.go:
+
+         1. a.needsLogin (the pane poller literally saw a login prompt on the
+            agent's own terminal) is authoritative — a genuinely wedged agent
+            always shows the badge.
+         2. The weaker probe-based signal (authKnown && !authAvailable) only
+            counts when the agent is NOT running. A running agent is, by
+            observation, working — the same signal /api/health/deep reports as
+            `pass` — and a credential-file miss must never outrank that.
+            Under the per-agent-UID layout the shared credential path is empty
+            for every agent, which is exactly how running, authenticated
+            agents ended up wearing a 🔑 badge.
+
+       The server now also gates the probe on "does this backend even have an
+       interactive login", so inference/API-key backends report no opinion. */
+    function _agentNeedsLogin(a, isDown) {
+      if (a.needsLogin === true) return true;
+      // Callers that already computed a down-state pass it in (paused / off /
+      // on-demand agents are NOT down and must keep their own styling —
+      // #2465). Callers that have no such notion fall back to the raw
+      // process state.
+      const down = (isDown === undefined) ? (a.state !== 'running') : isDown;
+      return down && a.authKnown === true && a.authAvailable !== true;
+    }
+
     function renderAgents(agents) {
       const el = document.getElementById('agents');
       // Preserve custom prompt input values across re-renders
@@ -5410,13 +5435,13 @@
       });
       const { sorted: sortedAgents } = _sortAgentsBySidebar(agents);
       const cards = sortedAgents.map(a => {
-        const needsLogin = a.needsLogin === true || (a.authKnown === true && a.authAvailable !== true);
         const isOff = a.offByCadence === true;
         const isOnDemand = a.onDemand === true;
         const isPaused = a.paused === true && !isOff && !isOnDemand;
         // Down = process not alive — anything but 'running'. 'stopped'-only
         // matching rendered crash-looping ('failed') agents green (#2465).
         const isStopped = a.state !== 'running' && !isPaused && !isOff && !isOnDemand;
+        const needsLogin = _agentNeedsLogin(a, isStopped);
         const STALE_MS = 1200000; // 20 minutes
         const isStale = a.summaryUpdated && !isPaused && a.busy === 'working' && (Date.now() - new Date(a.summaryUpdated).getTime()) > STALE_MS;
         let statusCls = '';
@@ -19035,7 +19060,7 @@ function burnAreaChart() {
 
     /** Same needs-login formula as the agent-card Auth badge. */
     function _welcomeAgentNeedsLogin(a) {
-      return a.needsLogin === true || (a.authKnown === true && a.authAvailable !== true);
+      return _agentNeedsLogin(a);
     }
 
     // Checklist steps. `auto(data)` derives done-state live from the latest
