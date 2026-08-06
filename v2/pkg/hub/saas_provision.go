@@ -2243,6 +2243,17 @@ spec:
           value: "{{.SessionKey}}"
         - name: HIVE_SSO_KEY
           value: "{{.SSOKey}}"
+{{- if .IsNginxIngress}}
+        # HIVE_INGRESS_AUTHZ tells the Node proxy that an nginx ingress
+        # auth-proxy sits IN FRONT of this pod and per-hive-authorizes every
+        # /terminal request (auth-url=auth-check?hive={{.ID}}) before it ever
+        # reaches the proxy. Only set on the nginx lane. On the OpenShift-Route
+        # lane there is NO auth-proxy — the Route forwards straight to the pod —
+        # so this is unset and the proxy is the ONLY per-hive gate, which makes
+        # it fail CLOSED on an empty allowlist (see server.js). SECURITY (C3).
+        - name: HIVE_INGRESS_AUTHZ
+          value: "true"
+{{- end}}
 {{- if .AuthorizedUsers}}
         - name: HIVE_AUTHORIZED_USERS
           value: "{{.AuthorizedUsers}}"
@@ -2372,6 +2383,16 @@ metadata:
     cert-manager.io/cluster-issuer: {{.CertIssuer}}
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    # SECURITY (CWE-862, finding C3): the terminal opens a live shell inside a
+    # credential-holding pod, so it MUST enforce the SAME per-hive authorization
+    # the main ingress does — not merely "is the caller a signed-in hub user".
+    # Without this auth-url, any GitHub account that completes hub OAuth (the
+    # shared .hive.kubestellar.io cookie) reaches ANY tenant's /terminal. The
+    # auth-check endpoint verifies the caller against THIS hive's authorized
+    # users (user.Hives[{{.ID}}]) and 403s a user with no access to this hive.
+    nginx.ingress.kubernetes.io/auth-url: "https://hive.kubestellar.io/api/saas/auth-check?hive={{.ID}}&uri=$request_uri"
+    nginx.ingress.kubernetes.io/auth-signin: "https://hive.kubestellar.io/login?redirect=$scheme://$http_host$request_uri"
+    nginx.ingress.kubernetes.io/auth-response-headers: "X-Hive-User,X-Hive-Role,X-Hive-Proxy-Auth"
 spec:
   ingressClassName: {{.IngressClass}}
   rules:
