@@ -182,6 +182,14 @@ type Manager struct {
 	// same deadlock reasoning as bobAPIKeyResolver above.
 	bobKeySourceResolver atomic.Pointer[func() string]
 
+	// auditSink, when set, receives agent lifecycle events (start, stop,
+	// launch failure, backend/model change) for durable, queryable recording
+	// in the dashboard's audit store. Nil in tests / non-dashboard setups, in
+	// which case every audit call is a no-op. See pkg/agent/audit.go for why
+	// this is an injected interface rather than a direct pkg/dashboard import,
+	// and why it is an atomic.Pointer rather than m.mu-guarded state.
+	auditSink atomic.Pointer[AuditSink]
+
 	inferenceRouteCallback      func(agentName, backend, model string)
 	clearInferenceRouteCallback func(agentName string)
 
@@ -594,6 +602,16 @@ func (m *Manager) Start(ctx context.Context, name string) error {
 	m.sanitizeGitRemotes(agent)
 
 	if err := m.ensureTmuxSession(agent); err != nil {
+		// No tmux session means no pane to announce into, so this failure
+		// cannot ride announceLaunchFailureInPane like the park-and-return
+		// branches do — record it here or it stays invisible.
+		m.audit(AuditAgentStartFailed, name, auditFields(
+			"outcome", "failure",
+			"backend", agent.effectiveBackend(),
+			"model", agent.effectiveModel(),
+			"error", err.Error(),
+			"stage", "tmux_session",
+		))
 		return err
 	}
 
@@ -1308,6 +1326,12 @@ func (m *Manager) launchInTmux(ctx context.Context, agent *AgentProcess) error {
 		"mode", mode.String(),
 		"session", agent.tmuxSession,
 	)
+	m.audit(AuditAgentStarted, agent.Name, auditFields(
+		"outcome", "success",
+		"backend", backend,
+		"model", model,
+		"mode", mode.String(),
+	))
 
 	agentCtx, cancel := context.WithCancel(ctx)
 	agent.cancel = cancel
@@ -2282,6 +2306,11 @@ func (m *Manager) Stop(name string) error {
 
 	agent.State = StateStopped
 	m.logger.Info("audit: agent stopped", "name", name)
+	m.audit(AuditAgentStopped, name, auditFields(
+		"outcome", "success",
+		"backend", agent.effectiveBackend(),
+		"model", agent.effectiveModel(),
+	))
 
 	return nil
 }
@@ -2319,6 +2348,12 @@ func (m *Manager) AddAgent(name string, cfg config.AgentConfig) {
 	}
 	m.idToName[agentID] = name
 	m.logger.Info("audit: agent added", "name", name, "id", agentID, "uid", agentUID)
+	m.audit(AuditAgentAdded, name, auditFields(
+		"outcome", "success",
+		"backend", cfg.Backend,
+		"model", cfg.Model,
+		"id", agentID,
+	))
 }
 
 // UpdateConfig updates the stored config for a running agent process so that
@@ -2353,6 +2388,12 @@ func (m *Manager) RemoveAgent(name string) {
 	delete(m.idToName, agent.ID)
 	delete(m.agents, name)
 	m.logger.Info("audit: agent removed", "name", name, "id", agent.ID)
+	m.audit(AuditAgentRemoved, name, auditFields(
+		"outcome", "success",
+		"backend", agent.effectiveBackend(),
+		"model", agent.effectiveModel(),
+		"id", agent.ID,
+	))
 }
 
 // inferencePaneCheck pairs an inference agent name with its captured visible
@@ -2885,10 +2926,44 @@ func launchFailureBanner(msg string) string {
 // pane write on the launch path — a missing session must not turn a parked
 // agent into a crashed manager. Caller holds m.mu (same discipline as
 // launchInTmux, which is its only caller).
+// It is also the single chokepoint every park-and-return branch already
+// passes through, so recording the durable audit event here — rather than
+// once per branch — means no launch failure can be added later that silently
+// skips the audit log. This is the watsonx case: an agent configured with a
+// backend the image does not support failed at every launch for a day, WARN-
+// logged inside the pod and invisible in the Audit Log UI.
 func (m *Manager) announceLaunchFailureInPane(agent *AgentProcess, msg string) {
 	agent.lastLaunchFailureBanner = launchFailureBanner(msg)
 	m.tmuxSendLiteralForAgent(agent, agent.lastLaunchFailureBanner)
 	m.tmuxSendKeysForAgent(agent, "Enter")
+
+	m.audit(AuditAgentStartFailed, agent.Name, auditFields(
+		"outcome", "failure",
+		"backend", agent.effectiveBackend(),
+		"model", agent.effectiveModel(),
+		"error", agent.LastError,
+	))
+}
+
+// effectiveBackend is the backend this agent will actually launch with: the
+// per-agent override when set, otherwise its configured backend.
+func (a *AgentProcess) effectiveBackend() string {
+	if a.BackendOverride != "" {
+		return a.BackendOverride
+	}
+	return a.Config.Backend
+}
+
+// effectiveModel is the model this agent will actually launch with: the
+// per-agent override when set, otherwise its configured model. Returns the
+// raw (un-normalized) name — the audit log should show what was ASKED for,
+// since a bad model name is exactly the kind of misconfiguration being
+// audited.
+func (a *AgentProcess) effectiveModel() string {
+	if a.ModelOverride != "" {
+		return a.ModelOverride
+	}
+	return a.Config.Model
 }
 
 // dismissInferencePrompts polls the tmux pane for Claude Code interactive
@@ -3988,6 +4063,12 @@ func (m *Manager) runCopilotDiagnostic(ctx context.Context, agent *AgentProcess)
 			m.logger.Warn("diagnostic: timed out waiting for copilot error output", "agent", agent.Name)
 			agent.LastError = "copilot hung with no output (diagnostic timed out)"
 			agent.State = StateFailed
+			m.audit(AuditAgentStartFailed, agent.Name, auditFields(
+				"outcome", "failure",
+				"backend", agent.effectiveBackend(),
+				"model", agent.effectiveModel(),
+				"error", agent.LastError,
+			))
 			return
 		case <-ticker.C:
 			output := m.captureTmuxPaneForAgent(agent)
@@ -4937,6 +5018,13 @@ func (m *Manager) Pause(name, trigger, reason string) error {
 		"backend", agent.Config.Backend,
 		"restart_count", agent.RestartCount,
 	)
+	m.audit(AuditAgentPaused, name, auditFields(
+		"outcome", "success",
+		"backend", agent.effectiveBackend(),
+		"model", agent.effectiveModel(),
+		"trigger", trigger,
+		"reason", reason,
+	))
 	return nil
 }
 
@@ -4960,6 +5048,11 @@ func (m *Manager) Resume(ctx context.Context, name, trigger, reason string) erro
 
 	prevTrigger := agent.PausedTrigger
 	prevReason := agent.PausedReason
+	// Snapshot backend/model while m.mu is still held — the audit call below
+	// runs after the deliberate early Unlock, where touching agent fields
+	// would be an unsynchronized read.
+	resumeBackend := agent.effectiveBackend()
+	resumeModel := agent.effectiveModel()
 	agent.Paused = false
 	agent.Config.Paused = false
 	if m.persistPauseCallback != nil {
@@ -4985,6 +5078,13 @@ func (m *Manager) Resume(ctx context.Context, name, trigger, reason string) erro
 		"prev_trigger", prevTrigger,
 		"prev_reason", prevReason,
 	)
+	m.audit(AuditAgentResumed, name, auditFields(
+		"outcome", "success",
+		"backend", resumeBackend,
+		"model", resumeModel,
+		"trigger", trigger,
+		"reason", reason,
+	))
 	if needsRelaunch {
 		if err := m.ensureTmuxSession(agent); err != nil {
 			return err
@@ -5367,9 +5467,19 @@ func (m *Manager) PinModel(name, model string) error {
 		return fmt.Errorf("agent %s not found", name)
 	}
 
+	prevModel := agent.effectiveModel()
 	agent.PinnedModel = model
 	agent.ModelOverride = model
 	m.logger.Info("agent model pinned", "name", name, "model", model)
+	if prevModel != model {
+		m.audit(AuditAgentModelSet, name, auditFields(
+			"outcome", "success",
+			"backend", agent.effectiveBackend(),
+			"model", model,
+			"previous_model", prevModel,
+			"trigger", "pin",
+		))
+	}
 	return nil
 }
 
@@ -5404,8 +5514,19 @@ func (m *Manager) SetModelOverride(name, model string) error {
 		m.logger.Info("agent model pin retargeted by user switch", "name", name, "model", model)
 	}
 
+	prevModel := agent.effectiveModel()
 	agent.ModelOverride = model
 	m.logger.Info("agent model override set", "name", name, "model", model)
+	// State CHANGES only — the governor re-asserts the current model on every
+	// evaluation cycle, so auditing unchanged writes would flood the ring.
+	if prevModel != model {
+		m.audit(AuditAgentModelSet, name, auditFields(
+			"outcome", "success",
+			"backend", agent.effectiveBackend(),
+			"model", model,
+			"previous_model", prevModel,
+		))
+	}
 
 	effectiveBackend := agent.Config.Backend
 	if agent.BackendOverride != "" {
@@ -5436,8 +5557,22 @@ func (m *Manager) SetBackendOverride(name, backend string) error {
 		return err
 	}
 
+	// Captured after validation so a rejected switch records no audit event:
+	// the override is only mutated below, once the backend is known routable.
+	prevBackend := agent.effectiveBackend()
 	agent.BackendOverride = backend
 	m.logger.Info("agent backend override set", "name", name, "backend", backend)
+	// Record only a real transition: /switch/{backend} is also re-applied on
+	// config reload with the value already in effect, and auditing those
+	// no-ops would bury the actual operator changes.
+	if prevBackend != backend {
+		m.audit(AuditAgentBackendSet, name, auditFields(
+			"outcome", "success",
+			"backend", backend,
+			"model", agent.effectiveModel(),
+			"previous_backend", prevBackend,
+		))
+	}
 
 	if m.routableBackend(backend) && m.inferenceRouteCallback != nil {
 		model := agent.ModelOverride
