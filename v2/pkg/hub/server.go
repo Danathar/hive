@@ -3267,7 +3267,7 @@ func sanitizePublicURLSelfCheck(in *PublicURLSelfCheck) *PublicURLSelfCheck {
 		return nil
 	}
 	status := sanitizeHeartbeatField(in.Status)
-	if status != PublicURLSelfCheckOK && status != PublicURLSelfCheckFail {
+	if status != PublicURLSelfCheckOK && status != PublicURLSelfCheckFail && status != PublicURLSelfCheckUnknown {
 		return nil
 	}
 	out := &PublicURLSelfCheck{
