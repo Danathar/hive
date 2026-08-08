@@ -13,10 +13,10 @@ import (
 )
 
 const (
-	webhookMaxBodyBytes     = 10 * 1024 * 1024
-	webhookSignatureHeader  = "X-Hub-Signature-256"
-	webhookEventHeader      = "X-GitHub-Event"
-	webhookSecretEnvVar     = "HIVE_WEBHOOK_SECRET"
+	webhookMaxBodyBytes    = 10 * 1024 * 1024
+	webhookSignatureHeader = "X-Hub-Signature-256"
+	webhookEventHeader     = "X-GitHub-Event"
+	webhookSecretEnvVar    = "HIVE_WEBHOOK_SECRET"
 )
 
 // WebhookReceiver handles GitHub webhook events and routes them to agents.
@@ -42,12 +42,17 @@ func (w *WebhookReceiver) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	}
 
 	secret := os.Getenv(webhookSecretEnvVar)
-	if secret != "" {
-		sig := r.Header.Get(webhookSignatureHeader)
-		if !verifyHMAC(body, sig, secret) {
-			http.Error(rw, "invalid signature", http.StatusUnauthorized)
-			return
-		}
+	if secret == "" {
+		// HIVE_WEBHOOK_SECRET is required. Accepting unsigned webhooks would allow
+		// any network-accessible client to trigger agent kicks. Fail closed.
+		http.Error(rw, "webhook secret not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	sig := r.Header.Get(webhookSignatureHeader)
+	if !verifyHMAC(body, sig, secret) {
+		http.Error(rw, "invalid signature", http.StatusUnauthorized)
+		return
 	}
 
 	eventType := r.Header.Get(webhookEventHeader)
