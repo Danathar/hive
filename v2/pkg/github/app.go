@@ -30,6 +30,22 @@ const (
 	// SEPARATE path and use agentTokenCachePerms — do not conflate the two.
 	tokenCachePerms = 0o600
 
+	// tokenMintTimeout hard-bounds every live App-JWT → installation-token
+	// exchange (CreateInstallationToken / GetInstallation). These calls are made
+	// with a bare gh.NewClient (no per-client Timeout) and are sometimes reached
+	// with an undeadlined process context (startup advisory-issue ensure, docs
+	// token refresh, appTransport.RoundTrip). On a firewalled / GHE-hosted spoke
+	// whose App is not yet installed (github.ibm.com unreachable, or the org has
+	// no installation) the underlying TCP/TLS connect can hang for minutes.
+	//
+	// That hang is the #2439 root cause: it froze the FIRST heartbeat attempt
+	// and blocked readiness (advisory-issue ensure runs before MarkReady), so
+	// livez/health deadline-exceeded, the pod crash-looped, and the hub stayed
+	// stuck "Upgrading" (it never received a fresh heartbeat with the new
+	// version). Bounding the mint turns "hang forever" into a fast, soft error
+	// the caller already treats as "App not usable → show install banner".
+	tokenMintTimeout = 8 * time.Second
+
 	// Per-agent scoped token caches. entrypoint.sh pre-creates each file as
 	// dev:hive-<agent> mode 0640 so the hive process (dev) can rewrite it in
 	// place and ONLY the owning agent's private group can read it — no chown
@@ -251,7 +267,7 @@ func (a *AppAuth) ScopedTokenForRepos(ctx context.Context, tier string, repos []
 			PullRequests: gh.Ptr("write"),
 			Metadata:     gh.Ptr("read"),
 		}
-	case "trusted":
+	case "trusted", "merger":
 		perms = &gh.InstallationPermissions{
 			Issues:       gh.Ptr("write"),
 			Contents:     gh.Ptr("write"),

@@ -644,11 +644,16 @@ func (s *Scheduler) buildMergeEligibleList() string {
 	if err != nil {
 		return "(none)\n"
 	}
+	return formatMergeEligibleData(data)
+}
+
+func formatMergeEligibleData(data []byte) string {
 	var payload struct {
 		Items []struct {
 			Number int    `json:"number"`
 			Repo   string `json:"repo"`
 			Title  string `json:"title"`
+			Queued bool   `json:"queued"`
 		} `json:"merge_eligible"`
 	}
 	if json.Unmarshal(data, &payload) != nil || len(payload.Items) == 0 {
@@ -656,7 +661,11 @@ func (s *Scheduler) buildMergeEligibleList() string {
 	}
 	var b strings.Builder
 	for _, pr := range payload.Items {
-		b.WriteString(fmt.Sprintf("  #%d %s — %s\n", pr.Number, pr.Repo, pr.Title))
+		queued := ""
+		if pr.Queued {
+			queued = " [queued for auto-merge]"
+		}
+		b.WriteString(fmt.Sprintf("  #%d %s%s — %s\n", pr.Number, pr.Repo, queued, pr.Title))
 	}
 	return b.String()
 }

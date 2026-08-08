@@ -210,6 +210,7 @@ type Server struct {
 	readyAt time.Time
 
 	githubAppMu         sync.RWMutex
+	githubConfigMu      sync.Mutex
 	githubAppRequired   bool
 	githubAppInstallURL string
 	githubAppPermIssue  string // non-empty when app is installed but lacks required permissions
@@ -272,10 +273,19 @@ type StatusPayload struct {
 	GitHubAppInstallURL string                 `json:"githubAppInstallURL,omitempty"`
 	GitHubAppPermIssue  string                 `json:"githubAppPermIssue,omitempty"`
 	GitHubAppState      string                 `json:"githubAppState,omitempty"`
-	GitHubBaseURL       string                 `json:"githubBaseURL,omitempty"`
-	InferenceBackends   []InferenceBackend     `json:"inferenceBackends,omitempty"`
-	SystemAlerts        []SystemAlert          `json:"systemAlerts,omitempty"`
-	HubBanner           *HubBannerState        `json:"hubBanner,omitempty"`
+	// GitHubAppInstallMissing is CONFIG TRUTH, independent of any auth probe
+	// or classification: a real App is named (app_id set, not the placeholder)
+	// but installation_id is 0. That state alone means every token is a
+	// countdown, so the install banner keys off this field FIRST — no recheck,
+	// classification, or raw-URL sniffing may gate it (the vllmd-13 reset left
+	// blank raw fields suppressing the banner while auth was not-installed).
+	GitHubAppInstallMissing bool               `json:"githubAppInstallMissing,omitempty"`
+	RepoTargetMisconfigured bool               `json:"repoTargetMisconfigured,omitempty"`
+	RepoTargetIssue         string             `json:"repoTargetIssue,omitempty"`
+	GitHubBaseURL           string             `json:"githubBaseURL,omitempty"`
+	InferenceBackends       []InferenceBackend `json:"inferenceBackends,omitempty"`
+	SystemAlerts            []SystemAlert      `json:"systemAlerts,omitempty"`
+	HubBanner               *HubBannerState    `json:"hubBanner,omitempty"`
 	// Platform surfaces the v4 spoke capabilities — the configured forge, the
 	// mint token service state, and the skills registry. It is additive and
 	// nil-safe: a github-only, mint-off hive with no skills dir still gets a
@@ -526,11 +536,15 @@ type FrontendBudget struct {
 }
 
 type FrontendCadence struct {
-	Agent string `json:"agent"`
-	Idle  string `json:"idle"`
-	Quiet string `json:"quiet"`
-	Busy  string `json:"busy"`
-	Surge string `json:"surge"`
+	Agent      string `json:"agent"`
+	Idle       string `json:"idle"`
+	Quiet      string `json:"quiet"`
+	Busy       string `json:"busy"`
+	Surge      string `json:"surge"`
+	IdleTitle  string `json:"idleTitle,omitempty"`
+	QuietTitle string `json:"quietTitle,omitempty"`
+	BusyTitle  string `json:"busyTitle,omitempty"`
+	SurgeTitle string `json:"surgeTitle,omitempty"`
 }
 
 type FrontendHold struct {
@@ -758,6 +772,7 @@ func (s *Server) registerCoreRoutes() {
 	s.mux.HandleFunc("GET /api/events", s.handleSSE)
 	s.mux.HandleFunc("POST /api/github-app/recheck", s.handleGitHubAppRecheck)
 	s.mux.HandleFunc("POST /api/github-app/install-clicked", s.handleGitHubAppInstallClicked)
+	s.mux.HandleFunc("GET /gh-setup", s.handleGitHubAppSetupCallback)
 	// SSO handoff: exchange a hub-minted, HMAC-signed token for a local session
 	// so a hub-authenticated user opens this (direct-route) spoke without a
 	// second GitHub device-flow login. Public path (see isPublicPath) because
@@ -1012,6 +1027,9 @@ func isPublicPath(path string) bool {
 		return true
 	case strings.HasPrefix(path, "/api/snapshot"):
 		return true
+	case path == "/api/style":
+		// Sanitized, same-origin CSS for public snapshot/read-only preview links.
+		return true
 	case path == "/contribute" || strings.HasPrefix(path, "/contribute/"):
 		return true
 	case path == "/api/contribute" || strings.HasPrefix(path, "/api/contribute/"):
@@ -1042,6 +1060,11 @@ func isPublicPath(path string) bool {
 		// token IS the credential. The handler itself verifies the token and
 		// the authorized_users allowlist before minting a session, so exposing
 		// the path unauthenticated does not weaken the allowlist gate.
+		return true
+	case path == "/gh-setup":
+		// GitHub App Setup URL return: GitHub redirects a fresh browser here
+		// after install, often without a hive session. The handler accepts only
+		// IDs verified by an App-JWT lookup against this app and this hive's org.
 		return true
 	default:
 		return false
@@ -1196,6 +1219,13 @@ func (s *Server) UpdateStatus(status *StatusPayload) {
 		status.ACMMLevel = detectACMMLevel(s.deps.Config)
 		status.ACMMPackAgents = buildACMMPackAgents(s.deps.Config)
 		status.GitHubBaseURL = s.deps.Config.GitHub.ResolvedBaseURL()
+		if issue := config.ValidateRepoTargets(s.deps.Config); issue != nil {
+			status.RepoTargetMisconfigured = true
+			status.RepoTargetIssue = issue.Message
+		} else {
+			status.RepoTargetMisconfigured = false
+			status.RepoTargetIssue = ""
+		}
 	}
 	status.ContributorPool = s.BuildContributorPoolStatus()
 
@@ -1205,6 +1235,30 @@ func (s *Server) UpdateStatus(status *StatusPayload) {
 	status.GitHubAppPermIssue = s.githubAppPermIssue
 	status.GitHubAppState = s.githubAppState
 	s.githubAppMu.RUnlock()
+
+	// CONFIG-TRUTH OVERRIDE, applied last so no probe-derived field can veto
+	// it: a real App with installation_id 0 must light the install banner the
+	// moment the page loads. The recheck loop's SetGitHubAppRequired state is
+	// probe-derived and can lag (or, after a "Reset Forge App", hold an empty
+	// install URL because the raw app_slug/base_url went blank); the RESOLVED
+	// config — the same values the Forge App tab displays — is what the banner
+	// must render. Operator-side classifications (key-missing/key-invalid/
+	// no-app-assigned) are preserved: only an empty state is filled in, and
+	// the placeholder app_id never reaches here (ConfiguredButUninstalled
+	// requires a real App).
+	if s.deps != nil && s.deps.Config != nil {
+		g := s.deps.Config.GitHub
+		if g.ConfiguredButUninstalled() {
+			status.GitHubAppInstallMissing = true
+			status.GitHubAppRequired = true
+			if status.GitHubAppState == "" {
+				status.GitHubAppState = githubAppStateNotInstalledToken
+			}
+		}
+		if status.GitHubAppRequired && status.GitHubAppInstallURL == "" {
+			status.GitHubAppInstallURL = g.AppInstallURL()
+		}
+	}
 
 	status.InferenceBackends = s.buildInferenceBackends()
 
@@ -1482,6 +1536,11 @@ func (s *Server) handleGitHubAppRecheck(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "recheck not configured", http.StatusNotImplemented)
 		return
 	}
+	ctx := r.Context()
+	if s.deps != nil && s.deps.Ctx != nil {
+		ctx = s.deps.Ctx
+	}
+	_, _ = s.AutoDiscoverGitHubInstallationID(ctx, true)
 	ok := s.RecheckGitHubApp()
 	w.Header().Set("Content-Type", "application/json")
 	if ok {
@@ -2298,12 +2357,30 @@ func agentCLIUnauthenticated(proc *agent.AgentProcess, authFn func(backend strin
 	if proc.NeedsLogin {
 		return true
 	}
-	if authFn == nil {
-		return false
-	}
 	backend := proc.Config.Backend
 	if proc.BackendOverride != "" {
 		backend = proc.BackendOverride
+	}
+	// METHOD GATE. An inference backend (litellm/vllm/llm-d) authenticates with
+	// an API key supplied by config — there is no interactive login and so no
+	// "needs login" state an operator could act on. Checking this BEFORE the
+	// probe stops a shared-credential miss from flagging an inference-backed
+	// agent that is running fine. See pkg/agent/authprobe.go for the full
+	// precedence rule.
+	if agent.IsInferenceBackend(backend) {
+		return false
+	}
+	// POSITIVE EVIDENCE beats absence-of-file: a running agent that the pane
+	// poller has NOT seen at a login prompt is working (the same signal deep
+	// health folds into `pass`), so a missing credentials file must not
+	// reclassify it. Only a non-running agent falls through to the probe. This
+	// is what stopped the empty shared credential path (per-agent-UID layout)
+	// from reporting healthy agents as needing login.
+	if proc.State == agent.StateRunning {
+		return false
+	}
+	if authFn == nil {
+		return false
 	}
 	available, known := authFn(backend)
 	return known && !available
@@ -2363,6 +2440,11 @@ func (s *Server) healthSummaryFor(status *StatusPayload, ready bool) map[string]
 	} else {
 		checks = append(checks, check{Name: "github_auth", Status: "fail", Detail: "no auth"})
 		fails++
+	}
+
+	if status != nil && status.RepoTargetMisconfigured {
+		checks = append(checks, check{Name: "repo_target", Status: "warn", Detail: status.RepoTargetIssue})
+		warns++
 	}
 
 	// 3. Agents
