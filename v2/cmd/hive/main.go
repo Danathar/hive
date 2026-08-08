@@ -937,6 +937,7 @@ func main() {
 	appAuthState := ghAuth.State
 	if ghClient != nil && len(cfg.Governor.Labels.Exempt) > 0 {
 		ghClient.SetExemptLabels(cfg.Governor.Labels.Exempt)
+		ghClient.SetAutoMergeLabel(cfg.Governor.Labels.AutoMerge)
 	}
 	// Load user token for advisory posting (comments on issues as the logged-in user)
 	var userGHClient atomic.Pointer[github.Client]
@@ -1388,6 +1389,7 @@ func main() {
 			ghClient.SetRepos(cfg.Project.Repos)
 			if len(cfg.Governor.Labels.Exempt) > 0 {
 				ghClient.SetExemptLabels(cfg.Governor.Labels.Exempt)
+				ghClient.SetAutoMergeLabel(cfg.Governor.Labels.AutoMerge)
 			}
 			if uc := userGHClient.Load(); uc != nil {
 				uc.SetRepos(cfg.Project.Repos)
@@ -1977,6 +1979,7 @@ func main() {
 			newClient := github.NewClientFromApp(newAppAuth, cfg.Project.Org, cfg.Project.Repos, logger)
 			if len(cfg.Governor.Labels.Exempt) > 0 {
 				newClient.SetExemptLabels(cfg.Governor.Labels.Exempt)
+				newClient.SetAutoMergeLabel(cfg.Governor.Labels.AutoMerge)
 			}
 
 			ghClient = newClient
@@ -2364,6 +2367,7 @@ func main() {
 					newClient := github.NewClientFromApp(newAppAuth, cfg.Project.Org, cfg.Project.Repos, logger)
 					if len(cfg.Governor.Labels.Exempt) > 0 {
 						newClient.SetExemptLabels(cfg.Governor.Labels.Exempt)
+						newClient.SetAutoMergeLabel(cfg.Governor.Labels.AutoMerge)
 					}
 					ghClient = newClient
 					appAuth = newAppAuth
@@ -3452,6 +3456,7 @@ func main() {
 				newClient := github.NewClientFromApp(newAppAuth, cfg.Project.Org, cfg.Project.Repos, logger)
 				if len(cfg.Governor.Labels.Exempt) > 0 {
 					newClient.SetExemptLabels(cfg.Governor.Labels.Exempt)
+					newClient.SetAutoMergeLabel(cfg.Governor.Labels.AutoMerge)
 				}
 				ghClient = newClient
 				appAuth = newAppAuth
@@ -4087,7 +4092,7 @@ func runEvalCycle(
 		atomicWrite("/data/last-actionable.json", data)
 	}
 
-	writeMergeEligible(actionable, actionable.Hold, cfg.Project.Org, logger)
+	writeMergeEligible(actionable, actionable.Hold, cfg.Project.Org, cfg.Governor.Labels.AutoMerge, logger)
 
 	shaResult, shaErr := ghClient.EnforceSHAHold(ctx, github.SHAHoldConfig{
 		PrimaryRepo:     cfg.Project.PrimaryRepo,
@@ -4929,12 +4934,13 @@ func applyDuplicatePRGuard(
 	github.ApplyDuplicatePRGuard(ctx, ghClient, claimLedger, hiveIdentity(cfg), actionable, logger)
 }
 
-func writeMergeEligible(actionable *github.ActionableResult, hold github.HoldResult, org string, logger *slog.Logger) {
+func writeMergeEligible(actionable *github.ActionableResult, hold github.HoldResult, org, autoMergeLabel string, logger *slog.Logger) {
 	holdSet := make(map[string]bool)
 	for _, h := range hold.Items {
 		key := fmt.Sprintf("%s/%d", h.Repo, h.Number)
 		holdSet[key] = true
 	}
+	autoMergeLabel = normalizedAutoMergeLabel(autoMergeLabel)
 
 	type eligiblePR struct {
 		Number int      `json:"number"`
@@ -5010,7 +5016,7 @@ func writeMergeEligible(actionable *github.ActionableResult, hold github.HoldRes
 			} else if l == "dco-signoff: no" {
 				dco = "no"
 			}
-			if strings.EqualFold(l, github.AutoMergeQueuedLabel) {
+			if l == autoMergeLabel {
 				queued = true
 			}
 		}
@@ -5050,6 +5056,13 @@ func writeMergeEligible(actionable *github.ActionableResult, hold github.HoldRes
 		return
 	}
 	atomicWrite(ciFailingPath, failData)
+}
+
+func normalizedAutoMergeLabel(label string) string {
+	if label = strings.TrimSpace(label); label != "" {
+		return label
+	}
+	return github.AutoMergeQueuedLabel
 }
 
 func atomicWrite(path string, data []byte) {
