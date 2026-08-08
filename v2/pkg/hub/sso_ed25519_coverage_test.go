@@ -26,7 +26,7 @@ func TestEd25519SSOKeysAndToken(t *testing.T) {
 		t.Fatalf("invalid public key hex %q", pubHex)
 	}
 	now := time.Unix(1_700_000_000, 0)
-	tok := MintSSOTokenEd25519(seed, "alice", "owner", "hosted-hive", now)
+	tok := MintSSOToken(seed, "alice", "owner", "hosted-hive", now)
 	parts := strings.Split(tok, ".")
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 		t.Fatalf("malformed ed25519 token %q", tok)
@@ -59,24 +59,12 @@ func TestEd25519SSOGuardsAndHiveSelection(t *testing.T) {
 		{"empty hive", seed, "alice", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := MintSSOTokenEd25519(tc.seed, tc.user, "owner", tc.hive, now); got != "" {
-				t.Fatalf("MintSSOTokenEd25519 = %q, want empty", got)
+			if got := MintSSOToken(tc.seed, tc.user, "owner", tc.hive, now); got != "" {
+				t.Fatalf("MintSSOToken = %q, want empty", got)
 			}
 		})
 	}
 	if ssoPublicKeyFromSeed("") != "" || ssoPublicKeyFromSeed("abcd") != "" || SSOSigningSeedFromMaster("") != "" {
 		t.Fatal("invalid or empty key material should fail closed")
-	}
-	if !hiveWantsEd25519SSO("hosted-kubestellar-console-4vkt", nil) {
-		t.Fatal("allowlisted v4 hive should request Ed25519 SSO")
-	}
-	if !hiveWantsEd25519SSO("other", &RegistryEntry{GitHash: "12c34"}) {
-		t.Fatal("short target git hash should request Ed25519 SSO")
-	}
-	if !hiveWantsEd25519SSO("other", &RegistryEntry{ImageRef: "ghcr.io/kubestellar/hive:12c34e5"}) {
-		t.Fatal("image ref containing target commit should request Ed25519 SSO")
-	}
-	if hiveWantsEd25519SSO("other", nil) || hiveWantsEd25519SSO("other", &RegistryEntry{GitHash: "deadbee", ImageRef: "latest"}) {
-		t.Fatal("unidentified hives must stay on legacy SSO")
 	}
 }
