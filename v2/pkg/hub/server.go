@@ -142,7 +142,11 @@ type RegistryEntry struct {
 	// DashboardURL. It is intentionally separate from the hub-side probe:
 	// private-network hives may be unreachable from the public hub while alive
 	// from their own cluster. Nil means an old spoke did not report it.
-	PublicURLSelfCheck *PublicURLSelfCheck   `json:"publicUrlSelfCheck,omitempty"`
+	PublicURLSelfCheck *PublicURLSelfCheck `json:"publicUrlSelfCheck,omitempty"`
+	// RouteExists is the spoke's in-cluster confirmation that an Ingress or
+	// OpenShift Route exists for DashboardURL's host. Nil means an old spoke
+	// did not report it; unknown means it could not verify (for example RBAC).
+	RouteExists        *RouteExistenceCheck  `json:"routeExists,omitempty"`
 	SnapshotURL        string                `json:"snapshotUrl,omitempty"`
 	ACMMLevel          int                   `json:"acmmLevel"`
 	AgentCount         int                   `json:"agentCount"`
@@ -1283,6 +1287,7 @@ func (s *HubServer) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		InferenceAuthError: sanitizeField(payload.InferenceAuthError),
 		DashboardURL:       payload.DashboardURL,
 		PublicURLSelfCheck: sanitizePublicURLSelfCheck(payload.PublicURLSelfCheck),
+		RouteExists:        sanitizeRouteExistenceCheck(payload.RouteExists),
 		SnapshotURL:        payload.SnapshotURL,
 		ACMMLevel:          clampInt(payload.ACMMLevel, 0, 6),
 		AgentCount: func() int {
@@ -3277,6 +3282,23 @@ func sanitizePublicURLSelfCheck(in *PublicURLSelfCheck) *PublicURLSelfCheck {
 		HTTPStatus: clampInt(in.HTTPStatus, 0, 599),
 	}
 	return out
+}
+
+func sanitizeRouteExistenceCheck(in *RouteExistenceCheck) *RouteExistenceCheck {
+	if in == nil {
+		return nil
+	}
+	status := sanitizeHeartbeatField(in.Status)
+	if status != RouteExistenceFound && status != RouteExistenceMissing && status != RouteExistenceUnknown {
+		return nil
+	}
+	return &RouteExistenceCheck{
+		Status:    status,
+		CheckedAt: sanitizeHeartbeatField(in.CheckedAt),
+		Host:      sanitizeHeartbeatField(in.Host),
+		Kind:      sanitizeHeartbeatField(in.Kind),
+		Error:     sanitizeProseField(in.Error),
+	}
 }
 
 // sanitizeImageRef sanitizes a container image reference reported by a spoke.
