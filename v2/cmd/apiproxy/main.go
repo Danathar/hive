@@ -14,6 +14,7 @@ import (
 
 func main() {
 	port := flag.Int("port", 9000, "port to listen on")
+	host := flag.String("host", "127.0.0.1", "host address to listen on (default localhost; set to 0.0.0.0 to expose externally)")
 	upstream := flag.String("upstream", "https://api.anthropic.com", "upstream API URL")
 	logFile := flag.String("log", "", "log file path (default: stdout)")
 	flag.Parse()
@@ -62,13 +63,16 @@ func main() {
 	authToken := os.Getenv("PROXY_AUTH_TOKEN")
 	if authToken == "" {
 		authToken = os.Getenv("ANTHROPIC_API_KEY")
+		if authToken != "" {
+			log.Println("[sec-check WARNING] PROXY_AUTH_TOKEN is unset; falling back to ANTHROPIC_API_KEY. Unauthenticated callers will be granted the host Anthropic key. Set PROXY_AUTH_TOKEN to restrict access.")
+		}
 	}
 	proxy, err := apiproxy.New(*upstream, handler, authToken)
 	if err != nil {
 		log.Fatalf("failed to create proxy: %v", err)
 	}
 
-	addr := fmt.Sprintf(":%d", *port)
+	addr := fmt.Sprintf("%s:%d", *host, *port)
 	log.Printf("[apiproxy] listening on %s → %s", addr, *upstream)
 	if err := http.ListenAndServe(addr, proxy); err != nil {
 		log.Fatalf("server error: %v", err)
