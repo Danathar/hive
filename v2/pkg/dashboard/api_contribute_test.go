@@ -163,6 +163,21 @@ func TestContributeLanding(t *testing.T) {
 	if !bytes.Contains(body, []byte("Default shown: macOS + Claude Code + containerized mode")) {
 		t.Error("server-rendered fallback command block missing default marker comment")
 	}
+
+	// #2846: multi-hub contributor sessions must stay discoverable from the
+	// onboarding page, including the ordering rule for paired tokens.
+	for _, want := range [][]byte{
+		[]byte(`id="multi-hub-note"`),
+		[]byte("Contribute to multiple hives"),
+		[]byte("HIVE_HUB</code> to comma-separated WebSocket URLs"),
+		[]byte("HIVE_REGISTRATION_TOKEN</code> to the matching comma-separated tokens in the same order"),
+		[]byte("one CLI/tmux session"),
+		[]byte("github.com/kubestellar/hive/pull/2846"),
+	} {
+		if !bytes.Contains(body, want) {
+			t.Errorf("landing page missing multi-hub help text %q", want)
+		}
+	}
 }
 
 // TestContributeLandingHasOpsTab pins the additive tab chrome: the landing page
