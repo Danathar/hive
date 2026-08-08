@@ -12,7 +12,6 @@ const assert = require('assert');
 const Module = require('module');
 const path = require('path');
 const fs = require('fs');
-const os = require('os');
 
 // Set for the whole run, not just during module load: the relay checks it at
 // CALL time in sleepMs() to skip its busy-wait, and the restart paths sleep for
@@ -48,6 +47,7 @@ function loadRelay({ backend = 'copilot', model = '', cliStates = ['ready'], pro
       // Panes that getCLIState()/checkTmuxIdle() classify per backend.
       if (state === 'ready') return '/ commands for help\n';
       if (state === 'working') return '/ commands for help\nesc cancel\n';
+      if (typeof state === 'string' && state.includes('\n')) return state;
       return 'dev@host:~$ \n';
     }
     if (/cmdline|ps -eo/.test(cmd)) {
@@ -105,9 +105,14 @@ function loadRelay({ backend = 'copilot', model = '', cliStates = ['ready'], pro
   process.env.GOOSE_MODEL = '';
   process.env.HIVE_AGENT_SESSION = 'contributor';
   process.env.CONTRIBUTOR_MODE = mode;
+  Object.assign(process.env, env);
 
-  // Keep the relay's task-file write out of the real /tmp path used in prod.
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-test-'));
+  // Keep the relay's task-file/token writes out of the real prod paths.
+  const scratchRoot = path.join(__dirname, '..', '.relay-test-tmp');
+  fs.mkdirSync(scratchRoot, { recursive: true });
+  const tmpDir = fs.mkdtempSync(path.join(scratchRoot, 'relay-test-'));
+  process.env.HIVE_TASK_FILE = path.join(tmpDir, 'contributor-task.json');
+  process.env.HIVE_GH_TOKEN_CACHE = path.join(tmpDir, 'gh-token.cache');
   // Point the headless status file at the test's tmp dir so probe writes don't
   // clobber a real one and can be asserted on.
   const headlessStatusFile = statusFile || path.join(tmpDir, 'headless-status.json');
@@ -150,6 +155,7 @@ function loadRelay({ backend = 'copilot', model = '', cliStates = ['ready'], pro
 
 function teardown(relay) {
   try { relay.cleanup(); } catch (_) {}
+  try { fs.rmSync(relay.__tmpDir, { recursive: true, force: true }); } catch (_) {}
 }
 
 const tests = [];
@@ -518,6 +524,281 @@ test('restart backoff grows and is capped', () => {
 });
 
 // ---------------------------------------------------------------------------
+// kubestellar/hive#2844 — interactive completion detection must distinguish a
+// finished turn from a backend prompt that is waiting for human input.
+// ---------------------------------------------------------------------------
+
+test('interactive pane classifier distinguishes complete, blocked, and working states', () => {
+  const relay = loadRelay({ backend: 'goose' });
+  try {
+    const fixtures = [
+      {
+        name: 'finished turn',
+        pane: 'Implemented the fix and opened a PR.\n> Enter to send\n',
+        want: relay.PANE_STATE_IDLE_COMPLETE,
+      },
+      {
+        name: 'finished turn with numbered summary',
+        pane: 'Completed:\n1. Added tests\n2. Ran validation\n> Enter to send\n',
+        want: relay.PANE_STATE_IDLE_COMPLETE,
+      },
+      {
+        name: 'finished turn mentioning permission error',
+        pane: 'Fixed the permission error and added regression coverage.\n> Enter to send\n',
+        want: relay.PANE_STATE_IDLE_COMPLETE,
+      },
+      {
+        name: 'finished turn after answered confirmation',
+        pane: 'Continue with this command? [y/n]\ny\nDone.\n> Enter to send\n',
+        want: relay.PANE_STATE_IDLE_COMPLETE,
+      },
+      {
+        name: 'question with trailing question mark',
+        pane: 'Should I open a pull request for this change?\n> \n',
+        want: relay.PANE_STATE_BLOCKED_ON_HUMAN,
+      },
+      {
+        name: 'numbered option menu',
+        pane: 'Choose how to proceed:\n1. Open a PR\n2. File a follow-up issue\n> \n',
+        want: relay.PANE_STATE_BLOCKED_ON_HUMAN,
+      },
+      {
+        name: 'yes/no confirmation',
+        pane: 'Continue with these changes? [y/n]\n> \n',
+        want: relay.PANE_STATE_BLOCKED_ON_HUMAN,
+      },
+      {
+        name: 'permission prompt',
+        pane: 'Allow command to run?\n[y/n]\n> \n',
+        want: relay.PANE_STATE_BLOCKED_ON_HUMAN,
+      },
+      {
+        name: 'permission prompt with working verb',
+        pane: 'Approve running this command? [y/n]\n> \n',
+        want: relay.PANE_STATE_BLOCKED_ON_HUMAN,
+      },
+      {
+        name: 'permission prompt without idle input chrome',
+        pane: 'Bypass Permissions mode\n❯ 1. No, exit\n  2. Yes, I accept\nEnter to confirm\n',
+        want: relay.PANE_STATE_BLOCKED_ON_HUMAN,
+      },
+      {
+        name: 'actively working',
+        pane: 'calling tool github.create_pull_request\n> Enter to send\n',
+        want: relay.PANE_STATE_WORKING,
+      },
+    ];
+
+    for (const tc of fixtures) {
+      assert.strictEqual(relay.classifyTmuxPane(tc.pane), tc.want, tc.name);
+    }
+  } finally { teardown(relay); }
+});
+
+test('claude bypass-permissions idle footer is not itself a blocked prompt', () => {
+  const relay = loadRelay({ backend: 'claude' });
+  try {
+    const pane = '✻ Worked for 1s\n❯ \n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n';
+    assert.strictEqual(relay.classifyTmuxPane(pane), relay.PANE_STATE_IDLE_COMPLETE);
+  } finally { teardown(relay); }
+});
+
+test('blocked interactive panes report attention instead of task_complete', () => {
+  const blockedPane = 'Should I open a pull request for this change?\n> \n';
+  const relay = loadRelay({ backend: 'goose', cliStates: [blockedPane, blockedPane] });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 'ct-blocked');
+    relay.__crashTick();
+
+    assert.ok(!relay.__sent.some(m => m.type === 'task_complete'),
+      'blocked panes must never be reported as completed');
+    const progress = relay.__sent.find(m => m.type === 'task_progress' && m.status === 'blocked_on_human');
+    assert.ok(progress, `expected blocked_on_human progress, got: ${JSON.stringify(relay.__sent)}`);
+    assert.strictEqual(progress.attention, true, 'blocked status must request human attention');
+    assert.ok(relay.getCurrentTask(), 'the task must remain active while waiting for a human');
+  } finally { teardown(relay); }
+});
+
+// ---------------------------------------------------------------------------
+// Multi-hub (kubestellar/hive#multi-hive) — one relay/CLI session subscribed
+// to more than one hub via comma-separated HIVE_HUB/HIVE_REGISTRATION_TOKEN.
+// ---------------------------------------------------------------------------
+
+const MULTI_HUB_ENV = {
+  HIVE_HUB: 'wss://hub-a.example/contribute,wss://hub-b.example/contribute',
+  HIVE_REGISTRATION_TOKEN: 'tok-a,tok-b',
+};
+
+function attachHubSinks(relay) {
+  const hubs = relay.getHubs();
+  const sentA = [], sentB = [];
+  hubs[0].ws = { readyState: 1, send: p => sentA.push(JSON.parse(p)) };
+  hubs[1].ws = { readyState: 1, send: p => sentB.push(JSON.parse(p)) };
+  return { hubs, sentA, sentB };
+}
+
+function withImmediateTimers(fn) {
+  const origSetTimeout = global.setTimeout;
+  global.setTimeout = (cb) => { cb(); return 0; };
+  try { fn(); } finally { global.setTimeout = origSetTimeout; }
+}
+
+test('HIVE_HUB/HIVE_REGISTRATION_TOKEN comma lists parse into one hub per entry, matched by position', () => {
+  const relay = loadRelay({ env: MULTI_HUB_ENV });
+  try {
+    const hubs = relay.getHubs();
+    assert.strictEqual(hubs.length, 2);
+    assert.ok(hubs[0].url.includes('hub-a.example'));
+    assert.ok(hubs[1].url.includes('hub-b.example'));
+    assert.strictEqual(hubs[0].regToken, 'tok-a');
+    assert.strictEqual(hubs[1].regToken, 'tok-b');
+  } finally { teardown(relay); }
+});
+
+test('only the active hub is sent ready on auth_ok; the other waits its turn', () => {
+  const relay = loadRelay({ env: MULTI_HUB_ENV });
+  try {
+    const { hubs, sentA, sentB } = attachHubSinks(relay);
+
+    relay.handleMessage(JSON.stringify({ type: 'auth_ok', contributor_id: 'c1', trust_tier: 'contributor' }), hubs[0]);
+    assert.deepStrictEqual(sentA.map(m => m.type), ['ready']);
+    assert.deepStrictEqual(sentB.map(m => m.type), []);
+
+    relay.handleMessage(JSON.stringify({ type: 'auth_ok', contributor_id: 'c1', trust_tier: 'contributor' }), hubs[1]);
+    assert.deepStrictEqual(sentB.map(m => m.type), [], 'non-active hub stays silent on its own auth_ok');
+  } finally { teardown(relay); }
+});
+
+test('auth_failed on the active hub advances polling to an already-authenticated hub', () => {
+  const relay = loadRelay({ env: MULTI_HUB_ENV });
+  try {
+    const { hubs, sentA, sentB } = attachHubSinks(relay);
+
+    relay.handleMessage(JSON.stringify({ type: 'auth_ok', contributor_id: 'c1', trust_tier: 'contributor' }), hubs[1]);
+    assert.deepStrictEqual(sentB.map(m => m.type), [], 'non-active hub waits before the active hub fails');
+
+    relay.handleMessage(JSON.stringify({ type: 'auth_failed', reason: 'bad token' }), hubs[0]);
+    assert.deepStrictEqual(sentA.map(m => m.type), []);
+    assert.deepStrictEqual(sentB.map(m => m.type), ['ready'], 'polling moved to the authenticated remaining hub');
+  } finally { teardown(relay); }
+});
+
+test('a task_assign is remembered by hub, and a rejection while busy is routed to the ASKING hub', () => {
+  const relay = loadRelay({ env: MULTI_HUB_ENV });
+  try {
+    const { hubs, sentA, sentB } = attachHubSinks(relay);
+    withImmediateTimers(() => {
+      relay.handleMessage(JSON.stringify({ type: 'task_unavailable', reason: 'no_work' }), hubs[0]);
+    });
+
+    relay.handleMessage(JSON.stringify({ type: 'task_assign', task_id: 't1', kind: 'issue', repo: 'foo/bar', number: 1, title: 'x' }), hubs[1]);
+    const task = relay.getCurrentTask();
+    assert.strictEqual(task._hub, hubs[1], 'currentTask remembers which hub assigned it');
+    assert.ok(sentB.some(m => m.type === 'task_accepted'), 'task_accepted went to the assigning hub');
+    assert.strictEqual(sentA.filter(m => m.type === 'task_accepted').length, 0);
+
+    sentA.length = 0;
+    relay.handleMessage(JSON.stringify({ type: 'task_assign', task_id: 't2', kind: 'issue', repo: 'foo/bar', number: 2, title: 'y' }), hubs[0]);
+    assert.ok(sentA.some(m => m.type === 'task_failed' && m.reason === 'Already has active task'),
+      'busy-rejection went to the hub that just asked, not silently dropped or misrouted to the active-task hub');
+    assert.strictEqual(sentB.filter(m => m.type === 'task_failed').length, 0);
+  } finally { teardown(relay); }
+});
+
+test('an idle non-active hub cannot assign work until the poll slot reaches it', () => {
+  const relay = loadRelay({ env: MULTI_HUB_ENV });
+  try {
+    const { hubs, sentB } = attachHubSinks(relay);
+
+    relay.handleMessage(JSON.stringify({ type: 'task_assign', task_id: 't2', kind: 'issue', repo: 'foo/bar', number: 2, title: 'y' }), hubs[1]);
+
+    assert.strictEqual(relay.getCurrentTask(), null);
+    assert.ok(sentB.some(m => m.type === 'task_failed' && m.reason === 'Hub is not the active polling slot'),
+      'unexpected assignment must be rejected back to the hub that sent it');
+  } finally { teardown(relay); }
+});
+
+test('token_refresh, task_revoke, and blocked progress only affect the hub that owns the active task', () => {
+  const blockedPane = 'Should I open a pull request for this change?\n> \n';
+  const relay = loadRelay({ backend: 'goose', cliStates: [blockedPane, blockedPane], env: MULTI_HUB_ENV });
+  try {
+    const { hubs, sentA, sentB } = attachHubSinks(relay);
+
+    relay.handleMessage(JSON.stringify({ type: 'task_assign', task_id: 't1', kind: 'issue', repo: 'foo/bar', number: 1, title: 'x' }), hubs[0]);
+    const tokenPath = path.join(relay.__tmpDir, 'gh-token.cache');
+
+    relay.handleMessage(JSON.stringify({ type: 'token_refresh', github_token: 'hub-b-token' }), hubs[1]);
+    assert.strictEqual(fs.existsSync(tokenPath), false, 'non-owning hub must not overwrite the active task token');
+
+    relay.__crashTick();
+    assert.ok(sentA.some(m => m.type === 'task_progress' && m.status === 'blocked_on_human'),
+      'blocked_on_human progress must go to the owning hub');
+    assert.strictEqual(sentB.filter(m => m.type === 'task_progress').length, 0,
+      'blocked_on_human progress must not leak to the non-owning hub');
+
+    relay.handleMessage(JSON.stringify({ type: 'task_revoke', task_id: 't1', reason: 'wrong hub' }), hubs[1]);
+    assert.strictEqual(relay.getCurrentTask().task_id, 't1', 'non-owning hub must not revoke the active task');
+
+    relay.handleMessage(JSON.stringify({ type: 'token_refresh', github_token: 'hub-a-token' }), hubs[0]);
+    assert.strictEqual(fs.readFileSync(tokenPath, 'utf8'), 'hub-a-token');
+
+    relay.handleMessage(JSON.stringify({ type: 'task_revoke', task_id: 't1', reason: 'owner revoke' }), hubs[0]);
+    assert.strictEqual(relay.getCurrentTask(), null);
+    assert.ok(sentA.some(m => m.type === 'ready'), 'owning hub is asked for work after its revoke');
+    assert.strictEqual(sentB.filter(m => m.type === 'ready').length, 0);
+  } finally { teardown(relay); }
+});
+
+test('task_unavailable on the active hub rotates the poll slot to the next hub', () => {
+  const relay = loadRelay({ env: MULTI_HUB_ENV });
+  try {
+    const { hubs, sentA, sentB } = attachHubSinks(relay);
+
+    relay.handleMessage(JSON.stringify({ type: 'auth_ok', contributor_id: 'c1', trust_tier: 'contributor' }), hubs[0]);
+    assert.deepStrictEqual(sentA.map(m => m.type), ['ready']);
+
+    withImmediateTimers(() => {
+      relay.handleMessage(JSON.stringify({ type: 'task_unavailable', reason: 'no_work' }), hubs[0]);
+    });
+    assert.deepStrictEqual(sentB.map(m => m.type), ['ready'], 'rotation sent ready to hub B, not hub A again');
+  } finally { teardown(relay); }
+});
+
+test('currentTask stays JSON-serializable after task_assign attaches its owning hub', () => {
+  const relay = loadRelay({ env: MULTI_HUB_ENV });
+  try {
+    const { hubs } = attachHubSinks(relay);
+    hubs[0].heartbeatInterval = setInterval(() => {}, 999999);
+    hubs[1].reconnectTimer = setTimeout(() => {}, 999999);
+    try {
+      withImmediateTimers(() => {
+        relay.handleMessage(JSON.stringify({ type: 'task_unavailable', reason: 'no_work' }), hubs[0]);
+      });
+      relay.handleMessage(JSON.stringify({ type: 'task_assign', task_id: 't1', kind: 'issue', repo: 'foo/bar', number: 1, title: 'x' }), hubs[1]);
+      assert.ok(relay.getCurrentTask(), 'task was accepted before serializing');
+      assert.doesNotThrow(() => JSON.stringify(relay.getCurrentTask()), 'currentTask must serialize even with its _hub set');
+    } finally {
+      clearInterval(hubs[0].heartbeatInterval);
+      clearTimeout(hubs[1].reconnectTimer);
+    }
+  } finally { teardown(relay); }
+});
+
+test('a currentTask with no recorded hub still reaches the hub', () => {
+  const relay = loadRelay({ env: MULTI_HUB_ENV });
+  try {
+    const { sentA } = attachHubSinks(relay);
+
+    relay.setCurrentTask({ task_id: 'pr-review-1', kind: 'review', repo: 'foo/bar', number: 0, title: 'Review open PRs' });
+    relay.failCurrentTask('done reviewing');
+
+    assert.ok(sentA.some(m => m.type === 'task_failed' && m.task_id === 'pr-review-1'),
+      'frames for a hubless currentTask must fall back to the active hub, not be dropped');
+  } finally { teardown(relay); }
+});
+
+// ---------------------------------------------------------------------------
 // kubestellar/hive#2538 — headless (non-interactive) delivery mode.
 //
 // A task must reach the backend CLI through a one-shot invocation (execFile),
@@ -618,9 +899,11 @@ test('a headless timeout kill is reported as a failure, not a completion', () =>
 });
 
 test('headless refuses an unsupported backend loudly instead of stalling', () => {
-  const relay = loadRelay({ backend: 'goose', mode: 'headless' });
+  // bob drives an interactive TUI with no known one-shot entry point. (goose
+  // used to be the example here, but it gained one — see the table test below.)
+  const relay = loadRelay({ backend: 'bob', mode: 'headless' });
   try {
-    assert.strictEqual(relay.headlessSupportsBackend(), false, 'goose has no one-shot mode');
+    assert.strictEqual(relay.headlessSupportsBackend(), false, 'bob has no one-shot mode');
     assignHeadlessTask(relay);
     // No CLI was ever spawned...
     assert.strictEqual(relay.__execFileCalls.length, 0, 'an unsupported backend must not spawn a CLI');
@@ -632,26 +915,77 @@ test('headless refuses an unsupported backend loudly instead of stalling', () =>
   } finally { teardown(relay); }
 });
 
+// Enumerates every backend the relay reasons about, so adding one forces an
+// explicit decision about its headless invocation rather than silently
+// inheriting "unsupported". `tail` is the exact trailing argv (one-shot tokens
+// + prompt); null means the backend has no non-interactive entry point.
 test('buildHeadlessArgv maps each supported backend to its one-shot invocation', () => {
-  const claude = loadRelay({ backend: 'claude', mode: 'headless' });
-  try {
-    const a = claude.buildHeadlessArgv('do the thing');
-    assert.strictEqual(a.bin, 'claude');
-    assert.ok(a.args.includes('-p') && a.args[a.args.length - 1] === 'do the thing');
-  } finally { teardown(claude); }
+  const PROMPT = 'do the thing';
+  for (const tc of [
+    { backend: 'claude', tail: ['-p', PROMPT] },
+    { backend: 'litellm', tail: ['-p', PROMPT] },
+    { backend: 'copilot', tail: ['-p', PROMPT] },
+    { backend: 'codex', tail: ['exec', PROMPT] },
+    // goose needs its `run` sub-command AND -t (whose VALUE is the prompt) —
+    // two leading tokens, unlike every other entry (#2828).
+    { backend: 'goose', tail: ['run', '--no-session', '-t', PROMPT] },
+    // Interactive-TUI backends with no known one-shot entry point.
+    { backend: 'bob', tail: null },
+    { backend: 'agy', tail: null },
+    { backend: 'pi', tail: null },
+  ]) {
+    const relay = loadRelay({ backend: tc.backend, mode: 'headless' });
+    try {
+      const got = relay.buildHeadlessArgv(PROMPT);
+      if (tc.tail === null) {
+        assert.strictEqual(got, null, `${tc.backend} has no one-shot mode, so no argv`);
+        assert.strictEqual(relay.headlessSupportsBackend(), false,
+          `${tc.backend} must not report headless support`);
+        continue;
+      }
+      assert.ok(got, `${tc.backend} must build a headless argv`);
+      assert.strictEqual(got.bin, tc.backend, `${tc.backend} should run its own binary`);
+      assert.deepStrictEqual(got.args.slice(-tc.tail.length), tc.tail,
+        `${tc.backend} one-shot argv wrong: ${JSON.stringify(got.args)}`);
+      assert.strictEqual(got.args[got.args.length - 1], PROMPT,
+        `${tc.backend} must pass the prompt as the final distinct argv element`);
+      assert.strictEqual(relay.headlessSupportsBackend(), true,
+        `${tc.backend} must report headless support`);
+    } finally { teardown(relay); }
+  }
+});
 
-  const codex = loadRelay({ backend: 'codex', mode: 'headless' });
+test('goose headless passes the prompt as -t\'s value and skips --model', () => {
+  // goose is in NO_MODEL_FLAG_BACKENDS (it selects its model via GOOSE_MODEL),
+  // so a configured MODEL must not leak in as --model and break the argv.
+  const relay = loadRelay({ backend: 'goose', mode: 'headless', model: 'some-model' });
   try {
-    const a = codex.buildHeadlessArgv('do the thing');
-    assert.strictEqual(a.bin, 'codex');
-    assert.ok(a.args.includes('exec') && a.args[a.args.length - 1] === 'do the thing',
-      `codex must use 'exec' one-shot: ${JSON.stringify(a.args)}`);
-  } finally { teardown(codex); }
+    const a = relay.buildHeadlessArgv("it's a prompt with quotes");
+    assert.ok(!a.args.includes('--model'),
+      `goose must not get --model: ${JSON.stringify(a.args)}`);
+    assert.deepStrictEqual(a.args.slice(-4),
+      ['run', '--no-session', '-t', "it's a prompt with quotes"],
+      'the prompt is -t\'s value, passed verbatim as its own argv element');
+  } finally { teardown(relay); }
+});
 
-  const goose = loadRelay({ backend: 'goose', mode: 'headless' });
+test('goose runs headless end-to-end and reports completion on exit 0', () => {
+  const relay = loadRelay({ backend: 'goose', mode: 'headless' });
   try {
-    assert.strictEqual(goose.buildHeadlessArgv('x'), null, 'unsupported backend has no argv');
-  } finally { teardown(goose); }
+    assignHeadlessTask(relay);
+    assert.strictEqual(relay.__execFileCalls.length, 1, 'expected one one-shot invocation');
+    const call = relay.__execFileCalls[0];
+    assert.strictEqual(call.bin, 'goose');
+    assert.ok(call.args.includes('run') && call.args.includes('-t'),
+      `goose headless must use 'run' with -t: ${JSON.stringify(call.args)}`);
+    assert.ok(call.args[call.args.length - 1].includes('foo/bar#7'),
+      'the task prompt must be the trailing argv element');
+    // Headless completion is the child's exit code, not scraped output.
+    assert.ok(relay.__sent.find(m => m.type === 'task_complete'),
+      'a successful goose one-shot run must report task_complete');
+    assert.ok(!relay.__tmuxSends().some(c => / -l /.test(c)),
+      'headless goose must never type into tmux');
+  } finally { teardown(relay); }
 });
 
 test('interactive mode still delivers via tmux send-keys (unchanged default path)', () => {
