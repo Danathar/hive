@@ -2022,13 +2022,15 @@ func (s *Server) handleAgentConfigGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Cadences as seconds (int) — frontend expects numbers, not duration strings
-	cadences := map[string]int64{}
+	cadences := map[string]any{}
 	for modeName, modeCfg := range s.deps.Config.Governor.Modes {
 		if c, ok := modeCfg.Cadences[name]; ok {
-			if c == "pause" || c == "off" || c == "0" {
+			if c.Mode() != config.CadenceModeInterval {
+				cadences[modeName] = c
+			} else if c.Interval() == "pause" || c.Interval() == "off" || c.Interval() == "0" {
 				cadences[modeName] = 0
 			} else {
-				d := parseCadenceDuration(c)
+				d := parseCadenceDuration(c.Interval())
 				cadences[modeName] = int64(d.Seconds())
 			}
 		}
@@ -2807,24 +2809,40 @@ func (s *Server) handleAgentConfigCadences(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	var body map[string]int64
+	var body map[string]json.RawMessage
 	if err := decodeBody(r, &body); err != nil {
 		jsonError(w, "invalid body", http.StatusBadRequest)
 		return
 	}
 
-	for modeName, seconds := range body {
+	for modeName, raw := range body {
 		mode, ok := s.deps.Config.Governor.Modes[modeName]
 		if !ok {
 			continue
 		}
 		if mode.Cadences == nil {
-			mode.Cadences = make(map[string]string)
+			mode.Cadences = make(map[string]config.Cadence)
 		}
-		if seconds <= 0 {
+		var seconds int64
+		var cadence config.Cadence
+		if err := json.Unmarshal(raw, &seconds); err == nil {
+			if seconds <= 0 {
+				cadence = "pause"
+			} else {
+				cadence = config.Cadence(formatCadenceDuration(seconds))
+			}
+		} else if err := json.Unmarshal(raw, &cadence); err != nil {
+			jsonError(w, "invalid cadence for "+modeName+": must be seconds, interval string, or schedule object", http.StatusBadRequest)
+			return
+		}
+		if err := cadence.Validate(); err != nil {
+			jsonError(w, "invalid cadence for "+modeName+": "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if cadence.Mode() == config.CadenceModeInterval && cadence.IsPaused() {
 			mode.Cadences[name] = "pause"
 		} else {
-			mode.Cadences[name] = formatCadenceDuration(seconds)
+			mode.Cadences[name] = cadence
 		}
 		s.deps.Config.Governor.Modes[modeName] = mode
 	}
@@ -3304,7 +3322,7 @@ func (s *Server) handleAgentExport(w http.ResponseWriter, r *http.Request) {
 	cadences := map[string]string{}
 	for modeName, modeCfg := range s.deps.Config.Governor.Modes {
 		if c, ok := modeCfg.Cadences[name]; ok {
-			cadences[modeName] = c
+			cadences[modeName] = c.String()
 		}
 	}
 
@@ -3473,7 +3491,17 @@ func (s *Server) buildExportYAML(name string, cfg config.AgentConfig, cadences m
 		modeOrder := []string{"idle", "quiet", "busy", "surge"}
 		for _, mode := range modeOrder {
 			if c, ok := cadences[mode]; ok {
-				b.WriteString(fmt.Sprintf("    %s: %s\n", mode, c))
+				if strings.Contains(c, "\n") {
+					b.WriteString(fmt.Sprintf("    %s:\n", mode))
+					for _, line := range strings.Split(c, "\n") {
+						if strings.TrimSpace(line) == "" {
+							continue
+						}
+						b.WriteString("      " + line + "\n")
+					}
+				} else {
+					b.WriteString(fmt.Sprintf("    %s: %s\n", mode, c))
+				}
 			}
 		}
 	}
