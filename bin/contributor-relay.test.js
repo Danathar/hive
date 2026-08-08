@@ -26,7 +26,7 @@ const RELAY_PATH = path.join(__dirname, 'contributor-relay.sh');
 // bash and no WebSocket are ever touched.
 // ---------------------------------------------------------------------------
 
-function loadRelay({ backend = 'copilot', model = '', cliStates = ['ready'], procAlive = true, mode = 'interactive', execFileResult = null, statusFile = null, paneText = null } = {}) {
+function loadRelay({ backend = 'copilot', model = '', cliStates = ['ready'], procAlive = true, mode = 'interactive', execFileResult = null, statusFile = null, paneText = null, env = null } = {}) {
   const commands = [];
   const sent = [];
   // Records every execFile (headless one-shot) invocation: { bin, args, opts }.
@@ -112,6 +112,9 @@ function loadRelay({ backend = 'copilot', model = '', cliStates = ['ready'], pro
   // clobber a real one and can be asserted on.
   const headlessStatusFile = statusFile || path.join(tmpDir, 'headless-status.json');
   process.env.HIVE_HEADLESS_STATUS_FILE = headlessStatusFile;
+  process.env.HIVE_TASK_FILE = path.join(tmpDir, 'contributor-task.json');
+  process.env.HIVE_GH_TOKEN_CACHE = path.join(tmpDir, 'gh-token.cache');
+  if (env) Object.assign(process.env, env);
 
   // node refuses to require a .sh file with the default extension handlers;
   // register .sh as JavaScript. This must happen BEFORE require.resolve(), and
@@ -777,6 +780,233 @@ test('an ordinary task failure still re-advertises ready (skipReady is opt-in)',
     relay.failCurrentTask('some ordinary failure');
     assert.strictEqual(relay.__sent.filter(m => m.type === 'ready').length, 1,
       'the pre-existing failure path must be unchanged');
+  } finally { teardown(relay); }
+});
+
+// Multi-hub (kubestellar/hive#multi-hive) — one relay/CLI session subscribed
+// to more than one hub via comma-separated HIVE_HUB/HIVE_REGISTRATION_TOKEN.
+// ---------------------------------------------------------------------------
+
+test('HIVE_HUB/HIVE_REGISTRATION_TOKEN comma lists parse into one hub per entry, matched by position', () => {
+  const relay = loadRelay({ env: {
+    HIVE_HUB: 'wss://hub-a.example/contribute,wss://hub-b.example/contribute',
+    HIVE_REGISTRATION_TOKEN: 'tok-a,tok-b',
+  } });
+  try {
+    const hubs = relay.getHubs();
+    assert.strictEqual(hubs.length, 2);
+    assert.ok(hubs[0].url.includes('hub-a.example'));
+    assert.ok(hubs[1].url.includes('hub-b.example'));
+    assert.strictEqual(hubs[0].regToken, 'tok-a');
+    assert.strictEqual(hubs[1].regToken, 'tok-b');
+  } finally { teardown(relay); }
+});
+
+test('only the active hub is sent ready on auth_ok; the other waits its turn', () => {
+  const relay = loadRelay({ env: {
+    HIVE_HUB: 'wss://hub-a.example/contribute,wss://hub-b.example/contribute',
+    HIVE_REGISTRATION_TOKEN: 'tok-a,tok-b',
+  } });
+  try {
+    const hubs = relay.getHubs();
+    const sentA = [], sentB = [];
+    hubs[0].ws = { readyState: 1, send: p => sentA.push(JSON.parse(p)) };
+    hubs[1].ws = { readyState: 1, send: p => sentB.push(JSON.parse(p)) };
+
+    relay.handleMessage(JSON.stringify({ type: 'auth_ok', contributor_id: 'c1', trust_tier: 'contributor' }), hubs[0]);
+    assert.deepStrictEqual(sentA.map(m => m.type), ['ready']);
+    assert.deepStrictEqual(sentB.map(m => m.type), []);
+
+    relay.handleMessage(JSON.stringify({ type: 'auth_ok', contributor_id: 'c1', trust_tier: 'contributor' }), hubs[1]);
+    assert.deepStrictEqual(sentB.map(m => m.type), [], 'non-active hub stays silent on its own auth_ok');
+  } finally { teardown(relay); }
+});
+
+test('auth_failed on the active hub advances polling to an already-authenticated hub', () => {
+  const relay = loadRelay({ env: {
+    HIVE_HUB: 'wss://hub-a.example/contribute,wss://hub-b.example/contribute',
+    HIVE_REGISTRATION_TOKEN: 'tok-a,tok-b',
+  } });
+  try {
+    const hubs = relay.getHubs();
+    const sentA = [], sentB = [];
+    hubs[0].ws = { readyState: 1, send: p => sentA.push(JSON.parse(p)) };
+    hubs[1].ws = { readyState: 1, send: p => sentB.push(JSON.parse(p)) };
+
+    relay.handleMessage(JSON.stringify({ type: 'auth_ok', contributor_id: 'c1', trust_tier: 'contributor' }), hubs[1]);
+    assert.deepStrictEqual(sentB.map(m => m.type), [], 'non-active hub waits before the active hub fails');
+
+    relay.handleMessage(JSON.stringify({ type: 'auth_failed', reason: 'bad token' }), hubs[0]);
+    assert.deepStrictEqual(sentA.map(m => m.type), []);
+    assert.deepStrictEqual(sentB.map(m => m.type), ['ready'], 'polling moved to the authenticated remaining hub');
+  } finally { teardown(relay); }
+});
+
+test('a task_assign is remembered by hub, and a rejection while busy is routed to the ASKING hub', () => {
+  const relay = loadRelay({ env: {
+    HIVE_HUB: 'wss://hub-a.example/contribute,wss://hub-b.example/contribute',
+    HIVE_REGISTRATION_TOKEN: 'tok-a,tok-b',
+  } });
+  try {
+    const hubs = relay.getHubs();
+    const sentA = [], sentB = [];
+    hubs[0].ws = { readyState: 1, send: p => sentA.push(JSON.parse(p)) };
+    hubs[1].ws = { readyState: 1, send: p => sentB.push(JSON.parse(p)) };
+
+    const origSetTimeout = global.setTimeout;
+    global.setTimeout = (fn) => { fn(); return 0; };
+    try {
+      relay.handleMessage(JSON.stringify({ type: 'task_unavailable', reason: 'no_work' }), hubs[0]);
+    } finally {
+      global.setTimeout = origSetTimeout;
+    }
+
+    relay.handleMessage(JSON.stringify({ type: 'task_assign', task_id: 't1', kind: 'issue', repo: 'foo/bar', number: 1, title: 'x' }), hubs[1]);
+    const task = relay.getCurrentTask();
+    assert.strictEqual(task._hub, hubs[1], 'currentTask remembers which hub assigned it');
+    assert.ok(sentB.some(m => m.type === 'task_accepted'), 'task_accepted went to the assigning hub');
+    assert.strictEqual(sentA.filter(m => m.type === 'task_accepted').length, 0);
+
+    sentA.length = 0;
+    relay.handleMessage(JSON.stringify({ type: 'task_assign', task_id: 't2', kind: 'issue', repo: 'foo/bar', number: 2, title: 'y' }), hubs[0]);
+    assert.ok(sentA.some(m => m.type === 'task_failed' && m.reason === 'Already has active task'),
+      'busy-rejection went to the hub that just asked, not silently dropped or misrouted to the active-task hub');
+    assert.strictEqual(sentB.filter(m => m.type === 'task_failed').length, 0);
+  } finally { teardown(relay); }
+});
+
+test('an idle non-active hub cannot assign work until the poll slot reaches it', () => {
+  const relay = loadRelay({ env: {
+    HIVE_HUB: 'wss://hub-a.example/contribute,wss://hub-b.example/contribute',
+    HIVE_REGISTRATION_TOKEN: 'tok-a,tok-b',
+  } });
+  try {
+    const hubs = relay.getHubs();
+    const sentB = [];
+    hubs[0].ws = { readyState: 1, send: () => {} };
+    hubs[1].ws = { readyState: 1, send: p => sentB.push(JSON.parse(p)) };
+
+    relay.handleMessage(JSON.stringify({ type: 'task_assign', task_id: 't2', kind: 'issue', repo: 'foo/bar', number: 2, title: 'y' }), hubs[1]);
+
+    assert.strictEqual(relay.getCurrentTask(), null);
+    assert.ok(sentB.some(m => m.type === 'task_failed' && m.reason === 'Hub is not the active polling slot'),
+      'unexpected assignment must be rejected back to the hub that sent it');
+  } finally { teardown(relay); }
+});
+
+test('token_refresh and task_revoke only affect the hub that owns the active task', () => {
+  const relay = loadRelay({ env: {
+    HIVE_HUB: 'wss://hub-a.example/contribute,wss://hub-b.example/contribute',
+    HIVE_REGISTRATION_TOKEN: 'tok-a,tok-b',
+  } });
+  try {
+    const hubs = relay.getHubs();
+    const sentA = [], sentB = [];
+    hubs[0].ws = { readyState: 1, send: p => sentA.push(JSON.parse(p)) };
+    hubs[1].ws = { readyState: 1, send: p => sentB.push(JSON.parse(p)) };
+
+    relay.handleMessage(JSON.stringify({ type: 'task_assign', task_id: 't1', kind: 'issue', repo: 'foo/bar', number: 1, title: 'x' }), hubs[0]);
+    const tokenPath = path.join(relay.__tmpDir, 'gh-token.cache');
+
+    relay.handleMessage(JSON.stringify({ type: 'token_refresh', github_token: 'hub-b-token' }), hubs[1]);
+    assert.strictEqual(fs.existsSync(tokenPath), false, 'non-owning hub must not overwrite the active task token');
+
+    relay.handleMessage(JSON.stringify({ type: 'task_revoke', task_id: 't1', reason: 'wrong hub' }), hubs[1]);
+    assert.strictEqual(relay.getCurrentTask().task_id, 't1', 'non-owning hub must not revoke the active task');
+
+    relay.handleMessage(JSON.stringify({ type: 'token_refresh', github_token: 'hub-a-token' }), hubs[0]);
+    assert.strictEqual(fs.readFileSync(tokenPath, 'utf8'), 'hub-a-token');
+
+    relay.handleMessage(JSON.stringify({ type: 'task_revoke', task_id: 't1', reason: 'owner revoke' }), hubs[0]);
+    assert.strictEqual(relay.getCurrentTask(), null);
+    assert.ok(sentA.some(m => m.type === 'ready'), 'owning hub is asked for work after its revoke');
+    assert.strictEqual(sentB.filter(m => m.type === 'ready').length, 0);
+  } finally { teardown(relay); }
+});
+
+test('task_unavailable on the active hub rotates the poll slot to the next hub', () => {
+  const relay = loadRelay({ env: {
+    HIVE_HUB: 'wss://hub-a.example/contribute,wss://hub-b.example/contribute',
+    HIVE_REGISTRATION_TOKEN: 'tok-a,tok-b',
+  } });
+  try {
+    const hubs = relay.getHubs();
+    const sentA = [], sentB = [];
+    hubs[0].ws = { readyState: 1, send: p => sentA.push(JSON.parse(p)) };
+    hubs[1].ws = { readyState: 1, send: p => sentB.push(JSON.parse(p)) };
+
+    relay.handleMessage(JSON.stringify({ type: 'auth_ok', contributor_id: 'c1', trust_tier: 'contributor' }), hubs[0]);
+    assert.deepStrictEqual(sentA.map(m => m.type), ['ready']);
+
+    // task_unavailable's retry delay is a raw setTimeout (not the relay's
+    // test-mode-aware sleepMs), so run it synchronously here rather than
+    // waiting out the real 30s TASK_UNAVAILABLE_RETRY_MS.
+    const origSetTimeout = global.setTimeout;
+    global.setTimeout = (fn) => { fn(); return 0; };
+    try {
+      relay.handleMessage(JSON.stringify({ type: 'task_unavailable', reason: 'no_work' }), hubs[0]);
+    } finally {
+      global.setTimeout = origSetTimeout;
+    }
+    assert.deepStrictEqual(sentB.map(m => m.type), ['ready'], 'rotation sent ready to hub B, not hub A again');
+  } finally { teardown(relay); }
+});
+
+test('currentTask stays JSON-serializable after task_assign attaches its owning hub (regression: circular Timeout handles)', () => {
+  const relay = loadRelay({ env: {
+    HIVE_HUB: 'wss://hub-a.example/contribute,wss://hub-b.example/contribute',
+    HIVE_REGISTRATION_TOKEN: 'tok-a,tok-b',
+  } });
+  try {
+    const hubs = relay.getHubs();
+    hubs[0].ws = { readyState: 1, send: () => {} };
+    hubs[1].ws = { readyState: 1, send: () => {} };
+    // Real per-hub state (heartbeatInterval/reconnectTimer are live Timeout
+    // objects once connected) is what made JSON.stringify(currentTask) throw
+    // "Converting circular structure to JSON" the first time this shipped —
+    // a plain unit test with bare {ws} stubs didn't catch it because it never
+    // populated these fields. Set them for real here.
+    hubs[0].heartbeatInterval = setInterval(() => {}, 999999);
+    hubs[1].reconnectTimer = setTimeout(() => {}, 999999);
+    try {
+      const origSetTimeout = global.setTimeout;
+      global.setTimeout = (fn) => { fn(); return 0; };
+      try {
+        relay.handleMessage(JSON.stringify({ type: 'task_unavailable', reason: 'no_work' }), hubs[0]);
+      } finally {
+        global.setTimeout = origSetTimeout;
+      }
+      relay.handleMessage(JSON.stringify({ type: 'task_assign', task_id: 't1', kind: 'issue', repo: 'foo/bar', number: 1, title: 'x' }), hubs[1]);
+      assert.ok(relay.getCurrentTask(), 'task was accepted before serializing');
+      assert.doesNotThrow(() => JSON.stringify(relay.getCurrentTask()), 'currentTask must serialize even with its _hub set');
+    } finally {
+      clearInterval(hubs[0].heartbeatInterval);
+      clearTimeout(hubs[1].reconnectTimer);
+    }
+  } finally { teardown(relay); }
+});
+
+test('a currentTask with no recorded hub still reaches the hub (regression: synthetic pr-review task)', () => {
+  const relay = loadRelay({ env: {
+    HIVE_HUB: 'wss://hub-a.example/contribute,wss://hub-b.example/contribute',
+    HIVE_REGISTRATION_TOKEN: 'tok-a,tok-b',
+  } });
+  try {
+    const hubs = relay.getHubs();
+    const sentA = [];
+    hubs[0].ws = { readyState: 1, send: p => sentA.push(JSON.parse(p)) };
+    hubs[1].ws = { readyState: 1, send: () => {} };
+
+    // The pr-review task the relay builds for itself after every
+    // PR_REVIEW_EVERY_N completions is assembled locally and never carries a
+    // _hub. Routing strictly on currentTask._hub sent its frames to
+    // `undefined`, so the hub saw the contributor go silent mid-review.
+    relay.setCurrentTask({ task_id: 'pr-review-1', kind: 'review', repo: 'foo/bar', number: 0, title: 'Review open PRs' });
+    relay.failCurrentTask('done reviewing');
+
+    assert.ok(sentA.length > 0,
+      'frames for a hubless currentTask must fall back to the active hub, not be dropped');
+    assert.ok(sentA.some(m => m.type === 'task_failed' && m.task_id === 'pr-review-1'));
   } finally { teardown(relay); }
 });
 
