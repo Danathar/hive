@@ -1479,6 +1479,9 @@ code{background:var(--cc-bg);padding:2px 8px;border-radius:4px;font-size:.9rem}
 <strong style="color:#e6edf3">Kubernetes is the advanced path.</strong> It needs a cluster, a kubeconfig and RBAC &mdash; not a first-timer&rsquo;s happy path. The workload runs the relay <strong>headless</strong> (no TTY), so only headless-capable backends work in a cluster: <strong>Claude Code, LiteLLM, Copilot, Codex</strong>. Other backends will refuse work at pod startup.<br>
 <span style="color:#8b949e">Credential note (interim): the generated Secret stores a long-lived personal <code>GH_TOKEN</code> &mdash; base64, not encrypted, and readable by anyone with <code>get secrets</code> in that namespace or by cluster-scoped operators/backups. That is materially more exposed than a <code>0600</code> file on your laptop. Revoke any time with <code>gh auth logout</code>. Gating the credential on explicit task acceptance is tracked in <a href="https://github.com/kubestellar/hive/issues/2537" target="_blank" rel="noopener" style="color:#58a6ff">#2537</a> and is not solved by this path.</span>
 </div>
+<div id="multi-hub-note" style="margin-bottom:12px;background:#161b22;border:1px solid #30363d;border-left:3px solid #58a6ff;border-radius:6px;padding:12px 14px;font-size:.85rem;color:#c9d1d9;line-height:1.5">
+<strong style="color:#e6edf3">Contribute to multiple hives:</strong> after registering with each hive, set <code>HIVE_HUB</code> to comma-separated WebSocket URLs and <code>HIVE_REGISTRATION_TOKEN</code> to the matching comma-separated tokens in the same order. One relay shares one CLI/tmux session, works on one task at a time, keeps each hub connected with its own heartbeat, and rotates only when the active hub says no task is available. Added by <a href="https://github.com/hanthor" target="_blank" rel="noopener" style="color:#58a6ff">@hanthor</a> in <a href="https://github.com/kubestellar/hive/pull/2846" target="_blank" rel="noopener" style="color:#58a6ff">#2846</a>.
+</div>
 <p style="color:#8b949e;margin-bottom:8px">Copy and paste these commands to get started:</p>
 <div style="margin-top:16px;background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:16px;position:relative">
 <button id="copy-btn" style="position:absolute;top:8px;right:8px;background:#238636;color:#fff;border:none;border-radius:4px;padding:4px 12px;cursor:pointer;font-size:.75rem">Copy</button>
@@ -1682,6 +1685,7 @@ function defaultPromptFor(v){
     '  1. Install the prerequisites (just, gh) for my OS.\n'+
     '  2. git clone -b v2 https://github.com/kubestellar/hive && cd hive\n'+
     '  3. export HIVE_HUB='+hubURL+'\n'+
+    '     For multiple hives, HIVE_HUB can be comma-separated when HIVE_REGISTRATION_TOKEN has matching tokens in the same order.\n'+
     '  4. just contribute-setup '+v+'\n'+
     '  5. just contribute-hive\n\n'+
     'Explain what each step does before I run it, and stop if anything looks wrong.';

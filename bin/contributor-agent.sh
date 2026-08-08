@@ -7,8 +7,9 @@
 # 4. The relay feeds tasks into the tmux session and reports results
 #
 # Environment (from ~/.config/hive/contributor.env):
-#   HIVE_HUB                — WebSocket URL
-#   HIVE_REGISTRATION_TOKEN — contributor's token
+#   HIVE_HUB                — WebSocket URL; comma-separated URLs subscribe to multiple hubs
+#   HIVE_REGISTRATION_TOKEN — contributor's token; for multiple hubs, one comma-separated token
+#                             per hub in the same order as HIVE_HUB
 #   AGENT_BACKEND           — preferred CLI backend
 
 set -euo pipefail

@@ -6,8 +6,11 @@
 // heartbeat, and reconnection with exponential backoff.
 //
 // Environment:
-//   HIVE_HUB              — WebSocket URL (wss://host:port/contribute)
-//   HIVE_REGISTRATION_TOKEN — contributor's registration token
+//   HIVE_HUB              — WebSocket URL (wss://host:port/contribute);
+//                           comma-separated URLs subscribe to multiple hubs
+//   HIVE_REGISTRATION_TOKEN — contributor's registration token; for multiple
+//                           hubs, provide one comma-separated token per hub in
+//                           the same order as HIVE_HUB
 //   AGENT_BACKEND          — CLI backend name (claude, copilot, gemini, etc.)
 //   AGENT_MODEL            — model override (optional)
 //   HIVE_AGENT_SESSION     — tmux session name for the agent (default: contributor)
