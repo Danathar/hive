@@ -78,6 +78,23 @@ func TestOwnerOnlyMutationsRejectSpoofedOwnerRoleWithSharedToken(t *testing.T) {
 	}
 }
 
+func TestOwnerOnlyMutationsRejectSpoofedOwnerVerificationMarker(t *testing.T) {
+	s := newFullServer(t)
+	s.authToken = "shared-secret-token"
+	req := httptest.NewRequest(http.MethodPost, "/api/breaker/engage", nil)
+	req.Header.Set("Authorization", "Bearer "+s.authToken)
+	req.Header.Set("X-Hive-User", "attacker")
+	req.Header.Set("X-Hive-Role", "owner")
+	req.Header.Set(ownerRoleVerifiedHeader, "true")
+	w := httptest.NewRecorder()
+
+	s.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("spoofed owner verification marker with shared token status = %d, want 403", w.Code)
+	}
+}
+
 func TestOwnerOnlyMutationsRejectInternalSharedTokenWithoutVerifiedRole(t *testing.T) {
 	s := newFullServer(t)
 	s.authToken = "shared-secret-token"
