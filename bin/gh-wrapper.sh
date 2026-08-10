@@ -130,25 +130,39 @@ _extract_author() {
   return 1
 }
 
-# Resolve the bot's GitHub login (cached per invocation for performance).
+# Resolve the authenticated GitHub login (cached per invocation for performance).
+# Initialize internally so caller-controlled environment cannot seed the cache.
+HIVE_AUTH_LOGIN_CACHED=""
 _resolve_self_login() {
-  if [[ -n "${HIVE_BOT_LOGIN_CACHED:-}" ]]; then
-    printf '%s\n' "$HIVE_BOT_LOGIN_CACHED"
-    return
+  if [[ -n "${HIVE_AUTH_LOGIN_CACHED:-}" ]]; then
+    printf '%s\n' "$HIVE_AUTH_LOGIN_CACHED"
+    return 0
   fi
-  if [[ -n "${HIVE_BOT_LOGIN:-}" ]]; then
-    HIVE_BOT_LOGIN_CACHED="$HIVE_BOT_LOGIN"
-    printf '%s\n' "$HIVE_BOT_LOGIN_CACHED"
-    return
+
+  local login
+  if ! login="$("$REAL_GH" api user --jq .login 2>/dev/null)"; then
+    return 1
   fi
-  if [[ -x "$REAL_GH" ]] && [[ -n "${GH_TOKEN:-}" ]]; then
-    HIVE_BOT_LOGIN_CACHED="$("$REAL_GH" api user -q '.login' 2>/dev/null || true)"
-    if [[ -n "$HIVE_BOT_LOGIN_CACHED" ]]; then
-      printf '%s\n' "$HIVE_BOT_LOGIN_CACHED"
-      return
-    fi
+  if [[ -z "$login" ]]; then
+    return 1
   fi
-  printf '%s\n' ""
+
+  HIVE_AUTH_LOGIN_CACHED="$login"
+  printf '%s\n' "$HIVE_AUTH_LOGIN_CACHED"
+}
+
+_lower() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+_author_matches_login() {
+  local requested_lc login_lc requested_base login_base
+  requested_lc="$(_lower "$1")"
+  login_lc="$(_lower "$2")"
+  requested_base="${requested_lc%\[bot\]}"
+  login_base="${login_lc%\[bot\]}"
+
+  [[ "$requested_lc" = "$login_lc" || "$requested_base" = "$login_base" ]]
 }
 
 # ── READ/WRITE SPLIT for GitHub lookups (fixes #2356; addresses #2393 item 6) ──
@@ -168,21 +182,18 @@ if { [ "$subcmd" = "issue" ] || [ "$subcmd" = "pr" ]; } && [ "$action" = "list" 
   if [[ "${HIVE_CONTRIBUTOR_MODE:-}" == "true" ]]; then
     : # Allow contributor agents read-only list/search to avoid duplicate PRs (#2356)
   elif author_value="$(_extract_author)" && [[ -n "$author_value" ]]; then
-    self_login="$(_resolve_self_login)"
-    if [[ -n "$self_login" ]] && [[ "$author_value" = "$self_login" ]]; then
-      : # Match: exact bot login
-    elif [[ -n "$self_login" ]] && [[ "$author_value" = "${self_login%\[bot\]}" ]]; then
-      : # Match: bot login without [bot] suffix
-    elif [[ -n "${HIVE_AGENT:-}" ]] && [[ "$author_value" = "${HIVE_AGENT}" ]]; then
-      : # Match: agent name
-    elif [[ -n "${HIVE_AGENT_DISPLAY_NAME:-}" ]] && [[ "$author_value" = "${HIVE_AGENT_DISPLAY_NAME}" ]]; then
-      : # Match: agent display name
-    elif [[ -n "${HIVE_CONTRIBUTOR_USERNAME:-}" ]] && [[ "$author_value" = "${HIVE_CONTRIBUTOR_USERNAME}" ]]; then
-      : # Match: contributor username (self-listing in contributor mode)
+    if [[ "$author_value" = "@me" ]]; then
+      : # GitHub resolves @me server-side to the authenticated token identity.
+    elif ! _resolve_self_login >/dev/null; then
+      echo "⛔ BLOCKED: gh $subcmd list --author requires authenticated GitHub identity." >&2
+      echo "Could not resolve the current token identity with 'gh api user --jq .login'." >&2
+      exit 1
+    elif _author_matches_login "$author_value" "$HIVE_AUTH_LOGIN_CACHED"; then
+      : # Match: authenticated login, case-insensitive, with optional [bot] suffix.
     else
-      echo "⛔ BLOCKED: gh $subcmd list --author must match the current bot/agent identity." >&2
-      echo "--author '$author_value' does not match the current identity." >&2
-      echo "Use --author with your own bot login or agent name to list your own items." >&2
+      echo "⛔ BLOCKED: gh $subcmd list --author must match the authenticated GitHub identity." >&2
+      echo "--author '$author_value' does not match token identity '$HIVE_AUTH_LOGIN_CACHED'." >&2
+      echo "Use --author @me or your authenticated bot login to list your own items." >&2
       exit 1
     fi
   else

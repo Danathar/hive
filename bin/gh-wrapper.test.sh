@@ -2,7 +2,7 @@
 # Author: RawNuke
 # Copyright (c) 2026 RawNuke. All rights reserved.
 #
-# Regression tests for kubestellar/hive#3072: gh-wrapper --author bypass fix.
+# Regression tests for kubestellar/hive#3072 and #3096: gh-wrapper --author gate.
 # Creates a temporary copy of the wrapper with a mock gh binary so tests
 # can run without requiring /usr/bin/gh.
 #
@@ -18,6 +18,7 @@ TEST_WRAPPER="${WORK_DIR}/gh-wrapper-test.sh"
 PASSED=0
 FAILED=0
 
+# shellcheck disable=SC2329 # invoked via EXIT trap
 cleanup() {
   rm -rf "$WORK_DIR"
 }
@@ -27,17 +28,15 @@ mkdir -p "$WORK_DIR"
 
 cat >"$MOCK_GH" <<'MOCK'
 #!/usr/bin/env bash
-case "$*" in
-  "api user -q .login")
-    echo "test-bot[bot]"
-    ;;
-  "api"*)
-    echo '{"login":"test-bot[bot]"}'
-    ;;
-  *)
-    exit 0
-    ;;
-esac
+if [[ "${1:-}" = "api" && "${2:-}" = "user" ]]; then
+  if [[ "${MOCK_GH_FAIL_IDENTITY:-}" = "true" ]]; then
+    echo "mock identity failure" >&2
+    exit 42
+  fi
+  echo "${MOCK_GH_LOGIN:-test-bot[bot]}"
+  exit 0
+fi
+exit 0
 MOCK
 chmod +x "$MOCK_GH"
 
@@ -45,7 +44,6 @@ sed "s|^REAL_GH=\"/usr/bin/gh\"|REAL_GH=\"${MOCK_GH}\"|" "$WRAPPER" > "$TEST_WRA
 chmod +x "$TEST_WRAPPER"
 
 export GH_TOKEN="test-token-mock"
-export HIVE_BOT_LOGIN="test-bot[bot]"
 
 _run_test() {
   local expected_rc="$1"
@@ -57,7 +55,85 @@ _run_test() {
     HIVE_AGENT="scanner" \
     HIVE_AGENT_DISPLAY_NAME="scanner" \
     HIVE_AGENT_ID="scanner" \
-    HIVE_BOT_LOGIN="test-bot[bot]" \
+    GH_TOKEN="test-token-mock" \
+    bash "$TEST_WRAPPER" "$@" 2>&1)" || rc=$?
+
+  if [[ "$rc" != "$expected_rc" ]]; then
+    echo "FAIL: $desc"
+    echo "  expected exit code $expected_rc, got $rc"
+    echo "  output: $output"
+    FAILED=$((FAILED + 1))
+    return 1
+  fi
+
+  echo "PASS: $desc"
+  PASSED=$((PASSED + 1))
+}
+
+_run_test_spoof() {
+  local expected_rc="$1"
+  local desc="$2"
+  shift 2
+
+  local output rc=0
+  output="$(env \
+    HIVE_AGENT="octocat" \
+    HIVE_AGENT_DISPLAY_NAME="octocat" \
+    HIVE_AGENT_ID="scanner" \
+    MOCK_GH_LOGIN="scanner[bot]" \
+    GH_TOKEN="test-token-mock" \
+    bash "$TEST_WRAPPER" "$@" 2>&1)" || rc=$?
+
+  if [[ "$rc" != "$expected_rc" ]]; then
+    echo "FAIL: $desc"
+    echo "  expected exit code $expected_rc, got $rc"
+    echo "  output: $output"
+    FAILED=$((FAILED + 1))
+    return 1
+  fi
+
+  echo "PASS: $desc"
+  PASSED=$((PASSED + 1))
+}
+
+_run_test_identity_failure() {
+  local expected_rc="$1"
+  local desc="$2"
+  shift 2
+
+  local output rc=0
+  output="$(env \
+    HIVE_AGENT="scanner" \
+    HIVE_AGENT_DISPLAY_NAME="scanner" \
+    HIVE_AGENT_ID="scanner" \
+    MOCK_GH_FAIL_IDENTITY="true" \
+    GH_TOKEN="test-token-mock" \
+    bash "$TEST_WRAPPER" "$@" 2>&1)" || rc=$?
+
+  if [[ "$rc" != "$expected_rc" ]]; then
+    echo "FAIL: $desc"
+    echo "  expected exit code $expected_rc, got $rc"
+    echo "  output: $output"
+    FAILED=$((FAILED + 1))
+    return 1
+  fi
+
+  echo "PASS: $desc"
+  PASSED=$((PASSED + 1))
+}
+
+_run_test_cached_env_spoof() {
+  local expected_rc="$1"
+  local desc="$2"
+  shift 2
+
+  local output rc=0
+  output="$(env \
+    HIVE_AGENT="scanner" \
+    HIVE_AGENT_DISPLAY_NAME="scanner" \
+    HIVE_AGENT_ID="scanner" \
+    HIVE_AUTH_LOGIN_CACHED="octocat" \
+    MOCK_GH_LOGIN="test-bot[bot]" \
     GH_TOKEN="test-token-mock" \
     bash "$TEST_WRAPPER" "$@" 2>&1)" || rc=$?
 
@@ -85,7 +161,6 @@ _run_test_contributor() {
     HIVE_AGENT="scanner" \
     HIVE_AGENT_DISPLAY_NAME="scanner" \
     HIVE_AGENT_ID="scanner" \
-    HIVE_BOT_LOGIN="test-bot[bot]" \
     GH_TOKEN="test-token-mock" \
     bash "$TEST_WRAPPER" "$@" 2>&1)" || rc=$?
 
@@ -124,11 +199,26 @@ _run_test 0 "pr list --author=test-bot[bot] (allowed, equals form)" \
 _run_test 0 "issue list --author test-bot (allowed, without [bot] suffix)" \
   issue list --repo test/repo --author test-bot
 
-_run_test 0 "issue list --author scanner (allowed, HIVE_AGENT match)" \
+_run_test 0 "issue list --author @me (allowed, server-side token identity)" \
+  issue list --repo test/repo --author @me
+
+_run_test 0 "issue list --author TEST-BOT (allowed, case-insensitive without [bot] suffix)" \
+  issue list --repo test/repo --author TEST-BOT
+
+_run_test 0 "issue list --author test-bot[bot] with spoofed HIVE_AGENT (allowed by token identity)" \
+  issue list --repo test/repo --author "test-bot[bot]"
+
+_run_test 1 "issue list --author scanner from HIVE_AGENT env (blocked)" \
   issue list --repo test/repo --author scanner
 
-_run_test 0 "pr list --author scanner (allowed, HIVE_AGENT match)" \
-  pr list --repo test/repo --author scanner
+_run_test_spoof 1 "issue list --author octocat with spoofed HIVE_AGENT (blocked)" \
+  issue list --repo test/repo --author octocat
+
+_run_test_identity_failure 1 "issue list --author test-bot[bot] when identity lookup fails (blocked)" \
+  issue list --repo test/repo --author "test-bot[bot]"
+
+_run_test_cached_env_spoof 1 "issue list --author env-seeded identity cache octocat (blocked)" \
+  issue list --repo test/repo --author octocat
 
 echo ""
 echo "=== Contributor mode tests ==="
