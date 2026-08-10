@@ -18,6 +18,7 @@ Start with [Architecture](architecture.md) for the system overview, then use the
 - [Dashboard API reference](api-reference.md) — pragmatic route index for dashboard and hub endpoints.
 - [Dashboard OpenAPI spec](../../dashboard/openapi.json) — machine-readable REST API reference for integrations.
 - [ioscan status](ioscan.md) — v2 status of the untrusted-input scanner/canary feature.
+- [Deployment scripts](../deploy/README.md) — inventory of v2 deployment helpers, including dashboard TTY panes and `hive-panes`.
 
 ## Contributors and access
 
