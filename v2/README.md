@@ -276,6 +276,17 @@ For GitHub App setup, configure the app's **Setup URL** to
 operator installs the app from the dashboard banner, GitHub redirects back and
 the hive verifies and saves the installation ID automatically.
 
+## Deployment Examples
+
+The `deploy/` directory contains pre-built configurations for common deployment patterns. Copy the one that matches your use case to `hive.yaml` and adjust the `github:` section.
+
+| File | Use Case |
+|------|----------|
+| `deploy/hive-quickstart.yaml` | Quick-start evaluation roster targeting `kubestellar/hive-tester` with all ten built-in agent lanes enabled under `acmm_level: 1` |
+| `deploy/architect-only.yaml` | Single `architect` agent managing KubeStellar Console repos — Docker on Proxmox LXC, ntfy notifications |
+| `deploy/hive-level2-knuckle.yaml` | ACMM L2 advisory config for `projectbluefin/knuckle` — agents observe and report, no issues or PRs |
+| `deploy/hive-level3-knuckle.yaml` | ACMM L3 measured config for `projectbluefin/knuckle` — quality uses the measured policy for testing issues, other agents stay advisory |
+
 ## Build from Source
 
 ```bash
