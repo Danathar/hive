@@ -33,7 +33,6 @@ func withFakeK8sAPI(t *testing.T, srv *httptest.Server) {
 	if err := os.WriteFile(nsPath, []byte("hive-hosted-test"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-
 	oldServer, oldToken, oldCA, oldNS := k8sAPIServer, k8sTokenPath, k8sCACertPath, k8sNamespacePath
 	k8sAPIServer = srv.URL
 	k8sTokenPath = tokenPath

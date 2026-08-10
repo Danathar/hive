@@ -185,6 +185,9 @@ func TestMiddleware_HubProxiedHeadersStillTrusted(t *testing.T) {
 	// Empty allowlist = hub-proxied hive; nginx-injected headers must still work.
 	s := newFullServer(t)
 	s.authToken = "shared-secret-token"
+	old := proxyProofRequired
+	proxyProofRequired = false
+	t.Cleanup(func() { proxyProofRequired = old })
 	var sawUser string
 	handler := s.authenticate(recordingHandler(&sawUser, nil))
 	req := httptest.NewRequest("GET", "/api/config", nil)
