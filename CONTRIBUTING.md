@@ -46,6 +46,24 @@ go test ./...
 
 The Go version is declared in [`v2/go.mod`](v2/go.mod). Install that version or newer compatible tooling before building.
 
+## Contributor `just` recipes
+
+The root [`Justfile`](Justfile) exposes the public contributor relay workflow. Run `just --list` to see the current recipe signatures; private implementation details are intentionally not listed there.
+
+| Recipe | What it does |
+| --- | --- |
+| `just contribute-check <backend>` | Runs the same read-only backend CLI preflight used by setup, then reports whether the machine is ready for `contribute-setup`. |
+| `just contribute-setup <backend>` | Checks the Justfile version, verifies the backend CLI, signs in with GitHub, registers with the configured hub, and writes `${HOME}/.config/hive/contributor.env`. |
+| `just contribute-hive [backend] [mode]` | Starts the contributor relay. The default mode is containerized; pass `local` as the mode to run natively when the local tools are installed. |
+| `just contribute-status` | Queries the configured hub for status and contributor profile information. |
+| `just contribute-browse` | Discovers available public hive projects. |
+| `just contribute-stop` | Stops a background contributor relay if one is running. |
+| `just contribute-k8s [namespace] [outfile] [image_tag]` | Emits Kubernetes manifests for a headless contributor workload. It writes to stdout or the requested file; it does not apply the manifest. |
+| `just hive-api <endpoint>` | Calls a hub API endpoint, defaulting to `/status`, using the configured hive URL. |
+| `just hive-api-docs` | Opens the hub API documentation in a browser. |
+
+See [v2/docs/contributor-relay.md](v2/docs/contributor-relay.md) for the end-to-end contributor relay workflow and Kubernetes workload details.
+
 ## Style and quality
 
 - Format Go changes with `gofmt`.
