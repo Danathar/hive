@@ -12,6 +12,7 @@ const GO_PORT = 19002;
 const TTYD_PORT = 19003;
 
 let goServer, ttydServer, proxyProcess;
+let mockSnapshotFrameAncestors = [];
 
 async function waitForPort(port, timeoutMs = 10000) {
   const start = Date.now();
@@ -44,6 +45,16 @@ function setupMockGoBackend() {
       res.end('{"hub":"online","active_contributors":0,"total_registered":0,"actionable_items":0}');
       return;
     }
+    if (req.url === '/api/snapshot/frame-ancestors') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ origins: mockSnapshotFrameAncestors }));
+      return;
+    }
+    if (req.url === '/snapshot') {
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end('<!doctype html><title>snapshot</title>');
+      return;
+    }
     res.writeHead(404);
     res.end('not found');
   });
@@ -74,7 +85,7 @@ function setupMockTtyd() {
   });
 }
 
-function startProxy() {
+function startProxy(extraEnv = {}) {
   return new Promise((resolve, reject) => {
     const proc = spawn('node', ['server.js'], {
       cwd: __dirname,
@@ -86,6 +97,7 @@ function startProxy() {
         HIVE_DASHBOARD_TOKEN: '',
         HIVE_STATIC_DIR: __dirname,
         NODE_ENV: 'test',
+        ...extraEnv,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -106,10 +118,10 @@ function startProxy() {
   });
 }
 
-async function setup() {
+async function setup(extraEnv = {}) {
   goServer = await setupMockGoBackend();
   ttydServer = await setupMockTtyd();
-  proxyProcess = await startProxy();
+  proxyProcess = await startProxy(extraEnv);
   await new Promise(r => setTimeout(r, 500));
 }
 
@@ -155,6 +167,30 @@ async function testHTTPHealth() {
   const data = await resp.json();
   assert.equal(data.status, 'ok');
   console.log('  ✓ /api/health returns 200');
+}
+
+async function testDefaultFrameDeny() {
+  const resp = await fetch(`http://localhost:${PROXY_PORT}/snapshot`);
+  assert.equal(resp.status, 200);
+  assert.equal(resp.headers.get('x-frame-options'), 'DENY');
+  assert.match(resp.headers.get('content-security-policy') || '', /frame-ancestors 'none'/);
+  console.log('  ✓ default /snapshot framing is denied');
+}
+
+async function testSnapshotFrameAllowlist() {
+  const resp = await fetch(`http://localhost:${PROXY_PORT}/snapshot`);
+  assert.equal(resp.status, 200);
+  assert.equal(resp.headers.get('x-frame-options'), null);
+  assert.match(resp.headers.get('content-security-policy') || '', /frame-ancestors https:\/\/docs\.projectbluefin\.io/);
+  console.log('  ✓ /snapshot uses CSP frame allowlist without XFO');
+}
+
+async function testOtherRoutesStillDenyFraming() {
+  const resp = await fetch(`http://localhost:${PROXY_PORT}/api/health`);
+  assert.equal(resp.status, 200);
+  assert.equal(resp.headers.get('x-frame-options'), 'DENY');
+  assert.match(resp.headers.get('content-security-policy') || '', /frame-ancestors 'none'/);
+  console.log('  ✓ non-snapshot routes still deny framing');
 }
 
 async function testNoFINError() {
@@ -697,17 +733,27 @@ async function testC3_EmptyAllowlist_Nginx_Deferred() {
 console.log('\nProxy WebSocket Tests\n');
 
 try {
+  mockSnapshotFrameAncestors = [];
   await setup();
 
   console.log('HTTP tests:');
   await testHTTPHealth();
   await testHTTPContributeStatus();
+  await testDefaultFrameDeny();
 
   console.log('\nWebSocket tests:');
   await testWSContributeConnect();
   await testNoFINError();
 
-  console.log('\n✓ Base tests passed\n');
+  await teardown();
+  mockSnapshotFrameAncestors = ['https://docs.projectbluefin.io'];
+  await setup();
+
+  console.log('\nFrame allowlist tests:');
+  await testSnapshotFrameAllowlist();
+  await testOtherRoutesStillDenyFraming();
+
+  console.log('\n✓ All tests passed\n');
 } catch (e) {
   console.error('\n✗ Test failed:', e.message, '\n');
   process.exitCode = 1;

@@ -360,15 +360,28 @@ func (s *HubServer) requestHostedLiteSpoke(username, owner, repo, host string, i
 	provisionWG.Add(1)
 	go func() {
 		defer provisionWG.Done()
-		if err := provisionHive(h, req, &cluster, s.appKeysByAppID(), s.logger); err != nil {
-			h.Status = "error"
-			h.Error = err.Error()
-			_ = saveSaaSHive(h)
+		// Re-load our own copy of the record rather than closing over the `h`
+		// returned to the caller: the handler reads spoke.Status the moment
+		// requestHostedLiteSpoke returns, so writing h.Status/h.Error from this
+		// background goroutine is a data race on the same struct. This mirrors
+		// the contract every other background provision goroutine in this
+		// package already follows (kickClaimClusterWorkAsync et al.) — re-load
+		// meta.json here so we never write through the handler's copy. The
+		// record was just persisted by saveSaaSHive(h) above, so this copy has
+		// identical fields for provisioning.
+		bg := loadSaaSHive(hiveID)
+		if bg == nil {
+			bg = h
+		}
+		if err := provisionHive(bg, req, &cluster, s.appKeysByAppID(), s.logger); err != nil {
+			bg.Status = "error"
+			bg.Error = err.Error()
+			_ = saveSaaSHive(bg)
 			s.logger.Warn("hosted lite spoke provision failed", "hive_id", hiveID, "error", err)
 			return
 		}
-		h.Status = "provisioning"
-		_ = saveSaaSHive(h)
+		bg.Status = "provisioning"
+		_ = saveSaaSHive(bg)
 	}()
 	s.updateRegistryForLiteSpoke(h)
 	return h, nil

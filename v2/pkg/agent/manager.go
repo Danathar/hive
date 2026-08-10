@@ -1289,6 +1289,12 @@ func backendDefersStartupKick(backend string) bool {
 	}
 }
 
+// copilotGitHubWriteDenyFlags and claudeGitHubWriteDenyFlags are defined together
+// near the bottom of this file (alongside the codex/bob backend constants). v2
+// independently added a copy of copilotGitHubWriteDenyFlags here; the v4 grouped
+// definition (which also carries claudeGitHubWriteDenyFlags) is kept as the single
+// source of truth, so this duplicate was dropped in the v2→v4 sync merge.
+
 func (m *Manager) launchInTmux(ctx context.Context, agent *AgentProcess) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -1434,11 +1440,15 @@ func (m *Manager) launchInTmux(ctx context.Context, agent *AgentProcess) error {
 			// in cli_models.go), which lets the Copilot CLI pick/adjust the model
 			// per task. Nothing here assumes a concrete id, so the sentinel flows
 			// through unchanged.
-			// Keep --enable-all-github-mcp-tools so READ tools (get_issue/list/
-			// search) stay available, then deny ALL write tools in EVERY mode:
-			// agents author via the App-gated gh wrapper, never as the user via
-			// the MCP. Mode governs the gh-wrapper/proxy layer only, not what the
-			// MCP may write.
+			// Every mode denies the FULL set of GitHub MCP write tools
+			// (copilotGitHubWriteDenyFlags) so no mode can author issues/PRs/
+			// comments as the login USER via the MCP; all GitHub writes must go
+			// through the App-gated gh wrapper / hive-open-pr. READ tools stay
+			// enabled via --enable-all-github-mcp-tools. The deny set is identical
+			// across ModeIssuesAndPRs / ModeIssuesOnly / advisory — the mode no
+			// longer changes what the MCP can write (it never legitimately should),
+			// it only governs the separate, unchanged gh-wrapper/proxy layer that
+			// still reads Mode for what the App-gated write path allows.
 			launchCmd = fmt.Sprintf("%s --model %s --no-auto-update --allow-all --enable-all-github-mcp-tools%s",
 				binary, model, copilotGitHubWriteDenyFlags)
 		case "gemini":
@@ -1686,11 +1696,11 @@ func (m *Manager) installCavemanForAgent(agent *AgentProcess, backend string) {
 	case "gemini":
 		cmd = exec.Command("npx", "-y", cavemanRef, "--", "--only", "gemini", modeFlag)
 	case "goose":
-		cmd = exec.Command("npx", "-y", "skills", "add", "JuliusBrussee/caveman", "-a", "goose")
+		cmd = exec.Command("npx", "-y", "skills", "add", "JuliusBrussee/caveman#0d95a81d35a9", "-a", "goose")
 	case "codex":
-		cmd = exec.Command("npx", "-y", "skills", "add", "JuliusBrussee/caveman", "-a", "codex")
+		cmd = exec.Command("npx", "-y", "skills", "add", "JuliusBrussee/caveman#0d95a81d35a9", "-a", "codex")
 	case "aider":
-		cmd = exec.Command("npx", "-y", "skills", "add", "JuliusBrussee/caveman", "-a", "aider-desk")
+		cmd = exec.Command("npx", "-y", "skills", "add", "JuliusBrussee/caveman#0d95a81d35a9", "-a", "aider-desk")
 	default:
 		m.logger.Info("caveman not supported for backend", "backend", backend)
 		return
