@@ -10,7 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // newMergeMockServer mocks PUT /pulls/{n}/merge. When failWith != 0 it returns
@@ -254,6 +256,7 @@ func TestIsRequiredCheckMergeBlocker(t *testing.T) {
 		"At least 1 approving review is required by reviewers ... required status checks have not",
 		"Changes must be made through a pull request",
 		"the base branch requires all commits to be signed ... has not succeeded",
+		`merging PR o/r#42 (squash): PUT http://127.0.0.1:64031/repos/o/r/pulls/42/merge: 405 Required status check "build" is expected.`,
 	}
 	for _, m := range reEngage {
 		if !isRequiredCheckMergeBlocker(m) {
@@ -265,6 +268,7 @@ func TestIsRequiredCheckMergeBlocker(t *testing.T) {
 		"merge conflict between base and head",
 		"Resource not accessible by integration",
 		"403 Forbidden: you do not have permission",
+		"GitHub API returned status code: 403",
 	}
 	for _, m := range unfixable {
 		if isRequiredCheckMergeBlocker(m) {
@@ -274,10 +278,12 @@ func TestIsRequiredCheckMergeBlocker(t *testing.T) {
 }
 
 // requiredCheckMergeServer always fails PUT /merge with a required-check message.
-func requiredCheckMergeServer(t *testing.T) *httptest.Server {
+func requiredCheckMergeServer(t *testing.T, attempts *atomic.Int32) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "PUT" && strings.HasSuffix(r.URL.Path, "/merge") {
+			attempts.Add(1)
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			_, _ = io.WriteString(w, `{"message":"Required status check \"build\" is expected."}`)
 			return
@@ -287,40 +293,43 @@ func requiredCheckMergeServer(t *testing.T) *httptest.Server {
 }
 
 func TestMergeWatcher_ReEngagesOnRequiredCheckFailure(t *testing.T) {
-	srv := requiredCheckMergeServer(t)
+	var mergeAttempts atomic.Int32
+	srv := requiredCheckMergeServer(t, &mergeAttempts)
 	defer srv.Close()
 	c := testMergeClient(t, srv.URL)
 	dir := t.TempDir()
-	mergeRequestDirForTest = dir
-	defer func() { mergeRequestDirForTest = "" }()
 
 	var reEngagedRepo string
 	var reEngagedNum int
-	var calls int
-	allow := true
+	var calls atomic.Int32
 	c.SetMergeReEngageHook(func(repo string, number int) bool {
-		calls++
+		calls.Add(1)
 		reEngagedRepo, reEngagedNum = repo, number
-		return allow
+		return true
 	})
 
 	reqPath, _ := WriteMergeRequest(dir, MergeRequest{Repo: "o/r", Number: 42, ExpectSHA: "abc", Agent: "scanner"})
-	// Drive to the terminal attempt. Each tick bumps the attempt count by
-	// reading back the prior tick's .result.json sidecar, so process the request
-	// until it is quarantined (renamed to .exhausted) rather than assuming a
-	// fixed tick count — under load the per-tick result write-then-read can lag,
-	// which would otherwise need one extra tick to reach the terminal attempt.
-	// A generous upper bound guards against an infinite loop if it never
-	// terminates. Once the request file is gone (quarantined), stop.
-	for i := 0; i < mergeRequestMaxAttempts*4; i++ {
-		if _, err := os.Stat(reqPath); err != nil {
-			break // request quarantined (renamed to .exhausted) — terminal reached
-		}
-		c.ProcessMergeRequestsOnce(context.Background())
+	now := func() time.Time { return time.Unix(1700000000, 0) }
+	// Drive the same request to the terminal attempt. Calling the handler
+	// directly keeps this regression focused on the terminal merge-failure
+	// re-engagement path instead of coupling it to the package-level test
+	// directory override used by the scan-loop tests above.
+	for i := 0; i < mergeRequestMaxAttempts; i++ {
+		c.handleOneMergeRequest(context.Background(), reqPath, now)
 	}
 
-	if calls != 1 {
-		t.Fatalf("re-engage hook should fire exactly once at terminal failure, got %d", calls)
+	if got := mergeAttempts.Load(); got != int32(mergeRequestMaxAttempts) {
+		t.Fatalf("server should see %d merge attempts, got %d", mergeRequestMaxAttempts, got)
+	}
+	resp := readMergeResult(t, reqPath)
+	if resp.Attempts != mergeRequestMaxAttempts {
+		t.Fatalf("result should record terminal attempt %d, got %+v", mergeRequestMaxAttempts, resp)
+	}
+	if !isRequiredCheckMergeBlocker(resp.Error) {
+		t.Fatalf("terminal error should be classified as a required-check blocker: %q", resp.Error)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("re-engage hook should fire exactly once at terminal failure, got %d (result=%+v)", got, resp)
 	}
 	if reEngagedRepo != "o/r" || reEngagedNum != 42 {
 		t.Fatalf("hook got (%q,%d), want (o/r,42)", reEngagedRepo, reEngagedNum)
