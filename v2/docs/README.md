@@ -27,7 +27,9 @@ Start with [Architecture](architecture.md) for the system overview, then use the
 
 ## Configuration and agents
 
-- [Agent configuration](agent-configuration.md) — agent fields, methods, models, pins, cadences, and ACMM packs.
+- [Agent configuration](agent-configuration.md) — agent fields, methods, models, pins, cadences, caveman mode, and ACMM packs.
+- [Knowledge curator](knowledge-curator.md) — automatic fact extraction and promotion knobs.
+- [GitHub App setup](github-app-setup.md) — app creation, permissions, Setup URL, and `/gh-setup`.
 - [ACMM policy matrix](acmm-policy-matrix.md) — capability levels and policy modes.
 - [ACMM policy fragments](../../examples/acmm/README.md) — per-level ACMM policy references.
 - [Sandbox isolation and agent guardrails](sandbox-isolation.md) — isolation layers and operator guardrail notes.
