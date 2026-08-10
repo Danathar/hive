@@ -1,5 +1,7 @@
 # Credly badges — integration design (planned, not yet built)
 
+> **Planned feature.** Hive currently ships only the contributor-card placeholder and milestone mapping. No live Credly API calls, credentials, or badge issuance exist yet.
+
 Status: **design only.** The contributor "Me" card (Leaderboard tab of
 `/contribute`) already shows a **Badges** section, but it is a labeled
 placeholder — it displays the milestone → badge *mapping* and makes **no external

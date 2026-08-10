@@ -250,7 +250,7 @@ Hive uses an **AI-native Capability Maturity Model** (ACMM) with six levels that
 | L5 | Semi-Autonomous (Semi-Automated) | 9 | All agents open hold-gated PRs. Humans batch-review and approve. |
 | L6 | Fully Autonomous | 10 | Agents open PRs and auto-merge on green CI. No hold label required. |
 
-Each level defines per-agent **policy modes**: advisory (observe only), measured (file issues), holdgated (PRs with hold label), or full (auto-merge). See `v2/docs/acmm-policy-matrix.md` for the full matrix.
+Each level defines per-agent **policy modes**: advisory (observe only), measured (file issues), holdgated (PRs with hold label), or full (auto-merge). See `v2/docs/acmm-policy-matrix.md` for the full matrix. Browse the [v2 docs index](v2/docs/README.md) for operations, contributor relay, snapshots, health checks, and design guides.
 
 ## Architecture
 
@@ -274,7 +274,7 @@ flowchart LR
     dash["Dashboard :3001"] -.->|"SSE"| gov
 ```
 
-**See [v2/docs/architecture.md](v2/docs/architecture.md) for the full reference architecture** — process model, the governor loop, the deterministic pipeline, layered guardrails, ACMM, beads, hub & spoke, and an end-to-end walkthrough, with Mermaid diagrams throughout.
+**See [v2/docs/architecture.md](v2/docs/architecture.md) for the full reference architecture** — process model, the governor loop, the deterministic pipeline, layered guardrails, ACMM, beads, hub & spoke, and an end-to-end walkthrough, with Mermaid diagrams throughout. Operator safety references include [trajectory review](v2/docs/trajectory-review.md), [dashboard health checks](v2/docs/health-checks.md), and [sandbox guardrails](v2/docs/sandbox-isolation.md).
 
 ## Contribute to a Hive
 
@@ -290,6 +290,8 @@ just contribute-hive
 ```
 
 Supported CLIs: Claude Code, GitHub Copilot, Pi, Goose, Bob. Contributors start as newcomer (rate-limited) and auto-promote based on completed tasks. Your credentials never leave your machine.
+
+A relay can subscribe to multiple hives with comma-separated `HIVE_HUB` and matching `HIVE_REGISTRATION_TOKEN` values, and operators can delegate selected spoke roles through **Acting as** / `HIVE_AGENT_ROLE`. See [v2/docs/contributor-relay.md](v2/docs/contributor-relay.md) and [v2/docs/contributor-trust-and-roles.md](v2/docs/contributor-trust-and-roles.md).
 
 See the [Hive Hub contribute page](https://hive.kubestellar.io) for details.
 

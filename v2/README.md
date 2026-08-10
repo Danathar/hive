@@ -64,6 +64,8 @@ operations.
 
 See [docs/hivectl.md](docs/hivectl.md) for the full command reference.
 
+See [docs/README.md](docs/README.md) for the full v2 documentation index.
+
 ## Kubernetes
 
 ```bash
@@ -75,7 +77,12 @@ kubectl create configmap hive-config -n hive --from-file=hive.yaml=hive.yaml
 kubectl apply -f deploy/k8s/pvc.yaml
 kubectl apply -f deploy/k8s/deployment.yaml
 kubectl apply -f deploy/k8s/service.yaml
+kubectl apply -f deploy/k8s/dashboard-route-rbac.yaml
 ```
+
+`dashboard-route-rbac.yaml` lets the spoke report `route_exists` in heartbeats.
+See [docs/health-checks.md](docs/health-checks.md) for listener probes,
+hub-fronted URL probing, and alert hysteresis.
 
 ## Configuration
 
@@ -94,31 +101,18 @@ project:
 ### Custom stylesheets
 
 The ClankeR leaderboard, the spoke dashboard, and the read-only `/snapshot`
-preview accept a shareable custom stylesheet parameter:
+preview accept a shareable sanitized CSS theme from a public GitHub repo:
 
-`/contribute/leaderboard?style=owner/repo/path/to/theme.css@ref`
-`/?style=owner/repo/path/to/theme.css@ref`
-`/snapshot?style=owner/repo/path/to/theme.css@ref`
+```text
+/contribute/leaderboard?style=owner/repo/path/to/theme.css@ref
+/?style=owner/repo/path/to/theme.css@ref
+/snapshot?style=owner/repo/path/to/theme.css@ref
+```
 
-The `@ref` suffix is optional and defaults to the repo's `HEAD`. Hive only
-accepts the `owner/repo/path.css` triplet form, fetches public GitHub raw content
-server-side without credentials, sanitizes CSS, strips external imports/URLs, and
-serves it from same-origin endpoints with a 128 KiB size cap. The sanitizer keeps
-normal declarations including custom properties (`--x`/`var(--x)`), attribute and
-pseudo selectors, gradients, `calc()`/`clamp()`/modern color functions, and the
-recursive at-rules `@media`, `@supports`, `@container`, and `@keyframes`.
-`@font-face` blocks are kept only when every `src` URL is same-origin/relative or
-`data:`. It removes `@import`, external or protocol-relative `url()` fetches,
-CSS escape sequences, `image-set()`, and legacy executable CSS vectors such as
-`expression()`, `behavior`, and `-moz-binding`.
-
-Sanitized style responses include `X-Hive-Style-Dropped: N` when anything was
-removed. Add `&report=1` to `/api/style` or `/api/leaderboard/style` to get JSON
-with the sanitized CSS and a short list of sanitizer reasons. Leaderboard CSS is
-scoped to `#tab-leaderboard`; dashboard and snapshot CSS is scoped to
-`#hive-dashboard-root`, which deliberately leaves login/setup overlays outside
-the custom-theme surface. `/api/style` is public so unauthenticated snapshots can
-load sanitized CSS, and the existing `style-src 'self'` CSP remains sufficient.
+See [docs/custom-stylesheets.md](docs/custom-stylesheets.md) for sanitizer
+rules, `report=1`, scoping, and examples. See
+[docs/snapshots.md](docs/snapshots.md) for the public snapshot page and
+frame-ancestor sharing configuration.
 
 ## Agents
 
@@ -168,6 +162,22 @@ policies:
   path: agents/
   poll_interval: 5m
 ```
+
+## ClankeR contributor relay
+
+ClankeR lets contributors lend their own AI CLI subscription to a hive through
+`/contribute`. Contributors start as `newcomer`, auto-promote to `contributor`
+after 5 PR-backed completions and `trusted` after 20, and may receive
+maintainer-granted tiers such as `merger`. The merger tier can queue **other
+people's** PRs for Hive's auto-merge-on-green sweep, never its own.
+
+Relays can subscribe to multiple hubs by setting comma-separated `HIVE_HUB` and
+matching `HIVE_REGISTRATION_TOKEN` lists. Operators can also allow contributors
+to act as selected spoke roles with `HIVE_AGENT_ROLE` / **Acting as**,
+profile-level grant chips, and `hub.contribute_delegatable_roles`.
+
+See [docs/contributor-relay.md](docs/contributor-relay.md) and
+[docs/contributor-trust-and-roles.md](docs/contributor-trust-and-roles.md).
 
 ## Governor
 
@@ -243,6 +253,15 @@ knowledge:
 An experiment framework that lets you test configuration changes (models, cadences, thresholds) against live data before committing them. Experiments run in a sandbox with rollback on failure.
 
 Configure via the dashboard or the `/api/nous/*` endpoints. See `hive.yaml.example` for available options.
+
+## Further reading
+
+- [v2 docs index](docs/README.md) — all operator, contributor, and design docs.
+- [Cross-cluster migration](docs/cross-cluster-migration.md) — move a hive between clusters.
+- [Manual provisioning](docs/manual-provisioning.md) — hosted/spoke provisioning and hub access.
+- [Config layering](docs/config-layering.md) — ConfigMap vs PVC overlay precedence.
+- [Trajectory review](docs/trajectory-review.md) — trajectory safety lane.
+- [Credly badges](docs/credly-badges.md) — planned badge integration placeholder.
 
 ## Ports and Volumes
 
