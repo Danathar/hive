@@ -1694,17 +1694,26 @@ func provisionHive(h *SaaSHive, req *CreateHiveRequest, cluster *ClusterConfig, 
 			}
 			return strings.Join(lines, "\n")
 		}(),
-		// AdditionalAppKeys delivers the fleet's OTHER App keys at provision time,
-		// each in its own per-app-id Secret entry. Naming is by APP ID, not by
-		// cluster: a key's identity is the App it belongs to, and the spoke selects
-		// by matching its configured app_id (resolveAppKeyFile). Per-cluster naming
-		// would be a lie here — the same PEM is valid on every cluster whose hives
-		// authenticate as that App, and a spoke has no way to know which cluster a
-		// file named for one was meant to serve. The primary key is excluded: it is
-		// already written as gh-app-key.pem above, and duplicating it would let the
-		// two copies drift.
-		"AdditionalAppKeys": provisionAdditionalAppKeys(
-			fleetKeys, resolveProvisionAppID(req.AppID, h, cluster)),
+		// SECURITY (audit N1, CWE-200): a spoke receives ONLY its own App key.
+		//
+		// This used to render every OTHER App key in the fleet into each new
+		// hive's Secret, so one tenant's pod held other tenants' GitHub App
+		// private keys — and with the 0644 projection (N5) every agent UID in
+		// that pod could read them. The stated rationale was pre-positioning a
+		// key for a possible future forge switch.
+		//
+		// That is the SAME argument this codebase already rejected when it
+		// removed the heartbeat's fleet-wide broadcast (see the note above
+		// appKeySyncDecision in cluster_app_key.go): speculative distribution of
+		// private key material is not justified by a migration that may never
+		// happen. When a hive IS re-assigned to a different App, that App's key
+		// is delivered at that moment through the reconcile / pending-identity
+		// lanes, keyed to the hive authoritatively assigned it.
+		//
+		// Kept as an empty list rather than deleting the template block, so a
+		// spoke rolling on an older manifest sees the field disappear cleanly
+		// instead of failing to render.
+		"AdditionalAppKeys": []provisionAppKey{},
 		"CPURequest":            cpuRequest,
 		"CPULimit":              cpuLimit,
 		"MemRequest":            memRequest,
@@ -1731,9 +1740,26 @@ func provisionHive(h *SaaSHive, req *CreateHiveRequest, cluster *ClusterConfig, 
 		// C2 follow-up: SSO is asymmetric — the spoke gets only the Ed25519 PUBLIC
 		// key (SSOPublicKey), derived from the same master seed the hub signs with,
 		// so even a hostile spoke operator holding this value cannot mint a token.
-		"HeartbeatKey": deriveDomainKey(provisionMasterSecret(), infoHeartbeatKey),
+		// N1: the heartbeat bearer is PER-HIVE. A fleet-wide bearer proved only
+		// "some provisioned spoke", so the hub had to trust body-supplied
+		// hive_id — and three key-delivery lanes read off that claimed ID.
+		// Binding the bearer to the hive makes the claim self-authenticating.
+		"HeartbeatKey": provisionHeartbeatKey(h.ID),
 		"SessionKey":   deriveDomainKey(provisionMasterSecret(), infoSessionKey),
 		"SSOPublicKey": ssoPublicKeyFromSeed(deriveDomainKey(provisionMasterSecret(), infoSSOEd25519Seed)),
+		// N2: the Ed25519 PUBLIC key for hub session cookies. A spoke verifies
+		// hive_hub_user with this and cannot mint one — unlike SessionKey below,
+		// which is symmetric and therefore let any spoke forge a hub ADMIN cookie.
+		// SessionKey is still shipped for the rollout window so a spoke on an older
+		// image keeps verifying legacy cookies; remove it once the fleet has rolled.
+		"SessionPublicKey": provisionSessionPublicKey(),
+		// N3: the terminal key is PER-HIVE, not fleet-wide. Without it
+		// TerminalSigningKey() falls through to the fleet-uniform SessionKey
+		// above, so an assertion minted on one spoke verifies on every other —
+		// any tenant could forge a shell grant on any other tenant. The spoke
+		// both mints and verifies this key locally, so symmetric is correct;
+		// only the sharing was wrong.
+		"TerminalKey": provisionTerminalKey(h.ID),
 		// Cluster-aware fields.
 		"DashboardHost":      dashboardHost,
 		"DashboardURL":       dashboardURL,
@@ -2564,6 +2590,25 @@ spec:
         # seed, can). Replaces the earlier symmetric HIVE_SSO_KEY.
         - name: HIVE_SSO_PUBLIC_KEY
           value: "{{.SSOPublicKey}}"
+        # N2 (CWE-321/798): the Ed25519 PUBLIC key for hub SESSION cookies.
+        # HIVE_SESSION_KEY above is symmetric, so every spoke that could VERIFY
+        # hive_hub_user could also MINT it — including "clubanderson.<sig>",
+        # which requireAdmin accepts on ~21 admin routes. With this the spoke
+        # verifies and cannot forge. HIVE_SESSION_KEY is still injected for the
+        # rollout window (a spoke on an older image only knows the legacy
+        # format); drop it once the fleet has rolled.
+        - name: HIVE_SESSION_PUBLIC_KEY
+          value: "{{.SessionPublicKey}}"
+        # N3 (CWE-862): the terminal signing key is PER-HIVE. This spoke both
+        # mints the assertion (dashboard/session.go, at login) and verifies it
+        # (proxy/server.js, on /terminal), so a symmetric key is the right shape
+        # — but it must not be shared. Without this var TerminalSigningKey()
+        # fell through to HIVE_SESSION_KEY, which is byte-identical fleet-wide,
+        # so an assertion minted here verified on EVERY other tenant's spoke:
+        # one hostile operator could forge a shell grant for an arbitrary user
+        # on an arbitrary hive. Both resolvers already prefer this var.
+        - name: HIVE_TERMINAL_KEY
+          value: "{{.TerminalKey}}"
 {{- if .IsNginxIngress}}
         # HIVE_INGRESS_AUTHZ tells the Node proxy that an nginx ingress
         # auth-proxy sits IN FRONT of this pod and per-hive-authorizes every

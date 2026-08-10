@@ -35,10 +35,52 @@ function deriveSessionKey() {
   return crypto.createHmac('sha256', master).update(INFO_SESSION_KEY).digest('hex');
 }
 const SESSION_KEY = deriveSessionKey();
+
+// SESSION_PUBLIC_KEY is the hub's Ed25519 PUBLIC key for session cookies (audit
+// N2). The hub holds the private seed and is the only party that can MINT a
+// cookie; this spoke can only VERIFY.
+//
+// SESSION_KEY above is symmetric, so a spoke able to verify was equally able to
+// mint — any spoke operator could read it from the pod env and forge
+// `clubanderson.<sig>`, a hub ADMIN cookie honoured on ~21 admin routes. Both
+// are read during the rollout window: this spoke may be running an older image
+// than the hub, or vice versa. Once the fleet has rolled, HIVE_SESSION_KEY (and
+// the legacy branch in verifyHubUserCookieEither) go away.
+//
+// Derived from HIVE_HUB_SECRET as a fallback for self-hosted spokes whose
+// operator legitimately holds the master. The info string MUST stay byte-for-byte
+// identical to infoSessionEd25519Seed in v2/pkg/hub/hub_keys.go.
+const INFO_SESSION_ED25519_SEED = 'hive-session-ed25519-v1';
+function deriveSessionPublicKey() {
+  const explicit = (process.env.HIVE_SESSION_PUBLIC_KEY || '').trim();
+  if (explicit) return explicit;
+  const master = (process.env.HIVE_HUB_SECRET || '').trim();
+  if (!master) return '';
+  const seedHex = crypto.createHmac('sha256', master).update(INFO_SESSION_ED25519_SEED).digest('hex');
+  try {
+    // Node cannot expand a raw Ed25519 seed directly, so wrap it in the PKCS#8
+    // prefix for a 32-byte Ed25519 private key and export the public half. This
+    // mirrors Go's ed25519.NewKeyFromSeed(seed).Public().
+    const pkcs8 = Buffer.concat([
+      Buffer.from('302e020100300506032b657004220420', 'hex'),
+      Buffer.from(seedHex, 'hex'),
+    ]);
+    const priv = crypto.createPrivateKey({ key: pkcs8, format: 'der', type: 'pkcs8' });
+    const spki = crypto.createPublicKey(priv).export({ format: 'der', type: 'spki' });
+    // Strip the 12-byte SPKI header to get the raw 32-byte public key, matching
+    // the hex encoding the hub ships in HIVE_SESSION_PUBLIC_KEY.
+    return Buffer.from(spki.subarray(spki.length - 32)).toString('hex');
+  } catch (_) {
+    return '';
+  }
+}
+const SESSION_PUBLIC_KEY = deriveSessionPublicKey();
 // Boot-time "am I hub-hosted?" signal. Either the injected session key (modern)
 // or a master secret (legacy) proves hosted mode, where identity comes from the
 // hub cookie rather than a shared dashboard token.
-const IS_HOSTED = SESSION_KEY !== '';
+// N2: either key proves hosted mode. A freshly provisioned spoke may hold only
+// the public key once HIVE_SESSION_KEY is dropped after the rollout.
+const IS_HOSTED = SESSION_KEY !== '' || SESSION_PUBLIC_KEY !== '';
 
 // Snapshot frame-ancestors allowlist (v2 #3032). Additive to the v4 C2/session
 // hardening above: the CSP default stays frame-ancestors 'none' everywhere; only
@@ -52,6 +94,20 @@ const SNAPSHOT_FRAME_ANCESTORS_FALLBACK = parseSnapshotFrameAncestors(process.en
 // domain receives it), so the signature check alone proves only "some hub user",
 // never "a user allowed on THIS hive".
 const HIVE_ID = process.env.HIVE_ID || '';
+
+// TERMINAL_ROLES are the roles sufficient to open a shell: owner and read-write.
+// A `read`-only grant authenticates and authorizes the DASHBOARD but is NOT
+// enough for a terminal — the finding asks role sufficiency (owner/operator) be
+// enforced, and a read-only user with shell access would be a privilege
+// escalation. Role strings mirror pkg/config (RoleOwner, RoleReadWrite) and the
+// hub saasRole* constants.
+const TERMINAL_ROLES = new Set(['owner', 'read-write']);
+
+// Declared ABOVE the HIVE_AUTHORIZED_USERS parse below, because
+// parseAuthorizedUsernames now consults it (N4 role-aware allowlist). A `const`
+// sits in a temporal dead zone until its declaration executes, and that parse
+// runs at module load — with this further down, the proxy threw "Cannot access
+// 'TERMINAL_ROLES' before initialization" and failed to start at all.
 
 // HIVE_AUTHORIZED_USERS is this hive's per-hive allowlist, injected by the hub
 // (authorizedUsersForHive): a comma-separated list of `username` or
@@ -78,6 +134,8 @@ const HIVE_AUTHORIZED_USERS = parseAuthorizedUsernames(process.env.HIVE_AUTHORIZ
 // the ingress" — there is no ingress to defer to — so the terminal must deny.
 const HIVE_INGRESS_AUTHZ = (process.env.HIVE_INGRESS_AUTHZ || '') === 'true';
 
+
+
 // parseAuthorizedUsernames turns "owner:owner,alice:read,bob" into a Set of
 // lowercased usernames. It mirrors the Go parseAuthorizedUsers split (comma
 // list, ":role" suffix optional) but keeps only the identity, which is all the
@@ -85,8 +143,23 @@ const HIVE_INGRESS_AUTHZ = (process.env.HIVE_INGRESS_AUTHZ || '') === 'true';
 function parseAuthorizedUsernames(raw) {
   const set = new Set();
   for (const entry of raw.split(',')) {
-    const name = entry.split(':')[0].trim().toLowerCase();
-    if (name) set.add(name);
+    const parts = entry.split(':');
+    const name = parts[0].trim().toLowerCase();
+    if (!name) continue;
+    // SECURITY (audit N4, CWE-862): the role suffix is NOT decoration — honour it.
+    //
+    // This used to keep only `parts[0]`, discarding ":read". authorizedUsersForHive
+    // emits EVERY user granted the hive, as `owner:owner` plus `name:read` for the
+    // rest, so dropping the suffix made a read-only viewer indistinguishable from
+    // an owner in this set — and the terminal gate then handed them a shell in a
+    // credential-holding container.
+    //
+    // A missing suffix means "no role stated"; those entries are kept, since the
+    // list has historically carried bare names and the caller (isAuthorizedForThisHive)
+    // is only reached when there is no authoritative assertion to read a role from.
+    const role = (parts[1] || '').trim().toLowerCase();
+    if (role && !TERMINAL_ROLES.has(role)) continue;
+    set.add(name);
   }
   return set;
 }
@@ -173,14 +246,6 @@ const TERMINAL_ASSERTION_COOKIE = 'hive_terminal_assertion';
 // bounds. Matches the Go ssoClockSkew (30s).
 const TERMINAL_CLOCK_SKEW_S = 30;
 
-// TERMINAL_ROLES are the roles sufficient to open a shell: owner and read-write.
-// A `read`-only grant authenticates and authorizes the DASHBOARD but is NOT
-// enough for a terminal — the finding asks role sufficiency (owner/operator) be
-// enforced, and a read-only user with shell access would be a privilege
-// escalation. Role strings mirror pkg/config (RoleOwner, RoleReadWrite) and the
-// hub saasRole* constants.
-const TERMINAL_ROLES = new Set(['owner', 'read-write']);
-
 // verifyTerminalAssertion mirrors Go hub.VerifyTerminalAssertion. It returns
 // { username, role } on success, or null on ANY failure (bad signature, wrong
 // version, wrong hive, expired/not-yet-valid, malformed) — fail closed, never
@@ -236,17 +301,37 @@ function verifyTerminalAssertion(key, token, expectedHiveID, nowSec) {
 function authorizeTerminal(cookieUser, assertionCookie) {
   const nowSec = Math.floor(Date.now() / 1000);
   const claim = verifyTerminalAssertion(TERMINAL_SIGNING_KEY, assertionCookie, HIVE_ID, nowSec);
-  if (claim && TERMINAL_ROLES.has((claim.role || '').toLowerCase())) {
-    // A valid this-hive assertion with a sufficient role is the primary grant.
-    // Bind it to the SAME user the hub-wide cookie authenticated: an attacker
-    // must present BOTH a validly-signed hub cookie for user X AND a validly-
-    // signed terminal assertion for user X on THIS hive.
-    if (claim.username && cookieUser &&
-        claim.username.toLowerCase() === cookieUser.toLowerCase()) {
-      return true;
-    }
+
+  if (claim) {
+    // The assertion VERIFIED — a correctly signed, unexpired, this-hive grant.
+    // Its role is therefore authoritative, and this function must answer from it
+    // alone. It must NOT fall through to the allowlist.
+    //
+    // SECURITY (audit N4, CWE-862/613): the fallback below used to be reached
+    // for every non-grant outcome, including a valid assertion whose role was
+    // merely insufficient. That silently upgraded read-only users to a shell,
+    // because the allowlist parse (parseAuthorizedUsernames) DISCARDS the
+    // ":read" suffix and authorizedUsersForHive puts every granted user in the
+    // list — so `carol:read` was indistinguishable from `alice:owner` there.
+    //
+    // Worse, the allowlist is a provision-time env snapshot: hub-side revocation
+    // never reaches a running spoke, so a revoked user kept shell access
+    // indefinitely on a stale list. Honouring the assertion's own role — and its
+    // expiry — is what makes revocation and downgrade actually take effect.
+    const roleOK = TERMINAL_ROLES.has((claim.role || '').toLowerCase());
+    const userOK = !!claim.username && !!cookieUser &&
+      claim.username.toLowerCase() === cookieUser.toLowerCase();
+    // Bind the grant to the SAME user the hub-wide cookie authenticated: an
+    // attacker must present BOTH a validly-signed hub cookie for user X AND a
+    // validly-signed terminal assertion for user X on THIS hive.
+    return roleOK && userOK;
   }
-  // No usable assertion → fall back to the #2756 static allowlist + fail-closed.
+
+  // No USABLE assertion — absent, expired, wrong hive, or bad signature. There
+  // is no authoritative role to read, so fall back to the #2756 static allowlist
+  // (itself fail-closed). Note this is deliberately narrower than before: it is
+  // now reached only when the assertion tells us NOTHING, never when it tells us
+  // "no".
   return isAuthorizedForThisHive(cookieUser);
 }
 
@@ -362,6 +447,46 @@ function verifyHubUserCookie(secret, value) {
     return '';
   }
   return username;
+}
+
+// HUB_COOKIE_V2_MARKER separates the username from an Ed25519 signature. It must
+// stay byte-identical to hubCookieV2Marker in v2/pkg/hub/hub_cookie.go. A legacy
+// HMAC signature is base64url and so can never contain a '.', which is what makes
+// the two formats distinguishable by structure rather than by guessing.
+const HUB_COOKIE_V2_MARKER = '.v2.';
+
+// verifyHubUserCookieV2 mirrors verifyHubUserCookieValueV2 in
+// v2/pkg/hub/hub_cookie.go EXACTLY: value is `<username>.v2.<base64url(sig)>`
+// where sig is Ed25519 over the username, verified against the hub's PUBLIC key.
+// Returns the verified username, or '' on any failure.
+function verifyHubUserCookieV2(pubHex, value) {
+  if (!pubHex || !value) return '';
+  const idx = value.lastIndexOf(HUB_COOKIE_V2_MARKER);
+  if (idx <= 0) return '';
+  const username = value.slice(0, idx);
+  const sigB64 = value.slice(idx + HUB_COOKIE_V2_MARKER.length);
+  if (!username || !sigB64) return '';
+  try {
+    const raw = Buffer.from(pubHex, 'hex');
+    if (raw.length !== 32) return '';
+    // Wrap the raw 32-byte key in its SPKI header so Node can import it.
+    const spki = Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), raw]);
+    const pub = crypto.createPublicKey({ key: spki, format: 'der', type: 'spki' });
+    const sig = Buffer.from(sigB64, 'base64url');
+    return crypto.verify(null, Buffer.from(username), pub, sig) ? username : '';
+  } catch (_) {
+    return '';
+  }
+}
+
+// verifyHubUserCookieEither accepts a v2 (Ed25519) cookie or, during the rollout
+// window only, a legacy HMAC one — mirroring the Go helper of the same name.
+// The legacy branch is the N2 vulnerability (verify-capable implies mint-capable)
+// and is removed once the fleet has rolled and existing cookies have aged out.
+function verifyHubUserCookieEither(pubHex, legacySecret, value) {
+  const v2 = verifyHubUserCookieV2(pubHex, value);
+  if (v2) return v2;
+  return verifyHubUserCookie(legacySecret, value);
 }
 
 // snapshotFrameAncestors (v2 #3032): resolves the per-hive allowlist for framing
@@ -493,7 +618,7 @@ app.use('/terminal', (req, res, next) => {
     }, {});
     // SECURITY (CWE-345): the cookie is HMAC-signed by the hub. Verify the
     // signature — a non-empty value is NOT proof of authentication.
-    const user = verifyHubUserCookie(SESSION_KEY, cookies['hive_hub_user']);
+    const user = verifyHubUserCookieEither(SESSION_PUBLIC_KEY, SESSION_KEY, cookies['hive_hub_user']);
     if (!user) {
       if (req.headers.upgrade === 'websocket') {
         req.socket.destroy();
@@ -595,7 +720,7 @@ server.on('upgrade', (req, socket, head) => {
         return acc;
       }, {});
       // SECURITY (CWE-345): verify the hub's HMAC signature, not mere existence.
-      const wsUser = verifyHubUserCookie(SESSION_KEY, cookies['hive_hub_user']);
+      const wsUser = verifyHubUserCookieEither(SESSION_PUBLIC_KEY, SESSION_KEY, cookies['hive_hub_user']);
       if (!wsUser) {
         socket.destroy();
         return;

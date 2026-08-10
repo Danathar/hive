@@ -51,6 +51,18 @@ const (
 	// in the existing master — no new secret, no rotation. Distinct label from the
 	// legacy symmetric infoSSOKey so the two can never derive to the same bytes.
 	infoSSOEd25519Seed = "hive-sso-ed25519-v1"
+
+	// infoSessionEd25519Seed derives the Ed25519 signing SEED for the hub SESSION
+	// cookie (audit N2). Same construction as infoSSOEd25519Seed and for the same
+	// reason: a spoke must be able to VERIFY a hub-minted value without being able
+	// to MINT one.
+	//
+	// The symmetric infoSessionKey above cannot give that. It is provisioned into
+	// every spoke so the spoke's proxy can check `hive_hub_user`, but an HMAC key
+	// that verifies also signs — so any spoke operator could read it from their pod
+	// env and mint `clubanderson.<sig>`, which requireAdmin accepts on ~21 admin
+	// routes. Distinct label from infoSessionKey so the two can never collide.
+	infoSessionEd25519Seed = "hive-session-ed25519-v1"
 )
 
 // deriveDomainKey returns a domain-separated sub-key of master for the given
@@ -63,6 +75,40 @@ func deriveDomainKey(master, info string) string {
 	}
 	mac := hmac.New(sha256.New, []byte(master))
 	mac.Write([]byte(info))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// derivePerHiveKey returns a sub-key bound to BOTH a trust domain and a single
+// hive: HMAC-SHA256(master, info || 0x00 || hiveID).
+//
+// SECURITY (audit N1/N3, CWE-321/798). deriveDomainKey above takes a FIXED label,
+// so every spoke in the fleet derives byte-identical keys from the one master.
+// Possession therefore proves "some provisioned spoke" and never "this spoke" —
+// which is the whole of the hosted kill chain: spoke A's key verifies on spoke B,
+// so one hostile tenant can forge terminal grants for any other tenant and beat
+// heartbeats as any victim.
+//
+// Mixing the hive ID into the derivation makes the key per-spoke while keeping
+// every property the fleet-wide scheme had: deterministic in the existing master
+// (no new secret to store, rotate, or escrow), reproducible by the hub on demand,
+// and stable across re-provisioning.
+//
+// The 0x00 separator matters. Plain concatenation is ambiguous — ("hive-terminal",
+// "a|b") and ("hive-terminal|a", "b") would hash identically — and hive IDs are
+// operator-influenced, so an ambiguous encoding is a real (if narrow) collision
+// lane. A NUL byte cannot appear in either input: info strings are compile-time
+// constants and hive IDs are validated by isValidName.
+//
+// Returns "" for an empty master OR an empty hiveID: a keyless or identity-less
+// caller must fail closed rather than silently sharing one key again.
+func derivePerHiveKey(master, info, hiveID string) string {
+	if master == "" || hiveID == "" {
+		return ""
+	}
+	mac := hmac.New(sha256.New, []byte(master))
+	mac.Write([]byte(info))
+	mac.Write([]byte{0})
+	mac.Write([]byte(hiveID))
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
@@ -89,6 +135,106 @@ func (s *HubServer) ssoSigningSeed() string {
 
 func (s *HubServer) impersonateKey() string {
 	return deriveDomainKey(s.hubSecret, infoImpersonateKey)
+}
+
+// sessionSigningSeed returns the hex-encoded 32-byte Ed25519 SEED the hub signs
+// session cookies with (audit N2). PRIVATE key material: it must NEVER be
+// injected into a spoke — spokes receive only sessionPublicKey().
+func (s *HubServer) sessionSigningSeed() string {
+	return deriveDomainKey(s.hubSecret, infoSessionEd25519Seed)
+}
+
+// sessionPublicKey returns the hex Ed25519 PUBLIC key a spoke verifies hub
+// session cookies with. Safe to place in a Deployment: it verifies, it cannot
+// sign.
+func (s *HubServer) sessionPublicKey() string {
+	return ssoPublicKeyFromSeed(s.sessionSigningSeed())
+}
+
+// provisionSessionPublicKey is the provisioning-time mirror of
+// sessionPublicKey, resolved against provisionMasterSecret().
+func provisionSessionPublicKey() string {
+	return ssoPublicKeyFromSeed(deriveDomainKey(provisionMasterSecret(), infoSessionEd25519Seed))
+}
+
+// provisionTerminalKey returns the PER-HIVE terminal signing key injected into a
+// spoke as HIVE_TERMINAL_KEY (audit N3).
+//
+// The terminal assertion is minted on the spoke (dashboard/session.go) and
+// verified on that same spoke (proxy/server.js), so a symmetric key is the right
+// shape here — unlike the hub session cookie, no other party needs to verify it.
+// What was wrong was that TerminalSigningKey() fell through to HIVE_SESSION_KEY,
+// which is fleet-uniform: an assertion minted with spoke A's key verified on
+// spoke B, so any spoke could forge a shell grant for any user on any tenant.
+//
+// Binding the key to the hive ID closes that without changing the mint/verify
+// code on either side — TerminalSigningKey() and the proxy's mirror already
+// prefer HIVE_TERMINAL_KEY; provisioning simply never set it.
+func provisionTerminalKey(hiveID string) string {
+	return derivePerHiveKey(provisionMasterSecret(), infoTerminalKey, hiveID)
+}
+
+// provisionHeartbeatKey returns the PER-HIVE heartbeat bearer injected into a
+// spoke as HIVE_HEARTBEAT_KEY (audit N1).
+//
+// The spoke presents this to the hub, so unlike the terminal key it crosses the
+// trust boundary — but it is still symmetric, because the hub can re-derive it
+// on demand from the master plus the claimed hive ID. That is precisely what
+// makes the identity binding possible: with a fleet-shared bearer the hub had no
+// way to check that the caller was the hive it claimed to be, which is why
+// handleHeartbeat trusted body-supplied hive_id and three key-delivery lanes
+// became IDOR.
+func provisionHeartbeatKey(hiveID string) string {
+	return derivePerHiveKey(provisionMasterSecret(), infoHeartbeatKey, hiveID)
+}
+
+// heartbeatKeyFor returns the per-hive heartbeat bearer the hub EXPECTS from
+// hiveID. Mirror of provisionHeartbeatKey, resolved against the running hub's
+// own master rather than the provisioning-time lookup.
+func (s *HubServer) heartbeatKeyFor(hiveID string) string {
+	return derivePerHiveKey(s.hubSecret, infoHeartbeatKey, hiveID)
+}
+
+// verifyHeartbeatBearer authenticates a heartbeat and BINDS it to the claimed
+// hive (audit N1).
+//
+// Accepts either:
+//
+//  1. the per-hive bearer for exactly this hiveID — the post-fix path, which
+//     makes the claimed identity self-authenticating; or
+//  2. the legacy fleet-wide bearer — every spoke currently in the field holds
+//     this and will keep holding it until the hub re-provisions it.
+//
+// Lane 2 is a DELIBERATE, TEMPORARY compatibility path and it does NOT bind
+// identity — a spoke presenting the legacy key can still claim any hive_id, so
+// the N1 IDOR remains open for spokes that have not rolled. It exists because a
+// flag-day cutover would break every heartbeat in the fleet simultaneously,
+// which is the failure mode #2773 already documented for the v2-hub/v4-spoke
+// split. Remove it once the fleet has re-provisioned; the callers that consume
+// the identity are hardened independently, so the window is bounded by rollout
+// rather than by trust in the legacy key.
+//
+// Both comparisons are constant-time. Order matters only for the returned
+// telemetry, not for security: a caller holding the legacy key is accepted
+// regardless of which branch runs first.
+func (s *HubServer) verifyHeartbeatBearer(presented, hiveID string) bool {
+	if presented == "" {
+		return false
+	}
+	if perHive := s.heartbeatKeyFor(hiveID); perHive != "" && secureCompareHub(presented, perHive) {
+		return true
+	}
+	// Legacy fleet-wide bearer — accepted during rollout only.
+	return secureCompareHub(presented, s.heartbeatKey())
+}
+
+// heartbeatBearerIsPerHive reports whether the presented bearer is the modern,
+// identity-bound one. Used for rollout telemetry so an operator can see when the
+// fleet has fully migrated and the legacy lane in verifyHeartbeatBearer can be
+// deleted.
+func (s *HubServer) heartbeatBearerIsPerHive(presented, hiveID string) bool {
+	perHive := s.heartbeatKeyFor(hiveID)
+	return perHive != "" && secureCompareHub(presented, perHive)
 }
 
 // ssoPublicKeyFromSeed expands a hex Ed25519 seed into the hex-encoded 32-byte
@@ -143,6 +289,17 @@ func spokeDomainKey(envVar, info string) string {
 
 // SpokeHeartbeatKey returns the bearer a spoke presents on /api/heartbeat and
 // /api/task-status. Exported for use from the dashboard/heartbeat call sites.
+//
+// N1 note: a hub-provisioned spoke gets HIVE_HEARTBEAT_KEY, which is now the
+// PER-HIVE bearer — no spoke-side change is needed, the value in the env var
+// simply becomes identity-bound at the next re-provision.
+//
+// The HIVE_HUB_SECRET fallback below still derives the FLEET-wide bearer, and
+// deliberately so: it serves self-hosted operators who legitimately hold the
+// master and beat against their own hub, where "any spoke can claim any ID" is
+// not a cross-tenant concern because there is exactly one tenant. The hub keeps
+// accepting that value through verifyHeartbeatBearer's legacy lane. A hosted
+// spoke cannot reach this path — it never receives the master.
 func SpokeHeartbeatKey() string { return spokeDomainKey(EnvHeartbeatKey, infoHeartbeatKey) }
 
 // SpokeSessionKey returns the key a spoke uses to VERIFY the hub-minted
