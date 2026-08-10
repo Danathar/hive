@@ -152,7 +152,7 @@ Set `replicas: N` on a declared agent to run a small pool with the same prompt, 
 | Type | Required fields | Behavior |
 |---|---|---|
 | `kick` | none | Keep ordinary governor timer kicks. |
-| `webhook` | `events` | `/webhook`/GitHub webhook receiver matches `X-GitHub-Event` or `event.action` strings such as `issues.opened`; optional `repos` filters by repository name. If `HIVE_WEBHOOK_SECRET` is set, GitHub `X-Hub-Signature-256` HMAC is verified. |
+| `webhook` | `events` | `/webhook`/GitHub webhook receiver matches `X-GitHub-Event` or `event.action` strings such as `issues.opened`; optional `repos` filters by repository name. `HIVE_WEBHOOK_SECRET` is required and every request must include a valid GitHub `X-Hub-Signature-256` HMAC. Missing configuration or invalid signatures fail closed with `401`. |
 | `bead` | `match` | The bead watcher polls the agent's `beads_dir` about every 30 seconds and kicks when an individual JSON file has every `key: value` in `match` at the top level. Current watcher matching is not the nested `metadata` map inside the `bd` ledger file. |
 | `schedule` | `schedule` | Cron-style channel trigger independent of governor-mode cadences. |
 | `discord` | `patterns` | Declared shape for Discord-triggered work; patterns are validated by config load. |
