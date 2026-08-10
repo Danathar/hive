@@ -1241,7 +1241,7 @@ func (h *ContributeWSHub) DisconnectContributor(contributorID, reason string) in
 		h.logger.Info("[contribute-ws] disconnecting contributor session", "username", username, "reason", reason)
 		if c.ws != nil {
 			// Best-effort notify then close; the read loop's defer does the release.
-			_ = sendJSON(c.ws, WSMessage{Type: "auth_failed", Seq: h.nextSeq(), Reason: reason})
+			_ = c.send(WSMessage{Type: "auth_failed", Seq: h.nextSeq(), Reason: reason})
 			c.ws.Close()
 		}
 	}

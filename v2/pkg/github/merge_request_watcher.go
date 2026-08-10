@@ -125,7 +125,7 @@ func (c *Client) SetMergeReEngageHook(fn MergeReEngageFunc) {
 func isRequiredCheckMergeBlocker(errMsg string) bool {
 	m := strings.ToLower(errMsg)
 	// Unfixable-by-code blockers take precedence: never re-engage these.
-	for _, deny := range []string{"merge conflict", "not accessible by integration", "permission", "403", "must be a member"} {
+	for _, deny := range []string{"merge conflict", "not accessible by integration", "permission", "403 forbidden", "status code: 403", "http 403", "must be a member"} {
 		if strings.Contains(m, deny) {
 			return false
 		}
