@@ -999,6 +999,19 @@ func TestGitSource_StartSyncLoop_Cancels(t *testing.T) {
 	}
 }
 
+func TestImportDocumentRejectsDuplicateName(t *testing.T) {
+	api := NewKnowledgeAPI(nil, KnowledgeConfig{Enabled: true, Engine: "file"}, covLogger())
+	api.docSources = append(api.docSources, &DocumentSource{slug: "existing-doc"})
+
+	_, err := api.ImportDocument(context.Background(), DocSourceConfig{Name: "Existing Doc"})
+	if err == nil {
+		t.Fatal("expected duplicate document name to be rejected before import")
+	}
+	if !strings.Contains(err.Error(), "already imported") {
+		t.Fatalf("expected duplicate import error, got %v", err)
+	}
+}
+
 // --- gitsync: gitPull error path, syncAll ---
 
 func TestGitPull_NotARepo(t *testing.T) {
