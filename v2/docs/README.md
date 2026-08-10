@@ -1,61 +1,63 @@
 # Hive v2 documentation
 
-This index organizes the versioned Hive docs under `v2/docs/`. It is the
-precursor to a published docs site.
-
-## Getting Started
-
-- [Agent configuration](agent-configuration.md) — configure lanes, models,
-  channels, policy modes, and ACMM packs.
-- [Hive CLI](hivectl.md) — inspect agents, beads, events, config, knowledge, and
-  lite enrollment.
-- [Hive lite enrollment](lite-enrollment.md) — five-minute, zero-secret advisory
-  enrollment for a repository.
-- [Credly badges](credly-badges.md) — public badge/credential surfaces.
-
-## Architecture
-
-- [Reference architecture](architecture.md) — process model, governor,
-  deterministic pipeline, guardrails, ACMM, beads, hub/spoke, model backends,
-  and observability.
-- [CNCF reference architecture](cncf-reference-architecture.md) — cloud-native
-  framing for Hive's components and security boundaries.
-- [ACMM policy matrix](acmm-policy-matrix.md) — autonomy levels mapped to agent
-  policy modes.
-- [Configuration layering](config-layering.md) — seed, overlay, dashboard, and
-  hub/spoke configuration precedence.
-- [Planning intelligence](planning-intelligence.md) — goal decomposition, plan
-  review, and stall-replan concepts.
-- [Knowledge system design](design/knowledge-system.md) — layered knowledge,
-  primers, and extraction design.
-
-## Security
-
-- [Security threat model](security-threat-model.md) — actors, boundaries,
-  layered defenses, known gaps, and reporting.
-- [Architecture Decision Records](adr/README.md) — lightweight ADR process and
-  records 0001-0010.
-- [Intent verification](intent-verification.md) — tier-based change
-  authorization for merge eligibility.
-- [Trajectory review](trajectory-review.md) — drift detection and agent pause
-  semantics.
-- [Rootless Podman CI seam](podman-rootless-ci.md) — documented test intent and
-  static contract for contributor-container runtime handling.
+Start with [Architecture](architecture.md) for the system overview, then use the topic guides below.
 
 ## Operations
 
-- [Manual provisioning](manual-provisioning.md) — hub/spoke provisioning paths,
-  authentication modes, and troubleshooting.
-- [Cross-cluster migration](cross-cluster-migration.md) — moving spokes across
-  clusters, including heartbeat-only clusters.
-- [Retro lane](retro-lane.md) — deterministic post-completion analysis and
-  advisory beads.
-- [Review swarm](review-swarm.md) — structured review perspectives, verdicts,
-  and merge-gate integration.
+- [Manual provisioning](manual-provisioning.md) — heartbeat-only cluster provisioning, hub access roles, and common gotchas.
+- [Config layering](config-layering.md) — how ConfigMap seed, PVC dashboard overlay, and runtime config interact.
+- [Operator reference](operator-reference.md) — top-level config blocks, hive flags/env, and GitHub token scopes.
+- [Cross-cluster migration](cross-cluster-migration.md) — moving a hive between clusters without losing state.
+- [Dashboard route and health checks](health-checks.md) — `dashboard-route-rbac.yaml`, `route_exists`, listener probes, and alert behavior.
+- [Network and port requirements](network-requirements.md) — inbound ports, proxy paths, egress, and firewall guidance.
+- [TLS, HTTPS, and certificates](tls-setup.md) — termination patterns and certificate ownership.
+- [Security notes](security.md) — log scrubbing and secret redaction guarantees/limits.
+- [Token collection and usage tracking](token-tracking.md) — session JSONL, `/api/cost`, and hub usage rollups.
+- [Public snapshots](snapshots.md) — read-only `/snapshot`, custom CSS, and frame-ancestor sharing.
+- [hivectl](hivectl.md) — command-line client for the dashboard API.
+- [`bd` beads CLI](beads-cli.md) — work-ledger and knowledge command reference for operators and contributors.
+- [Backup and restore](backup-restore.md) — `hive-backup`, Kubernetes CronJob, and spoke backup scope.
+- [Deployment helper scripts](deployment-scripts.md) — Proxmox LXC and blue-green Compose helpers.
+- [Dashboard API reference](api-reference.md) — pragmatic route index for dashboard and hub endpoints.
+- [Dashboard OpenAPI spec](../../dashboard/openapi.json) — machine-readable REST API reference for integrations.
+- [ioscan status](ioscan.md) — v2 status of the untrusted-input scanner/canary feature.
+- [Deployment scripts](../deploy/README.md) — inventory of v2 deployment helpers, including dashboard TTY panes and `hive-panes`.
 
-## Roadmap & Positioning
+## Contributors and access
 
-- [Public roadmap](roadmap.md) — Now / Next / Later direction for v4 catch-up and
-  follow-on work.
-- [Landscape and positioning](landscape.md) — comparison with Fullsend,
-  single-agent tools, hosted services, and research harnesses.
+- [ClankeR contributor relay](contributor-relay.md) — local contributor setup, multi-hub subscriptions, and role requests.
+- [Contributor trust tiers and delegated agent roles](contributor-trust-and-roles.md) — newcomer/contributor/trusted/merger/advisor semantics, **Acting as**, grants, and delegatable roles.
+- [Credly badges](credly-badges.md) — planned integration design; currently a placeholder mapping only.
+
+## Configuration and agents
+
+- [Agent configuration](agent-configuration.md) — agent fields, methods, models, pins, cadences, caveman mode, and ACMM packs.
+- [Knowledge curator](knowledge-curator.md) — automatic fact extraction and promotion knobs.
+- [GitHub App setup](github-app-setup.md) — app creation, permissions, Setup URL, and `/gh-setup`.
+- [ACMM policy matrix](acmm-policy-matrix.md) — capability levels and policy modes.
+- [ACMM policy fragments](../../examples/acmm/README.md) — per-level ACMM policy references.
+- [Sandbox isolation and agent guardrails](sandbox-isolation.md) — isolation layers and operator guardrail notes.
+- [Per-agent gh restrictions](../../config/restrictions/README.md) — file-based wrapper denials in `/etc/hive/restrictions/`.
+- [Podman rootless CI](podman-rootless-ci.md) — rootless Podman contract for `contribute-hive`.
+- [CLI backend setup](../../docs/backend-setup.md) — setup notes for Claude, Copilot, Goose, Bob, Pi, Codex, and Aider.
+- [Inference backends](../../docs/inference-backends.md) — vLLM, llm-d, LiteLLM, and Model Gateway troubleshooting.
+- [apiproxy](apiproxy.md) — Anthropic-compatible proxy logging and deployment notes.
+- [v1 to v2 migration](../../docs/migration-v1-v2.md) — migration checklist and rollback notes.
+
+## Architecture and design
+
+- [Architecture](architecture.md) — process model, governor loop, guardrails, hub/spoke, and walkthrough.
+- [CNCF reference architecture](cncf-reference-architecture.md) — CNCF submission/reference template.
+- [Knowledge system design](design/knowledge-system.md) — llm-wiki layers, subscriptions, and APIs.
+- [Trajectory review](trajectory-review.md) — trajectory safety lane and review signals.
+
+## Historical/design notes
+
+Some documents describe planned or design-only work rather than live features. Those pages are marked at the top, for example [Credly badges](credly-badges.md). `ioscan` is also documented as absent from v2 HEAD until code is reintroduced.
+
+## Security (v4)
+
+- [Security threat model](security-threat-model.md) — actors, boundaries, layered defenses, known gaps, and reporting.
+- [Architecture Decision Records](adr/README.md) — lightweight ADR process and records 0001-0010.
+- [Intent verification](intent-verification.md) — tier-based change authorization for merge eligibility.
+- [Rootless Podman CI seam](podman-rootless-ci.md) — documented test intent and static contract for contributor-container runtime handling.

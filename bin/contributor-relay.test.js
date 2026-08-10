@@ -597,10 +597,57 @@ test('interactive pane classifier distinguishes complete, blocked, and working s
         pane: 'calling tool github.create_pull_request\n> Enter to send\n',
         want: relay.PANE_STATE_WORKING,
       },
+      // kubestellar/hive#2844 — MCP elicitation forms. Each of these leaves the
+      // pane at goose's idle chrome ("> " / "> Enter to send") with no working
+      // word, so the pre-fix classifier called them IDLE_COMPLETE and the relay
+      // reported the unanswered form as a finished task.
+      {
+        name: 'elicitation form ending in a bare > input line',
+        pane: 'Extension needs some information to proceed:\n\n  Project name: my-service\n  Environment:  production\n  Region:       us-east-1\n\n> \n',
+        want: relay.PANE_STATE_BLOCKED_ON_HUMAN,
+      },
+      {
+        name: 'elicitation form with bracketed fields and no > at all',
+        pane: 'Extension needs some information to proceed:\n\n  Project name: [                    ]\n  Environment:  [ production        ]\n\n  [ Submit ]   [ Cancel ]\n',
+        want: relay.PANE_STATE_BLOCKED_ON_HUMAN,
+      },
+      {
+        name: 'elicitation form while goose "> Enter to send" hint is still on screen',
+        pane: 'Please fill in the deployment details below:\n\n  Namespace: default\n  Replicas:  3\n\n> Enter to send\n',
+        want: relay.PANE_STATE_BLOCKED_ON_HUMAN,
+      },
+      {
+        name: 'goose elicitation timeout marker',
+        pane: 'Elicitation request timed out or failed\n> Enter to send\n',
+        want: relay.PANE_STATE_BLOCKED_ON_HUMAN,
+      },
     ];
 
     for (const tc of fixtures) {
       assert.strictEqual(relay.classifyTmuxPane(tc.pane), tc.want, tc.name);
+    }
+  } finally { teardown(relay); }
+});
+
+test('elicitation-form detection does not false-positive on ordinary finished output (#2844)', () => {
+  const relay = loadRelay({ backend: 'goose' });
+  try {
+    // Finished panes that happen to contain form-ish shapes or words like
+    // "provide"/"continue" mid-sentence, or a "label: value" line, must stay
+    // COMPLETE. The elicitation matcher requires BOTH an explicit request-for-
+    // input lead-in AND a form structure, so none of these should trip it — the
+    // same bare-substring lesson as the /login false-positive fix.
+    const finished = [
+      'Implemented the fix and opened a PR: https://github.com/x/y/pull/1\n\ngoose is ready\n> Enter to send\n',
+      'Done.\nFiles changed: 3\nTests: passing\n> Enter to send\n',
+      'I updated the docs to provide the following context for readers.\n> Enter to send\n',
+      'The build will continue to run in CI. All done.\n> Enter to send\n',
+      'Refactored the parser [see commit abc123]. Complete.\n> Enter to send\n',
+    ];
+    for (const pane of finished) {
+      assert.strictEqual(
+        relay.classifyTmuxPane(pane), relay.PANE_STATE_IDLE_COMPLETE,
+        `finished pane wrongly classified as blocked/working: ${JSON.stringify(pane)}`);
     }
   } finally { teardown(relay); }
 });
@@ -627,6 +674,26 @@ test('blocked interactive panes report attention instead of task_complete', () =
     assert.ok(progress, `expected blocked_on_human progress, got: ${JSON.stringify(relay.__sent)}`);
     assert.strictEqual(progress.attention, true, 'blocked status must request human attention');
     assert.ok(relay.getCurrentTask(), 'the task must remain active while waiting for a human');
+  } finally { teardown(relay); }
+});
+
+test('goose elicitation form is reported as blocked, never as task_complete (#2844)', () => {
+  // The exact scenario Jorge reported: an MCP elicitation form left the pane at
+  // goose's "> Enter to send" chrome, and the relay sent task_complete for work
+  // that had not happened. It must now go out as attention/blocked instead.
+  const formPane = 'Extension needs some information to proceed:\n\n  Project name: my-service\n  Region:       us-east-1\n\n> Enter to send\n';
+  const relay = loadRelay({ backend: 'goose', cliStates: [formPane, formPane] });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 'ct-elicit');
+    relay.__crashTick();
+
+    assert.ok(!relay.__sent.some(m => m.type === 'task_complete'),
+      'an unanswered elicitation form must never be reported as completed');
+    const progress = relay.__sent.find(m => m.type === 'task_progress' && m.status === 'blocked_on_human');
+    assert.ok(progress, `expected blocked_on_human progress, got: ${JSON.stringify(relay.__sent)}`);
+    assert.strictEqual(progress.attention, true, 'blocked status must request human attention');
+    assert.ok(relay.getCurrentTask(), 'the task must remain active while the form is unanswered');
   } finally { teardown(relay); }
 });
 
@@ -727,6 +794,20 @@ test('an idle non-active hub cannot assign work until the poll slot reaches it',
     assert.ok(sentB.some(m => m.type === 'task_failed' && m.reason === 'Hub is not the active polling slot'),
       'unexpected assignment must be rejected back to the hub that sent it');
   } finally { teardown(relay); }
+});
+
+test('hub notice messages are logged for operators', () => {
+  const relay = loadRelay();
+  const lines = [];
+  const oldLog = console.log;
+  console.log = (msg) => { lines.push(String(msg)); };
+  try {
+    relay.handleMessage(JSON.stringify({ type: 'notice', message: 'role assigned: scanner — your next task will be scanner work' }));
+    assert.ok(lines.some(l => l.includes('role assigned: scanner')), 'notice message was not logged');
+  } finally {
+    console.log = oldLog;
+    teardown(relay);
+  }
 });
 
 test('token_refresh, task_revoke, and blocked progress only affect the hub that owns the active task', () => {
@@ -1011,40 +1092,92 @@ test('interactive mode still delivers via tmux send-keys (unchanged default path
   } finally { teardown(relay); }
 });
 
-// ---------------------------------------------------------------------------
-// Unresponsive-backend recovery: blocking modal prompts must be classified and
-// dismissed with the RIGHT key, and a CLI that never reaches its prompt must
-// hand its task back instead of silently holding it.
-// ---------------------------------------------------------------------------
 
-// Real captures from a running ghcr.io/kubestellar/hive-contributor container.
-// Note both keep codex's banner chrome ("OpenAI Codex (v0.146.0)", the "›"
-// input marker) on screen BEHIND the modal — which is exactly why the ready
-// patterns have to be checked after the modal patterns, not before.
+// Verbatim capture of a genuinely READY codex pane from a running
+// ghcr.io/kubestellar/hive-contributor container. Note what it does NOT
+// contain: no "codex>", no line ending in ">", and the banner says "OpenAI
+// Codex", not "Codex CLI". The pre-fix patterns matched none of it, so this
+// pane classified as 'starting' forever.
+const CODEX_READY_PANE = [
+  'dev@codex-contributor:~/workspace$ codex --dangerously-bypass-approvals-and-sandbox',
+  '\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e',
+  '\u2502 >_ OpenAI Codex (v0.146.0)                          \u2502',
+  '\u2502 model:       gpt-5.6-luna medium   /model to change \u2502',
+  '\u2502 directory:   ~/workspace                            \u2502',
+  '\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f',
+  '  Tip: Use /rename to rename your threads for easier thread resuming.',
+  '\u203a Run /review on my current changes',
+  '  gpt-5.6-luna medium \u00b7 ~/workspace',
+  '', '', '',
+].join('\n');
+
 const CODEX_TRUST_PANE = [
   'dev@codex-contributor:~/workspace$ codex --dangerously-bypass-approvals-and-sandbox',
   '> You are in /home/dev/workspace',
   '',
   '  Do you trust the contents of this directory? Working with untrusted contents comes with higher risk of prompt injection.',
   '',
-  '› 1. Yes, continue',
+  '\u203a 1. Yes, continue',
   '  2. No, quit',
   '',
   '  Press enter to continue',
-  '╭─────────────────────────────────────────────────────╮',
-  '│ >_ OpenAI Codex (v0.146.0)                          │',
-  '╰─────────────────────────────────────────────────────╯',
+  '\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e',
+  '\u2502 >_ OpenAI Codex (v0.146.0)                          \u2502',
+  '\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f',
 ].join('\n');
 
 const CODEX_UPDATE_PANE = [
   'dev@codex-contributor:~/workspace$ codex --dangerously-bypass-approvals-and-sandbox',
   '  ✨ Update available! 0.146.0 -> 0.147.0',
   '  Release notes: https://github.com/openai/codex/releases/latest',
-  '› 1. Update now (runs `npm install -g @openai/codex`)',
+  '\u203a 1. Update now (runs `npm install -g @openai/codex`)',
   '  2. Skip',
   '  3. Skip until next version',
   '  Press enter to continue',
 ].join('\n');
+
+test('a ready codex pane is classified ready (regression: > vs \u203a, and "OpenAI Codex" not "Codex CLI")', () => {
+  const relay = loadRelay({ backend: 'codex', cliStates: [CODEX_READY_PANE] });
+  try {
+    assert.strictEqual(relay.getCLIState(), 'ready',
+      'codex readiness was never detected, so every task was queued and handed back at timeout — the backend could not run a single task');
+  } finally { teardown(relay); }
+});
+
+test('the modal panes still win over the ready marker they also draw', () => {
+  // Both modals render '\u203a' too; modal classification runs first, so a
+  // blocked pane must NOT be reported ready by the widened pattern.
+  for (const pane of [CODEX_TRUST_PANE, CODEX_UPDATE_PANE]) {
+    const relay = loadRelay({ backend: 'codex', cliStates: [pane] });
+    try {
+      assert.strictEqual(relay.getCLIState(), 'onboarding');
+    } finally { teardown(relay); }
+  }
+});
+
+test('codex numbered startup menus get explicit safe selections', () => {
+  const relay = loadRelay({ backend: 'codex' });
+  try {
+    assert.strictEqual(relay.blockingPromptKey(CODEX_TRUST_PANE), '1');
+    assert.strictEqual(relay.blockingPromptKey(CODEX_UPDATE_PANE), '3');
+    assert.strictEqual(relay.blockingPromptKey('Do you trust this folder? (y/n)'), null);
+  } finally { teardown(relay); }
+});
+
+// ---------------------------------------------------------------------------
+// Unresponsive-backend recovery: blocking modal prompts must be classified and
+// dismissed with the RIGHT key, and a CLI that never reaches its prompt must
+// hand its task back instead of silently holding it.
+// ---------------------------------------------------------------------------
+
+// NOTE (v2→v4 sync): v2 and v4 each added a codex-pane test block with its own
+// CODEX_TRUST_PANE / CODEX_UPDATE_PANE constants (semantically identical — the
+// only difference is '›' escapes vs the literal '›'). The v4 definitions
+// above are kept as the single source of truth; the v2 redeclarations here were
+// dropped in the sync merge, and the v2 tests below reuse the v4 constants. Both
+// keep codex's banner chrome ("OpenAI Codex (v0.146.0)", the "›" input marker) on
+// screen BEHIND the modal — which is exactly why the ready patterns have to be
+// checked after the modal patterns, not before.
 
 test('codex trust prompt is classified as onboarding, not ready, despite the banner behind it', () => {
   const relay = loadRelay({ backend: 'codex', paneText: CODEX_TRUST_PANE });
@@ -1354,42 +1487,11 @@ test('a currentTask with no recorded hub still reaches the hub (regression: synt
   } finally { teardown(relay); }
 });
 
-// Verbatim capture of a genuinely READY codex pane from a running
-// ghcr.io/kubestellar/hive-contributor container. Note what it does NOT
-// contain: no "codex>", no line ending in ">", and the banner says "OpenAI
-// Codex", not "Codex CLI". The pre-fix patterns matched none of it, so this
-// pane classified as 'starting' forever.
-const CODEX_READY_PANE = [
-  'dev@codex-contributor:~/workspace$ codex --dangerously-bypass-approvals-and-sandbox',
-  '\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e',
-  '\u2502 >_ OpenAI Codex (v0.146.0)                          \u2502',
-  '\u2502 model:       gpt-5.6-luna medium   /model to change \u2502',
-  '\u2502 directory:   ~/workspace                            \u2502',
-  '\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f',
-  '  Tip: Use /rename to rename your threads for easier thread resuming.',
-  '\u203a Run /review on my current changes',
-  '  gpt-5.6-luna medium \u00b7 ~/workspace',
-  '', '', '',
-].join('\n');
-
-test('a ready codex pane is classified ready (regression: > vs \u203a, and "OpenAI Codex" not "Codex CLI")', () => {
-  const relay = loadRelay({ backend: 'codex', paneText: CODEX_READY_PANE });
-  try {
-    assert.strictEqual(relay.getCLIState(), 'ready',
-      'codex readiness was never detected, so every task was queued and handed back at timeout — the backend could not run a single task');
-  } finally { teardown(relay); }
-});
-
-test('the modal panes still win over the ready marker they also draw', () => {
-  // Both modals render '\u203a' too; modal classification runs first, so a
-  // blocked pane must NOT be reported ready by the widened pattern.
-  for (const pane of [CODEX_TRUST_PANE, CODEX_UPDATE_PANE]) {
-    const relay = loadRelay({ backend: 'codex', paneText: pane });
-    try {
-      assert.strictEqual(relay.getCLIState(), 'onboarding');
-    } finally { teardown(relay); }
-  }
-});
+// NOTE (v2->v4 sync): v2 added a second copy of CODEX_READY_PANE and repeats of
+// the "ready codex pane" / "modal panes still win" tests here. Those constants
+// and tests are already defined once in the v4 codex block earlier in this file,
+// so the redeclarations were dropped in the sync merge to keep a single source of
+// truth; the unique N20 /tmp-cleanup test below is preserved.
 
 // N20 (CWE-20): the /tmp cleanup's second `find` must parenthesize its -o group.
 //
