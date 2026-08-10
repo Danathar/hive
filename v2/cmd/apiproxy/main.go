@@ -12,9 +12,23 @@ import (
 	"github.com/kubestellar/hive/v2/pkg/apiproxy"
 )
 
+const defaultProxyHost = "127.0.0.1"
+
+func proxyAuthTokenFromEnv(getenv func(string) string, warnf func(string, ...any)) string {
+	authToken := getenv("PROXY_AUTH_TOKEN")
+	if authToken != "" {
+		return authToken
+	}
+	authToken = getenv("ANTHROPIC_API_KEY")
+	if authToken != "" {
+		warnf("[sec-check WARNING] PROXY_AUTH_TOKEN is unset; falling back to ANTHROPIC_API_KEY. Unauthenticated callers will be granted the host Anthropic key. Set PROXY_AUTH_TOKEN to restrict access.")
+	}
+	return authToken
+}
+
 func main() {
 	port := flag.Int("port", 9000, "port to listen on")
-	host := flag.String("host", "127.0.0.1", "host address to listen on (default localhost; set to 0.0.0.0 to expose externally)")
+	host := flag.String("host", defaultProxyHost, "host address to listen on (default localhost; set to 0.0.0.0 to expose externally)")
 	upstream := flag.String("upstream", "https://api.anthropic.com", "upstream API URL")
 	logFile := flag.String("log", "", "log file path (default: stdout)")
 	flag.Parse()
@@ -60,13 +74,7 @@ func main() {
 		logWriter.Encode(entry)
 	}
 
-	authToken := os.Getenv("PROXY_AUTH_TOKEN")
-	if authToken == "" {
-		authToken = os.Getenv("ANTHROPIC_API_KEY")
-		if authToken != "" {
-			log.Println("[sec-check WARNING] PROXY_AUTH_TOKEN is unset; falling back to ANTHROPIC_API_KEY. Unauthenticated callers will be granted the host Anthropic key. Set PROXY_AUTH_TOKEN to restrict access.")
-		}
-	}
+	authToken := proxyAuthTokenFromEnv(os.Getenv, log.Printf)
 	proxy, err := apiproxy.New(*upstream, handler, authToken)
 	if err != nil {
 		log.Fatalf("failed to create proxy: %v", err)
