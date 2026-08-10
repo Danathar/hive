@@ -280,7 +280,10 @@ func TestHandleTaskStatus_ValidPayload(t *testing.T) {
 
 	body := `{"hive_id":"hive-1","leaderboard":[{"github_username":"alice"}],"contributors":{"registered":5,"active":3}}`
 	req := httptest.NewRequest("POST", "/api/task-status", strings.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+srv.hubSecret)
+	// v4 task-status auth is fail-closed: it accepts ONLY the derived heartbeat
+	// sub-key, never the master secret. Supply the derived key so the request
+	// authenticates and we exercise the payload path this test targets.
+	req.Header.Set("Authorization", "Bearer "+srv.heartbeatKey())
 	w := httptest.NewRecorder()
 	srv.handleTaskStatus(w, req)
 
@@ -308,7 +311,10 @@ func TestHandleTaskStatus_OfflineHiveRejected(t *testing.T) {
 
 	body := `{"hive_id":"hive-1","leaderboard":[],"contributors":{"registered":1,"active":0}}`
 	req := httptest.NewRequest("POST", "/api/task-status", strings.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+srv.hubSecret)
+	// v4 task-status auth is fail-closed: it accepts ONLY the derived heartbeat
+	// sub-key, never the master secret. Supply the derived key so the request
+	// authenticates and we exercise the payload path this test targets.
+	req.Header.Set("Authorization", "Bearer "+srv.heartbeatKey())
 	w := httptest.NewRecorder()
 	srv.handleTaskStatus(w, req)
 
@@ -321,7 +327,10 @@ func TestHandleTaskStatus_InvalidJSON(t *testing.T) {
 	srv := NewHubServer(0, slog.Default(), "test", "v2")
 
 	req := httptest.NewRequest("POST", "/api/task-status", strings.NewReader("not json"))
-	req.Header.Set("Authorization", "Bearer "+srv.hubSecret)
+	// v4 task-status auth is fail-closed: it accepts ONLY the derived heartbeat
+	// sub-key, never the master secret. Supply the derived key so the request
+	// authenticates and we exercise the payload path this test targets.
+	req.Header.Set("Authorization", "Bearer "+srv.heartbeatKey())
 	w := httptest.NewRecorder()
 	srv.handleTaskStatus(w, req)
 
@@ -335,7 +344,10 @@ func TestHandleTaskStatus_EmptyHiveID(t *testing.T) {
 
 	body := `{"hive_id":"","leaderboard":[],"contributors":{}}`
 	req := httptest.NewRequest("POST", "/api/task-status", strings.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+srv.hubSecret)
+	// v4 task-status auth is fail-closed: it accepts ONLY the derived heartbeat
+	// sub-key, never the master secret. Supply the derived key so the request
+	// authenticates and we exercise the payload path this test targets.
+	req.Header.Set("Authorization", "Bearer "+srv.heartbeatKey())
 	w := httptest.NewRecorder()
 	srv.handleTaskStatus(w, req)
 

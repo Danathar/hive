@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"os/exec"
 	"slices"
 	"strings"
 	"testing"
@@ -52,6 +53,16 @@ func TestPodmanArgsHonorsRestrictedNetworkMode(t *testing.T) {
 func TestPodmanRunSkippedWhenUnavailable(t *testing.T) {
 	if !Available() {
 		t.Skip("podman not available")
+	}
+	// Available() only checks for the podman binary. Rootless podman with
+	// --userns=keep-id (this launcher's default) additionally needs the uidmap
+	// helpers (newuidmap/newgidmap) to set up the user namespace; without them
+	// the run aborts with "command required for rootless mode with multiple IDs:
+	// newuidmap ... not found". That is a runner-provisioning gap, not a defect
+	// in the launcher, so skip rather than fail when the helpers are absent (the
+	// CI runner has podman but not the uidmap package).
+	if _, err := exec.LookPath("newuidmap"); err != nil {
+		t.Skip("rootless podman prerequisites (newuidmap) not installed")
 	}
 	res, err := (PodmanLauncher{}).Run(context.Background(), LaunchSpec{Image: "docker.io/library/alpine:latest", Workspace: t.TempDir(), Command: []string{"sh", "-c", "test -d /workspace"}, NetworkNone: true})
 	if err != nil {
