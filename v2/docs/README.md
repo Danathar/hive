@@ -9,6 +9,10 @@ Start with [Architecture](architecture.md) for the system overview, then use the
 - [Operator reference](operator-reference.md) — top-level config blocks, hive flags/env, and GitHub token scopes.
 - [Cross-cluster migration](cross-cluster-migration.md) — moving a hive between clusters without losing state.
 - [Dashboard route and health checks](health-checks.md) — `dashboard-route-rbac.yaml`, `route_exists`, listener probes, and alert behavior.
+- [Network and port requirements](network-requirements.md) — inbound ports, proxy paths, egress, and firewall guidance.
+- [TLS, HTTPS, and certificates](tls-setup.md) — termination patterns and certificate ownership.
+- [Security notes](security.md) — log scrubbing and secret redaction guarantees/limits.
+- [Token collection and usage tracking](token-tracking.md) — session JSONL, `/api/cost`, and hub usage rollups.
 - [Public snapshots](snapshots.md) — read-only `/snapshot`, custom CSS, and frame-ancestor sharing.
 - [hivectl](hivectl.md) — command-line client for the dashboard API.
 - [Dashboard API reference](api-reference.md) — pragmatic route index for dashboard and hub endpoints.
