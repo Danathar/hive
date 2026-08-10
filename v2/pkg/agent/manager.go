@@ -4270,30 +4270,58 @@ func (a *AgentProcess) FilteredPaneLines(n int) []string {
 	return filterPaneOutput(a.lastPaneCapture, n)
 }
 
-// backendBinary maps an agent backend to the CLI binary that is actually
-// exec'd for it. Every model-gateway backend (config.InferenceBackends: vllm,
-// llm-d, litellm, watsonx) launches the SAME claude CLI, pointed at hive's
-// local OpenAI-compatible translator via ANTHROPIC_BASE_URL — the backend name
-// selects the upstream route, not the binary. Those entries are therefore
-// derived from the canonical list rather than written out here, so a backend
-// added to config.InferenceBackends can never again be accepted by config and
-// then rejected at kick time with "unknown backend".
-func backendBinary(backend string) (string, error) {
-	binaries := map[string]string{
-		"claude":  "claude",
-		"copilot": "copilot",
-		"gemini":  "gemini",
-		"goose":   "goose",
-		"pi":      "goose",
-		"bob":     "bob",
+// backendBinaryAliases names the backends whose binary is NOT simply the
+// backend name. Only genuine aliases belong here: every other CLI backend is
+// derived from config.CLIBackends by identity, and every model-gateway backend
+// from config.InferenceBackends. Keeping this map to aliases only is what makes
+// the accept-then-fail class of bug structurally impossible — see backendBinary.
+var backendBinaryAliases = map[string]string{
+	"pi": "goose",
+}
+
+// backendBinaryName maps an agent backend to the NAME of the CLI binary that is
+// exec'd for it, without touching the filesystem. Split out from backendBinary
+// so the "every supported backend resolves" invariant can be tested without
+// requiring each CLI to be installed on the test machine.
+//
+// Both canonical lists are derived rather than written out here:
+//
+//   - config.CLIBackends (claude, copilot, goose, codex, pi, bob, aider, gemini)
+//     each launch a binary of the same name, except for the aliases above.
+//   - config.InferenceBackends (vllm, llm-d, litellm, watsonx) all launch the
+//     SAME claude CLI, pointed at hive's local OpenAI-compatible translator via
+//     ANTHROPIC_BASE_URL — the backend name selects the upstream route, not the
+//     binary.
+//
+// Deriving both means a backend added to either list can never again be
+// accepted by config.ValidateBackend and then rejected hours later at kick time
+// with "unknown backend". Previously only InferenceBackends was derived, so
+// codex and aider were valid config values that failed at launch.
+func backendBinaryName(backend string) (string, error) {
+	binaries := make(map[string]string, len(config.CLIBackends)+len(config.InferenceBackends))
+	for _, b := range config.CLIBackends {
+		binaries[b] = b
 	}
 	for _, b := range config.InferenceBackends {
 		binaries[b] = "claude"
+	}
+	for backend, binary := range backendBinaryAliases {
+		binaries[backend] = binary
 	}
 
 	binary, ok := binaries[backend]
 	if !ok {
 		return "", fmt.Errorf("unknown backend: %s", backend)
+	}
+	return binary, nil
+}
+
+// backendBinary resolves an agent backend to the absolute path of the CLI
+// binary that is actually exec'd for it.
+func backendBinary(backend string) (string, error) {
+	binary, err := backendBinaryName(backend)
+	if err != nil {
+		return "", err
 	}
 
 	path, err := exec.LookPath(binary)
