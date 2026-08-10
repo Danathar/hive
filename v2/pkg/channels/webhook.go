@@ -45,7 +45,8 @@ func (w *WebhookReceiver) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	if secret == "" {
 		// HIVE_WEBHOOK_SECRET is required. Accepting unsigned webhooks would allow
 		// any network-accessible client to trigger agent kicks. Fail closed.
-		http.Error(rw, "webhook secret not configured", http.StatusServiceUnavailable)
+		w.mgr.logger.Warn("channels: webhook rejected because HIVE_WEBHOOK_SECRET is not configured")
+		http.Error(rw, "webhook secret not configured; set HIVE_WEBHOOK_SECRET to the GitHub webhook secret", http.StatusUnauthorized)
 		return
 	}
 
