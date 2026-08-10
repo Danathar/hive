@@ -861,6 +861,7 @@ func gitHTTPBackend(t *testing.T, projectRoot string) http.HandlerFunc {
 }
 
 func TestGitSource_InitSyncFullClone(t *testing.T) {
+	t.Setenv("HIVE_ALLOW_PRIVATE_GIT_SOURCE", "true")
 	src := makeHTTPSourceRepo(t)
 	base := t.TempDir()
 
@@ -898,6 +899,7 @@ func TestGitSource_InitSyncFullClone(t *testing.T) {
 }
 
 func TestGitSource_InitSparseSubpath(t *testing.T) {
+	t.Setenv("HIVE_ALLOW_PRIVATE_GIT_SOURCE", "true")
 	src := makeHTTPSourceRepo(t)
 	base := t.TempDir()
 
@@ -948,6 +950,7 @@ func TestGitSource_SyncNotARepo(t *testing.T) {
 }
 
 func TestGitSource_StartSyncLoop_Cancels(t *testing.T) {
+	t.Setenv("HIVE_ALLOW_PRIVATE_GIT_SOURCE", "true")
 	src := makeHTTPSourceRepo(t)
 	base := t.TempDir()
 	gs := NewGitSource(GitSourceConfig{
