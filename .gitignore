@@ -17,3 +17,7 @@ _inline.js
 /cov.out
 /dash.js
 /pr-body.md
+
+# Test-run scratch: pkg/agent tests create stub CLI binaries under a
+# randomly-suffixed dir. Generated per run; never part of the tree.
+.hive-agent-stubs-*/
