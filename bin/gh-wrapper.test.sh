@@ -55,6 +55,7 @@ _run_test() {
     HIVE_AGENT="scanner" \
     HIVE_AGENT_DISPLAY_NAME="scanner" \
     HIVE_AGENT_ID="scanner" \
+    MOCK_GH_LOGIN="${MOCK_GH_LOGIN:-test-bot[bot]}" \
     GH_TOKEN="test-token-mock" \
     bash "$TEST_WRAPPER" "$@" 2>&1)" || rc=$?
 
@@ -161,6 +162,7 @@ _run_test_contributor() {
     HIVE_AGENT="scanner" \
     HIVE_AGENT_DISPLAY_NAME="scanner" \
     HIVE_AGENT_ID="scanner" \
+    MOCK_GH_LOGIN="${MOCK_GH_LOGIN:-test-bot[bot]}" \
     GH_TOKEN="test-token-mock" \
     bash "$TEST_WRAPPER" "$@" 2>&1)" || rc=$?
 
@@ -187,6 +189,18 @@ _run_test 1 "pr list without --author (blocked)" \
 _run_test 1 "issue list --author foreign-user (blocked)" \
   issue list --repo test/repo --author foreign-user
 
+_run_test 1 "issue list with global --repo before subcommand and --author foreign-user (blocked)" \
+  --repo test/repo issue list --author foreign-user
+
+_run_test 1 "pr list with global -R before subcommand and --author foreign-user (blocked)" \
+  -R test/repo pr list --author foreign-user
+
+_run_test 1 "issue list -A foreign-user (blocked, short author flag)" \
+  issue list --repo test/repo -A foreign-user
+
+_run_test 1 "issue list duplicate --author with unsafe effective author (blocked)" \
+  issue list --repo test/repo --author @me --author octocat
+
 _run_test 1 "pr list --author=foreign-user (blocked, equals form)" \
   pr list --repo test/repo --author=foreign-user
 
@@ -198,6 +212,15 @@ _run_test 0 "pr list --author=test-bot[bot] (allowed, equals form)" \
 
 _run_test 0 "issue list --author test-bot (allowed, without [bot] suffix)" \
   issue list --repo test/repo --author test-bot
+
+_run_test 0 "issue list with global -R before subcommand and --author test-bot (allowed)" \
+  -R test/repo issue list --author test-bot
+
+_run_test 0 "issue list -A test-bot (allowed, short author flag)" \
+  issue list --repo test/repo -A test-bot
+
+_run_test 0 "issue list duplicate --author with safe effective author (allowed)" \
+  issue list --repo test/repo --author octocat --author @me
 
 _run_test 0 "issue list --author @me (allowed, server-side token identity)" \
   issue list --repo test/repo --author @me
@@ -229,7 +252,28 @@ _run_test_contributor 0 "issue list contributor mode (allowed without --author)"
 _run_test_contributor 0 "pr list contributor mode (allowed without --author)" \
   pr list --repo test/repo
 
-_run_test_contributor 0 "issue list contributor mode --author self (allowed)" \
+_run_test_contributor 1 "issue list contributor mode --author octocat (blocked)" \
+  issue list --repo test/repo --author octocat
+
+_run_test_contributor 1 "issue list contributor mode -A octocat (blocked)" \
+  issue list --repo test/repo -A octocat
+
+_run_test_contributor 1 "issue list contributor mode global -R --author octocat (blocked)" \
+  -R test/repo issue list --author octocat
+
+_run_test_contributor 1 "issue list contributor mode duplicate --author with unsafe effective author (blocked)" \
+  issue list --repo test/repo --author @me --author octocat
+
+_run_test_contributor 0 "issue list contributor mode --author @me (allowed)" \
+  issue list --repo test/repo --author @me
+
+_run_test_contributor 0 "issue list contributor mode --author token login (allowed)" \
+  issue list --repo test/repo --author test-bot
+
+_run_test_contributor 1 "issue list contributor mode --author unverified contributor username (blocked)" \
+  issue list --repo test/repo --author test-contributor
+
+MOCK_GH_LOGIN="test-contributor" _run_test_contributor 0 "issue list contributor mode --author verified contributor token login (allowed)" \
   issue list --repo test/repo --author test-contributor
 
 echo ""

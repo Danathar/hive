@@ -95,8 +95,18 @@ fi
 args=("$@")
 subcmd=""
 action=""
+skip_next=false
 for arg in "${args[@]}"; do
+  if $skip_next; then
+    skip_next=false
+    continue
+  fi
   case "$arg" in
+    --repo|--hostname|-R|--jq|-q)
+      skip_next=true
+      continue
+      ;;
+    --repo=*|--hostname=*|--jq=*|-R*) continue ;;
     -*) continue ;;
     *)
       if [ -z "$subcmd" ]; then
@@ -114,19 +124,29 @@ done
 # Extract the --author value from the args array. Returns the value on stdout
 # on success (exit 0) or nothing on failure (exit 1).
 _extract_author() {
-  local i
+  local i author_value="" found=false
   for ((i=0; i<${#args[@]}; i++)); do
-    if [[ "${args[$i]}" = --author=* ]]; then
-      printf '%s\n' "${args[$i]#--author=}"
-      return 0
+    if [[ "${args[$i]}" = --author=* || "${args[$i]}" = -A=* ]]; then
+      author_value="${args[$i]#*=}"
+      found=true
+      continue
     fi
-    if [[ "${args[$i]}" = --author ]]; then
+    if [[ "${args[$i]}" = -A?* ]]; then
+      author_value="${args[$i]#-A}"
+      found=true
+      continue
+    fi
+    if [[ "${args[$i]}" = --author || "${args[$i]}" = -A ]]; then
       if [[ $((i+1)) -lt ${#args[@]} ]] && [[ "${args[$((i+1))]}" != -* ]]; then
-        printf '%s\n' "${args[$((i+1))]}"
-        return 0
+        author_value="${args[$((i+1))]}"
+        found=true
       fi
     fi
   done
+  if $found; then
+    printf '%s\n' "$author_value"
+    return 0
+  fi
   return 1
 }
 
@@ -177,11 +197,9 @@ _author_matches_login() {
 # Block gh issue list and gh pr list for NON-contributor hive agents (they consume
 # assigned work from actionable.json). Contributors are exempt so they can look
 # before they leap. `--author` self-listing is allowed only when the author value
-# matches the current agent/bot identity (fixes #3072).
+# matches the authenticated token identity (fixes #3072 and #3096).
 if { [ "$subcmd" = "issue" ] || [ "$subcmd" = "pr" ]; } && [ "$action" = "list" ]; then
-  if [[ "${HIVE_CONTRIBUTOR_MODE:-}" == "true" ]]; then
-    : # Allow contributor agents read-only list/search to avoid duplicate PRs (#2356)
-  elif author_value="$(_extract_author)" && [[ -n "$author_value" ]]; then
+  if author_value="$(_extract_author)" && [[ -n "$author_value" ]]; then
     if [[ "$author_value" = "@me" ]]; then
       : # GitHub resolves @me server-side to the authenticated token identity.
     elif ! _resolve_self_login >/dev/null; then
@@ -193,9 +211,11 @@ if { [ "$subcmd" = "issue" ] || [ "$subcmd" = "pr" ]; } && [ "$action" = "list" 
     else
       echo "⛔ BLOCKED: gh $subcmd list --author must match the authenticated GitHub identity." >&2
       echo "--author '$author_value' does not match token identity '$HIVE_AUTH_LOGIN_CACHED'." >&2
-      echo "Use --author @me or your authenticated bot login to list your own items." >&2
+      echo "Use --author @me or your authenticated login to list your own items." >&2
       exit 1
     fi
+  elif [[ "${HIVE_CONTRIBUTOR_MODE:-}" == "true" ]]; then
+    : # Allow contributor agents read-only list/search to avoid duplicate PRs (#2356).
   else
     echo "⛔ BLOCKED: gh $subcmd list is disabled for agents." >&2
     echo "Read /var/run/hive-metrics/actionable.json instead." >&2
