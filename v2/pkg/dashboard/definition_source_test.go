@@ -190,6 +190,36 @@ func TestAgentImportURLPolicy(t *testing.T) {
 	}
 }
 
+func TestAgentImportRejectsRedirectToPrivateHost(t *testing.T) {
+	defSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/latest/meta-data" {
+			fmt.Fprintf(w, "apiVersion: hive.kubestellar.io/v1\nkind: %s\nmetadata:\n  name: redirected-private-agent\nspec:\n  backend: claude\n", exportKind)
+			return
+		}
+		http.Redirect(w, r, "http://169.254.169.254/latest/meta-data", http.StatusFound)
+	}))
+	defer defSrv.Close()
+	routeImportFetchesToServer(t, defSrv)
+
+	s, deps := apiServer(t)
+	deps.Config.Data.AgentsDir = t.TempDir()
+	enableDefinitionAllowlist(deps, "kubestellar/hive")
+
+	rec := doPost(s, "/api/agents/import", map[string]interface{}{
+		"source": "url",
+		"url":    "https://raw.githubusercontent.com/kubestellar/hive/main/agents/redirect.yaml",
+	})
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected redirect to private host to fail with 502, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "redirect to private/internal host blocked") {
+		t.Fatalf("expected private redirect error, got %s", rec.Body.String())
+	}
+	if _, ok := deps.Config.Agents["redirected-private-agent"]; ok {
+		t.Fatal("redirected private response must not be imported")
+	}
+}
+
 // TestImport_UncheckedStaysPlain: a normal import (no keepLinked) produces a
 // baked agent with NO definition_source link.
 func TestImport_UncheckedStaysPlain(t *testing.T) {

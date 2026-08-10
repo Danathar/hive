@@ -346,7 +346,10 @@ func (s *Server) handleAgentImport(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		client := &http.Client{Timeout: importHTTPTimeoutS * 1e9} // nanoseconds
+		client := &http.Client{
+			Timeout:       importHTTPTimeoutS * 1e9, // nanoseconds
+			CheckRedirect: noRedirectToPrivate,
+		}
 		resp, err := client.Get(importFetchURL(body.URL))
 		if err != nil {
 			jsonError(w, "failed to fetch URL: "+err.Error(), http.StatusBadGateway)

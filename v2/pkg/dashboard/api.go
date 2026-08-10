@@ -4533,7 +4533,10 @@ func probeModelsWithHeaders(endpoint, apiKey string, extraHeaders map[string]str
 			req.Header.Set(k, v)
 		}
 	}
-	client := &http.Client{Timeout: litellmProbeTimeout}
+	client := &http.Client{
+		Timeout:       litellmProbeTimeout,
+		CheckRedirect: noRedirectToPrivate,
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return 0, fmt.Errorf("cannot reach gateway: %w", err)
