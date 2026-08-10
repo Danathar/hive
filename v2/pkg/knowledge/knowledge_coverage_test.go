@@ -146,6 +146,29 @@ func TestSplitAtParagraphs_SingleShort(t *testing.T) {
 	}
 }
 
+func TestValidateLocalFilePath(t *testing.T) {
+	orig := allowedFilePrefixes
+	t.Cleanup(func() { allowedFilePrefixes = orig })
+
+	base := t.TempDir()
+	allowedFilePrefixes = []string{base + string(filepath.Separator)}
+
+	if err := validateLocalFilePath(filepath.Join(base, "doc.md")); err != nil {
+		t.Fatalf("expected allowed local document path: %v", err)
+	}
+	if err := validateLocalFilePath(filepath.Join(base, "..", "secret.md")); err == nil {
+		t.Fatal("expected path outside allowed prefix to be rejected")
+	}
+
+	ds := &DocumentSource{knowledgeDir: base}
+	if err := ds.validateFilePath(filepath.Join(base, "nested", "doc.md")); err != nil {
+		t.Fatalf("expected DocumentSource path under knowledge dir: %v", err)
+	}
+	if err := ds.validateFilePath(filepath.Join(base, "..", "secret.md")); err == nil {
+		t.Fatal("expected DocumentSource path outside knowledge dir to be rejected")
+	}
+}
+
 // --- Context7 coverage (context7Get and wrappers) ---
 
 func TestContext7Get_Success(t *testing.T) {
@@ -861,6 +884,7 @@ func gitHTTPBackend(t *testing.T, projectRoot string) http.HandlerFunc {
 }
 
 func TestGitSource_InitSyncFullClone(t *testing.T) {
+	t.Setenv("HIVE_ALLOW_PRIVATE_GIT_SOURCE", "true")
 	src := makeHTTPSourceRepo(t)
 	base := t.TempDir()
 
@@ -898,6 +922,7 @@ func TestGitSource_InitSyncFullClone(t *testing.T) {
 }
 
 func TestGitSource_InitSparseSubpath(t *testing.T) {
+	t.Setenv("HIVE_ALLOW_PRIVATE_GIT_SOURCE", "true")
 	src := makeHTTPSourceRepo(t)
 	base := t.TempDir()
 
@@ -948,6 +973,7 @@ func TestGitSource_SyncNotARepo(t *testing.T) {
 }
 
 func TestGitSource_StartSyncLoop_Cancels(t *testing.T) {
+	t.Setenv("HIVE_ALLOW_PRIVATE_GIT_SOURCE", "true")
 	src := makeHTTPSourceRepo(t)
 	base := t.TempDir()
 	gs := NewGitSource(GitSourceConfig{
