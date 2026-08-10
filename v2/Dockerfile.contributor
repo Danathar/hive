@@ -73,10 +73,15 @@ RUN ARCH=$(dpkg --print-architecture) \
   && rm -rf /tmp/goose-dl \
   || echo "Goose install skipped"
 
-# Pi CLI (pi.dev coding agent) — disabled: curl-pipe-to-shell is unsafe for
-# reproducible image builds (supply-chain risk, no integrity verification).
-# Re-enable only after pi.dev publishes a versioned binary release with a
-# verifiable SHA256. See: https://github.com/kubestellar/hive/issues/2902
+# Install Pi CLI (pi.dev coding agent). Do not use pi.dev's curl-pipe-to-shell
+# installer here: it is mutable and executes remote shell as root. Pi publishes
+# npm-shrinkwrap.json, so install a pinned npm package with lifecycle scripts
+# disabled and fail the image build if the binary is absent.
+ARG PI_CODING_AGENT_VERSION=0.84.1
+RUN npm install -g --ignore-scripts --no-fund --no-audit \
+    "@earendil-works/pi-coding-agent@${PI_CODING_AGENT_VERSION}" \
+  && npm cache clean --force \
+  && which pi
 
 # Install Go (needed for building/testing Go projects)
 ARG GO_VERSION=1.24.4
