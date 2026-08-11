@@ -1488,11 +1488,11 @@ func TestHandleGovernorRepos_Success(t *testing.T) {
 func TestHandleGovernorRepos_StripOrg(t *testing.T) {
 	s, deps := apiServer(t)
 	rec := doPut(s, "/api/config/governor/repos", map[string]interface{}{"repos": []string{"myorg/new-repo"}, "primaryRepo": "myorg/new-repo"})
-	if rec.Code != http.StatusOK {
-		t.Errorf("status = %d, want 200", rec.Code)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rec.Code)
 	}
-	if len(deps.Config.Project.Repos) != 1 || deps.Config.Project.Repos[0] != "new-repo" {
-		t.Errorf("repos = %v, want stripped new-repo", deps.Config.Project.Repos)
+	if len(deps.Config.Project.Repos) == 1 && deps.Config.Project.Repos[0] == "new-repo" {
+		t.Errorf("repos mutated to stripped value %v despite rejection", deps.Config.Project.Repos)
 	}
 }
 

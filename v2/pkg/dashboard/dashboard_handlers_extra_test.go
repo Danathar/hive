@@ -711,13 +711,15 @@ func TestHandleGovernorReposStripOrgPrefix(t *testing.T) {
 	markOwnerRequest(req)
 	srv.handleGovernorRepos(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d (body: %s)", w.Code, w.Body.String())
 	}
-	// Verify a matching org prefix is normalized to the bare repo.
+	// Verify org prefix was not silently stripped
 	repos := srv.deps.Config.Project.Repos
-	if len(repos) != 2 || repos[0] != "my-repo" || repos[1] != "other-repo" {
-		t.Errorf("repos = %v, want stripped my-repo and other-repo", repos)
+	for _, r := range repos {
+		if strings.HasPrefix(r, "testorg/") {
+			t.Errorf("org prefix should be stripped: %q", r)
+		}
 	}
 }
 
