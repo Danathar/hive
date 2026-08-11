@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 
@@ -266,17 +265,21 @@ func TestMiddleware_F2ProxyProof(t *testing.T) {
 	}
 }
 
-// TestProxyProofRequiredDefaultsStrict pins F7: the shipped default must be
-// fail-closed. A hub-proxied spoke that receives forged X-Hive-User/X-Hive-Role
-// with NO proof header must be rejected out of the box, not trusted. If someone
-// flips the default back to fail-open, this test breaks.
-func TestProxyProofRequiredDefaultsStrict(t *testing.T) {
-	// Unset means "not =false", which is the production default.
-	if os.Getenv("HIVE_PROXY_PROOF_REQUIRED") == "false" {
-		t.Skip("HIVE_PROXY_PROOF_REQUIRED=false escape hatch set in env; default not under test")
+func TestMiddleware_F2ProxyProofDefaultRejectsMissingProof(t *testing.T) {
+	s := newFullServer(t)
+	s.authToken = "shared-secret-token"
+	handler := s.authenticate(recordingHandler(nil, nil))
+	req := httptest.NewRequest("GET", "/api/config", nil)
+	req.Header.Set("X-Hive-User", "clubanderson")
+	req.Header.Set("X-Hive-Role", "owner")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("missing proof with default enforcement = %d, want 401", w.Code)
 	}
-	if !proxyProofRequired {
-		t.Fatal("proxyProofRequired must default to true (fail closed) so forged identity headers with no proof are rejected (F7)")
+	if !strings.Contains(w.Body.String(), "missing proxy proof header") {
+		t.Fatalf("missing proof error = %q, want clear proxy proof error", w.Body.String())
 	}
 }
 
