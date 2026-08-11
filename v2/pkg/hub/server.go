@@ -335,6 +335,13 @@ func downsampleSpark(points []SparkPoint, max int) []SparkPoint {
 	if len(points) <= max {
 		return points
 	}
+	if max == 1 {
+		// A single-point cap has no "in between" to spread across, and the step
+		// formula below divides by (max-1)==0 → +Inf, so int(Round(0*Inf)) is
+		// math.MinInt64 and indexes out of range. Keep the first sample. (Ported
+		// from v2 alongside its TestDownsampleSpark_MaxOne regression test.)
+		return []SparkPoint{points[0]}
+	}
 	out := make([]SparkPoint, 0, max)
 	// Spread max samples across the series, inclusive of both endpoints.
 	step := float64(len(points)-1) / float64(max-1)
