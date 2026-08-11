@@ -19,6 +19,7 @@ func TestWatsonxUpsert_RejectsMissingProjectID(t *testing.T) {
 	body := `{"name":"watsonx","kind":"watsonx","endpoint":"https://us-south.ml.cloud.ibm.com/ml/gateway","api_key":"ibm-cloud-key-1234567890"}`
 	req := httptest.NewRequest("PUT", "/api/config/governor/gateways", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	markOwnerRequest(req)
 	w := httptest.NewRecorder()
 	markOwnerRequest(req)
 	srv.handleGovernorGatewaysUpsert(w, req)
@@ -39,6 +40,7 @@ func TestWatsonxUpsert_RejectsMissingKey(t *testing.T) {
 	body := `{"name":"watsonx","kind":"watsonx","endpoint":"https://us-south.ml.cloud.ibm.com/ml/gateway","project_id":"proj-1"}`
 	req := httptest.NewRequest("PUT", "/api/config/governor/gateways", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	markOwnerRequest(req)
 	w := httptest.NewRecorder()
 	markOwnerRequest(req)
 	srv.handleGovernorGatewaysUpsert(w, req)
@@ -82,6 +84,7 @@ func TestWatsonxUpsert_StoresGateway(t *testing.T) {
 	body := `{"name":"watsonx","kind":"watsonx","endpoint":"https://public.example/ml/gateway","project_id":"proj-42","region":"us-south","api_key":"` + secret + `","default_model":"ibm/granite-4-h-small"}`
 	req := httptest.NewRequest("PUT", "/api/config/governor/gateways", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	markOwnerRequest(req)
 	w := httptest.NewRecorder()
 	markOwnerRequest(req)
 	srv.handleGovernorGatewaysUpsert(w, req)
@@ -235,6 +238,7 @@ func TestWatsonxUpsert_DerivesEndpointFromRegion(t *testing.T) {
 	body := `{"name":"watsonx","kind":"watsonx","endpoint":"","region":"eu-de","project_id":"p","api_key":"ibm-cloud-key-1234567890"}`
 	req := httptest.NewRequest("PUT", "/api/config/governor/gateways", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	markOwnerRequest(req)
 	w := httptest.NewRecorder()
 	markOwnerRequest(req)
 	srv.handleGovernorGatewaysUpsert(w, req)
