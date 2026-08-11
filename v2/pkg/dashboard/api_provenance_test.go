@@ -201,3 +201,39 @@ func TestProvenanceRedactsSecrets(t *testing.T) {
 		t.Fatal("response leaked the github token")
 	}
 }
+
+// TestProvenanceRejectsEmptyRole is the regression test for the empty-role
+// authorization bypass: when X-Hive-Role is absent, the handler must fail
+// CLOSED (403) rather than defaulting to "owner". The prior code granted owner
+// access to any request that simply omitted the header.
+func TestProvenanceRejectsEmptyRole(t *testing.T) {
+	writeProvenanceFixture(t, "project:\n  org: acme\nagents:\n  scanner: {}\n", "")
+
+	// getProvenance with "" does NOT set X-Hive-Role — simulating a request
+	// from a caller that omits the header entirely.
+	rec, _ := getProvenance(t, "")
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("empty X-Hive-Role: status = %d, want 403 (fail closed); "+
+			"before this fix an omitted header defaulted to owner", rec.Code)
+	}
+}
+
+// A non-owner role must still be rejected, so the fail-closed change did not
+// merely move the bypass to a different value.
+func TestProvenanceRejectsNonOwnerRole(t *testing.T) {
+	writeProvenanceFixture(t, "project:\n  org: acme\nagents:\n  scanner: {}\n", "")
+	rec, _ := getProvenance(t, "viewer")
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("viewer role: status = %d, want 403", rec.Code)
+	}
+}
+
+// A genuine owner must still be served, so failing closed did not lock out the
+// legitimate caller.
+func TestProvenanceAllowsOwnerRole(t *testing.T) {
+	writeProvenanceFixture(t, "project:\n  org: acme\nagents:\n  scanner: {}\n", "")
+	rec, _ := getProvenance(t, "owner")
+	if rec.Code != http.StatusOK {
+		t.Errorf("owner role: status = %d, want 200", rec.Code)
+	}
+}
