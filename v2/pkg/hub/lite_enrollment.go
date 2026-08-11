@@ -16,8 +16,9 @@ import (
 )
 
 const (
-	liteDefaultACMMLevel = 2
-	liteMaxACMMLevel     = 2
+	liteDefaultACMMLevel      = 2
+	liteMaxACMMLevel          = 2
+	liteRepoAccessHTTPTimeout = 10 * time.Second
 )
 
 type LiteEnrollmentConfig struct {
@@ -89,6 +90,10 @@ func (s *HubServer) handleLiteEnroll(w http.ResponseWriter, r *http.Request) {
 	}
 	if !isValidName(host) {
 		writeJSONError(w, http.StatusBadRequest, "invalid github_host")
+		return
+	}
+	if err := validateLiteGitHubHost(r.Context(), host); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	token := bearerTokenFromRequest(r)
@@ -491,7 +496,35 @@ func bearerTokenFromRequest(r *http.Request) string {
 	return strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
 }
 
+func validateLiteGitHubHost(ctx context.Context, host string) error {
+	if host == "" || host == publicGitHubHost {
+		return nil
+	}
+	if isPrivateURL(ctx, "https://"+host) {
+		return fmt.Errorf("github_host resolves to a private/internal address")
+	}
+	return nil
+}
+
+func liteRepoAccessHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: liteRepoAccessHTTPTimeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return fmt.Errorf("stopped after %d redirects", len(via))
+			}
+			if isPrivateURL(req.Context(), req.URL.String()) {
+				return fmt.Errorf("redirect to private/internal github_host blocked")
+			}
+			return nil
+		},
+	}
+}
+
 func verifyGitHubRepoAccess(ctx context.Context, token, host, owner, repo string) (bool, error) {
+	if err := validateLiteGitHubHost(ctx, host); err != nil {
+		return false, err
+	}
 	apiBase := "https://api.github.com"
 	if host != "" && host != publicGitHubHost {
 		apiBase = "https://" + host + "/api/v3"
@@ -506,7 +539,7 @@ func verifyGitHubRepoAccess(ctx context.Context, token, host, owner, repo string
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.github+json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := liteRepoAccessHTTPClient().Do(req)
 	if err != nil {
 		return false, fmt.Errorf("GitHub repo access check failed: %w", err)
 	}
