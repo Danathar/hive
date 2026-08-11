@@ -116,6 +116,29 @@ func TestHandleLiteEnrollTable(t *testing.T) {
 	}
 }
 
+func TestHandleLiteEnrollRejectsPrivateGitHubHostBeforeAccessCheck(t *testing.T) {
+	s, cleanup := newLiteTestHub(t)
+	defer cleanup()
+	called := false
+	oldVerify := verifyLiteRepoAccess
+	verifyLiteRepoAccess = func(context.Context, string, string, string, string) (bool, error) {
+		called = true
+		return true, nil
+	}
+	t.Cleanup(func() { verifyLiteRepoAccess = oldVerify })
+
+	rec := httptest.NewRecorder()
+	req := liteReqWithUser(http.MethodPost, "/api/saas/lite/enroll", `{"owner":"kubestellar","repo":"hive","github_host":"169.254.169.254","installation_id":123}`, "lite-user")
+	s.handleLiteEnroll(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%s, want 400", rec.Code, rec.Body.String())
+	}
+	if called {
+		t.Fatal("private github_host reached repo access verifier; request-driven SSRF preflight must run first")
+	}
+}
+
 func TestHandleLiteEnrollDuplicateIdempotent(t *testing.T) {
 	s, cleanup := newLiteTestHub(t)
 	defer cleanup()
