@@ -1,7 +1,10 @@
 package celtrigger
 
 import (
+	"bytes"
 	"fmt"
+	"log/slog"
+	"strings"
 	"testing"
 )
 
@@ -229,6 +232,11 @@ func containsName(rules []Rule, name string) bool {
 }
 
 func TestMatchSkipsRuleThatExceedsCostLimit(t *testing.T) {
+	var logs bytes.Buffer
+	origLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(origLogger) })
+
 	rules := []Rule{{
 		Name:  "expensive",
 		Agent: "scanner",
@@ -245,6 +253,12 @@ func TestMatchSkipsRuleThatExceedsCostLimit(t *testing.T) {
 	if got := engine.Match(NormalizedEvent{Kind: KindIssueOpened, Labels: labels}); len(got) != 0 {
 		t.Fatalf("expensive CEL rule matched despite exceeding cost limit: %+v", got)
 	}
+	gotLog := logs.String()
+	if !strings.Contains(gotLog, "celtrigger: rule exceeded evaluation cost budget; treating as no-match") ||
+		!strings.Contains(gotLog, "rule=expensive") ||
+		!strings.Contains(gotLog, fmt.Sprintf("budget=%d", maxEvalCost)) {
+		t.Fatalf("cost-limit overrun was not observable in logs: %q", gotLog)
+	}
 }
 
 func TestMatchAllowsNormalRuleWithinCostLimit(t *testing.T) {
@@ -255,5 +269,25 @@ func TestMatchAllowsNormalRuleWithinCostLimit(t *testing.T) {
 	got := engine.Match(NormalizedEvent{Kind: KindIssueOpened, Labels: []string{"bug"}})
 	if len(got) != 1 || got[0].Agent != "scanner" {
 		t.Fatalf("normal CEL rule did not match: %+v", got)
+	}
+}
+
+func TestMatchAllowsRealisticOperatorRuleWithinCostLimit(t *testing.T) {
+	engine, err := Compile([]Rule{{
+		Name:  "realistic",
+		Agent: "scanner",
+		Expr:  `event.repo.startsWith("kubestellar/") && event.title.matches("(?i).*(bug|fix|security).*") && event.labels.exists(l, l == "security")`,
+	}})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	got := engine.Match(NormalizedEvent{
+		Kind:   KindIssueOpened,
+		Repo:   "kubestellar/hive",
+		Title:  "Security fix for CEL trigger limits",
+		Labels: []string{"help wanted", "security", "v4"},
+	})
+	if len(got) != 1 || got[0].Name != "realistic" {
+		t.Fatalf("realistic operator rule did not match within cost budget %d: %+v", maxEvalCost, got)
 	}
 }
