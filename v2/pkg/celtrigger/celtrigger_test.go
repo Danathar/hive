@@ -1,6 +1,7 @@
 package celtrigger
 
 import (
+	"fmt"
 	"testing"
 )
 
@@ -225,4 +226,34 @@ func containsName(rules []Rule, name string) bool {
 		}
 	}
 	return false
+}
+
+func TestMatchSkipsRuleThatExceedsCostLimit(t *testing.T) {
+	rules := []Rule{{
+		Name:  "expensive",
+		Agent: "scanner",
+		Expr:  `event.labels.all(a, event.labels.all(b, event.labels.all(c, a != "" && b != "" && c != "")))`,
+	}}
+	engine, err := Compile(rules)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	labels := make([]string, 0, 200)
+	for i := 0; i < 200; i++ {
+		labels = append(labels, fmt.Sprintf("label-%03d", i))
+	}
+	if got := engine.Match(NormalizedEvent{Kind: KindIssueOpened, Labels: labels}); len(got) != 0 {
+		t.Fatalf("expensive CEL rule matched despite exceeding cost limit: %+v", got)
+	}
+}
+
+func TestMatchAllowsNormalRuleWithinCostLimit(t *testing.T) {
+	engine, err := Compile([]Rule{{Name: "bug", Agent: "scanner", Expr: `hasLabel(event.labels, "bug")`}})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	got := engine.Match(NormalizedEvent{Kind: KindIssueOpened, Labels: []string{"bug"}})
+	if len(got) != 1 || got[0].Agent != "scanner" {
+		t.Fatalf("normal CEL rule did not match: %+v", got)
+	}
 }

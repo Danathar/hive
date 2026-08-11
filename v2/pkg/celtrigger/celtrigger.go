@@ -44,6 +44,10 @@ const (
 // priority sorts first in Match results.
 const defaultPriority = 0
 
+// maxEvalCost bounds CEL runtime work per rule evaluation. A rule that exceeds
+// this budget is treated like any other runtime evaluation error: no match.
+const maxEvalCost uint64 = 100
+
 // activationVarEvent is the top-level CEL variable name under which the
 // normalized event fields are exposed to expressions.
 const activationVarEvent = "event"
@@ -188,7 +192,7 @@ func Compile(rules []Rule) (*Engine, error) {
 			return nil, fmt.Errorf("celtrigger: rule %q: expression must return bool, got %s", name, ast.OutputType())
 		}
 
-		prg, err := env.Program(ast)
+		prg, err := env.Program(ast, cel.CostLimit(maxEvalCost), cel.InterruptCheckFrequency(100))
 		if err != nil {
 			return nil, fmt.Errorf("celtrigger: rule %q: program: %w", name, err)
 		}
