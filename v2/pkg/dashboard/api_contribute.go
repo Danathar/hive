@@ -6682,7 +6682,11 @@ func (s *Server) handleContributorGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleContributorTrust(w http.ResponseWriter, r *http.Request) {
-	if !s.requireContributorWrite(w, r) {
+	// Owner-only: trust tier changes control which agent roles a contributor
+	// can claim. A read-write user could otherwise elevate any contributor
+	// to "trusted" tier and then grant them privileged agent roles
+	// (sec-check, ci-maintainer, architect). Fixes #3458.
+	if !requireOwnerRole(w, r) {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
@@ -6723,7 +6727,11 @@ func (s *Server) handleContributorTrust(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handleContributorAgentRoleGrants(w http.ResponseWriter, r *http.Request) {
-	if !s.requireContributorWrite(w, r) {
+	// Owner-only: granting privileged agent roles (sec-check, ci-maintainer,
+	// architect) pre-authorises a contributor to claim those roles via the
+	// contribute WebSocket. A read-write user could otherwise pre-grant
+	// themselves or others elevated agent access. Fixes #3458.
+	if !requireOwnerRole(w, r) {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
@@ -6858,7 +6866,10 @@ func normalizeUniqueAgentRoles(in []string) []string {
 }
 
 func (s *Server) handleContributorRevoke(w http.ResponseWriter, r *http.Request) {
-	if !s.requireContributorWrite(w, r) {
+	// Owner-only: revocation is a permanent status change that blocks a
+	// contributor from the hive. A read-write user could otherwise revoke
+	// any contributor, including other owners. Fixes #3458.
+	if !requireOwnerRole(w, r) {
 		return
 	}
 	id := r.PathValue("id")
@@ -6959,7 +6970,9 @@ func (s *Server) handleContributorRequeue(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleContributorDelete(w http.ResponseWriter, r *http.Request) {
-	if !s.requireContributorWrite(w, r) {
+	// Owner-only: deletion is permanent and irreversible. A read-write user
+	// could otherwise delete any contributor's profile. Fixes #3458.
+	if !requireOwnerRole(w, r) {
 		return
 	}
 	id := r.PathValue("id")
@@ -7489,24 +7502,16 @@ func defaultHostResolver(ctx context.Context, host string) ([]string, error) {
 }
 
 func isPrivateURL(ctx context.Context, rawURL string) bool {
-	for _, scheme := range []string{"https://", "http://", "wss://", "ws://"} {
-		if strings.HasPrefix(rawURL, scheme) {
-			rawURL = strings.TrimPrefix(rawURL, scheme)
-			break
-		}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return true
 	}
-	host := rawURL
-	if idx := strings.IndexAny(host, ":/"); idx >= 0 {
-		host = host[:idx]
+	host := strings.ToLower(parsed.Hostname())
+	if host == "" {
+		return true
 	}
-	host = strings.ToLower(host)
-	blocked := []string{"localhost", "127.", "10.", "172.16.", "172.17.", "172.18.", "172.19.",
-		"172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.", "172.26.", "172.27.",
-		"172.28.", "172.29.", "172.30.", "172.31.", "192.168.", "169.254.", "[::1]", "[::ffff:", "0.0.0.0", "0."}
-	for _, p := range blocked {
-		if strings.HasPrefix(host, p) {
-			return true
-		}
+	if isPrivateHost(host) {
+		return true
 	}
 
 	addrs, err := privateURLResolver(ctx, host)
@@ -7515,14 +7520,33 @@ func isPrivateURL(ctx context.Context, rawURL string) bool {
 		return true
 	}
 	for _, addr := range addrs {
-		for _, p := range blocked {
-			if strings.HasPrefix(addr, p) {
-				return true
-			}
+		if isPrivateHost(addr) {
+			return true
 		}
 	}
 
 	return false
+}
+
+func isPrivateHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	if ip == nil {
+		return false
+	}
+	return isPrivateIP(ip)
+}
+
+func isPrivateIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified()
 }
 
 // validateGitHubToken checks a GitHub personal access token against the GitHub API

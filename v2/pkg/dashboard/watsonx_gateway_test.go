@@ -19,6 +19,7 @@ func TestWatsonxUpsert_RejectsMissingProjectID(t *testing.T) {
 	body := `{"name":"watsonx","kind":"watsonx","endpoint":"https://us-south.ml.cloud.ibm.com/ml/gateway","api_key":"ibm-cloud-key-1234567890"}`
 	req := httptest.NewRequest("PUT", "/api/config/governor/gateways", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	markOwnerRequest(req)
 	w := httptest.NewRecorder()
 	markOwnerRequest(req)
 	srv.handleGovernorGatewaysUpsert(w, req)
@@ -39,6 +40,7 @@ func TestWatsonxUpsert_RejectsMissingKey(t *testing.T) {
 	body := `{"name":"watsonx","kind":"watsonx","endpoint":"https://us-south.ml.cloud.ibm.com/ml/gateway","project_id":"proj-1"}`
 	req := httptest.NewRequest("PUT", "/api/config/governor/gateways", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	markOwnerRequest(req)
 	w := httptest.NewRecorder()
 	markOwnerRequest(req)
 	srv.handleGovernorGatewaysUpsert(w, req)
@@ -57,6 +59,7 @@ func TestWatsonxUpsert_RejectsMissingKey(t *testing.T) {
 // stored as a file ref (never inlined) and project_id/region persist inline.
 func TestWatsonxUpsert_StoresGateway(t *testing.T) {
 	srv := newFullServer(t)
+	allowPrivateURLHostsForTest(t, "public.example")
 	dir := t.TempDir()
 	orig := gatewaySecretsDir
 	gatewaySecretsDir = dir
@@ -78,9 +81,10 @@ func TestWatsonxUpsert_StoresGateway(t *testing.T) {
 	t.Cleanup(func() { watsonx.DefaultMinter = origMinter })
 
 	const secret = "ibm-cloud-key-super-secret-1234567890"
-	body := `{"name":"watsonx","kind":"watsonx","endpoint":"` + fake.URL + `/ml/gateway","project_id":"proj-42","region":"us-south","api_key":"` + secret + `","default_model":"ibm/granite-4-h-small"}`
+	body := `{"name":"watsonx","kind":"watsonx","endpoint":"https://public.example/ml/gateway","project_id":"proj-42","region":"us-south","api_key":"` + secret + `","default_model":"ibm/granite-4-h-small"}`
 	req := httptest.NewRequest("PUT", "/api/config/governor/gateways", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	markOwnerRequest(req)
 	w := httptest.NewRecorder()
 	markOwnerRequest(req)
 	srv.handleGovernorGatewaysUpsert(w, req)
@@ -211,6 +215,7 @@ func TestWatsonxEndpointForRegion(t *testing.T) {
 // project + key.
 func TestWatsonxUpsert_DerivesEndpointFromRegion(t *testing.T) {
 	srv := newFullServer(t)
+	allowPrivateURLHostsForTest(t, "eu-de.ml.cloud.ibm.com")
 	dir := t.TempDir()
 	orig := gatewaySecretsDir
 	gatewaySecretsDir = dir
@@ -233,6 +238,7 @@ func TestWatsonxUpsert_DerivesEndpointFromRegion(t *testing.T) {
 	body := `{"name":"watsonx","kind":"watsonx","endpoint":"","region":"eu-de","project_id":"p","api_key":"ibm-cloud-key-1234567890"}`
 	req := httptest.NewRequest("PUT", "/api/config/governor/gateways", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	markOwnerRequest(req)
 	w := httptest.NewRecorder()
 	markOwnerRequest(req)
 	srv.handleGovernorGatewaysUpsert(w, req)
@@ -251,6 +257,7 @@ func TestWatsonxUpsert_DerivesEndpointFromRegion(t *testing.T) {
 // verdict here.
 func TestWatsonxDiscover_InvalidKeyReturnsNoModels(t *testing.T) {
 	srv := newFullServer(t)
+	allowPrivateURLHostsForTest(t, "public.example")
 	// Minter that always fails the exchange (invalid key).
 	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"errorMessage":"Provided API key could not be found"}`, http.StatusBadRequest)
@@ -260,7 +267,7 @@ func TestWatsonxDiscover_InvalidKeyReturnsNoModels(t *testing.T) {
 	watsonx.DefaultMinter = watsonx.NewTokenMinterForTest(fake.URL+"/identity/token", nil)
 	t.Cleanup(func() { watsonx.DefaultMinter = origMinter })
 
-	body := `{"name":"watsonx","kind":"watsonx","endpoint":"` + fake.URL + `/ml/gateway","project_id":"p","api_key":"bad-key-1234567890"}`
+	body := `{"name":"watsonx","kind":"watsonx","endpoint":"https://public.example/ml/gateway","project_id":"p","api_key":"bad-key-1234567890"}`
 	req := httptest.NewRequest("POST", "/api/config/governor/gateways/discover", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -295,6 +302,7 @@ func TestWatsonxDiscover_InvalidKeyReturnsNoModels(t *testing.T) {
 // dead end — fallback is allowed only behind a validated key.
 func TestWatsonxDiscover_ValidKeyListingFailureFallsBack(t *testing.T) {
 	srv := newFullServer(t)
+	allowPrivateURLHostsForTest(t, "public.example")
 	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/identity/token") {
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "IAM-JWT", "expires_in": 3600})
@@ -307,7 +315,7 @@ func TestWatsonxDiscover_ValidKeyListingFailureFallsBack(t *testing.T) {
 	watsonx.DefaultMinter = watsonx.NewTokenMinterForTest(fake.URL+"/identity/token", nil)
 	t.Cleanup(func() { watsonx.DefaultMinter = origMinter })
 
-	body := `{"name":"watsonx","kind":"watsonx","endpoint":"` + fake.URL + `/ml/gateway","project_id":"p","api_key":"good-key-1234567890"}`
+	body := `{"name":"watsonx","kind":"watsonx","endpoint":"https://public.example/ml/gateway","project_id":"p","api_key":"good-key-1234567890"}`
 	req := httptest.NewRequest("POST", "/api/config/governor/gateways/discover", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()

@@ -1015,6 +1015,7 @@ type GatewayConfig struct {
 // gatewayKind values.
 const (
 	GatewayKindOpenRouter = "openrouter"
+	GatewayKindGroq       = "groq"
 	GatewayKindLiteLLM    = "litellm"
 	GatewayKindVLLM       = "vllm"
 	GatewayKindLLMD       = "llm-d"

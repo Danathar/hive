@@ -64,7 +64,24 @@ func validateRepoName(field, repo string) *RepoTargetIssue {
 		return issue(field, "repo '"+repo+"' is a URL — expected repo name only so the target resolves to org/repo")
 	}
 	if strings.Contains(repo, "/") {
-		return issue(field, "repo '"+repo+"' contains '/' — expected repo name only so the target resolves to org/repo")
+		// A fully-qualified "<owner>/<repo>" is a VALID target — the runtime
+		// resolves it exactly this way: Client.splitRepo() splits on the single
+		// slash and uses that owner (falling back to project.org only for a bare
+		// name). So a hive can legitimately watch a repo in a DIFFERENT org than
+		// project.org (e.g. project.org=kalantar-msb watching
+		// inference-sim/sim2real). These configs worked for a long time; the
+		// stricter validator added later flagged them as "misconfigured" even
+		// though nothing was wrong — a false positive (see #3021 and the
+		// context-forge/hashicorp/kalantar-msb fleet warnings).
+		//
+		// Accept any well-formed owner/repo (exactly one slash, both parts
+		// non-empty). Only genuinely-broken shapes — a trailing slash, a leading
+		// slash, or multiple slashes — are still rejected.
+		parts := strings.Split(repo, "/")
+		if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
+			return nil
+		}
+		return issue(field, "repo '"+repo+"' is not a valid target — expected 'repo' or 'owner/repo' (exactly one '/')")
 	}
 	return nil
 }
