@@ -12,7 +12,9 @@
 package celtrigger
 
 import (
+	"errors"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"sort"
 	"strings"
@@ -22,6 +24,7 @@ import (
 	"github.com/google/cel-go/common/types/ref"
 	"github.com/google/cel-go/common/types/traits"
 	"github.com/google/cel-go/ext"
+	"github.com/google/cel-go/interpreter"
 )
 
 // Event kind constants. These are the forge-neutral event kinds that a
@@ -44,9 +47,12 @@ const (
 // priority sorts first in Match results.
 const defaultPriority = 0
 
-// maxEvalCost bounds CEL runtime work per rule evaluation. A rule that exceeds
-// this budget is treated like any other runtime evaluation error: no match.
-const maxEvalCost uint64 = 100
+// maxEvalCost bounds CEL runtime work per rule evaluation. The budget is high
+// enough for realistic operator rules that combine field checks, string
+// predicates, and modest label scans, while still stopping pathological nested
+// comprehensions. A rule that exceeds this budget fails closed as no-match and
+// emits a warning so operators can diagnose why it stopped firing.
+const maxEvalCost uint64 = 10_000
 
 // activationVarEvent is the top-level CEL variable name under which the
 // normalized event fields are exposed to expressions.
@@ -221,6 +227,9 @@ func (e *Engine) Match(event NormalizedEvent) []Rule {
 	for i, cr := range e.rules {
 		out, _, err := cr.program.Eval(act)
 		if err != nil {
+			if isCostLimitExceeded(err) {
+				slog.Warn("celtrigger: rule exceeded evaluation cost budget; treating as no-match", "rule", cr.rule.Name, "budget", maxEvalCost)
+			}
 			// Fail closed: a runtime error means "did not match".
 			continue
 		}
@@ -240,6 +249,11 @@ func (e *Engine) Match(event NormalizedEvent) []Rule {
 		matched = append(matched, h.rule)
 	}
 	return matched
+}
+
+func isCostLimitExceeded(err error) bool {
+	var cancelled interpreter.EvalCancelledError
+	return errors.As(err, &cancelled) && cancelled.Cause == interpreter.CostLimitExceeded
 }
 
 // Len reports the number of compiled rules held by the engine.
