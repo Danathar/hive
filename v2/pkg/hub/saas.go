@@ -3015,11 +3015,9 @@ func (s *HubServer) handleHiveStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"access denied"}`, http.StatusForbidden)
 		return
 	}
-	if h.Owner != username && username != hubAdminUsername {
-		if _, hasAccess := user.Hives[id]; !hasAccess {
-			http.Error(w, `{"error":"access denied"}`, http.StatusForbidden)
-			return
-		}
+	if !userIsHiveOwner(username, h) {
+		http.Error(w, `{"error":"access denied"}`, http.StatusForbidden)
+		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(h)
@@ -3163,7 +3161,7 @@ func (s *HubServer) handleDeleteHive(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"status": deleteStatusDeleted})
 		return
 	}
-	if h.Owner != username && username != hubAdminUsername {
+	if !userIsHiveOwner(username, h) {
 		http.Error(w, `{"error":"only the owner can delete this hive"}`, http.StatusForbidden)
 		return
 	}
@@ -3249,7 +3247,7 @@ func (s *HubServer) handleMigrateHive(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"hive not found"}`, http.StatusNotFound)
 		return
 	}
-	if h.Owner != username && username != hubAdminUsername {
+	if !userIsHiveOwner(username, h) {
 		http.Error(w, `{"error":"only the owner can migrate this hive"}`, http.StatusForbidden)
 		return
 	}
@@ -3609,7 +3607,7 @@ func (s *HubServer) handleUpgradeHive(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"hive not found"}`, http.StatusNotFound)
 		return
 	}
-	if h.Owner != username && username != hubAdminUsername {
+	if !userIsHiveOwner(username, h) {
 		http.Error(w, `{"error":"only the owner can upgrade"}`, http.StatusForbidden)
 		return
 	}
@@ -3698,7 +3696,7 @@ func (s *HubServer) handleSwitchBranch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"hive not found"}`, http.StatusNotFound)
 		return
 	}
-	if h.Owner != username && username != hubAdminUsername {
+	if !userIsHiveOwner(username, h) {
 		http.Error(w, `{"error":"only the owner can switch branches"}`, http.StatusForbidden)
 		return
 	}
@@ -3833,7 +3831,7 @@ func (s *HubServer) handleToggleVisibility(w http.ResponseWriter, r *http.Reques
 		http.Error(w, `{"error":"hive not found — only hosted hives can be toggled from here"}`, http.StatusNotFound)
 		return
 	}
-	if h.Owner != username && username != hubAdminUsername {
+	if !userIsHiveOwner(username, h) {
 		http.Error(w, `{"error":"only the owner can change visibility"}`, http.StatusForbidden)
 		return
 	}
@@ -3920,7 +3918,7 @@ func (s *HubServer) handleRenameHive(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"hive not found — only hosted hives can be renamed from here"}`, http.StatusNotFound)
 		return
 	}
-	if h.Owner != username && username != hubAdminUsername {
+	if !userIsHiveOwner(username, h) {
 		http.Error(w, `{"error":"only the owner can rename this hive"}`, http.StatusForbidden)
 		return
 	}
@@ -4059,7 +4057,7 @@ func (s *HubServer) handleToggleAutoUpgrade(w http.ResponseWriter, r *http.Reque
 			Repos: regEntry.Repos,
 		}
 	}
-	if h.Owner != username && username != hubAdminUsername {
+	if !userIsHiveOwner(username, h) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
 		fmt.Fprint(w, `{"error":"only the owner can change auto-upgrade"}`)
