@@ -222,6 +222,29 @@ func TestHandleAuditLogAllowsReadWriteRole(t *testing.T) {
 	}
 }
 
+func TestHandleAuditLogAllowsOwnerRole(t *testing.T) {
+	server := &Server{audit: &AuditLog{}}
+	server.audit.Log("alice", "config.save", "file=hive.yaml", "scanner")
+	req := httptest.NewRequest(http.MethodGet, "/api/audit", nil)
+	req.Header.Set("X-Hive-Role", config.RoleOwner)
+	rec := httptest.NewRecorder()
+
+	server.handleAuditLog(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Entries []AuditEntry `json:"entries"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("response is not JSON: %v; body=%q", err, rec.Body.String())
+	}
+	if len(body.Entries) != 1 {
+		t.Fatalf("response had %d entries, want 1", len(body.Entries))
+	}
+}
+
 func TestAuditDetailFormatsKeyValuePairs(t *testing.T) {
 	if got := auditDetail(); got != "" {
 		t.Fatalf("auditDetail() = %q, want empty string", got)
