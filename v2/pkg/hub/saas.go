@@ -52,6 +52,92 @@ func resolveHubAdminUsername() string {
 	return defaultHubAdminUsername
 }
 
+// hubAdminsEnv is the env var (comma-separated canonical ids, e.g.
+// "github:clubanderson,google:1078...") that overrides the admin SET for
+// multi-provider login. A bare login in the list is accepted and treated as
+// github: via the identity shim. When unset, the admin set is the single
+// hubAdminUsername above (itself overridable via HIVE_HUB_ADMIN_USERNAME), so
+// both existing env contracts keep working. Prefer isHubAdmin()/
+// primaryHubAdmin() over comparing against hubAdminUsername directly, so
+// multi-provider admins work and so a same-subject identity on a DIFFERENT
+// provider can never inherit admin.
+const hubAdminsEnv = "HIVE_HUB_ADMINS"
+
+// hubAdminSet returns the canonicalized set of admin identities. Sourced from
+// HIVE_HUB_ADMINS when set, else the single hubAdminUsername. Every entry is
+// run through canonicalizeLegacy so a bare login becomes github:<login>; this
+// is what stops a Google/IBMid user whose subject happens to be the admin's
+// login from matching the GitHub admin.
+func hubAdminSet() map[string]bool {
+	raw := strings.TrimSpace(os.Getenv(hubAdminsEnv))
+	entries := []string{hubAdminUsername}
+	if raw != "" {
+		entries = splitCSV(raw)
+	}
+	set := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		if c := canonicalizeLegacy(e); c != "" {
+			set[strings.ToLower(c)] = true
+		}
+	}
+	return set
+}
+
+// isHubAdmin reports whether the given identity (bare-legacy or canonical) is a
+// hub admin. Both the input and the configured admin ids are canonicalized, so
+// "clubanderson", "github:clubanderson", and "GitHub:ClubAnderson" all match the
+// default admin, while "google:clubanderson" does NOT.
+func isHubAdmin(id string) bool {
+	if id == "" {
+		return false
+	}
+	return hubAdminSet()[strings.ToLower(canonicalizeLegacy(id))]
+}
+
+// primaryHubAdmin returns the canonical identity of the primary hub admin — the
+// first entry of HIVE_HUB_ADMINS, else the resolved hubAdminUsername. Used where
+// the code needs a concrete admin identity to WRITE (e.g. audit attribution).
+func primaryHubAdmin() string {
+	raw := strings.TrimSpace(os.Getenv(hubAdminsEnv))
+	if raw != "" {
+		if list := splitCSV(raw); len(list) > 0 {
+			return canonicalizeLegacy(list[0])
+		}
+	}
+	return canonicalizeLegacy(hubAdminUsername)
+}
+
+// userCanonicalID returns a user's canonical wire-form identity: the explicit
+// CanonicalID when present, else the legacy-shimmed GitHubUsername (a bare login
+// becomes github:<login>). This is the single source of truth for "who is this
+// record" across the dual-read storage path and the provider badge.
+func userCanonicalID(u *SaaSUser) string {
+	if u == nil {
+		return ""
+	}
+	if u.CanonicalID != "" {
+		return canonicalizeLegacy(u.CanonicalID)
+	}
+	return canonicalizeLegacy(u.GitHubUsername)
+}
+
+// userProvider returns a user's login provider ("github"/"google"/"ibmid"/
+// "redhat"/"microsoft"/"custom"), from the stored Provider field when set, else
+// parsed from the canonical identity. Legacy records with neither resolve to
+// "github" via the shim. Drives the admin Users-table auth-method badge.
+func userProvider(u *SaaSUser) string {
+	if u == nil {
+		return ""
+	}
+	if u.Provider != "" {
+		return strings.ToLower(u.Provider)
+	}
+	if p, _, ok := parseCanonical(userCanonicalID(u)); ok {
+		return p
+	}
+	return legacyProvider
+}
+
 func splitCSV(s string) []string {
 	parts := strings.Split(s, ",")
 	out := make([]string, 0, len(parts))
@@ -173,6 +259,34 @@ type SaaSUser struct {
 	SaaSQuota      int               `json:"saas_quota"`
 	Blocked        bool              `json:"blocked"`
 	EncryptedToken string            `json:"encrypted_token,omitempty"`
+
+	// Multi-provider identity (phase 1d). All omitempty so the thousands of
+	// existing GitHub-only records on the PVC round-trip byte-identical until a
+	// user first logs in / links after this ships.
+	//
+	//   CanonicalID  the wire-form primary identity ("google:1078", "github:foo").
+	//                Empty on a legacy record → the shim treats GitHubUsername as
+	//                the (github:) primary. saveSaaSUser/loadSaaSUser already dual-
+	//                read on GitHubUsername; CanonicalID is the explicit form used
+	//                by the badge and by Phase 2's OIDC callback when it creates a
+	//                non-GitHub user.
+	//   Provider     "github" | "google" | "ibmid" | "redhat" | "microsoft" |
+	//                "custom" — drives the admin Users-table auth-method badge.
+	//                Derivable from CanonicalID but stored so the badge needs no
+	//                parse per render.
+	//   AvatarURL    stored avatar (Google/IBMid give a picture claim); replaces
+	//                the derived github.com/<login>.png where present.
+	//   Email        the provider email claim (display only; NEVER the key — subs
+	//                are stable, emails are reassignable).
+	//   LinkedGitHubLogin  an OPTIONAL attached GitHub identity for a non-GitHub
+	//                primary who needs user-scoped GitHub calls (contributor
+	//                reissue). Never required to own a hive — the App does the
+	//                GitHub work.
+	CanonicalID       string `json:"canonical_id,omitempty"`
+	Provider          string `json:"provider,omitempty"`
+	AvatarURL         string `json:"avatar_url,omitempty"`
+	Email             string `json:"email,omitempty"`
+	LinkedGitHubLogin string `json:"linked_github_login,omitempty"`
 
 	// Contact/CRM fields. Admin-maintained free text used to reach a hub user
 	// outside GitHub (and to remember what was said last time). All three are
@@ -479,7 +593,7 @@ func (s *HubServer) blockIfImpersonatingWrite(w http.ResponseWriter, r *http.Req
 // read used for messaging/audit/status; the security decisions live in
 // resolveIdentity.
 func (s *HubServer) activeImpersonationGrant(r *http.Request) (impersonationGrant, bool) {
-	if s.getRealAuthUser(r) != hubAdminUsername {
+	if !isHubAdmin(s.getRealAuthUser(r)) {
 		return impersonationGrant{}, false
 	}
 	cookie, err := r.Cookie(impersonateCookieName)
@@ -487,7 +601,7 @@ func (s *HubServer) activeImpersonationGrant(r *http.Request) (impersonationGran
 		return impersonationGrant{}, false
 	}
 	grant, ok := verifyImpersonateCookieValue(s.impersonateKey(), cookie.Value, time.Now())
-	if !ok || grant.Admin != hubAdminUsername {
+	if !ok || !isHubAdmin(grant.Admin) {
 		return impersonationGrant{}, false
 	}
 	if loadSaaSUser(grant.Target) == nil {
@@ -672,7 +786,7 @@ func (s *HubServer) getRealAuthUser(r *http.Request) string {
 //   - a hive_hub_impersonate cookie is present AND its HMAC verifies AND it has
 //     not expired (verifyImpersonateCookieValue);
 //   - the grant's Admin field equals the REAL signed session user;
-//   - that real user is exactly hubAdminUsername (only the admin may impersonate
+//   - that real user is a hub admin (isHubAdmin — only an admin may impersonate
 //     — a stolen cookie replayed on a non-admin session is ignored);
 //   - the target resolves to a real registered user on disk.
 //
@@ -683,7 +797,7 @@ func (s *HubServer) getRealAuthUser(r *http.Request) string {
 // the target is always a normal user, and writes never run under it.
 func (s *HubServer) resolveIdentity(r *http.Request) (effective, realUser string, impersonating bool) {
 	realUser = s.getRealAuthUser(r)
-	if realUser == "" || realUser != hubAdminUsername {
+	if realUser == "" || !isHubAdmin(realUser) {
 		return realUser, realUser, false
 	}
 	cookie, err := r.Cookie(impersonateCookieName)
@@ -773,12 +887,74 @@ func (s *HubServer) validateGitHubToken(token string) string {
 	return user.Login
 }
 
+// saaSUserFilePaths returns the candidate on-disk paths for an identity, in
+// read/try order: the canonical filename first, then the legacy "<login>.json"
+// fallback for a bare or github: identity. The caller has already rejected
+// path-traversal characters in the raw username.
+func saaSUserFilePaths(username string) []string {
+	var paths []string
+	if stem, err := encodeUserFilename(username); err == nil {
+		paths = append(paths, filepath.Join(saasUsersDir, stem+".json"))
+	}
+	provider, subject, ok := parseCanonical(username)
+	if ok && provider == legacyProvider {
+		legacy := filepath.Join(saasUsersDir, subject+".json")
+		if len(paths) == 0 || paths[0] != legacy {
+			paths = append(paths, legacy)
+		}
+	}
+	return paths
+}
+
+// readSaaSUserFile reads a user's JSON, trying the canonical filename then the
+// legacy fallback (see saaSUserFilePaths). Returns the first file that reads.
+func readSaaSUserFile(username string) ([]byte, error) {
+	var firstErr error
+	for _, p := range saaSUserFilePaths(username) {
+		data, err := os.ReadFile(p)
+		if err == nil {
+			return data, nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	if firstErr == nil {
+		firstErr = os.ErrNotExist
+	}
+	return nil, firstErr
+}
+
+// saveSaaSUserPath returns the file path a user record is written to. A GitHub
+// (or bare-legacy) primary keeps its legacy "<login>.json" so existing records
+// are updated in place with no rename; a non-GitHub primary writes the canonical
+// "<provider>.<subject>.json".
+func saveSaaSUserPath(u *SaaSUser) (string, error) {
+	// The record's primary identity: the explicit CanonicalID when set (a
+	// non-GitHub or newly-created user), else GitHubUsername (a bare login for
+	// legacy GitHub users). Either resolves through parseCanonical + the shim.
+	id := userCanonicalID(u)
+	provider, subject, ok := parseCanonical(id)
+	if !ok {
+		return "", fmt.Errorf("invalid identity for save: %q", id)
+	}
+	if provider == legacyProvider {
+		return filepath.Join(saasUsersDir, subject+".json"), nil
+	}
+	stem, err := encodeUserFilename(id)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(saasUsersDir, stem+".json"), nil
+}
+
 func loadSaaSUser(username string) *SaaSUser {
 	if strings.Contains(username, "..") || strings.Contains(username, "/") || strings.Contains(username, "\\") {
 		return nil
 	}
-	path := filepath.Join(saasUsersDir, username+".json")
-	data, err := os.ReadFile(path)
+	// Dual-read: try the canonical filename ("google.1078.json") then the legacy
+	// "<login>.json". No file is rewritten — existing users resolve via legacy.
+	data, err := readSaaSUserFile(username)
 	if err != nil {
 		return nil
 	}
@@ -811,7 +987,10 @@ func saveSaaSUser(u *SaaSUser) error {
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(saasUsersDir, u.GitHubUsername+".json")
+	path, err := saveSaaSUserPath(u)
+	if err != nil {
+		return err
+	}
 	tmpPath := path + ".tmp"
 	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
 		return err
@@ -830,7 +1009,7 @@ func ensureSaaSUser(username string) *SaaSUser {
 		return u
 	}
 	quota := 0
-	if username == hubAdminUsername {
+	if isHubAdmin(username) {
 		quota = -1
 	}
 	u = &SaaSUser{
@@ -855,7 +1034,14 @@ func listAllSaaSUsers() []SaaSUser {
 		if !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
-		u := loadSaaSUser(strings.TrimSuffix(e.Name(), ".json"))
+		stem := strings.TrimSuffix(e.Name(), ".json")
+		// A canonical filename ("google.1078", "github.foo") decodes to its wire
+		// id; a legacy filename ("foo") does not — load it as the bare login.
+		key := stem
+		if id, ok := decodeUserFilename(stem); ok {
+			key = id
+		}
+		u := loadSaaSUser(key)
 		if u != nil {
 			users = append(users, *u)
 		}
@@ -886,7 +1072,7 @@ func (s *HubServer) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 		// particular the impersonation exit) must still be reachable by the real
 		// admin, and no admin-only surface may leak to the impersonated target.
 		username := s.getRealAuthUser(r)
-		if username != hubAdminUsername {
+		if !isHubAdmin(username) {
 			http.Error(w, `{"error":"admin access required"}`, http.StatusForbidden)
 			return
 		}
@@ -936,6 +1122,11 @@ func (s *HubServer) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 	type adminUserView struct {
 		SaaSUser
 		StatusTier string `json:"status_tier"`
+		// Provider is always populated (derived via userProvider) so the Users
+		// table's auth-method badge never has to parse — a legacy github-only
+		// record resolves to "github". This shadows SaaSUser.Provider's
+		// omitempty, so the field is present on every row.
+		Provider string `json:"provider"`
 	}
 	views := make([]adminUserView, 0, len(users))
 	for i := range users {
@@ -944,6 +1135,7 @@ func (s *HubServer) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 		views = append(views, adminUserView{
 			SaaSUser:   users[i],
 			StatusTier: userStatusTier(&users[i], live[name], engaged[name], now),
+			Provider:   userProvider(&users[i]),
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -1148,7 +1340,7 @@ func (s *HubServer) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request
 // record (login state, quota, encrypted token).
 func (s *HubServer) handleAdminDeleteUser(w http.ResponseWriter, r *http.Request) {
 	username := r.PathValue("username")
-	if username == hubAdminUsername {
+	if isHubAdmin(username) {
 		writeJSONError(w, http.StatusForbidden, "cannot delete the hub admin")
 		return
 	}
@@ -2524,7 +2716,7 @@ func (s *HubServer) handleMyHives(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	isAdmin := username == hubAdminUsername
+	isAdmin := isHubAdmin(username)
 	for _, h := range allHives {
 		if role, ok := user.Hives[h.ID]; ok {
 			if isAdmin && role != "owner" {
@@ -2535,7 +2727,7 @@ func (s *HubServer) handleMyHives(w http.ResponseWriter, r *http.Request) {
 			result = append(result, entry)
 			continue
 		}
-		if strings.EqualFold(h.Owner, username) {
+		if canonicalEqual(h.Owner, username) {
 			entry := MyHiveEntry{RegistryEntry: h, Role: "owner", AutoUpgrade: autoUpgradeMap[h.ID], AutoUpgradeMode: autoUpgradeModeMap[h.ID]}
 			enrichFromSaaSMeta(&entry)
 			result = append(result, entry)
@@ -2583,7 +2775,7 @@ func (s *HubServer) handleMyHives(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, sh := range listSaaSHives() {
-		if (sh.Owner == username || isAdmin) && !seen[sh.ID] {
+		if (canonicalEqual(sh.Owner, username) || isAdmin) && !seen[sh.ID] {
 			user.Hives[sh.ID] = "owner"
 			entry := MyHiveEntry{
 				RegistryEntry: RegistryEntry{
@@ -2828,13 +3020,13 @@ func (s *HubServer) handleAccessStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	hiveAccess := make(map[string]hiveAccessInfo)
 
-	isAdmin := username == hubAdminUsername
+	isAdmin := isHubAdmin(username)
 	for _, h := range allHives {
 		if role, ok := user.Hives[h.ID]; ok {
 			hiveAccess[h.ID] = hiveAccessInfo{Role: role, Status: "accepted"}
 			continue
 		}
-		if strings.EqualFold(h.Owner, username) {
+		if canonicalEqual(h.Owner, username) {
 			hiveAccess[h.ID] = hiveAccessInfo{Role: "owner", Status: "accepted"}
 			continue
 		}
@@ -3086,7 +3278,7 @@ func (s *HubServer) handleHiveStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"access denied"}`, http.StatusForbidden)
 		return
 	}
-	if h.Owner != username && username != hubAdminUsername {
+	if !canonicalEqual(h.Owner, username) && !isHubAdmin(username) {
 		if _, hasAccess := user.Hives[id]; !hasAccess {
 			http.Error(w, `{"error":"access denied"}`, http.StatusForbidden)
 			return
@@ -3165,7 +3357,7 @@ func (s *HubServer) handleOpenHive(w http.ResponseWriter, r *http.Request) {
 	// the spoke. The role we pass is advisory — the spoke re-checks its own
 	// allowlist and uses that role authoritatively.
 	role := saasRoleRead
-	if username == hubAdminUsername {
+	if isHubAdmin(username) {
 		role = saasRoleOwner
 	} else {
 		user := loadSaaSUser(username)
@@ -3173,7 +3365,7 @@ func (s *HubServer) handleOpenHive(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"error":"access denied"}`, http.StatusForbidden)
 			return
 		}
-		if h := loadSaaSHive(id); h != nil && h.Owner == username {
+		if h := loadSaaSHive(id); h != nil && canonicalEqual(h.Owner, username) {
 			role = saasRoleOwner
 		} else if r, ok := user.Hives[id]; ok {
 			role = r
@@ -3221,7 +3413,7 @@ func (s *HubServer) handleDeleteHive(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"status": deleteStatusDeleted})
 		return
 	}
-	if h.Owner != username && username != hubAdminUsername {
+	if !canonicalEqual(h.Owner, username) && !isHubAdmin(username) {
 		http.Error(w, `{"error":"only the owner can delete this hive"}`, http.StatusForbidden)
 		return
 	}
@@ -3292,7 +3484,7 @@ func (s *HubServer) handleMigrateHive(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"hive not found"}`, http.StatusNotFound)
 		return
 	}
-	if h.Owner != username && username != hubAdminUsername {
+	if !canonicalEqual(h.Owner, username) && !isHubAdmin(username) {
 		http.Error(w, `{"error":"only the owner can migrate this hive"}`, http.StatusForbidden)
 		return
 	}
@@ -3637,7 +3829,7 @@ func (s *HubServer) handleUpgradeHive(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"hive not found"}`, http.StatusNotFound)
 		return
 	}
-	if h.Owner != username && username != hubAdminUsername {
+	if !canonicalEqual(h.Owner, username) && !isHubAdmin(username) {
 		http.Error(w, `{"error":"only the owner can upgrade"}`, http.StatusForbidden)
 		return
 	}
@@ -3726,7 +3918,7 @@ func (s *HubServer) handleSwitchBranch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"hive not found"}`, http.StatusNotFound)
 		return
 	}
-	if h.Owner != username && username != hubAdminUsername {
+	if !canonicalEqual(h.Owner, username) && !isHubAdmin(username) {
 		http.Error(w, `{"error":"only the owner can switch branches"}`, http.StatusForbidden)
 		return
 	}
@@ -3861,7 +4053,7 @@ func (s *HubServer) handleToggleVisibility(w http.ResponseWriter, r *http.Reques
 		http.Error(w, `{"error":"hive not found — only hosted hives can be toggled from here"}`, http.StatusNotFound)
 		return
 	}
-	if h.Owner != username && username != hubAdminUsername {
+	if !canonicalEqual(h.Owner, username) && !isHubAdmin(username) {
 		http.Error(w, `{"error":"only the owner can change visibility"}`, http.StatusForbidden)
 		return
 	}
@@ -3948,7 +4140,7 @@ func (s *HubServer) handleRenameHive(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"hive not found — only hosted hives can be renamed from here"}`, http.StatusNotFound)
 		return
 	}
-	if h.Owner != username && username != hubAdminUsername {
+	if !canonicalEqual(h.Owner, username) && !isHubAdmin(username) {
 		http.Error(w, `{"error":"only the owner can rename this hive"}`, http.StatusForbidden)
 		return
 	}
@@ -4071,7 +4263,7 @@ func (s *HubServer) handleToggleAutoUpgrade(w http.ResponseWriter, r *http.Reque
 			Repos: regEntry.Repos,
 		}
 	}
-	if h.Owner != username && username != hubAdminUsername {
+	if !canonicalEqual(h.Owner, username) && !isHubAdmin(username) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
 		fmt.Fprint(w, `{"error":"only the owner can change auto-upgrade"}`)
@@ -5399,7 +5591,7 @@ func (s *HubServer) handleProxyHiveConfig(w http.ResponseWriter, r *http.Request
 	// hive with no owner fell through and its raw config was fetchable by ANY
 	// authenticated hub user. Fail closed: only the site admin may pull an
 	// ownerless hive's config.
-	if caller != hubAdminUsername && (owner == "" || caller != owner) {
+	if !isHubAdmin(caller) && (owner == "" || !canonicalEqual(caller, owner)) {
 		http.Error(w, `{"error":"not authorized for this hive"}`, http.StatusForbidden)
 		return
 	}
@@ -5542,10 +5734,10 @@ func userIsHiveOwner(username string, h *SaaSHive) bool {
 	if username == "" || h == nil {
 		return false
 	}
-	if username == hubAdminUsername {
+	if isHubAdmin(username) {
 		return true
 	}
-	if strings.EqualFold(h.Owner, username) {
+	if canonicalEqual(h.Owner, username) {
 		return true
 	}
 	u := loadSaaSUser(username)
@@ -5566,7 +5758,7 @@ func (s *HubServer) handleAccessList(w http.ResponseWriter, r *http.Request) {
 	}
 	// Notes is admin-only; a non-admin owner viewing their hive's access gets
 	// name+Slack but not the admin's private CRM notes.
-	access := accessForHive(hiveID, listAllSaaSUsers(), username == hubAdminUsername)
+	access := accessForHive(hiveID, listAllSaaSUsers(), isHubAdmin(username))
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"access": access})
 }
@@ -5582,7 +5774,7 @@ func (s *HubServer) handleGrantableUsers(w http.ResponseWriter, r *http.Request)
 	username := s.getAuthUser(r)
 	// Any user who owns at least one hive may see the roster; that is the same
 	// bar as being able to open Manage Access at all. Admin always qualifies.
-	owns := username == hubAdminUsername
+	owns := isHubAdmin(username)
 	if !owns {
 		for _, h := range listSaaSHives() {
 			h := h
@@ -5804,7 +5996,7 @@ func (s *HubServer) handleGetRequests(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	role := user.Hives[hiveID]
-	if !config.RoleAtLeast(role, config.RoleReadWrite) && username != hubAdminUsername {
+	if !config.RoleAtLeast(role, config.RoleReadWrite) && !isHubAdmin(username) {
 		http.Error(w, `{"error":"need owner or read-write access"}`, http.StatusForbidden)
 		return
 	}
@@ -5838,7 +6030,7 @@ func (s *HubServer) handleApproveRequest(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	approverRole := approverUser.Hives[hiveID]
-	if !config.RoleAtLeast(approverRole, config.RoleReadWrite) && approver != hubAdminUsername {
+	if !config.RoleAtLeast(approverRole, config.RoleReadWrite) && !isHubAdmin(approver) {
 		http.Error(w, `{"error":"need owner or read-write access"}`, http.StatusForbidden)
 		return
 	}
@@ -5855,7 +6047,7 @@ func (s *HubServer) handleApproveRequest(w http.ResponseWriter, r *http.Request)
 		http.Error(w, `{"error":"role must be read, read-write, merger, or owner"}`, http.StatusBadRequest)
 		return
 	}
-	if approver != hubAdminUsername && config.RoleAtLeast(body.Role, approverRole) {
+	if !isHubAdmin(approver) && config.RoleAtLeast(body.Role, approverRole) {
 		http.Error(w, `{"error":"cannot grant a role equal to or higher than your own"}`, http.StatusForbidden)
 		return
 	}
@@ -5896,7 +6088,7 @@ func (s *HubServer) handleDenyRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	denierRole := denierUser.Hives[hiveID]
-	if !config.RoleAtLeast(denierRole, config.RoleReadWrite) && denier != hubAdminUsername {
+	if !config.RoleAtLeast(denierRole, config.RoleReadWrite) && !isHubAdmin(denier) {
 		http.Error(w, `{"error":"need owner or read-write access"}`, http.StatusForbidden)
 		return
 	}
@@ -5933,7 +6125,7 @@ func (s *HubServer) handleApproveAccess(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	approverRole := approverUser.Hives[hiveID]
-	if approverRole != "owner" && approver != hubAdminUsername {
+	if approverRole != "owner" && !isHubAdmin(approver) {
 		http.Error(w, `{"error":"only the owner can approve access"}`, http.StatusForbidden)
 		return
 	}
@@ -5979,7 +6171,7 @@ func (s *HubServer) handleDenyAccess(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	denierRole := denierUser.Hives[hiveID]
-	if denierRole != "owner" && denier != hubAdminUsername {
+	if denierRole != "owner" && !isHubAdmin(denier) {
 		http.Error(w, `{"error":"only the owner can deny access"}`, http.StatusForbidden)
 		return
 	}
@@ -6477,7 +6669,7 @@ func (s *HubServer) handleApproveProvision(w http.ResponseWriter, r *http.Reques
 		// Admin chose a specific placeholder — validate it is an available
 		// placeholder (same check the assign path uses) before using it. The
 		// full status recheck under loadSaaSHive below still guards the race.
-		if sel := loadSaaSHive(hiveID); sel == nil || sel.Status != statusAvailable || sel.Owner != hubAdminUsername {
+		if sel := loadSaaSHive(hiveID); sel == nil || sel.Status != statusAvailable || !isHubAdmin(sel.Owner) {
 			http.Error(w, `{"error":"selected placeholder is not available"}`, http.StatusConflict)
 			return
 		}
@@ -6749,7 +6941,7 @@ func findAvailablePlaceholder(clusterID string) string {
 		if h.Status != statusAvailable {
 			continue
 		}
-		if h.Owner != hubAdminUsername {
+		if !isHubAdmin(h.Owner) {
 			continue
 		}
 		if clusterIDForHive(&h) != clusterID {
@@ -6778,7 +6970,7 @@ func listAvailablePlaceholders(pool string) []AvailablePlaceholder {
 		if h.Status != statusAvailable {
 			continue
 		}
-		if h.Owner != hubAdminUsername {
+		if !isHubAdmin(h.Owner) {
 			continue
 		}
 		cluster := clusterIDForHive(&h)
@@ -7208,7 +7400,7 @@ type AssignHiveRequest struct {
 // both reachable (hive-oke) and heartbeat-only (vllm-d) clusters: NO hub→spoke
 // push or kubectl is used, so a vllm-d claim is delivered entirely by heartbeat.
 func (s *HubServer) handleAssignHive(w http.ResponseWriter, r *http.Request) {
-	if s.getAuthUser(r) != hubAdminUsername {
+	if !isHubAdmin(s.getAuthUser(r)) {
 		http.Error(w, `{"error":"admin access required"}`, http.StatusForbidden)
 		return
 	}
@@ -7540,7 +7732,7 @@ func (s *HubServer) handleUserToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	requester := s.getAuthUser(r)
-	if requester != body.Username && requester != hubAdminUsername {
+	if requester != body.Username && !isHubAdmin(requester) {
 		http.Error(w, `{"error":"can only retrieve your own token"}`, http.StatusForbidden)
 		return
 	}
@@ -15511,6 +15703,48 @@ const dashboardHTML = `<!DOCTYPE html>
       return 'contact-panel-' + String(username || '').replace(/[^A-Za-z0-9_-]/g, '_');
     }
 
+    /* providerBadge renders the user's login method (auth provider) as a small
+       chip next to their name in the admin Users table, so an admin can see at a
+       glance who signed in with GitHub vs Google vs IBMid vs Red Hat vs
+       Microsoft. The provider rides the users payload as u.provider (derived
+       server-side via userProvider). A legacy record with no provider resolves
+       to github, so every existing row shows the GitHub chip — no blank. */
+    // providerLogoSVG returns a small inline brand SVG per login provider, matching
+    // the marks used on the /login picker, so the badge is recognizable at a glance.
+    function providerLogoSVG(p) {
+      var s = 'width="12" height="12" style="flex:none" aria-hidden="true"';
+      switch (p) {
+        case 'github':
+          return '<svg viewBox="0 0 16 16" fill="currentColor" ' + s + '><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>';
+        case 'google':
+          return '<svg viewBox="0 0 18 18" ' + s + '><path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.92c1.7-1.57 2.68-3.88 2.68-6.62z"/><path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.92-2.26c-.8.54-1.84.86-3.04.86-2.34 0-4.32-1.58-5.03-3.7H.96v2.33A9 9 0 0 0 9 18z"/><path fill="#FBBC05" d="M3.97 10.72a5.4 5.4 0 0 1 0-3.44V4.95H.96a9 9 0 0 0 0 8.1l3.01-2.33z"/><path fill="#EA4335" d="M9 3.58c1.32 0 2.5.45 3.44 1.35l2.58-2.58C13.46.89 11.42 0 9 0A9 9 0 0 0 .96 4.95l3.01 2.33C4.68 5.16 6.66 3.58 9 3.58z"/></svg>';
+        case 'ibmid':
+          return '<svg viewBox="0 0 24 24" fill="#1F70C1" ' + s + '><path d="M2 4h20v2H2zm0 3.5h20v2H2zm0 3.5h20v2H2zm0 3.5h20v2H2zm0 3.5h20v2H2z"/></svg>';
+        case 'redhat':
+          return '<svg viewBox="0 0 24 24" fill="#EE0000" ' + s + '><path d="M16.35 14.4c1.6 0 3.9-.33 3.9-2.24a1.8 1.8 0 0 0-.04-.44l-.95-4.12c-.22-.9-.41-1.31-2-2.12-1.24-.63-3.94-1.67-4.74-1.67-.74 0-.96.96-1.85.94-.86-.02-1.5-.74-2.3-.74-.77 0-1.27.52-1.66 1.6 0 0-1.08 3.05-1.22 3.49a.83.83 0 0 0-.03.25c0 1.2 4.71 5.32 10.88 5.32M20.47 12.94c.22 1.05.22 1.16.22 1.3 0 1.8-2.02 2.79-4.67 2.79-6 0-11.25-3.51-11.25-5.83 0-.32.07-.63.18-.93C2.94 10.36 1 10.63 1 12.34c0 2.8 6.63 6.26 11.87 6.26 4.02 0 5.03-1.82 5.03-3.25 0-1.13-.97-2.4-2.43-2.41"/></svg>';
+        case 'microsoft':
+          return '<svg viewBox="0 0 23 23" ' + s + '><path fill="#F25022" d="M0 0h11v11H0z"/><path fill="#7FBA00" d="M12 0h11v11H12z"/><path fill="#00A4EF" d="M0 12h11v11H0z"/><path fill="#FFB900" d="M12 12h11v11H12z"/></svg>';
+        default:
+          return '';
+      }
+    }
+
+    function providerBadge(u) {
+      var p = String((u && u.provider) || 'github').toLowerCase();
+      var meta = {
+        github: {label: 'GitHub', color: '#c9d1d9', bg: 'rgba(110,118,129,0.25)'},
+        google: {label: 'Google', color: '#e8eaed', bg: 'rgba(66,133,244,0.22)'},
+        ibmid:  {label: 'IBMid',  color: '#e8eaed', bg: 'rgba(15,98,254,0.22)'},
+        redhat: {label: 'Red Hat',color: '#f5c2c7', bg: 'rgba(238,0,0,0.22)'},
+        microsoft: {label: 'Microsoft', color: '#e8eaed', bg: 'rgba(0,120,215,0.22)'}
+      }[p] || {label: p || 'unknown', color: 'var(--muted)', bg: 'rgba(110,118,129,0.25)'};
+      var logo = providerLogoSVG(p);
+      return '<span title="Signed in with ' + escAttr(meta.label) + '"' +
+        ' style="display:inline-flex;align-items:center;gap:4px;padding:1px 7px;border-radius:9999px;' +
+        'font-size:0.6rem;font-weight:600;color:' + meta.color + ';background:' + meta.bg + '">' +
+        (logo ? logo : '') + esc(meta.label) + '</span>';
+    }
+
     // renderContactCell is the collapsed summary shown in the main user row.
     function renderContactCell(u) {
       var bits = [];
@@ -16163,6 +16397,7 @@ const dashboardHTML = `<!DOCTYPE html>
         var nameCell = avatar +
           '<span class="hive-access-wrap" style="position:relative;display:inline-flex;align-items:center;gap:4px;cursor:help">' +
             '<span style="color:var(--text);font-weight:600">' + esc(u.github_username) + '</span>' +
+            providerBadge(u) +
             (hasPendingReq ? ' <span style="color:var(--accent);font-size:0.65rem">&#9679; request</span>' : '') +
             renderUserStatsCard(u, hasPendingReq) +
           '</span>';
