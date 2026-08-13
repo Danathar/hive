@@ -6402,6 +6402,21 @@ func (s *Server) inferenceAPIKey(backend string) string {
 			return key
 		}
 	}
+	// Same contract as inference-time forwarding: an explicit gateway for
+	// this backend wins over the legacy litellm: key store (see
+	// ResolveLiteLLMInferenceKey). A key rotated via the Model Gateways tab
+	// lands only in the gateway's key file, so resolving the legacy file here
+	// made discovery send the revoked key and log "no models found from any
+	// endpoint" (surfaced as a sticky error toast) while the save-time probe
+	// — which uses the submitted key — reported the models fine.
+	//
+	// A matching gateway that resolves NO key of its own still falls back to
+	// the legacy store: keyless gateway entries (e.g. an endpoint-only entry
+	// with the key kept in the classic litellm: block) predate per-gateway
+	// keys and must keep discovering with the legacy key.
+	if key := gov.ResolveLiteLLMInferenceKey(backend); key != "" {
+		return key
+	}
 	return gov.LiteLLM.ResolveAPIKey()
 }
 
