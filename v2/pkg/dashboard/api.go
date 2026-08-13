@@ -5254,12 +5254,13 @@ func (s *Server) handleGovernorBobKeyClear(w http.ResponseWriter, r *http.Reques
 	cfg := s.deps.Config
 	bc := cfg.Governor.Bob
 	// Only drop the pointer if it names the file we just removed; an operator
-	// who pointed api_key_file at their own path keeps that setting.
+	// who pointed api_key_file at their own path keeps that setting. The label
+	// describes the key we just cleared, so drop it in the same case — leaving
+	// a stale "Team inference key" beside a now-empty slot would mislead.
 	if bc.APIKeyFile == writableBobKeyFile {
 		bc.APIKeyFile = ""
+		bc.KeyName = ""
 	}
-	// The label describes the revoked key; a future key gets its own name.
-	bc.KeyName = ""
 	cfg.Governor.Bob = bc
 
 	if err := s.saveConfig(); err != nil {
