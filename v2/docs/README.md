@@ -11,7 +11,7 @@ Start with [Architecture](architecture.md) for the system overview, then use the
 - [Environment variable reference](env-vars.md) — centralized list of runtime, deployment, hub, backup, and contributor environment variables.
 - [Troubleshooting](troubleshooting.md) — v2 container logs, config validation, agent tmux sessions, dashboard auth, and GitHub credential checks.
 - [Notifications](notifications.md) — ntfy, Slack, and Discord webhook setup, trigger events, and test commands.
-- [Cross-cluster migration](cross-cluster-migration.md) — moving a hive between clusters without losing state.
+- [Cross-cluster migration](cross-cluster-migration.md) — the manual procedure for moving a hive between clusters.
 - [Dashboard route and health checks](health-checks.md) — `dashboard-route-rbac.yaml`, `route_exists`, listener probes, and alert behavior.
 - [Network and port requirements](network-requirements.md) — inbound ports, proxy paths, egress, and firewall guidance.
 - [TLS, HTTPS, and certificates](tls-setup.md) — termination patterns and certificate ownership.
@@ -43,8 +43,10 @@ Start with [Architecture](architecture.md) for the system overview, then use the
 - [Custom dashboard stylesheets](custom-stylesheets.md) — operator-supplied CSS for the dashboard and public snapshot.
 - [Portable AgentDefinition format](../AGENT-DEFINITION.md) — standalone YAML schema for importing/exporting agent definitions.
 - [Knowledge curator](knowledge-curator.md) — automatic fact extraction and promotion knobs.
+- [Agent peer-awareness logging (pluk)](agent-logging.md) — pluk log format, `hive-panes`, availability, and retention.
 - [GitHub App setup](github-app-setup.md) — app creation, permissions, Setup URL, and `/gh-setup`.
 - [ACMM policy matrix](acmm-policy-matrix.md) — capability levels and policy modes.
+- [Inception](inception.md) — operator guide to the L1 brainstorm/inception workflow: phases, API, and template variables.
 - [ACMM policy fragments](../../examples/acmm/README.md) — per-level ACMM policy references.
 - [Sandbox isolation and agent guardrails](sandbox-isolation.md) — isolation layers and operator guardrail notes.
 - [Per-agent gh restrictions](../../config/restrictions/README.md) — file-based wrapper denials in `/etc/hive/restrictions/`.
