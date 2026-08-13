@@ -46,6 +46,7 @@ Start with [Architecture](architecture.md) for the system overview, then use the
 - [Agent peer-awareness logging (pluk)](agent-logging.md) — pluk log format, `hive-panes`, availability, and retention.
 - [GitHub App setup](github-app-setup.md) — app creation, permissions, Setup URL, and `/gh-setup`.
 - [ACMM policy matrix](acmm-policy-matrix.md) — capability levels and policy modes.
+- [Inception](inception.md) — operator guide to the L1 brainstorm/inception workflow: phases, API, and template variables.
 - [ACMM policy fragments](../../examples/acmm/README.md) — per-level ACMM policy references.
 - [Sandbox isolation and agent guardrails](sandbox-isolation.md) — isolation layers and operator guardrail notes.
 - [Per-agent gh restrictions](../../config/restrictions/README.md) — file-based wrapper denials in `/etc/hive/restrictions/`.
