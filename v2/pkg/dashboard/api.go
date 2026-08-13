@@ -5087,6 +5087,10 @@ func (s *Server) handleGovernorBobStatus(w http.ResponseWriter, r *http.Request)
 		// configured is presence-only; the key value is never serialized.
 		"configured": source != "",
 		"source":     source,
+		// keyName is the operator-chosen LABEL for the key, not the key value —
+		// safe to serialize. Empty on hives that never recorded a name (the
+		// dashboard renders that as "(unnamed)"), so no backwards-compat break.
+		"keyName": bc.KeyName,
 	})
 }
 
@@ -5108,6 +5112,10 @@ func (s *Server) handleGovernorBobKey(w http.ResponseWriter, r *http.Request) {
 
 	var body struct {
 		APIKey *string `json:"apiKey"`
+		// KeyName is an optional human LABEL recorded alongside the key so
+		// managers can tell keys apart without seeing values. Absent
+		// (nil) leaves any existing name untouched; present-but-empty clears it.
+		KeyName *string `json:"keyName"`
 	}
 	if err := decodeBody(r, &body); err != nil {
 		jsonError(w, "invalid body", http.StatusBadRequest)
@@ -5116,6 +5124,16 @@ func (s *Server) handleGovernorBobKey(w http.ResponseWriter, r *http.Request) {
 	if body.APIKey == nil {
 		jsonError(w, "apiKey is required", http.StatusBadRequest)
 		return
+	}
+	var keyName string
+	nameProvided := body.KeyName != nil
+	if nameProvided {
+		keyName = strings.TrimSpace(*body.KeyName)
+		if len(keyName) > bobKeyNameMaxLen {
+			jsonError(w, fmt.Sprintf("keyName is too long (limit %d characters)", bobKeyNameMaxLen),
+				http.StatusBadRequest)
+			return
+		}
 	}
 	key := strings.TrimSpace(*body.APIKey)
 	if key == "" {
@@ -5156,6 +5174,11 @@ func (s *Server) handleGovernorBobKey(w http.ResponseWriter, r *http.Request) {
 	// A key VALUE pasted into api_key_env would be a plaintext secret in
 	// hive.yaml and never worked as a name (os.Getenv("...") is empty).
 	// Now that a real key is stored properly, scrub it.
+	// Record the label only when the field was present: absent leaves the
+	// existing name, present-but-empty clears it (both per the body contract).
+	if nameProvided {
+		bc.KeyName = keyName
+	}
 	if looksLikeAPIKeyValue(bc.APIKeyEnv) {
 		bc.APIKeyEnv = ""
 		s.logger.Info("cleared key-like value from bob api_key_env (replaced by stored API key)")
@@ -5201,6 +5224,8 @@ func (s *Server) handleGovernorBobKey(w http.ResponseWriter, r *http.Request) {
 		// How many parked bob agents were started by this save, so the UI can
 		// report what actually happened instead of telling the user to do it.
 		"relaunched": len(relaunched),
+		// The label, never the value (see handleGovernorBobStatus).
+		"keyName": bc.KeyName,
 	})
 }
 
@@ -5229,9 +5254,12 @@ func (s *Server) handleGovernorBobKeyClear(w http.ResponseWriter, r *http.Reques
 	cfg := s.deps.Config
 	bc := cfg.Governor.Bob
 	// Only drop the pointer if it names the file we just removed; an operator
-	// who pointed api_key_file at their own path keeps that setting.
+	// who pointed api_key_file at their own path keeps that setting. The label
+	// describes the key we just cleared, so drop it in the same case — leaving
+	// a stale "Team inference key" beside a now-empty slot would mislead.
 	if bc.APIKeyFile == writableBobKeyFile {
 		bc.APIKeyFile = ""
+		bc.KeyName = ""
 	}
 	cfg.Governor.Bob = bc
 
