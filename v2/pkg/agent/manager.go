@@ -1704,6 +1704,29 @@ func (m *Manager) launchInTmux(ctx context.Context, agent *AgentProcess) error {
 				binary, model, copilotGitHubWriteDenyFlags)
 		case "gemini":
 			launchCmd = fmt.Sprintf("%s --model %s", binary, model)
+		case "agy":
+			// Antigravity CLI (Google's Gemini CLI replacement). Needs
+			// --dangerously-skip-permissions or it blocks on a per-tool
+			// approval prompt that no one is attached to answer — the same
+			// contract as claude's bypass flag, and the value already used for
+			// agy in config/backends.conf.
+			//
+			// An unrecognised --model is NOT fatal here: agy warns
+			// ("model X is not recognized ... Using \"Gemini 3.6 Flash\"
+			// instead") and continues on its default, so a stale model carried
+			// over from another provider degrades to a warning rather than a
+			// dead agent.
+			//
+			// --effort is REQUIRED whenever --model is given. Without it agy
+			// warns "--model <m> requires --effort (available: low, medium,
+			// high)" and silently ignores the model, so the configured model
+			// would never actually take effect. "low" matches the effort agy
+			// itself falls back to, keeping behaviour unchanged while making
+			// the model selection real.
+			launchCmd = fmt.Sprintf("%s --dangerously-skip-permissions", binary)
+			if model != "" {
+				launchCmd = fmt.Sprintf("%s --model %s --effort %s", launchCmd, model, agyDefaultEffort)
+			}
 		case "pi":
 			// pi takes the model as a CLI flag, not a subcommand. Without
 			// this case the launch command never receives the configured
@@ -4850,6 +4873,14 @@ var (
 
 const (
 	sharedConfigDesiredMode    = 0o660
+	// agyDefaultEffort is the reasoning effort passed alongside agy's --model.
+	// agy requires --effort whenever --model is given and otherwise ignores the
+	// model entirely; "low" is the effort agy defaults to on its own, so this
+	// makes the configured model take effect without changing behaviour. Hive
+	// has no per-agent reasoning-effort setting yet — when it grows one, this
+	// is the constant it should replace.
+	agyDefaultEffort = "low"
+
 	tokenRestartCooldownSec    = 60  // minimum seconds between token-triggered restarts per agent
 	expiredTokenHangTimeoutSec = 180 // blank pane after this many seconds triggers token purge + restart
 	tlsErrorRestartCooldownSec = 120 // minimum seconds between TLS-error-triggered restarts per agent
