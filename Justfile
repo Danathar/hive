@@ -206,7 +206,21 @@ contribute-setup backend="claude": check-version (contribute-check-backend backe
       if [[ -n "$_TOKEN" ]]; then
         MY_HIVES=$(curl -sf -H "Authorization: Bearer ${_TOKEN}" "https://hive.kubestellar.io/api/saas/my-hives" 2>/dev/null || echo "")
         if [[ -n "$MY_HIVES" ]]; then
-          HIVE_LIST=$(echo "$MY_HIVES" | jq -r '.hives[]? // .[] | "\(.id)|\(.name // .project_name)"' 2>/dev/null)
+          # /api/saas/my-hives answers with "hives": null for an account that
+          # owns no SaaS-hosted hive — the normal case for a contributor who
+          # only lends their CLI to someone else's hive. The old filter treated
+          # that as "try something else" via `// .[]`, which iterates every
+          # TOP-LEVEL KEY of the response (alerts, channel_targets, …) and then
+          # interpolates .name over values that are arrays. jq exits 5 on that,
+          # and because the recipe runs under `set -euo pipefail` the whole
+          # setup died with a bare "recipe failed with exit code 5" — never
+          # reaching the public-registry fallback directly below, which would
+          # have listed the hives fine.
+          #
+          # So: iterate .hives ONLY when it really is an array of objects, and
+          # never let jq's exit status abort the lookup. An empty result here
+          # is a valid answer that means "fall through to the registry".
+          HIVE_LIST=$(echo "$MY_HIVES" | jq -r '(.hives // empty) | select(type == "array") | .[] | select(type == "object") | "\(.id)|\(.name // .project_name // .id)"' 2>/dev/null || true)
         fi
       fi
       if [[ -z "$HIVE_LIST" ]]; then
@@ -215,10 +229,13 @@ contribute-setup backend="claude": check-version (contribute-check-backend backe
           echo "Set HIVE_HUB manually: export HIVE_HUB=wss://<hive>/contribute"
           exit 1
         }
-        HIVE_LIST=$(echo "$HIVES_JSON" | jq -r '.hives[] | select(.online==true) | "\(.id)|\(.name)"' 2>/dev/null)
+        # Same guards as above: a registry whose shape drifts must degrade to
+        # "no hives listed" with an actionable message, not kill the recipe.
+        HIVE_LIST=$(echo "$HIVES_JSON" | jq -r '(.hives // empty) | select(type == "array") | .[] | select(type == "object" and .online == true) | "\(.id)|\(.name // .id)"' 2>/dev/null || true)
       fi
       if [[ -z "$HIVE_LIST" ]]; then
         echo "No hives available. Check https://hive.kubestellar.io"
+        echo "Or set the hub directly: export HIVE_HUB=wss://<hive>/contribute"
         exit 1
       fi
       echo "Your hives:"
