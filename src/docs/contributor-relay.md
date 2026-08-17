@@ -34,7 +34,8 @@ Important environment variables:
 | --- | --- | --- |
 | `HIVE_HUB` | value from `contributor.env`, else public hub default | WebSocket hub(s) to subscribe to. Use comma-separated URLs for multi-hub mode. Direct Compose reads the registered value from the mounted config file. |
 | `HIVE_REGISTRATION_TOKEN` | value from `contributor.env` | Registration token(s), positional with `HIVE_HUB` when multiple hubs are listed. Required; run `just contribute-setup` / `just contribute-register` first. |
-| `AGENT_BACKEND` | `claude` | CLI/backend to run (`claude`, `copilot`, `goose`, `bob`, `codex`, `litellm`, etc., depending on image support and credentials). |
+| `AGENT_BACKEND` | `claude` | CLI/backend to run (`claude`, `copilot`, `goose`, `bob`, `codex`, `litellm`, `agy`, etc., depending on image support and credentials). `agy` is not in the contributor image and cannot inherit a sign-in, so run it with `just contribute-hive agy local`. |
+| `AGENT_REASONING_EFFORT` | unset | Reasoning effort override. Consumed by `codex` (`-c model_reasoning_effort`) and by `agy` (`--effort low\|medium\|high`, required whenever a model is set, else agy ignores the model). Ignored by other backends. |
 | `AGENT_MODEL` | unset | Optional model override passed to the contributor agent. |
 | `CONTRIBUTOR_MODE` | `interactive` | `interactive` keeps a tmux/TTY session. `headless` is for one-shot/no-TTY task delivery. |
 
@@ -81,7 +82,7 @@ kubectl apply -f relay.yaml
 kubectl -n my-namespace rollout status deploy/hive-contributor
 ```
 
-The generated pod sets `CONTRIBUTOR_MODE=headless` because Kubernetes pods have no TTY; interactive tmux mode would stall. Headless mode is currently verified for `claude`, `litellm`, `copilot`, `codex`, and `goose`. The Deployment has one replica per registered contributor identity and uses readiness/liveness probes that read the relay's headless status file (`waiting`, `working`, `done` pass; missing/failed state fails).
+The generated pod sets `CONTRIBUTOR_MODE=headless` because Kubernetes pods have no TTY; interactive tmux mode would stall. Headless mode is currently verified for `claude`, `litellm`, `copilot`, `codex`, `goose`, and `agy` (`agy -p`, verified on 1.1.13) — but **`agy` is host-only**: it signs in through an interactive Google OAuth flow with no API-key mode, so a pod cannot authenticate and `just contribute-k8s` deliberately keeps warning for it. Headless `agy` works on a host that has already signed in. The Deployment has one replica per registered contributor identity and uses readiness/liveness probes that read the relay's headless status file (`waiting`, `working`, `done` pass; missing/failed state fails).
 
 The generated Secret contains the registration token and `GH_TOKEN` as Kubernetes Secret data. Treat it as sensitive cluster-readable material and prefer a pinned image tag/digest for repeatable operation.
 

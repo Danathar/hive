@@ -13,7 +13,9 @@
 //                           the same order as HIVE_HUB
 //   AGENT_BACKEND          — CLI backend name (claude, copilot, gemini, etc.)
 //   AGENT_MODEL            — model override (optional)
-//   AGENT_REASONING_EFFORT — Codex reasoning effort override (optional)
+//   AGENT_REASONING_EFFORT — reasoning effort override (optional). Consumed by
+//                           codex (-c model_reasoning_effort) and by agy
+//                           (--effort low|medium|high); ignored elsewhere.
 //   HIVE_AGENT_ROLE        — optional spoke agent role to claim (scanner,
 //                           quality, outreach, etc.; hub-enforced)
 //   HIVE_AGENT_SESSION     — tmux session name for the agent (default: contributor)
@@ -425,6 +427,19 @@ function warnOnProtocolDrift(hub, hubVersion) {
 // "Cannot read properties of undefined (reading 'maxTokens')" (bobshell 1.0.6).
 const NO_MODEL_FLAG_BACKENDS = ['amazonq', 'goose', 'bob'];
 
+// agy (Google's Antigravity CLI) REQUIRES --effort whenever --model is given:
+// without it agy warns "--model <m> requires --effort (available: low, medium,
+// high)" and silently IGNORES the model, so the contributor's configured model
+// never takes effect. AGY_DEFAULT_EFFORT mirrors agyDefaultEffort in the
+// hub-side launcher (src/pkg/agent/manager.go) so a relay agent and a pod agent
+// resolve the same effort. AGENT_REASONING_EFFORT can override it, but only
+// with a value agy actually accepts — codex's vocabulary is wider (it takes
+// "minimal"), and forwarding an unknown token here would make agy reject the
+// pairing and drop the model again.
+const AGY_DEFAULT_EFFORT = 'low';
+const AGY_EFFORTS = ['low', 'medium', 'high'];
+const agyEffort = AGY_EFFORTS.includes(REASONING_EFFORT) ? REASONING_EFFORT : AGY_DEFAULT_EFFORT;
+
 // Single source of truth for the CLI launch command (issue #2203, bug 1).
 // contributor-agent.sh builds "$CMD $PERM_FLAG $MODEL_FLAG" for the FIRST
 // launch; every restart path in this file previously rebuilt only "$CMD $PERM"
@@ -461,7 +476,10 @@ function buildLaunchCommand() {
   const reasoningFlag = BACKEND === 'codex' && REASONING_EFFORT
     ? `-c 'model_reasoning_effort="${REASONING_EFFORT}"'`
     : '';
-  cachedLaunchCommand = [cmd, perm, modelFlag, reasoningFlag].filter(Boolean).join(' ');
+  // Paired with modelFlag, never on its own: agy without --model needs no
+  // --effort, and passing one alone would be a flag agy has no model to apply.
+  const agyEffortFlag = BACKEND === 'agy' && modelFlag ? `--effort ${agyEffort}` : '';
+  cachedLaunchCommand = [cmd, perm, modelFlag, reasoningFlag, agyEffortFlag].filter(Boolean).join(' ');
   return cachedLaunchCommand;
 }
 
@@ -480,7 +498,7 @@ function buildLaunchCommand() {
 //          prompt is appended as the final, distinct argv element.
 //
 // Backends NOT listed here have no known non-interactive entry point (bob /
-// agy / pi drive an interactive TUI), so headless mode refuses them LOUDLY at
+// pi drive an interactive TUI), so headless mode refuses them LOUDLY at
 // task time rather than silently stalling. Extending this table is how a
 // future PR adds a backend once its headless invocation is verified.
 const HEADLESS_BACKENDS = {
@@ -503,6 +521,16 @@ const HEADLESS_BACKENDS = {
   // that `run`, `-t` and `--no-session` all exist and that a failed run exits
   // non-zero, which is the exit-code contract runHeadlessTask() relies on.
   goose: { flag: ['run', '--no-session', '-t'] },
+  // agy -p "<prompt>" — Antigravity's print mode ("Run a single prompt
+  // non-interactively and print the response", `agy --help`). Verified against
+  // agy 1.1.13: a print-mode run answers on stdout and exits 0, which is the
+  // exit-code contract runHeadlessTask() relies on. NOTE this makes agy
+  // headless-capable on a HOST only — agy's sign-in is an interactive Google
+  // OAuth flow (browser URL + pasted code) with no API-key mode, and a fresh
+  // container has nothing to inherit it from, which is why agy stays OUT of
+  // K8S_HEADLESS_BACKENDS on the /contribute page and out of the contributor
+  // image. The capability and the credential are separate questions.
+  agy: { flag: '-p' },
 };
 
 // headlessSupportsBackend reports whether the configured backend has a known
@@ -524,11 +552,14 @@ function buildHeadlessArgv(prompt) {
   const permArgs = perm ? perm.split(/\s+/).filter(Boolean) : [];
   const modelArgs = MODEL && !NO_MODEL_FLAG_BACKENDS.includes(BACKEND) ? ['--model', MODEL] : [];
   const reasoningArgs = BACKEND === 'codex' && REASONING_EFFORT ? ['-c', `model_reasoning_effort="${REASONING_EFFORT}"`] : [];
+  // Same --model/--effort pairing the interactive launch enforces, so headless
+  // agy honors the configured model instead of silently falling back.
+  const agyEffortArgs = BACKEND === 'agy' && modelArgs.length ? ['--effort', agyEffort] : [];
   // spec.flag is a single token for most backends, or an array of leading
   // tokens for backends needing a sub-command plus a flag (goose). Normalize
   // to an array so both shapes spread the same way ahead of the prompt.
   const oneShotArgs = Array.isArray(spec.flag) ? spec.flag : [spec.flag];
-  const args = [...permArgs, ...modelArgs, ...reasoningArgs, ...oneShotArgs, prompt];
+  const args = [...permArgs, ...modelArgs, ...reasoningArgs, ...agyEffortArgs, ...oneShotArgs, prompt];
   return { bin: cmd, args };
 }
 

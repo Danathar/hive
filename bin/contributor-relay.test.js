@@ -214,6 +214,54 @@ test('bob never receives --model even when AGENT_MODEL is set', () => {
   } finally { teardown(relay); }
 });
 
+test('agy pairs --effort with --model, and omits it when no model is set', () => {
+  // agy warns "--model <m> requires --effort (available: low, medium, high)"
+  // and then IGNORES the model, so the two flags must travel together. Mirrors
+  // agyDefaultEffort ("low") in the hub-side launcher.
+  const withModel = loadRelay({ backend: 'agy', model: 'gemini-3.6-flash-high' });
+  try {
+    const cmd = withModel.buildLaunchCommand();
+    assert.match(cmd, /--model gemini-3\.6-flash-high/, `expected model flag, got: ${cmd}`);
+    assert.match(cmd, /--effort low/, `agy dropped the required --effort: ${cmd}`);
+  } finally { teardown(withModel); }
+
+  const noModel = loadRelay({ backend: 'agy' });
+  try {
+    const cmd = noModel.buildLaunchCommand();
+    assert.ok(!/--effort/.test(cmd), `--effort belongs only with --model, got: ${cmd}`);
+  } finally { teardown(noModel); }
+});
+
+test('agy effort honors AGENT_REASONING_EFFORT but rejects values agy cannot take', () => {
+  // codex's vocabulary is wider than agy's ("minimal" is valid for codex only).
+  // Forwarding an unknown token would make agy reject the pairing and drop the
+  // model again, so anything outside low|medium|high falls back to the default.
+  const good = loadRelay({ backend: 'agy', model: 'm', reasoningEffort: 'high' });
+  try {
+    assert.match(good.buildLaunchCommand(), /--effort high/);
+  } finally { teardown(good); }
+
+  const bogus = loadRelay({ backend: 'agy', model: 'm', reasoningEffort: 'minimal' });
+  try {
+    const cmd = bogus.buildLaunchCommand();
+    assert.match(cmd, /--effort low/, `unknown effort must fall back to low, got: ${cmd}`);
+    assert.ok(!/minimal/.test(cmd), `agy must not receive codex-only effort values: ${cmd}`);
+  } finally { teardown(bogus); }
+});
+
+test('agy headless argv carries the same --model/--effort pairing', () => {
+  const relay = loadRelay({ backend: 'agy', mode: 'headless', model: 'gemini-3.6-flash-high' });
+  try {
+    const a = relay.buildHeadlessArgv('review this');
+    const i = a.args.indexOf('--effort');
+    assert.ok(i >= 0, `headless agy dropped --effort: ${JSON.stringify(a.args)}`);
+    assert.strictEqual(a.args[i + 1], 'low');
+    assert.ok(a.args.includes('--model'), `headless agy dropped --model: ${JSON.stringify(a.args)}`);
+    // The prompt still has to be the final, distinct element after -p.
+    assert.deepStrictEqual(a.args.slice(-2), ['-p', 'review this']);
+  } finally { teardown(relay); }
+});
+
 test('amazonq and goose are also excluded from --model', () => {
   for (const backend of ['amazonq', 'goose']) {
     const relay = loadRelay({ backend, model: 'some-model' });
@@ -1038,9 +1086,12 @@ test('buildHeadlessArgv maps each supported backend to its one-shot invocation',
     // goose needs its `run` sub-command AND -t (whose VALUE is the prompt) —
     // two leading tokens, unlike every other entry (#2828).
     { backend: 'goose', tail: ['run', '--no-session', '-t', PROMPT] },
+    // agy -p "<prompt>" — Antigravity's print mode. Headless CAPABILITY only:
+    // agy still cannot sign in inside a pod (interactive Google OAuth, no
+    // API-key mode), which is why the k8s manifest generator keeps warning.
+    { backend: 'agy', tail: ['-p', PROMPT] },
     // Interactive-TUI backends with no known one-shot entry point.
     { backend: 'bob', tail: null },
-    { backend: 'agy', tail: null },
     { backend: 'pi', tail: null },
   ]) {
     const relay = loadRelay({ backend: tc.backend, mode: 'headless' });

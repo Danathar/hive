@@ -160,9 +160,18 @@ contribute-check-backend backend="claude":
         if command -v agy &>/dev/null; then
           echo "agy CLI detected ($(agy --version 2>&1 | head -1))"
           echo "  Models: gemini-3.6-flash, claude-sonnet-4-6, gpt-oss-120b, and more"
-          echo "  Set model: --model gemini-3.6-flash-high"
+          echo "  Set model: export AGENT_MODEL=gemini-3.6-flash-high"
+          echo "  Effort:    export AGENT_REASONING_EFFORT=low|medium|high (agy needs --effort with --model)"
+          # agy signs in through an interactive Google OAuth flow (browser URL
+          # plus a pasted code) and offers no API-key mode, so run it on the
+          # HOST: a container cannot inherit the sign-in. Sign in once with a
+          # bare `agy` before starting the relay.
+          echo "  Sign in once interactively (run: agy) — agy's Google OAuth cannot be"
+          echo "  completed by an unattended container, so run this backend on the host:"
+          echo "    just contribute-hive agy local"
         else
-          echo "ERROR: agy CLI not found. Install: https://antigravity.dev"
+          echo "ERROR: agy CLI not found. Install: https://antigravity.google/product/antigravity-cli"
+          echo "  Homebrew: brew install --cask antigravity-cli"
           exit 1
         fi
         ;;
@@ -608,7 +617,21 @@ contribute-hive backend="" mode="docker": check-version
           fi
           ;;
         agy)
-          if [ -d "${HOME}/.antigravitycli" ]; then
+          # agy 1.1.x keeps its state under ${HOME}/.gemini/antigravity-cli,
+          # NOT the ${HOME}/.antigravitycli this recipe staged before — on a
+          # 1.1.13 install that legacy path does not exist at all, so the mount
+          # was a silent no-op. Stage whichever is present (legacy first-run
+          # installs may still use the old path) so neither layout is dropped.
+          #
+          # Staging state is NOT the same as staging a session: agy authenticates
+          # through an interactive Google OAuth flow and keeps no credential file
+          # under HOME that a container can inherit (verified on 1.1.13 — a clean
+          # container asks for a browser login regardless of what is mounted).
+          # The /contribute page therefore offers agy in HOST mode only.
+          if [ -d "${HOME}/.gemini/antigravity-cli" ]; then
+            stage_copy "${HOME}/.gemini/antigravity-cli" "antigravity-cli"
+            CLI_MOUNTS="-v ${CLI_STAGE}/antigravity-cli:/home/dev/.gemini/antigravity-cli${VOLSUF}"
+          elif [ -d "${HOME}/.antigravitycli" ]; then
             stage_copy "${HOME}/.antigravitycli" ".antigravitycli"
             CLI_MOUNTS="-v ${CLI_STAGE}/.antigravitycli:/home/dev/.antigravitycli${VOLSUF}"
           fi
@@ -840,11 +863,17 @@ contribute-k8s namespace="hive-contributor" outfile="" image_tag="v4":
     # (waiting/working/done/failed). Kept in step with HEADLESS_STATUS_FILE's
     # default in bin/contributor-relay.sh; the probe below reads this exact path.
     readonly HEADLESS_STATUS_FILE="/tmp/contributor-headless-status.json"
-    # Backends with a verified non-interactive (headless) entry point — must
-    # match HEADLESS_BACKENDS in bin/contributor-relay.sh. A headless pod on any
-    # OTHER backend (bob/agy/pi) refuses work LOUDLY at startup, so we warn
-    # here rather than emit a manifest that will crash-loop with no explanation.
-    # goose joined this set in #2828 via its `goose run` one-shot sub-command.
+    # Backends a CLUSTER can run headless. A headless pod on any OTHER backend
+    # (bob/pi) refuses work LOUDLY at startup, so we warn here rather than emit
+    # a manifest that will crash-loop with no explanation. goose joined this set
+    # in #2828 via its `goose run` one-shot sub-command.
+    #
+    # This is deliberately a SUBSET of HEADLESS_BACKENDS in
+    # bin/contributor-relay.sh, which lists CLI capability only: agy has a
+    # verified print mode (`agy -p`) and runs headless on a HOST, but it
+    # authenticates through an interactive Google OAuth flow with no API-key
+    # mode, so a pod has no way to sign in. Do NOT add agy here to "resync" the
+    # two lists — a pod would start, fail auth, and crash-loop.
     readonly HEADLESS_BACKENDS="claude litellm copilot codex goose"
     # Memory sizing: the contributor image is ~2.7GiB unpacked and each task
     # spawns a real coding-CLI + a repo build/test, so requests are deliberately
