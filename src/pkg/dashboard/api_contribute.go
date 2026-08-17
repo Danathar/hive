@@ -1835,6 +1835,7 @@ code{background:var(--cc-bg);padding:2px 8px;border-radius:4px;font-size:.9rem}
 <label style="font-size:.9rem;color:#8b949e">Choose your CLI:</label>
 <select id="cli-select" style="background:#161b22;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:6px 12px;font-size:.9rem;cursor:pointer">
 <option value="claude" data-install="npm i -g @anthropic-ai/claude-code" data-host-install="npm i -g @anthropic-ai/claude-code" data-model-flag="--model" data-default-model="">Claude Code</option>
+<option value="codex" data-install="npm i -g @openai/codex" data-host-install="npm i -g @openai/codex\ncodex login --device-auth   # or export CODEX_API_KEY / OPENAI_API_KEY for API-key mode" data-model-flag="--model" data-default-model="" data-env="# Optional: Codex reasoning effort — the relay passes it as -c model_reasoning_effort.\n# export AGENT_REASONING_EFFORT=high">OpenAI Codex</option>
 <option value="copilot" data-install="" data-host-install="npm install -g @github/copilot # uses your existing gh auth" data-model-flag="--model" data-default-model="">GitHub Copilot</option>
 <option value="pi" data-install="" data-host-install="curl -fsSL https://pi.dev/install.sh | sh" data-model-flag="--model" data-default-model="">Pi</option>
 <option value="goose" data-install="" data-host-install="# Install Goose: https://github.com/block/goose/releases\n# Install Ollama: https://ollama.com/download\nollama pull llama3.2:3b\nexport GOOSE_PROVIDER=ollama GOOSE_MODEL=llama3.2:3b" data-model-flag="" data-default-model="">Goose</option>
@@ -2016,7 +2017,7 @@ setTimeout(function(){btn.textContent='Copy';btn.style.background='#238636'},200
 
 // ── #2548 Branded client entry points ──────────────────────────────────────
 // Per-client identity (inline SVG emblems, CSP-safe), first-class parity for
-// Claude / Copilot / Pi / Goose, a documented-only "Open in" deep-link, and a
+// Claude / Codex / Copilot / Pi / Goose, a documented-only "Open in" deep-link, and a
 // customizable copy-paste prompt. All additive: the source of truth stays
 // #cli-select, and everything degrades gracefully if this block never runs.
 //
@@ -2028,6 +2029,7 @@ setTimeout(function(){btn.textContent='Copy';btn.style.background='#238636'},200
 // labeled onboarding-not-contribution in the UI.
 var EMB={
 claude:'<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#d97757" d="M12 2 3.5 20h3.2l1.6-3.7h7.4L17.3 20h3.2L12 2Zm-2.4 11.2L12 7.6l2.4 5.6H9.6Z"/></svg>',
+codex:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4l6.93 4v8L12 20l-6.93-4V8z" fill="none" stroke="#10a37f" stroke-width="1.5" stroke-linejoin="round"/><path d="M10 10.5l2 1.5-2 1.5M13.5 15h3" stroke="#10a37f" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>',
 copilot:'<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12.5" r="8" fill="none" stroke="#e6edf3" stroke-width="1.6"/><circle cx="9" cy="12" r="1.3" fill="#e6edf3"/><circle cx="15" cy="12" r="1.3" fill="#e6edf3"/><path d="M12 4.5V2M8 5l-1-2M16 5l1-2" stroke="#e6edf3" stroke-width="1.4" stroke-linecap="round"/></svg>',
 pi:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h16" stroke="#7c93ff" stroke-width="2" stroke-linecap="round"/><path d="M9 8v10M15.5 8v7.5a2 2 0 0 0 2 2" stroke="#7c93ff" stroke-width="2" stroke-linecap="round"/></svg>',
 goose:'<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#3fb0ac" d="M6 14a6 6 0 0 1 6-6c1 0 1.6.9 1 1.7 2.5.4 4 2.4 4 5.1 0 .6-.5 1.2-1.2 1.2H8.5A2.5 2.5 0 0 1 6 13.5V14Z"/><circle cx="10.5" cy="10.8" r=".8" fill="#0d1117"/><path d="M13 9.7l2.4-1" stroke="#f0b429" stroke-width="1.4" stroke-linecap="round"/></svg>',
@@ -2046,6 +2048,7 @@ claude:{name:'Claude Code',tag:'Anthropic',peer:true,
     // Desktop with a link"). q= prefills the prompt for the user to review/send.
     href:function(p){return 'claude://claude.ai/new?q='+encodeURIComponent(p);},
     desc:'Opens Claude Desktop with a setup prompt prefilled.'}},
+codex:{name:'Codex',tag:'OpenAI',peer:true},
 copilot:{name:'GitHub Copilot',tag:'GitHub',peer:true},
 pi:{name:'Pi',tag:'pi.dev',peer:true},
 goose:{name:'Goose',tag:'Block (Ollama)',peer:true},
@@ -2069,7 +2072,7 @@ var promptTool2=document.getElementById('prompt-tool2');
 var promptEdited=false;   // once the user edits, don't clobber on same client
 var promptForClient='';   // which client the current prompt text was generated for
 function tileOrder(){
-  // Peers (Claude/Copilot/Pi/Goose/LiteLLM/OpenRouter) first, in select order, then
+  // Peers (Claude/Codex/Copilot/Pi/Goose/LiteLLM/OpenRouter) first, in select order, then
   // the rest — so these tools lead the grid rather than being afterthoughts. This
   // is an ORDERING signal only; peer status is no longer shown as a visible badge.
   var peers=[],rest=[];
