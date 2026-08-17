@@ -152,3 +152,60 @@ func TestGatewayDoesNotSetFrameOptionsOrHSTS(t *testing.T) {
 			"this guard should be updated instead of just deleted")
 	}
 }
+
+// TestGatewayAuthRateLimiting pins the ingress throttle for the public
+// authentication paths tracked by issue #3906. Keep this check path-specific:
+// placing limit_req on the whole /api/ location would throttle ordinary
+// dashboard reads and still would not document which credential-bearing paths
+// are protected.
+func TestGatewayAuthRateLimiting(t *testing.T) {
+	conf := readNginxConf(t)
+
+	zone := regexp.MustCompile(`(?m)^\s*limit_req_zone\s+\$binary_remote_addr\s+zone=auth_limit:10m\s+rate=5r/m;`)
+	if !zone.MatchString(conf) {
+		t.Fatal("nginx.conf must define the per-client auth_limit zone at 5 requests per minute")
+	}
+	deviceFlowZone := regexp.MustCompile(`(?m)^\s*limit_req_zone\s+\$binary_remote_addr\s+zone=device_flow_limit:10m\s+rate=15r/m;`)
+	if !deviceFlowZone.MatchString(conf) {
+		t.Fatal("nginx.conf must define a device-flow zone at 15 requests per minute")
+	}
+
+	if !regexp.MustCompile(`(?m)^\s*limit_req_status\s+429;`).MatchString(conf) {
+		t.Fatal("nginx.conf must return 429 when an auth request exceeds its rate limit")
+	}
+
+	for _, tc := range []struct {
+		path string
+		zone string
+	}{
+		{path: "/api/auth/token", zone: "auth_limit"},
+		{path: "/api/gh-user-auth/", zone: "device_flow_limit"},
+		{path: "/sso", zone: "auth_limit"},
+	} {
+		tc := tc
+		t.Run(tc.path, func(t *testing.T) {
+			// Capture the location's own block body ([^}]* -- these auth
+			// locations contain no nested braces) so both assertions are
+			// scoped INSIDE the block, not satisfied by a directive that
+			// happens to appear later in the file.
+			location := regexp.QuoteMeta(tc.path)
+			block := regexp.MustCompile(`(?ms)^\s*location\s+(?:=\s+)?` + location + `\s*\{([^}]*)\}`)
+			m := block.FindStringSubmatch(conf)
+			if m == nil {
+				t.Fatalf("nginx.conf is missing a dedicated location block for %q", tc.path)
+			}
+			body := m[1]
+			if !regexp.MustCompile(`(?m)^\s*limit_req\s+zone=` + regexp.QuoteMeta(tc.zone) + `\s+burst=10\s+nodelay;`).MatchString(body) {
+				t.Errorf("nginx.conf auth location %q is missing limit_req zone=%s burst=10 nodelay", tc.path, tc.zone)
+			}
+			// proxy_pass is NOT inherited into nested locations. Without its
+			// own proxy_pass the block terminates the request and nginx falls
+			// back to static-file serving: every auth path 404s and login is
+			// bricked while this structural test stays green. Pin the
+			// directive inside the block itself.
+			if !regexp.MustCompile(`(?m)^\s*proxy_pass\s+http://hive_api;`).MatchString(body) {
+				t.Errorf("nginx.conf auth location %q must carry its own proxy_pass (nested locations do not inherit it; omitting it 404s the auth path)", tc.path)
+			}
+		})
+	}
+}
