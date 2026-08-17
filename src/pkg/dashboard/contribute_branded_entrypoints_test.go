@@ -7,7 +7,7 @@ import (
 
 // #2548 — branded client entry points (onboarding, additive). These tests pin the
 // rendered /contribute page: per-client visual identity, first-class ordering for
-// Claude/Copilot/Pi/Goose/LiteLLM/OpenRouter (they lead the tile grid; the visible
+// Claude/Codex/Copilot/Pi/Goose/LiteLLM/OpenRouter (they lead the tile grid; the visible
 // "First-class" badge itself was removed per operator request — peer:true is now
 // an ORDERING signal only, not a rendered pill), a documented-only "Open in"
 // deep-link labeled as onboarding-not-contribution, and a full copy-pasteable
@@ -17,7 +17,7 @@ import (
 
 // TestBrandedEntryPoints_IdentityAndParity asserts the find-by-sight tile grid, the
 // per-client inline SVG emblems (CSP-safe, no external images), and first-class
-// ORDERING for Claude/Copilot/Pi/Goose/LiteLLM/OpenRouter are all present — and
+// ORDERING for Claude/Codex/Copilot/Pi/Goose/LiteLLM/OpenRouter are all present — and
 // that the visible "First-class" pill is gone (removed per operator request; the
 // tiles themselves — emblem + name + vendor subtitle — stay).
 func TestBrandedEntryPoints_IdentityAndParity(t *testing.T) {
@@ -46,19 +46,20 @@ func TestBrandedEntryPoints_IdentityAndParity(t *testing.T) {
 		t.Error("the now-unused .ct-parity badge class must be removed, not left dangling")
 	}
 
-	// Ordering: each of the SIX first-class clients must still be marked
+	// Ordering: each of the SEVEN first-class clients must still be marked
 	// peer:true in the CLIENTS table so it leads the grid (tileOrder() puts
 	// peers first) — this is an ordering signal only now, not a rendered badge.
 	for _, peer := range []string{
-		`claude:{name:'Claude Code'`, `copilot:{name:'GitHub Copilot'`, `pi:{name:'Pi'`,
-		`goose:{name:'Goose'`, `litellm:{name:'LiteLLM'`, `openrouter:{name:'OpenRouter'`,
+		`claude:{name:'Claude Code'`, `codex:{name:'Codex'`, `copilot:{name:'GitHub Copilot'`,
+		`pi:{name:'Pi'`, `goose:{name:'Goose'`, `litellm:{name:'LiteLLM'`,
+		`openrouter:{name:'OpenRouter'`,
 	} {
 		if !strings.Contains(body, peer) {
 			t.Errorf("missing first-class client entry %q", peer)
 		}
 	}
-	if strings.Count(body, "peer:true") < 6 {
-		t.Errorf("expected >=6 peer:true (Claude/Copilot/Pi/Goose/LiteLLM/OpenRouter lead the grid), got %d", strings.Count(body, "peer:true"))
+	if strings.Count(body, "peer:true") < 7 {
+		t.Errorf("expected >=7 peer:true (Claude/Codex/Copilot/Pi/Goose/LiteLLM/OpenRouter lead the grid), got %d", strings.Count(body, "peer:true"))
 	}
 
 	// Emblems must be inline SVG (CSP-safe) — no external <img> smuggled into a tile.
@@ -97,7 +98,7 @@ func TestBrandedEntryPoints_DeepLinkLabeledOnboarding(t *testing.T) {
 	}
 
 	// Honesty: no invented vendor deep-link schemes for tools that don't document one.
-	for _, forbidden := range []string{"goose://", "copilot://", "pi://"} {
+	for _, forbidden := range []string{"goose://", "copilot://", "pi://", "codex://"} {
 		if strings.Contains(body, forbidden) {
 			t.Errorf("invented vendor deep-link scheme present: %q", forbidden)
 		}
@@ -141,5 +142,45 @@ func TestBrandedEntryPoints_ExistingSelectorsIntact(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("existing onboarding control regressed/missing: %q", want)
 		}
+	}
+}
+
+// TestContributeCodexOnboardingSurface pins Codex as a first-class picker entry.
+// Every layer below the page already supported it — `just contribute-setup codex`
+// preflights the CLI + auth, the relay drives `codex exec` headlessly and passes
+// AGENT_REASONING_EFFORT as -c model_reasoning_effort, K8S_HEADLESS_BACKENDS
+// lists it, and Dockerfile.contributor pins @openai/codex — but the CLI select
+// and the tile grid omitted it, so contributors had no path to pick it.
+func TestContributeCodexOnboardingSurface(t *testing.T) {
+	body := renderContributePage(t)
+
+	for _, want := range []string{
+		// The CLI select option, with the vendor's own install command.
+		`<option value="codex"`,
+		`npm i -g @openai/codex`,
+		// Auth is Codex's device login or an API key — the same two modes the
+		// Justfile preflight accepts.
+		`codex login --device-auth`,
+		// --model is honored (codex is not in the relay's NO_MODEL_FLAG_BACKENDS).
+		`data-model-flag="--model" data-default-model="" data-env="# Optional: Codex reasoning effort`,
+		// Tile metadata + emblem so it renders in the grid like its peers.
+		`codex:{name:'Codex',tag:'OpenAI',peer:true}`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("codex onboarding surface missing %q", want)
+		}
+	}
+
+	// Codex must lead the grid next to Claude Code, not trail the non-peer
+	// backends: peer:true plus an earlier position in the select (tileOrder
+	// preserves select order within the peer group).
+	iClaude := strings.Index(body, `<option value="claude"`)
+	iCodex := strings.Index(body, `<option value="codex"`)
+	iOther := strings.Index(body, `<option value="other"`)
+	if iClaude < 0 || iCodex < 0 || iOther < 0 {
+		t.Fatalf("missing select options: claude=%d codex=%d other=%d", iClaude, iCodex, iOther)
+	}
+	if !(iClaude < iCodex && iCodex < iOther) {
+		t.Errorf("codex must sit next to Claude Code in the CLI select: claude=%d codex=%d other=%d", iClaude, iCodex, iOther)
 	}
 }
