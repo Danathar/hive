@@ -184,3 +184,48 @@ func TestContributeCodexOnboardingSurface(t *testing.T) {
 		t.Errorf("codex must sit next to Claude Code in the CLI select: claude=%d codex=%d other=%d", iClaude, iCodex, iOther)
 	}
 }
+
+// TestContributeAgyHostOnlySurface pins agy (Google's Antigravity CLI) as a
+// picker entry that is honest about its one real limit. agy already had a
+// Justfile preflight, a backends.conf perm flag and relay readiness/idle
+// patterns, so interactive HOST runs work — but the contributor image does not
+// ship the binary and agy's sign-in is an interactive Google OAuth flow with no
+// API-key mode, so no container or pod can inherit a session. The page
+// therefore offers it in host mode only and says why, rather than generating
+// containerized commands that cannot work.
+func TestContributeAgyHostOnlySurface(t *testing.T) {
+	body := renderContributePage(t)
+
+	for _, want := range []string{
+		// The CLI select option, with the vendor's install path.
+		`<option value="agy"`,
+		`brew install --cask antigravity-cli`,
+		// agy needs --effort whenever a model is set, or it ignores the model.
+		`AGENT_REASONING_EFFORT=low`,
+		// Tile metadata + emblem, tagged so the host-only constraint is visible
+		// before a contributor commits to it.
+		`agy:{name:'Antigravity',tag:'Google (host)'}`,
+		// Host-only forcing + the note that explains the mode flip.
+		`var HOST_ONLY_BACKENDS=['other','agy']`,
+		`id="hostonly-note"`,
+		`interactive Google OAuth flow`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("agy onboarding surface missing %q", want)
+		}
+	}
+
+	// The host-only fallback must still cover "other" — the entry that had this
+	// behavior before agy joined it — and must switch the visible selector, not
+	// just the local variable, or the generated commands and the UI disagree.
+	if !strings.Contains(body, `if(isHostOnly(cli)&&mode!=='host'){modeSel.value='host';mode='host';}`) {
+		t.Error("host-only backends must flip the mode selector itself, not only the local mode")
+	}
+
+	// agy must NOT be advertised for Kubernetes: a pod cannot complete its
+	// OAuth, so the k8s capability map stays without it (see
+	// TestContributeK8sHeadlessCapability for the full enumeration).
+	if strings.Contains(body, "K8S_HEADLESS_BACKENDS={claude:1,litellm:1,copilot:1,codex:1,watsonx:1,goose:1,agy:1") {
+		t.Error("agy must stay out of K8S_HEADLESS_BACKENDS — a pod cannot complete agy's sign-in")
+	}
+}

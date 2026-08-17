@@ -417,8 +417,10 @@ func TestContributeLandingHasWatsonxOption(t *testing.T) {
 // run-mode reasons about and pins whether it is headless-capable, so adding a
 // backend forces an explicit decision here rather than silently defaulting to
 // "no headless mode". goose is capable via its `goose run --no-session -t`
-// one-shot sub-command (#2828); bob/agy/pi drive an interactive TUI with no
-// known non-interactive entry point, so they must keep warning.
+// one-shot sub-command (#2828); bob/pi drive an interactive TUI with no known
+// non-interactive entry point, so they must keep warning. agy keeps warning
+// for a DIFFERENT reason — it has a print mode, but no way to sign in inside a
+// pod — which is why the reason string is pinned alongside the boolean.
 func TestContributeK8sHeadlessCapability(t *testing.T) {
 	setupContributeEnv(t)
 	s := NewServer(0, slog.Default())
@@ -433,6 +435,22 @@ func TestContributeK8sHeadlessCapability(t *testing.T) {
 	}
 	body := w.Body.String()
 
+	// Scan ONLY the capability map's own literal. A bare strings.Contains for
+	// "<backend>:1" over the whole page matches any other JS object that
+	// happens to use the same key (HOST_ONLY_BACKENDS did exactly that), which
+	// would silently turn this pin into a page-wide grep.
+	const mapKey = "K8S_HEADLESS_BACKENDS={"
+	i := strings.Index(body, mapKey)
+	if i < 0 {
+		t.Fatalf("K8S_HEADLESS_BACKENDS literal not found on the page")
+	}
+	rest := body[i+len(mapKey):]
+	j := strings.Index(rest, "}")
+	if j < 0 {
+		t.Fatalf("K8S_HEADLESS_BACKENDS literal is unterminated")
+	}
+	capabilityMap := rest[:j]
+
 	for _, tc := range []struct {
 		backend  string
 		headless bool
@@ -445,11 +463,16 @@ func TestContributeK8sHeadlessCapability(t *testing.T) {
 		{"watsonx", true, "OpenAI-compatible endpoint via the claude binary"},
 		{"goose", true, "goose run --no-session -t one-shot sub-command (#2828)"},
 		{"bob", false, "interactive TUI, no known one-shot entry point"},
-		{"agy", false, "interactive TUI, no known one-shot entry point"},
+		// agy DOES have a one-shot mode (`agy -p`, in the relay's own
+		// HEADLESS_BACKENDS since this change) but stays false HERE: this list
+		// gates the Kubernetes path, and agy signs in through an interactive
+		// Google OAuth flow with no API-key mode, so a pod can never
+		// authenticate. Capability and credential are separate questions.
+		{"agy", false, "headless-capable (agy -p) but cannot sign in inside a pod"},
 		{"pi", false, "interactive TUI, no known one-shot entry point"},
 	} {
 		// The capability map is emitted as a JS object literal keyed by backend.
-		present := strings.Contains(body, tc.backend+":1")
+		present := strings.Contains(capabilityMap, tc.backend+":1")
 		if present != tc.headless {
 			t.Errorf("K8S_HEADLESS_BACKENDS headless=%v for %q, want %v (%s)",
 				present, tc.backend, tc.headless, tc.why)

@@ -1845,6 +1845,7 @@ code{background:var(--cc-bg);padding:2px 8px;border-radius:4px;font-size:.9rem}
 <option value="llm-d" data-install="" data-host-install="npm i -g @anthropic-ai/claude-code" data-model-flag="--model" data-default-model="" data-env="# llm-d — self-hosted OpenAI-compatible endpoint\nexport HIVE_LITELLM_ENDPOINT=http://your-llm-d-host:8000/v1\nexport HIVE_LITELLM_API_KEY=sk-your-llm-d-key  # only if your endpoint needs one">llm-d (self-hosted)</option>
 <option value="bob" data-install="" data-host-install="curl -fsSL https://bob.ibm.com/download/bobshell.sh | bash" data-model-flag="" data-default-model="" data-env="# Bob (IBM bobshell) — get a key at https://bob.ibm.com (Scope: Inference).\n# Exported locally, never sent to the hive.\nexport BOBSHELL_API_KEY=your-bob-api-key">Bob</option>
 <option value="watsonx" data-install="" data-host-install="npm i -g @anthropic-ai/claude-code" data-model-flag="--model" data-default-model="" data-env="# IBM watsonx.ai — OpenAI-compatible gateway, bring your own project + key.\n# watsonx auth is an IAM-minted JWT, not a raw bearer key — your local\n# Claude-Code setup or a small local proxy handles the token exchange.\n# Exported locally, never sent to the hive.\nexport HIVE_LITELLM_ENDPOINT=https://us-south.ml.cloud.ibm.com/ml/gateway/v1\nexport HIVE_LITELLM_API_KEY=your-ibm-cloud-api-key\nexport WATSONX_PROJECT_ID=your-watsonx-project-id">watsonx.ai (IBM Granite + your key)</option>
+<option value="agy" data-install="" data-host-install="# Antigravity CLI (Google): https://antigravity.google/product/antigravity-cli\nbrew install --cask antigravity-cli\nagy   # sign in once with your Google account, interactively, then exit" data-model-flag="--model" data-default-model="" data-env="# Optional: agy effort — REQUIRED alongside a model, or agy ignores the model.\n# export AGENT_REASONING_EFFORT=low   # low|medium|high">Antigravity (agy)</option>
 <option value="other" data-install="" data-host-install="# Install your CLI tool" data-model-flag="" data-default-model="">Other (host only)</option>
 </select>
 </span>
@@ -1877,6 +1878,13 @@ code{background:var(--cc-bg);padding:2px 8px;border-radius:4px;font-size:.9rem}
 <div id="k8s-note" style="display:none;margin-bottom:12px;background:#161b22;border:1px solid #30363d;border-left:3px solid #d29922;border-radius:6px;padding:12px 14px;font-size:.85rem;color:#c9d1d9;line-height:1.5">
 <strong style="color:#e6edf3">Kubernetes is the advanced path.</strong> It needs a cluster, a kubeconfig and RBAC &mdash; not a first-timer&rsquo;s happy path. The workload runs the relay <strong>headless</strong> (no TTY), so only headless-capable backends work in a cluster: <strong>Claude Code, LiteLLM, Copilot, Codex</strong>. Other backends will refuse work at pod startup.<br>
 <span style="color:#8b949e">Credential note (interim): the generated Secret stores a long-lived personal <code>GH_TOKEN</code> &mdash; base64, not encrypted, and readable by anyone with <code>get secrets</code> in that namespace or by cluster-scoped operators/backups. That is materially more exposed than a <code>0600</code> file on your laptop. Revoke any time with <code>gh auth logout</code>. Gating the credential on explicit task acceptance is tracked in <a href="https://github.com/kubestellar/hive/issues/2537" target="_blank" rel="noopener" style="color:#58a6ff">#2537</a> and is not solved by this path.</span>
+</div>
+<!-- Host-only note. Shown for backends the containerized/Kubernetes paths cannot
+     run, so the mode flip to Host is explained rather than mysterious: "other"
+     has no image, and agy's Google sign-in is interactive with no API-key mode,
+     so no unattended container can hold a session. -->
+<div id="hostonly-note" style="display:none;margin-bottom:12px;background:#161b22;border:1px solid #30363d;border-left:3px solid #d29922;border-radius:6px;padding:12px 14px;font-size:.85rem;color:#c9d1d9;line-height:1.5">
+<strong style="color:#e6edf3">This backend runs on your host, not in a container.</strong> The mode selector has been switched to <strong>Host</strong> for you. <strong>Antigravity (agy)</strong> signs in through an interactive Google OAuth flow &mdash; a browser URL plus a pasted code, with no API-key mode &mdash; so a container or pod has no session to inherit, and the contributor image does not ship the binary. Run <code>agy</code> once to sign in, then start the relay on the host. Its print mode (<code>agy -p</code>) is verified, so headless host runs work; Kubernetes does not.
 </div>
 <div id="multi-hub-note" style="margin-bottom:12px;background:#161b22;border:1px solid #30363d;border-left:3px solid #58a6ff;border-radius:6px;padding:12px 14px;font-size:.85rem;color:#c9d1d9;line-height:1.5">
 <strong style="color:#e6edf3">Contribute to multiple hives:</strong> after registering with each hive, set <code>HIVE_HUB</code> to comma-separated WebSocket URLs and <code>HIVE_REGISTRATION_TOKEN</code> to the matching comma-separated tokens in the same order. One relay shares one CLI/tmux session, works on one task at a time, keeps each hub connected with its own heartbeat, and rotates only when the active hub says no task is available. Added by <a href="https://github.com/hanthor" target="_blank" rel="noopener" style="color:#58a6ff">@hanthor</a> in <a href="https://github.com/kubestellar/hive/pull/2846" target="_blank" rel="noopener" style="color:#58a6ff">#2846</a>.
@@ -1944,6 +1952,18 @@ var k8sTpl='PREREQ\ngit clone -b {{HIVE_BRANCH}} https://github.com/kubestellar/
 // HEADLESS_BACKENDS in bin/contributor-relay.sh and the Justfile. A pod has no
 // TTY, so only these run in a cluster; anything else refuses work at startup.
 var K8S_HEADLESS_BACKENDS={claude:1,litellm:1,copilot:1,codex:1,watsonx:1,goose:1};
+// Backends that can only run on the contributor's own host. "other" has no
+// image by definition. agy is host-only for a different reason: it signs in
+// through an interactive Google OAuth flow (browser URL + pasted code) with no
+// API-key mode, so neither a container nor a pod can inherit a contributor's
+// session — verified against agy 1.1.13, where a clean container demands a
+// fresh browser login no matter what is mounted, and the contributor image does
+// not ship the binary either. Selecting one flips Mode to Host rather than
+// generating commands that cannot work. NOTE agy IS headless-capable on a host
+// (agy -p, see HEADLESS_BACKENDS in bin/contributor-relay.sh); it is the
+// credential, not the capability, that keeps it out of K8S_HEADLESS_BACKENDS.
+var HOST_ONLY_BACKENDS=['other','agy'];
+function isHostOnly(c){return HOST_ONLY_BACKENDS.indexOf(c)>=0;}
 var modelRow=document.getElementById('model-row');
 var modelInput=document.getElementById('model-input');
 function updateCmds(){update();}
@@ -1955,13 +1975,11 @@ var opt=sel.options[sel.selectedIndex];
 var mode=modeSel.value;
 var modelFlag=opt.getAttribute('data-model-flag')||'';
 var model=(modelInput.value||'').trim();
-if(cli==='other')mode='host';
-if(mode==='containerized'&&cli==='other'){modeSel.value='host';mode='host';}
-// #2549 Kubernetes mode. "other" has no image, so it can't run in a cluster;
-// fall back to host. Show the k8s note only in this mode.
-if(mode==='kubernetes'&&cli==='other'){modeSel.value='host';mode='host';}
+if(isHostOnly(cli)&&mode!=='host'){modeSel.value='host';mode='host';}
 var k8sNote=document.getElementById('k8s-note');
 if(k8sNote)k8sNote.style.display=(mode==='kubernetes')?'block':'none';
+var hostOnlyNote=document.getElementById('hostonly-note');
+if(hostOnlyNote)hostOnlyNote.style.display=isHostOnly(cli)?'block':'none';
 modelRow.style.display=(modelFlag||cli==='goose')?'flex':'none';
 var modelLine='';
 if(model){
@@ -2039,6 +2057,7 @@ vllm:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5l4 14 3-9 3 9 4-1
 'llm-d':'<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="2" fill="none" stroke="#4d9375" stroke-width="1.5"/><path d="M8 9h4a3 3 0 0 1 0 6H8V9Z" fill="none" stroke="#4d9375" stroke-width="1.5" stroke-linejoin="round"/></svg>',
 bob:'<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="4" width="14" height="16" rx="2" fill="none" stroke="#1f70c1" stroke-width="1.5"/><path d="M9 8h3.5a2 2 0 0 1 0 4H9V8ZM9 12h4a2 2 0 0 1 0 4H9v-4Z" fill="none" stroke="#1f70c1" stroke-width="1.3" stroke-linejoin="round"/></svg>',
 watsonx:'<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8" fill="none" stroke="#1f70c1" stroke-width="1.5"/><path d="M12 7v10M8.5 9.5l7 5M15.5 9.5l-7 5" stroke="#1f70c1" stroke-width="1.4" stroke-linecap="round"/></svg>',
+agy:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4.5 19 19H5z" fill="none" stroke="#a78bfa" stroke-width="1.6" stroke-linejoin="round"/><path d="M12 20.5v-5" stroke="#a78bfa" stroke-width="1.5" stroke-linecap="round"/><circle cx="12" cy="10.5" r="1.4" fill="#a78bfa"/></svg>',
 other:'<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="6" width="16" height="12" rx="2" fill="none" stroke="#8b949e" stroke-width="1.5"/><path d="M8 12h.01M12 12h.01M16 12h.01" stroke="#8b949e" stroke-width="2.2" stroke-linecap="round"/></svg>'
 };
 var CLIENTS={
@@ -2058,6 +2077,7 @@ vllm:{name:'vLLM',tag:'self-hosted'},
 'llm-d':{name:'llm-d',tag:'self-hosted'},
 bob:{name:'Bob',tag:'IBM'},
 watsonx:{name:'watsonx.ai',tag:'IBM'},
+agy:{name:'Antigravity',tag:'Google (host)'},
 other:{name:'Other',tag:'host only'}
 };
 var tilesEl=document.getElementById('client-tiles');
