@@ -3574,7 +3574,7 @@ func (s *Server) handleAgentPrompt(w http.ResponseWriter, r *http.Request) {
 		template = s.loadPromptTemplate(name)
 	}
 
-	const repoBaseURL = "https://github.com/kubestellar/hive/blob/v2/"
+	const repoBaseURL = "https://github.com/kubestellar/hive/blob/HEAD/"
 	sourceFiles := []map[string]string{}
 
 	templateName := ""
