@@ -1,0 +1,12 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Optional hardening overlay — backup pods/exec namespace restriction.
+#
+# Requires Kyverno >= 1.11. Apply in ADDITION to the base k8s manifests.
+# See kyverno-backup-exec-restriction.yaml for full background and
+# instructions (issue #4062).
+
+resources:
+  - ../../../k8s
+  - kyverno-backup-exec-restriction.yaml
