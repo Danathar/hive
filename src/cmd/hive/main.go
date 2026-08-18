@@ -78,6 +78,7 @@ import (
 	"github.com/kubestellar/hive/pkg/snapshot"
 	"github.com/kubestellar/hive/pkg/timeline"
 	"github.com/kubestellar/hive/pkg/tokens"
+	"github.com/kubestellar/hive/pkg/toolapprove"
 	"github.com/kubestellar/hive/pkg/tracing"
 	"github.com/kubestellar/hive/pkg/trajectory"
 	"github.com/kubestellar/hive/pkg/watsonx"
@@ -1399,6 +1400,15 @@ func main() {
 	// Gated on a real client + usable App — with no App there is no bot to author
 	// as, and requests simply accumulate rather than opening under a wrong
 	// identity. ghClient uses the App installation token (see ghAuth wiring).
+
+	// Approval desk (RFC #4000): the single tool-approval decision point plus
+	// its durable operator-lane inbox. Both are nil unless
+	// `tool_approval.enabled` is set — the default — so this costs nothing and
+	// changes nothing on a hive that has not opted in. Built here, before the
+	// auto-merge sweep is started below, because the sweep is the one producer
+	// wired in this slice. Also handed to the dashboard for the Approvals panel.
+	approvalDesk, approvalInbox := buildApprovalDesk(cfg, logger)
+
 	if ghClient != nil && cfg.GitHub.HasUsableApp() {
 		// Attribution resolver: effective backend/model from the manager
 		// (runtime overrides included), falling back to the configured values
@@ -1496,6 +1506,13 @@ func main() {
 		// never start this loop regardless of the flag above — see
 		// AutoMergeConfig.SelfAuthoredAutoMergeAllowed. StartSelfAuthoredAutoMergeSweep
 		// itself no-ops (with a one-time INFO log) when acmmAllowed is false.
+		// Approval desk (RFC #4000). Installed BEFORE the sweep starts so the
+		// first tick already consults it. A nil desk (the default —
+		// `tool_approval.enabled` is false) installs no hook, leaving the
+		// sweep's behavior byte-identical to the pre-desk build.
+		if approvalDesk != nil && approvalInbox != nil {
+			ghClient.SetApprovalDesk(newSelfMergeDeskHook(approvalDesk, approvalInbox, cfg, logger))
+		}
 		ghClient.StartSelfAuthoredAutoMergeSweep(ctx, cfg.AutoMerge.MaxMerges, cfg.AutoMerge.SelfAuthoredAutoMergeAllowed(cfg.ACMMLevel), cfg.ACMMLevel)
 	}
 
@@ -2207,9 +2224,13 @@ func main() {
 		BeadSynthesizer:       beadSynth,
 		BeadStores:            beadStores,
 		BeadStoreLoadFailures: beadStoreLoadFailures,
-		Logger:                logger,
-		Ctx:                   ctx,
-		RefreshFunc:           refreshDashboard,
+		// RFC #4000 approval desk. Nil unless `tool_approval.enabled`, in which
+		// case the Approvals panel renders as "not enabled".
+		ApprovalDesk:  approvalDesk,
+		ApprovalInbox: approvalInbox,
+		Logger:        logger,
+		Ctx:           ctx,
+		RefreshFunc:   refreshDashboard,
 		// #3768: give the contribute queue read access to the duplicate-PR
 		// claim ledger, so an issue any open PR (hive-authored or a human
 		// contributor's) already claims to fix is never offered to another
@@ -2648,6 +2669,11 @@ func main() {
 			AgentMgr: agentMgr,
 			Timeline: dashSrv.LifecycleTimeline(),
 			Audit:    dashSrv.AgentAuditSink(),
+			// #4000 ↔ #4001 seam: an `enqueue-approval` hook lands in the same
+			// durable operator inbox the desk uses. nil when the desk is off,
+			// which keeps the dispatcher's "no approval queue wired" error
+			// honest rather than failing on every firing.
+			Approvals: newHookApprovalAdapter(approvalInbox, toolapprove.ACMMLevelOf(cfg)),
 		}, logger)
 
 		// Re-apply live agent definitions (definition_source) on reload so an
@@ -2762,6 +2788,8 @@ func main() {
 		AgentMgr: agentMgr,
 		Timeline: dashSrv.LifecycleTimeline(),
 		Audit:    dashSrv.AgentAuditSink(),
+		// #4000 ↔ #4001 seam: see the reload site above.
+		Approvals: newHookApprovalAdapter(approvalInbox, toolapprove.ACMMLevelOf(cfg)),
 	}, logger)
 
 	// Emit the governor_mode_change transition post-commit. Installed once:
