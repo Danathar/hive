@@ -1180,8 +1180,10 @@ function detectNoWorkVerdict(lines) {
   if (!Array.isArray(lines) || lines.length === 0) return null;
   // Anchored at line start: the task PROMPT quotes the marker mid-sentence
   // ("...the exact form 'HIVE_VERDICT: ...'"), and an anchored match keeps
-  // that instruction echo from reading as the agent's own verdict.
-  const VERDICT_RE = /^\s*HIVE_VERDICT:\s*no_work_needed\b[\s:—–-]*(.*)$/i;
+  // that instruction echo from reading as the agent's own verdict. Codex
+  // renders its completed assistant messages with a leading bullet, which is
+  // presentation chrome rather than part of the verdict.
+  const VERDICT_RE = /^\s*(?:•\s*)?HIVE_VERDICT:\s*no_work_needed\b[\s:—–-]*(.*)$/i;
   // Scan newest-first so the agent's final conclusion wins over anything it
   // merely quoted or considered earlier in the transcript.
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -1318,10 +1320,17 @@ function classifyTmuxPane(text) {
     hasCompletionMarker = true;
     isWorking = bobRunning && BOB_SPINNER.test(text);
   } else if (BACKEND === 'codex') {
+    // Codex retains prior tool rows in its long-lived pane.  Scope transient
+    // activity words to the tail so an old "Running" row cannot pin a
+    // completed turn in WORKING forever.
+    const codexTail = text.split('\n').slice(-15).join('\n');
     // Same marker mismatch as getCLIState(): '›' (U+203A), not '>'.
     hasIdlePrompt = /codex>|›|>\s*$/.test(text);
-    hasCompletionMarker = /completed|done|finished/i.test(text);
-    isWorking = /running|executing|thinking/i.test(text);
+    hasCompletionMarker = /completed|done|finished/i.test(text) ||
+      detectNoWorkVerdict(text.split('\n')) !== null;
+    // Codex also signals an in-flight turn through its status row ("Working",
+    // "esc to interrupt") without ever printing a tool verb.
+    isWorking = /running|executing|thinking|\bworking\b|esc to interrupt/i.test(codexTail);
   } else if (BACKEND === 'pi') {
     hasIdlePrompt = /pi v\d|0\.0%|auto\)|\d+\.\d+%/.test(text);
     hasCompletionMarker = /completed|done|finished|tokens\)|\d+\.\d+%/i.test(text);
@@ -1343,7 +1352,12 @@ function classifyTmuxPane(text) {
     // busy agent as idle. The stall backstop in progressTick() covers whatever
     // this still misses.
     const agyTail = text.split('\n').slice(-15).join('\n');
-    hasIdlePrompt = /\? for shortcuts/.test(text);
+    // agy formerly ended idle turns with "? for shortcuts". Current Gemini
+    // builds render a bare input line followed by the model footer instead.
+    // Keep the bare ">" constrained to that footer so a Markdown quote in
+    // an in-flight response cannot be mistaken for an idle prompt.
+    hasIdlePrompt = /\? for shortcuts/.test(text) ||
+      /(?:^|\n)>\s*\n\s*\n\s*Gemini\b[^\n]*\s*$/m.test(agyTail);
     hasCompletionMarker = true;
     isWorking = /Running|Searching|Reading|Writing|Editing/i.test(agyTail);
   } else {
@@ -1434,12 +1448,35 @@ function relaunchCLI() {
 // test suite, a slow clone) for many minutes without drawing anything new.
 const PANE_STALL_TIMEOUT_MS = Number(process.env.HIVE_PANE_STALL_TIMEOUT_MS) || 20 * 60 * 1000;
 
+// Observed live (kubestellar/hive): a task crossed PANE_STALL_TIMEOUT_MS while
+// agy sat blocked on a slow `gh pr create` network round trip. The relay
+// declared it a failure and moved on to the next task, and the pane then, only
+// seconds to minutes later, printed the CLI's real completion summary — with a
+// genuine PR link. The pane fingerprint at the instant of the stall check
+// cannot contain output that has not streamed in yet, so checking it harder at
+// that single instant cannot fix this; giving the CLI a FEW more ticks to
+// reach a real PANE_STATE_IDLE_COMPLETE (which already runs full PR/no-work
+// detection, see detectPRURL/detectNoWorkVerdict below) can. So the stall
+// verdict must be CONFIRMED on this many consecutive ticks — each
+// PROGRESS_REPORT_INTERVAL_MS apart, and each one re-running
+// checkTmuxPaneState() first — before the relay gives up. A tick where the
+// pane has since gone idle-complete, or produced any new output, exits this
+// path before the confirm count is ever consulted.
+const PANE_STALL_CONFIRM_TICKS = Math.max(1, Number(process.env.HIVE_PANE_STALL_CONFIRM_TICKS) || 2);
+
 let lastPaneFingerprint = null;
 let lastPaneChangeAt = 0;
+// How many CONSECUTIVE ticks paneStalled() has now returned true. Distinct
+// from the fingerprint clock above: that clock says "how long has it been
+// unchanged", this says "how many chances has the CLI had to prove otherwise
+// since we first noticed". Reset by resetPaneStallClock() and by any tick
+// where paneStalled() is false (new output resets the whole stall story).
+let stallConfirmCount = 0;
 
 function resetPaneStallClock() {
   lastPaneFingerprint = null;
   lastPaneChangeAt = Date.now();
+  stallConfirmCount = 0;
   // A new task also starts with a clean CLI-liveness count: shell readings from
   // the previous task say nothing about this one.
   consecutiveShellReadings = 0;
@@ -1461,6 +1498,21 @@ function paneStalled(tmuxLines) {
   if (!fingerprint) return false;
   if (!lastPaneChangeAt) { lastPaneChangeAt = now; return false; }
   return now - lastPaneChangeAt >= PANE_STALL_TIMEOUT_MS;
+}
+
+// paneStallConfirmed wraps paneStalled() with the multi-tick confirmation
+// described above it. Any tick where paneStalled() is false (new output
+// appeared) resets the count — the CLI gets full credit for proving it is not
+// stuck, not just a one-shot escape. Kept separate from paneStalled() itself
+// so tests of the underlying timeout signal are unaffected by the confirm
+// gate, and vice versa.
+function paneStallConfirmed(tmuxLines) {
+  if (!paneStalled(tmuxLines)) {
+    stallConfirmCount = 0;
+    return false;
+  }
+  stallConfirmCount++;
+  return stallConfirmCount >= PANE_STALL_CONFIRM_TICKS;
 }
 
 function flushPendingTask() {
@@ -1703,12 +1755,29 @@ function progressTick() {
   } else {
     // Stall backstop: a pane frozen this long is not evidence of work, and
     // continuing to report "working" would renew the hub's lease forever.
-    if (paneStalled(tmuxLines)) {
+    // Confirmed over PANE_STALL_CONFIRM_TICKS ticks rather than acted on
+    // immediately — see the comment above PANE_STALL_CONFIRM_TICKS for why a
+    // single instant cannot distinguish "stuck" from "about to finish".
+    if (paneStallConfirmed(tmuxLines)) {
+      // The CLI may still be mid-turn on the task we are about to give up on
+      // (observed live: a slow `gh pr create` returned, with a real PR link,
+      // seconds after the stall verdict). Relaunch it so the NEXT task starts
+      // on a demonstrably fresh CLI, rather than risking its prompt landing on
+      // top of whatever the abandoned turn still produces — the same reason
+      // the CLI-died branch above relaunches before failing the task.
+      try {
+        console.log(`Relaunching ${BACKEND} after a confirmed pane stall: ${relaunchCLI()}`);
+      } catch (e) {
+        console.error('Failed to relaunch after a confirmed pane stall:', e.message);
+      }
       failCurrentTask(
-        `no pane activity for ${Math.round(PANE_STALL_TIMEOUT_MS / 60000)} minutes — the agent CLI is not visibly working`,
+        `no pane activity for ${Math.round(PANE_STALL_TIMEOUT_MS / 60000)}+ minutes, confirmed over ${PANE_STALL_CONFIRM_TICKS} checks — the agent CLI is not visibly working`,
         { kind: 'environment' }
       );
       return;
+    }
+    if (stallConfirmCount > 0) {
+      console.warn(`Pane unchanged for ${Math.round(PANE_STALL_TIMEOUT_MS / 60000)}+ minutes — confirming before giving up on ${currentTask.task_id} (${stallConfirmCount}/${PANE_STALL_CONFIRM_TICKS})`);
     }
     send({ type: 'task_progress', seq: nextSeq(), task_id: currentTask.task_id, task_gen: currentTask.task_gen, status: 'working', tmux_output: tmuxLines });
   }
@@ -2029,7 +2098,10 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     // Run one progress tick with the grace period already elapsed.
     __crashTick: () => { taskAssignedAt = Date.now() - TASK_GRACE_PERIOD_MS - 1; progressTick(); },
     paneStalled,
+    paneStallConfirmed,
     resetPaneStallClock,
+    PANE_STALL_CONFIRM_TICKS,
+    getStallConfirmCount: () => stallConfirmCount,
     launchCommandWithCwd,
     cliProcessLooksGone,
     paneForegroundCommand,
