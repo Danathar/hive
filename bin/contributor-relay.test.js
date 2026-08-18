@@ -1443,6 +1443,18 @@ const CODEX_UPDATE_PANE = [
   '  Press enter to continue',
 ].join('\n');
 
+const CODEX_COMPLETED_NO_WORK_PANE = [
+  '• Running GH_TOKEN=... gh issue view 4065 --repo kubestellar/hive',
+  '',
+  // Codex may leave many old tool rows above the completed turn.
+  ...Array.from({ length: 20 }, (_, i) => `  checked upstream evidence ${i}`),
+  '',
+  'HIVE_VERDICT: no_work_needed — upstream PR #4066 already implements issue #4065.',
+  '─ Worked for 1m 59s ─',
+  '',
+  '› ',
+].join('\n');
+
 test('a ready codex pane is classified ready (regression: > vs \u203a, and "OpenAI Codex" not "Codex CLI")', () => {
   const relay = loadRelay({ backend: 'codex', cliStates: [CODEX_READY_PANE] });
   try {
@@ -1468,6 +1480,30 @@ test('codex numbered startup menus get explicit safe selections', () => {
     assert.strictEqual(relay.blockingPromptKey(CODEX_TRUST_PANE), '1');
     assert.strictEqual(relay.blockingPromptKey(CODEX_UPDATE_PANE), '3');
     assert.strictEqual(relay.blockingPromptKey('Do you trust this folder? (y/n)'), null);
+  } finally { teardown(relay); }
+});
+
+test('codex no-work verdict is COMPLETE despite stale activity in scrollback', () => {
+  const relay = loadRelay({ backend: 'codex' });
+  try {
+    assert.strictEqual(
+      relay.classifyTmuxPane(CODEX_COMPLETED_NO_WORK_PANE), relay.PANE_STATE_IDLE_COMPLETE,
+      'an old Codex Running row must not keep a completed no-work turn in WORKING');
+  } finally { teardown(relay); }
+});
+
+test('codex still reads as WORKING while activity is in the tail', () => {
+  const relay = loadRelay({ backend: 'codex' });
+  try {
+    const busy = [
+      'HIVE_VERDICT: no_work_needed — an older, finished turn',
+      '',
+      '› ',
+      '• Running gh issue view 4066 --repo kubestellar/hive',
+    ].join('\n');
+    assert.strictEqual(
+      relay.classifyTmuxPane(busy), relay.PANE_STATE_WORKING,
+      'recent Codex activity must still take precedence over an older verdict');
   } finally { teardown(relay); }
 });
 

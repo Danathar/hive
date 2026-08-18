@@ -1318,10 +1318,15 @@ function classifyTmuxPane(text) {
     hasCompletionMarker = true;
     isWorking = bobRunning && BOB_SPINNER.test(text);
   } else if (BACKEND === 'codex') {
+    // Codex retains prior tool rows in its long-lived pane.  Scope transient
+    // activity words to the tail so an old "Running" row cannot pin a
+    // completed turn in WORKING forever.
+    const codexTail = text.split('\n').slice(-15).join('\n');
     // Same marker mismatch as getCLIState(): '›' (U+203A), not '>'.
     hasIdlePrompt = /codex>|›|>\s*$/.test(text);
-    hasCompletionMarker = /completed|done|finished/i.test(text);
-    isWorking = /running|executing|thinking/i.test(text);
+    hasCompletionMarker = /completed|done|finished/i.test(text) ||
+      detectNoWorkVerdict(text.split('\n')) !== null;
+    isWorking = /running|executing|thinking/i.test(codexTail);
   } else if (BACKEND === 'pi') {
     hasIdlePrompt = /pi v\d|0\.0%|auto\)|\d+\.\d+%/.test(text);
     hasCompletionMarker = /completed|done|finished|tokens\)|\d+\.\d+%/i.test(text);
