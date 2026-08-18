@@ -1507,6 +1507,41 @@ test('codex still reads as WORKING while activity is in the tail', () => {
   } finally { teardown(relay); }
 });
 
+test('a pane with long diff in tail (no activity verbs) but completion_marker=true stays WORKING', () => {
+  // Regression for the tail-scope fix: narrowing the activity scan to the tail
+  // must not flip a mid-turn pane to COMPLETE just because the scrollback holds
+  // a completion word. Work is still ongoing here — codex is streaming a diff,
+  // so the tail carries neither an activity verb nor the '›' idle prompt.
+  const relay = loadRelay({ backend: 'codex' });
+  try {
+    const midTurn = [
+      '• Running git diff --stat',
+      '  done reading upstream evidence',
+      '',
+      ...Array.from({ length: 20 }, (_, i) => `+  const line${i} = compute(${i});`),
+    ].join('\n');
+    assert.strictEqual(
+      relay.classifyTmuxPane(midTurn), relay.PANE_STATE_WORKING,
+      'a mid-turn codex pane must not complete just because "done" sits in the scrollback');
+  } finally { teardown(relay); }
+});
+
+test('codex status indicators ("Working", "esc to interrupt") count as in-flight', () => {
+  const relay = loadRelay({ backend: 'codex' });
+  try {
+    for (const status of ['• Working (12s • esc to interrupt)', '  esc to interrupt']) {
+      const pane = [
+        'HIVE_VERDICT: no_work_needed — an older, finished turn',
+        '› ',
+        status,
+      ].join('\n');
+      assert.strictEqual(
+        relay.classifyTmuxPane(pane), relay.PANE_STATE_WORKING,
+        `codex status row ${JSON.stringify(status)} must read as WORKING`);
+    }
+  } finally { teardown(relay); }
+});
+
 // ---------------------------------------------------------------------------
 // Unresponsive-backend recovery: blocking modal prompts must be classified and
 // dismissed with the RIGHT key, and a CLI that never reaches its prompt must

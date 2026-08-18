@@ -1326,7 +1326,9 @@ function classifyTmuxPane(text) {
     hasIdlePrompt = /codex>|›|>\s*$/.test(text);
     hasCompletionMarker = /completed|done|finished/i.test(text) ||
       detectNoWorkVerdict(text.split('\n')) !== null;
-    isWorking = /running|executing|thinking/i.test(codexTail);
+    // Codex also signals an in-flight turn through its status row ("Working",
+    // "esc to interrupt") without ever printing a tool verb.
+    isWorking = /running|executing|thinking|\bworking\b|esc to interrupt/i.test(codexTail);
   } else if (BACKEND === 'pi') {
     hasIdlePrompt = /pi v\d|0\.0%|auto\)|\d+\.\d+%/.test(text);
     hasCompletionMarker = /completed|done|finished|tokens\)|\d+\.\d+%/i.test(text);
