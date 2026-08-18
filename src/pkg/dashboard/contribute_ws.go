@@ -323,6 +323,7 @@ type ActivityEntry struct {
 	Role      string `json:"role,omitempty"`
 	CLI       string `json:"cli,omitempty"`
 	Model     string `json:"model,omitempty"`
+	Effort    string `json:"effort,omitempty"`
 	Task      string `json:"task,omitempty"`
 }
 
@@ -760,7 +761,7 @@ func (h *ContributeWSHub) saveActivity() {
 
 const activityDebounceSecs = 60
 
-func (h *ContributeWSHub) addActivity(username, action, role, cli, model, task string) {
+func (h *ContributeWSHub) addActivity(username, action, role, cli, model, effort, task string) {
 	h.activityMu.Lock()
 	if len(h.activity) > 0 && (action == "joined" || action == "left") {
 		last := h.activity[len(h.activity)-1]
@@ -778,6 +779,7 @@ func (h *ContributeWSHub) addActivity(username, action, role, cli, model, task s
 		Role:      role,
 		CLI:       cli,
 		Model:     model,
+		Effort:    effort,
 		Task:      task,
 	}
 	h.activity = append(h.activity, entry)
@@ -1675,7 +1677,7 @@ func (h *ContributeWSHub) bookAndRevokeReleased(targets []releaseTarget, reason,
 		)
 		// #2568: record the operator's reason in the activity log so the release is
 		// auditable (the reason rides in the Task field alongside the task id).
-		h.addActivity(username, activityVerb+": "+reason, tgt.conn.role, tgt.conn.cliBackend, tgt.conn.model, tgt.task.TaskID)
+		h.addActivity(username, activityVerb+": "+reason, tgt.conn.role, tgt.conn.cliBackend, tgt.conn.model, tgt.conn.reasoningEffort, tgt.task.TaskID)
 		// Push the EXISTING task_revoke message so the relay stops cleanly and
 		// re-readies. Best-effort: if the socket is already gone the disconnect path
 		// has (or will) release it anyway; the cooldown above is already booked. The
@@ -1844,7 +1846,7 @@ func (h *ContributeWSHub) RequeueContributorTask(contributorID, reason string) (
 			username = tgt.conn.profile.GitHubUsername
 		}
 		taskDesc := fmt.Sprintf("%s %s#%d: %s", msg.Kind, msg.Repo, msg.Number, msg.Title)
-		h.addActivity(username, "reassigned by yank", tgt.conn.role, tgt.conn.cliBackend, tgt.conn.model, taskDesc)
+		h.addActivity(username, "reassigned by yank", tgt.conn.role, tgt.conn.cliBackend, tgt.conn.model, tgt.conn.reasoningEffort, taskDesc)
 		h.logger.Info("[contribute-ws] clanker reassigned after yank",
 			"username", username, "task", msg.TaskID, "repo", msg.Repo, "number", msg.Number)
 		if !h.requireExplicitAccept() {
@@ -2492,7 +2494,7 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 			delete(h.connections, connID)
 			h.mu.Unlock()
 			h.logger.Info("[contribute-ws] disconnected", "username", contributor.profile.GitHubUsername)
-			h.addActivity(contributor.profile.GitHubUsername, "left", contributor.role, contributor.cliBackend, contributor.model, "")
+			h.addActivity(contributor.profile.GitHubUsername, "left", contributor.role, contributor.cliBackend, contributor.model, contributor.reasoningEffort, "")
 		}
 		conn.Close()
 	}()
@@ -2700,7 +2702,7 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 				"cli", msg.CLIBackend,
 				"role", requestedRole,
 			)
-			h.addActivity(profile.GitHubUsername, "joined", requestedRole, msg.CLIBackend, msg.Model, "")
+			h.addActivity(profile.GitHubUsername, "joined", requestedRole, msg.CLIBackend, msg.Model, msg.ReasoningEffort, "")
 
 			select {
 			case authDone <- contributor:
@@ -2794,7 +2796,7 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 				if task.Role != "" {
 					taskDesc = fmt.Sprintf("contributor ran %s task: %s", task.Role, taskDesc)
 				}
-				h.addActivity(contributor.profile.GitHubUsername, "picked up", contributor.role, contributor.cliBackend, contributor.model, taskDesc)
+				h.addActivity(contributor.profile.GitHubUsername, "picked up", contributor.role, contributor.cliBackend, contributor.model, contributor.reasoningEffort, taskDesc)
 				h.logger.Info("[contribute-ws] task assigned",
 					"username", contributor.profile.GitHubUsername,
 					"task", task.TaskID,
@@ -3035,7 +3037,7 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 						h.markTaskCompletedVerdict(completedTask.Repo, completedTask.Number, verifiedPR,
 							verdict, contributor.profile.GitHubUsername, strings.TrimSpace(msg.VerdictReason))
 					}
-					h.addActivity(contributor.profile.GitHubUsername, "completed", contributor.role, contributor.cliBackend, contributor.model, msg.TaskID)
+					h.addActivity(contributor.profile.GitHubUsername, "completed", contributor.role, contributor.cliBackend, contributor.model, contributor.reasoningEffort, msg.TaskID)
 					h.logger.Info("[contribute-ws] task complete",
 						"username", contributor.profile.GitHubUsername,
 						"task", msg.TaskID,
@@ -3070,6 +3072,7 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 					promotedUser := contributor.profile.GitHubUsername
 					promotedCLI := contributor.cliBackend
 					promotedModel := contributor.model
+					promotedEffort := contributor.reasoningEffort
 					contributor.mu.Unlock()
 					// #2390-era command center: narrate the promotion as its own
 					// activity event so the Operations dev-log and achievement pops
@@ -3077,7 +3080,7 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 					// Read-only signalling — it changes no control behaviour and is
 					// emitted only on the real newcomer -> contributor transition.
 					if promoted {
-						h.addActivity(promotedUser, "promoted", "contributor", promotedCLI, promotedModel, "contributor")
+						h.addActivity(promotedUser, "promoted", "contributor", promotedCLI, promotedModel, promotedEffort, "contributor")
 					}
 					_ = saveContributorProfile(contributor.profile)
 				} else {
@@ -3164,7 +3167,7 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 					}
 					contributor.mu.Unlock()
 
-					h.addActivity(contributor.profile.GitHubUsername, "failed", contributor.role, contributor.cliBackend, contributor.model, msg.TaskID)
+					h.addActivity(contributor.profile.GitHubUsername, "failed", contributor.role, contributor.cliBackend, contributor.model, contributor.reasoningEffort, msg.TaskID)
 					h.logger.Info("[contribute-ws] task failed",
 						"username", contributor.profile.GitHubUsername,
 						"task", msg.TaskID,
@@ -3582,7 +3585,7 @@ func (h *ContributeWSHub) reclaimExpiredLeases(now time.Time) int {
 			"number", tgt.task.Number,
 			"lease_ttl", wsTaskTimeout.String(),
 		)
-		h.addActivity(username, "lease expired: auto-released", tgt.conn.role, tgt.conn.cliBackend, tgt.conn.model, tgt.task.TaskID)
+		h.addActivity(username, "lease expired: auto-released", tgt.conn.role, tgt.conn.cliBackend, tgt.conn.model, tgt.conn.reasoningEffort, tgt.task.TaskID)
 		if tgt.conn.ws != nil {
 			_ = tgt.conn.send(WSMessage{
 				Type:   "task_revoke",
