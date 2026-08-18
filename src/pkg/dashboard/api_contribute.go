@@ -2202,7 +2202,7 @@ update();  // initial paint: copy block + branded UI in sync from first load
 })();
 </script>
 </div>
-<p style="color:#6e7681;font-size:.78rem;margin-top:8px">Containerized mode auto-detects docker, then podman &mdash; when both are present, Docker wins. Docker's daemon runs rootful (docker-group membership is effectively root on the host); Podman here runs rootless (user namespace via <code>--userns=keep-id</code>, SELinux labels). Force either explicitly with <code>export HIVE_CONTAINER_RUNTIME=podman</code> (or <code>docker</code>). Rootless Podman handling is best-effort today, not yet covered by CI &mdash; see <a href="https://github.com/kubestellar/hive/blob/v2/src/docs/podman-rootless-ci.md" target="_blank" style="color:#58a6ff">docs/podman-rootless-ci.md</a>.</p>
+<p style="color:#6e7681;font-size:.78rem;margin-top:8px">Containerized mode auto-detects docker, then podman &mdash; when both are present, Docker wins. Docker's daemon runs rootful (docker-group membership is effectively root on the host); Podman here runs rootless (user namespace via <code>--userns=keep-id</code>, SELinux labels). Force either explicitly with <code>export HIVE_CONTAINER_RUNTIME=podman</code> (or <code>docker</code>). Rootless Podman handling is best-effort today, not yet covered by CI &mdash; see <a href="https://github.com/kubestellar/hive/blob/HEAD/src/docs/podman-rootless-ci.md" target="_blank" style="color:#58a6ff">docs/podman-rootless-ci.md</a>.</p>
 <p style="color:#6e7681;font-size:.78rem;margin-top:8px">Don't see your CLI? <a href="https://github.com/kubestellar/hive/issues/new?title=CLI+request:+&labels=enhancement" target="_blank" style="color:#58a6ff">Open an issue</a> and we'll add support for it.</p>
 <div style="margin-top:20px;display:flex;gap:12px;flex-wrap:wrap">
 <button type="button" id="goto-leaderboard-tab" style="display:inline-block;padding:8px 20px;background:#161b22;border:1px solid #30363d;border-radius:8px;color:#58a6ff;text-decoration:none;font-size:.9rem;font-family:inherit;cursor:pointer">🏆 View Leaderboard</button>
@@ -7825,15 +7825,37 @@ func validateGitHubToken(token, apiURL string) string {
 }
 
 // handleAPIv1 wraps contribute API endpoints with GitHub token auth.
-// Accepts Authorization: Bearer <gh-personal-access-token>.
+//
+// Authentication accepts BOTH the bearer scheme (hosted clients) and the legacy
+// "token <pat>" scheme that `gh auth token` users and older hive CLIs send, so
+// upgrading a hive never breaks existing scripts. Credentials in the query
+// string (?token=) are NOT supported: query strings land in ingress and access
+// logs.
+//
+// Authorization: every /api/v1 path except /api/v1/me is gated on the hive's
+// authorized-users allowlist. The contributor data behind these reads
+// (knowledge base, contributor roster, activity feed) is hive-private, so a
+// merely-authenticated GitHub user must not be able to read it. /api/v1/me is
+// exempt because it only ever returns the caller's own profile.
 func (s *Server) handleAPIv1(w http.ResponseWriter, r *http.Request) {
-	token := r.Header.Get("Authorization")
-	if strings.HasPrefix(token, "Bearer ") {
-		token = token[7:]
-	} else if strings.HasPrefix(token, "token ") {
-		token = token[6:]
-	} else {
-		token = r.URL.Query().Get("token")
+	// Defense in depth: strip any client-supplied identity headers up front so no
+	// downstream handler can ever observe a client-forged identity on this route.
+	r.Header.Del("X-Hive-User")
+	r.Header.Del("X-Hive-Role")
+	r.Header.Del(ownerRoleVerifiedHeader)
+
+	var token string
+	if auth := strings.Fields(r.Header.Get("Authorization")); len(auth) == 2 {
+		// Both schemes carry a GitHub PAT; "token" is kept for compatibility.
+		if strings.EqualFold(auth[0], "Bearer") || strings.EqualFold(auth[0], "token") {
+			token = auth[1]
+		}
+	}
+	if token == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"error":"Invalid or missing GitHub token. Use: Authorization: Bearer <gh-token>"}`))
+		return
 	}
 
 	username := validateGitHubToken(token, s.deps.Config.GitHub.OAuthAPIURL())
@@ -7842,6 +7864,15 @@ func (s *Server) handleAPIv1(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		w.Write([]byte(`{"error":"Invalid or missing GitHub token. Use: Authorization: Bearer <gh-token>"}`))
 		return
+	}
+
+	// Require allowlist authorization for every path except /api/v1/me, which is
+	// self-scoped. Fail closed: an empty allowlist authorizes nobody.
+	if !strings.HasPrefix(r.URL.Path, "/api/v1/me") {
+		if _, ok := s.deps.Config.Dashboard.AuthorizedRole(username); !ok {
+			jsonError(w, "forbidden: not authorized for this endpoint", http.StatusForbidden)
+			return
+		}
 	}
 
 	subpath := strings.TrimPrefix(r.URL.Path, "/api/v1")
@@ -7878,9 +7909,42 @@ func (s *Server) handleAPIv1(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		w.Write([]byte(`{"error":"Not registered as a contributor. Run: just contribute-setup"}`))
 	default:
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotFound)
-		w.Write([]byte(`{"error":"Unknown endpoint","available":["/api/v1/status","/api/v1/activity","/api/v1/contributors","/api/v1/knowledge","/api/v1/me"]}`))
+		if !strings.HasPrefix(subpath, "/prs/") || !strings.HasSuffix(subpath, "/queue-automerge") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(`{"error":"Unknown endpoint","available":["/api/v1/status","/api/v1/activity","/api/v1/contributors","/api/v1/knowledge","/api/v1/me","/api/v1/prs/{owner}/{repo}/{number}/queue-automerge"]}`))
+			return
+		}
+		parts := strings.Split(strings.TrimPrefix(subpath, "/prs/"), "/")
+		if len(parts) != 4 || parts[3] != "queue-automerge" {
+			jsonError(w, "Unknown endpoint", http.StatusNotFound)
+			return
+		}
+		// queue-automerge mutates merge state, so it must never be reachable via
+		// GET (or any other safe method) — that would let a link or image tag
+		// trigger a merge and bypass the write gate.
+		if r.Method != http.MethodPost {
+			jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		role, ok := s.deps.Config.Dashboard.AuthorizedRole(username)
+		if !ok {
+			jsonError(w, "merger or owner access required", http.StatusForbidden)
+			return
+		}
+		// Identity and role are resolved server-side from the validated token and
+		// hive allowlist. Overwrite any client-supplied headers before reusing the
+		// dashboard queue handler and its repo, self-review, and exact-head guards.
+		r.Header.Set("X-Hive-User", username)
+		r.Header.Set("X-Hive-Role", role)
+		r.Header.Del(ownerRoleVerifiedHeader)
+		if isOwnerRole(role) {
+			r.Header.Set(ownerRoleVerifiedHeader, "true")
+		}
+		r.SetPathValue("owner", parts[0])
+		r.SetPathValue("repo", parts[1])
+		r.SetPathValue("number", parts[2])
+		s.handleQueuePRAutoMerge(w, r)
 	}
 }
 

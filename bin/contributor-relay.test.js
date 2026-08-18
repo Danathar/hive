@@ -44,7 +44,10 @@ function loadRelay({ backend = 'copilot', backendBinary = null, model = '', reas
     if (/capture-pane/.test(cmd)) {
       // paneText, when given, is returned verbatim — for tests that need a
       // REAL pane rendering (e.g. a codex modal menu) rather than one of the
-      // three synthetic states below.
+      // three synthetic states below. A function is called fresh each capture
+      // (tests that need the pane to CHANGE partway through, e.g. a late
+      // completion arriving after a stall confirmation tick).
+      if (typeof paneText === 'function') return paneText();
       if (paneText !== null) return paneText;
       const state = cliStates[Math.min(stateIdx++, cliStates.length - 1)];
       // Panes that getCLIState()/checkTmuxIdle() classify per backend.
@@ -243,6 +246,20 @@ const AGY_WEDGED_PANE = [
   '? for shortcuts',
 ].join('\n');
 
+// Live agy/Gemini pane after opening kubestellar/hive#4079. Newer builds no
+// longer print "? for shortcuts" at rest: their idle chrome is a bare input
+// prompt followed by the selected-model footer.
+const AGY_GEMINI_IDLE_PANE = [
+  '● Bash(gh pr create --repo kubestellar/hive ...)',
+  ...Array.from({ length: 20 }, (_, i) => `  completed test step ${i}`),
+  '',
+  '  • Opened https://github.com/foo/bar/pull/9 targeting v4.',
+  '────────────────────────────────────────────',
+  '>',
+  '',
+  'Gemini 3.7 Flash · high',
+].join('\n');
+
 // --- CLI liveness: ask the PANE, not the process table --------------------
 //
 // The old probe substring-matched the whole process table for the backend's
@@ -333,6 +350,26 @@ test('agy at its idle prompt is COMPLETE even with stale narration on screen', (
   } finally { teardown(relay); }
 });
 
+test('agy Gemini footer with a bare prompt is COMPLETE', () => {
+  const relay = loadRelay({ backend: 'agy' });
+  try {
+    assert.strictEqual(
+      relay.classifyTmuxPane(AGY_GEMINI_IDLE_PANE), relay.PANE_STATE_IDLE_COMPLETE,
+      'a finished current agy/Gemini pane must not remain working because its old footer changed');
+  } finally { teardown(relay); }
+});
+
+test('agy Gemini idle pane reports its visible PR as task_complete', () => {
+  const relay = loadRelay({ backend: 'agy', paneText: AGY_GEMINI_IDLE_PANE });
+  try {
+    assignTask(relay, 'ct-agy-gemini-idle');
+    relay.__crashTick();
+    const complete = relay.__sent.find(m => m.type === 'task_complete');
+    assert.ok(complete, 'the live agy/Gemini pane shape must complete the task');
+    assert.strictEqual(complete.pr_url, 'https://github.com/foo/bar/pull/9');
+  } finally { teardown(relay); }
+});
+
 test('agy still reads as WORKING while activity is in the tail', () => {
   const relay = loadRelay({ backend: 'agy' });
   try {
@@ -370,7 +407,12 @@ test('an unchanging pane trips the stall backstop; any change resets it', () => 
   } finally { teardown(relay); }
 });
 
-test('a stalled pane hands the task back as an environment failure', () => {
+test('a stalled pane is NOT failed on the first confirmation tick', () => {
+  // Observed live: a task can cross PANE_STALL_TIMEOUT_MS while the CLI is
+  // blocked on a slow network call (a `gh pr create` round trip), then print
+  // its real completion — with a real PR link — moments later. The relay must
+  // not act on the very first tick that crosses the timeout; it needs to give
+  // the CLI PANE_STALL_CONFIRM_TICKS chances to prove it was about to finish.
   const relay = loadRelay({
     backend: 'agy',
     paneText: 'a frozen pane with no idle prompt and nothing happening',
@@ -380,13 +422,90 @@ test('a stalled pane hands the task back as an environment failure', () => {
     assignTask(relay, 't-stall');
     relay.__stallTick();   // records the fingerprint, reports working
     relay.__agePaneStallClock(relay.PANE_STALL_TIMEOUT_MS + 1);
-    relay.__stallTick();   // same pane past the timeout -> give the task back
+    relay.__stallTick();   // first tick past the timeout -> confirmation 1, not a failure yet
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_failed').length, 0,
+      'the first tick past the stall timeout must not fail the task on its own');
+    assert.strictEqual(relay.getStallConfirmCount(), 1);
+    assert.strictEqual(relay.getCurrentTask() && relay.getCurrentTask().task_id, 't-stall',
+      'the task must still be held while confirmation is pending');
+  } finally { teardown(relay); }
+});
+
+test('a pane that recovers between stall ticks is NOT failed, and the confirm count resets', () => {
+  let capture = 'a frozen pane with no idle prompt and nothing happening';
+  const relay = loadRelay({ backend: 'agy', paneText: () => capture });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-recover');
+    relay.__stallTick();
+    relay.__agePaneStallClock(relay.PANE_STALL_TIMEOUT_MS + 1);
+    relay.__stallTick();   // confirmation 1
+    assert.strictEqual(relay.getStallConfirmCount(), 1);
+    // New output appears -- the CLI was never actually stuck.
+    capture = 'a frozen pane with no idle prompt and nothing happening, plus fresh output this time';
+    relay.__agePaneStallClock(relay.PANE_STALL_TIMEOUT_MS);
+    relay.__stallTick();
+    assert.strictEqual(relay.getStallConfirmCount(), 0,
+      'any new pane content must reset the confirm count, not just delay the verdict');
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_failed').length, 0);
+  } finally { teardown(relay); }
+});
+
+test('a stalled pane hands the task back as an environment failure once confirmed, and relaunches the CLI', () => {
+  const relay = loadRelay({
+    backend: 'agy',
+    paneText: 'a frozen pane with no idle prompt and nothing happening',
+  });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-stall');
+    relay.__stallTick();
+    relay.__agePaneStallClock(relay.PANE_STALL_TIMEOUT_MS + 1);
+    relay.__stallTick();   // confirmation 1 — not yet failed (see the test above)
+    relay.__agePaneStallClock(relay.PANE_STALL_TIMEOUT_MS + 1);
+    const before = relay.__tmuxSends().length;
+    relay.__stallTick();   // confirmation 2 (== PANE_STALL_CONFIRM_TICKS) -> give the task back
     const failed = relay.__sent.filter(m => m.type === 'task_failed');
     assert.strictEqual(failed.length, 1, `expected one task_failed, got ${JSON.stringify(relay.__sent.map(m => m.type))}`);
     assert.strictEqual(failed[0].failure_kind, 'environment',
       'a frozen pane says nothing about the WORK, so the failure is the environment kind');
     assert.match(failed[0].reason, /no pane activity/);
+    assert.match(failed[0].reason, new RegExp(String(relay.PANE_STALL_CONFIRM_TICKS)),
+      'the failure reason should name how many checks confirmed it, for anyone reading the log');
     assert.strictEqual(relay.getCurrentTask(), null, 'the relay must let go of the task, not keep renewing its lease');
+    // The CLI is relaunched so the NEXT task cannot land its prompt on top of
+    // whatever the abandoned turn is still doing in the background.
+    const sends = relay.__tmuxSends().slice(before);
+    assert.ok(sends.some(c => /agy/.test(c)),
+      `a confirmed stall must relaunch the CLI: ${JSON.stringify(sends)}`);
+  } finally { teardown(relay); }
+});
+
+test('a pane that reaches real IDLE_COMPLETE between stall ticks is reported as a normal completion, PR and all', () => {
+  // The exact live scenario: paneText starts frozen (mid stall), then -- before
+  // the SECOND confirmation tick -- the CLI's real completion appears, agy back
+  // at its idle prompt with a PR link in the output. checkTmuxPaneState() must
+  // win over the stall path on that tick, so the task is reported completed
+  // with the PR, not failed.
+  let capture = 'a frozen pane with no idle prompt and nothing happening';
+  const relay = loadRelay({ backend: 'agy', paneText: () => capture });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-late-finish');
+    relay.__stallTick();
+    relay.__agePaneStallClock(relay.PANE_STALL_TIMEOUT_MS + 1);
+    relay.__stallTick();   // confirmation 1
+    assert.strictEqual(relay.getStallConfirmCount(), 1);
+    // The slow network call the pane was blocked on finally returns.
+    capture = 'Pull request opened: foo/bar#4061 https://github.com/foo/bar/pull/4061\n? for shortcuts';
+    relay.__agePaneStallClock(relay.PANE_STALL_TIMEOUT_MS + 1);
+    relay.__stallTick();
+    const completed = relay.__sent.filter(m => m.type === 'task_complete');
+    assert.strictEqual(completed.length, 1,
+      `late completion must be reported as completed, not failed: ${JSON.stringify(relay.__sent.map(m => m.type))}`);
+    assert.strictEqual(completed[0].pr_url, 'https://github.com/foo/bar/pull/4061',
+      'the PR that actually landed must be credited, not lost to the stall path');
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_failed').length, 0);
   } finally { teardown(relay); }
 });
 
@@ -1443,6 +1562,19 @@ const CODEX_UPDATE_PANE = [
   '  Press enter to continue',
 ].join('\n');
 
+const CODEX_COMPLETED_NO_WORK_PANE = [
+  '• Running GH_TOKEN=... gh issue view 4065 --repo kubestellar/hive',
+  '',
+  // Codex may leave many old tool rows above the completed turn.
+  ...Array.from({ length: 20 }, (_, i) => `  checked upstream evidence ${i}`),
+  '',
+  // Codex prefixes completed assistant output with this bullet in tmux.
+  '• HIVE_VERDICT: no_work_needed — upstream PR #4066 already implements issue #4065.',
+  '─ Worked for 1m 59s ─',
+  '',
+  '› ',
+].join('\n');
+
 test('a ready codex pane is classified ready (regression: > vs \u203a, and "OpenAI Codex" not "Codex CLI")', () => {
   const relay = loadRelay({ backend: 'codex', cliStates: [CODEX_READY_PANE] });
   try {
@@ -1468,6 +1600,76 @@ test('codex numbered startup menus get explicit safe selections', () => {
     assert.strictEqual(relay.blockingPromptKey(CODEX_TRUST_PANE), '1');
     assert.strictEqual(relay.blockingPromptKey(CODEX_UPDATE_PANE), '3');
     assert.strictEqual(relay.blockingPromptKey('Do you trust this folder? (y/n)'), null);
+  } finally { teardown(relay); }
+});
+
+test('codex no-work verdict is COMPLETE despite stale activity in scrollback', () => {
+  const relay = loadRelay({ backend: 'codex' });
+  try {
+    assert.strictEqual(
+      relay.classifyTmuxPane(CODEX_COMPLETED_NO_WORK_PANE), relay.PANE_STATE_IDLE_COMPLETE,
+      'an old Codex Running row must not keep a completed no-work turn in WORKING');
+  } finally { teardown(relay); }
+});
+
+test('a bullet-prefixed Codex no-work verdict is reported as task_complete', () => {
+  const relay = loadRelay({ backend: 'codex', paneText: CODEX_COMPLETED_NO_WORK_PANE });
+  try {
+    assignTask(relay, 'ct-codex-no-work');
+    relay.__crashTick();
+    const complete = relay.__sent.find(m => m.type === 'task_complete');
+    assert.ok(complete, 'the live Codex pane shape must complete the task rather than remain working');
+    assert.strictEqual(complete.verdict, 'no_work_needed');
+  } finally { teardown(relay); }
+});
+
+test('codex still reads as WORKING while activity is in the tail', () => {
+  const relay = loadRelay({ backend: 'codex' });
+  try {
+    const busy = [
+      'HIVE_VERDICT: no_work_needed — an older, finished turn',
+      '',
+      '› ',
+      '• Running gh issue view 4066 --repo kubestellar/hive',
+    ].join('\n');
+    assert.strictEqual(
+      relay.classifyTmuxPane(busy), relay.PANE_STATE_WORKING,
+      'recent Codex activity must still take precedence over an older verdict');
+  } finally { teardown(relay); }
+});
+
+test('a pane with long diff in tail (no activity verbs) but completion_marker=true stays WORKING', () => {
+  // Regression for the tail-scope fix: narrowing the activity scan to the tail
+  // must not flip a mid-turn pane to COMPLETE just because the scrollback holds
+  // a completion word. Work is still ongoing here — codex is streaming a diff,
+  // so the tail carries neither an activity verb nor the '›' idle prompt.
+  const relay = loadRelay({ backend: 'codex' });
+  try {
+    const midTurn = [
+      '• Running git diff --stat',
+      '  done reading upstream evidence',
+      '',
+      ...Array.from({ length: 20 }, (_, i) => `+  const line${i} = compute(${i});`),
+    ].join('\n');
+    assert.strictEqual(
+      relay.classifyTmuxPane(midTurn), relay.PANE_STATE_WORKING,
+      'a mid-turn codex pane must not complete just because "done" sits in the scrollback');
+  } finally { teardown(relay); }
+});
+
+test('codex status indicators ("Working", "esc to interrupt") count as in-flight', () => {
+  const relay = loadRelay({ backend: 'codex' });
+  try {
+    for (const status of ['• Working (12s • esc to interrupt)', '  esc to interrupt']) {
+      const pane = [
+        'HIVE_VERDICT: no_work_needed — an older, finished turn',
+        '› ',
+        status,
+      ].join('\n');
+      assert.strictEqual(
+        relay.classifyTmuxPane(pane), relay.PANE_STATE_WORKING,
+        `codex status row ${JSON.stringify(status)} must read as WORKING`);
+    }
   } finally { teardown(relay); }
 });
 
