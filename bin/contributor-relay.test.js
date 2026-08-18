@@ -252,6 +252,36 @@ const AGY_WEDGED_PANE = [
 // 'claude' whatever the backend was — so a dead CLI was never detected, was
 // never relaunched, cliReady stayed latched, and the hub's task prompt was typed
 // into a bare shell.
+// --- Relaunch must pin the working directory --------------------------------
+//
+// A long-lived tmux server can hand every pane it forks a cwd that no longer
+// exists (observed: a nested clone's v2/pkg/agent, orphaned when the repo
+// renamed v2/ -> src/). The shell reports "shell-init: error retrieving current
+// directory" and a backend needing a resolvable cwd dies shortly after its
+// first task — agy exits 2 that way. The Justfile pins the cwd for the first
+// launch; a relaunch that dropped the cd would silently undo it.
+test('a relaunch cds into the relay cwd before starting the CLI', () => {
+  const relay = loadRelay({ backend: 'agy' });
+  try {
+    const launched = relay.launchCommandWithCwd('agy --dangerously-skip-permissions');
+    assert.match(launched, /^cd .+ && agy --dangerously-skip-permissions$/,
+      `relaunch must pin the cwd, got: ${launched}`);
+    assert.ok(launched.includes(process.cwd()),
+      `the cd target must be the relay's own cwd: ${launched}`);
+  } finally { teardown(relay); }
+});
+
+test('relaunchCLI sends the cd-prefixed command to tmux', () => {
+  const relay = loadRelay({ backend: 'agy' });
+  try {
+    const before = relay.__tmuxSends().length;
+    relay.relaunchCLI();
+    const sends = relay.__tmuxSends().slice(before);
+    assert.ok(sends.some(c => /cd .+ && /.test(c)),
+      `the relaunch typed into the pane must carry the cd: ${JSON.stringify(sends)}`);
+  } finally { teardown(relay); }
+});
+
 test('a shell in the pane is only a death after consecutive confirmations', () => {
   const relay = loadRelay({ backend: 'agy', procAlive: false });
   try {

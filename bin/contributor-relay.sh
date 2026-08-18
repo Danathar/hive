@@ -1381,12 +1381,28 @@ function checkTmuxPaneState() {
 
 // Relaunch the backend CLI in the tmux session using the flags from
 // backends.conf, the same way contributor-agent.sh first launched it.
+// launchCommandWithCwd prefixes the launch with a cd into the relay's own
+// working directory (the repo root, where `just contribute-hive` starts node).
+//
+// A relaunch lands in whatever directory the pane's shell is sitting in, and a
+// long-lived tmux server can hand out a cwd that no longer exists — every pane
+// it forks inherits the dead directory, the shell prints "shell-init: error
+// retrieving current directory", and a backend that needs a resolvable cwd dies
+// shortly after its first task (agy exits 2; claude/codex/goose tolerate it).
+// The Justfile pins the cwd for the FIRST launch; without this, the first
+// relaunch would silently undo that.
+function launchCommandWithCwd(launchCmd) {
+  const cwd = process.cwd();
+  if (!cwd) return launchCmd;
+  return `cd ${shellQuote(cwd)} && ${launchCmd}`;
+}
+
 function relaunchCLI() {
   const launchCmd = buildLaunchCommand();
   // The pane may be wedged in bash PS2 continuation; clear it or the relaunch
   // command is swallowed as more continuation text and never runs.
   recoverWedgedShell();
-  execSync(`tmux send-keys -t ${TMUX_SESSION} ${shellQuote(launchCmd)} Enter`, { timeout: 15000 });
+  execSync(`tmux send-keys -t ${TMUX_SESSION} ${shellQuote(launchCommandWithCwd(launchCmd))} Enter`, { timeout: 15000 });
   // The CLI is NOT up yet. cliReady must stay false until the readiness
   // classifier positively confirms it, or a task prompt sent in the meantime
   // is typed as literal keystrokes into a bare shell (issue #2203, bug 2).
@@ -2014,6 +2030,7 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     __crashTick: () => { taskAssignedAt = Date.now() - TASK_GRACE_PERIOD_MS - 1; progressTick(); },
     paneStalled,
     resetPaneStallClock,
+    launchCommandWithCwd,
     cliProcessLooksGone,
     paneForegroundCommand,
     CLI_GONE_CONFIRMATIONS,
