@@ -10,6 +10,10 @@ import (
 	"testing"
 )
 
+// testGateToken is the client auth token tests present to the proxy; the gate
+// is mandatory, so ServeHTTP tests must always authenticate.
+const testGateToken = "test-gate-token"
+
 // eventRecorder collects proxied events for assertion.
 type eventRecorder struct {
 	mu     sync.Mutex
@@ -203,13 +207,14 @@ func TestServeHTTPLogsRequestAndForwardsBody(t *testing.T) {
 	defer upstream.Close()
 
 	rec := &eventRecorder{}
-	p, err := New(upstream.URL, rec.handler, "", "")
+	p, err := New(upstream.URL, rec.handler, "", testGateToken)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	reqBody := `{"model":"claude-opus-4","messages":[]}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(reqBody))
+	req.Header.Set("X-Api-Key", testGateToken)
 	req.Header.Set("X-Hive-Agent", "scanner")
 	w := httptest.NewRecorder()
 	p.ServeHTTP(w, req)
@@ -242,12 +247,13 @@ func TestServeHTTPHandlesNonJSONBody(t *testing.T) {
 	defer upstream.Close()
 
 	rec := &eventRecorder{}
-	p, err := New(upstream.URL, rec.handler, "", "")
+	p, err := New(upstream.URL, rec.handler, "", testGateToken)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader("not json at all"))
+	req.Header.Set("X-Api-Key", testGateToken)
 	w := httptest.NewRecorder()
 	p.ServeHTTP(w, req)
 
@@ -267,11 +273,12 @@ func TestServeHTTPWithoutHandler(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	p, err := New(upstream.URL, nil, "", "")
+	p, err := New(upstream.URL, nil, "", testGateToken)
 	if err != nil {
 		t.Fatal(err)
 	}
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader("{}"))
+	req.Header.Set("X-Api-Key", testGateToken)
 	w := httptest.NewRecorder()
 	p.ServeHTTP(w, req)
 
@@ -293,12 +300,13 @@ func TestResponseLoggedAndPassedThrough(t *testing.T) {
 	defer upstream.Close()
 
 	rec := &eventRecorder{}
-	p, err := New(upstream.URL, rec.handler, "", "")
+	p, err := New(upstream.URL, rec.handler, "", testGateToken)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader("{}"))
+	req.Header.Set("X-Api-Key", testGateToken)
 	w := httptest.NewRecorder()
 	p.ServeHTTP(w, req)
 
@@ -329,12 +337,13 @@ func TestErrorResponseIsLogged(t *testing.T) {
 	defer upstream.Close()
 
 	rec := &eventRecorder{}
-	p, err := New(upstream.URL, rec.handler, "", "")
+	p, err := New(upstream.URL, rec.handler, "", testGateToken)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader("{}"))
+	req.Header.Set("X-Api-Key", testGateToken)
 	w := httptest.NewRecorder()
 	p.ServeHTTP(w, req)
 
@@ -379,12 +388,13 @@ func TestSSEStreamIsLoggedAndPassedThrough(t *testing.T) {
 	defer upstream.Close()
 
 	rec := &eventRecorder{}
-	p, err := New(upstream.URL, rec.handler, "", "")
+	p, err := New(upstream.URL, rec.handler, "", testGateToken)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader("{}"))
+	req.Header.Set("X-Api-Key", testGateToken)
 	w := httptest.NewRecorder()
 	p.ServeHTTP(w, req)
 
@@ -458,12 +468,13 @@ func TestSSEIgnoresMalformedDataLines(t *testing.T) {
 	defer upstream.Close()
 
 	rec := &eventRecorder{}
-	p, err := New(upstream.URL, rec.handler, "", "")
+	p, err := New(upstream.URL, rec.handler, "", testGateToken)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader("{}"))
+	req.Header.Set("X-Api-Key", testGateToken)
 	w := httptest.NewRecorder()
 	p.ServeHTTP(w, req)
 
@@ -487,12 +498,13 @@ func TestSSEWithNoRecognisedEvents(t *testing.T) {
 	defer upstream.Close()
 
 	rec := &eventRecorder{}
-	p, err := New(upstream.URL, rec.handler, "", "")
+	p, err := New(upstream.URL, rec.handler, "", testGateToken)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader("{}"))
+	req.Header.Set("X-Api-Key", testGateToken)
 	w := httptest.NewRecorder()
 	p.ServeHTTP(w, req)
 
@@ -677,15 +689,17 @@ func TestServeHTTPForwardsClientKeyWhenPresent(t *testing.T) {
 	}
 }
 
-// Without a gate token the proxy stays an open relay, preserving the previous
-// local-development behaviour.
-func TestServeHTTPWithoutClientAuthTokenAllowsUnauthenticatedCaller(t *testing.T) {
+// Without a gate token the proxy must fail closed: an unauthenticated relay
+// would let any co-resident loopback caller spend the host upstream key.
+func TestServeHTTPWithoutClientAuthTokenRefusesRequests(t *testing.T) {
+	var upstreamHits int
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits++
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer upstream.Close()
 
-	p, err := New(upstream.URL, nil, "", "")
+	p, err := New(upstream.URL, nil, "host-api-key", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -694,8 +708,11 @@ func TestServeHTTPWithoutClientAuthTokenAllowsUnauthenticatedCaller(t *testing.T
 	w := httptest.NewRecorder()
 	p.ServeHTTP(w, req)
 
-	if w.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusNoContent)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusServiceUnavailable)
+	}
+	if upstreamHits != 0 {
+		t.Fatalf("upstream hits = %d, want 0 when the proxy is misconfigured", upstreamHits)
 	}
 }
 
@@ -735,11 +752,12 @@ func TestValidateClientAuth(t *testing.T) {
 // An unreachable upstream must yield 502 rather than a hang or a panic.
 func TestUnreachableUpstreamYields502(t *testing.T) {
 	// Port 1 on loopback is not listening.
-	p, err := New("http://127.0.0.1:1", nil, "", "")
+	p, err := New("http://127.0.0.1:1", nil, "", testGateToken)
 	if err != nil {
 		t.Fatal(err)
 	}
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader("{}"))
+	req.Header.Set("X-Api-Key", testGateToken)
 	w := httptest.NewRecorder()
 	p.ServeHTTP(w, req)
 
