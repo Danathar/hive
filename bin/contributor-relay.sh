@@ -1581,11 +1581,63 @@ function classifyTmuxPane(text) {
     const codexTail = text.split('\n').slice(-15).join('\n');
     // Same marker mismatch as getCLIState(): '›' (U+203A), not '>'.
     hasIdlePrompt = /codex>|›|>\s*$/.test(text);
-    hasCompletionMarker = /completed|done|finished/i.test(text) ||
-      detectNoWorkVerdict(text.split('\n')) !== null;
-    // Codex also signals an in-flight turn through its status row ("Working",
-    // "esc to interrupt") without ever printing a tool verb.
-    isWorking = /running|executing|thinking|\bworking\b|esc to interrupt/i.test(codexTail);
+    // Not a prose match. codex writes its own completion summary in whatever
+    // words the work calls for, and requiring "completed|done|finished" makes
+    // finishing a task depend on which English word it happened to reach for.
+    //
+    // Observed live: a task that ran to completion and opened
+    // kubestellar/hive#4259 ready for review summarised itself as "Opened
+    // ready-for-review PR #4259 … Conclusion: direct .kube reuse is not viable
+    // … Branch is pushed and clean … Worked for 6m 22s". None of the three
+    // words appear, and there is no no_work_needed verdict either (it shipped a
+    // PR), so hasCompletionMarker was false, the IDLE_COMPLETE arm could not be
+    // reached, and the pane fell through to PANE_STATE_WORKING with the agent
+    // sitting idle at its prompt.
+    //
+    // The same reliance on prose in the other direction produced #4182 for agy.
+    //
+    // codex's real state signal is its status row, which isWorking below reads:
+    // an in-flight turn renders "esc to interrupt", and an idle one does not.
+    // hasIdlePrompt cannot carry that distinction here — codex draws its "›"
+    // input line while it is working too — so gating completion on a completion
+    // WORD added nothing except a way to miss finished work. copilot, goose,
+    // agy and bob all set this true for the same reason.
+    hasCompletionMarker = true;
+    // Prefer codex's own status row over guessing from prose, exactly as the
+    // agy branch below does after #4182.
+    //
+    // The bare verbs are matched case-insensitively against the tail, and codex
+    // narrates in plain English — including in the summary it prints when a turn
+    // FINISHES. A summary that happens to say "I'm running the tests" or
+    // "executing the plan" pins a finished pane to WORKING, the relay keeps
+    // renewing the lease, and the task dies at the stall backstop or
+    // MAX_TASK_DURATION with its PR already open. That is #4182, which was the
+    // same latent shape on agy until a summary tripped it.
+    //
+    // Captured from a live pane, codex's markers are:
+    //
+    //   working -> "• Working (46s • esc to interrupt)"  AND  "› Ask Codex to…"
+    //   idle    ->                                             "› Ask Codex to…"
+    //
+    // so "esc to interrupt" is the ONLY discriminator; the "›" input line is
+    // drawn in both states, which is why hasIdlePrompt cannot carry this and
+    // why the verb list was doing the work.
+    //
+    // The second alternative keeps the protection the bare verbs were really
+    // providing, without the prose exposure. codex marks an in-flight tool call
+    // with its OWN bullet chrome — "• Running <cmd>", against "• Ran <cmd>" once
+    // finished — so anchoring to the bullet distinguishes codex saying it is
+    // running something from the model narrating that it ran something:
+    //
+    //   "• Running gh issue view 4066"        -> chrome, in flight   -> WORKING
+    //   "- While running the tests I ..."     -> prose, in a summary -> not
+    //
+    // That matters beyond this bug: it is what stops a stale
+    // "HIVE_VERDICT: no_work_needed" higher in the scrollback from being
+    // reported as the completion of a turn that has since started new work.
+    const codexBusyMarker = /esc to interrupt/i.test(codexTail) ||
+      /(?:^|\n)\s*[•·▸]\s*(?:Running|Executing|Thinking)\b/i.test(codexTail);
+    isWorking = codexBusyMarker;
   } else if (BACKEND === 'pi') {
     hasIdlePrompt = /pi v\d|0\.0%|auto\)|\d+\.\d+%/.test(text);
     hasCompletionMarker = /completed|done|finished|tokens\)|\d+\.\d+%/i.test(text);
