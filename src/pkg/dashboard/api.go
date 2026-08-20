@@ -139,6 +139,8 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	s.mux.HandleFunc("PUT /api/config/governor/litellm", s.handleGovernorLiteLLM)
 	s.mux.HandleFunc("PUT /api/config/governor/trajectory", s.handleGovernorTrajectory)
 	s.mux.HandleFunc("PUT /api/config/governor/features", s.handleGovernorFeatures)
+	s.mux.HandleFunc("GET /api/config/governor/general-advanced", s.handleGovernorGeneralAdvancedGet)
+	s.mux.HandleFunc("PUT /api/config/governor/general-advanced", s.handleGovernorGeneralAdvancedPut)
 	s.mux.HandleFunc("GET /api/config/governor/advisory", s.handleGovernorAdvisoryGet)
 	s.mux.HandleFunc("PUT /api/config/governor/advisory", s.handleGovernorAdvisoryPut)
 	s.mux.HandleFunc("GET /api/config/governor/replan", s.handleGovernorReplanGet)
@@ -4131,6 +4133,7 @@ func (s *Server) handleGovernorConfigGet(w http.ResponseWriter, r *http.Request)
 			// switch from this, so an untouched hive shows it on.
 			"attributionTrailer": cfg.Governor.AttributionTrailerEnabled(),
 		},
+		"general_advanced": generalAdvancedSectionResponse(cfg),
 		"hub": map[string]interface{}{
 			"enabled": cfg.Hub.Enabled,
 			// namespace is read-only, runtime-derived display info (never
