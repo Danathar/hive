@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -14,14 +15,19 @@ import (
 
 const defaultProxyHost = "127.0.0.1"
 
-// clientAuthTokenFromEnv returns the token callers must present to the proxy.
-// An empty result leaves the proxy an open relay, so a warning is emitted.
-func clientAuthTokenFromEnv(getenv func(string) string, warnf func(string, ...any)) string {
+// errMissingClientAuthToken reports the fail-closed startup contract: without a
+// client auth token any co-resident loopback process could have its requests
+// fulfilled with the host upstream key, so the proxy refuses to start.
+var errMissingClientAuthToken = errors.New("PROXY_AUTH_TOKEN is required: without it the proxy would accept unauthenticated callers and grant them the host upstream key")
+
+// clientAuthTokenFromEnv returns the token callers must present to the proxy,
+// or an error when it is unset so the caller can fail closed.
+func clientAuthTokenFromEnv(getenv func(string) string) (string, error) {
 	token := getenv("PROXY_AUTH_TOKEN")
 	if token == "" {
-		warnf("[sec-check WARNING] PROXY_AUTH_TOKEN is unset; the proxy will accept unauthenticated callers and may grant them the host upstream key. Set PROXY_AUTH_TOKEN to require caller authentication.")
+		return "", errMissingClientAuthToken
 	}
-	return token
+	return token, nil
 }
 
 // upstreamAPIKeyFromEnv returns the credential the proxy swaps in on the
@@ -78,7 +84,10 @@ func main() {
 		logWriter.Encode(entry)
 	}
 
-	clientAuthToken := clientAuthTokenFromEnv(os.Getenv, log.Printf)
+	clientAuthToken, err := clientAuthTokenFromEnv(os.Getenv)
+	if err != nil {
+		log.Fatalf("[sec-check] refusing to start: %v", err)
+	}
 	upstreamAPIKey := upstreamAPIKeyFromEnv(os.Getenv)
 	proxy, err := apiproxy.New(*upstream, handler, upstreamAPIKey, clientAuthToken)
 	if err != nil {

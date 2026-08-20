@@ -187,8 +187,13 @@ type AgentProcess struct {
 	StallNudges        int       // total post-kick stall nudges sent (surfaced to the dashboard)
 	launchGen          int       // increments per launch; stale deliverStartupKick goroutines check it and drop
 	lastInferKickMarks int       // no-action watchdog: tool-marker count in pane+scrollback just after kick delivery
-	actionNudgeSent    bool      // no-action watchdog: at most one action nudge per kick
-	ActionNudges       int       // total prose-only-response action nudges sent (surfaced to the dashboard)
+	// kickLogPending is true while the current tmux session holds kick output
+	// that has not yet been archived to a per-kick log file (see
+	// kick_logs.go). Set after every kick delivery; cleared when the
+	// scrollback is archived (next kick, restart, shutdown). Guarded by m.mu.
+	kickLogPending  bool
+	actionNudgeSent bool // no-action watchdog: at most one action nudge per kick
+	ActionNudges    int  // total prose-only-response action nudges sent (surfaced to the dashboard)
 	// sandboxResumeAfterCancel is set when an operator resumes a paused
 	// sandbox agent while the canceled sandbox goroutine is still draining.
 	// The completion handler then turns the expected cancellation into Idle
@@ -356,6 +361,16 @@ type Manager struct {
 	sendKeysForAgent     func(agent *AgentProcess, keys ...string)
 	promptDismissSleep   func(time.Duration)
 	promptDismissTimeout time.Duration
+
+	// Per-kick durable log archiving (#4296, #4295) — see kick_logs.go.
+	// kickLogDir/kickLogRetention/kickLogMaxBytes are resolved once in
+	// NewManager from env overrides; captureFullLogFn and clearHistoryFn are
+	// test seams over the tmux capture-pane / clear-history subprocesses.
+	kickLogDir       string
+	kickLogRetention int
+	kickLogMaxBytes  int64
+	captureFullLogFn func(agent *AgentProcess) (string, error)
+	clearHistoryFn   func(agent *AgentProcess)
 }
 
 // SetPersistPauseCallback wires a function that persists an agent's paused
@@ -707,13 +722,43 @@ func writeAgentCredFile(path, token string, agentUID int) error {
 	return nil
 }
 
-const agentTokenRefreshInterval = 40 * time.Minute
+const (
+	// defaultAgentTokenRefreshInterval is how often per-agent scoped token
+	// cache files are rewritten. Installation tokens expire after 1 hour;
+	// refreshing at 40-minute intervals keeps a valid token on disk with a
+	// 20-minute safety margin.
+	defaultAgentTokenRefreshInterval = 40 * time.Minute
+	// AgentTokenRefreshIntervalEnv overrides the refresh interval with a Go
+	// duration string (e.g. "30m"). Invalid or non-positive values fall back
+	// to the default.
+	AgentTokenRefreshIntervalEnv = "HIVE_AGENT_TOKEN_REFRESH_INTERVAL"
+)
+
+// agentTokenRefreshInterval resolves the per-agent token refresh interval
+// from AgentTokenRefreshIntervalEnv, falling back to the default.
+func agentTokenRefreshInterval() time.Duration {
+	if v := os.Getenv(AgentTokenRefreshIntervalEnv); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return defaultAgentTokenRefreshInterval
+}
 
 // StartAgentTokenRefresh refreshes per-agent scoped tokens for all running
 // agents on a timer. Tokens expire after 1 hour; this refreshes at 40-minute
-// intervals so there's always a valid token on disk.
+// intervals (configurable via HIVE_AGENT_TOKEN_REFRESH_INTERVAL) so there's
+// always a valid token on disk.
+//
+// Safe to start even before an App auth is wired: refreshAgentTokens no-ops
+// while m.appAuth is nil, so hives whose GitHub App credentials arrive AFTER
+// boot (heartbeat delivery, config API reinit, config reload) start refreshing
+// as soon as SetAppAuth is called. Previously this loop was only started when
+// the App was configured at boot, so hosted spokes never refreshed per-agent
+// caches: agent sessions outlived their token, `gh` 401'd and printed
+// "gh auth login", and the login-detector auto-paused the agent.
 func (m *Manager) StartAgentTokenRefresh(ctx context.Context) {
-	ticker := time.NewTicker(agentTokenRefreshInterval)
+	ticker := time.NewTicker(agentTokenRefreshInterval())
 	defer ticker.Stop()
 	for {
 		select {
@@ -723,6 +768,43 @@ func (m *Manager) StartAgentTokenRefresh(ctx context.Context) {
 			m.refreshAgentTokens(ctx)
 		}
 	}
+}
+
+// RefreshAgentTokens immediately rewrites every running agent's per-agent
+// scoped token cache. Called when GitHub App auth is wired late (heartbeat
+// delivery, config API reinit, config reload) so agents that were already
+// running get a valid cache right away instead of waiting for the next tick.
+func (m *Manager) RefreshAgentTokens(ctx context.Context) {
+	m.refreshAgentTokens(ctx)
+}
+
+// RefreshAgentTokenFor re-mints and re-caches the scoped token for a single
+// agent, using the same tier logic as launch. Used by the login-detector to
+// attempt a token re-cache before pausing: the likeliest cause of a `gh`
+// "gh auth login" prompt on an App-authenticated hive is an expired cached
+// token, so refreshing it means a subsequent Resume works immediately.
+// Returns an error when the agent is unknown, has no UID, or no App auth is
+// wired.
+func (m *Manager) RefreshAgentTokenFor(ctx context.Context, name string) error {
+	m.mu.RLock()
+	auth := m.appAuth
+	agent, ok := m.agents[name]
+	m.mu.RUnlock()
+
+	if auth == nil {
+		return fmt.Errorf("no github app auth wired")
+	}
+	if !ok {
+		return fmt.Errorf("agent %s not found", name)
+	}
+	if agent.UID <= 0 {
+		return fmt.Errorf("agent %s has no dedicated UID", name)
+	}
+	tier := m.agentMode(agent).TokenTier()
+	if err := auth.WriteAgentToken(ctx, agent.Name, tier, agent.UID); err != nil {
+		return fmt.Errorf("re-caching scoped token for %s: %w", name, err)
+	}
+	return nil
 }
 
 func (m *Manager) refreshAgentTokens(ctx context.Context) {
@@ -817,6 +899,8 @@ func NewManager(agents map[string]config.AgentConfig, logger *slog.Logger, proje
 		logger.Info("no UID map found, agents will share dev UID", "path", UIDMapPath)
 	}
 
+	kickLogDir, kickLogRetention, kickLogMaxBytes := kickLogSettingsFromEnv()
+
 	m := &Manager{
 		agents:           make(map[string]*AgentProcess),
 		idToName:         make(map[string]string),
@@ -826,6 +910,9 @@ func NewManager(agents map[string]config.AgentConfig, logger *slog.Logger, proje
 		copilotAuthToken: copilotToken,
 		claudeAuthToken:  claudeToken,
 		uidMap:           uidMap,
+		kickLogDir:       kickLogDir,
+		kickLogRetention: kickLogRetention,
+		kickLogMaxBytes:  kickLogMaxBytes,
 	}
 
 	for name, cfg := range agents {
@@ -1325,9 +1412,19 @@ func (m *Manager) ensureTmuxSession(agent *AgentProcess) error {
 		if backend == "" || IsInferenceBackend(backend) {
 			backend = "claude"
 		}
-		pipePaneCmd := fmt.Sprintf("%s watch %s --cli=%s", plukPath, agent.tmuxSession, backend)
+		logFile, err := ensurePlukLogFile(plukRunDir, agent.tmuxSession)
+		if err != nil {
+			// Non-fatal, and deliberately not a reason to skip the attach: the
+			// shell's own `>>` will still create the file. It may land 0600 under
+			// a tight umask, which costs peer readability but not the agent's own
+			// logging, and that is strictly better than no publisher at all.
+			m.logger.Warn("pluk log file setup failed; peer agents may not be able to read this session's log",
+				"agent", agent.Name, "error", err)
+			logFile = plukSessionLogPath(plukRunDir, agent.tmuxSession)
+		}
+		pipePaneCmd := plukPipePaneCmd(plukPath, agent.tmuxSession, backend, logFile)
 		_ = m.tmuxCmd(agent, "pipe-pane", "-t", agent.tmuxSession, "-o", pipePaneCmd).Run()
-		m.logger.Info("pluk publisher attached", "agent", agent.Name, "cli", backend)
+		m.logger.Info("pluk publisher attached", "agent", agent.Name, "cli", backend, "log", logFile)
 	}
 
 	return nil
@@ -1713,7 +1810,10 @@ func (m *Manager) launchInTmux(ctx context.Context, agent *AgentProcess) error {
 			// gh-wrapper/proxy layer only, not what the MCP may write.
 			launchCmd = base + claudeGitHubWriteDenyFlags
 		case "copilot":
-			// model is passed verbatim to `copilot --model %s`. It may be a
+			// model arrives here already canonicalized by normalizeModelName
+			// (CanonicalizeCopilotModel: separator drift like claude-fable.5 is
+			// normalized to the CLI-accepted claude-fable-5, #4262) and is then
+			// passed as-is to `copilot --model %s`. It may be a
 			// concrete id OR the auto-selection sentinel "auto" (copilotAutoModel
 			// in cli_models.go), which lets the Copilot CLI pick/adjust the model
 			// per task. Nothing here assumes a concrete id, so the sentinel flows
@@ -1794,6 +1894,7 @@ func (m *Manager) launchInTmux(ctx context.Context, agent *AgentProcess) error {
 		now := time.Now()
 		agent.LastKick = &now
 		agent.LastKickMessage = bootstrapPrompt
+		agent.kickLogPending = true
 		snippet := bootstrapPrompt
 		const maxBootstrapSnippet = 200
 		snippet = truncateStr(snippet, maxBootstrapSnippet)
@@ -2721,12 +2822,17 @@ func (m *Manager) logOutputSignals(agent, line string) {
 }
 
 // Blocked-action thrash breaker: an agent that keeps hammering a policy wall
-// (e.g. git push in ADVISORY mode, blocked every ~3s by git-credential-hive)
-// burns model tokens indefinitely with zero possible output — observed live
-// 2026-08-04 on a hosted L2 hive whose guide agent retried a blocked push
-// every 3 seconds. The hub, not the model, breaks the loop: thrashThreshold
-// blocked-action lines within thrashWindow pauses the session (visible,
-// reversible, stops governor kicks) with the reason spelled out.
+// (e.g. a push with no per-agent token, blocked every ~3s by
+// git-credential-hive, or a proxy hard-deny) burns model tokens indefinitely
+// with zero possible output — observed live 2026-08-04 on a hosted L2 hive
+// whose guide agent retried a blocked push every 3 seconds. (Since #4289,
+// ADVISORY-mode pushes are no longer blocked by the credential helper — the
+// read-only token is served and GitHub rejects the push with 403 — but the
+// helper still emits "git push blocked:" for unknown-UID and missing-token
+// failures, which this breaker continues to catch.) The hub, not the model,
+// breaks the loop: thrashThreshold blocked-action lines within thrashWindow
+// pauses the session (visible, reversible, stops governor kicks) with the
+// reason spelled out.
 const (
 	thrashWindow    = 60 * time.Second
 	thrashThreshold = 5
@@ -3082,16 +3188,7 @@ func (m *Manager) CaptureFullLog(name string) (string, error) {
 	if agent.tmuxSession == "" {
 		return "", fmt.Errorf("agent %s has no active session", name)
 	}
-	// -S -<n>: start n lines back into history; -E -: through the last visible
-	// line; -J: join wrapped lines so copied text is not hard-wrapped at the
-	// pane width; -p: print to stdout. -1: keep the tail behaviour bounded.
-	cmd := m.tmuxCmd(agent, "capture-pane", "-t", agent.tmuxSession, "-p", "-J",
-		"-S", fmt.Sprintf("-%d", fullLogCaptureLines), "-E", "-")
-	out, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("capturing pane for %s: %w", name, err)
-	}
-	return string(out), nil
+	return m.captureScrollbackForAgent(agent)
 }
 
 // captureVisiblePaneForAgent captures only the visible pane (no scrollback).
@@ -3651,6 +3748,11 @@ func (m *Manager) SendKick(name string, message string) error {
 // (crash detect + waitForCLIReadyForAgent + waitForInputPromptForAgent) —
 // this function does no readiness checking of its own.
 func (m *Manager) deliverKickLocked(agent *AgentProcess, message, trigger string) {
+	// Archive the PREVIOUS kick's scrollback and clear the history before any
+	// input touches the pane, so each archived kick log is cleanly delimited
+	// (#4296). Must be the first thing this function does.
+	m.rotateKickLogOnKickLocked(agent)
+
 	// Clear stale input before kick (Ctrl+C then Ctrl+U).
 	// Goose 1.37 exits on ^C — skip clear for goose backend.
 	if agent.Config.Backend != "goose" && agent.BackendOverride != "goose" {
@@ -3702,6 +3804,9 @@ func (m *Manager) deliverKickLocked(agent *AgentProcess, message, trigger string
 	agent.LastKickMessage = message
 	agent.KickRefused = false
 	agent.KickRefusalReason = ""
+	// The session now holds this kick's output; the next rotation point
+	// (kick, restart, shutdown) must archive it before it is destroyed.
+	agent.kickLogPending = true
 
 	// Arm the post-kick watchdog for inference agents: the watcher loop
 	// sends a "continue" nudge if the pane freezes at an idle prompt, and
@@ -5433,8 +5538,10 @@ const claudeGitHubWriteDenyFlags = " --disallowed-tools 'mcp__github__create_pul
 //
 // No --model is passed, and that is load-bearing. bob auto-selects its own
 // model, and hive's normalizeModelName rewrites a trailing -<digits> to
-// .<digits> for every backend except claude/inference, so a configured
-// `claude-sonnet-4-6` reached bob as `claude-sonnet-4.6` — an id bob's backend
+// .<digits> for every backend except claude/copilot/inference (copilot uses
+// alias-based canonicalization instead, see CanonicalizeCopilotModel), so a
+// configured `claude-sonnet-4-6` reached bob as `claude-sonnet-4.6` — an id
+// bob's backend
 // does not know. Its model config came back undefined and every prompt died
 // with "🛑 Cannot read properties of undefined (reading 'maxTokens')". Verified
 // live: the same bob with no --model runs inference successfully.
@@ -5763,7 +5870,19 @@ func (m *Manager) ensureWorldWritable(root string) {
 
 // normalizeModelName converts YAML-friendly model names to the format each
 // CLI backend expects. Claude CLI uses hyphens (claude-opus-4-7), while
-// Copilot and other backends use dots (claude-opus-4.7).
+// gemini/goose/agy-style backends use dots (claude-opus-4.7).
+//
+// copilot does NOT take the blind trailing-digits dot-rewrite below: the
+// Copilot CLI's --model nomenclature mixes separators per model family
+// (claude-fable-5 is DASHED, claude-opus-4.6 is DOTTED), so the rewrite
+// corrupted every dashed-family id — verified live, copilot CLI v1.0.78
+// rejected the rewritten `claude-fable.5` ("is not available") and fell back
+// to a different model (#4262). copilot instead uses the alias-based
+// CanonicalizeCopilotModel (copilot_models.go), which normalizes separator
+// drift against the known CLI-accepted list in both directions and passes
+// unknown ids through verbatim. Applied here — at launch time — so an
+// already-stored bad id self-corrects on existing spokes without operator
+// action.
 //
 // Self-hosted inference backends (vllm, llm-d, litellm) are the outbound
 // gateway model id verbatim — the string must match an entitled model on the
@@ -5784,6 +5903,9 @@ func (m *Manager) ensureWorldWritable(root string) {
 func normalizeModelName(model, backend string) string {
 	if backend == "claude" || backend == bobBackend || IsInferenceBackend(backend) {
 		return model
+	}
+	if backend == "copilot" {
+		return CanonicalizeCopilotModel(model)
 	}
 	idx := strings.LastIndex(model, "-")
 	if idx < 0 || idx == len(model)-1 {
@@ -6279,25 +6401,47 @@ func (m *Manager) AuthorizeMerge(agentName string, fileUID int) error {
 	return nil
 }
 
-// InvocationMetadata reports the effective backend and model the hive invokes
-// for the named agent, accounting for runtime overrides — the launch-time
-// truth the invocation-attribution trail records (see pkg/github/attribution
+// InvocationMetadata reports the effective backend, model, and reasoning effort
+// the hive invokes for the named agent, accounting for runtime overrides — the
+// launch-time truth the invocation-attribution trail records (see pkg/github/attribution
 // .go). ok=false when the agent is unknown to the manager (the caller then
 // falls back to static config). Read-only under RLock; called from the
 // PR-request watcher goroutine, never from the launch path.
-func (m *Manager) InvocationMetadata(agentName string) (backend, model string, ok bool) {
+func (m *Manager) InvocationMetadata(agentName string) (backend, model, effort string, ok bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	agent, exists := m.agents[agentName]
 	if !exists {
-		return "", "", false
+		return "", "", "", false
 	}
 	backend = effectiveBackend(agent)
 	model = agent.Config.Model
 	if agent.ModelOverride != "" {
 		model = agent.ModelOverride
 	}
-	return backend, model, true
+	return backend, model, ResolveReasoningEffort(backend, model), true
+}
+
+// ResolveReasoningEffort reports the reasoning effort the hive actually launches
+// a given backend/model pair with. Exported because the attribution trail is
+// resolved in TWO places — Manager.InvocationMetadata above for a running agent,
+// and cmd/hive's fallback that reads straight from config when the Manager does
+// not know the agent — and both must give the same answer.
+//
+// Before this existed the fallback carried its own hardcoded "low", so changing
+// agyDefaultEffort here would have left cmd/hive silently stamping PRs with an
+// effort agy was no longer being launched with. An attribution trail that
+// misreports is worse than one that says nothing.
+//
+// agy is the only backend with a rule: it REQUIRES --effort whenever --model is
+// given (without it agy ignores the model outright), and it is given no --effort
+// at all when no model is set. Every other backend takes its effort from its own
+// config, which the hive does not resolve here, so the honest answer is "".
+func ResolveReasoningEffort(backend, model string) string {
+	if backend == "agy" && model != "" {
+		return agyDefaultEffort
+	}
+	return ""
 }
 
 // filteredEnv returns os.Environ() with write-capable tokens removed for advisory agents.
@@ -6921,6 +7065,13 @@ func (m *Manager) RestartWithBootstrap(ctx context.Context, name, prompt string)
 		}
 	}
 
+	// Archive the outgoing session's kick output before the session is killed
+	// below — kill-session destroys the scrollback (#4295/#4296).
+	if agent.kickLogPending {
+		m.archiveKickLogLocked(agent, "restart")
+		agent.kickLogPending = false
+	}
+
 	// Terminate the agent's CLI process(es) before recreating the session.
 	// reapAgentCLI matches by the HIVE_AGENT env marker, so it works whether or
 	// not UID isolation is enabled. killAgentProcesses (UID-based) is only safe
@@ -7206,6 +7357,14 @@ func (m *Manager) Restart(ctx context.Context, name string) error {
 		}
 	}
 
+	// Archive the outgoing session's kick output BEFORE anything below kills
+	// the CLI or the session — kill-session destroys the scrollback and with
+	// it the only record of the previous run (#4295/#4296).
+	if agent.kickLogPending {
+		m.archiveKickLogLocked(agent, "restart")
+		agent.kickLogPending = false
+	}
+
 	// Terminate the agent's CLI process(es) before recreating the session.
 	// reapAgentCLI matches by the HIVE_AGENT env marker, so it works whether or
 	// not UID isolation is enabled. killAgentProcesses (UID-based) is only safe
@@ -7370,6 +7529,15 @@ func (m *Manager) SetModelOverride(name, model string) error {
 	agent, ok := m.agents[name]
 	if !ok {
 		return fmt.Errorf("agent %s not found", name)
+	}
+
+	// Store the CLI-accepted spelling for copilot so the persisted selection,
+	// the dropdown preselect, and auto-heal all agree on one canonical id
+	// (separator drift like claude-fable.5 vs claude-fable-5, #4262). Launch
+	// re-applies the same canonicalization, so even ids stored before this
+	// existed self-correct there.
+	if agent.effectiveBackend() == "copilot" {
+		model = CanonicalizeCopilotModel(model)
 	}
 
 	// A pin blocks the governor's auto-selection, never a user's explicit

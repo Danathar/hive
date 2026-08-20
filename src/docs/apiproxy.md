@@ -6,8 +6,8 @@ for requests/responses and SSE chunks.
 
 Two independent credentials are involved:
 
-- **Client auth token** (`PROXY_AUTH_TOKEN`) — what callers must present *to the
-  proxy*. When it is set, every request must carry either
+- **Client auth token** (`PROXY_AUTH_TOKEN`) — **required**; what callers must
+  present *to the proxy*. Every request must carry either
   `Authorization: Bearer <PROXY_AUTH_TOKEN>` or `X-Api-Key: <PROXY_AUTH_TOKEN>`,
   otherwise the proxy returns `401 Unauthorized` without logging or forwarding
   the request. The comparison is constant time. The gate token is stripped from
@@ -19,8 +19,12 @@ Two independent credentials are involved:
   forwarded as-is. This preserves the dummy-key workflow used by agent CLIs.
 
 The two are deliberately separate so that the host upstream key is never an
-implicit credential for anyone who can reach the listener. If `PROXY_AUTH_TOKEN`
-is unset the proxy is an open relay and logs a warning at startup.
+implicit credential for anyone who can reach the listener. The proxy fails
+closed: if `PROXY_AUTH_TOKEN` is unset, `cmd/apiproxy` exits with an error at
+startup, and the proxy handler refuses every request with
+`503 Service Unavailable` rather than acting as an open relay. Otherwise any
+co-resident loopback process — including a prompt-injected agent — could spend
+the host `ANTHROPIC_API_KEY` unauthenticated.
 
 ## Run
 
@@ -46,7 +50,7 @@ Environment:
 
 | Name | Purpose |
 |---|---|
-| `PROXY_AUTH_TOKEN` | Client auth token callers must present to the proxy (`Authorization: Bearer <token>` or `X-Api-Key: <token>`). Validated with a constant-time compare and stripped before the upstream request. When unset, the proxy accepts unauthenticated callers and logs a warning. |
+| `PROXY_AUTH_TOKEN` | **Required.** Client auth token callers must present to the proxy (`Authorization: Bearer <token>` or `X-Api-Key: <token>`). Validated with a constant-time compare and stripped before the upstream request. When unset, `cmd/apiproxy` refuses to start and the proxy handler answers `503`. |
 | `ANTHROPIC_API_KEY` | Upstream API key injected on the outbound request when the caller did not supply its own real upstream credential. Never used to authenticate callers. |
 
 ## Deployment notes
@@ -54,7 +58,7 @@ Environment:
 The binary listens on `127.0.0.1:<port>` by default. Treat `--host 0.0.0.0` as
 an explicit compatibility opt-in for deployments that need cross-container or
 cross-pod access, and pair it with network policy/firewall controls.
-Always configure `PROXY_AUTH_TOKEN` in production: without it the proxy accepts
-any caller and will happily lend them the host `ANTHROPIC_API_KEY`. Use a
+`PROXY_AUTH_TOKEN` is mandatory: without it the proxy would accept any caller
+and lend them the host `ANTHROPIC_API_KEY`, so the binary refuses to start. Use a
 high-entropy random value distinct from the upstream key, and rotate the two
 independently.
