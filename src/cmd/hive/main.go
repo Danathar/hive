@@ -74,6 +74,7 @@ import (
 	"github.com/kubestellar/hive/pkg/pushbroker"
 	"github.com/kubestellar/hive/pkg/retro"
 	"github.com/kubestellar/hive/pkg/review"
+	"github.com/kubestellar/hive/pkg/rotation"
 	"github.com/kubestellar/hive/pkg/scheduler"
 	"github.com/kubestellar/hive/pkg/snapshot"
 	"github.com/kubestellar/hive/pkg/timeline"
@@ -82,6 +83,7 @@ import (
 	"github.com/kubestellar/hive/pkg/tracing"
 	"github.com/kubestellar/hive/pkg/trajectory"
 	"github.com/kubestellar/hive/pkg/watsonx"
+	"github.com/kubestellar/hive/pkg/worksource"
 	"go.opentelemetry.io/otel/attribute"
 )
 
@@ -1074,9 +1076,17 @@ func main() {
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	// preShutdownHook, when set, runs in the signal handler before the context
+	// is canceled. It is stored after the agent manager exists and archives
+	// every agent's in-flight kick log to /data so a pod roll or hive upgrade
+	// does not destroy the latest run's scrollback (#4296).
+	var preShutdownHook atomic.Pointer[func()]
 	go func() {
 		sig := <-sigCh
 		logger.Info("received signal, shutting down", "signal", sig)
+		if fn := preShutdownHook.Load(); fn != nil {
+			(*fn)()
+		}
 		cancel()
 	}()
 
@@ -1342,6 +1352,10 @@ func main() {
 		AppAuthoredPRs:  cfg.GitHub.AppAuthoredPRsEnabled(),
 	}
 	agentMgr := agent.NewManager(cfg.EnabledAgents(), logger, projectCtx)
+	// SIGTERM (pod roll, hive upgrade) destroys every tmux server and with it
+	// the in-flight kick's scrollback; archive it to /data first (#4296).
+	archiveOnShutdown := func() { agentMgr.ArchiveAllKickLogs("shutdown") }
+	preShutdownHook.Store(&archiveOnShutdown)
 	agentMgr.SetSandboxConfig(cfg.AgentSandbox)
 	// Treat any configured gateway name as an inference-routable backend so an
 	// agent with backend: <gateway> routes through it. Resolution is live
@@ -1388,8 +1402,14 @@ func main() {
 	if appAuth != nil {
 		agentMgr.SetAppAuth(appAuth)
 		agentMgr.SetSandboxPushMinter(pushbroker.GitHubAppMinter{Auth: appAuth})
-		go agentMgr.StartAgentTokenRefresh(ctx)
 	}
+	// Start the per-agent token refresh loop UNCONDITIONALLY. It no-ops until
+	// App auth is wired, and on hosted spokes that wiring happens AFTER boot
+	// (heartbeat delivery / config API reinit / config reload). Gating this on
+	// appAuth != nil at boot meant those hives never refreshed per-agent token
+	// caches: agent sessions outlived their scoped token, gh 401'd and printed
+	// "gh auth login", and the login-detector auto-paused the agent (#4072).
+	go agentMgr.StartAgentTokenRefresh(ctx)
 	if ghClient != nil {
 		agentMgr.SetSandboxPRClient(ghClient)
 	}
@@ -1416,10 +1436,14 @@ func main() {
 		// lazily per backend and cached. Only launch descriptors flow here —
 		// never tokens, keys, or prompt content.
 		ghClient.SetAttributionResolver(func(agentName string) github.InvocationMeta {
-			backend, model, known := agentMgr.InvocationMetadata(agentName)
+			backend, model, effort, known := agentMgr.InvocationMetadata(agentName)
 			if !known {
 				if ac, inCfg := cfg.Agents[agentName]; inCfg {
 					backend, model = ac.Backend, ac.Model
+					// Same resolver the Manager uses, not a second copy of the
+					// rule: a hardcoded default here would drift silently the
+					// moment agy's default effort changed.
+					effort = agent.ResolveReasoningEffort(backend, model)
 				}
 			}
 			tool, toolVersion := github.ResolveToolVersion(backend)
@@ -1430,6 +1454,7 @@ func main() {
 				// "auto" — see github.RequestedModel for the known follow-up
 				// on discovering bob's internal routing.
 				Model:       github.RequestedModel(backend, model),
+				Effort:      effort,
 				Tool:        tool,
 				ToolVersion: toolVersion,
 			}
@@ -2205,6 +2230,17 @@ func main() {
 		}
 	}
 
+	// Provider rotation (RFC #3958): opt-in automatic failover when a
+	// provider's subscription/credit is exhausted. Nil when disabled.
+	var rotationMgr *rotation.Manager
+	if cfg.Governor.Rotation.Enabled {
+		rotationMgr = rotation.NewManager(cfg.Governor.Rotation)
+		rotationMgr.Start(ctx)
+		logger.Info("provider rotation enabled",
+			"threshold_pct", cfg.Governor.Rotation.EffectiveThreshold(),
+			"providers", len(cfg.Governor.Rotation.Providers))
+	}
+
 	dashSrv.RegisterAPI(&dashboard.Dependencies{
 		Config:           cfg,
 		AgentMgr:         agentMgr,
@@ -2217,6 +2253,7 @@ func main() {
 		Nous:             nousState,
 		Scheduler:        sched,
 		MetricsCollector: metricsCollector,
+		RotationMgr:      rotationMgr,
 		// #3972: hand the ACMM advisor the SAME cached fleet-stats collector
 		// the heartbeat reads, so its merge-success signal reuses the existing
 		// 30-minute collect loop instead of issuing a second GitHub fetch.
@@ -2301,6 +2338,10 @@ func main() {
 			ghClient = newClient
 			appAuth = newAppAuth
 			agentMgr.SetAppAuth(newAppAuth)
+			// Deliver fresh per-agent scoped tokens to already-running agents
+			// immediately — the periodic refresh loop only ticks every 40m,
+			// far too long for agents whose caches are empty or stale (#4072).
+			go agentMgr.RefreshAgentTokens(ctx)
 			dashSrv.UpdateGitHubClient(newClient, newAppAuth)
 			logger.Info("github client reinitialized via config API", "app_id", newAppID, "installation_id", newInstallationID)
 
@@ -2724,6 +2765,8 @@ func main() {
 					ghClient = newClient
 					appAuth = newAppAuth
 					agentMgr.SetAppAuth(newAppAuth)
+					// Immediate per-agent token delivery — see #4072.
+					go agentMgr.RefreshAgentTokens(ctx)
 					agentMgr.SetSandboxPushMinter(pushbroker.GitHubAppMinter{Auth: newAppAuth})
 					agentMgr.SetSandboxPRClient(newClient)
 					dashSrv.UpdateGitHubClient(newClient, newAppAuth)
@@ -3268,6 +3311,17 @@ func main() {
 					_, _, errMsg := dashSrv.AdvisoryState()
 					return errMsg
 				}(),
+				// Digest SHAPE: how many findings went out, and how many the
+				// top-N cap withheld. The hub renders the pair so a capped
+				// digest never reads as the complete picture.
+				AdvisoryFindingCount: func() int {
+					findings, _ := dashSrv.AdvisoryCounts()
+					return findings
+				}(),
+				AdvisoryOverflowCount: func() int {
+					_, overflow := dashSrv.AdvisoryCounts()
+					return overflow
+				}(),
 				// Inference-backend auth-failure signal (repeated 401s from a
 				// stale gateway key). Reported as its own field so the hub can
 				// raise a dedicated inference-auth alert whose ROOT cause an
@@ -3285,7 +3339,12 @@ func main() {
 				PrimaryRepo:             cfg.Project.PrimaryRepo,
 				ACMMLevel:               acmmLvl,
 				Agents:                  agents,
-				Governor:                hub.GovernorSummary{Mode: string(govState.Mode), Issues: govState.QueueIssues, PRs: govState.QueuePRs},
+				Governor: hub.GovernorSummary{Mode: string(govState.Mode), Issues: govState.QueueIssues, PRs: govState.QueuePRs, WorkSource: func() string {
+					if t := cfg.Governor.WorkSource.Type; t != "" && t != "github" {
+						return t
+					}
+					return ""
+				}()},
 				// Tokens carries the spoke's authoritative cumulative token
 				// total (same store the dashboard token panel and governor
 				// budget read). It flows to the hub's My Hives token column so
@@ -3896,6 +3955,11 @@ func main() {
 				ghClient = newClient
 				appAuth = newAppAuth
 				agentMgr.SetAppAuth(newAppAuth)
+				// Immediate per-agent token delivery: hosted spokes get their
+				// App creds via this heartbeat path AFTER agents have already
+				// launched (with empty 0-byte caches), so waiting for the next
+				// 40-minute tick guarantees a window of gh 401s (#4072).
+				go agentMgr.RefreshAgentTokens(ctx)
 				dashSrv.UpdateGitHubClient(newClient, newAppAuth)
 				dashSrv.SetGitHubAppRequired(false)
 				dashSrv.ClearPendingGitHubAppInstall()
@@ -4143,7 +4207,7 @@ func main() {
 		}
 	}
 	// Clear any legacy "not configured" banner alert persisted by an older
-	// build. The half-configured state is shown inline in Governor Config →
+	// build. The half-configured state is shown inline in Settings →
 	// General, not in the top banner.
 	dashSrv.ReconcileTrajectoryAlert(&cfg.Governor)
 
@@ -4245,6 +4309,7 @@ func main() {
 	// entries, and every cadenced agent is still kicked here, unchanged.
 	logger.Info("startup honors persisted cadence state — first eval kicks only agents whose cadence has elapsed")
 	runEvalCycle(ctx, cfg, ghClient, gov, sched, agentMgr, dashSrv, notifier, beadStores, tokenCollector, metricsCollector, nousState, &lastActionable, advisoryStore, advisoryIssues, nil, logger)
+	runRotationCheck(ctx, cfg, rotationMgr, gov, agentMgr, logger)
 	runAutoMergeSweepIfDue(ctx, ghClient, dashSrv, &lastAutoMergeSweep, logger)
 	persistState(agentMgr, gov, cfg, tokenCollector, statePath, logger, dashSrv)
 
@@ -4286,6 +4351,7 @@ func main() {
 				}
 			}
 			runEvalCycle(ctx, cfg, ghClient, gov, sched, agentMgr, dashSrv, notifier, beadStores, tokenCollector, metricsCollector, nousState, &lastActionable, advisoryStore, advisoryIssues, restarted, logger)
+			runRotationCheck(ctx, cfg, rotationMgr, gov, agentMgr, logger)
 			runAutoMergeSweepIfDue(ctx, ghClient, dashSrv, &lastAutoMergeSweep, logger)
 			// Trajectory review runs after the eval cycle (so kicks/intents are
 			// current) on its own cadence, gated by Due().
@@ -4738,6 +4804,42 @@ func classifyGitHubAppWriteForbidden(ctx context.Context, appAuth *github.AppAut
 	return d.Message(), github.AppStateWriteForbidden
 }
 
+// primaryAdvisoryRepo returns the repo the advisory digest is posted to: the
+// configured primary repo, falling back to the first listed repo. Shared by the
+// boot ensure, the per-cycle re-ensure, and the post path so all three can never
+// disagree about WHICH repo's pinned issue the digest belongs to.
+func primaryAdvisoryRepo(cfg *config.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	if cfg.Project.PrimaryRepo != "" {
+		return cfg.Project.PrimaryRepo
+	}
+	if len(cfg.Project.Repos) > 0 {
+		return cfg.Project.Repos[0]
+	}
+	return ""
+}
+
+// advisoryIssueUnresolved reports whether the pinned advisory issue for repo is
+// still unknown, i.e. the digest has nowhere to go. A recorded 0 counts as
+// unresolved: it is the zero value a failed ensure would leave behind, and
+// posting to issue 0 is not a thing.
+func advisoryIssueUnresolved(advisoryIssues map[string]int, repo string) bool {
+	num, ok := advisoryIssues[repo]
+	return !ok || num <= 0
+}
+
+// advisoryIssueMissingError is the error recorded (and reported to the hub) when
+// a hive has findings to publish but no advisory issue to publish them to. It is
+// deliberately an ERROR rather than a silent skip: the hub's staleness gate
+// treats a hive reporting neither a post time nor an error as "not an advisory
+// participant" and never alarms, which is how a wedged digest went unnoticed for
+// six days in #4167.
+func advisoryIssueMissingError(repo string) string {
+	return fmt.Sprintf("no advisory issue resolved for %s — digest not posted", repo)
+}
+
 func runEvalCycle(
 	ctx context.Context,
 	cfg *config.Config,
@@ -4773,17 +4875,25 @@ func runEvalCycle(
 		return
 	}
 
-	if dashSrv.IsGitHubAppRequired() {
-		primaryRepo := cfg.Project.PrimaryRepo
-		if primaryRepo == "" && len(cfg.Project.Repos) > 0 {
-			primaryRepo = cfg.Project.Repos[0]
-		}
-		if primaryRepo != "" && ghClient != nil {
+	// Re-ensure the pinned advisory issue whenever it is still unresolved, not
+	// only while the App banner is up (#4167). The startup ensure can fail for
+	// reasons that deliberately do NOT raise that banner — a rate limit, a 5xx,
+	// a search-API blip — and the old gate meant such a hive kept an empty
+	// advisoryIssues map for the rest of the process lifetime: every later
+	// digest silently found no issue to post to, so the pinned comment froze at
+	// whatever it last said. Retrying here is cheap (one search per eval cycle
+	// only while unresolved, nothing once resolved) and is the difference
+	// between a transient boot error and a permanently wedged digest.
+	if primaryRepo := primaryAdvisoryRepo(cfg); primaryRepo != "" && ghClient != nil {
+		if advisoryIssueUnresolved(advisoryIssues, primaryRepo) {
 			num, retryErr := ghClient.EnsureAdvisoryIssue(ctx, primaryRepo)
 			if retryErr == nil {
 				advisoryIssues[primaryRepo] = num
 				os.Setenv("HIVE_ADVISORY_ISSUE", fmt.Sprintf("%d", num))
-				logger.Info("advisory issue created on retry", "repo", primaryRepo, "number", num)
+				logger.Info("advisory issue resolved on retry", "repo", primaryRepo, "number", num)
+			} else {
+				logger.Warn("advisory issue still unresolved — digest cannot be posted this cycle",
+					"repo", primaryRepo, "error", retryErr)
 			}
 		}
 	}
@@ -4794,6 +4904,27 @@ func runEvalCycle(
 	if err != nil {
 		logger.Error("failed to enumerate actionable items", "error", err)
 		return
+	}
+
+	// If a non-default work source is configured, overlay its issues onto
+	// the actionable result. PRs always come from GitHub.
+	if wsType := cfg.Governor.WorkSource.Type; wsType != "" && wsType != "github" {
+		ghToken := cfg.GitHub.Token
+		if ghToken == "" {
+			ghToken = os.Getenv("HIVE_GITHUB_TOKEN")
+		}
+		ws, wsErr := worksource.FromConfig(cfg.Governor.WorkSource, ghClient, ghToken, cfg.Project.Org, logger)
+		if wsErr != nil {
+			logger.Warn("work_source config error, falling back to GitHub Issues", "error", wsErr)
+		} else if wsIssues, listErr := ws.ListIssues(ctx); listErr != nil {
+			logger.Warn("work_source enumeration failed, falling back to GitHub Issues", "source", ws.SourceType(), "error", listErr)
+		} else {
+			// Replace the Issues portion of actionable with worksource results.
+			actionable.Issues = github.IssueResult{
+				Count: len(wsIssues),
+				Items: worksource.ToGitHubIssues(wsIssues),
+			}
+		}
 	}
 
 	ghClient.EnrichCIStatus(ctx, actionable.PRs.Items)
@@ -5039,7 +5170,7 @@ func runEvalCycle(
 	}
 
 	// Scan agent panes for login-required patterns and pause + notify if detected
-	scanForLoginRequired(cfg, agentMgr, notifier, dashSrv, logger)
+	scanForLoginRequired(ctx, cfg, agentMgr, notifier, dashSrv, logger)
 
 	agentStatuses := agentMgr.AllStatuses()
 
@@ -5121,7 +5252,23 @@ func runEvalCycle(
 
 	// Advisory digest: build from beads (the source of truth) before status broadcast.
 	if len(beadStores) > 0 {
-		digest := advisory.BuildDigestFromBeads(beadStores, string(govState.Mode))
+		// Retire findings no agent has re-reported inside the staleness window
+		// BEFORE the digest is built, so a stale finding never appears in the
+		// comment one last time after it has been proven gone. Agents re-file a
+		// finding for as long as its condition holds (beads.Store.Upsert), so
+		// silence is the evidence here.
+		advCfg := cfg.Governor.Advisory
+		if advCfg.StalenessDays > 0 {
+			if pruned := advisory.PruneStaleAdvisoryBeads(beadStores, time.Duration(advCfg.StalenessDays)*24*time.Hour); len(pruned) > 0 {
+				logger.Info("closed stale advisory findings not re-reported within the staleness window",
+					"count", len(pruned), "staleness_days", advCfg.StalenessDays, "titles", strings.Join(pruned, "; "))
+			}
+		}
+		digestOpts := advisory.DigestOptions{
+			MaxFindings: advCfg.MaxFindings,
+			ShowAll:     advCfg.ShowAll,
+		}
+		digest := advisory.BuildDigestFromBeads(beadStores, string(govState.Mode), digestOpts)
 		if advisoryStore != nil {
 			advisoryStore.SetLatestDigest(digest)
 		}
@@ -5153,10 +5300,7 @@ func runEvalCycle(
 				"resolved_count", len(digest.RecentlyResolved),
 			)
 
-			primaryRepo := cfg.Project.PrimaryRepo
-			if primaryRepo == "" && len(cfg.Project.Repos) > 0 {
-				primaryRepo = cfg.Project.Repos[0]
-			}
+			primaryRepo := primaryAdvisoryRepo(cfg)
 			// Repo entries may be org-qualified ("org/repo"); the digest
 			// linkifier needs the bare repo name alongside the org.
 			org, repoName := cfg.Project.Org, primaryRepo
@@ -5207,7 +5351,12 @@ func runEvalCycle(
 				}
 			}
 
-			md := advisory.FormatDigestMarkdown(digest, org, repoName)
+			md := advisory.FormatDigestMarkdown(digest, advisory.DigestOptions{
+				MaxFindings: digestOpts.MaxFindings,
+				ShowAll:     digestOpts.ShowAll,
+				Org:         org,
+				PrimaryRepo: repoName,
+			})
 			if md != "" {
 				if issueNum, ok := advisoryIssues[primaryRepo]; ok && issueNum > 0 {
 					// Prefer the App client as the PRIMARY poster. The App
@@ -5275,6 +5424,7 @@ func runEvalCycle(
 						// Record the fresh, successful digest post so the hub's
 						// advisory-staleness gate stays satisfied for this hive.
 						dashSrv.RecordAdvisoryPost(digest.TotalCount)
+						dashSrv.RecordAdvisoryOverflow(digest.OverflowCount)
 						// A successful write proves the app is installed AND has
 						// write access — clear BOTH the perm issue and the
 						// app-required banner flag. Previously only the perm
@@ -5298,7 +5448,68 @@ func runEvalCycle(
 							logger.Info("closed healed GitHub App access findings after successful App digest post",
 								"count", len(healed), "titles", strings.Join(healed, "; "))
 						}
+						// Repo-ACCESS findings ("no clone mechanism", "no
+						// repository access mechanism in L2 advisory mode",
+						// …) are the second #2575 family: true before #4291
+						// gave advisory tiers Contents:read and a working
+						// credential-helper fetch, but a digest post only
+						// proves issues:WRITE, so they need their own proof.
+						// Verify with a real advisor-scoped Contents read of
+						// the repo each finding names (or the primary repo
+						// when it names none), memoized per repo — a finding
+						// about a repo the hive genuinely cannot read stays
+						// open.
+						readVerified := map[string]bool{}
+						canRead := func(ownerRepo string) bool {
+							target := ownerRepo
+							if target == "" {
+								target = primaryRepo
+							}
+							owner, name := cfg.Project.Org, target
+							if i := strings.LastIndex(target, "/"); i > 0 {
+								owner, name = target[:i], target[i+1:]
+							}
+							if owner == "" || name == "" {
+								return false
+							}
+							key := owner + "/" + name
+							if v, ok := readVerified[key]; ok {
+								return v
+							}
+							appAuth := ghClient.AppAuth()
+							if appAuth == nil {
+								// Static-token client: no advisor-tier token
+								// can be minted, so the read path cannot be
+								// verified — leave the finding open.
+								return false
+							}
+							err := appAuth.VerifyRepoRead(ctx, owner, name)
+							if err != nil {
+								logger.Info("repo-access finding left open: advisor read probe failed",
+									"repo", key, "error", err)
+							}
+							readVerified[key] = err == nil
+							return readVerified[key]
+						}
+						if healed := advisory.CloseHealedRepoAccessFindings(beadStores, canRead); len(healed) > 0 {
+							logger.Info("closed healed repo-access findings after verified advisory read path",
+								"count", len(healed), "titles", strings.Join(healed, "; "))
+						}
 					}
+				} else {
+					// No pinned advisory issue for this repo, yet there IS
+					// something to publish. This used to be a completely silent
+					// skip (#4167): the digest stopped updating, the spoke
+					// reported neither a post time nor an error, and the hub's
+					// staleness gate therefore read the hive as "not an advisory
+					// participant" and never raised the pill — a wedged digest
+					// that looked exactly like a healthy PR-only hive. Record it
+					// as a post FAILURE so the hub flags the hive stale with the
+					// real cause, and log it once per cycle for the operator.
+					msg := advisoryIssueMissingError(primaryRepo)
+					dashSrv.RecordAdvisoryError(msg)
+					logger.Warn("advisory digest not posted: no pinned advisory issue",
+						"repo", primaryRepo, "findings", digest.TotalCount)
 				}
 			}
 		}
@@ -5346,6 +5557,7 @@ func loginCommandForBackend(backend string) string {
 // scanForLoginRequired checks each running agent's tmux pane output for login-required
 // patterns. When a match is found, the agent is paused and a notification is sent.
 func scanForLoginRequired(
+	ctx context.Context,
 	cfg *config.Config,
 	agentMgr *agent.Manager,
 	notifier *notify.Notifier,
@@ -5393,6 +5605,17 @@ func scanForLoginRequired(
 					"agent", name,
 					"pattern", re.String(),
 				)
+
+				// Attempt a per-agent token re-cache BEFORE pausing. On an
+				// App-authenticated hive the likeliest cause of a "gh auth
+				// login" prompt is an expired scoped-token cache (#4072);
+				// re-minting it now means the operator's Resume immediately
+				// works instead of 401ing straight back into this pause.
+				// Best-effort: hives without App auth (or agents without a
+				// dedicated UID) simply skip it.
+				if refreshErr := agentMgr.RefreshAgentTokenFor(ctx, name); refreshErr == nil {
+					logger.Info("re-cached per-agent scoped token before login-detector pause", "agent", name)
+				}
 
 				// Pause the agent instead of restarting
 				if pauseErr := agentMgr.Pause(name, "login-detector", "login required detected"); pauseErr != nil {
@@ -6006,6 +6229,73 @@ func trustedMergerFunc(cfg *config.Config) github.MergerAuthorizer {
 // trust, the trusted-merger tier gate (SetMergerAuthorizer), check
 // verification — live inside SweepQueuedAutoMerges; this function is only the
 // scheduler and the dashboard audit sink.
+// rotationTrigger is the PausedTrigger stamped on strand-pauses so rotation's
+// auto-resume never resumes a pause it did not create.
+const rotationTrigger = "provider-rotation"
+
+// runRotationCheck applies RFC #3958 provider rotation after an eval cycle:
+// for each agent not mid-task whose provider was positively measured as
+// exhausted, move it to a backend with headroom at the same tier; when
+// nothing has headroom, pause it loudly (strand). Stranded agents are
+// auto-resumed when their provider recovers headroom. Never runs mid-task:
+// only idle agents are candidates.
+func runRotationCheck(ctx context.Context, cfg *config.Config, rotMgr *rotation.Manager, gov *governor.Governor, agentMgr *agent.Manager, logger *slog.Logger) {
+	if rotMgr == nil || !cfg.Governor.Rotation.Enabled {
+		return
+	}
+	govState := gov.GetState()
+	for name, proc := range agentMgr.AllStatuses() {
+		backend := proc.Config.Backend
+		if proc.BackendOverride != "" {
+			backend = proc.BackendOverride
+		}
+
+		// Auto-resume: a stranded agent whose provider recovered.
+		if proc.Paused && proc.PausedTrigger == rotationTrigger {
+			if rotMgr.StrandRecovered(backend) {
+				if err := agentMgr.Resume(ctx, name, rotationTrigger, "provider headroom recovered"); err != nil {
+					logger.Warn("rotation: auto-resume failed", "agent", name, "error", err)
+				} else {
+					logger.Info("rotation: auto-resumed stranded agent", "agent", name, "backend", backend)
+				}
+			}
+			continue
+		}
+		if proc.Paused {
+			continue // never touch an operator pause
+		}
+		// Never rotate mid-task: only idle agents are candidates.
+		if proc.State == agent.StateRunning {
+			continue
+		}
+
+		cadenceS := 0
+		if c, ok := govState.Cadences[name]; ok && c.Interval > 0 {
+			cadenceS = int(c.Interval / time.Second)
+		}
+
+		if !rotMgr.Exhausted(backend) {
+			continue
+		}
+		next := rotMgr.NextBackendForCadence(name, backend, cadenceS)
+		if next == "" {
+			// Strand loudly: pause so the agent burns nothing until a
+			// provider recovers; the loop above auto-resumes it.
+			if err := agentMgr.Pause(name, rotationTrigger, "no provider has headroom (RFC #3958)"); err != nil {
+				logger.Warn("rotation: strand-pause failed", "agent", name, "error", err)
+			} else {
+				logger.Info("rotation: stranding agent, no headroom anywhere", "agent", name, "backend", backend)
+			}
+			continue
+		}
+		if err := agentMgr.SetBackendOverride(name, next); err != nil {
+			logger.Warn("rotation: backend override failed", "agent", name, "to", next, "error", err)
+			continue
+		}
+		logger.Info("rotation: moved agent to new backend", "agent", name, "from", backend, "to", next)
+	}
+}
+
 func runAutoMergeSweepIfDue(ctx context.Context, ghClient *github.Client, dashSrv *dashboard.Server, lastRun *time.Time, logger *slog.Logger) {
 	if ghClient == nil {
 		return

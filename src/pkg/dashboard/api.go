@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kubestellar/hive/pkg/agent"
 	"github.com/kubestellar/hive/pkg/beads"
 	"github.com/kubestellar/hive/pkg/classify"
 	"github.com/kubestellar/hive/pkg/config"
@@ -50,6 +51,7 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	s.mux.HandleFunc("PUT /api/config/variables/{name}", s.handleVariableUpsert)
 	s.mux.HandleFunc("DELETE /api/config/variables/{name}", s.handleVariableDelete)
 	s.mux.HandleFunc("GET /api/audit", s.handleAuditLog)
+	s.mux.HandleFunc("GET /api/providers/headroom", s.handleProvidersHeadroom)
 	s.mux.HandleFunc("POST /api/presence", s.handlePresence)
 	s.mux.HandleFunc("GET /api/prompt-history", s.handlePromptHistory)
 	s.mux.HandleFunc("POST /api/self-upgrade", s.handleSelfUpgrade)
@@ -70,6 +72,11 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	// Full retained scrollback of an agent's latest run, as plain text (#3693).
 	// Backs the Terminal's "view / download full log" controls.
 	s.mux.HandleFunc("GET /api/agents/{name}/log", s.handleAgentFullLog)
+	// Durable per-kick run-log history (#4296, #4295): list archived kick
+	// logs, fetch one, and a minimal HTML index page linked from agent cards.
+	s.mux.HandleFunc("GET /api/agents/{name}/kicks", s.handleAgentKickLogList)
+	s.mux.HandleFunc("GET /api/agents/{name}/kicks/{id}", s.handleAgentKickLog)
+	s.mux.HandleFunc("GET /agents/{name}/kicks", s.handleAgentKickHistoryPage)
 
 	s.mux.HandleFunc("GET /api/role", s.handleRole)
 
@@ -130,19 +137,46 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	s.mux.HandleFunc("GET /api/config/governor", s.handleGovernorConfigGet)
 	s.mux.HandleFunc("PUT /api/config/governor/sensing", s.handleGovernorSensing)
 	s.mux.HandleFunc("PUT /api/config/governor/thresholds", s.handleGovernorThresholds)
+	s.mux.HandleFunc("GET /api/config/governor/threshold-scaling", s.handleGovernorThresholdScalingGet)
 	s.mux.HandleFunc("PUT /api/config/governor/threshold-scaling", s.handleGovernorThresholdScaling)
 	s.mux.HandleFunc("PUT /api/config/governor/labels", s.handleGovernorLabels)
 	s.mux.HandleFunc("PUT /api/config/governor/budget", s.handleGovernorBudget)
 	s.mux.HandleFunc("POST /api/config/governor/budget/reset", s.handleGovernorBudgetReset)
 	s.mux.HandleFunc("PUT /api/config/governor/notifications", s.handleGovernorNotifications)
 	s.mux.HandleFunc("PUT /api/config/governor/health", s.handleGovernorHealth)
+	// Escalation breaker is a top-level Config field (not GovernorConfig), but
+	// its UI lives on the governor Health tab — see api_escalation.go.
+	s.mux.HandleFunc("GET /api/config/escalation", s.handleEscalationGet)
+	s.mux.HandleFunc("PUT /api/config/escalation", s.handleEscalationPut)
+	// Review-swarm merge gate is a top-level Config field (not GovernorConfig),
+	// but its UI lives on the governor Features tab — see api_config_review.go.
+	s.mux.HandleFunc("GET /api/config/review", s.handleReviewConfigGet)
+	s.mux.HandleFunc("PUT /api/config/review", s.handleReviewConfigPut)
 	s.mux.HandleFunc("PUT /api/config/governor/logging", s.handleGovernorLogging)
 	s.mux.HandleFunc("PUT /api/config/governor/attribution", s.handleGovernorAttribution)
 	s.mux.HandleFunc("PUT /api/config/governor/hub", s.handleGovernorHub)
 	s.mux.HandleFunc("PUT /api/config/governor/litellm", s.handleGovernorLiteLLM)
 	s.mux.HandleFunc("PUT /api/config/governor/trajectory", s.handleGovernorTrajectory)
 	s.mux.HandleFunc("PUT /api/config/governor/features", s.handleGovernorFeatures)
+	s.mux.HandleFunc("GET /api/config/governor/general-advanced", s.handleGovernorGeneralAdvancedGet)
+	s.mux.HandleFunc("PUT /api/config/governor/general-advanced", s.handleGovernorGeneralAdvancedPut)
+
+	// auto_merge is a top-level Config field (not GovernorConfig), but its UI
+	// lives on the governor Features tab — see api_config_automerge.go.
+	s.mux.HandleFunc("GET /api/config/auto-merge", s.handleAutoMergeGet)
+	s.mux.HandleFunc("PUT /api/config/auto-merge", s.handleAutoMergePut)
+	s.mux.HandleFunc("GET /api/config/governor/advisory", s.handleGovernorAdvisoryGet)
+	s.mux.HandleFunc("PUT /api/config/governor/advisory", s.handleGovernorAdvisoryPut)
+	s.mux.HandleFunc("GET /api/config/governor/replan", s.handleGovernorReplanGet)
+	s.mux.HandleFunc("PUT /api/config/governor/replan", s.handleGovernorReplanPut)
+	s.mux.HandleFunc("GET /api/config/governor/work-source", s.handleGovernorWorkSourceGet)
+	s.mux.HandleFunc("PUT /api/config/governor/work-source", s.handleGovernorWorkSourcePut)
 	s.mux.HandleFunc("PUT /api/config/governor/security", s.handleGovernorSecurity)
+	// Backup encryption key: presence-only status, set, and clear. The key
+	// value is never returned by any of these (#4129).
+	s.mux.HandleFunc("GET /api/config/governor/backup", s.handleBackupKeyStatus)
+	s.mux.HandleFunc("PUT /api/config/governor/backup", s.handleBackupKeySet)
+	s.mux.HandleFunc("DELETE /api/config/governor/backup", s.handleBackupKeyClear)
 	// bob API key: PUT sets/replaces, DELETE revokes. Both are non-GET, so the
 	// roleEnforcement middleware already 403s a read-only role — no separate
 	// authorization rule is needed or wanted here.
@@ -152,6 +186,8 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	// Live key validation (pasted or saved key) — see bob_key_probe.go.
 	s.mux.HandleFunc("POST /api/config/governor/bob/test", s.handleGovernorBobKeyTest)
 	s.mux.HandleFunc("POST /api/config/governor/litellm/test", s.handleGovernorLiteLLMTest)
+	s.mux.HandleFunc("GET /api/config/governor/inference-auth", s.handleGovernorInferenceAuthGet)
+	s.mux.HandleFunc("PUT /api/config/governor/inference-auth", s.handleGovernorInferenceAuthPut)
 	s.mux.HandleFunc("GET /api/config/governor/gateways", s.handleGovernorGatewaysList)
 	s.mux.HandleFunc("PUT /api/config/governor/gateways", s.handleGovernorGatewaysUpsert)
 	s.mux.HandleFunc("DELETE /api/config/governor/gateways/{name}", s.handleGovernorGatewaysDelete)
@@ -1284,6 +1320,12 @@ func (s *Server) validateModelForAgent(name, model string) error {
 	if len(known) == 0 {
 		return nil // cannot enumerate — do not block
 	}
+	// Copilot catalog/CLI nomenclature drifts between "." and "-" (#4262):
+	// the served list is canonical, so compare the canonicalized candidate
+	// rather than rejecting a dotted/dashed variant of an available model.
+	if backend == "copilot" {
+		model = agent.CanonicalizeCopilotModel(model)
+	}
 	for _, id := range known {
 		if id == model {
 			return nil
@@ -1388,10 +1430,11 @@ func pauseToggleResponse(w http.ResponseWriter, status, agent string, changed, p
 // requireOwnerRole returns true when authenticate established owner-level access.
 // A client-supplied X-Hive-Role is not enough: authenticate strips inbound role
 // headers before auth and sets ownerRoleVerifiedHeader only for trusted owner
-// sessions or proof-verified hub proxy identities. Owner-only mutations must
-// require its server-only verification marker, so legacy/proofless proxy
-// headers and shared-token requests fail closed instead of trusting spoofable
-// client input.
+// sessions, proof-verified hub proxy identities, or shared-token operators
+// (X-Hive-Internal / bearer token — possession of the secret is the owner
+// credential on those deployments). Owner-only mutations must require its
+// server-only verification marker, so legacy/proofless proxy headers fail
+// closed instead of trusting spoofable client input.
 func requireOwnerRole(w http.ResponseWriter, r *http.Request) bool {
 	role := r.Header.Get("X-Hive-Role")
 	if !isOwnerRole(role) || r.Header.Get(ownerRoleVerifiedHeader) != "true" {
@@ -2057,21 +2100,20 @@ func (s *Server) handleSSO(w http.ResponseWriter, r *http.Request) {
 	// keeps the spoke the authority on who may enter, even via SSO — a valid
 	// hub token for a user not on the allowlist is refused. The role comes from
 	// the allowlist (authoritative), not the token, so the hub can never
-	// escalate a user's role on the spoke.
-	role := tokenRole
-	if s.deps != nil && s.deps.Config != nil {
-		if allowRole, ok := s.deps.Config.Dashboard.AuthorizedRole(username); ok {
-			role = allowRole
-		} else if s.deps.Config.Dashboard.IsDirectRouteAuthzEnabled() {
-			// Allowlist is enforced and this user isn't on it → deny.
-			if s.deps.Logger != nil {
-				s.deps.Logger.Warn("sso handoff: user not authorized for this hive", "username", username)
-			}
-			writeSSOError(w, r, http.StatusForbidden, ssoErrNotAuthorized,
-				"You are signed in to the hub, but this hive's own authorized-users list does not include your account.",
-				"Ask the hive owner to grant you access to this hive, then open it again from the hub dashboard.")
-			return
+	// escalate a user's role on the spoke. liveAllowlistRole is the same shared
+	// rule authenticate re-applies on EVERY subsequent request
+	// (session_live_role.go), so the role minted here can never outlive a later
+	// Manage Access change.
+	role, authorized := s.liveAllowlistRole(username, tokenRole)
+	if !authorized {
+		// Allowlist is enforced and this user isn't on it → deny.
+		if s.deps != nil && s.deps.Logger != nil {
+			s.deps.Logger.Warn("sso handoff: user not authorized for this hive", "username", username)
 		}
+		writeSSOError(w, r, http.StatusForbidden, ssoErrNotAuthorized,
+			"You are signed in to the hub, but this hive's own authorized-users list does not include your account.",
+			"Ask the hive owner to grant you access to this hive, then open it again from the hub dashboard.")
+		return
 	}
 	if role == "" {
 		role = config.RoleRead
@@ -4109,16 +4151,22 @@ func (s *Server) handleGovernorConfigGet(w http.ResponseWriter, r *http.Request)
 			"compress":   cfg.Governor.Logging.Compress,
 			"level":      cfg.Governor.Logging.Level,
 		},
-		"litellm":    litellmSectionResponse(&cfg.Governor.LiteLLM),
-		"trajectory": trajectorySectionResponse(&cfg.Governor),
-		"classifier": classifierSectionResponse(),
-		"features":   featuresSectionResponse(cfg),
-		"security":   securitySectionResponse(cfg),
+		"litellm":     litellmSectionResponse(&cfg.Governor.LiteLLM),
+		"trajectory":  trajectorySectionResponse(&cfg.Governor),
+		"classifier":  classifierSectionResponse(),
+		"features":    featuresSectionResponse(cfg),
+		"review":      cfg.Review,
+		"auto_merge":  autoMergeSectionResponse(cfg),
+		"advisory":    advisorySectionResponse(cfg),
+		"replan":      replanSectionResponse(cfg),
+		"work_source": workSourceSectionResponse(cfg),
+		"security":    securitySectionResponse(cfg),
 		"attribution": map[string]interface{}{
 			// Effective value (default ON when unset) — the UI renders the
 			// switch from this, so an untouched hive shows it on.
 			"attributionTrailer": cfg.Governor.AttributionTrailerEnabled(),
 		},
+		"general_advanced": generalAdvancedSectionResponse(cfg),
 		"hub": map[string]interface{}{
 			"enabled": cfg.Hub.Enabled,
 			// namespace is read-only, runtime-derived display info (never
@@ -4319,6 +4367,23 @@ func (s *Server) handleGovernorThresholds(w http.ResponseWriter, r *http.Request
 	okResponse(w, map[string]string{"status": "updated"})
 }
 
+// handleGovernorThresholdScalingGet returns the configured threshold-scaling
+// curve (with its default applied) so the Thresholds tab can prefill its
+// select without loading the whole governor config payload. OWNER-ONLY,
+// matching the write side and the rest of the governor-config surface.
+func (s *Server) handleGovernorThresholdScalingGet(w http.ResponseWriter, r *http.Request) {
+	if !requireOwnerRole(w, r) {
+		return
+	}
+	if s.deps == nil || s.deps.Config == nil {
+		jsonError(w, "config unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	jsonResponse(w, map[string]string{
+		"threshold_scaling": s.deps.Config.Governor.ThresholdScalingMode(),
+	})
+}
+
 // handleGovernorThresholdScaling sets how the DEFAULT mode thresholds scale
 // with the hive's repo count (#3498).
 //
@@ -4333,13 +4398,20 @@ func (s *Server) handleGovernorThresholdScaling(w http.ResponseWriter, r *http.R
 
 	var body struct {
 		ThresholdScaling string `json:"thresholdScaling"`
+		// Snake-case alias so callers can send the same key the GET returns
+		// and the YAML config uses.
+		ThresholdScalingSnake string `json:"threshold_scaling"`
 	}
 	if err := decodeBody(r, &body); err != nil {
 		jsonError(w, "invalid body", http.StatusBadRequest)
 		return
 	}
 
-	scaling := sanitizeString(body.ThresholdScaling)
+	raw := body.ThresholdScaling
+	if raw == "" {
+		raw = body.ThresholdScalingSnake
+	}
+	scaling := sanitizeString(raw)
 	// Same gate as config.validate, so the write path cannot persist a value
 	// that fails the next config load.
 	if !config.ValidateThresholdScaling(scaling) {

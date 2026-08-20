@@ -13,23 +13,23 @@ Hive separates decisions into two layers: a **deterministic pipeline** of shell 
 - `git`, and a GitHub token (PAT or App) for the org you want the hive to work on
 
 ```bash
-git clone -b v2 https://github.com/kubestellar/hive.git
-cd hive/v2
+git clone https://github.com/kubestellar/hive.git
+cd hive
 
-cp hive.yaml.example hive.yaml
-export HIVE_GITHUB_TOKEN=ghp_...
-docker compose up -d
+cp src/hive.yaml.example src/hive.yaml
+echo "HIVE_GITHUB_TOKEN=ghp_..." > .env
+docker compose -f src/docker-compose.yaml up -d
 ```
 
 Dashboard at `http://localhost:3001`.
 
-The pre-built image tag is documented in [src/docs/operator-reference.md#image-provenance-for-ghcriokubestellarhivev2-latest](src/docs/operator-reference.md#image-provenance-for-ghcriokubestellarhivev2-latest).
+The pre-built image tag is documented in [src/docs/operator-reference.md#image-provenance-and-tags](src/docs/operator-reference.md#image-provenance-and-tags). Standalone image references come from one source of truth, [`src/deploy/standalone-images.sh`](src/deploy/standalone-images.sh).
 
 To build from source instead of pulling the pre-built image:
 
 ```bash
-docker compose build
-docker compose up -d
+docker compose -f src/docker-compose.yaml build
+docker compose -f src/docker-compose.yaml up -d
 ```
 
 ## Kubernetes Deployment
@@ -186,7 +186,7 @@ kubectl apply -f src/deploy/k8s/service.yaml
 
 ## Configuration
 
-All v2 runtime config lives in a single `hive.yaml`. Environment variables are interpolated with `${VAR}` syntax. See [src/hive.yaml.example](src/hive.yaml.example) for the full reference, [src/docs/env-vars.md](src/docs/env-vars.md) for the centralized environment variable reference, [src/docs/agent-configuration.md](src/docs/agent-configuration.md) for agent configuration, [src/AGENT-DEFINITION.md](src/AGENT-DEFINITION.md) for the portable agent YAML format, [src/docs/supervisor.md](src/docs/supervisor.md) for the supervisor agent, [docs/backend-setup.md](docs/backend-setup.md) for CLI backends, [docs/inference-backends.md](docs/inference-backends.md) for model gateways, and [docs/migration-v1-v2.md](docs/migration-v1-v2.md) for v1→v2 migration.
+All v2 runtime config lives in a single `hive.yaml`. Environment variables are interpolated with `${VAR}` syntax. See [src/hive.yaml.example](src/hive.yaml.example) for the full reference, [src/docs/env-vars.md](src/docs/env-vars.md) for the centralized environment variable reference, [src/docs/agent-configuration.md](src/docs/agent-configuration.md) for agent configuration, [src/AGENT-DEFINITION.md](src/AGENT-DEFINITION.md) for the portable agent YAML format, [src/docs/supervisor.md](src/docs/supervisor.md) for the supervisor agent, [docs/backend-setup.md](docs/backend-setup.md) for CLI backends, [docs/inference-backends.md](docs/inference-backends.md) for model gateways, [docs/migration-v1-v2.md](docs/migration-v1-v2.md) for v1→v2 migration, and [src/docs/migration-v2-v4.md](src/docs/migration-v2-v4.md) for upgrading a v2 deployment to v4.
 
 The top-level deterministic shell pipeline uses a separate project file,
 `config/hive-project.yaml.example`; see [config/README.md](config/README.md)
@@ -303,7 +303,7 @@ running on your own machine:
 
 ```bash
 brew install just gh
-git clone -b v2 https://github.com/kubestellar/hive && cd hive
+git clone https://github.com/kubestellar/hive && cd hive
 just contribute-setup claude
 just contribute-hive
 ```
