@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"fmt"
 	"net/url"
 	"sort"
 	"strconv"
@@ -22,9 +23,9 @@ const maxMyHivesPerPage = 500
 
 type myHivesQuery struct {
 	q       string // case-insensitive substring across id/name/org/project/owner/repo/cluster
-	status  string // "online", "offline", or an exact provStatus (available, assigned, provisioning, error, ...)
+	status  string // "online", "offline", advisory/budget bucket, or exact provStatus (available, assigned, provisioning, error, ...)
 	cluster string // ClusterID or ClusterName, case-insensitive
-	sortKey string // id | name | org | owner | cluster | status | last_seen
+	sortKey string // id | name | org | owner | cluster | status | last_seen | advisory_activity | budget
 	desc    bool
 	page    int // 1-based; 0 = no pagination
 	perPage int
@@ -78,6 +79,14 @@ func entryMatches(e *MyHiveEntry, q myHivesQuery) bool {
 		if e.Online {
 			return false
 		}
+	case "advisory-fresh", "advisory-aging", "advisory-stale", "advisory-unknown":
+		if e.AdvisoryIssueActivity.Bucket != strings.TrimPrefix(q.status, "advisory-") {
+			return false
+		}
+	case "budget-ok", "budget-warning", "budget-critical", "budget-exhausted", "budget-unknown":
+		if e.BudgetHealth.Bucket != strings.TrimPrefix(q.status, "budget-") {
+			return false
+		}
 	default:
 		if !strings.EqualFold(e.ProvStatus, q.status) {
 			return false
@@ -125,6 +134,10 @@ func applyMyHivesQuery(entries []MyHiveEntry, q myHivesQuery) (view []MyHiveEntr
 			case "last_seen":
 				// RFC3339 sorts lexically; empty (never beat) sorts first asc.
 				return e.LastHeartbeat
+			case "advisory_activity":
+				return e.AdvisoryIssueActivity.LastActivityAt
+			case "budget":
+				return fmt.Sprintf("%012.6f", e.BudgetHealth.PercentUsed)
 			default:
 				return ""
 			}
@@ -180,6 +193,28 @@ func myHivesSummary(entries []MyHiveEntry) map[string]int {
 		}
 		if e.UpgradeFailed {
 			s["upgrade_failed"]++
+		}
+		switch e.AdvisoryIssueActivity.Bucket {
+		case advisoryIssueBucketFresh:
+			s["advisory_issue_fresh"]++
+		case advisoryIssueBucketAging:
+			s["advisory_issue_aging"]++
+		case advisoryIssueBucketStale:
+			s["advisory_issue_stale"]++
+		default:
+			s["advisory_issue_unknown"]++
+		}
+		switch e.BudgetHealth.Bucket {
+		case budgetBucketOK:
+			s["budget_ok"]++
+		case budgetBucketWarning:
+			s["budget_warning"]++
+		case budgetBucketCritical:
+			s["budget_critical"]++
+		case budgetBucketExhausted:
+			s["budget_exhausted"]++
+		default:
+			s["budget_unknown"]++
 		}
 	}
 	return s
