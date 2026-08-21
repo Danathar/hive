@@ -28,8 +28,20 @@ const (
 	maxHivesPerUser   = 3
 	maxSaaSHivesTotal = 0 // 0 = unlimited
 	provisionTimeout  = 5 * time.Minute
-	cpuRequest        = "500m"
-	cpuLimit          = "2000m"
+	// cpuRequest/memRequest are the SCHEDULING footprint (what the scheduler
+	// reserves per hive) and directly set fleet density; the limits below are
+	// the burst ceiling and are unchanged. Right-sized 2026-08 from live fleet
+	// measurement (59 hives across vllm-d + hive-oke via kubectl top):
+	//   CPU:    p50 29-65m,   p90 0.5-1.7 cores, max 1.9  → 250m request
+	//   Memory: p50 0.8-1.1Gi, p90 1.3-2.9Gi,    max 3Gi  → 2Gi request
+	// Halving both doubles schedulable density on existing clusters (500
+	// hives: 125 vCPU + 1 TiB requested instead of 250 vCPU + 2 TiB). CPU is
+	// compressible so under-request only slows, never kills; memory bursts
+	// above 2Gi ride the 16Gi limit, with node overcommit bounded by the p90.
+	// Applies to NEW provisions; existing deployments keep their requests
+	// until their manifest is next re-applied.
+	cpuRequest = "250m"
+	cpuLimit   = "2000m"
 	// memRequest/memLimit size the spoke pod for the WHOLE agent fleet, not just
 	// the Go hive process. Each active coding agent (Copilot/Claude CLI) grows to
 	// ~2GB RSS, and an L6 hive runs 5-6 concurrently plus the hive process, so an
@@ -39,7 +51,7 @@ const (
 	// and the PR pipeline stalls (observed 2026-08-06: 9 OOM kills, whole fleet
 	// down ~4.5h on console-4vkt). 16Gi gives each agent headroom; OKE nodes have
 	// ~90GiB allocatable, so this is comfortably schedulable.
-	memRequest            = "4Gi"
+	memRequest            = "2Gi"
 	memLimit              = "16Gi"
 	nfsStorageCapacity    = "50Gi"
 	nfsMountTargetIP      = "10.0.10.30"
@@ -162,26 +174,33 @@ var clustersConfigPath = "/data/saas/clusters.json"
 // hive spokes onto. Each cluster has its own kubeconfig, storage backend,
 // ingress style, and optional platform-specific settings (OCI, OpenShift).
 type ClusterConfig struct {
-	ID                string `json:"id" yaml:"id"`
-	Name              string `json:"name" yaml:"name"`
-	KubeconfigPath    string `json:"kubeconfig_path,omitempty" yaml:"kubeconfig_path,omitempty"`
-	Context           string `json:"context" yaml:"context"`
-	InCluster         bool   `json:"in_cluster" yaml:"in_cluster"`
-	StorageClass      string `json:"storage_class" yaml:"storage_class"`
-	StorageType       string `json:"storage_type" yaml:"storage_type"`
-	NFSMountIP        string `json:"nfs_mount_ip,omitempty" yaml:"nfs_mount_ip,omitempty"`
-	IngressType       string `json:"ingress_type" yaml:"ingress_type"`
-	IngressClass      string `json:"ingress_class,omitempty" yaml:"ingress_class,omitempty"`
-	CertIssuer        string `json:"cert_issuer,omitempty" yaml:"cert_issuer,omitempty"`
-	Domain            string `json:"domain" yaml:"domain"`
-	DomainPrefix      string `json:"domain_prefix,omitempty" yaml:"domain_prefix,omitempty"`
-	OCICompartment    string `json:"oci_compartment,omitempty" yaml:"oci_compartment,omitempty"`
-	OCIAvailDomain    string `json:"oci_avail_domain,omitempty" yaml:"oci_avail_domain,omitempty"`
-	OCIMountTarget    string `json:"oci_mount_target,omitempty" yaml:"oci_mount_target,omitempty"`
-	OCIExportSet      string `json:"oci_export_set,omitempty" yaml:"oci_export_set,omitempty"`
-	RequiresSCC       bool   `json:"requires_scc" yaml:"requires_scc"`
-	SCCName           string `json:"scc_name,omitempty" yaml:"scc_name,omitempty"`
-	HasGPU            bool   `json:"has_gpu" yaml:"has_gpu"`
+	ID             string `json:"id" yaml:"id"`
+	Name           string `json:"name" yaml:"name"`
+	KubeconfigPath string `json:"kubeconfig_path,omitempty" yaml:"kubeconfig_path,omitempty"`
+	Context        string `json:"context" yaml:"context"`
+	InCluster      bool   `json:"in_cluster" yaml:"in_cluster"`
+	StorageClass   string `json:"storage_class" yaml:"storage_class"`
+	StorageType    string `json:"storage_type" yaml:"storage_type"`
+	NFSMountIP     string `json:"nfs_mount_ip,omitempty" yaml:"nfs_mount_ip,omitempty"`
+	IngressType    string `json:"ingress_type" yaml:"ingress_type"`
+	IngressClass   string `json:"ingress_class,omitempty" yaml:"ingress_class,omitempty"`
+	CertIssuer     string `json:"cert_issuer,omitempty" yaml:"cert_issuer,omitempty"`
+	Domain         string `json:"domain" yaml:"domain"`
+	DomainPrefix   string `json:"domain_prefix,omitempty" yaml:"domain_prefix,omitempty"`
+	OCICompartment string `json:"oci_compartment,omitempty" yaml:"oci_compartment,omitempty"`
+	OCIAvailDomain string `json:"oci_avail_domain,omitempty" yaml:"oci_avail_domain,omitempty"`
+	OCIMountTarget string `json:"oci_mount_target,omitempty" yaml:"oci_mount_target,omitempty"`
+	OCIExportSet   string `json:"oci_export_set,omitempty" yaml:"oci_export_set,omitempty"`
+	RequiresSCC    bool   `json:"requires_scc" yaml:"requires_scc"`
+	SCCName        string `json:"scc_name,omitempty" yaml:"scc_name,omitempty"`
+	HasGPU         bool   `json:"has_gpu" yaml:"has_gpu"`
+	// MaxHives caps how many hosted hives (SaaS records, assigned or pooled)
+	// may exist on this cluster. 0 = unlimited. This is the HARD per-cluster
+	// gate: the bin-packed capacity estimate (hiveSlotsForNode) is advisory
+	// and can be optimistic, but routes/PVCs/namespaces and image-pull
+	// bandwidth all scale with hive COUNT, so operators need an explicit
+	// ceiling they can set per cluster as the fleet grows.
+	MaxHives          int    `json:"max_hives,omitempty" yaml:"max_hives,omitempty"`
 	Arch              string `json:"arch" yaml:"arch"`
 	ImageTag          string `json:"image_tag" yaml:"image_tag"`
 	ImagePullPolicy   string `json:"image_pull_policy,omitempty" yaml:"image_pull_policy,omitempty"`
@@ -338,17 +357,25 @@ func clusterDefaultForge(c *ClusterConfig) string {
 	return publicForgeHost
 }
 
-// kubectlForCluster builds an exec.Cmd that targets a specific cluster.
-// For in-cluster configs (InCluster == true) it runs plain kubectl;
-// for remote clusters it injects --kubeconfig and --context flags.
-func kubectlForCluster(cluster *ClusterConfig, args ...string) *exec.Cmd {
-	return exec.Command("kubectl", kubectlArgsForCluster(cluster, args...)...)
+// kubectlForCluster builds a bounded kubectl command that targets a specific
+// cluster. For in-cluster configs (InCluster == true) it runs plain kubectl;
+// for remote clusters it injects --kubeconfig and --context flags. Execution
+// (Output/CombinedOutput/Run) acquires a per-cluster concurrency slot — see
+// kubectl_executor.go.
+func kubectlForCluster(cluster *ClusterConfig, args ...string) *kubectlCmd {
+	return &kubectlCmd{
+		Cmd:       exec.Command("kubectl", kubectlArgsForCluster(cluster, args...)...),
+		clusterID: cluster.ID,
+	}
 }
 
 // kubectlForClusterContext is like kubectlForCluster but lets callers bound the
 // command lifetime with a context.
-func kubectlForClusterContext(ctx context.Context, cluster *ClusterConfig, args ...string) *exec.Cmd {
-	return exec.CommandContext(ctx, "kubectl", kubectlArgsForCluster(cluster, args...)...)
+func kubectlForClusterContext(ctx context.Context, cluster *ClusterConfig, args ...string) *kubectlCmd {
+	return &kubectlCmd{
+		Cmd:       exec.CommandContext(ctx, "kubectl", kubectlArgsForCluster(cluster, args...)...),
+		clusterID: cluster.ID,
+	}
 }
 
 // unreachableKubeconfigSentinel is aimed at instead of a real kubeconfig when a
@@ -1622,8 +1649,8 @@ func loadSaaSHive(id string) *SaaSHive {
 		return nil
 	}
 	path := filepath.Join(saasHivesDir, id, "meta.json")
-	data, err := os.ReadFile(path)
-	if err != nil {
+	data, ok := readHiveMeta(path)
+	if !ok {
 		return nil
 	}
 	var h SaaSHive
@@ -1648,7 +1675,11 @@ func saveSaaSHive(h *SaaSHive) error {
 	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
 		return err
 	}
-	return os.Rename(tmpPath, path)
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	storeHiveMeta(path, data)
+	return nil
 }
 
 // removeHiveRecord durably purges the hub-side, on-disk record for a deleted
@@ -1673,6 +1704,7 @@ func removeHiveRecord(id string, logger *slog.Logger) {
 		return
 	}
 	hiveDir := filepath.Join(saasHivesDir, id)
+	evictHiveMeta(filepath.Join(hiveDir, "meta.json"))
 	if err := os.RemoveAll(hiveDir); err != nil {
 		logger.Warn("removeHiveRecord: failed to remove hive directory", "path", hiveDir, "error", err)
 	}
