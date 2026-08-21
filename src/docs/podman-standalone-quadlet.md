@@ -316,22 +316,48 @@ published port, which is what the previous slice shipped.
 
 ### 4. Boot persistence
 
-**Rootful** — enable it:
+**There is nothing to enable, and trying fails.** These units are *generated*,
+and systemd refuses to enable a generated unit:
 
 ```sh
-sudo systemctl enable hive.service hive-gateway.service
+sudo systemctl enable hive.service
+# Failed to enable unit: Unit /run/systemd/generator/hive.service is transient or generated
 ```
 
-**Rootless** — enable them *and* turn on lingering, or the user manager exits at
-logout and the services go with it:
+`[Install] WantedBy=default.target` inside `hive.container` and
+`hive-gateway.container` is what wires them to boot. The generator turns it
+into `default.target.wants/` symlinks in its own output directory on every
+`daemon-reload`, so step 2 above already did it. Confirm they landed:
 
 ```sh
-systemctl --user enable hive.service hive-gateway.service
+# rootless
+ls -l "/run/user/$(id -u)/systemd/generator/default.target.wants/"
+# rootful
+sudo ls -l /run/systemd/generator/default.target.wants/
+```
+
+**Rootless additionally needs lingering**, or the user manager never starts at
+boot and the symlinks above are never read:
+
+```sh
 loginctl enable-linger "$USER"
+loginctl show-user "$USER" -p Linger      # -> Linger=yes
 ```
 
 `loginctl enable-linger` is not optional for a rootless install that must
-survive a reboot. Verify with `loginctl show-user "$USER" -p Linger`.
+survive a reboot. Rootful needs no equivalent; the system manager is PID 1.
+
+**Do not check any of this with `systemctl is-enabled`.** For a generated unit
+it reports `generated` — with lingering on, with lingering off, and with the
+symlink deleted. It cannot tell you whether Hive will come back. Use
+
+```sh
+bin/hive-podman-lifecycle-probe.sh check              # or --rootful
+```
+
+which reads the generator output and the linger state instead, and see
+[the lifecycle page](podman-quadlet-lifecycle.md) for the measurements behind
+that advice.
 
 ## Traps, measured not guessed
 
@@ -427,6 +453,12 @@ Compose healthcheck, that the unit still names `dashboard.port` where a reader
 will meet it, and that every file this page tells you to copy is one the repo
 actually tracks. Change any one of those and the PR fails instead of the
 operator's start (#4367).
+
+Lifecycle behaviour — stop, start, restart, recreate, and boot wiring — has its
+own repeatable check, `bin/hive-podman-lifecycle-probe.sh`, covered by
+`bin/test_hive_podman_lifecycle_probe.sh` with every input mocked. The
+measurements it was written from are in
+[podman-quadlet-lifecycle.md](podman-quadlet-lifecycle.md).
 
 A **live rootless start was performed** on Fedora 44, Podman 5.8.4, cgroup v2,
 SELinux enforcing, against the real `ghcr.io/kubestellar/hive:stable` image:
@@ -552,17 +584,41 @@ returned **0 in 11s**, `ActiveState=active`, and `podman ps` showed
 already pulled.) The unit was not changed between the two runs; only the port
 in the config was.
 
+A **live rootful start was performed** by [#4377](podman-quadlet-lifecycle.md),
+on the same host and against the same image, closing the gap recorded below:
+
+| | Observed |
+| --- | --- |
+| `sudo systemctl daemon-reload` | generated `hive.service` and `hive-data-volume.service` |
+| generated properties | `Type=notify`, `NotifyAccess=all`, `TimeoutStartUSec=5min` |
+| ordering | `Requires=hive-data-volume.service`, `After=hive-data-volume.service` |
+| `sudo systemctl start hive.service` | returned **0** after 11.7s, `ActiveState=active`, `Result=success` |
+| container | `healthy` |
+| `%E` in a system unit | measured as `/etc`: `/etc/hive/hive.yaml` and `/etc/hive/secrets` were the mount sources on the running container |
+| `AddCapability=NET_ADMIN` | enforcing, same as rootless: `[entrypoint] iptables (iptables-nft): outbound :443 -> :18443` and `ambient CAP_NET_ADMIN granted` |
+
+#4377 also exercised stop, start, restart, and recreate in both root modes, and
+found that a clean `systemctl stop` left the unit `failed` until
+`SuccessExitStatus=143 SIGTERM` was added to the unit. See
+[the lifecycle page](podman-quadlet-lifecycle.md).
+
 Recorded honestly rather than left implied:
 
 - One observation outside this slice's scope, recorded because it was seen:
   `systemctl --user restart hive.service` propagated through `Requires=` and
   restarted `hive-gateway.service` 11s later, after which `:3001/api/health`
-  still answered 200 on Hive's new container address. Restart/recreate
+  still answered 200 on Hive's new container address. Gateway restart/recreate
   semantics are their own slice and are **not** characterised here — this is one
   observation, not a claim about the general case.
-- **Rootful was not started live.** It is dry-run generated only. The rootful
-  half of `%E` (`/etc`) is from `systemd.unit(5)`; the rootless half
-  (`/home/<user>/.config`) was measured directly with a probe unit.
+- **Rootful was not started live *by #4354*.** It was dry-run generated only,
+  and the rootful half of `%E` (`/etc`) was read from `systemd.unit(5)` rather
+  than measured; the rootless half (`/home/<user>/.config`) was measured
+  directly with a probe unit. #4377 closed both, as recorded above.
+- **No reboot has been performed** in either root mode. The boot *wiring* is
+  measured — the generator's `default.target.wants/` symlink, `default.target`
+  being reached, and lingering starting a sessionless user manager — but their
+  composition across an actual kernel boot is not. See
+  [the lifecycle page](podman-quadlet-lifecycle.md#reboot-persistence-not-executed-here).
 - The live runs used a scratch directory for `hive.yaml`, `secrets/`,
   `hive.env`, and `nginx.conf` instead of `%E/hive`, so they could not touch a
   real operator configuration. Nothing else in the units differed.
