@@ -160,6 +160,7 @@ func agentActivityFor(mgr *agent.Manager, cfg *config.Config, govState governor.
 		PausedBy:       proc.PausedBy,
 		PausedAt:       proc.PausedAt,
 		NeedsLogin:     proc.NeedsLogin,
+		QuotaExhausted: proc.QuotaExhausted,
 		LastActivityAt: proc.LastPaneChange,
 		// A missing tmux session is only meaningful for an agent the manager
 		// believes is running; SessionMissing enforces that itself.
@@ -209,6 +210,46 @@ func heartbeatKickInterval(govState governor.State, name string, proc *agent.Age
 		return 0
 	}
 	return cadence.Interval
+}
+
+func quotaExhaustedAgentCount(agents []hub.AgentSummary) int {
+	count := 0
+	for _, a := range agents {
+		if a.QuotaExhausted && !a.Paused &&
+			!strings.EqualFold(a.State, "paused") &&
+			strings.EqualFold(a.State, "running") {
+			count++
+		}
+	}
+	return count
+}
+
+func quotaExhaustedProcessCount(statuses map[string]*agent.AgentProcess) int {
+	count := 0
+	for _, proc := range statuses {
+		if proc != nil && proc.QuotaExhausted && !proc.Paused && proc.State == agent.StateRunning {
+			count++
+		}
+	}
+	return count
+}
+
+func quotaExhaustedAgentReason(count int) string {
+	if count <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d agent(s) out of provider quota", count)
+}
+
+func providerLimitHeartbeatFields(agents []hub.AgentSummary) (reason string, rebuffs int) {
+	errMsg, _, _, rebuffs := dashboard.InferenceBudgetExceeded()
+	if errMsg != "" {
+		if rebuffs > 1 {
+			return fmt.Sprintf("provider spending limit reached — %d refused calls: %s", rebuffs, errMsg), rebuffs
+		}
+		return "provider spending limit reached — " + errMsg, rebuffs
+	}
+	return quotaExhaustedAgentReason(quotaExhaustedAgentCount(agents)), 0
 }
 
 // prospectiveGitHubIdentity returns the GitHub identity the spoke WOULD hold
@@ -3501,6 +3542,8 @@ func main() {
 				tasksCompleted7d = &n
 			}
 
+			providerLimitReason, providerLimitRebuffs := providerLimitHeartbeatFields(agents)
+
 			return &hub.HeartbeatPayload{
 				AgentsWithModel:      &agentsWithModel,
 				BudgetCurrentSpend:   budgetSpend,
@@ -3582,6 +3625,8 @@ func main() {
 					errMsg, _ := dashSrv.InferenceAuthState()
 					return errMsg
 				}(),
+				ProviderLimitReason:     providerLimitReason,
+				ProviderLimitRebuffs:    providerLimitRebuffs,
 				RepoTargetMisconfigured: repoTargetMisconfigured(),
 				RepoTargetIssue:         repoTargetIssueMessage(),
 				Repos:                   cfg.Project.Repos,
@@ -3913,6 +3958,7 @@ func main() {
 				if cfg.ACMMLevel != nil {
 					acmmLvl = *cfg.ACMMLevel
 				}
+				providerLimitReason, providerLimitRebuffs := providerLimitHeartbeatFields(agents)
 				return &hub.HeartbeatPayload{
 					HiveID:                  cfg.HiveID,
 					Org:                     cfg.Project.Org,
@@ -3925,6 +3971,8 @@ func main() {
 					Version:                 "3.0.0",
 					RepoTargetMisconfigured: repoTargetMisconfigured(),
 					RepoTargetIssue:         repoTargetIssueMessage(),
+					ProviderLimitReason:     providerLimitReason,
+					ProviderLimitRebuffs:    providerLimitRebuffs,
 				}
 			}, targetSHA, logger)
 
@@ -5606,7 +5654,11 @@ func runEvalCycle(
 		dashSrv.AddSystemAlert(providerBudgetAlertID, "error", msg)
 		providerBudgetCause = msg
 	} else {
-		dashSrv.ClearSystemAlert(providerBudgetAlertID)
+		if reason := quotaExhaustedAgentReason(quotaExhaustedProcessCount(agentMgr.AllStatuses())); reason != "" {
+			dashSrv.AddSystemAlert(providerBudgetAlertID, "error", "provider quota exhausted — "+reason)
+		} else {
+			dashSrv.ClearSystemAlert(providerBudgetAlertID)
+		}
 	}
 	// Notify ONCE per latch, not once per cycle. The deduped banner above
 	// already carries the ongoing state; a high-priority notification repeated
