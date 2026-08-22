@@ -89,7 +89,23 @@ func hiveHealthFor(e RegistryEntry, rollup agentFleetRollup, app GitHubAppHealth
 	if e.ACMMLevel > acmmInceptionMax {
 		if app.Bucket == ghAppBucketBroken {
 			v.State = HealthStateRed
-			v.Reason = "GitHub App broken"
+			// Name the specific failure when the spoke reported one —
+			// "repo-not-covered" (App installed but this repo not ticked) needs
+			// a completely different remedy than a missing/invalid key.
+			if st := strings.TrimSpace(e.GitHubAppState); st != "" && st != GitHubAppTokenStatusOK && st != "unknown" {
+				v.Reason = "GitHub App: " + st
+			} else {
+				v.Reason = "GitHub App broken"
+			}
+			return v
+		}
+		// Budget exhaustion halts every agent, so no output stream can move.
+		// The chip must say THAT instead of the downstream "no write in Nh" —
+		// the operator's remedy (raise budget or wait for the window) is
+		// entirely different from debugging a stuck agent.
+		if e.BudgetExhausted != nil && *e.BudgetExhausted {
+			v.State = HealthStateRed
+			v.Reason = "budget exhausted — agents halted"
 			return v
 		}
 		if rollup.Expected > 0 && rollup.Running == 0 {
@@ -118,9 +134,13 @@ func hiveHealthFor(e RegistryEntry, rollup agentFleetRollup, app GitHubAppHealth
 		// L2 Advisory: freshness of the advisory stream is the health signal.
 		// Every agent contributes to the advisory stream, so if none are on
 		// duty (all paused/off-schedule), staleness is caused by that — say so
-		// instead of a bare "advisory stale" red.
-		if roster := grantRosterFor(e.Agents, func(AgentSummary) bool { return true }); len(roster.onDuty) == 0 {
-			return noWritersOnDuty(v, "advisory", roster)
+		// instead of a bare "advisory stale" red. Only judged when the spoke
+		// reports per-agent detail; older spokes send none, and absence of
+		// detail must not read as absence of agents.
+		if len(e.Agents) > 0 {
+			if roster := grantRosterFor(e.Agents, func(AgentSummary) bool { return true }); len(roster.onDuty) == 0 {
+				return noWritersOnDuty(v, "advisory", roster)
+			}
 		}
 		// Reuse the existing advisory/issue-activity bucketing rather than the
 		// per-repo activity collector.
@@ -190,7 +210,10 @@ func grantRosterFor(agents []AgentSummary, grant func(AgentSummary) bool) grantR
 		if !grant(a) {
 			continue
 		}
-		if a.ExpectedActive {
+		// Off duty = operator-paused (Paused flag or paused state — paused
+		// agents still report ExpectedActive true, the governor keeps them on
+		// the schedule) or off-schedule (!ExpectedActive).
+		if a.ExpectedActive && !a.Paused && !strings.EqualFold(a.State, agentStatePaused) {
 			r.onDuty = append(r.onDuty, a.Name)
 		} else {
 			r.off = append(r.off, a.Name)

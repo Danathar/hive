@@ -228,6 +228,61 @@ func TestHiveHealthFor_ACMMBands(t *testing.T) {
 			wantReason: "create-capable agent(s) off: sec-check",
 		},
 		{
+			// Live mcp-context-forge case: App installed and minting fine, but
+			// the repo isn't ticked in the installation — spoke reports
+			// githubAppState "repo-not-covered". The chip names it.
+			name: "L2 GitHub App repo-not-covered — red names the state",
+			entry: func() RegistryEntry {
+				e := base(2)
+				e.GitHubAppState = "repo-not-covered"
+				return e
+			}(),
+			rollup:     okRollup(),
+			app:        GitHubAppHealth{Bucket: ghAppBucketBroken, Status: "ok"},
+			queued:     2,
+			wantState:  HealthStateRed,
+			wantKind:   "advisory",
+			wantReason: "GitHub App: repo-not-covered",
+		},
+		{
+			// Budget exhaustion outranks freshness banding: agents are halted,
+			// so "no write in Nh" would bury the actual cause.
+			name: "L4 budget exhausted — red names the cause",
+			entry: func() RegistryEntry {
+				e := withActivity(base(4), ractivity("o/r", oldTs, oldTs, "", ""))
+				t := true
+				e.BudgetExhausted = &t
+				return e
+			}(),
+			rollup:     okRollup(),
+			app:        okApp(),
+			queued:     9,
+			wantState:  HealthStateRed,
+			wantKind:   "creates",
+			wantReason: "budget exhausted",
+		},
+		{
+			// The real kellyaa wire shape: paused agents keep ExpectedActive
+			// true (the governor still schedules them) and Enabled true — the
+			// pause lives ONLY in State/Paused. The roster must read them as
+			// off duty or a fully-paused hive shows a false red.
+			name: "L3 grant-holders paused via state — green, reason names them",
+			entry: func() RegistryEntry {
+				e := base(3)
+				e.Agents = []AgentSummary{
+					{Name: "quality", State: agentStatePaused, Enabled: true, ExpectedActive: true, CanOpenIssue: true, CanOpenPR: true},
+					{Name: "scanner", State: agentStateRunning, Enabled: true, ExpectedActive: true},
+				}
+				return e
+			}(),
+			rollup:     okRollup(),
+			app:        okApp(),
+			queued:     4,
+			wantState:  HealthStateGreen,
+			wantKind:   "creates",
+			wantReason: "create-capable agent(s) off: quality",
+		},
+		{
 			// L6 twin: a merge-judged hive whose on-duty agents can create but
 			// not merge is quiet-by-design for merges, not failing.
 			name: "L6 no merge-capable agent on duty — green (quiet by design)",
