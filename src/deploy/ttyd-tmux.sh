@@ -7,7 +7,18 @@ set -euo pipefail
 #   /tmp/tmux-{agent_uid}/hive-{name}
 # We extract the owner from the socket and su-exec as that user.
 
-SESSION=${1:-supervisor}
+# Remember whether ttyd actually forwarded a session name. When it did not, the
+# fallback below picks a session the operator never asked for, and the resulting
+# "no tmux socket found" is a symptom several steps downstream of the real cause
+# (#4593: ttyd started without -a/--url-arg discards the dashboard's ?arg=).
+# Distinguishing the two cases is what lets the error message say so.
+if [ "$#" -ge 1 ] && [ -n "${1:-}" ]; then
+  SESSION="$1"
+  SESSION_FROM_ARG=1
+else
+  SESSION="supervisor"
+  SESSION_FROM_ARG=0
+fi
 
 # Find the per-agent socket: /tmp/tmux-*/${SESSION}
 TMUX_SOCKET=""
@@ -26,6 +37,26 @@ fi
 
 if [ ! -S "$TMUX_SOCKET" ]; then
   echo "error: no tmux socket found for session '${SESSION}'" >&2
+  if [ "$SESSION_FROM_ARG" -eq 0 ]; then
+    # The operator never typed 'supervisor' — the fallback did. Say where the
+    # name should have come from instead of naming a session nobody asked for.
+    echo "hint: no session name was passed to this script, so it fell back to" >&2
+    echo "      '${SESSION}'. The dashboard sends the name as ?arg=hive-<agent>," >&2
+    echo "      which ttyd only forwards when it is started with -a/--url-arg." >&2
+    echo "      Check ttyd's argv for -a (regression #4593)." >&2
+  fi
+  # Real sessions are named hive-<agent>, so listing them turns a dead end into
+  # the one thing the caller needs: a name that would have worked.
+  FOUND=""
+  for sock in /tmp/tmux-*/*; do
+    [ -S "$sock" ] || continue
+    FOUND="${FOUND} $(basename "$sock")"
+  done
+  if [ -n "$FOUND" ]; then
+    echo "available sessions:${FOUND}" >&2
+  else
+    echo "available sessions: none — no agent tmux sockets exist under /tmp/tmux-*/" >&2
+  fi
   exit 1
 fi
 
