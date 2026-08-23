@@ -1409,7 +1409,14 @@ TTYD_CRED="${HIVE_TTYD_CREDENTIAL:-}"
 if [ -z "$TTYD_CRED" ] && [ -n "${HIVE_DASHBOARD_TOKEN:-}" ]; then
   TTYD_CRED="hive:${HIVE_DASHBOARD_TOKEN}"
 fi
-CRED_ARGS="-a"
+# CRED_ARGS carries ONLY the credential. --url-arg (-a) is passed unconditionally
+# on the ttyd command line below and must never live in here: #4593 was caused by
+# this branch REPLACING a CRED_ARGS that was also carrying -a, which silently
+# dropped --url-arg on every hive with a dashboard token (i.e. effectively all of
+# them — bin/hive-podman-setup.sh generates HIVE_DASHBOARD_TOKEN unconditionally
+# and the Compose stack requires it). Keep the two concerns in separate places so
+# the next edit to the credential branch cannot take --url-arg down with it.
+CRED_ARGS=""
 if [ -n "$TTYD_CRED" ]; then
   CRED_ARGS="-c ${TTYD_CRED}"
 fi
@@ -1420,7 +1427,12 @@ TTYD_RESPAWN_DELAY_SECS=5
 (
   trap '' HUP
   while true; do
-    ttyd -W ${CRED_ARGS} -i "${TTYD_BIND}" -p "${TTYD_PORT}" -t fontSize=14 -t disableLeaveAlert=true /usr/local/bin/ttyd-tmux.sh
+    # -a/--url-arg lets ttyd forward the ?arg=<session> that the dashboard puts in
+    # every terminal link (src/pkg/dashboard/static/index.html) through to
+    # ttyd-tmux.sh. Without it ttyd discards the query, the attach script falls
+    # back to its default session name, and the browser terminal dies with
+    # "no tmux socket found for session 'supervisor'" (#4593).
+    ttyd -W -a ${CRED_ARGS} -i "${TTYD_BIND}" -p "${TTYD_PORT}" -t fontSize=14 -t disableLeaveAlert=true /usr/local/bin/ttyd-tmux.sh
     echo "[entrypoint] ttyd exited (rc=$?), respawning in ${TTYD_RESPAWN_DELAY_SECS}s..."
     sleep "$TTYD_RESPAWN_DELAY_SECS"
   done

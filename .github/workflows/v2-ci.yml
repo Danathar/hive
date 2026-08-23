@@ -421,6 +421,19 @@ jobs:
         working-directory: .
         run: bash src/deploy/test_terminal_scrollback_status.sh
 
+      # #4593: the dashboard's per-agent terminal link carries the session as
+      # ?arg=hive-<agent>, which ttyd only forwards when started with -a
+      # (--url-arg). The credential branch added in #2178 REPLACED the variable
+      # that carried -a, so every hive with a dashboard token — i.e. effectively
+      # all of them — got a browser terminal that could not attach. A grep for
+      # "-a" passes on that bug, so this runs the real flag assembly out of
+      # entrypoint.sh with ttyd stubbed and asserts on the resulting argv, once
+      # per credential configuration. Skips the end-to-end half where tmux is
+      # absent.
+      - name: ttyd keeps --url-arg when credentialed (#4593)
+        working-directory: .
+        run: bash src/deploy/test_ttyd_url_arg.sh
+
       # #4440: the changelog reminder promises it "always succeeds" and "never
       # blocks a merge", and it did neither on a fork PR — GITHUB_TOKEN is
       # read-only there, the comment POST 403s, and `bash -e` made that a red
