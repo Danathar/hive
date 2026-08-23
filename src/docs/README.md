@@ -11,6 +11,7 @@ Start with [Architecture](architecture.md) for the system overview, then use the
 - [`CAP_NET_ADMIN` and self-hosted spokes](https://github.com/kubestellar/hive/blob/v4/src/docs/net-admin-requirement.md) — the container runs with or without `NET_ADMIN`; granting it (`--cap-add NET_ADMIN` / `securityContext.capabilities.add`) enables the full forced-proxy-egress gate, and what the degraded best-effort mode means without it.
 - [Config layering](https://github.com/kubestellar/hive/blob/v4/src/docs/config-layering.md) — how ConfigMap seed, PVC dashboard overlay, and runtime config interact.
 - [Operator reference](https://github.com/kubestellar/hive/blob/v4/src/docs/operator-reference.md) — top-level config blocks, hive flags/env, GitHub token scopes, and image provenance.
+- [Changelog](https://github.com/kubestellar/hive/blob/v4/CHANGELOG.md) — recent user-visible changes and release notes.
 - [Release channels](release-channels.md) — `stable`/`candidate`/`edge` moving image tags, switching a hive to a channel, and the `stable (v4)` version pill.
 - [The `auto-update` Compose profile](https://github.com/kubestellar/hive/blob/v4/src/docs/auto-update-profile.md) — what unattended Watchtower updates cost you, what the Docker socket proxy does and does **not** fix, and why Kubernetes should not use this profile at all.
 - [Environment variable reference](https://github.com/kubestellar/hive/blob/v4/src/docs/env-vars.md) — centralized list of runtime, deployment, hub, backup, and contributor environment variables.
@@ -32,7 +33,7 @@ Start with [Architecture](architecture.md) for the system overview, then use the
 - [Dashboard API reference](https://github.com/kubestellar/hive/blob/v4/src/docs/api-reference.md) — pragmatic route index for dashboard and hub endpoints.
 - [Dashboard OpenAPI spec](https://github.com/kubestellar/hive/blob/v4/dashboard/openapi.json) — machine-readable REST API reference for integrations.
 - [ioscan status](https://github.com/kubestellar/hive/blob/v4/src/docs/ioscan.md) — the untrusted-input scanner/canary feature (live and default-on in v4).
-- [Deployment scripts](https://github.com/kubestellar/hive/blob/v4/src/deploy/README.md) — inventory of v2 deployment helpers, including dashboard TTY panes and `hive-panes`.
+- [Deployment scripts](https://github.com/kubestellar/hive/blob/v4/src/deploy/README.md) — inventory of deployment helpers, including dashboard TTY panes and `hive-panes`.
 
 ## Contributors and access
 
@@ -65,7 +66,7 @@ Start with [Architecture](architecture.md) for the system overview, then use the
 - [CLI backend setup](https://github.com/kubestellar/hive/blob/v4/docs/backend-setup.md) — setup notes for Claude, Copilot, Goose, Bob, Pi, Codex, and Aider.
 - [Inference backends](https://github.com/kubestellar/hive/blob/v4/docs/inference-backends.md) — vLLM, llm-d, LiteLLM, and Model Gateway troubleshooting.
 - [apiproxy](https://github.com/kubestellar/hive/blob/v4/src/docs/apiproxy.md) — Anthropic-compatible proxy logging and deployment notes.
-- [v1 to v2 migration](https://github.com/kubestellar/hive/blob/v4/docs/migration-v1-v2.md) — migration checklist and rollback notes.
+- [v1 to v2 migration](https://github.com/kubestellar/hive/blob/v4/docs/migration-v1-v2.md) — **historical.** Both ends of this migration are retired; v2 was retired in August 2026. Kept for operators still on v1, who should read it alongside [v2 → v4 migration](migration-v2-v4.md) above. New deployments do not need it.
 
 ## Architecture and design
 
