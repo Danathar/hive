@@ -748,6 +748,12 @@ func TestBuildTokens_NilSummary(t *testing.T) {
 	dir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	c := tokens.NewCollector(dir, logger)
+	// Redirect the persisted-snapshot path away from the live
+	// /data/token-summary.json BEFORE anything reads Summary(): the snapshot
+	// restore is lazy (first read, #4585), so the redirect fully isolates
+	// this test from a hive host's production state and the nil branch is
+	// always testable.
+	c.SetPersistPath(filepath.Join(t.TempDir(), "token-summary.json"))
 
 	// The collector's Summary() returns nil until scan runs, so this tests the nil branch
 	ft := buildTokens(c)
