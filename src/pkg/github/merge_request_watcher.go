@@ -168,8 +168,10 @@ func (c *Client) StartMergeRequestWatcher(ctx context.Context, authz MergeReques
 	// Agents must be able to DROP request files here (hive-merge runs AS the
 	// agent). Force group-write + setgid so agent-written files inherit the node
 	// group — same rationale as the pr-request dir. The forge check still holds:
-	// the watcher reads each file's OWNING UID.
-	if err := os.Chmod(mergeRequestDir(), 0o2775); err != nil {
+	// the watcher reads each file's OWNING UID. Sticky bit: only a file's owner
+	// may unlink or replace a queued request. (os.Chmod drops raw 0o2000/0o1000
+	// bits — the special bits must be os.ModeSetgid/os.ModeSticky.)
+	if err := os.Chmod(mergeRequestDir(), 0o775|os.ModeSetgid|os.ModeSticky); err != nil {
 		c.logger.Warn("merge-request watcher: could not set group-writable perms on request dir; agents may be unable to request merges",
 			slog.String("dir", mergeRequestDir()), slog.String("error", err.Error()))
 	}

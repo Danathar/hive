@@ -67,6 +67,12 @@ func TestPrepareRequestDirsIsAgentWritable(t *testing.T) {
 		if perm := info.Mode().Perm(); perm&0o070 != 0o070 {
 			t.Errorf("%s queue perm = %#o, want group rwx — agents cannot drop request files", name, perm)
 		}
+		if info.Mode()&os.ModeSetgid == 0 {
+			t.Errorf("%s queue missing setgid bit — agent-written files won't inherit the node group", name)
+		}
+		if info.Mode()&os.ModeSticky == 0 {
+			t.Errorf("%s queue missing sticky bit — any agent could unlink a peer's queued request", name)
+		}
 	}
 }
 
