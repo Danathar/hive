@@ -15,7 +15,17 @@ import (
 // node group. The forge-check still holds: each watcher reads a file's OWNING
 // UID, which is the agent that wrote it — group-writability lets agents write,
 // it does not let one agent forge another's ownership.
-const requestDirMode = 0o2775
+//
+// The sticky bit (as on /tmp) is required alongside group-write: without it,
+// write permission on the directory is delete permission on every entry, so
+// any agent could unlink or replace a peer's queued request regardless of
+// file ownership. With it, only a file's owner may unlink or rename it —
+// drop-box semantics are preserved.
+//
+// NOTE: os.Chmod ignores raw 0o2000/0o1000 bits — setgid and sticky MUST be
+// expressed as os.ModeSetgid / os.ModeSticky or they are silently dropped
+// (the previous raw-octal 0o2775 chmod never actually set setgid).
+const requestDirMode = 0o775 | os.ModeSetgid | os.ModeSticky
 
 // ensureRequestDir creates one request queue and opens it to the agent group.
 // Returns false when the directory cannot be created, which is the only state

@@ -51,6 +51,35 @@ func withReviewDir(t *testing.T) string {
 	return dir
 }
 
+func TestReviewRequestWatcherSetsQueueMode(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		preexist bool
+	}{
+		{name: "fresh"},
+		{name: "upgrade existing", preexist: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := withReviewDir(t)
+			if tt.preexist {
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatalf("pre-create review queue: %v", err)
+				}
+				if err := os.Chmod(dir, 0o755); err != nil {
+					t.Fatalf("pre-create chmod: %v", err)
+				}
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			done := reviewTestClient(t, "http://127.0.0.1:0").StartReviewRequestWatcher(ctx, nil, nil)
+			cancel()
+			<-done
+
+			assertRequestDirMode(t, "review", dir)
+		})
+	}
+}
+
 // End-to-end: an approve review is submitted, consumed, audited as
 // agent_pr_reviewed with state=approved.
 func TestReviewRequestWatcher_ApprovesAndAudits(t *testing.T) {
