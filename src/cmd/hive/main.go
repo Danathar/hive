@@ -81,6 +81,7 @@ import (
 	"github.com/kubestellar/hive/pkg/tokens"
 	"github.com/kubestellar/hive/pkg/tracing"
 	"github.com/kubestellar/hive/pkg/trajectory"
+	"github.com/kubestellar/hive/pkg/watchdog"
 	"github.com/kubestellar/hive/pkg/watsonx"
 	"github.com/kubestellar/hive/pkg/worksource"
 	"go.opentelemetry.io/otel/attribute"
@@ -2443,6 +2444,48 @@ func main() {
 			"providers", len(cfg.Governor.Rotation.Providers))
 	}
 
+	// Agent self-healing watchdog (RFC #4665): liveness/readiness
+	// reconciliation on the governor tick. Config problems fall back to the
+	// RFC defaults loudly — a typo must not disable self-healing silently.
+	wdSettings, wdCfgErrs := watchdog.SettingsFrom(cfg.Governor.Watchdog)
+	for _, e := range wdCfgErrs {
+		logger.Warn("watchdog config problem", "error", e)
+	}
+	var wd *watchdog.Reconciler
+	if wdSettings.Enabled() {
+		wdFleet := agent.WatchdogFleet{
+			M: agentMgr,
+			// Queue depth for the readiness gate: an agent producing nothing
+			// while nothing is queued is correct, not unhealthy. Read live
+			// from the governor so it reflects the current sweep.
+			Queued: func() (int, bool) {
+				st := gov.GetState()
+				return st.QueueIssues + st.QueuePRs, true
+			},
+		}
+		wd = watchdog.New(wdSettings, wdFleet, dashSrv, logger,
+			watchdog.WithAuthProbes(watchdogAuthProbes(cfg)))
+		if saved != nil && len(saved.Watchdog) > 0 {
+			wd.Restore(saved.Watchdog)
+		}
+		// Dead-session recovery moves under the watchdog's bounded ladder ONLY
+		// when the watchdog may actually act. In observe mode the manager's
+		// crash loop keeps its existing job, so there is never a window in
+		// which neither component restarts a dead agent.
+		agentMgr.SetDeadSessionRecoveryOwner(wdSettings.MayAct())
+		logger.Info("agent watchdog enabled (RFC #4665)",
+			"mode", string(wdSettings.Mode),
+			"probe_interval", wdSettings.ProbeInterval,
+			"crash_loop_after", wdSettings.CrashLoopAfter,
+			"auth_probe", wdSettings.AuthProbe,
+			"dead_session_recovery", map[bool]string{true: "watchdog", false: "crash-loop"}[wdSettings.MayAct()])
+		if wdSettings.Mode == watchdog.ModeObserve {
+			logger.Info("agent watchdog is in OBSERVE mode: it will classify agents, publish conditions and record what it WOULD have done, but will not restart or pause anything. Set governor.watchdog.mode: heal to enable healing.")
+		}
+	} else {
+		logger.Info("agent watchdog disabled by config", "mode", string(wdSettings.Mode))
+	}
+
 	dashSrv.RegisterAPI(&dashboard.Dependencies{
 		Config:           cfg,
 		AgentMgr:         agentMgr,
@@ -2476,7 +2519,7 @@ func main() {
 			return getClaimLedger(logger).Lookup(repo, number)
 		},
 		PersistFunc: func() {
-			persistState(agentMgr, gov, cfg, tokenCollector, statePath, logger, dashSrv)
+			persistState(agentMgr, gov, cfg, tokenCollector, statePath, logger, dashSrv, wd)
 		},
 		ReInitFunc: func() {
 			initAgentConfigDrivenSystems(cfg)
@@ -4662,8 +4705,11 @@ func main() {
 	logger.Info("startup honors persisted cadence state — first eval kicks only agents whose cadence has elapsed")
 	runEvalCycle(ctx, cfg, ghClient, gov, sched, agentMgr, dashSrv, notifier, beadStores, tokenCollector, metricsCollector, nousState, &lastActionable, advisoryStore, advisoryIssues, nil, logger)
 	runRotationCheck(ctx, cfg, rotationMgr, gov, agentMgr, logger)
+	if wd != nil {
+		wd.Tick(ctx)
+	}
 	runAutoMergeSweepIfDue(ctx, ghClient, dashSrv, &lastAutoMergeSweep, logger)
-	persistState(agentMgr, gov, cfg, tokenCollector, statePath, logger, dashSrv)
+	persistState(agentMgr, gov, cfg, tokenCollector, statePath, logger, dashSrv, wd)
 
 	agentTickCh := func() <-chan time.Time {
 		if agentTicker != nil {
@@ -4676,7 +4722,7 @@ func main() {
 		select {
 		case <-ctx.Done():
 			logger.Info("shutting down, persisting state")
-			persistState(agentMgr, gov, cfg, tokenCollector, statePath, logger, dashSrv)
+			persistState(agentMgr, gov, cfg, tokenCollector, statePath, logger, dashSrv, wd)
 			return
 		case <-ticker.C:
 			restarted := agentMgr.CheckAndRestartCrashedAgents(ctx)
@@ -4702,6 +4748,40 @@ func main() {
 					}
 				}
 			}
+			// Watchdog sweep (RFC #4665): synchronous but bounded — every
+			// probe carries a deadline and restarts run detached under a hard
+			// timeout, so a wedged agent can never stall this tick. Tick
+			// self-gates to watchdog.probe_interval_s.
+			//
+			// It runs BEFORE runEvalCycle so agents it revived join this
+			// cycle's resume-kick list rather than waiting a full eval
+			// interval. Restarts are detached, so a given sweep's completions
+			// are usually collected on the next pass — TakeRestarted drains
+			// whatever has finished, and the governor gate gets the final say
+			// either way.
+			if wd != nil {
+				// Re-resolve the mode each sweep so a change saved from the
+				// dashboard (or the fleet-wide kill switch being engaged)
+				// takes effect without a restart — and so dead-session
+				// ownership moves with it. Without this, leaving heal via the
+				// settings page would stop the watchdog restarting while the
+				// manager's crash loop was still standing down: a window in
+				// which NEITHER recovers a dead agent.
+				if s, errs := watchdog.SettingsFrom(cfg.Governor.Watchdog); s.Mode != wd.Mode() {
+					for _, e := range errs {
+						logger.Warn("watchdog config problem", "error", e)
+					}
+					logger.Info("watchdog mode changed", "from", string(wd.Mode()), "to", string(s.Mode))
+					dashSrv.AuditLog("system", "watchdog-mode", "from="+string(wd.Mode())+", to="+string(s.Mode), "")
+					wd.SetSettings(s)
+					agentMgr.SetDeadSessionRecoveryOwner(s.MayAct())
+				}
+				wd.Tick(ctx)
+				for _, name := range wd.TakeRestarted() {
+					dashSrv.AuditLog("system", "restart", "trigger=watchdog", name)
+					restarted = append(restarted, name)
+				}
+			}
 			runEvalCycle(ctx, cfg, ghClient, gov, sched, agentMgr, dashSrv, notifier, beadStores, tokenCollector, metricsCollector, nousState, &lastActionable, advisoryStore, advisoryIssues, restarted, logger)
 			runRotationCheck(ctx, cfg, rotationMgr, gov, agentMgr, logger)
 			runAutoMergeSweepIfDue(ctx, ghClient, dashSrv, &lastAutoMergeSweep, logger)
@@ -4723,7 +4803,7 @@ func main() {
 					logger.Info("retro lane filed advisory beads", "findings", n)
 				}
 			}
-			persistState(agentMgr, gov, cfg, tokenCollector, statePath, logger, dashSrv)
+			persistState(agentMgr, gov, cfg, tokenCollector, statePath, logger, dashSrv, wd)
 			if cfg.Governor.EvalIntervalS != lastEvalInterval && cfg.Governor.EvalIntervalS > 0 {
 				logger.Info("eval interval changed, resetting ticker",
 					"from", lastEvalInterval, "to", cfg.Governor.EvalIntervalS)
@@ -6575,7 +6655,26 @@ func randomName() string {
 	return adj + "-" + noun
 }
 
-func persistState(agentMgr *agent.Manager, gov *governor.Governor, cfg *config.Config, tc *tokens.Collector, path string, logger *slog.Logger, dashSrv *dashboard.Server) {
+// watchdogAuthProbes builds the per-provider credential probes for the
+// watchdog by adapting the rotation package's provider probers (#4608) —
+// the same machinery the #4645 probe rewrite targets, so that rewrite reaches
+// the watchdog automatically.
+func watchdogAuthProbes(cfg *config.Config) map[string]watchdog.AuthProbe {
+	threshold := cfg.Governor.Rotation.EffectiveThreshold()
+	probers := []rotation.Prober{
+		rotation.ClaudeProber{ThresholdPct: threshold},
+		rotation.CodexProber{ThresholdPct: threshold},
+		rotation.AgyProber{ThresholdPct: threshold},
+		rotation.DeepSeekProber{},
+	}
+	out := make(map[string]watchdog.AuthProbe, len(probers))
+	for _, p := range probers {
+		out[p.Provider()] = watchdog.RotationAuthProbe{Prober: p}
+	}
+	return out
+}
+
+func persistState(agentMgr *agent.Manager, gov *governor.Governor, cfg *config.Config, tc *tokens.Collector, path string, logger *slog.Logger, dashSrv *dashboard.Server, wd *watchdog.Reconciler) {
 	statuses := agentMgr.AllStatuses()
 	agents := make(map[string]snapshot.AgentState, len(statuses))
 	for name, proc := range statuses {
@@ -6667,6 +6766,14 @@ func persistState(agentMgr *agent.Manager, gov *governor.Governor, cfg *config.C
 	// Only written when engaged — a never-thrown breaker adds nothing.
 	if engaged, breakerPaused := agentMgr.BreakerState(); engaged {
 		state.Breaker = &snapshot.BreakerState{Engaged: true, Paused: breakerPaused}
+	}
+
+	// Persist the watchdog's backoff/crash-loop/condition state (RFC #4665
+	// open question 2: it rides the existing state file).
+	if wd != nil {
+		if wdState := wd.Snapshot(); len(wdState) > 0 {
+			state.Watchdog = wdState
+		}
 	}
 
 	if err := snapshot.SaveState(path, state, logger); err != nil {
