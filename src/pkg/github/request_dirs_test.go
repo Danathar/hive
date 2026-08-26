@@ -60,18 +60,32 @@ func TestPrepareRequestDirsIsAgentWritable(t *testing.T) {
 	PrepareRequestDirs(quietLogger())
 
 	for name, dir := range map[string]string{"pr": pr, "issue": issue} {
-		info, err := os.Stat(dir)
-		if err != nil {
-			t.Fatalf("%s queue: %v", name, err)
+		assertRequestDirMode(t, name, dir)
+	}
+}
+
+func TestPrepareRequestDirsUpgradesExistingQueueModes(t *testing.T) {
+	pr, issue := testQueueDirs(t)
+
+	for name, dir := range map[string]string{"pr": pr, "issue": issue} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("%s queue pre-create: %v", name, err)
 		}
-		if perm := info.Mode().Perm(); perm&0o070 != 0o070 {
-			t.Errorf("%s queue perm = %#o, want group rwx — agents cannot drop request files", name, perm)
+		if err := os.Chmod(dir, 0o755); err != nil {
+			t.Fatalf("%s queue chmod: %v", name, err)
 		}
-		if info.Mode()&os.ModeSetgid == 0 {
-			t.Errorf("%s queue missing setgid bit — agent-written files won't inherit the node group", name)
+		queued := filepath.Join(dir, "pending.json")
+		if err := os.WriteFile(queued, []byte(`{"agent":"quality"}`), 0o664); err != nil {
+			t.Fatalf("%s queue write queued request: %v", name, err)
 		}
-		if info.Mode()&os.ModeSticky == 0 {
-			t.Errorf("%s queue missing sticky bit — any agent could unlink a peer's queued request", name)
+	}
+
+	PrepareRequestDirs(quietLogger())
+
+	for name, dir := range map[string]string{"pr": pr, "issue": issue} {
+		assertRequestDirMode(t, name, dir)
+		if _, err := os.Stat(filepath.Join(dir, "pending.json")); err != nil {
+			t.Fatalf("%s queued request was lost across permission upgrade: %v", name, err)
 		}
 	}
 }
@@ -92,6 +106,23 @@ func TestPrepareRequestDirsIsIdempotent(t *testing.T) {
 
 	if _, err := os.Stat(queued); err != nil {
 		t.Fatalf("a queued request was lost across PrepareRequestDirs: %v", err)
+	}
+}
+
+func assertRequestDirMode(t *testing.T, name, dir string) {
+	t.Helper()
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("%s queue: %v", name, err)
+	}
+	if perm := info.Mode().Perm(); perm&0o070 != 0o070 {
+		t.Errorf("%s queue perm = %#o, want group rwx — agents cannot drop request files", name, perm)
+	}
+	if info.Mode()&os.ModeSetgid == 0 {
+		t.Errorf("%s queue missing setgid bit — agent-written files won't inherit the node group", name)
+	}
+	if info.Mode()&os.ModeSticky == 0 {
+		t.Errorf("%s queue missing sticky bit — any agent could unlink a peer's queued request", name)
 	}
 }
 

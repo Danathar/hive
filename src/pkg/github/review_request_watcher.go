@@ -97,20 +97,12 @@ func (c *Client) StartReviewRequestWatcher(ctx context.Context, authz ReviewRequ
 	if nowFn == nil {
 		nowFn = time.Now
 	}
-	if err := os.MkdirAll(reviewRequestDir(), 0o777); err != nil {
-		c.logger.Warn("review-request watcher: cannot create request dir; disabled",
-			slog.String("dir", reviewRequestDir()), slog.String("error", err.Error()))
-		close(done)
-		return done
-	}
 	// Agents (UID >= 2001, shared node group) must be able to DROP request files;
 	// MkdirAll is umask-masked, so force group-write + setgid (same as the PR
-	// watcher). The forge-check still holds via the file's owning UID. Sticky
-	// bit: only a file's owner may unlink or replace a queued request. (os.Chmod
-	// drops raw 0o2000/0o1000 bits — use os.ModeSetgid/os.ModeSticky.)
-	if err := os.Chmod(reviewRequestDir(), 0o775|os.ModeSetgid|os.ModeSticky); err != nil {
-		c.logger.Warn("review-request watcher: could not set group-writable perms on request dir; agents may be unable to review",
-			slog.String("dir", reviewRequestDir()), slog.String("error", err.Error()))
+	// watcher). The forge-check still holds via the file's owning UID.
+	if !ensureRequestDir(c.logger, "review", reviewRequestDir()) {
+		close(done)
+		return done
 	}
 	// Capture the poll interval BEFORE spawning: the goroutine's first read of
 	// the package-level interval races with a test's fastTick cleanup restoring

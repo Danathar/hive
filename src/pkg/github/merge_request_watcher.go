@@ -159,21 +159,13 @@ func (c *Client) StartMergeRequestWatcher(ctx context.Context, authz MergeReques
 	if nowFn == nil {
 		nowFn = time.Now
 	}
-	if err := os.MkdirAll(mergeRequestDir(), 0o777); err != nil {
-		c.logger.Warn("merge-request watcher: cannot create request dir; disabled",
-			slog.String("dir", mergeRequestDir()), slog.String("error", err.Error()))
-		close(done)
-		return done
-	}
 	// Agents must be able to DROP request files here (hive-merge runs AS the
 	// agent). Force group-write + setgid so agent-written files inherit the node
 	// group — same rationale as the pr-request dir. The forge check still holds:
-	// the watcher reads each file's OWNING UID. Sticky bit: only a file's owner
-	// may unlink or replace a queued request. (os.Chmod drops raw 0o2000/0o1000
-	// bits — the special bits must be os.ModeSetgid/os.ModeSticky.)
-	if err := os.Chmod(mergeRequestDir(), 0o775|os.ModeSetgid|os.ModeSticky); err != nil {
-		c.logger.Warn("merge-request watcher: could not set group-writable perms on request dir; agents may be unable to request merges",
-			slog.String("dir", mergeRequestDir()), slog.String("error", err.Error()))
+	// the watcher reads each file's OWNING UID.
+	if !ensureRequestDir(c.logger, "merge", mergeRequestDir()) {
+		close(done)
+		return done
 	}
 	// Capture the poll interval BEFORE spawning: the goroutine's first read of
 	// the package-level interval races with a test's fastTick cleanup restoring
