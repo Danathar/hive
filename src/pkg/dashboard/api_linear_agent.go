@@ -124,6 +124,34 @@ type noAgentManagerError struct{}
 
 func (*noAgentManagerError) Error() string { return "agent manager unavailable" }
 
+// linearAgentTokenTimeout bounds LinearAgentAccessToken. The common path is a
+// store read; only an expired token costs an HTTP refresh, and this runs on
+// the agent LAUNCH path (under the manager's lock), so it must not hang.
+const linearAgentTokenTimeout = 5 * time.Second
+
+// LinearAgentAccessToken returns the connected workspace's live OAuth access
+// token, or "" when no workspace is connected (or the store is unreadable).
+// It is the value pkg/agent injects into ISSUES_ONLY+ agents as
+// LINEAR_ACCESS_TOKEN so their Linear writes are authored by the same "Hive"
+// app identity that acknowledges sessions — the Linear analogue of the GitHub
+// App token pushed as GITHUB_TOKEN. Never logged by callers.
+func (s *Server) LinearAgentAccessToken() string {
+	svc := s.linearAgent()
+	if svc == nil || svc.client == nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), linearAgentTokenTimeout)
+	defer cancel()
+	tok, err := svc.client.AccessToken(ctx)
+	if err != nil {
+		// "not installed" is the steady state of every hive without a Linear
+		// workspace; log only at debug so GitHub-only hives stay quiet.
+		s.logger.Debug("linear agent: no access token for agents", "error", err)
+		return ""
+	}
+	return tok
+}
+
 // resolveLinearSessionAgent names the agent for Linear sessions:
 // work_source.linear.session_agent when set (and configured), else the sole
 // configured agent, else an error the responder reports into the session.

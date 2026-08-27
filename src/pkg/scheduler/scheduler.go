@@ -274,6 +274,7 @@ func (s *Scheduler) substituteTemplateWithPolicy(template string, actionable *gi
 		"PR_LIST":               lit(prList),
 		"AUTHORIZED_REPOS":      lit(s.buildReposSection()),
 		"GH_AUTH":               lit(s.ghAuthInstructions()),
+		"WORK_TRACKER":          lit(s.workTrackerSection()),
 		"PROJECT_ORG":           lit(s.cfg.Project.Org),
 		"PROJECT_NAME":          lit(s.cfg.Project.Name),
 		"PROJECT_PRIMARY_REPO":  lit(fullPrimaryRepo),
@@ -601,6 +602,10 @@ func (s *Scheduler) BuildAgentMessage(agentName string, issues []github.Issue, a
 		// one commit — kicks kept spawning NEW PRs while the reaper's
 		// re-engagements aged every red SHA to its cap unfixed.
 		message = s.addRedPRFixFirst(agentName, message)
+		// Non-GitHub work source: tell the agent how the tracker half of its
+		// policy maps onto Linear (identity, auth, filing, PR linking, hold).
+		// Same seam, same reason — a customized template cannot omit it.
+		message = s.addWorkTrackerSection(message)
 	}()
 
 	baseName := s.cfg.BaseAgentName(agentName)

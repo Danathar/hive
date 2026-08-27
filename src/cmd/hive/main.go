@@ -2481,6 +2481,25 @@ func main() {
 		logger.Info("agent watchdog disabled by config", "mode", string(wdSettings.Mode))
 	}
 
+	// Linear write credential for ISSUES_ONLY+ agents (GitHub-issue parity):
+	// prefer the connected Linear agent app's OAuth token, so agent writes are
+	// authored by the same "Hive" app identity that acknowledges sessions —
+	// the analogue of App-bot authorship on GitHub — and fall back to the
+	// work-source API key from hive.yaml. Resolved live off the dashboard's
+	// install store and the cfg pointer so a workspace connected after boot
+	// reaches agents on their next launch / hourly token refresh. Values are
+	// never logged. Wired before RegisterAPI so the resolver is in place
+	// before any agent launches.
+	agentMgr.SetLinearCredentialResolver(func() agent.LinearCredential {
+		if tok := dashSrv.LinearAgentAccessToken(); tok != "" {
+			return agent.LinearCredential{AccessToken: tok}
+		}
+		if cfg.Governor.WorkSource.Type == "linear" {
+			return agent.LinearCredential{APIKey: strings.TrimSpace(cfg.Governor.WorkSource.Linear.APIKey)}
+		}
+		return agent.LinearCredential{}
+	})
+
 	dashSrv.RegisterAPI(&dashboard.Dependencies{
 		Config:           cfg,
 		AgentMgr:         agentMgr,

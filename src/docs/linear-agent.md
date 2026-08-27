@@ -95,6 +95,45 @@ workspace, the resolved session agent, and recent sessions.
 `POST /api/linear/agent/disconnect` (owner) forgets the stored grant (revoke
 the app itself from Linear's settings).
 
+## GitHub-issue parity: agents writing to Linear
+
+With the pieces above a hive could *read* Linear and *acknowledge* sessions,
+but an agent still had no way to do the tracker half of its policy —
+file an issue, comment, cite the issue from a PR — against Linear. The
+policy templates are written for GitHub Issues (`gh issue create`,
+`Fixes #N`, the `hold` label), and the proxy's mutation allowlist was gated
+but nothing reachable: no agent held a Linear credential. Parity is built
+the same way the GitHub path is, from the config that already exists:
+
+| GitHub Issues | Linear | Mechanism |
+|---|---|---|
+| App installation token, tier-scoped, pushed as `GITHUB_TOKEN` to push-capable agents and refreshed hourly | The connected app's OAuth token pushed as `LINEAR_ACCESS_TOKEN` (Bearer) to **ISSUES_ONLY+** agents; falls back to `work_source.linear.api_key` as `LINEAR_API_KEY`; re-pushed on the same hourly refresh tick | `agent.Manager.SetLinearCredentialResolver`, wired in `main.go` from `dashboard.Server.LinearAgentAccessToken` |
+| Advisory agents have `GH_TOKEN`/`GITHUB_TOKEN` stripped | Advisory agents have both Linear variables stripped from the tmux session | `ensureTmuxSession` |
+| Writes authored by the App bot | Writes authored by the Hive app user (the same identity that acknowledges sessions) | `actor=app` grant |
+| `${GH_AUTH}` explains auth; templates give `gh issue create` and `Fixes #N` | A **Work Tracker: Linear** section rendered from `work_source.linear` (team → repo map, states, hold labels, `assigned_only`) and injected into every kick at the same post-resolution seam as held-PR coordination, so customized templates cannot omit it; `${WORK_TRACKER}` places it explicitly | `pkg/scheduler/work_tracker.go` |
+| `Fixes #N` auto-closes on merge | Linear's GitHub integration: identifier in the branch name or `Fixes TEAM-123` in the PR body links the PR, moves the issue to In Progress when it opens and Done when it merges; `Part of` / `Refs` / `Contributes to` are the non-closing forms | Linear-side, nothing hive-specific |
+| REST route table gates writes by tier | GraphQL operation allowlist gates writes by tier (below) | `pkg/proxy/linear_rules.go` |
+
+Nothing changes for a GitHub-sourced hive: with no Linear credential the
+resolver injects nothing and the tracker section is empty.
+
+Agents are told **not** to change the state of PR-driven issues by hand —
+Linear's GitHub integration owns that transition, exactly as GitHub's
+`Fixes` keyword owns issue closure. Make sure the integration is enabled
+for the workspace and the repos in `work_source.linear.teams[].repo` are
+connected to it.
+
+### Session kicks and governor kicks
+
+A delegated issue reaches the hive twice: the webhook opens an agent
+session (kicked immediately to `session_agent`), and — with
+`assigned_only: true` — the same issue is enumerated into the governor's
+backlog on the next sweep. This mirrors GitHub, where a webhook-channel kick
+and a governor kick for the same issue also coexist. The governor kick
+rotates the session's kick log, which the responder reports into the
+session as "finished this run"; the follow-on run carries on with the same
+identifier in its work list.
+
 ## Proxy enforcement
 
 Agent-side calls to `api.linear.app` go through the ACMM proxy
@@ -129,3 +168,10 @@ workspace:
 6. **Token refresh**: after ~24h, confirm the stored access token refreshes
    transparently (30-minute grace window; the old refresh token is kept when
    the response omits a new one).
+7. **Agent writes**: from an ISSUES_ONLY+ agent session, confirm
+   `LINEAR_ACCESS_TOKEN` is set (and absent in an advisory session), that an
+   `issueCreate` lands authored by the Hive app user, and that an `issueDelete`
+   is refused by the proxy with a 403 naming the operation.
+8. **PR auto-link**: open a PR on a branch named `<agent>/team-123-slug` with
+   `Fixes TEAM-123` in the body and confirm Linear attaches it and moves the
+   issue to In Progress, then Done on merge.

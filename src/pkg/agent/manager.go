@@ -443,6 +443,14 @@ type Manager struct {
 	// spoke. An atomic read is lock-free and safe from any lock context.
 	bobAPIKeyResolver atomic.Pointer[func() string]
 
+	// linearCredentialResolver resolves the Linear write credential handed to
+	// ISSUES_ONLY+ agents at LAUNCH and token-refresh time — the Linear
+	// analogue of the App token pushed as GITHUB_TOKEN. Resolved live (not at
+	// boot) so a workspace connected from the dashboard after startup reaches
+	// agents on their next launch / hourly refresh without a restart. Same
+	// atomic.Pointer discipline and deadlock reasoning as bobAPIKeyResolver.
+	linearCredentialResolver atomic.Pointer[func() LinearCredential]
+
 	// explainModeDefaultResolver returns the hive-wide default explain mode
 	// (governor.explain_mode, falling back to HIVE_EXPLAIN_MODE) at KICK and
 	// LAUNCH time rather than at boot, so an operator who turns explanation on
@@ -768,6 +776,77 @@ func (m *Manager) bobAPIKey() string {
 	}
 	return (*fnp)()
 }
+
+// LinearCredential is what an agent authenticates to api.linear.app with.
+// Exactly one of the two is expected to be set: AccessToken is the installed
+// Linear agent app's OAuth token (sent as `Authorization: Bearer …`, so writes
+// are authored by the app identity — the parity of GitHub's App bot); APIKey
+// is the work-source personal API key (sent bare as `Authorization: …`), the
+// fallback when no workspace is connected. Empty means "inject nothing".
+type LinearCredential struct {
+	AccessToken string
+	APIKey      string
+}
+
+// Empty reports whether no credential is available.
+func (c LinearCredential) Empty() bool { return c.AccessToken == "" && c.APIKey == "" }
+
+// SetLinearCredentialResolver injects the resolver for the Linear write
+// credential. Called from main.go with a closure over the live Linear agent
+// install + config, so a workspace connected after boot is picked up on the
+// next launch or hourly refresh. The resolver returns credential VALUES,
+// which are never logged. A nil fn clears it (no Linear credential injected).
+func (m *Manager) SetLinearCredentialResolver(fn func() LinearCredential) {
+	// Atomic store — no m.mu — so linearCredential can be read lock-free from
+	// the lock-holding launch path (see bobAPIKeyResolver docs).
+	if fn == nil {
+		m.linearCredentialResolver.Store(nil)
+		return
+	}
+	m.linearCredentialResolver.Store(&fn)
+}
+
+// linearCredential returns the current Linear credential, or the zero value
+// when none is configured (or no resolver was injected, as in tests/bare
+// setups). Safe to call while holding m.mu.
+func (m *Manager) linearCredential() LinearCredential {
+	fnp := m.linearCredentialResolver.Load()
+	if fnp == nil || *fnp == nil {
+		return LinearCredential{}
+	}
+	return (*fnp)()
+}
+
+// linearEnvPairs renders the Linear credential as env pairs for one agent, or
+// nil when the agent may not hold one. Gated on CanCreateIssues() — the
+// ISSUES_ONLY floor — because that is the tier at which the proxy's Linear
+// gate (pkg/proxy/linear_rules.go) first permits a mutation: below it the
+// credential could only ever be used for reads the hive already performs on
+// the agent's behalf, and GitHub parity says advisory agents stay token-less.
+// Both values are Secret so they never reach the shell command line.
+func (m *Manager) linearEnvPairs(agent *AgentProcess) []agentEnvPair {
+	if !m.agentMode(agent).CanCreateIssues() {
+		return nil
+	}
+	cred := m.linearCredential()
+	switch {
+	case cred.AccessToken != "":
+		return []agentEnvPair{{linearAccessTokenEnvVar, cred.AccessToken, true}}
+	case cred.APIKey != "":
+		return []agentEnvPair{{linearAPIKeyEnvVar, cred.APIKey, true}}
+	}
+	return nil
+}
+
+// Environment variables carrying the Linear credential into an agent session.
+// LINEAR_API_KEY is the name Linear's own SDK, MCP server, and CLI read for a
+// personal key; LINEAR_ACCESS_TOKEN is the OAuth (Bearer) form. The kick's
+// work-tracker section (pkg/scheduler) tells the agent which header each one
+// maps to.
+const (
+	linearAccessTokenEnvVar = "LINEAR_ACCESS_TOKEN"
+	linearAPIKeyEnvVar      = "LINEAR_API_KEY"
+)
 
 // SetExplainModeDefaultResolver injects the resolver for the hive-wide default
 // explain mode. Called from main.go with a closure over the live config, so a
@@ -1390,6 +1469,21 @@ func (m *Manager) refreshAgentTokens(ctx context.Context) {
 	}
 	m.mu.RUnlock()
 
+	// Re-push the Linear OAuth token alongside the GitHub one. Linear access
+	// tokens expire (~24h) and liveToken refreshes them through the store;
+	// the agent's CLI reads its env once per turn, so the hourly refresh tick
+	// is what keeps LINEAR_ACCESS_TOKEN current inside a long-running session.
+	// Independent of GitHub App auth: a Linear-sourced hive with no App still
+	// needs this, hence it runs before the auth == nil return below.
+	for _, a := range agents {
+		if a.tmuxSession == "" {
+			continue
+		}
+		for _, p := range m.linearEnvPairs(a) {
+			_ = m.tmuxCmd(a, "set-environment", "-t", a.tmuxSession, p.Key, p.Value).Run()
+		}
+	}
+
 	if auth == nil {
 		return
 	}
@@ -1986,6 +2080,15 @@ func (m *Manager) ensureTmuxSession(agent *AgentProcess) error {
 	if !m.agentMode(agent).CanPush() {
 		_ = m.tmuxCmd(agent, "set-environment", "-t", agent.tmuxSession, "-u", "GH_TOKEN").Run()
 		_ = m.tmuxCmd(agent, "set-environment", "-t", agent.tmuxSession, "-u", "GITHUB_TOKEN").Run()
+	}
+	// Same for the Linear credential below the ISSUES_ONLY floor: the hive
+	// process env may carry LINEAR_API_KEY (the work-source key, referenced
+	// from hive.yaml as ${LINEAR_API_KEY}) and a tmux server started by this
+	// process inherits it, so an advisory agent would otherwise be handed a
+	// write-capable key the proxy gate would have to catch on every call.
+	if !m.agentMode(agent).CanCreateIssues() {
+		_ = m.tmuxCmd(agent, "set-environment", "-t", agent.tmuxSession, "-u", linearAccessTokenEnvVar).Run()
+		_ = m.tmuxCmd(agent, "set-environment", "-t", agent.tmuxSession, "-u", linearAPIKeyEnvVar).Run()
 	}
 
 	// Every set-environment above updated the SESSION environment, which tmux
@@ -8417,6 +8520,10 @@ func (m *Manager) agentEnvPairs(agent *AgentProcess) []agentEnvPair {
 			}
 		}
 	}
+	// Linear write credential for ISSUES_ONLY+ agents — see linearEnvPairs.
+	// Nil for advisory agents and for hives with no Linear credential, so a
+	// GitHub-only hive sees no change.
+	vars = append(vars, m.linearEnvPairs(agent)...)
 	if m.claudeAuthToken != "" && backend == "claude" {
 		vars = append(vars, agentEnvPair{"CLAUDE_CODE_OAUTH_TOKEN", m.claudeAuthToken, true})
 	}

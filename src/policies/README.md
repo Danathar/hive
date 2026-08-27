@@ -66,6 +66,7 @@ The complete built-in scheduler set in v4 is:
 | `${PR_LIST}` | Formatted pull-request list. | Empty/none formatting comes from the scheduler formatter. |
 | `${AUTHORIZED_REPOS}` | Repository authorization section for the configured project repos and GitHub host. | Built by the scheduler. |
 | `${GH_AUTH}` | GitHub App/CLI authentication instructions for the agent. | Templates/policies decide whether using GitHub writes is allowed; supervisor no-GitHub policies should not rely on this fragment. |
+| `${WORK_TRACKER}` | Work-tracker guidance when `governor.work_source.type` is not GitHub (today: Linear — identity format, auth, filing issues, PR linking, hold labels), rendered from the work-source config. | Empty for GitHub-sourced hives. If a template omits it, the scheduler appends the section after resolution so no policy can leave a Linear-sourced agent with GitHub-only instructions. |
 | `${PROJECT_ORG}` | `project.org`. | GitHub organization/owner. |
 | `${PROJECT_NAME}` | `project.name`. | May be empty if not configured. |
 | `${PROJECT_PRIMARY_REPO}` | Primary repo as `org/repo`. | Combines `project.org` and `project.primary_repo`. |
