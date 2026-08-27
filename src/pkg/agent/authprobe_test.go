@@ -339,6 +339,11 @@ func TestAgentAuthState_CopilotCredentials(t *testing.T) {
 func TestAgentAuthState_CodexCredentials(t *testing.T) {
 	emptyCodexSharedPath(t)
 	t.Setenv("HOME", t.TempDir())
+	// codexEnvHasCredentials reads the developer's real shell: an
+	// OPENAI_API_KEY / CODEX_API_KEY exported locally made the "no
+	// credentials" arm pass as authenticated. Pin both empty first.
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("CODEX_API_KEY", "")
 	m := &Manager{}
 
 	if !BackendRequiresInteractiveAuth("codex") {
