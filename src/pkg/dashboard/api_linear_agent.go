@@ -126,7 +126,8 @@ func (*noAgentManagerError) Error() string { return "agent manager unavailable" 
 
 // linearAgentTokenTimeout bounds LinearAgentAccessToken. The common path is a
 // store read; only an expired token costs an HTTP refresh, and this runs on
-// the agent LAUNCH path (under the manager's lock), so it must not hang.
+// the agent LAUNCH path (Phase 2, after the manager's lock is released — but
+// still blocking the launch), so it must not hang.
 const linearAgentTokenTimeout = 5 * time.Second
 
 // LinearAgentAccessToken returns the connected workspace's live OAuth access

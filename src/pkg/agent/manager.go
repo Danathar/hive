@@ -838,6 +838,32 @@ func (m *Manager) linearEnvPairs(agent *AgentProcess) []agentEnvPair {
 	return nil
 }
 
+// linearRefreshTmuxArgs returns the tmux invocations the refresh tick applies
+// to one agent's session for the Linear credential: set-environment pushes of
+// the current credential for ISSUES_ONLY+ agents, or explicit unsets ("-u") of
+// BOTH credential vars for agents below the floor. The unsets exist because
+// the creation-time strip in ensureTmuxSession fires only when the session is
+// created (it early-returns on an existing session): a live agent downgraded
+// below ISSUES_ONLY keeps its session, and tmux forks a fresh CLI per turn, so
+// without them every post-downgrade turn would inherit the last pushed value
+// indefinitely — LINEAR_API_KEY never expires. They are unconditional on prior
+// state (set-environment -u is idempotent) so a downgrade is closed on the
+// first tick regardless of which variable, if any, was pushed before.
+// Callers must skip agents with no tmux session.
+func (m *Manager) linearRefreshTmuxArgs(a *AgentProcess) [][]string {
+	if !m.agentMode(a).CanCreateIssues() {
+		return [][]string{
+			{"set-environment", "-t", a.tmuxSession, "-u", linearAccessTokenEnvVar},
+			{"set-environment", "-t", a.tmuxSession, "-u", linearAPIKeyEnvVar},
+		}
+	}
+	var out [][]string
+	for _, p := range m.linearEnvPairs(a) {
+		out = append(out, []string{"set-environment", "-t", a.tmuxSession, p.Key, p.Value})
+	}
+	return out
+}
+
 // Environment variables carrying the Linear credential into an agent session.
 // LINEAR_API_KEY is the name Linear's own SDK, MCP server, and CLI read for a
 // personal key; LINEAR_ACCESS_TOKEN is the OAuth (Bearer) form. The kick's
@@ -1089,10 +1115,11 @@ func agentTokenRefreshInterval() time.Duration {
 // intervals (configurable via HIVE_AGENT_TOKEN_REFRESH_INTERVAL) so there's
 // always a valid token on disk.
 //
-// Safe to start even before an App auth is wired: refreshAgentTokens no-ops
-// while m.appAuth is nil, so hives whose GitHub App credentials arrive AFTER
-// boot (heartbeat delivery, config API reinit, config reload) start refreshing
-// as soon as SetAppAuth is called. Previously this loop was only started when
+// Safe to start even before an App auth is wired: the Linear credential
+// push/strip in refreshAgentTokens runs regardless, and the GitHub App token
+// portion skips itself while m.appAuth is nil, so hives whose GitHub App
+// credentials arrive AFTER boot (heartbeat delivery, config API reinit, config
+// reload) start refreshing as soon as SetAppAuth is called. Previously this loop was only started when
 // the App was configured at boot, so hosted spokes never refreshed per-agent
 // caches: agent sessions outlived their token, `gh` 401'd and printed
 // "gh auth login", and the login-detector auto-paused the agent.
@@ -1471,16 +1498,20 @@ func (m *Manager) refreshAgentTokens(ctx context.Context) {
 
 	// Re-push the Linear OAuth token alongside the GitHub one. Linear access
 	// tokens expire (~24h) and liveToken refreshes them through the store;
-	// the agent's CLI reads its env once per turn, so the hourly refresh tick
-	// is what keeps LINEAR_ACCESS_TOKEN current inside a long-running session.
-	// Independent of GitHub App auth: a Linear-sourced hive with no App still
-	// needs this, hence it runs before the auth == nil return below.
+	// the agent's CLI reads its env once per turn, so this refresh tick
+	// (agentTokenRefreshInterval, 40m by default) is what keeps
+	// LINEAR_ACCESS_TOKEN current inside a long-running session. For agents
+	// below the ISSUES_ONLY floor the same tick actively UNSETS both
+	// credential vars instead — see linearRefreshTmuxArgs for why the
+	// creation-time strip in ensureTmuxSession is not enough. Independent of
+	// GitHub App auth: a Linear-sourced hive with no App still needs this,
+	// hence it runs before the auth == nil return below.
 	for _, a := range agents {
 		if a.tmuxSession == "" {
 			continue
 		}
-		for _, p := range m.linearEnvPairs(a) {
-			_ = m.tmuxCmd(a, "set-environment", "-t", a.tmuxSession, p.Key, p.Value).Run()
+		for _, args := range m.linearRefreshTmuxArgs(a) {
+			_ = m.tmuxCmd(a, args...).Run()
 		}
 	}
 
