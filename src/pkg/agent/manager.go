@@ -2503,7 +2503,7 @@ func (m *Manager) launchInTmux(ctx context.Context, agent *AgentProcess) error {
 		_ = m.verifyBobStateDirsWritable(agent.Name, bobSharedHome, m.workDir+"/"+agent.Name, agent.UID)
 	}
 
-	launchCmd := binary
+	var launchCmd string
 	model := agent.Config.Model
 	if agent.ModelOverride != "" {
 		model = agent.ModelOverride
@@ -3484,36 +3484,13 @@ var acmmLevelNames = map[int]string{
 }
 
 func (m *Manager) buildBootstrapPrompt(agent *AgentProcess) string {
-	// Look for policy files in priority order.
-	// For advisory agents (non-quality at L3+), prefer <agent>-advisory.md
-	// over <agent>.md so they get the correct advisory-only instructions.
-	policyDir := m.project.PolicyDir
-	if policyDir == "" {
-		policyDir = "/data/policies/agents"
-	}
-	policiesRoot := filepath.Dir(policyDir)
-	if policiesRoot == "." || policiesRoot == "" {
-		policiesRoot = "/data/policies"
-	}
-	mode := m.agentMode(agent)
-	suffix := mode.SuffixForLevel(m.project.ACMMLevel)
-
-	var paths []string
-	if agent.Config.KickTemplate != "" {
-		paths = append(paths, fmt.Sprintf("%s/%s", policyDir, agent.Config.KickTemplate))
-	}
-	paths = append(paths,
-		fmt.Sprintf("%s/%s%s.md", policyDir, agent.Name, suffix),
-		fmt.Sprintf("%s/%s.md", policyDir, agent.Name),
-		fmt.Sprintf("/data/agents/%s/CLAUDE.md", agent.Name),
-		filepath.Join(policiesRoot, "examples", "agents", agent.Name+suffix+".md"),
-		filepath.Join(policiesRoot, "examples", "agents", agent.Name+".md"),
-		fmt.Sprintf("/opt/hive/examples/agents/%s.md", agent.Name),
-	)
 	// No boot prompt — the governor's first eval cycle (10s after startup)
 	// kicks all due agents via BuildKickMessages with fully substituted
 	// templates. Sending a boot prompt here caused unsubstituted ${ISSUE_LIST}
-	// and other vars to reach the agent.
+	// and other vars to reach the agent. The policy-file path list this
+	// function used to assemble was dead code once the boot prompt was
+	// removed, so it is gone too.
+	_ = agent // signature kept for the call site; the arg is no longer read
 	return ""
 }
 

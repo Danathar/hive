@@ -35,10 +35,12 @@ linters:
     # its own PR after its findings are fixed — that ratchet is tracked in the
     # ratchet issue #4903.
     #
-    # ineffassign (11) is the cheapest next rung; errcheck (579) is the most
-    # valuable and the largest, and is worth splitting by package.
+    # errcheck (579) is the most valuable remaining rung and the largest, and
+    # is worth splitting by package.
     - govet
     - misspell
+    # RATCHET: ineffassign enabled after its 11 findings were fixed (#4903).
+    - ineffassign
 
   exclusions:
     generated: lax

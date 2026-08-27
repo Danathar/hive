@@ -140,11 +140,10 @@ func TestRuntimeContext_Hit(t *testing.T) {
 func TestBuild_UnknownType_Skipped(t *testing.T) {
 	specs := []VarSpec{{Name: "V", Type: "nonexistent", Scope: ScopeConfig}}
 	reg := Build(specs, Policy{}, nil)
-	// Unknown type is skipped — variable left literal.
-	got := reg.Expand(context.Background(), "${V}", ScopeConfig, nil)
-	// Since no env var V is set, bare env fallback also fails → literal.
+	// Unknown type is skipped — variable left literal. With no env var V
+	// set, the bare env fallback also fails → literal survives.
 	os.Unsetenv("V")
-	got = reg.Expand(context.Background(), "${V}", ScopeConfig, nil)
+	got := reg.Expand(context.Background(), "${V}", ScopeConfig, nil)
 	if got != "${V}" {
 		t.Errorf("unknown type should leave literal, got %q", got)
 	}

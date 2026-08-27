@@ -7903,11 +7903,6 @@ func (s *Server) buildAgentLeaderboardEntries() []LeaderboardEntry {
 		prsOpened, issuesFixed, totalFindings := s.countAgentActivity(name)
 		tasksCompleted := prsOpened + issuesFixed
 
-		displayName := proc.Config.DisplayName
-		if displayName == "" {
-			displayName = name
-		}
-
 		emoji := proc.Config.Emoji
 		if emoji == "" {
 			emoji = "\U0001F916"

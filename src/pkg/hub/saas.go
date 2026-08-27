@@ -2389,16 +2389,6 @@ func buildClusterHealth(s *HubServer) (*ClusterHealthResponse, error) {
 		}
 	}
 
-	aggCPUPct := 0
-	if aggCPUAlloc > 0 {
-		aggCPUPct = int(aggCPUUsed * percentMultiplier / aggCPUAlloc)
-	}
-	aggMemPct := 0
-	if aggMemAlloc > 0 {
-		aggMemPct = int(aggMemUsed * percentMultiplier / aggMemAlloc)
-	}
-	aggMemGB := int(aggMemAlloc / giToBytes)
-
 	// Include heartbeat-only clusters that are NOT in s.clusters but do have
 	// heartbeat-reported health data. This handles firewalled spokes whose
 	// cluster isn't in the hub's clusters.json.
@@ -2422,16 +2412,17 @@ func buildClusterHealth(s *HubServer) (*ClusterHealthResponse, error) {
 	}
 	s.heartbeatHealthMu.RUnlock()
 
-	// Recompute aggregates after including heartbeat-only clusters.
-	aggCPUPct = 0
+	// Compute aggregates only after heartbeat-only clusters are included; an
+	// earlier pre-inclusion computation was dead (always overwritten here).
+	aggCPUPct := 0
 	if aggCPUAlloc > 0 {
 		aggCPUPct = int(aggCPUUsed * percentMultiplier / aggCPUAlloc)
 	}
-	aggMemPct = 0
+	aggMemPct := 0
 	if aggMemAlloc > 0 {
 		aggMemPct = int(aggMemUsed * percentMultiplier / aggMemAlloc)
 	}
-	aggMemGB = int(aggMemAlloc / giToBytes)
+	aggMemGB := int(aggMemAlloc / giToBytes)
 
 	// Sort clusters by ID for deterministic output.
 	sort.Slice(perCluster, func(i, j int) bool {
@@ -4159,7 +4150,9 @@ func (s *HubServer) handleOpenHive(w http.ResponseWriter, r *http.Request) {
 	// Access gate: only the owner, an authorized user, or the hub admin may open
 	// the spoke. The role we pass is advisory — the spoke re-checks its own
 	// allowlist and uses that role authoritatively.
-	role := saasRoleRead
+	// Every branch below either assigns role or rejects the request, so no
+	// initializer is needed (and ineffassign flags one as dead).
+	var role string
 	if isHubAdmin(username) {
 		role = saasRoleOwner
 	} else {
