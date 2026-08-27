@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 	"time"
@@ -87,5 +88,42 @@ func TestUnhandledKeyDoesNotQuit(t *testing.T) {
 	_, cmd := newModel().Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
 	if cmd != nil {
 		t.Fatal("an unbound key returned a command; only q and ctrl+c should quit")
+	}
+}
+
+// TestRunOverPipes drives the real program — the constructor Run uses, options
+// and all — with a pipe standing in for the terminal.
+//
+// The teatest cases above build their own program internally, so none of them
+// executes tea.NewProgram in app.go. Without this, WithAltScreen could be
+// dropped and every other test would still pass, while `hivectl tui` would
+// start scribbling over the operator's scrollback instead of taking its own
+// screen.
+func TestRunOverPipes(t *testing.T) {
+	var out bytes.Buffer
+
+	done := make(chan error, 1)
+	go func() { done <- run(bytes.NewReader([]byte("q")), &out) }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run() = %v, want nil", err)
+		}
+	case <-time.After(finalWait):
+		t.Fatal("run() did not return after q on stdin")
+	}
+
+	rendered := out.String()
+	if !strings.Contains(rendered, splash) {
+		t.Fatalf("run() output does not contain %q:\n%q", splash, rendered)
+	}
+	// ESC[?1049h / ESC[?1049l are the alt-screen enter/leave pair. Asserting
+	// BOTH is the point: entering without leaving is the failure that strands
+	// an operator's terminal in the alternate buffer after exit.
+	for _, want := range []string{"\x1b[?1049h", "\x1b[?1049l"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("run() output missing alt-screen sequence %q", want)
+		}
 	}
 }

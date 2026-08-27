@@ -13,6 +13,9 @@
 package tui
 
 import (
+	"io"
+	"os"
+
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -81,14 +84,28 @@ func (m model) View() string {
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, splash)
 }
 
-// Run starts the TUI and blocks until the operator quits. It returns whatever
-// error bubbletea reports, including the failure to open a terminal when the
-// program is run without a TTY.
+// Run starts the TUI on this process's own terminal and blocks until the
+// operator quits. It returns whatever error bubbletea reports, including the
+// failure to open a terminal when the program is run without a TTY.
+func Run() error {
+	return run(os.Stdin, os.Stdout)
+}
+
+// run is Run with its terminal injected.
 //
-// Alt-screen mode is deliberate: the TUI takes the whole screen and restores
+// The split exists so tests can drive the REAL program — the same
+// tea.NewProgram call with the same options — over pipes instead of a TTY.
+// That matters beyond coverage: teatest builds its own program internally, so a
+// teatest-only suite never executes this constructor and would not notice
+// WithAltScreen being dropped. Alt-screen is not cosmetic — it is what restores
 // the operator's scrollback on exit, so `hivectl tui` leaves the terminal the
 // way it found it.
-func Run() error {
-	_, err := tea.NewProgram(newModel(), tea.WithAltScreen()).Run()
+func run(in io.Reader, out io.Writer) error {
+	_, err := tea.NewProgram(
+		newModel(),
+		tea.WithAltScreen(),
+		tea.WithInput(in),
+		tea.WithOutput(out),
+	).Run()
 	return err
 }
