@@ -2517,7 +2517,6 @@ func (s *HubServer) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 			s.mu.Unlock()
 			s.logger.Info("heartbeat: spoke branch switch complete",
 				"hive_id", payload.HiveID, "branch", payload.GitBranch)
-			switchTag = ""
 		} else if spokeUpgradesPausedNow {
 			// Kill switch: keep the armed tag but do not put it on the wire.
 			s.logger.Debug("heartbeat: switch instruction withheld — spoke upgrades are paused",
