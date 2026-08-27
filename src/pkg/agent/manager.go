@@ -7281,8 +7281,14 @@ func (m *Manager) setupCodexHome(agent *AgentProcess) {
 	}
 	dir := codexHomePath(agent.Name)
 	agentUser := m.agentExecUserSpec(agent)
+	salvagedConfig := m.healCodexHomeOwnership(agent, dir, agentUser)
 	if err := exec.Command("su-exec", agentUser, "mkdir", "-p", dir).Run(); err != nil {
-		m.logger.Warn("failed to pre-create codex home", "agent", agent.Name, "dir", dir, "error", err)
+		m.logger.Error("failed to pre-create codex home; codex cannot start without it, and a later run may create it under the wrong identity", "agent", agent.Name, "dir", dir, "error", err)
+	}
+	if salvagedConfig != nil {
+		if err := writeFileAsUser(agentUser, filepath.Join(dir, "config.toml"), salvagedConfig); err != nil {
+			m.logger.Warn("failed to restore salvaged codex config", "agent", agent.Name, "dir", dir, "error", err)
+		}
 	}
 	// Bridge auth: symlink the per-agent auth.json to the shared login file so a
 	// single sign-in propagates to all agents. `ln -sfn` is idempotent and
@@ -7292,6 +7298,91 @@ func (m *Manager) setupCodexHome(agent *AgentProcess) {
 	if err := exec.Command("su-exec", agentUser, "ln", "-sfn", codexSharedAuthFile, authLink).Run(); err != nil {
 		m.logger.Warn("failed to link codex auth", "agent", agent.Name, "link", authLink, "error", err)
 	}
+}
+
+// healCodexHomeOwnership repairs a CODEX_HOME wedged by wrong-owner state.
+// /data is the persistent volume, so a stale owner survives every restart:
+// either the whole dir was created by a codex run under another identity
+// (e.g. after a failed pre-create), or a config.toml inside an agent-owned
+// dir was written as dev/root and the agent EACCESes on it at startup — the
+// same failure class cavemanNpmCachePath removes foreign-owned caches for.
+//
+// Hive never writes config.toml, so any content is operator-authored: the
+// heal salvages it when the manager can read it and returns the bytes for
+// setupCodexHome to write back as the agent after the re-mkdir. A dir that
+// cannot be rebuilt (root-owned, no write access) is left alone with an
+// Error log naming the owner and the manual fix.
+func (m *Manager) healCodexHomeOwnership(agent *AgentProcess, dir, agentUser string) []byte {
+	owner := fileOwnerUID(dir)
+	if owner < 0 {
+		return nil // absent (fresh mkdir will own it) or unstattable
+	}
+	if owner == agent.UID {
+		return m.healForeignCodexConfig(agent, dir, agentUser)
+	}
+	// Codex's app-server requires the current UID to own CODEX_HOME itself,
+	// so a foreign-owned dir can only be rebuilt, not patched around.
+	cfgPath := filepath.Join(dir, "config.toml")
+	salvaged, readErr := os.ReadFile(cfgPath)
+	if err := os.RemoveAll(dir); err != nil {
+		m.logger.Error("codex home is owned by the wrong UID and could not be rebuilt; codex will fail until it is chowned or removed manually", "agent", agent.Name, "dir", dir, "ownerUID", owner, "wantUID", agent.UID, "error", err)
+		return nil
+	}
+	m.logger.Warn("rebuilt codex home that was owned by the wrong UID", "agent", agent.Name, "dir", dir, "ownerUID", owner, "wantUID", agent.UID, "configSalvaged", readErr == nil)
+	if readErr != nil {
+		return nil
+	}
+	return salvaged
+}
+
+// healForeignCodexConfig handles the agent-owned-dir case: a config.toml
+// owned by another UID (written by a codex run as dev/root with CODEX_HOME
+// pointed at this agent's dir). The agent owns the dir, so it can unlink the
+// file even though it cannot read it; content is preserved when the manager
+// can read it.
+func (m *Manager) healForeignCodexConfig(agent *AgentProcess, dir, agentUser string) []byte {
+	cfgPath := filepath.Join(dir, "config.toml")
+	owner := fileOwnerUID(cfgPath)
+	if owner < 0 || owner == agent.UID {
+		return nil
+	}
+	salvaged, readErr := os.ReadFile(cfgPath)
+	if err := exec.Command("su-exec", agentUser, "rm", "-f", cfgPath).Run(); err != nil {
+		m.logger.Error("codex config.toml is owned by the wrong UID and could not be removed; codex will fail until it is chowned or removed manually", "agent", agent.Name, "path", cfgPath, "ownerUID", owner, "wantUID", agent.UID, "error", err)
+		return nil
+	}
+	m.logger.Warn("removed codex config.toml that was owned by the wrong UID", "agent", agent.Name, "path", cfgPath, "ownerUID", owner, "wantUID", agent.UID, "configSalvaged", readErr == nil)
+	if readErr != nil {
+		return nil
+	}
+	return salvaged
+}
+
+// fileOwnerUID returns the numeric owner of path, or -1 when it cannot be
+// determined (path absent, or a non-unix Stat result).
+func fileOwnerUID(path string) int {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return -1
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return -1
+	}
+	return int(st.Uid)
+}
+
+// writeFileAsUser writes content to path as userSpec via su-exec, for files
+// that must end up owned by the agent UID (the manager runs as dev and
+// cannot chown). The `sh -c 'cat > "$1"'` form keeps the path out of shell
+// parsing entirely.
+func writeFileAsUser(userSpec, path string, content []byte) error {
+	cmd := exec.Command("su-exec", userSpec, "sh", "-c", `cat > "$1"`, "sh", path)
+	cmd.Stdin = strings.NewReader(string(content))
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return outputErr(fmt.Sprintf("writing %s as %s", path, userSpec), err, output)
+	}
+	return nil
 }
 
 // inferenceConfigMigrationVersion matches the Claude CLI internal config
