@@ -176,6 +176,19 @@ func (c *Client) do(ctx context.Context, query string, vars map[string]interface
 	return doGraphQL(ctx, c.http, c.graphqlURL, tok, query, vars, out)
 }
 
+// AccessToken returns the installed workspace's live OAuth access token,
+// refreshing it through the Store when it is at or past the skewed deadline.
+//
+// This is the credential the hive hands to ISSUES_ONLY+ agents so their
+// Linear writes (issueCreate, commentCreate, …) are authored by the same
+// "Hive" app identity that acknowledges sessions — the Linear analogue of the
+// GitHub App installation token that pkg/agent injects as GITHUB_TOKEN. It
+// returns "" with an error when no workspace is connected; callers fall back
+// to the work-source API key or inject nothing.
+func (c *Client) AccessToken(ctx context.Context) (string, error) {
+	return c.liveToken(ctx)
+}
+
 // liveToken returns a non-expired access token, refreshing and persisting
 // through the Store when the stored one is at or past the skewed deadline.
 func (c *Client) liveToken(ctx context.Context) (string, error) {

@@ -152,6 +152,8 @@ Part 2 of [RFC #4492](https://github.com/kubestellar/hive/issues/4492): the hive
 | `LINEAR_WEBHOOK_SECRET` | Yes for Linear webhooks | none | HMAC-SHA256 signing secret from the Linear app's webhook settings. The receiver **fails closed**: with this unset every delivery to `/api/linear/webhook` is rejected 401. |
 | `LINEAR_AGENT_STORE` | No | `/data/linear-agent.json` | Path of the persisted install record (workspace identity + OAuth grant, mode 0600). Override for tests or non-container runs. |
 
+Inside an **agent** session (set by the hive, never by the operator): ISSUES_ONLY+ agents receive `LINEAR_ACCESS_TOKEN` (the connected app's OAuth token, `Authorization: Bearer`) or, when no workspace is connected, `LINEAR_API_KEY` (the work-source key, bare `Authorization`). Advisory agents receive neither and have both stripped. See [linear-agent.md](linear-agent.md#github-issue-parity-agents-writing-to-linear).
+
 ## Hub, SaaS, alerts, and backups
 
 | Variable | Required | Default | Purpose |
