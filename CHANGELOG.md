@@ -48,7 +48,27 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ### Fixed
 
-- Removed the half-wired `amazonq` (Amazon Q Developer) backend from the operator-facing dashboard: the CLI backend picker's `KNOWN_BACKENDS` array and the "CLI Pin Value" tooltip both listed it as a selectable option, but it was never in either authoritative registry (`config/backends.conf`'s `KNOWN_BACKENDS`/`backend_binary`/`backend_perm_flag`, or `src/pkg/config/config.go`'s `CLIBackends`), so `validateBackendName` rejected it on launch — an accept-then-fail bug where the dashboard recommended a backend that could not start. Also dropped from the three shell/JS "no `--model` flag" lists in `bin/agent-launch.sh`, `bin/contributor-agent.sh`, and `bin/contributor-relay.sh` (the `goose`/`bob` handling in each is unaffected) and from `bin/contributor-relay.test.js`. Nobody had requested Amazon Q support; removal was cheaper than finishing the integration. Found by the backend-list parity guard added in [#4987](https://github.com/kubestellar/hive/pull/4987). The dashboard's JS `KNOWN_BACKENDS` array is still unguarded by that parity test — it cannot practically parse embedded JS — so this exact class of drift can recur there. ([#4988](https://github.com/kubestellar/hive/issues/4988))
+- **The dashboard no longer offers `amazonq` as a backend it cannot launch**
+  ([#4988](https://github.com/kubestellar/hive/issues/4988)). It was listed in
+  the backend/method picker and named in the CLI Pin Value tooltip while being
+  absent from both authoritative registries (`config/backends.conf`'s
+  `KNOWN_BACKENDS` and `config.CLIBackends`), so `validateBackendName` rejected
+  it and an operator who picked the backend the UI recommended got a launch
+  failure — the accept-then-fail class that function exists to prevent. Amazon
+  Q once had a complete dispatch path (`backend_binary` → `q`,
+  `backend_perm_flag` → `--trust-all-tools`) and was deliberately removed from
+  `backends.conf` in #1045 (commit `9d397f55`), whose message states the
+  resulting set outright: "6 CLIs: Claude, Copilot, Goose, Codex, Agy, Bob" —
+  the UI was simply never brought along. Removed from both dashboard trees and
+  from the three dead `--model`-exclusion lists that still named it
+  (`bin/agent-launch.sh`, `bin/contributor-agent.sh`,
+  `bin/contributor-relay.sh`, `bin/contributor-relay.test.js`). Found by the
+  backend-list parity guard added in
+  [#4987](https://github.com/kubestellar/hive/pull/4987), which could not
+  reach the dashboard's embedded JS; a new guard
+  (`TestBackendPickerOffersOnlyDispatchableBackends` and friends) now parses
+  that third, previously-unguarded `KNOWN_BACKENDS` array and the CLI Pin
+  Value tooltip directly, so this exact class of drift cannot recur there.
 
 - An issue covered by an open PR that only *references* it (`Refs #N`, `Part of
   #N`) is no longer immediately re-offered to agents. Such weak claims — along

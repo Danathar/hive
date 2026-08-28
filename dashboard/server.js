@@ -82,7 +82,7 @@ function persistEnabledAgents() {
 }
 
 // ── Centralized backend/model config (JS equivalent of backends.conf) ──────
-const KNOWN_BACKENDS = ['claude', 'copilot', 'gemini', 'codex', 'amazonq', 'goose', 'aider'];
+const KNOWN_BACKENDS = ['claude', 'copilot', 'gemini', 'codex', 'goose', 'aider'];
 const FREE_BACKENDS = ['copilot', 'goose'];
 
 function normalizeModelForBackend(backend, model) {
