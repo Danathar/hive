@@ -1,15 +1,18 @@
 package dashboard
 
 import (
+	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
 // #4918: `just contribute-hive <backend> local` runs the backend CLI as the
-// contributor's own user, on their own machine, with permission gating
-// bypassed and nothing scoping its filesystem access to the workspace. The
-// recipe previously described that mode only as "native mode" and said nothing
-// about the difference.
+// contributor's own user, on their own machine. Claude-family agents now use
+// Claude Code's native OS sandbox on that path, Codex retains its own sandbox,
+// and backends without a sandbox still warn plainly that they are unconfined.
 //
 // What the silence cost: an agent doing entirely correct work on an assigned
 // third-party repo ran that repo's own test suite; a latent defect in two of
@@ -18,8 +21,7 @@ import (
 // Nothing was written, and the only reason is that the process happened to lack
 // privilege. No compromise was involved.
 //
-// The remedy on this path is container mode, which is already the default. The
-// warning exists so the operator choosing `local` is choosing it knowingly.
+// Container mode remains the backend-independent remedy and the default.
 
 // contributeHiveLocalBranch returns the head of contribute-hive's local-mode
 // branch, up to the tmux session name it derives. Read from the Justfile rather
@@ -38,12 +40,19 @@ func contributeHiveLocalBranch(t *testing.T) string {
 	return src[start : start+end]
 }
 
-// TestLocalModeWarnsItIsUnconfined pins the warning itself.
-func TestLocalModeWarnsItIsUnconfined(t *testing.T) {
+// TestLocalModeDistinguishesConfinedAndUnconfinedBackends pins both messages.
+// A blanket warning would now lie about Claude and Codex; a blanket success
+// message would hide the unchanged exposure of the other backends.
+func TestLocalModeDistinguishesConfinedAndUnconfinedBackends(t *testing.T) {
 	block := contributeHiveLocalBranch(t)
 
-	if !strings.Contains(block, "LOCAL MODE") || !strings.Contains(block, "NOT confined") {
-		t.Error("contribute-hive local mode no longer states that the agent is unconfined (#4918)")
+	for _, want := range []string{
+		"claude|litellm", "codex)", "_LOCAL_WRITE_CONFINED=true",
+		"workspace write confinement is enabled", "NOT confined",
+	} {
+		if !strings.Contains(block, want) {
+			t.Errorf("local-mode posture branch does not contain %q", want)
+		}
 	}
 	// The warning has to name the way out, or it is an alarm rather than
 	// guidance. Container mode is the default and is the remedy on this path.
@@ -52,18 +61,113 @@ func TestLocalModeWarnsItIsUnconfined(t *testing.T) {
 	}
 }
 
-// TestLocalModeWarningIsHonestAboutWhatStillHolds. A warning that implies
-// NOTHING is constrained is its own kind of wrong: the #4938 host-state denials
-// do apply here (the recipe sources config/backends.conf), and credentials and
-// pushes are constrained on every path. Saying so is what makes the "not
-// constrained" half credible.
-func TestLocalModeWarningIsHonestAboutWhatStillHolds(t *testing.T) {
+// TestLocalModeMessagesAreHonestAboutWhatStillHolds pins the hard-fail promise
+// on the confined branch and the remaining controls on the fallback branch.
+func TestLocalModeMessagesAreHonestAboutWhatStillHolds(t *testing.T) {
 	block := contributeHiveLocalBranch(t)
 
-	for _, want := range []string{"Still constrained", "sudo", "rpm-ostree", "GitHub token"} {
+	for _, want := range []string{
+		"startup fails rather than", "falling back unconfined",
+		"Still constrained", "host-state commands", "GitHub token",
+	} {
 		if !strings.Contains(block, want) {
-			t.Errorf("the local-mode warning does not mention %q, so it overstates the exposure", want)
+			t.Errorf("the local-mode posture message does not mention %q", want)
 		}
+	}
+}
+
+func claudeLocalSandboxArgs(t *testing.T, extraEnv ...string) []string {
+	t.Helper()
+	workspace := filepath.Join(t.TempDir(), "workspace with spaces")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", "-c", `
+source ../../../config/backends.conf
+eval "set -- $(claude_family_local_perm_flag_shell)"
+printf '%s\0' "$@"
+`)
+	for _, entry := range os.Environ() {
+		if strings.HasPrefix(entry, "HIVE_WORKSPACE_DIR=") || strings.HasPrefix(entry, "HIVE_CLAUDE_DANGEROUSLY_") {
+			continue
+		}
+		cmd.Env = append(cmd.Env, entry)
+	}
+	cmd.Env = append(cmd.Env, append([]string{"HIVE_WORKSPACE_DIR=" + workspace}, extraEnv...)...)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("resolve Claude local sandbox argv: %v", err)
+	}
+	parts := strings.Split(string(out), "\x00")
+	return parts[:len(parts)-1]
+}
+
+func argValue(args []string, key string) (string, bool) {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == key {
+			return args[i+1], true
+		}
+	}
+	return "", false
+}
+
+// TestClaudeLocalSandboxIsMandatory asserts the three controls that turn the
+// native sandbox into a boundary instead of a best-effort hint.
+func TestClaudeLocalSandboxIsMandatory(t *testing.T) {
+	args := claudeLocalSandboxArgs(t)
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, "dangerously-skip-permissions") {
+		t.Fatalf("default local Claude argv still bypasses permissions: %q", args)
+	}
+	if mode, ok := argValue(args, "--permission-mode"); !ok || mode != "dontAsk" {
+		t.Fatalf("permission mode = %q, %v; want dontAsk", mode, ok)
+	}
+	workspace, ok := argValue(args, "--add-dir")
+	if !ok || !strings.Contains(workspace, "workspace with spaces") {
+		t.Fatalf("workspace grant was lost or word-split: %q", args)
+	}
+
+	raw, ok := argValue(args, "--settings")
+	if !ok {
+		t.Fatalf("Claude local argv has no sandbox settings: %q", args)
+	}
+	var settings struct {
+		Sandbox struct {
+			Enabled                  bool `json:"enabled"`
+			FailIfUnavailable        bool `json:"failIfUnavailable"`
+			AllowUnsandboxedCommands bool `json:"allowUnsandboxedCommands"`
+			Filesystem               struct {
+				AllowWrite []string `json:"allowWrite"`
+			} `json:"filesystem"`
+		} `json:"sandbox"`
+	}
+	if err := json.Unmarshal([]byte(raw), &settings); err != nil {
+		t.Fatalf("settings argument is not JSON: %v\n%s", err, raw)
+	}
+	if !settings.Sandbox.Enabled || !settings.Sandbox.FailIfUnavailable || settings.Sandbox.AllowUnsandboxedCommands {
+		t.Fatalf("sandbox is not mandatory: %+v", settings.Sandbox)
+	}
+	if len(settings.Sandbox.Filesystem.AllowWrite) != 1 || settings.Sandbox.Filesystem.AllowWrite[0] != workspace {
+		t.Fatalf("sandbox write roots = %q, want only %q", settings.Sandbox.Filesystem.AllowWrite, workspace)
+	}
+}
+
+func TestClaudeLocalSandboxNeedsExplicitDangerousBypass(t *testing.T) {
+	args := claudeLocalSandboxArgs(t, "HIVE_CLAUDE_DANGEROUSLY_BYPASS_APPROVALS_AND_SANDBOX=1")
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "dangerously-skip-permissions") || strings.Contains(joined, "--settings") {
+		t.Fatalf("explicit dangerous bypass did not restore the old posture: %q", args)
+	}
+}
+
+func TestClaudeHostStateOptOutDoesNotDisableLocalSandbox(t *testing.T) {
+	args := claudeLocalSandboxArgs(t, "HIVE_CLAUDE_DANGEROUSLY_ALLOW_HOST_STATE=1")
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--settings") || strings.Contains(joined, "dangerously-skip-permissions") {
+		t.Fatalf("host-state opt-out crossed the filesystem boundary: %q", args)
+	}
+	if strings.Contains(joined, "Bash(rpm-ostree:*)") {
+		t.Fatalf("host-state opt-out did not remove the command list: %q", args)
 	}
 }
 

@@ -772,11 +772,13 @@ contribute-hive backend="" mode="docker": check-version
     if [[ "$_MODE" == "local" ]]; then
       # ── Local mode: tmux session + relay (same as container, but on host) ──
       #
-      # SAY WHAT THIS MODE COSTS (#4918). Local mode runs the backend CLI as
-      # THIS user, on THIS machine, with permission gating bypassed and nothing
-      # scoping its filesystem access to the workspace. Container mode — the
-      # DEFAULT, which is why the recipe's `mode` parameter defaults to
-      # "docker" — puts the same agent behind a container boundary instead.
+      # SAY WHAT THIS MODE COSTS (#4918). The backend CLI runs as THIS user on
+      # THIS machine. Claude-family agents now get Claude Code's native OS
+      # sandbox on this path, and Codex keeps its workspace-write sandbox.
+      # Backends without a sandbox (and either backend's explicit dangerous
+      # bypass) remain unconfined. Container mode — the DEFAULT, which is why
+      # the recipe's `mode` parameter defaults to "docker" — remains the
+      # backend-independent boundary.
       #
       # An operator picking `local` was previously told nothing about that
       # difference: the recipe's own usage line described it only as "native
@@ -789,27 +791,54 @@ contribute-hive backend="" mode="docker": check-version
       # privilege. No compromise was involved.
       #
       # The message names what IS still constrained, deliberately, so it reads
-      # as a boundary statement rather than an alarm: #4938's host-state
-      # denials apply here (backends.conf is sourced by this recipe below), and
-      # credentials/pushes are constrained on every path. Neither of those is
-      # filesystem confinement, and the agent_sandbox podman path is hub-side
-      # only — it does not exist on this path at all, so it is not offered as a
-      # remedy here. Container mode is the remedy on this path.
-      echo "⚠️  LOCAL MODE — the agent is NOT confined to a workspace."
-      echo ""
-      echo "    The backend CLI runs as $(id -un) on this machine, with permission"
-      echo "    prompts bypassed. It can read and write anything your user can,"
-      echo "    including files outside ${HIVE_WORKSPACE_DIR:-$HOME/workspace}."
-      echo "    Assigned repos are third-party code and their test suites run for real."
-      echo ""
-      echo "    Still constrained: privilege-escalation and host boot/deployment"
-      echo "    commands are denied (sudo, pkexec, rpm-ostree, bootc, grubby, ...),"
-      echo "    and no agent receives a GitHub token or pushes directly."
-      echo "    NOT constrained: everything else your user can reach."
-      echo ""
-      echo "    For a confined agent, drop 'local' and use container mode:"
-      echo "      just contribute-hive ${BACKEND}"
-      echo ""
+      # as a boundary statement rather than an alarm. The agent_sandbox Podman
+      # path is hub-side only; it does not exist on this contributor path.
+      _local_truthy() {
+        case "${1:-}" in 1|true|TRUE|yes|YES|on|ON) return 0 ;; *) return 1 ;; esac
+      }
+      _LOCAL_WRITE_CONFINED=false
+      case "$BACKEND" in
+        claude|litellm)
+          if ! _local_truthy "${HIVE_CLAUDE_DANGEROUSLY_BYPASS_APPROVALS_AND_SANDBOX:-}"; then
+            _LOCAL_WRITE_CONFINED=true
+          fi
+          ;;
+        codex)
+          if ! _local_truthy "${HIVE_CODEX_DANGEROUSLY_BYPASS_APPROVALS_AND_SANDBOX:-}"; then
+            _LOCAL_WRITE_CONFINED=true
+          fi
+          ;;
+      esac
+      if [[ "$_LOCAL_WRITE_CONFINED" == "true" ]]; then
+        echo "🔒 LOCAL MODE — workspace write confinement is enabled for ${BACKEND}."
+        echo ""
+        echo "    The CLI still runs as $(id -un) on this machine, but commands and"
+        echo "    file edits may write only under the agent state directory and"
+        echo "    ${HIVE_WORKSPACE_DIR:-$HOME/workspace}."
+        if [[ "$BACKEND" == "claude" || "$BACKEND" == "litellm" ]]; then
+          echo "    Claude's native sandbox is mandatory: startup fails rather than"
+          echo "    falling back unconfined when its OS sandbox is unavailable."
+        fi
+        echo ""
+        echo "    Container mode remains the stronger backend-independent boundary:"
+        echo "      just contribute-hive ${BACKEND}"
+        echo ""
+      else
+        echo "⚠️  LOCAL MODE — the agent is NOT confined to a workspace."
+        echo ""
+        echo "    The backend CLI runs as $(id -un) on this machine, with permission"
+        echo "    prompts bypassed. It can read and write anything your user can,"
+        echo "    including files outside ${HIVE_WORKSPACE_DIR:-$HOME/workspace}."
+        echo "    Assigned repos are third-party code and their test suites run for real."
+        echo ""
+        echo "    Still constrained: supported host-state commands are denied, and no"
+        echo "    agent receives a GitHub token or pushes directly."
+        echo "    NOT constrained: everything else your user can reach."
+        echo ""
+        echo "    For a confined agent, drop 'local' and use container mode:"
+        echo "      just contribute-hive ${BACKEND}"
+        echo ""
+      fi
       TMUX_SESSION="hive-${BACKEND}-$(head -c 2 /dev/urandom | od -An -tx1 | tr -d ' ')"
       SCRIPT_DIR="$(pwd)/bin"
       RELAY="${SCRIPT_DIR}/contributor-relay.sh"
@@ -868,11 +897,35 @@ contribute-hive backend="" mode="docker": check-version
       # are shell syntax and the pane dies with `syntax error near token '('`
       # before the CLI ever starts. backend_perm_flag stays raw for argv
       # consumers (agent-launch.sh); see backends.conf.
-      PERM_FLAG=$(backend_perm_flag_shell "$BACKEND" 2>/dev/null || echo "")
+      case "$BACKEND" in
+        claude|litellm)
+          PERM_FLAG=$(claude_family_local_perm_flag_shell)
+          ;;
+        *)
+          PERM_FLAG=$(backend_perm_flag_shell "$BACKEND" 2>/dev/null || echo "")
+          ;;
+      esac
 
       if ! command -v "$CMD" &>/dev/null; then
         echo "ERROR: ${BACKEND} CLI not found. Install it first."
         exit 1
+      fi
+
+      # Claude Code hard-fails internally when its native sandbox cannot start.
+      # Catch the ordinary Linux dependency failure before the relay connects,
+      # so an operator gets an actionable error instead of a dead CLI pane.
+      if [[ "$BACKEND" == "claude" || "$BACKEND" == "litellm" ]] \
+          && ! _local_truthy "${HIVE_CLAUDE_DANGEROUSLY_BYPASS_APPROVALS_AND_SANDBOX:-}" \
+          && [[ "$(uname -s)" == "Linux" ]]; then
+        for _SANDBOX_DEP in bwrap socat; do
+          if ! command -v "$_SANDBOX_DEP" >/dev/null 2>&1; then
+            echo "ERROR: Claude local confinement requires ${_SANDBOX_DEP}."
+            echo "       Install bubblewrap and socat, use container mode, or explicitly"
+            echo "       opt out only on an externally isolated/disposable host with:"
+            echo "       HIVE_CLAUDE_DANGEROUSLY_BYPASS_APPROVALS_AND_SANDBOX=1"
+            exit 1
+          fi
+        done
       fi
 
       # LiteLLM: point Claude Code at the contributor's own proxy.
