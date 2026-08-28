@@ -196,8 +196,18 @@ contribute-check-backend backend="claude":
           exit 1
         fi
         ;;
+      kilo)
+        if command -v kilo &>/dev/null; then
+          echo "Kilo CLI detected ($(kilo --version 2>&1 | head -1))"
+          echo "  Headless only: kilo run <prompt> --model provider/model --format json --auto"
+          echo "  Set KILO_AUTH_CONTENT or KILO_API_KEY (optionally KILO_ORG_ID); do not mount Kilo config."
+        else
+          echo "ERROR: kilo CLI not found. Install @kilocode/cli: https://kilo.ai/docs/code-with-ai/platforms/cli"
+          exit 1
+        fi
+        ;;
       *)
-        echo "ERROR: Unknown backend '{{backend}}'. Supported: claude, copilot, goose, codex, pi, bob, agy, litellm, opencode"
+        echo "ERROR: Unknown backend '{{backend}}'. Supported: claude, copilot, goose, codex, pi, bob, agy, litellm, opencode, kilo"
         exit 1
         ;;
     esac
@@ -1317,7 +1327,7 @@ contribute-hive backend="" mode="docker": check-version
           if [[ -n "$name" ]]; then add_provider_env "$name"; fi
         done < <(node bin/pi-backend.js --env-names "${AGENT_MODEL}")
       else
-        for name in ANTHROPIC_API_KEY OPENAI_API_KEY GOOGLE_API_KEY GOOSE_API_KEY GOOSE_PROVIDER GOOSE_MODEL BOBSHELL_API_KEY HIVE_LITELLM_ENDPOINT HIVE_LITELLM_API_KEY; do
+        for name in ANTHROPIC_API_KEY OPENAI_API_KEY GOOGLE_API_KEY GOOSE_API_KEY GOOSE_PROVIDER GOOSE_MODEL BOBSHELL_API_KEY HIVE_LITELLM_ENDPOINT HIVE_LITELLM_API_KEY KILO_AUTH_CONTENT KILO_CONFIG_CONTENT KILO_API_KEY KILO_ORG_ID; do
           add_provider_env "$name"
         done
       fi

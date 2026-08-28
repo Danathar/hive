@@ -150,6 +150,11 @@ GOOSECFG
       ln -sf "$agent_md" "${HOME}/AGENTS.md"
       ln -sf "$agent_md" "${HOME}/CLAUDE.md"
       ;;
+    kilo)
+      # Kilo reads AGENTS.md-compatible project instructions.
+      ln -sf "$agent_md" "${HOME}/AGENTS.md"
+      ln -sf "$agent_md" "${HOME}/CLAUDE.md"
+      ;;
     *)
       ln -sf "$agent_md" "${HOME}/CLAUDE.md"
       ;;
@@ -342,6 +347,10 @@ detect_cli() {
       ;;
     opencode)
       if opencode --version &>/dev/null; then echo "OK"; else echo "NOT_AUTHED"; fi
+      ;;
+    kilo)
+      # Credentials are environment-only; never mount a whole Kilo home.
+      if kilo --version &>/dev/null; then echo "OK"; else echo "NOT_AUTHED"; fi
       ;;
     *)
       echo "UNKNOWN"
