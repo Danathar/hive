@@ -8561,6 +8561,15 @@ type agentEnvPair struct {
 	Secret bool
 }
 
+// inferenceQuietCLIEnv is the set of Claude CLI switches exported to
+// inference-routed sessions so the CLI stops emitting non-inference traffic
+// (telemetry, error reporting, nonessential lookups) to its Anthropic host.
+var inferenceQuietCLIEnv = []string{
+	"DISABLE_TELEMETRY",
+	"DISABLE_ERROR_REPORTING",
+	"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+}
+
 func (m *Manager) agentEnvPairs(agent *AgentProcess) []agentEnvPair {
 	model := agent.Config.Model
 	if agent.ModelOverride != "" {
@@ -8659,6 +8668,16 @@ func (m *Manager) agentEnvPairs(agent *AgentProcess) []agentEnvPair {
 		// at most N completion tokens"); a future enhancement could parse it
 		// to auto-adjust per-model instead of using a universal floor.
 		vars = append(vars, agentEnvPair{"CLAUDE_CODE_MAX_OUTPUT_TOKENS", strconv.Itoa(inferenceMaxOutputTokensDefault), false})
+		// The Claude CLI sends telemetry batches, error reports, and other
+		// non-inference traffic to its configured Anthropic host. Routed at
+		// an OpenAI-compatible gateway that traffic has nowhere useful to go
+		// (the proxy now answers it locally rather than forwarding it — see
+		// classifyInferencePath), so switch it off at the source. Only for
+		// inference-routed sessions: subscription/Anthropic-direct sessions
+		// keep Anthropic's own telemetry.
+		for _, v := range inferenceQuietCLIEnv {
+			vars = append(vars, agentEnvPair{v, "1", false})
+		}
 	}
 	if m.copilotAuthToken != "" {
 		vars = append(vars, agentEnvPair{"COPILOT_GITHUB_TOKEN", m.copilotAuthToken, true})

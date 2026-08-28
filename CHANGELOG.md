@@ -66,6 +66,7 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ### Fixed
 
+- **Inference reroute no longer forwards Claude CLI telemetry to the gateway.** When an agent's backend is an OpenAI-compatible inference gateway, every request the Claude CLI made to its Anthropic host — telemetry batches under `/api/event_logging/`, error reports, `POST /v1/messages/count_tokens`, profile lookups — was blindly translated into a `POST /v1/chat/completions` with `"messages": null`, and the gateway rejected each one with `400 Missing required parameter: 'messages'`, counted against the provider's request rate limit (measured at ~2 failures per real completion on a production hive). Both the MITM reroute and the `ANTHROPIC_BASE_URL` translator now forward only `POST /v1/messages`: `count_tokens` is answered locally with a chars-based `input_tokens` estimate, anything under `/api/` gets `200 {}`, and unknown paths get a 404 `not_found_error` plus a `WARN` log line naming the method and path. Inference-routed `claude` sessions also launch with `DISABLE_TELEMETRY=1`, `DISABLE_ERROR_REPORTING=1`, and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`; subscription sessions are unchanged. See [docs/agent-configuration.md](src/docs/agent-configuration.md#methods-subscription-clis-vs-self-hosted-inference).
 - **The dashboard no longer offers `amazonq` as a backend it cannot launch**
   ([#4988](https://github.com/kubestellar/hive/issues/4988)). It was listed in
   the backend/method picker and named in the CLI Pin Value tooltip while being

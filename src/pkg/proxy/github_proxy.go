@@ -150,12 +150,15 @@ var (
 // GitHubProxy is an HTTP CONNECT proxy that performs MITM TLS
 // inspection on GitHub API traffic and enforces ACMM mode rules.
 type GitHubProxy struct {
-	listenAddr   string
-	caCert       tls.Certificate
-	caX509       *x509.Certificate
-	logger       *slog.Logger
-	uidMap       *agent.UIDMap
-	allowedRepos map[string]bool
+	// localInferencePaths records CLI telemetry paths already logged once by
+	// localInferenceResponse, so per-path DEBUG lines do not repeat.
+	localInferencePaths sync.Map
+	listenAddr          string
+	caCert              tls.Certificate
+	caX509              *x509.Certificate
+	logger              *slog.Logger
+	uidMap              *agent.UIDMap
+	allowedRepos        map[string]bool
 
 	// proxyAdvisoryOK mirrors entrypoint.sh's HIVE_PROXY_ADVISORY_OK — the SAME
 	// explicit, operator-set escape hatch that already governs whether a failed
@@ -1854,6 +1857,16 @@ func (p *GitHubProxy) inferenceTranslatorHandler() http.Handler {
 			return
 		}
 
+		// Same path gate as the MITM reroute: only POST /v1/messages is
+		// translated and forwarded; CLI housekeeping is answered here.
+		if kind := classifyInferencePath(r.Method, r.URL.Path); kind != inferencePathMessages {
+			status, respBody := p.localInferenceResponse(kind, r.Method, r.URL.Path, body, agentName)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			io.WriteString(w, respBody)
+			return
+		}
+
 		// Diagnostic: count tools in original Anthropic request.
 		var toolDiag struct {
 			Tools json.RawMessage `json:"tools"`
@@ -2056,6 +2069,16 @@ func (p *GitHubProxy) handleInferenceRequest(conn net.Conn, req *http.Request, a
 	if err != nil {
 		p.logTimeout("inference reroute: request body read timed out", err, "agent", agentName)
 		p.writeHTTPError(conn, http.StatusBadGateway, "failed to read request body")
+		return
+	}
+
+	// Only POST /v1/messages is an inference call. The Claude Code CLI also
+	// sends telemetry batches, error reports, and count_tokens to this host;
+	// translating those bodies produced {"messages": null} and a gateway 400
+	// per call, charged against the provider's request rate limit.
+	if kind := classifyInferencePath(req.Method, req.URL.Path); kind != inferencePathMessages {
+		status, respBody := p.localInferenceResponse(kind, req.Method, req.URL.Path, body, agentName)
+		writeLocalInferenceResponse(conn, status, respBody)
 		return
 	}
 

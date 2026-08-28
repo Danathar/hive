@@ -272,6 +272,35 @@ func TestAgentEnvPairs_WithAdvisoryIssue(t *testing.T) {
 	}
 }
 
+// Inference-routed claude sessions get the CLI telemetry switches so the
+// CLI stops sending event-logging / error-report traffic to the gateway;
+// subscription sessions do not (Anthropic's own telemetry is legitimate there).
+func TestAgentEnvPairs_InferenceQuietCLIEnv(t *testing.T) {
+	m := NewManager(map[string]config.AgentConfig{
+		"inf": {Backend: "vllm", Model: "llama-70b"},
+		"sub": {Backend: "claude", Model: "sonnet"},
+	}, discardLogger(), ProjectContext{})
+
+	has := func(pairs []agentEnvPair, key string) bool {
+		for _, p := range pairs {
+			if p.Key == key && p.Value == "1" {
+				return true
+			}
+		}
+		return false
+	}
+	inf := m.agentEnvPairs(&AgentProcess{Name: "inf", Config: config.AgentConfig{Backend: "vllm", Model: "llama-70b"}})
+	sub := m.agentEnvPairs(&AgentProcess{Name: "sub", Config: config.AgentConfig{Backend: "claude", Model: "sonnet"}})
+	for _, key := range inferenceQuietCLIEnv {
+		if !has(inf, key) {
+			t.Errorf("inference backend should set %s=1", key)
+		}
+		if has(sub, key) {
+			t.Errorf("subscription backend should not set %s", key)
+		}
+	}
+}
+
 func TestAgentEnvPairs_NonInference_NoAnthropicVars(t *testing.T) {
 	m := NewManager(map[string]config.AgentConfig{
 		"scanner": {Backend: "claude", Model: "sonnet"},
