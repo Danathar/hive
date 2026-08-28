@@ -20785,6 +20785,52 @@ function burnAreaChart() {
       dataObj[parts[parts.length - 1]] = value;
     }
 
+    // wsLinearTeams returns the live (unsaved) Linear team list, creating the
+    // nested objects on first use so edits before a save have somewhere to go.
+    function wsLinearTeams() {
+      if (!_configState.data.work_source) _configState.data.work_source = {};
+      if (!_configState.data.work_source.linear) _configState.data.work_source.linear = {};
+      const lin = _configState.data.work_source.linear;
+      if (!Array.isArray(lin.teams)) lin.teams = [];
+      return lin.teams;
+    }
+    // wsLinearTeamEdit updates one field of one team and marks the whole
+    // team list dirty: the API replaces the list when 'linear.teams' is
+    // present, so every edit sends the complete array.
+    function wsLinearTeamEdit(idx, field, value) {
+      const teams = wsLinearTeams();
+      const t = teams[idx];
+      if (!t) return;
+      if (field === 'states') {
+        t.states = value.split(',').map(s => s.trim()).filter(Boolean);
+      } else if (field === 'cycles') {
+        t.cycles = value ? 'current' : '';
+      } else if (field === 'projects') {
+        t.projects = value.split(',').map(s => s.trim()).filter(Boolean).map(s => {
+          const eq = s.indexOf('=');
+          return eq < 0 ? { name: s } : { name: s.slice(0, eq).trim(), repo: s.slice(eq + 1).trim() };
+        });
+      } else {
+        t[field] = value;
+      }
+      markWorkSourceDirty('linear.teams', teams);
+    }
+    function wsLinearTeamAdd() {
+      const teams = wsLinearTeams();
+      teams.push({ key: '', repo: '', states: [], cycles: '', projects: [] });
+      markWorkSourceDirty('linear.teams', teams);
+      renderConfigTab('Work Source');
+    }
+    function wsLinearTeamRemove(idx) {
+      const teams = wsLinearTeams();
+      teams.splice(idx, 1);
+      markWorkSourceDirty('linear.teams', teams);
+      renderConfigTab('Work Source');
+    }
+    function wsLinearToggleAssignedOnly(el) {
+      markWorkSourceDirty('linear.assigned_only', el.classList.toggle('on'));
+    }
+
     // renderGovWorkSource renders the work_source settings: which external planning
     // tool hive reads work items from (Step 01 of the loop). Saved to
     // /api/config/governor/work-source.
@@ -20794,6 +20840,8 @@ function burnAreaChart() {
       const ghp = ws.github_projects || {};
       const lin = ws.linear || {};
       const jira = ws.jira || {};
+      const linTeams = Array.isArray(lin.teams) ? lin.teams : [];
+      const linAgents = Array.isArray(_configState.data.agents) ? _configState.data.agents.slice().sort() : [];
 
       const typeOpts = [
         ['', 'GitHub Issues (default)'],
@@ -20846,14 +20894,52 @@ function burnAreaChart() {
         <div style="border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:14px">
           <div style="font-size:0.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px">Linear</div>
           <div class="config-field">
-            <label>API key <span class="config-info">i<span class="config-tooltip">Linear personal API key (Settings → API → Personal API keys). Stored as a secret reference; use \${ENV_VAR} syntax to avoid putting the raw key in config.</span></span></label>
-            <input type="text" placeholder="\${LINEAR_API_KEY}" value="${esc(lin.api_key||'')}" data-change-action="markWorkSourceDirty" data-arg0="linear.api_key" data-arg-types="s,w">
+            <label>API key <span class="config-info">i<span class="config-tooltip">Linear personal API key (Settings → API → Personal API keys). Stored as a secret reference; use \${ENV_VAR} syntax to avoid putting the raw key in config. The stored value is never shown — leave blank to keep it.</span></span></label>
+            <input type="text" placeholder="${lin.api_key_set ? '(set — leave blank to keep)' : '\${LINEAR_API_KEY}'}" value="" data-change-action="markWorkSourceDirty" data-arg0="linear.api_key" data-arg-types="s,w">
           </div>
           <div class="config-field">
             <label>Hold labels <span class="config-info">i<span class="config-tooltip">Comma-separated Linear label names that gate an issue (like GitHub's "hold" label). Issues carrying any of these labels are excluded.</span></span></label>
             <input type="text" placeholder="hold, blocked" value="${esc((lin.hold_labels||[]).join(', '))}" data-change-action="gh64">
           </div>
-          <p style="font-size:0.72rem;color:var(--muted);margin:8px 0 0">Teams are configured in <code>hive.yaml</code> — each team maps to a GitHub repo agents clone.</p>
+          <div class="config-field">
+            <label>Session agent <span class="config-info">i<span class="config-tooltip">Agent that takes Linear agent sessions (delegations and @-mentions). Required when the hive runs more than one agent; with exactly one agent it is implicit.</span></span></label>
+            ${linAgents.length ? `<select data-change-action="markWorkSourceDirty" data-arg0="linear.session_agent" data-arg-types="s,w">
+              <option value="" ${!lin.session_agent ? 'selected' : ''}>${linAgents.length === 1 ? `(implicit: ${esc(linAgents[0])})` : '— choose an agent —'}</option>
+              ${linAgents.map(a => `<option value="${esc(a)}" ${lin.session_agent === a ? 'selected' : ''}>${esc(a)}</option>`).join('')}
+            </select>` : `<input type="text" placeholder="agent name" value="${esc(lin.session_agent||'')}" data-change-action="markWorkSourceDirty" data-arg0="linear.session_agent" data-arg-types="s,w">`}
+          </div>
+          <div class="config-toggle" style="margin:10px 0 14px">
+            <div class="config-toggle-switch ${lin.assigned_only ? 'on' : ''}" data-action="wsLinearToggleAssignedOnly" data-arg-types="t"></div>
+            <span class="config-toggle-label">Assigned only <span style="color:var(--muted);font-weight:400">— enumerate only issues assigned or delegated to the Hive app (requires a connected Linear agent)</span></span>
+          </div>
+          <div style="font-size:0.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin:6px 0 8px">Teams <span class="config-info">i<span class="config-tooltip">Each Linear team maps to the GitHub repo (owner/name) agents clone for its issues. States narrows enumeration to those workflow states (e.g. "Todo, In Progress") — without it the whole backlog is counted and can push the governor into SURGE. Projects override the repo per Linear project.</span></span></div>
+          ${linTeams.length === 0 ? `<p style="font-size:0.72rem;color:var(--muted);margin:0 0 8px">No teams yet — add one so hive knows which repo each team's issues belong to.</p>` : ''}
+          ${linTeams.map((t, i) => `
+          <div style="border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:8px">
+            <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:8px;align-items:end">
+              <div class="config-field" style="margin:0">
+                <label>Team key</label>
+                <input type="text" placeholder="ENG" value="${esc(t.key||'')}" data-change-action="wsLinearTeamEdit" data-arg0="${i}" data-arg1="key" data-arg-types="j,s,w">
+              </div>
+              <div class="config-field" style="margin:0">
+                <label>Repo</label>
+                <input type="text" placeholder="my-org/my-repo" value="${esc(t.repo||'')}" data-change-action="wsLinearTeamEdit" data-arg0="${i}" data-arg1="repo" data-arg-types="j,s,w">
+              </div>
+              <button type="button" class="btn-secondary" style="font-size:0.72rem" data-action="wsLinearTeamRemove" data-arg0="${i}" data-arg-types="j">Remove</button>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:end;margin-top:8px">
+              <div class="config-field" style="margin:0">
+                <label>States <span class="config-info">i<span class="config-tooltip">Comma-separated Linear workflow state names to include. Empty = every open state (whole backlog).</span></span></label>
+                <input type="text" placeholder="Todo, In Progress" value="${esc((t.states||[]).join(', '))}" data-change-action="wsLinearTeamEdit" data-arg0="${i}" data-arg1="states" data-arg-types="j,s,w">
+              </div>
+              <label style="font-size:0.75rem;display:flex;align-items:center;gap:6px;white-space:nowrap"><input type="checkbox" ${t.cycles === 'current' ? 'checked' : ''} data-change-action="wsLinearTeamEdit" data-arg0="${i}" data-arg1="cycles" data-arg-types="j,s,c"> Current cycle only</label>
+            </div>
+            <div class="config-field" style="margin:8px 0 0">
+              <label>Projects <span class="config-info">i<span class="config-tooltip">Optional per-project repo overrides, comma-separated as name=owner/repo (or just name to use the team repo).</span></span></label>
+              <input type="text" placeholder="Billing=my-org/billing, Website" value="${esc((t.projects||[]).map(pr => pr.repo ? pr.name + '=' + pr.repo : pr.name).join(', '))}" data-change-action="wsLinearTeamEdit" data-arg0="${i}" data-arg1="projects" data-arg-types="j,s,w">
+            </div>
+          </div>`).join('')}
+          <button type="button" class="btn-secondary" style="font-size:0.72rem" data-action="wsLinearTeamAdd">+ Add team</button>
         </div>` : ''}
 
         ${type === 'jira' ? `

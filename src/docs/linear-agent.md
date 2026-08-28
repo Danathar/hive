@@ -62,8 +62,9 @@ mid-run streaming of agent output into Linear yet.
    `/linear/callback`, and the hive stores the workspace grant + its
    per-workspace app user id at `LINEAR_AGENT_STORE`
    (default `/data/linear-agent.json`).
-4. **Pick the session agent** in `hive.yaml` when the hive runs more than one
-   agent:
+4. **Pick the session agent** when the hive runs more than one agent — from
+   the dashboard (Governor → Work Source → Linear → *Session agent*) or in
+   `hive.yaml`:
 
    ```yaml
    governor:
@@ -72,9 +73,11 @@ mid-run streaming of agent output into Linear yet.
          session_agent: scanner   # agent that takes Linear sessions
    ```
 
-   With exactly one configured agent this is implicit.
+   With exactly one configured agent this is implicit. The dashboard rejects
+   (400) a name that matches no configured agent.
 5. **Optional — enumerate only delegated/assigned issues**: when the Linear
-   work source is active, `assigned_only: true` narrows backlog enumeration to
+   work source is active, *Assigned only* in the dashboard (or
+   `assigned_only: true` in `hive.yaml`) narrows backlog enumeration to
    issues assigned **or delegated** to the app user (Linear sets `delegate`,
    not `assignee`, when an issue is handed to an agent):
 
@@ -88,7 +91,33 @@ mid-run streaming of agent output into Linear yet.
    ```
 
    This fails closed: `assigned_only` without a connected Linear agent is a
-   startup error, never "enumerate everything".
+   startup error, never "enumerate everything" — and the dashboard refuses to
+   save it (400) until step 3 has been completed.
+6. **Map teams to repos.** The whole `work_source.linear` block — API key,
+   hold labels, session agent, assigned-only, and the team list with each
+   team's `repo`, `states`, `cycles` and per-project repo overrides — is
+   settable from the dashboard's Work Source tab, backed by
+   `GET`/`PUT /api/config/governor/work-source` (owner-only). Set `states`
+   (e.g. `Todo, In Progress`) on each team: without it every open issue in
+   the team counts toward the governor's backlog and a large backlog will put
+   the hive into SURGE. `GET` never returns the API key value, only
+   `api_key_set`; a `PUT` that omits `api_key` keeps the stored one. The
+   `teams` list is replaced when present and untouched when absent:
+
+   ```json
+   {
+     "type": "linear",
+     "linear": {
+       "session_agent": "scanner",
+       "assigned_only": false,
+       "hold_labels": ["hold"],
+       "teams": [
+         {"key": "ENG", "repo": "my-org/app", "states": ["Todo", "In Progress"],
+          "cycles": "current", "projects": [{"name": "Billing", "repo": "my-org/billing"}]}
+       ]
+     }
+   }
+   ```
 
 `GET /api/linear/agent/status` (owner) reports configuration, the connected
 workspace, the resolved session agent, and recent sessions.
