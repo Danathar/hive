@@ -3685,6 +3685,50 @@ type DashboardConfig struct {
 	// wrongly forced into direct-route mode (which broke their dashboard link and
 	// snapshot preview) the moment they were granted an authorized_users list.
 	HubProxied bool `yaml:"hub_proxied"`
+	// PublicURL is the externally reachable origin of THIS dashboard
+	// (scheme + host[:port], no path), used to build OAuth redirect URIs —
+	// the Linear agent install and the OpenRouter funding flow — when it
+	// differs from the host the request arrived on. Precedence when a
+	// callback URL is built: dashboard.public_url, then hub.dashboard_url
+	// (kept for hub-hosted spokes, whose hub already knows their public
+	// name), then the X-Forwarded-Proto/X-Forwarded-Host/Host of the request.
+	// Set it on a hub-less hive whose dashboard is private but whose OAuth
+	// callback path is published on a different public hostname, or behind
+	// an ingress that rewrites the Host header on the way in (Traefik with a
+	// fixed upstream Host, a Cloudflare Tunnel "HTTP Host Header"): with
+	// nothing configured, the install leg and the callback leg can derive
+	// different origins and the provider rejects the code exchange with
+	// "redirect_uri is invalid". Validated at load time by
+	// ValidateDashboardPublicURL.
+	PublicURL string `yaml:"public_url,omitempty" json:"public_url,omitempty"`
+}
+
+// ValidateDashboardPublicURL validates and normalizes dashboard.public_url:
+// an absolute http(s) URL naming an origin only — no path, query, fragment or
+// credentials — returned with any trailing slash removed. Empty is valid and
+// means "unset".
+func ValidateDashboardPublicURL(raw string) (string, error) {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return "", nil
+	}
+	u, err := url.Parse(v)
+	if err != nil {
+		return "", fmt.Errorf("dashboard.public_url %q: %w", raw, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", fmt.Errorf("dashboard.public_url %q: must be an absolute http:// or https:// URL", raw)
+	}
+	if u.Hostname() == "" {
+		return "", fmt.Errorf("dashboard.public_url %q: missing host", raw)
+	}
+	if u.User != nil {
+		return "", fmt.Errorf("dashboard.public_url %q: credentials are not allowed", raw)
+	}
+	if strings.Trim(u.Path, "/") != "" || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery {
+		return "", fmt.Errorf("dashboard.public_url %q: must be an origin only (scheme://host[:port]) with no path, query or fragment", raw)
+	}
+	return u.Scheme + "://" + u.Host, nil
 }
 
 var snapshotFrameAncestorHostPattern = regexp.MustCompile(`(?i)^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\.?$`)
@@ -4860,6 +4904,11 @@ func (c *Config) validate() error {
 		return err
 	} else {
 		c.Dashboard.SnapshotFrameAncestors = normalized
+	}
+	if normalized, err := ValidateDashboardPublicURL(c.Dashboard.PublicURL); err != nil {
+		return err
+	} else {
+		c.Dashboard.PublicURL = normalized
 	}
 	if !ValidateThresholdScaling(c.Governor.ThresholdScaling) {
 		return fmt.Errorf("governor: invalid threshold_scaling %q (must be linear, sqrt, or none)", c.Governor.ThresholdScaling)

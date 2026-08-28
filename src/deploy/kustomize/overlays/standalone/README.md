@@ -27,6 +27,17 @@ All placeholders are UPPER_SNAKE_CASE. Search for them before applying:
 | `YOUR_RWX_STORAGE_CLASS` | `patch-pvc-storageclass.yaml` | A storage class on your cluster (RWO is fine for the default single replica). |
 | Route host (OpenShift) | see below | If you also want a Route, add the openshift overlay or set `spec.host`. |
 
+If the dashboard's OAuth callbacks (`/linear/callback` for the Linear agent,
+`/openrouter/callback` for OpenRouter funding) are published on a different
+hostname than the one you open the dashboard on — or your ingress rewrites the
+`Host` header on the way in (Traefik with a fixed upstream `Host`, a Cloudflare
+Tunnel "HTTP Host Header") — also set `dashboard.public_url` in
+`patch-configmap.yaml` to the externally reachable origin
+(`https://hive.example.com`, no path). Without it the install leg and the
+callback leg can derive different `redirect_uri`s and the provider rejects the
+code exchange. Do not use `hub.dashboard_url` for this on a standalone hive;
+see [docs/linear-agent.md](../../../../docs/linear-agent.md#setup).
+
 Also populate `hive-secrets` (from the base) with a GitHub App PEM **or**
 `HIVE_GITHUB_TOKEN`, and — if your litellm/inference endpoint needs auth —
 the key named by `governor.litellm.api_key_env` (default `HIVE_LITELLM_API_KEY`)

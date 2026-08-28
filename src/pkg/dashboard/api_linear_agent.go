@@ -200,28 +200,10 @@ func (s *Server) registerLinearAgentRoutes() {
 }
 
 // linearAgentCallbackURL builds this hive's redirect_uri from an allowlisted
-// own origin — configured dashboard_url first, then the forwarded/request
-// host. Never client-supplied (same rationale as openRouterCallbackURL).
+// own origin — see oauthPublicOrigin for the precedence (dashboard.public_url,
+// hub.dashboard_url, then the forwarded/request host). Never client-supplied.
 func (s *Server) linearAgentCallbackURL(r *http.Request) string {
-	base := ""
-	if s.deps != nil && s.deps.Config != nil {
-		base = strings.TrimSpace(s.deps.Config.Hub.DashboardURL)
-	}
-	if base == "" {
-		scheme := "https"
-		if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") == "" {
-			scheme = "http"
-		}
-		if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
-			scheme = proto
-		}
-		host := r.Header.Get("X-Forwarded-Host")
-		if host == "" {
-			host = r.Host
-		}
-		base = scheme + "://" + host
-	}
-	return strings.TrimRight(base, "/") + linearAgentCallbackPath
+	return s.oauthPublicOrigin(r) + linearAgentCallbackPath
 }
 
 // handleLinearAgentInstall (owner) starts the actor=app authorize flow.
@@ -243,9 +225,12 @@ func (s *Server) handleLinearAgentInstall(w http.ResponseWriter, r *http.Request
 		jsonError(w, "failed to start flow", http.StatusInternalServerError)
 		return
 	}
-	authorizeURL := linearagent.BuildAuthorizeURL(svc.creds.ClientID, s.linearAgentCallbackURL(r), state)
+	redirectURI := s.linearAgentCallbackURL(r)
+	authorizeURL := linearagent.BuildAuthorizeURL(svc.creds.ClientID, redirectURI, state)
 	s.auditFromRequest(r, "linear_agent_install_start", "", "")
-	jsonResponse(w, map[string]interface{}{"authorize_url": authorizeURL})
+	// redirect_uri is echoed so an operator can see the exact value the Linear
+	// app's Callback URL must match without decoding authorize_url.
+	jsonResponse(w, map[string]interface{}{"authorize_url": authorizeURL, "redirect_uri": redirectURI})
 }
 
 // handleLinearAgentCallback is the PUBLIC OAuth return. The single-use state
