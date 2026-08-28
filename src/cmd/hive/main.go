@@ -6346,7 +6346,15 @@ func runEvalCycle(
 		// forced full rewrite stretches with this interval (60 attempts ×
 		// interval) — acceptable, since it only heals out-of-band comment
 		// edits, and documented in the settings tooltip.
-		if shouldPostAdvisoryDigest(digest, ghClient, hasExistingPinnedIssueForEmptyDigest) &&
+		// governor.advisory.target routes the comment write: GitHub (default,
+		// the unchanged path below) or a designated Linear issue. For the
+		// Linear route the configured issue plays the pinned issue's role in
+		// the empty-digest freshness rule, so a clean Linear-sourced hive
+		// keeps refreshing its comment exactly as a GitHub one does.
+		advisoryTarget, advisoryLinearIssue, advisoryRouteErr := resolveAdvisoryDigestRoute(cfg)
+		hasDigestHome := hasExistingPinnedIssueForEmptyDigest ||
+			(advisoryTarget == config.AdvisoryTargetLinear && advisoryRouteErr == nil)
+		if shouldPostAdvisoryDigest(digest, ghClient, hasDigestHome) &&
 			advisoryPostDue(advCfg, primaryRepo, time.Now(), logger) {
 			// Log severity breakdown and contributing agents
 			bySeverity := map[string]int{"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
@@ -6379,7 +6387,26 @@ func runEvalCycle(
 				PrimaryRepo: repoName,
 			})
 			if md != "" {
-				if hasPinnedAdvisoryIssue {
+				if advisoryTarget != config.AdvisoryTargetGitHub {
+					// Non-GitHub route. A misconfiguration (Linear chosen with
+					// no linear_issue, or an unknown target) is recorded as a
+					// post FAILURE, never redirected to the GitHub issue: the
+					// operator opted out of it, and the hub's staleness pill is
+					// how they learn the digest has nowhere to go.
+					if advisoryRouteErr != nil {
+						dashSrv.RecordAdvisoryError(advisoryRouteErr.Error())
+						logger.Error("advisory digest not posted: target misconfigured",
+							"target", advisoryTarget, "error", advisoryRouteErr)
+					} else if err := postAdvisoryDigestToLinear(ctx, cfg, advisoryLinearIssue, md); err != nil {
+						dashSrv.RecordAdvisoryError(err.Error())
+						logger.Warn("failed to post advisory digest to linear", "issue", advisoryLinearIssue, "error", err)
+					} else {
+						logger.Info("posted advisory digest", "linear_issue", advisoryLinearIssue, "findings", digest.TotalCount, "via", "linear")
+						dashSrv.RecordAdvisoryPost(digest.TotalCount)
+						recordAdvisoryPostSuccess(primaryRepo, time.Now())
+						dashSrv.RecordAdvisoryOverflow(digest.OverflowCount)
+					}
+				} else if hasPinnedAdvisoryIssue {
 					// Prefer the App client as the PRIMARY poster. The App
 					// authored the advisory-digest comment and always holds
 					// issues:write, so it is the correct identity to edit it.

@@ -132,3 +132,52 @@ func TestAdvisoryUpdateIntervalRoundTrip(t *testing.T) {
 		t.Fatalf("unset update_interval_s must be omitted from yaml, got: %s", out)
 	}
 }
+
+// TestAdvisoryConfigTargetDefaultsToGitHub pins the zero-behavior-change
+// contract for governor.advisory.target: an untouched hive resolves to the
+// GitHub advisory issue, the Linear keys stay empty, and neither key leaks
+// into a re-marshalled hive.yaml.
+func TestAdvisoryConfigTargetDefaultsToGitHub(t *testing.T) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+
+	a := cfg.Governor.Advisory
+	if a.Target != "" {
+		t.Errorf("Target = %q, want empty (unset) so hive.yaml round-trips untouched", a.Target)
+	}
+	if got := a.ResolvedTarget(); got != AdvisoryTargetGitHub {
+		t.Errorf("ResolvedTarget() = %q, want %q", got, AdvisoryTargetGitHub)
+	}
+	if a.LinearIssue != "" {
+		t.Errorf("LinearIssue = %q, want empty", a.LinearIssue)
+	}
+	out, err := yaml.Marshal(a)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(out), "target") || strings.Contains(string(out), "linear_issue") {
+		t.Fatalf("unset target/linear_issue must be omitted from yaml, got: %s", out)
+	}
+}
+
+// TestAdvisoryConfigTargetParsesLinear confirms the two new keys parse from
+// YAML and that ResolvedTarget normalizes case/whitespace without inventing a
+// value for anything it does not recognize.
+func TestAdvisoryConfigTargetParsesLinear(t *testing.T) {
+	var cfg Config
+	src := "governor:\n  advisory:\n    target: Linear\n    linear_issue: ONB-123\n"
+	if err := yaml.Unmarshal([]byte(src), &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	cfg.applyDefaults()
+	a := cfg.Governor.Advisory
+	if a.Target != "Linear" || a.LinearIssue != "ONB-123" {
+		t.Fatalf("parsed = {%q %q}, want {Linear ONB-123}", a.Target, a.LinearIssue)
+	}
+	if got := a.ResolvedTarget(); got != AdvisoryTargetLinear {
+		t.Errorf("ResolvedTarget() = %q, want %q", got, AdvisoryTargetLinear)
+	}
+	if got := (AdvisoryConfig{Target: " jira "}).ResolvedTarget(); got != "jira" {
+		t.Errorf("unknown target resolved to %q, want it passed through for the caller to reject", got)
+	}
+}

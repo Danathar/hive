@@ -157,3 +157,53 @@ func TestGovAdvisory_InGovernorConfigGet(t *testing.T) {
 		t.Fatal("governor config GET is missing the advisory section")
 	}
 }
+
+// TestGovAdvisory_TargetRoundTrip covers the digest-target surface: the GET
+// reports the resolved target (github when unset), the PUT stores target and
+// linear_issue, a Linear target without an issue is rejected, and an unknown
+// target is rejected — so the governor never has to fail closed on a value
+// the dashboard could have refused.
+func TestGovAdvisory_TargetRoundTrip(t *testing.T) {
+	s := govServer(t)
+
+	var got map[string]any
+	rec := doOwnerGet(s, "/api/config/governor/advisory")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET: %d — %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got["target"] != "github" || got["linear_issue"] != "" {
+		t.Fatalf("default target/linear_issue = %v/%v, want github/\"\"", got["target"], got["linear_issue"])
+	}
+
+	if rec := doPut(s, "/api/config/governor/advisory", map[string]any{"target": "linear"}); rec.Code != http.StatusBadRequest {
+		t.Fatalf("target=linear without linear_issue: %d, want 400 — %s", rec.Code, rec.Body.String())
+	}
+	if rec := doPut(s, "/api/config/governor/advisory", map[string]any{"target": "jira", "linear_issue": "X-1"}); rec.Code != http.StatusBadRequest {
+		t.Fatalf("unknown target: %d, want 400 — %s", rec.Code, rec.Body.String())
+	}
+	if s.deps.Config.Governor.Advisory.Target != "" || s.deps.Config.Governor.Advisory.LinearIssue != "" {
+		t.Fatal("rejected PUTs must not mutate config")
+	}
+
+	if rec := doPut(s, "/api/config/governor/advisory", map[string]any{"target": " Linear ", "linear_issue": " ONB-123 "}); rec.Code != http.StatusOK {
+		t.Fatalf("PUT linear: %d — %s", rec.Code, rec.Body.String())
+	}
+	if a := s.deps.Config.Governor.Advisory; a.Target != "linear" || a.LinearIssue != "ONB-123" {
+		t.Fatalf("stored = {%q %q}, want normalized {linear ONB-123}", a.Target, a.LinearIssue)
+	}
+	// Once an issue is stored, re-sending only the target is fine.
+	if rec := doPut(s, "/api/config/governor/advisory", map[string]any{"target": "linear"}); rec.Code != http.StatusOK {
+		t.Fatalf("PUT linear with stored issue: %d — %s", rec.Code, rec.Body.String())
+	}
+	// And switching back to GitHub leaves the Linear issue in place for a
+	// later switch without forcing the operator to retype it.
+	if rec := doPut(s, "/api/config/governor/advisory", map[string]any{"target": "github"}); rec.Code != http.StatusOK {
+		t.Fatalf("PUT github: %d — %s", rec.Code, rec.Body.String())
+	}
+	if a := s.deps.Config.Governor.Advisory; a.ResolvedTarget() != "github" || a.LinearIssue != "ONB-123" {
+		t.Fatalf("after switching back = {%q %q}, want {github ONB-123}", a.Target, a.LinearIssue)
+	}
+}

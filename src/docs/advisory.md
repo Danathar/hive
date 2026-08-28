@@ -18,6 +18,8 @@ governor:
     staleness_days: 7
     pr_autoclose: true
     update_interval_s: 0  # 0 = default (~60s cycle); 30–3600 to slow the refresh
+    target: github        # github (default) | linear
+    linear_issue: ""      # required when target is linear, e.g. ONB-123
 ```
 
 ## Keeping findings current
@@ -179,6 +181,43 @@ Details worth knowing:
   stalled digest.
 - Values outside the band are rejected by the dashboard API and clamped (with
   a one-time warning in the hive log) when hand-edited into `hive.yaml`.
+
+## Where the digest is posted
+
+`governor.advisory.target` — default `github`. Chooses which tracker hosts the
+digest comment. Also editable from **Governor Config → Advisory**.
+
+- `github` (default, and the only behavior before the key existed): the pinned
+  comment on the advisory issue of the primary repo, exactly as described at
+  the top of this page. Leaving the key out means this; nothing about the
+  GitHub path changes when the key is absent.
+- `linear`: the digest is maintained as **one comment on a designated Linear
+  issue**, named by `governor.advisory.linear_issue` (an identifier such as
+  `ONB-123`). The comment body is identical to what the GitHub comment would
+  contain, and it is rewritten in place every cycle: the hive finds its own
+  comment by the fixed footer it stamps on it (`hive-advisory-digest`) and
+  updates that comment rather than adding a new one, skipping the write when
+  the body is unchanged. Authentication reuses the work source's key
+  (`governor.work_source.linear.api_key`, the same bare-token header the
+  issue enumerator sends), so a Linear-sourced hive needs no extra credential.
+  The `update_interval_s` throttle and the hub's staleness signal apply to
+  this route exactly as to GitHub.
+
+This is meant for hives whose work source is Linear
+(`governor.work_source.type: linear`) and whose owners live in Linear rather
+than GitHub. It is a choice, not an inference: a Linear work source does
+**not** move the digest by itself, because a living GitHub issue that is never
+closed is a perfectly good digest home and many operators prefer it.
+
+The Linear route fails closed. If `target` is `linear` and `linear_issue` is
+empty, or the API key is missing, or the issue cannot be found, the hive logs
+an error naming the missing key (`governor.advisory.linear_issue is required
+when governor.advisory.target is linear — digest not posted`), records the
+cycle as a failed post so the hub's stale-advisory pill trips, and does
+**not** fall back to the GitHub issue. The dashboard API rejects a `linear`
+target with no issue up front, and rejects any target other than `github` or
+`linear`; a hand-edited unknown value in `hive.yaml` is reported the same way
+at post time.
 
 ## Related
 

@@ -458,9 +458,28 @@ func (s *LinearSource) fetchTeamIssues(ctx context.Context, teamKey string, stat
 }
 
 func (s *LinearSource) doQuery(ctx context.Context, query string, vars map[string]interface{}) (*linearGraphQLResponse, error) {
-	baseURL := s.cfg.BaseURL
+	raw, err := linearGraphQL(ctx, s.client, s.cfg.BaseURL, s.cfg.APIKey, query, vars)
+	if err != nil {
+		return nil, err
+	}
+	var resp linearGraphQLResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	return &resp, nil
+}
+
+// linearGraphQL posts one GraphQL request to Linear with the bare API-key
+// Authorization header Linear expects and returns the raw response body once
+// it has passed the HTTP-status and top-level `errors` checks. Shared by the
+// issue enumerator (doQuery) and the advisory digest poster so both speak to
+// Linear the same way. An empty baseURL means the production endpoint.
+func linearGraphQL(ctx context.Context, client *http.Client, baseURL, apiKey, query string, vars map[string]interface{}) ([]byte, error) {
 	if baseURL == "" {
 		baseURL = defaultLinearBaseURL
+	}
+	if client == nil {
+		client = &http.Client{Timeout: 30 * time.Second}
 	}
 	body, err := json.Marshal(linearGraphQLRequest{Query: query, Variables: vars})
 	if err != nil {
@@ -471,9 +490,9 @@ func (s *LinearSource) doQuery(ctx context.Context, query string, vars map[strin
 		return nil, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", s.cfg.APIKey)
+	req.Header.Set("Authorization", apiKey)
 
-	httpResp, err := s.client.Do(req)
+	httpResp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("post: %w", err)
 	}
@@ -486,12 +505,16 @@ func (s *LinearSource) doQuery(ctx context.Context, query string, vars map[strin
 	if httpResp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("status %d: %s", httpResp.StatusCode, string(raw))
 	}
-	var resp linearGraphQLResponse
-	if err := json.Unmarshal(raw, &resp); err != nil {
+	var envelope struct {
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
-	if len(resp.Errors) > 0 {
-		return nil, fmt.Errorf("graphql error: %s", resp.Errors[0].Message)
+	if len(envelope.Errors) > 0 {
+		return nil, fmt.Errorf("graphql error: %s", envelope.Errors[0].Message)
 	}
-	return &resp, nil
+	return raw, nil
 }

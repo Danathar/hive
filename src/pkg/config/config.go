@@ -1511,6 +1511,38 @@ type AdvisoryConfig struct {
 	// so a user-lengthened interval never false-alarms as a wedge — pinned by
 	// TestAdvisoryStaleThresholdCoversMaxUpdateInterval in pkg/hub.
 	UpdateIntervalS int `yaml:"update_interval_s,omitempty" json:"update_interval_s,omitempty"`
+	// Target selects where the digest comment lives: AdvisoryTargetGitHub
+	// (the pinned advisory issue on the primary repo — the default, and the
+	// only behavior before this key existed) or AdvisoryTargetLinear (one
+	// comment on the Linear issue named by LinearIssue, rewritten each cycle
+	// with the same body the GitHub comment would get). Empty means UNSET
+	// and resolves to GitHub through ResolvedTarget; an unknown value fails
+	// closed at post time rather than silently falling back to GitHub.
+	Target string `yaml:"target,omitempty" json:"target,omitempty"`
+	// LinearIssue is the Linear issue identifier (e.g. "ONB-123") that hosts
+	// the digest when Target is AdvisoryTargetLinear. Required for that
+	// target: an empty value logs an error naming this key and skips the
+	// post — the digest is never redirected to GitHub without being asked.
+	// Authentication reuses governor.work_source.linear.api_key.
+	LinearIssue string `yaml:"linear_issue,omitempty" json:"linear_issue,omitempty"`
+}
+
+// Advisory digest targets accepted by AdvisoryConfig.Target.
+const (
+	AdvisoryTargetGitHub = "github"
+	AdvisoryTargetLinear = "linear"
+)
+
+// ResolvedTarget returns Target with the unset default applied: an empty
+// string is GitHub, because that is what every hive did before the key
+// existed. Any other value is returned trimmed and lower-cased so a caller
+// can reject what it does not recognize instead of guessing.
+func (a AdvisoryConfig) ResolvedTarget() string {
+	t := strings.ToLower(strings.TrimSpace(a.Target))
+	if t == "" {
+		return AdvisoryTargetGitHub
+	}
+	return t
 }
 
 // PRAutoCloseEnabled resolves AdvisoryConfig.PRAutoClose with its default (on).

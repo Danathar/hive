@@ -249,15 +249,28 @@ func (s *Server) handleGovernorAdvisoryPut(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	var body struct {
-		MaxFindings     *int  `json:"max_findings"`
-		ShowAll         *bool `json:"show_all"`
-		StalenessDays   *int  `json:"staleness_days"`
-		PRAutoClose     *bool `json:"pr_autoclose"`
-		UpdateIntervalS *int  `json:"update_interval_s"`
+		MaxFindings     *int    `json:"max_findings"`
+		ShowAll         *bool   `json:"show_all"`
+		StalenessDays   *int    `json:"staleness_days"`
+		PRAutoClose     *bool   `json:"pr_autoclose"`
+		UpdateIntervalS *int    `json:"update_interval_s"`
+		Target          *string `json:"target"`
+		LinearIssue     *string `json:"linear_issue"`
 	}
 	if err := decodeBody(r, &body); err != nil {
 		jsonError(w, "invalid body", http.StatusBadRequest)
 		return
+	}
+	// Normalize the digest target up front so the validation below and the
+	// stored value agree. Empty means "unset" (GitHub) and is stored as such
+	// so hive.yaml keeps round-tripping without the key.
+	if body.Target != nil {
+		v := strings.ToLower(strings.TrimSpace(*body.Target))
+		body.Target = &v
+	}
+	if body.LinearIssue != nil {
+		v := strings.TrimSpace(*body.LinearIssue)
+		body.LinearIssue = &v
 	}
 
 	// --- validate before mutating anything ---
@@ -280,8 +293,36 @@ func (s *Server) handleGovernorAdvisoryPut(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// --- apply ---
 	cfg := s.deps.Config
+	if body.Target != nil && *body.Target != "" &&
+		*body.Target != config.AdvisoryTargetGitHub && *body.Target != config.AdvisoryTargetLinear {
+		jsonError(w, fmt.Sprintf("target must be %q or %q", config.AdvisoryTargetGitHub, config.AdvisoryTargetLinear), http.StatusBadRequest)
+		return
+	}
+	// Selecting Linear without an issue to post to would fail closed on
+	// every cycle; catch it here where the operator can see the rule instead
+	// of in the governor log. The effective values are whatever this request
+	// sets, falling back to what is already stored.
+	effectiveTarget := cfg.Governor.Advisory.ResolvedTarget()
+	if body.Target != nil {
+		effectiveTarget = (config.AdvisoryConfig{Target: *body.Target}).ResolvedTarget()
+	}
+	effectiveLinearIssue := cfg.Governor.Advisory.LinearIssue
+	if body.LinearIssue != nil {
+		effectiveLinearIssue = *body.LinearIssue
+	}
+	if effectiveTarget == config.AdvisoryTargetLinear && effectiveLinearIssue == "" {
+		jsonError(w, "linear_issue (e.g. ONB-123) is required when target is linear", http.StatusBadRequest)
+		return
+	}
+
+	// --- apply ---
+	if body.Target != nil {
+		cfg.Governor.Advisory.Target = *body.Target
+	}
+	if body.LinearIssue != nil {
+		cfg.Governor.Advisory.LinearIssue = *body.LinearIssue
+	}
 	if body.MaxFindings != nil {
 		cfg.Governor.Advisory.MaxFindings = *body.MaxFindings
 	}
@@ -318,6 +359,8 @@ func advisorySectionResponse(cfg *config.Config) map[string]interface{} {
 		"staleness_days":    a.StalenessDays,
 		"pr_autoclose":      a.PRAutoCloseEnabled(),
 		"update_interval_s": a.UpdateIntervalS,
+		"target":            a.ResolvedTarget(),
+		"linear_issue":      a.LinearIssue,
 	}
 }
 
