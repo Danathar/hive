@@ -45,6 +45,20 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ### Fixed
 
+- An issue covered by an open PR that only *references* it (`Refs #N`, `Part of
+  #N`) is no longer immediately re-offered to agents. Such weak claims — along
+  with claims from externally-authored PRs — used to be ignored entirely on the
+  agent side, so the scanner could be handed an issue its own open PR already
+  addressed; because the hold-gated scanner policy forbids `gh pr list` and
+  makes the kick message its only source of truth, the agent could not discover
+  the existing PR and re-implemented the issue from scratch. Weak claims now
+  **defer** agent dispatch for 72h measured from when the claim was first
+  observed, then release the issue even while the PR stays open. Nothing is
+  frozen — a stranger's PR can delay the hive's own pipeline by at most one
+  window, a partially-addressed issue still comes back for its remainder, and a
+  red+stale claiming PR defers nothing. Claims that assert they *close* an issue
+  are unchanged. ([#4929](https://github.com/kubestellar/hive/issues/4929))
+
 - The canonical `blocked` workflow overlay now stays out of the contributor
   queue: the actionable-work enumerator, ReadyQueue, live contributor
   assignment, and internal kick projection all withhold it. Work waiting on
