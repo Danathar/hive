@@ -182,7 +182,7 @@ installation instead of broadening the PAT.
 | Name | Source | Purpose |
 |---|---|---|
 | `--config` | flag | Path to `hive.yaml`; default `/etc/hive/hive.yaml` unless `HIVE_CONFIG` is set. |
-| `HIVE_CONFIG` | env | Overrides the default config path before `--config` is parsed. |
+| `HIVE_CONFIG` | env | Sets the **default** of `--config`. An explicit `--config` outranks it — and the image ships one (`CMD ["--config", "/etc/hive/hive.yaml"]`), so `entrypoint.sh` appends `--config "$HIVE_CONFIG"` to the launch argv when the variable is set. Without that append the variable is inert in the container ([#4973](https://github.com/kubestellar/hive/issues/4973)). |
 | `HIVE_MODE=hub` | env | Starts the hub server instead of a spoke dashboard. |
 | `HIVE_HUB_PORT` | env | Hub listen port in hub mode; default `3001`. |
 | `HIVE_SINGLETON_LOCK` | env | Internal/escape hatch for the process singleton lock path; value `off` disables the guard. |

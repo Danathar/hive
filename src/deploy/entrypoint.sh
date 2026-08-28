@@ -1349,6 +1349,48 @@ elif [ -f /data/proxy-ca.pem ]; then
   echo "[entrypoint] WARN: no system CA bundle at $SYSTEM_CA_BUNDLE; SSL_CERT_FILE=/data/proxy-ca.pem (proxy CA only)"
 fi
 
+# ── Config-path argv reconciliation (#4973) ───────────────────────────
+# Both config branches above have a read-only escape hatch: when the config
+# path cannot be written they `export HIVE_CONFIG=<runtime config>` and log
+# "config path is read-only — using ... directly". That export was INERT.
+#
+# main.go reads HIVE_CONFIG only to pick the DEFAULT of its -config flag:
+#
+#   defaultConfig := "/etc/hive/hive.yaml"
+#   if envCfg := os.Getenv("HIVE_CONFIG"); envCfg != "" { defaultConfig = envCfg }
+#   configPath := flag.String("config", defaultConfig, ...)
+#
+# and the image's own CMD passes the flag EXPLICITLY
+# (Dockerfile: CMD ["--config", "/etc/hive/hive.yaml"]), which outranks any
+# default. So on every hive whose config path is read-only — a bind-mounted
+# hive.yaml under docker/podman is the common case — the binary loaded the
+# stale read-only file while the entrypoint believed it had redirected it.
+#
+# The damage is not confined to that boot. Config.Save() writes
+# /data/hive.yaml.runtime unconditionally, so the first save of any kind
+# (dashboard edit, heartbeat-delivered config) wrote the STALE config back
+# over the runtime file that held the operator's real state. Observed as an
+# ACMM level set from the dashboard reverting on the next restart, twice, with
+# /data fully intact (#4973).
+#
+# main.go cannot fix this on its own: an explicit --config coming from the
+# image's CMD is indistinguishable from one an operator typed. The entrypoint
+# is the component that knows the config path is stale, so it has to say so in
+# the argv it actually launches with.
+#
+# APPENDED, not substituted: Go's flag package processes occurrences in order
+# and keeps the last, so `--config <stale> ... --config $HIVE_CONFIG` resolves
+# to HIVE_CONFIG without this script having to parse and rewrite the CMD.
+#
+# When HIVE_CONFIG is unset (the ordinary case, where the cp above succeeded
+# and the config path IS current) nothing is appended and the CMD applies
+# unchanged. When an operator sets HIVE_CONFIG themselves, this makes the
+# binary honour it — which is what the variable already means everywhere else
+# in this script (HIVE_CONFIG_PATH is derived from it at the top).
+if [ -n "${HIVE_CONFIG:-}" ]; then
+  set -- "$@" --config "$HIVE_CONFIG"
+  echo "[entrypoint] Config path pinned for the Go binary: --config $HIVE_CONFIG"
+fi
 echo "[entrypoint] Starting Go binary on :${HIVE_API_PORT} (uid=$(id -u))"
 hive "$@" &
 HIVE_PID=$!
