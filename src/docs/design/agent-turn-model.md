@@ -540,11 +540,11 @@ Things this spike did not establish, and what would settle each.
    determinable from the code alone and was not raised as a defect by this
    spike. Confirming it needs the author's intent, not more reading.
 3. **What is the actual observed restart rate, and how much work is lost per
-   restart?** The RFC's motivation is "frequent spoke rolls", but this spike
-   found no metric that quantifies work discarded by a restart. `RestartCount`
-   (`src/pkg/snapshot/state.go:92`) counts restarts but says nothing about what
-   each one cost. Sizing the problem would need that measurement, and step 4's
-   feasibility judgement arguably depends on it.
+   restart?** ~~The RFC's motivation is "frequent spoke rolls", but this spike
+   found no metric that quantifies work discarded by a restart.~~ **An
+   instrument now exists** (`src/pkg/agent/turn_loss.go`); the question is
+   awaiting fleet data rather than awaiting a way to collect it. See
+   [Measuring the motivation](#measuring-the-motivation-open-question-3) below.
 4. **Is `buildBootstrapPrompt`'s path-building dead code, or a staging post?**
    The function assembles a candidate policy-file list
    (`src/pkg/agent/manager.go:3366-3378`) and then discards it by returning `""`
@@ -560,6 +560,73 @@ Things this spike did not establish, and what would settle each.
    itself to the tmux CLI path, which is the fleet's normal mode; the sandbox
    and inference paths were not mapped and may not share these constraints.
 
+
+---
+
+## Measuring the motivation (open question 3)
+
+The RFC argues from "frequent spoke rolls discard agent work". That premise was
+unsized: `RestartCount` (`src/pkg/snapshot/state.go`) counts restarts and says
+nothing about what any of them cost. Step 4's feasibility call depends on the
+difference, and the measurement is cheap next to a prototype — so it is now
+instrumented, in `src/pkg/agent/turn_loss.go`.
+
+**What is counted.** A turn is interrupted when hive tears down an agent's CLI
+and tmux session while a delivered kick's output has not yet been rotated
+(`kickLogPending`) — the restart and shutdown paths, funnelled through
+`tearDownTurnLocked`. Ordinary kick rotation is deliberately excluded: a kick is
+only delivered into a pane sitting at its input marker, so rotation means the
+previous turn finished, and counting it would bury the signal in completed work.
+
+**Why two clocks, and why neither alone is honest.** `kickLogPending` means
+"output not archived", which is not the same as "the turn was still running": an
+agent that finished and then sat idle for an hour still carries pending output.
+Charging that hour to the restart would overstate the loss — an overclaim in
+favour of the RFC, produced by the RFC's own instrument, which is exactly the
+result nobody should trust. So each record carries:
+
+| Field | Meaning |
+|---|---|
+| `SinceKick` | Teardown minus kick delivery. An **upper bound** on what the interruption could have cost — never a measurement of what it did. |
+| `SinceOutput` | Teardown minus the last observed pane change. A large value beside a large `SinceKick` says the agent was idle and little was lost. Nil means the pane poller never saw a change, which reads as **unknown** and must never be read as idle. |
+| `Producing` | Whether the pane changed *after* the kick landed — the agent did something this turn. Binary and threshold-free, which is why the aggregate carries it: "interruptions that hit an agent doing work" is answerable across the fleet without anyone first agreeing how many idle seconds count as idle. Unknown resolves to false. |
+| `Bytes` | Archived scrollback at teardown, a proxy for the volume of turn output discarded. |
+
+Analysis discounts with `SinceOutput`; the instrument does not decide for it.
+Deciding would be taking step 4's judgement inside a tool built to inform it.
+
+**Where it lands.** Per-agent aggregates plus a bounded tail of individual
+records ride the existing `/data/hive-state.json` through
+`snapshot.AgentTurnLoss` — not a sidecar, per the maintainer caution against
+adding durable store number five — and are re-seeded at boot
+(`SeedTurnLoss`), because a counter that reset on restart would reset on exactly
+the event it exists to count. Each interruption is also logged as
+`audit: turn interrupted mid-flight`, so the fleet-wide question is answerable
+from log aggregation without reading every spoke's PVC.
+
+**Reading it.** The headline is `producing / interruptions` — the share of
+teardowns that certainly discarded work — with `upper_bound_s` as the ceiling on
+cost and the `recent` tail showing the shape (a few long turns vs. many short
+ones):
+
+```bash
+jq '.agents | to_entries[] | select(.value.turn_loss)
+    | {agent: .key, interruptions: .value.turn_loss.interruptions,
+       producing: .value.turn_loss.producing,
+       upper_bound_s: .value.turn_loss.upper_bound_s}' /data/hive-state.json
+```
+
+**What it still does not answer.** It sizes what a teardown *discards*, not what
+recovery would *cost*, so it does not by itself settle the beads-checkpointing
+comparison raised on the issue — that needs the killed-at-50% experiment, which
+wants this baseline first. And it measures the tmux CLI path only: the sandbox
+and inference paths (open question 5) have different teardown semantics and are
+not instrumented here.
+
+**Status: instrument only.** It changes nothing about when or how an agent is
+torn down. `tearDownTurnLocked` replaces three hand-copied archive-then-clear
+blocks with one funnel so the accounting cannot drift between the restart paths,
+and is otherwise behaviour-preserving.
 ---
 
 ## What this page does not say

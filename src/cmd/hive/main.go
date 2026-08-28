@@ -6859,6 +6859,41 @@ func watchdogAuthProbes(cfg *config.Config) map[string]watchdog.AuthProbe {
 	return out
 }
 
+// turnLossToSnapshot converts the manager's in-memory turn-loss accumulation
+// into its persisted form, or nil when nothing has been recorded.
+//
+// Nil rather than a zero struct on purpose: `turn_loss` is omitempty, so an
+// agent that has never been interrupted adds nothing to /data/hive-state.json.
+// The overwhelming majority of agents are in that state, and a measurement that
+// bloated every hive's state file with empty records would be its own argument
+// for removing it.
+func turnLossToSnapshot(loss agent.TurnLoss) *snapshot.AgentTurnLoss {
+	if loss.Interruptions == 0 && len(loss.Recent) == 0 {
+		return nil
+	}
+	out := &snapshot.AgentTurnLoss{
+		Interruptions: loss.Interruptions,
+		Producing:     loss.Producing,
+		UpperBoundS:   loss.UpperBound.Seconds(),
+		Bytes:         loss.Bytes,
+	}
+	for _, r := range loss.Recent {
+		rec := snapshot.AgentTurnInterruption{
+			At:         r.At,
+			Reason:     r.Reason,
+			SinceKickS: r.SinceKick.Seconds(),
+			Producing:  r.Producing,
+			Bytes:      r.Bytes,
+		}
+		if r.SinceOutput != nil {
+			s := r.SinceOutput.Seconds()
+			rec.SinceOutputS = &s
+		}
+		out.Recent = append(out.Recent, rec)
+	}
+	return out
+}
+
 func persistState(agentMgr *agent.Manager, gov *governor.Governor, cfg *config.Config, path string, logger *slog.Logger, dashSrv *dashboard.Server, wd *watchdog.Reconciler) {
 	statuses := agentMgr.AllStatuses()
 	agents := make(map[string]snapshot.AgentState, len(statuses))
@@ -6874,6 +6909,7 @@ func persistState(agentMgr *agent.Manager, gov *governor.Governor, cfg *config.C
 			PausedReason:    proc.PausedReason,
 			PausedTrigger:   proc.PausedTrigger,
 			PausedBy:        proc.PausedBy,
+			TurnLoss:        turnLossToSnapshot(proc.TurnLoss),
 		}
 		if !proc.PausedAt.IsZero() {
 			t := proc.PausedAt
