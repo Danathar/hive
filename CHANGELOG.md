@@ -48,6 +48,22 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ### Fixed
 
+- The hub's "upgrade not armed" de-duplication memory is now **per hub server**
+  and no longer leaks entries for hives that no longer exist
+  ([#4995](https://github.com/kubestellar/hive/issues/4995)). It was a
+  package-level global keyed on hive ID alone, so two hub instances in one
+  process — or two servers managing same-named hives, the normal case for
+  fixtures — clobbered each other, and one server's arming could suppress a
+  refusal notice the other should have emitted. That timeline entry is the only
+  operator-visible signal distinguishing "deliberately not upgraded" from
+  "silently broken", so suppressing it across a server boundary defeated the
+  feature. Entries also grew without bound: the sole removal path was a
+  successful arming, and a hive deleted or deprovisioned while uncollectible is
+  by definition never armed — which is precisely the unassigned-placeholder
+  population this code exists for. Entries are now reconciled against the live
+  hive set on the auto-upgrade sweep that already lists it. No behaviour change
+  for a single running hub beyond the leak being fixed.
+
 - Removed the half-wired `amazonq` (Amazon Q Developer) backend from the operator-facing dashboard: the CLI backend picker's `KNOWN_BACKENDS` array and the "CLI Pin Value" tooltip both listed it as a selectable option, but it was never in either authoritative registry (`config/backends.conf`'s `KNOWN_BACKENDS`/`backend_binary`/`backend_perm_flag`, or `src/pkg/config/config.go`'s `CLIBackends`), so `validateBackendName` rejected it on launch — an accept-then-fail bug where the dashboard recommended a backend that could not start. Also dropped from the three shell/JS "no `--model` flag" lists in `bin/agent-launch.sh`, `bin/contributor-agent.sh`, and `bin/contributor-relay.sh` (the `goose`/`bob` handling in each is unaffected) and from `bin/contributor-relay.test.js`. Nobody had requested Amazon Q support; removal was cheaper than finishing the integration. Found by the backend-list parity guard added in [#4987](https://github.com/kubestellar/hive/pull/4987). The dashboard's JS `KNOWN_BACKENDS` array is still unguarded by that parity test — it cannot practically parse embedded JS — so this exact class of drift can recur there. ([#4988](https://github.com/kubestellar/hive/issues/4988))
 
 - An issue covered by an open PR that only *references* it (`Refs #N`, `Part of

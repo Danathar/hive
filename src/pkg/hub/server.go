@@ -975,6 +975,29 @@ type HubServer struct {
 	// target SHA, proving the upgrade completed.
 	heartbeatUpgrade map[string]string
 
+	// undeliverableUpgradeNoted de-duplicates the "upgrade not armed" timeline
+	// entry per (hive, target) — see noteUncollectibleUpgrade in
+	// pullonly_upgrade.go for why that entry exists and why it must not repeat
+	// every 2-minute poll.
+	//
+	// PER-SERVER, not package-global (#4995). As a global it was shared by every
+	// hub in a process: two servers managing same-named hives — the normal case
+	// for fixtures — clobbered each other's memory, and one server's arming
+	// could suppress a refusal the other should have reported. The timeline
+	// entry is the whole operator-visible point of that file ("Silence is how
+	// the original wedge went unnoticed"), so suppressing it across a server
+	// boundary defeats the feature rather than merely being untidy.
+	//
+	// GUARDED BY undeliverableUpgradeMu, which is separate from s.mu on purpose:
+	// noteUncollectibleUpgrade calls recordTimeline immediately after releasing
+	// it, and recordTimeline is not safe to call under the registry lock.
+	//
+	// Lazily created on first write. Bare &HubServer{} literals are common in
+	// this package's tests and never run a constructor, so a nil map here must
+	// be a working empty map rather than a panic.
+	undeliverableUpgradeMu    sync.Mutex
+	undeliverableUpgradeNoted map[string]string
+
 	// clusterUnreachableUntil suppresses kubectl against clusters the hub has
 	// just proven it cannot route to (firewalled GPU clusters like the heartbeat-only cluster).
 	// Without this, triggerAutoUpgrades() paid a full dial timeout PER HIVE PER

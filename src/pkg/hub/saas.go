@@ -5937,6 +5937,10 @@ func (s *HubServer) triggerAutoUpgrades() {
 		return
 	}
 	hives := listSaaSHives()
+	// Reconcile the undeliverable-upgrade memory against the live set while we
+	// have it. Arming is the only other removal path, and a hive deleted while
+	// uncollectible is never armed — see pruneUncollectibleUpgrades (#4995).
+	s.pruneUncollectibleUpgrades(hives)
 	// Upgrade waves: bound how many hives may be UPGRADING per cluster at
 	// once. A merge used to roll every behind hive simultaneously — observed
 	// live as a fleet-wide restart inside minutes, an image-pull + PVC IO
@@ -6276,7 +6280,7 @@ func (s *HubServer) triggerAutoUpgrades() {
 		}
 		// The hive is deliverable again — drop any suppressed-refusal memory so a
 		// future undeliverable episode is reported afresh rather than swallowed.
-		forgetUncollectibleUpgrade(h.ID)
+		s.forgetUncollectibleUpgrade(h.ID)
 		s.logger.Info("audit: auto-upgrade triggered", "hive_id", h.ID, "branch", branch, "from", currentSHA, "to", latestSHA, "cluster", hiveCluster.ID, "mode", normalizeAutoUpgradeMode(h.AutoUpgradeMode))
 		s.recordTimeline(h.ID, TimelineUpgradeStarted,
 			fmt.Sprintf("auto-upgrade triggered on %s: %s → %s", branch, orDash(currentSHA), latestSHA), "auto-upgrade")

@@ -1,7 +1,6 @@
 package hub
 
 import (
-	"sync"
 	"time"
 )
 
@@ -144,9 +143,10 @@ func uncollectibleUpgradeReason(lastHeartbeat string) string {
 		"an upgrade instruction"
 }
 
-// undeliverableUpgradeNoted remembers the (hive, target) pairs already written to
-// a timeline, so the refusal is recorded ONCE per target rather than on every
-// poll.
+// The de-duplication memory for the "upgrade not armed" timeline entry lives on
+// HubServer as undeliverableUpgradeNoted (see server.go). It remembers the
+// (hive, target) pairs already written, so the refusal is recorded ONCE per
+// target rather than on every poll.
 //
 // StartLatestSHAPoller ticks every latestSHAPollInterval (2m) and calls
 // triggerAutoUpgrades() each time, so an un-deduplicated timeline write would
@@ -155,10 +155,20 @@ func uncollectibleUpgradeReason(lastHeartbeat string) string {
 // timeline exists to show. Keying on the TARGET means a genuinely new upgrade
 // opportunity (the branch advanced) is reported again, while the same refusal is
 // not repeated.
-var (
-	undeliverableUpgradeMu    sync.Mutex
-	undeliverableUpgradeNoted = map[string]string{}
-)
+//
+// It was a package-level global until #4995. Two problems, both real:
+//
+//  1. SHARED ACROSS SERVERS. Every hub in a process wrote to one map, keyed on
+//     hive ID alone. Two servers managing same-named hives clobbered each
+//     other, so one server's arming could suppress a refusal the other should
+//     have reported — silencing the one operator-visible signal this file
+//     exists to produce.
+//  2. UNBOUNDED. The comment above claims the map is bounded because it is
+//     keyed on target, but the only removal path was "the hive was successfully
+//     armed". A hive deleted or deprovisioned while uncollectible is never
+//     armed — and an unassigned placeholder that never heartbeats is exactly
+//     the population this file is about — so its entry was retained for the
+//     lifetime of the process. pruneUncollectibleUpgrades below closes that.
 
 // noteUncollectibleUpgrade records — once per (hive, target) — that the hub
 // declined to arm an upgrade the hive could not collect, and why.
@@ -167,13 +177,16 @@ var (
 // original wedge went unnoticed: a hive with auto_upgrade=true that never
 // upgrades is indistinguishable from one already at latest.
 func (s *HubServer) noteUncollectibleUpgrade(hiveID, target, reason string) {
-	undeliverableUpgradeMu.Lock()
-	if prev, ok := undeliverableUpgradeNoted[hiveID]; ok && prev == target {
-		undeliverableUpgradeMu.Unlock()
+	s.undeliverableUpgradeMu.Lock()
+	if prev, ok := s.undeliverableUpgradeNoted[hiveID]; ok && prev == target {
+		s.undeliverableUpgradeMu.Unlock()
 		return
 	}
-	undeliverableUpgradeNoted[hiveID] = target
-	undeliverableUpgradeMu.Unlock()
+	if s.undeliverableUpgradeNoted == nil {
+		s.undeliverableUpgradeNoted = map[string]string{}
+	}
+	s.undeliverableUpgradeNoted[hiveID] = target
+	s.undeliverableUpgradeMu.Unlock()
 
 	s.recordTimeline(hiveID, TimelineUpgradeStale,
 		"auto-upgrade to "+orDash(target)+" not armed — "+reason, "auto-upgrade")
@@ -183,10 +196,49 @@ func (s *HubServer) noteUncollectibleUpgrade(hiveID, target, reason string) {
 // if it later becomes uncollectible again the refusal is reported afresh rather
 // than suppressed by a stale entry. Called when a hive is successfully armed —
 // i.e. the condition has genuinely cleared.
-func forgetUncollectibleUpgrade(hiveID string) {
-	undeliverableUpgradeMu.Lock()
-	delete(undeliverableUpgradeNoted, hiveID)
-	undeliverableUpgradeMu.Unlock()
+func (s *HubServer) forgetUncollectibleUpgrade(hiveID string) {
+	s.undeliverableUpgradeMu.Lock()
+	delete(s.undeliverableUpgradeNoted, hiveID)
+	s.undeliverableUpgradeMu.Unlock()
+}
+
+// pruneUncollectibleUpgrades drops memory for hives that no longer exist, given
+// the live hive set the caller is already iterating.
+//
+// This is the entry lifecycle the map never had. Arming is the only other
+// removal path, and a hive deleted or deprovisioned while uncollectible is by
+// definition never armed, so without this the entry outlives the hive for the
+// process's lifetime and the set of dead placeholders grows monotonically.
+//
+// A SWEEP RATHER THAN A REMOVAL HOOK, deliberately. removeHiveRecord() — the
+// deletion path — is a bare function with no server receiver, so it cannot
+// reach a per-server map without threading a HubServer through it, and it is
+// not the only way a hive leaves the set (deprovision, a record failing to load,
+// an operator clearing the directory). Reconciling against the live set on a
+// sweep the caller already performs covers every disappearance for free and is
+// self-healing after a missed event, which a hook is not.
+//
+// EMPTY IS NOT AUTHORITATIVE. listSaaSHives() returns nil both when there are no
+// hives and when its ReadDir fails (saas_provision.go), and those are
+// indistinguishable to a caller. Pruning on an empty list would let one
+// transient read error wipe the memory and re-emit every suppressed refusal on
+// the next tick — the duplicate-timeline flood this map exists to prevent. So an
+// empty set prunes nothing; the next successful sweep does the work.
+func (s *HubServer) pruneUncollectibleUpgrades(live []SaaSHive) {
+	if len(live) == 0 {
+		return
+	}
+	alive := make(map[string]bool, len(live))
+	for i := range live {
+		alive[live[i].ID] = true
+	}
+	s.undeliverableUpgradeMu.Lock()
+	defer s.undeliverableUpgradeMu.Unlock()
+	for id := range s.undeliverableUpgradeNoted {
+		if !alive[id] {
+			delete(s.undeliverableUpgradeNoted, id)
+		}
+	}
 }
 
 // upgradeBranchOrDefault resolves the branch whose latest SHA should be used as

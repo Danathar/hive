@@ -60,7 +60,6 @@ func TestPullOnlyHiveThatHeartbeatsStillUpgrades(t *testing.T) {
 	defer cleanup()
 
 	s := pullOnlyTestServer(t)
-	forgetUncollectibleUpgrade("pull-live")
 	saveSaaSHive(&SaaSHive{
 		ID: "pull-live", Owner: "alice", AutoUpgrade: true,
 		Status: "running", ClusterID: "vllm-d",
@@ -96,7 +95,6 @@ func TestAutoUpgradeNotArmedForNeverHeartbeatedHive(t *testing.T) {
 	defer cleanup()
 
 	s := pullOnlyTestServer(t)
-	forgetUncollectibleUpgrade("ph-1")
 	saveSaaSHive(&SaaSHive{
 		ID: "ph-1", Owner: "alice", AutoUpgrade: true,
 		Status: "running", ClusterID: "vllm-d",
@@ -125,7 +123,6 @@ func TestAutoUpgradeNotArmedForLongDeadHive(t *testing.T) {
 	defer cleanup()
 
 	s := pullOnlyTestServer(t)
-	forgetUncollectibleUpgrade("dead-1")
 	saveSaaSHive(&SaaSHive{
 		ID: "dead-1", Owner: "alice", AutoUpgrade: true,
 		Status: "running", ClusterID: "hive-oke",
@@ -151,7 +148,6 @@ func TestBrieflyQuietHiveStillUpgrades(t *testing.T) {
 	defer cleanup()
 
 	s := pullOnlyTestServer(t)
-	forgetUncollectibleUpgrade("quiet-1")
 	saveSaaSHive(&SaaSHive{
 		ID: "quiet-1", Owner: "alice", AutoUpgrade: true,
 		Status: "running", ClusterID: "vllm-d",
@@ -179,7 +175,6 @@ func TestStaleUpgradeNotReArmedForUncollectibleHive(t *testing.T) {
 	defer cleanup()
 
 	s := pullOnlyTestServer(t)
-	forgetUncollectibleUpgrade("ph-2")
 	saveSaaSHive(&SaaSHive{
 		ID: "ph-2", Owner: "alice", AutoUpgrade: true,
 		Status: "running", ClusterID: "vllm-d",
@@ -214,7 +209,6 @@ func TestStaleUpgradeStillRecoveredForLiveHive(t *testing.T) {
 	defer cleanup()
 
 	s := pullOnlyTestServer(t)
-	forgetUncollectibleUpgrade("ok-2")
 	saveSaaSHive(&SaaSHive{
 		ID: "ok-2", Owner: "alice", AutoUpgrade: true,
 		Status: "running", ClusterID: "vllm-d",
@@ -245,7 +239,6 @@ func TestUncollectibleUpgradeCannotAccumulateStaleness(t *testing.T) {
 	defer cleanup()
 
 	s := pullOnlyTestServer(t)
-	forgetUncollectibleUpgrade("ph-3")
 	saveSaaSHive(&SaaSHive{
 		ID: "ph-3", Owner: "alice", AutoUpgrade: true,
 		Status: "running", ClusterID: "vllm-d",
@@ -276,7 +269,6 @@ func TestUncollectibleUpgradeIsSurfacedNotSilent(t *testing.T) {
 	defer cleanup()
 
 	s := pullOnlyTestServer(t)
-	forgetUncollectibleUpgrade("ph-4")
 	saveSaaSHive(&SaaSHive{
 		ID: "ph-4", Owner: "alice", AutoUpgrade: true,
 		Status: "running", ClusterID: "vllm-d",
@@ -307,7 +299,6 @@ func TestUncollectibleRefusalIsDeduplicated(t *testing.T) {
 	defer cleanup()
 
 	s := pullOnlyTestServer(t)
-	forgetUncollectibleUpgrade("ph-5")
 	saveSaaSHive(&SaaSHive{
 		ID: "ph-5", Owner: "alice", AutoUpgrade: true,
 		Status: "running", ClusterID: "vllm-d",
@@ -382,7 +373,6 @@ func TestLiveHiveNeverTargetedWithForeignBranchSHA(t *testing.T) {
 	defer cleanup()
 
 	s := pullOnlyTestServer(t)
-	forgetUncollectibleUpgrade("live-nobranch")
 	latestSHAMu.Lock()
 	latestSHAByBranch["v2"] = branchSHAInfo{SHA: "0b78dc0"}
 	latestSHAMu.Unlock()
@@ -423,7 +413,6 @@ func TestUpgradePathNeverShellsOutToCluster(t *testing.T) {
 	defer cleanup()
 
 	s := pullOnlyTestServer(t)
-	forgetUncollectibleUpgrade("nopush")
 	// A REACHABLE remote cluster: under the old push model this is exactly the
 	// case that would have shelled out to kubectl.
 	s.clusters["remote"] = ClusterConfig{
@@ -529,7 +518,6 @@ func TestAutoUpgradeToggleWorksUnderPull(t *testing.T) {
 
 	// And the setting must actually take effect on the next poll — on a
 	// pull-only cluster, which is the case that matters.
-	forgetUncollectibleUpgrade("toggle-1")
 	s.triggerAutoUpgrades()
 	if !s.registry.Hives[0].Upgrading {
 		t.Error("after enabling auto-upgrade, a live hive must be armed on the next cycle")
