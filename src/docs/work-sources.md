@@ -95,6 +95,12 @@ See [Linear agent integration](linear-agent.md) for the OAuth app setup,
 webhook wiring, `LINEAR_CLIENT_ID`/`LINEAR_CLIENT_SECRET`/
 `LINEAR_WEBHOOK_SECRET`, and how agents write back to Linear.
 
+**ACMM gap issues.** The dashboard's ACMM "Open Issue" / "Open All" buttons
+file on GitHub by default even on a Linear-sourced hive. Set
+`governor.acmm.issue_tracker: work_source` to file them on the Linear team
+mapped to the criterion's repo instead (`teams[].repo` match, else the first
+team) — see [ACMM policy matrix → Where gap issues are filed](acmm-policy-matrix.md#where-acmm-gap-issues-are-filed).
+
 ## `type: jira` — Jira Cloud
 
 Reads issues from Jira Cloud via the REST API v3

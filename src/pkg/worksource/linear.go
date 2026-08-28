@@ -518,3 +518,112 @@ func linearGraphQL(ctx context.Context, client *http.Client, baseURL, apiKey, qu
 	}
 	return raw, nil
 }
+
+// TeamForRepo picks the Linear team that owns work for repo: the first
+// configured team whose Repo matches (either the full "owner/name" or the
+// bare name), else the first team. ok is false only when no teams are
+// configured at all. This is the team the ACMM gap issue for a repo is
+// filed on when governor.acmm.issue_tracker is work_source.
+func (s *LinearSource) TeamForRepo(repo string) (LinearTeamConfig, bool) {
+	if len(s.cfg.Teams) == 0 {
+		return LinearTeamConfig{}, false
+	}
+	repo = strings.TrimSpace(repo)
+	for _, t := range s.cfg.Teams {
+		if t.Repo == repo || repoBaseName(t.Repo) == repo {
+			return t, true
+		}
+	}
+	return s.cfg.Teams[0], true
+}
+
+func repoBaseName(full string) string {
+	if i := strings.LastIndex(full, "/"); i >= 0 {
+		return full[i+1:]
+	}
+	return full
+}
+
+// linearTeamIDQuery resolves a team key to the UUID issueCreate needs.
+const linearTeamIDQuery = `query($key: String!) {
+  teams(filter: { key: { eq: $key } }, first: 1) { nodes { id key } }
+}`
+
+// linearIssueCreateMutation is the minimal write: team, title, description.
+const linearIssueCreateMutation = `mutation($input: IssueCreateInput!) {
+  issueCreate(input: $input) {
+    success
+    issue { id identifier number url title }
+  }
+}`
+
+type linearTeamIDResponse struct {
+	Data struct {
+		Teams struct {
+			Nodes []struct {
+				ID  string `json:"id"`
+				Key string `json:"key"`
+			} `json:"nodes"`
+		} `json:"teams"`
+	} `json:"data"`
+}
+
+type linearIssueCreateResponse struct {
+	Data struct {
+		IssueCreate struct {
+			Success bool               `json:"success"`
+			Issue   LinearCreatedIssue `json:"issue"`
+		} `json:"issueCreate"`
+	} `json:"data"`
+}
+
+// LinearCreatedIssue is what issueCreate returns for the new issue.
+type LinearCreatedIssue struct {
+	ID         string `json:"id"`
+	Identifier string `json:"identifier"` // e.g. "ENG-123"
+	Number     int    `json:"number"`     // the numeric part of Identifier
+	URL        string `json:"url"`
+	Title      string `json:"title"`
+}
+
+// CreateIssue files a new issue on the team with key teamKey via Linear's
+// issueCreate mutation. It is the write counterpart of ListIssues and goes
+// through the same linearGraphQL transport (credential, endpoint, error
+// envelope) as the enumerator and the advisory digest poster. The
+// description is Markdown, which Linear renders natively, so callers can
+// pass the same body they would give GitHub.
+func (s *LinearSource) CreateIssue(ctx context.Context, teamKey, title, description string) (*LinearCreatedIssue, error) {
+	teamKey = strings.TrimSpace(teamKey)
+	if teamKey == "" {
+		return nil, fmt.Errorf("linear: team key is required")
+	}
+	raw, err := linearGraphQL(ctx, s.client, s.cfg.BaseURL, s.cfg.APIKey, linearTeamIDQuery, map[string]interface{}{"key": teamKey})
+	if err != nil {
+		return nil, fmt.Errorf("linear: resolve team %s: %w", teamKey, err)
+	}
+	var teamResp linearTeamIDResponse
+	if err := json.Unmarshal(raw, &teamResp); err != nil {
+		return nil, fmt.Errorf("linear: resolve team %s: decode response: %w", teamKey, err)
+	}
+	if len(teamResp.Data.Teams.Nodes) == 0 {
+		return nil, fmt.Errorf("linear: team %q not found", teamKey)
+	}
+	input := map[string]interface{}{
+		"teamId":      teamResp.Data.Teams.Nodes[0].ID,
+		"title":       title,
+		"description": description,
+	}
+	raw, err = linearGraphQL(ctx, s.client, s.cfg.BaseURL, s.cfg.APIKey, linearIssueCreateMutation, map[string]interface{}{"input": input})
+	if err != nil {
+		return nil, fmt.Errorf("linear: issueCreate: %w", err)
+	}
+	var resp linearIssueCreateResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, fmt.Errorf("linear: issueCreate: decode response: %w", err)
+	}
+	if !resp.Data.IssueCreate.Success || resp.Data.IssueCreate.Issue.Identifier == "" {
+		return nil, fmt.Errorf("linear: issueCreate did not return an issue")
+	}
+	issue := resp.Data.IssueCreate.Issue
+	return &issue, nil
+}

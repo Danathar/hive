@@ -90,6 +90,10 @@ type Server struct {
 	acmmEvalMu       sync.RWMutex
 	acmmEvalCache    *ACMMEvaluation
 	acmmEvalCachedAt time.Time
+	// acmmLinearBaseURL overrides the Linear GraphQL endpoint the ACMM
+	// "Open Issue" path posts issueCreate to. Empty = production; tests
+	// point it at an httptest server.
+	acmmLinearBaseURL string
 
 	// Sparkline histories, all backed by the generic timeSeries ring buffer
 	// (see timeseries.go). Lazily constructed via the tokenSeries()/factSeries()

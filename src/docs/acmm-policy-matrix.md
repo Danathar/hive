@@ -117,6 +117,48 @@ Existing autonomous lanes can open issues, create PRs, and auto-merge on green C
 6. **Brainstorm is always advisory.** It produces KB facts and beads, never GitHub issues or PRs. Its role evolves from inception (L1) to ongoing ideation (L2+), but its mode stays advisory at all levels.
 7. **Telemetry and operations are L5/L6-only opt-in agents.** Below L5 they are absent from the pack roster and dashboard, do not spawn panes, and cannot be kicked. At L5–L6 they use a paused cadence in every governor mode until an operator opts in; they may open issues and PRs but never merge.
 
+## Where ACMM gap issues are filed
+
+The dashboard's ACMM evaluation lists each criterion a repo is missing, and
+the level dialog offers **Open Issue** (per criterion) and **Open All** (every
+failing criterion at that level). Both call `POST /api/acmm/issue`. By default
+the issue goes to the repo's **GitHub Issues** with the `acmm` and
+`ai-fix-requested` labels.
+
+A hive whose backlog lives in Linear (`governor.work_source.type: linear`) can
+file them there instead:
+
+```yaml
+governor:
+  acmm:
+    issue_tracker: work_source   # "" | github | work_source (default github)
+```
+
+| Value | Where the issue goes |
+|---|---|
+| `github` (or unset) | GitHub Issues on the criterion's repo — unchanged behavior. |
+| `work_source` | Wherever the backlog lives. Linear work source → Linear `issueCreate` on the team whose `teams[].repo` matches the criterion's repo (else the first team). GitHub / GitHub Projects / Jira / unset → GitHub Issues as above. |
+
+Any other value fails config validation at load time.
+
+The choice can also be made **per click**: the request body accepts an
+optional `tracker` field (`"github"` or `"work_source"`) that overrides the
+configured default for that one issue; an unknown value is a `400`. When the
+work source is Linear the level dialog shows a small **File in: GitHub /
+Linear** selector, pre-selected from the config, that sets this field. The
+response always says where the issue went:
+
+```json
+{"tracker": "linear", "issue_number": 42, "identifier": "ENG-42",
+ "issue_url": "https://linear.app/acme/issue/ENG-42/...", "team": "ENG"}
+```
+
+(`tracker: "github"` responses carry `issue_number` and `issue_url` as
+before.) `GET /api/acmm/evaluation` reports the effective default as
+`issue_tracker` (`github` | `linear`) plus `work_source_type`. Title and body
+are identical on both trackers; Linear uses `work_source.linear.api_key`, and
+the audit log records `tracker` alongside the URL either way.
+
 ## Changing a hive's ACMM level
 
 Promoting or demoting a running hive between levels is a single operation — the

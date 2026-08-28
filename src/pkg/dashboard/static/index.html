@@ -14731,7 +14731,47 @@ function burnAreaChart() {
     };
     let _acmmEvalData = null;
     let _acmmSelectedRepo = null; // null = aggregate view
-    const _acmmOpenedIssues = {}; // key: "repo:criterionId" → {number, url}
+    const _acmmOpenedIssues = {}; // key: "repo:criterionId" → {number, url, identifier, tracker}
+    // Where "Open Issue" files: null = the server's configured default
+    // (governor.acmm.issue_tracker), else 'github' | 'linear' chosen in the
+    // level dialog's selector. Only offered when the work source is Linear.
+    let _acmmTracker = null;
+
+    function acmmTrackerAvailable() {
+      return !!(_acmmEvalData && _acmmEvalData.work_source_type === 'linear');
+    }
+    function acmmEffectiveTracker() {
+      if (_acmmTracker) return _acmmTracker;
+      return (_acmmEvalData && _acmmEvalData.issue_tracker) || 'github';
+    }
+    // The API's `tracker` field speaks github|work_source; the UI speaks the
+    // destination (github|linear). Omit the field to keep the server default.
+    function acmmIssuePayload(repo, criterionId, level) {
+      const body = {repo, criterion_id: criterionId, criterion_level: level};
+      if (_acmmTracker && acmmTrackerAvailable()) body.tracker = _acmmTracker === 'linear' ? 'work_source' : 'github';
+      return body;
+    }
+    function acmmRememberIssue(key, data) {
+      _acmmOpenedIssues[key] = {number: data.issue_number, url: data.issue_url, identifier: data.identifier || '', tracker: data.tracker || 'github'};
+      return _acmmOpenedIssues[key];
+    }
+    // "ENG-42" for Linear, "#42" for GitHub.
+    function acmmIssueRef(issue) {
+      return issue.identifier ? issue.identifier : ('#' + issue.number);
+    }
+    function acmmTrackerName(tracker) { return tracker === 'linear' ? 'Linear' : 'GitHub'; }
+    function acmmTrackerSelector() {
+      if (!acmmTrackerAvailable()) return '';
+      const cur = acmmEffectiveTracker();
+      return '<label class="muted-xs" style="margin-left:8px;display:inline-flex;align-items:center;gap:4px" title="Where Open Issue / Open All file the gap issue. Default comes from governor.acmm.issue_tracker.">File in ' +
+        '<select data-change-action="acmmSetTracker" data-arg-types="t" style="font-size:0.72rem;padding:2px 4px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text)">' +
+        '<option value="github"' + (cur === 'github' ? ' selected' : '') + '>GitHub</option>' +
+        '<option value="linear"' + (cur === 'linear' ? ' selected' : '') + '>Linear</option>' +
+        '</select></label>';
+    }
+    function acmmSetTracker(el) {
+      _acmmTracker = el && el.value === 'linear' ? 'linear' : 'github';
+    }
 
     function acmmGetActiveData() {
       if (!_acmmEvalData) return null;
@@ -14749,13 +14789,13 @@ function burnAreaChart() {
         const issueKey = repo + ':' + c.id;
         const existing = _acmmOpenedIssues[issueKey];
         if (existing) {
-          issueBtn = '<span style="margin-left:auto;padding:3px 10px;font-size:0.7rem;border:1px solid var(--green);border-radius:4px;color:var(--muted);white-space:nowrap">✅ <a href="' + escapeHtml(existing.url) + '" target="_blank" class="muted-xs">#' + existing.number + '</a></span>';
+          issueBtn = '<span style="margin-left:auto;padding:3px 10px;font-size:0.7rem;border:1px solid var(--green);border-radius:4px;color:var(--muted);white-space:nowrap">✅ <a href="' + escapeHtml(existing.url) + '" target="_blank" class="muted-xs">' + escapeHtml(acmmIssueRef(existing)) + '</a></span>';
         } else {
           const escapedId = escapeHtml(c.id).replace(/'/g, "\\'");
           const escapedRepo = escapeHtml(repo).replace(/'/g, "\\'");
           issueBtn = '<button data-action="acmmCreateIssue" data-arg0="' + escapeHtml(repo) + '" data-arg1="' + escapeHtml(c.id) + '" data-arg2="' + c.level + '" data-arg-types="s,s,j,t" data-stop="1" ' +
             'style="margin-left:auto;padding:3px 10px;font-size:0.7rem;background:var(--bg);border:1px solid var(--border);border-radius:4px;cursor:pointer;color:var(--muted);white-space:nowrap" ' +
-            'title="Open GitHub issue for agents to fix this">📋 Open Issue</button>';
+            'title="Open a ' + acmmTrackerName(acmmEffectiveTracker()) + ' issue for agents to fix this">📋 Open Issue</button>';
         }
       }
       const rowId = 'acmm-row-' + c.id.replace(/[^a-zA-Z0-9]/g, '-');
@@ -14790,7 +14830,7 @@ function burnAreaChart() {
         const r = await fetch('/api/acmm/issue', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({repo, criterion_id: criterionId, criterion_level: level})
+          body: JSON.stringify(acmmIssuePayload(repo, criterionId, level))
         });
         if (!r.ok) {
           const errText = await r.text();
@@ -14800,8 +14840,9 @@ function burnAreaChart() {
           return;
         }
         const data = await r.json();
-        _acmmOpenedIssues[repo + ':' + criterionId] = {number: data.issue_number, url: data.issue_url};
-        btn.innerHTML = '✅ <a href="' + escapeHtml(data.issue_url) + '" target="_blank" class="muted-xs">#' + data.issue_number + '</a>';
+        const opened = acmmRememberIssue(repo + ':' + criterionId, data);
+        btn.innerHTML = '✅ <a href="' + escapeHtml(data.issue_url) + '" target="_blank" class="muted-xs">' + escapeHtml(acmmIssueRef(opened)) + '</a>';
+        btn.title = 'Opened on ' + acmmTrackerName(opened.tracker);
         btn.style.borderColor = 'var(--green)';
       } catch (e) {
         btn.textContent = '⚠ Error';
@@ -14837,7 +14878,7 @@ function burnAreaChart() {
         const r = await fetch('/api/acmm/issue', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({repo, criterion_id: criterionId, criterion_level: level})
+          body: JSON.stringify(acmmIssuePayload(repo, criterionId, level))
         });
         if (!r.ok) {
           const errText = await r.text();
@@ -14845,8 +14886,11 @@ function burnAreaChart() {
           return;
         }
         const data = await r.json();
-        _acmmOpenedIssues[repo + ':' + criterionId] = {number: data.issue_number, url: data.issue_url};
-        acmmShowDialog('Issue Created', '<p class="text-base">Issue <a href="' + escapeHtml(data.issue_url) + '" target="_blank" style="color:var(--blue)">#' + data.issue_number + '</a> created on <strong>' + escapeHtml(repo) + '</strong> with <code>acmm</code> and <code>ai-fix-requested</code> labels.</p>');
+        const opened = acmmRememberIssue(repo + ':' + criterionId, data);
+        const where = opened.tracker === 'linear'
+          ? ' in Linear (team <code>' + escapeHtml(data.team || '') + '</code>) for <strong>' + escapeHtml(repo) + '</strong>.'
+          : ' created on <strong>' + escapeHtml(repo) + '</strong> with <code>acmm</code> and <code>ai-fix-requested</code> labels.';
+        acmmShowDialog('Issue Created', '<p class="text-base">Issue <a href="' + escapeHtml(data.issue_url) + '" target="_blank" style="color:var(--blue)">' + escapeHtml(acmmIssueRef(opened)) + '</a>' + where + '</p>');
       } catch (e) {
         acmmShowDialog('Issue Creation Failed', '<p class="error-note">Network error: ' + escapeHtml(e.message) + '</p>');
       }
@@ -14868,7 +14912,7 @@ function burnAreaChart() {
         html += '<div class="row-end">' +
           '<button data-action="acmmCloseDialog" class="dialog-btn">Close</button></div>';
       } else {
-        html += '<p class="dialog-note">This will create ' + newCriteria.length + ' issue(s) for failing criteria at L' + level + '.' +
+        html += '<p class="dialog-note">This will create ' + newCriteria.length + ' ' + acmmTrackerName(acmmEffectiveTracker()) + ' issue(s) for failing criteria at L' + level + '.' +
           (alreadyOpened > 0 ? ' (' + alreadyOpened + ' already opened, will be skipped)' : '') + '</p>';
         if (hasMultiRepo && !_acmmSelectedRepo) {
           html += '<p class="dialog-note">Select a target repo first, or issues will be created for each repo where the criterion fails.</p>';
@@ -14877,7 +14921,7 @@ function burnAreaChart() {
         for (const c of criteria) {
           const opened = _acmmOpenedIssues[(targetRepo || '') + ':' + c.id];
           if (opened) {
-            html += '<div style="font-size:0.78rem;padding:2px 0;color:var(--muted)">✅ ' + escapeHtml(c.name) + ' <a href="' + escapeHtml(opened.url) + '" target="_blank" class="muted-xs">#' + opened.number + '</a></div>';
+            html += '<div style="font-size:0.78rem;padding:2px 0;color:var(--muted)">✅ ' + escapeHtml(c.name) + ' <a href="' + escapeHtml(opened.url) + '" target="_blank" class="muted-xs">' + escapeHtml(acmmIssueRef(opened)) + '</a></div>';
           } else {
             html += '<div style="font-size:0.78rem;padding:2px 0">❌ ' + escapeHtml(c.name) + '</div>';
           }
@@ -14906,11 +14950,10 @@ function burnAreaChart() {
           try {
             const r = await fetch('/api/acmm/issue', {
               method: 'POST', headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({repo: targetRepo, criterion_id: c.id, criterion_level: level})
+              body: JSON.stringify(acmmIssuePayload(targetRepo, c.id, level))
             });
             if (r.ok) {
-              const data = await r.json();
-              _acmmOpenedIssues[issueKey] = {number: data.issue_number, url: data.issue_url};
+              acmmRememberIssue(issueKey, await r.json());
               created++;
             } else { failed++; }
           } catch { failed++; }
@@ -14923,11 +14966,10 @@ function burnAreaChart() {
               try {
                 const r = await fetch('/api/acmm/issue', {
                   method: 'POST', headers: {'Content-Type': 'application/json'},
-                  body: JSON.stringify({repo: rr.repo, criterion_id: c.id, criterion_level: level})
+                  body: JSON.stringify(acmmIssuePayload(rr.repo, c.id, level))
                 });
                 if (r.ok) {
-                  const data = await r.json();
-                  _acmmOpenedIssues[issueKey] = {number: data.issue_number, url: data.issue_url};
+                  acmmRememberIssue(issueKey, await r.json());
                   created++;
                 } else { failed++; }
               } catch { failed++; }
@@ -14937,7 +14979,8 @@ function burnAreaChart() {
         const prog = document.getElementById('acmm-batch-progress');
         if (prog) prog.textContent = created + '/' + criteria.length + ' created' + (failed > 0 ? ' (' + failed + ' failed)' : '') + (skipped > 0 ? ' (' + skipped + ' skipped)' : '') + '...';
       }
-      acmmShowDialog('Issues Created', '<p class="text-base">' + created + ' issue(s) created' + (failed > 0 ? ', ' + failed + ' failed' : '') + (skipped > 0 ? ', ' + skipped + ' already existed' : '') + ' with <code>acmm</code> + <code>ai-fix-requested</code> labels.</p>');
+      const labelNote = acmmEffectiveTracker() === 'linear' ? ' in Linear.' : ' with <code>acmm</code> + <code>ai-fix-requested</code> labels.';
+      acmmShowDialog('Issues Created', '<p class="text-base">' + created + ' issue(s) created' + (failed > 0 ? ', ' + failed + ' failed' : '') + (skipped > 0 ? ', ' + skipped + ' already existed' : '') + labelNote + '</p>');
     }
 
     function acmmShowLevelDialog(level, repoName) {
@@ -14984,6 +15027,7 @@ function burnAreaChart() {
         '<span style="font-size:0.82rem;color:' + statusColor + ';font-weight:600">' + statusText + '</span>' +
         '<span class="muted-xs">(threshold: ' + threshold + '%)</span>' +
         batchBtn +
+        (failCount > 0 ? acmmTrackerSelector() : '') +
         '</div>' +
         '<p style="font-size:0.8rem;color:var(--muted);margin:0 0 8px">' + escapeHtml(desc) + '</p>' +
         '</div>' +

@@ -143,7 +143,7 @@ Auth levels are derived from dashboard middleware (`isPublicPath`, dashboard tok
 | `POST` | `/api/packs/{level}/apply` | Dashboard auth/session | Pack Apply | `pkg/dashboard/api.go:166` |
 | `PUT` | `/api/packs/level` | Dashboard auth/session | Pack Set Level | `pkg/dashboard/api.go:167` |
 | `GET` | `/api/acmm/evaluation` | Dashboard auth/session | ACMMEvaluation | `pkg/dashboard/api.go:169` |
-| `POST` | `/api/acmm/issue` | Dashboard auth/session | ACMMCreate Issue | `pkg/dashboard/api.go:170` |
+| `POST` | `/api/acmm/issue` | Dashboard auth/session | ACMMCreate Issue — files on GitHub or, with `governor.acmm.issue_tracker: work_source` / body `tracker: "work_source"` on a Linear-sourced hive, on Linear; response `tracker` says which. See [ACMM policy matrix](acmm-policy-matrix.md#where-acmm-gap-issues-are-filed) | `pkg/dashboard/api.go:170` |
 | `GET` | `/api/acmm-recommendation` | Dashboard auth/session | Advisory level-up recommendation (`acmmadvisor.Recommendation`, JSON): never changes the applied level — see [ACMM advisor](acmm-advisor.md) | `pkg/dashboard/api.go:230` |
 
 ## Cost, tokens, telemetry

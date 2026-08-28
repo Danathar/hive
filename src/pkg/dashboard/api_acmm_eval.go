@@ -12,7 +12,9 @@ import (
 
 	gh "github.com/google/go-github/v72/github"
 
+	"github.com/kubestellar/hive/pkg/config"
 	"github.com/kubestellar/hive/pkg/github"
+	"github.com/kubestellar/hive/pkg/worksource"
 )
 
 const acmmEvalTTL = time.Hour
@@ -37,6 +39,13 @@ type ACMMEvaluation struct {
 	CriteriaResults   []CriterionResult `json:"criteria_results,omitempty"`
 	RepoResults       []RepoEvaluation  `json:"repo_results,omitempty"`
 	Error             string            `json:"error,omitempty"`
+	// IssueTracker is where "Open Issue" files by default for this hive —
+	// "github" or "linear" — after resolving governor.acmm.issue_tracker
+	// against the work source. The dashboard's tracker selector defaults
+	// to it. WorkSourceType is governor.work_source.type ("" = github) so
+	// the UI knows whether a non-GitHub choice exists at all.
+	IssueTracker   string `json:"issue_tracker"`
+	WorkSourceType string `json:"work_source_type,omitempty"`
 }
 
 // RepoEvaluation holds ACMM results for a single repository.
@@ -77,6 +86,10 @@ type ACMMIssueRequest struct {
 	Repo         string `json:"repo"`
 	CriterionID  string `json:"criterion_id"`
 	CriterionLvl int    `json:"criterion_level"`
+	// Tracker optionally overrides governor.acmm.issue_tracker for this one
+	// request: "github" | "work_source". Empty = the configured default;
+	// anything else is a 400.
+	Tracker string `json:"tracker,omitempty"`
 }
 
 func (s *Server) handleACMMEvaluation(w http.ResponseWriter, r *http.Request) {
@@ -96,6 +109,7 @@ func (s *Server) handleACMMEvaluation(w http.ResponseWriter, r *http.Request) {
 		result.OperationalLevel = opsLevel
 		result.OperationalName = opsName
 		result.OverallLevel = minInt(result.CodebaseLevel, opsLevel)
+		s.stampACMMIssueTracker(&result)
 		jsonResponse(w, result)
 		return
 	}
@@ -108,6 +122,7 @@ func (s *Server) handleACMMEvaluation(w http.ResponseWriter, r *http.Request) {
 		result.OperationalLevel = opsLevel
 		result.OperationalName = opsName
 		result.OverallLevel = minInt(result.CodebaseLevel, opsLevel)
+		s.stampACMMIssueTracker(&result)
 		jsonResponse(w, result)
 		return
 	}
@@ -120,10 +135,26 @@ func (s *Server) handleACMMEvaluation(w http.ResponseWriter, r *http.Request) {
 	s.acmmEvalCache = &eval
 	s.acmmEvalCachedAt = time.Now()
 
+	s.stampACMMIssueTracker(&eval)
 	jsonResponse(w, eval)
 }
 
-// handleACMMCreateIssue creates a GitHub issue for a failed ACMM criterion.
+// stampACMMIssueTracker fills the tracker fields from live config. It runs
+// on every response, cached or not, so a config edit shows up in the UI
+// without waiting for the hour-long evaluation cache to expire.
+func (s *Server) stampACMMIssueTracker(eval *ACMMEvaluation) {
+	eval.IssueTracker = acmmIssueDestinationGitHub
+	if s.deps == nil || s.deps.Config == nil {
+		return
+	}
+	eval.WorkSourceType = s.deps.Config.Governor.WorkSource.Type
+	eval.IssueTracker = s.acmmIssueDestination(s.deps.Config.Governor.ACMM.EffectiveIssueTracker())
+}
+
+// handleACMMCreateIssue files an issue for a failed ACMM criterion — on
+// GitHub (the default) or, when governor.acmm.issue_tracker is work_source
+// and the backlog is Linear, on the Linear team mapped to the repo. The
+// request's `tracker` field overrides the config for one click.
 func (s *Server) handleACMMCreateIssue(w http.ResponseWriter, r *http.Request) {
 	if !requireOwnerRole(w, r) {
 		return
@@ -156,9 +187,35 @@ func (s *Server) handleACMMCreateIssue(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "config not loaded", http.StatusInternalServerError)
 		return
 	}
+	// Per-click override beats the configured default; an unknown value is
+	// the caller's mistake, not a reason to fall back to GitHub.
+	tracker, err := s.deps.Config.Governor.ACMM.ResolveACMMIssueTracker(req.Tracker)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	owner := s.deps.Config.Project.Org
 	if owner == "" {
 		http.Error(w, "org not configured", http.StatusInternalServerError)
+		return
+	}
+
+	title, body := acmmIssueContent(criterion)
+
+	// Invocation-attribution trail: this issue is created by the hive on an
+	// operator's dashboard action — stamp the (config-gated) visible trailer
+	// and, after creation, record the (unconditional) audit entry: the same
+	// two layers the PR-request watcher applies (see pkg/github/attribution.go).
+	meta := github.InvocationMeta{Agent: github.AttributionAgentDashboard}
+	if s.deps.Config.Governor.AttributionTrailerEnabled() {
+		body = github.AppendTrailer(body, meta)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), acmmEvalTimeout)
+	defer cancel()
+
+	if s.acmmIssueDestination(tracker) == acmmIssueDestinationLinear {
+		s.createACMMLinearIssue(ctx, w, r, req.Repo, title, body, meta)
 		return
 	}
 
@@ -172,9 +229,6 @@ func (s *Server) handleACMMCreateIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), acmmEvalTimeout)
-	defer cancel()
-
 	_, _, labelErr := ghClient.Issues.CreateLabel(ctx, owner, req.Repo, &gh.Label{
 		Name:        gh.Ptr(acmmIssueLabelName),
 		Description: gh.Ptr(acmmIssueLabelDesc),
@@ -182,19 +236,136 @@ func (s *Server) handleACMMCreateIssue(w http.ResponseWriter, r *http.Request) {
 	})
 	labelExists := labelErr == nil || strings.Contains(labelErr.Error(), "already_exists")
 
+	issueReq := &gh.IssueRequest{
+		Title: gh.Ptr(title),
+		Body:  gh.Ptr(body),
+	}
+	if labelExists {
+		issueReq.Labels = &[]string{acmmIssueLabelName, "ai-fix-requested"}
+	}
+
+	issue, _, err := ghClient.Issues.Create(ctx, owner, req.Repo, issueReq)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to create issue: %v", err), http.StatusInternalServerError)
+		return
+	}
+	// Unconditional audit entry — written even with the trailer toggled off.
+	s.auditFromRequest(r, github.AuditActionHiveIssueCreated,
+		meta.AuditDetail(
+			"repo", owner+"/"+req.Repo,
+			"number", strconv.Itoa(issue.GetNumber()),
+			"url", issue.GetHTMLURL(),
+			"tracker", acmmIssueDestinationGitHub,
+			"flow", "acmm-eval"), "")
+
+	jsonResponse(w, map[string]interface{}{
+		"tracker":      acmmIssueDestinationGitHub,
+		"issue_number": issue.GetNumber(),
+		"issue_url":    issue.GetHTMLURL(),
+	})
+}
+
+// Where an ACMM gap issue actually lands, after resolving
+// config.ACMMIssueTrackerWorkSource against the hive's work source. These
+// are the values of the `tracker` field in the /api/acmm/issue response and
+// of ACMMEvaluation.IssueTracker.
+const (
+	acmmIssueDestinationGitHub = "github"
+	acmmIssueDestinationLinear = "linear"
+)
+
+// acmmIssueDestination maps a resolved tracker choice to a destination.
+// work_source resolves to Linear only when the backlog is Linear; every
+// other work source (GitHub Issues, GitHub Projects, Jira — which has no
+// write path — or unset) files on GitHub exactly as before.
+func (s *Server) acmmIssueDestination(tracker string) string {
+	if tracker == config.ACMMIssueTrackerWorkSource && s.deps != nil && s.deps.Config != nil &&
+		s.deps.Config.Governor.WorkSource.Type == "linear" {
+		return acmmIssueDestinationLinear
+	}
+	return acmmIssueDestinationGitHub
+}
+
+// acmmLinearSource builds a Linear adapter from the hive's work_source
+// config for the issueCreate write. It is constructed per request — the
+// config can be edited live from the dashboard and the adapter is a thin
+// HTTP wrapper, so there is nothing worth caching.
+func (s *Server) acmmLinearSource() (*worksource.LinearSource, error) {
+	lc := s.deps.Config.Governor.WorkSource.Linear
+	if strings.TrimSpace(lc.APIKey) == "" {
+		return nil, fmt.Errorf("work_source.linear.api_key not configured")
+	}
+	if len(lc.Teams) == 0 {
+		return nil, fmt.Errorf("work_source.linear.teams is empty")
+	}
+	teams := make([]worksource.LinearTeamConfig, len(lc.Teams))
+	for i, t := range lc.Teams {
+		teams[i] = worksource.LinearTeamConfig{Key: t.Key, Repo: t.Repo}
+	}
+	return worksource.NewLinearSource(worksource.LinearConfig{
+		APIKey:  lc.APIKey,
+		Teams:   teams,
+		BaseURL: s.acmmLinearBaseURL,
+		Logger:  s.logger,
+	}, nil), nil
+}
+
+// createACMMLinearIssue files the gap issue on the Linear team mapped to
+// repo (see LinearSource.TeamForRepo) and writes the same audit entry the
+// GitHub path does, with tracker=linear so the trail says where it went.
+func (s *Server) createACMMLinearIssue(ctx context.Context, w http.ResponseWriter, r *http.Request, repo, title, body string, meta github.InvocationMeta) {
+	src, err := s.acmmLinearSource()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Linear issue tracker not available: %v", err), http.StatusInternalServerError)
+		return
+	}
+	team, ok := src.TeamForRepo(repo)
+	if !ok {
+		http.Error(w, "Linear issue tracker not available: no teams configured", http.StatusInternalServerError)
+		return
+	}
+	issue, err := src.CreateIssue(ctx, team.Key, title, body)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to create issue: %v", err), http.StatusInternalServerError)
+		return
+	}
+	s.auditFromRequest(r, github.AuditActionHiveIssueCreated,
+		meta.AuditDetail(
+			"repo", s.deps.Config.Project.Org+"/"+repo,
+			"number", strconv.Itoa(issue.Number),
+			"identifier", issue.Identifier,
+			"url", issue.URL,
+			"tracker", acmmIssueDestinationLinear,
+			"team", team.Key,
+			"flow", "acmm-eval"), "")
+
+	jsonResponse(w, map[string]interface{}{
+		"tracker":      acmmIssueDestinationLinear,
+		"issue_number": issue.Number,
+		"identifier":   issue.Identifier,
+		"issue_url":    issue.URL,
+		"team":         team.Key,
+	})
+}
+
+// acmmIssueContent renders the title and Markdown body of a gap issue for
+// criterion. It is tracker-agnostic: GitHub and Linear receive byte-identical
+// text (before the attribution trailer), so an operator switching trackers
+// sees the same issue either way.
+func acmmIssueContent(criterion *ACMMCriterion) (title, body string) {
 	levelName := acmmLevelNames[criterion.Level]
 	if levelName == "" {
 		levelName = "Unknown"
 	}
 
-	title := fmt.Sprintf("[ACMM L%d] Add %s", criterion.Level, criterion.Name)
+	title = fmt.Sprintf("[ACMM L%d] Add %s", criterion.Level, criterion.Name)
 
 	var patternsStr strings.Builder
 	for _, p := range criterion.Patterns {
 		patternsStr.WriteString(fmt.Sprintf("- `%s`\n", p))
 	}
 
-	body := fmt.Sprintf("## ACMM Gap: %s\n\n"+
+	body = fmt.Sprintf("## ACMM Gap: %s\n\n"+
 		"**Level:** L%d %s\n"+
 		"**Category:** %s\n"+
 		"**Criterion ID:** `%s`\n\n"+
@@ -218,41 +389,7 @@ func (s *Server) handleACMMCreateIssue(w http.ResponseWriter, r *http.Request) {
 		criterion.Level, levelName,
 		acmmCriterionWhyItMatters(criterion.Level, criterion.Category),
 	)
-
-	// Invocation-attribution trail: this issue is created by the hive on an
-	// operator's dashboard action — stamp the (config-gated) visible trailer
-	// and, after creation, record the (unconditional) audit entry: the same
-	// two layers the PR-request watcher applies (see pkg/github/attribution.go).
-	meta := github.InvocationMeta{Agent: github.AttributionAgentDashboard}
-	if s.deps.Config.Governor.AttributionTrailerEnabled() {
-		body = github.AppendTrailer(body, meta)
-	}
-
-	issueReq := &gh.IssueRequest{
-		Title: gh.Ptr(title),
-		Body:  gh.Ptr(body),
-	}
-	if labelExists {
-		issueReq.Labels = &[]string{acmmIssueLabelName, "ai-fix-requested"}
-	}
-
-	issue, _, err := ghClient.Issues.Create(ctx, owner, req.Repo, issueReq)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("failed to create issue: %v", err), http.StatusInternalServerError)
-		return
-	}
-	// Unconditional audit entry — written even with the trailer toggled off.
-	s.auditFromRequest(r, github.AuditActionHiveIssueCreated,
-		meta.AuditDetail(
-			"repo", owner+"/"+req.Repo,
-			"number", strconv.Itoa(issue.GetNumber()),
-			"url", issue.GetHTMLURL(),
-			"flow", "acmm-eval"), "")
-
-	jsonResponse(w, map[string]interface{}{
-		"issue_number": issue.GetNumber(),
-		"issue_url":    issue.GetHTMLURL(),
-	})
+	return title, body
 }
 
 func acmmCriterionWhyItMatters(level int, category string) string {

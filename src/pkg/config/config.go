@@ -1295,6 +1295,11 @@ type GovernorConfig struct {
 	// all existing hives.
 	WorkSource WorkSourceConfig `yaml:"work_source,omitempty" json:"work_source,omitempty"`
 
+	// ACMM tunes the dashboard's ACMM evaluation surface — today only where
+	// the "Open Issue" buttons file gap issues (GitHub, or the work source).
+	// Zero value = GitHub, the historical behavior. See ACMMConfig.
+	ACMM ACMMConfig `yaml:"acmm,omitempty" json:"acmm,omitempty"`
+
 	// Rotation configures automatic provider failover when a provider's
 	// subscription or credit is exhausted. See RFC #3958.
 	Rotation RotationConfig `yaml:"rotation,omitempty" json:"rotation,omitempty"`
@@ -4926,6 +4931,9 @@ func (c *Config) validate() error {
 	// dashboard would see explanation stay off with nothing saying why.
 	if !ValidateExplainMode(strings.TrimSpace(c.Governor.ExplainMode)) {
 		return fmt.Errorf("governor: invalid explain_mode %q (must be off, brief, or full, or empty to inherit %s)", c.Governor.ExplainMode, ExplainModeEnvVar)
+	}
+	if !ValidateACMMIssueTracker(strings.TrimSpace(c.Governor.ACMM.IssueTracker)) {
+		return fmt.Errorf("governor: invalid acmm.issue_tracker %q (must be %s or %s, or empty for %s)", c.Governor.ACMM.IssueTracker, ACMMIssueTrackerGitHub, ACMMIssueTrackerWorkSource, ACMMIssueTrackerGitHub)
 	}
 	for name, agent := range c.Agents {
 		// One gate, shared with the config write path (dashboard agent-config
