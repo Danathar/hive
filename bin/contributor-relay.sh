@@ -1234,6 +1234,8 @@ let pendingTask = null;
 // Used so the eventual recovery re-advertises availability to the hub, which
 // we deliberately withheld at failure time (see armCLIReadyWait).
 let cliReadyFailed = false;
+// Set only by an interactive revoke. The next ready is delayed until a fresh CLI is confirmed.
+let readyAfterInteractiveRevoke = false;
 
 if (CONTRIBUTOR_MODE === MODE_HEADLESS) {
   // Headless mode has no tmux pane to scrape for readiness. Each task spawns
@@ -1272,9 +1274,14 @@ if (CONTRIBUTOR_MODE === MODE_HEADLESS) {
 // churn one task per timeout window forever.
 function armCLIReadyWait() {
   const hadFailed = cliReadyFailed;
+  const becameReadyAfterRevoke = readyAfterInteractiveRevoke;
   waitForCLI().then(() => {
     cliReady = true;
     cliReadyFailed = false;
+    if (becameReadyAfterRevoke) {
+      readyAfterInteractiveRevoke = false;
+      send({ type: 'ready', seq: nextSeq() });
+    }
     // Only re-advertise if we previously withdrew by failing a task; the normal
     // startup path is already advertised by the auth_ok handler.
     if (hadFailed) send({ type: 'ready', seq: nextSeq() });
@@ -2422,6 +2429,10 @@ function handleMessage(data, hub) {
         break;
       }
       console.log(`Task revoked: ${msg.task_id} — ${msg.reason}`);
+      // A task-issued GitHub token is stored only in this relay cache. Remove it
+      // before interrupting the CLI so a surviving turn cannot keep using it.
+      try { fs.unlinkSync(GH_TOKEN_CACHE); } catch (_) {}
+      tokenExpiresAt = null;
       currentTask = null;
       taskAssignedAt = 0;
       if (progressInterval) { clearInterval(progressInterval); progressInterval = null; }
@@ -2433,9 +2444,24 @@ function handleMessage(data, hub) {
         headlessChild = null;
         writeHeadlessStatus(HEADLESS_STATE_WAITING);
       }
+      if (CONTRIBUTOR_MODE !== MODE_HEADLESS) {
+        // Bind interruption to this relay's configured pane only. Two Ctrl-C
+        // events are required because one cancels a Claude/Codex/Pi turn but
+        // leaves the CLI alive; relaunchCLI gates ready on a clean prompt.
+        readyAfterInteractiveRevoke = true;
+        cliReady = false;
+        quitLiveCLI();
+        try {
+          console.log(`Relaunching ${BACKEND} after task revoke: ${relaunchCLI()}`);
+        } catch (e) {
+          readyAfterInteractiveRevoke = false;
+          cliReadyFailed = true;
+          console.error(`Failed to stop and relaunch ${BACKEND} after revoke: ${e.message}`);
+        }
+      }
       // Stay with the hub that just revoked — it's clearly alive and reachable.
       activeHubIndex = hubs.indexOf(hub);
-      sendTo(hub, { type: 'ready', seq: nextSeq() });
+      if (CONTRIBUTOR_MODE === MODE_HEADLESS) sendTo(hub, { type: 'ready', seq: nextSeq() });
       break;
 
     case 'task_unavailable':

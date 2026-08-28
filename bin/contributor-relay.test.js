@@ -1593,7 +1593,7 @@ test('hub notice messages are logged for operators', () => {
   }
 });
 
-test('token_refresh, task_revoke, and blocked progress only affect the hub that owns the active task', () => {
+test('token_refresh, task_revoke, and blocked progress only affect the hub that owns the active task', async () => {
   const blockedPane = 'Should I open a pull request for this change?\n> \n';
   const relay = loadRelay({ backend: 'goose', cliStates: [blockedPane, blockedPane], env: MULTI_HUB_ENV });
   try {
@@ -1618,6 +1618,11 @@ test('token_refresh, task_revoke, and blocked progress only affect the hub that 
     assert.strictEqual(fs.readFileSync(tokenPath, 'utf8'), 'hub-a-token');
 
     relay.handleMessage(JSON.stringify({ type: 'task_revoke', task_id: 't1', reason: 'owner revoke' }), hubs[0]);
+    await Promise.resolve();
+    await Promise.resolve();
+    const revokeInterrupts = relay.__tmuxSends().filter(c => /C-c\s*$/.test(c));
+    assert.ok(revokeInterrupts.length >= 2, 'interactive revoke must double-interrupt the configured tmux pane before ready');
+    assert.strictEqual(fs.existsSync(tokenPath), false, 'revoking a task must clear its task-scoped GitHub token cache');
     assert.strictEqual(relay.getCurrentTask(), null);
     assert.ok(sentA.some(m => m.type === 'ready'), 'owning hub is asked for work after its revoke');
     assert.strictEqual(sentB.filter(m => m.type === 'ready').length, 0);
@@ -2406,7 +2411,7 @@ test('an idle non-active hub cannot assign work until the poll slot reaches it',
   } finally { teardown(relay); }
 });
 
-test('token_refresh and task_revoke only affect the hub that owns the active task', () => {
+test('token_refresh and task_revoke only affect the hub that owns the active task', async () =>{
   const relay = loadRelay({ env: {
     HIVE_HUB: 'wss://hub-a.example/contribute,wss://hub-b.example/contribute',
     HIVE_REGISTRATION_TOKEN: 'tok-a,tok-b',
@@ -2430,6 +2435,11 @@ test('token_refresh and task_revoke only affect the hub that owns the active tas
     assert.strictEqual(fs.readFileSync(tokenPath, 'utf8'), 'hub-a-token');
 
     relay.handleMessage(JSON.stringify({ type: 'task_revoke', task_id: 't1', reason: 'owner revoke' }), hubs[0]);
+    await Promise.resolve();
+    await Promise.resolve();
+    const revokeInterrupts = relay.__tmuxSends().filter(c => /C-c\s*$/.test(c));
+    assert.ok(revokeInterrupts.length >= 2, 'interactive revoke must double-interrupt the configured tmux pane before ready');
+    assert.strictEqual(fs.existsSync(tokenPath), false, 'revoking a task must clear its task-scoped GitHub token cache');
     assert.strictEqual(relay.getCurrentTask(), null);
     assert.ok(sentA.some(m => m.type === 'ready'), 'owning hub is asked for work after its revoke');
     assert.strictEqual(sentB.filter(m => m.type === 'ready').length, 0);
