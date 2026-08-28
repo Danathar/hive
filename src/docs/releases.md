@@ -218,27 +218,17 @@ request touching `src/go.mod`, `src/go.sum`, or the generator script itself
 a version bump), and fails the build if the committed file differs from a
 fresh run. A generated file that can silently go stale is worse than no file
 at all — it would make a false completeness claim the moment a dependency
-changed. There is deliberately no special-case in that job to tolerate an
-out-of-date `NOTICE` indefinitely: the first time it runs against a real Go
-toolchain it will very likely find the committed placeholder (see below)
-stale, and that is the correct, actionable failure — the fix is the same one
-line either way, "run the script, commit the result."
+changed. There is deliberately no special-case to tolerate an out-of-date
+`NOTICE`: the fix is always "run the script, commit the result."
 
-**Current state of the committed file, stated plainly.** The `NOTICE` file
-introduced alongside this section was assembled in an environment that could
-not run `go` tooling at all, so it could not produce the real, resolved
-module graph. It is derived **statically from `src/go.mod`'s require
-blocks only** (not `go.sum`, not the full transitive graph, not verified
-license text), and every entry's license field reads `UNVERIFIED` rather than
-guessing — an attribution file with a wrong license identifier is a false
-legal claim and is worse than an admitted gap. The very next CI run of
-`notice-drift` after this merges is expected to fail once, showing a full
-diff against the real, `go-licenses`-generated content; a maintainer applies
-that regenerated output (or re-runs `generate-notice.sh` locally with `go`
-installed) and commits it, after which `NOTICE` is the authoritative,
-license-text-included file and `notice-drift` keeps it that way going
-forward. This is not a hidden gap: `NOTICE`'s own header states the same
-thing in the file itself.
+**Current state of the committed file.** `NOTICE` is the authoritative,
+`go-licenses`-generated output from the resolved module graph. The generator
+uses `go-licenses report` rather than `save`: `save` refuses to emit anything
+when the graph contains a license class the tool considers incompatible,
+while an attribution inventory must identify every dependency, including a
+restrictively licensed one. Inclusion in `NOTICE` records what ships; it is
+not an approval or compatibility decision. License-acceptance policy belongs
+in a separate gate so it cannot make this inventory incomplete.
 
 **What `NOTICE` does NOT cover.** Go module dependencies only. It does not
 cover:
