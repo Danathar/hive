@@ -506,7 +506,11 @@ RELAY_PID=$!
 
 # Launch the CLI in the tmux session
 CMD=$(backend_binary "$AGENT_BACKEND")
-PERM_FLAG=$(backend_perm_flag "$AGENT_BACKEND")
+# _shell variant: PERM_FLAG's only use here is interpolation into the tmux
+# send-keys shell line below, and the claude deny list (#4938) contains (),*
+# — raw, bash dies at the first paren before the CLI starts. The raw
+# backend_perm_flag stays for argv consumers; see backends.conf.
+PERM_FLAG=$(backend_perm_flag_shell "$AGENT_BACKEND")
 MODEL_FLAG=""
 if [[ -n "${AGENT_MODEL:-}" ]]; then
   case "$AGENT_BACKEND" in

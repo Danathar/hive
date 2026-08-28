@@ -568,4 +568,36 @@ case "$claude_bypass_output" in
     ;;
 esac
 
+# THE SHELL-LINE CONTRACT. Not every consumer word-splits into argv: the
+# Justfile's contribute-hive local mode, this script's own interactive tmux
+# launch, and supervisor.sh's generated launcher all paste the flag string
+# into text a shell re-PARSES. There the raw deny list's (),* are shell
+# syntax, and the launch died at the first paren before the CLI ever started:
+#   -bash: syntax error near unexpected token `('
+# backend_perm_flag_shell is the spelling for those consumers. Three pins:
+# it must parse as shell source, it must reduce to the SAME argv as the raw
+# word-split contract above, and the raw spelling must NOT parse — if it
+# ever does, the two variants have converged and one should be deleted.
+source "${ROOT_DIR}/config/backends.conf"
+
+shell_perm_value="$(backend_perm_flag_shell claude)"
+if ! bash -n -c "true ${shell_perm_value}" 2>/dev/null; then
+  echo "backend_perm_flag_shell output must parse as shell source; got:" >&2
+  echo "  ${shell_perm_value}" >&2
+  exit 1
+fi
+
+mapfile -t shell_parsed < <(eval "printf '%s\n' ${shell_perm_value}")
+if [[ "${#shell_parsed[@]}" -ne 5 || "${shell_parsed[4]}" != "${claude_perm_args[4]}" ]]; then
+  echo "shell-quoted flags must reduce to the same argv as the raw word-split contract; got ${#shell_parsed[@]} words:" >&2
+  printf '  [%s]\n' "${shell_parsed[@]}" >&2
+  exit 1
+fi
+
+if bash -n -c "true ${claude_perm_value}" 2>/dev/null; then
+  echo "the RAW claude perm flags unexpectedly parse as shell source — the _shell variant is redundant; got:" >&2
+  echo "  ${claude_perm_value}" >&2
+  exit 1
+fi
+
 echo "contributor-agent codex + claude contract tests passed"
