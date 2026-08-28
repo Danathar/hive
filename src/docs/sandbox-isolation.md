@@ -11,11 +11,27 @@ Two halves of that target hold differently, and the difference matters:
 
 **#4918 is what that costs in practice, and it did not require a compromise.** An agent doing correct work on an assigned third-party repo ran that repo's own test suite; a latent defect in two of its tests let a hook escape its stubs and issue `rpm-ostree kargs --append-if-missing=...` against the operator's real deployment. Nothing was written, and the only reason is that the process happened to lack privilege. Benign behaviour was a sufficient precondition, so this is a routine exposure rather than an exceptional one.
 
-The claude-family launch path now carries host-state denials for exactly this class — privilege escalation (`sudo`, `pkexec`, `doas`, `su`) and the boot/deployment tools that reach polkit without needing escalation of their own (`rpm-ostree`, `bootc`, `ostree`, `grubby`, `bootctl`, `efibootmgr`), matching the workspace-write posture Codex has had since #3512. That is a floor, not a sandbox: it names commands rather than enforcing a boundary, and an agent still runs unconfined against everything not on the list. **Operators running hive on a machine they care about should enable the sandbox below.**
+The claude-family launch path now carries host-state denials for exactly this class — privilege escalation (`sudo`, `pkexec`, `doas`, `su`) and the boot/deployment tools that reach polkit without needing escalation of their own (`rpm-ostree`, `bootc`, `ostree`, `grubby`, `bootctl`, `efibootmgr`), matching the workspace-write posture Codex has had since #3512. That is a floor, not a sandbox: it names commands rather than enforcing a boundary, and an agent still runs unconfined against everything not on the list.
+
+## Which confinement is available depends on the path you are on
+
+This is the part that is easy to get wrong, because the two paths have different levers and only one of them has the Podman sandbox at all.
+
+| | Hub / pod agents (`pkg/agent`) | Contributor relay (`just contribute-hive`) |
+|---|---|---|
+| Runs where | The hive spoke's own container | The contributor's machine |
+| Podman agent sandbox (`agent_sandbox`) | Available, opt-in — see below | **Does not exist on this path.** `SandboxEnabled` is read only by `pkg/agent`; nothing in `bin/contributor-relay.sh`, `bin/contributor-agent.sh` or the `Justfile` consults it |
+| The confinement lever | `agent_sandbox` + the per-agent opt-in | **Container mode vs local mode** — `just contribute-hive` defaults to container; `... local` is the unconfined one |
+| Host-state denials (#4938) | Yes | Yes (`config/backends.conf`) |
+| Credentials / pushes | Constrained | Constrained |
+
+**The #4918 incident happened on the contributor relay's local mode**, so enabling `agent_sandbox` would not have prevented it. The remedy on that path is container mode, which `just contribute-hive` already uses by default and now warns about when it is not.
+
+Operators running hive on a machine they care about should therefore: use container mode on the contributor path, and enable the sandbox below on the hub path.
 
 ## Current wiring
 
-Sandbox execution is opt-in and the tmux path remains unchanged for all agents unless both gates are set:
+Sandbox execution is opt-in and the tmux path remains unchanged for all agents unless **both** gates are set — the global one and a per-agent one:
 
 ```yaml
 agent_sandbox:
@@ -30,6 +46,10 @@ agents:
     sandbox:
       enabled: true
 ```
+
+**Both gates are required, and the global one alone does nothing.** `agent_sandbox.enabled: true` with no per-agent `sandbox.enabled: true` sandboxes zero agents. That matters more than it reads, because the dashboard's Security tab writes *only* the global flag and is the only sandbox control the UI offers: an owner can turn "agent sandbox" on, be told the setting was updated, and have every agent keep running unconfined. Hive now logs a `agent sandbox posture` warning at boot and on every config reload when the sandbox is enabled globally but some or all agents are not opted in (`config.AgentSandboxGateWarnings`).
+
+The second gate is deliberate rather than an oversight, and it is not safe to simply collapse. A sandboxed agent runs a different execution model — no tmux CLI at all, and every kick is a Podman run against the primary repo — and `startSandboxKickLocked` has **no fallback to the tmux path**: an agent opted in without a resolvable image fails every kick outright rather than degrading. Making the global flag sufficient would therefore convert working agents into permanently failing ones on any hive that set it without an image. Changing that default is a fleet-affecting decision that wants measurement, not a code-reading; the warning above is the part that is safe today.
 
 For sandboxed agents, a kick now follows this path:
 
