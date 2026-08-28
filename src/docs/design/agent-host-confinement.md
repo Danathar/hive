@@ -1,9 +1,11 @@
-# Agent host confinement on the default (unconfined) launch path (#4918)
+# Agent host confinement on the default launch path (#4918)
 
-Status: **investigation — no decision taken.** Nothing here is implemented and
-nothing here is a commitment to implement. This page maps what #4918 reported,
-what #4938 already closed, what it deliberately left open, and the options for
-closing the rest — with costs — so the next decision is made on evidence.
+Status: **historical investigation; contributor-local Claude confinement is now
+implemented.** This page records the evidence and options as assessed before
+Claude Code's native sandbox was wired into `contribute-hive ... local`.
+Claude/LiteLLM local launches now use that OS-enforced sandbox with hard-fail
+startup and no unsandboxed retry; Codex retains `workspace-write`. The hub-side
+Podman default and local backends without a native sandbox remain open concerns.
 
 All citations are against `origin/v4` at `1b54c69e` unless noted.
 

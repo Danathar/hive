@@ -75,6 +75,8 @@ Important environment variables:
 | `CONTRIBUTOR_MODE` | `interactive` | `interactive` keeps a tmux/TTY session. `headless` is for one-shot/no-TTY task delivery. |
 | `HIVE_AGENT_SESSION` | `contributor` | tmux session name for interactive mode. |
 | `HIVE_CODEX_APPROVALS_REVIEWER` | `auto_review` | Codex reviewer for boundary requests. The default prevents Hive-delivered work from waiting on an interactive operator while retaining `workspace-write`; set `user` only for an intentionally attended contributor. Set it to the **empty string** to omit the `-c approvals_reviewer=` key entirely — the escape hatch if a Codex release rejects that config key at startup. Doing so keeps the sandbox posture; it is not the same as the dangerous bypass. |
+| `HIVE_CLAUDE_DANGEROUSLY_ALLOW_HOST_STATE` | unset | Drops the defense-in-depth Claude command denylist. In local mode the native filesystem sandbox still applies, so this does not grant host writes. |
+| `HIVE_CLAUDE_DANGEROUSLY_BYPASS_APPROVALS_AND_SANDBOX` | unset | Restores the pre-#4918 unconfined Claude/LiteLLM local posture. Use only on a disposable or externally sandboxed host. |
 
 ### Where each backend reads its instructions
 
@@ -113,25 +115,30 @@ this, omits `--add-dir`, and warns on stderr rather than corrupting the argv;
 the sandbox posture still applies, but the workspace is not granted. Move the
 workspace to a path without spaces.
 
-Claude-family host-state denials: `claude` and `litellm` run permissions-bypassed
-on the contributor's own machine, so hive denies privilege escalation
-(`sudo`, `pkexec`, `doas`, `su`) and host boot/deployment tools (`rpm-ostree`,
-`bootc`, `ostree`, `grubby`, `bootctl`, `efibootmgr`) on that path — an agent
-running an assigned repo's test suite reached a contributor's bootloader
-otherwise (#4918). Repo work is unaffected. `HIVE_CLAUDE_DANGEROUSLY_ALLOW_HOST_STATE=1`
-restores the old posture and is the claude analogue of the Codex bypass below;
-prefer leaving it unset.
+Claude-family local confinement: `claude` and `litellm` use Claude Code's
+native OS sandbox in host mode. Hive enables it through command-line settings,
+requires startup to fail when the sandbox is unavailable, disables unsandboxed
+command retry, and runs in `dontAsk` mode so a request outside the declared
+roots is denied instead of hanging an unattended pane. Bash subprocesses and
+file edits may write only to `HIVE_AGENT_CWD` and `HIVE_WORKSPACE_DIR`.
+Network domains are unrestricted because assigned third-party repositories
+must be able to fetch arbitrary test/build dependencies; this is write
+confinement, not a claim that the process can read or exfiltrate nothing.
 
-Container mode vs local mode is the confinement choice on this path. Those
-denials are a floor, not a boundary: they name commands, and an agent still runs
-unconfined against everything not on the list. `just contribute-hive` defaults to
-**container** mode, which puts the agent behind a container boundary;
-`just contribute-hive <backend> local` runs it as your own user on your own
-machine with permission gating bypassed and nothing scoping its filesystem access
-to the workspace. Local mode now says so at launch. Note that the `agent_sandbox`
-Podman path documented in [sandbox-isolation.md](sandbox-isolation.md) is
-**hub-side only** — nothing on the contributor path reads it — so container mode
-is the remedy here, not that setting.
+On Linux/WSL2 the native sandbox requires `bubblewrap` and `socat`; macOS uses
+Seatbelt. Missing dependencies are a hard launch failure, never a silent
+fallback. The existing privilege-escalation and boot/deployment command
+denials remain as defense in depth. `HIVE_CLAUDE_DANGEROUSLY_ALLOW_HOST_STATE=1`
+drops only that command list; it does not cross the OS boundary. The distinct,
+loudly named `HIVE_CLAUDE_DANGEROUSLY_BYPASS_APPROVALS_AND_SANDBOX=1` restores
+the old unconfined local posture for an externally isolated/disposable host.
+
+`just contribute-hive` still defaults to **container** mode, the stronger
+backend-independent boundary. In local mode Claude/LiteLLM now use the native
+sandbox and Codex retains `workspace-write`; other backends remain unconfined
+and the launch banner says so. The `agent_sandbox` Podman path documented in
+[sandbox-isolation.md](sandbox-isolation.md) remains **hub-side only** — nothing
+on the contributor path reads it.
 
 Codex config-key compatibility: `approvals_reviewer` is passed with `-c`, so it
 depends on the installed Codex release accepting that key. If a version rejects

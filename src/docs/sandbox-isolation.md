@@ -7,11 +7,11 @@ Hive agents are untrusted code executors: prompts, tool output, and cloned repos
 Two halves of that target hold differently, and the difference matters:
 
 - **Credentials and pushes are constrained on every path.** No agent receives a GitHub token or pushes directly; authorship goes through the App-gated `gh` wrapper and the push broker.
-- **Workspace confinement holds only on the sandbox path below.** "It can only modify its mounted workspace" is a property of the Podman sandbox, not of hive generally. On the default tmux path there is no container: the backend CLI runs as the operator's own user, on the operator's own host, with nothing scoping its filesystem access to the workspace.
+- **Workspace write confinement depends on the launch path and backend.** The Podman sandbox below is the hub-side boundary. Contributor container mode has its own container boundary. In contributor local mode, Claude/LiteLLM now require Claude Code's native OS sandbox and Codex retains its `workspace-write` sandbox; other backends still run as the operator's user without a filesystem boundary.
 
 **#4918 is what that costs in practice, and it did not require a compromise.** An agent doing correct work on an assigned third-party repo ran that repo's own test suite; a latent defect in two of its tests let a hook escape its stubs and issue `rpm-ostree kargs --append-if-missing=...` against the operator's real deployment. Nothing was written, and the only reason is that the process happened to lack privilege. Benign behaviour was a sufficient precondition, so this is a routine exposure rather than an exceptional one.
 
-The claude-family launch path now carries host-state denials for exactly this class — privilege escalation (`sudo`, `pkexec`, `doas`, `su`) and the boot/deployment tools that reach polkit without needing escalation of their own (`rpm-ostree`, `bootc`, `ostree`, `grubby`, `bootctl`, `efibootmgr`), matching the workspace-write posture Codex has had since #3512. That is a floor, not a sandbox: it names commands rather than enforcing a boundary, and an agent still runs unconfined against everything not on the list.
+The claude-family launch path carries host-state denials for exactly this class — privilege escalation (`sudo`, `pkexec`, `doas`, `su`) and the boot/deployment tools that reach polkit without needing escalation of their own (`rpm-ostree`, `bootc`, `ostree`, `grubby`, `bootctl`, `efibootmgr`). Those denials remain only a command-list floor. On the contributor local path, Claude Code's native sandbox is now the OS-enforced write boundary around them.
 
 ## Which confinement is available depends on the path you are on
 
@@ -21,13 +21,13 @@ This is the part that is easy to get wrong, because the two paths have different
 |---|---|---|
 | Runs where | The hive spoke's own container | The contributor's machine |
 | Podman agent sandbox (`agent_sandbox`) | Available, opt-in — see below | **Does not exist on this path.** `SandboxEnabled` is read only by `pkg/agent`; nothing in `bin/contributor-relay.sh`, `bin/contributor-agent.sh` or the `Justfile` consults it |
-| The confinement lever | `agent_sandbox` + the per-agent opt-in | **Container mode vs local mode** — `just contribute-hive` defaults to container; `... local` is the unconfined one |
+| The confinement lever | `agent_sandbox` + the per-agent opt-in | Container mode (the default), or a backend-native sandbox in local mode. Claude/LiteLLM and Codex are write-confined locally; other backends are not |
 | Host-state denials (#4938) | Yes | Yes (`config/backends.conf`) |
 | Credentials / pushes | Constrained | Constrained |
 
-**The #4918 incident happened on the contributor relay's local mode**, so enabling `agent_sandbox` would not have prevented it. The remedy on that path is container mode, which `just contribute-hive` already uses by default and now warns about when it is not.
+**The #4918 incident happened on the contributor relay's local mode**, so enabling `agent_sandbox` would not have prevented it. Claude-family local launches now use Claude Code's native sandbox with hard-fail startup and unsandboxed retry disabled. Container mode remains the stronger backend-independent remedy and the `just contribute-hive` default.
 
-Operators running hive on a machine they care about should therefore: use container mode on the contributor path, and enable the sandbox below on the hub path.
+Operators running hive on a machine they care about should therefore prefer container mode on the contributor path, use only a locally sandboxed backend when local mode is necessary, and enable the sandbox below on the hub path.
 
 ## Current wiring
 
