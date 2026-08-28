@@ -11,6 +11,7 @@ Start with [Architecture](architecture.md) for the system overview, then use the
 - [`CAP_NET_ADMIN` and self-hosted spokes](https://github.com/kubestellar/hive/blob/v4/src/docs/net-admin-requirement.md) — the container runs with or without `NET_ADMIN`; granting it (`--cap-add NET_ADMIN` / `securityContext.capabilities.add`) enables the full forced-proxy-egress gate, and what the degraded best-effort mode means without it.
 - [Config layering](https://github.com/kubestellar/hive/blob/v4/src/docs/config-layering.md) — how ConfigMap seed, PVC dashboard overlay, and runtime config interact.
 - [Operator reference](https://github.com/kubestellar/hive/blob/v4/src/docs/operator-reference.md) — top-level config blocks, hive flags/env, GitHub token scopes, and image provenance.
+- [Token mint](token-mint.md) — the opt-in `mint:` block (`pkg/mint`): what a minted token grants, key lifecycle, and the trust boundary an operator must get right before enabling it. Companion to [ADR-0007](https://github.com/kubestellar/hive/blob/v4/src/docs/adr/0007-token-mint.md).
 - [Changelog](https://github.com/kubestellar/hive/blob/v4/CHANGELOG.md) — recent user-visible changes and release notes.
 - [Release channels](release-channels.md) — `stable`/`candidate`/`edge` moving image tags, switching a hive to a channel, and the `stable (v4)` version pill.
 - [Tagged releases](releases.md) — the automated `v1.2.3` release path: what triggers a release, how the version is inferred from `CHANGELOG.md`, the commit convention that drives it, the human escape hatch, how it relates to the moving release channels above, and the per-release SPDX SBOM attached to each GitHub Release (and why it is a release artifact, not an in-image attestation — see #3760).
@@ -22,6 +23,8 @@ Start with [Architecture](architecture.md) for the system overview, then use the
 - [v2 → v4 migration](migration-v2-v4.md) — upgrading a v2 deployment: the config is compatible unmodified, and what actually changes is the image tag, the published `7681` port, and the Compose/Kubernetes security settings.
 - [Dashboard route and health checks](https://github.com/kubestellar/hive/blob/v4/src/docs/health-checks.md) — `dashboard-route-rbac.yaml`, `route_exists`, listener probes, and alert behavior.
 - [Agent self-healing watchdog](agent-watchdog.md) — liveness and readiness reconciliation for launched agents: liveness classification, restart backoff, crash-loop escalation, the auth probe that refuses to restart into dead credentials, and the `conditions` array on `/api/agents`. Ships in `mode: observe`, which audits the restarts it would have made without making them.
+- [Audit log format](audit-log.md) — the JSONL schema of `/data/audit.jsonl`: the five fields, how to parse the flat `detail` string (and why `repo` is not first-class), the pseudo-users, and why size-triggered rotation means the effective lookback varies per hive rather than being 90 days.
+- [`hive-open-pr`](hive-open-pr.md) — how agents open pull requests as the App bot instead of via `gh pr create`: the flags, the UID-ownership anchor that makes the request forge-resistant, and the asynchronous contract (exit `0` means requested, not opened).
 - [Network and port requirements](https://github.com/kubestellar/hive/blob/v4/src/docs/network-requirements.md) — inbound ports, proxy paths, egress, and firewall guidance.
 - [TLS, HTTPS, and certificates](https://github.com/kubestellar/hive/blob/v4/src/docs/tls-setup.md) — termination patterns and certificate ownership.
 - [Security notes](https://github.com/kubestellar/hive/blob/v4/src/docs/security.md) — log scrubbing and secret redaction guarantees/limits.
@@ -50,22 +53,26 @@ Start with [Architecture](architecture.md) for the system overview, then use the
 
 ## Configuration and agents
 
-- [Agent configuration](agent-configuration.md) — agent fields, methods, models, pins, cadences, caveman mode, and ACMM packs.
+- [Agent configuration](agent-configuration.md) — agent fields, methods, models, pins, cadences, caveman mode, ACMM packs, and live-linked `definition_source` (with its seed-only trust model).
 - [Advisory digest](advisory.md) — what the digest shows (`max_findings`, `show_all`) and how findings are retired (staleness auto-close, PR-linked auto-close).
 - [Advisory digest staleness](advisory-staleness.md) — when the hub raises the stale-advisory pill and alert, the gates that deliberately suppress it (undelivered App, App cannot write, all agents quiet), and the admin diagnostics that measure hidden staleness.
 - [Governor mode thresholds](https://github.com/kubestellar/hive/blob/v4/src/docs/governor-thresholds.md) — how idle/quiet/busy/surge thresholds scale with repo count, the `threshold_scaling` curves, and when explicit thresholds win.
 - [Supervisor agent](https://github.com/kubestellar/hive/blob/v4/src/docs/supervisor.md) — supervisor policy modes, bead roles, and when to enable the orchestration lane.
 - [Custom dashboard stylesheets](https://github.com/kubestellar/hive/blob/v4/src/docs/custom-stylesheets.md) — operator-supplied CSS for the dashboard and public snapshot.
 - [Portable AgentDefinition format](https://github.com/kubestellar/hive/blob/v4/src/AGENT-DEFINITION.md) — standalone YAML schema for importing/exporting agent definitions.
-- [Knowledge curator](https://github.com/kubestellar/hive/blob/v4/src/docs/knowledge-curator.md) — automatic fact extraction and promotion knobs.
+- [Knowledge curator](https://github.com/kubestellar/hive/blob/v4/src/docs/knowledge-curator.md) — automatic fact extraction and promotion knobs, plus `knowledge.git_sources`: indexing a remote repo, layer semantics, private-repo auth (unsupported), and diagnosing a failed source.
+- [Skill registry](skills.md) — the `/data/skills/` file format and front-matter fields. **Loaded and counted on the dashboard, but not yet delivered to agents**: populating it changes no agent's behaviour today. Use the knowledge curator for knowledge that actually reaches agents.
+- [AGENTS.md repo instructions](agents-md.md) — the per-repo `AGENTS.md` file format Hive's parser (`pkg/agentsmd`) understands, including front-matter `skills:` and inline `## Skill:` sections. **Parsed and tested, but not wired into kicks**: the one call site's repo-root lookup unconditionally returns empty, so an `AGENTS.md` you add today has no effect on any agent's prompt.
 - [Agent peer-awareness logging (pluk)](https://github.com/kubestellar/hive/blob/v4/src/docs/agent-logging.md) — pluk log format, `hive-panes`, availability, and retention.
 - [Strategy Lab (Nous)](https://github.com/kubestellar/hive/blob/v4/src/docs/strategy-lab.md) — experiment lifecycle, dashboard/API configuration, fast-fail bounds, and the gate-decision flow. No `nous:` block in `hive.yaml`.
 - [GitHub App setup](https://github.com/kubestellar/hive/blob/v4/src/docs/github-app-setup.md) — the Forge App on GitHub and GitHub Enterprise: app creation, permissions, Setup URL, and `/gh-setup`.
 - [ACMM policy matrix](acmm-policy-matrix.md) — capability levels and policy modes.
+- [ACMM level-up advisor](acmm-advisor.md) — the advisory-only `pkg/acmmadvisor` computation behind `GET /api/acmm-recommendation`: the signals it measures, per-level thresholds, and why it never changes the applied level.
 - [Inception](https://github.com/kubestellar/hive/blob/v4/src/docs/inception.md) — operator guide to the L1 brainstorm/inception workflow: phases, API, and template variables.
 - [Planning intelligence](planning-intelligence.md) — how a large GitHub issue becomes an epic the architect lane decomposes into child beads, the human plan-review gate that withholds those children until approved, and stall-replan.
 - [Review swarm](review-swarm.md) — the five review perspectives, the verdict collector and its report contract, and the opt-in merge-gate integration and bounded auto-fix cycle for review findings.
 - [Retro lane](retro-lane.md) — the opt-in (`retro.enabled`) post-completion pass that reconstructs a record for each closed bead and flags patterns such as excessive fix attempts or kicks; deterministic by default, with LLM analysis separately opt-in.
+- [Work sources](work-sources.md) — `governor.work_source`: the four `type` options (`github` default, `github_projects`, `linear`, `jira`), config fields, required credentials, and priority/hold-label mapping per source.
 - [Linear agent integration](linear-agent.md) — joining a Linear workspace as a first-class agent member: webhook verification, the 10-second session acknowledgement, which hive agent takes sessions, and narrating completion back as agent activities.
 - [Lite enrollment](lite-enrollment.md) — the zero-repo-secret on-ramp: `hivectl enroll OWNER/REPO` adds a repo to a spoke's `project.repos`, with prerequisites and the hosted lite-spoke path.
 - [ACMM policy fragments](https://github.com/kubestellar/hive/blob/v4/examples/acmm/README.md) — per-level ACMM policy references.
