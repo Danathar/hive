@@ -282,6 +282,16 @@ type AppAuthDiagnosis struct {
 	// IssuesPerm is the granted issues permission, when the installation
 	// resolved.
 	IssuesPerm string
+	// ActionsPerm and StatusesPerm are the granted Actions and Commit-statuses
+	// permissions, when the installation resolved. Empty means GitHub reported
+	// no grant.
+	//
+	// They are RECORDED, never enforced (#4030). The Hive App holds neither at
+	// write by design, so requiring them here would flip every healthy
+	// installation to AppStateInsufficientPerms — see the note on
+	// GrantsVisualHiveExecution for why observing them still matters.
+	ActionsPerm  string
+	StatusesPerm string
 	// Repo, when set, is the repository whose write attempt was forbidden.
 	// Only AppStateWriteForbidden (#2353) populates it, so the banner can name
 	// the exact repo the operator must add to the App installation.
@@ -298,6 +308,65 @@ type AppAuthDiagnosis struct {
 	// Err is the underlying error, for logs. Never rendered to a user
 	// verbatim, because it can carry raw API text.
 	Err error
+}
+
+// grantNone is what ExecutionGrants renders for a permission GitHub reported
+// no grant for. "" would be ambiguous in a log line against a field that was
+// simply never populated, and this string is only ever read by humans.
+const grantNone = "none"
+
+// grantWrite is the permission level GitHub reports for a write grant. It is
+// spelled separately from requiredIssuesPerm, which happens to hold the same
+// string: that one names a REQUIREMENT of the Hive App, and reusing it for the
+// Visual Hive grants would read as though those were required too, which is
+// exactly what they are not.
+const grantWrite = "write"
+
+// GrantsVisualHiveExecution reports whether this installation currently grants
+// the two write permissions the optional Visual Hive App needs (#4030): Actions
+// (to dispatch the installed workflow) and Commit statuses (to publish the
+// provenance-bound setup authorization status).
+//
+// It answers a QUESTION; it does not impose a requirement. False is the normal,
+// healthy answer for an ordinary Hive installation and must never be treated as
+// a fault: the Hive App deliberately holds Actions at read and requests no
+// Commit-statuses grant at all, and the whole reason #4030 registers a separate
+// App is that turning Visual Hive on must not widen permissions for the
+// installations that will never use it.
+//
+// What it is FOR is the consolidation decision #4030 defers. Folding these
+// grants into the Hive App would make every installation re-approve, and
+// GitHub keeps an App on its OLD permissions until an org owner accepts — so a
+// fleet can sit half-approved indefinitely with nothing surfacing it. Before
+// this, DiagnoseAppAuth read only the issues permission, so those two grants
+// were not merely unenforced, they were unobservable: every installation
+// reported the same "ok" whether or not the widened permissions had landed.
+// Recording them is what makes a half-approved fleet countable.
+//
+// Metadata is not consulted. GitHub grants it implicitly to every installation
+// that holds any repository permission, so it cannot discriminate between the
+// approved and unapproved halves of a fleet.
+func (d AppAuthDiagnosis) GrantsVisualHiveExecution() bool {
+	return d.ActionsPerm == grantWrite && d.StatusesPerm == grantWrite
+}
+
+// ExecutionGrants renders the two Visual Hive execution grants as a stable,
+// log-safe "actions=<grant> statuses=<grant>" pair.
+//
+// It carries only permission LEVELS ("read"/"write"/"none") that GitHub already
+// reports, never account names, repository names, or error text, so it is safe
+// to log unconditionally at info level — which is the point: a caller that
+// emitted it only for a faulty verdict would never emit it for the case that
+// motivated it, an installation which has not approved a permission update and
+// therefore still classifies as healthy.
+func (d AppAuthDiagnosis) ExecutionGrants() string {
+	grant := func(p string) string {
+		if strings.TrimSpace(p) == "" {
+			return grantNone
+		}
+		return p
+	}
+	return fmt.Sprintf("actions=%s statuses=%s", grant(d.ActionsPerm), grant(d.StatusesPerm))
 }
 
 // keyFileReadable reports whether path exists and holds non-empty content.
@@ -374,7 +443,12 @@ func (a *AppAuth) DiagnoseAppAuth(ctx context.Context, expectedOwner string, key
 	}
 
 	d.Account = inst.GetAccount().GetLogin()
-	d.IssuesPerm = inst.GetPermissions().GetIssues()
+	perms := inst.GetPermissions()
+	d.IssuesPerm = perms.GetIssues()
+	// Recorded for observability only — the classification below is unchanged
+	// and still turns solely on issues. See AppAuthDiagnosis.ActionsPerm.
+	d.ActionsPerm = perms.GetActions()
+	d.StatusesPerm = perms.GetStatuses()
 
 	if expectedOwner != "" && d.Account != "" && !strings.EqualFold(d.Account, expectedOwner) {
 		d.State = AppStateWrongInstallation

@@ -353,3 +353,150 @@ func TestClassifyAPIError_NoResponseIsUnknown(t *testing.T) {
 		t.Error("an unreachable API must not be reported as anyone's fault")
 	}
 }
+
+// TestDiagnoseAppAuth_RecordsVisualHiveExecutionGrants is the #4030 gap: before
+// this, DiagnoseAppAuth read only the issues permission, so the Actions and
+// Commit-statuses grants were not merely unenforced — they were unobservable.
+// Every installation reported "ok" whether or not those grants had landed,
+// which is what would make a half-approved fleet invisible.
+//
+// The table's discriminating pair is "ordinary Hive App" vs "Hive App with the
+// Visual Hive grants": both are AppStateOK, and only ExecutionGrants /
+// GrantsVisualHiveExecution tell them apart.
+func TestDiagnoseAppAuth_RecordsVisualHiveExecutionGrants(t *testing.T) {
+	tests := []struct {
+		name         string
+		permissions  string
+		wantState    AppAuthState
+		wantGrants   string
+		wantSatisfie bool
+	}{
+		{
+			// The ~55 installations that will never use Visual Hive. Healthy,
+			// and must stay healthy — see the invariant test below.
+			name:         "ordinary Hive App grants neither",
+			permissions:  `{"issues":"write"}`,
+			wantState:    AppStateOK,
+			wantGrants:   "actions=none statuses=none",
+			wantSatisfie: false,
+		},
+		{
+			// GitHub reports read for an App that requested read. Still not
+			// the write pair Visual Hive needs.
+			name:         "read-only Actions and statuses do not satisfy",
+			permissions:  `{"issues":"write","actions":"read","statuses":"read"}`,
+			wantState:    AppStateOK,
+			wantGrants:   "actions=read statuses=read",
+			wantSatisfie: false,
+		},
+		{
+			// The half-approved shape: an org owner accepted a widening that
+			// only partly landed. Indistinguishable from healthy before #4030.
+			name:         "one of the two grants is not enough",
+			permissions:  `{"issues":"write","actions":"write","statuses":"read"}`,
+			wantState:    AppStateOK,
+			wantGrants:   "actions=write statuses=read",
+			wantSatisfie: false,
+		},
+		{
+			name:         "both grants at write satisfies",
+			permissions:  `{"issues":"write","actions":"write","statuses":"write"}`,
+			wantState:    AppStateOK,
+			wantGrants:   "actions=write statuses=write",
+			wantSatisfie: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":42980,"account":{"login":"katamari"},"permissions":` + tt.permissions + `}`))
+			}))
+			defer srv.Close()
+
+			got := testAuth(t, srv.URL).DiagnoseAppAuth(context.Background(), "katamari")
+
+			if got.State != tt.wantState {
+				t.Fatalf("State = %s, want %s", got.State, tt.wantState)
+			}
+			if got.ExecutionGrants() != tt.wantGrants {
+				t.Errorf("ExecutionGrants() = %q, want %q", got.ExecutionGrants(), tt.wantGrants)
+			}
+			if got.GrantsVisualHiveExecution() != tt.wantSatisfie {
+				t.Errorf("GrantsVisualHiveExecution() = %v, want %v",
+					got.GrantsVisualHiveExecution(), tt.wantSatisfie)
+			}
+		})
+	}
+}
+
+// TestDiagnoseAppAuth_VisualHiveGrantsAreRecordedNotRequired pins the invariant
+// that #4030 turns on: recording the two grants must NOT make them requirements
+// of the Hive App.
+//
+// This is the guard against the tempting wrong fix. Adding "actions" and
+// "statuses" to the required set would flip every ordinary installation to
+// AppStateInsufficientPerms and raise a banner accusing org owners of a
+// permission gap that is deliberate — the exact fleet-wide re-approval event
+// the separate Visual Hive App exists to avoid. Remove the separation and the
+// first subtest fails.
+//
+// The second subtest is its mirror: the Visual Hive App's own permission shape
+// (Actions and Commit statuses at write, no issues) must NOT be mistaken for a
+// healthy Hive App just because the new fields are populated. Classification
+// still turns solely on issues.
+func TestDiagnoseAppAuth_VisualHiveGrantsAreRecordedNotRequired(t *testing.T) {
+	diagnose := func(t *testing.T, permissions string) AppAuthDiagnosis {
+		t.Helper()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":42980,"account":{"login":"katamari"},"permissions":` + permissions + `}`))
+		}))
+		defer srv.Close()
+		return testAuth(t, srv.URL).DiagnoseAppAuth(context.Background(), "katamari")
+	}
+
+	t.Run("missing Actions and statuses is not a permission fault", func(t *testing.T) {
+		got := diagnose(t, `{"issues":"write"}`)
+		if got.State != AppStateOK {
+			t.Fatalf("State = %s, want ok — the Hive App deliberately lacks these grants "+
+				"and must never be accused of a permission gap for it", got.State)
+		}
+		if got.State.UserActionable() {
+			t.Error("an ordinary Hive installation must not be told to fix anything")
+		}
+		if msg := got.Message(); msg != "" {
+			t.Errorf("Message() = %q, want empty for a healthy installation", msg)
+		}
+	})
+
+	t.Run("Visual Hive grants do not substitute for issues:write", func(t *testing.T) {
+		got := diagnose(t, `{"actions":"write","statuses":"write","metadata":"read"}`)
+		if got.State != AppStateInsufficientPerms {
+			t.Fatalf("State = %s, want insufficient-permissions — classification still "+
+				"turns solely on issues", got.State)
+		}
+		// The grants are still recorded for the very installation the
+		// classification rejects; observability is independent of the verdict.
+		if !got.GrantsVisualHiveExecution() {
+			t.Error("GrantsVisualHiveExecution() = false, want true — the grants are " +
+				"recorded regardless of the issues verdict")
+		}
+	})
+}
+
+// TestExecutionGrants_RendersUngrantedAsNone keeps the log token stable. An
+// empty string in a log line is ambiguous against a field that was never
+// populated, and this rendering is the fleet-countable signal.
+func TestExecutionGrants_RendersUngrantedAsNone(t *testing.T) {
+	if got := (AppAuthDiagnosis{}).ExecutionGrants(); got != "actions=none statuses=none" {
+		t.Errorf("ExecutionGrants() = %q, want %q", got, "actions=none statuses=none")
+	}
+	if got := (AppAuthDiagnosis{ActionsPerm: "write"}).ExecutionGrants(); got != "actions=write statuses=none" {
+		t.Errorf("ExecutionGrants() = %q, want %q", got, "actions=write statuses=none")
+	}
+	if (AppAuthDiagnosis{}).GrantsVisualHiveExecution() {
+		t.Error("a zero diagnosis must not report the Visual Hive grants as satisfied")
+	}
+}
