@@ -5706,6 +5706,36 @@ func advisoryIssueMissingError(repo string, cause error) string {
 	return base
 }
 
+// actionableAfterGitHubEnumerate decides whether an eval cycle survives a
+// failed GitHub enumeration. On the default (GitHub) work source the answer
+// is no: an all-repos failure usually means a rate limit or outage, and a
+// zero-count result would idle the agents, so the cycle keeps prior state.
+//
+// On a non-default work source (e.g. Linear) the GitHub call is only there
+// for PR maintenance; the backlog comes from the work-source overlay that
+// runs next. Aborting here meant a Linear-sourced hive whose GitHub App could
+// not list issues (403 "Resource not accessible by integration", an Issues
+// permission a Linear hive should not need) never enumerated its Linear
+// backlog at all and sat at queue 0. Such a hive continues with whatever
+// partial result GitHub returned (nil becomes an empty result; PRs are kept
+// when obtainable) and lets the overlay populate issues.
+func actionableAfterGitHubEnumerate(cfg *config.Config, actionable *github.ActionableResult, err error, logger *slog.Logger) (*github.ActionableResult, bool) {
+	if err == nil {
+		return actionable, true
+	}
+	wsType := cfg.Governor.WorkSource.Type
+	if wsType == "" || wsType == "github" {
+		logger.Error("failed to enumerate actionable items", "error", err)
+		return nil, false
+	}
+	logger.Warn("GitHub enumeration failed; continuing so the configured work source can still populate issues",
+		"work_source", wsType, "error", err)
+	if actionable == nil {
+		actionable = &github.ActionableResult{GeneratedAt: time.Now()}
+	}
+	return actionable, true
+}
+
 func runEvalCycle(
 	ctx context.Context,
 	cfg *config.Config,
@@ -5775,8 +5805,8 @@ func runEvalCycle(
 	enumCtx, enumSpan := tracing.StartSpan(ctx, "governor.enumerate_actionable")
 	actionable, err := ghClient.EnumerateActionable(enumCtx)
 	enumSpan.End()
-	if err != nil {
-		logger.Error("failed to enumerate actionable items", "error", err)
+	actionable, ok := actionableAfterGitHubEnumerate(cfg, actionable, err, logger)
+	if !ok {
 		return
 	}
 

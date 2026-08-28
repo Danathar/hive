@@ -119,6 +119,11 @@ mid-run streaming of agent output into Linear yet.
    }
    ```
 
+With `type: linear` the GitHub App does **not** need the Issues read
+permission: a failed GitHub issue enumeration is logged as a warning and the
+cycle continues, with the Linear backlog supplying issues and GitHub supplying
+PRs when it can.
+
 `GET /api/linear/agent/status` (owner) reports configuration, the connected
 workspace, the resolved session agent, and recent sessions.
 `POST /api/linear/agent/disconnect` (owner) forgets the stored grant (revoke
