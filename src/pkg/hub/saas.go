@@ -174,6 +174,14 @@ const hubUpgradeDebounce = 4 * time.Minute
 // paying that per hive serialized the upgrade loop and starved the hub's own
 // upgrade check that runs after it. The heartbeat fallback is the real delivery
 // path for unreachable clusters, so failing fast costs nothing.
+//
+// Retained under nolint despite having no current caller: three other files
+// cite it BY NAME as the basis for their own timeouts
+// (hosted_namespace_identity.go, netadmin_reconcile.go, saas_bulk.go). Deleting
+// it to satisfy the linter would orphan those comments and lose the recorded
+// reasoning for the 15s figure, which is the thing worth keeping.
+//
+//nolint:unused // referenced by name from three sibling timeout comments
 const upgradeKubectlTimeout = 15 * time.Second
 
 // clusterUnreachableTTL is how long the hub skips kubectl for a cluster after a
@@ -2074,18 +2082,14 @@ func (s *HubServer) handleListClusters(w http.ResponseWriter, r *http.Request) {
 
 const clusterHealthCacheTTL = 30 * time.Second
 
-// clusterHealthCPUWarnPct is the CPU usage percentage threshold for warning state.
-const clusterHealthCPUWarnPct = 60
-
-// clusterHealthCPUDangerPct is the CPU usage percentage threshold for danger state.
-const clusterHealthCPUDangerPct = 80
-
-// clusterHealthMemWarnPct is the memory usage percentage threshold for warning state.
-const clusterHealthMemWarnPct = 60
-
-// clusterHealthMemDangerPct is the memory usage percentage threshold for danger state.
-const clusterHealthMemDangerPct = 80
-
+// CPU and memory bar thresholds are NOT declared here. The hub serves the
+// cluster-health panel raw percentages and the panel colours them with its own
+// CLUSTER_CPU_WARN_PCT / CLUSTER_CPU_DANGER_PCT / CLUSTER_MEM_* constants, so a
+// Go-side copy would be a second set of numbers that nothing reads and nobody
+// updates together. The disk thresholds below are different: they are anchored
+// to kubelet behaviour rather than taste and are pinned by a test, so they have
+// a reason to exist on this side.
+//
 // Disk thresholds are anchored to kubelet's own behaviour rather than to
 // round numbers, so a coloured bar means something concrete is about to
 // happen on the node:
@@ -2107,17 +2111,8 @@ const clusterHealthDiskWarnPct = 85
 // hard eviction threshold fires (nodefs.available<10%).
 const clusterHealthDiskDangerPct = 90
 
-// kubectlTopTimeoutSec is the timeout for kubectl top nodes commands.
-const kubectlTopTimeoutSec = 10
-
-// kubectlGetTimeoutSec is the timeout for kubectl get nodes commands.
-const kubectlGetTimeoutSec = 10
-
 // millicoresPerCore converts cores to millicores.
 const millicoresPerCore = 1000
-
-// mbPerGB converts megabytes to gigabytes.
-const mbPerGB = 1024
 
 // kiToBytes converts Ki units to bytes.
 const kiToBytes = 1024
@@ -2163,15 +2158,6 @@ type ClusterHealthNode struct {
 // hiveHostedNamespacePrefix is the namespace prefix used for SaaS-provisioned
 // hives; pods in these namespaces identify hives running on a node.
 const hiveHostedNamespacePrefix = "hive-hosted-"
-
-// hostedAvailableIDPrefix is the ID prefix a pre-provisioned pool slot carries
-// while it is unclaimed inventory (e.g. "hosted-available-oke-01-placeholder-bb95").
-// It is the RegistryEntry-side marker for an available placeholder: unlike
-// MyHiveEntry, RegistryEntry has no ProvStatus field, so the ID prefix (paired
-// with the "available-" org prefix, placeholderOrgPrefix) is the reliable signal
-// that a slot is idle inventory rather than a claimed hive. A claimed hive keeps
-// neither marker.
-const hostedAvailableIDPrefix = "hosted-available-"
 
 type ClusterHealthSummary struct {
 	TotalNodes    int `json:"total_nodes"`
