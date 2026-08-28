@@ -149,6 +149,13 @@ type Client struct {
 	// issues:write) still surface within ~an hour instead of never. Guarded by
 	// advisoryMu.
 	advisoryDigestSkips map[string]int
+	// defaultBranches memoizes the resolved default branch per "owner/repo"
+	// (see defaultbranch.go). A repo's default branch changes about as often as
+	// the repo is renamed, so caching it keeps the "what is this repo's base?"
+	// lookup off the hot path of every PR open without risking a stale answer
+	// that matters. Guarded by defaultBranchMu.
+	defaultBranchMu sync.RWMutex
+	defaultBranches map[string]string
 }
 
 func (c *Client) SetCanaryScanner(enabled, failClosed bool, reg *ioscan.CanaryRegistry, onLeak func(ioscan.CanaryLeak)) {

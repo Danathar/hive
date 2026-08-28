@@ -21,7 +21,11 @@ import (
 
 const (
 	DefaultSandboxKickTimeout = 45 * time.Minute
-	defaultSandboxBaseRef     = "main"
+	// fallbackSandboxBaseRef is used only when the cloned repository refuses to
+	// name its own default branch (see resolveBaseRef). It is a fallback, never
+	// the starting assumption — hardcoding it based every sandbox PR on main
+	// even in repos whose default branch is something else (kubestellar/hive#4928).
+	fallbackSandboxBaseRef    = "main"
 	defaultSandboxNetworkMode = sandbox.NetworkModeRestricted
 	sandboxPromptRelPath      = ".hive/kick-prompt.txt"
 	sandboxTranscriptRelPath  = ".hive/sandbox-transcript.log"
@@ -97,16 +101,16 @@ func (e *SandboxExecutor) Run(ctx context.Context, spec SandboxKickSpec) (Sandbo
 	if spec.Timeout <= 0 {
 		spec.Timeout = DefaultSandboxKickTimeout
 	}
-	if spec.BaseRef == "" {
-		spec.BaseRef = defaultSandboxBaseRef
-	}
 	if spec.NetworkMode == "" {
 		spec.NetworkMode = defaultSandboxNetworkMode
 	}
 	if spec.Branch == "" {
 		spec.Branch = e.branchName(spec.Agent)
 	}
-	workspace, baseSHA, err := e.prepareWorkspace(ctx, spec)
+	// prepareWorkspace resolves spec.BaseRef from the clone when the caller did
+	// not pin one, so the PR opened below is based on the repo's own default
+	// branch rather than an assumed "main".
+	workspace, baseSHA, err := e.prepareWorkspace(ctx, &spec)
 	if err != nil {
 		res.Error = err.Error()
 		return res, err
@@ -200,7 +204,11 @@ func (e *SandboxExecutor) Run(ctx context.Context, spec SandboxKickSpec) (Sandbo
 	return res, nil
 }
 
-func (e *SandboxExecutor) prepareWorkspace(ctx context.Context, spec SandboxKickSpec) (string, string, error) {
+// prepareWorkspace clones the target repo and checks out the work branch off the
+// base ref. When spec.BaseRef is empty it is RESOLVED from the clone and written
+// back into spec, so the caller opens its PR against the same ref it branched
+// from.
+func (e *SandboxExecutor) prepareWorkspace(ctx context.Context, spec *SandboxKickSpec) (string, string, error) {
 	if strings.TrimSpace(spec.Org) == "" || strings.TrimSpace(spec.Repo) == "" {
 		return "", "", errors.New("sandbox workspace prep requires org and repo")
 	}
@@ -221,6 +229,9 @@ func (e *SandboxExecutor) prepareWorkspace(ctx context.Context, spec SandboxKick
 	if out, err := e.runner().Run(ctx, "", pushbroker.PushEnv(os.Environ()), "git", cloneArgs...); err != nil {
 		return "", "", fmt.Errorf("git clone: %w: %s", err, strings.TrimSpace(string(out)))
 	}
+	if strings.TrimSpace(spec.BaseRef) == "" {
+		spec.BaseRef = e.resolveBaseRef(ctx, workspace)
+	}
 	fetchArgs := append(append([]string{}, authArgs...), "fetch", "origin", spec.BaseRef)
 	if out, err := e.runner().Run(ctx, workspace, pushbroker.PushEnv(os.Environ()), "git", fetchArgs...); err != nil {
 		return "", "", fmt.Errorf("git fetch %s: %w: %s", spec.BaseRef, err, strings.TrimSpace(string(out)))
@@ -233,6 +244,32 @@ func (e *SandboxExecutor) prepareWorkspace(ctx context.Context, spec SandboxKick
 		return "", "", fmt.Errorf("git rev-parse HEAD: %w", err)
 	}
 	return workspace, strings.TrimSpace(string(base)), nil
+}
+
+// resolveBaseRef reports the default branch of the freshly cloned repo. `git
+// clone` records the remote's HEAD in refs/remotes/origin/HEAD, so the answer is
+// already on disk — no API call, no extra token scope. An unreadable or
+// unexpected answer falls back to fallbackSandboxBaseRef rather than failing the
+// kick.
+func (e *SandboxExecutor) resolveBaseRef(ctx context.Context, workspace string) string {
+	out, err := e.runner().Run(ctx, workspace, pushbroker.PushEnv(os.Environ()),
+		"git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+	if err != nil {
+		if e.Logger != nil {
+			e.Logger.Warn("sandbox: default-branch lookup failed, using fallback base",
+				"workspace", workspace, "fallback", fallbackSandboxBaseRef, "error", err)
+		}
+		return fallbackSandboxBaseRef
+	}
+	ref := strings.TrimSpace(string(out))
+	// symbolic-ref --short renders it as "origin/<branch>".
+	if _, branch, found := strings.Cut(ref, "/"); found {
+		ref = branch
+	}
+	if ref == "" {
+		return fallbackSandboxBaseRef
+	}
+	return ref
 }
 
 func (e *SandboxExecutor) cloneAuthArgs(ctx context.Context, repo, dir string) ([]string, func(), error) {

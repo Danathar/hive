@@ -32,7 +32,11 @@ type CreatePRResult struct {
 // `gh pr create` (which would attribute the PR to the Copilot login user).
 //
 // repo may be "owner/repo" or a bare repo name (owner defaults to the hive org).
-// head is the branch the agent pushed; base defaults to "main" when empty.
+// head is the branch the agent pushed; an empty base is RESOLVED from the target
+// repository's own default branch (see DefaultBranch) rather than assumed to be
+// "main" — a repo whose default is "testing" or "develop" would otherwise get
+// every PR based on the wrong branch, carrying the full divergence between the
+// two branches in its diff (kubestellar/hive#4928).
 //
 // It is idempotent: if an OPEN PR for head already exists, it returns that PR
 // with AlreadyExisted=true instead of erroring or opening a duplicate — this
@@ -50,7 +54,7 @@ func (c *Client) CreatePR(ctx context.Context, repo, head, base, title, body str
 		return CreatePRResult{}, fmt.Errorf("CreatePR: head branch is required")
 	}
 	if base = strings.TrimSpace(base); base == "" {
-		base = "main"
+		base = c.DefaultBranch(ctx, owner, repo)
 	}
 	if strings.TrimSpace(title) == "" {
 		return CreatePRResult{}, fmt.Errorf("CreatePR: title is required")
