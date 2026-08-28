@@ -106,14 +106,28 @@ spec:
                 - SETPCAP
                 - CHOWN # chown per-agent dirs/beads to the agent UID
                 - DAC_OVERRIDE
+                # FOWNER + FSETID: the entrypoint's /data/home permission
+                # repair ("[entrypoint] Fixing /data/home perms...") runs
+                # `chmod -R g+rwX` and `chmod g+s` over a tree it has already
+                # chowned to dev (1001). The container is uid 0, but chmod on an
+                # inode you do not OWN needs CAP_FOWNER, and keeping the setgid
+                # bit on a directory whose group you are not in needs
+                # CAP_FSETID (without it the kernel silently clears S_ISGID).
+                # Without FOWNER the chmod fails, the entrypoint's `set -e`
+                # exits 1 right after that log line, and the pod crash-loops
+                # on every fresh RWO PVC with no error text.
+                - FOWNER
+                - FSETID
           args:
             - "--config"
             - "/etc/hive/hive.yaml"
           ports:
+            # ONE named port: the dashboard UI and /api/* are the same :3002
+            # listener. Declaring it twice (`dashboard` + `api`) only warns
+            # here but makes the matching Service (service.yaml) a hard
+            # admission error (duplicate port 3002), so both declare exactly
+            # `dashboard` and the probes below target it by that name.
             - name: dashboard
-              containerPort: 3002
-              protocol: TCP
-            - name: api
               containerPort: 3002
               protocol: TCP
             # ttyd (:7681) is loopback-only inside the pod (reached via the
@@ -156,7 +170,7 @@ spec:
           startupProbe:
             httpGet:
               path: /api/health
-              port: api
+              port: dashboard
             initialDelaySeconds: 10
             periodSeconds: 5
             failureThreshold: 30
@@ -171,13 +185,13 @@ spec:
             # See pkg/dashboard/server.go handleLivez.
             httpGet:
               path: /api/livez
-              port: api
+              port: dashboard
             periodSeconds: 30
             timeoutSeconds: 5
           readinessProbe:
             httpGet:
               path: /api/health
-              port: api
+              port: dashboard
             initialDelaySeconds: 10
             periodSeconds: 10
             timeoutSeconds: 5

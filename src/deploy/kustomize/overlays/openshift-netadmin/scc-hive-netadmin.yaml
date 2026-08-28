@@ -7,7 +7,7 @@
 #
 # Deltas from restricted-v2 (each one exists because the base pod needs it):
 #
-#   allowedCapabilities        The six capabilities the deployment's
+#   allowedCapabilities        The eight capabilities the deployment's
 #                              `capabilities.add` lists (it still drops ALL
 #                              first). An SCC admits a pod only if every added
 #                              cap is in this list — allowing only NET_ADMIN
@@ -59,6 +59,8 @@ allowedCapabilities:
   - SETPCAP
   - CHOWN # chown per-agent dirs/beads to the agent UID
   - DAC_OVERRIDE
+  - FOWNER # entrypoint `chmod -R g+rwX /data/home` on dev-owned files
+  - FSETID # entrypoint `chmod g+s` on dev:node dirs (root is not in `node`)
 defaultAddCapabilities: null
 requiredDropCapabilities:
   - ALL

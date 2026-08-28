@@ -7,7 +7,7 @@
 #
 #     capabilities:
 #       drop: [ALL]
-#       add:  [NET_ADMIN, SETUID, SETGID, SETPCAP, CHOWN, DAC_OVERRIDE]
+#       add:  [NET_ADMIN, SETUID, SETGID, SETPCAP, CHOWN, DAC_OVERRIDE, FOWNER, FSETID]
 #
 # and until now NOTHING ever booted a container under it. The one runtime job in
 # this area (test_ambient_cap_runtime.sh) uses `docker run --cap-add=NET_ADMIN`,
@@ -32,7 +32,8 @@
 #   2. BOOTS a container under `--cap-drop=ALL --cap-add=<the derived set>` and
 #      exercises each capability's ACTUAL consumer: the entrypoint's own setpriv
 #      flags, the gosu fallback, the SUID su-exec hop to a per-agent UID, the
-#      per-agent chown, a DAC_OVERRIDE write, and the ACMM iptables egress gate.
+#      per-agent chown, a DAC_OVERRIDE write, the /data/home perm repair's
+#      FOWNER chmod and FSETID setgid bit, and the ACMM iptables egress gate.
 #   3. MUTATES: re-runs the whole chain once per capability with THAT capability
 #      removed, and requires the chain to break and the report to name it. This is
 #      what makes the positive run non-vacuous — and it is machine-checked every
@@ -415,6 +416,39 @@ chmod 000 /data/dac-probe 2>/dev/null
 echo probe > /data/dac-probe 2>/dev/null
 [ -s /data/dac-probe ]
 step dac-override-write-through-mode-000 $? "needs DAC_OVERRIDE; root write into a 0000 file"
+
+# ── FOWNER: the entrypoint's `chmod -R g+rwX /data/home` over dev-owned files ─
+# /data/home is chowned to dev before the perm repair runs, so root is chmod-ing
+# inodes it does not own. inode_owner_or_capable() admits that only with
+# CAP_FOWNER; without it chmod returns EPERM and, under the entrypoint's
+# `set -e`, the container exited 1 with no error text (the AKS crash-loop).
+mkdir -p /data/home/capprobe-fowner
+: > /data/home/capprobe-fowner/config.json
+chown -R "${AGENT_USER}:${AGENT_GROUP}" /data/home/capprobe-fowner 2>/dev/null
+fowner_err="$(chmod -R g+rwX /data/home/capprobe-fowner 2>&1)"
+fowner_rc=$?
+fmode="$(stat -c '%a' /data/home/capprobe-fowner/config.json 2>/dev/null || echo 000)"
+# group digit of the octal mode: g+rw set <=> 6 or 7
+fgroup="${fmode%?}"; fgroup="${fgroup#"${fgroup%?}"}"
+case "$fgroup" in 6|7) r=0 ;; *) r=1 ;; esac
+[ "$fowner_rc" -eq 0 ] && [ "$r" -eq 0 ]
+step fowner-chmod-non-owned-tree $? "needs FOWNER; rc=${fowner_rc} mode=${fmode} $(echo "$fowner_err" | tr '\n' ' ' | cut -c1-120)"
+
+# ── FSETID: the entrypoint's `chmod g+s` on shared dirs whose group root is NOT in ─
+# setattr_prepare() clears S_ISGID from a chmod when the caller is not a member
+# of the inode's group and lacks CAP_FSETID — chmod still returns 0, the bit is
+# just silently dropped, and the next agent's mkdir under that dir lands in the
+# wrong group (the EACCES class of #2284). The dir is root-OWNED here so this
+# step needs no FOWNER and isolates FSETID on its own.
+mkdir -p /data/home/capprobe-fsetid
+chgrp "${AGENT_GROUP}" /data/home/capprobe-fsetid 2>/dev/null
+chmod g+s /data/home/capprobe-fsetid 2>/dev/null
+smode="$(stat -c '%a' /data/home/capprobe-fsetid 2>/dev/null || echo 0)"
+case "$smode" in
+  2???|3???|6???|7???) r=0 ;;
+  *) r=1 ;;
+esac
+step fsetid-setgid-bit-survives-chmod $r "needs FSETID; /data/home/capprobe-fsetid mode=${smode} (want the 2000 bit set)"
 
 # ── NET_ADMIN as root: the ACMM forced-egress REDIRECT ──────────────────────
 if [ "${RUN_EGRESS_GATE}" = "1" ]; then

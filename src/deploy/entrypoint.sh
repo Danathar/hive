@@ -575,10 +575,20 @@ if [ "$(id -u)" = "0" ]; then
     # this completes in <1s. Running in background caused a race where agents
     # started before perms were fixed, hitting EACCES on config.json.
     echo "[entrypoint] Fixing /data/home perms..."
-    chmod -R g+rwX /data/home 2>/dev/null
-    find /data/home -type d -exec chmod g+s {} + 2>/dev/null
+    # This file runs under `set -e`. chmod on an inode root does not OWN (the
+    # tree is dev-owned) needs CAP_FOWNER, and keeping the setgid bit needs
+    # CAP_FSETID — both are in deployment.yaml's capabilities.add. Before they
+    # were, a failed chmod here exited the container with status 1 right after
+    # the line above and NO error text, crash-looping every fresh PVC. Log and
+    # continue instead: agents may hit EACCES later, but the operator gets a
+    # WARN naming the cause rather than a silent exit.
+    chmod -R g+rwX /data/home 2>/dev/null \
+      || echo "[entrypoint] WARN: chmod -R g+rwX /data/home failed — is CAP_FOWNER in the pod's capabilities.add? Continuing; agents may hit EACCES under /data/home"
+    find /data/home -type d -exec chmod g+s {} + 2>/dev/null \
+      || echo "[entrypoint] WARN: chmod g+s on /data/home dirs failed — is CAP_FOWNER/CAP_FSETID in the pod's capabilities.add? Continuing"
     if [ "$DATA_OWNER" != "1001" ]; then
-      chown -R dev:node /data/config /data/home 2>/dev/null
+      chown -R dev:node /data/config /data/home 2>/dev/null \
+        || echo "[entrypoint] WARN: chown -R dev:node /data/config /data/home failed — is CAP_CHOWN in the pod's capabilities.add? Continuing"
     fi
     echo "[entrypoint] perm fix complete"
   else

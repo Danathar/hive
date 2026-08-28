@@ -115,8 +115,11 @@ you're doing a *real* deployment.
 GitHub — no clone:
 
 ```bash
-kubectl apply -k "https://github.com/kubestellar/hive/src/deploy/kustomize/overlays/standalone?ref=v4"
+kubectl apply -k "https://github.com/kubestellar/hive//src/deploy/kustomize/overlays/standalone?ref=v4"
 ```
+
+(Note the `//` between the repo and the sub-path — kustomize needs it to find
+the directory inside the repo; a single slash does not resolve.)
 
 This applies the overlay with its **PLACEHOLDER** values (`YOUR_ORG`,
 `YOUR_OAUTH_CLIENT_ID`, `YOUR_RWX_STORAGE_CLASS`, …). It is only for seeing the
@@ -132,7 +135,7 @@ git clone -b v4 https://github.com/kubestellar/hive.git
 cd hive/src/deploy/kustomize/overlays/standalone
 # Edit the placeholders — see "What you must swap" below:
 #   patch-configmap.yaml       (org/repos, owner login, OAuth client id, litellm endpoint)
-#   patch-pvc-storageclass.yaml (your RWX storage class)
+#   patch-pvc-storageclass.yaml (your storage class — the PVC is RWO; RWX not needed)
 # Review the rendered manifests, then apply:
 kubectl kustomize .
 kubectl apply -k .
@@ -141,14 +144,36 @@ kubectl -n hive-inference rollout status deploy/vllm
 ```
 
 **Upgrading the image.** The base tracks `ghcr.io/kubestellar/hive:stable`. To
-pin a reviewed tag or digest (so upgrades are deliberate — there is no hub to
-auto-upgrade you), run from the overlay directory and re-apply:
+pin (so upgrades are deliberate — there is no hub to auto-upgrade you), resolve
+the channel you reviewed to a **digest** and write it in from the overlay
+directory, then re-apply:
 
 ```bash
-kustomize edit set image ghcr.io/kubestellar/hive=ghcr.io/kubestellar/hive:<tag>
-# or a digest:  ...=ghcr.io/kubestellar/hive@sha256:<digest>
+TOKEN=$(curl -s "https://ghcr.io/token?scope=repository:kubestellar/hive:pull" | jq -r .token)
+DIGEST=$(curl -sI -H "Authorization: Bearer $TOKEN" \
+  -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json" \
+  https://ghcr.io/v2/kubestellar/hive/manifests/stable \
+  | awk 'tolower($1)=="docker-content-digest:" {print $2}' | tr -d '\r')
+kustomize edit set image ghcr.io/kubestellar/hive=ghcr.io/kubestellar/hive@"$DIGEST"
 kubectl apply -k .
 ```
+
+> **Which image tags exist.** `ghcr.io/kubestellar/hive` carries the channel
+> tags (`stable`, `candidate`, `edge`, `v4-latest`) and a short-SHA tag per
+> merge. A `vX.Y.Z` **image** tag exists only when the automated tagged-release
+> workflow (`.github/workflows/release.yml`, see
+> [Tagged releases](releases.md)) has cut that version — it retags the merge's
+> short-SHA images. That workflow landed after the `v4.0.0` git tag, so there is
+> **no `:v4.0.0` image**; `newTag: v4.0.0` is an `ImagePullBackOff`. Pin a
+> version tag only after confirming it on the
+> [Releases page](https://github.com/kubestellar/hive/releases) or with
+> `curl -sI -H "Authorization: Bearer $TOKEN" https://ghcr.io/v2/kubestellar/hive/manifests/vX.Y.Z`
+> (200 = exists). Digests always work.
+
+**Storage.** The base `hive-data` PVC is `ReadWriteOnce`. That is correct for
+the single-replica standalone hive — any block storage class works; you do
+**not** need an RWX class. (RWX is only relevant to the hub-provisioned path
+further down, whose template runs a surge rollout.)
 
 **On OpenShift.** The standalone overlay does not create a Route or grant any
 SCC. Two more pieces supply the OpenShift-only deltas:
@@ -254,23 +279,27 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
-  # ── Public hive standalone overlay, pinned to a reviewed tag ──────────────
+  # ── Public hive standalone overlay, pinned to a reviewed git ref ──────────
   # kubectl/kustomize fetches this from GitHub at apply time — no local clone.
   # Bump the ref= value in a git commit when you want to upgrade; review the
-  # diff of what changed upstream before you do.
-  - https://github.com/kubestellar/hive//src/deploy/kustomize/overlays/standalone?ref=v4.2.0
+  # diff of what changed upstream before you do. A git TAG (v4.0.0) or a full
+  # commit SHA is immutable; a branch (v4) moves under you.
+  - https://github.com/kubestellar/hive//src/deploy/kustomize/overlays/standalone?ref=v4.0.0
   #
   # OpenShift only: add your Route here alongside the remote base.
   # On plain Kubernetes, use an Ingress resource instead.
   - route.yaml
 
-# Pin the image to a specific tag for extra safety. Without this the base
-# tracks `ghcr.io/kubestellar/hive:stable`; pinning means upgrades are
-# deliberate — you bump this in git, review, and apply.
+# Pin the image for extra safety. Without this the base tracks
+# `ghcr.io/kubestellar/hive:stable`; pinning means upgrades are deliberate —
+# you bump this in git, review, and apply. Pin by DIGEST: a git tag does not
+# imply an image tag (there is no `:v4.0.0` image — see "Upgrading the image"
+# above for how to resolve `stable` to a digest and how to check whether a
+# `vX.Y.Z` image tag exists before using one).
 images:
   - name: ghcr.io/kubestellar/hive
     newName: ghcr.io/kubestellar/hive
-    newTag: v4.2.0
+    digest: sha256:<digest-you-resolved-from-stable>
 
 patches:
   - path: patch-configmap.yaml
@@ -281,10 +310,12 @@ patches:
 ```
 
 > **`ref=` branch vs tag:** `?ref=v4` follows the branch — every `apply` may
-> get a different manifest from the last one. `?ref=v4.2.0` is immutable —
-> the same apply produces the same result every time. For a production cluster,
-> always pin a tag; bump it deliberately in a git commit so you have a record
-> of every upgrade.
+> get a different manifest from the last one. `?ref=v4.0.0` (a git tag) or
+> `?ref=<full-sha>` is immutable — the same apply produces the same result
+> every time. For a production cluster, always pin a tag or SHA; bump it
+> deliberately in a git commit so you have a record of every upgrade. Git tags
+> are listed at https://github.com/kubestellar/hive/tags — note they are a
+> different thing from image tags (see "Which image tags exist" above).
 
 > **Double slash `//` in the URL:** kustomize requires `//` to separate the
 > repo root from the path inside it. `github.com/kubestellar/hive//src/...` is
@@ -370,7 +401,7 @@ metadata:
   name: hive-data
   namespace: hive
 spec:
-  storageClassName: ocs-storagecluster-cephfs   # ← your cluster's RWX class
+  storageClassName: ocs-storagecluster-cephfs   # ← a storage class on your cluster
 ```
 
 To find the right class name:
@@ -378,8 +409,8 @@ To find the right class name:
 ```bash
 kubectl get storageclass
 # Look for one marked (default) or annotated storageclass.kubernetes.io/is-default-class=true
-# On Spyre/ODF clusters, ocs-storagecluster-cephfs is the RWX class.
-# RWO is fine for a single-replica hive (no HA needed for most standalone installs).
+# The base PVC is ReadWriteOnce, so any block class works (AKS managed-csi, EBS, RBD, ...).
+# On Spyre/ODF clusters, ocs-storagecluster-cephfs (RWX) also works — RWX is allowed, not required.
 ```
 
 #### `route.yaml` — OpenShift only
@@ -506,12 +537,14 @@ kubectl apply -k overlays/spyre/
 # 1. Read the release notes for the new tag:
 #    https://github.com/kubestellar/hive/releases
 
-# 2. Bump the ref in kustomization.yaml:
+# 2. Bump the ref and the image pin in kustomization.yaml:
 #    resources:
-#      - https://github.com/kubestellar/hive//src/deploy/kustomize/overlays/standalone?ref=v4.3.0
+#      - https://github.com/kubestellar/hive//src/deploy/kustomize/overlays/standalone?ref=<new git tag or sha>
 #    images:
 #      - name: ghcr.io/kubestellar/hive
-#        newTag: v4.3.0
+#        digest: sha256:<digest resolved from stable, or from the release's image tag>
+#    (use `newTag: vX.Y.Z` only after confirming that IMAGE tag exists — see
+#    "Which image tags exist" above)
 
 # 3. Preview the diff — see exactly what changes upstream:
 kubectl kustomize overlays/spyre | diff - <(kubectl kustomize overlays/spyre 2>/dev/null) || true
