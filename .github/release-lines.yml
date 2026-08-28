@@ -28,7 +28,7 @@
 # "fix" it by only editing one side.
 
 # The release lines CI is expected to cover.
-release_lines: [v2, v4]
+release_lines: [v2, v4, v5]
 
 # Workflows whose branch filters are pinned to the release lines.
 #
@@ -69,7 +69,7 @@ pinned:
   # entry again, the exclusion has been lost upstream — restore it there; do
   # not merge the sync branch, and do not "fix" it by widening this entry.
   # See src/docs/release-line-guard.md, "The infra workflow sync".
-  scorecard.yml: [main, -v2]
+  scorecard.yml: [main, -v2, -v5]
   suid-contract.yml: []
   v2-ci.yml: []
   v2-tests.yml: []

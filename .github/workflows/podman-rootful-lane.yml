@@ -57,10 +57,12 @@ on:
     branches:
       - v2
       - v4
+      - v5
   pull_request:
     branches:
       - v2
       - v4
+      - v5
   workflow_dispatch:
     inputs:
       somark:

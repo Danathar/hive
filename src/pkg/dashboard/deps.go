@@ -107,7 +107,7 @@ type Dependencies struct {
 	// ApprovalInbox is the durable operator-lane queue backing the desk. Nil
 	// exactly when ApprovalDesk is nil (both come from DeskFromConfig).
 	ApprovalInbox *toolapprove.Inbox
-	HookFire     func(context.Context, hooks.Payload)
+	HookFire      func(context.Context, hooks.Payload)
 }
 
 type NousState struct {
