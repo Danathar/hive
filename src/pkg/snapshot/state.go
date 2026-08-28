@@ -97,6 +97,56 @@ type AgentState struct {
 	LaunchCmd       string           `json:"launch_cmd,omitempty"`
 	LastKick        *time.Time       `json:"last_kick,omitempty"`
 	KickHistory     []AgentKickEntry `json:"kick_history,omitempty"`
+	// TurnLoss records what teardowns discarded from this agent's in-flight
+	// turns. RestartCount above says how OFTEN an agent was restarted;
+	// this says what those restarts COST, which is RFC #4002's open question 3
+	// and the input its step-4 feasibility call depends on.
+	//
+	// It rides the existing state file rather than a sidecar because the RFC
+	// explicitly cautions against adding durable store number five, and because
+	// the measurement is worthless unless it survives the very event it
+	// measures.
+	TurnLoss *AgentTurnLoss `json:"turn_loss,omitempty"`
+}
+
+// AgentTurnLoss is the persisted form of agent.TurnLoss. It is duplicated here
+// rather than imported because pkg/snapshot does not depend on pkg/agent (and
+// must not — the manager is the thing being snapshotted); cmd/hive converts at
+// the boundary, exactly as it already does for KickHistory.
+type AgentTurnLoss struct {
+	// Interruptions is every teardown that hit a turn with output still pending.
+	Interruptions int `json:"interruptions"`
+	// Producing is the subset where the pane changed AFTER the kick landed —
+	// the agent was observably working. This is the honest headline: teardowns
+	// that certainly discarded work, as opposed to teardowns that merely could
+	// have.
+	Producing int `json:"producing"`
+	// UpperBoundS is the summed time-since-kick across interruptions, in
+	// seconds. Named for what it is: the most these teardowns could have cost,
+	// never a claim about what they did cost.
+	UpperBoundS float64 `json:"upper_bound_s"`
+	// Bytes is the summed archived scrollback across interruptions, a proxy for
+	// the volume of turn output discarded.
+	Bytes int64 `json:"bytes"`
+	// Recent is a bounded tail of individual records, oldest first, so an
+	// operator can see the SHAPE of the loss (a few long turns vs. many short
+	// ones) rather than only its total.
+	Recent []AgentTurnInterruption `json:"recent,omitempty"`
+}
+
+// AgentTurnInterruption is one teardown that killed a turn in flight.
+//
+// Durations are seconds as floats rather than time.Duration: this lands in a
+// file operators read with `jq`, where a nanosecond integer is not legible.
+type AgentTurnInterruption struct {
+	At         time.Time `json:"at"`
+	Reason     string    `json:"reason"`
+	SinceKickS float64   `json:"since_kick_s"`
+	// SinceOutputS is nil when the pane poller never observed a change, which
+	// means UNKNOWN and must never be read as "idle".
+	SinceOutputS *float64 `json:"since_output_s,omitempty"`
+	Producing    bool     `json:"producing"`
+	Bytes        int      `json:"bytes"`
 }
 
 type GovKickEntry struct {

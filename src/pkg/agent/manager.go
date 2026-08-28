@@ -324,7 +324,13 @@ type AgentProcess struct {
 	// that has not yet been archived to a per-kick log file (see
 	// kick_logs.go). Set after every kick delivery; cleared when the
 	// scrollback is archived (next kick, restart, shutdown). Guarded by m.mu.
-	kickLogPending  bool
+	kickLogPending bool
+	// TurnLoss accumulates what teardowns have discarded from this agent's
+	// in-flight turns (#4002 open question 3): RestartCount says how many
+	// restarts happened, this says what they cost. Guarded by m.mu, persisted
+	// through snapshot.AgentState so it survives the restart it measures. See
+	// turn_loss.go.
+	TurnLoss        TurnLoss
 	actionNudgeSent bool // no-action watchdog: at most one action nudge per kick
 	ActionNudges    int  // total prose-only-response action nudges sent (surfaced to the dashboard)
 	// sandboxResumeAfterCancel is set when an operator resumes a paused
@@ -6059,6 +6065,7 @@ func (a *AgentProcess) snapshot() AgentProcess {
 		ModelOverride:      a.ModelOverride,
 		BackendOverride:    a.BackendOverride,
 		RestartCount:       a.RestartCount,
+		TurnLoss:           cloneTurnLoss(a.TurnLoss),
 		KickHistory:        history,
 		LastKickMessage:    a.LastKickMessage,
 		NeedsLogin:         needsLogin,
@@ -9172,11 +9179,9 @@ func (m *Manager) RestartWithBootstrap(ctx context.Context, name, prompt string)
 	}
 
 	// Archive the outgoing session's kick output before the session is killed
-	// below — kill-session destroys the scrollback (#4295/#4296).
-	if agent.kickLogPending {
-		m.archiveKickLogLocked(agent, "restart")
-		agent.kickLogPending = false
-	}
+	// below — kill-session destroys the scrollback (#4295/#4296) — and record
+	// what the teardown discarded (#4002).
+	m.tearDownTurnLocked(agent, "restart")
 
 	// Terminate the agent's CLI process(es) before recreating the session.
 	// reapAgentCLI matches by the HIVE_AGENT env marker, so it works whether or
@@ -9481,11 +9486,9 @@ func (m *Manager) Restart(ctx context.Context, name string) error {
 
 	// Archive the outgoing session's kick output BEFORE anything below kills
 	// the CLI or the session — kill-session destroys the scrollback and with
-	// it the only record of the previous run (#4295/#4296).
-	if agent.kickLogPending {
-		m.archiveKickLogLocked(agent, "restart")
-		agent.kickLogPending = false
-	}
+	// it the only record of the previous run (#4295/#4296). The same funnel
+	// records what this teardown cost the in-flight turn (#4002).
+	m.tearDownTurnLocked(agent, "restart")
 
 	// Terminate the agent's CLI process(es) before recreating the session.
 	// reapAgentCLI matches by the HIVE_AGENT env marker, so it works whether or
