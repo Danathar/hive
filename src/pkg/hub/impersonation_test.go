@@ -360,8 +360,8 @@ func TestImpersonationNoPrivilegeEscalation(t *testing.T) {
 	get2.AddCookie(testAuthCookie("bob"))
 	get2.AddCookie(impersonateCookie("bob", "alice", now))
 	eff, real, imp = s.resolveIdentity(get2)
-	if imp || eff != "bob" {
-		t.Errorf("non-admin self-minted grant honored: eff=%q imp=%v; want bob/false", eff, imp)
+	if imp || eff != "bob" || real != "bob" {
+		t.Errorf("non-admin self-minted grant honored: eff=%q real=%q imp=%v; want bob/bob/false", eff, real, imp)
 	}
 }
 

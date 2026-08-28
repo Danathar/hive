@@ -49,6 +49,10 @@ verified untouched afterwards.
 src/deploy/probe_podman_rootless_netadmin.sh --bypass
 ```
 
+CI runs exactly this, per pull request, on `ubuntu-latest`:
+`.github/workflows/podman-rootless-lane.yml` (#4334). A case that stops
+matching the contract recorded here fails that job.
+
 It creates its own throwaway store by default, removes only the containers it
 created, by name, and exits non-zero if any case stops matching the contract
 recorded here. It deletes its own store with `podman unshare rm -rf`, because
@@ -226,5 +230,6 @@ that rootless cannot enforce; it does not finish the argument.
 ## References
 
 - [`src/deploy/entrypoint.sh`](https://github.com/kubestellar/hive/blob/v4/src/deploy/entrypoint.sh) — `EXIT_NET_ADMIN_REQUIRED`, the bounding-set probe, and the fail-closed branch.
+- [Podman support matrix](podman-support-matrix.md) — the support decision this spike feeds: rootless + enforcing started as **experimental** on this spike's evidence and was promoted to **supported** by #4487, which measured the three promotion criteria this spike named.
 - [NET_ADMIN requirement](https://github.com/kubestellar/hive/blob/v4/src/docs/net-admin-requirement.md)
 - [Security model](https://github.com/kubestellar/hive/blob/v4/src/docs/security-model.md)

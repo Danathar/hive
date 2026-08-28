@@ -166,6 +166,10 @@ func parseCopilotSessionFile(path string) (*SessionSummary, error) {
 	summary := &SessionSummary{
 		Agent: "unknown",
 		Model: "unknown",
+		// All token usage lands in one lump at session.shutdown, so there is no
+		// intra-session time distribution to recover. Repo attribution reports
+		// copilot tokens as backend_unsupported.
+		Backend: BackendCopilot,
 	}
 
 	scanner := bufio.NewScanner(f)
@@ -179,6 +183,13 @@ func parseCopilotSessionFile(path string) (*SessionSummary, error) {
 		var evt copilotEvent
 		if err := json.Unmarshal(scanner.Bytes(), &evt); err != nil {
 			continue
+		}
+
+		// Session start time: the earliest event with a parseable timestamp.
+		if summary.FirstActive == 0 {
+			if ts := parseTimestampToUnixMilli(evt.Timestamp); ts > 0 {
+				summary.FirstActive = ts
+			}
 		}
 
 		switch evt.Type {

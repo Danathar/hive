@@ -91,6 +91,15 @@ needs one.
 
 ### 1. Rootless, hosted — the primary lane
 
+> **Built (#4334):** `.github/workflows/podman-rootless-lane.yml` runs the
+> three-case matrix per PR on `ubuntu-latest`. It asserts the discovered Podman
+> version floor, rootless mode, and cgroup version before probing, reports the
+> exact version against the one recorded below, and does not swallow the
+> probe's exit status. What it does *not* do is build the PR's own image — it
+> probes a published one, so an unpublished change to `src/deploy/entrypoint.sh`
+> is not yet covered.
+
+
 Everything in the rootless matrix runs here: default startup and exit 77,
 `--cap-add NET_ADMIN` with the redirect installed, deliberate advisory mode,
 bypass resistance, the preflight checks, and Compose-provider selection.
@@ -107,6 +116,15 @@ test.
 
 ### 2. Rootful, hosted
 
+> **Built (#4335):** `.github/workflows/podman-rootful-lane.yml` runs the #4200
+> probe per PR on `ubuntu-latest` under `sudo -n`. It asserts passwordless
+> sudo, the Podman version floor, and `rootless=false` before probing — so the
+> job cannot pass by quietly running rootless — and it does not swallow the
+> probe's exit status. It passes no `--store`, leaving the probe's throwaway
+> graphroot/runroot in place, and a post-run step checks that the runner's own
+> rootful store came back unchanged. Like lane 1 it probes a published image,
+> not the PR's own.
+
 `sudo -n` works and `sudo podman run` works. The rootful egress-gate baseline
 (#4200) belongs here.
 
@@ -116,6 +134,16 @@ hosted runners are ephemeral and single-use. It must never be combined with
 `pull_request_target`, and it must not have access to secrets — see below.
 
 ### 3. `arm64`, hosted
+
+> **Built (#4336):** `.github/workflows/podman-arm64-lane.yml` runs
+> `src/deploy/probe_arm64_image_startup.sh` per PR on `ubuntu-24.04-arm`. It
+> asserts the runner really is arm64, prints the runtime and network backend
+> for comparison against the amd64 lanes, then checks four things and no more:
+> the tag advertises a `linux/arm64` image, that image pulls and really is
+> arm64, `/usr/local/bin/hive` executes, and the container answers
+> `GET /api/health`. A missing arm64 manifest fails the job rather than
+> skipping, and the lane does not build an image ad hoc — the arm64 build is
+> already a per-push gate in `docker.yml`.
 
 `ubuntu-24.04-arm` is already used by `.github/workflows/docker.yml` for the
 multi-architecture image build, so the runner label is proven in this
@@ -127,6 +155,16 @@ that the identical-capability result says will not diverge. If the two ever do
 diverge, that is itself the signal to widen the lane.
 
 ### 4. SELinux-enforcing — the only lane that needs new infrastructure
+
+> **Built (#4337):** not a workflow, on purpose — see below.
+> [The release qualification](podman-selinux-release-qualification.md) documents
+> a repeatable procedure and ships `src/deploy/qualify_podman_selinux.sh`, run
+> per release on an enforcing Fedora/CentOS Stream-class host. It covers the
+> `:z`/`:Z` mount forms, MCS label behaviour, and secret access, and gives
+> #4209's preflight its first coverage on a host where SELinux enforces
+> anything. The script refuses to run outside Enforcing and records the release
+> as UNEXECUTED rather than reporting a pass from a permissive host. The first
+> row is recorded in the ledger there.
 
 Hosted runners have no SELinux at all: no `getenforce`, no `/sys/fs/selinux`,
 AppArmor instead. There is no way to make an Ubuntu hosted runner enforce
@@ -150,6 +188,17 @@ enforcement, because the host kernel is what enforces, and that kernel has no
 SELinux at all.
 
 ### 5. Quadlet generator gate
+
+> **Built (#4338):** `.github/workflows/quadlet-gate.yml` runs
+> `src/deploy/test_quadlet_generator_gate.sh` per PR on `ubuntu-latest`. It
+> takes the generator from the official Podman image pinned by digest rather
+> than from `apt` — Ubuntu 24.04 packages podman 4.9.3, below the 5.0.0 that
+> ADR-0017 derives as its binding constraint — verifies the binary is present
+> before running anything, and dry-runs both rootful and `--user`. It fails on
+> any generator diagnostic rather than on the exit status alone, because the
+> generator warns about a short-name image while still exiting 0. No Quadlet
+> units exist yet, so what it gates today is the generator's presence and
+> dry-run capability; known-bad fixtures keep that from being a vacuous pass.
 
 Small and hosted, but it needs its own issue precisely because of the
 generator-absent finding. The lane must install the generator (the distribution
@@ -209,9 +258,10 @@ Applies to every lane above.
 Deliberately not opened here; a maintainer can file them as-is. Each is
 `Part of #4188` and none should close it.
 
-1. **CI: rootless Podman lane on hosted amd64.** Wrap the #4199 probe script
-   in a workflow on `ubuntu-latest`. Assert the discovered Podman version and root mode. AC: the
-   three-case matrix runs per PR; a gate that fails to install fails the job.
+1. ~~**CI: rootless Podman lane on hosted amd64.**~~ **Done (#4334)** —
+   `.github/workflows/podman-rootless-lane.yml`. Wrapped the #4199 probe script
+   in a workflow on `ubuntu-latest`, asserting the discovered Podman version and
+   root mode.
 2. **CI: rootful Podman lane on hosted amd64.** `sudo podman`, the #4200
    baseline. AC: no secrets, no `pull_request_target`, rootful mode asserted.
 3. **CI: `arm64` build/pull and startup lane.** `ubuntu-24.04-arm`, scoped to

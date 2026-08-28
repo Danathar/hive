@@ -203,11 +203,25 @@ elif overlay_has_real_app:
     # PEM it names actually exists on this PVC. A dangling reference
     # (e.g. an interrupted key write) must not silently authenticate with
     # a missing/placeholder file; fail loud instead of 401-looping quietly.
+    #
+    # BOTH delivery locations, not just the PVC (#4368). /secrets is the
+    # provisioning mount, and the provisioning template used to seed
+    # key_file=/secrets/gh-app-key.pem for every App-using hive while creating
+    # that Secret entry only for hives provisioned WITH an inline private key.
+    # Four hives shipped naming a file that would never exist — under the one
+    # prefix this check did not look at, so the warning written for exactly
+    # this symptom stayed silent on every one of them, and the fault first
+    # surfaced as github_auth: fail hours later. A path outside both prefixes
+    # is an operator's own location and is deliberately not second-guessed.
     key_file = overlay_gh.get('key_file') or ''
-    if isinstance(key_file, str) and key_file.startswith('/data/') and not os.path.isfile(key_file):
+    if isinstance(key_file, str) and key_file.startswith(('/data/', '/secrets/')) and not os.path.isfile(key_file):
+        where = 'the PVC' if key_file.startswith('/data/') else 'the provisioning secret mount'
         sys.stderr.write(
             "[entrypoint] WARNING: overlay github.key_file=%s does not exist on "
-            "the PVC — GitHub App auth will fail until it is re-installed\n" % key_file
+            "%s — GitHub App auth will fail until it is re-installed. An explicit "
+            "key_file also short-circuits the fallback that would otherwise find a "
+            "delivered key; leaving it unset lets the path be derived from app_id\n"
+            % (key_file, where)
         )
 
 # The dashboard OVERLAY wins for acmm_level: the ConfigMap seed only ever
@@ -333,6 +347,26 @@ if [ "$(id -u)" = "0" ]; then
   chown dev:node /home/dev 2>/dev/null || true
   chown dev:node /etc/hive/hive.yaml 2>/dev/null || true
 
+  # Keep the MITM CA private key out of /data's agent-writable namespace.
+  # /data contains shared agent state and may be group-writable on PVCs. The
+  # certificate remains at /data/proxy-ca.pem because agents need to trust it,
+  # but the private key lives below an owner-only directory. If the legacy key
+  # is present, discard the old CA pair so a key that may already have been
+  # copied by an agent can never remain trusted. Reject symlinks so the proxy
+  # cannot be redirected to an attacker-controlled path.
+  mkdir -p /data/.hive && chown dev:node /data/.hive 2>/dev/null || true
+  chmod 700 /data/.hive 2>/dev/null || true
+  if [ -L /data/.hive/proxy-ca-key.pem ]; then
+    rm -f -- /data/.hive/proxy-ca-key.pem 2>/dev/null || true
+  fi
+  if [ -L /data/proxy-ca-key.pem ] || [ -f /data/proxy-ca-key.pem ]; then
+    # A key that was exposed in the old location may already have been copied
+    # by an agent. Do not migrate it: discard the old key and certificate so
+    # the proxy creates a fresh CA pair on this boot.
+    rm -f -- /data/proxy-ca-key.pem /data/proxy-ca.pem /data/proxy-ca-bundle.pem 2>/dev/null || true
+  fi
+  chmod 600 /data/.hive/proxy-ca-key.pem 2>/dev/null || true
+
   # Ensure the PVC secrets dir the dashboard writes API keys into
   # (/data/secrets/litellm_api_key) exists and is owned by the dev user.
   # The Go binary runs as non-root (uid 1001) and CANNOT chown, so if this
@@ -414,6 +448,29 @@ if [ "$(id -u)" = "0" ]; then
     cp -rn /opt/hive/seed-data/* /data/ 2>/dev/null || true
   fi
 
+  # The seed copy above runs as root, so everything it creates is root-owned.
+  # Roster agents get re-chowned to their own hive-<agent> UID in the
+  # per-agent loop below, but /data/agents ITSELF and any seeded directory for
+  # an agent no longer in the roster (e.g. the retired "reviewer" seed) stay
+  # root-owned forever. The permissions watcher runs as dev after the
+  # privilege drop, cannot chown, and would warn about them on every tick
+  # (#4488). This is the one moment we are still root and the chown actually
+  # succeeds, so hand root-owned agent-data entries to dev:node NOW.
+  # Entries already owned by an agent UID or dev are left untouched.
+  if [ -d /data/agents ]; then
+    if [ "$(stat -c '%u' /data/agents 2>/dev/null || echo 0)" = "0" ]; then
+      chown dev:node /data/agents 2>/dev/null || true
+      chmod g+rwX /data/agents 2>/dev/null || true
+    fi
+    for _seeded_dir in /data/agents/*/; do
+      [ -d "$_seeded_dir" ] || continue
+      if [ "$(stat -c '%u' "$_seeded_dir" 2>/dev/null || echo 0)" = "0" ]; then
+        chown -R dev:node "$_seeded_dir" 2>/dev/null || true
+        chmod -R g+rwX "$_seeded_dir" 2>/dev/null || true
+      fi
+    done
+  fi
+
   # Create beads symlinks: /home/dev/<agent>-beads -> /data/beads/<agent>
   if [ -d /etc/hive/agents ] || [ -d /data/beads ]; then
     mkdir -p /home/dev /data/beads
@@ -439,6 +496,19 @@ if [ "$(id -u)" = "0" ]; then
       chown -R dev:node /data/beads 2>/dev/null || true
       chmod -R g+rwX /data/beads 2>/dev/null || true
     fi
+    # UNCONDITIONAL group repair (fma incident, llm-d-fast-model-actuation):
+    # OpenShift's restricted SCC assigns the namespace a random fsGroup
+    # (e.g. 1001670000); kubelet chgrps the PVC to it WITH setgid on mount, so
+    # bead dirs created afterwards inherit that foreign gid at mode 0770. The
+    # hive server drops to dev (groups node + hive-launch) at privilege drop,
+    # losing the fsGroup supplementary group, and then EACCESes on every store
+    # at startup — the advisory digest builds empty and silently goes stale
+    # while agents keep writing findings. The DATA_OWNER-gated chown above
+    # never fires (fsGroup changes group, not owner), so re-group the beads
+    # tree to node on every boot while we are still root. The tree is small
+    # (JSON ledgers), so the recursive walk is cheap even on NFS.
+    chgrp -R node /data/beads 2>/dev/null || true
+    chmod -R g+rwX /data/beads 2>/dev/null || true
   fi
 
   # Shared CLI auth/cache lives in /data/home (persistent volume).
@@ -451,6 +521,13 @@ if [ "$(id -u)" = "0" ]; then
   # is perfectly writable. 2775 = rwxrwxr-x + setgid (new entries inherit node).
   chmod 2775 /data/home 2>/dev/null || true
   chown dev:node /data/home 2>/dev/null || true
+  # Per-agent interactive HOMEs live here (#4596): the manager provisions
+  # /data/home/agents/<name> per agent at launch, bridged by symlinks back to
+  # the shared dot-dirs below. 0755: every agent UID traverses it, none write
+  # directly in it (each agent's own home is chowned to that agent).
+  mkdir -p /data/home/agents
+  chmod 0755 /data/home/agents 2>/dev/null || true
+  chown dev:node /data/home/agents 2>/dev/null || true
   chmod 2770 /data/home/.copilot 2>/dev/null || true
   chown dev:node /data/home/.copilot 2>/dev/null || true
   chmod 2775 /data/home/.claude /data/home/.claude/session-env 2>/dev/null || true
@@ -498,10 +575,20 @@ if [ "$(id -u)" = "0" ]; then
     # this completes in <1s. Running in background caused a race where agents
     # started before perms were fixed, hitting EACCES on config.json.
     echo "[entrypoint] Fixing /data/home perms..."
-    chmod -R g+rwX /data/home 2>/dev/null
-    find /data/home -type d -exec chmod g+s {} + 2>/dev/null
+    # This file runs under `set -e`. chmod on an inode root does not OWN (the
+    # tree is dev-owned) needs CAP_FOWNER, and keeping the setgid bit needs
+    # CAP_FSETID — both are in deployment.yaml's capabilities.add. Before they
+    # were, a failed chmod here exited the container with status 1 right after
+    # the line above and NO error text, crash-looping every fresh PVC. Log and
+    # continue instead: agents may hit EACCES later, but the operator gets a
+    # WARN naming the cause rather than a silent exit.
+    chmod -R g+rwX /data/home 2>/dev/null \
+      || echo "[entrypoint] WARN: chmod -R g+rwX /data/home failed — is CAP_FOWNER in the pod's capabilities.add? Continuing; agents may hit EACCES under /data/home"
+    find /data/home -type d -exec chmod g+s {} + 2>/dev/null \
+      || echo "[entrypoint] WARN: chmod g+s on /data/home dirs failed — is CAP_FOWNER/CAP_FSETID in the pod's capabilities.add? Continuing"
     if [ "$DATA_OWNER" != "1001" ]; then
-      chown -R dev:node /data/config /data/home 2>/dev/null
+      chown -R dev:node /data/config /data/home 2>/dev/null \
+        || echo "[entrypoint] WARN: chown -R dev:node /data/config /data/home failed — is CAP_CHOWN in the pod's capabilities.add? Continuing"
     fi
     echo "[entrypoint] perm fix complete"
   else
@@ -867,12 +954,132 @@ with open('/var/run/hive/uid-map.json', 'w') as f:
       echo "[entrypoint] ERROR: iptables not found — cannot force proxy egress"
     fi
 
-    if [ "$_iptables_ok" != "true" ]; then
+    # ── IPv6 egress gate (#4319) ────────────────────────────────────────────
+    # The redirect above exists ONLY in the IPv4 nat table. On any network that
+    # gives the container a global IPv6 address, an agent that resolves an AAAA
+    # record reaches :443 over IPv6 and never meets it — a SILENT bypass of the
+    # capability model (no ADVISORY-ONLY warning fires, because the IPv4 gate
+    # installed successfully). The proxy listens on 127.0.0.1 only
+    # (proxy.GitHubProxy listenAddr), so mirroring the REDIRECT with ip6tables
+    # could not deliver the traffic anywhere; the IPv6 family is instead CLOSED
+    # with a filter-table REJECT carrying the SAME three exemptions — xt_owner
+    # and xt_mark are family-agnostic, and SO_MARK (stamped by the Go proxy's
+    # markDialer) marks IPv6 packets identically, so the proxy's own upstream
+    # dials stay exempt on IPv6-capable networks.
+    #
+    # REJECT --reject-with tcp-reset rather than DROP: dual-stack clients get an
+    # immediate RST and fall back to IPv4 (Happy Eyeballs), landing in the IPv4
+    # redirect above, instead of hanging through a timeout on every dial.
+    #
+    # sysctl net.ipv6.conf.all.disable_ipv6=1 was REJECTED as the mechanism:
+    # the image depends on IPv6 loopback internally (the gateway nginx binds
+    # `listen [::]:PORT` for ::1 clients — gateway_nginx_dualstack_test.go —
+    # and the proxy's self-lookup reads /proc/net/tcp6), and /proc/sys is
+    # read-only in most container runtimes anyway.
+    #
+    # A kernel with no IPv6 stack at all (/proc/sys/net/ipv6 absent) has no
+    # IPv6 route to gate; that case passes vacuously rather than failing a
+    # container that cannot carry the traffic in the first place.
+    #
+    # The SAME reasoning applies one step further in, and the stack-presence
+    # check alone does not catch it (#4327 follow-up): a pod can have the IPv6
+    # stack compiled in — /proc/sys/net/ipv6 present, ::1 up for the gateway
+    # nginx and the proxy's /proc/net/tcp6 self-lookup — while having NO global
+    # IPv6 address and NO IPv6 default route. Such a pod cannot originate IPv6
+    # egress at all, so there is no bypass to close. Fail-closing there took
+    # down a healthy hive on an IPv4-only OpenShift cluster whose nodes also
+    # lack the ip6tables `owner`/`REJECT` extensions, so the gate could not be
+    # installed even though nothing could ever traverse it.
+    #
+    # Routability, not stack presence, is the property that decides whether an
+    # IPv6 bypass is reachable — so that is what is tested. A pod that later
+    # gains a global address gets the gate on its next start, and any pod that
+    # HAS IPv6 egress still fails closed exactly as before.
+    _ip6tables_ok=false
+    _ip6_routable=false
+    if [ -d /proc/sys/net/ipv6 ]; then
+      # A global-scope address AND a default route are both required to send
+      # IPv6 off-host. Prefer `ip`; fall back to /proc for minimal images.
+      if command -v ip >/dev/null 2>&1; then
+        if ip -6 addr show scope global 2>/dev/null | grep -q 'inet6' \
+           && ip -6 route show default 2>/dev/null | grep -q .; then
+          _ip6_routable=true
+        fi
+      elif [ -r /proc/net/if_inet6 ] && [ -r /proc/net/ipv6_route ]; then
+        # if_inet6 scope 0x00 == global; ipv6_route holds a ::/0 default when
+        # the destination prefix length field (col 2) is 00.
+        if awk '$4 == "00" { found=1 } END { exit !found }' /proc/net/if_inet6 2>/dev/null \
+           && awk '$2 == "00" { found=1 } END { exit !found }' /proc/net/ipv6_route 2>/dev/null; then
+          _ip6_routable=true
+        fi
+      else
+        # Neither `ip` nor the /proc files are readable, so routability cannot
+        # be determined. Assume routable and let the gate decide: an
+        # indeterminate probe must not be the thing that disables enforcement.
+        _ip6_routable=true
+      fi
+    fi
+    if [ ! -d /proc/sys/net/ipv6 ]; then
+      echo "[entrypoint] IPv6 stack absent from kernel — no IPv6 egress to gate"
+      _ip6tables_ok=true
+    elif [ "$_ip6_routable" != "true" ]; then
+      echo "[entrypoint] IPv6 present but not routable (no global address and/or no default route) — no IPv6 egress to gate"
+      _ip6tables_ok=true
+    else
+      # Same binary-selection rationale as IPT above: prefer the explicit nft
+      # frontend on nft-mode kernels (OKE, OpenShift/RHEL9).
+      IP6T=""
+      if command -v ip6tables-nft >/dev/null 2>&1; then
+        IP6T="ip6tables-nft"
+      elif command -v ip6tables >/dev/null 2>&1; then
+        IP6T="ip6tables"
+      fi
+      if [ -n "$IP6T" ]; then
+        # Same jittered chain-creation retry as the IPv4 gate: one-shot
+        # creation turns transient netlink/xtables contention into a
+        # fail-closed crash-loop (see the 2026-08-13 note above).
+        _ip6_chain_ok=false
+        _ip6_try=0
+        while [ "$_ip6_try" -lt 5 ]; do
+          _ip6_try=$((_ip6_try + 1))
+          if $IP6T -nL HIVE_PROXY6 >/dev/null 2>&1; then
+            $IP6T -F HIVE_PROXY6 2>/dev/null || true
+            _ip6_chain_ok=true
+            break
+          fi
+          if $IP6T -w 10 -N HIVE_PROXY6 2>/tmp/hive-ip6t-err.log; then
+            _ip6_chain_ok=true
+            break
+          fi
+          echo "[entrypoint] WARN: ip6tables chain creation attempt ${_ip6_try}/5 failed: $(cat /tmp/hive-ip6t-err.log 2>/dev/null) — retrying"
+          sleep $(( _ip6_try * 2 + $$ % 3 ))
+        done
+        if [ "$_ip6_chain_ok" = "true" ]; then
+          # Exemptions mirror the IPv4 chain exactly, in the same order, for
+          # the same two-platform reasons (owner-UID where xt_owner exists,
+          # packet mark where it does not). `|| true` on the owner lines keeps
+          # their failure non-fatal on hosts without xt_owner.
+          $IP6T -A HIVE_PROXY6 -m owner --uid-owner 0 -j RETURN || true
+          $IP6T -A HIVE_PROXY6 -m owner --uid-owner "$PROXY_UID" -j RETURN || true
+          $IP6T -A HIVE_PROXY6 -m mark --mark "$HIVE_PROXY_EGRESS_MARK" -j RETURN
+          $IP6T -A HIVE_PROXY6 -p tcp --dport 443 -j REJECT --reject-with tcp-reset
+          $IP6T -A OUTPUT -j HIVE_PROXY6
+          echo "[entrypoint] ip6tables ($IP6T): outbound IPv6 :443 REJECTed (proxy has no IPv6 listener; proxy UID ${PROXY_UID} + egress mark ${HIVE_PROXY_EGRESS_MARK} exempt)"
+          _ip6tables_ok=true
+        else
+          echo "[entrypoint] ERROR: ip6tables chain creation failed after ${_ip6_try} attempts: $(cat /tmp/hive-ip6t-err.log 2>/dev/null)"
+        fi
+      else
+        echo "[entrypoint] ERROR: ip6tables not found — IPv6 egress cannot be gated"
+      fi
+    fi
+
+    if [ "$_iptables_ok" != "true" ] || [ "$_ip6tables_ok" != "true" ]; then
       if [ "$PROXY_ADVISORY_OK" = "true" ]; then
         echo "[entrypoint] WARN: proxy egress enforcement is ADVISORY-ONLY (HIVE_PROXY_ADVISORY_OK=true set). Agents can bypass the MITM proxy — capability model is NOT enforced."
       else
-        echo "[entrypoint] FATAL: could not establish forced proxy egress (iptables redirect). The ACMM capability model would be advisory-only, allowing agents with raw tokens to bypass the MITM proxy." >&2
-        echo "[entrypoint] FATAL: refusing to start. Grant NET_ADMIN + install iptables, or set HIVE_PROXY_ADVISORY_OK=true to deliberately run in advisory mode." >&2
+        echo "[entrypoint] FATAL: could not establish forced proxy egress (IPv4 redirect established: ${_iptables_ok}; IPv6 gate established: ${_ip6tables_ok}). The ACMM capability model would be advisory-only for the failed family, allowing agents with raw tokens to bypass the MITM proxy." >&2
+        echo "[entrypoint] FATAL: refusing to start. Grant NET_ADMIN + install iptables/ip6tables, or set HIVE_PROXY_ADVISORY_OK=true to deliberately run in advisory mode." >&2
         # Distinguish root cause by exit code (#3760 follow-up): netfilter
         # chain manipulation itself requires CAP_NET_ADMIN, so if the
         # bounding set lacks it, that absence is BY ITSELF sufficient to
@@ -1142,6 +1349,48 @@ elif [ -f /data/proxy-ca.pem ]; then
   echo "[entrypoint] WARN: no system CA bundle at $SYSTEM_CA_BUNDLE; SSL_CERT_FILE=/data/proxy-ca.pem (proxy CA only)"
 fi
 
+# ── Config-path argv reconciliation (#4973) ───────────────────────────
+# Both config branches above have a read-only escape hatch: when the config
+# path cannot be written they `export HIVE_CONFIG=<runtime config>` and log
+# "config path is read-only — using ... directly". That export was INERT.
+#
+# main.go reads HIVE_CONFIG only to pick the DEFAULT of its -config flag:
+#
+#   defaultConfig := "/etc/hive/hive.yaml"
+#   if envCfg := os.Getenv("HIVE_CONFIG"); envCfg != "" { defaultConfig = envCfg }
+#   configPath := flag.String("config", defaultConfig, ...)
+#
+# and the image's own CMD passes the flag EXPLICITLY
+# (Dockerfile: CMD ["--config", "/etc/hive/hive.yaml"]), which outranks any
+# default. So on every hive whose config path is read-only — a bind-mounted
+# hive.yaml under docker/podman is the common case — the binary loaded the
+# stale read-only file while the entrypoint believed it had redirected it.
+#
+# The damage is not confined to that boot. Config.Save() writes
+# /data/hive.yaml.runtime unconditionally, so the first save of any kind
+# (dashboard edit, heartbeat-delivered config) wrote the STALE config back
+# over the runtime file that held the operator's real state. Observed as an
+# ACMM level set from the dashboard reverting on the next restart, twice, with
+# /data fully intact (#4973).
+#
+# main.go cannot fix this on its own: an explicit --config coming from the
+# image's CMD is indistinguishable from one an operator typed. The entrypoint
+# is the component that knows the config path is stale, so it has to say so in
+# the argv it actually launches with.
+#
+# APPENDED, not substituted: Go's flag package processes occurrences in order
+# and keeps the last, so `--config <stale> ... --config $HIVE_CONFIG` resolves
+# to HIVE_CONFIG without this script having to parse and rewrite the CMD.
+#
+# When HIVE_CONFIG is unset (the ordinary case, where the cp above succeeded
+# and the config path IS current) nothing is appended and the CMD applies
+# unchanged. When an operator sets HIVE_CONFIG themselves, this makes the
+# binary honour it — which is what the variable already means everywhere else
+# in this script (HIVE_CONFIG_PATH is derived from it at the top).
+if [ -n "${HIVE_CONFIG:-}" ]; then
+  set -- "$@" --config "$HIVE_CONFIG"
+  echo "[entrypoint] Config path pinned for the Go binary: --config $HIVE_CONFIG"
+fi
 echo "[entrypoint] Starting Go binary on :${HIVE_API_PORT} (uid=$(id -u))"
 hive "$@" &
 HIVE_PID=$!
@@ -1219,7 +1468,14 @@ TTYD_CRED="${HIVE_TTYD_CREDENTIAL:-}"
 if [ -z "$TTYD_CRED" ] && [ -n "${HIVE_DASHBOARD_TOKEN:-}" ]; then
   TTYD_CRED="hive:${HIVE_DASHBOARD_TOKEN}"
 fi
-CRED_ARGS="-a"
+# CRED_ARGS carries ONLY the credential. --url-arg (-a) is passed unconditionally
+# on the ttyd command line below and must never live in here: #4593 was caused by
+# this branch REPLACING a CRED_ARGS that was also carrying -a, which silently
+# dropped --url-arg on every hive with a dashboard token (i.e. effectively all of
+# them — bin/hive-podman-setup.sh generates HIVE_DASHBOARD_TOKEN unconditionally
+# and the Compose stack requires it). Keep the two concerns in separate places so
+# the next edit to the credential branch cannot take --url-arg down with it.
+CRED_ARGS=""
 if [ -n "$TTYD_CRED" ]; then
   CRED_ARGS="-c ${TTYD_CRED}"
 fi
@@ -1230,7 +1486,12 @@ TTYD_RESPAWN_DELAY_SECS=5
 (
   trap '' HUP
   while true; do
-    ttyd -W ${CRED_ARGS} -i "${TTYD_BIND}" -p "${TTYD_PORT}" -t fontSize=14 -t disableLeaveAlert=true /usr/local/bin/ttyd-tmux.sh
+    # -a/--url-arg lets ttyd forward the ?arg=<session> that the dashboard puts in
+    # every terminal link (src/pkg/dashboard/static/index.html) through to
+    # ttyd-tmux.sh. Without it ttyd discards the query, the attach script falls
+    # back to its default session name, and the browser terminal dies with
+    # "no tmux socket found for session 'supervisor'" (#4593).
+    ttyd -W -a ${CRED_ARGS} -i "${TTYD_BIND}" -p "${TTYD_PORT}" -t fontSize=14 -t disableLeaveAlert=true /usr/local/bin/ttyd-tmux.sh
     echo "[entrypoint] ttyd exited (rc=$?), respawning in ${TTYD_RESPAWN_DELAY_SECS}s..."
     sleep "$TTYD_RESPAWN_DELAY_SECS"
   done

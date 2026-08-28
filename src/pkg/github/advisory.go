@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -19,6 +20,30 @@ const (
 	advisoryLabelDesc = "Pinned advisory report from Hive agents"
 	advisoryLabelClr  = "0e8a16"
 )
+
+// IssuesDisabledError reports that the advisory issue cannot be created or
+// resolved because the target repo has its Issues feature turned off
+// (has_issues=false). GitHub disables Issues on forks by default, so this is
+// the common failure mode when a hive is pointed at a fork (#4329). It is a
+// distinct class from the 403 "Resource not accessible by integration"
+// App-permission failure: no amount of App reconfiguration fixes it, only a
+// repo-settings change (or repointing the hive) does, so the message names
+// that remedy.
+type IssuesDisabledError struct {
+	// Repo is the owner/name of the repo with Issues disabled.
+	Repo string
+	// Fork records whether the repo is a GitHub fork, the usual reason
+	// Issues are off.
+	Fork bool
+}
+
+func (e *IssuesDisabledError) Error() string {
+	why := "common on forks"
+	if e.Fork {
+		why = "it is a fork, and GitHub disables Issues on forks by default"
+	}
+	return fmt.Sprintf("Issues are disabled on %s (%s) — enable Issues in the repo's Settings > General > Features, or point the hive at the upstream repo", e.Repo, why)
+}
 
 // EnsureAdvisoryIssue finds or creates the pinned advisory issue for a repo.
 // Returns the issue number.
@@ -39,6 +64,21 @@ func (c *Client) EnsureAdvisoryIssue(ctx context.Context, repo string) (int, err
 	if num > 0 {
 		c.logger.Info("found existing advisory issue", slog.String("repo", repo), slog.Int("number", num))
 		return num, nil
+	}
+
+	// Before attempting to create, check whether the repo can hold issues at
+	// all. A fork (or any repo with the Issues feature off) has no Issues tab:
+	// the create below would fail with a 410 that reads like an auth problem,
+	// and the fleet alert would blame the App. Name the real cause instead
+	// (#4329). A failed metadata probe fails OPEN — the create attempt then
+	// produces its own, real error.
+	if ghRepo, _, repoErr := c.client.Repositories.Get(ctx, owner, repo); repoErr == nil {
+		if ghRepo != nil && !ghRepo.GetHasIssues() {
+			return 0, &IssuesDisabledError{Repo: owner + "/" + repo, Fork: ghRepo.GetFork()}
+		}
+	} else {
+		c.logger.Warn("could not check repo has_issues before advisory issue create",
+			slog.String("repo", repo), slog.String("error", repoErr.Error()))
 	}
 
 	c.logger.Info("creating advisory issue", slog.String("repo", repo))
@@ -101,6 +141,15 @@ const (
 	// one audit pulse per ~50 minutes, enough to show the loop is alive without
 	// flooding the dashboard audit log.
 	advisoryDigestAuditInterval = 50
+	// advisoryDigestWriteThroughInterval bounds how many consecutive
+	// unchanged-digest cycles may be skipped before a real write is forced
+	// (#4818). A skipped cycle proves a PRIOR successful write, not current
+	// write permission, so without a periodic write-through a 403 regression
+	// (App loses issues:write, repo dropped from the installation) would stay
+	// invisible for as long as the digest stayed quiet. At ~one cycle a minute
+	// this forces roughly one real write per hour — enough to keep the
+	// App-banner logic honest while still eliminating ~98% of the no-op edits.
+	advisoryDigestWriteThroughInterval = 60
 )
 
 // PostAdvisoryDigest updates the existing digest comment on the advisory issue,
@@ -121,6 +170,36 @@ func (c *Client) PostAdvisoryDigest(ctx context.Context, repo string, issueNum i
 	// mention and neither pass weakens the other.
 	digest = advisory.NeutralizeMentions(digest)
 	digest = truncateDigest(logscrub.ScrubString(digest))
+
+	// Skip-if-unchanged guard (#4818): the digest is re-rendered ~once a
+	// minute, and at steady state the body is byte-identical cycle after
+	// cycle — rewriting the pinned comment anyway burned ~1,440 no-op GitHub
+	// writes/day. Hash the FINAL body (post-scrub, post-truncation — exactly
+	// the bytes that would go over the wire) and skip the whole forge
+	// round-trip when it matches the last body this process successfully
+	// wrote. Returning nil is deliberate: an unchanged skip is a HEALTHY
+	// cycle, so the caller's success path still advances the
+	// advisory-staleness freshness record (RecordAdvisoryPost). Three cases
+	// always write: the first post after process start (no hash yet), a
+	// changed body, and the periodic write-through that re-proves write
+	// permission (see advisoryDigestWriteThroughInterval).
+	key := fmt.Sprintf("%s/%s#%d", owner, repoName, issueNum)
+	digestHash := fmt.Sprintf("%x", sha256.Sum256([]byte(digest)))
+	c.advisoryMu.Lock()
+	if c.advisoryDigestSkips == nil {
+		c.advisoryDigestSkips = make(map[string]int)
+	}
+	if c.advisoryDigestHashes[key] == digestHash &&
+		c.advisoryDigestSkips[key] < advisoryDigestWriteThroughInterval-1 {
+		c.advisoryDigestSkips[key]++
+		skips := c.advisoryDigestSkips[key]
+		c.advisoryMu.Unlock()
+		c.logger.Debug("advisory digest unchanged — skipping forge write",
+			slog.String("repo", repo), slog.Int("issue", issueNum),
+			slog.Int("consecutive_skips", skips))
+		return nil
+	}
+	c.advisoryMu.Unlock()
 
 	commentID, err := c.findDigestComment(ctx, owner, repoName, issueNum)
 	if err != nil {
@@ -154,7 +233,15 @@ func (c *Client) PostAdvisoryDigest(ctx context.Context, repo string, issueNum i
 	if c.advisoryDigestPosts == nil {
 		c.advisoryDigestPosts = make(map[string]int)
 	}
-	key := fmt.Sprintf("%s/%s#%d", owner, repoName, issueNum)
+	if c.advisoryDigestHashes == nil {
+		c.advisoryDigestHashes = make(map[string]string)
+	}
+	// Record the hash only after a SUCCESSFUL write (errors returned above),
+	// so a failed edit keeps being retried every cycle rather than skipped as
+	// "already posted". Reset the skip streak: the write-through clock starts
+	// over from any real write.
+	c.advisoryDigestHashes[key] = digestHash
+	c.advisoryDigestSkips[key] = 0
 	c.advisoryDigestPosts[key]++
 	count := c.advisoryDigestPosts[key]
 	c.advisoryMu.Unlock()
@@ -242,12 +329,47 @@ func (c *Client) findDigestComment(ctx context.Context, owner, repo string, issu
 	if err != nil {
 		return 0, err
 	}
+	var botAuthored int64
 	for _, comment := range comments {
-		if strings.HasPrefix(comment.GetBody(), advisoryDigestPrefix) {
+		if !strings.HasPrefix(comment.GetBody(), advisoryDigestPrefix) {
+			continue
+		}
+		if c.appAuth == nil {
+			// Token (PAT) client: historical prefix-only match. The credential
+			// may legitimately be the human who authored the comment, and
+			// authorship cannot be verified without an extra /user round trip.
 			return int(comment.GetID()), nil
 		}
+		login := comment.GetUser().GetLogin()
+		if c.appBotLogin != "" && login == c.appBotLogin {
+			// Exactly our own bot comment — the one credential-safe choice.
+			return int(comment.GetID()), nil
+		}
+		if strings.HasSuffix(login, "[bot]") || comment.GetUser().GetType() == "Bot" {
+			// Bot-authored but not provably ours (bot login unknown, or a slug
+			// mismatch between config and the real App). Remember the first as
+			// a fallback rather than skipping it: refusing our own comment on
+			// a misconfigured slug would create a duplicate every cycle.
+			if botAuthored == 0 {
+				botAuthored = comment.GetID()
+			}
+			continue
+		}
+		// A digest comment this App can never edit — e.g. one left behind by
+		// the removed user-token fallback (#1927), authored by a human. GitHub
+		// hard-forbids an App from editing a foreign-authored comment (403
+		// "Resource not accessible by integration") no matter what the
+		// installation grants, so adopting it wedges the digest forever
+		// (kalantar-msb/soft-reflective#1). Skip it; if no bot-authored digest
+		// comment exists a fresh App-authored one is created and every later
+		// cycle edits THAT one, so nothing is duplicated per cycle.
+		c.logger.Warn("skipping advisory digest comment not authored by this App — an installation token can never edit it",
+			slog.String("repo", owner+"/"+repo),
+			slog.Int("issue", issueNum),
+			slog.Int64("comment_id", comment.GetID()),
+			slog.String("author", login))
 	}
-	return 0, nil
+	return int(botAuthored), nil
 }
 
 func (c *Client) findAdvisoryIssue(ctx context.Context, owner, repo string) (int, error) {

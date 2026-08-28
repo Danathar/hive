@@ -4,6 +4,40 @@
 
 Hive can authenticate with either a personal access token or a GitHub App. Use a GitHub App for production hives because installation tokens are scoped to selected repositories and can author PRs as the app bot when `github.app_authored_prs` is enabled.
 
+## Personal access token (PAT) scopes
+
+The PAT path is `HIVE_GITHUB_TOKEN` (or `github.token` in `hive.yaml`); the App path is `github.app_id`/`github.key_file` as described below. If you set `app_id`/`key_file` this section does not apply — the App permission table further down does.
+
+Hive never validates token scopes at startup. A PAT with missing scopes fails **at request time** with generic GitHub 403 responses (fine-grained PATs typically say `Resource not accessible by personal access token`). The visible symptoms are agents reporting no actionable work, advisory digests not appearing on the tracking issue, empty fleet-stats widgets, or failed issue/PR writes in agent logs — none of which name the missing scope. If you see unexplained 403s, check the scopes below first.
+
+### Classic PATs
+
+Classic scopes are coarse, so one scope covers every ACMM tier:
+
+| ACMM tier | Minimum classic scopes | Why |
+| --- | --- | --- |
+| L1–L2 (advisory) | `repo` (private repos) or `public_repo` (public repos only) | Read issues/PRs/contents; post advisory digest comments to the pinned tracking issue (an issues **write**, even though the tier is otherwise read-only). |
+| L3–L4 (issue filing) | same | Create, label, comment on, and close issues. |
+| L5–L6 (PR/merge) | same, plus `workflow` if agent PRs may touch `.github/workflows/` | Push branches, open/update/merge PRs, read checks/statuses. GitHub rejects workflow-file pushes without `workflow`. |
+
+Add `read:org` when Hive should identify org members and contributor roles (recommended for org-owned hives).
+
+### Fine-grained PATs
+
+Fine-grained PATs are supported — the token is sent as a plain bearer, same as a classic PAT. Grant the token access to every repository the hive works on, with repository permissions mirroring the App table below:
+
+| Permission | L1–L2 (advisory) | L3–L4 (issues) | L5–L6 (PR/merge) |
+| --- | --- | --- | --- |
+| Metadata | Read | Read | Read |
+| Contents | Read | Read | Read and write |
+| Issues | Read and write | Read and write | Read and write |
+| Pull requests | Read | Read | Read and write |
+| Checks | Read | Read | Read |
+| Actions | Read | Read | Read |
+| Commit statuses | Read | Read | Read |
+
+Organization permission: **Members: Read** where contributor/owner identification is configured. Note that Issues read-and-write is needed even at advisory tiers because digests are posted as issue comments.
+
 ## Create the app
 
 In GitHub, open **Settings → Developer settings → GitHub Apps → New GitHub App** (or the equivalent organization settings page). On **GitHub Enterprise**, do this on your enterprise host (`https://<your-ghe-host>/settings/apps/new`), not github.com — the app, its install page (`https://<your-ghe-host>/github-apps/<app-slug>`), and the source control host Hive is configured for must all be the same host.
@@ -28,12 +62,71 @@ Repository permissions used by the dashboard setup UI are:
 | Pull requests | Read/write | Create, update, approve/merge, and inspect PRs. |
 | Checks | Read-only | Monitor CI status. |
 | Actions | Read-only | Inspect workflow runs. |
+| Workflows | Read/write | Let trusted-tier agents push branches that modify `.github/workflows/`. Without it GitHub rejects any such push server-side ("refusing to allow a GitHub App to create or update workflow … without workflows permission") no matter what the token requests. Hive degrades gracefully — trusted-tier token minting retries without this permission and logs a warning — but CI-fix PRs from agents stay impossible until it is granted **and re-accepted on each installation** (an existing install must approve the new permission under Settings → Integrations → the app → Review request). |
 
 Organization permission:
 
 | Permission | Level | Why |
 | --- | --- | --- |
 | Members | Read-only | Identify contributors and owners where configured. |
+
+### The optional Visual Hive App (#4030)
+
+Visual Hive needs two grants the Hive App deliberately does **not** hold — Actions
+at write (to dispatch its installed workflow) and Commit statuses at write (to
+publish the provenance-bound setup authorization status). Rather than widen the
+Hive App, those grants live in a separate, optional, KubeStellar-owned App, so
+enabling Visual Hive never changes what an installation that will never use it
+has approved.
+
+| App | App ID | Forge |
+| --- | --- | --- |
+| `kubestellar-viz-hive` | 4729416 | github.com |
+| `kubestellar-viz-hive-ghe` | 5945 | github.ibm.com |
+
+Its permission set is exactly:
+
+| Permission | Level | Why |
+| --- | --- | --- |
+| Actions | Read/write | Dispatch the installed Visual Hive workflow. |
+| Commit statuses | Read/write | Publish the setup authorization status. |
+| Metadata | Read-only | Required by GitHub. |
+
+Nothing else — no Contents, Workflows, Issues, Pull requests or Checks — and no
+webhooks. Install it on **selected repositories**, not all repositories.
+
+These identities are declared in `src/pkg/config/provenance.go` and are inert on
+this branch: nothing resolves a key for them, delivers one, or authenticates as
+them. Registering them ahead of the feature only means a config naming one is
+described accurately instead of reported as an unknown App.
+
+#### Reading the granted Actions and Commit-statuses permissions
+
+App auth classification turns solely on the Issues permission, and an
+installation that has not been granted the two Visual Hive permissions is
+healthy — its `state` is `ok`. That is correct, and it is also why those grants
+have to be reported separately: without it, an installation that has approved
+them and one that has not are indistinguishable.
+
+Every credential verdict now logs what is actually granted, including when the
+verdict is `ok`:
+
+```
+github app credential verdict owner=<org> state=ok grants="actions=read statuses=none" visual_hive_execution_grants=false
+```
+
+`grants` reports the level GitHub returned for each permission (`none` when
+there is no grant), and `visual_hive_execution_grants` is true only when both
+are at `write`. Emitting it for a healthy verdict is the point: an installation
+that has not approved a permission update is the one that still looks fine, and
+GitHub keeps an App on its old permissions until an org owner accepts, so a
+partly approved fleet is otherwise invisible.
+
+Verdicts are computed where a GitHub call has failed and on the dashboard's
+**Re-check** button, not on every eval cycle, so this adds no API calls to a
+healthy hive. To read a specific installation's grants on demand — for example
+to confirm the demo/canary install — press Re-check on that hive and read the
+line above from its logs.
 
 ## Install and configure Hive
 
@@ -71,3 +164,46 @@ The setup endpoint is intentionally public because GitHub opens it in a browser 
 ## Rotation and recovery
 
 To rotate a private key, generate a new key in GitHub, mount it at the configured `key_file`, restart Hive, then delete the old key in GitHub after the new one is confirmed working. If an installation was replaced, use `/gh-setup` again or update `github.installation_id` and restart/reload the hive.
+
+## Hub-distributed App keys (hosted fleet) — operator runbook
+
+On a hosted fleet the hub — not the hive owner — is the App-key authority. The hub keeps one PEM per cluster at `/data/saas/app-keys/<clusterID>.pem` (owner-only file modes, on the same PVC as the hub's other secrets) and reconciles it to every spoke on that cluster over the heartbeat. A claimed hive whose cluster has no stored key is delivered `key_delivered=false` at claim time and then receives nothing on any beat — it stays `Degraded` on `key-missing` forever until an operator uploads a key. **The hive owner cannot see, supply, or fix this key**; every owner-facing surface deliberately stays silent for the operator-side states (`key-missing`, `key-invalid`, `no-app-assigned`).
+
+### Uploading (or replacing) a cluster's App key
+
+The upload endpoint is the ONLY way key material enters the hub. Admin-gated:
+
+```
+PUT /api/saas/admin/cluster-app-keys/{clusterID}
+Content-Type: application/json
+
+{"private_key": "-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----", "app_id": 123456}
+```
+
+- `private_key` (required) — the GitHub App's PEM private key. Validated before it is persisted; a non-PEM or unparsable key is rejected with 400 and nothing is stored.
+- `app_id` (optional) — the App's numeric ID; when supplied it is persisted alongside in `clusters.json` so the cluster carries a complete identity.
+- An unknown `{clusterID}` returns 404.
+
+The response echoes back only the key's **fingerprint** (never the key), so you can verify the right key landed:
+
+```json
+{"cluster_id": "oke-frankfurt-1", "app_id": 123456, "has_key": true, "fingerprint": "sha256:..."}
+```
+
+Compare that fingerprint with one computed locally from the PEM you meant to upload. Delivery to the spokes then happens automatically on the next heartbeats — no restart needed.
+
+### Checking which clusters hold a key
+
+```
+GET /api/saas/admin/cluster-app-keys
+```
+
+returns `[{cluster_id, app_id, has_key, fingerprint}, ...]` for every cluster. A cluster with `has_key: false` will strand the first App-requiring hive claimed onto it — check this *before* pointing a pool at a new cluster.
+
+### The `app-creds-undelivered` fleet alert
+
+When a claimed, online hive reports an operator-side App-credential state, the hub raises a **critical** fleet alert (type `app-creds-undelivered`) in the dashboard's "Attention needed" panel. The alert names the hive and its cluster, shows how long it has been stranded, and carries the exact `PUT` remedy above. One alert per hive; it clears automatically once the key is delivered and the spoke reports healthy. The states it covers:
+
+- `key-missing` — no key ever reached the spoke (usually: the cluster has no stored PEM — upload one).
+- `key-invalid` — a key is present but GitHub rejects the JWTs it signs (it belongs to a different App — replace it with the correct PEM).
+- `no-app-assigned` — the hive still carries the placeholder `app_id` and was never assigned a real App (assign the cluster's App and upload its key).

@@ -58,6 +58,16 @@ var flexTimeFormats = []string{
 	"2006-01-02T15:04-07:00",
 	"2006-01-02T15:04:05",
 	"2006-01-02",
+	// Agents write beads through the bd CLI but occasionally hand-edit or
+	// template a human-format timestamp (observed live on torch-spyre:
+	// "2026-07-23 16:04 EDT"). Accept the common space-separated shapes so a
+	// well-meaning-but-wrong value still parses. time.Parse resolves a bare
+	// zone abbreviation to offset 0 when it isn't the local zone — hours-level
+	// imprecision, which beats the alternative below.
+	"2006-01-02 15:04:05 MST",
+	"2006-01-02 15:04 MST",
+	"2006-01-02 15:04:05",
+	"2006-01-02 15:04",
 }
 
 func (ft *flexTime) UnmarshalJSON(b []byte) error {
@@ -74,7 +84,18 @@ func (ft *flexTime) UnmarshalJSON(b []byte) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("parsing time %q: no matching format", s)
+	// FAIL-SOFT, deliberately. This unmarshals inside the store-wide
+	// json.Unmarshal of beads.json, so returning an error here poisons the
+	// ENTIRE agent ledger over one malformed field: the store is dropped from
+	// beadStores, the hive runs on a partial ledger for the life of the
+	// process, and the hub raises "N bead store(s) failed to load at startup"
+	// (observed live: torch-spyre ran degraded for a month over a single
+	// hand-written timestamp). A zero time is strictly less wrong — the bead
+	// stays visible with unknown age, and zero-CreatedAt beads simply sort
+	// oldest. Callers that must distinguish "absent" from "unparseable" can't
+	// anyway: both arrive as the zero value, same as the "" case above.
+	ft.Time = time.Time{}
+	return nil
 }
 
 func (ft flexTime) MarshalJSON() ([]byte, error) {
@@ -152,6 +173,16 @@ func NewStore(dir string) (*Store, error) {
 	// silently requests plain 0770 — the setgid bit is dropped before the
 	// syscall, with no error — which is why the dir came out drwxrwx--- and the
 	// regression test caught it only on Linux (where the assertion is guarded).
+	//
+	// Re-group BEFORE the chmod (fma incident): on OpenShift the PVC root
+	// carries the namespace's random fsGroup with setgid, so a freshly created
+	// dir INHERITS that foreign gid — and at 0770 the hive server (which drops
+	// the fsGroup supplementary group at privilege drop) can never traverse
+	// it, silently losing the whole store at the next boot. The creator owns
+	// the dir and shares the node group with every hive UID, so pin the group
+	// to the creator's egid. Best-effort, like the chmod; chown can clear
+	// setgid on some platforms, so it must come first.
+	_ = os.Chown(dir, -1, os.Getegid())
 	_ = os.Chmod(dir, 0o770|os.ModeSetgid)
 
 	s := &Store{
@@ -188,6 +219,7 @@ func (s *Store) Create(title string, beadType BeadType, priority Priority, actor
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.lockAndRefresh()()
 
 	now := flexTime{time.Now().UTC()}
 	metadata := make(map[string]interface{})
@@ -374,6 +406,7 @@ func (s *Store) appendArchiveEntry(b *Bead) bool {
 func (s *Store) Update(id string, fn func(b *Bead)) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.lockAndRefresh()()
 
 	b, ok := s.beads[id]
 	if !ok {
@@ -740,19 +773,42 @@ func (s *Store) persist(_ *Bead) error {
 	}
 
 	path := filepath.Join(s.dir, beadsFileName)
-	tmpPath := path + ".tmp"
+	// A UNIQUE temp name per writer (#4742): the old fixed beads.json.tmp let
+	// two concurrent processes write the same temp file, so one rename won the
+	// race and the other failed with ENOENT — and whichever snapshot landed
+	// last silently dropped the other process's beads. The flock in
+	// lockAndRefresh serializes cooperating writers; the unique name keeps
+	// even a non-cooperating writer from corrupting an in-flight persist.
+	tmp, err := os.CreateTemp(s.dir, beadsFileName+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("creating tmp beads file: %w", err)
+	}
+	tmpPath := tmp.Name()
 	// 0660 (group-writable) so a bead file created by one node-group member can be
 	// rewritten by another (e.g. the architect agent and the dashboard both write
-	// the architect store). Matches the /data/home/* FilePerms model.
-	if err := os.WriteFile(tmpPath, data, 0660); err != nil {
+	// the architect store). Matches the /data/home/* FilePerms model. CreateTemp
+	// makes 0600, so widen explicitly.
+	_ = tmp.Chmod(0660)
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
 		return fmt.Errorf("writing tmp beads: %w", err)
 	}
-	return os.Rename(tmpPath, path)
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("closing tmp beads: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	return nil
 }
 
 func (s *Store) CloseAll(reason string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.lockAndRefresh()()
 
 	now := flexTime{time.Now().UTC()}
 	closed := 0
@@ -837,6 +893,7 @@ func newArchivedBead(b *Bead) ArchivedBead {
 func (s *Store) Archive(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.lockAndRefresh()()
 
 	b, ok := s.beads[id]
 	if !ok {

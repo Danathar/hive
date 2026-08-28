@@ -1,4 +1,5 @@
 import express from 'express';
+import httpBase from 'http';
 import { createProxyMiddleware } from 'http-proxy-middleware';
 import path from 'path';
 import fs from 'fs';
@@ -151,8 +152,9 @@ const SESSION_PUBLIC_KEYS = sessionPublicKeys();
 // Boot-time "am I hub-hosted?" signal. Either the injected session key (modern)
 // or a master secret (legacy) proves hosted mode, where identity comes from the
 // hub cookie rather than a shared dashboard token.
-// N2: either key proves hosted mode. A freshly provisioned spoke may hold only
-// the public key once HIVE_SESSION_KEY is dropped after the rollout.
+// N2: either key proves hosted mode. Hosted provisioning no longer injects
+// HIVE_SESSION_KEY at all (issue #3234), so a spoke provisioned or reconciled
+// after that change holds only the public key — hence checking both.
 //
 // ROTATION: this deliberately keys off SESSION_PUBLIC_KEY — the PRIMARY key —
 // exactly as before, NOT off SESSION_PUBLIC_KEYS. Two reasons, both about not
@@ -928,9 +930,45 @@ app.get('/api-docs', (_req, res) => {
 
 app.use('/api', apiProxy);
 
+// GitHub App setup callback. After the operator installs the App, GitHub
+// redirects their browser to /gh-setup?installation_id=...&setup_action=...,
+// and the Go API's GET /gh-setup handler verifies the installation with the
+// App key and persists installation_id. This route was missing here: the
+// request fell through to the SPA fallback below, the dashboard rendered at
+// the /gh-setup URL, and the documented setup flow silently did nothing on
+// every gateway deployment — the operator had to find and paste the
+// installation ID by hand. Proxy it to the Go API exactly like /api.
+app.use('/gh-setup', createProxyMiddleware({
+  target: GO_API_URL,
+  changeOrigin: true,
+  // The express mount strips the /gh-setup prefix (same as /api above);
+  // re-prepend it, collapsing the bare "/" express leaves before a query
+  // string so the Go mux pattern "GET /gh-setup" still matches.
+  pathRewrite: (p) => '/gh-setup' + p.replace(/^\/(?=\?|$)/, ''),
+  on: {
+    error(err, req, res) {
+      console.error(`[gh-setup-proxy] ${req.method} ${req.url} → ${err.message}`);
+      if (res.writeHead) {
+        res.writeHead(502, { 'Content-Type': 'text/plain' });
+        res.end('GitHub App setup endpoint unavailable');
+      }
+    },
+  },
+}));
+
 const ttydProxy = createProxyMiddleware({
   target: TTYD_URL,
   changeOrigin: true,
+  // ttyd (libwebsockets) serves ONE request per TCP connection and hangs up
+  // on any reuse. Without an explicit agent, httpxy (the proxy engine) pools
+  // upstream sockets in its own keepAlive:true default agents, so the
+  // browser's basic-auth flow — an unauthenticated request answered 401,
+  // then an authenticated retry — deterministically rode a dead pooled
+  // socket and surfaced as 502 "Terminal unavailable" with the CORRECT
+  // password. A non-pooling agent gives every request a fresh connection;
+  // pooling buys nothing here anyway, because the endpoint's real traffic
+  // is a single long-lived websocket.
+  agent: new httpBase.Agent({ keepAlive: false }),
   pathRewrite: (p) => p.replace(/^\/terminal/, '') || '/',
   on: {
     error(err, req, res) {

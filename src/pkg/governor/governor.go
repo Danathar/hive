@@ -848,6 +848,7 @@ func (g *Governor) validateAgentReportIfPresent(agentName string) (AgentReportRe
 			"findings", len(report.Findings),
 			"prs_opened", len(report.PRsOpened),
 			"beads_filed", len(report.BeadsFiled),
+			"artifacts", len(report.Artifacts),
 		)
 	}
 	return record, true
@@ -1089,6 +1090,25 @@ func (g *Governor) GetBudget() BudgetInfo {
 		ResetAt:        g.budget.ResetAt,
 		WindowBaseline: g.budget.WindowBaseline,
 	}
+}
+
+// BudgetWindow returns the CURRENT budget window's bounds. GetBudget exposes
+// ResetAt (the moment the window opened) but not its length, and the length is
+// the configured governor.budget.period_days rather than a fixed 7 days — so a
+// caller outside this package cannot derive the end without duplicating
+// budgetWindowDuration's config fallback and getting it subtly wrong.
+//
+// ok is false when no window has opened yet (zero ResetAt), which callers must
+// distinguish from a window that opened at some point in the past: the hub's
+// quadrant scorer reads unbounded budget spend as uninterpretable, since zero
+// equally means "the window just rolled" and "nothing was consumed".
+func (g *Governor) BudgetWindow() (start, end time.Time, ok bool) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if g.budget.ResetAt.IsZero() {
+		return time.Time{}, time.Time{}, false
+	}
+	return g.budget.ResetAt, g.budget.ResetAt.Add(g.budgetWindowDuration()), true
 }
 
 // UpdateBudgetFromTotals refreshes budget spend from the token collector's

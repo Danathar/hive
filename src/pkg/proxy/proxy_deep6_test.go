@@ -2,8 +2,6 @@ package proxy
 
 import (
 	"bufio"
-	"crypto/x509"
-	"encoding/pem"
 	"fmt"
 	"io"
 	"log/slog"
@@ -24,7 +22,7 @@ func TestProxyHTTPGitReceivePackStreaming(t *testing.T) {
 	clientConn, proxyClient := net.Pipe()
 	upstreamConn, proxyUpstream := net.Pipe()
 
-	go p.proxyHTTP(proxyClient, proxyUpstream, "scanner", agent.ModeIssuesAndPRs)
+	go p.proxyHTTP(proxyClient, proxyUpstream, "scanner", agent.ModeIssuesAndPRs, agent.AgentCapabilities{})
 
 	done := make(chan struct{})
 
@@ -76,7 +74,7 @@ func TestProxyHTTPGitUploadPack(t *testing.T) {
 	clientConn, proxyClient := net.Pipe()
 	upstreamConn, proxyUpstream := net.Pipe()
 
-	go p.proxyHTTP(proxyClient, proxyUpstream, "scanner", agent.ModeAdvisory)
+	go p.proxyHTTP(proxyClient, proxyUpstream, "scanner", agent.ModeAdvisory, agent.AgentCapabilities{})
 
 	done := make(chan struct{})
 
@@ -197,13 +195,6 @@ func TestHandleConnectDirectUpstreamDialFail(t *testing.T) {
 	if !strings.Contains(statusLine, "502") {
 		t.Fatalf("expected 502 on upstream dial failure, got %q", statusLine)
 	}
-}
-
-func newCertPool(p *GitHubProxy) *x509.CertPool {
-	pool := x509.NewCertPool()
-	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: p.caX509.Raw})
-	pool.AppendCertsFromPEM(caPEM)
-	return pool
 }
 
 // ---------- identifyAgentFromReq: UID lookup succeeds ----------

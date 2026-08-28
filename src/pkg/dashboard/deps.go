@@ -14,6 +14,7 @@ import (
 	"github.com/kubestellar/hive/pkg/config"
 	ghpkg "github.com/kubestellar/hive/pkg/github"
 	"github.com/kubestellar/hive/pkg/governor"
+	"github.com/kubestellar/hive/pkg/hooks"
 	"github.com/kubestellar/hive/pkg/knowledge"
 	"github.com/kubestellar/hive/pkg/rotation"
 	"github.com/kubestellar/hive/pkg/scheduler"
@@ -22,11 +23,18 @@ import (
 )
 
 type Dependencies struct {
-	Config           *config.Config
-	AgentMgr         *agent.Manager
-	Governor         *governor.Governor
-	GHClient         *ghpkg.Client
-	GHAppAuth        *ghpkg.AppAuth
+	Config    *config.Config
+	AgentMgr  *agent.Manager
+	Governor  *governor.Governor
+	GHClient  *ghpkg.Client
+	GHAppAuth *ghpkg.AppAuth
+	// GHTokenScopes is the boot-time PAT scope probe result (see
+	// ghpkg.CheckTokenScopes). It is set only on the token-auth path; the App
+	// path leaves it at ScopeStatusSkipped because Apps carry permissions, not
+	// OAuth scopes. github_auth reports it as a DETAIL on an otherwise-passing
+	// check: a narrow token still authenticates, so failing the check would
+	// misreport the fault — what is broken is a capability, not the auth.
+	GHTokenScopes    ghpkg.ScopeResult
 	Tokens           *tokens.Collector
 	Knowledge        *knowledge.KnowledgeAPI
 	Inception        *knowledge.InceptionEngine
@@ -43,7 +51,13 @@ type Dependencies struct {
 	// already uses keeps the advisor read-only and adds zero GitHub traffic.
 	// Nil is safe: Snapshot() on a nil collector reports ready=false and the
 	// advisor leaves the signal at its conservative zero.
-	FleetStats      *FleetStatsCollector
+	FleetStats *FleetStatsCollector
+	Activity   *ActivityCollector
+	// RepoCost caches the /api/repo-cost interval join on a ticker (see
+	// repo_cost_collector.go), mirroring Activity's caching of
+	// /api/repo-activity. Nil is safe: handleRepoCost falls back to computing
+	// inline (used by tests that construct a bare Dependencies).
+	RepoCost        *RepoCostCollector
 	BeadSynthesizer *knowledge.BeadSynthesizer
 	BeadStores      map[string]*beads.Store
 	// BeadStoreLoadFailures counts configured bead stores that failed to open at
@@ -93,6 +107,7 @@ type Dependencies struct {
 	// ApprovalInbox is the durable operator-lane queue backing the desk. Nil
 	// exactly when ApprovalDesk is nil (both come from DeskFromConfig).
 	ApprovalInbox *toolapprove.Inbox
+	HookFire     func(context.Context, hooks.Payload)
 }
 
 type NousState struct {

@@ -10,6 +10,7 @@ import (
 	"github.com/kubestellar/hive/pkg/config"
 	"github.com/kubestellar/hive/pkg/governor"
 	"github.com/kubestellar/hive/pkg/hooks"
+	"github.com/kubestellar/hive/pkg/hub"
 	"github.com/kubestellar/hive/pkg/notify"
 	"github.com/kubestellar/hive/pkg/timeline"
 )
@@ -171,6 +172,50 @@ func installGovernorModeChangeEmitter(gov *governor.Governor) {
 	})
 }
 
+func installAgentPauseEmitter(mgr *agent.Manager) {
+	if mgr == nil {
+		return
+	}
+	mgr.SetPauseTransitionObserver(func(event agent.PauseTransitionEvent) {
+		transition := hooks.TransitionAgentResumed
+		if event.Paused {
+			transition = hooks.TransitionAgentPaused
+		}
+		hookDispatcher().Fire(context.Background(), hooks.Payload{
+			Transition: transition,
+			Agent:      event.Agent,
+			Actor:      event.By,
+			Trigger:    event.Trigger,
+			Reason:     event.Reason,
+			At:         event.At.UnixMilli(),
+			Causation: hooks.Causation{
+				Depth:            event.Causation.Depth,
+				HookName:         event.Causation.HookName,
+				OriginTransition: hooks.Transition(event.Causation.OriginTransition),
+			},
+		})
+	})
+}
+
+func installUpgradePauseEmitter(hubSrv *hub.HubServer) {
+	if hubSrv == nil {
+		return
+	}
+	hubSrv.SetUpgradePauseObserver(func(event hub.UpgradePauseEvent) {
+		to := "off"
+		if event.Paused {
+			to = "on"
+		}
+		hookDispatcher().Fire(context.Background(), hooks.Payload{
+			Transition: hooks.TransitionUpgradePause,
+			To:         to,
+			Actor:      event.By,
+			Reason:     event.Target,
+			Attrs:      map[string]string{"target": event.Target},
+		})
+	})
+}
+
 // ---------------------------------------------------------------------------
 // Adapters
 // ---------------------------------------------------------------------------
@@ -214,13 +259,10 @@ func (a *pauserAdapter) PauseAgent(ctx context.Context, agentName, reason string
 	// The causation is folded into the trigger provenance so the durable pause
 	// record names the responsible hook ("hook:<name>").
 	//
-	// LOOP-SAFETY REQUIREMENT for whoever adds the agent_paused emitter:
-	// that emitter MUST carry this `cause` through as
-	// cause.Child(hookName, TransitionAgentPaused) on the payload it fires.
-	// Today no agent_paused emitter exists, so a hook-driven pause simply
-	// emits nothing and the pause→agent_paused→pause cycle cannot form. The
-	// moment one is added, the depth-1 guard becomes the ONLY thing stopping
-	// that cycle, and it works solely off Payload.Causation.
+	// LOOP-SAFETY REQUIREMENT: installAgentPauseEmitter must carry this
+	// structured cause through on the payload it fires. With agent_paused wired,
+	// the depth-1 guard is the ONLY thing stopping a pause→agent_paused→pause
+	// cycle, and it works solely off Payload.Causation.
 	//
 	// Do NOT try to recover the depth by parsing the trigger string below.
 	// It is human-readable provenance, not a machine-readable causation
@@ -233,7 +275,11 @@ func (a *pauserAdapter) PauseAgent(ctx context.Context, agentName, reason string
 	// identity is the HOOK, not a person — PauseBy's contract is "never
 	// fabricate" a human actor, so hookPauseActor is an explicitly
 	// non-human identity that cannot be mistaken for a dashboard user.
-	return a.mgr.PauseBy(agentName, hookPauseTriggerFor(cause), reason, hookPauseActor(cause))
+	return a.mgr.PauseByCause(agentName, hookPauseTriggerFor(cause), reason, hookPauseActor(cause), agent.PauseCausation{
+		Depth:            cause.Depth,
+		HookName:         cause.HookName,
+		OriginTransition: string(cause.OriginTransition),
+	})
 }
 
 // hookPauseActor is the PausedBy identity recorded for a hook-driven pause.

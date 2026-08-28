@@ -1,0 +1,59 @@
+# golangci-lint configuration for the Hive Go module.
+#
+# Starting posture is DELIBERATELY CONSERVATIVE. A first lint run over a mature
+# ~1,280-test-file codebase typically produces hundreds of findings; enabling
+# everything at once yields a red gate nobody can land through, which ends with
+# the gate being disabled rather than the findings being fixed. The linters
+# below are the ones whose findings are almost always real defects, so the gate
+# starts green-able and can be tightened deliberately.
+#
+# To tighten: enable one linter, fix its findings in their own PR, then commit
+# the config change alongside. Do NOT enable several at once.
+
+version: "2"
+
+run:
+  # 5m is comfortably above observed runtime for this module; raise it rather
+  # than dropping linters if a future addition pushes past it.
+  timeout: 5m
+  # Tests are in scope: this repo's tests assert security invariants, so a
+  # broken test is a broken guard.
+  tests: true
+
+linters:
+  default: none
+  enable:
+    # THE ENABLED SET grows one linter at a time, never in batches.
+    #
+    # A first run with errcheck + staticcheck + unused enabled produced 859
+    # findings (579 errcheck, 225 staticcheck, 44 unused, 11 ineffassign) on a
+    # codebase that has never been linted. A gate that red is not a gate: it
+    # gets disabled, or it gets merged around, and either way the findings stay.
+    #
+    # So the gate starts with the linters that are already CLEAN or nearly so,
+    # making it enforceable from day one. Each remaining linter is enabled in
+    # its own PR after its findings are fixed — that ratchet is tracked in the
+    # ratchet issue #4903.
+    #
+    # Remaining backlog: staticcheck (225), errcheck (579). errcheck is the
+    # most valuable remaining rung and the largest, and is worth splitting by
+    # package.
+    - govet
+    - misspell
+    # RATCHET: ineffassign enabled after its 11 findings were fixed (#4903).
+    - ineffassign
+    # RATCHET: unused enabled after its 44 findings were fixed (#4903). Most
+    # were dead constants, aliases, and test helpers superseded by refactors
+    # that moved on without deleting them. One declaration is retained under an
+    # explained //nolint:unused — see pkg/hub/wrapkey_store.go.
+    - unused
+
+  exclusions:
+    generated: lax
+
+issues:
+  # Report every occurrence. The defaults (50 per linter, 3 per identical
+  # issue) hide the true size of a problem, which matters when deciding
+  # whether a finding class is worth fixing or excluding.
+  max-issues-per-linter: 0
+  max-same-issues: 0

@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/kubestellar/hive/pkg/agent"
 	"github.com/kubestellar/hive/pkg/config"
@@ -132,6 +133,13 @@ func restoreAgentRuntimeState(saved *snapshot.PersistedState, cfg *config.Config
 		if as.RestartCount > 0 {
 			agentMgr.SeedRestartCount(name, as.RestartCount)
 		}
+		// Without this the turn-loss measurement would reset on exactly the
+		// event it exists to measure, and every spoke would permanently report
+		// only what its CURRENT process lifetime lost — which for a fleet that
+		// rolls often is close to nothing. See pkg/agent/turn_loss.go.
+		if as.TurnLoss != nil {
+			agentMgr.SeedTurnLoss(name, turnLossFromSnapshot(as.TurnLoss))
+		}
 		if as.LastKick != nil {
 			agentMgr.SeedLastKick(name, *as.LastKick)
 		}
@@ -165,4 +173,33 @@ func restoreAgentRuntimeState(saved *snapshot.PersistedState, cfg *config.Config
 			_ = agentMgr.UpdateConfig(name, agentCfg)
 		}
 	}
+}
+
+// turnLossFromSnapshot converts the persisted turn-loss record back into the
+// manager's in-memory form. The inverse of turnLossToSnapshot in main.go.
+func turnLossFromSnapshot(in *snapshot.AgentTurnLoss) agent.TurnLoss {
+	if in == nil {
+		return agent.TurnLoss{}
+	}
+	out := agent.TurnLoss{
+		Interruptions: in.Interruptions,
+		Producing:     in.Producing,
+		UpperBound:    time.Duration(in.UpperBoundS * float64(time.Second)),
+		Bytes:         in.Bytes,
+	}
+	for _, r := range in.Recent {
+		rec := agent.TurnInterruption{
+			At:        r.At,
+			Reason:    r.Reason,
+			SinceKick: time.Duration(r.SinceKickS * float64(time.Second)),
+			Producing: r.Producing,
+			Bytes:     r.Bytes,
+		}
+		if r.SinceOutputS != nil {
+			d := time.Duration(*r.SinceOutputS * float64(time.Second))
+			rec.SinceOutput = &d
+		}
+		out.Recent = append(out.Recent, rec)
+	}
+	return out
 }

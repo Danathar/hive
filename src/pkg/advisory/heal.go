@@ -107,11 +107,28 @@ const repoAccessHealedCloseReason = "auto-closed: the hive verified an advisory-
 // omitted Contents:read and the credential helper blocked fetches), and agents
 // word them freely, so the patterns tolerate drift.
 //
+// "Tolerate drift" was not tolerant enough (#4464): a hive's digest showed two
+// findings of exactly this family that no pattern matched, so the healer never
+// even considered them and they sat in the digest permanently —
+//
+//	"Repository worktree not provisioned for guide agent despite
+//	 include_repos=true configuration"
+//	"Quality agent lacks read access to repository for coverage analysis"
+//
+// Two gaps, both about word ORDER rather than vocabulary. The first states the
+// claim in the passive past participle ("worktree not provisioned") where the
+// provisioning pattern below only read the noun form ("no ... provisioning"),
+// and says "worktree" where the pattern said "workspace". The second writes
+// "read access TO repository" where the access patterns require "repository
+// ... access". Both are ordinary English an agent will produce, so the last
+// two patterns cover them explicitly.
+//
 // Like appAuthFindingPatterns they must stay directional: every pattern
-// requires the LACK language ("no/missing/lacks/cannot") adjacent to the
-// access/clone subject, so a CODE finding that merely mentions repository
-// access ("Repository access logs are not retained", "read access to
-// repository secrets not restricted") never matches. And unlike the app-auth
+// requires the LACK language ("no/missing/lacks/cannot", or "not/never
+// provisioned") adjacent to the access/clone subject, so a CODE finding that
+// merely mentions repository access ("Repository access logs are not
+// retained", "read access to repository secrets not restricted") never
+// matches. And unlike the app-auth
 // healer, a title match alone is NOT sufficient to close — see
 // CloseHealedRepoAccessFindings, which additionally requires a verified read
 // of the repository the finding concerns.
@@ -125,10 +142,30 @@ var repoAccessFindingPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\b(no|missing|lacks?|without|unavailable)\b[^.\n]*\brepo(sitory)?\s+(read\s+)?access\b[^.\n]*\b(mechanism|infrastructure|capabilit|path|method|provision)`),
 	// "repository access infrastructure missing"
 	regexp.MustCompile(`(?i)\brepo(sitory)?\s+(read\s+)?access\b[^.\n]*\b(mechanism|infrastructure|capabilit|path|method|provision)[a-z]*\b[^.\n]*\b(missing|unavailable|absent|lacking|not\s+available)\b`),
-	// "no repository workspace provisioning for advisory agents"
-	regexp.MustCompile(`(?i)\b(no|missing|lacks?|without)\b[^.\n]*\brepo(sitory)?\s+workspace\s+provisioning\b`),
+	// "no repository workspace provisioning for advisory agents", "no git
+	// worktree provisioned", "missing repository checkout provisioning"
+	regexp.MustCompile(`(?i)\b(no|missing|lacks?|without)\b[^.\n]*\b(repo(sitory)?|git|agent)\s+(workspace|work\s?tree|checkout|clone)\s+provision`),
 	// "guide agent cannot access target repository", "unable to clone the repository"
 	regexp.MustCompile(`(?i)\b(cannot|can't|unable\s+to)\s+(access|read|clone|fetch)\b[^.\n]*\brepo(sitory)?\b`),
+	// #4464, gap 1: the same claim in the passive — "Repository worktree not
+	// provisioned for guide agent", "agent workspace never provisioned". The
+	// pattern above needs a leading lack-word and the noun "provisioning";
+	// this one needs neither, so it requires the agent-infrastructure subject
+	// (repo/git/agent + workspace/worktree/checkout/clone) to stay directional.
+	regexp.MustCompile(`(?i)\b(repo(sitory)?|git|agent)\s+(workspace|work\s?tree|checkout|clone)\b[^.\n]*\b(not|never)\s+provisioned\b`),
+	// #4464, gap 2: "lacks read access TO repository", "no clone access to the
+	// repo" — the reverse word order of the access patterns above, which only
+	// read "repository ... access". WRITE access is deliberately NOT listed:
+	// the close below is gated on a verified READ, which would be the wrong
+	// proof for a write-access claim (those are the app-auth healer's).
+	regexp.MustCompile(`(?i)\b(no|missing|lacks?|without|unavailable)\b[^.\n]*\b(read-only|read|clone|checkout|fetch)\s+access\s+to\b[^.\n]*\brepo(sitory)?\b`),
+	// #4464, gap 3 (found live on a customer hive AFTER the first two fixes
+	// shipped): "Repository not provisioned for guide agent - cannot perform
+	// documentation audit". The bare repo noun with no workspace/worktree/
+	// checkout qualifier — gap 1's pattern requires that middle noun, so this
+	// escaped. Directional: the "not/never provisioned" claim must attach to
+	// the repo(sitory) subject within the same clause.
+	regexp.MustCompile(`(?i)\brepo(sitory)?\b[^.\n]*\b(not|never|un)provisioned\b|\brepo(sitory)?\b[^.\n]*\b(not|never)\s+provisioned\b`),
 }
 
 // IsRepoAccessFinding reports whether a finding title describes the hive's own

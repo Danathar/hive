@@ -125,11 +125,17 @@ exemptions should stay.
 
 ## What remains unproven
 
-- **IPv6.** The gate is IPv4-only — the entrypoint has no `ip6tables` path at
-  all. On this configuration the container gets no global IPv6 address, so there
-  is nothing to bypass; on a host or network that does hand out IPv6, an agent
-  could reach `:443` over v6 and miss the redirect entirely. **This is the
-  bypass-resistance test that needs its own follow-up issue.**
+- **IPv6 — now ANSWERED, and the bypass was real.** The gate was IPv4-only: the
+  entrypoint had no `ip6tables` path at all. On this configuration the container
+  got no IPv6 address, so there was nothing to bypass here. Measured since on a
+  dual-stack container network: 5 agent connections to `:443` over IPv6 produced
+  **0** redirects while 5 over IPv4 produced **5**, in the same run. See
+  [The IPv4-only egress gate is bypassable over IPv6](podman-ipv6-egress-bypass.md).
+  *Fixed in #4327:* the entrypoint now closes the IPv6 family with an
+  `ip6tables` filter-table `REJECT` carrying the same three exemptions (the
+  proxy listens on `127.0.0.1` only, so a v6 `REDIRECT` had nowhere to
+  deliver); `src/deploy/probe_podman_ipv6_egress.sh` observes the dual-stack
+  case on a Linux host.
 - **Kernels without `xt_owner`.** Deleting the owner rules emulates the shape
   but not the kernel. This host has `xt_owner`.
 - **Restart, reboot, and recreate.** Single `podman run` only; nothing about
@@ -146,6 +152,7 @@ exemptions should stay.
 ## References
 
 - [Rootless Podman startup and exit-77 behavior](podman-rootless-startup-spike.md) — the rootless counterpart (#4199).
+- [Podman support matrix](podman-support-matrix.md) — the support decision this baseline feeds: rootful + enforcing is the **supported** reference cell.
 - `src/deploy/probe_podman_rootful_netadmin.sh` — the probe that produces every number above.
 - `src/deploy/entrypoint.sh` — the gate itself, and the `#2678` regression history in its comments.
 - `src/pkg/proxy/somark_linux.go` — where `SO_MARK` is stamped.

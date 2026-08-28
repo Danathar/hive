@@ -129,7 +129,7 @@ every agent UID. If you copy `fsGroup` across but not `defaultMode`, you lose
 the exclusion.
 
 **Container securityContext** — `seccompProfile` moves here from the pod level,
-and the capability set inverts from "drop one" to "drop all, add back six":
+and the capability set inverts from "drop one" to "drop all, add back eight":
 
 ```diff
            securityContext:
@@ -146,6 +146,8 @@ and the capability set inverts from "drop one" to "drop all, add back six":
 +                - SETPCAP
 +                - CHOWN       # chown per-agent dirs/beads to the agent UID
 +                - DAC_OVERRIDE
++                - FOWNER      # entrypoint chmod -R g+rwX over dev-owned /data/home
++                - FSETID      # entrypoint chmod g+s on dev:node dirs
 ```
 
 `NET_ADMIN` is load-bearing: without it the forced-proxy egress gate cannot

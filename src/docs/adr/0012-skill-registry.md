@@ -1,6 +1,10 @@
 # ADR-0012: Skill registry and BYO-agent contract
 
-Status: Accepted (retroactive)
+Status: Accepted (back-filled)
+
+> **Operator guide:** [Skill registry](../skills.md) covers the on-disk format
+> and the current wiring status. This ADR records the decision; it is not an
+> operator guide.
 
 ## Context
 
@@ -30,6 +34,8 @@ agent specs are strict: malformed YAML, missing name/backend/model, or unknown
 modes fail before an agent can launch silently.
 
 ## Consequences
+
+Rationale not recorded beyond the implementation, linked code, and cited design notes.
 
 Skills become portable and discoverable without removing simple repo-local
 snippets. Custom agents get a small, stable interface that catalogs and launchers

@@ -10,13 +10,15 @@ spec:
   selector:
     app.kubernetes.io/name: hive
   ports:
+    # ONE port. The dashboard UI and the /api/* endpoints are the same HTTP
+    # listener (:3002), so they share one named port. This used to be declared
+    # twice (`dashboard` and `api`, both 3002) and the API server rejects that
+    # outright: `spec.ports[1]: Duplicate value: {... "Port":3002 ...}` — the
+    # Service never existed on plain Kubernetes (AKS). Routes/Ingresses and the
+    # probes in deployment.yaml all target `dashboard`.
     - name: dashboard
       port: 3002
       targetPort: dashboard
-      protocol: TCP
-    - name: api
-      port: 3002
-      targetPort: api
       protocol: TCP
     # SECURITY: the ttyd terminal (:7681) is intentionally NOT exposed as a
     # Service port. The terminal is reached only through the authenticating proxy

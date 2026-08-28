@@ -74,6 +74,78 @@ Important environment variables:
 | `AGENT_REASONING_EFFORT` | unset | Reasoning effort override. Consumed by `codex` (`-c model_reasoning_effort`) and by `agy` (`--effort low\|medium\|high`, required whenever a model is set, else agy ignores the model). Ignored by other backends. |
 | `CONTRIBUTOR_MODE` | `interactive` | `interactive` keeps a tmux/TTY session. `headless` is for one-shot/no-TTY task delivery. |
 | `HIVE_AGENT_SESSION` | `contributor` | tmux session name for interactive mode. |
+| `HIVE_CODEX_APPROVALS_REVIEWER` | `auto_review` | Codex reviewer for boundary requests. The default prevents Hive-delivered work from waiting on an interactive operator while retaining `workspace-write`; set `user` only for an intentionally attended contributor. Set it to the **empty string** to omit the `-c approvals_reviewer=` key entirely — the escape hatch if a Codex release rejects that config key at startup. Doing so keeps the sandbox posture; it is not the same as the dangerous bypass. |
+| `HIVE_CLAUDE_DANGEROUSLY_ALLOW_HOST_STATE` | unset | Drops the defense-in-depth Claude command denylist. In local mode the native filesystem sandbox still applies, so this does not grant host writes. |
+| `HIVE_CLAUDE_DANGEROUSLY_BYPASS_APPROVALS_AND_SANDBOX` | unset | Restores the pre-#4918 unconfined Claude/LiteLLM local posture. Use only on a disposable or externally sandboxed host. |
+
+### Where each backend reads its instructions
+
+The relay downloads the hive's knowledge export to a single `agent.md` and then
+symlinks it under whatever filename the chosen CLI actually looks for
+(`bin/contributor-agent.sh`). Getting this wrong is silent: the export is
+fetched and refreshed on schedule, but the model never sees it — the failure
+mode fixed for Goose in [#2393](https://github.com/kubestellar/hive/issues/2393).
+
+| Backend | Filenames linked in `$HOME` |
+| --- | --- |
+| `claude`, `litellm` | `CLAUDE.md` |
+| `copilot` | `copilot-instructions.md`, `COPILOT.md`, `CLAUDE.md` |
+| `goose` | `AGENTS.md`, `.goosehints`, `.goose-instructions.md`, `CLAUDE.md` |
+| `codex` | `AGENTS.md`, `CLAUDE.md` |
+| `pi` | `AGENTS.md`, `CLAUDE.md` |
+| `bob` | `.bob/AGENTS.md`, `CLAUDE.md` (compatibility) |
+| `agy` | `CLAUDE.md` |
+| anything else | `CLAUDE.md` only — the `*` fallback |
+
+A backend that reads neither `CLAUDE.md` nor one of the names above falls into
+the `*` branch and runs with no hive knowledge at all. When adding a backend,
+confirm the filename its CLI reads and give it an explicit case.
+
+For Codex, Hive also passes `--add-dir "$HIVE_WORKSPACE_DIR"`. The CLI itself
+starts in the stable, credential-free `HIVE_AGENT_CWD`, while assigned checkouts
+live below the separately bounded writable workspace. Automatic-review denial
+or timeout remains a failure; headless mode reports the redacted terminal
+diagnostic to Hive and returns the contributor to the ready pool.
+
+`HIVE_WORKSPACE_DIR` must not contain whitespace. `backend_perm_flag` returns a
+whitespace-separated flag string that the launcher word-splits, so a path with a
+space cannot be expressed as a single argument — `--add-dir /work space` would
+reach Codex as three separate words and grant the wrong directory. Hive detects
+this, omits `--add-dir`, and warns on stderr rather than corrupting the argv;
+the sandbox posture still applies, but the workspace is not granted. Move the
+workspace to a path without spaces.
+
+Claude-family local confinement: `claude` and `litellm` use Claude Code's
+native OS sandbox in host mode. Hive enables it through command-line settings,
+requires startup to fail when the sandbox is unavailable, disables unsandboxed
+command retry, and runs in `dontAsk` mode so a request outside the declared
+roots is denied instead of hanging an unattended pane. Bash subprocesses and
+file edits may write only to `HIVE_AGENT_CWD` and `HIVE_WORKSPACE_DIR`.
+Network domains are unrestricted because assigned third-party repositories
+must be able to fetch arbitrary test/build dependencies; this is write
+confinement, not a claim that the process can read or exfiltrate nothing.
+
+On Linux/WSL2 the native sandbox requires `bubblewrap` and `socat`; macOS uses
+Seatbelt. Missing dependencies are a hard launch failure, never a silent
+fallback. The existing privilege-escalation and boot/deployment command
+denials remain as defense in depth. `HIVE_CLAUDE_DANGEROUSLY_ALLOW_HOST_STATE=1`
+drops only that command list; it does not cross the OS boundary. The distinct,
+loudly named `HIVE_CLAUDE_DANGEROUSLY_BYPASS_APPROVALS_AND_SANDBOX=1` restores
+the old unconfined local posture for an externally isolated/disposable host.
+
+`just contribute-hive` still defaults to **container** mode, the stronger
+backend-independent boundary. In local mode Claude/LiteLLM now use the native
+sandbox and Codex retains `workspace-write`; other backends remain unconfined
+and the launch banner says so. The `agent_sandbox` Podman path documented in
+[sandbox-isolation.md](sandbox-isolation.md) remains **hub-side only** — nothing
+on the contributor path reads it.
+
+Codex config-key compatibility: `approvals_reviewer` is passed with `-c`, so it
+depends on the installed Codex release accepting that key. If a version rejects
+it at startup, set `HIVE_CODEX_APPROVALS_REVIEWER=` (empty) to drop the key
+while keeping `--ask-for-approval`/`--sandbox` — prefer that over
+`HIVE_CODEX_DANGEROUSLY_BYPASS_APPROVALS_AND_SANDBOX=1`, which removes the
+sandbox altogether.
 
 To change hubs for direct Compose, re-run the registration/setup flow for the target hub or edit `${HOME}/.config/hive/contributor.env` so `HIVE_HUB` and `HIVE_REGISTRATION_TOKEN` stay matched.
 
@@ -135,6 +207,58 @@ just contribute-hive
 The lists are positional: the first token belongs to the first hub, the second token belongs to the second hub, and so on. If the counts differ, the relay refuses to start rather than sending a token to the wrong hub.
 
 The relay keeps a WebSocket and heartbeat for each subscribed hub, but shares one CLI/tmux session and works on only one task at a time. It rotates to another hub when the active hub has no assignable work. A task that is blocked on human action stays with its owning hub; the relay does not mix task state across hubs.
+
+## Moving the relay to another machine
+
+Nothing binds a contributor identity to a machine. Authentication is a plain token-hash lookup — no device binding, no IP pinning, no session affinity — so the same `contributor.env` authenticates from anywhere. Only one relay should run at a time per identity, but *which* machine it runs on is yours to choose: a desktop today, a VM or a sandbox tomorrow, and back again.
+
+What you cannot do is re-run `contribute-setup` on the new machine. `POST /api/contribute/register` is unauthenticated and identifies you by a self-asserted GitHub username, so it will never hand back an existing contributor's token — otherwise POSTing someone else's username would be an account takeover. It answers "already registered" and stops. That is correct; the two supported ways round it are below.
+
+### Option 1 — copy the credential (keeps the old machine working)
+
+Copy both files. `contribute-hive` hard-requires each of them and refuses to start without either:
+
+```bash
+scp old-machine:~/.config/hive/contributor.env ~/.config/hive/
+scp old-machine:~/.config/hive/gh-auth.env     ~/.config/hive/
+chmod 600 ~/.config/hive/contributor.env ~/.config/hive/gh-auth.env
+```
+
+**Copying is the only way to *reuse* a registration token.** The hive stores only a SHA-256 hash of it and clears the plaintext after the first read, so no endpoint can print it again — not the dashboard, not the API, not the hive administrator.
+
+Use this when you want to switch back and forth, or to try the VM before committing to it. The cost is that the credential now exists in two places: delete both files on the machine you are moving off once the new one works.
+
+### Option 2 — reissue the credential (`just contribute-move`)
+
+```bash
+export HIVE_HUB=wss://hive.example.com/contribute
+just contribute-move claude
+```
+
+`contribute-move` does everything `contribute-setup` does — backend preflight, `gh auth`, `gh-auth.env`, CLI config staging — except that instead of registering it calls `POST /api/contribute/reissue-token`, which authenticates with your GitHub token and therefore *can* prove you own the identity. It then writes `contributor.env` for you.
+
+**This rotates the credential.** Reissuing overwrites the stored hash, so a relay still running on the old machine stops authenticating the moment this succeeds. That is the point when you are moving off a machine you no longer want holding the token — but it means this is not the way to switch back and forth.
+
+Three things it does that a hand-rolled rotation makes easy to get wrong:
+
+- **It preserves every hub, in order.** For more than one hive, list them comma-separated and it reissues against each, writing the positional `HIVE_HUB` / `HIVE_REGISTRATION_TOKEN` / `CONTRIBUTOR_ID` lists aligned in the same order. Doing this by hand means rotating per hub and rebuilding three lists without transposing them; the relay refuses to start when the lengths disagree, and sends the wrong token to the wrong hive when the order is wrong.
+
+  ```bash
+  export HIVE_HUB='wss://hive-a.example.com/contribute,wss://hive-b.example.com/contribute'
+  just contribute-move claude
+  ```
+
+  Re-run it later with `HIVE_HUB` unset and it reuses the hub list already in `contributor.env`.
+
+- **A partial failure keeps what it got.** If the second hive is unreachable, the first one's rotation has already happened on that hive and its new token can never be reprinted — so every token it did receive is written, the failures are named, and the exit status is non-zero. Re-run to retry the rest.
+
+- **It asks before sending your GitHub token.** It prints every host that will receive it and requires confirmation, and it refuses any non-loopback `http://` hub outright. (`contribute-setup` deliberately never sends your GitHub token, because it derives the hub URL from a public registry entry that a poisoned registry would control. `contribute-move` takes the URL from *you* and reissue-token authenticates by GitHub token by design — hence the prompt.) Set `HIVE_MOVE_ASSUME_YES=1` for scripted runs.
+
+Keys `contribute-move` does not manage — `HIVE_LITELLM_ENDPOINT`, for instance — are carried across from the previous file rather than dropped, and the previous file is kept at `contributor.env.bak`.
+
+### Adding another hive to an existing setup
+
+That is not a move: run `contribute-setup` against the new hive with `HIVE_HUB` pointing at it. It appends to the hub, token, and id lists already in `contributor.env` rather than replacing them, so a working multi-hive setup survives. The previous file is kept at `contributor.env.bak`.
 
 ## Acting as a spoke agent role
 
@@ -211,7 +335,7 @@ The generated Secret contains the registration token and `GH_TOKEN` as Kubernete
 
 Two admission behaviors are worth knowing when your relay seems idle:
 
-- **Issues already claimed by any open PR are skipped.** The hub's claim ledger records every open PR that references an issue with a closing keyword (`fixes #N`, `closes owner/repo#N`, …) — including PRs from external authors, not just hive agents ([#3792](https://github.com/kubestellar/hive/pull/3792)). A claimed issue is silently dropped from the contribute candidate set; if nothing else is admissible the relay receives `task_unavailable` with reason `no_matching_work` (there is no per-issue "claimed by PR #N" message). External claims affect only the contribute queue — they never suppress the hive's own agents.
+- **Issues already claimed by any open PR are skipped.** The hub's claim ledger records every open PR that references an issue with a closing keyword (`fixes #N`, `closes owner/repo#N`, …) — including PRs from external authors, not just hive agents ([#3792](https://github.com/kubestellar/hive/pull/3792)). A claimed issue is silently dropped from the contribute candidate set; if nothing else is admissible the relay receives `task_unavailable` with reason `no_matching_work` (there is no per-issue "claimed by PR #N" message). External claims — like the weaker non-closing `Refs #N` references — now DEFER the hive's own agents for a bounded 72h window from when the claim was first observed, then release the issue even while the PR stays open ([#4929](https://github.com/kubestellar/hive/issues/4929)). They previously never suppressed agent work at all, which let an agent that cannot check for existing PRs re-implement an issue a live PR already covered. Nothing is frozen: the window is a bound, and a red+stale claiming PR defers nothing.
 - **Claims expire.** Ledger entries live 72 hours (refreshed while the PR stays open); a claiming PR that goes red on a required check and stale releases the issue back to the queue.
 
 ## Capability declaration (DECLARE)

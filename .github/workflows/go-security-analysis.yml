@@ -1,0 +1,203 @@
+name: Go Security Analysis
+
+# Static analysis and vulnerability scanning for the Go module under src/.
+#
+# This complements, and does not replace, the `go vet` step already in
+# v2-ci.yml. Three tools, three different questions:
+#
+#   govulncheck   — does this code CALL a known-vulnerable symbol? Unlike a
+#                   dependency-version scanner (dependabot), it is reachability
+#                   -based, so it does not fire on a vulnerable package the
+#                   code never reaches. That makes its findings actionable
+#                   rather than noise.
+#   gosec         — insecure patterns in OUR code: command injection, weak
+#                   randomness, unhandled errors on security-relevant calls,
+#                   file permissions.
+#   golangci-lint — correctness and maintainability lints beyond `go vet`.
+#
+# A fourth job, notice-drift, asks a different question entirely — not "is
+# this code safe" but "is the repo's third-party attribution (NOTICE, at the
+# repo root) still accurate" — and a fifth, action-pins, asks "does every
+# SHA-pinned action actually resolve". Both are static, both are Go/repo-
+# structure checks, and both fit this workflow's existing shape better than a
+# new file.
+#
+# Each runs as its OWN job rather than sequential steps in one job: a gosec
+# finding must not hide a govulncheck finding behind an early exit. Five
+# independent verdicts also means a reviewer sees which class of problem
+# failed without opening the log.
+#
+# WHY THIS EXISTS: the OpenSSF Best Practices badge asks whether the project
+# applies static analysis and checks for known vulnerabilities. Before this
+# workflow the honest answer was "go vet only", which is thin for a project
+# that runs model output with credentials able to write to source repos.
+# notice-drift answers a related but separate ask from a CNCF General
+# Technical Review: how does the project ensure third-party code carries
+# correct and complete attribution. See that job's own comment for the full
+# reasoning.
+
+on:
+  push:
+    branches: [v2, v4]
+    paths: ['src/**', '.github/workflows/**', '.github/release-lines.yml']
+  pull_request:
+    branches: [v2, v4]
+    paths: ['src/**', '.github/workflows/**', '.github/release-lines.yml']
+  schedule:
+    # Weekly, so a newly-PUBLISHED advisory against unchanged code is still
+    # found. A push-only trigger cannot catch that: the vulnerability appears
+    # in the database, not in a diff.
+    - cron: '0 6 * * 1'
+    # Also weekly for notice-drift: an upstream dependency's LICENSE file can
+    # change (a relicense, a typo fix) with go.mod/go.sum untouched, which a
+    # push-only trigger would never catch either.
+
+permissions:
+  contents: read
+
+# Same discipline as v2-ci.yml: cancel superseded PR runs, never cancel a
+# push-to-branch run (keyed on run_id so each gets its own group).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  govulncheck:
+    name: govulncheck (known vulnerabilities)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.25'
+          cache-dependency-path: src/go.sum
+
+      # Installed by version rather than via a marketplace action so the tool
+      # itself is pinned and the supply chain is one hop shorter.
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+
+      - name: Scan
+        working-directory: src
+        run: govulncheck ./...
+
+  gosec:
+    name: gosec (insecure patterns)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.25'
+          cache-dependency-path: src/go.sum
+
+      # Version floor is load-bearing: gosec v2.21.4 pins golang.org/x/tools
+      # v0.25.0, which does not COMPILE under Go 1.25 ("invalid array length").
+      # The failure looks like a scan failure but is a build failure in the
+      # tool itself — do not downgrade to "fix" a finding.
+      - name: Install gosec
+        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0
+
+      # -exclude-generated: generated files are not hand-maintained, so a
+      # finding there is not actionable by a reviewer.
+      # Test files are IN scope deliberately: a test that shells out on
+      # attacker-influenced input is a real hole, not a test-only concern.
+      # NON-BLOCKING FOR NOW, deliberately and temporarily.
+      #
+      # The first run surfaced a real backlog, including G115 integer-overflow
+      # conversions in pkg/knowledge and pkg/dashboard. Those deserve triage on
+      # their own merits, not a rushed batch fix under a red gate — and a gate
+      # that blocks every PR from day one on a pre-existing backlog gets
+      # disabled rather than drained.
+      #
+      # So gosec RUNS and its findings are visible in the log on every PR, but
+      # does not fail the build yet. Flipping this to blocking is the last step
+      # of the triage issue #4903; do not flip it before the
+      # HIGH-severity findings are resolved, and do not delete the step to make
+      # the summary look clean.
+      - name: Scan
+        working-directory: src
+        continue-on-error: true
+        run: gosec -exclude-generated ./...
+
+  golangci-lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.25'
+          cache-dependency-path: src/go.sum
+
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.13.1
+          working-directory: src
+
+  action-pins:
+    name: action pins resolve
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # A fabricated 40-hex SHA looks exactly like a correct pin and is only
+      # caught when the workflow RUNS. release.yml shipped one (#4908), so every
+      # tagged release failed at "Prepare all required actions" — discovered
+      # only when someone tried to cut a release.
+      - name: Check every pinned action SHA exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: src/scripts/check-action-pins.sh .github/workflows
+
+  notice-drift:
+    name: NOTICE matches the module graph
+    runs-on: ubuntu-latest
+    # WHY THIS JOB EXISTS: a CNCF General Technical Review asks how the
+    # project ensures third-party attribution stays correct and complete. A
+    # generated NOTICE that can silently go stale is worse than no NOTICE at
+    # all — it makes a false completeness claim the moment a dependency is
+    # bumped, added, or removed without anyone regenerating the file by hand.
+    # This job is the enforcement: it regenerates NOTICE the same way a
+    # contributor would (src/scripts/generate-notice.sh, itself pinned — see
+    # that script's header for why google/go-licenses was chosen) and fails
+    # if the committed NOTICE differs from a fresh run against the current
+    # src/go.mod / src/go.sum.
+    #
+    # FIRST-RUN STATE: the NOTICE committed alongside this job is a
+    # STATICALLY-DERIVED placeholder (see NOTICE's own header) — it was
+    # assembled from src/go.mod without running `go` tooling, because the PR
+    # that introduced it was authored in an environment where `go` could not
+    # be run. That placeholder is EXPECTED to differ from this job's output
+    # the first time this job runs for real (this job needs `go`, which is
+    # exactly what was unavailable when NOTICE was hand-assembled). This job
+    # deliberately does NOT special-case that expected first-run diff by
+    # skipping or soft-failing — a diff against the placeholder is a real,
+    # actionable diff (the placeholder is explicitly not yet the resolved
+    # module graph), and the fix is the same either way: run
+    # src/scripts/generate-notice.sh locally, commit the result. There is
+    # nothing for this job to silently tolerate; "the file is stale, here is
+    # the regenerated version, commit it" is the correct message on run one
+    # exactly as it is on every run after.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.25'
+          cache-dependency-path: src/go.sum
+
+      - name: Regenerate NOTICE from the current module graph
+        run: src/scripts/generate-notice.sh /tmp/NOTICE.generated
+
+      - name: Fail if the committed NOTICE is stale
+        run: |
+          set -euo pipefail
+          if ! diff -u NOTICE /tmp/NOTICE.generated; then
+            echo "::error::NOTICE is out of date with src/go.mod / src/go.sum. Run 'src/scripts/generate-notice.sh' locally (requires a Go toolchain) and commit the regenerated NOTICE." >&2
+            exit 1
+          fi
+          echo "NOTICE matches the current module graph."

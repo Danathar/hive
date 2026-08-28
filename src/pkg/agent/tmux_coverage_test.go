@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +17,29 @@ import (
 func tmuxAvailable() bool {
 	_, err := exec.LookPath("tmux")
 	return err == nil
+}
+
+// forceSharedUID pins a test agent to the shared dev UID and the default tmux
+// socket, making the test hermetic on live hive hosts.
+//
+// NewManager loads /var/run/hive/uid-map.json whenever it exists. On a host
+// that runs (or ever ran) a real hive, a test agent whose name collides with a
+// deployed agent — "scanner" is one — silently inherits that agent's real UID
+// and per-UID tmux socket from the production map. Every tmux exec for it then
+// routes through `su-exec <user>` (absent outside the hive container image) and
+// targets a per-UID socket no test session lives on. CI runners have no
+// uid-map, so the collision only bites on hive-like hosts: the suite is green
+// in CI and red for anyone running it where a hive is installed.
+func forceSharedUID(t *testing.T, m *Manager, name string) {
+	t.Helper()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	a, ok := m.agents[name]
+	if !ok {
+		t.Fatalf("forceSharedUID: agent %q not found", name)
+	}
+	a.UID = 0
+	a.tmuxSocket = ""
 }
 
 // cleanupAgent cancels the agent's poll goroutine and tears down its tmux
@@ -107,16 +131,31 @@ func paneInject(t *testing.T, session, text string) {
 	time.Sleep(400 * time.Millisecond)
 }
 
-// paneInjectLines renders each string on its own pane line.
-func paneInjectLines(t *testing.T, session string, lines ...string) {
+// requirePaneShows blocks until capture-pane actually returns text in the
+// session's visible pane, failing the test if it never renders.
+//
+// paneInject only types the text and sleeps a fixed 400ms; on a loaded runner
+// (parallel packages, coverage instrumentation, the suite's own tmux fork
+// storm) the server can take longer than that to paint. Tests that next enter
+// a readiness poll bounded by the TestMain-shrunk cliReadyTimeout (5s) then
+// start that clock BEFORE their marker is visible and flake with "kick
+// dropped" (seen intermittently in TestDeliverStartupKick_BobReceivesKick).
+// Gating on the render keeps those tests deterministic without widening the
+// production timeouts they exist to exercise.
+func requirePaneShows(t *testing.T, session, text string) {
 	t.Helper()
-	for _, ln := range lines {
-		if err := testTmuxCommand("send-keys", "-t", session, "-l", ": "+ln).Run(); err != nil {
-			t.Fatalf("send-keys: %v", err)
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		out, err := testTmuxCommand("capture-pane", "-t", session, "-p").Output()
+		if err == nil && strings.Contains(string(out), text) {
+			return
 		}
-		_ = testTmuxCommand("send-keys", "-t", session, "Enter").Run()
+		if time.Now().After(deadline) {
+			t.Fatalf("pane %q never rendered %q (capture err: %v, last capture:\n%s)",
+				session, text, err, string(out))
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
-	time.Sleep(500 * time.Millisecond)
 }
 
 // ---------------------------------------------------------------------------
@@ -131,6 +170,7 @@ func TestStart_LaunchClaude(t *testing.T) {
 	m := NewManager(map[string]config.AgentConfig{
 		"scanner": {Backend: "claude", Model: "opus"},
 	}, discardLogger(), ProjectContext{ACMMLevel: 5})
+	forceSharedUID(t, m, "scanner")
 
 	if err := m.Start(context.Background(), "scanner"); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -523,7 +563,22 @@ func TestConfirmMenuOption_SelectsOption(t *testing.T) {
 		t.Fatal(err)
 	}
 	testTmuxCommand("send-keys", "-t", session, "Enter").Run()
-	time.Sleep(500 * time.Millisecond)
+	// Wait until the shell has actually started and executed the printf: a
+	// fixed 500ms was a knife-edge against shell startup time (a zsh with user
+	// dotfiles takes >2s to first render on some hosts), and confirmMenuOption
+	// treats a pane without the title as "already dismissed" — masking the
+	// race as a wrong-answer failure four Down-keys later.
+	rendered := false
+	for i := 0; i < 100; i++ {
+		if selectedMenuOption(m.captureVisiblePaneForAgent(agent)) != "" {
+			rendered = true
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !rendered {
+		t.Fatalf("menu never rendered in the pane: %q", m.captureVisiblePaneForAgent(agent))
+	}
 	// want "accept" is on the selected ❯ line -> confirm immediately.
 	if !m.confirmMenuOption(agent, "Bypass Permissions mode", "accept", "Down") {
 		t.Error("should confirm the already-selected wanted option")

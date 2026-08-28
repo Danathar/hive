@@ -144,9 +144,9 @@ else
   PERM_FLAG=$(backend_perm_flag "$BACKEND")
   MODEL_FLAG="--model"
 
-  # amazonq and goose don't support --model
+  # goose doesn't support --model (it takes its model from config/env)
   case "$BACKEND" in
-    amazonq|goose) MODEL_FLAG="" ;;
+    goose) MODEL_FLAG="" ;;
   esac
 
   if [[ -z "$CMD" || -z "$PERM_FLAG" ]]; then
