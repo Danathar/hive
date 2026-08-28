@@ -7,12 +7,16 @@
 #
 # Deltas from restricted-v2 (each one exists because the base pod needs it):
 #
-#   allowedCapabilities        The six capabilities the deployment's
+#   allowedCapabilities        The eight capabilities the deployment's
 #                              `capabilities.add` lists (it still drops ALL
 #                              first). An SCC admits a pod only if every added
 #                              cap is in this list — allowing only NET_ADMIN
 #                              would still reject the pod, so the su-exec set
 #                              is listed too, mirroring deployment.yaml 1:1.
+#                              That 1:1 is machine-checked by
+#                              ../../test_manifest_caps_runtime.sh (#4379):
+#                              drift here does not fail a grep, it fails
+#                              admission, on the cluster, at deploy time.
 #   runAsUser: RunAsAny        The entrypoint starts as root (iptables REDIRECT,
 #                              PVC chown) and then drops to `dev`;
 #                              MustRunAsRange would force a namespace-range UID
@@ -55,6 +59,8 @@ allowedCapabilities:
   - SETPCAP
   - CHOWN # chown per-agent dirs/beads to the agent UID
   - DAC_OVERRIDE
+  - FOWNER # entrypoint `chmod -R g+rwX /data/home` on dev-owned files
+  - FSETID # entrypoint `chmod g+s` on dev:node dirs (root is not in `node`)
 defaultAddCapabilities: null
 requiredDropCapabilities:
   - ALL

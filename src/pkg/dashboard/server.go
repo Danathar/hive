@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/kubestellar/hive/pkg/hub"
 	"github.com/kubestellar/hive/pkg/openrouter"
 	"github.com/kubestellar/hive/pkg/planning"
+	"github.com/kubestellar/hive/pkg/watchdog"
 )
 
 //go:embed static
@@ -88,6 +90,10 @@ type Server struct {
 	acmmEvalMu       sync.RWMutex
 	acmmEvalCache    *ACMMEvaluation
 	acmmEvalCachedAt time.Time
+	// acmmLinearBaseURL overrides the Linear GraphQL endpoint the ACMM
+	// "Open Issue" path posts issueCreate to. Empty = production; tests
+	// point it at an httptest server.
+	acmmLinearBaseURL string
 
 	// Sparkline histories, all backed by the generic timeSeries ring buffer
 	// (see timeseries.go). Lazily constructed via the tokenSeries()/factSeries()
@@ -98,9 +104,31 @@ type Server struct {
 	tokenHist *timeSeries[TokenSparklineEntry]
 	factHist  *timeSeries[FactHistoryEntry]
 	costHist  *timeSeries[CostHistoryEntry]
+	// budgetWindowHist records one row per CLOSED budget window (#4298). Lazily
+	// built like the sparkline rings so a zero-value Server works in tests.
+	budgetWindowOnce sync.Once
+	budgetWindowHist *budgetWindowTracker
+
+	// convergenceModeTrk captures one (mode, generation) pair per enrolled
+	// eval pass and detects transitions (#4263). convergenceSoakTrk records the
+	// bounded per-pass soak telemetry. Both lazily built like the rings above.
+	convergenceModeOnce sync.Once
+	convergenceModeTrk  *convergenceModeTracker
+	convergenceSoakOnce sync.Once
+	convergenceSoakTrk  *convergenceSoakTracker
 
 	// lastFullBroadcast is guarded by statusMu (set/read alongside s.status).
 	lastFullBroadcast time.Time
+
+	// statusSeq / statusMutationEpoch power the stale-snapshot guard (#4348).
+	// statusSeq increments on every published full snapshot and travels in the
+	// payload so the frontend can drop out-of-order status responses.
+	// statusMutationEpoch increments on every state mutation; a snapshot
+	// rebuild that STARTED before the latest mutation is dropped at publish
+	// time, so no published snapshot can revert a mutation the operator has
+	// already been told succeeded. Both guarded by statusMu.
+	statusSeq           uint64
+	statusMutationEpoch uint64
 
 	// fact/cost histories were migrated to the generic timeSeries store (#2041);
 	// the trend history (#2039) remains a dedicated buffer for now.
@@ -163,6 +191,12 @@ type Server struct {
 	openRouterStateOnce  sync.Once
 	openRouterStateStore *openrouter.StateStore
 
+	// Linear agent integration (RFC #4492 Part 2): lazily-built service
+	// bundling the install store, control-plane client, webhook receiver, and
+	// session responder. See api_linear_agent.go.
+	linearAgentOnce sync.Once
+	linearAgentSvc  *linearAgentService
+
 	audit *AuditLog
 
 	// presenceEngagedAt maps a username to the last time their browser
@@ -179,6 +213,9 @@ type Server struct {
 	cachedLatestHash    string
 	cachedLatestMessage string
 	cachedLatestAt      time.Time
+	cachedStableV4Hash  string
+	cachedStableV4At    time.Time
+	commitBehindCache   map[string]int
 
 	contributeHub *ContributeWSHub
 
@@ -242,15 +279,25 @@ type Server struct {
 
 // StatusPayload matches the JSON contract the dashboard frontend render() expects.
 type StatusPayload struct {
-	Timestamp string           `json:"timestamp"`
-	HiveID    string           `json:"hiveId"`
-	Agents    []FrontendAgent  `json:"agents"`
-	Governor  FrontendGovernor `json:"governor"`
-	Tokens    FrontendTokens   `json:"tokens"`
-	Repos     []FrontendRepo   `json:"repos"`
-	Beads     FrontendBeads    `json:"beads"`
-	Planning  FrontendPlanning `json:"planning"`
-	Health    map[string]any   `json:"health"`
+	Timestamp string `json:"timestamp"`
+	// StatusSeq is a monotonic publish sequence (#4348): the frontend drops
+	// any status payload whose seq is older than the last one it rendered,
+	// so a stale in-flight poll/SSE response can never repaint over a newer
+	// snapshot (e.g. reverting a just-reset restart counter).
+	StatusSeq uint64 `json:"statusSeq"`
+	// StatusInstance identifies the server process that produced the seq.
+	// Seqs restart at 1 when the spoke restarts; the frontend resets its
+	// guard counters when the instance changes instead of dropping forever.
+	StatusInstance   string                    `json:"statusInstance"`
+	HiveID           string                    `json:"hiveId"`
+	Agents           []FrontendAgent           `json:"agents"`
+	ConfiguredAgents []FrontendConfiguredAgent `json:"configuredAgents"`
+	Governor         FrontendGovernor          `json:"governor"`
+	Tokens           FrontendTokens            `json:"tokens"`
+	Repos            []FrontendRepo            `json:"repos"`
+	Beads            FrontendBeads             `json:"beads"`
+	Planning         FrontendPlanning          `json:"planning"`
+	Health           map[string]any            `json:"health"`
 	// DeepHealth carries the spoke's own deep health checks (HealthSummary:
 	// ready, github_auth, agents, …) — the same checks the heartbeat reports
 	// to the hub. The dashboard's header Health pill renders from these, NOT
@@ -369,6 +416,15 @@ type InferenceBackend struct {
 	Name      string   `json:"name"`
 	Inference bool     `json:"inference"`
 	Models    []string `json:"models"`
+	// ModelsFallback is true when Models is NOT an authoritative census of
+	// what the backend offers: the static alias list substituted because
+	// live /v1/models discovery failed (endpoint down, 403, etc), a PARTIAL
+	// sweep in which some endpoints answered and others did not, or the
+	// HIVE_*_MODELS env list standing in for a registered endpoint that
+	// failed to answer. The UI must not treat any of these as evidence that
+	// models were actually added or removed (#4426, #4438) — diffing against
+	// one is what produced the "Model removed from litellm: …" toast storms.
+	ModelsFallback bool `json:"models_fallback,omitempty"`
 }
 
 type FrontendAgent struct {
@@ -429,6 +485,54 @@ type FrontendAgent struct {
 	LastError        string `json:"lastError,omitempty"`
 	StallNudges      int    `json:"stallNudges,omitempty"`
 	ActionNudges     int    `json:"actionNudges,omitempty"`
+	TransientNudges  int    `json:"transientNudges,omitempty"`
+	// Conditions is the watchdog reconciler's observed-truth condition set
+	// (Ready/Authenticated/Producing — RFC #4665), replacing trust in the
+	// State config echo. Empty until the watchdog's first sweep.
+	Conditions []watchdog.Condition `json:"conditions,omitempty"`
+	// WatchdogMode is the authority the watchdog was running under when it
+	// published Conditions. The UI needs it to say whether a condition implied
+	// an action that was actually TAKEN: in observe mode a "crash-looping"
+	// verdict means the agent was NOT paused, and a reader must not conclude
+	// otherwise.
+	WatchdogMode string `json:"watchdogMode,omitempty"`
+	// Enabled mirrors the CONFIG flag, not a runtime state, and is the only
+	// thing that distinguishes "switched off on purpose" from "stopped because
+	// something broke" — State reads "stopped" for both.
+	//
+	// A disabled agent reaches this payload at all because ApplyPack adds every
+	// pack agent to the runtime roster and gates only the Start on Enabled
+	// (api_packs.go), which is deliberate: the card is how an operator turns
+	// the agent on. But without this field the card cannot say so, and it
+	// offers a terminal and a full log for an agent that has never had a tmux
+	// session — a dead end that reports "no tmux socket found for session
+	// hive-<name>".
+	//
+	// NOT omitempty: false is the meaningful value here, and omitempty would
+	// erase exactly the case this exists to report.
+	Enabled bool `json:"enabled"`
+}
+
+// FrontendConfiguredAgent is the secret-free config inventory used by the
+// dashboard to surface agents that have no runtime process (notably agents
+// configured with enabled: false). Runtime details remain in FrontendAgent.
+type FrontendConfiguredAgent struct {
+	Name         string `json:"name"`
+	DisplayName  string `json:"displayName,omitempty"`
+	Description  string `json:"description,omitempty"`
+	SortOrder    int    `json:"sortOrder"`
+	Emoji        string `json:"emoji,omitempty"`
+	Color        string `json:"color,omitempty"`
+	Enabled      bool   `json:"enabled"`
+	ModelOwner   string `json:"modelOwner,omitempty"`
+	BackendOwner string `json:"backendOwner,omitempty"`
+	// Mode/ModeEmoji are resolved the same way buildAgents resolves them for a
+	// running agent: the agent's own Mode override if set, else the ACMM level
+	// default. A disabled agent has no runtime entry, so without these the
+	// sidebar cannot say what the agent WOULD do once enabled — which is the
+	// one thing an operator wants to check before enabling it.
+	Mode      string `json:"mode,omitempty"`
+	ModeEmoji string `json:"modeEmoji,omitempty"`
 }
 
 type FrontendGovernor struct {
@@ -549,13 +653,22 @@ type FrontendBudget struct {
 	HoursRemaining  float64 `json:"HOURS_REMAINING"`
 	ProjectedWeekly int64   `json:"PROJECTED_WEEKLY"`
 	ProjectedPct    float64 `json:"PROJECTED_PCT"`
-	LastUpdated     string  `json:"LAST_UPDATED"`
+	// WindowHoursRemaining is wall-clock time until the current budget period
+	// resets. HoursRemaining above is instead how long the remaining token
+	// allowance would last at the observed burn rate.
+	WindowHoursRemaining float64 `json:"WINDOW_HOURS_REMAINING"`
+	LastUpdated          string  `json:"LAST_UPDATED"`
 	// Exhausted is true when the weekly limit is set and window spend has
 	// reached it — the governor is suppressing kicks for non-exempt agents.
 	Exhausted bool `json:"BUDGET_EXHAUSTED"`
 	// WindowEndsAt is when the current budget window rolls (RFC3339);
 	// empty unless a weekly limit is set and a window is open.
 	WindowEndsAt string `json:"WINDOW_ENDS_AT"`
+	// WindowStartsAt is when the current window opened (RFC3339), i.e. the last
+	// reset. Additive (#4298): it is what lets a usage graph mark where the
+	// resets fell, and what bounds each row of the per-window history. Empty
+	// under exactly the same conditions as WindowEndsAt.
+	WindowStartsAt string `json:"WINDOW_STARTS_AT,omitempty"`
 }
 
 type FrontendCadence struct {
@@ -756,17 +869,18 @@ func (s *Server) buildInferenceBackends() []InferenceBackend {
 		{"vllm", "vLLM (self-hosted)"},
 		{"llm-d", "llm-d (self-hosted)"},
 	} {
-		models := s.queryInferenceModels(b.id)
+		models, fallback := s.queryInferenceModelsDetailed(b.id)
 		backends = append(backends, InferenceBackend{
-			ID: b.id, Name: b.name, Inference: true, Models: models,
+			ID: b.id, Name: b.name, Inference: true, Models: models, ModelsFallback: fallback,
 		})
 	}
 	// litellm has no in-cluster default — include it only when an endpoint
 	// is registered, so an unconfigured backend isn't SSE-pushed empty.
 	if endpoints, ok := s.getInferenceEndpoints("litellm"); ok && len(endpoints) > 0 {
+		models, fallback := s.queryInferenceModelsDetailed("litellm")
 		backends = append(backends, InferenceBackend{
 			ID: "litellm", Name: "LiteLLM (proxy)", Inference: true,
-			Models: s.queryInferenceModels("litellm"),
+			Models: models, ModelsFallback: fallback,
 		})
 	}
 	return backends
@@ -1273,6 +1387,17 @@ func isPublicPath(path string) bool {
 		// query IS the credential — the handler verifies it (unknown/expired/
 		// replayed states are rejected) before storing anything.
 		return true
+	case path == linearAgentCallbackPath:
+		// Linear agent OAuth return (RFC #4492 Part 2): the installing admin's
+		// browser comes back from linear.app with no hive session. The
+		// single-use state token is the credential, verified server-side.
+		return true
+	case path == linearAgentWebhookPath:
+		// Linear AgentSessionEvent webhooks: Linear's servers cannot hold a
+		// dashboard session. NOT actually open — the handler fails closed
+		// without LINEAR_WEBHOOK_SECRET and verifies the HMAC signature over
+		// the raw body plus the signed timestamp's replay window.
+		return true
 	case path == "/sso":
 		// SSO handoff exchange: the caller has no session yet, the signed hub
 		// token IS the credential. The handler itself verifies the token and
@@ -1442,7 +1567,41 @@ func (s *Server) roleEnforcement(next http.Handler) http.Handler {
 	})
 }
 
+// BeginStatusSnapshot returns the current mutation epoch. Callers that build
+// a full status snapshot should capture this BEFORE reading any state and
+// pass it to UpdateStatusIfFresh, which drops the snapshot if a mutation
+// landed while it was being built (#4348).
+func (s *Server) BeginStatusSnapshot() uint64 {
+	s.statusMu.RLock()
+	defer s.statusMu.RUnlock()
+	return s.statusMutationEpoch
+}
+
+// noteStatusMutation records that server-side state just changed. It returns
+// the minimum StatusSeq a published snapshot must carry to be guaranteed to
+// reflect the mutation — any snapshot published with a lower seq was built
+// before it. Mutation handlers hand this floor to the frontend so it can
+// discard stale in-flight status responses (#4348).
+func (s *Server) noteStatusMutation() uint64 {
+	s.statusMu.Lock()
+	defer s.statusMu.Unlock()
+	s.statusMutationEpoch++
+	return s.statusSeq + 1
+}
+
+// UpdateStatus publishes a snapshot unconditionally (epoch captured at entry).
+// Prefer BeginStatusSnapshot + UpdateStatusIfFresh when the snapshot build is
+// slow enough for a mutation to race it.
 func (s *Server) UpdateStatus(status *StatusPayload) {
+	s.UpdateStatusIfFresh(status, s.BeginStatusSnapshot())
+}
+
+// UpdateStatusIfFresh publishes the snapshot unless a state mutation happened
+// after buildEpoch was captured — a stale build must not overwrite (and then
+// broadcast) pre-mutation values the operator has already seen change.
+// Returns whether the snapshot was published; the mutation's own
+// refresh-after-mutation rebuild repaints shortly after a drop.
+func (s *Server) UpdateStatusIfFresh(status *StatusPayload, buildEpoch uint64) bool {
 	if s.deps != nil && s.deps.Config != nil {
 		status.ACMMLevel = detectACMMLevel(s.deps.Config)
 		status.ACMMPackAgents = buildACMMPackAgents(s.deps.Config)
@@ -1516,6 +1675,19 @@ func (s *Server) UpdateStatus(status *StatusPayload) {
 	s.hubBannerMu.RUnlock()
 
 	s.statusMu.Lock()
+	if buildEpoch < s.statusMutationEpoch {
+		// A mutation landed after this snapshot's build began: its data may
+		// predate the mutation. Drop it — the mutation's own refresh rebuild
+		// (which began after the epoch bump) publishes the fresh state.
+		curEpoch := s.statusMutationEpoch
+		s.statusMu.Unlock()
+		s.logger.Debug("dropping stale status snapshot built before a mutation",
+			"buildEpoch", buildEpoch, "mutationEpoch", curEpoch)
+		return false
+	}
+	s.statusSeq++
+	status.StatusSeq = s.statusSeq
+	status.StatusInstance = strconv.FormatInt(s.startedAt.UnixNano(), 10)
 	status.Timestamp = time.Now().UTC().Format(time.RFC3339)
 	s.status = status
 	s.lastFullBroadcast = time.Now()
@@ -1523,14 +1695,18 @@ func (s *Server) UpdateStatus(status *StatusPayload) {
 
 	s.AppendTokenSparkline(status)
 	s.AppendTrendHistory(status)
+	// #4298: fold the budget window into per-window history so a closed window's
+	// consumption survives the reset that erases the live number.
+	s.ObserveBudgetWindow(status)
 
 	data, err := json.Marshal(status)
 	if err != nil {
 		s.logger.Warn("failed to marshal status for SSE", "error", err)
-		return
+		return true
 	}
 
 	s.broadcastFrame(fmt.Sprintf("data: %s\n\n", data))
+	return true
 }
 
 // AddSystemAlert adds a critical alert visible on the dashboard.
@@ -1602,10 +1778,14 @@ func (s *Server) handleBannerDismissed(w http.ResponseWriter, r *http.Request) {
 
 	// Resolve the acting user: a direct-route spoke has a per-user session
 	// cookie; a hub-proxied spoke gets identity injected as X-Hive-User /
-	// X-Hive-Role by nginx. Either establishes an authenticated user.
+	// X-Hive-Role by nginx. Either establishes an authenticated user. The role
+	// is the LIVE allowlist role (session_live_role.go): a revoked session
+	// must not keep dismissing banners under its stale identity.
 	username, role := "", ""
 	if sess := s.sessionFromRequest(r); sess != nil {
-		username, role = sess.Username, sess.Role
+		if live, ok := s.liveSessionRole(sess); ok {
+			username, role = sess.Username, live
+		}
 	} else if hubUser := r.Header.Get("X-Hive-User"); hubUser != "" {
 		username, role = hubUser, r.Header.Get("X-Hive-Role")
 	}
@@ -1641,6 +1821,39 @@ func (s *Server) githubAppNotInstalled() bool {
 	s.githubAppMu.RLock()
 	defer s.githubAppMu.RUnlock()
 	return s.githubAppRequired && s.githubAppState == githubAppStateNotInstalledToken
+}
+
+// Operator-side pkg/github AppAuthState wire tokens (AppAuthState.
+// OperatorActionable()): credential failures only the hub operator can fix.
+// Kept as literals for the same reason as githubAppStateNotInstalledToken.
+const (
+	githubAppStateKeyMissingToken    = "key-missing"
+	githubAppStateKeyInvalidToken    = "key-invalid"
+	githubAppStateNoAppAssignedToken = "no-app-assigned"
+)
+
+// githubAppCredsUndelivered is the config-truth rule for the OPERATOR-SIDE
+// credential states, the exact sibling of githubAppNotInstalled: an App whose
+// private key never arrived (or cannot sign for it) can never mint, so
+// github_auth must fail in BOTH health surfaces even while a token-based
+// GHClient still works. Before this, a hive stuck on key-missing showed
+// github_auth ✓ ("token-based") for 8 days while its agents could not act as
+// the App at all — the green check is what let kelly-headwaters sit degraded
+// and unexamined (2026-08-12 → 2026-08-20). Returns the failure detail, or ""
+// when no operator-side state is in force.
+func (s *Server) githubAppCredsUndelivered() string {
+	s.githubAppMu.RLock()
+	defer s.githubAppMu.RUnlock()
+	if !s.githubAppRequired {
+		return ""
+	}
+	switch s.githubAppState {
+	case githubAppStateKeyMissingToken, githubAppStateNoAppAssignedToken:
+		return "GitHub App credentials not delivered by the hub — agents cannot act as the App (operator action; no action needed from the hive owner)"
+	case githubAppStateKeyInvalidToken:
+		return "GitHub App private key does not match the App it authenticates as — GitHub rejects its JWT (operator must push the correct key)"
+	}
+	return ""
 }
 
 func (s *Server) SetGitHubAppRequired(required bool) {
@@ -1947,9 +2160,14 @@ func (s *Server) handleHealthDeep(w http.ResponseWriter, r *http.Request) {
 		failCount++
 	}
 
-	// 2. GitHub auth — config truth first (see githubAppNotInstalled).
+	// 2. GitHub auth — config truth first (see githubAppNotInstalled and
+	// githubAppCredsUndelivered).
 	if s.githubAppNotInstalled() {
 		checks["github_auth"] = map[string]any{"status": "fail", "detail": "GitHub App not installed — no installation for this org"}
+		overall = "degraded"
+		failCount++
+	} else if detail := s.githubAppCredsUndelivered(); detail != "" {
+		checks["github_auth"] = map[string]any{"status": "fail", "detail": detail}
 		overall = "degraded"
 		failCount++
 	} else if s.deps != nil && s.deps.GHAppAuth != nil {
@@ -1961,7 +2179,15 @@ func (s *Server) handleHealthDeep(w http.ResponseWriter, r *http.Request) {
 			failCount++
 		}
 	} else if s.deps != nil && s.deps.GHClient != nil {
-		checks["github_auth"] = map[string]any{"status": "pass", "detail": "token-based"}
+		// Stays "pass": a too-narrow PAT authenticates fine, so the auth is not
+		// what is broken — a capability is. Reporting it as a fail would send
+		// an operator to re-issue working credentials. The detail carries the
+		// specific missing scope so the diagnosis is not left to a runtime 403.
+		detail := "token-based"
+		if s.deps.GHTokenScopes.Status == github.ScopeStatusMissing {
+			detail = "token-based — " + s.deps.GHTokenScopes.Detail
+		}
+		checks["github_auth"] = map[string]any{"status": "pass", "detail": detail}
 	} else {
 		checks["github_auth"] = map[string]any{"status": "fail", "detail": "no GitHub auth configured"}
 		overall = "degraded"
@@ -2005,6 +2231,16 @@ func (s *Server) handleHealthDeep(w http.ResponseWriter, r *http.Request) {
 					ac["status"] = "warn"
 					ac["detail"] = "refused kick: " + proc.KickRefusalReason
 				}
+			} else if agentDisabledInConfig(s.deps.Config, name, proc) {
+				// Switched off in config, so nothing ever starts it and it has
+				// no session — the same DELIBERATE non-running state the paused
+				// branch above already scores as "skip". Scoring it "fail"
+				// meant every hive that turns an agent off reports a permanent
+				// health failure it can never clear, and (via healthSummaryFor)
+				// raises a standing hub alert for an agent nobody wants running.
+				ac["disabled"] = true
+				ac["status"] = "skip"
+				ac["detail"] = "disabled in config — not started"
 			} else {
 				ac["status"] = "fail"
 				failCount++
@@ -2556,6 +2792,13 @@ func (s *Server) RecordAdvisoryError(errMsg string) {
 // more specific cause; the inference-auth fold only fills an otherwise-empty
 // error. It self-clears the moment inference recovers, because the provider
 // stops reporting the signal.
+//
+// Bead-store LOAD failures fold the same way (fma incident: /data/beads dirs
+// group-owned by a foreign gid locked the server out at startup, so every
+// digest built empty and the advisory silently aged for 3 days while the
+// agents kept writing findings). Gated on participation like the inference
+// fold, and outranked by both a real post error and the inference cause —
+// which are more specific. Self-clears on a restart that loads all stores.
 func (s *Server) AdvisoryState() (lastPostedAt time.Time, lastFindings int, lastError string) {
 	s.advisoryMu.RLock()
 	postedAt, findings, errMsg := s.advisoryLastPostedAt, s.advisoryLastFindings, s.advisoryLastError
@@ -2564,6 +2807,8 @@ func (s *Server) AdvisoryState() (lastPostedAt time.Time, lastFindings int, last
 	if errMsg == "" && !postedAt.IsZero() {
 		if infErr, _ := InferenceAuthError(); infErr != "" {
 			errMsg = infErr
+		} else if s.deps != nil && s.deps.BeadStoreLoadFailures > 0 {
+			errMsg = fmt.Sprintf("%d bead store(s) failed to load at startup (check /data/beads ownership) — advisory digest is built from the stores that DID load", s.deps.BeadStoreLoadFailures)
 		}
 	}
 	return postedAt, findings, errMsg
@@ -2664,9 +2909,13 @@ func (s *Server) healthSummaryFor(status *StatusPayload, ready bool) map[string]
 		fails++
 	}
 
-	// 2. GitHub auth — config truth first (see githubAppNotInstalled).
+	// 2. GitHub auth — config truth first (see githubAppNotInstalled and
+	// githubAppCredsUndelivered).
 	if s.githubAppNotInstalled() {
 		checks = append(checks, check{Name: "github_auth", Status: "fail", Detail: "GitHub App not installed — no installation for this org"})
+		fails++
+	} else if detail := s.githubAppCredsUndelivered(); detail != "" {
+		checks = append(checks, check{Name: "github_auth", Status: "fail", Detail: detail})
 		fails++
 	} else if s.deps != nil && s.deps.GHAppAuth != nil {
 		if _, err := s.deps.GHAppAuth.Token(s.deps.Ctx); err != nil {
@@ -2682,7 +2931,12 @@ func (s *Server) healthSummaryFor(status *StatusPayload, ready bool) map[string]
 			checks = append(checks, check{Name: "github_auth", Status: "pass"})
 		}
 	} else if s.deps != nil && s.deps.GHClient != nil {
-		checks = append(checks, check{Name: "github_auth", Status: "pass", Detail: "token"})
+		// See the /health counterpart above: pass with a scope-specific detail.
+		detail := "token"
+		if s.deps.GHTokenScopes.Status == github.ScopeStatusMissing {
+			detail = "token — " + s.deps.GHTokenScopes.Detail
+		}
+		checks = append(checks, check{Name: "github_auth", Status: "pass", Detail: detail})
 	} else {
 		checks = append(checks, check{Name: "github_auth", Status: "fail", Detail: "no auth"})
 		fails++
@@ -2699,6 +2953,7 @@ func (s *Server) healthSummaryFor(status *StatusPayload, ready bool) map[string]
 		const staleOutputThreshold = 30 * time.Minute
 		running := 0
 		paused := 0
+		disabled := 0
 		stalled := 0
 		unsubstituted := 0
 		down := 0
@@ -2747,6 +3002,15 @@ func (s *Server) healthSummaryFor(status *StatusPayload, ready bool) map[string]
 					}
 				}
 			} else if !grace {
+				// Disabled in config is a deliberate off-state, not a fault:
+				// nothing starts the agent, so "down" would be a permanent
+				// false alarm on any hive that switched an agent off. Counted
+				// separately (like paused) so the detail line still says the
+				// agent is not running, without failing the check.
+				if agentDisabledInConfig(s.deps.Config, name, proc) {
+					disabled++
+					continue
+				}
 				// A non-running agent whose CLI has no credentials is not
 				// crashed — it is waiting for a human to click Login on the
 				// agent panel. Bucket it separately so the operator reads an
@@ -2770,6 +3034,9 @@ func (s *Server) healthSummaryFor(status *StatusPayload, ready bool) map[string]
 		detail := fmt.Sprintf("%d running", running)
 		if paused > 0 {
 			detail += fmt.Sprintf(", %d paused", paused)
+		}
+		if disabled > 0 {
+			detail += fmt.Sprintf(", %d disabled", disabled)
 		}
 		if down > 0 {
 			detail += fmt.Sprintf(", %d down: %s", down, strings.Join(downNames, ", "))

@@ -27,6 +27,17 @@ All placeholders are UPPER_SNAKE_CASE. Search for them before applying:
 | `YOUR_RWX_STORAGE_CLASS` | `patch-pvc-storageclass.yaml` | A storage class on your cluster (RWO is fine for the default single replica). |
 | Route host (OpenShift) | see below | If you also want a Route, add the openshift overlay or set `spec.host`. |
 
+If the dashboard's OAuth callbacks (`/linear/callback` for the Linear agent,
+`/openrouter/callback` for OpenRouter funding) are published on a different
+hostname than the one you open the dashboard on — or your ingress rewrites the
+`Host` header on the way in (Traefik with a fixed upstream `Host`, a Cloudflare
+Tunnel "HTTP Host Header") — also set `dashboard.public_url` in
+`patch-configmap.yaml` to the externally reachable origin
+(`https://hive.example.com`, no path). Without it the install leg and the
+callback leg can derive different `redirect_uri`s and the provider rejects the
+code exchange. Do not use `hub.dashboard_url` for this on a standalone hive;
+see [docs/linear-agent.md](../../../../docs/linear-agent.md#setup).
+
 Also populate `hive-secrets` (from the base) with a GitHub App PEM **or**
 `HIVE_GITHUB_TOKEN`, and — if your litellm/inference endpoint needs auth —
 the key named by `governor.litellm.api_key_env` (default `HIVE_LITELLM_API_KEY`)
@@ -78,20 +89,75 @@ kubectl -n hive-inference rollout status deploy/vllm
 
 ## Pinning / upgrading the image
 
-The base tracks `ghcr.io/kubestellar/hive:stable`. To pin a reviewed digest (so
-upgrades are deliberate), run from this overlay directory:
+The base tracks `ghcr.io/kubestellar/hive:stable`. Pin so that upgrades are
+deliberate — there is no hub to auto-upgrade a standalone hive.
+
+**Which tags actually exist on `ghcr.io/kubestellar/hive`:**
+
+- Channel tags (`stable`, `candidate`, `edge`, `v4-latest`) and an immutable
+  7-character short-SHA tag for every merge to `v4`. These are what `docker.yml`
+  publishes, and they are the only tags that are guaranteed to exist.
+- `vX.Y.Z` **image** tags are produced only by the automated
+  [tagged-release workflow](../../../../docs/releases.md)
+  (`.github/workflows/release.yml`), which retags the just-published short-SHA
+  images with the version it cut. That workflow landed *after* the `v4.0.0`
+  **git** tag, so **there is no `ghcr.io/kubestellar/hive:v4.0.0` image** — a
+  `newTag: v4.0.0` pin goes straight to `ImagePullBackOff`. Before pinning a
+  version tag, confirm the image exists:
+
+  ```bash
+  # Anonymous pull token, then ask the registry for that tag's manifest.
+  TOKEN=$(curl -s "https://ghcr.io/token?scope=repository:kubestellar/hive:pull" | jq -r .token)
+  curl -sI -H "Authorization: Bearer $TOKEN" \
+    -H "Accept: application/vnd.oci.image.index.v1+json" \
+    https://ghcr.io/v2/kubestellar/hive/manifests/v4.1.0 | head -1   # 200 = exists, 404 = not published
+  ```
+
+  Version tags that do exist are listed on the
+  [GitHub Releases page](https://github.com/kubestellar/hive/releases) (each
+  release attaches the SBOM of the image it tagged).
+
+**Pin by digest (works today, always immutable — recommended).** Resolve the
+channel you reviewed to its digest, then write it into `kustomization.yaml`
+(git-tracked) from this overlay directory:
 
 ```bash
+TOKEN=$(curl -s "https://ghcr.io/token?scope=repository:kubestellar/hive:pull" | jq -r .token)
+DIGEST=$(curl -sI -H "Authorization: Bearer $TOKEN" \
+  -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json" \
+  https://ghcr.io/v2/kubestellar/hive/manifests/stable \
+  | awk 'tolower($1)=="docker-content-digest:" {print $2}' | tr -d '\r')
+echo "$DIGEST"   # sha256:...
+
 kustomize edit set image \
-  ghcr.io/kubestellar/hive=ghcr.io/kubestellar/hive@sha256:<digest>
+  ghcr.io/kubestellar/hive=ghcr.io/kubestellar/hive@"$DIGEST"
 ```
 
-That writes an `images:` entry into `kustomization.yaml` (git-tracked). To
-upgrade, bump the digest and re-apply:
+(`docker buildx imagetools inspect ghcr.io/kubestellar/hive:stable` or
+`crane digest ghcr.io/kubestellar/hive:stable` print the same digest if you
+have those tools.)
+
+**Pin by version tag** — only once you have confirmed the tag exists as above:
+
+```bash
+kustomize edit set image ghcr.io/kubestellar/hive=ghcr.io/kubestellar/hive:vX.Y.Z
+```
+
+Either form writes an `images:` entry into `kustomization.yaml`. To upgrade,
+bump the digest/tag in git and re-apply:
 
 ```bash
 kubectl apply -k src/deploy/kustomize/overlays/standalone
 ```
+
+## Storage
+
+The base PVC (`../../../k8s/pvc.yaml`) is **`ReadWriteOnce`**, which is correct
+for the default single replica — any block storage class (AKS `managed-csi`,
+EBS, Ceph RBD, …) works. `patch-pvc-storageclass.yaml` only sets
+`storageClassName`; you do **not** need an RWX class. The base Deployment rolls
+with `strategy: Recreate`, so old and new pods never mount `/data` at the same
+time — RWX only matters if you change that to a surge rollout.
 
 ## Exposing the dashboard
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -112,6 +113,90 @@ func TestSetupCodexHome_NonRootRunsSuExec(t *testing.T) {
 	m.setupCodexHome(agent) // must not panic even when su-exec is missing
 }
 
+// codexHealTestManager returns a manager and a codex agent with the given UID.
+func codexHealTestManager(t *testing.T, uid int) (*Manager, *AgentProcess) {
+	t.Helper()
+	m := NewManager(map[string]config.AgentConfig{"cxa": {Backend: "codex"}}, discardLogger(), ProjectContext{})
+	m.mu.Lock()
+	agent := m.agents["cxa"]
+	agent.UID = uid
+	m.mu.Unlock()
+	return m, agent
+}
+
+// TestHealCodexHomeOwnership_AbsentDirNoOp pins that a fresh spoke (no
+// CODEX_HOME yet) is untouched: the following mkdir owns the create path.
+func TestHealCodexHomeOwnership_AbsentDirNoOp(t *testing.T) {
+	m, agent := codexHealTestManager(t, 2001)
+	dir := filepath.Join(t.TempDir(), "codex-cxa")
+	if got := m.healCodexHomeOwnership(agent, dir, "hive-cxa"); got != nil {
+		t.Errorf("absent dir must salvage nothing, got %q", got)
+	}
+	if _, err := os.Lstat(dir); !os.IsNotExist(err) {
+		t.Errorf("absent dir must not be created by the heal, stat err=%v", err)
+	}
+}
+
+// TestHealCodexHomeOwnership_ForeignDirRebuiltWithSalvage pins the wedge
+// this heal exists for: a CODEX_HOME owned by another identity survives on
+// /data across restarts and codex refuses to start. The heal must remove
+// the dir and hand back the operator-authored config.toml for the re-create
+// to restore. The test dir is owned by the test UID while the agent wants a
+// different UID, which is exactly the foreign-owner shape.
+func TestHealCodexHomeOwnership_ForeignDirRebuiltWithSalvage(t *testing.T) {
+	m, agent := codexHealTestManager(t, os.Getuid()+12345)
+	dir := filepath.Join(t.TempDir(), "codex-cxa")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const cfg = "model = \"gpt-5.1-codex\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := m.healCodexHomeOwnership(agent, dir, "hive-cxa")
+	if string(got) != cfg {
+		t.Errorf("readable config.toml must be salvaged before the rebuild, got %q", got)
+	}
+	if _, err := os.Lstat(dir); !os.IsNotExist(err) {
+		t.Errorf("foreign-owned codex home must be removed, stat err=%v", err)
+	}
+}
+
+// TestHealCodexHomeOwnership_AgentOwnedDirKept pins the invariant that a
+// correctly-owned CODEX_HOME (and its config.toml) is never touched.
+func TestHealCodexHomeOwnership_AgentOwnedDirKept(t *testing.T) {
+	m, agent := codexHealTestManager(t, os.Getuid())
+	dir := filepath.Join(t.TempDir(), "codex-cxa")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "config.toml")
+	const cfg = "model = \"gpt-5.1-codex\"\n"
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.healCodexHomeOwnership(agent, dir, "hive-cxa"); got != nil {
+		t.Errorf("agent-owned home must salvage nothing, got %q", got)
+	}
+	content, err := os.ReadFile(cfgPath)
+	if err != nil || string(content) != cfg {
+		t.Errorf("agent-owned config.toml must be untouched, content=%q err=%v", content, err)
+	}
+}
+
+func TestFileOwnerUID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "f")
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := fileOwnerUID(path); got != os.Getuid() {
+		t.Errorf("fileOwnerUID = %d, want %d", got, os.Getuid())
+	}
+	if got := fileOwnerUID(filepath.Join(t.TempDir(), "absent")); got != -1 {
+		t.Errorf("fileOwnerUID(absent) = %d, want -1", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // CheckAndRestartCrashedAgents
 // ---------------------------------------------------------------------------
@@ -211,6 +296,7 @@ func TestAgentEnvPairs_InferenceCov(t *testing.T) {
 	for _, p := range pairs {
 		found[p.Key] = p.Value
 	}
+
 	if found["ANTHROPIC_API_KEY"] != "sk-hive-cxa" {
 		t.Errorf("inference should set ANTHROPIC_API_KEY, got %q", found["ANTHROPIC_API_KEY"])
 	}
@@ -222,6 +308,32 @@ func TestAgentEnvPairs_InferenceCov(t *testing.T) {
 	}
 	if _, ok := found["COPILOT_GITHUB_TOKEN"]; !ok {
 		t.Error("copilot token should be present as a secret pair")
+	}
+}
+
+func TestAgentEnvPairs_ConfiguredGatewayGetsTranslatorEnv(t *testing.T) {
+	m := NewManager(map[string]config.AgentConfig{
+		"guide": {Backend: "OpenRouter", Model: "anthropic/claude-opus-4.8"},
+	}, discardLogger(), ProjectContext{})
+	m.SetGatewayBackendChecker(func(backend string) bool {
+		return strings.EqualFold(backend, "openrouter")
+	})
+	m.mu.RLock()
+	agent := m.agents["guide"]
+	m.mu.RUnlock()
+
+	found := map[string]string{}
+	for _, p := range m.agentEnvPairs(agent) {
+		found[p.Key] = p.Value
+	}
+	if found["ANTHROPIC_API_KEY"] != "sk-hive-guide" {
+		t.Errorf("gateway backend should set ANTHROPIC_API_KEY, got %q", found["ANTHROPIC_API_KEY"])
+	}
+	if _, ok := found["ANTHROPIC_BASE_URL"]; !ok {
+		t.Error("gateway backend should set ANTHROPIC_BASE_URL")
+	}
+	if found["NO_PROXY"] == "" {
+		t.Error("gateway backend should set NO_PROXY")
 	}
 }
 

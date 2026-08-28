@@ -283,6 +283,11 @@ type AgentSummary struct {
 	// session is alive, the CLI process is alive, and the agent still cannot do
 	// any work. It is invisible in State, which reads "running" throughout.
 	NeedsLogin bool `json:"needsLogin,omitempty"`
+	// QuotaExhausted is true when the agent pane shows a provider/monthly quota
+	// refusal ("monthly quota", Copilot Free requests exhausted, LiteLLM
+	// budget_exceeded). Unlike NeedsLogin, re-authentication will not help; the
+	// agent cannot buy tokens until the provider quota resets or is raised.
+	QuotaExhausted bool `json:"quotaExhausted,omitempty"`
 	// SessionMissing is true when the manager expected a live tmux session for
 	// a running agent and did not find one — the zombie case. Reported
 	// explicitly rather than inferred hub-side, because only the spoke can see
@@ -300,6 +305,44 @@ type AgentSummary struct {
 	// "running and working" from "running and producing nothing" — State,
 	// StartedAt and the kick log all keep their values while a CLI sits idle.
 	LastActivityAt string `json:"lastActivityAt,omitempty"`
+	// KickIntervalSec is the governor's CURRENT-mode interval for this agent.
+	// It lets the hub distinguish a fault from a scheduled-cadence agent that
+	// is correctly idle between kicks (flashsystems/ess: 2h/4h cadences looked
+	// idle after the generic 45-minute pane-activity threshold).
+	KickIntervalSec int64 `json:"kickIntervalSec,omitempty"`
+
+	// --- Fleet-divergence signals (the EXPECTED and ABLE legs) ---
+	// These let the hub show the gap between what the GOVERNOR expects running,
+	// what is ACTUALLY running, and what is ABLE to fulfill its mission. They
+	// are the minimum raw truths the hub cannot derive; every composite verdict
+	// (run-state, blocked reason, stuck/impotent, rollup) is derived hub-side.
+	// All are zero-valued on a legacy spoke that predates them, which the hub
+	// reads as UNKNOWN — never as a fault.
+
+	// ExpectedActive is true when the governor's CURRENT mode schedules this
+	// agent on a kicking cadence right now (config.ExpectedActive): the mode's
+	// cadence for this agent is not pause/off/0/"on demand" and the agent is
+	// not on-demand. It is the EXPECTED leg — the governor's intent — which the
+	// hub otherwise cannot see (it never receives per-mode Cadences).
+	ExpectedActive bool `json:"expectedActive,omitempty"`
+	// CanOpenIssue / CanOpenPR / CanMerge are the agent's capability at the
+	// hive's current ACMM level and effective mode — the EXACT gates the spoke
+	// enforces (AgentMode.CanCreateIssues/CanPush/CanMerge, the same checks
+	// AuthorizePROpen/AuthorizeMerge use). Sent as booleans so the hub needs no
+	// ACMM-level→mode mapping and the badge cannot claim a capability the relay
+	// would refuse.
+	CanOpenIssue bool `json:"canOpenIssue,omitempty"`
+	CanOpenPR    bool `json:"canOpenPR,omitempty"`
+	CanMerge     bool `json:"canMerge,omitempty"`
+	// Backend is the agent's effective backend (honoring BackendOverride). The
+	// hub needs it to interpret NeedsLogin (interactive CLI vs inference key)
+	// and to phrase a blocked reason.
+	Backend string `json:"backend,omitempty"`
+	// Enabled distinguishes "configured and meant to run" from "not running":
+	// a config-enabled-but-stopped agent is otherwise indistinguishable from an
+	// unconfigured one, which is exactly the STUCK-vs-disabled ambiguity the
+	// fleet view exists to resolve.
+	Enabled bool `json:"enabled,omitempty"`
 }
 
 // AgentActivity is the per-agent liveness evidence the spoke has and the hub
@@ -314,9 +357,18 @@ type AgentActivity struct {
 	PausedBy       string
 	PausedAt       time.Time
 	NeedsLogin     bool
+	QuotaExhausted bool
 	SessionMissing bool
 	StartedAt      time.Time
 	LastActivityAt time.Time
+	KickInterval   time.Duration
+	// Fleet-divergence signals — see the matching AgentSummary fields.
+	ExpectedActive bool
+	CanOpenIssue   bool
+	CanOpenPR      bool
+	CanMerge       bool
+	Backend        string
+	Enabled        bool
 }
 
 // NewAgentSummary builds one AgentSummary from an agent's name, state, mode and
@@ -332,7 +384,14 @@ func NewAgentSummary(name, state, mode string, act AgentActivity) AgentSummary {
 		PausedReason:   act.PausedReason,
 		PausedBy:       act.PausedBy,
 		NeedsLogin:     act.NeedsLogin,
+		QuotaExhausted: act.QuotaExhausted,
 		SessionMissing: act.SessionMissing,
+		ExpectedActive: act.ExpectedActive,
+		CanOpenIssue:   act.CanOpenIssue,
+		CanOpenPR:      act.CanOpenPR,
+		CanMerge:       act.CanMerge,
+		Backend:        act.Backend,
+		Enabled:        act.Enabled,
 	}
 	if !act.PausedAt.IsZero() {
 		as.PausedAt = act.PausedAt.UTC().Format(time.RFC3339)
@@ -342,6 +401,9 @@ func NewAgentSummary(name, state, mode string, act AgentActivity) AgentSummary {
 	}
 	if !act.LastActivityAt.IsZero() {
 		as.LastActivityAt = act.LastActivityAt.UTC().Format(time.RFC3339)
+	}
+	if act.KickInterval > 0 {
+		as.KickIntervalSec = int64(act.KickInterval / time.Second)
 	}
 	return as
 }
@@ -490,6 +552,17 @@ type HeartbeatPayload struct {
 	// DATA this beat" — never as an error and never as "everyone idle forever"
 	// (legacy fields keep accumulating regardless).
 	EngagedSessionUsers []string `json:"engaged_session_users,omitempty"`
+	// DashboardTokenHash is the SHA-256 hex of this spoke's dashboard token
+	// (DASHBOARD_AUTH_TOKEN), reported so the hub can keep its own record
+	// (SaaSHive.DashboardTokenHash) of the credential spoke-relayed upgrade
+	// requests prove themselves with — without the hub ever needing to read
+	// the hive-secrets secret from the spoke's cluster (impossible on
+	// pull-only clusters) and without the raw token ever riding the wire. The
+	// beat itself is authenticated by the per-hive bearer, so only the hive
+	// can set its own record — which is sound: the record only lets that same
+	// hive's dashboard prove it is itself. omitempty: an old spoke, or one
+	// with no token, sends nothing, and the hub keeps whatever it has.
+	DashboardTokenHash string `json:"dashboard_token_hash,omitempty"`
 	// UserLastActions maps username → RFC3339 timestamp of that user's most
 	// recent audit-logged REAL action on this hive (config save, agent
 	// restart, ACMM change, login, …; pseudo-users like "system" are never
@@ -563,9 +636,15 @@ type HeartbeatPayload struct {
 	// inference-auth alert whose ROOT cause an operator sees directly, distinct
 	// from a GitHub-post advisory staleness. It clears the moment an inference
 	// call succeeds, so a fixed hive self-heals. Never carries key material.
-	InferenceAuthError string         `json:"inference_auth_error,omitempty"`
-	Health             map[string]any `json:"health"`
-	DashboardURL       string         `json:"dashboard_url"`
+	InferenceAuthError string `json:"inference_auth_error,omitempty"`
+	// ProviderLimitReason is the spoke's current provider-side spending/quota
+	// refusal banner (distinct from hive-local governor budget). Empty means no
+	// signal or an old spoke. ProviderLimitRebuffs counts matched refused calls
+	// while latched, when known.
+	ProviderLimitReason  string         `json:"provider_limit_reason,omitempty"`
+	ProviderLimitRebuffs int            `json:"provider_limit_rebuffs,omitempty"`
+	Health               map[string]any `json:"health"`
+	DashboardURL         string         `json:"dashboard_url"`
 	// PublicURLSelfCheck is the spoke's own end-to-end probe of the dashboard
 	// URL it is advertising to the hub. It exists because the hub's public
 	// network can be the wrong vantage point for private-network hives: a URL
@@ -605,6 +684,12 @@ type HeartbeatPayload struct {
 	Timestamp          string `json:"timestamp"`
 	GitHubAppRequired  bool   `json:"github_app_required,omitempty"`
 	GitHubAppPermIssue string `json:"github_app_perm_issue,omitempty"`
+	// GitHubAppTokenStatus is the spoke's local view of the shared App token
+	// cache used by GitHub writers ("ok", "stale", "missing", "error").
+	// LastMintAt is the cache file mtime and Error is a log-safe detail.
+	GitHubAppTokenStatus     string `json:"github_app_token_status,omitempty"`
+	GitHubAppTokenLastMintAt string `json:"github_app_token_last_mint_at,omitempty"`
+	GitHubAppTokenError      string `json:"github_app_token_error,omitempty"`
 	// RepoTargetMisconfigured carries an operator-facing config-shape issue
 	// detected by the spoke. It is visibility only: the spoke keeps running and
 	// the hub does not rewrite the project fields.
@@ -643,6 +728,78 @@ type HeartbeatPayload struct {
 	// instead of summing a frozen number forever. Empty from a spoke too old
 	// to report it, which the hub treats as "not stale".
 	FleetStatsCollectedAt string `json:"fleet_stats_collected_at,omitempty"`
+
+	// --- Per-repo output activity (hive-health) ---------------------------
+	// RepoActivity is the spoke's audit-derived summary of output produced
+	// back to each work source (issues/PRs/comments/merges/claims/reviews/
+	// advisory) with counts + recency. It lets the hub decide, from the beat
+	// alone, whether a hive is actually producing — banded by ACMM level in
+	// the health verdict. Nil from a spoke too old to compute it (carried
+	// forward hub-side), like ComponentReach.
+	RepoActivity            []RepoActivityWire `json:"repo_activity,omitempty"`
+	RepoActivityCollectedAt string             `json:"repo_activity_collected_at,omitempty"`
+	RepoActivityWindowHours int                `json:"repo_activity_window_hours,omitempty"`
+	// RepoActivityCountWindowHours is the lookback the per-repo counts were
+	// accumulated over. RepoActivityWindowHours above is the FRESHNESS window
+	// the health verdict uses; the two differ by 28x, so a rate computed
+	// against the freshness window overstates activity (#4860).
+	RepoActivityCountWindowHours int `json:"repo_activity_count_window_hours,omitempty"`
+
+	// --- Quadrant signals -------------------------------------------------
+	// Cheap, already-computed spoke metrics forwarded so the hub can score the
+	// per-hive quadrant (trust / efficiency / satisfaction / productivity)
+	// without asking spokes to do new work. Every one of these is read from
+	// state the spoke already maintains on an existing timer — none costs a
+	// GitHub API call, which matters because the fleet shares a search quota.
+	//
+	// All pointers. A nil from an older spoke means "not reported", which the
+	// scorer treats as absent evidence rather than a measurement of zero — the
+	// distinction the whole quadrant design rests on. That also makes this
+	// block forward-compatible with no version negotiation.
+
+	// BudgetCurrentSpend is tokens consumed since the CURRENT budget window
+	// opened (governor's totalTokens minus the window baseline). Unlike
+	// Tokens24h above — which despite its name is a lifetime cumulative total —
+	// this is a genuine windowed delta, which is what makes a cost-per-outcome
+	// ratio meaningful rather than merely rankable.
+	//
+	// It is uninterpretable without its window bounds: zero equally means "the
+	// window just rolled" and "nothing was consumed". The two timestamps below
+	// are therefore part of the same signal, not optional decoration, and the
+	// window length is governor.budget.period_days (default 7 days) rather than
+	// anything fixed — so consumers must normalise (e.g. per day) before
+	// comparing against the 90-day PR counters above.
+	BudgetCurrentSpend   *int64 `json:"budget_current_spend,omitempty"`
+	BudgetLimit          *int64 `json:"budget_limit,omitempty"`
+	BudgetWindowStartsAt string `json:"budget_window_starts_at,omitempty"`
+	BudgetWindowEndsAt   string `json:"budget_window_ends_at,omitempty"`
+	// BudgetExhausted reports that the governor is actively suppressing agent
+	// kicks because the window's budget ran out. It is both an efficiency and a
+	// productivity signal: throughput near zero means something very different
+	// when the hive is being throttled than when it is merely idle.
+	BudgetExhausted *bool `json:"budget_exhausted,omitempty"`
+	BudgetIgnored   *bool `json:"budget_ignored,omitempty"`
+
+	// HoldTotal is issues and PRs parked behind a hold label awaiting human
+	// review, and AwaitingReview is plans blocked on a human decision. Both
+	// measure the same thing from different ends: how much of this hive's work
+	// is stalled on a person rather than on the agents.
+	HoldTotal      *int `json:"hold_total,omitempty"`
+	AwaitingReview *int `json:"awaiting_review,omitempty"`
+
+	// SLAViolations is work aging past its service threshold, taken from the
+	// governor's eval snapshot.
+	SLAViolations *int `json:"sla_violations,omitempty"`
+
+	// TasksCompleted7d is contributor-relay tasks completed in the last seven
+	// days, summed on the spoke from its 168 hourly buckets. The buckets
+	// themselves stay local: sending ~168 integers every two minutes to
+	// reconstruct one number on the hub would be pure waste.
+	//
+	// A flat zero is a real measurement for a hive with no contributors, not a
+	// gap — read it alongside Contributors above to tell the two apart.
+	TasksCompleted7d *int `json:"tasks_completed_7d,omitempty"`
+
 	// AgentsWithModel counts this hive's agents that have an effective method
 	// (backend) or model assigned — override first, then agent config, exactly
 	// as the launcher resolves it. The hub uses it for user-journey stage
@@ -905,7 +1062,7 @@ func StartHeartbeat(ctx context.Context, hubURL string, collect StatusCollector,
 		// A non-nil slice (even empty) is an authoritative replacement of the
 		// spoke's allowlist; nil means the hub sent nothing, leave it alone.
 		if resp.AuthorizedUsers != nil && onAuthorizedUsers != nil {
-			onAuthorizedUsers(resp.AuthorizedUsers)
+			onAuthorizedUsers(resp.AuthorizedUsers, resp.AuthorizedUserNames)
 		}
 		// A non-nil ProjectConfig means the hub wants the spoke to adopt a newly
 		// claimed project (placeholder assignment); nil means leave it alone.
@@ -1913,6 +2070,23 @@ type HeartbeatGitHubAppConfig struct {
 	// so it deserializes to empty on both sides; a spoke that reads it (older
 	// builds) simply never receives entries. It always arrives nil now.
 	AdditionalKeys []HeartbeatAppKey `json:"additional_keys,omitempty"`
+	// SecondaryKey delivers the ONE optional second App key this hive is
+	// authorized to hold (#4815), so a cluster's second App — the optional
+	// Visual Hive App, #4030 — can receive a credential without the primary key
+	// having anywhere else to go.
+	//
+	// WHY THIS IS NOT AdditionalKeys REVIVED. AdditionalKeys is a LIST selected
+	// from the fleet key set with no binding to the caller, which is exactly what
+	// made it the CWE-200/639 cross-tenant disclosure. This is a SINGLE key
+	// resolved from SaaSHive.SecondaryAppID on the hub's own record for the
+	// authenticated hive (secondaryAppKeyForHive): the hive is handed the one App
+	// an operator assigned it or nothing at all, and no value a spoke sends can
+	// change which App that is. The singular type is part of the guarantee — a
+	// list is the shape that invites "while we're here, send the others too".
+	//
+	// nil for every hive without a SecondaryAppID, which is the entire fleet
+	// today, so the heartbeat payload is byte-identical for them.
+	SecondaryKey *HeartbeatAppKey `json:"secondary_key,omitempty"`
 }
 
 // HeartbeatAppKey is one (app_id, private key) pair the hub delivers alongside
@@ -2039,6 +2213,18 @@ type HeartbeatResponse struct {
 	// changes propagate automatically. nil means "hub sent nothing" (leave the
 	// spoke's list unchanged); a non-nil (possibly empty) slice replaces it.
 	AuthorizedUsers []string `json:"authorized_users,omitempty"`
+	// AuthorizedUserNames is a PURELY COSMETIC companion to AuthorizedUsers: a
+	// map from each entry's raw identity key (never the "username:role" wire
+	// form — just the key before the ":role" suffix) to a human display name,
+	// so the spoke's read-only Access tab can show "Jane Doe" instead of a raw
+	// "ibmid:5500087VJB"/"google:1078…"/"microsoft:AAAA…" subject. It carries
+	// NO authority — the spoke's allowlist match (AuthorizedRole) reads only
+	// AuthorizedUsers/the key, and this map is never consulted for sign-in.
+	// Sent whenever AuthorizedUsers is (nil means "leave the spoke's copy
+	// unchanged", mirroring AuthorizedUsers' own nil semantics); a key absent
+	// here, or mapped to "", simply has no known name yet and the spoke falls
+	// back to the raw key.
+	AuthorizedUserNames map[string]string `json:"authorized_user_names,omitempty"`
 	// ProjectConfig is the claimed project's real org/repos/ACMM. The hub sets
 	// it (mirroring AuthorizedUsers) when a placeholder hive has been assigned
 	// to a user and the spoke is still reporting its old (placeholder) project.
@@ -2078,7 +2264,7 @@ type SwitchBranchCallback func(tag string)
 // access list ("username:role" entries) so the spoke can reconcile its
 // device-flow login allowlist with Manage Access grants. Used for
 // heartbeat-only clusters where the hub cannot push config over kubectl.
-type AuthorizedUsersCallback func(users []string)
+type AuthorizedUsersCallback func(users []string, names map[string]string)
 
 // GitHubAppConfigCallback is called when the hub delivers GitHub App config
 // via the heartbeat response (app ID, installation ID, private key).

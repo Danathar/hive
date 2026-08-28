@@ -132,17 +132,19 @@ type costSessionEntry struct {
 	Input     int64   `json:"input"`
 	Output    int64   `json:"output"`
 	CacheRead int64   `json:"cache_read"`
-	// Messages and LastActive give the UI enough to show session size and
-	// recency without a second round-trip. LastActive is a unix-seconds stamp
-	// (0 when the scanner could not determine it).
+	// Messages and Started/LastActive give the UI enough to show session size
+	// and timing without a second round-trip. Started is the earliest event
+	// timestamp and LastActive the latest, both unix-milliseconds stamps
+	// (0 when the scanner could not determine them).
 	Messages   int   `json:"messages"`
+	Started    int64 `json:"started,omitempty"`
 	LastActive int64 `json:"last_active,omitempty"`
 }
 
 // maxCostSessions caps how many per-session rows the /api/cost payload carries,
 // so a long-lived fleet with thousands of scanned sessions can't bloat the
-// response. The most-expensive sessions are kept (the UI sorts by cost), which
-// is what an operator hunting a cost spike wants to see first.
+// response. The newest-started sessions are kept, matching the Cost page's
+// default session ordering.
 const maxCostSessions = 200
 
 const costEstimateDisclaimer = "Estimated from token counts × published list prices. " +
@@ -216,9 +218,9 @@ func (s *Server) estimatedCost() costEstimated {
 // show cost per session (and, via the Agent field, group sessions by sandbox).
 // It is a pure function of the summary — each session's own token splits are
 // priced at list price, identically to the aggregate rows. The result is sorted
-// most-expensive first and capped at maxCostSessions so the payload stays
-// bounded on a large fleet. Returns an empty (non-nil) slice when there is no
-// session data.
+// by start time descending, then agent name ascending, and capped at
+// maxCostSessions so the payload stays bounded on a large fleet. Returns an
+// empty (non-nil) slice when there is no session data.
 func estimatedSessions(summary *tokens.AggregateSummary) []costSessionEntry {
 	if summary == nil {
 		return []costSessionEntry{}
@@ -237,12 +239,19 @@ func estimatedSessions(summary *tokens.AggregateSummary) []costSessionEntry {
 			Output:     sess.OutputTokens,
 			CacheRead:  sess.CacheRead,
 			Messages:   sess.Messages,
+			Started:    sess.FirstActive,
 			LastActive: sess.LastActive,
 		})
 	}
-	// Most-expensive first — that's what an operator hunting a cost spike wants,
-	// and it makes the maxCostSessions cap keep the rows that matter.
-	sort.Slice(out, func(i, j int) bool { return out[i].USD > out[j].USD })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Started != out[j].Started {
+			return out[i].Started > out[j].Started
+		}
+		if out[i].Agent != out[j].Agent {
+			return out[i].Agent < out[j].Agent
+		}
+		return out[i].SessionID < out[j].SessionID
+	})
 	if len(out) > maxCostSessions {
 		out = out[:maxCostSessions]
 	}

@@ -310,6 +310,16 @@ func (a *AppAuth) ScopedTokenForRepos(ctx context.Context, tier string, repos []
 			PullRequests: gh.Ptr("write"),
 			Checks:       gh.Ptr("read"),
 			Metadata:     gh.Ptr("read"),
+			// Workflows:write lets trusted-tier agents push branches that
+			// touch .github/workflows (#4677) — without it GitHub rejects
+			// such pushes server-side ("refusing to allow a GitHub App to
+			// create or update workflow ... without workflows permission").
+			// A requested permission must be a subset of what the App
+			// installation grants, so if the installation has not accepted
+			// Workflows read & write yet, the mint below falls back to a
+			// token without it and logs the missing grant instead of
+			// breaking every trusted-tier mint.
+			Workflows: gh.Ptr("write"),
 		}
 	case "advisor":
 		// Advisors review agent PRs and audit repo contents — their core
@@ -340,6 +350,21 @@ func (a *AppAuth) ScopedTokenForRepos(ctx context.Context, tier string, repos []
 	defer cancel()
 	jwtClient := newJWTClient(jwtToken, a.apiURL)
 	installToken, _, err := jwtClient.Apps.CreateInstallationToken(mintCtx, a.installationID, opts)
+	if err != nil && perms.Workflows != nil {
+		// The installation has likely not accepted the Workflows permission
+		// on the App yet — GitHub refuses to mint a token requesting a
+		// permission the installation does not grant. Degrade honestly
+		// rather than failing every trusted-tier mint: retry without
+		// workflows and surface exactly what the operator must flip (#4677).
+		a.logger.Warn("scoped token mint with workflows:write failed; retrying without it — "+
+			"pushes touching .github/workflows will be rejected until the App grants Workflows read & write "+
+			"(App settings → Permissions → Workflows → Read and write, then re-accept on the installation; see docs/github-app-setup.md)",
+			"tier", tier, "error", err)
+		perms.Workflows = nil
+		retryCtx, retryCancel := mintContext(ctx)
+		defer retryCancel()
+		installToken, _, err = jwtClient.Apps.CreateInstallationToken(retryCtx, a.installationID, opts)
+	}
 	if err != nil {
 		return "", fmt.Errorf("creating scoped token for tier %s: %w", tier, err)
 	}
@@ -562,7 +587,11 @@ func (t *appTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	req2 := req.Clone(req.Context())
 	req2.Header.Set("Authorization", "Bearer "+token)
-	return t.base.RoundTrip(req2)
+	base := t.base
+	if base == nil {
+		base = sharedProxyTrust.sharedTransport()
+	}
+	return base.RoundTrip(req2)
 }
 
 func NewClientFromApp(auth *AppAuth, org string, repos []string, logger *slog.Logger) *Client {
@@ -579,7 +608,6 @@ func NewClientFromAppWithBotLogin(auth *AppAuth, org string, repos []string, log
 	auth.SetBotLogin(appBotLogin)
 	transport := &appTransport{
 		auth: auth,
-		base: http.DefaultTransport,
 	}
 	const appClientTimeout = 30 * time.Second
 	httpClient := &http.Client{Transport: transport, Timeout: appClientTimeout}

@@ -74,6 +74,22 @@ func (s *Server) handleAgentCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Reject an explain_mode the config loader would reject. Without this, a bad
+	// value is written to the agent file here and only surfaces at the NEXT
+	// config load, as a load failure far from the request that caused it.
+	if !config.ValidateExplainMode(body.Agent.ExplainMode) {
+		jsonError(w, "explain_mode must be one of: off, brief, full (or empty to inherit the hive default)", http.StatusBadRequest)
+		return
+	}
+
+	// Same reasoning for caveman_mode: reject at the request rather than
+	// persisting a value the config loader would fail on later (#4531,
+	// flagged as a follow-up in #3897).
+	if !config.ValidateCavemanMode(body.Agent.CavemanMode) {
+		jsonError(w, "caveman_mode must be one of: lite, full, ultra, wenyan (or empty to disable)", http.StatusBadRequest)
+		return
+	}
+
 	if _, exists := s.deps.Config.Agents[body.Name]; exists {
 		jsonError(w, "agent already exists", http.StatusConflict)
 		return
@@ -564,25 +580,6 @@ func (s *Server) validateImportURL(rawURL string, keepLinked bool) error {
 
 func isGistImportHost(host string) bool {
 	return host == "gist.github.com" || host == "gist.githubusercontent.com"
-}
-
-func importFetchURL(rawURL string) string {
-	u, err := url.Parse(strings.TrimSpace(rawURL))
-	if err != nil || !strings.EqualFold(u.Hostname(), "github.com") {
-		return rawURL
-	}
-	m := githubBlobURLPattern.FindStringSubmatch(u.Path)
-	if m == nil {
-		return rawURL
-	}
-	raw := url.URL{
-		Scheme:   "https",
-		Host:     "raw.githubusercontent.com",
-		Path:     "/" + strings.Join([]string{m[1], m[2], m[3], m[4]}, "/"),
-		RawQuery: u.RawQuery,
-		Fragment: u.Fragment,
-	}
-	return raw.String()
 }
 
 // definitionSourceFromURL parses a GitHub blob or raw file URL into a

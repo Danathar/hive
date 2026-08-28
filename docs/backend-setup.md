@@ -6,14 +6,15 @@ Hive validates backend names in `src/pkg/config` and launches CLIs in `src/pkg/a
 
 | Backend | Binary launched by the Go manager | Auth / setup | Notes |
 | --- | --- | --- | --- |
-| `claude` | `claude` | Install Claude Code and log in once. Hive launches with `--dangerously-skip-permissions`; inference routes add `--bare --settings`. | Advisory/issue modes add disallowed GitHub MCP tools. |
+| `claude` | `claude` | Install Claude Code and log in once. Hive launches with `--dangerously-skip-permissions`; inference routes add `--bare --settings`. | Advisory/issue modes add disallowed GitHub MCP tools. Every mode also denies host-state commands — privilege escalation (`sudo`/`pkexec`/`doas`/`su`) and boot/deployment tools (`rpm-ostree`/`bootc`/`ostree`/`grubby`/`bootctl`/`efibootmgr`) — because the tmux path runs unconfined on the operator's host (#4918). Set `HIVE_CLAUDE_DANGEROUSLY_ALLOW_HOST_STATE=1` only when you intentionally want an agent to manage host state. |
 | `copilot` | `copilot` | Install GitHub Copilot CLI and authenticate with GitHub. Hive also probes Copilot model entitlements live. | Launched with `--no-auto-update --allow-all`; write tools are denied by mode when needed. |
 | `gemini` | `gemini` | Install Gemini CLI and configure its normal auth/API key. | Supported by the server-side manager; Hive launches `gemini` and passes `--model` when a model is configured. |
 | `goose` | `goose` | Install Block Goose and configure provider/model (`GOOSE_PROVIDER`, `GOOSE_MODEL`, or `goose configure`). | Hive launches `goose run -s` and appends `--model` when set. |
 | `pi` | `goose` in the Go manager; `pi` in contributor scripts | In the server-side manager, `backendBinary("pi")` maps to `goose`. Configure Goose for pod agents. The contributor relay image/scripts use a separate `pi` binary. | Server-side pod agents use Goose for `backend: pi`; contributor mode uses the Pi CLI. |
 | `bob` | `bob` | Provide `HIVE_BOB_API_KEY` or `/secrets/bob_api_key` for pods; contributor mode requires `BOBSHELL_API_KEY`. | Hive uses API-key auth headlessly and accepts the Bob license at launch. |
-| `codex` | `codex` | Install `@openai/codex` and run `codex login --device-auth` for subscription/OAuth auth. The CLI stores credentials in `CODEX_HOME/auth.json` (default `${HOME}/.codex/auth.json`); API-key mode can use `CODEX_API_KEY`/`OPENAI_API_KEY` or a populated auth file, but it is not required for subscription users. | Hive gives each agent its own `CODEX_HOME` and probes `auth.json` for OAuth tokens/API-key state (or API-key env presence). Contributor mode defaults to `--ask-for-approval on-request --sandbox workspace-write`; override with `HIVE_CODEX_APPROVAL_POLICY`/`HIVE_CODEX_SANDBOX_MODE`, or set `HIVE_CODEX_DANGEROUSLY_BYPASS_APPROVALS_AND_SANDBOX=1` only when you intentionally want the old bypass posture. `AGENT_REASONING_EFFORT` is passed to Codex as `-c model_reasoning_effort="..."`. |
+| `codex` | `codex` | Install `@openai/codex` and run `codex login --device-auth` for subscription/OAuth auth. The CLI stores credentials in `CODEX_HOME/auth.json` (default `${HOME}/.codex/auth.json`); API-key mode can use `CODEX_API_KEY`/`OPENAI_API_KEY` or a populated auth file, but it is not required for subscription users. | Hive gives each agent its own `CODEX_HOME` and probes `auth.json` for OAuth tokens/API-key state (or API-key env presence). Contributor mode keeps `--ask-for-approval on-request --sandbox workspace-write`, grants the exact `HIVE_WORKSPACE_DIR` tree with `--add-dir`, and defaults `approvals_reviewer` to `auto_review` so an unattended task never waits on the contributor. Override with `HIVE_CODEX_APPROVAL_POLICY`/`HIVE_CODEX_SANDBOX_MODE`/`HIVE_CODEX_APPROVALS_REVIEWER`, or set `HIVE_CODEX_DANGEROUSLY_BYPASS_APPROVALS_AND_SANDBOX=1` only when you intentionally want the old bypass posture. `AGENT_REASONING_EFFORT` is passed to Codex as `-c model_reasoning_effort="..."`. |
 | `aider` | contributor scripts launch `aider`; the server-side Go manager does not launch it | Install Aider and configure its provider/API key normally for contributor mode. | Not supported as a server-side agent backend in this branch: config accepts the name, but `backendBinary("aider")` returns `unknown backend: aider`, so a pod agent will not start. Use contributor mode for Aider. |
+| `agy` | `agy` | Install the Antigravity CLI (`brew install --cask antigravity-cli`) and run `agy` once to sign in interactively with a Google account. **There is no API-key mode**, so a container cannot inherit the sign-in. | **Host-only.** Launched with `--dangerously-skip-permissions` (same contract as `claude`, or agy blocks on a per-tool approval prompt nobody is attached to answer). When a model is configured the manager appends `--model <m> --effort low`: agy *requires* `--effort` alongside `--model` and otherwise ignores the model entirely. An unrecognised model is not fatal — agy warns and falls back to its own default. Note the effort is the fixed `agyDefaultEffort` constant server-side; hive has no per-agent effort setting yet, so `AGENT_REASONING_EFFORT` applies to the **contributor relay only**, not to pod agents. Not in the contributor image: run `just contribute-hive agy local`. Headless (`agy -p`) is verified on a host that has already signed in. agy also exits `2` if the working directory does not resolve, where some other backends tolerate it. |
 
 ## IBM Bob headless setup
 
@@ -45,6 +46,14 @@ AGENT_BACKEND=litellm HIVE_LITELLM_ENDPOINT=https://litellm.example.com just con
 ```
 
 `AGENT_BACKEND` selects the CLI, `AGENT_MODEL` optionally pins the model, and `CONTRIBUTOR_MODE` defaults to `interactive` (tmux with a TTY). For Codex, `AGENT_REASONING_EFFORT` optionally pins the reasoning effort. `CONTRIBUTOR_MODE=headless` is reserved for one-shot/no-TTY task delivery.
+
+Both contributor modes are unattended from Codex's perspective: Hive may
+deliver work when nobody is watching the tmux pane. The default automatic
+reviewer evaluates only actions that already cross the `workspace-write`
+boundary. It does not widen that boundary, and the dangerous no-sandbox mode
+remains opt-in. A denied or timed-out automatic review returns to Codex; in
+headless mode a non-zero terminal result is reported to Hive with a bounded,
+token-redacted diagnostic rather than waiting for input.
 
 `just contribute-check <backend>` runs a read-only preflight before registration. It checks that the chosen CLI exists and that obvious auth prerequisites are present.
 

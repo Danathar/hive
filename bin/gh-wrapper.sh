@@ -95,6 +95,17 @@ if ! _contributor_mode; then
   # login"), instead of the fail-loud this gate promises.
   if [[ -n "${HIVE_AGENT_TOKEN_CACHE:-}" && -f "${HIVE_AGENT_TOKEN_CACHE}" && -r "${HIVE_AGENT_TOKEN_CACHE}" && -s "${HIVE_AGENT_TOKEN_CACHE}" ]]; then
     export GH_TOKEN="$(cat "$HIVE_AGENT_TOKEN_CACHE")"
+    # GHE spokes (github.ibm.com etc.): gh only reads GH_TOKEN for github.com;
+    # any other GH_HOST authenticates from GH_ENTERPRISE_TOKEN. Exporting both
+    # is harmless on github.com and makes the scoped token work on GHE — the
+    # missing export left every GHE gh call unauthenticated (401) even though
+    # token delivery itself worked (root-caused live 2026-08-20).
+    export GH_ENTERPRISE_TOKEN="$GH_TOKEN"
+    # Agents are non-interactive by definition: a gh command that would prompt
+    # (e.g. `gh issue create` with no --title after the agent's shell tool
+    # mangled a multiline command) hung until the tool timeout and read as a
+    # network failure. Fail loud and instant instead.
+    export GH_PROMPT_DISABLED=1
   else
     echo "⛔ BLOCKED: per-agent scoped GitHub token not available, unreadable, or empty (${HIVE_AGENT_TOKEN_CACHE:-HIVE_AGENT_TOKEN_CACHE unset})." >&2
     echo "   Refusing to fall back to the shared full-privilege App token — that would defeat per-agent tier scoping (audit H3)." >&2
@@ -471,8 +482,19 @@ if { [ "$subcmd" = "issue" ] || [ "$subcmd" = "pr" ]; } && [ "$action" = "list" 
   elif _contributor_mode; then
     : # Allow contributor agents read-only list/search to avoid duplicate PRs (#2356).
   else
-    echo "⛔ BLOCKED: gh $subcmd list is disabled for agents." >&2
-    echo "Read /var/run/hive-metrics/actionable.json instead." >&2
+    # Root-caused in a live hive (2026-08-20): agents read this two-line
+    # message as "all gh $subcmd commands are blocked" and silently skipped
+    # `gh issue create` / PR creation for confirmed findings, and the single
+    # hardcoded path pointed at a file that (a) does not exist on the
+    # container-hosted model (which writes /data/last-actionable.json) and
+    # (b) sits outside the agent CLI's workspace sandbox for file-read tools.
+    # Be explicit: only LIST/enumeration is blocked, writes remain allowed,
+    # and point at whichever work-queue snapshot actually exists here.
+    _actionable_hint="/var/run/hive-metrics/actionable.json"
+    [ -f /data/last-actionable.json ] && _actionable_hint="/data/last-actionable.json"
+    echo "⛔ BLOCKED: gh $subcmd list is disabled for agents — but ONLY listing/enumeration is blocked." >&2
+    echo "Write commands like 'gh issue create' and PR creation via 'hive-open-pr' are still ALLOWED — do not skip them because of this message." >&2
+    echo "For the pre-filtered issue/PR queue, read ${_actionable_hint} (use a shell command like 'cat', not a workspace file-read tool)." >&2
     exit 1
   fi
 fi
@@ -925,12 +947,33 @@ if [[ -n "$AGENT_NAME" ]]; then
         *) [[ -z "$item_num" ]] && item_num="$arg" ;;
       esac
     done
+    # Explicit success: the loop's last iteration is often `[[ -z set ]] && …`
+    # (a trailing positional like a --body value), which evaluates false. Under
+    # `set -e` that non-zero return killed the whole wrapper — comments with a
+    # trailing free-text arg died with a silent exit 1.
+    return 0
   }
 
   case "$subcmd/$action" in
     issue/create|pr/create)
-      _ensure_labels
       _inject_identity
+      # ── Relay issue creation through the hive (issue-request watcher) ──
+      # The direct path rode the agent's shell tool: one GHE secondary-rate-
+      # limit stall, network blip, or mangled multiline command and the
+      # finding was silently lost (root-caused live 2026-08-21: sec-check's
+      # creates timed out mid-flight, repeatedly, and survived only as beads).
+      # hive-open-issue writes a request file (milliseconds, no network); the
+      # hive creates the issue server-side with the App token — retried with
+      # backoff, deduped by exact open-issue title, and gated by the SAME
+      # CanCreateIssues mode check + UID forge-resistance as this wrapper.
+      # Mode gates (NO_GITHUB/ADVISORY capture) have already run above, so an
+      # advisory agent's finding still lands in the digest, never the queue.
+      # Contributors are EXEMPT (they file under their own identity), mirroring
+      # the hive-open-pr redirect.
+      if [ "$subcmd" = "issue" ] && ! _contributor_mode && command -v hive-open-issue >/dev/null 2>&1; then
+        exec hive-open-issue "${args[@]}" --label "$LABELS_CSV"
+      fi
+      _ensure_labels
       # `|| rc=$?` (not `cmd; rc=$?`): this script runs under `set -e`, so a
       # bare failing gh exited the wrapper BEFORE rc was ever read — the
       # unlabeled retry below was dead code, and a missing injected label
@@ -944,6 +987,32 @@ if [[ -n "$AGENT_NAME" ]]; then
       exit $rc
       ;;
     issue/edit|pr/edit)
+      # ── Issue self-claim → hive/claimed-by-<agent> label ──
+      # An App bot cannot be a GitHub assignee (Issues.AddAssignees silently
+      # drops it), so `gh issue edit <n> --add-assignee @me` would be a no-op —
+      # the agent thinks it claimed the issue but nothing is recorded. Relay it
+      # to hive-open-issue claim, which applies a visible, AUDITED
+      # hive/claimed-by-<agent> label (agent_issue_claimed). Only for a plain
+      # self-claim on an issue; anything else falls through to the label path.
+      if [ "$subcmd" = "issue" ] && ! _contributor_mode && command -v hive-open-issue >/dev/null 2>&1; then
+        _claim_self=false
+        _prev_arg=""
+        for a in "${args[@]}"; do
+          case "$a" in
+            --add-assignee=@me|--add-assignee=@self) _claim_self=true ;;
+            @me|@self) [ "$_prev_arg" = "--add-assignee" ] && _claim_self=true ;;
+          esac
+          _prev_arg="$a"
+        done
+        if $_claim_self; then
+          _extract_item
+          if [ -n "$item_num" ]; then
+            _claim_repo=""
+            [ -n "$item_repo" ] && _claim_repo="--repo $item_repo"
+            exec hive-open-issue claim $_claim_repo "$item_num"
+          fi
+        fi
+      fi
       _ensure_labels
       # Label injection is provenance metadata, not a security gate. gh applies
       # an edit atomically, so a missing label (repo not yet ensured, create
@@ -968,10 +1037,31 @@ if [[ -n "$AGENT_NAME" ]]; then
       fi
       exec "$REAL_GH" "$@"
       ;;
-    issue/comment|pr/comment|pr/review)
-      _ensure_labels
+    pr/review)
+      _inject_identity
+      # ── Relay reviews through the hive (review-request watcher) ──
+      # A direct `gh pr review` lands under the agent's own shell token, is
+      # never audited, and so PR-review activity is invisible to the hive-health
+      # output signal. hive-review writes a request file the hive submits with
+      # the App token and records as agent_pr_reviewed — same rationale as
+      # issue/create, and gated by the SAME per-agent authorization + UID
+      # forge-resistance. Contributors are EXEMPT (they review under their own
+      # identity), mirroring the hive-open-pr / hive-open-issue redirects.
+      if ! _contributor_mode && command -v hive-review >/dev/null 2>&1; then
+        exec hive-review "${args[@]}"
+      fi
+      # No relay available: fall through to real gh so a review is never lost.
+      exec "$REAL_GH" "$@"
+      ;;
+    issue/comment|pr/comment)
       _inject_identity
       _extract_item
+      # ── Relay comments through the hive (same rationale as issue/create) ──
+      # A lost review/triage comment is a lost work product.
+      if [ "$action" = "comment" ] && ! _contributor_mode && command -v hive-open-issue >/dev/null 2>&1; then
+        exec hive-open-issue comment "${args[@]}"
+      fi
+      _ensure_labels
       "$REAL_GH" "${args[@]}"
       exit_code=$?
       if [[ $exit_code -eq 0 && -n "$item_num" ]]; then

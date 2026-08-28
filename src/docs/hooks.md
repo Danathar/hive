@@ -127,7 +127,7 @@ Three steps, all in `src/pkg/hooks/transition.go` plus the emitting site:
 
 Nothing else changes — the registry, predicates, and every action work off the generic `Payload`. `installGovernorModeChangeEmitter` in `cmd/hive/hookwire.go` is the worked example: it uses an observer the governor invokes after committing *and* after releasing its mutex, which is how you emit post-commit without holding a lock across third-party work.
 
-**If the transition can also be produced by a hook action, the emitter must carry the causation.** `pause` is the case that exists today: a hook that pauses an agent would, once an `agent_paused` emitter is added, feed that transition straight back into the hooks that triggered it. The emitter must fire with `cause.Child(hookName, transition)` from the `Causation` the action received, because the depth-1 guard reads *only* `Payload.Causation`. The `paused_trigger` provenance string (`hook:<name>`) is for humans reading the audit log — do not try to reconstruct the depth by parsing it.
+**If the transition can also be produced by a hook action, the emitter must carry the causation.** `pause` is the case that exists today: a hook that pauses an agent feeds `agent_paused` straight back into the hooks that triggered it. The pause action passes `cause.Child(hookName, transition)` through the audited pause API, and the `agent_paused` emitter carries that structured cause because the depth-1 guard reads *only* `Payload.Causation`. The `paused_trigger` provenance string (`hook:<name>`) is for humans reading the audit log — do not try to reconstruct the depth by parsing it.
 
 ## Action reference
 
@@ -173,7 +173,7 @@ Places a request on the [#4000](https://github.com/kubestellar/hive/issues/4000)
 | `summary` | the ask shown in the approvals UI |
 | `agent`, `repo` | scope; default to the transition's values |
 
-**Status:** the queue interface is defined and consumed, but the backing queue lands with #4000. Until then an `enqueue-approval` hook reports a wiring failure per firing (visible in the audit log) rather than silently dropping the request.
+**Status:** functional on v5. The backing queue landed with [#4057](https://github.com/kubestellar/hive/issues/4057) as `toolapprove.Inbox`, connected by an adapter in `cmd/hive/hookwire.go` passed via `WithApprovalQueue`. It is gated by `tool_approval.enabled` (default off); with the desk disabled the sink is nil and an `enqueue-approval` hook records an unwired-sink error rather than silently dropping the request. Nothing in `pkg/hooks` changed when it landed.
 
 ## Predicates (`when:`)
 

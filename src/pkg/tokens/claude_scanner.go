@@ -40,9 +40,9 @@ type claudeMessagePayload struct {
 
 // claudeUsagePayload is the token usage block inside a Claude Code assistant message.
 type claudeUsagePayload struct {
-	InputTokens             int64 `json:"input_tokens"`
-	OutputTokens            int64 `json:"output_tokens"`
-	CacheReadInputTokens    int64 `json:"cache_read_input_tokens"`
+	InputTokens              int64 `json:"input_tokens"`
+	OutputTokens             int64 `json:"output_tokens"`
+	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
 	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
 }
 
@@ -158,13 +158,19 @@ func parseClaudeSessionFile(path string, agentDetector func(string) string) (*Se
 	summary := &SessionSummary{
 		SessionID: sessionID,
 		Agent:     "unknown",
+		Backend:   BackendClaude,
 	}
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, maxScanBufSizeClaude), maxScanBufSizeClaude)
 
 	firstHumanMsg := ""
+	var firstTimestamp int64
 	var lastTimestamp int64
+	// timeline retains the per-message usage grain that the loop below would
+	// otherwise sum away. It is additive — the summed fields are still the
+	// authoritative totals — and bounded by coalescing, not truncation.
+	var timeline usageTimeline
 
 	for scanner.Scan() {
 		var raw claudeRawEntry
@@ -175,6 +181,7 @@ func parseClaudeSessionFile(path string, agentDetector func(string) string) (*Se
 		switch raw.Type {
 		case "assistant":
 			// Parse nested message payload for model and usage
+			entryTS := parseTimestampToUnixMilli(raw.Timestamp)
 			var msg claudeMessagePayload
 			if len(raw.Message) > 0 {
 				if err := json.Unmarshal(raw.Message, &msg); err == nil {
@@ -185,10 +192,24 @@ func parseClaudeSessionFile(path string, agentDetector func(string) string) (*Se
 					summary.OutputTokens += msg.Usage.OutputTokens
 					summary.CacheRead += msg.Usage.CacheReadInputTokens
 					summary.CacheCreate += msg.Usage.CacheCreationInputTokens
+					// Retain the same numbers at their own timestamp. This is
+					// the ONLY place the per-message time distribution exists;
+					// everything downstream is summed.
+					timeline.add(UsageEvent{
+						TimestampMs: entryTS,
+						Model:       msg.Model,
+						Input:       msg.Usage.InputTokens,
+						Output:      msg.Usage.OutputTokens,
+						CacheRead:   msg.Usage.CacheReadInputTokens,
+						CacheCreate: msg.Usage.CacheCreationInputTokens,
+					})
 				}
 			}
 			summary.Messages++
-			lastTimestamp = parseTimestampToUnixMilli(raw.Timestamp)
+			lastTimestamp = entryTS
+			if firstTimestamp == 0 {
+				firstTimestamp = lastTimestamp
+			}
 
 		case "human":
 			// Extract first human message for agent detection
@@ -207,6 +228,9 @@ func parseClaudeSessionFile(path string, agentDetector func(string) string) (*Se
 			}
 			summary.Messages++
 			lastTimestamp = parseTimestampToUnixMilli(raw.Timestamp)
+			if firstTimestamp == 0 {
+				firstTimestamp = lastTimestamp
+			}
 
 		default:
 			// Flat format fallback: entries with top-level input_tokens/output_tokens
@@ -218,10 +242,26 @@ func parseClaudeSessionFile(path string, agentDetector func(string) string) (*Se
 				if raw.Model != "" && summary.Model == "" {
 					summary.Model = raw.Model
 				}
+				// Flat-format entries carry a timestamp only when the writer
+				// supplied one; parseTimestampToUnixMilli yields 0 otherwise.
+				// A zero stamp is retained deliberately (the tokens are real)
+				// but marks the event as unplaceable in time, so an interval
+				// join must send it to `unattributed` rather than guessing.
+				timeline.add(UsageEvent{
+					TimestampMs: parseTimestampToUnixMilli(raw.Timestamp),
+					Model:       raw.Model,
+					Input:       raw.InputTokens,
+					Output:      raw.OutputTokens,
+					CacheRead:   raw.CacheRead,
+					CacheCreate: raw.CacheCreate,
+				})
 			}
 			if raw.Role == "user" || raw.Role == "assistant" {
 				summary.Messages++
 				lastTimestamp = time.Now().UnixMilli()
+				if firstTimestamp == 0 {
+					firstTimestamp = lastTimestamp
+				}
 			}
 			if raw.Role == "user" && firstHumanMsg == "" {
 				// Try Message field as a string for flat-format files
@@ -236,7 +276,9 @@ func parseClaudeSessionFile(path string, agentDetector func(string) string) (*Se
 	}
 
 	summary.TotalTokens = summary.InputTokens + summary.OutputTokens + summary.CacheRead + summary.CacheCreate
+	summary.FirstActive = firstTimestamp
 	summary.LastActive = lastTimestamp
+	summary.Usage, summary.UsageCoalesced = timeline.finish()
 
 	if agentDetector != nil && firstHumanMsg != "" {
 		summary.Agent = agentDetector(firstHumanMsg)

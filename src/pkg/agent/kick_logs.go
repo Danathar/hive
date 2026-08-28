@@ -194,19 +194,28 @@ func (m *Manager) clearScrollbackForAgent(agent *AgentProcess) {
 // restart, container teardown on shutdown, clear-history on kick rotation) —
 // that ordering is the entire point of this feature.
 func (m *Manager) archiveKickLogLocked(agent *AgentProcess, reason string) bool {
+	return m.archiveKickLogBytesLocked(agent, reason) > 0
+}
+
+// archiveKickLogBytesLocked is archiveKickLogLocked's implementation, reporting
+// the archived scrollback size instead of a bare success bool. The turn-loss
+// instrument (turn_loss.go) needs that size as its proxy for how much turn
+// output a teardown discarded; every other caller only asks whether a file was
+// written and goes through the bool wrapper above.
+func (m *Manager) archiveKickLogBytesLocked(agent *AgentProcess, reason string) int {
 	if m.kickLogRetention <= 0 || m.kickLogDir == "" {
-		return false
+		return 0
 	}
 	if agent.tmuxSession == "" {
-		return false
+		return 0
 	}
 	content, err := m.captureScrollbackForAgent(agent)
 	if err != nil {
 		m.logger.Warn("kick log archive: capture failed", "name", agent.Name, "reason", reason, "error", err)
-		return false
+		return 0
 	}
 	if strings.TrimSpace(content) == "" {
-		return false
+		return 0
 	}
 
 	now := time.Now()
@@ -226,18 +235,22 @@ func (m *Manager) archiveKickLogLocked(agent *AgentProcess, reason string) bool 
 	dir := m.agentKickLogDir(agent.Name)
 	if err := os.MkdirAll(dir, kickLogDirMode); err != nil {
 		m.logger.Warn("kick log archive: mkdir failed", "name", agent.Name, "dir", dir, "error", err)
-		return false
+		return 0
 	}
 	fname := now.UTC().Format(kickLogTimestampFormat) + "-" + sanitizeKickLogComponent(reason) + kickLogSuffix
 	path := filepath.Join(dir, fname)
 	if err := os.WriteFile(path, []byte(header+content), kickLogFileMode); err != nil {
 		m.logger.Warn("kick log archive: write failed", "name", agent.Name, "path", path, "error", err)
-		return false
+		return 0
 	}
 	m.logger.Info("archived kick log", "name", agent.Name, "reason", reason, "file", fname, "bytes", len(header)+len(content))
 
 	m.pruneKickLogs(dir)
-	return true
+	m.notifyKickObserver(agent.Name, KickObserverEventArchived, reason)
+	// The content length, not the file length: the header is hive's own
+	// framing, and counting it would credit every interruption with a constant
+	// few hundred bytes of work that the agent never produced.
+	return len(content)
 }
 
 // rotateKickLogOnKickLocked runs at the top of deliverKickLocked, before any
@@ -262,11 +275,9 @@ func (m *Manager) ArchiveAllKickLogs(reason string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, agent := range m.agents {
-		if !agent.kickLogPending {
-			continue
-		}
-		m.archiveKickLogLocked(agent, reason)
-		agent.kickLogPending = false
+		// tearDownTurnLocked no-ops unless kickLogPending, and records what the
+		// teardown discarded (#4002) as well as archiving it.
+		m.tearDownTurnLocked(agent, reason)
 	}
 }
 

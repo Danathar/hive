@@ -4,12 +4,17 @@
 package rotation
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -17,11 +22,24 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kubestellar/hive/pkg/claude"
 	"github.com/kubestellar/hive/pkg/config"
 )
 
 // probeTimeout bounds each CLI/HTTP headroom probe.
 const probeTimeout = 10 * time.Second
+
+// probeWaitDelay bounds how long exec.Cmd.Wait may block on the probe's I/O
+// pipes after the child is killed or the context expires. CLI probes spawn
+// processes (codex app-server, claude) that fork grandchildren which inherit
+// the stdout/stderr pipe write ends; killing the direct child then leaves the
+// pipe open, exec's copier goroutine never sees EOF, and a bare Wait blocks
+// FOREVER. Observed live on weavster: the watchdog's codex auth probe wedged
+// the main governor goroutine for 2.5h (no evals, no advisory digest — the
+// hub flagged the digest stale). WaitDelay is the stdlib's remedy: after the
+// delay Wait force-closes the pipes and returns ErrWaitDelay instead of
+// hanging.
+const probeWaitDelay = 5 * time.Second
 
 // pollInterval is how often the Manager re-probes provider headroom.
 const pollInterval = 5 * time.Minute
@@ -85,7 +103,11 @@ type Prober interface {
 func runCLI(ctx context.Context, name string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+	cmd := exec.CommandContext(ctx, name, args...)
+	// See probeWaitDelay: without this a grandchild holding the output pipe
+	// makes CombinedOutput block past the context timeout, indefinitely.
+	cmd.WaitDelay = probeWaitDelay
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("%s probe failed: %w", name, err)
 	}
@@ -98,56 +120,267 @@ func failOpen(provider string, err error) Headroom {
 	return Headroom{Provider: provider, Available: true, ProbeErr: err}
 }
 
-// ClaudeProber probes Anthropic subscription usage via `claude /usage`.
+// ClaudeProber probes Anthropic subscription usage via the OAuth usage API.
+//
+// `claude /usage` no longer renders the weekly-quota block (current builds
+// show session stats only) and headless `/status` is unavailable, so the probe
+// uses the same undocumented endpoint Claude Code's own HUD polls:
+//
+//	GET https://api.anthropic.com/api/oauth/usage
+//	Authorization: Bearer <accessToken from ~/.claude/.credentials.json>
+//	anthropic-beta: oauth-2025-04-20        (required, else 401)
+//
+// The `limits` array carries per-kind percent + resets_at (session /
+// weekly_all / weekly_scoped); the binding limit is the max percent. The
+// endpoint rate-limits aggressively, so a 429/401/parse failure is fail-open
+// (never evidence of exhaustion).
 type ClaudeProber struct {
 	ThresholdPct int
+	// BaseURL overrides the API endpoint (tests). Default production host.
+	BaseURL string
+	// Client overrides the HTTP client (tests).
+	Client *http.Client
+	// CredentialsPath overrides the default ~/.claude/.credentials.json.
+	CredentialsPath string
 }
 
-var claudeUsageRe = regexp.MustCompile(`Current week \(all models\)[^\d]*(\d+)%`)
+const claudeUsageBaseURL = "https://api.anthropic.com"
+const claudeOAuthBeta = "oauth-2025-04-20"
+
+// sharedCLIHome is the durable shared CLI home on the PVC — the HOME the
+// manager gives agent tmux sessions and where fleet-level CLI auth state
+// (.claude, .codex, .copilot) persists across pod restarts.
+const sharedCLIHome = "/data/home"
+
+type claudeCredentials struct {
+	ClaudeAiOauth struct {
+		AccessToken string `json:"accessToken"`
+	} `json:"claudeAiOauth"`
+}
+
+type claudeUsageResponse struct {
+	Limits []struct {
+		Kind     string     `json:"kind"`
+		Percent  *float64   `json:"percent"`
+		ResetsAt *time.Time `json:"resets_at"`
+	} `json:"limits"`
+}
 
 func (p ClaudeProber) Provider() string { return "anthropic" }
 
 func (p ClaudeProber) Probe(ctx context.Context) Headroom {
-	out, err := runCLI(ctx, "claude", "/usage", "--output-format", "text")
+	credPath := p.CredentialsPath
+	if credPath == "" {
+		// The hive main process runs with HOME=/home/dev (Dockerfile), but the
+		// durable OAuth credentials live in the shared CLI home on the PVC —
+		// claude.CredentialsPath (/data/home/.claude/.credentials.json), the
+		// same canonical location authprobe and the session watcher use. Try
+		// $HOME first (dev shells, tests), then fall back to the shared home.
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return failOpen(p.Provider(), err)
+		}
+		credPath = filepath.Join(home, ".claude", ".credentials.json")
+		if _, statErr := os.Stat(credPath); statErr != nil {
+			if _, sharedErr := os.Stat(claude.CredentialsPath); sharedErr == nil {
+				credPath = claude.CredentialsPath
+			}
+		}
+	}
+	raw, err := os.ReadFile(credPath)
+	if err != nil {
+		return failOpen(p.Provider(), fmt.Errorf("claude credentials: %w", err))
+	}
+	var creds claudeCredentials
+	if err := json.Unmarshal(raw, &creds); err != nil {
+		return failOpen(p.Provider(), fmt.Errorf("claude credentials parse: %w", err))
+	}
+	if creds.ClaudeAiOauth.AccessToken == "" {
+		// An empty token is the signature of an expired OAuth session; the
+		// CLI reports "Login expired" and serves nothing. Not exhaustion.
+		return failOpen(p.Provider(), errors.New("claude credentials: empty accessToken"))
+	}
+	base := p.BaseURL
+	if base == "" {
+		base = claudeUsageBaseURL
+	}
+	client := p.Client
+	if client == nil {
+		client = &http.Client{Timeout: probeTimeout}
+	}
+	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/api/oauth/usage", nil)
 	if err != nil {
 		return failOpen(p.Provider(), err)
 	}
-	m := claudeUsageRe.FindStringSubmatch(out)
-	if m == nil {
-		return failOpen(p.Provider(), fmt.Errorf("claude usage output did not match"))
+	req.Header.Set("Authorization", "Bearer "+creds.ClaudeAiOauth.AccessToken)
+	req.Header.Set("anthropic-beta", claudeOAuthBeta)
+	resp, err := client.Do(req)
+	if err != nil {
+		return failOpen(p.Provider(), err)
 	}
-	used, _ := strconv.Atoi(m[1])
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return failOpen(p.Provider(), fmt.Errorf("claude usage HTTP %d", resp.StatusCode))
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return failOpen(p.Provider(), err)
+	}
+	var parsed claudeUsageResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return failOpen(p.Provider(), err)
+	}
+	used := 0
+	var resetAt time.Time
+	for _, l := range parsed.Limits {
+		if l.Percent == nil {
+			continue
+		}
+		pct := int(*l.Percent)
+		if pct > used {
+			used = pct
+			if l.ResetsAt != nil {
+				resetAt = *l.ResetsAt
+			}
+		}
+	}
 	return Headroom{
 		Provider:     p.Provider(),
 		Available:    used < p.ThresholdPct,
 		PctRemaining: fullPct - used,
+		ResetAt:      resetAt,
 	}
 }
 
-// CodexProber probes OpenAI subscription usage via `codex /status`.
+// CodexProber probes OpenAI subscription usage via the codex app-server
+// JSON-RPC interface.
+//
+// `codex /status` is TUI-only: current builds reject `--output-format` and
+// headless invocations die with "stdin is not a terminal", so the probe drives
+// the app-server protocol directly: spawn `codex app-server`, exchange an
+// initialize handshake, then call `account/rateLimits/read`. The reply carries
+// rateLimits.primary (the binding window) with usedPercent + resetsAt. A probe
+// failure is fail-open: never evidence of exhaustion.
 type CodexProber struct {
 	ThresholdPct int
 }
 
-var codexWeeklyRe = regexp.MustCompile(`Weekly limit:[^\d]*(\d+)%`)
+type codexRateLimitsResult struct {
+	RateLimits struct {
+		Primary struct {
+			UsedPercent int   `json:"usedPercent"`
+			ResetsAt    int64 `json:"resetsAt"`
+		} `json:"primary"`
+	} `json:"rateLimits"`
+}
 
 func (p CodexProber) Provider() string { return "openai" }
 
 func (p CodexProber) Probe(ctx context.Context) Headroom {
-	out, err := runCLI(ctx, "codex", "/status", "--output-format", "text")
+	ctx, cancel := context.WithTimeout(ctx, probeTimeout+5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "codex", "app-server")
+	// See probeWaitDelay: codex app-server forks helpers that inherit the
+	// stdout pipe, so the deferred Kill+Wait below blocked forever without
+	// this — wedging the caller (the watchdog tick on the main governor
+	// goroutine) and with it every eval and advisory-digest post.
+	cmd.WaitDelay = probeWaitDelay
+	// The hive main process runs with HOME=/home/dev, but codex auth state
+	// lives in the shared CLI home on the PVC (/data/home/.codex — the HOME
+	// the manager gives agent sessions). Point the app-server there when it
+	// exists so the probe sees the fleet's real login, not an empty home.
+	if fi, err := os.Stat(sharedCLIHome); err == nil && fi.IsDir() {
+		cmd.Env = append(os.Environ(), "HOME="+sharedCLIHome)
+	}
+	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return failOpen(p.Provider(), err)
 	}
-	m := codexWeeklyRe.FindStringSubmatch(out)
-	if m == nil {
-		return failOpen(p.Provider(), fmt.Errorf("codex status output did not match"))
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return failOpen(p.Provider(), err)
 	}
-	remaining, _ := strconv.Atoi(m[1])
-	return Headroom{
-		Provider:     p.Provider(),
-		Available:    fullPct-remaining < p.ThresholdPct,
-		PctRemaining: remaining,
+	cmd.Stderr = io.Discard
+	if err := cmd.Start(); err != nil {
+		return failOpen(p.Provider(), err)
 	}
+	// Kill AND reap: without Wait the killed app-server stays a zombie for the
+	// life of the hive process, one per probe cycle.
+	defer func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}()
+	send := func(id int, method string, params any) error {
+		msg := struct {
+			ID     int    `json:"id"`
+			Method string `json:"method"`
+			Params any    `json:"params,omitempty"`
+		}{ID: id, Method: method, Params: params}
+		b, err := json.Marshal(msg)
+		if err != nil {
+			return err
+		}
+		_, err = stdin.Write(append(b, '\n'))
+		return err
+	}
+	if err := send(0, "initialize", map[string]any{
+		"clientInfo": map[string]string{"name": "hive-rotation", "title": "Hive Rotation", "version": "1.0"},
+	}); err != nil {
+		return failOpen(p.Provider(), err)
+	}
+	handshake := false
+	sc := bufio.NewScanner(stdout)
+	for sc.Scan() {
+		line := bytes.TrimSpace(sc.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var m struct {
+			ID     int              `json:"id"`
+			Result json.RawMessage  `json:"result"`
+			Error  *json.RawMessage `json:"error"`
+		}
+		if err := json.Unmarshal(line, &m); err != nil {
+			continue // keepalives / config warnings that are not JSON objects
+		}
+		if m.Error != nil {
+			return failOpen(p.Provider(), fmt.Errorf("codex app-server error: %s", string(*m.Error)))
+		}
+		if m.ID == 0 && !handshake {
+			handshake = true
+			if err := send(1, "account/rateLimits/read", map[string]any{}); err != nil {
+				return failOpen(p.Provider(), err)
+			}
+			continue
+		}
+		if m.ID == 1 {
+			used, resetAt, err := parseCodexRateLimits(m.Result)
+			if err != nil {
+				return failOpen(p.Provider(), err)
+			}
+			return Headroom{
+				Provider:     p.Provider(),
+				Available:    used < p.ThresholdPct,
+				PctRemaining: fullPct - used,
+				ResetAt:      resetAt,
+			}
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return failOpen(p.Provider(), err)
+	}
+	return failOpen(p.Provider(), errors.New("codex app-server: no rateLimits response"))
+}
+
+func parseCodexRateLimits(result json.RawMessage) (usedPct int, resetAt time.Time, err error) {
+	var res codexRateLimitsResult
+	if err := json.Unmarshal(result, &res); err != nil {
+		return 0, time.Time{}, err
+	}
+	return res.RateLimits.Primary.UsedPercent,
+		time.Unix(res.RateLimits.Primary.ResetsAt, 0).UTC(), nil
 }
 
 // AgyProber probes Google usage via `agy --print "/usage"`.
@@ -386,8 +619,10 @@ func (m *Manager) NextBackend(agentName, currentBackend string) string {
 	return m.nextBackend(agentName, currentBackend, 0)
 }
 
-// NextBackendForCadence is NextBackend with the agent's cadence applied, so
-// high-volume agents are never offered a subscription provider.
+// NextBackendForCadence is NextBackend with the agent's cadence applied.
+// High-volume agents avoid subscription providers during normal operation, but
+// may use one as an availability failover when their current metered provider
+// is positively measured exhausted.
 func (m *Manager) NextBackendForCadence(agentName, currentBackend string, cadenceS int) string {
 	return m.nextBackend(agentName, currentBackend, cadenceS)
 }
@@ -395,6 +630,19 @@ func (m *Manager) NextBackendForCadence(agentName, currentBackend string, cadenc
 func (m *Manager) nextBackend(agentName, currentBackend string, cadenceS int) string {
 	currentProvider := m.providerForBackend(currentBackend)
 	highVolume := cadenceS > 0 && cadenceS <= m.cfg.EffectiveHighVolumeCadenceS()
+
+	// A high-cadence agent normally must not consume a subscription pool: it
+	// can exhaust a weekly allowance and take the operator's own CLI down with
+	// it. But stranding that same agent after a positively measured prepaid
+	// provider exhaustion is worse: the available subscription alternatives are
+	// exactly the failover path. This exception is deliberately narrow:
+	// metered current provider, successful probe, and unavailable headroom.
+	// Probe errors remain fail-open and never trigger a rotation.
+	allowSubscriptionFailover := false
+	if current, ok := m.cfg.Providers[currentProvider]; ok && current.Class == ClassMetered {
+		h := m.HeadroomFor(currentProvider)
+		allowSubscriptionFailover = h.ProbeErr == nil && !h.Available
+	}
 
 	type candidate struct {
 		provider string
@@ -415,8 +663,9 @@ func (m *Manager) nextBackend(agentName, currentBackend string, cadenceS int) st
 		if len(pc.Backends) == 0 {
 			continue
 		}
-		if highVolume && pc.Class == ClassSubscription {
-			// High-volume agents must never land on subscription providers.
+		if highVolume && pc.Class == ClassSubscription && !allowSubscriptionFailover {
+			// Preserve the subscription guard unless a confirmed exhausted
+			// metered provider leaves this high-volume agent without service.
 			continue
 		}
 		h := m.HeadroomFor(name)

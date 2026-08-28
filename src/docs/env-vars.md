@@ -1,19 +1,19 @@
 # Environment variable reference
 
-This reference is generated from the v2 source, deployment manifests, and the top-level helper scripts. The code is authoritative: `hive.yaml` may also expand arbitrary `${NAME}` placeholders through the config resolver, but only the variables below have built-in behavior.
+This reference is compiled by hand from the Go source under `src/`, the deployment manifests, and the top-level helper scripts. The code is authoritative: `hive.yaml` may also expand arbitrary `${NAME}` placeholders through the config resolver, but only the variables below have built-in behavior.
 
 ## Core `hive` runtime
 
 | Variable | Required | Default | Purpose |
 |---|---:|---|---|
-| `HIVE_CONFIG` | No | `/etc/hive/hive.yaml` | Default config path used before the `--config` flag is parsed. The dashboard also uses it when reporting config provenance. |
+| `HIVE_CONFIG` | No | `/etc/hive/hive.yaml` | Default config path used before the `--config` flag is parsed; an explicit `--config` outranks it, so `entrypoint.sh` also appends `--config "$HIVE_CONFIG"` to the launch argv when it is set ([#4973](https://github.com/kubestellar/hive/issues/4973)). The dashboard also uses it when reporting config provenance — which is why the two must not disagree. |
 | `HIVE_MODE` | No | spoke/dashboard mode | Set to `hub` to run the hub server instead of the spoke dashboard. |
 | `HIVE_HUB_PORT` | No | `3001` | Hub listen port when `HIVE_MODE=hub`. |
 | `HIVE_SINGLETON_LOCK` | No | `/var/run/hive-metrics/hive.singleton.lock` when available, otherwise OS temp dir | Overrides the process singleton lock path. Set exactly `off` only for local development where duplicate processes are intentional. |
-| `HIVE_GITHUB_TOKEN` | Required unless GitHub App auth is configured | none | Main PAT fallback for `github.token`; also used by fleet/stat fallback paths and some deployment manifests. |
+| `HIVE_GITHUB_TOKEN` | Required unless GitHub App auth is configured | none | Main PAT fallback for `github.token`; also used by fleet/stat fallback paths and some deployment manifests. Missing PAT scopes surface as request-time 403s — see [Required PAT scopes](github-app-setup.md#personal-access-token-pat-scopes). |
 | `GH_APP_KEY_FILE` | No | configured `github.key_file`, then `/data/gh-app-key.pem` or `/secrets/gh-app-key.pem` in provisioned paths | GitHub App private-key file fallback. |
-| `DASHBOARD_AUTH_TOKEN` | No | none | Kubernetes/provisioned secret name for the dashboard shared token; used before `HIVE_DASHBOARD_TOKEN` when `dashboard.auth_token` is empty. |
-| `HIVE_DASHBOARD_TOKEN` | No | none | Dashboard/API shared-token fallback and default `hivectl --token-env` variable. |
+| `DASHBOARD_AUTH_TOKEN` | No | none | Dashboard shared-token **value** used by Kubernetes/provisioned deployments; read before `HIVE_DASHBOARD_TOKEN` when `dashboard.auth_token` is empty. Same format rules as `HIVE_DASHBOARD_TOKEN` — see [Generating and rotating `HIVE_DASHBOARD_TOKEN`](#generating-and-rotating-hive_dashboard_token). |
+| `HIVE_DASHBOARD_TOKEN` | No | none | Dashboard/API shared-token fallback and default `hivectl --token-env` variable. See [Generating and rotating `HIVE_DASHBOARD_TOKEN`](#generating-and-rotating-hive_dashboard_token). |
 | `HIVE_AUTHORIZED_USERS` | No | none | Comma-separated direct-route dashboard allowlist, with optional `user:role` entries. Used when `dashboard.authorized_users` is empty. |
 | `HIVE_REPO` | No | none | Bootstrap shortcut in `owner/repo` form; fills `project.org`, `project.repos`, and `project.primary_repo` if missing. |
 | `HIVE_LEVEL` | No | config/pack value | ACMM level bootstrap/override used by hosted flows and the entrypoint pack selection. |
@@ -34,6 +34,70 @@ This reference is generated from the v2 source, deployment manifests, and the to
 | `HIVE_FEDERATION_REGISTRY_PATH` | No | `/data/federation/registry.json` | Federation registry path override. |
 | `HIVE_WEBHOOK_SECRET` | No | none | HMAC secret for the spoke `/webhook` channel. |
 | `GITHUB_WEBHOOK_SECRET` | No | `/data/saas/webhook-secret.key` when present | Hub GitHub webhook HMAC secret. |
+
+## Generating and rotating `HIVE_DASHBOARD_TOKEN`
+
+`HIVE_DASHBOARD_TOKEN` (and the `dashboard.auth_token` config key it falls back
+to) is an opaque shared secret. The server does **not** enforce any format:
+
+- **Format**: any non-empty string is accepted. It is not parsed as a UUID,
+  JWT, or hex value — it is compared byte-for-byte (in constant time) against
+  the `Authorization: ******` value on each API request.
+- **Validation**: there is no startup validation and no minimum-length or
+  entropy check. A weak or predictable value is accepted silently, so the
+  burden of picking a strong value is entirely on the operator.
+- **What it protects**: on a self-hosted (non-direct-route) hive this token is
+  the *only* API credential — it gates agent logs, kick controls, and config
+  reads/writes, and it doubles as the server-to-server `X-Hive-Internal`
+  credential used by the local proxy. Treat it like a root password for the
+  hive. On direct-route or hub-proxied spokes identity is per-user and the
+  shared token is server-to-server only.
+- **Empty value**: leaving it unset leaves the dashboard API unauthenticated
+  (unless direct-route per-user authorization is configured). Never deploy an
+  internet-reachable hive without it.
+
+### Precedence: `dashboard.auth_token`, `DASHBOARD_AUTH_TOKEN`, `HIVE_DASHBOARD_TOKEN`
+
+Three sources can supply the same one shared token. The first non-empty value
+wins and the rest are ignored:
+
+1. `dashboard.auth_token` in `hive.yaml` (note that the shipped manifests set it
+   to the `${HIVE_DASHBOARD_TOKEN}` placeholder, which the config resolver
+   expands — so in those deployments the env var is what actually supplies it).
+2. `DASHBOARD_AUTH_TOKEN` environment variable.
+3. `HIVE_DASHBOARD_TOKEN` environment variable.
+
+**Both env vars hold the token *value*, not a Kubernetes Secret name.** In
+`src/deploy/k8s/deployment.yaml` the *name* of the Secret is `hive-secrets`; the
+env var is populated from a key inside it via `secretKeyRef`. Setting either var
+to something like `hive-secrets` configures that literal string as your
+dashboard password.
+
+Because both resolve to the same field, setting them to *different* values is
+never useful — the lower-precedence one is silently discarded, which is a common
+source of "I rotated the token but the old one still works" confusion. Pick one
+variable per deployment and rotate that one.
+
+Generate a strong value with a CSPRNG; 32 bytes (256 bits) of entropy is
+recommended:
+
+```sh
+openssl rand -hex 32
+# or
+head -c 32 /dev/urandom | base64 | tr -d '=+/'
+```
+
+Placeholders like `your-dashboard-auth-token` in deployment examples must be
+replaced — any string "works", but a guessable token is a full-access
+credential.
+
+**Rotation**: the token is read at process start and compared per request, so
+rotating is: update the env var / Kubernetes Secret / `config.env`, then
+restart the container or pod. The old token stops being accepted as soon as
+the process restarts with the new value; there is no separate session
+invalidation step (browser device-flow sessions use their own cookies and are
+unaffected). Update any `hivectl` environments and other API clients to the
+new value at the same time.
 
 ## Deployment entrypoint and proxy knobs
 
@@ -70,10 +134,25 @@ This reference is generated from the v2 source, deployment manifests, and the to
 | `CONTEXT7_API_KEY` | No | none | Optional key for Context7 knowledge API integration. |
 | `GOOSE_PROVIDER` | No | Goose CLI default | Provider passed through Goose backend/model resolution. |
 | `GOOSE_MODEL` | No | Goose CLI default | Model passed through Goose backend/model resolution and contributor relay fallback. |
+| `HIVE_EXPLAIN_MODE` | No | `off` | **Fallback** for the hive-wide default agent explain mode (`off`, `brief`, `full`) — see [agent-configuration.md](agent-configuration.md#explain-mode-debugging-agent-behaviour). `governor.explain_mode` in `hive.yaml` (Settings → Governor → General in the dashboard) takes precedence; this variable applies only when that is unset. Either way it applies only to agents that leave `explain_mode` unset; an agent with an explicit value, including `off`, keeps it. Hive also injects the *resolved* mode into every agent process under this same name. An unrecognized value resolves to `off`. |
 | `BD_DIR` | No | current directory | `bd` beads CLI data directory. |
 | `BD_DASHBOARD_URL` | No | none | Dashboard URL used by `bd kb` integration. |
 | `HIVE_CONN_<NAME>_URL` | No | generated from agent connection config | Agent API connection URI variable when a connection omits `env_name`; `<NAME>` is the uppercased connection name with `-` replaced by `_`. |
 | Custom connection auth env vars | No | none | If an agent API connection uses `auth.type: env`, Hive reads `auth.env_var` and injects that exact variable into the agent. |
+
+## Linear agent integration
+
+Part 2 of [RFC #4492](https://github.com/kubestellar/hive/issues/4492): the hive can join a Linear workspace as an agent (`actor=app` OAuth), receive `AgentSessionEvent` webhooks, and narrate work back as agent activities. Setup and verification steps live in [linear-agent.md](linear-agent.md).
+
+| Variable | Required | Default | Purpose |
+|---|---:|---|---|
+| `LINEAR_API_KEY` | Yes for `work_source.type: linear` | none | Read-only Linear API key used by the Linear work-source adapter. Reference it from `hive.yaml` with `api_key: ${LINEAR_API_KEY}` rather than storing the secret directly. The same `${LINEAR_API_KEY}` form works when the work source is set from the dashboard: the reference is resolved from the hive's environment when the work source is built (an unset variable is a startup error), and only the reference is ever persisted. |
+| `LINEAR_CLIENT_ID` | Yes for the Linear agent integration | none | OAuth client id of your Linear application (Linear → Settings → API → Applications). Without it the install endpoint returns 412 and the integration stays off. |
+| `LINEAR_CLIENT_SECRET` | Yes for the Linear agent integration | none | OAuth ****** for the code exchange and token refresh. Secret — deliver via Kubernetes Secret / env, never config files. |
+| `LINEAR_WEBHOOK_SECRET` | Yes for Linear webhooks | none | HMAC-SHA256 signing secret from the Linear app's webhook settings. The receiver **fails closed**: with this unset every delivery to `/api/linear/webhook` is rejected 401. |
+| `LINEAR_AGENT_STORE` | No | `/data/linear-agent.json` | Path of the persisted install record (workspace identity + OAuth grant, mode 0600). Override for tests or non-container runs. |
+
+Inside an **agent** session (set by the hive, never by the operator): ISSUES_ONLY+ agents receive `LINEAR_ACCESS_TOKEN` (the connected app's OAuth token, `Authorization: Bearer`) or, when no workspace is connected, `LINEAR_API_KEY` (the work-source key, bare `Authorization`). Advisory agents receive neither and have both stripped. See [linear-agent.md](linear-agent.md#github-issue-parity-agents-writing-to-linear).
 
 ## Hub, SaaS, alerts, and backups
 
@@ -165,13 +244,64 @@ With two or more providers configured, `/login` renders a provider picker; with 
 | `SLACK_WEBHOOK` | No | none | Slack incoming webhook for top-level script notifications. |
 | `DISCORD_WEBHOOK` | No | none | Discord webhook for top-level script notifications. |
 
+## Credly badge integration (proposed — not implemented)
+
+> **No code reads these variables.** The Credly integration is a design
+> ([Credly badges](credly-badges.md)); Hive ships only the contributor-card
+> placeholder and the milestone mapping. There are no live Credly API calls,
+> credentials, or badge issuance. Setting these today has **no effect**.
+
+They are listed here so the central reference does not appear to contradict
+`credly-badges.md`, and so the names are reserved. Treat the table as a design
+record until the feature ships — at which point these rows move into the
+sections above and gain real defaults.
+
+| Variable | Required | Default | Purpose |
+|---|---:|---|---|
+| `HIVE_CREDLY_ORG_ID` | n/a — proposed | none | Credly issuing organization id. |
+| `HIVE_CREDLY_API_TOKEN` | n/a — proposed | none | Credly Issuer API token. A live issuing credential when the feature ships: supply it by environment or secret reference only, never in `hive.yaml` and never committed. Until then, unset leaves the card in placeholder mode. |
+| `HIVE_CREDLY_TEMPLATES` | n/a — proposed | none | JSON map of milestone id → Credly badge template id. |
+
+## Keeping this reference current
+
+The code is authoritative and this table is hand-maintained, so it drifts unless
+PRs update it. **If your change adds, renames, or removes an environment
+variable lookup, update this file in the same PR.**
+
+What counts as a change that needs an entry:
+
+- A new `os.Getenv` or `os.LookupEnv` call in `src/` — most live in
+  `src/pkg/hub`, `src/pkg/dashboard`, `src/pkg/agent`, and `src/pkg/config`.
+- A new variable referenced from a deployment manifest under `src/deploy/`, or
+  from a top-level helper script in `bin/`.
+- A change to an existing variable's default, or to whether it is required.
+
+What each column means:
+
+| Column | What to write |
+|---|---|
+| Variable | The exact name, in backticks. |
+| Required | `No` for anything with a working default. Spell out the condition when it is conditional (see `HIVE_GITHUB_TOKEN`). |
+| Default | The literal fallback value, or `none`. If the fallback is a lookup chain, describe the order — precedence is the part operators get wrong. |
+| Purpose | What it controls and which component reads it. Link to a deeper section when the variable has real setup steps. |
+
+Add the row to the section matching the component that reads the variable, and
+run the searches below to confirm nothing else was missed.
+
+One exception to "the code is authoritative": a **proposed** variable that no
+code reads yet may be listed, but only in a section explicitly marked as such
+(see [Credly badge integration](#credly-badge-integration-proposed--not-implemented)).
+The marking is the whole point — an operator must never set a variable from this
+file and have it silently do nothing. When the feature ships, move those rows
+into the section for the component that reads them.
+
 ## Verification commands
 
 The table above was cross-checked with these mechanical searches from the repository root:
 
 ```sh
-rg 'os\.(Getenv|LookupEnv)\(' v2 --glob '*.go'
-rg '\bHIVE_[A-Z0-9_]+\b|\bBD_DIR\b|\bGH_APP_KEY_FILE\b|\bAGENT_BACKEND\b' v2 bin config Justfile
-rg '\b(ANTHROPIC|COPILOT|GOOSE|BOBSHELL|OCI|KUBERNETES|POD|NAMESPACE|DASHBOARD|PROXY|SLACK|DISCORD|NTFY)_[A-Z0-9_]+\b' v2 bin config Justfile
+rg 'os\.(Getenv|LookupEnv)\(' src --glob '*.go'
+rg '\bHIVE_[A-Z0-9_]+\b|\bBD_DIR\b|\bGH_APP_KEY_FILE\b|\bAGENT_BACKEND\b' src bin config Justfile
+rg '\b(ANTHROPIC|COPILOT|GOOSE|BOBSHELL|OCI|KUBERNETES|POD|NAMESPACE|DASHBOARD|PROXY|SLACK|DISCORD|NTFY)_[A-Z0-9_]+\b' src bin config Justfile
 rg 'HIVE_[A-Z0-9_]+|BD_DIR|GH_APP_KEY_FILE|AGENT_BACKEND' src/deploy
 ```

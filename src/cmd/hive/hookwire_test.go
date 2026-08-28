@@ -5,8 +5,11 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/kubestellar/hive/pkg/agent"
 	"github.com/kubestellar/hive/pkg/config"
 	"github.com/kubestellar/hive/pkg/hooks"
 	"github.com/kubestellar/hive/pkg/timeline"
@@ -253,5 +256,76 @@ func TestHookPauseActorIsNonHumanAndAttributed(t *testing.T) {
 	// Unnamed hook: still non-anonymous, still clearly not a person.
 	if got := hookPauseActor(hooks.Causation{}); got != hookPauseTrigger {
 		t.Errorf("expected %q, got %q", hookPauseTrigger, got)
+	}
+}
+
+type hookWireAudit struct {
+	mu      sync.Mutex
+	actions []string
+	ch      chan string
+}
+
+func (a *hookWireAudit) Record(actor, action, agentName string, fields map[string]any) {
+	a.mu.Lock()
+	a.actions = append(a.actions, action)
+	a.mu.Unlock()
+	select {
+	case a.ch <- action:
+	default:
+	}
+}
+
+func (a *hookWireAudit) count(action string) int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var n int
+	for _, got := range a.actions {
+		if got == action {
+			n++
+		}
+	}
+	return n
+}
+
+func TestAgentPausedEmitterCarriesHookCausationAndStopsPauseLoop(t *testing.T) {
+	resetHookDispatcher(t)
+	t.Cleanup(func() { resetHookDispatcher(t) })
+
+	mgr := agent.NewManager(map[string]config.AgentConfig{
+		"scanner": {Backend: "claude"},
+	}, hookTestLogger(), agent.ProjectContext{})
+	audit := &hookWireAudit{ch: make(chan string, 8)}
+	cfg := &config.Config{Hooks: []config.HookRule{{
+		Name: "pause-again", On: "agent_paused", Action: "pause",
+		Params: map[string]string{"agent": "scanner"},
+	}}}
+	buildHookDispatcher(cfg, hookSinks{AgentMgr: mgr, Audit: audit}, hookTestLogger())
+	installAgentPauseEmitter(mgr)
+
+	hookDispatcher().Fire(context.Background(), hooks.Payload{
+		Transition: hooks.TransitionAgentPaused,
+		Agent:      "scanner",
+		Trigger:    "world",
+		Reason:     "positive control",
+	})
+	deadline := time.After(time.Second)
+	for audit.count(hooks.AuditHookSuppressed) == 0 {
+		select {
+		case <-audit.ch:
+		case <-deadline:
+			t.Fatalf("expected hook-caused pause transition to be depth-suppressed; audit=%v", audit.actions)
+		}
+	}
+	hookDispatcher().Wait()
+
+	if got := audit.count(hooks.AuditHookFired); got != 1 {
+		t.Fatalf("pause hook should fire exactly once before depth suppression, got %d actions=%v", got, audit.actions)
+	}
+	status, err := mgr.GetStatus("scanner")
+	if err != nil {
+		t.Fatalf("GetStatus: %v", err)
+	}
+	if status.PausedBy != "hook:pause-again" || status.PausedTrigger != "hook:pause-again" {
+		t.Fatalf("hook pause provenance lost: by=%q trigger=%q", status.PausedBy, status.PausedTrigger)
 	}
 }

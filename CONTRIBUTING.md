@@ -77,6 +77,31 @@ See [src/docs/contributor-relay.md](src/docs/contributor-relay.md) for the end-t
 - Do not commit secrets, generated credentials, or local runtime state.
 - For documentation changes, verify every command, path, and branch name you mention.
 
+## Test policy
+
+**A change to behavior must come with a test that would fail without it.** This
+is the project's standing expectation, not a per-PR negotiation.
+
+- **Bug fixes** add a test that reproduces the bug — one that fails on the
+  parent commit and passes on the fix. A fix whose test passes either way has
+  not demonstrated it fixes anything.
+- **New functionality** adds tests covering its normal path and the failure
+  modes a caller can actually hit.
+- **Security-relevant changes** assert the invariant, not the implementation.
+  A test that merely calls a guard proves nothing; it must fail when the guard
+  is removed.
+- **Tests are in scope for review.** A test asserting the wrong thing is worse
+  than no test, because it reports green while the behavior is broken.
+
+Where a test is genuinely impractical — a change that only affects real cloud
+infrastructure, or a docs-only edit — say so in the PR body and explain what
+you did to verify it instead. "Tests not practical" without that explanation is
+a reason for a reviewer to push back.
+
+Static analysis runs in CI (`go vet`, `golangci-lint`, `gosec`, and
+`govulncheck`; see [`.github/workflows/go-security-analysis.yml`](.github/workflows/go-security-analysis.yml)).
+Fix findings rather than suppressing them; when a suppression is genuinely
+right, comment why at the suppression site.
 
 ## Optional git hooks
 
@@ -107,6 +132,7 @@ The sign-off adds a `Signed-off-by:` trailer certifying that you have the right 
 - Include `Fixes #<issue>` lines for issues the PR closes.
 - Describe what changed, why, and how you tested it.
 - Include the relevant command output or a short note such as `Not run (docs only)` when tests are not applicable.
+- Add a [CHANGELOG.md](CHANGELOG.md) entry under `Unreleased` for user-visible changes — features, fixes, security changes, migrations, deprecations, and breaking changes. Routine refactors, test-only changes, and dependency churn are explicitly out of scope; see the guidance at the top of that file. A GitHub Actions job leaves a one-time advisory comment when a PR touches code without touching the changelog: it is a reminder, not a merge gate, and an entry is not required when the change is not user-visible.
 - Expect maintainers to ask for focused follow-up changes rather than broad drive-by edits.
 
 ## Maintainer resources

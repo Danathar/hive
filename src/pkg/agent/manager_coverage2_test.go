@@ -83,41 +83,21 @@ func TestReadCoveragePreamble_ValidFile(t *testing.T) {
 	data, _ := json.Marshal(metrics)
 	os.WriteFile(cacheFile, data, 0o644)
 
-	// Temporarily override the constant path by writing to the actual path
-	// We test the function via a custom approach: read the file ourselves
-	// and verify the parsing logic since we can't change the const.
-	// Instead, write to the actual path if accessible, or test the logic inline.
+	orig := metricsCachePath
+	metricsCachePath = cacheFile
+	t.Cleanup(func() { metricsCachePath = orig })
 
-	// Since metricsCachePath is a const, we test the parsing logic directly
-	var parsed map[string]map[string]json.Number
-	if err := json.Unmarshal(data, &parsed); err != nil {
-		t.Fatalf("JSON unmarshal: %v", err)
-	}
-	ci, ok := parsed["ci-maintainer"]
-	if !ok {
-		t.Fatal("ci-maintainer not found")
-	}
-	cov, err := ci["coverage"].Int64()
-	if err != nil {
-		t.Fatalf("coverage Int64: %v", err)
-	}
-	if cov != 85 {
-		t.Errorf("coverage = %d, want 85", cov)
-	}
-	target, err := ci["coverageTarget"].Int64()
-	if err != nil {
-		t.Fatalf("target Int64: %v", err)
-	}
-	if target != 91 {
-		t.Errorf("target = %d, want 91", target)
-	}
-	expected := fmt.Sprintf("[COVERAGE] Current: %d%% | Target: %d%%.", cov, target)
-	if expected != "[COVERAGE] Current: 85% | Target: 91%." {
-		t.Errorf("unexpected preamble: %q", expected)
+	got := (&Manager{logger: discardLogger()}).readCoveragePreamble()
+	if got != "[COVERAGE] Current: 85% | Target: 91%." {
+		t.Errorf("readCoveragePreamble = %q, want '[COVERAGE] Current: 85%% | Target: 91%%.'", got)
 	}
 }
 
 func TestReadCoveragePreamble_MissingFile(t *testing.T) {
+	orig := metricsCachePath
+	metricsCachePath = filepath.Join(t.TempDir(), "missing-agent-metrics-cache.json")
+	t.Cleanup(func() { metricsCachePath = orig })
+
 	m := &Manager{logger: discardLogger()}
 	got := m.readCoveragePreamble()
 	if got != "" {
@@ -126,9 +106,13 @@ func TestReadCoveragePreamble_MissingFile(t *testing.T) {
 }
 
 func TestReadCoveragePreamble_InvalidJSON(t *testing.T) {
-	// Write invalid JSON to the metrics cache path if possible
-	// Since metricsCachePath is /data/metrics/..., this test verifies
-	// the function handles the missing file case (returns "")
+	orig := metricsCachePath
+	metricsCachePath = filepath.Join(t.TempDir(), "agent-metrics-cache.json")
+	t.Cleanup(func() { metricsCachePath = orig })
+	if err := os.WriteFile(metricsCachePath, []byte("not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	m := &Manager{logger: discardLogger()}
 	got := m.readCoveragePreamble()
 	if got != "" {
@@ -1559,21 +1543,22 @@ func TestClearExpiredTokens_Logic(t *testing.T) {
 		"otherSetting":     "keep",
 	}
 
-	// Apply the same operations as clearExpiredTokens
+	// Apply the same operations as clearExpiredTokens: ONLY the token map is
+	// emptied. Login identity (loggedInUsers/lastLoggedInUser) survives — an
+	// expired token does not change who was logged in, and the interactive CLI
+	// refuses a re-seeded token without an identity.
 	input["copilotTokens"] = map[string]interface{}{}
-	input["loggedInUsers"] = []interface{}{}
-	delete(input, "lastLoggedInUser")
 
 	tokens := input["copilotTokens"].(map[string]interface{})
 	if len(tokens) != 0 {
 		t.Error("tokens should be empty after clear")
 	}
 	users := input["loggedInUsers"].([]interface{})
-	if len(users) != 0 {
-		t.Error("loggedInUsers should be empty after clear")
+	if len(users) != 1 || users[0] != "user1" {
+		t.Error("loggedInUsers must be preserved across a token clear")
 	}
-	if _, ok := input["lastLoggedInUser"]; ok {
-		t.Error("lastLoggedInUser should be deleted")
+	if input["lastLoggedInUser"] != "user1" {
+		t.Error("lastLoggedInUser must be preserved across a token clear")
 	}
 	if input["otherSetting"] != "keep" {
 		t.Error("other settings should be preserved")
@@ -1784,10 +1769,21 @@ func TestValidateTmuxKillSessionArgs(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestConcurrentPauseResume_NoPanic(t *testing.T) {
+	// Sandbox-enabled agents keep every Pause/Resume cycle a pure in-memory
+	// state transition — which is all this test pins: the pause/resume mutex
+	// accounting under concurrency. Without the sandbox gate, each Resume of a
+	// StatePaused agent takes the relaunch path (ensureTmuxSession +
+	// launchInTmux): a REAL tmux session create plus CLI launch per cycle,
+	// ~250 launches per run, none of them cleaned up. On hosts with a writable
+	// HIVE_WORK_DIR that took 220s+ alone and pushed the whole package past
+	// go test's 600s default timeout (#4628).
+	sandboxOn := true
+	sandbox := &config.AgentSandboxOverride{Enabled: &sandboxOn}
 	m := NewManager(map[string]config.AgentConfig{
-		"a": {Backend: "claude"},
-		"b": {Backend: "claude"},
+		"a": {Backend: "claude", Sandbox: sandbox},
+		"b": {Backend: "claude", Sandbox: sandbox},
 	}, discardLogger(), ProjectContext{})
+	m.SetSandboxConfig(config.AgentSandboxConfig{Enabled: true})
 
 	done := make(chan struct{})
 	for i := 0; i < 5; i++ {

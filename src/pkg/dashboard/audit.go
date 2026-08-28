@@ -2,10 +2,15 @@ package dashboard
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -169,6 +174,107 @@ func (a *AuditLog) LastUserActions() map[string]string {
 		out[user] = t.UTC().Format(time.RFC3339)
 	}
 	return out
+}
+
+// OutputActionsSince reads the on-disk audit log (auditLogPath) and returns
+// every entry whose Action is in `actions` and whose timestamp is at or after
+// `since`. It reads the FILES, not the in-memory ring, because the ring is
+// capped at auditRingCap (500) and reset on restart — cost-attribution activity
+// needs the full audit window across busy hives. Lumberjack rotated backups
+// adjacent to filePath are included, including compressed ".gz" backups.
+// Malformed lines and unparseable timestamps are skipped. A missing current file
+// returns an empty slice (clean first-boot).
+//
+// filePath is a parameter (defaulting to auditLogPath when "") so tests can
+// point it at a fixture without touching /data.
+func (a *AuditLog) OutputActionsSince(since time.Time, actions map[string]bool, filePath string) []AuditEntry {
+	if filePath == "" {
+		filePath = auditLogPath
+	}
+	var out []AuditEntry
+	for _, path := range auditLogFiles(filePath) {
+		data, err := readAuditLogFile(path)
+		if err != nil {
+			continue
+		}
+		for _, line := range bytes.Split(data, []byte("\n")) {
+			line = bytes.TrimSpace(line)
+			if len(line) == 0 {
+				continue
+			}
+			var e AuditEntry
+			if json.Unmarshal(line, &e) != nil || e.Timestamp == "" {
+				continue
+			}
+			if len(actions) > 0 && !actions[e.Action] {
+				continue
+			}
+			t, perr := time.Parse(time.RFC3339, e.Timestamp)
+			if perr != nil || t.Before(since) {
+				continue
+			}
+			out = append(out, e)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Timestamp < out[j].Timestamp })
+	return out
+}
+
+func auditLogFiles(filePath string) []string {
+	dir := filepath.Dir(filePath)
+	base := filepath.Base(filePath)
+	ext := filepath.Ext(base)
+	prefix := strings.TrimSuffix(base, ext)
+	patterns := []string{
+		filePath,
+		filePath + ".*",
+		filepath.Join(dir, prefix+"-*"+ext),
+		filepath.Join(dir, prefix+"-*"+ext+".gz"),
+	}
+	seen := map[string]bool{}
+	files := make([]string, 0, len(patterns))
+	for _, pattern := range patterns {
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			continue
+		}
+		for _, p := range matches {
+			if seen[p] {
+				continue
+			}
+			seen[p] = true
+			files = append(files, p)
+		}
+	}
+	sort.Strings(files)
+	return files
+}
+
+// maxAuditFileReadBytes caps how many decompressed bytes readAuditLogFile will
+// load from a single audit file. Lumberjack rotates at auditMaxSizeMB (5MB), so
+// a legitimate file — compressed or not — decompresses to roughly that size.
+// Without a cap, a crafted or corrupted ".gz" in /data (a gzip bomb: a few KB
+// expanding to many GB) would let io.ReadAll exhaust dashboard memory. 64MB is
+// >10x the rotation size, so no legitimate file is ever truncated; a truncated
+// trailing line simply fails json.Unmarshal and is skipped by the caller.
+const maxAuditFileReadBytes = 64 << 20
+
+func readAuditLogFile(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var r io.Reader = f
+	if strings.HasSuffix(path, ".gz") {
+		gz, err := gzip.NewReader(f)
+		if err != nil {
+			return nil, err
+		}
+		defer gz.Close()
+		r = gz
+	}
+	return io.ReadAll(io.LimitReader(r, maxAuditFileReadBytes))
 }
 
 func (a *AuditLog) Recent(n int) []AuditEntry {

@@ -3,6 +3,7 @@ package dashboard
 import (
 	"log/slog"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -42,6 +43,79 @@ func TestParseCadenceDuration(t *testing.T) {
 			t.Errorf("parseCadenceDuration(%q) = %v, want %v", tt.input, got, tt.want)
 		}
 	}
+}
+
+func TestOperabilityAgentsHiddenFromDashboardBelowL5(t *testing.T) {
+	level := 3
+	cfg := &config.Config{
+		ACMMLevel: &level,
+		Agents: map[string]config.AgentConfig{
+			"scanner":    {Backend: "copilot", Enabled: true},
+			"telemetry":  {Backend: "copilot", Enabled: true},
+			"operations": {Backend: "copilot", Enabled: true},
+		},
+		Governor: config.GovernorConfig{Modes: map[string]config.ModeConfig{
+			"idle": {
+				Cadences: map[string]config.Cadence{
+					"scanner":    "4h",
+					"telemetry":  "4h",
+					"operations": "4h",
+				},
+			},
+		}},
+	}
+	statuses := map[string]*agent.AgentProcess{
+		"scanner":    {Name: "scanner", Config: cfg.Agents["scanner"]},
+		"telemetry":  {Name: "telemetry", Config: cfg.Agents["telemetry"]},
+		"operations": {Name: "operations", Config: cfg.Agents["operations"]},
+	}
+
+	if got := agentNamesFromConfigured(buildConfiguredAgents(cfg)); containsAny(got, "telemetry", "operations") {
+		t.Fatalf("configured agents below L5 = %v, want no telemetry/operations", got)
+	}
+	if got := agentNamesFromFrontend(buildAgents(statuses, cfg, governor.State{Mode: governor.ModeIdle})); containsAny(got, "telemetry", "operations") {
+		t.Fatalf("frontend agents below L5 = %v, want no telemetry/operations", got)
+	}
+	if got := agentNamesFromCadence(buildCadenceMatrix(cfg, statuses)); containsAny(got, "telemetry", "operations") {
+		t.Fatalf("cadence matrix below L5 = %v, want no telemetry/operations", got)
+	}
+}
+
+func agentNamesFromConfigured(in []FrontendConfiguredAgent) []string {
+	out := make([]string, 0, len(in))
+	for _, a := range in {
+		out = append(out, a.Name)
+	}
+	return out
+}
+
+func agentNamesFromFrontend(in []FrontendAgent) []string {
+	out := make([]string, 0, len(in))
+	for _, a := range in {
+		out = append(out, a.Name)
+	}
+	return out
+}
+
+func agentNamesFromCadence(in []FrontendCadence) []string {
+	out := make([]string, 0, len(in))
+	for _, a := range in {
+		out = append(out, a.Agent)
+	}
+	return out
+}
+
+func containsAny(names []string, needles ...string) bool {
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		seen[name] = true
+	}
+	for _, needle := range needles {
+		if seen[needle] {
+			return true
+		}
+	}
+	return false
 }
 
 func TestComputeNextKick(t *testing.T) {
@@ -747,6 +821,12 @@ func TestBuildTokens_NilSummary(t *testing.T) {
 	dir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	c := tokens.NewCollector(dir, logger)
+	// Redirect the persisted-snapshot path away from the live
+	// /data/token-summary.json BEFORE anything reads Summary(): the snapshot
+	// restore is lazy (first read, #4585), so the redirect fully isolates
+	// this test from a hive host's production state and the nil branch is
+	// always testable.
+	c.SetPersistPath(filepath.Join(t.TempDir(), "token-summary.json"))
 
 	// The collector's Summary() returns nil until scan runs, so this tests the nil branch
 	ft := buildTokens(c)
@@ -872,11 +952,50 @@ func TestBuildBudget_BurnRate(t *testing.T) {
 	}
 }
 
+// TestBuildBudget_HonorsConfiguredPeriod pins #4762: the governor already
+// honored period_days, but the dashboard independently added the seven-day
+// fallback to ResetAt and projected over 168 hours. A two-day budget therefore
+// rendered as a one-week period even though enforcement rolled after two days.
+func TestBuildBudget_HonorsConfiguredPeriod(t *testing.T) {
+	const periodDays = 2
+	cfg := config.GovernorConfig{Budget: config.BudgetConfig{PeriodDays: periodDays}}
+	gov := governor.New(cfg, map[string]config.AgentConfig{}, nil)
+	gov.SetBudgetLimit(10000)
+	resetAt := time.Now().Add(-12 * time.Hour)
+	gov.SetBudgetResetAt(resetAt)
+	gov.UpdateBudgetFromTotals(1200, nil, nil)
+
+	fb := buildBudget(gov, nil)
+	start, err := time.Parse(time.RFC3339, fb.WindowStartsAt)
+	if err != nil {
+		t.Fatalf("parse window start %q: %v", fb.WindowStartsAt, err)
+	}
+	end, err := time.Parse(time.RFC3339, fb.WindowEndsAt)
+	if err != nil {
+		t.Fatalf("parse window end %q: %v", fb.WindowEndsAt, err)
+	}
+	if got, want := end.Sub(start), periodDays*24*time.Hour; got != want {
+		t.Fatalf("dashboard budget period = %v, want configured %v", got, want)
+	}
+	if fb.WindowHoursRemaining < 35.9 || fb.WindowHoursRemaining > 36.1 {
+		t.Errorf("window hours remaining = %.2f, want about 36", fb.WindowHoursRemaining)
+	}
+	// 1,200 tokens in 12 hours projects to about 4,800 over 48 hours,
+	// not the old seven-day projection of about 16,800.
+	if fb.ProjectedWeekly < 4790 || fb.ProjectedWeekly > 4810 {
+		t.Errorf("period projection = %d, want about 4800", fb.ProjectedWeekly)
+	}
+}
+
 func TestBuildBudget_WithTokenCollectorSummary(t *testing.T) {
 	cfg := config.GovernorConfig{}
 	gov := governor.New(cfg, map[string]config.AgentConfig{}, nil)
-	// No weekly limit — should use totalTokens as used but no percentage calc
-	collector := tokens.NewCollector("/nonexistent", nil)
+	// No weekly limit — should use totalTokens as used but no percentage calc.
+	// Real logger + redirected persist path: the collector's lazy snapshot
+	// restore would otherwise read the live /data/token-summary.json on a hive
+	// host and, before NewCollector was nil-safe, panic on the nil logger (#4664).
+	collector := tokens.NewCollector("/nonexistent", slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})))
+	collector.SetPersistPath(filepath.Join(t.TempDir(), "token-summary.json"))
 	fb := buildBudget(gov, collector)
 	// With no spend and no limit, used should be 0 or whatever the collector says
 	if fb.PctUsed != 0 {

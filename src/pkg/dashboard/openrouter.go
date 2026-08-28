@@ -17,9 +17,9 @@ package dashboard
 // SECURITY:
 //   - PKCE S256; the code_verifier NEVER leaves the server.
 //   - state is single-use + short-lived; the callback binds to the stored hive.
-//   - callback_url is built server-side from an allowlisted own-origin (the
-//     hive's configured dashboard_url, else the request host) — never accepted
-//     from the client.
+//   - callback_url is built server-side from an allowlisted own-origin
+//     (dashboard.public_url, else hub.dashboard_url, else the request host —
+//     see oauthPublicOrigin) — never accepted from the client.
 //   - /openrouter/callback is a PUBLIC path (the returning browser has no
 //     session yet); the state token is the credential and is verified server-side.
 
@@ -71,30 +71,12 @@ func (s *Server) registerOpenRouterRoutes() {
 }
 
 // openRouterCallbackURL builds THIS hive's callback URL from an allowlisted own
-// origin. It prefers the configured dashboard_url (correct for hosted/firewalled
-// hives), then falls back to the request's forwarded/host origin. It NEVER
-// accepts a callback origin supplied by the client, so a code can only be
-// redeemed back to this server.
+// origin — see oauthPublicOrigin for the precedence (dashboard.public_url,
+// hub.dashboard_url, then the forwarded/request host). It NEVER accepts a
+// callback origin supplied by the client, so a code can only be redeemed back
+// to this server.
 func (s *Server) openRouterCallbackURL(r *http.Request) string {
-	base := ""
-	if s.deps != nil && s.deps.Config != nil {
-		base = strings.TrimSpace(s.deps.Config.Hub.DashboardURL)
-	}
-	if base == "" {
-		scheme := "https"
-		if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") == "" {
-			scheme = "http"
-		}
-		if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
-			scheme = proto
-		}
-		host := r.Header.Get("X-Forwarded-Host")
-		if host == "" {
-			host = r.Host
-		}
-		base = scheme + "://" + host
-	}
-	return strings.TrimRight(base, "/") + openRouterCallbackPath
+	return s.oauthPublicOrigin(r) + openRouterCallbackPath
 }
 
 // handleOpenRouterStart begins a PKCE funding flow for THIS hive. It generates a

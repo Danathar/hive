@@ -97,10 +97,13 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	s.mux.HandleFunc("GET /api/token-access", s.handleTokenAccess)
 	s.mux.HandleFunc("GET /api/tokens", s.handleTokens)
 	s.mux.HandleFunc("GET /api/cost", s.handleCost)
+	s.mux.HandleFunc("GET /api/repo-activity", s.handleRepoActivity)
+	s.mux.HandleFunc("GET /api/repo-cost", s.handleRepoCost)
 	s.mux.HandleFunc("GET /api/cost/history", s.handleCostHistory)
+	// #4298: "for every recent reset, how much of the budget had been used".
+	s.mux.HandleFunc("GET /api/budget/history", s.handleBudgetHistory)
 	s.mux.HandleFunc("GET /api/trend/history", s.handleTrendHistory)
 	s.mux.HandleFunc("GET /api/timeseries", s.handleTimeSeries)
-	s.mux.HandleFunc("GET /api/issue-costs", s.handleIssueCosts)
 	s.mux.HandleFunc("GET /api/model-advisor", s.handleModelAdvisor)
 	s.mux.HandleFunc("GET /api/budget-ignore", s.handleBudgetIgnoreGet)
 	s.mux.HandleFunc("POST /api/budget-ignore", s.handleBudgetIgnoreSet)
@@ -144,6 +147,7 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	s.mux.HandleFunc("POST /api/config/governor/budget/reset", s.handleGovernorBudgetReset)
 	s.mux.HandleFunc("PUT /api/config/governor/notifications", s.handleGovernorNotifications)
 	s.mux.HandleFunc("PUT /api/config/governor/health", s.handleGovernorHealth)
+	s.mux.HandleFunc("PUT /api/config/governor/watchdog", s.handleGovernorWatchdog)
 	// Escalation breaker is a top-level Config field (not GovernorConfig), but
 	// its UI lives on the governor Health tab — see api_escalation.go.
 	s.mux.HandleFunc("GET /api/config/escalation", s.handleEscalationGet)
@@ -165,6 +169,13 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	// lives on the governor Features tab — see api_config_automerge.go.
 	s.mux.HandleFunc("GET /api/config/auto-merge", s.handleAutoMergeGet)
 	s.mux.HandleFunc("PUT /api/config/auto-merge", s.handleAutoMergePut)
+	// convergence is a top-level Config field (not GovernorConfig); its UI
+	// lives on the governor Features tab — see api_config_convergence.go
+	// (#4263 off/shadow/enforce rollout). The soak endpoint is the
+	// fixed-commit telemetry read path (convergence_soak.go).
+	s.mux.HandleFunc("GET /api/config/convergence", s.handleConvergenceConfigGet)
+	s.mux.HandleFunc("PUT /api/config/convergence", s.handleConvergenceConfigPut)
+	s.mux.HandleFunc("GET /api/convergence/soak", s.handleConvergenceSoak)
 	s.mux.HandleFunc("GET /api/config/governor/advisory", s.handleGovernorAdvisoryGet)
 	s.mux.HandleFunc("PUT /api/config/governor/advisory", s.handleGovernorAdvisoryPut)
 	s.mux.HandleFunc("GET /api/config/governor/replan", s.handleGovernorReplanGet)
@@ -172,6 +183,8 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	s.mux.HandleFunc("GET /api/config/governor/work-source", s.handleGovernorWorkSourceGet)
 	s.mux.HandleFunc("PUT /api/config/governor/work-source", s.handleGovernorWorkSourcePut)
 	s.mux.HandleFunc("PUT /api/config/governor/security", s.handleGovernorSecurity)
+	s.mux.HandleFunc("GET /api/config/governor/project-observability", s.handleGovernorProjectObservabilityGet)
+	s.mux.HandleFunc("PUT /api/config/governor/project-observability", s.handleGovernorProjectObservabilityPut)
 	// Backup encryption key: presence-only status, set, and clear. The key
 	// value is never returned by any of these (#4129).
 	s.mux.HandleFunc("GET /api/config/governor/backup", s.handleBackupKeyStatus)
@@ -194,6 +207,7 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	s.mux.HandleFunc("POST /api/config/governor/gateways/{name}/test", s.handleGovernorGatewaysTest)
 	s.mux.HandleFunc("POST /api/config/governor/gateways/discover", s.handleGovernorGatewaysDiscover)
 	s.registerOpenRouterRoutes()
+	s.registerLinearAgentRoutes()
 	s.mux.HandleFunc("POST /api/config/governor/agents", s.handleGovernorAddAgent)
 	s.mux.HandleFunc("DELETE /api/config/governor/agents/{name}", s.handleGovernorRemoveAgent)
 	s.mux.HandleFunc("PUT /api/config/governor/repos", s.handleGovernorRepos)
@@ -411,9 +425,20 @@ func (s *Server) resolveAgentParam(nameOrID string) string {
 }
 
 func (s *Server) refreshAfterMutation() {
+	s.refreshAfterMutationSeq()
+}
+
+// refreshAfterMutationSeq bumps the mutation epoch (so any in-flight snapshot
+// rebuild that started before this mutation is dropped at publish, #4348),
+// kicks an async rebuild, and returns the minimum StatusSeq of snapshots
+// guaranteed to reflect the mutation. Handlers whose UI patches the DOM
+// optimistically should return that floor to the frontend.
+func (s *Server) refreshAfterMutationSeq() uint64 {
+	floor := s.noteStatusMutation()
 	if s.deps != nil && s.deps.RefreshFunc != nil {
 		go s.deps.RefreshFunc()
 	}
+	return floor
 }
 
 func (s *Server) persistAfterMutation() {
@@ -423,11 +448,19 @@ func (s *Server) persistAfterMutation() {
 }
 
 func (s *Server) refreshAndPersist() {
-	s.refreshAfterMutation()
+	s.refreshAndPersistSeq()
+}
+
+// refreshAndPersistSeq is refreshAndPersist returning the post-mutation
+// StatusSeq floor (see refreshAfterMutationSeq).
+func (s *Server) refreshAndPersistSeq() uint64 {
+	floor := s.refreshAfterMutationSeq()
 	s.persistAfterMutation()
+	return floor
 }
 
 func (s *Server) refreshAndPersistSync() {
+	s.noteStatusMutation()
 	if s.deps != nil && s.deps.RefreshFunc != nil {
 		s.deps.RefreshFunc()
 	}
@@ -529,8 +562,15 @@ func (s *Server) handleRole(w http.ResponseWriter, r *http.Request) {
 	role := r.Header.Get("X-Hive-Role")
 	user := r.Header.Get("X-Hive-User")
 	if sess := s.sessionFromRequest(r); sess != nil {
-		user = sess.Username
-		role = sess.Role
+		// Live allowlist role, never the role frozen into the session at login
+		// (session_live_role.go): this endpoint drives what the UI believes the
+		// user may do, so a Manage Access grant/downgrade must show up here the
+		// moment the heartbeat delivers it — the same rule authenticate applies
+		// to every gated request. A revoked session reports no identity.
+		if live, ok := s.liveSessionRole(sess); ok {
+			user = sess.Username
+			role = live
+		}
 	}
 	if role == "" {
 		role = "owner"
@@ -577,10 +617,11 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 	cached := s.cachedLatestHash
 	cachedMsg := s.cachedLatestMessage
 	cacheAge := time.Since(s.cachedLatestAt)
+	stableV4 := s.cachedStableV4Hash
+	stableV4Age := time.Since(s.cachedStableV4At)
 	s.versionMu.RUnlock()
 
-	const versionCacheTTL = 5 * time.Minute
-	if cacheAge > versionCacheTTL || cached == "" {
+	if cacheAge > dashboardVersionTipCacheTTL || cached == "" {
 		if latest, err := s.fetchLatestRemoteHash(); err == nil && latest != "" {
 			msg := s.fetchCommitMessage(latest)
 			s.versionMu.Lock()
@@ -590,6 +631,17 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 			s.versionMu.Unlock()
 			cached = latest
 			cachedMsg = msg
+		}
+	}
+	if upstreamBranch() == dashboardStableReleaseBranch {
+		stableV4 = cached
+	} else if stableV4Age > dashboardVersionTipCacheTTL || stableV4 == "" {
+		if latest, err := s.fetchRemoteHashForBranch(dashboardStableReleaseBranch); err == nil && latest != "" {
+			s.versionMu.Lock()
+			s.cachedStableV4Hash = latest
+			s.cachedStableV4At = time.Now()
+			s.versionMu.Unlock()
+			stableV4 = latest
 		}
 	}
 
@@ -608,11 +660,92 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 			resp["latestMessage"] = cachedMsg
 		}
 	}
+	if stableV4 != "" {
+		stableShort := shortSHADashboard(stableV4)
+		resp["stableV4Hash"] = stableV4
+		resp["stableV4Short"] = stableShort
+		// Distinguish "the tip has no image yet" (a known state: nothing to
+		// upgrade to, compare never attempted) from "the compare failed"
+		// (genuinely unknown). Without this the frontend renders a yellow
+		// "? behind" next to the green ✓ whenever the tip is unbuilt (#4804).
+		stableImageReady := ghcrTagExistsCached(stableShort)
+		resp["stableV4ImageReady"] = stableImageReady
+		if sameCommitDashboard(versionHash, stableV4) {
+			resp["commitsBehind"] = 0
+		} else if stableImageReady {
+			if count, ok := s.commitsBehindStableTip(versionHash, stableV4); ok {
+				resp["commitsBehind"] = count
+			}
+		}
+	}
 
 	jsonResponse(w, resp)
 }
 
+const dashboardVersionTipCacheTTL = 5 * time.Minute
+const dashboardStableReleaseBranch = "v4"
+
+func (s *Server) commitsBehindStableTip(base, head string) (int, bool) {
+	base = shortSHADashboard(base)
+	head = shortSHADashboard(head)
+	if base == "" || head == "" {
+		return 0, false
+	}
+	if sameCommitDashboard(base, head) {
+		return 0, true
+	}
+	key := base + "..." + head
+	s.versionMu.RLock()
+	if s.commitBehindCache != nil {
+		if count, ok := s.commitBehindCache[key]; ok {
+			s.versionMu.RUnlock()
+			return count, true
+		}
+	}
+	s.versionMu.RUnlock()
+	if s.deps == nil || s.deps.GHClient == nil || s.deps.Ctx == nil {
+		return 0, false
+	}
+	count, err := s.deps.GHClient.CompareAheadBy(s.deps.Ctx, "kubestellar", "hive", base, head)
+	if err != nil {
+		s.logger.Warn("failed to compare commits behind stable tip", "base", base, "head", head, "error", err)
+		return 0, false
+	}
+	s.versionMu.Lock()
+	if s.commitBehindCache == nil {
+		s.commitBehindCache = map[string]int{}
+	}
+	s.commitBehindCache[key] = count
+	s.versionMu.Unlock()
+	return count, true
+}
+
+func shortSHADashboard(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) > hub.StandardSHALen {
+		return s[:hub.StandardSHALen]
+	}
+	return s
+}
+
+func sameCommitDashboard(a, b string) bool {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if a == "" || b == "" {
+		return false
+	}
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	return strings.EqualFold(a[:n], b[:n])
+}
+
 func (s *Server) fetchLatestRemoteHash() (string, error) {
+	return s.fetchRemoteHashForBranch(upstreamBranch())
+}
+
+func (s *Server) fetchRemoteHashForBranch(branch string) (string, error) {
 	if s.deps == nil || s.deps.GHClient == nil {
 		return "", fmt.Errorf("no github client")
 	}
@@ -620,7 +753,7 @@ func (s *Server) fetchLatestRemoteHash() (string, error) {
 	if ctx == nil {
 		return "", fmt.Errorf("no context")
 	}
-	return s.deps.GHClient.LatestCommitHash(ctx, "kubestellar", "hive", upstreamBranch())
+	return s.deps.GHClient.LatestCommitHash(ctx, "kubestellar", "hive", branch)
 }
 
 // fetchCommitMessage returns the first line of the commit message for a given SHA.
@@ -795,7 +928,21 @@ func (s *Server) handleSelfUpgrade(w http.ResponseWriter, r *http.Request) {
 	}
 	upgradeURL := hubURL + "/api/saas/hives/" + url.PathEscape(hiveID) + "/upgrade"
 
+	user := r.Header.Get("X-Hive-User")
+	proof := s.authToken
+	if proof == "" && s.deps.Config.Dashboard.AuthToken != "" {
+		proof = s.deps.Config.Dashboard.AuthToken
+	}
 	cookie, _ := r.Cookie("hive_hub_user")
+	if proof == "" && cookie == nil {
+		// Fail fast and honestly: with no dashboard-token proof and no hub
+		// session cookie to relay, the hub is guaranteed to reject this request,
+		// and "not authenticated" would mislead a logged-in owner. Name the
+		// missing credential and how to configure it (#4446 honest-error
+		// standard).
+		jsonError(w, "self-upgrade needs this spoke's dashboard token to prove itself to the hub — set DASHBOARD_AUTH_TOKEN (the hive-secrets/dashboard-token secret) and restart the spoke", http.StatusBadRequest)
+		return
+	}
 	const upgradeTimeout = 30 * time.Second
 	client := &http.Client{Timeout: upgradeTimeout}
 	req, err := http.NewRequest("POST", upgradeURL, nil)
@@ -805,6 +952,15 @@ func (s *Server) handleSelfUpgrade(w http.ResponseWriter, r *http.Request) {
 	}
 	if cookie != nil {
 		req.AddCookie(cookie)
+	}
+	if user != "" {
+		req.Header.Set("X-Hive-User", user)
+	}
+	if role != "" {
+		req.Header.Set("X-Hive-Role", role)
+	}
+	if proof != "" {
+		req.Header.Set(proxyAuthHeader, proof)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", "https://hive.kubestellar.io")
@@ -1150,13 +1306,74 @@ func (s *Server) handleLifecycleTimeline(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	dto := s.LifecycleTimeline().Snapshot(limit, window)
+	store := s.LifecycleTimeline()
+	dto := store.Snapshot(limit, window)
+	if level := s.lifecycleACMMLevel(); level > 0 {
+		dto.Events = filterTimelineEventsByACMMLevel(dto.Events, level)
+		dto.Fleet = fleetHealthForTimelineEvents(store.Recent(0), window, level)
+	}
 	// Defensive nil-guard: Snapshot already guarantees a non-nil slice, but
 	// keep the endpoint's array-always contract explicit.
 	if dto.Events == nil {
 		dto.Events = []timeline.Event{}
 	}
 	jsonResponse(w, dto)
+}
+
+func (s *Server) lifecycleACMMLevel() int {
+	if s == nil || s.deps == nil || s.deps.Config == nil {
+		return 0
+	}
+	return detectACMMLevel(s.deps.Config)
+}
+
+func filterTimelineEventsByACMMLevel(events []timeline.Event, level int) []timeline.Event {
+	filtered := make([]timeline.Event, 0, len(events))
+	for _, event := range events {
+		if agent.AgentAvailableAtACMMLevel(event.Agent, level) {
+			filtered = append(filtered, event)
+		}
+	}
+	return filtered
+}
+
+func fleetHealthForTimelineEvents(events []timeline.Event, window time.Duration, level int) timeline.FleetHealth {
+	if window <= 0 {
+		window = timeline.DefaultFleetWindow
+	}
+	fh := timeline.FleetHealth{WindowMs: window.Milliseconds()}
+	cutoff := time.Now().Add(-window).UnixMilli()
+	merged := map[string]bool{}
+	blocked := map[string]bool{}
+	active := map[string]bool{}
+	for _, event := range events {
+		if event.At < cutoff || !agent.AgentAvailableAtACMMLevel(event.Agent, level) {
+			continue
+		}
+		fh.Events++
+		if event.IssueRef == "" {
+			continue
+		}
+		switch event.Kind {
+		case timeline.KindMerged:
+			merged[event.IssueRef] = true
+		case timeline.KindBlocked:
+			blocked[event.IssueRef] = true
+		default:
+			active[event.IssueRef] = true
+		}
+	}
+	for ref := range merged {
+		fh.Merged++
+		delete(active, ref)
+		delete(blocked, ref)
+	}
+	for ref := range blocked {
+		fh.Blocked++
+		delete(active, ref)
+	}
+	fh.InFlight = len(active)
+	return fh
 }
 
 func (s *Server) handleWidget(w http.ResponseWriter, r *http.Request) {
@@ -1714,8 +1931,11 @@ func (s *Server) handleResetRestarts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.deps.Logger.Info("audit: restart count reset", "agent", name, "trigger", "dashboard-api")
-	s.refreshAndPersist()
-	okResponse(w, map[string]string{"status": "reset", "agent": name})
+	floor := s.refreshAndPersistSeq()
+	// minStatusSeq: status snapshots below this seq were built before the
+	// reset — the dashboard drops them so the zeroed counter can't flicker
+	// back to the stale value (#4348).
+	jsonResponse(w, map[string]any{"ok": true, "status": "reset", "agent": name, "minStatusSeq": floor})
 }
 
 // --- Token access audit log ---
@@ -1768,14 +1988,6 @@ func (s *Server) handleTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonResponse(w, summary)
-}
-
-func (s *Server) handleIssueCosts(w http.ResponseWriter, r *http.Request) {
-	if s.deps.Tokens == nil {
-		jsonResponse(w, map[string]interface{}{})
-		return
-	}
-	jsonResponse(w, s.deps.Tokens.IssueCosts())
 }
 
 func (s *Server) handleModelAdvisor(w http.ResponseWriter, r *http.Request) {
@@ -1848,16 +2060,22 @@ func (s *Server) handleGHAuth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-const userTokenPath = "/data/gh-user-token"
+var userTokenPath = "/data/gh-user-token"
 
 func (s *Server) handleGHUserAuthStatus(w http.ResponseWriter, r *http.Request) {
 	// The login status must reflect THIS request's user, not the single
 	// persisted token. On a direct-route spoke, resolving from the per-user
 	// session is the only correct answer — otherwise every visitor would see
 	// the last-authenticated user's identity (the reported vulnerability).
+	// The role is the LIVE allowlist role (session_live_role.go), not the one
+	// frozen into the session at login, so the UI's idea of the user's
+	// capabilities always matches what the gated endpoints will enforce; a
+	// revoked session reports logged-out rather than a ghost identity.
 	if sess := s.sessionFromRequest(r); sess != nil {
-		jsonResponse(w, map[string]interface{}{"logged_in": true, "username": sess.Username, "role": sess.Role})
-		return
+		if live, ok := s.liveSessionRole(sess); ok {
+			jsonResponse(w, map[string]interface{}{"logged_in": true, "username": sess.Username, "role": live})
+			return
+		}
 	}
 	// Hub-proxied path: nginx injects the per-user X-Hive-User/X-Hive-Role, so
 	// report THAT user rather than the single shared persisted token (which
@@ -2377,17 +2595,13 @@ func (s *Server) handleAgentConfigGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	proc, err := s.deps.AgentMgr.GetStatus(name)
-	if err != nil {
-		jsonError(w, err.Error(), http.StatusNotFound)
-		return
-	}
 
 	cli := agentCfg.Backend
-	if proc.BackendOverride != "" {
+	if err == nil && proc.BackendOverride != "" {
 		cli = proc.BackendOverride
 	}
 	model := agentCfg.Model
-	if proc.ModelOverride != "" {
+	if err == nil && proc.ModelOverride != "" {
 		model = proc.ModelOverride
 	}
 
@@ -2443,7 +2657,12 @@ func (s *Server) handleAgentConfigGet(w http.ResponseWriter, r *http.Request) {
 		models[modeName] = ""
 	}
 
-	lastPrompt := proc.LastKickMessage
+	lastPrompt := ""
+	pinnedCLI := agentCfg.CLIPinned
+	if err == nil {
+		lastPrompt = proc.LastKickMessage
+		pinnedCLI = pinnedCLI || proc.PinnedCLI != ""
+	}
 
 	// Read restrictions from agent work dir files
 	restrictions := s.loadAgentRestrictions(name)
@@ -2464,11 +2683,14 @@ func (s *Server) handleAgentConfigGet(w http.ResponseWriter, r *http.Request) {
 
 	jsonResponse(w, map[string]interface{}{
 		"general": map[string]interface{}{
+			"enabled":          agentCfg.Enabled,
 			"launchCmd":        launchCmd,
 			"displayName":      displayName,
 			"description":      agentCfg.Description,
-			"cliPinned":        agentCfg.CLIPinned || proc.PinnedCLI != "",
+			"cliPinned":        pinnedCLI,
 			"cliPinValue":      cli,
+			"modelOwner":       agentCfg.ModelOwner,
+			"backendOwner":     agentCfg.BackendOwner,
 			"staleTimeout":     staleTimeout,
 			"restartStrategy":  restartStrategy,
 			"model":            model,
@@ -2487,6 +2709,7 @@ func (s *Server) handleAgentConfigGet(w http.ResponseWriter, r *http.Request) {
 			"detectKeywords":   agentCfg.DetectKeywords,
 			"aliases":          agentCfg.Aliases,
 			"cavemanMode":      agentCfg.CavemanMode,
+			"explainMode":      agentCfg.ExplainMode,
 			"sandboxEnabled":   agentCfg.Sandbox != nil && agentCfg.Sandbox.Enabled != nil && *agentCfg.Sandbox.Enabled,
 			"sandboxEffective": agentCfg.SandboxEnabled(s.deps.Config.AgentSandbox),
 			"replicas":         agentCfg.Replicas,
@@ -2736,9 +2959,20 @@ func (s *Server) handleAuthorizedUsersList(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	entries := s.deps.Config.Dashboard.AuthorizedUsers
+	// names is the purely cosmetic key→display-name companion delivered by the
+	// hub's heartbeat (AuthorizedUserNames). It is never consulted for
+	// authorization — only AuthorizedUsers (the raw key) is — so a nil/empty
+	// map here just means every row falls back to its raw key, exactly as
+	// before this field existed.
+	names := s.deps.Config.Dashboard.AuthorizedUserNames
 	type userView struct {
 		Username string `json:"username"`
 		Role     string `json:"role"`
+		// DisplayName is the human-readable name for Username, when the hub
+		// knows one (see AuthorizedUserNames). omitempty: absent means "no
+		// known name", and the UI must render Username (the raw identity key)
+		// instead — never blank, never "undefined".
+		DisplayName string `json:"display_name,omitempty"`
 	}
 	out := make([]userView, 0, len(entries))
 	for i, e := range entries {
@@ -2760,7 +2994,7 @@ func (s *Server) handleAuthorizedUsersList(w http.ResponseWriter, r *http.Reques
 				role = "read"
 			}
 		}
-		out = append(out, userView{Username: name, Role: role})
+		out = append(out, userView{Username: name, Role: role, DisplayName: strings.TrimSpace(names[name])})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Username < out[j].Username })
 	jsonResponse(w, map[string]any{
@@ -3125,12 +3359,25 @@ func (s *Server) handleAgentConfigGeneral(w http.ResponseWriter, r *http.Request
 	if v, ok := body["cavemanMode"]; ok {
 		if s, ok := v.(string); ok {
 			s = sanitizeString(s)
-			validCavemanModes := map[string]bool{"": true, "lite": true, "full": true, "ultra": true, "wenyan": true}
-			if !validCavemanModes[s] {
+			// Same gate as config.Validate, so the write path cannot persist a
+			// value that would fail the next config load.
+			if !config.ValidateCavemanMode(s) {
 				jsonError(w, "caveman_mode must be one of: lite, full, ultra, wenyan (or empty to disable)", http.StatusBadRequest)
 				return
 			}
 			agentCfg.CavemanMode = s
+		}
+	}
+	if v, ok := body["explainMode"]; ok {
+		if s, ok := v.(string); ok {
+			s = sanitizeString(s)
+			// Same gate as config.Validate, so the write path cannot persist a
+			// value that would fail the next config load.
+			if !config.ValidateExplainMode(s) {
+				jsonError(w, "explain_mode must be one of: off, brief, full (or empty to inherit the hive default)", http.StatusBadRequest)
+				return
+			}
+			agentCfg.ExplainMode = s
 		}
 	}
 	// promptSource: a nested {owner,repo,path,ref} object (or explicit null to
@@ -4135,6 +4382,7 @@ func (s *Server) handleGovernorConfigGet(w http.ResponseWriter, r *http.Request)
 			"healthcheckInterval": cfg.Governor.Health.HealthcheckInterval,
 			"restartCooldown":     cfg.Governor.Health.RestartCooldown,
 			"modelLock":           cfg.Governor.Health.ModelLock,
+			"watchdog":            watchdogConfigPayload(cfg),
 		},
 		"sensing": map[string]interface{}{
 			"ghRatePatterns":     cfg.Governor.Sensing.GHRatePatterns,
@@ -4151,16 +4399,18 @@ func (s *Server) handleGovernorConfigGet(w http.ResponseWriter, r *http.Request)
 			"compress":   cfg.Governor.Logging.Compress,
 			"level":      cfg.Governor.Logging.Level,
 		},
-		"litellm":     litellmSectionResponse(&cfg.Governor.LiteLLM),
-		"trajectory":  trajectorySectionResponse(&cfg.Governor),
-		"classifier":  classifierSectionResponse(),
-		"features":    featuresSectionResponse(cfg),
-		"review":      cfg.Review,
-		"auto_merge":  autoMergeSectionResponse(cfg),
-		"advisory":    advisorySectionResponse(cfg),
-		"replan":      replanSectionResponse(cfg),
-		"work_source": workSourceSectionResponse(cfg),
-		"security":    securitySectionResponse(cfg),
+		"litellm":               litellmSectionResponse(&cfg.Governor.LiteLLM),
+		"trajectory":            trajectorySectionResponse(&cfg.Governor),
+		"classifier":            classifierSectionResponse(),
+		"features":              featuresSectionResponse(cfg),
+		"review":                cfg.Review,
+		"auto_merge":            autoMergeSectionResponse(cfg),
+		"convergence":           s.convergenceSectionResponse(cfg),
+		"advisory":              advisorySectionResponse(cfg),
+		"project_observability": s.projectObservabilityResponse(cfg),
+		"replan":                replanSectionResponse(cfg),
+		"work_source":           workSourceSectionResponse(cfg),
+		"security":              securitySectionResponse(cfg),
 		"attribution": map[string]interface{}{
 			// Effective value (default ON when unset) — the UI renders the
 			// switch from this, so an untouched hive shows it on.
@@ -4351,6 +4601,15 @@ func (s *Server) handleGovernorThresholds(w http.ResponseWriter, r *http.Request
 			s.deps.Config.Governor.Modes[modeName] = mode
 		}
 	}
+
+	// #4037: the operator just typed these numbers, so they stop being
+	// pack-seeded bases and become absolutes that EffectiveThreshold returns
+	// verbatim — the #3498 guarantee that a hand-tuned `surge: 300` is never
+	// multiplied by the repo count. Cleared for the WHOLE set, deliberately:
+	// leaving the untouched modes scaling while this one does not can invert
+	// the mode ladder (a scaled busy above an unscaled surge). Editing any
+	// threshold means the operator owns all of them.
+	s.deps.Config.Governor.ThresholdsSource = ""
 
 	if err := s.saveConfig(); err != nil {
 		s.logger.Error("failed to persist config after threshold update", "error", err)
@@ -4580,8 +4839,10 @@ func (s *Server) handleGovernorBudgetReset(w http.ResponseWriter, r *http.Reques
 	}
 	s.deps.Governor.ResetBudgetWindow()
 	s.auditFromRequest(r, "governor_budget_window_reset", auditDetail("section", "budget"), "")
-	s.refreshAndPersist()
-	okResponse(w, map[string]string{"status": "reset"})
+	floor := s.refreshAndPersistSeq()
+	// minStatusSeq: see handleResetRestarts — lets the dashboard discard
+	// pre-reset status snapshots so the budget bar can't revert (#4348).
+	jsonResponse(w, map[string]any{"ok": true, "status": "reset", "minStatusSeq": floor})
 }
 
 func (s *Server) handleGovernorNotifications(w http.ResponseWriter, r *http.Request) {
@@ -6388,7 +6649,12 @@ func (s *Server) persistGitHubSetupInstallation(r *http.Request, installationID 
 
 func (s *Server) requestHasGitHubSetupAdmin(r *http.Request) bool {
 	if sess := s.sessionFromRequest(r); sess != nil {
-		return config.RoleAtLeast(sess.Role, config.RoleReadWrite)
+		// Authz decision: use the LIVE allowlist role (session_live_role.go),
+		// never the role frozen into the session at login — a downgrade or
+		// revocation must strip GitHub-setup admin immediately, and a granted
+		// owner must gain it without re-login (same class as #4299).
+		live, ok := s.liveSessionRole(sess)
+		return ok && config.RoleAtLeast(live, config.RoleReadWrite)
 	}
 	role := r.Header.Get("X-Hive-Role")
 	if !config.RoleAtLeast(role, config.RoleReadWrite) {
@@ -6499,7 +6765,7 @@ func (s *Server) handleInferenceModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	models := s.fetchInferenceModelsForBackend(backend, endpoints)
+	models, complete := s.fetchInferenceModelsForBackendDetailed(backend, endpoints)
 	fallback := false
 	if len(models) == 0 {
 		s.logger.Warn("no models found from any endpoint", "backend", backend, "endpoints", len(endpoints))
@@ -6515,6 +6781,13 @@ func (s *Server) handleInferenceModels(w http.ResponseWriter, r *http.Request) {
 		"backend":  backend,
 		"models":   models,
 		"fallback": fallback,
+		// partial: some of the backend's endpoints answered and others did
+		// not, so `models` is a FLOOR, not a census — every id in it really
+		// was discovered (so the dropdown labels them normally, unlike the
+		// static fallback), but a model's absence proves nothing. Auto-heal
+		// must sit out this sample rather than switch an agent off a model
+		// that only the unreachable endpoint serves (#4438).
+		"partial": !fallback && !complete,
 	}
 	// Some LiteLLM gateways advertise the FULL catalog on /v1/models but scope
 	// a key's team to a SUBSET; a non-entitled model 403s at inference. When
@@ -6584,23 +6857,37 @@ func intersectEntitled(discovered, entitled []string) []string {
 // Falls back to the legacy raw-key path whenever no gateway resolves for this
 // name (env-configured vllm/llm-d endpoints), keeping existing behaviour.
 func (s *Server) fetchInferenceModelsForBackend(backend string, endpoints []string) []string {
+	models, _ := s.fetchInferenceModelsForBackendDetailed(backend, endpoints)
+	return models
+}
+
+// fetchInferenceModelsForBackendDetailed additionally reports whether EVERY
+// endpoint answered, so a caller can tell a complete census from a partial one
+// (#4438). It matters most here: this is the discovery the dashboard's model
+// auto-heal reads, and auto-heal does not merely toast — it rewrites the
+// agent's configured model and relaunches its session. A gateway that drops
+// out of a multi-endpoint sweep must never be able to spend an agent's
+// selection that way.
+func (s *Server) fetchInferenceModelsForBackendDetailed(backend string, endpoints []string) ([]string, bool) {
 	gw := s.resolveGatewayForBackend(backend)
 	if gw == nil || !gatewayKindNeedsProbeAuth(gw.Kind) {
-		return fetchModelsFromEndpoints(endpoints, s.inferenceAPIKey(backend))
+		return fetchModelsFromEndpointsDetailed(endpoints, s.inferenceAPIKey(backend))
 	}
 	bearer, headers, err := gatewayProbeAuth(gw.Kind, gw.ResolveAPIKey(), gw.ProjectID)
 	if err != nil {
 		s.logger.Warn("gateway auth for model discovery failed",
 			"backend", backend, "kind", gw.Kind, "error", err)
-		return nil
+		return nil, false
 	}
 	seen := make(map[string]bool)
 	var all []string
+	complete := true
 	for _, ep := range endpoints {
 		models, err := fetchModelsWithHeaders(ep, bearer, headers)
 		if err != nil {
 			s.logger.Warn("model discovery failed",
 				"backend", backend, "kind", gw.Kind, "endpoint", ep, "error", err)
+			complete = false
 			continue
 		}
 		for _, m := range models {
@@ -6610,7 +6897,7 @@ func (s *Server) fetchInferenceModelsForBackend(backend string, endpoints []stri
 			}
 		}
 	}
-	return all
+	return all, complete
 }
 
 // gatewayKindNeedsProbeAuth reports whether a gateway kind requires the
@@ -6707,10 +6994,34 @@ var inferenceStaticModelAliases = []string{
 }
 
 func (s *Server) queryInferenceModels(backend string) []string {
-	if endpoints, ok := s.getInferenceEndpoints(backend); ok {
-		models := fetchModelsFromEndpoints(endpoints, s.inferenceAPIKey(backend))
+	models, _ := s.queryInferenceModelsDetailed(backend)
+	return models
+}
+
+// queryInferenceModelsDetailed additionally reports whether the returned list
+// is NON-AUTHORITATIVE — a stand-in for a census that did not fully succeed —
+// rather than a complete live-discovered or operator-configured set. Callers
+// surfacing model add/remove events must ignore diffs against such a list.
+//
+// Three shapes are non-authoritative, and all three produced the same false
+// "Model removed" storm before they were flagged:
+//   - the static aliases, when discovery failed outright (#4426);
+//   - a PARTIAL sweep, when some endpoints answered and others did not;
+//   - the HIVE_*_MODELS env list, when it is reached only BECAUSE a
+//     registered endpoint failed to answer (#4438).
+//
+// The env list is authoritative in the one case where it is the configured
+// source of models rather than a consolation prize: no endpoint registered at
+// all, so nothing was ever probed.
+func (s *Server) queryInferenceModelsDetailed(backend string) ([]string, bool) {
+	endpoints, ok := s.getInferenceEndpoints(backend)
+	probed := ok && len(endpoints) > 0
+	if probed {
+		models, complete := fetchModelsFromEndpointsDetailed(endpoints, s.inferenceAPIKey(backend))
 		if len(models) > 0 {
-			return models
+			// Show a partial sweep — a short dropdown beats an empty one —
+			// but never let it stand as a census of what exists.
+			return models, !complete
 		}
 	}
 	envVar := "HIVE_VLLM_MODELS"
@@ -6721,11 +7032,11 @@ func (s *Server) queryInferenceModels(backend string) []string {
 		envVar = "HIVE_LITELLM_MODELS"
 	}
 	if val := os.Getenv(envVar); val != "" {
-		return inferenceModelsFromEnv(envVar, "")
+		return inferenceModelsFromEnv(envVar, ""), probed
 	}
 	// Discovery failed or the backend is unconfigured — fall back to the
 	// common static aliases (unverified against any endpoint/key).
-	return inferenceStaticModelAliases
+	return inferenceStaticModelAliases, true
 }
 
 const inferenceModelQueryTimeout = 5 * time.Second
@@ -6734,11 +7045,25 @@ const inferenceModelQueryTimeout = 5 * time.Second
 // a deduplicated, combined list of all model IDs found. apiKey is optional
 // (litellm requires bearer auth; vllm/llm-d do not).
 func fetchModelsFromEndpoints(endpoints []string, apiKey string) []string {
+	models, _ := fetchModelsFromEndpointsDetailed(endpoints, apiKey)
+	return models
+}
+
+// fetchModelsFromEndpointsDetailed additionally reports whether EVERY endpoint
+// answered. A PARTIAL sweep — one gateway of several timing out or answering
+// 403 while its siblings reply — still returns a non-empty list, and a caller
+// that diffs model sets must not read the survivors as "the unreachable
+// endpoint's models were removed" (#4438: a partial sweep wallpapered the
+// dashboard with false "Model removed from litellm: …" toasts, including for
+// the very model the hive's agents were configured to use).
+func fetchModelsFromEndpointsDetailed(endpoints []string, apiKey string) ([]string, bool) {
 	seen := make(map[string]bool)
 	var all []string
+	complete := true
 	for _, ep := range endpoints {
 		models, err := fetchModelsFromEndpoint(ep, apiKey)
 		if err != nil {
+			complete = false
 			continue
 		}
 		for _, m := range models {
@@ -6748,7 +7073,7 @@ func fetchModelsFromEndpoints(endpoints []string, apiKey string) []string {
 			}
 		}
 	}
-	return all
+	return all, complete
 }
 
 func fetchModelsFromEndpoint(baseURL, apiKey string) ([]string, error) {
@@ -7165,6 +7490,47 @@ func (s *Server) handleCostHistory(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleTrendHistory(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, s.TrendHistory())
+}
+
+// handleBudgetHistory serves the per-budget-window report (#4298): one row per
+// CLOSED window, newest first, plus the window still open so an operator sees
+// the whole picture in one response rather than joining two endpoints.
+//
+// `windows` is ALWAYS an array, never null — a hive that has not yet seen a
+// roll returns `[]`, which a client renders as "no history yet" rather than
+// crashing on a nil. That is the compatibility requirement #4298 names: new
+// code must not break an environment that was never keeping this history.
+func (s *Server) handleBudgetHistory(w http.ResponseWriter, r *http.Request) {
+	windows := s.BudgetWindowHistory()
+	if windows == nil {
+		windows = []BudgetWindowEntry{}
+	}
+
+	resp := map[string]any{"windows": windows}
+
+	// The open window, straight from the live status, so the report reads
+	// continuously from "now" back through the closed rows.
+	s.statusMu.RLock()
+	status := s.status
+	s.statusMu.RUnlock()
+	if status != nil {
+		b := status.Budget
+		current := map[string]any{
+			"limit":     b.WeeklyBudget,
+			"used":      b.Used,
+			"pctUsed":   b.PctUsed,
+			"exhausted": b.Exhausted,
+		}
+		if b.WindowStartsAt != "" {
+			current["windowStart"] = b.WindowStartsAt
+		}
+		if b.WindowEndsAt != "" {
+			current["windowEnd"] = b.WindowEndsAt
+		}
+		resp["current"] = current
+	}
+
+	jsonResponse(w, resp)
 }
 
 // handleTimeSeries is the unified read endpoint over the sparkline histories.

@@ -1,8 +1,7 @@
 level: 2
 name: Advisory
 description: >
-  One-way feedback (formerly "Instructed"). Five agents (supervisor, scanner, quality, guide, brainstorm)
-  produce advisory beads — findings visible on the dashboard and in a tracking
+  One-way feedback (formerly "Instructed"). Five agents produce advisory beads — findings visible on the dashboard and in a tracking
   issue. No GitHub issues or PRs created. Agents observe and report; humans
   decide what to act on.
 governor:

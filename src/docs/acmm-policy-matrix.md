@@ -54,7 +54,7 @@ Quality agent opens GitHub issues and PRs about testing gaps, coverage, and CI w
 
 ### L4 — Security-Aware (Adaptive) (7 agents)
 
-All agents open GitHub issues — bugs, docs gaps, CI problems, security vulnerabilities. Only Quality, sec-check, and ci-maintainer may open PRs. Security agent joins. Closed-loop feedback: agents act on their own findings.
+Delivery agents open GitHub issues — bugs, docs gaps, CI problems, security vulnerabilities. Only Quality, sec-check, and ci-maintainer may open PRs. Security agent joins.
 
 | Agent | Mode | Template |
 |-------|------|----------|
@@ -66,7 +66,7 @@ All agents open GitHub issues — bugs, docs gaps, CI problems, security vulnera
 | **sec-check** | **holdgated** | `sec-check-holdgated.md` |
 | brainstorm | advisory | `brainstorm-advisory.md` |
 
-### L5 — Semi-Autonomous (Semi-Automated) (9 agents)
+### L5 — Semi-Autonomous (Semi-Automated) (11 agents)
 
 Agents open issues AND pull requests. All PRs get a hold label — humans batch-review and approve. Architect produces RFCs, strategist coordinates across agents. The system proposes; it does not merge autonomously.
 
@@ -80,11 +80,13 @@ Agents open issues AND pull requests. All PRs get a hold label — humans batch-
 | sec-check | holdgated | `sec-check-holdgated.md` |
 | architect | holdgated | `architect-holdgated.md` |
 | strategist | holdgated | `strategist-holdgated.md` |
+| telemetry (paused) | holdgated | `telemetry-holdgated.md` |
+| operations (paused) | holdgated | `operations-holdgated.md` |
 | brainstorm | advisory | `brainstorm-advisory.md` |
 
-### L6 — Fully Autonomous (10 agents)
+### L6 — Fully Autonomous (12 agents)
 
-Agents open issues, create PRs, and auto-merge on green CI. No hold label. Outreach agent handles community engagement (highest trust — external-facing). Governor at fastest cadence.
+Existing autonomous lanes can open issues, create PRs, and auto-merge on green CI. No hold label. Outreach handles community engagement. Telemetry and operations remain paused and use `ISSUES_AND_PRS`, so they never merge their own PRs.
 
 | Agent | Mode | Template |
 |-------|------|----------|
@@ -97,6 +99,8 @@ Agents open issues, create PRs, and auto-merge on green CI. No hold label. Outre
 | architect | full | `architect-full.md` |
 | strategist | full | `strategist-full.md` |
 | outreach | full | `outreach-full.md` |
+| telemetry (paused) | full | `telemetry-full.md` |
+| operations (paused) | full | `operations-full.md` |
 | brainstorm | advisory | `brainstorm-advisory.md` |
 
 ## Example config alignment
@@ -111,6 +115,49 @@ Agents open issues, create PRs, and auto-merge on green CI. No hold label. Outre
 4. **Mode escalation is per-agent.** At L4, some agents are measured (issues only) while others are holdgated (issues + PRs). The level defines the mix.
 5. **Knowledge priming works at all levels.** The `${KNOWLEDGE}` template variable injects relevant facts from git sources and wiki layers regardless of the agent's mode.
 6. **Brainstorm is always advisory.** It produces KB facts and beads, never GitHub issues or PRs. Its role evolves from inception (L1) to ongoing ideation (L2+), but its mode stays advisory at all levels.
+7. **Telemetry and operations are L5/L6-only opt-in agents.** Below L5 they are absent from the pack roster and dashboard, do not spawn panes, and cannot be kicked. At L5–L6 they use a paused cadence in every governor mode until an operator opts in; they may open issues and PRs but never merge.
+
+## Where ACMM gap issues are filed
+
+The dashboard's ACMM evaluation lists each criterion a repo is missing, and
+the level dialog offers **Open Issue** (per criterion) and **Open All** (every
+failing criterion at that level). Both call `POST /api/acmm/issue`. By default
+the issue goes to the repo's **GitHub Issues** with the `acmm` and
+`ai-fix-requested` labels.
+
+A hive whose backlog lives in Linear (`governor.work_source.type: linear`) can
+file them there instead:
+
+```yaml
+governor:
+  acmm:
+    issue_tracker: work_source   # "" | github | work_source (default github)
+```
+
+| Value | Where the issue goes |
+|---|---|
+| `github` (or unset) | GitHub Issues on the criterion's repo — unchanged behavior. |
+| `work_source` | Wherever the backlog lives. Linear work source → Linear `issueCreate` on the team whose `teams[].repo` matches the criterion's repo (else the first team). GitHub / GitHub Projects / Jira / unset → GitHub Issues as above. |
+
+Any other value fails config validation at load time.
+
+The choice can also be made **per click**: the request body accepts an
+optional `tracker` field (`"github"` or `"work_source"`) that overrides the
+configured default for that one issue; an unknown value is a `400`. When the
+work source is Linear the level dialog shows a small **File in: GitHub /
+Linear** selector, pre-selected from the config, that sets this field. The
+response always says where the issue went:
+
+```json
+{"tracker": "linear", "issue_number": 42, "identifier": "ENG-42",
+ "issue_url": "https://linear.app/acme/issue/ENG-42/...", "team": "ENG"}
+```
+
+(`tracker: "github"` responses carry `issue_number` and `issue_url` as
+before.) `GET /api/acmm/evaluation` reports the effective default as
+`issue_tracker` (`github` | `linear`) plus `work_source_type`. Title and body
+are identical on both trackers; Linear uses `work_source.linear.api_key`, and
+the audit log records `tracker` alongside the URL either way.
 
 ## Changing a hive's ACMM level
 
@@ -144,3 +191,13 @@ Notes:
 - On a hosted hive the level can also be hub/admin-managed; the ConfigMap seed is
   authoritative for `acmm_level` on those (see the operator reference on config
   precedence).
+
+## Automated level-up guidance
+
+A separate, advisory-only computation — the ACMM advisor (`pkg/acmmadvisor`) —
+can tell you whether a hive has earned progression to the next level, based on
+test coverage, green-CI streak, merge success rate, and backlog/hold signals.
+It never changes the applied level itself; changing the level is always the
+manual process described above. See the [ACMM advisor](acmm-advisor.md) page
+for the exact thresholds per target level and what the `GET
+/api/acmm-recommendation` endpoint returns.

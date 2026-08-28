@@ -174,6 +174,14 @@ const hubUpgradeDebounce = 4 * time.Minute
 // paying that per hive serialized the upgrade loop and starved the hub's own
 // upgrade check that runs after it. The heartbeat fallback is the real delivery
 // path for unreachable clusters, so failing fast costs nothing.
+//
+// Retained under nolint despite having no current caller: three other files
+// cite it BY NAME as the basis for their own timeouts
+// (hosted_namespace_identity.go, netadmin_reconcile.go, saas_bulk.go). Deleting
+// it to satisfy the linter would orphan those comments and lose the recorded
+// reasoning for the 15s figure, which is the thing worth keeping.
+//
+//nolint:unused // referenced by name from three sibling timeout comments
 const upgradeKubectlTimeout = 15 * time.Second
 
 // clusterUnreachableTTL is how long the hub skips kubectl for a cluster after a
@@ -317,6 +325,85 @@ type SaaSUser struct {
 	FullName string `json:"full_name,omitempty"`
 	SlackID  string `json:"slack_id,omitempty"`
 	Notes    string `json:"notes,omitempty"`
+	// Company is ADMIN-entered CRM free text — the user's company/organization.
+	// Like FullName/SlackID/Notes it is operator-maintained (never asserted by a
+	// login) and is deliberately NOT collected in the hive request/provision
+	// form; the operator fills it in manually from the admin Users table. Same
+	// escaping + length-cap discipline as the other contact fields
+	// (maxContactCompanyLen); omitempty so existing records round-trip
+	// byte-identical until an admin sets it.
+	Company string `json:"company,omitempty"`
+
+	// Country is an OPTIONAL ISO 3166-1 alpha-2 code (uppercase, e.g. "GB"),
+	// rendered as a small flag beside the user's avatar. Two sources, in
+	// priority order: the explicit dropdown in the get-started wizard (copied
+	// here on approval, like FullName/SlackID above), else a best-effort
+	// inference from the Accept-Language region subtag at login, which only
+	// ever fills an EMPTY value. See user_country.go for the full rationale and
+	// the privacy posture.
+	//
+	// Stored as the code, never as the glyph: the flag is derived at render
+	// time from regional-indicator code points, so no external image host is
+	// involved and an unknown country renders nothing at all.
+	//
+	// omitempty so the thousands of existing records on the PVC round-trip
+	// byte-identical until a user actually picks a country or logs in from a
+	// browser that states a region.
+	Country string `json:"country,omitempty"`
+
+	// CountrySetByUser records that the country above was chosen DELIBERATELY
+	// by the user rather than inferred, and it is what makes an explicit CLEAR
+	// stick.
+	//
+	// Without it, "explicit" is inferred from `Country != ""` (see
+	// applyInferredCountry), which is fine for a pick but wrong for a clear: a
+	// user who removes their country via the self-service endpoint leaves an
+	// empty field, and the very next login's Accept-Language inference would
+	// silently put a flag back. "Prefer not to say" would become impossible to
+	// express — and impossible to notice failing, since the flag reappears a
+	// login later, far from the action that was supposed to remove it.
+	//
+	// Set only by the user's own writes: the self-service endpoint
+	// (handleMyCountry) and the wizard pick copied on approval
+	// (applyRequestContactToUser). NEVER set by the login-path inference, which
+	// is precisely the distinction this field exists to draw.
+	//
+	// omitempty bool so every record that has not been through a deliberate
+	// pick — which today is all of them — round-trips byte-identical.
+	//
+	// STILL WRITTEN, not deprecated: CountrySource below is the finer-grained
+	// successor, but this boolean is what other readers and every record
+	// already on the PVC speak, so every user-chosen write keeps setting it.
+	CountrySetByUser bool `json:"country_set_by_user,omitempty"`
+
+	// CountrySource is the PROVENANCE of the country above — who put it there.
+	// One of countrySourceInferred / countrySourceAdmin / countrySourceUser, or
+	// "" for a record nothing has ever touched.
+	//
+	// A boolean stopped being enough the moment an ADMIN could assign a country
+	// on someone else's behalf, because that is a third kind of claim and it
+	// sits BETWEEN the two the boolean can express:
+	//
+	//   - It is not user-chosen. Stamping CountrySetByUser for an admin edit
+	//     would assert the user made a statement about themselves that they
+	//     never made, and — since that marker is also what suppresses ever
+	//     asking again — would permanently silence the question for them.
+	//   - But it must still outrank Accept-Language inference. An admin's
+	//     best-effort attribution is a human looking at evidence; the header is
+	//     a language preference. Letting the next login overwrite it would
+	//     re-introduce, in a new form, exactly the silent-clobber bug #4374 was
+	//     opened to fix.
+	//
+	// Precedence, strongest first: user > admin > inferred > unset. See
+	// countryProvenanceRank and mayOverwriteCountry in user_country.go, which
+	// are the single arbiters — no caller compares these strings by hand.
+	//
+	// BACKWARD COMPATIBILITY. Records written before this field exists carry
+	// only CountrySetByUser, so an ABSENT source is read through that boolean:
+	// CountrySetByUser=true with no source means user-chosen (see
+	// effectiveCountrySource). That is why this is omitempty and why nothing
+	// backfills it — an untouched record must still serialize byte-identically.
+	CountrySource string `json:"country_source,omitempty"`
 
 	// Engagement stats, admin-only (they ride /api/saas/admin/users, which is
 	// requireAdmin). Both omitempty ints so existing records round-trip
@@ -365,6 +452,9 @@ const (
 	// are ~11 chars (U01ABCDEF23); the headroom allows an @handle or a
 	// workspace-qualified form.
 	maxContactSlackIDLen = 64
+	// maxContactCompanyLen bounds the company/organization name — an identifier
+	// like the name/Slack fields, sized generously for long legal entity names.
+	maxContactCompanyLen = 128
 	// maxContactNotesLen bounds the free-text notes field — the longest of the
 	// three, sized for a few paragraphs of admin scratch notes per user.
 	maxContactNotesLen = 8192
@@ -458,7 +548,8 @@ func (s *HubServer) registerSaaSRoutes() {
 	s.mux.HandleFunc("GET /dashboard", s.handleDashboard)
 	s.mux.HandleFunc("GET /access-denied", s.handleAccessDenied)
 	s.mux.HandleFunc("GET /api/saas/my-hives", s.requireAuth(s.handleMyHives))
-	// Daily image-pulls sparkline series (external adoption gauge). requireAuth,
+	// Per-release image-pulls series, headline (active release line) plus
+	// per-line (external adoption gauge). requireAuth,
 	// not requireAdmin: any signed-in hub user sees the same public-adoption
 	// number, and the underlying data is scraped from the PUBLIC package page.
 	s.mux.HandleFunc("GET /api/hub/image-pulls", s.requireAuth(s.handleImagePulls))
@@ -466,6 +557,17 @@ func (s *HubServer) registerSaaSRoutes() {
 	// non-admin legitimately sees their OWN hives' usage; the handler scopes
 	// fleet-wide data to admins itself.
 	s.mux.HandleFunc("GET /api/saas/usage", s.requireAuth(s.handleUsage))
+	// Self-service country: the ONE field a non-admin may write on their own
+	// user record. requireAuth, not requireAdmin — that is the entire point,
+	// since every other SaaSUser write is admin-gated and the wizard is a
+	// one-time surface. The handler resolves the acting user from the SESSION
+	// and the body carries no identity, so this cannot reach anyone else's
+	// record. See handleMyCountry in user_country.go.
+	//
+	// PUT with a JSON body rather than a code in the path: country is personal
+	// data and a URL would put it in access logs, Referer headers and history.
+	s.mux.HandleFunc("GET /api/saas/me/country", s.requireAuth(s.handleMyCountry))
+	s.mux.HandleFunc("PUT /api/saas/me/country", s.requireAuth(s.handleMyCountry))
 	s.mux.HandleFunc("POST /api/saas/lite/enroll", s.requireAuth(s.handleLiteEnroll))
 	s.mux.HandleFunc("POST /api/saas/hives", s.requireAuth(s.handleCreateHive))
 	s.mux.HandleFunc("GET /api/saas/hives/{id}/status", s.requireAuth(s.handleHiveStatus))
@@ -475,7 +577,7 @@ func (s *HubServer) registerSaaSRoutes() {
 	// handleOpenHive does its own auth check + login redirect.
 	s.mux.HandleFunc("GET /api/saas/hives/{id}/open", s.handleOpenHive)
 	s.mux.HandleFunc("DELETE /api/saas/hives/{id}", s.requireAuth(s.handleDeleteHive))
-	s.mux.HandleFunc("POST /api/saas/hives/{id}/upgrade", s.requireAuth(s.handleUpgradeHive))
+	s.mux.HandleFunc("POST /api/saas/hives/{id}/upgrade", s.requireAuthOrSpokeUpgrade(s.handleUpgradeHive))
 	s.mux.HandleFunc("POST /api/saas/hives/{id}/switch-branch", s.requireAuth(s.handleSwitchBranch))
 	s.mux.HandleFunc("PUT /api/saas/hives/{id}/visibility", s.requireAuth(s.handleToggleVisibility))
 	s.mux.HandleFunc("PUT /api/saas/hives/{id}/auto-upgrade", s.requireAuth(s.handleToggleAutoUpgrade))
@@ -488,6 +590,10 @@ func (s *HubServer) registerSaaSRoutes() {
 	// switch-branch and auto-upgrade above.
 	s.mux.HandleFunc("POST /api/saas/hives/{id}/forge", s.requireAuth(s.handleSwitchForge))
 	s.mux.HandleFunc("POST /api/saas/hives/{id}/reset-app", s.requireAuth(s.handleResetApp))
+	// Assigns a hive its OPTIONAL second GitHub App (#4815). requireAuth is the
+	// same outer gate reset-app uses; the handler itself re-checks isHubAdmin,
+	// which is the authoritative check for both.
+	s.mux.HandleFunc("PUT /api/saas/hives/{id}/secondary-app", s.requireAuth(s.handleSetHiveSecondaryApp))
 	s.mux.HandleFunc("POST /api/saas/hives/{id}/restart-spoke", s.requireAuth(s.handleRestartSpoke))
 	s.mux.HandleFunc("GET /api/saas/hive-config/{hiveID}", s.requireAuth(s.handleProxyHiveConfig))
 	s.mux.HandleFunc("GET /api/saas/latest-sha", s.handleLatestSHA)
@@ -533,7 +639,14 @@ func (s *HubServer) registerSaaSRoutes() {
 	s.mux.HandleFunc("PUT /api/saas/approve-provision/{username}", s.requireAdmin(s.handleApproveProvision))
 	s.mux.HandleFunc("DELETE /api/saas/deny-provision/{username}", s.requireAdmin(s.handleDenyProvision))
 	s.mux.HandleFunc("GET /api/saas/admin/available-placeholders", s.requireAdmin(s.handleAvailablePlaceholders))
+	s.mux.HandleFunc("GET /api/saas/admin/scale-settings", s.requireAdmin(s.handleGetScaleSettings))
+	s.mux.HandleFunc("POST /api/saas/admin/scale-settings", s.requireAdmin(s.handleSetScaleSettings))
 	s.mux.HandleFunc("GET /api/saas/admin/users", s.requireAdmin(s.handleAdminUsers))
+	// Aggregate geographic rollup of the user base (counts only, no usernames).
+	// Admin-gated like the rest of the CRM/Users surface: country is personal
+	// data, so even the aggregate stays behind requireAdmin. Takes no query
+	// parameters — no country ever appears in a URL. See user_country_rollup.go.
+	s.mux.HandleFunc("GET /api/saas/admin/user-countries", s.requireAdmin(s.handleAdminUserCountries))
 	// #3234: fleet readiness for removing the N1/N2 legacy compatibility lanes.
 	s.mux.HandleFunc("GET /api/saas/admin/auth-rollout", s.requireAdmin(s.handleAuthRollout))
 	// Master-secret rotation (src/docs/design/master-key-rotation.md). Both are
@@ -703,6 +816,216 @@ func (s *HubServer) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+// requireAuthOrSpokeUpgrade accepts the normal hub session for hub-dashboard
+// clicks and, for a hosted spoke dashboard, the spoke's server-to-server proof
+// plus the already-authenticated operator identity injected by that spoke.
+func (s *HubServer) requireAuthOrSpokeUpgrade(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !isCSRFSafe(r) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"CSRF check failed"}`))
+			return
+		}
+		if s.blockIfImpersonatingWrite(w, r) {
+			return
+		}
+		username := s.getAuthUser(r)
+		if username == "" {
+			spokeUser, reason := s.trustedSpokeUpgradeUser(r, r.PathValue("id"))
+			if spokeUser != "" {
+				next(w, r)
+				return
+			}
+			// Honest-error standard (#4446): every rejection on the spoke lane
+			// names WHICH credential failed and what to do about it, because the
+			// spoke dashboard relays this body verbatim into the operator's
+			// toast — a bare "not authenticated" told a logged-in owner nothing.
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]string{"error": reason})
+			return
+		}
+		user := loadSaaSUser(username)
+		if user == nil {
+			ensureSaaSUser(username)
+			user = loadSaaSUser(username)
+		}
+		if user == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"error":"unknown user — please log in again"}`))
+			return
+		}
+		if user.Blocked {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"account blocked"}`))
+			return
+		}
+		next(w, r)
+	}
+}
+
+// trustedSpokeUpgradeUser authenticates the spoke-relayed upgrade lane. It
+// returns the user to attribute the upgrade to and an empty reason on success,
+// or ("", reason) on failure, where reason is an operator-facing explanation of
+// exactly which credential failed (the spoke shows it verbatim in a toast).
+//
+// The proof (X-Hive-Proxy-Auth = the hive's own dashboard token) is the
+// load-bearing credential: possession of that per-hive secret already grants
+// owner on the spoke dashboard itself, so a proof-verified request is the
+// spoke's authenticated operator by construction. X-Hive-User is attribution,
+// not authentication — gateway-fronted spokes (the Node auth proxy on :3001)
+// authenticate the operator with the shared token, strip per-user identity
+// headers, and therefore relay NO X-Hive-User even for a legitimate logged-in
+// owner. Rejecting that shape was the "Upgrade failed: not authenticated" bug:
+// a proof-verified request with no user identity is now attributed to the
+// hive's registered owner instead of being turned away.
+func (s *HubServer) trustedSpokeUpgradeUser(r *http.Request, hiveID string) (string, string) {
+	username := r.Header.Get("X-Hive-User")
+	proof := r.Header.Get(proxyAuthHeader)
+	if hiveID == "" {
+		return "", "not authenticated — upgrade request named no hive"
+	}
+	if username == "" && proof == "" {
+		// Nothing to verify at all. Old spoke builds (pre proof-forwarding)
+		// relay the upgrade click with no credentials whatsoever; tell the
+		// operator how to upgrade past that build instead of a dead end.
+		return "", "not authenticated — this upgrade request reached the hub with no hub session and no spoke credentials; if it came from a spoke dashboard, that spoke build is too old to relay its upgrade credentials — trigger this hive's upgrade from the hub dashboard (or enable auto-upgrade), after which the spoke button will work"
+	}
+	if r.Header.Get("X-Hive-Role") != saasRoleOwner {
+		return "", "not authenticated — spoke upgrade requests must carry the owner role"
+	}
+	if proof == "" {
+		return "", "not authenticated — spoke upgrade proof missing: the spoke sent no dashboard-token proof (X-Hive-Proxy-Auth); set DASHBOARD_AUTH_TOKEN on the spoke to its hive-secrets/dashboard-token value"
+	}
+	switch s.verifySpokeUpgradeProof(hiveID, proof) {
+	case spokeProofOK:
+		// verified — fall through to attribution below
+	case spokeProofUnverifiable:
+		return "", "not authenticated — the hub has no stored dashboard-token record for this hive and could not read its hive-secrets/dashboard-token secret (the hive's cluster is unreachable from the hub, e.g. pull-only); a spoke on a current build reports its token over the authenticated heartbeat — trigger this hive's upgrade from the hub dashboard once, and the spoke's Upgrade button will verify against the stored record from then on"
+	default: // spokeProofMismatch
+		return "", "not authenticated — spoke upgrade proof rejected: the spoke's DASHBOARD_AUTH_TOKEN does not match this hive's dashboard-token secret; re-sync the spoke's token"
+	}
+	if username == "" {
+		// Proof verified but no per-user identity (shared-token gateway
+		// topology): attribute the upgrade to the hive's registered owner.
+		if h := loadSaaSHive(hiveID); h != nil {
+			username = h.Owner
+		}
+		if username == "" {
+			return "", "not authenticated — spoke upgrade request carried no user identity and this hive has no registered owner to attribute it to"
+		}
+	}
+	user := loadSaaSUser(username)
+	if user == nil {
+		return "", fmt.Sprintf("not authenticated — the hub has no record of user %q; log in to the hub once, then retry", username)
+	}
+	if user.Blocked {
+		return "", "not authenticated — this account is blocked on the hub"
+	}
+	return username, ""
+}
+
+// spokeProofVerdict is the outcome of verifying a spoke's dashboard-token
+// upgrade proof. The three-way split exists for the honest-error chain:
+// "your token is wrong" and "the hub cannot check any token" demand different
+// operator actions and must never share one message.
+type spokeProofVerdict int
+
+const (
+	spokeProofOK spokeProofVerdict = iota
+	// spokeProofMismatch: at least one reference credential was available and
+	// the presented proof matched none of them.
+	spokeProofMismatch
+	// spokeProofUnverifiable: the hub has NO reference to check against — no
+	// stored DashboardTokenHash record and no readable secret (pull-only or
+	// otherwise unreachable cluster).
+	spokeProofUnverifiable
+)
+
+// verifySpokeUpgradeProof checks a spoke-relayed upgrade proof against, in
+// order:
+//
+//  1. The hub's OWN stored record (SaaSHive.DashboardTokenHash — written at
+//     provisioning when the hub mints the token, refreshed from the spoke's
+//     authenticated heartbeat). This needs no cluster access at all, which is
+//     the point: hosted spokes on pull-only clusters (e.g. fmaas) are reached
+//     only by their outbound heartbeat, and requiring a live kubectl secret
+//     read there made every proof unverifiable by design.
+//  2. A live read of the hive's hive-secrets/dashboard-token secret
+//     (spokeProxyAuthToken, cached) — the pre-existing lane, kept as fallback
+//     for hives that predate the stored record on clusters the hub CAN reach.
+//     A successful live read that matches also backfills the stored record, so
+//     the next verification (and a later loss of cluster access) no longer
+//     depends on the cluster. A rotation the stored record missed is adopted
+//     the same way: stale hash, live read matches, record refreshed.
+func (s *HubServer) verifySpokeUpgradeProof(hiveID, proof string) spokeProofVerdict {
+	verifiable := false
+	if h := loadSaaSHive(hiveID); h != nil && h.DashboardTokenHash != "" {
+		verifiable = true
+		if secureCompareHub(HashDashboardToken(proof), h.DashboardTokenHash) {
+			return spokeProofOK
+		}
+	}
+	if expected := s.spokeProxyAuthToken(hiveID); expected != "" {
+		verifiable = true
+		if secureCompareHub(proof, expected) {
+			if h := loadSaaSHive(hiveID); h != nil {
+				if hash := HashDashboardToken(expected); h.DashboardTokenHash != hash {
+					h.DashboardTokenHash = hash
+					_ = saveSaaSHive(h)
+				}
+			}
+			return spokeProofOK
+		}
+	}
+	if !verifiable {
+		return spokeProofUnverifiable
+	}
+	return spokeProofMismatch
+}
+
+// adoptSpokeDashboardTokenHash folds a heartbeat-reported dashboard-token hash
+// into the hive's stored record (see HeartbeatPayload.DashboardTokenHash for
+// why the spoke reports it, and verifySpokeUpgradeProof for what reads it).
+// Callers must have authenticated the beat's per-hive bearer first. An empty
+// or malformed value changes nothing: old spokes and token-less spokes report
+// nothing, and the hub must keep whatever record it already has.
+func (s *HubServer) adoptSpokeDashboardTokenHash(payload *HeartbeatPayload) {
+	reported := payload.DashboardTokenHash
+	if reported == "" || !isHexSHA256(reported) {
+		return
+	}
+	if !strings.HasPrefix(payload.HiveID, "hosted-") && !strings.HasPrefix(payload.HiveID, "saas-") {
+		return
+	}
+	h := loadSaaSHive(payload.HiveID)
+	if h == nil || h.DashboardTokenHash == reported {
+		return
+	}
+	h.DashboardTokenHash = reported
+	if err := saveSaaSHive(h); err != nil {
+		s.logger.Warn("failed to store heartbeat-reported dashboard token hash", "hive_id", payload.HiveID, "error", err)
+	}
+}
+
+// isHexSHA256 reports whether s is a well-formed lowercase-or-uppercase hex
+// SHA-256 digest — 64 hex characters, the only shape adoptSpokeDashboardTokenHash
+// will persist.
+func isHexSHA256(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+			return false
+		}
+	}
+	return true
 }
 
 // isCSRFSafe reports whether a request may be allowed to MUTATE state.
@@ -1460,6 +1783,18 @@ func (s *HubServer) handleImpersonationStatus(w http.ResponseWriter, r *http.Req
 // They are length-capped here — the last point before the value reaches the
 // PVC — and escaped on every dashboard render path.
 //
+// `country` rides this same body rather than a route of its own. It is the only
+// way the field can be set for the thousands of users who joined before it
+// existed: the wizard is a one-time gate already behind them, and the
+// self-service endpoint reaches only the acting user, so an admin looking at a
+// row with an empty Country column previously had no control at all. It carries
+// ADMIN provenance, never user provenance — see the block on the country branch
+// below, which is the load-bearing decision in this change.
+//
+// PRIVACY: the code rides the JSON BODY, never the path or a query string, for
+// the same reason the self-service endpoint does — a URL lands in access logs,
+// Referer headers and browser history.
+//
 // Registered behind requireAdmin; this handler does no auth of its own.
 func (s *HubServer) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 	username := r.PathValue("username")
@@ -1476,11 +1811,22 @@ func (s *HubServer) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request
 		FullName  *string `json:"full_name"`
 		SlackID   *string `json:"slack_id"`
 		Notes     *string `json:"notes"`
+		Company   *string `json:"company"`
+		// Pointer like the rest, and for a sharper reason here: `""` is an
+		// explicit CLEAR ("remove this country"), while an absent key means the
+		// admin edited some other field and this one must not be touched. A
+		// plain string would collapse the two and let a quota edit silently
+		// wipe a country.
+		Country *string `json:"country"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
+	// Whether the country branch below actually APPLIED, which is not the same
+	// as the key being present: a stronger user-chosen value declines the edit.
+	// Tracked so the audit line records what changed rather than what was asked.
+	countryEdited := false
 	if body.SaaSQuota != nil {
 		u.SaaSQuota = *body.SaaSQuota
 	}
@@ -1498,6 +1844,49 @@ func (s *HubServer) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request
 	if body.Notes != nil {
 		u.Notes = truncateRunes(strings.TrimSpace(*body.Notes), maxContactNotesLen)
 	}
+	if body.Company != nil {
+		u.Company = truncateRunes(strings.TrimSpace(*body.Company), maxContactCompanyLen)
+	}
+	if body.Country != nil {
+		raw := strings.TrimSpace(*body.Country)
+		code := ""
+		if raw != "" {
+			// The SAME validator every other country path uses, so this
+			// endpoint cannot drift into accepting a shape the render sites
+			// reject. Not capped like the free-text fields above: a country is
+			// two letters or it is rejected outright, so there is nothing to
+			// truncate — a bad value must 400 rather than be silently reshaped
+			// into a different country.
+			code = normalizeCountryCode(raw)
+			if code == "" {
+				writeJSONError(w, http.StatusBadRequest, "country must be an ISO 3166-1 alpha-2 code (two letters), or \"\" to clear it")
+				return
+			}
+		}
+		// PROVENANCE — the whole point of this branch, and the easy thing to get
+		// wrong. An admin edit is countrySourceAdmin, NEVER countrySourceUser:
+		//
+		//   - It must not claim the user chose this. They did not; an admin
+		//     inferred it from a conference badge, an email domain, a
+		//     conversation. Marking it user-chosen would fabricate a statement
+		//     and would permanently suppress ever asking them for a real one.
+		//   - It must still outrank the login-path Accept-Language inference,
+		//     or the assignment is silently reverted the next time the user
+		//     signs in from a differently-configured browser — the #4374 bug in
+		//     a new form, and invisible in exactly the same way.
+		//
+		// mayOverwriteCountry is what keeps the admin from stepping on a value
+		// the USER stated about themselves. It is not an error to try: the edit
+		// is simply not applied to the country, the rest of the request still
+		// lands, and the response is still a 200 — the admin has changed
+		// nothing they were entitled to change. A 409 here would fail an
+		// otherwise-valid multi-field save over a field the admin may not even
+		// have meant to touch.
+		if mayOverwriteCountry(u, countrySourceAdmin) {
+			setUserCountry(u, code, countrySourceAdmin)
+			countryEdited = true
+		}
+	}
 	// A failed write is the one outcome the admin MUST hear about: the dashboard
 	// closes the editor on a 2xx, so reporting success here after the PVC write
 	// failed would silently discard the edit.
@@ -1508,8 +1897,19 @@ func (s *HubServer) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request
 	}
 	// Do not log the note bodies — they are free text and may hold anything an
 	// admin jotted down. Log only that contact fields were touched.
-	s.logger.Info("audit: admin updated user", "target", username, "quota", u.SaaSQuota, "blocked", u.Blocked,
-		"contactEdited", body.FullName != nil || body.SlackID != nil || body.Notes != nil)
+	//
+	// The country VALUE is logged, unlike those bodies: it is a two-letter code
+	// from a closed shape, an admin assigning one on another person's behalf is
+	// exactly the attribution an audit trail exists to record, and "who decided
+	// this user is in GB" is unanswerable from a bare "countryEdited: true".
+	// Logged only when the write actually applied, so the line never claims a
+	// change that mayOverwriteCountry declined.
+	attrs := []any{"target", username, "quota", u.SaaSQuota, "blocked", u.Blocked,
+		"contactEdited", body.FullName != nil || body.SlackID != nil || body.Notes != nil || body.Company != nil}
+	if countryEdited {
+		attrs = append(attrs, "countryAssigned", u.Country, "countrySource", u.CountrySource)
+	}
+	s.logger.Info("audit: admin updated user", attrs...)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "updated"})
 }
@@ -1682,18 +2082,14 @@ func (s *HubServer) handleListClusters(w http.ResponseWriter, r *http.Request) {
 
 const clusterHealthCacheTTL = 30 * time.Second
 
-// clusterHealthCPUWarnPct is the CPU usage percentage threshold for warning state.
-const clusterHealthCPUWarnPct = 60
-
-// clusterHealthCPUDangerPct is the CPU usage percentage threshold for danger state.
-const clusterHealthCPUDangerPct = 80
-
-// clusterHealthMemWarnPct is the memory usage percentage threshold for warning state.
-const clusterHealthMemWarnPct = 60
-
-// clusterHealthMemDangerPct is the memory usage percentage threshold for danger state.
-const clusterHealthMemDangerPct = 80
-
+// CPU and memory bar thresholds are NOT declared here. The hub serves the
+// cluster-health panel raw percentages and the panel colours them with its own
+// CLUSTER_CPU_WARN_PCT / CLUSTER_CPU_DANGER_PCT / CLUSTER_MEM_* constants, so a
+// Go-side copy would be a second set of numbers that nothing reads and nobody
+// updates together. The disk thresholds below are different: they are anchored
+// to kubelet behaviour rather than taste and are pinned by a test, so they have
+// a reason to exist on this side.
+//
 // Disk thresholds are anchored to kubelet's own behaviour rather than to
 // round numbers, so a coloured bar means something concrete is about to
 // happen on the node:
@@ -1715,17 +2111,8 @@ const clusterHealthDiskWarnPct = 85
 // hard eviction threshold fires (nodefs.available<10%).
 const clusterHealthDiskDangerPct = 90
 
-// kubectlTopTimeoutSec is the timeout for kubectl top nodes commands.
-const kubectlTopTimeoutSec = 10
-
-// kubectlGetTimeoutSec is the timeout for kubectl get nodes commands.
-const kubectlGetTimeoutSec = 10
-
 // millicoresPerCore converts cores to millicores.
 const millicoresPerCore = 1000
-
-// mbPerGB converts megabytes to gigabytes.
-const mbPerGB = 1024
 
 // kiToBytes converts Ki units to bytes.
 const kiToBytes = 1024
@@ -1771,15 +2158,6 @@ type ClusterHealthNode struct {
 // hiveHostedNamespacePrefix is the namespace prefix used for SaaS-provisioned
 // hives; pods in these namespaces identify hives running on a node.
 const hiveHostedNamespacePrefix = "hive-hosted-"
-
-// hostedAvailableIDPrefix is the ID prefix a pre-provisioned pool slot carries
-// while it is unclaimed inventory (e.g. "hosted-available-oke-01-placeholder-bb95").
-// It is the RegistryEntry-side marker for an available placeholder: unlike
-// MyHiveEntry, RegistryEntry has no ProvStatus field, so the ID prefix (paired
-// with the "available-" org prefix, placeholderOrgPrefix) is the reliable signal
-// that a slot is idle inventory rather than a claimed hive. A claimed hive keeps
-// neither marker.
-const hostedAvailableIDPrefix = "hosted-available-"
 
 type ClusterHealthSummary struct {
 	TotalNodes    int `json:"total_nodes"`
@@ -1997,16 +2375,6 @@ func buildClusterHealth(s *HubServer) (*ClusterHealthResponse, error) {
 		}
 	}
 
-	aggCPUPct := 0
-	if aggCPUAlloc > 0 {
-		aggCPUPct = int(aggCPUUsed * percentMultiplier / aggCPUAlloc)
-	}
-	aggMemPct := 0
-	if aggMemAlloc > 0 {
-		aggMemPct = int(aggMemUsed * percentMultiplier / aggMemAlloc)
-	}
-	aggMemGB := int(aggMemAlloc / giToBytes)
-
 	// Include heartbeat-only clusters that are NOT in s.clusters but do have
 	// heartbeat-reported health data. This handles firewalled spokes whose
 	// cluster isn't in the hub's clusters.json.
@@ -2030,16 +2398,17 @@ func buildClusterHealth(s *HubServer) (*ClusterHealthResponse, error) {
 	}
 	s.heartbeatHealthMu.RUnlock()
 
-	// Recompute aggregates after including heartbeat-only clusters.
-	aggCPUPct = 0
+	// Compute aggregates only after heartbeat-only clusters are included; an
+	// earlier pre-inclusion computation was dead (always overwritten here).
+	aggCPUPct := 0
 	if aggCPUAlloc > 0 {
 		aggCPUPct = int(aggCPUUsed * percentMultiplier / aggCPUAlloc)
 	}
-	aggMemPct = 0
+	aggMemPct := 0
 	if aggMemAlloc > 0 {
 		aggMemPct = int(aggMemUsed * percentMultiplier / aggMemAlloc)
 	}
-	aggMemGB = int(aggMemAlloc / giToBytes)
+	aggMemGB := int(aggMemAlloc / giToBytes)
 
 	// Sort clusters by ID for deterministic output.
 	sort.Slice(perCluster, func(i, j int) bool {
@@ -2307,6 +2676,17 @@ func buildSingleClusterHealth(cluster *ClusterConfig, hiveCount int, logger *slo
 		}
 		slots := int(totalSlots)
 		hiveCapacityRemaining = &slots
+		// Headroom alert: warn operators before the cluster fills. Fires when
+		// fewer than 10% of total estimated slots (current hives + remaining)
+		// are left. Cheap to emit here — this path is cached for 30s and only
+		// runs on health page loads.
+		if total := hiveCount + slots; total > 0 && logger != nil {
+			if slots*100 < total*capacityHeadroomWarnPct {
+				logger.Warn("cluster hive capacity headroom low",
+					"cluster", cluster.ID, "hives", hiveCount,
+					"slots_remaining", slots, "headroom_pct", slots*100/total)
+			}
+		}
 	}
 
 	// Build summary.
@@ -2634,6 +3014,11 @@ type MyHiveEntry struct {
 	// admin-only action in the row menu.
 	AssignedUnclaimed bool `json:"assignedUnclaimed,omitempty"`
 
+	// Unassigned marks an unclaimed pool placeholder (statusAvailable or the
+	// legacy available-* org fallback). Fleet hides these idle capacity rows by
+	// default so real tenant hives drive the attention count.
+	Unassigned bool `json:"unassigned,omitempty"`
+
 	// AssignedAt is the RFC3339 timestamp the placeholder was last assigned/claimed
 	// (SaaSHive.AssignedAt). It rides the row payload ONLY for a hive that is still
 	// AssignedUnclaimed, so the dashboard can render a live "claim pending" counter
@@ -2678,6 +3063,23 @@ type MyHiveEntry struct {
 	// modal; this is only the hover preview.
 	RecentEvents []TimelineEvent `json:"recentEvents,omitempty"`
 
+	// AdvisoryIssueActivity is the fleet row's advisory/issue output freshness:
+	// the newest successful advisory digest post or actionable-issue count
+	// movement already reported to the hub, bucketed on read. Placeholders and
+	// old/non-advisory spokes with no signal still get the field with bucket
+	// "unknown" so every row renders an explicit n/a instead of disappearing.
+	AdvisoryIssueActivity AdvisoryIssueActivity `json:"advisoryIssueActivity"`
+
+	// BudgetHealth is this hive's current governor budget-window usage, bucketed
+	// for the fleet row. It includes the underlying spend/limit/window numbers so
+	// the UI can explain the dot without reverse-engineering RegistryEntry.
+	BudgetHealth BudgetHealth `json:"budgetHealth"`
+
+	// GitHubAppHealth is this hive's GitHub App token/auth health for the fleet
+	// row, bucketed server-side so every consumer shares the same thresholds and
+	// problem semantics.
+	GitHubAppHealth GitHubAppHealth `json:"githubAppHealth"`
+
 	// AdvisoryStale is true when this hive SHOULD be posting advisory digests
 	// but its digest has quietly gone stale — computed on read by advisoryStale()
 	// so the browser never re-derives the threshold or the gating (advisory-mode
@@ -2694,6 +3096,7 @@ type MyHiveEntry struct {
 	// what both the alert evaluator (alertHiveFromEntry) and the JSON payload
 	// read. The spoke owns the consecutive-failure threshold and the self-heal,
 	// so there is nothing to compute on read the way AdvisoryStale is computed.
+	CommitsBehindStableV4 *int `json:"commitsBehindStableV4,omitempty"`
 
 	// InactiveAgents is how many of this hive's agents are RUNNING but not
 	// doing any work — session gone, sitting on a login prompt, or producing
@@ -2708,6 +3111,40 @@ type MyHiveEntry struct {
 	// hives with nothing wrong, so the pill and the facet self-suppress.
 	InactiveAgents       int    `json:"inactiveAgents,omitempty"`
 	InactiveAgentsReason string `json:"inactiveAgentsReason,omitempty"`
+
+	// AllAgentsQuiet is true when EVERY agent this hive reports is deliberately
+	// quiet — paused or off-schedule. This is "hive not in use": nothing is
+	// broken, nothing will be produced, and the same condition suppresses the
+	// advisory-staleness pill (allAgentsQuietByDesign). Computed on read so the
+	// browser never re-derives the pause/off-schedule rule; the fleet page
+	// renders it as a distinct state chip rather than health or fault.
+	AllAgentsQuiet bool `json:"allAgentsQuiet,omitempty"`
+
+	// FleetRollup / AgentVerdicts carry the three-way divergence view — what the
+	// governor EXPECTS running, what is ACTUALLY running, and what is ABLE to
+	// fulfill its mission — computed on read from the per-agent heartbeat
+	// signals + this hive's blocker fields. FleetRollup is the per-spoke header
+	// ("expects N · M running · K able"); AgentVerdicts is the per-agent
+	// drill-down. Both stay nil for a hive with no reported agents. Computed on
+	// read (deriveAgentVerdict/rollupAgents) so the browser never re-derives the
+	// state machine and cannot drift from the Go rule.
+	FleetRollup   *agentFleetRollup  `json:"fleetRollup,omitempty"`
+	AgentVerdicts []AgentVerdictJSON `json:"agentVerdicts,omitempty"`
+
+	// AgentRosterMismatch is an additive warning when the spoke's reported
+	// agent list no longer matches the ACMM pack roster for its level. It does
+	// not change the red/green hive verdict; red production failures still
+	// outrank this yellow configuration-drift signal.
+	AgentRosterMismatch *agentRosterMismatch `json:"agentRosterMismatch,omitempty"`
+
+	// HealthVerdict is the at-a-glance hive-health verdict (hive-health): does
+	// this spoke have RECENT OUTPUT back to its work source, banded by ACMM
+	// level? green/red/unknown with a WHY reason, computed on read from the same
+	// rollup/app-health/queue/advisory/repo-activity signals the row already
+	// carries. nil for placeholder rows (nothing to judge). Named distinctly
+	// from the embedded RegistryEntry.Health (the raw spoke-reported blob) to
+	// avoid shadowing it. See health_verdict.go.
+	HealthVerdict *HealthVerdict `json:"healthVerdict,omitempty"`
 
 	// URLUnreachable is true when this hive's PUBLIC dashboard URL failed to
 	// serve on the last several probes — the link in this very table is dead.
@@ -2724,6 +3161,21 @@ type MyHiveEntry struct {
 	// not a critical dead-link chip.
 	PrivateURL       bool   `json:"privateUrl,omitempty"`
 	PrivateURLReason string `json:"privateUrlReason,omitempty"`
+
+	// Quadrant is this hive's four-axis score — trust, efficiency,
+	// satisfaction, productivity — computed on read and never persisted.
+	//
+	// It lives HERE rather than on RegistryEntry (where Journey sits) because
+	// unlike every other derived field on a row, a quadrant is not a property
+	// of the hive alone: the scores are percentiles against the other hives in
+	// the SAME view. Two requests over different filters legitimately produce
+	// different numbers for one hive, so caching it on the shared registry
+	// entry would let one caller's filtered population leak into another's.
+	//
+	// Nil when the caller is not entitled to see it, or when the population is
+	// too small to rank honestly — the browser renders nothing at all in that
+	// case rather than an empty chart.
+	Quadrant *Quadrant `json:"quadrant,omitempty"`
 }
 
 // myHivesRecentEventCount is how many timeline events ride the My Hives
@@ -3081,6 +3533,7 @@ func (s *HubServer) handleMyHives(w http.ResponseWriter, r *http.Request) {
 			result[i].PendingRequestCount = len(pending)
 			result[i].PendingRequests = pending
 		}
+		result[i].Unassigned = isPlaceholderEntry(result[i])
 	}
 
 	// Unassigned placeholder rows: auth-class check failures are the pool's
@@ -3124,9 +3577,16 @@ func (s *HubServer) handleMyHives(w http.ResponseWriter, r *http.Request) {
 	// stalled where. Derived on read; never persisted on the registry entry.
 	journeyNow := time.Now()
 	for i := range result {
+		if count, known := commitsBehindStableV4(result[i].GitHash, s.logger); known {
+			result[i].CommitsBehindStableV4 = &count
+		}
+
 		st := s.journey.get(result[i].ID)
 		status := JourneyStatusFor(&result[i].RegistryEntry, st, journeyNow)
 		result[i].Journey = &status
+		result[i].AdvisoryIssueActivity = advisoryIssueActivityFor(result[i].RegistryEntry, journeyNow)
+		result[i].BudgetHealth = budgetHealthFor(result[i].RegistryEntry)
+		result[i].GitHubAppHealth = githubAppHealthFor(result[i].RegistryEntry, journeyNow)
 
 		// Advisory-staleness pill, computed on read (same as Journey) so the
 		// gating — advisory-mode participation, app-can-write, past-threshold —
@@ -3150,6 +3610,47 @@ func (s *HubServer) handleMyHives(w http.ResponseWriter, r *http.Request) {
 			result[i].InactiveAgentsReason = rep.Reason
 		}
 
+		// "Hive not in use": every reported agent deliberately quiet. Same
+		// predicate that suppresses the advisory-stale pill, surfaced as its
+		// own state so an entirely-parked hive reads as PARKED, not healthy
+		// and not broken.
+		result[i].AllAgentsQuiet = allAgentsQuietByDesign(result[i].RegistryEntry)
+
+		// Fleet-divergence view: derive the three-way picture (expected vs
+		// actual vs able) and the per-agent verdicts from the same per-agent
+		// heartbeat signals plus this hive's blocker fields. Derived on read so
+		// the browser never re-runs the state machine (shares classifyInactive‐
+		// Agent with the block above, so the two can never disagree).
+		//
+		// SKIP placeholders/pool hives entirely: an unclaimed placeholder runs
+		// its default agents against no real repo, so they legitimately report
+		// "expected N · 0 able · N impotent" — a cascade of FALSE alarms that
+		// would drown the one signal the view exists for. No verdicts → the
+		// frontend has nothing to render for them and they carry no problem
+		// count. (isPlaceholderEntry is the same authoritative test computeFleet‐
+		// Stats and the alert layer use.)
+		if len(result[i].Agents) > 0 && !isPlaceholderEntry(result[i]) {
+			blockers := hiveBlockers{
+				GitHubAppRequired:       result[i].GitHubAppRequired,
+				GitHubAppPermIssue:      result[i].GitHubAppPermIssue,
+				GitHubAppState:          result[i].GitHubAppState,
+				RepoTargetMisconfigured: result[i].RepoTargetMisconfigured,
+				RepoTargetIssue:         result[i].RepoTargetIssue,
+				InferenceAuthError:      result[i].InferenceAuthError,
+				ProviderLimitReason:     result[i].ProviderLimitReason,
+			}
+			rollup := rollupAgents(result[i].Agents, blockers, queuedWork, journeyNow)
+			result[i].FleetRollup = &rollup
+			result[i].AgentVerdicts = buildAgentVerdicts(result[i].Agents, blockers, queuedWork, journeyNow)
+			result[i].AgentRosterMismatch = computeAgentRosterMismatch(result[i].ACMMLevel, result[i].Agents)
+
+			// Hive-health verdict: reuse the rollup + app-health + queue depth we
+			// just computed. Only for real (non-placeholder) hives with reported
+			// agents — a placeholder has nothing to produce.
+			verdict := hiveHealthFor(result[i].RegistryEntry, rollup, result[i].GitHubAppHealth, queuedWork, journeyNow)
+			result[i].HealthVerdict = &verdict
+		}
+
 		// Sparkline history dominated this payload: at 42 hives the two series
 		// were ~755 KB of an 818 KB response (92%), yet they are drawn into a
 		// 50 px-wide SVG. Downsample on the WIRE only — the registry keeps the
@@ -3159,12 +3660,41 @@ func (s *HubServer) handleMyHives(w http.ResponseWriter, r *http.Request) {
 		result[i].PRHistory = downsampleSpark(result[i].PRHistory, sparkWirePoints)
 	}
 
+	// Score the quadrant last, once every row is populated: the axes read
+	// fields the loop above fills in, and the scores are percentiles against
+	// this exact set of rows. Ranking against the whole registry instead would
+	// let the header polygon disagree with the rows it summarises.
+	fleetQuadrant := attachQuadrants(result, isAdmin, journeyNow)
+
+	// Server-side scoping (filter/sort/pagination) happens LAST, after every
+	// set-wide computation above (drift norm, alerts, outage suppression,
+	// quadrant percentiles) has run over the caller's full visible set — the
+	// page is a wire-level view, not a different fleet. No query params →
+	// full set, exactly as before.
+	hivesView := result
+	query := parseMyHivesQuery(r.URL.Query())
+	matched := len(result)
+	if query.active() {
+		hivesView, matched = applyMyHivesQuery(result, query)
+	}
+
 	resp := map[string]any{
-		"hives":                    result,
+		"hives": hivesView,
+		// The fleet average backs the reference polygon drawn behind every
+		// row's kite and the aggregate at the top of the dashboard. It is an
+		// aggregate over many hives and identifies none of them, so unlike the
+		// per-hive scores it is not gated on the caller's role.
+		"fleet_quadrant": fleetQuadrant,
+		// Summary counts over the FULL visible set (never the page) so
+		// dashboard tiles stay truthful under any filter.
+		"hives_summary":            myHivesSummary(result),
+		"hives_total":              len(result),
+		"hives_matched":            matched,
 		"saas_quota":               user.SaaSQuota,
 		"saas_used":                saasCount,
 		"is_admin":                 isAdmin,
 		"latest_sha":               getLatestSHA(),
+		"stable_v4_sha":            getLatestSHAForBranch(stableReleaseBranch),
 		"latest_shas":              getDisplaySHAs(),
 		"latest_sha_messages":      getDisplaySHAMessages(),
 		"latest_sha_image_status":  getImageStatuses(),
@@ -3437,6 +3967,16 @@ func (s *HubServer) handleCreateHive(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"unknown cluster_id"}`, http.StatusBadRequest)
 		return
 	}
+	// Per-cluster ceiling — checked after the global cap so the more specific
+	// error wins only when the global gate passes.
+	if full, n := clusterAtMaxHives(&cluster); full {
+		max := effectiveMaxHives(&cluster)
+		s.logger.Warn("provision rejected — cluster at max_hives",
+			"cluster", cluster.ID, "count", n, "max_hives", max)
+		http.Error(w, fmt.Sprintf(`{"error":"cluster %s is at capacity (%d/%d hives) — pick another cluster or raise max_hives"}`,
+			cluster.ID, n, max), http.StatusServiceUnavailable)
+		return
+	}
 	subdomain := hiveID + "." + cluster.Domain
 
 	h := &SaaSHive{
@@ -3472,9 +4012,9 @@ func (s *HubServer) handleCreateHive(w http.ResponseWriter, r *http.Request) {
 	provisionHiveRecord := *h
 	provisionHiveRecord.Repos = append([]string(nil), h.Repos...)
 	provisionReq := req
-	provisionWG.Add(1)
-	go func() {
-		defer provisionWG.Done()
+	// Queued, not spawned: execution is bounded hub-wide and per cluster so a
+	// provisioning burst cannot stampede kubectl/OCI (see provision_queue.go).
+	enqueueProvision(targetCluster, func() {
 		h := &provisionHiveRecord
 		cluster := s.clusterForHive(h)
 		if cluster == nil {
@@ -3493,7 +4033,7 @@ func (s *HubServer) handleCreateHive(w http.ResponseWriter, r *http.Request) {
 		}
 		h.Status = "provisioning"
 		saveSaaSHive(h)
-	}()
+	})
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
@@ -3596,7 +4136,9 @@ func (s *HubServer) handleOpenHive(w http.ResponseWriter, r *http.Request) {
 	// Access gate: only the owner, an authorized user, or the hub admin may open
 	// the spoke. The role we pass is advisory — the spoke re-checks its own
 	// allowlist and uses that role authoritatively.
-	role := saasRoleRead
+	// Every branch below either assigns role or rejects the request, so no
+	// initializer is needed (and ineffassign flags one as dead).
+	var role string
 	if isHubAdmin(username) {
 		role = saasRoleOwner
 	} else {
@@ -4003,6 +4545,9 @@ func (s *HubServer) handleUpgradeHive(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PathValue("id")
 	username := s.getAuthUser(r)
+	if username == "" {
+		username, _ = s.trustedSpokeUpgradeUser(r, id)
+	}
 	h := loadSaaSHive(id)
 	if h == nil {
 		http.Error(w, `{"error":"hive not found"}`, http.StatusNotFound)
@@ -4512,7 +5057,7 @@ func (s *HubServer) handleToggleAutoUpgrade(w http.ResponseWriter, r *http.Reque
 	if !isValidAutoUpgradeMode(body.Mode) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		fmt.Fprint(w, `{"error":"invalid auto_upgrade_mode (expected \"instant\" or \"daily\")"}`)
+		fmt.Fprint(w, `{"error":"invalid auto_upgrade_mode (expected \"instant\", \"daily\" or \"weekly\")"}`)
 		return
 	}
 	h.AutoUpgrade = body.AutoUpgrade
@@ -4684,10 +5229,15 @@ var (
 	commitMsgBySHA = map[string]string{}
 )
 
-// trackedBranches lists the always-tracked branches that produce Docker
-// images via CI. Personal dev branches (e.g. mk) are tracked dynamically:
-// see HubServer.trackedBranchList.
-var trackedBranches = []string{"v2", "v3"}
+// trackedBranches lists the legacy always-tracked branches that still produce
+// Docker images via CI. Personal dev branches (e.g. mk) are tracked
+// dynamically: see HubServer.trackedBranchList. v3 is retired and must not be
+// offered solely because old image tags or persisted SHA cache entries linger.
+var trackedBranches = []string{"v2"}
+
+var retiredBranches = map[string]struct{}{
+	"v3": {},
+}
 
 // trackedBranchList returns the static CI branches plus every branch some
 // registered hive is assigned to, so a personal dev branch gets SHA polling,
@@ -4698,6 +5248,9 @@ func (s *HubServer) trackedBranchList() []string {
 	seen := make(map[string]bool, len(trackedBranches))
 	out := make([]string, 0, len(trackedBranches))
 	add := func(b string) {
+		if _, retired := retiredBranches[b]; retired {
+			return
+		}
 		if b != "" && !seen[b] {
 			seen[b] = true
 			out = append(out, b)
@@ -4733,7 +5286,7 @@ const imageBranchCacheTTL = 5 * time.Minute
 // ghcr.io/kubestellar/hive:<branch>-latest tags (cached). A tag with a '-'
 // that our sanitizer would have produced can't be reversed unambiguously, so
 // we only surface tags that round-trip: the tag minus the "-latest" suffix.
-// Slashless branches (v2, v3, mk) round-trip exactly; slashed branches
+// Slashless branches (v2, mk) round-trip exactly; slashed branches
 // (feat/x → feat-x-latest) surface as "feat-x", which is still a valid
 // switch target because switch-branch/branchToTag normalize both to the same
 // image tag.
@@ -5186,11 +5739,14 @@ func (s *HubServer) StartLatestSHAPoller(ctx context.Context) {
 	// Clear Upgrading flags orphaned by spoke pods that vanished mid-upgrade.
 	// Runs alongside — not inside — triggerAutoUpgrades because that function
 	// only ever considers hives with AutoUpgrade enabled, while the flag is set
-	// by the admin and bulk upgrade paths for any hive.
-	s.sweepOrphanedUpgrades()
+	// by the admin and bulk upgrade paths for any hive. Throttled internally to
+	// orphanedUpgradeSweepInterval — corrective work, not a hot path.
+	s.sweepOrphanedUpgradesIfDue()
 	// Auto-reset any placeholder wedged at assigned && !claim_delivered past the
 	// timeout, so an assigned-but-unclaimed slot can never dead-end silently.
-	s.sweepStuckAssignments()
+	// Throttled internally to stuckAssignmentSweepInterval — a wedge only
+	// becomes actionable after assignStuckResetTimeout, far longer than a tick.
+	s.sweepStuckAssignmentsIfDue()
 	// Repair pre-#1222 NET_ADMIN securityContext drift so the F5 fatal-egress
 	// image (#2664) can't crash-loop drifted hives. Throttled internally to
 	// netAdminReconcileInterval — this poller ticks far more often than the
@@ -5216,10 +5772,15 @@ func (s *HubServer) StartLatestSHAPoller(ctx context.Context) {
 	// loadSaaSUser already drops an expired grant at every read, on the wall
 	// clock, whether or not this ever runs. See access_expiry.go.
 	s.sweepExpiredAccessIfDue()
-	// Record the per-release image-pulls snapshot (external-adoption chart). The
-	// call is internally guarded to snapshot only when the v2 release SHA advances,
-	// so ticking it alongside the frequent SHA poll is cheap — no separate
-	// scheduler. See image_pulls.go.
+	// Keep each cluster's placeholder pool at its configured watermark so
+	// approvals never dead-end on "no available placeholder". Throttled
+	// internally to poolReplenishInterval; disabled per cluster unless
+	// pool_target is set. See pool_replenisher.go.
+	s.replenishPoolsIfDue()
+	// Record the per-release image-pulls snapshots (external-adoption chart). The
+	// call is internally guarded to snapshot only when a release line's SHA
+	// advances, so ticking it alongside the frequent SHA poll is cheap — no
+	// separate scheduler. See image_pulls.go.
 	s.maybeSnapshotImagePulls(ctx, time.Now())
 	ticker := time.NewTicker(latestSHAPollInterval)
 	defer ticker.Stop()
@@ -5240,12 +5801,13 @@ func (s *HubServer) StartLatestSHAPoller(ctx context.Context) {
 		}
 		// Always check for pending auto-upgrades (retries failed/missed hives).
 		s.triggerAutoUpgrades()
-		s.sweepOrphanedUpgrades()
-		s.sweepStuckAssignments()
+		s.sweepOrphanedUpgradesIfDue()
+		s.sweepStuckAssignmentsIfDue()
 		s.reconcileNetAdminIfDue()
 		s.reconcilePerHiveEnvIfDue()
 		s.retireExpiredGenerationsIfDue()
 		s.sweepExpiredAccessIfDue()
+		s.replenishPoolsIfDue()
 		s.maybeSnapshotImagePulls(ctx, time.Now())
 		changed := false
 		for branch, sha := range newSHAs {
@@ -5375,6 +5937,29 @@ func (s *HubServer) triggerAutoUpgrades() {
 		return
 	}
 	hives := listSaaSHives()
+	// Upgrade waves: bound how many hives may be UPGRADING per cluster at
+	// once. A merge used to roll every behind hive simultaneously — observed
+	// live as a fleet-wide restart inside minutes, an image-pull + PVC IO
+	// storm. Count the in-flight upgrades per cluster first; the arming gate
+	// below starts new upgrades only while a cluster is under its wave size.
+	// Recovery/latch-clearing paths are deliberately NOT bounded (corrective,
+	// not disruptive), and wait-healthy is implicit: Upgrading clears when a
+	// spoke reports the target reached, freeing wave slots for the next tick.
+	upgradingByCluster := make(map[string]int)
+	s.mu.RLock()
+	upgradingIDs := make(map[string]bool)
+	for _, reg := range s.registry.Hives {
+		if reg.Upgrading {
+			upgradingIDs[reg.ID] = true
+		}
+	}
+	s.mu.RUnlock()
+	for i := range hives {
+		if upgradingIDs[hives[i].ID] {
+			upgradingByCluster[clusterIDForHive(&hives[i])]++
+		}
+	}
+	waveSize := upgradeWaveSize()
 	for _, h := range hives {
 		s.mu.RLock()
 		var currentSHA, branch, upgradeTarget, imageRef, lastHeartbeat string
@@ -5569,6 +6154,22 @@ func (s *HubServer) triggerAutoUpgrades() {
 
 			// Not stale — keep the original target so the hive can satisfy it.
 			// Re-populate the heartbeatUpgrade map in case the hub restarted.
+			//
+			// SAME COLLECTIBILITY GATE AS THE STALE BRANCH ABOVE. Arming is
+			// arming: re-populating the map for a hive that cannot collect
+			// reproduces the wedge the stale branch just abandoned, only
+			// sooner. Because this branch runs on EVERY poll while the hive is
+			// latched, it re-arms roughly every 2 minutes, whereas abandonment
+			// waits out staleUpgradeTimeout — so without this check the fix
+			// merely races the timeout and the uncollectible hive stays armed.
+			// The predicate is upgradeCollectible(), reused rather than
+			// restated, so there is one definition of "can collect".
+			if upgradeTarget != "" && !upgradeCollectible(lastHeartbeat, time.Now()) {
+				s.logger.Debug("not re-arming in-progress upgrade — hive cannot collect it",
+					"hive", h.ID, "target", upgradeTarget,
+					"last_heartbeat", orDash(lastHeartbeat))
+				continue
+			}
 			hiveCluster := s.clusterForHive(&h)
 			if hiveCluster != nil && !hiveCluster.InCluster {
 				if upgradeTarget != "" {
@@ -5660,6 +6261,17 @@ func (s *HubServer) triggerAutoUpgrades() {
 			s.noteUncollectibleUpgrade(h.ID, latestSHA, reason)
 			continue
 		}
+		// Wave gate — evaluated AFTER every eligibility check so a slot is
+		// only ever spent on a hive that would actually arm, and BEFORE the
+		// fire-date persistence so a deferred daily/weekly hive keeps its
+		// window open and simply boards a later wave this same day.
+		if waveSize > 0 && upgradingByCluster[hiveCluster.ID] >= waveSize {
+			s.logger.Debug("auto-upgrade deferred — cluster upgrade wave is full",
+				"hive_id", h.ID, "cluster", hiveCluster.ID,
+				"in_flight", upgradingByCluster[hiveCluster.ID], "wave_size", waveSize)
+			continue
+		}
+		upgradingByCluster[hiveCluster.ID]++
 		// Record the day's fire BEFORE kicking the rollout. Persisting first
 		// means a hub crash between here and the restart cannot cause a second
 		// upgrade for the same ET day; at worst the hive waits for tomorrow's
@@ -5680,7 +6292,7 @@ func (s *HubServer) triggerAutoUpgrades() {
 		}
 		// The hive is deliverable again — drop any suppressed-refusal memory so a
 		// future undeliverable episode is reported afresh rather than swallowed.
-		forgetUncollectibleUpgrade(h.ID)
+		s.forgetUncollectibleUpgrade(h.ID)
 		s.logger.Info("audit: auto-upgrade triggered", "hive_id", h.ID, "branch", branch, "from", currentSHA, "to", latestSHA, "cluster", hiveCluster.ID, "mode", normalizeAutoUpgradeMode(h.AutoUpgradeMode))
 		s.recordTimeline(h.ID, TimelineUpgradeStarted,
 			fmt.Sprintf("auto-upgrade triggered on %s: %s → %s", branch, orDash(currentSHA), latestSHA), "auto-upgrade")
@@ -6025,15 +6637,39 @@ func (s *HubServer) handleLatestSHA(w http.ResponseWriter, r *http.Request) {
 // non-hosted spoke's own allowlist is left untouched. The owner is always
 // included as owner even if no explicit access record names them.
 func authorizedUsersForHiveID(hiveID string) []string {
+	users, _ := authorizedUsersAndNamesForHiveID(hiveID)
+	return users
+}
+
+// authorizedUsersAndNamesForHiveID does the shared work behind
+// authorizedUsersForHiveID and the heartbeat handler's AuthorizedUserNames
+// delivery: one roster scan producing both the authoritative "username:role"
+// allowlist and its cosmetic display-name companion, so the two can never
+// drift out of sync with each other (different key sets, different order) by
+// construction.
+//
+// The name map only gets an entry when provisionRequestUserIdentity resolves
+// to something FRIENDLIER than the raw key itself (source != "native") — an
+// entry with no known human name is simply absent, and the spoke's own
+// rendering falls back to the raw key exactly as it does today for a key with
+// no map entry at all.
+func authorizedUsersAndNamesForHiveID(hiveID string) ([]string, map[string]string) {
 	h := loadSaaSHive(hiveID)
 	if h == nil {
-		return nil
+		return nil, nil
 	}
 	out := make([]string, 0, 4)
+	names := make(map[string]string, 4)
 	seen := map[string]bool{}
+	addName := func(key string, u *SaaSUser) {
+		if id, source := provisionRequestUserIdentity(key, u, ""); source != "native" && id != key {
+			names[key] = id
+		}
+	}
 	if h.Owner != "" {
 		out = append(out, h.Owner+":owner")
 		seen[strings.ToLower(h.Owner)] = true
+		addName(h.Owner, loadSaaSUser(h.Owner))
 	}
 	for _, u := range listAllSaaSUsers() {
 		role, ok := u.Hives[hiveID]
@@ -6045,8 +6681,13 @@ func authorizedUsersForHiveID(hiveID string) []string {
 		}
 		out = append(out, u.GitHubUsername+":"+role)
 		seen[strings.ToLower(u.GitHubUsername)] = true
+		uu := u
+		addName(u.GitHubUsername, &uu)
 	}
-	return out
+	if len(names) == 0 {
+		return out, nil
+	}
+	return out, names
 }
 
 // HiveAccessEntry is one user's access to a hive.
@@ -6067,6 +6708,23 @@ type HiveAccessEntry struct {
 	FullName string `json:"full_name,omitempty"`
 	SlackID  string `json:"slack_id,omitempty"`
 	Notes    string `json:"notes,omitempty"`
+	// DisplayLabel is the human-facing name for this row, resolved with the
+	// SAME precedence provisionRequestUserIdentity uses everywhere else
+	// (linked GitHub login → recognizable GitHub login → email → DisplayName
+	// → FullName → raw key) — never a second, competing resolver. Username
+	// above stays the raw identity key throughout (the auth key / allowlist
+	// match, completely unchanged); DisplayLabel is presentation only. Always
+	// non-empty: it falls all the way back to Username, so the UI never has
+	// to special-case "no name known" beyond comparing the two strings.
+	DisplayLabel string `json:"display_label,omitempty"`
+	// Provider is the identity provider ("github"/"google"/"ibmid"/"microsoft"/…)
+	// so the row can show the right provider mark without re-deriving it from
+	// Username client-side. See grantableUserProvider.
+	Provider string `json:"provider,omitempty"`
+	// AvatarURL is the provider-stored avatar (Google/Microsoft picture claim)
+	// for a non-GitHub user; empty for a GitHub user, who keeps the derived
+	// github.com/<login>.png the UI already builds from Username.
+	AvatarURL string `json:"avatar_url,omitempty"`
 	// Engagement stats copied from the user's record so a co-member's My-Hives
 	// avatar hover can show the same logins / time-in-hive the admin Users card
 	// shows. Like Notes these are stats ABOUT a person, so they ride ONLY for a
@@ -6127,12 +6785,17 @@ func accessForHive(hiveID string, users []SaaSUser, includeAdminOnly bool) []Hiv
 	access := make([]HiveAccessEntry, 0)
 	for _, u := range users {
 		if role, ok := u.Hives[hiveID]; ok {
+			uu := u
+			label, _ := provisionRequestUserIdentity(u.GitHubUsername, &uu, "")
 			entry := HiveAccessEntry{
-				Username:  u.GitHubUsername,
-				Role:      role,
-				ExpiresAt: u.HiveExpiry[hiveID],
-				FullName:  u.FullName,
-				SlackID:   u.SlackID,
+				Username:     u.GitHubUsername,
+				Role:         role,
+				ExpiresAt:    u.HiveExpiry[hiveID],
+				FullName:     u.FullName,
+				SlackID:      u.SlackID,
+				DisplayLabel: label,
+				Provider:     grantableUserProvider(&uu),
+				AvatarURL:    u.AvatarURL,
 				// Coarse last-active rides for every viewer of the row (see the
 				// field doc) — only the granular stats below stay admin-only.
 				LastActive: latestUserActivity(&u),
@@ -6850,6 +7513,14 @@ const maxProvisionRequestBodyBytes = 4 * 1024
 
 type ProvisionRequest struct {
 	Username string `json:"username"`
+	// UserID is the human-facing identifier admins should use when reviewing
+	// the request. Username remains the stable auth key/native provider subject
+	// (for example "ibmid:695000VVZ9"); UserID captures the meaningful login or
+	// identity available at request time so the review queue does not headline
+	// opaque SSO subjects. Empty on older records; enrichProvisionRequests fills
+	// it from the user record when possible, and the UI falls back to Username.
+	UserID       string `json:"user_id,omitempty"`
+	UserIDSource string `json:"user_id_source,omitempty"`
 	// GitHubHost is the GitHub instance the org lives on — empty means public
 	// github.com, otherwise a GitHub Enterprise host (github.ibm.com,
 	// github.cisco.com, …). Captured so an admin can see which instance a
@@ -6875,6 +7546,18 @@ type ProvisionRequest struct {
 	// fields existed round-trip unchanged.
 	FullName string `json:"full_name,omitempty"`
 	SlackID  string `json:"slack_id,omitempty"`
+
+	// Country is the requester's OPTIONAL self-declared ISO 3166-1 alpha-2
+	// code, picked from the wizard's dropdown. Like the two fields above it
+	// reuses the SaaSUser key of the same name and is copied onto the user
+	// record on approval (applyRequestContactToUser) — asking and then dropping
+	// the answer would be worse than not asking.
+	//
+	// This is the AUTHORITATIVE source of a user's country: they chose it about
+	// themselves. The Accept-Language inference on the login path is only a
+	// fallback for records that never got one. omitempty so requests filed
+	// before this field existed round-trip unchanged.
+	Country string `json:"country,omitempty"`
 
 	// Decision audit. Previously a request only carried its final Status, so
 	// once it left "pending" there was no record of WHO decided, WHEN, or —
@@ -6973,6 +7656,56 @@ func roleForUserOnHive(username, hiveID string, users []SaaSUser) string {
 	return ""
 }
 
+// provisionRequestUserIdentity chooses the operator-facing identifier for a
+// request, plus its source so the UI only links identifiers known to be GitHub
+// logins.
+// The raw request Username is the auth key and can be an opaque provider subject
+// ("ibmid:…"). Prefer a linked GitHub/GHE login when the user has one, then a
+// recognizable GitHub login, then email/name claims, and fall back to the auth
+// key only when no friendlier identity exists.
+func provisionRequestUserIdentity(username string, u *SaaSUser, requestFullName string) (id, source string) {
+	if u != nil {
+		if id := strings.TrimSpace(u.LinkedGitHubLogin); id != "" {
+			return id, "github"
+		}
+		if provider, subject := splitIdentityKey(strings.TrimSpace(u.GitHubUsername)); provider == "" || normalizeIdentityProvider(provider) == legacyProvider {
+			if subject != "" {
+				return subject, "github"
+			}
+		}
+		if id := strings.TrimSpace(u.Email); id != "" {
+			return id, "email"
+		}
+		if id := strings.TrimSpace(u.DisplayName); id != "" {
+			return id, "name"
+		}
+		if id := strings.TrimSpace(u.FullName); id != "" {
+			return id, "name"
+		}
+	}
+	if id := strings.TrimSpace(requestFullName); id != "" {
+		return id, "name"
+	}
+	if provider, subject := splitIdentityKey(strings.TrimSpace(username)); normalizeIdentityProvider(provider) == legacyProvider && subject != "" {
+		return subject, "github"
+	}
+	return strings.TrimSpace(username), "native"
+}
+
+func provisionRequestUserID(username string, u *SaaSUser, requestFullName string) string {
+	id, _ := provisionRequestUserIdentity(username, u, requestFullName)
+	return id
+}
+
+func provisionRequestUserFromRoster(username string, users []SaaSUser) *SaaSUser {
+	for i := range users {
+		if strings.EqualFold(users[i].GitHubUsername, username) {
+			return &users[i]
+		}
+	}
+	return nil
+}
+
 // enrichProvisionRequests fills in the derived AssignedRole / OtherHives fields
 // on every request in place.
 //
@@ -6989,6 +7722,13 @@ func enrichProvisionRequests(requests []ProvisionRequest) []ProvisionRequest {
 	}
 	users := listAllSaaSUsers()
 	for i := range requests {
+		if requests[i].UserID == "" {
+			requests[i].UserID, requests[i].UserIDSource = provisionRequestUserIdentity(requests[i].Username, provisionRequestUserFromRoster(requests[i].Username, users), requests[i].FullName)
+		} else if requests[i].UserIDSource == "" {
+			if requests[i].UserID == requests[i].Username {
+				requests[i].UserIDSource = "native"
+			}
+		}
 		requests[i].AssignedRole = roleForUserOnHive(requests[i].Username, requests[i].AssignedHive, users)
 		requests[i].OtherHives = hivesForUser(requests[i].Username, requests[i].AssignedHive, users)
 	}
@@ -7019,6 +7759,18 @@ func applyRequestContactToUser(user *SaaSUser, pr *ProvisionRequest) {
 	}
 	if user.SlackID == "" && pr.SlackID != "" {
 		user.SlackID = truncateRunes(strings.TrimSpace(pr.SlackID), maxContactSlackIDLen)
+	}
+	// The explicit pick outranks anything Accept-Language inferred at login, so
+	// unlike the two fields above this one overwrites a value already on the
+	// record — but only when the request actually carries a choice. Re-normalize
+	// rather than trusting the stored request: it may predate the validation.
+	if code := normalizeCountryCode(pr.Country); code != "" {
+		// The wizard pick is a deliberate statement BY THE USER, so it carries
+		// the same provenance the self-service endpoint stamps. Without this,
+		// an approval would leave the record looking "inferred", and the
+		// priority rule would hold only by the accident of the value being
+		// non-empty.
+		setUserCountry(user, code, countrySourceUser)
 	}
 }
 
@@ -7105,6 +7857,7 @@ func (s *HubServer) handleRequestProvision(w http.ResponseWriter, r *http.Reques
 		AuthMethod  string `json:"auth_method"`
 		FullName    string `json:"full_name"`
 		SlackID     string `json:"slack_id"`
+		Country     string `json:"country"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid JSON")
@@ -7127,6 +7880,12 @@ func (s *HubServer) handleRequestProvision(w http.ResponseWriter, r *http.Reques
 	// check, not a regex.
 	body.FullName = truncateRunes(strings.TrimSpace(body.FullName), maxContactNameLen)
 	body.SlackID = truncateRunes(strings.TrimSpace(body.SlackID), maxContactSlackIDLen)
+	// Country is OPTIONAL and normalized rather than rejected: a malformed or
+	// absent code stores "", which renders no flag at all. Validating here (the
+	// last point before the PVC) means the render sites can trust that a stored
+	// country is two uppercase letters, and a client that never sends the field
+	// behaves exactly as before this shipped.
+	body.Country = normalizeCountryCode(body.Country)
 	// Accept a pasted org/repo URL, not just a bare name. Users read
 	// "GitHub Organization" and paste the org's URL; the old validator rejected
 	// ":" and "/" and returned a bare "invalid org name" that explained nothing.
@@ -7246,18 +8005,22 @@ func (s *HubServer) handleRequestProvision(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	userID, userIDSource := provisionRequestUserIdentity(username, loadSaaSUser(username), body.FullName)
 	pr := &ProvisionRequest{
-		Username:    username,
-		GitHubHost:  body.GitHubHost,
-		Org:         body.Org,
-		Repos:       body.Repos,
-		PrimaryRepo: primaryRepo,
-		ACMMLevel:   acmm,
-		AuthMethod:  body.AuthMethod,
-		FullName:    body.FullName,
-		SlackID:     body.SlackID,
-		RequestedAt: time.Now().UTC().Format(time.RFC3339),
-		Status:      provisionStatusPending,
+		Username:     username,
+		UserID:       userID,
+		UserIDSource: userIDSource,
+		GitHubHost:   body.GitHubHost,
+		Org:          body.Org,
+		Repos:        body.Repos,
+		PrimaryRepo:  primaryRepo,
+		ACMMLevel:    acmm,
+		AuthMethod:   body.AuthMethod,
+		FullName:     body.FullName,
+		SlackID:      body.SlackID,
+		Country:      body.Country,
+		RequestedAt:  time.Now().UTC().Format(time.RFC3339),
+		Status:       provisionStatusPending,
 	}
 	if err := saveProvisionRequest(pr); err != nil {
 		http.Error(w, `{"error":"failed to save provision request"}`, http.StatusInternalServerError)
@@ -9011,6 +9774,25 @@ const dashboardHTML = `<!DOCTYPE html>
     .header-right { display: flex; align-items: center; gap: .8rem; justify-self: end; }
     .nav-user { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; color: var(--text); }
     .nav-avatar { width: 28px; height: 28px; border-radius: 50%; }
+    /* The country flag beside an avatar. Sized just under the surrounding text
+       so it reads as a marker rather than as a second avatar, and given a fixed
+       line-height so a tall emoji cannot stretch the row it sits in. No color
+       of our own — the glyph carries its own, and the box is transparent, so
+       this behaves identically in light and dark. */
+    .country-flag { font-size: 0.95rem; line-height: 1; vertical-align: middle; margin-left: 2px; }
+    /* The viewer's OWN flag is a button, not a label — it opens the country
+       editor. Stripped of every default button chrome so it reads as the same
+       inline glyph the read-only .country-flag is, and only gains a background
+       on hover/focus to say it is interactive. Transparent by default and
+       var(--muted)/var(--text) otherwise, so it inherits the theme in both
+       light and dark rather than carrying colors of its own. */
+    .country-edit-btn { background: none; border: 0; padding: 0 2px; margin: 0; cursor: pointer;
+      line-height: 1; display: inline-flex; align-items: center; border-radius: 4px; color: var(--muted); }
+    .country-edit-btn:hover, .country-edit-btn:focus-visible { background: var(--surface); color: var(--text); }
+    /* The no-country state. A muted ＋ rather than a globe or a "??" box: it
+       reads as "add one", which is the action available, instead of pretending
+       to be a flag we do not have. */
+    .country-flag-empty { font-size: 0.8rem; line-height: 1; color: var(--muted); }
 
     /* ── Layout ── */
     .content { max-width: 1600px; margin: 0 auto; padding: 2.5rem clamp(1rem, 4vw, 4.5rem) 3rem; }
@@ -9046,6 +9828,18 @@ const dashboardHTML = `<!DOCTYPE html>
        normal state of the screen rather than an absence the eye has to infer.
        --alert-color is set inline per severity so one rule serves all three. */
     #fleet-alerts-panel { margin-bottom: 16px; }
+    /* ── Fleet summary tiles ── */
+    /* One-line fleet inventory above the alerts panel, fed by the server's
+       hives_summary (computed over the caller's FULL visible set, never the
+       current filter/page). Shown only past SUMMARY_TILES_MIN_HIVES so a
+       two-hive user never sees a dashboard cosplaying as a fleet console. */
+    #fleet-summary-tiles { margin-bottom: 12px; }
+    .fleet-tiles { display: flex; gap: 8px; flex-wrap: wrap; }
+    .fleet-tile { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); padding: 8px 14px; min-width: 84px; text-align: center; }
+    .fleet-tile-n { font-size: 1.15rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .fleet-tile-label { font-size: 0.62rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap; }
+    .fleet-tile.warn { border-color: rgba(245,158,11,0.4); }
+    .fleet-tile.bad { border-color: rgba(248,81,73,0.45); }
     .alert-panel { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); padding: 12px 16px; }
     .alert-panel.has-critical { border-color: rgba(248,81,73,0.45); background: rgba(248,81,73,0.06); }
     .alert-panel.has-warning { border-color: rgba(245,158,11,0.4); background: rgba(245,158,11,0.05); }
@@ -9210,6 +10004,22 @@ const dashboardHTML = `<!DOCTYPE html>
     .heartbeat-heart-flash { animation: heartbeatPulse 0.6s ease-in-out 3 forwards; }
     @keyframes heartbeatPulse { 0% { transform: scale(0.85); opacity: 0; } 30% { transform: scale(1.3); opacity: 1; } 70% { transform: scale(1); opacity: 0.9; } 100% { transform: scale(0.9); opacity: 0; } }
     @media (prefers-reduced-motion: reduce) { .heartbeat-heart-flash { animation: none; } }
+    /* Quadrant hover: the same kite drawn large, with numbers. Hidden until
+       hover/focus rather than built on demand so there is no work on mouseover
+       and no layout thrash mid-render.
+
+       The panel is positioned RIGHT-aligned and above-anchored because the
+       Quadrant column is the last in a horizontally scrolling table — a
+       left-anchored panel on the final column would open off-screen. The
+       parent .table-wrap keeps overflow visible, so this escapes the cell. */
+    .quadrant-cell .quadrant-hover {
+      display: none; position: absolute; right: 0; bottom: calc(100% + 8px);
+      z-index: 60; width: 240px; padding: 10px 12px; text-align: left;
+      background: var(--bg-soft); border: 1px solid var(--line); border-radius: 8px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.45); cursor: default; white-space: normal;
+      font-size: 0.72rem; line-height: 1.4; color: var(--text);
+    }
+    .quadrant-cell:hover .quadrant-hover, .quadrant-cell:focus-within .quadrant-hover { display: block; }
     .hive-name { font-weight: 600; color: var(--text); }
     .hive-org { font-size: 0.75rem; color: var(--muted); }
 
@@ -9359,6 +10169,7 @@ const dashboardHTML = `<!DOCTYPE html>
       <a href="/reading">Reading</a>
       <a href="/get-started">Get Started</a>
       <a href="/dashboard" style="color:var(--amber)">My Hives</a>
+      <a href="/fleet" id="nav-fleet" style="display:none" title="Fleet health — agents the governor expects on but that can't work">Fleet</a>
       <a href="/api/docs" target="_blank">API</a>
       <a href="https://kubestellar.io/docs/hive/overview/introduction" target="_blank" rel="noopener">Docs</a>
       <span id="nav-user" class="nav-user"></span>
@@ -9377,14 +10188,18 @@ const dashboardHTML = `<!DOCTYPE html>
         <p class="subtitle">Hive instances you own or have access to</p>
         <p style="margin-top:8px;padding:8px 14px;border:1px solid var(--line);border-radius:8px;background:rgba(244,199,95,0.08);font-size:0.85rem">👋 New to Hive? Read the <a href="https://docs.kubestellar.io/docs/hive/getting-started" target="_blank" rel="noopener" style="color:var(--amber);font-weight:700">Getting Started Guide</a> before diving in.</p>
         <p id="latest-image-sha" style="font-size:0.7rem;color:var(--muted);margin-top:4px"></p>
-        <!-- Image-pulls sparkline: 30-day daily-delta of container-image PULLS
-             of the public spoke image (ghcr.io/kubestellar/hive:v2). Gauges
-             external adoption beyond the hosted fleet. Derived from GitHub's
-             cumulative "Total downloads" counter — it is pulls/day, NOT unique
-             downloads (uniqueness is not measurable). Populated by
-             loadImagePulls(). Hidden until there is data to show. -->
+        <!-- Image-pulls bar chart: per-release container-image PULLS of the
+             public spoke image (ghcr.io/kubestellar/hive), bucketed by the
+             ACTIVE release line's release boundaries (the line the "stable"
+             channel currently resolves to — v4 today, v5 after the next
+             rollover, with no code change). Gauges external adoption beyond
+             the hosted fleet. Derived from GitHub's cumulative "Total
+             downloads" counter — it is pulls, NOT unique downloads
+             (uniqueness is not measurable). Populated by loadImagePulls(),
+             which also fills the per-line mini charts in the
+             "Latest available images" rows. Hidden until there is data. -->
         <div id="image-pulls-spark" style="display:none;margin-top:8px"
-             title="Container-image pulls per v2 release: the pulls that landed while each of the last ~10 v2 SHAs was the newest release, of the public hive image (ghcr.io/kubestellar/hive:v2). Derived from GitHub's cumulative download counter — pulls, not unique downloads."></div>
+             title="Container-image pulls per release of the active release line: the pulls that landed while each of the last ~10 releases was the newest, of the public hive image (ghcr.io/kubestellar/hive). Derived from GitHub's cumulative download counter — pulls, not unique downloads."></div>
       </div>
       <div style="display:flex;gap:8px;align-items:center">
         <button class="btn-primary" id="btn-send-banner-top" style="display:none;background:#d97706" onclick="_bannerTargetHive=null;document.getElementById('banner-modal').style.display='flex';loadBannerHiveList()">Send Banner</button>
@@ -9429,6 +10244,7 @@ const dashboardHTML = `<!DOCTYPE html>
          sit directly adjacent with no unrelated card between them. -->
     <div id="usage-panel" style="display:none;margin-bottom:24px"></div>
     <div id="hive-drift-summary" style="display:none"></div>
+    <div id="fleet-summary-tiles" style="display:none"></div>
     <div id="fleet-alerts-panel" style="display:none"></div>
     <div id="hive-view-bar" style="display:none"></div>
     <div id="hive-filter-bar" style="display:none"></div>
@@ -9477,6 +10293,15 @@ const dashboardHTML = `<!DOCTYPE html>
       </div>
       <div id="admin-users-body" style="display:none">
         <div id="users-container"><div class="loading">Loading users...</div></div>
+        <!-- Fleet-wide geographic rollup of the user base. Lives directly under
+             the Users table because it is the same data aggregated: the table
+             answers "who", this answers "where, overall". Inside
+             admin-users-body so it collapses with the section, and admin-gated
+             twice over — the section is display:none until the admin check
+             passes, and the endpoint it reads is behind requireAdmin.
+             Rendered as a plain ranked bar list; no map, no charting library,
+             no external asset (the hub forbids external CDNs/images). -->
+        <div id="user-countries-container" style="margin-top:20px"></div>
       </div>
     </div>
 
@@ -9500,6 +10325,37 @@ const dashboardHTML = `<!DOCTYPE html>
       </div>
       <div id="cluster-health-body" style="display:none">
         <div id="cluster-health-grid" style="display:grid;grid-template-columns:repeat(2,1fr);gap:12px"></div>
+      </div>
+    </div>
+
+    <!-- Scale Controls: every fleet-scale tunable (upgrade wave size,
+         provisioning queue bounds, kubectl concurrency, per-cluster
+         capacity/pool watermarks) is edited HERE, not in env vars or config
+         files. Values persist server-side (scale_settings.json) and override
+         the env/clusters.json defaults, which remain only as initial values.
+         Admin-gated twice: hidden until the admin check passes, and the
+         endpoints are behind requireAdmin. -->
+    <div id="scale-controls-section" style="display:none;margin-top:48px">
+      <div onclick="toggleScaleControls()" style="display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none;margin-bottom:16px">
+        <span id="scale-controls-toggle" style="font-size:0.7rem;color:var(--muted);transition:transform 0.2s">&#9654;</span>
+        <h2 style="font-size:1.3rem;color:var(--accent);margin:0">Scale Controls</h2>
+        <span id="scale-controls-summary" style="font-size:0.8rem;color:var(--muted);margin-left:8px"></span>
+      </div>
+      <div id="scale-controls-body" style="display:none">
+        <div style="font-size:0.8rem;color:var(--muted);margin-bottom:12px">
+          Fleet throughput knobs. Blank/0 = use the default shown. Changes apply live
+          (worker-count reductions apply on the next hub restart).
+        </div>
+        <div id="scale-globals" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:16px"></div>
+        <div style="font-size:0.85rem;color:var(--text);margin:12px 0 8px;font-weight:600">Per-cluster limits</div>
+        <div class="table-wrap"><table style="width:100%;font-size:0.85rem"><thead><tr>
+          <th style="text-align:left">Cluster</th><th style="text-align:right">Hives</th><th style="text-align:right">Pool avail</th>
+          <th style="text-align:right">Max hives</th><th style="text-align:right">Pool min</th><th style="text-align:right">Pool target</th>
+        </tr></thead><tbody id="scale-clusters-body"></tbody></table></div>
+        <div style="display:flex;align-items:center;gap:12px;margin-top:14px">
+          <button class="btn-primary" onclick="saveScaleSettings()">Save Scale Settings</button>
+          <span id="scale-save-status" style="font-size:0.8rem;color:var(--muted)"></span>
+        </div>
       </div>
     </div>
 
@@ -9558,6 +10414,207 @@ const dashboardHTML = `<!DOCTYPE html>
       var labels = { github_projects: 'GH Projects', linear: 'Linear', jira: 'Jira' };
       var cls = /^[a-z_]+$/.test(ws) ? ws : 'unknown';
       return '<span class="ws-badge ws-badge--' + cls + '" title="Work source: ' + escAttr(ws) + '">' + esc(labels[ws] || ws) + '</span>';
+    }
+
+    /* ---- Quadrant kite -------------------------------------------------
+       Trust / Efficiency / Satisfaction / Productivity, drawn as a four-axis
+       polygon. ONE renderer at two sizes: a ~22px shape in the table column and
+       the same shape at ~170px with labels and numbers in its hover. They must
+       never fork — the small kite is legible only because it is literally the
+       large one shrunk, so a shape learned in a hover is recognisable in the
+       column.
+
+       Axis positions are FIXED: Trust north, Productivity east, Satisfaction
+       south, Efficiency west. Reordering per row would make every previously
+       learned shape mean something else. QUADRANT_AXES mirrors Go's
+       QuadrantAxisOrder and the two must not drift. */
+    var QUADRANT_AXES = ['trust', 'productivity', 'satisfaction', 'efficiency'];
+    var QUADRANT_AXIS_LABELS = { trust: 'Trust', productivity: 'Prod', satisfaction: 'Satis', efficiency: 'Effic' };
+    /* Angles clockwise from north, index-aligned with QUADRANT_AXES. */
+    var QUADRANT_ANGLES = [0, 90, 180, 270];
+
+    /* quadrantAxis pulls one axis off a quadrant, returning an unscored stub
+       when absent so a partial payload can never throw mid-render. */
+    function quadrantAxis(q, name) {
+      var axes = (q && q.axes) || [];
+      for (var i = 0; i < axes.length; i++) {
+        if (axes[i] && axes[i].axis === name) return axes[i];
+      }
+      return { axis: name, score: 0, scored: false };
+    }
+
+    /* quadrantPoint maps an axis index and score to a coordinate.
+
+       An UNSCORED axis returns the exact centre, so the polygon visibly caves
+       in on that side. This is the visual half of the rule that absent evidence
+       is not a zero: a collapsed spoke reads as "not measured", where a small
+       symmetric shape would read as "mediocre everywhere". */
+    function quadrantPoint(idx, score, scored, cx, cy, radius) {
+      if (!scored) return [cx, cy];
+      var frac = Math.max(0, Math.min(1, (score || 0) / 100));
+      var rad = QUADRANT_ANGLES[idx % 4] * Math.PI / 180;
+      /* -cos on y because SVG grows downward and north must point up. */
+      return [cx + radius * frac * Math.sin(rad), cy - radius * frac * Math.cos(rad)];
+    }
+
+    function quadrantPolygonPoints(q, cx, cy, radius) {
+      var pts = [];
+      for (var i = 0; i < QUADRANT_AXES.length; i++) {
+        var a = quadrantAxis(q, QUADRANT_AXES[i]);
+        var p = quadrantPoint(i, a.score, a.scored, cx, cy, radius);
+        pts.push(p[0].toFixed(2) + ',' + p[1].toFixed(2));
+      }
+      return pts.join(' ');
+    }
+
+    /* quadrantSVG draws the kite. fleet is the reference polygon behind it, so
+       a row reads as a deviation from normal rather than an absolute the viewer
+       must calibrate; it is omitted when the fleet scored nothing, since an
+       empty reference would collapse to a dot and read as data. */
+    function quadrantSVG(q, fleet, size, labelled) {
+      var pad = labelled ? size * 0.26 : 2;
+      var cx = size / 2, cy = size / 2, radius = size / 2 - pad;
+      var s = '<svg viewBox="0 0 ' + size + ' ' + size + '" width="' + size + '" height="' + size +
+        '" role="img" aria-label="' + escAttr(quadrantAriaLabel(q)) + '" style="display:block;overflow:visible">';
+      /* Faint concentric rings orient the eye without competing with the data. */
+      [0.33, 0.66, 1].forEach(function(ring) {
+        var pts = [];
+        for (var i = 0; i < 4; i++) {
+          var p = quadrantPoint(i, 100, true, cx, cy, radius * ring);
+          pts.push(p[0].toFixed(2) + ',' + p[1].toFixed(2));
+        }
+        s += '<polygon points="' + pts.join(' ') + '" fill="none" stroke="var(--line)" stroke-width="0.5" opacity="0.35"/>';
+      });
+      if (labelled) {
+        for (var i = 0; i < 4; i++) {
+          var p = quadrantPoint(i, 100, true, cx, cy, radius);
+          s += '<line x1="' + cx + '" y1="' + cy + '" x2="' + p[0].toFixed(2) + '" y2="' + p[1].toFixed(2) +
+            '" stroke="var(--line)" stroke-width="0.5" opacity="0.35"/>';
+        }
+      }
+      if (fleet && fleet.scored_axes > 0) {
+        s += '<polygon points="' + quadrantPolygonPoints(fleet, cx, cy, radius) +
+          '" fill="var(--muted)" fill-opacity="0.10" stroke="var(--muted)" stroke-width="0.75" stroke-dasharray="2,2" opacity="0.6"/>';
+      }
+      s += '<polygon points="' + quadrantPolygonPoints(q, cx, cy, radius) +
+        '" fill="var(--accent)" fill-opacity="0.22" stroke="var(--accent)" stroke-width="1.5" stroke-linejoin="round"/>';
+      for (var i = 0; i < 4; i++) {
+        var a = quadrantAxis(q, QUADRANT_AXES[i]);
+        if (!a.scored) continue;
+        var p = quadrantPoint(i, a.score, true, cx, cy, radius);
+        s += '<circle cx="' + p[0].toFixed(2) + '" cy="' + p[1].toFixed(2) + '" r="' + (labelled ? 2.5 : 1.5) + '" fill="var(--accent)"/>';
+      }
+      if (labelled) {
+        for (var i = 0; i < 4; i++) {
+          var a = quadrantAxis(q, QUADRANT_AXES[i]);
+          var lp = quadrantPoint(i, 122, true, cx, cy, radius);
+          var anchor = QUADRANT_ANGLES[i] === 90 ? 'start' : (QUADRANT_ANGLES[i] === 270 ? 'end' : 'middle');
+          /* An unscored axis prints a dash, never a 0 — the whole point of
+             tracking scored separately from score. */
+          var val = '—';
+          if (a.scored) {
+            val = String(a.score);
+            if (a.delta) val += ' ' + (a.delta < 0 ? '−' : '+') + Math.abs(a.delta);
+          }
+          s += '<text x="' + lp[0].toFixed(2) + '" y="' + lp[1].toFixed(2) + '" text-anchor="' + anchor +
+            '" font-size="8" fill="var(--muted)" style="text-transform:uppercase;letter-spacing:0.5px">' +
+            esc(QUADRANT_AXIS_LABELS[QUADRANT_AXES[i]]) + '</text>';
+          s += '<text x="' + lp[0].toFixed(2) + '" y="' + (lp[1] + 9).toFixed(2) + '" text-anchor="' + anchor +
+            '" font-size="7.5" fill="var(--text)" opacity="0.85">' + esc(val) + '</text>';
+        }
+      }
+      return s + '</svg>';
+    }
+
+    /* A shape-only kite is invisible to a screen reader without this. */
+    function quadrantAriaLabel(q) {
+      if (!q || !q.scored_axes) return 'Quadrant: not enough data';
+      return 'Quadrant: ' + QUADRANT_AXES.map(function(name) {
+        var a = quadrantAxis(q, name);
+        return QUADRANT_AXIS_LABELS[name] + (a.scored ? ' ' + a.score : ' not measured');
+      }).join(', ');
+    }
+
+    /* quadrantCell is the table column: the small kite plus its own hover
+       panel, so a lopsided shape can be diagnosed without leaving the row.
+       Renders nothing at all for a hive with no quadrant — the server omits it
+       for callers who may not see it and for hives with nothing scored, and an
+       empty chart would imply a hive scoring zero everywhere. */
+    function quadrantCell(h) {
+      var q = h && h.quadrant;
+      if (!q) return '';
+      return '<span class="quadrant-cell" style="position:relative;display:inline-block;cursor:help">' +
+        quadrantSVG(q, _fleetQuadrant, 22, false) +
+        '<span class="quadrant-hover">' + quadrantPanelHTML(q) + '</span>' +
+        '</span>';
+    }
+
+    /* quadrantPanelHTML is the shared hover body — the same chart drawn large,
+       with the composite and whichever nudges apply. Used by BOTH the column
+       hover and the status hover so the two can never drift. */
+    function quadrantPanelHTML(q) {
+      if (!q) return '';
+      var nudges = QUADRANT_AXES.map(function(name) { return quadrantAxis(q, name); })
+        .filter(function(a) { return a.nudge; })
+        .map(function(a) {
+          return '<div style="display:flex;gap:6px;align-items:flex-start;margin-top:4px">' +
+            '<span style="color:var(--accent);flex:0 0 auto">→</span><span>' + esc(a.nudge) + '</span></div>';
+        }).join('');
+      /* Reasons explain a collapsed spoke, so a gap reads as "not measured yet"
+         rather than as something the viewer has to interpret. */
+      var reasons = QUADRANT_AXES.map(function(name) { return quadrantAxis(q, name); })
+        .filter(function(a) { return !a.scored && a.reason; })
+        .map(function(a) {
+          return '<div style="color:var(--muted);margin-top:2px">' +
+            esc(QUADRANT_AXIS_LABELS[a.axis]) + ': ' + esc(a.reason) + '</div>';
+        }).join('');
+      return '<div style="display:flex;flex-direction:column;align-items:center;gap:6px">' +
+          quadrantSVG(q, _fleetQuadrant, 170, true) +
+          '<div style="font-size:0.7rem;color:var(--muted)">Composite <span style="color:var(--text);font-weight:600">' +
+            (q.scored_axes ? q.composite : '—') + '</span> · ' + (q.scored_axes || 0) + ' of 4 axes scored</div>' +
+        '</div>' +
+        (nudges ? '<div style="font-size:0.7rem;margin-top:6px;border-top:1px solid var(--line);padding-top:6px">' + nudges + '</div>' : '') +
+        (reasons ? '<div style="font-size:0.65rem;margin-top:4px">' + reasons + '</div>' : '');
+    }
+
+    /* fleetQuadrantHeaderHTML is the aggregate above the table: the same kite,
+       averaged over the CURRENT filtered view.
+
+       This is the surface that turns the instrument from per-hive feedback into
+       a platform signal. One hive with a collapsed efficiency spoke is that
+       hive's problem; thirty of them collapsed the same way is not thirty
+       nudges, it is one platform problem, and only the aggregate shows that.
+
+       It re-renders with the table, so narrowing the filter re-aggregates over
+       whatever is now in view — which is why the rows and this shape always
+       agree with each other.
+
+       Renders nothing when nothing scored, rather than an empty chart: at that
+       point there is no finding to show, and a collapsed aggregate would read
+       as a fleet failing on every axis. */
+    function fleetQuadrantHeaderHTML() {
+      var q = _fleetQuadrant;
+      if (!q || !q.scored_axes) return '';
+      var axes = QUADRANT_AXES.map(function(name) {
+        var a = quadrantAxis(q, name);
+        var val = a.scored ? String(a.score) : '—';
+        return '<div style="display:flex;flex-direction:column;align-items:center;gap:1px;min-width:52px">' +
+          '<span style="font-size:0.62rem;text-transform:uppercase;letter-spacing:0.5px;color:var(--muted)">' +
+            esc(QUADRANT_AXIS_LABELS[name]) + '</span>' +
+          '<span style="font-size:0.95rem;font-weight:600;color:' + (a.scored ? 'var(--text)' : 'var(--muted)') + '">' +
+            esc(val) + '</span></div>';
+      }).join('');
+      /* No fleet ghost behind the aggregate — it IS the fleet, and drawing it
+         against itself would render two identical overlaid polygons. */
+      return '<div style="display:flex;align-items:center;gap:16px;margin:0 auto 12px;padding:10px 14px;' +
+          'background:var(--bg-soft);border:1px solid var(--line);border-radius:8px;width:fit-content">' +
+          quadrantSVG(q, null, 78, false) +
+          '<div>' +
+            '<div style="font-size:0.72rem;color:var(--muted);margin-bottom:4px">' +
+              'Fleet quadrant · ' + (_allDashHives || []).length + ' hives in view</div>' +
+            '<div style="display:flex;gap:14px">' + axes + '</div>' +
+          '</div>' +
+        '</div>';
     }
 
     /* ---- Clickable user avatars ---------------------------------------
@@ -9710,6 +10767,202 @@ const dashboardHTML = `<!DOCTYPE html>
           'onerror="this.onerror=null;this.src=' + jsArg(avatarInitialsSVG(label, px)) + '">';
       }
       return '<img src="' + escAttr(avatarInitialsSVG(label, px)) + '" alt="" style="' + style + '">';
+    }
+
+    /* ---- Country flag ---------------------------------------------------
+       A user's OPTIONAL country renders as a small flag beside their avatar.
+
+       The glyph is DERIVED from the stored ISO 3166-1 alpha-2 code, never
+       fetched: a flag emoji is just the two regional-indicator code points for
+       the code's letters (REGIONAL INDICATOR SYMBOL LETTER A is U+1F1E6), so
+       the hub needs no image assets and no external image host.
+
+       Mirrors normalizeCountryCode / countryFlagEmoji in user_country.go. The
+       server already normalizes before storing, so this is defence in depth for
+       a legacy record or a hand-edited file — and it is what guarantees the
+       render sites can never emit half a code point.
+
+       Unknown or unset country renders NOTHING. No globe placeholder, no "??"
+       box: absence of evidence must look like absence, not like a broken flag. */
+    var REGIONAL_INDICATOR_BASE = 0x1F1E6;  /* U+1F1E6 REGIONAL INDICATOR SYMBOL LETTER A */
+    var COUNTRY_CODE_LEN = 2;               /* ISO 3166-1 alpha-2 */
+
+    function normalizeCountryCode(code) {
+      var c = String(code == null ? '' : code).trim().toUpperCase();
+      if (c.length !== COUNTRY_CODE_LEN) return '';
+      /* Shape check only — two ASCII letters. The hub does not adjudicate which
+         territories exist; it just refuses anything that would break a render. */
+      if (!/^[A-Z]{2}$/.test(c)) return '';
+      return c;
+    }
+
+    function countryFlagEmoji(code) {
+      var c = normalizeCountryCode(code);
+      if (!c) return '';
+      return String.fromCodePoint(
+        REGIONAL_INDICATOR_BASE + (c.charCodeAt(0) - 65),
+        REGIONAL_INDICATOR_BASE + (c.charCodeAt(1) - 65));
+    }
+
+    /* countryFlagHTML: the flag as an inline <span>, or '' when there is no
+       country. Every caller appends the result unconditionally, so returning ''
+       is what makes an unknown country render as silence.
+
+       The code is escaped into the title/aria-label even though it is already
+       normalized to [A-Z]{2} — the render path must not depend on the validator
+       upstream of it staying correct. Colors come from theme tokens; the glyph
+       is the emoji's own, so only the sizing is ours. */
+    function countryFlagHTML(code) {
+      var c = normalizeCountryCode(code);
+      if (!c) return '';
+      var glyph = countryFlagEmoji(c);
+      return '<span class="country-flag" title="' + escAttr(c) + '" ' +
+        'role="img" aria-label="' + escAttr(c) + '">' + glyph + '</span>';
+    }
+
+    /* ---- Self-service country editor ------------------------------------
+       The nav flag is the affordance: clicking it opens a small overlay where
+       the signed-in user sets or clears their OWN country. It is the only such
+       surface — the get-started wizard is a one-time gate you pass before you
+       have a hive, so an existing user otherwise has no way to correct or
+       remove a country (including one the hub merely GUESSED from their
+       browser's language). See handleMyCountry in user_country.go.
+
+       Deliberately not a profile page. One field, one overlay, reusing the
+       overlay pattern the assign/timeline/prompt dialogs already use. */
+
+    /* countryDisplayName: the English name for a code, via Intl.DisplayNames —
+       a browser built-in, so the dashboard carries no 250-row country table of
+       its own and cannot drift from one. Falls back to the bare code where the
+       API is missing or the code is unassigned; a code is always better than an
+       empty label. */
+    function countryDisplayName(code) {
+      var c = normalizeCountryCode(code);
+      if (!c) return '';
+      try {
+        var dn = new Intl.DisplayNames(['en'], {type: 'region'});
+        return dn.of(c) || c;
+      } catch (e) { return c; }
+    }
+
+    /* The viewer's own country, mirrored from the auth payload so the editor
+       opens showing what is on file rather than blank. Updated in place after a
+       successful save so the nav and the next open agree without a reload. */
+    var _myCountry = '';
+
+    /* countryNavHTML: the nav's country control for the SIGNED-IN viewer.
+
+       Distinct from countryFlagHTML, which is the read-only glyph used wherever
+       someone ELSE's flag is shown. Here the flag is a button, and — the part
+       that matters for the fleet this endpoint exists to serve — when there is
+       NO country it still renders, as a muted outline, because a user with no
+       flag is exactly the user who needs a way to add one. An invisible control
+       would leave them in the same dead end as before.
+
+       var(--muted) for the empty state and no color of our own for the set
+       state (the emoji carries its own), so both are light- and dark-safe. */
+    function countryNavHTML(code) {
+      var c = normalizeCountryCode(code);
+      var inner, title;
+      if (c) {
+        inner = '<span class="country-flag">' + countryFlagEmoji(c) + '</span>';
+        title = countryDisplayName(c) + ' — click to change';
+      } else {
+        inner = '<span class="country-flag-empty">＋</span>';
+        title = 'Set your country';
+      }
+      return '<button type="button" class="country-edit-btn" onclick="openCountryEditor()" ' +
+        'title="' + escAttr(title) + '" aria-label="' + escAttr(title) + '">' + inner + '</button>';
+    }
+
+    /* openCountryEditor: the overlay. Reads the current value from _myCountry,
+       writes through PUT /api/saas/me/country.
+
+       The code rides the JSON BODY, never a path or query string: country is
+       personal data and a URL is the one place it would land in access logs,
+       Referer headers and browser history. Clearing sends an explicit empty
+       string — which the hub records as a DECISION, so the login-path
+       Accept-Language inference will not quietly put a flag back. */
+    function openCountryEditor() {
+      var overlay = document.createElement('div');
+      overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:3000;display:flex;align-items:center;justify-content:center';
+      var btn = 'padding:7px 14px;border-radius:6px;border:1px solid var(--border);cursor:pointer;font-size:0.8rem';
+      var fld = 'width:100%;padding:8px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:6px;box-sizing:border-box;font-size:0.85rem;text-transform:uppercase';
+      overlay.innerHTML =
+        '<div style="background:var(--bg);border:1px solid var(--border);border-radius:12px;padding:22px;max-width:400px;width:90%">' +
+        '<h3 style="margin:0 0 10px 0;font-size:1rem">Your country</h3>' +
+        '<p style="margin:0 0 12px 0;color:var(--muted);font-size:0.82rem;line-height:1.5">' +
+        'Shows a small flag beside your avatar. Two-letter country code (ISO 3166-1 alpha-2), ' +
+        'for example GB or JP. Leave it blank for no flag &mdash; we will not guess one for you.</p>' +
+        '<input id="_country-input" type="text" maxlength="2" autocomplete="country" ' +
+        'value="' + escAttr(_myCountry) + '" style="' + fld + '">' +
+        '<div id="_country-preview" style="margin-top:8px;font-size:0.82rem;color:var(--muted);min-height:1.2em"></div>' +
+        '<div id="_country-err" style="display:none;margin-top:8px;font-size:0.8rem;color:#f85149"></div>' +
+        '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:18px">' +
+        '<button data-act="no" style="' + btn + ';background:transparent;color:var(--text)">Cancel</button>' +
+        '<button data-act="yes" style="' + btn + ';background:var(--accent,#3fb950);color:#fff;border-color:transparent;font-weight:600">Save</button>' +
+        '</div></div>';
+
+      function close() {
+        document.removeEventListener('keydown', onKey);
+        overlay.remove();
+      }
+      function onKey(e) {
+        if (e.key === 'Escape') close();
+        if (e.key === 'Enter') save();
+      }
+      /* Live echo of what the code resolves to, so a typo is visible BEFORE
+         saving rather than as a surprise flag afterwards. Blank input reads as
+         the explicit "no flag" state, not as an error. */
+      function preview() {
+        var el = document.getElementById('_country-input');
+        var pv = document.getElementById('_country-preview');
+        if (!el || !pv) return;
+        var c = normalizeCountryCode(el.value);
+        if (!el.value.trim()) { pv.textContent = 'No flag will be shown.'; return; }
+        if (!c) { pv.textContent = 'Not a two-letter country code yet.'; return; }
+        pv.textContent = countryFlagEmoji(c) + '  ' + countryDisplayName(c);
+      }
+      async function save() {
+        var el = document.getElementById('_country-input');
+        var err = document.getElementById('_country-err');
+        var raw = el ? el.value.trim() : '';
+        /* '' is a legitimate value here (clear); anything else must be a valid
+           code. Checked client-side for a fast message, and again server-side
+           because a client check is a convenience, never a control. */
+        if (raw !== '' && !normalizeCountryCode(raw)) {
+          if (err) { err.textContent = 'Enter a two-letter country code, or leave it blank.'; err.style.display = ''; }
+          return;
+        }
+        try {
+          var resp = await fetch('/api/saas/me/country', {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({country: normalizeCountryCode(raw)})
+          });
+          var data = await resp.json();
+          if (!resp.ok) throw new Error(data.error || 'save failed');
+          _myCountry = normalizeCountryCode(data.country);
+          var nav = document.getElementById('nav-country');
+          if (nav) nav.innerHTML = countryNavHTML(_myCountry);
+          close();
+        } catch (e) {
+          if (err) { err.textContent = 'Error: ' + e.message; err.style.display = ''; }
+        }
+      }
+
+      overlay.addEventListener('click', function(e) {
+        if (e.target === overlay) { close(); return; }
+        var act = e.target.getAttribute && e.target.getAttribute('data-act');
+        if (act === 'yes') save();
+        else if (act === 'no') close();
+      });
+      overlay.addEventListener('input', preview);
+      document.addEventListener('keydown', onKey);
+      document.body.appendChild(overlay);
+      var inp = document.getElementById('_country-input');
+      if (inp) { inp.focus(); inp.select(); }
+      preview();
     }
 
     /* Rendered avatar sizes, in CSS pixels, one per surface. They differ because
@@ -10073,7 +11326,15 @@ const dashboardHTML = `<!DOCTYPE html>
     function accessAvatarTitle(a) {
       var uname = String(a.username || '');
       var role = String(a.role || '');
+      // display_label is resolved hub-side (accessForHive) with the same
+      // precedence used everywhere else a friendly name is shown, and always
+      // falls back to the raw key — so it's only worth a separate first line
+      // when it's actually friendlier than uname itself. The raw key rides
+      // on every title regardless (first line), same as before this field
+      // existed.
+      var label = String(a.display_label || '');
       var lines = [uname + (role ? ' — ' + role : '')];
+      if (label && label !== uname) lines.splice(0, 0, label);
       // ("Logged into their hive now" is appended generically in avatarProfileLink
       // for EVERY avatar surface, so it is not added here — doing both would
       // double the line.)
@@ -10101,8 +11362,22 @@ const dashboardHTML = `<!DOCTYPE html>
     function inlineAccessAvatar(a) {
       var uname = String(a.username || '');
       var role = String(a.role || '');
-      return linkedAvatar(uname, INLINE_ACCESS_AVATAR_PX, accessAvatarTitle(a),
-        'border:1px solid ' + accessRoleColor(role) + ';background:var(--surface);flex:0 0 auto');
+      var provider = a.provider || identityProviderFromKey(uname);
+      var extraStyle = 'border:1px solid ' + accessRoleColor(role) + ';background:var(--surface);flex:0 0 auto';
+      // A non-GitHub key (ibmid/google/microsoft) has no github.com profile to
+      // link to — linkedAvatar would build a 404'ing image and a link to
+      // someone else's account by coincidence of URL-shape. userAvatar uses
+      // the provider-stored avatar_url when present, else initials derived
+      // from the real display label (never from the opaque provider:sub key).
+      var avatar = provider === 'github'
+        ? linkedAvatar(uname, INLINE_ACCESS_AVATAR_PX, accessAvatarTitle(a), extraStyle)
+        : userAvatar({display_name: a.display_label, avatar_url: a.avatar_url, github_username: uname},
+            INLINE_ACCESS_AVATAR_PX, extraStyle);
+      if (provider === 'github') return avatar;
+      // userAvatar returns a bare <img> with no title/tooltip and no profile
+      // link (there is none to link to) — wrap it so the same rich tooltip
+      // accessAvatarTitle gives GitHub faces is not lost for everyone else.
+      return '<span title="' + escAttr(accessAvatarTitle(a)) + '" style="display:inline-block;line-height:0">' + avatar + '</span>';
     }
 
     /* Inline summary of the OTHER users on this hive, or '' when there are
@@ -10627,7 +11902,7 @@ const dashboardHTML = `<!DOCTYPE html>
            about an installation that is already correct. */
         lines.push(h.githubAppState === GH_APP_STATE_KEY_INVALID
           ? '⚠ GitHub App: key does not match the App (operator must push the correct key)'
-          : '⚠ GitHub App: credentials not yet delivered by the hub (operator action)');
+          : '⚠ GitHub App: credentials not yet delivered by the hub (operator action: upload the App key — PUT /api/saas/admin/cluster-app-keys/{cluster})');
         st = 'degraded'; c = colors.degraded; ic = icons.degraded; statusLabel = 'Degraded'; lines[0] = statusLabel;
       }
       else if (h.githubAppRequired && h.githubAppPermIssue) { lines.push('✓ GitHub App installed'); lines.push('⚠ GitHub App: ' + ghAppPermIssueLabel(h.githubAppState)); st = 'degraded'; c = colors.degraded; ic = icons.degraded; statusLabel = 'Degraded'; lines[0] = statusLabel; }
@@ -11060,6 +12335,10 @@ const dashboardHTML = `<!DOCTYPE html>
              lowercased because GitHub usernames are case-insensitive and the
              roster and the auth payload can disagree on casing. */
           _currentUser = String(data.login || '').toLowerCase();
+          /* The viewer's own country, mirrored so the editor opens showing what
+             is on file. Absent from the payload for a user who has none, which
+             normalizes to '' and renders the empty ＋ control. */
+          _myCountry = normalizeCountryCode(data.country);
           var roleText = data.hub_admin ? 'Hub Admin' : 'User';
           /* The viewer's own face links to their own profile, like every other
              face in the dashboard. avatar_url comes from the auth payload (it is
@@ -11072,6 +12351,17 @@ const dashboardHTML = `<!DOCTYPE html>
             avatarProfileLink(data.login, String(data.login || '') + ' — ' + roleText,
               '<img src="' + escAttr(data.avatar_url) + '" class="nav-avatar" alt="" ' +
               'onerror="this.onerror=null;this.src=' + jsArg(avatarInitialsSVG(data.login, NAV_AVATAR_PX)) + '">') +
+            /* The viewer's country, immediately after their face — and, unlike
+               every other flag in the dashboard, CLICKABLE, because this is the
+               viewer's own record. Wrapped in a stable #nav-country host so a
+               save can repaint just this control without re-rendering the whole
+               nav (and without a page reload).
+
+               countryNavHTML also renders in the EMPTY state, as a muted ＋.
+               countryFlagHTML returns '' there, which is right for someone
+               else's flag but would hide the control from precisely the users
+               who have no country and need to set one. */
+            '<span id="nav-country">' + countryNavHTML(data.country) + '</span>' +
             '<span style="font-size:0.85rem">' + esc(data.login) + '</span>' +
             '<span style="font-size:0.65rem;color:var(--muted);margin-left:6px">' + roleText + '</span>';
         }
@@ -11085,6 +12375,7 @@ const dashboardHTML = `<!DOCTYPE html>
        leak — every name it can show was already in h.access. */
     var _currentUser = '';
     var _latestSHA = '';
+    var _stableV4SHA = '';
     var _latestSHAs = {};
     var _latestSHAMessages = {};
     var _latestImageStatus = {};
@@ -11167,6 +12458,10 @@ const dashboardHTML = `<!DOCTYPE html>
     var _clusterList = [];
     var _commitMessages = {};
     var _allDashHives = [];
+    /* Fleet-average quadrant for the CURRENT view, served alongside the rows.
+       Null until the first payload lands, which quadrantSVG handles by drawing
+       no reference polygon rather than an empty one collapsed at the centre. */
+    var _fleetQuadrant = null;
     /* Seeded to the A-Z default rather than '' (registry/arrival order) so the
        very first paint — including paintCachedHives, which runs before any
        network call — is already alphabetical. loadHiveSortPrefs overwrites both
@@ -11196,8 +12491,14 @@ const dashboardHTML = `<!DOCTYPE html>
        channel-pinned hive as its bare branch for the pre-network paint.
        v3 (#4041): agent rows carry pause provenance (pausedTrigger/
        pausedReason/pausedBy/pausedAt) rendered into the Agents tooltip; a
-       v2 cache would paint paused agents provenance-less until the poll. */
-    var HIVES_CACHE_VERSION = 3;
+       v2 cache would paint paused agents provenance-less until the poll.
+       v4: rows carry quadrant, and the cache carries the fleet average that
+       every kite is drawn against; a v3 cache would paint the new column empty
+       until the poll landed.
+       v5: rows carry the fleet-divergence view (fleetRollup + agentVerdicts:
+       expected/actual/able per agent); a v4 cache would omit the new per-agent
+       drill-down until the first poll landed. */
+    var HIVES_CACHE_VERSION = 5;
     /* 10 minutes: long enough to cover a reload or a tab restore, short enough
        that a cached fleet is never wildly out of date before the poll lands. */
     var HIVES_CACHE_TTL_MS = 10 * 60 * 1000;
@@ -11228,7 +12529,11 @@ const dashboardHTML = `<!DOCTYPE html>
         window.localStorage.setItem(LS_HIVES_CACHE, JSON.stringify({
           version: HIVES_CACHE_VERSION,
           savedAt: Date.now(),
-          hives: rows
+          hives: rows,
+          /* Cached WITH the rows: the reference polygon is a property of the
+             population those rows came from, so pairing them keeps a cached
+             paint self-consistent even though the rows are truncated. */
+          fleetQuadrant: _fleetQuadrant
         }));
       } catch (e) {
         /* Quota errors are expected on large fleets — caching is best-effort. */
@@ -11246,6 +12551,7 @@ const dashboardHTML = `<!DOCTYPE html>
       try {
         _allDashHives = c.hives;
         _hiveRegistry = c.hives;
+        _fleetQuadrant = c.fleetQuadrant || null;
         renderHives(sortedDashHives(), true);
         return true;
       } catch (e) {
@@ -11971,6 +13277,9 @@ const dashboardHTML = `<!DOCTYPE html>
     var EMPTY_ALERT_SUMMARY = {alerts: [], countsBySeverity: {}, countsByType: {}, total: 0, acknowledgedTotal: 0};
 
     var _fleetAlerts = EMPTY_ALERT_SUMMARY;
+    /* Server-computed fleet inventory counts (hives_summary on the my-hives
+       payload). Null until the first load; renderSummaryTiles guards. */
+    var _hivesSummary = null;
     /* Active alert-type filter: '' = no alert filtering. Single-select, unlike
        the status chips — "show me the crash-looping hives" is a drill-down, and
        OR-ing several alert types back together just reproduces the full list. */
@@ -12010,7 +13319,12 @@ const dashboardHTML = `<!DOCTYPE html>
       /* The hive's inference gateway is rejecting every call with 401 (a stale
          key) — the ROOT cause of an otherwise silent outage where the hive
          looks online but every agent is dead in the water. */
-      'inference-auth-failed': 'Inference auth failing'
+      'inference-auth-failed': 'Inference auth failing',
+      /* GitHub App credentials are in an operator-side state (key-missing /
+         key-invalid / no-app-assigned). The owner cannot fix these — the App
+         key is hub-distributed — so this alert is the operator's only active
+         signal (#4316). The reason carries the PUT remedy. */
+      'app-creds-undelivered': 'App credentials undelivered'
     };
 
     /* How many alert rows are listed before the panel collapses the remainder
@@ -12209,6 +13523,47 @@ const dashboardHTML = `<!DOCTYPE html>
          it was deleted between the alert being evaluated and now). Say so rather
          than leaving a click that silently did nothing. */
       hiveToast('Could not find ' + (hiveName || hiveId) + ' in the hive list', 'error');
+    }
+
+    /* SUMMARY_TILES_MIN_HIVES gates the fleet tiles strip: below this many
+       visible hives the tiles restate what the eye already sees in the table,
+       so they stay hidden and the page keeps its small-user simplicity. */
+    var SUMMARY_TILES_MIN_HIVES = 8;
+
+    /* renderSummaryTiles draws the fleet inventory strip above the alerts
+       panel from the server-computed hives_summary — always the caller's FULL
+       visible set, never the active filter, so the numbers stay truthful
+       during any drill-down. Zero-count exception tiles self-suppress. */
+    function renderSummaryTiles() {
+      var el = document.getElementById('fleet-summary-tiles');
+      if (!el) return;
+      var s = _hivesSummary;
+      if (!s || (Number(s.total) || 0) < SUMMARY_TILES_MIN_HIVES) {
+        el.style.display = 'none';
+        return;
+      }
+      /* [key, label, css-class-when-nonzero, always-show] */
+      var defs = [
+        ['total', 'Hives', '', true],
+        ['online', 'Online', '', true],
+        ['offline', 'Offline', 'warn', true],
+        ['pool_available', 'Pool', '', false],
+        ['assigned_unclaimed', 'Unclaimed', 'warn', false],
+        ['provisioning', 'Provisioning', '', false],
+        ['upgrading', 'Upgrading', '', false],
+        ['upgrade_failed', 'Upgrade failed', 'bad', false],
+        ['errors', 'Errors', 'bad', false]
+      ];
+      var tiles = '';
+      for (var i = 0; i < defs.length; i++) {
+        var n = Number(s[defs[i][0]]) || 0;
+        if (!n && !defs[i][3]) continue;
+        var cls = n && defs[i][2] ? ' ' + defs[i][2] : '';
+        tiles += '<div class="fleet-tile' + cls + '"><div class="fleet-tile-n">' + n +
+          '</div><div class="fleet-tile-label">' + esc(defs[i][1]) + '</div></div>';
+      }
+      el.innerHTML = '<div class="fleet-tiles">' + tiles + '</div>';
+      el.style.display = '';
     }
 
     /* renderAlertsPanel draws the "Attention needed" panel above the hive list.
@@ -12971,8 +14326,11 @@ const dashboardHTML = `<!DOCTYPE html>
         : '';
     }
 
-    /* applyDashFilters filters the hives the caller wants rendered.
-       Placeholder (unassigned) rows bypass every filter — see isPlaceholderHive.
+    /* applyDashFilters filters the assigned hives the caller wants rendered.
+       Unassigned pool placeholders are handled separately in renderHives:
+       health/status/facet filters do not hide inventory, but the search box
+       still narrows every displayed row so typing text cannot leave unrelated
+       placeholders visible under an active search.
        For assigned rows all four narrowing mechanisms compose as an AND: the
        status chips (by state), the alert-type filter (hives carrying that
        alert), the search box and the facets. That is what "click an alert type
@@ -12980,7 +14338,6 @@ const dashboardHTML = `<!DOCTYPE html>
        active. */
     function applyDashFilters(hives) {
       return (hives || []).filter(function(h) {
-        if (isPlaceholderHive(h)) return true;
         return hiveMatchesFilters(h) && hiveMatchesAlertFilter(h) &&
           hiveMatchesSearch(h) && hiveMatchesFacets(h);
       });
@@ -13277,6 +14634,21 @@ const dashboardHTML = `<!DOCTYPE html>
           if (rb2 === null) return -1;
           return _dashSortAsc ? ra - rb2 : rb2 - ra;
         }
+        if (key === 'quadrant' || key.indexOf('quadrant') === 0) {
+          /* Quadrant sorts rank by composite or by one axis. A hive with no
+             quadrant — unscored, or one the viewer may not see — sorts LAST in
+             both directions rather than clumping at whichever end 0 collates
+             to. It is the least informative row either way, so it stays out of
+             the operator's path whether they asked for strongest or weakest.
+             Sorting by weakest axis is the point of the column: it turns the
+             table into a worklist. */
+          var qa = quadrantSortValue(a, key);
+          var qb = quadrantSortValue(b, key);
+          if (qa === null && qb === null) return 0;
+          if (qa === null) return 1;
+          if (qb === null) return -1;
+          return _dashSortAsc ? qa - qb : qb - qa;
+        }
         var va = key === 'name' ? hiveNameSortValue(a) : ((a && a[key]) || '');
         var vb = key === 'name' ? hiveNameSortValue(b) : ((b && b[key]) || '');
         if (typeof va === 'number' && typeof vb === 'number') return _dashSortAsc ? va - vb : vb - va;
@@ -13405,6 +14777,22 @@ const dashboardHTML = `<!DOCTYPE html>
     function hiveNameSortValue(h) {
       var label = hiveLabel(h);
       return label.line2 ? label.line1 + ' ' + label.line2 : label.line1;
+    }
+
+    /* quadrantSortValue resolves a quadrant sort key to a number, or null when
+       the hive has nothing to rank on that key.
+
+       Null rather than 0 for an unscored axis, deliberately: zero is a real
+       score and would place an unmeasured hive among the genuinely weak ones,
+       which is precisely the confusion the whole scored/unscored split exists
+       to prevent. */
+    function quadrantSortValue(h, key) {
+      var q = h && h.quadrant;
+      if (!q || !q.scored_axes) return null;
+      if (key === 'quadrant') return q.composite;
+      var name = key.slice('quadrant'.length).toLowerCase();
+      var a = quadrantAxis(q, name);
+      return a.scored ? a.score : null;
     }
 
     function sortDashHives(key) {
@@ -13774,6 +15162,12 @@ const dashboardHTML = `<!DOCTYPE html>
         _userUsed = data.saas_used || 0;
         _allDashHives = data.hives || [];
         _hiveRegistry = data.hives || [];
+        /* The fleet reference polygon behind every kite. Captured here rather
+           than derived in the browser: it is the average over the SAME
+           population the server scored, and recomputing it client-side from
+           the rows the caller may see would silently exclude the ones they may
+           not, quietly moving the reference. */
+        _fleetQuadrant = data.fleet_quadrant || null;
         /* Who is logged into their hive right now (admin-only in the payload) →
            the green-dashed avatar border. A Set of lowercased usernames so the
            avatar lookup is case-insensitive, matching GitHub handle semantics. */
@@ -13782,7 +15176,9 @@ const dashboardHTML = `<!DOCTYPE html>
         /* Alerts ride along on the same payload — see handleMyHives. Normalise
            to the empty summary so every consumer can iterate without guarding. */
         _fleetAlerts = data.alerts || EMPTY_ALERT_SUMMARY;
+        _hivesSummary = data.hives_summary || null;
         _latestSHA = data.latest_sha || _latestSHA;
+        _stableV4SHA = data.stable_v4_sha || _stableV4SHA;
         if (data.latest_shas) _latestSHAs = data.latest_shas;
         if (data.tracked_branches) _trackedBranchesList = data.tracked_branches;
         if (data.release_channels) _releaseChannels = data.release_channels;
@@ -13816,7 +15212,13 @@ const dashboardHTML = `<!DOCTYPE html>
               } else if (brStatus === 'failed') {
                 brStatusHTML = '<span style="color:var(--red);font-size:0.7rem;cursor:help" title="Image build failed for this commit — upgrades keep using the previous image">✗</span>';
               }
-              lines += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:2px"><span style="display:inline-block;padding:1px 6px;border-radius:9999px;font-size:0.6rem;background:rgba(59,130,246,0.15);color:#60a5fa;border:1px solid rgba(59,130,246,0.3)">' + esc(br) + '</span><span style="font-family:monospace;color:var(--muted)">' + esc(_latestSHAs[br]) + '</span>' + (brMsg ? '<span style="font-size:0.7rem;color:var(--muted);opacity:0.7">: ' + esc(brMsg) + '</span>' : '') + brStatusHTML + '</div>';
+              lines += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:2px"><span style="display:inline-block;padding:1px 6px;border-radius:9999px;font-size:0.6rem;background:rgba(59,130,246,0.15);color:#60a5fa;border:1px solid rgba(59,130,246,0.3)">' + esc(br) + '</span><span style="font-family:monospace;color:var(--muted)">' + esc(_latestSHAs[br]) + '</span>' + (brMsg ? '<span style="font-size:0.7rem;color:var(--muted);opacity:0.7">: ' + esc(brMsg) + '</span>' : '') + brStatusHTML +
+                /* Per-line pulls mini chart: a .line-pulls span each
+                   row, filled from the cached /api/hub/image-pulls payload now
+                   and refreshed by loadImagePulls() on every dashboard poll.
+                   A line with no pull data renders "—", never an error. */
+                '<span class="line-pulls" data-branch="' + escAttr(br) + '" style="display:inline-flex;align-items:center;margin-left:4px">' + linePullSparkHTML(br) + '</span>' +
+                '</div>';
             }
           } else if (_latestSHA) {
             lines = '<span style="font-family:monospace;color:var(--muted)">' + esc(_latestSHA) + '</span>';
@@ -13977,14 +15379,80 @@ const dashboardHTML = `<!DOCTYPE html>
       }
     }
 
-    /* loadImagePulls fetches the per-RELEASE pull series (pulls that landed while
-       each of the last ~10 v2 SHAs was the newest release) and paints a small
-       inline-SVG bar chart near the header — one bar per release, newest on the
-       right. Gauges external adoption of the public spoke image
-       (ghcr.io/kubestellar/hive:v2) beyond the hosted fleet. Honest labelling:
+    /* loadImagePulls fetches the per-RELEASE pull series and paints (a) a small
+       inline-SVG bar chart near the header for the ACTIVE release line — the
+       line the "stable" channel currently resolves to, reported by the server
+       as data.line, so a v4→v5 rollover re-labels and re-buckets the chart with
+       no frontend change — and (b) a mini per-line chart in each
+       "Latest available images" row from data.lines. One bar per release,
+       newest on the right. Gauges external adoption of the public spoke image
+       (ghcr.io/kubestellar/hive) beyond the hosted fleet. Honest labelling:
        derived from GitHub's cumulative download counter (pulls, NOT unique
-       downloads). Cold start (fewer than two release snapshots → no window can be
-       closed yet) shows "collecting…". */
+       downloads; GitHub publishes one package-wide counter, not per-tag). Cold
+       start (fewer than two release snapshots → no window can be closed yet)
+       shows "collecting…". */
+    var _imagePullLines = {};   // branch → per-line series from /api/hub/image-pulls
+
+    /* pullBarsSVG renders a per-release pull series as an inline SVG bar
+       chart, newest bar highlighted, per-bar <title> tooltips with the exact
+       numbers. Shared by the header widget and the per-row mini charts so the
+       two can never drift apart visually. */
+    function pullBarsSVG(points, BAR_W, BAR_GAP, BAR_H) {
+      var BAR_PAD = 2; // px, top breathing room so the tallest bar isn't clipped
+      var vals = points.map(function(p) { return Math.max(0, Number(p.pulls) || 0); });
+      var maxV = Math.max.apply(null, vals);
+      if (maxV <= 0) maxV = 1; // avoid divide-by-zero on an all-zero window
+      var chartW = points.length * BAR_W + (points.length - 1) * BAR_GAP;
+      var usableH = BAR_H - BAR_PAD;
+      var bars = '';
+      points.forEach(function(p, i) {
+        var v = vals[i];
+        var h = Math.max(1, (v / maxV) * usableH); // min 1px so a zero-pull release is still visible
+        var x = i * (BAR_W + BAR_GAP);
+        var y = BAR_H - h;
+        var sha = esc(String(p.sha || ''));
+        var tip = sha + ': ' + v + ' pulls' + (p.date ? ' (since ' + esc(String(p.date)) + ')' : '');
+        // The newest bar (last) is highlighted; older ones muted.
+        var fill = (i === points.length - 1) ? '#60a5fa' : 'rgba(96,165,250,0.45)';
+        bars += '<rect x="' + x.toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + BAR_W + '" height="' + h.toFixed(1) + '" rx="1.5" fill="' + fill + '"><title>' + tip + '</title></rect>';
+      });
+      return '<svg width="' + chartW + '" height="' + BAR_H + '" viewBox="0 0 ' + chartW + ' ' + BAR_H + '" ' +
+        'style="display:block;overflow:visible">' + bars + '</svg>';
+    }
+
+    /* linePullSparkHTML is one branch row's mini pulls chart: compact bars plus
+       the newest release's count, wrapped in a tooltip with the exact totals.
+       No data for the line (a retired line pre-history, or a freshly cut line
+       like v5 with no closed release window yet) renders a muted "—". */
+    function linePullSparkHTML(br) {
+      var s = _imagePullLines[br];
+      var points = (s && s.points) || [];
+      if (!s || s.collecting || points.length < 1) {
+        return '<span style="color:var(--muted);opacity:0.5;font-size:0.65rem;cursor:help" title="No image-pull data for this line yet — a bar appears once two releases have been published on it">—</span>';
+      }
+      var latest = Number(s.latest) || 0;
+      var total = Number(s.total_window) || 0;
+      var tip = 'Image pulls per ' + esc(br) + ' release: ' + latest + ' on ' +
+        esc(String(points[points.length - 1].sha || '')) + ' \u00b7 ' + total +
+        ' over last ' + points.length + ' release' + (points.length === 1 ? '' : 's') +
+        ' (package-wide pulls landing during each release window)';
+      return '<span style="display:inline-flex;align-items:center;gap:4px" title="' + escAttr(tip) + '">' +
+        pullBarsSVG(points, 5, 2, 14) +
+        '<span style="font-size:0.65rem;color:#60a5fa;font-variant-numeric:tabular-nums">' + esc(String(latest)) + '</span>' +
+        '</span>';
+    }
+
+    /* fillLinePullSparks refreshes every rendered .line-pulls placeholder from
+       the cached series — called after each loadImagePulls fetch so the row
+       charts update even though the rows themselves rendered earlier in the
+       poll from the (possibly stale) cache. */
+    function fillLinePullSparks() {
+      var spans = document.querySelectorAll('.line-pulls');
+      for (var i = 0; i < spans.length; i++) {
+        spans[i].innerHTML = linePullSparkHTML(spans[i].getAttribute('data-branch') || '');
+      }
+    }
+
     async function loadImagePulls() {
       var host = document.getElementById('image-pulls-spark');
       if (!host) return;
@@ -13999,12 +15467,18 @@ const dashboardHTML = `<!DOCTYPE html>
         host.style.display = 'none';
         return;
       }
+      _imagePullLines = (data && data.lines) || {};
+      fillLinePullSparks();
       var points = (data && data.points) || [];
+      /* The server names the ACTIVE line (stable channel's branch). Fall back
+         to a lineless label rather than guessing a branch. */
+      var line = (data && data.line) ? esc(String(data.line)) : '';
+      var lineLabel = 'Pulls per ' + (line ? line + ' ' : '') + 'release';
       host.style.display = 'block';
 
       /* Cold start: needs at least two release snapshots to close one window. */
       if ((data && data.collecting) || points.length < 1) {
-        host.innerHTML = '<div style="font-size:0.7rem;color:var(--muted)">Image pulls per v2 release: <span style="opacity:0.7">collecting… (a bar appears once a second release is published)</span></div>';
+        host.innerHTML = '<div style="font-size:0.7rem;color:var(--muted)">Image ' + lineLabel.toLowerCase() + ': <span style="opacity:0.7">collecting… (a bar appears once a second release is published)</span></div>';
         return;
       }
 
@@ -14012,37 +15486,15 @@ const dashboardHTML = `<!DOCTYPE html>
       var BAR_W = 14;      // px, per-release bar width
       var BAR_GAP = 3;     // px, gap between bars
       var BAR_H = 30;      // px, drawing height
-      var BAR_PAD = 2;     // px, top breathing room so the tallest bar isn't clipped
 
-      var vals = points.map(function(p) { return Math.max(0, Number(p.pulls) || 0); });
-      var maxV = Math.max.apply(null, vals);
-      if (maxV <= 0) maxV = 1; // avoid divide-by-zero on an all-zero window
-      var chartW = points.length * BAR_W + (points.length - 1) * BAR_GAP;
-      var usableH = BAR_H - BAR_PAD;
-
-      var bars = '';
-      points.forEach(function(p, i) {
-        var v = vals[i];
-        var h = Math.max(1, (v / maxV) * usableH); // min 1px so a zero-pull release is still visible
-        var x = i * (BAR_W + BAR_GAP);
-        var y = BAR_H - h;
-        var sha = esc(String(p.sha || ''));
-        var tip = sha + ': ' + v + ' pulls' + (p.date ? ' (since ' + esc(String(p.date)) + ')' : '');
-        // The newest bar (last) is highlighted; older ones muted.
-        var fill = (i === points.length - 1) ? '#60a5fa' : 'rgba(96,165,250,0.45)';
-        bars += '<rect x="' + x.toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + BAR_W + '" height="' + h.toFixed(1) + '" rx="1.5" fill="' + fill + '"><title>' + tip + '</title></rect>';
-      });
-
-      var svg =
-        '<svg width="' + chartW + '" height="' + BAR_H + '" viewBox="0 0 ' + chartW + ' ' + BAR_H + '" ' +
-        'style="display:block;overflow:visible">' + bars + '</svg>';
+      var svg = pullBarsSVG(points, BAR_W, BAR_GAP, BAR_H);
 
       var latest = (data && Number(data.latest)) || 0;
       var total = (data && Number(data.total_window)) || 0;
       var newestSHA = points.length ? esc(String(points[points.length - 1].sha || '')) : '';
       host.innerHTML =
         '<div style="display:flex;align-items:center;gap:10px">' +
-          '<div style="font-size:0.7rem;color:var(--muted);white-space:nowrap">Pulls per v2 release</div>' +
+          '<div style="font-size:0.7rem;color:var(--muted);white-space:nowrap">' + lineLabel + '</div>' +
           svg +
           '<div style="font-size:0.7rem;color:var(--muted);white-space:nowrap">' +
             '<span style="color:#60a5fa;font-weight:600">' + esc(String(latest)) + '</span> on ' + newestSHA +
@@ -14379,6 +15831,7 @@ const dashboardHTML = `<!DOCTYPE html>
         '<button type="button" onclick="runBulkAction(\'upgrade\')" style="' + btn + '">Upgrade to latest</button>' +
         '<button type="button" onclick="runBulkAction(\'enable-auto-upgrade\')" style="' + btn + '">Auto: instant</button>' +
         '<button type="button" onclick="runBulkAction(\'daily-auto-upgrade\')" style="' + btn + '" title="Upgrade at most once a day, midday — keeps a stable hive from being restarted mid-work, and puts a bad roll in staffed hours">Auto: daily 1pm ET</button>' +
+        '<button type="button" onclick="runBulkAction(\'weekly-auto-upgrade\')" style="' + btn + '" title="Upgrade at most once a week, Tuesday midday — the least disruptive cadence that still keeps the hive current">Auto: Tue 1pm ET</button>' +
         '<button type="button" onclick="runBulkAction(\'disable-auto-upgrade\')" style="' + btn + '">Auto-upgrade off</button>' +
         branchPicker +
         '<button type="button" onclick="clearBulkSelection()" style="' + btn + ';color:var(--muted)">Clear</button>' +
@@ -14399,6 +15852,7 @@ const dashboardHTML = `<!DOCTYPE html>
       'upgrade': 'Upgrade to latest',
       'enable-auto-upgrade': 'Enable instant auto-upgrade on',
       'daily-auto-upgrade': 'Enable daily 1pm ET auto-upgrade on',
+      'weekly-auto-upgrade': 'Enable weekly Tuesday 1pm ET auto-upgrade on',
       'disable-auto-upgrade': 'Disable auto-upgrade on',
       'switch-branch': 'Switch branch for'
     };
@@ -14542,12 +15996,14 @@ const dashboardHTML = `<!DOCTYPE html>
         '|' + _dashFacetTrayOpen;
       if (!force && sig === _lastHivesJSON) return;
       _lastHivesJSON = sig;
-      /* Status filters describe ASSIGNED hives only. An unassigned placeholder
-         has no GitHub App, no tokens and no real health to speak of, so every
-         chip would appear to "hide" the whole pool — and filtering to e.g.
-         Degraded made the Unassigned section vanish, which reads as the
-         placeholders having been deleted. Split first, filter only the assigned
-         side, and leave the pool alone. */
+      /* Status/facet filters describe ASSIGNED hives only. An unassigned
+         placeholder has no GitHub App, no tokens and no real health to speak of,
+         so every chip would appear to "hide" the whole pool — and filtering to
+         e.g. Degraded made the Unassigned section vanish, which reads as the
+         placeholders having been deleted. The free-text search is different:
+         it promises to filter the displayed rows by visible metadata, so it
+         also scopes placeholders by name/id/cluster/repo instead of leaving
+         unrelated inventory visible while the header says a search is active. */
       var assignedAll = [], unassignedAll = [];
       for (var _si = 0; _si < allHives.length; _si++) {
         (isPlaceholderHive(allHives[_si]) ? unassignedAll : assignedAll).push(allHives[_si]);
@@ -14557,7 +16013,11 @@ const dashboardHTML = `<!DOCTYPE html>
          _upgradingHives from here on, so they cannot observe each other's
          mutations and the pill can no longer disagree with the badge. */
       normalizeUpgradeStates(assignedAll);
-      var hives = applyDashFilters(assignedAll).concat(unassignedAll);
+      var filteredAssigned = applyDashFilters(assignedAll);
+      var filteredUnassigned = (_dashSearchQuery || '').trim()
+        ? unassignedAll.filter(hiveMatchesSearch)
+        : unassignedAll;
+      var hives = filteredAssigned.concat(filteredUnassigned);
       var filterBar = document.getElementById('hive-filter-bar');
       if (filterBar) filterBar.style.display = allHives.length ? '' : 'none';
       var searchRow = document.getElementById('hive-search-row');
@@ -14575,7 +16035,7 @@ const dashboardHTML = `<!DOCTYPE html>
       if (viewBar) viewBar.style.display = allHives.length ? '' : 'none';
       renderViewBar();
       /* Counts are over the assigned set only, matching what the chips filter. */
-      renderStatusFilterBar(assignedAll, hives.length - unassignedAll.length);
+      renderStatusFilterBar(assignedAll, filteredAssigned.length);
       /* Facets are offered over the assigned set for the same reason the chips
          are: a placeholder carries no cluster, role or branch worth faceting. */
       renderFacetRail(assignedAll);
@@ -14585,6 +16045,7 @@ const dashboardHTML = `<!DOCTYPE html>
       /* Drawn BEFORE the empty-state early-returns below: a fleet whose every
          hive is filtered out still has alerts worth showing, and the panel is
          how the operator gets back out of a drill-down. */
+      renderSummaryTiles();
       renderAlertsPanel();
       if (!allHives.length) {
         var driftEl0 = document.getElementById('hive-drift-summary');
@@ -14609,12 +16070,11 @@ const dashboardHTML = `<!DOCTYPE html>
       }
       if (!hives.length) {
         /* Hives exist, but every one was filtered out — say so, and offer the
-           way back rather than looking like the list failed to load. Only
-           assigned hives can be hidden, so report that count, not the total. */
+           way back rather than looking like the list failed to load. */
         document.getElementById('hives-container').innerHTML =
           '<div class="empty-state">' +
           '<p style="font-size:1.2rem;margin-bottom:8px">No hives match these filters</p>' +
-          '<p>' + assignedAll.length + (assignedAll.length === 1 ? ' hive is' : ' hives are') + ' hidden by the search, facets or status filters.</p>' +
+          '<p>' + allHives.length + (allHives.length === 1 ? ' hive is' : ' hives are') + ' hidden by the search, facets or status filters.</p>' +
           /* clearAllHiveFilters, not clearStatusFilters: a search term, a facet
              or an alert drill-down can empty the list too, and a button that
              only clears the chips would leave the operator stuck looking at an
@@ -14911,7 +16371,9 @@ const dashboardHTML = `<!DOCTYPE html>
              escape quotes and is unsafe to interpolate into an attribute. */
           var autoUpgradeCheck = '';
           if (isHosted && h.role === 'owner') {
-            var mode = h.autoUpgrade ? (h.autoUpgradeMode === AUTO_UPGRADE_DAILY ? AUTO_UPGRADE_DAILY : AUTO_UPGRADE_INSTANT) : AUTO_UPGRADE_OFF;
+            var mode = h.autoUpgrade
+              ? ((h.autoUpgradeMode === AUTO_UPGRADE_DAILY || h.autoUpgradeMode === AUTO_UPGRADE_WEEKLY) ? h.autoUpgradeMode : AUTO_UPGRADE_INSTANT)
+              : AUTO_UPGRADE_OFF;
             var opts = '';
             for (var oi = 0; oi < AUTO_UPGRADE_OPTIONS.length; oi++) {
               var opt = AUTO_UPGRADE_OPTIONS[oi];
@@ -14952,7 +16414,14 @@ const dashboardHTML = `<!DOCTYPE html>
           /* The drift dot rides on the SHA line, right of the current/behind
              glyph: "what commit is this hive on, and does it match the fleet" is
              one thought. It sets no extra line, so a drifting hive is no taller. */
-          var shaLine = '<span style="font-family:monospace;color:var(--muted)" title="' + escAttr(shaMsg) + '">' + esc(sha) + '</span>' + status + (driftDot ? ' ' + driftDot : '');
+          var behindKnown = h.commitsBehindStableV4 !== undefined && h.commitsBehindStableV4 !== null;
+          var behindBadge = '';
+          if (behindKnown && h.commitsBehindStableV4 > 0) {
+            behindBadge = ' <span style="display:inline-block;padding:1px 6px;border-radius:999px;font-size:0.6rem;background:rgba(210,153,34,0.14);color:var(--yellow);border:1px solid rgba(210,153,34,0.35);white-space:nowrap" title="' + escAttr(h.commitsBehindStableV4 + ' commits behind stable v4 tip ' + (_stableV4SHA || '')) + '">' + esc(h.commitsBehindStableV4) + ' behind</span>';
+          } else if (!behindKnown && _stableV4SHA && sha && !sameShaJS(sha, _stableV4SHA)) {
+            behindBadge = ' <span style="display:inline-block;padding:1px 6px;border-radius:999px;font-size:0.6rem;background:rgba(210,153,34,0.10);color:var(--yellow);border:1px solid rgba(210,153,34,0.25);white-space:nowrap" title="' + escAttr('Could not compare this commit with stable v4 tip ' + _stableV4SHA) + '">? behind</span>';
+          }
+          var shaLine = '<span style="font-family:monospace;color:var(--muted)" title="' + escAttr(shaMsg) + '">' + esc(sha) + '</span>' + status + behindBadge + (driftDot ? ' ' + driftDot : '');
           versionCell = '<div style="' + STACKED_CELL_STYLE + '">' +
             '<div style="' + STACKED_LINE_STYLE + '">' + branch + '</div>' +
             '<div style="' + STACKED_LINE_STYLE + '">' + shaLine + '</div>' +
@@ -14979,7 +16448,7 @@ const dashboardHTML = `<!DOCTYPE html>
         //   ISSUES+PRS+CONTRIB → one Activity cell (all 3 stats + sparklines, 3 sorts kept)
         // Counted against the <th> cells in the header and the <td> cells emitted
         // below (bulkCheckboxCell contributes one).
-        var TOTAL_COLUMNS = 12;
+        var TOTAL_COLUMNS = 13;
         /* Visibility moved OUT of its own column and under Location: "where
            does this hive run" and "who can see it" are both facts about the
            hive's placement, so they read as one cell, and folding them saves a
@@ -15120,6 +16589,9 @@ const dashboardHTML = `<!DOCTYPE html>
               '<div style="' + STACKED_LINE_STYLE + '" title="Active contributors"><span style="color:var(--muted);min-width:24px;display:inline-block">Ctr</span>' + (h.activeContributors || 0) + '</div>' +
             '</div>' +
           '</td>' +
+          /* QUADRANT: the small kite. Shape only at this size — the numbers
+             live in its hover, which is the same chart drawn large. */
+          '<td>' + quadrantCell(h) + '</td>' +
           '</tr>' + pendingExpandRow;
       };
       /* Section-header row: a labeled separator spanning all columns, styled to
@@ -15127,9 +16599,9 @@ const dashboardHTML = `<!DOCTYPE html>
       /* Count of <th> cells in the hive table header below. The section-header
          row spans all of them; a stale value would leave the separator short
          and the table visibly ragged. 12 after the 15-to-9 fold (PROV, DRIFT,
-         ACMM/JOURNEY→Maturity, ISSUES/PRS/CONTRIB→Activity). Must stay equal to
-         TOTAL_COLUMNS. */
-      var TOTAL_COLUMNS_HEADER = 12;
+         ACMM/JOURNEY→Maturity, ISSUES/PRS/CONTRIB→Activity), then 13 with the
+         Quadrant column. Must stay equal to TOTAL_COLUMNS. */
+      var TOTAL_COLUMNS_HEADER = 13;
       /* The header is a click target that expands/collapses its section. The
          caret mirrors aria-expanded so the affordance and the a11y state can
          never disagree. sectionKey also scopes the select-all checkbox to THIS
@@ -15260,6 +16732,7 @@ const dashboardHTML = `<!DOCTYPE html>
         rows = hives.map(function(h, i) { return buildRow(h, i, 'all'); }).join('');
       }
       document.getElementById('hives-container').innerHTML =
+        fleetQuadrantHeaderHTML() +
         '<div class="table-wrap"><table class="hive-table"><thead><tr>' +
         /* Non-admin lists have no section headers, so the flat list's
            select-all lives in the table head instead. */
@@ -15281,6 +16754,10 @@ const dashboardHTML = `<!DOCTYPE html>
         '<th onclick="sortDashHives(\'agentCount\')" style="cursor:pointer">Agents ⇅</th><th onclick="sortDashHives(\'totalTokens24h\')" style="cursor:pointer" title="Cumulative tokens consumed, as of the last heartbeat">Tokens ⇅</th><th onclick="sortDashHives(\'governorMode\')" style="cursor:pointer">Mode ⇅</th>' +
         /* ACTIVITY folds Issues, PRs and Contrib; each keeps its own sort ⇅. */
         '<th style="vertical-align:middle" title="Actionable issues, actionable PRs and active contributors">' + stackHeader('Activity', subSort('actionableIssues', 'Iss ⇅', 'Sort by actionable issues') + subSort('actionablePRs', 'PRs ⇅', 'Sort by actionable PRs') + subSort('activeContributors', 'Ctr ⇅', 'Sort by active contributors')) + '</th>' +
+        /* QUADRANT folds the four axis sorts plus the composite. Sorting by a
+           single axis is the point of the column: "weakest efficiency" turns
+           the table into a worklist rather than a picture. */
+        '<th style="vertical-align:middle" title="Trust, Efficiency, Satisfaction and Productivity, each scored against the hives in the current view. Hover a kite for the numbers.">' + stackHeader('Quadrant', subSort('quadrant', 'All ⇅', 'Sort by the composite of every scored axis') + subSort('quadrantTrust', 'T ⇅', 'Sort by Trust: autonomy level, governor posture, merge acceptance and enrolled scope') + subSort('quadrantEfficiency', 'E ⇅', 'Sort by Efficiency: token burn rate, spend per merged PR, rework and output per agent') + subSort('quadrantProductivity', 'P ⇅', 'Sort by Productivity: merged PRs, relay throughput, work-source autonomy and work stalled on a human')) + '</th>' +
         '</tr></thead><tbody>' + rows + '</tbody></table></div>';
       /* Delegated, so binding once is enough no matter how often the table is
          re-rendered. The guard keeps repeated renders from stacking listeners. */
@@ -15316,9 +16793,10 @@ const dashboardHTML = `<!DOCTYPE html>
     var AUTO_UPGRADE_OFF = 'off';
     var AUTO_UPGRADE_INSTANT = 'instant';
     var AUTO_UPGRADE_DAILY = 'daily';
+    var AUTO_UPGRADE_WEEKLY = 'weekly';
     /* Copy is framed around DISRUPTION, not cron mechanics: the operator is
        choosing when it is acceptable to interrupt a hive that is working. */
-    var AUTO_UPGRADE_TITLE = 'When to apply new versions. Instant restarts the hive as soon as a new version lands; Daily restarts it at most once a day, after hours, so a stable hive is not disturbed mid-work.';
+    var AUTO_UPGRADE_TITLE = 'When to apply new versions. Instant restarts the hive as soon as a new version lands; Daily restarts it at most once a day at 1pm ET; Weekly restarts it at most once a week, Tuesday at 1pm ET, so a stable hive is disturbed as rarely as possible.';
     /* Icon-only labels. The "Auto:" prefix repeated on every row was the widest
        single element in the Version column and said nothing a scanning operator
        did not already know from the column it sits in — so it is carried by the
@@ -15345,7 +16823,8 @@ const dashboardHTML = `<!DOCTYPE html>
     var AUTO_UPGRADE_OPTIONS = [
       {value: AUTO_UPGRADE_OFF, label: '⦸ off', ariaLabel: 'Auto-upgrade: off'},
       {value: AUTO_UPGRADE_INSTANT, label: '⚡ instant', ariaLabel: 'Auto-upgrade: instantly when a new version lands'},
-      {value: AUTO_UPGRADE_DAILY, label: '🕐 1p', ariaLabel: 'Auto-upgrade: daily at 1pm ET'}
+      {value: AUTO_UPGRADE_DAILY, label: '🕐 1p', ariaLabel: 'Auto-upgrade: daily at 1pm ET'},
+      {value: AUTO_UPGRADE_WEEKLY, label: '🗓 tue 1p', ariaLabel: 'Auto-upgrade: weekly on Tuesday at 1pm ET'}
     ];
     /* Accessible name for the select itself, resolved from the CURRENT mode so
        the control announces what it is set to rather than only what it does. */
@@ -15375,7 +16854,7 @@ const dashboardHTML = `<!DOCTYPE html>
        concrete preference rather than leaving a blank to be re-interpreted. */
     async function setAutoUpgradeMode(id, value) {
       var enabled = value !== AUTO_UPGRADE_OFF;
-      var mode = (value === AUTO_UPGRADE_DAILY) ? AUTO_UPGRADE_DAILY : AUTO_UPGRADE_INSTANT;
+      var mode = (value === AUTO_UPGRADE_DAILY || value === AUTO_UPGRADE_WEEKLY) ? value : AUTO_UPGRADE_INSTANT;
       try {
         var resp = await fetch('/api/saas/hives/' + encodeURIComponent(id) + '/auto-upgrade', {
           method: 'PUT',
@@ -15384,7 +16863,8 @@ const dashboardHTML = `<!DOCTYPE html>
         });
         if (!resp.ok) { hiveToast('Failed to update auto-upgrade', 'error'); loadHives(); return; }
         var label = !enabled ? 'off'
-          : (mode === AUTO_UPGRADE_DAILY ? 'daily at 1pm ET' : 'instant');
+          : (mode === AUTO_UPGRADE_DAILY ? 'daily at 1pm ET'
+          : (mode === AUTO_UPGRADE_WEEKLY ? 'weekly on Tuesday at 1pm ET' : 'instant'));
         hiveToast(id + ' auto-upgrade: ' + label, 'success');
         loadHives();
       } catch(e) {
@@ -16241,10 +17721,43 @@ const dashboardHTML = `<!DOCTYPE html>
     // github.ibm.com means GitHub Enterprise — hardcoding github.com would send
     // an admin to a 404 (or worse, an unrelated public repo of the same name).
     // Requests with no repo recorded fall back to plain escaped text.
-    /* provisionRequesterLabel renders the requester's real name and Slack ID
-       beside their GitHub login on the review card. Mapping a login to a person
-       is the reason the wizard asks for a name at all, and this is where the
-       operator deciding the request needs it.
+    /* provisionRequesterPrimary returns the identifier admins should scan first
+       on provision-request rows. The durable request key (username) may be an
+       opaque native provider subject such as "ibmid:695000VVZ9"; user_id is the
+       GitHub/GHE login or best human-readable identity captured/enriched by the
+       server. Older records without user_id fall back to username. */
+    function provisionRequesterPrimary(pr) {
+      if (!pr) return '';
+      var id = String(pr.user_id || '').trim();
+      return id || String(pr.username || '').trim();
+    }
+
+    function provisionRequesterNativeSubject(pr) {
+      if (!pr) return '';
+      var native = String(pr.username || '').trim();
+      var primary = provisionRequesterPrimary(pr);
+      return native && primary && native !== primary ? native : '';
+    }
+
+    function provisionNativeSubjectChip(pr) {
+      var native = provisionRequesterNativeSubject(pr);
+      if (!native) return '';
+      return '<span title="Native provider subject" style="font-size:0.68rem;padding:1px 6px;border-radius:999px;border:1px solid var(--border);color:var(--muted);font-family:ui-monospace,monospace">' +
+        esc(native) + '</span>';
+    }
+
+    function provisionRequesterAvatar(pr, px, extraStyle) {
+      var primary = provisionRequesterPrimary(pr);
+      if (pr && pr.user_id_source === 'github') {
+        return linkedAvatar(primary, px, primary, extraStyle);
+      }
+      return userAvatar({display_name: primary, github_username: String((pr && pr.username) || '')}, px, extraStyle);
+    }
+
+    /* provisionRequesterLabel renders the requester's real name, Slack ID, and
+       native provider subject beside the primary user ID on the review card.
+       Mapping a login to a person is the reason the wizard asks for a name at
+       all, and this is where the operator deciding the request needs it.
 
        Both are free text a user typed. esc() everywhere, and the whole label is
        built as a text node's escaped HTML rather than interpolated into an
@@ -16255,10 +17768,14 @@ const dashboardHTML = `<!DOCTYPE html>
       if (!pr) return '';
       var name = (pr.full_name || '').trim();
       var slack = (pr.slack_id || '').trim();
-      if (!name && !slack) return '';
+      var native = provisionRequesterNativeSubject(pr);
+      if (!name && !slack && !native) return '';
+      var primary = provisionRequesterPrimary(pr);
       var bits = [];
-      if (name) bits.push(esc(name));
+      if (name && name !== primary) bits.push(esc(name));
       if (slack) bits.push('slack: ' + esc(slack));
+      if (native) bits.push(provisionNativeSubjectChip(pr));
+      if (!bits.length) return '';
       return '<span style="font-size:0.75rem;color:var(--muted);margin-left:8px">' +
         bits.join(' &middot; ') + '</span>';
     }
@@ -16301,19 +17818,18 @@ const dashboardHTML = `<!DOCTYPE html>
       var rows = decided.map(function(pr) {
         var approved = pr.status === 'approved';
         var color = approved ? 'var(--green)' : 'var(--red)';
-        var uname = pr.username || '';
-        // Link the requester to their GitHub profile. Always github.com: a
-        // profile link is about the person, and the account that signed in to
-        // the hub is a github.com account even when the ORG they asked for
-        // lives on an Enterprise host.
+        var primary = provisionRequesterPrimary(pr);
+        // Link the requester avatar only when the server says the primary user
+        // ID is a GitHub login. Email/name fallbacks get an initials avatar
+        // instead, avoiding bogus github.com links for OIDC subjects.
         //
         // The AVATAR carries that link now. The username used to be a second
         // anchor to the same profile; two controls for one destination is noise,
         // so the name is plain text and the face is the affordance.
         var userCell =
-          linkedAvatar(uname, PANEL_ACCESS_AVATAR_PX, uname, 'margin-right:6px') +
-          (uname
-            ? '<span>' + esc(uname) + '</span>'
+          provisionRequesterAvatar(pr, PANEL_ACCESS_AVATAR_PX, 'margin-right:6px') +
+          (primary
+            ? '<span>' + esc(primary) + '</span>' + provisionRequesterLabel(pr)
             : '<span style="color:var(--muted)">—</span>');
         // Repo link, built by the shared provisionRepoLabel(): github_host is
         // empty for public github.com and otherwise a GitHub Enterprise host
@@ -16400,12 +17916,13 @@ const dashboardHTML = `<!DOCTYPE html>
       _provisionRequestsByUser = {};
       pending.forEach(function(pr) { _provisionRequestsByUser[pr.username] = pr; });
       var rows = pending.map(function(pr) {
-        var avatar = linkedAvatar(pr.username, TABLE_AVATAR_PX, pr.username, 'margin-right:8px');
+        var primary = provisionRequesterPrimary(pr);
+        var avatar = provisionRequesterAvatar(pr, TABLE_AVATAR_PX, 'margin-right:8px');
         return '<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:8px">' +
           '<div style="display:flex;align-items:center;gap:8px">' +
           avatar +
           '<div>' +
-          '<span style="font-size:0.85rem;font-weight:600">' + esc(pr.username) + '</span>' +
+          '<span style="font-size:0.85rem;font-weight:600">' + esc(primary || pr.username) + '</span>' +
           // Who the requester actually IS. Mapping a login to a person is the
           // reason the wizard asks for a name, and this review card is where an
           // operator needs it. esc() only — free text, never markup.
@@ -16591,6 +18108,126 @@ const dashboardHTML = `<!DOCTYPE html>
       var toggle = document.getElementById('cluster-health-toggle');
       if (body) body.style.display = _clusterHealthCollapsed ? 'none' : '';
       if (toggle) toggle.style.transform = _clusterHealthCollapsed ? '' : 'rotate(90deg)';
+    }
+
+    /* ---- Scale Controls (admin) ----
+       Renders inputs from GET /api/saas/admin/scale-settings and saves the
+       whole document via POST. The GET payload carries saved values,
+       EFFECTIVE values (after the saved > env > default chain) and the
+       built-in defaults, so each input can show what is actually in force. */
+    var _scaleControlsCollapsed = localStorage.getItem('hive-scale-controls-collapsed') !== 'false';
+    var _scaleData = null;
+    function toggleScaleControls() {
+      _scaleControlsCollapsed = !_scaleControlsCollapsed;
+      localStorage.setItem('hive-scale-controls-collapsed', _scaleControlsCollapsed ? 'true' : 'false');
+      var body = document.getElementById('scale-controls-body');
+      var toggle = document.getElementById('scale-controls-toggle');
+      if (body) body.style.display = _scaleControlsCollapsed ? 'none' : '';
+      if (toggle) toggle.style.transform = _scaleControlsCollapsed ? '' : 'rotate(90deg)';
+    }
+    var SCALE_GLOBAL_KNOBS = [
+      { key: 'upgrade_wave_size', label: 'Upgrade wave size', hint: 'auto-upgrades per cluster per tick' },
+      { key: 'provision_workers', label: 'Provision workers', hint: 'total concurrent provisions (grows live; shrink needs restart)' },
+      { key: 'provision_per_cluster', label: 'Provisions per cluster', hint: 'concurrent provisions per target cluster' },
+      { key: 'kubectl_per_cluster', label: 'kubectl per cluster', hint: 'concurrent kubectl processes per cluster' }
+    ];
+    function scaleNumInput(id, value, placeholder) {
+      return '<input type="number" min="0" max="10000" id="' + id + '" value="' + (value || '') + '"' +
+        ' placeholder="' + placeholder + '"' +
+        ' style="width:90px;padding:6px 8px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.85rem;text-align:right">';
+    }
+    async function loadScaleSettings() {
+      if (!_isAdmin) return;
+      try {
+        var resp = await fetch('/api/saas/admin/scale-settings');
+        if (!resp.ok) { document.getElementById('scale-controls-section').style.display = 'none'; return; }
+        var data = await resp.json();
+        _scaleData = data;
+        document.getElementById('scale-controls-section').style.display = '';
+        var body = document.getElementById('scale-controls-body');
+        var toggle = document.getElementById('scale-controls-toggle');
+        if (body) body.style.display = _scaleControlsCollapsed ? 'none' : '';
+        if (toggle) toggle.style.transform = _scaleControlsCollapsed ? '' : 'rotate(90deg)';
+        var eff = data.effective || {};
+        document.getElementById('scale-controls-summary').textContent =
+          'wave ' + eff.upgrade_wave_size + ' · workers ' + eff.provision_workers +
+          ' · per-cluster ' + eff.provision_per_cluster + ' · kubectl ' + eff.kubectl_per_cluster;
+        /* Don't clobber in-progress edits: only re-render when collapsed or
+           on first load. */
+        if (document.activeElement && document.activeElement.id && document.activeElement.id.indexOf('scale-') === 0) return;
+        var saved = data.saved || {};
+        var defaults = data.defaults || {};
+        document.getElementById('scale-globals').innerHTML = SCALE_GLOBAL_KNOBS.map(function(k) {
+          return '<div style="padding:12px;border:1px solid var(--border);border-radius:8px;background:var(--surface)">' +
+            '<div style="font-size:0.8rem;font-weight:600;margin-bottom:2px">' + k.label + '</div>' +
+            '<div style="font-size:0.7rem;color:var(--muted);margin-bottom:8px">' + k.hint + '</div>' +
+            '<div style="display:flex;align-items:center;gap:8px">' +
+            scaleNumInput('scale-' + k.key, saved[k.key], 'default ' + defaults[k.key]) +
+            '<span style="font-size:0.75rem;color:var(--muted)">in force: ' + (eff[k.key] != null ? eff[k.key] : '?') + '</span>' +
+            '</div></div>';
+        }).join('');
+        var overrides = saved.clusters || {};
+        document.getElementById('scale-clusters-body').innerHTML = (data.clusters || []).map(function(c) {
+          var o = overrides[c.id] || {};
+          function cell(field, effective) {
+            var savedVal = (o[field] != null) ? o[field] : '';
+            return '<td style="text-align:right;padding:6px 4px">' +
+              scaleNumInput('scale-c-' + c.id + '-' + field, savedVal, String(effective)) + '</td>';
+          }
+          return '<tr><td style="padding:6px 4px">' + c.id + '</td>' +
+            '<td style="text-align:right;padding:6px 4px">' + c.hives + '</td>' +
+            '<td style="text-align:right;padding:6px 4px">' + c.available_placeholders + '</td>' +
+            cell('max_hives', c.max_hives) + cell('pool_min', c.pool_min) + cell('pool_target', c.pool_target) + '</tr>';
+        }).join('');
+      } catch (e) { /* transient — next poll retries */ }
+    }
+    async function saveScaleSettings() {
+      var status = document.getElementById('scale-save-status');
+      function intOrZero(id) {
+        var el = document.getElementById(id);
+        if (!el || el.value === '') return 0;
+        var n = parseInt(el.value, 10);
+        return isNaN(n) ? 0 : n;
+      }
+      var body = {
+        upgrade_wave_size: intOrZero('scale-upgrade_wave_size'),
+        provision_workers: intOrZero('scale-provision_workers'),
+        provision_per_cluster: intOrZero('scale-provision_per_cluster'),
+        kubectl_per_cluster: intOrZero('scale-kubectl_per_cluster'),
+        clusters: {}
+      };
+      ((_scaleData && _scaleData.clusters) || []).forEach(function(c) {
+        var row = {};
+        ['max_hives', 'pool_min', 'pool_target'].forEach(function(f) {
+          var el = document.getElementById('scale-c-' + c.id + '-' + f);
+          /* Blank = no override (fall back to clusters.json). An explicit
+             number — including 0 — is an override. */
+          if (el && el.value !== '') {
+            var n = parseInt(el.value, 10);
+            if (!isNaN(n)) row[f] = n;
+          }
+        });
+        if (Object.keys(row).length > 0) body.clusters[c.id] = row;
+      });
+      try {
+        var resp = await fetch('/api/saas/admin/scale-settings', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+        });
+        if (!resp.ok) {
+          var err = {};
+          try { err = await resp.json(); } catch (_) {}
+          status.textContent = 'Save failed: ' + (err.error || resp.status);
+          status.style.color = 'var(--red)';
+          return;
+        }
+        status.textContent = 'Saved — in effect now.';
+        status.style.color = 'var(--green)';
+        setTimeout(function() { status.textContent = ''; }, 5000);
+        loadScaleSettings();
+      } catch (e) {
+        status.textContent = 'Save failed: ' + e;
+        status.style.color = 'var(--red)';
+      }
     }
 
     function healthBarColor(pct, warnThreshold, dangerThreshold) {
@@ -17180,6 +18817,7 @@ const dashboardHTML = `<!DOCTYPE html>
       await loadAdminUsers();
       if (!_adminLoaded) setTimeout(loadAdminUsers, 2000);
       loadClusterHealth();
+      loadScaleSettings();
       loadReach();
       loadClusters();
       handleOpenRouterReturn();
@@ -17192,6 +18830,7 @@ const dashboardHTML = `<!DOCTYPE html>
     startAssignCounterTicker();
     setInterval(loadAdminUsers, POLL_INTERVAL_MS);
     setInterval(loadClusterHealth, CLUSTER_HEALTH_POLL_MS);
+    setInterval(loadScaleSettings, CLUSTER_HEALTH_POLL_MS);
     setInterval(loadReach, REACH_POLL_MS);
     var _refreshTimer = null;
     var REFRESH_DEBOUNCE_MS = 500;
@@ -17301,7 +18940,7 @@ const dashboardHTML = `<!DOCTYPE html>
       var filtered = (_allUsers || []).filter(function(u) {
         if (!q) return true;
         if (!u) return false;
-        var hay = [u.github_username, u.display_name, u.email, u.full_name, u.slack_id, u.notes]
+        var hay = [u.github_username, u.display_name, u.email, u.full_name, u.slack_id, u.company, u.notes]
           .filter(function(v) { return !!v; }).join(' ').toLowerCase();
         return hay.includes(q);
       });
@@ -17341,6 +18980,8 @@ const dashboardHTML = `<!DOCTYPE html>
         }
         _adminLoaded = true;
         document.getElementById('admin-section').style.display = '';
+        var navFleet = document.getElementById('nav-fleet');
+        if (navFleet) navFleet.style.display = '';
         /* The section is display:none until the admin check passes, so this is
            the first point at which the persisted collapse state can be pushed
            onto real DOM. Idempotent, so running it on every poll is fine. */
@@ -17351,6 +18992,10 @@ const dashboardHTML = `<!DOCTYPE html>
         var data = await resp.json();
         _allUsers = data.users || [];
         try { applySortUsers(); } catch(re) { console.error('renderUsers error:', re); }
+        /* Rollup rides the same admin poll as the table it sits under, so the
+           two can never disagree about the roster. Not awaited: a slow or
+           failed rollup must not delay or break the users table. */
+        loadUserCountries();
       } catch(e) {
         if (!_adminLoaded) document.getElementById('admin-section').style.display = 'none';
       } finally {
@@ -17360,6 +19005,103 @@ const dashboardHTML = `<!DOCTYPE html>
 
     function filterUsers() {
       applySortUsers();
+    }
+
+    /* ---- Fleet country rollup -------------------------------------------
+       Where the hub's user base is, in aggregate. Reads
+       /api/saas/admin/user-countries, which is requireAdmin and returns COUNTS
+       only — no usernames — so this surface cannot be used to look up an
+       individual.
+
+       Deliberately NOT a map and NOT a chart: the hub ships no external CDN and
+       no external images, so a map would mean vendoring geometry and a charting
+       library would mean a script tag we cannot serve. A ranked bar list says
+       the same thing in less space and is readable at a glance.
+
+       The unknown bucket is rendered as its own row, always, with the same
+       weight as a country. Country is optional and best-effort, so early on
+       unknown IS the majority; hiding it would turn "3 of 200 users told us
+       they're in DE" into something that looks like "the fleet is German". */
+
+    /* Width of the widest bar, in percent of the list. The bars are scaled
+       against the LARGEST bucket rather than the total so the smaller
+       countries stay visible when one bucket dominates — which it will, since
+       unknown starts at ~100%. */
+    var COUNTRY_BAR_MAX_PCT = 100;
+
+    /* countryRollupRow renders one bucket. label is pre-built HTML (a flag+code
+       chip, or the plain "Unknown" text); everything else is numeric. */
+    function countryRollupRow(label, count, max, total) {
+      /* max is guaranteed >= 1 by the caller — see renderCountryRollup, which
+         returns early on an empty population. Guarding again here anyway
+         because a zero would silently produce NaN% and a bar that vanishes
+         rather than an error anyone would notice. */
+      var pct = (max > 0) ? Math.round((count / max) * COUNTRY_BAR_MAX_PCT) : 0;
+      var share = (total > 0) ? Math.round((count / total) * 100) : 0;
+      return '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">' +
+        '<div style="flex:none;width:72px;font-size:0.72rem;color:var(--text)">' + label + '</div>' +
+        '<div style="flex:1;height:8px;background:var(--border);border-radius:4px;overflow:hidden">' +
+          '<div style="width:' + pct + '%;height:100%;background:var(--accent)"></div>' +
+        '</div>' +
+        '<div style="flex:none;width:84px;text-align:right;font-size:0.7rem;color:var(--muted)">' +
+          count + ' &middot; ' + share + '%</div>' +
+      '</div>';
+    }
+
+    function renderCountryRollup(data) {
+      var el = document.getElementById('user-countries-container');
+      if (!el) return;
+      var countries = (data && data.countries) || [];
+      var unknown = Number(data && data.unknown) || 0;
+      var total = Number(data && data.total) || 0;
+      /* No users at all is the only case with nothing to say. An all-unknown
+         population is NOT this case: it still renders, as a single 100% Unknown
+         bar, which is exactly the state the operator needs to see on day one. */
+      if (total <= 0) {
+        el.innerHTML = '<div style="font-size:0.75rem;color:var(--muted)">No users yet.</div>';
+        return;
+      }
+      /* Scale against the biggest bucket, unknown included, so no bar can ever
+         exceed 100%. Floored at 1 so the divide is safe even if a future caller
+         reaches here with all-zero counts. */
+      var max = unknown;
+      countries.forEach(function(c) { if (Number(c.count) > max) max = Number(c.count); });
+      if (max < 1) max = 1;
+
+      var rows = countries.map(function(c) {
+        /* The server normalizes before sending; normalizing again is what
+           guarantees a legacy or hand-edited record can never emit half a code
+           point into the flag. A code that fails the check is dropped rather
+           than rendered raw. */
+        var code = normalizeCountryCode(c && c.code);
+        if (!code) return '';
+        var label = '<span style="display:inline-flex;align-items:center;gap:4px">' +
+          countryFlagHTML(code) + esc(code) + '</span>';
+        return countryRollupRow(label, Number(c.count) || 0, max, total);
+      }).join('');
+
+      /* Unknown is last (it is not a country and should not head a ranked list
+         of them) but always present, and labelled in --muted so it reads as an
+         absence rather than as a place. */
+      var unknownLabel = '<span style="color:var(--muted)">Unknown</span>';
+      rows += countryRollupRow(unknownLabel, unknown, max, total);
+
+      el.innerHTML =
+        '<div style="font-size:0.85rem;color:var(--accent);font-weight:600;margin-bottom:8px">' +
+          'Where users are &mdash; ' + countries.length + ' countr' + (countries.length === 1 ? 'y' : 'ies') +
+          ', ' + unknown + ' unknown of ' + total +
+        '</div>' + rows;
+    }
+
+    async function loadUserCountries() {
+      try {
+        var resp = await fetch('/api/saas/admin/user-countries');
+        /* 403 means not admin. Leave the container empty rather than writing an
+           error: a non-admin should learn nothing about this surface, not even
+           that it exists and refused them. */
+        if (!resp.ok) return;
+        renderCountryRollup(await resp.json());
+      } catch(e) {}
     }
 
     // --- Admin Users: contact / CRM fields -------------------------------
@@ -17373,7 +19115,8 @@ const dashboardHTML = `<!DOCTYPE html>
 
     // Number of columns in the admin users table. Panel/expand rows span the
     // full width, so this must track the <th> count in renderUsers.
-    var USERS_TABLE_COLSPAN = 8;
+    // 9 since the Country column landed.
+    var USERS_TABLE_COLSPAN = 9;
     // Rows of the notes textarea. Big enough for a short paragraph without
     // pushing the next user off screen. It is the only free-form prose field,
     // so it gets the height as well as the width; still user-resizable.
@@ -17405,6 +19148,108 @@ const dashboardHTML = `<!DOCTYPE html>
     var CONTACT_W_NOTES_BASIS = '48%';
     var CONTACT_W_NOTES_MIN = '320px';
     var CONTACT_NOTES_GROW = 3;
+    /* Country is a two-letter code plus a live flag preview, so it is the
+       narrowest field in the panel and the only one with a fixed-ish basis: it
+       can never need more room than "GB  United Kingdom" takes to echo. */
+    var CONTACT_W_COUNTRY_BASIS = '12%';
+    var CONTACT_W_COUNTRY_MIN = '150px';
+    /* ISO 3166-1 alpha-2. Mirrors countryCodeLen in user_country.go — the
+       maxlength is a courtesy that stops a third letter being typed at all;
+       normalizeCountryCode on both sides is the actual control. */
+    var CONTACT_MAX_COUNTRY = 2;
+    var CONTACT_MAX_COMPANY = 128;
+    var CONTACT_W_COMPANY_BASIS = '18%';
+    var CONTACT_W_COMPANY_MIN = '170px';
+
+    /* ISO 3166-1 alpha-2 codes for the Country dropdown. We do NOT ship a
+       250-row name table (the reason the field used to be free text): the codes
+       are a compact closed list, and countryDisplayName() turns each into its
+       localized English name via the browser's Intl.DisplayNames at render
+       time — so the <select> options are labeled without a duplicated table and
+       stay in step with the same name source the flag/preview already use. */
+    var ISO_COUNTRY_CODES = ("AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR PS PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW").split(" ");
+
+    /* Minimum number of users sharing a country before it floats to the
+       "frequent" group at the top of the Country dropdown. "More than one":
+       a single assignment is not yet a pattern worth reordering the list for. */
+    var COUNTRY_FREQUENT_MIN_USERS = 2;
+    /* The disabled divider between the frequent group and the full
+       alphabetical list. value-less and disabled, so it can never be picked. */
+    var COUNTRY_FREQUENT_SEPARATOR = '──────────';
+
+    // frequentCountryCodes returns the codes held by at least
+    // COUNTRY_FREQUENT_MIN_USERS of the given users, ordered by count
+    // descending then localized name — the group countrySelectOptionsHTML
+    // floats to the top of the dropdown. Empty or malformed countries never
+    // count (normalizeCountryCode gates them out), so a roster full of
+    // country-less users produces no group at all. Recomputed on every panel
+    // render from the roster the admin poll keeps fresh (_allUsers), so the
+    // ordering tracks assignments live as countries are added or cleared.
+    function frequentCountryCodes(users) {
+      var counts = {};
+      (users || []).forEach(function (u) {
+        var c = normalizeCountryCode(u && u.country);
+        if (c) counts[c] = (counts[c] || 0) + 1;
+      });
+      return Object.keys(counts)
+        .filter(function (c) { return counts[c] >= COUNTRY_FREQUENT_MIN_USERS; })
+        .map(function (c) { return { code: c, count: counts[c], name: countryDisplayName(c) || c }; })
+        .sort(function (a, b) {
+          if (a.count !== b.count) return b.count - a.count;
+          return a.name.localeCompare(b.name);
+        })
+        .map(function (o) { return o.code; });
+    }
+
+    // countrySelectOptionsHTML builds the <option>s for the Country dropdown,
+    // sorted by localized display name, marking the current code selected and
+    // a leading blank ("— none —") so an admin can clear a country.
+    //
+    // Countries already assigned to more than one loaded user float to a
+    // "frequent" group right under "— none —" (frequentCountryCodes), followed
+    // by a disabled separator and then the FULL alphabetical list — frequent
+    // codes stay duplicated there on purpose, so an admin whose muscle memory
+    // says "scroll to U" still finds United States where it always was. The
+    // current code is marked selected exactly once (the frequent copy when it
+    // has one), because duplicate selected attributes would make the browser
+    // pick the later, alphabetical copy and scroll the closed select there.
+    function countrySelectOptionsHTML(current) {
+      var cur = (normalizeCountryCode(current) || '');
+      var opts = ISO_COUNTRY_CODES.map(function (code) {
+        return { code: code, name: countryDisplayName(code) || code };
+      }).sort(function (a, b) { return a.name.localeCompare(b.name); });
+      var html = '<option value=""' + (cur ? '' : ' selected') + '>— none —</option>';
+      var frequent = frequentCountryCodes(_allUsers);
+      var curInFrequent = frequent.indexOf(cur) !== -1;
+      frequent.forEach(function (code) {
+        html += '<option value="' + escAttr(code) + '"' + (code === cur ? ' selected' : '') +
+          '>' + esc(countryDisplayName(code) || code) + ' (' + esc(code) + ')</option>';
+      });
+      if (frequent.length) {
+        html += '<option value="" disabled>' + COUNTRY_FREQUENT_SEPARATOR + '</option>';
+      }
+      opts.forEach(function (o) {
+        html += '<option value="' + escAttr(o.code) + '"' + (o.code === cur && !curInFrequent ? ' selected' : '') +
+          '>' + esc(o.name) + ' (' + esc(o.code) + ')</option>';
+      });
+      return html;
+    }
+
+    // companyDatalistOptionsHTML builds the autocomplete suggestions for the
+    // Company combobox from the DISTINCT company values already entered across
+    // all loaded users — so the list "compiles as you enter them" without any
+    // server-side vocabulary. _allUsers is the admin roster the Users table
+    // already holds. The field stays a free-text <input list=…>, so a brand-new
+    // company can always be typed and becomes a suggestion on the next render.
+    function companyDatalistOptionsHTML() {
+      var seen = {};
+      (_allUsers || []).forEach(function (u) {
+        var c = (u && u.company ? String(u.company).trim() : '');
+        if (c) seen[c] = true;
+      });
+      return Object.keys(seen).sort(function (a, b) { return a.localeCompare(b); })
+        .map(function (c) { return '<option value="' + escAttr(c) + '"></option>'; }).join('');
+    }
 
     // Which users currently have their contact panel open, keyed by username.
     // Re-rendering on the admin poll must not slam a panel shut mid-edit.
@@ -17487,6 +19332,46 @@ const dashboardHTML = `<!DOCTYPE html>
       return 'contact-panel-' + String(username || '').replace(/[^A-Za-z0-9_-]/g, '_');
     }
 
+    /* Same sanitizing rule as contactPanelId, for the country field's live
+       preview node. Separate id per user because every panel row is emitted for
+       every user up front (hidden until expanded), so a shared id would collide
+       across hundreds of rows and every lookup would find the first one. */
+    function contactCountryPreviewId(username) {
+      return 'contact-country-preview-' + String(username || '').replace(/[^A-Za-z0-9_-]/g, '_');
+    }
+
+    /* countryPreviewHTML: what a typed code resolves to, as flag + English name.
+
+       Reuses countryFlagEmoji / countryDisplayName from the shared block above
+       rather than restating them, so the admin editor and the self-service
+       editor can never disagree about what a code means.
+
+       Three distinct states, deliberately worded so none of them reads as an
+       error the admin caused:
+         blank   -> "No flag" (a legitimate value: clearing the country)
+         partial -> "Two-letter code" (still typing; not a failure)
+         valid   -> the flag and the country's name
+
+       The code is escaped even though normalizeCountryCode has already reduced
+       it to [A-Z]{2}, and the name is escaped because Intl.DisplayNames returns
+       a localized string this render path does not own. */
+    function countryPreviewHTML(raw) {
+      var typed = String(raw == null ? '' : raw).trim();
+      if (!typed) return 'No flag';
+      var c = normalizeCountryCode(typed);
+      if (!c) return 'Two-letter code';
+      return countryFlagEmoji(c) + ' ' + esc(countryDisplayName(c));
+    }
+
+    /* refreshContactCountryPreview re-renders one user's preview from whatever
+       is currently in their input. Called on every keystroke, so it reads the
+       DOM rather than _allUsers — the point is to reflect the UNSAVED text. */
+    function refreshContactCountryPreview(username, value) {
+      var el = document.getElementById(contactCountryPreviewId(username));
+      if (!el) return;
+      el.innerHTML = countryPreviewHTML(value);
+    }
+
     /* providerBadge renders the user's login method (auth provider) as a small
        chip next to their name in the admin Users table, so an admin can see at a
        glance who signed in with GitHub vs Google vs IBMid vs Red Hat vs
@@ -17534,10 +19419,33 @@ const dashboardHTML = `<!DOCTYPE html>
         (logo ? logo : '') + esc(meta.label) + '</span>';
     }
 
+    /* countryCell renders the user's country in the admin Users table as
+       flag + alpha-2 code, following the providerBadge chip above rather than
+       inventing a second visual language for a per-row attribute: same
+       inline-flex chip, same 4px gap, same small type.
+
+       Unknown or unset renders NOTHING — an empty cell, no globe, no dash, no
+       "unknown" chip. That is #4371's rule and it matters most here, where a
+       column of placeholders would read as data we have. The rollup below the
+       table is where the size of the unknown bucket is stated explicitly; the
+       row is not the place to repeat it 200 times.
+
+       countryFlagHTML already normalizes and escapes; the code is escaped again
+       for the visible text because the render path must not depend on the
+       validator upstream of it staying correct. Color is the --muted theme
+       token so the code recedes next to the name in both light and dark. */
+    function countryCell(u) {
+      var code = normalizeCountryCode(u && u.country);
+      if (!code) return '';
+      return '<span style="display:inline-flex;align-items:center;gap:4px;font-size:0.7rem;color:var(--muted)">' +
+        countryFlagHTML(code) + esc(code) + '</span>';
+    }
+
     // renderContactCell is the collapsed summary shown in the main user row.
     function renderContactCell(u) {
       var bits = [];
       if (u.full_name) bits.push('<span style="font-size:0.78rem">' + esc(u.full_name) + '</span>');
+      if (u.company) bits.push('<span style="font-size:0.7rem;color:var(--muted)">' + esc(u.company) + '</span>');
       if (u.slack_id) bits.push('<span style="font-size:0.7rem;color:var(--muted)">slack: ' + esc(u.slack_id) + '</span>');
       if (u.notes) {
         var preview = u.notes.length > CONTACT_NOTES_PREVIEW_CHARS
@@ -17632,6 +19540,32 @@ const dashboardHTML = `<!DOCTYPE html>
             '<label style="' + lbl + '">Slack ID</label>' +
             '<input type="text" data-contact-user="' + user + '" data-contact-field="slack_id"' +
               ' maxlength="' + CONTACT_MAX_SLACK + '" value="' + escAttr(u.slack_id || '') + '" style="' + fld + '">' +
+          '</div>' +
+          /* Company. Admin-entered CRM free text, NOT collected in the hive
+             request form (operator fills it manually). A combobox: a plain
+             <input> backed by a <datalist> of the company names already entered
+             across users (companyDatalistOptionsHTML), so it autocompletes from
+             the growing set as they are entered while still accepting a new one. */
+          '<div style="flex:1 1 ' + CONTACT_W_COMPANY_BASIS + ';min-width:' + CONTACT_W_COMPANY_MIN + '">' +
+            '<label style="' + lbl + '">Company</label>' +
+            '<input type="text" data-contact-user="' + user + '" data-contact-field="company"' +
+              ' list="contact-company-suggestions"' +
+              ' maxlength="' + CONTACT_MAX_COMPANY + '" value="' + escAttr(u.company || '') + '" style="' + fld + '">' +
+          '</div>' +
+          /* Country. An ADMIN ASSIGNMENT on the user's behalf (recorded as
+             CountrySource "admin"). Now a <select> of ISO 3166-1 codes labeled
+             with their localized names via Intl.DisplayNames — no duplicated
+             250-row table (countrySelectOptionsHTML), a blank "— none —" clears
+             it. The live preview still echoes the flag + name for the current
+             selection so the row's Country column agrees on open. */
+          '<div style="flex:1 1 ' + CONTACT_W_COUNTRY_BASIS + ';min-width:' + CONTACT_W_COUNTRY_MIN + '">' +
+            '<label style="' + lbl + '">Country</label>' +
+            '<select data-contact-user="' + user + '" data-contact-field="country"' +
+              ' aria-describedby="' + contactCountryPreviewId(u.github_username) + '"' +
+              ' style="' + fld + '">' + countrySelectOptionsHTML(u.country) + '</select>' +
+            '<div id="' + contactCountryPreviewId(u.github_username) + '"' +
+              ' style="margin-top:4px;font-size:0.66rem;color:var(--muted);min-height:1.1em">' +
+              countryPreviewHTML(u.country) + '</div>' +
           '</div>' +
           '<div style="flex:' + CONTACT_NOTES_GROW + ' 1 ' + CONTACT_W_NOTES_BASIS + ';min-width:' + CONTACT_W_NOTES_MIN + '">' +
             '<label style="' + lbl + '">Notes</label>' +
@@ -17809,9 +19743,26 @@ const dashboardHTML = `<!DOCTYPE html>
         // Any keystroke marks the table as being edited and records the
         // in-progress value, so the poll backs off and nothing typed is only
         // ever held in a DOM node that is about to be replaced.
-        el.addEventListener('input', function() {
+        var onEdit = function() {
           markContactEditing();
           _contactDirty[key] = el.value;
+          /* Country is the one field whose stored form (two letters) does not
+             say what it means, so it echoes as you type/select. The other
+             fields are their own preview. */
+          if (field === 'country') refreshContactCountryPreview(user, el.value);
+        };
+        el.addEventListener('input', onEdit);
+        // A <select> (the Country dropdown) fires 'change', not always 'input'.
+        // Also save on change so a dropdown pick commits without needing a blur.
+        el.addEventListener('change', function() {
+          onEdit();
+          if (el.tagName === 'SELECT') {
+            var pending = el.value;
+            saveContactField(user, field, pending, {silent: true}).then(function(ok) {
+              if (ok && _contactDirty[key] === pending) delete _contactDirty[key];
+              refreshContactToggleLabel(user);
+            });
+          }
         });
         // focus/blur also count as activity: tabbing between fields must not
         // leave a gap the poll can render into.
@@ -17890,6 +19841,17 @@ const dashboardHTML = `<!DOCTYPE html>
       var current = _allUsers ? (_allUsers.find(function(x) { return x.github_username === username; }) || {}) : {};
       var previous = (_contactLastSaved[key] !== undefined) ? _contactLastSaved[key] : (current[field] || '');
       var next = (value || '').trim();
+      /* Country is stored upper-cased by the server, so normalize it to the
+         SAME form here before the equality check. Without this, re-opening the
+         panel and typing "gb" over a stored "GB" would read as a change and fire
+         a pointless PUT, and the optimistic cache below would hold a value the
+         server never wrote. A half-typed or invalid code is left alone rather
+         than blanked, so the field still holds what was typed while the server
+         does the actual rejecting. */
+      if (field === 'country') {
+        var norm = normalizeCountryCode(next);
+        if (norm) next = norm;
+      }
       if (next === previous) return Promise.resolve(true);
       _contactLastSaved[key] = next;
       // Keep the in-memory copy in step so the next poll's signature check does
@@ -18205,6 +20167,7 @@ const dashboardHTML = `<!DOCTYPE html>
           '<td style="font-size:0.75rem;color:var(--muted)">' + esc(fmtUserTS(u.created_at)) + '</td>' +
           '<td style="font-size:0.75rem;color:var(--muted)">' + esc(fmtUserTS(u.last_login)) + '</td>' +
           '<td style="text-align:left">' + renderContactCell(u) + '</td>' +
+          '<td>' + countryCell(u) + '</td>' +
           '<td>' + statusCell + '</td>' +
           '<td><input type="number" min="0" max="10" value="' + (u.saas_quota || 0) + '" style="width:50px;padding:4px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);text-align:center" onchange="updateUser(\'' + esc(u.github_username) + '\',{saas_quota:parseInt(this.value)||0})"></td>' +
           '<td>' + (hiveCount > 0 ? '<a href="#" onclick="toggleAdminExpand(\'' + esc(u.github_username) + '\');return false" style="color:var(--blue);font-size:0.8rem">' + hiveCount + ' hive' + (hiveCount > 1 ? 's' : '') + '</a>' : '<span style="color:var(--muted)">0</span>') + '</td>' +
@@ -18212,8 +20175,12 @@ const dashboardHTML = `<!DOCTYPE html>
           '</tr>' + renderContactPanelRow(u) + hiveRows;
       }).join('');
       document.getElementById('users-container').innerHTML =
+        // Shared autocomplete vocabulary for the Company combobox, rebuilt each
+        // render from the distinct company values across all users so it grows
+        // as new companies are entered.
+        '<datalist id="contact-company-suggestions">' + companyDatalistOptionsHTML() + '</datalist>' +
         '<table class="hive-table"><thead><tr>' +
-        '<th onclick="sortUsers(\'github_username\')" style="cursor:pointer">User ⇅</th><th onclick="sortUsers(\'created_at\')" style="cursor:pointer">Joined ⇅</th><th onclick="sortUsers(\'last_login\')" style="cursor:pointer">Last Login ⇅</th><th onclick="sortUsers(\'full_name\')" style="cursor:pointer">Contact ⇅</th><th onclick="sortUsers(\'status\')" style="cursor:pointer">Status ⇅</th><th onclick="sortUsers(\'saas_quota\')" style="cursor:pointer">Quota ⇅</th><th onclick="sortUsers(\'hiveCount\')" style="cursor:pointer">Hives ⇅</th><th>Actions</th>' +
+        '<th onclick="sortUsers(\'github_username\')" style="cursor:pointer">User ⇅</th><th onclick="sortUsers(\'created_at\')" style="cursor:pointer">Joined ⇅</th><th onclick="sortUsers(\'last_login\')" style="cursor:pointer">Last Login ⇅</th><th onclick="sortUsers(\'full_name\')" style="cursor:pointer">Contact ⇅</th><th onclick="sortUsers(\'country\')" style="cursor:pointer">Country ⇅</th><th onclick="sortUsers(\'status\')" style="cursor:pointer">Status ⇅</th><th onclick="sortUsers(\'saas_quota\')" style="cursor:pointer">Quota ⇅</th><th onclick="sortUsers(\'hiveCount\')" style="cursor:pointer">Hives ⇅</th><th>Actions</th>' +
         '</tr></thead><tbody>' + rows + '</tbody></table>';
       // The contact panels are built as raw HTML above; wire their listeners
       // once the rows are actually in the DOM. Inline on* handlers are avoided
@@ -19046,8 +21013,23 @@ const dashboardHTML = `<!DOCTYPE html>
             <option value="merger" title="Everything Read-Write grants, plus approve and queue other contributors' work for auto-merge.">Merger</option>
             <option value="owner" title="Full control: manage access, settings and budget for this hive.">Owner</option>
           </select>
-          <input id="access-expiry" type="date" title="Optional expiry — leave empty for permanent access. Access is revoked automatically after this date (UTC)."
-            style="flex:0 0 auto;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.85rem">
+          <!-- A checkbox owns whether the new grant expires; the date input is
+               HIDDEN until it is checked.
+               An empty <input type="date"> cannot express "no expiry" — the
+               browser paints its own mm/dd/yyyy placeholder, so an untouched
+               field looks like a date the operator already chose. Adding a
+               label alone did not fix it: the control then showed a name and a
+               date that disagreed. Hiding the input when unchecked leaves
+               exactly one visible answer. -->
+          <span style="display:flex;align-items:center;gap:6px;flex:0 0 auto">
+            <input type="checkbox" id="access-expiry-enabled" onchange="toggleAddExpiryVisible()"
+              title="Off — access lasts until it is removed. On — pick the last day of access."
+              style="cursor:pointer;margin:0">
+            <label for="access-expiry-enabled" style="font-size:0.7rem;color:var(--muted);cursor:pointer;white-space:nowrap">Expires</label>
+            <input id="access-expiry" type="date" title="Access is revoked automatically after this date (UTC)."
+              style="display:none;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.85rem">
+            <span id="access-expiry-never" style="font-size:0.7rem;color:var(--text)">Never</span>
+          </span>
           <button onclick="addAccess()" class="btn-primary" style="flex:0 0 auto;padding:8px 16px;font-size:0.8rem">Add</button>
         </div>
         <div id="access-role-hint" style="margin-top:6px;font-size:0.72rem;color:var(--muted);line-height:1.4"></div>
@@ -19524,8 +21506,19 @@ const dashboardHTML = `<!DOCTYPE html>
         }
         var ownerCount = users.filter(function(u) { return u.role === 'owner'; }).length;
         var rows = users.map(function(u) {
-          var avatar = linkedAvatar(u.username, LIST_AVATAR_PX,
-            String(u.username || '') + (u.role ? ' — ' + u.role : ''), 'margin-right:6px');
+          // u.username is the raw identity key — the actual auth key and
+          // allowlist match — and is NEVER altered for display. u.display_label
+          // is resolved hub-side (accessForHive → provisionRequestUserIdentity,
+          // the SAME precedence used everywhere else a friendly name is shown)
+          // and always falls back to u.username, so hasFriendlyName is exactly
+          // "the hub found something better than the raw key".
+          var provider = u.provider || identityProviderFromKey(u.username);
+          var hasFriendlyName = !!(u.display_label && u.display_label !== u.username);
+          var avatar = provider === 'github'
+            ? linkedAvatar(u.username, LIST_AVATAR_PX,
+                String(u.username || '') + (u.role ? ' — ' + u.role : ''), 'margin-right:6px')
+            : userAvatar({display_name: u.display_label, avatar_url: u.avatar_url, github_username: u.username},
+                LIST_AVATAR_PX, 'margin-right:6px');
           // The last owner can be neither removed nor demoted — doing so would
           // orphan the hive with no one able to manage access.
           var isLastOwner = (u.role === 'owner' && ownerCount <= 1);
@@ -19559,17 +21552,56 @@ const dashboardHTML = `<!DOCTYPE html>
           // last valid day when set, and empty means permanent. Changing it
           // extends (or clears) the expiry; the last owner cannot be expired
           // for the same reason they cannot be removed or demoted.
+          // A checkbox owns whether this grant expires; the date input EXISTS
+          // only when it does.
+          //
+          // A bare <input type="date"> cannot express "no expiry": an empty one
+          // still paints the browser's mm/dd/yyyy placeholder, so a permanent
+          // grant and one expiring today look the same. Labelling it was not
+          // enough — the row then read "Expires: Never 08/27/2026", stating
+          // both answers at once and leaving the operator to guess which the
+          // system believed. Removing the control entirely when unchecked is
+          // the only version with exactly one visible answer.
+          var hasExpiry = !!u.expires_at;
+          var expiryToggleId = 'expcb-' + esc(u.username).replace(/[^A-Za-z0-9_-]/g, '_');
+          // Checking the box needs a date to submit; today would expire the
+          // grant immediately, so default to 30 days out and let the operator
+          // adjust. Unchecking sends '' — the API's existing "permanent".
           var expiryControl = isLastOwner ? '' :
-            '<input type="date" class="access-expiry-input" value="' + esc(expiryToDateInput(u.expires_at)) + '"' +
-            ' onchange="changeAccessExpiry(\'' + esc(u.username) + '\', \'' + esc(u.role) + '\', this.value)"' +
-            ' title="Optional expiry — empty means permanent. Access is revoked automatically after this date (UTC)."' +
-            ' style="font-size:0.65rem;padding:2px 4px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:' + (u.expires_at ? 'var(--amber)' : 'var(--muted)') + '">';
-          return '<div style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;padding:8px 0;border-bottom:1px solid var(--border)">' +
-            '<div style="display:flex;align-items:center;gap:4px;flex:1 1 240px;min-width:0">' + checkbox + avatar + providerIconHTML(identityProviderFromKey(u.username)) + '<span style="font-size:0.85rem;word-break:break-word">' + esc(u.username) + '</span>' +
+            '<span style="display:inline-flex;align-items:center;gap:4px" title="' +
+              (hasExpiry ? 'Access is revoked automatically after this date (UTC).' : 'No expiry — this grant lasts until it is removed.') + '">' +
+            '<input type="checkbox" id="' + expiryToggleId + '"' + (hasExpiry ? ' checked' : '') +
+            ' onchange="toggleAccessExpiry(\'' + esc(u.username) + '\', \'' + esc(u.role) + '\', this.checked)"' +
+            ' style="cursor:pointer;margin:0">' +
+            '<label for="' + expiryToggleId + '" style="font-size:0.6rem;color:var(--muted);cursor:pointer">Expires</label>' +
+            (hasExpiry ?
+              '<input type="date" class="access-expiry-input" value="' + esc(expiryToDateInput(u.expires_at)) + '"' +
+              ' onchange="changeAccessExpiry(\'' + esc(u.username) + '\', \'' + esc(u.role) + '\', this.value)"' +
+              ' title="Access is revoked automatically after this date (UTC)."' +
+              ' style="font-size:0.65rem;padding:2px 4px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--amber)">'
+              : '<span style="font-size:0.6rem;color:var(--text)">Never</span>') +
+            '</span>';
+          // Primary label: the resolved friendly name when the hub found one,
+          // else the raw key exactly as before. The raw key is NEVER hidden —
+          // it rides as a muted secondary line (and the avatar's title) any
+          // time a friendly name is shown, so support/debugging always has it
+          // one glance away. A GitHub user whose label is still the bare
+          // login keeps the existing async profile-name enrichment
+          // (.gh-display-name / enrichGhDisplayNames, #4145).
+          var primaryLabel = hasFriendlyName ? u.display_label : u.username;
+          var rawKeyLine = hasFriendlyName
+            ? '<span style="display:block;font-size:0.7rem;color:var(--muted);word-break:break-word" title="Auth key">' + esc(u.username) + '</span>'
+            : '';
+          var ghEnrichPlaceholder = (provider === 'github' && !hasFriendlyName)
             /* Empty placeholder the async GitHub profile lookup fills in
                (#4145): display name lands beside the username when it arrives,
                and stays empty on any failure — the login always renders first. */
-            '<span class="gh-display-name" data-gh-login="' + escAttr(u.username) + '" style="margin-left:6px;font-size:0.75rem;color:var(--muted)"></span></div>' +
+            ? '<span class="gh-display-name" data-gh-login="' + escAttr(u.username) + '" style="margin-left:6px;font-size:0.75rem;color:var(--muted)"></span>'
+            : '';
+          return '<div style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;padding:8px 0;border-bottom:1px solid var(--border)">' +
+            '<div style="display:flex;align-items:center;gap:4px;flex:1 1 240px;min-width:0">' + checkbox + avatar + providerIconHTML(provider) +
+            '<span style="font-size:0.85rem;word-break:break-word;min-width:0" title="' + escAttr(u.username) + '">' + esc(primaryLabel) + rawKeyLine + '</span>' +
+            ghEnrichPlaceholder + '</div>' +
             '<div style="display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:8px;flex:1 1 300px;min-width:0">' +
             lastActive +
             roleControl +
@@ -19651,7 +21683,11 @@ const dashboardHTML = `<!DOCTYPE html>
         });
         if (!resp.ok) { var d = await resp.json(); hiveToast(d.error || 'Failed', 'error'); return; }
         document.getElementById('access-username').value = '';
-        document.getElementById('access-expiry').value = '';
+        // Reset the checkbox too, not just the date: clearing one without the
+        // other leaves the form claiming an expiry is set while submitting ''
+        // (permanent), which is the desync this control exists to prevent.
+        document.getElementById('access-expiry-enabled').checked = false;
+        toggleAddExpiryVisible();
         loadAccessList();
         loadAccessAuditLog();
       } catch(e) { hiveToast('Error: ' + e.message, 'error'); }
@@ -19660,6 +21696,45 @@ const dashboardHTML = `<!DOCTYPE html>
     /* changeAccessExpiry sets, extends, or clears (empty value) the expiry on
        an existing grant. The role is re-sent unchanged — the add endpoint
        upserts — and expires_at carries the new bound ("" = permanent). */
+    // toggleAddExpiryVisible shows the Add User date input only while the
+    // checkbox is on, and swaps in a literal "Never" while it is off, so the
+    // row always states one answer rather than showing a placeholder date the
+    // operator never chose.
+    function toggleAddExpiryVisible() {
+      var on = document.getElementById('access-expiry-enabled').checked;
+      var input = document.getElementById('access-expiry');
+      var never = document.getElementById('access-expiry-never');
+      input.style.display = on ? '' : 'none';
+      if (never) never.style.display = on ? 'none' : '';
+      if (on) {
+        // Seed a usable date so checking the box cannot submit an empty value
+        // (which the API reads as permanent — the opposite of what was asked).
+        if (!input.value) {
+          var d = new Date();
+          d.setDate(d.getDate() + defaultExpiryDays);
+          input.value = d.toISOString().slice(0, 10);
+        }
+      } else {
+        input.value = '';
+      }
+    }
+
+    // defaultExpiryDays is how far out the date lands when an operator turns
+    // expiry ON. It must not be 0: checking the box would then expire the
+    // grant the moment it was checked, which reads as the UI revoking access
+    // rather than scheduling it.
+    var defaultExpiryDays = 30;
+
+    // toggleAccessExpiry flips a grant between permanent and expiring.
+    // Unchecking sends '' — the API's existing "permanent" — and checking
+    // sends a real date, because the server cannot store "expires, date TBD".
+    async function toggleAccessExpiry(username, role, checked) {
+      if (!checked) { changeAccessExpiry(username, role, ''); return; }
+      var d = new Date();
+      d.setDate(d.getDate() + defaultExpiryDays);
+      changeAccessExpiry(username, role, d.toISOString().slice(0, 10));
+    }
+
     async function changeAccessExpiry(username, role, value) {
       try {
         var resp = await fetch('/api/saas/hives/' + encodeURIComponent(_accessHiveId) + '/access', {

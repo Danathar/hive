@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -80,6 +81,32 @@ type Client struct {
 	// MergeRequestAuthorizer / F4). nil fails closed. Set by
 	// StartMergeRequestWatcher.
 	mergeAuthz MergeRequestAuthorizer
+	// issueAuthz gates issue-create/comment/claim requests from the issue-request
+	// watcher against the per-agent mode policy (CanCreateIssues) +
+	// forge-resistance. nil fails closed. Set by StartIssueRequestWatcher.
+	issueAuthz IssueRequestAuthorizer
+	// reviewAuthz gates PR-review requests from the review-request watcher against
+	// the per-agent push-capability policy + forge-resistance. nil fails closed.
+	// Set by StartReviewRequestWatcher.
+	reviewAuthz ReviewRequestAuthorizer
+	// issueRetries tracks per-request-file retry backoff for the issue-request
+	// watcher (in-memory; reset on restart). Guarded by issueRetryMu.
+	issueRetryMu sync.Mutex
+	issueRetries map[string]*issueRetryState
+	// prRetries / reviewRetries apply the same per-request-file backoff +
+	// give-up policy to the PR-open and PR-review watchers (request_retry.go).
+	// Zero values are ready to use.
+	prRetries     retryTracker
+	reviewRetries retryTracker
+	// defaultBranchMu guards defaultBranches, which memoizes the resolved
+	// default branch per "owner/repo" (see defaultbranch.go). A repo's default
+	// branch changes about as often as the repo is renamed, so caching it keeps
+	// the "what is this repo's base?" lookup off the hot path of every PR open
+	// without risking a stale answer that matters. Only successful lookups are
+	// cached — a transient API error must not pin a repo to the fallback for
+	// the life of the process.
+	defaultBranchMu sync.RWMutex
+	defaultBranches map[string]string
 	// mergerAuthz gates the label-queued auto-merge sweep on WHO queued the
 	// merge: it reports whether a login holds at least config.RoleMerger (audit
 	// F3). nil fails closed — SweepQueuedAutoMerges merges nothing. Guarded
@@ -122,6 +149,20 @@ type Client struct {
 	// advisoryMu.
 	advisoryMu          sync.Mutex
 	advisoryDigestPosts map[string]int
+	// advisoryDigestHashes holds, per "owner/repo#issue", the content hash of
+	// the last digest body SUCCESSFULLY written to the forge (#4818). When the
+	// next cycle renders a byte-identical body, PostAdvisoryDigest skips the
+	// EditComment call entirely — at steady state that saves ~1,440 no-op
+	// GitHub writes/day. Only successful writes record a hash, so a failed
+	// write keeps being retried. Guarded by advisoryMu.
+	advisoryDigestHashes map[string]string
+	// advisoryDigestSkips counts consecutive skipped-because-unchanged cycles
+	// per key since the last real write. Once it reaches
+	// advisoryDigestWriteThroughInterval-1 the next cycle writes through even
+	// if unchanged, so permission regressions (e.g. a 403 after the App loses
+	// issues:write) still surface within ~an hour instead of never. Guarded by
+	// advisoryMu.
+	advisoryDigestSkips map[string]int
 }
 
 func (c *Client) SetCanaryScanner(enabled, failClosed bool, reg *ioscan.CanaryRegistry, onLeak func(ioscan.CanaryLeak)) {
@@ -167,6 +208,8 @@ type Issue struct {
 	Author    string    `json:"author"`
 	Labels    []string  `json:"labels"`
 	Assignees []string  `json:"assignees"`
+	Priority  string    `json:"priority,omitempty"`
+	State     string    `json:"state,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	// UpdatedAt is GitHub's last-activity timestamp for the issue (new commits
 	// referencing it, comments, label/assignee changes, …). It is the
@@ -193,11 +236,22 @@ type Issue struct {
 	// leaves them empty, and an empty SourceType reads as "github". Consumers
 	// must build identity through worksource.Ref rather than reading these
 	// directly, so there is a single key implementation.
-	SourceType     string `json:"source_type,omitempty"`
-	ExternalID     string `json:"external_id,omitempty"`
-	ComplexityTier string `json:"complexity_tier,omitempty"`
-	ModelRec       string `json:"model_recommendation,omitempty"`
-	Lane           string `json:"lane,omitempty"`
+	SourceType string `json:"source_type,omitempty"`
+	ExternalID string `json:"external_id,omitempty"`
+	// DependsOn carries source-native dependency edges through the legacy
+	// GitHub-shaped scheduler envelope. Key is always worksource.Ref.Key().
+	DependsOn      []IssueDependency `json:"depends_on,omitempty"`
+	ComplexityTier string            `json:"complexity_tier,omitempty"`
+	ModelRec       string            `json:"model_recommendation,omitempty"`
+	Lane           string            `json:"lane,omitempty"`
+}
+
+// IssueDependency is the transport form of a source-aware work dependency.
+// It deliberately carries the canonical key rather than source fields so the
+// key format has one implementation in pkg/worksource.
+type IssueDependency struct {
+	Key      string `json:"key"`
+	Resolved bool   `json:"resolved"`
 }
 
 type PullRequest struct {
@@ -315,6 +369,17 @@ type IssueResult struct {
 	SLAViolations int     `json:"sla_violations"`
 }
 
+// IssueResultFromItems builds the queue summary consumed by the governor.
+func IssueResultFromItems(items []Issue) IssueResult {
+	result := IssueResult{Count: len(items), Items: items}
+	for _, issue := range items {
+		if issue.AgeMinutes > slaThresholdMinutes {
+			result.SLAViolations++
+		}
+	}
+	return result
+}
+
 type PRResult struct {
 	Count int           `json:"count"`
 	Items []PullRequest `json:"items"`
@@ -357,8 +422,6 @@ var PermanentExemptLabels = []string{"do-not-merge"}
 // Client.AutoMergeLabel(), which honours that configuration; this constant
 // exists so a nil or unconfigured client still has a sane value.
 const AutoMergeQueuedLabel = config.DefaultAutoMergeLabel
-
-var exemptFiles = []string{"ADOPTERS.md", "ADOPTERS.MD"}
 
 const slaThresholdMinutes = 30
 
@@ -487,13 +550,6 @@ func (c *Client) EnumerateActionable(ctx context.Context) (*ActionableResult, er
 		return allIssues[i].AgeMinutes > allIssues[j].AgeMinutes
 	})
 
-	slaViolations := 0
-	for _, issue := range allIssues {
-		if issue.AgeMinutes > slaThresholdMinutes {
-			slaViolations++
-		}
-	}
-
 	holdIssueCount := 0
 	holdPRCount := 0
 	for _, h := range holdItems {
@@ -504,11 +560,7 @@ func (c *Client) EnumerateActionable(ctx context.Context) (*ActionableResult, er
 		}
 	}
 
-	result.Issues = IssueResult{
-		Count:         len(allIssues),
-		Items:         allIssues,
-		SLAViolations: slaViolations,
-	}
+	result.Issues = IssueResultFromItems(allIssues)
 	result.PRs = PRResult{
 		Count:       len(allPRs),
 		Items:       allPRs,
@@ -969,6 +1021,12 @@ func (c *Client) QueuePRAutoMerge(ctx context.Context, repo string, number int, 
 	if err != nil {
 		return fmt.Errorf("approving PR: %w", err)
 	}
+	// Audit the review so it counts as activity on the trail. This is the hive's
+	// own auto-merge self-approval (a governor action); agent-authored reviews
+	// come through the review-request watcher, which audits separately.
+	c.recordCreationAudit(AuditActionPRReviewed, InvocationMeta{Agent: AttributionAgentGovernor},
+		"repo", owner+"/"+repoName, "number", strconv.Itoa(number),
+		"agent", queuedBy, "state", "approved")
 	if _, _, err := c.client.Issues.AddLabelsToIssue(ctx, owner, repoName, number, []string{label}); err != nil {
 		return fmt.Errorf("adding %s label: %w", label, err)
 	}
@@ -1035,17 +1093,26 @@ func safeGetLogin(u *gh.User) string {
 	return u.GetLogin()
 }
 
-func isHeld(labels []string) bool {
+func HasHoldLabel(labels []string) bool {
+	return HasHoldLabelWith(labels, nil)
+}
+
+func HasHoldLabelWith(labels, extraHoldLabels []string) bool {
+	holdLabels := append([]string{}, HoldLabels...)
+	holdLabels = append(holdLabels, extraHoldLabels...)
 	for _, label := range labels {
 		lower := strings.ToLower(label)
-		for _, sub := range HoldLabels {
-			if strings.Contains(lower, sub) {
+		for _, sub := range holdLabels {
+			sub = strings.ToLower(strings.TrimSpace(sub))
+			if sub != "" && strings.Contains(lower, sub) {
 				return true
 			}
 		}
 	}
 	return false
 }
+
+func isHeld(labels []string) bool { return HasHoldLabel(labels) }
 
 // SetExemptLabels is nil-receiver safe for the same reason as SetRepos.
 func (c *Client) SetExemptLabels(labels []string) {
@@ -1105,19 +1172,37 @@ func (c *Client) AutoMergeLabel() string {
 }
 
 func (c *Client) isExempt(labels []string) bool {
+	return HasExemptLabel(labels, c.exemptLabels)
+}
+
+func HasExemptLabel(labels, exemptLabels []string) bool {
 	for _, label := range labels {
 		for _, perm := range PermanentExemptLabels {
 			if strings.EqualFold(label, perm) || strings.HasPrefix(label, perm) {
 				return true
 			}
 		}
-		for _, exempt := range c.exemptLabels {
+		for _, exempt := range exemptLabels {
 			if strings.EqualFold(label, exempt) || strings.HasPrefix(label, exempt) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+func FilterExemptIssues(items []Issue, exemptLabels []string) []Issue {
+	if len(items) == 0 {
+		return []Issue{}
+	}
+	out := make([]Issue, 0, len(items))
+	for _, issue := range items {
+		if HasExemptLabel(issue.Labels, exemptLabels) {
+			continue
+		}
+		out = append(out, issue)
+	}
+	return out
 }
 
 // trackerTaskListRe matches a Markdown task-list item whose subject is an issue
@@ -1149,7 +1234,7 @@ const trackerTaskListMin = 3
 // The callout text itself is NOT matched — free-text matching is brittle in the
 // direction that hurts. The task list is enough, and it is what GitHub itself
 // treats as the tracking signal.
-func isTracker(title string, labels []string, body string) bool {
+func IsTrackerIssue(title string, labels []string, body string) bool {
 	if strings.HasPrefix(title, "[Tracker]") {
 		return true
 	}
@@ -1164,6 +1249,10 @@ func isTracker(title string, labels []string, body string) bool {
 		return true
 	}
 	return false
+}
+
+func isTracker(title string, labels []string, body string) bool {
+	return IsTrackerIssue(title, labels, body)
 }
 
 type RateLimitInfo struct {
@@ -1216,6 +1305,20 @@ func (c *Client) LatestCommitHash(ctx context.Context, owner, repo, branch strin
 		return "", fmt.Errorf("fetching ref %s/%s@%s: %w", owner, repo, branch, err)
 	}
 	return ref.GetObject().GetSHA(), nil
+}
+
+// CompareAheadBy returns how many commits head is ahead of base according to
+// GitHub's compare endpoint. When head is the release tip and base is a running
+// build SHA, this is the "commits behind" count for that build.
+func (c *Client) CompareAheadBy(ctx context.Context, owner, repo, base, head string) (int, error) {
+	if c == nil || c.client == nil {
+		return 0, ErrNoGitHubClient
+	}
+	cmp, _, err := c.client.Repositories.CompareCommits(ctx, owner, repo, base, head, nil)
+	if err != nil {
+		return 0, fmt.Errorf("comparing commits %s/%s %s...%s: %w", owner, repo, base, head, err)
+	}
+	return cmp.GetAheadBy(), nil
 }
 
 // CommitMessage returns the first line of the commit message for the given SHA.
@@ -1350,8 +1453,6 @@ func (c *Client) SearchOutreachPRCount(ctx context.Context, author, org, project
 	}
 	return result.GetTotal(), nil
 }
-
-const perPage = 100
 
 var shaPattern = regexp.MustCompile(`[0-9a-f]{7,40}\b`)
 

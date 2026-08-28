@@ -1,11 +1,11 @@
-# Pinned to the golang:1.26-alpine multi-arch index digest to prevent
+# Pinned to the golang:1.27-alpine multi-arch index digest to prevent
 # floating-tag supply-chain risk. Refresh deliberately:
 #   TOKEN=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/golang:pull" | jq -r .token)
 #   curl -sI -H "Authorization: Bearer $TOKEN" \
 #     -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json" \
-#     https://registry-1.docker.io/v2/library/golang/manifests/1.26-alpine | grep -i docker-content-digest
+#     https://registry-1.docker.io/v2/library/golang/manifests/1.27-alpine | grep -i docker-content-digest
 # and update both the tag and the @sha256 digest together.
-FROM golang:1.26-alpine@sha256:3889b425f035be855a72fb4755265311293b6d414521f0a519d819df32222d83 AS builder
+FROM golang:1.27-alpine@sha256:4c9fe60190a2a3350ddc51de80d0224b8a6698d12bdfc999fee45ea9d6c46dbc AS builder
 RUN apk add --no-cache git
 WORKDIR /src
 
@@ -25,6 +25,17 @@ COPY src/ .
 
 ARG GIT_HASH=unknown
 ARG GIT_BRANCH=unknown
+# VERSION is the semver Hive reports (`hive --version`, heartbeats,
+# registration), wired the same way as GIT_HASH/GIT_BRANCH: an -X ldflag that
+# takes over from the Go linker default (cmd/hive/main.go, "0.0.0-dev") only
+# when a caller passes it. NO current workflow passes it — docker.yml never
+# does, and release.yml (.github/workflows/release.yml) deliberately does not
+# rebuild at all; it retags the image docker.yml already published for that
+# commit rather than invoking this Dockerfile a second time. This ARG exists
+# so that gap can be closed later (teaching a build to embed a real semver)
+# without a second source change. See src/docs/releases.md, "What still
+# blocks cutting a real release", for why that is not done in this PR.
+ARG VERSION=""
 # Cache mounts for GOCACHE (/tmp/gobuild, matching the GOCACHE= below) and the
 # module cache. docker.yml's `no-cache-filters: builder,runtime` still forces
 # this RUN to re-execute on every build — that is the #3760 stale-binary
@@ -37,7 +48,9 @@ RUN --mount=type=cache,id=hive-go-build,target=/tmp/gobuild \
     GIT_HASH=$(git -C /repo rev-parse HEAD 2>/dev/null || echo "unknown") && \
     GIT_SHORT=$(git -C /repo rev-parse --short=7 HEAD 2>/dev/null || echo "unknown") && \
     if [ "$GIT_BRANCH" = "unknown" ] || [ -z "$GIT_BRANCH" ]; then GIT_BRANCH=$(git -C /repo rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown"); fi && \
-    GOCACHE=/tmp/gobuild CGO_ENABLED=0 go build -ldflags "-X main.gitHash=${GIT_HASH} -X main.gitShort=${GIT_SHORT} -X main.gitBranch=${GIT_BRANCH}" -o /hive ./cmd/hive && \
+    VERSION_LDFLAG="" && \
+    if [ -n "$VERSION" ]; then VERSION_LDFLAG="-X main.version=${VERSION}"; fi && \
+    GOCACHE=/tmp/gobuild CGO_ENABLED=0 go build -ldflags "-X main.gitHash=${GIT_HASH} -X main.gitShort=${GIT_SHORT} -X main.gitBranch=${GIT_BRANCH} ${VERSION_LDFLAG}" -o /hive ./cmd/hive && \
     GOCACHE=/tmp/gobuild CGO_ENABLED=0 go build -o /bd ./cmd/bd && \
     GOCACHE=/tmp/gobuild CGO_ENABLED=0 go build -o /hive-backup ./cmd/hive-backup
 
@@ -268,6 +281,33 @@ RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" && \
       echo "WARN: Goose CLI download failed — skipping (backend: goose will be unavailable)"; \
     fi
 
+# --- Layer 8.25: Google Antigravity CLI (backend: agy) ---
+# The vendor distributes a self-contained Linux executable, not an npm package.
+# Pin the version, build ID, and SHA-512 from its public updater manifest; do
+# not use the mutable manifest at image-build time. The CLI requires a
+# pre-authenticated Google OAuth session in $HOME/.gemini: the image supplies
+# only the binary, while an operator seeds that persistent state (a pod cannot
+# complete the interactive OAuth flow itself). This enables a self-hosted Hive
+# controller to use its configured agy fallback rung without pretending that
+# generic contributor containers can bootstrap Google login.
+ARG AGY_VERSION=1.1.19
+ARG AGY_BUILD=4894004681244672
+ARG AGY_SHA512_AMD64=7c3b310c80685adcba714994207eb870fb4817403975da46555b7d9fade446487da3d8f897aa220dfbc30f602ab461a0147a6f7b3c8228fdebd35951e3f250fd
+ARG AGY_SHA512_ARM64=488c3dac1c7ca866a9da990f9a88648bfb7176992a0a2d27605e3bc10143e5b17af552ed99f0bf4250e2d69fed6d0d5f50684c729bf03f269f2b52b44503558d
+RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" && \
+    case "$ARCH" in \
+      amd64|x86_64) AGY_URL_ARCH=x64; AGY_FILE_ARCH=x64; AGY_SHA512="$AGY_SHA512_AMD64" ;; \
+      arm64|aarch64) AGY_URL_ARCH=arm; AGY_FILE_ARCH=arm64; AGY_SHA512="$AGY_SHA512_ARM64" ;; \
+      *) echo "unsupported arch for agy: $ARCH" >&2; exit 1 ;; \
+    esac && \
+    curl -fsSL --retry 8 --retry-delay 5 --retry-max-time 300 --retry-connrefused --retry-all-errors \
+      -o /tmp/agy.tar.gz "https://storage.googleapis.com/antigravity-public/antigravity-cli/${AGY_VERSION}-${AGY_BUILD}/linux-${AGY_URL_ARCH}/cli_linux_${AGY_FILE_ARCH}.tar.gz" && \
+    echo "${AGY_SHA512}  /tmp/agy.tar.gz" | sha512sum -c - && \
+    tar xzf /tmp/agy.tar.gz -C /tmp && \
+    install -m 0755 /tmp/antigravity /usr/local/bin/agy && \
+    rm -f /tmp/agy.tar.gz /tmp/antigravity && \
+    agy --version
+
 # --- Layer 8.5: pi CLI (@earendil-works/pi-coding-agent — backend: pi) ---
 # Tolerant of failure like the copilot/codex layers: agents configured for
 # backend: pi simply won't launch if this is absent, same degradation as
@@ -300,13 +340,19 @@ ARG BOBSHELL_SHA256_ARM64=6ec51abec4251d41ec45709030988b90baa659f535fc8d14dd0030
 # a silent trap that cost real debugging time. If this download breaks, the
 # build must break loudly rather than ship an image that reproduces that bug.
 # The `which bob` check turns a partial install into a build failure too.
+# Per-attempt bounds (--connect-timeout/--speed-time/--max-time) kill stalled
+# IBM COS connections so they can't consume the whole retry budget: without
+# them a single hung download burned all of --retry-max-time and exited 28
+# (issue #4941; CI runs 32990236986, 33072306789, 33132187354).
 RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" && \
     case "$ARCH" in \
       amd64) BOBSHELL_SHA256="$BOBSHELL_SHA256_AMD64" ;; \
       arm64) BOBSHELL_SHA256="$BOBSHELL_SHA256_ARM64" ;; \
       *) echo "unsupported arch for bobshell: $ARCH" >&2; exit 1 ;; \
     esac && \
-    curl -fsSL --retry 8 --retry-delay 5 --retry-max-time 300 --retry-connrefused --retry-all-errors -o /tmp/bobshell.tgz "${BOBSHELL_BASE_URL}/bobshell-${BOBSHELL_VERSION}.tgz" && \
+    curl -fsSL --retry 8 --retry-delay 5 --retry-max-time 600 --retry-connrefused --retry-all-errors \
+      --connect-timeout 15 --speed-limit 1024 --speed-time 30 --max-time 180 \
+      -o /tmp/bobshell.tgz "${BOBSHELL_BASE_URL}/bobshell-${BOBSHELL_VERSION}.tgz" && \
     echo "${BOBSHELL_SHA256}  /tmp/bobshell.tgz" | sha256sum -c - && \
     npm install -g /tmp/bobshell.tgz && \
     npm cache clean --force && \
@@ -379,7 +425,9 @@ COPY bin/gh-app-token.sh bin/hive-config.sh bin/agent-launch.sh bin/git-credenti
 # bit on purpose: it must only ever be sourced.
 COPY bin/agent-env-scrub.sh /usr/local/bin/agent-env-scrub.sh
 COPY bin/hive-open-pr.sh /usr/local/bin/hive-open-pr
+COPY bin/hive-open-issue.sh /usr/local/bin/hive-open-issue
 COPY bin/hive-merge.sh /usr/local/bin/hive-merge
+COPY bin/hive-review.sh /usr/local/bin/hive-review
 COPY bin/gh-wrapper.sh /usr/local/bin/gh
 # SDK-based copilot model discovery helper (see Layer 3b). Invoked as
 # `node /usr/local/bin/copilot-models.mjs` by the dashboard, so no exec bit.
@@ -387,7 +435,7 @@ COPY bin/copilot-models.mjs /usr/local/bin/copilot-models.mjs
 COPY config/backends.conf /usr/local/etc/hive/backends.conf
 RUN chmod +x /usr/local/bin/ttyd-tmux.sh /usr/local/bin/hive-panes /usr/local/bin/gh-app-token.sh \
     /usr/local/bin/hive-config.sh /usr/local/bin/agent-launch.sh /usr/local/bin/gh \
-    /usr/local/bin/git-credential-hive.sh /usr/local/bin/hive-open-pr /usr/local/bin/hive-merge
+    /usr/local/bin/git-credential-hive.sh /usr/local/bin/hive-open-pr /usr/local/bin/hive-open-issue /usr/local/bin/hive-merge /usr/local/bin/hive-review
 
 # SECURITY (#4045): interactive-shell arm of the agent credential scrub.
 # BASH_ENV (exported by agent-launch.sh) only reaches NON-interactive shells;
@@ -488,6 +536,65 @@ RUN mkdir -p /data/home/.copilot /data/home/.cache /data/home/.config /data/home
     chown -R dev:node /data/home/
 
 RUN chown -R dev:node /data /home/dev 2>/dev/null || true
+
+# --- SUID/SGID inventory (#3866, CWE-250/CWE-732) ---
+# Strip every setuid/setgid bit in the image except the one su-exec helper the
+# launcher needs, and FAIL THE BUILD if the inventory is anything else.
+#
+# The C6 fix above hardened su-exec to 4750 root:hive-launch so agent UIDs
+# cannot exec it. It did not touch what the BASE IMAGE ships. node:26-slim
+# (Debian 13) plus the passwd/util-linux packages installed at the top of this
+# stage leave eleven setuid/setgid binaries behind, and every one of them is
+# world-executable — so reachable by any agent UID (2001+), which is exactly the
+# population the su-exec 4750 mode exists to exclude:
+#
+#   4755 root:root    /usr/bin/{chfn,chsh,gpasswd,mount,newgrp,passwd,su,umount}
+#   2755 root:shadow  /usr/bin/{chage,expiry}  /usr/sbin/unix_chkpwd
+#
+# Nothing in Hive execs any of them. The entrypoint creates the per-agent
+# accounts with useradd/groupadd/usermod while it is still root, and every
+# privilege hop goes through gosu (as root) or su-exec (as dev) — none of which
+# needs a setuid bit on a Debian tool.
+#
+# They matter because the pod cannot neutralise them the usual way. Setting
+# `allowPrivilegeEscalation: false` would set no_new_privs and disable ALL SUID
+# binaries — including su-exec, which would break agent launch (see the C6 note
+# in src/deploy/k8s/deployment.yaml). So no_new_privs stays off, and a SUID-root
+# exec from an agent UID would land in a bounding set that still holds SETUID,
+# SETGID and DAC_OVERRIDE: enough to read the MITM CA private key whatever mode
+# the 0700 directory #4341 moved it into carries.
+#
+# Stripping is safe precisely because only NON-root callers need a setuid bit.
+# root keeps full use of mount/su/passwd, and the accounts those tools would
+# edit are locked system accounts (root's shadow entry is `*`).
+#
+# This runs LAST, after every apt/npm/pip layer, so a package installed anywhere
+# above is covered. The assertion is what makes it durable: a future layer that
+# reintroduces a setuid binary fails the build here rather than shipping.
+RUN find / -xdev -type f \( -perm -4000 -o -perm -2000 \) \
+      ! -path /usr/local/bin/su-exec -print -exec chmod -s '{}' + \
+ && remaining="$(find / -xdev -type f \( -perm -4000 -o -perm -2000 \) -printf '%M %u:%g %p\n' | sort)" \
+ && if [ "$remaining" != "-rwsr-x--- root:hive-launch /usr/local/bin/su-exec" ]; then \
+      echo "FATAL: image SUID/SGID inventory is not the single expected helper." >&2; \
+      echo "       want: -rwsr-x--- root:hive-launch /usr/local/bin/su-exec" >&2; \
+      echo "       got:" >&2; echo "$remaining" | sed 's/^/         /' >&2; \
+      exit 1; \
+    fi
+
+
+# --- Layer 8.26: shared-$HOME state hygiene (umask 007 wrappers) ---
+# Agent CLIs rewrite their credential/settings state as mode 600 owned by the
+# writing agent (agy: antigravity-cli/*.json + oauth token; claude:
+# .credentials.json). With a shared $HOME (/data/home) that breaks every other
+# agent on the same provider (EACCES -> login/onboarding screens). Launch
+# through wrappers that set umask 007 so shared state stays group-readable.
+# See RFC #4665.
+RUN for b in agy claude; do \
+      [ -e "/usr/local/bin/$b" ] || continue; \
+      mv "/usr/local/bin/$b" "/usr/local/bin/$b.real"; \
+      printf '#!/bin/sh\numask 007\nexec /usr/local/bin/%s.real "$@"\n' "$b" > "/usr/local/bin/$b"; \
+      chmod 755 "/usr/local/bin/$b"; \
+    done
 
 ENTRYPOINT ["entrypoint.sh"]
 CMD ["--config", "/etc/hive/hive.yaml"]

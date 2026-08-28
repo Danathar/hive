@@ -7,10 +7,11 @@ import (
 )
 
 type advisoryAPIResponse struct {
-	MaxFindings   int  `json:"max_findings"`
-	ShowAll       bool `json:"show_all"`
-	StalenessDays int  `json:"staleness_days"`
-	PRAutoClose   bool `json:"pr_autoclose"`
+	MaxFindings     int  `json:"max_findings"`
+	ShowAll         bool `json:"show_all"`
+	StalenessDays   int  `json:"staleness_days"`
+	PRAutoClose     bool `json:"pr_autoclose"`
+	UpdateIntervalS int  `json:"update_interval_s"`
 }
 
 func getAdvisorySettings(t *testing.T, s *Server) advisoryAPIResponse {
@@ -84,6 +85,9 @@ func TestGovAdvisory_Validation(t *testing.T) {
 		{"negative max findings", map[string]any{"max_findings": -1}},
 		{"zero staleness", map[string]any{"staleness_days": 0}},
 		{"negative staleness", map[string]any{"staleness_days": -7}},
+		{"negative update interval", map[string]any{"update_interval_s": -60}},
+		{"update interval below minimum", map[string]any{"update_interval_s": 5}},
+		{"update interval above maximum", map[string]any{"update_interval_s": 86400}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if rec := doPut(s, "/api/config/governor/advisory", tc.body); rec.Code != http.StatusBadRequest {
@@ -94,6 +98,44 @@ func TestGovAdvisory_Validation(t *testing.T) {
 
 	if rec := doPutRaw(s, "/api/config/governor/advisory", "not json"); rec.Code != http.StatusBadRequest {
 		t.Fatalf("bad body: expected 400, got %d", rec.Code)
+	}
+}
+
+// TestGovAdvisory_UpdateIntervalRoundTrip pins the #4820 knob's API contract:
+// unset reports 0 (the "default cadence" sentinel), an in-range PUT round-trips
+// verbatim, an explicit 0 resets to the default, and partial updates leave it
+// untouched.
+func TestGovAdvisory_UpdateIntervalRoundTrip(t *testing.T) {
+	s := govServer(t)
+
+	if got := getAdvisorySettings(t, s); got.UpdateIntervalS != 0 {
+		t.Fatalf("untouched update_interval_s = %d, want the 0 default sentinel", got.UpdateIntervalS)
+	}
+
+	if rec := doPut(s, "/api/config/governor/advisory", map[string]any{"update_interval_s": 300}); rec.Code != http.StatusOK {
+		t.Fatalf("put update_interval_s: %d — %s", rec.Code, rec.Body.String())
+	}
+	if got := getAdvisorySettings(t, s); got.UpdateIntervalS != 300 {
+		t.Fatalf("update_interval_s = %d, want the configured 300", got.UpdateIntervalS)
+	}
+	if s.deps.Config.Governor.Advisory.UpdateIntervalS != 300 {
+		t.Fatal("PUT did not store update_interval_s on the live config")
+	}
+
+	// A partial update of a sibling field leaves the interval alone.
+	if rec := doPut(s, "/api/config/governor/advisory", map[string]any{"max_findings": 7}); rec.Code != http.StatusOK {
+		t.Fatalf("partial put: %d", rec.Code)
+	}
+	if got := getAdvisorySettings(t, s); got.UpdateIntervalS != 300 {
+		t.Fatalf("partial put changed update_interval_s to %d", got.UpdateIntervalS)
+	}
+
+	// Explicit 0 is the supported way back to the default cadence.
+	if rec := doPut(s, "/api/config/governor/advisory", map[string]any{"update_interval_s": 0}); rec.Code != http.StatusOK {
+		t.Fatalf("reset put: %d — %s", rec.Code, rec.Body.String())
+	}
+	if got := getAdvisorySettings(t, s); got.UpdateIntervalS != 0 {
+		t.Fatalf("update_interval_s = %d after reset, want 0", got.UpdateIntervalS)
 	}
 }
 
@@ -113,5 +155,55 @@ func TestGovAdvisory_InGovernorConfigGet(t *testing.T) {
 	}
 	if resp.Advisory == nil {
 		t.Fatal("governor config GET is missing the advisory section")
+	}
+}
+
+// TestGovAdvisory_TargetRoundTrip covers the digest-target surface: the GET
+// reports the resolved target (github when unset), the PUT stores target and
+// linear_issue, a Linear target without an issue is rejected, and an unknown
+// target is rejected — so the governor never has to fail closed on a value
+// the dashboard could have refused.
+func TestGovAdvisory_TargetRoundTrip(t *testing.T) {
+	s := govServer(t)
+
+	var got map[string]any
+	rec := doOwnerGet(s, "/api/config/governor/advisory")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET: %d — %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got["target"] != "github" || got["linear_issue"] != "" {
+		t.Fatalf("default target/linear_issue = %v/%v, want github/\"\"", got["target"], got["linear_issue"])
+	}
+
+	if rec := doPut(s, "/api/config/governor/advisory", map[string]any{"target": "linear"}); rec.Code != http.StatusBadRequest {
+		t.Fatalf("target=linear without linear_issue: %d, want 400 — %s", rec.Code, rec.Body.String())
+	}
+	if rec := doPut(s, "/api/config/governor/advisory", map[string]any{"target": "jira", "linear_issue": "X-1"}); rec.Code != http.StatusBadRequest {
+		t.Fatalf("unknown target: %d, want 400 — %s", rec.Code, rec.Body.String())
+	}
+	if s.deps.Config.Governor.Advisory.Target != "" || s.deps.Config.Governor.Advisory.LinearIssue != "" {
+		t.Fatal("rejected PUTs must not mutate config")
+	}
+
+	if rec := doPut(s, "/api/config/governor/advisory", map[string]any{"target": " Linear ", "linear_issue": " ONB-123 "}); rec.Code != http.StatusOK {
+		t.Fatalf("PUT linear: %d — %s", rec.Code, rec.Body.String())
+	}
+	if a := s.deps.Config.Governor.Advisory; a.Target != "linear" || a.LinearIssue != "ONB-123" {
+		t.Fatalf("stored = {%q %q}, want normalized {linear ONB-123}", a.Target, a.LinearIssue)
+	}
+	// Once an issue is stored, re-sending only the target is fine.
+	if rec := doPut(s, "/api/config/governor/advisory", map[string]any{"target": "linear"}); rec.Code != http.StatusOK {
+		t.Fatalf("PUT linear with stored issue: %d — %s", rec.Code, rec.Body.String())
+	}
+	// And switching back to GitHub leaves the Linear issue in place for a
+	// later switch without forcing the operator to retype it.
+	if rec := doPut(s, "/api/config/governor/advisory", map[string]any{"target": "github"}); rec.Code != http.StatusOK {
+		t.Fatalf("PUT github: %d — %s", rec.Code, rec.Body.String())
+	}
+	if a := s.deps.Config.Governor.Advisory; a.ResolvedTarget() != "github" || a.LinearIssue != "ONB-123" {
+		t.Fatalf("after switching back = {%q %q}, want {github ONB-123}", a.Target, a.LinearIssue)
 	}
 }

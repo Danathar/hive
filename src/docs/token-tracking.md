@@ -9,6 +9,7 @@ The collector starts from `data.metrics_dir` and rescans every 30 seconds. It me
 - Hive JSONL session files in `data.metrics_dir` (`*.jsonl`) using the flat `SessionEntry` schema.
 - Claude Code session JSONL under `data.claude_sessions_dir` when configured. It reads assistant `message.usage` blocks from recent files (30-day mtime window).
 - Copilot CLI `events.jsonl` under `data.copilot_sessions_dir` when configured. It reads `session.shutdown.modelMetrics` and avoids double-counting sessions already captured live by the proxy.
+- Bob CLI chat recordings under `data.bob_sessions_dir` (default `/data/home/.bob`) when configured. It reads `tmp/*/chats/*.json`, maps Bob project hashes back to trusted agent folders, and records explicit `tokens` fields (falling back to content-size estimates only when a recording has no token data).
 - Inference usage files written by `InferenceSink` as `inference-<agent>.jsonl` under `data.metrics_dir` for `vllm`, `llm-d`, `litellm`, and live Copilot proxy usage.
 
 A flat session entry can include `role`, `agent`, `model`, `input_tokens`, `output_tokens`, `cache_read`, and `cache_creation`. When `agent` is absent, Hive infers the agent from session path or configured detection keywords.
@@ -28,6 +29,7 @@ The collector keeps the latest aggregate in memory and writes `/data/token-summa
 
 - `/api/status` includes token/cost fields used by the dashboard.
 - `/api/cost` returns estimated cost from token counts × the static price table plus native spend for gateways that report it (OpenRouter `/key`, LiteLLM `/key/info`). Estimated rows are labelled `estimated` or `unpriced`; native gateway rows are labelled `native`.
+- `/api/repo-activity` is phase 1 of per-repo cost attribution: it reports audited output counts per repo and per `(repo, agent)` from `repo=` audit entries, plus an explicit `unattributed` bucket for output events with no repo. It reports activity only, not dollars; cost must not be smeared across repos until timestamped token joins exist.
 - Cost estimates are not invoices. Subscription plans, self-hosted inference, negotiated rates, and provider billing semantics can differ from list prices.
 
 ## Hub rollups

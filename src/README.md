@@ -13,10 +13,17 @@ cd hive
 cp src/hive.yaml.example src/hive.yaml
 # Edit src/hive.yaml — set your org, repos, and agent config
 
-echo "HIVE_GITHUB_TOKEN=ghp_..." > .env
+# src/.env, NOT ./.env — `-f src/docker-compose.yaml` makes `src/` the project
+# directory, so that is where Compose reads `.env`. A root `.env` is ignored
+# silently, and both paths are gitignored, so nothing warns you.
+echo "HIVE_GITHUB_TOKEN=ghp_..." > src/.env
+# REQUIRED: the dashboard's auth proxy refuses to start without it.
+printf 'HIVE_DASHBOARD_TOKEN=%s\n' "$(openssl rand -hex 32)" >> src/.env
+
 docker compose -f src/docker-compose.yaml up -d
 
 # Dashboard at http://localhost:3001
+curl -sf http://127.0.0.1:3001/api/health     # -> {"status":"ok"}
 ```
 
 ### Option B: Build from source
@@ -28,7 +35,13 @@ cd hive
 cp src/hive.yaml.example src/hive.yaml
 # Edit src/hive.yaml — set your org, repos, and agent config
 
-echo "HIVE_GITHUB_TOKEN=ghp_..." > .env
+# src/.env, NOT ./.env — `-f src/docker-compose.yaml` makes `src/` the project
+# directory, so that is where Compose reads `.env`. A root `.env` is ignored
+# silently, and both paths are gitignored, so nothing warns you.
+echo "HIVE_GITHUB_TOKEN=ghp_..." > src/.env
+# REQUIRED: the dashboard's auth proxy refuses to start without it.
+printf 'HIVE_DASHBOARD_TOKEN=%s\n' "$(openssl rand -hex 32)" >> src/.env
+
 docker compose -f src/docker-compose.yaml build
 docker compose -f src/docker-compose.yaml up -d
 ```
@@ -275,7 +288,7 @@ Configure via the dashboard (Strategy Lab panel, ACMM level 4+) or the `/api/nou
 
 ## Further reading
 
-- [v2 docs index](docs/README.md) — all operator, contributor, and design docs.
+- [documentation index](docs/README.md) — all operator, contributor, and design docs.
 - [Cross-cluster migration](docs/cross-cluster-migration.md) — move a hive between clusters.
 - [Manual provisioning](docs/manual-provisioning.md) — hosted/spoke provisioning and hub access.
 - [Config layering](docs/config-layering.md) — ConfigMap vs PVC overlay precedence.
@@ -334,7 +347,7 @@ The `deploy/` directory contains pre-built configurations for common deployment 
 ## Additional references
 
 - [Operator reference](docs/operator-reference.md) — config blocks, server flags/env, GitHub token scopes.
-- [Troubleshooting](docs/troubleshooting.md) — v2 container logs, config validation, agent sessions, dashboard auth, and GitHub credential checks.
+- [Troubleshooting](docs/troubleshooting.md) — container logs, config validation, agent sessions, dashboard auth, and GitHub credential checks.
 - [Config layering](docs/config-layering.md) — effective config provenance and precedence.
 - [Dashboard API reference](docs/api-reference.md) — generated route index.
 - [apiproxy](docs/apiproxy.md) — model API proxy purpose and deployment notes.

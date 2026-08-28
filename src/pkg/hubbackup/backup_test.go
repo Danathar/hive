@@ -1,16 +1,16 @@
 package hubbackup
 
 import (
-	"syscall"
-	"encoding/json"
-	"compress/gzip"
-	"bytes"
 	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"encoding/hex"
+	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/kubestellar/hive/pkg/config"
@@ -266,7 +266,7 @@ func TestBuildIncludesSpokesAndSecrets(t *testing.T) {
 
 	spokes := fakeSpokes{spokes: []SpokeConfig{
 		{ID: "hosted-x", Files: map[string][]byte{
-			"hive.yaml.runtime":       []byte("project:\n  org: acme\n"),
+			"hive.yaml.runtime":   []byte("project:\n  org: acme\n"),
 			"hive-id":             []byte("hosted-x"),
 			"gh-app-key-5686.pem": []byte("-----BEGIN RSA PRIVATE KEY-----\n"),
 		}},
@@ -324,7 +324,7 @@ func TestExtractRestoresContent(t *testing.T) {
 	spokes := fakeSpokes{spokes: []SpokeConfig{
 		{ID: "hosted-x", Files: map[string][]byte{
 			"hive.yaml.runtime": spokeYAML,
-			"hive-id":       []byte("hosted-x"),
+			"hive-id":           []byte("hosted-x"),
 		}},
 	}}
 	sealed, _, err := Build(key, spokes, nil, quietLogger())
@@ -445,9 +445,7 @@ func TestKubectlArgsForRemoteCluster(t *testing.T) {
 }
 
 func TestStripSecretNoise(t *testing.T) {
-	raw := []byte(`{"kind":"Secret","metadata":{"name":"x","uid":"u1',","resourceVersion":"9","creationTimestamp":"t"},"data":{"a":"b"}}`)
-	// Use a well-formed input.
-	raw = []byte(`{"kind":"Secret","metadata":{"name":"x","uid":"u1","resourceVersion":"9","creationTimestamp":"t"},"data":{"a":"b"}}`)
+	raw := []byte(`{"kind":"Secret","metadata":{"name":"x","uid":"u1","resourceVersion":"9","creationTimestamp":"t"},"data":{"a":"b"}}`)
 	out, err := stripSecretNoise(raw)
 	if err != nil {
 		t.Fatal(err)

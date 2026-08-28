@@ -297,10 +297,29 @@ var gee4veeRepoAccessTitles = []struct{ title, ref string }{
 	{"Guide agent blocked: No repository access mechanism in L2 advisory mode", "github.ibm.com/devx-prod/epx-vscode-ext-poc"},
 }
 
+// issue4464RepoAccessTitles are the two finding titles a live hive's advisory
+// digest showed in #4464, transcribed from the screenshot on the issue. Both
+// are the same family as gee4veeRepoAccessTitles, and NEITHER matched before
+// this — so the healer never considered them and they could not age out of the
+// digest no matter how many cycles ran. The operator read them as an error the
+// hive was reporting about itself, which is what the bug report is.
+var issue4464RepoAccessTitles = []struct{ title, ref string }{
+	{"Repository worktree not provisioned for guide agent despite include_repos=true configuration", "/data/agents/guide (empty directory)"},
+	{"Quality agent lacks read access to repository for coverage analysis", "devx-prod/epx-vscode-ext-poc"},
+	// Gap 3, found live on a customer hive after the first two fixes shipped:
+	// the bare repo noun, no workspace/worktree qualifier.
+	{"Critical: Repository not provisioned for guide agent - cannot perform documentation audit", "/tmp/hive/epx-vscode-ext-poc"},
+}
+
 func TestIsRepoAccessFinding(t *testing.T) {
 	for _, f := range gee4veeRepoAccessTitles {
 		if !IsRepoAccessFinding(f.title) {
 			t.Errorf("IsRepoAccessFinding(%q) = false, want true (the #2575 family must match)", f.title)
+		}
+	}
+	for _, f := range issue4464RepoAccessTitles {
+		if !IsRepoAccessFinding(f.title) {
+			t.Errorf("IsRepoAccessFinding(%q) = false, want true (the #4464 family must match)", f.title)
 		}
 	}
 	// Drift the agents plausibly produce must still match.
@@ -309,6 +328,17 @@ func TestIsRepoAccessFinding(t *testing.T) {
 		"clone mechanism unavailable for L2 guide agents",
 		"Guide agent unable to fetch the target repository",
 		"Agent workspace lacks a git clone mechanism",
+		// #4464 drift: the passive "not/never provisioned" voice, and
+		// "<verb> access TO <repo>" word order, in wordings adjacent to the
+		// two the issue reported.
+		"No git worktree provisioned for the guide agent",
+		"Agent workspace never provisioned for documentation auditing",
+		"Repository workspace never provisioned for advisory agents",
+		"Missing repository checkout provisioning for advisory agents",
+		"Missing repository worktree provisioning for guide agent",
+		"Guide agent lacks read-only access to the repository",
+		"Scanner agent has no read-only access to the repository",
+		"No clone access to repo for the newcomer agent",
 	}
 	for _, title := range drift {
 		if !IsRepoAccessFinding(title) {
@@ -324,7 +354,23 @@ func TestIsRepoAccessFinding(t *testing.T) {
 		"Add repository access checks to the admin API",
 		"Overly permissive repository access granted to all org members",
 		"Insufficient repo permissions", // app-auth family, handled by the other healer
+		// WRITE-access lack is the app-auth family too — a verified Contents
+		// READ must never close it.
+		"Guide agent lacks write access to repository for issue filing",
+		// A worktree that exists but is dirty/stale is a real operational
+		// finding, not a missing read path.
+		"Repository worktree contains uncommitted changes from previous session",
 		"",
+		// The #4464 widening reaches for "provisioned" and "access to
+		// <repo>", so these guard the two new patterns specifically: real
+		// code findings that use the same words about something else.
+		"Anonymous read access to repository artifacts is not gated",
+		"Terraform state bucket provisioned without encryption",
+		"Repository checkout action is not pinned to a commit SHA",
+		"No rate limit on the repository search endpoint",
+		// WRITE access is the app-auth healer's business: this healer's proof
+		// is a verified READ, which cannot substantiate a write claim.
+		"Guide agent lacks write access to repository for the digest",
 	}
 	for _, title := range negatives {
 		if IsRepoAccessFinding(title) {
@@ -372,6 +418,14 @@ func TestCloseHealedRepoAccessFindings(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// The #4464 pair heals through the same gate: the guide finding's ref
+	// ("/data/agents/guide (empty directory)") parses as no-repo → primary,
+	// and the quality finding's ref names the verified GHE repo.
+	for _, f := range issue4464RepoAccessTitles {
+		if _, err := store.Create(f.title, beads.TypeAdvisory, beads.PriorityHigh, "guide", f.ref); err != nil {
+			t.Fatal(err)
+		}
+	}
 	// A repo-access finding about a repo the verifier CANNOT read: real
 	// condition, must survive the heal.
 	locked, err := store.Create("Guide agent cannot access target repository - no clone mechanism available",
@@ -394,10 +448,11 @@ func TestCloseHealedRepoAccessFindings(t *testing.T) {
 	}
 
 	healed := CloseHealedRepoAccessFindings(stores, canRead)
-	if len(healed) != len(gee4veeRepoAccessTitles) {
-		t.Fatalf("healed %d findings (%v), want the %d from #2575", len(healed), healed, len(gee4veeRepoAccessTitles))
+	wantHealed := len(gee4veeRepoAccessTitles) + len(issue4464RepoAccessTitles)
+	if len(healed) != wantHealed {
+		t.Fatalf("healed %d findings (%v), want the %d from #2575 + #4464", len(healed), healed, wantHealed)
 	}
-	for _, f := range gee4veeRepoAccessTitles {
+	for _, f := range append(append([]struct{ title, ref string }{}, gee4veeRepoAccessTitles...), issue4464RepoAccessTitles...) {
 		found := false
 		for _, h := range healed {
 			if h == f.title {
@@ -445,5 +500,64 @@ func TestCloseHealedRepoAccessFindings(t *testing.T) {
 	// A nil verifier must close nothing, ever.
 	if closed := CloseHealedRepoAccessFindings(stores, nil); closed != nil {
 		t.Errorf("nil verifier closed %v, want none", closed)
+	}
+}
+
+// TestCloseHealedRepoAccessFindings_Issue4464 runs the two titles a live hive
+// actually displayed (#4464) end to end. Before the pattern widening both were
+// invisible to IsRepoAccessFinding, so this heal was a no-op on them and the
+// operator's digest kept showing an infrastructure error that nothing could
+// ever retire. The refs are the ones from the report, including the guide
+// finding's non-repo ref — "/data/agents/guide (empty directory)" does not
+// parse as owner/repo, which must fall back to probing the hive's own primary
+// repo rather than refusing to consider the bead.
+func TestCloseHealedRepoAccessFindings_Issue4464(t *testing.T) {
+	store, err := beads.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stores := map[string]*beads.Store{"guide": store}
+	for _, f := range issue4464RepoAccessTitles {
+		if _, err := store.Create(f.title, beads.TypeAdvisory, beads.PriorityHigh, "guide", f.ref); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var probed []string
+	canRead := func(ownerRepo string) bool {
+		probed = append(probed, ownerRepo)
+		return ownerRepo == "" || ownerRepo == "devx-prod/epx-vscode-ext-poc"
+	}
+
+	healed := CloseHealedRepoAccessFindings(stores, canRead)
+	if len(healed) != len(issue4464RepoAccessTitles) {
+		t.Fatalf("healed %d findings (%v), want both #4464 titles", len(healed), healed)
+	}
+	wantProbes := map[string]bool{"": false, "devx-prod/epx-vscode-ext-poc": false}
+	for _, p := range probed {
+		if _, ok := wantProbes[p]; ok {
+			wantProbes[p] = true
+		}
+	}
+	for repo, seen := range wantProbes {
+		if !seen {
+			t.Errorf("read verification was never consulted for %q", repo)
+		}
+	}
+
+	// The read gate still decides. With no readable repo, the same two
+	// findings must survive — a digest entry that is TRUE has to stay.
+	store2, err := beads.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range issue4464RepoAccessTitles {
+		if _, err := store2.Create(f.title, beads.TypeAdvisory, beads.PriorityHigh, "guide", f.ref); err != nil {
+			t.Fatal(err)
+		}
+	}
+	unreadable := func(string) bool { return false }
+	if closed := CloseHealedRepoAccessFindings(map[string]*beads.Store{"guide": store2}, unreadable); len(closed) != 0 {
+		t.Errorf("closed %v with an unverifiable read path, want none", closed)
 	}
 }

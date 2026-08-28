@@ -24,6 +24,7 @@ import (
 	"github.com/kubestellar/hive/pkg/resolve"
 	"github.com/kubestellar/hive/pkg/skillreg"
 	"github.com/kubestellar/hive/pkg/tokens"
+	"github.com/kubestellar/hive/pkg/watchdog"
 )
 
 // skillsConventionalDir is the conventional on-disk location the dashboard
@@ -37,12 +38,19 @@ var skillsConventionalDir = dataVolumePath + "/skills"
 const defaultLookbackHours = 24
 
 // Cadence sentinel values: a per-mode cadence set to one of these means the
-// governor will not kick the agent on a timer in that mode. Kept as named
-// constants so the offByCadence detection and computeNextKick agree on the
-// exact spellings the config layer emits.
+// governor will not kick the agent on a timer in that mode. Named constants so
+// the two next-kick computations below agree on the exact spellings the config
+// layer emits, rather than each carrying its own literal list — the drift these
+// were introduced to prevent, and which had already started before they were
+// wired in.
+//
+// config.Cadence.IsPaused() remains the authority for the interval-mode
+// judgment (it also accepts "paused" and "0"); these are the string-cadence
+// spellings the dashboard's own formatting paths compare against.
 const (
-	cadencePause = "pause"
-	cadenceOff   = "off"
+	cadencePause    = "pause"
+	cadenceOff      = "off"
+	cadenceOnDemand = "on demand"
 )
 
 // SetProxyViolationsProvider registers a function that returns per-agent
@@ -112,6 +120,10 @@ var (
 
 	inferenceAuthMu sync.RWMutex
 	inferenceAuthFn func() (errMsg string, since time.Time)
+	// inferenceBudget* carry the PROVIDER spending-limit signal (#4294) —
+	// distinct from the auth signal above and from the hive's own token budget.
+	inferenceBudgetMu sync.RWMutex
+	inferenceBudgetFn func() (errMsg string, since, lastRebuff time.Time, rebuffs int)
 )
 
 // SetEntitledModelsProvider registers a function that reports the per-key
@@ -150,6 +162,40 @@ func getInferenceAuthFn() func() (errMsg string, since time.Time) {
 	return inferenceAuthFn
 }
 
+// SetInferenceBudgetProvider registers a function reporting the proxy's current
+// PROVIDER spending-limit signal (kubestellar/hive#4294): a non-empty log-safe
+// cause, when it latched, and how many rebuffs have been seen — only while the
+// provider is refusing on a money limit.
+//
+// This is deliberately a separate provider from the auth one: an operator
+// facing "the gateway rejects our key" and one facing "the gateway will not
+// spend more money today" take different actions, and folding them into one
+// signal would tell neither of them which they have. Wired to the proxy's
+// InferenceBudgetExceeded; nil in tests and on spokes with no proxy, which the
+// accessor tolerates.
+func SetInferenceBudgetProvider(fn func() (errMsg string, since, lastRebuff time.Time, rebuffs int)) {
+	inferenceBudgetMu.Lock()
+	defer inferenceBudgetMu.Unlock()
+	inferenceBudgetFn = fn
+}
+
+// InferenceBudgetExceeded returns the current provider spending-limit signal,
+// or zero values when no provider is registered or the provider is serving.
+//
+// lastRebuff (the most recent rebuff, which moves forward; since does not) is
+// carried through because the eval cycle suppresses kicks only while it is
+// fresh — suppressing on the latch alone would withhold the very traffic that
+// clears the latch. See pkg/proxy/inference_budget.go.
+func InferenceBudgetExceeded() (errMsg string, since, lastRebuff time.Time, rebuffs int) {
+	inferenceBudgetMu.RLock()
+	fn := inferenceBudgetFn
+	inferenceBudgetMu.RUnlock()
+	if fn == nil {
+		return "", time.Time{}, time.Time{}, 0
+	}
+	return fn()
+}
+
 // InferenceAuthError returns the current inference-backend auth-failure signal
 // from the registered provider, or ("", zero) when none is registered or the
 // backend is healthy. It is the single source both heartbeat fields read (the
@@ -166,9 +212,10 @@ func InferenceAuthError() (errMsg string, since time.Time) {
 // AgentStatusPayload is a lightweight payload containing only agent metadata,
 // broadcast on a fast cadence (every ~10s) independent of the full eval cycle.
 type AgentStatusPayload struct {
-	Timestamp string          `json:"timestamp"`
-	Agents    []FrontendAgent `json:"agents"`
-	GovMode   string          `json:"govMode"`
+	Timestamp        string                    `json:"timestamp"`
+	Agents           []FrontendAgent           `json:"agents"`
+	ConfiguredAgents []FrontendConfiguredAgent `json:"configuredAgents"`
+	GovMode          string                    `json:"govMode"`
 }
 
 // BuildAgentOnlyStatus builds a lightweight agent-only status from in-memory
@@ -179,9 +226,10 @@ func BuildAgentOnlyStatus(
 	cfg *config.Config,
 ) *AgentStatusPayload {
 	return &AgentStatusPayload{
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		Agents:    buildAgents(agentStatuses, cfg, govState),
-		GovMode:   strings.ToLower(string(govState.Mode)),
+		Timestamp:        time.Now().UTC().Format(time.RFC3339),
+		Agents:           buildAgents(agentStatuses, cfg, govState),
+		ConfiguredAgents: buildConfiguredAgents(cfg),
+		GovMode:          strings.ToLower(string(govState.Mode)),
 	}
 }
 
@@ -208,6 +256,7 @@ func BuildFrontendStatus(
 		Timestamp:           time.Now().UTC().Format(time.RFC3339),
 		HiveID:              cfg.HiveID,
 		Agents:              buildAgents(agentStatuses, cfg, govState),
+		ConfiguredAgents:    buildConfiguredAgents(cfg),
 		Governor:            buildGovernor(govState, cfg),
 		Tokens:              buildTokens(tokenCollector),
 		Repos:               buildRepos(cfg, actionable),
@@ -228,6 +277,78 @@ func BuildFrontendStatus(
 		Security:            buildSecurity(cfg),
 	}
 	return payload
+}
+
+// agentDisabledInConfig reports whether an agent is switched OFF in config —
+// `enabled: false` — as opposed to merely not running right now.
+//
+// The distinction matters because a disabled agent is never started, so it has
+// no tmux session and no captured pane, yet it still appears in the runtime
+// roster: ApplyPack adds every agent in the ACMM level's pack to the manager
+// and gates only the Start on Enabled (api_packs.go). That is deliberate — the
+// runtime card is how an operator turns the agent back on — but it means every
+// consumer reading "not running" has to ask WHY before calling it a fault.
+//
+// The live config wins; proc.Config is the manager's copy and only refreshes
+// on UpdateConfig/reconcile. Callers must check "running" FIRST: an agent
+// disabled while it is still up keeps running until the next reconcile, and it
+// genuinely does have a session until then.
+func agentDisabledInConfig(cfg *config.Config, name string, proc *agent.AgentProcess) bool {
+	if cfg != nil {
+		if liveCfg, ok := cfg.Agents[name]; ok {
+			return !liveCfg.Enabled
+		}
+	}
+	if proc != nil {
+		return !proc.Config.Enabled
+	}
+	return false
+}
+
+func buildConfiguredAgents(cfg *config.Config) []FrontendConfiguredAgent {
+	if cfg == nil {
+		return []FrontendConfiguredAgent{}
+	}
+	names := make([]string, 0, len(cfg.Agents))
+	for name := range cfg.Agents {
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool {
+		left, right := cfg.Agents[names[i]], cfg.Agents[names[j]]
+		if left.GetSortOrder() != right.GetSortOrder() {
+			return left.GetSortOrder() < right.GetSortOrder()
+		}
+		return names[i] < names[j]
+	})
+
+	acmmLevel := 0
+	if cfg.ACMMLevel != nil {
+		acmmLevel = *cfg.ACMMLevel
+	}
+
+	agents := make([]FrontendConfiguredAgent, 0, len(names))
+	for _, name := range names {
+		if !agent.AgentAvailableAtACMMLevel(name, acmmLevel) {
+			continue
+		}
+		agentCfg := cfg.Agents[name]
+		// Same resolution buildAgents uses: explicit per-agent Mode wins,
+		// otherwise the ACMM level default for this agent.
+		mode := agent.DefaultAgentMode(name, acmmLevel)
+		if modeStr := agentCfg.Mode; modeStr != "" {
+			if parsed, ok := agent.ParseAgentMode(modeStr); ok {
+				mode = parsed
+			}
+		}
+		agents = append(agents, FrontendConfiguredAgent{
+			Name: name, DisplayName: agentCfg.DisplayName,
+			Description: agentCfg.Description, SortOrder: agentCfg.GetSortOrder(),
+			Emoji: agentCfg.Emoji, Color: agentCfg.Color, Enabled: agentCfg.Enabled,
+			ModelOwner: agentCfg.ModelOwner, BackendOwner: agentCfg.BackendOwner,
+			Mode: mode.String(), ModeEmoji: mode.Emoji(),
+		})
+	}
+	return agents
 }
 
 // buildSecurity summarizes operator-facing security posture from effective
@@ -359,6 +480,16 @@ func buildSkills() FrontendSkills {
 func buildAgents(statuses map[string]*agent.AgentProcess, cfg *config.Config, govState governor.State) []FrontendAgent {
 	currentMode := strings.ToLower(string(govState.Mode))
 
+	// The watchdog's authority is hive-wide, but it rides each agent's payload
+	// because it is only meaningful next to that agent's conditions: it is what
+	// tells a reader whether a condition implied an action actually taken.
+	watchdogMode := ""
+	if cfg != nil {
+		if s, _ := watchdog.SettingsFrom(cfg.Governor.Watchdog); s.Enabled() {
+			watchdogMode = string(s.Mode)
+		}
+	}
+
 	packAllowed := acmmPackAllowedSet(cfg)
 	onDemandSet := config.OnDemandAgentsFromPacks()
 
@@ -421,7 +552,15 @@ func buildAgents(statuses map[string]*agent.AgentProcess, cfg *config.Config, go
 		// dot so operators do not mistake a governor-paused agent for a running
 		// one. On-demand agents are excluded — they are intentionally not on a
 		// cadence and carry their own on-demand styling.
-		offByCadence := (cadence == cadencePause || cadence == cadenceOff) &&
+		//
+		// Derived from the shared cadence resolver so it agrees exactly with the
+		// heartbeat's ExpectedActive (config.ExpectedActive): both read the same
+		// per-mode cadence and the same IsPaused semantics. offByCadence is the
+		// stricter "has a pause/off ENTRY" form (an ABSENT cadence is not off),
+		// which is why it checks the resolved cadence directly rather than
+		// negating ExpectedActive.
+		modeCadence := cfg.CadenceValueForMode(name, currentMode)
+		offByCadence := modeCadence != "" && modeCadence.IsPaused() &&
 			!proc.Config.OnDemand && !onDemandSet[name]
 
 		pinnedCli := proc.PinnedCLI != "" || proc.Config.CLIPinned
@@ -464,6 +603,7 @@ func buildAgents(statuses map[string]*agent.AgentProcess, cfg *config.Config, go
 			Color:         agentCfg.Color,
 			BeadRole:      agentCfg.GetBeadRole(),
 			Managed:       agentCfg.Managed,
+			Enabled:       !agentDisabledInConfig(cfg, name, proc),
 			ReplicaBase:   agentCfg.ReplicaOf,
 			ReplicaIndex:  agentCfg.ReplicaIndex,
 			ReplicaCount:  agentCfg.ReplicaCount,
@@ -497,6 +637,11 @@ func buildAgents(statuses map[string]*agent.AgentProcess, cfg *config.Config, go
 			LastError:     proc.LastError,
 			StallNudges:   proc.StallNudges,
 			ActionNudges:  proc.ActionNudges,
+			// #4697: transient-API-error retry nudges, surfaced beside the
+			// other two nudge counters.
+			TransientNudges: proc.TransientNudges,
+			Conditions:      proc.WatchdogConditions,
+			WatchdogMode:    watchdogMode,
 		}
 
 		acmmLevel := 0
@@ -803,7 +948,7 @@ func formatHumanTime(t time.Time) string {
 }
 
 func computeNextKick(lastKick *time.Time, cadence string) string {
-	if cadence == "" || cadence == "off" || cadence == "pause" || cadence == "on demand" {
+	if cadence == "" || cadence == cadenceOff || cadence == cadencePause || cadence == cadenceOnDemand {
 		return ""
 	}
 	base := time.Now()
@@ -835,7 +980,7 @@ func computeNextKickFromCadence(lastKick *time.Time, cadence config.Cadence) str
 
 func parseCadenceDuration(cadence string) time.Duration {
 	cadence = strings.TrimSpace(cadence)
-	if cadence == "" || cadence == "off" || cadence == "pause" || cadence == "on demand" {
+	if cadence == "" || cadence == cadenceOff || cadence == cadencePause || cadence == cadenceOnDemand {
 		return 0
 	}
 	d, err := time.ParseDuration(cadence)
@@ -1240,6 +1385,8 @@ func buildHealth(ghClient *github.Client, ctx context.Context) map[string]any {
 
 func buildBudget(gov *governor.Governor, tokenCollector *tokens.Collector) FrontendBudget {
 	budget := gov.GetBudget()
+	windowStart, windowEnd, hasWindow := gov.BudgetWindow()
+	now := time.Now()
 
 	var totalTokens int64
 	if tokenCollector != nil {
@@ -1248,12 +1395,20 @@ func buildBudget(gov *governor.Governor, tokenCollector *tokens.Collector) Front
 		}
 	}
 
-	// Compute hours elapsed since last budget reset
+	// Compute elapsed/remaining wall-clock time from the governor's effective
+	// budget period. BudgetWindow is the single source of truth for configured
+	// period_days; using the default duration here makes a two-day budget look
+	// like a seven-day one in the dashboard.
 	var hoursElapsed float64
-	if !budget.ResetAt.IsZero() {
-		hoursElapsed = time.Since(budget.ResetAt).Hours()
+	var windowHoursRemaining float64
+	if hasWindow {
+		hoursElapsed = now.Sub(windowStart).Hours()
 		if hoursElapsed < 0 {
 			hoursElapsed = 0
+		}
+		windowHoursRemaining = windowEnd.Sub(now).Hours()
+		if windowHoursRemaining < 0 {
+			windowHoursRemaining = 0
 		}
 	}
 
@@ -1266,9 +1421,10 @@ func buildBudget(gov *governor.Governor, tokenCollector *tokens.Collector) Front
 	}
 
 	fb := FrontendBudget{
-		WeeklyBudget: budget.WeeklyLimit,
-		Used:         used,
-		LastUpdated:  time.Now().UTC().Format(time.RFC3339),
+		WeeklyBudget:         budget.WeeklyLimit,
+		Used:                 used,
+		LastUpdated:          now.UTC().Format(time.RFC3339),
+		WindowHoursRemaining: windowHoursRemaining,
 	}
 
 	if budget.WeeklyLimit > 0 {
@@ -1284,8 +1440,11 @@ func buildBudget(gov *governor.Governor, tokenCollector *tokens.Collector) Front
 			burnRate := float64(used) / hoursElapsed
 			fb.BurnRateHourly = burnRate
 			fb.BurnRateInstant = burnRate
-			const hoursPerWeek = 168.0
-			fb.ProjectedWeekly = int64(burnRate * hoursPerWeek)
+			periodHours := governor.BudgetWindowDuration.Hours()
+			if hasWindow {
+				periodHours = windowEnd.Sub(windowStart).Hours()
+			}
+			fb.ProjectedWeekly = int64(burnRate * periodHours)
 			fb.ProjectedPct = float64(fb.ProjectedWeekly) / float64(budget.WeeklyLimit) * pctMultiplier
 			if burnRate > 0 {
 				fb.HoursRemaining = float64(remaining) / burnRate
@@ -1294,8 +1453,9 @@ func buildBudget(gov *governor.Governor, tokenCollector *tokens.Collector) Front
 		fb.HoursElapsed = hoursElapsed
 
 		fb.Exhausted = used >= budget.WeeklyLimit
-		if !budget.ResetAt.IsZero() {
-			fb.WindowEndsAt = budget.ResetAt.Add(governor.BudgetWindowDuration).UTC().Format(time.RFC3339)
+		if hasWindow {
+			fb.WindowEndsAt = windowEnd.UTC().Format(time.RFC3339)
+			fb.WindowStartsAt = windowStart.UTC().Format(time.RFC3339)
 		}
 	}
 
@@ -1303,8 +1463,18 @@ func buildBudget(gov *governor.Governor, tokenCollector *tokens.Collector) Front
 }
 
 func buildCadenceMatrix(cfg *config.Config, agentStatuses map[string]*agent.AgentProcess) []FrontendCadence {
+	if cfg == nil {
+		return nil
+	}
+	acmmLevel := 0
+	if cfg.ACMMLevel != nil {
+		acmmLevel = *cfg.ACMMLevel
+	}
 	sortedNames := make([]string, 0, len(cfg.Agents))
 	for name := range cfg.Agents {
+		if !agent.AgentAvailableAtACMMLevel(name, acmmLevel) {
+			continue
+		}
 		sortedNames = append(sortedNames, name)
 	}
 	sort.Strings(sortedNames)

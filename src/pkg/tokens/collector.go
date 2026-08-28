@@ -21,11 +21,46 @@ type SessionEntry struct {
 	OutputTokens  int64  `json:"output_tokens,omitempty"`
 	Message       string `json:"message,omitempty"`
 	Role          string `json:"role,omitempty"`
+	// Timestamp is the per-entry event time as an ISO 8601 / RFC 3339 string
+	// (the same wire format the Claude and Copilot session files use). It is
+	// optional; entries without one simply don't contribute to the session's
+	// FirstActive/LastActive bracket.
+	Timestamp string `json:"timestamp,omitempty"`
 	// Agent, when set, pins the session to a specific agent instead of
 	// relying on keyword detection from the first user message. Inference
 	// (bare-mode) agents set this so the translator-written usage records
 	// attribute cleanly. Normal Claude/Copilot session files omit it.
 	Agent string `json:"agent,omitempty"`
+}
+
+// UsageEvent is one timestamped slice of token usage inside a session — the
+// per-assistant-message grain that the Claude session files record and that
+// every scanner previously summed away. Retaining it is what makes intra-session
+// analysis possible: burn-rate curves over the life of a run, and (see
+// pkg/dashboard/repo_cost.go) attributing a session's cost to the repos an agent
+// actually touched while it was spending.
+//
+// TimestampMs is unix-milliseconds. An event whose source line carried no
+// parseable timestamp is still emitted with TimestampMs 0 so its tokens are
+// never lost; consumers that need ordering must treat 0 as "unknown time" and
+// refuse to place it in an interval rather than sorting it to the front.
+type UsageEvent struct {
+	TimestampMs int64  `json:"ts_ms"`
+	Model       string `json:"model,omitempty"`
+	// Coalesced counts how many raw per-message events this entry represents.
+	// It is 1 for an untouched event and >1 for a bucket produced by
+	// coalescing (see maxUsageEventsPerSession). It is never 0 for a real event.
+	Coalesced   int   `json:"coalesced,omitempty"`
+	Input       int64 `json:"input"`
+	Output      int64 `json:"output"`
+	CacheRead   int64 `json:"cache_read"`
+	CacheCreate int64 `json:"cache_create"`
+}
+
+// Total is the sum of the four token counts, matching how SessionSummary
+// computes TotalTokens.
+func (u UsageEvent) Total() int64 {
+	return u.Input + u.Output + u.CacheRead + u.CacheCreate
 }
 
 type SessionSummary struct {
@@ -38,7 +73,79 @@ type SessionSummary struct {
 	CacheCreate  int64  `json:"cache_create"`
 	TotalTokens  int64  `json:"total_tokens"`
 	Messages     int    `json:"messages"`
-	LastActive   int64  `json:"last_active,omitempty"`
+	// FirstActive / LastActive bracket the session in time: the earliest and
+	// latest event timestamps seen while parsing, as unix-milliseconds stamps
+	// (0 when the scanner could not determine them).
+	FirstActive int64 `json:"first_active,omitempty"`
+	LastActive  int64 `json:"last_active,omitempty"`
+
+	// Backend names the tool that produced this session ("claude", "copilot",
+	// "bob", "inference", ""). Consumers use it to tell which sessions carry a
+	// usable Usage timeline; "" means an older/flat-format session of unknown
+	// provenance and must be treated as NOT time-resolved.
+	Backend string `json:"backend,omitempty"`
+
+	// Usage is the time-ordered per-message usage timeline, populated only by
+	// scanners that can observe the grain (currently Claude — see
+	// BackendClaude). It is ADDITIVE: the summed fields above remain the
+	// authoritative session totals and are unchanged by its presence. When
+	// non-empty its token sums equal the summed fields exactly, so a consumer
+	// may use either but must never add both.
+	//
+	// Bounded by maxUsageEventsPerSession via coalescing, never truncation:
+	// tokens are preserved even when individual message boundaries are not.
+	Usage []UsageEvent `json:"usage,omitempty"`
+
+	// UsageCoalesced is how many raw per-message events were folded into
+	// coarser buckets to keep Usage within maxUsageEventsPerSession. 0 means
+	// the timeline is at full per-message fidelity. It is reported rather than
+	// hidden because a silently-degraded timeline would make an interval join
+	// look more precise than it is.
+	UsageCoalesced int `json:"usage_coalesced,omitempty"`
+}
+
+// stripUsageTimelines returns a shallow copy of agg whose sessions carry no
+// Usage timeline, for persistence only.
+//
+// The timeline is a LIVE-ONLY structure. It is rebuilt from the source session
+// JSONL on every scan, so persisting it buys nothing on restart — but it would
+// cost a great deal: up to maxUsageEventsPerSession events per Claude session
+// at ~60-90 bytes of JSON each, re-marshalled and rewritten to
+// /data/token-summary.json every scanInterval. On a hive with many sessions
+// that turns a modest snapshot into a multi-megabyte write every 30 seconds,
+// for data that is discarded and recomputed at the next scan anyway.
+//
+// UsageCoalesced is likewise dropped: it describes a timeline that is not
+// present, and keeping it would imply a fidelity claim about nothing.
+//
+// The summed token fields are untouched, so a restored snapshot is exactly as
+// complete as it was before the timeline existed. A restored session therefore
+// has Backend set but Usage empty, which the repo-cost join treats as
+// not-time-resolved and reports under backend_unsupported rather than
+// silently dropping or misattributing its tokens.
+func stripUsageTimelines(agg *AggregateSummary) *AggregateSummary {
+	if agg == nil {
+		return nil
+	}
+	out := *agg
+	out.Sessions = make([]SessionSummary, len(agg.Sessions))
+	copy(out.Sessions, agg.Sessions)
+	for i := range out.Sessions {
+		out.Sessions[i].Usage = nil
+		out.Sessions[i].UsageCoalesced = 0
+	}
+	return &out
+}
+
+// UsageTotal sums the retained usage timeline. It exists so tests and consumers
+// can assert the timeline reconciles against TotalTokens without duplicating the
+// summation. Returns 0 for a session with no timeline.
+func (s *SessionSummary) UsageTotal() int64 {
+	var t int64
+	for _, u := range s.Usage {
+		t += u.Total()
+	}
+	return t
 }
 
 // AgentModelBucket holds per-agent or per-model token breakdown.
@@ -68,8 +175,12 @@ type AggregateSummary struct {
 
 const (
 	defaultScanInterval = 30 * time.Second
-	defaultPersistPath  = "/data/token-summary.json"
 )
+
+// defaultPersistPath is the PVC location of the token summary snapshot.
+// It is a var (not a const) only so tests can point it at a temp path;
+// production always uses the fixed /data/token-summary.json location.
+var defaultPersistPath = "/data/token-summary.json"
 
 type Collector struct {
 	sessionsDir               string
@@ -82,28 +193,42 @@ type Collector struct {
 	logger                    *slog.Logger
 	mu                        sync.RWMutex
 	latest                    *AggregateSummary
-	issueCosts                map[string]int64
 	scanInterval              time.Duration
 	prevSessionCount          int
 	prevTotalTokens           int64
 	prevByAgent               map[string]int64
+
+	// loadOnce guards the one-time restore of the persisted snapshot. The
+	// load is deferred until first read (see Summary) instead of happening in
+	// NewCollector so callers may redirect defaultPersistPath or call
+	// SetPersistPath after construction — otherwise the constructor eagerly
+	// reads the live /data/token-summary.json on a hive host and tests see
+	// production data instead of a clean initial state (#4585).
+	loadOnce sync.Once
 }
 
 func NewCollector(sessionsDir string, logger *slog.Logger) *Collector {
+	// A nil logger must not become a latent panic: loadSnapshot logs on the
+	// first successful restore, which only happens on hosts where the snapshot
+	// file exists — exactly the environments where a crash hurts most (#4664).
+	if logger == nil {
+		logger = slog.Default()
+	}
 	c := &Collector{
 		sessionsDir:  sessionsDir,
 		persistPath:  defaultPersistPath,
 		detector:     DefaultAgentDetector,
 		logger:       logger,
-		issueCosts:   make(map[string]int64),
 		scanInterval: defaultScanInterval,
 		prevByAgent:  make(map[string]int64),
 	}
-	c.loadSnapshot()
 	return c
 }
 
 // SetPersistPath overrides the default path for the token summary snapshot.
+// Safe to call after construction and before first use: the persisted
+// snapshot is loaded lazily on first Summary/scan, so the override wins even
+// when set later than NewCollector (#4585).
 func (c *Collector) SetPersistPath(path string) {
 	c.persistPath = path
 }
@@ -160,6 +285,12 @@ func (c *Collector) Start(stop <-chan struct{}) {
 }
 
 func (c *Collector) scan() {
+	// Restore the persisted snapshot once, BEFORE the first scan overwrites
+	// c.latest, preserving the original constructor-time load order (#4585).
+	c.mu.Lock()
+	c.loadOnce.Do(c.loadSnapshot)
+	c.mu.Unlock()
+
 	agg, err := CollectFromDir(c.sessionsDir, c.detector)
 	if err != nil {
 		c.logger.Warn("token scan failed", "error", err)
@@ -185,7 +316,7 @@ func (c *Collector) scan() {
 	}
 
 	if c.bobSessionsDir != "" {
-		bobAgg, err := ScanBobSessions(c.bobSessionsDir)
+		bobAgg, err := ScanBobSessionsWithLogger(c.bobSessionsDir, c.logger)
 		if err != nil {
 			c.logger.Warn("bob session scan failed", "error", err)
 		} else if bobAgg != nil && bobAgg.SessionCount > 0 {
@@ -230,27 +361,15 @@ func (c *Collector) scan() {
 }
 
 func (c *Collector) Summary() *AggregateSummary {
+	// Restore the persisted snapshot once, on first read, under the write
+	// lock so a concurrent reader never observes the load mid-write.
+	c.mu.Lock()
+	c.loadOnce.Do(c.loadSnapshot)
+	c.mu.Unlock()
+
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.latest
-}
-
-func (c *Collector) SeedIssueCosts(costs map[string]int64) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for k, v := range costs {
-		c.issueCosts[k] = v
-	}
-}
-
-func (c *Collector) IssueCosts() map[string]int64 {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	result := make(map[string]int64, len(c.issueCosts))
-	for k, v := range c.issueCosts {
-		result[k] = v
-	}
-	return result
 }
 
 func CollectFromDir(sessionsDir string, agentDetector func(firstMsg string) string) (*AggregateSummary, error) {
@@ -336,11 +455,25 @@ func parseSessionFile(path string, agentDetector func(string) string) (*SessionS
 
 	firstUserMsg := ""
 	explicitAgent := ""
-	var lastTimestamp int64
+	// FirstActive/LastActive are the min/max parseable entry timestamps, not
+	// the first/last line seen: flat-format files are append-mostly but not
+	// guaranteed ordered (atomic rewrites and merged records can interleave),
+	// so line position is not a reliable recency signal. Unparseable or absent
+	// timestamps contribute nothing, leaving 0 when no entry carries one.
+	var firstTimestamp, lastTimestamp int64
 	for scanner.Scan() {
 		var entry SessionEntry
 		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
 			continue
+		}
+
+		if ts := parseTimestampToUnixMilli(entry.Timestamp); ts > 0 {
+			if ts > lastTimestamp {
+				lastTimestamp = ts
+			}
+			if firstTimestamp == 0 || ts < firstTimestamp {
+				firstTimestamp = ts
+			}
 		}
 
 		if entry.Agent != "" && explicitAgent == "" {
@@ -366,6 +499,7 @@ func parseSessionFile(path string, agentDetector func(string) string) (*SessionS
 	}
 
 	summary.TotalTokens = summary.InputTokens + summary.OutputTokens + summary.CacheRead + summary.CacheCreate
+	summary.FirstActive = firstTimestamp
 	summary.LastActive = lastTimestamp
 
 	if explicitAgent != "" {
@@ -410,7 +544,7 @@ func (c *Collector) saveSnapshot(agg *AggregateSummary) {
 	if c.persistPath == "" || agg == nil {
 		return
 	}
-	data, err := json.Marshal(agg)
+	data, err := json.Marshal(stripUsageTimelines(agg))
 	if err != nil {
 		c.logger.Warn("failed to marshal token snapshot", "error", err)
 		return

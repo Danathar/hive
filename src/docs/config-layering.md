@@ -104,8 +104,10 @@ that does restore from it first; that variant is not what new hives get.
 
 **On Docker/LXC it is a live boot input, and the source of truth.** There is no
 ConfigMap and no overlay in that mode, so the entrypoint restores this file over
-the config path on every boot (or points `HIVE_CONFIG` straight at it when the
-config path is read-only). It is also the only reason a dashboard save survives
+the config path on every boot (or points `HIVE_CONFIG` straight at it, and
+pins the same path into the launch argv as `--config`, when the config path is
+read-only — the argv half is required, because the image's `CMD` passes an
+explicit `--config` that would otherwise outrank the variable, [#4973](https://github.com/kubestellar/hive/issues/4973)). It is also the only reason a dashboard save survives
 a container recreation: `Config.saveDashboardOverlay` deliberately early-returns
 outside Kubernetes because this file already plays that role.
 

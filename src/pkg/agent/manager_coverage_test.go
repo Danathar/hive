@@ -387,7 +387,10 @@ func TestNewManager_CustomWorkDir(t *testing.T) {
 }
 
 func TestNewManager_DefaultWorkDir(t *testing.T) {
-	os.Unsetenv("HIVE_WORK_DIR")
+	// "" (not Unsetenv) so TestMain's package-wide HIVE_WORK_DIR guard
+	// (#4737/#4738) is restored after this test instead of leaking an unset
+	// var to the rest of the run.
+	t.Setenv("HIVE_WORK_DIR", "")
 	m := NewManager(map[string]config.AgentConfig{}, discardLogger(), ProjectContext{})
 	if m.workDir != "/data/agents" {
 		t.Errorf("workDir = %q, want /data/agents", m.workDir)
@@ -556,17 +559,4 @@ func TestBuildBootstrapPrompt_WithFile(t *testing.T) {
 	if prompt != "" {
 		t.Error("boot prompt should be empty — agents get kicked by governor")
 	}
-}
-
-func contains(s, sub string) bool {
-	return len(s) >= len(sub) && (s == sub || len(s) > 0 && containsHelper(s, sub))
-}
-
-func containsHelper(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
 }

@@ -2,7 +2,15 @@ name: v2 Tests
 
 on:
   schedule:
-    - cron: '*/15 * * * *'
+    # Hourly, at :30 — deliberately offset from coverage-hourly.yml's :00 run
+    # so the two scheduled nets alternate every half hour instead of firing
+    # together. This schedule is the post-merge safety net for the default
+    # branch (there is no push trigger; pull_request below is the real gate),
+    # and it is what keeps create-issue-on-failure armed. It ran every 15
+    # minutes until #4650: ~96 runs/day at ~3m15s each — ~5 runner-hours/day —
+    # almost all on an unchanged, already-gated SHA, while coverage-hourly
+    # re-ran the identical suite with the same floors every hour anyway.
+    - cron: '30 * * * *'
   workflow_dispatch:
   # Gate PRs, not just the cron. `go test ./pkg/...` runs nowhere else — v2-ci.yml
   # builds and vets but never runs the unit tests — so before this, a Go
@@ -19,6 +27,17 @@ on:
 permissions:
   contents: read
   issues: write
+
+# Cancel superseded PR runs only (#4623). A new push to a PR makes the
+# in-flight run's verdict irrelevant, so cancelling it is pure runner-minute
+# savings. Scheduled and workflow_dispatch runs must NEVER be cancelable:
+# the scheduled run feeds create-issue-on-failure (the merge-race/flake
+# auto-filer) — cancelling one blinds it for that window. Keying the non-PR
+# group on run_id gives every such run its own group, so they can neither
+# cancel each other nor queue behind one another.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # ── Sharding layout (#4118) ──────────────────────────────────────────────────
 # The suite is split so PR wall-clock ≈ the slowest single piece, not the sum.
@@ -295,7 +314,7 @@ jobs:
 
   # Per-package coverage-floor gate (#4112): parse-only, consumes the shard
   # artifacts — it runs no tests, so PRs run the suite exactly once. PR-only:
-  # on the 15-minute schedule the hourly coverage workflow remains the
+  # on the hourly schedule the coverage-hourly workflow remains the
   # monitoring + issue-filing authority.
   #
   # Scoring is computed from the coverage PROFILES, not from the `ok ...
@@ -337,7 +356,7 @@ jobs:
           # KEEP IN SYNC with coverage-hourly.yml, which applies the same floors
           # on its hourly scheduled run.
           declare -A PKG_THRESHOLD=(
-            [dashboard]=78   # ~20% is inception tmux watcher + copilot/claude device-flow + /data file I/O + k8s
+            [dashboard]=82   # ~17% is inception tmux watcher + copilot/claude device-flow + /data file I/O + k8s
             [hub]=87         # kubectl-shelling + live-GitHub paths; see #2355. Was 89 against v2's 89.9%; v4 measures 87.6%.
             [agent]=89       # pre-existing shortfall inherited from #2350, NOT a new regression. See #2355.
 
@@ -345,20 +364,43 @@ jobs:
             # A RATCHET, NOT A TARGET — see coverage-hourly.yml for the full
             # rationale. Raise these toward 90 as tests land; never raise one to
             # paper over a drop.
-            [intent]=65
-            [sandbox]=67
-            [ioscan]=71
-            [pushbroker]=72
-            [tracing]=76
+            #
+            # ── Ratchet turned for #4570 ─────────────────────────────────────
+            # sandbox/ioscan/pushbroker: tests added in the same PR, so the
+            #   floors move with the gain (67.6→98.5, 71.0→97.1, 72.8→100.0).
+            # intent/tracing/dashboard: NO code change — these had drifted far
+            #   above floors recorded at d89121f5 and were no longer catching
+            #   anything. Re-measured on v4 at cd8aee5d and moved up to what
+            #   they actually hold, with ~1 point of headroom.
+            # scheduler (90.4) and escalation (93.2) now clear the 90% default
+            #   and no longer need an entry at all.
+            [intent]=87
+            [tracing]=85
             [review]=80
             [retro]=82
             [github]=88
             [hivectl]=88
             [knowledge]=89
-            [scheduler]=89
-            [escalation]=89
             [proxy]=89
+            [ioscan]=96
+            [sandbox]=98
+            [pushbroker]=99
+
+            # ── ./cmd/... floors (#4701) ─────────────────────────────────────
+            # See coverage-hourly.yml for the rationale. cmd keys are prefixed
+            # ("cmd/<name>") so cmd/hivectl can never collide with
+            # pkg/hivectl's floor. Recorded just below what v4 measures after
+            # #4700/#4719 so the ratchet can turn as CLI tests land.
+            [cmd/bd]=58       # 60.4% after #4700's kb-CLI tests
+            [cmd/hive]=17     # 18.8% after #4719's merge-authz tests; bulk is main()/run-loop wiring
+            [cmd/apiproxy]=13 # 14.7%
+            [cmd/hive-backup]=68 # 71.1% after #4736's CLI entry-point tests
           )
+
+          # Thin flag-parsing mains with no test files, wrapping packages the
+          # gate already floors. KEEP IN SYNC with coverage-hourly.yml. Any NEW
+          # untested cmd package still hard-fails.
+          UNTESTED_CMD_MAINS='cmd/hivectl'
 
           # Merge every shard profile: per-block counts are summed, so the N
           # partial pkg/agent profiles combine into the package's true
@@ -396,16 +438,27 @@ jobs:
           echo "Total coverage (./pkg/...): ${TOTAL:-unavailable}"
 
           # Classify every package exactly once from the combined logs.
-          # Floors apply to ./pkg/... only, matching the historical gate
-          # (./cmd/... lines are ignored here; the shards themselves already
-          # fail on any cmd test failure).
+          # ./cmd/... is scored too (#4701): the shards have run cmd tests
+          # since the partition change, but coverage floors previously applied
+          # to ./pkg/... only, so a CLI package could lose all its tests
+          # without the gate noticing. The TOTAL line remains ./pkg/...-only
+          # for trend continuity.
           cat test-*.log > cover-run.log
           grep -E '^(ok|FAIL|\?)' cover-run.log \
-            | awk '$2 ~ /^github\.com\/kubestellar\/hive\/pkg\// {print $1, $2}' \
+            | awk '$2 ~ /^github\.com\/kubestellar\/hive\/(pkg|cmd)\// {print $1, $2}' \
             | LC_ALL=C sort -u > pkg-states.txt
 
+          # Floor-map key: cmd packages get a "cmd/" prefix so cmd/hivectl can
+          # never resolve to pkg/hivectl's floor; pkg keeps the bare basename.
+          floor_key() {
+            case "$1" in
+              */cmd/*) echo "cmd/${1##*/}" ;;
+              *)       echo "${1##*/}" ;;
+            esac
+          }
+
           while read -r state pkgpath; do
-            pkg=${pkgpath##*/}
+            pkg=$(floor_key "$pkgpath")
             case "$state" in
               ok)
                 # A package that also has a FAIL line anywhere is broken; the
@@ -425,8 +478,15 @@ jobs:
                 REPORT="${REPORT}${pkg}: FAIL\n"
                 ;;
               \?)
-                BROKEN="${BROKEN}${pkg}: NO TEST FILES\n"
-                REPORT="${REPORT}${pkg}: no tests\n"
+                case " $UNTESTED_CMD_MAINS " in
+                  *" $pkg "*)
+                    REPORT="${REPORT}${pkg}: no tests (exempt thin main)\n"
+                    ;;
+                  *)
+                    BROKEN="${BROKEN}${pkg}: NO TEST FILES\n"
+                    REPORT="${REPORT}${pkg}: no tests\n"
+                    ;;
+                esac
                 ;;
             esac
           done < pkg-states.txt
@@ -467,6 +527,10 @@ jobs:
           script: |
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             const sha = context.sha.substring(0, 7);
+            // The scheduled run executes on the DEFAULT branch (v4) — name the
+            // real branch instead of the workflow's historical "v2" label,
+            // which sent operators to the retired v2 line (#4569).
+            const branch = context.ref.replace('refs/heads/', '');
             const results = [
               '${{ needs.test-hub.result }}',
               '${{ needs.test-agent.result }}',
@@ -475,7 +539,7 @@ jobs:
             ];
             const wasCancelled = results.includes('cancelled');
             const kind = wasCancelled ? 'cancelled (likely timed out)' : 'failure';
-            const title = `[Tests] v2 test ${wasCancelled ? 'cancelled' : 'failure'} on ${sha}`;
+            const title = `[Tests] ${branch} test ${wasCancelled ? 'cancelled' : 'failure'} on ${sha}`;
 
             const existing = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
@@ -484,7 +548,7 @@ jobs:
               labels: 'ci-failure',
               per_page: 10,
             });
-            const dup = existing.data.find(i => i.title.startsWith('[Tests] v2 test'));
+            const dup = existing.data.find(i => i.title.startsWith(`[Tests] ${branch} test`) || i.title.startsWith('[Tests] v2 test'));
             if (dup) {
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
@@ -499,6 +563,6 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               title,
-              body: `## Test ${wasCancelled ? 'Cancelled' : 'Failure'}\n\n- **Commit:** \`${context.sha}\`\n- **Run:** ${runUrl}\n- **Branch:** v2\n\nScheduled test run was ${kind}. See the [workflow run](${runUrl}) for details.`,
+              body: `## Test ${wasCancelled ? 'Cancelled' : 'Failure'}\n\n- **Commit:** \`${context.sha}\`\n- **Run:** ${runUrl}\n- **Branch:** ${branch}\n\nScheduled test run was ${kind}. See the [workflow run](${runUrl}) for details.`,
               labels: ['ci-failure', 'kind/bug'],
             });

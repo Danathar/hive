@@ -125,9 +125,19 @@ func (l Layer) String() string {
 // Path returns where an operator must write to change a field won by this
 // layer. This is the answer to the question that took four attempts during the
 // GitHub Enterprise incident.
+//
+// LayerSeed is environment-aware, gated on the same IsKubernetesPod() the
+// layering itself already uses (see config.go). In Kubernetes the seed really
+// is the ConfigMap. Outside Kubernetes there is no ConfigMap at all — the seed
+// is RuntimeConfigFile, a plain file on the PVC that Save() rewrites on every
+// dashboard save (see saveLocked, config.go:5141) — so naming the ConfigMap
+// there points an operator at a layer that does not exist (#4971).
 func (l Layer) Path() string {
 	switch l {
 	case LayerSeed:
+		if !IsKubernetesPod() {
+			return RuntimeConfigFile
+		}
 		return "ConfigMap hive-config (key hive.yaml)"
 	case LayerDashboardOverlay:
 		return DashboardOverlayFile
@@ -144,14 +154,24 @@ func (l Layer) Path() string {
 // the provenance API so an operator can see not just which layer won but
 // whether editing it is even possible.
 //
-// The ConfigMap's answer — "nobody" — is the single most useful fact this
-// package exposes. Nothing in the system writes it: the hub only reads it, and
-// the spoke's RBAC omits configmaps entirely. An operator who edits it and
-// restarts will observe no change, which is exactly what happened four times
-// in a row during the GHE incident.
+// In Kubernetes, the ConfigMap's answer — "nobody" — is the single most
+// useful fact this package exposes. Nothing in the system writes it: the hub
+// only reads it, and the spoke's RBAC omits configmaps entirely. An operator
+// who edits it and restarts will observe no change, which is exactly what
+// happened four times in a row during the GHE incident.
+//
+// Outside Kubernetes there is no ConfigMap and no RBAC to omit — LayerSeed is
+// RuntimeConfigFile, which the spoke rewrites on every save (saveLocked,
+// config.go:5141) and the entrypoint restores over the boot config on every
+// restart (entrypoint.sh:267-311, Docker/LXC branch). Reporting "nobody" there
+// is the same misdirection in the opposite direction: it hides the one file
+// that actually decides the value (#4971).
 func (l Layer) Writer() string {
 	switch l {
 	case LayerSeed:
+		if !IsKubernetesPod() {
+			return "spoke (Config.Save)"
+		}
 		return "nobody (hub has read-only access; spoke RBAC omits configmaps)"
 	case LayerDashboardOverlay:
 		return "spoke (Config.Save) and hub (via heartbeat delivery)"
@@ -165,7 +185,16 @@ func (l Layer) Writer() string {
 }
 
 // Writable reports whether any running component can write this layer.
-func (l Layer) Writable() bool { return l != LayerSeed && l != LayerUnset }
+//
+// Outside Kubernetes LayerSeed is RuntimeConfigFile, which the spoke writes
+// directly (see Writer), so it is writable there even though the same layer
+// is genuinely unwritable ("nobody") in Kubernetes (#4971).
+func (l Layer) Writable() bool {
+	if l == LayerSeed {
+		return !IsKubernetesPod()
+	}
+	return l != LayerUnset
+}
 
 // seedKeys carries key-presence facts that survive only in raw YAML, so the
 // merge can be exactly faithful to the heredoc. See MergeLayersYAML.
@@ -359,17 +388,35 @@ func gitHubLooksPlaceholder(gh GitHubConfig) bool {
 	return containsFold(gh.KeyFile, "PLACEHOLDER")
 }
 
-// DanglingKeyFile reports whether gh names a PVC key file that does not exist.
+// DanglingKeyFile reports whether gh names a key file, in either of the two
+// locations a hive's App key is ever delivered to, that does not exist.
 // The entrypoint warns rather than fails here, because the alternative is a
 // silent 401 loop against GitHub. Surfaced through provenance so the condition
 // is visible without reading pod logs.
+//
+// BOTH prefixes, not just the PVC (#4368). /secrets is the provisioning mount,
+// and the provisioning template used to seed key_file=/secrets/gh-app-key.pem
+// for every App-using hive while creating that Secret entry only for hives
+// provisioned with an inline private key. Four hives shipped naming a file that
+// would never exist — under the one prefix this predicate did not look at, so
+// the detector written for precisely that symptom returned false for every one
+// of them. A path outside both prefixes is an operator's own location and is
+// left alone: they are entitled to keep a key somewhere this build has never
+// heard of.
 func DanglingKeyFile(gh GitHubConfig) bool {
-	const pvcPrefix = "/data/"
-	if len(gh.KeyFile) < len(pvcPrefix) || gh.KeyFile[:len(pvcPrefix)] != pvcPrefix {
+	if !hasPrefix(gh.KeyFile, "/data/") && !hasPrefix(gh.KeyFile, "/secrets/") {
 		return false
 	}
 	_, err := os.Stat(gh.KeyFile)
 	return os.IsNotExist(err)
+}
+
+// hasPrefix is strings.HasPrefix, spelled out because this file imports only
+// log and os — the same reason the original code compared the prefix by slice
+// rather than calling into strings. Length-checked first, so a KeyFile shorter
+// than the prefix returns false instead of panicking on the slice.
+func hasPrefix(s, prefix string) bool {
+	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
 }
 
 // containsFold reports whether s contains substr, ASCII case-insensitively.
