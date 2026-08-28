@@ -113,6 +113,15 @@ this, omits `--add-dir`, and warns on stderr rather than corrupting the argv;
 the sandbox posture still applies, but the workspace is not granted. Move the
 workspace to a path without spaces.
 
+Claude-family host-state denials: `claude` and `litellm` run permissions-bypassed
+on the contributor's own machine, so hive denies privilege escalation
+(`sudo`, `pkexec`, `doas`, `su`) and host boot/deployment tools (`rpm-ostree`,
+`bootc`, `ostree`, `grubby`, `bootctl`, `efibootmgr`) on that path — an agent
+running an assigned repo's test suite reached a contributor's bootloader
+otherwise (#4918). Repo work is unaffected. `HIVE_CLAUDE_DANGEROUSLY_ALLOW_HOST_STATE=1`
+restores the old posture and is the claude analogue of the Codex bypass below;
+prefer leaving it unset.
+
 Codex config-key compatibility: `approvals_reviewer` is passed with `-c`, so it
 depends on the installed Codex release accepting that key. If a version rejects
 it at startup, set `HIVE_CODEX_APPROVALS_REVIEWER=` (empty) to drop the key
@@ -308,7 +317,7 @@ The generated Secret contains the registration token and `GH_TOKEN` as Kubernete
 
 Two admission behaviors are worth knowing when your relay seems idle:
 
-- **Issues already claimed by any open PR are skipped.** The hub's claim ledger records every open PR that references an issue with a closing keyword (`fixes #N`, `closes owner/repo#N`, …) — including PRs from external authors, not just hive agents ([#3792](https://github.com/kubestellar/hive/pull/3792)). A claimed issue is silently dropped from the contribute candidate set; if nothing else is admissible the relay receives `task_unavailable` with reason `no_matching_work` (there is no per-issue "claimed by PR #N" message). External claims affect only the contribute queue — they never suppress the hive's own agents.
+- **Issues already claimed by any open PR are skipped.** The hub's claim ledger records every open PR that references an issue with a closing keyword (`fixes #N`, `closes owner/repo#N`, …) — including PRs from external authors, not just hive agents ([#3792](https://github.com/kubestellar/hive/pull/3792)). A claimed issue is silently dropped from the contribute candidate set; if nothing else is admissible the relay receives `task_unavailable` with reason `no_matching_work` (there is no per-issue "claimed by PR #N" message). External claims — like the weaker non-closing `Refs #N` references — now DEFER the hive's own agents for a bounded 72h window from when the claim was first observed, then release the issue even while the PR stays open ([#4929](https://github.com/kubestellar/hive/issues/4929)). They previously never suppressed agent work at all, which let an agent that cannot check for existing PRs re-implement an issue a live PR already covered. Nothing is frozen: the window is a bound, and a red+stale claiming PR defers nothing.
 - **Claims expire.** Ledger entries live 72 hours (refreshed while the PR stays open); a claiming PR that goes red on a required check and stale releases the issue back to the queue.
 
 ## Capability declaration (DECLARE)

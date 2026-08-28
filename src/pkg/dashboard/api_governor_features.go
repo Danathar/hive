@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/kubestellar/hive/pkg/config"
+	"github.com/kubestellar/hive/pkg/linearagent"
 )
 
 // Sampling-ratio bounds for the tracing head-based sampler. The config treats a
@@ -422,10 +423,12 @@ func (s *Server) handleGovernorWorkSourceGet(w http.ResponseWriter, r *http.Requ
 	jsonResponse(w, workSourceSectionResponse(s.deps.Config))
 }
 
-// handleGovernorWorkSourcePut updates the work_source config. Only the type
-// and per-source credential/setting fields are accepted; team lists for Linear
-// are complex nested structures that remain YAML-only (same as the advisory
-// config's complex sub-structs).
+// handleGovernorWorkSourcePut updates the work_source config. The type and
+// per-source credential/setting fields are accepted; for Linear the full
+// team→repo map (teams), session_agent and assigned_only are accepted too, so
+// a Linear-sourced hive can be configured end-to-end from the dashboard
+// without falling back to the ConfigMap seed. List-valued fields (hold_labels,
+// teams) replace the stored list when present and are left alone when absent.
 func (s *Server) handleGovernorWorkSourcePut(w http.ResponseWriter, r *http.Request) {
 	if !requireOwnerRole(w, r) {
 		return
@@ -445,8 +448,11 @@ func (s *Server) handleGovernorWorkSourcePut(w http.ResponseWriter, r *http.Requ
 			DefaultRepo    *string  `json:"default_repo"`
 		} `json:"github_projects"`
 		Linear *struct {
-			APIKey     *string  `json:"api_key"`
-			HoldLabels []string `json:"hold_labels"`
+			APIKey       *string                         `json:"api_key"`
+			HoldLabels   []string                        `json:"hold_labels"`
+			SessionAgent *string                         `json:"session_agent"`
+			AssignedOnly *bool                           `json:"assigned_only"`
+			Teams        []config.LinearTeamSourceConfig `json:"teams"`
 		} `json:"linear"`
 		Jira *struct {
 			BaseURL     *string  `json:"base_url"`
@@ -472,9 +478,15 @@ func (s *Server) handleGovernorWorkSourcePut(w http.ResponseWriter, r *http.Requ
 			return
 		}
 	}
+	cfg := s.deps.Config
+	if body.Linear != nil {
+		if msg := validateLinearWorkSourcePatch(cfg, body.Linear.SessionAgent, body.Linear.AssignedOnly, body.Linear.Teams); msg != "" {
+			jsonError(w, msg, http.StatusBadRequest)
+			return
+		}
+	}
 
 	// --- apply ---
-	cfg := s.deps.Config
 	ws := &cfg.Governor.WorkSource
 	if body.Type != nil {
 		ws.Type = *body.Type
@@ -507,6 +519,15 @@ func (s *Server) handleGovernorWorkSourcePut(w http.ResponseWriter, r *http.Requ
 		}
 		if l.HoldLabels != nil {
 			ws.Linear.HoldLabels = l.HoldLabels
+		}
+		if l.SessionAgent != nil {
+			ws.Linear.SessionAgent = strings.TrimSpace(*l.SessionAgent)
+		}
+		if l.AssignedOnly != nil {
+			ws.Linear.AssignedOnly = *l.AssignedOnly
+		}
+		if l.Teams != nil {
+			ws.Linear.Teams = l.Teams
 		}
 	}
 	if body.Jira != nil {
@@ -557,8 +578,13 @@ func workSourceSectionResponse(cfg *config.Config) map[string]interface{} {
 			"default_repo":    ws.GitHubProjects.DefaultRepo,
 		},
 		"linear": map[string]interface{}{
-			"api_key":     ws.Linear.APIKey,
-			"hold_labels": ws.Linear.HoldLabels,
+			// The key itself is never echoed: the form only needs to know
+			// whether one is stored (leave the field blank to keep it).
+			"api_key_set":   ws.Linear.APIKey != "",
+			"hold_labels":   ws.Linear.HoldLabels,
+			"session_agent": ws.Linear.SessionAgent,
+			"assigned_only": ws.Linear.AssignedOnly,
+			"teams":         linearTeamsResponse(ws.Linear.Teams),
 		},
 		"jira": map[string]interface{}{
 			"base_url":     ws.Jira.BaseURL,
@@ -570,4 +596,71 @@ func workSourceSectionResponse(cfg *config.Config) map[string]interface{} {
 			"hold_labels":  ws.Jira.HoldLabels,
 		},
 	}
+}
+
+// linearTeamsResponse renders the team list as plain maps so the form always
+// receives a JSON array (never null) with every field present.
+func linearTeamsResponse(teams []config.LinearTeamSourceConfig) []map[string]interface{} {
+	out := make([]map[string]interface{}, 0, len(teams))
+	for _, t := range teams {
+		projects := make([]map[string]interface{}, 0, len(t.Projects))
+		for _, p := range t.Projects {
+			projects = append(projects, map[string]interface{}{"name": p.Name, "repo": p.Repo})
+		}
+		states := t.States
+		if states == nil {
+			states = []string{}
+		}
+		out = append(out, map[string]interface{}{
+			"key":      t.Key,
+			"repo":     t.Repo,
+			"states":   states,
+			"cycles":   t.Cycles,
+			"projects": projects,
+		})
+	}
+	return out
+}
+
+// validateLinearWorkSourcePatch checks the Linear fields of a work-source PUT
+// before anything is mutated. It mirrors the rules the work-source factory
+// and the session responder enforce at runtime, so the dashboard refuses to
+// persist a config that would only fail at the next reload:
+//   - every team needs a key and a repo (the team→repo map is what makes
+//     enumeration work at all);
+//   - session_agent must name a configured agent (unknownSessionAgentError);
+//   - assigned_only requires a connected Linear agent (fail closed, same as
+//     worksource.New).
+//
+// Returns the 400 message, or "" when the patch is acceptable.
+func validateLinearWorkSourcePatch(cfg *config.Config, sessionAgent *string, assignedOnly *bool, teams []config.LinearTeamSourceConfig) string {
+	for i, t := range teams {
+		if strings.TrimSpace(t.Key) == "" {
+			return fmt.Sprintf("linear.teams[%d].key is required", i)
+		}
+		if strings.TrimSpace(t.Repo) == "" {
+			return fmt.Sprintf("linear.teams[%d].repo is required (owner/name agents clone for team %s)", i, t.Key)
+		}
+		if t.Cycles != "" && t.Cycles != "current" {
+			return fmt.Sprintf("linear.teams[%d].cycles must be empty or \"current\"", i)
+		}
+		for j, p := range t.Projects {
+			if strings.TrimSpace(p.Name) == "" {
+				return fmt.Sprintf("linear.teams[%d].projects[%d].name is required", i, j)
+			}
+		}
+	}
+	if sessionAgent != nil {
+		if name := strings.TrimSpace(*sessionAgent); name != "" {
+			if _, ok := cfg.Agents[name]; !ok {
+				return (&unknownSessionAgentError{name: name}).Error()
+			}
+		}
+	}
+	if assignedOnly != nil && *assignedOnly {
+		if linearagent.StoredViewerID(linearagent.DefaultStorePath()) == "" {
+			return "assigned_only requires a connected Linear agent: connect the workspace via POST /api/linear/agent/install first (no install found at " + linearagent.DefaultStorePath() + ")"
+		}
+	}
+	return ""
 }
