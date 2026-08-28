@@ -644,7 +644,9 @@ start_supervisor() {
 
   local launch_cmd bin perm model_name
   bin=$(backend_binary "$cli")
-  perm=$(backend_perm_flag "$cli")
+  # _shell variant (#4938): this string is typed into a tmux pane below, where
+  # the claude deny list's (),* are parsed as shell syntax raw. See backends.conf.
+  perm=$(backend_perm_flag_shell "$cli")
   model_name=$(normalize_model_for_backend "$cli" "claude-opus-4-6")
   if [[ -z "$bin" || -z "$perm" ]]; then
     die "Unknown CLI: $cli. Supported: $KNOWN_BACKENDS"
@@ -1218,7 +1220,10 @@ cmd_switch() {
   # Resolve launch command for backend
   local launch_cmd bin perm
   bin=$(backend_binary "$backend")
-  perm=$(backend_perm_flag "$backend")
+  # _shell variant (#4938): AGENT_LAUNCH_CMD lands in an env file and is
+  # re-parsed as shell source by supervisor.sh's generated launcher (unquoted
+  # heredoc), where the claude deny list's (),* raw are a syntax error.
+  perm=$(backend_perm_flag_shell "$backend")
   if [[ -z "$bin" || -z "$perm" ]]; then
     die "Unknown backend: $backend. Supported: $KNOWN_BACKENDS"
   fi

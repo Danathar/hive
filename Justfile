@@ -820,7 +820,12 @@ contribute-hive backend="" mode="docker": check-version
       # Get CLI binary and permission flags from backends.conf
       source "${SCRIPT_DIR}/../config/backends.conf" 2>/dev/null || true
       CMD=$(backend_binary "$BACKEND" 2>/dev/null || echo "$BACKEND")
-      PERM_FLAG=$(backend_perm_flag "$BACKEND" 2>/dev/null || echo "")
+      # _shell variant: this flag string is pasted into a tmux send-keys shell
+      # line below, and the claude deny list (#4938) contains (),* — raw, they
+      # are shell syntax and the pane dies with `syntax error near token '('`
+      # before the CLI ever starts. backend_perm_flag stays raw for argv
+      # consumers (agent-launch.sh); see backends.conf.
+      PERM_FLAG=$(backend_perm_flag_shell "$BACKEND" 2>/dev/null || echo "")
 
       if ! command -v "$CMD" &>/dev/null; then
         echo "ERROR: ${BACKEND} CLI not found. Install it first."
