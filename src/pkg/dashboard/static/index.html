@@ -3208,7 +3208,7 @@
   <!-- Approvals desk (RFC #4000). Hidden until /api/approvals reports the desk
        enabled, so a hive that has not opted in sees no new chrome. -->
   <div id="approvals-section" style="margin-top: 16px; margin-bottom: 24px; display: none;">
-    <h2 style="margin-bottom: 8px;" class="section-label section-header-toggle" onclick="toggleSection('approvals-section')"><span class="section-chevron">▼</span> ✋ Approvals <span id="approvals-badge" title="Pending operator approvals" style="display:none;font-size:0.62em;font-weight:600;vertical-align:middle;padding:2px 7px;border-radius:10px;margin-left:6px;background:color-mix(in srgb, var(--yellow) 25%, transparent);color:var(--text)">0</span></h2>
+    <h2 style="margin-bottom: 8px;" class="section-label section-header-toggle" data-action="toggleSection" data-arg0="approvals-section"><span class="section-chevron">▼</span> ✋ Approvals <span id="approvals-badge" title="Pending operator approvals" style="display:none;font-size:0.62em;font-weight:600;vertical-align:middle;padding:2px 7px;border-radius:10px;margin-left:6px;background:color-mix(in srgb, var(--yellow) 25%, transparent);color:var(--text)">0</span></h2>
     <div class="section-body">
       <div id="approvals-card" style="background:var(--card-bg);border:1px solid var(--border);border-radius:8px;padding:16px">
         <!-- Policy-bug banner: an inbox accumulating on a full-autonomy hive is
@@ -3216,8 +3216,8 @@
         <div id="approvals-policy-bug" style="display:none;margin-bottom:10px;padding:8px 10px;border-radius:6px;background:color-mix(in srgb, var(--red) 12%, transparent);border:1px solid color-mix(in srgb, var(--red) 40%, transparent);font-size:0.75rem"></div>
         <div id="approvals-chips" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;font-size:0.72rem"></div>
         <div id="approvals-actions" style="display:none;gap:8px;align-items:center;margin-bottom:10px;font-size:0.75rem">
-          <button class="btn" onclick="approvalsResolveSelected(true)">Approve selected</button>
-          <button class="btn" onclick="approvalsResolveSelected(false)">Reject selected</button>
+          <button class="btn" data-action="approvalsResolveSelected" data-arg0="true" data-arg-types="j">Approve selected</button>
+          <button class="btn" data-action="approvalsResolveSelected" data-arg0="false" data-arg-types="j">Reject selected</button>
           <span class="muted" id="approvals-selected-count"></span>
         </div>
         <div id="approvals-list"></div>
@@ -9352,7 +9352,7 @@ function burnAreaChart() {
     function renderApprovalChip(value, label, active) {
       const bg = active ? 'color-mix(in srgb, var(--accent) 25%, transparent)' : 'transparent';
       return '<button class="repo-chip-btn" style="background:' + bg + '" ' +
-        'onclick="approvalsSetFilter(' + (value === null ? 'null' : JSON.stringify(value)) + ')">' +
+        'data-action="approvalsSetFilter" data-arg-types="j" data-arg0="' + escapeHtml(value === null ? 'null' : JSON.stringify(value)) + '">' +
         escapeHtml(label) + '</button>';
     }
 
@@ -9366,7 +9366,7 @@ function burnAreaChart() {
       const bugMark = it.policy_bug ? ' <span title="Queued at ACMM L6 — probable policy bug">⚠️</span>' : '';
 
       return '<div style="display:flex;gap:8px;align-items:flex-start;padding:7px 0;border-top:1px solid var(--border);font-size:0.75rem">' +
-        '<input type="checkbox"' + checked + ' onchange="approvalsToggle(' + JSON.stringify(it.id) + ')">' +
+        '<input type="checkbox"' + checked + ' data-change-action="approvalsToggle" data-arg0="' + escapeHtml(it.id) + '">' +
         '<div style="flex:1;min-width:0">' +
           '<div><strong>' + escapeHtml(target) + '</strong>' + bugMark +
             ' <span class="muted">' + escapeHtml(it.kind || '') + '</span></div>' +
@@ -9374,8 +9374,8 @@ function burnAreaChart() {
           '<div style="margin-top:3px">' + ruleChip + '</div>' +
         '</div>' +
         '<div style="display:flex;gap:5px">' +
-          '<button class="btn" onclick="approvalsResolveOne(' + JSON.stringify(it.id) + ',true)">Approve</button>' +
-          '<button class="btn" onclick="approvalsResolveOne(' + JSON.stringify(it.id) + ',false)">Reject</button>' +
+          '<button class="btn" data-action="approvalsResolveOne" data-arg-types="s,j" data-arg0="' + escapeHtml(it.id) + '" data-arg1="true">Approve</button>' +
+          '<button class="btn" data-action="approvalsResolveOne" data-arg-types="s,j" data-arg0="' + escapeHtml(it.id) + '" data-arg1="false">Reject</button>' +
         '</div>' +
       '</div>';
     }
