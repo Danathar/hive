@@ -207,9 +207,13 @@ type WSMessage struct {
 	Message           string `json:"message,omitempty"`
 	RegistrationToken string `json:"registration_token,omitempty"`
 	CLIBackend        string `json:"cli_backend,omitempty"`
-	Model             string `json:"model,omitempty"`
-	ReasoningEffort   string `json:"reasoning_effort,omitempty"`
-	TaskID            string `json:"task_id,omitempty"`
+	// Provider is optional, bounded receipt evidence derived by Pi relays from
+	// their canonical provider/model preference. It is never assignment or
+	// routing authority; Model remains the canonical selection transport.
+	Provider        string `json:"provider,omitempty"`
+	Model           string `json:"model,omitempty"`
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	TaskID          string `json:"task_id,omitempty"`
 	// TaskGen is the assignment GENERATION / lease token for this task (kubestellar/
 	// hive#2568, the Gate). The hub stamps it on task_assign; the relay echoes it back
 	// on task_progress / task_complete / task_failed. The hub rejects any completion or
@@ -3427,10 +3431,20 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 					if completedTask != nil && completedTask.Number > 0 {
 						completedDesc = fmt.Sprintf("%s %s#%d: %s", completedTask.Kind, completedTask.Repo, completedTask.Number, completedTask.Title)
 					}
+					provider := ""
+					if contributor.cliBackend == "pi" {
+						provider, _, _ = strings.Cut(contributor.model, "/")
+					}
 					h.addActivity(contributor.profile.GitHubUsername, "completed", contributor.role, contributor.cliBackend, contributor.model, contributor.reasoningEffort, completedDesc)
 					h.logger.Info("[contribute-ws] task complete",
 						"username", contributor.profile.GitHubUsername,
 						"task", msg.TaskID,
+						"task_gen", msg.TaskGen,
+						"backend", contributor.cliBackend,
+						// Provider is derived from Pi's one canonical provider/model input;
+						// this evidence is not a second authority or routing signal.
+						"provider", provider,
+						"model", contributor.model,
 						"result", msg.Result,
 						"pr_verified", verifiedPR != "",
 						"verdict", verdict,
@@ -3561,10 +3575,19 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 					if failedTask != nil && failedTask.Number > 0 {
 						failedDesc = fmt.Sprintf("%s %s#%d: %s", failedTask.Kind, failedTask.Repo, failedTask.Number, failedTask.Title)
 					}
+					provider := ""
+					if contributor.cliBackend == "pi" {
+						provider, _, _ = strings.Cut(contributor.model, "/")
+					}
 					h.addActivity(contributor.profile.GitHubUsername, "failed", contributor.role, contributor.cliBackend, contributor.model, contributor.reasoningEffort, failedDesc)
 					h.logger.Info("[contribute-ws] task failed",
 						"username", contributor.profile.GitHubUsername,
 						"task", msg.TaskID,
+						"task_gen", msg.TaskGen,
+						"backend", contributor.cliBackend,
+						"provider", provider,
+						"model", contributor.model,
+						"result", "failed",
 						"reason", msg.Reason,
 						"failure_kind", failureKind,
 						"permanent", msg.Permanent,

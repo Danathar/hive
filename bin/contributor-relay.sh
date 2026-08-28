@@ -29,6 +29,11 @@ const WebSocket = require('ws');
 const { execSync, execFile, execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const {
+  parsePiModelSelection,
+  redactPiCredentials,
+  piReadiness,
+} = require('./pi-backend.js');
 
 const rawHub = process.env.HIVE_HUB || 'wss://hive.kubestellar.io:3001/contribute';
 // Multi-hub (kubestellar/hive#multi-hive): HIVE_HUB and HIVE_REGISTRATION_TOKEN
@@ -44,7 +49,16 @@ if (rawHubList.length > 1 && rawTokenList.length !== rawHubList.length) {
   process.exit(1);
 }
 const BACKEND = process.env.AGENT_BACKEND || 'claude';
-const MODEL = process.env.AGENT_MODEL || process.env.GOOSE_MODEL || '';
+// GOOSE_MODEL is a Goose-only compatibility input. Letting it fall back for Pi
+// made a restart silently select a Goose model the initial Pi launcher never
+// requested (#5039).
+const MODEL = process.env.AGENT_MODEL || (BACKEND === 'goose' ? process.env.GOOSE_MODEL : '') || '';
+const PI_SELECTION = parsePiModelSelection(MODEL);
+// Process environment is immutable for a running container in normal use. Keep
+// the startup view so readiness/redaction stays consistent across reconnects
+// (and so a later test/process mutation cannot change the declared contract).
+const PI_ENV = BACKEND === 'pi' ? { ...process.env } : {};
+let piInvocationState = 'untested';
 const REASONING_EFFORT = process.env.AGENT_REASONING_EFFORT || '';
 const AGENT_ROLE = (process.env.HIVE_AGENT_ROLE || '').trim();
 // Neutral directory both entrypoints launch the CLI from ($HOME). Used to pin
@@ -316,6 +330,7 @@ function detectCapabilities() {
   // operator could not see. Best-effort: omitted entirely when the probe fails.
   const cliVersion = detectAgentCLIVersion();
   if (cliVersion) caps.agent_cli_version = cliVersion;
+  if (BACKEND === 'pi') Object.assign(caps, piReadiness(PI_SELECTION, !!cliVersion, piInvocationState, PI_ENV));
   cachedCapabilities = caps;
   return caps;
 }
@@ -486,7 +501,30 @@ function resolveBackend() {
 // effectiveReasoningEffort() below, which must agree on whether a model is in
 // play — agy's effort is conditional on exactly that.
 function modelFlagFor() {
+  if (BACKEND === 'pi' && !PI_SELECTION.valid) throw new Error(PI_SELECTION.error);
   return MODEL && !NO_MODEL_FLAG_BACKENDS.includes(BACKEND) ? `--model ${MODEL}` : '';
+}
+
+function effectiveProvider() {
+  return BACKEND === 'pi' && PI_SELECTION.valid ? PI_SELECTION.provider : '';
+}
+
+// Receipt fields are bounded selections, never credentials. Provider is
+// transported canonically inside model; the separate field is evidence for
+// local status/receipts, not another input or authority source.
+function effectiveSelectionFields() {
+  const out = { cli_backend: BACKEND };
+  const model = effectiveModel();
+  const provider = effectiveProvider();
+  if (provider) out.provider = provider;
+  if (model) out.model = model;
+  return out;
+}
+
+function setPiInvocationState(state) {
+  if (BACKEND !== 'pi') return;
+  piInvocationState = state;
+  if (cachedCapabilities) Object.assign(cachedCapabilities, piReadiness(PI_SELECTION, !!cachedCapabilities.agent_cli_version, state, PI_ENV));
 }
 
 // effectiveReasoningEffort is the SINGLE source of truth for the effort actually
@@ -734,7 +772,7 @@ function buildLaunchCommand() {
 //          prompt is appended as the final, distinct argv element.
 //
 // Backends NOT listed here have no known non-interactive entry point (bob /
-// pi drive an interactive TUI), so headless mode refuses them LOUDLY at
+// aider drive an interactive TUI), so headless mode refuses them LOUDLY at
 // task time rather than silently stalling. Extending this table is how a
 // future PR adds a backend once its headless invocation is verified.
 const HEADLESS_BACKENDS = {
@@ -757,6 +795,10 @@ const HEADLESS_BACKENDS = {
   // that `run`, `-t` and `--no-session` all exist and that a failed run exits
   // non-zero, which is the exit-code contract runHeadlessTask() relies on.
   goose: { flag: ['run', '--no-session', '-t'] },
+  // pi --print --mode json <prompt> — Pi's bounded non-interactive entry point.
+  // AGENT_MODEL is already the canonical provider/model token, so no separate
+  // --provider input is needed (or allowed) and restart/headless stay identical.
+  pi: { flag: ['--print', '--mode', 'json'] },
   // agy -p "<prompt>" — Antigravity's print mode ("Run a single prompt
   // non-interactively and print the response", `agy --help`). Verified against
   // agy 1.1.13: a print-mode run answers on stdout and exits 0, which is the
@@ -792,6 +834,7 @@ function headlessSupportsBackend() {
 function buildHeadlessArgv(prompt) {
   const spec = HEADLESS_BACKENDS[BACKEND];
   if (!spec) return null;
+  if (BACKEND === 'pi' && !PI_SELECTION.valid) throw new Error(PI_SELECTION.error);
   const { cmd, perm } = resolveBackend();
   const permArgs = perm ? perm.split(/\s+/).filter(Boolean) : [];
   const modelArgs = MODEL && !NO_MODEL_FLAG_BACKENDS.includes(BACKEND) ? ['--model', MODEL] : [];
@@ -814,6 +857,8 @@ function writeHeadlessStatus(state, extra) {
   const payload = Object.assign({
     mode: MODE_HEADLESS,
     backend: BACKEND,
+    ...effectiveSelectionFields(),
+    ...(BACKEND === 'pi' ? piReadiness(PI_SELECTION, !!detectCapabilities().agent_cli_version, piInvocationState, PI_ENV) : {}),
     state,
     updated_at: new Date().toISOString(),
   }, extra || {});
@@ -845,10 +890,19 @@ function runHeadlessTask(task) {
     return;
   }
 
-  const { bin, args } = buildHeadlessArgv(prompt);
+  let built;
+  try {
+    built = buildHeadlessArgv(prompt);
+  } catch (e) {
+    const reason = e.message;
+    writeHeadlessStatus(HEADLESS_STATE_FAILED, { task_id: task.task_id, task_gen: task.task_gen, result: 'failed', reason });
+    failCurrentTask(reason, { permanent: true, kind: 'environment' });
+    return;
+  }
+  const { bin, args } = built;
   console.log(`Headless: running ${bin} (one-shot) for ${task.repo}#${task.number}`);
-  writeHeadlessStatus(HEADLESS_STATE_WORKING, { task_id: task.task_id, repo: task.repo, number: task.number });
-  send({ type: 'task_progress', seq: nextSeq(), task_id: task.task_id, task_gen: task.task_gen, kind: task.kind, repo: task.repo, number: task.number, title: task.title, status: 'working' });
+  writeHeadlessStatus(HEADLESS_STATE_WORKING, { task_id: task.task_id, task_gen: task.task_gen, repo: task.repo, number: task.number, result: 'working' });
+  send({ type: 'task_progress', seq: nextSeq(), task_id: task.task_id, task_gen: task.task_gen, kind: task.kind, repo: task.repo, number: task.number, title: task.title, status: 'working', ...effectiveSelectionFields() });
 
   let settled = false;
   const finish = (fn) => { if (settled) return; settled = true; fn(); };
@@ -863,6 +917,13 @@ function runHeadlessTask(task) {
     // Tokens can appear in agent output; redact before the tail leaves the host.
     const outTail = redactTokens(String(stdout || '') + String(stderr || ''))
       .split('\n').slice(-TMUX_TAIL_LINES);
+    // A revoke clears currentTask before killing the child. Ignore any callback
+    // that arrives afterwards — including a raced exit 0 — so stale work cannot
+    // emit completion after its assignment generation was fenced out.
+    if (!currentTask || currentTask.task_id !== task.task_id || currentTask.task_gen !== task.task_gen) {
+      writeHeadlessStatus(HEADLESS_STATE_WAITING, { revoked_task_id: task.task_id });
+      return;
+    }
     if (err) {
       // A non-zero exit, a spawn failure (ENOENT), or the timeout kill all land
       // here. err.killed && err.signal signals the timeout; report a real
@@ -878,13 +939,18 @@ function runHeadlessTask(task) {
         ? `headless task exceeded ${HEADLESS_TASK_TIMEOUT_MS / 60000}min and was killed`
         : `headless CLI exited with error: ${err.code !== undefined ? `code ${err.code}` : err.message}${diagnosticSuffix}`;
       finish(() => {
+        setPiInvocationState('failed');
         console.error(`Headless task ${task.task_id} failed: ${reason}`);
-        writeHeadlessStatus(HEADLESS_STATE_FAILED, { task_id: task.task_id, reason });
-        failCurrentTask(reason, { permanent: false });
+        writeHeadlessStatus(HEADLESS_STATE_FAILED, { task_id: task.task_id, task_gen: task.task_gen, result: 'failed', reason });
+        failCurrentTask(reason, {
+          permanent: false,
+          kind: BACKEND === 'pi' ? 'environment' : undefined,
+        });
       });
       return;
     }
     finish(() => {
+      setPiInvocationState('succeeded');
       console.log(`Headless task ${task.task_id} completed (exit 0)`);
       const prURL = detectPRURL(outTail, task.repo);
       if (prURL) console.log(`Detected PR for ${task.task_id}: ${prURL}`);
@@ -893,8 +959,8 @@ function runHeadlessTask(task) {
       // the claim with "shipped" anyway).
       const noWork = prURL ? null : detectNoWorkVerdict(outTail);
       if (noWork) console.log(`Detected no_work_needed verdict for ${task.task_id}: ${noWork.reason || '(no reason)'}`);
-      writeHeadlessStatus(HEADLESS_STATE_DONE, { task_id: task.task_id, pr_url: prURL });
-      send({ type: 'task_complete', seq: nextSeq(), task_id: task.task_id, task_gen: task.task_gen, result: 'completed', summary: 'Headless one-shot invocation exited 0', tmux_output: outTail, pr_url: prURL, verdict: noWork ? noWork.verdict : undefined, verdict_reason: noWork ? noWork.reason : undefined });
+      writeHeadlessStatus(HEADLESS_STATE_DONE, { task_id: task.task_id, task_gen: task.task_gen, result: 'completed', pr_url: prURL });
+      send({ type: 'task_complete', seq: nextSeq(), task_id: task.task_id, task_gen: task.task_gen, result: 'completed', summary: 'Headless one-shot invocation exited 0', tmux_output: outTail, pr_url: prURL, verdict: noWork ? noWork.verdict : undefined, verdict_reason: noWork ? noWork.reason : undefined, ...effectiveSelectionFields() });
       currentTask = null;
       taskAssignedAt = 0;
       tasksCompletedCount++;
@@ -1390,11 +1456,12 @@ function redactTokens(text) {
   // {36,} not {36}: GitHub documents that token length may grow, and an exact
   // bound would redact only the first 36 characters of a longer token, leaking
   // its tail into the hub log line (kubestellar/hive#4267).
-  return text.replace(/gho_[A-Za-z0-9]{36,}/g, 'gho_***REDACTED***')
+  const githubRedacted = text.replace(/gho_[A-Za-z0-9]{36,}/g, 'gho_***REDACTED***')
     .replace(/ghp_[A-Za-z0-9]{36,}/g, 'ghp_***REDACTED***')
     .replace(/ghs_[A-Za-z0-9]{36,}/g, 'ghs_***REDACTED***')
     .replace(/ghu_[A-Za-z0-9]{36,}/g, 'ghu_***REDACTED***')
     .replace(/ghr_[A-Za-z0-9]{36,}/g, 'ghr_***REDACTED***');
+  return BACKEND === 'pi' ? redactPiCredentials(githubRedacted, PI_SELECTION, PI_ENV) : githubRedacted;
 }
 
 function captureTmuxLines(n) {
@@ -1961,7 +2028,18 @@ function failCurrentTask(reason, opts) {
   const taskGen = currentTask.task_gen;
   const tmuxLines = captureTmuxLines(TMUX_TAIL_LINES);
   console.error(`Task ${taskId} failed${permanent ? ' permanently' : ''}${kind ? ` [${kind}]` : ''}: ${reason}`);
-  send({ type: 'task_failed', seq: nextSeq(), task_id: taskId, task_gen: taskGen, reason, permanent, failure_kind: kind, tmux_output: tmuxLines });
+  send({
+    type: 'task_failed',
+    seq: nextSeq(),
+    task_id: taskId,
+    task_gen: taskGen,
+    result: 'failed',
+    reason,
+    permanent,
+    failure_kind: kind,
+    tmux_output: tmuxLines,
+    ...effectiveSelectionFields(),
+  });
   currentTask = null;
   taskAssignedAt = 0;
   if (progressInterval) { clearInterval(progressInterval); progressInterval = null; }
@@ -2189,6 +2267,9 @@ function handleMessage(data, hub) {
         seq: nextSeq(),
         registration_token: hub.regToken,
         cli_backend: BACKEND,
+        // Pi derives this evidence from the canonical provider/model input. It
+        // remains advisory and is never used by the hub to route work.
+        provider: effectiveProvider() || undefined,
         // #4117: AGENT_MODEL if set, else the model detected from the CLI's
         // own session transcript, else '' (today's degrade for backends with
         // no known transcript format).
@@ -2515,6 +2596,9 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     refreshDetectedModel,
     effectiveModel,
     progressModelFields,
+    effectiveProvider,
+    effectiveSelectionFields,
+    PI_SELECTION,
     __setDetectedModel: (v) => { detectedModel = v; },
     MAX_TASK_CLI_RESTARTS,
     setCliReady: (v) => { cliReady = v; },
@@ -2577,6 +2661,13 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     __setGivenUp: (key, at) => { givenUpTasks.set(key, at); },
   };
 } else {
+  if (BACKEND === 'pi' && !PI_SELECTION.valid) {
+    console.error(`FATAL: ${PI_SELECTION.error}`);
+    if (CONTRIBUTOR_MODE === MODE_HEADLESS) {
+      writeHeadlessStatus(HEADLESS_STATE_FAILED, { result: 'failed', reason: PI_SELECTION.error });
+    }
+    process.exit(1);
+  }
   // Warm the capability cache BEFORE the first hub connection. detectCapabilities()
   // is called from the auth_challenge handler, and the hub bounds a handshake at
   // 30s (wsAuthTimeout); doing the probes here keeps every one of them — backend

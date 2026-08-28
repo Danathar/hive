@@ -242,6 +242,15 @@ if [[ "${HIVE_CONTRIBUTOR_AGENT_TEST_LINK_KNOWLEDGE:-}" == "1" ]]; then
   exit 0
 fi
 
+validate_pi_selection() {
+  node "${SCRIPT_DIR}/pi-backend.js" "${AGENT_MODEL:-}"
+}
+
+if [[ "${HIVE_CONTRIBUTOR_AGENT_TEST_PI_SELECTION:-}" == "1" ]]; then
+  validate_pi_selection
+  exit $?
+fi
+
 codex_auth_file() {
   local codex_home="${CODEX_HOME:-${HOME}/.codex}"
   echo "${codex_home}/auth.json"
@@ -350,6 +359,21 @@ echo "Hub:     $HIVE_HUB"
 echo "Backend: $AGENT_BACKEND"
 echo ""
 
+# Pi has no official PI_PROVIDER/PI_MODEL environment contract. Hive accepts
+# exactly one contributor preference, AGENT_MODEL=provider/model, and Pi itself
+# resolves that canonical token. Validate before the relay authenticates so a
+# missing/malformed selection cannot claim ready and fail only after assignment.
+if [[ "$AGENT_BACKEND" == "pi" ]]; then
+  if ! PI_SELECTION_JSON="$(validate_pi_selection)"; then
+    echo "ERROR: Pi requires AGENT_MODEL=provider/model (for example, openai/gpt-5)."
+    exit 1
+  fi
+  echo "Pi selection: ${PI_SELECTION_JSON}"
+  while IFS= read -r name; do
+    if [[ -n "$name" ]]; then unset "$name"; fi
+  done < <(node "${SCRIPT_DIR}/pi-backend.js" --unselected-env-names "${AGENT_MODEL}")
+fi
+
 # Check CLI readiness
 STATUS=$(detect_cli "$AGENT_BACKEND")
 case "$STATUS" in
@@ -373,7 +397,11 @@ case "$STATUS" in
     exit 1
     ;;
   OK)
-    echo "$AGENT_BACKEND CLI detected and ready."
+    if [[ "$AGENT_BACKEND" == "pi" ]]; then
+      echo "pi CLI binary is present; authentication remains unverified until a request succeeds."
+    else
+      echo "$AGENT_BACKEND CLI detected and ready."
+    fi
     ;;
 esac
 

@@ -136,6 +136,14 @@ type ContributorCapabilities struct {
 	// CredentialType names the kind of credential the relay authenticates GitHub
 	// with (e.g. "app", "pat", "oauth"), NOT the credential itself. Advisory.
 	CredentialType string `json:"credential_type,omitempty"`
+	// Pi readiness is a four-stage, machine-readable declaration (#5039). Auth
+	// deliberately distinguishes configured_unverified from verified: a key or
+	// auth-file entry is configuration, not proof that a provider accepted it.
+	// Invocation becomes succeeded only after Pi completes a real one-shot task.
+	PiBinary         string `json:"pi_binary,omitempty"`
+	PiConfiguration  string `json:"pi_configuration,omitempty"`
+	PiAuthentication string `json:"pi_authentication,omitempty"`
+	PiInvocation     string `json:"pi_invocation,omitempty"`
 }
 
 // IsZero reports whether the client declared no capabilities at all, so the hub
@@ -143,7 +151,8 @@ type ContributorCapabilities struct {
 // empty struct.
 func (c ContributorCapabilities) IsZero() bool {
 	return c.ContainerRuntime == "" && c.OS == "" && c.Arch == "" &&
-		c.AgentCLIVersion == "" && c.RelayProtocolVersion == "" && c.CredentialType == ""
+		c.AgentCLIVersion == "" && c.RelayProtocolVersion == "" && c.CredentialType == "" &&
+		c.PiBinary == "" && c.PiConfiguration == "" && c.PiAuthentication == "" && c.PiInvocation == ""
 }
 
 // capabilityFieldMaxLen bounds each declared capability field the hub is willing
@@ -177,6 +186,10 @@ func (c ContributorCapabilities) Sanitized() ContributorCapabilities {
 		AgentCLIVersion:      sanitizeCapabilityField(c.AgentCLIVersion),
 		RelayProtocolVersion: sanitizeCapabilityField(c.RelayProtocolVersion),
 		CredentialType:       sanitizeCapabilityField(c.CredentialType),
+		PiBinary:             sanitizeCapabilityField(c.PiBinary),
+		PiConfiguration:      sanitizeCapabilityField(c.PiConfiguration),
+		PiAuthentication:     sanitizeCapabilityField(c.PiAuthentication),
+		PiInvocation:         sanitizeCapabilityField(c.PiInvocation),
 	}
 }
 
