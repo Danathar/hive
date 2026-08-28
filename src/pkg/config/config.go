@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
@@ -1341,6 +1342,16 @@ type WorkSourceConfig struct {
 	Linear LinearSourceConfig `yaml:"linear,omitempty" json:"linear,omitempty"`
 	// Jira configures the Jira Cloud REST v3 adapter.
 	Jira JiraSourceConfig `yaml:"jira,omitempty" json:"jira,omitempty"`
+}
+
+// IsZero reports whether no work source has been configured at all: no type
+// and no adapter-specific settings. Used by the dashboard-overlay reload to
+// decide whether the overlay carries an operator-set work source.
+func (w WorkSourceConfig) IsZero() bool {
+	return w.Type == "" &&
+		reflect.DeepEqual(w.GitHubProjects, GitHubProjectsSourceConfig{}) &&
+		reflect.DeepEqual(w.Linear, LinearSourceConfig{}) &&
+		reflect.DeepEqual(w.Jira, JiraSourceConfig{})
 }
 
 // GitHubProjectsSourceConfig configures the GitHub Projects v2 work source.
@@ -3876,6 +3887,18 @@ func LoadWithDashboardOverlay(path string) (*Config, error) {
 		cfg.Tracing = overlay.Tracing
 		cfg.OTel = mergeOTelOverride(cfg.OTel, overlay.Tracing)
 	}
+	// Governor work source: the dashboard's PUT /api/config/governor/work-source
+	// writes the whole config to the overlay, but the reload only adopted
+	// OTel/Tracing, RemovedAgents and Agents from it — so a work source set
+	// from the dashboard was lost on every pod restart and GET returned
+	// type "" again. Adopt it here, BEFORE the fullness guard, so a short
+	// overlay (no agents yet) still carries it. The whole block is copied so
+	// per-adapter settings (teams, hold labels, assigned_only, …) survive with
+	// the type. Nothing here touches overlay.Variables — see the security
+	// invariant at the end of this function.
+	if !overlay.Governor.WorkSource.IsZero() {
+		cfg.Governor.WorkSource = overlay.Governor.WorkSource
+	}
 	if len(overlay.RemovedAgents) > 0 {
 		cfg.RemovedAgents = overlay.RemovedAgents
 		cfg.PruneRemovedAgents()
@@ -4639,6 +4662,14 @@ func IsInferenceBackend(backend string) bool {
 // KNOWN_BACKENDS, so omitting it here reproduced exactly the accept-in-one-
 // place drift this list exists to prevent — except inverted: valid in the
 // shell config, rejected by the hub.
+//
+// TestShellAndGoCLIBackendListsAgree (backend_list_parity_test.go) asserts
+// this list against config/backends.conf's KNOWN_BACKENDS, with a closed,
+// commented set of exceptions (cliBackendExceptions in that file) for the two
+// names — litellm, gemini — that are known to belong on only one side. Adding
+// a backend here without also updating the shell side (or, if it genuinely
+// belongs on only one side, documenting why in cliBackendExceptions) fails
+// that test.
 var CLIBackends = []string{"claude", "copilot", "goose", "codex", "pi", "bob", "aider", "gemini", "agy"}
 
 // IsCLIBackend returns true if the backend launches an agentic CLI binary.
@@ -5324,6 +5355,13 @@ func (c *Config) redactedForPersist() *Config {
 	cp := *c
 	cp.OTel.Headers = envRedactedHeaders(cp.OTel.Headers)
 	cp.Tracing.Headers = envRedactedHeaders(cp.Tracing.Headers)
+	// Work-source credentials are persisted verbatim. The dashboard PUT stores
+	// the operator's literal `${LINEAR_API_KEY}` reference (API saves are not
+	// env-expanded) and worksource.FromConfig resolves it at the point of use,
+	// so the reference round-trips through the overlay unchanged. Do NOT try
+	// to "fold" a value back into ${VAR} by scanning the environment: any env
+	// value that is a substring of the key (CI's ACCEPT_EULA=Y rewrote the
+	// trailing Y of the literal reference) corrupts it.
 	// #4041: never write the built-in login-pattern defaults as explicit
 	// values. applyDefaults fills LoginPatterns on load, so by save time the
 	// in-memory list always LOOKS explicit; marshaling it pins today's

@@ -2106,6 +2106,17 @@ func main() {
 	activityCollector.EnablePersistence("/data/activity.json")
 	go activityCollector.Start(ctx)
 
+	// Per-repo cost collector: joins the same audited output events against
+	// the token collector's per-message usage timeline, on the same ticker
+	// interval as the activity collector above, and caches the result for
+	// /api/repo-cost. Before this (#4943), the interval join — including
+	// the same expensive audit read the activity collector does — ran on
+	// every 60s dashboard poll, per open browser tab, instead of once per
+	// collection interval.
+	repoCostCollector := dashboard.NewRepoCostCollector(dashSrv.GetAudit(), tokenCollector, "", logger)
+	repoCostCollector.EnablePersistence("/data/repo-cost.json")
+	go repoCostCollector.Start(ctx)
+
 	// Persistent hourly metrics behind the Operations + Leaderboard sparklines
 	// (queue depth, tasks/hour, fleet size, per-contributor completions). The
 	// store loads any prior 7-day history from the /data PVC on first use and the
@@ -2535,6 +2546,7 @@ func main() {
 		// 30-minute collect loop instead of issuing a second GitHub fetch.
 		FleetStats:            fleetStatsCollector,
 		Activity:              activityCollector,
+		RepoCost:              repoCostCollector,
 		BeadSynthesizer:       beadSynth,
 		BeadStores:            beadStores,
 		BeadStoreLoadFailures: beadStoreLoadFailures,
@@ -5237,11 +5249,19 @@ func healGitHubAppInstallation(ctx context.Context, appAuth *github.AppAuth, cfg
 // Returns ("", AppStateOK) when App auth is healthy, and ("", state) for a nil
 // appAuth (a token-authenticated hive has nothing to check).
 func diagnoseGitHubApp(ctx context.Context, appAuth *github.AppAuth, expectedOwner string) (string, github.AppAuthState) {
-	if appAuth == nil {
-		return "", github.AppStateOK
-	}
-	d := appAuth.DiagnoseAppAuth(ctx, expectedOwner, spokeAppKeyPath, spokeProvisionedAppKeyPath)
+	d := diagnoseGitHubAppFull(ctx, appAuth, expectedOwner)
 	return d.Message(), d.State
+}
+
+// diagnoseGitHubAppFull is diagnoseGitHubApp without the lossy projection to
+// (message, state). Callers that only need the banner should keep using the
+// wrapper above; this exists for the one caller that also reports the granted
+// Actions and Commit-statuses permissions (#4030), which the projection drops.
+func diagnoseGitHubAppFull(ctx context.Context, appAuth *github.AppAuth, expectedOwner string) github.AppAuthDiagnosis {
+	if appAuth == nil {
+		return github.AppAuthDiagnosis{State: github.AppStateOK, ExpectedAccount: expectedOwner}
+	}
+	return appAuth.DiagnoseAppAuth(ctx, expectedOwner, spokeAppKeyPath, spokeProvisionedAppKeyPath)
 }
 
 // maxTimelineEnumeratePerCycle bounds how many enumerated-issue events a single
@@ -5409,8 +5429,10 @@ const githubAppBannerRetryDelay = 3 * time.Second
 // Returns raise=false with an empty message when the App is fine or when we
 // simply cannot tell.
 func classifyGitHubAppFailure(ctx context.Context, appAuth *github.AppAuth, expectedOwner string, logger *slog.Logger) (raise bool, msg string, state github.AppAuthState) {
+	var d github.AppAuthDiagnosis
 	for attempt := 1; attempt <= githubAppBannerAttempts; attempt++ {
-		msg, state = diagnoseGitHubApp(ctx, appAuth, expectedOwner)
+		d = diagnoseGitHubAppFull(ctx, appAuth, expectedOwner)
+		msg, state = d.Message(), d.State
 		if state != github.AppStateUnknown {
 			break
 		}
@@ -5435,6 +5457,28 @@ func classifyGitHubAppFailure(ctx context.Context, appAuth *github.AppAuth, expe
 			"owner", expectedOwner)
 		return false, "", github.AppStateUnknown
 	}
+
+	// #4030: record the Actions and Commit-statuses grants alongside the
+	// verdict. These are NOT required of the Hive App and their absence is not
+	// a fault — the optional Visual Hive App exists so they never have to be.
+	// But an installation that has not approved them is otherwise
+	// indistinguishable from one that has, both reporting "ok", which is what
+	// would make a half-approved fleet invisible during any later
+	// consolidation.
+	//
+	// It is deliberately emitted for EVERY verdict, including AppStateOK.
+	// Gating it on a fault would defeat the purpose: the half-approved
+	// installation is the one that looks healthy. It costs no extra API call —
+	// the diagnosis above already fetched the installation.
+	//
+	// Note this runs where verdicts are computed, not on every eval cycle:
+	// every caller reaches here from a failed GitHub call or from the
+	// dashboard's Re-check. Re-check is therefore the operator-invokable way to
+	// read a specific installation's grants.
+	logger.Info("github app credential verdict",
+		"owner", expectedOwner, "state", state.String(),
+		"grants", d.ExecutionGrants(),
+		"visual_hive_execution_grants", d.GrantsVisualHiveExecution())
 	if state == github.AppStateOK {
 		return false, "", github.AppStateOK
 	}

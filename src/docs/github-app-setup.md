@@ -70,6 +70,64 @@ Organization permission:
 | --- | --- | --- |
 | Members | Read-only | Identify contributors and owners where configured. |
 
+### The optional Visual Hive App (#4030)
+
+Visual Hive needs two grants the Hive App deliberately does **not** hold — Actions
+at write (to dispatch its installed workflow) and Commit statuses at write (to
+publish the provenance-bound setup authorization status). Rather than widen the
+Hive App, those grants live in a separate, optional, KubeStellar-owned App, so
+enabling Visual Hive never changes what an installation that will never use it
+has approved.
+
+| App | App ID | Forge |
+| --- | --- | --- |
+| `kubestellar-viz-hive` | 4729416 | github.com |
+| `kubestellar-viz-hive-ghe` | 5945 | github.ibm.com |
+
+Its permission set is exactly:
+
+| Permission | Level | Why |
+| --- | --- | --- |
+| Actions | Read/write | Dispatch the installed Visual Hive workflow. |
+| Commit statuses | Read/write | Publish the setup authorization status. |
+| Metadata | Read-only | Required by GitHub. |
+
+Nothing else — no Contents, Workflows, Issues, Pull requests or Checks — and no
+webhooks. Install it on **selected repositories**, not all repositories.
+
+These identities are declared in `src/pkg/config/provenance.go` and are inert on
+this branch: nothing resolves a key for them, delivers one, or authenticates as
+them. Registering them ahead of the feature only means a config naming one is
+described accurately instead of reported as an unknown App.
+
+#### Reading the granted Actions and Commit-statuses permissions
+
+App auth classification turns solely on the Issues permission, and an
+installation that has not been granted the two Visual Hive permissions is
+healthy — its `state` is `ok`. That is correct, and it is also why those grants
+have to be reported separately: without it, an installation that has approved
+them and one that has not are indistinguishable.
+
+Every credential verdict now logs what is actually granted, including when the
+verdict is `ok`:
+
+```
+github app credential verdict owner=<org> state=ok grants="actions=read statuses=none" visual_hive_execution_grants=false
+```
+
+`grants` reports the level GitHub returned for each permission (`none` when
+there is no grant), and `visual_hive_execution_grants` is true only when both
+are at `write`. Emitting it for a healthy verdict is the point: an installation
+that has not approved a permission update is the one that still looks fine, and
+GitHub keeps an App on its old permissions until an org owner accepts, so a
+partly approved fleet is otherwise invisible.
+
+Verdicts are computed where a GitHub call has failed and on the dashboard's
+**Re-check** button, not on every eval cycle, so this adds no API calls to a
+healthy hive. To read a specific installation's grants on demand — for example
+to confirm the demo/canary install — press Re-check on that hive and read the
+line above from its logs.
+
 ## Install and configure Hive
 
 1. After creating the app, note the **App ID**, **Client ID**, and app slug from the app page/URL.

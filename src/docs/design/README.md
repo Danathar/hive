@@ -59,17 +59,14 @@ that status is the thing to check before treating a page as current behaviour:
   programmatic path that does work today.
 
 - [The agent turn model and where in-process state lives](agent-turn-model.md) —
-  **spike / investigation, informational.** Step 1 of RFC #4002 and the only
-  step taken: a cited map of how hive drives an agent turn today and which
-  per-agent state does not survive a process restart. No decision, no
-  prototype, no proposal. Its main finding is that there is no "turn" in the
-  code at all — a turn begins when hive types a prompt into a tmux pane and
-  ends when the pane matches an idle-prompt marker, so every progress signal
-  hive has (turn completion, liveness, stalls, auth failure) is screen-scraped
-  rendered terminal text. Read it before steps 2-4, particularly for the fork
-  it names: hive does not own the conversation format, so
-  "conversation-as-state" means either accepting backend-specific resume
-  envelopes or moving off opaque interactive CLIs.
+  **spike / investigation, steps 1 and 2 complete.** A cited map of how hive
+  drives an agent turn today and which state does not survive restart, plus an
+  isolated `pkg/turn` prototype: serialized conversation and operation state,
+  a re-entrant structured `Step`, atomic scrubbed persistence, and a replay
+  test that kills a contribute-shaped turn at every operation boundary. It is
+  not wired to the tmux loop or contributor relay, and takes no production
+  decision. Read it before steps 3-4, particularly for the unresolved fork:
+  backend-specific resume envelopes versus an API-shaped backend hive owns.
 
 - [Copilot per-repo cost capture at the MITM proxy](copilot-cost-capture.md) —
   **investigation, no decision taken.** Phase 4 of epic #4836, which asked
@@ -84,6 +81,24 @@ that status is the thing to check before treating a page as current behaviour:
   timestamps and `InferenceSink` discards them, so persisting per-request usage
   with its timestamp would move Copilot from "structurally impossible" to
   phase 3's existing join, in `pkg/tokens` only and off the request path.
+
+- [Agent host confinement on the default (unconfined) launch path](agent-host-confinement.md)
+  — **investigation, no decision taken.** #4918: an agent doing correct,
+  benign work on an assigned third-party repo ran that repo's own test suite,
+  which reached the operator's real bootloader via `rpm-ostree kargs`, stopped
+  only by polkit. Maps the default tmux launch path
+  (`src/pkg/agent/manager.go`, `bin/agent-launch.sh`) against the three
+  deployment modes (hub pod, containerized `contribute-hive`, `contribute-hive
+  ... local`) and establishes precisely what #4938's merged host-state denylist
+  covers — the reported command family, on the `Bash` tool surface, by bare
+  command word — and what it leaves open: absolute-path/wrapper invocation,
+  unlisted polkit-reachable actions, non-`Bash` tool surfaces, and plain
+  filesystem writes outside any denied command. Surveys confinement options
+  (Podman sandbox, bwrap/systemd-run, seccomp, dedicated low-privilege UID, a
+  disposable VM) with real costs, and recommends closing the existing Podman
+  sandbox's double opt-in gate (`src/pkg/config/config.go`) for
+  `contribute-hive` once its CI coverage gap is closed, keeping the denylist as
+  the floor elsewhere.
 
 ## Adding a document here
 
