@@ -100,6 +100,32 @@ Hive did not historically maintain a complete changelog. This file starts a prag
   the sandbox kick) outright, with the reason surfaced in the retry/quarantine
   log, because a wrong base is worse than a delayed PR
   ([#4928](https://github.com/kubestellar/hive/issues/4928)).
+- **`just contribute-hive <backend> local` now says that it runs the agent
+  unconfined on your machine**, and the docs no longer imply a workspace
+  boundary that only the opt-in Podman path provides
+  ([#4918](https://github.com/kubestellar/hive/issues/4918)). Container mode is
+  the default and is the confined one; local mode runs the backend CLI as your
+  own user with permission gating bypassed and nothing scoping its filesystem
+  access — which is how an agent running an assigned third-party repo's test
+  suite reached a contributor's bootloader. The launch banner now names what is
+  still constrained (the #4938 host-state denials; credentials and pushes on
+  every path) and what is not, and points at container mode as the remedy.
+  `sandbox-isolation.md` gains a per-path table recording the finding that
+  matters most here: **the `agent_sandbox` Podman path is hub-side only and
+  does not exist on the contributor path at all**, so enabling it would not
+  have prevented the reported incident.
+- **A globally-enabled agent sandbox that sandboxes nothing is no longer
+  silent.** `agent_sandbox.enabled` is only half the gate — each agent also
+  needs `sandbox: {enabled: true}` — and the dashboard's Security tab writes
+  only the global half, so an owner could turn the sandbox on, be told the
+  setting was updated, and have every agent keep running unconfined. Hive now
+  logs an `agent sandbox posture` warning at boot **and on every config
+  reload** (the moment the toggle is flipped) naming which agents are still
+  unconfined, and separately warns when an opted-in agent resolves no sandbox
+  image — sandboxed kicks have no tmux fallback and fail outright. Behaviour is
+  unchanged: the second gate is load-bearing and collapsing it would convert
+  working agents into permanently failing ones, so that remains a separate,
+  measurement-first decision.
 
 - Pull requests from forks can now satisfy `v4`'s required `gate` status context. `gate` is a job in `docker.yml`, which triggered on `push` only — and a fork PR's push event fires in the contributor's repo, not here, so `gate` never attached to the head SHA this repo evaluates and branch protection blocked the merge waiting for a check that could not arrive. Six fully green contributor PRs (#4930, #4932, #4934, #4935, #4936, #4937) were structurally unmergeable; `gate` was verified absent on every one of their head SHAs. It went unnoticed because `enforce_admins` is false, so maintainers' own merges silently bypassed the same missing check — the required context was in practice unenforced for maintainers and absolutely enforced for outside contributors. `docker.yml` now also triggers on `pull_request`, with every image-build job skipped for that event, so the context attaches to fork PRs at the cost of one ~5-second shell job and no image CI: the image is already built and smoke-tested on every PR by `v2-ci.yml` (`docker`, `build-and-test`, `overlayfs-exec-guard`). Push builds and GHCR publishing are unchanged — `gate` reports `push=false` for a PR event, so every `merge*` job stays skipped ([#4965](https://github.com/kubestellar/hive/issues/4965)).
 

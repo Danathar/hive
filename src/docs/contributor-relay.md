@@ -122,6 +122,17 @@ otherwise (#4918). Repo work is unaffected. `HIVE_CLAUDE_DANGEROUSLY_ALLOW_HOST_
 restores the old posture and is the claude analogue of the Codex bypass below;
 prefer leaving it unset.
 
+Container mode vs local mode is the confinement choice on this path. Those
+denials are a floor, not a boundary: they name commands, and an agent still runs
+unconfined against everything not on the list. `just contribute-hive` defaults to
+**container** mode, which puts the agent behind a container boundary;
+`just contribute-hive <backend> local` runs it as your own user on your own
+machine with permission gating bypassed and nothing scoping its filesystem access
+to the workspace. Local mode now says so at launch. Note that the `agent_sandbox`
+Podman path documented in [sandbox-isolation.md](sandbox-isolation.md) is
+**hub-side only** — nothing on the contributor path reads it — so container mode
+is the remedy here, not that setting.
+
 Codex config-key compatibility: `approvals_reviewer` is passed with `-c`, so it
 depends on the installed Codex release accepting that key. If a version rejects
 it at startup, set `HIVE_CODEX_APPROVALS_REVIEWER=` (empty) to drop the key

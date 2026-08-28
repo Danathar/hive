@@ -1519,6 +1519,19 @@ func main() {
 	archiveOnShutdown := func() { agentMgr.ArchiveAllKickLogs("shutdown") }
 	preShutdownHook.Store(&archiveOnShutdown)
 	agentMgr.SetSandboxConfig(cfg.AgentSandbox)
+
+	// Say out loud when the sandbox opt-in is configured but inert. The gate is
+	// two-part (global agent_sandbox.enabled AND a per-agent sandbox.enabled),
+	// and the dashboard's Security tab writes only the global half — so an
+	// owner can turn the sandbox on, be told the setting was updated, and still
+	// have every agent running unconfined on the operator's own host.
+	//
+	// That silence is the part of #4918 that is safe to fix here. The gate
+	// itself is load-bearing: a sandboxed agent runs a different execution
+	// model and startSandboxKickLocked has no tmux fallback, so collapsing it
+	// would convert working agents into permanently failing ones. Telling an
+	// operator who believes they are covered that they are not costs nothing.
+	logAgentSandboxPosture(logger, cfg)
 	// Treat any configured gateway name as an inference-routable backend so an
 	// agent with backend: <gateway> routes through it. Resolution is live
 	// (reads cfg on each call) so gateways added from the Model Gateways tab
@@ -3002,6 +3015,11 @@ func main() {
 		// threshold — re-sync it alongside the repo list above.
 		gov.SetRepoCount(cfg.Project.RepoCount())
 		agentMgr.SetSandboxConfig(cfg.AgentSandbox)
+		// Re-run the posture check on reload, not only at boot: flipping the
+		// Security tab's sandbox toggle writes the config and lands here, which
+		// is the exact moment an operator forms the belief that they are now
+		// sandboxed. See logAgentSandboxPosture.
+		logAgentSandboxPosture(logger, cfg)
 
 		// Hot-reload the state-triggered hooks (RFC #4001). Recompiles only
 		// when the `hooks:` list actually changed, and swaps the registry in
@@ -8639,6 +8657,18 @@ func parseColorInt(color string) int {
 	var result int
 	fmt.Sscanf(color, "%x", &result)
 	return result
+}
+
+// logAgentSandboxPosture emits the sandbox gate diagnostics from
+// config.AgentSandboxGateWarnings at WARN.
+//
+// Split out so boot and the config-watcher reload report identically — an
+// operator who flips the Security tab's sandbox toggle never restarts, so a
+// boot-only check would never reach the person who most needs it.
+func logAgentSandboxPosture(logger *slog.Logger, cfg *config.Config) {
+	for _, warning := range config.AgentSandboxGateWarnings(cfg) {
+		logger.Warn("agent sandbox posture", "warning", warning)
+	}
 }
 
 func runHub(logger *slog.Logger, configPath string) {

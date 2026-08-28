@@ -720,7 +720,11 @@ contribute-move backend="claude": check-version (contribute-check-backend backen
 # Start contributing — containerized (default; docker or podman) or local mode
 # Usage: just contribute-hive              (container, default CLI from setup)
 #        just contribute-hive copilot      (container, copilot backend)
-#        just contribute-hive claude local  (native mode, claude)
+#        just contribute-hive claude local  (UNCONFINED, on your host — see #4918)
+#
+# Container mode is the default and is the confined one. Local mode runs the
+# backend CLI as your own user on your own machine with permission gating
+# bypassed and no workspace confinement; the recipe warns about that at launch.
 # Runtime: auto-detects docker then podman (discovery order, not posture —
 # see src/docs/podman-rootless-ci.md); force with HIVE_CONTAINER_RUNTIME=podman
 contribute-hive backend="" mode="docker": check-version
@@ -767,6 +771,45 @@ contribute-hive backend="" mode="docker": check-version
 
     if [[ "$_MODE" == "local" ]]; then
       # ── Local mode: tmux session + relay (same as container, but on host) ──
+      #
+      # SAY WHAT THIS MODE COSTS (#4918). Local mode runs the backend CLI as
+      # THIS user, on THIS machine, with permission gating bypassed and nothing
+      # scoping its filesystem access to the workspace. Container mode — the
+      # DEFAULT, which is why the recipe's `mode` parameter defaults to
+      # "docker" — puts the same agent behind a container boundary instead.
+      #
+      # An operator picking `local` was previously told nothing about that
+      # difference: the recipe's own usage line described it only as "native
+      # mode". #4918 is what the silence cost. An agent doing entirely correct
+      # work on an assigned third-party repo ran that repo's own test suite; a
+      # latent defect in two of its tests let a hook escape its stubs and call
+      # `rpm-ostree kargs --append-if-missing=...` against the operator's REAL
+      # deployment, raising three polkit dialogs on their desktop. Nothing was
+      # written, and the only reason is that the process happened to lack
+      # privilege. No compromise was involved.
+      #
+      # The message names what IS still constrained, deliberately, so it reads
+      # as a boundary statement rather than an alarm: #4938's host-state
+      # denials apply here (backends.conf is sourced by this recipe below), and
+      # credentials/pushes are constrained on every path. Neither of those is
+      # filesystem confinement, and the agent_sandbox podman path is hub-side
+      # only — it does not exist on this path at all, so it is not offered as a
+      # remedy here. Container mode is the remedy on this path.
+      echo "⚠️  LOCAL MODE — the agent is NOT confined to a workspace."
+      echo ""
+      echo "    The backend CLI runs as $(id -un) on this machine, with permission"
+      echo "    prompts bypassed. It can read and write anything your user can,"
+      echo "    including files outside ${HIVE_WORKSPACE_DIR:-$HOME/workspace}."
+      echo "    Assigned repos are third-party code and their test suites run for real."
+      echo ""
+      echo "    Still constrained: privilege-escalation and host boot/deployment"
+      echo "    commands are denied (sudo, pkexec, rpm-ostree, bootc, grubby, ...),"
+      echo "    and no agent receives a GitHub token or pushes directly."
+      echo "    NOT constrained: everything else your user can reach."
+      echo ""
+      echo "    For a confined agent, drop 'local' and use container mode:"
+      echo "      just contribute-hive ${BACKEND}"
+      echo ""
       TMUX_SESSION="hive-${BACKEND}-$(head -c 2 /dev/urandom | od -An -tx1 | tr -d ' ')"
       SCRIPT_DIR="$(pwd)/bin"
       RELAY="${SCRIPT_DIR}/contributor-relay.sh"

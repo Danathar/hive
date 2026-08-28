@@ -1034,6 +1034,73 @@ func (a *AgentConfig) SandboxEnabled(global AgentSandboxConfig) bool {
 	return *a.Sandbox.Enabled
 }
 
+// AgentSandboxGateWarnings reports the sandbox misconfigurations that the
+// two-gate opt-in otherwise makes SILENT. Empty means nothing to say.
+//
+// SandboxEnabled (above) requires BOTH agent_sandbox.enabled AND a per-agent
+// sandbox.enabled: true. That second gate is deliberate — a sandboxed agent
+// runs a completely different execution model (no tmux CLI at all; every kick
+// is a podman run against the primary repo), and startSandboxKickLocked in
+// pkg/agent has NO fallback to tmux: an agent flipped on without a resolvable
+// image fails every kick outright. So the gate is not something to quietly
+// collapse.
+//
+// What it must not do is stay invisible. The dashboard's Security tab writes
+// only the GLOBAL flag (handleGovernorSecurity), and it is the only sandbox
+// control the UI offers — so an owner can turn "agent sandbox" on, be told the
+// setting was updated, and have every agent keep running unconfined. The
+// response's own sandboxedAgents field stays 0 and nothing explains why.
+//
+// #4918 is what that silence costs. An agent doing correct work on an assigned
+// third-party repo ran that repo's test suite, a hook escaped its stubs, and
+// `rpm-ostree kargs` reached the operator's real deployment. An operator who
+// had flipped the sandbox toggle on would reasonably believe they were covered.
+//
+// These are WARNINGS, not validation errors: every state described here is a
+// legal config, and refusing to boot on it would turn a diagnostic into an
+// outage.
+func AgentSandboxGateWarnings(cfg *Config) []string {
+	if cfg == nil || !cfg.AgentSandbox.Enabled {
+		// The sandbox is off globally. That is the documented default and the
+		// posture the docs describe; it is not a misconfiguration.
+		return nil
+	}
+
+	var optedIn, noImage []string
+	for name, a := range cfg.Agents {
+		if !a.SandboxEnabled(cfg.AgentSandbox) {
+			continue
+		}
+		optedIn = append(optedIn, name)
+		if strings.TrimSpace(a.SandboxImage(cfg.AgentSandbox)) == "" {
+			noImage = append(noImage, name)
+		}
+	}
+	sort.Strings(optedIn)
+	sort.Strings(noImage)
+
+	var out []string
+	if len(optedIn) == 0 {
+		out = append(out, fmt.Sprintf(
+			"agent_sandbox.enabled is true but NO agent is opted in, so the sandbox is inert and all %d agent(s) still run unconfined on the tmux path — "+
+				"the per-agent gate is separate: set `sandbox: {enabled: true}` on each agent that should be sandboxed (#4918)",
+			len(cfg.Agents)))
+		return out
+	}
+	if len(noImage) > 0 {
+		out = append(out, fmt.Sprintf(
+			"agent(s) %s are sandbox-opted-in but resolve no sandbox image; sandboxed kicks have no tmux fallback and will fail outright — "+
+				"set agent_sandbox.image (or the per-agent sandbox.image)",
+			strings.Join(noImage, ", ")))
+	}
+	if len(optedIn) < len(cfg.Agents) {
+		out = append(out, fmt.Sprintf(
+			"agent_sandbox.enabled is true but only %d of %d agent(s) are opted in (%s); the rest still run unconfined on the tmux path (#4918)",
+			len(optedIn), len(cfg.Agents), strings.Join(optedIn, ", ")))
+	}
+	return out
+}
+
 // SandboxImage returns the per-agent image override, then the global default.
 func (a *AgentConfig) SandboxImage(global AgentSandboxConfig) string {
 	if a != nil && a.Sandbox != nil && a.Sandbox.Image != "" {
