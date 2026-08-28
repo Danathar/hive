@@ -6,7 +6,7 @@ This reference is compiled by hand from the Go source under `src/`, the deployme
 
 | Variable | Required | Default | Purpose |
 |---|---:|---|---|
-| `HIVE_CONFIG` | No | `/etc/hive/hive.yaml` | Default config path used before the `--config` flag is parsed. The dashboard also uses it when reporting config provenance. |
+| `HIVE_CONFIG` | No | `/etc/hive/hive.yaml` | Default config path used before the `--config` flag is parsed; an explicit `--config` outranks it, so `entrypoint.sh` also appends `--config "$HIVE_CONFIG"` to the launch argv when it is set ([#4973](https://github.com/kubestellar/hive/issues/4973)). The dashboard also uses it when reporting config provenance — which is why the two must not disagree. |
 | `HIVE_MODE` | No | spoke/dashboard mode | Set to `hub` to run the hub server instead of the spoke dashboard. |
 | `HIVE_HUB_PORT` | No | `3001` | Hub listen port when `HIVE_MODE=hub`. |
 | `HIVE_SINGLETON_LOCK` | No | `/var/run/hive-metrics/hive.singleton.lock` when available, otherwise OS temp dir | Overrides the process singleton lock path. Set exactly `off` only for local development where duplicate processes are intentional. |

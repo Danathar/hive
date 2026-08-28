@@ -1139,6 +1139,36 @@ func main() {
 		}
 	}
 
+	// HIVE_CONFIG names a DIFFERENT file from the one we actually loaded.
+	//
+	// This is only ever the entrypoint's read-only escape hatch failing to
+	// land. When the config path cannot be written, entrypoint.sh exports
+	// HIVE_CONFIG=/data/hive.yaml.runtime and logs "config path is read-only —
+	// using ... directly"; HIVE_CONFIG is read above only as the DEFAULT of
+	// -config, and the image's CMD passes that flag explicitly
+	// (Dockerfile: CMD ["--config", "/etc/hive/hive.yaml"]), so the explicit
+	// value won and the redirect did nothing.
+	//
+	// That is #4973, and it is silently destructive rather than merely wrong:
+	// the stale file loads, then Config.Save() writes the whole in-memory
+	// config back over /data/hive.yaml.runtime, destroying the state the
+	// operator had persisted there. An ACMM level set from the dashboard came
+	// back at its provisioned value after a restart, twice, with /data intact.
+	//
+	// entrypoint.sh now appends `--config "$HIVE_CONFIG"` to the argv so the
+	// last-occurrence-wins rule in flag.Parse carries the redirect, which means
+	// this branch should be unreachable. It is kept — at WARN, naming both
+	// paths — because the failure it reports is invisible from every other
+	// vantage point: /api/config/provenance reads HIVE_CONFIG directly, so it
+	// reports the file the entrypoint chose while the process runs on the one
+	// it did not, and the two disagree with no way to tell from the outside.
+	if envCfg := os.Getenv("HIVE_CONFIG"); envCfg != "" && envCfg != *configPath {
+		logger.Warn("config path disagreement: HIVE_CONFIG names a different file than the one loaded — an explicit -config (the image CMD) outranked the entrypoint's redirect; persisted state in HIVE_CONFIG may be overwritten by the next save",
+			"hive_config_env", envCfg,
+			"loaded_config", *configPath,
+		)
+	}
+
 	logger.Info("hive starting",
 		"org", cfg.Project.Org,
 		"repos", cfg.Project.Repos,
