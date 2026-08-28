@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/exp/teatest"
 )
 
@@ -42,18 +43,97 @@ func TestAppQuitsOnCtrlC(t *testing.T) {
 	tm.WaitFinished(t, teatest.WithFinalTimeout(finalWait))
 }
 
-// TestAppRendersSplash pins the one thing the frame draws. Asserting on the
-// text rather than a golden file keeps this test stable across the layout work
-// in later tasks: the splash line is the contract, its exact placement is not.
-func TestAppRendersSplash(t *testing.T) {
+// TestAppRendersGrid pins what a sized frame draws since T3: all four pane
+// titles, on screen at once. Asserting on the titles rather than a golden
+// file keeps this test stable across layout refinement — the full frame's
+// exact bytes are pinned separately by the golden test in pkg/tui/panes.
+func TestAppRendersGrid(t *testing.T) {
 	tm := teatest.NewTestModel(t, newModel(), teatest.WithInitialTermSize(80, 24))
 
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
-		return strings.Contains(string(b), splash)
+		for _, title := range []string{"AGENTS", "GOVERNOR", "TOKENS", "EVENTS"} {
+			if !strings.Contains(string(b), title) {
+				return false
+			}
+		}
+		return true
 	}, teatest.WithDuration(finalWait))
 
 	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
 	tm.WaitFinished(t, teatest.WithFinalTimeout(finalWait))
+}
+
+// TestTabCyclesFocus drives tab and shift+tab through the real program, per
+// the T3 acceptance criteria. teatest rather than bare Update calls for the
+// same reason as TestAppQuits: input decoding is part of what is asserted —
+// shift+tab in particular arrives as its own key sequence, and a handler
+// matching the wrong spelling would pass a unit test that hand-builds the
+// message it expects.
+func TestTabCyclesFocus(t *testing.T) {
+	tm := teatest.NewTestModel(t, newModel(), teatest.WithInitialTermSize(80, 24))
+
+	// Two tabs forward, one back: ends on pane 1 iff both directions work
+	// and neither is a no-op. (2-0 would also pass if shift+tab did nothing
+	// and one tab was dropped, but then the direct cycle test below fails.)
+	tm.Send(tea.KeyMsg{Type: tea.KeyTab})
+	tm.Send(tea.KeyMsg{Type: tea.KeyTab})
+	tm.Send(tea.KeyMsg{Type: tea.KeyShiftTab})
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(finalWait))
+
+	final, ok := tm.FinalModel(t).(model)
+	if !ok {
+		t.Fatalf("final model has unexpected type %T", tm.FinalModel(t))
+	}
+	if final.focus != 1 {
+		t.Fatalf("after tab,tab,shift+tab focus = %d, want 1", final.focus)
+	}
+}
+
+// TestFocusCycleWrapsBothDirections pins the modulo arithmetic directly:
+// forward from the last pane wraps to the first, and backward from the first
+// wraps to the last — the negative-operand case the "+paneCount-1" spelling
+// exists for.
+func TestFocusCycleWrapsBothDirections(t *testing.T) {
+	m := newModel()
+	for i := 0; i < paneCount; i++ {
+		if m.focus != i {
+			t.Fatalf("tab cycle step %d: focus = %d, want %d", i, m.focus, i)
+		}
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+		m = next.(model)
+	}
+	if m.focus != 0 {
+		t.Fatalf("tab from last pane: focus = %d, want wrap to 0", m.focus)
+	}
+	back, _ := m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	if got := back.(model).focus; got != paneCount-1 {
+		t.Fatalf("shift+tab from pane 0: focus = %d, want wrap to %d", got, paneCount-1)
+	}
+}
+
+// TestFocusHighlightsExactlyOnePane pins the focused-border contract from the
+// issue ("the focused pane gets a highlighted border") in a way no golden
+// file drift can silently weaken: exactly one cell wears the thick border,
+// and tab moves it.
+func TestFocusHighlightsExactlyOnePane(t *testing.T) {
+	sized, _ := newModel().Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m := sized.(model)
+
+	// The thick border's top-left corner only appears on the focused cell.
+	const thickCorner = "┏"
+	if got := strings.Count(m.View(), thickCorner); got != 1 {
+		t.Fatalf("frame has %d thick-border corners, want exactly 1 (one focused pane)", got)
+	}
+	before := m.View()
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	after := next.(model).View()
+	if before == after {
+		t.Fatal("tab did not move the focus highlight: frame unchanged")
+	}
+	if got := strings.Count(after, thickCorner); got != 1 {
+		t.Fatalf("after tab, frame has %d thick-border corners, want exactly 1", got)
+	}
 }
 
 // TestViewBeforeSizeMsg guards the zero-size path in View. bubbletea can call
@@ -66,18 +146,28 @@ func TestViewBeforeSizeMsg(t *testing.T) {
 	}
 }
 
-// TestViewCentersWhenSized checks the sized path actually pads, so a future
-// refactor cannot quietly drop the centering and still pass on substring
-// matches alone.
-func TestViewCentersWhenSized(t *testing.T) {
-	m, _ := newModel().Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+// TestViewFillsTerminalExactly checks the grid arithmetic: the frame is
+// exactly as tall as the terminal (header + two grid rows + footer), and no
+// rendered line overflows the width — the remainder-absorbing split, off by
+// one, would do both.
+func TestViewFillsTerminalExactly(t *testing.T) {
+	const w, h = 80, 24
+	m, _ := newModel().Update(tea.WindowSizeMsg{Width: w, Height: h})
 
-	view := m.View()
-	if !strings.Contains(view, splash) {
-		t.Fatalf("sized View() does not contain %q:\n%s", splash, view)
+	view := m.(model).View()
+	lines := strings.Split(view, "\n")
+	if len(lines) != h {
+		t.Fatalf("sized View() renders %d lines, want exactly %d", len(lines), h)
 	}
-	if lines := strings.Count(view, "\n"); lines < 2 {
-		t.Fatalf("sized View() has %d newlines, want a padded frame:\n%s", lines, view)
+	for i, line := range lines {
+		if lw := lipgloss.Width(line); lw > w {
+			t.Fatalf("line %d is %d cells wide, want <= %d:\n%q", i, lw, w, line)
+		}
+	}
+	for _, want := range []string{headerText, footerText} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("sized View() missing %q", want)
+		}
 	}
 }
 
