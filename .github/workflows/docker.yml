@@ -10,6 +10,30 @@ on:
       - '**'
       - '!dependabot/**'
       - '!copilot/**'
+  # `gate` is the ONLY status context v4 branch protection requires, and a
+  # push-only workflow cannot produce it for a pull request from a FORK: the
+  # push event fires in the contributor's repo, not here, so `gate` never
+  # attaches to the head SHA this repo evaluates and protection blocks the
+  # merge waiting for a check that cannot arrive (#4965). Six green fork PRs
+  # were structurally unmergeable; maintainers never saw it because
+  # enforce_admins is false, so an admin merge silently bypasses the same
+  # missing check.
+  #
+  # This trigger exists to produce that one context. It deliberately runs
+  # NOTHING else on a pull request — every build job below is skipped for this
+  # event — so it adds no image CI. The heavyweight builds stay push-only,
+  # exactly as the comment above describes.
+  #
+  # No `paths:` or `branches:` filter, on purpose. A required context must
+  # attach to EVERY pull request; a filtered one silently never runs on the
+  # changes it does not match, and protection then waits forever. That is also
+  # why the already PR-triggered `build-and-test` is not a drop-in replacement
+  # for `gate` in the required list — v2-ci.yml path-filters it.
+  #
+  # Leaving the filter off also keeps this workflow's `unpinned: '**'` contract
+  # in .github/release-lines.yml intact: that guard requires every `branches:`
+  # filter here to stay a wildcard, so a fixed base-branch list would fail it.
+  pull_request:
   workflow_dispatch:
 
 # Serialize Docker builds per branch so concurrent merges don't race. Do NOT
@@ -72,6 +96,14 @@ jobs:
 
   build:
     needs: gate
+    # Skipped for `pull_request` (#4965): that trigger exists only so the
+    # required `gate` context attaches to a fork PR's head SHA. The image build
+    # stays push-only — and a PR is not left unbuilt by this, because
+    # v2-ci.yml already runs on pull_request and builds src/Dockerfile with a
+    # real `hive --version` smoke test (`docker`), plus `build-and-test`
+    # (go build + go vet) and `overlayfs-exec-guard`. Building here too would
+    # be a third image build of the same commit.
+    if: github.event_name != 'pull_request'
     strategy:
       matrix:
         include:
@@ -305,6 +337,8 @@ jobs:
 
   build-contributor:
     needs: gate
+    # Push-only, same as `build` above (#4965).
+    if: github.event_name != 'pull_request'
     strategy:
       matrix:
         include:
@@ -401,6 +435,8 @@ jobs:
 
   build-hub:
     needs: gate
+    # Push-only, same as `build` above (#4965).
+    if: github.event_name != 'pull_request'
     strategy:
       matrix:
         include:
