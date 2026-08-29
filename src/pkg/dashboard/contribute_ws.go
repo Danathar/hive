@@ -3915,6 +3915,18 @@ func (h *ContributeWSHub) cleanupLoop() {
 		// through the SAME cooldown+generation-bump path a manual requeue uses.
 		h.reclaimExpiredLeases(time.Now())
 
+		// Deregister under the lock; CLOSE outside it.
+		//
+		// closeWithReason writes a Close frame with a deadline, so it can block for
+		// up to wsCloseFrameDeadline against a peer that has stopped reading — which
+		// is exactly what a stale connection is. Doing that while holding h.mu would
+		// hold the hub-wide lock for up to one second PER stale socket, serially:
+		// against the maxWSConnections cap of 50 that is a worst case near a minute
+		// during which no contributor can register, no sequence number can be
+		// allocated, and every other hub operation stalls. The bare c.ws.Close() this
+		// replaced could not block, so the risk arrived with the close frame and is
+		// removed here rather than traded for it.
+		var staleConns []*websocket.Conn
 		h.mu.Lock()
 		for id, c := range h.connections {
 			c.mu.Lock()
@@ -3926,18 +3938,24 @@ func (h *ContributeWSHub) cleanupLoop() {
 			c.mu.Unlock()
 			if stale {
 				h.logger.Info("[contribute-ws] cleanup: removing stale connection", "username", username, "conn", id)
-				// Nil-guard the close: a connection may carry no live socket (e.g. a
+				// Nil-guard: a connection may carry no live socket (e.g. a
 				// test-injected in-flight entry, or a connection torn down elsewhere),
 				// and cleanupLoop iterates ALL registered connections. Mirrors the
 				// existing guard in RequeueContributorTask so a ws-less entry is pruned
 				// rather than nil-dereferenced.
 				if c.ws != nil {
-					closeWithReason(c.ws, websocket.CloseGoingAway, "connection went stale: no pong within the heartbeat window")
+					staleConns = append(staleConns, c.ws)
 				}
 				delete(h.connections, id)
 			}
 		}
 		h.mu.Unlock()
+
+		// Already deregistered above, so a slow or wedged peer here delays nothing
+		// but this sweep — the next tick is 30s away and re-observes fresh state.
+		for _, ws := range staleConns {
+			closeWithReason(ws, websocket.CloseGoingAway, "connection went stale: no pong within the heartbeat window")
+		}
 	}
 }
 

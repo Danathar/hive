@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -106,5 +107,45 @@ func TestWS_MissingTokenClosesWithAStatedReason(t *testing.T) {
 	if closeErr.Code != websocket.ClosePolicyViolation || closeErr.Text == "" {
 		t.Errorf("missing-token refusal closed with code=%d text=%q; want a policy violation with a stated reason",
 			closeErr.Code, closeErr.Text)
+	}
+}
+
+// TestCleanupSweepDoesNotCloseUnderTheHubLock pins the lock discipline the close
+// frame made load-bearing.
+//
+// closeWithReason writes a Close frame with a deadline, so it can block for up to
+// wsCloseFrameDeadline against a peer that has stopped reading — precisely what a
+// stale connection is. Holding h.mu across that would freeze the hub-wide lock
+// for up to a second per stale socket, serially; against the maxWSConnections cap
+// of 50 that is a worst case near a minute with no contributor able to register.
+// The bare c.ws.Close() this replaced could not block, so the risk arrived WITH
+// the close frame.
+//
+// A source-level assertion because the failure is a lock-scope property, not an
+// observable output: a runtime test would have to wedge a real peer's TCP
+// receive window to make the write block, which is far more machinery than the
+// invariant is worth.
+func TestCleanupSweepDoesNotCloseUnderTheHubLock(t *testing.T) {
+	src := fileSource(t, "src/pkg/dashboard/contribute_ws.go")
+
+	start := strings.Index(src, "func (h *ContributeWSHub) cleanupLoop()")
+	if start < 0 {
+		t.Fatal("cleanupLoop was not found")
+	}
+	body := src[start : start+strings.Index(src[start:], "\nfunc ")]
+
+	unlockIdx := strings.LastIndex(body, "h.mu.Unlock()")
+	closeIdx := strings.Index(body, "closeWithReason(")
+	if unlockIdx < 0 || closeIdx < 0 {
+		t.Fatal("cleanupLoop no longer unlocks or no longer closes; re-check this invariant")
+	}
+	if closeIdx < unlockIdx {
+		t.Error("cleanupLoop calls closeWithReason while holding h.mu — a blocking " +
+			"control-frame write can stall the whole hub for up to a second per stale socket")
+	}
+	// The sockets have to be collected first, or moving the close out would mean
+	// closing connections still registered in the map.
+	if !strings.Contains(body, "staleConns") {
+		t.Error("stale sockets must be collected and deregistered under the lock, then closed outside it")
 	}
 }
