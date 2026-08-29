@@ -921,11 +921,11 @@ func taskDescOf(task *WSTaskAssign) string {
 	if task == nil {
 		return ""
 	}
-	key := task.identityKey()
-	if key == "" {
-		return task.TaskID
-	}
-	return fmt.Sprintf("%s %s: %s", task.Kind, key, task.Title)
+	// Delegates to assignDesc (#5120), the one renderer every feed entry goes
+	// through — this typed wrapper exists so the release sites (#5097) keep
+	// their nil-tolerant one-argument call shape. Two copies of the format
+	// string would drift; one already almost did.
+	return assignDesc(task.Kind, task.identityKey(), task.Title, task.TaskID)
 }
 
 func (h *ContributeWSHub) addActivity(username, action, role, cli, model, effort, task string) {

@@ -24,15 +24,14 @@ import (
 // entries say "released", and the tests hold them to it.
 
 // TestTaskDescOfRendersGitHubWorkLikeItsPickup keeps the common case aligned: a
-// GitHub issue's release reads the same as the "picked up" entry it closes out,
-// because identityKey() spells a numbered item "repo#number" — exactly what the
-// pickup path formats by hand.
+// GitHub issue's release reads the same as the "picked up" entry it closes out.
 //
-// The two DO diverge for external work, and deliberately so. The pickup path
-// still formats with %d and therefore renders a Linear/Jira item as "repo#0";
-// this helper uses the canonical key instead. Matching that bug for symmetry
-// would be the wrong trade — the release entry is correct and the pickup entry
-// has a pre-existing gap worth fixing on its own.
+// HISTORY: when this test landed (#5097), the two DID diverge for external
+// work — the pickup path formatted with %d and rendered a Linear/Jira item as
+// "repo#0" while this helper used the canonical key, a divergence the test
+// comment flagged as a pre-existing gap worth its own fix. #5120 was that fix:
+// every feed entry now renders through assignDesc, and taskDescOf is a typed
+// wrapper over it, so the verbs can no longer disagree about the same item.
 func TestTaskDescOfRendersGitHubWorkLikeItsPickup(t *testing.T) {
 	task := &WSTaskAssign{
 		TaskID: "t-1",
