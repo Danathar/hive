@@ -1,0 +1,24 @@
+{
+  "entries": [
+    {
+      "ts": "2026-08-29T16:42:03Z",
+      "user": "oidc:00u1opaque",
+      "action": "agent.kick",
+      "detail": "reason=governor",
+      "agent": "scanner",
+      "user_name": "Jane Doe"
+    },
+    {
+      "ts": "2026-08-29T16:41:20Z",
+      "user": "Danathar",
+      "action": "agent.pause",
+      "agent": "reviewer"
+    },
+    {
+      "ts": "2026-08-29T16:39:58Z",
+      "user": "system",
+      "action": "governor.mode",
+      "detail": "quiet -> busy"
+    }
+  ]
+}
