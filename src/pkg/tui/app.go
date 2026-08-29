@@ -15,9 +15,16 @@
 // fetches that exist and delivers each result to the panes as that pane's own
 // message type; see poll.go for the loop, its cadence and its error policy.
 // The SSE feed (T13) and the per-pane content (T5/T7/T9/T11) build on it.
+//
+// T24 (#5138): the frame is size-aware. The grid already re-derived itself from
+// the last tea.WindowSizeMsg on every render, so it shares the space at any
+// size for free; what T24 adds is the FLOOR. Below minWidth x minHeight the
+// grid is not shrunk, it is replaced by a single centred message, per the
+// design doc's note on the sketch (src/docs/design/tui.md §3).
 package tui
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"time"
@@ -37,6 +44,24 @@ const splash = "Hive TUI (q to quit)"
 // paneCount is the grid's four cells. Focus arithmetic uses it so adding a
 // pane later cannot silently desynchronize tab cycling from the pane table.
 const paneCount = 4
+
+// minWidth and minHeight are the smallest terminal the grid is drawn in.
+//
+// The numbers come from what the frame needs to be READABLE rather than from
+// what it needs to avoid panicking — the cell() clamp already makes any size
+// render without crashing. Below this, every cell's interior is a couple of
+// columns wide after two borders and a halved terminal, which is a frame that
+// draws but says nothing. Showing an operator a stack of empty boxes is worse
+// than telling them the window is too small, so this is the floor.
+const (
+	minWidth  = 60
+	minHeight = 20
+)
+
+// tooSmallText is the whole below-minimum frame's content. It is derived from
+// the constants rather than spelled out, so the numbers an operator is told to
+// resize to cannot drift away from the numbers actually enforced.
+var tooSmallText = fmt.Sprintf("terminal too small (need at least %dx%d)", minWidth, minHeight)
 
 // Border styles for the grid cells. The focused pane gets a THICK border, not
 // only a color change: test and CI environments render through termenv's
@@ -221,6 +246,10 @@ func (m model) View() string {
 		return splash
 	}
 
+	if m.width < minWidth || m.height < minHeight {
+		return m.tooSmallView()
+	}
+
 	// One line each for header and footer; the grid gets the rest, split
 	// into two rows and two columns. The right column and bottom row absorb
 	// the odd remainder so the frame always fills the terminal exactly.
@@ -236,9 +265,10 @@ func (m model) View() string {
 			style = focusedBorder
 		}
 		// The border consumes one row/column on every side; the pane
-		// renders only the interior. Clamped so a pathologically small
-		// terminal degrades to empty cells instead of panicking — the
-		// operator-facing minimum-size message is T24's.
+		// renders only the interior. The clamp stays after T24 even though
+		// the minimum-size guard now keeps the grid out of the sizes that
+		// need it: it is a defence against a later layout change reserving
+		// more chrome, not a duplicate of the guard.
 		innerW := max(0, outerW-2)
 		innerH := max(0, outerH-2)
 		return style.Render(m.panes[i].View(innerW, innerH))
@@ -253,6 +283,24 @@ func (m model) View() string {
 	footer := footerStyle.Width(m.width).Render(footerText)
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, top, bottom, footer)
+}
+
+// tooSmallView renders the below-minimum frame: the message alone, centred in
+// the terminal, and nothing else.
+//
+// The message is wrapped to the terminal's width and the result is clipped to
+// its exact width and height, so the frame fits ANY size — including one
+// narrower than the message itself, which lipgloss.Place alone would happily
+// overflow. That matters because this is precisely the path a too-narrow
+// terminal takes: a minimum-size message that itself wraps past the right edge
+// is the same broken frame it exists to avoid.
+func (m model) tooSmallView() string {
+	msg := lipgloss.NewStyle().
+		Width(m.width).
+		Align(lipgloss.Center).
+		Render(tooSmallText)
+	placed := lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, msg)
+	return lipgloss.NewStyle().MaxWidth(m.width).MaxHeight(m.height).Render(placed)
 }
 
 // Run starts the TUI on this process's own terminal and blocks until the
