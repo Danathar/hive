@@ -1848,10 +1848,18 @@ function classifyTmuxPane(text) {
   let hasIdlePrompt, hasCompletionMarker, isWorking;
 
   if (BACKEND === 'claude') {
-    const lastLines = text.split('\n').slice(-15).join('\n');
-    hasIdlePrompt = /bypass permissions|shift\+tab to cycle/.test(text);
+    const claudeTail = text.split('\n').slice(-15).join('\n');
+    // Claude's optional footer hints change when a background shell is still
+    // running. Its own state markers do not: an in-flight turn renders
+    // "esc to interrupt", while an idle turn retains the ⏵⏵ / agents chrome.
+    // Prefer those markers over transcript verbs, which may describe finished
+    // work. Keep the verb heuristic only for an unrecognised footer so an
+    // unknown Claude UI still errs toward busy.
+    hasIdlePrompt = /⏵⏵|← for agents|bypass permissions|shift\+tab to cycle/.test(claudeTail);
     hasCompletionMarker = /[✻✶✽] \S+ed for \d+[ms]|Honking|tokens\)/.test(text);
-    isWorking = /─.*Bash\(|Reading|Editing|Writing|Searching/.test(lastLines) || /ing…/.test(lastLines);
+    const claudeBusyMarker = /esc to interrupt/i.test(claudeTail);
+    isWorking = claudeBusyMarker ||
+      (!hasIdlePrompt && (/─.*Bash\(|Reading|Editing|Writing|Searching/.test(claudeTail) || /ing…/.test(claudeTail)));
   } else if (BACKEND === 'copilot') {
     hasIdlePrompt = /\/ commands.*help/.test(text);
     hasCompletionMarker = true;

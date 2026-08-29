@@ -1527,6 +1527,37 @@ test('claude bypass-permissions idle footer is not itself a blocked prompt', () 
   } finally { teardown(relay); }
 });
 
+test('#5162 claude with a background shell still running is COMPLETE', () => {
+  const relay = loadRelay({ backend: 'claude' });
+  try {
+    // Live idle pane: the shell indicator displaces "shift+tab to cycle", but
+    // the turn has ended and Claude's persistent footer chrome remains.
+    const pane = [
+      '✻ Cogitated for 10m 31s · 1 shell still running',
+      '❯',
+      '  ⏵⏵ auto mode on · 1 shell · ← for agents · ↓ to manage',
+    ].join('\n');
+    assert.strictEqual(relay.classifyTmuxPane(pane), relay.PANE_STATE_IDLE_COMPLETE,
+      'a background shell is orthogonal to whether the Claude turn finished');
+  } finally { teardown(relay); }
+});
+
+test('#5162 claude busy chrome wins over idle-looking footer chrome', () => {
+  const relay = loadRelay({ backend: 'claude' });
+  try {
+    // A duration line from an older turn and the persistent ⏵⏵ chrome must not
+    // hide Claude's explicit marker for the turn currently in flight.
+    const pane = [
+      '✻ Cogitated for 2m 10s',
+      '● Running the focused tests now.',
+      '❯',
+      '  ⏵⏵ auto mode on · esc to interrupt',
+    ].join('\n');
+    assert.strictEqual(relay.classifyTmuxPane(pane), relay.PANE_STATE_WORKING,
+      'esc to interrupt must prevent a busy Claude turn from completing');
+  } finally { teardown(relay); }
+});
+
 test('blocked interactive panes report attention instead of task_complete', () => {
   const blockedPane = 'Should I open a pull request for this change?\n> \n';
   const relay = loadRelay({ backend: 'goose', cliStates: [blockedPane, blockedPane] });
