@@ -26,6 +26,7 @@ import (
 	"github.com/charmbracelet/x/exp/teatest"
 
 	"github.com/kubestellar/hive/pkg/tui"
+	"github.com/kubestellar/hive/pkg/tui/client"
 )
 
 // TestGridGolden pins the complete 100x30 frame — header, all four bordered
@@ -34,6 +35,13 @@ import (
 // width-sensitive terminal output, and a test that inherited a default size
 // would produce a diff on someone else's machine.
 func TestGridGolden(t *testing.T) {
+	// Pin the dashboard at a closed port. T12 made the app poll on startup, so
+	// an unpinned golden would render whatever a dashboard on localhost:3001
+	// returned — and a hive developer's machine is exactly where one is running.
+	// A refused connection produces a swallowed fetch error and no visible
+	// change, which is what keeps this frame the same everywhere.
+	t.Setenv(client.BaseURLEnv, "http://127.0.0.1:1")
+
 	tm := teatest.NewTestModel(t, tui.New(), teatest.WithInitialTermSize(100, 30))
 
 	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})

@@ -9,17 +9,23 @@
 //
 // T3 (#5004): the frame is a header bar, a 2×2 grid of the four panes from
 // pkg/tui/panes, and a footer keybinding strip, per the layout sketch in
-// src/docs/design/tui.md §3. The panes are stubs; polling (T12), the SSE feed
-// (T13) and every API call are separate tasks that build on this frame.
+// src/docs/design/tui.md §3.
+//
+// T12 (#5061): the frame is live. A tick every pollInterval issues the client
+// fetches that exist and delivers each result to the panes as that pane's own
+// message type; see poll.go for the loop, its cadence and its error policy.
+// The SSE feed (T13) and the per-pane content (T5/T7/T9/T11) build on it.
 package tui
 
 import (
 	"io"
 	"os"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/kubestellar/hive/pkg/tui/client"
 	"github.com/kubestellar/hive/pkg/tui/panes"
 )
 
@@ -48,11 +54,20 @@ var (
 	footerStyle = lipgloss.NewStyle().Faint(true)
 )
 
-// headerText is static until T12 wires polling: the sketch's header carries
-// hive name, governor mode and connection state, and every one of those is
-// data this frame does not fetch yet. Placeholders say so honestly instead of
-// pretending — a dash is "not known", which is true, while any invented value
-// would be false.
+// headerText still carries placeholders after T12, and each one is a fact
+// about what is not fetched yet rather than an oversight:
+//
+//   - `hive:` — the hive's name is on GET /api/status (StatusPayload.HiveID),
+//     which no merged client method reads. T6's /api/status client decodes the
+//     governor slice; until a client call exposes the id, inventing one here
+//     would be a guess rendered as a fact.
+//   - `governor:` — same endpoint, T6/T7's to fill.
+//   - `ws:` — SSE connection state, and the TUI opens no stream yet. T13b owns
+//     this field and it stays literally true until then: not connected.
+//
+// A dash is "not known", which is true; any value polled data does not support
+// would be false. T12 populates none of them because nothing it polls carries
+// them — /api/agents is the only merged read, and it carries none of the three.
 const headerText = "hive: —   governor: —   ws: not connected"
 
 // footerText lists only the bindings that EXIST. The sketch's full strip
@@ -84,6 +99,21 @@ type model struct {
 	// focus indexes the focused pane. Exactly one pane is always focused;
 	// there is no "nothing focused" state to handle everywhere else.
 	focus int
+
+	// api is the dashboard client every poll goes through. client.New cannot
+	// fail — a bad HIVE_DASHBOARD_URL surfaces as a request error on the first
+	// tick rather than as a constructor error the TUI has no frame to render
+	// yet — so the model always has one and poll never has to nil-check it.
+	api *client.Client
+
+	// interval is this model's poll cadence, defaulting to pollInterval.
+	//
+	// It is a field rather than a bare constant read for two reasons. Tests
+	// drive a whole tick — fetch, delivery, and the re-arm — without waiting
+	// five real seconds for it. And T13b needs exactly this knob: once the SSE
+	// stream is connected the poll becomes a fallback and should slow down,
+	// not keep hammering an endpoint the stream has already superseded.
+	interval time.Duration
 }
 
 // newModel returns the root model in its initial state. Unexported because the
@@ -97,6 +127,8 @@ func newModel() model {
 			panes.NewTokens(),
 			panes.NewEvents(),
 		},
+		api:      client.New(),
+		interval: pollInterval,
 	}
 }
 
@@ -108,11 +140,15 @@ func New() tea.Model {
 	return newModel()
 }
 
-// Init implements tea.Model. It gathers the panes' initial commands; the T3
-// stubs all return nil, but wiring Init through now means T5/T7/T9/T11 get
-// their first fetch issued without touching the app again.
+// Init implements tea.Model.
+//
+// It gathers the panes' initial commands and starts the poll loop: one fetch
+// immediately, and the first tick armed for pollInterval later. The immediate
+// fetch is what keeps startup honest — without it every pane would show
+// "waiting for data" for a full interval while a perfectly reachable dashboard
+// sat there answering, and an operator would read that as the TUI being broken.
 func (m model) Init() tea.Cmd {
-	var cmds []tea.Cmd
+	cmds := []tea.Cmd{m.poll(), m.scheduleTick()}
 	for _, p := range m.panes {
 		if c := p.Init(); c != nil {
 			cmds = append(cmds, c)
@@ -126,6 +162,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		return m, nil
+	case tickMsg:
+		// Re-arm BEFORE the fetches are issued, not after they resolve: the
+		// loop's cadence must not depend on how long a fetch takes, and a
+		// dashboard that never answers must not be able to stop the clock.
+		return m, tea.Batch(m.scheduleTick(), m.poll())
+	case fetchErrMsg:
+		// Swallowed on purpose — see fetchErrMsg's doc comment. Returning here
+		// rather than falling through to the broadcast below is the mechanism:
+		// the panes never see the error, so they never have to decide whether
+		// to clear their data, and the previous frame simply persists.
 		return m, nil
 	case tea.KeyMsg:
 		// KeyMsg.String() normalizes both plain runes ("q") and control
