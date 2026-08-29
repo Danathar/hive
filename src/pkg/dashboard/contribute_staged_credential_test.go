@@ -97,6 +97,50 @@ func TestInteractiveWarningIsHonestAboutWhatItCosts(t *testing.T) {
 	}
 }
 
+// TestAPIKeyAuthenticationIsNotTreatedAsMissingCredential covers the other way a
+// contributor can authenticate. ANTHROPIC_API_KEY is forwarded into the
+// container by the provider-env block, so a contributor using it needs no
+// .credentials.json at all.
+//
+// Checking only the OAuth file made an API-key contributor look unauthenticated:
+// interactive runs warned about a login menu they would never see, and — far
+// worse — headless runs exited refusing to start a run that would have worked.
+// The check has to sit here rather than at the forwarding site, because the
+// headless refusal exits long before that code is reached.
+func TestAPIKeyAuthenticationIsNotTreatedAsMissingCredential(t *testing.T) {
+	block := contributeHiveClaudeStagingBlock(t)
+
+	if !strings.Contains(block, "ANTHROPIC_API_KEY") {
+		t.Fatal("the credential gate ignores ANTHROPIC_API_KEY, so an API-key contributor is " +
+			"warned interactively and hard-failed headless for a run that would have worked (#5088)")
+	}
+	// It must SHORT-CIRCUIT the gate, not merely be mentioned: a present key means
+	// no warning and no refusal, whatever the OAuth file says.
+	guard := `if [[ -z "${ANTHROPIC_API_KEY:-}" ]] && ! claude_staged_credential_usable`
+	if !strings.Contains(block, guard) {
+		t.Error("a present ANTHROPIC_API_KEY must skip the gate entirely")
+	}
+}
+
+// TestCredentialGateIsForwardedKeysOnly guards against the inverse mistake. The
+// gate may only accept a key this recipe actually forwards into the container —
+// accepting one it does not forward would wave through a run that then cannot
+// authenticate, which is worse than the false warning being fixed.
+func TestCredentialGateIsForwardedKeysOnly(t *testing.T) {
+	src := justfileSource(t)
+	forwardIdx := strings.Index(src, "for name in ANTHROPIC_API_KEY")
+	if forwardIdx < 0 {
+		t.Fatal("the provider-env forwarding list was not found")
+	}
+	line := src[forwardIdx:]
+	if end := strings.Index(line, "\n"); end > 0 {
+		line = line[:end]
+	}
+	if !strings.Contains(line, "ANTHROPIC_API_KEY") {
+		t.Error("ANTHROPIC_API_KEY is accepted by the gate but not forwarded into the container")
+	}
+}
+
 // TestStagedCredentialCheckToleratesRefreshTokens guards the one nuance that
 // separates this from crying wolf. An expired ACCESS token that still carries a
 // refresh token is fine: Claude Code refreshes it silently and no login prompt

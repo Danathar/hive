@@ -1278,7 +1278,14 @@ contribute-hive backend="" mode="docker": check-version
           # the credential persists). Headless: fail, because there is no human
           # to answer a login prompt and the pod would sit at it forever —
           # #2538's "never wait silently" rule.
-          if ! claude_staged_credential_usable "${CLI_STAGE}/.claude/.credentials.json"; then
+          # ANTHROPIC_API_KEY is a complete alternative to the OAuth file: the
+          # provider-env block below forwards it into the container with -e, so a
+          # contributor authenticating that way needs no .credentials.json at all
+          # and must never be warned — let alone hard-failed in headless mode,
+          # which would refuse to start a run that would have worked. Checked here
+          # rather than at the forwarding site because the headless refusal exits
+          # long before that code is reached.
+          if [[ -z "${ANTHROPIC_API_KEY:-}" ]] && ! claude_staged_credential_usable "${CLI_STAGE}/.claude/.credentials.json"; then
             if [[ "${CONTRIBUTOR_MODE:-}" == "headless" ]]; then
               echo "ERROR: no usable Claude credential to stage into the container." >&2
               echo "  A headless run has no way to complete a login prompt, so it would" >&2
