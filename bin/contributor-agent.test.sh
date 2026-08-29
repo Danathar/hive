@@ -192,6 +192,46 @@ done
 echo "contributor-agent hook override tests passed"
 echo "contributor-agent knowledge fetch tests passed"
 
+# Pi uses one shared provider/model parser for first launch and relay restarts.
+# The test hook exits before any tmux/network setup, so these are deterministic
+# startup-contract checks rather than a claim that a real provider authenticated.
+pi_selection_output="$(
+  env -i \
+    PATH="${PATH}" \
+    HOME="$HOME_DIR" \
+    OPENAI_API_KEY="synthetic-invalid-pi-key" \
+    HIVE_REGISTRATION_TOKEN="test-token" \
+    HIVE_CONTRIBUTOR_AGENT_TEST_PI_SELECTION=1 \
+    AGENT_BACKEND=pi \
+    AGENT_MODEL=openai/gpt-5 \
+    bash "${ROOT_DIR}/bin/contributor-agent.sh"
+)"
+case "$pi_selection_output" in
+  *'"provider":"openai"'*'"model":"openai/gpt-5"'*'"authentication":"configured_unverified"'* ) ;;
+  *)
+    echo "expected canonical Pi selection/readiness JSON; got: $pi_selection_output" >&2
+    exit 1
+    ;;
+esac
+case "$pi_selection_output" in
+  *"synthetic-invalid-pi-key"* )
+    echo "Pi readiness leaked a provider credential" >&2
+    exit 1
+    ;;
+esac
+if env -i \
+    PATH="${PATH}" \
+    HOME="$HOME_DIR" \
+    HIVE_REGISTRATION_TOKEN="test-token" \
+    HIVE_CONTRIBUTOR_AGENT_TEST_PI_SELECTION=1 \
+    AGENT_BACKEND=pi \
+    AGENT_MODEL=bare-model \
+    bash "${ROOT_DIR}/bin/contributor-agent.sh" >/dev/null 2>&1; then
+  echo "expected Pi startup to reject an unqualified model" >&2
+  exit 1
+fi
+echo "contributor-agent Pi selection tests passed"
+
 rm -f "${HOME_DIR}/CLAUDE.md"
 rm -rf "${HOME_DIR}/.bob"
 BOB_AGENT_MD="${HOME_DIR}/agent.md"

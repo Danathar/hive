@@ -127,8 +127,17 @@ contribute-check-backend backend="claude":
       pi)
         if command -v pi &>/dev/null; then
           echo "Pi CLI detected ($(pi --version 2>&1 | head -1))"
-          echo "  Supports: Anthropic, OpenAI, Google, Ollama, and more"
-          echo "  Set provider: --provider anthropic --model claude-sonnet-4-6"
+          if [[ -z "${AGENT_MODEL:-}" ]]; then
+            echo "ERROR: Pi requires one canonical provider-qualified model."
+            echo "  export AGENT_MODEL=anthropic/claude-sonnet-4-6"
+            exit 1
+          fi
+          if ! PI_READINESS=$(node bin/pi-backend.js "${AGENT_MODEL}" 2>&1); then
+            echo "ERROR: ${PI_READINESS}"
+            exit 1
+          fi
+          echo "HIVE_BACKEND_READINESS=${PI_READINESS}"
+          echo "  Credential presence is reported as configured_unverified, never as proof of authentication."
         else
           echo "ERROR: Pi CLI not found. Install: curl -fsSL https://pi.dev/install.sh | sh"
           exit 1
@@ -775,6 +784,21 @@ contribute-hive backend="" mode="docker": check-version
       echo "  then re-run: just contribute-hive bob"
       exit 1
     fi
+    if [[ "$BACKEND" == "pi" ]]; then
+      if ! PI_READINESS=$(node bin/pi-backend.js "${AGENT_MODEL:-}" 2>&1); then
+        echo "ERROR: ${PI_READINESS}"
+        echo "  export AGENT_MODEL=provider/model"
+        exit 1
+      fi
+      echo "HIVE_BACKEND_READINESS=${PI_READINESS}"
+      # This recipe runs in its own shell, so narrowing the environment does not
+      # alter the contributor's login shell. It does ensure both local relay/CLI
+      # launches and the container path can see only the selected provider's
+      # official credential variables.
+      while IFS= read -r name; do
+        if [[ -n "$name" ]]; then unset "$name"; fi
+      done < <(node bin/pi-backend.js --unselected-env-names "${AGENT_MODEL}")
+    fi
     echo "=== Hive Contributor Agent (ClankeR) ==="
     echo "Backend:  ${BACKEND}"
     echo "Hub:      {{hive_hub}}"
@@ -1021,6 +1045,10 @@ contribute-hive backend="" mode="docker": check-version
         if [[ -n "${AGENT_MODEL:-}" ]]; then
           PERM_FLAG="${PERM_FLAG} --model ${AGENT_MODEL}"
         fi
+      elif [[ "$BACKEND" == "pi" ]]; then
+        # Same canonical selection used by the container entrypoint and every
+        # relay restart. %q keeps model IDs with shell metacharacters one argv.
+        PERM_FLAG="${PERM_FLAG:+${PERM_FLAG} }--model $(printf %q "$AGENT_MODEL")"
       fi
 
       # Create tmux session with the CLI.
@@ -1222,6 +1250,10 @@ contribute-hive backend="" mode="docker": check-version
         pi)
           if [ -d "${HOME}/.pi" ]; then
             stage_copy "${HOME}/.pi" ".pi"
+            # Keep only the selected provider's official auth/custom-provider
+            # entries in the ephemeral copy. The agent must not inherit keys for
+            # every provider merely because the host is signed into them.
+            node bin/pi-backend.js --stage "${AGENT_MODEL}" "${CLI_STAGE}/.pi"
             CLI_MOUNTS="-v ${CLI_STAGE}/.pi:/home/dev/.pi${VOLSUF}"
           fi
           # SECURITY (H6 / CWE-668) EXCEPTION: pi alone gets host networking.
@@ -1269,6 +1301,26 @@ contribute-hive backend="" mode="docker": check-version
           ;;
       esac
       CONTAINER_NAME="hive-contributor-${BACKEND}-$(head -c 4 /dev/urandom | od -An -tx1 | tr -d ' ')"
+      # Pi receives ONLY the selected provider's official credential variables.
+      # A contributor may have keys for several providers in their shell; handing
+      # all of them to an unconfined agent would violate least privilege and make
+      # provider selection observable through unrelated secrets (#5039).
+      PROVIDER_ENV_ARGS=()
+      add_provider_env() {
+        local name="$1"
+        # Docker/Podman resolve a name-only --env from this process. The secret
+        # value therefore never appears in the runtime command's argv.
+        if [[ -n "${!name:-}" ]]; then PROVIDER_ENV_ARGS+=("-e" "${name}"); fi
+      }
+      if [[ "$BACKEND" == "pi" ]]; then
+        while IFS= read -r name; do
+          if [[ -n "$name" ]]; then add_provider_env "$name"; fi
+        done < <(node bin/pi-backend.js --env-names "${AGENT_MODEL}")
+      else
+        for name in ANTHROPIC_API_KEY OPENAI_API_KEY GOOGLE_API_KEY GOOSE_API_KEY GOOSE_PROVIDER GOOSE_MODEL BOBSHELL_API_KEY HIVE_LITELLM_ENDPOINT HIVE_LITELLM_API_KEY; do
+          add_provider_env "$name"
+        done
+      fi
       # NOTE: deliberately NOT --rm. With --rm the runtime deletes the
       # container the instant it exits, taking its logs with it — so a
       # container that dies during startup leaves nothing to diagnose
@@ -1294,17 +1346,10 @@ contribute-hive backend="" mode="docker": check-version
         -e GH_TOKEN="${GH_TOKEN:-}" \
         -e HIVE_USE_CONTRIBUTOR_GH=true \
         -e HIVE_CONTAINER_NAME="${CONTAINER_NAME}" \
-        ${ANTHROPIC_API_KEY:+-e ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY}"} \
-        ${GOOGLE_API_KEY:+-e GOOGLE_API_KEY="${GOOGLE_API_KEY}"} \
-        ${GOOSE_API_KEY:+-e GOOSE_API_KEY="${GOOSE_API_KEY}"} \
-        ${GOOSE_PROVIDER:+-e GOOSE_PROVIDER="${GOOSE_PROVIDER}"} \
-        ${GOOSE_MODEL:+-e GOOSE_MODEL="${GOOSE_MODEL}"} \
-        ${OPENAI_API_KEY:+-e OPENAI_API_KEY="${OPENAI_API_KEY}"} \
-        ${BOBSHELL_API_KEY:+-e BOBSHELL_API_KEY="${BOBSHELL_API_KEY}"} \
-        ${HIVE_LITELLM_ENDPOINT:+-e HIVE_LITELLM_ENDPOINT="${HIVE_LITELLM_ENDPOINT}"} \
-        ${HIVE_LITELLM_API_KEY:+-e HIVE_LITELLM_API_KEY="${HIVE_LITELLM_API_KEY}"} \
+        "${PROVIDER_ENV_ARGS[@]}" \
         ${AGENT_MODEL:+-e AGENT_MODEL="${AGENT_MODEL}"} \
         ${AGENT_REASONING_EFFORT:+-e AGENT_REASONING_EFFORT="${AGENT_REASONING_EFFORT}"} \
+        ${CONTRIBUTOR_MODE:+-e CONTRIBUTOR_MODE="${CONTRIBUTOR_MODE}"} \
         {{hive_image}} > /dev/null
 
       echo "Container: ${CONTAINER_NAME}"

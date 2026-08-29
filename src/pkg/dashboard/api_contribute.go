@@ -2101,9 +2101,10 @@ var hostTpl='PREREQ\nINSTALL\ngit clone -b {{HIVE_BRANCH}} https://github.com/ku
 // its own, so you can read it before piping to kubectl. Only the headless-
 // capable backends run this way (see K8S_HEADLESS_BACKENDS).
 var k8sTpl='PREREQ\ngit clone -b {{HIVE_BRANCH}} https://github.com/kubestellar/hive && cd hive\nexport HIVE_HUB='+hubURL+'\nROLEHELPjust contribute-setup CLI\n# Review the manifest, then apply into your current kube-context:\njust contribute-k8s hive-contributor | kubectl apply -f -\nkubectl -n hive-contributor rollout status deploy/hive-contributor';
-// Backends with a verified headless (non-interactive) entry point — must match
-// HEADLESS_BACKENDS in bin/contributor-relay.sh and the Justfile. A pod has no
-// TTY, so only these run in a cluster; anything else refuses work at startup.
+// Backends whose credentials and model configuration this generator can stage
+// safely. Pi's relay supports headless execution, but this generator does not
+// yet stage its provider-specific credentials or canonical model. A pod has no
+// TTY, so anything outside this list refuses work at startup.
 var K8S_HEADLESS_BACKENDS={claude:1,litellm:1,copilot:1,codex:1,watsonx:1,goose:1};
 // Backends that can only run on the contributor's own host. "other" has no
 // image by definition. agy is host-only for a different reason: it signs in
@@ -4552,6 +4553,10 @@ function capabilityLine(caps){
   if(caps.agent_cli_version)parts.push('cli '+esc(caps.agent_cli_version));
   if(caps.relay_protocol_version)parts.push('proto '+esc(caps.relay_protocol_version));
   if(caps.credential_type)parts.push('cred:'+esc(caps.credential_type));
+  if(caps.pi_binary)parts.push('pi binary:'+esc(caps.pi_binary));
+  if(caps.pi_configuration)parts.push('config:'+esc(caps.pi_configuration));
+  if(caps.pi_authentication)parts.push('auth:'+esc(caps.pi_authentication));
+  if(caps.pi_invocation)parts.push('invoke:'+esc(caps.pi_invocation));
   if(!parts.length)return '';
   return '<div class="clanker-sub clanker-declares" title="Self-declared by the client. Advisory only — the hub records and shows it but never routes, gates, or trusts work on it.">declares: '+parts.join(' &middot; ')+'</div>';
 }

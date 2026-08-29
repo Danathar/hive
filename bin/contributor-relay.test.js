@@ -12,6 +12,7 @@ const assert = require('assert');
 const Module = require('module');
 const path = require('path');
 const fs = require('fs');
+const piBackend = require('./pi-backend.js');
 
 // Set for the whole run, not just during module load: the relay checks it at
 // CALL time in sleepMs() to skip its busy-wait, and the restart paths sleep for
@@ -30,6 +31,7 @@ function loadRelay({ backend = 'copilot', backendBinary = null, backendPerm = '-
   const sent = [];
   // Records every execFile (headless one-shot) invocation: { bin, args, opts }.
   const execFileCalls = [];
+  const deferredExecFileCallbacks = [];
   let stateIdx = 0;
   // Guard against a runaway loop in the code under test eating all memory.
   const MAX_RECORDED_COMMANDS = 10000;
@@ -79,7 +81,9 @@ function loadRelay({ backend = 'copilot', backendBinary = null, backendPerm = '-
     execFileCalls.push({ bin, args, opts: typeof opts === 'function' ? {} : opts });
     const child = { killed: false, kill() { this.killed = true; } };
     const r = execFileResult || {};
-    if (callback) {
+    if (callback && r.defer) {
+      deferredExecFileCallbacks.push(callback);
+    } else if (callback) {
       // Mirror execFile's async contract closely enough for the relay's logic:
       // callback(err, stdout, stderr).
       callback(r.err || null, r.stdout || '', r.stderr || '');
@@ -170,6 +174,11 @@ function loadRelay({ backend = 'copilot', backendBinary = null, backendPerm = '-
   relay.__sent = sent;
   relay.__tmpDir = tmpDir;
   relay.__execFileCalls = execFileCalls;
+  relay.__completeDeferredExecFile = (err, stdout = '', stderr = '') => {
+    const callback = deferredExecFileCallbacks.shift();
+    assert.ok(callback, 'no deferred execFile callback is pending');
+    callback(err, stdout, stderr);
+  };
   relay.__headlessStatusFile = headlessStatusFile;
   relay.__readHeadlessStatus = () => {
     try { return JSON.parse(fs.readFileSync(headlessStatusFile, 'utf8')); } catch (_) { return null; }
@@ -755,6 +764,145 @@ test('goose is also excluded from --model', () => {
   const relay = loadRelay({ backend: 'goose', model: 'some-model' });
   try {
     assert.ok(!/--model/.test(relay.buildLaunchCommand()), 'goose should not get --model');
+  } finally { teardown(relay); }
+});
+
+// ---------------------------------------------------------------------------
+// Pi provider/model, readiness and receipts (kubestellar/hive#5039).
+// ---------------------------------------------------------------------------
+
+test('Pi accepts exactly one canonical provider/model selection', () => {
+  assert.deepStrictEqual(piBackend.parsePiModelSelection('openrouter/moonshotai/kimi-k2.6'), {
+    valid: true,
+    state: 'configured',
+    provider: 'openrouter',
+    model: 'moonshotai/kimi-k2.6',
+    canonical: 'openrouter/moonshotai/kimi-k2.6',
+  });
+  for (const bad of ['', 'openai', '/gpt-5', 'openai/', 'open ai/gpt-5', 'openai/--provider', 'openai/gpt;id']) {
+    assert.strictEqual(piBackend.parsePiModelSelection(bad).valid, false, `accepted malformed Pi model ${JSON.stringify(bad)}`);
+  }
+});
+
+test('Pi container staging retains only the selected provider credentials', () => {
+  const tmpDir = fs.mkdtempSync(path.join(__dirname, '..', '.relay-test-tmp', 'pi-stage-'));
+  const agentDir = path.join(tmpDir, 'agent');
+  fs.mkdirSync(agentDir, { recursive: true });
+  fs.writeFileSync(path.join(agentDir, 'auth.json'), JSON.stringify({ openai: { key: 'selected-key' }, anthropic: { key: 'unrelated-key' } }));
+  fs.writeFileSync(path.join(agentDir, 'models.json'), JSON.stringify({ providers: { openai: { apiKey: 'selected-custom-key' }, anthropic: { apiKey: 'unrelated-custom-key' } }, defaults: {} }));
+  try {
+    const selection = piBackend.parsePiModelSelection('openai/gpt-5');
+    piBackend.narrowPiStage(tmpDir, selection);
+    assert.deepStrictEqual(Object.keys(JSON.parse(fs.readFileSync(path.join(agentDir, 'auth.json')))), ['openai']);
+    const models = JSON.parse(fs.readFileSync(path.join(agentDir, 'models.json')));
+    assert.deepStrictEqual(Object.keys(models.providers), ['openai']);
+    assert.deepStrictEqual(piBackend.providerCredentialEnvNames(selection), ['OPENAI_API_KEY']);
+    assert.ok(piBackend.unselectedProviderCredentialEnvNames(selection).includes('ANTHROPIC_API_KEY'));
+    assert.ok(!piBackend.unselectedProviderCredentialEnvNames(selection).includes('OPENAI_API_KEY'));
+    assert.strictEqual(
+      piBackend.redactPiCredentials('selected-custom-key unrelated-custom-key', selection, { PI_CODING_AGENT_DIR: agentDir }),
+      '***REDACTED*** unrelated-custom-key',
+    );
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('Pi initial/restart command transports the same canonical model and no competing provider flag', () => {
+  const relay = loadRelay({ backend: 'pi', model: 'google/gemini-2.5-pro', env: { GOOSE_MODEL: 'wrong-goose/model' } });
+  try {
+    const initial = relay.buildLaunchCommand();
+    assert.match(initial, /--model google\/gemini-2\.5-pro/);
+    assert.ok(!/--provider/.test(initial), `canonical model is sufficient; got ${initial}`);
+    assert.ok(!/wrong-goose/.test(initial), `Pi inherited GOOSE_MODEL: ${initial}`);
+    relay.relaunchCLI();
+    const restart = relay.__tmuxSends().find(c => /google\/gemini-2\.5-pro/.test(c));
+    assert.ok(restart, 'Pi restart dropped the effective provider/model');
+  } finally { teardown(relay); }
+});
+
+test('Pi readiness distinguishes configured credentials from verified authentication', () => {
+  const key = 'synthetic-invalid-openai-key';
+  const relay = loadRelay({ backend: 'pi', model: 'openai/gpt-5', cliVersion: 'pi 0.73.1\n', env: { OPENAI_API_KEY: key } });
+  try {
+    relay.handleMessage(JSON.stringify({ type: 'auth_challenge', seq: 1, nonce: 'n' }));
+    const auth = relay.__sent.find(m => m.type === 'auth_response');
+    assert.strictEqual(auth.model, 'openai/gpt-5');
+    assert.strictEqual(auth.provider, 'openai');
+    assert.strictEqual(relay.effectiveProvider(), 'openai');
+    assert.strictEqual(auth.capabilities.pi_binary, 'present');
+    assert.strictEqual(auth.capabilities.pi_configuration, 'configured');
+    assert.strictEqual(auth.capabilities.pi_authentication, 'configured_unverified');
+    assert.strictEqual(auth.capabilities.pi_invocation, 'untested');
+    assert.ok(!JSON.stringify(auth).includes(key), 'Pi credential leaked into readiness evidence');
+    assert.strictEqual(relay.redactTokens(`provider rejected ${key}`), 'provider rejected ***REDACTED***');
+  } finally { teardown(relay); }
+});
+
+test('Pi headless argv and completion receipt name effective selection, generation and result', () => {
+  const relay = loadRelay({ backend: 'pi', backendPerm: '', mode: 'headless', model: 'openai/gpt-5', cliVersion: 'pi 0.73.1', env: { OPENAI_API_KEY: 'synthetic-invalid-key' } });
+  try {
+    const argv = relay.buildHeadlessArgv('make the change');
+    assert.strictEqual(argv.bin, 'pi');
+    assert.deepStrictEqual(argv.args, ['--model', 'openai/gpt-5', '--print', '--mode', 'json', 'make the change']);
+    const task = { task_id: 'pi-1', task_gen: 17, kind: 'issue', repo: 'x/y', number: 1, title: 'Pi' };
+    relay.setCurrentTask(task);
+    relay.runHeadlessTask(task);
+    const complete = relay.__sent.find(m => m.type === 'task_complete');
+    assert.ok(complete, 'Pi exit 0 produced no completion receipt');
+    assert.strictEqual(complete.cli_backend, 'pi');
+    assert.strictEqual(complete.provider, 'openai');
+    assert.strictEqual(complete.model, 'openai/gpt-5');
+    assert.strictEqual(complete.task_gen, 17);
+    assert.strictEqual(complete.result, 'completed');
+    const status = relay.__readHeadlessStatus();
+    assert.strictEqual(status.pi_authentication, 'verified');
+    assert.strictEqual(status.pi_invocation, 'succeeded');
+    assert.strictEqual(status.task_gen, undefined, 'waiting status must not retain a stale assignment generation');
+  } finally { teardown(relay); }
+});
+
+test('Pi provider/model resolution failure is bounded, redacted environment evidence', () => {
+  const key = 'synthetic-invalid-openai-key';
+  const error = Object.assign(new Error('Pi exited'), { code: 1 });
+  const relay = loadRelay({
+    backend: 'pi',
+    mode: 'headless',
+    model: 'openai/not-a-real-model',
+    cliVersion: 'pi 0.73.1',
+    env: { OPENAI_API_KEY: key },
+    execFileResult: { err: error, stderr: `Unknown model; attempted credential ${key}` },
+  });
+  try {
+    const task = { task_id: 'pi-bad-model', task_gen: 18, kind: 'issue', repo: 'x/y', number: 3, title: 'bad model' };
+    relay.setCurrentTask(task);
+    relay.runHeadlessTask(task);
+    const failed = relay.__sent.find(m => m.type === 'task_failed');
+    assert.ok(failed, 'Pi resolver failure produced no failure receipt');
+    assert.strictEqual(failed.failure_kind, 'environment');
+    assert.strictEqual(failed.cli_backend, 'pi');
+    assert.strictEqual(failed.provider, 'openai');
+    assert.strictEqual(failed.model, 'openai/not-a-real-model');
+    assert.strictEqual(failed.task_gen, 18);
+    assert.ok(!JSON.stringify(failed).includes(key), 'Pi failure receipt leaked its provider credential');
+    const status = relay.__readHeadlessStatus();
+    assert.strictEqual(status.pi_authentication, 'configured_unverified');
+    assert.strictEqual(status.pi_invocation, 'failed');
+    assert.ok(!JSON.stringify(status).includes(key), 'Pi failure status leaked its provider credential');
+  } finally { teardown(relay); }
+});
+
+test('Pi revoke kills the child and rejects a raced stale completion', () => {
+  const relay = loadRelay({ backend: 'pi', mode: 'headless', model: 'openai/gpt-5', execFileResult: { defer: true }, cliVersion: 'pi 0.73.1' });
+  try {
+    const task = { task_id: 'pi-revoke', task_gen: 22, kind: 'issue', repo: 'x/y', number: 2, title: 'revoke' };
+    relay.setCurrentTask(task);
+    relay.runHeadlessTask(task);
+    const child = relay.getHeadlessChild();
+    relay.handleMessage(JSON.stringify({ type: 'task_revoke', task_id: task.task_id, reason: 'operator stop' }));
+    assert.strictEqual(child.killed, true, 'revoke did not kill Pi');
+    relay.__completeDeferredExecFile(null, 'late success', '');
+    assert.ok(!relay.__sent.some(m => m.type === 'task_complete' && m.task_id === task.task_id), 'revoked Pi emitted stale completion');
   } finally { teardown(relay); }
 });
 
@@ -1677,11 +1825,12 @@ test('buildHeadlessArgv maps each supported backend to its one-shot invocation',
     // agy still cannot sign in inside a pod (interactive Google OAuth, no
     // API-key mode), which is why the k8s manifest generator keeps warning.
     { backend: 'agy', tail: ['-p', PROMPT] },
-    // Interactive-TUI backends with no known one-shot entry point.
+    // Pi has a print/JSON one-shot path and requires a canonical selection.
+    { backend: 'pi', model: 'openai/gpt-5', tail: ['--print', '--mode', 'json', PROMPT] },
+    // Interactive-TUI backend with no known one-shot entry point.
     { backend: 'bob', tail: null },
-    { backend: 'pi', tail: null },
   ]) {
-    const relay = loadRelay({ backend: tc.backend, mode: 'headless' });
+    const relay = loadRelay({ backend: tc.backend, mode: 'headless', model: tc.model || '' });
     try {
       const got = relay.buildHeadlessArgv(PROMPT);
       if (tc.tail === null) {
