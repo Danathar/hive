@@ -21,6 +21,8 @@
 // size for free; what T24 adds is the FLOOR. Below minWidth x minHeight the
 // grid is not shrunk, it is replaced by a single centred message, per the
 // design doc's note on the sketch (src/docs/design/tui.md §3).
+// T25 (#5139): every color the frame draws comes from theme.go, as a
+// light/dark pair. No call site names a color of its own.
 package tui
 
 import (
@@ -68,13 +70,17 @@ var tooSmallText = fmt.Sprintf("terminal too small (need at least %dx%d)", minWi
 // Ascii profile where colors are stripped, so a color-only highlight would be
 // invisible exactly where the golden file pins the frame. The thick border
 // survives any profile; the color is a refinement on real terminals.
+//
+// The colors come from theme (T25) rather than being written here: a literal
+// at the call site is a value chosen against ONE background, and the focus
+// border in particular was invisible on a light terminal. See theme.go.
 var (
 	unfocusedBorder = lipgloss.NewStyle().
 			Border(lipgloss.NormalBorder()).
-			BorderForeground(lipgloss.Color("240"))
+			BorderForeground(theme.Border)
 	focusedBorder = lipgloss.NewStyle().
 			Border(lipgloss.ThickBorder()).
-			BorderForeground(lipgloss.Color("205"))
+			BorderForeground(theme.BorderFocus)
 	headerStyle = lipgloss.NewStyle().Bold(true)
 	footerStyle = lipgloss.NewStyle().Faint(true)
 )
