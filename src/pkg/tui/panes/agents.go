@@ -2,92 +2,223 @@ package panes
 
 import (
 	"fmt"
+	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/kubestellar/hive/pkg/tui/client"
 )
 
-// AgentsMsg delivers a completed GET /api/agents poll to the Agents pane.
-//
-// It is the app's poll loop (T12, #5061) that fetches and the pane that keeps
-// the result; this type is the contract between them. Each pane owns its own
-// message type rather than sharing one "data arrived" message, because the
-// app broadcasts non-key messages to EVERY pane (the T3 routing contract) —
-// a shared type would make every pane inspect a payload addressed to another.
-//
-// Only SUCCESSFUL polls become an AgentsMsg. A failed fetch never reaches a
-// pane at all (see fetchErrMsg in pkg/tui/app.go), which is what makes "a
-// failed poll keeps the previous data" true by construction rather than by a
-// rule each pane has to remember to follow.
-type AgentsMsg struct {
-	// Agents is the fleet as of that poll. An empty (or nil) slice is a
-	// legitimate value meaning "this hive has no agents configured", NOT a
-	// failure — see the Agents pane's `loaded` flag for why the difference
-	// has to be representable.
-	Agents []client.Agent
+// AgentStatus is the live state displayed beside an agent.
+type AgentStatus string
+
+const (
+	AgentStatusRunning AgentStatus = "running"
+	AgentStatusPaused  AgentStatus = "paused"
+	AgentStatusError   AgentStatus = "error"
+)
+
+// AgentState contains the live fields that GET /api/agents does not expose.
+// The app can join these fields from /api/status without adding values to
+// client.Agent that the agent-list endpoint never sends.
+type AgentState struct {
+	Status       AgentStatus
+	LastActivity time.Time
 }
 
-// Agents is the fleet pane — one row per agent with state and backend once T5
-// lands.
+// AgentsMsg delivers a completed fleet snapshot to the Agents pane.
 //
-// T12 gives it the data and the honest two-state summary that goes with
-// having data; the row-per-agent table, the status glyphs and the j/k
-// selection cursor are T5's, and they replace summaryLine without touching
-// the delivery plumbing here.
+// Agents remains the direct result of GET /api/agents so the existing polling
+// path can send this message unchanged. States is optional supplemental live
+// data keyed by client.Agent.Name; T13b can populate it when it joins status
+// updates. ObservedAt makes relative activity labels stable for the lifetime
+// of a snapshot and deterministic in tests.
+type AgentsMsg struct {
+	Agents     []client.Agent
+	States     map[string]AgentState
+	ObservedAt time.Time
+}
+
+// Agents is the fleet pane. It renders content only; the app owns borders and
+// focus chrome and routes keys only to the focused pane.
 type Agents struct {
 	stub
-
-	// agents is the most recent SUCCESSFUL poll. A failed poll leaves it
-	// alone, so the pane keeps showing the last fleet it actually saw
-	// instead of blanking on a transient error.
-	agents []client.Agent
-
-	// loaded records that at least one poll has succeeded. Without it an
-	// empty `agents` is ambiguous — a hive with no agents configured and a
-	// TUI that has not yet fetched anything would render identically, and
-	// "waiting for data" would be a lie in the first case.
-	loaded bool
+	agents     []client.Agent
+	states     map[string]AgentState
+	selected   int
+	loaded     bool
+	observedAt time.Time
 }
 
 // NewAgents returns the Agents pane in its pre-poll state.
 func NewAgents() Agents { return Agents{stub: stub{title: "AGENTS"}} }
 
-// Update implements Pane. An AgentsMsg replaces the pane's fleet; every other
-// message falls through to the stub behaviour (see stub.update for why a pane
-// still returns itself).
+// Update replaces the latest successful snapshot and moves the selection with
+// j/k (or the matching arrow keys), clamping at the fleet's edges.
 func (p Agents) Update(msg tea.Msg) (Pane, tea.Cmd) {
-	if data, ok := msg.(AgentsMsg); ok {
-		p.agents = data.Agents
+	switch msg := msg.(type) {
+	case AgentsMsg:
+		p.agents = append([]client.Agent(nil), msg.Agents...)
+		p.states = cloneAgentStates(msg.States)
 		p.loaded = true
+		p.observedAt = msg.ObservedAt
+		if p.observedAt.IsZero() {
+			p.observedAt = time.Now()
+		}
+		if len(p.agents) == 0 {
+			p.selected = 0
+		} else if p.selected >= len(p.agents) {
+			p.selected = len(p.agents) - 1
+		}
 		return p, nil
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "j", "down":
+			if p.selected+1 < len(p.agents) {
+				p.selected++
+			}
+			return p, nil
+		case "k", "up":
+			if p.selected > 0 {
+				p.selected--
+			}
+			return p, nil
+		}
 	}
 	return p.update(msg, p)
 }
 
-// View implements Pane.
+func cloneAgentStates(in map[string]AgentState) map[string]AgentState {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]AgentState, len(in))
+	for name, state := range in {
+		out[name] = state
+	}
+	return out
+}
+
+// View renders one clipped, non-wrapping row per agent into the exact box the
+// grid assigned to this pane.
 func (p Agents) View(width, height int) string {
 	if !p.loaded {
 		return stubView(p.Title(), width, height)
 	}
-	return contentView(p.Title(), p.summaryLine(), width, height)
+	if width <= 0 || height <= 0 {
+		return ""
+	}
+
+	lines := []string{p.titleLine()}
+	if len(p.agents) == 0 {
+		lines = append(lines, "", "no agents configured")
+	} else {
+		lines = append(lines, agentsHeader(width))
+		for i, agent := range p.agents {
+			lines = append(lines, p.agentLine(agent, i == p.selected, width))
+		}
+	}
+
+	return lipgloss.NewStyle().
+		Width(width).
+		Height(height).
+		MaxWidth(width).
+		MaxHeight(height).
+		Render(strings.Join(lines, "\n"))
 }
 
-// summaryLine is deliberately the smallest honest thing the pane can say once
-// it holds real data: how many agents the poll returned.
-//
-// It exists because the alternative is worse, not because it is the intended
-// UI. Leaving the placeholder up after a successful poll would state that no
-// data has arrived when some has — so the pane has to change, and this is the
-// change that commits to none of T5's layout decisions (columns, glyphs,
-// truncation, selection). T5 replaces this one line with the table.
-func (p Agents) summaryLine() string {
+func (p Agents) titleLine() string {
 	switch n := len(p.agents); n {
 	case 0:
-		return "no agents configured"
+		return p.Title()
 	case 1:
-		return "1 agent"
+		return p.Title() + "  1 agent"
 	default:
-		return fmt.Sprintf("%d agents", n)
+		return fmt.Sprintf("%s  %d agents", p.Title(), n)
 	}
+}
+
+const (
+	agentNameWidth     = 10
+	agentBackendWidth  = 8
+	agentModelWidth    = 14
+	agentActivityWidth = 9
+)
+
+func agentsHeader(width int) string {
+	return clipAgentLine(fmt.Sprintf("    %s %s %s %s",
+		agentColumn("NAME", agentNameWidth),
+		agentColumn("BACKEND", agentBackendWidth),
+		agentColumn("MODEL", agentModelWidth),
+		agentColumn("ACTIVITY", agentActivityWidth),
+	), width)
+}
+
+func (p Agents) agentLine(agent client.Agent, selected bool, width int) string {
+	cursor := " "
+	if selected {
+		cursor = "▸"
+	}
+	name := agent.DisplayName
+	if name == "" {
+		name = agent.Name
+	}
+	state, ok := p.states[agent.Name]
+	if !ok {
+		// GET /api/agents has only the configured enabled bit. It is enough
+		// for the polling-only UI to distinguish active from stopped agents;
+		// supplemental /api/status data supersedes it when available.
+		state.Status = AgentStatusRunning
+		if !agent.Enabled {
+			state.Status = AgentStatusPaused
+		}
+	}
+	return clipAgentLine(fmt.Sprintf("%s %s %s %s %s %s",
+		cursor,
+		statusGlyph(state.Status),
+		agentColumn(name, agentNameWidth),
+		agentColumn(agent.Backend, agentBackendWidth),
+		agentColumn(agent.Model, agentModelWidth),
+		agentColumn(relativeActivity(state.LastActivity, p.observedAt), agentActivityWidth),
+	), width)
+}
+
+func agentColumn(value string, width int) string {
+	return lipgloss.NewStyle().Inline(true).Width(width).MaxWidth(width).Render(value)
+}
+
+func clipAgentLine(line string, width int) string {
+	return lipgloss.NewStyle().MaxWidth(width).Render(line)
+}
+
+func statusGlyph(status AgentStatus) string {
+	switch status {
+	case AgentStatusRunning:
+		return "●"
+	case AgentStatusPaused:
+		return "Ⅱ"
+	case AgentStatusError:
+		return "×"
+	default:
+		return "?"
+	}
+}
+
+func relativeActivity(activity, now time.Time) string {
+	if activity.IsZero() {
+		return "—"
+	}
+	age := now.Sub(activity)
+	if age < time.Minute {
+		return "now"
+	}
+	if age < time.Hour {
+		return fmt.Sprintf("%dm ago", int(age/time.Minute))
+	}
+	if age < 24*time.Hour {
+		return fmt.Sprintf("%dh ago", int(age/time.Hour))
+	}
+	return fmt.Sprintf("%dd ago", int(age/(24*time.Hour)))
 }

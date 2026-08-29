@@ -72,10 +72,46 @@ func TestAgentsKeepsDataAcrossForeignMessages(t *testing.T) {
 		t.Errorf("a foreign message changed the pane:\nbefore:\n%s\nafter:\n%s", before, got)
 	}
 
-	keyed, _ := after.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	keyed, _ := after.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
 	if got := keyed.View(40, 10); got != before {
-		t.Error("a key changed a pane with no bindings")
+		t.Error("an unrelated key changed the pane")
 	}
+}
+
+// TestAgentsSelectionMovement covers j/k without coupling cursor behaviour to
+// the rendering golden. Selection clamps rather than wrapping at either edge.
+func TestAgentsSelectionMovement(t *testing.T) {
+	next, _ := NewAgents().Update(AgentsMsg{Agents: []client.Agent{
+		agent("scanner"), agent("quality"), agent("reviewer"),
+	}})
+	p := next.(Agents)
+
+	press := func(key string) {
+		t.Helper()
+		next, cmd := p.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
+		if cmd != nil {
+			t.Fatalf("key %q returned a command", key)
+		}
+		p = next.(Agents)
+	}
+	assertSelected := func(want int) {
+		t.Helper()
+		if p.selected != want {
+			t.Fatalf("selected = %d, want %d", p.selected, want)
+		}
+	}
+
+	assertSelected(0)
+	press("j")
+	assertSelected(1)
+	press("j")
+	press("j")
+	assertSelected(2)
+	press("k")
+	assertSelected(1)
+	press("k")
+	press("k")
+	assertSelected(0)
 }
 
 // TestAgentsViewFillsItsBoxExactly is the grid's structural requirement: a
