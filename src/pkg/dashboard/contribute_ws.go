@@ -880,18 +880,28 @@ func (h *ContributeWSHub) activityPath() string {
 
 const activityDebounceSecs = 60
 
-// taskDescOf renders an assigned task the same way the "picked up" and
-// "completed" entries do, so a released task lines up with its own pickup in the
-// feed instead of being described differently. A synthetic task (pr-review,
-// Number == 0) has no issue to name and falls back to its id.
+// taskDescOf renders an assigned task for the activity feed.
+//
+// Identity comes from identityKey(), the same canonical, source-aware spelling
+// the hub keys in-flight work on (#4245): the explicit Key when present,
+// "repo#number" otherwise. Deriving it from Number alone would have been wrong
+// for external work — a Linear or Jira item deliberately carries Number == 0 and
+// puts its identity in Key/ExternalID, so treating "numberless" as "synthetic"
+// discards exactly the identity that item has, and every such release would read
+// as an opaque task id.
+//
+// A genuinely synthetic task — a pr-review sweep, which has no work item behind
+// it and therefore no canonical key — falls back to its task id, which is all it
+// has ever had.
 func taskDescOf(task *WSTaskAssign) string {
 	if task == nil {
 		return ""
 	}
-	if task.Number <= 0 {
+	key := task.identityKey()
+	if key == "" {
 		return task.TaskID
 	}
-	return fmt.Sprintf("%s %s#%d: %s", task.Kind, task.Repo, task.Number, task.Title)
+	return fmt.Sprintf("%s %s: %s", task.Kind, key, task.Title)
 }
 
 func (h *ContributeWSHub) addActivity(username, action, role, cli, model, effort, task string) {

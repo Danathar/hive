@@ -23,10 +23,17 @@ import (
 // sockets on one issue into a quarantine of an issue nobody had failed. These
 // entries say "released", and the tests hold them to it.
 
-// TestTaskDescOfMatchesPickupFormatting keeps a released task describable the
-// same way its own pickup was, so the two line up in the feed instead of the
-// release being phrased differently from the entry it closes out.
-func TestTaskDescOfMatchesPickupFormatting(t *testing.T) {
+// TestTaskDescOfRendersGitHubWorkLikeItsPickup keeps the common case aligned: a
+// GitHub issue's release reads the same as the "picked up" entry it closes out,
+// because identityKey() spells a numbered item "repo#number" — exactly what the
+// pickup path formats by hand.
+//
+// The two DO diverge for external work, and deliberately so. The pickup path
+// still formats with %d and therefore renders a Linear/Jira item as "repo#0";
+// this helper uses the canonical key instead. Matching that bug for symmetry
+// would be the wrong trade — the release entry is correct and the pickup entry
+// has a pre-existing gap worth fixing on its own.
+func TestTaskDescOfRendersGitHubWorkLikeItsPickup(t *testing.T) {
 	task := &WSTaskAssign{
 		TaskID: "t-1",
 		Kind:   "issue",
@@ -41,10 +48,41 @@ func TestTaskDescOfMatchesPickupFormatting(t *testing.T) {
 	}
 }
 
-// TestTaskDescOfHandlesSyntheticAndNilTasks covers the two inputs that have no
-// issue to name. A synthetic pr-review task carries Number == 0 and must not
-// render as "#0", which would read as a real issue and collide with every other
-// numberless task in the feed.
+// TestTaskDescOfUsesSourceAwareIdentity covers external work items. A Linear or
+// Jira item deliberately carries Number == 0 and puts its identity in
+// Key/ExternalID (#4245). An earlier version of this helper treated "numberless"
+// as "synthetic" and returned only the internal task id, discarding exactly the
+// identity such an item has — every external release would have read as an opaque
+// id nobody could match to a work item.
+func TestTaskDescOfUsesSourceAwareIdentity(t *testing.T) {
+	external := &WSTaskAssign{
+		TaskID:     "t-2",
+		Kind:       "issue",
+		Repo:       "acme/team",
+		Number:     0,
+		Key:        "acme/team!ENG-123",
+		SourceType: "linear",
+		ExternalID: "ENG-123",
+		Title:      "Ship the poll loop",
+	}
+	got := taskDescOf(external)
+	if !strings.Contains(got, "acme/team!ENG-123") {
+		t.Errorf("taskDescOf() = %q, want it to carry the canonical external key", got)
+	}
+	if !strings.Contains(got, "Ship the poll loop") {
+		t.Errorf("taskDescOf() = %q, want it to carry the title", got)
+	}
+	if got == external.TaskID {
+		t.Error("an external work item must not collapse to its internal task id")
+	}
+	if strings.Contains(got, "#0") {
+		t.Errorf("taskDescOf() = %q, must never render a numberless item as issue #0", got)
+	}
+}
+
+// TestTaskDescOfHandlesSyntheticAndNilTasks covers the two inputs that genuinely
+// have no work item behind them. A pr-review sweep carries no canonical key at
+// all — not merely no number — and its task id is all it has ever had.
 func TestTaskDescOfHandlesSyntheticAndNilTasks(t *testing.T) {
 	synthetic := &WSTaskAssign{TaskID: "pr-review-1730", Kind: "review", Repo: "kubestellar/hive"}
 	if got := taskDescOf(synthetic); got != "pr-review-1730" {
