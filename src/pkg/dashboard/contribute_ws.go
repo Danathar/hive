@@ -880,6 +880,30 @@ func (h *ContributeWSHub) activityPath() string {
 
 const activityDebounceSecs = 60
 
+// taskDescOf renders an assigned task for the activity feed.
+//
+// Identity comes from identityKey(), the same canonical, source-aware spelling
+// the hub keys in-flight work on (#4245): the explicit Key when present,
+// "repo#number" otherwise. Deriving it from Number alone would have been wrong
+// for external work — a Linear or Jira item deliberately carries Number == 0 and
+// puts its identity in Key/ExternalID, so treating "numberless" as "synthetic"
+// discards exactly the identity that item has, and every such release would read
+// as an opaque task id.
+//
+// A genuinely synthetic task — a pr-review sweep, which has no work item behind
+// it and therefore no canonical key — falls back to its task id, which is all it
+// has ever had.
+func taskDescOf(task *WSTaskAssign) string {
+	if task == nil {
+		return ""
+	}
+	key := task.identityKey()
+	if key == "" {
+		return task.TaskID
+	}
+	return fmt.Sprintf("%s %s: %s", task.Kind, key, task.Title)
+}
+
 func (h *ContributeWSHub) addActivity(username, action, role, cli, model, effort, task string) {
 	h.activityMu.Lock()
 	if len(h.activity) > 0 && (action == "joined" || action == "left") {
@@ -2814,6 +2838,20 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 				if abandonedTask.Number > 0 {
 					h.bookReleaseCooldown(abandonedTask.Repo, abandonedTask.Number)
 				}
+				// #5097: make the abandonment VISIBLE. Until now this path recorded
+				// nothing an operator could see — the issue showed a "picked up" with
+				// no terminal event ever following it, which is indistinguishable in
+				// the feed from an issue nobody touched. Four issues were opened and
+				// dropped in ten minutes on a flapping session and the hub's own
+				// history showed only that they were picked up.
+				//
+				// Deliberately NOT the "failed" verb: #4260 established that a dropped
+				// socket is not a failure of the work, and booking it as one is what
+				// turned three dropped sockets into a quarantine of an issue nobody had
+				// failed. This is a release, and it says so.
+				h.addActivity(contributor.profile.GitHubUsername, "released: connection lost",
+					contributor.role, contributor.cliBackend, contributor.model,
+					contributor.reasoningEffort, taskDescOf(abandonedTask))
 			}
 			h.mu.Lock()
 			delete(h.connections, connID)
@@ -3057,6 +3095,12 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 				// server-issued lease — a later task_progress for it must not resurrect
 				// ownership.
 				h.revokeLease(identityOf(contributor), abandoned.TaskID)
+				// #5097: same visibility gap as the disconnect path above — the
+				// relay giving a task back by asking for new work left no trace in
+				// the activity feed either.
+				h.addActivity(contributor.profile.GitHubUsername, "released: gave the task back",
+					contributor.role, contributor.cliBackend, contributor.model,
+					contributor.reasoningEffort, taskDescOf(abandoned))
 				h.logger.Warn("[contribute-ws] task abandoned without completion",
 					"username", contributor.profile.GitHubUsername,
 					"abandoned_task", abandoned.TaskID,
