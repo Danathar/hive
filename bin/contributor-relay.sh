@@ -1728,15 +1728,52 @@ function paneShowsTransientAPIError(text) {
   });
 }
 
-// paneShowsUnretryableAPIError vetoes the retry for failures a repeat cannot
-// clear — an authorization refusal or an exhausted quota. Checked over the same
-// tail, and NOT gated on the "API Error:" chrome, because a quota message can
-// arrive as its own banner line.
+// paneShowsUnretryableAPIError detects failures a repeat cannot clear — an
+// authorization refusal or an exhausted quota. LINE-WISE and gated on the same
+// "API Error:" chrome as the transient detector, and the gate matters MORE
+// here: this verdict actively fails the task, so a false positive fails work
+// that genuinely completed. An agent working on hive's own quota-handling code
+// can legitimately print "budget_exceeded" in its final summary (the repo's
+// test files contain these strings verbatim); without the chrome gate that
+// completed turn would be booked as an environment failure. Claude renders
+// every real quota/authorization error under the chrome on the same line
+// ("API Error: 429 {\"type\":\"budget_exceeded\"...}"), so the gate costs
+// nothing for the errors this exists to catch. A chrome-less quota banner
+// (copilot/bob render some) falls through to the pre-#5094 behavior and is
+// part of the documented #5121 residual.
 function paneShowsUnretryableAPIError(text) {
-  const tail = paneTail(text, TRANSIENT_API_ERROR_TAIL_LINES);
-  if (UNRETRYABLE_API_ERROR_STATUS_RE.test(tail)) return true;
-  const lower = tail.toLowerCase();
-  return UNRETRYABLE_API_ERROR_PATTERNS.some((pat) => lower.includes(pat));
+  const lines = paneTail(text, TRANSIENT_API_ERROR_TAIL_LINES).split('\n');
+  return lines.some((line) => {
+    const lower = line.toLowerCase();
+    if (!lower.includes('api error:')) return false;
+    if (UNRETRYABLE_API_ERROR_PATTERNS.some((pat) => lower.includes(pat))) return true;
+    return UNRETRYABLE_API_ERROR_STATUS_RE.test(line);
+  });
+}
+
+// paneShowsLoginRequiredError detects an AUTHENTICATION failure — the CLI's
+// credential expired mid-session and it is asking for /login. Neither of the
+// other two buckets fits: a retry cannot clear it (typing "try again" at an
+// expired credential is a wall), and failing it releases a task a human can
+// rescue in thirty seconds by logging in. The honest state is BLOCKED_ON_HUMAN
+// — a person genuinely is the only thing that can move it — which the hub
+// already renders with an attention flag.
+//
+// 401 is authentication, NOT the 403 the fatal bucket catches: the hub's #4400
+// rule is that /login fixes a 401 and fixes nothing about a 403. Ordering in
+// classifyTmuxPane preserves that: the fatal check runs first, so a line
+// carrying both a login hint and a 403/authorization refusal stays fatal.
+//
+// Without this, a mid-session credential expiry — the exact scenario #5088
+// reported — rendered "● Please run /login · API Error: 401 …" above the idle
+// prompt and was booked as a COMPLETED task.
+function paneShowsLoginRequiredError(text) {
+  const lines = paneTail(text, TRANSIENT_API_ERROR_TAIL_LINES).split('\n');
+  return lines.some((line) => {
+    const lower = line.toLowerCase();
+    if (lower.includes('please run /login')) return true;
+    return lower.includes('api error:') && /\b401\b/.test(line);
+  });
 }
 
 // tmuxSessionHasAttachedClient reports whether a human is currently attached to
@@ -1955,6 +1992,14 @@ function classifyTmuxPane(text) {
   // being booked as a finished task — the same defect, one branch over.
   if (paneShowsUnretryableAPIError(text)) {
     return PANE_STATE_FATAL_API_ERROR;
+  }
+  // Authentication (401 / "Please run /login") AFTER the fatal check — a line
+  // carrying both a login hint and an authorization refusal must stay fatal,
+  // because /login fixes a 401 and fixes nothing about a 403 (#4400). A human
+  // logging in is the only recovery, so this is blocked-on-human, not an error
+  // to retry or fail.
+  if (paneShowsLoginRequiredError(text)) {
+    return PANE_STATE_BLOCKED_ON_HUMAN;
   }
   if (paneShowsTransientAPIError(text)) {
     return PANE_STATE_TRANSIENT_API_ERROR;
@@ -2861,6 +2906,7 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     PANE_STATE_FATAL_API_ERROR,
     paneShowsTransientAPIError,
     paneShowsUnretryableAPIError,
+    paneShowsLoginRequiredError,
     handleTransientAPIError,
     resetTransientNudgeState,
     tmuxSessionHasAttachedClient,

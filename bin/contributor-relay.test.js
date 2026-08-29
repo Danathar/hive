@@ -3644,9 +3644,19 @@ test('#5094 authorization and quota failures are never retried', () => {
       'API Error: 403 Forbidden',
       'API Error: 403 {"message":"team not allowed to access model"}',
       'API Error: 429 {"error":{"type":"budget_exceeded"}}',
-      'Budget has been exceeded!',
+      'API Error: 429 {"error":{"message":"Budget has been exceeded!"}}',
     ]) {
       assert.ok(relay.paneShowsUnretryableAPIError(line), `should veto a retry: ${line}`);
+    }
+    // The chrome gate: a quota PHRASE without the "API Error:" chrome is not an
+    // API error. The repo's own test files contain these strings verbatim, so an
+    // agent working on quota-handling code can print one in a completed turn's
+    // summary — failing that turn would be a worse bug than the one this fixes.
+    for (const line of [
+      'Budget has been exceeded!',
+      'I fixed the budget_exceeded handling in quota_exhaustion_test.go',
+    ]) {
+      assert.ok(!relay.paneShowsUnretryableAPIError(line), `must not veto without chrome: ${line}`);
     }
     // And the veto wins end to end: a 403 pane is not classified as retryable.
     const forbidden = CLAUDE_API_ERROR_PANE.replace(
@@ -3753,6 +3763,73 @@ test('#5094 an unretryable failure is failed at once, with no retry typed', () =
     assert.ok(!sends.some(c => c.includes(relay.TRANSIENT_API_ERROR_NUDGE_MESSAGE)),
       'retrying a quota failure loops the agent against a wall (#4583)');
     assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 0);
+  } finally { teardown(relay); }
+});
+
+test('#5094 a completed turn whose summary mentions a quota phrase is still complete', () => {
+  // The false-failure direction of the fatal bucket. This agent finished — real
+  // PR line, idle prompt — and its summary echoes a string from the code it was
+  // editing. Failing it would destroy credited work.
+  const pane = [
+    '● Done — opened https://github.com/kubestellar/hive/pull/5095',
+    '',
+    "● Summary: hardened the budget_exceeded path in quota_exhaustion_test.go",
+    '',
+    '✻ Cogitated for 4m 10s',
+    '',
+    '❯ ',
+    '  ⏵⏵ auto mode on (shift+tab to cycle)',
+  ].join('\n');
+  const relay = loadRelay({ backend: 'claude', paneText: pane, attachedClients: false });
+  try {
+    assert.strictEqual(relay.classifyTmuxPane(pane), relay.PANE_STATE_IDLE_COMPLETE);
+    relay.setCliReady(true);
+    assignTask(relay, 't-prose');
+    relay.__crashTick();
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_failed').length, 0,
+      'a completed turn must not be failed over a quota phrase in its own prose');
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 1);
+  } finally { teardown(relay); }
+});
+
+test('#5094 a mid-session credential expiry is blocked-on-human, not completed', () => {
+  // The exact #5088 scenario: the OAuth token expired mid-task and Claude Code
+  // rendered its login line above the idle prompt. A retry is a wall, a failure
+  // releases a task a human can rescue in thirty seconds by logging in, and a
+  // completion — what the classifier said before this — is a fabrication.
+  const pane401 = CLAUDE_API_ERROR_PANE.replace(
+    'API Error: Connection lost mid-response. The response above may be incomplete.',
+    '● Please run /login · API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"OAuth token has expired"}}');
+  const relay = loadRelay({ backend: 'claude', paneText: pane401, attachedClients: false });
+  try {
+    assert.strictEqual(relay.classifyTmuxPane(pane401), relay.PANE_STATE_BLOCKED_ON_HUMAN);
+    relay.setCliReady(true);
+    assignTask(relay, 't-401');
+    const before = relay.__tmuxSends().length;
+    relay.__crashTick();
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 0,
+      'an expired credential must never book a completion');
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_failed').length, 0,
+      'a human can fix this by logging in — do not release the task');
+    assert.ok(!relay.__tmuxSends().slice(before).some(c => c.includes(relay.TRANSIENT_API_ERROR_NUDGE_MESSAGE)),
+      'typing "try again" at an expired credential is a wall');
+    const blocked = relay.__sent.filter(m => m.status === 'blocked_on_human');
+    assert.strictEqual(blocked.length, 1);
+    assert.strictEqual(blocked[0].attention, true);
+  } finally { teardown(relay); }
+});
+
+test('#5094 a login hint alongside a 403 stays fatal — /login fixes nothing about authorization', () => {
+  // #4400: 401 is authentication (login fixes it); 403 is authorization (the
+  // caller IS identified and is not permitted). A line carrying both the login
+  // hint and a 403 must take the fatal path, or the task waits on a human who
+  // cannot actually fix it.
+  const pane = CLAUDE_API_ERROR_PANE.replace(
+    'API Error: Connection lost mid-response. The response above may be incomplete.',
+    '● Please run /login · API Error: 403 {"error":{"message":"team not allowed to access model"}}');
+  const relay = loadRelay({ backend: 'claude', paneText: pane });
+  try {
+    assert.strictEqual(relay.classifyTmuxPane(pane), relay.PANE_STATE_FATAL_API_ERROR);
   } finally { teardown(relay); }
 });
 
