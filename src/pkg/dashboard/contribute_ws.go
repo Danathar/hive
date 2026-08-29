@@ -2038,7 +2038,7 @@ func (h *ContributeWSHub) DisconnectContributor(contributorID, reason string) in
 		if c.ws != nil {
 			// Best-effort notify then close; the read loop's defer does the release.
 			_ = c.send(WSMessage{Type: "auth_failed", Seq: h.nextSeq(), Reason: reason})
-			c.ws.Close()
+			closeWithReason(c.ws, websocket.ClosePolicyViolation, reason)
 		}
 	}
 	return len(closing)
@@ -2764,7 +2764,7 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-time.After(wsAuthTimeout):
 			_ = sendJSON(conn, WSMessage{Type: "auth_failed", Reason: "Authentication timeout"})
-			conn.Close()
+			closeWithReason(conn, websocket.ClosePolicyViolation, "authentication timeout")
 		case <-authDone:
 		}
 	}()
@@ -2842,7 +2842,7 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 		case "auth_response":
 			if msg.RegistrationToken == "" {
 				_ = sendJSON(conn, WSMessage{Type: "auth_failed", Reason: "Missing registration token"})
-				conn.Close()
+				closeWithReason(conn, websocket.ClosePolicyViolation, "missing registration token")
 				return
 			}
 
@@ -2858,13 +2858,13 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 
 			if profile == nil {
 				_ = sendJSON(conn, WSMessage{Type: "auth_failed", Reason: "Invalid registration token"})
-				conn.Close()
+				closeWithReason(conn, websocket.ClosePolicyViolation, "invalid registration token")
 				return
 			}
 
 			if profile.TrustTier == "revoked" {
 				_ = sendJSON(conn, WSMessage{Type: "auth_failed", Reason: "Access has been revoked"})
-				conn.Close()
+				closeWithReason(conn, websocket.ClosePolicyViolation, "access has been revoked")
 				return
 			}
 
@@ -2875,7 +2875,7 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 				}
 				_ = sendJSON(conn, WSMessage{Type: "auth_failed", Reason: reason, AcceptedModels: acceptedModels})
 				h.logger.Info("[contribute-ws] model rejected", "username", profile.GitHubUsername, "model", msg.Model)
-				conn.Close()
+				closeWithReason(conn, websocket.ClosePolicyViolation, "model not accepted by this hive")
 				return
 			}
 
@@ -2892,7 +2892,7 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 					h.logger.Warn("[contribute-ws] agent role claim rejected",
 						"username", profile.GitHubUsername, "tier", profile.TrustTier,
 						"role", requestedRole, "reason", reason)
-					conn.Close()
+					closeWithReason(conn, websocket.ClosePolicyViolation, "agent role claim rejected")
 					return
 				}
 			}
@@ -3636,7 +3636,7 @@ func (h *ContributeWSHub) heartbeatLoop(c *ContributorConnection) {
 
 		if time.Since(lastPong) > wsHeartbeatTimeout {
 			h.logger.Info("[contribute-ws] heartbeat timeout", "username", c.profile.GitHubUsername)
-			c.ws.Close()
+			closeWithReason(c.ws, websocket.CloseGoingAway, "heartbeat timeout: no pong within the heartbeat window")
 			return
 		}
 
@@ -3932,7 +3932,7 @@ func (h *ContributeWSHub) cleanupLoop() {
 				// existing guard in RequeueContributorTask so a ws-less entry is pruned
 				// rather than nil-dereferenced.
 				if c.ws != nil {
-					c.ws.Close()
+					closeWithReason(c.ws, websocket.CloseGoingAway, "connection went stale: no pong within the heartbeat window")
 				}
 				delete(h.connections, id)
 			}
@@ -5138,4 +5138,44 @@ func stringSliceFromAny(v any) []string {
 // writeMu to satisfy gorilla/websocket's one-concurrent-writer contract.
 func sendJSON(conn *websocket.Conn, msg WSMessage) error {
 	return conn.WriteJSON(msg)
+}
+
+// wsCloseFrameDeadline bounds the write of the courtesy Close frame. It is a
+// best-effort courtesy on a socket we are hanging up anyway: if the peer is
+// already gone the write fails immediately, and waiting longer than this would
+// hold a goroutine open for a client that will never read it.
+const wsCloseFrameDeadline = time.Second
+
+// closeWithReason closes a contributor socket after telling the client WHY.
+//
+// THE DEFECT (kubestellar/hive#5090): every close on this path was a bare
+// conn.Close(), which shuts the TCP socket without sending a WebSocket Close
+// frame. The client therefore observes code 1006 (abnormal closure) with an
+// empty reason — byte-for-byte identical to a yanked network cable. Measured
+// against a live hub: an unauthenticated probe received the auth-timeout
+// explanation as a JSON message and then, on the very next line, a 1006 close
+// carrying none of it. Deliberate server hangups and network faults were
+// indistinguishable, so a contributor whose session was flapping had no way to
+// learn which one they were looking at.
+//
+// The JSON auth_failed messages some call sites already send are not a
+// substitute: they are absent entirely from the heartbeat and stale-sweep
+// closes, and a client that has stopped reading (the exact case a heartbeat
+// timeout describes) never sees them.
+//
+// WriteControl is documented as safe to call concurrently with all other
+// methods, so this needs no coordination with the writeMu the JSON senders
+// take. Both the frame write and the close are best-effort: a peer that has
+// already vanished simply fails the write, which is not worth logging on a
+// socket being discarded.
+func closeWithReason(conn *websocket.Conn, code int, reason string) {
+	if conn == nil {
+		return
+	}
+	_ = conn.WriteControl(
+		websocket.CloseMessage,
+		websocket.FormatCloseMessage(code, reason),
+		time.Now().Add(wsCloseFrameDeadline),
+	)
+	_ = conn.Close()
 }
