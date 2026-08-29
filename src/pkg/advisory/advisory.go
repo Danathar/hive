@@ -40,6 +40,18 @@ type Finding struct {
 	// the "docs/install.md that isn't there" bug (#3704). The renderer marks it
 	// as outdated instead of emitting a dead file reference.
 	PathStale bool `json:"path_stale,omitempty"`
+	// ProvenanceSHA is the commit the finding's evidence was actually computed
+	// at. Producers may set it directly (advisory JSONL, bead metadata); when
+	// they do not, MarkStaleProvenance recovers it from the provenance commit
+	// the finding already names in Detail.
+	ProvenanceSHA string `json:"provenance_sha,omitempty"`
+	// ProvenanceStale is set by MarkStaleProvenance when ProvenanceSHA names a
+	// commit OTHER than the digest's AnalyzedSnapshot. Such a finding is being
+	// republished under a freshness stamp it never earned — its evidence was
+	// computed against an older tree and nothing has re-checked it since, which
+	// is how findings survived their own fix for five cycles (#5130). The
+	// renderer captions it rather than passing it off as analyzed-at-HEAD.
+	ProvenanceStale bool `json:"provenance_stale,omitempty"`
 }
 
 // Snapshot identifies the single commit that a digest's analysis is pinned to.
@@ -573,6 +585,7 @@ func BuildDigestFromBeads(stores map[string]*beads.Store, mode string, opts Dige
 			if d := b.Meta("detail"); d != "" && f.Detail == "" {
 				f.Detail = d
 			}
+			f.ProvenanceSHA = b.Meta(provenanceSHAMetadataKey)
 			f = capCoverageGapSeverity(f)
 			byAgent[agentName] = append(byAgent[agentName], f)
 			total++
@@ -617,6 +630,12 @@ func BuildDigestFromBeads(stores map[string]*beads.Store, mode string, opts Dige
 	if opts.VerifyPath != nil && overflow == 0 {
 		VerifyFindingPaths(d, opts.VerifyPath)
 	}
+	// Path existence is not freshness. A finding can cite a file that still
+	// exists and yet have been computed several commits ago, against evidence
+	// the analyzed commit no longer reproduces — the #5130 findings were
+	// exactly that shape, and VerifyFindingPaths waved both of them through.
+	// Run after the cap so only rendered findings are examined.
+	MarkStaleProvenance(d)
 	return d
 }
 
@@ -991,7 +1010,16 @@ func FormatDigestMarkdown(d *Digest, opts DigestOptions) string {
 			if f.DuplicateCount > 0 {
 				repeat = fmt.Sprintf(" _(reported %d×)_", f.DuplicateCount+1)
 			}
-			b.WriteString(fmt.Sprintf("- **[%s]** %s%s%s _%s_\n", f.Type, linkifyRefs(title, org), loc, repeat, f.Agent))
+			// The finding's evidence was computed at some other commit and
+			// nothing has re-checked it here (#5130). Say so on the finding
+			// itself: the footer's "Analyzed at" stamp is digest-wide, and
+			// letting it cover this one is the overclaim that got a stale
+			// finding reported as a fabrication.
+			prov := ""
+			if f.ProvenanceStale && f.ProvenanceSHA != "" {
+				prov = fmt.Sprintf(" ⚠️ _(evidence computed at `%s`, not re-verified at the analyzed commit)_", shortSHA(f.ProvenanceSHA))
+			}
+			b.WriteString(fmt.Sprintf("- **[%s]** %s%s%s%s _%s_\n", f.Type, linkifyRefs(title, org), loc, repeat, prov, f.Agent))
 			if detail != "" {
 				b.WriteString(fmt.Sprintf("  > %s\n", linkifyRefs(detail, org)))
 			}
@@ -1057,7 +1085,8 @@ func writeAnalyzedFooter(b *strings.Builder, d *Digest) {
 	if s.Branch != "" {
 		fmt.Fprintf(b, " (branch `%s`)", s.Branch)
 	}
-	b.WriteString(" — the latest commit when this digest was generated. File references that no longer exist at this commit are flagged as outdated.*\n")
+	b.WriteString(" — the latest commit when this digest was generated. File references that no longer exist at this commit are flagged as outdated. " +
+		"Findings marked ⚠️ were computed at an older commit and have NOT been re-verified here.*\n")
 }
 
 // SetLatestDigest stores the most recent digest for dashboard access.
@@ -1100,7 +1129,28 @@ func PersistAsBeads(findings []Finding, stores map[string]*beads.Store) (created
 			continue
 		}
 
+		// Explicit provenance only, never the prose-inferred SHA: this decides
+		// whether a finding keeps ageing, and misreading "fixed in commit
+		// abc1234" as provenance would retire a finding that still holds.
+		prov := normalizeSHA(f.ProvenanceSHA)
+
 		existing := store.List(beads.ListFilter{})
+
+		// A re-report carrying the SAME provenance commit the bead already
+		// records is a restatement of evidence computed once, not fresh
+		// confirmation that the condition still holds. Refreshing LastSeenAt
+		// for it is what let fixed findings outlive their fix: agents re-report
+		// from cached prior findings, PersistAsBeads read that as "still
+		// happening", and PruneStaleAdvisoryBeads never got to age them out
+		// (#5130). Skipping the whole finding leaves the staleness clock
+		// running, so silence retires it on the normal schedule.
+		//
+		// Gated on an explicit provenance SHA on BOTH sides, so a hive whose
+		// agents record none behaves exactly as it did before.
+		if prov != "" && provenanceAlreadyRecorded(existing, f.Title, prov) {
+			continue
+		}
+
 		dup := false
 		for _, b := range existing {
 			// Only OPEN beads suppress a duplicate. A resolved (closed/done)
@@ -1113,12 +1163,17 @@ func PersistAsBeads(findings []Finding, stores map[string]*beads.Store) (created
 				continue
 			}
 			if b.Title == f.Title && b.Type == beads.TypeAdvisory {
-				// The finding is being re-reported, which is exactly the signal
-				// staleness pruning consumes: stamp it so PruneStaleAdvisoryBeads
-				// keeps this bead alive for another window. Skipping the stamp
-				// here would let a finding an agent reports every single cycle
-				// still age out and be auto-closed.
+				// The finding is being re-reported from evidence this bead has
+				// not seen before (identical-provenance re-reports were skipped
+				// above), which is exactly the signal staleness pruning
+				// consumes: stamp it so PruneStaleAdvisoryBeads keeps this bead
+				// alive for another window. Skipping the stamp here would let a
+				// finding an agent reports every single cycle still age out and
+				// be auto-closed.
 				_ = store.SetLastSeenAt(b.ID, time.Now())
+				if prov != "" {
+					_ = store.SetMetadata(b.ID, provenanceSHAMetadataKey, prov)
+				}
 				dup = true
 				break
 			}
@@ -1143,6 +1198,9 @@ func PersistAsBeads(findings []Finding, stores map[string]*beads.Store) (created
 		if f.Detail != "" {
 			meta["detail"] = logscrub.ScrubString(f.Detail)
 		}
+		if prov != "" {
+			meta[provenanceSHAMetadataKey] = prov
+		}
 
 		// Upsert, not Create: it stamps LastSeenAt on the new bead (so the
 		// staleness clock starts) and folds in the cosmetic title drift that
@@ -1157,6 +1215,34 @@ func PersistAsBeads(findings []Finding, stores map[string]*beads.Store) (created
 		created++
 	}
 	return created
+}
+
+// provenanceAlreadyRecorded reports whether an OPEN advisory bead that this
+// report would land on already records provenance commit prov.
+//
+// Title matching mirrors Upsert (exact, or equal under beads.UpsertTitleKey) so
+// the gate covers the same beads the write path would have refreshed — matching
+// on the exact string alone would miss the cosmetic drift agents re-file with,
+// and the gate would almost never fire.
+func provenanceAlreadyRecorded(existing []*beads.Bead, title, prov string) bool {
+	key := beads.UpsertTitleKey(title)
+	for _, b := range existing {
+		if b.Type != beads.TypeAdvisory {
+			continue
+		}
+		// A resolved bead never gates: if the condition recurs after healing,
+		// the re-report has to open a fresh bead (#2575).
+		if b.Status == beads.StatusClosed || b.Status == beads.StatusDone {
+			continue
+		}
+		if b.Title != title && beads.UpsertTitleKey(b.Title) != key {
+			continue
+		}
+		if sameCommit(b.Meta(provenanceSHAMetadataKey), prov) {
+			return true
+		}
+	}
+	return false
 }
 
 func severityIcon(sev string) string {
