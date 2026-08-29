@@ -880,6 +880,20 @@ func (h *ContributeWSHub) activityPath() string {
 
 const activityDebounceSecs = 60
 
+// taskDescOf renders an assigned task the same way the "picked up" and
+// "completed" entries do, so a released task lines up with its own pickup in the
+// feed instead of being described differently. A synthetic task (pr-review,
+// Number == 0) has no issue to name and falls back to its id.
+func taskDescOf(task *WSTaskAssign) string {
+	if task == nil {
+		return ""
+	}
+	if task.Number <= 0 {
+		return task.TaskID
+	}
+	return fmt.Sprintf("%s %s#%d: %s", task.Kind, task.Repo, task.Number, task.Title)
+}
+
 func (h *ContributeWSHub) addActivity(username, action, role, cli, model, effort, task string) {
 	h.activityMu.Lock()
 	if len(h.activity) > 0 && (action == "joined" || action == "left") {
@@ -2814,6 +2828,20 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 				if abandonedTask.Number > 0 {
 					h.bookReleaseCooldown(abandonedTask.Repo, abandonedTask.Number)
 				}
+				// #5097: make the abandonment VISIBLE. Until now this path recorded
+				// nothing an operator could see — the issue showed a "picked up" with
+				// no terminal event ever following it, which is indistinguishable in
+				// the feed from an issue nobody touched. Four issues were opened and
+				// dropped in ten minutes on a flapping session and the hub's own
+				// history showed only that they were picked up.
+				//
+				// Deliberately NOT the "failed" verb: #4260 established that a dropped
+				// socket is not a failure of the work, and booking it as one is what
+				// turned three dropped sockets into a quarantine of an issue nobody had
+				// failed. This is a release, and it says so.
+				h.addActivity(contributor.profile.GitHubUsername, "released: connection lost",
+					contributor.role, contributor.cliBackend, contributor.model,
+					contributor.reasoningEffort, taskDescOf(abandonedTask))
 			}
 			h.mu.Lock()
 			delete(h.connections, connID)
@@ -3057,6 +3085,12 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 				// server-issued lease — a later task_progress for it must not resurrect
 				// ownership.
 				h.revokeLease(identityOf(contributor), abandoned.TaskID)
+				// #5097: same visibility gap as the disconnect path above — the
+				// relay giving a task back by asking for new work left no trace in
+				// the activity feed either.
+				h.addActivity(contributor.profile.GitHubUsername, "released: gave the task back",
+					contributor.role, contributor.cliBackend, contributor.model,
+					contributor.reasoningEffort, taskDescOf(abandoned))
 				h.logger.Warn("[contribute-ws] task abandoned without completion",
 					"username", contributor.profile.GitHubUsername,
 					"abandoned_task", abandoned.TaskID,
