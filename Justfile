@@ -1244,6 +1244,26 @@ contribute-hive backend="" mode="docker": check-version
           cp -a "$src" "$dst" 2>/dev/null || true
         fi
       }
+      # claude_staged_credential_usable <path> : can the container authenticate
+      # with the credential we just staged, without a human completing a login?
+      #
+      # Mirrors pkg/claude's ReadAccessToken rule — a claudeAiOauth block with a
+      # non-empty accessToken, not past its expiresAt — with ONE deliberate
+      # addition: an expired access token that still carries a refreshToken is
+      # treated as usable, because Claude Code refreshes it silently and no
+      # login prompt appears. Warning there would be crying wolf, and the
+      # refreshed token being discarded with the staging dir costs nothing,
+      # since the host's refreshToken still works on the next run.
+      #
+      # Without jq the check cannot run; stay silent rather than guess. Expiry is
+      # compared in milliseconds (what Claude Code writes) built from `date +%s`
+      # rather than %3N, which BSD/macOS date does not support.
+      claude_staged_credential_usable() {
+        local path="$1"
+        [ -f "$path" ] || return 1
+        command -v jq >/dev/null 2>&1 || return 0
+        jq -e --argjson now "$(( $(date +%s) * 1000 ))" '.claudeAiOauth as $o | (($o.accessToken // "") != "") and ((($o.expiresAt // 0) == 0) or (($o.expiresAt // 0) >= $now) or (($o.refreshToken // "") != ""))' "$path" >/dev/null 2>&1
+      }
       CLI_MOUNTS=""
       case "${BACKEND}" in
         claude)
@@ -1251,6 +1271,58 @@ contribute-hive backend="" mode="docker": check-version
           stage_copy "${HOME}/.config/claude-code" "claude-code"
           mkdir -p "${CLI_STAGE}/.claude" "${CLI_STAGE}/claude-code"
           CLI_MOUNTS="-v ${CLI_STAGE}/.claude:/home/dev/.claude${VOLSUF} -v ${CLI_STAGE}/claude-code:/home/dev/.config/claude-code${VOLSUF}"
+          # #5088: say so when the staged credential cannot authenticate.
+          #
+          # The container gets a COPY of ~/.claude in an ephemeral staging dir
+          # that the cleanup trap deletes on exit (see the H6/CWE-668 note
+          # above). That containment is deliberate and stays. What it also does,
+          # silently, is throw away a login performed INSIDE the container — so
+          # a contributor whose host credential has expired reaches the CLI's
+          # login menu, completes the whole browser flow, works for a session,
+          # and is back at the login menu on the next run with nothing to show
+          # for it. Reported in #5088 after exactly that sequence.
+          #
+          # Interactive: warn, and name the fix (log in on the HOST once, where
+          # the credential persists). Headless: fail, because there is no human
+          # to answer a login prompt and the pod would sit at it forever —
+          # #2538's "never wait silently" rule.
+          # ANTHROPIC_API_KEY is a complete alternative to the OAuth file: the
+          # provider-env block below forwards it into the container with -e, so a
+          # contributor authenticating that way needs no .credentials.json at all
+          # and must never be warned — let alone hard-failed in headless mode,
+          # which would refuse to start a run that would have worked. Checked here
+          # rather than at the forwarding site because the headless refusal exits
+          # long before that code is reached.
+          if [[ -z "${ANTHROPIC_API_KEY:-}" ]] && ! claude_staged_credential_usable "${CLI_STAGE}/.claude/.credentials.json"; then
+            if [[ "${CONTRIBUTOR_MODE:-}" == "headless" ]]; then
+              echo "ERROR: no usable Claude credential to stage into the container." >&2
+              echo "  A headless run has no way to complete a login prompt, so it would" >&2
+              echo "  sit at one indefinitely. Authenticate on this host first:" >&2
+              echo "" >&2
+              echo "      claude   # then /login, and quit once it reports you signed in" >&2
+              echo "" >&2
+              echo "  Then re-run this command." >&2
+              # The staging dir already holds a copy of ~/.claude, and the
+              # cleanup trap that would remove it is not registered until just
+              # before the container starts — exiting here without this rm would
+              # leave that credential copy sitting in /tmp indefinitely.
+              rm -rf "${CLI_STAGE}"
+              exit 1
+            fi
+            echo "⚠  No usable Claude credential was staged into the container."
+            echo ""
+            echo "    The CLI will come up at its login menu. You CAN log in there and it"
+            echo "    will work — but only for this run: the container writes to a throwaway"
+            echo "    copy of ~/.claude that is deleted when this command exits (#5088), so"
+            echo "    the next run starts from the login menu again."
+            echo ""
+            echo "    To log in once and keep it, quit this and run claude on the host:"
+            echo ""
+            echo "        claude   # then /login, and quit once it reports you signed in"
+            echo ""
+            echo "    then re-run: just contribute-hive ${BACKEND}"
+            echo ""
+          fi
           ;;
         copilot)
           if [ -d "${HOME}/.copilot" ]; then
