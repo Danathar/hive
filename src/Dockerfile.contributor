@@ -73,6 +73,12 @@ ARG COPILOT_VERSION=1.0.59
 # debs, whose global root differs from the node base image src/Dockerfile uses.
 # `claude --version` makes the build itself fail loudly if the link is missing,
 # instead of every contributor task failing at runtime.
+# kilo resolves its platform-native binary through npm optionalDependencies at
+# RUNTIME (its JS launcher finds @kilocode/cli-linux-* itself), so unlike
+# claude-code it survives --ignore-scripts today — verified on 7.5.6. The
+# `kilo --version` gate below is insurance against exactly the claude failure
+# (#5034): if a future kilo version moves the link into its postinstall, the
+# IMAGE BUILD fails loudly instead of every contributor's first kilo task.
 ARG KILO_CLI_VERSION=7.5.6
 RUN npm install -g --ignore-scripts --no-fund --no-audit \
     @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
@@ -81,7 +87,8 @@ RUN npm install -g --ignore-scripts --no-fund --no-audit \
     @kilocode/cli@${KILO_CLI_VERSION} \
   && npm cache clean --force \
   && node "$(npm root -g)/@anthropic-ai/claude-code/install.cjs" \
-  && claude --version
+  && claude --version \
+  && kilo --version
 
 # Install bobshell (IBM "bob"). Mirrors Layer 9 of src/Dockerfile so the
 # containerized contributor relay can actually run the bob backend — without

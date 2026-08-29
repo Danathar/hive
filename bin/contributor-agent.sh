@@ -350,7 +350,22 @@ detect_cli() {
       ;;
     kilo)
       # Credentials are environment-only; never mount a whole Kilo home.
-      if kilo --version &>/dev/null; then echo "OK"; else echo "NOT_AUTHED"; fi
+      #
+      # `kilo --version` succeeds with ZERO credentials, so it can only prove
+      # the binary exists — the "configured is not verified" trap #5043 names
+      # for Pi. `kilo auth list` prints the credential count from the sources
+      # kilo actually honours: ~/.local/share/kilo/auth.json and the natively
+      # consumed KILO_AUTH_CONTENT env var (verified on @kilocode/cli 7.5.6 —
+      # setting the env var alone moves the count from 0 to 1, and with zero
+      # credentials `kilo run` dies at the first task with "You need to sign
+      # in to use this model"). Non-zero count → OK; zero → NOT_AUTHED.
+      if ! kilo --version &>/dev/null; then
+        echo "NOT_AUTHED"
+      elif kilo auth list 2>/dev/null | grep -qE '[1-9][0-9]* credential'; then
+        echo "OK"
+      else
+        echo "NOT_AUTHED"
+      fi
       ;;
     *)
       echo "UNKNOWN"

@@ -200,7 +200,8 @@ contribute-check-backend backend="claude":
         if command -v kilo &>/dev/null; then
           echo "Kilo CLI detected ($(kilo --version 2>&1 | head -1))"
           echo "  Headless only: kilo run <prompt> --model provider/model --format json --auto"
-          echo "  Set KILO_AUTH_CONTENT or KILO_API_KEY (optionally KILO_ORG_ID); do not mount Kilo config."
+          echo "  Set KILO_AUTH_CONTENT (auth.json content — the only verified auth path)"
+          echo "  and pass an explicit model for that provider; do not mount Kilo config."
         else
           echo "ERROR: kilo CLI not found. Install @kilocode/cli: https://kilo.ai/docs/code-with-ai/platforms/cli"
           exit 1

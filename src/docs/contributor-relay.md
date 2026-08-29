@@ -184,7 +184,7 @@ The relay speaks to whatever backend you set up — pass it to `contribute-setup
 | `litellm` | Claude Code pointed at **your own LiteLLM proxy**: `export HIVE_LITELLM_ENDPOINT=… HIVE_LITELLM_API_KEY=…` (exported locally, never sent to the hive) |
 | `agy` | Antigravity — host mode only; it signs in through an interactive Google OAuth flow with no API-key mode, so a container cannot inherit its credentials |
 | `opencode` | Provider-agnostic (75+ providers); `opencode auth login` writes a credential to `~/.local/share/opencode/auth.json`. Headless-only: `opencode run "<prompt>"` is its one-shot entry point, wired via `CONTRIBUTOR_MODE=headless`; there is no interactive-tmux launch path for it |
-| `kilo` | Headless-only: `kilo run "<prompt>" --auto`; set `KILO_AUTH_CONTENT` / `KILO_CONFIG_CONTENT` or `KILO_API_KEY` (optional `KILO_ORG_ID`). Hive forwards only those values and never mounts a Kilo home/config directory. `--auto` is approval, not a sandbox. |
+| `kilo` | Headless-only: `kilo run "<prompt>" --auto`; authenticate with `KILO_AUTH_CONTENT` — the JSON content of kilo's `auth.json` (opencode shape, `{"provider":{"type":"api","key":"…"}}`), consumed natively by the CLI (verified on 7.5.6: setting it moves `kilo auth list` from 0 to 1 credentials). Use an explicit `--model provider/model` matching a provider you supplied; kilo's own default-model gateway needs its interactive sign-in, which a container cannot do. `KILO_CONFIG_CONTENT`, `KILO_API_KEY` and `KILO_ORG_ID` are forwarded for forward-compatibility but are **not** a verified auth path on 7.5.6 (`KILO_API_KEY` alone authenticates nothing). Hive forwards only these values and never mounts a Kilo home/config directory. `--auto` is approval, not a sandbox. |
 
 ## Choosing a model
 
