@@ -217,3 +217,165 @@ func TestRunOverPipes(t *testing.T) {
 		}
 	}
 }
+
+// helpKey is the "?" keypress, spelled once so the overlay tests cannot drift
+// apart on how the binding is sent.
+var helpKey = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("?")}
+
+// TestHelpOverlayTogglesOnQuestionMark: "?" raises the overlay and a second
+// "?" puts it away, which is the toggle the design doc's table promises.
+//
+// The second press works through the any-key-dismiss branch rather than a
+// dedicated toggle case — the test asserts the observable behaviour, so that
+// implementation detail is free to change.
+func TestHelpOverlayTogglesOnQuestionMark(t *testing.T) {
+	m := newModel()
+	m.width, m.height = 100, 30
+	if m.helpVisible {
+		t.Fatal("helpVisible = true before any key; the overlay must start hidden")
+	}
+
+	next, cmd := m.Update(helpKey)
+	shown, ok := next.(model)
+	if !ok {
+		t.Fatalf("Update returned unexpected type %T", next)
+	}
+	if !shown.helpVisible {
+		t.Fatal(`helpVisible = false after "?"; the overlay must open`)
+	}
+	if cmd != nil {
+		t.Error(`"?" returned a command; opening the overlay must not quit or fetch`)
+	}
+
+	next, _ = shown.Update(helpKey)
+	hidden, ok := next.(model)
+	if !ok {
+		t.Fatalf("Update returned unexpected type %T", next)
+	}
+	if hidden.helpVisible {
+		t.Fatal(`helpVisible = true after a second "?"; the binding must toggle`)
+	}
+}
+
+// TestHelpOverlayDismissesOnAnyKey covers the "any key dismisses" contract
+// across keys that take genuinely different paths through the app's handling:
+// a bound global, an unbound rune, and a special key.
+//
+// "q" is the one that matters. It is the app's quit binding, so if the dismiss
+// branch did not come FIRST it would end the program while the reader believed
+// they were closing a dialog — the one misfire a help screen must not have.
+func TestHelpOverlayDismissesOnAnyKey(t *testing.T) {
+	cases := []struct {
+		name string
+		key  tea.KeyMsg
+	}{
+		{"q, which is otherwise quit", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")}},
+		{"tab, which is otherwise focus", tea.KeyMsg{Type: tea.KeyTab}},
+		{"an unbound rune", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")}},
+		{"a special key", tea.KeyMsg{Type: tea.KeyEsc}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newModel()
+			m.width, m.height = 100, 30
+			m.helpVisible = true
+
+			next, cmd := m.Update(tc.key)
+			got, ok := next.(model)
+			if !ok {
+				t.Fatalf("Update returned unexpected type %T", next)
+			}
+			if got.helpVisible {
+				t.Error("helpVisible = true; every key must dismiss the overlay")
+			}
+			if cmd != nil {
+				t.Error("dismissing returned a command; the key must be swallowed, not also acted on")
+			}
+		})
+	}
+}
+
+// TestHelpOverlaySwallowsQuit is the same guarantee as the "q" case above, but
+// driven through the REAL bubbletea loop: a unit test on Update would still
+// pass if tea.Quit reached the program by some other path.
+//
+// The program must still be running after "?" then "q", and must exit only on
+// the "q" that follows.
+func TestHelpOverlaySwallowsQuit(t *testing.T) {
+	tm := teatest.NewTestModel(t, newModel(), teatest.WithInitialTermSize(100, 30))
+
+	tm.Send(helpKey)
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")}) // dismisses
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")}) // quits
+	tm.WaitFinished(t, teatest.WithFinalTimeout(finalWait))
+
+	final, ok := tm.FinalModel(t).(model)
+	if !ok {
+		t.Fatalf("final model has unexpected type %T", tm.FinalModel(t))
+	}
+	// Reaching here means the program exited, and it can only have been the
+	// third key: if the second "q" had quit, the overlay would still be up.
+	if final.helpVisible {
+		t.Error("helpVisible = true at exit; the first q should have dismissed the overlay")
+	}
+}
+
+// TestHelpOverlayDoesNotReachPanes: while the overlay is up, keys are consumed
+// by it and never routed to the focused pane, so a pane binding cannot fire
+// underneath a modal the operator is reading.
+func TestHelpOverlayDoesNotReachPanes(t *testing.T) {
+	m := newModel()
+	m.width, m.height = 100, 30
+	m.helpVisible = true
+	before := m.focus
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	got, ok := next.(model)
+	if !ok {
+		t.Fatalf("Update returned unexpected type %T", next)
+	}
+	if got.focus != before {
+		t.Errorf("focus moved from %d to %d while the overlay was up; tab must only dismiss", before, got.focus)
+	}
+}
+
+// TestHelpOverlayViewReplacesFrame pins what the operator sees: the overlay's
+// content is on screen, the grid's chrome is not, and the frame still fills the
+// terminal exactly so dismissing it cannot leave a resized screen behind.
+func TestHelpOverlayViewReplacesFrame(t *testing.T) {
+	m := newModel()
+	m.width, m.height = 100, 30
+	m.helpVisible = true
+
+	view := m.View()
+	if !strings.Contains(view, "Keybindings") {
+		t.Error("overlay view does not carry the table's title")
+	}
+	if !strings.Contains(view, "press any key to dismiss") {
+		t.Error("overlay view does not say how to close itself")
+	}
+	// The grid's footer strip is part of the frame the overlay covers.
+	if strings.Contains(view, footerText) {
+		t.Error("the grid's footer is visible through the overlay; it is modal, not translucent")
+	}
+	if got := lipgloss.Height(view); got != 30 {
+		t.Errorf("overlay frame height = %d, want 30", got)
+	}
+	if got := lipgloss.Width(view); got != 100 {
+		t.Errorf("overlay frame width = %d, want 100", got)
+	}
+}
+
+// TestFooterAdvertisesHelp: the footer strip names only bindings that exist,
+// and "?" now does. An operator who never discovers the overlay may as well not
+// have it.
+func TestFooterAdvertisesHelp(t *testing.T) {
+	if !strings.Contains(footerText, "? help") {
+		t.Errorf("footerText = %q, want it to advertise the help binding", footerText)
+	}
+	m := newModel()
+	m.width, m.height = 100, 30
+	if !strings.Contains(m.View(), "? help") {
+		t.Error("the rendered frame does not advertise ? help")
+	}
+}

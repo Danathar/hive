@@ -74,7 +74,7 @@ const headerText = "hive: —   governor: —   ws: not connected"
 // (p pause, m model, K kick, …) documents keys whose tasks have not landed;
 // showing them now would advertise actions that silently do nothing. Each
 // action task appends its own binding when it wires the key.
-const footerText = "tab focus  q quit"
+const footerText = "tab focus  ? help  q quit"
 
 // model is the root bubbletea model.
 //
@@ -105,6 +105,11 @@ type model struct {
 	// tick rather than as a constructor error the TUI has no frame to render
 	// yet — so the model always has one and poll never has to nil-check it.
 	api *client.Client
+
+	// helpVisible is whether the help overlay is up. While it is, the overlay
+	// swallows EVERY key — including q — so a reader dismissing it cannot
+	// accidentally quit the program instead (see Update).
+	helpVisible bool
 
 	// interval is this model's poll cadence, defaulting to pollInterval.
 	//
@@ -175,11 +180,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// to clear their data, and the previous frame simply persists.
 		return m, nil
 	case tea.KeyMsg:
+		// The help overlay is modal and dismisses on ANY key, so it is handled
+		// before the global bindings rather than as one of them. Order is the
+		// whole mechanism: falling through would let "q" quit the program while
+		// the reader believed they were closing a dialog, which is the one
+		// misfire a help screen must not have. It also makes "?" a toggle for
+		// free — the second press lands here.
+		if m.helpVisible {
+			m.helpVisible = false
+			return m, nil
+		}
 		// KeyMsg.String() normalizes both plain runes ("q") and control
 		// combinations ("ctrl+c", "shift+tab") into one comparable form, so
 		// the global bindings can be listed together rather than split
 		// across a type switch on key type.
 		switch msg.String() {
+		case "?":
+			m.helpVisible = true
+			return m, nil
 		case "q", "ctrl+c":
 			return m, tea.Quit
 		case "tab":
@@ -252,7 +270,17 @@ func (m model) View() string {
 	header := headerStyle.Width(m.width).Render(headerText)
 	footer := footerStyle.Width(m.width).Render(footerText)
 
-	return lipgloss.JoinVertical(lipgloss.Left, header, top, bottom, footer)
+	frame := lipgloss.JoinVertical(lipgloss.Left, header, top, bottom, footer)
+	if m.helpVisible {
+		// Place, not Join: the overlay sits ON the frame rather than taking
+		// rows from it, so the grid keeps the exact geometry it had and the
+		// frame is still the terminal's size when the overlay is dismissed.
+		// panes.Help() sizes itself to its content; centring it is this
+		// layer's job, the same split pane.go draws between content and the
+		// chrome around it.
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, panes.Help())
+	}
+	return frame
 }
 
 // Run starts the TUI on this process's own terminal and blocks until the
