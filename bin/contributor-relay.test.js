@@ -3907,6 +3907,114 @@ test('#5094 with a human attached the relay asks for attention instead of typing
 
 
 // ---------------------------------------------------------------------------
+// kubestellar/hive#5121 — an API error the curated lists cannot name must not
+// read as a completed task either.
+//
+// #5094/#5106 closed the retryable and known-unretryable buckets; anything
+// outside both — a 400, a 404, a novel gateway phrasing — still fell through
+// to the completion test and booked a completion for a turn that shipped
+// nothing. Unknown errors are anchored on the CLI's own rendering (a
+// line-leading "● API Error:"), logged verbatim so the curated lists can be
+// grown from real occurrences, and routed down the bounded transient path.
+// ---------------------------------------------------------------------------
+
+const UNKNOWN_ERROR_PANE = [
+  "● Now the app's poll loop:",
+  '',
+  '  Ran 6 shell commands',
+  '',
+  '● API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"max_tokens: unexpected value"}}',
+  '',
+  '✻ Cogitated for 2m 04s',
+  '',
+  '❯ ',
+  '  ⏵⏵ auto mode on (shift+tab to cycle)',
+].join('\n');
+
+test('#5121 an unrecognised API error does not classify as complete', () => {
+  const relay = loadRelay({ backend: 'claude', paneText: UNKNOWN_ERROR_PANE });
+  try {
+    assert.strictEqual(relay.classifyTmuxPane(UNKNOWN_ERROR_PANE),
+      relay.PANE_STATE_UNKNOWN_API_ERROR,
+      'a 400 is in neither curated list, and a turn ending in ANY API error did not complete');
+  } finally { teardown(relay); }
+});
+
+test('#5121 an unrecognised error is retried, never completed, and fails honestly when the budget runs out', () => {
+  const relay = loadRelay({ backend: 'claude', paneText: UNKNOWN_ERROR_PANE, attachedClients: false });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-unknown');
+    const before = relay.__tmuxSends().length;
+    relay.__crashTick();
+    assert.ok(relay.__tmuxSends().slice(before).some(c => c.includes(relay.TRANSIENT_API_ERROR_NUDGE_MESSAGE)),
+      'the unknown bucket takes the bounded retry path');
+    for (let i = 0; i < relay.TRANSIENT_API_ERROR_MAX_NUDGES; i++) {
+      relay.__clearTransientNudgeCooldown();
+      relay.__crashTick();
+    }
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 0,
+      'an errored turn must never be booked as a completion, named or not');
+    const failures = relay.__sent.filter(m => m.type === 'task_failed');
+    assert.strictEqual(failures.length, 1, 'an exhausted budget hands the task back exactly once');
+    assert.strictEqual(failures[0].failure_kind, 'environment');
+  } finally { teardown(relay); }
+});
+
+test('#5121 the unmatched error line is logged verbatim for list-growing', () => {
+  const relay = loadRelay({ backend: 'claude', paneText: UNKNOWN_ERROR_PANE, attachedClients: false });
+  const origWarn = console.warn;
+  const warned = [];
+  console.warn = (...args) => { warned.push(args.join(' ')); };
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-instrument');
+    relay.__crashTick();
+    assert.ok(warned.some(w => w.includes('#5121') && w.includes('invalid_request_error')),
+      'the exact unrecognised line must reach the log, or the curated lists cannot grow from it');
+  } finally {
+    console.warn = origWarn;
+    teardown(relay);
+  }
+});
+
+test('#5121 the anchor requires the CLI\'s own rendering — quoted prose still completes', () => {
+  // An agent whose completed-turn summary MENTIONS an API error must be
+  // credited, not held and retried. The anchor is the line-leading ● bullet;
+  // a mid-line mention is prose.
+  const pane = [
+    '● Done — opened https://github.com/kubestellar/hive/pull/9999',
+    '',
+    '● The flake was the upstream returning API Error: 418 during the outage window.',
+    '',
+    '✻ Cogitated for 3m 30s',
+    '',
+    '❯ ',
+    '  ⏵⏵ auto mode on (shift+tab to cycle)',
+  ].join('\n');
+  const relay = loadRelay({ backend: 'claude', paneText: pane });
+  try {
+    assert.strictEqual(relay.classifyTmuxPane(pane), relay.PANE_STATE_IDLE_COMPLETE);
+    assert.strictEqual(relay.paneUnknownAPIErrorLine(pane), null);
+  } finally { teardown(relay); }
+});
+
+test('#5121 the curated buckets keep first claim on their lines', () => {
+  const relay = loadRelay({ backend: 'claude' });
+  try {
+    const mk = (line) => UNKNOWN_ERROR_PANE.replace(
+      '● API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"max_tokens: unexpected value"}}',
+      line);
+    assert.strictEqual(relay.classifyTmuxPane(mk('● API Error: Connection lost mid-response. The response above may be incomplete.')),
+      relay.PANE_STATE_TRANSIENT_API_ERROR, 'a known-retryable error stays in its bucket');
+    assert.strictEqual(relay.classifyTmuxPane(mk('● API Error: 403 Forbidden')),
+      relay.PANE_STATE_FATAL_API_ERROR, 'a known-fatal error stays in its bucket');
+    assert.strictEqual(relay.classifyTmuxPane(mk('● Please run /login · API Error: 401 {"type":"error"}')),
+      relay.PANE_STATE_BLOCKED_ON_HUMAN, 'an authentication failure stays blocked-on-human');
+  } finally { teardown(relay); }
+});
+
+// ---------------------------------------------------------------------------
 
 let failed = 0;
 // RELAY_TEST_ONLY=<substring> runs a single test, for debugging in isolation.

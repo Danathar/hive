@@ -142,6 +142,13 @@ const PANE_STATE_TRANSIENT_API_ERROR = 'TRANSIENT_API_ERROR';
 // ended having shipped nothing. Retrying it would loop the agent against a wall,
 // so this is failed at once rather than nudged.
 const PANE_STATE_FATAL_API_ERROR = 'FATAL_API_ERROR';
+// An API failure matching NEITHER curated list ended the turn at the idle
+// prompt (kubestellar/hive#5121). Still not completion: the turn shipped
+// nothing. Nobody can say from a pattern table whether a retry clears it, so
+// it takes the bounded transient path — if it was retryable the retry wins,
+// and if not the budget runs out and the task is handed back as an honest
+// environment failure. Either way, never a fabricated completion.
+const PANE_STATE_UNKNOWN_API_ERROR = 'UNKNOWN_API_ERROR';
 
 // ── Transient API-error recovery (kubestellar/hive#5094) ─────────────────────
 //
@@ -1806,6 +1813,33 @@ function tmuxSendNudge(message) {
   tmuxSendEnters();
 }
 
+// paneUnknownAPIErrorLine returns the first line of the visible tail that
+// carries Claude Code's own error rendering — a line-leading "● API Error:" —
+// or null. Reached only after the three curated detectors above have NOT
+// matched (classifyTmuxPane's ordering), so a hit here is an API failure the
+// tables cannot name (kubestellar/hive#5121): a 400, a 404, a 429 phrased in a
+// way nobody anticipated, a brand-new gateway message.
+//
+// The anchor is deliberately STRICTER than the curated detectors' anywhere-in-
+// the-line match. They pair the chrome with a known pattern, which is already
+// two independent signals; this one has no pattern to pair with, so the chrome
+// must be the CLI's own rendering — the ● bullet at line start is how Claude
+// Code prints its errors — or an agent whose completed-turn prose merely
+// mentions "API Error: 418" would be held and retried instead of credited.
+// The residual is an agent whose rendered message BEGINS with the literal
+// string "API Error:", which is as narrow as this can get from pane text.
+//
+// Returning the line (not a boolean) is the instrumentation half of #5121:
+// every hit is logged verbatim at the call site, so the curated lists can be
+// grown from what actually occurs in the wild instead of from guesses.
+function paneUnknownAPIErrorLine(text) {
+  const lines = paneTail(text, TRANSIENT_API_ERROR_TAIL_LINES).split('\n');
+  for (const line of lines) {
+    if (/^\s*●\s*API Error:/i.test(line)) return line.trim();
+  }
+  return null;
+}
+
 function classifyTmuxPane(text) {
   let hasIdlePrompt, hasCompletionMarker, isWorking;
 
@@ -2003,6 +2037,14 @@ function classifyTmuxPane(text) {
   }
   if (paneShowsTransientAPIError(text)) {
     return PANE_STATE_TRANSIENT_API_ERROR;
+  }
+  // LAST of the error checks, FIRST before completion: an anchored API error
+  // the curated lists cannot name (#5121). Order matters twice over — the
+  // curated buckets get first claim on their lines, and a turn that ended in
+  // ANY API error must not fall through to the completion test below, which is
+  // exactly how #5094's false completions happened.
+  if (paneUnknownAPIErrorLine(text) !== null) {
+    return PANE_STATE_UNKNOWN_API_ERROR;
   }
   if (hasIdlePrompt && hasCompletionMarker) return PANE_STATE_IDLE_COMPLETE;
   return PANE_STATE_WORKING;
@@ -2507,6 +2549,15 @@ function progressTick() {
     });
   } else if (paneState === PANE_STATE_TRANSIENT_API_ERROR) {
     handleTransientAPIError(tmuxLines);
+  } else if (paneState === PANE_STATE_UNKNOWN_API_ERROR) {
+    // Instrumentation first (#5121): log the exact line the curated lists
+    // could not name, so the lists can be grown from real occurrences. Then
+    // the bounded transient path — retry up to the budget, honest environment
+    // failure after it, blocked_on_human if someone is attached. Shared budget
+    // and cooldown with the transient state: it is the same task either way.
+    console.warn(`Unrecognised API error (kubestellar/hive#5121) — treating as transient: ` +
+      `${paneUnknownAPIErrorLine(tmuxLines.join('\n')) || '(line scrolled away)'}`);
+    handleTransientAPIError(tmuxLines);
   } else if (paneState === PANE_STATE_FATAL_API_ERROR) {
     // No retry: an authorization refusal or an exhausted quota cannot be cleared
     // by repeating the request (#4400, #4583). Hand the task back honestly so the
@@ -2946,6 +2997,8 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     PANE_STATE_IDLE_COMPLETE,
     PANE_STATE_TRANSIENT_API_ERROR,
     PANE_STATE_FATAL_API_ERROR,
+    PANE_STATE_UNKNOWN_API_ERROR,
+    paneUnknownAPIErrorLine,
     paneShowsTransientAPIError,
     paneShowsUnretryableAPIError,
     paneShowsLoginRequiredError,
