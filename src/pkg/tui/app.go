@@ -7,9 +7,10 @@
 // the fleet model, so everything it displays arrives over the documented HTTP
 // contract in dashboard/openapi.json.
 //
-// SCAFFOLD ONLY (T1, #4916). The model here draws one centered line and quits.
-// Panes, the layout grid, polling, and every API call are separate tasks that
-// build on this frame; see #4907 for the task graph.
+// T3 (#5004): the frame is a header bar, a 2×2 grid of the four panes from
+// pkg/tui/panes, and a footer keybinding strip, per the layout sketch in
+// src/docs/design/tui.md §3. The panes are stubs; polling (T12), the SSE feed
+// (T13) and every API call are separate tasks that build on this frame.
 package tui
 
 import (
@@ -18,13 +19,47 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/kubestellar/hive/pkg/tui/panes"
 )
 
-// splash is the only thing the scaffold frame draws. It names the binding that
-// gets an operator back out, because a full-screen alt-screen program that does
-// not say how to exit is a trap — especially over SSH, where the reflex of
-// closing the terminal also kills whatever else the session was doing.
+// splash is drawn only before the first tea.WindowSizeMsg arrives. It names
+// the binding that gets an operator back out, because a full-screen program
+// that does not say how to exit is a trap — especially over SSH.
 const splash = "Hive TUI (q to quit)"
+
+// paneCount is the grid's four cells. Focus arithmetic uses it so adding a
+// pane later cannot silently desynchronize tab cycling from the pane table.
+const paneCount = 4
+
+// Border styles for the grid cells. The focused pane gets a THICK border, not
+// only a color change: test and CI environments render through termenv's
+// Ascii profile where colors are stripped, so a color-only highlight would be
+// invisible exactly where the golden file pins the frame. The thick border
+// survives any profile; the color is a refinement on real terminals.
+var (
+	unfocusedBorder = lipgloss.NewStyle().
+			Border(lipgloss.NormalBorder()).
+			BorderForeground(lipgloss.Color("240"))
+	focusedBorder = lipgloss.NewStyle().
+			Border(lipgloss.ThickBorder()).
+			BorderForeground(lipgloss.Color("205"))
+	headerStyle = lipgloss.NewStyle().Bold(true)
+	footerStyle = lipgloss.NewStyle().Faint(true)
+)
+
+// headerText is static until T12 wires polling: the sketch's header carries
+// hive name, governor mode and connection state, and every one of those is
+// data this frame does not fetch yet. Placeholders say so honestly instead of
+// pretending — a dash is "not known", which is true, while any invented value
+// would be false.
+const headerText = "hive: —   governor: —   ws: not connected"
+
+// footerText lists only the bindings that EXIST. The sketch's full strip
+// (p pause, m model, K kick, …) documents keys whose tasks have not landed;
+// showing them now would advertise actions that silently do nothing. Each
+// action task appends its own binding when it wires the key.
+const footerText = "tab focus  q quit"
 
 // model is the root bubbletea model.
 //
@@ -39,19 +74,51 @@ type model struct {
 	// zero rather than assume it has been sized.
 	width  int
 	height int
+
+	// panes holds the grid's cells in reading order: 0 Agents (top-left),
+	// 1 Governor (top-right), 2 Tokens (bottom-left), 3 Events
+	// (bottom-right) — the numbering the design sketch's [1]..[4] badges use,
+	// zero-based.
+	panes [paneCount]panes.Pane
+
+	// focus indexes the focused pane. Exactly one pane is always focused;
+	// there is no "nothing focused" state to handle everywhere else.
+	focus int
 }
 
 // newModel returns the root model in its initial state. Unexported because the
 // program is entered through Run; the tests use it directly to drive the model
 // without a terminal.
 func newModel() model {
-	return model{}
+	return model{
+		panes: [paneCount]panes.Pane{
+			panes.NewAgents(),
+			panes.NewGovernor(),
+			panes.NewTokens(),
+			panes.NewEvents(),
+		},
+	}
 }
 
-// Init implements tea.Model. The scaffold has nothing to kick off — no polling,
-// no first fetch — so it issues no command.
+// New returns the TUI's root model for embedding in another bubbletea program
+// or driving under teatest. The panes' golden test lives next to the panes
+// (pkg/tui/panes/testdata, per the design doc's testing convention) and this
+// is its entry point; hivectl's own entry stays Run.
+func New() tea.Model {
+	return newModel()
+}
+
+// Init implements tea.Model. It gathers the panes' initial commands; the T3
+// stubs all return nil, but wiring Init through now means T5/T7/T9/T11 get
+// their first fetch issued without touching the app again.
 func (m model) Init() tea.Cmd {
-	return nil
+	var cmds []tea.Cmd
+	for _, p := range m.panes {
+		if c := p.Init(); c != nil {
+			cmds = append(cmds, c)
+		}
+	}
+	return tea.Batch(cmds...)
 }
 
 // Update implements tea.Model.
@@ -59,29 +126,86 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		return m, nil
 	case tea.KeyMsg:
 		// KeyMsg.String() normalizes both plain runes ("q") and control
-		// combinations ("ctrl+c") into one comparable form, so the quit
-		// bindings can be listed together rather than split across a type
-		// switch on key type.
+		// combinations ("ctrl+c", "shift+tab") into one comparable form, so
+		// the global bindings can be listed together rather than split
+		// across a type switch on key type.
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
+		case "tab":
+			m.focus = (m.focus + 1) % paneCount
+			return m, nil
+		case "shift+tab":
+			// +paneCount-1 rather than -1: keeps the operand positive, so
+			// the modulo never sees a negative number to round wrongly.
+			m.focus = (m.focus + paneCount - 1) % paneCount
+			return m, nil
+		}
+		// Any other key belongs to the focused pane. The T3 stubs ignore
+		// everything, but routing through this seam now is what lets a pane
+		// task add j/k selection without touching the app's key handling.
+		var cmd tea.Cmd
+		m.panes[m.focus], cmd = m.panes[m.focus].Update(msg)
+		return m, cmd
+	}
+	// Non-key messages go to every pane: a poll result or SSE event (T12,
+	// T13b) is not addressed to whichever pane happens to be focused.
+	var cmds []tea.Cmd
+	for i, p := range m.panes {
+		next, c := p.Update(msg)
+		m.panes[i] = next
+		if c != nil {
+			cmds = append(cmds, c)
 		}
 	}
-	return m, nil
+	return m, tea.Batch(cmds...)
 }
 
 // View implements tea.Model.
 func (m model) View() string {
 	if m.width <= 0 || m.height <= 0 {
-		// Not sized yet. Return the bare line rather than centering into a
-		// zero-sized box, which lipgloss would render as an empty frame — a
-		// blank screen for however long it takes the first WindowSizeMsg to
+		// Not sized yet. Return the bare line rather than laying out into a
+		// zero-sized box, which would render as an empty frame — a blank
+		// screen for however long it takes the first WindowSizeMsg to
 		// arrive.
 		return splash
 	}
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, splash)
+
+	// One line each for header and footer; the grid gets the rest, split
+	// into two rows and two columns. The right column and bottom row absorb
+	// the odd remainder so the frame always fills the terminal exactly.
+	gridH := m.height - 2
+	topH := gridH / 2
+	botH := gridH - topH
+	leftW := m.width / 2
+	rightW := m.width - leftW
+
+	cell := func(i, outerW, outerH int) string {
+		style := unfocusedBorder
+		if i == m.focus {
+			style = focusedBorder
+		}
+		// The border consumes one row/column on every side; the pane
+		// renders only the interior. Clamped so a pathologically small
+		// terminal degrades to empty cells instead of panicking — the
+		// operator-facing minimum-size message is T24's.
+		innerW := max(0, outerW-2)
+		innerH := max(0, outerH-2)
+		return style.Render(m.panes[i].View(innerW, innerH))
+	}
+
+	top := lipgloss.JoinHorizontal(lipgloss.Top,
+		cell(0, leftW, topH), cell(1, rightW, topH))
+	bottom := lipgloss.JoinHorizontal(lipgloss.Top,
+		cell(2, leftW, botH), cell(3, rightW, botH))
+
+	header := headerStyle.Width(m.width).Render(headerText)
+	footer := footerStyle.Width(m.width).Render(footerText)
+
+	return lipgloss.JoinVertical(lipgloss.Left, header, top, bottom, footer)
 }
 
 // Run starts the TUI on this process's own terminal and blocks until the
