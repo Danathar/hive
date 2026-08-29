@@ -686,12 +686,21 @@ fi
 
 echo ""
 CONTAINER_NAME="${HIVE_CONTAINER_NAME:-hive-contributor}"
+# The engine that launched this container, passed in by the `just contribute-hive`
+# recipe from the runtime it resolved (kubestellar/hive#5145). A container cannot
+# see its own launcher, so without this the attach hint below guessed "docker" and
+# was simply wrong on every podman run — the operator pasted it and got a
+# docker-socket permission error, or "no such container" if docker also happened to
+# be running. Defaulting to docker keeps a bare-docker launch, or an image started
+# by something older than the recipe that passes this, printing exactly what it
+# printed before.
+CONTAINER_RUNTIME="${HIVE_CONTAINER_RUNTIME:-docker}"
 echo "Contributor agent is running."
 echo "  Mode:    $CONTRIBUTOR_MODE"
 echo "  CLI:     $CMD"
 echo "  ClankeR: PID $RELAY_PID"
 if [[ "$CONTRIBUTOR_MODE" == "interactive" ]]; then
-  echo "  Tmux:    docker exec -it $CONTAINER_NAME tmux attach -t $TMUX_SESSION"
+  echo "  Tmux:    $CONTAINER_RUNTIME exec -it $CONTAINER_NAME tmux attach -t $TMUX_SESSION"
 else
   # Headless: no pane to attach to. The relay drives a one-shot CLI per task and
   # writes its lifecycle state (waiting/working/done/failed) here for a probe.

@@ -46,6 +46,7 @@ just contribute-hive claude local  # host mode — relay + CLI directly on your 
 ```
 
 Containerized mode auto-detects the runtime — docker first, then podman — and can be forced with `export HIVE_CONTAINER_RUNTIME=podman`.
+The resolved runtime is passed into the container, so the "attach to the CLI" hints printed from inside it (the status line, and the banner shown when the CLI needs a login) name the engine that actually launched it ([#5145](https://github.com/kubestellar/hive/issues/5145)). In host mode there is no container, and those hints are a plain `tmux attach -t <session>`.
 
 Use `just contribute-check <backend>` before registering to catch missing CLIs or obvious auth gaps.
 

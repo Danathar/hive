@@ -1465,6 +1465,7 @@ contribute-hive backend="" mode="docker": check-version
         -e GH_TOKEN="${GH_TOKEN:-}" \
         -e HIVE_USE_CONTRIBUTOR_GH=true \
         -e HIVE_CONTAINER_NAME="${CONTAINER_NAME}" \
+        -e HIVE_CONTAINER_RUNTIME="${RUNTIME}" \
         "${PROVIDER_ENV_ARGS[@]}" \
         ${AGENT_MODEL:+-e AGENT_MODEL="${AGENT_MODEL}"} \
         ${AGENT_REASONING_EFFORT:+-e AGENT_REASONING_EFFORT="${AGENT_REASONING_EFFORT}"} \

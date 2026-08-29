@@ -359,6 +359,27 @@ function injectGhToken(token) {
 const CLI_READY_POLL_MS = 2000;
 const CLI_READY_TIMEOUT_MS = 600000;
 const CONTAINER_NAME = process.env.HIVE_CONTAINER_NAME || 'hive-contributor';
+// ATTACH_COMMAND is the paste-able command that puts a human on the CLI's tmux
+// pane. It is computed once, here, because it is printed at the one moment a
+// wrong answer really costs: the "needs authentication" banner fires when the
+// agent is BLOCKED and a person must intervene, so a command that fails is
+// worse than no command at all (kubestellar/hive#5145).
+//
+// Two facts the relay cannot infer and so is told:
+//
+//   * HIVE_CONTAINER_NAME is set ONLY by the container arm of the
+//     `just contribute-hive` recipe. Local mode runs this relay directly on the
+//     host, beside the tmux server it drives — there is no container to exec
+//     into, and the hint is plain `tmux attach`, which is what the recipe's own
+//     status line four lines earlier already says.
+//   * HIVE_CONTAINER_RUNTIME carries the engine the recipe resolved. A
+//     container cannot see its own launcher, so hardcoding "docker" handed
+//     every podman operator a command that fails. It defaults to docker, so a
+//     bare-docker launch prints exactly what it printed before.
+const CONTAINER_RUNTIME = process.env.HIVE_CONTAINER_RUNTIME || 'docker';
+const ATTACH_COMMAND = process.env.HIVE_CONTAINER_NAME
+  ? `${CONTAINER_RUNTIME} exec -it ${CONTAINER_NAME} tmux attach -t ${TMUX_SESSION}`
+  : `tmux attach -t ${TMUX_SESSION}`;
 
 // detectCapabilities builds the OPTIONAL, client-declared capability object the
 // relay reports in auth_response (kubestellar/hive#2547, declare half). Every
@@ -1283,7 +1304,7 @@ function waitForCLI() {
         console.log('╔══════════════════════════════════════════════════════════╗');
         console.log('║  Claude Code needs authentication.                      ║');
         console.log('║  In another terminal, run:                              ║');
-        console.log(`║  docker exec -it ${CONTAINER_NAME} tmux attach -t ${TMUX_SESSION}`);
+        console.log(`║  ${ATTACH_COMMAND}`);
         console.log('║  Then type: /login                                      ║');
         console.log('║  Complete the login, then press Ctrl-B D to detach.     ║');
         console.log('║  Waiting for login to complete...                       ║');
@@ -3091,6 +3112,11 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     buildHeadlessArgv,
     runHeadlessTask,
     getHeadlessChild: () => headlessChild,
+    // Attach-hint surface (kubestellar/hive#5145): the exact command the
+    // needs-authentication banner tells a human to paste.
+    ATTACH_COMMAND,
+    CONTAINER_NAME,
+    CONTAINER_RUNTIME,
     // Coverage for previously untested pure/isolated functions (#4267).
     redactTokens,
     detectNoWorkVerdict,
