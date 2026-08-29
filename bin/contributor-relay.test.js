@@ -26,7 +26,7 @@ const RELAY_PATH = path.join(__dirname, 'contributor-relay.sh');
 // bash and no WebSocket are ever touched.
 // ---------------------------------------------------------------------------
 
-function loadRelay({ backend = 'copilot', backendBinary = null, backendPerm = '--allow-all', model = '', reasoningEffort = '', cliStates = ['ready'], procAlive = true, mode = 'interactive', execFileResult = null, statusFile = null, paneText = null, env = null, cliVersion = null } = {}) {
+function loadRelay({ backend = 'copilot', backendBinary = null, backendPerm = '--allow-all', model = '', reasoningEffort = '', cliStates = ['ready'], procAlive = true, mode = 'interactive', execFileResult = null, statusFile = null, paneText = null, env = null, cliVersion = null, attachedClients = false } = {}) {
   const commands = [];
   const sent = [];
   // Records every execFile (headless one-shot) invocation: { bin, args, opts }.
@@ -57,6 +57,11 @@ function loadRelay({ backend = 'copilot', backendBinary = null, backendPerm = '-
       if (state === 'working') return '/ commands for help\nesc cancel\n';
       if (typeof state === 'string' && state.includes('\n')) return state;
       return 'dev@host:~$ \n';
+    }
+    if (/list-clients/.test(cmd)) {
+      // #5094: the relay asks whether a human is attached before it types a
+      // retry into the pane. An empty answer means nobody is watching.
+      return attachedClients ? '/dev/pts/3: 0 [200x50 xterm-256color] (utf8)\n' : '';
     }
     if (/display-message/.test(cmd)) {
       // The relay asks the PANE what it is running (pane_current_command).
@@ -3527,6 +3532,213 @@ test('#4267 warnOnProtocolDrift warns once per hub and stays silent when current
     teardown(relay);
   }
 });
+
+// ---------------------------------------------------------------------------
+// kubestellar/hive#5094 — a transient API error must never read as completion.
+//
+// Claude Code prints a turn-duration summary ("✻ Cogitated for 9m 24s") whenever
+// a turn ENDS, including when it ends in an error, and the claude branch of
+// classifyTmuxPane matched exactly that line as its completion marker. So an
+// errored turn was indistinguishable from a finished one and the relay reported
+// task_complete for work that shipped nothing. Observed live: #5061 picked up at
+// 11:46:38, booked "completed" at 11:57:40 with no PR, its half-written work
+// still uncommitted.
+// ---------------------------------------------------------------------------
+
+// The pane at the moment of the live failure: a tool row, the API error, the
+// duration summary the classifier used to trust, and claude's idle chrome.
+const CLAUDE_API_ERROR_PANE = [
+  "● Now the app's poll loop:",
+  '',
+  '  Ran 6 shell commands',
+  '',
+  '● API Error: Connection lost mid-response. The response above may be incomplete.',
+  '',
+  '✻ Cogitated for 9m 24s',
+  '',
+  '❯ ',
+  '  ⏵⏵ auto mode on (shift+tab to cycle)',
+].join('\n');
+
+// The same pane after a turn that actually finished.
+const CLAUDE_CLEAN_PANE = [
+  "● Now the app's poll loop:",
+  '',
+  '  Ran 6 shell commands',
+  '',
+  '● Done — opened https://github.com/kubestellar/hive/pull/5095',
+  '',
+  '✻ Cogitated for 9m 24s',
+  '',
+  '❯ ',
+  '  ⏵⏵ auto mode on (shift+tab to cycle)',
+].join('\n');
+
+test('#5094 a claude turn ending in a transient API error does not classify as complete', () => {
+  const relay = loadRelay({ backend: 'claude', paneText: CLAUDE_API_ERROR_PANE });
+  try {
+    assert.strictEqual(relay.classifyTmuxPane(CLAUDE_API_ERROR_PANE),
+      relay.PANE_STATE_TRANSIENT_API_ERROR,
+      'the duration summary after an API error is "the turn stopped", not "the task is done"');
+  } finally { teardown(relay); }
+});
+
+test('#5094 a claude turn that really finished still classifies as complete', () => {
+  // The guard that matters as much as the fix: a check broad enough to swallow
+  // real completions would be a worse bug than the one it closes.
+  const relay = loadRelay({ backend: 'claude', paneText: CLAUDE_CLEAN_PANE });
+  try {
+    assert.strictEqual(relay.classifyTmuxPane(CLAUDE_CLEAN_PANE),
+      relay.PANE_STATE_IDLE_COMPLETE);
+  } finally { teardown(relay); }
+});
+
+test('#5094 the relay never reports task_complete for a turn that ended in an API error', () => {
+  const relay = loadRelay({ backend: 'claude', paneText: CLAUDE_API_ERROR_PANE });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-apierr');
+    relay.__crashTick();
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 0,
+      'an errored turn must not be booked as a completion');
+    assert.ok(relay.getCurrentTask(), 'the task must still be held, not handed back as done');
+  } finally { teardown(relay); }
+});
+
+test('#5094 the transient detector matches retryable failures only', () => {
+  const relay = loadRelay({ backend: 'claude' });
+  try {
+    const retryable = [
+      'API Error: Connection lost mid-response. The response above may be incomplete.',
+      'API Error: Connection error',
+      'API Error: Request timed out',
+      'API Error: 500 Internal Server Error',
+      'API Error: 502 Bad Gateway',
+      'API Error: 503 Service Unavailable',
+      'API Error: 529 {"type":"overloaded_error"}',
+    ];
+    for (const line of retryable) {
+      assert.ok(relay.paneShowsTransientAPIError(line), `should be retryable: ${line}`);
+    }
+    const notRetryable = [
+      // Prose about an error is not an error — no "API Error:" chrome.
+      'The user reported Connection lost mid-response earlier.',
+      // A number that merely looks like a status, under the API-error chrome.
+      'API Error: request id 15003 failed validation',
+      // Nothing to do with the API at all.
+      '● Read 12 lines',
+    ];
+    for (const line of notRetryable) {
+      assert.ok(!relay.paneShowsTransientAPIError(line), `should not be retryable: ${line}`);
+    }
+  } finally { teardown(relay); }
+});
+
+test('#5094 authorization and quota failures are never retried', () => {
+  // Claude Code renders every API failure under the same "API Error:" prefix, so
+  // the retryable list alone cannot tell an overloaded upstream from a refused
+  // one. Nudging these loops the agent against a wall (#4400, #4583).
+  const relay = loadRelay({ backend: 'claude' });
+  try {
+    for (const line of [
+      'API Error: 403 Forbidden',
+      'API Error: 403 {"message":"team not allowed to access model"}',
+      'API Error: 429 {"error":{"type":"budget_exceeded"}}',
+      'Budget has been exceeded!',
+    ]) {
+      assert.ok(relay.paneShowsUnretryableAPIError(line), `should veto a retry: ${line}`);
+    }
+    // And the veto wins end to end: a 403 pane is not classified as retryable.
+    const forbidden = CLAUDE_API_ERROR_PANE.replace(
+      'API Error: Connection lost mid-response. The response above may be incomplete.',
+      'API Error: 403 Forbidden');
+    assert.notStrictEqual(relay.classifyTmuxPane(forbidden), relay.PANE_STATE_TRANSIENT_API_ERROR);
+  } finally { teardown(relay); }
+});
+
+test('#5094 with nobody attached the relay types one retry per tick, within its budget', () => {
+  const relay = loadRelay({ backend: 'claude', paneText: CLAUDE_API_ERROR_PANE, attachedClients: false });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-retry');
+
+    // One retry per tick, up to the cap. The cooldown exists to stop the relay
+    // typing on every 2-minute progress tick; clearing it between ticks is how
+    // the test crosses it without sleeping 90 seconds three times.
+    for (let i = 1; i <= relay.TRANSIENT_API_ERROR_MAX_NUDGES; i++) {
+      relay.__clearTransientNudgeCooldown();
+      const before = relay.__tmuxSends().length;
+      relay.__crashTick();
+      const sends = relay.__tmuxSends().slice(before);
+      assert.ok(sends.some(c => c.includes(relay.TRANSIENT_API_ERROR_NUDGE_MESSAGE)),
+        `tick ${i} should have typed the retry message`);
+      assert.strictEqual(relay.getTransientNudgeCount(), i);
+    }
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_failed').length, 0,
+      'the task must not be failed while retries remain');
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 0);
+  } finally { teardown(relay); }
+});
+
+test('#5094 the cooldown stops a retry being typed on every progress tick', () => {
+  const relay = loadRelay({ backend: 'claude', paneText: CLAUDE_API_ERROR_PANE, attachedClients: false });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-cooldown');
+    relay.__crashTick();                       // types retry 1
+    const after = relay.__tmuxSends().length;
+    relay.__crashTick();                       // still inside the cooldown
+    assert.strictEqual(relay.getTransientNudgeCount(), 1,
+      'a second tick inside the cooldown must not type another retry');
+    const sends = relay.__tmuxSends().slice(after);
+    assert.ok(!sends.some(c => c.includes(relay.TRANSIENT_API_ERROR_NUDGE_MESSAGE)));
+  } finally { teardown(relay); }
+});
+
+// A task that starts fresh gets a fresh budget: a previous task exhausting its
+// retries must not deny the next one its own. Sequenced the way the hub actually
+// drives it — the first task is handed back before a second is assigned, since a
+// relay already holding a task does not accept another.
+test('#5094 the retry budget resets per task', () => {
+  const relay = loadRelay({ backend: 'claude', paneText: CLAUDE_API_ERROR_PANE, attachedClients: false });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-first');
+    for (let i = 0; i <= relay.TRANSIENT_API_ERROR_MAX_NUDGES; i++) {
+      relay.__clearTransientNudgeCooldown();
+      relay.__crashTick();
+    }
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_failed').length, 1,
+      'the first task should have been handed back once its retries ran out');
+    assert.ok(!relay.getCurrentTask(), 'the failed task must be released');
+
+    assignTask(relay, 't-second');
+    assert.strictEqual(relay.getTransientNudgeCount(), 0,
+      'a new task must start with a full retry budget');
+  } finally { teardown(relay); }
+});
+
+test('#5094 with a human attached the relay asks for attention instead of typing over them', () => {
+  // The hub-side nudge declines when someone is attached (manager.go,
+  // tmuxSessionHasAttachedClientForAgent) so a watchdog never types over a
+  // person. The relay honors the same rule — but says so, rather than going
+  // quiet and letting the stall backstop eventually fail the task.
+  const relay = loadRelay({ backend: 'claude', paneText: CLAUDE_API_ERROR_PANE, attachedClients: true });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-attached');
+    const before = relay.__tmuxSends().length;
+    relay.__crashTick();
+    const sends = relay.__tmuxSends().slice(before);
+    assert.ok(!sends.some(c => c.includes(relay.TRANSIENT_API_ERROR_NUDGE_MESSAGE)),
+      'nothing may be typed into a pane a human is sitting in');
+    const blocked = relay.__sent.filter(m => m.status === 'blocked_on_human');
+    assert.strictEqual(blocked.length, 1, 'the human should be told the agent needs them');
+    assert.strictEqual(blocked[0].attention, true);
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 0);
+  } finally { teardown(relay); }
+});
+
 
 // ---------------------------------------------------------------------------
 
