@@ -132,6 +132,71 @@ const HEADLESS_STATE_FAILED = 'failed';   // last task failed (non-zero/spawn er
 const PANE_STATE_WORKING = 'WORKING';
 const PANE_STATE_BLOCKED_ON_HUMAN = 'BLOCKED_ON_HUMAN';
 const PANE_STATE_IDLE_COMPLETE = 'IDLE_COMPLETE';
+// A retryable API failure left the CLI parked at its idle prompt with the
+// response truncated (kubestellar/hive#5094). This is NOT completion and NOT a
+// stall: the turn ended, but it ended in an error, and the same request can
+// succeed on a retry.
+const PANE_STATE_TRANSIENT_API_ERROR = 'TRANSIENT_API_ERROR';
+// An API failure a retry CANNOT clear — an authorization refusal or an exhausted
+// quota — left the CLI parked at its idle prompt. Also not completion: the turn
+// ended having shipped nothing. Retrying it would loop the agent against a wall,
+// so this is failed at once rather than nudged.
+const PANE_STATE_FATAL_API_ERROR = 'FATAL_API_ERROR';
+
+// ── Transient API-error recovery (kubestellar/hive#5094) ─────────────────────
+//
+// THE DEFECT: Claude Code prints a turn-duration summary ("✻ Cogitated for
+// 9m 24s") whenever a turn ENDS — including when it ends in an API error — and
+// classifyTmuxPane's claude branch matched exactly that line as its completion
+// marker. An errored turn was therefore indistinguishable from a finished one,
+// so the relay reported task_complete for work that shipped nothing. Observed
+// live: issue #5061 was picked up at 11:46:38 and booked "completed" at
+// 11:57:40 with no PR, its half-written work still uncommitted in the tree.
+//
+// These patterns mirror src/pkg/agent/manager.go's transientAPIErrorPatterns
+// (#4697), which the hub's own fleet has used for this same error since. Keep
+// the two lists in step. Membership is deliberately narrow: every entry must be
+// an error where REPEATING THE SAME REQUEST CAN SUCCEED.
+const TRANSIENT_API_ERROR_PATTERNS = [
+  'connection lost mid-response',
+  'connection error',
+  'request timed out',
+  'overloaded_error',
+];
+// 500/502/503/529 are retryable upstream failures. Whole tokens only, so a
+// request id or token count under the same "API Error:" chrome cannot trip it.
+const TRANSIENT_API_ERROR_STATUS_RE = /\b(?:500|502|503|529)\b/;
+// Errors a retry CANNOT fix. Claude Code renders every API failure under the
+// same "API Error:" prefix, so a substring match alone cannot tell an
+// overloaded upstream from a refused one — these are re-checked separately and
+// veto the retry, exactly as the hub path does via
+// lineShowsUpstreamAuthorizationError / paneShowsQuotaExhausted. Nudging one of
+// these loops the agent against a wall and burns tokens to no effect.
+const UNRETRYABLE_API_ERROR_PATTERNS = [
+  'not allowed to access model',
+  'team not allowed to access',
+  'exceeded your monthly quota',
+  'used all your copilot free chat requests',
+  'budget_exceeded',
+  'budget has been exceeded',
+  'provider spending limit reached',
+  'refused the request on a spending limit',
+  'gone over your budget allowance',
+  'bobcoins',
+];
+// 403 is authorization, not authentication: the caller IS identified and is not
+// permitted, so neither a retry nor a login changes anything (#4400).
+const UNRETRYABLE_API_ERROR_STATUS_RE = /\bAPI Error: 403\b/i;
+// The visible tail the error must appear in. Matching the whole pane would let
+// an error the agent already recovered from read as current.
+const TRANSIENT_API_ERROR_TAIL_LINES = 12;
+// What we type. Short and free of shell metacharacters by construction — it is
+// interpolated into a tmux send-keys command line below.
+const TRANSIENT_API_ERROR_NUDGE_MESSAGE = 'try again';
+// Bounded so a persistent upstream failure ends as an honest task failure
+// rather than an infinite typing loop. Mirrors the hub's cap and cooldown.
+const TRANSIENT_API_ERROR_MAX_NUDGES = 3;
+const TRANSIENT_API_ERROR_NUDGE_COOLDOWN_MS = 90000;
 
 // Cap on captured child output kept in memory / sent to the hub, so a chatty
 // CLI cannot grow the buffer without bound. The tail is what matters for an
@@ -1642,6 +1707,105 @@ function paneLooksBlockedOnHuman(text) {
   return hasQuestion || hasNumberedMenu || hasElicitationForm || blockingPatterns.some(re => re.test(beforePrompt));
 }
 
+// paneTail returns the last n lines of a pane capture. Pure, so the detectors
+// below are table-testable without tmux.
+function paneTail(text, n) {
+  return String(text || '').split('\n').slice(-n).join('\n');
+}
+
+// paneShowsTransientAPIError reports whether the visible tail carries a
+// retryable API failure. Every candidate line must carry the "API Error:"
+// chrome AND a known-retryable pattern, so prose that merely mentions a dropped
+// connection ("the user reported connection lost mid-response earlier") does
+// not trip it.
+function paneShowsTransientAPIError(text) {
+  const lines = paneTail(text, TRANSIENT_API_ERROR_TAIL_LINES).split('\n');
+  return lines.some((line) => {
+    const lower = line.toLowerCase();
+    if (!lower.includes('api error:')) return false;
+    if (TRANSIENT_API_ERROR_PATTERNS.some((pat) => lower.includes(pat))) return true;
+    return TRANSIENT_API_ERROR_STATUS_RE.test(line);
+  });
+}
+
+// paneShowsUnretryableAPIError detects failures a repeat cannot clear — an
+// authorization refusal or an exhausted quota. LINE-WISE and gated on the same
+// "API Error:" chrome as the transient detector, and the gate matters MORE
+// here: this verdict actively fails the task, so a false positive fails work
+// that genuinely completed. An agent working on hive's own quota-handling code
+// can legitimately print "budget_exceeded" in its final summary (the repo's
+// test files contain these strings verbatim); without the chrome gate that
+// completed turn would be booked as an environment failure. Claude renders
+// every real quota/authorization error under the chrome on the same line
+// ("API Error: 429 {\"type\":\"budget_exceeded\"...}"), so the gate costs
+// nothing for the errors this exists to catch. A chrome-less quota banner
+// (copilot/bob render some) falls through to the pre-#5094 behavior and is
+// part of the documented #5121 residual.
+function paneShowsUnretryableAPIError(text) {
+  const lines = paneTail(text, TRANSIENT_API_ERROR_TAIL_LINES).split('\n');
+  return lines.some((line) => {
+    const lower = line.toLowerCase();
+    if (!lower.includes('api error:')) return false;
+    if (UNRETRYABLE_API_ERROR_PATTERNS.some((pat) => lower.includes(pat))) return true;
+    return UNRETRYABLE_API_ERROR_STATUS_RE.test(line);
+  });
+}
+
+// paneShowsLoginRequiredError detects an AUTHENTICATION failure — the CLI's
+// credential expired mid-session and it is asking for /login. Neither of the
+// other two buckets fits: a retry cannot clear it (typing "try again" at an
+// expired credential is a wall), and failing it releases a task a human can
+// rescue in thirty seconds by logging in. The honest state is BLOCKED_ON_HUMAN
+// — a person genuinely is the only thing that can move it — which the hub
+// already renders with an attention flag.
+//
+// 401 is authentication, NOT the 403 the fatal bucket catches: the hub's #4400
+// rule is that /login fixes a 401 and fixes nothing about a 403. Ordering in
+// classifyTmuxPane preserves that: the fatal check runs first, so a line
+// carrying both a login hint and a 403/authorization refusal stays fatal.
+//
+// Without this, a mid-session credential expiry — the exact scenario #5088
+// reported — rendered "● Please run /login · API Error: 401 …" above the idle
+// prompt and was booked as a COMPLETED task.
+function paneShowsLoginRequiredError(text) {
+  const lines = paneTail(text, TRANSIENT_API_ERROR_TAIL_LINES).split('\n');
+  return lines.some((line) => {
+    const lower = line.toLowerCase();
+    if (lower.includes('please run /login')) return true;
+    return lower.includes('api error:') && /\b401\b/.test(line);
+  });
+}
+
+// tmuxSessionHasAttachedClient reports whether a human is currently attached to
+// the agent's tmux session. The hub-side nudge declines in exactly this case
+// (manager.go, tmuxSessionHasAttachedClientForAgent) so a watchdog never types
+// over someone who is sitting in the pane; the relay honors the same rule.
+// Failure to ask is treated as "attached", i.e. the cautious answer: it
+// withholds typing rather than risking it.
+function tmuxSessionHasAttachedClient() {
+  try {
+    const out = execSync(`tmux list-clients -t ${TMUX_SESSION} 2>/dev/null || true`,
+      { encoding: 'utf8', timeout: 15000 });
+    return String(out).trim().length > 0;
+  } catch (_) {
+    return true;
+  }
+}
+
+// tmuxSendNudge types a short literal message and submits it.
+//
+// Deliberately NOT tmuxSendKeys(): that function is the TASK-PROMPT path and
+// carries machinery a nudge must not trigger — a /clear once the context
+// crosses CLEAR_CONTEXT_THRESHOLD_PCT, the periodic every-N-tasks CLI restart,
+// and the /tmp sweep. A nudge exists precisely to preserve the session context
+// that makes recovery cheap; clearing or restarting would throw away the very
+// thing being rescued.
+function tmuxSendNudge(message) {
+  execSync(`tmux send-keys -t ${TMUX_SESSION} -l '${message}'`, { timeout: 15000 });
+  sleepMs(ENTER_DELAY_MS);
+  tmuxSendEnters();
+}
+
 function classifyTmuxPane(text) {
   let hasIdlePrompt, hasCompletionMarker, isWorking;
 
@@ -1808,6 +1972,38 @@ function classifyTmuxPane(text) {
 
   if (paneLooksBlockedOnHuman(text)) return PANE_STATE_BLOCKED_ON_HUMAN;
   if (isWorking) return PANE_STATE_WORKING;
+  // A turn that ended in a RETRYABLE API failure is not a completed turn
+  // (kubestellar/hive#5094). This must sit above the completion test: the
+  // completion markers below are "the turn stopped" signals — claude's
+  // "✻ …ed for 9m 24s" duration summary is printed for an errored turn exactly
+  // as for a successful one — so without this check an API error reads as
+  // success and the task is reported complete having shipped nothing.
+  //
+  // Below isWorking, though: a CLI that is streaming or mid-retry (Claude Code
+  // retries some failures itself, rendering a countdown) is left alone, because
+  // interrupting that would CAUSE the stall this is meant to prevent.
+  // Unretryable FIRST, so a pane carrying both signals fails rather than retries
+  // — the veto has to win, or a 403 rendered under the same "API Error:" chrome
+  // as a dropped connection would be nudged forever.
+  //
+  // Both branches exist for one reason: a turn that ended in an API error did not
+  // complete. Closing only the retryable half (the original #5094 fix) left a 403
+  // or an exhausted quota falling straight through to the completion test and
+  // being booked as a finished task — the same defect, one branch over.
+  if (paneShowsUnretryableAPIError(text)) {
+    return PANE_STATE_FATAL_API_ERROR;
+  }
+  // Authentication (401 / "Please run /login") AFTER the fatal check — a line
+  // carrying both a login hint and an authorization refusal must stay fatal,
+  // because /login fixes a 401 and fixes nothing about a 403 (#4400). A human
+  // logging in is the only recovery, so this is blocked-on-human, not an error
+  // to retry or fail.
+  if (paneShowsLoginRequiredError(text)) {
+    return PANE_STATE_BLOCKED_ON_HUMAN;
+  }
+  if (paneShowsTransientAPIError(text)) {
+    return PANE_STATE_TRANSIENT_API_ERROR;
+  }
   if (hasIdlePrompt && hasCompletionMarker) return PANE_STATE_IDLE_COMPLETE;
   return PANE_STATE_WORKING;
 }
@@ -1921,6 +2117,18 @@ let lastPaneChangeAt = 0;
 // since we first noticed". Reset by resetPaneStallClock() and by any tick
 // where paneStalled() is false (new output resets the whole stall story).
 let stallConfirmCount = 0;
+
+// Transient-API-error nudge state (kubestellar/hive#5094), scoped to the
+// CURRENT task: how many retries we have typed and when the last one went out.
+// Both are reset at task start — a previous task's exhausted budget must not
+// deny this one its retries.
+let transientNudgeCount = 0;
+let lastTransientNudgeAt = 0;
+
+function resetTransientNudgeState() {
+  transientNudgeCount = 0;
+  lastTransientNudgeAt = 0;
+}
 
 function resetPaneStallClock() {
   lastPaneFingerprint = null;
@@ -2070,6 +2278,9 @@ function startProgressReporting() {
   // Every task starts with a clean stall clock — the previous task's pane
   // fingerprint says nothing about this one.
   resetPaneStallClock();
+  // Likewise the retry budget: a previous task that exhausted its API-error
+  // retries must not deny this one its own (#5094).
+  resetTransientNudgeState();
 
   taskTimeoutHandle = setTimeout(() => {
     if (currentTask) {
@@ -2082,6 +2293,82 @@ function startProgressReporting() {
 
 // One iteration of the progress/completion/crash-detection loop. Extracted from
 // the setInterval body so it can be driven deterministically from tests.
+// handleTransientAPIError recovers a task whose turn ended in a retryable API
+// failure (kubestellar/hive#5094).
+//
+// Before this existed the pane classified as IDLE_COMPLETE and the relay
+// reported the task COMPLETED — the hub booked a completion that shipped
+// nothing, reassigned the contributor, and the half-finished work was orphaned.
+// Every branch here is a way of NOT doing that: retry it, hand it to the human
+// already watching, or fail it honestly. None of them claims success.
+//
+// The goose backend has had this shape since long before #5094 — see
+// checkTmuxPaneState, which presses Enter on a goose network error and returns
+// WORKING. This generalises that precedent rather than inventing one.
+function handleTransientAPIError(tmuxLines) {
+  if (!currentTask) return;
+  const now = Date.now();
+  const progressBase = {
+    type: 'task_progress',
+    seq: nextSeq(),
+    task_id: currentTask.task_id,
+    task_gen: currentTask.task_gen,
+    tmux_output: tmuxLines,
+  };
+
+  // A human attached to the pane owns it. The hub-side nudge declines in
+  // exactly this case so a watchdog never types over someone; the honest
+  // fallback is to say the agent needs attention, which is true, rather than to
+  // stay silent and let the stall backstop eventually fail the task.
+  if (tmuxSessionHasAttachedClient()) {
+    console.warn(`Task ${currentTask.task_id} stopped on a retryable API error; ` +
+      `a client is attached to ${TMUX_SESSION}, so not typing a retry`);
+    send({
+      ...progressBase,
+      status: 'blocked_on_human',
+      attention: true,
+      summary: 'Agent stopped on a retryable API error; a human is attached to the pane',
+      ...progressModelFields(),
+    });
+    return;
+  }
+
+  // Bounded: a persistent upstream failure ends as an honest environment
+  // failure, which the hub records and can re-offer, rather than an infinite
+  // typing loop or a fabricated completion.
+  if (transientNudgeCount >= TRANSIENT_API_ERROR_MAX_NUDGES) {
+    failCurrentTask(
+      `agent stopped on a retryable API error and did not recover after ` +
+      `${TRANSIENT_API_ERROR_MAX_NUDGES} retries`,
+      { kind: 'environment' }
+    );
+    return;
+  }
+
+  // Give the previous retry time to land before typing another.
+  if (lastTransientNudgeAt && now - lastTransientNudgeAt < TRANSIENT_API_ERROR_NUDGE_COOLDOWN_MS) {
+    send({ ...progressBase, status: 'working', ...progressModelFields() });
+    return;
+  }
+
+  transientNudgeCount++;
+  lastTransientNudgeAt = now;
+  console.warn(`Transient API error on ${currentTask.task_id} — sending retry ` +
+    `${transientNudgeCount}/${TRANSIENT_API_ERROR_MAX_NUDGES}`);
+  try {
+    tmuxSendNudge(TRANSIENT_API_ERROR_NUDGE_MESSAGE);
+  } catch (e) {
+    console.error('Failed to send the retry nudge:', e.message);
+  }
+  send({
+    ...progressBase,
+    status: 'working',
+    summary: `Retrying after a transient API error ` +
+      `(${transientNudgeCount}/${TRANSIENT_API_ERROR_MAX_NUDGES})`,
+    ...progressModelFields(),
+  });
+}
+
 function progressTick() {
   lastProgressTick = Date.now();
   if (!currentTask) return;
@@ -2218,6 +2505,17 @@ function progressTick() {
       tmux_output: tmuxLines,
       ...progressModelFields(),
     });
+  } else if (paneState === PANE_STATE_TRANSIENT_API_ERROR) {
+    handleTransientAPIError(tmuxLines);
+  } else if (paneState === PANE_STATE_FATAL_API_ERROR) {
+    // No retry: an authorization refusal or an exhausted quota cannot be cleared
+    // by repeating the request (#4400, #4583). Hand the task back honestly so the
+    // hub records it and can re-offer it once an operator fixes the cause —
+    // rather than claiming a completion that shipped nothing.
+    failCurrentTask(
+      'agent stopped on an API failure a retry cannot clear (authorization or quota)',
+      { kind: 'environment' }
+    );
   } else {
     // Stall backstop: a pane frozen this long is not evidence of work, and
     // continuing to report "working" would renew the hub's lease forever.
@@ -2604,6 +2902,18 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     PANE_STATE_WORKING,
     PANE_STATE_BLOCKED_ON_HUMAN,
     PANE_STATE_IDLE_COMPLETE,
+    PANE_STATE_TRANSIENT_API_ERROR,
+    PANE_STATE_FATAL_API_ERROR,
+    paneShowsTransientAPIError,
+    paneShowsUnretryableAPIError,
+    paneShowsLoginRequiredError,
+    handleTransientAPIError,
+    resetTransientNudgeState,
+    tmuxSessionHasAttachedClient,
+    TRANSIENT_API_ERROR_MAX_NUDGES,
+    TRANSIENT_API_ERROR_NUDGE_MESSAGE,
+    getTransientNudgeCount: () => transientNudgeCount,
+    __clearTransientNudgeCooldown: () => { lastTransientNudgeAt = 0; },
     // Run one progress tick with the grace period already elapsed.
     __crashTick: () => { taskAssignedAt = Date.now() - TASK_GRACE_PERIOD_MS - 1; progressTick(); },
     paneStalled,
