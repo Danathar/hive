@@ -1294,6 +1294,11 @@ contribute-hive backend="" mode="docker": check-version
               echo "      claude   # then /login, and quit once it reports you signed in" >&2
               echo "" >&2
               echo "  Then re-run this command." >&2
+              # The staging dir already holds a copy of ~/.claude, and the
+              # cleanup trap that would remove it is not registered until just
+              # before the container starts — exiting here without this rm would
+              # leave that credential copy sitting in /tmp indefinitely.
+              rm -rf "${CLI_STAGE}"
               exit 1
             fi
             echo "⚠  No usable Claude credential was staged into the container."
