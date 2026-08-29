@@ -105,6 +105,22 @@ type PRRequestAuthorizer func(agent string, fileUID int) error
 // immediately when it never starts), so callers — tests above all — can JOIN
 // the loop after cancelling instead of sleeping and hoping: an unjoined
 // watcher outliving its test races the test's global-seam restores.
+// PROpenedHook is notified when the watcher opens a NEW PR for an agent.
+type PROpenedHook func(agent, repo string, number int, url string)
+
+// SetPROpenedHook installs (or with nil, removes) the PR-opened hook. Safe
+// to call before or after the watcher starts.
+func (c *Client) SetPROpenedHook(fn PROpenedHook) {
+	if c == nil {
+		return
+	}
+	if fn == nil {
+		c.prOpenedHook.Store(nil)
+		return
+	}
+	c.prOpenedHook.Store(&fn)
+}
+
 func (c *Client) StartPRRequestWatcher(ctx context.Context, authz PRRequestAuthorizer, holdLabel func() bool, nowFn func() time.Time) <-chan struct{} {
 	done := make(chan struct{})
 	if c == nil {
@@ -277,6 +293,12 @@ func (c *Client) handleOnePRRequest(ctx context.Context, path string, nowFn func
 	// A reused PR is recorded too (reused=true): the watcher may be
 	// re-processing a request that partially succeeded, and the invocation
 	// that produced the branch is the same.
+	if hook := c.prOpenedHook.Load(); hook != nil && *hook != nil && !res.AlreadyExisted {
+		// Progress surfaces (the Linear session emitter) learn about the PR
+		// here, on the path that actually opened it. Own goroutine: an HTTP
+		// post to a tracker must never delay consuming the request file.
+		go (*hook)(req.Agent, req.Repo, res.Number, res.URL)
+	}
 	c.recordCreationAudit(AuditActionAgentPRCreated, meta,
 		"repo", req.Repo,
 		"number", strconv.Itoa(res.Number),

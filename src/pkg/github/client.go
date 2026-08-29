@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	gh "github.com/google/go-github/v72/github"
@@ -70,6 +71,11 @@ type Client struct {
 	// `exec hive-open-pr`). nil means "never hold" (backward-compatible no-op).
 	// Set by StartPRRequestWatcher.
 	prHoldLabel func() bool
+	// prOpenedHook, when set, is told about every NEW PR the request watcher
+	// opens (agent, repo, number, url) — the seam progress surfaces such as
+	// the Linear session emitter hook. atomic so SetPROpenedHook is safe
+	// while the watcher goroutine runs.
+	prOpenedHook atomic.Pointer[PROpenedHook]
 	// mergeAuthz gates merge requests from the merge-request watcher against the
 	// per-agent ACMM merge-policy (CanMerge) + forge-resistance AND the merge
 	// TARGET (pinned SHA + governor merge-eligible membership; see

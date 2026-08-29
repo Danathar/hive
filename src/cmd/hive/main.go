@@ -2570,6 +2570,14 @@ func main() {
 		return agent.LinearCredential{}
 	})
 
+	// In-flight ledger + session PR link (Linear GitHub-parity follow-ups):
+	// the scheduler withholds work a Linear session is already working, and
+	// the pr-request watcher narrates opened PRs into the session.
+	sched.SetInflightLookup(dashSrv.LinearSessionHolder)
+	if ghClient != nil {
+		ghClient.SetPROpenedHook(dashSrv.LinearAgentPROpened)
+	}
+
 	dashSrv.RegisterAPI(&dashboard.Dependencies{
 		Config:           cfg,
 		AgentMgr:         agentMgr,

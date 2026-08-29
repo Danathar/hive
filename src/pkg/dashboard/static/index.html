@@ -21120,6 +21120,8 @@ function burnAreaChart() {
           rows.push('<div>No Linear workspace connected.</div>');
         }
         rows.push(`<div>Session agent: ${st.session_agent ? `<strong>${esc(st.session_agent)}</strong>` : `<span style="color:var(--yellow)">${esc(st.session_agent_error || 'not resolved')}</span>`}</div>`);
+        const credLabel = { oauth: 'connected app OAuth token (writes authored by the Hive app user)', api_key: 'work-source API key (no workspace connected — writes authored by the key owner)', none: 'none — ISSUES_ONLY+ agents cannot write to Linear' }[st.agent_credential || 'none'];
+        rows.push(`<div>Agent credential: <span style="color:${st.agent_credential === 'none' ? 'var(--yellow)' : 'inherit'}">${esc(credLabel)}</span></div>`);
         rows.push(`<div>Webhook endpoint: <code>${esc(st.webhook_path || '/api/linear/webhook')}</code> · OAuth callback: <code>${esc(st.callback_path || '/linear/callback')}</code></div>`);
         const sessions = Array.isArray(st.sessions) ? st.sessions : [];
         if (sessions.length) {

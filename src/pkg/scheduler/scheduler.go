@@ -34,6 +34,7 @@ type Scheduler struct {
 	classifier           ioscan.Classifier
 	classifierThresholds ioscan.Thresholds
 	classifierBudget     int
+	inflight             InflightLookup
 	mu                   sync.RWMutex
 }
 
@@ -213,6 +214,7 @@ func (s *Scheduler) substituteTemplateWithPolicy(template string, actionable *gi
 	} else {
 		agentIssuesForList = filterByLane(issues, baseName)
 	}
+	agentIssuesForList, heldInflight := s.splitInflight(agentIssuesForList)
 	issueList, issueFailClosed := s.formatIssueListWithPolicy(agentIssuesForList)
 	prList, prFailClosed := s.formatPRListWithPolicy(actionable)
 	if issueFailClosed || prFailClosed {
@@ -275,6 +277,7 @@ func (s *Scheduler) substituteTemplateWithPolicy(template string, actionable *gi
 		"AUTHORIZED_REPOS":      lit(s.buildReposSection()),
 		"GH_AUTH":               lit(s.ghAuthInstructions()),
 		"WORK_TRACKER":          lit(s.workTrackerSection()),
+		"IN_FLIGHT":             lit(inflightNote(heldInflight)),
 		"PROJECT_ORG":           lit(s.cfg.Project.Org),
 		"PROJECT_NAME":          lit(s.cfg.Project.Name),
 		"PROJECT_PRIMARY_REPO":  lit(fullPrimaryRepo),
@@ -447,7 +450,7 @@ func (s *Scheduler) BuildKickMessages(actionable *github.ActionableResult, agent
 			messages = append(messages, KickMessage{
 				Agent:     agentName,
 				Message:   msg,
-				IssueRefs: issueRefsForAgent(agentName, classifiedIssues),
+				IssueRefs: issueRefsForAgent(agentName, s.freeOfInflight(classifiedIssues)),
 			})
 		}
 	}
@@ -606,6 +609,10 @@ func (s *Scheduler) BuildAgentMessage(agentName string, issues []github.Issue, a
 		// policy maps onto Linear (identity, auth, filing, PR linking, hold).
 		// Same seam, same reason — a customized template cannot omit it.
 		message = s.addWorkTrackerSection(message)
+		// Items a live session already holds were dropped from the list
+		// above; say so at the same seam so a customized template cannot
+		// leave the agent wondering where its delegated issue went.
+		message = s.addInflightNote(message, issues)
 	}()
 
 	baseName := s.cfg.BaseAgentName(agentName)

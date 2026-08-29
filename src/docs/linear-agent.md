@@ -185,13 +185,38 @@ connected to it.
 ### Session kicks and governor kicks
 
 A delegated issue reaches the hive twice: the webhook opens an agent
-session (kicked immediately to `session_agent`), and — with
+session (kicked immediately to the session agent), and — with
 `assigned_only: true` — the same issue is enumerated into the governor's
-backlog on the next sweep. This mirrors GitHub, where a webhook-channel kick
-and a governor kick for the same issue also coexist. The governor kick
-rotates the session's kick log, which the responder reports into the
-session as "finished this run"; the follow-on run carries on with the same
-identifier in its work list.
+backlog on the next sweep. Kicks never interrupt a running agent
+(`SendKick` waits for the CLI's input prompt), so the risk is a *re-hand*:
+the governor kicking the same issue again the moment the session's run
+ends, or a second agent in the lane taking it in parallel.
+
+The session tracker is therefore the in-flight ledger. While a session is
+`working`, the scheduler withholds its issue from every governor kick's
+`${ISSUE_LIST}` and `IssueRefs`, and says so in an **In Flight** note
+appended at the same seam as the tracker section (`${IN_FLIGHT}` places it
+explicitly). The hold releases when the session finishes — its kick log
+archives — or fails. GitHub-sourced items are never session-held.
+
+### Which agent takes sessions
+
+`work_source.linear.session_agent` when set; otherwise the sole configured
+agent; otherwise the sole enabled agent whose ACMM mode allows tracker
+writes (`ISSUES_ONLY` and above) — which is what makes the L3 pack (six
+agents, quality the only writer) work without extra config. Two or more
+writers is ambiguous and the session is acknowledged with an error naming
+the setting.
+
+### PRs in the session
+
+When the hive's `hive-open-pr` watcher opens a PR for an agent with an
+active session, the PR is narrated into the session as an `action`
+activity and attached to the session's external links
+(`agentSessionUpdate.externalUrls`), so the person who delegated the issue
+sees where the work landed before the run ends. Linear's GitHub integration
+attaches the same PR to the *issue* on its own; this is the session
+surface.
 
 ## Proxy enforcement
 
@@ -234,3 +259,11 @@ workspace:
 8. **PR auto-link**: open a PR on a branch named `<agent>/team-123-slug` with
    `Fixes TEAM-123` in the body and confirm Linear attaches it and moves the
    issue to In Progress, then Done on merge.
+9. **Session PR link**: with a session `working`, have the agent open a PR
+   through `hive-open-pr` and confirm the session shows an "Opened pull
+   request" activity and the PR under its external links.
+10. **In-flight withholding**: while a session is `working`, trigger a
+    governor kick for the same agent and confirm the delegated issue is
+    absent from its work list and named under "In Flight"; after the run
+    ends, confirm it is handed out again on the next sweep (or has left the
+    enumerated states via the PR).
