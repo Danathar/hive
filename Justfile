@@ -817,7 +817,15 @@ contribute-hive backend="" mode="docker": check-version
     fi
     echo "=== Hive Contributor Agent (ClankeR) ==="
     echo "Backend:  ${BACKEND}"
-    echo "Hub:      {{hive_hub}}"
+    # The SOURCED value, not {{hive_hub}}. `hive_hub := env("HIVE_HUB", …)` is
+    # resolved by just at PARSE time, from the environment just itself was
+    # started with — but HIVE_HUB arrives only when this recipe sources
+    # contributor.env above. Interpolating {{hive_hub}} here therefore printed
+    # the built-in default on every machine whose hub comes from the config
+    # file, i.e. every hosted spoke, while the relay connected somewhere else
+    # entirely. Same shape as the ${_HUB:-{{hive_hub}}} fallback contribute-setup
+    # already uses.
+    echo "Hub:      ${HIVE_HUB:-{{hive_hub}}}"
     echo "GitHub:   $(gh api user --jq '.login' 2>/dev/null || echo 'authenticated')"
     echo ""
 
@@ -1487,15 +1495,34 @@ contribute-hive backend="" mode="docker": check-version
 contribute-status:
     #!/usr/bin/env bash
     set -euo pipefail
-    HUB_HTTP=$(echo "{{hive_hub}}" | sed 's|^wss://|https://|;s|^ws://|http://|;s|/contribute$||')
-    echo "=== Hub Status ==="
-    curl -sf "${HUB_HTTP}/api/contribute/status" 2>/dev/null | jq . || echo "Hub unreachable at ${HUB_HTTP}"
+    # Resolve the hub from contributor.env BEFORE deriving any URL from it.
+    # {{hive_hub}} is just's PARSE-time value and cannot see the config file this
+    # recipe sources, so every query below used to go to the built-in default hub
+    # while reporting a CONTRIBUTOR_ID that only exists on the configured one —
+    # a guaranteed 404 ("Could not fetch profile") for anyone on a hosted spoke.
+    CONTRIBUTOR_ID=""
     if [[ -f "{{config_dir}}/contributor.env" ]]; then
+      # shellcheck source=/dev/null
       source "{{config_dir}}/contributor.env"
-      echo ""
-      echo "=== Your Profile ==="
-      curl -sf "${HUB_HTTP}/api/contributors/${CONTRIBUTOR_ID}" 2>/dev/null | jq . || echo "Could not fetch profile"
     fi
+    HIVE_HUB="${HIVE_HUB:-{{hive_hub}}}"
+    # HIVE_HUB and CONTRIBUTOR_ID are comma-separated and POSITION-ALIGNED
+    # (hub[i] ↔ id[i]) for a contributor registered with more than one hub — the
+    # same convention contributor.env documents and the relay already honors. Walk
+    # them together rather than reporting only the first.
+    IFS=',' read -r -a _HUBS <<< "${HIVE_HUB}"
+    IFS=',' read -r -a _IDS <<< "${CONTRIBUTOR_ID}"
+    for i in "${!_HUBS[@]}"; do
+      HUB_HTTP=$(echo "${_HUBS[$i]}" | sed 's|^wss://|https://|;s|^ws://|http://|;s|/contribute$||')
+      echo "=== Hub Status (${HUB_HTTP}) ==="
+      curl -sf "${HUB_HTTP}/api/contribute/status" 2>/dev/null | jq . || echo "Hub unreachable at ${HUB_HTTP}"
+      if [[ -n "${_IDS[$i]:-}" ]]; then
+        echo ""
+        echo "=== Your Profile (${_IDS[$i]}) ==="
+        curl -sf "${HUB_HTTP}/api/contributors/${_IDS[$i]}" 2>/dev/null | jq . || echo "Could not fetch profile"
+      fi
+      echo ""
+    done
 
 # Browse available Hive projects to contribute to
 contribute-browse:
