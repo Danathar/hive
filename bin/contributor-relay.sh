@@ -137,6 +137,11 @@ const PANE_STATE_IDLE_COMPLETE = 'IDLE_COMPLETE';
 // stall: the turn ended, but it ended in an error, and the same request can
 // succeed on a retry.
 const PANE_STATE_TRANSIENT_API_ERROR = 'TRANSIENT_API_ERROR';
+// An API failure a retry CANNOT clear — an authorization refusal or an exhausted
+// quota — left the CLI parked at its idle prompt. Also not completion: the turn
+// ended having shipped nothing. Retrying it would loop the agent against a wall,
+// so this is failed at once rather than nudged.
+const PANE_STATE_FATAL_API_ERROR = 'FATAL_API_ERROR';
 
 // ── Transient API-error recovery (kubestellar/hive#5094) ─────────────────────
 //
@@ -1940,7 +1945,18 @@ function classifyTmuxPane(text) {
   // Below isWorking, though: a CLI that is streaming or mid-retry (Claude Code
   // retries some failures itself, rendering a countdown) is left alone, because
   // interrupting that would CAUSE the stall this is meant to prevent.
-  if (paneShowsTransientAPIError(text) && !paneShowsUnretryableAPIError(text)) {
+  // Unretryable FIRST, so a pane carrying both signals fails rather than retries
+  // — the veto has to win, or a 403 rendered under the same "API Error:" chrome
+  // as a dropped connection would be nudged forever.
+  //
+  // Both branches exist for one reason: a turn that ended in an API error did not
+  // complete. Closing only the retryable half (the original #5094 fix) left a 403
+  // or an exhausted quota falling straight through to the completion test and
+  // being booked as a finished task — the same defect, one branch over.
+  if (paneShowsUnretryableAPIError(text)) {
+    return PANE_STATE_FATAL_API_ERROR;
+  }
+  if (paneShowsTransientAPIError(text)) {
     return PANE_STATE_TRANSIENT_API_ERROR;
   }
   if (hasIdlePrompt && hasCompletionMarker) return PANE_STATE_IDLE_COMPLETE;
@@ -2446,6 +2462,15 @@ function progressTick() {
     });
   } else if (paneState === PANE_STATE_TRANSIENT_API_ERROR) {
     handleTransientAPIError(tmuxLines);
+  } else if (paneState === PANE_STATE_FATAL_API_ERROR) {
+    // No retry: an authorization refusal or an exhausted quota cannot be cleared
+    // by repeating the request (#4400, #4583). Hand the task back honestly so the
+    // hub records it and can re-offer it once an operator fixes the cause —
+    // rather than claiming a completion that shipped nothing.
+    failCurrentTask(
+      'agent stopped on an API failure a retry cannot clear (authorization or quota)',
+      { kind: 'environment' }
+    );
   } else {
     // Stall backstop: a pane frozen this long is not evidence of work, and
     // continuing to report "working" would renew the hub's lease forever.
@@ -2833,6 +2858,7 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     PANE_STATE_BLOCKED_ON_HUMAN,
     PANE_STATE_IDLE_COMPLETE,
     PANE_STATE_TRANSIENT_API_ERROR,
+    PANE_STATE_FATAL_API_ERROR,
     paneShowsTransientAPIError,
     paneShowsUnretryableAPIError,
     handleTransientAPIError,

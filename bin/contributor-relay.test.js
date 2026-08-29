@@ -3718,6 +3718,44 @@ test('#5094 the retry budget resets per task', () => {
   } finally { teardown(relay); }
 });
 
+test('#5094 an unretryable API failure is not reported complete either', () => {
+  // The first fix closed only the RETRYABLE case. A 403 or an exhausted quota is
+  // not in the retryable set, so it fell straight through to the completion test
+  // and was booked as a finished task exactly as a dropped connection used to be
+  // — the same defect, one branch over.
+  const pane403 = CLAUDE_API_ERROR_PANE.replace(
+    'API Error: Connection lost mid-response. The response above may be incomplete.',
+    'API Error: 403 Forbidden');
+  const relay = loadRelay({ backend: 'claude', paneText: pane403, attachedClients: false });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-403');
+    relay.__crashTick();
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 0,
+      'a 403 turn shipped nothing and must never be booked as a completion');
+    const failures = relay.__sent.filter(m => m.type === 'task_failed');
+    assert.strictEqual(failures.length, 1, 'it should be handed back immediately, not retried');
+    assert.strictEqual(failures[0].failure_kind, 'environment');
+  } finally { teardown(relay); }
+});
+
+test('#5094 an unretryable failure is failed at once, with no retry typed', () => {
+  const paneQuota = CLAUDE_API_ERROR_PANE.replace(
+    'API Error: Connection lost mid-response. The response above may be incomplete.',
+    'API Error: 429 {"error":{"type":"budget_exceeded"}}');
+  const relay = loadRelay({ backend: 'claude', paneText: paneQuota, attachedClients: false });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-quota');
+    const before = relay.__tmuxSends().length;
+    relay.__crashTick();
+    const sends = relay.__tmuxSends().slice(before);
+    assert.ok(!sends.some(c => c.includes(relay.TRANSIENT_API_ERROR_NUDGE_MESSAGE)),
+      'retrying a quota failure loops the agent against a wall (#4583)');
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 0);
+  } finally { teardown(relay); }
+});
+
 test('#5094 with a human attached the relay asks for attention instead of typing over them', () => {
   // The hub-side nudge declines when someone is attached (manager.go,
   // tmuxSessionHasAttachedClientForAgent) so a watchdog never types over a
