@@ -69,7 +69,7 @@ Important environment variables:
 | --- | --- | --- |
 | `HIVE_HUB` | value from `contributor.env`, else public hub default | WebSocket hub(s) to subscribe to. Use comma-separated URLs for multi-hub mode. Direct Compose reads the registered value from the mounted config file. |
 | `HIVE_REGISTRATION_TOKEN` | value from `contributor.env` | Registration token(s), positional with `HIVE_HUB` when multiple hubs are listed. Required; run `just contribute-setup` first. |
-| `AGENT_BACKEND` | `claude` | CLI/backend to run (`claude`, `copilot`, `goose`, `bob`, `codex`, `pi`, `aider`, `litellm`, `agy`, `opencode`, depending on image support and credentials). `agy` is not in the contributor image and cannot inherit a sign-in, so run it with `just contribute-hive agy local`. `opencode` only runs headless (`CONTRIBUTOR_MODE=headless`) — it has no interactive-tmux wiring. |
+| `AGENT_BACKEND` | `claude` | CLI/backend to run (`claude`, `copilot`, `goose`, `bob`, `codex`, `pi`, `aider`, `litellm`, `agy`, `opencode`, `kilo`, depending on image support and credentials). `agy` is not in the contributor image and cannot inherit a sign-in, so run it with `just contribute-hive agy local`. `opencode` and `kilo` only run headless (`CONTRIBUTOR_MODE=headless`) — it has no interactive-tmux wiring. |
 | `AGENT_MODEL` | unset (backend default) | Optional model override passed to the contributor agent (e.g. `claude-sonnet-4-6`, `gpt-4o`, `gemini-2.5-pro`). Declared to the hive when the relay connects. |
 | `AGENT_REASONING_EFFORT` | unset | Reasoning effort override. Consumed by `codex` (`-c model_reasoning_effort`) and by `agy` (`--effort low\|medium\|high`, required whenever a model is set, else agy ignores the model). Ignored by other backends. |
 | `CONTRIBUTOR_MODE` | `interactive` | `interactive` keeps a tmux/TTY session. `headless` is for one-shot/no-TTY task delivery. |
@@ -103,6 +103,7 @@ mode fixed for Goose in [#2393](https://github.com/kubestellar/hive/issues/2393)
 | `bob` | `.bob/AGENTS.md`, `CLAUDE.md` (compatibility) |
 | `agy` | `CLAUDE.md` |
 | `opencode` | `AGENTS.md`, `CLAUDE.md` |
+| `kilo` | `AGENTS.md`, `CLAUDE.md` |
 | anything else | `CLAUDE.md` only — the `*` fallback |
 
 A backend that reads neither `CLAUDE.md` nor one of the names above falls into
@@ -183,6 +184,7 @@ The relay speaks to whatever backend you set up — pass it to `contribute-setup
 | `litellm` | Claude Code pointed at **your own LiteLLM proxy**: `export HIVE_LITELLM_ENDPOINT=… HIVE_LITELLM_API_KEY=…` (exported locally, never sent to the hive) |
 | `agy` | Antigravity — host mode only; it signs in through an interactive Google OAuth flow with no API-key mode, so a container cannot inherit its credentials |
 | `opencode` | Provider-agnostic (75+ providers); `opencode auth login` writes a credential to `~/.local/share/opencode/auth.json`. Headless-only: `opencode run "<prompt>"` is its one-shot entry point, wired via `CONTRIBUTOR_MODE=headless`; there is no interactive-tmux launch path for it |
+| `kilo` | Headless-only: `kilo run "<prompt>" --auto`; set `KILO_AUTH_CONTENT` / `KILO_CONFIG_CONTENT` or `KILO_API_KEY` (optional `KILO_ORG_ID`). Hive forwards only those values and never mounts a Kilo home/config directory. `--auto` is approval, not a sandbox. |
 
 ## Choosing a model
 

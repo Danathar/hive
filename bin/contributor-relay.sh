@@ -817,6 +817,8 @@ const HEADLESS_BACKENDS = {
   // CONTRIBUTOR_MODE=headless. `opencode run` exits with a real status code
   // on completion, the exit-code contract runHeadlessTask() relies on.
   opencode: { flag: 'run' },
+  // Kilo is OpenCode-derived but uses distinct credentials and config.
+  kilo: { flag: 'run' },
 };
 
 // headlessSupportsBackend reports whether the configured backend has a known
