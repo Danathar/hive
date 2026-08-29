@@ -1741,6 +1741,99 @@ contribute-k8s namespace="hive-contributor" outfile="" image_tag="v4":
       printf '%s' "$1" | base64 | tr -d '\n'
     }
 
+    # ── Backend credential preflight (#5103) ──
+    #
+    # Before this existed the generated workload carried NO credential for the
+    # agent CLI it was told to run: the pod authenticated to the hub
+    # (HIVE_REGISTRATION_TOKEN) and to GitHub (GH_TOKEN), then launched a
+    # backend with nothing to authenticate WITH — it deployed cleanly, went
+    # Ready, accepted a task, and could do no work. All five allow-listed
+    # headless backends had the gap.
+    #
+    # Each backend below either contributes its credential material to the
+    # Secret, or the generation REFUSES with a message naming exactly what is
+    # missing — a refusal at generation beats a manifest that cannot work.
+    # HIVE_K8S_ALLOW_MISSING_BACKEND_CREDENTIALS=1 is the explicit escape hatch
+    # for an operator who supplies credentials out of band (their own Secret,
+    # an injector, a patched pod); it downgrades every refusal to a stderr
+    # warning, mirroring the unsupported-backend warning above.
+    #
+    # A backend that is not headless-capable at all skips this preflight: the
+    # warning above already says the pod cannot work, and failing it again over
+    # credentials would bury the real message.
+    CRED_YAML=""
+    add_cred() { CRED_YAML+="  $1: $2"$'\n'; }
+    CRED_MISSING=""
+    if [[ "$BACKEND_HEADLESS_OK" == true ]]; then
+      case "$BACKEND" in
+        claude)
+          # Two routes, explicit key first (operator intent beats a file that
+          # happens to exist): ANTHROPIC_API_KEY travels as itself and the CLI
+          # reads it natively; otherwise the operator's logged-in OAuth
+          # credential file travels base64-wrapped in one env var and the
+          # container entrypoint materializes it at ~/.claude/.credentials.json
+          # (bin/contributor-agent.sh). The pod refreshes tokens against its
+          # own ephemeral copy; the laptop's file is never written back.
+          if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+            add_cred "ANTHROPIC_API_KEY" "$(b64 "${ANTHROPIC_API_KEY}")"
+          elif [[ -f "${HOME}/.claude/.credentials.json" ]]; then
+            add_cred "HIVE_CLAUDE_CREDENTIALS_B64" "$(b64 "$(base64 < "${HOME}/.claude/.credentials.json" | tr -d '\n')")"
+          else
+            CRED_MISSING="claude has no credential to ship: set ANTHROPIC_API_KEY in this shell, or log the CLI in once on this machine (run 'claude', then /login) so ~/.claude/.credentials.json exists."
+          fi
+          ;;
+        litellm)
+          # The entrypoint maps these to ANTHROPIC_BASE_URL/ANTHROPIC_API_KEY
+          # for the claude CLI (bin/contributor-agent.sh) — same wiring the
+          # laptop container path uses. The endpoint is persisted by setup; the
+          # key is env-only by design and must be present when generating.
+          if [[ -n "${HIVE_LITELLM_ENDPOINT:-}" && -n "${HIVE_LITELLM_API_KEY:-}" ]]; then
+            add_cred "HIVE_LITELLM_ENDPOINT" "$(b64 "${HIVE_LITELLM_ENDPOINT}")"
+            add_cred "HIVE_LITELLM_API_KEY" "$(b64 "${HIVE_LITELLM_API_KEY}")"
+          else
+            CRED_MISSING="litellm needs HIVE_LITELLM_ENDPOINT and HIVE_LITELLM_API_KEY set in this shell when generating."
+          fi
+          ;;
+        goose)
+          # The entrypoint writes ~/.config/goose/config.yaml from
+          # GOOSE_PROVIDER/GOOSE_MODEL if absent; goose reads GOOSE_API_KEY
+          # from the environment. A hosted provider without its key cannot
+          # work, so the key is required alongside the provider; the local
+          # ollama default that works on a laptop does not exist in a pod.
+          if [[ -n "${GOOSE_PROVIDER:-}" && -n "${GOOSE_API_KEY:-}" ]]; then
+            add_cred "GOOSE_PROVIDER" "$(b64 "${GOOSE_PROVIDER}")"
+            add_cred "GOOSE_API_KEY" "$(b64 "${GOOSE_API_KEY}")"
+            if [[ -n "${GOOSE_MODEL:-}" ]]; then add_cred "GOOSE_MODEL" "$(b64 "${GOOSE_MODEL}")"; fi
+          else
+            CRED_MISSING="goose needs GOOSE_PROVIDER and GOOSE_API_KEY set in this shell when generating (GOOSE_MODEL optional)."
+          fi
+          ;;
+        copilot|codex)
+          # Both authenticate through OAuth state directories (~/.copilot,
+          # ~/.codex) whose refresh/rewrite behavior inside an unattended pod
+          # is UNVERIFIED — shipping a mechanism that may sign the pod out
+          # mid-task would recreate this bug with extra steps. Refuse honestly
+          # and point at the paths that are verified. Plumbing these is
+          # tracked in kubestellar/hive#5103.
+          CRED_MISSING="${BACKEND} authenticates via an OAuth state directory whose behavior in an unattended pod is unverified (kubestellar/hive#5103); use 'just contribute-hive ${BACKEND}' (container) or a claude/litellm/goose pod instead."
+          ;;
+      esac
+    fi
+    if [[ -n "$CRED_MISSING" ]]; then
+      if [[ "${HIVE_K8S_ALLOW_MISSING_BACKEND_CREDENTIALS:-}" == "1" ]]; then
+        echo "WARNING: emitting a workload with NO ${BACKEND} credential (escape hatch set)." >&2
+        echo "         ${CRED_MISSING}" >&2
+        echo "         The pod will deploy, go Ready, accept a task, and be unable to run it" >&2
+        echo "         unless you provide the credential out of band." >&2
+      else
+        echo "ERROR: ${CRED_MISSING}" >&2
+        echo "       Refusing to emit a workload whose agent CLI cannot authenticate" >&2
+        echo "       (kubestellar/hive#5103). Set HIVE_K8S_ALLOW_MISSING_BACKEND_CREDENTIALS=1" >&2
+        echo "       to emit anyway if you provide the credential out of band." >&2
+        exit 1
+      fi
+    fi
+
     # ── Build the YAML ──
     REG_TOKEN_B64=$(b64 "${HIVE_REGISTRATION_TOKEN:-}")
     GH_TOKEN_B64=$(b64 "${GH_TOKEN:-}")
@@ -1787,6 +1880,10 @@ contribute-k8s namespace="hive-contributor" outfile="" image_tag="v4":
     YAML+="data:"$'\n'
     YAML+="  HIVE_REGISTRATION_TOKEN: ${REG_TOKEN_B64}"$'\n'
     YAML+="  GH_TOKEN: ${GH_TOKEN_B64}"$'\n'
+    # Backend credential material from the preflight above (#5103): the agent
+    # CLI's own credential, delivered the same way as GH_TOKEN and covered by
+    # the same interim credential note on the Deployment below.
+    YAML+="${CRED_YAML}"
 
     # ── Probe command (#2660 status file) ──
     # The kubelet execs this against the pod. It reads the coarse lifecycle state
@@ -1815,8 +1912,11 @@ contribute-k8s namespace="hive-contributor" outfile="" image_tag="v4":
     YAML+="# Kubernetes restarts it on failure and keeps a stable identity — the"$'\n'
     YAML+="# exact reason an operator wants a cluster over a laptop."$'\n'
     YAML+="#"$'\n'
-    YAML+="# INTERIM CREDENTIAL NOTE (#2537): the Secret above carries a long-lived,"$'\n'
-    YAML+="# personal GH_TOKEN (scope repo,read:org). In a cluster it is base64 (NOT"$'\n'
+    YAML+="# INTERIM CREDENTIAL NOTE (#2537, #5103): the Secret above carries a"$'\n'
+    YAML+="# long-lived, personal GH_TOKEN (scope repo,read:org) and, when the"$'\n'
+    YAML+="# selected backend requires one, that backend's own credential (an API"$'\n'
+    YAML+="# key, or a Claude OAuth credential file with a refresh token)."$'\n'
+    YAML+="# In a cluster these are base64 (NOT"$'\n'
     YAML+="# encrypted), readable by anyone with 'get secrets' in this namespace and"$'\n'
     YAML+="# by cluster-scoped operators/backups. This is materially more exposed"$'\n'
     YAML+="# than a 0600 file on a laptop. Revoke any time with: gh auth logout (or"$'\n'

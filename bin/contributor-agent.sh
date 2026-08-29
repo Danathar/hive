@@ -223,6 +223,29 @@ if [[ "$AGENT_BACKEND" == "litellm" ]]; then
   fi
 fi
 
+# ── Materialize a delivered Claude credential (#5103) ──
+# A K8s contributor pod cannot mount the operator's ~/.claude, so `just
+# contribute-k8s` ships the operator's logged-in .credentials.json base64-
+# wrapped in one Secret-backed env var. Written before anything launches the
+# CLI, with the strict mode claude expects; decoded to a temp file first so a
+# corrupt value leaves no half-written credential behind. The variable is
+# unset afterwards — the relay and CLI children have no reason to inherit a
+# second copy of the credential in their environment.
+if [[ -n "${HIVE_CLAUDE_CREDENTIALS_B64:-}" ]]; then
+  mkdir -p "${HOME}/.claude"
+  _cred_tmp="$(mktemp "${HOME}/.claude/.credentials.json.tmp.XXXXXX")"
+  if printf '%s' "$HIVE_CLAUDE_CREDENTIALS_B64" | base64 -d > "$_cred_tmp" 2>/dev/null \
+      && [[ -s "$_cred_tmp" ]]; then
+    chmod 600 "$_cred_tmp"
+    mv "$_cred_tmp" "${HOME}/.claude/.credentials.json"
+    echo "Claude credential materialized from the delivered secret."
+  else
+    rm -f "$_cred_tmp"
+    echo "WARNING: HIVE_CLAUDE_CREDENTIALS_B64 was set but did not decode to a non-empty file; ignoring it." >&2
+  fi
+  unset HIVE_CLAUDE_CREDENTIALS_B64 _cred_tmp
+fi
+
 if [[ "${HIVE_CONTRIBUTOR_AGENT_TEST_RESOLVE_BACKEND:-}" == "1" ]]; then
   echo "backend_binary=$(backend_binary "$AGENT_BACKEND")"
   echo "backend_perm_flag=$(backend_perm_flag "$AGENT_BACKEND")"
@@ -588,7 +611,10 @@ fi
 # hub's ensureClaudeSettings pattern (src/pkg/agent/manager.go). The key is
 # stored both in full and as its last 20 chars — customApiKeyResponses
 # matching differs across Claude Code versions.
-if [[ "$AGENT_BACKEND" == "litellm" ]]; then
+# Also for claude driven by a delivered ANTHROPIC_API_KEY (#5103, the K8s
+# contributor path): the CLI raises the same custom-API-key approval prompt,
+# which nothing can answer in a headless pod.
+if [[ "$AGENT_BACKEND" == "litellm" ]] || { [[ "$AGENT_BACKEND" == "claude" ]] && [[ -n "${ANTHROPIC_API_KEY:-}" ]]; }; then
   python3 - <<'PYEOF' 2>/dev/null || true
 import json, os
 p = os.path.join(os.path.expanduser('~'), '.claude.json')
