@@ -1,0 +1,31 @@
+{
+  "agents": [
+    "scanner",
+    "quality",
+    "reviewer"
+  ],
+  "thresholds": {
+    "quiet": 2,
+    "busy": 10,
+    "surge": 20
+  },
+  "effectiveThresholds": {
+    "quiet": 2,
+    "busy": 10,
+    "surge": 20
+  },
+  "thresholdScaling": "none",
+  "repoCount": 1,
+  "budget": {
+    "totalTokens": 50000000,
+    "periodDays": 1,
+    "criticalPct": 85
+  },
+  "general_advanced": {
+    "eval_interval_s": 300,
+    "attribution_trailer": true,
+    "explain_mode": "",
+    "explain_mode_effective": "off",
+    "explain_mode_source": "default"
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "timestamp": "2026-08-29T15:04:31Z",
+  "statusSeq": 1842,
+  "statusInstance": "spoke-7f3a",
+  "hiveId": "acme-prod",
+  "governor": {
+    "active": true,
+    "mode": "busy",
+    "issues": 9,
+    "prs": 3,
+    "thresholds": {
+      "quiet": 2,
+      "busy": 10,
+      "surge": 20
+    },
+    "nextKick": "8/29 3:09 PM PDT"
+  },
+  "acmmLevel": 4,
+  "acmmLevelConfigured": true,
+  "acmmPackAgents": [
+    "scanner",
+    "quality",
+    "reviewer"
+  ],
+  "budget": {
+    "totalTokens": 50000000,
+    "usedTokens": 20500000,
+    "periodDays": 1
+  }
+}
