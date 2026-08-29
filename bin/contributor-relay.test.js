@@ -919,6 +919,56 @@ test('Pi revoke kills the child and rejects a raced stale completion', () => {
 const PROMPT_WITH_APOSTROPHES =
   "Work on issue foo/bar#421. Fork it with 'gh repo fork foo/bar --clone=false' first.";
 
+// ---------------------------------------------------------------------------
+// kubestellar/hive#5090 — a close must be diagnosable.
+//
+// The close handler used to ignore the code and reason entirely and log only
+// "closed. Reconnecting in 1000ms...". A contributor whose socket flapped every
+// 30-90 seconds therefore could not tell a deliberate server hangup from a
+// network drop, and the backoff carried no signal either — it never grows past
+// 1s because each reconnect succeeds.
+// ---------------------------------------------------------------------------
+
+test('#5090 a 1006 close is named as a cut socket, not a stated reason', () => {
+  const relay = loadRelay({ backend: 'claude' });
+  try {
+    const out = relay.describeWsClose(1006, '');
+    assert.ok(out.includes('1006'), 'the code itself must appear');
+    assert.ok(/no close frame/.test(out),
+      '1006 is synthesised by the client when the peer never sent a frame — say so');
+    assert.ok(/network|proxy|abrupt/.test(out),
+      'name the causes that actually produce it, so the reader knows where to look next');
+  } finally { teardown(relay); }
+});
+
+test('#5090 a close carrying a stated reason reports both code and text', () => {
+  const relay = loadRelay({ backend: 'claude' });
+  try {
+    const out = relay.describeWsClose(1008, 'invalid registration token');
+    assert.ok(out.includes('1008'));
+    assert.ok(out.includes('policy violation'), 'known codes get their name');
+    assert.ok(out.includes('invalid registration token'), 'the server-stated reason must survive to the log');
+  } finally { teardown(relay); }
+});
+
+test('#5090 an unknown close code is reported by number rather than guessed at', () => {
+  const relay = loadRelay({ backend: 'claude' });
+  try {
+    const out = relay.describeWsClose(4999, '');
+    assert.ok(out.includes('4999'));
+    assert.ok(!/undefined/.test(out), 'an unnamed code must not render as "undefined"');
+  } finally { teardown(relay); }
+});
+
+test('#5090 a normal closure with no text still identifies itself', () => {
+  const relay = loadRelay({ backend: 'claude' });
+  try {
+    const out = relay.describeWsClose(1000, '');
+    assert.ok(out.includes('1000') && out.includes('normal closure'));
+    assert.ok(!out.trim().endsWith(':'), 'no dangling separator when there is no reason text');
+  } finally { teardown(relay); }
+});
+
 test('task prompt is queued, not typed, while cliReady is false', () => {
   const relay = loadRelay({ backend: 'copilot' });
   try {
@@ -3532,6 +3582,7 @@ test('#4267 warnOnProtocolDrift warns once per hub and stays silent when current
     teardown(relay);
   }
 });
+
 
 // ---------------------------------------------------------------------------
 // kubestellar/hive#5094 — a transient API error must never read as completion.

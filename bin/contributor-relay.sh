@@ -2818,6 +2818,47 @@ function handleMessage(data, hub) {
   }
 }
 
+// WebSocket close codes the relay can meaningfully name. Anything else is
+// reported by number rather than guessed at.
+const WS_CLOSE_CODE_NAMES = {
+  1000: 'normal closure',
+  1001: 'going away',
+  1002: 'protocol error',
+  1003: 'unsupported data',
+  1005: 'no status received',
+  1006: 'abnormal closure',
+  1008: 'policy violation',
+  1009: 'message too big',
+  1011: 'internal server error',
+  1012: 'service restart',
+  1013: 'try again later',
+  1015: 'TLS handshake failure',
+};
+
+// describeWsClose renders the close code and reason for the log line.
+//
+// THE GAP THIS FILLS (kubestellar/hive#5090): this handler used to ignore both
+// arguments and log only "closed. Reconnecting in 1000ms...", so a contributor
+// whose socket flapped every 30-90 seconds had no way to tell a deliberate
+// server hangup from a network drop — the two produce identical output, and the
+// backoff never grows past 1s because each reconnect succeeds, so even the delay
+// carries no signal.
+//
+// 1006 is called out explicitly because it is the one code that is never sent
+// on the wire: the `ws` library synthesises it when the connection died WITHOUT
+// a close frame. Seeing it means the socket was cut — by the network, a proxy,
+// or a peer calling close() without the courtesy frame — rather than closed
+// with a stated reason. That distinction is the whole diagnostic.
+function describeWsClose(code, reason) {
+  const text = reason === undefined || reason === null ? '' : String(reason).trim();
+  const name = WS_CLOSE_CODE_NAMES[code];
+  const label = name ? `code=${code} ${name}` : `code=${code}`;
+  if (code === 1006) {
+    return `${label} — no close frame; the socket was cut (network, proxy, or an abrupt peer close)`;
+  }
+  return text ? `${label}: ${text}` : label;
+}
+
 function connectHub(hub) {
   if (hub.reconnectTimer) { clearTimeout(hub.reconnectTimer); hub.reconnectTimer = null; }
   if (hub.heartbeatInterval) { clearInterval(hub.heartbeatInterval); hub.heartbeatInterval = null; }
@@ -2848,9 +2889,10 @@ function connectHub(hub) {
     handleMessage(data.toString(), hub);
   });
 
-  hub.ws.on('close', () => {
+  hub.ws.on('close', (code, reason) => {
     if (gen !== hub.connectGeneration) return;
-    console.log(`Connection to ${hub.url} closed. Reconnecting in ${hub.reconnectDelay}ms...`);
+    console.log(`Connection to ${hub.url} closed (${describeWsClose(code, reason)}). ` +
+      `Reconnecting in ${hub.reconnectDelay}ms...`);
     if (hub.heartbeatInterval) { clearInterval(hub.heartbeatInterval); hub.heartbeatInterval = null; }
     hub.reconnectTimer = setTimeout(() => connectHub(hub), hub.reconnectDelay);
     hub.reconnectDelay = Math.min(hub.reconnectDelay * 2, MAX_RECONNECT_DELAY_MS);
@@ -2970,6 +3012,7 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     parseProtocolVersion,
     classifyPeerProtocol,
     warnOnProtocolDrift,
+    describeWsClose,
     // Headless (non-interactive) mode surface (kubestellar/hive#2538).
     CONTRIBUTOR_MODE,
     MODE_INTERACTIVE,
