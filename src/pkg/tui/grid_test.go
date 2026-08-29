@@ -2,6 +2,7 @@ package tui
 
 import (
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -18,7 +19,14 @@ type fakePane struct {
 	updates int
 }
 
-func (f *fakePane) Init() tea.Cmd { return func() tea.Msg { return nil } }
+// fakeInitMsg identifies which pane's Init command produced it, so a test can
+// assert that all four were collected rather than only that SOMETHING was.
+// That distinction started mattering in T12: Init now always returns the poll
+// and tick commands, so a non-nil result no longer says anything about the
+// panes.
+type fakeInitMsg struct{ title string }
+
+func (f *fakePane) Init() tea.Cmd { return func() tea.Msg { return fakeInitMsg{f.title} } }
 func (f *fakePane) Update(tea.Msg) (panes.Pane, tea.Cmd) {
 	f.updates++
 	return f, func() tea.Msg { return nil }
@@ -26,8 +34,14 @@ func (f *fakePane) Update(tea.Msg) (panes.Pane, tea.Cmd) {
 func (f *fakePane) View(width, height int) string { return f.title }
 func (f *fakePane) Title() string                 { return f.title }
 
+// modelWithFakes swaps every pane for a fake and shortens the poll cadence so
+// a test can run a whole tick — fetch, delivery and re-arm — without waiting
+// out a real interval. The dashboard URL is pinned for the whole package in
+// TestMain, so the fakes' model polls a closed port rather than whatever the
+// developer has running on localhost:3001.
 func modelWithFakes() (model, []*fakePane) {
 	m := newModel()
+	m.interval = time.Millisecond
 	fakes := make([]*fakePane, paneCount)
 	for i := range fakes {
 		fakes[i] = &fakePane{title: m.panes[i].Title()}
@@ -45,15 +59,33 @@ func TestNewExposesTheRootModel(t *testing.T) {
 }
 
 // TestInitBatchesPaneCommands pins that a pane's Init command is collected
-// rather than dropped — the seam T5/T7/T9/T11 use to issue their first fetch.
+// rather than dropped — the seam T5/T7/T9/T11 use to issue their first fetch —
+// alongside the poll loop's own startup commands.
+//
+// It drains the batch and looks for each pane by name. Asserting merely that
+// Init() is non-nil would now pass on the tick command alone, with every
+// pane's Init silently discarded.
 func TestInitBatchesPaneCommands(t *testing.T) {
 	m, _ := modelWithFakes()
-	if m.Init() == nil {
-		t.Fatal("Init() dropped the panes' initial commands")
+
+	seen := map[string]bool{}
+	sawTick := false
+	for _, msg := range drain(m.Init()) {
+		switch msg := msg.(type) {
+		case fakeInitMsg:
+			seen[msg.title] = true
+		case tickMsg:
+			sawTick = true
+		}
 	}
-	// The stub panes have no initial work, so the real model issues none.
-	if newModel().Init() != nil {
-		t.Fatal("stub model Init() returned a command, want nil")
+
+	for _, title := range []string{"AGENTS", "GOVERNOR", "TOKENS", "EVENTS"} {
+		if !seen[title] {
+			t.Errorf("Init() dropped the %s pane's initial command", title)
+		}
+	}
+	if !sawTick {
+		t.Error("Init() did not arm the poll loop")
 	}
 }
 
