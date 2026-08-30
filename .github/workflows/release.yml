@@ -23,6 +23,24 @@ name: Tagged Release
 # CHANGELOG.md `<!-- release: none|major|minor|patch -->` marker is the human
 # escape hatch when inference would be wrong.
 #
+# RACES (#5142): the gate-earning dance below takes minutes, and v4 can
+# advance underneath it. Two rules keep that from starving releases or
+# painting red runs for normal traffic:
+#   - SUPERSESSION IS DEFERRAL, NOT FAILURE. If v4 has already advanced past
+#     this run's commit (precheck job), or advances mid-flight (a
+#     non-fast-forward rejection at the final push), this run steps aside
+#     cleanly: the very merge that won triggered its own docker.yml run,
+#     whose completion triggers a fresh release run for the NEWER tip — and
+#     Unreleased is untouched, so that successor derives the same release.
+#     Retrying here on the old tip could never succeed anyway: the images
+#     were built from THIS commit, so rebasing the release commit onto the
+#     new tip would tag content the published images do not contain.
+#   - PROTECTION PROPAGATION IS RETRIED. Branch protection can take a few
+#     seconds to ingest the gate check-run's conclusion; a push in that
+#     window is rejected with GH006 even though the check succeeded (observed
+#     live: success at T, rejection at T+5s). The final push retries GH006
+#     for a bounded window instead of failing on a timing artifact.
+#
 # IDEMPOTENCY: this workflow's own release commit (moving Unreleased into a
 # dated section) is what empties Unreleased, which re-triggers docker.yml on
 # push, which re-triggers this workflow — and on that second pass Unreleased
@@ -75,9 +93,40 @@ jobs:
         id: derive
         run: src/scripts/derive-release-version.sh
 
-  release:
+  # Cheap supersession check BEFORE the expensive release job (#5142): if v4
+  # already moved past the commit this run was triggered for, every minute
+  # spent here is wasted — the final push can only ever be rejected
+  # non-fast-forward — and worse, the `concurrency` group above serializes
+  # release runs, so a doomed run delays the successor that CAN release. One
+  # API call decides in seconds. The successor is guaranteed to exist for any
+  # commit worth releasing: the merge that advanced v4 triggered docker.yml,
+  # whose completion triggers release.yml for that newer tip.
+  precheck:
     needs: decide
     if: needs.decide.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      proceed: ${{ steps.tip.outputs.proceed }}
+    steps:
+      - name: Defer to the successor run if v4 already advanced
+        id: tip
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          sha="${{ needs.decide.outputs.sha }}"
+          tip="$(gh api "repos/${{ github.repository }}/branches/v4" --jq .commit.sha)"
+          if [ "$tip" = "$sha" ]; then
+            echo "v4 is still at ${sha} — proceeding with the release."
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::v4 is at ${tip}, already past ${sha}. Deferring: the release run for the newer merge cuts this release (Unreleased is untouched, so nothing is dropped). See the RACES note in this workflow's header (#5142)."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  release:
+    needs: [decide, precheck]
+    if: needs.decide.outputs.release == 'true' && needs.precheck.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.decide.outputs.version }}
@@ -379,19 +428,65 @@ jobs:
               ;;
           esac
 
+      # The two live failure modes of this push, and their remedies (#5142):
+      #
+      #   GH006 ("Required status check \"gate\" is expected"): branch
+      #   protection has not yet ingested the gate check-run's conclusion —
+      #   observed live as a rejection 5 seconds AFTER the check succeeded.
+      #   The check exists and passed; only propagation lags. Retried for a
+      #   bounded window rather than failing the release on a timing artifact.
+      #
+      #   non-fast-forward ("fetch first"): v4 advanced mid-flight. Retrying
+      #   could never succeed — this release commit is parented on the old
+      #   tip, and rebasing it forward would tag source the already-published
+      #   images were not built from. Defer instead: exit green with a notice,
+      #   push nothing (tag included), and let the successor run — triggered
+      #   by the very merge that won — cut the release from ITS tip. The
+      #   `pushed` output gates the GitHub-Release step below so a deferred
+      #   run creates no release object either.
       - name: Push release commit and tag to v4
+        id: push_v4
         run: |
           set -euo pipefail
           git tag "v${VERSION}" HEAD
-          # Push the branch update and the tag together. v4 must be at HEAD
-          # of the commit this workflow started from (SHA) plus exactly this
-          # one release commit — if v4 moved underneath us (another merge
-          # landed mid-workflow), a plain fast-forward push fails loudly
-          # rather than force-pushing over new work. The SHA now carries a
-          # successful "gate" check (see the step above), so protection
-          # allows this push.
-          git push origin HEAD:refs/heads/v4
-          git push origin "refs/tags/v${VERSION}"
+          # RELEASE_PUSH_GH006_WINDOW is a test seam (test-release-push-retry.sh
+          # drives the exhaustion path with 0); production always uses 120s.
+          deadline=$((SECONDS + ${RELEASE_PUSH_GH006_WINDOW:-120}))
+          while true; do
+            if out="$(git push origin HEAD:refs/heads/v4 2>&1)"; then
+              echo "$out"
+              break
+            fi
+            echo "$out"
+            if grep -qiE 'non-fast-forward|fetch first|\[rejected\]' <<<"$out"; then
+              echo "::notice::v4 advanced past ${SHA} while this release run was in flight — deferring to the successor run for the newer merge (see the RACES note in this workflow's header, #5142). Nothing was pushed; Unreleased is untouched."
+              echo "pushed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if grep -q 'GH006' <<<"$out"; then
+              if [ "$SECONDS" -lt "$deadline" ]; then
+                echo "Branch protection has not yet ingested the successful gate check (GH006 propagation lag) — retrying in 8s..."
+                sleep 8
+                continue
+              fi
+              echo "::error::push to v4 still rejected by branch protection 120s after gate succeeded — this is no longer propagation lag; check the required-status configuration." >&2
+              exit 1
+            fi
+            echo "::error::push to v4 failed for an unrecognized reason (output above)." >&2
+            exit 1
+          done
+          # The tag only after the branch: if the branch push had failed, a
+          # pushed tag would point at a commit v4 never contained. A plain
+          # bounded retry — tag pushes have no protection race, only
+          # transient transport failures.
+          for attempt in 1 2 3; do
+            if git push origin "refs/tags/v${VERSION}"; then
+              break
+            fi
+            [ "$attempt" -eq 3 ] && { echo "::error::tag push failed after 3 attempts" >&2; exit 1; }
+            sleep 5
+          done
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
 
       # --notes-file and --generate-notes have fragile combined behavior
       # across gh versions, so notes are built as one file: GitHub's own
@@ -400,6 +495,7 @@ jobs:
       # produced), then the SBOM callout appended after it — rather than
       # relying on the two flags to compose correctly together.
       - name: Create GitHub Release
+        if: steps.push_v4.outputs.pushed == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
