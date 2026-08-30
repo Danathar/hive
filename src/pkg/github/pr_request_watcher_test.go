@@ -44,6 +44,9 @@ func newPRMockServerLabels(t *testing.T, existingHead string, created *int, adde
 				return
 			}
 			_, _ = io.WriteString(w, `[]`)
+		case r.Method == "GET" && strings.Contains(r.URL.Path, "/issues/"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"number":1,"title":"ordinary issue","body":"implement the requested change","state":"open"}`)
 		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/pulls"):
 			if created != nil {
 				*created++
