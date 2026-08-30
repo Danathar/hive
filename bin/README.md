@@ -13,6 +13,7 @@ Most production scripts are installed under `/usr/local/bin` by `bin/hive-deploy
 | `issue-classifier.sh` | Classifier | Enriches `actionable.json` with deterministic metadata such as complexity tier, model recommendation, tracker status, cluster key, lane, and architecture-review flag. |
 | `architecture-detector.sh` | Classifier | Adds architecture signals to actionable issues from `hive-project.yaml` rules so the classifier can route them to the architect lane. |
 | `pr-cluster-detector.sh` | Classifier | Groups related actionable issues into clusters using component, reporter timing, label-combo, and failure-mode signals. |
+| `hive-baseline-check.sh` | Classifier | Compares one exact failing check with the repository's default branch and open sibling PRs, returning shared/isolated/unknown so agents do not retry a repository-wide incident per PR. |
 | `merge-gate.sh` | Gate | Writes `/var/run/hive-metrics/merge-eligible.json`; PRs qualify only when required CI passes, they are not drafts or excluded, and author/review policy allows merge. |
 | `conflict-sweeper.sh` | Gate/enforcer | Processes AI-authored PRs with `mergeable=CONFLICTING`, attempts a rebase, force-pushes clean rebases, or closes unrebasable PRs and reopens the original issue. |
 | `copilot-comment-checker.sh` | Monitor | Prefetches unaddressed Copilot review comments into `/var/run/hive-metrics/copilot-comments.json` for reviewer agents. |
@@ -91,6 +92,7 @@ Most production scripts are installed under `/usr/local/bin` by `bin/hive-deploy
 | `contributor-agent.test.sh` | Contributor-agent regression for knowledge export handling. |
 | `contributor-relay.test.js` | Contributor relay task/restart/headless behavior; loads `contributor-relay.sh` as JavaScript with stubs. |
 | `gh-wrapper.test.sh` | `gh-wrapper.sh` author-gate and restriction regressions using a mock `gh` binary. |
+| `test_hive_baseline_check.sh` | Shared-CI classifier regressions for red default branches, exact-name sibling thresholds, reruns, pending checks, and fail-closed API errors. |
 | `test_bin_suites_wired.sh` | Fails when a test suite in this directory is not run by any workflow, Justfile target, or hook (#4363). |
 | `test_hive_standalone_runtime.sh` | `hive-standalone-runtime.sh` engine selection: Docker default, explicit Podman, and no silent fallback. |
 | `test_hive_podman_cleanup.sh` | `hive-podman-cleanup.sh` ownership labels and cleanup guard. Analyses arguments only: it contacts no container engine and deletes nothing. |
