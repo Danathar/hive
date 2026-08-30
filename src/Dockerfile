@@ -450,6 +450,7 @@ COPY bin/hive-open-pr.sh /usr/local/bin/hive-open-pr
 COPY bin/hive-open-issue.sh /usr/local/bin/hive-open-issue
 COPY bin/hive-merge.sh /usr/local/bin/hive-merge
 COPY bin/hive-review.sh /usr/local/bin/hive-review
+COPY bin/hive-baseline-check.sh /usr/local/bin/hive-baseline-check.sh
 COPY bin/gh-wrapper.sh /usr/local/bin/gh
 # SDK-based copilot model discovery helper (see Layer 3b). Invoked as
 # `node /usr/local/bin/copilot-models.mjs` by the dashboard, so no exec bit.
@@ -457,7 +458,8 @@ COPY bin/copilot-models.mjs /usr/local/bin/copilot-models.mjs
 COPY config/backends.conf /usr/local/etc/hive/backends.conf
 RUN chmod +x /usr/local/bin/ttyd-tmux.sh /usr/local/bin/hive-panes /usr/local/bin/gh-app-token.sh \
     /usr/local/bin/hive-config.sh /usr/local/bin/agent-launch.sh /usr/local/bin/gh \
-    /usr/local/bin/git-credential-hive.sh /usr/local/bin/hive-open-pr /usr/local/bin/hive-open-issue /usr/local/bin/hive-merge /usr/local/bin/hive-review
+    /usr/local/bin/git-credential-hive.sh /usr/local/bin/hive-open-pr /usr/local/bin/hive-open-issue /usr/local/bin/hive-merge /usr/local/bin/hive-review \
+    /usr/local/bin/hive-baseline-check.sh
 
 # SECURITY (#4045): interactive-shell arm of the agent credential scrub.
 # BASH_ENV (exported by agent-launch.sh) only reaches NON-interactive shells;
