@@ -36,6 +36,7 @@ import (
 
 	"github.com/kubestellar/hive/pkg/tui/client"
 	"github.com/kubestellar/hive/pkg/tui/panes"
+	"github.com/kubestellar/hive/pkg/tui/theme"
 )
 
 // splash is drawn only before the first tea.WindowSizeMsg arrives. It names

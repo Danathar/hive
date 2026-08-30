@@ -4,6 +4,8 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/kubestellar/hive/pkg/tui/theme"
 )
 
 // Binding is one row of the help overlay's key table.
@@ -58,7 +60,7 @@ var (
 	// weight survives every profile.
 	helpBoxStyle = lipgloss.NewStyle().
 			Border(lipgloss.ThickBorder()).
-			BorderForeground(lipgloss.Color("205")).
+			BorderForeground(theme.BorderFocus).
 			Padding(0, 1)
 	helpTitleStyle   = lipgloss.NewStyle().Bold(true)
 	helpSectionStyle = lipgloss.NewStyle().Bold(true)

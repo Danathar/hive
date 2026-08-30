@@ -5,7 +5,6 @@ import (
 	"go/parser"
 	"go/token"
 	"path/filepath"
-	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -32,12 +31,15 @@ var hexLiteral = regexp.MustCompile(`^"#[0-9a-fA-F]{3,8}"$`)
 
 // themedPackages are the directories the ratchet covers, relative to this
 // package: the app itself, where T25 found the two literals it migrated, and
-// panes/, which renders no color today and should not start doing so by
-// writing its own.
+// panes/, whose help overlay borders its box in the frame's emphasis color.
+//
+// theme/ is deliberately NOT listed. It is the one place a color may be named,
+// so the ratchet works by not scanning it rather than by exempting a filename
+// — a file added to this package called theme.go gets caught like any other.
 var themedPackages = []string{".", "panes"}
 
 // TestNoRawColorLiteralsOutsideTheme is the ratchet the acceptance criteria
-// ask for: theme.go is the only file allowed to name a color.
+// ask for: pkg/tui/theme is the only place allowed to name a color.
 //
 // It parses the sources rather than grepping them, so a color mentioned in a
 // comment (this package explains its palette at length) cannot fail the test,
@@ -58,8 +60,7 @@ func TestNoRawColorLiteralsOutsideTheme(t *testing.T) {
 			t.Fatalf("no Go files under %s — the ratchet is scanning nothing", dir)
 		}
 		for _, path := range paths {
-			base := filepath.Base(path)
-			if strings.HasSuffix(base, "_test.go") || base == "theme.go" {
+			if strings.HasSuffix(filepath.Base(path), "_test.go") {
 				continue
 			}
 			fset := token.NewFileSet()
@@ -72,43 +73,17 @@ func TestNoRawColorLiteralsOutsideTheme(t *testing.T) {
 				case *ast.SelectorExpr:
 					pkg, ok := n.X.(*ast.Ident)
 					if ok && pkg.Name == "lipgloss" && colorConstructors[n.Sel.Name] {
-						t.Errorf("%s: lipgloss.%s names a color outside theme.go; add a theme token and reference it instead",
+						t.Errorf("%s: lipgloss.%s names a color outside pkg/tui/theme; add a theme token and reference it instead",
 							fset.Position(n.Pos()), n.Sel.Name)
 					}
 				case *ast.BasicLit:
 					if n.Kind == token.STRING && hexLiteral.MatchString(n.Value) {
-						t.Errorf("%s: raw color literal %s outside theme.go; add a theme token and reference it instead",
+						t.Errorf("%s: raw color literal %s outside pkg/tui/theme; add a theme token and reference it instead",
 							fset.Position(n.Pos()), n.Value)
 					}
 				}
 				return true
 			})
-		}
-	}
-}
-
-// TestThemeTokensDefineBothBackgrounds pins that every token is adaptive in
-// fact and not only in type.
-//
-// An AdaptiveColor with an empty half is not a compile error and not a panic:
-// lipgloss resolves "" to no color, so the frame silently loses that element
-// on exactly one of the two backgrounds — the failure this whole task exists
-// to fix, reintroduced by a typo. Reflection rather than a hand-written list
-// so a token added later is covered without anyone remembering to add it here.
-func TestThemeTokensDefineBothBackgrounds(t *testing.T) {
-	v := reflect.ValueOf(theme)
-	if v.NumField() == 0 {
-		t.Fatal("theme has no tokens")
-	}
-	for i := 0; i < v.NumField(); i++ {
-		name := v.Type().Field(i).Name
-		c, ok := v.Field(i).Interface().(lipgloss.AdaptiveColor)
-		if !ok {
-			t.Errorf("theme.%s is %T, want lipgloss.AdaptiveColor — every token must be defined for both backgrounds", name, v.Field(i).Interface())
-			continue
-		}
-		if c.Light == "" || c.Dark == "" {
-			t.Errorf("theme.%s = %+v, want both halves set — an empty half renders as no color on that background", name, c)
 		}
 	}
 }
