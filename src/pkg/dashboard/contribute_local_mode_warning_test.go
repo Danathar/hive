@@ -13,10 +13,10 @@ import (
 // contributor's own user, on their own machine. Claude/litellm, codex, and
 // copilot now use a native OS-enforced sandbox on that path; opencode gets a
 // command-name deny-list (a floor, not a boundary) via its own permission
-// config; goose, agy, bob, pi, and aider have no confinement mechanism this
+// config; goose, agy, bob, pi, aider, and kilo have no confinement mechanism this
 // repo can wire at all and REFUSE to launch locally without an explicit
 // per-backend opt-in env var. See contribute_local_mode_backend_matrix_test.go
-// for the tests covering the five refuse-to-launch backends, copilot's
+// for the tests covering the refuse-to-launch backends, copilot's
 // sandbox gating, and opencode's deny-list.
 //
 // What the silence cost: an agent doing entirely correct work on an assigned
