@@ -39,6 +39,10 @@ func countingServer(t *testing.T, hits *atomic.Int64, match func(*http.Request) 
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/compare/") {
+			_, _ = io.WriteString(w, `{"files":[]}`)
+			return
+		}
 		_, _ = io.WriteString(w, `[]`)
 	}))
 }

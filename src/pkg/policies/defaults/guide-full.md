@@ -66,3 +66,7 @@ bd create --title "<specific documentation gap title>" \
 5. For gaps with a clear fix, create a worktree and open a PR
 6. Create a bead for each finding
 7. Summarize findings in your response
+
+## Publishable Content Boundary
+
+Attribution belongs ONLY in the issue or PR body and the DCO commit trailer. NEVER write `Filed by`, ACMM levels, agent names, or hive run metadata inside any committed file.

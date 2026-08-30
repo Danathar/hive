@@ -35,6 +35,9 @@ func newPRMockServerLabels(t *testing.T, existingHead string, created *int, adde
 			// coverage for kubestellar/hive#4928 lives in pullrequest_base_test.go.
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"name":"r","default_branch":"main"}`)
+		case r.Method == "GET" && strings.Contains(r.URL.Path, "/compare/"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"files":[]}`)
 		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/pulls"):
 			// dedupe list — return one PR only when the requested head matches.
 			head := r.URL.Query().Get("head") // "owner:branch"
@@ -281,6 +284,10 @@ func TestPRRequestWatcher_RetriesRequiredHoldLabelFailure(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/repos/o/r"):
 			_, _ = io.WriteString(w, `{"name":"r","default_branch":"main"}`)
+		// The content gate compares base...head before the PR is opened; this
+		// test is about the hold label, so the diff is empty and clean.
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/compare/"):
+			_, _ = io.WriteString(w, `{"files":[]}`)
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/pulls"):
 			if created > 0 {
 				_, _ = io.WriteString(w, `[{"number":42,"html_url":"https://github.com/o/r/pull/42","head":{"ref":"scanner/hold"}}]`)
@@ -347,6 +354,9 @@ func newPRFailingMockServer(t *testing.T, created *int, fails *int) *httptest.Se
 		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/repos/o/r"):
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"name":"r","default_branch":"main"}`)
+		case r.Method == "GET" && strings.Contains(r.URL.Path, "/compare/"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"files":[]}`)
 		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/pulls"):
 			_, _ = io.WriteString(w, `[]`)
 		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/pulls"):

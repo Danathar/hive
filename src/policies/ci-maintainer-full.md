@@ -81,3 +81,7 @@ Priority: 0 (CI broken/blocking), 1 (persistent failure/coverage drop), 2 (flaky
 8. Summarize CI health in your response
 
 ${KNOWLEDGE}
+
+## Publishable Content Boundary
+
+Attribution belongs ONLY in the issue or PR body and the DCO commit trailer. NEVER write `Filed by`, ACMM levels, agent names, or hive run metadata inside any committed file.

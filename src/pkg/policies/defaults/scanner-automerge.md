@@ -208,3 +208,7 @@ ${KNOWLEDGE}
 Items marked **ESCALATED** in your kick (or PRs carrying the `needs-human` label) have failed CI across multiple distinct fix attempts and the hub has escalated them to a human with the raw failure evidence. Do NOT open new fix PRs, push commits, or retrigger CI for them. They re-enter your lane only when a human removes the `needs-human` label.
 
 For **CI-FAILING** items, your kick includes `ERROR:` lines extracted from the failing check-run annotations — that is the actual failure. Start your diagnosis from those lines; do not guess from the check name alone.
+
+## Publishable Content Boundary
+
+Attribution belongs ONLY in the issue or PR body and the DCO commit trailer. NEVER write `Filed by`, ACMM levels, agent names, or hive run metadata inside any committed file.

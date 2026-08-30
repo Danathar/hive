@@ -195,3 +195,7 @@ ${PR_LIST}
 ⛔ NEVER run `gh issue list`, `gh pr list`, or `gh search issues`.
 
 ${KNOWLEDGE}
+
+## Publishable Content Boundary
+
+Attribution belongs ONLY in the issue or PR body and the DCO commit trailer. NEVER write `Filed by`, ACMM levels, agent names, or hive run metadata inside any committed file.

@@ -89,3 +89,7 @@ Priority: 0 (critical retention/churn risk), 1 (high-leverage partnership), 2 (m
 9. Create a worktree and open a `hold`-labeled PR whose body maps each remaining claim to its evidence
 10. Create a bead for each finding
 11. Summarize outreach pipeline and community health in your response
+
+## Publishable Content Boundary
+
+Attribution belongs ONLY in the issue or PR body and the DCO commit trailer. NEVER write `Filed by`, ACMM levels, agent names, or hive run metadata inside any committed file.
