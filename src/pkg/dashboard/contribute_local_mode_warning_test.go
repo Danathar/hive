@@ -137,6 +137,9 @@ func TestClaudeLocalSandboxIsMandatory(t *testing.T) {
 		t.Fatalf("Claude local argv has no sandbox settings: %q", args)
 	}
 	var settings struct {
+		Permissions struct {
+			Allow []string `json:"allow"`
+		} `json:"permissions"`
 		Sandbox struct {
 			Enabled                  bool `json:"enabled"`
 			FailIfUnavailable        bool `json:"failIfUnavailable"`
@@ -154,6 +157,15 @@ func TestClaudeLocalSandboxIsMandatory(t *testing.T) {
 	}
 	if len(settings.Sandbox.Filesystem.AllowWrite) != 1 || settings.Sandbox.Filesystem.AllowWrite[0] != workspace {
 		t.Fatalf("sandbox write roots = %q, want only %q", settings.Sandbox.Filesystem.AllowWrite, workspace)
+	}
+	wantPermissions := []string{"Edit(" + workspace + "/**)", "Write(" + workspace + "/**)"}
+	if len(settings.Permissions.Allow) != len(wantPermissions) {
+		t.Fatalf("tool write permissions = %q, want %q", settings.Permissions.Allow, wantPermissions)
+	}
+	for i, want := range wantPermissions {
+		if settings.Permissions.Allow[i] != want {
+			t.Fatalf("tool write permissions = %q, want %q", settings.Permissions.Allow, wantPermissions)
+		}
 	}
 }
 
