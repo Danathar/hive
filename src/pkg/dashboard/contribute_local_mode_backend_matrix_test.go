@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -22,7 +23,7 @@ import (
 //     as a floor, matching the claude host-state deny-list precedent — and
 //     the local-mode banner must never call this "confined", only
 //     "denylisted", because it is not a filesystem boundary.
-//   - goose, agy, bob, pi, aider: verified against each CLI's own current
+//   - goose, agy, bob, pi, aider, kilo: verified against each CLI's own current
 //     docs to have no sandbox, no filesystem allowlist, and no deny
 //     mechanism at all. Local mode for these MUST refuse to launch without
 //     an explicit per-backend HIVE_<BACKEND>_DANGEROUSLY_RUN_UNCONFINED=1 —
@@ -55,6 +56,7 @@ func runBackendsConfFunc(t *testing.T, fn string, args []string, extraEnv ...str
 			"HIVE_OPENCODE_DANGEROUSLY_", "HIVE_GOOSE_DANGEROUSLY_",
 			"HIVE_AGY_DANGEROUSLY_", "HIVE_BOB_DANGEROUSLY_",
 			"HIVE_PI_DANGEROUSLY_", "HIVE_AIDER_DANGEROUSLY_",
+			"HIVE_KILO_DANGEROUSLY_",
 		} {
 			if strings.HasPrefix(entry, prefix) {
 				skip = true
@@ -78,19 +80,117 @@ func runBackendsConfFunc(t *testing.T, fn string, args []string, extraEnv ...str
 	return string(out), exitCode
 }
 
-// ── The five backends with no confinement mechanism at all ─────────────
+type localConfinementPosture string
+
+const (
+	postureSandboxed    localConfinementPosture = "sandboxed"
+	postureDenylisted   localConfinementPosture = "denylisted"
+	postureRefusalGated localConfinementPosture = "refusal-gated"
+)
+
+// localBackendPostures is deliberately a closed declaration, not a fallback.
+// TestEveryKnownBackendDeclaresLocalConfinementPosture compares it with the
+// production KNOWN_BACKENDS list in both directions. Adding a backend without
+// deciding whether local mode sandboxes it, deny-lists host-state commands, or
+// refuses to launch therefore fails the suite instead of silently selecting an
+// unconfined default (#5076). The category-specific tests below execute the
+// production sandbox, deny-list, and refusal helpers; this table is the join
+// that makes those tests exhaustive over the production backend registry.
+var localBackendPostures = map[string]localConfinementPosture{
+	"claude":   postureSandboxed,
+	"copilot":  postureSandboxed,
+	"goose":    postureRefusalGated,
+	"codex":    postureSandboxed,
+	"agy":      postureRefusalGated,
+	"bob":      postureRefusalGated,
+	"pi":       postureRefusalGated,
+	"aider":    postureRefusalGated,
+	"litellm":  postureSandboxed,
+	"opencode": postureDenylisted,
+	"kilo":     postureRefusalGated,
+}
+
+func shellKnownLocalBackends(t *testing.T) []string {
+	t.Helper()
+	out, code := runBackendsConfFunc(t, `printf '%s' "$KNOWN_BACKENDS"`, nil)
+	if code != 0 {
+		t.Fatalf("reading KNOWN_BACKENDS from config/backends.conf exited %d: %q", code, out)
+	}
+	backends := strings.Fields(out)
+	if len(backends) == 0 {
+		t.Fatal("KNOWN_BACKENDS is empty; confinement-posture coverage would assert nothing")
+	}
+	return backends
+}
+
+func localBackendPostureProblems(knownBackends []string, declared map[string]localConfinementPosture) []string {
+	known := make(map[string]bool)
+	var problems []string
+	for _, backend := range knownBackends {
+		known[backend] = true
+		posture, ok := declared[backend]
+		if !ok {
+			problems = append(problems, backend+" is in KNOWN_BACKENDS but has no declared local confinement posture")
+			continue
+		}
+		switch posture {
+		case postureSandboxed, postureDenylisted, postureRefusalGated:
+		default:
+			problems = append(problems, backend+" has unknown local confinement posture "+string(posture))
+		}
+	}
+	for backend := range declared {
+		if !known[backend] {
+			problems = append(problems, backend+" has a stale local confinement posture but is not in KNOWN_BACKENDS")
+		}
+	}
+	sort.Strings(problems)
+	return problems
+}
+
+func TestEveryKnownBackendDeclaresLocalConfinementPosture(t *testing.T) {
+	if problems := localBackendPostureProblems(shellKnownLocalBackends(t), localBackendPostures); len(problems) > 0 {
+		t.Fatalf("local backend confinement posture coverage is incomplete:\n  %s", strings.Join(problems, "\n  "))
+	}
+}
+
+// TestPostureCoverageFailsForANewUnclassifiedBackend proves the guard is not a
+// green assertion over today's list. It models the exact #5076 regression: a
+// new backend is registered but no sandbox, deny-list, or refusal posture is
+// declared for local mode.
+func TestPostureCoverageFailsForANewUnclassifiedBackend(t *testing.T) {
+	known := append(shellKnownLocalBackends(t), "future-backend")
+	problems := localBackendPostureProblems(known, localBackendPostures)
+	if got := strings.Join(problems, "\n"); !strings.Contains(got, "future-backend is in KNOWN_BACKENDS") {
+		t.Fatalf("unclassified future backend did not fail posture coverage: %q", problems)
+	}
+}
+
+func refusalGatedLocalBackends(t *testing.T) []struct{ backend, envVar string } {
+	t.Helper()
+	var backends []struct{ backend, envVar string }
+	for _, backend := range shellKnownLocalBackends(t) {
+		if localBackendPostures[backend] != postureRefusalGated {
+			continue
+		}
+		out, code := runBackendsConfFunc(t, "unconfined_local_backend_env_var", []string{backend})
+		if code != 0 {
+			t.Fatalf("resolve refusal gate for %s: exited %d: %q", backend, code, out)
+		}
+		envVar := strings.TrimSpace(out)
+		want := "HIVE_" + strings.ToUpper(backend) + "_DANGEROUSLY_RUN_UNCONFINED"
+		if envVar != want {
+			t.Fatalf("%s is declared refusal-gated but maps to %q, want its own %q gate", backend, envVar, want)
+		}
+		backends = append(backends, struct{ backend, envVar string }{backend, envVar})
+	}
+	return backends
+}
+
+// ── Backends with no confinement mechanism at all ──────────────────────
 
 func TestUnconfinedBackendsRefuseToLaunchByDefault(t *testing.T) {
-	for _, tc := range []struct {
-		backend string
-		envVar  string
-	}{
-		{"goose", "HIVE_GOOSE_DANGEROUSLY_RUN_UNCONFINED"},
-		{"agy", "HIVE_AGY_DANGEROUSLY_RUN_UNCONFINED"},
-		{"bob", "HIVE_BOB_DANGEROUSLY_RUN_UNCONFINED"},
-		{"pi", "HIVE_PI_DANGEROUSLY_RUN_UNCONFINED"},
-		{"aider", "HIVE_AIDER_DANGEROUSLY_RUN_UNCONFINED"},
-	} {
+	for _, tc := range refusalGatedLocalBackends(t) {
 		t.Run(tc.backend, func(t *testing.T) {
 			out, code := runBackendsConfFunc(t, "unconfined_local_perm_flag_shell", []string{tc.backend})
 			if code == 0 {
@@ -110,16 +210,7 @@ func TestUnconfinedBackendsRefuseToLaunchByDefault(t *testing.T) {
 }
 
 func TestUnconfinedBackendsLaunchWithExplicitOptIn(t *testing.T) {
-	for _, tc := range []struct {
-		backend string
-		envVar  string
-	}{
-		{"goose", "HIVE_GOOSE_DANGEROUSLY_RUN_UNCONFINED"},
-		{"agy", "HIVE_AGY_DANGEROUSLY_RUN_UNCONFINED"},
-		{"bob", "HIVE_BOB_DANGEROUSLY_RUN_UNCONFINED"},
-		{"pi", "HIVE_PI_DANGEROUSLY_RUN_UNCONFINED"},
-		{"aider", "HIVE_AIDER_DANGEROUSLY_RUN_UNCONFINED"},
-	} {
+	for _, tc := range refusalGatedLocalBackends(t) {
 		t.Run(tc.backend, func(t *testing.T) {
 			_, code := runBackendsConfFunc(t, "unconfined_local_perm_flag_shell", []string{tc.backend}, tc.envVar+"=1")
 			if code != 0 {
@@ -134,13 +225,7 @@ func TestUnconfinedBackendsLaunchWithExplicitOptIn(t *testing.T) {
 // into one silently opt into another with no confinement either.
 func TestEveryUnconfinedBackendHasItsOwnEscapeHatch(t *testing.T) {
 	seen := map[string]string{}
-	for _, tc := range []struct{ backend, envVar string }{
-		{"goose", "HIVE_GOOSE_DANGEROUSLY_RUN_UNCONFINED"},
-		{"agy", "HIVE_AGY_DANGEROUSLY_RUN_UNCONFINED"},
-		{"bob", "HIVE_BOB_DANGEROUSLY_RUN_UNCONFINED"},
-		{"pi", "HIVE_PI_DANGEROUSLY_RUN_UNCONFINED"},
-		{"aider", "HIVE_AIDER_DANGEROUSLY_RUN_UNCONFINED"},
-	} {
+	for _, tc := range refusalGatedLocalBackends(t) {
 		if prior, ok := seen[tc.envVar]; ok {
 			t.Fatalf("escape hatch %s is claimed by both %s and %s", tc.envVar, prior, tc.backend)
 		}
