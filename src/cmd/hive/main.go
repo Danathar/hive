@@ -1695,13 +1695,15 @@ func main() {
 		// privilege. A denied request is quarantined, never opened.
 		// holdLabel (F6): at hold-gated ACMM levels (L3/L4/L5) every agent-opened
 		// PR must carry the "hold" label so the merge gate holds it for human
-		// approval. This is decided server-side from the authoritative hive level
+		// approval. Outreach content is public speech on the project's behalf, so
+		// it remains human-reviewed at L6 too. This is decided server-side from the
+		// authenticated agent identity and authoritative hive level
 		// (GetACMMLevel), NOT from a client flag — the gh-wrapper.sh tail that used
 		// to add the label was dead code after `exec hive-open-pr`. L1/L2 open no
-		// agent PRs (manual); L6 auto-merges on green (no hold).
-		holdLabel := func() bool {
-			l := agentMgr.GetACMMLevel()
-			return l >= acmmHoldGatedMinLevel && l <= acmmHoldGatedMaxLevel
+		// agent PRs (manual); non-outreach L6 PRs retain their existing automerge
+		// behavior.
+		holdLabel := func(agentName string) bool {
+			return shouldHoldAgentPR(agentName, agentMgr.GetACMMLevel())
 		}
 		ghClient.StartPRRequestWatcher(ctx, agentMgr.AuthorizePROpen, holdLabel, nil)
 		// Issue relay: agents request issue creation and comments by dropping a
@@ -7613,6 +7615,16 @@ const (
 	acmmHoldGatedMinLevel = 3
 	acmmHoldGatedMaxLevel = 5
 )
+
+// shouldHoldAgentPR keeps public outreach claims human-reviewed even at L6,
+// where ordinary agent PRs may auto-merge. The general ACMM hold gate remains
+// unchanged for all roles at L3-L5.
+func shouldHoldAgentPR(agentName string, level int) bool {
+	if strings.EqualFold(strings.TrimSpace(agentName), "outreach") {
+		return true
+	}
+	return level >= acmmHoldGatedMinLevel && level <= acmmHoldGatedMaxLevel
+}
 
 // mergeableJSONUnknown is the explicit wire value for "mergeability was never
 // determined". It is spelled out rather than left as "" so a consumer reading
