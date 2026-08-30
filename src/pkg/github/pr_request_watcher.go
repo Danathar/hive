@@ -93,11 +93,12 @@ type PRRequestAuthorizer func(agent string, fileUID int) error
 // watcher must never open a PR that hasn't been authorized against the same
 // policy as the direct `gh pr create` path.
 //
-// holdLabel (F6) decides server-side, from authoritative hive config (the ACMM
-// level), whether a freshly-opened PR must carry the "hold" label. It is applied
-// AFTER the PR is created, on the path that actually runs — unlike the
-// gh-wrapper.sh tail, which was dead code (it sat after `exec hive-open-pr`), so
-// hold-gated PRs were being opened unlabeled. A nil holdLabel means "never hold".
+// holdLabel (F6) decides server-side, from the authoring agent and authoritative
+// hive config (the ACMM level), whether a freshly-opened PR must carry the
+// "hold" label. It is applied AFTER the PR is created, on the path that
+// actually runs — unlike the gh-wrapper.sh tail, which was dead code (it sat
+// after `exec hive-open-pr`), so hold-gated PRs were being opened unlabeled. A
+// nil holdLabel means "never hold".
 //
 // nowFn is injectable for tests; pass nil for time.Now.
 //
@@ -121,7 +122,7 @@ func (c *Client) SetPROpenedHook(fn PROpenedHook) {
 	c.prOpenedHook.Store(&fn)
 }
 
-func (c *Client) StartPRRequestWatcher(ctx context.Context, authz PRRequestAuthorizer, holdLabel func() bool, nowFn func() time.Time) <-chan struct{} {
+func (c *Client) StartPRRequestWatcher(ctx context.Context, authz PRRequestAuthorizer, holdLabel func(agent string) bool, nowFn func() time.Time) <-chan struct{} {
 	done := make(chan struct{})
 	if c == nil {
 		close(done)
@@ -234,10 +235,23 @@ func (c *Client) handleOnePRRequest(ctx context.Context, path string, nowFn func
 	title, body, err := c.validatePRRequestClaims(ctx, req)
 	if err != nil {
 		if reason, policy := prRequestPolicyReason(err); policy {
-			c.rejectPRRequest(path, req, reason, nowFn)
+			c.rejectPRRequest(path, req, "claim", reason, nowFn)
 			return
 		}
 		c.failPRRequest(path, req, err, nowFn)
+		return
+	}
+
+	// Public outreach prose speaks for the project, so it gets a second gate at
+	// the same choke point (#5115). The check above is about the request being
+	// accurate; this one is about the project being able to stand behind what
+	// the PR would publish — an unsupported capability claim with no evidence
+	// record, or regulatory language.
+	if reason, err := c.validateOutreachPRRequest(ctx, req); err != nil {
+		c.failPRRequest(path, req, err, nowFn)
+		return
+	} else if reason != "" {
+		c.rejectPRRequest(path, req, "outreach", reason, nowFn)
 		return
 	}
 
@@ -269,13 +283,15 @@ func (c *Client) handleOnePRRequest(ctx context.Context, path string, nowFn func
 	// unreachable (it followed `exec hive-open-pr`), so those PRs were opened
 	// unlabeled and the gate was inert. AddLabels is additive + idempotent, so it
 	// is safe to (re)apply even when we reused an already-open PR.
-	if c.prHoldLabel != nil && c.prHoldLabel() {
+	if c.prHoldLabel != nil && c.prHoldLabel(req.Agent) {
 		if lerr := c.AddLabels(ctx, req.Repo, res.Number, []string{"hold"}); lerr != nil {
-			// A missing hold label at a hold-gated level is a policy failure, not a
-			// cosmetic one — surface it loudly so an operator notices, but the PR is
-			// already open so we do not fail the request.
+			// A missing hold label is a policy failure, not a cosmetic one. Keep
+			// the request queued: the next bounded retry deduplicates the existing
+			// PR and reapplies the label instead of silently declaring success.
 			c.logger.Warn("pr-request watcher: PR opened but failed to apply hold label (hold-gated level)",
 				slog.String("repo", req.Repo), slog.Int("number", res.Number), slog.String("error", lerr.Error()))
+			c.failPRRequest(path, req, fmt.Errorf("PR #%d opened but required hold label could not be applied: %w", res.Number, lerr), nowFn)
+			return
 		} else {
 			c.logger.Info("pr-request watcher: applied hold label (hold-gated ACMM level)",
 				slog.String("repo", req.Repo), slog.Int("number", res.Number))
@@ -328,14 +344,20 @@ func (c *Client) failPRRequest(path string, req PRRequest, err error, nowFn func
 		slog.String("repo", req.Repo), slog.String("head", req.Head), slog.String("error", err.Error()))
 }
 
-// rejectPRRequest records a claim-validation mismatch and quarantines it. A
+// rejectPRRequest records a permanent policy mismatch and quarantines it. A
 // changed request or branch is required to make it valid, so retrying the same
 // file would only consume API quota and hide the actionable feedback.
-func (c *Client) rejectPRRequest(path string, req PRRequest, reason string, nowFn func() time.Time) {
-	c.writePRResult(path, PRResponse{OK: false, Error: "PR claim rejected: " + reason, At: nowFn().UTC().Format(time.RFC3339)})
+//
+// More than one gate shares this path, so gate names which one refused.
+// Without it a quarantined request says only that something was rejected, and
+// the gates have different remedies: correct the request, or change what the
+// branch would publish.
+func (c *Client) rejectPRRequest(path string, req PRRequest, gate, reason string, nowFn func() time.Time) {
+	c.writePRResult(path, PRResponse{OK: false, Error: "PR " + gate + " rejected: " + reason, At: nowFn().UTC().Format(time.RFC3339)})
 	_ = os.Rename(path, path+".rejected")
 	c.prRetries.clear(path)
-	c.logger.Warn("pr-request watcher: REJECTED (claim mismatch)",
+	c.logger.Warn("pr-request watcher: REJECTED (policy)",
+		slog.String("gate", gate),
 		slog.String("agent", req.Agent), slog.String("repo", req.Repo),
 		slog.String("head", req.Head), slog.String("reason", reason))
 }

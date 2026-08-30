@@ -65,12 +65,14 @@ type Client struct {
 	// StartPRRequestWatcher.
 	prAuthz PRRequestAuthorizer
 	// prHoldLabel decides, at PR-creation time, whether a freshly-opened PR must
-	// carry the "hold" label (F6). It is consulted server-side from authoritative
-	// hive config (the ACMM level), NOT trusted from a client flag — the
+	// carry the "hold" label (F6). It receives the authoring agent so role-specific
+	// safety rules (for example, mandatory human review of outreach content) can
+	// be enforced alongside the authoritative ACMM level. It is consulted
+	// server-side, NOT trusted from a client flag — the
 	// gh-wrapper.sh tail that used to add the label is dead code (it sits after
 	// `exec hive-open-pr`). nil means "never hold" (backward-compatible no-op).
 	// Set by StartPRRequestWatcher.
-	prHoldLabel func() bool
+	prHoldLabel func(agent string) bool
 	// prOpenedHook, when set, is told about every NEW PR the request watcher
 	// opens (agent, repo, number, url) — the seam progress surfaces such as
 	// the Linear session emitter hook. atomic so SetPROpenedHook is safe
