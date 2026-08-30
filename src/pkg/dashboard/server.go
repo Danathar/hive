@@ -1273,7 +1273,7 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 			} else {
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
 				w.WriteHeader(http.StatusUnauthorized)
-				w.Write([]byte(loginPage))
+				_, _ = w.Write([]byte(loginPage))
 			}
 			return
 		}
@@ -1982,16 +1982,16 @@ func (s *Server) handleGitHubAppRecheck(w http.ResponseWriter, r *http.Request) 
 	ok := s.RecheckGitHubApp()
 	w.Header().Set("Content-Type", "application/json")
 	if ok {
-		w.Write([]byte(`{"status":"installed"}`))
+		_, _ = w.Write([]byte(`{"status":"installed"}`))
 	} else {
 		s.githubAppMu.RLock()
 		permIssue := s.githubAppPermIssue
 		s.githubAppMu.RUnlock()
 		if permIssue != "" {
 			detail, _ := json.Marshal(permIssue)
-			w.Write([]byte(`{"status":"insufficient_permissions","detail":` + string(detail) + `}`))
+			_, _ = w.Write([]byte(`{"status":"insufficient_permissions","detail":` + string(detail) + `}`))
 		} else {
-			w.Write([]byte(`{"status":"not_installed"}`))
+			_, _ = w.Write([]byte(`{"status":"not_installed"}`))
 		}
 	}
 }
@@ -2024,10 +2024,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if !ready {
 		w.WriteHeader(http.StatusServiceUnavailable)
-		json.NewEncoder(w).Encode(map[string]string{"status": "starting"})
+		jsonResponse(w, map[string]string{"status": "starting"})
 		return
 	}
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	jsonResponse(w, map[string]string{"status": "ok"})
 }
 
 const (
@@ -2103,7 +2103,7 @@ func (s *Server) handleLivez(w http.ResponseWriter, r *http.Request) {
 
 	if !ready {
 		w.WriteHeader(http.StatusServiceUnavailable)
-		json.NewEncoder(w).Encode(map[string]string{"status": "starting"})
+		jsonResponse(w, map[string]string{"status": "starting"})
 		return
 	}
 
@@ -2118,7 +2118,7 @@ func (s *Server) handleLivez(w http.ResponseWriter, r *http.Request) {
 			// minutes); past that, the goroutine never got going.
 			if age := time.Since(s.startedAt); age > livezStartupGrace {
 				w.WriteHeader(http.StatusServiceUnavailable)
-				json.NewEncoder(w).Encode(map[string]string{
+				jsonResponse(w, map[string]string{
 					"status": "unhealthy",
 					"detail": "heartbeat loop never started sending",
 				})
@@ -2128,7 +2128,7 @@ func (s *Server) handleLivez(w http.ResponseWriter, r *http.Request) {
 			// Attempts have stopped advancing entirely — the loop is wedged,
 			// not merely unable to reach the hub. A restart is the remedy.
 			w.WriteHeader(http.StatusServiceUnavailable)
-			json.NewEncoder(w).Encode(map[string]string{
+			jsonResponse(w, map[string]string{
 				"status":                    "unhealthy",
 				"detail":                    "heartbeat loop stalled",
 				"last_heartbeat_attempt_at": lastAttempt.UTC().Format(time.RFC3339),
@@ -2137,7 +2137,7 @@ func (s *Server) handleLivez(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	jsonResponse(w, map[string]string{"status": "ok"})
 }
 
 func (s *Server) handleHealthDeep(w http.ResponseWriter, r *http.Request) {
@@ -2394,7 +2394,7 @@ func (s *Server) handleHealthDeep(w http.ResponseWriter, r *http.Request) {
 	if overall != "ok" {
 		w.WriteHeader(http.StatusOK)
 	}
-	json.NewEncoder(w).Encode(map[string]any{
+	jsonResponse(w, map[string]any{
 		"status": overall,
 		"checks": checks,
 		"fails":  failCount,
@@ -2447,10 +2447,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	if status == nil {
-		json.NewEncoder(w).Encode(map[string]string{"status": "initializing"})
+		jsonResponse(w, map[string]string{"status": "initializing"})
 		return
 	}
-	json.NewEncoder(w).Encode(status)
+	jsonResponse(w, status)
 }
 
 func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
@@ -2482,13 +2482,18 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 		s.sseMu.Unlock()
 	}()
 
-	fmt.Fprintf(w, "retry: %d\n\n", sseRetryMs)
+	if _, err := fmt.Fprintf(w, "retry: %d\n\n", sseRetryMs); err != nil {
+		return
+	}
 	flusher.Flush()
 
 	s.statusMu.RLock()
 	if s.status != nil {
 		data, _ := json.Marshal(s.status)
-		fmt.Fprintf(w, "data: %s\n\n", data)
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+			s.statusMu.RUnlock()
+			return
+		}
 		flusher.Flush()
 	}
 	s.statusMu.RUnlock()

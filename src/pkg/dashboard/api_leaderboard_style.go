@@ -205,7 +205,7 @@ func fetchAndSanitizeCustomStyle(ctx context.Context, src customStyleSource, sco
 	if err != nil {
 		return nil, customStyleSanitizeReport{}, err
 	}
-	defer resp.Body.Close()
+	defer closeHTTPBody(resp.Body)
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, customStyleSanitizeReport{}, errCustomStyleNotFound
 	}

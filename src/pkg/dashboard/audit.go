@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -134,7 +135,9 @@ func (a *AuditLog) Log(user, action, detail, agent string) {
 
 	if a.writer != nil {
 		if data, err := json.Marshal(entry); err == nil {
-			a.writer.Write(append(data, '\n'))
+			if _, err := a.writer.Write(append(data, '\n')); err != nil {
+				slog.Error("audit log write failed", "error", err)
+			}
 		}
 	}
 }
@@ -268,14 +271,14 @@ func readAuditLogFile(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	var r io.Reader = f
 	if strings.HasSuffix(path, ".gz") {
 		gz, err := gzip.NewReader(f)
 		if err != nil {
 			return nil, err
 		}
-		defer gz.Close()
+		defer func() { _ = gz.Close() }()
 		r = gz
 	}
 	return io.ReadAll(io.LimitReader(r, maxAuditFileReadBytes))

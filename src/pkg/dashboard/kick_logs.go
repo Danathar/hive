@@ -91,7 +91,7 @@ func (s *Server) handleAgentKickHistoryPage(w http.ResponseWriter, r *http.Reque
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 
-	fmt.Fprintf(w, `<!DOCTYPE html><html><head><meta charset="utf-8"><title>%s — kick log history</title>
+	_, _ = fmt.Fprintf(w, `<!DOCTYPE html><html><head><meta charset="utf-8"><title>%s — kick log history</title>
 <style>
 body{font-family:ui-monospace,monospace;background:#0d1117;color:#c9d1d9;margin:2rem}
 h1{font-size:1.1rem}a{color:#58a6ff;text-decoration:none}a:hover{text-decoration:underline}
@@ -102,16 +102,16 @@ table{border-collapse:collapse;margin-top:1rem}td,th{padding:.3rem .9rem;text-al
 `, esc, esc, esc)
 
 	if len(infos) == 0 {
-		fmt.Fprint(w, `<p class="muted">No archived kick logs yet. Archives appear after the agent's next kick, restart, or a hive shutdown.</p>`)
+		_, _ = fmt.Fprint(w, `<p class="muted">No archived kick logs yet. Archives appear after the agent's next kick, restart, or a hive shutdown.</p>`)
 	} else {
-		fmt.Fprint(w, `<table><tr><th>archived (UTC)</th><th>trigger</th><th>size</th><th></th></tr>`)
+		_, _ = fmt.Fprint(w, `<table><tr><th>archived (UTC)</th><th>trigger</th><th>size</th><th></th></tr>`)
 		for _, info := range infos {
 			id := html.EscapeString(info.ID)
-			fmt.Fprintf(w,
+			_, _ = fmt.Fprintf(w,
 				`<tr><td>%s</td><td>%s</td><td>%d B</td><td><a href="/api/agents/%s/kicks/%s" target="_blank">view</a> · <a href="/api/agents/%s/kicks/%s?download=1">download</a></td></tr>`,
 				info.Timestamp.UTC().Format(time.RFC3339), html.EscapeString(info.Reason), info.SizeBytes, esc, id, esc, id)
 		}
-		fmt.Fprint(w, `</table>`)
+		_, _ = fmt.Fprint(w, `</table>`)
 	}
-	fmt.Fprint(w, `</body></html>`)
+	_, _ = fmt.Fprint(w, `</body></html>`)
 }

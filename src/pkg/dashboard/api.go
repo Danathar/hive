@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -504,7 +505,7 @@ func (s *Server) refreshAsync() {
 const maxDecodeBodyBytes = 1 << 20 // 1 MiB
 
 func decodeBody(r *http.Request, v interface{}) error {
-	defer r.Body.Close()
+	defer closeHTTPBody(r.Body)
 	r.Body = http.MaxBytesReader(nil, r.Body, maxDecodeBodyBytes)
 	return json.NewDecoder(r.Body).Decode(v)
 }
@@ -818,7 +819,7 @@ func ghcrTagExists(tag string) bool {
 	if err != nil {
 		return false
 	}
-	defer tokenResp.Body.Close()
+	defer closeHTTPBody(tokenResp.Body)
 	var tok struct {
 		Token string `json:"token"`
 	}
@@ -834,7 +835,7 @@ func ghcrTagExists(tag string) bool {
 	if err != nil {
 		return false
 	}
-	resp.Body.Close()
+	closeHTTPBody(resp.Body)
 	return resp.StatusCode == http.StatusOK
 }
 
@@ -914,7 +915,7 @@ func (s *Server) handleConfigDownload(w http.ResponseWriter, r *http.Request) {
 	filename := fmt.Sprintf("hive-%s-%s-%s.yaml", safeOrg, safeRepo, timestamp)
 	w.Header().Set("Content-Type", "application/x-yaml")
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
-	w.Write(data)
+	_, _ = w.Write(data)
 }
 
 func (s *Server) handleSelfUpgrade(w http.ResponseWriter, r *http.Request) {
@@ -985,7 +986,7 @@ func (s *Server) handleSelfUpgrade(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "hub unreachable", http.StatusBadGateway)
 		return
 	}
-	defer resp.Body.Close()
+	defer closeHTTPBody(resp.Body)
 	const maxUpgradeResponseBytes = 1 << 16
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxUpgradeResponseBytes))
 	if resp.StatusCode < 300 {
@@ -993,14 +994,14 @@ func (s *Server) handleSelfUpgrade(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)
-	w.Write(body)
+	_, _ = w.Write(body)
 }
 
 func (s *Server) handleSnapshotAPI(w http.ResponseWriter, r *http.Request) {
 	if s.deps == nil || s.deps.Config == nil || !s.deps.Config.Hub.AutoSnapshot {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
-		w.Write([]byte(`{"error":"snapshots not enabled"}`))
+		_, _ = w.Write([]byte(`{"error":"snapshots not enabled"}`))
 		return
 	}
 	s.statusMu.RLock()
@@ -1012,7 +1013,7 @@ func (s *Server) handleSnapshotAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "public, max-age=60")
-	json.NewEncoder(w).Encode(status)
+	jsonResponse(w, status)
 }
 
 func (s *Server) handleSnapshotFrameAncestors(w http.ResponseWriter, r *http.Request) {
@@ -1032,7 +1033,7 @@ func (s *Server) handleSnapshotPage(w http.ResponseWriter, r *http.Request) {
 	cfg := s.deps.Config
 	if s.deps == nil || cfg == nil || !cfg.Hub.AutoSnapshot {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprintf(w, `<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="3;url=%s"><title>Hive</title>
+		_, _ = fmt.Fprintf(w, `<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="3;url=%s"><title>Hive</title>
 <style>body{font-family:system-ui,sans-serif;background:#0a0a0a;color:#e0e0e0;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}
 .card{text-align:center;max-width:480px;padding:40px}.bee{font-size:3rem;margin-bottom:16px}h1{color:#f59e0b;margin:0 0 8px}p{color:#8b949e;line-height:1.6}a{color:#58a6ff}</style>
 </head><body><div class="card"><div class="bee">🐝</div><h1>Hive</h1><p>AI Agent Orchestration for Open Source</p><p>Snapshot is not currently published for this hive.</p><p>Redirecting to <a href="%s">%s</a>...</p></div></body></html>`,
@@ -1098,11 +1099,14 @@ func (s *Server) handleSnapshotPage(w http.ResponseWriter, r *http.Request) {
 	// the CSP script-src-elem hash allowlist from the exact bytes being served
 	// (#3848 part 1 / #3907, see csp_script_src.go).
 	applyDocumentScriptSrcElem(w, []byte(html))
-	w.Write([]byte(html))
+	_, _ = w.Write([]byte(html))
 }
 
 func (s *Server) buildSnapshot(outputFile, mode string) {
-	os.MkdirAll("/data/snapshots", 0o755)
+	if err := os.MkdirAll("/data/snapshots", 0o755); err != nil {
+		s.logger.Warn("snapshot directory creation failed", "error", err)
+		return
+	}
 	dashURL := fmt.Sprintf("http://localhost:%d", s.port)
 	htmlSource := "/opt/hive/proxy/public/index.html"
 	builderScript := "/opt/hive/dashboard/build-snapshot.mjs"
@@ -2422,7 +2426,7 @@ func writeSSOError(w http.ResponseWriter, r *http.Request, status int, code, wha
 	// hive look permanently broken even after access is granted.
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
-	fmt.Fprintf(w, ssoErrorPage, html.EscapeString(code), html.EscapeString(what), html.EscapeString(action))
+	_, _ = fmt.Fprintf(w, ssoErrorPage, html.EscapeString(code), html.EscapeString(what), html.EscapeString(action))
 }
 
 // ssoErrorPage is the terminal error shell for a failed SSO handoff. Format
@@ -2477,7 +2481,11 @@ func (s *Server) handleGHUserAuthLogout(w http.ResponseWriter, r *http.Request) 
 	// logging-out owner's own token stranded on disk. Viewer logouts leave the
 	// hive's user client intact.
 	if !s.directRouteAuthzEnabled() || loggedOutRole == config.RoleOwner {
-		os.Remove(userTokenPath)
+		if err := os.Remove(userTokenPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			s.deps.Logger.Error("GitHub user token removal failed", "error", err)
+			jsonError(w, "failed to remove persisted GitHub credentials", http.StatusInternalServerError)
+			return
+		}
 	}
 	clearSessionCookie(w)
 	s.auditFromRequest(r, "gh_auth_logout", "", "")
@@ -4085,7 +4093,7 @@ func (s *Server) handleAgentExport(w http.ResponseWriter, r *http.Request) {
 	if strings.Contains(accept, "text/yaml") || strings.Contains(accept, "application/yaml") {
 		w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s.yaml", name))
-		w.Write([]byte(yamlContent))
+		_, _ = w.Write([]byte(yamlContent))
 		return
 	}
 
@@ -5265,7 +5273,7 @@ func probeModelsWithHeaders(endpoint, apiKey string, extraHeaders map[string]str
 	if err != nil {
 		return 0, fmt.Errorf("cannot reach gateway: %w", err)
 	}
-	defer resp.Body.Close()
+	defer closeHTTPBody(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
 		// Error path: only a truncated slice of the body is surfaced to the
@@ -7127,7 +7135,7 @@ func fetchModelsWithHeaders(baseURL, apiKey string, extraHeaders map[string]stri
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer closeHTTPBody(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("upstream returned %d", resp.StatusCode)
@@ -7322,7 +7330,7 @@ func titleCaseWords(s string) string {
 func (s *Server) handleKnowledgeExport(w http.ResponseWriter, r *http.Request) {
 	if !s.ensureKnowledge() {
 		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
-		w.Write([]byte("# Agent Knowledge\n\nKnowledge base not available.\n"))
+		_, _ = w.Write([]byte("# Agent Knowledge\n\nKnowledge base not available.\n"))
 		return
 	}
 
@@ -7397,7 +7405,7 @@ func (s *Server) handleKnowledgeExport(w http.ResponseWriter, r *http.Request) {
 	// tag when it genuinely changes.
 	sum := sha256.Sum256([]byte(body))
 	w.Header().Set("ETag", fmt.Sprintf(`"%x"`, sum))
-	w.Write([]byte(body))
+	_, _ = w.Write([]byte(body))
 }
 
 // sortFactsStable orders facts by their natural identifier so an unchanged
@@ -8918,8 +8926,7 @@ func (s *Server) handleBeadsReset(w http.ResponseWriter, r *http.Request) {
 
 	s.auditFromRequest(r, "beads_reset", "", "")
 	s.refreshAndPersist()
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"status": "reset", "closed": results, "reason": body.Reason})
+	jsonResponse(w, map[string]any{"status": "reset", "closed": results, "reason": body.Reason})
 }
 
 func (s *Server) handleBeadsResetAgent(w http.ResponseWriter, r *http.Request) {
@@ -8957,8 +8964,7 @@ func (s *Server) handleBeadsResetAgent(w http.ResponseWriter, r *http.Request) {
 
 	s.auditFromRequest(r, "beads_reset_agent", "", agentName)
 	s.refreshAndPersist()
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"status": "reset", "agent": agentName, "closed": closed, "reason": body.Reason})
+	jsonResponse(w, map[string]any{"status": "reset", "agent": agentName, "closed": closed, "reason": body.Reason})
 }
 
 func (s *Server) handleBeadsList(w http.ResponseWriter, r *http.Request) {

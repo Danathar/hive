@@ -178,7 +178,7 @@ func probeBobAPIKey(key string) (reason, detail string) {
 		// rejection quotes the offending value) — always redact.
 		return bobTestReasonUnreachable, "cannot reach the bob backend: " + redactSecret(err.Error(), key)
 	}
-	defer resp.Body.Close()
+	defer closeHTTPBody(resp.Body)
 
 	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
 		return "", ""

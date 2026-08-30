@@ -221,7 +221,7 @@ func patchKeyIntoHiveSecrets(dataKey, value string) error {
 	if err != nil {
 		return fmt.Errorf("calling kubernetes API: %w", err)
 	}
-	defer resp.Body.Close()
+	defer closeHTTPBody(resp.Body)
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		// Deliberately status-only: API error bodies can echo patch
 		// contents, which would leak the key value into logs/responses.
