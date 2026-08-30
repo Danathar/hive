@@ -488,6 +488,18 @@ jobs:
       - name: Contributor identity relocation (#4408)
         working-directory: .
         run: bash src/deploy/test_contribute_move.sh
+
+      # #5145: container mode resolves docker OR podman, but both hints printed
+      # from INSIDE the container hardcoded docker — a container cannot see its
+      # own launcher. On a podman run the recipe's host-side hint and the
+      # entrypoint's status line disagreed about the same container in one
+      # screen of output, and the one an operator pasted was the wrong one.
+      # This renders both hints from their shipped sources and requires them to
+      # be the same command; a grep for the literal would pass on a hint that
+      # names the variable and still renders wrongly.
+      - name: In-container attach hints name the real runtime (#5145)
+        working-directory: .
+        run: bash src/deploy/test_attach_hint_runtime.sh
   create-issue-on-failure:
     if: failure() && github.event_name == 'push' && github.ref == 'refs/heads/v2'
     runs-on: ubuntu-latest

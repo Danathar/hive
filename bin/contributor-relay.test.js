@@ -4045,6 +4045,95 @@ test('#5121 the curated buckets keep first claim on their lines', () => {
   } finally { teardown(relay); }
 });
 
+// --- Attach hints must name the runtime that actually launched us ----------
+//
+// kubestellar/hive#5145. Container mode resolves docker OR podman, but the
+// relay runs INSIDE the container and cannot see its own launcher, so both
+// in-container attach hints hardcoded `docker`. Observed live on a podman
+// launch: the recipe's own host-side hint said `podman exec -it hive-...`, and
+// four lines later this relay's banner said `docker exec -it hive-...` — two
+// contradictory instructions for the same container in one screen of output.
+// The podman operator pastes the second one and gets a docker-socket
+// permission error.
+//
+// The banner is the site that matters: it fires exactly when the agent is
+// BLOCKED and a human must attach to complete a login. A paste-able command
+// that fails there reads as "the whole thing is broken".
+//
+// ATTACH_COMMAND is resolved at module load from the environment the recipe
+// passes in, so these load the relay with that environment and read the value
+// the banner will print.
+
+test('#5145 a podman container names podman in its attach hint', () => {
+  const relay = loadRelay({ env: { HIVE_CONTAINER_NAME: 'hive-contributor-agy-5b4f', HIVE_CONTAINER_RUNTIME: 'podman' } });
+  try {
+    assert.strictEqual(relay.ATTACH_COMMAND,
+      'podman exec -it hive-contributor-agy-5b4f tmux attach -t contributor',
+      'a podman-launched container must not tell the operator to run docker');
+  } finally { teardown(relay); }
+});
+
+test('#5145 a docker container is unchanged, with or without the new variable', () => {
+  // The recipe now passes HIVE_CONTAINER_RUNTIME, but an image or a launch
+  // older than that change does not. Both must print exactly what shipped
+  // before, or the fix trades a wrong podman hint for a wrong docker one.
+  const withVar = loadRelay({ env: { HIVE_CONTAINER_NAME: 'hive-contributor', HIVE_CONTAINER_RUNTIME: 'docker' } });
+  try {
+    assert.strictEqual(withVar.ATTACH_COMMAND, 'docker exec -it hive-contributor tmux attach -t contributor');
+  } finally { teardown(withVar); }
+
+  const withoutVar = loadRelay({ env: { HIVE_CONTAINER_NAME: 'hive-contributor', HIVE_CONTAINER_RUNTIME: '' } });
+  try {
+    assert.strictEqual(withoutVar.ATTACH_COMMAND, 'docker exec -it hive-contributor tmux attach -t contributor',
+      'an older launch that passes no runtime must keep printing docker');
+  } finally { teardown(withoutVar); }
+});
+
+test('#5145 local mode names no container at all', () => {
+  // HIVE_CONTAINER_NAME is set ONLY by the container arm of the recipe
+  // (Justfile: `-e HIVE_CONTAINER_NAME=...`). In local mode this relay runs on
+  // the host beside the tmux server it drives, so there is no container to exec
+  // into and `docker exec -it hive-contributor ...` could only ever fail —
+  // which is what the banner printed before this fix, on every local run.
+  const relay = loadRelay({ env: { HIVE_CONTAINER_NAME: '', HIVE_AGENT_SESSION: 'hive-agy-5b4f' } });
+  try {
+    assert.strictEqual(relay.ATTACH_COMMAND, 'tmux attach -t hive-agy-5b4f',
+      'local mode must print the plain tmux command the recipe itself prints');
+    assert.ok(!/docker|podman|exec/.test(relay.ATTACH_COMMAND),
+      `local mode must not mention a container runtime: ${relay.ATTACH_COMMAND}`);
+  } finally { teardown(relay); }
+});
+
+test('#5145 the needs-authentication banner prints the resolved command', () => {
+  // The value is only worth computing if the banner actually uses it. A second
+  // hardcoded copy inside the banner would pass every assertion above.
+  //
+  // waitForCLI() is armed during module load in interactive mode and its first
+  // poll runs synchronously, so a pane that reads as needs-login makes the
+  // banner print while loadRelay() is still running — capture around it.
+  const lines = [];
+  const oldLog = console.log;
+  console.log = (msg) => { lines.push(String(msg)); };
+  let relay;
+  try {
+    relay = loadRelay({
+      backend: 'claude',
+      cliStates: ['Please run /login\n'],
+      env: { HIVE_CONTAINER_NAME: 'hive-contributor-claude-9a1c', HIVE_CONTAINER_RUNTIME: 'podman' },
+    });
+  } finally {
+    console.log = oldLog;
+  }
+  try {
+    assert.ok(lines.some(l => l.includes('needs authentication')),
+      `the login banner did not fire; captured:\n${lines.join('\n')}`);
+    assert.ok(lines.some(l => l.includes(relay.ATTACH_COMMAND)),
+      `the banner does not print ATTACH_COMMAND (${relay.ATTACH_COMMAND}); captured:\n${lines.join('\n')}`);
+    assert.ok(!lines.some(l => /docker exec/.test(l)),
+      `the banner still hardcodes a docker exec line; captured:\n${lines.join('\n')}`);
+  } finally { teardown(relay); }
+});
+
 // ---------------------------------------------------------------------------
 
 let failed = 0;
