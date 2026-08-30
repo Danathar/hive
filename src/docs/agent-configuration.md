@@ -31,7 +31,7 @@ You almost never write a full roster by hand: applying an ACMM level (below) gen
 Hive's config is layered, and the layering is the point: **a file's location says who owns the setting.**
 
 ```
-/etc/hive/hive.yaml            ← ConfigMap seed (Kubernetes) or bind mount (Docker/LXC).
+/etc/hive/hive.yaml            ← ConfigMap seed (Kubernetes) or bind mount (Docker, Podman, LXC).
 │                                 The operator/platform layer. Re-seeded on every pod
 │                                 boot; authoritative for acmm_level and hub.is_public.
 ├── /data/hive.yaml.dashboard  ← Dashboard overlay on the PVC. Every save from the
@@ -43,7 +43,7 @@ Hive's config is layered, and the layering is the point: **a file's location say
 │                                 Merged over the agents: map at load time.
 ├── /data/hive.yaml.runtime    ← Persisted runtime config (was hive.yaml.bak). Never
 │                                 edit. On K8s a post-merge snapshot the entrypoint
-│                                 restores from if the seed is lost; on Docker/LXC the
+│                                 restores from if the seed is lost; outside Kubernetes the
 │                                 boot-time source of truth. The legacy name is still
 │                                 read as a fallback during the migration.
 ├── /data/secrets/             ← Secret VALUES written by the dashboard (writable PVC).
@@ -536,7 +536,7 @@ This is the property operators most need to understand before enabling the featu
 
 - A dashboard save cannot turn `allow_github_prompt` on if the seed has it off.
 - A dashboard save cannot add a repo slug to `github_prompt_allowlist`.
-- A compromised or malicious dashboard overlay can neither widen the set of readable repos nor repoint an agent's `definition_source` at an arbitrary repo — only a seed edit (ConfigMap in Kubernetes, bind-mounted file in Docker/LXC) can do either.
+- A compromised or malicious dashboard overlay can neither widen the set of readable repos nor repoint an agent's `definition_source` at an arbitrary repo — only a seed edit (ConfigMap in Kubernetes, bind-mounted file under Docker, Podman or LXC) can do either.
 
 An empty allowlist denies every repo even with `allow_github_prompt: true` — the allowlist is required, not merely advisory.
 
