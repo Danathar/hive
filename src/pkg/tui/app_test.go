@@ -51,7 +51,7 @@ func TestAppRendersGrid(t *testing.T) {
 	tm := teatest.NewTestModel(t, newModel(), teatest.WithInitialTermSize(80, 24))
 
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
-		for _, title := range []string{"AGENTS", "GOVERNOR", "TOKENS", "EVENTS"} {
+		for _, title := range paneTitles {
 			if !strings.Contains(string(b), title) {
 				return false
 			}
@@ -140,6 +140,11 @@ func TestFocusHighlightsExactlyOnePane(t *testing.T) {
 // View before the first tea.WindowSizeMsg arrives; centering into a 0x0 box
 // renders nothing, so an unsized frame would flash blank rather than telling
 // the operator how to get out.
+//
+// Since T24 it also pins the ORDER of View's two early returns: width 0 means
+// "not measured yet", not "a zero-width terminal", so it must keep reaching
+// the splash rather than the below-minimum message — which names a size and
+// would be a claim about a terminal nobody has measured.
 func TestViewBeforeSizeMsg(t *testing.T) {
 	if got := newModel().View(); got != splash {
 		t.Fatalf("unsized View() = %q, want %q", got, splash)
