@@ -434,7 +434,7 @@ func (s *Server) fetchCostJSON(ctx context.Context, url, apiKey, caBundle string
 	if err != nil {
 		return nil, fmt.Errorf("cannot reach gateway: %w", err)
 	}
-	defer resp.Body.Close()
+	defer closeHTTPBody(resp.Body)
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, costProbeMaxBody))
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {

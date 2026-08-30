@@ -460,7 +460,7 @@ func (w *InceptionWatcher) runPlukSubscriberWithSettings(ctx context.Context, lo
 		w.logger.Warn("pluk subscriber: cannot open log", "error", err)
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	// Seek to end — we only care about new events
 	if seekEnd {

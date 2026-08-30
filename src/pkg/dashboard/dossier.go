@@ -309,7 +309,7 @@ func fetchCredlyBadges(credlyName string) ([]HeraldryBadge, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer closeHTTPBody(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("credly returned %d", resp.StatusCode)
 	}
@@ -487,7 +487,7 @@ func fetchGitHubPublicUser(username string) (serviceYears, followers int, err er
 	if err != nil {
 		return 0, 0, err
 	}
-	defer resp.Body.Close()
+	defer closeHTTPBody(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		return 0, 0, fmt.Errorf("github returned %d", resp.StatusCode)
 	}

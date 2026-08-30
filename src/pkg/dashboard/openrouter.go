@@ -126,7 +126,7 @@ func (s *Server) handleOpenRouterQR(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "image/png")
 	w.Header().Set("Cache-Control", "no-store")
-	w.Write(png)
+	_, _ = w.Write(png)
 }
 
 // handleOpenRouterModels returns the curated suggested model list plus OpenRouter's

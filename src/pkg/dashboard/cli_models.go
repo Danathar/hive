@@ -758,7 +758,7 @@ func (s *Server) copilotAPIHost(token string) string {
 	if err != nil {
 		return copilotDefaultAPIHost
 	}
-	defer resp.Body.Close()
+	defer closeHTTPBody(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		return copilotDefaultAPIHost
 	}
@@ -800,7 +800,7 @@ func fetchCopilotModels(modelsURL, token, integrationID string) ([]string, error
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer closeHTTPBody(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("upstream returned %d", resp.StatusCode)
 	}
@@ -892,7 +892,7 @@ func fetchGeminiModels(apiKey string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer closeHTTPBody(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("upstream returned %d", resp.StatusCode)
 	}
@@ -1104,7 +1104,7 @@ func fetchClaudeModels(modelsURL, authHeader, authValue string) ([]string, error
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer closeHTTPBody(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("upstream returned %d", resp.StatusCode)
 	}

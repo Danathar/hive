@@ -884,7 +884,10 @@ func (h *ContributeWSHub) saveActivity() {
 		return
 	}
 	path := h.activityPath()
-	os.MkdirAll(filepath.Dir(path), 0o755)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		h.logger.Warn("[contribute-ws] activity directory creation failed", "error", err)
+		return
+	}
 	tmpPath := path + ".tmp"
 	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
 		h.logger.Warn("[contribute-ws] activity write failed", "error", err)
@@ -1048,7 +1051,10 @@ func (h *ContributeWSHub) saveNoPRStreaks() {
 		return
 	}
 	path := h.noPRStreaksPath()
-	os.MkdirAll(filepath.Dir(path), 0o755)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		h.logger.Warn("[contribute-ws] no-PR streaks directory creation failed", "error", err)
+		return
+	}
 	tmpPath := path + ".tmp"
 	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
 		h.logger.Warn("[contribute-ws] no-PR streaks write failed", "error", err)
@@ -1191,7 +1197,10 @@ func (h *ContributeWSHub) saveNoWorkVerdicts() {
 		return
 	}
 	path := h.noWorkVerdictsPath()
-	os.MkdirAll(filepath.Dir(path), 0o755)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		h.logger.Warn("[contribute-ws] no-work verdicts directory creation failed", "error", err)
+		return
+	}
 	tmpPath := path + ".tmp"
 	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
 		h.logger.Warn("[contribute-ws] no-work verdicts write failed", "error", err)
@@ -1355,7 +1364,10 @@ func (h *ContributeWSHub) saveFailedTasks() {
 		return
 	}
 	path := h.failedTasksPath()
-	os.MkdirAll(filepath.Dir(path), 0o755)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		h.logger.Warn("[contribute-ws] failed tasks directory creation failed", "error", err)
+		return
+	}
 	tmpPath := path + ".tmp"
 	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
 		h.logger.Warn("[contribute-ws] failed tasks write failed", "error", err)
@@ -1449,7 +1461,10 @@ func (h *ContributeWSHub) saveCompletedTasks() {
 		return
 	}
 	path := h.completedTasksPath()
-	os.MkdirAll(filepath.Dir(path), 0o755)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		h.logger.Warn("[contribute-ws] completed tasks directory creation failed", "error", err)
+		return
+	}
 	tmpPath := path + ".tmp"
 	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
 		h.logger.Warn("[contribute-ws] completed tasks write failed", "error", err)
@@ -2889,7 +2904,7 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 			h.logger.Info("[contribute-ws] disconnected", "username", contributor.profile.GitHubUsername)
 			h.addActivity(contributor.profile.GitHubUsername, "left", contributor.role, contributor.cliBackend, contributor.model, contributor.reasoningEffort, "")
 		}
-		conn.Close()
+		_ = conn.Close()
 	}()
 
 	for {
@@ -3722,7 +3737,7 @@ func (h *ContributeWSHub) heartbeatLoop(c *ContributorConnection) {
 
 		if err := c.send(WSMessage{Type: "ping", Seq: h.nextSeq()}); err != nil {
 			h.logger.Info("[contribute-ws] heartbeat ping failed, closing", "username", c.profile.GitHubUsername)
-			c.ws.Close()
+			_ = c.ws.Close()
 			return
 		}
 	}

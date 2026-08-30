@@ -3,6 +3,7 @@ package dashboard
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -116,7 +117,7 @@ func (s *Server) handleCopilotAuthStart(w http.ResponseWriter, r *http.Request) 
 		jsonError(w, "device code request failed: "+err.Error(), http.StatusBadGateway)
 		return
 	}
-	defer resp.Body.Close()
+	defer closeHTTPBody(resp.Body)
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		jsonError(w, "read device code response: "+err.Error(), http.StatusBadGateway)
@@ -243,7 +244,7 @@ func (s *Server) pollCopilotToken(ctx context.Context, deviceCode string, interv
 			continue
 		}
 		body, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		closeHTTPBody(resp.Body)
 		if err != nil {
 			continue
 		}
@@ -308,7 +309,11 @@ func (s *Server) handleCopilotAuthLogout(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	os.Remove(copilotUserTokenPath)
+	if err := os.Remove(copilotUserTokenPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		s.deps.Logger.Error("Copilot credential removal failed", "error", err)
+		jsonError(w, "failed to remove persisted Copilot credentials", http.StatusInternalServerError)
+		return
+	}
 	if s.deps != nil && s.deps.AgentMgr != nil {
 		s.deps.AgentMgr.SetCopilotToken("")
 	}

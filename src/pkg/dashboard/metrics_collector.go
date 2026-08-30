@@ -237,7 +237,7 @@ func (mc *MetricsCollector) collectCoverage() map[string]any {
 	if err != nil {
 		return result
 	}
-	defer resp.Body.Close()
+	defer closeHTTPBody(resp.Body)
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

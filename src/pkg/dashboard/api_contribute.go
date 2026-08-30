@@ -6282,7 +6282,7 @@ fetch('/api/version').then(function(r){return r.json()}).then(function(d){
 </script>
 </body></html>`, "{{HIVE_BRANCH}}", upstreamBranch()), projectName, michromaFontFaceCSS, customStyleHeadHTML, projectName, len(profiles), tierBoxes.String(), hubURL, hubURLJS, projectNameJS, tierTableRows, customStyleNoticeHTML)
 	applyDocumentScriptSrcElem(w, page.Bytes())
-	w.Write(page.Bytes())
+	_, _ = w.Write(page.Bytes())
 }
 
 // ── Registration ───────────────────────────────────────────────────────────
@@ -6495,7 +6495,7 @@ func (s *Server) handleContributeReissueToken(w http.ResponseWriter, r *http.Req
 	if username == "" {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte(`{"error":"Invalid or missing GitHub token. Use: Authorization: Bearer <gh-personal-access-token>"}`))
+		_, _ = w.Write([]byte(`{"error":"Invalid or missing GitHub token. Use: Authorization: Bearer <gh-personal-access-token>"}`))
 		return
 	}
 
@@ -8130,7 +8130,7 @@ func validateGitHubToken(token, apiURL string) string {
 	if err != nil || resp.StatusCode != 200 {
 		return ""
 	}
-	defer resp.Body.Close()
+	defer closeHTTPBody(resp.Body)
 	var user struct {
 		Login string `json:"login"`
 	}
@@ -8175,7 +8175,7 @@ func (s *Server) handleAPIv1(w http.ResponseWriter, r *http.Request) {
 	if token == "" {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte(`{"error":"Invalid or missing GitHub token. Use: Authorization: Bearer <gh-token>"}`))
+		_, _ = w.Write([]byte(`{"error":"Invalid or missing GitHub token. Use: Authorization: Bearer <gh-token>"}`))
 		return
 	}
 
@@ -8183,7 +8183,7 @@ func (s *Server) handleAPIv1(w http.ResponseWriter, r *http.Request) {
 	if username == "" {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte(`{"error":"Invalid or missing GitHub token. Use: Authorization: Bearer <gh-token>"}`))
+		_, _ = w.Write([]byte(`{"error":"Invalid or missing GitHub token. Use: Authorization: Bearer <gh-token>"}`))
 		return
 	}
 
@@ -8228,12 +8228,12 @@ func (s *Server) handleAPIv1(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
-		w.Write([]byte(`{"error":"Not registered as a contributor. Run: just contribute-setup"}`))
+		_, _ = w.Write([]byte(`{"error":"Not registered as a contributor. Run: just contribute-setup"}`))
 	default:
 		if !strings.HasPrefix(subpath, "/prs/") || !strings.HasSuffix(subpath, "/queue-automerge") {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusNotFound)
-			w.Write([]byte(`{"error":"Unknown endpoint","available":["/api/v1/status","/api/v1/activity","/api/v1/contributors","/api/v1/knowledge","/api/v1/me","/api/v1/prs/{owner}/{repo}/{number}/queue-automerge"]}`))
+			_, _ = w.Write([]byte(`{"error":"Unknown endpoint","available":["/api/v1/status","/api/v1/activity","/api/v1/contributors","/api/v1/knowledge","/api/v1/me","/api/v1/prs/{owner}/{repo}/{number}/queue-automerge"]}`))
 			return
 		}
 		parts := strings.Split(strings.TrimPrefix(subpath, "/prs/"), "/")
@@ -8283,7 +8283,7 @@ func (s *Server) handleAPIDocs(w http.ResponseWriter, r *http.Request) {
 	}
 	baseURL := scheme + "://" + host
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, `<!DOCTYPE html>
+	_, _ = fmt.Fprintf(w, `<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><title>Hive API</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
