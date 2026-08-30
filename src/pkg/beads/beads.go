@@ -264,6 +264,13 @@ func upsertTitleKey(title string) string {
 	return b.String()
 }
 
+// UpsertTitleKey exposes the match key Upsert uses, for callers that must know
+// which bead a report WOULD land on before writing it. The advisory provenance
+// gate needs exactly that: it has to recognise the bead a re-report would
+// refresh, including the cosmetic title drift Upsert folds, or it could only
+// ever fire on byte-identical titles.
+func UpsertTitleKey(title string) string { return upsertTitleKey(title) }
+
 // Upsert records a finding without duplicating it: if an OPEN bead of the same
 // type already carries an equivalent title, its LastSeenAt is refreshed (and
 // its priority raised if this report is more severe) and that bead is returned;
