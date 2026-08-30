@@ -228,39 +228,33 @@ func (c *Client) handleOnePRRequest(ctx context.Context, path string, nowFn func
 		return
 	}
 
+	// Validate claims while the request is still at the server-side choke point.
+	// Agents cannot bypass this by invoking a different CLI: direct POST /pulls
+	// is denied by the proxy, and every supported path arrives here.
+	title, body, err := c.validatePRRequestClaims(ctx, req)
+	if err != nil {
+		if reason, policy := prRequestPolicyReason(err); policy {
+			c.rejectPRRequest(path, req, reason, nowFn)
+			return
+		}
+		c.failPRRequest(path, req, err, nowFn)
+		return
+	}
+
 	// Invocation-attribution trail (attribution.go): resolve what the hive
 	// invoked for this agent, append the visible trailer to the PR body when
 	// the toggle is on, and — below, on success — record the audit entry
 	// unconditionally. This choke point covers every agent regardless of CLI,
 	// because the proxy hard-denies direct POST /pulls.
 	meta := c.attributionMeta(req.Agent)
-	body := req.Body
 	if c.attributionTrailerOn() {
 		body = AppendTrailer(body, meta)
 	}
 
-	res, err := c.CreatePR(ctx, req.Repo, req.Head, req.Base, req.Title, body)
+	res, err := c.CreatePR(ctx, req.Repo, req.Head, req.Base, title, body)
 	resp := PRResponse{At: nowFn().UTC().Format(time.RFC3339)}
 	if err != nil {
-		// Leave the request in place so a later tick retries (transient API
-		// errors, main not yet pushed, etc.) — but with exponential backoff, and
-		// quarantine once the give-up horizon passes. Retrying every tick
-		// forever let ~10 poisoned requests generate thousands of junk create
-		// calls an hour, tripping the org-wide secondary rate limit
-		// (request_retry.go).
-		resp.OK = false
-		resp.Error = err.Error()
-		c.writePRResult(path, resp)
-		if c.prRetries.noteFailure(path, nowFn()) {
-			_ = os.Rename(path, path+".failed")
-			c.prRetries.clear(path)
-			c.logger.Error("pr-request watcher: request exceeded retry horizon, quarantined",
-				slog.String("path", path), slog.String("repo", req.Repo),
-				slog.String("head", req.Head), slog.String("error", err.Error()))
-			return
-		}
-		c.logger.Warn("pr-request watcher: open failed, will retry with backoff",
-			slog.String("repo", req.Repo), slog.String("head", req.Head), slog.String("error", err.Error()))
+		c.failPRRequest(path, req, err, nowFn)
 		return
 	}
 	resp.OK = true
@@ -314,6 +308,36 @@ func (c *Client) handleOnePRRequest(ctx context.Context, path string, nowFn func
 		slog.String("repo", req.Repo), slog.String("head", req.Head),
 		slog.Int("number", res.Number), slog.Bool("reused", res.AlreadyExisted),
 		slog.String("agent", req.Agent))
+}
+
+// failPRRequest records a transient validation or PR-creation failure. The
+// request remains queued and is retried with the same bounded backoff used for
+// all other forge failures.
+func (c *Client) failPRRequest(path string, req PRRequest, err error, nowFn func() time.Time) {
+	resp := PRResponse{OK: false, Error: err.Error(), At: nowFn().UTC().Format(time.RFC3339)}
+	c.writePRResult(path, resp)
+	if c.prRetries.noteFailure(path, nowFn()) {
+		_ = os.Rename(path, path+".failed")
+		c.prRetries.clear(path)
+		c.logger.Error("pr-request watcher: request exceeded retry horizon, quarantined",
+			slog.String("path", path), slog.String("repo", req.Repo),
+			slog.String("head", req.Head), slog.String("error", err.Error()))
+		return
+	}
+	c.logger.Warn("pr-request watcher: request failed, will retry with backoff",
+		slog.String("repo", req.Repo), slog.String("head", req.Head), slog.String("error", err.Error()))
+}
+
+// rejectPRRequest records a claim-validation mismatch and quarantines it. A
+// changed request or branch is required to make it valid, so retrying the same
+// file would only consume API quota and hide the actionable feedback.
+func (c *Client) rejectPRRequest(path string, req PRRequest, reason string, nowFn func() time.Time) {
+	c.writePRResult(path, PRResponse{OK: false, Error: "PR claim rejected: " + reason, At: nowFn().UTC().Format(time.RFC3339)})
+	_ = os.Rename(path, path+".rejected")
+	c.prRetries.clear(path)
+	c.logger.Warn("pr-request watcher: REJECTED (claim mismatch)",
+		slog.String("agent", req.Agent), slog.String("repo", req.Repo),
+		slog.String("head", req.Head), slog.String("reason", reason))
 }
 
 // denyPRRequest records an authorization failure and quarantines the request
