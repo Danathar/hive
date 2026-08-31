@@ -634,3 +634,9 @@ and is otherwise behaviour-preserving.
 It does not say the RFC is infeasible, and it does not say it is worthwhile.
 Step 4 is where that judgement belongs, and it should be made with §5.1's fork
 named explicitly and Open question 3 answered.
+
+Step 3 — the handoff evaluation — is now written up separately in
+[Evaluating a handoff path for the re-entrant turn model](agent-turn-handoff.md).
+It re-checks §6.3's residuals against `v4`, and reports that §5.1's fork is no
+longer deferrable: the envelope it describes is handoff-able on the headless
+path only.
