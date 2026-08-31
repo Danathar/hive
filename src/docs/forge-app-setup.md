@@ -3,11 +3,13 @@
 > **Read this first.** On **GitHub.com and GitHub Enterprise** the Forge App is a
 > GitHub App and everything works — see [GitHub App setup](github-app-setup.md).
 > On **GitLab, Gitea, and Forgejo** it does not. The adapters exist in the source
-> tree, are tested, and are **not wired into any running code path**: nothing in
-> Hive constructs one today. Configuring `project.forge: gitlab` changes what the
-> dashboard *displays* and nothing else. There is no non-GitHub setup path to
-> follow yet, and this page exists so you can establish that in one read instead
-> of discovering it after an install.
+> tree and are tested, but they are **still not on a path a non-GitHub hive can
+> reach**. One caller now constructs an adapter from `project.forge` — the
+> governor's escalation writes ([#5259](https://github.com/kubestellar/hive/issues/5259))
+> — and it is a genuine first step, but nothing feeds it on a GitLab or Gitea
+> hive, because enumeration still requires a GitHub client. There is no
+> non-GitHub setup path to follow yet, and this page exists so you can establish
+> that in one read instead of discovering it after an install.
 
 ## Terminology
 
@@ -23,22 +25,30 @@ this page is the difference.
 | --- | --- | --- | --- | --- | --- | --- |
 | GitHub.com | Yes | Yes | Yes | Yes | Yes | Yes |
 | GitHub Enterprise | Yes | Yes | Yes | Yes | Yes | Yes |
-| GitLab (SaaS or self-managed) | **No** | Adapter only, unwired | Adapter only, unwired | **Not implemented** | **Not implemented** | **No** |
-| Gitea | **No** | Adapter only, unwired | Adapter only, unwired | **Not implemented** | **Not implemented** | **No** |
-| Forgejo | **No** | Adapter only, unwired | Adapter only, unwired | **Not implemented** | **Not implemented** | **No** |
+| GitLab (SaaS or self-managed) | **No** | Adapter only, unwired | Wired but unreachable | **Not implemented** | **Not implemented** | **No** |
+| Gitea | **No** | Adapter only, unwired | Wired but unreachable | **Not implemented** | **Not implemented** | **No** |
+| Forgejo | **No** | Adapter only, unwired | Wired but unreachable | **Not implemented** | **Not implemented** | **No** |
 
 "Adapter only, unwired" means the Go code is written and covered by tests, but no
-running code path calls it. Gitea and Forgejo share one adapter because they
-share one REST API surface.
+running code path calls it. "Wired but unreachable" is the narrower state the
+comment/label column is now in: one production caller — the governor's
+escalation sweep — selects its adapter from `project.forge` and would post the
+evidence comment and `needs-human` label to your forge, but it is driven by the
+GitHub-only enumeration the governor cycle starts from, which produces nothing
+without a GitHub client.
+The wiring is real; the input never arrives. `hold` is not in that caller and
+stays unwired. Gitea and Forgejo share one adapter because they share one REST
+API surface.
 
 **A hive cannot presently run against GitLab, Gitea, or Forgejo.** If that is
 your forge, there is nothing to install and no configuration that will make
 agents work.
 
 This is the state the [roadmap](roadmap.md) records for the abstraction: the
-adapters are built, and what remains is "moving scheduler operations behind the
-abstraction — production callers still use the forge-specific client directly."
-The design rationale is [ADR-0005](adr/0005-forge-abstraction.md).
+adapters are built, the first production caller is behind the seam, and what
+remains is the read path — neutralizing enumeration, which today owns hold-label
+filtering, issue filters and SLA tracking inside `pkg/github`. The design
+rationale is [ADR-0005](adr/0005-forge-abstraction.md).
 
 ## Why: the agent execution path is GitHub-only
 
@@ -112,9 +122,11 @@ agent needs.
 ## The configuration surface that exists
 
 These keys parse and validate today. They are documented here because they are
-real and you will find them in the source — **not** because setting them enables
-anything. Their only consumer is the dashboard's Platform card, which reads them
-to display a forge name and instance URL.
+real and you will find them in the source — **not** because setting them makes a
+non-GitHub hive work. They have two consumers: the dashboard's Platform card,
+which reads them to display a forge name and instance URL, and the governor's
+escalation writes, which build an adapter from them (see the table above for why
+that caller is not reached on a non-GitHub hive today).
 
 ```yaml
 project:
@@ -151,7 +163,7 @@ likely way to break a working hive:
 
 | Key | Meaning | Values |
 | --- | --- | --- |
-| `project.forge` | Which forge **family** a spoke executes against — selects the `pkg/forge` adapter (display-only today) | `github`, `gitlab`, `gitea` |
+| `project.forge` | Which forge **family** a spoke executes against — selects the `pkg/forge` adapter (read by the dashboard and by the governor's escalation writes; see above) | `github`, `gitlab`, `gitea` |
 | `github.forge` | Which GitHub **instance** this hive's App and repos live on — drives App ID, app slug, and API URL | a GitHub host label |
 
 `github.forge` is part of the GitHub App identity system and is fully live. Do
@@ -160,9 +172,9 @@ kind of setting.
 
 ## If you evaluate the adapters anyway
 
-Should you exercise `pkg/forge` directly — from a test or your own program, since
-Hive itself will not call it — the tokens it expects are ordinary access tokens,
-not apps:
+Should you exercise `pkg/forge` directly — from a test or your own program, which
+is still the only way to reach most of it — the tokens it expects are ordinary
+access tokens, not apps:
 
 | Forge | Credential | Sent as |
 | --- | --- | --- |
@@ -187,14 +199,19 @@ is not deployment-ready.
 
 Listed so the size of the gap is legible, not as a plan of record:
 
-1. `CreateIssue` and `CreateChangeRequest` on the `Forge` interface, plus a
+1. A forge-neutral enumeration path. Today the governor cycle starts at
+   `github.Client.EnumerateActionable`, which also owns hold-label filtering,
+   issue filters and SLA tracking, so neutralizing it means lifting that policy
+   above the forge boundary — this is what makes the already-wired escalation
+   writes unreachable on a non-GitHub hive.
+2. `CreateIssue` and `CreateChangeRequest` on the `Forge` interface, plus a
    settled `Merge` — the create-and-merge lifecycle agents depend on.
-2. A forge-neutral agent execution path, since agents reach their forge through
+3. A forge-neutral agent execution path, since agents reach their forge through
    the `gh` CLI wrapper rather than through `pkg/forge`.
-3. Credential plumbing for token-based forges alongside the GitHub App minting
+4. Credential plumbing for token-based forges alongside the GitHub App minting
    machinery, including per-tier scoping.
-4. A GitLab/Gitea dashboard login provider.
-5. Egress-proxy mode enforcement registration for the non-GitHub hosts.
+5. A GitLab/Gitea dashboard login provider.
+6. Egress-proxy mode enforcement registration for the non-GitHub hosts.
 
 ## See also
 

@@ -57,6 +57,7 @@ import (
 	"github.com/kubestellar/hive/pkg/defsrc"
 	"github.com/kubestellar/hive/pkg/discord"
 	"github.com/kubestellar/hive/pkg/escalation"
+	"github.com/kubestellar/hive/pkg/forge"
 	"github.com/kubestellar/hive/pkg/github"
 	"github.com/kubestellar/hive/pkg/governor"
 	"github.com/kubestellar/hive/pkg/hooks"
@@ -5924,7 +5925,7 @@ func runEvalCycle(
 	// bounded ring in one cycle, and no I/O happens on this path.
 	recordEnumeratedIssues(ctx, dashSrv, actionable)
 
-	escalatedPRs := runEscalationSweep(ctx, cfg, ghClient, actionable, notifier, logger)
+	escalatedPRs := runEscalationSweep(ctx, cfg, governorForge(cfg, ghClient, logger), actionable, notifier, logger)
 
 	intentVerdicts := writeIntentVerdicts(ctx, cfg, ghClient, actionable, beadStores, logger)
 	refreshReviewVerdicts(cfg, logger)
@@ -7564,16 +7565,21 @@ func reapStuckRedPRs(cfg *config.Config, actionable *github.ActionableResult, es
 // escalated PR keys so the work-list writers can flag them. Deterministic by
 // design: no agent judgment is involved in counting, evidence, or the
 // stop-order. Human-authored PRs are never escalated.
+//
+// The two forge writes go through forge.IssueWriter rather than *github.Client
+// so the evidence lands on whichever forge the hive is actually configured for
+// (see governorForge in forgewire.go). On a GitHub hive the writer IS the
+// *github.Client this used to take, so nothing about that path changed.
 func runEscalationSweep(
 	ctx context.Context,
 	cfg *config.Config,
-	ghClient *github.Client,
+	writer forge.IssueWriter,
 	actionable *github.ActionableResult,
 	notifier *notify.Notifier,
 	logger *slog.Logger,
 ) map[string]bool {
 	escalated := map[string]bool{}
-	if cfg.Escalation.Disabled || ghClient == nil || actionable == nil {
+	if cfg.Escalation.Disabled || writer == nil || actionable == nil {
 		return escalated
 	}
 	getEscalationStore()
@@ -7625,14 +7631,14 @@ func runEscalationSweep(
 			excerpt = escalationStore.Excerpt(o.Repo, o.Number)
 		}
 		body := escalation.CommentBody(r.Attempts, meta[key].checks, excerpt)
-		if err := ghClient.CreateIssueComment(ctx, o.Repo, o.Number, body); err != nil {
+		if err := writer.CreateIssueComment(ctx, o.Repo, o.Number, body); err != nil {
 			// Retry next pass rather than marking escalated with no comment:
 			// the whole point is that the evidence reaches a human.
 			logger.Warn("escalation comment failed; will retry next pass",
 				"repo", o.Repo, "pr", o.Number, "error", err)
 			continue
 		}
-		if err := ghClient.AddLabels(ctx, o.Repo, o.Number, []string{escalation.NeedsHumanLabel}); err != nil {
+		if err := writer.AddLabels(ctx, o.Repo, o.Number, []string{escalation.NeedsHumanLabel}); err != nil {
 			logger.Warn("escalation label failed", "repo", o.Repo, "pr", o.Number, "error", err)
 		}
 		escalationStore.MarkEscalated(o.Repo, o.Number)
