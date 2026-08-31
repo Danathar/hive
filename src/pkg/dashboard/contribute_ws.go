@@ -3117,6 +3117,21 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 			default:
 			}
 
+			// Count a PROTOCOL-level Pong as liveness, exactly as the JSON
+			// "pong" case below does (kubestellar/hive#5090). Now that the hub
+			// emits real Ping control frames, a relay that answers only those —
+			// which is what any conforming WebSocket client does automatically,
+			// with no relay code at all — must not be false-timed-out by the
+			// heartbeat sweep. gorilla invokes this handler from ReadMessage on
+			// the read goroutine, which holds neither mu nor writeMu here, so
+			// taking mu introduces no re-entrancy.
+			contributor.ws.SetPongHandler(func(string) error {
+				contributor.mu.Lock()
+				contributor.lastPong = time.Now()
+				contributor.mu.Unlock()
+				return nil
+			})
+
 			go h.heartbeatLoop(contributor)
 
 		case "ready":
@@ -3737,8 +3752,19 @@ func (h *ContributeWSHub) heartbeatLoop(c *ContributorConnection) {
 
 		if err := c.send(WSMessage{Type: "ping", Seq: h.nextSeq()}); err != nil {
 			h.logger.Info("[contribute-ws] heartbeat ping failed, closing", "username", c.profile.GitHubUsername)
-			_ = c.ws.Close()
+			closeWithReason(c.ws, websocket.CloseGoingAway, "heartbeat ping write failed")
 			return
+		}
+
+		// Also emit a PROTOCOL-level Ping control frame alongside the JSON one
+		// (kubestellar/hive#5090). See writeProtocolPing for why the JSON ping
+		// alone is not enough to hold the connection open through the ingress
+		// path. A failure here is not fatal on its own: the JSON ping above
+		// already succeeded, so the socket is live and the next tick's
+		// heartbeat-timeout check remains the authority on when to hang up.
+		if err := writeProtocolPing(c.ws); err != nil {
+			h.logger.Debug("[contribute-ws] protocol ping failed",
+				"username", c.profile.GitHubUsername, "error", err)
 		}
 	}
 }
@@ -5256,6 +5282,55 @@ func sendJSON(conn *websocket.Conn, msg WSMessage) error {
 // already gone the write fails immediately, and waiting longer than this would
 // hold a goroutine open for a client that will never read it.
 const wsCloseFrameDeadline = time.Second
+
+// wsProtocolPingDeadline bounds the write of a keepalive Ping control frame.
+// It is deliberately far shorter than wsHeartbeatInterval so a wedged socket
+// cannot stack up heartbeat goroutines waiting on a peer that has stopped
+// reading.
+const wsProtocolPingDeadline = 10 * time.Second
+
+// writeProtocolPing sends a WebSocket PROTOCOL-level Ping control frame (opcode
+// 0x9) on the connection.
+//
+// THE DEFECT (kubestellar/hive#5090): the contributor keepalive was implemented
+// ENTIRELY as application JSON — the hub sends {"type":"ping"} as a text frame
+// and the relay answers {"type":"pong"}, and neither side ever emitted a
+// control frame. websocket.PingMessage appeared nowhere in this package, and
+// the relay never called ws.ping().
+//
+// That distinction is invisible to the two endpoints and decisive to everything
+// between them. An L7 proxy that understands WebSocket — and the hosted spokes
+// sit behind both ingress-nginx and an OCI load balancer — may account only for
+// control-frame traffic when deciding whether a tunnel is idle, precisely
+// because application payload can be a long-running unidirectional stream that
+// says nothing about liveness. Under such a proxy a connection carrying a text
+// frame every 30 seconds is still "idle", and gets reaped on the idle timer
+// with no Close frame: the peer sees 1006 with an empty reason and no
+// application-layer log on either side, which is exactly the signature #5090
+// measured — the hub proven to send Close frames on its own hangups, yet every
+// observed flap frameless.
+//
+// Sending a real Ping costs one 2-byte control frame per 30s tick and makes the
+// connection unambiguously live to any conforming intermediary. It is additive:
+// the JSON ping/pong stays exactly as it was, so old relays that answer only
+// the JSON heartbeat are unaffected, and gorilla/websocket answers an inbound
+// Ping with a Pong automatically via its default ping handler, so a relay needs
+// no change to make the reverse direction work either.
+//
+// WriteControl is documented as safe to call concurrently with all other
+// methods, so — like closeWithReason — this deliberately does NOT take writeMu.
+// Taking it here would nest a second lock under callers that already hold it
+// and buy nothing.
+func writeProtocolPing(conn *websocket.Conn) error {
+	if conn == nil {
+		return nil
+	}
+	return conn.WriteControl(
+		websocket.PingMessage,
+		nil,
+		time.Now().Add(wsProtocolPingDeadline),
+	)
+}
 
 // closeWithReason closes a contributor socket after telling the client WHY.
 //
