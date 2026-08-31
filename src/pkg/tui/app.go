@@ -23,10 +23,19 @@
 // design doc's note on the sketch (src/docs/design/tui.md §3).
 // T25 (#5139): every color the frame draws comes from theme.go, as a
 // light/dark pair. No call site names a color of its own.
+//
+// T13b (#5215): the frame is PUSHED to. The TUI subscribes to the dashboard's
+// SSE stream (T13a) at startup and translates each event into the same pane
+// messages the poll produces, so a pane moves the moment the server publishes
+// rather than on the next tick. The poll does not go away — it becomes the
+// fallback and the reconciler: healthy stream, 60s reconcile; dropped stream,
+// back to the 5s poll and a header that says so. See the SSE section at the
+// bottom of this file.
 package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -92,21 +101,35 @@ var (
 	confirmErrorStyle = lipgloss.NewStyle().Bold(true)
 )
 
-// headerText still carries placeholders after T12, and each one is a fact
-// about what is not fetched yet rather than an oversight:
+// headerFormat is the header bar, with the SSE connection state as its only
+// live field after T13b. The other two still carry placeholders, and each one
+// is a fact about what is not fetched yet rather than an oversight:
 //
 //   - `hive:` — the hive's name is on GET /api/status (StatusPayload.HiveID),
 //     which no merged client method reads. T6's /api/status client decodes the
 //     governor slice; until a client call exposes the id, inventing one here
 //     would be a guess rendered as a fact.
 //   - `governor:` — same endpoint, T6/T7's to fill.
-//   - `ws:` — SSE connection state, and the TUI opens no stream yet. T13b owns
-//     this field and it stays literally true until then: not connected.
 //
 // A dash is "not known", which is true; any value polled data does not support
-// would be false. T12 populates none of them because nothing it polls carries
-// them — /api/agents is the only merged read, and it carries none of the three.
-const headerText = "hive: —   governor: —   ws: not connected"
+// would be false.
+const headerFormat = "hive: —   governor: —   ws: %s"
+
+// The two `ws:` values, and why there are only two.
+//
+// "connected" means an event has been RECEIVED on the stream, not that a
+// socket was opened: client.StreamEvents hands back its channels before the
+// request is even dialled, so a successful connect is not observable through
+// its contract — the first event is. Everything else is "not connected", and
+// that deliberately covers three situations the operator does not need told
+// apart: before the first event, while a reconnect is backing off, and after a
+// drop. All three mean the same thing about what is on screen — the numbers
+// are coming from the 5s poll, not from the stream — which is the only
+// distinction the header exists to draw.
+const (
+	wsConnected    = "connected"
+	wsNotConnected = "not connected"
+)
 
 // footerText lists only the bindings that EXIST. The sketch's full strip
 // (p pause, m model, K kick, …) documents keys whose tasks have not landed;
@@ -200,6 +223,43 @@ type model struct {
 	// stream is connected the poll becomes a fallback and should slow down,
 	// not keep hammering an endpoint the stream has already superseded.
 	interval time.Duration
+
+	// tickGen retires superseded poll chains. Changing interval only affects
+	// the NEXT re-arm, so switching cadence means arming a fresh chain while
+	// the old one is still pending; bumping this makes the pending tick a
+	// no-op instead of a second, permanent loop. See tickMsg in poll.go.
+	tickGen uint64
+
+	// agents is the last fleet roster a poll returned.
+	//
+	// The stream carries live per-agent state but not the /api/agents contract
+	// panes.Agents draws its rows from, so an SSE update joins its states onto
+	// this list rather than rebuilding the roster from a second source that
+	// would disagree with the polled one about who is in the fleet. This is
+	// the join panes.AgentsMsg.States was defined for.
+	agents []client.Agent
+
+	// sse is the live stream, or nil while there is none. It is a pointer
+	// because it owns a cancel func and two channels — things a value-typed
+	// model copies by reference on purpose, so cancelling reaches the one
+	// goroutine that exists rather than a copy of it.
+	sse *sseStream
+
+	// sseGen identifies the current stream attempt. Every SSE message carries
+	// the generation it was produced for, so a late event or error from a
+	// stream that has already been replaced is dropped instead of degrading
+	// (or resurrecting) the connection state of its successor.
+	sseGen uint64
+
+	// sseConnected is whether an event has arrived on the current stream. It
+	// is the header's `ws:` field and the reason the poll is stretched; see
+	// wsConnected for why receipt, not dial, is the signal.
+	sseConnected bool
+
+	// sseBackoff is the delay before the NEXT reconnect attempt, zero before
+	// the first failure. It doubles per consecutive failure and is reset by
+	// any received event.
+	sseBackoff time.Duration
 }
 
 // newModel returns the root model in its initial state. Unexported because the
@@ -233,8 +293,13 @@ func New() tea.Model {
 // fetch is what keeps startup honest — without it every pane would show
 // "waiting for data" for a full interval while a perfectly reachable dashboard
 // sat there answering, and an operator would read that as the TUI being broken.
+//
+// The SSE subscription starts here too, and starts ALONGSIDE the poll rather
+// than instead of it: the stream's first event may be seconds away (or never
+// arrive, on a dashboard that is down), and the first frame must not wait on
+// it. The poll stretches only once the stream has proved itself.
 func (m model) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.poll(), m.scheduleTick()}
+	cmds := []tea.Cmd{m.poll(), m.scheduleTick(), m.connectSSE()}
 	for _, p := range m.panes {
 		if c := p.Init(); c != nil {
 			cmds = append(cmds, c)
@@ -250,6 +315,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		return m, nil
 	case tickMsg:
+		if msg.gen != m.tickGen {
+			// A tick from a chain the cadence change retired. Dropping it
+			// without re-arming is what ends that chain; see tickMsg.
+			return m, nil
+		}
 		// Re-arm BEFORE the fetches are issued, not after they resolve: the
 		// loop's cadence must not depend on how long a fetch takes, and a
 		// dashboard that never answers must not be able to stop the clock.
@@ -260,6 +330,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the panes never see the error, so they never have to decide whether
 		// to clear their data, and the previous frame simply persists.
 		return m, nil
+	case sseOpenMsg:
+		return m.handleSSEOpen(msg)
+	case sseEventMsg:
+		return m.handleSSEEvent(msg)
+	case sseDroppedMsg:
+		return m.handleSSEDropped(msg)
+	case sseReconnectMsg:
+		if msg.gen != m.sseGen {
+			return m, nil
+		}
+		return m, m.connectSSE()
+	case panes.AgentsMsg:
+		// Remember the roster on its way to the pane. A poll-sourced snapshot
+		// carries the fleet; an SSE-sourced one carries the same slice back
+		// with live states joined onto it, so re-caching is a no-op there.
+		if msg.Agents != nil {
+			m.agents = msg.Agents
+		}
+		next, cmd := m.broadcast(msg)
+		return next, cmd
 	case agentActionMsg:
 		return m.handleAgentAction(msg)
 	case attachReadyMsg:
@@ -302,7 +392,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.helpVisible = true
 			return m, nil
 		case "q", "ctrl+c":
-			return m, tea.Quit
+			return m.stopSSE(), tea.Quit
 		case "tab":
 			m.focus = (m.focus + 1) % paneCount
 			return m, nil
@@ -350,6 +440,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	// Non-key messages go to every pane: a poll result or SSE event (T12,
 	// T13b) is not addressed to whichever pane happens to be focused.
+	next, cmd := m.broadcast(msg)
+	return next, cmd
+}
+
+// broadcast delivers one message to every pane and returns the updated model
+// with their commands batched.
+//
+// It returns the concrete model rather than tea.Model so the SSE path can
+// deliver SEVERAL messages out of one event — an agents snapshot and a
+// governor snapshot from the same status payload — by threading the result of
+// one broadcast into the next, instead of discarding the panes each one
+// updated.
+func (m model) broadcast(msg tea.Msg) (model, tea.Cmd) {
 	var cmds []tea.Cmd
 	for i, p := range m.panes {
 		next, c := p.Update(msg)
@@ -404,7 +507,7 @@ func (m model) View() string {
 	bottom := lipgloss.JoinHorizontal(lipgloss.Top,
 		cell(2, leftW, botH), cell(3, rightW, botH))
 
-	header := headerStyle.Width(m.width).Render(headerText)
+	header := headerStyle.Width(m.width).Render(m.headerText())
 	footerTextForFrame := footerText
 	if m.footerErr != "" {
 		footerTextForFrame = m.footerErr
@@ -534,6 +637,15 @@ func (m model) confirmView() string {
 	return confirmBoxStyle.Width(contentWidth).Render(body)
 }
 
+// headerText renders the header bar for this model's connection state.
+func (m model) headerText() string {
+	ws := wsNotConnected
+	if m.sseConnected {
+		ws = wsConnected
+	}
+	return fmt.Sprintf(headerFormat, ws)
+}
+
 // tooSmallView renders the below-minimum frame: the message alone, centred in
 // the terminal, and nothing else.
 //
@@ -550,6 +662,384 @@ func (m model) tooSmallView() string {
 		Render(tooSmallText)
 	placed := lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, msg)
 	return lipgloss.NewStyle().MaxWidth(m.width).MaxHeight(m.height).Render(placed)
+}
+
+// ── SSE (T13b) ───────────────────────────────────────────────────────────────
+
+// sseReconcileInterval is the poll cadence while the stream is healthy.
+//
+// The poll is not switched off when the stream connects; it is demoted to a
+// RECONCILER, and two things make that worth a request a minute. The stream
+// carries live state but not the /api/agents roster panes.Agents draws its
+// rows from, so something still has to notice an agent being added or removed.
+// And a stream that is up is not proof the frame is current: a dropped event,
+// or a server that stopped publishing while holding the connection open, looks
+// exactly like a quiet hive. 60s is twelve times the push cadence — slow
+// enough that the stream is plainly doing the work, often enough that a
+// silently stale frame cannot outlive a minute.
+const sseReconcileInterval = 60 * time.Second
+
+// The reconnect backoff. It starts at a second so a momentary blip costs
+// almost nothing, and stops doubling at 30s so a dashboard that is down for an
+// hour is still retried steadily rather than at an interval that has grown
+// past usefulness. The fallback poll runs at pollInterval throughout, so the
+// backoff never decides how fresh the frame is — only how soon push resumes.
+const (
+	sseBackoffMin = 1 * time.Second
+	sseBackoffMax = 30 * time.Second
+)
+
+// errSSEClosed is a stream that ended without an error of its own: the server
+// closed cleanly. For the frame it means what an error means — nothing is
+// being pushed any more — so it travels the same path rather than being a
+// second, silent case.
+var errSSEClosed = errors.New("sse stream closed")
+
+// sseStream is one live subscription: the channels client.StreamEvents
+// returned, the cancel that ends the request behind them, and the generation
+// they belong to.
+type sseStream struct {
+	events <-chan client.SSEEvent
+	errs   <-chan error
+	cancel context.CancelFunc
+	gen    uint64
+}
+
+// The SSE messages, each carrying the generation of the stream that produced
+// it.
+//
+// GENERATIONS ARE THE WHOLE CONCURRENCY STORY. A dropped stream is replaced
+// while its Cmds may still be in flight: without the guard, a late error from
+// the connection we already gave up on would degrade the fresh one, a late
+// event would report it healthy, and a backoff timer from an abandoned attempt
+// would open a second stream nobody re-arms a reader for. Every handler
+// therefore compares against model.sseGen first and drops anything older.
+type (
+	// sseOpenMsg hands a newly subscribed stream back to the model.
+	// Subscribing happens in a Cmd rather than in Update because it starts a
+	// goroutine and creates a cancel func, and Update stays pure.
+	sseOpenMsg struct {
+		gen    uint64
+		stream *sseStream
+	}
+
+	// sseEventMsg is one completely framed event off the stream.
+	sseEventMsg struct {
+		gen   uint64
+		event client.SSEEvent
+	}
+
+	// sseDroppedMsg is the stream ending, by error or by clean close.
+	sseDroppedMsg struct {
+		gen uint64
+		err error
+	}
+
+	// sseReconnectMsg is the backoff timer firing.
+	sseReconnectMsg struct {
+		gen uint64
+	}
+)
+
+// connectSSE subscribes to the dashboard's event stream.
+//
+// The context is deliberately not derived from anything request-scoped: this
+// stream lives until it drops or the program exits. Its cancel travels on the
+// returned stream so the model can end the request on a drop, on a reconnect,
+// and on quit.
+func (m model) connectSSE() tea.Cmd {
+	api, gen := m.api, m.sseGen
+	return func() tea.Msg {
+		ctx, cancel := context.WithCancel(context.Background())
+		events, errs := api.StreamEvents(ctx)
+		return sseOpenMsg{gen: gen, stream: &sseStream{
+			events: events,
+			errs:   errs,
+			cancel: cancel,
+			gen:    gen,
+		}}
+	}
+}
+
+// waitSSE is ONE receive from the stream; Update re-arms it for the next.
+//
+// That is the bubbletea channel pump: a Cmd runs on its own goroutine and ends
+// by producing a message, so a long-lived channel is drained one Cmd per value
+// rather than by a loop, which would have no way to deliver what it read.
+func waitSSE(s *sseStream) tea.Cmd {
+	return func() tea.Msg {
+		select {
+		case event, ok := <-s.events:
+			if !ok {
+				return sseDroppedMsg{gen: s.gen, err: s.terminalErr()}
+			}
+			return sseEventMsg{gen: s.gen, event: event}
+		case err, ok := <-s.errs:
+			if !ok {
+				return sseDroppedMsg{gen: s.gen, err: errSSEClosed}
+			}
+			return sseDroppedMsg{gen: s.gen, err: err}
+		}
+	}
+}
+
+// terminalErr takes the stream's failure without blocking, falling back to
+// errSSEClosed when it simply ended.
+//
+// It exists because the select above can observe either channel first. The
+// producer buffers its error and only then closes both (errs first, events
+// second, its defers running in reverse), so a closed events channel means any
+// error is already sitting in errs — and receiving from a closed buffered
+// channel still yields what it holds. Reporting a bare close without looking
+// would throw away the one description of what went wrong.
+func (s *sseStream) terminalErr() error {
+	select {
+	case err, ok := <-s.errs:
+		if ok && err != nil {
+			return err
+		}
+	default:
+	}
+	return errSSEClosed
+}
+
+// cancelSSE ends the current stream's request, if there is one.
+func (m model) cancelSSE() {
+	if m.sse != nil {
+		m.sse.cancel()
+	}
+}
+
+// stopSSE ends the stream for good, on the way out of the program.
+//
+// Cancelling is what stops the goroutine StreamEvents owns: it is blocked on a
+// read that nothing else can end, which is harmless for `hivectl tui` — the
+// process is exiting — and is a leak per program under teatest, where the test
+// binary outlives everything it drives.
+//
+// Retiring the generation is the other half, and it is not bookkeeping. The
+// cancellation closes the stream's channels, so the pump produces one last
+// drop; without the bump that drop is indistinguishable from a real one and
+// the model would degrade the header and schedule a reconnect while the
+// program is already quitting.
+func (m model) stopSSE() model {
+	m.cancelSSE()
+	m.sse = nil
+	m.sseGen++
+	return m
+}
+
+func (m model) handleSSEOpen(msg sseOpenMsg) (tea.Model, tea.Cmd) {
+	if msg.gen != m.sseGen {
+		// A subscription abandoned before it reported back. Cancelling here is
+		// what stops it holding a request open with nobody reading it.
+		msg.stream.cancel()
+		return m, nil
+	}
+	m.sse = msg.stream
+	return m, waitSSE(msg.stream)
+}
+
+func (m model) handleSSEEvent(msg sseEventMsg) (tea.Model, tea.Cmd) {
+	if msg.gen != m.sseGen || m.sse == nil {
+		return m, nil
+	}
+	// A received event is the only proof the stream is up (see wsConnected),
+	// so it is what resets the backoff and stretches the poll. No new tick
+	// chain is armed for the stretch: the pending tick re-arms itself from
+	// m.interval, so the new cadence takes effect within one pollInterval
+	// without a second chain ever existing.
+	m.sseConnected = true
+	m.sseBackoff = 0
+	m.interval = sseReconcileInterval
+
+	cmds := []tea.Cmd{waitSSE(m.sse)}
+	for _, paneMsg := range m.paneMsgs(msg.event) {
+		var cmd tea.Cmd
+		m, cmd = m.broadcast(paneMsg)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	return m, tea.Batch(cmds...)
+}
+
+func (m model) handleSSEDropped(msg sseDroppedMsg) (tea.Model, tea.Cmd) {
+	if msg.gen != m.sseGen {
+		return m, nil
+	}
+	m.cancelSSE()
+	m.sse = nil
+	m.sseConnected = false
+
+	if m.sseBackoff == 0 {
+		m.sseBackoff = sseBackoffMin
+	} else {
+		m.sseBackoff = min(2*m.sseBackoff, sseBackoffMax)
+	}
+	m.sseGen++
+	gen, delay := m.sseGen, m.sseBackoff
+	cmds := []tea.Cmd{tea.Tick(delay, func(time.Time) tea.Msg {
+		return sseReconnectMsg{gen: gen}
+	})}
+
+	// Only the first drop after a healthy stream restores the poll, because it
+	// is the only one with a stretched cadence to undo. Retiring the 60s chain
+	// and arming a 5s one on EVERY failed reconnect as well would issue a
+	// fetch per backoff step — which is how a dashboard that is down ends up
+	// receiving more requests than one that is up.
+	if m.interval != pollInterval {
+		m.interval = pollInterval
+		m.tickGen++
+		// Fetch now as well as re-arming: the pending tick belonged to the 60s
+		// chain this retires, so without an immediate poll the fallback's
+		// first data would be a whole pollInterval away — spent showing a
+		// frame the stream has already stopped updating.
+		cmds = append(cmds, m.scheduleTick(), m.poll())
+	}
+	return m, tea.Batch(cmds...)
+}
+
+// sseStatusAgent is the subset of the dashboard's status agent entry that this
+// frame renders. Fields are transcribed from dashboard.FrontendAgent
+// (src/pkg/dashboard/server.go), which is what both the full status payload
+// and the lighter `agent-status` payload carry under `agents`.
+//
+// It is deliberately narrow. The wire object has some sixty fields; decoding
+// the four that decide a status glyph keeps this file from becoming a second,
+// drifting copy of the dashboard's model — the same reason client.Agent
+// documents itself as exactly the /api/agents contract and nothing more.
+type sseStatusAgent struct {
+	Name      string `json:"name"`
+	Enabled   bool   `json:"enabled"`
+	Paused    bool   `json:"paused"`
+	State     string `json:"state"`
+	LastError string `json:"lastError,omitempty"`
+}
+
+// sseAgentStateRunning is the one agent.ProcessState value that means the
+// process is up ("running"; the only other is "stopped").
+const sseAgentStateRunning = "running"
+
+// sseStatusPayload is the envelope both stream event types share. The full
+// status payload has a great deal more in it, and the JSON decoder discards
+// every key not named here without retaining it.
+type sseStatusPayload struct {
+	Timestamp string           `json:"timestamp"`
+	Agents    []sseStatusAgent `json:"agents"`
+}
+
+// paneMsgs translates one stream event into the pane messages it supports.
+//
+// The panes are not taught about SSE: an event becomes the SAME message type
+// the poll delivers, so a pane cannot tell (and never has to handle) where its
+// snapshot came from. That is what makes the stream a source rather than a
+// second rendering path.
+//
+// Two event types arrive on this stream (see client/sse.go):
+//
+//   - `agent-status`, the dashboard's fast agent-only push, carries agents
+//     alone — so it produces an agents delivery and nothing else.
+//   - the default message event, the full status snapshot, carries the
+//     governor slice as well; client.GovernorStatus decodes directly from that
+//     document, which is why the governor delivery costs one more Decode of
+//     the same bytes rather than a second endpoint.
+//
+// WHAT IS DELIBERATELY NOT FILLED IN. GovernorMsg.EvalInterval is left zero:
+// it is configuration from /api/config/governor, not live state, and this task
+// adds no fetches. The pane already renders an unknown interval as a dash, so
+// the result is an honest partial frame instead of no governor frame at all —
+// nothing else feeds that pane today. AgentState.LastActivity is left zero for
+// the same kind of reason: the payload's per-agent timestamp (`lastKick`) is a
+// pre-formatted server-local display string, so a real instant cannot be
+// recovered from it, and panes.Agents renders zero as "—".
+func (m model) paneMsgs(event client.SSEEvent) []tea.Msg {
+	var payload sseStatusPayload
+	if err := event.Decode(&payload); err != nil {
+		// A frame we cannot read is dropped exactly as a failed fetch is: the
+		// panes keep what they were last told rather than being handed a zero
+		// value they could not tell from an empty hive.
+		return nil
+	}
+
+	var msgs []tea.Msg
+	// The roster comes from the poll, the states from the stream. Before the
+	// first poll returns there is no roster to join onto, and sending the
+	// states alone would blank the pane — so this waits, which costs at most
+	// the one in-flight fetch Init issued.
+	if states := sseAgentStates(payload.Agents); states != nil && len(m.agents) > 0 {
+		msgs = append(msgs, panes.AgentsMsg{
+			Agents:     m.agents,
+			States:     states,
+			ObservedAt: sseObservedAt(payload.Timestamp),
+		})
+	}
+
+	if event.Type != client.SSEEventTypeAgentStatus {
+		var status client.GovernorStatus
+		// Active is the payload's own "this document has a governor section"
+		// bit — buildGovernor hardcodes it true — so this both skips a
+		// governor-less snapshot and avoids overwriting a good frame with an
+		// all-dashes one.
+		if err := event.Decode(&status); err == nil && status.Active {
+			msgs = append(msgs, panes.GovernorMsg{Status: status})
+		}
+	}
+	return msgs
+}
+
+// sseAgentStates keys the live states by agent name, the key panes.AgentsMsg
+// joins on. It returns nil for a payload with nothing usable, which is the
+// signal to leave the pane's existing states alone rather than clear them.
+func sseAgentStates(agents []sseStatusAgent) map[string]panes.AgentState {
+	if len(agents) == 0 {
+		return nil
+	}
+	states := make(map[string]panes.AgentState, len(agents))
+	for _, agent := range agents {
+		if agent.Name == "" {
+			continue
+		}
+		states[agent.Name] = panes.AgentState{Status: agent.status()}
+	}
+	if len(states) == 0 {
+		return nil
+	}
+	return states
+}
+
+// status maps the wire's several state fields onto the pane's three.
+//
+// The order is the priority order an operator reads them in: a recorded error
+// is the thing to say about an agent even while it is nominally running, and a
+// paused agent is paused whatever its process is doing. A stopped-but-not
+// -errored agent lands on paused, which is also what the poll-only path shows
+// for a disabled one (panes.Agents.agentLine) — the pane has no fourth status
+// and adding one is a pane change, which this task does not make.
+func (a sseStatusAgent) status() panes.AgentStatus {
+	switch {
+	case a.LastError != "":
+		return panes.AgentStatusError
+	case a.Paused || !a.Enabled:
+		return panes.AgentStatusPaused
+	case a.State == sseAgentStateRunning:
+		return panes.AgentStatusRunning
+	default:
+		return panes.AgentStatusPaused
+	}
+}
+
+// sseObservedAt reads the payload's own publish time, which is RFC 3339 (
+// BuildFrontendStatus formats it with time.RFC3339). Using the server's
+// timestamp rather than the receiving clock is what keeps the relative
+// activity labels honest about the snapshot they describe; an unreadable one
+// returns zero, which panes.Agents substitutes its own clock for.
+func sseObservedAt(timestamp string) time.Time {
+	observed, err := time.Parse(time.RFC3339, timestamp)
+	if err != nil {
+		return time.Time{}
+	}
+	return observed
 }
 
 // Run starts the TUI on this process's own terminal and blocks until the

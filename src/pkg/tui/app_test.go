@@ -169,7 +169,7 @@ func TestViewFillsTerminalExactly(t *testing.T) {
 			t.Fatalf("line %d is %d cells wide, want <= %d:\n%q", i, lw, w, line)
 		}
 	}
-	for _, want := range []string{headerText, footerText} {
+	for _, want := range []string{m.(model).headerText(), footerText} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("sized View() missing %q", want)
 		}
