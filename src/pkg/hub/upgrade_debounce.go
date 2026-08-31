@@ -247,7 +247,21 @@ func shouldDebounceAutoUpgrade(prev autoUpgradeDebounceState, target string, int
 			collapsed++
 			reason = "debounce re-armed — newer target supersedes the pending one"
 		}
-		if firstArmed.IsZero() {
+		// A record with no live pending target cannot contribute a wait clock.
+		// prev.Target == "" means the previous cycle was not actually holding
+		// anything — the hive caught up by another route (a manual upgrade, a
+		// channel switch) and the target was consumed without this gate
+		// clearing the record. Inheriting FirstArmedAt from it would make the
+		// cap read "already waited hours" and fire on the FIRST cycle of a
+		// genuinely new merge, silently skipping the debounce for it.
+		//
+		// This is keyed on PROVENANCE, not on elapsed time. An earlier attempt
+		// treated "older than maxHold" as the staleness signal, which is wrong
+		// and dangerous: on a branch whose merge gap exceeds the poll step the
+		// reset fires before the cap can, pushing the clock forward every cycle
+		// so the cap NEVER fires and the hive starves completely (measured: a
+		// 7-minute merge cadence produced ZERO rolls in 4.5 hours).
+		if firstArmed.IsZero() || prev.Target == "" {
 			firstArmed = now
 		}
 		next := autoUpgradeDebounceState{

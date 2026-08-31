@@ -163,6 +163,58 @@ func TestBusyBranchIsNotStarvedByDebounce(t *testing.T) {
 	}
 }
 
+// TestNoMergeCadenceStarvesTheHive sweeps a range of merge cadences and asserts
+// that NONE of them starve the hive.
+//
+// This exists because a plausible-looking staleness rule very nearly shipped
+// that did starve it. Keying "is this record stale" on ELAPSED TIME (older than
+// maxHold) rather than on provenance meant that on any branch whose merge gap
+// exceeded the poll step, the reset fired before the cap could, pushing the
+// wait clock forward every single cycle so the cap never fired at all —
+// measured at a 7-minute cadence: ZERO rolls in 4.5 hours, a total silent
+// stall. A single-cadence test missed it because the 2-minute case still
+// passed.
+//
+// Sweeping cadences is what catches that class of bug, so this test sweeps.
+func TestNoMergeCadenceStarvesTheHive(t *testing.T) {
+	base := time.Date(2026, 8, 31, 20, 0, 0, 0, time.UTC)
+	const maxHold = 30 * time.Minute
+
+	for _, step := range []time.Duration{
+		time.Minute, 2 * time.Minute, 3 * time.Minute, 4 * time.Minute,
+		7 * time.Minute, 11 * time.Minute, 13 * time.Minute,
+	} {
+		var obs []struct {
+			target string
+			at     time.Time
+		}
+		const n = 60
+		for i := 0; i < n; i++ {
+			obs = append(obs, struct {
+				target string
+				at     time.Time
+			}{fmt.Sprintf("sha%04d", i), base.Add(time.Duration(i) * step)})
+		}
+		span := time.Duration(n-1) * step
+
+		rolls := driveMerges(obs, testDebounce, maxHold)
+
+		if len(rolls) == 0 {
+			t.Errorf("merge cadence %v over %v STARVED the hive — zero rolls, it would never upgrade", step, span)
+			continue
+		}
+		// Upper bound: never worse than one roll per merge, and in practice far
+		// better. Expressed against the span so it holds for every cadence.
+		if maxExpected := int(span/maxHold) + 2; len(rolls) > maxExpected {
+			t.Errorf("cadence %v produced %d rolls over %v, want <= %d", step, len(rolls), span, maxExpected)
+		}
+		// It must also converge: the last roll cannot be the very first SHA.
+		if rolls[len(rolls)-1].target == "sha0000" {
+			t.Errorf("cadence %v: final roll is still the first SHA — not converging", step)
+		}
+	}
+}
+
 // TestQuietBranchStillUpgradesPromptly guards the cost of debouncing: a lone
 // merge with nothing behind it must still roll, one window later — not never,
 // and not only at some daily window.
