@@ -36,8 +36,19 @@ function loadRelay({ backend = 'copilot', backendBinary = null, backendPerm = '-
   // Guard against a runaway loop in the code under test eating all memory.
   const MAX_RECORDED_COMMANDS = 10000;
 
+  // #5281: lets a test model a tmux send that fails, so the one-shot budget's
+  // behaviour on a throwing send is pinned rather than assumed.
+  let failNextLiteralSend = false;
+
   const fakeExecSync = (cmd) => {
     if (commands.length < MAX_RECORDED_COMMANDS) commands.push(cmd);
+    // Recorded BEFORE throwing: a test needs to see that the send was
+    // ATTEMPTED, which is the difference between "spent the budget" and
+    // "retried every tick".
+    if (failNextLiteralSend && /send-keys\b.*\s-l\s/.test(cmd)) {
+      failNextLiteralSend = false;
+      throw new Error('tmux: server exited unexpectedly');
+    }
     // backendBinary lets a test model backends.conf mapping a backend NAME to a
     // different BINARY (litellm → claude); it defaults to the identity mapping
     // every other backend has.
@@ -185,6 +196,7 @@ function loadRelay({ backend = 'copilot', backendBinary = null, backendPerm = '-
   const ws = new stubs.ws();
   relay.setWs(ws);
   relay.__commands = commands;
+  relay.__failNextNudge = () => { failNextLiteralSend = true; };
   relay.__sent = sent;
   relay.__tmpDir = tmpDir;
   relay.__execFileCalls = execFileCalls;
@@ -1573,6 +1585,11 @@ test('blocked interactive panes report attention instead of task_complete', () =
   try {
     relay.setCliReady(true);
     assignTask(relay, 'ct-blocked');
+    // #5281: an unattended question now gets ONE autonomy reminder first. The
+    // guarantee this test exists for is unchanged and asserted below -- never a
+    // completion, task stays active -- but it is now the SECOND tick that
+    // reports it, once the one-shot budget is spent.
+    relay.__crashTick();
     relay.__crashTick();
 
     assert.ok(!relay.__sent.some(m => m.type === 'task_complete'),
@@ -1593,6 +1610,10 @@ test('goose elicitation form is reported as blocked, never as task_complete (#28
   try {
     relay.setCliReady(true);
     assignTask(relay, 'ct-elicit');
+    // #5281: one autonomy reminder first (a form is a question), then today's
+    // report from the second tick on. The never-a-completion guarantee below is
+    // what this test is for and is unchanged.
+    relay.__crashTick();
     relay.__crashTick();
 
     assert.ok(!relay.__sent.some(m => m.type === 'task_complete'),
@@ -1601,6 +1622,273 @@ test('goose elicitation form is reported as blocked, never as task_complete (#28
     assert.ok(progress, `expected blocked_on_human progress, got: ${JSON.stringify(relay.__sent)}`);
     assert.strictEqual(progress.attention, true, 'blocked status must request human attention');
     assert.ok(relay.getCurrentTask(), 'the task must remain active while the form is unanswered');
+  } finally { teardown(relay); }
+});
+
+// ---------------------------------------------------------------------------
+// kubestellar/hive#5281 — an unattended agent that stops to ask a question gets
+// one reminder to proceed on its own.
+//
+// Detection without recovery was the gap: the relay already SAW the question
+// and raised `attention`, but an attention flag only helps someone watching,
+// and a contributor run by a user who never attaches to tmux is a supported way
+// to run one. For that user every question cost 20-30 minutes and a failed
+// task, even though the task prompt had already told the agent to decide for
+// itself.
+//
+// The dangerous half is telling a question apart from a prompt only a person
+// can answer. Typing "proceed autonomously" into a /login flow, or submitting
+// it as a password, is worse than waiting — so those panes are vetoed, and the
+// veto is asked of the whole recent window rather than just the cursor line.
+// ---------------------------------------------------------------------------
+
+const QUESTION_PANE = 'Should I open a pull request for this change?\n> \n';
+
+function nudges(relay, from = 0) {
+  return relay.__tmuxSends().slice(from).filter(c => c.includes(relay.AUTONOMY_NUDGE_MESSAGE));
+}
+
+test('#5281 an unattended question gets exactly one autonomy reminder', () => {
+  const relay = loadRelay({ backend: 'goose', cliStates: [QUESTION_PANE, QUESTION_PANE], attachedClients: false });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-question');
+    const before = relay.__tmuxSends().length;
+
+    relay.__crashTick();
+    assert.strictEqual(nudges(relay, before).length, 1, 'the first tick reminds it to proceed');
+    assert.strictEqual(relay.__sent.filter(m => m.status === 'blocked_on_human').length, 0,
+      'nobody is attached to be blocked on, so the first tick does not raise attention');
+
+    relay.__crashTick();
+    assert.strictEqual(nudges(relay, before).length, 1,
+      'a question re-asked after the reminder is one the agent cannot answer — do not loop');
+    const blocked = relay.__sent.filter(m => m.status === 'blocked_on_human');
+    assert.strictEqual(blocked.length, 1, 'from the second tick on, behaviour is exactly today\'s');
+    assert.strictEqual(blocked[0].attention, true);
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 0,
+      'a blocked pane must never be booked as a completion, nudged or not');
+    assert.ok(relay.getCurrentTask(), 'the task stays active');
+  } finally { teardown(relay); }
+});
+
+test('#5281 the budget is per task, not per process', () => {
+  // Driven through the REAL lifecycle — ask, finish, get assigned again —
+  // rather than by calling the reset directly, so that a change which dropped
+  // resetAutonomyNudgeState() from the task-start path would fail here.
+  const DONE_PANE = [
+    '● Done — opened https://github.com/kubestellar/hive/pull/9999',
+    '',
+    '✻ Cogitated for 3m 30s',
+    '',
+    '❯ ',
+    '  ⏵⏵ auto mode on (shift+tab to cycle)',
+  ].join('\n');
+  let pane = QUESTION_PANE;
+  const relay = loadRelay({ backend: 'claude', paneText: () => pane, attachedClients: false });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-first');
+    const before = relay.__tmuxSends().length;
+    relay.__crashTick();
+    relay.__crashTick();
+    assert.strictEqual(nudges(relay, before).length, 1, 'one reminder for the first task');
+
+    pane = DONE_PANE;
+    relay.__crashTick();
+    assert.ok(!relay.getCurrentTask(), 'the first task should have completed');
+
+    // A fresh task must get its own reminder — a previous task's spent budget
+    // denying this one is the same bug #5094 fixed for the retry budget.
+    pane = QUESTION_PANE;
+    assignTask(relay, 't-second');
+    const mid = relay.__tmuxSends().length;
+    relay.__crashTick();
+    assert.strictEqual(nudges(relay, mid).length, 1, 'the next task gets its own one-shot');
+  } finally { teardown(relay); }
+});
+
+test('#5281 an attached pane is never nudged', () => {
+  const relay = loadRelay({ backend: 'goose', cliStates: [QUESTION_PANE, QUESTION_PANE], attachedClients: true });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-attached-question');
+    const before = relay.__tmuxSends().length;
+    relay.__crashTick();
+    assert.strictEqual(nudges(relay, before).length, 0,
+      'someone is there to answer — do not type over them');
+    const blocked = relay.__sent.filter(m => m.status === 'blocked_on_human');
+    assert.strictEqual(blocked.length, 1, 'and the attention report is unchanged');
+    assert.strictEqual(blocked[0].attention, true);
+  } finally { teardown(relay); }
+});
+
+test('#5281 a login pane is never nudged, even when it is phrased as a question', () => {
+  // #4400: only a human can log in, so typing the reminder here would put the
+  // literal string into a /login flow.
+  //
+  // The second case is the one that makes the explicit login veto load-bearing
+  // rather than decorative. A bare 401 pane is already not a question, so the
+  // reason classifier alone would refuse it; a 401 whose next line ASKS
+  // something classifies as a perfectly ordinary question, and only the
+  // paneShowsLoginRequiredError check stops it being nudged.
+  const cases = {
+    'bare 401': '● Please run /login · API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"OAuth token has expired"}}\n\n❯ \n',
+    '401 phrased as a question': [
+      '● Please run /login · API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"OAuth token has expired"}}',
+      'Would you like to log in now?',
+      '❯ ',
+    ].join('\n'),
+  };
+  for (const [name, loginPane] of Object.entries(cases)) {
+    const relay = loadRelay({ backend: 'claude', paneText: loginPane, attachedClients: false });
+    try {
+      assert.strictEqual(relay.classifyTmuxPane(loginPane), relay.PANE_STATE_BLOCKED_ON_HUMAN, name);
+      relay.setCliReady(true);
+      assignTask(relay, `t-login-${name.replace(/\W+/g, '-')}`);
+      const before = relay.__tmuxSends().length;
+      relay.__crashTick();
+      assert.strictEqual(nudges(relay, before).length, 0, `${name} must never be nudged`);
+      assert.strictEqual(relay.__sent.filter(m => m.status === 'blocked_on_human').length, 1, name);
+    } finally { teardown(relay); }
+  }
+});
+
+test('#5281 human-required prompts are never nudged', () => {
+  // Each of these is a pane where typing prose is actively harmful: it would be
+  // submitted as a credential, or would answer a trust/permission decision the
+  // agent is not entitled to make.
+  const panes = {
+    'credential entry': 'Paste your API key to continue:\n> \n',
+    'folder trust': 'Do you trust this folder?\n> \n',
+    'permission prompt': 'Allow Claude to run this command?\n> \n',
+    'consent': 'This action requires your approval before continuing.\n> \n',
+  };
+  for (const [name, pane] of Object.entries(panes)) {
+    const relay = loadRelay({ backend: 'goose', cliStates: [pane, pane], attachedClients: false });
+    try {
+      assert.strictEqual(relay.classifyBlockedOnHumanReason(pane), relay.BLOCKED_REASON_HUMAN_REQUIRED,
+        `${name} must classify as human-required`);
+      relay.setCliReady(true);
+      assignTask(relay, `t-${name.replace(/\s+/g, '-')}`);
+      const before = relay.__tmuxSends().length;
+      relay.__crashTick();
+      assert.strictEqual(nudges(relay, before).length, 0, `${name} must never be nudged`);
+      assert.strictEqual(relay.__sent.filter(m => m.status === 'blocked_on_human').length, 1,
+        `${name} must still report blocked_on_human`);
+    } finally { teardown(relay); }
+  }
+});
+
+test('#5281 the human-required veto beats a trailing question mark anywhere in the window', () => {
+  // The precedence rule, and the reason the veto reads the whole recent window:
+  // a trust dialog renders its heading a few lines up while the cursor line is
+  // an innocent-looking question. Classifying on the cursor line alone would
+  // nudge it.
+  const pane = [
+    'Confirm folder trust',
+    'This folder has not been opened before.',
+    '',
+    'Do you want to proceed?',
+    '> ',
+  ].join('\n');
+  const relay = loadRelay({ backend: 'goose', cliStates: [pane, pane], attachedClients: false });
+  try {
+    assert.strictEqual(relay.classifyBlockedOnHumanReason(pane), relay.BLOCKED_REASON_HUMAN_REQUIRED,
+      'when in doubt, human-required — waiting is cheaper than a wrong answer');
+    relay.setCliReady(true);
+    assignTask(relay, 't-trust-question');
+    const before = relay.__tmuxSends().length;
+    relay.__crashTick();
+    assert.strictEqual(nudges(relay, before).length, 0);
+  } finally { teardown(relay); }
+});
+
+test('#5281 a numbered menu is left in today\'s behaviour, deliberately', () => {
+  // Pinned rather than implemented: a menu TUI may read typed text as a
+  // selection filter rather than as chat input, so nudging one needs Escape
+  // handling this version does not attempt. If that changes, this test is the
+  // thing that should be rewritten, not deleted.
+  // Worded to match the shipping hasNumberedMenu detector: a choose/select
+  // lead-in, a menu-shaped line above the prompt, and two or more numbered
+  // options.
+  const menuPane = [
+    'Please choose how to continue:',
+    '',
+    '❯ 1. Rebase onto main',
+    '  2. Merge main in',
+    '  3. Leave it alone',
+    '',
+    '> ',
+  ].join('\n');
+  const relay = loadRelay({ backend: 'goose', cliStates: [menuPane, menuPane], attachedClients: false });
+  try {
+    assert.strictEqual(relay.classifyBlockedOnHumanReason(menuPane), relay.BLOCKED_REASON_MENU);
+    relay.setCliReady(true);
+    assignTask(relay, 't-menu');
+    const before = relay.__tmuxSends().length;
+    relay.__crashTick();
+    assert.strictEqual(nudges(relay, before).length, 0, 'menus are out of scope for the nudge');
+    assert.strictEqual(relay.__sent.filter(m => m.status === 'blocked_on_human').length, 1,
+      'and they keep reporting exactly as they do today');
+  } finally { teardown(relay); }
+});
+
+test('#5281 an elicitation form and a y/N both count as questions', () => {
+  const cases = {
+    'elicitation form': 'Extension needs some information to proceed:\n\n  Project name: my-service\n  Region:       us-east-1\n\n> Enter to send\n',
+    'y/N confirmation': 'Overwrite the existing branch? [y/N]\n> \n',
+  };
+  for (const [name, pane] of Object.entries(cases)) {
+    const relay = loadRelay({ backend: 'goose', cliStates: [pane, pane], attachedClients: false });
+    try {
+      assert.strictEqual(relay.classifyBlockedOnHumanReason(pane), relay.BLOCKED_REASON_QUESTION, name);
+      relay.setCliReady(true);
+      assignTask(relay, `t-${name.replace(/\W+/g, '-')}`);
+      const before = relay.__tmuxSends().length;
+      relay.__crashTick();
+      assert.strictEqual(nudges(relay, before).length, 1, `${name} should be nudged`);
+    } finally { teardown(relay); }
+  }
+});
+
+test('#5281 an unblocked pane classifies as no reason at all', () => {
+  const relay = loadRelay({ backend: 'goose' });
+  try {
+    assert.strictEqual(relay.classifyBlockedOnHumanReason('Done — opened a PR.\n> \n'), null);
+    assert.strictEqual(relay.classifyBlockedOnHumanReason(''), null);
+  } finally { teardown(relay); }
+});
+
+test('#5281 the reminder carries no shell metacharacters', () => {
+  // tmuxSendNudge interpolates this into a single-quoted `send-keys -l '...'`.
+  // A quote or a metacharacter here would be a command-injection shaped bug,
+  // not a typo, so the constraint is pinned rather than trusted.
+  const relay = loadRelay({ backend: 'goose' });
+  try {
+    assert.match(relay.AUTONOMY_NUDGE_MESSAGE, /^[A-Za-z0-9 ,.]+$/,
+      `the nudge text must stay trivially quotable, got: ${relay.AUTONOMY_NUDGE_MESSAGE}`);
+  } finally { teardown(relay); }
+});
+
+test('#5281 a failed send still spends the budget', () => {
+  // A send that throws has already disturbed the pane. Retrying it every tick
+  // is the loop the one-shot budget exists to prevent.
+  const relay = loadRelay({ backend: 'goose', cliStates: [QUESTION_PANE, QUESTION_PANE], attachedClients: false });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-send-fails');
+    const origWarn = console.error;
+    console.error = () => {};
+    try {
+      relay.__failNextNudge();
+      relay.__crashTick();
+      relay.__crashTick();
+    } finally { console.error = origWarn; }
+    assert.strictEqual(nudges(relay).length, 1,
+      'the send was attempted exactly once and not retried on the next tick');
+    assert.strictEqual(relay.__sent.filter(m => m.status === 'blocked_on_human').length, 2,
+      'both ticks fell through to today\'s report');
   } finally { teardown(relay); }
 });
 
