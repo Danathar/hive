@@ -770,8 +770,13 @@ type SaaSHive struct {
 	// All three are omitempty and absent on every existing record, which reads
 	// as "nothing pending" — so meta.json stays byte-identical for the fleet
 	// until a hive actually has an upgrade waiting.
+	// AutoUpgradePendingFirst is when the hive FIRST fell behind and began
+	// waiting. Unlike AutoUpgradePendingSince it survives re-arming, and it is
+	// what the max-hold cap is measured against — on a branch that never goes
+	// quiet it is the only clock that does not reset.
 	AutoUpgradePendingTarget string    `json:"auto_upgrade_pending_target,omitempty"`
 	AutoUpgradePendingSince  time.Time `json:"auto_upgrade_pending_since,omitempty"`
+	AutoUpgradePendingFirst  time.Time `json:"auto_upgrade_pending_first,omitempty"`
 	AutoUpgradeCollapsed     int       `json:"auto_upgrade_collapsed,omitempty"`
 
 	// GitHubBaseURL / GitHubAPIURL pin this hive's GitHub host. The GitHub

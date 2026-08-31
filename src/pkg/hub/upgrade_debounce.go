@@ -72,6 +72,29 @@ import (
 // unrelated reasons.
 const defaultAutoUpgradeDebounceInterval = 5 * time.Minute
 
+// defaultAutoUpgradeMaxHold bounds how long a single pending upgrade may be
+// deferred by repeated re-arming, regardless of how busy the branch is.
+//
+// This is not belt-and-braces; it is required by the MEASURED cadence of the
+// branch being debounced. Sampling the last 100 merges to v4 (2026-08-30 19:07Z
+// → 2026-08-31 23:33Z): the MEDIAN inter-merge gap is 3.0 minutes, 63% of gaps
+// are under 5 minutes, and the longest observed run of consecutive sub-5-minute
+// gaps is 13 — which a pure debounce would turn into a ~50-minute hold, and on a
+// busier day an unbounded one.
+//
+// A pure debounce is therefore the wrong shape on its own here: "wait for quiet"
+// assumes quiet arrives, and on this branch it frequently does not. The max hold
+// converts the guarantee from "rolls once the branch goes quiet" into "rolls
+// once the branch goes quiet, and in no case later than this" — which is what
+// makes the change safe to run on a branch whose median gap is below the
+// debounce interval.
+//
+// 30 minutes is chosen to sit well above the interval (so it never pre-empts an
+// ordinary quiet-window roll) while still being far below the 5.5-hour window in
+// which the incident produced 11 rolls. Worst case the fleet now rolls about
+// twice an hour instead of every merge.
+const defaultAutoUpgradeMaxHold = 30 * time.Minute
+
 // autoUpgradeDebounceInterval resolves the live debounce interval. The
 // dashboard-saved Scale Controls value wins, then HIVE_UPGRADE_DEBOUNCE_SECONDS,
 // then the built-in default — the same precedence as upgradeWaveSize(), and read
@@ -106,6 +129,29 @@ func autoUpgradeDebounceInterval() time.Duration {
 	return time.Duration(secs) * time.Second
 }
 
+// autoUpgradeMaxHold resolves the live max-hold cap, overridable via
+// HIVE_UPGRADE_MAX_HOLD_SECONDS on the same conventions as the debounce
+// interval: 0 = use the default, negative = no cap at all.
+//
+// Disabling the cap is deliberately possible but is NOT recommended on a branch
+// whose median inter-merge gap is below the debounce interval — see
+// defaultAutoUpgradeMaxHold for the measurement.
+func autoUpgradeMaxHold() time.Duration {
+	secs := 0
+	if v := os.Getenv("HIVE_UPGRADE_MAX_HOLD_SECONDS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			secs = n
+		}
+	}
+	if secs < 0 {
+		return 0 // cap explicitly disabled
+	}
+	if secs == 0 {
+		return defaultAutoUpgradeMaxHold
+	}
+	return time.Duration(secs) * time.Second
+}
+
 // autoUpgradeDebounceState is the per-hive pending-target record.
 //
 // It is persisted in the hive's own meta.json (see SaaSHive) rather than held in
@@ -123,6 +169,11 @@ type autoUpgradeDebounceState struct {
 	// that is what makes the window measure "the branch has been quiet",
 	// not "we have been waiting a while".
 	ArmedAt time.Time
+	// FirstArmedAt is when this hive FIRST fell behind and began waiting, and
+	// unlike ArmedAt it survives re-arming. It is what the max-hold cap is
+	// measured against: without it, a branch that never goes quiet would reset
+	// the only clock there was and defer the upgrade forever.
+	FirstArmedAt time.Time
 	// Collapsed counts how many distinct targets have superseded one another
 	// inside this window. It exists so the eventual roll can REPORT how many
 	// merges it absorbed. Silent batching would trade one invisible problem
@@ -152,7 +203,10 @@ type autoUpgradeDebounceDecision struct {
 //
 // prev is the hive's stored debounce state (zero value if none). target is the
 // SHA the hive would upgrade to on this cycle. interval is the quiet period; a
-// non-positive interval disables debouncing entirely. now is injected so the
+// non-positive interval disables debouncing entirely. maxHold caps the total
+// time a pending upgrade may be deferred by repeated re-arming, so a branch
+// that never goes quiet still converges; a non-positive maxHold disables the
+// cap. now is injected so the
 // behaviour is testable without touching the wall clock.
 //
 // The three cases:
@@ -168,7 +222,7 @@ type autoUpgradeDebounceDecision struct {
 // A hub restart inside the window is handled by prev being loaded from disk:
 // the SAME-TARGET case then sees the original ArmedAt and fires on schedule
 // rather than restarting the clock.
-func shouldDebounceAutoUpgrade(prev autoUpgradeDebounceState, target string, interval time.Duration, now time.Time) autoUpgradeDebounceDecision {
+func shouldDebounceAutoUpgrade(prev autoUpgradeDebounceState, target string, interval, maxHold time.Duration, now time.Time) autoUpgradeDebounceDecision {
 	if target == "" {
 		// Nothing to arm. Clear any pending record so a stale target cannot
 		// later fire against a branch that has since moved on.
@@ -187,19 +241,43 @@ func shouldDebounceAutoUpgrade(prev autoUpgradeDebounceState, target string, int
 	if prev.Target == "" || !sameCommit(prev.Target, target) {
 		collapsed := prev.Collapsed
 		reason := "debounce armed — waiting for the branch to go quiet"
+		firstArmed := prev.FirstArmedAt
 		if prev.Target != "" {
 			// A newer target REPLACED a pending one. This is the collapse.
 			collapsed++
 			reason = "debounce re-armed — newer target supersedes the pending one"
 		}
-		return autoUpgradeDebounceDecision{
-			State:  autoUpgradeDebounceState{Target: target, ArmedAt: now, Collapsed: collapsed},
-			Reason: reason,
+		if firstArmed.IsZero() {
+			firstArmed = now
 		}
+		next := autoUpgradeDebounceState{
+			Target: target, ArmedAt: now, FirstArmedAt: firstArmed, Collapsed: collapsed,
+		}
+		// Max-hold cap, checked on the RE-ARM path because that is the only
+		// path a never-quiet branch ever takes. Without this a branch whose
+		// median inter-merge gap is below the debounce interval — which v4's
+		// measurably is — would re-arm forever and never upgrade at all.
+		if maxHold > 0 && now.Sub(firstArmed) >= maxHold {
+			return autoUpgradeDebounceDecision{
+				Allowed:   true,
+				Collapsed: collapsed,
+				Reason:    "debounce max hold reached — rolling on a busy branch",
+			}
+		}
+		return autoUpgradeDebounceDecision{State: next, Reason: reason}
 	}
 
 	// Same target as the pending one: the branch has been quiet since ArmedAt.
 	if waited := now.Sub(prev.ArmedAt); waited < interval {
+		// The cap applies here too, so a hive cannot be held past it by any
+		// combination of quiet and busy cycles.
+		if maxHold > 0 && !prev.FirstArmedAt.IsZero() && now.Sub(prev.FirstArmedAt) >= maxHold {
+			return autoUpgradeDebounceDecision{
+				Allowed:   true,
+				Collapsed: prev.Collapsed,
+				Reason:    "debounce max hold reached — rolling before the window elapsed",
+			}
+		}
 		return autoUpgradeDebounceDecision{
 			State:  prev,
 			Reason: "debounce holding — branch not yet quiet",
@@ -229,6 +307,7 @@ func (s *HubServer) persistUpgradeDebounceState(h *SaaSHive, st autoUpgradeDebou
 	// state even if the disk write below fails.
 	h.AutoUpgradePendingTarget = st.Target
 	h.AutoUpgradePendingSince = st.ArmedAt
+	h.AutoUpgradePendingFirst = st.FirstArmedAt
 	h.AutoUpgradeCollapsed = st.Collapsed
 
 	// Re-read from disk rather than saving the loop's copy wholesale: that copy
@@ -241,6 +320,7 @@ func (s *HubServer) persistUpgradeDebounceState(h *SaaSHive, st autoUpgradeDebou
 	}
 	stored.AutoUpgradePendingTarget = st.Target
 	stored.AutoUpgradePendingSince = st.ArmedAt
+	stored.AutoUpgradePendingFirst = st.FirstArmedAt
 	stored.AutoUpgradeCollapsed = st.Collapsed
 	if err := saveSaaSHive(stored); err != nil {
 		s.logger.Warn("failed to persist auto-upgrade debounce state — a hub restart would re-arm the window",

@@ -6376,11 +6376,12 @@ func (s *HubServer) triggerAutoUpgrades() {
 		// keeps its daily/weekly window open.
 		debounce := shouldDebounceAutoUpgrade(
 			autoUpgradeDebounceState{
-				Target:    h.AutoUpgradePendingTarget,
-				ArmedAt:   h.AutoUpgradePendingSince,
-				Collapsed: h.AutoUpgradeCollapsed,
+				Target:       h.AutoUpgradePendingTarget,
+				ArmedAt:      h.AutoUpgradePendingSince,
+				FirstArmedAt: h.AutoUpgradePendingFirst,
+				Collapsed:    h.AutoUpgradeCollapsed,
 			},
-			latestSHA, autoUpgradeDebounceInterval(), time.Now())
+			latestSHA, autoUpgradeDebounceInterval(), autoUpgradeMaxHold(), time.Now())
 		if !debounce.Allowed {
 			// Persist the (possibly just-replaced) pending target so a hub
 			// restart inside the window resumes it rather than dropping it.

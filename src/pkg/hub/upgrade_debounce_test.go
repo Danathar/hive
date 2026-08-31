@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -13,7 +14,12 @@ import (
 // SHA, a quiet branch must still upgrade, and the paths an operator drives must
 // not be delayed at all.
 
-const testDebounce = 5 * time.Minute
+const (
+	testDebounce = 5 * time.Minute
+	// Generous cap: the tests in this file that are about the QUIET-window
+	// behaviour must not trip the max hold. The cap has its own test.
+	testMaxHold = 4 * time.Hour
+)
 
 // disableUpgradeDebounceForTest turns the merge-driven debounce (#5391) off for
 // the duration of a test, restoring the historical roll-on-the-first-cycle
@@ -53,11 +59,11 @@ type roll struct {
 func driveMerges(observations []struct {
 	target string
 	at     time.Time
-}, interval time.Duration) []roll {
+}, interval, maxHold time.Duration) []roll {
 	var state autoUpgradeDebounceState
 	var rolls []roll
 	for _, o := range observations {
-		d := shouldDebounceAutoUpgrade(state, o.target, interval, o.at)
+		d := shouldDebounceAutoUpgrade(state, o.target, interval, maxHold, o.at)
 		if d.Allowed {
 			rolls = append(rolls, roll{target: o.target, collapsed: d.Collapsed})
 			state = autoUpgradeDebounceState{} // the fire path clears the record
@@ -93,7 +99,7 @@ func TestMergeBurstCollapsesToOneRollAtNewestSHA(t *testing.T) {
 		{"db613df", base.Add(14 * time.Minute)},
 	}
 
-	rolls := driveMerges(obs, testDebounce)
+	rolls := driveMerges(obs, testDebounce, testMaxHold)
 
 	if len(rolls) != 1 {
 		t.Fatalf("a burst of 5 merges must collapse into exactly ONE roll, got %d: %+v", len(rolls), rolls)
@@ -105,6 +111,55 @@ func TestMergeBurstCollapsesToOneRollAtNewestSHA(t *testing.T) {
 	// batching is explicitly rejected by #5391.
 	if rolls[0].collapsed != 4 {
 		t.Errorf("roll must report the 4 superseded targets it collapsed, reported %d", rolls[0].collapsed)
+	}
+}
+
+// TestBusyBranchIsNotStarvedByDebounce is the guard on the one real failure
+// mode of a pure debounce: a branch that NEVER goes quiet would re-arm the
+// window forever and the hive would never upgrade at all.
+//
+// This is not hypothetical for v4. Sampling the 100 merges from 2026-08-30
+// 19:07Z to 2026-08-31 23:33Z, the MEDIAN inter-merge gap is 3.0 minutes and
+// 63% of gaps are under 5 minutes — i.e. below the debounce interval. The
+// max-hold cap is what converts "rolls once the branch goes quiet" into "rolls
+// once the branch goes quiet, and in no case later than the cap".
+//
+// The test replays a relentless branch: a new merge every 2 minutes, never
+// pausing, for two hours.
+func TestBusyBranchIsNotStarvedByDebounce(t *testing.T) {
+	base := time.Date(2026, 8, 31, 20, 0, 0, 0, time.UTC)
+	const maxHold = 30 * time.Minute
+
+	var obs []struct {
+		target string
+		at     time.Time
+	}
+	for i := 0; i < 60; i++ { // 60 merges x 2m = 2 hours, never quiet
+		obs = append(obs, struct {
+			target string
+			at     time.Time
+		}{fmt.Sprintf("sha%04d", i), base.Add(time.Duration(i) * 2 * time.Minute)})
+	}
+
+	rolls := driveMerges(obs, testDebounce, maxHold)
+
+	if len(rolls) == 0 {
+		t.Fatal("a permanently busy branch was STARVED — the hive would never upgrade at all")
+	}
+	// Bounded above: roughly one roll per max-hold period across the 2h run,
+	// not one per merge. The old behaviour would have produced 60.
+	if len(rolls) > 6 {
+		t.Errorf("busy branch produced %d rolls in 2h; the cap should bound this near 2h/%v", len(rolls), maxHold)
+	}
+	// The cap must fire repeatedly across the run rather than once — otherwise
+	// the hive converges once and then starves again.
+	if len(rolls) < 2 {
+		t.Errorf("expected the cap to fire repeatedly across 2 hours, got %d roll(s)", len(rolls))
+	}
+	// Each roll must land on a target that was current at the time, and the
+	// LAST roll must be recent enough that the hive is not left far behind.
+	if rolls[len(rolls)-1].target == "sha0000" {
+		t.Error("the final roll landed on the very first SHA — the hive is not converging")
 	}
 }
 
@@ -123,7 +178,7 @@ func TestQuietBranchStillUpgradesPromptly(t *testing.T) {
 		{"abc1234", base.Add(6 * time.Minute)}, // window elapsed
 	}
 
-	rolls := driveMerges(obs, testDebounce)
+	rolls := driveMerges(obs, testDebounce, testMaxHold)
 
 	if len(rolls) != 1 {
 		t.Fatalf("a quiet branch must roll exactly once, got %d: %+v", len(rolls), rolls)
@@ -149,7 +204,7 @@ func TestDebounceDisabledRollsImmediately(t *testing.T) {
 		{"bcab144", base.Add(4 * time.Minute)},
 	}
 
-	rolls := driveMerges(obs, 0)
+	rolls := driveMerges(obs, 0, testMaxHold)
 
 	if len(rolls) != 3 {
 		t.Fatalf("with debounce disabled every merge must roll, want 3, got %d: %+v", len(rolls), rolls)
@@ -171,7 +226,7 @@ func TestPendingTargetSurvivesHubRestart(t *testing.T) {
 	base := time.Date(2026, 8, 31, 20, 45, 0, 0, time.UTC)
 
 	// Arm the window.
-	d := shouldDebounceAutoUpgrade(autoUpgradeDebounceState{}, "db613df", testDebounce, base)
+	d := shouldDebounceAutoUpgrade(autoUpgradeDebounceState{}, "db613df", testDebounce, testMaxHold, base)
 	if d.Allowed {
 		t.Fatal("a freshly observed target must be held, not rolled immediately")
 	}
@@ -194,13 +249,13 @@ func TestPendingTargetSurvivesHubRestart(t *testing.T) {
 	}
 
 	// Immediately after the restart the window has NOT elapsed — still held.
-	if got := shouldDebounceAutoUpgrade(recovered, "db613df", testDebounce, base.Add(time.Minute)); got.Allowed {
+	if got := shouldDebounceAutoUpgrade(recovered, "db613df", testDebounce, testMaxHold, base.Add(time.Minute)); got.Allowed {
 		t.Error("restart must not cause an early roll while the window is still open")
 	}
 
 	// Once the ORIGINAL window elapses the upgrade fires. If the restart had
 	// reset the clock this would still be holding.
-	after := shouldDebounceAutoUpgrade(recovered, "db613df", testDebounce, base.Add(testDebounce+time.Second))
+	after := shouldDebounceAutoUpgrade(recovered, "db613df", testDebounce, testMaxHold, base.Add(testDebounce+time.Second))
 	if !after.Allowed {
 		t.Fatal("pending upgrade was LOST across the restart — it must still roll")
 	}
@@ -218,7 +273,7 @@ func TestShortAndFullSHADoNotReArmForever(t *testing.T) {
 	armed := autoUpgradeDebounceState{Target: "db613df", ArmedAt: base}
 
 	// The same commit, reported at full length, must NOT look like a new merge.
-	d := shouldDebounceAutoUpgrade(armed, "db613df1c0ffee0123456789abcdef0123456789", testDebounce, base.Add(2*time.Minute))
+	d := shouldDebounceAutoUpgrade(armed, "db613df1c0ffee0123456789abcdef0123456789", testDebounce, testMaxHold, base.Add(2*time.Minute))
 	if d.Allowed {
 		t.Fatal("window should still be open at +2m")
 	}
@@ -230,7 +285,7 @@ func TestShortAndFullSHADoNotReArmForever(t *testing.T) {
 	}
 
 	// And it fires on schedule rather than being deferred forever.
-	if got := shouldDebounceAutoUpgrade(armed, "db613df1c0ffee0123456789abcdef0123456789", testDebounce, base.Add(6*time.Minute)); !got.Allowed {
+	if got := shouldDebounceAutoUpgrade(armed, "db613df1c0ffee0123456789abcdef0123456789", testDebounce, testMaxHold, base.Add(6*time.Minute)); !got.Allowed {
 		t.Error("upgrade must fire once the window elapses despite the SHA length mismatch")
 	}
 }
@@ -241,7 +296,7 @@ func TestEmptyTargetClearsPendingState(t *testing.T) {
 	base := time.Date(2026, 8, 31, 20, 45, 0, 0, time.UTC)
 	armed := autoUpgradeDebounceState{Target: "db613df", ArmedAt: base, Collapsed: 3}
 
-	d := shouldDebounceAutoUpgrade(armed, "", testDebounce, base.Add(time.Minute))
+	d := shouldDebounceAutoUpgrade(armed, "", testDebounce, testMaxHold, base.Add(time.Minute))
 	if d.Allowed {
 		t.Error("an empty target must never roll")
 	}
