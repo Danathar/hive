@@ -1246,17 +1246,23 @@ func main() {
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	// preShutdownHook, when set, runs in the signal handler before the context
-	// is canceled. It is stored after the agent manager exists and archives
-	// every agent's in-flight kick log to /data so a pod roll or hive upgrade
-	// does not destroy the latest run's scrollback (#4296).
-	var preShutdownHook atomic.Pointer[func()]
+	// preShutdownHooks run in the signal handler before the context is canceled,
+	// in registration order, while every connection and tmux server is still
+	// live. Registrations happen later in startup, once the subsystems they
+	// touch exist.
+	//
+	// This was a single atomic.Pointer[func()] until kubestellar/hive#5390. A
+	// lone pointer makes registration DESTRUCTIVE: the second Store silently
+	// discards the first hook, and the loss is invisible — nothing fails, a
+	// shutdown side effect simply stops happening. That is precisely the trap
+	// the WebSocket drain walked into, since the slot was already held by
+	// #4296's kick-log archive. A slice makes adding a hook additive by
+	// construction, so the next one cannot repeat the mistake.
+	var preShutdownHooks shutdownHooks
 	go func() {
 		sig := <-sigCh
 		logger.Info("received signal, shutting down", "signal", sig)
-		if fn := preShutdownHook.Load(); fn != nil {
-			(*fn)()
-		}
+		preShutdownHooks.run()
 		cancel()
 	}()
 
@@ -1552,7 +1558,7 @@ func main() {
 	// SIGTERM (pod roll, hive upgrade) destroys every tmux server and with it
 	// the in-flight kick's scrollback; archive it to /data first (#4296).
 	archiveOnShutdown := func() { agentMgr.ArchiveAllKickLogs("shutdown") }
-	preShutdownHook.Store(&archiveOnShutdown)
+	preShutdownHooks.add("archive-kick-logs", archiveOnShutdown)
 	agentMgr.SetSandboxConfig(cfg.AgentSandbox)
 
 	// Say out loud when the sandbox opt-in is configured but inert. The gate is
@@ -1905,6 +1911,24 @@ func main() {
 	}
 
 	dashSrv := dashboard.NewServerWithAuth(cfg.Dashboard.Port, cfg.Dashboard.AuthToken, logger)
+	// SIGTERM (pod roll, hive self-upgrade) kills the process and every
+	// contributor WebSocket with it, and until #5390 it did so without a word:
+	// the peer saw a bare 1006, indistinguishable from a network fault, which is
+	// what made #5090 take days to diagnose. Send each contributor a 1012
+	// (CloseServiceRestart) first so the relay knows to reconnect immediately —
+	// into the replacement pod, which maxSurge=1/maxUnavailable=0 has already
+	// brought to readiness before this signal was delivered.
+	//
+	// Registered as its OWN hook rather than folded into archiveOnShutdown: the
+	// two are unrelated, and the drain must not be able to prevent the archive
+	// from running. addUrgent, not add, because it is the time-critical half —
+	// the sooner the frame is on the wire the sooner the relay reconnects,
+	// whereas the kick-log archive does PVC I/O on NFS and nobody is waiting on
+	// it. The hub is resolved lazily inside the closure because the contributor
+	// hub is not constructed until registerContributeRoutes runs, below.
+	preShutdownHooks.addUrgent("drain-contributor-websockets", func() {
+		dashSrv.DrainContributorsForShutdown()
+	})
 	var beadStores map[string]*beads.Store
 
 	// Wire ioscan input enforcement (opt-in via ioscan.enabled) to the dashboard

@@ -5580,3 +5580,101 @@ func closeWithReason(conn *websocket.Conn, code int, reason string) {
 	)
 	_ = conn.Close()
 }
+
+// wsDrainReason is the close reason every contributor socket receives when the
+// hub process is shutting down. It is a fixed string rather than a formatted
+// one so a relay may match on it verbatim.
+const wsDrainReason = "hub restarting for upgrade"
+
+// wsDrainBudget bounds the ENTIRE shutdown drain, not one socket.
+//
+// closeWithReason writes a Close frame with a wsCloseFrameDeadline (1s) write
+// deadline, so a peer that has stopped reading can stall a single close for up
+// to a second. Against the maxWSConnections cap of 50 a serial drain is a 50s
+// worst case — longer than terminationGracePeriodSeconds (30s), which would
+// mean the drain itself delays the exit past the point where SIGKILL lands and
+// the archive hook that follows it never runs. The budget makes that
+// impossible: whatever has not been closed when it expires is abandoned, and
+// the sockets left behind are exactly as dead as they are today.
+const wsDrainBudget = 2 * time.Second
+
+// DrainForShutdown tells every registered contributor WHY the socket is about
+// to die (kubestellar/hive#5390).
+//
+// THE DEFECT: the hub process is killed on every upgrade roll — measured at 11
+// ReplicaSets in 5.5 hours on one hosted spoke, one per merge to v4 — and it
+// has no shutdown handling for contributor WebSockets at all. The sockets die
+// with the process at SIGKILL, so the peer observes a bare 1006 with no reason,
+// byte-for-byte identical to a yanked cable. #5107 made DELIBERATE closes
+// legible; process death was not one of them, which is why the hub provably
+// sends Close frames and yet every flap observed in #5090 was frameless.
+//
+// CloseServiceRestart (1012) is defined as "the server is restarting" and
+// carries the client expectation of reconnecting, which is exactly true here:
+// the deployment is maxSurge=1/maxUnavailable=0, so the replacement pod has
+// already passed its readiness probe by the time the old one gets SIGTERM.
+//
+// This does NOT stop the flap — the pod still rolls, the socket still dies.
+// What changes is that the relay learns immediately and reconnects into an
+// already-serving hub, instead of discovering the corpse by read error or
+// missed pong seconds later.
+//
+// Locking follows cleanupLoop exactly: snapshot the sockets under h.mu, then
+// close OUTSIDE it. Closing under the lock would hold the hub-wide mutex for up
+// to wsCloseFrameDeadline per wedged peer, serially. Connections are NOT
+// deleted from the map — the process is about to exit, and leaving the
+// bookkeeping untouched keeps this off the lease/cooldown accounting held under
+// #5151.
+//
+// Returns the number of sockets a Close frame was attempted on, for the
+// shutdown log line.
+func (h *ContributeWSHub) DrainForShutdown() int {
+	if h == nil {
+		return 0
+	}
+
+	var conns []*websocket.Conn
+	h.mu.RLock()
+	for _, c := range h.connections {
+		// Nil-guard mirrors cleanupLoop: a registered connection may carry no live
+		// socket (test-injected in-flight entry, or one torn down elsewhere).
+		if c != nil && c.ws != nil {
+			conns = append(conns, c.ws)
+		}
+	}
+	h.mu.RUnlock()
+
+	if len(conns) == 0 {
+		return 0
+	}
+
+	// Fire-and-forget. A WebSocket Close is not a handshake we need to complete
+	// server-side, and waiting for acknowledgements would put a peer's silence on
+	// the shutdown path's critical section.
+	deadline := time.Now().Add(wsDrainBudget)
+	drained := 0
+	for _, ws := range conns {
+		if !time.Now().Before(deadline) {
+			break
+		}
+		closeWithReason(ws, websocket.CloseServiceRestart, wsDrainReason)
+		drained++
+	}
+
+	if h.logger != nil {
+		h.logger.Info("[contribute-ws] drained contributor sockets for shutdown",
+			"drained", drained, "registered", len(conns))
+	}
+	return drained
+}
+
+// DrainContributorsForShutdown is the Server-level entry point for the
+// pre-shutdown drain. It exists so cmd/hive can reach the contributor hub
+// without the hub itself being exported plumbing, and is a no-op on a Server
+// whose contribute routes were never registered.
+func (s *Server) DrainContributorsForShutdown() int {
+	if s == nil || s.contributeHub == nil {
+		return 0
+	}
+	return s.contributeHub.DrainForShutdown()
+}
