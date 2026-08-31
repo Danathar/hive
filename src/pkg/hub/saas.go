@@ -2202,6 +2202,14 @@ type PerClusterHealth struct {
 	DataSource string               `json:"data_source,omitempty"` // "heartbeat" when data comes from spoke heartbeat instead of kubectl
 	DataStale  bool                 `json:"data_stale,omitempty"`  // true when heartbeat data is older than heartbeatHealthStaleness
 	DataAge    string               `json:"data_age,omitempty"`    // human-readable age or collection timestamp
+	// StuckPods reports hive-namespace pods stuck Terminating — the residue of
+	// nodes disappearing without draining (#5328 item 3). Nil means the hub
+	// could not determine it (unreachable cluster, pull-only pool, failed
+	// listing); a non-nil report with Total 0 means it looked and the cluster
+	// is clean. Those must not render alike: 27 orphans accumulated for three
+	// weeks precisely because nothing distinguished "none" from "nobody
+	// checked". See orphaned_pod_visibility.go.
+	StuckPods *StuckPodReport `json:"stuck_pods,omitempty"`
 }
 
 type ClusterHealthResponse struct {
@@ -2742,6 +2750,28 @@ func buildSingleClusterHealth(cluster *ClusterConfig, hiveCount int, logger *slo
 		result.GPUSummary = &GPUSummary{
 			TotalGPUs:       totalGPUCapacity,
 			AllocatableGPUs: totalGPUAllocatable,
+		}
+	}
+
+	// Orphaned Terminating-pod count (#5328 item 3). READ-ONLY: one extra
+	// `kubectl get pods` on a path that already lists pods. It needs its own
+	// listing because the query above is field-selected to phase=Running and
+	// therefore cannot see an orphan by construction.
+	//
+	// Best-effort: nil on failure, so a cluster the hub could not interrogate
+	// reports UNKNOWN rather than a reassuring zero.
+	if stuck := collectStuckPods(ctx, cluster, timeout, time.Now()); stuck != nil {
+		result.StuckPods = stuck
+		// Log when the fleet is actually accumulating orphans. The reaper
+		// clears them, so a persistently non-zero count here means orphans are
+		// being PRODUCED faster than they age past orphanedPodMinAge — which is
+		// the upstream node-lifecycle fault (#5328 item 1), not a reaper
+		// problem. Silence on zero keeps a healthy fleet quiet.
+		if stuck.Total > 0 && logger != nil {
+			logger.Warn("cluster has hive pods stuck terminating — check for ungraceful node loss",
+				"cluster", cluster.ID,
+				"stuck_pods", stuck.Total,
+				"namespaces_affected", stuck.NamespacesAffected)
 		}
 	}
 
@@ -18590,6 +18620,24 @@ const dashboardHTML = `<!DOCTYPE html>
               var capRemaining = cs.hive_capacity_remaining;
               capacityLine = ' · <span title="Estimated headroom: per-hive CPU/memory request footprint bin-packed into free (allocatable minus requested) capacity on Ready, schedulable nodes only">room for ~' + capRemaining + ' more hive' + (capRemaining === 1 ? '' : 's') + '</span>';
             }
+            // Stuck (orphaned Terminating) hive pods — the residue of nodes
+            // disappearing without draining (#5328). ABSENT means the hub could
+            // not determine it and nothing is claimed; a present zero is
+            // deliberately silent so a healthy fleet stays quiet. Only a real
+            // non-zero count renders, because the whole cost of this incident
+            // was that 27 orphans across 15 namespaces accumulated for three
+            // weeks with nothing reporting them.
+            var stuckLine = '';
+            if (c.stuck_pods && c.stuck_pods.total > 0) {
+              var sp = c.stuck_pods;
+              var nsList = (sp.namespaces || []).map(function(x) { return x.namespace + ' (' + x.count + ')'; }).join(', ');
+              if (sp.truncated) { nsList += ', …'; }
+              var stuckTitle = 'Hive pods stuck Terminating past the reaper threshold: deletionTimestamp set, no finalizers, not Running. ' +
+                'Signature of a node removed without draining. Affected namespaces: ' + nsList;
+              stuckLine = ' · <span style="color:var(--red)" title="' + esc(stuckTitle) + '">' +
+                sp.total + ' stuck pod' + (sp.total === 1 ? '' : 's') +
+                ' in ' + sp.namespaces_affected + ' ns</span>';
+            }
             var errorLine = c.error ? '<div style="margin:8px 0;padding:6px 10px;background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:6px;font-size:0.75rem;color:var(--red)">' + esc(c.error) + '</div>' : '';
             var headerHtml = '<div style="display:flex;align-items:center;gap:8px;margin:16px 0 8px">' +
               clusterBadge(c.id, c.name) +
@@ -18599,7 +18647,7 @@ const dashboardHTML = `<!DOCTYPE html>
               '<span style="color:' + cCpuColor + '">' + (cs.total_cpu_percent || 0) + '% cpu</span> · ' +
               '<span style="color:' + cMemColor + '">' + (cs.total_mem_percent || 0) + '% mem</span> · ' +
               cDiskSegment +
-              (c.hive_count || 0) + ' hives' + capacityLine + gpuLine +
+              (c.hive_count || 0) + ' hives' + capacityLine + gpuLine + stuckLine +
               '</span></div>';
             var nodesHtml = (c.nodes || []).length > 0
               ? '<div style="display:grid;grid-template-columns:repeat(2,1fr);gap:12px">' + (c.nodes || []).map(renderNodeCard).join('') + '</div>'
