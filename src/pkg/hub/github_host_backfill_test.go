@@ -289,11 +289,11 @@ func TestBackfilledHostProducesGHEAPIURL(t *testing.T) {
 	host := backfillGitHubHostFromCluster(&SaaSHive{}, &ClusterConfig{
 		GitHubBaseURL: "https://github.ibm.com",
 	})
-	if got := gheAPIURLForHost(host); got != "https://github.ibm.com/api/v3" {
-		t.Errorf("gheAPIURLForHost(%q) = %q, want https://github.ibm.com/api/v3", host, got)
+	if got := forgeAPIURLForHost("", host); got != "https://github.ibm.com/api/v3" {
+		t.Errorf("forgeAPIURLForHost(%q) = %q, want https://github.ibm.com/api/v3", host, got)
 	}
 	// And a public hive must still push nothing.
-	if got := gheAPIURLForHost(backfillGitHubHostFromCluster(&SaaSHive{}, &ClusterConfig{})); got != "" {
+	if got := forgeAPIURLForHost("", backfillGitHubHostFromCluster(&SaaSHive{}, &ClusterConfig{})); got != "" {
 		t.Errorf("public hive pushed API URL %q, want empty", got)
 	}
 }
