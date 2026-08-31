@@ -52,6 +52,13 @@ type Finding struct {
 	// is how findings survived their own fix for five cycles (#5130). The
 	// renderer captions it rather than passing it off as analyzed-at-HEAD.
 	ProvenanceStale bool `json:"provenance_stale,omitempty"`
+	// CachedReplays counts the byte-identical no-provenance re-reports of this
+	// finding that PersistAsBeads has skipped since its evidence last changed
+	// (#5236). Non-zero means the repetition is cached replay, not repeated
+	// verification, and the renderer captions the finding as unverified so a
+	// stale claim and the downstream issue refuting it cannot both read as
+	// live work.
+	CachedReplays int `json:"cached_replays,omitempty"`
 }
 
 // Snapshot identifies the single commit that a digest's analysis is pinned to.
@@ -586,6 +593,7 @@ func BuildDigestFromBeads(stores map[string]*beads.Store, mode string, opts Dige
 				f.Detail = d
 			}
 			f.ProvenanceSHA = b.Meta(provenanceSHAMetadataKey)
+			f.CachedReplays, _ = strconv.Atoi(b.Meta(evidenceReplayCountMetadataKey))
 			f = capCoverageGapSeverity(f)
 			byAgent[agentName] = append(byAgent[agentName], f)
 			total++
@@ -1018,6 +1026,13 @@ func FormatDigestMarkdown(d *Digest, opts DigestOptions) string {
 			prov := ""
 			if f.ProvenanceStale && f.ProvenanceSHA != "" {
 				prov = fmt.Sprintf(" ⚠️ _(evidence computed at `%s`, not re-verified at the analyzed commit)_", shortSHA(f.ProvenanceSHA))
+			} else if f.CachedReplays > 0 && f.ProvenanceSHA == "" {
+				// A no-provenance finding whose only "confirmations" were
+				// byte-identical replays of cached text. Without the caption
+				// the repetition reads as fresh verification, and the digest
+				// presents a possibly-disproved claim as live work alongside
+				// whatever downstream issue refutes it (#5236).
+				prov = fmt.Sprintf(" ⚠️ _(re-reported %d× from cached evidence, not re-verified)_", f.CachedReplays)
 			}
 			b.WriteString(fmt.Sprintf("- **[%s]** %s%s%s%s _%s_\n", f.Type, linkifyRefs(title, org), loc, repeat, prov, f.Agent))
 			if detail != "" {
@@ -1145,10 +1160,33 @@ func PersistAsBeads(findings []Finding, stores map[string]*beads.Store) (created
 		// (#5130). Skipping the whole finding leaves the staleness clock
 		// running, so silence retires it on the normal schedule.
 		//
-		// Gated on an explicit provenance SHA on BOTH sides, so a hive whose
-		// agents record none behaves exactly as it did before.
+		// Gated on an explicit provenance SHA on BOTH sides; findings that
+		// record none take the evidence-identity gate below instead.
 		if prov != "" && provenanceAlreadyRecorded(existing, f.Title, prov) {
 			continue
+		}
+
+		// The same boundary for findings that record NO provenance (#5236): a
+		// re-report byte-identical to the text this bead already holds is a
+		// cached replay, not fresh confirmation — nothing was recomputed, so
+		// nothing was confirmed. Skipping it leaves the staleness clock
+		// running, exactly like the identical-provenance case above, so a
+		// disproved finding finally ages out instead of being kept alive
+		// forever by its own cache (the atomic-image-builder shell-coverage
+		// finding survived its fix this way). A report whose producer changed
+		// ANYTHING — title, detail, file, line — hashes differently and still
+		// refreshes below, so a genuinely re-checked condition keeps its bead
+		// alive as before, and a brand-new no-provenance finding still creates
+		// its bead normally.
+		hash := findingEvidenceHash(f)
+		if prov == "" {
+			if replayed := beadWithIdenticalEvidence(existing, f.Title, hash); replayed != nil {
+				// Count the skipped replay so the digest can caption the
+				// finding as unverified rather than silently live.
+				n, _ := strconv.Atoi(replayed.Meta(evidenceReplayCountMetadataKey))
+				_ = store.SetMetadata(replayed.ID, evidenceReplayCountMetadataKey, strconv.Itoa(n+1))
+				continue
+			}
 		}
 
 		dup := false
@@ -1174,6 +1212,11 @@ func PersistAsBeads(findings []Finding, stores map[string]*beads.Store) (created
 				if prov != "" {
 					_ = store.SetMetadata(b.ID, provenanceSHAMetadataKey, prov)
 				}
+				// The bead now records THIS report's evidence: future replays
+				// compare against it, and the replay count restarts because
+				// the evidence visibly changed.
+				_ = store.SetMetadata(b.ID, evidenceHashMetadataKey, hash)
+				_ = store.SetMetadata(b.ID, evidenceReplayCountMetadataKey, "0")
 				dup = true
 				break
 			}
@@ -1201,6 +1244,11 @@ func PersistAsBeads(findings []Finding, stores map[string]*beads.Store) (created
 		if prov != "" {
 			meta[provenanceSHAMetadataKey] = prov
 		}
+		// Recorded on creation AND on the Upsert title-drift fold below (the
+		// meta loop runs after Upsert), so the stored hash always describes
+		// the report that last touched the bead.
+		meta[evidenceHashMetadataKey] = hash
+		meta[evidenceReplayCountMetadataKey] = "0"
 
 		// Upsert, not Create: it stamps LastSeenAt on the new bead (so the
 		// staleness clock starts) and folds in the cosmetic title drift that
