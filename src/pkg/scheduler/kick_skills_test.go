@@ -44,7 +44,7 @@ func TestPrimeSkills_NoDeclaredSkillsIsNoOp(t *testing.T) {
 	writeSkill(t, dir, "go-testing.md", "Prefer t.TempDir.")
 
 	s := schedulerWithSkills("scanner", nil)
-	if got := s.primeSkills("scanner"); got != "" {
+	if got := s.primeSkills("scanner", ""); got != "" {
 		t.Errorf("primeSkills with no declared skills = %q, want empty", got)
 	}
 }
@@ -52,7 +52,7 @@ func TestPrimeSkills_NoDeclaredSkillsIsNoOp(t *testing.T) {
 func TestPrimeSkills_UnknownAgentIsNoOp(t *testing.T) {
 	useSkillsDir(t)
 	s := schedulerWithSkills("scanner", []string{"go-testing"})
-	if got := s.primeSkills("nobody"); got != "" {
+	if got := s.primeSkills("nobody", ""); got != "" {
 		t.Errorf("primeSkills for an unconfigured agent = %q, want empty", got)
 	}
 }
@@ -63,7 +63,7 @@ func TestPrimeSkills_MissingRegistryDirIsNoOp(t *testing.T) {
 	skillsRegistryDir = filepath.Join(t.TempDir(), "does-not-exist")
 
 	s := schedulerWithSkills("scanner", []string{"go-testing"})
-	if got := s.primeSkills("scanner"); got != "" {
+	if got := s.primeSkills("scanner", ""); got != "" {
 		t.Errorf("primeSkills with no registry dir = %q, want empty", got)
 	}
 }
@@ -76,7 +76,7 @@ func TestPrimeSkills_InjectsDeclaredSkillBody(t *testing.T) {
 	writeSkill(t, dir, "go-testing.md", "---\nname: go-testing\nversion: 1.2.0\n---\n"+body+"\n")
 
 	s := schedulerWithSkills("scanner", []string{"go-testing"})
-	got := s.primeSkills("scanner")
+	got := s.primeSkills("scanner", "")
 	if got == "" {
 		t.Fatal("primeSkills returned empty for a declared, present skill")
 	}
@@ -98,7 +98,7 @@ func TestPrimeSkills_OnlyDeclaredSkillsAreInjected(t *testing.T) {
 	writeSkill(t, dir, "unwanted.md", "UNWANTED BODY")
 
 	s := schedulerWithSkills("scanner", []string{"wanted"})
-	got := s.primeSkills("scanner")
+	got := s.primeSkills("scanner", "")
 	if !strings.Contains(got, "WANTED BODY") {
 		t.Errorf("injection %q missing the declared skill", got)
 	}
@@ -112,7 +112,7 @@ func TestPrimeSkills_UnresolvableNameIsNoOp(t *testing.T) {
 	writeSkill(t, dir, "present.md", "PRESENT BODY")
 
 	s := schedulerWithSkills("scanner", []string{"typo-not-a-skill"})
-	if got := s.primeSkills("scanner"); got != "" {
+	if got := s.primeSkills("scanner", ""); got != "" {
 		t.Errorf("primeSkills with only an unknown name = %q, want empty", got)
 	}
 }
@@ -123,9 +123,50 @@ func TestPrimeSkills_UnknownNameDoesNotSuppressKnownOne(t *testing.T) {
 	writeSkill(t, dir, "present.md", "PRESENT BODY")
 
 	s := schedulerWithSkills("scanner", []string{"typo", "present"})
-	got := s.primeSkills("scanner")
+	got := s.primeSkills("scanner", "")
 	if !strings.Contains(got, "PRESENT BODY") {
 		t.Errorf("injection %q dropped the resolvable skill because a sibling name was unknown", got)
+	}
+}
+
+// A repo-local skill is the fallback half of ResolveRequested: it must work
+// even when the hive-wide registry directory does not exist.
+func TestPrimeSkills_RepoInlineSkillFallbackWithoutRegistry(t *testing.T) {
+	orig := skillsRegistryDir
+	t.Cleanup(func() { skillsRegistryDir = orig })
+	skillsRegistryDir = filepath.Join(t.TempDir(), "does-not-exist")
+
+	repoRoot := t.TempDir()
+	const body = "Use table-driven tests for validation branches."
+	if err := os.WriteFile(filepath.Join(repoRoot, "AGENTS.md"), []byte("## Skill: go-testing\n"+body+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := schedulerWithSkills("scanner", []string{"go-testing"})
+	got := s.primeSkills("scanner", repoRoot)
+	if !strings.Contains(got, body) {
+		t.Errorf("injection %q missing repo-local fallback body %q", got, body)
+	}
+}
+
+// Registry definitions are curated and versioned, so they retain the package's
+// documented precedence over an ad-hoc repo-local definition of the same name.
+func TestPrimeSkills_RegistryOverridesRepoInlineSkill(t *testing.T) {
+	dir := useSkillsDir(t)
+	writeSkill(t, dir, "go-testing.md", "REGISTRY BODY")
+
+	repoRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoRoot, "AGENTS.md"), []byte("## Skill: go-testing\nREPO BODY\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := schedulerWithSkills("scanner", []string{"go-testing"})
+	got := s.primeSkills("scanner", repoRoot)
+	if !strings.Contains(got, "REGISTRY BODY") {
+		t.Errorf("injection %q missing registry definition", got)
+	}
+	if strings.Contains(got, "REPO BODY") {
+		t.Errorf("injection %q used repo fallback despite registry match", got)
 	}
 }
 
@@ -139,6 +180,38 @@ func TestSubstituteTemplate_KnowledgeCarriesSkills(t *testing.T) {
 	out := s.substituteTemplate("BEGIN ${KNOWLEDGE} END", nil, "scanner", nil)
 	if !strings.Contains(out, body) {
 		t.Errorf("expanded kick %q does not contain the injected skill body %q", out, body)
+	}
+}
+
+// End-to-end through checkout-root resolution and kick assembly: an agent's
+// skills list can name a definition that exists only in the primary repo.
+func TestSubstituteTemplate_KnowledgeCarriesRepoSkillFallback(t *testing.T) {
+	orig := skillsRegistryDir
+	t.Cleanup(func() { skillsRegistryDir = orig })
+	skillsRegistryDir = filepath.Join(t.TempDir(), "does-not-exist")
+
+	checkouts := t.TempDir()
+	repoRoot := filepath.Join(checkouts, "hive")
+	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const body = "Run the repository's focused verifier before pushing."
+	if err := os.WriteFile(filepath.Join(repoRoot, "AGENTS.md"), []byte("## Skill: verification\n"+body+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{
+		Agents: map[string]config.AgentConfig{
+			"scanner": {Skills: []string{"verification"}},
+		},
+	}
+	cfg.Project.PrimaryRepo = "hive"
+	cfg.Project.CheckoutsDir = checkouts
+	s := New(cfg, slog.Default())
+
+	out := s.substituteTemplate("BEGIN ${KNOWLEDGE} END", nil, "scanner", nil)
+	if !strings.Contains(out, body) {
+		t.Errorf("expanded kick %q does not contain repo-local fallback body %q", out, body)
 	}
 }
 
@@ -189,7 +262,7 @@ func TestPrimeSkills_OversizedSkillIsNotInjected(t *testing.T) {
 	writeSkill(t, dir, "huge.md", strings.Repeat("x", maxSkillsInjectionBytes+1))
 
 	s := schedulerWithSkills("scanner", []string{"huge"})
-	if got := s.primeSkills("scanner"); got != "" {
+	if got := s.primeSkills("scanner", ""); got != "" {
 		t.Errorf("primeSkills injected %d chars for an over-cap skill, want empty", len(got))
 	}
 }

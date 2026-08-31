@@ -240,6 +240,8 @@ func (s *Scheduler) substituteTemplateWithPolicy(template string, actionable *gi
 	}
 	knowledgeSection := s.primeKnowledge(agentIssues)
 
+	repoRoot := s.agentsRepoRoot(primaryRepo)
+
 	// Additive: prepend the repo's AGENTS.md instructions + requested skills to
 	// the injected knowledge, when a local checkout root is available. This is a
 	// guarded, single call point — it returns "" (and never errors) when no
@@ -255,15 +257,15 @@ func (s *Scheduler) substituteTemplateWithPolicy(template string, actionable *gi
 	// agentsmd.ParseNearest for closest-wins nested AGENTS.md. That still has no
 	// caller — nothing on the kick path knows which FILE an agent will touch —
 	// so it stays deferred, unlike the checkout root, which is now threaded.
-	if agentsSection := s.primeAgentsMd(s.agentsRepoRoot(primaryRepo)); agentsSection != "" {
+	if agentsSection := s.primeAgentsMd(repoRoot); agentsSection != "" {
 		knowledgeSection = agentsSection + "\n" + knowledgeSection
 	}
 
-	// Registry skills are a separate, independently-wired path from the
-	// AGENTS.md block above. That one needs a repo checkout (see
-	// agentsRepoRoot); this one reads the hive-host-local skills directory, so
-	// it takes effect today without any per-repo provisioning.
-	if skillsSection := s.primeSkills(agentName); skillsSection != "" {
+	// Agent-declared skills prefer the hive-host-local registry, then fall back
+	// to definitions in the primary repo's AGENTS.md or adjacent skills/
+	// directory. The registry remains independently useful without a checkout;
+	// the fallback activates only when agentsRepoRoot found one above.
+	if skillsSection := s.primeSkills(agentName, repoRoot); skillsSection != "" {
 		knowledgeSection = skillsSection + "\n" + knowledgeSection
 	}
 
@@ -1509,14 +1511,16 @@ var skillsRegistryDir = "/data/skills"
 const maxSkillsInjectionBytes = 8192
 
 // primeSkills resolves the skills agentName declares in config against the
-// host-local skill registry and renders them for injection into the kick.
+// host-local skill registry, falling back to repo-local AGENTS.md skills, and
+// renders them for injection into the kick. A registry skill wins when both
+// sources define the same name.
 //
-// It is tolerant at every step: no declared skills, a missing registry
-// directory, or a name with no matching skill all yield "" rather than an
-// error, so a misconfigured skill degrades the kick instead of blocking the
-// agent. Loading happens per kick (not once at startup) so an operator editing
-// a skill file sees it take effect on the next kick without a restart.
-func (s *Scheduler) primeSkills(agentName string) string {
+// It is tolerant at every step: no declared skills, missing registry or repo
+// files, and names with no matching skill all yield "" rather than an error, so
+// a misconfigured skill degrades the kick instead of blocking the agent.
+// Loading happens per kick (not once at startup) so an operator editing either
+// source sees it take effect on the next kick without a restart.
+func (s *Scheduler) primeSkills(agentName, repoRoot string) string {
 	if s.cfg == nil {
 		return ""
 	}
@@ -1525,23 +1529,39 @@ func (s *Scheduler) primeSkills(agentName string) string {
 		return ""
 	}
 
+	var repoCfg *agentsmd.AgentsConfig
+	if repoRoot != "" {
+		var err error
+		repoCfg, err = agentsmd.Parse(repoRoot, s.logger)
+		if err != nil {
+			// Parse is tolerant and should not error; log defensively and keep
+			// resolving against the registry.
+			s.logger.Warn("skillreg: cannot parse repo skills, continuing with registry",
+				"agent", agentName, "root", repoRoot, "error", err)
+			repoCfg = nil
+		}
+	}
+
 	reg := skillreg.NewRegistry()
 	loaded, err := reg.Load(skillsRegistryDir, s.logger)
 	if err != nil {
-		s.logger.Warn("skillreg: cannot load skills registry, skipping injection",
+		// An unexpected registry failure must not suppress a valid repo-local
+		// fallback.
+		s.logger.Warn("skillreg: cannot load skills registry, continuing with repo skills",
 			"dir", skillsRegistryDir, "error", err)
-		return ""
-	}
-	if loaded == 0 {
-		s.logger.Debug("skillreg: no skills in registry, skipping injection",
-			"dir", skillsRegistryDir, "requested", len(ac.Skills))
-		return ""
 	}
 
-	resolved := reg.ResolveRequested(nil, ac.Skills)
+	resolved := reg.ResolveRequested(repoCfg, ac.Skills)
 	if len(resolved) == 0 {
+		if loaded == 0 && (repoCfg == nil || len(repoCfg.Skills) == 0) {
+			s.logger.Debug("skillreg: no skills available, skipping injection",
+				"dir", skillsRegistryDir, "repo_root", repoRoot,
+				"requested", len(ac.Skills))
+			return ""
+		}
 		s.logger.Warn("skillreg: none of the declared skills resolved",
-			"agent", agentName, "requested", ac.Skills, "registry_size", loaded)
+			"agent", agentName, "requested", ac.Skills, "registry_size", loaded,
+			"repo_root", repoRoot)
 		return ""
 	}
 
@@ -1555,6 +1575,7 @@ func (s *Scheduler) primeSkills(agentName string) string {
 	s.logger.Info("skillreg: injecting skills into kick",
 		"agent", agentName,
 		"dir", skillsRegistryDir,
+		"repo_root", repoRoot,
 		"injected", len(kept),
 		"dropped", len(dropped),
 		"chars", len(section),

@@ -132,23 +132,21 @@ rather than a failed kick.
 ## Connection to the skill registry
 
 The `skills:` front-matter key names skills by the same kind of identifier the
-[skill registry](skills.md) (`/data/skills/`, `pkg/skillreg`) resolves — but the
-two are **independent paths** that happen to share a vocabulary:
+[skill registry](skills.md) (`/data/skills/`, `pkg/skillreg`) resolves. There
+are two request paths with different precedence:
 
 - `pkg/agentsmd` resolves a skill name to text from an inline `## Skill:`
   section or a `skills/<name>.md` file **in the same repo** — self-contained,
   and it does not consult the registry at all.
-- The skill registry is a **different, hive-wide** store, injected into kicks
-  from the agent's own `skills:` config (see its page). It reads
-  `/data/skills/` on the hive host and needs no repo checkout.
+- An agent's own `skills:` config is resolved by `pkg/skillreg`: it checks the
+  **hive-wide** `/data/skills/` store first, then falls back to the primary
+  repo's inline or adjacent definition when that repo has a configured checkout.
+  Registry definitions therefore retain precedence when both sources use the
+  same name, while a missing checkout does not affect registry-only operation.
 
-Both reach a live kick prompt, by different routes and from different sources.
-One gap remains between them: `skillreg.ResolveRequested` accepts an
-`agentsmd.AgentsConfig` so a repo's inline snippets could act as a fallback
-under registry skills, and the scheduler still passes `nil` for it — so a repo's
-inline `## Skill:` sections reach the kick through the `AGENTS.md` block above,
-never through an agent's `skills:` list. Don't read the shared vocabulary as
-evidence that authoring one wires up the other.
+Both reach a live kick prompt. A repo's front-matter request stays self-contained
+inside `pkg/agentsmd`; registry precedence applies to names requested by the
+agent config through `pkg/skillreg.ResolveRequested`.
 
 ## What to read next
 

@@ -79,11 +79,18 @@ agents:
       - review-checklist
 ```
 
-At each kick the scheduler loads `/data/skills/`, resolves the declared names,
-and prepends the rendered block to the agent's `${KNOWLEDGE}` section
-(`src/pkg/scheduler/scheduler.go`, `primeSkills`). Loading happens **per kick,
-not once at startup**, so editing a skill file takes effect on the next kick —
-no hive restart required.
+At each kick the scheduler loads `/data/skills/` and, when a checkout is
+configured for the primary repo, parses that repo's `AGENTS.md` and adjacent
+`skills/` directory. It resolves each declared name against the hive-wide
+registry first and falls back to the repo-local definition when the registry
+has no match, then prepends the rendered block to the agent's `${KNOWLEDGE}`
+section (`src/pkg/scheduler/scheduler.go`, `primeSkills`). Loading happens **per
+kick, not once at startup**, so editing either source takes effect on the next
+kick — no hive restart required.
+
+The fallback needs a checkout root from `project.checkouts_dir` (or the guarded
+`policies.local_dir` fallback described in [agents-md.md](agents-md.md)). Without
+one, registry-backed skills continue to work exactly as before.
 
 Only declared skills are injected. A skill sitting in the directory that no
 agent names is never sent to anyone.
@@ -95,14 +102,15 @@ Every failure mode degrades the kick rather than blocking the agent:
 | Situation | Result |
 | --- | --- |
 | agent declares no `skills:` | nothing injected |
-| `/data/skills/` absent | nothing injected |
-| declared name matches no skill | that name skipped; the others still inject |
+| `/data/skills/` absent | repo-local matches still inject when a checkout is configured; otherwise nothing |
+| repo checkout absent | registry matches still inject; repo-local fallback is unavailable |
+| declared name matches neither source | that name skipped; the others still inject |
 | *every* declared name unknown | nothing injected, logged at `warn` |
 | malformed front matter in a file | that file skipped by `Load`, logged |
 
-Each injection logs at `info` with the agent, the directory, and how many
-skills were injected, so "did this agent actually get its skills" is answerable
-from the hive log.
+Each injection logs at `info` with the agent, registry directory, repo root, and
+how many skills were injected, so "did this agent actually get its skills" is
+answerable from the hive log.
 
 ## Size cap
 
@@ -139,22 +147,11 @@ version.
 
 ## Still not wired
 
-Two paths named in the package remain unconnected, and this page will not
-imply otherwise:
-
-- **`AGENTS.md` inline skills.** `ResolveRequested` accepts an
-  `agentsmd.AgentsConfig` so a repo's inline snippets can act as a fallback
-  under registry skills, but the scheduler still passes `nil` for it. The
-  checkout-root half of that blocker is fixed — `agentsRepoRoot()` now resolves
-  a real root from `project.checkouts_dir`
-  ([#5227](https://github.com/kubestellar/hive/issues/5227)), and a repo's
-  `AGENTS.md` reaches the kick through its own injected block (see
-  [agents-md.md](agents-md.md)). What is still unconnected is this list: an
-  agent's `skills:` names resolve only against registry files in
-  `/data/skills/`, never against a repo's inline `## Skill:` sections.
-- **`AgentSpec.DefaultSkills`.** The BYO-agent contract can declare default
-  skills, but no launcher consumes them yet; use the agent `skills:` config
-  above.
+**`AgentSpec.DefaultSkills`** remains unconnected. The BYO-agent contract can
+declare default skills, but no BYO-agent launcher consumes `AgentSpec` yet; use
+the agent `skills:` config above. This is separate from the scheduler path,
+which now resolves those configured names across both registry and repo-local
+sources.
 
 ## Related
 
