@@ -6391,6 +6391,49 @@ func (s *HubServer) triggerAutoUpgrades() {
 		if latestSHA == "" || sameCommit(currentSHA, latestSHA) {
 			continue
 		}
+		// Merge-driven debounce (#5391). Reached ONLY on the automatic
+		// chase-latest path: everything that starts an upgrade for an operator
+		// — a manual "Upgrade now" (upgradeHiveHandler), a bulk upgrade
+		// (saas_bulk.go), and a hard image pin (delivered as UpgradeTarget
+		// through the stale-recovery branch ABOVE the `if !h.AutoUpgrade` gate)
+		// — arms s.heartbeatUpgrade directly and never enters this loop body.
+		// So an operator's upgrade and a pin stay IMMEDIATE by construction,
+		// and only the merge-frequency-driven roll is held.
+		//
+		// Placed after every eligibility gate above so a hive that would not
+		// upgrade anyway never arms a window, and before the wave gate and the
+		// fire-date persistence below so a debounced hive costs no wave slot and
+		// keeps its daily/weekly window open.
+		debounce := shouldDebounceAutoUpgrade(
+			autoUpgradeDebounceState{
+				Target:       h.AutoUpgradePendingTarget,
+				ArmedAt:      h.AutoUpgradePendingSince,
+				FirstArmedAt: h.AutoUpgradePendingFirst,
+				Collapsed:    h.AutoUpgradeCollapsed,
+			},
+			latestSHA, autoUpgradeDebounceInterval(), autoUpgradeMaxHold(), time.Now())
+		if !debounce.Allowed {
+			// Persist the (possibly just-replaced) pending target so a hub
+			// restart inside the window resumes it rather than dropping it.
+			s.persistUpgradeDebounceState(&h, debounce.State)
+			s.logger.Info("auto-upgrade debounced — holding for a quiet branch",
+				"hive_id", h.ID, "branch", branch,
+				"target", debounce.State.Target, "current", currentSHA,
+				"collapsed", debounce.State.Collapsed,
+				"debounce", autoUpgradeDebounceInterval(),
+				"reason", debounce.Reason)
+			continue
+		}
+		if debounce.Collapsed > 0 {
+			// Report the collapse. Silent batching would trade one invisible
+			// problem for another: without this line, N merges producing one
+			// roll is indistinguishable from N-1 upgrades having been lost.
+			s.logger.Info("auto-upgrade debounce collapsed a merge burst into one roll",
+				"hive_id", h.ID, "branch", branch,
+				"merges_collapsed", debounce.Collapsed+1,
+				"final_target", latestSHA, "current", currentSHA,
+				"debounce", autoUpgradeDebounceInterval())
+		}
 		hiveCluster := s.clusterForHive(&h)
 		if hiveCluster == nil {
 			s.logger.Warn("auto-upgrade skipped — no cluster config", "hive_id", h.ID, "cluster_id", h.ClusterID)
@@ -6454,6 +6497,13 @@ func (s *HubServer) triggerAutoUpgrades() {
 					"hive_id", h.ID, "date", decision.FireDate, "error", err)
 			}
 		}
+		// Clear the debounce record now the roll is actually going out. Cleared
+		// HERE, after every gate that could still `continue`, so a hive turned
+		// away by the wave gate keeps its pending target and simply boards a
+		// later wave instead of re-arming a fresh window each cycle. Clearing
+		// before the rollout (like the fire date above) means a hub crash in
+		// between costs at most a re-armed window, never a duplicate roll.
+		s.persistUpgradeDebounceState(&h, autoUpgradeDebounceState{})
 		// The hive is deliverable again — drop any suppressed-refusal memory so a
 		// future undeliverable episode is reported afresh rather than swallowed.
 		s.forgetUncollectibleUpgrade(h.ID)

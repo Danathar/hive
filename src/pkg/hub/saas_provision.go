@@ -755,6 +755,30 @@ type SaaSHive struct {
 	// which are never gated and never record a date.
 	AutoUpgradeLastFired string `json:"auto_upgrade_last_fired,omitempty"`
 
+	// AutoUpgradePendingTarget / AutoUpgradePendingSince / AutoUpgradeCollapsed
+	// are the merge-driven upgrade DEBOUNCE state (#5391): the newest SHA seen
+	// while waiting for the branch to go quiet, when that target was first
+	// observed, and how many earlier targets it superseded.
+	//
+	// They live on the PVC rather than in memory for one reason: a hub restart
+	// inside the quiet window must not DROP a pending upgrade. Dropping one
+	// silently is a worse failure than rolling too often, which is the whole
+	// thing this debounce exists to reduce. On restart the window resumes from
+	// the stored AutoUpgradePendingSince, so the wait is neither lost nor
+	// restarted.
+	//
+	// All three are omitempty and absent on every existing record, which reads
+	// as "nothing pending" — so meta.json stays byte-identical for the fleet
+	// until a hive actually has an upgrade waiting.
+	// AutoUpgradePendingFirst is when the hive FIRST fell behind and began
+	// waiting. Unlike AutoUpgradePendingSince it survives re-arming, and it is
+	// what the max-hold cap is measured against — on a branch that never goes
+	// quiet it is the only clock that does not reset.
+	AutoUpgradePendingTarget string    `json:"auto_upgrade_pending_target,omitempty"`
+	AutoUpgradePendingSince  time.Time `json:"auto_upgrade_pending_since,omitempty"`
+	AutoUpgradePendingFirst  time.Time `json:"auto_upgrade_pending_first,omitempty"`
+	AutoUpgradeCollapsed     int       `json:"auto_upgrade_collapsed,omitempty"`
+
 	// GitHubBaseURL / GitHubAPIURL pin this hive's GitHub host. The GitHub
 	// host is a property of the HIVE (where its org/repos live), not the
 	// cluster: a cluster-level GHE default silently breaks hives for
