@@ -48,7 +48,7 @@ func HelpBindings() []Binding {
 		{Keys: "m", Action: "Open the model picker for the selected agent", Scope: "Agents pane"},
 		{Keys: "K", Action: "Kick the selected agent now", Scope: "Agents pane"},
 		{Keys: "A", Action: "Open the ACMM level overlay", Scope: "global"},
-		{Keys: "a", Action: "Attach to the selected agent's tmux session", Scope: "Agents pane (local)"},
+		{Keys: "a", Action: "Attach to the selected agent's tmux session", Scope: "Agents pane (local)", Available: true},
 	}
 }
 
