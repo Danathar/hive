@@ -174,6 +174,14 @@ type Client struct {
 	// re-installs it while the PR-request watcher goroutine may be reading it.
 	hiveIdentityMu sync.RWMutex
 	hiveIdentity   HiveIdentity
+	// commitTrees memoizes "owner/repo@commitSHA" -> tree SHA for the
+	// duplicate-payload guard (pr_duplicate_tree.go, #5111). A commit's tree
+	// can never change, so unlike defaultBranches this cache has no staleness
+	// window at all; it exists purely so re-inspecting the same open PRs on
+	// every PR creation does not re-pay a lookup per candidate. Guarded by
+	// commitTreeMu.
+	commitTreeMu sync.RWMutex
+	commitTrees  map[string]string
 }
 
 func (c *Client) SetCanaryScanner(enabled, failClosed bool, reg *ioscan.CanaryRegistry, onLeak func(ioscan.CanaryLeak)) {
