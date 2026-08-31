@@ -12,6 +12,8 @@ import (
 // trigger cycle arms exactly waveSize upgrades; the rest board later waves as
 // in-flight upgrades clear.
 func TestTriggerAutoUpgradesWaveBound(t *testing.T) {
+	// Debounce is not this test's subject — see disableUpgradeDebounceForTest.
+	disableUpgradeDebounceForTest(t)
 	cleanup := helperSetupTempDirs(t)
 	defer cleanup()
 	resetCommitOrderState(t)

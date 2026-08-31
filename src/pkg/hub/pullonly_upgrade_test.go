@@ -57,6 +57,8 @@ func pullOnlyTestServer(t *testing.T) *HubServer {
 // disable auto-upgrade for 40+ healthy spokes; this test fails if anyone
 // reintroduces one.
 func TestPullOnlyHiveThatHeartbeatsStillUpgrades(t *testing.T) {
+	// Debounce is not this test's subject — see disableUpgradeDebounceForTest.
+	disableUpgradeDebounceForTest(t)
 	cleanup := helperSetupTempDirs(t)
 	defer cleanup()
 
@@ -148,6 +150,8 @@ func TestAutoUpgradeNotArmedForLongDeadHive(t *testing.T) {
 // it is restarting into an upgrade — must still be armed. Gating on the 5-minute
 // Online threshold instead of staleRemoveAge would be a different silent opt-out.
 func TestBrieflyQuietHiveStillUpgrades(t *testing.T) {
+	// Debounce is not this test's subject — see disableUpgradeDebounceForTest.
+	disableUpgradeDebounceForTest(t)
 	cleanup := helperSetupTempDirs(t)
 	defer cleanup()
 
@@ -273,6 +277,8 @@ func TestUncollectibleUpgradeCannotAccumulateStaleness(t *testing.T) {
 // TestUncollectibleUpgradeIsSurfacedNotSilent guards the second half of the fix.
 // Silence is how the original wedge went unnoticed.
 func TestUncollectibleUpgradeIsSurfacedNotSilent(t *testing.T) {
+	// Debounce is not this test's subject — see disableUpgradeDebounceForTest.
+	disableUpgradeDebounceForTest(t)
 	cleanup := helperSetupTempDirs(t)
 	defer cleanup()
 
@@ -304,6 +310,8 @@ func TestUncollectibleUpgradeIsSurfacedNotSilent(t *testing.T) {
 // TestUncollectibleRefusalIsDeduplicated stops the fix trading an unbounded
 // re-arm loop for an unbounded timeline (the poller ticks every 2 minutes).
 func TestUncollectibleRefusalIsDeduplicated(t *testing.T) {
+	// Debounce is not this test's subject — see disableUpgradeDebounceForTest.
+	disableUpgradeDebounceForTest(t)
 	cleanup := helperSetupTempDirs(t)
 	defer cleanup()
 
@@ -379,6 +387,8 @@ func TestUpgradeBranchDefaultsToHubBranchNotV2(t *testing.T) {
 // that CAN collect — which is where a foreign-branch target is actually
 // dangerous, because the spoke picks it up and rolls itself onto a v2 build.
 func TestLiveHiveNeverTargetedWithForeignBranchSHA(t *testing.T) {
+	// Debounce is not this test's subject — see disableUpgradeDebounceForTest.
+	disableUpgradeDebounceForTest(t)
 	cleanup := helperSetupTempDirs(t)
 	defer cleanup()
 
@@ -420,6 +430,8 @@ func TestLiveHiveNeverTargetedWithForeignBranchSHA(t *testing.T) {
 // The positive half is that the upgrade is still DELIVERED — via the heartbeat —
 // so this cannot pass by simply breaking upgrades.
 func TestUpgradePathNeverShellsOutToCluster(t *testing.T) {
+	// Debounce is not this test's subject — see disableUpgradeDebounceForTest.
+	disableUpgradeDebounceForTest(t)
 	cleanup := helperSetupTempDirs(t)
 	defer cleanup()
 
