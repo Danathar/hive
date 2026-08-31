@@ -300,38 +300,17 @@ func TestPersistAsBeadsRefreshesOnNewProvenance(t *testing.T) {
 	}
 }
 
-// Findings that record no provenance must behave exactly as they did before
-// this change: every re-report still counts as a confirmation. Nothing may
-// start ageing out just because its producer does not report a commit.
-func TestPersistAsBeadsUnaffectedWithoutProvenance(t *testing.T) {
-	store, err := beads.NewStore(t.TempDir())
-	if err != nil {
-		t.Fatalf("creating store: %v", err)
-	}
-	stores := map[string]*beads.Store{"quality": store}
-	f := Finding{Agent: "quality", Severity: "high", Title: "a finding with no provenance"}
-
-	PersistAsBeads([]Finding{f}, stores)
-	b := store.List(beads.ListFilter{})[0]
-	stale := time.Now().Add(-10 * 24 * time.Hour)
-	if err := store.SetLastSeenAt(b.ID, stale); err != nil {
-		t.Fatalf("stamping bead: %v", err)
-	}
-
-	PersistAsBeads([]Finding{f}, stores)
-	after, err := store.Get(b.ID)
-	if err != nil {
-		t.Fatalf("re-reading bead: %v", err)
-	}
-	seen, _ := after.LastSeen()
-	if !seen.After(stale.UTC()) {
-		t.Error("a re-report without provenance must still refresh LastSeenAt, as before")
-	}
-}
+// The "findings without provenance are unaffected" contract that used to be
+// pinned here was consciously retired by #5236: a byte-identical no-provenance
+// re-report is now recognised as cached replay and no longer refreshes
+// LastSeenAt. The replacement contracts live in evidence_test.go.
 
 // The prose-inferred SHA is good enough to caption a finding but must never
 // decide whether it ages out: "fixed in commit <sha>" in a Detail would
-// otherwise retire a finding that still holds.
+// otherwise retire a finding that still holds. The re-report varies its
+// wording (while still citing the same commit) because a byte-identical
+// replay is now gated on evidence identity (#5236), which is not what this
+// test is about.
 func TestPersistAsBeadsIgnoresProseProvenance(t *testing.T) {
 	store, err := beads.NewStore(t.TempDir())
 	if err != nil {
@@ -355,6 +334,7 @@ func TestPersistAsBeadsIgnoresProseProvenance(t *testing.T) {
 		t.Fatalf("stamping bead: %v", err)
 	}
 
+	f.Detail = "still regressed in commit " + provenanceOfOne + ", re-checked today"
 	PersistAsBeads([]Finding{f}, stores)
 	after, err := store.Get(b.ID)
 	if err != nil {
