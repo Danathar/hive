@@ -106,7 +106,7 @@ func drain(cmd tea.Cmd) []tea.Msg {
 // "does not sleep real intervals", and it is also what makes these assertions
 // deterministic rather than timing-dependent.
 func runTick(m model) []tea.Msg {
-	_, cmd := m.Update(tickMsg(time.Time{}))
+	_, cmd := m.Update(tickMsg{})
 	return drain(cmd)
 }
 
@@ -142,6 +142,12 @@ func findFetchErr(msgs []tea.Msg) *fetchErrMsg {
 // agentsServer serves the fixture, or a 500 once fail is set. The counter lets
 // a test assert that a second tick really issued a second request rather than
 // replaying a cached result.
+//
+// It counts /api/agents ONLY. Since T13b the model also subscribes to
+// /api/events at startup, and that request lands on this handler too — so a
+// counter that counted every path would make "the poll fetched twice" and "the
+// poll fetched once and the stream connected" indistinguishable, and would
+// depend on when an asynchronous stream goroutine happened to dial.
 type agentsServer struct {
 	*httptest.Server
 	fail     atomic.Bool
@@ -152,14 +158,14 @@ func newAgentsServer(t *testing.T) *agentsServer {
 	t.Helper()
 	s := &agentsServer{}
 	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/agents" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		s.requests.Add(1)
 		if s.fail.Load() {
 			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = w.Write([]byte(`{"error":"internal"}`))
-			return
-		}
-		if r.URL.Path != "/api/agents" {
-			w.WriteHeader(http.StatusNotFound)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -226,7 +232,7 @@ func TestTickFetchesAndRearms(t *testing.T) {
 	server := newAgentsServer(t)
 	m := pollTestModel(t, server.URL)
 
-	next, cmd := m.Update(tickMsg(time.Time{}))
+	next, cmd := m.Update(tickMsg{})
 	if cmd == nil {
 		t.Fatal("a tick produced no command at all")
 	}

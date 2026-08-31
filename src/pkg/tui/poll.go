@@ -23,13 +23,30 @@ import (
 //
 // T13b replaces this loop with the SSE stream and keeps it as the fallback;
 // having picked the stream's own cadence means that switch changes where the
-// data comes from without changing how often the frame moves.
+// data comes from without changing how often the frame moves. It is also the
+// cadence the fallback returns to: while the stream is up the loop stretches to
+// sseReconcileInterval (app.go), and a dropped stream puts it back here.
 const pollInterval = 5 * time.Second
 
-// tickMsg is the poll heartbeat. Its time value is not read today — the tick
-// is a "go fetch now" signal, not a clock — but tea.Tick supplies it and
-// dropping it would mean wrapping the callback for nothing.
-type tickMsg time.Time
+// tickMsg is the poll heartbeat. It carries no time: the tick is a "go fetch
+// now" signal, not a clock, and nothing reads when it fired. tea.Tick supplies
+// the instant to the callback, which discards it — T13b made this a struct for
+// the generation below, and a field kept only because the callback is handed
+// one would be a value no reader could rely on.
+//
+// GEN IS WHAT KEEPS THE LOOP SINGLE. tea.Tick fires once and the loop stays
+// alive by re-arming from the handler, so "arm the new cadence" and "the old
+// cadence is still armed" are the same instant: T13b changes the cadence when
+// the SSE stream connects or drops, and arming a replacement chain without
+// retiring the old one would leave two live chains ticking forever — one
+// cadence change doubling the fetch rate for the rest of the process's life.
+// Each chain therefore carries the model's tick generation, and a tick whose
+// generation no longer matches is dropped instead of re-armed. That is what
+// ends the superseded chain at its next fire rather than running it alongside
+// the new one.
+type tickMsg struct {
+	gen uint64
+}
 
 // fetchErrMsg reports that one poll failed.
 //
@@ -68,7 +85,10 @@ func (e fetchErrMsg) Error() string {
 // queue up a backlog of pending fetches that all land at once when it
 // recovers.
 func (m model) scheduleTick() tea.Cmd {
-	return tea.Tick(m.interval, func(t time.Time) tea.Msg { return tickMsg(t) })
+	gen := m.tickGen
+	return tea.Tick(m.interval, func(time.Time) tea.Msg {
+		return tickMsg{gen: gen}
+	})
 }
 
 // poll issues every fetch the client can currently make, as one batch.
