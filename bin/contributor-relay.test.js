@@ -26,7 +26,7 @@ const RELAY_PATH = path.join(__dirname, 'contributor-relay.sh');
 // bash and no WebSocket are ever touched.
 // ---------------------------------------------------------------------------
 
-function loadRelay({ backend = 'copilot', backendBinary = null, backendPerm = '--allow-all', model = '', reasoningEffort = '', cliStates = ['ready'], procAlive = true, mode = 'interactive', execFileResult = null, statusFile = null, paneText = null, env = null, cliVersion = null, attachedClients = false } = {}) {
+function loadRelay({ backend = 'copilot', backendBinary = null, backendPerm = '--allow-all', model = '', reasoningEffort = '', cliStates = ['ready'], procAlive = true, mode = 'interactive', execFileResult = null, statusFile = null, paneText = null, env = null, cliVersion = null, attachedClients = false, attachedIdleMs = 0, clientActivityRaw = null, listClientsThrows = false } = {}) {
   const commands = [];
   const sent = [];
   // Records every execFile (headless one-shot) invocation: { bin, args, opts }.
@@ -61,7 +61,16 @@ function loadRelay({ backend = 'copilot', backendBinary = null, backendPerm = '-
     if (/list-clients/.test(cmd)) {
       // #5094: the relay asks whether a human is attached before it types a
       // retry into the pane. An empty answer means nobody is watching.
-      return attachedClients ? '/dev/pts/3: 0 [200x50 xterm-256color] (utf8)\n' : '';
+      //
+      // #5277: the question is now "has anyone typed recently", asked as
+      // `-F '#{client_activity}'`, so the stub answers in tmux's own currency —
+      // epoch SECONDS of last input. attachedIdleMs defaults to 0, i.e. a
+      // client that just typed, which is what every pre-#5277 test meant by
+      // `attachedClients: true`.
+      if (listClientsThrows) throw new Error('tmux: no server running');
+      if (!attachedClients) return '';
+      if (clientActivityRaw !== null) return clientActivityRaw;
+      return `${Math.floor((Date.now() - attachedIdleMs) / 1000)}\n`;
     }
     if (/display-message/.test(cmd)) {
       // The relay asks the PANE what it is running (pane_current_command).
@@ -3933,6 +3942,201 @@ test('#5094 with a human attached the relay asks for attention instead of typing
     assert.strictEqual(blocked.length, 1, 'the human should be told the agent needs them');
     assert.strictEqual(blocked[0].attention, true);
     assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 0);
+  } finally { teardown(relay); }
+});
+
+
+// ---------------------------------------------------------------------------
+// kubestellar/hive#5277 — "a client is attached" is not "a human is here".
+//
+// The #5094 guard above is right to refuse to type over someone, but it tested
+// connection rather than presence. bin/ttyd-tmux.sh attaches a client with
+// `tmux attach-session`, and the dashboard's browser terminal proxies to it, so
+// a tab someone opened an hour ago and walked away from was indistinguishable
+// from a person mid-keystroke — and disabled API-error auto-retry for the whole
+// 30-minute task ceiling. Observed live: a contributor hit a connection-lost
+// error, no `try again` was ever typed, and a human hand-typed the recovery.
+//
+// The fix is a recency test on tmux's own `client_activity`. Everything the
+// guard used to protect is still protected; only the abandoned tab changes.
+// ---------------------------------------------------------------------------
+
+test('#5277 a dashboard tab left open no longer disables auto-retry', () => {
+  // The incident, exactly: attached the whole time, idle the whole time.
+  const relay = loadRelay({
+    backend: 'claude', paneText: CLAUDE_API_ERROR_PANE,
+    attachedClients: true, attachedIdleMs: 60 * 60 * 1000,
+  });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-idle-tab');
+    const before = relay.__tmuxSends().length;
+    relay.__crashTick();
+    assert.ok(relay.__tmuxSends().slice(before).some(c => c.includes(relay.TRANSIENT_API_ERROR_NUDGE_MESSAGE)),
+      'an hour-idle client is a left-open tab, not a person — the retry must be typed');
+    assert.strictEqual(relay.__sent.filter(m => m.status === 'blocked_on_human').length, 0,
+      'nobody is there to be blocked on');
+    assert.strictEqual(relay.getTransientNudgeCount(), 1);
+  } finally { teardown(relay); }
+});
+
+test('#5277 a client that typed a moment ago still owns the pane', () => {
+  // The control. Without it the fix could pass by simply never checking.
+  const relay = loadRelay({
+    backend: 'claude', paneText: CLAUDE_API_ERROR_PANE,
+    attachedClients: true, attachedIdleMs: 30 * 1000,
+  });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-active');
+    const before = relay.__tmuxSends().length;
+    relay.__crashTick();
+    assert.ok(!relay.__tmuxSends().slice(before).some(c => c.includes(relay.TRANSIENT_API_ERROR_NUDGE_MESSAGE)),
+      'someone who typed 30 seconds ago is still someone');
+    const blocked = relay.__sent.filter(m => m.status === 'blocked_on_human');
+    assert.strictEqual(blocked.length, 1, 'and they should be told the agent needs them');
+    assert.strictEqual(blocked[0].attention, true);
+  } finally { teardown(relay); }
+});
+
+test('#5277 presence is decided by the idle threshold, not by the connection', () => {
+  // Both sides of the boundary, read straight off the helper. The 5s margins
+  // clear the stub's whole-second quantisation.
+  const idle = (ms) => {
+    const relay = loadRelay({ backend: 'claude', attachedClients: true, attachedIdleMs: ms });
+    try { return relay.tmuxSessionHumanPresence(); } finally { teardown(relay); }
+  };
+  const threshold = loadRelay({ backend: 'claude' }).HUMAN_PRESENCE_IDLE_MS;
+
+  const justActive = idle(threshold - 5000);
+  assert.strictEqual(justActive.attached, true);
+  assert.strictEqual(justActive.active, true, 'just inside the threshold is still a person');
+
+  const justIdle = idle(threshold + 5000);
+  assert.strictEqual(justIdle.attached, true, 'the client is still connected');
+  assert.strictEqual(justIdle.active, false, 'but it is no longer evidence of a person');
+  assert.ok(justIdle.idleMs >= threshold, `idleMs ${justIdle.idleMs} should report the real age`);
+});
+
+test('#5277 the query asks tmux for client_activity, not just for a client list', () => {
+  // The whole fix rests on tmux being ASKED for the timestamp. A refactor that
+  // dropped the -F would leave every other test passing — the stub would answer
+  // with epoch seconds regardless — while the real tmux returned a pts line and
+  // silently restored the bug as "activity unknown, assume present".
+  const relay = loadRelay({ backend: 'claude', attachedClients: true });
+  try {
+    relay.tmuxSessionHumanPresence();
+    const query = relay.__commands.filter(c => /list-clients/.test(c)).pop();
+    assert.ok(query, 'the presence check must actually ask tmux');
+    assert.ok(query.includes('client_activity'),
+      `presence must be asked as a recency question, got: ${query}`);
+  } finally { teardown(relay); }
+});
+
+test('#5277 nobody attached reports neither attached nor active', () => {
+  const relay = loadRelay({ backend: 'claude', attachedClients: false });
+  try {
+    assert.deepStrictEqual(relay.tmuxSessionHumanPresence(), { attached: false, active: false, idleMs: null });
+  } finally { teardown(relay); }
+});
+
+test('#5277 a tmux failure still counts as someone present', () => {
+  // Fail closed, unchanged: not being able to ask must never license typing.
+  const relay = loadRelay({
+    backend: 'claude', paneText: CLAUDE_API_ERROR_PANE, listClientsThrows: true,
+  });
+  try {
+    assert.deepStrictEqual(relay.tmuxSessionHumanPresence(), { attached: true, active: true, idleMs: null });
+    relay.setCliReady(true);
+    assignTask(relay, 't-tmux-broken');
+    const before = relay.__tmuxSends().length;
+    relay.__crashTick();
+    assert.ok(!relay.__tmuxSends().slice(before).some(c => c.includes(relay.TRANSIENT_API_ERROR_NUDGE_MESSAGE)),
+      'a tmux hiccup must not be read as an empty room');
+    assert.strictEqual(relay.__sent.filter(m => m.status === 'blocked_on_human').length, 1);
+  } finally { teardown(relay); }
+});
+
+test('#5277 an activity value tmux did not give us counts as someone present', () => {
+  // An older tmux whose client_activity is not an epoch integer: attached is
+  // known, recency is not, so recency is assumed.
+  const relay = loadRelay({
+    backend: 'claude', paneText: CLAUDE_API_ERROR_PANE, attachedClients: true,
+    clientActivityRaw: '/dev/pts/3: 0 [200x50 xterm-256color] (utf8)\n',
+  });
+  try {
+    const presence = relay.tmuxSessionHumanPresence();
+    assert.strictEqual(presence.attached, true);
+    assert.strictEqual(presence.active, true);
+    assert.strictEqual(presence.idleMs, null, 'an unknown age must read as unknown, not as zero');
+    relay.setCliReady(true);
+    assignTask(relay, 't-unparseable');
+    const before = relay.__tmuxSends().length;
+    relay.__crashTick();
+    assert.ok(!relay.__tmuxSends().slice(before).some(c => c.includes(relay.TRANSIENT_API_ERROR_NUDGE_MESSAGE)));
+  } finally { teardown(relay); }
+});
+
+test('#5277 a client clock ahead of ours counts as someone present', () => {
+  // A future timestamp clamps to "just now" rather than wrapping to a huge
+  // idle age, which would hand the pane away on a clock skew.
+  const relay = loadRelay({ backend: 'claude', attachedClients: true, attachedIdleMs: -10 * 60 * 1000 });
+  try {
+    const presence = relay.tmuxSessionHumanPresence();
+    assert.strictEqual(presence.active, true, 'skew must not read as an abandoned tab');
+    assert.strictEqual(presence.idleMs, 0);
+  } finally { teardown(relay); }
+});
+
+test('#5277 the newest client decides — one active client protects the pane', () => {
+  // Two clients: a stale dashboard tab and a person who just typed. The person
+  // wins, so the tab cannot drag presence down to "nobody home".
+  const stale = Math.floor((Date.now() - 60 * 60 * 1000) / 1000);
+  const fresh = Math.floor(Date.now() / 1000);
+  const relay = loadRelay({
+    backend: 'claude', attachedClients: true,
+    clientActivityRaw: `${stale}\n${fresh}\n`,
+  });
+  try {
+    assert.strictEqual(relay.tmuxSessionHumanPresence().active, true);
+  } finally { teardown(relay); }
+});
+
+test('#5277 a suppressed nudge still consumes no retry budget', () => {
+  const relay = loadRelay({
+    backend: 'claude', paneText: CLAUDE_API_ERROR_PANE,
+    attachedClients: true, attachedIdleMs: 10 * 1000,
+  });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-budget');
+    for (let i = 0; i < 5; i++) {
+      relay.__clearTransientNudgeCooldown();
+      relay.__crashTick();
+    }
+    assert.strictEqual(relay.getTransientNudgeCount(), 0,
+      'refusing to type must not spend a retry the agent never got');
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_failed').length, 0,
+      'and it must not exhaust the budget into a failure either');
+  } finally { teardown(relay); }
+});
+
+test('#5277 the idle-client retry is still bounded and still fails honestly', () => {
+  const relay = loadRelay({
+    backend: 'claude', paneText: CLAUDE_API_ERROR_PANE,
+    attachedClients: true, attachedIdleMs: 45 * 60 * 1000,
+  });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-idle-bounded');
+    for (let i = 0; i <= relay.TRANSIENT_API_ERROR_MAX_NUDGES; i++) {
+      relay.__clearTransientNudgeCooldown();
+      relay.__crashTick();
+    }
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 0);
+    const failures = relay.__sent.filter(m => m.type === 'task_failed');
+    assert.strictEqual(failures.length, 1, 'an exhausted budget hands the task back exactly once');
+    assert.strictEqual(failures[0].failure_kind, 'environment');
   } finally { teardown(relay); }
 });
 
