@@ -114,6 +114,16 @@ var (
 	cachedHealth   map[string]any
 	cachedHealthMu sync.RWMutex
 
+	// cachedGreenStreak carries the real green-CI streak (#5226) computed on
+	// the status-build path, where a GitHub client and context already exist.
+	// The ACMM advisor endpoint reads this cache rather than calling GitHub
+	// itself, so an advisory HTTP request never triggers an Actions API call.
+	// cachedGreenStreakOK stays false until a collect has actually succeeded,
+	// which is what keeps "not measured yet" distinct from a measured zero.
+	cachedGreenStreak   int
+	cachedGreenStreakOK bool
+	cachedGreenStreakMu sync.RWMutex
+
 	proxyViolationsMu sync.RWMutex
 	proxyViolationsFn func() map[string]int
 
@@ -1382,7 +1392,29 @@ func buildHealth(ghClient *github.Client, ctx context.Context) map[string]any {
 	cachedHealth = health
 	cachedHealthMu.Unlock()
 
+	// Refresh the green-CI streak on the same pass that already talks to
+	// GitHub for workflow health (#5226). A failed or unmeasurable read leaves
+	// the previous cached value untouched rather than clobbering a real streak
+	// with an unknown — a transient API error must not make the advisor
+	// suddenly withdraw a recommendation it had legitimately earned.
+	if streak, measured := ghClient.GreenCIStreak(ctx); measured {
+		cachedGreenStreakMu.Lock()
+		cachedGreenStreak = streak
+		cachedGreenStreakOK = true
+		cachedGreenStreakMu.Unlock()
+	}
+
 	return copyHealthMap(health)
+}
+
+// greenCIStreakSnapshot returns the last successfully measured green-CI streak
+// and whether one has ever been measured. measured=false means "unknown", and
+// the ACMM advisor leaves its GreenStreak signal at the conservative zero
+// rather than treating the absence of data as a measured zero.
+func greenCIStreakSnapshot() (streak int, measured bool) {
+	cachedGreenStreakMu.RLock()
+	defer cachedGreenStreakMu.RUnlock()
+	return cachedGreenStreak, cachedGreenStreakOK
 }
 
 func buildBudget(gov *governor.Governor, tokenCollector *tokens.Collector) FrontendBudget {

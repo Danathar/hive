@@ -15,6 +15,24 @@ const (
 	pctMultiplier        = 100
 )
 
+// ciStreakRunsLimit is how many completed default-branch runs the green-streak
+// scan reads. It is deliberately larger than ciRunsLimit (which powers the
+// pass-rate percentage over a short recent window): the ACMM advisor's highest
+// streak threshold is 12 consecutive green runs, so a 10-run page could never
+// satisfy it and the criterion would be unreachable no matter how green the
+// repo actually is. One page of this size covers every threshold with headroom
+// while remaining a single API request.
+const ciStreakRunsLimit = 30
+
+// ciConclusionSuccess / ciConclusionSkipped are the run conclusions that count
+// as "not red" for streak purposes. A skipped run means no gate ran, so it
+// neither proves nor breaks greenness — it is transparent to the streak, the
+// same treatment ciPassRate already gives it.
+const (
+	ciConclusionSuccess = "success"
+	ciConclusionSkipped = "skipped"
+)
+
 func (c *Client) FetchWorkflowHealth(ctx context.Context) map[string]any {
 	primaryRepo := c.primaryRepo()
 
@@ -25,11 +43,11 @@ func (c *Client) FetchWorkflowHealth(ctx context.Context) map[string]any {
 	health["helm"] = c.helmCheck(ctx, primaryRepo)
 
 	nightlyWorkflows := map[string]string{
-		"nightly":            "Nightly Test Suite",
-		"nightlyCompliance":  "Nightly Compliance & Perf",
-		"nightlyDashboard":   "Nightly Dashboard Health",
-		"nightlyGhaw":        "Nightly gh-aw Version Check",
-		"nightlyPlaywright":  "Playwright Cross-Browser (Nightly)",
+		"nightly":           "Nightly Test Suite",
+		"nightlyCompliance": "Nightly Compliance & Perf",
+		"nightlyDashboard":  "Nightly Dashboard Health",
+		"nightlyGhaw":       "Nightly gh-aw Version Check",
+		"nightlyPlaywright": "Playwright Cross-Browser (Nightly)",
 	}
 	for key, wfName := range nightlyWorkflows {
 		health[key] = c.checkWorkflow(ctx, primaryRepo, wfName)
@@ -76,6 +94,69 @@ func (c *Client) ciPassRate(ctx context.Context, repo string) int {
 		return healthStatusFailure
 	}
 	return passed * pctMultiplier / total
+}
+
+// GreenCIStreak returns the number of consecutive green CI runs on the primary
+// repo's default branch, counting back from the most recent completed run, and
+// whether the streak could be measured at all.
+//
+// measured=false means "unknown" and MUST be treated as such by callers — it is
+// returned when there is no GitHub client, when the Actions API call fails, and
+// when the repo reports no completed runs at all. That last case is the
+// important one: a repo with no CI configured must read as unknown, never as a
+// green streak, or the advisor would reward a repo for having no gates to fail.
+// Callers leave the advisor signal at its conservative zero when measured is
+// false rather than fabricating a number.
+//
+// What it measures, honestly: consecutive non-red completed runs on the default
+// branch, over at most ciStreakRunsLimit runs. Its known weaknesses, stated in
+// the same spirit as mergeSuccessRateFromFleetStats:
+//   - the streak resets on ANY red, including a flake unrelated to code quality;
+//   - it measures nothing about repos whose CI does not run on the default
+//     branch (they read as unknown, which is the safe direction);
+//   - a repo that rarely commits can hold a stale streak indefinitely, because
+//     the signal is count-based rather than time-based;
+//   - it is capped at ciStreakRunsLimit, so it reports "at least N" rather than
+//     a true unbounded streak. The cap sits above every advisor threshold, so
+//     the cap can only ever under-report, never over-report.
+func (c *Client) GreenCIStreak(ctx context.Context) (streak int, measured bool) {
+	if c == nil || c.client == nil {
+		return 0, false
+	}
+	repo := c.primaryRepo()
+	branch, err := c.DefaultBranch(ctx, c.org, repo)
+	if err != nil || branch == "" {
+		return 0, false
+	}
+	opts := &gh.ListWorkflowRunsOptions{
+		Status:      "completed",
+		Branch:      branch,
+		ListOptions: gh.ListOptions{PerPage: ciStreakRunsLimit},
+	}
+	runs, _, err := c.client.Actions.ListRepositoryWorkflowRuns(ctx, c.org, repo, opts)
+	if err != nil || runs == nil {
+		return 0, false
+	}
+	// No completed runs at all: the repo has no CI history on its default
+	// branch. Unknown, explicitly NOT a zero-length green streak.
+	if len(runs.WorkflowRuns) == 0 {
+		return 0, false
+	}
+	// ListRepositoryWorkflowRuns returns runs newest-first, so counting from
+	// the head of the slice walks backwards in time from the latest run. Stop
+	// at the first red — that is where the streak ended.
+	for _, run := range runs.WorkflowRuns {
+		if run == nil {
+			continue
+		}
+		switch run.GetConclusion() {
+		case ciConclusionSuccess, ciConclusionSkipped:
+			streak++
+		default:
+			return streak, true
+		}
+	}
+	return streak, true
 }
 
 func (c *Client) checkWorkflow(ctx context.Context, repo, workflowName string) int {
@@ -274,8 +355,8 @@ func (c *Client) deployChecks(ctx context.Context, repo string, health map[strin
 	})
 
 	deployJobs := map[string]string{
-		"deploy_vllm_d":    "deploy-vllm-d",
-		"deploy_pok_prod":  "deploy-pok-prod",
+		"deploy_vllm_d":   "deploy-vllm-d",
+		"deploy_pok_prod": "deploy-pok-prod",
 	}
 
 	for key := range deployJobs {
