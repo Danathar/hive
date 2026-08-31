@@ -3191,12 +3191,35 @@ function connectHub(hub) {
         return;
       }
       sendTo(hub, { type: 'ping', seq: nextSeq() });
+      // Also emit a PROTOCOL-level Ping control frame (kubestellar/hive#5090).
+      // The JSON ping above is an ordinary text frame; an L7 proxy that scores
+      // tunnel idleness on control-frame traffic does not count it, so a
+      // connection heartbeating every 30s was still reaped as idle — the
+      // frameless-1006 flap this issue measured. `ws` answers an inbound Ping
+      // with a Pong automatically, so the hub needs nothing extra to see this.
+      // Wrapped because ping() throws if the socket left OPEN between the
+      // readyState check and the call; the heartbeat-timeout check above stays
+      // the authority on when to give up.
+      try { hub.ws.ping(); } catch { /* socket already closing; close handler reconnects */ }
     }, HEARTBEAT_INTERVAL_MS);
   });
 
   hub.ws.on('message', (data) => {
     if (gen !== hub.connectGeneration) return;
     handleMessage(data.toString(), hub);
+  });
+
+  // A PROTOCOL-level Pong counts as liveness exactly as the JSON 'pong' does
+  // (kubestellar/hive#5090), so a hub answering only control frames cannot trip
+  // this relay's HEARTBEAT_TIMEOUT_MS sweep. An inbound Ping is likewise
+  // evidence the hub is alive; `ws` auto-replies with a Pong for us.
+  hub.ws.on('pong', () => {
+    if (gen !== hub.connectGeneration) return;
+    hub.lastPong = Date.now();
+  });
+  hub.ws.on('ping', () => {
+    if (gen !== hub.connectGeneration) return;
+    hub.lastPong = Date.now();
   });
 
   hub.ws.on('close', (code, reason) => {
