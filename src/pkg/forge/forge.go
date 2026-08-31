@@ -99,6 +99,30 @@ type MergeOptions struct {
 	Strategy string
 }
 
+// IssueWriter is the narrow write seam production callers are typed against.
+//
+// It is the "post the evidence, then label it" pair — the only forge writes on
+// Hive's scheduler/governor path — split out of Forge so a caller can depend on
+// the abstraction WITHOUT forcing every hive through an adapter. *github.Client
+// already carries these two methods with exactly these signatures (its own doc
+// comments say they mirror this interface for precisely this swap), so a GitHub
+// hive keeps running on the concrete client it always used — same code path,
+// same behavior — while a GitLab or Gitea hive gets the matching adapter at the
+// same call site.
+//
+// Every Forge is an IssueWriter: Forge embeds this interface.
+type IssueWriter interface {
+	// CreateIssueComment posts a comment on the issue or change request numbered
+	// `number` in `repo`. GitHub, GitLab and Gitea all model issue and PR/MR
+	// comments through the same endpoint, so a single method covers both.
+	CreateIssueComment(ctx context.Context, repo string, number int, body string) error
+
+	// AddLabels adds the given labels to an issue or change request. It is a
+	// no-op (returning nil) when labels is empty. Labels that already exist are
+	// left as-is by every forge.
+	AddLabels(ctx context.Context, repo string, number int, labels []string) error
+}
+
 // Forge is the forge-neutral operation set Hive depends on.
 //
 // Read path — implemented by the GitHub, GitLab and Gitea adapters:
@@ -108,8 +132,8 @@ type MergeOptions struct {
 //   - ListOpenChangeRequests
 //
 // Write path — implemented by all three adapters:
-//   - CreateIssueComment (comment on an issue or change request)
-//   - AddLabels
+//   - CreateIssueComment (comment on an issue or change request) — via IssueWriter
+//   - AddLabels — via IssueWriter
 //   - RemoveLabel
 //   - SetHold (add/remove the hold gate label — a forge-neutral merge gate)
 //
@@ -117,6 +141,10 @@ type MergeOptions struct {
 // (strategy, gate checks) diverge too much across forges to neutralize cleanly.
 // See MergeOptions and the TODO on Merger below.
 type Forge interface {
+	// The forge-neutral write seam (CreateIssueComment, AddLabels). Embedded so
+	// any Forge can be handed to a caller typed against IssueWriter alone.
+	IssueWriter
+
 	// Kind reports which forge implementation this is.
 	Kind() Kind
 
@@ -132,16 +160,6 @@ type Forge interface {
 	// ListOpenChangeRequests returns the open pull requests (GitHub / Gitea) /
 	// merge requests (GitLab) for a repo.
 	ListOpenChangeRequests(ctx context.Context, repo string) ([]ChangeRequest, error)
-
-	// CreateIssueComment posts a comment on the issue or change request numbered
-	// `number` in `repo`. GitHub, GitLab and Gitea all model issue and PR/MR
-	// comments through the same endpoint, so a single method covers both.
-	CreateIssueComment(ctx context.Context, repo string, number int, body string) error
-
-	// AddLabels adds the given labels to an issue or change request. It is a
-	// no-op (returning nil) when labels is empty. Labels that already exist are
-	// left as-is by every forge.
-	AddLabels(ctx context.Context, repo string, number int, labels []string) error
 
 	// RemoveLabel removes a single label from an issue or change request. Removing
 	// a label that is not present is treated as success (the desired end state is
