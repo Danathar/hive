@@ -144,11 +144,14 @@ imply otherwise:
 
 - **`AGENTS.md` inline skills.** `ResolveRequested` accepts an
   `agentsmd.AgentsConfig` so a repo's inline snippets can act as a fallback
-  under registry skills, but the scheduler passes `nil` for it. That path needs
-  a per-repo checkout, which hive agents do not have — they work over the
-  GitHub API — and `agentsRepoRoot()` returns `""` accordingly
-  ([#5227](https://github.com/kubestellar/hive/issues/5227)). Until that lands,
-  only registry files in `/data/skills/` are resolvable.
+  under registry skills, but the scheduler still passes `nil` for it. The
+  checkout-root half of that blocker is fixed — `agentsRepoRoot()` now resolves
+  a real root from `project.checkouts_dir`
+  ([#5227](https://github.com/kubestellar/hive/issues/5227)), and a repo's
+  `AGENTS.md` reaches the kick through its own injected block (see
+  [agents-md.md](agents-md.md)). What is still unconnected is this list: an
+  agent's `skills:` names resolve only against registry files in
+  `/data/skills/`, never against a repo's inline `## Skill:` sections.
 - **`AgentSpec.DefaultSkills`.** The BYO-agent contract can declare default
   skills, but no launcher consumes them yet; use the agent `skills:` config
   above.

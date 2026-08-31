@@ -244,10 +244,18 @@ func (s *Scheduler) substituteTemplateWithPolicy(template string, actionable *gi
 	// the injected knowledge, when a local checkout root is available. This is a
 	// guarded, single call point — it returns "" (and never errors) when no
 	// AGENTS.md exists, so it is a no-op for repos that don't use the convention.
-	// TODO(agentsmd): thread a per-repo checkout root here (e.g. from the git
-	// source's LocalDir) and, once file-level targeting exists, prefer
-	// agentsmd.ParseNearest for closest-wins nested AGENTS.md.
-	if agentsSection := s.primeAgentsMd(s.agentsRepoRoot()); agentsSection != "" {
+	//
+	// The root is resolved for the PRIMARY repo, which is the repo this kick's
+	// instructions are about — the same repo ${PROJECT_PRIMARY_REPO} names here
+	// and HIVE_REPO names in the agent's environment. A multi-repo hive gets the
+	// primary repo's AGENTS.md, never a different repo's: resolution is keyed by
+	// repo name, so it cannot silently pick the wrong one.
+	//
+	// TODO(agentsmd): once file-level targeting exists, prefer
+	// agentsmd.ParseNearest for closest-wins nested AGENTS.md. That still has no
+	// caller — nothing on the kick path knows which FILE an agent will touch —
+	// so it stays deferred, unlike the checkout root, which is now threaded.
+	if agentsSection := s.primeAgentsMd(s.agentsRepoRoot(primaryRepo)); agentsSection != "" {
 		knowledgeSection = agentsSection + "\n" + knowledgeSection
 	}
 
@@ -1393,15 +1401,68 @@ func filterByLane(issues []github.Issue, lane string) []github.Issue {
 
 const maxIssuesToPrime = 5
 
-// agentsRepoRoot returns the local filesystem root of the primary repo's
-// checkout, or "" if no local checkout is configured. Hive agents operate over
-// GitHub rather than local clones, so this is usually empty today; the hook
-// exists so that when a checkout root becomes available (e.g. a git source's
-// LocalDir) the AGENTS.md convention is honored without further wiring.
-func (s *Scheduler) agentsRepoRoot() string {
-	// Intentionally conservative: only wired sources expose a root. Returning ""
-	// makes primeAgentsMd a no-op. See the TODO(agentsmd) at the call site.
+// agentsRepoRoot returns the local filesystem root of repo's checkout, or ""
+// when the hive has none — in which case primeAgentsMd is a no-op, exactly as
+// before this was wired.
+//
+// Two sources, in order:
+//
+//  1. project.checkouts_dir — the explicit one. An operator who mounts checkouts
+//     of the monitored repos points at the parent directory and each repo is
+//     found at "<dir>/<name>". Hive agents work over the API and keep no clones
+//     of their own, so this is how a root gets to exist at all.
+//  2. policies.local_dir — the git source LocalDir the original TODO(agentsmd)
+//     named. It is a real checkout root (buildPolicyPaths already reads files
+//     out of it), but it is a checkout of policies.repo, so it is used ONLY when
+//     that repo IS the repo being asked about. Otherwise it would inject the
+//     config repo's AGENTS.md into work on an unrelated repo.
+//
+// Neither is checked for existence here: agentsmd.Parse tolerates a missing
+// directory or file and yields "", and primeAgentsMd logs which root came up
+// empty. One stat per kick to say the same thing earlier is not worth it.
+func (s *Scheduler) agentsRepoRoot(repo string) string {
+	if s.cfg == nil {
+		return ""
+	}
+	if root := s.cfg.Project.CheckoutRootFor(repo); root != "" {
+		return root
+	}
+	if local := strings.TrimSpace(s.cfg.Policies.LocalDir); local != "" &&
+		sameRepo(s.cfg.Policies.Repo, s.cfg.Project.Org, repo) {
+		return local
+	}
 	return ""
+}
+
+// sameRepo reports whether a git source's repo field names org/repo. The source
+// field is written as a clone URL in practice ("https://host/org/name(.git)"),
+// but a bare "org/name" and a bare "name" are accepted too, since config is
+// hand-written and all three forms appear in the wild.
+func sameRepo(sourceRepo, org, repo string) bool {
+	src := strings.TrimSpace(sourceRepo)
+	name := strings.TrimSpace(repo)
+	if src == "" || name == "" {
+		return false
+	}
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		name = name[i+1:]
+	}
+	src = strings.TrimSuffix(strings.TrimSuffix(strings.TrimRight(src, "/"), ".git"), "/")
+	parts := strings.Split(src, "/")
+	srcName := parts[len(parts)-1]
+	srcOwner := ""
+	if len(parts) >= 2 {
+		srcOwner = parts[len(parts)-2]
+	}
+	if !strings.EqualFold(srcName, name) {
+		return false
+	}
+	// An owner on both sides must agree; a bare "name" source asserts no owner
+	// and matches on name alone.
+	if srcOwner != "" && strings.TrimSpace(org) != "" {
+		return strings.EqualFold(srcOwner, strings.TrimSpace(org))
+	}
+	return true
 }
 
 // primeAgentsMd reads the repository's AGENTS.md (the cross-tool convention for
@@ -1418,13 +1479,18 @@ func (s *Scheduler) primeAgentsMd(repoRoot string) string {
 		return ""
 	}
 	section := cfg.InjectionText(nil)
-	if section != "" {
-		s.logger.Info("agentsmd: injecting repo instructions into kick",
-			"root", repoRoot,
-			"requested_skills", len(cfg.RequestedSkills),
-			"chars", len(section),
-		)
+	if section == "" {
+		// The silent half of kubestellar/hive#5227: a wired root holding no
+		// AGENTS.md produced exactly the same nothing as an unwired scheduler,
+		// so neither state was observable. Say which one this is.
+		s.logger.Debug("agentsmd: no repo instructions to inject", "root", repoRoot)
+		return ""
 	}
+	s.logger.Info("agentsmd: injecting repo instructions into kick",
+		"root", repoRoot,
+		"requested_skills", len(cfg.RequestedSkills),
+		"chars", len(section),
+	)
 	return section
 }
 
