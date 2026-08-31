@@ -4287,15 +4287,25 @@ func sanitizeRepoEntry(s string) string {
 	return strings.Join(parts, "/")
 }
 
-// gheAPIURLForHost turns a GitHub host into the API base URL the spoke should
-// use. GitHub Enterprise serves its v3 API at https://<host>/api/v3 — the
-// working reference is hosted-open-source-osscar, which runs against
-// github.ibm.com with exactly that value.
+// forgeAPIURLForHost turns a forge kind and host into the API base URL the
+// spoke should use. GitHub Enterprise serves its v3 API at
+// https://<host>/api/v3 — the working reference is hosted-open-source-osscar,
+// which runs against github.ibm.com with exactly that value.
+//
+// GitLab and Gitea deliberately return an empty URL. Their adapters own the
+// /api/v4 and /api/v1 suffixes respectively, so adding either suffix here would
+// duplicate the API-path contract. More importantly, treating either host as
+// GitHub Enterprise would aim the spoke at a nonexistent /api/v3 endpoint.
 //
 // Public github.com (and an empty host) return "", meaning "leave the spoke's
 // github.api_url alone" — its own default is already https://api.github.com,
-// and pushing a value here would overwrite a hand-tuned config.
-func gheAPIURLForHost(host string) string {
+// and pushing a value here would overwrite a hand-tuned config. An empty or
+// legacy kind retains the original host-based GitHub/GHE inference.
+func forgeAPIURLForHost(kind, host string) string {
+	switch ForgeKind(strings.ToLower(strings.TrimSpace(kind))) {
+	case ForgeGitLab, ForgeGitea:
+		return ""
+	}
 	host = strings.TrimSpace(strings.ToLower(host))
 	if host == "" || host == "github.com" || host == "api.github.com" {
 		return ""

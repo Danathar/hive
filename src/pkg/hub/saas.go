@@ -3913,7 +3913,7 @@ func (s *HubServer) handleCreateHive(w http.ResponseWriter, r *http.Request) {
 	if host, org, reposFromOrg := normalizeProjectRef(req.Org); org != "" && (host != "" || len(reposFromOrg) > 0) {
 		if host != "" {
 			req.GitHubBaseURL = "https://" + host
-			req.GitHubAPIURL = gheAPIURLForHost(host)
+			req.GitHubAPIURL = forgeAPIURLForHost("", host)
 		}
 		req.Org = org
 		if len(reposFromOrg) > 0 {
@@ -3929,7 +3929,7 @@ func (s *HubServer) handleCreateHive(w http.ResponseWriter, r *http.Request) {
 		host, org, reposFromShifted := normalizeProjectRef(req.Org + "/" + originalFirstRepo)
 		if host != "" && org != "" && strings.Contains(req.Org, ".") {
 			req.GitHubBaseURL = "https://" + host
-			req.GitHubAPIURL = gheAPIURLForHost(host)
+			req.GitHubAPIURL = forgeAPIURLForHost("", host)
 			req.Org = org
 			repos := replaceFirstCSV(req.Repos, strings.Join(reposFromShifted, "/"))
 			req.Repos = repos
@@ -8341,7 +8341,7 @@ func (s *HubServer) handleApproveProvision(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		// An explicit "public" choice means public github.com. Record it as a
-		// blank host so gheAPIURLForHost pushes nothing and the spoke keeps its
+		// blank host so forgeAPIURLForHost pushes nothing and the spoke keeps its
 		// own api.github.com default — and so the cluster backfill below, which
 		// only ever fills a blank, does not silently re-GHE it.
 		if strings.EqualFold(host, githubHostPublic) {
@@ -8891,7 +8891,7 @@ func projectConfigForHiveID(hiveID, curOrg string, curRepos []string, curPrimary
 	// Deliberately conservative: an empty curAPIURL means the spoke is too old
 	// to report its API URL, which is UNKNOWN, not a mismatch — pushing on it
 	// would re-send on every beat with no read-back to ever stop it.
-	wantAPIURL := gheAPIURLForHost(h.GitHubHost)
+	wantAPIURL := forgeAPIURLForHost(h.Forge, h.GitHubHost)
 	// The api_url is the field where unknown-vs-mismatch actually bites: a spoke
 	// too old to report it sends "", which is NOT "I am on api.github.com". The
 	// observedKnown argument carries that distinction explicitly instead of
@@ -8962,7 +8962,7 @@ func projectConfigForHiveID(hiveID, curOrg string, curRepos []string, curPrimary
 			if forgeAPIURL != "" {
 				return forgeAPIURL
 			}
-			return gheAPIURLForHost(h.GitHubHost)
+			return forgeAPIURLForHost(h.Forge, h.GitHubHost)
 		}(),
 		// AIAuthor is deliberately left empty here. Provisioning state never
 		// knows the agents' GitHub account — the spoke owns it — and the spoke
@@ -9152,7 +9152,7 @@ func (s *HubServer) handleAssignHive(w http.ResponseWriter, r *http.Request) {
 	// right GitHub API. Never blank an existing value with an empty one.
 	//
 	// "public" is an explicit choice of public github.com on a cluster whose
-	// defaults point at GHE. Record it as a blank host (so gheAPIURLForHost
+	// defaults point at GHE. Record it as a blank host (so forgeAPIURLForHost
 	// pushes nothing and the spoke keeps api.github.com) PLUS the
 	// GitHubBaseURL sentinel, which is what makes effectiveGitHubBaseURL
 	// resolve to "" and therefore makes the cluster backfill below decline to
@@ -9171,7 +9171,7 @@ func (s *HubServer) handleAssignHive(w http.ResponseWriter, r *http.Request) {
 	// the placeholder carries one. Placeholders provisioned BEFORE their
 	// cluster gained github_base_url/github_api_url have GitHubHost == "", and
 	// nothing else ever fills it in: projectConfigForHiveID pushes
-	// gheAPIURLForHost(h.GitHubHost), which is empty for those hives, so the
+	// forgeAPIURLForHost(h.Forge, h.GitHubHost), which is empty for those hives, so the
 	// spoke keeps api.github.com and the public app_id even though the cluster
 	// is a GHE cluster (observed on the heartbeat-only cluster: hosted-available-vllmd-01 has
 	// base_url: "" / api_url: "" against a github.ibm.com cluster). The hive's

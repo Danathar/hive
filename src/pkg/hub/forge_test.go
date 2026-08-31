@@ -143,7 +143,7 @@ func TestForgeSwitchSurvivesHeartbeat(t *testing.T) {
 // existing GHE push could never handle.
 //
 // Everywhere else an empty github_api_url means "leave the spoke alone", and
-// gheAPIURLForHost("github.com") is "" by definition — so a naive
+// forgeAPIURLForHost("", "github.com") is "" by definition — so a naive
 // implementation can move a hive TO enterprise but never back. The public
 // target is therefore delivered as an EXPLICIT api.github.com.
 func TestForgeSwitchBackToPublicIsDeliverable(t *testing.T) {
@@ -641,5 +641,69 @@ func TestPendingForgeAPIURLRespectsStoredKind(t *testing.T) {
 	})
 	if got := pendingForgeAPIURL(loadSaaSHive("pub"), ""); got != defaultPublicAPIURL {
 		t.Errorf("public hive: pendingForgeAPIURL = %q, want the explicit %q", got, defaultPublicAPIURL)
+	}
+}
+
+// TestProjectConfigAPIURLRespectsStoredKind is the steady-state regression for
+// #5346. pendingForgeAPIURL only governs an outstanding switch; after delivery,
+// projectConfigForHiveID derives the ordinary heartbeat value from the stored
+// forge and host on every beat. Dropping the kind there classified every
+// GitLab/Gitea host as GHE and permanently re-pushed /api/v3.
+func TestProjectConfigAPIURLRespectsStoredKind(t *testing.T) {
+	cleanup := helperSetupTempDirs(t)
+	defer cleanup()
+
+	nonGitHub := []struct {
+		id, forge, host, reportedAPIURL string
+	}{
+		{"steady-gl", string(ForgeGitLab), "gitlab.example.com", "https://gitlab.example.com/api/v4"},
+		{"steady-gt", string(ForgeGitea), "gitea.example.com", "https://gitea.example.com/api/v1"},
+	}
+	for _, tc := range nonGitHub {
+		t.Run(tc.forge, func(t *testing.T) {
+			h := &SaaSHive{
+				ID: tc.id, Status: "running", Org: "o", Repos: []string{"r"},
+				PrimaryRepo: "r", ACMMLevel: 2, ACMMDelivered: true,
+				Forge: tc.forge, GitHubHost: tc.host,
+			}
+			if err := saveSaaSHive(h); err != nil {
+				t.Fatalf("save hive: %v", err)
+			}
+
+			// Force a project push so the wire value is observable. A non-GitHub
+			// forge has no hub-side API URL; in particular it must not get GHE's
+			// /api/v3 suffix alongside the unrelated project reconciliation.
+			got := projectConfigForHiveID(tc.id, "old", []string{"r"}, "r", 2, "", tc.reportedAPIURL)
+			if got == nil {
+				t.Fatal("project mismatch should produce a project config")
+			}
+			if got.GitHubAPIURL != "" {
+				t.Fatalf("GitHubAPIURL = %q, want empty for %s", got.GitHubAPIURL, tc.forge)
+			}
+
+			// Once the project is delivered, the reported adapter URL must
+			// converge: the hub has no API URL to push and returns no config.
+			h.ClaimDelivered = true
+			if err := saveSaaSHive(h); err != nil {
+				t.Fatalf("save delivered hive: %v", err)
+			}
+			if got := projectConfigForHiveID(tc.id, "o", []string{"r"}, "r", 2, "", tc.reportedAPIURL); got != nil {
+				t.Fatalf("matching steady-state heartbeat pushed again: %+v", got)
+			}
+		})
+	}
+
+	// Records predating SaaSHive.Forge still use the original host inference.
+	// A legacy enterprise host must therefore continue to receive /api/v3.
+	if err := saveSaaSHive(&SaaSHive{
+		ID: "steady-ghe-legacy", Status: "running", Org: "o", Repos: []string{"r"},
+		PrimaryRepo: "r", ACMMLevel: 2, ClaimDelivered: true, ACMMDelivered: true,
+		GitHubHost: "github.ibm.com",
+	}); err != nil {
+		t.Fatalf("save legacy GHE hive: %v", err)
+	}
+	got := projectConfigForHiveID("steady-ghe-legacy", "o", []string{"r"}, "r", 2, "", defaultPublicAPIURL)
+	if got == nil || got.GitHubAPIURL != "https://github.ibm.com"+gheAPIPathSuffix {
+		t.Fatalf("legacy GHE project config = %+v, want unchanged /api/v3 delivery", got)
 	}
 }

@@ -903,7 +903,7 @@ func resolveProvisionAppID(reqAppID string, h *SaaSHive, cluster *ClusterConfig)
 // A hive's GitHubHost is otherwise only ever set from an explicitly pasted
 // org URL at assign time. Placeholders provisioned BEFORE their cluster gained
 // github_base_url/github_api_url therefore keep GitHubHost == "" forever, and
-// projectConfigForHiveID pushes gheAPIURLForHost("") == "" on every heartbeat
+// projectConfigForHiveID pushes forgeAPIURLForHost("", "") == "" on every heartbeat
 // — which the spoke reads as "leave mine alone". The result is a hive on a GHE
 // cluster still pointing at api.github.com with the public app_id (observed on
 // the heartbeat-only cluster: a hosted-available hive in org "katamari" has base_url: "",
