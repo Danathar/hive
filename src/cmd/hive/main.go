@@ -1705,6 +1705,12 @@ func main() {
 		holdLabel := func(agentName string) bool {
 			return shouldHoldAgentPR(agentName, agentMgr.GetACMMLevel())
 		}
+		// #5117: tell the client which accounts are ours, so the
+		// self-authorization gate recognises an issue filed under
+		// project.ai_author's plain user account as hive-filed rather than
+		// mistaking it for a human's. The App bot is recognised without this;
+		// hiveIdentity() is the same resolver the duplicate-PR guard uses.
+		ghClient.SetHiveIdentity(hiveIdentity(cfg))
 		ghClient.StartPRRequestWatcher(ctx, agentMgr.AuthorizePROpen, holdLabel, nil)
 		// Issue relay: agents request issue creation and comments by dropping a
 		// file (hive-open-issue via the gh wrapper) instead of calling GitHub

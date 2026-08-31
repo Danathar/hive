@@ -166,6 +166,14 @@ type Client struct {
 	// issues:write) still surface within ~an hour instead of never. Guarded by
 	// advisoryMu.
 	advisoryDigestSkips map[string]int
+	// hiveIdentity records which accounts count as "this hive" for the
+	// self-authorization gate (pr_self_authorization.go, #5117). It is optional
+	// — the gate recognises the App bot without it — and exists so an issue
+	// filed under project.ai_author's plain user account is also recognised as
+	// ours rather than mistaken for a human's. Guarded because config reload
+	// re-installs it while the PR-request watcher goroutine may be reading it.
+	hiveIdentityMu sync.RWMutex
+	hiveIdentity   HiveIdentity
 }
 
 func (c *Client) SetCanaryScanner(enabled, failClosed bool, reg *ioscan.CanaryRegistry, onLeak func(ioscan.CanaryLeak)) {

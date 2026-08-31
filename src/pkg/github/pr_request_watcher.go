@@ -60,6 +60,12 @@ type PRResponse struct {
 	Number         int    `json:"number,omitempty"`
 	URL            string `json:"url,omitempty"`
 	AlreadyExisted bool   `json:"already_existed,omitempty"`
+	// SelfAuthorized reports that the PR was held because its only tracked
+	// rationale is an issue the hive filed and no human has acknowledged
+	// (#5117). The PR was still opened; it just cannot merge until someone
+	// signs off on the direction. Reported to the agent so it can go get that
+	// sign-off rather than reading the hold as an unexplained failure.
+	SelfAuthorized bool   `json:"self_authorized,omitempty"`
 	Error          string `json:"error,omitempty"`
 	At             string `json:"at"`
 }
@@ -297,7 +303,19 @@ func (c *Client) handleOnePRRequest(ctx context.Context, path string, nowFn func
 	// unreachable (it followed `exec hive-open-pr`), so those PRs were opened
 	// unlabeled and the gate was inert. AddLabels is additive + idempotent, so it
 	// is safe to (re)apply even when we reused an already-open PR.
-	if c.prHoldLabel != nil && c.prHoldLabel(req.Agent) {
+	//
+	// #5117 adds a second, level-independent reason to hold: the PR's only
+	// tracked rationale is an issue the hive filed that nobody has acknowledged.
+	// It is evaluated only when the level is NOT already holding — at a
+	// hold-gated level every PR already waits for the human checkpoint this gate
+	// exists to create, so asking GitHub about the issue would buy nothing.
+	holdByLevel := c.prHoldLabel != nil && c.prHoldLabel(req.Agent)
+	var selfAuth SelfAuthorization
+	if !holdByLevel {
+		selfAuth = c.EvaluateSelfAuthorization(ctx, req.Repo, title, body, req.IssueN)
+		resp.SelfAuthorized = selfAuth.Held
+	}
+	if holdByLevel || selfAuth.Held {
 		if lerr := c.AddLabels(ctx, req.Repo, res.Number, []string{"hold"}); lerr != nil {
 			// A missing hold label is a policy failure, not a cosmetic one. Keep
 			// the request queued: the next bounded retry deduplicates the existing
@@ -306,9 +324,26 @@ func (c *Client) handleOnePRRequest(ctx context.Context, path string, nowFn func
 				slog.String("repo", req.Repo), slog.Int("number", res.Number), slog.String("error", lerr.Error()))
 			c.failPRRequest(path, req, fmt.Errorf("PR #%d opened but required hold label could not be applied: %w", res.Number, lerr), nowFn)
 			return
+		} else if selfAuth.Held {
+			c.logger.Info("pr-request watcher: held PR — its only tracked rationale is an issue the hive filed and nobody acknowledged",
+				slog.String("repo", req.Repo), slog.Int("number", res.Number),
+				slog.String("rationale_repo", selfAuth.Repo), slog.Int("rationale_issue", selfAuth.Issue),
+				slog.String("reason", selfAuth.Reason), slog.String("agent", req.Agent))
 		} else {
 			c.logger.Info("pr-request watcher: applied hold label (hold-gated ACMM level)",
 				slog.String("repo", req.Repo), slog.Int("number", res.Number))
+		}
+	}
+
+	// Explain the hold on the PR itself, once, when we opened it. A "hold" with
+	// no stated cause reads as a malfunction, and the person who has to clear it
+	// needs to know what clears it. Best-effort: the label is the enforcement,
+	// the comment is the courtesy, and a failed courtesy must not fail the
+	// request and send it round the retry loop.
+	if selfAuth.Held && !res.AlreadyExisted {
+		if cerr := c.CreateIssueComment(ctx, req.Repo, res.Number, selfAuthorizationNotice(selfAuth)); cerr != nil {
+			c.logger.Warn("pr-request watcher: held PR but could not post the explanation",
+				slog.String("repo", req.Repo), slog.Int("number", res.Number), slog.String("error", cerr.Error()))
 		}
 	}
 
@@ -328,7 +363,8 @@ func (c *Client) handleOnePRRequest(ctx context.Context, path string, nowFn func
 		"number", strconv.Itoa(res.Number),
 		"author", res.Author,
 		"url", res.URL,
-		"reused", strconv.FormatBool(res.AlreadyExisted))
+		"reused", strconv.FormatBool(res.AlreadyExisted),
+		"self_authorized", strconv.FormatBool(selfAuth.Held))
 	c.writePRResult(path, resp)
 	// Success (or reuse of an existing PR) — consume the request so it isn't
 	// reprocessed.
