@@ -327,3 +327,138 @@ func TestAgentActionDecodeErrorIsNotAPIError(t *testing.T) {
 		t.Errorf("error = %q, does not name the decode failure", err)
 	}
 }
+
+// TestKickAgentDecodesFixtureAndSendsPrompt pins the response schema and the
+// prompt-bearing request form published for POST /api/kick/{agent}.
+func TestKickAgentDecodesFixtureAndSendsPrompt(t *testing.T) {
+	fixture, err := os.ReadFile(filepath.Join("testdata", "kick.json"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+
+	var gotPath, gotMethod, gotAuth, gotContentType string
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotMethod = r.URL.Path, r.Method
+		gotAuth = r.Header.Get("Authorization")
+		gotContentType = r.Header.Get("Content-Type")
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(fixture)
+	}))
+	defer server.Close()
+
+	got, err := newTestClient(t, server, "tok").KickAgent(context.Background(), "scanner", "review issue 5217")
+	if err != nil {
+		t.Fatalf("KickAgent() = %v, want nil", err)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("method = %q, want POST", gotMethod)
+	}
+	if gotPath != "/api/kick/scanner" {
+		t.Errorf("path = %q, want /api/kick/scanner", gotPath)
+	}
+	if gotAuth != "Bearer tok" {
+		t.Errorf("Authorization = %q, want %q", gotAuth, "Bearer tok")
+	}
+	if gotContentType != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", gotContentType)
+	}
+	if want := `{"prompt":"review issue 5217"}`; string(gotBody) != want {
+		t.Errorf("request body = %q, want %q", gotBody, want)
+	}
+	if want := (KickResult{Status: "kicked", Agent: "scanner"}); got != want {
+		t.Errorf("KickAgent() = %+v, want %+v", got, want)
+	}
+}
+
+// TestKickAgentWithoutPromptSendsNoBody protects the server's automatic-kick
+// path. Sending an empty prompt object would be observably different from the
+// operation's optional request body and would mask regressions in postJSON.
+func TestKickAgentWithoutPromptSendsNoBody(t *testing.T) {
+	var gotBody []byte
+	var gotContentType string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		gotContentType = r.Header.Get("Content-Type")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"status":"kicked","agent":"quality"}`)
+	}))
+	defer server.Close()
+
+	got, err := newTestClient(t, server, "tok").KickAgent(context.Background(), "quality", "")
+	if err != nil {
+		t.Fatalf("KickAgent() = %v, want nil", err)
+	}
+	if len(gotBody) != 0 {
+		t.Errorf("request body = %q, want empty for an automatic kick", gotBody)
+	}
+	if gotContentType != "" {
+		t.Errorf("Content-Type = %q, want unset for a bodiless POST", gotContentType)
+	}
+	if want := (KickResult{Status: "kicked", Agent: "quality"}); got != want {
+		t.Errorf("KickAgent() = %+v, want %+v", got, want)
+	}
+}
+
+// TestKickAgentEscapesAndRequiresAgentName keeps the agent argument inside its
+// one path segment and rejects an empty path parameter before any request.
+func TestKickAgentEscapesAndRequiresAgentName(t *testing.T) {
+	var gotRawPath string
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		gotRawPath = r.URL.EscapedPath()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"status":"kicked","agent":"a/b"}`)
+	}))
+	defer server.Close()
+	c := newTestClient(t, server, "tok")
+
+	if _, err := c.KickAgent(context.Background(), "a/b", "go"); err != nil {
+		t.Fatalf("KickAgent() = %v, want nil", err)
+	}
+	if gotRawPath != "/api/kick/a%2Fb" {
+		t.Errorf("escaped path = %q, want /api/kick/a%%2Fb", gotRawPath)
+	}
+	if _, err := c.KickAgent(context.Background(), "", "go"); err == nil {
+		t.Fatal("KickAgent() error = nil, want a rejection of the empty agent name")
+	} else if !strings.Contains(err.Error(), "agent name is required") {
+		t.Errorf("error = %q, does not name the problem", err)
+	}
+	if calls != 1 {
+		t.Errorf("server calls = %d, want 1; empty agent must fail locally", calls)
+	}
+}
+
+// TestKickAgentServerErrorReturnsAPIError covers the task's required error
+// path and ensures failed kicks retain their POST method and escaped path.
+func TestKickAgentServerErrorReturnsAPIError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"error":"boom"}`)
+	}))
+	defer server.Close()
+
+	got, err := newTestClient(t, server, "tok").KickAgent(context.Background(), "scanner", "go")
+	if err == nil {
+		t.Fatal("KickAgent() error = nil, want *APIError")
+	}
+	if got != (KickResult{}) {
+		t.Errorf("result = %+v, want the zero value on error", got)
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error = %v (%T), want *APIError", err, err)
+	}
+	if apiErr.StatusCode != http.StatusInternalServerError {
+		t.Errorf("StatusCode = %d, want 500", apiErr.StatusCode)
+	}
+	if apiErr.Method != http.MethodPost {
+		t.Errorf("Method = %q, want POST", apiErr.Method)
+	}
+	if apiErr.Path != "/api/kick/scanner" {
+		t.Errorf("Path = %q, want /api/kick/scanner", apiErr.Path)
+	}
+}
