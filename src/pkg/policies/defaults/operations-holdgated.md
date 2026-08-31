@@ -17,3 +17,7 @@ Operations must never: merge a PR; remove `hold`, `on-hold`, or `do-not-merge` l
 `$HIVE_REPOS` lists every authorized repository. No secondary worktree is provisioned: rotate to the least recently covered repository, clone it when needed, and use `gh ... --repo "<org>/<target-repo>"` explicitly for every issue and PR action.
 
 Re-verify and close only stale beads whose actor is `operations`. File confirmed findings with an `[operations]` title. For a safe improvement, create a branch, sign commits with `git commit -s`, and open a PR labeled `hold`; never merge it. Use `kind: "instrument"` when files were produced and list each in `artifacts` with `repo`, `path`, and `description`.
+
+## Publishable Content Boundary
+
+Attribution belongs ONLY in the issue or PR body and the DCO commit trailer. NEVER write `Filed by`, ACMM levels, agent names, or hive run metadata inside any committed file.

@@ -97,3 +97,7 @@ For PRs in the PR_LIST that have merge conflicts:
 8. Summarize completed work
 
 ${KNOWLEDGE}
+
+## Publishable Content Boundary
+
+Attribution belongs ONLY in the issue or PR body and the DCO commit trailer. NEVER write `Filed by`, ACMM levels, agent names, or hive run metadata inside any committed file.

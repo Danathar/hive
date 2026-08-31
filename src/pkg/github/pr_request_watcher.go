@@ -242,6 +242,20 @@ func (c *Client) handleOnePRRequest(ctx context.Context, path string, nowFn func
 		return
 	}
 
+	// Scan the candidate diff at the same choke point (#5114). The gate above
+	// checks what the request SAYS; this one checks what the branch would
+	// PUBLISH — agent and run metadata committed into files, which no change to
+	// the request can make safe. Both run because a request can be honest about
+	// a branch that is still unpublishable.
+	if err := c.validatePRRequestContent(ctx, req); err != nil {
+		if reason, policy := prContentMetadataReason(err); policy {
+			c.rejectPRRequest(path, req, "content", reason, nowFn)
+			return
+		}
+		c.failPRRequest(path, req, err, nowFn)
+		return
+	}
+
 	// Public outreach prose speaks for the project, so it gets a second gate at
 	// the same choke point (#5115). The check above is about the request being
 	// accurate; this one is about the project being able to stand behind what
