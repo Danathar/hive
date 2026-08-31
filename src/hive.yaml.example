@@ -13,6 +13,12 @@ project:
     - repo-two
   ai_author: your-bot-user               # GitHub username for AI commits
   primary_repo: repo-one                 # Main repo for priority routing
+  # Optional: host-local directory holding one checkout per repo, as
+  # <checkouts_dir>/<repo name>. Supplies the repo root Hive reads AGENTS.md
+  # from at kick time (src/docs/agents-md.md). Hive agents work over the API and
+  # keep no clones, so without this AGENTS.md injection stays a no-op — which is
+  # the default. An absent directory or a repo with no AGENTS.md is also a no-op.
+  # checkouts_dir: /data/checkouts
 
 ioscan:
   enabled: true                           # default: true; scans untrusted text before agent kicks

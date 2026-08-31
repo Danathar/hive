@@ -621,7 +621,7 @@ Both polarities are enforced at **enumeration** — the point where GitHub issue
 - **[Documentation index](README.md)** — what hive is, setup, and the full topic-guide surface.
 - **[Architecture](architecture.md)** — process model, deterministic pipeline, governor loop, guardrails, and hub/spoke design.
 - **[Portable AgentDefinition format](../AGENT-DEFINITION.md)** — standalone YAML schema for agent imports, exports, and overlays.
-- **[AGENTS.md repo instructions](agents-md.md)** — the per-repo instruction file format Hive's parser understands. **Not wired into kicks today** — see the page for why.
+- **[AGENTS.md repo instructions](agents-md.md)** — the per-repo instruction file format Hive's parser understands. Injected into kicks once `project.checkouts_dir` gives Hive a checkout to read it from — see the page.
 - **[Dashboard route and health checks](health-checks.md)** — listener probes and alert behavior for stuck sessions and restart loops.
 - **[Troubleshooting](troubleshooting.md)** — stuck sessions, login expiry, restart loops, and notification checks.
 - **[ACMM policy matrix](acmm-policy-matrix.md)** — the full per-level, per-agent policy table.

@@ -612,6 +612,18 @@ type ProjectConfig struct {
 	// polarity is Governor.Labels.Exempt, which wins on conflict. Absent/empty
 	// = no filtering, the pre-existing behavior. See IssueFilterConfig.
 	IssueFilter IssueFilterConfig `yaml:"issue_filter,omitempty"`
+	// CheckoutsDir is a host-local directory holding one checkout per monitored
+	// repo, as "<CheckoutsDir>/<repo name>" — the bare name from Repos, without
+	// the org. It is how an operator supplies the per-repo checkout root the
+	// AGENTS.md convention needs (kubestellar/hive#5227): Hive agents work over
+	// the API and keep no clones of their own, so without this there is no local
+	// path for the scheduler to read a repo's AGENTS.md from.
+	//
+	// Optional and additive. Empty (the default) means no checkout root, which
+	// is exactly the previous behavior — AGENTS.md injection stays a no-op. A
+	// directory that is absent or holds no AGENTS.md is also a no-op; nothing
+	// here can fail a kick. See CheckoutRootFor.
+	CheckoutsDir string `yaml:"checkouts_dir,omitempty"`
 }
 
 const (
@@ -630,6 +642,31 @@ func (p *ProjectConfig) ForgeKind() string {
 		return ForgeGitHub
 	}
 	return p.Forge
+}
+
+// CheckoutRootFor returns the host-local checkout root for one monitored repo,
+// or "" when none is configured. repo may be a bare name ("hive") or an
+// org-qualified slug ("kubestellar/hive"); only the name portion is used, since
+// CheckoutsDir is keyed by bare repo name.
+//
+// Returning "" is the no-op case and is deliberately the default: a hive that
+// never sets checkouts_dir behaves exactly as it did before this existed.
+func (p *ProjectConfig) CheckoutRootFor(repo string) string {
+	dir := strings.TrimSpace(p.CheckoutsDir)
+	name := strings.TrimSpace(repo)
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		name = name[i+1:]
+	}
+	if dir == "" || name == "" {
+		return ""
+	}
+	// Refuse a name that would escape CheckoutsDir. A repo name comes from
+	// config rather than from a forge, but this is a filesystem path built from
+	// a string and the guard costs nothing.
+	if name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
+		return ""
+	}
+	return filepath.Join(dir, name)
 }
 
 // PRsAllowed returns whether agents may open pull requests. Defaults to true.
