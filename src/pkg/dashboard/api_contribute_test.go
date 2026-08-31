@@ -1209,9 +1209,24 @@ func TestHivesOnboard(t *testing.T) {
 	var resp struct {
 		NextSteps []string `json:"next_steps"`
 	}
-	json.Unmarshal(w.Body.Bytes(), &resp)
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
 	if len(resp.NextSteps) < 3 {
-		t.Errorf("expected >=3 steps, got %d", len(resp.NextSteps))
+		t.Fatalf("expected >=3 steps, got %d", len(resp.NextSteps))
+	}
+
+	steps := strings.Join(resp.NextSteps, "\n")
+	for _, want := range []string{
+		"docker compose up -d",
+		"Quadlet",
+		"systemctl --user",
+		"src/docs/podman-standalone-quadlet.md",
+		"~/.config/hive/secrets/gh-app-key.pem",
+	} {
+		if !strings.Contains(steps, want) {
+			t.Errorf("onboarding steps do not mention %q: %q", want, steps)
+		}
 	}
 }
 

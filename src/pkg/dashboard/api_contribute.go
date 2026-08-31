@@ -7735,8 +7735,8 @@ func (s *Server) handleHivesOnboard(w http.ResponseWriter, r *http.Request) {
 		"next_steps": []string{
 			"1. Install the Hive GitHub App on your org",
 			"2. Note the App ID and Installation ID",
-			"3. Save the private key as /etc/hive/gh-app-key.pem",
-			"4. Deploy with: docker compose up -d",
+			"3. Save the private key in the deployment's secrets directory (for example, /etc/hive/secrets/gh-app-key.pem, or ~/.config/hive/secrets/gh-app-key.pem for rootless Podman)",
+			"4. Deploy: Docker — docker compose up -d; Podman — install the Quadlet units from src/deploy/quadlet/ per src/docs/podman-standalone-quadlet.md, then start hive-gateway.service with systemctl (systemctl --user for rootless)",
 			"5. Register: POST /api/hives/register",
 		},
 	})
