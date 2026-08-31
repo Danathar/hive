@@ -1808,20 +1808,81 @@ function paneShowsLoginRequiredError(text) {
   });
 }
 
-// tmuxSessionHasAttachedClient reports whether a human is currently attached to
-// the agent's tmux session. The hub-side nudge declines in exactly this case
-// (manager.go, tmuxSessionHasAttachedClientForAgent) so a watchdog never types
-// over someone who is sitting in the pane; the relay honors the same rule.
-// Failure to ask is treated as "attached", i.e. the cautious answer: it
-// withholds typing rather than risking it.
-function tmuxSessionHasAttachedClient() {
+// How long an attached tmux client must have been silent before the relay
+// stops treating it as a person who owns the pane (kubestellar/hive#5277).
+//
+// The guard this feeds exists so a watchdog never types over someone
+// mid-keystroke, and that is worth keeping. But "a client is connected" is not
+// "a human is here": a dashboard terminal tab left open an hour ago
+// (bin/ttyd-tmux.sh attaches one, and the dashboard's browser terminal proxies
+// to it) was indistinguishable from someone actively typing, and it disabled
+// API-error auto-retry for the whole 30-minute task ceiling.
+//
+// Five minutes, and the two bounds are asymmetric. Below ~2 minutes the
+// threshold is not observable at all: the only caller runs on the
+// PROGRESS_REPORT_INTERVAL_MS tick, 120s apart. Above it, every extra minute is
+// a minute of a stranded task, and the cost of being wrong in that direction is
+// mild — "try again" typed at a prompt nobody is typing at is visible and
+// harmless, while the cost of being wrong in the other direction is the bug
+// this fixes. Long enough to cover reading a diff; far short of the 30-minute
+// strand it replaces.
+const HUMAN_PRESENCE_IDLE_MS = Number(process.env.HIVE_HUMAN_PRESENCE_IDLE_MS) || 5 * 60 * 1000;
+
+// tmuxSessionHumanPresence reports whether a human is at the agent's tmux
+// session, and how confident that answer is.
+//
+//   attached — some client is connected at all.
+//   active   — some client has typed within HUMAN_PRESENCE_IDLE_MS. This, not
+//               `attached`, is the question a watchdog must ask before typing.
+//   idleMs   — how long the most recently active client has been quiet, or
+//               null when tmux did not say.
+//
+// `client_activity` is tmux's per-client timestamp of last input, in epoch
+// seconds — the signal that distinguishes an abandoned tab from a person.
+//
+// EVERY uncertain answer resolves to active:true, because the failure this
+// guard prevents (typing over someone mid-keystroke) is worse than the failure
+// it causes (a retry deferred one tick). tmux erroring, tmux returning
+// unparseable activity values, and a clock skewed into the future all take that
+// branch. Only a client that positively reports itself quiet for long enough
+// releases the pane.
+function tmuxSessionHumanPresence() {
   try {
-    const out = execSync(`tmux list-clients -t ${TMUX_SESSION} 2>/dev/null || true`,
+    const out = execSync(
+      `tmux list-clients -t ${TMUX_SESSION} -F '#{client_activity}' 2>/dev/null || true`,
       { encoding: 'utf8', timeout: 15000 });
-    return String(out).trim().length > 0;
+    const text = String(out).trim();
+    if (!text) return { attached: false, active: false, idleMs: null };
+
+    let newestSec = null;
+    for (const line of text.split('\n')) {
+      const seconds = Number(String(line).trim());
+      if (!Number.isFinite(seconds) || seconds <= 0) continue;
+      if (newestSec === null || seconds > newestSec) newestSec = seconds;
+    }
+    if (newestSec === null) {
+      // Attached, but tmux told us nothing usable about when — an old tmux
+      // whose client_activity is not an epoch integer, say. Presence unknown,
+      // so presence assumed.
+      return { attached: true, active: true, idleMs: null };
+    }
+
+    // A negative age means the client's clock is ahead of ours; clamping to
+    // zero makes that read as "just now", which is the cautious direction.
+    const idleMs = Math.max(0, Date.now() - newestSec * 1000);
+    return { attached: true, active: idleMs < HUMAN_PRESENCE_IDLE_MS, idleMs };
   } catch (_) {
-    return true;
+    return { attached: true, active: true, idleMs: null };
   }
+}
+
+// tmuxSessionHasAttachedClient reports only whether a client is CONNECTED. It
+// deliberately says nothing about whether a person is there — see
+// tmuxSessionHumanPresence for the question callers actually want. Kept because
+// "is anything attached at all" is still a real question, and because failing
+// closed on a tmux error is the same rule at both layers.
+function tmuxSessionHasAttachedClient() {
+  return tmuxSessionHumanPresence().attached;
 }
 
 // tmuxSendNudge types a short literal message and submits it.
@@ -2391,21 +2452,32 @@ function handleTransientAPIError(tmuxLines) {
     tmux_output: tmuxLines,
   };
 
-  // A human attached to the pane owns it. The hub-side nudge declines in
-  // exactly this case so a watchdog never types over someone; the honest
-  // fallback is to say the agent needs attention, which is true, rather than to
-  // stay silent and let the stall backstop eventually fail the task.
-  if (tmuxSessionHasAttachedClient()) {
+  // A human AT the pane owns it, and a watchdog must never type over someone
+  // mid-keystroke. But presence is a recency question, not a connection one
+  // (#5277): a dashboard terminal tab left open is a connected client and not a
+  // person, and treating the two alike disabled recovery entirely for as long
+  // as the tab lived. An attached-but-quiet client falls through to the retry
+  // below; only a recently active one still takes this branch.
+  const presence = tmuxSessionHumanPresence();
+  if (presence.active) {
+    const since = presence.idleMs === null
+      ? 'activity unknown'
+      : `last input ${Math.round(presence.idleMs / 1000)}s ago`;
     console.warn(`Task ${currentTask.task_id} stopped on a retryable API error; ` +
-      `a client is attached to ${TMUX_SESSION}, so not typing a retry`);
+      `someone is active on ${TMUX_SESSION} (${since}), so not typing a retry`);
     send({
       ...progressBase,
       status: 'blocked_on_human',
       attention: true,
-      summary: 'Agent stopped on a retryable API error; a human is attached to the pane',
+      summary: 'Agent stopped on a retryable API error; a human is active in the pane',
       ...progressModelFields(),
     });
     return;
+  }
+  if (presence.attached) {
+    console.warn(`Task ${currentTask.task_id} stopped on a retryable API error; ` +
+      `a client is attached to ${TMUX_SESSION} but has been idle ` +
+      `${Math.round(presence.idleMs / 1000)}s, so proceeding with the retry`);
   }
 
   // Bounded: a persistent upstream failure ends as an honest environment
@@ -3038,6 +3110,8 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     handleTransientAPIError,
     resetTransientNudgeState,
     tmuxSessionHasAttachedClient,
+    tmuxSessionHumanPresence,
+    HUMAN_PRESENCE_IDLE_MS,
     TRANSIENT_API_ERROR_MAX_NUDGES,
     TRANSIENT_API_ERROR_NUDGE_MESSAGE,
     getTransientNudgeCount: () => transientNudgeCount,
