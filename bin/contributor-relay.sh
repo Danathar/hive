@@ -1665,40 +1665,91 @@ function detectPRURL(lines, repo) {
   return repoMatch || anyMatch;
 }
 
-// Best-effort scan of the agent's recent output for the no_work_needed
-// sentinel (kubestellar/hive#3987). The hub's task prompt instructs the agent:
-// when it affirmatively determines there is NOTHING shippable (the remainder
-// is gated on an unanswered maintainer decision, or merged PRs already cover
-// it), it prints a line of the exact form
-//   HIVE_VERDICT: no_work_needed — <short reason>
-// instead of opening a PR. Reported on task_complete as verdict/verdict_reason
-// so the hub can park the issue for the long offer-suppression window instead
-// of re-offering it every short-cooldown period forever (the #2547 shape that
-// escalation only bounded). Returns null when no marker is found — the hub
-// then treats the completion exactly as an idle one (today's semantics). The
-// marker spelling must stay in sync with buildTaskPrompt in
+// ── The HIVE_VERDICT: sentinel family (kubestellar/hive#3987, #5376) ─────────
+//
+// The hub's task prompt asks the agent to end a task by printing ONE line of
+// the exact form
+//
+//   HIVE_VERDICT: <verdict> — <short reason>
+//
+// Two verdicts are defined:
+//
+//   no_work_needed  (#3987) — the agent affirmatively determined there is
+//     NOTHING shippable (the remainder is gated on an unanswered maintainer
+//     decision, or merged PRs already cover it). Reported on task_complete as
+//     verdict/verdict_reason so the hub parks the issue for the long
+//     offer-suppression window instead of re-offering it every short-cooldown
+//     period forever (the #2547 shape that escalation only bounded).
+//
+//   complete        (#5376) — the agent is DONE with the task, whatever it
+//     shipped. This is the completion signal the interactive relay lacked:
+//     before it, "is this task done" was inferred from the vendor's terminal
+//     rendering (see classifyTmuxPane), which produced thirteen separate
+//     issues (#1566, #4026, #4064, #4067, #4078, #4080, #4128, #4182, #4265,
+//     #5094, #5121, #5156, #5162) as one CLI after another restyled its
+//     chrome. Chrome is a vendor's cosmetic output; this line is the agent's
+//     own statement. Only the second is a contract.
+//
+// Both are parsed by ONE anchored, echo-guarded scanner below, deliberately:
+// the anti-false-positive handling is the hard-won part and there must not be
+// a second copy of it to drift.
+//
+// The marker spelling must stay in sync with buildTaskPrompt in
 // src/pkg/dashboard/contribute_ws.go.
-function detectNoWorkVerdict(lines) {
+const HIVE_VERDICT_NO_WORK = 'no_work_needed';
+const HIVE_VERDICT_COMPLETE = 'complete';
+
+// detectHiveVerdict scans `lines` newest-first for any of `wanted` (an array of
+// verdict tokens) and returns { verdict, reason } for the first — i.e. the
+// LAST-printed — match, or null.
+//
+// Returns null rather than throwing on junk input: every caller is on a
+// best-effort path reading a terminal capture that may be empty.
+function detectHiveVerdict(lines, wanted) {
   if (!Array.isArray(lines) || lines.length === 0) return null;
+  if (!Array.isArray(wanted) || wanted.length === 0) return null;
   // Anchored at line start: the task PROMPT quotes the marker mid-sentence
   // ("...the exact form 'HIVE_VERDICT: ...'"), and an anchored match keeps
   // that instruction echo from reading as the agent's own verdict. Codex
   // renders its completed assistant messages with a leading bullet, which is
   // presentation chrome rather than part of the verdict.
-  const VERDICT_RE = /^\s*(?:•\s*)?HIVE_VERDICT:\s*no_work_needed\b[\s:—–-]*(.*)$/i;
+  //
+  // The verdict token is an alternation of exactly the wanted tokens with a \b
+  // after it, so "no_work_neededX" and "completely rewrote the parser" are both
+  // non-matches — a prose line that merely STARTS with a verdict word must not
+  // become a verdict.
+  const alt = wanted.map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  const VERDICT_RE = new RegExp(`^\\s*(?:•\\s*)?HIVE_VERDICT:\\s*(${alt})\\b[\\s:—–-]*(.*)$`, 'i');
   // Scan newest-first so the agent's final conclusion wins over anything it
   // merely quoted or considered earlier in the transcript.
   for (let i = lines.length - 1; i >= 0; i--) {
     const m = VERDICT_RE.exec(lines[i]);
     if (!m) continue;
-    const reason = (m[1] || '').trim();
+    const reason = (m[2] || '').trim();
     // tmux may wrap the prompt's instruction so its quoted marker lands at a
     // visual line start; its giveaway is the literal "<short reason>"
     // placeholder. Never treat that echo as a real verdict.
     if (reason.startsWith('<')) continue;
-    return { verdict: 'no_work_needed', reason };
+    return { verdict: m[1].toLowerCase(), reason };
   }
   return null;
+}
+
+// Best-effort scan for the no_work_needed sentinel. Unchanged in behaviour
+// from #3987/#4265; it now shares the scanner above. Returns null when no
+// marker is found — the hub then treats the completion exactly as an idle one.
+function detectNoWorkVerdict(lines) {
+  return detectHiveVerdict(lines, [HIVE_VERDICT_NO_WORK]);
+}
+
+// detectCompletionVerdict reports whether the agent SAID it finished (#5376).
+//
+// Either verdict counts as "the agent declared this task over": no_work_needed
+// is a completion too — it is the agent concluding the task with nothing to
+// ship — and requiring a second `complete` line after it would make a
+// compliant agent look non-compliant.
+function detectCompletionVerdict(lines) {
+  return detectHiveVerdict(lines, [HIVE_VERDICT_COMPLETE, HIVE_VERDICT_NO_WORK]);
 }
 
 // True while a bob CLI process is alive. bob exits at the end of every turn,
@@ -2435,6 +2486,75 @@ const PANE_STALL_TIMEOUT_MS = Number(process.env.HIVE_PANE_STALL_TIMEOUT_MS) || 
 // path before the confirm count is ever consulted.
 const PANE_STALL_CONFIRM_TICKS = Math.max(1, Number(process.env.HIVE_PANE_STALL_CONFIRM_TICKS) || 2);
 
+// ── Chrome-idle grace before an unverdicted completion (#5376) ───────────────
+//
+// THE DEMOTION. classifyTmuxPane() used to be the whole completion contract:
+// PANE_STATE_IDLE_COMPLETE meant "task done", full stop. It is no longer
+// allowed to say that on its own. It says "this pane looks idle" — a liveness
+// judgement its per-backend chrome CAN support — and the agent's own
+// HIVE_VERDICT: line says whether the task is done.
+//
+// THE FALLBACK, and why this shape. Not every backend will emit the sentinel
+// reliably; some builds ignore instructions in a long prompt, and the marker
+// can scroll out of the fifteen-line tail on a chatty summary. Two honest
+// options were on the table:
+//
+//   (a) idle-without-verdict is "still running" until the progress lease
+//       expires. Rejected. A non-compliant agent that genuinely finished draws
+//       nothing more, so paneChangedSince() stops re-arming the lease and the
+//       task dies at PANE_STALL_TIMEOUT_MS as an `environment` FAILURE — with
+//       its PR already open. That converts every success by a non-compliant
+//       backend into a false failure and a wasted re-offer. It is the #4182 /
+//       #4127 shape (a finished task killed by the stall backstop) reintroduced
+//       deliberately, and it is worse than the bug this issue exists to end.
+//
+//   (b) a BOUNDED grace period after idle, then complete anyway. Chosen.
+//
+// What (b) buys, precisely: the sentinel becomes the fast path — an agent that
+// says it is done is believed on the spot, verdict recorded — while chrome
+// alone must hold idle for CHROME_IDLE_GRACE_TICKS consecutive ticks before it
+// is allowed to conclude anything. That directly targets the failure mode the
+// thirteen issues share: every one of them was a MOMENTARY misread — a
+// duration summary printed mid-turn, a status row between tool calls, an
+// errored turn parked at the prompt. A pane that has rendered idle chrome and
+// nothing else across several minutes is a far weaker claim than a single
+// frame, and any new output at all resets the count (see recordChromeIdleTick).
+//
+// What (b) does NOT buy: it is still chrome, so it is still fallible, just
+// slower and much harder to trip. The verdict path is the one that is
+// trustworthy. The grace exists so that adopting it costs nothing when an
+// agent does not comply, which is what makes the demotion shippable at all.
+//
+// The completion is marked `chrome_idle` when it comes from this path, so the
+// hub and the operator can see which signal ended a task and per-backend
+// non-compliance is measurable rather than guessed at.
+const CHROME_IDLE_GRACE_TICKS = Math.max(1, Number(process.env.HIVE_CHROME_IDLE_GRACE_TICKS) || 3);
+
+// How many CONSECUTIVE ticks the pane has classified IDLE_COMPLETE with no
+// completion verdict in sight. Reset on task start and on any tick that does
+// not see an unverdicted idle pane.
+let chromeIdleTicks = 0;
+
+// recordChromeIdleTick advances (or resets) the grace counter and reports
+// whether chrome alone has now earned the right to end the task.
+//
+// PURE with respect to the pane fingerprint: it takes the already-captured
+// lines and never reads the pane itself. paneStalled() is destructive — the
+// first call seeing new output consumes it (#5333) — so nothing on the tick
+// path may take a second reading.
+function recordChromeIdleTick(idleWithoutVerdict) {
+  if (!idleWithoutVerdict) {
+    chromeIdleTicks = 0;
+    return false;
+  }
+  chromeIdleTicks++;
+  return chromeIdleTicks >= CHROME_IDLE_GRACE_TICKS;
+}
+
+function resetChromeIdleGrace() {
+  chromeIdleTicks = 0;
+}
+
 let lastPaneFingerprint = null;
 let lastPaneChangeAt = 0;
 // How many CONSECUTIVE ticks paneStalled() has now returned true. Distinct
@@ -2474,6 +2594,9 @@ function resetPaneStallClock() {
   // A new task also starts with a clean CLI-liveness count: shell readings from
   // the previous task say nothing about this one.
   consecutiveShellReadings = 0;
+  // Likewise the chrome-idle grace (#5376): idle ticks accumulated while the
+  // PREVIOUS task wound down must never count toward ending this one.
+  resetChromeIdleGrace();
 }
 
 // paneStalled records the current pane content and reports whether it has been
@@ -2977,8 +3100,44 @@ function progressTick() {
   // below still does its own recording, unaffected.
   if (paneChangedSince(tmuxLines)) armTaskProgressLease();
 
-  if (paneState === PANE_STATE_IDLE_COMPLETE) {
-    console.log(`Task ${currentTask.task_id} completed — agent idle`);
+  // #5376: the agent's own completion sentinel, read BEFORE the pane state is
+  // consulted, because it — not the chrome — is what now decides the task is
+  // done. Both HIVE_VERDICT: complete and HIVE_VERDICT: no_work_needed count.
+  //
+  // Read from the already-captured tmuxLines: no second pane read, so the
+  // destructive paneStalled() fingerprint (#5333) is untouched.
+  const completionVerdict = detectCompletionVerdict(tmuxLines);
+
+  // Chrome-idle grace (#5376). classifyTmuxPane() saying IDLE_COMPLETE is now
+  // only a hint; it must repeat across CHROME_IDLE_GRACE_TICKS ticks before it
+  // may end a task on its own. A verdict short-circuits the wait entirely.
+  const idleWithoutVerdict = paneState === PANE_STATE_IDLE_COMPLETE && !completionVerdict;
+  const chromeIdleGraceElapsed = recordChromeIdleTick(idleWithoutVerdict);
+
+  // A verdict ends the task from ANY pane state. This is the point of the
+  // change: an agent that says it is finished is finished, whatever its CLI
+  // chose to render around the statement. It is precisely the case the
+  // thirteen chrome issues kept getting wrong from the other side — a real
+  // completion the classifier read as WORKING (#4127, #4181, #4259) and the
+  // stall backstop then failed with the PR already open.
+  //
+  // The two error states are excluded, and deliberately: a pane showing an
+  // authorization refusal or a truncated retryable response has NOT completed,
+  // and a stale verdict line still on screen from earlier in the transcript
+  // must not launder that into a success. Those branches below own those panes.
+  const apiErrorState = paneState === PANE_STATE_TRANSIENT_API_ERROR ||
+    paneState === PANE_STATE_UNKNOWN_API_ERROR ||
+    paneState === PANE_STATE_FATAL_API_ERROR;
+  const verdictCompletes = !!completionVerdict && !apiErrorState;
+
+  if (verdictCompletes || (paneState === PANE_STATE_IDLE_COMPLETE && chromeIdleGraceElapsed)) {
+    // How this task ended, recorded so the hub and the operator can tell the
+    // trustworthy signal from the fallback — and so per-backend sentinel
+    // non-compliance is measurable rather than guessed at.
+    const completionSignal = verdictCompletes ? 'verdict' : 'chrome_idle';
+    console.log(`Task ${currentTask.task_id} completed — signal=${completionSignal}` +
+      (verdictCompletes ? ` (HIVE_VERDICT: ${completionVerdict.verdict})` : ` (pane idle for ${chromeIdleTicks} consecutive checks, no verdict emitted)`));
+    resetChromeIdleGrace();
     // Successful completion clears this work item's crash-retry budget.
     cliRestartCounts.delete(taskKey(currentTask));
     // Best-effort: report the PR the agent opened, if one is visible in its
@@ -2990,7 +3149,9 @@ function progressTick() {
     // #3987: only report a no_work_needed verdict when no PR was shipped — a
     // visible PR contradicts "nothing shippable" (the hub would override the
     // claim with "shipped" anyway).
-    const noWork = prURL ? null : detectNoWorkVerdict(tmuxLines);
+    const noWork = prURL || !completionVerdict || completionVerdict.verdict !== HIVE_VERDICT_NO_WORK
+      ? null
+      : completionVerdict;
     if (noWork) console.log(`Detected no_work_needed verdict for ${currentTask.task_id}: ${noWork.reason || '(no reason)'}`);
     // Cause B (#5353). "Idle" here is a verdict read off the pane's rendering
     // chrome, and it is wrong often enough to have produced thirteen separate
@@ -3012,7 +3173,12 @@ function progressTick() {
     // launches in flight. Its credential is still dropped.
     const bobAlreadyExited = BACKEND === 'bob' && !bobIsRunning();
     stopAgentForTaskExit({ skipCLI: bobAlreadyExited });
-    send({ type: 'task_complete', seq: nextSeq(), task_id: currentTask.task_id, task_gen: currentTask.task_gen, result: 'completed', summary: noWork ? 'Agent returned to idle (reported no_work_needed)' : 'Agent returned to idle', tmux_output: tmuxLines, pr_url: prURL, verdict: noWork ? noWork.verdict : undefined, verdict_reason: noWork ? noWork.reason : undefined });
+    const completionSummary = noWork
+      ? 'Agent returned to idle (reported no_work_needed)'
+      : (verdictCompletes
+        ? 'Agent reported the task complete (HIVE_VERDICT)'
+        : `Agent returned to idle (no verdict emitted; pane idle for ${CHROME_IDLE_GRACE_TICKS} consecutive checks)`);
+    send({ type: 'task_complete', seq: nextSeq(), task_id: currentTask.task_id, task_gen: currentTask.task_gen, result: 'completed', summary: completionSummary, tmux_output: tmuxLines, pr_url: prURL, completion_signal: completionSignal, verdict: noWork ? noWork.verdict : undefined, verdict_reason: noWork ? noWork.reason : undefined });
     // bob exits after each turn, so the pane is now a bare shell. Bring it
     // back up before the next task, or the prompt would be typed into bash
     // ("-bash: <prompt>: command not found") and silently lost.
@@ -3045,6 +3211,21 @@ function progressTick() {
     } else {
       send({ type: 'ready', seq: nextSeq() });
     }
+  } else if (paneState === PANE_STATE_IDLE_COMPLETE) {
+    // Idle chrome, no verdict, grace not yet elapsed (#5376). Report progress
+    // and wait — this is the tick or two in which a momentary misread (a
+    // duration summary printed mid-turn, a status row between tool calls)
+    // resolves itself by the pane simply carrying on.
+    //
+    // This branch MUST exist ahead of the stall backstop below rather than
+    // falling into it. An idle pane is byte-for-byte identical frame to frame,
+    // so the stall detector would accumulate against it and eventually hand the
+    // task back as an `environment` failure — a finished task reported as a
+    // failure, which is exactly the #4127/#4182 shape and strictly worse than
+    // the false completion this change is removing. The grace counter above is
+    // the bound here; the stall clock is not.
+    console.log(`Task ${currentTask.task_id}: pane looks idle but no HIVE_VERDICT yet — ${chromeIdleTicks}/${CHROME_IDLE_GRACE_TICKS} checks before completing on chrome alone`);
+    send({ type: 'task_progress', seq: nextSeq(), task_id: currentTask.task_id, task_gen: currentTask.task_gen, status: 'working', tmux_output: tmuxLines, ...progressModelFields() });
   } else if (paneState === PANE_STATE_BLOCKED_ON_HUMAN) {
     // #5281: before reporting a blocked pane to a human who may not be there,
     // see whether this is a question the agent was already told to answer
@@ -3560,6 +3741,15 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     paneChangedSince,
     resetPaneStallClock,
     PANE_STALL_CONFIRM_TICKS,
+    // Completion-signal surface (kubestellar/hive#5376).
+    CHROME_IDLE_GRACE_TICKS,
+    HIVE_VERDICT_COMPLETE,
+    HIVE_VERDICT_NO_WORK,
+    detectHiveVerdict,
+    detectCompletionVerdict,
+    recordChromeIdleTick,
+    resetChromeIdleGrace,
+    getChromeIdleTicks: () => chromeIdleTicks,
     // Max-duration lease surface (kubestellar/hive#5321).
     MAX_TASK_DURATION_MS,
     ABSOLUTE_TASK_DEADLINE_MS,

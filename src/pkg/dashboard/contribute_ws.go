@@ -316,6 +316,18 @@ type WSMessage struct {
 	// keeps yielding no work — precisely the signal needed to go answer the
 	// gating question. Truncated server-side to noWorkReasonMaxLen.
 	VerdictReason string `json:"verdict_reason,omitempty"`
+	// CompletionSignal records WHICH signal ended an interactive task
+	// (kubestellar/hive#5376): "verdict" when the agent printed its own
+	// HIVE_VERDICT: line, "chrome_idle" when it never did and the relay fell
+	// back to a bounded grace period of idle-looking terminal chrome.
+	//
+	// Diagnostic only — it changes no cooldown, no trust and no selection. It
+	// exists so per-backend sentinel non-compliance is MEASURABLE rather than
+	// guessed at: chrome inference is the mechanism behind thirteen separate
+	// false-completion issues, and this field is how an operator sees which
+	// backends are still relying on it. Absent from relays predating #5376 and
+	// from the headless path, which takes the CLI's exit code instead.
+	CompletionSignal string `json:"completion_signal,omitempty"`
 	// Permanent marks a task_failed the relay will not retry: it exhausted its
 	// per-task CLI-restart budget and gave up (see MAX_TASK_CLI_RESTARTS in
 	// bin/contributor-relay.sh). Reassigning the same work item to the same
@@ -1227,6 +1239,39 @@ func normalizeCompletionVerdict(reported, verifiedPR string) string {
 		return completionVerdictNoWorkNeeded
 	}
 	return completionVerdictIdle
+}
+
+// Completion-signal vocabulary (kubestellar/hive#5376). Diagnostic only: these
+// values gate no cooldown, no trust and no selection.
+const (
+	// completionSignalVerdict — the agent printed its own HIVE_VERDICT: line.
+	// This is the trustworthy signal.
+	completionSignalVerdict = "verdict"
+	// completionSignalChromeIdle — the agent never printed one and the relay
+	// fell back to a bounded grace period of idle-looking terminal chrome.
+	// Chrome inference is the mechanism behind thirteen separate
+	// false-completion issues, so a rising count here for some backend is the
+	// operator's cue that that backend is not honouring the sentinel.
+	completionSignalChromeIdle = "chrome_idle"
+	// completionSignalUnknown — the field was absent (a relay predating #5376,
+	// or the headless path, which takes the CLI's exit code) or carried a
+	// value the hub does not recognise.
+	completionSignalUnknown = "unknown"
+)
+
+// normalizeCompletionSignal maps a client-reported completion_signal onto the
+// closed vocabulary above. Client-supplied free text never reaches the hub's
+// structured logs: an unrecognised value is reported as unknown, exactly as an
+// absent one is.
+func normalizeCompletionSignal(reported string) string {
+	switch strings.ToLower(strings.TrimSpace(reported)) {
+	case completionSignalVerdict:
+		return completionSignalVerdict
+	case completionSignalChromeIdle:
+		return completionSignalChromeIdle
+	default:
+		return completionSignalUnknown
+	}
 }
 
 // isSuppressedByNoWorkVerdict reports whether a live no_work_needed verdict
@@ -3648,6 +3693,10 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 						"pr_verified", verifiedPR != "",
 						"verdict", verdict,
 						"verdict_reason", strings.TrimSpace(msg.VerdictReason),
+						// #5376: which signal ended the task. Diagnostic only —
+						// normalized to a closed vocabulary so a client cannot
+						// inject arbitrary text into the hub's structured logs.
+						"completion_signal", normalizeCompletionSignal(msg.CompletionSignal),
 					)
 					contributor.mu.Lock()
 					contributor.profile.TasksCompleted++
@@ -4599,7 +4648,28 @@ func buildTaskPromptBody(repoFull, issueRef, title, sourceHint string) string {
 			"remaining work is blocked on an unanswered maintainer decision, or merged "+
 			"PRs already cover everything actionable — do NOT open a PR; instead print "+
 			"a single line of the exact form 'HIVE_VERDICT: no_work_needed — <short reason>' "+
-			"and stop.",
+			"and stop. "+
+			// #5376: the completion sentinel. The interactive relay used to
+			// infer "this task is done" from the CLI's own terminal chrome —
+			// per-backend regexes over the last fifteen lines of the tmux pane.
+			// That produced thirteen separate issues (#1566, #4026, #4064,
+			// #4067, #4078, #4080, #4128, #4182, #4265, #5094, #5121, #5156,
+			// #5162) as one CLI after another restyled its output, because the
+			// input was a vendor's cosmetic rendering rather than a contract.
+			// This line IS the contract: the agent states it is finished. The
+			// relay's detectCompletionVerdict scrapes it; keep the marker
+			// spelling in sync with bin/contributor-relay.sh.
+			//
+			// Asked for LAST and on its own line for a reason: the relay reads
+			// a bounded tail of the pane, so a sentinel buried above a long
+			// summary can scroll out of view before the relay looks.
+			"When you HAVE finished the task — the PR is open, or you have "+
+			"otherwise done everything you intend to do — print, as the very "+
+			"last thing you output and on a line by itself, "+
+			"'HIVE_VERDICT: complete — <short reason>'. Print it exactly once, "+
+			"only when you are actually done, and never before starting work. "+
+			"If you printed the no_work_needed line above, that already counts "+
+			"as your completion — do not print both.",
 		repoFull, issueRef, title, sourceHint, repoFull, repoFull,
 	)
 }
