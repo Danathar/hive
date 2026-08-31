@@ -6,7 +6,7 @@ type AgentMode int
 const (
 	ModeAdvisory       AgentMode = iota // Advisory beads only, governor posts digests
 	ModeIssuesOnly                      // Open issues, no PRs
-	ModeIssuesAndPRs                    // Issues + PRs (hold-labeled at L5)
+	ModeIssuesAndPRs                    // Issues + PRs, without merge authority
 	ModeIssuesPRsMerge                  // Issues + PRs + auto-merge on green CI
 )
 
@@ -52,18 +52,6 @@ func (m AgentMode) Suffix() string {
 		return modeSuffixes[m]
 	}
 	return "-advisory"
-}
-
-// SuffixForLevel returns the policy file suffix adjusted for ACMM level.
-// ISSUES_AND_PRS uses "-holdgated" only at L5 (hold-labeled PRs) and "-full" at all other levels.
-func (m AgentMode) SuffixForLevel(level int) string {
-	if m == ModeIssuesAndPRs {
-		if level == 5 {
-			return "-holdgated"
-		}
-		return "-full"
-	}
-	return m.Suffix()
 }
 
 func (m AgentMode) CanCreateIssues() bool { return m >= ModeIssuesOnly }

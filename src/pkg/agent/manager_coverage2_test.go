@@ -1333,7 +1333,7 @@ func TestDefaultAgentMode_AllLevels(t *testing.T) {
 	}
 }
 
-// SuffixForLevel, AgentMode booleans, and ParseAgentMode are tested in mode_test.go
+// AgentMode booleans and ParseAgentMode are tested in mode_test.go.
 
 // ---------------------------------------------------------------------------
 // ClearAllModeOverrides — verify modes cleared
