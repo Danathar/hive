@@ -219,6 +219,19 @@ function teardown(relay) {
   try { fs.rmSync(relay.__tmpDir, { recursive: true, force: true }); } catch (_) {}
 }
 
+// Drive a full chrome-idle grace window (kubestellar/hive#5376).
+//
+// A pane that merely LOOKS idle no longer completes a task on the first tick:
+// classifyTmuxPane was demoted to liveness, and chrome alone must hold idle for
+// CHROME_IDLE_GRACE_TICKS consecutive ticks before it may conclude anything. A
+// test that wants the fallback completion therefore has to tick that many
+// times. Tests exercising the SENTINEL path do not need this — that is the
+// whole point of the sentinel, and several tests below assert exactly that by
+// completing in one tick.
+function graceTicks(relay, tick) {
+  for (let i = 0; i < relay.CHROME_IDLE_GRACE_TICKS; i++) tick();
+}
+
 const tests = [];
 function test(name, fn) { tests.push([name, fn]); }
 
@@ -537,10 +550,14 @@ test('agy Gemini idle pane reports its visible PR as task_complete', () => {
   const relay = loadRelay({ backend: 'agy', paneText: AGY_GEMINI_IDLE_PANE });
   try {
     assignTask(relay, 'ct-agy-gemini-idle');
-    relay.__crashTick();
+    // #5376: this pane carries no HIVE_VERDICT line, so it completes on the
+    // chrome-idle FALLBACK — after the grace window, not on the first tick.
+    graceTicks(relay, () => relay.__crashTick());
     const complete = relay.__sent.find(m => m.type === 'task_complete');
     assert.ok(complete, 'the live agy/Gemini pane shape must complete the task');
     assert.strictEqual(complete.pr_url, 'https://github.com/foo/bar/pull/9');
+    assert.strictEqual(complete.completion_signal, 'chrome_idle',
+      'a completion inferred from chrome must be labelled as such');
   } finally { teardown(relay); }
 });
 
@@ -727,8 +744,17 @@ test('a pane that reaches real IDLE_COMPLETE between stall ticks is reported as 
     assert.strictEqual(relay.getStallConfirmCount(), 1);
     // The slow network call the pane was blocked on finally returns.
     capture = 'Pull request opened: foo/bar#4061 https://github.com/foo/bar/pull/4061\n? for shortcuts';
-    relay.__agePaneStallClock(relay.PANE_STALL_TIMEOUT_MS + 1);
-    relay.__stallTick();
+    // #5376: no HIVE_VERDICT line in this capture, so it takes the chrome-idle
+    // fallback and needs the grace window. The stall clock is aged past its
+    // timeout on every one of those ticks DELIBERATELY: an idle pane is
+    // byte-identical frame to frame, so if the grace window let the stall
+    // backstop keep running underneath it, this shipped PR would be handed back
+    // as an `environment` failure — the #4127 shape, reintroduced. The
+    // IDLE_COMPLETE branch must own the pane for the whole window.
+    graceTicks(relay, () => {
+      relay.__agePaneStallClock(relay.PANE_STALL_TIMEOUT_MS + 1);
+      relay.__stallTick();
+    });
     const completed = relay.__sent.filter(m => m.type === 'task_complete');
     assert.strictEqual(completed.length, 1,
       `late completion must be reported as completed, not failed: ${JSON.stringify(relay.__sent.map(m => m.type))}`);
@@ -1695,7 +1721,9 @@ test('#5281 the budget is per task, not per process', () => {
     assert.strictEqual(nudges(relay, before).length, 1, 'one reminder for the first task');
 
     pane = DONE_PANE;
-    relay.__crashTick();
+    // #5376: DONE_PANE is chrome only — no HIVE_VERDICT line — so it takes the
+    // grace-window fallback rather than completing on the first tick.
+    graceTicks(relay, () => relay.__crashTick());
     assert.ok(!relay.getCurrentTask(), 'the first task should have completed');
 
     // A fresh task must get its own reminder — a previous task's spent budget
@@ -4164,7 +4192,8 @@ test('#5094 a completed turn whose summary mentions a quota phrase is still comp
     assert.strictEqual(relay.classifyTmuxPane(pane), relay.PANE_STATE_IDLE_COMPLETE);
     relay.setCliReady(true);
     assignTask(relay, 't-prose');
-    relay.__crashTick();
+    // #5376: chrome-only completion, so it needs the grace window.
+    graceTicks(relay, () => relay.__crashTick());
     assert.strictEqual(relay.__sent.filter(m => m.type === 'task_failed').length, 0,
       'a completed turn must not be failed over a quota phrase in its own prose');
     assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 1);
@@ -4874,7 +4903,10 @@ test('#5353 a reported completion stops the agent and drops its token', () => {
   // The headline case. The pane reads idle, the relay books a completion, the
   // hub reassigns the issue — and the agent that "finished" must not still be
   // sitting in the pane with a valid credential.
-  const relay = loadRelay({ backend: 'copilot', paneText: IDLE_PANE });
+  // #5376: completion now comes from the agent's own sentinel rather than the
+  // idle chrome, so the pane carries one. What this test is about is unchanged:
+  // whatever ended the task, the agent must be stopped and its token gone.
+  const relay = loadRelay({ backend: 'copilot', paneText: `HIVE_VERDICT: complete — shipped it\n${IDLE_PANE}` });
   try {
     relay.setCliReady(true);
     assignTask(relay, 't-complete');
@@ -4896,7 +4928,7 @@ test('#5353 the completion report still carries the AGENT output, not the relaun
   // (and detectPRURL still finds the PR the agent opened).
   const relay = loadRelay({
     backend: 'copilot',
-    paneText: 'Pull request opened: https://github.com/foo/bar/pull/909\n/ commands for help\n',
+    paneText: 'Pull request opened: https://github.com/foo/bar/pull/909\n/ commands for help\nHIVE_VERDICT: complete — PR is open\n',
   });
   try {
     relay.setCliReady(true);
@@ -5078,6 +5110,405 @@ test('#5353 declining an assignment touches neither the pane nor an unrelated to
     const ctrlCs = relay.__tmuxSends().slice(before).filter(c => /C-c\s*$/.test(c)).length;
     assert.strictEqual(ctrlCs, 0,
       'declining an assignment must never interrupt the agent working the previous one');
+  } finally { teardown(relay); }
+});
+
+// ---------------------------------------------------------------------------
+// The completion signal (kubestellar/hive#5376).
+//
+// THE CLASS THIS SECTION EXISTS TO CATCH. Task completion in the interactive
+// relay used to be inferred entirely from tmux rendering chrome — per-backend
+// regexes over the last fifteen lines of the pane. Thirteen issues (#1566,
+// #4026, #4064, #4067, #4078, #4080, #4128, #4182, #4265, #5094, #5121, #5156,
+// #5162) are one defect repeating: a CLI restyled its cosmetic output in a
+// patch release and completion broke, in one direction or the other.
+//
+// The tests below are written so that they hold whatever any vendor does to
+// its chrome. The bar, stated plainly:
+//
+//   1. A task completes on the SENTINEL, whatever the pane renders around it —
+//      including chrome that classifyTmuxPane reads as busy, and chrome from a
+//      backend nobody has written a branch for.
+//   2. A task does NOT complete on chrome alone in a single tick, which is what
+//      the whole history consists of.
+//
+// A future backend restyle can still move a pane between WORKING and
+// IDLE_COMPLETE. What it can no longer do is decide, on its own and instantly,
+// that a task finished.
+// ---------------------------------------------------------------------------
+
+// A pane whose chrome classifyTmuxPane reads as BUSY for claude — "esc to
+// interrupt" is its in-flight marker — but which carries the agent's own
+// completion sentinel. This is the shape the thirteen issues kept getting
+// wrong from the other side: a real completion the classifier called WORKING,
+// which the stall backstop then failed with the PR already open (#4127, #4181,
+// #4259). The sentinel must win.
+const VERDICT_UNDER_BUSY_CHROME = [
+  '● Opened https://github.com/foo/bar/pull/4242',
+  'HIVE_VERDICT: complete — PR is open and ready for review',
+  '',
+  '✻ Cogitating… (esc to interrupt)',
+].join('\n');
+
+test('#5376 a task completes on the sentinel even while the chrome says the CLI is busy', () => {
+  const relay = loadRelay({ backend: 'claude', paneText: VERDICT_UNDER_BUSY_CHROME });
+  try {
+    // The classifier is unchanged and still reads this pane as working — that
+    // is the point. Its verdict about the pane is no longer the task's verdict.
+    assert.strictEqual(relay.classifyTmuxPane(VERDICT_UNDER_BUSY_CHROME), relay.PANE_STATE_WORKING,
+      'setup: the chrome must still classify as busy, or this test proves nothing');
+
+    relay.setCliReady(true);
+    assignTask(relay, 't-verdict-busy');
+    relay.__crashTick();
+
+    const completed = relay.__sent.filter(m => m.type === 'task_complete');
+    assert.strictEqual(completed.length, 1,
+      `the agent said it was done; the chrome must not overrule it: ${JSON.stringify(relay.__sent.map(m => m.type))}`);
+    assert.strictEqual(completed[0].completion_signal, 'verdict');
+    assert.strictEqual(completed[0].pr_url, 'https://github.com/foo/bar/pull/4242');
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_failed').length, 0);
+  } finally { teardown(relay); }
+});
+
+test('#5376 the sentinel completes a task through chrome no backend branch has ever seen', () => {
+  // The generalisation of the class. Every one of the thirteen issues was
+  // fixed by teaching classifyTmuxPane about some CLI's new rendering. This
+  // asserts the property that makes the fourteenth unnecessary: completion
+  // holds for chrome invented right here, that no branch and no pattern in the
+  // relay has any knowledge of.
+  const ALIEN_CHROME = [
+    '╭───────────────────────────────────────╮',
+    '│  ⟡⟡⟡  nobody has ever shipped this UI  │',
+    '╰───────────────────────────────────────╯',
+    'HIVE_VERDICT: complete — did the thing',
+    '⟿ ⟿ ⟿',
+  ].join('\n');
+  const relay = loadRelay({ backend: 'claude', paneText: ALIEN_CHROME });
+  try {
+    assert.notStrictEqual(relay.classifyTmuxPane(ALIEN_CHROME), relay.PANE_STATE_IDLE_COMPLETE,
+      'setup: unrecognised chrome must not classify as complete on its own');
+    relay.setCliReady(true);
+    assignTask(relay, 't-alien');
+    relay.__crashTick();
+    const completed = relay.__sent.filter(m => m.type === 'task_complete');
+    assert.strictEqual(completed.length, 1,
+      'a restyled CLI must not be able to break completion once the agent states it');
+    assert.strictEqual(completed[0].completion_signal, 'verdict');
+  } finally { teardown(relay); }
+});
+
+test('#5376 chrome alone does NOT complete a task on a single tick', () => {
+  // The other half of the bar, and the demotion itself. IDLE_COMPLETE chrome
+  // with no sentinel must report progress and WAIT — the momentary misreads
+  // behind the thirteen issues (a duration summary printed mid-turn, a status
+  // row between tool calls) resolve inside this window by the pane simply
+  // carrying on.
+  const IDLE_CHROME_NO_VERDICT = [
+    '● Summary: looked at the tests',
+    '✻ Cogitated for 4m 10s',
+    '❯ ',
+    '  ⏵⏵ auto mode on (shift+tab to cycle)',
+  ].join('\n');
+  const relay = loadRelay({ backend: 'claude', paneText: IDLE_CHROME_NO_VERDICT });
+  try {
+    assert.strictEqual(relay.classifyTmuxPane(IDLE_CHROME_NO_VERDICT), relay.PANE_STATE_IDLE_COMPLETE,
+      'setup: this is exactly the chrome that used to complete a task by itself');
+    relay.setCliReady(true);
+    assignTask(relay, 't-chrome-only');
+    relay.__crashTick();
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 0,
+      'one frame of idle chrome must no longer end a task');
+    assert.ok(relay.getCurrentTask(), 'the task is still held while the relay waits for a verdict');
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_progress' && m.status === 'working').length, 1,
+      'the relay must keep reporting the task as working, not silently do nothing');
+  } finally { teardown(relay); }
+});
+
+test('#5376 a pane that resumes work inside the grace window is never completed', () => {
+  // The misread, modelled. The pane shows a duration summary and idle chrome
+  // mid-turn; the CLI then carries on. Under the old contract that first frame
+  // WAS the completion, and the hub reassigned an issue whose agent was still
+  // working on it. The grace window has to actually absorb this, and the
+  // counter has to RESET rather than merely pause.
+  const MIDTURN_IDLE_FRAME = [
+    '✻ Cogitated for 1m 02s',
+    '❯ ',
+    '  ⏵⏵ auto mode on (shift+tab to cycle)',
+  ].join('\n');
+  const BACK_TO_WORK = [
+    '● Bash(go test ./...)',
+    '✻ Cogitating… (esc to interrupt)',
+  ].join('\n');
+  let pane = MIDTURN_IDLE_FRAME;
+  const relay = loadRelay({ backend: 'claude', paneText: () => pane });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-midturn');
+    // Every tick of the window but the last.
+    for (let i = 0; i < relay.CHROME_IDLE_GRACE_TICKS - 1; i++) relay.__crashTick();
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 0);
+    // The turn was never over.
+    pane = BACK_TO_WORK;
+    relay.__crashTick();
+    assert.strictEqual(relay.getChromeIdleTicks(), 0,
+      'resumed work must RESET the grace counter, not leave it primed to fire on the next idle frame');
+    // And a single later idle frame must not cash in the earlier ticks.
+    pane = MIDTURN_IDLE_FRAME;
+    relay.__crashTick();
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 0,
+      'one idle frame after a reset must not complete the task');
+    assert.ok(relay.getCurrentTask(), 'the task is still held');
+  } finally { teardown(relay); }
+});
+
+test('#5376 a non-compliant agent still completes — via the bounded chrome-idle fallback', () => {
+  // The fallback decision, pinned. Option (a) — hold until the progress lease
+  // expires — was rejected because a non-compliant agent that genuinely
+  // finished draws nothing more, so the lease is never renewed and the task
+  // dies as an `environment` FAILURE with its PR already open. This asserts
+  // the choice that was made instead: bounded grace, then complete, labelled
+  // so the non-compliance is visible.
+  const IDLE_NO_VERDICT = [
+    '● Opened https://github.com/foo/bar/pull/777',
+    '✻ Cogitated for 9m 24s',
+    '❯ ',
+    '  ⏵⏵ auto mode on (shift+tab to cycle)',
+  ].join('\n');
+  const relay = loadRelay({ backend: 'claude', paneText: IDLE_NO_VERDICT });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-noncompliant');
+    graceTicks(relay, () => relay.__crashTick());
+    const completed = relay.__sent.filter(m => m.type === 'task_complete');
+    assert.strictEqual(completed.length, 1,
+      'an agent that never emits the sentinel must still be able to finish a task');
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_failed').length, 0,
+      'the fallback must never turn a finished task into a failure');
+    assert.strictEqual(completed[0].completion_signal, 'chrome_idle',
+      'the weaker signal must be labelled, so per-backend non-compliance is measurable');
+    assert.strictEqual(completed[0].pr_url, 'https://github.com/foo/bar/pull/777');
+  } finally { teardown(relay); }
+});
+
+test('#5376 an idle pane awaiting its verdict is not handed to the stall backstop', () => {
+  // The trap in the fallback. An idle pane is byte-for-byte identical frame to
+  // frame, so if the grace window merely declined to complete and fell through
+  // to the stall detector, a finished task would be handed back as an
+  // `environment` failure — the #4127/#4182 shape, reintroduced by the very
+  // change meant to end it. The stall clock is aged past its timeout on every
+  // tick here to prove the IDLE_COMPLETE branch owns the pane throughout.
+  const IDLE_NO_VERDICT = [
+    '✻ Cogitated for 9m 24s',
+    '❯ ',
+    '  ⏵⏵ auto mode on (shift+tab to cycle)',
+  ].join('\n');
+  const relay = loadRelay({ backend: 'claude', paneText: IDLE_NO_VERDICT });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-idle-stall');
+    graceTicks(relay, () => {
+      relay.__agePaneStallClock(relay.PANE_STALL_TIMEOUT_MS + 1);
+      relay.__stallTick();
+    });
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_failed').length, 0,
+      'waiting for a verdict must never be charged to the stall backstop');
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 1);
+  } finally { teardown(relay); }
+});
+
+test('#5376 a verdict does NOT launder an API error into a completion', () => {
+  // A stale sentinel from earlier in the transcript, sitting above a turn that
+  // ended in an authorization refusal. The verdict path must not be able to
+  // report this as a success — that is #5094 and #4400 in a new coat, and
+  // those branches own this pane.
+  const VERDICT_ABOVE_FATAL_ERROR = [
+    'HIVE_VERDICT: complete — finished the previous piece',
+    '● Continuing with the next part…',
+    'API Error: 403 Forbidden',
+    '❯ ',
+    '  ⏵⏵ auto mode on (shift+tab to cycle)',
+  ].join('\n');
+  const relay = loadRelay({ backend: 'claude', paneText: VERDICT_ABOVE_FATAL_ERROR });
+  try {
+    assert.strictEqual(relay.classifyTmuxPane(VERDICT_ABOVE_FATAL_ERROR), relay.PANE_STATE_FATAL_API_ERROR,
+      'setup: this pane must classify as a fatal API error');
+    relay.setCliReady(true);
+    assignTask(relay, 't-verdict-vs-error');
+    relay.__crashTick();
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 0,
+      'a turn that ended in an API failure shipped nothing and must not be booked complete');
+    const failed = relay.__sent.filter(m => m.type === 'task_failed');
+    assert.strictEqual(failed.length, 1, 'it must be handed back honestly');
+    assert.strictEqual(failed[0].failure_kind, 'environment');
+  } finally { teardown(relay); }
+});
+
+test('#5376 the grace window does not carry across tasks', () => {
+  // Idle ticks accumulated while the previous task wound down must never count
+  // toward ending the next one — the same per-task scoping bug #5094 fixed for
+  // the retry budget and #5281 for the autonomy nudge.
+  const IDLE_NO_VERDICT = ['✻ Cogitated for 1m', '❯ ', '  ⏵⏵ auto mode on (shift+tab to cycle)'].join('\n');
+  const relay = loadRelay({ backend: 'claude', paneText: IDLE_NO_VERDICT });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-one');
+    graceTicks(relay, () => relay.__crashTick());
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 1, 'setup: first task completes');
+
+    assignTask(relay, 't-two');
+    assert.strictEqual(relay.getChromeIdleTicks(), 0, 'a new task starts with a clean grace counter');
+    relay.__crashTick();
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete' && m.task_id === 't-two').length, 0,
+      'the second task must earn its own grace window, not inherit the first one\'s');
+  } finally { teardown(relay); }
+});
+
+// --- detectCompletionVerdict / detectHiveVerdict (#5376) ---------------------
+
+test('#5376 detectCompletionVerdict accepts complete and no_work_needed, and nothing else', () => {
+  const relay = loadRelay({});
+  try {
+    const c = relay.detectCompletionVerdict(['work happened', 'HIVE_VERDICT: complete — shipped PR #1']);
+    assert.strictEqual(c.verdict, 'complete');
+    assert.strictEqual(c.reason, 'shipped PR #1');
+
+    // no_work_needed IS a completion: it is the agent concluding the task with
+    // nothing to ship. Requiring a second line after it would make a compliant
+    // agent look non-compliant.
+    assert.strictEqual(relay.detectCompletionVerdict(['HIVE_VERDICT: no_work_needed — gated']).verdict,
+      'no_work_needed');
+
+    // Codex's leading bullet is presentation chrome, not part of the verdict.
+    assert.strictEqual(relay.detectCompletionVerdict(['  • HIVE_VERDICT: complete - done']).verdict, 'complete');
+    // Case-insensitive, as the no_work_needed marker has always been.
+    assert.strictEqual(relay.detectCompletionVerdict(['hive_verdict: COMPLETE']).verdict, 'complete');
+
+    // An invented verdict is not a completion.
+    assert.strictEqual(relay.detectCompletionVerdict(['HIVE_VERDICT: probably_fine — eh']), null);
+  } finally { teardown(relay); }
+});
+
+test('#5376 the completion sentinel inherits the anti-false-positive guards, not a second parser', () => {
+  // These are the guards #3987/#4265 built for no_work_needed. Extending the
+  // family must not have created a weaker parser alongside the hardened one —
+  // if it had, the prompt's own echo would read as the agent finishing before
+  // it started.
+  const relay = loadRelay({});
+  try {
+    // The prompt's placeholder, wrapped by tmux to a visual line start.
+    assert.strictEqual(relay.detectCompletionVerdict(['HIVE_VERDICT: complete — <short reason>']), null,
+      'the prompt echo must never read as a completion');
+    // Quoted mid-sentence — the prompt instruction itself.
+    assert.strictEqual(
+      relay.detectCompletionVerdict(["print a line of the exact form 'HIVE_VERDICT: complete — <reason>'"]), null,
+      'an unanchored match would complete every task the moment the prompt was typed');
+    // Prose that merely begins with the verdict word.
+    assert.strictEqual(relay.detectCompletionVerdict(['HIVE_VERDICT: completely_wrong']), null);
+    // Junk in, null out — every caller is on a best-effort terminal-capture path.
+    assert.strictEqual(relay.detectCompletionVerdict([]), null);
+    assert.strictEqual(relay.detectCompletionVerdict('not-an-array'), null);
+    assert.strictEqual(relay.detectCompletionVerdict(['ordinary output']), null);
+  } finally { teardown(relay); }
+});
+
+test('#5376 the newest verdict wins, so a stale one cannot end a later turn', () => {
+  const relay = loadRelay({});
+  try {
+    const v = relay.detectCompletionVerdict([
+      'HIVE_VERDICT: no_work_needed — nothing here',
+      'actually, on reflection, there was work',
+      'HIVE_VERDICT: complete — opened PR #2',
+    ]);
+    assert.strictEqual(v.verdict, 'complete');
+    assert.strictEqual(v.reason, 'opened PR #2');
+  } finally { teardown(relay); }
+});
+
+test('#5376 no_work_needed detection is unchanged by the shared parser', () => {
+  // detectNoWorkVerdict feeds the hub's long offer-suppression window (#3987)
+  // and the HEADLESS completion path, neither of which this change touches.
+  // It must not have started matching `complete`.
+  const relay = loadRelay({});
+  try {
+    assert.strictEqual(relay.detectNoWorkVerdict(['HIVE_VERDICT: complete — shipped']), null,
+      'a completion verdict is not a no_work_needed verdict');
+    assert.strictEqual(relay.detectNoWorkVerdict(['HIVE_VERDICT: no_work_needed — gated']).verdict,
+      'no_work_needed');
+  } finally { teardown(relay); }
+});
+
+test('#5376 a no_work_needed verdict still completes the task and reports the verdict', () => {
+  // End to end on the interactive path: the #3987 contract must survive the
+  // demotion — and, now, complete on the sentinel rather than waiting out the
+  // grace window for chrome to agree.
+  const NO_WORK_PANE = [
+    'HIVE_VERDICT: no_work_needed — remainder is gated on a maintainer decision',
+    '✻ Cogitating… (esc to interrupt)',
+  ].join('\n');
+  const relay = loadRelay({ backend: 'claude', paneText: NO_WORK_PANE });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-nowork');
+    relay.__crashTick();
+    const completed = relay.__sent.filter(m => m.type === 'task_complete');
+    assert.strictEqual(completed.length, 1, 'no_work_needed is a completion');
+    assert.strictEqual(completed[0].verdict, 'no_work_needed');
+    assert.strictEqual(completed[0].verdict_reason, 'remainder is gated on a maintainer decision');
+    assert.strictEqual(completed[0].completion_signal, 'verdict');
+  } finally { teardown(relay); }
+});
+
+test('#5376 a shipped PR still overrides a no_work_needed claim', () => {
+  // #3987: a visible PR contradicts "nothing shippable", so the verdict is not
+  // reported (the hub would override it with "shipped" anyway). The task still
+  // completes — on the sentinel.
+  const PANE = [
+    'Opened https://github.com/foo/bar/pull/31',
+    'HIVE_VERDICT: no_work_needed — I thought there was nothing to do',
+    '✻ Cogitating… (esc to interrupt)',
+  ].join('\n');
+  const relay = loadRelay({ backend: 'claude', paneText: PANE });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-nowork-with-pr');
+    relay.__crashTick();
+    const completed = relay.__sent.filter(m => m.type === 'task_complete');
+    assert.strictEqual(completed.length, 1);
+    assert.strictEqual(completed[0].pr_url, 'https://github.com/foo/bar/pull/31');
+    assert.strictEqual(completed[0].verdict, undefined,
+      'a visible PR contradicts no_work_needed, so the claim must not be forwarded');
+  } finally { teardown(relay); }
+});
+
+test('#5376 classifyTmuxPane keeps every one of its stall/liveness branches', () => {
+  // The demotion removed the classifier's AUTHORITY over completion, not its
+  // patterns. Those forty-odd patterns are still correct for "is this pane
+  // moving", which is what the stall backstop and the blocked/error branches
+  // read. Deleting them would blind those paths.
+  const relay = loadRelay({ backend: 'claude' });
+  try {
+    assert.strictEqual(relay.classifyTmuxPane('✻ Cogitating… (esc to interrupt)'), relay.PANE_STATE_WORKING);
+    assert.strictEqual(
+      relay.classifyTmuxPane('✻ Cogitated for 4m\n❯ \n  ⏵⏵ auto mode on (shift+tab to cycle)'),
+      relay.PANE_STATE_IDLE_COMPLETE,
+      'IDLE_COMPLETE still exists — it is a liveness reading now, not a completion');
+  } finally { teardown(relay); }
+});
+
+test('#5376 recordChromeIdleTick fires only after the full consecutive window', () => {
+  const relay = loadRelay({});
+  try {
+    relay.resetChromeIdleGrace();
+    for (let i = 1; i < relay.CHROME_IDLE_GRACE_TICKS; i++) {
+      assert.strictEqual(relay.recordChromeIdleTick(true), false, `tick ${i} must not fire`);
+    }
+    assert.strictEqual(relay.recordChromeIdleTick(true), true, 'the last tick of the window fires');
+    // Consecutive, not cumulative.
+    relay.resetChromeIdleGrace();
+    relay.recordChromeIdleTick(true);
+    assert.strictEqual(relay.recordChromeIdleTick(false), false);
+    assert.strictEqual(relay.getChromeIdleTicks(), 0, 'a non-idle tick resets the window');
   } finally { teardown(relay); }
 });
 
