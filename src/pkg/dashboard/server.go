@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kubestellar/hive/pkg/acmmadvisor"
 	"github.com/kubestellar/hive/pkg/agent"
 	"github.com/kubestellar/hive/pkg/config"
 	"github.com/kubestellar/hive/pkg/github"
@@ -320,23 +321,29 @@ type StatusPayload struct {
 	// from the shallow /api/health liveness signal or the repo-workflow
 	// Health map above, so the pill can never show "Health OK" while the
 	// spoke's own agents are down (#2465).
-	DeepHealth          map[string]any         `json:"deepHealth,omitempty"`
-	Budget              FrontendBudget         `json:"budget"`
-	CadenceMatrix       []FrontendCadence      `json:"cadenceMatrix"`
-	GHRateLimits        map[string]any         `json:"ghRateLimits"`
-	AgentMetrics        map[string]any         `json:"agentMetrics"`
-	Hold                FrontendHold           `json:"hold"`
-	IssueToMerge        map[string]any         `json:"issueToMerge"`
-	ACMMLevel           int                    `json:"acmmLevel"`
-	ACMMLevelConfigured bool                   `json:"acmmLevelConfigured"`
-	ACMMPackAgents      []string               `json:"acmmPackAgents"`
-	AdvisoryDigest      any                    `json:"advisoryDigest,omitempty"`
-	ContributorPool     *ContributorPoolStatus `json:"contributorPool,omitempty"`
-	SystemResources     *SystemResources       `json:"systemResources,omitempty"`
-	GitHubAppRequired   bool                   `json:"githubAppRequired,omitempty"`
-	GitHubAppInstallURL string                 `json:"githubAppInstallURL,omitempty"`
-	GitHubAppPermIssue  string                 `json:"githubAppPermIssue,omitempty"`
-	GitHubAppState      string                 `json:"githubAppState,omitempty"`
+	DeepHealth          map[string]any    `json:"deepHealth,omitempty"`
+	Budget              FrontendBudget    `json:"budget"`
+	CadenceMatrix       []FrontendCadence `json:"cadenceMatrix"`
+	GHRateLimits        map[string]any    `json:"ghRateLimits"`
+	AgentMetrics        map[string]any    `json:"agentMetrics"`
+	Hold                FrontendHold      `json:"hold"`
+	IssueToMerge        map[string]any    `json:"issueToMerge"`
+	ACMMLevel           int               `json:"acmmLevel"`
+	ACMMLevelConfigured bool              `json:"acmmLevelConfigured"`
+	ACMMPackAgents      []string          `json:"acmmPackAgents"`
+	// ACMMAdvice is the advisory level-up recommendation (#5225), derived from
+	// the same live signals the /api/acmm-recommendation endpoint serves so the
+	// two surfaces can never drift. It is ADVISORY ONLY: nothing acts on it
+	// automatically — a human approves a level change via handlePackSetLevel.
+	// Omitted when it could not be computed (e.g. no config yet).
+	ACMMAdvice          *acmmadvisor.Recommendation `json:"acmmAdvice,omitempty"`
+	AdvisoryDigest      any                         `json:"advisoryDigest,omitempty"`
+	ContributorPool     *ContributorPoolStatus      `json:"contributorPool,omitempty"`
+	SystemResources     *SystemResources            `json:"systemResources,omitempty"`
+	GitHubAppRequired   bool                        `json:"githubAppRequired,omitempty"`
+	GitHubAppInstallURL string                      `json:"githubAppInstallURL,omitempty"`
+	GitHubAppPermIssue  string                      `json:"githubAppPermIssue,omitempty"`
+	GitHubAppState      string                      `json:"githubAppState,omitempty"`
 	// GitHubAppInstallMissing is CONFIG TRUTH, independent of any auth probe
 	// or classification: a real App is named (app_id set, not the placeholder)
 	// but installation_id is 0. That state alone means every token is a
@@ -1664,6 +1671,15 @@ func (s *Server) UpdateStatusIfFresh(status *StatusPayload, buildEpoch uint64) b
 	}
 
 	status.InferenceBackends = s.buildInferenceBackends()
+
+	// Attach the advisory ACMM level-up recommendation (#5225) from the SAME
+	// signal-collection path the /api/acmm-recommendation endpoint uses, so the
+	// endpoint and the status payload cannot report different advice. Pure
+	// computation over already-collected signals — no I/O on this hot path.
+	// ADVISORY ONLY: this must never auto-apply a level.
+	if advice := acmmadvisor.RecommendFromStatus(s.buildACMMStatusInputs()); advice.CurrentLevel > 0 {
+		status.ACMMAdvice = &advice
+	}
 
 	// Deep checks travel inside the status payload so every dashboard surface
 	// (header pill included) renders the same truth the heartbeat sends the

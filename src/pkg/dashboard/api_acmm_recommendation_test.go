@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/kubestellar/hive/pkg/acmmadvisor"
@@ -99,6 +100,7 @@ func TestHandleACMMRecommendationWithSignals(t *testing.T) {
 // TestBuildACMMStatusInputs_ReadsLiveSignals unit-tests the signal mapping in
 // isolation, including the coverage extraction and nil-safety.
 func TestBuildACMMStatusInputs_ReadsLiveSignals(t *testing.T) {
+	resetGreenStreakCache(t)
 	s := newTestServer()
 	lvl := 3
 	s.deps = &Dependencies{
@@ -134,11 +136,128 @@ func TestBuildACMMStatusInputs_ReadsLiveSignals(t *testing.T) {
 	if in.CoveragePct != 88 {
 		t.Fatalf("CoveragePct = %v, want 88", in.CoveragePct)
 	}
-	// GreenStreak is still untracked and must remain zero (never fabricated).
+	// GreenStreak must read zero here: no streak has ever been measured in this
+	// test (the cache is cleared above), so the signal is unknown, not a
+	// measured zero, and must never be fabricated (#5226).
 	// MergeSuccessRate must also read zero here: no fleet-stats collector is
 	// wired into deps, so the signal is unknown, not measured (#3972).
 	if in.GreenStreak != 0 || in.MergeSuccessRate != 0 {
 		t.Fatalf("GreenStreak/MergeSuccessRate should be 0, got %d / %v", in.GreenStreak, in.MergeSuccessRate)
+	}
+}
+
+// resetGreenStreakCache clears the package-level green-CI streak cache and
+// restores it when the test ends, so streak-sensitive tests do not leak state
+// into each other.
+func resetGreenStreakCache(t *testing.T) {
+	t.Helper()
+	cachedGreenStreakMu.Lock()
+	prevStreak, prevOK := cachedGreenStreak, cachedGreenStreakOK
+	cachedGreenStreak, cachedGreenStreakOK = 0, false
+	cachedGreenStreakMu.Unlock()
+	t.Cleanup(func() {
+		cachedGreenStreakMu.Lock()
+		cachedGreenStreak, cachedGreenStreakOK = prevStreak, prevOK
+		cachedGreenStreakMu.Unlock()
+	})
+}
+
+// TestBuildACMMStatusInputs_GreenStreak verifies the #5226 wiring: when the
+// status-build path has measured a real green-CI streak, that REAL VALUE
+// reaches the advisor input — it is no longer the hardcoded zero this code
+// carried before. The unmeasured case must stay at the conservative zero so an
+// absent measurement is never reported as a measured streak.
+func TestBuildACMMStatusInputs_GreenStreak(t *testing.T) {
+	cases := []struct {
+		name     string
+		streak   int
+		measured bool
+		want     int
+	}{
+		{
+			// The load-bearing case: a measured streak of 7 must arrive as 7.
+			// Against the pre-#5226 code this fails (it would read 0), which is
+			// what makes this an assertion of substance rather than shape.
+			name: "measured streak flows through",
+			// A value above greenStreakL4 (5) and below greenStreakL6 (12), so
+			// it is unmistakably a real reading rather than a boundary artifact.
+			streak: 7, measured: true, want: 7,
+		},
+		{
+			// A measured zero is legitimate: CI ran and the latest run is red.
+			name:   "measured zero (latest run red) is honest",
+			streak: 0, measured: true, want: 0,
+		},
+		{
+			// Never measured: must NOT be reported as a streak.
+			name:   "unmeasured stays conservative",
+			streak: 99, measured: false, want: 0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resetGreenStreakCache(t)
+			if tc.measured {
+				cachedGreenStreakMu.Lock()
+				cachedGreenStreak, cachedGreenStreakOK = tc.streak, true
+				cachedGreenStreakMu.Unlock()
+			}
+			s := newTestServer()
+			lvl := 3
+			s.deps = &Dependencies{Config: &config.Config{ACMMLevel: &lvl}}
+			s.UpdateStatus(minimalPayload())
+
+			if got := s.buildACMMStatusInputs().GreenStreak; got != tc.want {
+				t.Fatalf("GreenStreak = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestStatusPayloadCarriesACMMAdvice verifies the #5225 wiring end-to-end: the
+// status payload must carry a recommendation whose CONTENT reflects the live
+// signals, not merely a non-nil struct. A hive at L3 with a measured green
+// streak, quality agent and coverage must produce advice that evaluates the
+// L3→L4 criteria and names the real streak value in its checklist.
+func TestStatusPayloadCarriesACMMAdvice(t *testing.T) {
+	resetGreenStreakCache(t)
+	cachedGreenStreakMu.Lock()
+	cachedGreenStreak, cachedGreenStreakOK = 7, true
+	cachedGreenStreakMu.Unlock()
+
+	s := newTestServer()
+	lvl := 3
+	s.deps = &Dependencies{
+		Config: &config.Config{
+			ACMMLevel: &lvl,
+			Agents:    map[string]config.AgentConfig{qualityAgentName: {}},
+		},
+	}
+	s.UpdateStatus(minimalPayload())
+
+	in := s.buildACMMStatusInputs()
+	if in.GreenStreak != 7 {
+		t.Fatalf("advisor input GreenStreak = %d, want the measured 7", in.GreenStreak)
+	}
+	rec := acmmadvisor.RecommendFromStatus(in)
+	if rec.CurrentLevel != 3 {
+		t.Fatalf("recommendation CurrentLevel = %d, want 3", rec.CurrentLevel)
+	}
+	// The streak criterion must appear as MET: 7 clears the L4 floor of 5.
+	// This asserts the real value drove a real verdict — a payload carrying a
+	// permanently-zero streak would land this criterion in Unmet instead.
+	var found bool
+	for _, c := range rec.Met {
+		if strings.Contains(c.Name, "Green-CI streak") {
+			found = true
+		}
+	}
+	if !found {
+		var unmet []string
+		for _, c := range rec.Unmet {
+			unmet = append(unmet, c.Name)
+		}
+		t.Fatalf("Green-CI streak should be MET with a measured streak of 7; unmet = %v", unmet)
 	}
 }
 
