@@ -161,6 +161,83 @@ else
 fi
 rm -f /tmp/out.$$
 
+# --- Case 8: --vault-root rejects a parent escape EVEN THOUGH the target
+# exists on disk (the #5309 bug: the repo view lies about the deployed vault) --
+vault="$tmp/vault"
+mkdir -p "$vault/docs" "$vault/wiki"
+cat > "$vault/docs/policy.md" <<'EOF'
+# Policy
+
+This file really does exist in the repo checkout.
+EOF
+cat > "$vault/wiki/agents.md" <<'EOF'
+# Agents
+
+See [policy](../docs/policy.md).
+EOF
+# Sanity: without --vault-root the very same link is considered valid, which
+# is precisely why pointing the plain checker at the wiki would not fix #5309.
+if (cd "$vault" && python3 "$checker" wiki) >/tmp/out.$$ 2>&1; then
+  note_ok "source-layout mode still accepts an existing ../ target (baseline)"
+else
+  note_fail "baseline source-layout run should pass, got:"; cat /tmp/out.$$
+fi
+rm -f /tmp/out.$$
+if (cd "$vault" && python3 "$checker" wiki --vault-root) >/tmp/out.$$ 2>&1; then
+  note_fail "--vault-root should reject '../docs/policy.md' despite it existing"
+else
+  grep -q "escapes the wiki vault root" /tmp/out.$$ \
+    && note_ok "--vault-root rejects a parent escape whose target exists on disk" \
+    || { note_fail "expected vault-escape message in output:"; cat /tmp/out.$$; }
+fi
+rm -f /tmp/out.$$
+
+# --- Case 9: in-vault links keep working under --vault-root ---------------
+invault="$tmp/invault/wiki"
+mkdir -p "$invault/sub"
+cat > "$invault/agents.md" <<'EOF'
+# Agents
+
+Sibling: [getting started](getting-started.md#first-run).
+Subdir: [deep](sub/deep.md).
+Absolute outbound: [policy](https://github.com/kubestellar/hive/blob/v4/src/docs/policy.md).
+EOF
+cat > "$invault/getting-started.md" <<'EOF'
+# Getting started
+
+## First run
+
+Text.
+EOF
+cat > "$invault/sub/deep.md" <<'EOF'
+# Deep
+
+Back up within the vault: [agents](../agents.md).
+EOF
+if (cd "$tmp/invault" && python3 "$checker" wiki --vault-root) >/tmp/out.$$ 2>&1; then
+  note_ok "in-vault siblings, subdirs, in-vault '../' and blob/v4 URLs all pass"
+else
+  note_fail "in-vault links should pass under --vault-root, got:"; cat /tmp/out.$$
+fi
+rm -f /tmp/out.$$
+
+# --- Case 10: a broken in-vault link is still caught under --vault-root ---
+vbroken="$tmp/vbroken/wiki"
+mkdir -p "$vbroken"
+cat > "$vbroken/a.md" <<'EOF'
+# A
+
+See [gone](nowhere.md).
+EOF
+if (cd "$tmp/vbroken" && python3 "$checker" wiki --vault-root) >/tmp/out.$$ 2>&1; then
+  note_fail "missing in-vault target should still fail under --vault-root"
+else
+  grep -q "nowhere.md does not exist" /tmp/out.$$ \
+    && note_ok "ordinary broken-link checking still applies under --vault-root" \
+    || { note_fail "expected 'does not exist' in output:"; cat /tmp/out.$$; }
+fi
+rm -f /tmp/out.$$
+
 if [ "$fail" -ne 0 ]; then
   echo "test-check-docs-links FAILED"
   exit 1

@@ -25,7 +25,28 @@ link-rewrite pass (Case 2) only rewrites such links to a GitHub blob URL; it
 does not verify the target exists. A stale escape link is a real 404 on the
 published site history/blob view.
 
-Usage: src/scripts/check-docs-links.py [docs-dir]  (default: src/docs)
+VAULT MODE (--vault-root): the wiki vault under src/deploy/data/wiki/ is NOT
+read from a repo checkout by its real audience. src/Dockerfile bakes
+`COPY src/deploy/data/ /opt/hive/seed-data/` and src/deploy/entrypoint.sh
+seeds it with `cp -rn /opt/hive/seed-data/* /data/`, so the vault lands at
+/data/wiki/ with NOTHING above it. A parent-relative link such as
+`../../../docs/acmm-policy-matrix.md` therefore resolves fine for a reviewer
+browsing this repo on GitHub and is a dead link for the operator reading the
+same page in a running hive — the audiences see different results from
+identical source, and the repo view is the one that lies.
+
+A plain relative-link check run from a checkout would call that link VALID,
+because the target genuinely exists at that path in the repo. So --vault-root
+does not model the source layout: it models the DEPLOYED layout. Every
+relative link is resolved against the vault root as its containment boundary,
+and any target that escapes it is rejected outright regardless of whether the
+file exists in the repo. In-vault links (siblings, subdirectories) are still
+resolved and anchor-checked exactly as in src/docs/ mode. Outbound references
+from the wiki must use absolute https://github.com/kubestellar/hive/blob/v4/
+URLs, which work identically in the repo view and the deployed vault (#5308).
+
+Usage: src/scripts/check-docs-links.py [docs-dir] [--vault-root]
+       (default docs-dir: src/docs)
 Exit 0 with a per-file summary; exit 1 and print every broken link if any.
 """
 from __future__ import annotations
@@ -105,7 +126,19 @@ def extract_links(text: str) -> list[str]:
     return links
 
 
-def check_file(path: Path, repo_root: Path, heading_cache: dict[Path, set[str]]) -> list[str]:
+def check_file(
+    path: Path,
+    repo_root: Path,
+    heading_cache: dict[Path, set[str]],
+    vault_root: Path | None = None,
+) -> list[str]:
+    """Check one Markdown file.
+
+    repo_root is the containment boundary in normal (src/docs/) mode.
+    When vault_root is set, the boundary tightens to the vault directory,
+    because that directory is the whole filesystem the deployed reader has:
+    nothing above /data/wiki/ is reachable at runtime.
+    """
     problems = []
     text = path.read_text(encoding="utf-8", errors="replace")
     own_slugs = heading_cache.setdefault(path, heading_slugs(text))
@@ -125,11 +158,29 @@ def check_file(path: Path, repo_root: Path, heading_cache: dict[Path, set[str]])
 
         # Relative file link, resolved against this file's directory.
         resolved = (path.parent / path_part).resolve()
-        try:
-            resolved.relative_to(repo_root)
-        except ValueError:
-            problems.append(f"{path}: link '{raw}' escapes the repository")
-            continue
+
+        if vault_root is not None:
+            # Deployed-layout rule. The vault is seeded flat at /data/wiki/,
+            # so a target outside it cannot resolve for the operator no matter
+            # what exists in the repo checkout. Reject before any exists()
+            # test — the on-disk file is exactly the false reassurance that
+            # made this class of break invisible in review (#5309).
+            try:
+                resolved.relative_to(vault_root)
+            except ValueError:
+                problems.append(
+                    f"{path}: link '{raw}' escapes the wiki vault root; the vault is "
+                    f"seeded flat at /data/wiki/, so this cannot resolve in a running "
+                    f"hive even though the target exists in the repo. Use an absolute "
+                    f"https://github.com/kubestellar/hive/blob/v4/... URL instead."
+                )
+                continue
+        else:
+            try:
+                resolved.relative_to(repo_root)
+            except ValueError:
+                problems.append(f"{path}: link '{raw}' escapes the repository")
+                continue
 
         if not resolved.exists():
             problems.append(f"{path}: broken link '{raw}' -> {resolved.relative_to(repo_root)} does not exist")
@@ -150,12 +201,27 @@ def check_file(path: Path, repo_root: Path, heading_cache: dict[Path, set[str]])
 
 
 def main() -> int:
-    docs_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("src/docs")
+    args = sys.argv[1:]
+    vault_mode = "--vault-root" in args
+    positional = [a for a in args if not a.startswith("--")]
+    unknown = [a for a in args if a.startswith("--") and a != "--vault-root"]
+    if unknown or len(positional) > 1:
+        print(
+            "usage: check-docs-links.py [docs-dir] [--vault-root]",
+            file=sys.stderr,
+        )
+        return 2
+
+    docs_dir = Path(positional[0]) if positional else Path("src/docs")
     if not docs_dir.is_dir():
         print(f"no such directory: {docs_dir}", file=sys.stderr)
         return 1
 
     repo_root = Path.cwd().resolve()
+    # In vault mode the checked directory IS the reader's root: it is seeded to
+    # /data/wiki/ with nothing above it, so it doubles as the containment
+    # boundary that models the deployed layout.
+    vault_root = docs_dir.resolve() if vault_mode else None
     md_files = sorted(docs_dir.rglob("*.md"))
     if not md_files:
         print(f"no Markdown files found under {docs_dir}")
@@ -164,9 +230,10 @@ def main() -> int:
     heading_cache: dict[Path, set[str]] = {}
     all_problems: list[str] = []
     for f in md_files:
-        all_problems.extend(check_file(f, repo_root, heading_cache))
+        all_problems.extend(check_file(f, repo_root, heading_cache, vault_root))
 
-    print(f"checked {len(md_files)} files under {docs_dir}")
+    mode = " (deployed flat-vault layout)" if vault_mode else ""
+    print(f"checked {len(md_files)} files under {docs_dir}{mode}")
     if all_problems:
         print(f"\n{len(all_problems)} broken link(s):\n")
         for p in all_problems:
