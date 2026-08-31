@@ -7420,11 +7420,21 @@ func (m *Manager) setupCodexHome(agent *AgentProcess) {
 // dir was written as dev/root and the agent EACCESes on it at startup — the
 // same failure class cavemanNpmCachePath removes foreign-owned caches for.
 //
+// The primary repair is an in-place `chown -R` to the agent UID (#5379): an
+// agent RENAME is the common trigger — the per-agent CODEX_HOME keeps the
+// PREVIOUS agent's owner — and a rename should not discard the lane's codex
+// state (cache/, .tmp/, history). Chowning also avoids walking the tree from
+// Go entirely, which matters because /data on hosted spokes is an NFSv3 PVC
+// where os.RemoveAll's openat-based descent fails with EACCES even as root.
+//
+// Only when the chown itself fails do we fall back to a rebuild, and that
+// rebuild shells out to `rm -rf` (via su-exec, the same idiom the rest of
+// setupCodexHome uses) rather than os.RemoveAll, for the same NFSv3 reason.
 // Hive never writes config.toml, so any content is operator-authored: the
-// heal salvages it when the manager can read it and returns the bytes for
-// setupCodexHome to write back as the agent after the re-mkdir. A dir that
-// cannot be rebuilt (root-owned, no write access) is left alone with an
-// Error log naming the owner and the manual fix.
+// rebuild path salvages it when the manager can read it and returns the bytes
+// for setupCodexHome to write back as the agent after the re-mkdir. A dir that
+// can be neither chowned nor removed is left alone with an Error log naming
+// the owner and the manual fix.
 func (m *Manager) healCodexHomeOwnership(agent *AgentProcess, dir, agentUser string) []byte {
 	owner := fileOwnerUID(dir)
 	if owner < 0 {
@@ -7434,10 +7444,20 @@ func (m *Manager) healCodexHomeOwnership(agent *AgentProcess, dir, agentUser str
 		return m.healForeignCodexConfig(agent, dir, agentUser)
 	}
 	// Codex's app-server requires the current UID to own CODEX_HOME itself,
-	// so a foreign-owned dir can only be rebuilt, not patched around.
+	// so a foreign-owned dir must be re-owned (preferred) or rebuilt.
+	chownErr := m.chownCodexHomeToAgent(agent, dir)
+	if chownErr == nil {
+		m.logger.Warn("re-owned codex home that was owned by the wrong UID (agent rename); codex state preserved", "agent", agent.Name, "dir", dir, "ownerUID", owner, "wantUID", agent.UID)
+		// healForeignCodexConfig is still the right follow-up: the recursive
+		// chown fixed every entry it could reach, but a config.toml that is a
+		// symlink or otherwise skipped stays foreign-owned, and that narrower
+		// heal removes it (salvaging content) so codex can read its config.
+		return m.healForeignCodexConfig(agent, dir, agentUser)
+	}
+	m.logger.Warn("could not chown codex home to the agent; falling back to rebuild", "agent", agent.Name, "dir", dir, "ownerUID", owner, "wantUID", agent.UID, "error", chownErr)
 	cfgPath := filepath.Join(dir, "config.toml")
 	salvaged, readErr := os.ReadFile(cfgPath)
-	if err := os.RemoveAll(dir); err != nil {
+	if err := removeTreeAsRoot(dir); err != nil {
 		m.logger.Error("codex home is owned by the wrong UID and could not be rebuilt; codex will fail until it is chowned or removed manually", "agent", agent.Name, "dir", dir, "ownerUID", owner, "wantUID", agent.UID, "error", err)
 		return nil
 	}
@@ -7446,6 +7466,56 @@ func (m *Manager) healCodexHomeOwnership(agent *AgentProcess, dir, agentUser str
 		return nil
 	}
 	return salvaged
+}
+
+// codexHomeChownUserSpec is the identity the recursive chown runs as. Only
+// root can give a directory away to another UID, and the manager runs as dev,
+// so this goes through the same SUID su-exec helper every other UID switch in
+// setupCodexHome uses (see the Dockerfile C6 note: su-exec is 4750
+// root:hive-launch, exec-able by dev but NOT by any agent UID).
+const codexHomeChownUserSpec = "root"
+
+// chownCodexHomeToAgent recursively gives CODEX_HOME to the agent UID.
+//
+// NFS SAFETY (#5379): this MUST shell out. /data on hosted spokes is NFSv3,
+// where Go's own tree walks (os.RemoveAll, filepath.WalkDir + os.Lchown) fail
+// mid-descent with "openfdat ...: permission denied" because openat-based
+// directory descriptors are not reliably supported there. `chown -R` in
+// coreutils does not use that access pattern and is verified working on the
+// affected mount. Do not "simplify" this back into a Go walk.
+//
+// -h chowns symlinks THEMSELVES rather than following them: auth.json is a
+// symlink into the SHARED credential file, which must keep its own ownership
+// and must never be rewritten through.
+func (m *Manager) chownCodexHomeToAgent(agent *AgentProcess, dir string) error {
+	return chownTreeAsRoot(dir, fmt.Sprintf("%d:%d", agent.UID, os.Getgid()))
+}
+
+// chownTreeAsRoot is a var, not a plain func, ONLY so tests can substitute a
+// harness that performs the same re-owning without the SUID helper (which
+// exists only inside the image). Production always uses the exec below.
+var chownTreeAsRoot = func(dir, spec string) error {
+	cmd := exec.Command("su-exec", codexHomeChownUserSpec, "chown", "-Rh", spec, dir)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return outputErr(fmt.Sprintf("chown -Rh %s %s", spec, dir), err, output)
+	}
+	return nil
+}
+
+// removeTreeAsRoot deletes a tree the manager may not own.
+//
+// NFS SAFETY (#5379): os.RemoveAll CANNOT be used here. It descends with
+// openat-based directory file descriptors, which fail with EACCES on the
+// NFSv3-backed /data PVC even for root — the exact wedge that left a renamed
+// agent's codex backend dead for days. A shell `rm -rf` on the identical path
+// succeeds immediately. Keep this as an exec, not a Go walk.
+// It is a var for the same test-substitution reason as chownTreeAsRoot.
+var removeTreeAsRoot = func(dir string) error {
+	cmd := exec.Command("su-exec", codexHomeChownUserSpec, "rm", "-rf", dir)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return outputErr(fmt.Sprintf("rm -rf %s", dir), err, output)
+	}
+	return nil
 }
 
 // healForeignCodexConfig handles the agent-owned-dir case: a config.toml
