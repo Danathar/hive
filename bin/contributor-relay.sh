@@ -205,6 +205,18 @@ const TRANSIENT_API_ERROR_NUDGE_MESSAGE = 'try again';
 const TRANSIENT_API_ERROR_MAX_NUDGES = 3;
 const TRANSIENT_API_ERROR_NUDGE_COOLDOWN_MS = 90000;
 
+// What the relay types at an unattended pane that stopped to ask a question
+// (kubestellar/hive#5281). The task prompts already tell agents to decide for
+// themselves — an agent that stops to ask is one that forgot, and a human
+// watching would type exactly this line. When nobody is watching, nobody does.
+//
+// Letters, spaces and one comma, by construction: tmuxSendNudge interpolates
+// this into a single-quoted `tmux send-keys -l '...'`, so a quote or a shell
+// metacharacter here would be a command-injection shaped bug rather than a
+// typo. There is a test pinning that.
+const AUTONOMY_NUDGE_MESSAGE =
+  'no human is available to answer, so proceed autonomously with your best judgment';
+
 // Cap on captured child output kept in memory / sent to the hub, so a chatty
 // CLI cannot grow the buffer without bound. The tail is what matters for an
 // audit trail, mirroring TMUX_TAIL_LINES on the interactive path.
@@ -1679,9 +1691,49 @@ function recentPaneLines(text, limit = 12) {
     .slice(-limit);
 }
 
-function paneLooksBlockedOnHuman(text) {
+// Why a blocked pane is blocked (kubestellar/hive#5281). BLOCKED_ON_HUMAN
+// conflates two populations, and only one of them can be helped without a
+// person:
+//
+//   question       — a plain "?", a y/N, an elicitation form. The agent forgot
+//                    its standing instruction to decide for itself, and a
+//                    one-line reminder is usually all it takes.
+//   menu           — a numbered menu. Deliberately NOT nudge-eligible: a menu
+//                    TUI may read typed text as a selection filter rather than
+//                    as chat input, so covering it properly needs Escape
+//                    handling this does not attempt.
+//   human-required — login, credential entry, trust/consent, permission. Only
+//                    a person can answer these, and typing at them is actively
+//                    harmful.
+const BLOCKED_REASON_QUESTION = 'question';
+const BLOCKED_REASON_MENU = 'menu';
+const BLOCKED_REASON_HUMAN_REQUIRED = 'human-required';
+
+// The confirmation half of the old blockingPatterns list: prompts an agent
+// working autonomously is entitled to answer for itself.
+const QUESTION_BLOCKING_PATTERNS = [
+  /\[[Yy]\/[Nn]\]|\([Yy]\/[Nn]\)|\b[Yy]es\/[Nn]o\b/,
+  /\b(?:continue|proceed|confirm|approve|allow|deny|accept|reject|choose|select)\b.*\?/i,
+  /\bPress Enter to continue\b/i,
+  /\bEnter to confirm\b/i,
+];
+
+// The other half: prompts where a person is the only possible answer. Kept as
+// its own list because it is a veto, not a detector — see
+// classifyBlockedOnHumanReason.
+const HUMAN_REQUIRED_BLOCKING_PATTERNS = [
+  /\b(?:approval|consent|trust this folder|Do you trust|Confirm folder trust)\b/i,
+  /\bpermission\b.*\b(?:allow|approve|confirm|continue|proceed)\b/i,
+  /\b(?:allow|approve|confirm|continue|proceed)\b.*\bpermission\b/i,
+  /\b(?:Allow|Approve|Run|Execute)\b.*\b(?:command|tool|edit|file|operation)\b/i,
+  /\b(?:Paste|Enter).*(?:API key|token|code|password)\b/i,
+];
+
+// classifyBlockedOnHumanReason returns one of the BLOCKED_REASON_* constants,
+// or null when the pane is not blocked at all.
+function classifyBlockedOnHumanReason(text) {
   const lines = recentPaneLines(text);
-  if (lines.length === 0) return false;
+  if (lines.length === 0) return null;
   const recent = lines.join('\n');
   const last = lines[lines.length - 1];
   const beforePrompt = [...lines].reverse().find(line =>
@@ -1722,21 +1774,36 @@ function paneLooksBlockedOnHuman(text) {
     /\bElicitation request timed out\b/i.test(recent) ||
     /\bTimeout waiting for user response\b/i.test(recent);
   const hasElicitationForm = (hasInputRequestLeadIn && hasFormStructure) || hasElicitationMarker;
-  const blockingPatterns = [
-    // Confirmation prompts and TUI continuation screens.
-    /\[[Yy]\/[Nn]\]|\([Yy]\/[Nn]\)|\b[Yy]es\/[Nn]o\b/,
-    /\b(?:continue|proceed|confirm|approve|allow|deny|accept|reject|choose|select)\b.*\?/i,
-    /\bPress Enter to continue\b/i,
-    /\bEnter to confirm\b/i,
-    // Permission/auth/onboarding prompts seen from Claude/Copilot/Goose/Bob.
-    /\b(?:approval|consent|trust this folder|Do you trust|Confirm folder trust)\b/i,
-    /\bpermission\b.*\b(?:allow|approve|confirm|continue|proceed)\b/i,
-    /\b(?:allow|approve|confirm|continue|proceed)\b.*\bpermission\b/i,
-    /\b(?:Allow|Approve|Run|Execute)\b.*\b(?:command|tool|edit|file|operation)\b/i,
-    /\b(?:Paste|Enter).*(?:API key|token|code|password)\b/i,
-  ];
+  const blockingPatterns = [...QUESTION_BLOCKING_PATTERNS, ...HUMAN_REQUIRED_BLOCKING_PATTERNS];
 
-  return hasQuestion || hasNumberedMenu || hasElicitationForm || blockingPatterns.some(re => re.test(beforePrompt));
+  const blocked = hasQuestion || hasNumberedMenu || hasElicitationForm ||
+    blockingPatterns.some(re => re.test(beforePrompt));
+  if (!blocked) return null;
+
+  // Human-required WINS over every other signal, and is asked of the whole
+  // recent window rather than just the line above the prompt (#5281). A trust
+  // dialog or a credential request often renders its heading a few lines up
+  // while the cursor line is a bare "Do you want to proceed?" — classifying
+  // that as an ordinary question is exactly the mistake that would type an
+  // autonomy reminder into a /login flow or submit it as a password.
+  //
+  // Widening the window can only move a pane from question to human-required,
+  // never make an unblocked pane blocked: `blocked` above is computed exactly
+  // as it always was. When in doubt, human-required — waiting costs 30 minutes,
+  // a wrong nudge costs a credential prompt answered with prose.
+  if (HUMAN_REQUIRED_BLOCKING_PATTERNS.some(re => re.test(recent))) {
+    return BLOCKED_REASON_HUMAN_REQUIRED;
+  }
+  if (hasNumberedMenu) return BLOCKED_REASON_MENU;
+  return BLOCKED_REASON_QUESTION;
+}
+
+// paneLooksBlockedOnHuman is the original boolean, now derived from the
+// classifier so there is exactly one definition of "blocked". Its answer is
+// unchanged: classifyBlockedOnHumanReason returns non-null for precisely the
+// panes this used to return true for.
+function paneLooksBlockedOnHuman(text) {
+  return classifyBlockedOnHumanReason(text) !== null;
 }
 
 // paneTail returns the last n lines of a pane capture. Pure, so the detectors
@@ -2266,6 +2333,17 @@ function resetTransientNudgeState() {
   lastTransientNudgeAt = 0;
 }
 
+// Autonomy-nudge state (kubestellar/hive#5281), scoped to the CURRENT task.
+// Budget of exactly one: a question the agent re-asks AFTER being told to
+// proceed autonomously is a question it genuinely cannot answer itself, and
+// re-nudging it would loop until the max-duration ceiling. Once spent, the pane
+// reports blocked_on_human exactly as it does today.
+let autonomyNudgeSent = false;
+
+function resetAutonomyNudgeState() {
+  autonomyNudgeSent = false;
+}
+
 function resetPaneStallClock() {
   lastPaneFingerprint = null;
   lastPaneChangeAt = Date.now();
@@ -2417,6 +2495,8 @@ function startProgressReporting() {
   // Likewise the retry budget: a previous task that exhausted its API-error
   // retries must not deny this one its own (#5094).
   resetTransientNudgeState();
+  // And the one-shot autonomy reminder (#5281), for the same reason.
+  resetAutonomyNudgeState();
 
   taskTimeoutHandle = setTimeout(() => {
     if (currentTask) {
@@ -2514,6 +2594,75 @@ function handleTransientAPIError(tmuxLines) {
       `(${transientNudgeCount}/${TRANSIENT_API_ERROR_MAX_NUDGES})`,
     ...progressModelFields(),
   });
+}
+
+// paneHasPresentHuman is the one place this file asks "is a person there?".
+//
+// It exists as a named seam because #5281 and #5094 must answer it the SAME
+// way: a guard that diverges between two nudges is how you get a pane that is
+// safe from one watchdog and not the other.
+//
+// Today it is the bare attached check — a client is connected. #5277 is
+// replacing that with a recency test on tmux's `client_activity`, because a
+// dashboard terminal tab left open is a connected client and not a person.
+// When that lands this body becomes `return tmuxSessionHumanPresence().active;`
+// and both callers inherit it; that one line is the whole follow-up.
+function paneHasPresentHuman() {
+  return tmuxSessionHasAttachedClient();
+}
+
+// maybeSendAutonomyNudge types a one-shot reminder at an unattended pane that
+// stopped to ask a question it was already instructed to answer for itself
+// (kubestellar/hive#5281), and reports whether it did.
+//
+// Detection without recovery is what this fixes. The relay already SEES the
+// question and raises `attention`, but an attention flag only helps someone who
+// is watching something, and a contributor run by a user who never attaches to
+// tmux is a supported way to run one. For that user every question the agent
+// asks costs 20-30 minutes and a failed task.
+//
+// Four things must all hold, and each one is a separate way to get this wrong:
+//
+//  1. The pane is blocked on a QUESTION, not on something only a person can
+//     answer. See classifyBlockedOnHumanReason.
+//  2. It is not a login/401 pane. Belt to the classifier's braces: a /login
+//     flow is reached by a different route through checkTmuxPaneState (#4400),
+//     so excluding it here makes "never nudge a login" true by construction
+//     rather than true by coincidence.
+//  3. Nobody is at the pane.
+//  4. The one-shot budget is unspent.
+function maybeSendAutonomyNudge(tmuxLines) {
+  if (!currentTask) return false;
+  if (autonomyNudgeSent) return false;
+
+  const pane = tmuxLines.join('\n');
+  if (paneShowsLoginRequiredError(pane)) return false;
+  if (classifyBlockedOnHumanReason(pane) !== BLOCKED_REASON_QUESTION) return false;
+  if (paneHasPresentHuman()) return false;
+
+  // Spend the budget BEFORE typing. A send that throws has still disturbed the
+  // pane, and retrying it on the next tick is the loop this budget exists to
+  // prevent.
+  autonomyNudgeSent = true;
+  console.warn(`Task ${currentTask.task_id} is blocked on a question with nobody attached to ` +
+    `${TMUX_SESSION} — reminding it to proceed autonomously (once per task)`);
+  try {
+    tmuxSendNudge(AUTONOMY_NUDGE_MESSAGE);
+  } catch (e) {
+    console.error('Failed to send the autonomy reminder:', e.message);
+    return false;
+  }
+  send({
+    type: 'task_progress',
+    seq: nextSeq(),
+    task_id: currentTask.task_id,
+    task_gen: currentTask.task_gen,
+    status: 'working',
+    summary: 'Agent asked a question with no human attached; reminded it to proceed autonomously',
+    tmux_output: tmuxLines,
+    ...progressModelFields(),
+  });
+  return true;
 }
 
 function progressTick() {
@@ -2640,6 +2789,11 @@ function progressTick() {
       send({ type: 'ready', seq: nextSeq() });
     }
   } else if (paneState === PANE_STATE_BLOCKED_ON_HUMAN) {
+    // #5281: before reporting a blocked pane to a human who may not be there,
+    // see whether this is a question the agent was already told to answer
+    // itself. At most once per task; everything below is unchanged and is what
+    // runs on every later tick.
+    if (maybeSendAutonomyNudge(tmuxLines)) return;
     console.warn(`Task ${currentTask.task_id} is blocked waiting for human input`);
     send({
       type: 'task_progress',
@@ -3109,6 +3263,13 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     paneShowsLoginRequiredError,
     handleTransientAPIError,
     resetTransientNudgeState,
+    classifyBlockedOnHumanReason,
+    BLOCKED_REASON_QUESTION,
+    BLOCKED_REASON_MENU,
+    BLOCKED_REASON_HUMAN_REQUIRED,
+    maybeSendAutonomyNudge,
+    resetAutonomyNudgeState,
+    AUTONOMY_NUDGE_MESSAGE,
     tmuxSessionHasAttachedClient,
     tmuxSessionHumanPresence,
     HUMAN_PRESENCE_IDLE_MS,
