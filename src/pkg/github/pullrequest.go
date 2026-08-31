@@ -19,9 +19,18 @@ type CreatePRResult struct {
 	// the App bot the hive relayed as (e.g. "kubestellar-hive[bot]"). Taken from
 	// the API response, not assumed, so the audit log records the true author.
 	Author string
-	// AlreadyExisted is true when an open PR for this head branch was already
-	// present, so we returned it instead of opening a duplicate.
+	// AlreadyExisted is true when an open PR already covers this request, so we
+	// returned it instead of opening a duplicate. Two different findings set it:
+	// an open PR for the same HEAD BRANCH, and (see DuplicateTree) an open PR
+	// carrying the same CONTENT from a different branch.
 	AlreadyExisted bool
+	// DuplicateTree narrows AlreadyExisted to the content case (#5111): the
+	// reuse was decided because an open PR on the same base has an identical
+	// tree SHA, not because the head branch matched. Callers that report the
+	// outcome keep the two apart because they mean different things to whoever
+	// reads the result — "your retry was absorbed" versus "this change is
+	// already proposed as #N, go comment on it".
+	DuplicateTree bool
 }
 
 // CreatePR opens a pull request on behalf of THIS hive's GitHub App — so the PR
@@ -48,6 +57,11 @@ type CreatePRResult struct {
 // It is idempotent: if an OPEN PR for head already exists, it returns that PR
 // with AlreadyExisted=true instead of erroring or opening a duplicate — this
 // makes the file-watcher safe to retry a request that partially succeeded.
+//
+// It also refuses to file the same CONTENT twice (kubestellar/hive#5111): if an
+// open PR on the same base already carries an identical tree SHA, that PR is
+// returned with AlreadyExisted and DuplicateTree set. Same-branch idempotency
+// cannot see this case, because the duplicate arrives on a fresh branch.
 func (c *Client) CreatePR(ctx context.Context, repo, head, base, title, body string) (CreatePRResult, error) {
 	if c == nil || c.client == nil {
 		return CreatePRResult{}, ErrNoGitHubClient
@@ -89,6 +103,31 @@ func (c *Client) CreatePR(ctx context.Context, repo, head, base, title, body str
 		c.logger.Info("CreatePR: open PR already exists for head, reusing",
 			slog.String("repo", repo), slog.String("head", head), slog.Int("number", existing.GetNumber()))
 		return CreatePRResult{Number: existing.GetNumber(), URL: existing.GetHTMLURL(), Author: existing.GetUser().GetLogin(), AlreadyExisted: true}, nil
+	}
+
+	// Content identity (#5111): the check above only recognises a duplicate that
+	// reuses the SAME branch. Agents also copy a change forward onto a NEW branch
+	// and file it again — five such PRs on tuna-os/tromso, two with identical
+	// trees, so `git diff` between their tips was empty. Compare the tree SHA
+	// against the open PRs on this same base and reuse the match instead.
+	//
+	// A failed lookup proceeds to create. Refusing to publish work because an
+	// auxiliary read failed would be a worse bug than the duplicate: the guard
+	// is here to stop redundant PRs, not to become a new way to lose one.
+	if existing, err := c.findOpenPRWithIdenticalTree(ctx, owner, repo, head, base); err != nil {
+		c.logger.Warn("CreatePR: duplicate-tree lookup failed, proceeding to create",
+			slog.String("repo", repo), slog.String("head", head), slog.String("error", err.Error()))
+	} else if existing != nil {
+		c.logger.Info("CreatePR: an open PR already carries this exact tree, reusing it instead of opening a duplicate",
+			slog.String("repo", repo), slog.String("head", head),
+			slog.String("base", base), slog.Int("number", existing.GetNumber()))
+		return CreatePRResult{
+			Number:         existing.GetNumber(),
+			URL:            existing.GetHTMLURL(),
+			Author:         existing.GetUser().GetLogin(),
+			AlreadyExisted: true,
+			DuplicateTree:  true,
+		}, nil
 	}
 
 	pr, _, err := c.client.PullRequests.Create(ctx, owner, repo, &gh.NewPullRequest{

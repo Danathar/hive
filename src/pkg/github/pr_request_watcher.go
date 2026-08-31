@@ -60,11 +60,22 @@ type PRResponse struct {
 	Number         int    `json:"number,omitempty"`
 	URL            string `json:"url,omitempty"`
 	AlreadyExisted bool   `json:"already_existed,omitempty"`
+	// DuplicateTree says the returned PR was reused because it already carries
+	// this request's exact content, not because it shares the head branch
+	// (#5111). It is the difference between "your retry landed on the PR you
+	// already opened" and "this change is already proposed as #N" — the second
+	// is the one an agent must act on, by commenting on that PR rather than
+	// filing again, so it is reported rather than folded into AlreadyExisted.
+	DuplicateTree bool `json:"duplicate_tree,omitempty"`
 	// SelfAuthorized reports that the PR was held because its only tracked
 	// rationale is an issue the hive filed and no human has acknowledged
 	// (#5117). The PR was still opened; it just cannot merge until someone
 	// signs off on the direction. Reported to the agent so it can go get that
 	// sign-off rather than reading the hold as an unexplained failure.
+	//
+	// Never set together with DuplicateTree: see the precedence note in
+	// handleOnePRRequest. A duplicate request opened no PR, so there is nothing
+	// of this request's to have authorised.
 	SelfAuthorized bool   `json:"self_authorized,omitempty"`
 	Error          string `json:"error,omitempty"`
 	At             string `json:"at"`
@@ -295,6 +306,7 @@ func (c *Client) handleOnePRRequest(ctx context.Context, path string, nowFn func
 	resp.Number = res.Number
 	resp.URL = res.URL
 	resp.AlreadyExisted = res.AlreadyExisted
+	resp.DuplicateTree = res.DuplicateTree
 
 	// F6: apply the ACMM "hold" label server-side, from authoritative config, on
 	// the path that actually runs. At hold-gated levels (L3/L4/L5) every
@@ -309,13 +321,27 @@ func (c *Client) handleOnePRRequest(ctx context.Context, path string, nowFn func
 	// It is evaluated only when the level is NOT already holding — at a
 	// hold-gated level every PR already waits for the human checkpoint this gate
 	// exists to create, so asking GitHub about the issue would buy nothing.
+	//
+	// PRECEDENCE, #5111 over #5117 (and over the level gate). The other two ask
+	// "may this agent's change proceed to merge?", which is a property of the PR
+	// THIS REQUEST CREATED. DuplicateTree says this request created nothing: res
+	// names a PR that already existed, and it may belong to another agent or to
+	// a human. Labelling or commenting there acts on somebody else's PR, and a
+	// "hold" stamped on it blocks a merge that has nothing to do with this
+	// request. So the duplicate path takes neither hold reason.
+	//
+	// No governance is skipped by that ordering. The PR being pointed at went
+	// through the self-authorisation gate when IT was opened through this same
+	// path; and where it is a human's PR, hive has no standing to gate it at
+	// all. Evaluating the gate here would additionally spend GitHub calls to
+	// compute a hold that must not be applied.
 	holdByLevel := c.prHoldLabel != nil && c.prHoldLabel(req.Agent)
 	var selfAuth SelfAuthorization
-	if !holdByLevel {
+	if !res.DuplicateTree && !holdByLevel {
 		selfAuth = c.EvaluateSelfAuthorization(ctx, req.Repo, title, body, req.IssueN)
 		resp.SelfAuthorized = selfAuth.Held
 	}
-	if holdByLevel || selfAuth.Held {
+	if !res.DuplicateTree && (holdByLevel || selfAuth.Held) {
 		if lerr := c.AddLabels(ctx, req.Repo, res.Number, []string{"hold"}); lerr != nil {
 			// A missing hold label is a policy failure, not a cosmetic one. Keep
 			// the request queued: the next bounded retry deduplicates the existing
@@ -364,15 +390,26 @@ func (c *Client) handleOnePRRequest(ctx context.Context, path string, nowFn func
 		"author", res.Author,
 		"url", res.URL,
 		"reused", strconv.FormatBool(res.AlreadyExisted),
-		"self_authorized", strconv.FormatBool(selfAuth.Held))
+		"self_authorized", strconv.FormatBool(selfAuth.Held),
+		"duplicate_tree", strconv.FormatBool(res.DuplicateTree))
 	c.writePRResult(path, resp)
 	// Success (or reuse of an existing PR) — consume the request so it isn't
 	// reprocessed.
 	_ = os.Remove(path)
 	c.prRetries.clear(path)
+	if res.DuplicateTree {
+		// Logged on its own line, not folded into the line below: this is the
+		// outcome the issue asked to be able to count ("a queue that looks like
+		// five problems when it is one"), and it should be findable without
+		// parsing a boolean out of a success message.
+		c.logger.Info("pr-request watcher: request carried content an open PR already proposes; reused it instead of opening a duplicate",
+			slog.String("repo", req.Repo), slog.String("head", req.Head),
+			slog.Int("number", res.Number), slog.String("agent", req.Agent))
+	}
 	c.logger.Info("pr-request watcher: PR opened by App bot",
 		slog.String("repo", req.Repo), slog.String("head", req.Head),
 		slog.Int("number", res.Number), slog.Bool("reused", res.AlreadyExisted),
+		slog.Bool("duplicate_tree", res.DuplicateTree),
 		slog.String("agent", req.Agent))
 }
 
