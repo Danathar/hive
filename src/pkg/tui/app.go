@@ -26,6 +26,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -82,8 +83,13 @@ var (
 	focusedBorder = lipgloss.NewStyle().
 			Border(lipgloss.ThickBorder()).
 			BorderForeground(theme.BorderFocus)
-	headerStyle = lipgloss.NewStyle().Bold(true)
-	footerStyle = lipgloss.NewStyle().Faint(true)
+	headerStyle     = lipgloss.NewStyle().Bold(true)
+	footerStyle     = lipgloss.NewStyle().Faint(true)
+	confirmBoxStyle = lipgloss.NewStyle().
+			Border(lipgloss.ThickBorder()).
+			BorderForeground(theme.BorderFocus).
+			Padding(0, 1)
+	confirmErrorStyle = lipgloss.NewStyle().Bold(true)
 )
 
 // headerText still carries placeholders after T12, and each one is a fact
@@ -106,7 +112,30 @@ const headerText = "hive: —   governor: —   ws: not connected"
 // (p pause, m model, K kick, …) documents keys whose tasks have not landed;
 // showing them now would advertise actions that silently do nothing. Each
 // action task appends its own binding when it wires the key.
-const footerText = "tab focus  ? help  q quit"
+const footerText = "tab focus  p pause/resume  ? help  q quit"
+
+// confirmState is the pause/resume dialog. It remains present while the HTTP
+// command is in flight so every other key stays behind the modal, and it also
+// holds a failed call's message so an API error becomes UI rather than a
+// process-ending error.
+type confirmState struct {
+	agent    string
+	pause    bool
+	pending  bool
+	actionID uint64
+	err      string
+}
+
+// agentActionMsg is the asynchronous result of confirming the dialog. The
+// original target travels with it so a late response cannot close or rewrite
+// a newer modal the operator opened after dismissing the in-flight one.
+type agentActionMsg struct {
+	actionID uint64
+	agent    string
+	pause    bool
+	result   client.AgentActionResult
+	err      error
+}
 
 // model is the root bubbletea model.
 //
@@ -142,6 +171,15 @@ type model struct {
 	// swallows EVERY key — including q — so a reader dismissing it cannot
 	// accidentally quit the program instead (see Update).
 	helpVisible bool
+
+	// confirm is non-nil while a pause/resume dialog is open. Like help, it
+	// owns every key while visible; unlike help, only y, n and esc act on it.
+	confirm *confirmState
+
+	// actionSeq identifies each confirmed HTTP call. Agent and verb alone are
+	// not enough: an operator can dismiss an in-flight request and open the
+	// same action again, and the first response must not close the new modal.
+	actionSeq uint64
 
 	// interval is this model's poll cadence, defaulting to pollInterval.
 	//
@@ -211,7 +249,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the panes never see the error, so they never have to decide whether
 		// to clear their data, and the previous frame simply persists.
 		return m, nil
+	case agentActionMsg:
+		return m.handleAgentAction(msg)
 	case tea.KeyMsg:
+		if m.confirm != nil {
+			return m.updateConfirm(msg)
+		}
 		// The help overlay is modal and dismisses on ANY key, so it is handled
 		// before the global bindings rather than as one of them. Order is the
 		// whole mechanism: falling through would let "q" quit the program while
@@ -239,6 +282,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// +paneCount-1 rather than -1: keeps the operand positive, so
 			// the modulo never sees a negative number to round wrongly.
 			m.focus = (m.focus + paneCount - 1) % paneCount
+			return m, nil
+		case "p":
+			if m.focus != 0 {
+				return m, nil
+			}
+			agents, ok := m.panes[0].(panes.Agents)
+			if !ok {
+				return m, nil
+			}
+			name, paused, ok := agents.SelectedAgent()
+			if !ok {
+				return m, nil
+			}
+			m.confirm = &confirmState{agent: name, pause: !paused}
 			return m, nil
 		}
 		// Any other key belongs to the focused pane. The T3 stubs ignore
@@ -308,6 +365,9 @@ func (m model) View() string {
 	footer := footerStyle.Width(m.width).Render(footerText)
 
 	frame := lipgloss.JoinVertical(lipgloss.Left, header, top, bottom, footer)
+	if m.confirm != nil {
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.confirmView())
+	}
 	if m.helpVisible {
 		// Place, not Join: the overlay sits ON the frame rather than taking
 		// rows from it, so the grid keeps the exact geometry it had and the
@@ -318,6 +378,113 @@ func (m model) View() string {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, panes.Help())
 	}
 	return frame
+}
+
+// updateConfirm consumes every key while the pause/resume dialog is open.
+// Unknown keys — including q and tab — intentionally do nothing rather than
+// leaking through to the frame underneath.
+func (m model) updateConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "n", "esc":
+		m.confirm = nil
+		return m, nil
+	case "y":
+		if m.confirm.pending {
+			return m, nil
+		}
+		// The model is a value type, but confirm is a pointer so nil can mean
+		// "closed". Copy its value before editing to preserve Update's rule that
+		// the input model is never mutated through shared pointer state.
+		confirm := *m.confirm
+		m.confirm = &confirm
+		m.confirm.pending = true
+		m.confirm.err = ""
+		m.actionSeq++
+		m.confirm.actionID = m.actionSeq
+		target := *m.confirm
+		return m, m.agentAction(target)
+	default:
+		return m, nil
+	}
+}
+
+func (m model) agentAction(target confirmState) tea.Cmd {
+	return func() tea.Msg {
+		var result client.AgentActionResult
+		var err error
+		if target.pause {
+			result, err = m.api.PauseAgent(context.Background(), target.agent)
+		} else {
+			result, err = m.api.ResumeAgent(context.Background(), target.agent)
+		}
+		return agentActionMsg{
+			actionID: target.actionID,
+			agent:    target.agent,
+			pause:    target.pause,
+			result:   result,
+			err:      err,
+		}
+	}
+}
+
+func (m model) handleAgentAction(msg agentActionMsg) (tea.Model, tea.Cmd) {
+	matchesOpenModal := m.confirm != nil &&
+		m.confirm.actionID == msg.actionID &&
+		m.confirm.agent == msg.agent && m.confirm.pause == msg.pause
+	if msg.err != nil {
+		if matchesOpenModal {
+			confirm := *m.confirm
+			m.confirm = &confirm
+			m.confirm.pending = false
+			verb := "Pause"
+			if !msg.pause {
+				verb = "Resume"
+			}
+			if client.IsForbidden(msg.err) {
+				m.confirm.err = verb + " failed: owner access required"
+			} else {
+				m.confirm.err = fmt.Sprintf("%s failed: %v", verb, msg.err)
+			}
+		}
+		return m, nil
+	}
+
+	// State, not Status, is the operation's authoritative post-call value.
+	// This also handles Changed=false correctly: a no-op response still fixes
+	// a stale row before the refresh arrives.
+	name := msg.result.Agent
+	if name == "" {
+		name = msg.agent
+	}
+	if agents, ok := m.panes[0].(panes.Agents); ok {
+		m.panes[0] = agents.SetAgentPaused(name, msg.result.Paused())
+	}
+	if matchesOpenModal {
+		m.confirm = nil
+	}
+	return m, m.poll()
+}
+
+func (m model) confirmView() string {
+	verb := "Pause"
+	if !m.confirm.pause {
+		verb = "Resume"
+	}
+	body := fmt.Sprintf("%s agent %s?", verb, m.confirm.agent)
+	switch {
+	case m.confirm.err != "":
+		body += "\n\n" + confirmErrorStyle.Render(m.confirm.err) + "\n\nPress y to retry or n/esc to cancel"
+	case m.confirm.pending:
+		body += "\n\nWorking…"
+	default:
+		body += "\n\ny confirm  n/esc cancel"
+	}
+
+	// At the minimum supported frame width this leaves one cell of breathing
+	// room on each side after the border and padding. Width also makes long API
+	// errors wrap inside the modal instead of growing the terminal frame.
+	contentWidth := min(52, max(1, m.width-6))
+	return confirmBoxStyle.Width(contentWidth).Render(body)
 }
 
 // tooSmallView renders the below-minimum frame: the message alone, centred in

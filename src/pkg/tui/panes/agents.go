@@ -55,13 +55,66 @@ type Agents struct {
 // NewAgents returns the Agents pane in its pre-poll state.
 func NewAgents() Agents { return Agents{stub: stub{title: "AGENTS"}} }
 
+// SelectedAgent returns the dashboard name and paused state of the row under
+// the cursor. The ok result is false until a successful fleet snapshot has
+// supplied at least one row, so callers can make an action key a no-op instead
+// of inventing a target.
+//
+// The status feed is authoritative when present. Before it arrives, Enabled
+// is the same fallback the rendered status glyph uses, which keeps the action
+// offered by `p` consistent with what the operator sees in the pane.
+func (p Agents) SelectedAgent() (name string, paused bool, ok bool) {
+	if p.selected < 0 || p.selected >= len(p.agents) {
+		return "", false, false
+	}
+	agent := p.agents[p.selected]
+	state, hasState := p.states[agent.Name]
+	if hasState {
+		return agent.Name, state.Status == AgentStatusPaused, true
+	}
+	return agent.Name, !agent.Enabled, true
+}
+
+// SetAgentPaused applies the authoritative state returned by a pause/resume
+// operation immediately. The app still refreshes the full fleet afterwards,
+// but reflecting the response here prevents a successful action from leaving
+// a stale row on screen while that refresh is in flight (or if it fails).
+func (p Agents) SetAgentPaused(name string, paused bool) Agents {
+	found := false
+	for _, agent := range p.agents {
+		if agent.Name == name {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return p
+	}
+	p.states = cloneAgentStates(p.states)
+	if p.states == nil {
+		p.states = make(map[string]AgentState)
+	}
+	state := p.states[name]
+	state.Status = AgentStatusRunning
+	if paused {
+		state.Status = AgentStatusPaused
+	}
+	p.states[name] = state
+	return p
+}
+
 // Update replaces the latest successful snapshot and moves the selection with
 // j/k (or the matching arrow keys), clamping at the fleet's edges.
 func (p Agents) Update(msg tea.Msg) (Pane, tea.Cmd) {
 	switch msg := msg.(type) {
 	case AgentsMsg:
 		p.agents = append([]client.Agent(nil), msg.Agents...)
-		p.states = cloneAgentStates(msg.States)
+		// States is optional supplemental data. A fleet-only refresh carries a
+		// nil map and must not erase an authoritative pause/resume result that
+		// the app just applied while the refresh was in flight.
+		if msg.States != nil {
+			p.states = cloneAgentStates(msg.States)
+		}
 		p.loaded = true
 		p.observedAt = msg.ObservedAt
 		if p.observedAt.IsZero() {

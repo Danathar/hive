@@ -114,6 +114,59 @@ func TestAgentsSelectionMovement(t *testing.T) {
 	assertSelected(0)
 }
 
+func TestAgentsSelectedAgentUsesDisplayedState(t *testing.T) {
+	next, _ := NewAgents().Update(AgentsMsg{
+		Agents: []client.Agent{
+			agent("scanner"),
+			{Name: "quality", Enabled: false},
+		},
+		States: map[string]AgentState{
+			"scanner": {Status: AgentStatusPaused},
+		},
+	})
+	p := next.(Agents)
+
+	name, paused, ok := p.SelectedAgent()
+	if !ok || name != "scanner" || !paused {
+		t.Fatalf("first SelectedAgent() = (%q, %v, %v), want scanner, paused, true", name, paused, ok)
+	}
+
+	next, _ = p.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	p = next.(Agents)
+	name, paused, ok = p.SelectedAgent()
+	if !ok || name != "quality" || !paused {
+		t.Fatalf("second SelectedAgent() = (%q, %v, %v), want quality, paused, true", name, paused, ok)
+	}
+
+	if _, _, ok := NewAgents().SelectedAgent(); ok {
+		t.Fatal("SelectedAgent() reported a row before the first fleet snapshot")
+	}
+}
+
+func TestAgentsSetAgentPausedAppliesActionResult(t *testing.T) {
+	next, _ := NewAgents().Update(AgentsMsg{Agents: []client.Agent{agent("scanner")}})
+	p := next.(Agents).SetAgentPaused("scanner", true)
+
+	name, paused, ok := p.SelectedAgent()
+	if !ok || name != "scanner" || !paused {
+		t.Fatalf("after SetAgentPaused(true) = (%q, %v, %v), want scanner, paused, true", name, paused, ok)
+	}
+
+	p = p.SetAgentPaused("scanner", false)
+	_, paused, _ = p.SelectedAgent()
+	if paused {
+		t.Fatal("SetAgentPaused(false) left the selected agent paused")
+	}
+
+	// A normal /api/agents poll has no supplemental state map. It refreshes
+	// the rows without erasing the authoritative result of the write.
+	next, _ = p.SetAgentPaused("scanner", true).Update(AgentsMsg{Agents: []client.Agent{agent("scanner")}})
+	_, paused, _ = next.(Agents).SelectedAgent()
+	if !paused {
+		t.Fatal("a fleet-only refresh erased the pause result")
+	}
+}
+
 // TestAgentsViewFillsItsBoxExactly is the grid's structural requirement: a
 // pane renders exactly the size it was given whatever its content, or the 2×2
 // join skews.
