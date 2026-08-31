@@ -112,7 +112,7 @@ const headerText = "hive: —   governor: —   ws: not connected"
 // (p pause, m model, K kick, …) documents keys whose tasks have not landed;
 // showing them now would advertise actions that silently do nothing. Each
 // action task appends its own binding when it wires the key.
-const footerText = "tab focus  p pause/resume  ? help  q quit"
+const footerText = "tab focus  p pause/resume  a attach  ? help  q quit"
 
 // confirmState is the pause/resume dialog. It remains present while the HTTP
 // command is in flight so every other key stays behind the modal, and it also
@@ -180,6 +180,17 @@ type model struct {
 	// not enough: an operator can dismiss an in-flight request and open the
 	// same action again, and the first response must not close the new modal.
 	actionSeq uint64
+
+	// attachPending covers both the short tmux session preflight and the time
+	// spent inside the attached session. It prevents repeated `a` presses from
+	// queuing multiple terminal-suspending commands before the first preflight
+	// completes.
+	attachPending bool
+
+	// footerErr is an attach failure rendered in place of the normal binding
+	// strip. tmux is a local optional dependency, so a missing binary or session
+	// is UI state rather than a reason to terminate the whole TUI.
+	footerErr string
 
 	// interval is this model's poll cadence, defaulting to pollInterval.
 	//
@@ -251,6 +262,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case agentActionMsg:
 		return m.handleAgentAction(msg)
+	case attachReadyMsg:
+		if msg.err != nil {
+			m.attachPending = false
+			m.footerErr = "Attach failed: " + msg.err.Error()
+			return m, nil
+		}
+		return m, tea.ExecProcess(msg.cmd, func(err error) tea.Msg {
+			return attachDoneMsg{err: err}
+		})
+	case attachDoneMsg:
+		m.attachPending = false
+		if msg.err != nil {
+			m.footerErr = "Attach failed: " + msg.err.Error()
+		} else {
+			m.footerErr = ""
+		}
+		return m, m.poll()
 	case tea.KeyMsg:
 		if m.confirm != nil {
 			return m.updateConfirm(msg)
@@ -297,6 +325,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.confirm = &confirmState{agent: name, pause: !paused}
 			return m, nil
+		case "a":
+			if m.focus != 0 || m.attachPending {
+				return m, nil
+			}
+			agents, ok := m.panes[0].(panes.Agents)
+			if !ok {
+				return m, nil
+			}
+			name, _, ok := agents.SelectedAgent()
+			if !ok {
+				return m, nil
+			}
+			m.attachPending = true
+			m.footerErr = ""
+			return m, prepareAttach(name)
 		}
 		// Any other key belongs to the focused pane. The T3 stubs ignore
 		// everything, but routing through this seam now is what lets a pane
@@ -362,7 +405,11 @@ func (m model) View() string {
 		cell(2, leftW, botH), cell(3, rightW, botH))
 
 	header := headerStyle.Width(m.width).Render(headerText)
-	footer := footerStyle.Width(m.width).Render(footerText)
+	footerTextForFrame := footerText
+	if m.footerErr != "" {
+		footerTextForFrame = m.footerErr
+	}
+	footer := footerStyle.Width(m.width).MaxWidth(m.width).Render(footerTextForFrame)
 
 	frame := lipgloss.JoinVertical(lipgloss.Left, header, top, bottom, footer)
 	if m.confirm != nil {

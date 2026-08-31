@@ -384,3 +384,14 @@ func TestFooterAdvertisesHelp(t *testing.T) {
 		t.Error("the rendered frame does not advertise ? help")
 	}
 }
+
+func TestFooterAdvertisesAttach(t *testing.T) {
+	if !strings.Contains(footerText, "a attach") {
+		t.Errorf("footerText = %q, want it to advertise the attach binding", footerText)
+	}
+	m := newModel()
+	m.width, m.height = 100, 30
+	if !strings.Contains(m.View(), "a attach") {
+		t.Error("the rendered frame does not advertise a attach")
+	}
+}
