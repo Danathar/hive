@@ -22,12 +22,20 @@ on:
   # so a red PR fails the check without also filing an issue.
   pull_request:
     branches: [v2, v4]
-    # dashboard/openapi.json is in scope because the two guards that police it
-    # live under src/ (pkg/dashboard/openapi_route_parity_test.go and
-    # openapi_schema_parity_test.go) but the file they check does not. Without
-    # it a spec-only PR — the exact shape of the #5077 drift — would edit the
-    # published contract while running neither guard.
-    paths: ['src/**', 'dashboard/openapi.json', '.github/workflows/v2-tests.yml']
+    # Several package tests police shipped files outside src/: contributor
+    # scripts under bin/, the shared shell backend config, and Justfile recipes.
+    # Those files must trigger the tests that guard them; otherwise a change to
+    # the guarded side of a parity assertion skips the assertion entirely.
+    # dashboard/openapi.json is the same class: its route/schema guards live in
+    # src/pkg/dashboard, but the published contract does not. The contract test
+    # in pkg/github/ci_trigger_contract_test.go pins this complete relationship.
+    paths:
+      - 'src/**'
+      - 'bin/**'
+      - 'config/**'
+      - 'Justfile'
+      - 'dashboard/openapi.json'
+      - '.github/workflows/v2-tests.yml'
 
 permissions:
   contents: read
