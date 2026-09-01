@@ -1,0 +1,35 @@
+name: Formal Verify
+
+# Exhaustively re-verifies the Spin model of the escalation + reviewer-lane
+# lifecycle (src/formal/escalation/) whenever the modeled Go code or the model
+# itself changes. Reporting-only: this check is intentionally NOT required.
+# The run fails when a property that must hold is violated, or when a
+# documented counterexample (known design gap) can no longer be reproduced —
+# both mean the model and the code have drifted apart and a human should look.
+on:
+  pull_request:
+    paths:
+      - 'src/pkg/escalation/**'
+      - 'src/pkg/scheduler/reviewer_lane*'
+      - 'src/formal/**'
+      - '.github/workflows/formal-verify.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  escalation:
+    name: formal-verify (escalation)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Spin
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y spin
+
+      - name: Verify escalation lifecycle model
+        run: bash src/formal/escalation/run.sh
