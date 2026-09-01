@@ -136,6 +136,11 @@ type Observation struct {
 	HeadSHA string
 	Red     bool // CI status is failure
 	Excerpt string
+	// Labels are the PR's current forge labels. Sweep reads them to reconcile
+	// reviewer-lane verdicts (which are expressed as label edits, possibly made
+	// entirely outside the hub's view) back into the ledger — see the
+	// reviewer-pass reset in Sweep.
+	Labels []string
 }
 
 // Result reports the ledger's verdict for one observed PR.
@@ -183,6 +188,26 @@ func (s *Store) Sweep(obs []Observation, threshold int) map[string]Result {
 			e.ReEngagements = 0
 			e.Escalated = false
 			e.RedSHAs = nil
+		}
+		// Reviewer-verdict reconciliation (#5511, gap G1): the reviewer lane's
+		// REPAIR/DE-ESCALATE verdict is expressed as label edits only —
+		// needs-human removed, reviewer-passed added — usually via a direct
+		// `gh pr edit` the hub never observes. Without syncing that verdict
+		// into the ledger the entry stays Escalated forever, and if the
+		// reviewer's pushed fix goes red again the PR is orphaned: the fix
+		// lane and the reaper skip escalated rows, reviewer-passed excludes it
+		// from the reviewer lane, and NewlyEscala requires !Escalated so
+		// needs-human can never re-fire (proven by the Spin model in
+		// src/formal/escalation, property P5). Reset the entry the way
+		// machinery amnesty does — un-escalate, restart the distinct-SHA
+		// ledger, fresh re-engagement budget, Machinery untouched — so the PR
+		// re-enters the normal lifecycle. A later re-escalation then fires
+		// normally, and the reviewer-passed label routes it to a human rather
+		// than back to the reviewer.
+		if e.Escalated && containsLabel(o.Labels, ReviewerPassedLabel) && !containsLabel(o.Labels, NeedsHumanLabel) {
+			e.Escalated = false
+			e.RedSHAs = nil
+			e.ReEngagements = 0
 		}
 		if o.HeadSHA != "" && !containsSHA(e.RedSHAs, o.HeadSHA) {
 			e.RedSHAs = append(e.RedSHAs, o.HeadSHA)
@@ -375,6 +400,16 @@ func (s *Store) TryReEngage(repo string, number int, headSHA string) bool {
 		e.Escalated = false
 		e.RedSHAs = nil
 	}
+	// An escalated (needs-human) entry is out of the automated lane entirely:
+	// re-engaging it would burn budget on a PR the fix loop is standing down
+	// from and let a caller log "re-engaged fix loop" for a human-parked PR
+	// (#5511, gap G3 — the merge-request watcher's terminal path reaches here
+	// without consulting the escalated set, unlike the governor reaper). The
+	// amnesty above may have just un-escalated an older-generation entry, in
+	// which case re-engagement proceeds on its fresh budget as intended.
+	if e.Escalated {
+		return false
+	}
 	if e.ReEngagements >= MaxReEngagements {
 		return false
 	}
@@ -419,6 +454,15 @@ func containsSHA(shas []string, sha string) bool {
 	return false
 }
 
+func containsLabel(labels []string, label string) bool {
+	for _, l := range labels {
+		if l == label {
+			return true
+		}
+	}
+	return false
+}
+
 // CommentBody renders the escalation comment posted on the PR. It leads with
 // the raw CI evidence — the whole point is that a human (or the next agent
 // pass) sees the actual error, not just "CI failed".
@@ -444,3 +488,9 @@ func CommentBody(attempts int, failingChecks []string, excerpt string) string {
 // NeedsHumanLabel is the label applied to escalated PRs. Kick builders exclude
 // items carrying it from fix dispatch.
 const NeedsHumanLabel = "needs-human"
+
+// ReviewerPassedLabel marks a PR the reviewer lane (#5480) has repaired or
+// de-escalated once. Canonical here because Sweep's reviewer-verdict
+// reconciliation reads it against the ledger; the scheduler's reviewer lane
+// (pkg/scheduler) re-exports it for the work-list builder and kick contract.
+const ReviewerPassedLabel = "reviewer-passed"
