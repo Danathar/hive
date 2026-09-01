@@ -22,12 +22,23 @@ const (
 )
 
 type UIDMap struct {
-	Agents         map[string]int `json:"agents"`
-	ProxyUID       int            `json:"proxy_uid"`
-	BaseUID        int            `json:"base_uid"`
-	IptablesActive bool           `json:"iptables_active"`
+	Agents             map[string]int `json:"agents"`
+	ProxyUID           int            `json:"proxy_uid"`
+	BaseUID            int            `json:"base_uid"`
+	IptablesActive     bool           `json:"iptables_active"`
+	IsolationMarkerDir string         `json:"isolation_marker_dir,omitempty"`
+	IsolationRevision  string         `json:"isolation_revision,omitempty"`
 
 	mu sync.RWMutex
+}
+
+// IsolationContract returns the entrypoint's protected completion-marker
+// contract for an agent. Empty values mean the UID map predates asynchronous
+// migration, so callers preserve the legacy launch behaviour.
+func (u *UIDMap) IsolationContract(name string) (markerDir, revision string, uid int) {
+	u.mu.RLock()
+	defer u.mu.RUnlock()
+	return u.IsolationMarkerDir, u.IsolationRevision, u.Agents[name]
 }
 
 func NewUIDMap() *UIDMap {

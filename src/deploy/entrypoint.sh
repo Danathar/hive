@@ -68,6 +68,92 @@ HIVE_CONFIG_RUNTIME_LEGACY="/data/hive.yaml.bak"
 HIVE_RUNTIME_USER="dev"
 HIVE_RUNTIME_GROUP="node"
 
+# UID-isolation ownership migrations are deliberately versioned separately
+# from the image. Keying the marker to every image SHA would turn every edge
+# rollout back into an O(size of PVC) walk; bump this only when the ownership
+# contract itself changes and an existing tree needs another full pass.
+HIVE_UID_ISOLATION_REVISION="1"
+HIVE_UID_ISOLATION_MARKER_DIR="${HIVE_UID_ISOLATION_MARKER_DIR:-/data/.hive/uid-isolation}"
+export HIVE_UID_ISOLATION_REVISION HIVE_UID_ISOLATION_MARKER_DIR
+
+hive_uid_isolation_marker_path() {
+  echo "${HIVE_UID_ISOLATION_MARKER_DIR}/agent-$1.ready"
+}
+
+hive_uid_isolation_marker_matches() {
+  [ -f "$1" ] && [ "$(cat "$1" 2>/dev/null || true)" = "$2" ]
+}
+
+hive_publish_uid_isolation_marker() {
+  _marker_path="$1"
+  _marker_value="$2"
+  _marker_tmp="${_marker_path}.tmp.$$"
+  if printf '%s\n' "$_marker_value" > "$_marker_tmp" 2>/dev/null \
+     && chmod 0644 "$_marker_tmp" 2>/dev/null \
+     && mv -f "$_marker_tmp" "$_marker_path" 2>/dev/null; then
+    return 0
+  fi
+  rm -f "$_marker_tmp" 2>/dev/null || true
+  echo "[entrypoint] WARN: could not publish UID-isolation marker $_marker_path; the affected agent will remain held rather than enter a partially migrated tree"
+  return 1
+}
+
+# Run every operation whose cost scales with persistent-volume size outside
+# PID 1's startup path. The Go server can therefore bind :3002 and satisfy the
+# startup probe while a version flip repairs a months-old NFS tree. The UID map
+# tells the Go manager which protected markers to await before launching each
+# agent, so making the walk asynchronous does not create a partially-isolated
+# execution window.
+hive_run_uid_isolation_migration() {
+  _home_marker="${HIVE_UID_ISOLATION_MARKER_DIR}/home.ready"
+
+  if [ "${HIVE_HOME_MIGRATION_NEEDED:-false}" = "true" ]; then
+    echo "[entrypoint] UID isolation: repairing shared home in background"
+    chown -R dev:node /data/home/.claude /data/home/.codex /data/home/.bob 2>/dev/null \
+      || echo "[entrypoint] WARN: shared-home chown was incomplete; continuing with the existing fail-open permission policy"
+    if [ "${HIVE_HOME_MODE_REPAIR_NEEDED:-false}" = "true" ]; then
+      chmod -R g+rwX /data/home 2>/dev/null \
+        || echo "[entrypoint] WARN: chmod -R g+rwX /data/home failed — is CAP_FOWNER in the pod's capabilities.add? Continuing; agents may hit EACCES under /data/home"
+      find /data/home -type d -exec chmod g+s {} + 2>/dev/null \
+        || echo "[entrypoint] WARN: chmod g+s on /data/home dirs failed — is CAP_FOWNER/CAP_FSETID in the pod's capabilities.add? Continuing"
+    fi
+    # A marker records that the best-effort pass COMPLETED, matching the old
+    # fail-open behaviour when chown/chmod encounter an NFS race. A command
+    # failure is still logged above; withholding the marker forever would turn
+    # a recoverable permissions warning into a fleet-wide agent outage.
+    hive_publish_uid_isolation_marker "$_home_marker" "$HIVE_UID_ISOLATION_REVISION" || true
+    echo "[entrypoint] UID isolation: shared-home pass complete"
+  fi
+
+  _uid_offset=0
+  echo "$AGENT_NAMES" | while read -r _agent_name; do
+    [ -n "$_agent_name" ] || continue
+    _agent_uid=$((HIVE_UID_BASE + _uid_offset))
+    _agent_dir="/data/agents/${_agent_name}"
+    _agent_marker="$(hive_uid_isolation_marker_path "$_agent_uid")"
+    _agent_expected="${HIVE_UID_ISOLATION_REVISION}:${_agent_uid}"
+    _agent_owner="$(stat -c '%u' "$_agent_dir" 2>/dev/null || echo 0)"
+
+    if hive_uid_isolation_marker_matches "$_agent_marker" "$_agent_expected" \
+       && [ "$_agent_owner" = "$_agent_uid" ]; then
+      echo "[entrypoint] UID isolation: ${_agent_name} already current — skipping"
+    else
+      echo "[entrypoint] UID isolation: repairing ${_agent_name} (uid ${_agent_uid}) in background"
+      chown -R "hive-${_agent_name}:node" "$_agent_dir" 2>/dev/null \
+        || echo "[entrypoint] WARN: UID-isolation chown for ${_agent_name} was incomplete; continuing with the existing fail-open permission policy"
+      chmod g+rwX "$_agent_dir" 2>/dev/null || true
+      hive_publish_uid_isolation_marker "$_agent_marker" "$_agent_expected" || true
+      echo "[entrypoint] UID isolation: ${_agent_name} pass complete"
+    fi
+    _uid_offset=$((_uid_offset + 1))
+  done
+}
+
+hive_start_uid_isolation_migration() {
+  hive_run_uid_isolation_migration &
+  echo "[entrypoint] UID-isolation migration running in background (PID $!)"
+}
+
 # hive_harden_runtime_config makes $1 readable by the user that reads it, and
 # by nobody else: chown to dev:node, then chmod 0600.
 #
@@ -147,6 +233,7 @@ hive_harden_runtime_config() {
 #   /data/.hive/proxy-ca-key.pem   — owner-only by design, chowned at its site.
 HIVE_DATA_ROOT_PHASE_PATHS="
 /data/.hive
+/data/.hive/uid-isolation
 /data/secrets
 /data/config
 /data/config/github-copilot
@@ -656,6 +743,9 @@ if [ "$(id -u)" = "0" ]; then
   # cannot be redirected to an attacker-controlled path.
   mkdir -p /data/.hive && chown dev:node /data/.hive 2>/dev/null || true
   chmod 700 /data/.hive 2>/dev/null || true
+  mkdir -p "$HIVE_UID_ISOLATION_MARKER_DIR"
+  chown dev:node "$HIVE_UID_ISOLATION_MARKER_DIR" 2>/dev/null || true
+  chmod 0700 "$HIVE_UID_ISOLATION_MARKER_DIR" 2>/dev/null || true
   if [ -L /data/.hive/proxy-ca-key.pem ]; then
     rm -f -- /data/.hive/proxy-ca-key.pem 2>/dev/null || true
   fi
@@ -831,13 +921,13 @@ if [ "$(id -u)" = "0" ]; then
   chmod 2770 /data/home/.copilot 2>/dev/null || true
   chown dev:node /data/home/.copilot 2>/dev/null || true
   chmod 2775 /data/home/.claude /data/home/.claude/session-env 2>/dev/null || true
-  chown -R dev:node /data/home/.claude 2>/dev/null || true
+  chown dev:node /data/home/.claude /data/home/.claude/session-env 2>/dev/null || true
   # Codex (newer method) writes a local sqlite state db under $HOME/.codex —
   # pre-create it group-writable + setgid so every agent UID (node group) can
   # init it, matching .claude/.copilot. Without this, switching an agent to the
   # codex backend fails with "Permission denied" initializing state_N.sqlite.
   chmod 2775 /data/home/.codex 2>/dev/null || true
-  chown -R dev:node /data/home/.codex 2>/dev/null || true
+  chown dev:node /data/home/.codex 2>/dev/null || true
   # bob writes installation_id, settings.json, trustedFolders.json and tmp/ under
   # $HOME/.bob, plus custom modes under $HOME/.bob/settings. Pre-create both
   # group-writable + setgid so the FIRST agent to launch (a 2001+ UID in group
@@ -845,7 +935,7 @@ if [ "$(id -u)" = "0" ]; then
   # in #2284/#2253. Pre-creating also removes the ordering dependency on which
   # process touches .bob first. 2770: no world access, these hold auth settings.
   chmod 2770 /data/home/.bob /data/home/.bob/settings 2>/dev/null || true
-  chown -R dev:node /data/home/.bob 2>/dev/null || true
+  chown dev:node /data/home/.bob /data/home/.bob/settings 2>/dev/null || true
   ln -sfn /data/config/github-copilot /home/dev/.config/github-copilot
   ln -sfn /data/config/github-copilot /data/home/.config/github-copilot
   ln -sfn /data/home/.copilot /home/dev/.copilot
@@ -870,29 +960,18 @@ if [ "$(id -u)" = "0" ]; then
   else
     NEED_PERM_FIX=true
   fi
-  if [ "$NEED_PERM_FIX" = "true" ]; then
-    # Run synchronously — on fresh provisions /data/home is nearly empty so
-    # this completes in <1s. Running in background caused a race where agents
-    # started before perms were fixed, hitting EACCES on config.json.
-    echo "[entrypoint] Fixing /data/home perms..."
-    # This file runs under `set -e`. chmod on an inode root does not OWN (the
-    # tree is dev-owned) needs CAP_FOWNER, and keeping the setgid bit needs
-    # CAP_FSETID — both are in deployment.yaml's capabilities.add. Before they
-    # were, a failed chmod here exited the container with status 1 right after
-    # the line above and NO error text, crash-looping every fresh PVC. Log and
-    # continue instead: agents may hit EACCES later, but the operator gets a
-    # WARN naming the cause rather than a silent exit.
-    chmod -R g+rwX /data/home 2>/dev/null \
-      || echo "[entrypoint] WARN: chmod -R g+rwX /data/home failed — is CAP_FOWNER in the pod's capabilities.add? Continuing; agents may hit EACCES under /data/home"
-    find /data/home -type d -exec chmod g+s {} + 2>/dev/null \
-      || echo "[entrypoint] WARN: chmod g+s on /data/home dirs failed — is CAP_FOWNER/CAP_FSETID in the pod's capabilities.add? Continuing"
-    if [ "$DATA_OWNER" != "1001" ]; then
-      chown -R dev:node /data/config /data/home 2>/dev/null \
-        || echo "[entrypoint] WARN: chown -R dev:node /data/config /data/home failed — is CAP_CHOWN in the pod's capabilities.add? Continuing"
-    fi
-    echo "[entrypoint] perm fix complete"
+  _home_marker="${HIVE_UID_ISOLATION_MARKER_DIR}/home.ready"
+  HIVE_HOME_MODE_REPAIR_NEEDED="$NEED_PERM_FIX"
+  HIVE_HOME_MIGRATION_NEEDED=false
+  if [ "$NEED_PERM_FIX" = "true" ] \
+     || ! hive_uid_isolation_marker_matches "$_home_marker" "$HIVE_UID_ISOLATION_REVISION"; then
+    # Invalidate synchronously, before the Go process can read the UID map.
+    # The expensive repair itself runs in hive_run_uid_isolation_migration.
+    rm -f "$_home_marker" 2>/dev/null || true
+    HIVE_HOME_MIGRATION_NEEDED=true
+    echo "[entrypoint] /data/home permission migration scheduled in background"
   else
-    echo "[entrypoint] /data/home perms OK — skipping"
+    echo "[entrypoint] /data/home ownership marker and perms OK — skipping"
   fi
   chown dev:node /home/dev/.config 2>/dev/null || true
   # Copilot CLI rewrites config.json with 0600 on every token refresh,
@@ -1084,11 +1163,15 @@ print('\n'.join(sorted(names)))
         useradd --system -u "$AGENT_UID" -g node -d /data/home -M -s /bin/bash "hive-${agent_name}" 2>/dev/null || true
       fi
       mkdir -p "/data/agents/${agent_name}"
-      # Skip recursive chown if already owned by this agent — avoids NFS
-      # contention during rolling updates when the old pod is still writing.
+      # Invalidate a stale/incomplete marker synchronously, then leave the
+      # recursive work to the background migration. Manager.Start waits for
+      # this protected marker before the agent can enter its tree.
       AGENT_DIR_OWNER=$(stat -c '%u' "/data/agents/${agent_name}" 2>/dev/null || echo "0")
-      if [ "$AGENT_DIR_OWNER" != "$AGENT_UID" ]; then
-        chown -R "hive-${agent_name}:node" "/data/agents/${agent_name}" 2>/dev/null || true
+      AGENT_ISOLATION_MARKER=$(hive_uid_isolation_marker_path "$AGENT_UID")
+      AGENT_ISOLATION_EXPECTED="${HIVE_UID_ISOLATION_REVISION}:${AGENT_UID}"
+      if [ "$AGENT_DIR_OWNER" != "$AGENT_UID" ] \
+         || ! hive_uid_isolation_marker_matches "$AGENT_ISOLATION_MARKER" "$AGENT_ISOLATION_EXPECTED"; then
+        rm -f "$AGENT_ISOLATION_MARKER" 2>/dev/null || true
       fi
       # Ensure agent dirs are group-writable so the dev user (same node group)
       # can clean up stale workspaces at runtime without root privileges.
@@ -1158,13 +1241,20 @@ uid_map = {
     'agents': agents,
     'proxy_uid': $PROXY_UID,
     'base_uid': $HIVE_UID_BASE,
-    'iptables_active': False
+    'iptables_active': False,
+    'isolation_marker_dir': os.environ['HIVE_UID_ISOLATION_MARKER_DIR'],
+    'isolation_revision': os.environ['HIVE_UID_ISOLATION_REVISION']
 }
 os.makedirs('/var/run/hive', exist_ok=True)
 with open('/var/run/hive/uid-map.json', 'w') as f:
     json.dump(uid_map, f, indent=2)
 print('[entrypoint] UID map written to /var/run/hive/uid-map.json')
 " 2>/dev/null || echo "[entrypoint] WARN: Failed to write UID map"
+
+    # This returns immediately. The root child keeps the capabilities needed
+    # for chown/chmod while the re-exec below drops PID 1 to dev and starts the
+    # HTTP server. Per-agent launches are held on the markers written here.
+    hive_start_uid_isolation_migration
 
     # Set up iptables: redirect all outbound :443 to the MITM proxy port,
     # except traffic from the proxy itself (UID 1001 / dev user).

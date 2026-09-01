@@ -62,6 +62,11 @@ const (
 	proxyListenPort      = 18443
 	proxyCACertPath      = "/data/proxy-ca.pem"
 
+	// Completion markers live on the same potentially slow NFS PVC as the
+	// migrated trees. One read per second per waiting agent is responsive
+	// without amplifying load during a rolling update.
+	uidIsolationPollInterval = time.Second
+
 	// fullLogCaptureLines bounds the "download/view full log" capture (see
 	// CaptureFullLog). tmux's -S - captures the entire scrollback, but a wedged
 	// agent that has spammed for hours can hold a very large buffer; this caps the
@@ -1723,6 +1728,66 @@ func (m *Manager) mintAgentTokenUnlocked(ctx context.Context, agent *AgentProces
 	m.issueAgentMintToken(agent.Name, tier, agent.UID)
 }
 
+// uidIsolationMarkersReady reports whether both ownership passes an agent
+// depends on have completed: the shared HOME repair and that agent's own tree.
+// Marker contents bind readiness to both the ownership-schema revision and the
+// assigned UID, so a roster change that shifts UIDs cannot reuse a stale pass.
+func uidIsolationMarkersReady(markerDir, revision string, uid int) bool {
+	if markerDir == "" || revision == "" || uid <= 0 {
+		return true // legacy/shared-UID deployment: no marker contract to await
+	}
+	checks := map[string]string{
+		filepath.Join(markerDir, "home.ready"):                       revision,
+		filepath.Join(markerDir, fmt.Sprintf("agent-%d.ready", uid)): revision + ":" + strconv.Itoa(uid),
+	}
+	for path, expected := range checks {
+		data, err := os.ReadFile(path)
+		if err != nil || strings.TrimSpace(string(data)) != expected {
+			return false
+		}
+	}
+	return true
+}
+
+// awaitUIDIsolation keeps expensive PVC ownership walks off the pod startup
+// path without weakening per-agent UID isolation. The entrypoint starts the
+// root repair worker asynchronously, allowing the dashboard/startup probe to
+// become healthy; each agent waits here before sanitizeGitRemotes, tmux setup,
+// or any backend process can touch its persistent tree.
+func (m *Manager) awaitUIDIsolation(ctx context.Context, agent *AgentProcess) error {
+	if m.uidMap == nil || agent.UID <= 0 {
+		return nil
+	}
+	markerDir, revision, uid := m.uidMap.IsolationContract(agent.Name)
+	if uidIsolationMarkersReady(markerDir, revision, uid) {
+		return nil
+	}
+
+	m.logger.Info("agent launch held for UID-isolation migration",
+		"agent", agent.Name,
+		"uid", uid,
+		"marker_dir", markerDir,
+		"revision", revision,
+	)
+	ticker := time.NewTicker(uidIsolationPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("wait for agent %s UID-isolation migration: %w", agent.Name, ctx.Err())
+		case <-ticker.C:
+			if uidIsolationMarkersReady(markerDir, revision, uid) {
+				m.logger.Info("UID-isolation migration complete; releasing agent launch",
+					"agent", agent.Name,
+					"uid", uid,
+					"revision", revision,
+				)
+				return nil
+			}
+		}
+	}
+}
+
 func (m *Manager) Start(ctx context.Context, name string) error {
 	// PHASE 1 — brief critical section: map lookup, the pure in-memory
 	// decisions (running/sandbox), and claiming the per-agent launch guard.
@@ -1794,6 +1859,10 @@ func (m *Manager) Start(ctx context.Context, name string) error {
 	// advancing, and /api/livez stays 200. Neither call mutates m.mu-guarded
 	// AgentProcess fields (they read only immutable Name/UID/tmuxSession/
 	// tmuxSocket and Config), so running them lock-free is race-free.
+	if err := m.awaitUIDIsolation(ctx, agent); err != nil {
+		return err
+	}
+
 	m.sanitizeGitRemotes(agent)
 
 	if err := m.ensureTmuxSession(agent); err != nil {
