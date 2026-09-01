@@ -408,6 +408,14 @@ governor:
 # planning:
 #   plan_from_label: false
 
+# Optional formal-verification capability for the quality lane. OFF by default
+# and effective only at ACMM L5/L6. When enabled, quality may author
+# Spin/Promela models for protocol-shaped code under formal/<subsystem>/, add a
+# path-gated reporting-only CI job, and maintain one deduplicated issue per
+# violated property. See docs/formal-verification.md for the artifact contract.
+# quality:
+#   formal: false
+
 # CEL-based agent triggers — declarative rules that kick an agent directly off
 # a normalized source-control event (issue opened, PR opened, a label applied,
 # a comment posted), evaluated with CEL against the `event` variable. This is

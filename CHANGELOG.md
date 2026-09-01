@@ -11,6 +11,10 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+### Added
+
+- The quality lane can now opt into agent-authored formal verification with `quality.formal: true` at ACMM L5/L6. Every quality kick receives the same model-worthiness, `formal/<subsystem>/` artifact, expected-verdict drift, reporting-only CI, counterexample narrative/deduplication, and modeled-subsystem maintenance contract even when its ordinary policy prompt is customized. The zero value is off, and the setting becomes inert on an ACMM downgrade below L5 without being discarded ([#5512](https://github.com/kubestellar/hive/issues/5512)).
+
 ## 2026-09-01 (v4.0.1)
 
 ### Added

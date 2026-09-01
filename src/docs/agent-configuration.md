@@ -426,6 +426,14 @@ The L5 roster is the canonical worked example — eleven agents, eight on the go
 
 At L5, every agent PR gets a `hold` label automatically. The system proposes; it does not merge autonomously.
 
+The quality lane has an additional opt-in formal-verification capability at
+L5/L6. Set top-level `quality.formal: true` to let quality identify
+protocol-shaped subsystems and author Spin/Promela models, their executable
+property contract, and reporting-only CI. The setting is inert below L5 and
+does not turn modeling into a default for every repository. See
+[Formal verification](formal-verification.md) for the admission, artifact,
+reporting, and maintenance rules.
+
 Telemetry and operations are L5/L6-only agents. They stay absent below L5 and remain paused at L5/L6 until an operator deliberately opts in. Their lane keywords are disjoint: telemetry owns instrumentation and observability terms, while operations owns health, SLO, runbook, incident, rollback, and alerting terms.
 
 Configure that opt-in under **Settings → Project Observability**. This tab is

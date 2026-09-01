@@ -58,6 +58,7 @@ Start with [Architecture](architecture.md) for the system overview, then use the
 ## Configuration and agents
 
 - [Agent configuration](agent-configuration.md) — agent fields, methods, models, pins, cadences, caveman mode, ACMM packs, and live-linked `definition_source` (with its seed-only trust model).
+- [Formal verification](formal-verification.md) — the optional L5/L6 `quality.formal` capability for agent-authored Spin/Promela models, reporting-only CI, and deduplicated counterexample issues.
 - [Advisory digest](advisory.md) — what the digest shows (`max_findings`, `show_all`) and how findings are retired (staleness auto-close, PR-linked auto-close).
 - [Advisory digest staleness](advisory-staleness.md) — when the hub raises the stale-advisory pill and alert, the gates that deliberately suppress it (undelivered App, App cannot write, all agents quiet), and the admin diagnostics that measure hidden staleness.
 - [Governor mode thresholds](https://github.com/kubestellar/hive/blob/v4/src/docs/governor-thresholds.md) — how idle/quiet/busy/surge thresholds scale with repo count, the `threshold_scaling` curves, and when explicit thresholds win.
