@@ -132,10 +132,10 @@ const (
 )
 
 // footerText lists only the bindings that EXIST. The sketch's full strip
-// (p pause, m model, K kick, …) documents keys whose tasks have not landed;
+// (m model, A acmm, …) documents keys whose tasks have not landed;
 // showing them now would advertise actions that silently do nothing. Each
 // action task appends its own binding when it wires the key.
-const footerText = "tab focus  p pause/resume  a attach  ? help  q quit"
+const footerText = "tab focus  p pause/resume  K kick  a attach  ? help  q quit"
 
 // confirmState is the pause/resume dialog. It remains present while the HTTP
 // command is in flight so every other key stays behind the modal, and it also
@@ -158,6 +158,15 @@ type agentActionMsg struct {
 	pause    bool
 	result   client.AgentActionResult
 	err      error
+}
+
+// kickResultMsg is the asynchronous result of asking the dashboard to queue a
+// kick. The target travels with the result because an empty Agent in a malformed
+// success response must not erase the operator's target from the status text.
+type kickResultMsg struct {
+	agent  string
+	result client.KickResult
+	err    error
 }
 
 // model is the root bubbletea model.
@@ -210,10 +219,15 @@ type model struct {
 	// completes.
 	attachPending bool
 
-	// footerErr is an attach failure rendered in place of the normal binding
-	// strip. tmux is a local optional dependency, so a missing binary or session
-	// is UI state rather than a reason to terminate the whole TUI.
-	footerErr string
+	// kickPending is the selected agent whose kick request is currently in
+	// flight. Only one local request is allowed at a time, so repeated K presses
+	// cannot enqueue duplicate commands before the dashboard answers.
+	kickPending string
+
+	// footerStatus is the latest action result rendered in place of the normal
+	// binding strip. Whichever asynchronous action answers last is the status
+	// the operator sees. Kick success describes only queueing or deduplication.
+	footerStatus string
 
 	// interval is this model's poll cadence, defaulting to pollInterval.
 	//
@@ -352,10 +366,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return next, cmd
 	case agentActionMsg:
 		return m.handleAgentAction(msg)
+	case kickResultMsg:
+		return m.handleKickResult(msg)
 	case attachReadyMsg:
 		if msg.err != nil {
 			m.attachPending = false
-			m.footerErr = "Attach failed: " + msg.err.Error()
+			m.footerStatus = "Attach failed: " + msg.err.Error()
 			return m, nil
 		}
 		return m, tea.ExecProcess(msg.cmd, func(err error) tea.Msg {
@@ -364,9 +380,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case attachDoneMsg:
 		m.attachPending = false
 		if msg.err != nil {
-			m.footerErr = "Attach failed: " + msg.err.Error()
+			m.footerStatus = "Attach failed: " + msg.err.Error()
 		} else {
-			m.footerErr = ""
+			m.footerStatus = ""
 		}
 		return m, m.poll()
 	case tea.KeyMsg:
@@ -415,6 +431,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.confirm = &confirmState{agent: name, pause: !paused}
 			return m, nil
+		case "K":
+			if m.focus != 0 || m.kickPending != "" {
+				return m, nil
+			}
+			agents, ok := m.panes[0].(panes.Agents)
+			if !ok {
+				return m, nil
+			}
+			name, _, ok := agents.SelectedAgent()
+			if !ok {
+				return m, nil
+			}
+			m.kickPending = name
+			m.footerStatus = ""
+			return m, m.kickAgent(name)
 		case "a":
 			if m.focus != 0 || m.attachPending {
 				return m, nil
@@ -428,7 +459,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.attachPending = true
-			m.footerErr = ""
+			m.footerStatus = ""
 			return m, prepareAttach(name)
 		}
 		// Any other key belongs to the focused pane. The T3 stubs ignore
@@ -509,8 +540,8 @@ func (m model) View() string {
 
 	header := headerStyle.Width(m.width).Render(m.headerText())
 	footerTextForFrame := footerText
-	if m.footerErr != "" {
-		footerTextForFrame = m.footerErr
+	if m.footerStatus != "" {
+		footerTextForFrame = m.footerStatus
 	}
 	footer := footerStyle.Width(m.width).MaxWidth(m.width).Render(footerTextForFrame)
 
@@ -613,6 +644,46 @@ func (m model) handleAgentAction(msg agentActionMsg) (tea.Model, tea.Cmd) {
 		m.confirm = nil
 	}
 	return m, m.poll()
+}
+
+func (m model) kickAgent(agent string) tea.Cmd {
+	return func() tea.Msg {
+		result, err := m.api.KickAgent(context.Background(), agent, "")
+		return kickResultMsg{agent: agent, result: result, err: err}
+	}
+}
+
+func (m model) handleKickResult(msg kickResultMsg) (tea.Model, tea.Cmd) {
+	// A result for anything other than the one local request still pending is
+	// stale. Ignoring it prevents an old response from clearing or rewriting a
+	// newer action if messages are replayed by an embedding program.
+	if m.kickPending != msg.agent {
+		return m, nil
+	}
+	m.kickPending = ""
+
+	if msg.err != nil {
+		if client.IsForbidden(msg.err) {
+			m.footerStatus = "Kick failed: owner access required"
+		} else {
+			m.footerStatus = fmt.Sprintf("Kick failed: %v", msg.err)
+		}
+		return m, nil
+	}
+
+	agent := msg.result.Agent
+	if agent == "" {
+		agent = msg.agent
+	}
+	switch msg.result.Status {
+	case "queued":
+		m.footerStatus = "kick queued for " + agent
+	case "in-flight":
+		m.footerStatus = "kick already in flight for " + agent + " (request deduplicated)"
+	default:
+		m.footerStatus = fmt.Sprintf("Kick returned status %q for %s", msg.result.Status, agent)
+	}
+	return m, nil
 }
 
 func (m model) confirmView() string {

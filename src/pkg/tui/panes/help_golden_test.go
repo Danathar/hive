@@ -102,7 +102,9 @@ func TestHelpMarksOnlyWiredBindingsAvailable(t *testing.T) {
 		"tab / shift+tab": true, // T3
 		"?":               true, // T23, this task
 		"q / ctrl+c":      true, // T1
+		"j / k, ↓ / ↑":    true, // T5 and T11
 		"p":               true, // T15
+		"K":               true, // T21
 		"a":               true, // T22
 	}
 	for _, b := range panes.HelpBindings() {

@@ -1,7 +1,9 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -18,7 +20,10 @@ import (
 	"github.com/kubestellar/hive/pkg/tui/panes"
 )
 
-var pauseKey = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")}
+var (
+	pauseKey = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")}
+	kickKey  = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("K")}
+)
 
 func modelWithAgent(paused bool) model {
 	m := newModel()
@@ -242,5 +247,184 @@ func TestPauseModalBoundsLongErrors(t *testing.T) {
 	}
 	if got := lipgloss.Height(view); got != minHeight {
 		t.Fatalf("modal error frame is %d rows high, want %d", got, minHeight)
+	}
+}
+
+// TestKickSelectedAgentThroughTeatest drives the complete T21 operator path:
+// the roster supplies the selection, uppercase K runs a Bubble Tea command,
+// and the dashboard receives exactly one bodyless kick request.
+func TestKickSelectedAgentThroughTeatest(t *testing.T) {
+	type observedRequest struct {
+		method string
+		path   string
+		body   []byte
+	}
+	request := make(chan observedRequest, 1)
+	var kickCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/agents":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"name":"scanner","enabled":true,"backend":"claude","model":"claude-opus-4-5"}]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/kick/scanner":
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Errorf("read kick body: %v", err)
+			}
+			kickCount.Add(1)
+			request <- observedRequest{method: r.Method, path: r.URL.Path, body: body}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"status":"queued","agent":"scanner"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	pinDashboard(t, server.URL)
+
+	tm := teatest.NewTestModel(t, newModel(), teatest.WithInitialTermSize(100, 30))
+	teatest.WaitFor(t, tm.Output(), func(out []byte) bool {
+		return strings.Contains(string(out), "scanner")
+	}, teatest.WithDuration(finalWait))
+	tm.Send(kickKey)
+
+	select {
+	case got := <-request:
+		if got.method != http.MethodPost || got.path != "/api/kick/scanner" {
+			t.Errorf("kick request = %s %s, want POST /api/kick/scanner", got.method, got.path)
+		}
+		if len(got.body) != 0 {
+			t.Errorf("kick request body = %q, want no body", got.body)
+		}
+	case <-time.After(finalWait):
+		t.Fatal("uppercase K did not reach the dashboard")
+	}
+	teatest.WaitFor(t, tm.Output(), func(out []byte) bool {
+		return strings.Contains(string(out), "kick queued for scanner")
+	}, teatest.WithDuration(finalWait))
+
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(finalWait))
+	if got := kickCount.Load(); got != 1 {
+		t.Errorf("kick request count = %d, want exactly 1", got)
+	}
+	if final := tm.FinalModel(t).(model); final.kickPending != "" {
+		t.Errorf("kick remained pending for %q after the response", final.kickPending)
+	}
+}
+
+func TestKickKeyRequiresFocusedSelectedAgent(t *testing.T) {
+	m := modelWithAgent(false)
+	m.focus = 1
+	next, cmd := m.Update(kickKey)
+	if cmd != nil || next.(model).kickPending != "" {
+		t.Fatal("K queued a kick while another pane was focused")
+	}
+
+	empty := newModel()
+	next, cmd = empty.Update(kickKey)
+	if cmd != nil || next.(model).kickPending != "" {
+		t.Fatal("K queued a kick before the roster supplied a selection")
+	}
+
+	loadedEmpty, _ := empty.Update(panes.AgentsMsg{Agents: []client.Agent{}})
+	next, cmd = loadedEmpty.(model).Update(kickKey)
+	if cmd != nil || next.(model).kickPending != "" {
+		t.Fatal("K queued a kick from a loaded but empty roster")
+	}
+}
+
+func TestLowercaseKRemainsAgentNavigation(t *testing.T) {
+	m := newModel()
+	next, _ := m.Update(panes.AgentsMsg{Agents: []client.Agent{
+		{Name: "scanner", Enabled: true},
+		{Name: "quality", Enabled: true},
+	}})
+	m = next.(model)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	m = next.(model)
+	name, _, _ := m.panes[0].(panes.Agents).SelectedAgent()
+	if name != "quality" {
+		t.Fatalf("j selected %q, want quality", name)
+	}
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	got := next.(model)
+	name, _, _ = got.panes[0].(panes.Agents).SelectedAgent()
+	if name != "scanner" {
+		t.Errorf("lowercase k selected %q, want scanner", name)
+	}
+	if cmd != nil || got.kickPending != "" {
+		t.Fatal("lowercase k queued a kick instead of only navigating")
+	}
+}
+
+func TestRepeatedKickKeyWhilePendingQueuesOneCommand(t *testing.T) {
+	m := modelWithAgent(false)
+	next, first := m.Update(kickKey)
+	if first == nil {
+		t.Fatal("first K did not return a kick command")
+	}
+	pending := next.(model)
+	if pending.kickPending != "scanner" {
+		t.Fatalf("kick pending for %q, want scanner", pending.kickPending)
+	}
+
+	next, second := pending.Update(kickKey)
+	if second != nil {
+		t.Fatal("repeated K returned a second command while the first was pending")
+	}
+	if got := next.(model).kickPending; got != "scanner" {
+		t.Errorf("repeated K changed pending target to %q", got)
+	}
+}
+
+func TestKickResultStatusText(t *testing.T) {
+	apiFailure := &client.APIError{
+		StatusCode: http.StatusBadGateway,
+		Method:     http.MethodPost,
+		Path:       "/api/kick/scanner",
+		Body:       `{"error":"agent tmux session is unavailable"}`,
+	}
+	tests := []struct {
+		name   string
+		result client.KickResult
+		err    error
+		want   string
+	}{
+		{name: "queued", result: client.KickResult{Status: "queued", Agent: "scanner"}, want: "kick queued for scanner"},
+		{name: "in flight", result: client.KickResult{Status: "in-flight", Agent: "scanner"}, want: "kick already in flight for scanner (request deduplicated)"},
+		{name: "owner required", err: &client.APIError{StatusCode: http.StatusForbidden}, want: "Kick failed: owner access required"},
+		{name: "API failure", err: apiFailure, want: "agent tmux session is unavailable"},
+		{name: "transport failure", err: errors.New("dial tcp: connection refused"), want: "dial tcp: connection refused"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := modelWithAgent(false)
+			m.width, m.height = 100, 30
+			m.kickPending = "scanner"
+			next, cmd := m.Update(kickResultMsg{agent: "scanner", result: tc.result, err: tc.err})
+			got := next.(model)
+			if cmd != nil {
+				t.Fatal("kick result returned a command; status rendering must remain in the TUI")
+			}
+			if got.kickPending != "" {
+				t.Errorf("kick remained pending for %q", got.kickPending)
+			}
+			if !strings.Contains(got.footerStatus, tc.want) {
+				t.Errorf("kick status = %q, want it to contain %q", got.footerStatus, tc.want)
+			}
+			if !strings.Contains(got.View(), tc.want) {
+				t.Errorf("footer does not contain %q", tc.want)
+			}
+		})
+	}
+}
+
+func TestFooterAdvertisesKickBinding(t *testing.T) {
+	if !strings.Contains(footerText, "K kick") {
+		t.Errorf("footerText = %q, want it to advertise uppercase K kick", footerText)
 	}
 }
