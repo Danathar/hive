@@ -340,31 +340,79 @@ assert_eq "POSITIVE CONTROL: scanner is never paused by mode (cadence=15min in e
   "$(cat "${STATE_DIR_T}/cadence_scanner" 2>/dev/null)" "15min"
 assert_eq "surge mode: architect cadence=0 renders as off" "$(cat "${STATE_DIR_T}/cadence_architect" 2>/dev/null)" "off"
 
-# DOCUMENTS THE CURRENT STATE (BUG — see the PR body): the header comment and
-# `priority_agents=(scanner ci-maintainer)` (line 497) both name the agent
-# ci-maintainer, and AGENTS_ENABLED's own default in bin/hive.sh is
-# "supervisor scanner ci-maintainer architect outreach" — ci-maintainer IS the
-# real agent name. But every CADENCE_*_SEC and MODEL_*_* default in this file
-# is written for an agent called "reviewer" instead (CADENCE_REVIEWER_*,
-# MODEL_*_REVIEWER). get_cadence()/get_model_selection() build the lookup key
-# from the AGENT name, so an operator who never overrides
-# CADENCE_CI_MAINTAINER_*_SEC gets cadence=0 (mode-paused, forever, in every
-# mode) for ci-maintainer, and get_model_selection() silently falls through to
-# its hardcoded "copilot:claude-sonnet-4-6" default in every mode too — the
-# entire ci-maintainer cadence ladder and model ladder in the header comment
-# (lines 8-34) are unreachable dead configuration. Pinned so a fix (renaming
-# the REVIEWER defaults to CI_MAINTAINER, or renaming the agent) flips this
-# deliberately.
+# FIXED in #5571 (was pinned as a bug by #5548). The header comment and
+# `priority_agents=(scanner ci-maintainer)` both name the agent ci-maintainer,
+# and AGENTS_ENABLED's default in bin/hive.sh is "supervisor scanner
+# ci-maintainer architect outreach" — ci-maintainer IS the real agent name.
+# But every CADENCE_*_SEC and MODEL_*_* default was written for an agent called
+# "reviewer" (CADENCE_REVIEWER_*, MODEL_*_REVIEWER), and
+# get_cadence()/get_model_selection() build the lookup key from the AGENT name.
+# So ci-maintainer got cadence=0 (mode-paused, forever, in every mode) and its
+# model fell through to the hardcoded copilot default. #5571 renames those keys
+# to CI_MAINTAINER (keeping REVIEWER as a deprecated alias), which makes the
+# ladder documented in the header comment reachable for the first time.
+#
+# NOTE ON SCOPE: this affects systemd/bare-metal hives only. kick-governor.sh
+# is driven by kick-governor.timer (bin/hive.sh) and is NOT copied into the
+# container image (src/Dockerfile), where the Go governor in src/pkg/governor
+# runs instead and has no CADENCE_* variables at all.
 reset_state
-write_actionable 0 0   # idle: CADENCE_REVIEWER_IDLE_SEC defaults to 900 (15min) if it were consulted
+write_actionable 0 0   # idle: CADENCE_CI_MAINTAINER_IDLE_SEC defaults to 900 (15min)
 run_gov "${BASE_ENV[@]}" >/dev/null
-assert_eq "[pinned bug] ci-maintainer's cadence is 0/off in idle mode — CADENCE_REVIEWER_IDLE_SEC (900) is never consulted" \
-  "$(cat "${STATE_DIR_T}/cadence_ci-maintainer" 2>/dev/null)" "off"
-assert_eq "[pinned bug] ci-maintainer is never kicked as a result, even though it is the highest-priority non-scanner agent" \
-  "$(kick_count ci-maintainer)" "0"
-assert_eq "[pinned bug] ci-maintainer's model falls through to the hardcoded default, not MODEL_IDLE_REVIEWER" \
+assert_eq "ci-maintainer's idle cadence is now the documented 15min, not 0/off" \
+  "$(cat "${STATE_DIR_T}/cadence_ci-maintainer" 2>/dev/null)" "15min"
+assert_eq "ci-maintainer IS kicked in idle mode now that its cadence resolves" \
+  "$(kick_count ci-maintainer)" "1"
+
+# The idle-mode model default happens to equal the old hardcoded fallback
+# (copilot:claude-sonnet-4-6), so idle alone cannot distinguish fixed from
+# broken. SURGE can: MODEL_SURGE_CI_MAINTAINER is metered claude:, matching
+# "priority agents get metered Claude in surge/busy". Before the fix every
+# mode fell through to copilot:.
+reset_state
+write_actionable 25 0   # surge
+run_gov "${BASE_ENV[@]}" CADENCE_CI_MAINTAINER_SURGE_SEC=900 >/dev/null
+assert_eq "ci-maintainer's surge model is metered claude:, proving MODEL_SURGE_CI_MAINTAINER is consulted" \
   "$(grep '^BACKEND=' "${STATE_DIR_T}/model_ci-maintainer" 2>/dev/null | cut -d= -f2):$(grep '^MODEL=' "${STATE_DIR_T}/model_ci-maintainer" 2>/dev/null | cut -d= -f2)" \
-  "copilot:claude-sonnet-4-6"
+  "claude:claude-sonnet-4-6"
+
+# Backward compatibility: an operator who set the OLD CADENCE_REVIEWER_* name
+# in governor.env must not be silently changed underneath them.
+reset_state
+write_actionable 0 0
+run_gov "${BASE_ENV[@]}" CADENCE_REVIEWER_IDLE_SEC=1800 >/dev/null
+assert_eq "deprecated CADENCE_REVIEWER_IDLE_SEC is still honoured as an alias" \
+  "$(cat "${STATE_DIR_T}/cadence_ci-maintainer" 2>/dev/null)" "30min"
+# ...but the new name wins when both are set.
+reset_state
+write_actionable 0 0
+run_gov "${BASE_ENV[@]}" CADENCE_REVIEWER_IDLE_SEC=1800 CADENCE_CI_MAINTAINER_IDLE_SEC=2700 >/dev/null
+assert_eq "new CADENCE_CI_MAINTAINER_* takes precedence over the deprecated alias" \
+  "$(cat "${STATE_DIR_T}/cadence_ci-maintainer" 2>/dev/null)" "45min"
+
+# ── 4b. A missing cadence key is LOUD, a deliberate 0 is SILENT (#5571) ─────
+# get_cadence used to return `${!var_name:-0}` — so "no cadence configured"
+# and "operator deliberately paused this agent" were the same value, and a
+# mistyped/unlisted agent name disabled that agent with no error and no log.
+# That conflation is the root defect; the ci-maintainer key was one symptom.
+echo "-- missing cadence key is distinguishable from a deliberate 0 (#5571) --"
+reset_state
+write_actionable 0 0
+run_gov "${BASE_ENV[@]}" AGENTS_ENABLED="supervisor scanner ci-maintainer architect outreach notanagent" >/dev/null
+grep -q "CONFIG ERROR: CADENCE_NOTANAGENT_IDLE_SEC is not defined" "$LOG_FILE_T" \
+  && pass "an agent with NO cadence key logs a CONFIG ERROR naming the missing variable" \
+  || fail "an agent with NO cadence key logs a CONFIG ERROR naming the missing variable" "log: $(cat "$LOG_FILE_T")"
+assert_eq "an agent with NO cadence key is still not kicked (fails safe, but visibly)" \
+  "$(kick_count notanagent)" "0"
+# POSITIVE CONTROL: a deliberate 0 must stay silent, or every paused agent
+# would spam CONFIG ERROR every 15 minutes and the signal would be worthless.
+reset_state
+write_actionable 0 0
+run_gov "${BASE_ENV[@]}" CADENCE_OUTREACH_IDLE_SEC=0 >/dev/null
+grep -q "CONFIG ERROR: CADENCE_OUTREACH_IDLE_SEC" "$LOG_FILE_T" \
+  && fail "a DELIBERATE cadence of 0 must NOT log a CONFIG ERROR" "log: $(cat "$LOG_FILE_T")" \
+  || pass "a DELIBERATE cadence of 0 is honoured silently (no CONFIG ERROR)"
+assert_eq "a DELIBERATE cadence of 0 still pauses the agent" "$(kick_count outreach)" "0"
 
 # ── 5. Dashboard pause / operator-resume / cadence=0 handling (maybe_kick) ──
 echo "-- pause handling --"

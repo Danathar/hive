@@ -6,7 +6,10 @@
 # agent at a cadence that reflects the current workload:
 #
 # Architect and outreach are OPPORTUNISTIC — they fill idle cycles and yield
-# entirely under load. Scanner and ci-maintainer always have priority.
+# entirely under load. Scanner and ci-maintainer are the PRIORITY agents: they
+# get metered Claude rather than copilot in surge/busy (see the model table).
+# "Priority" is about model quality, not about always being kicked — under
+# SURGE, ci-maintainer still yields so scanner owns the queue.
 #
 #   SURGE (queue > SURGE_THRESHOLD, default 20):
 #     scanner   → every 15 min
@@ -92,10 +95,15 @@ CADENCE_SCANNER_BUSY_SEC="${CADENCE_SCANNER_BUSY_SEC:-900}"       # 15 min
 CADENCE_SCANNER_QUIET_SEC="${CADENCE_SCANNER_QUIET_SEC:-900}"     # 15 min
 CADENCE_SCANNER_IDLE_SEC="${CADENCE_SCANNER_IDLE_SEC:-900}"       # 15 min
 
-CADENCE_REVIEWER_SURGE_SEC="${CADENCE_REVIEWER_SURGE_SEC:-0}"       # PAUSED
-CADENCE_REVIEWER_BUSY_SEC="${CADENCE_REVIEWER_BUSY_SEC:-3600}"     # 1 hour
-CADENCE_REVIEWER_QUIET_SEC="${CADENCE_REVIEWER_QUIET_SEC:-2700}"   # 45 min
-CADENCE_REVIEWER_IDLE_SEC="${CADENCE_REVIEWER_IDLE_SEC:-900}"      # 15 min
+# ci-maintainer. The values below are the ones this script's own header has
+# always documented for ci-maintainer; they were unreachable because the keys
+# were named REVIEWER, an agent that never appears in AGENTS_ENABLED.
+# CADENCE_REVIEWER_*_SEC is still honoured as a deprecated alias so operators
+# who set the old name in governor.env are not silently changed underneath.
+CADENCE_CI_MAINTAINER_SURGE_SEC="${CADENCE_CI_MAINTAINER_SURGE_SEC:-${CADENCE_REVIEWER_SURGE_SEC:-0}}"      # PAUSED — yields to scanner under load
+CADENCE_CI_MAINTAINER_BUSY_SEC="${CADENCE_CI_MAINTAINER_BUSY_SEC:-${CADENCE_REVIEWER_BUSY_SEC:-3600}}"      # 1 hour
+CADENCE_CI_MAINTAINER_QUIET_SEC="${CADENCE_CI_MAINTAINER_QUIET_SEC:-${CADENCE_REVIEWER_QUIET_SEC:-2700}}"   # 45 min
+CADENCE_CI_MAINTAINER_IDLE_SEC="${CADENCE_CI_MAINTAINER_IDLE_SEC:-${CADENCE_REVIEWER_IDLE_SEC:-900}}"       # 15 min
 
 CADENCE_ARCHITECT_SURGE_SEC="${CADENCE_ARCHITECT_SURGE_SEC:-0}"     # PAUSED
 CADENCE_ARCHITECT_BUSY_SEC="${CADENCE_ARCHITECT_BUSY_SEC:-0}"      # PAUSED
@@ -145,25 +153,25 @@ COST_WEIGHT_HAIKU="${COST_WEIGHT_HAIKU:-1}"
 # Non-priority agents (architect, outreach) use copilot (free/unlimited).
 # Supervisor is lightweight — Haiku or copilot.
 MODEL_SURGE_SCANNER="${MODEL_SURGE_SCANNER:-claude:claude-sonnet-4-6}"
-MODEL_SURGE_REVIEWER="${MODEL_SURGE_REVIEWER:-claude:claude-sonnet-4-6}"
+MODEL_SURGE_CI_MAINTAINER="${MODEL_SURGE_CI_MAINTAINER:-${MODEL_SURGE_REVIEWER:-claude:claude-sonnet-4-6}}"
 MODEL_SURGE_ARCHITECT="${MODEL_SURGE_ARCHITECT:-claude:claude-opus-4-6}"
 MODEL_SURGE_OUTREACH="${MODEL_SURGE_OUTREACH:-copilot:claude-opus-4-6}"
 MODEL_SURGE_SUPERVISOR="${MODEL_SURGE_SUPERVISOR:-claude:claude-haiku-4-5}"
 
 MODEL_BUSY_SCANNER="${MODEL_BUSY_SCANNER:-claude:claude-sonnet-4-6}"
-MODEL_BUSY_REVIEWER="${MODEL_BUSY_REVIEWER:-claude:claude-sonnet-4-6}"
+MODEL_BUSY_CI_MAINTAINER="${MODEL_BUSY_CI_MAINTAINER:-${MODEL_BUSY_REVIEWER:-claude:claude-sonnet-4-6}}"
 MODEL_BUSY_ARCHITECT="${MODEL_BUSY_ARCHITECT:-copilot:claude-sonnet-4-6}"
 MODEL_BUSY_OUTREACH="${MODEL_BUSY_OUTREACH:-copilot:claude-sonnet-4-6}"
 MODEL_BUSY_SUPERVISOR="${MODEL_BUSY_SUPERVISOR:-claude:claude-haiku-4-5}"
 
 MODEL_QUIET_SCANNER="${MODEL_QUIET_SCANNER:-claude:claude-haiku-4-5}"
-MODEL_QUIET_REVIEWER="${MODEL_QUIET_REVIEWER:-copilot:claude-sonnet-4-6}"
+MODEL_QUIET_CI_MAINTAINER="${MODEL_QUIET_CI_MAINTAINER:-${MODEL_QUIET_REVIEWER:-copilot:claude-sonnet-4-6}}"
 MODEL_QUIET_ARCHITECT="${MODEL_QUIET_ARCHITECT:-copilot:claude-opus-4-6}"
 MODEL_QUIET_OUTREACH="${MODEL_QUIET_OUTREACH:-copilot:claude-sonnet-4-6}"
 MODEL_QUIET_SUPERVISOR="${MODEL_QUIET_SUPERVISOR:-claude:claude-haiku-4-5}"
 
 MODEL_IDLE_SCANNER="${MODEL_IDLE_SCANNER:-copilot:claude-sonnet-4-6}"
-MODEL_IDLE_REVIEWER="${MODEL_IDLE_REVIEWER:-copilot:claude-sonnet-4-6}"
+MODEL_IDLE_CI_MAINTAINER="${MODEL_IDLE_CI_MAINTAINER:-${MODEL_IDLE_REVIEWER:-copilot:claude-sonnet-4-6}}"
 MODEL_IDLE_ARCHITECT="${MODEL_IDLE_ARCHITECT:-copilot:claude-opus-4-6}"
 MODEL_IDLE_OUTREACH="${MODEL_IDLE_OUTREACH:-copilot:claude-sonnet-4-6}"
 MODEL_IDLE_SUPERVISOR="${MODEL_IDLE_SUPERVISOR:-copilot:claude-sonnet-4-6}"
@@ -389,14 +397,29 @@ determine_mode() {
 
 # ── Cadence selection ────────────────────────────────────────────────────────
 
+# A cadence of 0 means PAUSED. That is a legitimate, deliberate configuration —
+# but it must never be reached by ACCIDENT. A missing key used to fall through
+# to :-0, so a typo'd or unlisted agent name silently disabled that agent with
+# no error and no log line (see #5571: ci-maintainer was keyed to REVIEWER).
+#
+# So the two states are now distinguished:
+#   - key is SET (to 0 or anything else) → honoured exactly as written
+#   - key is UNSET                       → loud CONFIG error on stderr, and the
+#                                          agent is still skipped, but visibly
+# Skipping on an unset key keeps the failure safe (we never invent a cadence and
+# start kicking an agent the operator never configured) while making it audible.
 get_cadence() {
   local agent="$1" mode="$2"
   local upper_agent upper_mode
   upper_agent=$(echo "$agent" | tr '[:lower:]-' '[:upper:]_')
   upper_mode=$(echo "$mode" | tr '[:lower:]' '[:upper:]')
   local var_name="CADENCE_${upper_agent}_${upper_mode}_SEC"
-  local val="${!var_name:-0}"
-  echo "$val"
+  if [[ -z "${!var_name+x}" ]]; then
+    log "CONFIG ERROR: ${var_name} is not defined — '${agent}' has no cadence for mode '${mode}' and will NOT be kicked. Set ${var_name} in /etc/hive/governor.env (0 to pause deliberately)."
+    echo 0
+    return
+  fi
+  echo "${!var_name}"
 }
 
 # ── Model selection ──────────────────────────────────────────────────────────
