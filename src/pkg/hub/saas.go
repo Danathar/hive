@@ -3710,6 +3710,21 @@ func (s *HubServer) handleMyHives(w http.ResponseWriter, r *http.Request) {
 			// just computed. Only for real (non-placeholder) hives with reported
 			// agents — a placeholder has nothing to produce.
 			verdict := hiveHealthFor(result[i].RegistryEntry, rollup, result[i].GitHubAppHealth, queuedWork, journeyNow)
+			// Digest-lag amber (#5577): the channel/behind-count divergence
+			// info lives on MyHiveEntry (TrackedChannel is hub-owned, the
+			// behind-count was computed just above), so this row of the
+			// signature table is applied here rather than in hiveHealthFor.
+			applyChannelLag(&verdict, result[i].TrackedChannel, result[i].CommitsBehindStableV4, result[i].Upgrading)
+			// The App-broken hint's install URL is cluster-scoped (a GHE
+			// cluster must never be handed a github.com link), so resolve it
+			// from this hive's cluster config — the same single URL builder
+			// the create-hive modal uses.
+			if verdict.cause == causeAppBroken && verdict.Remediation != nil {
+				if c, ok := s.clusters[result[i].ClusterID]; ok {
+					gh := clusterGitHubConfig(&c)
+					verdict.Remediation.Link = gh.AppInstallURL()
+				}
+			}
 			result[i].HealthVerdict = &verdict
 		}
 
