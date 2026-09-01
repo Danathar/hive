@@ -143,31 +143,227 @@ hivectl observe trends --range week        # or --hours 12 (1-720); not both
 hivectl tui
 ```
 
-Opens a full-screen, keyboard-driven view of the fleet over the same dashboard
-API the non-interactive subcommands use, so it honours the same `--hive` /
-endpoint configuration. Requires a real terminal; press `q` or `ctrl+c` to
-exit.
+A full-screen, keyboard-driven view of the fleet — agents, the governor,
+token/cost spend, and recent activity — over the same dashboard API the
+non-interactive subcommands above use. It is not a second Hive runtime, just
+another client of the API: same auth token, same endpoints, same SSE stream
+the web dashboard consumes. Requires a real terminal.
 
-**Under active construction.** Four panes sit in a 2×2 grid, and only half are
-wired to live data today:
+This is the v1 delivery of the `hive tui` epic
+([#4907](https://github.com/kubestellar/hive/issues/4907)); the design
+rationale and the fixed architecture decisions behind it are recorded in
+[`src/docs/design/tui.md`](design/tui.md).
 
-| Pane | State |
-|---|---|
-| Agents | live — polls `GET /api/agents` |
-| Tokens | live — per-agent rows and fleet total |
-| Governor | stub — renders its title, pending T7 |
-| Events | stub — renders its title, pending T11 |
+#### Launch and endpoint selection
 
-`tab` moves focus between panes; `q` or `ctrl+c` exits. Those are the only keys
-bound: no help overlay, no pause/resume, no resize handling yet.
+`hivectl tui` takes no flags — it is a bare subcommand. In particular it does
+**not** honour the root `--server` / `--token-env` flags the other `hivectl`
+commands read: it builds its own client directly from two environment
+variables, checked once at startup:
 
-Note the command's own `--help` text describes an event feed — that is the
-end-state design, not what ships today.
+| Variable | Default | Meaning |
+|---|---|---|
+| `HIVE_DASHBOARD_URL` | `http://localhost:3001` | Dashboard API base URL |
+| `HIVE_DASHBOARD_TOKEN` | *(empty)* | Auth token — the same variable `--token-env` defaults to |
 
-Track progress under the `hive tui` epic
-([#4907](https://github.com/kubestellar/hive/issues/4907)); the open `tui T*`
-issues list what is still missing. Prefer the web dashboard or the
-non-interactive subcommands above for anything you need today.
+If you already have `HIVE_DASHBOARD_TOKEN` exported for the commands above,
+`hivectl tui` picks it up for free — the token variable name is shared on
+purpose. The base URL default differs by one detail from `--server`'s
+(`http://localhost:3001` vs. `http://127.0.0.1:3001`): both resolve to the
+same loopback dashboard, but set `HIVE_DASHBOARD_URL` explicitly if you also
+pass `--server` to other commands against a non-default host, since the TUI
+will not pick that flag up.
+
+#### The four panes
+
+A 2×2 grid — Agents and Governor on top, Tokens and Events on the bottom —
+refreshed from two independent loops with different cadences:
+
+| Pane | Source | Cadence |
+|---|---|---|
+| **Agents** | `GET /api/agents`, joined with live per-agent state pushed over SSE | reconciliation loop |
+| **Governor** | `GET /api/status` (live mode/queue), `GET /api/config/governor` (eval interval) | reconciliation loop |
+| **Tokens** | `GET /api/tokens` (counts, required) + `GET /api/cost` (estimate, optional) | activity loop, fixed |
+| **Events** | `GET /api/audit` (newest-first operator/governor activity) | activity loop, fixed |
+
+The **reconciliation loop** is what the SSE connection status affects: every
+5 seconds while the stream is down or has not proven itself yet, stretching to
+every 60 seconds once an event has actually been received on it (the stream
+is doing the work at that point; the poll is just a reconciler catching a
+roster change the stream does not announce, or a stream that stalled without
+dropping the connection).
+
+The **activity loop** — Tokens and Events — polls every 5 seconds
+**unconditionally**, whether or not the SSE stream is connected. Nothing on
+the stream carries token counts, estimated cost, or audit rows, so there is
+no push event for those panes to wait on; tying them to the reconciliation
+timer would make a *healthy* connection the reason they went stale. (This is
+what `tui T32` / [#5421](https://github.com/kubestellar/hive/issues/5421)
+fixed — earlier builds hung all seven reads off one timer, so a connected
+stream paradoxically made the Tokens and Events panes twelve times staler.)
+
+Both loops fetch once immediately on startup, so the frame fills in before
+either interval elapses. A failed fetch never blanks a pane: the previous
+successful frame stays on screen until the next successful read replaces it.
+One field is the exception — a failed `/api/cost` read *clears* the cached
+estimate rather than holding it, because a dollar figure attached to token
+counts that have since moved by a fresh `/api/tokens` read is worse than an
+honest `—`. Every write action below (pause/resume, model apply, kick,
+ACMM apply, returning from a tmux attach) also triggers an immediate full
+refresh of both loops, so the frame does not wait out an interval to show the
+effect of the operator's own action.
+
+`/api/audit` is the one poll-shaped read that needs owner (read-write) access;
+a read-only token gets a 403 there like any other forbidden read, and it
+travels the same swallowed-error path as a network failure — the Events pane
+simply keeps its last successful snapshot rather than showing an error.
+
+#### Keybindings
+
+| Key | Action | Scope |
+|---|---|---|
+| `tab` / `shift+tab` | Cycle pane focus forward / backward | global |
+| `j` / `k`, `↓` / `↑` | Move the row selection | Agents, Events panes |
+| `p` | Pause or resume the selected agent (opens a y/n confirm) | Agents pane |
+| `m` | Open the model picker for the selected agent | Agents pane |
+| `K` | Kick the selected agent now | Agents pane |
+| `A` | Open the ACMM level overlay | global |
+| `a` | Attach to the selected agent's tmux session (**local only**) | Agents pane |
+| `?` | Toggle the help overlay (lists this table; dismisses on any key) | global |
+| `q` / `ctrl+c` | Quit | global |
+
+Case is meaningful and deliberate: `K` (kick) and `A` (ACMM) are the two
+actions with the widest blast radius bound to a bare key, so each sits on the
+shifted member of a pair whose lowercase twin (`k` navigate, `a` attach) is
+pressed constantly during normal use — a missed shift never fires the bigger
+action by accident. Actions apply to the selection in the **focused** pane
+only; pressing `p`/`m`/`K`/`a` while a pane other than Agents is focused is a
+no-op, never a guess at "the current agent".
+
+**Every overlay below is modal**: while one is open it consumes *every* key,
+including `q`, `tab`, and the other action letters — closing or resolving the
+overlay is the only way those reach the frame underneath again. The ACMM
+overlay is the one exception to "letters are bindings": once its typed
+confirmation is open, ordinary letters (including `p`, `a`, `A`, `K`) are
+literal text being typed into the confirmation phrase, not actions.
+
+#### Pause / resume
+
+`p` on a selected agent opens a confirm dialog (`y` confirm, `n` / `esc`
+cancel) rather than acting immediately. While the request is in flight the
+dialog shows "Working…" and swallows further input; on failure it shows the
+error in place and offers retry (`y`) or cancel. A 403 renders as `Pause
+failed: owner access required` (or `Resume failed: …`) rather than the raw
+HTTP error, since a forbidden pause/resume always means the same thing:
+the token is not the hive owner's.
+
+#### Model apply
+
+`m` opens a picker for the selected agent's backend, fetching its model
+catalogue asynchronously. The catalogue can carry two independent
+qualifications, both shown as a note in the overlay when present:
+
+- **Fallback** — endpoint discovery found nothing and the server substituted
+  its static alias list; these ids are unverified guesses, not a confirmed
+  catalogue.
+- **Partial** — some of the backend's endpoints answered and others did not;
+  a model's *absence* from the list proves nothing, since it may be served
+  only by the endpoint that failed to answer.
+
+`enter` applies the highlighted model. **Applying restarts the agent's
+session** — the overlay states this before every apply — so the picker is not
+a preview; choosing a model takes effect and interrupts in-flight work.
+Applying is refused while a previous apply is still pending, so repeated
+`enter` presses cannot queue a second restart. A 403 here renders as `Model
+change failed: owner access required`.
+
+#### Kick
+
+`K` queues an immediate run for the selected agent and reports the outcome in
+the footer rather than the pane: `kick queued for <agent>` on success, or
+`kick already in flight for <agent> (request deduplicated)` if one was already
+queued. A 403 renders as `Kick failed: owner access required`. Only one local
+kick request is in flight at a time; `K` is a no-op while the previous one is
+still pending.
+
+#### ACMM apply
+
+`A` opens the ACMM level overlay from anywhere — the level is a property of
+the whole hive, not the focused pane's selection. It fetches the pack list
+(the level definitions the server has configured) asynchronously; a 403 here
+renders as `ACMM packs unavailable: owner access required`.
+
+Selecting a level and pressing `enter` does **not** apply it directly — it
+begins a **typed confirmation**: the overlay asks for the exact phrase
+`APPLY L<n>`, and only an exact match arms the apply on the next `enter`.
+Anything else typed is a no-op; `esc` during confirmation backs out to the
+list rather than closing the overlay outright, so a mistyped phrase costs one
+key. Selecting the level already in force skips confirmation entirely and
+shows a "nothing to apply" message instead, since there is no write to
+protect against.
+
+On success the overlay **stays open**, now showing the reconciliation
+receipt, until the operator dismisses it with `enter` or `esc` — it does not
+flash past into a footer line, and a second `enter` cannot re-apply. On a
+partial failure (the level persisted server-side but the fleet has not yet
+reconciled to it — a 500 after the write took effect), the overlay still
+shows an apply error, but the app also triggers an immediate refresh anyway,
+because the panes underneath may already describe a hive that has moved.
+
+#### Local tmux attach
+
+`a` on a selected agent runs a preflight check (`tmux has-session -t
+hive-<agent>`) before suspending the TUI, so a missing `tmux` binary or a
+session that does not exist yet surfaces as a footer message
+(`Attach failed: …`) instead of a redraw flicker. A successful preflight hands
+the terminal to `tmux attach` directly; returning from the session (however it
+ends) restores the TUI and immediately refreshes the fleet, since the agent's
+state may have moved while attached. **This is local-only** — it execs a
+`tmux` binary next to the TUI process and cannot attach to a session running
+on a remote hive.
+
+#### Connection status and the poll fallback
+
+The header's `ws:` field is `connected` only once an event has actually been
+**received** on the SSE stream — not merely dialled, since a successful
+subscribe hands back its channels before the request is even confirmed.
+Everything else — before the first event, during a reconnect's backoff, and
+right after a drop — reads `not connected`, because all three mean the same
+thing to an operator: the numbers on screen are coming from the fallback poll,
+not the stream. `hive:` (identity) and `governor:` (mode) never blank on a
+drop; only `ws:` changes, so a flapping connection does not make the header
+look like the hive itself went away.
+
+On a drop, reconnection backs off starting at 1 second and doubling to a
+30-second cap, and the reconciliation loop's cadence drops back from 60s to 5s
+immediately along with an out-of-cycle fetch, so the fallback's first data
+does not wait out a whole interval. The activity loop (Tokens, Events) is
+unaffected by any of this — see [The four panes](#the-four-panes) above.
+
+#### Terminal size, help, resize, and quit
+
+The grid needs at least **60×20** to stay readable; below that the frame is
+replaced by a single centred `terminal too small (need at least 60x20)`
+message rather than shrinking the panes into unreadable slivers. Resizing is
+automatic — the layout re-derives itself from the terminal size on every
+render, with no keybinding involved. `?` toggles a help overlay listing every
+binding above; it dismisses on any keypress. Colors are chosen for contrast
+against both light and dark terminal backgrounds, so the focused-pane border
+and header stay legible either way. `q` or `ctrl+c` quits **from the top level
+only** — while any overlay is open, `q` is swallowed like every other key, so
+an operator dismisses the overlay first (see the modal rule above).
+
+#### v1 boundaries
+
+- **Self-hosted, token auth only.** `HIVE_DASHBOARD_TOKEN` against a
+  self-hosted hive's dashboard; there is no hub OAuth login flow.
+- **Local tmux attach only.** No remote terminal embedding over the ttyd
+  WebSocket — that is a follow-up epic.
+- **Feature parity with the web dashboard's operator loop, not visual
+  parity.** The TUI does not attempt to look like the web dashboard.
+
+Track any further work under the `hive tui` epic
+([#4907](https://github.com/kubestellar/hive/issues/4907)).
 
 ### enroll — spoke-based lite repo enrollment
 

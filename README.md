@@ -521,6 +521,23 @@ flowchart LR
 
 See also the [documentation index](src/docs/README.md), [public roadmap](src/docs/roadmap.md), and [landscape comparison](src/docs/landscape.md) for community-facing documentation and positioning.
 
+## Terminal dashboard
+
+`hivectl tui` is a full-screen, keyboard-driven terminal view of the fleet —
+agents, governor, token spend, and activity in a live 2×2 grid, with
+pause/resume, model apply, kick, and ACMM level actions. It is **not a second
+Hive runtime**: it is another client of the same dashboard API the web
+dashboard at `:3001` uses, over the same auth token and the same SSE stream.
+
+```bash
+export HIVE_DASHBOARD_TOKEN="..."
+hivectl tui
+```
+
+See [`hivectl tui` in the command reference](src/docs/hivectl.md#tui--live-terminal-dashboard)
+for keybindings, pane cadence, and v1 boundaries, and
+[the design record](src/docs/design/tui.md) for the reasoning behind it.
+
 ## Contribute to a Hive
 
 Community members can contribute compute to any hive through **ClankeR**, the

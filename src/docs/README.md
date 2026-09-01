@@ -36,7 +36,10 @@ Start with [Architecture](architecture.md) for the system overview, then use the
 - [State-triggered hooks](hooks.md) — declarative `transition → action` rules, the transition catalog, the vetted action set, and the security model (RFC #4001).
 - [CEL-based agent triggers](cel-triggers.md) — the `triggers:` config key: declarative CEL rules that kick an agent on a normalized source-control event, additive to built-in label/governor triggering, the `event.*` field reference, and the fail-closed compile/runtime contract.
 - [Public snapshots](https://github.com/kubestellar/hive/blob/v4/src/docs/snapshots.md) — read-only `/snapshot`, custom CSS, and frame-ancestor sharing.
-- [hivectl](hivectl.md) — command-line client for the dashboard API.
+- [hivectl](hivectl.md) — command-line client for the dashboard API, including
+  [`hivectl tui`](hivectl.md#tui--live-terminal-dashboard), the full-screen
+  terminal dashboard: keybindings, pane cadence, and v1 boundaries. See
+  [the design record](design/tui.md) for the reasoning behind it.
 - [`bd` beads CLI](https://github.com/kubestellar/hive/blob/v4/src/docs/beads-cli.md) — work-ledger and knowledge command reference for operators and contributors.
 - [Backup and restore](https://github.com/kubestellar/hive/blob/v4/src/docs/backup-restore.md) — `hive-backup`, Kubernetes CronJob, spoke backup scope, and setting the backup encryption key from Governor Config (hosted flow). Host-level backup, restore, and `docker compose down -v` are given per runtime: Docker Compose, and Podman/Quadlet with the executed backup → wipe → restore cycle in both root modes, the rootless mapped-UID trap that makes a host-shell `tar` skip the GitHub App key, and the Docker→Podman migration (the two volume stores are never shared).
 - [Hub disaster recovery](https://github.com/kubestellar/hive/blob/v4/docs/HUB_DISASTER_RECOVERY.md) — the hub-level runbook that goes beyond per-hive backup: hub backup and key escrow, spoke fleet recovery, Slack blast, and the full rebuild-from-zero procedure after a catastrophic loss.
