@@ -19,14 +19,20 @@
  * each exhaustive verification only carries the monitor state it needs:
  *   -DMON_AMNESTY  — P1 (one-shot amnesty) + P2 (no instant re-escalation)
  *   -DMON_BUDGET   — P3 (re-engagement budget bounds)
- *   -DMON_ADJ      — witness w_onepass (repeat adjudication below ACMM 6)
+ *   -DMON_ADJ      — invariant w_onepass (one adjudication per PR, ever)
  *   -DMON_PENDING  — witness w_pending (ledger wipe on a PENDING observation)
- *   -DWATCHER      — merge-request watcher re-engage path + witness w_watcher
- *                    (pkg/github/merge_request_watcher.go:276)
+ *   -DWATCHER      — merge-request watcher re-engage path + invariant
+ *                    w_watcher (pkg/github/merge_request_watcher.go)
  *   -DACMM6        — reviewer may close after recommend-close (level >= 6)
- *   -DPATCH_REVIEWER — hypothetical fix: a reviewer pass also resets the
- *                    LEDGER (Escalated/RedSHAs), not only the labels; shows
- *                    the P4b/P5 counterexample is closed by that sync.
+ *
+ * The G1/G3/G4 fixes (#5511) are the modeled DEFAULT, matching the shipped Go:
+ *   G1 — Store.Sweep reconciles the reviewer's label-only verdict into the
+ *        ledger (Escalated/RedSHAs reset when reviewer-passed is present and
+ *        needs-human absent) — see the Sweeper's reconciliation step. This is
+ *        what the former -DPATCH_REVIEWER run verified; it is now shipped.
+ *   G3 — Store.TryReEngage refuses escalated entries (post-amnesty guard).
+ *   G4 — a RECOMMEND-CLOSE verdict below ACMM 6 marks the PR
+ *        (reviewer-recommend-close label) and the work list excludes it.
  */
 
 #define NSHA        4   /* distinct head SHAs a PR may ever have (bounded pushes) */
@@ -53,8 +59,11 @@ byte prState = PR_OPEN;
 byte minted  = 1;   /* SHAs minted so far; the CURRENT head SHA id is always
                      * the most recently minted one (SHAs strictly increase) */
 
-bool needsHuman     = false;  /* escalation.NeedsHumanLabel on the PR */
-bool reviewerPassed = false;  /* scheduler.ReviewerPassedLabel on the PR */
+bool needsHuman       = false;  /* escalation.NeedsHumanLabel on the PR */
+bool reviewerPassed   = false;  /* escalation.ReviewerPassedLabel on the PR */
+bool recommendedClose = false;  /* scheduler.ReviewerRecommendCloseLabel: the
+                                 * recommend-close verdict was delivered (#5511
+                                 * G4); the work list excludes marked rows */
 
 /* ---------------- escalation ledger (escalation.Entry) ---------------- */
 bool entryExists = false;
@@ -98,8 +107,9 @@ bool wipedPendingWithHistory = false; /* witness: sweep deleted a non-empty entr
 #endif
 #ifdef WATCHER
 bool mergeReqPending           = false; /* a stale merge request sits in the watcher dir */
-bool watcherReEngagedEscalated = false; /* witness: watcher burned re-engage budget
-                                         * on an escalated (needs-human) PR */
+bool watcherReEngagedEscalated = false; /* violation flag: re-engage budget was
+                                         * granted while the entry was escalated
+                                         * (must stay false post-G3 fix) */
 #endif
 
 /* ---------------- ledger helpers ---------------- */
@@ -173,7 +183,11 @@ inline try_reengage(obsSha, ok) {
 	fi;
 	amnesty_check();
 	if
-	:: reeng >= MAX_REENG -> ok = false
+	/* #5511 G3 fix (shipped): an escalated (needs-human) entry is out of the
+	 * automated lane — refuse without burning budget. The amnesty above may
+	 * have just un-escalated an older-generation entry, which then proceeds. */
+	:: escalated -> ok = false
+	:: !escalated && reeng >= MAX_REENG -> ok = false
 	:: else ->
 		reeng++;
 		/* P3a: the per-SHA budget cap holds at every increment site. */
@@ -222,6 +236,23 @@ active proctype Sweeper() {
 			:: else -> skip
 			fi;
 			amnesty_check();
+			/* #5511 G1 fix (shipped): reviewer-verdict reconciliation. The
+			 * reviewer's REPAIR/DE-ESCALATE verdict is label edits only; if
+			 * the ledger still says Escalated but the PR no longer carries
+			 * needs-human and does carry reviewer-passed, sync the verdict:
+			 * reset the entry the way amnesty does (un-escalate, restart the
+			 * distinct-SHA ledger, fresh budget, Machinery untouched) so the
+			 * PR re-enters the normal lifecycle. Escalated is cleared, so the
+			 * reset cannot repeat — fresh reds re-accumulate and a later
+			 * re-escalation fires normally; reviewer-passed then routes it to
+			 * the human, not back to the reviewer. */
+			if
+			:: escalated && reviewerPassed && !needsHuman ->
+				escalated = false;
+				headCounted = false; attempts = 0;  /* RedSHAs = nil */
+				reeng = 0
+			:: else -> skip
+			fi;
 			if
 			:: !headCounted ->  /* unseen red SHA: append to RedSHAs */
 				headCounted = true;
@@ -324,13 +355,17 @@ active proctype Reaper() {
 }
 
 /* Reviewer lane (reviewer_lane.go, ACMM >= 5): adjudicates escalated rows from
- * ci-failing.json, excluding rows already labeled reviewer-passed. REPAIR and
+ * ci-failing.json, excluding rows already labeled reviewer-passed or
+ * reviewer-recommend-close (#5511 G4 fix: every verdict class marks the row,
+ * so "one reviewer pass per PR, ever" holds unconditionally). REPAIR and
  * DE-ESCALATE are indistinguishable at this abstraction (label swap + push);
- * RECOMMEND-CLOSE closes at ACMM >= 6 (-DACMM6), else comments and leaves
- * needs-human in place. */
+ * the ledger sync for those verdicts happens SWEEP-side (G1 fix), not here —
+ * the reviewer edits labels only, exactly like the real agent. RECOMMEND-CLOSE
+ * closes at ACMM >= 6 (-DACMM6), else comments, adds the recommend-close
+ * label, and leaves needs-human in place. */
 active proctype Reviewer() {
 	do
-	:: atomic { prState == PR_OPEN && ci == CI_RED && escalatedView && !reviewerPassed ->
+	:: atomic { prState == PR_OPEN && ci == CI_RED && escalatedView && !reviewerPassed && !recommendedClose ->
 		/* P4a: a PR carrying reviewer-passed is never adjudicated again. */
 		assert(!reviewerPassed);
 #ifdef MON_ADJ
@@ -343,21 +378,15 @@ active proctype Reviewer() {
 		:: minted < NSHA ->  /* REPAIR / DE-ESCALATE: fix or rebase, push, relabel */
 			reviewerPassed = true;
 			needsHuman = false;
-#ifdef PATCH_REVIEWER
-			/* Hypothetical fix under test: the label edit also resets the
-			 * LEDGER escalation state, the way TryReEngage's amnesty does,
-			 * so a still-red outcome re-enters the automated lane and can
-			 * re-escalate (NewlyEscala requires !Entry.Escalated). */
-			escalated = false;
-			headCounted = false; attempts = 0;
-			escalatedView = false;
-#endif
 			minted++; headCounted = false; ci = CI_PENDING; stale = false
 		:: true ->           /* RECOMMEND-CLOSE */
 #ifdef ACMM6
 			prState = PR_CLOSED
 #else
-			skip  /* comment posted; needs-human stays; a human closes/owns it */
+			/* Comment posted; needs-human stays; a human closes/owns it.
+			 * The verdict is marked (reviewer-recommend-close label) so the
+			 * work list never re-serves the row (#5511 G4). */
+			recommendedClose = true
 #endif
 		fi }
 	:: TERMINAL -> break
@@ -395,11 +424,14 @@ active proctype GenBumper() {
 }
 
 #ifdef WATCHER
-/* Merge-request watcher terminal path (merge_request_watcher.go:276): after
+/* Merge-request watcher terminal path (merge_request_watcher.go): after
  * mergeRequestMaxAttempts failures on a red required check it calls the
- * mergeReEngage hook — TryReEngage with an empty head SHA — WITHOUT consulting
- * the escalated set. A stale merge request can therefore burn re-engagement
- * budget on a needs-human PR (witness w_watcher). */
+ * mergeReEngage hook — TryReEngage with an empty head SHA — without consulting
+ * the escalated set. The #5511 G3 fix guards STORE-side: TryReEngage refuses
+ * escalated entries, so the watcher's call can no longer burn budget on a
+ * needs-human PR (invariant w_watcher: budget is never granted while the
+ * entry is escalated; a grant after machinery amnesty un-escalates first,
+ * which is amnesty's intended semantics). */
 active proctype MergeReqFiler() {
 	if
 	:: atomic { prState == PR_OPEN && !mergeReqPending -> mergeReqPending = true }
@@ -410,11 +442,11 @@ active proctype MergeWatcher() {
 	bool ok;
 	do
 	:: atomic { prState == PR_OPEN && ci == CI_RED && mergeReqPending ->
+		try_reengage(0, ok);
 		if
-		:: escalated -> watcherReEngagedEscalated = true
+		:: ok && escalated -> watcherReEngagedEscalated = true
 		:: else -> skip
 		fi;
-		try_reengage(0, ok);
 		mergeReqPending = false }  /* request quarantined .exhausted */
 	:: TERMINAL -> break
 	od
@@ -434,22 +466,23 @@ ltl p3_total  { [] (totalReengThisSha <= GEN_MAX * MAX_REENG) }
 
 /* P4b: the reviewer->human handoff. Once the reviewer has passed on a PR that
  * is (still or again) escalated, the PR must eventually reach the human queue
- * (needs-human) or leave the open set. EXPECTED TO FAIL on the shipped
- * machinery (see README: reviewer label edits never sync the ledger, and
- * NewlyEscala requires !Entry.Escalated, so needs-human is never re-applied). */
+ * (needs-human) or leave the open set. HOLDS since the #5511 G1 fix: the
+ * sweep syncs the reviewer's label verdict into the ledger, the PR re-enters
+ * the automated lane, re-escalates on fresh evidence, and NewlyEscala
+ * re-applies needs-human (the reviewer-passed exclusion then makes the queue
+ * a human's). Failed on the pre-fix machinery — see README, gap G1. */
 ltl p4_handoff { [] ((escalated && reviewerPassed) -> <> (needsHuman || TERMINAL)) }
 
 /* P5: every escalated PR eventually reaches a terminal state (merged, closed,
- * or human-owned). EXPECTED TO FAIL on the shipped machinery for the same
- * orphaned-PR reason; passes under -DPATCH_REVIEWER. */
+ * or human-owned). HOLDS since the #5511 G1 fix (failed before it for the
+ * same orphaned-PR reason — see README, gap G1). */
 ltl p5_term   { [] (escalated -> <> TERMINAL) }
 
 #ifdef MON_ADJ
-/* Witness (expected to "fail" = counterexample found below ACMM 6): the code
- * comment "one reviewer pass per PR, ever" holds only for REPAIR/DE-ESCALATE
- * verdicts (which add reviewer-passed). A RECOMMEND-CLOSE verdict below ACMM 6
- * leaves the row adjudicable, so the reviewer re-adjudicates (re-comments)
- * every kick until a human acts. */
+/* "One reviewer pass per PR, ever" — for EVERY verdict class. HOLDS since the
+ * #5511 G4 fix: a RECOMMEND-CLOSE verdict below ACMM 6 marks the row
+ * (reviewer-recommend-close) and the work list excludes it, exactly like
+ * reviewer-passed. Failed at ACMM 5 on the pre-fix machinery — gap G4. */
 ltl w_onepass { [] (adjudications <= 1) }
 #endif
 
@@ -461,7 +494,9 @@ ltl w_pending { [] (!wipedPendingWithHistory) }
 #endif
 
 #ifdef WATCHER
-/* Witness (expected to "fail" = counterexample found): the merge watcher's
- * re-engage hook fires on an escalated (needs-human) PR. */
+/* The merge watcher never burns re-engagement budget on an escalated
+ * (needs-human) PR. HOLDS since the #5511 G3 fix (TryReEngage's escalated
+ * guard); the pre-fix machinery granted budget through the watcher's
+ * unguarded call — gap G3. */
 ltl w_watcher { [] (!watcherReEngagedEscalated) }
 #endif
