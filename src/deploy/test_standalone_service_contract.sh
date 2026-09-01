@@ -32,6 +32,12 @@ set -euo pipefail
 PASS=0
 FAIL=0
 
+# Shared skip discipline (#5388): hive_test_skip is permissive by default and
+# FATAL under HIVE_TEST_REQUIRE_BEHAVIOURAL=1, so a lane whose runner GUARANTEES
+# the precondition below turns a silent skip into a red build.
+# shellcheck source=src/deploy/test_lib.sh
+. "$(cd "$(dirname "$0")" && pwd)/test_lib.sh"
+
 SRC_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 COMPOSE="$SRC_DIR/docker-compose.yaml"
 
@@ -66,12 +72,12 @@ else
 fi
 
 if ! command -v python3 >/dev/null 2>&1; then
-  echo "  SKIP: python3 unavailable — cannot make structural assertions"
-  exit 0
+  hive_test_skip "python3 unavailable — cannot make structural assertions"
+  hive_test_report; exit $?
 fi
 if ! python3 -c 'import yaml' >/dev/null 2>&1; then
-  echo "  SKIP: PyYAML unavailable — cannot make structural assertions"
-  exit 0
+  hive_test_skip "PyYAML unavailable — cannot make structural assertions"
+  hive_test_report; exit $?
 fi
 
 RESULTS="$(RENDER="$RENDER" COMPOSE="$COMPOSE" python3 <<'PY'

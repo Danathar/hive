@@ -14,6 +14,12 @@ set -euo pipefail
 PASS=0
 FAIL=0
 
+# Shared skip discipline (#5388): hive_test_skip is permissive by default and
+# FATAL under HIVE_TEST_REQUIRE_BEHAVIOURAL=1, so a lane whose runner GUARANTEES
+# the precondition below turns a silent skip into a red build.
+# shellcheck source=src/deploy/test_lib.sh
+. "$(cd "$(dirname "$0")" && pwd)/test_lib.sh"
+
 check() {
   local label="$1" want="$2" got="$3"
   if [ "$want" = "$got" ]; then
@@ -41,8 +47,8 @@ contains() {
 # Locate the repo root (this script lives in src/deploy/) and require `just`.
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 if ! command -v just >/dev/null 2>&1; then
-  echo "  SKIP: 'just' not installed; cannot exercise the recipe"
-  exit 0
+  hive_test_skip "'just' not installed; cannot exercise the recipe"
+  hive_test_report; exit $?
 fi
 
 echo "=== contribute-k8s workload generation tests ==="
@@ -100,7 +106,7 @@ if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' >/dev/null 2>&
   KINDS="$(printf '%s' "$OUT" | python3 -c 'import sys,yaml; print(",".join(d["kind"] for d in yaml.safe_load_all(sys.stdin) if d))')"
   check "YAML parses to the four expected kinds" "Namespace,ConfigMap,Secret,Deployment" "$KINDS"
 else
-  echo "  SKIP: PyYAML unavailable; skipping structural parse"
+  hive_test_skip "PyYAML unavailable; skipping structural parse"
 fi
 
 # ── Backend credential delivery (#5103) ──
