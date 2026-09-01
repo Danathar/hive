@@ -15,6 +15,10 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 - The quality lane can now opt into agent-authored formal verification with `quality.formal: true` at ACMM L5/L6. Every quality kick receives the same model-worthiness, `formal/<subsystem>/` artifact, expected-verdict drift, reporting-only CI, counterexample narrative/deduplication, and modeled-subsystem maintenance contract even when its ordinary policy prompt is customized. The zero value is off, and the setting becomes inert on an ACMM downgrade below L5 without being discarded ([#5512](https://github.com/kubestellar/hive/issues/5512)).
 
+### Fixed
+
+- Version flips no longer trap hosted spokes with large, long-lived `/data` PVCs in a startup-probe death loop ([#5525](https://github.com/kubestellar/hive/issues/5525)). The v5 entrypoint synchronously ran recursive per-agent `chown` and shared-home `chmod` passes before the Go server could bind `:3002`; on an NFS/RWX volume with months of worktrees the walk exceeded the probe budget, kubelet killed the container with exit 137, and the next boot restarted the same walk from the beginning. Size-dependent permission repair now runs in a root background worker, so the dashboard and health endpoint start independently of PVC size. Protected completion markers bind each finished pass to the ownership-schema revision and target UID, and the agent manager waits for both the shared-home and per-agent markers before touching that agent's tree, preserving UID isolation without putting the server behind the migration. Completed steady-state boots skip the recursive pass, while a changed UID invalidates its marker and repairs only the affected agent before launch.
+
 ## 2026-09-01 (v4.0.1)
 
 ### Added

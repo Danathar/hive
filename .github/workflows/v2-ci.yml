@@ -106,6 +106,14 @@ jobs:
       - name: Entrypoint /data ownership invariant (#5369)
         run: bash deploy/test_entrypoint_data_ownership.sh
 
+      # #5525: v4 -> v5 flips on long-lived NFS PVCs spent longer than the
+      # startup-probe budget in recursive per-agent chown/chmod, so kubelet
+      # killed the pod before :3002 listened and every restart began again.
+      # Pin both halves of the replacement: recursive walks live only in a
+      # background root worker, and UID/revision-bound markers gate agent launch.
+      - name: Entrypoint UID-isolation migration (#5525)
+        run: bash deploy/test_entrypoint_uid_isolation.sh
+
       # #5370: the arm64 lane probed the PUBLISHED image, so on a PR it
       # validated code already on v4 rather than the change proposed — a PR
       # fixing a startup bug stayed red, one introducing a startup bug went
