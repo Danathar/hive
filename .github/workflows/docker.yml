@@ -92,17 +92,13 @@ jobs:
   # release-line guard asserts this list against .github/release-lines.yml —
   # see the `env_lists` entry there and src/docs/release-line-guard.md.
   #
-  # NOTE (#5339): an earlier fix made this job skip `release-gate/*` on
-  # `pull_request`, on the theory that the release PR's own docker run
-  # superseded the green `gate` earned by the dispatched run. That theory was
-  # WRONG and the skip is reverted here. The release PR's `pull_request` runs
-  # are opened with GITHUB_TOKEN, so GitHub's recursion guard never starts
-  # their jobs — those suites contain ZERO check-runs, so they never produced
-  # a competing `gate` to supersede anything. Verified: the pre-fix release
-  # PR #5355 and the post-fix #5364 have byte-identical rollups (`tide`,
-  # `dco`, no `gate`) and both are BLOCKED. Skipping the job changed nothing
-  # except removing the one path that could ever attach a PR-associated
-  # `gate`, so it is a latent trap rather than a fix.
+  # NOTE (#5339/#5356): do not special-case `release-gate/*` pull requests in
+  # this job. GITHUB_TOKEN-opened release PR runs may be recursion-blocked
+  # before any job starts, and workflow_dispatch check-runs are not associated
+  # with a PR even when dispatched after it exists. tagged-release.yml handles
+  # that release-only gap by mirroring its verified check-run as a SHA-scoped
+  # commit status. Ordinary pull requests still need this job unchanged so
+  # their head SHA receives the required `gate` check-run (#4965).
   gate:
     runs-on: ubuntu-latest
     outputs:
