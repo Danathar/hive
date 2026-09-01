@@ -272,6 +272,21 @@ jobs:
         working-directory: .
         run: bash bin/test_gh_wrapper_gates.sh
 
+      # bin/enumerate-actionable.sh writes the actionable.json that
+      # merge-gate.sh, kick-agents.sh and the dashboard's contribute lane
+      # (src/pkg/dashboard/contribute_ws.go) consume instead of running their
+      # own gh queries. Every hold/blocked/draft/ADOPTERS exclusion and the
+      # external-issue SHA hold/unhold lifecycle — which WRITES labels and
+      # comments to GitHub — live in that one script. It has been patched by
+      # fix PRs (#4772 most recently) and had NO tests. This EXECUTES a
+      # path-rewritten copy against a stub gh (canned REST/GraphQL fixtures,
+      # real jq for --jq) and asserts on the written JSON and on which GitHub
+      # calls were made, with positive controls so an enumerator that emits
+      # nothing cannot pass. Runs in ~2s, no network.
+      - name: enumerate-actionable contract tests
+        working-directory: .
+        run: bash bin/test_enumerate_actionable.sh
+
       # #4289: git-credential-hive.sh is the fetch/clone AND push credential
       # source for every agent. Its mode block used to exit 1 in ADVISORY/
       # ISSUES_ONLY/NO_GITHUB modes, cutting off every git READ for advisory
