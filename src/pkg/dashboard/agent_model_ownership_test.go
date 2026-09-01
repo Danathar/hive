@@ -122,6 +122,37 @@ func TestClaimAgentFieldOwnershipMarksOwner(t *testing.T) {
 	}
 }
 
+// TestClaimAgentFieldOwnershipPersistsAgentOverlay guards the authoritative
+// layer for managed agents. Config loads replace the hive.yaml agent entry
+// wholesale with this file, so updating only the base config silently loses
+// both the operator's choice and its ownership marker on the next load.
+func TestClaimAgentFieldOwnershipPersistsAgentOverlay(t *testing.T) {
+	srv := newFullServer(t)
+	enableScanner(t, srv)
+
+	before := srv.deps.Config.Agents["scanner"]
+	if err := config.SaveAgentFile(srv.deps.Config.Data.AgentsDir, "scanner", before); err != nil {
+		t.Fatalf("seed stale agent overlay: %v", err)
+	}
+
+	srv.claimAgentFieldOwnership("scanner", "operator-model", "operator-backend")
+
+	overlays, err := config.LoadAgentOverrides(srv.deps.Config.Data.AgentsDir)
+	if err != nil {
+		t.Fatalf("load agent overlays: %v", err)
+	}
+	got, ok := overlays["scanner"]
+	if !ok {
+		t.Fatal("scanner overlay was not persisted")
+	}
+	if got.Model != "operator-model" || got.Backend != "operator-backend" {
+		t.Errorf("overlay values = model %q, backend %q; want operator-model, operator-backend", got.Model, got.Backend)
+	}
+	if !got.ModelIsOperatorOwned() || !got.BackendIsOperatorOwned() {
+		t.Errorf("overlay owners = model %q, backend %q; want both %q", got.ModelOwner, got.BackendOwner, config.FieldOwnerOperator)
+	}
+}
+
 // TestClaimAgentFieldOwnershipPartial checks that an empty argument leaves the
 // other field (and its owner) untouched.
 func TestClaimAgentFieldOwnershipPartial(t *testing.T) {

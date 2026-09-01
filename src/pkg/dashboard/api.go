@@ -1641,15 +1641,16 @@ func kickPhaseStatus(phase string) string {
 }
 
 // claimAgentFieldOwnership writes an operator's model and/or backend choice
-// into hive.yaml and marks those fields operator-owned. Empty arguments leave
-// the corresponding field untouched.
+// into hive.yaml and the per-agent overlay, and marks those fields
+// operator-owned. Empty arguments leave the corresponding field untouched.
 //
 // This is the durability half of the model/method revert fix. The in-memory
 // ModelOverride/BackendOverride on the agent process is replayed from
-// /data/hive-state.json on restart, but hive.yaml still carried the PACK's
-// model — and ApplyPack re-reconciles from the pack on every restart. Writing
-// the operator's value to the same layer the pack writes, plus an ownership
-// marker, is what makes the choice actually survive.
+// /data/hive-state.json on restart, but the saved config still carried the
+// PACK's model — and ApplyPack re-reconciles from the pack on every restart.
+// For managed agents the per-agent overlay replaces the hive.yaml entry on
+// every config load, so both persistent layers must receive the operator's
+// value and ownership marker for the choice to actually survive.
 func (s *Server) claimAgentFieldOwnership(name, model, backend string) {
 	if s.deps == nil || s.deps.Config == nil {
 		return
@@ -1673,6 +1674,14 @@ func (s *Server) claimAgentFieldOwnership(name, model, backend string) {
 		s.AddSystemAlert("agent-field-save-failed", "error",
 			"Could not save the model/method choice for "+name+" — it will revert on the next restart: "+err.Error())
 		return
+	}
+	if agentsDir := s.deps.Config.Data.AgentsDir; agentsDir != "" {
+		if err := config.SaveAgentFile(agentsDir, name, ac); err != nil {
+			s.deps.Logger.Error("failed to persist agent overlay after model/method choice", "agent", name, "error", err)
+			s.AddSystemAlert("agent-field-save-failed", "error",
+				"Could not save the model/method choice for "+name+" to its agent overlay — it will revert on the next config load: "+err.Error())
+			return
+		}
 	}
 	s.ClearSystemAlert("agent-field-save-failed")
 }
