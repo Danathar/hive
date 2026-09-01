@@ -259,41 +259,50 @@ rc="$(run_gov "${BASE_ENV[@]}")"
 assert_eq "sanity: shimmed copy runs to completion (rewrite + hive_is_paused shim both hold)" "$rc" "0"
 grep -q "GOVERNOR DONE" "$LOG_FILE_T" && pass "sanity: GOVERNOR DONE reached" || fail "sanity: GOVERNOR DONE reached" "log: $(cat "$LOG_FILE_T")"
 
-# ── 1. hive_is_paused is never sourced — PINNED BUG (fails OPEN, not closed) ─
-# kick-governor.sh calls _is_agent_paused() -> hive_is_paused() at 6 call
-# sites (maybe_kick, optimize_model_assignment, the model-cadence writer, the
-# buffer-clear loop, the stale-status loop) but only ever sources
-# backends.conf and /etc/hive/governor*.env — never hive-config.sh, the file
-# that DEFINES hive_is_paused. No systemd unit for kick-governor.timer exists
-# in-repo either, so nothing is shown to source hive-config.sh into the
-# governor's shell before it runs.
+# ── 1. Pause checks FAIL CLOSED with hive_is_paused undefined (#5549 fix 1) ──
+# kick-governor.sh calls _is_agent_paused() at 6 call sites (maybe_kick,
+# optimize_model_assignment, the model-cadence writer, the buffer-clear loop,
+# the stale-status loop). hive_is_paused() itself lives in bin/hive-config.sh,
+# which the script sources ONLY when HIVE_REPOS is unset — so whenever
+# HIVE_REPOS arrives preset (from /etc/hive/governor.env or the env, the
+# normal production configuration) hive_is_paused was never defined.
 #
-# This does NOT crash the script: every one of the 6 call sites is inside an
-# `if _is_agent_paused ...; then` or `_is_agent_paused ... && continue` — both
-# are set -e EXEMPT contexts (a command's failure inside an if/&&/|| condition
-# never triggers set -e). So "hive_is_paused: command not found" (exit 127)
-# is silently treated as "agent is NOT paused" at every call site. The
-# governor runs to GOVERNOR DONE and kicks normally — it just never honours
-# ANY pause file (dashboard pause, operator pause, cadence-zero pause) for as
-# long as hive_is_paused stays undefined. That is fail-OPEN on a safety
-# control, the opposite of what an operator hitting "pause" would expect.
-# Pinned so a fix (sourcing hive-config.sh, or inlining the check) flips this
-# deliberately; see the PR body for the finding.
-echo "-- pinned bug: hive_is_paused undefined makes every pause check fail OPEN --"
+# That did NOT crash the script: every call site is inside an
+# `if _is_agent_paused ...; then` or `_is_agent_paused ... && continue`, both
+# set -e EXEMPT contexts. So "hive_is_paused: command not found" (exit 127)
+# was silently read as "agent is NOT paused" at every call site, and the
+# governor kicked paused agents anyway — fail-OPEN on a safety control.
+#
+# #5549 makes _is_agent_paused self-contained and fail CLOSED: it delegates to
+# hive_is_paused when that IS defined, and otherwise checks the same three
+# markers directly against STATE_DIR. These assertions run against SCRIPT_RAW
+# (no shim injected — hive_is_paused genuinely undefined), which is exactly the
+# preset-HIVE_REPOS production shape.
+echo "-- pause checks fail CLOSED when hive_is_paused is undefined (#5549) --"
 reset_state
 write_actionable 0 0
-touch "${STATE_DIR_T}/paused_scanner"   # an operator pause the unmodified script should honour
+touch "${STATE_DIR_T}/paused_scanner"            # dashboard pause
+touch "${STATE_DIR_T}/operator_paused_outreach"  # operator pause
 rc="$(run_gov_raw AGENTS_ENABLED="scanner ci-maintainer architect outreach" HIVE_REPOS="acme/primary")"
-assert_eq "[pinned bug] unmodified script still exits 0 (set -e does NOT fire — the call sits inside an if/&&)" "$rc" "0"
+assert_eq "no hive_is_paused: script still exits 0 (pause handling is not an error path)" "$rc" "0"
 grep -q 'hive_is_paused.*not found\|command not found' "${WORK}/stderr-raw" \
-  && pass "[pinned bug] stderr carries 'hive_is_paused: command not found' on every call site, unhandled" \
-  || fail "[pinned bug] stderr carries 'hive_is_paused: command not found' on every call site, unhandled" "stderr: $(cat "${WORK}/stderr-raw")"
+  && fail "no hive_is_paused: stderr must NOT carry 'command not found' — the check is self-contained now" "stderr: $(cat "${WORK}/stderr-raw")" \
+  || pass "no hive_is_paused: stderr carries no 'command not found' — the check is self-contained now"
 grep -q "GOVERNOR DONE" "${WORK}/stderr-raw" \
-  && pass "[pinned bug] the script still reaches GOVERNOR DONE (does not abort)" \
-  || fail "[pinned bug] the script still reaches GOVERNOR DONE (does not abort)" "stderr: $(cat "${WORK}/stderr-raw")"
+  && pass "no hive_is_paused: the script still reaches GOVERNOR DONE (does not abort)" \
+  || fail "no hive_is_paused: the script still reaches GOVERNOR DONE (does not abort)" "stderr: $(cat "${WORK}/stderr-raw")"
 grep -q '^kicked:scanner$' "$KICK_LOG" \
-  && pass "[pinned bug] the paused_scanner marker is IGNORED — scanner is kicked anyway" \
-  || fail "[pinned bug] the paused_scanner marker is IGNORED — scanner is kicked anyway" "kicks: $(cat "$KICK_LOG" 2>/dev/null)"
+  && fail "no hive_is_paused: dashboard-paused scanner must NOT be kicked (fail closed)" "kicks: $(cat "$KICK_LOG" 2>/dev/null)" \
+  || pass "no hive_is_paused: dashboard-paused scanner is NOT kicked (fail closed)"
+grep -q '^kicked:outreach$' "$KICK_LOG" \
+  && fail "no hive_is_paused: operator-paused outreach must NOT be kicked (fail closed)" "kicks: $(cat "$KICK_LOG" 2>/dev/null)" \
+  || pass "no hive_is_paused: operator-paused outreach is NOT kicked (fail closed)"
+# POSITIVE CONTROL: the fix must not simply refuse to kick anything. architect
+# carries no pause marker and has cadence>0 in idle, so it MUST still be kicked
+# on the very same run that skipped the two paused agents.
+grep -q '^kicked:architect$' "$KICK_LOG" \
+  && pass "no hive_is_paused: POSITIVE CONTROL — the UNpaused architect IS still kicked on the same run" \
+  || fail "no hive_is_paused: POSITIVE CONTROL — the UNpaused architect IS still kicked on the same run" "kicks: $(cat "$KICK_LOG" 2>/dev/null)"
 
 # ── 2. AGENTS_ENABLED unset fails closed and loud, not silent ───────────────
 echo "-- AGENTS_ENABLED unset: fail-closed under set -u --"
@@ -447,19 +456,24 @@ mkdir -p "$METRICS_DIR_T"
 printf '{"weekly":{"billableTokens":96},"hourlyBurnRate":{"billable":0}}\n' \
   >"${METRICS_DIR_T}/tokens.json"
 run_gov "${BASE_ENV[@]}" TOKEN_BUDGET_WEEKLY=100 TOKEN_BUDGET_SAFETY_PCT=85 >/dev/null
-# DOCUMENTS THE CURRENT STATE (BUG — see the PR body): the sonnet->haiku
-# downgrade is a literal string substitution, `${model/sonnet/haiku}`, applied
-# to "claude-sonnet-4-6" — it swaps the tier word but leaves the version
-# suffix untouched, producing "claude-haiku-4-6". Every OTHER haiku default in
-# this file (MODEL_*_SUPERVISOR, MODEL_QUIET_SCANNER) and config/backends.conf's
-# own model_tier() both use "claude-haiku-4-5" — 4-6 is not a haiku version
-# that exists. A budget-critical downgrade (the exact moment this code path
-# exists to protect against runaway spend) hands the CLI a model name that
-# does not exist. Pinned so a fix (mapping tier AND version together, e.g.
-# via model_tier()/a lookup table) flips this deliberately.
-assert_eq "[pinned bug] budget >95%: sonnet->haiku downgrade keeps the SONNET version suffix (4-6), not haiku's real 4-5" \
+# #5549 fix 3: the sonnet->haiku downgrade used to be a literal string
+# substitution, `${model/sonnet/haiku}`, applied to "claude-sonnet-4-6" — it
+# swapped the tier word but left the version suffix untouched, producing
+# "claude-haiku-4-6". Every OTHER haiku default in this file
+# (MODEL_*_SUPERVISOR, MODEL_QUIET_SCANNER) and config/backends.conf's own
+# model_tier() use "claude-haiku-4-5"; 4-6 is not a haiku version that exists,
+# so the budget-critical path handed the CLI an unavailable model at exactly
+# the moment it existed to protect against runaway spend. downgrade_model_one_tier()
+# now maps tier AND version together onto GOVERNOR_MODEL_HAIKU.
+assert_eq "budget >95%: sonnet downgrades to the real haiku constant (claude-haiku-4-5), not a version-mangled claude-haiku-4-6" \
   "$(grep '^BACKEND=' "${STATE_DIR_T}/model_scanner" | cut -d= -f2):$(grep '^MODEL=' "${STATE_DIR_T}/model_scanner" | cut -d= -f2)" \
-  "claude:claude-haiku-4-6"
+  "claude:claude-haiku-4-5"
+# The downgrade target must be a model config/backends.conf actually recognises
+# — an assertion on the literal string alone would still pass if a future edit
+# swapped in another nonexistent name.
+assert_eq "budget >95%: the downgraded model is a tier backends.conf recognises (not 'unknown')" \
+  "$(cd "$WORK" && . ./config/backends.conf && model_tier "$(grep '^MODEL=' "${STATE_DIR_T}/model_scanner" | cut -d= -f2)")" \
+  "haiku"
 
 reset_state
 write_actionable 25 0
@@ -471,39 +485,46 @@ run_gov "${BASE_ENV[@]}" TOKEN_BUDGET_WEEKLY=100 TOKEN_BUDGET_SAFETY_PCT=85 >/de
 assert_eq "BUDGET_IGNORE_FLAG bypasses every downgrade even above 99%" \
   "$(grep '^BACKEND=' "${STATE_DIR_T}/model_scanner" | cut -d= -f2)" "claude"
 
-# DOCUMENTS THE CURRENT STATE (BUG — see the PR body): the budget-downgrade
-# loop at line ~514 is `for agent in outreach architect supervisor` —
-# hardcoded, not derived from AGENTS_ENABLED/agents[@]. The `assignments`
-# associative array (declare -A) is populated ONLY for agents actually in
-# AGENTS_ENABLED (line ~504). bin/hive.sh's own default AGENTS_ENABLED
-# includes supervisor, but it is an operator-configurable env var — nothing
-# stops an operator from running without it. If they do, and the token budget
-# then crosses TOKEN_BUDGET_SAFETY_PCT, `${assignments[supervisor]}` reads an
-# unset associative-array key under `set -u` and the WHOLE
-# optimize_model_assignment() call aborts (bare statement, not inside an
-# if/&&, so set -e DOES fire here — unlike the hive_is_paused case above).
-# That happens before maybe_kick ever runs (line 776 vs 919), so ONE missing
-# agent name in this hardcoded list means NO agent gets kicked that cycle,
-# the moment the budget crosses the safety threshold. Pinned so a fix
-# (deriving the loop from agents[@], or guarding the lookup) flips this
-# deliberately.
-echo "-- pinned bug: budget pressure crashes if AGENTS_ENABLED omits 'supervisor' --"
+# #5549 fix 2: the budget-downgrade loop used to be
+# `for agent in outreach architect supervisor` — hardcoded, not derived from
+# AGENTS_ENABLED/agents[@]. The `assignments` associative array is populated
+# ONLY for agents actually in AGENTS_ENABLED. bin/hive.sh's default
+# AGENTS_ENABLED includes supervisor, but it is an operator-configurable env
+# var. An operator running without it, whose budget then crossed
+# TOKEN_BUDGET_SAFETY_PCT, hit `${assignments[supervisor]}` — an unset
+# associative-array key under `set -u` — and the WHOLE
+# optimize_model_assignment() call aborted (bare statement, so set -e DOES
+# fire here, unlike the hive_is_paused case above). That happens before
+# maybe_kick ever runs, so ONE missing name in the hardcoded list meant NO
+# agent got kicked that cycle, the moment the budget crossed the threshold.
+# The loop now iterates agents[@], and the >95% priority ladder guards its
+# lookup with ${assignments[$agent]+set}.
+echo "-- budget pressure survives an AGENTS_ENABLED without 'supervisor' (#5549) --"
+# surge, so architect's default (claude:claude-opus-4-6) is a NON-copilot
+# backend and the >85% loop has something real to downgrade — in idle its
+# default is already copilot and the loop correctly skips it, which would make
+# the positive control below vacuous.
 reset_state
-write_actionable 0 0
+write_actionable 25 0
 mkdir -p "$METRICS_DIR_T"
 printf '{"weekly":{"billableTokens":90},"hourlyBurnRate":{"billable":0}}\n' \
   >"${METRICS_DIR_T}/tokens.json"
 rc="$(run_gov AGENTS_ENABLED="scanner ci-maintainer architect outreach" HIVE_REPOS="acme/primary" \
   TOKEN_BUDGET_WEEKLY=100 TOKEN_BUDGET_SAFETY_PCT=85)"
-assert_eq "[pinned bug] governor exits non-zero when budget pressure hits and supervisor is absent" \
-  "$( [ "$rc" != "0" ] && echo nonzero || echo 0 )" "nonzero"
+assert_eq "budget pressure without supervisor: governor exits 0, does not abort" "$rc" "0"
 grep -q "assignments\[.*\]: unbound variable" "${WORK}/stderr" \
-  && pass "[pinned bug] the documented crash signature: assignments[\$agent]: unbound variable" \
-  || fail "[pinned bug] the documented crash signature: assignments[\$agent]: unbound variable" "stderr: $(cat "${WORK}/stderr")"
+  && fail "budget pressure without supervisor: must NOT hit assignments[\$agent]: unbound variable" "stderr: $(cat "${WORK}/stderr")" \
+  || pass "budget pressure without supervisor: no assignments[\$agent] unbound-variable crash"
 grep -q "GOVERNOR DONE" "${WORK}/stderr" \
-  && fail "[pinned bug] GOVERNOR DONE is never reached — no agent is kicked this cycle" \
-  || pass "[pinned bug] GOVERNOR DONE is never reached — no agent is kicked this cycle"
-assert_eq "[pinned bug] POSITIVE CONTROL: the same scenario WITH supervisor present does not crash" \
+  && pass "budget pressure without supervisor: GOVERNOR DONE is reached" \
+  || fail "budget pressure without supervisor: GOVERNOR DONE is reached" "stderr: $(cat "${WORK}/stderr")"
+# POSITIVE CONTROL: reaching GOVERNOR DONE is not enough — the downgrade the
+# loop exists to perform must still actually happen for the agents that ARE
+# configured. architect's idle default is copilot already, so assert on the
+# recorded reason rather than the backend.
+assert_eq "budget pressure without supervisor: the downgrade STILL fires for a configured agent (architect)" \
+  "$(grep '^REASON=' "${STATE_DIR_T}/model_architect" 2>/dev/null | cut -d= -f2)" "budget_downgrade"
+assert_eq "budget pressure without supervisor: POSITIVE CONTROL — the same scenario WITH supervisor present also exits 0" \
   "$(run_gov "${BASE_ENV[@]}" TOKEN_BUDGET_WEEKLY=100 TOKEN_BUDGET_SAFETY_PCT=85)" "0"
 
 # ── 8. What is written where — the file contract other tooling reads ────────
