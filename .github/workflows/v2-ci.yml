@@ -443,6 +443,15 @@ jobs:
           node --check "${RUNNER_TEMP}/contributor-relay.js"
           node bin/contributor-relay.test.js
 
+      # Keyless subset of the backend smoke: backend-list/Dockerfile-pin drift
+      # checks plus the stub wire-contract scenarios (real relay, fake hub, a
+      # stub CLI binary — no credentials, no network beyond localhost). The
+      # live scenarios skip here by design; they run with real vendor CLIs on
+      # a schedule in backend-smoke.yml, which is deliberately NOT merge-gating.
+      - name: Backend smoke (keyless subset)
+        working-directory: .
+        run: bash bin/test_backend_smoke.sh
+
       # `just contribute-k8s` now emits a runnable contributor workload (#2549):
       # a headless Deployment (#2660) with a status-file probe. This runs the
       # real recipe and asserts the workload it produces, so a regression (a

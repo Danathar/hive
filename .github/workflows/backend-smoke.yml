@@ -1,0 +1,223 @@
+# Backend smoke — scheduled live canary for the contributor CLI backends.
+#
+# The vendor coding-agent CLIs hive drives (claude, codex) are an integration
+# surface hive does not control: vendors ship updates on their own schedule,
+# and what breaks is the seam — completion detection (#5376), CODEX_HOME
+# handling (#5335), readiness regexes that matched nothing on real codex
+# output. Every in-repo test pins that seam against captured fixtures, so a
+# vendor change ships green and fails in production. This workflow runs
+# bin/test_backend_smoke.sh — the real relay against a fake hub, driving the
+# REAL backend CLI on a one-line task — on a schedule, and files a deduplicated
+# issue when a backend integration breaks.
+#
+# Two lanes, deliberately, with distinct issue titles so their meanings never
+# blur:
+#   latest — installs the vendor's current CLI release on the runner. A red
+#            here means vendor drift is incoming: the next pin bump will break,
+#            but shipped images still work.
+#   pinned — runs the suite inside ghcr.io/kubestellar/hive-contributor:latest,
+#            against the CLI versions hive actually ships. A red here means
+#            contributors are broken TODAY.
+#
+# This is the only workflow in the repo holding model credentials
+# (ANTHROPIC_API_KEY / OPENAI_API_KEY repo secrets), which is exactly why it is
+# its own file: the podman arm64 lane's documented contract is "no secrets",
+# and nothing here may be folded into it. Keys are scoped per matrix arm —
+# claude arms never see the OpenAI key and vice versa.
+#
+# Cost control: 4 runs/day × 2 backends × 2 lanes × 2 single-turn calls on the
+# cheapest model tier (haiku / mini). The suite's live task is one line with no
+# file access. NOT merge-gating — the keyless subset of the same suite runs in
+# v2-ci instead.
+name: Backend smoke
+
+on:
+  schedule:
+    # Every 6h at :45 — the :00 (coverage-hourly) and :30 (v2-tests) hourly
+    # slots are taken, and the offsets are deliberate repo-wide.
+    - cron: '45 2,8,14,20 * * *'
+  workflow_dispatch:
+    inputs:
+      backends:
+        description: 'Space-separated backends to smoke'
+        default: 'claude codex'
+        type: string
+      lane:
+        description: 'Which lane(s) to run'
+        type: choice
+        options: [both, latest, pinned]
+        default: 'both'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    # Forks have no model credentials; a scheduled run there would only
+    # produce a permanently red workflow.
+    if: >-
+      github.repository == 'kubestellar/hive' &&
+      (github.event_name != 'workflow_dispatch' ||
+       inputs.lane == 'both' || inputs.lane == matrix.lane)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [claude, codex]
+        lane: [latest, pinned]
+    env:
+      # Per-arm key scoping: each backend arm gets only its own vendor's key.
+      ANTHROPIC_API_KEY: ${{ matrix.backend == 'claude' && secrets.ANTHROPIC_API_KEY || '' }}
+      OPENAI_API_KEY: ${{ matrix.backend == 'codex' && secrets.OPENAI_API_KEY || '' }}
+      SMOKE_BACKENDS: ${{ github.event_name == 'workflow_dispatch' && inputs.backends || 'claude codex' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Restrict to this arm's backend
+        id: scope
+        run: |
+          # The matrix already splits by backend; intersect with the dispatch
+          # input so `backends: claude` skips the codex arms cleanly.
+          case " ${SMOKE_BACKENDS} " in
+            *" ${{ matrix.backend }} "*) echo "run=true" >> "$GITHUB_OUTPUT" ;;
+            *) echo "run=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      # ── latest lane: current vendor releases on the bare runner ────────────
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: steps.scope.outputs.run == 'true' && matrix.lane == 'latest'
+        with:
+          node-version: '22'
+
+      - name: Install tmux and the latest ${{ matrix.backend }} CLI
+        if: steps.scope.outputs.run == 'true' && matrix.lane == 'latest'
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq tmux
+          case "${{ matrix.backend }}" in
+            claude) npm install -g @anthropic-ai/claude-code@latest ;;
+            codex)  npm install -g @openai/codex@latest ;;
+          esac
+
+      - name: Backend smoke (latest ${{ matrix.backend }})
+        if: steps.scope.outputs.run == 'true' && matrix.lane == 'latest'
+        run: |
+          HIVE_TEST_REQUIRE_BACKEND_SMOKE=1 \
+          HIVE_SMOKE_BACKENDS='${{ matrix.backend }}' \
+            bash bin/test_backend_smoke.sh |& tee smoke.log
+
+      # ── pinned lane: the CLI versions hive ships, inside the image ─────────
+      - name: Pull the contributor image
+        if: steps.scope.outputs.run == 'true' && matrix.lane == 'pinned'
+        run: podman pull ghcr.io/kubestellar/hive-contributor:latest
+
+      - name: Backend smoke (pinned ${{ matrix.backend }}, in-container)
+        if: steps.scope.outputs.run == 'true' && matrix.lane == 'pinned'
+        run: |
+          # The CHECKOUT's suite and relay run against the IMAGE's pinned CLI
+          # binaries. Secrets are forwarded by name only — never in argv.
+          podman run --rm --entrypoint /bin/bash \
+            -e HIVE_TEST_REQUIRE_BACKEND_SMOKE=1 \
+            -e HIVE_SMOKE_BACKENDS='${{ matrix.backend }}' \
+            -e ANTHROPIC_API_KEY \
+            -e OPENAI_API_KEY \
+            -v "${GITHUB_WORKSPACE}:/opt/hive-src:ro,Z" \
+            ghcr.io/kubestellar/hive-contributor:latest \
+            -lc 'bash /opt/hive-src/bin/test_backend_smoke.sh' |& tee smoke.log
+
+      - name: Upload evidence
+        if: always() && steps.scope.outputs.run == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: backend-smoke-${{ matrix.backend }}-${{ matrix.lane }}
+          path: smoke.log
+          if-no-files-found: ignore
+
+  create-issue-on-failure:
+    # Schedule-gated, like coverage-hourly and v2-tests: a red triage dispatch
+    # must never file (the unscoped version of this gate gave issue #2191 a
+    # 41-comment pileup). Dedupe is per LANE — "vendor drift incoming" and
+    # "contributors broken today" are different problems with different
+    # urgency, and must never collapse into one issue thread.
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    needs: [smoke]
+    permissions:
+      contents: read
+      issues: write
+      actions: read
+    steps:
+      - name: File or update per-lane issues
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const sha = context.sha.substring(0, 7);
+
+            // Which matrix arms actually failed — job names look like
+            // "smoke (claude, latest)".
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: context.runId,
+              per_page: 100,
+            });
+            const failed = jobs
+              .filter(j => j.name.startsWith('smoke (') && j.conclusion === 'failure')
+              .map(j => {
+                const m = j.name.match(/^smoke \(([^,]+), ([^)]+)\)$/);
+                return m ? { backend: m[1], lane: m[2] } : null;
+              })
+              .filter(Boolean);
+            if (failed.length === 0) return;
+
+            const lanes = [...new Set(failed.map(f => f.lane))];
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'backend-smoke',
+              per_page: 20,
+            });
+
+            for (const lane of lanes) {
+              const backends = failed.filter(f => f.lane === lane).map(f => f.backend);
+              const prefix = `[Backend smoke: ${lane}]`;
+              const meaning = lane === 'pinned'
+                ? 'The CLI versions hive SHIPS in the contributor image failed the smoke — contributors are likely broken right now.'
+                : "The vendor's LATEST CLI release failed the smoke against hive's relay — shipped images still work, but the next pin bump will break. Fix the integration before bumping.";
+              const dup = existing.data.find(i => i.title.startsWith(prefix));
+              if (dup) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: dup.number,
+                  body: `Another scheduled failure (${backends.join(', ')}) on \`${sha}\`: ${runUrl}`,
+                });
+                continue;
+              }
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `${prefix} ${backends.join(', ')} failure on ${sha}`,
+                body: [
+                  '## Backend smoke failure',
+                  '',
+                  `- **Lane:** ${lane}`,
+                  `- **Backend(s):** ${backends.join(', ')}`,
+                  `- **Commit:** \`${context.sha}\``,
+                  `- **Run:** ${runUrl}`,
+                  '',
+                  meaning,
+                  '',
+                  'The run log carries the suite\'s evidence block (relay log tail, fake-hub',
+                  'wire messages, tmux pane capture) for each failed scenario, and the',
+                  '`backend-smoke-<backend>-<lane>` artifact holds the full suite output.',
+                ].join('\n'),
+                labels: ['backend-smoke', 'ci-failure', 'kind/bug'],
+              });
+            }

@@ -998,7 +998,11 @@ const HEADLESS_BACKENDS = {
   // copilot -p "<prompt>" — non-interactive programmatic mode.
   copilot: { flag: '-p' },
   // codex exec "<prompt>" — Codex's non-interactive execution sub-command.
-  codex: { flag: 'exec' },
+  // --skip-git-repo-check: exec refuses to run at all in a cwd that is not a
+  // git repository ("Not inside a trusted directory..."), and the task
+  // workspace root is exactly that — the agent clones INTO it as its first
+  // act. Verified live against codex 0.146.0 via bin/test_backend_smoke.sh.
+  codex: { flag: ['exec', '--skip-git-repo-check'] },
   // goose run --no-session -t "<prompt>" — goose's one-shot sub-command. The
   // bare `goose` binary drives the interactive TUI, but `goose run` is a
   // documented non-interactive entry point (#2828): `-t` takes the prompt as
@@ -1188,6 +1192,13 @@ function runHeadlessTask(task) {
       send({ type: 'ready', seq: nextSeq() });
     });
   });
+  // codex exec prints "Reading additional input from stdin..." and then blocks
+  // on stdin-EOF even with the prompt already passed as an argv element; with
+  // execFile's default piped stdio nothing ever closes that pipe, so a
+  // headless codex task produced zero output and hung until the timeout
+  // killed it (found live by bin/test_backend_smoke.sh). Close stdin for
+  // every backend — a one-shot child has no interactive input coming.
+  if (headlessChild && headlessChild.stdin) headlessChild.stdin.end();
 }
 
 // A tmux pane can be left in bash's PS2 continuation state ("> ") when task
@@ -1785,15 +1796,20 @@ function detectHiveVerdict(lines, wanted) {
   // Anchored at line start: the task PROMPT quotes the marker mid-sentence
   // ("...the exact form 'HIVE_VERDICT: ...'"), and an anchored match keeps
   // that instruction echo from reading as the agent's own verdict. Codex
-  // renders its completed assistant messages with a leading bullet, which is
-  // presentation chrome rather than part of the verdict.
+  // renders its completed assistant messages with a leading bullet (•,
+  // U+2022) and Claude Code with a filled circle (●, U+25CF) — presentation
+  // chrome rather than part of the verdict. The claude glyph was missing
+  // until bin/test_backend_smoke.sh drove a REAL claude pane through the
+  // relay: the agent printed the sentinel, this regex missed it, and every
+  // interactive claude completion silently degraded to the chrome_idle
+  // fallback the sentinel exists to replace.
   //
   // The verdict token is an alternation of exactly the wanted tokens with a \b
   // after it, so "no_work_neededX" and "completely rewrote the parser" are both
   // non-matches — a prose line that merely STARTS with a verdict word must not
   // become a verdict.
   const alt = wanted.map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
-  const VERDICT_RE = new RegExp(`^\\s*(?:•\\s*)?HIVE_VERDICT:\\s*(${alt})\\b[\\s:—–-]*(.*)$`, 'i');
+  const VERDICT_RE = new RegExp(`^\\s*(?:[•●]\\s*)?HIVE_VERDICT:\\s*(${alt})\\b[\\s:—–-]*(.*)$`, 'i');
   // Scan newest-first so the agent's final conclusion wins over anything it
   // merely quoted or considered earlier in the transcript.
   for (let i = lines.length - 1; i >= 0; i--) {
