@@ -5513,6 +5513,171 @@ test('#5376 recordChromeIdleTick fires only after the full consecutive window', 
 });
 
 // ---------------------------------------------------------------------------
+// kubestellar/hive#5447 — a failed re-mint must be visible to the relay, and
+// token_expires_at must actually be read.
+//
+// Both halves were plumbing that carried no effect: maybeRefreshToken() logged
+// hub-side and told the relay nothing, so a stale credential first showed up as
+// a push failing about an hour into a long task; and tokenExpiresAt was
+// assigned in two places and never compared against anything.
+//
+// These assert OBSERVABLE behaviour (#5388): that a simulated mint failure
+// produces relay-visible output naming the condition, and that the expiry check
+// actually fires on a stale token rather than merely being reachable.
+// ---------------------------------------------------------------------------
+
+// Drives a token_refresh carrying an expiry, so a test starts from a relay that
+// genuinely holds a credential with a known lifetime.
+function refreshToken(relay, expiresInMs) {
+  relay.handleMessage(JSON.stringify({
+    type: 'token_refresh',
+    github_token: 'ghs_fake_test_token',
+    token_expires_at: new Date(Date.now() + expiresInMs).toISOString(),
+  }));
+}
+
+test('#5447 a hub-reported refresh failure is logged against the task, not swallowed', () => {
+  const relay = loadRelay({ backend: 'claude' });
+  const origError = console.error;
+  const errors = [];
+  console.error = (...args) => { errors.push(args.join(' ')); };
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-refresh-fail');
+    refreshToken(relay, 55 * 60 * 1000);
+    relay.handleMessage(JSON.stringify({
+      type: 'token_refresh_failed',
+      reason: 'mint failed, will retry on the next heartbeat',
+    }));
+    // The whole point of the issue: the relay must name the CREDENTIAL as the
+    // problem. Before this change nothing was emitted at all — the message type
+    // fell through handleMessage's switch unhandled.
+    const named = errors.find(e => e.includes('token refresh FAILED'));
+    assert.ok(named, 'a failed re-mint produced no relay-visible signal');
+    assert.ok(named.includes('foo/bar#421'), 'the failure was not logged against the task it belongs to');
+    assert.ok(named.includes('mint failed'), 'the hub-supplied reason did not reach the log');
+  } finally {
+    console.error = origError;
+    teardown(relay);
+  }
+});
+
+test('#5447 a refresh failure for a task we do not own is ignored', () => {
+  const relay = loadRelay({ backend: 'claude' });
+  try {
+    relay.setCliReady(true);
+    // No active task: the message must not be recorded against nothing.
+    relay.handleMessage(JSON.stringify({ type: 'token_refresh_failed', reason: 'mint failed' }));
+    assert.strictEqual(relay.tokenLifetimeStatus().refreshFailed, false,
+      'a refresh failure with no active task was recorded anyway');
+  } finally { teardown(relay); }
+});
+
+test('#5447 a later successful refresh clears the failure condition', () => {
+  const relay = loadRelay({ backend: 'claude' });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-refresh-recover');
+    refreshToken(relay, 55 * 60 * 1000);
+    relay.handleMessage(JSON.stringify({ type: 'token_refresh_failed', reason: 'mint failed' }));
+    assert.strictEqual(relay.tokenLifetimeStatus().refreshFailed, true,
+      'the failure was not recorded in the first place');
+    refreshToken(relay, 55 * 60 * 1000);
+    assert.strictEqual(relay.tokenLifetimeStatus().refreshFailed, false,
+      'a delivered credential must resolve the earlier renewal failure');
+  } finally { teardown(relay); }
+});
+
+test('#5447 tokenExpiresAt is actually read — a stale token warns', () => {
+  const relay = loadRelay({ backend: 'claude' });
+  const origWarn = console.warn;
+  const warnings = [];
+  console.warn = (...args) => { warnings.push(args.join(' ')); };
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-expiry');
+    // A credential that lapsed ten minutes ago. Before this change the relay
+    // held this number and never compared it to anything.
+    refreshToken(relay, -10 * 60 * 1000);
+    const msg = relay.warnOnTokenExpiry();
+    assert.ok(msg, 'an expired token produced no warning — token_expires_at is still unread');
+    assert.ok(/expired/.test(msg), `expected an expiry warning, got: ${msg}`);
+    assert.ok(warnings.some(w => /expired/.test(w)), 'the expiry warning never reached the log');
+    const status = relay.tokenLifetimeStatus();
+    assert.strictEqual(status.expired, true);
+    assert.strictEqual(status.known, true);
+  } finally {
+    console.warn = origWarn;
+    teardown(relay);
+  }
+});
+
+test('#5447 a healthy token neither warns nor reports expiry', () => {
+  const relay = loadRelay({ backend: 'claude' });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-healthy');
+    refreshToken(relay, 50 * 60 * 1000);
+    assert.strictEqual(relay.warnOnTokenExpiry(), null,
+      'a token with 50 minutes left must not warn — that would be noise on every task');
+    const status = relay.tokenLifetimeStatus();
+    assert.strictEqual(status.expired, false);
+    assert.strictEqual(status.expiring, false);
+  } finally { teardown(relay); }
+});
+
+test('#5447 the warning fires inside the window, before the first push can fail', () => {
+  const relay = loadRelay({ backend: 'claude' });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-window');
+    // Still valid, but inside the warning window: the operator should hear
+    // about it BEFORE the credential lapses, not afterwards.
+    refreshToken(relay, Math.floor(relay.TOKEN_EXPIRY_WARN_MS / 2));
+    const status = relay.tokenLifetimeStatus();
+    assert.strictEqual(status.expired, false, 'this token has not expired yet');
+    assert.strictEqual(status.expiring, true, 'a token inside the warning window must be flagged as expiring');
+    const msg = relay.warnOnTokenExpiry();
+    assert.ok(msg && /expires in/.test(msg), `expected a pre-expiry warning, got: ${msg}`);
+  } finally { teardown(relay); }
+});
+
+test('#5447 the expiry warning is throttled, not emitted every tick', () => {
+  const relay = loadRelay({ backend: 'claude' });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-throttle');
+    refreshToken(relay, -10 * 60 * 1000);
+    assert.ok(relay.warnOnTokenExpiry(), 'the first warning must fire');
+    assert.strictEqual(relay.warnOnTokenExpiry(), null,
+      'a second immediate warning would spam the log on every progress tick');
+  } finally { teardown(relay); }
+});
+
+test('#5447 an expired token still does NOT refuse the work (clock skew)', () => {
+  const relay = loadRelay({ backend: 'claude' });
+  const origWarn = console.warn;
+  console.warn = () => {};
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-no-refusal');
+    refreshToken(relay, -60 * 60 * 1000);
+    relay.handleMessage(JSON.stringify({ type: 'token_refresh_failed', reason: 'mint failed' }));
+    relay.progressTick();
+    // Deliberate: tokenExpiresAt is the HUB's wall clock read on OURS, so a
+    // skewed machine would abandon work on a perfectly good credential.
+    // Warning is the ceiling here; failing the task is not.
+    assert.ok(!relay.__sent.some(m => m.type === 'task_failed'),
+      'an expired-looking token must not fail the task — clock skew would destroy live work');
+    assert.strictEqual(relay.getCurrentTask() ? relay.getCurrentTask().task_id : null, 't-no-refusal',
+      'the task must still be held');
+  } finally {
+    console.warn = origWarn;
+    teardown(relay);
+  }
+});
+
+// ---------------------------------------------------------------------------
 
 let failed = 0;
 // RELAY_TEST_ONLY=<substring> runs a single test, for debugging in isolation.
