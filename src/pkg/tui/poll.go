@@ -94,12 +94,13 @@ func (m model) scheduleTick() tea.Cmd {
 
 // poll issues every fetch the client can currently make, as one batch.
 //
-// Four reads today: /api/agents (T4, #5067), plus the three T29 wired for the
+// Six reads today: /api/agents (T4, #5067), the three T29 wired for the
 // Governor pane and the header — /api/status for live governor state,
 // /api/config/governor for the evaluation cadence, and /api/hive-id for the
-// hive's identity. The tokens and events fetches (T8/T10) each add one line
-// here and one message type in pkg/tui/panes; the loop, the error policy and
-// the tick scheduling do not change when they land.
+// hive's identity — and the two T30 wires for the Tokens pane: /api/tokens for
+// the counts and /api/cost for the estimated spend joined onto them. The events
+// fetch (T10) adds one line here and one message type in pkg/tui/panes; the
+// loop, the error policy and the tick scheduling do not change when it lands.
 //
 // EACH FETCH FAILS ALONE. They are separate Cmds in one batch rather than one
 // Cmd making four calls, and that is the failure-isolation property T29 is
@@ -121,6 +122,8 @@ func (m model) poll() tea.Cmd {
 		m.fetchGovernor(),
 		m.fetchGovernorInterval(),
 		m.fetchHiveID(),
+		m.fetchTokens(),
+		m.fetchCosts(),
 	)
 }
 
@@ -230,4 +233,178 @@ func (m model) fetchHiveID() tea.Cmd {
 		}
 		return hiveIDMsg{id: id}
 	}
+}
+
+// tokenUsageMsg is a successful token-count read from GET /api/tokens.
+//
+// It is app-level rather than panes.TokensMsg for the reason governorStatusMsg
+// is: the pane's frame needs two endpoints, they fail independently, and
+// sending the pane message straight from this fetch would send it with whatever
+// cost this Cmd happened to know — none. The app caches this, joins it with the
+// last cost read, and emits one complete TokensMsg.
+//
+// An empty usage document is a legitimate answer and is kept as one. A hive
+// whose agents have burned no tokens reports zeroes, and the pane must render
+// that as a loaded zero-usage frame rather than sitting on "waiting for data"
+// forever; carrying success in the TYPE (a failure is a fetchErrMsg) is what
+// makes that distinction survive the trip.
+type tokenUsageMsg struct {
+	usage client.TokenUsage
+}
+
+// costSummaryMsg is a successful estimated-cost read from GET /api/cost.
+//
+// Cost is the OPTIONAL half of the Tokens frame. It never gates delivery: a
+// hive whose token endpoint answers and whose cost endpoint does not still gets
+// fresh counts, with every cost column rendered as an em dash. That asymmetry
+// is deliberate and is why this is a separate message from tokenUsageMsg rather
+// than a field on it.
+type costSummaryMsg struct {
+	summary client.CostSummary
+}
+
+// costFetchSource is the fetchErrMsg source naming the /api/cost read.
+//
+// It is a named constant because it is the ONE fetch whose failure the app acts
+// on rather than swallowing (it invalidates the cached estimate), so the
+// producer and that consumer must agree on the spelling. A literal in both
+// places would let a rename silently turn the invalidation off and leave the
+// pane showing a stale dollar figure with no test failing.
+const costFetchSource = "cost"
+
+// fetchTokens reads the fleet's token counts.
+//
+// This is the PRIMARY data for the pane. Its failure is the only failure that
+// holds the pane stale, which is what makes fetchCosts safe to lose.
+func (m model) fetchTokens() tea.Cmd {
+	return func() tea.Msg {
+		usage, err := m.api.Tokens(context.Background())
+		if err != nil {
+			return fetchErrMsg{source: "tokens", err: err}
+		}
+		return tokenUsageMsg{usage: usage}
+	}
+}
+
+// fetchCosts reads the dashboard's estimated spend.
+//
+// Separate from fetchTokens on purpose, and not merely for concurrency: cost is
+// a strictly richer read (it prices every model in the summary) and is the one
+// a restricted token or an older dashboard is likelier to refuse. Folding it
+// into the token fetch would make the counts only as available as the estimate,
+// which is precisely the "hold the whole pane stale behind an optional
+// estimate" failure this task forbids.
+func (m model) fetchCosts() tea.Cmd {
+	return func() tea.Msg {
+		summary, err := m.api.Costs(context.Background())
+		if err != nil {
+			return fetchErrMsg{source: costFetchSource, err: err}
+		}
+		return costSummaryMsg{summary: summary}
+	}
+}
+
+// tokensMsg projects the model's cached token and cost reads into the one frame
+// the Tokens pane consumes.
+//
+// THIS IS THE ONE PLACE A panes.TokensMsg IS BUILT, for the same reason
+// governorMsg is the one place a GovernorMsg is: every rule below has to hold
+// on every path, and a second construction site is a second place to get the
+// priced/unpriced distinction wrong.
+//
+// The projection rules, each of which is a fact about the wire and not a
+// preference:
+//
+//   - ROWS COME FROM ByAgentDetail, and their input/output counts stay the
+//     /api/tokens values. The cost payload carries its own per-agent input and
+//     output, but those are the estimator's view of the same buckets; showing
+//     them would make the counts change depending on whether an unrelated
+//     endpoint answered.
+//
+//   - COST ENRICHES A ROW, it never creates one. An agent priced by /api/cost
+//     but absent from ByAgentDetail has no counts to show, and a row of dashes
+//     with a dollar figure would invite the reading that it spent money without
+//     tokens.
+//
+//   - CostKnown IS THE ENTRY'S SOURCE, never its value. client.CostAgentEntry
+//     documents that an unpriced entry carries USD 0 on the wire as a
+//     placeholder; rendering that as $0.00 would report a free agent, which is
+//     the single most misleading thing this pane could say. Known() is the only
+//     thing consulted.
+//
+//   - FLEET COUNTS COME FROM TotalInput/TotalOutput, not from summing the rows
+//     above. AggregateSummary counts every scanned session including ones it
+//     could not attribute to a configured agent, so the total is legitimately
+//     larger than the visible rows. Re-summing would silently disagree with the
+//     web dashboard for the same hive.
+//
+//   - FLEET COST IS KNOWN ONLY WHEN EVERY MODEL IS PRICED. CostSummary.TotalUSD
+//     is a lower bound whenever UnpricedModels is non-empty, and presenting a
+//     lower bound as the fleet's spend is the same lie as $0.00 on an unpriced
+//     agent, one order of magnitude up.
+//
+// Map iteration order does not leak: the pane sorts what it is handed
+// (panes.sortRows), and this builds rows from a map without imposing any order
+// of its own, so the delivered frame is deterministic no matter which order Go
+// walked ByAgentDetail in.
+func (m model) tokensMsg() panes.TokensMsg {
+	costs := m.agentCosts()
+
+	rows := make([]panes.TokenRow, 0, len(m.tokenUsage.ByAgentDetail))
+	for name, bucket := range m.tokenUsage.ByAgentDetail {
+		if bucket == nil {
+			// A null bucket carries no counts. The dashboard does not emit one
+			// today, but the field is a pointer map and a row of zeroes
+			// attributed to a real agent is worse than no row.
+			continue
+		}
+		row := panes.TokenRow{
+			Agent: name,
+			TokenCounts: panes.TokenCounts{
+				Input:  bucket.Input,
+				Output: bucket.Output,
+			},
+		}
+		if entry, ok := costs[name]; ok && entry.Known() {
+			row.CostUSD = entry.USD
+			row.CostKnown = true
+		}
+		rows = append(rows, row)
+	}
+
+	total := panes.TokenCounts{
+		Input:  m.tokenUsage.TotalInput,
+		Output: m.tokenUsage.TotalOutput,
+	}
+	if m.costLoaded && m.costSummary.AllPriced() {
+		total.CostUSD = m.costSummary.TotalUSD
+		total.CostKnown = true
+	}
+
+	return panes.TokensMsg{Agents: rows, Total: total}
+}
+
+// agentCosts indexes the cost summary by agent name for the join.
+//
+// The join key is the agent name exactly as each endpoint spells it, and that
+// is a canonical key rather than a hopeful one: both payloads are derived from
+// the SAME AggregateSummary.ByAgentDetail map on the server — /api/tokens
+// returns its keys directly and /api/cost prices those same buckets
+// (pkg/tokens/pricing.go EstimateFromSummary, flattened by
+// pkg/dashboard/cost.go). There is no alias layer between them to normalize
+// away, so anything cleverer than an exact match would be inventing a
+// correspondence the server never made.
+//
+// It returns nil when no cost read has succeeded, which is what makes the
+// cost-failure case fall out of the projection rather than needing a branch:
+// every lookup misses and every row is unpriced.
+func (m model) agentCosts() map[string]client.CostAgentEntry {
+	if !m.costLoaded {
+		return nil
+	}
+	byAgent := make(map[string]client.CostAgentEntry, len(m.costSummary.ByAgent))
+	for _, entry := range m.costSummary.ByAgent {
+		byAgent[entry.Name] = entry
+	}
+	return byAgent
 }
