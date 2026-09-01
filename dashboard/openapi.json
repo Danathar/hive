@@ -11094,6 +11094,86 @@
         }
       }
     },
+    "/api/contribute/run-stats": {
+      "get": {
+        "tags": [
+          "Contribute"
+        ],
+        "summary": "Per-backend run-scenario aggregates",
+        "description": "Aggregates the durable contributor task-run log into per-backend scenario counts (verdict_complete, idle_complete, headless_complete, env_failure, task_failure, unspecified_failure), the chrome-idle share (the completion-sentinel non-compliance rate), and duration percentiles, over a trailing window. Public, GET only, no side effects \u2014 aggregate counts only, no usernames, reasons, or tokens.",
+        "parameters": [
+          {
+            "name": "days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 365,
+              "default": 7
+            },
+            "description": "Trailing window in days; 0 aggregates everything in the live log."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Per-backend run-scenario aggregates",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "window_days": {
+                      "type": "integer"
+                    },
+                    "total": {
+                      "type": "integer"
+                    },
+                    "backends": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "backend": {
+                            "type": "string"
+                          },
+                          "total": {
+                            "type": "integer"
+                          },
+                          "completed": {
+                            "type": "integer"
+                          },
+                          "failed": {
+                            "type": "integer"
+                          },
+                          "scenarios": {
+                            "type": "object",
+                            "description": "Map of scenario name -> count",
+                            "additionalProperties": {
+                              "type": "integer"
+                            }
+                          },
+                          "chrome_idle_share": {
+                            "type": "number",
+                            "description": "idle_complete / completed \u2014 the completion-sentinel non-compliance rate to ratchet toward zero"
+                          },
+                          "duration_p50_s": {
+                            "type": "number"
+                          },
+                          "duration_p95_s": {
+                            "type": "number"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/contribute/opportunistic": {
       "get": {
         "tags": [
