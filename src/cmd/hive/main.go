@@ -5921,25 +5921,7 @@ func runEvalCycle(
 			ghToken = os.Getenv("HIVE_GITHUB_TOKEN")
 		}
 		ws, wsErr := worksource.FromConfig(cfg.Governor.WorkSource, ghClient, ghToken, cfg.Project.Org, logger)
-		if wsErr != nil {
-			logger.Error("work_source config error; failing closed for issues while preserving GitHub PR maintenance", "error", wsErr)
-			actionable.Issues = github.IssueResultFromItems([]github.Issue{})
-		} else if wsIssues, listErr := ws.ListIssues(ctx); listErr != nil {
-			logger.Error("work_source enumeration failed; failing closed for issues while preserving GitHub PR maintenance", "source", ws.SourceType(), "error", listErr)
-			actionable.Issues = github.IssueResultFromItems([]github.Issue{})
-		} else {
-			// Replace the Issues portion of actionable with worksource results,
-			// applying the same label gates and SLA summary rules as GitHub.
-			items := github.FilterExemptIssues(worksource.ToGitHubIssues(wsIssues), cfg.Governor.Labels.Exempt)
-			filtered := items[:0]
-			for _, issue := range items {
-				if cfg.Project.IssueFilter.Admits(issue.Labels) {
-					filtered = append(filtered, issue)
-				}
-			}
-			items = filtered
-			actionable.Issues = github.IssueResultFromItems(items)
-		}
+		actionable.Issues = workSourceIssuesForCycle(ctx, ws, wsErr, cfg.Governor.Labels.Exempt, cfg.Project.IssueFilter, logger)
 	}
 
 	ghClient.EnrichCIStatus(ctx, actionable.PRs.Items)
@@ -6028,23 +6010,7 @@ func runEvalCycle(
 	// burning backend tokens far faster than any configured cadence and
 	// bypassing the budget gate; AllowResumeKick bounds resume kicks to one
 	// per cadence interval and respects mode pauses and the budget.
-	if len(restartedAgents) > 0 {
-		dueSet := make(map[string]bool, len(agentsDue))
-		for _, a := range agentsDue {
-			dueSet[a] = true
-		}
-		for _, a := range restartedAgents {
-			if dueSet[a] {
-				continue
-			}
-			if !gov.AllowResumeKick(a) {
-				logger.Info("restarted agent NOT resume-kicked (cadence/budget gate); it will be kicked at its next scheduled slot", "agent", a)
-				continue
-			}
-			agentsDue = append(agentsDue, a)
-			logger.Info("adding restarted agent to kick list", "agent", a)
-		}
-	}
+	agentsDue = mergeResumeKicks(agentsDue, restartedAgents, gov.AllowResumeKick, logger)
 
 	govState := gov.GetState()
 	span.SetAttributes(
@@ -6065,26 +6031,9 @@ func runEvalCycle(
 	// via the dashboard is always respected; the governor only controls kicks.
 
 	// Filter out on-demand agents — they are only triggered explicitly
-	onDemandSet := config.OnDemandAgentsFromPacks()
-	var filteredDue []string
-	for _, name := range agentsDue {
-		if ac, ok := cfg.Agents[name]; ok && ac.OnDemand {
-			continue
-		}
-		if onDemandSet[name] {
-			continue
-		}
-		// Operator-paused agents must consume NOTHING (#2573). SendKick
-		// would reject the kick anyway (paused ⇒ not running), but skipping
-		// here keeps paused agents out of BuildKickMessages and the audit
-		// log, and avoids a spurious "failed to send kick" error every eval
-		// cycle for a deliberate pause.
-		if agentMgr.IsPaused(name) {
-			continue
-		}
-		filteredDue = append(filteredDue, name)
-	}
-	agentsDue = filteredDue
+	// Operator-paused agents must consume NOTHING (#2573); see
+	// filterKickableAgents for the full gate.
+	agentsDue = filterKickableAgents(agentsDue, cfg.Agents, config.OnDemandAgentsFromPacks(), agentMgr.IsPaused)
 
 	// PROVIDER SPEND REBUFF (#4294). When the inference gateway is refusing on a
 	// money limit, every kick launched this cycle is a run that cannot buy a
@@ -6208,38 +6157,31 @@ func runEvalCycle(
 	// decision (#2573) and must not be forged by an automatic signal that will
 	// clear itself; withholding kicks achieves the saving without leaving paused
 	// agents behind for a human to un-pause by hand.
+	//
+	// Probe cycle: when the last rebuff has gone stale, ONE kick is
+	// deliberately allowed through to find out whether the provider is
+	// serving again. Its inference calls are what clear the latch (on a
+	// 2xx) or re-freshen it (on another rebuff) — nothing else can. Only
+	// one: the question is "is the window still clipped", and every kick
+	// beyond the first spends a run to learn the same answer. Releasing it
+	// re-arms suppression immediately, so the cycles while the probe's run
+	// is still in flight withhold again rather than leaking more kicks.
+	kickGate := gateKickMessagesForProviderBudget(messages, suppressKicks, providerBudgetLatched)
 	if suppressKicks && len(messages) > 0 {
-		withheld := make([]string, 0, len(messages))
-		for _, msg := range messages {
-			withheld = append(withheld, msg.Agent)
-		}
 		logger.Warn("provider spending limit: withholding agent kicks",
-			"withheld", withheld, "rebuffs", providerBudgetRebuffs, "since", providerBudgetSince,
+			"withheld", kickGate.Withheld, "rebuffs", providerBudgetRebuffs, "since", providerBudgetSince,
 			"next_probe_in", (providerBudgetProbeInterval - time.Since(providerBudgetProbe.freshest(providerBudgetLastRebuff))).Truncate(time.Second))
-		messages = nil
-	} else if providerBudgetLatched && len(messages) > 0 {
-		// Probe cycle: the last rebuff has gone stale, so ONE kick is
-		// deliberately allowed through to find out whether the provider is
-		// serving again. Its inference calls are what clear the latch (on a
-		// 2xx) or re-freshen it (on another rebuff) — nothing else can. Only
-		// one: the question is "is the window still clipped", and every kick
-		// beyond the first spends a run to learn the same answer. Releasing it
-		// re-arms suppression immediately, so the cycles while the probe's run
-		// is still in flight withhold again rather than leaking more kicks.
-		if len(messages) > 1 {
-			dropped := make([]string, 0, len(messages)-1)
-			for _, msg := range messages[1:] {
-				dropped = append(dropped, msg.Agent)
-			}
+	} else if kickGate.ReleaseProbe {
+		if len(kickGate.Withheld) > 0 {
 			logger.Warn("provider spending limit: withholding all but the probe kick",
-				"withheld", dropped, "rebuffs", providerBudgetRebuffs, "since", providerBudgetSince)
-			messages = messages[:1]
+				"withheld", kickGate.Withheld, "rebuffs", providerBudgetRebuffs, "since", providerBudgetSince)
 		}
 		providerBudgetProbe.markReleased(time.Now())
 		logger.Info("provider spending limit: releasing a single probe kick",
-			"probe_agent", messages[0].Agent, "rebuffs", providerBudgetRebuffs, "since", providerBudgetSince,
+			"probe_agent", kickGate.Kept[0].Agent, "rebuffs", providerBudgetRebuffs, "since", providerBudgetSince,
 			"last_rebuff", providerBudgetLastRebuff, "probe_interval", providerBudgetProbeInterval)
 	}
+	messages = kickGate.Kept
 	if notifyProviderBudget {
 		notifier.Send("Provider spending limit reached", providerBudgetCause, notify.PriorityHigh)
 	}
@@ -6292,22 +6234,16 @@ func runEvalCycle(
 	persistReviewDispatchState(reviewPlan, deliveredReviewKicks, logger)
 
 	if actionable.Issues.SLAViolations > 0 {
-		const doubleSLAMinutes = 60
-		const maxSLANotificationsPerCycle = 3
-		sent := 0
-		for _, issue := range actionable.Issues.Items {
-			if issue.AgeMinutes > doubleSLAMinutes {
-				if sent >= maxSLANotificationsPerCycle {
-					logger.Info("SLA notification cap reached, skipping remaining", "remaining", actionable.Issues.SLAViolations-sent)
-					break
-				}
-				notifier.Send(
-					"SLA 2x breach",
-					fmt.Sprintf("%s age %dm: %s\n%s", actionableIssueRef(issue), issue.AgeMinutes, issue.Title, issue.URL),
-					notify.PriorityHigh,
-				)
-				sent++
-			}
+		toNotify, capped := selectSLABreachNotifications(actionable.Issues.Items)
+		for _, issue := range toNotify {
+			notifier.Send(
+				"SLA 2x breach",
+				fmt.Sprintf("%s age %dm: %s\n%s", actionableIssueRef(issue), issue.AgeMinutes, issue.Title, issue.URL),
+				notify.PriorityHigh,
+			)
+		}
+		if capped {
+			logger.Info("SLA notification cap reached, skipping remaining", "remaining", actionable.Issues.SLAViolations-len(toNotify))
 		}
 	}
 
@@ -6577,7 +6513,8 @@ func runEvalCycle(
 						// string logged just below — log-safe, never key material.
 						dashSrv.RecordAdvisoryError(err.Error())
 						logger.Warn("failed to post advisory digest via app", "repo", primaryRepo, "issue", issueNum, "error", err)
-						if strings.Contains(err.Error(), "403") && strings.Contains(err.Error(), "Resource not accessible by integration") {
+						switch classifyAdvisoryPostError(err) {
+						case advisoryPostWriteForbidden:
 							// App is installed (we found the issue) but a real
 							// WRITE was forbidden. #2353: attribute this honestly.
 							// diagnoseGitHubApp only inspects installation-level
@@ -6598,9 +6535,9 @@ func runEvalCycle(
 							logger.Warn("GitHub App write failed — cannot write issue comments",
 								"repo", primaryRepo, "state", state.String(),
 								"operator_actionable", state.OperatorActionable(), "detail", msg)
-						} else if isGitHubRateLimitText(err) {
+						case advisoryPostRateLimited:
 							logger.Warn("GitHub API rate limit hit, skipping advisory digest post", "repo", primaryRepo)
-						} else {
+						default:
 							// Same verdict function as boot and Re-check, so a
 							// healthy or unclassifiable probe cannot raise the
 							// banner here either.
