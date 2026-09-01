@@ -5053,6 +5053,9 @@ func main() {
 const (
 	budgetWarnAlertID      = "budget-warn"
 	budgetExhaustedAlertID = "budget-exhausted"
+	// noCadenceAlertID is the never-kicked cause+fix banner (#5577): enabled
+	// agents with no cadence in any mode and no kick ever.
+	noCadenceAlertID = "agent-no-cadence"
 	// providerBudgetAlertID is the PROVIDER spend rebuff (#4294), kept distinct
 	// from the two token-budget alerts above so an operator can tell "we used
 	// our token allowance" from "the gateway will not spend more money".
@@ -5249,6 +5252,31 @@ func applyBudgetAlerts(gov *governor.Governor, trans governor.BudgetTransitions,
 		dashSrv.AddSystemAlert(budgetExhaustedAlertID, "error", msg)
 		notifier.Send("Budget exhausted", msg, notify.PriorityHigh)
 	}
+}
+
+// applyNoCadenceAlert keeps the never-kicked cause+fix banner (#5577) in sync
+// with the governor's view: raised (warning, not error — the hive is not
+// broken, it is unconfigured) while any enabled, governor-kickable agent has
+// no cadence in any mode and has never been kicked; cleared the moment the
+// operator sets a cadence or any kick path reaches the agent. This is the
+// spoke-side parity for the hub verdict's no-cadence amber: the same
+// governor-derived signal, rendered where the operator can act on it, with no
+// hub round-trip.
+func applyNoCadenceAlert(gov *governor.Governor, dashSrv *dashboard.Server) {
+	agents := gov.NoCadenceAgents()
+	if len(agents) == 0 {
+		dashSrv.ClearSystemAlert(noCadenceAlertID)
+		return
+	}
+	dashSrv.AddSystemAlert(noCadenceAlertID, "warning", noCadenceAlertMessage(agents))
+}
+
+// noCadenceAlertMessage renders the banner line: symptom, cause AND fix — the
+// exact gap the RFC calls out in the dashboard's not-producing warnings,
+// which name only the symptom.
+func noCadenceAlertMessage(agents []string) string {
+	return fmt.Sprintf("agent(s) %s enabled but never kicked — no cadence configured; set cadences on the agent card",
+		strings.Join(agents, ", "))
 }
 
 // agentKicker adapts *agent.Manager to planning.Kicker for the Phase 3
@@ -6016,6 +6044,13 @@ func runEvalCycle(
 			applyBudgetAlerts(gov, trans, dashSrv, notifier)
 		}
 	}
+
+	// Cause+fix banner for the never-kicked class (#5577): the dashboard's
+	// not-producing warnings name the SYMPTOM (agent idle, zero tokens); this
+	// names the cause — enabled agent, no cadence in any mode, never kicked —
+	// and the fix. Computed from the spoke's own governor config, no hub
+	// round-trip; self-clears the moment a cadence is set or any kick lands.
+	applyNoCadenceAlert(gov, dashSrv)
 
 	agentsDue := gov.Evaluate(
 		actionable.Issues.Count,
