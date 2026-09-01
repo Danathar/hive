@@ -94,23 +94,23 @@ func (m model) scheduleTick() tea.Cmd {
 
 // poll issues every fetch the client can currently make, as one batch.
 //
-// Six reads today: /api/agents (T4, #5067), the three T29 wired for the
+// Seven reads today: /api/agents (T4, #5067), the three T29 wired for the
 // Governor pane and the header — /api/status for live governor state,
 // /api/config/governor for the evaluation cadence, and /api/hive-id for the
 // hive's identity — and the two T30 wires for the Tokens pane: /api/tokens for
-// the counts and /api/cost for the estimated spend joined onto them. The events
-// fetch (T10) adds one line here and one message type in pkg/tui/panes; the
-// loop, the error policy and the tick scheduling do not change when it lands.
+// the counts and /api/cost for the estimated spend joined onto them, plus
+// /api/audit for the Events pane (T31). /api/events is deliberately absent: it
+// is the long-lived SSE status stream, not the poll-shaped activity feed.
 //
 // EACH FETCH FAILS ALONE. They are separate Cmds in one batch rather than one
-// Cmd making four calls, and that is the failure-isolation property T29 is
+// Cmd making seven calls, and that is the failure-isolation property T29 is
 // about: a dashboard that serves /api/status but forbids /api/config/governor
 // (a common read-only-token shape) must still show a live governor mode, and a
 // hive with no configured identity must not stop the Governor pane loading.
 // Folding them together would make every value only as available as the least
 // available endpoint, because one error return would discard three good
-// results. Batched Cmds also run concurrently, so four reads cost one round
-// trip of wall time, not four.
+// results. Batched Cmds also run concurrently, so seven reads cost one round
+// trip of wall time, not seven.
 //
 // Deliberately NOT polled: /api/health. It exists and would succeed, but
 // nothing in the frame renders it — the header's `ws:` field is SSE connection
@@ -124,6 +124,7 @@ func (m model) poll() tea.Cmd {
 		m.fetchHiveID(),
 		m.fetchTokens(),
 		m.fetchCosts(),
+		m.fetchEvents(),
 	)
 }
 
@@ -301,6 +302,23 @@ func (m model) fetchCosts() tea.Cmd {
 			return fetchErrMsg{source: costFetchSource, err: err}
 		}
 		return costSummaryMsg{summary: summary}
+	}
+}
+
+// fetchEvents reads the newest-first operator activity snapshot.
+//
+// Client.Events owns the /api/audit path and the wire shape. This command does
+// not sort, append to, or copy the returned slice: a successful snapshot is
+// handed straight to the pane, which owns replacement and scroll anchoring. A
+// failed read becomes fetchErrMsg instead of an empty EventsMsg, so 403s and
+// outages cannot erase the last good rows or reset the operator's position.
+func (m model) fetchEvents() tea.Cmd {
+	return func() tea.Msg {
+		events, err := m.api.Events(context.Background())
+		if err != nil {
+			return fetchErrMsg{source: "events", err: err}
+		}
+		return panes.EventsMsg{Events: events}
 	}
 }
 
