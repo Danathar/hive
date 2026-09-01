@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/kubestellar/hive/internal/testutil"
 )
 
 // redirectTransport rewrites every outgoing request so that requests targeting
@@ -803,6 +805,7 @@ func TestPollLoop_TickerBranch(t *testing.T) {
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	done := make(chan struct{})
 	go func() {
@@ -812,8 +815,12 @@ func TestPollLoop_TickerBranch(t *testing.T) {
 	// Start drainLoop so enqueued replies are sent via HTTP.
 	go b.drainLoop(ctx)
 
-	// Wait for two ticks (pollIntervalS=5s each) so the second fetch is routed.
-	time.Sleep(10500 * time.Millisecond)
+	// Wait for two ticks (pollIntervalS=5s each) so the second fetch is routed
+	// and its reply has gone out over HTTP, bounded at three ticks instead of a
+	// fixed margin past the second one.
+	testutil.Eventually(t, 3*pollIntervalS*time.Second, func() bool {
+		return fetchCount.Load() >= 2 && sendCount.Load() > 0
+	}, "expected two ticker fetches and a routed !ping reply")
 	cancel()
 
 	select {
@@ -847,6 +854,7 @@ func TestPollLoop_TickerBranch_FetchError(t *testing.T) {
 
 	b := newTestBot(ts, "ch")
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	done := make(chan struct{})
 	go func() {
@@ -854,7 +862,11 @@ func TestPollLoop_TickerBranch_FetchError(t *testing.T) {
 		b.pollLoop(ctx)
 	}()
 
-	time.Sleep(5500 * time.Millisecond)
+	// One ticker fetch (pollIntervalS=5s) is enough; bounded at two ticks
+	// instead of a fixed margin past the first.
+	testutil.Eventually(t, 2*pollIntervalS*time.Second, func() bool {
+		return fetchCount.Load() > 0
+	}, "expected a ticker fetch attempt")
 	cancel()
 
 	select {
@@ -980,6 +992,7 @@ func TestPollLoop_TickerSuccessPath(t *testing.T) {
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	done := make(chan struct{})
 	go func() {
@@ -989,8 +1002,12 @@ func TestPollLoop_TickerSuccessPath(t *testing.T) {
 	// Start drainLoop so enqueued replies are sent via HTTP.
 	go b.drainLoop(ctx)
 
-	// Wait for two ticks (pollIntervalS=5s each) so the second fetch is routed.
-	time.Sleep(10500 * time.Millisecond)
+	// Wait for two ticks (pollIntervalS=5s each) so the second fetch is routed
+	// and its reply has gone out over HTTP, bounded at three ticks instead of a
+	// fixed margin past the second one.
+	testutil.Eventually(t, 3*pollIntervalS*time.Second, func() bool {
+		return fetchCount.Load() >= 2 && sendCount.Load() > 0
+	}, "expected two ticker fetches and a routed !ping reply")
 	cancel()
 
 	select {
@@ -1023,6 +1040,7 @@ func TestPollLoop_TickerFetchErrorPath(t *testing.T) {
 
 	b := newTestBot(ts, "ch")
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	done := make(chan struct{})
 	go func() {
@@ -1030,7 +1048,11 @@ func TestPollLoop_TickerFetchErrorPath(t *testing.T) {
 		b.pollLoop(ctx)
 	}()
 
-	time.Sleep(5100 * time.Millisecond)
+	// One ticker fetch (pollIntervalS=5s) is enough; bounded at two ticks
+	// instead of a fixed margin past the first.
+	testutil.Eventually(t, 2*pollIntervalS*time.Second, func() bool {
+		return fetchAttempts.Load() > 0
+	}, "expected a ticker fetch attempt")
 	cancel()
 
 	select {

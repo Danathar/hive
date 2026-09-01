@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -146,11 +147,14 @@ func TestStartTaskStatusPushNilPayload(t *testing.T) {
 }
 
 func TestStartHeartbeatWithCancel(t *testing.T) {
+	firstBeat := make(chan struct{})
+	var firstBeatOnce sync.Once
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/health" {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
+		firstBeatOnce.Do(func() { close(firstBeat) })
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
@@ -166,8 +170,13 @@ func TestStartHeartbeatWithCancel(t *testing.T) {
 		close(done)
 	}()
 
-	// Cancel early
-	time.Sleep(500 * time.Millisecond)
+	// Cancel early: as soon as the loop has sent its first heartbeat, or after
+	// the original 500ms margin, whichever comes first. The assertion below is
+	// only that the loop stops on cancel, so this never fails on its own.
+	select {
+	case <-firstBeat:
+	case <-time.After(500 * time.Millisecond):
+	}
 	cancel()
 
 	select {

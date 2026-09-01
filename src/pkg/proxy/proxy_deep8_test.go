@@ -163,7 +163,9 @@ func TestHandleTransparentTLSNonGitHubWithTCPServer(t *testing.T) {
 	}
 	defer proxyLn.Close()
 
+	handled := make(chan struct{})
 	go func() {
+		defer close(handled)
 		conn, err := proxyLn.Accept()
 		if err != nil {
 			return
@@ -194,8 +196,14 @@ func TestHandleTransparentTLSNonGitHubWithTCPServer(t *testing.T) {
 	rawConn.Write(clientHello)
 
 	// The proxy will extract SNI="example.com", check IsGitHubHost=false,
-	// then try to dial example.com:443 which fails.
-	time.Sleep(3 * time.Second)
+	// then try to dial example.com:443. Wait for the handler goroutine to
+	// finish (immediate when that dial fails, e.g. no egress), keeping the
+	// original 3s upper bound for the case where a tunnel does come up and
+	// only the Close below tears it down.
+	select {
+	case <-handled:
+	case <-time.After(3 * time.Second):
+	}
 	rawConn.Close()
 
 	_ = echoPortStr

@@ -41,6 +41,7 @@ func refreshConn(ws *websocket.Conn, mintedAt time.Time) *ContributorConnection 
 func wsPair(t *testing.T) (serverConn, clientConn *websocket.Conn) {
 	t.Helper()
 	connReady := make(chan struct{})
+	handlerDone := make(chan struct{})
 	upgrader := websocket.Upgrader{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, err := upgrader.Upgrade(w, r, nil)
@@ -50,10 +51,12 @@ func wsPair(t *testing.T) (serverConn, clientConn *websocket.Conn) {
 		}
 		serverConn = c
 		close(connReady)
-		// Keep the handler alive so the conn stays open for the test body.
-		time.Sleep(2 * time.Second)
+		// Keep the handler alive until the test is done with the conn; released
+		// by the cleanup below (LIFO: runs before srv.Close) rather than a timer.
+		<-handlerDone
 	}))
 	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(handlerDone) })
 
 	client, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http"), nil)
 	if err != nil {
