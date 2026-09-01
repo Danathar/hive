@@ -79,8 +79,8 @@ exit 99`)
 		t.Fatal("attach remained pending after the preflight failed")
 	}
 	for _, want := range []string{"Attach failed:", "hive-scanner", "can't find session"} {
-		if !strings.Contains(failed.footerErr, want) {
-			t.Errorf("footer error %q does not contain %q", failed.footerErr, want)
+		if !strings.Contains(failed.footerStatus, want) {
+			t.Errorf("footer error %q does not contain %q", failed.footerStatus, want)
 		}
 		if !strings.Contains(failed.View(), want) {
 			t.Errorf("rendered footer does not contain %q", want)

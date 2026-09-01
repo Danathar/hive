@@ -19,7 +19,7 @@ type Binding struct {
 	Scope string
 	// Available reports whether pressing Keys does something TODAY.
 	//
-	// The design doc's §4 table is a ROADMAP: most of its rows belong to tasks
+	// The design doc's §4 table is a ROADMAP: some of its rows belong to tasks
 	// that have not landed. app.go's footerText already refuses to advertise
 	// those ("showing them now would advertise actions that silently do
 	// nothing"), and the same rule matters more here, because help is exactly
@@ -43,10 +43,10 @@ func HelpBindings() []Binding {
 		{Keys: "tab / shift+tab", Action: "Cycle pane focus forward / backward", Scope: "global", Available: true},
 		{Keys: "?", Action: "Toggle this help overlay", Scope: "global", Available: true},
 		{Keys: "q / ctrl+c", Action: "Quit", Scope: "global", Available: true},
-		{Keys: "j / k, ↓ / ↑", Action: "Move the selection within the focused pane", Scope: "focused pane"},
+		{Keys: "j / k, ↓ / ↑", Action: "Move the selection within the focused pane", Scope: "Agents / Events panes", Available: true},
 		{Keys: "p", Action: "Pause or resume the selected agent", Scope: "Agents pane", Available: true},
 		{Keys: "m", Action: "Open the model picker for the selected agent", Scope: "Agents pane"},
-		{Keys: "K", Action: "Kick the selected agent now", Scope: "Agents pane"},
+		{Keys: "K", Action: "Kick the selected agent now", Scope: "Agents pane", Available: true},
 		{Keys: "A", Action: "Open the ACMM level overlay", Scope: "global"},
 		{Keys: "a", Action: "Attach to the selected agent's tmux session", Scope: "Agents pane (local)", Available: true},
 	}
