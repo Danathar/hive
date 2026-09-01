@@ -13,6 +13,7 @@ Most production scripts are installed under `/usr/local/bin` by `bin/hive-deploy
 | `issue-classifier.sh` | Classifier | Enriches `actionable.json` with deterministic metadata such as complexity tier, model recommendation, tracker status, cluster key, lane, and architecture-review flag. |
 | `architecture-detector.sh` | Classifier | Adds architecture signals to actionable issues from `hive-project.yaml` rules so the classifier can route them to the architect lane. |
 | `pr-cluster-detector.sh` | Classifier | Groups related actionable issues into clusters using component, reporter timing, label-combo, and failure-mode signals. |
+| `hive-baseline-check.sh` | Classifier | Compares one exact failing check with the repository's default branch and open sibling PRs, returning shared/isolated/unknown so agents do not retry a repository-wide incident per PR. |
 | `merge-gate.sh` | Gate | Writes `/var/run/hive-metrics/merge-eligible.json`; PRs qualify only when required CI passes, they are not drafts or excluded, and author/review policy allows merge. |
 | `conflict-sweeper.sh` | Gate/enforcer | Processes AI-authored PRs with `mergeable=CONFLICTING`, attempts a rebase, force-pushes clean rebases, or closes unrebasable PRs and reopens the original issue. |
 | `copilot-comment-checker.sh` | Monitor | Prefetches unaddressed Copilot review comments into `/var/run/hive-metrics/copilot-comments.json` for reviewer agents. |
@@ -42,7 +43,9 @@ Most production scripts are installed under `/usr/local/bin` by `bin/hive-deploy
 | `gh-app-token.sh` | Credentials | Generates and caches (0600, hub-only) a GitHub App installation token; `--export` prints shell exports for callers; `--scoped <tier> [repos]` prints a JSON tier-scoped token for a contributor agent and never touches the shared cache. |
 | `git-credential-hive.sh` | Credentials | Git credential helper that serves cached GitHub App tokens and honors the host requested by Git. |
 | `gh-wrapper.sh` | Enforcement | `gh` wrapper that injects App tokens and enforces global/per-agent restriction rules from `/etc/hive/restrictions/<agent-id>.json`. |
-| `hive-open-pr.sh` | Enforcement | Agent-side wrapper for PR creation requests. It writes a request file for the Hive watcher so PRs are opened by the GitHub App bot and pass the same ACMM authorization checks. |
+| `hive-open-pr.sh` | Enforcement | Agent-side wrapper for PR creation requests. It writes a request file for the Hive watcher so PRs are opened by the GitHub App bot and pass the same ACMM authorization checks. See [`src/docs/hive-open-pr.md`](../src/docs/hive-open-pr.md). |
+| `hive-open-issue.sh` | Enforcement | Agent-side wrapper for issue creation and comments. Agents call it INSTEAD of `gh issue create` / `gh issue comment`; it writes a request file for the Hive watcher so the work is attributed to the GitHub App bot and passes the same ACMM authorization checks. See [`src/docs/hive-open-issue.md`](../src/docs/hive-open-issue.md). |
+| `hive-merge.sh` | Enforcement | Agent-side wrapper for merging a PR. Agents call it INSTEAD of the GitHub MCP `merge_pull_request` tool, so the merge is performed by the App bot under the same ACMM gating rather than with an agent's own credential. See [`src/docs/hive-merge.md`](../src/docs/hive-merge.md). |
 | `hive-review.sh` | Enforcement | Agent-side wrapper for `gh pr review`. Writes a review-request file the Hive submits with the App token and audits as `agent_pr_reviewed`, so PR-review activity is attributed and visible to hive-health (a direct `gh pr review` is invisible). |
 | `setup-proxy-iptables.sh` | Enforcement | Installs iptables rules in the container to force GitHub HTTPS traffic through the ACMM proxy even if an agent unsets proxy variables. |
 | `agent-env-scrub.sh` | Enforcement | Sourced (never executed) at the start of every shell in an agent's process tree, via `BASH_ENV`/`ENV` from `agent-launch.sh` and an `/etc/bash.bashrc` guard, to unset the live GitHub credentials backend CLIs re-export into agent tool shells (#4045). |
@@ -62,6 +65,9 @@ Most production scripts are installed under `/usr/local/bin` by `bin/hive-deploy
 | `hive-podman-preflight.sh` | Bootstrap | Read-only Podman diagnostics before a lifecycle runs: engine/version, the connection it is actually talking to, rootless vs rootful, and cgroup version. Runs only when `HIVE_DEPLOY_RUNTIME` selects podman; `hive-prereq-check.sh` invokes it. |
 | `hive-podman-preflight-host.sh` | Deploy | Read-only Podman preflight for SELinux state and mount labeling, configuration/secrets readability, and published host-port availability. Runs only when `HIVE_DEPLOY_RUNTIME=podman`. See [`src/docs/podman-preflight-host.md`](../src/docs/podman-preflight-host.md). |
 | `hive-podman-preflight-ids.sh` | Deploy | Read-only Podman preflight for rootless subordinate UID/GID delegation, unsupported (NFS and other distributed) container storage, and the rootless network backend/helper. Never edits `/etc/subuid` or `/etc/subgid`. Runs only when `HIVE_DEPLOY_RUNTIME=podman`. See [`src/docs/podman-preflight-ids.md`](../src/docs/podman-preflight-ids.md). |
+| `hive-podman-setup.sh` | Bootstrap | One-command standalone Podman install (#4470), the Podman counterpart to `hive-setup.sh`'s Docker path. |
+| `hive-podman-update.sh` | Deploy | Deliberate manual update and rollback for the Hive Quadlet unit (#4378). Updates are explicit rather than automatic, per ADR-0017. |
+| `hive-podman-lifecycle-probe.sh` | Deploy | Exercises the Quadlet lifecycle — stop, start, restart, recreate, and boot wiring (#4377) — to verify the unit behaves correctly across each transition. |
 | `federation-heartbeat.sh` | Federation | Sends live contributor and actionable-work stats to the Hive federation registry. |
 | `notify.sh` | Notifications | Shared Bash notification library for ntfy, Slack incoming webhooks, and Discord webhooks. |
 
@@ -71,6 +77,7 @@ Most production scripts are installed under `/usr/local/bin` by `bin/hive-deploy
 |---|---|---|
 | `contributor-agent.sh` | Contributor runtime | Contributor-container entrypoint: detects authenticated CLI backend, starts the relay, launches the CLI in tmux, and creates `${HOME}/agent.md` only from a verified live knowledge export. |
 | `contributor-relay.sh` | Contributor runtime | Node.js WebSocket client for ClankeR contributor agents. It authenticates to one or more hubs, receives tasks, injects GitHub tokens, reports progress/results, and supports interactive tmux or headless one-shot delivery. |
+| `pi-backend.js` | Contributor runtime | Pi contributor adapter contract (#5039). `AGENT_MODEL` is the one contributor-owned selection input; the adapter derives the provider's official credential variable names from it so only the selected provider's keys are handed to the container. |
 
 ## Model, token, and experiment helpers
 
@@ -91,6 +98,16 @@ Most production scripts are installed under `/usr/local/bin` by `bin/hive-deploy
 | `contributor-agent.test.sh` | Contributor-agent regression for knowledge export handling. |
 | `contributor-relay.test.js` | Contributor relay task/restart/headless behavior; loads `contributor-relay.sh` as JavaScript with stubs. |
 | `gh-wrapper.test.sh` | `gh-wrapper.sh` author-gate and restriction regressions using a mock `gh` binary. |
+| `test_agent_env_scrub.sh` | `agent-env-scrub.sh` (#4045): backend CLIs must not re-export live GitHub credentials into the tool shells they spawn. Behavioural plus source assertions. |
+| `test_gh_auth_native_no_cat.sh` | The N14 (#3842) fix: a native/systemd-install agent kicked via `kick-agents.sh` — no Go AgentManager, no per-agent `HIVE_AGENT_TOKEN_CACHE` — still authenticates without leaking the token through `cat`. |
+| `test_gh_wrapper_gates.sh` | `gh-wrapper.sh`'s enforcement gates. |
+| `test_git_credential_hive.sh` | `git-credential-hive.sh` behaviour. |
+| `test_hive_open_issue.sh` | `hive-open-issue.sh`, the agent issue-creation chokepoint. See [`src/docs/hive-open-issue.md`](../src/docs/hive-open-issue.md). |
+| `test_hive_review.sh` | `hive-review.sh`, the agent PR-review chokepoint. |
+| `test_hive_podman_setup.sh` | Contract tests for `hive-podman-setup.sh` (#4470). |
+| `test_hive_podman_update.sh` | Contract tests for `hive-podman-update.sh` (#4378). |
+| `test_hive_podman_lifecycle_probe.sh` | Contract tests for `hive-podman-lifecycle-probe.sh` (#4377). |
+| `test_hive_baseline_check.sh` | Shared-CI classifier regressions for red default branches, exact-name sibling thresholds, reruns, pending checks, and fail-closed API errors. |
 | `test_bin_suites_wired.sh` | Fails when a test suite in this directory is not run by any workflow, Justfile target, or hook (#4363). |
 | `test_hive_standalone_runtime.sh` | `hive-standalone-runtime.sh` engine selection: Docker default, explicit Podman, and no silent fallback. |
 | `test_hive_podman_cleanup.sh` | `hive-podman-cleanup.sh` ownership labels and cleanup guard. Analyses arguments only: it contacts no container engine and deletes nothing. |

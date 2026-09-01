@@ -29,14 +29,20 @@
 # follow the identical pattern (see that workflow's header). This script
 # follows it too — no `@latest`, ever.
 #
-# WHY NOT go-licenses check / go-licenses csv
+# WHY go-licenses report, NOT save / check / csv
 #
-# `go-licenses save` (writes each dependency's license file to a directory
-# tree) plus a small formatting pass is used here rather than `go-licenses
-# report` (a maintained-but-less-flexible NOTICE template), because the
-# repository wants module path, version, AND full license text per entry in
-# one flat file, and controlling that layout directly in this script is
-# simpler than fighting a report template.
+# `go-licenses report` with a repository-owned template exposes the package
+# path, resolved module version, detected license identifier, source URL, and
+# license text directly. That is exactly the flat NOTICE layout this
+# repository needs, without reconstructing versions or trying to match a CSV
+# package path back to a directory written by `save`.
+#
+# This distinction also keeps attribution separate from license policy.
+# `go-licenses save` refuses to produce output when it finds a license class
+# the tool considers incompatible. A NOTICE must still identify and reproduce
+# a restrictive dependency's license; omitting the dependency would make the
+# inventory incomplete. Deciding whether a dependency is acceptable belongs
+# in a separate policy gate, not in the generator that records what ships.
 #
 # REPRODUCIBILITY
 #
@@ -85,27 +91,22 @@ fi
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "${WORK_DIR}"' EXIT
 
-SAVE_DIR="${WORK_DIR}/licenses"
+REPORT_TEMPLATE="${WORK_DIR}/notice.tpl"
+GENERATED_NOTICE="${WORK_DIR}/NOTICE.generated"
 
-echo "Walking the module graph and saving license files..." >&2
-(
-  cd "${SRC_DIR}"
-  # --ignore the project's own module: LICENSE lives at the REPO root while the
-  # Go module is src/, so go-licenses' upward search stops at src/ and reports
-  # "cannot find a known open source license" for every kubestellar/hive
-  # package, failing the whole run before any dependency is written. Hive's own
-  # code does not belong in a THIRD-PARTY notice regardless, so ignoring it is
-  # correct rather than a workaround for the path layout.
-  "${GO_LICENSES_BIN}" save ./... --save_path="${SAVE_DIR}" --force \
-    --ignore github.com/kubestellar/hive
-)
+cat > "${REPORT_TEMPLATE}" <<'TEMPLATE'
+{{range . -}}
+Package:  {{.Name}}
+Version:  {{.Version}}
+License:  {{.LicenseName}}
+Source:   {{.LicenseURL}}
 
-echo "Classifying each module's license..." >&2
-REPORT_CSV="${WORK_DIR}/report.csv"
-(
-  cd "${SRC_DIR}"
-  "${GO_LICENSES_BIN}" csv ./... --ignore github.com/kubestellar/hive > "${REPORT_CSV}"
-)
+{{if .LicensePath}}{{.LicenseText}}{{else}}    (license text not found by go-licenses; verify manually)
+{{end}}
+-----------------------------------------------------------------------------
+
+{{end -}}
+TEMPLATE
 
 {
   cat <<'HEADER'
@@ -140,35 +141,23 @@ release (see src/docs/releases.md, "Software bill of materials (SBOM)").
 
 HEADER
 
-  # go-licenses csv output is "import path,license URL,license type" per
-  # line. Group by module (best-effort: the import path's leading segments
-  # up to the go.mod-declared module root) is skipped in favor of listing
-  # each reported package's license line directly — go-licenses already
-  # resolves transitively and de-duplicates identical license files, so this
-  # stays a flat, auditable list rather than re-deriving module boundaries
-  # with a second parsing pass.
-  if [[ -s "${REPORT_CSV}" ]]; then
-    while IFS=',' read -r pkg url ltype; do
-      [[ -z "${pkg}" ]] && continue
-      echo "Package:  ${pkg}"
-      echo "License:  ${ltype:-UNKNOWN (see source URL)}"
-      echo "Source:   ${url}"
-      lic_file=""
-      if [[ -d "${SAVE_DIR}" ]]; then
-        candidate="$(find "${SAVE_DIR}" -type f \( -iname 'LICENSE*' -o -iname 'COPYING*' \) -path "*${pkg}*" 2>/dev/null | head -1)"
-        [[ -n "${candidate}" ]] && lic_file="${candidate}"
-      fi
-      if [[ -n "${lic_file}" ]]; then
-        echo
-        sed 's/^/    /' "${lic_file}"
-      else
-        echo "    (license text not found by go-licenses save; verify manually)"
-      fi
-      echo
-      echo "-----------------------------------------------------------------------------"
-      echo
-    done < "${REPORT_CSV}"
-  fi
-} > "${OUT_PATH}"
+  echo "Walking the module graph and rendering license entries..." >&2
+  (
+    cd "${SRC_DIR}"
+    # --ignore the project's own module: LICENSE lives at the REPO root while
+    # the Go module is src/, so go-licenses' upward search stops at src/ and
+    # reports Hive packages as unlicensed. Hive's own code does not belong in
+    # a THIRD-PARTY notice regardless, so excluding it is the correct scope.
+    "${GO_LICENSES_BIN}" report --template="${REPORT_TEMPLATE}" \
+      --ignore github.com/kubestellar/hive ./...
+  # Preserve the complete text while normalizing insignificant end-of-line
+  # whitespace from upstream license files, so the committed output passes
+  # repository whitespace checks and stays stable across tooling/editors.
+  ) | sed 's/[[:space:]]\+$//'
+} > "${GENERATED_NOTICE}"
+
+# Replace the requested output only after generation succeeds, so a failed
+# tool run cannot leave a truncated NOTICE behind.
+mv -- "${GENERATED_NOTICE}" "${OUT_PATH}"
 
 echo "Wrote ${OUT_PATH}" >&2

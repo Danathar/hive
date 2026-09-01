@@ -45,6 +45,13 @@ type ActivityPoster interface {
 	CreateActivity(ctx context.Context, sessionID string, content ActivityContent) error
 }
 
+// SessionUpdater is the optional slice of Client the responder uses to attach
+// external links (an opened PR) to a session. Optional — asserted at runtime
+// — so the recording fakes in tests need not implement it.
+type SessionUpdater interface {
+	UpdateSessionExternalURLs(ctx context.Context, sessionID string, urls []ExternalURL) error
+}
+
 // KickFunc delivers a kick message to a named agent (agent.Manager.SendKick).
 type KickFunc func(agent, message string) error
 
@@ -158,6 +165,34 @@ func (r *Responder) HandleAgentEvent(agentName, event, detail string) {
 		Body: fmt.Sprintf("Agent `%s` finished this run (kick log archived: %s). The full log is retained on the hive dashboard.", agentName, detail),
 	})
 	r.tracker.SetState(sessionID, SessionStateFinished, ActivityResponse)
+}
+
+// HandlePROpened is the PR-open hook (the hive's pr-request watcher calls it
+// when it opens a PR on an agent's behalf). If the agent has an active Linear
+// session, the PR is narrated as an `action` activity and attached to the
+// session's external links, so the person who delegated the issue sees where
+// the work landed before the run ends — the parity of a `Fixes #N` PR showing
+// up on a GitHub issue. Linear's GitHub integration attaches the PR to the
+// ISSUE on its own; this is the SESSION surface.
+func (r *Responder) HandlePROpened(agentName, repo string, number int, url string) {
+	sessionID, ok := r.tracker.ActiveSessionForAgent(agentName)
+	if !ok || url == "" {
+		return
+	}
+	label := fmt.Sprintf("%s#%d", repo, number)
+	r.emit(sessionID, ActivityContent{
+		Type:      ActivityAction,
+		Action:    "Opened pull request",
+		Parameter: label,
+		Result:    url,
+	})
+	if u, ok := r.activities.(SessionUpdater); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), r.ackTimeout)
+		defer cancel()
+		if err := u.UpdateSessionExternalURLs(ctx, sessionID, []ExternalURL{{Label: label, URL: url}}); err != nil {
+			r.logger.Warn("linearagent: session external URL update failed", "session", sessionID, "error", err)
+		}
+	}
 }
 
 // emit posts one non-ack activity with a fresh deadline, logging failures.

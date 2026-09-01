@@ -99,10 +99,31 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # BOUNDED RETRY, NOT A SKIP PATH (#5273). The digest pin above fixed
+      # `manifest unknown` — a resolution failure, which no retry helps. This
+      # covers the other half: the TRANSFER dropping mid-layer. On 2026-08-31
+      # the pull died with `unexpected EOF` reading a blob from cdn01.quay.io
+      # and failed the whole gate for a PR that touches only Go code in
+      # pkg/dashboard; re-running the identical job passed. Three attempts
+      # with a short backoff, matching the transient-transport idiom in
+      # tagged-release.yml. Everything this gate refuses to do stays refused: a
+      # registry that is really unreachable still ends the job red on the last
+      # attempt, and there is still no `continue-on-error`, no `|| true`, and
+      # no path that reports green without the generator in hand.
       - name: Install the Quadlet generator
         run: |
           set -euo pipefail
-          podman pull -q "$PODMAN_IMAGE"
+          for attempt in 1 2 3; do
+            if podman pull -q "$PODMAN_IMAGE"; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::could not pull ${PODMAN_IMAGE} after 3 attempts. The generator is not optional (#4211): failing rather than skipping the gate."
+              exit 1
+            fi
+            echo "podman pull failed (attempt ${attempt}/3) — retrying in 5s..."
+            sleep 5
+          done
           echo "pulled $PODMAN_IMAGE"
 
       # AC: the job fails if the generator is missing rather than passing

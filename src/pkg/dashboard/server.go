@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kubestellar/hive/pkg/acmmadvisor"
 	"github.com/kubestellar/hive/pkg/agent"
 	"github.com/kubestellar/hive/pkg/config"
 	"github.com/kubestellar/hive/pkg/github"
@@ -94,6 +95,22 @@ type Server struct {
 	// "Open Issue" path posts issueCreate to. Empty = production; tests
 	// point it at an httptest server.
 	acmmLinearBaseURL string
+
+	// snapshotDir overrides the directory handleSnapshotPage/buildSnapshot
+	// read and write snapshot-{mode}.html under (#5235). Empty = production
+	// default "/data/snapshots"; tests point it at t.TempDir() so the
+	// stale-threshold rebuild decision can be exercised against real mtimes
+	// without touching the host filesystem. Read via s.snapshotDirOrDefault().
+	snapshotDir string
+	// buildSnapshotFn, if non-nil, replaces the Node builder invocation in
+	// buildSnapshot (#5235) — the same nil-in-production hook convention as
+	// pkg/hub's afterGenerationsReadAttempt (#5080). Production leaves this
+	// nil, in which case buildSnapshot runs the real `node
+	// build-snapshot.mjs` subprocess; tests set it to a fake that writes a
+	// fixture file instead, so the CSP-stamping/rewrite pipeline in
+	// handleSnapshotPage can be exercised without a Node toolchain on the
+	// test host.
+	buildSnapshotFn func(s *Server, outputFile, mode string)
 
 	// Sparkline histories, all backed by the generic timeSeries ring buffer
 	// (see timeseries.go). Lazily constructed via the tokenSeries()/factSeries()
@@ -239,7 +256,7 @@ type Server struct {
 	inferenceEndpoints map[string][]string // backend id → list of base URLs
 
 	// cliModels caches best-effort runtime model discovery for the CLI
-	// backends (copilot/claude/gemini/goose), each with its own discovery
+	// backends (copilot/claude/gemini/goose/codex/agy), each with its own discovery
 	// source and static fallback. See cli_models.go.
 	cliModels *cliModelCache
 
@@ -304,23 +321,29 @@ type StatusPayload struct {
 	// from the shallow /api/health liveness signal or the repo-workflow
 	// Health map above, so the pill can never show "Health OK" while the
 	// spoke's own agents are down (#2465).
-	DeepHealth          map[string]any         `json:"deepHealth,omitempty"`
-	Budget              FrontendBudget         `json:"budget"`
-	CadenceMatrix       []FrontendCadence      `json:"cadenceMatrix"`
-	GHRateLimits        map[string]any         `json:"ghRateLimits"`
-	AgentMetrics        map[string]any         `json:"agentMetrics"`
-	Hold                FrontendHold           `json:"hold"`
-	IssueToMerge        map[string]any         `json:"issueToMerge"`
-	ACMMLevel           int                    `json:"acmmLevel"`
-	ACMMLevelConfigured bool                   `json:"acmmLevelConfigured"`
-	ACMMPackAgents      []string               `json:"acmmPackAgents"`
-	AdvisoryDigest      any                    `json:"advisoryDigest,omitempty"`
-	ContributorPool     *ContributorPoolStatus `json:"contributorPool,omitempty"`
-	SystemResources     *SystemResources       `json:"systemResources,omitempty"`
-	GitHubAppRequired   bool                   `json:"githubAppRequired,omitempty"`
-	GitHubAppInstallURL string                 `json:"githubAppInstallURL,omitempty"`
-	GitHubAppPermIssue  string                 `json:"githubAppPermIssue,omitempty"`
-	GitHubAppState      string                 `json:"githubAppState,omitempty"`
+	DeepHealth          map[string]any    `json:"deepHealth,omitempty"`
+	Budget              FrontendBudget    `json:"budget"`
+	CadenceMatrix       []FrontendCadence `json:"cadenceMatrix"`
+	GHRateLimits        map[string]any    `json:"ghRateLimits"`
+	AgentMetrics        map[string]any    `json:"agentMetrics"`
+	Hold                FrontendHold      `json:"hold"`
+	IssueToMerge        map[string]any    `json:"issueToMerge"`
+	ACMMLevel           int               `json:"acmmLevel"`
+	ACMMLevelConfigured bool              `json:"acmmLevelConfigured"`
+	ACMMPackAgents      []string          `json:"acmmPackAgents"`
+	// ACMMAdvice is the advisory level-up recommendation (#5225), derived from
+	// the same live signals the /api/acmm-recommendation endpoint serves so the
+	// two surfaces can never drift. It is ADVISORY ONLY: nothing acts on it
+	// automatically — a human approves a level change via handlePackSetLevel.
+	// Omitted when it could not be computed (e.g. no config yet).
+	ACMMAdvice          *acmmadvisor.Recommendation `json:"acmmAdvice,omitempty"`
+	AdvisoryDigest      any                         `json:"advisoryDigest,omitempty"`
+	ContributorPool     *ContributorPoolStatus      `json:"contributorPool,omitempty"`
+	SystemResources     *SystemResources            `json:"systemResources,omitempty"`
+	GitHubAppRequired   bool                        `json:"githubAppRequired,omitempty"`
+	GitHubAppInstallURL string                      `json:"githubAppInstallURL,omitempty"`
+	GitHubAppPermIssue  string                      `json:"githubAppPermIssue,omitempty"`
+	GitHubAppState      string                      `json:"githubAppState,omitempty"`
 	// GitHubAppInstallMissing is CONFIG TRUTH, independent of any auth probe
 	// or classification: a real App is named (app_id set, not the placeholder)
 	// but installation_id is 0. That state alone means every token is a
@@ -1273,7 +1296,7 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 			} else {
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
 				w.WriteHeader(http.StatusUnauthorized)
-				w.Write([]byte(loginPage))
+				_, _ = w.Write([]byte(loginPage))
 			}
 			return
 		}
@@ -1649,6 +1672,15 @@ func (s *Server) UpdateStatusIfFresh(status *StatusPayload, buildEpoch uint64) b
 
 	status.InferenceBackends = s.buildInferenceBackends()
 
+	// Attach the advisory ACMM level-up recommendation (#5225) from the SAME
+	// signal-collection path the /api/acmm-recommendation endpoint uses, so the
+	// endpoint and the status payload cannot report different advice. Pure
+	// computation over already-collected signals — no I/O on this hot path.
+	// ADVISORY ONLY: this must never auto-apply a level.
+	if advice := acmmadvisor.RecommendFromStatus(s.buildACMMStatusInputs()); advice.CurrentLevel > 0 {
+		status.ACMMAdvice = &advice
+	}
+
 	// Deep checks travel inside the status payload so every dashboard surface
 	// (header pill included) renders the same truth the heartbeat sends the
 	// hub. Judged against the payload in hand: it becomes s.status moments
@@ -1926,10 +1958,7 @@ func (s *Server) IsPendingGitHubAppInstall() bool {
 		return false
 	}
 	const pendingInstallExpiry = 10 * time.Minute
-	if time.Since(s.pendingGitHubAppInstallAt) > pendingInstallExpiry {
-		return false
-	}
-	return true
+	return time.Since(s.pendingGitHubAppInstallAt) <= pendingInstallExpiry
 }
 
 func (s *Server) ClearPendingGitHubAppInstall() {
@@ -1985,16 +2014,16 @@ func (s *Server) handleGitHubAppRecheck(w http.ResponseWriter, r *http.Request) 
 	ok := s.RecheckGitHubApp()
 	w.Header().Set("Content-Type", "application/json")
 	if ok {
-		w.Write([]byte(`{"status":"installed"}`))
+		_, _ = w.Write([]byte(`{"status":"installed"}`))
 	} else {
 		s.githubAppMu.RLock()
 		permIssue := s.githubAppPermIssue
 		s.githubAppMu.RUnlock()
 		if permIssue != "" {
 			detail, _ := json.Marshal(permIssue)
-			w.Write([]byte(`{"status":"insufficient_permissions","detail":` + string(detail) + `}`))
+			_, _ = w.Write([]byte(`{"status":"insufficient_permissions","detail":` + string(detail) + `}`))
 		} else {
-			w.Write([]byte(`{"status":"not_installed"}`))
+			_, _ = w.Write([]byte(`{"status":"not_installed"}`))
 		}
 	}
 }
@@ -2027,10 +2056,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if !ready {
 		w.WriteHeader(http.StatusServiceUnavailable)
-		json.NewEncoder(w).Encode(map[string]string{"status": "starting"})
+		jsonResponse(w, map[string]string{"status": "starting"})
 		return
 	}
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	jsonResponse(w, map[string]string{"status": "ok"})
 }
 
 const (
@@ -2106,7 +2135,7 @@ func (s *Server) handleLivez(w http.ResponseWriter, r *http.Request) {
 
 	if !ready {
 		w.WriteHeader(http.StatusServiceUnavailable)
-		json.NewEncoder(w).Encode(map[string]string{"status": "starting"})
+		jsonResponse(w, map[string]string{"status": "starting"})
 		return
 	}
 
@@ -2121,7 +2150,7 @@ func (s *Server) handleLivez(w http.ResponseWriter, r *http.Request) {
 			// minutes); past that, the goroutine never got going.
 			if age := time.Since(s.startedAt); age > livezStartupGrace {
 				w.WriteHeader(http.StatusServiceUnavailable)
-				json.NewEncoder(w).Encode(map[string]string{
+				jsonResponse(w, map[string]string{
 					"status": "unhealthy",
 					"detail": "heartbeat loop never started sending",
 				})
@@ -2131,7 +2160,7 @@ func (s *Server) handleLivez(w http.ResponseWriter, r *http.Request) {
 			// Attempts have stopped advancing entirely — the loop is wedged,
 			// not merely unable to reach the hub. A restart is the remedy.
 			w.WriteHeader(http.StatusServiceUnavailable)
-			json.NewEncoder(w).Encode(map[string]string{
+			jsonResponse(w, map[string]string{
 				"status":                    "unhealthy",
 				"detail":                    "heartbeat loop stalled",
 				"last_heartbeat_attempt_at": lastAttempt.UTC().Format(time.RFC3339),
@@ -2140,7 +2169,7 @@ func (s *Server) handleLivez(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	jsonResponse(w, map[string]string{"status": "ok"})
 }
 
 func (s *Server) handleHealthDeep(w http.ResponseWriter, r *http.Request) {
@@ -2397,7 +2426,7 @@ func (s *Server) handleHealthDeep(w http.ResponseWriter, r *http.Request) {
 	if overall != "ok" {
 		w.WriteHeader(http.StatusOK)
 	}
-	json.NewEncoder(w).Encode(map[string]any{
+	jsonResponse(w, map[string]any{
 		"status": overall,
 		"checks": checks,
 		"fails":  failCount,
@@ -2450,10 +2479,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	if status == nil {
-		json.NewEncoder(w).Encode(map[string]string{"status": "initializing"})
+		jsonResponse(w, map[string]string{"status": "initializing"})
 		return
 	}
-	json.NewEncoder(w).Encode(status)
+	jsonResponse(w, status)
 }
 
 func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
@@ -2485,13 +2514,18 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 		s.sseMu.Unlock()
 	}()
 
-	fmt.Fprintf(w, "retry: %d\n\n", sseRetryMs)
+	if _, err := fmt.Fprintf(w, "retry: %d\n\n", sseRetryMs); err != nil {
+		return
+	}
 	flusher.Flush()
 
 	s.statusMu.RLock()
 	if s.status != nil {
 		data, _ := json.Marshal(s.status)
-		fmt.Fprintf(w, "data: %s\n\n", data)
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+			s.statusMu.RUnlock()
+			return
+		}
 		flusher.Flush()
 	}
 	s.statusMu.RUnlock()

@@ -14,6 +14,22 @@ repository queue depth.
 The first-responder agent. Scans open issues and PRs for actionable items,
 triages new issues, and handles quick fixes. Runs frequently in all modes.
 
+## Quality
+
+Owns test suites, coverage gates, and regression checks. Typically the first
+agent an operator grants write access to when moving to L3.
+
+## Guide
+
+Audits documentation, onboarding material, and contributor experience,
+identifying gaps that make the project harder to pick up.
+
+## Brainstorm
+
+Idea incubation. **Advisory only** — it files beads, never GitHub issues or
+pull requests, at every level. Commonly left paused until an operator wants
+its output.
+
 ## CI Maintainer
 
 Monitors CI pipelines, fixes flaky tests, updates workflows, and ensures
@@ -42,15 +58,18 @@ communications. Activated during idle periods.
 Security-focused agent. Reviews code for vulnerabilities, checks
 dependencies, and audits access patterns. Runs frequently across all modes.
 
-## Tester
-
-Writes and maintains test suites. Activated when coverage gaps or test
-failures are detected.
-
 ## Strategist
 
 Long-horizon planning agent. Analyzes trends, proposes roadmap items, and
 evaluates technical debt. Only activated in idle mode.
+
+## A note on testing
+
+There is no built-in `tester` agent. Test suites, coverage gates, and
+regression checks are the `quality` lane's work. An operator who wants a
+separate tester must define it as a custom agent with its own metadata and
+policy template — see
+[acmm-policy-matrix.md](https://github.com/kubestellar/hive/blob/v4/src/docs/acmm-policy-matrix.md).
 
 ## Adding a New Agent
 

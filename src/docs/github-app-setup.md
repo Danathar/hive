@@ -2,6 +2,13 @@
 
 > **Terminology:** the dashboard and docs call this the **Forge App** — the app Hive installs on your forge (your source control system, e.g., GitHub, GitHub Enterprise, GitLab, or Gitea). On **GitHub.com and GitHub Enterprise (GHE)** the Forge App **is a GitHub App**; this page covers creating and installing it. Dashboard controls live under **Governor Config → Forge App**.
 
+> **On GitLab, Gitea, or Forgejo?** This page does not apply, and there is no
+> equivalent setup to perform: those forges are **not supported for running a
+> hive** today. The adapters exist in the source tree but are not wired into any
+> running code path, and the agent execution path is GitHub-only. See
+> [Forge setup: GitLab, Gitea, and Forgejo](forge-app-setup.md) for exactly what
+> is and is not implemented before you attempt an install.
+
 Hive can authenticate with either a personal access token or a GitHub App. Use a GitHub App for production hives because installation tokens are scoped to selected repositories and can author PRs as the app bot when `github.app_authored_prs` is enabled.
 
 ## Personal access token (PAT) scopes
@@ -46,8 +53,17 @@ Recommended values:
 
 - **GitHub App name**: any unique operator-owned name.
 - **Homepage URL**: your project or Hive dashboard URL.
-- **Setup URL**: `https://<hive-host>/gh-setup`.
-- **Redirect on update**: enabled.
+- **Setup URL** (optional): `https://<hive-host>/gh-setup`. `<hive-host>` means
+  **the address you type into your browser to reach this hive** — not where the
+  hive process runs. GitHub redirects *your browser* here; it never fetches this
+  URL itself, and neither does the hive. See
+  [Choosing a Setup URL](#choosing-a-setup-url) before setting it, and leave it
+  blank if the hive is not reachable from the browser you administer it with —
+  Hive discovers `installation_id` on its own.
+- **Redirect on update**: enabled — but only alongside a Setup URL that is
+  actually reachable. It re-fires the redirect on every repository add or
+  removal, so an unreachable Setup URL produces a dead browser tab every time
+  you change the installation, not just once at install.
 - **Webhook**: inactive unless you separately configure webhook channels; the dashboard setup flow does not require webhooks.
 - **Device Flow**: enabled, so dashboard login can use the app's client ID.
 - **Visibility**: private for an organization-specific app; public only if you intentionally operate one app for many unrelated owners.
@@ -138,13 +154,63 @@ line above from its logs.
 ```yaml
 github:
   app_id: <app-id>
-  installation_id: <installation-id>  # optional when /gh-setup can complete it
+  installation_id: <installation-id>  # optional; auto-discovered (see below)
   app_slug: <app-slug>
   key_file: /secrets/gh-app-key.pem
   oauth_client_id: <client-id>
 ```
 
 For GitHub Enterprise, also set `api_url`/`base_url` or the supported `forge` value so install URLs and API calls target the same host.
+
+## Choosing a Setup URL
+
+The Setup URL is a **browser redirect target**, not a callback GitHub's servers
+make. After an install — and, with **Redirect on update** enabled, after every
+repository add or removal — GitHub sends whatever browser you were using to
+that address. So the only question that matters is:
+
+> Can the browser I administer this hive from open that URL?
+
+That is a property of how *you* reach the hive, not of where the hive runs:
+
+| How you reach the dashboard | Correct Setup URL |
+| --- | --- |
+| Desktop session on the hive machine | `http://localhost:3001/gh-setup` |
+| SSH tunnel (`ssh -L 3001:localhost:3001 you@hive`) | `http://localhost:3001/gh-setup` — the tunnel makes `localhost` genuinely the hive |
+| Another machine on the network | `http://<hive-lan-name-or-ip>:3001/gh-setup` |
+| Public hostname behind TLS | `https://<hive-host>/gh-setup` |
+| Not reachable from your browser at all | **leave it blank** — see below |
+
+`localhost` is the common trap. It is correct only for the first two rows, and
+it fails silently everywhere else: set it while sitting at the hive machine and
+it works, then administer the hive from a laptop and every install-update
+redirect lands on the laptop's own port 3001, which is nothing at all.
+
+### Headless, NATed, and remotely administered hives
+
+**The Setup URL is optional. A hive that is not reachable from anywhere should
+leave it blank and turn Redirect on update off.** Nothing is lost.
+
+The callback's only job is to save you from pasting an `installation_id`, and
+Hive already resolves that itself: it asks GitHub `GET /orgs/{org}/installation`
+authenticated with the **App JWT**, falling back to walking
+`GET /app/installations`. That runs when the hive starts, whenever App
+credentials are (re)loaded, and when you press **Re-check** on the dashboard's
+Forge App panel — adopting and persisting an unambiguous match, so it corrects a
+missing *or wrong* `installation_id` without any redirect. An ambiguous or
+absent result leaves your configuration untouched rather than guessing.
+
+Every one of those calls is **outbound, hive to GitHub**. A headless Fedora
+CoreOS host, a VM on a NAT network, or any server you only reach over SSH needs
+no inbound reachability for GitHub App authentication to work. The
+preconditions are the ones App auth already has: the private key mounted at
+`key_file`, and `project.org` set so Hive knows whose installation to look for.
+
+If you do leave a Setup URL configured that your browser cannot reach, the
+resulting dead redirect is cosmetic. Adding a repository modifies the existing
+installation rather than creating a new one, so the `installation_id` in that
+redirect is one the hive already holds — the failed page does not mean App
+authentication is broken.
 
 ## `/gh-setup` flow
 

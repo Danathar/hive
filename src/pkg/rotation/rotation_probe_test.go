@@ -40,6 +40,15 @@ func claudeCredsFile(t *testing.T, token string) string {
 	return path
 }
 
+type countingUnauthorizedTransport struct {
+	calls int
+}
+
+func (t *countingUnauthorizedTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	t.calls++
+	return &http.Response{StatusCode: http.StatusUnauthorized, Body: http.NoBody, Header: make(http.Header)}, nil
+}
+
 // claudeUsageServer serves /api/oauth/usage and verifies the Authorization
 // and anthropic-beta headers the probe must send.
 func claudeUsageServer(t *testing.T, status int, body string) *httptest.Server {
@@ -103,6 +112,32 @@ func TestClaudeProber_Unauthenticated(t *testing.T) {
 	}
 	if !h.Available {
 		t.Error("Available = false, want true (fail-open)")
+	}
+}
+
+func TestClaudeProber_ExpiredRefreshableTokenDoesNotProbeWithStaleAccessToken(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "credentials.json")
+	body := fmt.Sprintf(`{"claudeAiOauth":{"accessToken":"stale-token","refreshToken":"refresh-token","expiresAt":%d}}`,
+		time.Now().Add(-time.Minute).UnixMilli())
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	transport := &countingUnauthorizedTransport{}
+	h := ClaudeProber{
+		ThresholdPct:    80,
+		BaseURL:         "https://example.invalid",
+		Client:          &http.Client{Transport: transport},
+		CredentialsPath: path,
+	}.Probe(context.Background())
+	if h.ProbeErr == nil || !strings.Contains(h.ProbeErr.Error(), "refresh token present") {
+		t.Fatalf("ProbeErr = %v, want an explicit refreshable-expiry result", h.ProbeErr)
+	}
+	if !h.Available {
+		t.Fatal("a refreshable expiry is inconclusive, not evidence of exhaustion")
+	}
+	if transport.calls != 0 {
+		t.Fatalf("usage endpoint called %d times with a known-expired access token, want 0", transport.calls)
 	}
 }
 

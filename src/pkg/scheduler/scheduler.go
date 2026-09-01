@@ -19,6 +19,7 @@ import (
 	"github.com/kubestellar/hive/pkg/policies"
 	"github.com/kubestellar/hive/pkg/promptsrc"
 	"github.com/kubestellar/hive/pkg/resolve"
+	"github.com/kubestellar/hive/pkg/skillreg"
 	"github.com/kubestellar/hive/pkg/worksource"
 )
 
@@ -34,6 +35,7 @@ type Scheduler struct {
 	classifier           ioscan.Classifier
 	classifierThresholds ioscan.Thresholds
 	classifierBudget     int
+	inflight             InflightLookup
 	mu                   sync.RWMutex
 }
 
@@ -213,6 +215,7 @@ func (s *Scheduler) substituteTemplateWithPolicy(template string, actionable *gi
 	} else {
 		agentIssuesForList = filterByLane(issues, baseName)
 	}
+	agentIssuesForList, heldInflight := s.splitInflight(agentIssuesForList)
 	issueList, issueFailClosed := s.formatIssueListWithPolicy(agentIssuesForList)
 	prList, prFailClosed := s.formatPRListWithPolicy(actionable)
 	if issueFailClosed || prFailClosed {
@@ -237,15 +240,33 @@ func (s *Scheduler) substituteTemplateWithPolicy(template string, actionable *gi
 	}
 	knowledgeSection := s.primeKnowledge(agentIssues)
 
+	repoRoot := s.agentsRepoRoot(primaryRepo)
+
 	// Additive: prepend the repo's AGENTS.md instructions + requested skills to
 	// the injected knowledge, when a local checkout root is available. This is a
 	// guarded, single call point — it returns "" (and never errors) when no
 	// AGENTS.md exists, so it is a no-op for repos that don't use the convention.
-	// TODO(agentsmd): thread a per-repo checkout root here (e.g. from the git
-	// source's LocalDir) and, once file-level targeting exists, prefer
-	// agentsmd.ParseNearest for closest-wins nested AGENTS.md.
-	if agentsSection := s.primeAgentsMd(s.agentsRepoRoot()); agentsSection != "" {
+	//
+	// The root is resolved for the PRIMARY repo, which is the repo this kick's
+	// instructions are about — the same repo ${PROJECT_PRIMARY_REPO} names here
+	// and HIVE_REPO names in the agent's environment. A multi-repo hive gets the
+	// primary repo's AGENTS.md, never a different repo's: resolution is keyed by
+	// repo name, so it cannot silently pick the wrong one.
+	//
+	// TODO(agentsmd): once file-level targeting exists, prefer
+	// agentsmd.ParseNearest for closest-wins nested AGENTS.md. That still has no
+	// caller — nothing on the kick path knows which FILE an agent will touch —
+	// so it stays deferred, unlike the checkout root, which is now threaded.
+	if agentsSection := s.primeAgentsMd(repoRoot); agentsSection != "" {
 		knowledgeSection = agentsSection + "\n" + knowledgeSection
+	}
+
+	// Agent-declared skills prefer the hive-host-local registry, then fall back
+	// to definitions in the primary repo's AGENTS.md or adjacent skills/
+	// directory. The registry remains independently useful without a checkout;
+	// the fallback activates only when agentsRepoRoot found one above.
+	if skillsSection := s.primeSkills(agentName, repoRoot); skillsSection != "" {
+		knowledgeSection = skillsSection + "\n" + knowledgeSection
 	}
 
 	inceptionIdea, inceptionPhase, inceptionMode, inceptionAnswers, inceptionSlug, inceptionRepoURL := s.inceptionVars()
@@ -275,6 +296,7 @@ func (s *Scheduler) substituteTemplateWithPolicy(template string, actionable *gi
 		"AUTHORIZED_REPOS":      lit(s.buildReposSection()),
 		"GH_AUTH":               lit(s.ghAuthInstructions()),
 		"WORK_TRACKER":          lit(s.workTrackerSection()),
+		"IN_FLIGHT":             lit(inflightNote(heldInflight)),
 		"PROJECT_ORG":           lit(s.cfg.Project.Org),
 		"PROJECT_NAME":          lit(s.cfg.Project.Name),
 		"PROJECT_PRIMARY_REPO":  lit(fullPrimaryRepo),
@@ -447,7 +469,7 @@ func (s *Scheduler) BuildKickMessages(actionable *github.ActionableResult, agent
 			messages = append(messages, KickMessage{
 				Agent:     agentName,
 				Message:   msg,
-				IssueRefs: issueRefsForAgent(agentName, classifiedIssues),
+				IssueRefs: issueRefsForAgent(agentName, s.freeOfInflight(classifiedIssues)),
 			})
 		}
 	}
@@ -606,6 +628,10 @@ func (s *Scheduler) BuildAgentMessage(agentName string, issues []github.Issue, a
 		// policy maps onto Linear (identity, auth, filing, PR linking, hold).
 		// Same seam, same reason — a customized template cannot omit it.
 		message = s.addWorkTrackerSection(message)
+		// Items a live session already holds were dropped from the list
+		// above; say so at the same seam so a customized template cannot
+		// leave the agent wondering where its delegated issue went.
+		message = s.addInflightNote(message, issues)
 	}()
 
 	baseName := s.cfg.BaseAgentName(agentName)
@@ -920,7 +946,7 @@ func (s *Scheduler) buildScannerMessage(issues []github.Issue, actionable *githu
 	var b strings.Builder
 
 	b.WriteString("[agent:scanner]\n")
-	b.WriteString(fmt.Sprintf("YOUR WORK LIST (pre-filtered — hold/ADOPTERS/drafts excluded, classified):\n"))
+	b.WriteString("YOUR WORK LIST (pre-filtered — hold/ADOPTERS/drafts excluded, classified):\n")
 	b.WriteString(s.issueFilterNotice())
 
 	scannerIssues := issues
@@ -1377,15 +1403,68 @@ func filterByLane(issues []github.Issue, lane string) []github.Issue {
 
 const maxIssuesToPrime = 5
 
-// agentsRepoRoot returns the local filesystem root of the primary repo's
-// checkout, or "" if no local checkout is configured. Hive agents operate over
-// GitHub rather than local clones, so this is usually empty today; the hook
-// exists so that when a checkout root becomes available (e.g. a git source's
-// LocalDir) the AGENTS.md convention is honored without further wiring.
-func (s *Scheduler) agentsRepoRoot() string {
-	// Intentionally conservative: only wired sources expose a root. Returning ""
-	// makes primeAgentsMd a no-op. See the TODO(agentsmd) at the call site.
+// agentsRepoRoot returns the local filesystem root of repo's checkout, or ""
+// when the hive has none — in which case primeAgentsMd is a no-op, exactly as
+// before this was wired.
+//
+// Two sources, in order:
+//
+//  1. project.checkouts_dir — the explicit one. An operator who mounts checkouts
+//     of the monitored repos points at the parent directory and each repo is
+//     found at "<dir>/<name>". Hive agents work over the API and keep no clones
+//     of their own, so this is how a root gets to exist at all.
+//  2. policies.local_dir — the git source LocalDir the original TODO(agentsmd)
+//     named. It is a real checkout root (buildPolicyPaths already reads files
+//     out of it), but it is a checkout of policies.repo, so it is used ONLY when
+//     that repo IS the repo being asked about. Otherwise it would inject the
+//     config repo's AGENTS.md into work on an unrelated repo.
+//
+// Neither is checked for existence here: agentsmd.Parse tolerates a missing
+// directory or file and yields "", and primeAgentsMd logs which root came up
+// empty. One stat per kick to say the same thing earlier is not worth it.
+func (s *Scheduler) agentsRepoRoot(repo string) string {
+	if s.cfg == nil {
+		return ""
+	}
+	if root := s.cfg.Project.CheckoutRootFor(repo); root != "" {
+		return root
+	}
+	if local := strings.TrimSpace(s.cfg.Policies.LocalDir); local != "" &&
+		sameRepo(s.cfg.Policies.Repo, s.cfg.Project.Org, repo) {
+		return local
+	}
 	return ""
+}
+
+// sameRepo reports whether a git source's repo field names org/repo. The source
+// field is written as a clone URL in practice ("https://host/org/name(.git)"),
+// but a bare "org/name" and a bare "name" are accepted too, since config is
+// hand-written and all three forms appear in the wild.
+func sameRepo(sourceRepo, org, repo string) bool {
+	src := strings.TrimSpace(sourceRepo)
+	name := strings.TrimSpace(repo)
+	if src == "" || name == "" {
+		return false
+	}
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		name = name[i+1:]
+	}
+	src = strings.TrimSuffix(strings.TrimSuffix(strings.TrimRight(src, "/"), ".git"), "/")
+	parts := strings.Split(src, "/")
+	srcName := parts[len(parts)-1]
+	srcOwner := ""
+	if len(parts) >= 2 {
+		srcOwner = parts[len(parts)-2]
+	}
+	if !strings.EqualFold(srcName, name) {
+		return false
+	}
+	// An owner on both sides must agree; a bare "name" source asserts no owner
+	// and matches on name alone.
+	if srcOwner != "" && strings.TrimSpace(org) != "" {
+		return strings.EqualFold(srcOwner, strings.TrimSpace(org))
+	}
+	return true
 }
 
 // primeAgentsMd reads the repository's AGENTS.md (the cross-tool convention for
@@ -1402,14 +1481,130 @@ func (s *Scheduler) primeAgentsMd(repoRoot string) string {
 		return ""
 	}
 	section := cfg.InjectionText(nil)
-	if section != "" {
-		s.logger.Info("agentsmd: injecting repo instructions into kick",
-			"root", repoRoot,
-			"requested_skills", len(cfg.RequestedSkills),
-			"chars", len(section),
-		)
+	if section == "" {
+		// The silent half of kubestellar/hive#5227: a wired root holding no
+		// AGENTS.md produced exactly the same nothing as an unwired scheduler,
+		// so neither state was observable. Say which one this is.
+		s.logger.Debug("agentsmd: no repo instructions to inject", "root", repoRoot)
+		return ""
+	}
+	s.logger.Info("agentsmd: injecting repo instructions into kick",
+		"root", repoRoot,
+		"requested_skills", len(cfg.RequestedSkills),
+		"chars", len(section),
+	)
+	return section
+}
+
+// skillsRegistryDir is the host-local directory the skill registry is loaded
+// from at kick time. It matches the directory the dashboard reports on, so the
+// count shown in the UI and the skills actually injected come from one place.
+// It is a var, not a const, only so tests can point it at a temp dir.
+var skillsRegistryDir = "/data/skills"
+
+// maxSkillsInjectionBytes caps how much registry skill text may be prepended to
+// a single kick. Skill bodies are operator-authored files of unbounded size, and
+// the kick prompt shares a context budget with the knowledge primer and the
+// issue/PR lists; without a cap one long skill file could crowd out the actual
+// work queue. Skills are dropped whole (never truncated mid-body) so an agent
+// never receives half an instruction.
+const maxSkillsInjectionBytes = 8192
+
+// primeSkills resolves the skills agentName declares in config against the
+// host-local skill registry, falling back to repo-local AGENTS.md skills, and
+// renders them for injection into the kick. A registry skill wins when both
+// sources define the same name.
+//
+// It is tolerant at every step: no declared skills, missing registry or repo
+// files, and names with no matching skill all yield "" rather than an error, so
+// a misconfigured skill degrades the kick instead of blocking the agent.
+// Loading happens per kick (not once at startup) so an operator editing either
+// source sees it take effect on the next kick without a restart.
+func (s *Scheduler) primeSkills(agentName, repoRoot string) string {
+	if s.cfg == nil {
+		return ""
+	}
+	ac, ok := s.cfg.Agents[agentName]
+	if !ok || len(ac.Skills) == 0 {
+		return ""
+	}
+
+	var repoCfg *agentsmd.AgentsConfig
+	if repoRoot != "" {
+		var err error
+		repoCfg, err = agentsmd.Parse(repoRoot, s.logger)
+		if err != nil {
+			// Parse is tolerant and should not error; log defensively and keep
+			// resolving against the registry.
+			s.logger.Warn("skillreg: cannot parse repo skills, continuing with registry",
+				"agent", agentName, "root", repoRoot, "error", err)
+			repoCfg = nil
+		}
+	}
+
+	reg := skillreg.NewRegistry()
+	loaded, err := reg.Load(skillsRegistryDir, s.logger)
+	if err != nil {
+		// An unexpected registry failure must not suppress a valid repo-local
+		// fallback.
+		s.logger.Warn("skillreg: cannot load skills registry, continuing with repo skills",
+			"dir", skillsRegistryDir, "error", err)
+	}
+
+	resolved := reg.ResolveRequested(repoCfg, ac.Skills)
+	if len(resolved) == 0 {
+		if loaded == 0 && (repoCfg == nil || len(repoCfg.Skills) == 0) {
+			s.logger.Debug("skillreg: no skills available, skipping injection",
+				"dir", skillsRegistryDir, "repo_root", repoRoot,
+				"requested", len(ac.Skills))
+			return ""
+		}
+		s.logger.Warn("skillreg: none of the declared skills resolved",
+			"agent", agentName, "requested", ac.Skills, "registry_size", loaded,
+			"repo_root", repoRoot)
+		return ""
+	}
+
+	kept, dropped := capSkills(resolved, maxSkillsInjectionBytes)
+	if len(kept) == 0 {
+		s.logger.Warn("skillreg: all resolved skills exceed the injection cap, skipping",
+			"agent", agentName, "cap_bytes", maxSkillsInjectionBytes)
+		return ""
+	}
+	section := skillreg.InjectionText(kept)
+	s.logger.Info("skillreg: injecting skills into kick",
+		"agent", agentName,
+		"dir", skillsRegistryDir,
+		"repo_root", repoRoot,
+		"injected", len(kept),
+		"dropped", len(dropped),
+		"chars", len(section),
+	)
+	if len(dropped) > 0 {
+		s.logger.Warn("skillreg: dropped skills over the injection cap",
+			"agent", agentName, "dropped", dropped, "cap_bytes", maxSkillsInjectionBytes)
 	}
 	return section
+}
+
+// capSkills keeps skills in request order until adding the next one would push
+// the rendered body past capBytes. It returns the kept skills and the names of
+// those dropped. A single skill larger than capBytes is dropped rather than
+// truncated, so an agent never receives a partial instruction. Later, smaller
+// skills are still considered after a large one is dropped, so one oversized
+// file does not silently suppress everything declared after it.
+func capSkills(skills []skillreg.Skill, capBytes int) (kept []skillreg.Skill, dropped []string) {
+	used := 0
+	for _, sk := range skills {
+		size := len(sk.Body)
+		if used+size > capBytes {
+			dropped = append(dropped, sk.Name)
+			continue
+		}
+		used += size
+		kept = append(kept, sk)
+	}
+	return kept, dropped
 }
 
 // primeKnowledge queries the wiki layers for facts relevant to the given issues
@@ -1484,7 +1679,7 @@ func splitTitleWords(title string) []string {
 	var words []string
 	for _, word := range strings.Fields(strings.ToLower(title)) {
 		clean := strings.TrimFunc(word, func(r rune) bool {
-			return !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_')
+			return (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' && r != '_'
 		})
 		if len(clean) >= minWordLen {
 			words = append(words, clean)

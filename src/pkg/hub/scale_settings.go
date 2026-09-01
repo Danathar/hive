@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 // Admin-editable scale settings.
@@ -32,11 +33,18 @@ type ClusterScaleOverride struct {
 // ScaleSettings is the persisted document. Zero values mean "not set" —
 // the env-var / built-in default chain applies.
 type ScaleSettings struct {
-	UpgradeWaveSize     int                             `json:"upgrade_wave_size,omitempty"`
-	ProvisionWorkers    int                             `json:"provision_workers,omitempty"`
-	ProvisionPerCluster int                             `json:"provision_per_cluster,omitempty"`
-	KubectlPerCluster   int                             `json:"kubectl_per_cluster,omitempty"`
-	Clusters            map[string]ClusterScaleOverride `json:"clusters,omitempty"`
+	UpgradeWaveSize     int `json:"upgrade_wave_size,omitempty"`
+	ProvisionWorkers    int `json:"provision_workers,omitempty"`
+	ProvisionPerCluster int `json:"provision_per_cluster,omitempty"`
+	KubectlPerCluster   int `json:"kubectl_per_cluster,omitempty"`
+	// UpgradeDebounceSeconds is the merge-driven upgrade quiet period (#5391).
+	// Zero means "not set" — every existing settings document omits the field —
+	// and falls through to HIVE_UPGRADE_DEBOUNCE_SECONDS and then
+	// defaultAutoUpgradeDebounceInterval. A NEGATIVE value explicitly DISABLES
+	// debouncing and restores roll-on-every-merge. Resolved by
+	// autoUpgradeDebounceInterval(), not settingOrEnv, which clamps to >= 1.
+	UpgradeDebounceSeconds int                             `json:"upgrade_debounce_seconds,omitempty"`
+	Clusters               map[string]ClusterScaleOverride `json:"clusters,omitempty"`
 }
 
 var (
@@ -179,20 +187,24 @@ func (s *HubServer) handleGetScaleSettings(w http.ResponseWriter, r *http.Reques
 	}
 	sortClusterRows(rows)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(scaleSettingsView{
+	_ = json.NewEncoder(w).Encode(scaleSettingsView{
 		Saved: saved,
 		Effective: map[string]any{
 			"upgrade_wave_size":     upgradeWaveSize(),
 			"provision_workers":     provisionWorkerCount(),
 			"provision_per_cluster": provisionPerClusterCap(),
 			"kubectl_per_cluster":   kubectlMaxPerCluster(),
+			// Reported in seconds to match the input's unit, so the card shows
+			// the same number the operator typed. 0 = debouncing disabled.
+			"upgrade_debounce_seconds": int(autoUpgradeDebounceInterval() / time.Second),
 		},
 		Clusters: rows,
 		Defaults: map[string]int{
-			"upgrade_wave_size":     defaultUpgradeWaveSize,
-			"provision_workers":     defaultProvisionWorkers,
-			"provision_per_cluster": defaultProvisionPerCluster,
-			"kubectl_per_cluster":   defaultKubectlMaxPerCluster,
+			"upgrade_wave_size":        defaultUpgradeWaveSize,
+			"provision_workers":        defaultProvisionWorkers,
+			"provision_per_cluster":    defaultProvisionPerCluster,
+			"kubectl_per_cluster":      defaultKubectlMaxPerCluster,
+			"upgrade_debounce_seconds": int(defaultAutoUpgradeDebounceInterval / time.Second),
 		},
 	})
 }
@@ -221,6 +233,16 @@ func (s *HubServer) handleSetScaleSettings(w http.ResponseWriter, r *http.Reques
 			http.Error(w, `{"error":"values must be 0..10000 (0 = use default)"}`, http.StatusBadRequest)
 			return
 		}
+	}
+	// UpgradeDebounceSeconds is validated separately: unlike every knob above,
+	// a NEGATIVE value is meaningful here (the explicit "disable debouncing"
+	// escape hatch), so it cannot share the >= 0 rule. The upper bound still
+	// applies — a debounce longer than maxScaleSettingValue seconds is a typo,
+	// and an over-long quiet window would hold upgrades rather than merely
+	// slowing them.
+	if in.UpgradeDebounceSeconds > maxScaleSettingValue {
+		http.Error(w, `{"error":"upgrade_debounce_seconds must be <= 10000 (0 = use default, negative = disabled)"}`, http.StatusBadRequest)
+		return
 	}
 	for id, o := range in.Clusters {
 		if _, ok := s.clusters[id]; !ok {

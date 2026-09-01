@@ -164,17 +164,17 @@ func writeBobKeyFile(key string) error {
 
 	// Chmod before writing so the secret is never briefly world-readable.
 	if err := tmp.Chmod(bobKeyFileMode); err != nil {
-		tmp.Close()
+		_ = tmp.Close() // Preserve the primary chmod error.
 		return actionableWriteError(tmpName, err)
 	}
 	if _, err := tmp.WriteString(key); err != nil {
-		tmp.Close()
+		_ = tmp.Close() // Preserve the primary write error.
 		return actionableWriteError(tmpName, err)
 	}
 	// Flush to disk before the rename so a crash cannot leave an empty file
 	// in place of a previously-valid key.
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
+		_ = tmp.Close() // Preserve the primary sync error.
 		return actionableWriteError(tmpName, err)
 	}
 	if err := tmp.Close(); err != nil {

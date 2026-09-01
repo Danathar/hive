@@ -3,6 +3,7 @@ package dashboard
 import (
 	"bytes"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"os"
 	"regexp"
@@ -286,7 +287,9 @@ func (p *PromptHistory) Record(agent, trigger, prompt string) {
 		if data, err := json.Marshal(entry); err == nil {
 			// lumberjack.Write is a single atomic append per call, so an entry
 			// never interleaves with a concurrent writer's line.
-			p.writer.Write(append(data, '\n'))
+			if _, err := p.writer.Write(append(data, '\n')); err != nil {
+				slog.Error("prompt history write failed", "error", err)
+			}
 		}
 	}
 }

@@ -68,6 +68,17 @@ that status is the thing to check before treating a page as current behaviour:
   decision. Read it before steps 3-4, particularly for the unresolved fork:
   backend-specific resume envelopes versus an API-shaped backend hive owns.
 
+- [Evaluating a handoff path for the re-entrant turn model](agent-turn-handoff.md)
+  — **spike / investigation, no decision taken.** Step 3 of the same RFC. Its
+  finding is that hive has already built handoff's two hard mechanisms twice and
+  wired neither: `pkg/convergence/mutation` (#4255) holds an epoch-fenced claim
+  ledger and an idempotent operation journal, `pkg/turn` holds a second journal,
+  and nothing imports either. No single store has all three properties handoff
+  needs — atomic claim, cross-process serialization, corruption-resistant
+  persist — and the three partial implementations each hold a different two.
+  Recommends **no queue, and not yet**, with ordered prerequisites, and narrows
+  the beads-checkpointing challenge to the one variable still undecided.
+
 - [Copilot per-repo cost capture at the MITM proxy](copilot-cost-capture.md) —
   **investigation, no decision taken.** Phase 4 of epic #4836, which asked
   whether Copilot token usage can be captured per request with repo context and

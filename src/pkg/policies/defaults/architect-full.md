@@ -90,3 +90,7 @@ ${PR_LIST}
 8. Summarize architectural health in your response
 
 ${KNOWLEDGE}
+
+## Publishable Content Boundary
+
+Attribution belongs ONLY in the issue or PR body and the DCO commit trailer. NEVER write `Filed by`, ACMM levels, agent names, or hive run metadata inside any committed file.

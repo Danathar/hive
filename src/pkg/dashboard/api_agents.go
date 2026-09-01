@@ -325,7 +325,7 @@ func (s *Server) handleAgentImport(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, "failed to fetch URL: "+err.Error(), http.StatusBadGateway)
 			return
 		}
-		defer resp.Body.Close()
+		defer closeHTTPBody(resp.Body)
 		if resp.StatusCode != http.StatusOK {
 			jsonError(w, fmt.Sprintf("URL returned HTTP %d", resp.StatusCode), http.StatusBadGateway)
 			return

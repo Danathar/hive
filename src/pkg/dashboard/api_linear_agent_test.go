@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kubestellar/hive/pkg/github"
 	"github.com/kubestellar/hive/pkg/linearagent"
 )
 
@@ -236,6 +237,46 @@ func TestResolveLinearSessionAgent(t *testing.T) {
 	deps.Config.Agents["second"] = deps.Config.Agents["scanner"]
 	if _, err := s.resolveLinearSessionAgent(); err == nil {
 		t.Fatal("ambiguous agent set did not error")
+	}
+
+	// ACMM fallback: with several agents but exactly one tracker writer
+	// (CanCreateIssues), that writer takes sessions — the L3 shape.
+	second := deps.Config.Agents["second"]
+	second.Mode = "ISSUES_AND_PRS"
+	deps.Config.Agents["second"] = second
+	scanner := deps.Config.Agents["scanner"]
+	scanner.Mode = "ADVISORY"
+	deps.Config.Agents["scanner"] = scanner
+	if name, err := s.resolveLinearSessionAgent(); err != nil || name != "second" {
+		t.Fatalf("sole writer fallback: %q, %v", name, err)
+	}
+
+	// Two writers is ambiguous again.
+	scanner.Mode = "ISSUES_ONLY"
+	deps.Config.Agents["scanner"] = scanner
+	if _, err := s.resolveLinearSessionAgent(); err == nil {
+		t.Fatal("two writers did not error")
+	}
+}
+
+func TestLinearSessionHolder(t *testing.T) {
+	s, _, _ := linearAgentTestServer(t)
+	tr := s.linearAgent().tracker
+	var ev linearagent.SessionEvent
+	ev.AgentSession.ID = "sess-9"
+	ev.AgentSession.Issue.Identifier = "ENG-9"
+	tr.Observe(ev)
+	tr.SetAgent("sess-9", "scanner")
+
+	if _, ok := s.LinearSessionHolder(github.Issue{SourceType: "github", Number: 9}); ok {
+		t.Fatal("GitHub items are never session-held")
+	}
+	holder, ok := s.LinearSessionHolder(github.Issue{SourceType: "linear", ExternalID: "ENG-9"})
+	if !ok || !strings.Contains(holder, "scanner") || !strings.Contains(holder, "sess-9") {
+		t.Fatalf("holder = %q, %v", holder, ok)
+	}
+	if _, ok := s.LinearSessionHolder(github.Issue{SourceType: "linear", ExternalID: "ENG-10"}); ok {
+		t.Fatal("unrelated identifier reported held")
 	}
 }
 

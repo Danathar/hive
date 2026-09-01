@@ -16,8 +16,10 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -62,15 +64,36 @@ const (
 // down.
 type APIError struct {
 	StatusCode int
-	Path       string
-	Body       string
+	// Method is the HTTP method of the failed request. It exists because this
+	// package is no longer GET-only: the pause/resume writes (#5134) share this
+	// error type, and a 403 from POST /api/pause reported as "GET /api/pause"
+	// would send a reader looking for a request that was never made.
+	Method string
+	Path   string
+	Body   string
 }
 
 func (e *APIError) Error() string {
+	// TrimSpace covers a zero-value Method on a hand-constructed error; every
+	// APIError this package builds sets it.
+	req := strings.TrimSpace(e.Method + " " + e.Path)
 	if e.Body == "" {
-		return fmt.Sprintf("GET %s: %s", e.Path, http.StatusText(e.StatusCode))
+		return fmt.Sprintf("%s: %s", req, http.StatusText(e.StatusCode))
 	}
-	return fmt.Sprintf("GET %s: %s: %s", e.Path, http.StatusText(e.StatusCode), e.Body)
+	return fmt.Sprintf("%s: %s: %s", req, http.StatusText(e.StatusCode), e.Body)
+}
+
+// IsForbidden reports whether err is an APIError carrying 403.
+//
+// Every mutating dashboard endpoint is owner-gated (requireOwnerRole,
+// pkg/dashboard/api.go), and 403 is the ONE failure a pane should render
+// differently: it is not a broken hive, a bad path, or a dead proxy — it is a
+// working request from someone whose role does not permit the action, and the
+// only useful thing to tell them is that they are not the owner. Retrying,
+// which is the right response to most other errors, will never help.
+func IsForbidden(err error) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusForbidden
 }
 
 // Client talks to one dashboard.
@@ -131,17 +154,54 @@ func (c *Client) Health(ctx context.Context) error {
 
 // getJSON performs a GET and decodes the response body into v.
 //
-// It is the single request path for this package; later tasks add typed methods
-// that call it rather than building requests themselves. A nil v discards the
-// body, which is what a liveness check wants — Health cares about the status,
-// not the payload, and decoding a body it will not read would turn a healthy
-// dashboard serving an unexpected shape into a failure.
+// A nil v discards the body, which is what a liveness check wants — Health
+// cares about the status, not the payload, and decoding a body it will not read
+// would turn a healthy dashboard serving an unexpected shape into a failure.
 func (c *Client) getJSON(ctx context.Context, path string, v any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
+	return c.doJSON(ctx, http.MethodGet, path, nil, v)
+}
+
+// postJSON performs a POST and decodes the response body into v.
+//
+// body is marshalled as JSON when non-nil and omitted entirely when nil — which
+// is what the pause/resume operations want: dashboard/openapi.json declares no
+// requestBody for either, so they are POSTs whose whole payload is the agent
+// name in the path. The parameter exists because POST can carry one and the
+// later write tasks (ACMM apply, kick) will; passing nil is not an oversight.
+func (c *Client) postJSON(ctx context.Context, path string, body, v any) error {
+	return c.doJSON(ctx, http.MethodPost, path, body, v)
+}
+
+// putJSON performs a PUT and decodes the response body into v.
+//
+// PUT rather than POST because that is the method the operation declares:
+// /api/packs/level is registered as "PUT /api/packs/level" and Go's mux matches
+// on the method, so a POST would not reach the handler at all.
+func (c *Client) putJSON(ctx context.Context, path string, body, v any) error {
+	return c.doJSON(ctx, http.MethodPut, path, body, v)
+}
+
+// doJSON is the single request path for this package; typed methods call it
+// rather than building requests themselves, so there is exactly one place that
+// knows how a dashboard request is addressed, authenticated and error-wrapped.
+func (c *Client) doJSON(ctx context.Context, method, path string, body, v any) error {
+	var reader io.Reader
+	if body != nil {
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			return fmt.Errorf("encode body for %s %s: %w", method, path, err)
+		}
+		reader = bytes.NewReader(encoded)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reader)
 	if err != nil {
 		return fmt.Errorf("build request for %s: %w", path, err)
 	}
 	req.Header.Set("Accept", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	if c.token != "" {
 		// Authorization: Bearer is what the proxy's requireAuth verifies
 		// (src/proxy/server.js) and what hivectl already sends
@@ -153,18 +213,19 @@ func (c *Client) getJSON(ctx context.Context, path string, v any) error {
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("GET %s: %w", path, err)
+		return fmt.Errorf("%s %s: %w", method, path, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		// Read a bounded prefix so the error can quote the dashboard's own
 		// message; a body we cannot read is not worth failing differently for.
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
 		return &APIError{
 			StatusCode: resp.StatusCode,
+			Method:     method,
 			Path:       path,
-			Body:       strings.TrimSpace(string(body)),
+			Body:       strings.TrimSpace(string(errBody)),
 		}
 	}
 

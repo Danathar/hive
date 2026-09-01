@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -137,13 +138,74 @@ func TestHealCodexHomeOwnership_AbsentDirNoOp(t *testing.T) {
 	}
 }
 
-// TestHealCodexHomeOwnership_ForeignDirRebuiltWithSalvage pins the wedge
-// this heal exists for: a CODEX_HOME owned by another identity survives on
-// /data across restarts and codex refuses to start. The heal must remove
-// the dir and hand back the operator-authored config.toml for the re-create
-// to restore. The test dir is owned by the test UID while the agent wants a
-// different UID, which is exactly the foreign-owner shape.
-func TestHealCodexHomeOwnership_ForeignDirRebuiltWithSalvage(t *testing.T) {
+// stubCodexHealMechanisms replaces the two root-privileged helpers for the
+// duration of a test. The real ones go through su-exec, which exists only
+// inside the hive image; substituting them lets the tests below exercise the
+// heal's DECISION logic (chown first, rebuild only on failure) on any host.
+// chownOK/removeOK select whether each mechanism succeeds. The returned
+// counters record how many times each was invoked.
+func stubCodexHealMechanisms(t *testing.T, chownOK, removeOK bool) (chownCalls, removeCalls *int) {
+	t.Helper()
+	origChown, origRemove := chownTreeAsRoot, removeTreeAsRoot
+	t.Cleanup(func() { chownTreeAsRoot, removeTreeAsRoot = origChown, origRemove })
+	chownCalls, removeCalls = new(int), new(int)
+	chownTreeAsRoot = func(dir, spec string) error {
+		*chownCalls++
+		if !chownOK {
+			return fmt.Errorf("stub: chown refused")
+		}
+		return nil // a real chown would re-own; ownership is not observable here
+	}
+	removeTreeAsRoot = func(dir string) error {
+		*removeCalls++
+		if !removeOK {
+			return fmt.Errorf("stub: rm refused")
+		}
+		return os.RemoveAll(dir) // local FS in tests; production shells out
+	}
+	return chownCalls, removeCalls
+}
+
+// TestHealCodexHomeOwnership_ForeignDirChownedNotRemoved is the #5379
+// regression test. A CODEX_HOME left owned by the PREVIOUS agent after a
+// rename must be re-owned IN PLACE — the lane's codex state (cache/, history)
+// must survive, and no removal may be attempted. Before the fix this path
+// called os.RemoveAll, which additionally cannot succeed on the NFSv3 /data
+// PVC at all.
+func TestHealCodexHomeOwnership_ForeignDirChownedNotRemoved(t *testing.T) {
+	chownCalls, removeCalls := stubCodexHealMechanisms(t, true, true)
+	m, agent := codexHealTestManager(t, os.Getuid()+12345)
+	dir := filepath.Join(t.TempDir(), "codex-cxa")
+	if err := os.MkdirAll(filepath.Join(dir, "cache"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const cfg = "model = \"gpt-5.1-codex\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.healCodexHomeOwnership(agent, dir, "hive-cxa"); got != nil {
+		t.Errorf("chown path preserves the dir, so nothing needs salvaging; got %q", got)
+	}
+	if *chownCalls != 1 {
+		t.Errorf("foreign-owned home must be chowned once, got %d calls", *chownCalls)
+	}
+	if *removeCalls != 0 {
+		t.Errorf("a successful chown must not fall back to removal, got %d calls", *removeCalls)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "cache")); err != nil {
+		t.Errorf("codex state must survive the re-own, stat err=%v", err)
+	}
+	content, err := os.ReadFile(filepath.Join(dir, "config.toml"))
+	if err != nil || string(content) != cfg {
+		t.Errorf("config.toml must survive the re-own in place, content=%q err=%v", content, err)
+	}
+}
+
+// TestHealCodexHomeOwnership_ChownFailureFallsBackToRebuild pins that the
+// rebuild is still reachable when the chown cannot run, and that it salvages
+// the operator-authored config.toml on the way out.
+func TestHealCodexHomeOwnership_ChownFailureFallsBackToRebuild(t *testing.T) {
+	chownCalls, removeCalls := stubCodexHealMechanisms(t, false, true)
 	m, agent := codexHealTestManager(t, os.Getuid()+12345)
 	dir := filepath.Join(t.TempDir(), "codex-cxa")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -157,8 +219,35 @@ func TestHealCodexHomeOwnership_ForeignDirRebuiltWithSalvage(t *testing.T) {
 	if string(got) != cfg {
 		t.Errorf("readable config.toml must be salvaged before the rebuild, got %q", got)
 	}
+	if *chownCalls != 1 || *removeCalls != 1 {
+		t.Errorf("expected one chown attempt then one removal, got chown=%d remove=%d", *chownCalls, *removeCalls)
+	}
 	if _, err := os.Lstat(dir); !os.IsNotExist(err) {
-		t.Errorf("foreign-owned codex home must be removed, stat err=%v", err)
+		t.Errorf("fallback rebuild must remove the dir, stat err=%v", err)
+	}
+}
+
+// TestHealCodexHomeOwnership_BothMechanismsFailStaysLoud pins the constraint
+// that an unrepairable home keeps its loud ERROR and salvages nothing —
+// silence here would hide a dead agent.
+func TestHealCodexHomeOwnership_BothMechanismsFailStaysLoud(t *testing.T) {
+	chownCalls, removeCalls := stubCodexHealMechanisms(t, false, false)
+	m, agent := codexHealTestManager(t, os.Getuid()+12345)
+	dir := filepath.Join(t.TempDir(), "codex-cxa")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte("x = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.healCodexHomeOwnership(agent, dir, "hive-cxa"); got != nil {
+		t.Errorf("an unrepairable home must salvage nothing, got %q", got)
+	}
+	if *chownCalls != 1 || *removeCalls != 1 {
+		t.Errorf("both mechanisms must be attempted, got chown=%d remove=%d", *chownCalls, *removeCalls)
+	}
+	if _, err := os.Lstat(dir); err != nil {
+		t.Errorf("an unrepairable home must be left alone for manual repair, stat err=%v", err)
 	}
 }
 

@@ -17,6 +17,16 @@ Your job is to audit project documentation and fix gaps — creating issues and 
 7. **Always sign commits** with DCO: `git commit -s`
 8. **Only close your own beads** — when reaping stale findings, only close beads where `actor` is `guide`
 
+## Command Verification (MANDATORY)
+
+Before writing, publishing, or proposing any shell command in documentation or a finding:
+
+1. **Resolve every external name** — verify each package, app ID, image, version, and remote artifact against its authoritative registry or vendor source. A plausible name is not evidence: confirm the exact spelling, case, version, repository/channel, and platform availability.
+2. **Verify commands end to end** — run every copy-pasteable command in a representative environment when practical. If unavailable hardware, credentials, or a different operating system prevent execution, validate the complete command against current authoritative documentation and disclose that limitation in the finding.
+3. **Document prerequisites first** — before the first command that needs them, state required third-party repositories, plugins/toolkits, authentication, hardware, services, and generated configuration. Do not present a dependent command as a first step.
+4. **Record the evidence** — include the registry/vendor lookup and command check performed in the bead, issue, or PR. Do not rely only on another agent's report or on a package name that looks correct.
+5. **Fail closed** — if a command or artifact cannot be verified, do not publish it as working. Replace it with a verified alternative or describe the conceptual step without copy-pasteable syntax.
+
 ## Opening Issues
 
 ```bash
@@ -61,3 +71,7 @@ bd create --title "<specific documentation gap title>" \
 7. Summarize findings in your response
 
 ${KNOWLEDGE}
+
+## Publishable Content Boundary
+
+Attribution belongs ONLY in the issue or PR body and the DCO commit trailer. NEVER write `Filed by`, ACMM levels, agent names, or hive run metadata inside any committed file.

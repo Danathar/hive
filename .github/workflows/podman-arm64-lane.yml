@@ -26,14 +26,49 @@ name: Podman arm64 Lane
 # would be tested at all. If the architectures ever DO diverge, that is the
 # signal to widen this lane — not a reason to widen it now.
 #
-# WHY PULL RATHER THAN BUILD. #4188 asks for "build/pull plus startup", and the
-# arm64 BUILD is already a per-push gate: .github/workflows/docker.yml builds
-# linux/arm64 on this same runner label on every branch and asserts the
-# embedded commit matches the built SHA. What no lane covered is the other
-# half — that the published arm64 artifact pulls under Podman and starts. So
-# this lane pulls, and per #4336's stop condition it does NOT build an image ad
-# hoc: a missing arm64 manifest is reported and fails the job, because the fix
-# for that belongs in the publisher, not in a lane papering over it.
+# WHY PULL RATHER THAN BUILD, AND WHERE THAT STOPPED HOLDING (#5370). #4188
+# asks for "build/pull plus startup", and the arm64 BUILD is already a per-push
+# gate: .github/workflows/docker.yml builds linux/arm64 on this same runner
+# label on every branch and asserts the embedded commit matches the built SHA.
+# What no lane covered is the other half — that the published arm64 artifact
+# pulls under Podman and starts. So on a PUSH this lane pulls, and per #4336's
+# stop condition it does NOT build an image ad hoc: a missing arm64 manifest is
+# reported and fails the job, because the fix for that belongs in the
+# publisher, not in a lane papering over it.
+#
+# On a PULL REQUEST that reasoning inverts, and #5370 is what it cost. Probing
+# the published image on a PR validates code that is already on v4, not the
+# change proposed — so the lane cannot gate a fix to the code it tests. A PR
+# that REPAIRS a startup bug runs against the still-broken published image and
+# stays red; a PR that INTRODUCES one runs against the still-good published
+# image and goes green. The signal is inverted exactly when it matters.
+#
+# Measured, not hypothetical: #5342's 0600 hardening broke container startup
+# (#5360). It merged green because the lane probed the pre-#5342 image, then
+# stayed red across four merges, and #5368 — the fix — was red too, because
+# entrypoint.sh is baked into the image and the lane kept starting the old one.
+#
+# THE PUBLISHED-IMAGE ROUTE DOES NOT EXIST FOR A PR. #5370 proposed probing a
+# per-SHA image built from the PR head. Per-SHA tags are real
+# (ghcr.io/kubestellar/hive:<7-char-sha>) but are created ONLY by docker.yml's
+# `merge` job under push == 'true', and docker.yml (a) skips its `build` job
+# entirely on `pull_request` and (b) allow-lists pushes to LONG_LIVED branches
+# ("v2 v4 mk dd") only, so a PR branch's own push run builds as a compile gate
+# and publishes nothing. A fork PR never builds in this repo at all. So a PR
+# head SHA will NEVER have a published image to pull, and the suggested fix
+# cannot work as written.
+#
+# What this lane does instead: on a pull request it BUILDS the image from the
+# PR's checkout and probes that. #4336's "do not build ad hoc" stop condition
+# was written to stop this lane papering over a broken PUBLISHER — that reason
+# is untouched, and the push path still pulls and still fails on a missing
+# manifest. Building here is the only way to put the PR's own entrypoint.sh in
+# front of the probe.
+#
+# COST. The equivalent arm64 build in docker.yml runs ~3.6 min on this runner
+# label with the tmux stage served from the gha cache, inside this lane's
+# 30-minute timeout. The build is local only (`podman build`, no push, no
+# registry credentials), so the lane keeps `contents: read` and no secrets.
 #
 # A MISSING arm64 MANIFEST IS A FAILURE, NOT A SKIP. An arm64 lane that steps
 # aside when the arm64 image is absent reports green while proving nothing —
@@ -62,7 +97,13 @@ on:
   workflow_dispatch:
     inputs:
       image:
-        description: 'Image to probe (default ghcr.io/kubestellar/hive:v4-latest)'
+        # The old text here said v4-latest and was wrong (#5370). Nothing
+        # defaults to that: when this input is empty the lane passes no
+        # --image and probe_arm64_image_startup.sh falls back to
+        # HIVE_STANDALONE_IMAGE_HIVE from src/deploy/standalone-images.sh,
+        # which is ghcr.io/kubestellar/hive:stable — the RELEASE CHANNEL tag,
+        # further behind v4 tip than v4-latest is. Say what actually happens.
+        description: 'Image to probe. Empty = ghcr.io/kubestellar/hive:stable on a push, or the image built from the PR checkout on a pull request.'
         type: string
         default: ''
 
@@ -144,6 +185,92 @@ jobs:
             printf '| Runner | `%s`, image `%s` |\n' "$RUNNER_OS" "${ImageVersion:-unknown}"
           } >>"$GITHUB_STEP_SUMMARY"
 
+      # ── #5370: on a PR, probe THIS PR's code, not the published image ──
+      #
+      # Builds the image from the checkout and leaves it in the runner's local
+      # Podman store under a PR-specific tag, which the probe step then uses
+      # instead of the published tag. Without this the lane starts an image
+      # built from code that is already merged, and its result says nothing
+      # about the change under review — see the header for the measured cost
+      # of that (#5342 merged green, #5368 was red for fixing it).
+      #
+      # Local only: no `podman push`, no registry login, no secrets. The lane's
+      # `contents: read` permission is unchanged.
+      #
+      # NOT continue-on-error, and no `|| true`. A build failure here is a real
+      # result — the PR does not produce a runnable image — and must be as loud
+      # as a probe failure. Silently falling back to the published image on a
+      # build error would restore the exact inverted signal this step removes.
+      #
+      # `--platform linux/arm64` is asserted rather than assumed even though
+      # the runner is arm64: the environment step above already proved the
+      # architecture, and naming it here means a runner-label change surfaces
+      # as a build error instead of a silently-amd64 image.
+      - name: Build the arm64 image from this PR (#5370)
+        if: github.event_name == 'pull_request' && inputs.image == ''
+        env:
+          PR_IMAGE: localhost/hive-pr:arm64
+        run: |
+          set -euo pipefail
+
+          echo "Building ${PR_IMAGE} from src/Dockerfile at $(git rev-parse --short HEAD)"
+          echo "This is the PR's own code — the published image would be the pre-PR code (#5370)."
+
+          podman build \
+            --platform linux/arm64 \
+            --file src/Dockerfile \
+            --tag "${PR_IMAGE}" \
+            .
+
+          # Prove the thing that was built is arm64 and really exists locally.
+          # A build that silently produced another architecture would make the
+          # probe below meaningless in the same way probing the published image
+          # was meaningless.
+          built_arch="$(podman image inspect "${PR_IMAGE}" --format '{{.Architecture}}')"
+          if [ "$built_arch" != "arm64" ]; then
+            echo "::error::built image is ${built_arch}, expected arm64"
+            exit 1
+          fi
+          echo "built ${PR_IMAGE} (${built_arch})"
+
+      # Selects what the probe actually runs against, so the choice is made in
+      # ONE place and reported. On a pull request that is the image built
+      # above; otherwise it is the caller's --image, or the probe's own default
+      # (ghcr.io/kubestellar/hive:stable) when that is empty too.
+      - name: Select the image to probe
+        id: select
+        env:
+          INPUT_IMAGE: ${{ inputs.image }}
+          IS_PR: ${{ github.event_name == 'pull_request' }}
+        run: |
+          set -euo pipefail
+
+          # An explicit dispatch input always wins, and is treated as a
+          # registry reference: the operator asked for a specific published
+          # image, so the manifest and pull cases stay meaningful.
+          if [ -n "${INPUT_IMAGE:-}" ]; then
+            image="${INPUT_IMAGE}"
+            local_build="false"
+            why="explicit workflow_dispatch input"
+          elif [ "${IS_PR}" = "true" ]; then
+            image="localhost/hive-pr:arm64"
+            local_build="true"
+            why="built from this PR's checkout (#5370) — the published image would be the pre-PR code and could not gate this change"
+          else
+            image=""
+            local_build="false"
+            why="probe default (ghcr.io/kubestellar/hive:stable) — the published image, which is the right target on a push"
+          fi
+
+          echo "image=${image}" >>"$GITHUB_OUTPUT"
+          echo "local=${local_build}" >>"$GITHUB_OUTPUT"
+          printf 'probing: %s\n' "${image:-<probe default>}"
+          printf 'reason:  %s\n' "$why"
+          {
+            printf '\n**Image under test:** `%s`\n\n' "${image:-ghcr.io/kubestellar/hive:stable}"
+            printf '%s\n' "$why"
+          } >>"$GITHUB_STEP_SUMMARY"
+
       # The probe's exit status is the result. 0 means the arm64 image pulled
       # and the service started; 1 means one of the four checks failed — a
       # missing arm64 manifest lands here rather than skipping; 78 means a
@@ -153,13 +280,21 @@ jobs:
       # There is deliberately no continue-on-error and no `|| true`.
       - name: arm64 image pull and service startup (#4336)
         env:
-          IMAGE: ${{ inputs.image }}
+          IMAGE: ${{ steps.select.outputs.image }}
+          LOCAL_BUILD: ${{ steps.select.outputs.local }}
         run: |
           set -uo pipefail
 
           args=""
           if [ -n "${IMAGE:-}" ]; then
             args="--image ${IMAGE}"
+          fi
+          # #5370: a PR-built image is in the local store and was never
+          # published, so the manifest and pull cases do not apply to it. The
+          # probe skips those two under --local and still runs the cases that
+          # carry this lane's signal — the binary executes, the service starts.
+          if [ "${LOCAL_BUILD}" = "true" ]; then
+            args="${args} --local"
           fi
 
           # The runner invokes this with `bash -e`, so errexit has to come off
@@ -173,8 +308,16 @@ jobs:
 
           case "$status" in
             0)
-              echo "::notice::the arm64 image pulled and the service started"
-              printf '\n✅ The published arm64 image pulled, `/usr/local/bin/hive` ran, and the service answered `GET /api/health`.\n' >>"$GITHUB_STEP_SUMMARY"
+              # Say which image actually passed. Reporting "the published
+              # image" after probing a PR build would misdescribe the result
+              # in the same direction as the bug (#5370).
+              if [ "${LOCAL_BUILD}" = "true" ]; then
+                echo "::notice::the arm64 image built from this PR started"
+                printf '\n✅ The arm64 image **built from this PR** ran `/usr/local/bin/hive` and answered `GET /api/health`.\n' >>"$GITHUB_STEP_SUMMARY"
+              else
+                echo "::notice::the published arm64 image pulled and the service started"
+                printf '\n✅ The published arm64 image pulled, `/usr/local/bin/hive` ran, and the service answered `GET /api/health`.\n' >>"$GITHUB_STEP_SUMMARY"
+              fi
               ;;
             78)
               echo "::error::the probe could not run — a prerequisite is missing (EX_CONFIG). A lane that cannot run is not a lane that passed."
@@ -185,5 +328,97 @@ jobs:
               printf '\n❌ The arm64 pull/startup lane failed (exit %s).\n' "$status" >>"$GITHUB_STEP_SUMMARY"
               ;;
           esac
+
+          exit "$status"
+
+      # ── #5380: run the entrypoint behavioural suites where root exists ──
+      #
+      # THE PROBLEM THIS CLOSES. test_entrypoint_runtime_config.sh (#5368, for
+      # #5360) and test_entrypoint_data_ownership.sh (#5375, for #5369) each
+      # carry a behavioural block that is the whole reason the file exists: it
+      # creates a root-owned file and then really open()s it as the uid the
+      # hive process drops to. That is the assertion mode-checking could not
+      # make — #5360 shipped green behind a mode-only check and took four
+      # merges to diagnose.
+      #
+      # Both blocks need root AND a `dev` account. v2-ci.yml runs them on
+      # ubuntu-latest, which is neither: the runner user is uid 1001 but named
+      # `runner`, so `id -u dev` fails and BOTH blocks skip on every PR. They
+      # skip loudly rather than faking a pass — correct, and preserved — but a
+      # guard that cannot fail is not a guard. The strongest assertions in both
+      # files have never executed in CI.
+      #
+      # WHY HERE. This lane already builds the PR's own image (#5370, above)
+      # and starts a container from it. That image has root and has `dev` at
+      # uid 1001 (src/Dockerfile:165, `useradd -m -u 1001 -g node ... dev`), so
+      # it is the one place in CI where these blocks can actually run — and it
+      # runs the PR's code, so a regression is caught before merge rather than
+      # after.
+      #
+      # HOW. The suites are NOT baked into the image (they are test-only, and
+      # should stay out of a shipped artifact). They are bind-mounted in from
+      # the checkout instead. Both resolve the entrypoint under test as
+      # `$(dirname "$0")/entrypoint.sh`, so mounting src/deploy gives each
+      # suite the PR's own entrypoint.sh next to it — the same file the image
+      # was built from.
+      #
+      # AND A SKIP HERE IS FATAL. HIVE_TEST_REQUIRE_BEHAVIOURAL=1 turns every
+      # skip in those blocks into a FAILURE. This is the load-bearing half of
+      # #5380: in a container that DOES have root and DOES have `dev`, a skip
+      # cannot mean "unsuitable environment" — it means a precondition changed
+      # and the test silently stopped testing. Without this the whole problem
+      # recurs the moment someone edits the guard. The bare-runner path in
+      # v2-ci.yml is untouched and still skips loudly, so both suites stay
+      # runnable on a laptop and on an unprivileged runner.
+      #
+      # Only on the PR path, where a local image was built. On a push the image
+      # is a published registry reference and this lane's contract is the
+      # pull/startup probe above; the suites still run in v2-ci.yml there.
+      #
+      # --user root is explicit: the image's own USER is dev, and the entire
+      # point is to exercise the root-creates / dev-reads transition.
+      - name: Entrypoint behavioural suites, in-container (#5380)
+        if: github.event_name == 'pull_request' && steps.select.outputs.local == 'true'
+        env:
+          PR_IMAGE: localhost/hive-pr:arm64
+        run: |
+          set -euo pipefail
+
+          echo "Running the entrypoint behavioural suites inside ${PR_IMAGE}."
+          echo "Root and the 'dev' account both exist there, so the blocks that"
+          echo "skip on ubuntu-latest actually execute — and a skip is FATAL."
+
+          status=0
+          for suite in test_entrypoint_runtime_config test_entrypoint_data_ownership; do
+            echo ""
+            echo "── ${suite}.sh ─────────────────────────────────────────"
+            # The suite and the entrypoint it extracts functions from are
+            # mounted together, read-only. :ro,Z keeps SELinux relabelling
+            # correct and matches how the probe mounts hive.yaml.
+            if podman run --rm \
+                 --user root \
+                 --entrypoint /bin/bash \
+                 -e HIVE_TEST_REQUIRE_BEHAVIOURAL=1 \
+                 -v "${GITHUB_WORKSPACE}/src/deploy:/opt/hive-tests:ro,Z" \
+                 "${PR_IMAGE}" \
+                 "/opt/hive-tests/${suite}.sh"; then
+              echo "::notice::${suite}.sh passed IN-CONTAINER with behavioural blocks required"
+            else
+              rc=$?
+              echo "::error::${suite}.sh failed in-container (exit ${rc}). A skip counts as a failure here: this container has root and a 'dev' account, so a skipped behavioural block means the test stopped testing (#5380)."
+              status=1
+            fi
+          done
+
+          if [ "$status" -eq 0 ]; then
+            {
+              printf '\n✅ Entrypoint behavioural suites ran **inside the PR image** with '
+              printf '`HIVE_TEST_REQUIRE_BEHAVIOURAL=1` — the root-creates/dev-reads '
+              printf 'assertions for #5360 and #5369 actually executed, and a skip '
+              printf 'would have failed the lane.\n'
+            } >>"$GITHUB_STEP_SUMMARY"
+          else
+            printf '\n❌ An entrypoint behavioural suite failed in-container (#5380).\n' >>"$GITHUB_STEP_SUMMARY"
+          fi
 
           exit "$status"

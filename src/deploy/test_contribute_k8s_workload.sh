@@ -62,9 +62,15 @@ EOF
 cat > "$FAKE_HOME/.config/hive/gh-auth.env" <<'EOF'
 GH_TOKEN=placeholder-gh-token
 EOF
+# A logged-in Claude credential file (#5103): the generator refuses to emit a
+# claude workload without one (or ANTHROPIC_API_KEY), so the happy path seeds
+# a placeholder. Never a real credential.
+mkdir -p "$FAKE_HOME/.claude"
+printf '%s' '{"claudeAiOauth":{"accessToken":"placeholder-claude-oauth","refreshToken":"placeholder-claude-refresh"}}' \
+  > "$FAKE_HOME/.claude/.credentials.json"
 
 # ── Supported backend (claude): full workload on stdout ──
-OUT="$(cd "$REPO_ROOT" && HOME="$FAKE_HOME" just contribute-k8s hive-contributor 2>/dev/null)"
+OUT="$(cd "$REPO_ROOT" && HOME="$FAKE_HOME" ANTHROPIC_API_KEY="" just contribute-k8s hive-contributor 2>/dev/null)"
 
 contains "emits a Deployment"                 "$OUT" "kind: Deployment"
 contains "workload runs headless (#2660)"     "$OUT" "CONTRIBUTOR_MODE: \"headless\""
@@ -96,6 +102,83 @@ if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' >/dev/null 2>&
 else
   echo "  SKIP: PyYAML unavailable; skipping structural parse"
 fi
+
+# ── Backend credential delivery (#5103) ──
+# The workload used to carry NO credential for the agent CLI itself: the pod
+# authenticated to the hub and GitHub, then launched a backend with nothing to
+# authenticate with. These pin the three claude outcomes: OAuth file shipped,
+# explicit API key preferred, and an honest refusal when neither exists.
+contains "Secret ships the operator's Claude credential (#5103)" "$OUT" "HIVE_CLAUDE_CREDENTIALS_B64:"
+# Round-trip, not just presence: the Secret value, decoded once by Kubernetes
+# (envFrom) and once by the entrypoint, must reproduce the credential file
+# byte-for-byte. Presence-only checking passed an EMPTY value during
+# development (the b64 helper was called before its definition), so this
+# assertion is the one that actually guards the mechanism.
+CRED_VAL="$(printf '%s' "$OUT" | grep 'HIVE_CLAUDE_CREDENTIALS_B64:' | awk '{print $2}')"
+ROUNDTRIP="$(printf '%s' "$CRED_VAL" | base64 -d 2>/dev/null | base64 -d 2>/dev/null || true)"
+check "credential round-trips byte-for-byte through Secret + entrypoint decode" \
+  "$(cat "$FAKE_HOME/.claude/.credentials.json")" "$ROUNDTRIP"
+if printf '%s' "$OUT" | grep -q "placeholder-claude-oauth"; then
+  echo "  FAIL: raw Claude credential bytes leaked into the YAML unencoded"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS: Claude credential travels encoded, never as raw bytes"
+  PASS=$((PASS + 1))
+fi
+contains "credential note covers the backend credential" "$OUT" "#5103"
+
+# An explicit ANTHROPIC_API_KEY beats the file — operator intent wins.
+KEYED="$(cd "$REPO_ROOT" && HOME="$FAKE_HOME" ANTHROPIC_API_KEY="placeholder-anthropic-key" just contribute-k8s hive-contributor 2>/dev/null)"
+contains "explicit ANTHROPIC_API_KEY is shipped" "$KEYED" "ANTHROPIC_API_KEY:"
+if printf '%s' "$KEYED" | grep -q "HIVE_CLAUDE_CREDENTIALS_B64:"; then
+  echo "  FAIL: API key set, but the OAuth file was shipped anyway"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS: API key takes precedence over the OAuth file"
+  PASS=$((PASS + 1))
+fi
+
+# No credential at all: refuse at generation, naming the fix, exiting nonzero —
+# a refusal here beats a manifest that deploys cleanly and cannot work.
+NOCRED_HOME="$(mktemp -d)"
+mkdir -p "$NOCRED_HOME/.config/hive"
+cp "$FAKE_HOME/.config/hive/contributor.env" "$NOCRED_HOME/.config/hive/"
+cp "$FAKE_HOME/.config/hive/gh-auth.env" "$NOCRED_HOME/.config/hive/"
+if (cd "$REPO_ROOT" && HOME="$NOCRED_HOME" ANTHROPIC_API_KEY="" just contribute-k8s hive-contributor >/dev/null 2>"$NOCRED_HOME/err"); then
+  echo "  FAIL: generation succeeded with no claude credential to ship"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS: generation refuses when the claude CLI would have no credential"
+  PASS=$((PASS + 1))
+fi
+contains "refusal names the missing credential" "$(cat "$NOCRED_HOME/err")" "no credential to ship"
+contains "refusal points at the tracking issue" "$(cat "$NOCRED_HOME/err")" "#5103"
+
+# The escape hatch emits anyway (credentials provided out of band), warning on
+# stderr and keeping stdout clean YAML for kubectl.
+HATCH_OUT="$(cd "$REPO_ROOT" && HOME="$NOCRED_HOME" ANTHROPIC_API_KEY="" HIVE_K8S_ALLOW_MISSING_BACKEND_CREDENTIALS=1 just contribute-k8s hive-contributor 2>"$NOCRED_HOME/hatch-err")"
+contains "escape hatch still emits the Deployment" "$HATCH_OUT" "kind: Deployment"
+contains "escape hatch warns on stderr" "$(cat "$NOCRED_HOME/hatch-err")" "NO claude credential"
+if printf '%s' "$HATCH_OUT" | grep -q "WARNING:"; then
+  echo "  FAIL: escape-hatch warning leaked into stdout"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS: escape-hatch stdout stays clean YAML"
+  PASS=$((PASS + 1))
+fi
+
+# copilot: OAuth state directory, unverified in an unattended pod — refused
+# with a pointer rather than emitted broken.
+sed -i.bak 's/^AGENT_BACKEND=.*/AGENT_BACKEND=copilot/' "$NOCRED_HOME/.config/hive/contributor.env"
+if (cd "$REPO_ROOT" && HOME="$NOCRED_HOME" just contribute-k8s hive-contributor >/dev/null 2>"$NOCRED_HOME/copilot-err"); then
+  echo "  FAIL: copilot generation succeeded despite unverified pod auth"
+  FAIL=$((FAIL + 1))
+else
+  echo "  PASS: copilot refuses with its credential path unverified"
+  PASS=$((PASS + 1))
+fi
+contains "copilot refusal names the alternative" "$(cat "$NOCRED_HOME/copilot-err")" "contribute-hive copilot"
+rm -rf "$NOCRED_HOME"
 
 # ── Unsupported headless backend (bob): warn on STDERR, keep stdout clean. ──
 # bob drives an interactive TUI with no known one-shot entry point. goose used

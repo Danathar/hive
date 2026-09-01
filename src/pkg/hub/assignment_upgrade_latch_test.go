@@ -97,6 +97,8 @@ func TestAutoUpgradeLatchedWhileClaimInFlight(t *testing.T) {
 // TestAutoUpgradeResumesAfterClaimDelivered proves the latch RELEASES: the same
 // hive, once ClaimDelivered flips true, is eligible again and upgrades.
 func TestAutoUpgradeResumesAfterClaimDelivered(t *testing.T) {
+	// Debounce is not this test's subject — see disableUpgradeDebounceForTest.
+	disableUpgradeDebounceForTest(t)
 	cleanup := helperSetupTempDirs(t)
 	defer cleanup()
 	primeBehindLatest(t)
@@ -121,6 +123,8 @@ func TestAutoUpgradeResumesAfterClaimDelivered(t *testing.T) {
 // AVAILABLE placeholder is not assigned, so it is not in-flight and upgrades
 // normally.
 func TestAutoUpgradeAvailablePlaceholderUpgrades(t *testing.T) {
+	// Debounce is not this test's subject — see disableUpgradeDebounceForTest.
+	disableUpgradeDebounceForTest(t)
 	cleanup := helperSetupTempDirs(t)
 	defer cleanup()
 	primeBehindLatest(t)
@@ -143,6 +147,8 @@ func TestAutoUpgradeAvailablePlaceholderUpgrades(t *testing.T) {
 // TestAutoUpgradeLiveClaimedHiveUpgrades is the ordinary case: a live, fully
 // claimed hive (status set, ClaimDelivered=true) upgrades normally.
 func TestAutoUpgradeLiveClaimedHiveUpgrades(t *testing.T) {
+	// Debounce is not this test's subject — see disableUpgradeDebounceForTest.
+	disableUpgradeDebounceForTest(t)
 	cleanup := helperSetupTempDirs(t)
 	defer cleanup()
 	primeBehindLatest(t)

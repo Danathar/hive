@@ -124,6 +124,40 @@ func (c *Client) CreateActivity(ctx context.Context, sessionID string, content A
 	return nil
 }
 
+// ExternalURL is one link shown on a session (Linear renders these next to
+// the session header — "where the work is happening").
+type ExternalURL struct {
+	Label string `json:"label"`
+	URL   string `json:"url"`
+}
+
+// UpdateSessionExternalURLs points a session at external artifacts — the PR
+// an agent opened is the canonical one. Linear documents agentSessionUpdate
+// as the presence call alongside agentActivityCreate ("send an activity OR
+// update your external URL"), and the proxy allowlist keeps both reachable
+// at every tier for that reason; this is the control-plane caller.
+func (c *Client) UpdateSessionExternalURLs(ctx context.Context, sessionID string, urls []ExternalURL) error {
+	const mutation = `mutation AgentSessionUpdate($id: String!, $input: AgentSessionUpdateInput!) {
+  agentSessionUpdate(id: $id, input: $input) { success }
+}`
+	vars := map[string]interface{}{
+		"id":    sessionID,
+		"input": map[string]interface{}{"externalUrls": urls},
+	}
+	var out struct {
+		AgentSessionUpdate struct {
+			Success bool `json:"success"`
+		} `json:"agentSessionUpdate"`
+	}
+	if err := c.do(ctx, mutation, vars, &out); err != nil {
+		return err
+	}
+	if !out.AgentSessionUpdate.Success {
+		return fmt.Errorf("agentSessionUpdate reported failure")
+	}
+	return nil
+}
+
 // Identity is what FetchIdentity learns about an install: the app user's id in
 // the workspace and the workspace itself.
 type Identity struct {
@@ -251,7 +285,7 @@ func doGraphQL(ctx context.Context, hc *http.Client, graphqlURL, accessToken, qu
 	if err != nil {
 		return fmt.Errorf("post: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, oauthResponseLimit))
 	if err != nil {
 		return fmt.Errorf("read response: %w", err)

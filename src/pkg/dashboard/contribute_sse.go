@@ -325,6 +325,27 @@ func (h *ContributeWSHub) admissionQueueSnapshot(limit int, withDiagnostics bool
 				})
 				continue
 			}
+			// A tracker/umbrella issue is coordination-only: its children carry the
+			// work and are queued independently, so selectTask refuses to hand the
+			// parent to anyone (contribute_ws.go, "skipping tracker/umbrella
+			// issue"). This queue is the READ-ONLY PROJECTION of the set selectTask
+			// offers from — its doc comment promises the same exclusions — and it
+			// was the one gate the projection did not read, so a tracker sat here
+			// looking like offerable work that nobody could ever be assigned.
+			// Measured on a live hub: kubestellar/hive#4907 held a queue slot
+			// permanently. Same omission #4188 fixed on the assignment path, one
+			// surface over.
+			//
+			// Placed AFTER the hold check so a held tracker still renders as held —
+			// the operator's manual decision stays the stronger, visible signal —
+			// and before every other exclusion because this one can never lapse.
+			//
+			// Deliberately NOT logged: unlike selectTask, which runs once per
+			// assignment, this function runs on every queue request and SSE
+			// hydration, so a log line here would be pure noise.
+			if isTracker, _ := issue["is_tracker"].(bool); isTracker {
+				continue
+			}
 			if h.isTaskInCooldownKey(itemKey) {
 				continue
 			}

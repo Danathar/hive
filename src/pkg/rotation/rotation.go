@@ -152,12 +152,6 @@ const claudeOAuthBeta = "oauth-2025-04-20"
 // (.claude, .codex, .copilot) persists across pod restarts.
 const sharedCLIHome = "/data/home"
 
-type claudeCredentials struct {
-	ClaudeAiOauth struct {
-		AccessToken string `json:"accessToken"`
-	} `json:"claudeAiOauth"`
-}
-
 type claudeUsageResponse struct {
 	Limits []struct {
 		Kind     string     `json:"kind"`
@@ -191,14 +185,29 @@ func (p ClaudeProber) Probe(ctx context.Context) Headroom {
 	if err != nil {
 		return failOpen(p.Provider(), fmt.Errorf("claude credentials: %w", err))
 	}
-	var creds claudeCredentials
+	var creds claude.Credentials
 	if err := json.Unmarshal(raw, &creds); err != nil {
 		return failOpen(p.Provider(), fmt.Errorf("claude credentials parse: %w", err))
 	}
-	if creds.ClaudeAiOauth.AccessToken == "" {
+	if creds.ClaudeAIOAuth == nil || creds.ClaudeAIOAuth.AccessToken == "" {
 		// An empty token is the signature of an expired OAuth session; the
 		// CLI reports "Login expired" and serves nothing. Not exhaustion.
 		return failOpen(p.Provider(), errors.New("claude credentials: empty accessToken"))
+	}
+	oauth := creds.ClaudeAIOAuth
+	if oauth.ExpiresAt > 0 && oauth.ExpiresAt < time.Now().UnixMilli() {
+		if oauth.RefreshToken != "" {
+			// Claude access tokens are short-lived. The CLI silently redeems the
+			// refresh token on its next real request, so sending the stale access
+			// token to /usage would manufacture a 401 that the watchdog mistakes
+			// for a dead fleet credential (#5165). This probe is inconclusive,
+			// exactly like every other failed headroom measurement; it is not
+			// evidence of exhaustion or a need for human re-authentication.
+			return failOpen(p.Provider(), errors.New("claude access token expired; refresh token present, CLI will refresh on next use"))
+		}
+		// With no refresh grant, expiry is conclusive and the watchdog should
+		// preserve its high-severity re-authentication alert.
+		return failOpen(p.Provider(), errors.New("claude credentials: login expired (no refresh token)"))
 	}
 	base := p.BaseURL
 	if base == "" {
@@ -214,13 +223,13 @@ func (p ClaudeProber) Probe(ctx context.Context) Headroom {
 	if err != nil {
 		return failOpen(p.Provider(), err)
 	}
-	req.Header.Set("Authorization", "Bearer "+creds.ClaudeAiOauth.AccessToken)
+	req.Header.Set("Authorization", "Bearer "+oauth.AccessToken)
 	req.Header.Set("anthropic-beta", claudeOAuthBeta)
 	resp, err := client.Do(req)
 	if err != nil {
 		return failOpen(p.Provider(), err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return failOpen(p.Provider(), fmt.Errorf("claude usage HTTP %d", resp.StatusCode))
 	}
@@ -451,7 +460,7 @@ func (p DeepSeekProber) Probe(ctx context.Context) Headroom {
 	if err != nil {
 		return failOpen(p.Provider(), err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return failOpen(p.Provider(), fmt.Errorf("deepseek balance HTTP %d", resp.StatusCode))
 	}

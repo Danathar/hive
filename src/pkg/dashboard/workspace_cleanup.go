@@ -232,9 +232,9 @@ func removeTree(path string) error {
 
 	// chmod writable and retry — works when the current user owns the files
 	// (e.g. same-user read-only dirs) but not cross-user.
-	filepath.WalkDir(path, func(p string, d os.DirEntry, walkErr error) error {
+	chmodErr := filepath.WalkDir(path, func(p string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
-			return nil
+			return walkErr
 		}
 		// AUDIT N17 (open across three audits): os.Chmod FOLLOWS symlinks. This
 		// walk runs over an agent-writable workspace, so a symlink planted there
@@ -249,15 +249,16 @@ func removeTree(path string) error {
 		// swapped for a symlink between the readdir and this chmod (TOCTOU). The
 		// Lstat is the authoritative, immediately-before check.
 		info, lerr := os.Lstat(p)
-		if lerr != nil || info.Mode()&os.ModeSymlink != 0 {
+		if lerr != nil {
+			return lerr
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
 			return nil
 		}
 		if info.IsDir() {
-			os.Chmod(p, 0o770)
-		} else {
-			os.Chmod(p, 0o660)
+			return os.Chmod(p, 0o770)
 		}
-		return nil
+		return os.Chmod(p, 0o660)
 	})
 	if retryErr := os.RemoveAll(path); retryErr == nil {
 		return nil
@@ -266,8 +267,8 @@ func removeTree(path string) error {
 	// Last resort: shell out to rm -rf as current user.
 	cmd := exec.Command("rm", "-rf", path)
 	if shellErr := cmd.Run(); shellErr != nil {
-		return fmt.Errorf("os.RemoveAll: %w; su-exec rm (owner=%s, lookup=%v); rm -rf: %v",
-			err, ownerName, lookupErr, shellErr)
+		return fmt.Errorf("os.RemoveAll: %w; su-exec rm (owner=%s, lookup=%v); chmod walk: %v; rm -rf: %v",
+			err, ownerName, lookupErr, chmodErr, shellErr)
 	}
 	return nil
 }

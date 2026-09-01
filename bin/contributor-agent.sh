@@ -144,6 +144,17 @@ GOOSECFG
     agy)
       ln -sf "$agent_md" "${HOME}/CLAUDE.md"
       ;;
+    opencode)
+      # opencode reads AGENTS.md (https://opencode.ai/docs/rules/). Keep the
+      # CLAUDE.md compatibility link too, matching codex/pi above.
+      ln -sf "$agent_md" "${HOME}/AGENTS.md"
+      ln -sf "$agent_md" "${HOME}/CLAUDE.md"
+      ;;
+    kilo)
+      # Kilo reads AGENTS.md-compatible project instructions.
+      ln -sf "$agent_md" "${HOME}/AGENTS.md"
+      ln -sf "$agent_md" "${HOME}/CLAUDE.md"
+      ;;
     *)
       ln -sf "$agent_md" "${HOME}/CLAUDE.md"
       ;;
@@ -212,6 +223,29 @@ if [[ "$AGENT_BACKEND" == "litellm" ]]; then
   fi
 fi
 
+# ── Materialize a delivered Claude credential (#5103) ──
+# A K8s contributor pod cannot mount the operator's ~/.claude, so `just
+# contribute-k8s` ships the operator's logged-in .credentials.json base64-
+# wrapped in one Secret-backed env var. Written before anything launches the
+# CLI, with the strict mode claude expects; decoded to a temp file first so a
+# corrupt value leaves no half-written credential behind. The variable is
+# unset afterwards — the relay and CLI children have no reason to inherit a
+# second copy of the credential in their environment.
+if [[ -n "${HIVE_CLAUDE_CREDENTIALS_B64:-}" ]]; then
+  mkdir -p "${HOME}/.claude"
+  _cred_tmp="$(mktemp "${HOME}/.claude/.credentials.json.tmp.XXXXXX")"
+  if printf '%s' "$HIVE_CLAUDE_CREDENTIALS_B64" | base64 -d > "$_cred_tmp" 2>/dev/null \
+      && [[ -s "$_cred_tmp" ]]; then
+    chmod 600 "$_cred_tmp"
+    mv "$_cred_tmp" "${HOME}/.claude/.credentials.json"
+    echo "Claude credential materialized from the delivered secret."
+  else
+    rm -f "$_cred_tmp"
+    echo "WARNING: HIVE_CLAUDE_CREDENTIALS_B64 was set but did not decode to a non-empty file; ignoring it." >&2
+  fi
+  unset HIVE_CLAUDE_CREDENTIALS_B64 _cred_tmp
+fi
+
 if [[ "${HIVE_CONTRIBUTOR_AGENT_TEST_RESOLVE_BACKEND:-}" == "1" ]]; then
   echo "backend_binary=$(backend_binary "$AGENT_BACKEND")"
   echo "backend_perm_flag=$(backend_perm_flag "$AGENT_BACKEND")"
@@ -234,6 +268,15 @@ fi
 if [[ "${HIVE_CONTRIBUTOR_AGENT_TEST_LINK_KNOWLEDGE:-}" == "1" ]]; then
   link_backend_knowledge "$AGENT_BACKEND" "${HIVE_CONTRIBUTOR_AGENT_TEST_KNOWLEDGE_DEST:-${HOME}/agent.md}"
   exit 0
+fi
+
+validate_pi_selection() {
+  node "${SCRIPT_DIR}/pi-backend.js" "${AGENT_MODEL:-}"
+}
+
+if [[ "${HIVE_CONTRIBUTOR_AGENT_TEST_PI_SELECTION:-}" == "1" ]]; then
+  validate_pi_selection
+  exit $?
 fi
 
 codex_auth_file() {
@@ -325,6 +368,13 @@ detect_cli() {
     agy)
       if agy --version &>/dev/null; then echo "OK"; else echo "NOT_AUTHED"; fi
       ;;
+    opencode)
+      if opencode --version &>/dev/null; then echo "OK"; else echo "NOT_AUTHED"; fi
+      ;;
+    kilo)
+      # Credentials are environment-only; never mount a whole Kilo home.
+      if kilo --version &>/dev/null; then echo "OK"; else echo "NOT_AUTHED"; fi
+      ;;
     *)
       echo "UNKNOWN"
       ;;
@@ -340,6 +390,21 @@ echo "=== Hive Contributor Agent (ClankeR) ==="
 echo "Hub:     $HIVE_HUB"
 echo "Backend: $AGENT_BACKEND"
 echo ""
+
+# Pi has no official PI_PROVIDER/PI_MODEL environment contract. Hive accepts
+# exactly one contributor preference, AGENT_MODEL=provider/model, and Pi itself
+# resolves that canonical token. Validate before the relay authenticates so a
+# missing/malformed selection cannot claim ready and fail only after assignment.
+if [[ "$AGENT_BACKEND" == "pi" ]]; then
+  if ! PI_SELECTION_JSON="$(validate_pi_selection)"; then
+    echo "ERROR: Pi requires AGENT_MODEL=provider/model (for example, openai/gpt-5)."
+    exit 1
+  fi
+  echo "Pi selection: ${PI_SELECTION_JSON}"
+  while IFS= read -r name; do
+    if [[ -n "$name" ]]; then unset "$name"; fi
+  done < <(node "${SCRIPT_DIR}/pi-backend.js" --unselected-env-names "${AGENT_MODEL}")
+fi
 
 # Check CLI readiness
 STATUS=$(detect_cli "$AGENT_BACKEND")
@@ -364,7 +429,11 @@ case "$STATUS" in
     exit 1
     ;;
   OK)
-    echo "$AGENT_BACKEND CLI detected and ready."
+    if [[ "$AGENT_BACKEND" == "pi" ]]; then
+      echo "pi CLI binary is present; authentication remains unverified until a request succeeds."
+    else
+      echo "$AGENT_BACKEND CLI detected and ready."
+    fi
     ;;
 esac
 
@@ -542,7 +611,10 @@ fi
 # hub's ensureClaudeSettings pattern (src/pkg/agent/manager.go). The key is
 # stored both in full and as its last 20 chars — customApiKeyResponses
 # matching differs across Claude Code versions.
-if [[ "$AGENT_BACKEND" == "litellm" ]]; then
+# Also for claude driven by a delivered ANTHROPIC_API_KEY (#5103, the K8s
+# contributor path): the CLI raises the same custom-API-key approval prompt,
+# which nothing can answer in a headless pod.
+if [[ "$AGENT_BACKEND" == "litellm" ]] || { [[ "$AGENT_BACKEND" == "claude" ]] && [[ -n "${ANTHROPIC_API_KEY:-}" ]]; }; then
   python3 - <<'PYEOF' 2>/dev/null || true
 import json, os
 p = os.path.join(os.path.expanduser('~'), '.claude.json')
@@ -614,12 +686,21 @@ fi
 
 echo ""
 CONTAINER_NAME="${HIVE_CONTAINER_NAME:-hive-contributor}"
+# The engine that launched this container, passed in by the `just contribute-hive`
+# recipe from the runtime it resolved (kubestellar/hive#5145). A container cannot
+# see its own launcher, so without this the attach hint below guessed "docker" and
+# was simply wrong on every podman run — the operator pasted it and got a
+# docker-socket permission error, or "no such container" if docker also happened to
+# be running. Defaulting to docker keeps a bare-docker launch, or an image started
+# by something older than the recipe that passes this, printing exactly what it
+# printed before.
+CONTAINER_RUNTIME="${HIVE_CONTAINER_RUNTIME:-docker}"
 echo "Contributor agent is running."
 echo "  Mode:    $CONTRIBUTOR_MODE"
 echo "  CLI:     $CMD"
 echo "  ClankeR: PID $RELAY_PID"
 if [[ "$CONTRIBUTOR_MODE" == "interactive" ]]; then
-  echo "  Tmux:    docker exec -it $CONTAINER_NAME tmux attach -t $TMUX_SESSION"
+  echo "  Tmux:    $CONTAINER_RUNTIME exec -it $CONTAINER_NAME tmux attach -t $TMUX_SESSION"
 else
   # Headless: no pane to attach to. The relay drives a one-shot CLI per task and
   # writes its lifecycle state (waiting/working/done/failed) here for a probe.

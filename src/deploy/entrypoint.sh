@@ -61,6 +61,201 @@ HIVE_CONFIG_PATH="${HIVE_CONFIG:-/etc/hive/hive.yaml}"
 HIVE_CONFIG_RUNTIME="/data/hive.yaml.runtime"
 HIVE_CONFIG_RUNTIME_LEGACY="/data/hive.yaml.bak"
 
+# The uid/gid the hive process actually runs as after the privilege drop
+# further down (setpriv/gosu to dev). 0600 is an OWNER-only mode, so every
+# hardened config copy has to be owned by THIS user or the owner of the file
+# is not the reader of the file — see hive_harden_runtime_config.
+HIVE_RUNTIME_USER="dev"
+HIVE_RUNTIME_GROUP="node"
+
+# hive_harden_runtime_config makes $1 readable by the user that reads it, and
+# by nobody else: chown to dev:node, then chmod 0600.
+#
+# BOTH halves are load-bearing, and #5360 is what happens with only one.
+#
+# The mode half (#5342/#5331): every `cp` below that writes a PVC config copy
+# creates the destination anew, and cp gives a newly created destination the
+# SOURCE's mode — the ConfigMap seed and the bind-mounted hive.yaml are both
+# 0644 — so the copy is re-widened to 0644 on every boot. Without the chmod
+# the 0600 fix only holds from the first Config.Save() onward, and a hive that
+# boots and never saves stays world-readable indefinitely. These files carry
+# dashboard.auth_token (and github.token in PAT mode) and /data is
+# world-traversable, so that is the dashboard owner credential readable by
+# every unprivileged agent uid.
+#
+# The ownership half (#5360): those same `cp` calls run in the ROOT phase, so
+# the destination is created root:root. chmod 600 on a root:root file grants
+# access to root ALONE — and the hive process drops to dev (uid 1001) before
+# it ever opens the config, so it reads back `permission denied` and startup
+# aborts. The `chown -R dev:node /data` in the root-only block does NOT cover
+# this: it is guarded by `[ "$DATA_OWNER" != "1001" ]` and src/Dockerfile
+# already ships /data owned by dev:node, so on a fresh anonymous volume the
+# guard is false and the recursive chown never runs at all. It is also far
+# BELOW these call sites, so even when it does run it cannot help a file the
+# config branch has not created yet.
+#
+# Do the chown FIRST and the chmod second. The reverse order leaves a window
+# in which the file is 0644 and root-owned; chown does not clear the mode, so
+# chown-then-chmod is never wider than 0600 for longer than the chown itself.
+#
+# Best-effort throughout: a read-only or foreign-owned PVC, or a container
+# without CAP_CHOWN, must not abort boot. When the chown cannot be performed
+# the chmod is deliberately skipped rather than applied to a file we do not
+# own — locking a root-owned file to 0600 is precisely the #5360 failure, and
+# a readable-but-wider file that boots beats a hardened one that cannot.
+hive_harden_runtime_config() {
+  [ -f "$1" ] || return 0
+  # Already owned by the runtime user (the steady state after Config.Save(),
+  # and every non-root boot) — just tighten the mode.
+  if [ "$(stat -c '%u' "$1" 2>/dev/null || echo)" = "1001" ]; then
+    chmod 600 "$1" 2>/dev/null || true
+    return 0
+  fi
+  if chown "$HIVE_RUNTIME_USER:$HIVE_RUNTIME_GROUP" "$1" 2>/dev/null; then
+    chmod 600 "$1" 2>/dev/null || true
+  else
+    echo "[entrypoint] WARN: cannot chown $1 to $HIVE_RUNTIME_USER:$HIVE_RUNTIME_GROUP — leaving its mode alone so the runtime user can still read it (0600 on a foreign-owned file is #5360). Is CAP_CHOWN in the pod's capabilities.add?"
+  fi
+}
+
+# ── /data ownership as an INVARIANT, not a boot-time snapshot (#5369) ──
+#
+# HIVE_DATA_ROOT_PHASE_PATHS is the closed list of paths the root phase of this
+# script creates under /data. It exists because the recursive
+# `chown -R dev:node /data` further down is guarded on `[ "$DATA_OWNER" != 1001 ]`
+# and src/Dockerfile already ships /data owned by dev:node — so on a normal boot
+# the guard is FALSE and that chown never runs. Everything the root phase then
+# creates keeps root:root, and the hive process (uid 1001, after the setpriv/gosu
+# drop) cannot read it. #5360 was one instance of that; this list closes the class.
+#
+# The guard is NOT the bug and must stay. A recursive chown over an NFS-backed
+# PVC with thousands of files costs minutes of startup. This list is the targeted
+# alternative: a fixed set of shallow paths, chowned by NAME, so the cost is
+# O(number of entries here) rather than O(size of the PVC) — and the invariant is
+# restored without reintroducing the walk.
+#
+# MAINTENANCE RULE: if you add a root-phase write under /data, add its path here.
+# hive_assert_runtime_readable below fails the boot LOUDLY, naming the path, when
+# something in this list is unreadable to the runtime uid — so a forgotten entry
+# surfaces as a named error at startup instead of as a silent EACCES later.
+#
+# Deliberately NOT in this list:
+#   /data/agents/*, /data/beads/*  — chowned to per-agent hive-<name> UIDs by the
+#     per-agent loop, not to dev. Sweeping them to dev would undo that isolation.
+#   /data/secrets/bob_api_key      — mode 440, chowned at its own site, and read
+#     by agent UIDs rather than by dev.
+#   /data/.hive/proxy-ca-key.pem   — owner-only by design, chowned at its site.
+HIVE_DATA_ROOT_PHASE_PATHS="
+/data/.hive
+/data/secrets
+/data/config
+/data/config/github-copilot
+/data/home
+/data/home/.config
+/data/home/.bashrc
+/data/home/.profile
+"
+
+# hive_sweep_root_phase_paths hands every existing entry of that list to the
+# runtime user. Ownership ONLY — it never touches modes, because the modes are
+# already deliberate at each site (2775 on /data/home, 710 on /data/secrets,
+# 700 on /data/.hive) and re-deriving them here would be a second source of
+# truth that silently drifts from the first.
+#
+# Non-recursive on purpose: `chown` without -R on a directory is a single
+# syscall regardless of how many files are under it, which is what keeps the
+# NFS cost bounded. Directory ENTRIES created by the root phase are named
+# individually above; entries created later by dev or by an agent are already
+# owned by their creator and are not ours to reassign.
+#
+# Fails OPEN, per #5368: a chown that cannot happen (no CAP_CHOWN, read-only or
+# foreign-owned PVC) WARNs and continues. Nothing here is a security control —
+# the modes set at each site are — so a failed chown must never abort a boot.
+hive_sweep_root_phase_paths() {
+  _sweep_failed=""
+  for _p in $HIVE_DATA_ROOT_PHASE_PATHS; do
+    [ -e "$_p" ] || continue
+    # Already owned by the runtime user — the steady state on almost every
+    # boot. Skip the syscall entirely so the common path costs one stat.
+    [ "$(stat -c '%u' "$_p" 2>/dev/null || echo)" = "1001" ] && continue
+    chown "$HIVE_RUNTIME_USER:$HIVE_RUNTIME_GROUP" "$_p" 2>/dev/null \
+      || _sweep_failed="$_sweep_failed $_p"
+  done
+  if [ -n "$_sweep_failed" ]; then
+    echo "[entrypoint] WARN: could not chown to $HIVE_RUNTIME_USER:$HIVE_RUNTIME_GROUP:$_sweep_failed — is CAP_CHOWN in the pod's capabilities.add? Continuing; the runtime user may hit EACCES on these paths."
+  fi
+  unset _p _sweep_failed
+}
+
+# hive_assert_runtime_readable is the #5369 assertion: immediately BEFORE the
+# privilege drop, prove that the paths the hive process must read are actually
+# readable by the uid it is about to become — and if not, say WHICH path.
+#
+# This is option 3 from the issue, and it is worth having no matter how good the
+# sweep above is. #5360 took four merges to diagnose because the symptom was a
+# bare `permission denied` from the Go binary with no indication of which file or
+# why. The same fault caught here prints the path, its owner and its mode, before
+# the process that would fail on it has even started.
+#
+# Cheap by construction: it stats a short fixed list and, where a real read is
+# possible, does ONE open() per path as the runtime user. No directory walk.
+#
+# Non-fatal by design. A hive that boots degraded and tells you which file is
+# wrong beats one that refuses to boot on a check that may itself be wrong — and
+# on hosts without a `dev` account or without root there is no way to perform the
+# authoritative test at all. The Go binary still enforces what it genuinely needs;
+# this exists to NAME the fault first. The one true hard failure (an unreadable
+# config) already exits from the config block above.
+hive_assert_runtime_readable() {
+  _assert_bad=""
+  for _p in "$@"; do
+    [ -e "$_p" ] || continue
+    _owner="$(stat -c '%u' "$_p" 2>/dev/null || echo '')"
+    # Owned by the runtime uid — readable by definition, no probe needed.
+    [ "$_owner" = "1001" ] && continue
+    # No usable stat (BSD stat has no -c; a stat-less image is conceivable).
+    # We cannot evaluate this path, and a check that cannot evaluate must stay
+    # SILENT rather than report a fault it did not observe. A warning that
+    # fires on every path on every boot trains the operator to ignore the one
+    # that is real — which is how #5360's actual signal got lost.
+    [ -n "$_owner" ] || continue
+    # Not owned by it. Try the real syscall as that user when we can, since
+    # a foreign-owned file may still be perfectly readable via group or other
+    # bits and flagging it on ownership alone would be a false alarm.
+    if [ "$(id -u)" = "0" ] && command -v gosu >/dev/null 2>&1 \
+       && id -u "$HIVE_RUNTIME_USER" >/dev/null 2>&1; then
+      if [ -d "$_p" ]; then
+        gosu "$HIVE_RUNTIME_USER" test -r "$_p" -a -x "$_p" 2>/dev/null && continue
+      else
+        gosu "$HIVE_RUNTIME_USER" test -r "$_p" 2>/dev/null && continue
+      fi
+    else
+      # Cannot perform the authoritative test. Fall back to the mode bits: if
+      # the "other" class can read it, the runtime user can too. This is weaker
+      # than the open() above and is only used where the open() is impossible.
+      case "$(stat -c '%a' "$_p" 2>/dev/null || echo 000)" in
+        *[4567]) continue ;;
+      esac
+    fi
+    _assert_bad="$_assert_bad
+  $_p (owner uid=$_owner, mode=$(stat -c '%a' "$_p" 2>/dev/null || echo '?'))"
+  done
+  if [ -n "$_assert_bad" ]; then
+    echo "[entrypoint] WARN (#5369): these paths are NOT readable by the runtime user '$HIVE_RUNTIME_USER' (uid 1001) that this process is about to become:$_assert_bad"
+    echo "[entrypoint] WARN (#5369): they were created by the root phase and never handed over. Anything that reads them after the privilege drop will fail with EACCES. If a path above is a root-phase write, add it to HIVE_DATA_ROOT_PHASE_PATHS in this script."
+  fi
+  unset _p _owner _assert_bad
+}
+
+# Tighten pre-existing PVC config copies at boot. Files written before the
+# 0600 fix (#5331) are world-readable. Routed through the helper above so
+# these get the same chown-then-chmod treatment as the ones the `cp` calls
+# recreate — a pre-existing root-owned copy is just as unreadable to dev.
+for _cfg in "$HIVE_CONFIG_RUNTIME" "$HIVE_CONFIG_RUNTIME_LEGACY" /data/hive.yaml.dashboard; do
+  hive_harden_runtime_config "$_cfg"
+done
+unset _cfg
+
 # hive_runtime_config_read echoes the path to read the persisted runtime
 # config from: the new name when it is present and non-empty, else the
 # legacy name when that is, else empty. Read-only — it never creates,
@@ -70,6 +265,108 @@ hive_runtime_config_read() {
     echo "$HIVE_CONFIG_RUNTIME"
   elif [ -f "$HIVE_CONFIG_RUNTIME_LEGACY" ] && [ -s "$HIVE_CONFIG_RUNTIME_LEGACY" ]; then
     echo "$HIVE_CONFIG_RUNTIME_LEGACY"
+  fi
+}
+
+# hive_ghe_git_host echoes this hive's configured GitHub host when it is NOT
+# public github.com (i.e. a GitHub Enterprise instance such as github.ibm.com),
+# and nothing at all otherwise. Derived the same way the Go binary's
+# GitHubConfig.HostLabel() derives it (pkg/config/config.go): prefer
+# github.base_url, fall back to the host portion of github.api_url, strip the
+# scheme and a trailing /api/v3.
+#
+# Defined here, at the top, because BOTH boot phases need it: the root phase
+# writes /etc/gitconfig (which every agent UID reads) and the dev phase writes
+# ~dev/.gitconfig. Deriving it once keeps the two from drifting apart, which is
+# exactly the failure mode #5343 was.
+hive_ghe_git_host() {
+  _hgh_cfg="${HIVE_CONFIG:-/etc/hive/hive.yaml}"
+  [ -f "$_hgh_cfg" ] || return 0
+  python3 -c "
+import sys, yaml
+try:
+    with open(sys.argv[1]) as f:
+        cfg = yaml.safe_load(f) or {}
+except Exception:
+    sys.exit(0)
+gh = cfg.get('github') or {}
+pick = (gh.get('base_url') or gh.get('api_url') or '').strip()
+if pick.startswith('https://'):
+    pick = pick[len('https://'):]
+elif pick.startswith('http://'):
+    pick = pick[len('http://'):]
+pick = pick.rstrip('/')
+if pick.endswith('/api/v3'):
+    pick = pick[: -len('/api/v3')]
+host = pick.split('/', 1)[0]
+if host and host.lower() != 'api.github.com' and host.lower() != 'github.com':
+    print(host)
+" "$_hgh_cfg" 2>/dev/null || true
+}
+
+# hive_write_system_gitconfig writes /etc/gitconfig — the SYSTEM-level git
+# config, read by EVERY UID regardless of $HOME.
+#
+# WHY THIS EXISTS (#5343). The credential helper used to be installed with
+# `git config --global`, which is per-$HOME. The entrypoint runs as dev
+# (ENV HOME=/home/dev), so it landed in /home/dev/.gitconfig — while agents run
+# under per-agent UIDs with HOME=/data/home/agents/<name>. Measured on a hosted
+# GHE spoke: `su -s /bin/sh hive-quality -c 'git config --get-regexp credential'`
+# returned NOTHING for both --global and --system, because there was no
+# /etc/gitconfig either. Agents committed branches they could never push, and
+# the failure surfaced only as a line inside an otherwise-healthy session.
+#
+# /etc/gitconfig is the right home for it: the helper is already a single
+# system-wide binary at /usr/local/bin/git-credential-hive.sh, and a system file
+# sidesteps the per-UID ownership question that a shared /data/home/.gitconfig
+# would introduce (multiple agent UIDs, one directory).
+#
+# NO SECRET LIVES HERE. This file names a helper PATH and a bot identity. The
+# token is minted by the helper, per agent, from the per-agent scoped cache. So
+# 0644 (world-readable) is correct and required — every agent UID must read it.
+#
+# PRECEDENCE is safe: git reads system < global < local. /home/dev/.gitconfig
+# still exists for the dev user and for the contributor-relay/local-mode paths,
+# and it sets the SAME helper for the SAME hosts, so it shadows nothing. Agents
+# have no global config at all, so for them the system file is the only layer.
+#
+# HIVE_SYSTEM_GITCONFIG is a TEST SEAM (same convention as sharedAgentHome in
+# pkg/agent). It is never set in production; the regression test points it at a
+# temp file so it can exercise the real writer without touching /etc.
+hive_write_system_gitconfig() {
+  _hwsg_path="${HIVE_SYSTEM_GITCONFIG:-/etc/gitconfig}"
+  _hwsg_host="$(hive_ghe_git_host)"
+
+  # Refuse a planted symlink: /etc/gitconfig is read by every UID including
+  # root, so it must never be redirected somewhere agent-writable.
+  if [ -L "$_hwsg_path" ]; then
+    rm -f -- "$_hwsg_path" 2>/dev/null || true
+  fi
+
+  {
+    echo "# Managed by the hive entrypoint (kubestellar/hive#5343). Regenerated on every boot."
+    echo "# System-level so EVERY agent UID reads it regardless of \$HOME. Contains no secret:"
+    echo "# it names a helper path; the helper mints the per-agent scoped token."
+    echo "[user]"
+    echo "	name = kubestellar-hive"
+    echo "	email = hive-bot@kubestellar.io"
+    echo "[credential]"
+    echo "	helper = "
+    echo '[credential "https://github.com"]'
+    echo "	helper = /usr/local/bin/git-credential-hive.sh"
+    if [ -n "$_hwsg_host" ]; then
+      echo "[credential \"https://${_hwsg_host}\"]"
+      echo "	helper = /usr/local/bin/git-credential-hive.sh"
+    fi
+  } > "$_hwsg_path" 2>/dev/null || {
+    echo "[entrypoint] WARN: could not write $_hwsg_path — agents may be unable to push (see kubestellar/hive#5343)"
+    return 0
+  }
+  chmod 0644 "$_hwsg_path" 2>/dev/null || true
+  if [ -n "$_hwsg_host" ]; then
+    echo "[entrypoint] git credential helper wired system-wide in $_hwsg_path (github.com + GHE host ${_hwsg_host}) — readable by every agent UID"
+  else
+    echo "[entrypoint] git credential helper wired system-wide in $_hwsg_path (github.com) — readable by every agent UID"
   fi
 }
 
@@ -255,6 +552,7 @@ PYEOF
     # Write the (merged) config as the disaster-recovery snapshot. Always
     # under the new name; the legacy file is left untouched on the PVC.
     cp "$HIVE_CONFIG_PATH" "$HIVE_CONFIG_RUNTIME" 2>/dev/null || true
+    hive_harden_runtime_config "$HIVE_CONFIG_RUNTIME"
     echo "[entrypoint] K8s mode — ConfigMap is the seed, runtime config written to $HIVE_CONFIG_RUNTIME"
   else
     # Neither source exists: no runtime config on the PVC (checked first,
@@ -278,6 +576,7 @@ else
   if [ -f "$HIVE_CONFIG_PATH" ] && [ -s "$HIVE_CONFIG_PATH" ] && [ -z "$HIVE_CONFIG_SOURCE" ]; then
     # First boot: config exists but no PVC runtime config yet — seed it
     cp "$HIVE_CONFIG_PATH" "$HIVE_CONFIG_RUNTIME"
+    hive_harden_runtime_config "$HIVE_CONFIG_RUNTIME"
     echo "[entrypoint] First boot — config seeded to PVC: $HIVE_CONFIG_RUNTIME"
   elif [ -f "$HIVE_CONFIG_PATH" ] && [ -s "$HIVE_CONFIG_PATH" ] && [ -n "$HIVE_CONFIG_SOURCE" ]; then
     # The PVC runtime config is the source of truth (updated by Save()).
@@ -294,6 +593,7 @@ else
     # as the untouched fallback until Save() takes over writing the new one.
     if [ "$HIVE_CONFIG_SOURCE" = "$HIVE_CONFIG_RUNTIME_LEGACY" ]; then
       if cp "$HIVE_CONFIG_RUNTIME_LEGACY" "$HIVE_CONFIG_RUNTIME" 2>/dev/null; then
+        hive_harden_runtime_config "$HIVE_CONFIG_RUNTIME"
         echo "[entrypoint] Migration — seeded $HIVE_CONFIG_RUNTIME from legacy $HIVE_CONFIG_RUNTIME_LEGACY (legacy left in place)"
       fi
     fi
@@ -661,12 +961,35 @@ fi
 case ":$PATH:" in *:/usr/local/go/bin:*) ;; *) export PATH="$PATH:/usr/local/go/bin" ;; esac
 BASHRC
   chmod 644 /data/home/.bashrc 2>/dev/null || true
+  # Written by root via `cat >` above, so it is created root:root. Hand it to
+  # dev at the point of creation (#5369): the recursive /data chown is guarded
+  # off on every normal boot and cannot be relied on to fix it later.
+  chown dev:node /data/home/.bashrc 2>/dev/null || true
   # Login shells (tmux default-command) read ~/.profile, not ~/.bashrc — chain
   # them so both shell flavors get the same environment.
   if [ ! -f /data/home/.profile ]; then
     printf '[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"\n' > /data/home/.profile 2>/dev/null || true
     chmod 644 /data/home/.profile 2>/dev/null || true
+    # Same as .bashrc above — created by root, so hand it over here (#5369).
+    chown dev:node /data/home/.profile 2>/dev/null || true
   fi
+
+  # ── #5369: targeted post-phase ownership sweep ────────────────────────
+  # Everything the root phase creates under /data has now been created. Hand
+  # the closed list of those paths (HIVE_DATA_ROOT_PHASE_PATHS, defined at the
+  # top of this script) to the runtime user by NAME.
+  #
+  # This is what restores the invariant the DATA_OWNER guard turned into a
+  # boot-time snapshot. It is NOT a substitute for the guard and does not
+  # weaken it: the guard still prevents the recursive walk over an NFS PVC,
+  # and this sweep is deliberately non-recursive over a fixed list so its cost
+  # does not scale with the size of the volume.
+  #
+  # Most sites above already chown at the point of creation, and this sweep
+  # skips anything already dev-owned — so on a steady-state boot it is a
+  # handful of stat() calls and nothing else. It is the backstop for the site
+  # that forgets, which is the failure mode #5369 is actually about.
+  hive_sweep_root_phase_paths
 
   # ── Per-agent UID isolation ──────────────────────────────────────────
   # Extract agent names from config + pack YAML, create system users,
@@ -1116,6 +1439,26 @@ with open('/var/run/hive/uid-map.json', 'w') as f:
   # than re-derived, since it can't have changed and the FATAL branch's exit
   # code already depends on the two staying the same value.
 
+  # ── System-wide git credential helper (#5343) ───────────────────────────
+  # MUST happen here, in the root phase: /etc is root-owned, and the dev phase
+  # below cannot write it. This is the ONLY git config any per-agent UID reads
+  # — their $HOME (/data/home/agents/<name>) has no .gitconfig of its own.
+  hive_write_system_gitconfig
+
+  # ── #5369: last chance to name a handover we missed ───────────────────
+  # This is the final instruction of the root phase. Every root-phase write
+  # under /data has happened and the sweep has run; the next statement execs
+  # as uid 1001 and can no longer chown anything. So verify HERE that the
+  # paths the hive process must read are readable by the user it is about to
+  # become, and if any is not, print WHICH ONE with its owner and mode.
+  #
+  # The config paths are included explicitly alongside the swept list because
+  # they are the ones whose failure is fatal — an unreadable
+  # /data/hive.yaml.runtime is #5360 verbatim, and it is the exact fault this
+  # assertion exists to name in one line instead of four merges.
+  hive_assert_runtime_readable $HIVE_DATA_ROOT_PHASE_PATHS \
+    "$HIVE_CONFIG_RUNTIME" "$HIVE_CONFIG_RUNTIME_LEGACY" /data/hive.yaml.dashboard
+
   # setpriv identity mirrors `gosu dev` exactly: reuid=dev (UID 1001), regid=node
   # (dev's PRIMARY login group, GID 1000 — there is NO group named `dev`), and
   # --init-groups to populate the supplementary groups from the user db for dev
@@ -1210,7 +1553,25 @@ if [ -n "${HIVE_WIKI_GIT_URL:-}" ] && [ ! -d /data/vaults/hive-wiki/.git ]; then
 fi
 mkdir -p /data/vaults/hive-wiki
 
-# Configure git identity and credential helper for GitHub App token
+# Configure git identity and credential helper for GitHub App token.
+#
+# TWO LAYERS, DELIBERATELY (#5343):
+#
+#  1. /etc/gitconfig (SYSTEM) — written in the root phase above by
+#     hive_write_system_gitconfig. This is the layer that matters for AGENTS:
+#     every per-agent UID runs with its own $HOME (/data/home/agents/<name>)
+#     which has no .gitconfig, so the system file is the ONLY config they read.
+#
+#  2. ~dev/.gitconfig (GLOBAL, this block) — the dev user's own config, which
+#     the contributor-relay / local-mode / `just contribute-*` paths and any
+#     interactive `docker exec` shell have always used. Kept because those
+#     paths are not agent-UID paths, and because a hive that could not become
+#     root (the "continuing as root" / already-non-root boot) never reaches
+#     layer 1 at all — this block is then the only wiring there is.
+#
+# These do not fight: git precedence is system < global < local, and both
+# layers set the SAME helper for the SAME hosts, so the global layer shadows
+# nothing. What went wrong before was having ONLY layer 2.
 git config --global user.name "kubestellar-hive"
 git config --global user.email "hive-bot@kubestellar.io"
 git config --global --replace-all credential.helper ""
@@ -1229,39 +1590,32 @@ git config --global --replace-all "credential.https://github.com.helper" "/usr/l
 # and quality (which talk to the GitHub API, not git-over-HTTPS) worked fine
 # while guide's `git clone` could not authenticate at all.
 #
-# The host is derived the same way the Go binary's GitHubConfig.HostLabel()
-# derives it (pkg/config/config.go): prefer github.base_url, fall back to the
-# host portion of github.api_url, strip scheme and a trailing /api/v3, default
-# to github.com. Reading it here (from the same hive.yaml the Go binary reads)
-# rather than hardcoding "github.ibm.com" keeps this general for ANY configured
-# GHE host, and a no-op for a plain github.com hive (GHE_GIT_HOST resolves to
-# "github.com", which already has its helper wired above).
-GHE_GIT_HOST=""
-if [ -f "${HIVE_CONFIG:-/etc/hive/hive.yaml}" ]; then
-  GHE_GIT_HOST=$(python3 -c "
-import sys, yaml
-try:
-    with open(sys.argv[1]) as f:
-        cfg = yaml.safe_load(f) or {}
-except Exception:
-    sys.exit(0)
-gh = cfg.get('github') or {}
-pick = (gh.get('base_url') or gh.get('api_url') or '').strip()
-if pick.startswith('https://'):
-    pick = pick[len('https://'):]
-elif pick.startswith('http://'):
-    pick = pick[len('http://'):]
-pick = pick.rstrip('/')
-if pick.endswith('/api/v3'):
-    pick = pick[: -len('/api/v3')]
-host = pick.split('/', 1)[0]
-if host and host.lower() != 'api.github.com' and host.lower() != 'github.com':
-    print(host)
-" "${HIVE_CONFIG:-/etc/hive/hive.yaml}" 2>/dev/null) || true
-fi
+# The host derivation lives in hive_ghe_git_host() at the top of this file so
+# the system and global layers cannot drift apart.
+GHE_GIT_HOST="$(hive_ghe_git_host)"
 if [ -n "$GHE_GIT_HOST" ]; then
   git config --global --replace-all "credential.https://${GHE_GIT_HOST}.helper" "/usr/local/bin/git-credential-hive.sh"
   echo "[entrypoint] git credential helper wired for GitHub Enterprise host: ${GHE_GIT_HOST}"
+fi
+
+# ── Startup assertion: is the helper actually reachable from an AGENT UID? ──
+#
+# The whole point of #5343 is that the wiring LOOKED right (it was present in
+# ~dev/.gitconfig) while being invisible to every agent. So assert the property
+# that actually matters — "a process whose $HOME is not /home/dev resolves the
+# helper" — rather than "we ran git config successfully".
+#
+# HOME=/nonexistent is the cheapest faithful stand-in for an agent UID here:
+# it removes the global layer exactly the way an agent's own empty $HOME does,
+# leaving only the system layer under test. GIT_CONFIG_NOSYSTEM is explicitly
+# NOT set — the system layer is the thing being verified.
+_cred_probe_host="${GHE_GIT_HOST:-github.com}"
+_cred_probe="$(HOME=/nonexistent XDG_CONFIG_HOME=/nonexistent \
+  git config --get-regexp "^credential\." 2>/dev/null | grep -c "git-credential-hive.sh" || true)"
+if [ "${_cred_probe:-0}" -gt 0 ]; then
+  echo "[entrypoint] git credential helper VERIFIED reachable without a per-user .gitconfig (system layer, ${_cred_probe} host entries; agent UIDs will resolve it for ${_cred_probe_host})"
+else
+  echo "[entrypoint] WARN: git credential helper is NOT reachable from a process without a per-user .gitconfig. Every per-agent UID will commit branches it cannot push, and hive-open-pr will report the branch as missing from the remote. Check that /etc/gitconfig exists and is mode 0644. See kubestellar/hive#5343."
 fi
 
 # Generate initial GitHub App token if credentials are available

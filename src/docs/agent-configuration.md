@@ -31,7 +31,7 @@ You almost never write a full roster by hand: applying an ACMM level (below) gen
 Hive's config is layered, and the layering is the point: **a file's location says who owns the setting.**
 
 ```
-/etc/hive/hive.yaml            ← ConfigMap seed (Kubernetes) or bind mount (Docker/LXC).
+/etc/hive/hive.yaml            ← ConfigMap seed (Kubernetes) or bind mount (Docker, Podman, LXC).
 │                                 The operator/platform layer. Re-seeded on every pod
 │                                 boot; authoritative for acmm_level and hub.is_public.
 ├── /data/hive.yaml.dashboard  ← Dashboard overlay on the PVC. Every save from the
@@ -43,7 +43,7 @@ Hive's config is layered, and the layering is the point: **a file's location say
 │                                 Merged over the agents: map at load time.
 ├── /data/hive.yaml.runtime    ← Persisted runtime config (was hive.yaml.bak). Never
 │                                 edit. On K8s a post-merge snapshot the entrypoint
-│                                 restores from if the seed is lost; on Docker/LXC the
+│                                 restores from if the seed is lost; outside Kubernetes the
 │                                 boot-time source of truth. The legacy name is still
 │                                 read as a fallback during the migration.
 ├── /data/secrets/             ← Secret VALUES written by the dashboard (writable PVC).
@@ -332,6 +332,8 @@ Two rules of thumb:
 - **CLI methods are subscriptions.** You log in once per method from the dashboard, and every agent using that method shares the login. For `claude`, sharing is not instantaneous: the OAuth token is shared immediately through the per-agent home bridge, while the session identity (`~/.claude.json`, which is what decides whether the CLI shows a login menu) is adopted from an already-signed-in agent the next time each other agent launches or is restarted. So on a fresh install, expect the remaining agents to clear their 🔑 badge on their next start rather than the moment you finish logging in.
 - **Inference methods are endpoints.** You configure a base URL and a key *reference* (env var name or key-file path — the value goes in `/data/secrets/`, never in YAML). Agents on `vllm`/`llm-d`/`litellm` launch the Claude CLI routed through hive's inference translator, so there is no separate login.
 
+  Only `POST /v1/messages` is translated into an OpenAI `/v1/chat/completions` call. The Claude CLI also talks to its Anthropic host for housekeeping — telemetry batches (`/api/event_logging/...`), error reports, `POST /v1/messages/count_tokens` — and none of that has a meaning to an OpenAI-compatible gateway; forwarding it used to cost a gateway `400 Missing required parameter: 'messages'` per call, charged against the provider's request rate limit (roughly two failures per real completion in practice). The translator and the MITM reroute now answer those locally: `count_tokens` returns a chars-based estimate, anything under `/api/` returns `{}`, and any other path is a 404 in Anthropic error shape with a `WARN` log line naming the method and path, so a new CLI endpoint shows up in the hive log rather than as gateway noise. Inference-routed `claude` sessions are additionally launched with `DISABLE_TELEMETRY=1`, `DISABLE_ERROR_REPORTING=1`, and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`; subscription sessions are not.
+
 Every Model Gateway (and the bob backend) also accepts an optional `key_name` — a human-chosen LABEL for the configured key, e.g. `key_name: openrouter-prod-key`. It is safe-to-show metadata, not a secret: the dashboard's gateway row displays it as "Using key: `<name>`", or "(unnamed)" when no label is set, so operators can tell keys apart without ever seeing the value. See [`inference-backends.md`](../../docs/inference-backends.md) for a full YAML example.
 
 Kubernetes manifests for deploying inference backends (vllm Deployment, EPP RBAC, kustomization) are in [`deploy/inference/`](../deploy/inference/).
@@ -384,6 +386,12 @@ governor:
 - **Budget.** When the weekly token budget is exhausted, kicks are suppressed hive-wide (exempt agents excepted) until the period rolls over.
 
 Set `stale_timeout` with your cadences in mind: an agent kicked every 4h with a 30-minute stale timeout will look dead between kicks. The shipped packs use "longest cadence × 2".
+
+Cadences are not the only way an agent gets kicked: the additive `triggers:`
+config key declares CEL rules that kick a named agent directly off a
+source-control event (issue opened, PR opened, a label applied, a comment
+posted), independent of the governor's queue-depth cadence. See
+[CEL-based agent triggers](cel-triggers.md).
 
 ## ACMM levels: agent rosters as packs
 
@@ -528,7 +536,7 @@ This is the property operators most need to understand before enabling the featu
 
 - A dashboard save cannot turn `allow_github_prompt` on if the seed has it off.
 - A dashboard save cannot add a repo slug to `github_prompt_allowlist`.
-- A compromised or malicious dashboard overlay can neither widen the set of readable repos nor repoint an agent's `definition_source` at an arbitrary repo — only a seed edit (ConfigMap in Kubernetes, bind-mounted file in Docker/LXC) can do either.
+- A compromised or malicious dashboard overlay can neither widen the set of readable repos nor repoint an agent's `definition_source` at an arbitrary repo — only a seed edit (ConfigMap in Kubernetes, bind-mounted file under Docker, Podman or LXC) can do either.
 
 An empty allowlist denies every repo even with `allow_github_prompt: true` — the allowlist is required, not merely advisory.
 
@@ -613,7 +621,7 @@ Both polarities are enforced at **enumeration** — the point where GitHub issue
 - **[Documentation index](README.md)** — what hive is, setup, and the full topic-guide surface.
 - **[Architecture](architecture.md)** — process model, deterministic pipeline, governor loop, guardrails, and hub/spoke design.
 - **[Portable AgentDefinition format](../AGENT-DEFINITION.md)** — standalone YAML schema for agent imports, exports, and overlays.
-- **[AGENTS.md repo instructions](agents-md.md)** — the per-repo instruction file format Hive's parser understands. **Not wired into kicks today** — see the page for why.
+- **[AGENTS.md repo instructions](agents-md.md)** — the per-repo instruction file format Hive's parser understands. Injected into kicks once `project.checkouts_dir` gives Hive a checkout to read it from — see the page.
 - **[Dashboard route and health checks](health-checks.md)** — listener probes and alert behavior for stuck sessions and restart loops.
 - **[Troubleshooting](troubleshooting.md)** — stuck sessions, login expiry, restart loops, and notification checks.
 - **[ACMM policy matrix](acmm-policy-matrix.md)** — the full per-level, per-agent policy table.

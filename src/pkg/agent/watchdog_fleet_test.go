@@ -441,3 +441,48 @@ func TestNewestMtimeBounds(t *testing.T) {
 		t.Fatalf("newestMtime = %v ok=%v, want shallow file %v (depth bound must hold)", got, ok, want)
 	}
 }
+
+// TestWatchdogObserveCredentialProvenIsClaudeOnly pins the restriction that
+// keeps the reconciler's alert suppression honest.
+//
+// Observation.CredentialProven exists so the watchdog can tell "login prompt
+// over a credential a restart can redeem" from "genuinely logged out" and skip
+// paging an operator for the former. That is only safe where the evidence is
+// proof of USABILITY. credentialFileProves verifies an expiry for claude, but
+// answers copilot and codex by the PRESENCE of a token file — and a
+// stale-but-present copilot token is precisely the state an operator must be
+// told about. Letting presence read as proof would silence the alert that is
+// the only signal their fleet is logged out.
+func TestWatchdogObserveCredentialProvenIsClaudeOnly(t *testing.T) {
+	stageSharedClaudeCredential(t, map[string]any{
+		"accessToken": "sk-ant-oat-live",
+		"expiresAt":   time.Now().Add(4 * time.Hour).UnixMilli(),
+	})
+	m, panes := newWatchdogTestManager(t, map[string]string{
+		"scanner": "claude",
+		"helper":  "copilot",
+	})
+	// Presence-only evidence for copilot: credentialFileProves returns true on
+	// a held token without ever checking whether it still works.
+	m.SetCopilotToken("gho_stale_but_present")
+	(*panes)["scanner"] = "❯ "
+	(*panes)["helper"] = "❯ "
+
+	fleet := WatchdogFleet{M: m}
+
+	obs, err := fleet.Observe("scanner")
+	if err != nil {
+		t.Fatalf("observe claude agent: %v", err)
+	}
+	if !obs.CredentialProven {
+		t.Fatal("claude agent with a live credential must report CredentialProven: its expiry is verifiable")
+	}
+
+	obs, err = fleet.Observe("helper")
+	if err != nil {
+		t.Fatalf("observe copilot agent: %v", err)
+	}
+	if obs.CredentialProven {
+		t.Fatal("copilot evidence is presence-only and must never read as proof — doing so suppresses the operator's re-authentication alert")
+	}
+}

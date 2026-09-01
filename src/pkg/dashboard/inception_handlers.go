@@ -363,7 +363,11 @@ func (s *Server) handleInceptionDownload(w http.ResponseWriter, r *http.Request)
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.zip"`, safeName))
 
 	zw := zip.NewWriter(w)
-	defer zw.Close()
+	defer func() {
+		if err := zw.Close(); err != nil {
+			s.logger.Warn("inception scaffold archive close failed", "error", err)
+		}
+	}()
 
 	for _, f := range result.Files {
 		clean := filepath.Clean(f.Path)
@@ -372,9 +376,13 @@ func (s *Server) handleInceptionDownload(w http.ResponseWriter, r *http.Request)
 		}
 		fw, err := zw.Create(filepath.ToSlash(clean))
 		if err != nil {
+			s.logger.Warn("inception scaffold archive entry creation failed", "path", clean, "error", err)
 			continue
 		}
-		fw.Write([]byte(f.Content))
+		if _, err := fw.Write([]byte(f.Content)); err != nil {
+			s.logger.Warn("inception scaffold archive write failed", "path", clean, "error", err)
+			return
+		}
 	}
 }
 
@@ -444,7 +452,7 @@ func (s *Server) handleInceptionImport(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "file upload required", http.StatusBadRequest)
 		return
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	data, err := io.ReadAll(file)
 	if err != nil {
@@ -480,8 +488,12 @@ func (s *Server) handleInceptionImport(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			continue
 		}
-		content, _ := io.ReadAll(io.LimitReader(rc, maxFileBytes))
-		rc.Close()
+		content, readErr := io.ReadAll(io.LimitReader(rc, maxFileBytes))
+		closeErr := rc.Close()
+		if readErr != nil || closeErr != nil {
+			s.logger.Warn("inception wiki archive entry read failed", "file", baseName, "read_error", readErr, "close_error", closeErr)
+			continue
+		}
 
 		outPath := filepath.Join(wikiDir, baseName)
 		if err := os.WriteFile(outPath, content, 0o644); err != nil {
@@ -492,7 +504,11 @@ func (s *Server) handleInceptionImport(w http.ResponseWriter, r *http.Request) {
 
 	// Reconnect vault to pick up imported files
 	if s.deps.Knowledge != nil {
-		s.deps.Knowledge.ConnectVault(wikiDir, "inception-wiki")
+		if err := s.deps.Knowledge.ConnectVault(wikiDir, "inception-wiki"); err != nil {
+			s.logger.Warn("inception wiki vault reconnect failed", "error", err)
+			jsonError(w, "files imported but reconnecting the wiki vault failed", http.StatusInternalServerError)
+			return
+		}
 		if store := s.deps.Knowledge.GetVaultStore(wikiDir); store != nil {
 			store.Reindex()
 		}
@@ -643,7 +659,7 @@ func readJSON(r *http.Request, v interface{}) error {
 	if err != nil {
 		return err
 	}
-	defer r.Body.Close()
+	defer closeHTTPBody(r.Body)
 	if int64(len(body)) > maxInceptionBodyBytes {
 		return fmt.Errorf("request body exceeds %d bytes", maxInceptionBodyBytes)
 	}

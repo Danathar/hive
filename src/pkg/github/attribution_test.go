@@ -153,8 +153,14 @@ func attribPRMock(t *testing.T, postedBody *string) *httptest.Server {
 			// CreatePR resolves it here (kubestellar/hive#4928).
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"name":"r","default_branch":"main"}`)
+		case r.Method == "GET" && strings.Contains(r.URL.Path, "/compare/"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"files":[]}`)
 		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/pulls"):
 			_, _ = io.WriteString(w, `[]`)
+		case r.Method == "GET" && strings.Contains(r.URL.Path, "/issues/"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"number":9,"title":"ordinary issue","body":"implement the requested change","state":"open"}`)
 		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/pulls"):
 			raw, _ := io.ReadAll(r.Body)
 			var np map[string]any

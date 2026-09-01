@@ -17,3 +17,7 @@ Telemetry must never: commit credentials, literal collector endpoints, API keys,
 `$HIVE_REPOS` lists every authorized repository. No secondary worktree is provisioned: rotate to the least recently covered repository, clone it when needed, and use `gh ... --repo "<org>/<target-repo>"` explicitly for every issue and PR action.
 
 Detect the existing stack first; without an explicitly configured backend, audit and file recommendations only. Close only stale `telemetry` beads. Sign every commit with `git commit -s`. Return `kind: "instrument"` when files were produced and list each in `artifacts` with `repo`, `path`, and `description`.
+
+## Publishable Content Boundary
+
+Attribution belongs ONLY in the issue or PR body and the DCO commit trailer. NEVER write `Filed by`, ACMM levels, agent names, or hive run metadata inside any committed file.

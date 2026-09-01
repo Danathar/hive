@@ -267,7 +267,7 @@ func TestContributeLandingHasOpsTab(t *testing.T) {
 	// hydration is wired on tab-leaderboard open without any admin/role gate.
 	iLbPanel := strings.Index(body, `id="tab-leaderboard"`)
 	iOpsPanel := strings.Index(body, `id="tab-ops"`)
-	if iLbPanel < 0 || iOpsPanel < 0 || !(iOpsPanel < iLbPanel) {
+	if iLbPanel < 0 || iOpsPanel < 0 || iOpsPanel >= iLbPanel {
 		t.Errorf("Leaderboard panel must render after Operations: ops=%d leaderboard=%d", iOpsPanel, iLbPanel)
 	}
 	if !strings.Contains(body, `dp==='tab-leaderboard'&&!lbStarted`) {
@@ -290,10 +290,10 @@ func TestContributeLandingHasOpsTab(t *testing.T) {
 	if iManage < 0 || iAdmin < 0 || iOps < 0 || iClankers < 0 {
 		t.Fatalf("missing anchors: manage=%d admin=%d ops=%d clankers=%d", iManage, iAdmin, iOps, iClankers)
 	}
-	if !(iManage < iAdmin && iAdmin < iOps) {
+	if iManage >= iAdmin || iAdmin >= iOps {
 		t.Errorf("admin controls must render under Management (before Operations): manage=%d admin=%d ops=%d", iManage, iAdmin, iOps)
 	}
-	if !(iOps < iClankers) {
+	if iOps >= iClankers {
 		t.Errorf("Connected clankers must render under Operations (after tab-ops opens): ops=%d clankers=%d", iOps, iClankers)
 	}
 
@@ -1209,9 +1209,24 @@ func TestHivesOnboard(t *testing.T) {
 	var resp struct {
 		NextSteps []string `json:"next_steps"`
 	}
-	json.Unmarshal(w.Body.Bytes(), &resp)
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
 	if len(resp.NextSteps) < 3 {
-		t.Errorf("expected >=3 steps, got %d", len(resp.NextSteps))
+		t.Fatalf("expected >=3 steps, got %d", len(resp.NextSteps))
+	}
+
+	steps := strings.Join(resp.NextSteps, "\n")
+	for _, want := range []string{
+		"docker compose up -d",
+		"Quadlet",
+		"systemctl --user",
+		"src/docs/podman-standalone-quadlet.md",
+		"~/.config/hive/secrets/gh-app-key.pem",
+	} {
+		if !strings.Contains(steps, want) {
+			t.Errorf("onboarding steps do not mention %q: %q", want, steps)
+		}
 	}
 }
 

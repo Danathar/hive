@@ -15,10 +15,139 @@ import (
 
 // --- agentsRepoRoot ---
 
-func TestAgentsRepoRoot_ReturnsEmpty(t *testing.T) {
+// A hive that configures no checkout keeps the previous behavior exactly: no
+// root, so primeAgentsMd stays a no-op. This is the default and the common case.
+func TestAgentsRepoRoot_UnconfiguredIsEmpty(t *testing.T) {
 	s := New(&config.Config{}, slog.Default())
-	if got := s.agentsRepoRoot(); got != "" {
-		t.Errorf("agentsRepoRoot() = %q, want empty (no wired local checkout)", got)
+	if got := s.agentsRepoRoot("hive"); got != "" {
+		t.Errorf("agentsRepoRoot() = %q, want empty with no checkout configured", got)
+	}
+}
+
+// checkouts_dir is the explicit source: each repo is at "<dir>/<name>", and an
+// org-qualified slug resolves the same as the bare name.
+func TestAgentsRepoRoot_FromCheckoutsDir(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Project.Org = "kubestellar"
+	cfg.Project.CheckoutsDir = "/data/checkouts"
+	s := New(cfg, slog.Default())
+
+	want := filepath.Join("/data/checkouts", "hive")
+	for _, repo := range []string{"hive", "kubestellar/hive"} {
+		if got := s.agentsRepoRoot(repo); got != want {
+			t.Errorf("agentsRepoRoot(%q) = %q, want %q", repo, got, want)
+		}
+	}
+}
+
+// Per-repo, not global: a multi-repo hive must get each repo's own root, never
+// one repo's AGENTS.md injected into work on another.
+func TestAgentsRepoRoot_IsPerRepo(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Project.CheckoutsDir = "/data/checkouts"
+	s := New(cfg, slog.Default())
+
+	a, b := s.agentsRepoRoot("alpha"), s.agentsRepoRoot("beta")
+	if a == b {
+		t.Fatalf("two repos resolved to the same root %q", a)
+	}
+	if got, want := a, filepath.Join("/data/checkouts", "alpha"); got != want {
+		t.Errorf("agentsRepoRoot(alpha) = %q, want %q", got, want)
+	}
+}
+
+// policies.local_dir is a real checkout root, but of policies.repo — so it is
+// used only when that IS the repo being asked about.
+func TestAgentsRepoRoot_FromPoliciesLocalDir(t *testing.T) {
+	newCfg := func(policiesRepo string) *config.Config {
+		cfg := &config.Config{}
+		cfg.Project.Org = "kubestellar"
+		cfg.Policies.Repo = policiesRepo
+		cfg.Policies.LocalDir = "/data/policies"
+		return cfg
+	}
+
+	t.Run("matching repo uses the checkout", func(t *testing.T) {
+		for _, src := range []string{
+			"https://github.com/kubestellar/hive",
+			"https://github.com/kubestellar/hive.git",
+			"kubestellar/hive",
+			"hive",
+		} {
+			s := New(newCfg(src), slog.Default())
+			if got := s.agentsRepoRoot("hive"); got != "/data/policies" {
+				t.Errorf("policies.repo=%q: agentsRepoRoot = %q, want /data/policies", src, got)
+			}
+		}
+	})
+
+	t.Run("a different repo does not", func(t *testing.T) {
+		s := New(newCfg("https://github.com/kubestellar/hive-config"), slog.Default())
+		if got := s.agentsRepoRoot("hive"); got != "" {
+			t.Errorf("agentsRepoRoot = %q, want empty — the policies checkout is a different repo", got)
+		}
+	})
+
+	t.Run("a different org does not", func(t *testing.T) {
+		s := New(newCfg("https://github.com/someone-else/hive"), slog.Default())
+		if got := s.agentsRepoRoot("hive"); got != "" {
+			t.Errorf("agentsRepoRoot = %q, want empty — same name, different owner", got)
+		}
+	})
+}
+
+// checkouts_dir wins when both are set: it is the explicit per-repo source,
+// policies.local_dir is the incidental one.
+func TestAgentsRepoRoot_CheckoutsDirWins(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Project.Org = "kubestellar"
+	cfg.Project.CheckoutsDir = "/data/checkouts"
+	cfg.Policies.Repo = "https://github.com/kubestellar/hive"
+	cfg.Policies.LocalDir = "/data/policies"
+	s := New(cfg, slog.Default())
+
+	if got, want := s.agentsRepoRoot("hive"), filepath.Join("/data/checkouts", "hive"); got != want {
+		t.Errorf("agentsRepoRoot = %q, want %q", got, want)
+	}
+}
+
+// A repo name that would climb out of checkouts_dir resolves to no root rather
+// than to a path outside it.
+func TestAgentsRepoRoot_RejectsEscapingName(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Project.CheckoutsDir = "/data/checkouts"
+	s := New(cfg, slog.Default())
+
+	for _, repo := range []string{"..", ".", "a/../..", ""} {
+		if got := s.agentsRepoRoot(repo); got != "" && !strings.HasPrefix(got, "/data/checkouts/") {
+			t.Errorf("agentsRepoRoot(%q) = %q, escaped the checkouts dir", repo, got)
+		}
+	}
+}
+
+// The end-to-end claim of kubestellar/hive#5227: with a root threaded, a real
+// AGENTS.md on disk reaches the kick prompt. Before this wiring the root was
+// hardcoded empty and this was unreachable.
+func TestAgentsRepoRoot_ThreadedRootReachesTheKick(t *testing.T) {
+	checkouts := t.TempDir()
+	root := filepath.Join(checkouts, "hive")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const body = "Always run `make verify` before pushing."
+	if err := os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte(body+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{}
+	cfg.Project.Org = "kubestellar"
+	cfg.Project.PrimaryRepo = "hive"
+	cfg.Project.CheckoutsDir = checkouts
+	s := New(cfg, slog.Default())
+
+	got := s.primeAgentsMd(s.agentsRepoRoot(cfg.Project.PrimaryRepo))
+	if !strings.Contains(got, body) {
+		t.Fatalf("AGENTS.md body did not reach the injection; got %q", got)
 	}
 }
 

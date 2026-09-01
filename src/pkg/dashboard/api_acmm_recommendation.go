@@ -49,14 +49,14 @@ func (s *Server) buildACMMStatusInputs() acmmadvisor.StatusInputs {
 		// A hive with no explicit level detects as MinLevel (L1); see
 		// detectACMMLevel. Zero-value fallbacks keep this at a safe default.
 		CurrentLevel: acmmadvisor.MinLevel,
-		// GreenStreak is intentionally left at zero: the hive does not yet
-		// track a real green-CI streak as a first-class signal, and the
-		// advisor must never fabricate one. It therefore reads as "unknown /
-		// not yet earned", which only ever makes the advisor MORE conservative
-		// (it will not propose a raise on the strength of a made-up streak).
-		// When the signal becomes available, populate it here.
-		// TODO(acmm-signals): thread a real GreenStreak from CI history once
-		// tracked.
+		// GreenStreak IS real as of #5226: it is populated below from the
+		// green-CI streak the status-build path measures against the primary
+		// repo's default-branch Actions history. Until a measurement has
+		// actually succeeded it STAYS at zero — "unknown / not yet earned"
+		// rather than a fabricated number — which only ever makes the advisor
+		// MORE conservative. A repo with no CI at all reads as unknown, never
+		// as green. See Client.GreenCIStreak for what it measures and its
+		// known weaknesses (flake-sensitive, stale on quiet repos, capped).
 		//
 		// MergeSuccessRate IS real as of #3972: it is populated below from the
 		// fleet-stats collector's cached 90-day merged/rejected counts. See
@@ -86,6 +86,16 @@ func (s *Server) buildACMMStatusInputs() acmmadvisor.StatusInputs {
 		if rate, measured := mergeSuccessRateFromFleetStats(s.deps.FleetStats); measured {
 			in.MergeSuccessRate = rate
 		}
+	}
+
+	// Real green-CI streak (#5226), read from the cache the status-build path
+	// refreshes on the same pass it already fetches workflow health — no fresh
+	// GitHub call on this advisory request. When no measurement has ever
+	// succeeded (no GitHub client, API failure, or a repo with no CI history
+	// on its default branch) the signal STAYS at zero rather than reporting an
+	// unmeasured zero as a measured one.
+	if streak, measured := greenCIStreakSnapshot(); measured {
+		in.GreenStreak = streak
 	}
 
 	// Live queue/coverage signals come from the most recent status snapshot the

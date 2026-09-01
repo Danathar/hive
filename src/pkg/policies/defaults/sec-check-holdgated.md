@@ -84,3 +84,7 @@ Priority: 0 (critical/RCE/secret-exposed), 1 (high/auth-bypass), 2 (medium/info-
 7. For findings with a clear safe fix, create a worktree and open a hold-gated PR
 8. Create a bead for each finding
 9. Summarize security posture in your response, naming which repo you covered
+
+## Publishable Content Boundary
+
+Attribution belongs ONLY in the issue or PR body and the DCO commit trailer. NEVER write `Filed by`, ACMM levels, agent names, or hive run metadata inside any committed file.

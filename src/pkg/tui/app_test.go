@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/exp/teatest"
 )
 
@@ -42,42 +43,136 @@ func TestAppQuitsOnCtrlC(t *testing.T) {
 	tm.WaitFinished(t, teatest.WithFinalTimeout(finalWait))
 }
 
-// TestAppRendersSplash pins the one thing the frame draws. Asserting on the
-// text rather than a golden file keeps this test stable across the layout work
-// in later tasks: the splash line is the contract, its exact placement is not.
-func TestAppRendersSplash(t *testing.T) {
+// TestAppRendersGrid pins what a sized frame draws since T3: all four pane
+// titles, on screen at once. Asserting on the titles rather than a golden
+// file keeps this test stable across layout refinement — the full frame's
+// exact bytes are pinned separately by the golden test in pkg/tui/panes.
+func TestAppRendersGrid(t *testing.T) {
 	tm := teatest.NewTestModel(t, newModel(), teatest.WithInitialTermSize(80, 24))
 
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
-		return strings.Contains(string(b), splash)
+		for _, title := range paneTitles {
+			if !strings.Contains(string(b), title) {
+				return false
+			}
+		}
+		return true
 	}, teatest.WithDuration(finalWait))
 
 	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
 	tm.WaitFinished(t, teatest.WithFinalTimeout(finalWait))
 }
 
+// TestTabCyclesFocus drives tab and shift+tab through the real program, per
+// the T3 acceptance criteria. teatest rather than bare Update calls for the
+// same reason as TestAppQuits: input decoding is part of what is asserted —
+// shift+tab in particular arrives as its own key sequence, and a handler
+// matching the wrong spelling would pass a unit test that hand-builds the
+// message it expects.
+func TestTabCyclesFocus(t *testing.T) {
+	tm := teatest.NewTestModel(t, newModel(), teatest.WithInitialTermSize(80, 24))
+
+	// Two tabs forward, one back: ends on pane 1 iff both directions work
+	// and neither is a no-op. (2-0 would also pass if shift+tab did nothing
+	// and one tab was dropped, but then the direct cycle test below fails.)
+	tm.Send(tea.KeyMsg{Type: tea.KeyTab})
+	tm.Send(tea.KeyMsg{Type: tea.KeyTab})
+	tm.Send(tea.KeyMsg{Type: tea.KeyShiftTab})
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(finalWait))
+
+	final, ok := tm.FinalModel(t).(model)
+	if !ok {
+		t.Fatalf("final model has unexpected type %T", tm.FinalModel(t))
+	}
+	if final.focus != 1 {
+		t.Fatalf("after tab,tab,shift+tab focus = %d, want 1", final.focus)
+	}
+}
+
+// TestFocusCycleWrapsBothDirections pins the modulo arithmetic directly:
+// forward from the last pane wraps to the first, and backward from the first
+// wraps to the last — the negative-operand case the "+paneCount-1" spelling
+// exists for.
+func TestFocusCycleWrapsBothDirections(t *testing.T) {
+	m := newModel()
+	for i := 0; i < paneCount; i++ {
+		if m.focus != i {
+			t.Fatalf("tab cycle step %d: focus = %d, want %d", i, m.focus, i)
+		}
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+		m = next.(model)
+	}
+	if m.focus != 0 {
+		t.Fatalf("tab from last pane: focus = %d, want wrap to 0", m.focus)
+	}
+	back, _ := m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	if got := back.(model).focus; got != paneCount-1 {
+		t.Fatalf("shift+tab from pane 0: focus = %d, want wrap to %d", got, paneCount-1)
+	}
+}
+
+// TestFocusHighlightsExactlyOnePane pins the focused-border contract from the
+// issue ("the focused pane gets a highlighted border") in a way no golden
+// file drift can silently weaken: exactly one cell wears the thick border,
+// and tab moves it.
+func TestFocusHighlightsExactlyOnePane(t *testing.T) {
+	sized, _ := newModel().Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m := sized.(model)
+
+	// The thick border's top-left corner only appears on the focused cell.
+	const thickCorner = "┏"
+	if got := strings.Count(m.View(), thickCorner); got != 1 {
+		t.Fatalf("frame has %d thick-border corners, want exactly 1 (one focused pane)", got)
+	}
+	before := m.View()
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	after := next.(model).View()
+	if before == after {
+		t.Fatal("tab did not move the focus highlight: frame unchanged")
+	}
+	if got := strings.Count(after, thickCorner); got != 1 {
+		t.Fatalf("after tab, frame has %d thick-border corners, want exactly 1", got)
+	}
+}
+
 // TestViewBeforeSizeMsg guards the zero-size path in View. bubbletea can call
 // View before the first tea.WindowSizeMsg arrives; centering into a 0x0 box
 // renders nothing, so an unsized frame would flash blank rather than telling
 // the operator how to get out.
+//
+// Since T24 it also pins the ORDER of View's two early returns: width 0 means
+// "not measured yet", not "a zero-width terminal", so it must keep reaching
+// the splash rather than the below-minimum message — which names a size and
+// would be a claim about a terminal nobody has measured.
 func TestViewBeforeSizeMsg(t *testing.T) {
 	if got := newModel().View(); got != splash {
 		t.Fatalf("unsized View() = %q, want %q", got, splash)
 	}
 }
 
-// TestViewCentersWhenSized checks the sized path actually pads, so a future
-// refactor cannot quietly drop the centering and still pass on substring
-// matches alone.
-func TestViewCentersWhenSized(t *testing.T) {
-	m, _ := newModel().Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+// TestViewFillsTerminalExactly checks the grid arithmetic: the frame is
+// exactly as tall as the terminal (header + two grid rows + footer), and no
+// rendered line overflows the width — the remainder-absorbing split, off by
+// one, would do both.
+func TestViewFillsTerminalExactly(t *testing.T) {
+	const w, h = 80, 24
+	m, _ := newModel().Update(tea.WindowSizeMsg{Width: w, Height: h})
 
-	view := m.View()
-	if !strings.Contains(view, splash) {
-		t.Fatalf("sized View() does not contain %q:\n%s", splash, view)
+	view := m.(model).View()
+	lines := strings.Split(view, "\n")
+	if len(lines) != h {
+		t.Fatalf("sized View() renders %d lines, want exactly %d", len(lines), h)
 	}
-	if lines := strings.Count(view, "\n"); lines < 2 {
-		t.Fatalf("sized View() has %d newlines, want a padded frame:\n%s", lines, view)
+	for i, line := range lines {
+		if lw := lipgloss.Width(line); lw > w {
+			t.Fatalf("line %d is %d cells wide, want <= %d:\n%q", i, lw, w, line)
+		}
+	}
+	for _, want := range []string{m.(model).headerText(), footerText} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("sized View() missing %q", want)
+		}
 	}
 }
 
@@ -125,5 +220,178 @@ func TestRunOverPipes(t *testing.T) {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("run() output missing alt-screen sequence %q", want)
 		}
+	}
+}
+
+// helpKey is the "?" keypress, spelled once so the overlay tests cannot drift
+// apart on how the binding is sent.
+var helpKey = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("?")}
+
+// TestHelpOverlayTogglesOnQuestionMark: "?" raises the overlay and a second
+// "?" puts it away, which is the toggle the design doc's table promises.
+//
+// The second press works through the any-key-dismiss branch rather than a
+// dedicated toggle case — the test asserts the observable behaviour, so that
+// implementation detail is free to change.
+func TestHelpOverlayTogglesOnQuestionMark(t *testing.T) {
+	m := newModel()
+	m.width, m.height = 100, 30
+	if m.helpVisible {
+		t.Fatal("helpVisible = true before any key; the overlay must start hidden")
+	}
+
+	next, cmd := m.Update(helpKey)
+	shown, ok := next.(model)
+	if !ok {
+		t.Fatalf("Update returned unexpected type %T", next)
+	}
+	if !shown.helpVisible {
+		t.Fatal(`helpVisible = false after "?"; the overlay must open`)
+	}
+	if cmd != nil {
+		t.Error(`"?" returned a command; opening the overlay must not quit or fetch`)
+	}
+
+	next, _ = shown.Update(helpKey)
+	hidden, ok := next.(model)
+	if !ok {
+		t.Fatalf("Update returned unexpected type %T", next)
+	}
+	if hidden.helpVisible {
+		t.Fatal(`helpVisible = true after a second "?"; the binding must toggle`)
+	}
+}
+
+// TestHelpOverlayDismissesOnAnyKey covers the "any key dismisses" contract
+// across keys that take genuinely different paths through the app's handling:
+// a bound global, an unbound rune, and a special key.
+//
+// "q" is the one that matters. It is the app's quit binding, so if the dismiss
+// branch did not come FIRST it would end the program while the reader believed
+// they were closing a dialog — the one misfire a help screen must not have.
+func TestHelpOverlayDismissesOnAnyKey(t *testing.T) {
+	cases := []struct {
+		name string
+		key  tea.KeyMsg
+	}{
+		{"q, which is otherwise quit", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")}},
+		{"tab, which is otherwise focus", tea.KeyMsg{Type: tea.KeyTab}},
+		{"an unbound rune", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")}},
+		{"a special key", tea.KeyMsg{Type: tea.KeyEsc}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newModel()
+			m.width, m.height = 100, 30
+			m.helpVisible = true
+
+			next, cmd := m.Update(tc.key)
+			got, ok := next.(model)
+			if !ok {
+				t.Fatalf("Update returned unexpected type %T", next)
+			}
+			if got.helpVisible {
+				t.Error("helpVisible = true; every key must dismiss the overlay")
+			}
+			if cmd != nil {
+				t.Error("dismissing returned a command; the key must be swallowed, not also acted on")
+			}
+		})
+	}
+}
+
+// TestHelpOverlaySwallowsQuit is the same guarantee as the "q" case above, but
+// driven through the REAL bubbletea loop: a unit test on Update would still
+// pass if tea.Quit reached the program by some other path.
+//
+// The program must still be running after "?" then "q", and must exit only on
+// the "q" that follows.
+func TestHelpOverlaySwallowsQuit(t *testing.T) {
+	tm := teatest.NewTestModel(t, newModel(), teatest.WithInitialTermSize(100, 30))
+
+	tm.Send(helpKey)
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")}) // dismisses
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")}) // quits
+	tm.WaitFinished(t, teatest.WithFinalTimeout(finalWait))
+
+	final, ok := tm.FinalModel(t).(model)
+	if !ok {
+		t.Fatalf("final model has unexpected type %T", tm.FinalModel(t))
+	}
+	// Reaching here means the program exited, and it can only have been the
+	// third key: if the second "q" had quit, the overlay would still be up.
+	if final.helpVisible {
+		t.Error("helpVisible = true at exit; the first q should have dismissed the overlay")
+	}
+}
+
+// TestHelpOverlayDoesNotReachPanes: while the overlay is up, keys are consumed
+// by it and never routed to the focused pane, so a pane binding cannot fire
+// underneath a modal the operator is reading.
+func TestHelpOverlayDoesNotReachPanes(t *testing.T) {
+	m := newModel()
+	m.width, m.height = 100, 30
+	m.helpVisible = true
+	before := m.focus
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	got, ok := next.(model)
+	if !ok {
+		t.Fatalf("Update returned unexpected type %T", next)
+	}
+	if got.focus != before {
+		t.Errorf("focus moved from %d to %d while the overlay was up; tab must only dismiss", before, got.focus)
+	}
+}
+
+// TestHelpOverlayViewReplacesFrame pins what the operator sees: the overlay's
+// content is on screen, the grid's chrome is not, and the frame still fills the
+// terminal exactly so dismissing it cannot leave a resized screen behind.
+func TestHelpOverlayViewReplacesFrame(t *testing.T) {
+	m := newModel()
+	m.width, m.height = 100, 30
+	m.helpVisible = true
+
+	view := m.View()
+	if !strings.Contains(view, "Keybindings") {
+		t.Error("overlay view does not carry the table's title")
+	}
+	if !strings.Contains(view, "press any key to dismiss") {
+		t.Error("overlay view does not say how to close itself")
+	}
+	// The grid's footer strip is part of the frame the overlay covers.
+	if strings.Contains(view, footerText) {
+		t.Error("the grid's footer is visible through the overlay; it is modal, not translucent")
+	}
+	if got := lipgloss.Height(view); got != 30 {
+		t.Errorf("overlay frame height = %d, want 30", got)
+	}
+	if got := lipgloss.Width(view); got != 100 {
+		t.Errorf("overlay frame width = %d, want 100", got)
+	}
+}
+
+// TestFooterAdvertisesHelp: the footer strip names only bindings that exist,
+// and "?" now does. An operator who never discovers the overlay may as well not
+// have it.
+func TestFooterAdvertisesHelp(t *testing.T) {
+	if !strings.Contains(footerText, "? help") {
+		t.Errorf("footerText = %q, want it to advertise the help binding", footerText)
+	}
+	m := newModel()
+	m.width, m.height = 100, 30
+	if !strings.Contains(m.View(), "? help") {
+		t.Error("the rendered frame does not advertise ? help")
+	}
+}
+
+func TestFooterAdvertisesAttach(t *testing.T) {
+	if !strings.Contains(footerText, "a attach") {
+		t.Errorf("footerText = %q, want it to advertise the attach binding", footerText)
+	}
+	m := newModel()
+	m.width, m.height = 100, 30
+	if !strings.Contains(m.View(), "a attach") {
+		t.Error("the rendered frame does not advertise a attach")
 	}
 }

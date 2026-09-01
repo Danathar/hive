@@ -659,6 +659,18 @@ type ProjectConfig struct {
 	// polarity is Governor.Labels.Exempt, which wins on conflict. Absent/empty
 	// = no filtering, the pre-existing behavior. See IssueFilterConfig.
 	IssueFilter IssueFilterConfig `yaml:"issue_filter,omitempty"`
+	// CheckoutsDir is a host-local directory holding one checkout per monitored
+	// repo, as "<CheckoutsDir>/<repo name>" — the bare name from Repos, without
+	// the org. It is how an operator supplies the per-repo checkout root the
+	// AGENTS.md convention needs (kubestellar/hive#5227): Hive agents work over
+	// the API and keep no clones of their own, so without this there is no local
+	// path for the scheduler to read a repo's AGENTS.md from.
+	//
+	// Optional and additive. Empty (the default) means no checkout root, which
+	// is exactly the previous behavior — AGENTS.md injection stays a no-op. A
+	// directory that is absent or holds no AGENTS.md is also a no-op; nothing
+	// here can fail a kick. See CheckoutRootFor.
+	CheckoutsDir string `yaml:"checkouts_dir,omitempty"`
 }
 
 const (
@@ -677,6 +689,31 @@ func (p *ProjectConfig) ForgeKind() string {
 		return ForgeGitHub
 	}
 	return p.Forge
+}
+
+// CheckoutRootFor returns the host-local checkout root for one monitored repo,
+// or "" when none is configured. repo may be a bare name ("hive") or an
+// org-qualified slug ("kubestellar/hive"); only the name portion is used, since
+// CheckoutsDir is keyed by bare repo name.
+//
+// Returning "" is the no-op case and is deliberately the default: a hive that
+// never sets checkouts_dir behaves exactly as it did before this existed.
+func (p *ProjectConfig) CheckoutRootFor(repo string) string {
+	dir := strings.TrimSpace(p.CheckoutsDir)
+	name := strings.TrimSpace(repo)
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		name = name[i+1:]
+	}
+	if dir == "" || name == "" {
+		return ""
+	}
+	// Refuse a name that would escape CheckoutsDir. A repo name comes from
+	// config rather than from a forge, but this is a filesystem path built from
+	// a string and the guard costs nothing.
+	if name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
+		return ""
+	}
+	return filepath.Join(dir, name)
 }
 
 // PRsAllowed returns whether agents may open pull requests. Defaults to true.
@@ -999,6 +1036,20 @@ type AgentConfig struct {
 
 	// Connections declares external service integrations (MCP servers, APIs, knowledge sources).
 	Connections []ConnectionConfig `yaml:"connections,omitempty" json:"connections,omitempty"`
+
+	// Skills names reusable "how to do X" skills to resolve out of the hive's
+	// skill registry (pkg/skillreg, loaded from the host-local skills directory)
+	// and inject into this agent's kick context. Names are resolved at kick
+	// time, so editing a skill file takes effect on the next kick without a
+	// restart. An unknown name is skipped, not fatal: a typo degrades the kick
+	// rather than blocking the agent.
+	//
+	// This is deliberately host-local rather than per-repo. Hive agents work
+	// over the GitHub API and have no guaranteed per-repo checkout, so a
+	// repo-declared skills directory would resolve to nothing on most kicks;
+	// the registry directory is the same kind of operator-managed volume as
+	// /data/policies and is present on every hive host.
+	Skills []string `yaml:"skills,omitempty" json:"skills,omitempty"`
 
 	// Managed is true for agents loaded from the overlay directory (not base config).
 	Managed bool `yaml:"-" json:"managed"`
@@ -4148,7 +4199,7 @@ func ParseEnvFile(path string) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // read-only fd; nothing to lose on close error
 
 	result := make(map[string]string)
 	scanner := bufio.NewScanner(f)
@@ -4865,7 +4916,7 @@ func IsInferenceBackend(backend string) bool {
 // a backend here without also updating the shell side (or, if it genuinely
 // belongs on only one side, documenting why in cliBackendExceptions) fails
 // that test.
-var CLIBackends = []string{"claude", "copilot", "goose", "codex", "pi", "bob", "aider", "gemini", "agy"}
+var CLIBackends = []string{"claude", "copilot", "goose", "codex", "pi", "bob", "aider", "gemini", "agy", "opencode", "kilo"}
 
 // IsCLIBackend returns true if the backend launches an agentic CLI binary.
 func IsCLIBackend(backend string) bool {
@@ -4946,7 +4997,7 @@ func (c *Config) validate() error {
 	// empty github block validate and silently boot a hive with no credentials
 	// at all. Only a forge the operator actually wrote counts.
 	if c.GitHub.Token == "" && c.GitHub.AppID == 0 &&
-		!(strings.TrimSpace(c.GitHub.Forge_) != "" && c.GitHub.ResolvedAppID() != 0) {
+		(strings.TrimSpace(c.GitHub.Forge_) == "" || c.GitHub.ResolvedAppID() == 0) {
 		return fmt.Errorf("github.token, github.app_id or github.forge is required")
 	}
 	if err := c.Governor.LiteLLM.Validate(); err != nil {
@@ -5355,10 +5406,10 @@ func (c *Config) saveLocked() error {
 		}
 	} else {
 		if _, err := f.Write(data); err != nil {
-			f.Close()
+			_ = f.Close() // best-effort cleanup; the write error is what's recorded
 			srcErr = fmt.Errorf("writing config: %w", err)
 		} else if err := f.Sync(); err != nil {
-			f.Close()
+			_ = f.Close() // best-effort cleanup; the sync error is what's recorded
 			srcErr = fmt.Errorf("syncing config: %w", err)
 		} else if err := f.Close(); err != nil {
 			srcErr = fmt.Errorf("closing config: %w", err)
@@ -5374,11 +5425,15 @@ func (c *Config) saveLocked() error {
 	// renamed or removed here — see RuntimeConfigFileLegacy.
 	runtimePath := RuntimeConfigFile
 	var runtimeErr error
-	if err := os.WriteFile(runtimePath, data, 0o644); err != nil {
+	// 0600, not 0644: the marshaled config carries dashboard.auth_token (and
+	// github.token in PAT mode), and /data is world-traversable on hive
+	// hosts, so a group/world-readable runtime config hands the dashboard
+	// owner credential to every unprivileged agent user (#5331).
+	if err := os.WriteFile(runtimePath, data, 0o600); err != nil {
 		// Common cause: init container created the file as root, runtime user
 		// can't overwrite. Remove and retry so runtime state is not silently lost.
-		os.Remove(runtimePath)
-		if retryErr := os.WriteFile(runtimePath, data, 0o644); retryErr != nil {
+		_ = os.Remove(runtimePath) // best-effort; the retry's own WriteFile error is what's recorded below
+		if retryErr := os.WriteFile(runtimePath, data, 0o600); retryErr != nil {
 			runtimeErr = retryErr
 			log.Printf("[config] warning: failed to write PVC runtime config to %s (even after remove): %v", runtimePath, retryErr)
 		} else {
@@ -5386,6 +5441,12 @@ func (c *Config) saveLocked() error {
 		}
 	} else {
 		log.Printf("[config] PVC runtime config written to %s", runtimePath)
+		// os.WriteFile's mode only applies when it CREATES the file; a
+		// pre-existing world-readable inode (every hive deployed before
+		// this fix) keeps its old 0644 bits, so tighten explicitly.
+		if chmodErr := os.Chmod(runtimePath, 0o600); chmodErr != nil {
+			log.Printf("[config] warning: failed to tighten permissions on %s: %v", runtimePath, chmodErr)
+		}
 	}
 
 	overlayErr := c.saveDashboardOverlay()
@@ -5456,6 +5517,17 @@ var DashboardOverlayFile = "/data/hive.yaml.dashboard"
 // production always uses the fixed in-cluster path.
 var saTokenFile = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 
+// SetSATokenFileForTest points IsKubernetesPod's serviceaccount-token probe
+// at path and returns a restore func. Out-of-package tests that need the
+// non-Kubernetes branch call this with a non-existent path (alongside
+// clearing KUBERNETES_SERVICE_HOST) so they stay hermetic on hosts that
+// really are pods — in-cluster CI runners and dev hives.
+func SetSATokenFileForTest(path string) func() {
+	orig := saTokenFile
+	saTokenFile = path
+	return func() { saTokenFile = orig }
+}
+
 // IsKubernetesPod reports whether the process is running inside a
 // Kubernetes pod (mirrors the entrypoint's IS_KUBERNETES detection).
 func IsKubernetesPod() bool {
@@ -5501,19 +5573,27 @@ func (c *Config) saveDashboardOverlay() error {
 		return err
 	}
 	tmpPath := DashboardOverlayFile + ".tmp"
-	const overlayFileMode = 0o644
+	// 0600, not 0644: dashboardOverlayBytes only folds the dashboard auth
+	// token back to its env form when it matches a bootstrap env var — a
+	// dashboard-minted token is persisted verbatim, so the overlay is not
+	// reliably secret-free (#5331).
+	const overlayFileMode = 0o600
 	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, overlayFileMode)
 	if err != nil {
 		log.Printf("[config] warning: failed to open dashboard overlay temp file %s (dashboard saves will not survive pod restarts): %v", tmpPath, err)
 		return err
 	}
+	// OpenFile's mode only applies on create; a leftover 0644 tmp file from a
+	// crash before this fix would otherwise carry its old bits through the
+	// rename. Best-effort: the rename below installs whatever mode f has.
+	_ = f.Chmod(overlayFileMode)
 	if _, err := f.Write(data); err != nil {
-		f.Close()
+		_ = f.Close() // best-effort cleanup; the write error is what's returned
 		log.Printf("[config] warning: failed to write dashboard overlay temp file %s (dashboard saves will not survive pod restarts): %v", tmpPath, err)
 		return err
 	}
 	if err := f.Sync(); err != nil {
-		f.Close()
+		_ = f.Close() // best-effort cleanup; the sync error is what's returned
 		log.Printf("[config] warning: failed to fsync dashboard overlay temp file %s (dashboard saves will not survive pod restarts): %v", tmpPath, err)
 		return err
 	}

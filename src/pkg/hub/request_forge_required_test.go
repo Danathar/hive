@@ -254,10 +254,10 @@ func TestRequestForgeSurvivesToApprovedHive(t *testing.T) {
 
 	// And the host must actually change downstream behavior — that is the whole
 	// reason it has to be captured.
-	if api := gheAPIURLForHost(h.GitHubHost); api == "" {
+	if api := forgeAPIURLForHost("", h.GitHubHost); api == "" {
 		t.Errorf("a GHE host must yield a GHE API URL, got empty for %q", h.GitHubHost)
 	}
-	if gheAPIURLForHost("") != "" {
+	if forgeAPIURLForHost("", "") != "" {
 		t.Error("an empty host must yield no GHE API URL (public github.com default)")
 	}
 }

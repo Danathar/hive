@@ -68,13 +68,20 @@ type Credentials struct {
 }
 
 // OAuthTokens holds the token set stored inside the credentials file.
+//
+// RefreshTokenExpiresAt is carried even though hive never mints it: Claude
+// Code writes it, and a struct that dropped the field would silently delete
+// the only evidence that distinguishes "this login is over" from "this access
+// token aged out and the next CLI start will mint a new one" — see
+// HasUsableToken.
 type OAuthTokens struct {
-	AccessToken      string   `json:"accessToken"`
-	RefreshToken     string   `json:"refreshToken,omitempty"`
-	ExpiresAt        int64    `json:"expiresAt"`
-	Scopes           []string `json:"scopes"`
-	SubscriptionType string   `json:"subscriptionType,omitempty"`
-	RateLimitTier    string   `json:"rateLimitTier,omitempty"`
+	AccessToken           string   `json:"accessToken"`
+	RefreshToken          string   `json:"refreshToken,omitempty"`
+	ExpiresAt             int64    `json:"expiresAt"`
+	RefreshTokenExpiresAt int64    `json:"refreshTokenExpiresAt,omitempty"`
+	Scopes                []string `json:"scopes"`
+	SubscriptionType      string   `json:"subscriptionType,omitempty"`
+	RateLimitTier         string   `json:"rateLimitTier,omitempty"`
 }
 
 // tokenResponse is the raw response from the Claude token endpoint.
@@ -149,7 +156,7 @@ func ExchangeCode(code, codeVerifier, redirectURI string) (*OAuthTokens, error) 
 	if err != nil {
 		return nil, fmt.Errorf("token exchange request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -203,27 +210,84 @@ func WriteCredentials(tokens *OAuthTokens, path string) error {
 	return nil
 }
 
-// ReadAccessToken reads the access token from the credentials file.
-// Returns empty string if the file doesn't exist or is malformed.
-func ReadAccessToken(path string) string {
+// LoadTokens parses the credentials file and returns the stored token set, or
+// nil when the file is absent, malformed, or carries no token block. It never
+// applies an expiry rule — callers decide what a stale token means to them.
+func LoadTokens(path string) *OAuthTokens {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return ""
+		return nil
 	}
 	var creds Credentials
 	if err := json.Unmarshal(data, &creds); err != nil {
+		return nil
+	}
+	return creds.ClaudeAIOAuth
+}
+
+// expired reports whether a millisecond epoch stamp is in the past. A zero or
+// negative stamp is "no expiry recorded", which is never treated as expired —
+// fabricating an expiry from a missing one is how a working credential gets
+// declared dead.
+func expired(unixMilli int64, now time.Time) bool {
+	return unixMilli > 0 && unixMilli < now.UnixMilli()
+}
+
+// ReadAccessToken reads the access token from the credentials file.
+// Returns empty string if the file doesn't exist or is malformed.
+//
+// An EXPIRED access token reads as absent, deliberately: every caller of this
+// function wants a string to put in an Authorization header, and sending an
+// expired one manufactures a 401. Callers asking the different question — "can
+// this credential still get an agent working?" — must use HasUsableToken.
+func ReadAccessToken(path string) string {
+	tokens := LoadTokens(path)
+	if tokens == nil {
 		return ""
 	}
-	if creds.ClaudeAIOAuth == nil {
+	if expired(tokens.ExpiresAt, time.Now()) {
 		return ""
 	}
-	if creds.ClaudeAIOAuth.ExpiresAt > 0 && creds.ClaudeAIOAuth.ExpiresAt < time.Now().UnixMilli() {
-		return ""
-	}
-	return creds.ClaudeAIOAuth.AccessToken
+	return tokens.AccessToken
 }
 
 // HasValidToken returns true if a valid, non-expired Claude token exists.
 func HasValidToken(path string) bool {
 	return ReadAccessToken(path) != ""
+}
+
+// HasUsableToken reports whether this credential can put an agent back to work
+// WITHOUT a human completing an OAuth flow — either the access token is still
+// live, or it has aged out but the refresh grant behind it has not.
+//
+// The distinction is not academic; it is the difference between the two
+// recoveries hive can prescribe, and they are nothing alike:
+//
+//   - refreshable → RESTART THE CLI. Claude Code redeems the refresh token
+//     when a process starts, so a relaunch mints a new access token from the
+//     file already on disk. Measured on a live hive (2026-09-01): a credential
+//     whose access token had expired eight hours earlier produced a working
+//     agent on the first restart, with a refresh grant still 28 days from its
+//     own expiry.
+//   - not refreshable → OPERATOR LOGIN. Nothing on disk can mint a token; a
+//     human has to authenticate.
+//
+// Claude access tokens live 8 hours (measured: mint-to-expiresAt on a live
+// credential), so the refreshable state is the ROUTINE
+// one — a hive whose agents run longer than half a day enters it daily. Every
+// hive decision that reads "expired" as "logged out" therefore pages a human
+// once a day for a credential that would have healed itself on a restart.
+//
+// Positive evidence only: an unreadable or absent file returns false, leaving
+// callers exactly where they were before they asked.
+func HasUsableToken(path string) bool {
+	tokens := LoadTokens(path)
+	if tokens == nil {
+		return false
+	}
+	now := time.Now()
+	if tokens.AccessToken != "" && !expired(tokens.ExpiresAt, now) {
+		return true
+	}
+	return tokens.RefreshToken != "" && !expired(tokens.RefreshTokenExpiresAt, now)
 }

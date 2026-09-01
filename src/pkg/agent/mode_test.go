@@ -55,27 +55,6 @@ func TestAgentModeSuffix(t *testing.T) {
 	}
 }
 
-func TestSuffixForLevel(t *testing.T) {
-	tests := []struct {
-		mode  AgentMode
-		level int
-		want  string
-	}{
-		{ModeIssuesAndPRs, 3, "-full"},
-		{ModeIssuesAndPRs, 4, "-full"},
-		{ModeIssuesAndPRs, 5, "-holdgated"},
-		{ModeIssuesAndPRs, 6, "-full"},
-		{ModeAdvisory, 3, "-advisory"},
-		{ModeIssuesOnly, 4, "-issues"},
-		{ModeIssuesPRsMerge, 6, "-automerge"},
-	}
-	for _, tt := range tests {
-		if got := tt.mode.SuffixForLevel(tt.level); got != tt.want {
-			t.Errorf("AgentMode(%d).SuffixForLevel(%d) = %q, want %q", tt.mode, tt.level, got, tt.want)
-		}
-	}
-}
-
 func TestAgentModeCapabilities(t *testing.T) {
 	tests := []struct {
 		mode      AgentMode

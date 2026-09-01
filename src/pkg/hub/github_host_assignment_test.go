@@ -110,7 +110,7 @@ func TestAssignmentGitHubHostPrecedence(t *testing.T) {
 				t.Errorf("GitHubHost = %q, want %q", h.GitHubHost, tc.wantHost)
 			}
 			// The host only matters because of what it makes the heartbeat push.
-			if got := gheAPIURLForHost(h.GitHubHost); got != tc.wantAPIURL {
+			if got := forgeAPIURLForHost("", h.GitHubHost); got != tc.wantAPIURL {
 				t.Errorf("pushed github_api_url = %q, want %q", got, tc.wantAPIURL)
 			}
 		})

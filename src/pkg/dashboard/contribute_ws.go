@@ -207,9 +207,13 @@ type WSMessage struct {
 	Message           string `json:"message,omitempty"`
 	RegistrationToken string `json:"registration_token,omitempty"`
 	CLIBackend        string `json:"cli_backend,omitempty"`
-	Model             string `json:"model,omitempty"`
-	ReasoningEffort   string `json:"reasoning_effort,omitempty"`
-	TaskID            string `json:"task_id,omitempty"`
+	// Provider is optional, bounded receipt evidence derived by Pi relays from
+	// their canonical provider/model preference. It is never assignment or
+	// routing authority; Model remains the canonical selection transport.
+	Provider        string `json:"provider,omitempty"`
+	Model           string `json:"model,omitempty"`
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	TaskID          string `json:"task_id,omitempty"`
 	// TaskGen is the assignment GENERATION / lease token for this task (kubestellar/
 	// hive#2568, the Gate). The hub stamps it on task_assign; the relay echoes it back
 	// on task_progress / task_complete / task_failed. The hub rejects any completion or
@@ -312,6 +316,18 @@ type WSMessage struct {
 	// keeps yielding no work — precisely the signal needed to go answer the
 	// gating question. Truncated server-side to noWorkReasonMaxLen.
 	VerdictReason string `json:"verdict_reason,omitempty"`
+	// CompletionSignal records WHICH signal ended an interactive task
+	// (kubestellar/hive#5376): "verdict" when the agent printed its own
+	// HIVE_VERDICT: line, "chrome_idle" when it never did and the relay fell
+	// back to a bounded grace period of idle-looking terminal chrome.
+	//
+	// Diagnostic only — it changes no cooldown, no trust and no selection. It
+	// exists so per-backend sentinel non-compliance is MEASURABLE rather than
+	// guessed at: chrome inference is the mechanism behind thirteen separate
+	// false-completion issues, and this field is how an operator sees which
+	// backends are still relying on it. Absent from relays predating #5376 and
+	// from the headless path, which takes the CLI's exit code instead.
+	CompletionSignal string `json:"completion_signal,omitempty"`
 	// Permanent marks a task_failed the relay will not retry: it exhausted its
 	// per-task CLI-restart budget and gave up (see MAX_TASK_CLI_RESTARTS in
 	// bin/contributor-relay.sh). Reassigning the same work item to the same
@@ -354,6 +370,30 @@ func (t *WSTaskAssign) identityKey() string {
 		return t.Key
 	}
 	return worksource.Ref{Repo: t.Repo, Number: t.Number}.Key()
+}
+
+// assignDesc renders one assigned work item for the activity feed:
+// "<kind> <canonical identity>: <title>", falling back to the given task id
+// when the item has no canonical identity at all (a synthetic pr-review sweep).
+//
+// THE DEFECT THIS REPLACES (kubestellar/hive#5120): every feed entry derived
+// its label from Number. External work items — Linear, Jira — deliberately
+// carry Number == 0 and put their identity in Key/ExternalID (#4245), so a
+// Linear ticket was announced as "issue acme/team#0: …" on pickup and as a
+// bare internal task id on completion: the two entries for the SAME item did
+// not match each other, and every zero-numbered item in a repo rendered
+// identically. WSTaskAssign's own doc comment records where that exact
+// mistake led on the assignment path — two external items colliding as
+// "repo#0" in the double-assignment guard — and #4245 fixed it there; the
+// display layer kept it.
+//
+// For GitHub work the output is byte-identical to the old %s#%d rendering,
+// because Ref.Key() spells a numbered item "repo#number".
+func assignDesc(kind, key, title, fallback string) string {
+	if key == "" {
+		return fallback
+	}
+	return fmt.Sprintf("%s %s: %s", kind, key, title)
 }
 
 const maxActivityEntries = 50
@@ -856,7 +896,10 @@ func (h *ContributeWSHub) saveActivity() {
 		return
 	}
 	path := h.activityPath()
-	os.MkdirAll(filepath.Dir(path), 0o755)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		h.logger.Warn("[contribute-ws] activity directory creation failed", "error", err)
+		return
+	}
 	tmpPath := path + ".tmp"
 	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
 		h.logger.Warn("[contribute-ws] activity write failed", "error", err)
@@ -875,6 +918,30 @@ func (h *ContributeWSHub) activityPath() string {
 }
 
 const activityDebounceSecs = 60
+
+// taskDescOf renders an assigned task for the activity feed.
+//
+// Identity comes from identityKey(), the same canonical, source-aware spelling
+// the hub keys in-flight work on (#4245): the explicit Key when present,
+// "repo#number" otherwise. Deriving it from Number alone would have been wrong
+// for external work — a Linear or Jira item deliberately carries Number == 0 and
+// puts its identity in Key/ExternalID, so treating "numberless" as "synthetic"
+// discards exactly the identity that item has, and every such release would read
+// as an opaque task id.
+//
+// A genuinely synthetic task — a pr-review sweep, which has no work item behind
+// it and therefore no canonical key — falls back to its task id, which is all it
+// has ever had.
+func taskDescOf(task *WSTaskAssign) string {
+	if task == nil {
+		return ""
+	}
+	// Delegates to assignDesc (#5120), the one renderer every feed entry goes
+	// through — this typed wrapper exists so the release sites (#5097) keep
+	// their nil-tolerant one-argument call shape. Two copies of the format
+	// string would drift; one already almost did.
+	return assignDesc(task.Kind, task.identityKey(), task.Title, task.TaskID)
+}
 
 func (h *ContributeWSHub) addActivity(username, action, role, cli, model, effort, task string) {
 	h.activityMu.Lock()
@@ -996,7 +1063,10 @@ func (h *ContributeWSHub) saveNoPRStreaks() {
 		return
 	}
 	path := h.noPRStreaksPath()
-	os.MkdirAll(filepath.Dir(path), 0o755)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		h.logger.Warn("[contribute-ws] no-PR streaks directory creation failed", "error", err)
+		return
+	}
 	tmpPath := path + ".tmp"
 	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
 		h.logger.Warn("[contribute-ws] no-PR streaks write failed", "error", err)
@@ -1139,7 +1209,10 @@ func (h *ContributeWSHub) saveNoWorkVerdicts() {
 		return
 	}
 	path := h.noWorkVerdictsPath()
-	os.MkdirAll(filepath.Dir(path), 0o755)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		h.logger.Warn("[contribute-ws] no-work verdicts directory creation failed", "error", err)
+		return
+	}
 	tmpPath := path + ".tmp"
 	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
 		h.logger.Warn("[contribute-ws] no-work verdicts write failed", "error", err)
@@ -1166,6 +1239,39 @@ func normalizeCompletionVerdict(reported, verifiedPR string) string {
 		return completionVerdictNoWorkNeeded
 	}
 	return completionVerdictIdle
+}
+
+// Completion-signal vocabulary (kubestellar/hive#5376). Diagnostic only: these
+// values gate no cooldown, no trust and no selection.
+const (
+	// completionSignalVerdict — the agent printed its own HIVE_VERDICT: line.
+	// This is the trustworthy signal.
+	completionSignalVerdict = "verdict"
+	// completionSignalChromeIdle — the agent never printed one and the relay
+	// fell back to a bounded grace period of idle-looking terminal chrome.
+	// Chrome inference is the mechanism behind thirteen separate
+	// false-completion issues, so a rising count here for some backend is the
+	// operator's cue that that backend is not honouring the sentinel.
+	completionSignalChromeIdle = "chrome_idle"
+	// completionSignalUnknown — the field was absent (a relay predating #5376,
+	// or the headless path, which takes the CLI's exit code) or carried a
+	// value the hub does not recognise.
+	completionSignalUnknown = "unknown"
+)
+
+// normalizeCompletionSignal maps a client-reported completion_signal onto the
+// closed vocabulary above. Client-supplied free text never reaches the hub's
+// structured logs: an unrecognised value is reported as unknown, exactly as an
+// absent one is.
+func normalizeCompletionSignal(reported string) string {
+	switch strings.ToLower(strings.TrimSpace(reported)) {
+	case completionSignalVerdict:
+		return completionSignalVerdict
+	case completionSignalChromeIdle:
+		return completionSignalChromeIdle
+	default:
+		return completionSignalUnknown
+	}
 }
 
 // isSuppressedByNoWorkVerdict reports whether a live no_work_needed verdict
@@ -1303,7 +1409,10 @@ func (h *ContributeWSHub) saveFailedTasks() {
 		return
 	}
 	path := h.failedTasksPath()
-	os.MkdirAll(filepath.Dir(path), 0o755)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		h.logger.Warn("[contribute-ws] failed tasks directory creation failed", "error", err)
+		return
+	}
 	tmpPath := path + ".tmp"
 	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
 		h.logger.Warn("[contribute-ws] failed tasks write failed", "error", err)
@@ -1397,7 +1506,10 @@ func (h *ContributeWSHub) saveCompletedTasks() {
 		return
 	}
 	path := h.completedTasksPath()
-	os.MkdirAll(filepath.Dir(path), 0o755)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		h.logger.Warn("[contribute-ws] completed tasks directory creation failed", "error", err)
+		return
+	}
 	tmpPath := path + ".tmp"
 	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
 		h.logger.Warn("[contribute-ws] completed tasks write failed", "error", err)
@@ -1805,6 +1917,43 @@ func (h *ContributeWSHub) bookReleaseCooldown(repo string, number int) {
 	h.saveFailedTasks()
 }
 
+// clearReleaseCooldown withdraws a cooldown booked by bookReleaseCooldown once the
+// release it was hedging against turns out not to have happened
+// (kubestellar/hive#5322).
+//
+// The disconnect path books that cooldown speculatively: at the moment a socket
+// drops the hub cannot know whether the relay is gone for good or reconnecting, so
+// it stamps the #2356 window to stop a second session being handed the same issue
+// during the gap. A lease-bound resume answers the question — the ORIGINAL relay is
+// back and still on the ORIGINAL task, so no release ever occurred and the hedge has
+// served its purpose. Leaving it stamped is what left a demonstrably in-flight issue
+// carrying a release cooldown for the rest of the window: the ledger said "recently
+// let go" about work nobody let go of, and the operator surfaces that read the
+// failure ledger agreed.
+//
+// It is deliberately NARROW. It clears only the timestamp, and only when the issue
+// carries NO consecutive-failure count — i.e. only a hedge booked by
+// bookReleaseCooldown, never a cooldown earned through recordTaskFailure by a real
+// task_failed, a watchdog give-up, or the wedged-task backstop. A resume therefore
+// cannot launder a genuine failure record, and the #2356 duplicate-PR guarantee is
+// intact because the very thing that clears the window is the original owner
+// re-entering activeIssues, which is the stronger guard the window was standing in
+// for.
+func (h *ContributeWSHub) clearReleaseCooldown(repo string, number int) {
+	key := fmt.Sprintf("%s#%d", repo, number)
+	h.completedMu.Lock()
+	_, booked := h.failedTasks[key]
+	if booked && h.consecutiveFailures[key] == 0 {
+		delete(h.failedTasks, key)
+	} else {
+		booked = false
+	}
+	h.completedMu.Unlock()
+	if booked {
+		h.saveFailedTasks()
+	}
+}
+
 // failureCooldownForLocked returns how long, from the last failure time, an
 // issue should be excluded from selection. It is the SHORT
 // failedTaskCooldownMinutes normally, or the LONGER quarantineCooldownHours once
@@ -2034,7 +2183,7 @@ func (h *ContributeWSHub) DisconnectContributor(contributorID, reason string) in
 		if c.ws != nil {
 			// Best-effort notify then close; the read loop's defer does the release.
 			_ = c.send(WSMessage{Type: "auth_failed", Seq: h.nextSeq(), Reason: reason})
-			c.ws.Close()
+			closeWithReason(c.ws, websocket.ClosePolicyViolation, reason)
 		}
 	}
 	return len(closing)
@@ -2158,7 +2307,13 @@ func (h *ContributeWSHub) RequeueContributorTask(contributorID, reason string) (
 		if tgt.conn.profile != nil {
 			username = tgt.conn.profile.GitHubUsername
 		}
-		taskDesc := fmt.Sprintf("%s %s#%d: %s", msg.Kind, msg.Repo, msg.Number, msg.Title)
+		// WSMessage carries the canonical TaskKey additively (#4245); an older
+		// record without one keys exactly as it always did.
+		yankKey := msg.TaskKey
+		if yankKey == "" {
+			yankKey = worksource.Ref{Repo: msg.Repo, Number: msg.Number}.Key()
+		}
+		taskDesc := assignDesc(msg.Kind, yankKey, msg.Title, msg.TaskID)
 		h.addActivity(username, "reassigned by yank", tgt.conn.role, tgt.conn.cliBackend, tgt.conn.model, tgt.conn.reasoningEffort, taskDesc)
 		h.logger.Info("[contribute-ws] clanker reassigned after yank",
 			"username", username, "task", msg.TaskID, "repo", msg.Repo, "number", msg.Number)
@@ -2760,7 +2915,7 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-time.After(wsAuthTimeout):
 			_ = sendJSON(conn, WSMessage{Type: "auth_failed", Reason: "Authentication timeout"})
-			conn.Close()
+			closeWithReason(conn, websocket.ClosePolicyViolation, "authentication timeout")
 		case <-authDone:
 		}
 	}()
@@ -2780,6 +2935,50 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 			contributor.pendingToken = ""
 			contributor.credentialDelivered = false
 			contributor.mu.Unlock()
+
+			// #5322: deregister THIS socket before deciding whether its task is
+			// really abandoned. The check below asks "is some OTHER live
+			// connection for this identity already holding this task?", and the
+			// answer must not be able to include the connection being torn down.
+			// Moved up from the tail of this defer for exactly that reason; it is
+			// the same single delete of the same key, just ordered ahead of the
+			// release so the two cannot observe each other.
+			h.mu.Lock()
+			delete(h.connections, connID)
+			h.mu.Unlock()
+
+			// #5322: a socket that dies WITHOUT a close frame (an L7 proxy cutting
+			// the tunnel — the 1006 flap #5090/#5310 measured) leaves this read
+			// loop parked in ReadMessage, so this defer does not run when the
+			// socket dies; it runs whenever the next read finally errors. The
+			// relay meanwhile redials in ~1s and re-asserts its task over a NEW
+			// connection, which the lease-bound resume in task_progress legitimately
+			// adopts. h.connections is keyed by a random per-socket connID and the
+			// hub has no notion of "this contributor's current socket", so when this
+			// defer eventually fires it releases BY ISSUE a task that a live
+			// connection is demonstrably still working: it books a release cooldown
+			// on an in-flight issue and writes "released: connection lost" for work
+			// nobody released. That is the silent drop — the hub's own record of the
+			// assignment contradicted by the ghost of a socket that no longer
+			// represents the contributor.
+			//
+			// So: release only what is still ours to release. If another LIVE
+			// connection for this same identity already holds this exact task, the
+			// reconnect has already reconciled and this socket is a ghost — skip the
+			// release entirely. This changes nothing about a genuine departure (no
+			// other connection holds the task, so the release runs exactly as
+			// before, booking the same cooldown and writing the same rows —
+			// deliberately leaving kubestellar/hive#5151's accounting untouched).
+			if abandonedTask != nil && h.taskReadoptedByLiveConnection(contributor, abandonedTask) {
+				h.logger.Info("[contribute-ws] disconnect release skipped: task already re-adopted on a live connection",
+					"username", contributor.profile.GitHubUsername,
+					"task", abandonedTask.TaskID,
+					"repo", abandonedTask.Repo,
+					"number", abandonedTask.Number,
+				)
+				abandonedTask = nil
+			}
+
 			if abandonedTask != nil {
 				h.logger.Warn("[contribute-ws] task released on disconnect",
 					"username", contributor.profile.GitHubUsername,
@@ -2810,14 +3009,25 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 				if abandonedTask.Number > 0 {
 					h.bookReleaseCooldown(abandonedTask.Repo, abandonedTask.Number)
 				}
+				// #5097: make the abandonment VISIBLE. Until now this path recorded
+				// nothing an operator could see — the issue showed a "picked up" with
+				// no terminal event ever following it, which is indistinguishable in
+				// the feed from an issue nobody touched. Four issues were opened and
+				// dropped in ten minutes on a flapping session and the hub's own
+				// history showed only that they were picked up.
+				//
+				// Deliberately NOT the "failed" verb: #4260 established that a dropped
+				// socket is not a failure of the work, and booking it as one is what
+				// turned three dropped sockets into a quarantine of an issue nobody had
+				// failed. This is a release, and it says so.
+				h.addActivity(contributor.profile.GitHubUsername, "released: connection lost",
+					contributor.role, contributor.cliBackend, contributor.model,
+					contributor.reasoningEffort, taskDescOf(abandonedTask))
 			}
-			h.mu.Lock()
-			delete(h.connections, connID)
-			h.mu.Unlock()
 			h.logger.Info("[contribute-ws] disconnected", "username", contributor.profile.GitHubUsername)
 			h.addActivity(contributor.profile.GitHubUsername, "left", contributor.role, contributor.cliBackend, contributor.model, contributor.reasoningEffort, "")
 		}
-		conn.Close()
+		_ = conn.Close()
 	}()
 
 	for {
@@ -2838,7 +3048,7 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 		case "auth_response":
 			if msg.RegistrationToken == "" {
 				_ = sendJSON(conn, WSMessage{Type: "auth_failed", Reason: "Missing registration token"})
-				conn.Close()
+				closeWithReason(conn, websocket.ClosePolicyViolation, "missing registration token")
 				return
 			}
 
@@ -2854,13 +3064,13 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 
 			if profile == nil {
 				_ = sendJSON(conn, WSMessage{Type: "auth_failed", Reason: "Invalid registration token"})
-				conn.Close()
+				closeWithReason(conn, websocket.ClosePolicyViolation, "invalid registration token")
 				return
 			}
 
 			if profile.TrustTier == "revoked" {
 				_ = sendJSON(conn, WSMessage{Type: "auth_failed", Reason: "Access has been revoked"})
-				conn.Close()
+				closeWithReason(conn, websocket.ClosePolicyViolation, "access has been revoked")
 				return
 			}
 
@@ -2871,7 +3081,7 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 				}
 				_ = sendJSON(conn, WSMessage{Type: "auth_failed", Reason: reason, AcceptedModels: acceptedModels})
 				h.logger.Info("[contribute-ws] model rejected", "username", profile.GitHubUsername, "model", msg.Model)
-				conn.Close()
+				closeWithReason(conn, websocket.ClosePolicyViolation, "model not accepted by this hive")
 				return
 			}
 
@@ -2888,7 +3098,7 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 					h.logger.Warn("[contribute-ws] agent role claim rejected",
 						"username", profile.GitHubUsername, "tier", profile.TrustTier,
 						"role", requestedRole, "reason", reason)
-					conn.Close()
+					closeWithReason(conn, websocket.ClosePolicyViolation, "agent role claim rejected")
 					return
 				}
 			}
@@ -3030,6 +3240,21 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 			default:
 			}
 
+			// Count a PROTOCOL-level Pong as liveness, exactly as the JSON
+			// "pong" case below does (kubestellar/hive#5090). Now that the hub
+			// emits real Ping control frames, a relay that answers only those —
+			// which is what any conforming WebSocket client does automatically,
+			// with no relay code at all — must not be false-timed-out by the
+			// heartbeat sweep. gorilla invokes this handler from ReadMessage on
+			// the read goroutine, which holds neither mu nor writeMu here, so
+			// taking mu introduces no re-entrancy.
+			contributor.ws.SetPongHandler(func(string) error {
+				contributor.mu.Lock()
+				contributor.lastPong = time.Now()
+				contributor.mu.Unlock()
+				return nil
+			})
+
 			go h.heartbeatLoop(contributor)
 
 		case "ready":
@@ -3053,6 +3278,12 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 				// server-issued lease — a later task_progress for it must not resurrect
 				// ownership.
 				h.revokeLease(identityOf(contributor), abandoned.TaskID)
+				// #5097: same visibility gap as the disconnect path above — the
+				// relay giving a task back by asking for new work left no trace in
+				// the activity feed either.
+				h.addActivity(contributor.profile.GitHubUsername, "released: gave the task back",
+					contributor.role, contributor.cliBackend, contributor.model,
+					contributor.reasoningEffort, taskDescOf(abandoned))
 				h.logger.Warn("[contribute-ws] task abandoned without completion",
 					"username", contributor.profile.GitHubUsername,
 					"abandoned_task", abandoned.TaskID,
@@ -3113,7 +3344,11 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 					h.logger.Warn("[contribute-ws] failed to send task_assign", "error", err)
 					return
 				}
-				taskDesc := fmt.Sprintf("%s %s#%d: %s", task.Kind, task.Repo, task.Number, task.Title)
+				pickupKey := task.TaskKey
+				if pickupKey == "" {
+					pickupKey = worksource.Ref{Repo: task.Repo, Number: task.Number}.Key()
+				}
+				taskDesc := assignDesc(task.Kind, pickupKey, task.Title, task.TaskID)
 				if task.Role != "" {
 					taskDesc = fmt.Sprintf("contributor ran %s task: %s", task.Role, taskDesc)
 				}
@@ -3229,6 +3464,19 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 					// reconnected twice inside one lease window would be refused the
 					// second time even though it never stopped working.
 					h.renewLease(identity, lease.taskID, time.Now())
+
+					// #5322: the disconnect that preceded this resume booked a
+					// speculative release cooldown on the issue (#2356's
+					// duplicate-assign hedge). This resume proves the release never
+					// happened — the original relay is back, on the original task,
+					// under the original generation — so withdraw the hedge rather
+					// than leave a live, in-flight issue stamped "recently released"
+					// in the failure ledger for the rest of the window. Narrow by
+					// construction: clearReleaseCooldown refuses to touch an issue
+					// that carries a real consecutive-failure count.
+					if lease.number > 0 {
+						h.clearReleaseCooldown(lease.repo, lease.number)
+					}
 
 					h.logger.Info("[contribute-ws] task resumed from server-issued lease",
 						"username", contributor.profile.GitHubUsername,
@@ -3424,17 +3672,31 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 							verdict, contributor.profile.GitHubUsername, strings.TrimSpace(msg.VerdictReason))
 					}
 					completedDesc := msg.TaskID
-					if completedTask != nil && completedTask.Number > 0 {
-						completedDesc = fmt.Sprintf("%s %s#%d: %s", completedTask.Kind, completedTask.Repo, completedTask.Number, completedTask.Title)
+					if completedTask != nil {
+						completedDesc = assignDesc(completedTask.Kind, completedTask.identityKey(), completedTask.Title, msg.TaskID)
+					}
+					provider := ""
+					if contributor.cliBackend == "pi" {
+						provider, _, _ = strings.Cut(contributor.model, "/")
 					}
 					h.addActivity(contributor.profile.GitHubUsername, "completed", contributor.role, contributor.cliBackend, contributor.model, contributor.reasoningEffort, completedDesc)
 					h.logger.Info("[contribute-ws] task complete",
 						"username", contributor.profile.GitHubUsername,
 						"task", msg.TaskID,
+						"task_gen", msg.TaskGen,
+						"backend", contributor.cliBackend,
+						// Provider is derived from Pi's one canonical provider/model input;
+						// this evidence is not a second authority or routing signal.
+						"provider", provider,
+						"model", contributor.model,
 						"result", msg.Result,
 						"pr_verified", verifiedPR != "",
 						"verdict", verdict,
 						"verdict_reason", strings.TrimSpace(msg.VerdictReason),
+						// #5376: which signal ended the task. Diagnostic only —
+						// normalized to a closed vocabulary so a client cannot
+						// inject arbitrary text into the hub's structured logs.
+						"completion_signal", normalizeCompletionSignal(msg.CompletionSignal),
 					)
 					contributor.mu.Lock()
 					contributor.profile.TasksCompleted++
@@ -3558,13 +3820,22 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 					contributor.mu.Unlock()
 
 					failedDesc := msg.TaskID
-					if failedTask != nil && failedTask.Number > 0 {
-						failedDesc = fmt.Sprintf("%s %s#%d: %s", failedTask.Kind, failedTask.Repo, failedTask.Number, failedTask.Title)
+					if failedTask != nil {
+						failedDesc = assignDesc(failedTask.Kind, failedTask.identityKey(), failedTask.Title, msg.TaskID)
+					}
+					provider := ""
+					if contributor.cliBackend == "pi" {
+						provider, _, _ = strings.Cut(contributor.model, "/")
 					}
 					h.addActivity(contributor.profile.GitHubUsername, "failed", contributor.role, contributor.cliBackend, contributor.model, contributor.reasoningEffort, failedDesc)
 					h.logger.Info("[contribute-ws] task failed",
 						"username", contributor.profile.GitHubUsername,
 						"task", msg.TaskID,
+						"task_gen", msg.TaskGen,
+						"backend", contributor.cliBackend,
+						"provider", provider,
+						"model", contributor.model,
+						"result", "failed",
 						"reason", msg.Reason,
 						"failure_kind", failureKind,
 						"permanent", msg.Permanent,
@@ -3613,7 +3884,7 @@ func (h *ContributeWSHub) heartbeatLoop(c *ContributorConnection) {
 
 		if time.Since(lastPong) > wsHeartbeatTimeout {
 			h.logger.Info("[contribute-ws] heartbeat timeout", "username", c.profile.GitHubUsername)
-			c.ws.Close()
+			closeWithReason(c.ws, websocket.CloseGoingAway, "heartbeat timeout: no pong within the heartbeat window")
 			return
 		}
 
@@ -3621,8 +3892,19 @@ func (h *ContributeWSHub) heartbeatLoop(c *ContributorConnection) {
 
 		if err := c.send(WSMessage{Type: "ping", Seq: h.nextSeq()}); err != nil {
 			h.logger.Info("[contribute-ws] heartbeat ping failed, closing", "username", c.profile.GitHubUsername)
-			c.ws.Close()
+			closeWithReason(c.ws, websocket.CloseGoingAway, "heartbeat ping write failed")
 			return
+		}
+
+		// Also emit a PROTOCOL-level Ping control frame alongside the JSON one
+		// (kubestellar/hive#5090). See writeProtocolPing for why the JSON ping
+		// alone is not enough to hold the connection open through the ingress
+		// path. A failure here is not fatal on its own: the JSON ping above
+		// already succeeded, so the socket is live and the next tick's
+		// heartbeat-timeout check remains the authority on when to hang up.
+		if err := writeProtocolPing(c.ws); err != nil {
+			h.logger.Debug("[contribute-ws] protocol ping failed",
+				"username", c.profile.GitHubUsername, "error", err)
 		}
 	}
 }
@@ -3682,6 +3964,60 @@ func (h *ContributeWSHub) taskHeldByAnotherConnection(candidate *ContributorConn
 		conn.mu.Lock()
 		held := conn.currentTask != nil &&
 			conn.currentTask.Number == number &&
+			h.canonicalRepoKey(conn.currentTask.Repo) == canonicalRepo
+		conn.mu.Unlock()
+		if held {
+			return true
+		}
+	}
+	return false
+}
+
+// taskReadoptedByLiveConnection reports whether some OTHER live connection
+// belonging to the SAME contributor identity is currently holding the given task
+// (kubestellar/hive#5322).
+//
+// It exists because h.connections is keyed by a random per-socket connID, so the
+// hub cannot tell "the contributor's current socket" from "a socket the
+// contributor abandoned". When a tunnel is cut without a close frame the dead
+// socket's read loop stays parked until its next read errors, so its disconnect
+// defer can fire well AFTER the relay has redialed and re-adopted the task from
+// the server-issued lease. Releasing by issue at that point tears down work that
+// is demonstrably still in flight.
+//
+// The match is deliberately narrow — same identity AND same task id AND same
+// canonical repo/number — so it can only ever suppress the release of the exact
+// assignment that was reconciled. Anything else (a different task, a different
+// contributor, no live holder at all) is a genuine abandonment and releases
+// normally. It suppresses ONLY the release; it never adopts, assigns, extends a
+// lease, or relaxes any admission or ownership check.
+//
+// Concurrency: takes h.mu.RLock and each candidate's own mu, mirroring
+// taskHeldByAnotherConnection and the other read-only scans. `self` is skipped by
+// pointer identity, so the caller may hold neither, either, or both of self.mu
+// and self.writeMu without risking re-entrancy on this path.
+func (h *ContributeWSHub) taskReadoptedByLiveConnection(self *ContributorConnection, task *WSTaskAssign) bool {
+	if h == nil || task == nil || task.TaskID == "" {
+		return false
+	}
+	identity := identityOf(self)
+	if identity == "" {
+		return false
+	}
+	canonicalRepo := h.canonicalRepoKey(task.Repo)
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for _, conn := range h.connections {
+		if conn == nil || conn == self {
+			continue
+		}
+		if identityOf(conn) != identity {
+			continue
+		}
+		conn.mu.Lock()
+		held := conn.currentTask != nil &&
+			conn.currentTask.TaskID == task.TaskID &&
+			conn.currentTask.Number == task.Number &&
 			h.canonicalRepoKey(conn.currentTask.Repo) == canonicalRepo
 		conn.mu.Unlock()
 		if held {
@@ -3892,6 +4228,18 @@ func (h *ContributeWSHub) cleanupLoop() {
 		// through the SAME cooldown+generation-bump path a manual requeue uses.
 		h.reclaimExpiredLeases(time.Now())
 
+		// Deregister under the lock; CLOSE outside it.
+		//
+		// closeWithReason writes a Close frame with a deadline, so it can block for
+		// up to wsCloseFrameDeadline against a peer that has stopped reading — which
+		// is exactly what a stale connection is. Doing that while holding h.mu would
+		// hold the hub-wide lock for up to one second PER stale socket, serially:
+		// against the maxWSConnections cap of 50 that is a worst case near a minute
+		// during which no contributor can register, no sequence number can be
+		// allocated, and every other hub operation stalls. The bare c.ws.Close() this
+		// replaced could not block, so the risk arrived with the close frame and is
+		// removed here rather than traded for it.
+		var staleConns []*websocket.Conn
 		h.mu.Lock()
 		for id, c := range h.connections {
 			c.mu.Lock()
@@ -3903,18 +4251,24 @@ func (h *ContributeWSHub) cleanupLoop() {
 			c.mu.Unlock()
 			if stale {
 				h.logger.Info("[contribute-ws] cleanup: removing stale connection", "username", username, "conn", id)
-				// Nil-guard the close: a connection may carry no live socket (e.g. a
+				// Nil-guard: a connection may carry no live socket (e.g. a
 				// test-injected in-flight entry, or a connection torn down elsewhere),
 				// and cleanupLoop iterates ALL registered connections. Mirrors the
 				// existing guard in RequeueContributorTask so a ws-less entry is pruned
 				// rather than nil-dereferenced.
 				if c.ws != nil {
-					c.ws.Close()
+					staleConns = append(staleConns, c.ws)
 				}
 				delete(h.connections, id)
 			}
 		}
 		h.mu.Unlock()
+
+		// Already deregistered above, so a slow or wedged peer here delays nothing
+		// but this sweep — the next tick is 30s away and re-observes fresh state.
+		for _, ws := range staleConns {
+			closeWithReason(ws, websocket.CloseGoingAway, "connection went stale: no pong within the heartbeat window")
+		}
 	}
 }
 
@@ -4294,7 +4648,28 @@ func buildTaskPromptBody(repoFull, issueRef, title, sourceHint string) string {
 			"remaining work is blocked on an unanswered maintainer decision, or merged "+
 			"PRs already cover everything actionable — do NOT open a PR; instead print "+
 			"a single line of the exact form 'HIVE_VERDICT: no_work_needed — <short reason>' "+
-			"and stop.",
+			"and stop. "+
+			// #5376: the completion sentinel. The interactive relay used to
+			// infer "this task is done" from the CLI's own terminal chrome —
+			// per-backend regexes over the last fifteen lines of the tmux pane.
+			// That produced thirteen separate issues (#1566, #4026, #4064,
+			// #4067, #4078, #4080, #4128, #4182, #4265, #5094, #5121, #5156,
+			// #5162) as one CLI after another restyled its output, because the
+			// input was a vendor's cosmetic rendering rather than a contract.
+			// This line IS the contract: the agent states it is finished. The
+			// relay's detectCompletionVerdict scrapes it; keep the marker
+			// spelling in sync with bin/contributor-relay.sh.
+			//
+			// Asked for LAST and on its own line for a reason: the relay reads
+			// a bounded tail of the pane, so a sentinel buried above a long
+			// summary can scroll out of view before the relay looks.
+			"When you HAVE finished the task — the PR is open, or you have "+
+			"otherwise done everything you intend to do — print, as the very "+
+			"last thing you output and on a line by itself, "+
+			"'HIVE_VERDICT: complete — <short reason>'. Print it exactly once, "+
+			"only when you are actually done, and never before starting work. "+
+			"If you printed the no_work_needed line above, that already counts "+
+			"as your completion — do not print both.",
 		repoFull, issueRef, title, sourceHint, repoFull, repoFull,
 	)
 }
@@ -5115,4 +5490,191 @@ func stringSliceFromAny(v any) []string {
 // writeMu to satisfy gorilla/websocket's one-concurrent-writer contract.
 func sendJSON(conn *websocket.Conn, msg WSMessage) error {
 	return conn.WriteJSON(msg)
+}
+
+// wsCloseFrameDeadline bounds the write of the courtesy Close frame. It is a
+// best-effort courtesy on a socket we are hanging up anyway: if the peer is
+// already gone the write fails immediately, and waiting longer than this would
+// hold a goroutine open for a client that will never read it.
+const wsCloseFrameDeadline = time.Second
+
+// wsProtocolPingDeadline bounds the write of a keepalive Ping control frame.
+// It is deliberately far shorter than wsHeartbeatInterval so a wedged socket
+// cannot stack up heartbeat goroutines waiting on a peer that has stopped
+// reading.
+const wsProtocolPingDeadline = 10 * time.Second
+
+// writeProtocolPing sends a WebSocket PROTOCOL-level Ping control frame (opcode
+// 0x9) on the connection.
+//
+// THE DEFECT (kubestellar/hive#5090): the contributor keepalive was implemented
+// ENTIRELY as application JSON — the hub sends {"type":"ping"} as a text frame
+// and the relay answers {"type":"pong"}, and neither side ever emitted a
+// control frame. websocket.PingMessage appeared nowhere in this package, and
+// the relay never called ws.ping().
+//
+// That distinction is invisible to the two endpoints and decisive to everything
+// between them. An L7 proxy that understands WebSocket — and the hosted spokes
+// sit behind both ingress-nginx and an OCI load balancer — may account only for
+// control-frame traffic when deciding whether a tunnel is idle, precisely
+// because application payload can be a long-running unidirectional stream that
+// says nothing about liveness. Under such a proxy a connection carrying a text
+// frame every 30 seconds is still "idle", and gets reaped on the idle timer
+// with no Close frame: the peer sees 1006 with an empty reason and no
+// application-layer log on either side, which is exactly the signature #5090
+// measured — the hub proven to send Close frames on its own hangups, yet every
+// observed flap frameless.
+//
+// Sending a real Ping costs one 2-byte control frame per 30s tick and makes the
+// connection unambiguously live to any conforming intermediary. It is additive:
+// the JSON ping/pong stays exactly as it was, so old relays that answer only
+// the JSON heartbeat are unaffected, and gorilla/websocket answers an inbound
+// Ping with a Pong automatically via its default ping handler, so a relay needs
+// no change to make the reverse direction work either.
+//
+// WriteControl is documented as safe to call concurrently with all other
+// methods, so — like closeWithReason — this deliberately does NOT take writeMu.
+// Taking it here would nest a second lock under callers that already hold it
+// and buy nothing.
+func writeProtocolPing(conn *websocket.Conn) error {
+	if conn == nil {
+		return nil
+	}
+	return conn.WriteControl(
+		websocket.PingMessage,
+		nil,
+		time.Now().Add(wsProtocolPingDeadline),
+	)
+}
+
+// closeWithReason closes a contributor socket after telling the client WHY.
+//
+// THE DEFECT (kubestellar/hive#5090): every close on this path was a bare
+// conn.Close(), which shuts the TCP socket without sending a WebSocket Close
+// frame. The client therefore observes code 1006 (abnormal closure) with an
+// empty reason — byte-for-byte identical to a yanked network cable. Measured
+// against a live hub: an unauthenticated probe received the auth-timeout
+// explanation as a JSON message and then, on the very next line, a 1006 close
+// carrying none of it. Deliberate server hangups and network faults were
+// indistinguishable, so a contributor whose session was flapping had no way to
+// learn which one they were looking at.
+//
+// The JSON auth_failed messages some call sites already send are not a
+// substitute: they are absent entirely from the heartbeat and stale-sweep
+// closes, and a client that has stopped reading (the exact case a heartbeat
+// timeout describes) never sees them.
+//
+// WriteControl is documented as safe to call concurrently with all other
+// methods, so this needs no coordination with the writeMu the JSON senders
+// take. Both the frame write and the close are best-effort: a peer that has
+// already vanished simply fails the write, which is not worth logging on a
+// socket being discarded.
+func closeWithReason(conn *websocket.Conn, code int, reason string) {
+	if conn == nil {
+		return
+	}
+	_ = conn.WriteControl(
+		websocket.CloseMessage,
+		websocket.FormatCloseMessage(code, reason),
+		time.Now().Add(wsCloseFrameDeadline),
+	)
+	_ = conn.Close()
+}
+
+// wsDrainReason is the close reason every contributor socket receives when the
+// hub process is shutting down. It is a fixed string rather than a formatted
+// one so a relay may match on it verbatim.
+const wsDrainReason = "hub restarting for upgrade"
+
+// wsDrainBudget bounds the ENTIRE shutdown drain, not one socket.
+//
+// closeWithReason writes a Close frame with a wsCloseFrameDeadline (1s) write
+// deadline, so a peer that has stopped reading can stall a single close for up
+// to a second. Against the maxWSConnections cap of 50 a serial drain is a 50s
+// worst case — longer than terminationGracePeriodSeconds (30s), which would
+// mean the drain itself delays the exit past the point where SIGKILL lands and
+// the archive hook that follows it never runs. The budget makes that
+// impossible: whatever has not been closed when it expires is abandoned, and
+// the sockets left behind are exactly as dead as they are today.
+const wsDrainBudget = 2 * time.Second
+
+// DrainForShutdown tells every registered contributor WHY the socket is about
+// to die (kubestellar/hive#5390).
+//
+// THE DEFECT: the hub process is killed on every upgrade roll — measured at 11
+// ReplicaSets in 5.5 hours on one hosted spoke, one per merge to v4 — and it
+// has no shutdown handling for contributor WebSockets at all. The sockets die
+// with the process at SIGKILL, so the peer observes a bare 1006 with no reason,
+// byte-for-byte identical to a yanked cable. #5107 made DELIBERATE closes
+// legible; process death was not one of them, which is why the hub provably
+// sends Close frames and yet every flap observed in #5090 was frameless.
+//
+// CloseServiceRestart (1012) is defined as "the server is restarting" and
+// carries the client expectation of reconnecting, which is exactly true here:
+// the deployment is maxSurge=1/maxUnavailable=0, so the replacement pod has
+// already passed its readiness probe by the time the old one gets SIGTERM.
+//
+// This does NOT stop the flap — the pod still rolls, the socket still dies.
+// What changes is that the relay learns immediately and reconnects into an
+// already-serving hub, instead of discovering the corpse by read error or
+// missed pong seconds later.
+//
+// Locking follows cleanupLoop exactly: snapshot the sockets under h.mu, then
+// close OUTSIDE it. Closing under the lock would hold the hub-wide mutex for up
+// to wsCloseFrameDeadline per wedged peer, serially. Connections are NOT
+// deleted from the map — the process is about to exit, and leaving the
+// bookkeeping untouched keeps this off the lease/cooldown accounting held under
+// #5151.
+//
+// Returns the number of sockets a Close frame was attempted on, for the
+// shutdown log line.
+func (h *ContributeWSHub) DrainForShutdown() int {
+	if h == nil {
+		return 0
+	}
+
+	var conns []*websocket.Conn
+	h.mu.RLock()
+	for _, c := range h.connections {
+		// Nil-guard mirrors cleanupLoop: a registered connection may carry no live
+		// socket (test-injected in-flight entry, or one torn down elsewhere).
+		if c != nil && c.ws != nil {
+			conns = append(conns, c.ws)
+		}
+	}
+	h.mu.RUnlock()
+
+	if len(conns) == 0 {
+		return 0
+	}
+
+	// Fire-and-forget. A WebSocket Close is not a handshake we need to complete
+	// server-side, and waiting for acknowledgements would put a peer's silence on
+	// the shutdown path's critical section.
+	deadline := time.Now().Add(wsDrainBudget)
+	drained := 0
+	for _, ws := range conns {
+		if !time.Now().Before(deadline) {
+			break
+		}
+		closeWithReason(ws, websocket.CloseServiceRestart, wsDrainReason)
+		drained++
+	}
+
+	if h.logger != nil {
+		h.logger.Info("[contribute-ws] drained contributor sockets for shutdown",
+			"drained", drained, "registered", len(conns))
+	}
+	return drained
+}
+
+// DrainContributorsForShutdown is the Server-level entry point for the
+// pre-shutdown drain. It exists so cmd/hive can reach the contributor hub
+// without the hub itself being exported plumbing, and is a no-op on a Server
+// whose contribute routes were never registered.
+func (s *Server) DrainContributorsForShutdown() int {
+	if s == nil || s.contributeHub == nil {
+		return 0
+	}
+	return s.contributeHub.DrainForShutdown()
 }

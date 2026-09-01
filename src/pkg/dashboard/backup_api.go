@@ -152,5 +152,5 @@ func (s *Server) handleBackupDownload(w http.ResponseWriter, r *http.Request) {
 		"bead_dirs", len(beadDirs),
 		"bytes", len(res.Sealed))
 
-	w.Write(res.Sealed)
+	_, _ = w.Write(res.Sealed)
 }

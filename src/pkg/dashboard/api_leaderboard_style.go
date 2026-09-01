@@ -205,7 +205,7 @@ func fetchAndSanitizeCustomStyle(ctx context.Context, src customStyleSource, sco
 	if err != nil {
 		return nil, customStyleSanitizeReport{}, err
 	}
-	defer resp.Body.Close()
+	defer closeHTTPBody(resp.Body)
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, customStyleSanitizeReport{}, errCustomStyleNotFound
 	}
@@ -254,7 +254,7 @@ func stripCSSComments(css string) string {
 	for i := 0; i < len(css); {
 		if i+1 < len(css) && css[i] == '/' && css[i+1] == '*' {
 			i += 2
-			for i+1 < len(css) && !(css[i] == '*' && css[i+1] == '/') {
+			for i+1 < len(css) && (css[i] != '*' || css[i+1] != '/') {
 				if css[i] == '\n' {
 					out.WriteByte('\n')
 				}

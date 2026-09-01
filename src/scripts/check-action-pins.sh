@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # check-action-pins.sh — assert every SHA-pinned GitHub Action actually exists.
 #
-# WHY: release.yml shipped `anchore/sbom-action@f4dccdb4...`, a 40-hex SHA that
-# resolves to no commit in that repository (#4908). It LOOKS like a correct pin
+# WHY: tagged-release.yml shipped `anchore/sbom-action@f4dccdb4...`, a 40-hex
+# SHA that resolves to no commit in that repository (#4908). It LOOKS like a
+# correct pin
 # — right shape, plausible `# v0.20.9` comment beside it — and nothing catches a
 # fabricated SHA until the workflow runs and dies at "Prepare all required
 # actions". For a tag-triggered release workflow that means the break is only
@@ -46,6 +47,23 @@ if command -v gh >/dev/null 2>&1; then
       exit 1
     fi
   done || fail=1
+fi
+
+# An EMPTY workflow-expression delimiter pair anywhere in a workflow file is a
+# hard parse error in GitHub's workflow parser ("An expression was expected"),
+# and the parser scans `run:` blocks in full without honouring shell comments —
+# so one written inside a comment, purely to illustrate a point, still kills the
+# file. The failure mode is why this is worth a CI gate rather than a code
+# review note (#5339): GitHub does not reject the push or annotate the file. It
+# silently falls back to naming the workflow by its PATH, never reads its `on:`
+# block, and stops firing its triggers. release.yml sat like that for four days
+# with the entire tagged-release pipeline dead, while its only visible symptom
+# was job-less "failed" runs that looked like unrelated CI flake.
+empty_expr=$(grep -rnE '\$\{\{[[:space:]]*\}\}' "$DIR" 2>/dev/null || true)
+if [ -n "$empty_expr" ]; then
+  echo "EMPTY-EXPRESSION an empty \${{ }} is a workflow parse error, not a comment:"
+  echo "$empty_expr"
+  fail=1
 fi
 
 if [ "$fail" -ne 0 ]; then

@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -172,7 +173,10 @@ func (s *Server) handleClaudeAuthExchange(w http.ResponseWriter, r *http.Request
 	// Also write raw token for quick status checks.
 	tmpPath := claudeTokenFilePath + ".tmp"
 	if err := os.WriteFile(tmpPath, []byte(tokens.AccessToken), 0o600); err == nil {
-		os.Rename(tmpPath, claudeTokenFilePath)
+		if err := os.Rename(tmpPath, claudeTokenFilePath); err != nil {
+			s.deps.Logger.Warn("Claude status token rename failed", "error", err)
+			_ = os.Remove(tmpPath)
+		}
 	}
 
 	// Tell the agent manager to pick up the new token.
@@ -198,8 +202,17 @@ func (s *Server) handleClaudeAuthLogout(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	claudeRemoveFile(claudeCredPath)
-	claudeRemoveFile(claudeTokenFilePath)
+	var removeErr error
+	for _, path := range []string{claudeCredPath, claudeTokenFilePath} {
+		if err := claudeRemoveFile(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			removeErr = err
+			s.deps.Logger.Error("Claude credential removal failed", "path", path, "error", err)
+		}
+	}
+	if removeErr != nil {
+		jsonError(w, "failed to remove persisted Claude credentials", http.StatusInternalServerError)
+		return
+	}
 
 	if s.deps != nil && s.deps.AgentMgr != nil {
 		s.deps.AgentMgr.ReloadClaudeToken()

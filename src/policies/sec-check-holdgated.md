@@ -88,3 +88,7 @@ Priority: 0 (critical/RCE/secret-exposed), 1 (high/auth-bypass), 2 (medium/info-
 9. Summarize security posture in your response, naming which repo you covered
 
 ${KNOWLEDGE}
+
+## Publishable Content Boundary
+
+Attribution belongs ONLY in the issue or PR body and the DCO commit trailer. NEVER write `Filed by`, ACMM levels, agent names, or hive run metadata inside any committed file.

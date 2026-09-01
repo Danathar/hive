@@ -67,9 +67,11 @@ Note it only *reports* the runtime config. It never restores from it.
 > `hive.yaml.bak` and boots normally from it. Backups capture **both** names, so
 > restore whichever the archive contains — under the new name.
 >
-> On Docker/LXC this file is not a snapshot at all but the boot-time source of
-> truth, since there is no ConfigMap and no overlay there. See
-> `src/docs/config-layering.md`.
+> Outside Kubernetes — Docker, Podman, LXC, or a bare host binary; the branch is
+> chosen by the absence of a Kubernetes pod, not by the runtime — this file is not
+> a snapshot at all but the boot-time source of truth, since there is no ConfigMap
+> and no overlay there. Restoring such a hive means restoring the data volume that
+> holds it, not the seed. See `src/docs/config-layering.md`.
 
 **How to tell which variant a hive runs** — this is the only way to know:
 

@@ -79,6 +79,10 @@ func TestSanitizedCoversEveryDeclaredField(t *testing.T) {
 		AgentCLIVersion:      over,
 		RelayProtocolVersion: over,
 		CredentialType:       over,
+		PiBinary:             over,
+		PiConfiguration:      over,
+		PiAuthentication:     over,
+		PiInvocation:         over,
 	}.Sanitized()
 
 	for name, v := range map[string]string{
@@ -88,6 +92,10 @@ func TestSanitizedCoversEveryDeclaredField(t *testing.T) {
 		"agent_cli_version":      got.AgentCLIVersion,
 		"relay_protocol_version": got.RelayProtocolVersion,
 		"credential_type":        got.CredentialType,
+		"pi_binary":              got.PiBinary,
+		"pi_configuration":       got.PiConfiguration,
+		"pi_authentication":      got.PiAuthentication,
+		"pi_invocation":          got.PiInvocation,
 	} {
 		if len([]rune(v)) != capabilityFieldMaxLen {
 			t.Fatalf("%s kept %d runes, want %d — field is not bounded", name, len([]rune(v)), capabilityFieldMaxLen)
@@ -106,6 +114,10 @@ func TestSanitizedLeavesAnHonestDeclarationAlone(t *testing.T) {
 		AgentCLIVersion:      "2.0.14 (Claude Code)",
 		RelayProtocolVersion: "1.2",
 		CredentialType:       "app",
+		PiBinary:             "present",
+		PiConfiguration:      "configured",
+		PiAuthentication:     "configured_unverified",
+		PiInvocation:         "untested",
 	}
 	if got := in.Sanitized(); got != in {
 		t.Fatalf("honest declaration was altered:\n got %+v\nwant %+v", got, in)

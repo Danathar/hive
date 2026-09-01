@@ -73,6 +73,18 @@ type Observation struct {
 	// report Unknown, never guess.
 	AuthAvailable bool
 	AuthKnown     bool
+	// CredentialProven is the fleet's POSITIVE-EVIDENCE-ONLY credential probe
+	// (AgentHasValidCredential, #5291): true means this agent's backend is
+	// demonstrably able to authenticate without a human. False means "no
+	// proof" — never "logged out" — so it can only ever soften a verdict, not
+	// invent one.
+	//
+	// It is a separate field from AuthAvailable rather than a refinement of it
+	// because AuthAvailable comes from AgentAuthState, whose precedence is
+	// built for the dashboard badge: a pane showing login chrome outranks the
+	// credential file there. That is the exact evidence this reconciler must
+	// not trust on its own when deciding whether to page a human.
+	CredentialProven bool
 }
 
 // authScreenPatterns match credential screens the marker tables miss: the
