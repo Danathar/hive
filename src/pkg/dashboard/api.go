@@ -6895,14 +6895,14 @@ func (s *Server) handleBackends(w http.ResponseWriter, r *http.Request) {
 	litellmModels := s.queryInferenceModels("litellm")
 
 	// CLI backends each have a DIFFERENT discovery source (see cli_models.go):
-	// copilot → per-account Copilot /models, gemini → generativelanguage
-	// /v1beta/models, claude → maintained static list (no API exists), goose →
-	// configured provider's static list. Every probe is best-effort and falls
-	// back to a current static list, so a dropdown is never empty.
+	// provider HTTP APIs, vendor CLI protocols/subcommands, or a deliberately
+	// authoritative single option. Every probe is best-effort and falls back to
+	// a current static list, so a dropdown is never empty.
 	claudeCLI := s.queryCLIModels("claude")
 	copilotCLI := s.queryCLIModels("copilot")
 	geminiCLI := s.queryCLIModels("gemini")
 	gooseCLI := s.queryCLIModels("goose")
+	agyCLI := s.queryCLIModels(agyBackendID)
 	// bob has no discovery source and no usable --model flag: it selects its
 	// own model. Served explicitly so the client never falls through to the
 	// copilot catalog and offers models bob cannot honor (see bobStaticModels).
@@ -6914,6 +6914,7 @@ func (s *Server) handleBackends(w http.ResponseWriter, r *http.Request) {
 		{"id": bobBackendID, "name": "bob (IBM bobshell)", "models": bobCLI.models, "fallback": bobCLI.fallback},
 		{"id": "gemini", "name": "Gemini", "models": geminiCLI.models, "fallback": geminiCLI.fallback},
 		{"id": "goose", "name": "Goose", "models": gooseCLI.models, "fallback": gooseCLI.fallback},
+		{"id": agyBackendID, "name": "Google Antigravity (agy)", "models": agyCLI.models, "fallback": agyCLI.fallback},
 		{"id": "vllm", "name": "vLLM (self-hosted)", "models": vllmModels, "inference": true},
 		{"id": "llm-d", "name": "llm-d (self-hosted)", "models": llmdModels, "inference": true},
 		{"id": "litellm", "name": "LiteLLM (proxy)", "models": litellmModels, "inference": true},
