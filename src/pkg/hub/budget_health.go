@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/kubestellar/hive/pkg/config"
 )
 
 const (
@@ -26,10 +28,14 @@ type BudgetHealth struct {
 	Bucket          string  `json:"bucket"`
 	Exhausted       bool    `json:"exhausted,omitempty"`
 	ProviderLimited bool    `json:"providerLimited,omitempty"`
-	Reason          string  `json:"reason,omitempty"`
-	Ignored         bool    `json:"ignored,omitempty"`
-	WindowStartsAt  string  `json:"windowStartsAt,omitempty"`
-	WindowEndsAt    string  `json:"windowEndsAt,omitempty"`
+	// Misconfigured marks an exhaustion caused by a below-floor LIMIT rather
+	// than by real spend (#5508) — the remedy is to fix the number, not to
+	// wait for or reset the window.
+	Misconfigured  bool   `json:"misconfigured,omitempty"`
+	Reason         string `json:"reason,omitempty"`
+	Ignored        bool   `json:"ignored,omitempty"`
+	WindowStartsAt string `json:"windowStartsAt,omitempty"`
+	WindowEndsAt   string `json:"windowEndsAt,omitempty"`
 }
 
 func budgetHealthFor(e RegistryEntry) BudgetHealth {
@@ -61,6 +67,13 @@ func budgetHealthFor(e RegistryEntry) BudgetHealth {
 			out.UsedTokens = used
 			out.LimitTokens = *e.BudgetLimit
 			out.PercentUsed = float64(used) * float64(percentDenominator) / float64(*e.BudgetLimit)
+		}
+		// Name a misconfigured limit rather than reporting a spend problem the
+		// operator cannot fix by waiting (#5508). Set after the numbers above so
+		// the badge still shows used/limit alongside the reason.
+		if e.BudgetLimit != nil && config.BudgetLimitBelowFloor(*e.BudgetLimit) {
+			out.Misconfigured = true
+			out.Reason = fmt.Sprintf("limit of %d tokens cannot fund a single model call — likely a unit mistake", *e.BudgetLimit)
 		}
 		return out
 	}

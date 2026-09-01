@@ -4981,6 +4981,15 @@ func (s *Server) handleGovernorBudget(w http.ResponseWriter, r *http.Request) {
 		criticalPct = *body.CriticalPct
 	}
 
+	// The sanity floor judges only what THIS request supplied, so a spoke
+	// already storing a below-floor limit can still edit its other budget
+	// fields (#5508). Checked before the range validation so the operator is
+	// told about the unit mistake first.
+	if err := validateSuppliedBudgetFloor(body.TotalTokens); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	if err := validateGovernorBudget(totalTokens, periodDays, criticalPct); err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return

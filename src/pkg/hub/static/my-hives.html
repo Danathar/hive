@@ -619,6 +619,12 @@ function budgetHealthHTML(b) {
     : "budget " + pct + "% used this window (" + (b.usedTokens || 0) + " / " + (b.limitTokens || 0) + " tokens)";
   if (b.providerLimited) title = b.reason || label;
   if (b.exhausted && !b.providerLimited) title += " — exhausted; governor may throttle";
+  // A below-floor LIMIT is not a spending problem (#5508): the percentage is
+  // meaningless and a window reset changes nothing, so say so instead.
+  if (b.misconfigured) {
+    label = "budget misconfigured";
+    title = b.reason || label;
+  }
   return '<span class="budget-health ' + esc(bucket) + '" title="' + esc(title) + '">' +
     '<span class="light"></span><span class="rel">' + esc(label) + '</span></span>';
 }

@@ -3886,13 +3886,15 @@ func TestHandleGovernorBudget_PartialUpdatePreservesOtherFields(t *testing.T) {
 	seedBudget(deps, 1000)
 
 	// Exactly what the dashboard sends when only Total Tokens is edited.
-	rec := doPutRaw(s, "/api/config/governor/budget", `{"totalTokens":50}`)
+	// The value must clear the #5508 sanity floor; this test is about the
+	// pointer-merge preserving absent fields, not about budget sizing.
+	rec := doPutRaw(s, "/api/config/governor/budget", `{"totalTokens":50000000}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
 	}
 	b := deps.Config.Governor.Budget
-	if b.TotalTokens != 50 {
-		t.Errorf("TotalTokens = %d, want 50", b.TotalTokens)
+	if b.TotalTokens != 50000000 {
+		t.Errorf("TotalTokens = %d, want 50000000", b.TotalTokens)
 	}
 	if b.PeriodDays != budgetTestPeriodDays {
 		t.Errorf("PeriodDays = %d, want %d preserved", b.PeriodDays, budgetTestPeriodDays)

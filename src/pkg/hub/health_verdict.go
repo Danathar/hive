@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/kubestellar/hive/pkg/config"
 )
 
 // Hive-health verdict: does this spoke have RECENT OUTPUT back to its work
@@ -111,6 +113,17 @@ func hiveHealthFor(e RegistryEntry, rollup agentFleetRollup, app GitHubAppHealth
 		// entirely different from debugging a stuck agent.
 		if e.BudgetExhausted != nil && *e.BudgetExhausted {
 			v.State = HealthStateRed
+			// Separate the two ways a budget closes the gate, because the
+			// remedies are unrelated (#5508). A spoke whose LIMIT is too small
+			// to fund one model call never spent anything — waiting for the
+			// window to roll changes nothing, and the operator must fix the
+			// number. Collapsing that into the generic "exhausted" chip is what
+			// let limits of 5, 50 and 1000 tokens sit unnoticed on the fleet.
+			if e.BudgetLimit != nil && config.BudgetLimitBelowFloor(*e.BudgetLimit) {
+				v.Reason = fmt.Sprintf("budget limit misconfigured (%d tokens) — agents halted, window reset will not help",
+					*e.BudgetLimit)
+				return v
+			}
 			v.Reason = "budget exhausted — agents halted"
 			return v
 		}
