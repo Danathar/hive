@@ -9,7 +9,40 @@ User=dev
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=HIVE_DASHBOARD_URL=http://localhost:3001
 Environment=DOCS_REPO_DIR=/tmp/kubestellar-docs-snapshot
+# Refuse to start unless the checkout we execute from is owned by this service
+# user and is not group/other-writable (#5483, same class as #5435).
+#
+# WHY THIS GUARD EXISTS. ExecStart resolves out of /tmp/hive, a predictable
+# path under a world-writable parent that is CLEARED ON REBOOT. /tmp's sticky
+# bit only stops a user from deleting or renaming entries owned by someone
+# ELSE — it does not stop them CREATING /tmp/hive/dashboard/publish-snapshot.sh
+# in the window after a reboot wipes /tmp and before hive-deploy repopulates
+# the checkout. When hive-snapshot.timer next fires, systemd would run that
+# file as `dev`, and the script it replaces reads the GitHub App token from
+# /var/run/hive-metrics/gh-app-token.cache — so the planted code runs with a
+# path to that credential.
+#
+# The path stays under /tmp deliberately: the literal /tmp/hive checkout
+# location is shared with bin/hive.sh, bin/kick-agents.sh and hive-deploy;
+# relocating it is a deploy-layout change, not a fix to this unit. The guard
+# closes the code-execution path without moving anything. See
+# bin/hive-checkout-guard.sh for why this is a script whose EXIT STATUS is the
+# assertion rather than an inline `find` (which exits 0 even on no match).
+#
+# Test with: bash src/deploy/test_hive_snapshot_unit_contract.sh
+ExecStartPre=/usr/local/bin/hive-checkout-guard.sh /tmp/hive/dashboard publish-snapshot.sh
 ExecStart=/tmp/hive/dashboard/publish-snapshot.sh
 TimeoutStartSec=120
+# Hardening (mirrors hive-discord.service, #5481). PrivateTmp is deliberately
+# NOT set: it would give this unit a private /tmp namespace, hiding the very
+# checkout ExecStart points at, and the unit could not start. Likewise
+# ProtectSystem must not be 'strict' — strict mounts /tmp read-only and the
+# script builds the snapshot under /tmp. ProtectHome=read-only still lets
+# git/gh read ~/.gitconfig while blocking writes outside /tmp and /var.
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=read-only
+PrivateDevices=yes
+RestrictSUIDSGID=yes
 StandardOutput=journal
 StandardError=journal
