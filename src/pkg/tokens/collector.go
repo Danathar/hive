@@ -193,6 +193,7 @@ type Collector struct {
 	logger                    *slog.Logger
 	mu                        sync.RWMutex
 	latest                    *AggregateSummary
+	errorStreaks              map[string]int
 	scanInterval              time.Duration
 	prevSessionCount          int
 	prevTotalTokens           int64
@@ -322,6 +323,14 @@ func (c *Collector) scan() {
 		} else if bobAgg != nil && bobAgg.SessionCount > 0 {
 			MergeAggregates(agg, bobAgg)
 		}
+		// Per-agent consecutive model-call failure streaks (#5577/#5338),
+		// derived from the same recordings this scan just walked. Always
+		// stored non-nil after a scan, so AgentErrorStreaks can distinguish
+		// "measured, none failing" (empty) from "never scanned" (nil).
+		streaks := BobAgentErrorStreaks(c.bobSessionsDir, time.Now())
+		c.mu.Lock()
+		c.errorStreaks = streaks
+		c.mu.Unlock()
 	}
 
 	sessionDelta := agg.SessionCount - c.prevSessionCount
@@ -370,6 +379,24 @@ func (c *Collector) Summary() *AggregateSummary {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.latest
+}
+
+// AgentErrorStreaks returns the per-agent consecutive model-call failure
+// streaks computed on the last scan (see BobAgentErrorStreaks). nil until a
+// scan of a configured bob sessions dir has completed — callers (the
+// heartbeat) forward that nil as "not measured", never as "no failures".
+// The returned map is a copy.
+func (c *Collector) AgentErrorStreaks() map[string]int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.errorStreaks == nil {
+		return nil
+	}
+	out := make(map[string]int, len(c.errorStreaks))
+	for k, v := range c.errorStreaks {
+		out[k] = v
+	}
+	return out
 }
 
 func CollectFromDir(sessionsDir string, agentDetector func(firstMsg string) string) (*AggregateSummary, error) {

@@ -3806,6 +3806,16 @@ func main() {
 
 			providerLimitReason, providerLimitRebuffs := providerLimitHeartbeatFields(agents)
 
+			// Remediation-hint detectors (#5577). All three read state the
+			// spoke already maintains — no new GitHub calls, no new file
+			// scans on the beat path. AgentErrorStreaks is nil until the
+			// token collector's first bob-recording scan completes ("not
+			// measured", hub carries forward); the other two are always live
+			// measurements and send [] to clear a stale carry-forward.
+			agentErrorStreaks := tokenCollector.AgentErrorStreaks()
+			consentWedged := agentMgr.ConsentWedgedAgents()
+			noCadenceAgents := gov.NoCadenceAgents()
+
 			return &hub.HeartbeatPayload{
 				AgentsWithModel:      &agentsWithModel,
 				BudgetCurrentSpend:   budgetSpend,
@@ -3818,6 +3828,9 @@ func main() {
 				AwaitingReview:       awaitingReview,
 				SLAViolations:        slaViolations,
 				TasksCompleted7d:     tasksCompleted7d,
+				AgentErrorStreaks:    agentErrorStreaks,
+				ConsentWedged:        consentWedged,
+				NoCadenceAgents:      noCadenceAgents,
 				// Read-back for hub-funded gateways: the hub clears its pending
 				// record only when it sees the gateway named here, so a lost
 				// delivery is re-offered rather than dropped. Names only — the
@@ -4238,6 +4251,14 @@ func main() {
 					RepoTargetIssue:         repoTargetIssueMessage(),
 					ProviderLimitReason:     providerLimitReason,
 					ProviderLimitRebuffs:    providerLimitRebuffs,
+					// Remediation-hint detectors (#5577): all three are
+					// cheap in-memory reads, so even this minimal upgrading
+					// beat carries them — the pod is about to restart, and
+					// carrying the last real measurement across the roll keeps
+					// a live wedge visible instead of blanking it.
+					AgentErrorStreaks: tokenCollector.AgentErrorStreaks(),
+					ConsentWedged:     agentMgr.ConsentWedgedAgents(),
+					NoCadenceAgents:   gov.NoCadenceAgents(),
 				}
 			}, targetSHA, logger)
 
