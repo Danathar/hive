@@ -75,20 +75,25 @@ func pinDashboard(t *testing.T, url string) {
 	t.Setenv(client.TokenEnv, "test-token")
 }
 
-// pollTestModel is a model pointed at url with a poll interval short enough
-// that a tick can be run to completion inside a test.
+// pollTestModel is a model pointed at url with BOTH poll intervals short
+// enough that a tick can be run to completion inside a test.
 //
-// The interval is what makes these tests fast without sleeping a real one: the
-// AC asks for tick scheduling covered without waiting out the cadence, and the
-// interval being a model field rather than a bare constant read is what allows
-// it. It is deliberately not zero — a zero-duration tea.Tick is a hot loop, and
-// a test that passed with one would hide exactly the bug
+// The intervals are what make these tests fast without sleeping a real one:
+// the AC asks for tick scheduling covered without waiting out the cadence, and
+// each interval being a model field rather than a bare constant read is what
+// allows it. Neither is zero — a zero-duration tea.Tick is a hot loop, and a
+// test that passed with one would hide exactly the bug
 // TestNewModelPollsOnAnInterval guards.
+//
+// Both are shortened, not just the reconcile one: since T32 the two loops have
+// separate timers, and leaving the activity chain at its production 5s would
+// let a test that means to exercise it silently exercise nothing.
 func pollTestModel(t *testing.T, url string) model {
 	t.Helper()
 	pinDashboard(t, url)
 	m := newModel()
-	m.interval = time.Millisecond
+	m.reconcileInterval = time.Millisecond
+	m.activityInterval = time.Millisecond
 	return m
 }
 
@@ -114,12 +119,21 @@ func drain(cmd tea.Cmd) []tea.Msg {
 	return out
 }
 
-// runTick injects a tick into m and returns every message the resulting
-// command produced. The tick is INJECTED, never waited for — that is the AC's
-// "does not sleep real intervals", and it is also what makes these assertions
-// deterministic rather than timing-dependent.
+// runTick injects a RECONCILIATION tick into m and returns every message the
+// resulting command produced. The tick is INJECTED, never waited for — that is
+// the AC's "does not sleep real intervals", and it is also what makes these
+// assertions deterministic rather than timing-dependent.
 func runTick(m model) []tea.Msg {
-	_, cmd := m.Update(tickMsg{})
+	_, cmd := m.Update(reconcileTickMsg{})
+	return drain(cmd)
+}
+
+// runActivityTick is the same for the activity chain. It is a separate helper
+// rather than a parameter because since T32 the two ticks fetch DIFFERENT
+// endpoints, so a test that used the wrong one would not fail loudly — it
+// would assert against a batch that never contained what it was looking for.
+func runActivityTick(m model) []tea.Msg {
+	_, cmd := m.Update(activityTickMsg{})
 	return drain(cmd)
 }
 
@@ -136,11 +150,34 @@ func findAgentsMsg(msgs []tea.Msg) *panes.AgentsMsg {
 
 func hasTick(msgs []tea.Msg) bool {
 	for _, m := range msgs {
-		if _, ok := m.(tickMsg); ok {
+		if _, ok := m.(reconcileTickMsg); ok {
 			return true
 		}
 	}
 	return false
+}
+
+func hasActivityTick(msgs []tea.Msg) bool {
+	for _, m := range msgs {
+		if _, ok := m.(activityTickMsg); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// countMsg counts messages of one type in a drained batch. "Exactly one chain
+// of each class" is a COUNTING claim, so the tests that make it need a counter
+// rather than the boolean has* helpers above: two armed ticks and one armed
+// tick both look like `true`, and two is the failure.
+func countMsg[T tea.Msg](msgs []tea.Msg) int {
+	n := 0
+	for _, m := range msgs {
+		if _, ok := m.(T); ok {
+			n++
+		}
+	}
+	return n
 }
 
 func findFetchErr(msgs []tea.Msg) *fetchErrMsg {
@@ -194,16 +231,28 @@ func newAgentsServer(t *testing.T) *agentsServer {
 // tea.Tick(0, …) fires immediately and forever, so a model that forgot to set
 // the field would spin the CPU and hammer the dashboard as fast as the network
 // allows — while every other test in this package still passed, because they
-// all override the interval themselves.
+// all override the intervals themselves.
+//
+// BOTH are checked. T32 added the second field, and a constructor that set
+// only the one it inherited would leave the activity chain hot-looping on
+// /api/tokens, /api/cost and /api/audit from the moment the TUI started.
 func TestNewModelPollsOnAnInterval(t *testing.T) {
 	pinDashboard(t, closedDashboard)
 	m := newModel()
 
-	if m.interval <= 0 {
-		t.Fatalf("newModel().interval = %v, want a positive cadence (a zero tick is a hot loop)", m.interval)
-	}
-	if m.interval != pollInterval {
-		t.Errorf("newModel().interval = %v, want pollInterval (%v)", m.interval, pollInterval)
+	for _, c := range []struct {
+		name string
+		got  time.Duration
+	}{
+		{"reconcileInterval", m.reconcileInterval},
+		{"activityInterval", m.activityInterval},
+	} {
+		if c.got <= 0 {
+			t.Fatalf("newModel().%s = %v, want a positive cadence (a zero tick is a hot loop)", c.name, c.got)
+		}
+		if c.got != pollInterval {
+			t.Errorf("newModel().%s = %v, want pollInterval (%v)", c.name, c.got, pollInterval)
+		}
 	}
 	if m.api == nil {
 		t.Fatal("newModel() built no client; poll would nil-panic on the first tick")
@@ -227,11 +276,41 @@ func TestInitPollsImmediatelyAndArmsTick(t *testing.T) {
 	if len(got.Agents) != 3 {
 		t.Errorf("Init() delivered %d agents, want 3", len(got.Agents))
 	}
-	if !hasTick(msgs) {
-		t.Error("Init() armed no tick; the poll loop would never run a second time")
+	// BOTH chains must be armed, and exactly once each. Init is the only place
+	// either is started, so a missing arm here is a loop that never runs at
+	// all — and since T32 there are two loops to forget.
+	if n := countMsg[reconcileTickMsg](msgs); n != 1 {
+		t.Errorf("Init() armed %d reconciliation ticks, want exactly 1", n)
+	}
+	if n := countMsg[activityTickMsg](msgs); n != 1 {
+		t.Errorf("Init() armed %d activity ticks, want exactly 1; the Tokens and Events panes would never refresh", n)
 	}
 	if n := server.requests.Load(); n != 1 {
 		t.Errorf("Init() made %d requests, want exactly 1", n)
+	}
+}
+
+// TestInitFetchesBothClassesImmediately is the AC's "neither loop waits one
+// interval before its first data" clause.
+//
+// It is a separate test from the arming one above because they fail
+// differently: an Init that armed both chains but fetched only the reconcile
+// class would still fill the Tokens and Events panes — five seconds late,
+// which is invisible to a test that only checks the chains exist.
+func TestInitFetchesBothClassesImmediately(t *testing.T) {
+	server := newDashboardServer(t)
+	m := pollTestModel(t, server.URL)
+
+	msgs := drain(m.Init())
+
+	if findAgentsMsg(msgs) == nil {
+		t.Error("Init() delivered no agents; the reconciliation class did not fetch at startup")
+	}
+	if countMsg[tokenUsageMsg](msgs) == 0 {
+		t.Error("Init() delivered no token counts; the Tokens pane would say `waiting for data` for a whole interval")
+	}
+	if countMsg[panes.EventsMsg](msgs) == 0 {
+		t.Error("Init() delivered no audit rows; the Events pane would say `waiting for data` for a whole interval")
 	}
 }
 
@@ -245,7 +324,7 @@ func TestTickFetchesAndRearms(t *testing.T) {
 	server := newAgentsServer(t)
 	m := pollTestModel(t, server.URL)
 
-	next, cmd := m.Update(tickMsg{})
+	next, cmd := m.Update(reconcileTickMsg{})
 	if cmd == nil {
 		t.Fatal("a tick produced no command at all")
 	}
@@ -822,8 +901,8 @@ func TestHeaderSurvivesStreamDropAndRecovers(t *testing.T) {
 	// 4. Recovered: the fallback poll keeps refreshing while the stream is
 	// gone. The server now reports a different mode, and the header must
 	// follow it without any stream event.
-	if m.interval != pollInterval {
-		t.Errorf("interval = %v after a drop, want the fallback cadence %v", m.interval, pollInterval)
+	if m.reconcileInterval != pollInterval {
+		t.Errorf("interval = %v after a drop, want the fallback cadence %v", m.reconcileInterval, pollInterval)
 	}
 	m = pollAndApply(t, m)
 	recovered := fmt.Sprintf(headerFormat, "acme-prod", "SURGE", wsNotConnected)
@@ -1800,5 +1879,364 @@ func TestTokenFrameDoesNotOverflowTheMinimumTerminal(t *testing.T) {
 		if got := lipgloss.Width(line); got > minWidth {
 			t.Errorf("line %d is %d columns wide, want at most %d", i, got, minWidth)
 		}
+	}
+}
+
+// ── T32: split reconcile and activity cadences ───────────────────────────────
+
+// streamHealthyModel is a model in the state a healthy stream leaves behind,
+// built so the ACTIVITY chain can still be drained.
+//
+// pollTestModel shortens both intervals; this puts the reconcile one back to
+// the stretched production value, because these tests are about what that
+// stretch does and does not reach. The consequence is that a reconcile tick
+// armed by this model carries a real 60s timer — drainUntil it, never drain().
+func streamHealthyModel(t *testing.T, url string) model {
+	t.Helper()
+	m := pollTestModel(t, url)
+	m = connectedStream(t, m)
+	m.reconcileInterval = sseReconcileInterval
+	return m
+}
+
+// activityMsgCount is how many of the three activity reads a drained batch
+// delivered. It counts rather than reporting presence because the failures it
+// guards are "one of them went missing" and "all three were issued twice".
+func activityMsgCount(msgs []tea.Msg) int {
+	return countMsg[tokenUsageMsg](msgs) +
+		countMsg[costSummaryMsg](msgs) +
+		countMsg[panes.EventsMsg](msgs)
+}
+
+// findEventsMsg returns the delivered audit snapshot, or nil if no EventsMsg
+// was produced.
+func findEventsMsg(msgs []tea.Msg) *panes.EventsMsg {
+	for _, m := range msgs {
+		if e, ok := m.(panes.EventsMsg); ok {
+			return &e
+		}
+	}
+	return nil
+}
+
+// reconcileMsgCount is the same for the four reconciliation reads.
+func reconcileMsgCount(msgs []tea.Msg) int {
+	return countMsg[panes.AgentsMsg](msgs) +
+		countMsg[governorStatusMsg](msgs) +
+		countMsg[governorIntervalMsg](msgs) +
+		countMsg[hiveIDMsg](msgs)
+}
+
+// TestEachTickFetchesOnlyItsOwnClass is the split itself, asserted from both
+// sides.
+//
+// Testing only that each batch contains what it should would pass on a model
+// that never split them at all — one loop fetching everything satisfies every
+// "contains" clause. What distinguishes the split is the ABSENCE: a
+// reconciliation tick must not read /api/audit, and an activity tick must not
+// read /api/agents. Without that, the two loops are one loop running twice.
+func TestEachTickFetchesOnlyItsOwnClass(t *testing.T) {
+	t.Run("reconcile", func(t *testing.T) {
+		server := newDashboardServer(t)
+		m := pollTestModel(t, server.URL)
+
+		msgs := runTick(m)
+
+		if got := reconcileMsgCount(msgs); got != 4 {
+			t.Errorf("a reconciliation tick delivered %d of its 4 reads; a wired endpoint went missing", got)
+		}
+		if got := activityMsgCount(msgs); got != 0 {
+			t.Errorf("a reconciliation tick delivered %d activity reads, want 0 — those belong to the fixed loop", got)
+		}
+		if n := server.auditRequests.Load(); n != 0 {
+			t.Errorf("a reconciliation tick read /api/audit %d times, want 0", n)
+		}
+		if !hasTick(msgs) {
+			t.Error("a reconciliation tick did not arm the next one")
+		}
+		if hasActivityTick(msgs) {
+			t.Error("a reconciliation tick armed an activity chain; the two would multiply on every tick")
+		}
+	})
+
+	t.Run("activity", func(t *testing.T) {
+		server := newDashboardServer(t)
+		m := pollTestModel(t, server.URL)
+
+		msgs := runActivityTick(m)
+
+		if got := activityMsgCount(msgs); got != 3 {
+			t.Errorf("an activity tick delivered %d of its 3 reads; a wired endpoint went missing", got)
+		}
+		if got := reconcileMsgCount(msgs); got != 0 {
+			t.Errorf("an activity tick delivered %d reconciliation reads, want 0 — those belong to the stretching loop", got)
+		}
+		if n := server.auditRequests.Load(); n != 1 {
+			t.Errorf("an activity tick read /api/audit %d times, want exactly 1", n)
+		}
+		if !hasActivityTick(msgs) {
+			t.Error("an activity tick did not arm the next one; the Tokens and Events panes would freeze")
+		}
+		if hasTick(msgs) {
+			t.Error("an activity tick armed a reconciliation chain; the two would multiply on every tick")
+		}
+	})
+}
+
+// TestPollStillIssuesBothClasses pins that splitting the batch did not split
+// the one-shot refresh.
+//
+// poll() is what Init and every action handler use — a pause, a model apply,
+// an ACMM apply, returning from tmux. Those writes move the roster AND append
+// the operator's own action to the audit log, so a poll() that had quietly
+// become reconcile-only would show the effect of an action while the Events
+// pane sat there not recording it.
+func TestPollStillIssuesBothClasses(t *testing.T) {
+	server := newDashboardServer(t)
+	m := pollTestModel(t, server.URL)
+
+	msgs := drain(m.poll())
+
+	if got := reconcileMsgCount(msgs); got != 4 {
+		t.Errorf("poll() delivered %d reconciliation reads, want 4", got)
+	}
+	if got := activityMsgCount(msgs); got != 3 {
+		t.Errorf("poll() delivered %d activity reads, want 3", got)
+	}
+	if hasTick(msgs) || hasActivityTick(msgs) {
+		t.Error("poll() armed a tick chain; it is the one-shot refresh, and arming from an action handler would fork a second loop per keypress")
+	}
+}
+
+// TestHealthyStreamStretchesOnlyTheReconcileLoop is the bug T32 exists to fix,
+// stated as directly as the model allows.
+//
+// Before this change all seven reads hung off one timer, so the SSE event that
+// proved the stream healthy also stretched /api/tokens, /api/cost and
+// /api/audit to 60s. The Tokens and Events panes were therefore at their
+// stalest precisely when the header said `ws: connected` — the frame looking
+// its most alive at the moment half of it stopped moving.
+func TestHealthyStreamStretchesOnlyTheReconcileLoop(t *testing.T) {
+	m := pollTestModel(t, closedDashboard)
+	m = connectedStream(t, m)
+	m.reconcileInterval = pollInterval
+	m.activityInterval = pollInterval
+	beforeGen := m.activityGen
+
+	// The returned command is the stream reader re-arming on channels nothing
+	// ever writes to, so it is deliberately not drained.
+	next, _ := m.Update(sseEventMsg{
+		gen:   m.sseGen,
+		event: sseEvent(client.SSEEventTypeMessage, statusFixture),
+	})
+	got := next.(model)
+
+	if got.reconcileInterval != sseReconcileInterval {
+		t.Errorf("reconcileInterval = %v after a healthy stream event, want %v",
+			got.reconcileInterval, sseReconcileInterval)
+	}
+	if got.activityInterval != pollInterval {
+		t.Errorf("activityInterval = %v after a healthy stream event, want it untouched at %v; "+
+			"no stream event carries token counts or audit rows, so stretching this loop only makes the panes staler",
+			got.activityInterval, pollInterval)
+	}
+	if got.activityGen != beforeGen {
+		t.Error("a stream event retired the activity chain; nothing re-arms it, so the Tokens and Events panes would go dark")
+	}
+}
+
+// TestActivityLoopKeepsRefreshingWhileTheStreamIsHealthy is the same claim
+// made behaviourally rather than by reading a field.
+//
+// The audit body changes between the two ticks, so a model that had attached
+// the activity reads to the stretched timer — or that simply stopped issuing
+// them once connected — delivers the first snapshot twice and fails.
+func TestActivityLoopKeepsRefreshingWhileTheStreamIsHealthy(t *testing.T) {
+	server := newDashboardServer(t)
+	m := streamHealthyModel(t, server.URL)
+
+	first := runActivityTick(m)
+	if activityMsgCount(first) != 3 {
+		t.Fatalf("the first activity tick under a healthy stream delivered %d of 3 reads", activityMsgCount(first))
+	}
+
+	// The hive does something while the stream is up and says nothing about it.
+	server.audit.Store(`{"entries":[{"ts":"2026-09-01T13:00:00Z","user":"operator","action":"while-connected","agent":"scanner"}]}`)
+
+	second := runActivityTick(m)
+	events := findEventsMsg(second)
+	if events == nil {
+		t.Fatal("the second activity tick delivered no audit rows; the loop stopped under a healthy stream")
+	}
+	if len(events.Events) != 1 || events.Events[0].Action != "while-connected" {
+		t.Errorf("the second activity tick replayed the first snapshot: %+v", events.Events)
+	}
+	if n := server.auditRequests.Load(); n != 2 {
+		t.Errorf("/api/audit was read %d times across two activity ticks, want 2", n)
+	}
+	if !hasActivityTick(second) {
+		t.Error("the activity chain did not re-arm while the stream was healthy")
+	}
+}
+
+// TestStreamDropDoesNotRetireTheActivityChain is the failure a shared
+// generation counter would produce, and the reason activityGen exists.
+//
+// The drop path bumps the reconcile generation to retire the stretched 60s
+// chain, and re-arms a reconcile chain only. Had both classes stamped their
+// ticks with that one counter, the same bump would retire the activity tick
+// already in flight — and nothing would ever arm another. The Tokens and
+// Events panes would go dark for the rest of the session at the first stream
+// blip, which is the very failure this task is about, reached from the other
+// side.
+func TestStreamDropDoesNotRetireTheActivityChain(t *testing.T) {
+	server := newDashboardServer(t)
+	m := streamHealthyModel(t, server.URL)
+	inFlightGen, beforeInterval := m.activityGen, m.activityInterval
+
+	next, _ := m.Update(sseDroppedMsg{gen: m.sseGen, err: errSSEClosed})
+	got := next.(model)
+
+	if got.activityGen != inFlightGen {
+		t.Errorf("activityGen moved from %d to %d on a stream drop; the in-flight activity tick is now stale",
+			inFlightGen, got.activityGen)
+	}
+	if got.activityInterval != beforeInterval {
+		t.Errorf("activityInterval = %v after a drop, want it untouched at %v", got.activityInterval, beforeInterval)
+	}
+
+	// The proof, rather than the bookkeeping: the tick that was ALREADY ARMED
+	// when the stream dropped — carrying the pre-drop generation — must still
+	// fetch and still re-arm on the post-drop model.
+	_, cmd := got.Update(activityTickMsg{gen: inFlightGen})
+	if cmd == nil {
+		t.Fatal("the activity chain died with the stream; nothing would ever refresh Tokens or Events again")
+	}
+	msgs := drain(cmd)
+	if activityMsgCount(msgs) != 3 {
+		t.Errorf("the activity tick armed before the drop delivered %d of 3 reads afterwards", activityMsgCount(msgs))
+	}
+	if !hasActivityTick(msgs) {
+		t.Error("the surviving activity tick did not arm its successor")
+	}
+}
+
+// TestStreamDropDoesNotDuplicateActivityRequests is the AC's "does not
+// duplicate activity requests" clause.
+//
+// The fallback must fetch immediately — the reconcile data really is stale the
+// moment the stream stops — but the activity loop never stretched, so it has
+// been reading these three endpoints every 5s throughout and is mid-interval
+// right now. A full poll() here would issue a second copy of each, on the
+// exact code path a flapping dashboard walks over and over.
+func TestStreamDropDoesNotDuplicateActivityRequests(t *testing.T) {
+	server := newDashboardServer(t)
+	m := streamHealthyModel(t, server.URL)
+
+	_, cmd := m.Update(sseDroppedMsg{gen: m.sseGen, err: errSSEClosed})
+
+	// Waiting for the reconnect message is what makes the counter assertion
+	// trustworthy: it is a real sseBackoffMin timer, so by the time it lands a
+	// duplicate audit fetch against a local test server has had a full second
+	// to complete and be counted.
+	msgs := drainUntil(cmd, finalWait, func(msgs []tea.Msg) bool {
+		return findAgentsMsg(msgs) != nil && hasMsg[sseReconnectMsg](msgs)
+	})
+
+	if findAgentsMsg(msgs) == nil {
+		t.Fatal("the drop issued no immediate reconciliation fetch; the frame would sit stale for a whole interval")
+	}
+	if got := activityMsgCount(msgs); got != 0 {
+		t.Errorf("the drop issued %d activity reads, want 0 — the 5s loop is already doing that", got)
+	}
+	if n := server.auditRequests.Load(); n != 0 {
+		t.Errorf("the drop read /api/audit %d times, want 0", n)
+	}
+	if hasActivityTick(msgs) {
+		t.Error("the drop armed a second activity chain; every reconnect would double the activity fetch rate")
+	}
+}
+
+// TestConnectDropCyclesLeaveOneChainOfEachClass is the AC's repeated-cycle
+// clause, and it is the one a per-cycle leak actually shows up in.
+//
+// Every individual handler can look correct while the pair leaks: an extra
+// chain armed once per cycle is invisible in a single connect/drop test and
+// doubles the request rate every time a flaky dashboard blips. After three
+// full cycles there must still be exactly one live chain of each class — and
+// every retired reconcile generation must be dead, not merely outnumbered.
+func TestConnectDropCyclesLeaveOneChainOfEachClass(t *testing.T) {
+	m := pollTestModel(t, closedDashboard)
+
+	const cycles = 3
+	for range cycles {
+		m = connectedStream(t, m)
+		next, _ := m.Update(sseEventMsg{
+			gen:   m.sseGen,
+			event: sseEvent(client.SSEEventTypeMessage, statusFixture),
+		})
+		m = next.(model)
+		if m.reconcileInterval != sseReconcileInterval {
+			t.Fatalf("cycle setup: reconcileInterval = %v, want the stream to have stretched it", m.reconcileInterval)
+		}
+
+		next, _ = m.Update(sseDroppedMsg{gen: m.sseGen, err: errSSEClosed})
+		m = next.(model)
+	}
+
+	if m.activityGen != 0 {
+		t.Errorf("activityGen = %d after %d connect/drop cycles, want 0; the fixed loop has no cadence to change",
+			m.activityGen, cycles)
+	}
+	if m.reconcileGen != cycles {
+		t.Errorf("reconcileGen = %d after %d cycles, want one retirement per stretch undone", m.reconcileGen, cycles)
+	}
+
+	// Every retired reconcile chain is dead.
+	for gen := uint64(0); gen < m.reconcileGen; gen++ {
+		if _, cmd := m.Update(reconcileTickMsg{gen: gen}); cmd != nil {
+			t.Errorf("a tick from retired reconcile generation %d re-armed itself", gen)
+		}
+	}
+
+	// Exactly one live chain of each class. The reconcile interval is back at
+	// its production 5s after the last drop; shortening it here is what lets
+	// the re-arm be drained without the test sleeping it.
+	m.reconcileInterval = time.Millisecond
+	_, reconcileCmd := m.Update(reconcileTickMsg{gen: m.reconcileGen})
+	if n := countMsg[reconcileTickMsg](drain(reconcileCmd)); n != 1 {
+		t.Errorf("the live reconcile tick armed %d successors, want exactly 1", n)
+	}
+
+	_, activityCmd := m.Update(activityTickMsg{gen: m.activityGen})
+	if n := countMsg[activityTickMsg](drain(activityCmd)); n != 1 {
+		t.Errorf("the live activity tick armed %d successors, want exactly 1", n)
+	}
+}
+
+// TestActivityTickRearmsWhenTheFetchFails is the activity half of the error
+// policy that keeps a loop alive, and it matters more here than for
+// reconciliation: this loop is the ONLY source the Tokens and Events panes
+// have, so an unreachable dashboard that stopped the clock would leave them
+// frozen even after it came back.
+func TestActivityTickRearmsWhenTheFetchFails(t *testing.T) {
+	m := pollTestModel(t, closedDashboard)
+
+	done := make(chan []tea.Msg, 1)
+	go func() { done <- runActivityTick(m) }()
+
+	select {
+	case msgs := <-done:
+		if findFetchErr(msgs) == nil {
+			t.Error("an unreachable dashboard produced no fetchErrMsg on the activity loop")
+		}
+		if activityMsgCount(msgs) != 0 {
+			t.Error("a failed activity fetch produced pane data; panes must never see a zero-valued result")
+		}
+		if !hasActivityTick(msgs) {
+			t.Error("a failed activity fetch stopped the activity loop")
+		}
+	case <-time.After(finalWait):
+		t.Fatal("an activity tick against an unreachable dashboard did not return")
 	}
 }
