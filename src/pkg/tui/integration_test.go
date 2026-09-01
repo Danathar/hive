@@ -50,6 +50,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/kubestellar/hive/internal/testutil"
 	"github.com/kubestellar/hive/pkg/tui/panes"
 )
 
@@ -736,40 +737,22 @@ func (h *harness) stop() {
 // regression fail loudly instead of flakily.
 func (h *harness) waitFor(why string, cond func(model) bool) {
 	h.t.Helper()
-	deadline := time.Now().Add(waitTimeout)
-	for time.Now().Before(deadline) {
-		if cond(h.snapshot()) {
-			return
-		}
-		time.Sleep(pollStep)
-	}
-	h.t.Fatalf("timed out waiting for %s\nlast frame:\n%s", why, h.view())
+	testutil.Eventually(h.t, waitTimeout, func() bool { return cond(h.snapshot()) },
+		"timed out waiting for %s\nlast frame:\n%s", why, h.view())
 }
 
 // waitForView blocks until the rendered frame satisfies cond.
 func (h *harness) waitForView(why string, cond func(string) bool) {
 	h.t.Helper()
-	deadline := time.Now().Add(waitTimeout)
-	for time.Now().Before(deadline) {
-		if cond(h.view()) {
-			return
-		}
-		time.Sleep(pollStep)
-	}
-	h.t.Fatalf("timed out waiting for %s\nlast frame:\n%s", why, h.view())
+	testutil.Eventually(h.t, waitTimeout, func() bool { return cond(h.view()) },
+		"timed out waiting for %s\nlast frame:\n%s", why, h.view())
 }
 
 // waitForFixture blocks until cond holds on the fixture's recorded traffic.
 func (h *harness) waitForFixture(why string, cond func() bool) {
 	h.t.Helper()
-	deadline := time.Now().Add(waitTimeout)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(pollStep)
-	}
-	h.t.Fatalf("timed out waiting for %s\nlast frame:\n%s", why, h.view())
+	testutil.Eventually(h.t, waitTimeout, cond,
+		"timed out waiting for %s\nlast frame:\n%s", why, h.view())
 }
 
 // settle waits for the message queue to drain and in-flight commands to finish.
@@ -780,13 +763,16 @@ func (h *harness) waitForFixture(why string, cond func() bool) {
 func (h *harness) settle() {
 	h.t.Helper()
 	// Two consecutive empty observations, because a command can be between
-	// producing its message and the loop receiving it.
+	// producing its message and the loop receiving it. The drain itself uses
+	// Eventually; the short settle gap between observations is a deliberate
+	// quiet window, which is the one thing Eventually cannot express — it
+	// waits for a condition to BECOME true, and here we need the absence of
+	// activity to PERSIST.
 	for i := 0; i < 2; i++ {
-		deadline := time.Now().Add(waitTimeout)
-		for len(h.msgs) > 0 && time.Now().Before(deadline) {
-			time.Sleep(pollStep)
-		}
-		time.Sleep(5 * pollStep)
+		testutil.Eventually(h.t, waitTimeout, func() bool { return len(h.msgs) == 0 },
+			"message queue did not drain")
+		timer := time.NewTimer(5 * pollStep)
+		<-timer.C
 	}
 }
 
@@ -1991,7 +1977,8 @@ func assertGoroutinesSettle(t *testing.T, before int) {
 		if after <= before+tolerance {
 			return
 		}
-		time.Sleep(10 * pollStep)
+		timer := time.NewTimer(10 * pollStep)
+		<-timer.C
 	}
 	t.Errorf("goroutines did not settle after quit: %d before, %d after (tolerance %d)", before, after, tolerance)
 }
