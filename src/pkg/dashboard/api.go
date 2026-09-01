@@ -26,6 +26,7 @@ import (
 	"github.com/kubestellar/hive/pkg/beads"
 	"github.com/kubestellar/hive/pkg/classify"
 	"github.com/kubestellar/hive/pkg/config"
+	"github.com/kubestellar/hive/pkg/dashboard/webstatic"
 	"github.com/kubestellar/hive/pkg/github"
 	"github.com/kubestellar/hive/pkg/hub"
 	"github.com/kubestellar/hive/pkg/knowledge"
@@ -1126,8 +1127,8 @@ func (s *Server) handleSnapshotPage(w http.ResponseWriter, r *http.Request) {
 	// The snapshot document is built at runtime by build-snapshot.mjs and then
 	// rewritten above, so its inline <script> content is only known here. Stamp
 	// the CSP script-src-elem hash allowlist from the exact bytes being served
-	// (#3848 part 1 / #3907, see csp_script_src.go).
-	applyDocumentScriptSrcElem(w, []byte(html))
+	// (#3848 part 1 / #3907, see pkg/dashboard/webstatic).
+	webstatic.ApplyDocumentScriptSrcElem(w, []byte(html))
 	_, _ = w.Write([]byte(html))
 }
 

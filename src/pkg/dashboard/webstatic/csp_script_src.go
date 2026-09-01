@@ -1,4 +1,4 @@
-package dashboard
+package webstatic
 
 // csp_script_src.go — the script-src half of kubestellar/hive#3848 (#3907).
 //
@@ -43,11 +43,9 @@ package dashboard
 import (
 	"crypto/sha256"
 	"encoding/base64"
-	"io/fs"
 	"net/http"
 	"regexp"
 	"strings"
-	"sync"
 )
 
 // inlineScriptRe matches a <script ...>…</script> element and captures its
@@ -64,12 +62,12 @@ var inlineScriptRe = regexp.MustCompile(`(?is)<script\b([^>]*)>(.*?)</script>`)
 // are covered by URL sources ('self', pinned CDNs), not hashes.
 var scriptSrcAttrRe = regexp.MustCompile(`(?i)(^|\s)src\s*=`)
 
-// extractInlineScripts returns the raw text content of every inline <script>
+// ExtractInlineScripts returns the raw text content of every inline <script>
 // element in doc, in document order. Scripts with a src= attribute are
 // skipped; everything else — including non-executable data blocks — is
 // included, because hashing our own known content is harmless and keeps the
 // extraction rule simple enough to audit.
-func extractInlineScripts(doc []byte) [][]byte {
+func ExtractInlineScripts(doc []byte) [][]byte {
 	var scripts [][]byte
 	for _, m := range inlineScriptRe.FindAllSubmatch(doc, -1) {
 		if scriptSrcAttrRe.Match(m[1]) {
@@ -80,21 +78,21 @@ func extractInlineScripts(doc []byte) [][]byte {
 	return scripts
 }
 
-// cspScriptHash renders content as a CSP hash-source token. The digest is over
+// CSPScriptHash renders content as a CSP hash-source token. The digest is over
 // the element's exact text bytes (WHATWG CSP §8.2 "is element's inline
 // behavior allowed"), base64 standard encoding with padding.
-func cspScriptHash(content []byte) string {
+func CSPScriptHash(content []byte) string {
 	sum := sha256.Sum256(content)
 	return "'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'"
 }
 
-// scriptSrcElemSources builds the source list for script-src-elem covering
+// ScriptSrcElemSources builds the source list for script-src-elem covering
 // every inline script in doc: 'self' plus one hash per distinct script.
-func scriptSrcElemSources(doc []byte) string {
+func ScriptSrcElemSources(doc []byte) string {
 	sources := []string{"'self'"}
 	seen := map[string]bool{}
-	for _, script := range extractInlineScripts(doc) {
-		h := cspScriptHash(script)
+	for _, script := range ExtractInlineScripts(doc) {
+		h := CSPScriptHash(script)
 		if !seen[h] {
 			seen[h] = true
 			sources = append(sources, h)
@@ -103,37 +101,14 @@ func scriptSrcElemSources(doc []byte) string {
 	return strings.Join(sources, " ")
 }
 
-var (
-	baseScriptSrcElemOnce    sync.Once
-	baseScriptSrcElemSources string
-)
-
-// baseScriptSrcElem returns the startup-computed script-src-elem source list
-// covering the two documents whose bytes are fixed for the life of the
-// process: the embedded SPA (static/index.html, served verbatim by both
-// static_index.go and the plain file server) and the device-flow login page
-// (a const, served to any unauthenticated browser path). Computed once, like
-// the #3863 gzip/ETag precomputation it must stay compatible with.
-func baseScriptSrcElem() string {
-	baseScriptSrcElemOnce.Do(func() {
-		var docs []byte
-		if raw, err := fs.ReadFile(staticFS, "static/index.html"); err == nil {
-			docs = append(docs, raw...)
-		}
-		docs = append(docs, []byte(loginPage)...)
-		baseScriptSrcElemSources = scriptSrcElemSources(docs)
-	})
-	return baseScriptSrcElemSources
-}
-
-// applyDocumentScriptSrcElem replaces the script-src-elem directive of the
+// ApplyDocumentScriptSrcElem replaces the script-src-elem directive of the
 // already-set CSP header with the hash allowlist for doc — the complete
 // rendered document the handler is about to write. Handlers whose HTML varies
 // per response (the /contribute landing, the /snapshot document) call this
 // after rendering and before the first Write, so the policy always describes
 // exactly the bytes being served. A response with no CSP header (not routed
 // through securityHeaders, e.g. a bare test recorder) is left untouched.
-func applyDocumentScriptSrcElem(w http.ResponseWriter, doc []byte) {
+func ApplyDocumentScriptSrcElem(w http.ResponseWriter, doc []byte) {
 	csp := w.Header().Get("Content-Security-Policy")
 	if csp == "" {
 		return
@@ -141,7 +116,7 @@ func applyDocumentScriptSrcElem(w http.ResponseWriter, doc []byte) {
 	parts := strings.Split(csp, ";")
 	for i, part := range parts {
 		if strings.HasPrefix(strings.TrimSpace(part), "script-src-elem") {
-			parts[i] = " script-src-elem " + scriptSrcElemSources(doc)
+			parts[i] = " script-src-elem " + ScriptSrcElemSources(doc)
 			w.Header().Set("Content-Security-Policy", strings.TrimSpace(strings.Join(parts, ";")))
 			return
 		}

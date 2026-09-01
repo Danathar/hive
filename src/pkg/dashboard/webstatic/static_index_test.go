@@ -1,11 +1,10 @@
-package dashboard
+package webstatic
 
 import (
 	"compress/gzip"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 )
@@ -15,9 +14,9 @@ import (
 // happened rather than the raw bytes being relabeled.
 var testIndexBody = []byte("<!DOCTYPE html><html>" + strings.Repeat("<div>hive dashboard</div>", 200) + "</html>")
 
-func newTestIndex(t *testing.T) *indexDocument {
+func newTestIndex(t *testing.T) *IndexDocument {
 	t.Helper()
-	d := newIndexDocument(testIndexBody)
+	d := NewIndexDocument(testIndexBody)
 	if d.gzipped == nil {
 		t.Fatal("gzip precompression failed for test body")
 	}
@@ -151,28 +150,5 @@ func TestAcceptsGzip(t *testing.T) {
 		if got := acceptsGzip(c.header); got != c.want {
 			t.Errorf("acceptsGzip(%q) = %v, want %v", c.header, got, c.want)
 		}
-	}
-}
-
-func TestStaticTerminalLinksRenewAssertionBeforeOpening(t *testing.T) {
-	body, err := os.ReadFile("static/index.html")
-	if err != nil {
-		t.Fatal(err)
-	}
-	html := string(body)
-	for _, want := range []string{
-		"const TERMINAL_ASSERTION_RENEW_PATH = '/api/terminal/assertion/renew';",
-		"async function renewTerminalAssertion()",
-		"credentials: 'same-origin'",
-		"case 'openTerminal': e.preventDefault(); openTerminal(agent, el.href); break;",
-		"data-action=\"openTerminal\"",
-		"openTerminal(name);",
-	} {
-		if !strings.Contains(html, want) {
-			t.Fatalf("static dashboard terminal renewal wiring missing %q", want)
-		}
-	}
-	if strings.Contains(html, "window.open(terminalUrl(name), '_blank', 'noopener');") {
-		t.Fatal("welcome terminal action still opens /terminal directly without renewing the assertion")
 	}
 }

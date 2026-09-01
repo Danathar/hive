@@ -1,4 +1,4 @@
-package dashboard
+package webstatic
 
 import (
 	"bytes"
@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-// indexDocument serves the embedded SPA document (static/index.html) with
+// IndexDocument serves the embedded SPA document (static/index.html) with
 // compression and revalidation, replacing the bare http.FileServer for the
 // root document only.
 //
@@ -19,6 +19,7 @@ import (
 //   - no Content-Encoding (Go's file server never compresses),
 //   - no ETag, and
 //   - no Last-Modified (embed.FS files have a zero ModTime),
+//
 // so every dashboard visit re-downloaded the full 1.3 MB uncompressed. None of
 // the fleet's edges compress on our behalf (ingress-nginx ships with gzip off,
 // the OpenShift HAProxy router never compresses), so the spoke process is the
@@ -31,17 +32,17 @@ import (
 // the process. A new image ⇒ new bytes ⇒ new ETag, which is precisely the
 // invalidation we want; Cache-Control: no-cache forces revalidation on every
 // load, so a rolled spoke can never serve a stale UI from browser cache.
-type indexDocument struct {
+type IndexDocument struct {
 	raw     []byte
 	gzipped []byte // nil when gzip compression failed; raw is then always served
 	etag    string
 }
 
-func newIndexDocument(raw []byte) *indexDocument {
+func NewIndexDocument(raw []byte) *IndexDocument {
 	sum := sha256.Sum256(raw)
 	// 16 hex bytes of the digest is plenty for cache validation and keeps the
 	// header short; the quotes are part of the ETag grammar (RFC 9110 §8.8.3).
-	d := &indexDocument{
+	d := &IndexDocument{
 		raw:  raw,
 		etag: `"` + hex.EncodeToString(sum[:])[:16] + `"`,
 	}
@@ -103,7 +104,7 @@ func ifNoneMatchHits(header, etag string) bool {
 	return false
 }
 
-func (d *indexDocument) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (d *IndexDocument) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h := w.Header()
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	h.Set("ETag", d.etag)

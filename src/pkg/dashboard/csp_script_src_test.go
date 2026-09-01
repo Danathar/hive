@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/kubestellar/hive/pkg/config"
+	"github.com/kubestellar/hive/pkg/dashboard/webstatic"
 )
 
 // csp_script_src_test.go covers the script-src half of kubestellar/hive#3848
@@ -154,7 +155,7 @@ func TestEmbeddedIndexScriptsSatisfyCSPHashes(t *testing.T) {
 	}
 
 	s := &Server{deps: &Dependencies{Config: &config.Config{}}}
-	handler := s.securityHeaders(newIndexDocument(raw))
+	handler := s.securityHeaders(webstatic.NewIndexDocument(raw))
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("Accept-Encoding", "gzip")
@@ -189,7 +190,7 @@ func TestEmbeddedIndexScriptsSatisfyCSPHashes(t *testing.T) {
 	}
 
 	// POSITIVE CONTROL + COUNT FLOOR: the document still contains its scripts.
-	scripts := extractInlineScripts(body)
+	scripts := webstatic.ExtractInlineScripts(body)
 	if len(scripts) != 2 {
 		t.Fatalf("extracted %d inline scripts from static/index.html, want 2 — "+
 			"if the SPA gained or lost a script block, update this floor AND confirm the new "+
@@ -197,7 +198,7 @@ func TestEmbeddedIndexScriptsSatisfyCSPHashes(t *testing.T) {
 	}
 	elem := cspDirective(rec.Header().Get("Content-Security-Policy"), "script-src-elem")
 	for i, script := range scripts {
-		if h := cspScriptHash(script); !strings.Contains(elem, h) {
+		if h := webstatic.CSPScriptHash(script); !strings.Contains(elem, h) {
 			t.Errorf("inline script #%d of the served SPA is not allowlisted (%s missing) — "+
 				"the dashboard would render BLANK in every CSP3 browser\n elem: %s", i, h, elem)
 		}
@@ -221,13 +222,13 @@ func TestEmbeddedIndexScriptsSatisfyCSPHashes(t *testing.T) {
 // in the startup set: the device-flow login page, served with the same base
 // header to every unauthenticated browser path.
 func TestLoginPageScriptSatisfiesCSPHashes(t *testing.T) {
-	scripts := extractInlineScripts([]byte(loginPage))
+	scripts := webstatic.ExtractInlineScripts([]byte(loginPage))
 	if len(scripts) != 1 {
 		t.Fatalf("extracted %d inline scripts from the login page, want 1 — "+
 			"update the floor AND the startup hash set together", len(scripts))
 	}
 	elem := cspDirective(servedCSP(t), "script-src-elem")
-	if h := cspScriptHash(scripts[0]); !strings.Contains(elem, h) {
+	if h := webstatic.CSPScriptHash(scripts[0]); !strings.Contains(elem, h) {
 		t.Errorf("the login page's inline script is not allowlisted (%s missing) — "+
 			"sign-in would break in every CSP3 browser\n elem: %s", h, elem)
 	}
@@ -259,14 +260,14 @@ func TestContributePageScriptsSatisfyPerResponseCSP(t *testing.T) {
 		if strings.Contains(elem, "'unsafe-inline'") {
 			t.Errorf("host %s: script-src-elem must not carry 'unsafe-inline', got %q", host, elem)
 		}
-		scripts := extractInlineScripts(body)
+		scripts := webstatic.ExtractInlineScripts(body)
 		// COUNT FLOOR: the page ships 4 unconditional inline script blocks
 		// today; zero or few means extraction broke and the policy is vacuous.
 		if len(scripts) < 4 {
 			t.Fatalf("host %s: extracted %d inline scripts from /contribute, want >= 4", host, len(scripts))
 		}
 		for i, script := range scripts {
-			if h := cspScriptHash(script); !strings.Contains(elem, h) {
+			if h := webstatic.CSPScriptHash(script); !strings.Contains(elem, h) {
 				t.Errorf("host %s: /contribute inline script #%d not allowlisted (%s missing) — "+
 					"the page would render dead in every CSP3 browser", host, i, h)
 			}
@@ -287,12 +288,12 @@ func TestContributePageScriptsSatisfyPerResponseCSP(t *testing.T) {
 // handlers depend on.
 func TestApplyDocumentScriptSrcElem(t *testing.T) {
 	doc := []byte(`<html><head><script>alert("ours")</script></head></html>`)
-	wantHash := cspScriptHash([]byte(`alert("ours")`))
+	wantHash := webstatic.CSPScriptHash([]byte(`alert("ours")`))
 
 	rec := httptest.NewRecorder()
 	rec.Header().Set("Content-Security-Policy",
 		"default-src 'self'; script-src 'self' 'unsafe-inline'; script-src-elem 'self' 'sha256-stale='; script-src-attr 'unsafe-inline'; style-src 'self'")
-	applyDocumentScriptSrcElem(rec, doc)
+	webstatic.ApplyDocumentScriptSrcElem(rec, doc)
 	csp := rec.Header().Get("Content-Security-Policy")
 
 	elem := cspDirective(csp, "script-src-elem")
@@ -312,14 +313,14 @@ func TestApplyDocumentScriptSrcElem(t *testing.T) {
 	// A script-free document yields a hash-free (but still closed) directive.
 	rec2 := httptest.NewRecorder()
 	rec2.Header().Set("Content-Security-Policy", "script-src-elem 'self' 'sha256-stale='")
-	applyDocumentScriptSrcElem(rec2, []byte("<html>no scripts</html>"))
+	webstatic.ApplyDocumentScriptSrcElem(rec2, []byte("<html>no scripts</html>"))
 	if got := cspDirective(rec2.Header().Get("Content-Security-Policy"), "script-src-elem"); got != "script-src-elem 'self'" {
 		t.Errorf("script-free document: script-src-elem = %q, want \"script-src-elem 'self'\"", got)
 	}
 
 	// No CSP header (not routed through securityHeaders): leave untouched.
 	rec3 := httptest.NewRecorder()
-	applyDocumentScriptSrcElem(rec3, doc)
+	webstatic.ApplyDocumentScriptSrcElem(rec3, doc)
 	if got := rec3.Header().Get("Content-Security-Policy"); got != "" {
 		t.Errorf("helper invented a CSP header out of nothing: %q", got)
 	}
@@ -340,8 +341,8 @@ func TestDynamicHTMLHandlersStampDocumentCSP(t *testing.T) {
 		if err != nil {
 			t.Fatalf("reading %s: %v", file, err)
 		}
-		if got := strings.Count(string(src), "applyDocumentScriptSrcElem(w"); got < wantCalls {
-			t.Errorf("%s calls applyDocumentScriptSrcElem %d times, want >= %d — a rendered "+
+		if got := strings.Count(string(src), "webstatic.ApplyDocumentScriptSrcElem(w"); got < wantCalls {
+			t.Errorf("%s calls webstatic.ApplyDocumentScriptSrcElem %d times, want >= %d — a rendered "+
 				"document served without its per-response hashes renders BLANK in CSP3 browsers", file, got, wantCalls)
 		}
 	}

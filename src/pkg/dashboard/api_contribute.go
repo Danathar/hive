@@ -25,6 +25,7 @@ import (
 
 	"github.com/kubestellar/hive/pkg/beads"
 	"github.com/kubestellar/hive/pkg/config"
+	"github.com/kubestellar/hive/pkg/dashboard/webstatic"
 	"github.com/kubestellar/hive/pkg/github"
 	"github.com/kubestellar/hive/pkg/hub"
 )
@@ -795,8 +796,8 @@ func (s *Server) handleContributeLanding(w http.ResponseWriter, r *http.Request)
 	// content varies per response (hubURL derives from the Host header, and the
 	// optional custom-style script from the ?style= query), so its CSP
 	// script-src-elem hashes can only be computed from the finished document.
-	// applyDocumentScriptSrcElem below stamps them before the first Write
-	// (#3848 part 1 / #3907, see csp_script_src.go).
+	// webstatic.ApplyDocumentScriptSrcElem below stamps them before the first Write
+	// (#3848 part 1 / #3907, see pkg/dashboard/webstatic).
 	var page bytes.Buffer
 	fmt.Fprintf(&page, strings.ReplaceAll(`<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Contribute to %s</title>
@@ -805,8 +806,8 @@ func (s *Server) handleContributeLanding(w http.ResponseWriter, r *http.Request)
      single attribute write on purpose: everything else about the control (the
      button label, persistence, the cycle) lives in the deferred block at the
      foot of the document, because none of it affects the first paint. An inline
-     script element is fine under CSP — applyDocumentScriptSrcElem stamps a
-     sha256 for every inline script in the finished document (csp_script_src.go);
+     script element is fine under CSP — webstatic.ApplyDocumentScriptSrcElem stamps a
+     sha256 for every inline script in the finished document (pkg/dashboard/webstatic);
      it is inline on*= ATTRIBUTES that are forbidden (ADR-0016), which is why the
      button dispatches through data-action instead of onclick. -->
 <script>
@@ -6280,8 +6281,8 @@ fetch('/api/version').then(function(r){return r.json()}).then(function(d){
   el.innerHTML=dot+' Hive v'+d.version+' ('+d.short+')' + (d.behind?' · <span style="color:var(--cc-amber)">update available</span>':' · up to date');
 }).catch(function(){});
 </script>
-</body></html>`, "{{HIVE_BRANCH}}", upstreamBranch()), projectName, michromaFontFaceCSS, customStyleHeadHTML, projectName, len(profiles), tierBoxes.String(), hubURL, hubURLJS, projectNameJS, tierTableRows, customStyleNoticeHTML)
-	applyDocumentScriptSrcElem(w, page.Bytes())
+</body></html>`, "{{HIVE_BRANCH}}", upstreamBranch()), projectName, webstatic.MichromaFontFaceCSS, customStyleHeadHTML, projectName, len(profiles), tierBoxes.String(), hubURL, hubURLJS, projectNameJS, tierTableRows, customStyleNoticeHTML)
+	webstatic.ApplyDocumentScriptSrcElem(w, page.Bytes())
 	_, _ = w.Write(page.Bytes())
 }
 
