@@ -88,10 +88,16 @@ func TestMaybeRefreshToken_NotDueIsANoOp(t *testing.T) {
 }
 
 // TestMaybeRefreshToken_MintFailureRetriesNextHeartbeat: when the mint fails
-// (#2436-style App API error) nothing may be sent — the relay keeps its
+// (#2436-style App API error) NO CREDENTIAL may be sent — the relay keeps its
 // existing token — and tokenMintedAt must NOT advance, so tokenRefreshDue still
 // reports due on the next heartbeat and the refresh is retried rather than
 // abandoned for the life of the task.
+//
+// As of #5447 this path DOES write one frame: an advisory token_refresh_failed
+// carrying no token material (asserted below and, for its content, in
+// TestMaybeRefreshToken_MintFailureNotifiesRelay). The connection therefore now
+// needs a real socket rather than the nil-ws tripwire the other no-send cases
+// still use; the retry policy this test guards is unchanged.
 func TestMaybeRefreshToken_MintFailureRetriesNextHeartbeat(t *testing.T) {
 	hub := &ContributeWSHub{logger: slog.Default()}
 	s := NewServer(0, slog.Default())
@@ -99,9 +105,27 @@ func TestMaybeRefreshToken_MintFailureRetriesNextHeartbeat(t *testing.T) {
 	hub.server = s
 
 	minted := time.Now().Add(-wsTokenRefreshPeriod - time.Minute)
-	conn := refreshConn(nil, minted) // nil ws: a send attempt would panic
+	server, client := wsPair(t)
+	conn := refreshConn(server, minted)
 
 	hub.maybeRefreshToken(conn)
+
+	// Whatever is written on a failed mint, it must never be a credential.
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, data, err := client.ReadMessage()
+	if err != nil {
+		t.Fatalf("read after failed mint: %v", err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(data, &wire); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if wire["type"] != "token_refresh_failed" {
+		t.Fatalf("type = %v, want token_refresh_failed", wire["type"])
+	}
+	if _, ok := wire["github_token"]; ok {
+		t.Fatalf("a failed mint must never put token material on the wire: %s", data)
+	}
 
 	conn.mu.Lock()
 	got := conn.tokenMintedAt
@@ -212,4 +236,105 @@ func TestMaybeRefreshToken_SendFailureKeepsRetryArmed(t *testing.T) {
 	if _, _, due := tokenRefreshDue(conn, time.Now()); !due {
 		t.Fatalf("after a failed send, refresh must still be due on the next heartbeat")
 	}
+}
+
+// TestMaybeRefreshToken_MintFailureNotifiesRelay is the hub half of #5447.
+//
+// Before it, a failed re-mint was recorded ONLY in the hub's log. The relay was
+// told nothing, so its first evidence that the credential it holds had gone
+// stale was a push failing roughly an hour into a long task, which the agent
+// reported as a generic auth error — the misleading-symptom class of #5343.
+//
+// This asserts the OBSERVABLE consequence (#5388): a real frame, of a named
+// type, carrying a reason and no token material. Asserting only that the hub
+// "handles" a mint failure would pass against the old silent code.
+func TestMaybeRefreshToken_MintFailureNotifiesRelay(t *testing.T) {
+	hub := &ContributeWSHub{logger: slog.Default()}
+	s := NewServer(0, slog.Default())
+	s.deps = &Dependencies{GHAppAuth: newFailingAppAuth(t)}
+	hub.server = s
+
+	server, client := wsPair(t)
+	conn := refreshConn(server, time.Now().Add(-wsTokenRefreshPeriod-time.Minute))
+
+	hub.maybeRefreshToken(conn)
+
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, data, err := client.ReadMessage()
+	if err != nil {
+		t.Fatalf("the relay was never told the re-mint failed: %v", err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(data, &wire); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if wire["type"] != "token_refresh_failed" {
+		t.Fatalf("type = %v, want token_refresh_failed", wire["type"])
+	}
+	reason, _ := wire["reason"].(string)
+	if reason == "" {
+		t.Fatalf("token_refresh_failed carried no reason: %s", data)
+	}
+	// The reason is a fixed, caller-supplied string. The mint error itself can
+	// quote GitHub App responses, and that must not cross to a
+	// contributor-controlled process.
+	if strings.Contains(strings.ToLower(reason), "ghs_") || strings.Contains(reason, "token ") {
+		t.Fatalf("reason looks like it leaked auth detail: %q", reason)
+	}
+	if _, ok := wire["github_token"]; ok {
+		t.Fatalf("token material on a failure notice: %s", data)
+	}
+}
+
+// TestResumeTaskToken_MintFailureNotifiesRelay: the reconnect path must be as
+// loud as the heartbeat one. A resume whose mint fails leaves the relay holding
+// a credential minted before the disconnect, with refresh un-armed — exactly the
+// state in which a later push fails for no visible reason (#5447).
+func TestResumeTaskToken_MintFailureNotifiesRelay(t *testing.T) {
+	hub := &ContributeWSHub{logger: slog.Default()}
+	s := NewServer(0, slog.Default())
+	s.deps = &Dependencies{GHAppAuth: newFailingAppAuth(t)}
+	hub.server = s
+
+	server, client := wsPair(t)
+	conn := refreshConn(server, time.Time{})
+
+	hub.resumeTaskToken(conn, &taskLease{taskID: "t-resume", repo: "o/r", number: 7, tier: "contributor", gen: 1})
+
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, data, err := client.ReadMessage()
+	if err != nil {
+		t.Fatalf("a failed resume mint told the relay nothing: %v", err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(data, &wire); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if wire["type"] != "token_refresh_failed" {
+		t.Fatalf("type = %v, want token_refresh_failed", wire["type"])
+	}
+	if _, ok := wire["github_token"]; ok {
+		t.Fatalf("token material on a failure notice: %s", data)
+	}
+
+	// The lenient retry policy is unchanged: a failed resume mint must leave
+	// tokenMintedAt zero so a later resume or heartbeat can still arm refresh.
+	conn.mu.Lock()
+	minted := conn.tokenMintedAt
+	conn.mu.Unlock()
+	if !minted.IsZero() {
+		t.Fatalf("tokenMintedAt = %s, want zero after a failed resume mint", minted)
+	}
+}
+
+// TestServerCapabilitiesAdvertisesTokenRefreshFailed: the notice is only useful
+// if a client can learn the hub sends it without probing (#2567's contract).
+func TestServerCapabilitiesAdvertisesTokenRefreshFailed(t *testing.T) {
+	caps := serverCapabilities()
+	for _, c := range caps {
+		if c == capTokenRefreshFailed {
+			return
+		}
+	}
+	t.Fatalf("serverCapabilities() = %v, missing %q", caps, capTokenRefreshFailed)
 }

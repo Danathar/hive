@@ -468,21 +468,32 @@ Two things follow from refresh being driven by the hub's heartbeat:
   re-arms the cycle — without that step the resumed session's mint time would
   stay zero and refresh would never fire again for the life of the connection
   ([#2610](https://github.com/kubestellar/hive/issues/2610)).
-- **A failed re-mint is not fatal and is not announced.** If the mint errors, or
-  the hive has no App auth to mint from, the hub logs it and leaves the relay's
-  existing token in place, retrying on the next heartbeat. The relay is told
-  nothing. So the observable failure mode is not a "token expired" message: it
-  is a push or `gh` call that starts returning an authentication error partway
-  through a long task, with the previous 55 minutes having worked normally.
+- **A failed re-mint is not fatal, but it is announced.** If the mint errors the
+  hub logs it, leaves the relay's existing token in place, and retries on the
+  next heartbeat — and it now also sends the relay a `token_refresh_failed`
+  carrying a reason and no token material, so the relay logs the condition
+  against the task it belongs to
+  ([#5447](https://github.com/kubestellar/hive/issues/5447)). Both the heartbeat
+  and the resume path do this, and the hub advertises `token_refresh_failed` in
+  its `auth_ok` capability set. The message is advisory: nothing is revoked, no
+  task is failed, and a relay that ignores it behaves exactly as before. The
+  no-App-auth case is still silent — it is a deployment posture, not a failure.
 
-**Expiry is advertised but not enforced by the relay.** Each `token_refresh`
-carries a `token_expires_at` timestamp, and the relay records it — but it never
-checks it. Nothing in the relay warns as expiry approaches, refuses to start a
-push against a stale token, or asks the hub for a new one. The relay finds out
-that a token has died the same way it finds out about any other GitHub error:
-the command fails. If you see an authentication failure on a task that has been
-running for around an hour, a re-mint that quietly failed on the hub side is the
-first thing to check, and the hub's log is the only place that records it.
+**Expiry is now read, and warned on — but never enforced.** Each `token_refresh`
+carries a `token_expires_at` timestamp. The relay records it and, on each
+progress tick, compares it against the clock: it warns once the credential is
+within five minutes of expiry or already past it, and says so more pointedly
+when the hub has separately reported a failed renewal. The warning is throttled
+to once every ten minutes so a long task does not spam its log.
+
+It stops at warning deliberately. `token_expires_at` is the *hub's* wall clock
+read on the *relay's*, so a machine with a few minutes of skew would refuse work
+on a perfectly valid credential — strictly worse than today, where the token
+simply works. GitHub's answer to the actual call remains the authority on
+whether a token is good; the warning exists so that when the call does fail, the
+cause is already named in the log rather than surfacing as a generic
+authentication error. If you see an authentication failure on a task that has
+been running for around an hour, look for these two lines first.
 
 **Removal.** The token is unlinked on **every** task-exit path, before the agent
 is interrupted, so a turn that survives the stop cannot keep pushing against an

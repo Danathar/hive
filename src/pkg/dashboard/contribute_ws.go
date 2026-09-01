@@ -3925,6 +3925,7 @@ func (h *ContributeWSHub) maybeRefreshToken(c *ContributorConnection) {
 	if err != nil {
 		h.logger.Warn("[contribute-ws] token refresh: mint failed, will retry next heartbeat",
 			"username", c.profile.GitHubUsername, "tier", tier, "error", err)
+		h.sendTokenRefreshFailed(c, "mint failed, will retry on the next heartbeat")
 		return
 	}
 	if tok == "" {
@@ -4053,6 +4054,7 @@ func (h *ContributeWSHub) resumeTaskToken(c *ContributorConnection, lease *taskL
 	if err != nil {
 		h.logger.Warn("[contribute-ws] resume token refresh: mint failed, refresh will re-arm on next resume/heartbeat",
 			"username", c.profile.GitHubUsername, "tier", tier, "error", err)
+		h.sendTokenRefreshFailed(c, "mint failed on task resume, refresh will re-arm on the next resume or heartbeat")
 		return
 	}
 	if tok == "" {
@@ -4086,6 +4088,47 @@ func tokenRefreshDue(c *ContributorConnection, now time.Time) (tier, repo string
 	}
 	repo = c.currentTask.Repo
 	return tier, repo, true
+}
+
+// sendTokenRefreshFailed tells the relay that a mid-task re-mint FAILED, so the
+// credential it is holding is the OLD one and will expire at the token_expires_at
+// it was last given (#5447).
+//
+// Before this, a failed mint was recorded only in the hub's log. The relay's first
+// evidence was a push that started failing roughly an hour into a long task, which
+// the agent saw as a generic auth error — the same misleading-symptom class as
+// #5343, where a credential problem was reported as "the branch doesn't exist on
+// the remote".
+//
+// It deliberately carries NO token material: only a type and a human-readable
+// reason. The reason is a fixed, caller-supplied string, never the mint error
+// itself, because that error can quote GitHub App responses and we do not want
+// hub-internal auth detail crossing to a contributor-controlled process.
+//
+// Advisory only, and it changes NOTHING about the refresh contract: the old token
+// stays installed, tokenMintedAt is untouched (so tokenRefreshDue keeps firing),
+// and the next heartbeat retries exactly as before. A send failure is swallowed —
+// this is a notification about a degraded credential, and failing the refresh path
+// because the notification could not be delivered would turn a warning into an
+// outage. The heartbeat's own ping remains the authority on whether the socket is
+// alive.
+//
+// Concurrency: goes through c.send, which takes writeMu, and takes no other lock.
+// Both callers (maybeRefreshToken, resumeTaskToken) hold neither c.mu nor c.writeMu
+// at the call site — tokenRefreshDue releases c.mu before returning — so there is
+// no re-entrancy here.
+func (h *ContributeWSHub) sendTokenRefreshFailed(c *ContributorConnection, reason string) {
+	if c == nil {
+		return
+	}
+	if err := c.send(WSMessage{
+		Type:   "token_refresh_failed",
+		Seq:    h.nextSeq(),
+		Reason: reason,
+	}); err != nil {
+		h.logger.Debug("[contribute-ws] token refresh: could not notify relay of mint failure",
+			"username", c.profile.GitHubUsername, "error", err)
+	}
 }
 
 // sendTokenRefresh writes a token_refresh message carrying the new token and its
