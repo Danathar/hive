@@ -78,6 +78,12 @@ type ContributorConnection struct {
 	ws              *websocket.Conn
 	profile         *ContributorProfile
 	cliBackend      string
+	// session is the OPTIONAL client-declared session label from auth_response
+	// (multi-session-per-account). Empty for a single-session contributor, which
+	// keeps identityOf() at the bare ContributorID. When set, identityOf()
+	// returns ContributorID#session so concurrent relays under one account get
+	// independent lease/assignment/failure slots. Sanitized at auth time.
+	session         string
 	model           string
 	reasoningEffort string
 	role            string // empty = task-driven mode, "scanner"/"reviewer"/etc. = role mode
@@ -236,6 +242,19 @@ type WSMessage struct {
 	// routing authority; Model remains the canonical selection transport.
 	Provider        string `json:"provider,omitempty"`
 	Model           string `json:"model,omitempty"`
+	// Session is an OPTIONAL client-declared session label (kubestellar/hive:
+	// multi-session-per-account). One GitHub account has ONE contributor profile
+	// (one ContributorID, one auth token, one trust tier), but a contributor may
+	// want to run several relays at once under that account — e.g. one per CLI
+	// backend (claude, agy, pi, kiro). All identity-keyed hub state (task leases,
+	// assignment cooldowns, failure streaks, ownership fences) keys on
+	// identityOf(); without a distinguisher those sessions would collide on a
+	// single active-task slot. A distinct Session yields a distinct
+	// session-scoped identity (ContributorID#session) for that state, while auth,
+	// tier, model admission and rate-limit accounting stay per-account. Additive
+	// and backward-compatible: omitted → identity is the bare ContributorID,
+	// exactly the previous single-session behavior. Sanitized/bounded before use.
+	Session         string `json:"session,omitempty"`
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 	TaskID          string `json:"task_id,omitempty"`
 	// TaskGen is the assignment GENERATION / lease token for this task (kubestellar/
@@ -3329,6 +3348,7 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 				ws:              conn,
 				profile:         profile,
 				cliBackend:      msg.CLIBackend,
+				session:         sanitizeSessionLabel(msg.Session),
 				model:           msg.Model,
 				reasoningEffort: msg.ReasoningEffort,
 				role:            requestedRole,
@@ -4773,14 +4793,47 @@ const (
 // registered ContributorID is preferred; GitHubUsername is the fallback for
 // connections whose profile predates or lacks an ID. Two WebSocket connections
 // opened by the same registered contributor therefore share one identity.
+// sanitizeSessionLabel bounds and cleans a client-declared session label before
+// it becomes part of a map key, log field, and UI string. Multi-session-per-
+// account: the label distinguishes concurrent relays under one GitHub account.
+// Only [A-Za-z0-9._-] survive (so the ContributorID#session key stays a single
+// clean token and cannot smuggle path/format characters); the result is capped
+// at 32 bytes. An empty or all-stripped label returns "", which identityOf
+// treats as the historical single-session case.
+func sanitizeSessionLabel(s string) string {
+	if s == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		}
+		if b.Len() >= 32 {
+			break
+		}
+	}
+	return b.String()
+}
+
 func identityOf(c *ContributorConnection) string {
 	if c == nil || c.profile == nil {
 		return ""
 	}
-	if c.profile.ContributorID != "" {
-		return c.profile.ContributorID
+	base := c.profile.ContributorID
+	if base == "" {
+		base = c.profile.GitHubUsername
 	}
-	return c.profile.GitHubUsername
+	// Session-scoped identity (multi-session-per-account): a distinct session
+	// label lets concurrent relays under one account hold independent task
+	// leases/cooldowns/ownership. Empty session preserves the historical bare
+	// ContributorID key, so existing single-session contributors are unchanged.
+	if base != "" && c.session != "" {
+		return base + "#" + c.session
+	}
+	return base
 }
 
 // rateWindowCounts returns how many task assignments the given identity has been

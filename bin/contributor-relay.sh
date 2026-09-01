@@ -61,6 +61,17 @@ const PI_ENV = BACKEND === 'pi' ? { ...process.env } : {};
 let piInvocationState = 'untested';
 const REASONING_EFFORT = process.env.AGENT_REASONING_EFFORT || '';
 const AGENT_ROLE = (process.env.HIVE_AGENT_ROLE || '').trim();
+// HIVE_SESSION — optional session label (multi-session-per-account). One GitHub
+// account has one contributor identity per hub, and the hub keys task
+// leases/cooldowns/ownership on that identity, so two relays under the same
+// account would collide on a single active-task slot. Declaring a distinct
+// session gives each relay an independent session-scoped identity
+// (ContributorID#session) on the hub while auth/tier stay per-account. Defaults
+// to the backend name so the common case — one relay per CLI backend under one
+// account — works with no extra config. Omitted only if explicitly emptied.
+const AGENT_SESSION = (process.env.HIVE_SESSION !== undefined
+  ? process.env.HIVE_SESSION
+  : BACKEND).trim();
 // Neutral directory both entrypoints launch the CLI from ($HOME). Used to pin
 // the cwd on relaunch; see launchCommandWithCwd for why the relay's own cwd is
 // the wrong answer in local mode.
@@ -3444,6 +3455,9 @@ function handleMessage(data, hub) {
         model: refreshDetectedModel(),
         reasoning_effort: effectiveReasoningEffort() || undefined,
         role: AGENT_ROLE,
+        // Multi-session-per-account: additive, optional. An older hub ignores
+        // this unknown field and treats the relay as a single session.
+        session: AGENT_SESSION || undefined,
         // #2547 declare half + #2567: additive, optional self-report of runtime
         // posture and protocol version. An older hub ignores these unknown fields.
         protocol_version: RELAY_PROTOCOL_VERSION,
