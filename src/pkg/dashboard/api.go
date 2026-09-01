@@ -3723,8 +3723,16 @@ func (s *Server) handleAgentConfigCadences(w http.ResponseWriter, r *http.Reques
 		s.logger.Error("failed to persist config after cadence update", "agent", name, "error", err)
 	}
 	s.auditFromRequest(r, "config_agent_cadences", auditDetail("section", "cadences"), name)
-	s.refreshAndPersist()
-	okResponse(w, map[string]string{"status": "updated", "agent": name})
+	// The rebuild kicked here is asynchronous, so the browser's post-save
+	// GET /api/status can be served the CACHED pre-mutation snapshot and
+	// repaint the OLD cadence — the operator then waits for a later broadcast
+	// to see their own write (#5492). minStatusSeq is the lowest StatusSeq
+	// guaranteed to reflect this mutation; the dashboard raises its
+	// stale-snapshot floor to it and drops anything built earlier (#4348).
+	floor := s.refreshAndPersistSeq()
+	// jsonResponse rather than okResponse: the latter is typed map[string]string
+	// and cannot carry the numeric floor. "ok" is preserved for callers.
+	jsonResponse(w, map[string]any{"ok": true, "status": "updated", "agent": name, "minStatusSeq": floor})
 }
 
 func (s *Server) handleAgentConfigModels(w http.ResponseWriter, r *http.Request) {
