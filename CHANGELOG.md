@@ -11,7 +11,9 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
-## 2026-09-01 (v4.0.1)
+### Security
+
+- `hive-discord.service` no longer executes code out of a path an unprivileged local user could have planted ([#5435](https://github.com/kubestellar/hive/issues/5435)). The legacy v1 host unit runs `node bot.js` with `WorkingDirectory=/tmp/hive/discord`, so the executed file resolved out of a world-writable parent that is cleared on every reboot; `/tmp`'s sticky bit prevents replacing entries owned by others but not creating new ones, so a local user who won the post-reboot race — creating `/tmp/hive/discord/bot.js` before `hive-deploy` repopulated the checkout — got code execution as the service user together with the Discord bot token from `/etc/hive/discord.env`. The unit now runs `bin/hive-checkout-guard.sh` as an `ExecStartPre` and refuses to start unless every directory from `/` down to the checkout is owned by the service user or root and not writable by anyone else (a sticky ancestor such as `/tmp` is accepted, the leaf is not), and unless `bot.js` itself exists, is a regular file rather than a symlink, and is not group- or world-writable. `NoNewPrivileges`, `ProtectSystem=full`, `ProtectHome=read-only`, `PrivateDevices` and `RestrictSUIDSGID` are set alongside it. **The checkout stays at `/tmp/hive` and no path changes**, so existing hosts keep working: `/tmp/hive` is hardcoded well beyond `HIVE_REPO_DIR` (in `bin/hive.sh`, `bin/kick-agents.sh`, and the `ExecStart` of `hive-snapshot.service`), and relocating it is a deploy-layout change rather than a fix to this unit. `PrivateTmp` is deliberately *not* set and `ProtectSystem` is deliberately not `strict` — either would hide or freeze the very checkout the unit runs from and stop the bot starting; the contract test pins both as absent so a later hardening pass cannot introduce them. Containerized deployments never used this unit and are unaffected.
 
 ### Added
 
