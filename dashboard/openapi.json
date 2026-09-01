@@ -16628,16 +16628,26 @@
                     },
                     "models": {
                       "type": "array",
+                      "description": "Model ids the backend offers, as advertised by the inference gateway (\"openai/gpt-5\", \"claude_opus_4.8\"). A FLOOR rather than a census whenever `fallback` or `partial` is set.",
                       "items": {
-                        "type": "object"
+                        "type": "string"
                       }
                     },
                     "fallback": {
-                      "type": "boolean"
+                      "type": "boolean",
+                      "description": "True when endpoint discovery found nothing and the server substituted its static alias list. These ids are common guesses, unverified against the configured endpoint or key."
                     },
                     "partial": {
                       "type": "boolean",
-                      "description": "True when some but not all endpoints answered."
+                      "description": "True when some but not all endpoints answered. Every id present really was discovered, but a model's ABSENCE proves nothing."
+                    },
+                    "entitled": {
+                      "type": "boolean",
+                      "description": "Present and true when the server narrowed `models` to the set the configured key may actually use. Omitted otherwise, and never set alongside `fallback`."
+                    },
+                    "entitledSource": {
+                      "type": "string",
+                      "description": "How the entitled set was learned (key-info probe, or a \"team not allowed\" 403). Present only when `entitled` is true."
                     }
                   }
                 }
