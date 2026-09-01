@@ -70,15 +70,21 @@ check_exit "comment without body exits 2" 2 \
 echo ""
 echo "--- approve ---"
 rm -rf "$REQ_DIR"; mkdir -p "$REQ_DIR"
-run_script "revbot" --repo "org/repo" 12 --approve
+APPROVE_OUTPUT="$(run_script "revbot" --repo "org/repo" 12 --approve)"
+printf '%s\n' "$APPROVE_OUTPUT"
 REQ_FILE="$(find_req revbot)"
 if [ -n "$REQ_FILE" ]; then
   check "approve repo" "org/repo" "$(field "$REQ_FILE" repo)"
   check "approve number" "12" "$(field "$REQ_FILE" number)"
   check "approve event" "approve" "$(field "$REQ_FILE" event)"
   check "approve agent" "revbot" "$(field "$REQ_FILE" agent)"
+  if printf '%s\n' "$APPROVE_OUTPUT" | grep -Fq "result appears at ${REQ_FILE%.json}.result.json"; then
+    echo "  PASS: result path advertised"; PASS=$((PASS + 1))
+  else
+    echo "  FAIL: result path not advertised"; FAIL=$((FAIL + 1))
+  fi
 else
-  echo "  FAIL: approve request not created"; FAIL=$((FAIL + 4))
+  echo "  FAIL: approve request not created"; FAIL=$((FAIL + 5))
 fi
 
 # --- request_changes with body ---

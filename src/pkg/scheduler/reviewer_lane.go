@@ -132,23 +132,38 @@ func (s *Scheduler) buildReviewerMessage(agentName string, actionable *github.Ac
 	b.WriteString("     c. Fix on the SAME branch, working from the CI evidence above:\n")
 	b.WriteString("        gh pr checkout <number> → fix → commit -s → git push\n")
 	b.WriteString("        Do NOT open a replacement PR.\n")
-	b.WriteString(fmt.Sprintf("     d. Then return it to the automated lane and mark your pass:\n"+
+	b.WriteString(fmt.Sprintf("     d. After completing the mandatory audit below, return it to the automated lane and mark your pass:\n"+
 		"        gh pr edit <number> --remove-label needs-human --add-label %s\n", ReviewerPassedLabel))
 	b.WriteString("  2. DE-ESCALATE — the failure was environmental (base-branch regression since\n")
-	b.WriteString("     fixed, infra flake): rebase the branch on its base, push, then\n")
+	b.WriteString("     fixed, infra flake): rebase the branch on its base, push, complete the\n")
+	b.WriteString("     mandatory audit below, then\n")
 	b.WriteString(fmt.Sprintf("        gh pr edit <number> --remove-label needs-human --add-label %s\n", ReviewerPassedLabel))
-	b.WriteString("  3. RECOMMEND-CLOSE — duplicate, superseded, or irreparably lossy: post exactly\n")
-	b.WriteString("     ONE comment:\n")
-	b.WriteString("        gh pr comment <number> --body \"[reviewer] recommend close: <rationale>\"\n")
-	b.WriteString(fmt.Sprintf("     then mark the verdict delivered so it is never repeated:\n"+
+	b.WriteString("  3. RECOMMEND-CLOSE — duplicate, superseded, or irreparably lossy: complete the\n")
+	b.WriteString("     mandatory audit below using its recommend-close review body, then mark the\n")
+	b.WriteString(fmt.Sprintf("     verdict delivered so it is never repeated:\n"+
 		"        gh pr edit <number> --add-label %s\n", ReviewerRecommendCloseLabel))
 	if level >= reviewerCloseACMMLevel {
 		b.WriteString(fmt.Sprintf("     At this hive's ACMM level (%d) you MAY then close the PR yourself\n", level))
-		b.WriteString("     (gh pr close <number>) after posting the comment.\n")
+		b.WriteString("     (gh pr close <number>) after the audited review and bead are recorded.\n")
 	} else {
 		b.WriteString(fmt.Sprintf("     ⛔ NEVER close the PR yourself: closing is operator-only below ACMM level %d.\n", reviewerCloseACMMLevel))
-		b.WriteString("     The comment is your entire verdict; leave needs-human in place.\n")
+		b.WriteString("     The audited recommendation is your entire verdict; leave needs-human in place.\n")
 	}
+
+	b.WriteString("\nMANDATORY AUDIT — complete BOTH records for EVERY verdict before relabeling or closing:\n")
+	b.WriteString("  1. Submit a comment review through Hive's relay so the adjudication is attributed\n")
+	b.WriteString("     as `agent_pr_reviewed` (direct `gh pr comment` / `gh pr review` is not sufficient):\n")
+	b.WriteString("        REPAIR / DE-ESCALATE:\n")
+	b.WriteString("          hive-review <number> --repo <owner/repo> --comment --body \"Reviewer adjudication: <REPAIR|DE-ESCALATE> — evidence: <why>; changes: <what>; tests: <commands/results>; remaining risk: <risk or none>\"\n")
+	b.WriteString("        RECOMMEND-CLOSE (this is the one close-recommend record; do not post a second comment):\n")
+	b.WriteString("          hive-review <number> --repo <owner/repo> --comment --body \"[reviewer] recommend close: <duplicate/superseded/lossy rationale>; evidence: <why>; tests: <checks>; remaining risk: <risk or none>\"\n")
+	b.WriteString("     `hive-review` is asynchronous: poll the `.result.json` path it prints and do\n")
+	b.WriteString("     not proceed until that file reports `\"ok\": true`. A queued request is not yet\n")
+	b.WriteString("     an audit record; an error result must leave the PR in `needs-human`.\n")
+	b.WriteString("  2. Create the matching advisory bead so the outcome reaches the advisory digest:\n")
+	b.WriteString(fmt.Sprintf("        bd create --title \"Reviewer adjudication: <owner/repo>#<number> — <outcome>\" --type advisory --priority 2 --actor %s --external-ref \"gh-<owner/repo>#<number>\"\n", agentName))
+	b.WriteString("     If either record fails, leave `needs-human` in place, do not add a reviewer verdict\n")
+	b.WriteString("     label, and do not close; report the audit failure for a later retry.\n")
 
 	b.WriteString("\nINVARIANTS:\n")
 	b.WriteString(fmt.Sprintf("  ⛔ Adjudicate AT MOST %d PRs this kick, oldest first — the list above is\n", reviewerMaxPRsPerKick))

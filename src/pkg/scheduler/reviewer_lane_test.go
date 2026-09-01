@@ -159,8 +159,8 @@ func TestBuildReviewerMessage_ACMMGateDormantBelowL5(t *testing.T) {
 
 // At L5+ the kick carries the work list and the full adjudication contract:
 // the three exclusive verdicts, the same-branch repair rule, label mechanics,
-// the cap, and the human-authored-PR and reviewer-passed invariants. Below L6
-// closing is forbidden.
+// the cap, mandatory attribution/advisory audit, and the human-authored-PR and
+// reviewer-passed invariants. Below L6 closing is forbidden.
 func TestBuildReviewerMessage_ContractAtL5(t *testing.T) {
 	s := reviewerTestScheduler(t, 5, reviewerFixture)
 	msg := s.buildReviewerMessage("adjudicator", &github.ActionableResult{})
@@ -177,6 +177,16 @@ func TestBuildReviewerMessage_ContractAtL5(t *testing.T) {
 		"--remove-label needs-human",
 		"--add-label " + ReviewerPassedLabel,
 		"[reviewer] recommend close:",
+		"hive-review <number> --repo <owner/repo> --comment",
+		"agent_pr_reviewed",
+		"poll the `.result.json` path",
+		"`\"ok\": true`",
+		"A queued request is not yet",
+		"bd create --title \"Reviewer adjudication:",
+		"--type advisory --priority 2 --actor adjudicator",
+		"--external-ref \"gh-<owner/repo>#<number>\"",
+		"advisory digest",
+		"If either record fails, leave `needs-human` in place",
 		"--add-label " + ReviewerRecommendCloseLabel,
 		"NEVER close the PR yourself",
 		fmt.Sprintf("AT MOST %d PRs this kick", reviewerMaxPRsPerKick),
