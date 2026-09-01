@@ -142,22 +142,31 @@ chmod +x "${SHIM_DIR}/sleep"
 # fan-outs are longer than that. None of these is a contract under test; on
 # CI (and in the production containers) the real tools run.
 if ! xargs --version >/dev/null 2>&1; then
-  # Sequential subset of GNU `xargs -P N -I REPL cmd args...`.
+  # Sequential subset of GNU `xargs -P N -I REPL cmd args...` and
+  # `xargs -P N -n 1 cmd args...` (the ADOPTERS batch uses -I, the SHA
+  # re-check fan-out uses -n 1 so no `{}` substitution touches the script
+  # body — see bin/enumerate-actionable.sh).
   cat >"${SHIM_DIR}/xargs" <<'XARGSEOF'
 #!/usr/bin/env bash
 repl=""
+nmode=0
 while [ $# -gt 0 ]; do
   case "$1" in
     -P) shift 2 ;;
     -I) repl="$2"; shift 2 ;;
+    -n) nmode=1; shift 2 ;;
     *)  break ;;
   esac
 done
 while IFS= read -r line; do
   [ -n "$line" ] || continue
-  args=()
-  for a in "$@"; do args+=("${a//"$repl"/$line}"); done
-  "${args[@]}"
+  if [ "$nmode" = 1 ]; then
+    "$@" "$line"
+  else
+    args=()
+    for a in "$@"; do args+=("${a//"$repl"/$line}"); done
+    "${args[@]}"
+  fi
 done
 exit 0
 XARGSEOF
@@ -218,7 +227,8 @@ files() { # files <name>... -> [{"filename":..},..]
   issue 108 "a PR seen via the issues API"    hive-bot          User "$(labels)"                       "x"                                2024-01-09T00:00:00Z pr; echo ","
   issue 109 "external report without SHA"     newcomer          User "$(labels kind/bug)"              "It crashes on startup"            2024-01-10T00:00:00Z; echo ","
   issue 110 "external report with SHA"        newcomer          User "$(labels kind/bug)"              "Running at commit abc1234def"     2024-01-11T00:00:00Z; echo ","
-  issue 111 "bot-authored issue without SHA"  "dependabot[bot]" Bot  "$(labels)"                       "bump things"                      2024-01-12T00:00:00Z
+  issue 111 "bot-authored issue without SHA"  "dependabot[bot]" Bot  "$(labels)"                       "bump things"                      2024-01-12T00:00:00Z; echo ","
+  issue 112 "external report, SHA never supplied" newcomer       User "$(labels kind/bug)"              "It also crashes on startup"      2024-01-14T00:00:00Z
   echo "]"
 } >"${BASE}/repos_acme_primary_issues.json"
 
@@ -253,11 +263,21 @@ files src/other.go                >"${BASE}/repos_acme_primary_pulls_305_files.j
 files src/main.go                 >"${BASE}/repos_acme_secondary_pulls_401_files.json"
 files adopters.md                 >"${BASE}/repos_acme_secondary_pulls_402_files.json"
 
-# Re-check fixture for #109: the reporter later commented with a SHA.
+# Re-check fixture for #109, as of run 1 and run 2: no SHA yet, so the
+# same-cycle re-check the hold step triggers must not unhold it early. The
+# reporter comments with a SHA only between run 2 and run 3 (see the rewrite
+# right before run 3 below), so unhold is observed happening in run 3.
 cat >"${BASE}/graphql_109.json" <<'EOF'
 {"data":{"repository":{"issue":{"state":"OPEN","body":"It crashes on startup","author":{"login":"newcomer"},
+ "comments":{"nodes":[{"author":{"login":"hive-bot"},"body":"please add the SHA"}]}}}}}
+EOF
+
+# NEGATIVE CONTROL for the re-check: #112's reporter replies but never supplies
+# a SHA. The hold must survive the re-check unchanged, in every run.
+cat >"${BASE}/graphql_112.json" <<'EOF'
+{"data":{"repository":{"issue":{"state":"OPEN","body":"It also crashes on startup","author":{"login":"newcomer"},
  "comments":{"nodes":[{"author":{"login":"hive-bot"},"body":"please add the SHA"},
-                      {"author":{"login":"newcomer"},"body":"sure: 9f8e7d6c5b4a"}]}}}}}
+                      {"author":{"login":"newcomer"},"body":"not sure, will check later"}]}}}}}
 EOF
 
 # ── Runner ───────────────────────────────────────────────────────────────────
@@ -370,58 +390,107 @@ for keep in "110:external author WITH a SHA in the body" "111:Bot-typed author w
   if [[ ",${ISSUE_NUMS}," == *",${n},"* ]]; then pass "kept #${n}: ${why}"; else fail "kept #${n}: ${why}"; fi
 done
 if [[ ",${ISSUE_NUMS}," == *",109,"* ]]; then fail "#109 (external, no SHA, primary repo) withheld from actionable"; else pass "#109 (external, no SHA, primary repo) withheld from actionable"; fi
+if [[ ",${ISSUE_NUMS}," == *",112,"* ]]; then fail "#112 (external, no SHA, primary repo) withheld from actionable"; else pass "#112 (external, no SHA, primary repo) withheld from actionable"; fi
 assert_eq "#109 gets hold added and kind/bug removed, exactly once" \
   "$(gh_calls 'issue edit 109 --repo acme/primary --add-label hold --remove-label kind/bug')" "1"
 assert_eq "#109 gets exactly one comment asking for the SHA" "$(gh_calls 'issue comment 109 --repo acme/primary --body')" "1"
-assert_eq "the comment mentions the commit SHA" "$(grep -c 'commit SHA' "$GH_LOG" || true)" "1"
-assert_eq "no OTHER issue is labeled or commented on" "$(grep -cE '^issue (edit|comment) ' "$GH_LOG" || true)" "2"
+assert_eq "#112 gets hold added and kind/bug removed, exactly once" \
+  "$(gh_calls 'issue edit 112 --repo acme/primary --add-label hold --remove-label kind/bug')" "1"
+assert_eq "#112 gets exactly one comment asking for the SHA" "$(gh_calls 'issue comment 112 --repo acme/primary --body')" "1"
+assert_eq "the comment mentions the commit SHA" "$(grep -c 'commit SHA' "$GH_LOG" || true)" "2"
+assert_eq "no OTHER issue is labeled or commented on" "$(grep -cE '^issue (edit|comment) ' "$GH_LOG" || true)" "4"
 MARKER="${RUN_DIR}/sha_hold_posted_acme_primary_109"
+MARKER112="${RUN_DIR}/sha_hold_posted_acme_primary_112"
 [ -f "$MARKER" ] && pass "marker file recorded for #109" || fail "marker file recorded for #109" "expected $MARKER"
-# The marker just written is re-checked in the SAME cycle: the re-check loop
+[ -f "$MARKER112" ] && pass "marker file recorded for #112" || fail "marker file recorded for #112" "expected $MARKER112"
+# The markers just written are re-checked in the SAME cycle: the re-check loop
 # runs after the hold step and only skips markers already stamped resolved=.
-assert_eq "the fresh marker is re-checked via GraphQL in the same cycle" "$(gh_calls 'api graphql')" "1"
+# Neither #109 nor #112 has a SHA in the graphql fixtures yet, so both stay
+# held — this is the fix working correctly, not the marker being skipped.
+assert_eq "the fresh markers are re-checked via GraphQL in the same cycle" "$(gh_calls 'api graphql')" "2"
+if [ "$(gh_calls 'issue edit 109 --repo acme/primary --remove-label hold --add-label kind/bug')" = "0" ]; then
+  pass "run 1: same-cycle re-check does not unhold #109 (no SHA yet)"
+else
+  fail "run 1: same-cycle re-check does not unhold #109 (no SHA yet)" "unhold fired before the reporter supplied a SHA"
+fi
 
-# Run 2: same GitHub state. The marker must stop a second hold/comment.
+# Run 2: same GitHub state (still no SHA anywhere). The markers must stop a
+# second hold/comment, and the re-check must keep both issues held.
 rc="$(run_enum "$BASE" "${PROJ[@]}")"
 assert_eq "run 2 exits 0" "$rc" "0"
-assert_eq "run 2: hold comment is NOT posted again (marker)" "$(gh_calls 'issue comment 109')" "0"
+assert_eq "run 2: hold comment is NOT posted again (marker, #109)" "$(gh_calls 'issue comment 109')" "0"
+assert_eq "run 2: hold comment is NOT posted again (marker, #112)" "$(gh_calls 'issue comment 112')" "0"
 assert_eq "run 2: hold label is NOT re-added (marker)" "$(gh_calls '--add-label hold')" "0"
-assert_eq "run 2: unresolved marker is re-checked via GraphQL" "$(gh_calls 'api graphql')" "1"
-assert_eq "run 2: POSITIVE CONTROL — the other issues are unchanged" "$(jget '[.issues.items[].number | select(. != 109)] | join(",")')" "201,101,110,111"
-
-# DOCUMENTS THE CURRENT STATE (BUG — see the PR body): the re-check fan-out is
-# `xargs -I {} bash -c '<script>' _ {}`, and -I substitutes EVERY `{}` in the
-# initial arguments — including the python literals d.get("data",{}),
-# (issue.get("author") or {}), issue.get("comments",{}) INSIDE the script
-# string. The child's python is a SyntaxError on every entry, the trailing
-# `|| echo "skip"` hides it, and the has_sha/closed branches below are
-# unreachable. GNU xargs in production behaves exactly like the harness. The
-# graphql_109 fixture says the reporter supplied a SHA in a comment, yet #109
-# is never unheld, never re-admitted, its marker never resolves, and it is
-# re-queried every cycle for as long as the marker exists. Pinned so the fix
-# flips these deliberately (to: unhold call once, marker resolved=, #109 back
-# in items, no GraphQL on run 3).
+assert_eq "run 2: both unresolved markers are re-checked via GraphQL" "$(gh_calls 'api graphql')" "2"
+assert_eq "run 2: POSITIVE CONTROL — the other issues are unchanged" "$(jget '[.issues.items[].number | select(. != 109 and . != 112)] | join(",")')" "201,101,110,111"
 if [ "$(gh_calls 'issue edit 109 --repo acme/primary --remove-label hold --add-label kind/bug')" = "0" ]; then
-  pass "run 2: [pinned bug] SHA in the reporter's comment does NOT unhold #109"
+  pass "run 2: #109 still has no SHA, so it stays held"
 else
-  fail "run 2: [pinned bug] SHA in the reporter's comment does NOT unhold #109" "unhold fired — the xargs {} clobber is fixed; flip these pins to the intended lifecycle"
+  fail "run 2: #109 still has no SHA, so it stays held" "unhold fired with no SHA present"
 fi
-if grep -q '^resolved=' "$MARKER"; then
-  fail "run 2: [pinned bug] marker is never stamped resolved=" "marker resolved — flip these pins to the intended lifecycle"
+if [ "$(gh_calls 'issue edit 112 --repo acme/primary --remove-label hold --add-label kind/bug')" = "0" ]; then
+  pass "run 2: NEGATIVE CONTROL — no SHA anywhere keeps #112 held"
 else
-  pass "run 2: [pinned bug] marker is never stamped resolved="
+  fail "run 2: NEGATIVE CONTROL — no SHA anywhere keeps #112 held" "unhold fired for #112 with no SHA present"
 fi
+grep -q '^resolved=' "$MARKER" && fail "run 2: #109's marker stays unresolved (no SHA yet)" "marker resolved with no SHA present" || pass "run 2: #109's marker stays unresolved (no SHA yet)"
+grep -q '^resolved=' "$MARKER112" && fail "run 2: NEGATIVE CONTROL — #112's marker stays unresolved" "marker resolved with no SHA present" || pass "run 2: NEGATIVE CONTROL — #112's marker stays unresolved"
 ISSUE_NUMS2="$(jget '[.issues.items[].number] | join(",")')"
-if [[ ",${ISSUE_NUMS2}," == *",109,"* ]]; then
-  fail "run 2: [pinned bug] #109 is never re-admitted to actionable" "got $ISSUE_NUMS2 — flip these pins to the intended lifecycle"
+assert_eq "run 2: neither #109 nor #112 is in actionable yet" "$ISSUE_NUMS2" "201,101,110,111"
+
+# The reporter comments on #109 with a commit SHA between run 2 and run 3.
+# #112's reporter still never supplies one (negative control, unchanged).
+cat >"${BASE}/graphql_109.json" <<'EOF'
+{"data":{"repository":{"issue":{"state":"OPEN","body":"It crashes on startup","author":{"login":"newcomer"},
+ "comments":{"nodes":[{"author":{"login":"hive-bot"},"body":"please add the SHA"},
+                      {"author":{"login":"newcomer"},"body":"sure: 9f8e7d6c5b4a"}]}}}}}
+EOF
+
+# Run 3: the fix — the re-check fan-out now runs
+# `xargs -I {} -> xargs -n 1 bash -c '<script>' _`, so each entry arrives
+# positionally as $1 with no substitution, and the python dict literals
+# d.get("data",{}), (issue.get("author") or {}), issue.get("comments",{})
+# inside the script string are left untouched (previously -I clobbered every
+# `{}` in the whole command string, including those, and every child hit a
+# SyntaxError masked by `|| echo "skip"`). #109's marker is re-checked, finds
+# the SHA, and is unheld exactly once, stamped resolved=, and re-admitted to
+# actionable. #112's marker (negative control) is re-checked too, finds no
+# SHA, and its hold survives unchanged — proving the fix does not unhold
+# indiscriminately.
+rc="$(run_enum "$BASE" "${PROJ[@]}")"
+assert_eq "run 3 exits 0" "$rc" "0"
+assert_eq "run 3: both markers are still re-checked via GraphQL" "$(gh_calls 'api graphql')" "2"
+if [ "$(gh_calls 'issue edit 109 --repo acme/primary --remove-label hold --add-label kind/bug')" = "1" ]; then
+  pass "run 3: SHA in the reporter's comment unholds #109 exactly once"
 else
-  pass "run 2: [pinned bug] #109 is never re-admitted to actionable"
+  fail "run 3: SHA in the reporter's comment unholds #109 exactly once" "got $(gh_calls 'issue edit 109 --repo acme/primary --remove-label hold --add-label kind/bug') calls"
+fi
+if [ "$(gh_calls 'issue edit 112 --repo acme/primary --remove-label hold --add-label kind/bug')" = "0" ]; then
+  pass "run 3: NEGATIVE CONTROL — no SHA anywhere still keeps #112 held"
+else
+  fail "run 3: NEGATIVE CONTROL — no SHA anywhere still keeps #112 held" "unhold fired for #112 with no SHA present"
+fi
+grep -q '^resolved=' "$MARKER" && pass "run 3: #109's marker is stamped resolved=" || fail "run 3: #109's marker is stamped resolved=" "marker not resolved"
+grep -q '^resolved=' "$MARKER112" && fail "run 3: NEGATIVE CONTROL — #112's marker stays unresolved" "marker resolved with no SHA present" || pass "run 3: NEGATIVE CONTROL — #112's marker stays unresolved"
+ISSUE_NUMS3="$(jget '[.issues.items[].number] | join(",")')"
+if [[ ",${ISSUE_NUMS3}," == *",109,"* ]]; then
+  pass "run 3: #109 is re-admitted to actionable"
+else
+  fail "run 3: #109 is re-admitted to actionable" "got $ISSUE_NUMS3"
+fi
+if [[ ",${ISSUE_NUMS3}," == *",112,"* ]]; then
+  fail "run 3: NEGATIVE CONTROL — #112 stays withheld from actionable" "got $ISSUE_NUMS3 — #112 should still be held"
+else
+  pass "run 3: NEGATIVE CONTROL — #112 stays withheld from actionable"
 fi
 
-# Run 3: an unresolved marker keeps costing one GraphQL call per cycle.
+# Run 4: #109's marker is now resolved (no more GraphQL calls for it); #112's
+# marker is still unresolved and keeps costing one GraphQL call per cycle
+# until its reporter actually supplies a SHA.
 rc="$(run_enum "$BASE" "${PROJ[@]}")"
-assert_eq "run 3: [pinned bug] the same marker is re-queried again (unbounded per-cycle cost)" "${rc}:$(gh_calls 'api graphql')" "0:1"
-assert_eq "run 3: no label churn on #109" "$(gh_calls 'issue edit 109')" "0"
+assert_eq "run 4: only #112's still-unresolved marker is re-queried" "${rc}:$(gh_calls 'api graphql')" "0:1"
+assert_eq "run 4: no label churn on #109" "$(gh_calls 'issue edit 109')" "0"
+assert_eq "run 4: no label churn on #112 (still no SHA)" "$(gh_calls 'issue edit 112')" "0"
 
 # ── 7. Partial API failure: retry, degrade per repo, still publish ──────────
 echo "-- partial API failure --"
@@ -432,7 +501,9 @@ rm -rf "$RUN_DIR"/sha_hold_posted_*   # fresh hold state; avoids re-check noise
 rc="$(run_enum "$PARTIAL" "${PROJ[@]}")"
 assert_eq "one failing endpoint does not fail the run" "$rc" "0"
 assert_eq "failing endpoint is retried MAX_RETRIES (3) times" "$(gh_calls 'api repos/acme/secondary/issues?')" "3"
-assert_eq "POSITIVE CONTROL: healthy repo's issues still published" "$(jget '[.issues.items[] | select(.repo=="acme/primary") | .number] | join(",")')" "101,110,111"
+# $PARTIAL is a snapshot of $BASE taken after section 6 rewrote graphql_109.json
+# to include a SHA, so #109's fresh marker is unheld same-cycle here too.
+assert_eq "POSITIVE CONTROL: healthy repo's issues still published" "$(jget '[.issues.items[] | select(.repo=="acme/primary") | .number] | join(",")')" "101,110,111,109"
 assert_eq "failed repo contributes no issues (not stale, not fabricated)" "$(jget '[.issues.items[] | select(.repo=="acme/secondary")] | length')" "0"
 assert_eq "failed repo's OTHER endpoint (pulls) is unaffected" "$(jget '[.prs.items[] | select(.repo=="acme/secondary") | .number] | join(",")')" "401"
 grep -q 'WARN: 1 API calls failed after retries' "$LOG_FILE" && pass "partial failure is logged as a WARN" || fail "partial failure is logged as a WARN"
