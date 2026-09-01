@@ -79,6 +79,16 @@ const (
 	// offer-pool suppression instead of the short idle cooldown loop. Purely
 	// additive: a relay that never sends the field behaves exactly as before.
 	capCompletionVerdict = "completion_verdict"
+	// capTokenRefreshFailed: when a mid-task re-mint FAILS, the hub tells the
+	// relay so with a token_refresh_failed message instead of only logging it
+	// hub-side (#5447). Without it the relay's first evidence that its
+	// credential went stale is a push that starts failing roughly an hour into
+	// a long task, reported to the agent as a generic auth error — the
+	// misleading-symptom class of #5343. Purely additive and advisory: the
+	// existing token stays in place and the hub keeps retrying on the next
+	// heartbeat exactly as before, so a relay that ignores the message behaves
+	// precisely as it does today.
+	capTokenRefreshFailed = "token_refresh_failed"
 )
 
 // serverCapabilities returns the capability set this hub advertises on auth_ok.
@@ -93,6 +103,7 @@ func serverCapabilities() []string {
 		capCredentialAfterAccept,
 		capAgentRoleClaim,
 		capCompletionVerdict,
+		capTokenRefreshFailed,
 	}
 }
 

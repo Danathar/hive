@@ -11,6 +11,10 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+### Fixed
+
+- A contributor token re-mint that fails is no longer invisible to the relay, and the `token_expires_at` the hub already sends is finally read ([#5447](https://github.com/kubestellar/hive/issues/5447)). Refresh itself was working and is unchanged — the 50-minute re-mint against a 55-minute TTL still re-arms each cycle, so a 4-hour task never loses push access. What was missing was what happens when a mint *fails*: the hub logged a warning and told the relay nothing, so the first observable symptom was a push that started failing roughly an hour into a long task, surfaced to the agent as a generic authentication error. The hub now sends a `token_refresh_failed` message — a reason string, never token material — from both the heartbeat and the task-resume paths, advertised in the `auth_ok` capability set, and the relay logs it against the task it belongs to. Separately, the relay now compares `token_expires_at` against the clock on each progress tick and warns when the credential is within five minutes of expiry or already past it, more pointedly when a failed renewal was also reported. Both halves are advisory by design: nothing is revoked, no task is failed, and **no push is refused** — `token_expires_at` is the hub's wall clock read on the relay's, so refusing work on a few minutes of clock skew would be worse than the current behavior. GitHub's answer to the actual call remains the authority; these changes only ensure that when it does fail, the cause is already named in the log. A relay that ignores the new message behaves exactly as before.
+
 ## 2026-09-01 (v4.0.1)
 
 ### Added

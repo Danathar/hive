@@ -341,6 +341,80 @@ let seq = 0;
 let currentTask = null;
 let progressInterval = null;
 let tokenExpiresAt = null;
+// tokenRefreshFailedAt records when the hub last told us a mid-task re-mint
+// FAILED (a token_refresh_failed, kubestellar/hive#5447). Null means "no known
+// refresh problem"; a successful token_refresh clears it, because a fresh
+// credential resolves the condition. It exists so the expiry warning below can
+// distinguish "the hub is quiet and our clock may simply be off" from "the hub
+// told us it could not renew this credential", which is the difference between a
+// guess and a diagnosis.
+let tokenRefreshFailedAt = null;
+
+// TOKEN_EXPIRY_WARN_MS is how far ahead of expiry the relay starts warning. It
+// is one full progress interval plus a margin, so a task that is about to lose
+// push access says so at least one tick BEFORE the first push can fail, rather
+// than reporting it afterwards.
+const TOKEN_EXPIRY_WARN_MS = 5 * 60 * 1000;
+// TOKEN_EXPIRY_WARN_INTERVAL_MS throttles the warning so a long task past expiry
+// logs periodically instead of on every single progress tick.
+const TOKEN_EXPIRY_WARN_INTERVAL_MS = 10 * 60 * 1000;
+let lastTokenExpiryWarnAt = 0;
+
+// tokenLifetimeStatus turns the hub-supplied token_expires_at into the relay's
+// own read of its credential: how long is left, whether we are inside the warning
+// window, and whether the hub has reported a failed renewal.
+//
+// It is PURE and clock-injectable so the expiry logic can be tested without
+// waiting an hour, and it deliberately reports rather than decides — see
+// warnOnTokenExpiry() for why this only ever warns.
+function tokenLifetimeStatus(now = Date.now()) {
+  if (!tokenExpiresAt) {
+    return { known: false, expired: false, expiring: false, remainingMs: null, refreshFailed: tokenRefreshFailedAt !== null };
+  }
+  const remainingMs = tokenExpiresAt - now;
+  return {
+    known: true,
+    expired: remainingMs <= 0,
+    expiring: remainingMs <= TOKEN_EXPIRY_WARN_MS,
+    remainingMs,
+    refreshFailed: tokenRefreshFailedAt !== null,
+  };
+}
+
+function formatDuration(ms) {
+  const abs = Math.abs(ms);
+  const mins = Math.floor(abs / 60000);
+  const secs = Math.floor((abs % 60000) / 1000);
+  return mins > 0 ? `${mins}m${secs}s` : `${secs}s`;
+}
+
+// warnOnTokenExpiry logs — and ONLY logs — when the task's credential is at or
+// past its advertised expiry (kubestellar/hive#5447).
+//
+// It does NOT refuse the push, and that is deliberate. The relay's clock and the
+// hub's are independent; tokenExpiresAt is the HUB's wall-clock stamp read on the
+// relay's, so a machine with a few minutes of skew would refuse work on a
+// perfectly valid credential. Refusing on a bad clock is strictly worse than
+// today's behaviour, where the token simply works. The authority on whether a
+// token is good remains GitHub's answer to the actual call; this turns the
+// resulting failure from an unexplained auth error into a named, already-logged
+// condition — which is the whole point of the issue.
+//
+// Throttled, and never touches the token itself.
+function warnOnTokenExpiry(now = Date.now()) {
+  const status = tokenLifetimeStatus(now);
+  if (!status.known || !status.expiring) return null;
+  if (now - lastTokenExpiryWarnAt < TOKEN_EXPIRY_WARN_INTERVAL_MS) return null;
+  lastTokenExpiryWarnAt = now;
+  const cause = status.refreshFailed
+    ? ' — the hub reported that it could not renew this credential, so pushes may fail with a generic auth error'
+    : '';
+  const msg = status.expired
+    ? `GitHub token expired ${formatDuration(status.remainingMs)} ago${cause}`
+    : `GitHub token expires in ${formatDuration(status.remainingMs)}${cause}`;
+  console.warn(msg);
+  return msg;
+}
 
 function nextSeq() { return ++seq; }
 
@@ -2383,6 +2457,11 @@ function relaunchCLI() {
 function dropTaskCredential() {
   try { fs.unlinkSync(GH_TOKEN_CACHE); } catch (_) {}
   tokenExpiresAt = null;
+  // The credential this failure was ABOUT is gone, so the condition dies with
+  // it — otherwise a stale "refresh failed" would colour the next task's
+  // warnings (#5447).
+  tokenRefreshFailedAt = null;
+  lastTokenExpiryWarnAt = 0;
 }
 
 // stopAgentForTaskExit ends the AGENT, not just the bookkeeping, when a task
@@ -3011,6 +3090,13 @@ function maybeSendAutonomyNudge(tmuxLines) {
 function progressTick() {
   lastProgressTick = Date.now();
   if (!currentTask) return;
+
+  // Surface the credential's remaining lifetime BEFORE the grace-period return
+  // and before any of the pane judging below, so a token that is about to lapse
+  // is reported on its own schedule rather than only on ticks that happen to get
+  // as far as a progress report (#5447). Warn-only — see warnOnTokenExpiry.
+  warnOnTokenExpiry();
+
   if (Date.now() - taskAssignedAt < TASK_GRACE_PERIOD_MS) return;
 
   // #4117: re-detect the running model each tick so a mid-session model switch
@@ -3435,6 +3521,9 @@ function handleMessage(data, hub) {
       if (msg.github_token) {
         injectGhToken(msg.github_token);
         tokenExpiresAt = msg.token_expires_at ? new Date(msg.token_expires_at).getTime() : null;
+        // Fresh task, fresh credential: no inherited refresh failure (#5447).
+        tokenRefreshFailedAt = null;
+        lastTokenExpiryWarnAt = 0;
       }
       // TASK_FILE is observability/debug state with no reader that needs the
       // credential; the live token's one legitimate on-disk home is the 0600
@@ -3468,9 +3557,36 @@ function handleMessage(data, hub) {
       if (msg.github_token) {
         injectGhToken(msg.github_token);
         tokenExpiresAt = msg.token_expires_at ? new Date(msg.token_expires_at).getTime() : null;
+        // A delivered credential resolves any earlier renewal failure, and
+        // re-arms the expiry warning for the new token's own window (#5447).
+        tokenRefreshFailedAt = null;
+        lastTokenExpiryWarnAt = 0;
         console.log('GitHub token refreshed');
       }
       break;
+
+    // token_refresh_failed (kubestellar/hive#5447): the hub could not re-mint
+    // this task's credential. The token we hold is still the OLD one and stays
+    // installed — the hub retries on its next heartbeat — so there is nothing to
+    // drop and nothing to fail here. Recording it is the entire point: without
+    // it, the first evidence of a stale credential is a push failing about an
+    // hour into a long task, surfaced to the agent as a generic auth error
+    // (#5343's misleading-symptom class).
+    case 'token_refresh_failed': {
+      if (!currentTask || currentTaskHub() !== hub) {
+        console.log(`Ignoring token_refresh_failed from ${hub.url} — it does not own the active task`);
+        break;
+      }
+      tokenRefreshFailedAt = Date.now();
+      const status = tokenLifetimeStatus();
+      const remaining = status.known
+        ? (status.expired
+          ? `the current token expired ${formatDuration(status.remainingMs)} ago`
+          : `the current token expires in ${formatDuration(status.remainingMs)}`)
+        : 'the current token has no known expiry';
+      console.error(`GitHub token refresh FAILED for ${taskKey(currentTask)}: ${msg.reason || 'no reason given'} — ${remaining}. Pushes may fail with a generic auth error until the hub renews it.`);
+      break;
+    }
 
     case 'task_revoke':
       if (!currentTask) {
@@ -3699,6 +3815,9 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     handleMessage,
     injectGhToken,
     GH_TOKEN_CACHE,
+    tokenLifetimeStatus,
+    warnOnTokenExpiry,
+    TOKEN_EXPIRY_WARN_MS,
     tmuxSendKeys,
     flushPendingTask,
     relaunchCLI,
