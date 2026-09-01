@@ -690,9 +690,21 @@ jobs:
               labels: ['ci-failure', 'kind/bug'],
             });
 
+  # Deliberately NO `needs: build-and-test` here or on overlayfs-exec-guard.
+  # Neither job consumes anything build-and-test produces — each compiles the
+  # PR's own tree from scratch inside src/Dockerfile — so chaining them behind
+  # the test gate bought no correctness and put the gate's wall time PLUS a
+  # second trip through the shared runner queue on every PR's time-to-green
+  # (measured 2026-09-01 across three PR runs: ~2.75 min of build-and-test,
+  # then 10-11 min queued before either image job started, then 3.5-4.5 min
+  # of build). Running all three from t=0 makes the guard (~4.5 min) the
+  # ceiling instead of the sum. Cost of the trade: on the ~2% of runs where
+  # build-and-test is red, a compile error also fails the in-Dockerfile
+  # `go build` within ~1 min, and a test-only failure lets these two run to
+  # completion (~8 wasted runner-minutes). nightly-release still requires
+  # BOTH build-and-test and docker, so the v2 nightly gate is unchanged.
   docker:
     runs-on: ubuntu-latest
-    needs: build-and-test
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -732,7 +744,7 @@ jobs:
   # binary EPERMs here and the PR is blocked.
   overlayfs-exec-guard:
     runs-on: ubuntu-latest
-    needs: build-and-test
+    # No `needs: build-and-test` — see the note above the `docker` job.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -743,6 +755,21 @@ jobs:
       # image — buildx (BuildKit), attestations OFF (provenance:false/sbom:false
       # as in the #3760 fix) — and export it as an OCI archive so containerd
       # imports the real BuildKit layer layout (not the docker daemon's).
+      #
+      # cache-from: read docker.yml's `tmux-linux-amd64` gha scope, the same
+      # one its own amd64 build reads. That scope only ever receives
+      # `--target tmux-builder` exports (docker.yml's warm step, run on every
+      # PR and every v4 push), and tmux-builder's inputs are a pinned base
+      # image and a pinned tarball — so no layer carrying /usr/local/bin/hive
+      # can be served from it and the stale-COPY hazard the stale-binary guard
+      # below exists for cannot arise here. Every other stage is still built
+      # from scratch on THIS commit (there is no cache-to and no other scope),
+      # so the assertions below still test the PR's own binary. Read-only: a
+      # miss, a renamed scope, or a cache-service hiccup just recompiles tmux
+      # as before. Measured 2026-09-01: the runtime stage blocks on
+      # tmux-builder (~51s) at its third layer while its own apt layer takes
+      # ~20s, so a hit removes ~30s from a ~3.5 min build; a whole-image
+      # cache-to would instead ADD the 130-225s export docker.yml measured.
       - name: Build image via buildx (OCI archive, no attestations)
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -752,6 +779,7 @@ jobs:
           provenance: false
           sbom: false
           outputs: type=oci,oci-mediatypes=true,dest=/tmp/hive-oci.tar,tar=true
+          cache-from: type=gha,scope=tmux-linux-amd64
           build-args: |
             GIT_HASH=${{ github.sha }}
             GIT_BRANCH=${{ github.ref_name }}
