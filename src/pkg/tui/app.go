@@ -135,7 +135,7 @@ const (
 // (m model, A acmm, …) documents keys whose tasks have not landed;
 // showing them now would advertise actions that silently do nothing. Each
 // action task appends its own binding when it wires the key.
-const footerText = "tab focus  p pause/resume  K kick  a attach  ? help  q quit"
+const footerText = "tab focus  p pause/resume  m model  K kick  a attach  ? help  q quit"
 
 // confirmState is the pause/resume dialog. It remains present while the HTTP
 // command is in flight so every other key stays behind the modal, and it also
@@ -167,6 +167,28 @@ type kickResultMsg struct {
 	agent  string
 	result client.KickResult
 	err    error
+}
+
+// modelListMsg is the asynchronous result of the model picker's catalogue
+// call. The pickerID it was issued for travels with it so a response for an
+// overlay the operator has already closed — or closed and reopened — cannot
+// populate the newer one with the older one's backend.
+type modelListMsg struct {
+	pickerID uint64
+	list     client.ModelList
+	err      error
+}
+
+// modelSetMsg is the asynchronous result of applying a model. Like
+// agentActionMsg it carries its own identity plus the target, because this
+// write RESTARTS the agent's session: a response matched to the wrong overlay
+// would report a restart that did not happen to that agent.
+type modelSetMsg struct {
+	pickerID uint64
+	agent    string
+	model    string
+	result   client.ModelSetResult
+	err      error
 }
 
 // model is the root bubbletea model.
@@ -207,6 +229,18 @@ type model struct {
 	// confirm is non-nil while a pause/resume dialog is open. Like help, it
 	// owns every key while visible; unlike help, only y, n and esc act on it.
 	confirm *confirmState
+
+	// picker is non-nil while the model picker overlay is open. Like confirm
+	// it owns every key while visible, so no key an operator presses inside it
+	// can reach quit, focus, pause, kick, attach or the ACMM binding.
+	picker *panes.ModelPicker
+
+	// pickerSeq identifies each opened overlay so a late catalogue or set
+	// response can be discarded if it belongs to a superseded one.
+	pickerSeq uint64
+
+	// pickerID is the sequence number of the currently open overlay.
+	pickerID uint64
 
 	// actionSeq identifies each confirmed HTTP call. Agent and verb alone are
 	// not enough: an operator can dismiss an in-flight request and open the
@@ -368,6 +402,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleAgentAction(msg)
 	case kickResultMsg:
 		return m.handleKickResult(msg)
+	case modelListMsg:
+		return m.handleModelList(msg)
+	case modelSetMsg:
+		return m.handleModelSet(msg)
 	case attachReadyMsg:
 		if msg.err != nil {
 			m.attachPending = false
@@ -388,6 +426,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		if m.confirm != nil {
 			return m.updateConfirm(msg)
+		}
+		// The model picker is modal for the same reason and is checked in the
+		// same place: every key it does not act on is SWALLOWED, so no key
+		// pressed while choosing a model can reach quit, focus, pause, kick,
+		// attach or the ACMM binding underneath it.
+		if m.picker != nil {
+			return m.updateModelPicker(msg)
 		}
 		// The help overlay is modal and dismisses on ANY key, so it is handled
 		// before the global bindings rather than as one of them. Order is the
@@ -431,6 +476,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.confirm = &confirmState{agent: name, pause: !paused}
 			return m, nil
+		case "m":
+			if m.focus != 0 {
+				return m, nil
+			}
+			agents, ok := m.panes[0].(panes.Agents)
+			if !ok {
+				return m, nil
+			}
+			name, display, backend, current, ok := agents.SelectedAgentDetail()
+			if !ok {
+				// No row selected yet — before the first successful fleet
+				// snapshot there is no agent to change, so `m` is a no-op
+				// rather than an overlay addressed at nothing.
+				return m, nil
+			}
+			if backend == "" {
+				// Models() requires a backend, and asking with an empty one
+				// would 404 on the routing table rather than on the backend.
+				// Say what is missing instead of showing a fetch error.
+				m.footerStatus = "Model picker unavailable: " + name + " has no configured backend"
+				return m, nil
+			}
+			m.pickerSeq++
+			m.pickerID = m.pickerSeq
+			picker := panes.NewModelPicker(name, display, backend, current)
+			m.picker = &picker
+			m.footerStatus = ""
+			return m, m.fetchModels(m.pickerID, backend)
 		case "K":
 			if m.focus != 0 || m.kickPending != "" {
 				return m, nil
@@ -543,11 +616,21 @@ func (m model) View() string {
 	if m.footerStatus != "" {
 		footerTextForFrame = m.footerStatus
 	}
-	footer := footerStyle.Width(m.width).MaxWidth(m.width).Render(footerTextForFrame)
+	// Clipped BEFORE the width is applied, then padded to it. Width() wraps
+	// rather than truncates, so a strip longer than the terminal — which the
+	// binding list became once `m model` was added, at 68 columns against a
+	// 60-column minimum — would silently become a SECOND footer line and push
+	// the frame one row past the terminal's height. MaxWidth() alone cannot
+	// undo that: by the time it runs the newline is already in the string.
+	footer := footerStyle.Width(m.width).Render(
+		lipgloss.NewStyle().Inline(true).MaxWidth(m.width).Render(footerTextForFrame))
 
 	frame := lipgloss.JoinVertical(lipgloss.Left, header, top, bottom, footer)
 	if m.confirm != nil {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.confirmView())
+	}
+	if m.picker != nil {
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.picker.View(m.width))
 	}
 	if m.helpVisible {
 		// Place, not Join: the overlay sits ON the frame rather than taking
@@ -684,6 +767,116 @@ func (m model) handleKickResult(msg kickResultMsg) (tea.Model, tea.Cmd) {
 		m.footerStatus = fmt.Sprintf("Kick returned status %q for %s", msg.result.Status, agent)
 	}
 	return m, nil
+}
+
+// ── Model picker (T17) ───────────────────────────────────────────────────────
+
+// updateModelPicker consumes EVERY key while the overlay is open. Unknown keys
+// — including q, tab, p, K, a and A — deliberately do nothing rather than
+// leaking to the frame underneath, which is the whole point of the modal: an
+// operator scrolling a model list must not be able to quit the program or
+// pause an agent by pressing the wrong letter.
+func (m model) updateModelPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		if m.picker.Pending() {
+			// A set request is already with the server and has already
+			// restarted (or is restarting) the session. Closing the overlay
+			// would not undo that, and it would hide the result, so the modal
+			// stays until the request answers.
+			return m, nil
+		}
+		m.picker = nil
+		return m, nil
+	case "j", "down":
+		next := m.picker.Move(1)
+		m.picker = &next
+		return m, nil
+	case "k", "up":
+		next := m.picker.Move(-1)
+		m.picker = &next
+		return m, nil
+	case "enter":
+		// Apply refuses while pending, which is what bounds this to exactly
+		// one session-restarting request no matter how many times enter is
+		// pressed before the first one answers.
+		next, chosen, ok := m.picker.Apply()
+		if !ok {
+			return m, nil
+		}
+		m.picker = &next
+		return m, m.setAgentModel(m.pickerID, next.Agent(), chosen)
+	default:
+		return m, nil
+	}
+}
+
+func (m model) fetchModels(pickerID uint64, backend string) tea.Cmd {
+	return func() tea.Msg {
+		list, err := m.api.Models(context.Background(), backend)
+		return modelListMsg{pickerID: pickerID, list: list, err: err}
+	}
+}
+
+func (m model) setAgentModel(pickerID uint64, agent, modelID string) tea.Cmd {
+	return func() tea.Msg {
+		result, err := m.api.SetAgentModel(context.Background(), agent, modelID)
+		return modelSetMsg{pickerID: pickerID, agent: agent, model: modelID, result: result, err: err}
+	}
+}
+
+func (m model) handleModelList(msg modelListMsg) (tea.Model, tea.Cmd) {
+	// A response for a closed or superseded overlay is dropped. It carries a
+	// catalogue for a backend the current overlay may not even be showing.
+	if m.picker == nil || m.pickerID != msg.pickerID {
+		return m, nil
+	}
+	var next panes.ModelPicker
+	if msg.err != nil {
+		next = m.picker.SetCatalogueError(msg.err)
+	} else {
+		next = m.picker.SetCatalogue(msg.list)
+	}
+	m.picker = &next
+	return m, nil
+}
+
+func (m model) handleModelSet(msg modelSetMsg) (tea.Model, tea.Cmd) {
+	matchesOpenModal := m.picker != nil && m.pickerID == msg.pickerID
+
+	if msg.err != nil {
+		if matchesOpenModal {
+			// The overlay stays open with the failure and retry/cancel
+			// guidance, and the Agents row is untouched: a failed write means
+			// the agent still has the model it had.
+			next := m.picker.SetApplyError(msg.err)
+			m.picker = &next
+		}
+		return m, nil
+	}
+
+	// The response is authoritative for what the agent now runs. Prefer it
+	// over the id that was requested so an alias the server canonicalized is
+	// shown as the server resolved it.
+	agent := msg.result.Agent
+	if agent == "" {
+		agent = msg.agent
+	}
+	applied := msg.result.Model
+	if applied == "" {
+		applied = msg.model
+	}
+	if agents, ok := m.panes[0].(panes.Agents); ok {
+		m.panes[0] = agents.SetAgentModel(agent, applied)
+	}
+	if matchesOpenModal {
+		m.picker = nil
+	}
+	m.footerStatus = fmt.Sprintf("%s now on %s (session restarted)", agent, applied)
+	// Reconcile: the write restarted the session, so the roster's live fields
+	// are stale by definition and the next frame should not wait a poll
+	// interval to say so.
+	return m, m.poll()
 }
 
 func (m model) confirmView() string {
