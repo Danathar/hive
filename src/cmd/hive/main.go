@@ -2248,9 +2248,14 @@ func main() {
 	var knowledgeAPI *knowledge.KnowledgeAPI
 	if cfg.Knowledge.Enabled {
 		layers := convertKnowledgeLayers(cfg.Knowledge.Layers)
+		// The curator block was previously dropped here, so NewPromoter always
+		// received a zero CuratorConfig and AutoPromoteThreshold never reached
+		// the promoter in production. Passing it through is what makes the
+		// threshold gate real for the scheduled sweep (#5430).
 		knowledgeAPI = knowledge.NewKnowledgeAPI(layers, knowledge.KnowledgeConfig{
 			Enabled: cfg.Knowledge.Enabled,
 			Engine:  cfg.Knowledge.Engine,
+			Curator: curatorConfigFromHive(cfg.Knowledge.Curator),
 		}, logger)
 	}
 
@@ -2456,6 +2461,27 @@ func main() {
 				"bead_stores", len(beadStores),
 			)
 		}
+	}
+
+	// Scheduled knowledge promotion (#5430). knowledge.curator.schedule used to
+	// be parsed, defaulted to "daily", and never read. It now drives a real
+	// sweep — but ONLY when knowledge.curator.enabled is explicitly true.
+	// StartBackground is a no-op otherwise, and logs a notice if a schedule was
+	// configured without the opt-in so the mismatch is visible rather than
+	// silent. Do not replace the IsEnabled() guard with a schedule check: that
+	// would enable unreviewed promotion on every hive that omits the key.
+	if knowledgeAPI != nil && cfg.Knowledge.Curator.IsEnabled() {
+		promotionScheduler := knowledge.NewPromotionScheduler(
+			knowledgeAPI.Promoter(),
+			curatorConfigFromHive(cfg.Knowledge.Curator),
+			logger,
+		)
+		promotionScheduler.StartBackground(ctx)
+	} else if cfg.Knowledge.Curator.Schedule != "" {
+		logger.Info("knowledge.curator.schedule is set but scheduled promotion is disabled",
+			"schedule", cfg.Knowledge.Curator.Schedule,
+			"hint", "set knowledge.curator.enabled: true to opt in",
+		)
 	}
 
 	// Open the graph store in a background goroutine. NewGraphStore acquires
@@ -7036,6 +7062,22 @@ func convertKnowledgeLayers(cfgLayers []config.KnowledgeLayer) []knowledge.Layer
 		}
 	}
 	return layers
+}
+
+// curatorConfigFromHive maps the hive.yaml curator block onto the knowledge
+// package's own config. Enabled is carried across as a pointer so "absent"
+// stays distinguishable from "explicitly false" — the scheduled promotion loop
+// treats absent as OFF, and flattening it to a bool here would quietly turn
+// unreviewed promotion on fleet-wide (#5430).
+func curatorConfigFromHive(c config.KnowledgeCurator) knowledge.CuratorConfig {
+	return knowledge.CuratorConfig{
+		Enabled:              c.Enabled,
+		Schedule:             c.Schedule,
+		ExtractFrom:          c.ExtractFrom,
+		AutoPromoteThreshold: c.AutoPromoteThreshold,
+		PromoteFrom:          c.PromoteFrom,
+		PromoteTo:            c.PromoteTo,
+	}
 }
 
 // hiveIDFilePath is the persistent file where the Hive ID is stored across restarts.

@@ -361,6 +361,12 @@ func (k *KnowledgeAPI) DeleteFact(ctx context.Context, layer LayerType, slug str
 	return nil
 }
 
+// Promoter exposes the layer promoter so the scheduled promotion loop can be
+// built over the same clients the dashboard's manual promote path uses.
+func (k *KnowledgeAPI) Promoter() *Promoter {
+	return k.promoter
+}
+
 // PromoteFact promotes a fact from one layer to another (upward only).
 func (k *KnowledgeAPI) PromoteFact(ctx context.Context, req PromoteRequest) PromoteResult {
 	return k.promoter.Promote(ctx, req)

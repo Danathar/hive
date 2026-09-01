@@ -584,9 +584,31 @@ type KnowledgeLayer struct {
 }
 
 type KnowledgeCurator struct {
+	// Enabled gates the scheduled auto-promotion loop. It is a pointer so an
+	// absent key is distinguishable from an explicit `enabled: false`, and it
+	// defaults to FALSE — unlike BeadSynthesizer, which defaults to true.
+	//
+	// The asymmetry is deliberate. Auto-promotion copies facts into a
+	// higher-precedence knowledge layer with no human review, and `schedule`
+	// has been parsed-but-unactioned since it was introduced (#5430), so every
+	// existing hive that set it did so without ever having the loop run. If
+	// the loop defaulted on, upgrading would silently begin mutating the org
+	// layer on hives that never opted in. Scheduled promotion is therefore
+	// opt-in: `schedule` alone does NOT start it.
+	Enabled              *bool    `yaml:"enabled,omitempty"`
 	Schedule             string   `yaml:"schedule"`
 	ExtractFrom          []string `yaml:"extract_from"`
 	AutoPromoteThreshold float64  `yaml:"auto_promote_threshold"`
+	// PromoteFrom / PromoteTo name the source and target layers for the
+	// scheduled promotion sweep. Empty values fall back to project→org.
+	PromoteFrom string `yaml:"promote_from,omitempty"`
+	PromoteTo   string `yaml:"promote_to,omitempty"`
+}
+
+// IsEnabled reports whether scheduled auto-promotion is active. Absent (nil)
+// means DISABLED — see the Enabled field comment for why this defaults false.
+func (k KnowledgeCurator) IsEnabled() bool {
+	return k.Enabled != nil && *k.Enabled
 }
 
 type KnowledgePrimer struct {
@@ -4677,7 +4699,13 @@ func (c *Config) applyDefaults() {
 		if len(c.Knowledge.Primer.Priority) == 0 {
 			c.Knowledge.Primer.Priority = []string{"regression", "gotcha", "test_scaffold", "pattern", "decision"}
 		}
-		if c.Knowledge.Curator.Schedule == "" {
+		// Schedule is only defaulted when the curator has been explicitly
+		// enabled. Defaulting it unconditionally (the pre-#5430 behaviour) was
+		// harmless while nothing read the field, but now that it drives a
+		// promotion loop a blanket default would hand every hive a cadence it
+		// never asked for. The Enabled gate is the real guard; leaving Schedule
+		// empty on disabled hives keeps the config honest about what will run.
+		if c.Knowledge.Curator.IsEnabled() && c.Knowledge.Curator.Schedule == "" {
 			c.Knowledge.Curator.Schedule = defaultCuratorSchedule
 		}
 		if c.Knowledge.Curator.AutoPromoteThreshold == 0 {
