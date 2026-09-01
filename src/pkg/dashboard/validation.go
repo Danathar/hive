@@ -271,9 +271,18 @@ func validateGovernorHealth(healthcheckInterval, restartCooldown int) error {
 }
 
 // validateGovernorBudget validates budget configuration values.
+//
+// This is the SAVE path, and it REJECTS a below-floor limit (#5508). That is
+// deliberately stricter than config load, which only warns: here a human is
+// at the dashboard to read the message and correct the number, so refusing
+// costs one re-submit. On load there is nobody to tell, and refusing would
+// stop a running hive from booting. See config.MinUsableBudgetTokens.
 func validateGovernorBudget(totalTokens int64, periodDays, criticalPct int) error {
 	if totalTokens < 0 {
 		return fmt.Errorf("totalTokens must be >= 0")
+	}
+	if msg := config.SuggestBudgetUnitMistake(totalTokens); msg != "" {
+		return fmt.Errorf("%s (use 0 to disable budget tracking)", msg)
 	}
 	if periodDays < minBudgetPeriodDays || periodDays > maxBudgetPeriodDays {
 		return fmt.Errorf("periodDays must be between %d and %d", minBudgetPeriodDays, maxBudgetPeriodDays)
