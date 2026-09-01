@@ -64,15 +64,42 @@ func TestReconnectFlap_ManyFlapsDoNotEvictTheFeed(t *testing.T) {
 		flapRows(hub, "alice", "myorg/repo#7")
 	}
 
-	got := hub.RecentActivity()
-	if len(got) > 3 {
-		t.Fatalf("20 flaps should not fill the feed, got %d rows: %v", len(got), actions(got))
+	// A contributor that never actually left should occupy exactly one presence
+	// row, however many times it bounced — not one row per flap, which would be
+	// the same eviction only quieter.
+	got := actions(hub.RecentActivity())
+	want := []string{"picked up", "joined"}
+	if len(got) != len(want) {
+		t.Fatalf("20 flaps should collapse to %v, got %d rows: %v", want, len(got), got)
 	}
-	if got[0].Action != "picked up" {
-		t.Fatalf("the real 'picked up' row was evicted by flap churn: %v", actions(got))
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("activity = %v, want %v", got, want)
+		}
 	}
 	if n := hub.AbsorbedReconnects(); n != 20 {
-		t.Fatalf("absorbed reconnect counter = %d, want 20", n)
+		t.Fatalf("absorbed reconnect counter = %d, want 20 — every flap must stay countable", n)
+	}
+}
+
+// TestReconnectFlap_DoesNotConsumeUnrelatedJoined guards the third row of the
+// walk. The superseded "joined" is consumed ONLY after a "left" above it has been
+// seen; a "joined" that no departure followed is a live presence and must stand.
+func TestReconnectFlap_DoesNotConsumeUnrelatedJoined(t *testing.T) {
+	hub, _ := covK2Hub(t)
+
+	// Two arrivals with no departure between them: nothing to absorb. (The
+	// consecutive-action debounce is dodged by using a different user in between.)
+	hub.addActivity("alice", "joined", "contributor", "claude", "m", "", "")
+	hub.addActivity("bob", "picked up", "contributor", "claude", "m", "", "t")
+	hub.addActivity("alice", "joined", "contributor", "claude", "m", "", "")
+
+	got := actions(hub.RecentActivity())
+	if len(got) != 3 {
+		t.Fatalf("a 'joined' with no 'left' after it must not be consumed, got %v", got)
+	}
+	if n := hub.AbsorbedReconnects(); n != 0 {
+		t.Fatalf("nothing was absorbed, counter = %d, want 0", n)
 	}
 }
 

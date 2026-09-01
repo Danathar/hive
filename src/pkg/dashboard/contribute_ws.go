@@ -1066,10 +1066,22 @@ func (h *ContributeWSHub) absorbReconnectFlapLocked(username string) {
 	end := len(h.activity)
 	i := end
 	sawLeft := false
-	// At most two rows: the "left", then optionally the "released: connection lost"
-	// that preceded it. Bounded explicitly rather than by a general scan so this can
-	// never chew through the feed.
-	for i > 0 && end-i < 2 {
+	// At most three rows, which is everything one flap cycle can leave behind:
+	// the "left", the "released: connection lost" that may precede it, and the
+	// "joined" written by the PREVIOUS absorbed flap.
+	//
+	// That third row is what makes repeated flapping actually collapse. Each
+	// absorbed flap leaves its own "joined" as the new trailing row, so on the next
+	// flap the walk would stop at it and the feed would still grow by one row per
+	// flap — 20 flaps leaving 20 "joined" rows, which is the same eviction #5151
+	// reports, only quieter. Consuming the superseded "joined" makes a contributor
+	// that flaps N times in a row occupy ONE row rather than N: the arrival that is
+	// still true is the one about to be appended, and the earlier ones describe a
+	// presence that never lapsed.
+	//
+	// Bounded explicitly rather than by a general scan so this can never chew
+	// through the feed.
+	for i > 0 && end-i < 3 {
 		e := h.activity[i-1]
 		if e.Username != username {
 			break
@@ -1084,6 +1096,13 @@ func (h *ContributeWSHub) absorbReconnectFlapLocked(username string) {
 			continue
 		}
 		if sawLeft && e.Action == "released: connection lost" {
+			i--
+			continue
+		}
+		// Only reachable once the left (and any released) above it have been
+		// consumed, so this can only ever be the arrival that opened the session
+		// this flap just closed — never an unrelated join.
+		if sawLeft && e.Action == "joined" {
 			i--
 			continue
 		}
