@@ -131,10 +131,16 @@ const (
 	wsNotConnected = "not connected"
 )
 
-// footerText lists only the bindings that EXIST. The sketch's full strip
-// (m model, A acmm, …) documents keys whose tasks have not landed;
-// showing them now would advertise actions that silently do nothing. Each
-// action task appends its own binding when it wires the key.
+// footerText lists only the bindings that EXIST. The design sketch's strip
+// documents the whole roadmap, and showing a key before its task lands would
+// advertise an action that silently does nothing — so each action task appends
+// its own binding when it wires the key. As of T19 (`A acmm`) the strip has
+// caught up with the sketch, but the rule is what matters, not the parity.
+//
+// The strip is now LONGER than the 60-column minimum terminal, which is not
+// free: lipgloss's Width() wraps rather than truncates, so it has to be clipped
+// before it is padded or it becomes a second footer row. See View, and
+// TestFooterIsClippedNotWrappedAtTheMinimumWidth.
 const footerText = "tab focus  p pause/resume  m model  A acmm  K kick  a attach  ? help  q quit"
 
 // confirmState is the pause/resume dialog. It remains present while the HTTP
