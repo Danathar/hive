@@ -25,6 +25,12 @@
 #                    different tree.
 #   anything else    — hard-fail immediately, no retry.
 #
+# Since #5356 the step first mirrors the already-verified docker.yml check-run
+# as a SHA-scoped `gate` commit status. workflow_dispatch check-runs have no PR
+# association and never enter the release PR's required-context rollup; commit
+# statuses do. The status POST must succeed before the PR is opened, and the
+# tests below pin that fail-closed ordering.
+#
 # Usage: src/scripts/test-release-push-retry.sh
 set -uo pipefail
 
@@ -100,7 +106,16 @@ state="$RPR_STATE"
 # so dispatch on the argv containing a /merge endpoint rather than on $1 $2.
 args="$*"
 case "$args" in
+  *"/statuses/"*)
+    echo status >> "$state/timeline"
+    if [ "$RPR_SCENARIO" = status_fails ]; then
+      echo "gh: Resource not accessible by integration (HTTP 403)" >&2
+      exit 1
+    fi
+    echo '{"context":"gate","state":"success"}'
+    exit 0 ;;
   *"/merge"*)
+    echo merge >> "$state/timeline"
     n=$(( $(cat "$state/merge" 2>/dev/null || echo 0) + 1 ))
     echo "$n" > "$state/merge"
     # A missing `-f sha=` would silently reintroduce the head-moved race the
@@ -133,6 +148,11 @@ case "$args" in
 esac
 case "$1 $2" in
   "pr create")
+    echo pr >> "$state/timeline"
+    if [ "$RPR_SCENARIO" = pr_create_fails ]; then
+      echo "gh: a pull request for branch release-gate/v4.0.1 already exists"
+      exit 1
+    fi
     echo "https://github.com/kubestellar/hive/pull/9999"
     exit 0 ;;
   "pr close")
@@ -155,7 +175,6 @@ run_step() {
   : > "$st/out"
   RPR_SCENARIO="$1" RPR_TAG_SCENARIO="${2:-ok}" RPR_STATE="$st" \
     RELEASE_PUSH_GH006_WINDOW="${3:-120}" \
-    RELEASE_REGATE_SETTLE=0 RELEASE_REGATE_WINDOW=0 \
     VERSION="4.0.1" SHA="deadbeefcafe" GITHUB_OUTPUT="$st/gh_output" \
     GITHUB_REPOSITORY="kubestellar/hive" \
     PATH="$tmp/bin:$PATH" bash "$tmp/push_v4.sh" > "$st/out" 2>&1
@@ -169,6 +188,29 @@ run_step ok
 [ "$rc" -eq 0 ] && note_ok "exit 0" || note_fail "exit $rc, want 0: $output"
 grep -q '^pushed=true$' <<<"$ghout" && note_ok "pushed=true" || note_fail "GITHUB_OUTPUT lacks pushed=true: $ghout"
 [ "$(cat "$st/tag" 2>/dev/null)" = 1 ] && note_ok "tag pushed once" || note_fail "tag not pushed exactly once"
+[ "$(tr '\n' ' ' < "$st/timeline")" = "status pr merge " ] \
+  && note_ok "gate status published before PR creation and merge" \
+  || note_fail "unexpected status/PR/merge order: $(tr '\n' ' ' < "$st/timeline")"
+
+echo "case: gate status publication failure stops before opening the PR"
+run_step status_fails
+[ "$rc" -ne 0 ] && note_ok "non-zero exit" || note_fail "status failure must fail closed, got exit 0"
+grep -q 'Resource not accessible' <<<"$output" && note_ok "status API error preserved" || note_fail "status API error masked: $output"
+[ "$(tr '\n' ' ' < "$st/timeline")" = "status " ] \
+  && note_ok "no PR or merge attempted" \
+  || note_fail "workflow continued after status failure: $(tr '\n' ' ' < "$st/timeline")"
+[ -f "$st/tag" ] && note_fail "tag was pushed despite status failure" || note_ok "no tag pushed"
+
+echo "case: PR creation failure preserves the API response"
+run_step pr_create_fails
+[ "$rc" -ne 0 ] && note_ok "non-zero exit" || note_fail "PR creation failure must fail, got exit 0"
+grep -q 'a pull request for branch release-gate/v4.0.1 already exists' <<<"$output" \
+  && note_ok "gh pr create response preserved" \
+  || note_fail "gh pr create response masked: $output"
+[ "$(tr '\n' ' ' < "$st/timeline")" = "status pr " ] \
+  && note_ok "merge not attempted" \
+  || note_fail "workflow continued after PR creation failure: $(tr '\n' ' ' < "$st/timeline")"
+[ -f "$st/tag" ] && note_fail "tag was pushed despite PR creation failure" || note_ok "no tag pushed"
 
 echo "case: mergeable_state settling twice, then success"
 run_step settle_then_ok
@@ -255,6 +297,9 @@ elif "steps.push_v4.outputs.pushed == 'true'" not in (gh_release.get("if") or ""
 perms = w.get("permissions", {})
 if perms.get("pull-requests") != "write":
     bad("permissions no longer grant pull-requests: write — the #5222 PR-merge path needs it")
+release_perms = rel.get("permissions", {})
+if release_perms.get("statuses") != "write":
+    bad("the release job no longer grants statuses: write — the #5356 gate mirror cannot be published")
 # #5318: the deferral chain has no terminating condition of its own — a
 # superseded run correctly stands down, and a cancelled docker.yml run never
 # fires workflow_run at all. The schedule trigger is what eventually comes
@@ -333,18 +378,24 @@ else:
         bad("push_v4 regressed to `gh pr merge`, which refuses any PR whose AGGREGATE "
             "mergeStateStatus is BLOCKED — a pending non-required `tide` status alone is "
             "enough to block every release forever (#5318/#5324)")
-    # #5356: the re-dispatch must happen AFTER `gh pr create`, or the green
-    # suite goes back underneath the empty ones the PR-open burst creates and
-    # the 405 returns. Order is the whole point, so assert it, not mere
-    # presence.
-    if "gh workflow run docker.yml" not in code:
-        bad("push_v4 no longer re-dispatches docker.yml after opening the release PR — "
-            "the PR-open burst leaves an EMPTY check-suite newest on the head SHA and "
-            "protection reports `gate` as missing, blocking every release (#5356)")
-    elif code.index("gh workflow run docker.yml") < code.index("gh pr create"):
-        bad("push_v4 re-dispatches docker.yml BEFORE opening the release PR — the "
-            "PR-open burst then leaves an empty check-suite newest again and the "
-            "merge is refused exactly as in #5356. Re-dispatch after `gh pr create`.")
+    # #5356: workflow_dispatch check-runs are not PR-associated, even when
+    # dispatched after the PR exists. The verified gate must be mirrored as a
+    # SHA-scoped commit status BEFORE opening the PR so its rollup can see it.
+    status_endpoint = 'repos/${GITHUB_REPOSITORY}/statuses/${commit_sha}'
+    if status_endpoint not in code:
+        bad("push_v4 no longer publishes the SHA-scoped gate status — the release PR "
+            "rollup cannot see workflow_dispatch check-runs and protection 405s (#5356)")
+    else:
+        status_at = code.index(status_endpoint)
+        pr_at = code.index("gh pr create")
+        merge_at = code.index("gh api -X PUT")
+        if not status_at < pr_at < merge_at:
+            bad("push_v4 must publish gate status, then open the PR, then merge it (#5356)")
+    if "-f state=success" not in code or "-f context=gate" not in code:
+        bad("push_v4's commit status is not the required gate:success verdict (#5356)")
+    if "gh workflow run docker.yml" in code:
+        bad("push_v4 still re-dispatches docker.yml after PR creation — dispatched "
+            "check-runs remain unassociated and cannot satisfy the PR rollup (#5356)")
 sys.exit(0 if ok else 1)
 PY
 
