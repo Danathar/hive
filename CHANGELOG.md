@@ -11,6 +11,8 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-01 (v4.0.1)
+
 ### Added
 
 - Google Antigravity (`agy`) is now selectable as an agent method on the dashboard instead of being launchable only through hand-edited configuration. Its model dropdown is backend-specific rather than inheriting the unrelated Copilot catalog: the first paint uses the 11 model IDs reported by `agy models` in Antigravity CLI 1.1.18 (Gemini 3.7/3.6 Flash effort variants, Gemini 3.1 Pro, Claude Sonnet/Opus 4.6, and GPT-OSS 120B), then `/api/config/backends` replaces that floor with the signed-in account's live `agy models` inventory. The probe runs the vendor CLI against the same shared `.gemini` state as hive agents, without reading or logging OAuth material; a missing binary, signed-out account, timeout, or changed/empty output remains a non-fatal, explicitly marked static fallback. The existing launcher contract is unchanged: selecting one of these model IDs still supplies both `--model` and agy's required `--effort low`.
