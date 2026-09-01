@@ -40,6 +40,7 @@ on:
     paths:
       - 'src/docs/**'
       - 'src/deploy/data/wiki/**'
+      - 'docs/**'
       - 'src/scripts/check-docs-links.py'
       - 'src/scripts/test-check-docs-links.sh'
       - '.github/workflows/docs-link-check.yml'
@@ -49,6 +50,7 @@ on:
     paths:
       - 'src/docs/**'
       - 'src/deploy/data/wiki/**'
+      - 'docs/**'
       - 'src/scripts/check-docs-links.py'
       - 'src/scripts/test-check-docs-links.sh'
       - '.github/workflows/docs-link-check.yml'
@@ -68,6 +70,20 @@ jobs:
 
       - name: Check src/docs/ relative links and anchors
         run: python3 src/scripts/check-docs-links.py src/docs
+
+      # Repo-root docs/ was covered by nothing until #5491: it was absent from
+      # both paths: filters and had no step, so a PR breaking a relative link
+      # or heading anchor in any of its files ran no link check at all, and no
+      # later PR caught it either. Same shape as #5309 (the wiki vault) and the
+      # exemptions swept in #5388 — the guard was correct and simply never
+      # aimed at this surface.
+      #
+      # Plain mode, NOT --vault-root: root docs/ is served from the repository,
+      # so its many parent-relative links out to src/, bin/, .github/ and the
+      # root README resolve normally for a reader. The vault's flat-layout
+      # containment rule would reject exactly the links that are correct here.
+      - name: Check repo-root docs/ relative links and anchors
+        run: python3 src/scripts/check-docs-links.py docs
 
       # The wiki vault is checked in --vault-root mode, which models the
       # DEPLOYED layout rather than this checkout. See the header comment and
