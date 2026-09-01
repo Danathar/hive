@@ -178,8 +178,23 @@ func (p ModelPicker) SetCatalogueError(err error) ModelPicker {
 // the precedent for the shape, and errors.As over the exported APIError is the
 // documented way to ask.
 func isNotFound(err error) bool {
+	return apiStatus(err) == http.StatusNotFound
+}
+
+// apiStatus returns the HTTP status err carries as an APIError, or 0 when it is
+// not one — a transport failure, a decode error, a cancelled context.
+//
+// T19 needed the same errors.As dance to recognise a 5xx (see acmm.go's
+// isServerError), so the extraction happened then rather than a second copy
+// being written. Zero is a safe "not an HTTP answer" for both callers: neither
+// 404 nor >=500 matches it, so an unreachable dashboard is never mistaken for a
+// server that replied.
+func apiStatus(err error) int {
 	var apiErr *client.APIError
-	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode
+	}
+	return 0
 }
 
 // Apply marks a set request as started for the model under the cursor.

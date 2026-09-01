@@ -135,7 +135,7 @@ const (
 // (m model, A acmm, …) documents keys whose tasks have not landed;
 // showing them now would advertise actions that silently do nothing. Each
 // action task appends its own binding when it wires the key.
-const footerText = "tab focus  p pause/resume  m model  K kick  a attach  ? help  q quit"
+const footerText = "tab focus  p pause/resume  m model  A acmm  K kick  a attach  ? help  q quit"
 
 // confirmState is the pause/resume dialog. It remains present while the HTTP
 // command is in flight so every other key stays behind the modal, and it also
@@ -191,6 +191,27 @@ type modelSetMsg struct {
 	err      error
 }
 
+// acmmPacksMsg is the asynchronous result of the ACMM overlay's pack list
+// call. Like modelListMsg it carries the overlayID it was issued for, so a
+// response for an overlay the operator has already closed — or closed and
+// reopened — cannot populate the newer one with the older one's snapshot.
+type acmmPacksMsg struct {
+	overlayID uint64
+	status    client.ACMMStatus
+	err       error
+}
+
+// acmmApplyMsg is the asynchronous result of applying a level. It carries the
+// level as well as the overlay identity because this is the widest write in the
+// API: a response matched to the wrong overlay would report a fleet-wide
+// reconciliation against a level nobody asked for.
+type acmmApplyMsg struct {
+	overlayID uint64
+	level     int
+	result    client.ACMMLevelResult
+	err       error
+}
+
 // model is the root bubbletea model.
 //
 // It is a VALUE type with value receivers, which is the bubbletea convention
@@ -241,6 +262,19 @@ type model struct {
 
 	// pickerID is the sequence number of the currently open overlay.
 	pickerID uint64
+
+	// acmm is non-nil while the ACMM level overlay is open. It owns every key
+	// while visible for the same reason the picker does, and more so: the write
+	// behind it is fleet-wide, so a stray `p` or `q` reaching the frame from
+	// inside a typed confirmation is precisely what the confirmation exists to
+	// make impossible.
+	acmm *panes.ACMMOverlay
+
+	// acmmSeq and acmmID identify each opened ACMM overlay so a late pack list
+	// or apply response belonging to a superseded one is discarded. Same
+	// pattern as pickerSeq/pickerID.
+	acmmSeq uint64
+	acmmID  uint64
 
 	// actionSeq identifies each confirmed HTTP call. Agent and verb alone are
 	// not enough: an operator can dismiss an in-flight request and open the
@@ -406,6 +440,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleModelList(msg)
 	case modelSetMsg:
 		return m.handleModelSet(msg)
+	case acmmPacksMsg:
+		return m.handleACMMPacks(msg)
+	case acmmApplyMsg:
+		return m.handleACMMApply(msg)
 	case attachReadyMsg:
 		if msg.err != nil {
 			m.attachPending = false
@@ -433,6 +471,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// attach or the ACMM binding underneath it.
 		if m.picker != nil {
 			return m.updateModelPicker(msg)
+		}
+		// The ACMM overlay is modal for the same reason, and is the one that
+		// matters most: it is the only overlay in which ordinary letters are
+		// TEXT rather than bindings, so a key leaking out of it would both fail
+		// to type and fire an action the operator did not mean.
+		if m.acmm != nil {
+			return m.updateACMM(msg)
 		}
 		// The help overlay is modal and dismisses on ANY key, so it is handled
 		// before the global bindings rather than as one of them. Order is the
@@ -504,6 +549,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.picker = &picker
 			m.footerStatus = ""
 			return m, m.fetchModels(m.pickerID, backend)
+		case "A":
+			// GLOBAL, unlike p/m/K/a: the ACMM level is a property of the hive
+			// rather than of a selected agent, so there is no focused pane or
+			// row for it to be addressed at. It opens from anywhere.
+			m.acmmSeq++
+			m.acmmID = m.acmmSeq
+			overlay := panes.NewACMMOverlay()
+			m.acmm = &overlay
+			m.footerStatus = ""
+			return m, m.fetchACMM(m.acmmID)
 		case "K":
 			if m.focus != 0 || m.kickPending != "" {
 				return m, nil
@@ -631,6 +686,9 @@ func (m model) View() string {
 	}
 	if m.picker != nil {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.picker.View(m.width))
+	}
+	if m.acmm != nil {
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.acmm.View(m.width))
 	}
 	if m.helpVisible {
 		// Place, not Join: the overlay sits ON the frame rather than taking
@@ -876,6 +934,206 @@ func (m model) handleModelSet(msg modelSetMsg) (tea.Model, tea.Cmd) {
 	// Reconcile: the write restarted the session, so the roster's live fields
 	// are stale by definition and the next frame should not wait a poll
 	// interval to say so.
+	return m, m.poll()
+}
+
+// ── ACMM overlay (T19) ───────────────────────────────────────────────────────
+
+// updateACMM consumes EVERY key while the overlay is open.
+//
+// The consumption rule is stricter here than in any other modal, and the reason
+// is the typed confirmation: while it is composing, ordinary letters are TEXT.
+// `q` is a character in nothing operators type here, but `p`, `a`, `A` and `K`
+// all appear in "APPLY L4" — so a key leaking through would not merely fail to
+// type, it would pause an agent or open a second overlay while the operator was
+// spelling out a fleet-wide change. Every branch below therefore ends in this
+// function, and the default case does nothing rather than routing to a pane.
+func (m model) updateACMM(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// A receipt is on screen: the write is done and the only thing left is to
+	// read it. Both dismissal keys are accepted, nothing else does anything,
+	// and enter in particular cannot re-apply — the overlay cleared its
+	// confirmation state when the result landed.
+	if m.acmm.Done() {
+		switch msg.String() {
+		case "enter", "esc":
+			m.acmm = nil
+			return m, nil
+		default:
+			return m, nil
+		}
+	}
+
+	switch msg.String() {
+	case "esc":
+		if m.acmm.Pending() {
+			// The apply is already with the server and is reconciling the
+			// fleet. Closing the overlay would not undo it and would hide the
+			// receipt, so the modal stays until the request answers.
+			return m, nil
+		}
+		if m.acmm.Confirming() {
+			// esc backs OUT of the confirmation to the list rather than closing
+			// the overlay outright, so a mistyped phrase costs one key rather
+			// than the whole navigation.
+			next := m.acmm.CancelConfirm()
+			m.acmm = &next
+			return m, nil
+		}
+		m.acmm = nil
+		return m, nil
+	case "enter":
+		if m.acmm.Pending() {
+			return m, nil
+		}
+		if m.acmm.Confirming() {
+			// Apply refuses unless the typed phrase matches exactly, which is
+			// what makes a wrong or incomplete confirmation a no-op, and
+			// refuses while pending, which bounds this to one PUT.
+			next, level, ok := m.acmm.Apply()
+			if !ok {
+				return m, nil
+			}
+			m.acmm = &next
+			return m, m.applyACMM(m.acmmID, level)
+		}
+		// First enter only moves into the confirmation state. It never writes,
+		// and on the level already in force it does not even do that: the
+		// overlay records the no-op message instead.
+		// The refusal cases are already rendered by the overlay (the no-op
+		// message for the current level, the loading or error body for a list
+		// there is nothing to select in), so the ok flag has nothing left for
+		// this layer to do with it.
+		next, _ := m.acmm.BeginConfirm()
+		m.acmm = &next
+		return m, nil
+	case "backspace":
+		next := m.acmm.Backspace()
+		m.acmm = &next
+		return m, nil
+	case "j", "down":
+		// Move is a no-op while confirming or pending; see ACMMOverlay.Move for
+		// why the cursor must not slide under a half-typed phrase. Handled
+		// there rather than here so the rule holds for every caller.
+		if m.acmm.Confirming() {
+			return m.acmmType(msg)
+		}
+		next := m.acmm.Move(1)
+		m.acmm = &next
+		return m, nil
+	case "k", "up":
+		if m.acmm.Confirming() {
+			return m.acmmType(msg)
+		}
+		next := m.acmm.Move(-1)
+		m.acmm = &next
+		return m, nil
+	default:
+		return m.acmmType(msg)
+	}
+}
+
+// acmmType feeds a key press to the confirmation field, if one is open.
+//
+// Only genuine RUNE presses become text. A function or control key — f5,
+// ctrl+w, the arrows — is swallowed rather than rendered into the phrase,
+// because "APPLY L4" cannot contain one and letting them accumulate invisibly
+// would leave an operator staring at a field that looks right and will not
+// match.
+//
+// The j/k branches above route here as well, and that is the point: while
+// confirming they are the letters j and k, not navigation. `j` appears in no
+// confirmation phrase today, but making the rule "runes are text while
+// confirming" rather than "these two keys are special" is what keeps it true if
+// the phrase ever changes.
+func (m model) acmmType(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if !m.acmm.Confirming() || m.acmm.Pending() {
+		return m, nil
+	}
+	if msg.Type != tea.KeyRunes && msg.Type != tea.KeySpace {
+		return m, nil
+	}
+	text := string(msg.Runes)
+	if msg.Type == tea.KeySpace {
+		// tea.KeySpace carries its rune too, but only on some input paths;
+		// naming the character is what makes a spacebar press reliably produce
+		// the space in "APPLY L4".
+		text = " "
+	}
+	if msg.Alt {
+		// alt+r is not the letter r. Treating it as one would silently insert
+		// characters an operator did not type.
+		return m, nil
+	}
+	next := m.acmm.Type(text)
+	m.acmm = &next
+	return m, nil
+}
+
+func (m model) fetchACMM(overlayID uint64) tea.Cmd {
+	return func() tea.Msg {
+		status, err := m.api.ACMM(context.Background())
+		return acmmPacksMsg{overlayID: overlayID, status: status, err: err}
+	}
+}
+
+func (m model) applyACMM(overlayID uint64, level int) tea.Cmd {
+	return func() tea.Msg {
+		result, err := m.api.ApplyACMM(context.Background(), level)
+		return acmmApplyMsg{overlayID: overlayID, level: level, result: result, err: err}
+	}
+}
+
+func (m model) handleACMMPacks(msg acmmPacksMsg) (tea.Model, tea.Cmd) {
+	// A response for a closed or superseded overlay is dropped: it carries a
+	// snapshot of a level the current overlay may already have moved past.
+	if m.acmm == nil || m.acmmID != msg.overlayID {
+		return m, nil
+	}
+	var next panes.ACMMOverlay
+	if msg.err != nil {
+		next = m.acmm.SetStatusError(msg.err)
+	} else {
+		next = m.acmm.SetStatus(msg.status)
+	}
+	m.acmm = &next
+	return m, nil
+}
+
+func (m model) handleACMMApply(msg acmmApplyMsg) (tea.Model, tea.Cmd) {
+	matchesOpenModal := m.acmm != nil && m.acmmID == msg.overlayID
+
+	if msg.err != nil {
+		if !matchesOpenModal {
+			return m, nil
+		}
+		next := m.acmm.SetApplyError(msg.err)
+		m.acmm = &next
+		if next.PartiallyReconciled() {
+			// THE 500 PATH. The level may already be persisted while the roster
+			// is not reconciled to it, so this is the one failure that must
+			// still refresh: the panes underneath may be describing a hive that
+			// has already moved, and leaving them alone would make the frame
+			// agree with the false reading that nothing happened.
+			return m, m.poll()
+		}
+		return m, nil
+	}
+
+	// The overlay stays OPEN on success, holding the receipt, so the
+	// reconciliation is read rather than flashing past on its way to a footer
+	// line. Dismissal is the operator's, on enter or esc.
+	if matchesOpenModal {
+		next := m.acmm.SetResult(msg.result)
+		m.acmm = &next
+	}
+	level := msg.result.Level
+	if level == 0 {
+		level = msg.level
+	}
+	m.footerStatus = fmt.Sprintf("ACMM level now L%d", level)
+	// Refresh regardless of whether the overlay is still open: the roster,
+	// every agent's run state and the governor's configuration have all just
+	// been rewritten, so the Agents and Governor panes are stale by definition.
 	return m, m.poll()
 }
 

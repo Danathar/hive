@@ -107,6 +107,7 @@ func TestHelpMarksOnlyWiredBindingsAvailable(t *testing.T) {
 		"m":               true, // T17
 		"K":               true, // T21
 		"a":               true, // T22
+		"A":               true, // T19
 	}
 	for _, b := range panes.HelpBindings() {
 		if got := b.Available; got != wantAvailable[b.Keys] {
