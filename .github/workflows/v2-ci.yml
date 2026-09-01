@@ -287,6 +287,20 @@ jobs:
         working-directory: .
         run: bash bin/test_enumerate_actionable.sh
 
+      # bin/kick-governor.sh (923 lines, called from bin/hive.sh, run every 15
+      # min via kick-governor.timer) is the adaptive kick decision engine that
+      # reads enumerate-actionable's actionable.json: it measures the backlog,
+      # ladders every agent's cadence and model through SURGE/BUSY/QUIET/IDLE,
+      # downgrades models under token-budget pressure, and decides who gets
+      # kicked (or paused) this tick. It had no tests. This EXECUTES a
+      # path-rewritten copy against fixture actionable.json/tokens.json state
+      # and asserts on the state files it writes and which kicks fire, with
+      # positive controls beside every pause/exclusion so a governor that
+      # kicks nothing (or ignores every pause) cannot pass.
+      - name: kick-governor contract tests
+        working-directory: .
+        run: bash bin/test_kick_governor.sh
+
       # #4289: git-credential-hive.sh is the fetch/clone AND push credential
       # source for every agent. Its mode block used to exit 1 in ADVISORY/
       # ISSUES_ONLY/NO_GITHUB modes, cutting off every git READ for advisory
