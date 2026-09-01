@@ -83,25 +83,43 @@ func TestSaneBudgetSaveAccepted(t *testing.T) {
 	}
 }
 
-// TestBudgetPartialUpdateJudgedOnEffectiveValue guards the pointer-field merge:
-// a PUT that touches only periodDays must not be rejected because of a stored
-// below-floor totalTokens it never mentioned — otherwise an operator on one of
-// the three live spokes could not edit any other budget field.
-func TestBudgetPartialUpdateJudgedOnEffectiveValue(t *testing.T) {
+// TestBudgetPartialUpdateJudgedOnSuppliedValue pins the rule that the floor
+// judges only what the request SUPPLIED, never a value merely stored.
+//
+// This is what keeps the three live below-floor spokes usable: if the floor
+// were applied to the merged effective value, every budget PUT from those
+// hives would 400 — the operator could not adjust period_days and could not
+// even send an empty payload — locking them out of the screen they need in
+// order to fix the limit.
+func TestBudgetPartialUpdateJudgedOnSuppliedValue(t *testing.T) {
 	s := govServer(t)
 	// Simulate a live spoke that booted with a below-floor limit (load warned
-	// and accepted it, so this is a reachable state). PeriodDays/CriticalPct
-	// are set to valid stored values so this test isolates the FLOOR rule
-	// rather than tripping the unrelated period/pct range checks.
+	// and accepted it, so this is a reachable state).
 	s.deps.Config.Governor.Budget.TotalTokens = 50
 	s.deps.Config.Governor.Budget.PeriodDays = 7
 	s.deps.Config.Governor.Budget.CriticalPct = 90
 
+	// Editing an unrelated field must SUCCEED despite the stored below-floor
+	// limit, and must leave that limit alone.
 	rec := doPut(s, "/api/config/governor/budget", map[string]any{"periodDays": 14})
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("editing periodDays on a spoke with a stored below-floor limit returned %d; "+
-			"want %d so the operator is told to fix the limit", rec.Code, http.StatusBadRequest)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("editing periodDays on a spoke with a stored below-floor limit returned %d, want 200: %s; "+
+			"the floor must judge only SUPPLIED values or affected spokes are locked out",
+			rec.Code, rec.Body.String())
 	}
+	if got := s.deps.Config.Governor.Budget.PeriodDays; got != 14 {
+		t.Errorf("PeriodDays = %d, want 14", got)
+	}
+	if got := s.deps.Config.Governor.Budget.TotalTokens; got != 50 {
+		t.Errorf("TotalTokens = %d, want the stored 50 left untouched", got)
+	}
+
+	// But re-supplying a below-floor limit explicitly is still refused.
+	rec = doPut(s, "/api/config/governor/budget", map[string]any{"totalTokens": 50})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("explicitly re-supplying 50 returned %d, want 400", rec.Code)
+	}
+
 	// And the fix itself must go through in one PUT.
 	rec = doPut(s, "/api/config/governor/budget", map[string]any{"totalTokens": 50_000_000})
 	if rec.Code != http.StatusOK {

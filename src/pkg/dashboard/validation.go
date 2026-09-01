@@ -272,23 +272,47 @@ func validateGovernorHealth(healthcheckInterval, restartCooldown int) error {
 
 // validateGovernorBudget validates budget configuration values.
 //
-// This is the SAVE path, and it REJECTS a below-floor limit (#5508). That is
-// deliberately stricter than config load, which only warns: here a human is
-// at the dashboard to read the message and correct the number, so refusing
-// costs one re-submit. On load there is nobody to tell, and refusing would
-// stop a running hive from booting. See config.MinUsableBudgetTokens.
+// The #5508 sanity floor is deliberately NOT applied here. This signature
+// receives EFFECTIVE values (supplied fields merged over stored ones), so it
+// cannot tell a number the operator just typed from one already in the config.
+// The floor must only judge what a request actually SUPPLIED — see
+// validateSuppliedBudgetFloor, called from handleGovernorBudget.
 func validateGovernorBudget(totalTokens int64, periodDays, criticalPct int) error {
 	if totalTokens < 0 {
 		return fmt.Errorf("totalTokens must be >= 0")
-	}
-	if msg := config.SuggestBudgetUnitMistake(totalTokens); msg != "" {
-		return fmt.Errorf("%s (use 0 to disable budget tracking)", msg)
 	}
 	if periodDays < minBudgetPeriodDays || periodDays > maxBudgetPeriodDays {
 		return fmt.Errorf("periodDays must be between %d and %d", minBudgetPeriodDays, maxBudgetPeriodDays)
 	}
 	if criticalPct < minCriticalPct || criticalPct > maxCriticalPct {
 		return fmt.Errorf("criticalPct must be between %d and %d", minCriticalPct, maxCriticalPct)
+	}
+	return nil
+}
+
+// validateSuppliedBudgetFloor rejects a below-floor token limit that this
+// request actually supplied (#5508). nil means the field was absent, which is
+// always allowed.
+//
+// Judging only the SUPPLIED value matters for the three live spokes already
+// storing below-floor limits. If the floor were applied to the effective value
+// instead, every budget PUT from those hives would 400 — the operator could
+// not adjust period_days, and even an empty {} payload would be refused —
+// locking them out of the very screen they need to fix the limit. Refusing a
+// number the operator just typed is the guard; refusing one already persisted
+// is collateral damage.
+//
+// This is the SAVE path, and it REJECTS. That is deliberately stricter than
+// config load, which only WARNS: here a human is present to read the message
+// and correct the number, so refusing costs one re-submit. On load there is
+// nobody to tell, and refusing would stop a running hive from booting. Do not
+// unify the two — see the comment in config.applyDefaults.
+func validateSuppliedBudgetFloor(totalTokens *int64) error {
+	if totalTokens == nil {
+		return nil
+	}
+	if msg := config.SuggestBudgetUnitMistake(*totalTokens); msg != "" {
+		return fmt.Errorf("%s (use 0 to disable budget tracking)", msg)
 	}
 	return nil
 }
