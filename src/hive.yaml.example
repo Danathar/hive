@@ -436,6 +436,16 @@ governor:
 #   reviewer_agents: [] # optional explicit list; otherwise agents with review role/keywords are used
 #   fixer_agent: ""     # optional override; defaults to the PR lane, then scanner
 
+# Post-escalation reviewer lane — distinct from the pre-merge review swarm.
+# OFF by default and denied below ACMM L5. The built-in L5/L6 reviewer agent is
+# also cadence-paused, so enabling requires both this gate and an operator-set
+# cadence. See docs/reviewer-lane.md.
+# escalation:
+#   reviewer:
+#     enabled: false
+#     agent: reviewer
+#     max_per_cycle: 3
+
 # GitHub authentication — use ONE of these methods
 github:
   # Option 1: Personal access token (simplest)

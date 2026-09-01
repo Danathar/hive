@@ -96,6 +96,10 @@ type Entry struct {
 	// were burned. Older-generation entries are granted amnesty (see
 	// MachineryVersion).
 	Machinery int `json:"machinery,omitempty"`
+	// ReviewerFailed records that the single reviewer pass also ended red and
+	// the reviewer-failure comment/label side effects landed. It prevents the
+	// deterministic handoff to a true human from repeating every sweep.
+	ReviewerFailed bool `json:"reviewer_failed,omitempty"`
 }
 
 // Store is the on-PVC attempt ledger. All methods are safe for concurrent use.
@@ -135,6 +139,10 @@ type Observation struct {
 	HeadSHA string
 	Red     bool // CI status is failure
 	Excerpt string
+	// ReviewerPassed is true when the durable reviewer-pass label is present.
+	// A red PR with this bit set has exhausted the full automation ladder and
+	// must go directly to a true human, never back through the reviewer lane.
+	ReviewerPassed bool
 }
 
 // Result reports the ledger's verdict for one observed PR.
@@ -142,6 +150,10 @@ type Result struct {
 	Attempts    int
 	Escalated   bool // escalation actions already fired (now or previously)
 	NewlyEscala bool // this pass crossed the threshold — fire actions now
+	// NewlyReviewerFailed means a PR is still red after its one permitted
+	// reviewer pass. The caller posts the terminal handoff and then calls
+	// MarkReviewerFailed; until then this remains true so failed writes retry.
+	NewlyReviewerFailed bool
 }
 
 // Sweep folds a full enumeration pass into the ledger: increments attempt
@@ -213,9 +225,10 @@ func (s *Store) Sweep(obs []Observation, threshold int) map[string]Result {
 		// its own right.
 		exhausted := e.ReEngagements >= MaxReEngagements
 		results[key] = Result{
-			Attempts:    len(e.RedSHAs),
-			Escalated:   e.Escalated,
-			NewlyEscala: !e.Escalated && (len(e.RedSHAs) >= threshold || exhausted),
+			Attempts:            len(e.RedSHAs),
+			Escalated:           e.Escalated || o.ReviewerPassed,
+			NewlyEscala:         !o.ReviewerPassed && !e.Escalated && (len(e.RedSHAs) >= threshold || exhausted),
+			NewlyReviewerFailed: o.ReviewerPassed && !e.ReviewerFailed,
 		}
 	}
 	// Prune PRs that left the open set (merged or closed).
@@ -226,6 +239,18 @@ func (s *Store) Sweep(obs []Observation, threshold int) map[string]Result {
 	}
 	s.saveLocked()
 	return results
+}
+
+// MarkReviewerFailed records that the terminal true-human handoff landed.
+func (s *Store) MarkReviewerFailed(repo string, number int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e := s.entries[Key(repo, number)]; e != nil {
+		e.Escalated = true
+		e.ReviewerFailed = true
+		e.UpdatedAt = s.now()
+	}
+	s.saveLocked()
 }
 
 // MarkEscalated records that escalation side effects fired for the PR, so they
@@ -443,3 +468,30 @@ func CommentBody(attempts int, failingChecks []string, excerpt string) string {
 // NeedsHumanLabel is the label applied to escalated PRs. Kick builders exclude
 // items carrying it from fix dispatch.
 const NeedsHumanLabel = "needs-human"
+
+// ReviewerPassLabel is the durable one-pass marker. Reviewers apply it for
+// every outcome (repair, de-escalate, or recommend-close); scheduler routing
+// never offers a marked PR to the reviewer again.
+const ReviewerPassLabel = "hive/reviewer-pass"
+
+// ReviewerFailedCommentBody renders the terminal handoff after a reviewer pass
+// still leaves the PR red. The review itself contains the detailed adjudication
+// notes, so this deterministic comment points the human to that durable record.
+func ReviewerFailedCommentBody(failingChecks []string, excerpt string) string {
+	var b strings.Builder
+	b.WriteString("## 🛑 Reviewer pass exhausted — human decision required\n\n")
+	b.WriteString("The configured reviewer completed its single adjudication pass, but this PR is still red. ")
+	b.WriteString("Hive will not send it through either the fix loop or reviewer lane again. See the review immediately above for the reviewer\u2019s diagnosis and actions.\n\n")
+	if len(failingChecks) > 0 {
+		sorted := append([]string(nil), failingChecks...)
+		sort.Strings(sorted)
+		fmt.Fprintf(&b, "**Still failing:** %s\n\n", strings.Join(sorted, ", "))
+	}
+	if excerpt != "" {
+		b.WriteString("**Latest failure evidence:**\n\n```\n")
+		b.WriteString(excerpt)
+		b.WriteString("\n```\n\n")
+	}
+	b.WriteString("The `needs-human` label is authoritative; only a true human should remove it now.\n")
+	return b.String()
+}

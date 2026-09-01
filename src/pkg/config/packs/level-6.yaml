@@ -2,7 +2,7 @@ level: 6
 name: Fully Autonomous
 description: 'Multi-loop with external orchestration. Agents open issues, create PRs,
   and auto-merge on green CI. No hold label. Adds outreach agent (+outreach) for community
-  engagement and external-facing actions. Twelve agents total, including opt-in telemetry and operations. Highest trust — governor
+  engagement and external-facing actions. Thirteen agents total, including opt-in reviewer, telemetry, and operations. Highest trust — governor
   at fastest cadence.
 
   '
@@ -30,6 +30,7 @@ governor:
       outreach: 30m
       sec-check: 15m
       strategist: 30m
+      reviewer: paused
       telemetry: paused
       operations: paused
     busy:
@@ -41,6 +42,7 @@ governor:
       outreach: 1h
       sec-check: 30m
       strategist: 1h
+      reviewer: paused
       telemetry: paused
       operations: paused
     quiet:
@@ -52,6 +54,7 @@ governor:
       outreach: 2h
       sec-check: 1h
       strategist: 2h
+      reviewer: paused
       telemetry: paused
       operations: paused
     idle:
@@ -63,6 +66,7 @@ governor:
       outreach: 4h
       sec-check: 2h
       strategist: 4h
+      reviewer: paused
       telemetry: paused
       operations: paused
 agents:
@@ -330,6 +334,23 @@ agents:
 
     '
   clear_on_kick: true
+- name: reviewer
+  display_name: reviewer
+  role: reviewer
+  description: Adjudicates agent-authored PRs after the deterministic fix loop exhausts its budget; disabled until explicitly opted in.
+  emoji: 🧑‍⚖️
+  color: '#8250df'
+  sort_order: 67
+  backend: copilot
+  model: claude-opus-4-6
+  bead_role: worker
+  mode: ISSUES_AND_PRS
+  kick_template: reviewer-full.md
+  include_repos: true
+  stale_timeout: 28800
+  lane_keywords: [needs-human, escalated, reviewer]
+  interactions: Repairs or de-escalates one-pass escalated PRs on their existing branch; may close duplicates, superseded work, or provably lossy changes at L6.
+  knowledge_use: Reads CI evidence, PR history, base-branch state, and prior escalation notes; produces audited reviews and advisory findings.
 - name: telemetry
   display_name: telemetry
   role: telemetry

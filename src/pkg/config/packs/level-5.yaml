@@ -3,7 +3,7 @@ name: Semi-Autonomous
 description: 'Multi-loop feedback (formerly ''Semi-Automated''). Agents open issues AND pull requests. All agent
   PRs get a ''hold'' label automatically — humans batch-review and approve. Adds architect
   (+architect) for RFCs and strategist (+strategist) for cross-agent coordination.
-  Eleven agents total, including opt-in telemetry and operations. The system proposes; it does not merge autonomously.
+  Twelve agents total, including opt-in reviewer, telemetry, and operations. The system proposes; it does not merge autonomously.
 
   '
 governor:
@@ -30,6 +30,7 @@ governor:
       sec-check: 4h
       architect: 4h
       strategist: 4h
+      reviewer: paused
       telemetry: paused
       operations: paused
     busy:
@@ -41,6 +42,7 @@ governor:
       sec-check: 4h
       architect: 4h
       strategist: 4h
+      reviewer: paused
       telemetry: paused
       operations: paused
     quiet:
@@ -52,6 +54,7 @@ governor:
       sec-check: 4h
       architect: 4h
       strategist: 4h
+      reviewer: paused
       telemetry: paused
       operations: paused
     idle:
@@ -63,6 +66,7 @@ governor:
       sec-check: 4h
       architect: 4h
       strategist: 4h
+      reviewer: paused
       telemetry: paused
       operations: paused
 agents:
@@ -304,6 +308,23 @@ agents:
 
     '
   clear_on_kick: true
+- name: reviewer
+  display_name: reviewer
+  role: reviewer
+  description: Adjudicates agent-authored PRs after the deterministic fix loop exhausts its budget; disabled until explicitly opted in.
+  emoji: 🧑‍⚖️
+  color: '#8250df'
+  sort_order: 67
+  backend: copilot
+  model: claude-opus-4-6
+  bead_role: worker
+  mode: ISSUES_AND_PRS
+  kick_template: reviewer-holdgated.md
+  include_repos: true
+  stale_timeout: 28800
+  lane_keywords: [needs-human, escalated, reviewer]
+  interactions: Repairs or de-escalates one-pass escalated PRs on their existing branch; recommends closure but cannot close below L6.
+  knowledge_use: Reads CI evidence, PR history, base-branch state, and prior escalation notes; produces audited reviews and advisory findings.
 - name: telemetry
   display_name: telemetry
   role: telemetry

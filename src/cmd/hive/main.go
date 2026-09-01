@@ -5976,7 +5976,7 @@ func runEvalCycle(
 	intentVerdicts := writeIntentVerdicts(ctx, cfg, ghClient, actionable, beadStores, logger)
 	refreshReviewVerdicts(cfg, logger)
 	requiredCheckSet, _ := cfg.AutoMerge.RequiredCheckSet()
-	writeMergeEligible(actionable, actionable.Hold, cfg.Project.Org, escalatedPRs, cfg.Intent.Enforce, intentVerdicts, cfg.Review.RequireApproval, requiredCheckSet, logger)
+	writeMergeEligible(actionable, actionable.Hold, cfg.Project.Org, cfg.EffectiveAIAuthor(), escalatedPRs, cfg.Intent.Enforce, intentVerdicts, cfg.Review.RequireApproval, requiredCheckSet, logger)
 
 	// Stuck-PR reaper (backstop): re-dispatch a fix for any hive-authored PR
 	// that is red on a required check AND stale (its red head SHA unchanged past
@@ -7519,11 +7519,12 @@ func hivePRObservations(cfg *config.Config, actionable *github.ActionableResult)
 			continue
 		}
 		obs = append(obs, escalation.Observation{
-			Repo:    fullRepo(pr.Repo),
-			Number:  pr.Number,
-			HeadSHA: pr.HeadSHA,
-			Red:     pr.HasFailingRequiredCheck(),
-			Excerpt: pr.CIFailureExcerpt,
+			Repo:           fullRepo(pr.Repo),
+			Number:         pr.Number,
+			HeadSHA:        pr.HeadSHA,
+			Red:            pr.HasFailingRequiredCheck(),
+			Excerpt:        pr.CIFailureExcerpt,
+			ReviewerPassed: stringSliceContains(pr.Labels, escalation.ReviewerPassLabel),
 		})
 	}
 	return obs
@@ -7665,11 +7666,12 @@ func runEscalationSweep(
 		}
 		repo := fullRepo(pr.Repo)
 		obs = append(obs, escalation.Observation{
-			Repo:    repo,
-			Number:  pr.Number,
-			HeadSHA: pr.HeadSHA,
-			Red:     pr.CIStatus == "failure",
-			Excerpt: pr.CIFailureExcerpt,
+			Repo:           repo,
+			Number:         pr.Number,
+			HeadSHA:        pr.HeadSHA,
+			Red:            pr.CIStatus == "failure",
+			Excerpt:        pr.CIFailureExcerpt,
+			ReviewerPassed: stringSliceContains(pr.Labels, escalation.ReviewerPassLabel),
 		})
 		meta[escalation.Key(repo, pr.Number)] = prMeta{checks: pr.FailingChecks}
 	}
@@ -7683,6 +7685,37 @@ func runEscalationSweep(
 		}
 		if r.Escalated {
 			escalated[key] = true
+		}
+		if r.NewlyReviewerFailed {
+			escalated[key] = true
+			excerpt := o.Excerpt
+			if excerpt == "" {
+				excerpt = escalationStore.Excerpt(o.Repo, o.Number)
+			}
+			body := escalation.ReviewerFailedCommentBody(meta[key].checks, excerpt)
+			if err := writer.CreateIssueComment(ctx, o.Repo, o.Number, body); err != nil {
+				logger.Warn("reviewer-failure comment failed; will retry next pass",
+					"repo", o.Repo, "pr", o.Number, "error", err)
+				continue
+			}
+			if err := writer.AddLabels(ctx, o.Repo, o.Number, []string{escalation.NeedsHumanLabel}); err != nil {
+				// Unlike the first escalation, this PR may have had needs-human
+				// removed when the reviewer returned it to automation. Do not mark
+				// the terminal handoff complete until the authoritative queue label
+				// is definitely back; retry both visible writes next pass.
+				logger.Warn("reviewer-failure label failed; will retry next pass", "repo", o.Repo, "pr", o.Number, "error", err)
+				continue
+			}
+			escalationStore.MarkReviewerFailed(o.Repo, o.Number)
+			logger.Info("reviewer pass failed; escalated to true human",
+				"repo", o.Repo, "pr", o.Number,
+				"failing_checks", strings.Join(meta[key].checks, ","))
+			if notifier != nil {
+				notifier.Send("Reviewer pass exhausted",
+					fmt.Sprintf("%s#%d remains red after its one reviewer pass — true human attention required", o.Repo, o.Number),
+					notify.PriorityHigh)
+			}
+			continue
 		}
 		if !r.NewlyEscala {
 			continue
@@ -8414,6 +8447,15 @@ func fullRepoName(repo, org string) string {
 	return org + "/" + repo
 }
 
+func stringSliceContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 // auditPRAttributionWindow bounds how far back the audit trail is scanned to
 // map open PRs to the agent that opened them. Red PRs older than this fall
 // back to scanner ownership in the kick builders — acceptable: 14d exceeds any
@@ -8466,7 +8508,7 @@ func anyRequiredCheckFailing(failing []string, required map[string]bool) bool {
 	return false
 }
 
-func writeMergeEligible(actionable *github.ActionableResult, hold github.HoldResult, org string, escalatedPRs map[string]bool, enforceIntent bool, intentVerdicts map[string]intent.Verdict, requireReviewApproval bool, requiredChecks map[string]bool, logger *slog.Logger) {
+func writeMergeEligible(actionable *github.ActionableResult, hold github.HoldResult, org, aiAuthor string, escalatedPRs map[string]bool, enforceIntent bool, intentVerdicts map[string]intent.Verdict, requireReviewApproval bool, requiredChecks map[string]bool, logger *slog.Logger) {
 	holdSet := make(map[string]bool)
 	for _, h := range hold.Items {
 		key := fmt.Sprintf("%s/%d", h.Repo, h.Number)
@@ -8492,11 +8534,12 @@ func writeMergeEligible(actionable *github.ActionableResult, hold github.HoldRes
 	}
 
 	type failingPR struct {
-		Number  int    `json:"number"`
-		Repo    string `json:"repo"`
-		Title   string `json:"title"`
-		Author  string `json:"author"`
-		HeadSHA string `json:"head_sha,omitempty"`
+		Number  int      `json:"number"`
+		Repo    string   `json:"repo"`
+		Title   string   `json:"title"`
+		Author  string   `json:"author"`
+		Labels  []string `json:"labels,omitempty"`
+		HeadSHA string   `json:"head_sha,omitempty"`
 		// FailingChecks + Excerpt carry the raw CI evidence into the kick
 		// work list so fix agents see the actual error, not just "red".
 		FailingChecks []string `json:"failing_checks,omitempty"`
@@ -8512,10 +8555,23 @@ func writeMergeEligible(actionable *github.ActionableResult, hold github.HoldRes
 		Agent string `json:"agent,omitempty"`
 	}
 
+	type reviewerPR struct {
+		Number        int      `json:"number"`
+		Repo          string   `json:"repo"`
+		Title         string   `json:"title"`
+		Author        string   `json:"author"`
+		Labels        []string `json:"labels,omitempty"`
+		HeadSHA       string   `json:"head_sha,omitempty"`
+		CIStatus      string   `json:"ci_status,omitempty"`
+		FailingChecks []string `json:"failing_checks,omitempty"`
+		Excerpt       string   `json:"excerpt,omitempty"`
+	}
+
 	prAgents := auditPRAgents(org, time.Now().Add(-auditPRAttributionWindow), "")
 
 	var eligible []eligiblePR
 	var failing []failingPR
+	var reviewerQueue []reviewerPR
 	var reviewArtifact review.Artifact
 	reviewLoaded := false
 	if requireReviewApproval {
@@ -8528,6 +8584,27 @@ func writeMergeEligible(actionable *github.ActionableResult, hold github.HoldRes
 		}
 	}
 	for _, pr := range actionable.PRs.Items {
+		fullRepo := fullRepoName(pr.Repo, org)
+		escalated := escalatedPRs[escalation.Key(fullRepo, pr.Number)]
+		isAgentAuthor := pr.Author != "" && (pr.Author == aiAuthor || strings.HasSuffix(pr.Author, "[bot]"))
+		if isAgentAuthor && (escalated || stringSliceContains(pr.Labels, escalation.NeedsHumanLabel)) {
+			// This queue intentionally does not key off CIStatus. A base regression
+			// can turn an escalated PR green between cycles; the reviewer still
+			// needs to see it to verify the cause and de-escalate it. The durable
+			// needs-human label preserves that membership after the red ledger is
+			// cleared, while the author gate keeps human PRs out unconditionally.
+			reviewerQueue = append(reviewerQueue, reviewerPR{
+				Number:        pr.Number,
+				Repo:          fullRepo,
+				Title:         pr.Title,
+				Author:        pr.Author,
+				Labels:        append([]string(nil), pr.Labels...),
+				HeadSHA:       pr.HeadSHA,
+				CIStatus:      pr.CIStatus,
+				FailingChecks: append([]string(nil), pr.FailingChecks...),
+				Excerpt:       pr.CIFailureExcerpt,
+			})
+		}
 		if pr.Draft {
 			continue
 		}
@@ -8535,7 +8612,6 @@ func writeMergeEligible(actionable *github.ActionableResult, hold github.HoldRes
 		if holdSet[key] {
 			continue
 		}
-		fullRepo := fullRepoName(pr.Repo, org)
 		if enforceIntent {
 			if verdict, ok := intentVerdicts[fmt.Sprintf("%s/%d", fullRepo, pr.Number)]; ok && verdict.AgentPR && !verdict.MergeAllowed() {
 				reason := verdict.Reason
@@ -8569,6 +8645,7 @@ func writeMergeEligible(actionable *github.ActionableResult, hold github.HoldRes
 					Repo:          fullRepo,
 					Title:         pr.Title,
 					Author:        pr.Author,
+					Labels:        append([]string(nil), pr.Labels...),
 					HeadSHA:       pr.HeadSHA,
 					FailingChecks: pr.FailingChecks,
 					Excerpt:       pr.CIFailureExcerpt,
@@ -8647,8 +8724,9 @@ func writeMergeEligible(actionable *github.ActionableResult, hold github.HoldRes
 	logger.Info("merge-eligible.json updated", "eligible", len(eligible), "ci_failing", len(failing), "total_prs", len(actionable.PRs.Items))
 
 	failPayload := map[string]any{
-		"generated_at": time.Now().UTC().Format(time.RFC3339),
-		"ci_failing":   failing,
+		"generated_at":   time.Now().UTC().Format(time.RFC3339),
+		"ci_failing":     failing,
+		"reviewer_queue": reviewerQueue,
 	}
 	failData, err := json.Marshal(failPayload)
 	if err != nil {

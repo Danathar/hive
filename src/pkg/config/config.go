@@ -4790,6 +4790,12 @@ func applyKnownAgentDefaults(name string, agent *AgentConfig) {
 			DetectKeywords: []string{"operations", "operability", "healthz", "runbook"},
 			BeadRole:       "worker", SortOrder: 66, IncludeRepos: true,
 		},
+		"reviewer": {
+			Emoji: "🧑‍⚖️", Color: "#8250df", Aliases: []string{"rv"},
+			LaneKeywords:   []string{"needs-human", "escalated", "reviewer"},
+			DetectKeywords: []string{"reviewer", "adjudicate", "needs-human"},
+			BeadRole:       "worker", SortOrder: 67, IncludeRepos: true,
+		},
 		"quality": {
 			Emoji: "🧪", Color: "#3498db", Aliases: []string{"te", "qa"},
 			LaneKeywords:   []string{"test-gap", "test-strategy", "test-coverage", "test-scaffold", "untested", "missing-tests"},
@@ -5834,6 +5840,21 @@ type EscalationConfig struct {
 	// Threshold is the distinct-red-attempt count that triggers escalation.
 	// Zero means DefaultEscalationThreshold.
 	Threshold int `yaml:"threshold,omitempty" json:"threshold,omitempty"`
+	// Reviewer configures the opt-in reviewer lane that adjudicates PRs after
+	// the deterministic fix loop has applied needs-human. The lane remains off
+	// unless Enabled is explicitly true, and callers additionally require ACMM
+	// L5 or higher before exposing any escalated PR to it.
+	Reviewer EscalationReviewerConfig `yaml:"reviewer,omitempty" json:"reviewer,omitempty"`
+}
+
+// EscalationReviewerConfig bounds the optional reviewer lane. Agent defaults
+// to "reviewer" and MaxPerCycle defaults to DefaultReviewerMaxPerCycle.
+// Keeping this under escalation distinguishes post-breaker adjudication from
+// ReviewConfig's pre-merge verdict swarm.
+type EscalationReviewerConfig struct {
+	Enabled     bool   `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Agent       string `yaml:"agent,omitempty" json:"agent,omitempty"`
+	MaxPerCycle int    `yaml:"max_per_cycle,omitempty" json:"max_per_cycle,omitempty"`
 }
 
 // ReviewConfig gates the optional structured review-swarm merge gate. The zero
@@ -5958,6 +5979,14 @@ func (a AutoMergeConfig) SelfAuthoredAutoMergeAllowed(acmmLevel *int) bool {
 // here (a constant, checked by test) to avoid a config→escalation import.
 const DefaultEscalationThreshold = 3
 
+// ReviewerMinACMMLevel is the first maturity level at which the reviewer lane
+// may run. Lower levels fail closed even if a stale config says enabled:true.
+const ReviewerMinACMMLevel = 5
+
+// DefaultReviewerMaxPerCycle bounds one reviewer kick when the operator does
+// not choose a smaller or larger batch.
+const DefaultReviewerMaxPerCycle = 3
+
 // DefaultMaxParallelReviews matches review.DefaultMaxParallelReviews; duplicated
 // here to avoid a config→review import cycle.
 const DefaultMaxParallelReviews = 5
@@ -5976,4 +6005,26 @@ func (e EscalationConfig) EffectiveThreshold() int {
 		return e.Threshold
 	}
 	return DefaultEscalationThreshold
+}
+
+// EffectiveAgent resolves the configured reviewer agent name.
+func (r EscalationReviewerConfig) EffectiveAgent() string {
+	if agent := strings.TrimSpace(r.Agent); agent != "" {
+		return agent
+	}
+	return "reviewer"
+}
+
+// EffectiveMaxPerCycle resolves the per-kick adjudication cap.
+func (r EscalationReviewerConfig) EffectiveMaxPerCycle() int {
+	if r.MaxPerCycle > 0 {
+		return r.MaxPerCycle
+	}
+	return DefaultReviewerMaxPerCycle
+}
+
+// AllowedAt reports whether the operator enabled the lane at a sufficiently
+// mature ACMM level. A nil level is unconfigured and therefore denied.
+func (r EscalationReviewerConfig) AllowedAt(level *int) bool {
+	return r.Enabled && level != nil && *level >= ReviewerMinACMMLevel
 }

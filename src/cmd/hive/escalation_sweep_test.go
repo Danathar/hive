@@ -268,6 +268,53 @@ func TestRunEscalationSweepLabelFailureIsNonFatal(t *testing.T) {
 	}
 }
 
+func TestRunEscalationSweepReviewerPassHandsOffToTrueHumanOnce(t *testing.T) {
+	newTestEscalationStore(t)
+	client, fake := newEscalationSweepClient(t)
+	cfg := escalationTestConfig()
+	p := redPR("widgets", 41, "hive-agent", "review-fix")
+	p.Labels = []string{escalation.ReviewerPassLabel}
+	p.CIFailureExcerpt = "TestWidget: still failing"
+	actionable := actionableWith(p)
+
+	fake.failLabels = true
+	got := runEscalationSweep(context.Background(), cfg, client, actionable, nil, discardLogger())
+	key := escalation.Key("acme/widgets", 41)
+	if !got[key] {
+		t.Fatalf("reviewed red PR was not terminally escalated: %v", got)
+	}
+	if len(fake.comments) != 1 || !strings.Contains(fake.comments[0], "Reviewer pass exhausted") {
+		t.Fatalf("terminal reviewer comment = %v", fake.comments)
+	}
+	if len(fake.labels) != 0 {
+		t.Fatalf("failed terminal labels unexpectedly recorded: %v", fake.labels)
+	}
+
+	// A missing queue label cannot complete the handoff: retry the visible
+	// writes next pass, then stop only once needs-human is definitely restored.
+	fake.failLabels = false
+	runEscalationSweep(context.Background(), cfg, client, actionable, nil, discardLogger())
+	if len(fake.comments) != 2 || len(fake.labels) != 1 || fake.labels[0] != escalation.NeedsHumanLabel {
+		t.Fatalf("terminal handoff did not retry to completion: comments=%d labels=%v", len(fake.comments), fake.labels)
+	}
+	runEscalationSweep(context.Background(), cfg, client, actionable, nil, discardLogger())
+	if len(fake.comments) != 2 || len(fake.labels) != 1 {
+		t.Fatalf("terminal handoff repeated: comments=%d labels=%d", len(fake.comments), len(fake.labels))
+	}
+}
+
+func TestRunEscalationSweepReviewerNeverTouchesHumanPR(t *testing.T) {
+	newTestEscalationStore(t)
+	client, fake := newEscalationSweepClient(t)
+	p := redPR("widgets", 42, "alice", "red")
+	p.Labels = []string{escalation.ReviewerPassLabel}
+
+	got := runEscalationSweep(context.Background(), escalationTestConfig(), client, actionableWith(p), nil, discardLogger())
+	if len(got) != 0 || len(fake.paths) != 0 {
+		t.Fatalf("human PR was touched: escalated=%v paths=%v", got, fake.paths)
+	}
+}
+
 // Human-authored PRs are never escalation candidates, and a stored excerpt
 // backfills a crossing pass that observed none.
 func TestRunEscalationSweepAuthorGateAndExcerptFallback(t *testing.T) {

@@ -270,11 +270,17 @@ See [sandbox-isolation.md](sandbox-isolation.md) for the full threat model, the 
 **What you get:** The full hive works for you. Architect produces RFCs for bigger design changes. You shift from doing the work to batch-reviewing it.
 
 **Un-pause:** supervisor, architect — and yes, now you can un-pause brainstorm too
-**Leave paused:** telemetry, operations — unless you opt in (see below)
+**Leave paused:** reviewer, telemetry, operations — unless you opt in (see below)
 
 ⚠️ **Set cadences first:** Every newly un-paused agent gets the gear treatment: all modes **12h or 1d**. More agents running = faster token burn, so this matters more than ever.
 
-**Two new agents appear at L5:** `telemetry` and `operations` become available for the first time — they don't exist in the roster at any lower level — but they remain **paused by default**, even here. They're opt-in on purpose: to activate them, open **Settings → Project Observability**, select your managed project's observability stack (OpenTelemetry, Prometheus, Grafana, a `ServiceMonitor`, a commercial backend — whatever you actually run), and save. Saving replaces each agent's paused cadence with a conservative `24h` interval, which you can then tune from its Cadences tab like any other agent. Leave the tab unconfigured and both agents stay paused — there's no rush to enable them just because you reached L5. See [Telemetry agent](telemetry.md) and [Operations agent](operations.md) for what each one actually does, and [agent-configuration.md](agent-configuration.md) for the `project_observability` config block.
+**Two operability agents appear at L5:** `telemetry` and `operations` become available for the first time — they don't exist in the roster at any lower level — but they remain **paused by default**, even here. They're opt-in on purpose: to activate them, open **Settings → Project Observability**, select your managed project's observability stack (OpenTelemetry, Prometheus, Grafana, a `ServiceMonitor`, a commercial backend — whatever you actually run), and save. Saving replaces each agent's paused cadence with a conservative `24h` interval, which you can then tune from its Cadences tab like any other agent. Leave the tab unconfigured and both agents stay paused — there's no rush to enable them just because you reached L5. See [Telemetry agent](telemetry.md) and [Operations agent](operations.md) for what each one actually does, and [agent-configuration.md](agent-configuration.md) for the `project_observability` config block.
+
+The `reviewer` also first appears at L5 and stays paused, with an additional
+`escalation.reviewer.enabled` gate that defaults false. Enable it only when you
+want one bounded agent adjudication pass over agent-authored `needs-human` PRs;
+L5 can repair, de-escalate, or recommend closure, while the final close remains
+yours. See [Reviewer lane](reviewer-lane.md).
 
 **Using the findings:** Batch-review on a schedule (say, twice a week). Approve the PRs you like, decline the ones you don't, 👍 the issues that match your roadmap.
 
@@ -293,7 +299,7 @@ See [sandbox-isolation.md](sandbox-isolation.md) for the full threat model, the 
 **What you get:** A repo that improves itself while you sleep. The tests quality built at L3 are now the guardrails that keep agents honest.
 
 **Un-pause:** everything stays on from L5
-**Leave paused:** telemetry, operations — still opt-in, unless you already enabled them at L5
+**Leave paused:** reviewer, telemetry, operations — still opt-in, unless you already enabled them at L5
 
 ⚠️ **Cadence check:** You can shorten cadences now if your token budget allows — but 12h/1d still works fine. Faster isn't better if you're not reading the output.
 

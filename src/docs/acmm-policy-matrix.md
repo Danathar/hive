@@ -66,7 +66,7 @@ Delivery agents open GitHub issues — bugs, docs gaps, CI problems, security vu
 | **sec-check** | **holdgated** | `sec-check-holdgated.md` |
 | brainstorm | advisory | `brainstorm-advisory.md` |
 
-### L5 — Semi-Autonomous (Semi-Automated) (11 agents)
+### L5 — Semi-Autonomous (Semi-Automated) (12 agents)
 
 Agents open issues AND pull requests. All PRs get a hold label — humans batch-review and approve. Architect produces RFCs, strategist coordinates across agents. The system proposes; it does not merge autonomously.
 
@@ -80,11 +80,12 @@ Agents open issues AND pull requests. All PRs get a hold label — humans batch-
 | sec-check | holdgated | `sec-check-holdgated.md` |
 | architect | holdgated | `architect-holdgated.md` |
 | strategist | holdgated | `strategist-holdgated.md` |
+| reviewer (paused, opt-in gate) | holdgated | `reviewer-holdgated.md` |
 | telemetry (paused) | holdgated | `telemetry-holdgated.md` |
 | operations (paused) | holdgated | `operations-holdgated.md` |
 | brainstorm | advisory | `brainstorm-advisory.md` |
 
-### L6 — Fully Autonomous (12 agents)
+### L6 — Fully Autonomous (13 agents)
 
 Existing autonomous lanes can open issues, create PRs, and auto-merge on green CI. No hold label. Outreach handles community engagement. Telemetry and operations remain paused and use `ISSUES_AND_PRS`, so they never merge their own PRs.
 
@@ -99,6 +100,7 @@ Existing autonomous lanes can open issues, create PRs, and auto-merge on green C
 | architect | full | `architect-full.md` |
 | strategist | full | `strategist-full.md` |
 | outreach | full | `outreach-full.md` |
+| reviewer (paused, opt-in gate) | full | `reviewer-full.md` |
 | telemetry (paused) | full | `telemetry-full.md` |
 | operations (paused) | full | `operations-full.md` |
 | brainstorm | advisory | `brainstorm-advisory.md` |

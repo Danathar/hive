@@ -88,6 +88,37 @@ func TestCommentBody_LeadsWithEvidence(t *testing.T) {
 	}
 }
 
+func TestSweep_ReviewerPassGoesDirectlyToTrueHumanOnce(t *testing.T) {
+	s := Load(filepath.Join(t.TempDir(), "streaks.json"))
+	reviewed := obs("org/repo", 7, "review-fix", true)
+	reviewed.ReviewerPassed = true
+
+	r := s.Sweep([]Observation{reviewed}, 3)
+	got := r[Key("org/repo", 7)]
+	if !got.Escalated || !got.NewlyReviewerFailed || got.NewlyEscala {
+		t.Fatalf("reviewed red PR must bypass ordinary escalation: %+v", got)
+	}
+	// Until the caller confirms its comment landed, retry the terminal handoff.
+	r = s.Sweep([]Observation{reviewed}, 3)
+	if !r[Key("org/repo", 7)].NewlyReviewerFailed {
+		t.Fatal("unmarked reviewer handoff must retry")
+	}
+	s.MarkReviewerFailed("org/repo", 7)
+	r = s.Sweep([]Observation{reviewed}, 3)
+	if r[Key("org/repo", 7)].NewlyReviewerFailed {
+		t.Fatal("completed reviewer handoff repeated")
+	}
+}
+
+func TestReviewerFailedCommentBodyCarriesLatestEvidence(t *testing.T) {
+	body := ReviewerFailedCommentBody([]string{"test", "build"}, "TestWidget: got false")
+	for _, want := range []string{"Reviewer pass exhausted", "build, test", "TestWidget", NeedsHumanLabel, "true human"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("terminal handoff comment missing %q:\n%s", want, body)
+		}
+	}
+}
+
 // --- Staleness + re-engagement (red-PR re-engagement machinery) ---
 
 // mkClock returns a controllable clock and a pointer to advance it.

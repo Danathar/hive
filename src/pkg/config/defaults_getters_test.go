@@ -96,6 +96,29 @@ func TestEffectiveThreshold(t *testing.T) {
 	}
 }
 
+func TestEscalationReviewerDefaultsAndGate(t *testing.T) {
+	var unset EscalationReviewerConfig
+	if got := unset.EffectiveAgent(); got != "reviewer" {
+		t.Errorf("default agent = %q, want reviewer", got)
+	}
+	if got := unset.EffectiveMaxPerCycle(); got != DefaultReviewerMaxPerCycle {
+		t.Errorf("default max = %d, want %d", got, DefaultReviewerMaxPerCycle)
+	}
+	custom := EscalationReviewerConfig{Enabled: true, Agent: "adjudicator", MaxPerCycle: 2}
+	if got := custom.EffectiveAgent(); got != "adjudicator" || custom.EffectiveMaxPerCycle() != 2 {
+		t.Fatalf("custom reviewer config not honored: agent=%q max=%d", got, custom.EffectiveMaxPerCycle())
+	}
+	for level := 1; level <= 6; level++ {
+		got := custom.AllowedAt(&level)
+		if got != (level >= ReviewerMinACMMLevel) {
+			t.Errorf("AllowedAt(L%d) = %v", level, got)
+		}
+	}
+	if unset.AllowedAt(nil) || custom.AllowedAt(nil) {
+		t.Error("nil ACMM level must fail closed")
+	}
+}
+
 func TestAllowSecretFileRoot(t *testing.T) {
 	dir := t.TempDir()
 	keyFile := filepath.Join(dir, "gateway.key")

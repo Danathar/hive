@@ -13,6 +13,7 @@ import (
 	"github.com/kubestellar/hive/pkg/agentsmd"
 	"github.com/kubestellar/hive/pkg/classify"
 	"github.com/kubestellar/hive/pkg/config"
+	"github.com/kubestellar/hive/pkg/escalation"
 	"github.com/kubestellar/hive/pkg/github"
 	"github.com/kubestellar/hive/pkg/ioscan"
 	"github.com/kubestellar/hive/pkg/knowledge"
@@ -624,6 +625,10 @@ func (s *Scheduler) BuildAgentMessage(agentName string, issues []github.Issue, a
 		// one commit — kicks kept spawning NEW PRs while the reaper's
 		// re-engagements aged every red SHA to its cap unfixed.
 		message = s.addRedPRFixFirst(agentName, message)
+		// Reviewer lane: only the explicitly configured L5/L6 reviewer sees
+		// escalated PRs, with a hard per-kick cap. Every other agent continues
+		// to stand down for needs-human work.
+		message = s.addEscalatedReviewerLane(agentName, message)
 		// Non-GitHub work source: tell the agent how the tracker half of its
 		// policy maps onto Linear (identity, auth, filing, PR linking, hold).
 		// Same seam, same reason — a customized template cannot omit it.
@@ -906,6 +911,120 @@ func formatRedPRFixData(data []byte, agent string) string {
 	}
 	b.WriteString("\n")
 	return b.String()
+}
+
+// addEscalatedReviewerLane injects the post-breaker adjudication queue for the
+// one explicitly configured reviewer. The config is both opt-in and ACMM-gated;
+// the built-in reviewer stays cadence-paused until an operator enables it.
+func (s *Scheduler) addEscalatedReviewerLane(agentName, message string) string {
+	if message == "" || s.cfg == nil || !s.cfg.Escalation.Reviewer.AllowedAt(s.cfg.ACMMLevel) {
+		return message
+	}
+	baseName := s.cfg.BaseAgentName(agentName)
+	if baseName != s.cfg.Escalation.Reviewer.EffectiveAgent() {
+		return message
+	}
+	// Naming an ordinary coding agent in escalation.reviewer.agent must not
+	// silently broaden its queue. The target must also declare the reviewer
+	// role, making both the lane assignment and the authority explicit.
+	agentCfg, ok := s.cfg.Agents[baseName]
+	if !ok || agentCfg.Role != "reviewer" {
+		return message
+	}
+	data, err := os.ReadFile(ciFailingPath)
+	if err != nil {
+		return message
+	}
+	closeAllowed := s.cfg.ACMMLevel != nil && *s.cfg.ACMMLevel >= 6
+	section := formatReviewerLaneData(data, s.cfg.Escalation.Reviewer.EffectiveMaxPerCycle(), closeAllowed)
+	if section == "" {
+		return message
+	}
+	if idx := strings.Index(message, "\n"); idx >= 0 && strings.HasPrefix(message, "[agent:") {
+		return message[:idx+1] + section + message[idx+1:]
+	}
+	return section + message
+}
+
+// formatReviewerLaneData renders only needs-human agent PRs that have not
+// consumed the single reviewer pass. Queue membership is independent of current
+// CI status so a now-green base regression can still be de-escalated. The
+// reviewer-pass label is durable across restarts and future regressions, making
+// this filter the no-ping-pong guard.
+func formatReviewerLaneData(data []byte, maxPerCycle int, closeAllowed bool) string {
+	type reviewerQueueRow struct {
+		Number        int      `json:"number"`
+		Repo          string   `json:"repo"`
+		HeadSHA       string   `json:"head_sha"`
+		Labels        []string `json:"labels"`
+		CIStatus      string   `json:"ci_status"`
+		FailingChecks []string `json:"failing_checks"`
+		Excerpt       string   `json:"excerpt"`
+	}
+	var payload struct {
+		Items []reviewerQueueRow `json:"reviewer_queue"`
+	}
+	if json.Unmarshal(data, &payload) != nil {
+		return ""
+	}
+	if maxPerCycle <= 0 {
+		maxPerCycle = config.DefaultReviewerMaxPerCycle
+	}
+	var pending []reviewerQueueRow
+	for _, pr := range payload.Items {
+		if stringListContains(pr.Labels, escalation.ReviewerPassLabel) {
+			continue
+		}
+		pending = append(pending, pr)
+	}
+	if len(pending) == 0 {
+		return ""
+	}
+	assigned := pending
+	if len(assigned) > maxPerCycle {
+		assigned = assigned[:maxPerCycle]
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "\n## 🧑‍⚖️ REVIEWER LANE — %d escalated PRs assigned (cap %d)\n\n", len(assigned), maxPerCycle)
+	b.WriteString("These are hive-authored PRs that exhausted the ordinary fix loop. They are the ONLY PRs you may adjudicate this kick. For each, inspect the existing escalation comment and CI evidence, verify the change is still wanted, and compare the branch with its base for lossless diff and test-count parity. Choose exactly one outcome:\n")
+	b.WriteString("  - REPAIR: fix and test on the SAME branch, push, then remove `needs-human`.\n")
+	b.WriteString("  - DE-ESCALATE: only for a proven base regression or infrastructure flake; update/rebase the SAME branch, then remove `needs-human`.\n")
+	if closeAllowed {
+		b.WriteString("  - CLOSE: only when duplicate, superseded, or provably lossy; record the rationale, then close the PR (L6 authority).\n")
+	} else {
+		b.WriteString("  - RECOMMEND-CLOSE: record the rationale but DO NOT close; closure remains operator-only below L6. Keep `needs-human`.\n")
+	}
+	b.WriteString("For EVERY outcome, after completing the investigation/repair and before removing `needs-human` or closing, submit a durable comment review with `hive-review <number> --repo <repo> --comment --body <notes>`, create an advisory bead carrying the outcome/rationale, and add `hive/reviewer-pass`. Never remove that pass label. A marked PR that remains red goes directly to a true human and will never be assigned here again.\n\n")
+	for _, pr := range assigned {
+		fmt.Fprintf(&b, "  %s#%d @ %s\n", pr.Repo, pr.Number, pr.HeadSHA)
+		if pr.CIStatus != "" {
+			fmt.Fprintf(&b, "    CI: %s\n", pr.CIStatus)
+		}
+		if len(pr.FailingChecks) > 0 {
+			fmt.Fprintf(&b, "    failing: %s\n", strings.Join(pr.FailingChecks, ", "))
+		}
+		if excerpt := strings.TrimSpace(pr.Excerpt); excerpt != "" {
+			if runes := []rune(excerpt); len(runes) > redPRFixExcerptRunes {
+				excerpt = string(runes[:redPRFixExcerptRunes]) + "…"
+			}
+			b.WriteString("    evidence: " + strings.ReplaceAll(excerpt, "\n", "\n              ") + "\n")
+		}
+	}
+	if omitted := len(pending) - len(assigned); omitted > 0 {
+		fmt.Fprintf(&b, "  … %d more remain queued for later reviewer cycles; do not touch them this kick.\n", omitted)
+	}
+	b.WriteString("\n")
+	return b.String()
+}
+
+func stringListContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Scheduler) formatHeldPRClaimsWithPolicy(actionable *github.ActionableResult) (string, bool) {

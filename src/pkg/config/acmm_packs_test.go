@@ -25,7 +25,7 @@ func TestACMMPacksAgentCounts(t *testing.T) {
 	packs := ACMMPacks()
 
 	expected := map[int]int{
-		1: 2, 2: 5, 3: 6, 4: 7, 5: 11, 6: 12,
+		1: 2, 2: 5, 3: 6, 4: 7, 5: 12, 6: 13,
 	}
 	for _, p := range packs {
 		want, ok := expected[p.Level]
@@ -45,7 +45,7 @@ func TestOperabilityAgentsArePausedInEveryGovernorModeAtEligibleLevels(t *testin
 			t.Fatalf("load L%d pack: %v", level, err)
 		}
 		for _, mode := range []string{"surge", "busy", "quiet", "idle"} {
-			for _, agent := range []string{"telemetry", "operations"} {
+			for _, agent := range []string{"reviewer", "telemetry", "operations"} {
 				cadence := NewIntervalCadence(pack.Governor.Cadences[mode][agent])
 				if !cadence.IsPaused() {
 					t.Errorf("L%d %s %s cadence = %q, want paused", level, mode, agent, cadence)
@@ -56,7 +56,7 @@ func TestOperabilityAgentsArePausedInEveryGovernorModeAtEligibleLevels(t *testin
 }
 
 func TestOperabilityAgentDefaults(t *testing.T) {
-	for _, name := range []string{"telemetry", "operations"} {
+	for _, name := range []string{"reviewer", "telemetry", "operations"} {
 		agent := AgentConfig{}
 		applyKnownAgentDefaults(name, &agent)
 		if agent.Emoji == "" || agent.Color == "" || len(agent.Aliases) == 0 || len(agent.LaneKeywords) == 0 || len(agent.DetectKeywords) == 0 {
