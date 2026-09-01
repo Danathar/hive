@@ -256,7 +256,7 @@ type Server struct {
 	inferenceEndpoints map[string][]string // backend id → list of base URLs
 
 	// cliModels caches best-effort runtime model discovery for the CLI
-	// backends (copilot/claude/gemini/goose), each with its own discovery
+	// backends (copilot/claude/gemini/goose/codex/agy), each with its own discovery
 	// source and static fallback. See cli_models.go.
 	cliModels *cliModelCache
 

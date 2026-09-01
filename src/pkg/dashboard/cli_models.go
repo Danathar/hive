@@ -21,7 +21,7 @@ import (
 )
 
 // This file adds runtime model discovery for the CLI backends (copilot,
-// claude, gemini, goose), mirroring the /v1/models discovery already done
+// claude, gemini, goose, agy), mirroring the /v1/models discovery already done
 // for the inference backends (vllm/llm-d/litellm) in api.go.
 //
 // Each CLI has a DIFFERENT discovery source — there is NO single uniform
@@ -58,6 +58,10 @@ import (
 //     the catalog BAKED INTO the installed CLI binary — per-CLI-version, not
 //     per-account (the per-account remote_models fetch was removed upstream),
 //     and fully unauthenticated. See cli_models_codex.go.
+//   - agy:     `agy models` prints the Antigravity catalog available to the
+//     signed-in Google account. The probe uses the agents' shared HOME when it
+//     exists so the CLI, not hive, owns credential resolution. See
+//     cli_models_agy.go.
 //
 // Every discovery is BEST-EFFORT: a failed or absent probe falls back to a
 // current static list so a dropdown is never empty and never errors. Results
@@ -527,6 +531,8 @@ func (s *Server) queryCLIModels(backend string) cliModelResult {
 		r = s.discoverClaudeModels()
 	case "codex":
 		r = s.discoverCodexModels()
+	case agyBackendID:
+		r = s.discoverAgyModels()
 	case bobBackendID:
 		// bob picks its own model and exposes no catalog, so there is nothing
 		// to discover. The single auto sentinel is authoritative (not a
@@ -572,6 +578,8 @@ func cliStaticFallback(backend string) []string {
 		return claudeStaticModels
 	case "codex":
 		return codexStaticModels
+	case agyBackendID:
+		return agyStaticModels
 	case bobBackendID:
 		return bobStaticModels
 	case "goose":

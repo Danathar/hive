@@ -17,7 +17,8 @@ func TestCovD_QueryCLIModels(t *testing.T) {
 	logger := testLoggerCovD()
 	s := NewServer(0, logger)
 
-	backends := []string{"claude", "codex", "copilot", "gemini", "goose"}
+	swapAgyModelsProbe(t, func() ([]string, error) { return nil, errors.New("agy binary not installed") })
+	backends := []string{"claude", "codex", "copilot", "gemini", "goose", "agy"}
 	for _, b := range backends {
 		r := s.queryCLIModels(b)
 		if len(r.models) == 0 {
@@ -41,7 +42,7 @@ func TestCovD_QueryCLIModels(t *testing.T) {
 
 // TestCovD_CLIStaticFallback covers cliStaticFallback for all backends.
 func TestCovD_CLIStaticFallback(t *testing.T) {
-	for _, b := range []string{"copilot", "gemini", "claude", "codex", "goose", "nope"} {
+	for _, b := range []string{"copilot", "gemini", "claude", "codex", "goose", "agy", "nope"} {
 		_ = cliStaticFallback(b)
 	}
 	if cliStaticFallback("goose")[0] != "default" {

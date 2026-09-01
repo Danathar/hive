@@ -7765,7 +7765,7 @@
     // 'openrouter' is a first-class inference method (an OpenAI-compatible gateway
     // preset), so it appears in every backend/method picker even before a matching
     // Model Gateway is configured — the user picks it, then funds/configures it.
-    const KNOWN_BACKENDS = ['claude', 'copilot', 'bob', 'gemini', 'codex', 'goose', 'aider', 'vllm', 'llm-d', 'litellm', 'openrouter', 'watsonx'];
+    const KNOWN_BACKENDS = ['claude', 'copilot', 'bob', 'gemini', 'agy', 'codex', 'goose', 'aider', 'vllm', 'llm-d', 'litellm', 'openrouter', 'watsonx'];
     const FREE_BACKENDS = ['copilot', 'goose'];
     const INFERENCE_BACKENDS = ['vllm', 'llm-d', 'litellm', 'openrouter', 'watsonx'];
     // Names of Model Gateways configured under Settings → Model Gateways
@@ -7863,12 +7863,29 @@
     const BOB_CLI_MODELS = [
       { value: 'auto', label: 'Auto (bob picks)' },
     ];
+    // Google Antigravity exposes an account-aware catalog through `agy models`.
+    // This is the first-paint / failed-probe fallback, captured from agy 1.1.18
+    // on 2026-08-31 in the CLI's own order. Keep in sync with agyStaticModels
+    // in cli_models_agy.go.
+    const AGY_CLI_MODELS = [
+      { value: 'gemini-3.7-flash-high', label: 'Gemini 3.7 Flash (High)' },
+      { value: 'gemini-3.7-flash-medium', label: 'Gemini 3.7 Flash (Medium)' },
+      { value: 'gemini-3.7-flash-low', label: 'Gemini 3.7 Flash (Low)' },
+      { value: 'gemini-3.6-flash-high', label: 'Gemini 3.6 Flash (High)' },
+      { value: 'gemini-3.6-flash-medium', label: 'Gemini 3.6 Flash (Medium)' },
+      { value: 'gemini-3.6-flash-low', label: 'Gemini 3.6 Flash (Low)' },
+      { value: 'gemini-3.1-pro-high', label: 'Gemini 3.1 Pro (High)' },
+      { value: 'gemini-3.1-pro-low', label: 'Gemini 3.1 Pro (Low)' },
+      { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6 (Thinking)' },
+      { value: 'claude-opus-4-6-thinking', label: 'Claude Opus 4.6 (Thinking)' },
+      { value: 'gpt-oss-120b-medium', label: 'GPT-OSS 120B (Medium)' },
+    ];
     const KNOWN_MODELS = COPILOT_CLI_MODELS;
     // CLI_BACKENDS gates which /api/config/backends entries populate
-    // BACKEND_MODELS. bob is included so its server-served single-option list
-    // is honored; without it bob's entry would be dropped and modelsForBackend
-    // would fall through to the copilot catalog.
-    const CLI_BACKENDS = ['claude', 'copilot', 'bob', 'gemini', 'goose', 'codex'];
+    // BACKEND_MODELS. Every CLI with a server-served inventory must appear
+    // here; otherwise its entry is dropped and modelsForBackend falls back to
+    // the pre-discovery catalog (or, for an omitted unknown CLI, Copilot's).
+    const CLI_BACKENDS = ['claude', 'copilot', 'bob', 'gemini', 'agy', 'goose', 'codex'];
     // BACKEND_MODELS holds the live-discovered model list for every backend
     // (inference AND cli), keyed by backend id. INFERENCE_MODELS is kept as
     // an alias to the same object for backward compatibility with existing
@@ -7884,6 +7901,7 @@
       copilot: COPILOT_CLI_MODELS,
       bob: BOB_CLI_MODELS,
       gemini: COPILOT_CLI_MODELS,
+      agy: AGY_CLI_MODELS,
       goose: COPILOT_CLI_MODELS,
       codex: CODEX_CLI_MODELS,
     };
@@ -7891,6 +7909,7 @@
       // Configured gateways (e.g. openrouter) are inference/gateway backends,
       // so they carry the same ⚡ marker as vllm/llm-d/litellm.
       if (INFERENCE_BACKENDS.includes(b) || _configuredGateways.includes(b)) return b + ' ⚡';
+      if (b === 'agy') return 'Google Antigravity (agy)';
       return b;
     }
     // Auto-select sentinels: values meaning "let the CLI pick its own model"
