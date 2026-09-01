@@ -37,6 +37,7 @@ on:
   push:
     branches:
       - v4
+      - v5
     paths:
       - 'src/docs/**'
       - 'src/deploy/data/wiki/**'
@@ -46,6 +47,7 @@ on:
   pull_request:
     branches:
       - v4
+      - v5
     paths:
       - 'src/docs/**'
       - 'src/deploy/data/wiki/**'
