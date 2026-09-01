@@ -7,15 +7,25 @@ name: Dashboard Lint
 # would then pass against a checker nobody had exercised. The workflow file is
 # listed for the same reason: an edit to the `find` invocation here changes
 # what gets checked, and that edit must run the job it changes.
+#
+# THE SHIPPED DASHBOARD IS src/pkg/dashboard/static/ (#5516). That is the tree
+# `//go:embed static` compiles into the binary and serves; dashboard/index.html
+# is a different, smaller file. Until this was added, every edit to the
+# dashboard an operator actually loads ran no lint at all — which is how a
+# call to an undefined helper reached a released image and broke the login
+# flow. Both trees are checked now, and both are in the path filter, so a PR
+# touching either runs the job.
 on:
   push:
     paths:
       - 'dashboard/**'
+      - 'src/pkg/dashboard/static/**'
       - '.github/scripts/check-inline-js.js'
       - '.github/workflows/dashboard-lint.yml'
   pull_request:
     paths:
       - 'dashboard/**'
+      - 'src/pkg/dashboard/static/**'
       - '.github/scripts/check-inline-js.js'
       - '.github/workflows/dashboard-lint.yml'
 
@@ -30,5 +40,5 @@ jobs:
 
       - name: Extract and syntax-check inline JavaScript
         run: |
-          find dashboard -name '*.html' -print0 \
+          find dashboard src/pkg/dashboard/static -name '*.html' -print0 \
             | xargs -0 --no-run-if-empty node .github/scripts/check-inline-js.js

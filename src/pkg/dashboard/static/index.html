@@ -6228,7 +6228,7 @@
       if (code === null) return;
       if (!code.trim()) { showToast('No code entered', 'error'); return; }
       try {
-        const r = await apiFetch(`/api/agents/${encodeURIComponent(agentName)}/login-code`, {
+        const r = await fetch(`/api/agents/${encodeURIComponent(agentName)}/login-code`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ code: code.trim() }),
