@@ -21,7 +21,7 @@ sequenceDiagram
 ```
 
 - The **work queue** is built from the hive's monitored repos: open, actionable issues that pass the admin's filters. The current depth is visible on the Hub tab and at `GET /api/contribute/status` (as `actionable_items`).
-- The **relay** authenticates with a registration token, receives one task at a time, drives the local CLI inside a tmux session, injects a short-lived GitHub token for the PR, and reports the result. It heartbeats every 30 s and reconnects with exponential backoff; a task is abandoned if the relay observes no forward progress for 30 minutes, or if it crosses an absolute 4-hour backstop.
+- The **relay** authenticates with a registration token, receives one task at a time, drives the local CLI inside a tmux session, injects a short-lived GitHub token for the PR, and reports the result. It heartbeats every 30 s and reconnects with exponential backoff; a task is abandoned if the relay observes no forward progress for 30 minutes, or if it crosses an absolute 4-hour backstop. The GitHub token is valid for 55 minutes and is re-minted by the hub before it expires, so a task may outlive any single token ([below](#the-github-token-outlives-the-task-because-the-hub-re-mints-it)).
 - Every contributor has a **trust tier** with per-tier rate limits. See [Contributor trust tiers and delegated agent roles](contributor-trust-and-roles.md).
 
 ## Basic setup
@@ -423,6 +423,66 @@ This aligns the relay with the hub, which has been progress-driven since [#4260]
 Crossing either ceiling is reported with `failure_kind: environment`. It is a statement about this runtime — the relay could not see the work finish — not a judgement that the agent failed its task. The old path passed no options at all, so an infrastructure ceiling was recorded as a plain task failure.
 
 The hang case these ceilings nominally guard is covered better and sooner by the pane-stall detector above: 20 minutes of byte-identical output, confirmed over `PANE_STALL_CONFIRM_TICKS` ticks. The headless path has no pane to scrape and therefore no progress signal, so its one-shot child is bounded by the absolute backstop directly (`HIVE_HEADLESS_TASK_TIMEOUT_MS`).
+
+### The GitHub token outlives the task, because the hub re-mints it
+
+The scoped GitHub token the relay pushes with is valid for **55 minutes**
+(`wsTokenTTL`), which is shorter than the 4-hour absolute backstop above. A task
+is therefore allowed to run for longer than any single token lives. That gap is
+covered, not ignored: the hub re-mints ahead of expiry, so a task running to the
+backstop is expected to use several tokens in succession.
+
+**Minting.** The token is minted per task and scoped to that task's repository
+and the contributor's trust tier. It is delivered *after* the task's acceptance
+decision, on the `token_refresh` wire shape rather than inside `task_assign`
+itself — under the default auto-accept this is immediate, and under the opt-in
+explicit-acceptance mode it waits for the human. The relay's handler writes it
+to a single `0600` file (`GH_TOKEN_CACHE`, overridable with
+`HIVE_GH_TOKEN_CACHE`); that file is the only place the token lives.
+
+**Refresh.** On every heartbeat the hub checks whether the active task's token
+was minted at least **50 minutes** ago (`wsTokenRefreshPeriod`) and, if so,
+re-mints and pushes a fresh `token_refresh`. The relay overwrites the cache file
+in place. The five-minute gap before the 55-minute expiry absorbs clock skew and
+any `gh` command already in flight, so push access does not lapse between the
+old token dying and the new one landing. Refresh is unconditional on task
+duration: it re-arms each time it fires, so a task at the 4-hour backstop has
+been refreshed roughly four times.
+
+Two things follow from refresh being driven by the hub's heartbeat:
+
+- **It requires a live socket and an active task.** A task with no assignment,
+  or a connection whose socket has dropped, is not refreshed. A reconnect that
+  re-adopts a task through the server-issued lease re-mints immediately and
+  re-arms the cycle — without that step the resumed session's mint time would
+  stay zero and refresh would never fire again for the life of the connection
+  ([#2610](https://github.com/kubestellar/hive/issues/2610)).
+- **A failed re-mint is not fatal and is not announced.** If the mint errors, or
+  the hive has no App auth to mint from, the hub logs it and leaves the relay's
+  existing token in place, retrying on the next heartbeat. The relay is told
+  nothing. So the observable failure mode is not a "token expired" message: it
+  is a push or `gh` call that starts returning an authentication error partway
+  through a long task, with the previous 55 minutes having worked normally.
+
+**Expiry is advertised but not enforced by the relay.** Each `token_refresh`
+carries a `token_expires_at` timestamp, and the relay records it — but it never
+checks it. Nothing in the relay warns as expiry approaches, refuses to start a
+push against a stale token, or asks the hub for a new one. The relay finds out
+that a token has died the same way it finds out about any other GitHub error:
+the command fails. If you see an authentication failure on a task that has been
+running for around an hour, a re-mint that quietly failed on the hub side is the
+first thing to check, and the hub's log is the only place that records it.
+
+**Removal.** The token is unlinked on **every** task-exit path, before the agent
+is interrupted, so a turn that survives the stop cannot keep pushing against an
+issue the hub has already offered to someone else
+([#5353](https://github.com/kubestellar/hive/issues/5353),
+[#5373](https://github.com/kubestellar/hive/issues/5373)). It is deliberately
+*not* dropped when the relay declines an offered task: a decline is not an exit,
+and dropping the credential there would destroy the token belonging to the task
+still being worked. Unlinking the file does not revoke the token — it stays
+valid at GitHub for the remainder of its 55 minutes — so removal bounds *this
+relay's* use of it, not the credential's lifetime.
 
 ## Troubleshooting: the backend dies seconds after every task
 
