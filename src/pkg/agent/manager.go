@@ -427,8 +427,12 @@ type Manager struct {
 	// thrashMu guards thrash — its own mutex, NEVER m.mu: the breaker runs on
 	// the output-capture goroutines, and taking m.mu there risks the startup
 	// re-entrancy deadlock class (see the 2026-07 provisionWG incident).
-	thrashMu         sync.Mutex
-	thrash           map[string]*thrashState
+	thrashMu sync.Mutex
+	thrash   map[string]*thrashState
+	// consentWedges records consent-screen restarts for the heartbeat's
+	// ConsentWedged signal (#5577). Own mutex, NEVER m.mu — the recording
+	// sites run with m.mu held. Zero value ready.
+	consentWedges    consentWedgeTracker
 	logger           *slog.Logger
 	workDir          string
 	project          ProjectContext
@@ -4674,8 +4678,15 @@ func (m *Manager) SendKick(name string, message string) error {
 	// (observed live: "-bash: NEVER: command not found").
 	pane := m.captureVisiblePaneForAgent(agent)
 	if !paneHasCLIMarker(pane) || paneShowsConsentScreen(pane) {
+		consentScreen := paneShowsConsentScreen(pane)
+		if consentScreen {
+			// Remember the wedge for the heartbeat's ConsentWedged signal
+			// (#5577): a restart here lands back on the same consent screen,
+			// so repeats of this path ARE the wedge loop.
+			m.noteConsentWedge(name)
+		}
 		m.logger.Warn("agent CLI crashed or stuck on consent screen, restarting before kick",
-			"name", name, "consent_screen", paneShowsConsentScreen(pane))
+			"name", name, "consent_screen", consentScreen)
 		m.mu.Unlock()
 		if err := m.Restart(context.Background(), name); err != nil {
 			m.mu.Lock()

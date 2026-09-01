@@ -787,6 +787,30 @@ type HeartbeatPayload struct {
 	HoldTotal      *int `json:"hold_total,omitempty"`
 	AwaitingReview *int `json:"awaiting_review,omitempty"`
 
+	// --- Remediation-hint detectors (#5577) -------------------------------
+	// Three silent-failure classes a 2026-09-01 fleet audit could only find by
+	// exec'ing into pods. All follow the PRsMerged90d convention: absent means
+	// "not measured" (old spoke, collector not warm) and is carried forward
+	// hub-side — BUT, unlike the count pointers, a MEASURED empty result must
+	// also be distinguishable from absent so a recovered hive clears its own
+	// signal. These therefore omit `omitempty`: nil encodes as null ("not
+	// measured", hub carries forward) while a measured all-clear encodes as
+	// {} / [] and overwrites.
+	//
+	// AgentErrorStreaks maps agent name → consecutive failed model calls
+	// (zero-usage turns from the token scanner's chat recordings — the #5338
+	// bobshell crash-loop signal, where turns run, every call dies, and the
+	// agent stays green).
+	AgentErrorStreaks map[string]int `json:"agent_error_streaks"`
+	// ConsentWedged lists agents whose kick path hit a consent-screen restart
+	// in the last hour — the Copilot consent wedge that restarts an agent
+	// ~1/min while it reads green.
+	ConsentWedged []string `json:"consent_wedged"`
+	// NoCadenceAgents lists enabled, governor-kickable agents with no cadence
+	// configured in any mode AND no kick ever — agents that will idle forever
+	// until the operator sets a cadence.
+	NoCadenceAgents []string `json:"no_cadence_agents"`
+
 	// SLAViolations is work aging past its service threshold, taken from the
 	// governor's eval snapshot.
 	SLAViolations *int `json:"sla_violations,omitempty"`
