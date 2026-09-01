@@ -7520,6 +7520,7 @@ func hivePRObservations(cfg *config.Config, actionable *github.ActionableResult)
 			HeadSHA: pr.HeadSHA,
 			Red:     pr.HasFailingRequiredCheck(),
 			Excerpt: pr.CIFailureExcerpt,
+			Labels:  pr.Labels,
 		})
 	}
 	return obs
@@ -7666,6 +7667,11 @@ func runEscalationSweep(
 			HeadSHA: pr.HeadSHA,
 			Red:     pr.CIStatus == "failure",
 			Excerpt: pr.CIFailureExcerpt,
+			// Labels let Sweep reconcile reviewer-lane verdicts (label-only
+			// edits: needs-human removed, reviewer-passed added) back into the
+			// ledger so a reviewer-repaired PR that goes red again re-enters
+			// the fix lifecycle instead of being orphaned (#5511, gap G1).
+			Labels: pr.Labels,
 		})
 		meta[escalation.Key(repo, pr.Number)] = prMeta{checks: pr.FailingChecks}
 	}

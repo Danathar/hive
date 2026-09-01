@@ -11,6 +11,14 @@ func obs(repo string, num int, sha string, red bool) Observation {
 	return Observation{Repo: repo, Number: num, HeadSHA: sha, Red: red, Excerpt: "ReferenceError: seedMission is not defined"}
 }
 
+// obsLabeled is obs with the PR's current forge labels attached, as the
+// enumeration pass supplies them for reviewer-verdict reconciliation.
+func obsLabeled(repo string, num int, sha string, red bool, labels ...string) Observation {
+	o := obs(repo, num, sha, red)
+	o.Labels = labels
+	return o
+}
+
 func TestSweep_EscalatesAtThresholdOfDistinctRedSHAs(t *testing.T) {
 	s := Load(filepath.Join(t.TempDir(), "streaks.json"))
 
@@ -278,5 +286,105 @@ func TestSweep_MachineryAmnestyReleasesOldGenerationEscalations(t *testing.T) {
 	}
 	if s.TryReEngage("org/repo", 9, "c") {
 		t.Fatal("cap must hold at the current generation — amnesty is one-shot")
+	}
+}
+
+// escalate drives a fresh entry for repo#num across three distinct red SHAs
+// and marks the escalation side effects fired, leaving it Escalated under the
+// CURRENT machinery generation.
+func escalate(t *testing.T, s *Store, repo string, num int) {
+	t.Helper()
+	for _, sha := range []string{"e1", "e2", "e3"} {
+		s.Sweep([]Observation{obs(repo, num, sha, true)}, 3)
+	}
+	s.MarkEscalated(repo, num)
+}
+
+// Reviewer-verdict reconciliation (#5511, gap G1): the reviewer lane's
+// REPAIR/DE-ESCALATE verdict is label edits only (needs-human removed,
+// reviewer-passed added), usually via direct gh the hub never sees. Sweep must
+// sync that verdict into the ledger — reset the entry like amnesty does — or
+// a reviewer fix that goes red again is orphaned: excluded from the fix lane,
+// the reaper, the reviewer lane, AND the needs-human queue, forever.
+func TestSweep_ReviewerPassResetsEscalatedEntry(t *testing.T) {
+	s := Load(filepath.Join(t.TempDir(), "streaks.json"))
+	escalate(t, s, "org/repo", 7)
+
+	// The reviewer repaired and relabeled; the pushed fix is red again. The
+	// entry must be reset: un-escalated, distinct-SHA ledger restarted at the
+	// new red SHA, back in the automated lane.
+	r := s.Sweep([]Observation{obsLabeled("org/repo", 7, "fix1", true, ReviewerPassedLabel)}, 3)
+	got := r[Key("org/repo", 7)]
+	if got.Escalated || got.NewlyEscala {
+		t.Fatalf("reviewer pass must un-escalate the ledger entry: got %+v", got)
+	}
+	if got.Attempts != 1 {
+		t.Fatalf("reviewer pass must restart the distinct-SHA ledger: got %+v", got)
+	}
+	// The reset entry has a fresh re-engagement budget (it is a normal
+	// automated-lane entry again).
+	if !s.TryReEngage("org/repo", 7, "fix1") {
+		t.Fatal("reset entry must be re-engageable")
+	}
+
+	// Re-escalation happens only on fresh red evidence: two more distinct red
+	// SHAs (labels unchanged — the reset must NOT repeat while un-escalated,
+	// or the count could never reach the threshold).
+	s.Sweep([]Observation{obsLabeled("org/repo", 7, "fix2", true, ReviewerPassedLabel)}, 3)
+	r = s.Sweep([]Observation{obsLabeled("org/repo", 7, "fix3", true, ReviewerPassedLabel)}, 3)
+	got = r[Key("org/repo", 7)]
+	if got.Attempts != 3 || !got.NewlyEscala {
+		t.Fatalf("three fresh red SHAs after the reset must re-escalate: got %+v", got)
+	}
+}
+
+// The reset must NOT fire while needs-human is still present (the reviewer has
+// not delivered a verdict — e.g. a partially-applied label edit) or when the
+// labels carry no reviewer verdict at all.
+func TestSweep_ReviewerResetRequiresVerdictLabels(t *testing.T) {
+	s := Load(filepath.Join(t.TempDir(), "streaks.json"))
+
+	// needs-human still present alongside reviewer-passed: no reset.
+	escalate(t, s, "org/repo", 8)
+	r := s.Sweep([]Observation{obsLabeled("org/repo", 8, "x1", true, NeedsHumanLabel, ReviewerPassedLabel)}, 3)
+	if got := r[Key("org/repo", 8)]; !got.Escalated {
+		t.Fatalf("needs-human still present must keep the entry escalated: got %+v", got)
+	}
+
+	// No reviewer verdict labels at all: no reset.
+	escalate(t, s, "org/repo", 9)
+	r = s.Sweep([]Observation{obsLabeled("org/repo", 9, "y1", true, NeedsHumanLabel)}, 3)
+	if got := r[Key("org/repo", 9)]; !got.Escalated {
+		t.Fatalf("an escalated entry without a reviewer verdict must stay escalated: got %+v", got)
+	}
+}
+
+// TryReEngage must refuse escalated entries (#5511, gap G3): the merge-request
+// watcher's terminal path calls it without consulting the escalated set, and
+// without this guard it burns re-engagement budget — and logs "re-engaged fix
+// loop" — for a PR the fix loop is standing down from.
+func TestTryReEngage_RefusesEscalatedEntry(t *testing.T) {
+	s := Load(filepath.Join(t.TempDir(), "streaks.json"))
+	escalate(t, s, "org/repo", 5)
+
+	if s.TryReEngage("org/repo", 5, "e3") {
+		t.Fatal("an escalated entry must not be re-engaged")
+	}
+	if got := s.ReEngagements("org/repo", 5); got != 0 {
+		t.Fatalf("refused re-engage must not burn budget: count = %d, want 0", got)
+	}
+	// Empty-SHA path (the merge watcher's actual call shape) too.
+	if s.TryReEngage("org/repo", 5, "") {
+		t.Fatal("an escalated entry must not be re-engaged via the empty-SHA path")
+	}
+
+	// Machinery amnesty still wins: an OLD-generation escalated entry is
+	// un-escalated by the amnesty block and gets its fresh budget.
+	key := Key("org/repo", 6)
+	s.mu.Lock()
+	s.entries[key] = &Entry{RedSHAs: []string{"a", "b", "c"}, Escalated: true, CurRedSHA: "c", Machinery: 1}
+	s.mu.Unlock()
+	if !s.TryReEngage("org/repo", 6, "c") {
+		t.Fatal("amnesty must still release an older-generation escalated entry")
 	}
 }

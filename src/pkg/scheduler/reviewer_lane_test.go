@@ -29,6 +29,8 @@ const reviewerFixture = `{"generated_at":"2026-09-01T00:00:00Z","ci_failing":[
    "excerpt":"ReferenceError: seedMission is not defined"},
   {"number":41,"repo":"test-org/console","title":"escalated, already adjudicated","agent":"quality","escalated":true,
    "labels":["needs-human","reviewer-passed"],"failing_checks":["go test"]},
+  {"number":44,"repo":"test-org/console","title":"escalated, close already recommended","agent":"quality","escalated":true,
+   "labels":["needs-human","reviewer-recommend-close"],"failing_checks":["go test"]},
   {"number":3,"repo":"test-org/console","title":"oldest escalated","escalated":true,
    "labels":["needs-human"],"failing_checks":["lint"]}
 ]}`
@@ -54,6 +56,12 @@ func TestFormatReviewerWorkList_EscalatedOnlyAndReviewerPassedExcluded(t *testin
 	}
 	if strings.Contains(out, "#41") {
 		t.Error("reviewer-passed PR must be excluded: one reviewer pass per PR, ever")
+	}
+	// #5511 gap G4: below the close-authority level a RECOMMEND-CLOSE verdict
+	// leaves the PR open, so without this exclusion the reviewer would
+	// re-adjudicate (re-comment) it on every kick until an operator acts.
+	if strings.Contains(out, "#44") {
+		t.Error("reviewer-recommend-close PR must be excluded: the verdict was already delivered")
 	}
 	// Unattributed rows surface as scanner, the fleet's primary PR creator.
 	if !strings.Contains(out, "original author agent: scanner") {
@@ -169,6 +177,7 @@ func TestBuildReviewerMessage_ContractAtL5(t *testing.T) {
 		"--remove-label needs-human",
 		"--add-label " + ReviewerPassedLabel,
 		"[reviewer] recommend close:",
+		"--add-label " + ReviewerRecommendCloseLabel,
 		"NEVER close the PR yourself",
 		fmt.Sprintf("AT MOST %d PRs this kick", reviewerMaxPRsPerKick),
 		"NEVER touch a human-authored PR",

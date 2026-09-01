@@ -25,6 +25,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/kubestellar/hive/pkg/escalation"
 	"github.com/kubestellar/hive/pkg/github"
 )
 
@@ -57,7 +58,19 @@ const (
 	// belongs to a true human: the work-list builder excludes labeled rows, so
 	// there is no reviewer<->escalation ping-pong. The machinery-generation
 	// amnesty (#5471) plus one reviewer pass then human is the full ladder.
-	ReviewerPassedLabel = "reviewer-passed"
+	// Canonical in pkg/escalation, where Sweep's reviewer-verdict
+	// reconciliation resets the ledger for PRs carrying it (#5511, gap G1).
+	ReviewerPassedLabel = escalation.ReviewerPassedLabel
+
+	// ReviewerRecommendCloseLabel marks a PR on which the reviewer has already
+	// delivered a RECOMMEND-CLOSE verdict. Below reviewerCloseACMMLevel the PR
+	// stays open (closing is operator-only), so without this marker the row
+	// remains fully adjudicable and the reviewer re-comments the same verdict
+	// on every kick until a human acts (#5511, gap G4 — Spin model witness
+	// w_onepass_acmm5). The work-list builder excludes labeled rows exactly
+	// like ReviewerPassedLabel; the kick contract instructs the reviewer to
+	// add the label alongside the recommend-close comment.
+	ReviewerRecommendCloseLabel = "reviewer-recommend-close"
 )
 
 // agentRole resolves the effective role for an agent name: the configured
@@ -127,6 +140,8 @@ func (s *Scheduler) buildReviewerMessage(agentName string, actionable *github.Ac
 	b.WriteString("  3. RECOMMEND-CLOSE — duplicate, superseded, or irreparably lossy: post exactly\n")
 	b.WriteString("     ONE comment:\n")
 	b.WriteString("        gh pr comment <number> --body \"[reviewer] recommend close: <rationale>\"\n")
+	b.WriteString(fmt.Sprintf("     then mark the verdict delivered so it is never repeated:\n"+
+		"        gh pr edit <number> --add-label %s\n", ReviewerRecommendCloseLabel))
 	if level >= reviewerCloseACMMLevel {
 		b.WriteString(fmt.Sprintf("     At this hive's ACMM level (%d) you MAY then close the PR yourself\n", level))
 		b.WriteString("     (gh pr close <number>) after posting the comment.\n")
@@ -164,8 +179,9 @@ func (s *Scheduler) buildReviewerWorkList() string {
 // ci-failing.json bytes. Rows are ESCALATED hive-authored PRs only —
 // writeMergeEligible builds the file exclusively from the hive's own PR
 // enumeration with per-agent attribution, so every row is hive work; rows
-// whose Labels carry ReviewerPassedLabel are excluded (one reviewer pass per
-// PR, ever). Output is capped at reviewerMaxPRsPerKick rows, oldest first
+// whose Labels carry ReviewerPassedLabel or ReviewerRecommendCloseLabel are
+// excluded (one reviewer pass per PR, ever — whatever the verdict was).
+// Output is capped at reviewerMaxPRsPerKick rows, oldest first
 // (ascending PR number per repo — the enumeration carries no creation time,
 // and numbers are monotonic per repo).
 func formatReviewerWorkList(data []byte) string {
@@ -190,15 +206,19 @@ func formatReviewerWorkList(data []byte) string {
 		if !pr.Escalated {
 			continue // still in the automated fix lane — not the reviewer's
 		}
-		passed := false
+		adjudicated := false
 		for _, l := range pr.Labels {
-			if l == ReviewerPassedLabel {
-				passed = true
+			// One reviewer pass per PR, ever — for EVERY verdict class:
+			// reviewer-passed covers REPAIR/DE-ESCALATE; recommend-close
+			// covers the below-close-authority verdict whose PR stays open
+			// awaiting an operator (#5511, gap G4).
+			if l == ReviewerPassedLabel || l == ReviewerRecommendCloseLabel {
+				adjudicated = true
 				break
 			}
 		}
-		if passed {
-			continue // one reviewer pass per PR: a re-escalation is a human's
+		if adjudicated {
+			continue // one reviewer pass per PR: the rest is a human's
 		}
 		rows = append(rows, pr)
 	}
