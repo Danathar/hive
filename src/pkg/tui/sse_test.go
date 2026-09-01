@@ -357,7 +357,10 @@ func TestSSEEventStretchesThePollWithoutASecondChain(t *testing.T) {
 	if got.sseBackoff != 0 {
 		t.Errorf("sseBackoff = %v after a received event, want it reset", got.sseBackoff)
 	}
-	if got.headerText() != fmt.Sprintf(headerFormat, wsConnected) {
+	// The identity is still a dash — nothing polled /api/hive-id in this test —
+	// but the mode is live off the event the model just applied (T29), which is
+	// the point of the stream updating the header immediately.
+	if got.headerText() != fmt.Sprintf(headerFormat, headerUnknown, "BUSY", wsConnected) {
 		t.Errorf("header = %q, want it to report a live stream", got.headerText())
 	}
 	// The pump must re-arm, or the stream delivers exactly one event and then
@@ -625,13 +628,20 @@ func TestCleanStreamCloseIsADrop(t *testing.T) {
 	}
 }
 
-// findGovernorMsg returns the delivered governor snapshot, or nil if none was
-// produced.
+// findGovernorMsg returns the LAST delivered governor snapshot, or nil if none
+// was produced.
+//
+// Last rather than first, because the frame the pane ends up showing is the
+// one delivered last. A helper that returned the first would pass even when a
+// subsequent delivery overwrote a good evaluation interval with zero — which
+// is exactly the T29 regression these tests exist to catch.
 func findGovernorMsg(msgs []tea.Msg) *panes.GovernorMsg {
+	var found *panes.GovernorMsg
 	for _, msg := range msgs {
 		if g, ok := msg.(panes.GovernorMsg); ok {
-			return &g
+			g := g
+			found = &g
 		}
 	}
-	return nil
+	return found
 }

@@ -39,6 +39,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -101,19 +102,28 @@ var (
 	confirmErrorStyle = lipgloss.NewStyle().Bold(true)
 )
 
-// headerFormat is the header bar, with the SSE connection state as its only
-// live field after T13b. The other two still carry placeholders, and each one
-// is a fact about what is not fetched yet rather than an oversight:
+// headerFormat is the header bar. All three fields are live after T29.
 //
-//   - `hive:` — the hive's name is on GET /api/status (StatusPayload.HiveID),
-//     which no merged client method reads. T6's /api/status client decodes the
-//     governor slice; until a client call exposes the id, inventing one here
-//     would be a guess rendered as a fact.
-//   - `governor:` — same endpoint, T6/T7's to fill.
+// THE THREE FIELDS ARE INDEPENDENT, and the format string is written to make
+// that hard to undo. `hive:` and `governor:` come from two separately-failing
+// polls, and `ws:` is not data at all — it is whether the stream is up. A
+// header that derived identity or mode from the connection would go blank on
+// every reconnect while the cached values were still perfectly good, which is
+// the specific mistake T29's "do not treat an SSE connection as the data
+// value" exists to rule out.
 //
-// A dash is "not known", which is true; any value polled data does not support
-// would be false.
-const headerFormat = "hive: —   governor: —   ws: %s"
+// A dash is "not known", which is true; any value the polled data does not
+// support would be false. That covers four distinct situations deliberately
+// rendered the same way — no successful read yet, a read that failed, a hive
+// with no configured identity, and a governor that is not active — because the
+// operator's question is what the frame can be trusted to show, and the answer
+// in all four cases is "not this field".
+const headerFormat = "hive: %s   governor: %s   ws: %s"
+
+// headerUnknown is the header's dash for any field without a trustworthy
+// value. It is the em dash the design sketch and the Governor pane already
+// use, named once so the header and the pane cannot drift apart.
+const headerUnknown = "—"
 
 // The two `ws:` values, and why there are only two.
 //
@@ -308,6 +318,35 @@ type model struct {
 	// the first failure. It doubles per consecutive failure and is reset by
 	// any received event.
 	sseBackoff time.Duration
+
+	// hiveID is the last successful identity read, and governorStatus and
+	// governorInterval the last successful live and configured governor reads
+	// (T29). All three are the header's and the Governor pane's data.
+	//
+	// THEY ARE THREE FIELDS BECAUSE THEY ARE THREE FAILURES. Each is written
+	// only by its own successful fetch, so a forbidden config read cannot
+	// blank a live mode and a missing identity cannot stop the pane loading —
+	// the isolation is structural rather than something each handler has to
+	// remember. Holding the last good value is the same policy fetchErrMsg
+	// already applies to panes: an error is swallowed, so the previous
+	// observation stands until a successful one replaces it.
+	//
+	// governorInterval in particular is cached rather than passed through
+	// because EVERY panes.GovernorMsg must carry it — including the
+	// SSE-sourced ones, which come from a payload that does not contain it.
+	// That is the bug T29 closes: without this cache the stream's messages
+	// carry a zero interval and overwrite a good one, so `next eval` reverts
+	// to unknown the moment the stream delivers its first event.
+	hiveID           string
+	governorStatus   client.GovernorStatus
+	governorInterval time.Duration
+
+	// governorLoaded is whether governorStatus is a real observation rather
+	// than the zero value. It separates "no successful status read yet" from
+	// "the hive reported an inactive governor", which are the same struct but
+	// different facts: the header shows a dash for both, and only the latter
+	// should reach the pane as a frame.
+	governorLoaded bool
 }
 
 // newModel returns the root model in its initial state. Unexported because the
@@ -398,6 +437,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		next, cmd := m.broadcast(msg)
 		return next, cmd
+	case governorStatusMsg:
+		// Cache first, then deliver — the pane's frame is built from the cache
+		// so it always carries the interval, never just what this fetch knew.
+		m.governorStatus = msg.status
+		m.governorLoaded = true
+		return m.broadcastGovernor()
+	case governorIntervalMsg:
+		m.governorInterval = msg.interval
+		if !m.governorLoaded {
+			// Configuration answered before any live read did. There is no
+			// frame to send yet: a GovernorMsg now would carry a zero status
+			// the pane cannot distinguish from an inactive governor. The
+			// interval is cached and the first status read delivers both.
+			return m, nil
+		}
+		return m.broadcastGovernor()
+	case hiveIDMsg:
+		// Header-only, so no pane delivery. An empty id is stored as-is: the
+		// hive genuinely has no configured identity and the header says so.
+		m.hiveID = msg.id
+		return m, nil
 	case agentActionMsg:
 		return m.handleAgentAction(msg)
 	case kickResultMsg:
@@ -556,6 +616,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // governor snapshot from the same status payload — by threading the result of
 // one broadcast into the next, instead of discarding the panes each one
 // updated.
+// broadcastGovernor delivers the cached governor frame to the panes.
+//
+// THIS IS THE ONE PLACE A panes.GovernorMsg IS BUILT, and that is the design
+// rather than a tidiness preference. The pane's contract is that a message
+// carries both live status and configured cadence, but those arrive from two
+// endpoints on two schedules and, for SSE, from a payload that contains only
+// one of them. Every construction site is therefore an opportunity to send a
+// zero interval and blank `next eval` — which is exactly the bug T29 closes,
+// and it was introduced by a single literal built at the SSE site. Funnelling
+// every delivery through the cache makes the complete frame the only frame
+// that can be built.
+func (m model) broadcastGovernor() (tea.Model, tea.Cmd) {
+	next, cmd := m.broadcast(m.governorMsg())
+	return next, cmd
+}
+
+// governorMsg is the complete governor frame for the model's current cache:
+// the last successful live status joined with the last successful configured
+// interval. Splitting it out from broadcastGovernor is what lets a test assert
+// on the frame the panes are handed without reaching inside them, since
+// broadcast delivers into the panes rather than returning the message.
+func (m model) governorMsg() panes.GovernorMsg {
+	return panes.GovernorMsg{
+		Status:       m.governorStatus,
+		EvalInterval: m.governorInterval,
+	}
+}
+
 func (m model) broadcast(msg tea.Msg) (model, tea.Cmd) {
 	var cmds []tea.Cmd
 	for i, p := range m.panes {
@@ -611,7 +699,17 @@ func (m model) View() string {
 	bottom := lipgloss.JoinHorizontal(lipgloss.Top,
 		cell(2, leftW, botH), cell(3, rightW, botH))
 
-	header := headerStyle.Width(m.width).Render(m.headerText())
+	// CLIPPED INLINE, THEN PADDED. Width() WRAPS text that overflows rather
+	// than truncating it, so a header wider than the terminal silently becomes
+	// two lines and pushes the frame one row past the terminal's height —
+	// exactly the cliff the footer sits on. This is not hypothetical for the
+	// header now that T29 renders a real hive id: at the 60-column minimum,
+	// `hive:` plus a routine identity like "acme-production-us-east-1" already
+	// overflows. MaxWidth() alone cannot fix it, because the wrap has happened
+	// by the time it clips. Inline(true) collapses the text to one line first,
+	// so MaxWidth truncates instead.
+	header := headerStyle.Width(m.width).Render(
+		lipgloss.NewStyle().Inline(true).MaxWidth(m.width).Render(m.headerText()))
 	footerTextForFrame := footerText
 	if m.footerStatus != "" {
 		footerTextForFrame = m.footerStatus
@@ -901,13 +999,34 @@ func (m model) confirmView() string {
 	return confirmBoxStyle.Width(contentWidth).Render(body)
 }
 
-// headerText renders the header bar for this model's connection state.
+// headerText renders the header bar from the model's last successful reads.
+//
+// Every field reads its own cache and nothing else. In particular the two data
+// fields do not consult m.sseConnected: a stream drop changes `ws:` and leaves
+// identity and mode exactly as they were, which is what makes the header
+// survive a degraded stream instead of flickering to dashes and back on every
+// reconnect.
 func (m model) headerText() string {
+	hive := headerUnknown
+	if m.hiveID != "" {
+		hive = m.hiveID
+	}
+
+	// Active is the payload's "this document had a governor section" bit, so
+	// both halves are required: an inactive governor has no mode to report,
+	// and an active one with an empty mode string is a payload this frame
+	// cannot describe. Upper-casing matches the pane, which case-folds because
+	// the wire carries the mode lowercased on one path and uncased on another.
+	governor := headerUnknown
+	if m.governorStatus.Active && m.governorStatus.Mode != "" {
+		governor = strings.ToUpper(m.governorStatus.Mode)
+	}
+
 	ws := wsNotConnected
 	if m.sseConnected {
 		ws = wsConnected
 	}
-	return fmt.Sprintf(headerFormat, ws)
+	return fmt.Sprintf(headerFormat, hive, governor, ws)
 }
 
 // tooSmallView renders the below-minimum frame: the message alone, centred in
@@ -1118,6 +1237,18 @@ func (m model) handleSSEEvent(msg sseEventMsg) (tea.Model, tea.Cmd) {
 	m.interval = sseReconcileInterval
 
 	cmds := []tea.Cmd{waitSSE(m.sse)}
+
+	// A full status event carries the governor slice; an agent-only one does
+	// not. Caching before broadcasting is what keeps the header's mode as
+	// current as the pane's, and doing it ONLY when the event actually carried
+	// a governor section is what stops an agent-only push from clearing either
+	// — sseGovernorStatus returns false for those, so the cache is untouched
+	// and the last full snapshot stands.
+	if status, ok := sseGovernorStatus(msg.event); ok {
+		m.governorStatus = status
+		m.governorLoaded = true
+	}
+
 	for _, paneMsg := range m.paneMsgs(msg.event) {
 		var cmd tea.Cmd
 		m, cmd = m.broadcast(paneMsg)
@@ -1126,6 +1257,26 @@ func (m model) handleSSEEvent(msg sseEventMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, tea.Batch(cmds...)
+}
+
+// sseGovernorStatus extracts the governor slice from a stream event, reporting
+// whether the event carried one at all.
+//
+// Three ways to have no governor: the event is the agent-only push, the
+// payload does not decode, or it decodes with Active false — the payload's own
+// "this document has a governor section" bit. All three mean the same thing to
+// the caller and must leave the cache alone, because overwriting a good
+// snapshot with an all-dashes one is indistinguishable, on screen, from the
+// governor having stopped.
+func sseGovernorStatus(event client.SSEEvent) (client.GovernorStatus, bool) {
+	if event.Type == client.SSEEventTypeAgentStatus {
+		return client.GovernorStatus{}, false
+	}
+	var status client.GovernorStatus
+	if err := event.Decode(&status); err != nil || !status.Active {
+		return client.GovernorStatus{}, false
+	}
+	return status, true
 }
 
 func (m model) handleSSEDropped(msg sseDroppedMsg) (tea.Model, tea.Cmd) {
@@ -1209,14 +1360,14 @@ type sseStatusPayload struct {
 //     document, which is why the governor delivery costs one more Decode of
 //     the same bytes rather than a second endpoint.
 //
-// WHAT IS DELIBERATELY NOT FILLED IN. GovernorMsg.EvalInterval is left zero:
-// it is configuration from /api/config/governor, not live state, and this task
-// adds no fetches. The pane already renders an unknown interval as a dash, so
-// the result is an honest partial frame instead of no governor frame at all —
-// nothing else feeds that pane today. AgentState.LastActivity is left zero for
-// the same kind of reason: the payload's per-agent timestamp (`lastKick`) is a
-// pre-formatted server-local display string, so a real instant cannot be
-// recovered from it, and panes.Agents renders zero as "—".
+// GovernorMsg.EvalInterval is filled from the model's cache (T29). It is
+// configuration from /api/config/governor and is absent from this payload, so
+// before T29 it was sent as zero — which meant the first stream event silently
+// blanked an interval the poll had already fetched. AgentState.LastActivity is
+// still left zero, for a reason no cache can fix: the payload's per-agent
+// timestamp (`lastKick`) is a pre-formatted server-local display string, so a
+// real instant cannot be recovered from it, and panes.Agents renders zero as
+// "—".
 func (m model) paneMsgs(event client.SSEEvent) []tea.Msg {
 	var payload sseStatusPayload
 	if err := event.Decode(&payload); err != nil {
@@ -1239,15 +1390,16 @@ func (m model) paneMsgs(event client.SSEEvent) []tea.Msg {
 		})
 	}
 
-	if event.Type != client.SSEEventTypeAgentStatus {
-		var status client.GovernorStatus
-		// Active is the payload's own "this document has a governor section"
-		// bit — buildGovernor hardcodes it true — so this both skips a
-		// governor-less snapshot and avoids overwriting a good frame with an
-		// all-dashes one.
-		if err := event.Decode(&status); err == nil && status.Active {
-			msgs = append(msgs, panes.GovernorMsg{Status: status})
-		}
+	// The interval comes from the model's cache, NOT from this payload, which
+	// does not contain it: /api/status derives NextKick from the configured
+	// cadence but never sends the cadence itself. Reading the cache here is
+	// what stops a stream event from overwriting a known interval with zero
+	// and reverting `next eval` to unknown — the failure this task fixes.
+	if status, ok := sseGovernorStatus(event); ok {
+		msgs = append(msgs, panes.GovernorMsg{
+			Status:       status,
+			EvalInterval: m.governorInterval,
+		})
 	}
 	return msgs
 }
