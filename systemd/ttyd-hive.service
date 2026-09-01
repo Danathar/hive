@@ -5,7 +5,13 @@ After=network.target
 [Service]
 Type=simple
 User=dev
-ExecStart=/usr/bin/ttyd -W -a -p 7681 -t fontSize=14 -t disableLeaveAlert=true /usr/local/bin/ttyd-tmux.sh
+# Loopback-only by default: ttyd here is writable (-W) and unauthenticated, so
+# binding all interfaces hands a shell as this user to any network peer. This
+# mirrors the containerized default (TTYD_BIND=127.0.0.1 in
+# src/deploy/entrypoint.sh). To expose it beyond localhost, front it with the
+# authenticated dashboard proxy, or change -i and add a credential
+# (-c user:pass) via a drop-in override.
+ExecStart=/usr/bin/ttyd -W -a -i 127.0.0.1 -p 7681 -t fontSize=14 -t disableLeaveAlert=true /usr/local/bin/ttyd-tmux.sh
 Restart=always
 RestartSec=5
 
