@@ -368,7 +368,7 @@ func (m *Manager) credentialFileProves(agentName string, uid int, backend string
 	switch backend {
 	case "claude":
 		for _, p := range agentClaudeCredentialPaths(agentName, uid, backend) {
-			if claude.HasValidToken(p) {
+			if claude.HasUsableToken(p) {
 				return true
 			}
 		}
@@ -413,12 +413,18 @@ func (m *Manager) credentialFileProves(agentName string, uid int, backend string
 // the detector's existing behaviour untouched.
 //
 // One honest limitation: only claude's credential carries an expiry this can
-// verify (claude.HasValidToken). Copilot and codex are checked for the PRESENCE
-// of tokens, so a stale-but-present copilot token reads as valid here. That is
-// the same trade the manager's own token-restart heal already makes in
+// verify (claude.HasUsableToken). Copilot and codex are checked for the
+// PRESENCE of tokens, so a stale-but-present copilot token reads as valid here.
+// That is the same trade the manager's own token-restart heal already makes in
 // configHasTokens(), and it fails in the safe direction for this caller: the
 // heal restarts the CLI, which is a recovery attempt, rather than the detector
 // pausing the agent, which is not.
+//
+// For claude the question asked is "can a restart still use this?", not "is
+// the access token live right now?". An access token that has aged out under a
+// long-running session leaves a refresh grant that the next CLI start redeems,
+// so proof survives a routine expiry — which is the state a busy hive spends
+// part of every day in.
 func (m *Manager) AgentHasValidCredential(agentName string) bool {
 	if m == nil {
 		return false

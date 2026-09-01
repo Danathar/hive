@@ -37,10 +37,14 @@ func (m *Manager) diagnoseStuckLogin(agent *AgentProcess) string {
 			tokenRestartMaxAttempts, backend, home)
 	}
 
+	// HasUsableToken, matching the gate the heal itself used to get here
+	// (configHasTokens): the diagnosis must describe the credential the
+	// restarts were attempted against, and a routinely-expired-but-refreshable
+	// one is a credential those restarts could legitimately have used.
 	credPath := ""
 	credValid := false
 	for _, p := range agentClaudeCredentialPaths(agent.Name, uid, backend) {
-		if claude.HasValidToken(p) {
+		if claude.HasUsableToken(p) {
 			credPath, credValid = p, true
 			break
 		}

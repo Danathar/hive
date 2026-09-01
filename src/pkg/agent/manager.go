@@ -725,12 +725,13 @@ func (m *Manager) CopilotToken() string {
 // BackendAuthAvailable reports whether shared credentials exist for a CLI
 // backend, so the dashboard can show honest auth state even for agents with
 // no running pane (e.g. on-demand agents that never launched). Claude checks
-// the credentials file (with expiry); Copilot checks the cached token. For
-// backends we cannot introspect it returns (false, false) = unknown.
+// the credentials file (a live access token, or an expired one whose refresh
+// grant is still good — see claude.HasUsableToken); Copilot checks the cached
+// token. For backends we cannot introspect it returns (false, false) = unknown.
 func (m *Manager) BackendAuthAvailable(backend string) (available, known bool) {
 	switch backend {
 	case "claude":
-		return claude.HasValidToken(claude.CredentialsPath), true
+		return claude.HasUsableToken(claude.CredentialsPath), true
 	case "copilot":
 		m.mu.RLock()
 		tok := m.copilotAuthToken
@@ -1190,18 +1191,23 @@ func copilotTokenUsable(path string) (bool, string) {
 	return true, ""
 }
 
-// claudeTokenUsable reports whether the Claude credentials file holds a valid,
-// non-expired token. Unlike copilot's, a Claude credential can be PRESENT but
-// unusable (expired), so a bare presence check is insufficient — it delegates
-// to claude.HasValidToken, which parses the file and checks expiry. It
-// distinguishes an absent file ("missing") from a present-but-stale one
-// ("invalid or expired") for a more actionable alert.
+// claudeTokenUsable reports whether the Claude credentials file can still put
+// agents to work. Unlike copilot's, a Claude credential can be PRESENT but
+// unusable, so a bare presence check is insufficient — it delegates to
+// claude.HasUsableToken. It distinguishes an absent file ("missing") from one
+// that is genuinely spent ("login expired") for a more actionable alert.
+//
+// An access token that has merely aged out is NOT unusable: the refresh grant
+// beside it mints a new one on the next CLI start, with no operator involved.
+// Reporting that state as unusable is what made this watchdog prescribe an
+// interactive login every time a hive ran longer than a Claude access token
+// lives — roughly once a day, for a credential that was fine.
 func claudeTokenUsable(path string) (bool, string) {
 	if _, err := os.Stat(path); err != nil {
 		return false, "missing"
 	}
-	if !claude.HasValidToken(path) {
-		return false, "invalid or expired"
+	if !claude.HasUsableToken(path) {
+		return false, "login expired (no usable refresh grant)"
 	}
 	return true, ""
 }
@@ -6465,11 +6471,51 @@ func paneShowsTransientAPIError(lines []string) bool {
 	return false
 }
 
+// claudeCredentialReachable reports whether a usable Claude credential exists
+// at the locations this agent's CLI will look — its per-UID home first, then
+// the shared path its ~/.claude symlink resolves to.
+//
+// It is a REACHABILITY check, not a permission check, and the distinction is
+// worth stating: this runs in the hive process, so it proves the file is there
+// and parseable, not that the agent's UID can open it. The deployment keeps
+// those the same — the entrypoint's inotify guard chowns /data/home/.claude to
+// dev:node and holds it group-readable on every write, precisely so every
+// agent UID can read it (#4619). If that ever drifts, an agent lands at a login
+// prompt with no injected token instead of a working one; that is a loud,
+// alerting state, not a silent one, which is the right direction to fail in.
+//
+// HasUsableToken, not HasValidToken: an access token that has aged out is
+// exactly the case the CLI fixes for itself on start, by redeeming the refresh
+// grant beside it. Treating that state as "no credential here" would re-inject
+// the static override precisely when the CLI was about to recover, which is the
+// failure this guard exists to prevent.
+func claudeCredentialReachable(agent *AgentProcess, backend string) bool {
+	if agent == nil {
+		return false
+	}
+	for _, p := range agentClaudeCredentialPaths(agent.Name, agent.UID, backend) {
+		if claude.HasUsableToken(p) {
+			return true
+		}
+	}
+	return false
+}
+
 // configHasTokens returns true if either the Copilot config or Claude
-// credentials file contains a valid token. Used to decide whether an agent
-// stuck on a login prompt can be auto-restarted.
+// credentials file holds a credential a restart can still use. Used to decide
+// whether an agent stuck on a login prompt can be auto-restarted.
+//
+// claude.HasUsableToken, not HasValidToken: the single most common reason a
+// Claude agent sits at "Please run /login" is that its access token aged out
+// under a long-lived tmux session. Claude Code pins the token it read at
+// startup for the life of the process — it neither re-reads the file nor
+// refreshes mid-session — so the pane 401s while the refresh grant on disk is
+// still good for weeks. That is EXACTLY the case this heal was built for, and
+// gating it on HasValidToken excluded it: the file said "expired", the heal
+// stood down, and the operator was paged to redo a login that a restart would
+// have made unnecessary.
 func configHasTokens() bool {
-	if claude.HasValidToken(sharedClaudeCredentialPath) {
+	if claude.HasUsableToken(sharedClaudeCredentialPath) {
 		return true
 	}
 	return copilotConfigHasTokens()
@@ -8714,7 +8760,34 @@ func (m *Manager) agentEnvPairs(agent *AgentProcess) []agentEnvPair {
 	// Nil for advisory agents and for hives with no Linear credential, so a
 	// GitHub-only hive sees no change.
 	vars = append(vars, m.linearEnvPairs(agent)...)
-	if m.claudeAuthToken != "" && backend == "claude" {
+	// CLAUDE_CODE_OAUTH_TOKEN is a LAST RESORT, not the normal delivery path.
+	//
+	// Claude Code treats this variable as a static bearer token: when it is
+	// set the CLI uses it verbatim, never opens ~/.claude/.credentials.json,
+	// and therefore never refreshes. Measured in-container (2026-09-01): with
+	// the variable set to a bad value and a perfectly good credentials file
+	// beside it, the CLI answered "401 OAuth access token is invalid" — there
+	// is no fallback to the file.
+	//
+	// m.claudeAuthToken is a snapshot of the SHORT-LIVED access token, taken
+	// once at manager construction and refreshed only by ReloadClaudeToken()
+	// after a dashboard login. Injecting it therefore pinned every claude
+	// agent to the remaining life of whatever access token happened to be on
+	// disk when the container started — Claude access tokens live 8h, so the
+	// whole fleet 401'd within a day of every restart and the only recovery
+	// hive offered was an operator re-login, once per agent. That is the daily
+	// re-authentication treadmill of #5454.
+	//
+	// It is also unnecessary since per-agent homes (#4619): every agent's
+	// ~/.claude is a symlink to the shared /data/home/.claude, so the CLI can
+	// read the credential itself — and redeem its refresh grant on start,
+	// which is the one thing the env var makes impossible.
+	//
+	// So inject ONLY when the agent has no credential file it can read. That
+	// keeps the variable doing the job it was added for (#c5648bc9: deliver a
+	// dashboard-obtained token to an agent that cannot see the file) and stops
+	// it overriding a credential that can still refresh itself.
+	if m.claudeAuthToken != "" && backend == "claude" && !claudeCredentialReachable(agent, backend) {
 		vars = append(vars, agentEnvPair{"CLAUDE_CODE_OAUTH_TOKEN", m.claudeAuthToken, true})
 	}
 	// bob reads its key from BOBSHELL_API_KEY. Secret: true keeps the value off
