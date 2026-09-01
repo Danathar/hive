@@ -3665,6 +3665,8 @@ func main() {
 		hub.PublishHeartbeatIdentity(
 			cfg.HiveID,
 			cfg.Project.Org,
+			cfg.Project.PrimaryRepo,
+			cfg.Project.Repos,
 			reporterName,
 			processStartedAt.UTC().Format(time.RFC3339),
 			gitShort,
@@ -4238,8 +4240,20 @@ func main() {
 				}
 				providerLimitReason, providerLimitRebuffs := providerLimitHeartbeatFields(agents)
 				return &hub.HeartbeatPayload{
-					HiveID:                  cfg.HiveID,
-					Org:                     cfg.Project.Org,
+					HiveID: cfg.HiveID,
+					Org:    cfg.Project.Org,
+					// Project identity rides even this minimal beat. The hub
+					// rebuilds the registry entry from each payload VERBATIM
+					// (no carry-forward for these fields), and this beat is
+					// the LAST one the hub holds for the whole restart window
+					// that follows — omitting repos/primary_repo here blanked
+					// the entry (org set, primaryRepo "", repos []) until the
+					// new process's first successful collect, breaking the
+					// public-directory row (no repo link) and rendering the
+					// hive name as "org/". Both values are plain config reads,
+					// exactly as cheap as Org above.
+					Repos:                   cfg.Project.Repos,
+					PrimaryRepo:             cfg.Project.PrimaryRepo,
 					ACMMLevel:               acmmLvl,
 					Agents:                  agents,
 					GitHash:                 gitShort,

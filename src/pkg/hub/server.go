@@ -2037,6 +2037,40 @@ func (s *HubServer) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 			if entry.SnapshotURL == "" {
 				entry.SnapshotURL = h.SnapshotURL
 			}
+			// Project-identity carry-forward for DEGRADED beats. Three beat
+			// classes legitimately omit project fields: the pre-restart
+			// "upgrading" beat (a minimal payload, and the LAST beat the hub
+			// holds for the whole restart window that follows), the identity-
+			// only minimal liveness beat (fresh restart, collect timed out
+			// with no cache — StatsStale), and the upgrade-failure report
+			// (hive_id + SHAs only). The entry is otherwise rebuilt from the
+			// payload VERBATIM, so those beats blanked org/primaryRepo/repos —
+			// the public-directory row lost its repo link (contributors had
+			// nothing to contribute to) and the hive rendered as "org/" until
+			// the next full collect landed (observed live on the kubestellar/
+			// hive spoke, which auto-upgrades several times a day).
+			//
+			// Gated on the degraded classes so a full, healthy collect always
+			// wins — including a genuine clear. Repo fields carry only under
+			// the SAME org: a reassignment/reset changes the org (a reset slot
+			// reports its synthetic "available-<id>" org), and the old
+			// tenant's repos must never survive it.
+			if payload.Upgrading || payload.StatsStale || payload.UpgradeFailed {
+				if entry.Org == "" && h.Org != "" {
+					entry.Org = h.Org
+				}
+				if strings.EqualFold(entry.Org, h.Org) {
+					if entry.PrimaryRepo == "" && h.PrimaryRepo != "" {
+						entry.PrimaryRepo = h.PrimaryRepo
+					}
+					if len(entry.Repos) == 0 && len(h.Repos) > 0 {
+						entry.Repos = h.Repos
+					}
+				}
+				// Name was computed from the payload's (possibly empty)
+				// fields at build time — recompute it from the carried ones.
+				entry.Name = entry.Org + "/" + entry.PrimaryRepo
+			}
 			// SECURITY (C1/N3, CWE-639): for an EXISTING entry, Owner is never taken
 			// from the heartbeat body. When this hive has an authoritative SaaS
 			// record its Owner was already overlaid above (sh.Owner). Otherwise
