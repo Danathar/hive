@@ -23,6 +23,12 @@ set -uo pipefail
 PASS=0
 FAIL=0
 
+# Shared skip discipline (#5388): hive_test_skip is permissive by default and
+# FATAL under HIVE_TEST_REQUIRE_BEHAVIOURAL=1, so a lane whose runner GUARANTEES
+# the precondition below turns a silent skip into a red build.
+# shellcheck source=src/deploy/test_lib.sh
+. "$(cd "$(dirname "$0")" && pwd)/test_lib.sh"
+
 pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $1"; [ -n "${2:-}" ] && echo "        $2"; FAIL=$((FAIL + 1)); }
 
@@ -32,8 +38,8 @@ HELPER_PATH="/usr/local/bin/git-credential-hive.sh"
 echo "=== Entrypoint system gitconfig (#5343) ==="
 
 if ! command -v git >/dev/null 2>&1; then
-  echo "  SKIP: git not available"
-  exit 0
+  hive_test_skip "git not available"
+  hive_test_report; exit $?
 fi
 
 TMP="$(mktemp -d)"

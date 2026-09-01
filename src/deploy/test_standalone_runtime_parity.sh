@@ -60,6 +60,12 @@ PASS=0
 FAIL=0
 EXCEPTED=0
 
+# Shared skip discipline (#5388): hive_test_skip is permissive by default and
+# FATAL under HIVE_TEST_REQUIRE_BEHAVIOURAL=1, so a lane whose runner GUARANTEES
+# the precondition below turns a silent skip into a red build.
+# shellcheck source=src/deploy/test_lib.sh
+. "$(cd "$(dirname "$0")" && pwd)/test_lib.sh"
+
 pass() { printf '  PASS: %s\n' "$1"; PASS=$((PASS + 1)); }
 fail() {
   printf '  FAIL: %s\n' "$1"
@@ -79,12 +85,12 @@ for required in "$COMPOSE" "$UNIT_DIR" "$ENV_EXAMPLE" "$IMAGES_SH"; do
 done
 
 if ! command -v python3 >/dev/null 2>&1; then
-  printf '  SKIP: python3 unavailable — cannot compare the two descriptions structurally\n'
-  exit 0
+  hive_test_skip "python3 unavailable — cannot compare the two descriptions structurally"
+  hive_test_report; exit $?
 fi
 if ! python3 -c 'import yaml' >/dev/null 2>&1; then
-  printf '  SKIP: PyYAML unavailable — cannot parse docker-compose.yaml\n'
-  exit 0
+  hive_test_skip "PyYAML unavailable — cannot parse docker-compose.yaml"
+  hive_test_report; exit $?
 fi
 
 # Image references are normalised by the SOURCE OF TRUTH's own function rather

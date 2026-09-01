@@ -19,6 +19,12 @@ set -euo pipefail
 PASS=0
 FAIL=0
 
+# Shared skip discipline (#5388): hive_test_skip is permissive by default and
+# FATAL under HIVE_TEST_REQUIRE_BEHAVIOURAL=1, so a lane whose runner GUARANTEES
+# the precondition below turns a silent skip into a red build.
+# shellcheck source=src/deploy/test_lib.sh
+. "$(cd "$(dirname "$0")" && pwd)/test_lib.sh"
+
 DEPLOY_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENTRYPOINT="$DEPLOY_DIR/entrypoint.sh"
 
@@ -36,12 +42,12 @@ fail() {
 echo "=== entrypoint dangling key_file tests (#4368) ==="
 
 if ! command -v python3 >/dev/null 2>&1; then
-  echo "  SKIP: python3 not available"
-  exit 0
+  hive_test_skip "python3 not available"
+  hive_test_report; exit $?
 fi
 if ! python3 -c 'import yaml' >/dev/null 2>&1; then
-  echo "  SKIP: python3 yaml module not available"
-  exit 0
+  hive_test_skip "python3 yaml module not available"
+  hive_test_report; exit $?
 fi
 
 # Extract the merge block verbatim from the entrypoint: everything between the
