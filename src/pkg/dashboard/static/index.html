@@ -6175,7 +6175,8 @@
        hover a tooltip to find out what it is for. */
     function terminalCopyUrlButtonHtml(agentName, needsLogin) {
       if (!agentName || !needsLogin) return '';
-      return `<button type="button" class="terminal-copy-url-btn" data-action="copyTerminalUrl" data-agent="${esc(agentName)}" title="Show this agent\u2019s sign-in URL, captured whole from its terminal — wrapped lines are rejoined so the OAuth link is not broken by the wrap">🔑 Copy login URL</button>`;
+      return `<button type="button" class="terminal-copy-url-btn" data-action="copyTerminalUrl" data-agent="${esc(agentName)}" title="Show this agent\u2019s sign-in URL, captured whole from its terminal — wrapped lines are rejoined so the OAuth link is not broken by the wrap">🔑 Copy login URL</button>`
+        + `<button type="button" class="terminal-copy-url-btn" data-action="submitLoginCode" data-agent="${esc(agentName)}" title="Paste the authorization code the sign-in page gave you. It is typed into the agent\u2019s terminal by the server, so the browser terminal cannot mangle it.">↩ Submit login code</button>`;
     }
 
     /* Writes text to the clipboard, reporting honestly when it cannot.
@@ -6205,6 +6206,39 @@
       } catch { ok = false; }
       ta.remove();
       return ok;
+    }
+
+    /* The write-side twin of copyTerminalUrl.
+
+       Copying OUT of the dashboard terminal is broken (#5188) and this is the
+       same defect in the other direction: an operator who has opened the
+       sign-in URL must paste a code BACK, and ttyd/xterm.js over tmux mangles
+       it. Without this the only route left is a host shell and `tmux
+       send-keys`, which is not an answer for an operator whose interface is a
+       web dashboard.
+
+       The code goes to the server, which types it into the pane — the browser
+       terminal is never involved. It is refused rather than sanitised if it
+       carries whitespace or control characters, so a value that could submit a
+       second command into the agent's shell cannot be typed at all; the reason
+       is surfaced verbatim rather than as a generic failure. */
+    async function submitLoginCode(agentName) {
+      if (!agentName) return;
+      const code = prompt(`Paste the authorization code for "${agentName}".\n\nIt is sent to the server and typed into the agent's terminal, so the browser terminal cannot corrupt it.`);
+      if (code === null) return;
+      if (!code.trim()) { showToast('No code entered', 'error'); return; }
+      try {
+        const r = await apiFetch(`/api/agents/${encodeURIComponent(agentName)}/login-code`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code: code.trim() }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) { showToast(d.error || `Could not submit the code (HTTP ${r.status})`, 'error'); return; }
+        showToast(`Code submitted to ${agentName}`, 'success');
+      } catch (err) {
+        showToast(`Could not submit the code: ${err && err.message ? err.message : err}`, 'error');
+      }
     }
 
     async function copyTerminalUrl(agentName) {
@@ -14332,6 +14366,7 @@ function burnAreaChart() {
         case 'kickEmpty': { const inp = document.getElementById('kick-prompt-' + agent); if (inp) inp.value = ''; kick(agent); } break;
         case 'openTerminal': e.preventDefault(); openTerminal(agent, el.href); break;
         case 'copyTerminalUrl': e.stopPropagation(); copyTerminalUrl(agent); break;
+        case 'submitLoginCode': e.stopPropagation(); submitLoginCode(agent); break;
         case 'showTerminalKeyboardHint': e.stopPropagation(); showTerminalKeyboardHint(); break;
         case 'togglePin': togglePin(agent, el.dataset.pinType, el.dataset.unpin === 'true'); break;
         case 'resetRestarts': resetRestarts(agent); break;

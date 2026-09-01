@@ -97,6 +97,9 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	s.mux.HandleFunc("POST /api/breaker/release", s.handleBreakerRelease)
 	s.mux.HandleFunc("POST /api/pin/{agent}/{dimension}", s.handlePin)
 	s.mux.HandleFunc("POST /api/unpin/{agent}/{dimension}", s.handleUnpin)
+	// Write-side twin of the terminal-urls copy control: the dashboard terminal
+	// can neither hand an operator a wrapped login URL nor accept the code back.
+	s.mux.HandleFunc("POST /api/agents/{name}/login-code", s.handleAgentLoginCode)
 	s.mux.HandleFunc("POST /api/restart/{agent}", s.handleRestart)
 	s.mux.HandleFunc("POST /api/reset-restarts/{agent}", s.handleResetRestarts)
 

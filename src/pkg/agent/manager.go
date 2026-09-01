@@ -6392,6 +6392,18 @@ var loginPromptPatterns = []string{
 	// GitHub device-flow screen (Copilot CLI)
 	"Enter one-time code",
 	"github.com/login/device",
+	// Google / antigravity (`agy`). Verified verbatim on a live agy pane
+	// (2026-09-01). This CLI never prints the word "login" — it hands off to a
+	// browser and then asks for a pasted code — so neither
+	// lineHasLoginDirective nor any pattern above could see it, and an agy
+	// agent parked at its OAuth prompt reported state=running, needsLogin=
+	// false, and raised no alert while doing no work at all.
+	//
+	// Both are full imperative sentences from the CLI's own chrome rather than
+	// fragments like "authorization code", which an agent READING about OAuth
+	// would print in ordinary output — the #3959 lesson.
+	"Your browser should open automatically",
+	"paste the authorization code below",
 }
 
 // fatalNetworkErrorPatterns are substrings that indicate a transient TLS or
