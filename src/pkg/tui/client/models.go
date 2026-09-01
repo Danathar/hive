@@ -20,6 +20,13 @@ import (
 // this drift; the T4/T6 precedent is to transcribe from the handler and cite it.
 type ModelOption string
 
+// ModelSetResult is the response from POST /api/model/{agent}/{model}.
+type ModelSetResult struct {
+	Status string `json:"status"`
+	Agent  string `json:"agent"`
+	Model  string `json:"model"`
+}
+
 // ModelList is the whole response from GET /api/inference/models/{backend}.
 //
 // The list-level flags are not decoration: a caller that keeps only Models is
@@ -106,4 +113,28 @@ func (c *Client) Models(ctx context.Context, backend string) (ModelList, error) 
 		return ModelList{}, err
 	}
 	return list, nil
+}
+
+// SetAgentModel persists a model override for one agent and restarts its
+// session so the selection takes effect immediately.
+//
+// Model ids are passed through unchanged. In particular, this client does not
+// canonicalize aliases or verify catalogue membership: the agent's effective
+// backend owns that validation and returns its authoritative reason in an
+// APIError when the model is unavailable.
+func (c *Client) SetAgentModel(ctx context.Context, agent, model string) (ModelSetResult, error) {
+	const prefix = "/api/model/"
+	if agent == "" {
+		return ModelSetResult{}, fmt.Errorf("POST %s: agent is required", prefix)
+	}
+	if model == "" {
+		return ModelSetResult{}, fmt.Errorf("POST %s: model is required", prefix)
+	}
+
+	var result ModelSetResult
+	path := prefix + url.PathEscape(agent) + "/" + url.PathEscape(model)
+	if err := c.postJSON(ctx, path, nil, &result); err != nil {
+		return ModelSetResult{}, err
+	}
+	return result, nil
 }
