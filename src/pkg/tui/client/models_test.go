@@ -278,3 +278,172 @@ func TestModelsMalformedBody(t *testing.T) {
 		t.Errorf("error = %q, does not name the decode failure", err)
 	}
 }
+
+// TestSetAgentModelDecodesFixture covers the complete write contract: both
+// inputs are escaped as individual path segments, the operation is a bodiless
+// authenticated POST, and every published response field is decoded.
+func TestSetAgentModelDecodesFixture(t *testing.T) {
+	fixture, err := os.ReadFile(filepath.Join("testdata", "model-set.json"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+
+	var gotPath, gotMethod, gotAuth, gotContentType string
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotMethod = r.URL.EscapedPath(), r.Method
+		gotAuth = r.Header.Get("Authorization")
+		gotContentType = r.Header.Get("Content-Type")
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(fixture)
+	}))
+	defer server.Close()
+
+	got, err := newTestClient(t, server, "tok").SetAgentModel(
+		context.Background(), "review/team", "meta/llama-3.1",
+	)
+	if err != nil {
+		t.Fatalf("SetAgentModel() = %v, want nil", err)
+	}
+
+	if gotMethod != http.MethodPost {
+		t.Errorf("method = %q, want POST", gotMethod)
+	}
+	if gotPath != "/api/model/review%2Fteam/meta%2Fllama-3.1" {
+		t.Errorf("escaped path = %q, want /api/model/review%%2Fteam/meta%%2Fllama-3.1", gotPath)
+	}
+	if gotAuth != "Bearer tok" {
+		t.Errorf("Authorization = %q, want %q", gotAuth, "Bearer tok")
+	}
+	if len(gotBody) != 0 {
+		t.Errorf("request body = %q, want empty", gotBody)
+	}
+	if gotContentType != "" {
+		t.Errorf("Content-Type = %q, want unset for a bodiless POST", gotContentType)
+	}
+
+	want := ModelSetResult{
+		Status: "model_set",
+		Agent:  "review/team",
+		Model:  "meta/llama-3.1",
+	}
+	if got != want {
+		t.Errorf("SetAgentModel() = %+v, want %+v", got, want)
+	}
+}
+
+// TestSetAgentModelRequiresPathParameters verifies caller mistakes fail before
+// a round trip instead of producing a misleading route-level 404.
+func TestSetAgentModelRequiresPathParameters(t *testing.T) {
+	var called bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	}))
+	defer server.Close()
+
+	cases := []struct {
+		name  string
+		agent string
+		model string
+		want  string
+	}{
+		{name: "empty agent", model: "gpt-5", want: "agent is required"},
+		{name: "empty model", agent: "scanner", want: "model is required"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := newTestClient(t, server, "tok").SetAgentModel(context.Background(), tc.agent, tc.model)
+			if err == nil {
+				t.Fatal("error = nil, want a local validation error")
+			}
+			if got != (ModelSetResult{}) {
+				t.Errorf("result = %+v, want zero value", got)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q, want it to contain %q", err, tc.want)
+			}
+		})
+	}
+	if called {
+		t.Error("an empty path parameter reached the server; both must fail locally")
+	}
+}
+
+// TestSetAgentModelNonOKReturnsAPIError proves the client preserves the
+// backend's model-validation explanation and still handles server failures
+// through the shared typed error path.
+func TestSetAgentModelNonOKReturnsAPIError(t *testing.T) {
+	cases := []struct {
+		name string
+		code int
+		body string
+	}{
+		{
+			name: "model not available",
+			code: http.StatusBadRequest,
+			body: `{"ok":false,"error":"model meta/llama-3.1 is not available for backend codex"}`,
+		},
+		{name: "server error", code: http.StatusInternalServerError, body: `{"ok":false,"error":"boom"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.code)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer server.Close()
+
+			got, err := newTestClient(t, server, "tok").SetAgentModel(context.Background(), "scanner", "meta/llama-3.1")
+			if err == nil {
+				t.Fatalf("SetAgentModel() error = nil, want *APIError for %d", tc.code)
+			}
+			if got != (ModelSetResult{}) {
+				t.Errorf("result = %+v, want zero value", got)
+			}
+
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) {
+				t.Fatalf("error = %v (%T), want *APIError", err, err)
+			}
+			if apiErr.StatusCode != tc.code {
+				t.Errorf("StatusCode = %d, want %d", apiErr.StatusCode, tc.code)
+			}
+			if apiErr.Method != http.MethodPost {
+				t.Errorf("Method = %q, want POST", apiErr.Method)
+			}
+			if apiErr.Path != "/api/model/scanner/meta%2Fllama-3.1" {
+				t.Errorf("Path = %q, want escaped model path", apiErr.Path)
+			}
+			if apiErr.Body != tc.body {
+				t.Errorf("Body = %q, want %q", apiErr.Body, tc.body)
+			}
+		})
+	}
+}
+
+// TestSetAgentModelMalformedBody distinguishes a malformed success response
+// from a dashboard status error.
+func TestSetAgentModelMalformedBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `not-json`)
+	}))
+	defer server.Close()
+
+	got, err := newTestClient(t, server, "tok").SetAgentModel(context.Background(), "scanner", "gpt-5")
+	if err == nil {
+		t.Fatal("SetAgentModel() error = nil, want a decode error")
+	}
+	if got != (ModelSetResult{}) {
+		t.Errorf("result = %+v, want zero value", got)
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		t.Errorf("decode failure surfaced as *APIError (%v); the response was a 2xx", err)
+	}
+	if !strings.Contains(err.Error(), "decode") {
+		t.Errorf("error = %q, does not name the decode failure", err)
+	}
+}
