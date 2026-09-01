@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"sort"
-	"testing"
 	"time"
 )
 
@@ -227,9 +226,6 @@ const advisoryDiagnosticsInterval = 30 * time.Minute
 // StartAdvisoryDiagnostics logs the fleet advisory-suppression profile on a
 // timer. Read-only: it never mutates the registry and never raises an alert.
 func (s *HubServer) StartAdvisoryDiagnostics(ctx context.Context) {
-	if testing.Testing() {
-		return
-	}
 	ticker := time.NewTicker(advisoryDiagnosticsInterval)
 	defer ticker.Stop()
 	s.logAdvisoryDiagnostics(s.advisoryDiagnostics(time.Now()))

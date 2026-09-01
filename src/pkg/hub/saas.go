@@ -22,7 +22,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"testing"
 	"time"
 
 	"github.com/kubestellar/hive/pkg/config"
@@ -705,23 +704,6 @@ func (s *HubServer) registerSaaSRoutes() {
 	s.mux.HandleFunc("POST /api/saas/admin/slack/broadcast", s.requireAdmin(s.handleSlackBroadcast))
 	s.mux.HandleFunc("POST /api/saas/admin/journey-snooze", s.requireAdmin(s.handleJourneySnooze))
 	s.mux.HandleFunc("GET /api/saas/admin/journey-status", s.requireAdmin(s.handleJourneyStatus))
-
-	// Under `go test` these long-lived pollers leak across test cases: they
-	// immediately hit the GitHub API and read the package-level saas path
-	// variables that the filesystem test helper swaps per-test, which the
-	// race detector rightly flags. Production behavior is unchanged; tests
-	// that need poller logic call the functions directly.
-	if !testing.Testing() {
-		go s.startProvisionWatcher(context.Background())
-		go s.StartLatestSHAPoller(context.Background())
-		// Periodically probe every spoke's unauthenticated /api/status and alert
-		// on any that answer 200 (wide open) — catches auth drift automatically.
-		go s.StartAuthAudit(context.Background())
-		// Advisory-suppression profile (#4167): one structured log line every
-		// cycle saying how many hives are stale and how many are stale but
-		// UNREPORTED. Read-only measurement — no alert, no registry write.
-		go s.StartAdvisoryDiagnostics(context.Background())
-	}
 }
 
 // impersonateExitPath is the one mutating endpoint that stays callable while
