@@ -15,11 +15,21 @@ import (
 // ============================================================
 // heartbeat.go — core functions that previously lacked tests
 // ============================================================
+//
+// Heartbeat state lives in package-level atomics, so every test here resets it
+// BEFORE it runs as well as after — the same idiom as the other heartbeat test
+// files. Several of these tests assert the ABSENCE of recorded state ("should
+// not record success on 403"), which an earlier test that recorded a success
+// would satisfy vacuously or fail outright depending on run order. Resetting
+// only on the way out leaves a test at the mercy of whoever ran before it:
+// that is what made TestSendUpgradingHeartbeat_NonSuccess fail under -shuffle
+// and on CI (#5553).
 
 // --- recordHeartbeatSuccess / recordHeartbeatAttempt / Last* / HeartbeatEnabled ---
 
 func TestRecordHeartbeatSuccess(t *testing.T) {
-	defer ResetHeartbeatStateForTest()
+	t.Cleanup(ResetHeartbeatStateForTest)
+	ResetHeartbeatStateForTest()
 
 	// Before any call, LastHeartbeatSuccess returns false.
 	_, ok := LastHeartbeatSuccess()
@@ -42,7 +52,8 @@ func TestRecordHeartbeatSuccess(t *testing.T) {
 }
 
 func TestRecordHeartbeatAttempt(t *testing.T) {
-	defer ResetHeartbeatStateForTest()
+	t.Cleanup(ResetHeartbeatStateForTest)
+	ResetHeartbeatStateForTest()
 
 	_, ok := LastHeartbeatAttempt()
 	if ok {
@@ -63,7 +74,8 @@ func TestRecordHeartbeatAttempt(t *testing.T) {
 }
 
 func TestHeartbeatEnabled(t *testing.T) {
-	defer ResetHeartbeatStateForTest()
+	t.Cleanup(ResetHeartbeatStateForTest)
+	ResetHeartbeatStateForTest()
 
 	if HeartbeatEnabled() {
 		t.Fatal("expected HeartbeatEnabled=false at start")
@@ -137,14 +149,16 @@ func TestNewAgentSummary_ZeroTimes(t *testing.T) {
 // --- SendUpgradingHeartbeat ---
 
 func TestSendUpgradingHeartbeat_NilPayload(t *testing.T) {
-	defer ResetHeartbeatStateForTest()
+	t.Cleanup(ResetHeartbeatStateForTest)
+	ResetHeartbeatStateForTest()
 
 	// nil collector → returns early, no panic
 	SendUpgradingHeartbeat("http://x", func() *HeartbeatPayload { return nil }, "sha1", slog.Default())
 }
 
 func TestSendUpgradingHeartbeat_Success(t *testing.T) {
-	defer ResetHeartbeatStateForTest()
+	t.Cleanup(ResetHeartbeatStateForTest)
+	ResetHeartbeatStateForTest()
 
 	var received HeartbeatPayload
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -183,7 +197,8 @@ func TestSendUpgradingHeartbeat_Success(t *testing.T) {
 }
 
 func TestSendUpgradingHeartbeat_NonSuccess(t *testing.T) {
-	defer ResetHeartbeatStateForTest()
+	t.Cleanup(ResetHeartbeatStateForTest)
+	ResetHeartbeatStateForTest()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
@@ -203,7 +218,8 @@ func TestSendUpgradingHeartbeat_NonSuccess(t *testing.T) {
 }
 
 func TestSendUpgradingHeartbeat_BearerToken(t *testing.T) {
-	defer ResetHeartbeatStateForTest()
+	t.Cleanup(ResetHeartbeatStateForTest)
+	ResetHeartbeatStateForTest()
 
 	var gotAuth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

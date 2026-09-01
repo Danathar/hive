@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -1252,7 +1253,8 @@ func (p *GitHubProxy) tunnelDirect(conn net.Conn, r *http.Request) {
 // total transfer time, so a large-but-flowing response is never cut while an
 // upstream that goes silent mid-body releases the handler — and with it the
 // three sockets of the exchange — within one stall window. A var, not a
-// const, so tests can shorten it (same pattern as tunnelHalfCloseDrain).
+// const, so tests can shorten it (same motivation as tunnelHalfCloseDrain,
+// which is additionally atomic because its reader outlives the writing test).
 // Matches httpReadTimeout: the same patience already extended to the header
 // phase.
 var responseBodyStallTimeout = httpReadTimeout
@@ -1284,16 +1286,37 @@ func (b *stallBoundedBody) Close() error {
 	return err
 }
 
-// tunnelHalfCloseDrain bounds how long one direction of an opaque tunnel may
-// keep waiting for bytes AFTER the other direction has already finished. It is
-// a var, not a const, for the same reason as waitForReadyPollInterval in
-// pkg/hub: tests need a relay that unwedges in milliseconds. Production keeps
-// the default.
+// tunnelHalfCloseDrainDefault bounds how long one direction of an opaque
+// tunnel may keep waiting for bytes AFTER the other direction has already
+// finished.
 //
 // 30s is deliberately generous: the only legitimate traffic still in flight
 // once one side has hung up is a response tail already on the wire, which
 // arrives in RTTs, not tens of seconds.
-var tunnelHalfCloseDrain = 30 * time.Second
+const tunnelHalfCloseDrainDefault = 30 * time.Second
+
+// tunnelHalfCloseDrain is overridable rather than const for the same reason as
+// waitForReadyPollInterval in pkg/hub: tests need a relay that unwedges in
+// milliseconds. Production keeps the default.
+//
+// It is atomic because the write and the read genuinely happen on different
+// goroutines with no happens-before between them. relayTunnel reads the bound
+// from the copy goroutine it spawns, and that goroutine can outlive the test
+// that started it: a handler test only waits for the CONNECT response, not for
+// the relay to drain, so the goroutine is still reading while the NEXT test's
+// shortenTunnelDrain writes. A plain var made that an unsynchronised
+// write-after-read and -race failed whichever test happened to hold the baton
+// (#5553) — the reported test name was incidental, which is why the failure
+// moved between TestRelayTunnelUnwedgesFromSilentUpstream and
+// TestRelayTunnelDataFlowsBothWays across shuffle seeds.
+var tunnelHalfCloseDrain atomic.Int64
+
+func init() { tunnelHalfCloseDrain.Store(int64(tunnelHalfCloseDrainDefault)) }
+
+// tunnelDrain returns the current half-close drain bound.
+func tunnelDrain() time.Duration {
+	return time.Duration(tunnelHalfCloseDrain.Load())
+}
 
 // relayTunnel shuttles bytes both ways between the proxied client conn and the
 // upstream until BOTH directions have finished, bounding each direction once
@@ -1325,14 +1348,14 @@ func relayTunnel(conn, upstream net.Conn) {
 		// Client side is done (EOF or error — a dead client looks the same).
 		// A live upstream answers or closes within RTTs; a blackholed one
 		// never would, so bound the remaining upstream→client read.
-		_ = upstream.SetReadDeadline(time.Now().Add(tunnelHalfCloseDrain))
+		_ = upstream.SetReadDeadline(time.Now().Add(tunnelDrain()))
 		close(done)
 	}()
 	_, _ = io.Copy(conn, upstream)
 	// Mirror image: upstream finished (or errored) but the client may sit
 	// half-open without ever sending EOF; bound the client-side read so
 	// <-done cannot wedge this handler.
-	_ = conn.SetReadDeadline(time.Now().Add(tunnelHalfCloseDrain))
+	_ = conn.SetReadDeadline(time.Now().Add(tunnelDrain()))
 	<-done
 }
 
