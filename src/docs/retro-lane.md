@@ -27,6 +27,30 @@ Each finding is filed as an `advisory` bead attributed to actor `retro`, using t
 
 ## Optional LLM analysis
 
+### Prerequisites: configure `governor.litellm` first
+
+`retro.analysis_model` names a model that must be served by the hive's LiteLLM
+gateway (`governor.litellm`). Configure the gateway before setting this field:
+
+1. Set the endpoint and API key — either via environment variables
+   (`HIVE_LITELLM_ENDPOINT`, `HIVE_LITELLM_API_KEY`, documented in
+   [env-vars.md](env-vars.md)) or via the dashboard API
+   (`PUT /api/config/governor/litellm`, see [api-reference.md](api-reference.md)).
+2. Verify connectivity with `POST /api/config/governor/litellm/test`.
+3. Set `retro.analysis_model` to any model name the gateway exposes, for example
+   `gpt-4o-mini` or the default model configured in the gateway itself.
+
+```yaml
+retro:
+  enabled: true
+  analysis_model: gpt-4o-mini   # a model your governor.litellm serves
+```
+
+If `governor.litellm` is not configured, the retro lane silently skips model
+calls and files only deterministic findings — no error, no alert.
+
+### Analysis behavior
+
 Set `retro.analysis_model` to a model served by `governor.litellm` to enable bounded model analysis. The lane only calls the model for records that already triggered deterministic findings, keeping cost proportional to actionable anomalies. The prompt contains the compact record and finding types/details with hard truncation bounds.
 
 The model must return structured JSON:
