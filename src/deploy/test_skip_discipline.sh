@@ -91,13 +91,22 @@ fi
 # suites that probe with `command -v` sail past their guard and fail later, and
 # that misreports as "this suite does not honour the flag".
 #
-# So: build ONE sandbox bin of symlinks to everything on PATH, then per case
-# copy the symlink farm minus the denied tools. `command -v <tool>` then
-# genuinely fails, which is exactly what the suites' guards test, while every
-# unrelated utility still works. The farm is built once — rebuilding it per
-# suite is O(PATH) forks and takes minutes.
+# Shadowing with a stub does NOT work, and it is worth recording why: a stub
+# that exits non-zero still RESOLVES, so `command -v <tool>` succeeds and the
+# suite sails past its own guard; and a non-executable placeholder is simply
+# skipped by the PATH search, which then finds the real binary further along.
+# Both were tried. The only thing that makes a lookup genuinely fail is a PATH
+# that does not contain the tool.
+#
+# So: build ONE directory of symlinks to everything on PATH, then per case
+# build a directory of symlinks INTO that farm, omitting the denied tools, and
+# run the child with PATH set to it alone. Symlinking (not copying) keeps each
+# case cheap; every unrelated utility still resolves normally.
 SANDBOX_ROOT="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX_ROOT"' EXIT
+
+REAL_PYTHON3="$(command -v python3 || true)"
+
 FULL_BIN="${SANDBOX_ROOT}/full"
 mkdir -p "$FULL_BIN"
 while IFS= read -r _d; do
@@ -110,23 +119,59 @@ while IFS= read -r _d; do
   done
 done <<<"$(printf '%s' "$PATH" | tr ':' '\n')"
 
-if [ ! -x "${FULL_BIN}/bash" ]; then
-  hive_test_fail "could not build a PATH sandbox" "no bash under ${FULL_BIN}"
+if [ ! -x "${FULL_BIN}/bash" ] || [ ! -x "${FULL_BIN}/mktemp" ]; then
+  hive_test_fail "could not build a PATH sandbox" \
+    "bash or mktemp missing under ${FULL_BIN} — every case below would be a false red"
   hive_test_report; exit $?
 fi
+
+# A yaml.py that raises on import, shadowing the real PyYAML via PYTHONPATH.
+mkdir -p "${SANDBOX_ROOT}/yamlblock"
+printf 'raise ImportError("PyYAML masked by test_skip_discipline.sh")\n' \
+  >"${SANDBOX_ROOT}/yamlblock/yaml.py"
 
 _case_n=0
 
 # check_suite <suite> <how-the-precondition-is-denied> [tool ...]
 check_suite() {
   local suite="$1" how="$2"; shift 2
-  local bindir out rc_off rc_on tool
+  local bindir entry name denied out rc_off rc_on tool
 
   _case_n=$((_case_n + 1))
   bindir="${SANDBOX_ROOT}/case${_case_n}"
-  cp -a "$FULL_BIN" "$bindir"
+
+  # Copy the farm (symlinks only — cheap) and DELETE the denied names from the
+  # copy, then run the child with PATH set to it alone. Shadowing does not work
+  # and the alternatives were each verified to fail silently: an executable stub
+  # still RESOLVES so `command -v` succeeds; a non-executable placeholder and a
+  # dangling symlink are both skipped by the PATH search, which then finds the
+  # real binary further along. Only a PATH that does not contain the tool makes
+  # the lookup genuinely fail.
+  cp -R "$FULL_BIN" "$bindir"
+  for entry in "$@"; do
+    [ -z "$entry" ] && continue
+    [ "$entry" = "NO_PYYAML" ] && continue
+    rm -f "${bindir}/${entry}"
+  done
+
+  # The pseudo-tool NO_PYYAML denies the MODULE, not the interpreter: python3
+  # stays on PATH and works, but `import yaml` fails. This axis matters because
+  # these suites gate twice — once on python3, then on PyYAML — and denying
+  # python3 outright exits at the FIRST gate, leaving the second one untested.
+  # A regression in the PyYAML branch would then pass this guard.
   for tool in "$@"; do
-    [ -n "$tool" ] && rm -f "${bindir}/${tool}"
+    [ "$tool" = "NO_PYYAML" ] || continue
+    if [ -z "$REAL_PYTHON3" ]; then
+      hive_test_skip "${suite}: no python3 here to build a PyYAML-less sandbox"
+      return 0
+    fi
+    rm -f "${bindir}/python3"
+    {
+      printf '#!/bin/sh\n'
+      printf 'PYTHONPATH="%s:${PYTHONPATH:-}" exec "%s" "$@"\n' \
+        "${SANDBOX_ROOT}/yamlblock" "$REAL_PYTHON3"
+    } >"${bindir}/python3"
+    chmod +x "${bindir}/python3"
   done
 
   if [ ! -f "${HERE}/${suite}" ]; then
@@ -138,6 +183,21 @@ check_suite() {
   # Anti-vacuity: if a denial did not take, this case would assert nothing.
   for tool in "$@"; do
     [ -z "$tool" ] && continue
+    if [ "$tool" = "NO_PYYAML" ]; then
+      # The interpreter must still WORK and `import yaml` must still FAIL —
+      # either half being wrong makes this case assert nothing.
+      if ! PATH="$bindir" python3 -c 'print(1)' >/dev/null 2>&1; then
+        hive_test_fail "${suite}: python3 is broken in the NO_PYYAML sandbox" \
+          "the suite would exit at the python3 gate, not the PyYAML one"
+        return 0
+      fi
+      if PATH="$bindir" python3 -c 'import yaml' >/dev/null 2>&1; then
+        hive_test_fail "${suite}: PyYAML is still importable in the sandbox" \
+          "the denial did not take, so this case proves nothing"
+        return 0
+      fi
+      continue
+    fi
     if PATH="$bindir" command -v "$tool" >/dev/null 2>&1; then
       hive_test_fail "${suite}: '${tool}' is still reachable in the sandbox" \
         "the denial did not take, so this case proves nothing"
@@ -174,6 +234,15 @@ check_suite test_standalone_service_contract.sh   "python3 is absent"  python3
 check_suite test_watchtower_socket_contract.sh    "python3 is absent"  python3
 check_suite test_standalone_runtime_parity.sh     "python3 is absent"  python3
 check_suite test_changelog_reminder.sh            "python3 is absent"  python3
+# Second axis: python3 present and working, PyYAML absent. These suites gate
+# twice, and the python3-absent cases above stop at the FIRST gate — without
+# these, a regression in the PyYAML branch passes unnoticed.
+check_suite test_entrypoint_dangling_keyfile.sh   "PyYAML is absent"   NO_PYYAML
+check_suite test_standalone_service_contract.sh   "PyYAML is absent"   NO_PYYAML
+check_suite test_watchtower_socket_contract.sh    "PyYAML is absent"   NO_PYYAML
+check_suite test_standalone_runtime_parity.sh     "PyYAML is absent"   NO_PYYAML
+check_suite test_changelog_reminder.sh            "PyYAML is absent"   NO_PYYAML
+
 check_suite test_contribute_k8s_workload.sh       "'just' is absent"   just
 check_suite test_entrypoint_system_gitconfig.sh   "git is absent"      git
 
