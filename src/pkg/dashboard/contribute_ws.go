@@ -183,6 +183,24 @@ type ContributorConnection struct {
 func (c *ContributorConnection) send(msg WSMessage) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	// Bound the write (kubestellar/hive#5090). WriteJSON on a gorilla connection
+	// with no write deadline blocks INDEFINITELY once the peer's receive window
+	// closes — a half-open socket (an L7 proxy that dropped the tunnel without
+	// telling either endpoint) accepts no bytes and sends no RST, so the write
+	// neither completes nor fails. Every caller of send holds writeMu for the
+	// duration, so one wedged peer would park the heartbeat ticker, the read
+	// loop's replies, and the operator revoke/yank/reassign paths for that
+	// connection behind a lock nothing can break.
+	//
+	// wsWriteDeadline turns that unbounded park into a bounded failure the
+	// existing error paths already handle: the heartbeat's write-failure branch
+	// closes the socket with a reason, and a reply failure surfaces to its
+	// caller. The deadline is per-write and generous enough that an ordinary
+	// slow-but-live client is never cut — it exists to bound the pathological
+	// case, not to police latency.
+	if err := c.ws.SetWriteDeadline(time.Now().Add(wsWriteDeadline)); err != nil {
+		return err
+	}
 	return c.ws.WriteJSON(msg)
 }
 
@@ -432,11 +450,15 @@ type ContributeWSHub struct {
 	// mu-guarded to match taskGen's reasoning above: it is touched from the
 	// upgrade path and from deferred cleanup, and must never contend with or
 	// re-enter h.mu.
-	pendingConns   atomic.Int64
-	activityMu     sync.RWMutex
-	activity       []ActivityEntry
-	server         *Server
-	completedTasks map[string]time.Time
+	pendingConns atomic.Int64
+	activityMu   sync.RWMutex
+	activity     []ActivityEntry
+	// absorbedReconnects counts flaps collapsed by absorbReconnectFlapLocked
+	// (kubestellar/hive#5151), so a contributor bouncing stays countable after its
+	// feed rows stop being written. Guarded by activityMu alongside activity itself.
+	absorbedReconnects int
+	server             *Server
+	completedTasks     map[string]time.Time
 	// completedTaskCooldown holds a per-task override for how long, from the
 	// completion time in completedTasks, the issue stays in cooldown. It is
 	// populated by markTaskCompleted based on whether a PR was reported. When a
@@ -954,6 +976,31 @@ func (h *ContributeWSHub) addActivity(username, action, role, cli, model, effort
 			}
 		}
 	}
+	// #5151: absorb a fast reconnect instead of booking it as a departure plus an
+	// arrival. A flap emits "released: connection lost" -> "left" -> "joined"; the
+	// debounce above never fires on it because consecutive entries never repeat an
+	// action. At three rows per flap against maxActivityEntries (50), one flapping
+	// contributor evicts the entire retained feed in under 20 minutes, which is what
+	// #5090 measured as 19 joined / 19 left filling 38 of 50 slots.
+	//
+	// Retracting the trailing flap rows on the "joined" that closes the round trip is
+	// what makes this correct rather than merely quieter: the pair is only collapsed
+	// once the reconnect has PROVEN the contributor came back, so a genuine departure
+	// — where no "joined" ever arrives — keeps every row exactly as today. That is the
+	// property #5151 asks for ("expiry must fall through to exactly today's
+	// behavior"), and it needs no timer, no deferred work, and no grace period during
+	// which the hub is holding a decision it has not made.
+	//
+	// It touches ONLY the feed. The #2356 duplicate-PR guarantee is untouched and is
+	// not this function's to weaken: the release cooldown is still booked eagerly by
+	// the disconnect defer, and is withdrawn only by the lease-bound resume in
+	// task_progress via clearReleaseCooldown (#5322) — which withdraws it because the
+	// original owner has re-entered activeIssues, the stronger guard the cooldown was
+	// standing in for. No window is ever open in which the issue is both out of
+	// activeIssues and out of cooldown.
+	if action == "joined" {
+		h.absorbReconnectFlapLocked(username)
+	}
 	entry := ActivityEntry{
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		Username:  username,
@@ -978,6 +1025,92 @@ func (h *ContributeWSHub) addActivity(username, action, role, cli, model, effort
 	// center). Done AFTER releasing activityMu, and the fan-out itself is a
 	// non-blocking send, so a subscribed browser can never stall the WS path.
 	h.broadcastActivity(entry)
+}
+
+// reconnectFlapWindow is how recently a "left" must have been written for the
+// following "joined" to count as the same contributor bouncing rather than a
+// genuine departure followed later by a fresh arrival.
+//
+// It is sized against the relay's reconnect backoff, not against human behaviour:
+// BASE_RECONNECT_DELAY_MS is 1s and MAX_RECONNECT_DELAY_MS is 60s, so a relay that
+// is coming back does so inside a minute. Matching activityDebounceSecs keeps one
+// notion of "the same session, still" in this file rather than two that can drift.
+const reconnectFlapWindow = activityDebounceSecs * time.Second
+
+// absorbReconnectFlapLocked retracts the trailing "left" — and the
+// "released: connection lost" that may immediately precede it — written for this
+// user by a disconnect that a reconnect has now undone (kubestellar/hive#5151).
+//
+// Called from addActivity with activityMu already held, immediately before a
+// "joined" is appended. It walks back over at most the two rows one flap can
+// write, requires them to belong to THIS user and to be inside
+// reconnectFlapWindow, and stops at anything else. It therefore cannot reach past
+// a flap into unrelated history, cannot collapse two different users' rows
+// together, and cannot touch a "picked up" or "completed" — the rows an operator
+// actually wants and that this churn was evicting.
+//
+// A departure with no reconnect behind it is never reached at all: this runs only
+// on "joined". A departure whose reconnect arrives later than the window keeps its
+// rows, because at that distance it is no longer a flap.
+//
+// The flap stays COUNTABLE. #5151 is explicit that absorbing must not become
+// silence — the hub-side "[contribute-ws] disconnected" log line and the relay's
+// describeWsClose output are untouched and unconditional (they are the #5107
+// instrumentation and the real diagnostic surface), and absorbedReconnects
+// increments here so "this contributor flapped N times" stays answerable more
+// cheaply than by counting feed rows, which is what the issue asked for.
+func (h *ContributeWSHub) absorbReconnectFlapLocked(username string) {
+	if username == "" {
+		return
+	}
+	end := len(h.activity)
+	i := end
+	sawLeft := false
+	// At most two rows: the "left", then optionally the "released: connection lost"
+	// that preceded it. Bounded explicitly rather than by a general scan so this can
+	// never chew through the feed.
+	for i > 0 && end-i < 2 {
+		e := h.activity[i-1]
+		if e.Username != username {
+			break
+		}
+		t, err := time.Parse(time.RFC3339, e.Timestamp)
+		if err != nil || time.Since(t) >= reconnectFlapWindow {
+			break
+		}
+		if e.Action == "left" && !sawLeft {
+			sawLeft = true
+			i--
+			continue
+		}
+		if sawLeft && e.Action == "released: connection lost" {
+			i--
+			continue
+		}
+		break
+	}
+	// Only collapse when a "left" was actually found. Without it there is no
+	// departure to undo, and a bare "released: connection lost" must survive — it
+	// describes work, not presence.
+	if !sawLeft {
+		return
+	}
+	h.activity = h.activity[:i]
+	h.absorbedReconnects++
+}
+
+// AbsorbedReconnects returns how many contributor reconnects have been absorbed
+// into the activity feed rather than booked as a departure plus an arrival
+// (kubestellar/hive#5151). It is the cheap, non-evicting answer to "is a
+// contributor flapping, and how much", which before this was answerable only by
+// counting the feed rows the flapping was simultaneously evicting.
+func (h *ContributeWSHub) AbsorbedReconnects() int {
+	if h == nil {
+		return 0
+	}
+	h.activityMu.RLock()
+	defer h.activityMu.RUnlock()
+	return h.absorbedReconnects
 }
 
 func (h *ContributeWSHub) RecentActivity() []ActivityEntry {
@@ -3878,6 +4011,35 @@ func (h *ContributeWSHub) heartbeatLoop(c *ContributorConnection) {
 	defer ticker.Stop()
 
 	for range ticker.C {
+		// Stop as soon as this socket has been deregistered (kubestellar/hive#5090).
+		//
+		// The disconnect defer in HandleWS runs on the READ goroutine the moment
+		// ReadMessage errors: it deletes the connID from h.connections and closes
+		// the socket. This loop learns none of that — it has no done channel and no
+		// reference to the read side — so it slept out the remainder of its 30s tick
+		// and then wrote a ping to an already-closed connection. That write of
+		// course failed, and the failure branch logged
+		//
+		//     [contribute-ws] heartbeat ping failed, closing
+		//
+		// which reads as a diagnosis of why the connection died and is nothing of
+		// the sort: the connection was already dead and buried, by up to a full
+		// heartbeat interval. That line is what #5090 spent an investigation
+		// chasing. Because the tick is a fixed offset from REGISTRATION, it landed
+		// ~29-30s after every "new connection" regardless of what actually killed
+		// the socket, which is precisely why the flap looked like a clean 30s idle
+		// timer and sent the diagnosis toward per-direction proxy timeouts.
+		//
+		// Checking registration here makes the loop exit silently on a socket
+		// somebody else already tore down, so the "heartbeat ping failed" line is
+		// emitted ONLY when the heartbeat write is genuinely the first thing to
+		// notice the socket is bad. It also stops the goroutine leaking for up to
+		// one interval per disconnect, which on a flapping session is a goroutine
+		// per flap.
+		if !h.connectionRegistered(c) {
+			return
+		}
+
 		c.mu.Lock()
 		lastPong := c.lastPong
 		c.mu.Unlock()
@@ -3967,6 +4129,36 @@ func (h *ContributeWSHub) taskHeldByAnotherConnection(candidate *ContributorConn
 			h.canonicalRepoKey(conn.currentTask.Repo) == canonicalRepo
 		conn.mu.Unlock()
 		if held {
+			return true
+		}
+	}
+	return false
+}
+
+// connectionRegistered reports whether this exact connection object is still in
+// the hub's live connection map (kubestellar/hive#5090).
+//
+// h.connections is keyed by a random per-socket connID that the heartbeat loop
+// never sees, so the lookup is by VALUE: scan for the pointer. The map is capped
+// at maxWSConnections (50), so this is a bounded scan once per 30s tick per
+// connection — negligible next to the network write it guards.
+//
+// Pointer identity is the right test rather than any field comparison: it is
+// exactly "is the object I was started for still the registered one", which is
+// false both when the socket was deregistered by its disconnect defer and when a
+// reconnect replaced it under a new connID. Both mean this loop has no further
+// work to do.
+//
+// Takes only h.mu.RLock and no connection-level lock, so it cannot participate in
+// any lock ordering — callers may hold c.mu or c.writeMu or neither.
+func (h *ContributeWSHub) connectionRegistered(c *ContributorConnection) bool {
+	if h == nil || c == nil {
+		return false
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for _, conn := range h.connections {
+		if conn == c {
 			return true
 		}
 	}
@@ -5503,6 +5695,22 @@ const wsCloseFrameDeadline = time.Second
 // cannot stack up heartbeat goroutines waiting on a peer that has stopped
 // reading.
 const wsProtocolPingDeadline = 10 * time.Second
+
+// wsWriteDeadline bounds every application JSON write to a live contributor
+// connection (kubestellar/hive#5090).
+//
+// gorilla/websocket applies no write deadline by default, so WriteJSON against a
+// peer that has stopped reading blocks until the OS gives up on the socket —
+// which, on a half-open TCP connection with no RST, can be many minutes of
+// retransmission backoff. Because send() holds writeMu across the write, that
+// stall is not confined to the writing goroutine: it blocks every other writer
+// on the same connection.
+//
+// It is deliberately shorter than wsHeartbeatInterval so a write cannot still be
+// parked when the next heartbeat tick arrives (which would stack ticker
+// goroutines on writeMu), and comfortably longer than wsProtocolPingDeadline so
+// an ordinary slow client is never mistaken for a wedged one.
+const wsWriteDeadline = 15 * time.Second
 
 // writeProtocolPing sends a WebSocket PROTOCOL-level Ping control frame (opcode
 // 0x9) on the connection.
