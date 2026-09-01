@@ -287,13 +287,14 @@ func (m *Manager) AgentAuthState(agentName string, uid int, backend string, runn
 		return false, false
 	}
 
-	// (4) FILE PROBE, agent-own home first, shared legacy path second.
+	// (4) FILE PROBE, agent-own home first, shared legacy path second. The
+	// POSITIVE half lives in credentialFileProves so the login detector can ask
+	// the same question without inheriting rules 1-3 (#5291).
+	proven := m.credentialFileProves(agentName, uid, backend)
 	switch backend {
 	case "claude":
-		for _, p := range agentClaudeCredentialPaths(agentName, uid, backend) {
-			if claude.HasValidToken(p) {
-				return true, true
-			}
+		if proven {
+			return true, true
 		}
 		// A found+valid token is positive proof (above). Its ABSENCE, however, is
 		// NOT proof of "needs login" for Claude: unlike copilot/codex, Claude can
@@ -310,29 +311,13 @@ func (m *Manager) AgentAuthState(agentName string, uid int, backend string, runn
 		// pane-scan needsLogin signal at (3), which outranks this.
 		return false, false
 	case "copilot":
-		m.mu.RLock()
-		tok := m.copilotAuthToken
-		m.mu.RUnlock()
-		if tok != "" {
+		if proven {
 			return true, true
-		}
-		if _, err := os.Stat(copilotUserTokenProbePath); err == nil {
-			return true, true
-		}
-		for _, p := range agentCopilotConfigPaths(agentName, uid, backend) {
-			if copilotCredentialFileHasTokens(p) {
-				return true, true
-			}
 		}
 		return false, true
 	case "codex":
-		if codexEnvHasCredentials() {
+		if proven {
 			return true, true
-		}
-		for _, p := range agentCodexAuthPaths(agentName, uid, backend) {
-			if codexAuthFileHasCredentials(p) {
-				return true, true
-			}
 		}
 		return false, true
 	default:
@@ -359,4 +344,100 @@ func (m *Manager) AgentAuthAvailable(agentName string) (available, known bool) {
 	needsLogin := proc.NeedsLogin
 	proc.paneMu.RUnlock()
 	return m.AgentAuthState(agentName, proc.UID, backend, proc.State == StateRunning, needsLogin)
+}
+
+// credentialFileProves answers ONLY the positive half of the file probe: is
+// there, right now, on-disk (or in-process) evidence that this agent's backend
+// is authenticated?
+//
+// It is deliberately one-directional. `false` means "no proof", NOT "logged
+// out" — Claude in particular can be authenticated with no credentials file
+// this process can read (a live in-memory session, a per-UID HOME, a keychain),
+// which is why AgentAuthState reports UNKNOWN rather than needs-login when this
+// comes back false for claude.
+//
+// Split out of AgentAuthState for kubestellar/hive#5291. The login detector
+// needs this question and must NOT get AgentAuthState's answer, whose
+// precedence rules are built for a dashboard badge: rule 2 short-circuits to
+// "unknown" for any RUNNING agent (the detector only ever scans running
+// agents), and rule 3 lets the pane's own login text outrank the credential
+// file (which is precisely the evidence the detector must not trust on its
+// own). Sharing the code rather than copying it keeps the two answers from
+// drifting the way #4699 describes.
+func (m *Manager) credentialFileProves(agentName string, uid int, backend string) bool {
+	switch backend {
+	case "claude":
+		for _, p := range agentClaudeCredentialPaths(agentName, uid, backend) {
+			if claude.HasUsableToken(p) {
+				return true
+			}
+		}
+	case "copilot":
+		if m != nil {
+			m.mu.RLock()
+			tok := m.copilotAuthToken
+			m.mu.RUnlock()
+			if tok != "" {
+				return true
+			}
+		}
+		if _, err := os.Stat(copilotUserTokenProbePath); err == nil {
+			return true
+		}
+		for _, p := range agentCopilotConfigPaths(agentName, uid, backend) {
+			if copilotCredentialFileHasTokens(p) {
+				return true
+			}
+		}
+	case "codex":
+		if codexEnvHasCredentials() {
+			return true
+		}
+		for _, p := range agentCodexAuthPaths(agentName, uid, backend) {
+			if codexAuthFileHasCredentials(p) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// AgentHasValidCredential reports whether this agent's backend is DEMONSTRABLY
+// authenticated right now (kubestellar/hive#5291).
+//
+// Positive evidence only, and that asymmetry is the whole point. The login
+// detector uses it to decide when NOT to pause: proof of a working credential
+// means a login prompt on screen is residue or a stuck CLI, which is the
+// token-restart heal's job, not an operator's. Anything less than proof —
+// including "we cannot check this backend at all" — returns false and leaves
+// the detector's existing behaviour untouched.
+//
+// One honest limitation: only claude's credential carries an expiry this can
+// verify (claude.HasUsableToken). Copilot and codex are checked for the
+// PRESENCE of tokens, so a stale-but-present copilot token reads as valid here.
+// That is the same trade the manager's own token-restart heal already makes in
+// configHasTokens(), and it fails in the safe direction for this caller: the
+// heal restarts the CLI, which is a recovery attempt, rather than the detector
+// pausing the agent, which is not.
+//
+// For claude the question asked is "can a restart still use this?", not "is
+// the access token live right now?". An access token that has aged out under a
+// long-running session leaves a refresh grant that the next CLI start redeems,
+// so proof survives a routine expiry — which is the state a busy hive spends
+// part of every day in.
+func (m *Manager) AgentHasValidCredential(agentName string) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.RLock()
+	proc := m.agents[agentName]
+	m.mu.RUnlock()
+	if proc == nil {
+		return false
+	}
+	backend := proc.Config.Backend
+	if proc.BackendOverride != "" {
+		backend = proc.BackendOverride
+	}
+	return m.credentialFileProves(agentName, proc.UID, backend)
 }

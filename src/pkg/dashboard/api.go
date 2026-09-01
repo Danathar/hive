@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -19,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/kubestellar/hive/pkg/agent"
 	"github.com/kubestellar/hive/pkg/beads"
@@ -72,6 +74,10 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	// Full retained scrollback of an agent's latest run, as plain text (#3693).
 	// Backs the Terminal's "view / download full log" controls.
 	s.mux.HandleFunc("GET /api/agents/{name}/log", s.handleAgentFullLog)
+	// URLs visible in the agent's pane, joined across terminal wrapping, for
+	// the dashboard's click-to-copy control (#5188). The terminal itself
+	// cannot deliver a copy, so the copy is done server-side.
+	s.mux.HandleFunc("GET /api/agents/{name}/terminal-urls", s.handleAgentTerminalURLs)
 	// Durable per-kick run-log history (#4296, #4295): list archived kick
 	// logs, fetch one, and a minimal HTML index page linked from agent cards.
 	s.mux.HandleFunc("GET /api/agents/{name}/kicks", s.handleAgentKickLogList)
@@ -81,6 +87,10 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	s.mux.HandleFunc("GET /api/role", s.handleRole)
 
 	s.mux.HandleFunc("POST /api/kick/{agent}", s.handleKick)
+	// Outcome of the most recent asynchronous kick (#5325). The POST answers
+	// 202 as soon as the kick is queued; delivery success or failure is read
+	// from here, off the request path and therefore never proxy-timed-out.
+	s.mux.HandleFunc("GET /api/kick/{agent}/status", s.handleKickStatus)
 	s.mux.HandleFunc("POST /api/switch/{agent}/{backend}", s.handleSwitch)
 	s.mux.HandleFunc("POST /api/model/{agent}/{model}", s.handleModelSet)
 	s.mux.HandleFunc("POST /api/pause/{agent}", s.handlePause)
@@ -407,6 +417,22 @@ func jsonError(w http.ResponseWriter, msg string, code int) {
 	}
 }
 
+// jsonStatusResponse writes a JSON body under an explicit status code.
+//
+// The Content-Type MUST be set before WriteHeader — writing the status first
+// freezes the header map, and a JSON body served without its content type is
+// exactly what the dashboard's postJSON guard (#5301/#5306) treats as an
+// intermediary's HTML error page. Getting this backwards on the kick endpoint
+// would turn a healthy 202 into a reported failure, which is the whole class
+// of bug #5325 is about.
+func jsonStatusResponse(w http.ResponseWriter, code int, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		slog.Warn("jsonStatusResponse encode failed", "error", err)
+	}
+}
+
 func okResponse(w http.ResponseWriter, extra map[string]string) {
 	result := map[string]interface{}{"ok": true}
 	for k, v := range extra {
@@ -507,7 +533,7 @@ func (s *Server) refreshAsync() {
 const maxDecodeBodyBytes = 1 << 20 // 1 MiB
 
 func decodeBody(r *http.Request, v interface{}) error {
-	defer r.Body.Close()
+	defer closeHTTPBody(r.Body)
 	r.Body = http.MaxBytesReader(nil, r.Body, maxDecodeBodyBytes)
 	return json.NewDecoder(r.Body).Decode(v)
 }
@@ -575,13 +601,30 @@ func (s *Server) handleRole(w http.ResponseWriter, r *http.Request) {
 	if role == "" {
 		role = "owner"
 	}
-	jsonResponse(w, map[string]string{
+	resp := map[string]string{
 		"role": role,
 		"user": user,
 		// The queue label is server-configured, so the dashboard must be told
 		// it rather than hard-coding a name that a hive may have changed.
 		"automerge_label": s.autoMergeLabel(),
-	})
+	}
+	// display_name is the human name for an opaque OIDC identity key
+	// ("ibmid:5500…"), delivered by the hub heartbeat (AuthorizedUserNames).
+	// Purely cosmetic — the header chip shows it; every auth decision stays on
+	// the raw user key. Absent when unknown; the UI falls back to the key.
+	if dn := s.authorizedDisplayName(user); dn != "" && dn != user {
+		resp["display_name"] = dn
+	}
+	jsonResponse(w, resp)
+}
+
+// authorizedDisplayName looks up the hub-delivered cosmetic display name for
+// an identity key. Nil-safe: /api/role is served before deps are required.
+func (s *Server) authorizedDisplayName(user string) string {
+	if s == nil || s.deps == nil || s.deps.Config == nil || user == "" {
+		return ""
+	}
+	return strings.TrimSpace(s.deps.Config.Dashboard.AuthorizedUserNames[user])
 }
 
 // autoMergeLabel reports the configured queue label. /api/role is served
@@ -804,7 +847,7 @@ func ghcrTagExists(tag string) bool {
 	if err != nil {
 		return false
 	}
-	defer tokenResp.Body.Close()
+	defer closeHTTPBody(tokenResp.Body)
 	var tok struct {
 		Token string `json:"token"`
 	}
@@ -820,7 +863,7 @@ func ghcrTagExists(tag string) bool {
 	if err != nil {
 		return false
 	}
-	resp.Body.Close()
+	closeHTTPBody(resp.Body)
 	return resp.StatusCode == http.StatusOK
 }
 
@@ -900,7 +943,7 @@ func (s *Server) handleConfigDownload(w http.ResponseWriter, r *http.Request) {
 	filename := fmt.Sprintf("hive-%s-%s-%s.yaml", safeOrg, safeRepo, timestamp)
 	w.Header().Set("Content-Type", "application/x-yaml")
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
-	w.Write(data)
+	_, _ = w.Write(data)
 }
 
 func (s *Server) handleSelfUpgrade(w http.ResponseWriter, r *http.Request) {
@@ -971,7 +1014,7 @@ func (s *Server) handleSelfUpgrade(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "hub unreachable", http.StatusBadGateway)
 		return
 	}
-	defer resp.Body.Close()
+	defer closeHTTPBody(resp.Body)
 	const maxUpgradeResponseBytes = 1 << 16
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxUpgradeResponseBytes))
 	if resp.StatusCode < 300 {
@@ -979,14 +1022,14 @@ func (s *Server) handleSelfUpgrade(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)
-	w.Write(body)
+	_, _ = w.Write(body)
 }
 
 func (s *Server) handleSnapshotAPI(w http.ResponseWriter, r *http.Request) {
 	if s.deps == nil || s.deps.Config == nil || !s.deps.Config.Hub.AutoSnapshot {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
-		w.Write([]byte(`{"error":"snapshots not enabled"}`))
+		_, _ = w.Write([]byte(`{"error":"snapshots not enabled"}`))
 		return
 	}
 	s.statusMu.RLock()
@@ -998,7 +1041,7 @@ func (s *Server) handleSnapshotAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "public, max-age=60")
-	json.NewEncoder(w).Encode(status)
+	jsonResponse(w, status)
 }
 
 func (s *Server) handleSnapshotFrameAncestors(w http.ResponseWriter, r *http.Request) {
@@ -1018,7 +1061,7 @@ func (s *Server) handleSnapshotPage(w http.ResponseWriter, r *http.Request) {
 	cfg := s.deps.Config
 	if s.deps == nil || cfg == nil || !cfg.Hub.AutoSnapshot {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprintf(w, `<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="3;url=%s"><title>Hive</title>
+		_, _ = fmt.Fprintf(w, `<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="3;url=%s"><title>Hive</title>
 <style>body{font-family:system-ui,sans-serif;background:#0a0a0a;color:#e0e0e0;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}
 .card{text-align:center;max-width:480px;padding:40px}.bee{font-size:3rem;margin-bottom:16px}h1{color:#f59e0b;margin:0 0 8px}p{color:#8b949e;line-height:1.6}a{color:#58a6ff}</style>
 </head><body><div class="card"><div class="bee">🐝</div><h1>Hive</h1><p>AI Agent Orchestration for Open Source</p><p>Snapshot is not currently published for this hive.</p><p>Redirecting to <a href="%s">%s</a>...</p></div></body></html>`,
@@ -1033,7 +1076,8 @@ func (s *Server) handleSnapshotPage(w http.ResponseWriter, r *http.Request) {
 	if mode != "dark" {
 		mode = "light"
 	}
-	snapshotFile := fmt.Sprintf("/data/snapshots/snapshot-%s.html", mode)
+	snapDir := s.snapshotDirOrDefault()
+	snapshotFile := filepath.Join(snapDir, fmt.Sprintf("snapshot-%s.html", mode))
 	info, err := os.Stat(snapshotFile)
 	intervalMin := cfg.Hub.SnapshotIntervalMin
 	if intervalMin < 5 {
@@ -1043,8 +1087,8 @@ func (s *Server) handleSnapshotPage(w http.ResponseWriter, r *http.Request) {
 	needsRebuild := err != nil || time.Since(info.ModTime()) > staleThreshold
 
 	if needsRebuild {
-		s.buildSnapshot("/data/snapshots/snapshot-dark.html", "dark")
-		s.buildSnapshot("/data/snapshots/snapshot-light.html", "light")
+		s.buildSnapshot(filepath.Join(snapDir, "snapshot-dark.html"), "dark")
+		s.buildSnapshot(filepath.Join(snapDir, "snapshot-light.html"), "light")
 	}
 
 	data, err := os.ReadFile(snapshotFile)
@@ -1053,15 +1097,15 @@ func (s *Server) handleSnapshotPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data = []byte(strings.Replace(string(data),
+	data = []byte(strings.ReplaceAll(string(data),
 		`href="/live/hive/light"`,
-		`href="/snapshot?mode=light"`, -1))
-	data = []byte(strings.Replace(string(data),
+		`href="/snapshot?mode=light"`))
+	data = []byte(strings.ReplaceAll(string(data),
 		`href="/live/hive/dark"`,
-		`href="/snapshot?mode=dark"`, -1))
-	data = []byte(strings.Replace(string(data),
+		`href="/snapshot?mode=dark"`))
+	data = []byte(strings.ReplaceAll(string(data),
 		`href="/live/hive"`,
-		`href="/snapshot"`, -1))
+		`href="/snapshot"`))
 
 	html := string(data)
 	dashURL := ""
@@ -1084,11 +1128,39 @@ func (s *Server) handleSnapshotPage(w http.ResponseWriter, r *http.Request) {
 	// the CSP script-src-elem hash allowlist from the exact bytes being served
 	// (#3848 part 1 / #3907, see csp_script_src.go).
 	applyDocumentScriptSrcElem(w, []byte(html))
-	w.Write([]byte(html))
+	_, _ = w.Write([]byte(html))
+}
+
+// snapshotDirOrDefault returns the directory handleSnapshotPage/buildSnapshot
+// read and write snapshot-{mode}.html under: s.snapshotDir when a test has
+// overridden it, otherwise the production default. See the field comment on
+// Server.snapshotDir (#5235).
+func (s *Server) snapshotDirOrDefault() string {
+	if s.snapshotDir != "" {
+		return s.snapshotDir
+	}
+	return "/data/snapshots"
 }
 
 func (s *Server) buildSnapshot(outputFile, mode string) {
-	os.MkdirAll("/data/snapshots", 0o755)
+	if s.buildSnapshotFn != nil {
+		s.buildSnapshotFn(s, outputFile, mode)
+		return
+	}
+	buildSnapshotProd(s, outputFile, mode)
+}
+
+// buildSnapshotProd is the real Node-builder invocation buildSnapshot runs in
+// production. Split out from buildSnapshot so tests can override the whole
+// invocation via Server.buildSnapshotFn (#5235) without ever spawning `node`
+// — see the field comment on Server.buildSnapshotFn for the seam convention
+// this follows (pkg/hub's afterGenerationsReadAttempt, #5080).
+func buildSnapshotProd(s *Server, outputFile, mode string) {
+	snapDir := s.snapshotDirOrDefault()
+	if err := os.MkdirAll(snapDir, 0o755); err != nil {
+		s.logger.Warn("snapshot directory creation failed", "error", err)
+		return
+	}
 	dashURL := fmt.Sprintf("http://localhost:%d", s.port)
 	htmlSource := "/opt/hive/proxy/public/index.html"
 	builderScript := "/opt/hive/dashboard/build-snapshot.mjs"
@@ -1463,8 +1535,35 @@ func (s *Server) handleKick(w http.ResponseWriter, r *http.Request) {
 		msg = s.deps.Scheduler.BuildAgentMessageFromLastActionable(name)
 	}
 
-	if err := s.deps.AgentMgr.SendKick(name, msg); err != nil {
+	// Queue the kick and answer immediately (#5325).
+	//
+	// The old code called the synchronous SendKick inline. Its slow leg waits
+	// for the CLI's input prompt for up to inputPromptTimeout (120s), which
+	// exceeds a typical ingress idle timeout (commonly 60s) — so a kick to an
+	// agent whose CLI was merely slow to present its prompt was answered by the
+	// proxy with 504 while the wait was still running. The wait then completed,
+	// the prompt WAS typed, and the agent ran the session; the operator had
+	// been told it failed, and the natural retry delivered the work twice.
+	//
+	// SendKickAsync keeps every fast, deterministic precondition synchronous —
+	// unknown agent, paused/stopped, missing tmux session, sandbox rejection
+	// still return 400 here — and moves only the prompt wait and the typing to
+	// a background goroutine with an exactly-once in-flight guard. The outcome
+	// is reported by GET /api/kick/{agent}/status, off the request path.
+	started, err := s.deps.AgentMgr.SendKickAsync(name, msg)
+	if err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !started {
+		// A delivery for this agent is already in flight. Answering 202 with
+		// status "in-flight" is what makes an operator's retry harmless: the
+		// prompt is delivered exactly once regardless of how many times Kick
+		// is clicked.
+		jsonStatusResponse(w, http.StatusAccepted, map[string]interface{}{
+			"ok": true, "status": kickStatusInFlight, "agent": name,
+			"message": "a kick is already being delivered to " + name + "; not sending it twice",
+		})
 		return
 	}
 
@@ -1472,7 +1571,74 @@ func (s *Server) handleKick(w http.ResponseWriter, r *http.Request) {
 	s.deps.Logger.Info("audit: agent kicked", "agent", name, "trigger", "dashboard-api")
 	s.auditFromRequest(r, "kick", "", name)
 	s.refreshAfterMutation()
-	okResponse(w, map[string]string{"status": "kicked", "agent": name})
+	// 202, not 200: the message is queued, not yet proven delivered.
+	jsonStatusResponse(w, http.StatusAccepted, map[string]interface{}{
+		"ok": true, "status": kickStatusQueued, "agent": name,
+	})
+}
+
+// Kick dispatch statuses on the wire. "queued"/"in-flight" are the POST's
+// answers; the poll adds the terminal "delivered" and "failed".
+const (
+	kickStatusQueued    = "queued"
+	kickStatusInFlight  = "in-flight"
+	kickStatusUnknown   = "unknown"
+	kickStatusDelivered = "delivered"
+	kickStatusFailed    = "failed"
+)
+
+// handleKickStatus reports the outcome of the most recent asynchronous kick
+// for an agent (#5325).
+//
+// This is where kick success or failure is now decided. The POST only promises
+// the kick was queued; a client learns whether the prompt actually reached the
+// CLI by polling here. While the phase is "queued"/"in-flight" the outcome is
+// INDETERMINATE — pending is not failure, and a UI must not render it as one.
+//
+// Read-only, so any authenticated role may call it.
+func (s *Server) handleKickStatus(w http.ResponseWriter, r *http.Request) {
+	name := s.resolveAgentParam(r.PathValue("agent"))
+	if s.deps == nil || s.deps.AgentMgr == nil {
+		jsonError(w, "agent manager unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	d, ok := s.deps.AgentMgr.KickDispatchState(name)
+	if !ok {
+		// No async kick has been dispatched for this agent in this process's
+		// lifetime. That is not an error — it is simply "nothing to report".
+		jsonResponse(w, map[string]interface{}{
+			"ok": true, "agent": name, "status": kickStatusUnknown, "pending": false,
+		})
+		return
+	}
+	resp := map[string]interface{}{
+		"ok":       true,
+		"agent":    name,
+		"status":   kickPhaseStatus(d.Phase),
+		"pending":  d.Pending(),
+		"queuedAt": d.QueuedAt.UTC().Format(time.RFC3339),
+	}
+	if d.Error != "" {
+		resp["error"] = d.Error
+	}
+	if !d.SettledAt.IsZero() {
+		resp["settledAt"] = d.SettledAt.UTC().Format(time.RFC3339)
+	}
+	jsonResponse(w, resp)
+}
+
+// kickPhaseStatus maps a manager dispatch phase onto the wire status. The
+// pending phase is reported as "in-flight" so the poll's vocabulary matches the
+// POST's, and so no client can mistake it for a settled outcome.
+func kickPhaseStatus(phase string) string {
+	switch phase {
+	case agent.KickPhaseDelivered:
+		return kickStatusDelivered
+	case agent.KickPhaseFailed:
+		return kickStatusFailed
+	default:
+		return kickStatusInFlight
+	}
 }
 
 // claimAgentFieldOwnership writes an operator's model and/or backend choice
@@ -2408,7 +2574,7 @@ func writeSSOError(w http.ResponseWriter, r *http.Request, status int, code, wha
 	// hive look permanently broken even after access is granted.
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
-	fmt.Fprintf(w, ssoErrorPage, html.EscapeString(code), html.EscapeString(what), html.EscapeString(action))
+	_, _ = fmt.Fprintf(w, ssoErrorPage, html.EscapeString(code), html.EscapeString(what), html.EscapeString(action))
 }
 
 // ssoErrorPage is the terminal error shell for a failed SSO handoff. Format
@@ -2463,7 +2629,11 @@ func (s *Server) handleGHUserAuthLogout(w http.ResponseWriter, r *http.Request) 
 	// logging-out owner's own token stranded on disk. Viewer logouts leave the
 	// hive's user client intact.
 	if !s.directRouteAuthzEnabled() || loggedOutRole == config.RoleOwner {
-		os.Remove(userTokenPath)
+		if err := os.Remove(userTokenPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			s.deps.Logger.Error("GitHub user token removal failed", "error", err)
+			jsonError(w, "failed to remove persisted GitHub credentials", http.StatusInternalServerError)
+			return
+		}
 	}
 	clearSessionCookie(w)
 	s.auditFromRequest(r, "gh_auth_logout", "", "")
@@ -2609,9 +2779,10 @@ func (s *Server) handleAgentConfigGet(w http.ResponseWriter, r *http.Request) {
 	launchCmd := agentCfg.LaunchCmd
 	if launchCmd == "" {
 		launchCmd = fmt.Sprintf("%s --model %s", cli, model)
-		if cli == "claude" {
+		switch cli {
+		case "claude":
 			launchCmd = fmt.Sprintf("claude --model %s --dangerously-skip-permissions", model)
-		} else if cli == "copilot" {
+		case "copilot":
 			launchCmd = fmt.Sprintf("/usr/bin/copilot --allow-all --model %s", model)
 		}
 	}
@@ -4070,7 +4241,7 @@ func (s *Server) handleAgentExport(w http.ResponseWriter, r *http.Request) {
 	if strings.Contains(accept, "text/yaml") || strings.Contains(accept, "application/yaml") {
 		w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s.yaml", name))
-		w.Write([]byte(yamlContent))
+		_, _ = w.Write([]byte(yamlContent))
 		return
 	}
 
@@ -5250,15 +5421,15 @@ func probeModelsWithHeaders(endpoint, apiKey string, extraHeaders map[string]str
 	if err != nil {
 		return 0, fmt.Errorf("cannot reach gateway: %w", err)
 	}
-	defer resp.Body.Close()
+	defer closeHTTPBody(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
 		// Error path: only a truncated slice of the body is surfaced to the
 		// dialog (error bodies can be huge and may echo the key).
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, litellmProbeMaxErrBody))
 		gatewayMsg := redactLiteLLMKeyMaterial(strings.TrimSpace(string(body)))
-		switch {
-		case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		switch resp.StatusCode {
+		case http.StatusUnauthorized, http.StatusForbidden:
 			// The two auth failures lead users to different fixes.
 			if apiKey == "" {
 				return 0, fmt.Errorf("gateway requires an API key and none is configured (HTTP %d): %s",
@@ -6728,14 +6899,14 @@ func (s *Server) handleBackends(w http.ResponseWriter, r *http.Request) {
 	litellmModels := s.queryInferenceModels("litellm")
 
 	// CLI backends each have a DIFFERENT discovery source (see cli_models.go):
-	// copilot → per-account Copilot /models, gemini → generativelanguage
-	// /v1beta/models, claude → maintained static list (no API exists), goose →
-	// configured provider's static list. Every probe is best-effort and falls
-	// back to a current static list, so a dropdown is never empty.
+	// provider HTTP APIs, vendor CLI protocols/subcommands, or a deliberately
+	// authoritative single option. Every probe is best-effort and falls back to
+	// a current static list, so a dropdown is never empty.
 	claudeCLI := s.queryCLIModels("claude")
 	copilotCLI := s.queryCLIModels("copilot")
 	geminiCLI := s.queryCLIModels("gemini")
 	gooseCLI := s.queryCLIModels("goose")
+	agyCLI := s.queryCLIModels(agyBackendID)
 	// bob has no discovery source and no usable --model flag: it selects its
 	// own model. Served explicitly so the client never falls through to the
 	// copilot catalog and offers models bob cannot honor (see bobStaticModels).
@@ -6747,6 +6918,7 @@ func (s *Server) handleBackends(w http.ResponseWriter, r *http.Request) {
 		{"id": bobBackendID, "name": "bob (IBM bobshell)", "models": bobCLI.models, "fallback": bobCLI.fallback},
 		{"id": "gemini", "name": "Gemini", "models": geminiCLI.models, "fallback": geminiCLI.fallback},
 		{"id": "goose", "name": "Goose", "models": gooseCLI.models, "fallback": gooseCLI.fallback},
+		{"id": agyBackendID, "name": "Google Antigravity (agy)", "models": agyCLI.models, "fallback": agyCLI.fallback},
 		{"id": "vllm", "name": "vLLM (self-hosted)", "models": vllmModels, "inference": true},
 		{"id": "llm-d", "name": "llm-d (self-hosted)", "models": llmdModels, "inference": true},
 		{"id": "litellm", "name": "LiteLLM (proxy)", "models": litellmModels, "inference": true},
@@ -7112,7 +7284,7 @@ func fetchModelsWithHeaders(baseURL, apiKey string, extraHeaders map[string]stri
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer closeHTTPBody(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("upstream returned %d", resp.StatusCode)
@@ -7286,10 +7458,28 @@ func (s *Server) handleKnowledgeList(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// titleCaseWords capitalizes the first letter following each run of
+// whitespace, replicating the exact word-boundary rule of the deprecated
+// strings.Title (boundary = unicode.IsSpace, not "non-letter" — so
+// underscore-joined identifiers like "test_scaffold" are left as
+// "Test_scaffold", matching prior output byte-for-byte). It exists only as a
+// dependency-free fallback for a fact type absent from typeLabels;
+// golang.org/x/text/cases is not a module dependency here.
+func titleCaseWords(s string) string {
+	prevSpace := true
+	return strings.Map(func(r rune) rune {
+		if prevSpace && unicode.IsLetter(r) {
+			r = unicode.ToTitle(r)
+		}
+		prevSpace = unicode.IsSpace(r)
+		return r
+	}, s)
+}
+
 func (s *Server) handleKnowledgeExport(w http.ResponseWriter, r *http.Request) {
 	if !s.ensureKnowledge() {
 		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
-		w.Write([]byte("# Agent Knowledge\n\nKnowledge base not available.\n"))
+		_, _ = w.Write([]byte("# Agent Knowledge\n\nKnowledge base not available.\n"))
 		return
 	}
 
@@ -7343,7 +7533,7 @@ func (s *Server) handleKnowledgeExport(w http.ResponseWriter, r *http.Request) {
 		sortFactsStable(ff)
 		label := typeLabels[t]
 		if label == "" {
-			label = strings.Title(t)
+			label = titleCaseWords(t)
 		}
 		sb.WriteString("## " + label + "\n\n")
 		for _, f := range ff {
@@ -7364,7 +7554,7 @@ func (s *Server) handleKnowledgeExport(w http.ResponseWriter, r *http.Request) {
 	// tag when it genuinely changes.
 	sum := sha256.Sum256([]byte(body))
 	w.Header().Set("ETag", fmt.Sprintf(`"%x"`, sum))
-	w.Write([]byte(body))
+	_, _ = w.Write([]byte(body))
 }
 
 // sortFactsStable orders facts by their natural identifier so an unchanged
@@ -8885,8 +9075,7 @@ func (s *Server) handleBeadsReset(w http.ResponseWriter, r *http.Request) {
 
 	s.auditFromRequest(r, "beads_reset", "", "")
 	s.refreshAndPersist()
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"status": "reset", "closed": results, "reason": body.Reason})
+	jsonResponse(w, map[string]any{"status": "reset", "closed": results, "reason": body.Reason})
 }
 
 func (s *Server) handleBeadsResetAgent(w http.ResponseWriter, r *http.Request) {
@@ -8924,8 +9113,7 @@ func (s *Server) handleBeadsResetAgent(w http.ResponseWriter, r *http.Request) {
 
 	s.auditFromRequest(r, "beads_reset_agent", "", agentName)
 	s.refreshAndPersist()
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"status": "reset", "agent": agentName, "closed": closed, "reason": body.Reason})
+	jsonResponse(w, map[string]any{"status": "reset", "agent": agentName, "closed": closed, "reason": body.Reason})
 }
 
 func (s *Server) handleBeadsList(w http.ResponseWriter, r *http.Request) {

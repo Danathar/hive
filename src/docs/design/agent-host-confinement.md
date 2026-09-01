@@ -1,11 +1,30 @@
 # Agent host confinement on the default launch path (#4918)
 
-Status: **historical investigation; contributor-local Claude confinement is now
-implemented.** This page records the evidence and options as assessed before
-Claude Code's native sandbox was wired into `contribute-hive ... local`.
-Claude/LiteLLM local launches now use that OS-enforced sandbox with hard-fail
-startup and no unsandboxed retry; Codex retains `workspace-write`. The hub-side
-Podman default and local backends without a native sandbox remain open concerns.
+Status: **historical investigation; contributor-local confinement is now
+implemented for every backend that has a real mechanism, and the rest refuse
+to launch unconfined.** This page records the evidence and options as
+assessed before that work landed (#5011, then this follow-up). Claude/LiteLLM
+and Codex local launches use their own OS-enforced sandboxes with hard-fail
+startup and no unsandboxed retry; Copilot local launches now use Copilot
+CLI's own `--sandbox` (OS-enforced, same underlying technology class); opencode
+gets a command-name deny-list (a floor, not a boundary — it has no OS sandbox);
+goose, agy, bob, pi, and aider have **no confinement mechanism this repo can
+wire at all**, verified against each CLI's own current docs, and local mode
+for them now refuses to launch without an explicit per-backend operator
+opt-in rather than launching silently unconfined. See
+`src/docs/sandbox-isolation.md`'s per-backend confinement matrix for the
+current, authoritative state — the analysis below is left as the historical
+record of how each decision was reached, not a live status report. The
+hub-side Podman sandbox's double gate (`agent_sandbox.enabled` +
+per-agent `sandbox.enabled`) is unchanged — collapsing it is deliberately
+not done, since a sandboxed agent has no tmux fallback and an image-less
+opt-in would fail every kick outright (`config.AgentSandboxGateWarnings`'s
+doc comment). What *is* now fixed is the gate's silence: the dashboard's
+Security tab previously let an owner enable the global flag and believe the
+fleet was sandboxed with no per-agent opt-in and no error anywhere in the
+UI. `GET /api/config/governor`'s `security.sandboxWarnings` now carries the
+same diagnosis boot/reload already logged at WARN, and the Security tab
+renders it inline under the toggle and in the page's coherence-warnings box.
 
 All citations are against `origin/v4` at `1b54c69e` unless noted.
 
@@ -331,6 +350,13 @@ estimated from reading the code, not measured.
   default.
 
 ## Recommendation
+
+> **Update:** this recommendation is about the hub-side Podman sandbox
+> (`agent_sandbox`), which is a separate axis from the contributor-local
+> per-backend work this page's status line now describes — that work closed
+> the specific incident path (`contribute-hive ... local`) without touching
+> the Podman double-gate discussed here. The recommendation below is
+> unimplemented and still stands as an open item.
 
 **This investigation's single strongest recommendation: single-gate or
 default-on the existing Podman sandbox for `contribute-hive` (both

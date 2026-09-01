@@ -493,6 +493,14 @@ type Manager struct {
 	// observer is always invoked on its own goroutine. See kick_observer.go.
 	kickObserver atomic.Pointer[func(agentName, event, detail string)]
 
+	// kickDispatches tracks asynchronous kick dispatches (#5325): the in-flight
+	// guard that makes delivery exactly-once, and the latest outcome per agent
+	// so the dashboard can report the true result after answering the POST with
+	// 202. It carries its OWN mutex rather than living under m.mu, because the
+	// delivery goroutine settles a dispatch from a context that holds no
+	// manager lock and must not contend with the launch path. See kick_async.go.
+	kickDispatches kickDispatchRegistry
+
 	inferenceRouteCallback      func(agentName, backend, model string)
 	clearInferenceRouteCallback func(agentName string)
 
@@ -717,12 +725,13 @@ func (m *Manager) CopilotToken() string {
 // BackendAuthAvailable reports whether shared credentials exist for a CLI
 // backend, so the dashboard can show honest auth state even for agents with
 // no running pane (e.g. on-demand agents that never launched). Claude checks
-// the credentials file (with expiry); Copilot checks the cached token. For
-// backends we cannot introspect it returns (false, false) = unknown.
+// the credentials file (a live access token, or an expired one whose refresh
+// grant is still good — see claude.HasUsableToken); Copilot checks the cached
+// token. For backends we cannot introspect it returns (false, false) = unknown.
 func (m *Manager) BackendAuthAvailable(backend string) (available, known bool) {
 	switch backend {
 	case "claude":
-		return claude.HasValidToken(claude.CredentialsPath), true
+		return claude.HasUsableToken(claude.CredentialsPath), true
 	case "copilot":
 		m.mu.RLock()
 		tok := m.copilotAuthToken
@@ -1068,12 +1077,12 @@ func writeAgentCredFile(path, token string, agentUID int) error {
 	}
 	if agentUID > 0 {
 		if err := os.Chown(tmpPath, agentUID, -1); err != nil {
-			os.Remove(tmpPath)
+			_ = os.Remove(tmpPath) // best-effort cleanup; the chown error is what's returned
 			return fmt.Errorf("chown cred cache: %w", err)
 		}
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath) // best-effort cleanup; the rename error is what's returned
 		return fmt.Errorf("rename cred cache: %w", err)
 	}
 	return nil
@@ -1182,18 +1191,23 @@ func copilotTokenUsable(path string) (bool, string) {
 	return true, ""
 }
 
-// claudeTokenUsable reports whether the Claude credentials file holds a valid,
-// non-expired token. Unlike copilot's, a Claude credential can be PRESENT but
-// unusable (expired), so a bare presence check is insufficient — it delegates
-// to claude.HasValidToken, which parses the file and checks expiry. It
-// distinguishes an absent file ("missing") from a present-but-stale one
-// ("invalid or expired") for a more actionable alert.
+// claudeTokenUsable reports whether the Claude credentials file can still put
+// agents to work. Unlike copilot's, a Claude credential can be PRESENT but
+// unusable, so a bare presence check is insufficient — it delegates to
+// claude.HasUsableToken. It distinguishes an absent file ("missing") from one
+// that is genuinely spent ("login expired") for a more actionable alert.
+//
+// An access token that has merely aged out is NOT unusable: the refresh grant
+// beside it mints a new one on the next CLI start, with no operator involved.
+// Reporting that state as unusable is what made this watchdog prescribe an
+// interactive login every time a hive ran longer than a Claude access token
+// lives — roughly once a day, for a credential that was fine.
 func claudeTokenUsable(path string) (bool, string) {
 	if _, err := os.Stat(path); err != nil {
 		return false, "missing"
 	}
-	if !claude.HasValidToken(path) {
-		return false, "invalid or expired"
+	if !claude.HasUsableToken(path) {
+		return false, "login expired (no usable refresh grant)"
 	}
 	return true, ""
 }
@@ -2560,81 +2574,7 @@ func (m *Manager) launchInTmux(ctx context.Context, agent *AgentProcess) error {
 			m.logger.Warn("agent has both tools and mode set; tools takes precedence", "agent", agent.Name)
 		}
 	} else {
-		switch backend {
-		case "claude":
-			bareFlag := ""
-			if isInference {
-				bareFlag = fmt.Sprintf(" --bare --settings %s", claudeInferenceSettingsPath)
-			}
-			base := fmt.Sprintf("%s --model %s --dangerously-skip-permissions%s", binary, model, bareFlag)
-			// Deny ALL GitHub MCP write tools in EVERY mode: agents author via the
-			// App-gated gh wrapper, never as the user via the MCP. Mode governs the
-			// gh-wrapper/proxy layer only, not what the MCP may write.
-			launchCmd = base + claudeGitHubWriteDenyFlags + claudeHostStateDenyFlags()
-		case "copilot":
-			// model arrives here already canonicalized by normalizeModelName
-			// (CanonicalizeCopilotModel: separator drift like claude-fable.5 is
-			// normalized to the CLI-accepted claude-fable-5, #4262) and is then
-			// passed as-is to `copilot --model %s`. It may be a
-			// concrete id OR the auto-selection sentinel "auto" (copilotAutoModel
-			// in cli_models.go), which lets the Copilot CLI pick/adjust the model
-			// per task. Nothing here assumes a concrete id, so the sentinel flows
-			// through unchanged.
-			// PRIMARY defense against authoring as the login USER via the MCP:
-			// we do NOT pass --enable-all-github-mcp-tools. Copilot CLI's built-in
-			// GitHub MCP server is READ-ONLY BY DEFAULT (v0.0.350+), so the write
-			// tools (create_issue/create_pull_request/…) are never registered.
-			// READ tools (get_issue/list/search) stay available in that read-only
-			// default, so nothing here disables useful lookups. All GitHub writes
-			// must go through the App-gated gh wrapper / hive-open-pr.
-			// copilotGitHubWriteDenyFlags is applied as belt-and-suspenders (with
-			// the CORRECT `github-mcp-server(` server name) on top of the read-only
-			// default. This is identical across ModeIssuesAndPRs / ModeIssuesOnly /
-			// advisory — the mode never changes what the MCP can write (it never
-			// legitimately should), it only governs the separate, unchanged
-			// gh-wrapper/proxy layer that still reads Mode for the App-gated writes.
-			launchCmd = fmt.Sprintf("%s --model %s --no-auto-update --allow-all%s",
-				binary, model, copilotGitHubWriteDenyFlags)
-		case "gemini":
-			launchCmd = fmt.Sprintf("%s --model %s", binary, model)
-		case "agy":
-			// Antigravity CLI (Google's Gemini CLI replacement). Needs
-			// --dangerously-skip-permissions or it blocks on a per-tool
-			// approval prompt that no one is attached to answer — the same
-			// contract as claude's bypass flag, and the value already used for
-			// agy in config/backends.conf.
-			//
-			// An unrecognised --model is NOT fatal here: agy warns
-			// ("model X is not recognized ... Using \"Gemini 3.6 Flash\"
-			// instead") and continues on its default, so a stale model carried
-			// over from another provider degrades to a warning rather than a
-			// dead agent.
-			//
-			// --effort is REQUIRED whenever --model is given. Without it agy
-			// warns "--model <m> requires --effort (available: low, medium,
-			// high)" and silently ignores the model, so the configured model
-			// would never actually take effect. "low" matches the effort agy
-			// itself falls back to, keeping behaviour unchanged while making
-			// the model selection real.
-			launchCmd = fmt.Sprintf("%s --dangerously-skip-permissions", binary)
-			if model != "" {
-				launchCmd = fmt.Sprintf("%s --model %s --effort %s", launchCmd, model, agyDefaultEffort)
-			}
-		case "pi":
-			// pi takes the model as a CLI flag, not a subcommand. Without
-			// this case the launch command never receives the configured
-			// model (previously it also hit the goose binary via the alias).
-			launchCmd = fmt.Sprintf("%s --model %s", binary, model)
-		case "goose":
-			launchCmd = fmt.Sprintf("%s run -s", binary)
-			if model != "" {
-				launchCmd = fmt.Sprintf("%s --model %s", launchCmd, model)
-			}
-		case bobBackend:
-			launchCmd = bobLaunchCmd(binary)
-		default:
-			launchCmd = binary
-		}
+		launchCmd = backendLaunchCmd(binary, model, backend, isInference)
 	}
 
 	if mcpFlags := connectionMCPFlags(agent.Config.Connections, backend); mcpFlags != "" {
@@ -6101,7 +6041,7 @@ func isVisualNoise(s string) bool {
 	if t == "" {
 		return true
 	}
-	if strings.Trim(t, "─━─") == "" {
+	if strings.Trim(t, "─━") == "" {
 		return true
 	}
 	if strings.HasPrefix(t, "/data/agents/") && !strings.Contains(t, " ") {
@@ -6531,11 +6471,51 @@ func paneShowsTransientAPIError(lines []string) bool {
 	return false
 }
 
+// claudeCredentialReachable reports whether a usable Claude credential exists
+// at the locations this agent's CLI will look — its per-UID home first, then
+// the shared path its ~/.claude symlink resolves to.
+//
+// It is a REACHABILITY check, not a permission check, and the distinction is
+// worth stating: this runs in the hive process, so it proves the file is there
+// and parseable, not that the agent's UID can open it. The deployment keeps
+// those the same — the entrypoint's inotify guard chowns /data/home/.claude to
+// dev:node and holds it group-readable on every write, precisely so every
+// agent UID can read it (#4619). If that ever drifts, an agent lands at a login
+// prompt with no injected token instead of a working one; that is a loud,
+// alerting state, not a silent one, which is the right direction to fail in.
+//
+// HasUsableToken, not HasValidToken: an access token that has aged out is
+// exactly the case the CLI fixes for itself on start, by redeeming the refresh
+// grant beside it. Treating that state as "no credential here" would re-inject
+// the static override precisely when the CLI was about to recover, which is the
+// failure this guard exists to prevent.
+func claudeCredentialReachable(agent *AgentProcess, backend string) bool {
+	if agent == nil {
+		return false
+	}
+	for _, p := range agentClaudeCredentialPaths(agent.Name, agent.UID, backend) {
+		if claude.HasUsableToken(p) {
+			return true
+		}
+	}
+	return false
+}
+
 // configHasTokens returns true if either the Copilot config or Claude
-// credentials file contains a valid token. Used to decide whether an agent
-// stuck on a login prompt can be auto-restarted.
+// credentials file holds a credential a restart can still use. Used to decide
+// whether an agent stuck on a login prompt can be auto-restarted.
+//
+// claude.HasUsableToken, not HasValidToken: the single most common reason a
+// Claude agent sits at "Please run /login" is that its access token aged out
+// under a long-lived tmux session. Claude Code pins the token it read at
+// startup for the life of the process — it neither re-reads the file nor
+// refreshes mid-session — so the pane 401s while the refresh grant on disk is
+// still good for weeks. That is EXACTLY the case this heal was built for, and
+// gating it on HasValidToken excluded it: the file said "expired", the heal
+// stood down, and the operator was paged to redo a login that a restart would
+// have made unnecessary.
 func configHasTokens() bool {
-	if claude.HasValidToken(sharedClaudeCredentialPath) {
+	if claude.HasUsableToken(sharedClaudeCredentialPath) {
 		return true
 	}
 	return copilotConfigHasTokens()
@@ -6760,7 +6740,7 @@ var githubTokenLogin = func(token string) string {
 	if err != nil {
 		return ""
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return ""
 	}
@@ -7486,11 +7466,21 @@ func (m *Manager) setupCodexHome(agent *AgentProcess) {
 // dir was written as dev/root and the agent EACCESes on it at startup — the
 // same failure class cavemanNpmCachePath removes foreign-owned caches for.
 //
+// The primary repair is an in-place `chown -R` to the agent UID (#5379): an
+// agent RENAME is the common trigger — the per-agent CODEX_HOME keeps the
+// PREVIOUS agent's owner — and a rename should not discard the lane's codex
+// state (cache/, .tmp/, history). Chowning also avoids walking the tree from
+// Go entirely, which matters because /data on hosted spokes is an NFSv3 PVC
+// where os.RemoveAll's openat-based descent fails with EACCES even as root.
+//
+// Only when the chown itself fails do we fall back to a rebuild, and that
+// rebuild shells out to `rm -rf` (via su-exec, the same idiom the rest of
+// setupCodexHome uses) rather than os.RemoveAll, for the same NFSv3 reason.
 // Hive never writes config.toml, so any content is operator-authored: the
-// heal salvages it when the manager can read it and returns the bytes for
-// setupCodexHome to write back as the agent after the re-mkdir. A dir that
-// cannot be rebuilt (root-owned, no write access) is left alone with an
-// Error log naming the owner and the manual fix.
+// rebuild path salvages it when the manager can read it and returns the bytes
+// for setupCodexHome to write back as the agent after the re-mkdir. A dir that
+// can be neither chowned nor removed is left alone with an Error log naming
+// the owner and the manual fix.
 func (m *Manager) healCodexHomeOwnership(agent *AgentProcess, dir, agentUser string) []byte {
 	owner := fileOwnerUID(dir)
 	if owner < 0 {
@@ -7500,10 +7490,20 @@ func (m *Manager) healCodexHomeOwnership(agent *AgentProcess, dir, agentUser str
 		return m.healForeignCodexConfig(agent, dir, agentUser)
 	}
 	// Codex's app-server requires the current UID to own CODEX_HOME itself,
-	// so a foreign-owned dir can only be rebuilt, not patched around.
+	// so a foreign-owned dir must be re-owned (preferred) or rebuilt.
+	chownErr := m.chownCodexHomeToAgent(agent, dir)
+	if chownErr == nil {
+		m.logger.Warn("re-owned codex home that was owned by the wrong UID (agent rename); codex state preserved", "agent", agent.Name, "dir", dir, "ownerUID", owner, "wantUID", agent.UID)
+		// healForeignCodexConfig is still the right follow-up: the recursive
+		// chown fixed every entry it could reach, but a config.toml that is a
+		// symlink or otherwise skipped stays foreign-owned, and that narrower
+		// heal removes it (salvaging content) so codex can read its config.
+		return m.healForeignCodexConfig(agent, dir, agentUser)
+	}
+	m.logger.Warn("could not chown codex home to the agent; falling back to rebuild", "agent", agent.Name, "dir", dir, "ownerUID", owner, "wantUID", agent.UID, "error", chownErr)
 	cfgPath := filepath.Join(dir, "config.toml")
 	salvaged, readErr := os.ReadFile(cfgPath)
-	if err := os.RemoveAll(dir); err != nil {
+	if err := removeTreeAsRoot(dir); err != nil {
 		m.logger.Error("codex home is owned by the wrong UID and could not be rebuilt; codex will fail until it is chowned or removed manually", "agent", agent.Name, "dir", dir, "ownerUID", owner, "wantUID", agent.UID, "error", err)
 		return nil
 	}
@@ -7512,6 +7512,56 @@ func (m *Manager) healCodexHomeOwnership(agent *AgentProcess, dir, agentUser str
 		return nil
 	}
 	return salvaged
+}
+
+// codexHomeChownUserSpec is the identity the recursive chown runs as. Only
+// root can give a directory away to another UID, and the manager runs as dev,
+// so this goes through the same SUID su-exec helper every other UID switch in
+// setupCodexHome uses (see the Dockerfile C6 note: su-exec is 4750
+// root:hive-launch, exec-able by dev but NOT by any agent UID).
+const codexHomeChownUserSpec = "root"
+
+// chownCodexHomeToAgent recursively gives CODEX_HOME to the agent UID.
+//
+// NFS SAFETY (#5379): this MUST shell out. /data on hosted spokes is NFSv3,
+// where Go's own tree walks (os.RemoveAll, filepath.WalkDir + os.Lchown) fail
+// mid-descent with "openfdat ...: permission denied" because openat-based
+// directory descriptors are not reliably supported there. `chown -R` in
+// coreutils does not use that access pattern and is verified working on the
+// affected mount. Do not "simplify" this back into a Go walk.
+//
+// -h chowns symlinks THEMSELVES rather than following them: auth.json is a
+// symlink into the SHARED credential file, which must keep its own ownership
+// and must never be rewritten through.
+func (m *Manager) chownCodexHomeToAgent(agent *AgentProcess, dir string) error {
+	return chownTreeAsRoot(dir, fmt.Sprintf("%d:%d", agent.UID, os.Getgid()))
+}
+
+// chownTreeAsRoot is a var, not a plain func, ONLY so tests can substitute a
+// harness that performs the same re-owning without the SUID helper (which
+// exists only inside the image). Production always uses the exec below.
+var chownTreeAsRoot = func(dir, spec string) error {
+	cmd := exec.Command("su-exec", codexHomeChownUserSpec, "chown", "-Rh", spec, dir)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return outputErr(fmt.Sprintf("chown -Rh %s %s", spec, dir), err, output)
+	}
+	return nil
+}
+
+// removeTreeAsRoot deletes a tree the manager may not own.
+//
+// NFS SAFETY (#5379): os.RemoveAll CANNOT be used here. It descends with
+// openat-based directory file descriptors, which fail with EACCES on the
+// NFSv3-backed /data PVC even for root — the exact wedge that left a renamed
+// agent's codex backend dead for days. A shell `rm -rf` on the identical path
+// succeeds immediately. Keep this as an exec, not a Go walk.
+// It is a var for the same test-substitution reason as chownTreeAsRoot.
+var removeTreeAsRoot = func(dir string) error {
+	cmd := exec.Command("su-exec", codexHomeChownUserSpec, "rm", "-rf", dir)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return outputErr(fmt.Sprintf("rm -rf %s", dir), err, output)
+	}
+	return nil
 }
 
 // healForeignCodexConfig handles the agent-owned-dir case: a config.toml
@@ -8138,7 +8188,7 @@ func readInferenceConfigFile(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // read-only fd; nothing to lose on close error
 	return io.ReadAll(f)
 }
 
@@ -8168,7 +8218,7 @@ func writeInferenceConfigFile(path string, data []byte) error {
 		return err
 	}
 	if _, err := f.Write(data); err != nil {
-		f.Close()
+		_ = f.Close() // best-effort cleanup; the write error is what's returned
 		return err
 	}
 	return f.Close()
@@ -8182,7 +8232,7 @@ func writeAgentStateFile(path string, data []byte) error {
 		return err
 	}
 	if _, err := f.Write(data); err != nil {
-		f.Close()
+		_ = f.Close() // best-effort cleanup; the write error is what's returned
 		return err
 	}
 	// O_CREATE honours the mode only when the file did not already exist (and
@@ -8196,7 +8246,7 @@ func writeAgentStateFile(path string, data []byte) error {
 	// symlink and the mode change applied to the link target (TOCTOU, #3175).
 	// f.Chmod acts on the inode we opened, closing that window.
 	if err := f.Chmod(agentStateFileMode); err != nil {
-		f.Close()
+		_ = f.Close() // best-effort cleanup; the chmod error is what's returned
 		return err
 	}
 	return f.Close()
@@ -8561,6 +8611,15 @@ type agentEnvPair struct {
 	Secret bool
 }
 
+// inferenceQuietCLIEnv is the set of Claude CLI switches exported to
+// inference-routed sessions so the CLI stops emitting non-inference traffic
+// (telemetry, error reporting, nonessential lookups) to its Anthropic host.
+var inferenceQuietCLIEnv = []string{
+	"DISABLE_TELEMETRY",
+	"DISABLE_ERROR_REPORTING",
+	"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+}
+
 func (m *Manager) agentEnvPairs(agent *AgentProcess) []agentEnvPair {
 	model := agent.Config.Model
 	if agent.ModelOverride != "" {
@@ -8659,6 +8718,16 @@ func (m *Manager) agentEnvPairs(agent *AgentProcess) []agentEnvPair {
 		// at most N completion tokens"); a future enhancement could parse it
 		// to auto-adjust per-model instead of using a universal floor.
 		vars = append(vars, agentEnvPair{"CLAUDE_CODE_MAX_OUTPUT_TOKENS", strconv.Itoa(inferenceMaxOutputTokensDefault), false})
+		// The Claude CLI sends telemetry batches, error reports, and other
+		// non-inference traffic to its configured Anthropic host. Routed at
+		// an OpenAI-compatible gateway that traffic has nowhere useful to go
+		// (the proxy now answers it locally rather than forwarding it — see
+		// classifyInferencePath), so switch it off at the source. Only for
+		// inference-routed sessions: subscription/Anthropic-direct sessions
+		// keep Anthropic's own telemetry.
+		for _, v := range inferenceQuietCLIEnv {
+			vars = append(vars, agentEnvPair{v, "1", false})
+		}
 	}
 	if m.copilotAuthToken != "" {
 		vars = append(vars, agentEnvPair{"COPILOT_GITHUB_TOKEN", m.copilotAuthToken, true})
@@ -8691,7 +8760,34 @@ func (m *Manager) agentEnvPairs(agent *AgentProcess) []agentEnvPair {
 	// Nil for advisory agents and for hives with no Linear credential, so a
 	// GitHub-only hive sees no change.
 	vars = append(vars, m.linearEnvPairs(agent)...)
-	if m.claudeAuthToken != "" && backend == "claude" {
+	// CLAUDE_CODE_OAUTH_TOKEN is a LAST RESORT, not the normal delivery path.
+	//
+	// Claude Code treats this variable as a static bearer token: when it is
+	// set the CLI uses it verbatim, never opens ~/.claude/.credentials.json,
+	// and therefore never refreshes. Measured in-container (2026-09-01): with
+	// the variable set to a bad value and a perfectly good credentials file
+	// beside it, the CLI answered "401 OAuth access token is invalid" — there
+	// is no fallback to the file.
+	//
+	// m.claudeAuthToken is a snapshot of the SHORT-LIVED access token, taken
+	// once at manager construction and refreshed only by ReloadClaudeToken()
+	// after a dashboard login. Injecting it therefore pinned every claude
+	// agent to the remaining life of whatever access token happened to be on
+	// disk when the container started — Claude access tokens live 8h, so the
+	// whole fleet 401'd within a day of every restart and the only recovery
+	// hive offered was an operator re-login, once per agent. That is the daily
+	// re-authentication treadmill of #5454.
+	//
+	// It is also unnecessary since per-agent homes (#4619): every agent's
+	// ~/.claude is a symlink to the shared /data/home/.claude, so the CLI can
+	// read the credential itself — and redeem its refresh grant on start,
+	// which is the one thing the env var makes impossible.
+	//
+	// So inject ONLY when the agent has no credential file it can read. That
+	// keeps the variable doing the job it was added for (#c5648bc9: deliver a
+	// dashboard-obtained token to an agent that cannot see the file) and stops
+	// it overriding a credential that can still refresh itself.
+	if m.claudeAuthToken != "" && backend == "claude" && !claudeCredentialReachable(agent, backend) {
 		vars = append(vars, agentEnvPair{"CLAUDE_CODE_OAUTH_TOKEN", m.claudeAuthToken, true})
 	}
 	// bob reads its key from BOBSHELL_API_KEY. Secret: true keeps the value off
@@ -9438,7 +9534,7 @@ func killAgentProcesses(uid int, logger *slog.Logger) int {
 				break
 			}
 		}
-		f.Close()
+		_ = f.Close() // read-only /proc status fd; nothing to lose on close error
 
 		if ownerUID != uid {
 			continue
@@ -9912,6 +10008,91 @@ func toolRulesToLaunchCmd(binary, model, backend string, tools *config.ToolsConf
 		}
 		return cmd
 	}
+}
+
+// backendLaunchCmd builds the per-backend CLI command used when an agent has no
+// explicit ToolsConfig. It is the default-path counterpart to
+// toolRulesToLaunchCmd and is deliberately pure — no Manager, no tmux, no
+// process — so the flag contract each backend depends on can be asserted
+// directly in tests instead of by polling a live pane for typed output.
+func backendLaunchCmd(binary, model, backend string, isInference bool) string {
+	var launchCmd string
+	switch backend {
+	case "claude":
+		bareFlag := ""
+		if isInference {
+			bareFlag = fmt.Sprintf(" --bare --settings %s", claudeInferenceSettingsPath)
+		}
+		base := fmt.Sprintf("%s --model %s --dangerously-skip-permissions%s", binary, model, bareFlag)
+		// Deny ALL GitHub MCP write tools in EVERY mode: agents author via the
+		// App-gated gh wrapper, never as the user via the MCP. Mode governs the
+		// gh-wrapper/proxy layer only, not what the MCP may write.
+		launchCmd = base + claudeGitHubWriteDenyFlags + claudeHostStateDenyFlags()
+	case "copilot":
+		// model arrives here already canonicalized by normalizeModelName
+		// (CanonicalizeCopilotModel: separator drift like claude-fable.5 is
+		// normalized to the CLI-accepted claude-fable-5, #4262) and is then
+		// passed as-is to `copilot --model %s`. It may be a
+		// concrete id OR the auto-selection sentinel "auto" (copilotAutoModel
+		// in cli_models.go), which lets the Copilot CLI pick/adjust the model
+		// per task. Nothing here assumes a concrete id, so the sentinel flows
+		// through unchanged.
+		// PRIMARY defense against authoring as the login USER via the MCP:
+		// we do NOT pass --enable-all-github-mcp-tools. Copilot CLI's built-in
+		// GitHub MCP server is READ-ONLY BY DEFAULT (v0.0.350+), so the write
+		// tools (create_issue/create_pull_request/…) are never registered.
+		// READ tools (get_issue/list/search) stay available in that read-only
+		// default, so nothing here disables useful lookups. All GitHub writes
+		// must go through the App-gated gh wrapper / hive-open-pr.
+		// copilotGitHubWriteDenyFlags is applied as belt-and-suspenders (with
+		// the CORRECT `github-mcp-server(` server name) on top of the read-only
+		// default. This is identical across ModeIssuesAndPRs / ModeIssuesOnly /
+		// advisory — the mode never changes what the MCP can write (it never
+		// legitimately should), it only governs the separate, unchanged
+		// gh-wrapper/proxy layer that still reads Mode for the App-gated writes.
+		launchCmd = fmt.Sprintf("%s --model %s --no-auto-update --allow-all%s",
+			binary, model, copilotGitHubWriteDenyFlags)
+	case "gemini":
+		launchCmd = fmt.Sprintf("%s --model %s", binary, model)
+	case "agy":
+		// Antigravity CLI (Google's Gemini CLI replacement). Needs
+		// --dangerously-skip-permissions or it blocks on a per-tool
+		// approval prompt that no one is attached to answer — the same
+		// contract as claude's bypass flag, and the value already used for
+		// agy in config/backends.conf.
+		//
+		// An unrecognised --model is NOT fatal here: agy warns
+		// ("model X is not recognized ... Using \"Gemini 3.6 Flash\"
+		// instead") and continues on its default, so a stale model carried
+		// over from another provider degrades to a warning rather than a
+		// dead agent.
+		//
+		// --effort is REQUIRED whenever --model is given. Without it agy
+		// warns "--model <m> requires --effort (available: low, medium,
+		// high)" and silently ignores the model, so the configured model
+		// would never actually take effect. "low" matches the effort agy
+		// itself falls back to, keeping behaviour unchanged while making
+		// the model selection real.
+		launchCmd = fmt.Sprintf("%s --dangerously-skip-permissions", binary)
+		if model != "" {
+			launchCmd = fmt.Sprintf("%s --model %s --effort %s", launchCmd, model, agyDefaultEffort)
+		}
+	case "pi":
+		// pi takes the model as a CLI flag, not a subcommand. Without
+		// this case the launch command never receives the configured
+		// model (previously it also hit the goose binary via the alias).
+		launchCmd = fmt.Sprintf("%s --model %s", binary, model)
+	case "goose":
+		launchCmd = fmt.Sprintf("%s run -s", binary)
+		if model != "" {
+			launchCmd = fmt.Sprintf("%s --model %s", launchCmd, model)
+		}
+	case bobBackend:
+		launchCmd = bobLaunchCmd(binary)
+	default:
+		launchCmd = binary
+	}
+	return launchCmd
 }
 
 // connectionMCPFlags builds MCP-related launch flags from connection configs.

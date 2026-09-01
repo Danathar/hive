@@ -10,9 +10,14 @@ import (
 )
 
 // #4918: `just contribute-hive <backend> local` runs the backend CLI as the
-// contributor's own user, on their own machine. Claude-family agents now use
-// Claude Code's native OS sandbox on that path, Codex retains its own sandbox,
-// and backends without a sandbox still warn plainly that they are unconfined.
+// contributor's own user, on their own machine. Claude/litellm, codex, and
+// copilot now use a native OS-enforced sandbox on that path; opencode gets a
+// command-name deny-list (a floor, not a boundary) via its own permission
+// config; goose, agy, bob, pi, aider, and kilo have no confinement mechanism this
+// repo can wire at all and REFUSE to launch locally without an explicit
+// per-backend opt-in env var. See contribute_local_mode_backend_matrix_test.go
+// for the tests covering the refuse-to-launch backends, copilot's
+// sandbox gating, and opencode's deny-list.
 //
 // What the silence cost: an agent doing entirely correct work on an assigned
 // third-party repo ran that repo's own test suite; a latent defect in two of
@@ -47,7 +52,7 @@ func TestLocalModeDistinguishesConfinedAndUnconfinedBackends(t *testing.T) {
 	block := contributeHiveLocalBranch(t)
 
 	for _, want := range []string{
-		"claude|litellm", "codex)", "_LOCAL_WRITE_CONFINED=true",
+		"claude|litellm", "codex)", `_LOCAL_POSTURE="sandboxed"`,
 		"workspace write confinement is enabled", "NOT confined",
 	} {
 		if !strings.Contains(block, want) {
@@ -132,6 +137,9 @@ func TestClaudeLocalSandboxIsMandatory(t *testing.T) {
 		t.Fatalf("Claude local argv has no sandbox settings: %q", args)
 	}
 	var settings struct {
+		Permissions struct {
+			Allow []string `json:"allow"`
+		} `json:"permissions"`
 		Sandbox struct {
 			Enabled                  bool `json:"enabled"`
 			FailIfUnavailable        bool `json:"failIfUnavailable"`
@@ -149,6 +157,15 @@ func TestClaudeLocalSandboxIsMandatory(t *testing.T) {
 	}
 	if len(settings.Sandbox.Filesystem.AllowWrite) != 1 || settings.Sandbox.Filesystem.AllowWrite[0] != workspace {
 		t.Fatalf("sandbox write roots = %q, want only %q", settings.Sandbox.Filesystem.AllowWrite, workspace)
+	}
+	wantPermissions := []string{"Edit(" + workspace + "/**)", "Write(" + workspace + "/**)"}
+	if len(settings.Permissions.Allow) != len(wantPermissions) {
+		t.Fatalf("tool write permissions = %q, want %q", settings.Permissions.Allow, wantPermissions)
+	}
+	for i, want := range wantPermissions {
+		if settings.Permissions.Allow[i] != want {
+			t.Fatalf("tool write permissions = %q, want %q", settings.Permissions.Allow, wantPermissions)
+		}
 	}
 }
 

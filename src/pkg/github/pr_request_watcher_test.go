@@ -35,6 +35,9 @@ func newPRMockServerLabels(t *testing.T, existingHead string, created *int, adde
 			// coverage for kubestellar/hive#4928 lives in pullrequest_base_test.go.
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"name":"r","default_branch":"main"}`)
+		case r.Method == "GET" && strings.Contains(r.URL.Path, "/compare/"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"files":[]}`)
 		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/pulls"):
 			// dedupe list — return one PR only when the requested head matches.
 			head := r.URL.Query().Get("head") // "owner:branch"
@@ -44,6 +47,9 @@ func newPRMockServerLabels(t *testing.T, existingHead string, created *int, adde
 				return
 			}
 			_, _ = io.WriteString(w, `[]`)
+		case r.Method == "GET" && strings.Contains(r.URL.Path, "/issues/"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"number":1,"title":"ordinary issue","body":"implement the requested change","state":"open"}`)
 		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/pulls"):
 			if created != nil {
 				*created++
@@ -227,12 +233,14 @@ func TestPRRequestWatcher_NilAuthzFailsClosed(t *testing.T) {
 func TestPRRequestWatcher_HoldLabelApplied(t *testing.T) {
 	cases := []struct {
 		name     string
-		holdFn   func() bool
+		agent    string
+		holdFn   func(string) bool
 		wantHold bool
 	}{
-		{"hold-gated level applies hold", func() bool { return true }, true},
-		{"non-hold-gated level applies nothing", func() bool { return false }, false},
-		{"nil decider applies nothing", nil, false},
+		{"hold-gated level applies hold", "scanner", func(string) bool { return true }, true},
+		{"non-hold-gated level applies nothing", "scanner", func(string) bool { return false }, false},
+		{"agent-specific decider applies hold", "publicist", func(agent string) bool { return agent == "publicist" }, true},
+		{"nil decider applies nothing", "scanner", nil, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -250,7 +258,7 @@ func TestPRRequestWatcher_HoldLabelApplied(t *testing.T) {
 			prRequestDirForTest = dir
 			defer func() { prRequestDirForTest = old }()
 
-			_, _ = WritePRRequest(dir, PRRequest{Repo: "o/r", Head: "scanner/hold", Title: "gated PR", Agent: "scanner"})
+			_, _ = WritePRRequest(dir, PRRequest{Repo: "o/r", Head: "scanner/hold", Title: "gated PR", Agent: tc.agent})
 			c.ProcessPRRequestsOnce(context.Background())
 
 			if created != 1 {
@@ -269,6 +277,74 @@ func TestPRRequestWatcher_HoldLabelApplied(t *testing.T) {
 	}
 }
 
+func TestPRRequestWatcher_RetriesRequiredHoldLabelFailure(t *testing.T) {
+	created, labelAttempts := 0, 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/repos/o/r"):
+			_, _ = io.WriteString(w, `{"name":"r","default_branch":"main"}`)
+		// The content gate compares base...head before the PR is opened; this
+		// test is about the hold label, so the diff is empty and clean.
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/compare/"):
+			_, _ = io.WriteString(w, `{"files":[]}`)
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/pulls"):
+			if created > 0 {
+				_, _ = io.WriteString(w, `[{"number":42,"html_url":"https://github.com/o/r/pull/42","head":{"ref":"scanner/hold"}}]`)
+			} else {
+				_, _ = io.WriteString(w, `[]`)
+			}
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/pulls"):
+			created++
+			_, _ = io.WriteString(w, `{"number":42,"html_url":"https://github.com/o/r/pull/42"}`)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/labels"):
+			labelAttempts++
+			if labelAttempts == 1 {
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = io.WriteString(w, `{"message":"temporary label failure"}`)
+				return
+			}
+			_, _ = io.WriteString(w, `[]`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	c := NewClientForTest(srv.URL, "o", []string{"r"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	c.prAuthz = func(string, int) error { return nil }
+	c.prHoldLabel = func(string) bool { return true }
+
+	dir := t.TempDir()
+	old := prRequestDirForTest
+	prRequestDirForTest = dir
+	defer func() { prRequestDirForTest = old }()
+	reqPath, err := WritePRRequest(dir, PRRequest{
+		Repo: "o/r", Head: "scanner/hold", Title: "gated PR", Agent: "scanner",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now()
+	clock := func() time.Time { return now }
+	c.processPRRequests(context.Background(), clock)
+	if _, err := os.Stat(reqPath); err != nil {
+		t.Fatalf("request must remain queued when required hold label fails: %v", err)
+	}
+	if created != 1 || labelAttempts != 1 {
+		t.Fatalf("first pass created=%d label attempts=%d, want 1/1", created, labelAttempts)
+	}
+
+	now = now.Add(requestRetryBase + time.Second)
+	c.processPRRequests(context.Background(), clock)
+	if _, err := os.Stat(reqPath); !os.IsNotExist(err) {
+		t.Fatalf("request must be consumed after hold label retry succeeds: %v", err)
+	}
+	if created != 1 || labelAttempts != 2 {
+		t.Fatalf("retry created=%d label attempts=%d, want deduped 1/2", created, labelAttempts)
+	}
+}
+
 // newPRFailingMockServer fails the first `fails` POST /pulls calls with a 500,
 // then behaves like newPRMockServer. The dedupe GET always returns empty.
 func newPRFailingMockServer(t *testing.T, created *int, fails *int) *httptest.Server {
@@ -278,6 +354,9 @@ func newPRFailingMockServer(t *testing.T, created *int, fails *int) *httptest.Se
 		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/repos/o/r"):
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"name":"r","default_branch":"main"}`)
+		case r.Method == "GET" && strings.Contains(r.URL.Path, "/compare/"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"files":[]}`)
 		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/pulls"):
 			_, _ = io.WriteString(w, `[]`)
 		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/pulls"):

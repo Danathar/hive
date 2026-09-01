@@ -91,10 +91,10 @@ var pickerOnlyExceptions = []pickerOnlyException{
 // Direction matters: this asserts picker ⊆ registries, NOT the reverse. A name
 // the picker offers but nothing can launch is a broken promise to the operator
 // — the bug this issue reported. A supported backend the picker omits is only
-// under-advertisement, and whether `agy` or `pi` belong in the HUB's picker
-// depends on whether they can authenticate in a pod (agy's sign-in is an
-// interactive Google OAuth flow with no API-key mode), which is a question this
-// guard must not answer by implication.
+// under-advertisement. Some registered CLIs still target contributor-only or
+// otherwise separately constrained paths, so this generic safety guard must not
+// turn registry membership into a promise that every backend belongs here.
+// Backend-specific visibility requirements (including agy) get explicit tests.
 func TestBackendPickerOffersOnlyDispatchableBackends(t *testing.T) {
 	picker := jsBackendList(t, backendPickerSource(t), "KNOWN_BACKENDS")
 

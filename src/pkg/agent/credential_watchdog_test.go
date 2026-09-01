@@ -98,8 +98,30 @@ func writeClaudeCredsWithExpiry(t *testing.T, path, token string, expiresAtMilli
 	}
 }
 
-// TestClaudeTokenUsable proves the Claude probe distinguishes absent ("missing")
-// from present-but-expired ("invalid or expired") from valid.
+// writeClaudeCredsRefreshable writes a credentials file whose access token has
+// expired but whose refresh grant has not — the state a Claude fleet enters
+// roughly once a day, since access tokens live 8h.
+func writeClaudeCredsRefreshable(t *testing.T, path string) {
+	t.Helper()
+	body := map[string]any{
+		"claudeAiOauth": map[string]any{
+			"accessToken":           "sk-ant-oat-old",
+			"expiresAt":             time.Now().Add(-2 * time.Hour).UnixMilli(),
+			"refreshToken":          "sk-ant-ort-live",
+			"refreshTokenExpiresAt": time.Now().Add(28 * 24 * time.Hour).UnixMilli(),
+		},
+	}
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestClaudeTokenUsable proves the Claude probe distinguishes absent
+// ("missing") from a spent login from a credential that still works.
 func TestClaudeTokenUsable(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".credentials.json")
 
@@ -107,11 +129,12 @@ func TestClaudeTokenUsable(t *testing.T) {
 		t.Fatalf("absent file: expected (false,\"missing\"), got (%v,%q)", ok, reason)
 	}
 
-	// Present but expired (expiresAt in the past).
+	// Expired access token, no refresh grant: genuinely spent, only a human
+	// can fix it, and the watchdog's operator alert is correct.
 	past := time.Now().Add(-time.Hour).UnixMilli()
 	writeClaudeCredsWithExpiry(t, path, "sk-ant-oat-old", past)
-	if ok, reason := claudeTokenUsable(path); ok || reason != "invalid or expired" {
-		t.Fatalf("expired file: expected (false,\"invalid or expired\"), got (%v,%q)", ok, reason)
+	if ok, reason := claudeTokenUsable(path); ok || reason != "login expired (no usable refresh grant)" {
+		t.Fatalf("expired file: expected (false,\"login expired (no usable refresh grant)\"), got (%v,%q)", ok, reason)
 	}
 
 	// Present and valid (expiresAt in the future).
@@ -119,6 +142,15 @@ func TestClaudeTokenUsable(t *testing.T) {
 	writeClaudeCredsWithExpiry(t, path, "sk-ant-oat-fresh", future)
 	if ok, _ := claudeTokenUsable(path); !ok {
 		t.Fatal("valid file: expected usable")
+	}
+
+	// The regression this probe carried until 2026-09-01: an access token that
+	// merely aged out is NOT an unusable credential. The refresh grant beside
+	// it mints a new one on the next CLI start, so alerting here prescribed an
+	// interactive login for a fleet that only needed a restart.
+	writeClaudeCredsRefreshable(t, path)
+	if ok, reason := claudeTokenUsable(path); !ok {
+		t.Fatalf("expired-but-refreshable file: expected usable, got (%v,%q)", ok, reason)
 	}
 }
 

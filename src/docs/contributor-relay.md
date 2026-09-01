@@ -21,7 +21,7 @@ sequenceDiagram
 ```
 
 - The **work queue** is built from the hive's monitored repos: open, actionable issues that pass the admin's filters. The current depth is visible on the Hub tab and at `GET /api/contribute/status` (as `actionable_items`).
-- The **relay** authenticates with a registration token, receives one task at a time, drives the local CLI inside a tmux session, injects a short-lived GitHub token for the PR, and reports the result. It heartbeats every 30 s and reconnects with exponential backoff; a task is abandoned if it exceeds 30 minutes.
+- The **relay** authenticates with a registration token, receives one task at a time, drives the local CLI inside a tmux session, injects a short-lived GitHub token for the PR, and reports the result. It heartbeats every 30 s and reconnects with exponential backoff; a task is abandoned if the relay observes no forward progress for 30 minutes, or if it crosses an absolute 4-hour backstop. The GitHub token is valid for 55 minutes and is re-minted by the hub before it expires, so a task may outlive any single token ([below](#the-github-token-outlives-the-task-because-the-hub-re-mints-it)).
 - Every contributor has a **trust tier** with per-tier rate limits. See [Contributor trust tiers and delegated agent roles](contributor-trust-and-roles.md).
 
 ## Basic setup
@@ -46,6 +46,7 @@ just contribute-hive claude local  # host mode — relay + CLI directly on your 
 ```
 
 Containerized mode auto-detects the runtime — docker first, then podman — and can be forced with `export HIVE_CONTAINER_RUNTIME=podman`.
+The resolved runtime is passed into the container, so the "attach to the CLI" hints printed from inside it (the status line, and the banner shown when the CLI needs a login) name the engine that actually launched it ([#5145](https://github.com/kubestellar/hive/issues/5145)). In host mode there is no container, and those hints are a plain `tmux attach -t <session>`.
 
 Use `just contribute-check <backend>` before registering to catch missing CLIs or obvious auth gaps.
 
@@ -69,7 +70,7 @@ Important environment variables:
 | --- | --- | --- |
 | `HIVE_HUB` | value from `contributor.env`, else public hub default | WebSocket hub(s) to subscribe to. Use comma-separated URLs for multi-hub mode. Direct Compose reads the registered value from the mounted config file. |
 | `HIVE_REGISTRATION_TOKEN` | value from `contributor.env` | Registration token(s), positional with `HIVE_HUB` when multiple hubs are listed. Required; run `just contribute-setup` first. |
-| `AGENT_BACKEND` | `claude` | CLI/backend to run (`claude`, `copilot`, `goose`, `bob`, `codex`, `pi`, `aider`, `litellm`, `agy`, depending on image support and credentials). `agy` is not in the contributor image and cannot inherit a sign-in, so run it with `just contribute-hive agy local`. |
+| `AGENT_BACKEND` | `claude` | CLI/backend to run (`claude`, `copilot`, `goose`, `bob`, `codex`, `pi`, `aider`, `litellm`, `agy`, `opencode`, `kilo`, depending on image support and credentials). `agy` has no OS-level sandbox of its own, so run it containerized (`just contribute-hive agy`) — the contributor image ships the `agy` binary; local mode refuses to launch it without `HIVE_AGY_DANGEROUSLY_RUN_UNCONFINED=1`. `opencode` and `kilo` only run headless (`CONTRIBUTOR_MODE=headless`) — it has no interactive-tmux wiring. |
 | `AGENT_MODEL` | unset (backend default) | Optional model override passed to the contributor agent (e.g. `claude-sonnet-4-6`, `gpt-4o`, `gemini-2.5-pro`). Declared to the hive when the relay connects. |
 | `AGENT_REASONING_EFFORT` | unset | Reasoning effort override. Consumed by `codex` (`-c model_reasoning_effort`) and by `agy` (`--effort low\|medium\|high`, required whenever a model is set, else agy ignores the model). Ignored by other backends. |
 | `CONTRIBUTOR_MODE` | `interactive` | `interactive` keeps a tmux/TTY session. `headless` is for one-shot/no-TTY task delivery. |
@@ -77,6 +78,14 @@ Important environment variables:
 | `HIVE_CODEX_APPROVALS_REVIEWER` | `auto_review` | Codex reviewer for boundary requests. The default prevents Hive-delivered work from waiting on an interactive operator while retaining `workspace-write`; set `user` only for an intentionally attended contributor. Set it to the **empty string** to omit the `-c approvals_reviewer=` key entirely — the escape hatch if a Codex release rejects that config key at startup. Doing so keeps the sandbox posture; it is not the same as the dangerous bypass. |
 | `HIVE_CLAUDE_DANGEROUSLY_ALLOW_HOST_STATE` | unset | Drops the defense-in-depth Claude command denylist. In local mode the native filesystem sandbox still applies, so this does not grant host writes. |
 | `HIVE_CLAUDE_DANGEROUSLY_BYPASS_APPROVALS_AND_SANDBOX` | unset | Restores the pre-#4918 unconfined Claude/LiteLLM local posture. Use only on a disposable or externally sandboxed host. |
+| `HIVE_COPILOT_DANGEROUSLY_BYPASS_SANDBOX` | unset | Restores the unconfined Copilot local posture. Also the automatic fallback (with a warning) when the installed `copilot` CLI predates `--sandbox` (copilot-cli < 1.0.60). |
+| `HIVE_OPENCODE_DANGEROUSLY_ALLOW_HOST_STATE` | unset | Drops opencode's host-state command deny-list (`permission.bash`). opencode has no filesystem sandbox to fall back to either way — this only removes the command-name floor. |
+| `HIVE_GOOSE_DANGEROUSLY_RUN_UNCONFINED` | unset | **Required** for `just contribute-hive goose local` to launch at all. goose has no sandbox, filesystem allowlist, or command deny-list hive can wire; local mode refuses to launch without this. |
+| `HIVE_AGY_DANGEROUSLY_RUN_UNCONFINED` | unset | **Required** for `just contribute-hive agy local` to launch at all. Same reasoning as goose above — agy's execution modes govern approval only, not filesystem confinement. Container mode (the default) needs no such flag: it now ships the `agy` binary and runs it inside the container boundary. |
+| `HIVE_BOB_DANGEROUSLY_RUN_UNCONFINED` | unset | **Required** for `just contribute-hive bob local` to launch at all. Bob Shell documents no sandbox or path-restriction mechanism of any kind. |
+| `HIVE_PI_DANGEROUSLY_RUN_UNCONFINED` | unset | **Required** for `just contribute-hive pi local` to launch at all. pi ships with no sandbox by default; directory confinement exists only via a third-party extension hive does not depend on. |
+| `HIVE_AIDER_DANGEROUSLY_RUN_UNCONFINED` | unset | **Required** for `just contribute-hive aider local` to launch at all. aider has no sandbox or OS isolation option of any kind. |
+| `HIVE_KILO_DANGEROUSLY_RUN_UNCONFINED` | unset | **Required** for `just contribute-hive kilo local` to launch at all. kilo's `--auto` is an unattended auto-approve flag, not a boundary; kilo has no verified sandbox, filesystem allowlist, or command deny-list hive can wire. |
 
 ### Where each backend reads its instructions
 
@@ -95,6 +104,8 @@ mode fixed for Goose in [#2393](https://github.com/kubestellar/hive/issues/2393)
 | `pi` | `AGENTS.md`, `CLAUDE.md` |
 | `bob` | `.bob/AGENTS.md`, `CLAUDE.md` (compatibility) |
 | `agy` | `CLAUDE.md` |
+| `opencode` | `AGENTS.md`, `CLAUDE.md` |
+| `kilo` | `AGENTS.md`, `CLAUDE.md` |
 | anything else | `CLAUDE.md` only — the `*` fallback |
 
 A backend that reads neither `CLAUDE.md` nor one of the names above falls into
@@ -134,11 +145,19 @@ loudly named `HIVE_CLAUDE_DANGEROUSLY_BYPASS_APPROVALS_AND_SANDBOX=1` restores
 the old unconfined local posture for an externally isolated/disposable host.
 
 `just contribute-hive` still defaults to **container** mode, the stronger
-backend-independent boundary. In local mode Claude/LiteLLM now use the native
-sandbox and Codex retains `workspace-write`; other backends remain unconfined
-and the launch banner says so. The `agent_sandbox` Podman path documented in
-[sandbox-isolation.md](sandbox-isolation.md) remains **hub-side only** — nothing
-on the contributor path reads it.
+backend-independent boundary. In local mode: Claude/LiteLLM and Codex use
+their own OS-enforced sandboxes; Copilot now uses its own `--sandbox` (also
+OS-enforced — Seatbelt/bubblewrap/ProcessContainer depending on platform),
+gated on the installed CLI actually supporting the flag; opencode gets a
+command-name deny-list via its own `permission.bash` config (a floor, not a
+filesystem boundary — opencode has no OS sandbox); goose, agy, bob, pi, and
+aider have no confinement mechanism this repo can wire at all, and local mode
+for them **refuses to launch** unless the operator sets that backend's own
+`HIVE_<BACKEND>_DANGEROUSLY_RUN_UNCONFINED=1`. See
+[sandbox-isolation.md](sandbox-isolation.md)'s per-backend confinement matrix
+for the authoritative, up-to-date state. The `agent_sandbox` Podman path
+documented there remains **hub-side only** — nothing on the contributor path
+reads it.
 
 Codex config-key compatibility: `approvals_reviewer` is passed with `-c`, so it
 depends on the installed Codex release accepting that key. If a version rejects
@@ -165,7 +184,9 @@ The relay speaks to whatever backend you set up — pass it to `contribute-setup
 | `aider` | Aider |
 | `bob` | Bob shell (needs `BOBSHELL_API_KEY`) |
 | `litellm` | Claude Code pointed at **your own LiteLLM proxy**: `export HIVE_LITELLM_ENDPOINT=… HIVE_LITELLM_API_KEY=…` (exported locally, never sent to the hive) |
-| `agy` | Antigravity — host mode only; it signs in through an interactive Google OAuth flow with no API-key mode, so a container cannot inherit its credentials |
+| `agy` | Antigravity — no OS-level sandbox of its own, so container mode (default) is its only mode with any host boundary; local mode refuses without `HIVE_AGY_DANGEROUSLY_RUN_UNCONFINED=1`. Signs in through an interactive Google OAuth flow with no API-key mode: sign in once inside the container, or on the host first (`just contribute-hive agy` stages a signed-in `~/.gemini` into the container — unverified whether that alone re-authenticates an unattended run) |
+| `opencode` | Provider-agnostic (75+ providers); `opencode auth login` writes a credential to `~/.local/share/opencode/auth.json`. Headless-only: `opencode run "<prompt>"` is its one-shot entry point, wired via `CONTRIBUTOR_MODE=headless`; there is no interactive-tmux launch path for it |
+| `kilo` | Headless-only: `kilo run "<prompt>" --auto`; set `KILO_AUTH_CONTENT` / `KILO_CONFIG_CONTENT` or `KILO_API_KEY` (optional `KILO_ORG_ID`). Hive forwards only those values and never mounts a Kilo home/config directory. `--auto` is approval, not a sandbox. |
 
 ## Choosing a model
 
@@ -327,7 +348,7 @@ kubectl apply -f relay.yaml
 kubectl -n my-namespace rollout status deploy/hive-contributor
 ```
 
-The generated pod sets `CONTRIBUTOR_MODE=headless` because Kubernetes pods have no TTY; interactive tmux mode would stall. Headless mode is currently verified for `claude`, `litellm`, `copilot`, `codex`, `goose`, and `agy` (`agy -p`, verified on 1.1.13) — but **`agy` is host-only**: it signs in through an interactive Google OAuth flow with no API-key mode, so a pod cannot authenticate and `just contribute-k8s` deliberately keeps warning for it. Headless `agy` works on a host that has already signed in. The Deployment has one replica per registered contributor identity and uses readiness/liveness probes that read the relay's headless status file (`waiting`, `working`, `done` pass; missing/failed state fails).
+The generated pod sets `CONTRIBUTOR_MODE=headless` because Kubernetes pods have no TTY; interactive tmux mode would stall. Headless mode is currently verified for `claude`, `litellm`, `copilot`, `codex`, `goose`, and `agy` (`agy -p`, verified on 1.1.13) — but **`agy` stays out of `just contribute-k8s`'s `HEADLESS_BACKENDS` allowlist regardless**: it signs in through an interactive Google OAuth flow with no API-key mode, and a pod has no way to complete that sign-in even once (unlike the container path, where an operator can attach and run `agy` interactively, or the relay can stage an already-signed-in `~/.gemini`). Headless `agy` is verified only on a host that has already signed in. `opencode` has a verified one-shot invocation (`opencode run "<prompt>"`, [#4970](https://github.com/kubestellar/hive/issues/4970)) but is **not yet** in `just contribute-k8s`'s `HEADLESS_BACKENDS` allowlist: whether `opencode auth login`'s credential file supports non-interactive, unattended use in a fresh pod is unverified, so it currently runs headless on a host that has already signed in, the same posture as `agy`. The Deployment has one replica per registered contributor identity and uses readiness/liveness probes that read the relay's headless status file (`waiting`, `working`, `done` pass; missing/failed state fails).
 
 The generated Secret contains the registration token and `GH_TOKEN` as Kubernetes Secret data. Treat it as sensitive cluster-readable material and prefer a pinned image tag/digest for repeatable operation.
 
@@ -389,7 +410,79 @@ That last line types a fresh prompt into a pane whose CLI is still mid-turn, int
 
 A resume that is genuinely refused — an operator yanked the task, or the relay stopped reporting for longer than the lease window — still ends in `task_revoke`, and that is correct. The relay clears its task and asks for new work.
 
-**A dropped socket is not a failed issue.** The disconnect books a short cooldown on the issue so a second session cannot pick it up during the reconnect window and file a duplicate PR ([#2356](https://github.com/kubestellar/hive/issues/2356)). That cooldown no longer counts toward the consecutive-failure quarantine: three drops on a flaky connection used to park a perfectly workable issue for six hours with nothing having actually failed. Real failures — `task_failed`, the relay's own 30-minute watchdog giving up, the wedged-task backstop — still count, and still quarantine.
+**A dropped socket is not a failed issue.** The disconnect books a short cooldown on the issue so a second session cannot pick it up during the reconnect window and file a duplicate PR ([#2356](https://github.com/kubestellar/hive/issues/2356)). That cooldown no longer counts toward the consecutive-failure quarantine: three drops on a flaky connection used to park a perfectly workable issue for six hours with nothing having actually failed. Real failures — `task_failed`, the relay's own progress watchdog giving up, the wedged-task backstop — still count, and still quarantine.
+
+### The relay's max-duration ceiling is a progress lease
+
+[#5321](https://github.com/kubestellar/hive/issues/5321). `MAX_TASK_DURATION_MS` (30 minutes) bounds how long a task may go **without observed forward progress**, not how long it may take. Every progress tick that sees new pane output re-arms it from now, so an agent that is working keeps its lease indefinitely. `ABSOLUTE_TASK_DEADLINE_MS` (4 hours, `HIVE_ABSOLUTE_TASK_DEADLINE_MS`) is the backstop that nothing re-arms, for the pathological case of a process that prints forever without finishing.
+
+It was previously a flat wall-clock kill, armed once at task start and never re-armed. That made any task whose honest duration exceeded 30 minutes impossible rather than merely slow. Observed live on 2026-08-31 it killed an agent that had already committed and pushed and was blocked on a full `go test` run; the hub booked the task `failed` 57 seconds before that task's own PR was opened, and returned the issue to the failure cooldown. The work survived only because the agent chose, unprompted, to finish and file the PR anyway.
+
+This aligns the relay with the hub, which has been progress-driven since [#4260](https://github.com/kubestellar/hive/issues/4260): `leaseTTL` is re-stamped on every accepted `task_progress`, and `reclaimExpiredLeases` never reclaims a task that keeps reporting. The relay's blind timer was the only remaining wall-clock kill.
+
+Crossing either ceiling is reported with `failure_kind: environment`. It is a statement about this runtime — the relay could not see the work finish — not a judgement that the agent failed its task. The old path passed no options at all, so an infrastructure ceiling was recorded as a plain task failure.
+
+The hang case these ceilings nominally guard is covered better and sooner by the pane-stall detector above: 20 minutes of byte-identical output, confirmed over `PANE_STALL_CONFIRM_TICKS` ticks. The headless path has no pane to scrape and therefore no progress signal, so its one-shot child is bounded by the absolute backstop directly (`HIVE_HEADLESS_TASK_TIMEOUT_MS`).
+
+### The GitHub token outlives the task, because the hub re-mints it
+
+The scoped GitHub token the relay pushes with is valid for **55 minutes**
+(`wsTokenTTL`), which is shorter than the 4-hour absolute backstop above. A task
+is therefore allowed to run for longer than any single token lives. That gap is
+covered, not ignored: the hub re-mints ahead of expiry, so a task running to the
+backstop is expected to use several tokens in succession.
+
+**Minting.** The token is minted per task and scoped to that task's repository
+and the contributor's trust tier. It is delivered *after* the task's acceptance
+decision, on the `token_refresh` wire shape rather than inside `task_assign`
+itself — under the default auto-accept this is immediate, and under the opt-in
+explicit-acceptance mode it waits for the human. The relay's handler writes it
+to a single `0600` file (`GH_TOKEN_CACHE`, overridable with
+`HIVE_GH_TOKEN_CACHE`); that file is the only place the token lives.
+
+**Refresh.** On every heartbeat the hub checks whether the active task's token
+was minted at least **50 minutes** ago (`wsTokenRefreshPeriod`) and, if so,
+re-mints and pushes a fresh `token_refresh`. The relay overwrites the cache file
+in place. The five-minute gap before the 55-minute expiry absorbs clock skew and
+any `gh` command already in flight, so push access does not lapse between the
+old token dying and the new one landing. Refresh is unconditional on task
+duration: it re-arms each time it fires, so a task at the 4-hour backstop has
+been refreshed roughly four times.
+
+Two things follow from refresh being driven by the hub's heartbeat:
+
+- **It requires a live socket and an active task.** A task with no assignment,
+  or a connection whose socket has dropped, is not refreshed. A reconnect that
+  re-adopts a task through the server-issued lease re-mints immediately and
+  re-arms the cycle — without that step the resumed session's mint time would
+  stay zero and refresh would never fire again for the life of the connection
+  ([#2610](https://github.com/kubestellar/hive/issues/2610)).
+- **A failed re-mint is not fatal and is not announced.** If the mint errors, or
+  the hive has no App auth to mint from, the hub logs it and leaves the relay's
+  existing token in place, retrying on the next heartbeat. The relay is told
+  nothing. So the observable failure mode is not a "token expired" message: it
+  is a push or `gh` call that starts returning an authentication error partway
+  through a long task, with the previous 55 minutes having worked normally.
+
+**Expiry is advertised but not enforced by the relay.** Each `token_refresh`
+carries a `token_expires_at` timestamp, and the relay records it — but it never
+checks it. Nothing in the relay warns as expiry approaches, refuses to start a
+push against a stale token, or asks the hub for a new one. The relay finds out
+that a token has died the same way it finds out about any other GitHub error:
+the command fails. If you see an authentication failure on a task that has been
+running for around an hour, a re-mint that quietly failed on the hub side is the
+first thing to check, and the hub's log is the only place that records it.
+
+**Removal.** The token is unlinked on **every** task-exit path, before the agent
+is interrupted, so a turn that survives the stop cannot keep pushing against an
+issue the hub has already offered to someone else
+([#5353](https://github.com/kubestellar/hive/issues/5353),
+[#5373](https://github.com/kubestellar/hive/issues/5373)). It is deliberately
+*not* dropped when the relay declines an offered task: a decline is not an exit,
+and dropping the credential there would destroy the token belonging to the task
+still being worked. Unlinking the file does not revoke the token — it stays
+valid at GitHub for the remainder of its 55 minutes — so removal bounds *this
+relay's* use of it, not the credential's lifetime.
 
 ## Troubleshooting: the backend dies seconds after every task
 

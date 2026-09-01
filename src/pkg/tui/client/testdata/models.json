@@ -1,0 +1,12 @@
+{
+  "backend": "litellm",
+  "models": [
+    "openai/gpt-5",
+    "anthropic/claude-opus-5",
+    "gemini_2.5_pro"
+  ],
+  "fallback": false,
+  "partial": false,
+  "entitled": true,
+  "entitledSource": "key-info"
+}

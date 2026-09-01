@@ -6,16 +6,18 @@ package acmmadvisor
 // signals and returns a recommendation. It does NOT read the config, apply a
 // level, or perform any I/O.
 //
-// TODO(acmm2-wiring): wire RecommendFromStatus into pkg/dashboard's
-// status_builder.go — populate a StatusPayload.ACMMAdvice field from the same
-// inputs the dashboard already gathers:
-//   - CurrentLevel: dashboard.detectACMMLevel(cfg)
-//   - CoveragePct:  MetricsCollector coverage ("coverage" key, collectCoverage)
-//   - GreenStreak / MergeSuccessRate: from issue-to-merge / CI metrics
-//   - ActionableIssues: len(actionable) already passed to buildRepos/buildHold
-//   - HoldCount: buildHold(actionable) count
-//   - HasQualityAgent: presence of an active "quality" agent in the pack
-// The dashboard must render Recommendation.Met/Unmet as a checklist and must
+// Wiring status: RecommendFromStatus is wired into pkg/dashboard on two
+// surfaces that share ONE signal-collection path (buildACMMStatusInputs) so
+// they cannot drift — the GET /api/acmm-recommendation endpoint (#5225) and
+// the StatusPayload.ACMMAdvice field attached on the status-build path.
+// Every input is now sourced from real data: CurrentLevel from
+// detectACMMLevel, CoveragePct from the ci-maintainer coverage metric,
+// ActionableIssues/HoldCount from the live status snapshot, HasQualityAgent
+// from the active pack, MergeSuccessRate from the fleet-stats collector
+// (#3972), and GreenStreak from default-branch Actions history (#5226).
+// Signals that cannot be measured stay at zero rather than being fabricated.
+//
+// The dashboard renders Recommendation.Met/Unmet as a checklist and must
 // NEVER auto-apply the target level — a human approves via handlePackSetLevel.
 
 // StatusInputs is the forge-neutral bundle a status builder assembles from
@@ -37,13 +39,5 @@ type StatusInputs struct {
 // so it is safe to call from a hot status-build path. Callers attach the result
 // to their status payload; they must not act on it automatically.
 func RecommendFromStatus(in StatusInputs) Recommendation {
-	return Recommend(Signals{
-		CurrentLevel:     in.CurrentLevel,
-		CoveragePct:      in.CoveragePct,
-		GreenStreak:      in.GreenStreak,
-		MergeSuccessRate: in.MergeSuccessRate,
-		ActionableIssues: in.ActionableIssues,
-		HoldCount:        in.HoldCount,
-		HasQualityAgent:  in.HasQualityAgent,
-	})
+	return Recommend(Signals(in))
 }

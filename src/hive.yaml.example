@@ -13,6 +13,12 @@ project:
     - repo-two
   ai_author: your-bot-user               # GitHub username for AI commits
   primary_repo: repo-one                 # Main repo for priority routing
+  # Optional: host-local directory holding one checkout per repo, as
+  # <checkouts_dir>/<repo name>. Supplies the repo root Hive reads AGENTS.md
+  # from at kick time (src/docs/agents-md.md). Hive agents work over the API and
+  # keep no clones, so without this AGENTS.md injection stays a no-op — which is
+  # the default. An absent directory or a repo with no AGENTS.md is also a no-op.
+  # checkouts_dir: /data/checkouts
 
 ioscan:
   enabled: true                           # default: true; scans untrusted text before agent kicks
@@ -391,6 +397,34 @@ governor:
 #   long_stall_days: 7
 #   recent_closed_window_s: 604800
 #   analysis_model: ""   # empty disables all LLM calls (default)
+
+# Planning intelligence — the `plan`/`epic` issue-label trigger that auto-mints
+# an epic bead and requests architect decomposition (see docs/planning-intelligence.md).
+# Only gates the label trigger; the dashboard's "Plan this issue" button is always
+# available regardless of this block. OFF by default: the label path pipes a raw
+# issue body into the architect's kick prompt with no per-kick review, so this
+# must be explicitly opted into. Even when true, it is a no-op below ACMM L5 —
+# the decomposing architect only has a cadence at L5+.
+# planning:
+#   plan_from_label: false
+
+# CEL-based agent triggers — declarative rules that kick an agent directly off
+# a normalized source-control event (issue opened, PR opened, a label applied,
+# a comment posted), evaluated with CEL against the `event` variable. This is
+# additive: it runs alongside the existing label/governor triggering above, not
+# instead of it, and an absent/empty list is byte-identical to today's behavior.
+# The evaluator fails closed — a malformed rule is rejected at config load, and
+# a runtime evaluation error is treated as "no match", never a crash.
+# See docs/cel-triggers.md for the full `event.*` field reference and worked
+# examples.
+# triggers:
+#   - name: bug-triage
+#     expr: event.kind == "issue.opened" && hasLabel(event.labels, "bug")
+#     agent: triager
+#     priority: 10
+#   - name: ready-pr-review
+#     expr: event.kind == "pr.opened" && !event.is_draft && event.base_branch == "main"
+#     agent: reviewer
 
 # Review swarm merge gate — optional structured multi-perspective PR review.
 # Default is false to preserve existing merge eligibility behavior; when true,

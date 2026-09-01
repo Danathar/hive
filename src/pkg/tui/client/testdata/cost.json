@@ -1,0 +1,76 @@
+{
+  "estimated": {
+    "total_usd": 7.375,
+    "by_model": [
+      {
+        "name": "claude-opus-4-5",
+        "usd": 7.375,
+        "source": "estimated",
+        "input": 1200000,
+        "output": 88100,
+        "cache_read": 450000,
+        "cache_create": 10000
+      },
+      {
+        "name": "private-model-v1",
+        "usd": 0,
+        "source": "unpriced",
+        "input": 96700,
+        "output": 12400,
+        "cache_read": 25000,
+        "cache_create": 1500
+      }
+    ],
+    "by_agent": [
+      {
+        "name": "scanner",
+        "usd": 7.375,
+        "source": "estimated",
+        "input": 1200000,
+        "output": 88100,
+        "cache_read": 450000,
+        "cache_create": 10000
+      },
+      {
+        "name": "quality",
+        "usd": 0,
+        "source": "estimated",
+        "input": 0,
+        "output": 0,
+        "cache_read": 0,
+        "cache_create": 0
+      },
+      {
+        "name": "reviewer",
+        "usd": 0,
+        "source": "unpriced",
+        "input": 96700,
+        "output": 12400,
+        "cache_read": 25000,
+        "cache_create": 1500
+      }
+    ],
+    "unpriced_models": ["private-model-v1"],
+    "by_session": [
+      {
+        "session_id": "session-scanner-01",
+        "agent": "scanner",
+        "model": "claude-opus-4-5",
+        "usd": 7.375,
+        "source": "estimated"
+      }
+    ]
+  },
+  "gateways": [
+    {
+      "name": "openrouter",
+      "kind": "openrouter",
+      "source": "native",
+      "spent_usd": 8.25
+    }
+  ],
+  "price_table_date": "2026-08-01",
+  "disclaimer": "Estimated from token counts; not a bill.",
+  "merged_prs": 123,
+  "closed_issues": 456
+}

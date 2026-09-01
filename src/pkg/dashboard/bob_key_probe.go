@@ -178,7 +178,7 @@ func probeBobAPIKey(key string) (reason, detail string) {
 		// rejection quotes the offending value) — always redact.
 		return bobTestReasonUnreachable, "cannot reach the bob backend: " + redactSecret(err.Error(), key)
 	}
-	defer resp.Body.Close()
+	defer closeHTTPBody(resp.Body)
 
 	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
 		return "", ""
@@ -192,8 +192,8 @@ func probeBobAPIKey(key string) (reason, detail string) {
 		return msg
 	}
 
-	switch {
-	case resp.StatusCode == http.StatusUnauthorized:
+	switch resp.StatusCode {
+	case http.StatusUnauthorized:
 		detail = withSays(fmt.Sprintf("the bob backend rejected the key (HTTP %d)", resp.StatusCode))
 		// Decode the known "invalid jwt string" verdict: it fingers the key's
 		// DELIVERY, not its validity.
@@ -201,11 +201,11 @@ func probeBobAPIKey(key string) (reason, detail string) {
 			detail += " — " + bobJWTVerdictDetail
 		}
 		return bobTestReasonUnauthorized, detail
-	case resp.StatusCode == http.StatusPaymentRequired:
+	case http.StatusPaymentRequired:
 		// 402 insufficient_quota_or_plan_expired: a real credential of the
 		// wrong kind (e.g. a bob-user key instead of an Inference API key).
 		return bobTestReasonNoEntitlement, withSays(bobEntitlementDetail)
-	case resp.StatusCode == http.StatusForbidden:
+	case http.StatusForbidden:
 		// An HTML 403 is the CDN/edge (Cloudflare) blocking the request —
 		// bob's auth never evaluated the key, so it is not a key verdict.
 		if bobLooksLikeEdgeHTML(resp, says) {

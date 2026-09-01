@@ -57,6 +57,7 @@ import (
 	"github.com/kubestellar/hive/pkg/defsrc"
 	"github.com/kubestellar/hive/pkg/discord"
 	"github.com/kubestellar/hive/pkg/escalation"
+	"github.com/kubestellar/hive/pkg/forge"
 	"github.com/kubestellar/hive/pkg/github"
 	"github.com/kubestellar/hive/pkg/governor"
 	"github.com/kubestellar/hive/pkg/hooks"
@@ -99,7 +100,7 @@ import (
 // non-release value instead of "hive  (commit ...)" or a version that lies by
 // claiming a release number it isn't. src/Dockerfile and src/Dockerfile.hub
 // leave the VERSION build-arg empty for ordinary branch builds, so this Go
-// default is what ships; release.yml never rebuilds (it retags an
+// default is what ships; tagged-release.yml never rebuilds (it retags an
 // already-published image — see src/docs/releases.md), so today no build
 // path actually passes -X main.version=... yet. That gap is recorded as a
 // known limitation in src/docs/releases.md rather than silently masked here.
@@ -473,17 +474,17 @@ func writePerAppIDKey(appID int64, pemData string) (string, error) {
 		return "", fmt.Errorf("create temp app key file: %w", err)
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName) // no-op once the rename below succeeds
+	defer func() { _ = os.Remove(tmpName) }() // no-op once the rename below succeeds
 	if err := tmp.Chmod(spokeAppKeyFileMode); err != nil {
-		tmp.Close()
+		_ = tmp.Close() // best-effort cleanup; the chmod error is what's returned
 		return "", fmt.Errorf("chmod temp app key file: %w", err)
 	}
 	if _, err := tmp.WriteString(trimmed + "\n"); err != nil {
-		tmp.Close()
+		_ = tmp.Close() // best-effort cleanup; the write error is what's returned
 		return "", fmt.Errorf("write temp app key file: %w", err)
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
+		_ = tmp.Close() // best-effort cleanup; the sync error is what's returned
 		return "", fmt.Errorf("sync temp app key file: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
@@ -1066,7 +1067,9 @@ func main() {
 		if m.CurrentSHA != gitShort {
 			// We booted on a different SHA than the one that requested the
 			// upgrade: it landed. Drop the marker so the attempt budget resets.
-			os.Remove(upgradeMarkerStartupPath)
+			if err := os.Remove(upgradeMarkerStartupPath); err != nil && !os.IsNotExist(err) {
+				logger.Warn("failed to clear stale upgrade marker", "path", upgradeMarkerStartupPath, "error", err)
+			}
 			logger.Info("upgrade landed, cleared marker",
 				"current", gitShort, "previous", m.CurrentSHA, "target", m.TargetSHA)
 		} else {
@@ -1108,7 +1111,7 @@ func main() {
 
 	// Load or generate a unique Hive ID for this instance
 	cfg.HiveID = loadOrGenerateHiveID(logger)
-	os.Setenv("HIVE_ID", cfg.HiveID)
+	_ = os.Setenv("HIVE_ID", cfg.HiveID) // valid key/value; Setenv cannot fail on Unix
 
 	// Observability (#2439): report the removed-agents tombstone LoadWithDashboardOverlay
 	// adopted from the dashboard overlay at boot, BEFORE the startup ApplyPack below. On
@@ -1244,17 +1247,23 @@ func main() {
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	// preShutdownHook, when set, runs in the signal handler before the context
-	// is canceled. It is stored after the agent manager exists and archives
-	// every agent's in-flight kick log to /data so a pod roll or hive upgrade
-	// does not destroy the latest run's scrollback (#4296).
-	var preShutdownHook atomic.Pointer[func()]
+	// preShutdownHooks run in the signal handler before the context is canceled,
+	// in registration order, while every connection and tmux server is still
+	// live. Registrations happen later in startup, once the subsystems they
+	// touch exist.
+	//
+	// This was a single atomic.Pointer[func()] until kubestellar/hive#5390. A
+	// lone pointer makes registration DESTRUCTIVE: the second Store silently
+	// discards the first hook, and the loss is invisible — nothing fails, a
+	// shutdown side effect simply stops happening. That is precisely the trap
+	// the WebSocket drain walked into, since the slot was already held by
+	// #4296's kick-log archive. A slice makes adding a hook additive by
+	// construction, so the next one cannot repeat the mistake.
+	var preShutdownHooks shutdownHooks
 	go func() {
 		sig := <-sigCh
 		logger.Info("received signal, shutting down", "signal", sig)
-		if fn := preShutdownHook.Load(); fn != nil {
-			(*fn)()
-		}
+		preShutdownHooks.run()
 		cancel()
 	}()
 
@@ -1498,7 +1507,7 @@ func main() {
 				}
 			} else {
 				advisoryIssues[primaryRepo] = num
-				os.Setenv("HIVE_ADVISORY_ISSUE", fmt.Sprintf("%d", num))
+				_ = os.Setenv("HIVE_ADVISORY_ISSUE", fmt.Sprintf("%d", num)) // valid key/value; Setenv cannot fail on Unix
 				logger.Info("advisory issue ready", "repo", primaryRepo, "number", num)
 			}
 		}
@@ -1520,7 +1529,9 @@ func main() {
 	if brainstormPolicyDir == "" {
 		brainstormPolicyDir = "/data/policies/examples/kubestellar/agents"
 	}
-	os.MkdirAll(brainstormPolicyDir, 0o755)
+	if err := os.MkdirAll(brainstormPolicyDir, 0o755); err != nil {
+		logger.Warn("failed to create brainstorm policy dir", "path", brainstormPolicyDir, "error", err)
+	}
 	if policyData, err := policies.DefaultPolicies.ReadFile("defaults/brainstorm-advisory.md"); err == nil {
 		policyPath := filepath.Join(brainstormPolicyDir, "brainstorm-advisory.md")
 		// Always overwrite — the embedded policy may have been updated
@@ -1548,7 +1559,7 @@ func main() {
 	// SIGTERM (pod roll, hive upgrade) destroys every tmux server and with it
 	// the in-flight kick's scrollback; archive it to /data first (#4296).
 	archiveOnShutdown := func() { agentMgr.ArchiveAllKickLogs("shutdown") }
-	preShutdownHook.Store(&archiveOnShutdown)
+	preShutdownHooks.add("archive-kick-logs", archiveOnShutdown)
 	agentMgr.SetSandboxConfig(cfg.AgentSandbox)
 
 	// Say out loud when the sandbox opt-in is configured but inert. The gate is
@@ -1700,14 +1711,22 @@ func main() {
 		// privilege. A denied request is quarantined, never opened.
 		// holdLabel (F6): at hold-gated ACMM levels (L3/L4/L5) every agent-opened
 		// PR must carry the "hold" label so the merge gate holds it for human
-		// approval. This is decided server-side from the authoritative hive level
+		// approval. Outreach content is public speech on the project's behalf, so
+		// it remains human-reviewed at L6 too. This is decided server-side from the
+		// authenticated agent identity and authoritative hive level
 		// (GetACMMLevel), NOT from a client flag — the gh-wrapper.sh tail that used
 		// to add the label was dead code after `exec hive-open-pr`. L1/L2 open no
-		// agent PRs (manual); L6 auto-merges on green (no hold).
-		holdLabel := func() bool {
-			l := agentMgr.GetACMMLevel()
-			return l >= acmmHoldGatedMinLevel && l <= acmmHoldGatedMaxLevel
+		// agent PRs (manual); non-outreach L6 PRs retain their existing automerge
+		// behavior.
+		holdLabel := func(agentName string) bool {
+			return shouldHoldAgentPR(agentName, agentMgr.GetACMMLevel())
 		}
+		// #5117: tell the client which accounts are ours, so the
+		// self-authorization gate recognises an issue filed under
+		// project.ai_author's plain user account as hive-filed rather than
+		// mistaking it for a human's. The App bot is recognised without this;
+		// hiveIdentity() is the same resolver the duplicate-PR guard uses.
+		ghClient.SetHiveIdentity(hiveIdentity(cfg))
 		ghClient.StartPRRequestWatcher(ctx, agentMgr.AuthorizePROpen, holdLabel, nil)
 		// Issue relay: agents request issue creation and comments by dropping a
 		// file (hive-open-issue via the gh wrapper) instead of calling GitHub
@@ -1908,6 +1927,24 @@ func main() {
 	}
 
 	dashSrv := dashboard.NewServerWithAuth(cfg.Dashboard.Port, cfg.Dashboard.AuthToken, logger)
+	// SIGTERM (pod roll, hive self-upgrade) kills the process and every
+	// contributor WebSocket with it, and until #5390 it did so without a word:
+	// the peer saw a bare 1006, indistinguishable from a network fault, which is
+	// what made #5090 take days to diagnose. Send each contributor a 1012
+	// (CloseServiceRestart) first so the relay knows to reconnect immediately —
+	// into the replacement pod, which maxSurge=1/maxUnavailable=0 has already
+	// brought to readiness before this signal was delivered.
+	//
+	// Registered as its OWN hook rather than folded into archiveOnShutdown: the
+	// two are unrelated, and the drain must not be able to prevent the archive
+	// from running. addUrgent, not add, because it is the time-critical half —
+	// the sooner the frame is on the wire the sooner the relay reconnects,
+	// whereas the kick-log archive does PVC I/O on NFS and nobody is waiting on
+	// it. The hub is resolved lazily inside the closure because the contributor
+	// hub is not constructed until registerContributeRoutes runs, below.
+	preShutdownHooks.addUrgent("drain-contributor-websockets", func() {
+		dashSrv.DrainContributorsForShutdown()
+	})
 	var beadStores map[string]*beads.Store
 
 	// Wire ioscan input enforcement (opt-in via ioscan.enabled) to the dashboard
@@ -2474,8 +2511,12 @@ func main() {
 
 	go dashboard.StartWorkspaceCleanup(ctx, logger, dashSrv.GetAudit())
 
-	os.MkdirAll(nousSnapshotDir, 0o755)
-	os.MkdirAll(nousGovernorDir, 0o755)
+	if err := os.MkdirAll(nousSnapshotDir, 0o755); err != nil {
+		logger.Warn("failed to create nous snapshot dir", "path", nousSnapshotDir, "error", err)
+	}
+	if err := os.MkdirAll(nousGovernorDir, 0o755); err != nil {
+		logger.Warn("failed to create nous governor dir", "path", nousGovernorDir, "error", err)
+	}
 	nousState := loadNousState(logger)
 	nousState.SnapshotDir = nousSnapshotDir
 
@@ -2586,6 +2627,14 @@ func main() {
 		return agent.LinearCredential{}
 	})
 
+	// In-flight ledger + session PR link (Linear GitHub-parity follow-ups):
+	// the scheduler withholds work a Linear session is already working, and
+	// the pr-request watcher narrates opened PRs into the session.
+	sched.SetInflightLookup(dashSrv.LinearSessionHolder)
+	if ghClient != nil {
+		ghClient.SetPROpenedHook(dashSrv.LinearAgentPROpened)
+	}
+
 	dashSrv.RegisterAPI(&dashboard.Dependencies{
 		Config:           cfg,
 		AgentMgr:         agentMgr,
@@ -2664,7 +2713,7 @@ func main() {
 					}
 				} else {
 					advisoryIssues[newPrimaryRepo] = num
-					os.Setenv("HIVE_ADVISORY_ISSUE", fmt.Sprintf("%d", num))
+					_ = os.Setenv("HIVE_ADVISORY_ISSUE", fmt.Sprintf("%d", num)) // valid key/value; Setenv cannot fail on Unix
 					dashSrv.SetGitHubAppRequired(false)
 					dashSrv.ClearPendingGitHubAppInstall()
 					logger.Info("advisory issue ready on new primary repo", "repo", newPrimaryRepo, "number", num)
@@ -2706,7 +2755,7 @@ func main() {
 					logger.Warn("advisory issue creation failed after reinit", "repo", primaryRepo, "error", advErr)
 				} else {
 					advisoryIssues[primaryRepo] = num
-					os.Setenv("HIVE_ADVISORY_ISSUE", fmt.Sprintf("%d", num))
+					_ = os.Setenv("HIVE_ADVISORY_ISSUE", fmt.Sprintf("%d", num)) // valid key/value; Setenv cannot fail on Unix
 					logger.Info("advisory issue ready after reinit", "repo", primaryRepo, "number", num)
 				}
 			}
@@ -2790,7 +2839,7 @@ func main() {
 					return false
 				}
 				advisoryIssues[recheckRepo] = num
-				os.Setenv("HIVE_ADVISORY_ISSUE", fmt.Sprintf("%d", num))
+				_ = os.Setenv("HIVE_ADVISORY_ISSUE", fmt.Sprintf("%d", num)) // valid key/value; Setenv cannot fail on Unix
 				// Finding the advisory issue only proves the app is installed
 				// (reads succeed on public repos even with a token from the
 				// wrong installation). Verify write capability before letting
@@ -2920,7 +2969,7 @@ func main() {
 						// genuine failure (not installed / insufficient perms).
 						if dashSrv.RecheckGitHubApp() {
 							if num, exists := advisoryIssues[primaryRepo]; exists {
-								os.Setenv("HIVE_ADVISORY_ISSUE", fmt.Sprintf("%d", num))
+								_ = os.Setenv("HIVE_ADVISORY_ISSUE", fmt.Sprintf("%d", num)) // valid key/value; Setenv cannot fail on Unix
 							}
 							logger.Info("github app self-heal: banner cleared, app installed and write verified", "repo", primaryRepo)
 						} else {
@@ -3378,21 +3427,17 @@ func main() {
 					// pointer — the config watcher swaps its contents in
 					// place on reload.
 					lc := cfg.Governor.LiteLLM
-					endpoint := lc.ResolveEndpoint()
-					if lc.LocalProxy {
-						// Local fallback: the Go translator forwards to the
-						// bundled litellm proxy on loopback instead of the
-						// remote endpoint.
-						endpoint = litellmLocalProxyURL()
-					}
-					if endpoint == "" {
+					// Endpoint/model resolution lives in a pure function so the
+					// decision tree (local proxy / legacy block / explicit-gateway
+					// fallback / no route at all) is unit-testable — it is not
+					// reachable from a test while inline in main(). See #5460.
+					endpoint, resolvedModel, ok := resolveLiteLLMInferenceRoute(cfg, backend, model)
+					if !ok {
 						logger.Warn("litellm backend selected but no endpoint configured",
 							"agent", agentName, "model", model)
 						return
 					}
-					if model == "" {
-						model = lc.DefaultModel
-					}
+					model = resolvedModel
 					// Key source must MATCH the entitlement/probe path (gateways.go,
 					// cost.go, openrouter.go), which resolve the key from the gateway
 					// via ResolveGateway(backend).ResolveAPIKey(). When an EXPLICIT
@@ -4135,7 +4180,9 @@ func main() {
 					attemptCount = m.Attempts
 				} else {
 					// Different SHA or a different target — the old marker is stale.
-					os.Remove(upgradeMarkerPath)
+					if err := os.Remove(upgradeMarkerPath); err != nil && !os.IsNotExist(err) {
+						logger.Warn("failed to clear stale upgrade marker", "path", upgradeMarkerPath, "error", err)
+					}
 				}
 			}
 
@@ -5860,7 +5907,7 @@ func runEvalCycle(
 			num, retryErr := ghClient.EnsureAdvisoryIssue(ctx, primaryRepoAtCycleStart)
 			if retryErr == nil {
 				advisoryIssues[primaryRepoAtCycleStart] = num
-				os.Setenv("HIVE_ADVISORY_ISSUE", fmt.Sprintf("%d", num))
+				_ = os.Setenv("HIVE_ADVISORY_ISSUE", fmt.Sprintf("%d", num)) // valid key/value; Setenv cannot fail on Unix
 				logger.Info("advisory issue resolved on retry", "repo", primaryRepoAtCycleStart, "number", num)
 			} else {
 				advisoryEnsureErr = retryErr
@@ -5936,11 +5983,12 @@ func runEvalCycle(
 	// bounded ring in one cycle, and no I/O happens on this path.
 	recordEnumeratedIssues(ctx, dashSrv, actionable)
 
-	escalatedPRs := runEscalationSweep(ctx, cfg, ghClient, actionable, notifier, logger)
+	escalatedPRs := runEscalationSweep(ctx, cfg, governorForge(cfg, ghClient, logger), actionable, notifier, logger)
 
 	intentVerdicts := writeIntentVerdicts(ctx, cfg, ghClient, actionable, beadStores, logger)
 	refreshReviewVerdicts(cfg, logger)
-	writeMergeEligible(actionable, actionable.Hold, cfg.Project.Org, escalatedPRs, cfg.Intent.Enforce, intentVerdicts, cfg.Review.RequireApproval, logger)
+	requiredCheckSet, _ := cfg.AutoMerge.RequiredCheckSet()
+	writeMergeEligible(actionable, actionable.Hold, cfg.Project.Org, escalatedPRs, cfg.Intent.Enforce, intentVerdicts, cfg.Review.RequireApproval, requiredCheckSet, logger)
 
 	// Stuck-PR reaper (backstop): re-dispatch a fix for any hive-authored PR
 	// that is red on a required check AND stale (its red head SHA unchanged past
@@ -6276,7 +6324,7 @@ func runEvalCycle(
 	}
 
 	// Scan agent panes for login-required patterns and pause + notify if detected
-	scanForLoginRequired(ctx, cfg, agentMgr, notifier, dashSrv, logger)
+	scanForLoginRequired(ctx, cfg, agentMgr, notifier, dashSrv, logger, loginSightings)
 
 	// Epoch captured before reading agent/governor state so a mutation that
 	// lands mid-build (restart-count/budget reset) drops this snapshot instead
@@ -6719,6 +6767,173 @@ func loginCommandForBackend(backend string) string {
 	}
 }
 
+// loginScanAction is what the detector should do about one agent this cycle.
+type loginScanAction int
+
+const (
+	// loginScanIgnore: nothing that looks like a login problem, or a startup
+	// modal is on screen. Any sighting streak is cleared.
+	loginScanIgnore loginScanAction = iota
+	// loginScanDeferAuthenticated: the pane matched, but the backend credential
+	// is demonstrably valid, so this is residue or a stuck CLI — the manager's
+	// token-restart heal's case, not an operator's (kubestellar/hive#5291).
+	loginScanDeferAuthenticated
+	// loginScanDeferStreak: the pane matched and the credential is not provably
+	// good, but this is the first consecutive cycle to see it.
+	loginScanDeferStreak
+	// loginScanPause: pause the agent and page the operator.
+	loginScanPause
+)
+
+// loginPauseMinSightings is how many CONSECUTIVE governor cycles must see a
+// login pattern before the detector pauses (kubestellar/hive#5291).
+//
+// The manager's own pane poller learned this at its ~3s cadence, where a single
+// sighting restarted healthy agents; it now requires loginStreakRestartMin = 3.
+// The detector had no equivalent, and a pause is far more expensive than a
+// restart — it is sticky, it needs a human to undo, and it cancels the agent
+// context that hosts the heal. Two is deliberate rather than three: a governor
+// cycle is minutes, not seconds, so each extra cycle is real delay for a
+// genuine logout, and the credential gate above already covers the case this
+// backstops. It matters most for backends with no credential file this process
+// can check, where it is the only new protection.
+const loginPauseMinSightings = 2
+
+// loginSightingTracker counts CONSECUTIVE cycles in which each agent's pane
+// matched a login pattern. A clean cycle resets the count to zero, so a match
+// has to persist to accumulate — a single flicker never reaches the threshold.
+type loginSightingTracker struct {
+	mu     sync.Mutex
+	streak map[string]int
+}
+
+func newLoginSightingTracker() *loginSightingTracker {
+	return &loginSightingTracker{streak: map[string]int{}}
+}
+
+// loginSightings is the detector's process-scoped state. The governor cycle is
+// a function rather than an object, so the consecutive-sighting counts have to
+// outlive a single call; tests build their own tracker and pass it explicitly.
+var loginSightings = newLoginSightingTracker()
+
+// observe records this cycle's reading for one agent and returns the resulting
+// consecutive-sighting count (1 on the first sighting).
+func (t *loginSightingTracker) observe(agent string, matched bool) int {
+	if t != nil {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+	}
+	if t == nil {
+		// No tracker wired: behave as if every sighting is its own streak, which
+		// is exactly the pre-#5291 single-observation behaviour.
+		if matched {
+			return loginPauseMinSightings
+		}
+		return 0
+	}
+	if !matched {
+		delete(t.streak, agent)
+		return 0
+	}
+	t.streak[agent]++
+	return t.streak[agent]
+}
+
+// forget drops an agent's streak — on pause (it stops being scanned) and for
+// agents that are no longer present, so the map cannot grow without bound
+// across a long-lived process.
+func (t *loginSightingTracker) forget(agent string) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.streak, agent)
+}
+
+// retain drops every agent not in the given set.
+func (t *loginSightingTracker) retain(present map[string]bool) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for name := range t.streak {
+		if !present[name] {
+			delete(t.streak, name)
+		}
+	}
+}
+
+// loginScanDecision is the detector's whole judgement about one agent, as a
+// pure function of what was observed. It exists apart from scanForLoginRequired
+// so the decision can be tested against real pane text without a tmux session,
+// a manager, or a governor cycle.
+//
+// sightings is the consecutive-cycle count INCLUDING this one.
+//
+// The credential gate is the fix for kubestellar/hive#5291: the detector used
+// to pause on pane text alone, and the pane during and just after an
+// interactive /login necessarily contains login-screen chrome — so it fired on
+// the evidence the operator's own fix had just produced, seven minutes after
+// the credential was already valid. Worse, Pause() cancels the agent context
+// and tears down the poller that hosts the token-restart heal (#4606), which is
+// the mechanism built for exactly "login prompt on screen, credential valid".
+// Pausing first therefore disabled the machinery that would have fixed the pane
+// it misread.
+//
+// Text matching cannot be narrowed out of this: two earlier fixes tried
+// (tail-only matching, then a tighter copilot pattern) and this incident is the
+// third false positive. The pane legitimately contains login text at the moment
+// the credential is freshest, so the credential has to be consulted.
+func loginScanDecision(
+	backend, paneText string,
+	compiled []*regexp.Regexp,
+	credentialValid bool,
+	sightings int,
+) (loginScanAction, *regexp.Regexp) {
+	matched := loginScanMatch(backend, paneText, compiled)
+	return loginScanVerdict(matched != nil, credentialValid, sightings), matched
+}
+
+// loginScanMatch reports which login pattern this pane trips, or nil for none.
+// Separate from the verdict so the scan loop can match ONCE and use the answer
+// both to advance the sighting streak and to decide.
+func loginScanMatch(backend, paneText string, compiled []*regexp.Regexp) *regexp.Regexp {
+	// Stand down while a startup-blocking modal (folder trust, codex update, …)
+	// is on screen: that is not a login problem, and pausing the agent for it
+	// cancels the trust-prompt watcher that would answer it — the deadlock that
+	// kept copilot agents "sitting at login prompt" through every operator
+	// re-login (kubestellar/hive, 2026-08-22). The watcher answers the modal
+	// within seconds; if a REAL login prompt follows, the next detector tick
+	// sees it on a clean pane.
+	if agent.PaneShowsBlockingPrompt(backend, paneText) {
+		return nil
+	}
+	for _, re := range compiled {
+		if re.MatchString(paneText) {
+			return re
+		}
+	}
+	return nil
+}
+
+// loginScanVerdict turns "what the pane showed" into "what to do". It returns
+// loginScanIgnore whenever matched is false, which is what lets the scan loop
+// rely on a non-Ignore verdict implying a non-nil pattern to log.
+func loginScanVerdict(matched, credentialValid bool, sightings int) loginScanAction {
+	if !matched {
+		return loginScanIgnore
+	}
+	if credentialValid {
+		return loginScanDeferAuthenticated
+	}
+	if sightings < loginPauseMinSightings {
+		return loginScanDeferStreak
+	}
+	return loginScanPause
+}
+
 // scanForLoginRequired checks each running agent's tmux pane output for login-required
 // patterns. When a match is found, the agent is paused and a notification is sent.
 func scanForLoginRequired(
@@ -6728,6 +6943,7 @@ func scanForLoginRequired(
 	notifier *notify.Notifier,
 	dashSrv *dashboard.Server,
 	logger *slog.Logger,
+	sightings *loginSightingTracker,
 ) {
 	patterns := cfg.Governor.Sensing.LoginPatterns
 	if len(patterns) == 0 {
@@ -6760,10 +6976,12 @@ func scanForLoginRequired(
 	// Same discipline as the poller's tail-only match (#4577).
 	const paneLines = 12
 	statuses := agentMgr.AllStatuses()
+	scanned := make(map[string]bool, len(statuses))
 	for name, proc := range statuses {
 		if proc.State != "running" {
 			continue
 		}
+		scanned[name] = true
 
 		output, err := agentMgr.GetOutput(name, paneLines)
 		if err != nil || len(output) == 0 {
@@ -6771,62 +6989,78 @@ func scanForLoginRequired(
 		}
 
 		joined := strings.Join(output, "\n")
+		backend := cfg.Agents[name].Backend
 
-		// Stand down while a startup-blocking modal (folder trust, codex
-		// update, …) is on screen: that is not a login problem, and pausing
-		// the agent for it cancels the trust-prompt watcher that would answer
-		// it — the deadlock that kept copilot agents "sitting at login prompt"
-		// through every operator re-login (kubestellar/hive, 2026-08-22). The
-		// watcher answers the modal within seconds; if a REAL login prompt
-		// follows, the next detector tick sees it on a clean pane.
-		if agent.PaneShowsBlockingPrompt(cfg.Agents[name].Backend, joined) {
+		// #5291: ask the CREDENTIAL, not just the pane. A valid credential plus
+		// a login prompt is the token-restart heal's case; only an invalid one
+		// needs a human.
+		credentialValid := agentMgr.AgentHasValidCredential(name)
+
+		// Match once. The streak has to reflect what the pane SHOWED, including
+		// on the cycles where a gate below declines to act on it, so the
+		// sighting is recorded before the verdict is taken.
+		re := loginScanMatch(backend, joined, compiled)
+		streak := sightings.observe(name, re != nil)
+
+		switch loginScanVerdict(re != nil, credentialValid, streak) {
+		case loginScanIgnore:
 			continue
-		}
+		case loginScanDeferAuthenticated:
+			// Logged at Info, not Warn: this is the detector working correctly,
+			// and it is the line that explains an agent staying up with login
+			// text on its pane.
+			logger.Info("login pattern matched but the backend credential is valid — leaving it to the token-restart heal",
+				"agent", name, "backend", backend, "pattern", re.String())
+			continue
+		case loginScanDeferStreak:
+			logger.Info("login pattern matched but not yet on enough consecutive cycles — deferring",
+				"agent", name, "backend", backend, "pattern", re.String(),
+				"sightings", streak, "required", loginPauseMinSightings)
+			continue
+		case loginScanPause:
+			logger.Warn("login required detected",
+				"agent", name,
+				"pattern", re.String(),
+				"sightings", streak,
+			)
+			sightings.forget(name)
 
-		for _, re := range compiled {
-			if re.MatchString(joined) {
-				logger.Warn("login required detected",
-					"agent", name,
-					"pattern", re.String(),
-				)
-
-				// Attempt a per-agent token re-cache BEFORE pausing. On an
-				// App-authenticated hive the likeliest cause of a "gh auth
-				// login" prompt is an expired scoped-token cache (#4072);
-				// re-minting it now means the operator's Resume immediately
-				// works instead of 401ing straight back into this pause.
-				// Best-effort: hives without App auth (or agents without a
-				// dedicated UID) simply skip it.
-				if refreshErr := agentMgr.RefreshAgentTokenFor(ctx, name); refreshErr == nil {
-					logger.Info("re-cached per-agent scoped token before login-detector pause", "agent", name)
-				}
-
-				// Pause the agent instead of restarting
-				if pauseErr := agentMgr.Pause(name, "login-detector", "login required detected"); pauseErr != nil {
-					logger.Warn("failed to pause agent after login detection",
-						"agent", name, "error", pauseErr)
-				} else {
-					dashSrv.AuditLog("system", "pause", "trigger=login-detector", name)
-				}
-
-				// Determine the login instruction based on the agent's backend
-				backend := cfg.Agents[name].Backend
-				loginCmd := loginCommandForBackend(backend)
-
-				notifier.Send(
-					fmt.Sprintf("\U0001F511 Login required: %s", name),
-					fmt.Sprintf(
-						"Agent '%s' needs authentication. Open the agent's terminal "+
-							"(tmux attach -t hive-%s) and run the login command for the CLI (%s). %s",
-						name, name, backend, loginCmd,
-					),
-					notify.PriorityHigh,
-				)
-
-				break // one match per agent is enough
+			// Attempt a per-agent token re-cache BEFORE pausing. On an
+			// App-authenticated hive the likeliest cause of a "gh auth
+			// login" prompt is an expired scoped-token cache (#4072);
+			// re-minting it now means the operator's Resume immediately
+			// works instead of 401ing straight back into this pause.
+			// Best-effort: hives without App auth (or agents without a
+			// dedicated UID) simply skip it.
+			if refreshErr := agentMgr.RefreshAgentTokenFor(ctx, name); refreshErr == nil {
+				logger.Info("re-cached per-agent scoped token before login-detector pause", "agent", name)
 			}
+
+			// Pause the agent instead of restarting
+			if pauseErr := agentMgr.Pause(name, "login-detector", "login required detected"); pauseErr != nil {
+				logger.Warn("failed to pause agent after login detection",
+					"agent", name, "error", pauseErr)
+			} else {
+				dashSrv.AuditLog("system", "pause", "trigger=login-detector", name)
+			}
+
+			// Determine the login instruction based on the agent's backend
+			loginCmd := loginCommandForBackend(backend)
+
+			notifier.Send(
+				fmt.Sprintf("\U0001F511 Login required: %s", name),
+				fmt.Sprintf(
+					"Agent '%s' needs authentication. Open the agent's terminal "+
+						"(tmux attach -t hive-%s) and run the login command for the CLI (%s). %s",
+					name, name, backend, loginCmd,
+				),
+				notify.PriorityHigh,
+			)
 		}
 	}
+	// Agents that vanished (removed from config, stopped) must not keep a
+	// streak alive in the map for the life of the process.
+	sightings.retain(scanned)
 }
 
 func convertKnowledgeLayers(cfgLayers []config.KnowledgeLayer) []knowledge.LayerConfig {
@@ -7389,16 +7623,21 @@ func reapStuckRedPRs(cfg *config.Config, actionable *github.ActionableResult, es
 // escalated PR keys so the work-list writers can flag them. Deterministic by
 // design: no agent judgment is involved in counting, evidence, or the
 // stop-order. Human-authored PRs are never escalated.
+//
+// The two forge writes go through forge.IssueWriter rather than *github.Client
+// so the evidence lands on whichever forge the hive is actually configured for
+// (see governorForge in forgewire.go). On a GitHub hive the writer IS the
+// *github.Client this used to take, so nothing about that path changed.
 func runEscalationSweep(
 	ctx context.Context,
 	cfg *config.Config,
-	ghClient *github.Client,
+	writer forge.IssueWriter,
 	actionable *github.ActionableResult,
 	notifier *notify.Notifier,
 	logger *slog.Logger,
 ) map[string]bool {
 	escalated := map[string]bool{}
-	if cfg.Escalation.Disabled || ghClient == nil || actionable == nil {
+	if cfg.Escalation.Disabled || writer == nil || actionable == nil {
 		return escalated
 	}
 	getEscalationStore()
@@ -7450,14 +7689,14 @@ func runEscalationSweep(
 			excerpt = escalationStore.Excerpt(o.Repo, o.Number)
 		}
 		body := escalation.CommentBody(r.Attempts, meta[key].checks, excerpt)
-		if err := ghClient.CreateIssueComment(ctx, o.Repo, o.Number, body); err != nil {
+		if err := writer.CreateIssueComment(ctx, o.Repo, o.Number, body); err != nil {
 			// Retry next pass rather than marking escalated with no comment:
 			// the whole point is that the evidence reaches a human.
 			logger.Warn("escalation comment failed; will retry next pass",
 				"repo", o.Repo, "pr", o.Number, "error", err)
 			continue
 		}
-		if err := ghClient.AddLabels(ctx, o.Repo, o.Number, []string{escalation.NeedsHumanLabel}); err != nil {
+		if err := writer.AddLabels(ctx, o.Repo, o.Number, []string{escalation.NeedsHumanLabel}); err != nil {
 			logger.Warn("escalation label failed", "repo", o.Repo, "pr", o.Number, "error", err)
 		}
 		escalationStore.MarkEscalated(o.Repo, o.Number)
@@ -7632,6 +7871,16 @@ const (
 	acmmHoldGatedMinLevel = 3
 	acmmHoldGatedMaxLevel = 5
 )
+
+// shouldHoldAgentPR keeps public outreach claims human-reviewed even at L6,
+// where ordinary agent PRs may auto-merge. The general ACMM hold gate remains
+// unchanged for all roles at L3-L5.
+func shouldHoldAgentPR(agentName string, level int) bool {
+	if strings.EqualFold(strings.TrimSpace(agentName), "outreach") {
+		return true
+	}
+	return level >= acmmHoldGatedMinLevel && level <= acmmHoldGatedMaxLevel
+}
 
 // mergeableJSONUnknown is the explicit wire value for "mergeability was never
 // determined". It is spelled out rather than left as "" so a consumer reading
@@ -8202,7 +8451,18 @@ func auditPRAgents(org string, since time.Time, auditPath string) map[string]str
 	return out
 }
 
-func writeMergeEligible(actionable *github.ActionableResult, hold github.HoldResult, org string, escalatedPRs map[string]bool, enforceIntent bool, intentVerdicts map[string]intent.Verdict, requireReviewApproval bool, logger *slog.Logger) {
+// anyRequiredCheckFailing reports whether any of a PR's failing check names
+// is in the operator-declared required set.
+func anyRequiredCheckFailing(failing []string, required map[string]bool) bool {
+	for _, name := range failing {
+		if required[name] {
+			return true
+		}
+	}
+	return false
+}
+
+func writeMergeEligible(actionable *github.ActionableResult, hold github.HoldResult, org string, escalatedPRs map[string]bool, enforceIntent bool, intentVerdicts map[string]intent.Verdict, requireReviewApproval bool, requiredChecks map[string]bool, logger *slog.Logger) {
 	holdSet := make(map[string]bool)
 	for _, h := range hold.Items {
 		key := fmt.Sprintf("%s/%d", h.Repo, h.Number)
@@ -8284,18 +8544,35 @@ func writeMergeEligible(actionable *github.ActionableResult, hold github.HoldRes
 		}
 
 		if pr.CIStatus == "failure" {
-			failing = append(failing, failingPR{
-				Number:        pr.Number,
-				Repo:          fullRepo,
-				Title:         pr.Title,
-				Author:        pr.Author,
-				HeadSHA:       pr.HeadSHA,
-				FailingChecks: pr.FailingChecks,
-				Excerpt:       pr.CIFailureExcerpt,
-				Escalated:     escalatedPRs[escalation.Key(fullRepo, pr.Number)],
-				Agent:         prAgents[fmt.Sprintf("%s#%d", fullRepo, pr.Number)],
-			})
-			continue
+			// A PR red ONLY on non-required checks (perma-red Playwright
+			// shards, coverage) that GitHub itself reports mergeable is NOT a
+			// failing PR — it is merge-eligible, mirroring the
+			// pending-but-mergeable rule below. Without this, every dependabot
+			// PR on a repo with permanently-red optional checks classified as
+			// "failure", landed in ci-failing.json where no sweep or agent
+			// would ever merge it, and accumulated indefinitely (observed on
+			// kubestellar/console 2026-08-28: 16 dependabot PRs, oldest 11
+			// days). Gated on an operator-declared required-check set: with no
+			// set configured we cannot distinguish required from optional and
+			// keep the old fail-closed behavior. The merge step re-enforces
+			// branch protection, so this cannot merge anything GitHub blocks.
+			onlyOptionalRed := len(requiredChecks) > 0 &&
+				!anyRequiredCheckFailing(pr.FailingChecks, requiredChecks) &&
+				pr.Mergeable == github.MergeableYes
+			if !onlyOptionalRed {
+				failing = append(failing, failingPR{
+					Number:        pr.Number,
+					Repo:          fullRepo,
+					Title:         pr.Title,
+					Author:        pr.Author,
+					HeadSHA:       pr.HeadSHA,
+					FailingChecks: pr.FailingChecks,
+					Excerpt:       pr.CIFailureExcerpt,
+					Escalated:     escalatedPRs[escalation.Key(fullRepo, pr.Number)],
+					Agent:         prAgents[fmt.Sprintf("%s#%d", fullRepo, pr.Number)],
+				})
+				continue
+			}
 		}
 
 		// A PR whose CI is still "pending" is nonetheless merge-eligible when
@@ -8316,11 +8593,23 @@ func writeMergeEligible(actionable *github.ActionableResult, hold github.HoldRes
 			continue
 		}
 
+		if pr.Mergeable == github.MergeableNo {
+			// A conflicting PR cannot merge no matter how green its checks
+			// are. Listing it as merge-eligible left the eligible count stuck
+			// at N forever while nothing could actually merge (console
+			// #23002/#23003, 2026-08-31: the only two build-gate-green PRs
+			// were DIRTY go.mod dependabot bumps). Conflicts are the
+			// rebase/needs-human path's job, not the sweep's — keep them out
+			// of the eligible bucket.
+			continue
+		}
+
 		dco := "unknown"
 		for _, l := range pr.Labels {
-			if l == "dco-signoff: yes" {
+			switch l {
+			case "dco-signoff: yes":
 				dco = "yes"
-			} else if l == "dco-signoff: no" {
+			case "dco-signoff: no":
 				dco = "no"
 			}
 		}
@@ -8758,7 +9047,9 @@ func parseColorInt(color string) int {
 		return 0x95a5a6
 	}
 	var result int
-	fmt.Sscanf(color, "%x", &result)
+	if _, err := fmt.Sscanf(color, "%x", &result); err != nil {
+		return 0x95a5a6 // malformed hex: fall back to the same default as an empty string
+	}
 	return result
 }
 
@@ -8824,6 +9115,57 @@ func runHub(logger *slog.Logger, configPath string) {
 		os.Exit(1)
 	}
 	logger.Info("hub server stopped")
+}
+
+// resolveLiteLLMInferenceRoute resolves the endpoint and model an agent's
+// inference route should use for the built-in "litellm" backend. It is the
+// whole route-install decision tree for that backend, lifted out of main() so
+// it can be unit-tested (#5460); main() calls it and keeps ownership of key,
+// CA bundle and logging.
+//
+// requestedModel is the model the agent asked for ("" when it named none). The
+// returned model is that request when non-empty, otherwise the default
+// inherited from whichever source supplied the endpoint.
+//
+// Resolution order — each step matches the behavior shipped in 231ca4b:
+//
+//  1. local_proxy: the Go translator forwards to the bundled litellm proxy on
+//     loopback, overriding any configured remote endpoint.
+//  2. the legacy governor.litellm block (HIVE_LITELLM_ENDPOINT or yaml), whose
+//     default_model supplies the model.
+//  3. the EXPLICIT gateway named by this backend. A hive configured only
+//     through the Model Gateways tab leaves the legacy block empty; the key
+//     and CA bundle already resolve from that gateway, so the endpoint must
+//     too, or NO route is installed and every agent call dies "502 no
+//     inference route" while the Gateways tab Test button happily passes
+//     (ains-validation/pocketmini, 2026-08-31 — #5393).
+//
+// ok is false when no source yields an endpoint: the caller must warn and
+// install NO route. It never invents an endpoint, and never returns a route
+// with an empty endpoint — a silently empty endpoint is the 502 this whole
+// path exists to prevent.
+func resolveLiteLLMInferenceRoute(cfg *config.Config, backend, requestedModel string) (endpoint, model string, ok bool) {
+	lc := cfg.Governor.LiteLLM
+	model = requestedModel
+	endpoint = lc.ResolveEndpoint()
+	if lc.LocalProxy {
+		endpoint = litellmLocalProxyURL()
+	}
+	if endpoint == "" {
+		if gw := cfg.Governor.ResolveGateway(backend); gw != nil && gw.Endpoint != "" {
+			endpoint = gw.Endpoint
+			if model == "" {
+				model = gw.DefaultModel
+			}
+		}
+	}
+	if endpoint == "" {
+		return "", requestedModel, false
+	}
+	if model == "" {
+		model = lc.DefaultModel
+	}
+	return endpoint, model, true
 }
 
 // resolveWatsonxGateway finds the gateway backing the built-in "watsonx" agent

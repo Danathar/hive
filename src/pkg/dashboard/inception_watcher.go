@@ -460,7 +460,7 @@ func (w *InceptionWatcher) runPlukSubscriberWithSettings(ctx context.Context, lo
 		w.logger.Warn("pluk subscriber: cannot open log", "error", err)
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	// Seek to end — we only care about new events
 	if seekEnd {
@@ -532,7 +532,8 @@ func (w *InceptionWatcher) handlePlukEvent(event plukEvent) {
 
 	switch event.Type {
 	case "state_change":
-		if event.Data["state"] == "idle" {
+		switch event.Data["state"] {
+		case "idle":
 			phase := state.Phase
 
 			// Agent went idle during capture — if Pluk intercepted questions, apply them now
@@ -573,7 +574,7 @@ func (w *InceptionWatcher) handlePlukEvent(event plukEvent) {
 					}
 				}
 			}
-		} else if event.Data["state"] == "working" {
+		case "working":
 			w.plukIdleInStructure = false
 		}
 

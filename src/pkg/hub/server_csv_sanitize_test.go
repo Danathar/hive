@@ -227,20 +227,22 @@ func TestIsAvailableRegistryEntry(t *testing.T) {
 	}
 }
 
-func TestGheAPIURLForHost(t *testing.T) {
+func TestForgeAPIURLForHost(t *testing.T) {
 	cases := []struct {
-		in, want string
+		kind, host, want string
 	}{
-		{"", ""},
-		{"github.com", ""},
-		{"GITHUB.COM", ""},
-		{"api.github.com", ""},
-		{"github.ibm.com", "https://github.ibm.com/api/v3"},
-		{"  GitHub.Enterprise.org  ", "https://github.enterprise.org/api/v3"},
+		{"", "", ""},
+		{"", "github.com", ""},
+		{"", "GITHUB.COM", ""},
+		{"", "api.github.com", ""},
+		{"", "github.ibm.com", "https://github.ibm.com/api/v3"},
+		{string(ForgeGitHubEnterprise), "  GitHub.Enterprise.org  ", "https://github.enterprise.org/api/v3"},
+		{string(ForgeGitLab), "gitlab.example.com", ""},
+		{string(ForgeGitea), "gitea.example.com", ""},
 	}
 	for _, tc := range cases {
-		if got := gheAPIURLForHost(tc.in); got != tc.want {
-			t.Errorf("gheAPIURLForHost(%q) = %q, want %q", tc.in, got, tc.want)
+		if got := forgeAPIURLForHost(tc.kind, tc.host); got != tc.want {
+			t.Errorf("forgeAPIURLForHost(%q, %q) = %q, want %q", tc.kind, tc.host, got, tc.want)
 		}
 	}
 }

@@ -145,7 +145,7 @@ func (s *HubServer) handleLiteEnroll(w http.ResponseWriter, r *http.Request) {
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 		return
 	}
 
@@ -202,7 +202,7 @@ func (s *HubServer) handleLiteEnroll(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func (s *HubServer) findOwnedLiteTargetSpoke(username, owner, host string) (*SaaSHive, bool) {
@@ -334,7 +334,7 @@ func (s *HubServer) requestHostedLiteSpoke(username, owner, repo, host string, i
 	if host != "" && host != publicGitHubHost {
 		h.GitHubHost = host
 		h.GitHubBaseURL = "https://" + host
-		h.GitHubAPIURL = gheAPIURLForHost(host)
+		h.GitHubAPIURL = forgeAPIURLForHost("", host)
 	}
 	if err := saveSaaSHive(h); err != nil {
 		return nil, fmt.Errorf("save hosted lite spoke metadata: %w", err)
@@ -542,7 +542,7 @@ func verifyGitHubRepoAccess(ctx context.Context, token, host, owner, repo string
 	if err != nil {
 		return false, fmt.Errorf("GitHub repo access check failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusUnauthorized {
 		return false, nil
 	}

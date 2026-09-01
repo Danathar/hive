@@ -93,6 +93,16 @@ for src in "$HIVE_REPO"/bin/*.sh; do
   fi
 done
 
+# New helpers do not exist at the destination yet, so the generic drift loop's
+# "installed files only" guard cannot bootstrap them. Keep this explicit until
+# all supported native installations have received the #5110 classifier.
+BASELINE_HELPER_SRC="$HIVE_REPO/bin/hive-baseline-check.sh"
+BASELINE_HELPER_DST="$INSTALL_DIR/hive-baseline-check.sh"
+if [ -f "$BASELINE_HELPER_SRC" ] && ! cmp -s "$BASELINE_HELPER_SRC" "$BASELINE_HELPER_DST" 2>/dev/null; then
+  sudo install -m 0755 "$BASELINE_HELPER_SRC" "$BASELINE_HELPER_DST"
+  SYNCED="$SYNCED hive-baseline-check.sh"
+fi
+
 # hive.sh is installed as /usr/local/bin/hive (no .sh extension)
 HIVE_CLI="$HIVE_REPO/bin/hive.sh"
 HIVE_INSTALLED="$INSTALL_DIR/hive"

@@ -8,8 +8,6 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
-
-	gh "github.com/google/go-github/v72/github"
 )
 
 // --------------------------------------------------------------------------
@@ -1051,7 +1049,7 @@ func TestCheckWorkflow_NoRuns(t *testing.T) {
 	mux.HandleFunc("/repos/org/repo/actions/workflows", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"total_count": 1,
-			"workflows":  []map[string]interface{}{{"id": 1, "name": "CI"}},
+			"workflows":   []map[string]interface{}{{"id": 1, "name": "CI"}},
 		})
 	})
 	mux.HandleFunc("/repos/org/repo/actions/workflows/1/runs", func(w http.ResponseWriter, r *http.Request) {
@@ -1113,7 +1111,7 @@ func TestCiPassRate_NoRuns(t *testing.T) {
 	mux.HandleFunc("/repos/org/repo/actions/workflows", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"total_count": 1,
-			"workflows":  []map[string]interface{}{{"id": 1, "name": "CI"}},
+			"workflows":   []map[string]interface{}{{"id": 1, "name": "CI"}},
 		})
 	})
 	mux.HandleFunc("/repos/org/repo/actions/workflows/1/runs", func(w http.ResponseWriter, r *http.Request) {
@@ -1138,7 +1136,7 @@ func TestReleaseCheck_NoRuns(t *testing.T) {
 	mux.HandleFunc("/repos/org/repo/actions/workflows", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"total_count": 1,
-			"workflows":  []map[string]interface{}{{"id": 1, "name": "Release"}},
+			"workflows":   []map[string]interface{}{{"id": 1, "name": "Release"}},
 		})
 	})
 	mux.HandleFunc("/repos/org/repo/actions/workflows/1/runs", func(w http.ResponseWriter, r *http.Request) {
@@ -1494,7 +1492,128 @@ func TestCheckWorkflow_APIError(t *testing.T) {
 }
 
 // --------------------------------------------------------------------------
-// Unused import suppression
+// GreenCIStreak (#5226)
 // --------------------------------------------------------------------------
 
-var _ = gh.Int // suppress unused import
+// greenStreakServer stands up a mock exposing the repo metadata (for the
+// default-branch lookup) and the completed-runs listing GreenCIStreak reads.
+func greenStreakServer(t *testing.T, conclusions []string) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/org/repo1", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"default_branch": "main"})
+	})
+	mux.HandleFunc("/repos/org/repo1/actions/runs", func(w http.ResponseWriter, r *http.Request) {
+		// The streak must be scoped to the default branch, not the whole repo:
+		// counting PR-branch runs would let unmerged work inflate the streak.
+		if got := r.URL.Query().Get("branch"); got != "main" {
+			t.Errorf("branch filter = %q, want \"main\"", got)
+		}
+		runs := make([]map[string]any, 0, len(conclusions))
+		for i, c := range conclusions {
+			runs = append(runs, map[string]any{"id": i + 1, "conclusion": c, "status": "completed"})
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"total_count":   len(runs),
+			"workflow_runs": runs,
+		})
+	})
+	return httptest.NewServer(mux)
+}
+
+func TestGreenCIStreak(t *testing.T) {
+	cases := []struct {
+		name         string
+		conclusions  []string
+		wantStreak   int
+		wantMeasured bool
+	}{
+		{
+			// Runs are newest-first, so the streak counts from the head and
+			// stops at the first red: 3 green then a failure = 3.
+			name:        "counts consecutive green from newest, stops at first red",
+			conclusions: []string{"success", "success", "success", "failure", "success"},
+			wantStreak:  3, wantMeasured: true,
+		},
+		{
+			// Latest run red: a real, measured zero. Distinct from unknown.
+			name:        "latest run red is a measured zero",
+			conclusions: []string{"failure", "success", "success"},
+			wantStreak:  0, wantMeasured: true,
+		},
+		{
+			// Skipped means no gate ran: transparent, neither breaks nor is
+			// counted against the streak (same treatment ciPassRate gives it).
+			name:        "skipped runs count as not-red",
+			conclusions: []string{"success", "skipped", "success", "failure"},
+			wantStreak:  3, wantMeasured: true,
+		},
+		{
+			// A repo with NO CI history must read as unknown, never as green —
+			// otherwise the advisor rewards having no gates to fail.
+			name:        "no completed runs reads as unknown, not green",
+			conclusions: nil,
+			wantStreak:  0, wantMeasured: false,
+		},
+		{
+			// Non-success, non-skipped conclusions (cancelled, timed_out) end
+			// the streak: they are not evidence CI held.
+			name:        "cancelled ends the streak",
+			conclusions: []string{"success", "cancelled", "success"},
+			wantStreak:  1, wantMeasured: true,
+		},
+		{
+			// All green: the streak is the full page.
+			name:        "all green counts every run",
+			conclusions: []string{"success", "success", "success", "success"},
+			wantStreak:  4, wantMeasured: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := greenStreakServer(t, tc.conclusions)
+			defer server.Close()
+
+			c := newTestClient(t, server, "org", []string{"repo1"})
+			streak, measured := c.GreenCIStreak(context.Background())
+			if measured != tc.wantMeasured {
+				t.Fatalf("measured = %v, want %v", measured, tc.wantMeasured)
+			}
+			if streak != tc.wantStreak {
+				t.Fatalf("streak = %d, want %d", streak, tc.wantStreak)
+			}
+		})
+	}
+}
+
+// TestGreenCIStreak_APIError verifies an Actions failure reads as unknown
+// rather than as a zero streak, so a transient outage cannot be mistaken for
+// a repo whose CI just went red.
+func TestGreenCIStreak_APIError(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/org/repo1", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"default_branch": "main"})
+	})
+	mux.HandleFunc("/repos/org/repo1/actions/runs", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	c := newTestClient(t, server, "org", []string{"repo1"})
+	streak, measured := c.GreenCIStreak(context.Background())
+	if measured {
+		t.Fatalf("measured = true on API error, want false (unknown)")
+	}
+	if streak != 0 {
+		t.Fatalf("streak = %d on API error, want 0", streak)
+	}
+}
+
+// TestGreenCIStreak_NilClient verifies nil-safety: no client means unknown.
+func TestGreenCIStreak_NilClient(t *testing.T) {
+	var c *Client
+	if streak, measured := c.GreenCIStreak(context.Background()); measured || streak != 0 {
+		t.Fatalf("nil client: got (%d, %v), want (0, false)", streak, measured)
+	}
+}

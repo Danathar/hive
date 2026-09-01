@@ -148,8 +148,9 @@ func TestIdempotencyKeyDistinguishesDifferentRequests(t *testing.T) {
 		Tool:      "write",
 		Arguments: map[string]any{"a": "1", "b": "2", "c": "3"},
 	}}
+	first := DeriveIdempotencyKey(r1)
 	for i := 0; i < 20; i++ {
-		if DeriveIdempotencyKey(r1) != DeriveIdempotencyKey(r1) {
+		if DeriveIdempotencyKey(r1) != first {
 			t.Fatal("idempotency key is not stable across calls — map iteration order is leaking into the hash")
 		}
 	}

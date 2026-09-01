@@ -76,3 +76,7 @@ Priority: 0 (critical adoption blocker), 1 (high-impact opportunity), 2 (medium 
 6. For findings that need a planning document, create a worktree and open a hold-gated PR
 7. Create a bead for each finding
 8. Summarize strategic health in your response
+
+## Publishable Content Boundary
+
+Attribution belongs ONLY in the issue or PR body and the DCO commit trailer. NEVER write `Filed by`, ACMM levels, agent names, or hive run metadata inside any committed file.

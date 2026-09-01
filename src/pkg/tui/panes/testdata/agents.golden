@@ -1,0 +1,12 @@
+AGENTS  3 agents                                
+    NAME       BACKEND  MODEL          ACTIVITY 
+▸ ● Scanner    claude   claude-opus-4- now      
+  Ⅱ quality    copilot  gpt-5          7m ago   
+  × Reviewer   codex    gpt-5.1-codex- 1d ago   
+                                                
+                                                
+                                                
+                                                
+                                                
+                                                
+                                                

@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	gh "github.com/google/go-github/v72/github"
@@ -69,12 +70,19 @@ type Client struct {
 	// StartPRRequestWatcher.
 	prAuthz PRRequestAuthorizer
 	// prHoldLabel decides, at PR-creation time, whether a freshly-opened PR must
-	// carry the "hold" label (F6). It is consulted server-side from authoritative
-	// hive config (the ACMM level), NOT trusted from a client flag — the
+	// carry the "hold" label (F6). It receives the authoring agent so role-specific
+	// safety rules (for example, mandatory human review of outreach content) can
+	// be enforced alongside the authoritative ACMM level. It is consulted
+	// server-side, NOT trusted from a client flag — the
 	// gh-wrapper.sh tail that used to add the label is dead code (it sits after
 	// `exec hive-open-pr`). nil means "never hold" (backward-compatible no-op).
 	// Set by StartPRRequestWatcher.
-	prHoldLabel func() bool
+	prHoldLabel func(agent string) bool
+	// prOpenedHook, when set, is told about every NEW PR the request watcher
+	// opens (agent, repo, number, url) — the seam progress surfaces such as
+	// the Linear session emitter hook. atomic so SetPROpenedHook is safe
+	// while the watcher goroutine runs.
+	prOpenedHook atomic.Pointer[PROpenedHook]
 	// mergeAuthz gates merge requests from the merge-request watcher against the
 	// per-agent ACMM merge-policy (CanMerge) + forge-resistance AND the merge
 	// TARGET (pinned SHA + governor merge-eligible membership; see
@@ -163,6 +171,22 @@ type Client struct {
 	// issues:write) still surface within ~an hour instead of never. Guarded by
 	// advisoryMu.
 	advisoryDigestSkips map[string]int
+	// hiveIdentity records which accounts count as "this hive" for the
+	// self-authorization gate (pr_self_authorization.go, #5117). It is optional
+	// — the gate recognises the App bot without it — and exists so an issue
+	// filed under project.ai_author's plain user account is also recognised as
+	// ours rather than mistaken for a human's. Guarded because config reload
+	// re-installs it while the PR-request watcher goroutine may be reading it.
+	hiveIdentityMu sync.RWMutex
+	hiveIdentity   HiveIdentity
+	// commitTrees memoizes "owner/repo@commitSHA" -> tree SHA for the
+	// duplicate-payload guard (pr_duplicate_tree.go, #5111). A commit's tree
+	// can never change, so unlike defaultBranches this cache has no staleness
+	// window at all; it exists purely so re-inspecting the same open PRs on
+	// every PR creation does not re-pay a lookup per candidate. Guarded by
+	// commitTreeMu.
+	commitTreeMu sync.RWMutex
+	commitTrees  map[string]string
 }
 
 func (c *Client) SetCanaryScanner(enabled, failClosed bool, reg *ioscan.CanaryRegistry, onLeak func(ioscan.CanaryLeak)) {
@@ -689,7 +713,7 @@ func (c *Client) fetchPRs(ctx context.Context, repo string) (actionable []PullRe
 		if resp.NextPage == 0 {
 			break
 		}
-		opts.ListOptions.Page = resp.NextPage
+		opts.Page = resp.NextPage
 	}
 
 	for _, pr := range allPRs {
@@ -962,9 +986,20 @@ func (c *Client) fetchFailureExcerpt(ctx context.Context, owner, repo string, ru
 // CreateIssueComment posts a comment on an issue or PR. The signature mirrors
 // forge.Forge.CreateIssueComment so escalation callers can swap in a neutral
 // forge adapter on non-GitHub hives without changing call sites.
+//
+// Canary-gated exactly like CreateIssue/CreatePR (kubestellar/hive#4960): the
+// issue-request watcher dispatches the same agent-supplied body to either
+// CreateIssue (kind "issue") or here (kind "comment"), so a comment left
+// ungated would let a prompt-injected agent exfiltrate a canary that a new
+// issue would have refused fail-closed.
 func (c *Client) CreateIssueComment(ctx context.Context, repo string, number int, body string) error {
 	if c == nil {
 		return ErrNoGitHubClient
+	}
+	if leak, ok := c.scanCanaryText(body, "hive-comment:"+repo); ok {
+		if c.canaryFailClosed {
+			return fmt.Errorf("ioscan canary leak detected: agent=%s source=%s", leak.Agent, leak.Source)
+		}
 	}
 	body = logscrub.ScrubString(body)
 	owner, repoName := c.splitRepo(repo)

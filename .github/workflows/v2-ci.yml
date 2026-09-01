@@ -90,6 +90,33 @@ jobs:
       - name: Entrypoint dangling key_file tests (#4368)
         run: bash deploy/test_entrypoint_dangling_keyfile.sh
 
+      # #5369: the `chown -R dev:node /data` in the entrypoint's root phase is
+      # guarded on `[ "$DATA_OWNER" != "1001" ]`, and the Dockerfile already
+      # does that chown at BUILD time — so the guard is false on every normal
+      # boot and the chown never runs. Anything the root phase creates under
+      # /data afterwards stays root:root and is unreadable to the uid the hive
+      # process drops to. #5360 was one instance; this asserts the class.
+      #
+      # The guard must SURVIVE (it prevents a multi-minute recursive chown over
+      # an NFS PVC), so this pins the targeted sweep that replaces it, checks
+      # the pre-drop readability assertion, and mechanically enforces the
+      # maintenance rule: it extracts the root phase and fails if any mkdir
+      # under /data is neither swept nor chowned at its site, so the path list
+      # cannot go stale the first time someone adds a write.
+      - name: Entrypoint /data ownership invariant (#5369)
+        run: bash deploy/test_entrypoint_data_ownership.sh
+
+      # #5370: the arm64 lane probed the PUBLISHED image, so on a PR it
+      # validated code already on v4 rather than the change proposed — a PR
+      # fixing a startup bug stayed red, one introducing a startup bug went
+      # green. #5342 merged green that way and #5368, its fix, was red. The
+      # lane now builds the PR's own image and probes that. This pins the
+      # wiring: the build exists, it does not swallow failures, the probe is
+      # told the image is local, and the push path's missing-manifest failure
+      # (#4336) is untouched.
+      - name: arm64 lane probes PR code, not the published image (#5370)
+        run: bash deploy/test_arm64_lane_probes_pr_code.sh
+
       # Supply-chain pins regress SILENTLY. The PI_VERSION pin (#3443) landed on
       # v2, and a sync/v2-into-v4-* merge resolved the conflict in favour of the
       # older side and restored `ARG PI_VERSION=latest` — the fix commit is an
@@ -106,6 +133,17 @@ jobs:
       # immutable SHA tags are unconditional, while moving tags are monotonic.
       - name: Docker release-tag publication policy (#4804)
         run: bash scripts/test-publish-image-tags.sh
+
+      # #5142: v4.0.1 failed to publish twice in a row inside tagged-release.yml's
+      # final push — once on GH006 propagation lag (branch protection had not
+      # yet ingested the just-earned gate check), once on a non-fast-forward
+      # when a second merge landed mid-run. The push step now retries the
+      # first and defers green on the second (the successor run releases the
+      # newer merge; retagging here would publish images built from a
+      # different tree). Extracts the push step from tagged-release.yml and drives
+      # every branch of that state machine with a stubbed git.
+      - name: Release push retry/deferral state machine (#5142)
+        run: bash scripts/test-release-push-retry.sh
 
       # #4206: the standalone stack's image references live in exactly one
       # place, src/deploy/standalone-images.sh, so the Docker Compose assets
@@ -376,6 +414,10 @@ jobs:
         working-directory: .
         run: bash bin/test_hive_review.sh
 
+      - name: Shared CI baseline classifier tests
+        working-directory: .
+        run: bash bin/test_hive_baseline_check.sh
+
       # The guard that keeps the three steps above from being the last time
       # anyone notices: it fails when a bin/ suite exists and nothing runs it.
       # Each omission it catches is individually invisible, because nothing
@@ -477,6 +519,18 @@ jobs:
       - name: Contributor identity relocation (#4408)
         working-directory: .
         run: bash src/deploy/test_contribute_move.sh
+
+      # #5145: container mode resolves docker OR podman, but both hints printed
+      # from INSIDE the container hardcoded docker — a container cannot see its
+      # own launcher. On a podman run the recipe's host-side hint and the
+      # entrypoint's status line disagreed about the same container in one
+      # screen of output, and the one an operator pasted was the wrong one.
+      # This renders both hints from their shipped sources and requires them to
+      # be the same command; a grep for the literal would pass on a hint that
+      # names the variable and still renders wrongly.
+      - name: In-container attach hints name the real runtime (#5145)
+        working-directory: .
+        run: bash src/deploy/test_attach_hint_runtime.sh
   create-issue-on-failure:
     if: failure() && github.event_name == 'push' && github.ref == 'refs/heads/v2'
     runs-on: ubuntu-latest

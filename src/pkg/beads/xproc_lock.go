@@ -35,7 +35,7 @@ func (s *Store) lockAndRefresh() func() {
 		return func() {}
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		f.Close()
+		_ = f.Close() // best-effort cleanup; degrades to unserialized behavior per the doc comment above
 		return func() {}
 	}
 	s.refreshFromDisk()
@@ -87,7 +87,7 @@ func (s *Store) refreshFromDisk() {
 			s.beads[b.ID] = b
 			continue
 		}
-		if b.UpdatedAt.Time.After(cur.UpdatedAt.Time) {
+		if b.UpdatedAt.After(cur.UpdatedAt.Time) {
 			s.beads[b.ID] = b
 		}
 	}

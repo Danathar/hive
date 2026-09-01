@@ -44,6 +44,11 @@ type Tracker struct {
 	// session, which is how a kick-log archive event finds the session it
 	// completes (see Responder.HandleAgentEvent).
 	activeByAgent map[string]string
+	// activeByIssue maps a Linear issue identifier (ENG-42) to its most
+	// recent non-finished session, so the scheduler can keep an issue that a
+	// session is already working out of governor kicks (see
+	// ActiveSessionForIssue and pkg/scheduler's in-flight filter).
+	activeByIssue map[string]string
 	now           func() time.Time
 }
 
@@ -52,6 +57,7 @@ func NewTracker() *Tracker {
 	return &Tracker{
 		sessions:      make(map[string]*Session),
 		activeByAgent: make(map[string]string),
+		activeByIssue: make(map[string]string),
 		now:           time.Now,
 	}
 }
@@ -96,6 +102,9 @@ func (t *Tracker) SetAgent(sessionID, agent string) {
 	s.State = SessionStateWorking
 	s.LastEventAt = t.now()
 	t.activeByAgent[agent] = sessionID
+	if s.IssueIdentifier != "" {
+		t.activeByIssue[s.IssueIdentifier] = sessionID
+	}
 }
 
 // SetState transitions a session's state and records the last emitted
@@ -116,7 +125,28 @@ func (t *Tracker) SetState(sessionID, state, lastActivity string) {
 		if s.Agent != "" && t.activeByAgent[s.Agent] == sessionID {
 			delete(t.activeByAgent, s.Agent)
 		}
+		if s.IssueIdentifier != "" && t.activeByIssue[s.IssueIdentifier] == sessionID {
+			delete(t.activeByIssue, s.IssueIdentifier)
+		}
 	}
+}
+
+// ActiveSessionForIssue returns the working session for a Linear issue
+// identifier, if any. This is the in-flight ledger the scheduler consults so
+// an issue delegated through a session is not ALSO handed to the same (or
+// another) agent by the governor while that session's run is still going.
+func (t *Tracker) ActiveSessionForIssue(identifier string) (Session, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	id, ok := t.activeByIssue[identifier]
+	if !ok {
+		return Session{}, false
+	}
+	s, ok := t.sessions[id]
+	if !ok {
+		return Session{}, false
+	}
+	return *s, true
 }
 
 // ActiveSessionForAgent returns the agent's bound non-finished session id.
@@ -151,6 +181,9 @@ func (t *Tracker) evictLocked() {
 		}
 		if s := t.sessions[oldestID]; s.Agent != "" && t.activeByAgent[s.Agent] == oldestID {
 			delete(t.activeByAgent, s.Agent)
+		}
+		if s := t.sessions[oldestID]; s.IssueIdentifier != "" && t.activeByIssue[s.IssueIdentifier] == oldestID {
+			delete(t.activeByIssue, s.IssueIdentifier)
 		}
 		delete(t.sessions, oldestID)
 	}

@@ -1998,7 +1998,7 @@ select.admin-act{min-width:0;max-width:100%%}
 <option value="llm-d" data-install="" data-host-install="npm i -g @anthropic-ai/claude-code" data-model-flag="--model" data-default-model="" data-env="# llm-d — self-hosted OpenAI-compatible endpoint\nexport HIVE_LITELLM_ENDPOINT=http://your-llm-d-host:8000/v1\nexport HIVE_LITELLM_API_KEY=sk-your-llm-d-key  # only if your endpoint needs one">llm-d (self-hosted)</option>
 <option value="bob" data-install="" data-host-install="curl -fsSL https://bob.ibm.com/download/bobshell.sh | bash" data-model-flag="" data-default-model="" data-env="# Bob (IBM bobshell) — get a key at https://bob.ibm.com (Scope: Inference).\n# Exported locally, never sent to the hive.\nexport BOBSHELL_API_KEY=your-bob-api-key">Bob</option>
 <option value="watsonx" data-install="" data-host-install="npm i -g @anthropic-ai/claude-code" data-model-flag="--model" data-default-model="" data-env="# IBM watsonx.ai — OpenAI-compatible gateway, bring your own project + key.\n# watsonx auth is an IAM-minted JWT, not a raw bearer key — your local\n# Claude-Code setup or a small local proxy handles the token exchange.\n# Exported locally, never sent to the hive.\nexport HIVE_LITELLM_ENDPOINT=https://us-south.ml.cloud.ibm.com/ml/gateway/v1\nexport HIVE_LITELLM_API_KEY=your-ibm-cloud-api-key\nexport WATSONX_PROJECT_ID=your-watsonx-project-id">watsonx.ai (IBM Granite + your key)</option>
-<option value="agy" data-install="" data-host-install="# Antigravity CLI (Google): https://antigravity.google/product/antigravity-cli\nbrew install --cask antigravity-cli\nagy   # sign in once with your Google account, interactively, then exit" data-model-flag="--model" data-default-model="" data-env="# Optional: agy effort — REQUIRED alongside a model, or agy ignores the model.\n# export AGENT_REASONING_EFFORT=low   # low|medium|high">Antigravity (agy)</option>
+<option value="agy" data-install="" data-host-install="# Antigravity CLI (Google): https://antigravity.google/product/antigravity-cli\nbrew install --cask antigravity-cli\nagy   # sign in once with your Google account, interactively, then exit" data-model-flag="--model" data-default-model="" data-env="# Optional: agy effort — REQUIRED alongside a model, or agy ignores the model.\n# export AGENT_REASONING_EFFORT=low   # low|medium|high\n# agy has no OS-level sandbox (see the confinement note below): local mode\n# refuses to launch unless you set the escape hatch below, and container mode\n# is the boundary that actually applies.\n# export HIVE_AGY_DANGEROUSLY_RUN_UNCONFINED=1   # local mode only; opts OUT of the container boundary">Antigravity (agy)</option>
 <option value="other" data-install="" data-host-install="# Install your CLI tool" data-model-flag="" data-default-model="">Other (host only)</option>
 </select>
 </span>
@@ -2033,11 +2033,23 @@ select.admin-act{min-width:0;max-width:100%%}
 <span style="color:var(--cc-muted)">Credential note (interim): the generated Secret stores a long-lived personal <code>GH_TOKEN</code> &mdash; base64, not encrypted, and readable by anyone with <code>get secrets</code> in that namespace or by cluster-scoped operators/backups. That is materially more exposed than a <code>0600</code> file on your laptop. Revoke any time with <code>gh auth logout</code>. Gating the credential on explicit task acceptance is tracked in <a href="https://github.com/kubestellar/hive/issues/2537" target="_blank" rel="noopener" style="color:var(--cc-accent)">#2537</a> and is not solved by this path.</span>
 </div>
 <!-- Host-only note. Shown for backends the containerized/Kubernetes paths cannot
-     run, so the mode flip to Host is explained rather than mysterious: "other"
-     has no image, and agy's Google sign-in is interactive with no API-key mode,
-     so no unattended container can hold a session. -->
+     run at all: "other" has no image by definition. (agy used to force Host
+     here too, on the claim that its image lacked the binary and its Google
+     sign-in could not be inherited — #5048 found the first half wrong (the
+     binary just needed adding) and the second half unverified, so agy now
+     offers Container like every other backend; see #agy-confinement-note for
+     its own, narrower caveat.) -->
 <div id="hostonly-note" style="display:none;margin-bottom:12px;background:var(--cc-surface);border:1px solid var(--cc-border);border-left:3px solid #d29922;border-radius:6px;padding:12px 14px;font-size:.85rem;color:var(--cc-text-2);line-height:1.5">
-<strong style="color:var(--cc-text)">This backend runs on your host, not in a container.</strong> The mode selector has been switched to <strong>Host</strong> for you. <strong>Antigravity (agy)</strong> signs in through an interactive Google OAuth flow &mdash; a browser URL plus a pasted code, with no API-key mode &mdash; so a container or pod has no session to inherit, and the contributor image does not ship the binary. Run <code>agy</code> once to sign in, then start the relay on the host. Its print mode (<code>agy -p</code>) is verified, so headless host runs work; Kubernetes does not.
+<strong style="color:var(--cc-text)">This backend runs on your host, not in a container.</strong> The mode selector has been switched to <strong>Host</strong> for you.
+</div>
+<!-- agy confinement note. agy has no OS-level sandbox at all (see
+     config/backends.conf's "no confinement mechanism" section): local mode
+     refuses to launch it without an explicit per-backend escape hatch, so
+     Container is the only mode with any host boundary. Shown only for agy,
+     regardless of the selected mode, so the constraint is visible before a
+     contributor picks Local and hits the refusal. -->
+<div id="agy-confinement-note" style="display:none;margin-bottom:12px;background:var(--cc-surface);border:1px solid var(--cc-border);border-left:3px solid #d29922;border-radius:6px;padding:12px 14px;font-size:.85rem;color:var(--cc-text-2);line-height:1.5">
+<strong style="color:var(--cc-text)">Antigravity (agy) has no OS-level sandbox of its own.</strong> <strong>Container</strong> mode (the default) is the only mode with any host boundary &mdash; it runs agy inside the contributor container, which now ships the <code>agy</code> binary. agy signs in through an interactive Google OAuth flow with no API-key mode: run <code>agy</code> once inside the container (or on the host first &mdash; <code>just contribute-hive agy</code> stages a signed-in <code>~/.gemini</code> into the container, though whether a staged credential re-authenticates an unattended agy has not been confirmed end-to-end). <strong>Local</strong> mode refuses to launch agy at all unless you explicitly set <code>HIVE_AGY_DANGEROUSLY_RUN_UNCONFINED=1</code>, which drops the container boundary and leaves agy running directly against your host filesystem &mdash; not recommended.
 </div>
 <div id="multi-hub-note" style="margin-bottom:12px;background:var(--cc-surface);border:1px solid var(--cc-border);border-left:3px solid #58a6ff;border-radius:6px;padding:12px 14px;font-size:.85rem;color:var(--cc-text-2);line-height:1.5">
 <strong style="color:var(--cc-text)">Contribute to multiple hives:</strong> after registering with each hive, set <code>HIVE_HUB</code> to comma-separated WebSocket URLs and <code>HIVE_REGISTRATION_TOKEN</code> to the matching comma-separated tokens in the same order. One relay shares one CLI/tmux session, works on one task at a time, keeps each hub connected with its own heartbeat, and rotates only when the active hub says no task is available. Added by <a href="https://github.com/hanthor" target="_blank" rel="noopener" style="color:var(--cc-accent)">@hanthor</a> in <a href="https://github.com/kubestellar/hive/pull/2846" target="_blank" rel="noopener" style="color:var(--cc-accent)">#2846</a>.
@@ -2101,21 +2113,33 @@ var hostTpl='PREREQ\nINSTALL\ngit clone -b {{HIVE_BRANCH}} https://github.com/ku
 // its own, so you can read it before piping to kubectl. Only the headless-
 // capable backends run this way (see K8S_HEADLESS_BACKENDS).
 var k8sTpl='PREREQ\ngit clone -b {{HIVE_BRANCH}} https://github.com/kubestellar/hive && cd hive\nexport HIVE_HUB='+hubURL+'\nROLEHELPjust contribute-setup CLI\n# Review the manifest, then apply into your current kube-context:\njust contribute-k8s hive-contributor | kubectl apply -f -\nkubectl -n hive-contributor rollout status deploy/hive-contributor';
-// Backends with a verified headless (non-interactive) entry point — must match
-// HEADLESS_BACKENDS in bin/contributor-relay.sh and the Justfile. A pod has no
-// TTY, so only these run in a cluster; anything else refuses work at startup.
+// Backends whose credentials and model configuration this generator can stage
+// safely. Pi's relay supports headless execution, but this generator does not
+// yet stage its provider-specific credentials or canonical model. A pod has no
+// TTY, so anything outside this list refuses work at startup.
 var K8S_HEADLESS_BACKENDS={claude:1,litellm:1,copilot:1,codex:1,watsonx:1,goose:1};
 // Backends that can only run on the contributor's own host. "other" has no
-// image by definition. agy is host-only for a different reason: it signs in
-// through an interactive Google OAuth flow (browser URL + pasted code) with no
-// API-key mode, so neither a container nor a pod can inherit a contributor's
-// session — verified against agy 1.1.13, where a clean container demands a
-// fresh browser login no matter what is mounted, and the contributor image does
-// not ship the binary either. Selecting one flips Mode to Host rather than
-// generating commands that cannot work. NOTE agy IS headless-capable on a host
-// (agy -p, see HEADLESS_BACKENDS in bin/contributor-relay.sh); it is the
-// credential, not the capability, that keeps it out of K8S_HEADLESS_BACKENDS.
-var HOST_ONLY_BACKENDS=['other','agy'];
+// image by definition, so it stays here. Selecting one flips Mode to Host
+// rather than generating commands that cannot work.
+//
+// agy USED TO be in this list too, on the claim that the contributor image
+// did not ship the binary and that its Google sign-in could not be inherited
+// by a container. #5048 found the first half simply wrong (the binary was
+// never added; src/Dockerfile.contributor now installs it) and the second
+// half an overclaim: agy does persist OAuth state under ~/.gemini, including
+// a refresh_token, and the earlier "verified on 1.1.13" conclusion was
+// observing an incomplete staging mount (see the Justfile's agy staging
+// case), not an absence of any inheritable credential. agy is therefore no
+// longer forced to Host — see #agy-confinement-note for the constraint that
+// actually still applies to it: agy has no OS sandbox of its own, so
+// Container is its only mode with any host boundary at all, a narrower and
+// more accurate statement than "must run on the host."
+//
+// agy IS headless-capable on a host (agy -p, see HEADLESS_BACKENDS in
+// bin/contributor-relay.sh); it stays out of K8S_HEADLESS_BACKENDS
+// regardless, because a pod has no way to complete its interactive sign-in
+// even once.
+var HOST_ONLY_BACKENDS=['other'];
 function isHostOnly(c){return HOST_ONLY_BACKENDS.indexOf(c)>=0;}
 var modelRow=document.getElementById('model-row');
 var modelInput=document.getElementById('model-input');
@@ -2136,6 +2160,8 @@ var k8sNote=document.getElementById('k8s-note');
 if(k8sNote)k8sNote.style.display=(mode==='kubernetes')?'block':'none';
 var hostOnlyNote=document.getElementById('hostonly-note');
 if(hostOnlyNote)hostOnlyNote.style.display=isHostOnly(cli)?'block':'none';
+var agyNote=document.getElementById('agy-confinement-note');
+if(agyNote)agyNote.style.display=(cli==='agy')?'block':'none';
 modelRow.style.display=(modelFlag||cli==='goose')?'flex':'none';
 var modelLine='';
 if(model){
@@ -2233,7 +2259,7 @@ vllm:{name:'vLLM',tag:'self-hosted'},
 'llm-d':{name:'llm-d',tag:'self-hosted'},
 bob:{name:'Bob',tag:'IBM'},
 watsonx:{name:'watsonx.ai',tag:'IBM'},
-agy:{name:'Antigravity',tag:'Google (host)'},
+agy:{name:'Antigravity',tag:'Google (unconfined)'},
 other:{name:'Other',tag:'host only'}
 };
 var tilesEl=document.getElementById('client-tiles');
@@ -4552,6 +4578,10 @@ function capabilityLine(caps){
   if(caps.agent_cli_version)parts.push('cli '+esc(caps.agent_cli_version));
   if(caps.relay_protocol_version)parts.push('proto '+esc(caps.relay_protocol_version));
   if(caps.credential_type)parts.push('cred:'+esc(caps.credential_type));
+  if(caps.pi_binary)parts.push('pi binary:'+esc(caps.pi_binary));
+  if(caps.pi_configuration)parts.push('config:'+esc(caps.pi_configuration));
+  if(caps.pi_authentication)parts.push('auth:'+esc(caps.pi_authentication));
+  if(caps.pi_invocation)parts.push('invoke:'+esc(caps.pi_invocation));
   if(!parts.length)return '';
   return '<div class="clanker-sub clanker-declares" title="Self-declared by the client. Advisory only — the hub records and shows it but never routes, gates, or trusts work on it.">declares: '+parts.join(' &middot; ')+'</div>';
 }
@@ -6252,7 +6282,7 @@ fetch('/api/version').then(function(r){return r.json()}).then(function(d){
 </script>
 </body></html>`, "{{HIVE_BRANCH}}", upstreamBranch()), projectName, michromaFontFaceCSS, customStyleHeadHTML, projectName, len(profiles), tierBoxes.String(), hubURL, hubURLJS, projectNameJS, tierTableRows, customStyleNoticeHTML)
 	applyDocumentScriptSrcElem(w, page.Bytes())
-	w.Write(page.Bytes())
+	_, _ = w.Write(page.Bytes())
 }
 
 // ── Registration ───────────────────────────────────────────────────────────
@@ -6465,7 +6495,7 @@ func (s *Server) handleContributeReissueToken(w http.ResponseWriter, r *http.Req
 	if username == "" {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte(`{"error":"Invalid or missing GitHub token. Use: Authorization: Bearer <gh-personal-access-token>"}`))
+		_, _ = w.Write([]byte(`{"error":"Invalid or missing GitHub token. Use: Authorization: Bearer <gh-personal-access-token>"}`))
 		return
 	}
 
@@ -7705,8 +7735,8 @@ func (s *Server) handleHivesOnboard(w http.ResponseWriter, r *http.Request) {
 		"next_steps": []string{
 			"1. Install the Hive GitHub App on your org",
 			"2. Note the App ID and Installation ID",
-			"3. Save the private key as /etc/hive/gh-app-key.pem",
-			"4. Deploy with: docker compose up -d",
+			"3. Save the private key in the deployment's secrets directory (for example, /etc/hive/secrets/gh-app-key.pem, or ~/.config/hive/secrets/gh-app-key.pem for rootless Podman)",
+			"4. Deploy: Docker — docker compose up -d; Podman — install the Quadlet units from src/deploy/quadlet/ per src/docs/podman-standalone-quadlet.md, then start hive-gateway.service with systemctl (systemctl --user for rootless)",
 			"5. Register: POST /api/hives/register",
 		},
 	})
@@ -7979,7 +8009,7 @@ func isValidUsername(s string) bool {
 		return false
 	}
 	for _, c := range s {
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.') {
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '-' && c != '_' && c != '.' {
 			return false
 		}
 	}
@@ -8100,7 +8130,7 @@ func validateGitHubToken(token, apiURL string) string {
 	if err != nil || resp.StatusCode != 200 {
 		return ""
 	}
-	defer resp.Body.Close()
+	defer closeHTTPBody(resp.Body)
 	var user struct {
 		Login string `json:"login"`
 	}
@@ -8145,7 +8175,7 @@ func (s *Server) handleAPIv1(w http.ResponseWriter, r *http.Request) {
 	if token == "" {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte(`{"error":"Invalid or missing GitHub token. Use: Authorization: Bearer <gh-token>"}`))
+		_, _ = w.Write([]byte(`{"error":"Invalid or missing GitHub token. Use: Authorization: Bearer <gh-token>"}`))
 		return
 	}
 
@@ -8153,7 +8183,7 @@ func (s *Server) handleAPIv1(w http.ResponseWriter, r *http.Request) {
 	if username == "" {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte(`{"error":"Invalid or missing GitHub token. Use: Authorization: Bearer <gh-token>"}`))
+		_, _ = w.Write([]byte(`{"error":"Invalid or missing GitHub token. Use: Authorization: Bearer <gh-token>"}`))
 		return
 	}
 
@@ -8198,12 +8228,12 @@ func (s *Server) handleAPIv1(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
-		w.Write([]byte(`{"error":"Not registered as a contributor. Run: just contribute-setup"}`))
+		_, _ = w.Write([]byte(`{"error":"Not registered as a contributor. Run: just contribute-setup"}`))
 	default:
 		if !strings.HasPrefix(subpath, "/prs/") || !strings.HasSuffix(subpath, "/queue-automerge") {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusNotFound)
-			w.Write([]byte(`{"error":"Unknown endpoint","available":["/api/v1/status","/api/v1/activity","/api/v1/contributors","/api/v1/knowledge","/api/v1/me","/api/v1/prs/{owner}/{repo}/{number}/queue-automerge"]}`))
+			_, _ = w.Write([]byte(`{"error":"Unknown endpoint","available":["/api/v1/status","/api/v1/activity","/api/v1/contributors","/api/v1/knowledge","/api/v1/me","/api/v1/prs/{owner}/{repo}/{number}/queue-automerge"]}`))
 			return
 		}
 		parts := strings.Split(strings.TrimPrefix(subpath, "/prs/"), "/")
@@ -8253,7 +8283,7 @@ func (s *Server) handleAPIDocs(w http.ResponseWriter, r *http.Request) {
 	}
 	baseURL := scheme + "://" + host
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, `<!DOCTYPE html>
+	_, _ = fmt.Fprintf(w, `<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><title>Hive API</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}

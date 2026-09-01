@@ -72,6 +72,70 @@ the staleness window.
 - The close is recorded as
   `close_reason: auto-closed: a merged pull request addresses this finding`.
 
+### Evidence provenance
+
+The digest footer stamps one commit — `Analyzed at owner/repo@<sha>` — across
+every finding it renders. That stamp describes when the digest was *built*, not
+when each finding's evidence was *computed*, and the two drift apart: findings
+persist as open beads and are re-rendered verbatim every cycle, so a finding
+whose evidence was gathered several commits ago is republished under today's
+commit without anything re-checking it.
+
+That drift is not just noise. A finding that was accurate when computed, then
+fixed in the target repo, kept appearing under a commit at which it no longer
+reproduced — and a re-verifying agent that checked it against the stamped commit
+concluded the evidence had been fabricated when it was merely stale (#5130).
+
+So the digest now tracks the commit a finding's evidence came from, and captions
+any finding that was **not** computed at the analyzed commit:
+
+> - **[coverage-gap]** contrib/aib has no test coverage ⚠️ _(evidence computed at
+>   `c9546a8`, not re-verified at the analyzed commit)_ _quality_
+
+The digest cannot re-run a finding's own evidence — that evidence is arbitrary
+(a `grep`, a workflow-file read, a coverage run), and a coverage-specific refresh
+would still republish the rest. What it can do is stop asserting a freshness it
+never checked, so the caption says exactly that and the footer no longer implies
+otherwise.
+
+A finding's provenance commit is read from, in order:
+
+1. `provenance_sha` in the finding's advisory JSONL, or the same key in the
+   bead's metadata. This is the **explicit** form, and the one to prefer.
+2. The finding's own prose, when it already names its provenance — wordings like
+   `revision <sha>`, `commit <sha>`, `computed at <sha>` or `as of <sha>` are
+   recognised. A bare hex run with no such keyword is never read as a commit:
+   log ids and digests appear in finding text far too often.
+
+A finding that names no provenance at all is left **unmarked**. Silence about
+provenance is not a freshness claim in either direction, so the digest neither
+captions it nor implies it was verified.
+
+#### Provenance and the staleness clock
+
+Provenance also fixes a hole in [staleness auto-close](#staleness-auto-close).
+The re-report of a finding is what refreshes its `last_seen_at`, on the reasoning
+that an agent only re-files a finding while its condition holds. But agents
+re-report from **cached prior findings**, not from re-verification — so a
+finding that had already been fixed kept re-stamping itself and survived every
+prune window.
+
+A re-report that carries the **same** `provenance_sha` the bead already records
+is therefore a restatement of evidence computed once, not fresh confirmation
+that the condition still holds. It no longer refreshes `last_seen_at`, so the
+staleness clock keeps running and `staleness_days` retires the finding on the
+normal schedule. A re-report computed at a *different* commit is a genuine
+re-check: it refreshes the stamp and records its new provenance.
+
+Two deliberate limits keep this from retiring findings that still hold:
+
+- Only an **explicit** `provenance_sha` gates the refresh, never the prose-
+  inferred one. Misreading "regressed in commit `<sha>`" as provenance would age
+  out a live finding, so inference is trusted for captions only.
+- A finding that records no provenance behaves exactly as it did before — every
+  re-report still counts as a confirmation. Nothing starts ageing out merely
+  because its producer does not report a commit.
+
 ## How much the digest shows
 
 By default the digest renders the **top 10** findings, ranked by severity

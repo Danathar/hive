@@ -1,0 +1,12 @@
+TOKENS                                          
+                                                
+AGENT                      IN       OUT     COST
+scanner                  1.2M     88.1k    $4.10
+quality                410.3k     31.0k    $1.32
+reviewer                96.7k     12.4k    $0.38
+ux-discovery            48.2k      5.1k        —
+────────────────────────────────────────────────
+total                    1.8M    141.9k    $5.80
+                                                
+                                                
+                                                

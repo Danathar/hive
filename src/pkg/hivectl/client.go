@@ -75,7 +75,7 @@ func NewClient(server, token string, timeout time.Duration) (*Client, error) {
 		return nil, fmt.Errorf("invalid Hive server URL %q", server)
 	}
 	if baseURL.Scheme != "http" && baseURL.Scheme != "https" {
-		return nil, fmt.Errorf("Hive server URL must use http or https")
+		return nil, fmt.Errorf("hive server URL must use http or https")
 	}
 	baseURL.Path = strings.TrimRight(baseURL.Path, "/")
 	// Give the client its OWN transport rather than sharing the process-wide
@@ -146,7 +146,7 @@ func (c *Client) StreamSSE(ctx context.Context, apiPath string, query url.Values
 	if err != nil {
 		return connectionError(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		return apiError(resp.StatusCode, data)
@@ -213,13 +213,13 @@ func (c *Client) do(ctx context.Context, method, apiPath string, query url.Value
 	if err != nil {
 		return nil, "", connectionError(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
 		return nil, "", connectionError(err)
 	}
 	if int64(len(data)) > maxResponseBytes {
-		return nil, "", fmt.Errorf("Hive response exceeds the %d MiB client limit", maxResponseBytes>>20)
+		return nil, "", fmt.Errorf("hive response exceeds the %d MiB client limit", maxResponseBytes>>20)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, "", apiError(resp.StatusCode, data)

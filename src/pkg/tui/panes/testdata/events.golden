@@ -1,0 +1,12 @@
+EVENTS                                          
+                                                
+12:04:02  kick scanner — reason=governor (govern
+12:03:41  pr.open — number=4919 (Danathar)      
+12:01:58  state.change quality — running -> idle
+11:58:20  pause reviewer (Jane Doe)             
+11:57:03  bead.close — id=bd-1042 (system)      
+11:55:44  governor.mode — quiet -> busy (system)
+11:52:30  set_model quality — model=gpt-5 (opera
+11:49:12  agent.complete reviewer (system)      
+11:45:01  resume ux-discovery (operator)        
+11:40:17  queue.refresh — actionable=7 (system) 

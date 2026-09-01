@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -29,6 +30,15 @@ func runBootPrelude(t *testing.T, env map[string]string, files map[string]string
 // is the ordinary way that happens.
 func runBootPreludeRO(t *testing.T, env map[string]string, files map[string]string, readOnly []string) string {
 	t.Helper()
+	out, _ := runBootPreludeRoot(t, env, files, readOnly)
+	return out
+}
+
+// runBootPreludeRoot is runBootPreludeRO that also returns the temp root, so a
+// test can inspect the FILES the prelude left behind (permissions, contents)
+// and not just what it logged.
+func runBootPreludeRoot(t *testing.T, env map[string]string, files map[string]string, readOnly []string) (string, string) {
+	t.Helper()
 	src, err := os.ReadFile(entrypointPath)
 	if err != nil {
 		t.Skipf("entrypoint.sh not readable from this package: %v", err)
@@ -40,6 +50,14 @@ func runBootPreludeRO(t *testing.T, env map[string]string, files map[string]stri
 		t.Fatal("could not find the end of the config branch in entrypoint.sh; the marker moved and this test would silently cover nothing")
 	}
 	root := t.TempDir()
+	// /data always exists on a real hive (it is the PVC mount point), so
+	// create it even when a case seeds no files into it. Otherwise the
+	// entrypoint's `cp ... /data/hive.yaml.runtime` fails on the missing
+	// directory and a permissions assertion would pass/fail for the wrong
+	// reason.
+	if err := os.MkdirAll(filepath.Join(root, "data"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	for rel, content := range files {
 		p := filepath.Join(root, rel)
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
@@ -53,6 +71,21 @@ func runBootPreludeRO(t *testing.T, env map[string]string, files map[string]stri
 	body := text[:end]
 	body = strings.ReplaceAll(body, `"/data/`, `"`+root+`/data/`)
 	body = strings.ReplaceAll(body, `/etc/hive/hive.yaml`, root+"/etc/hive/hive.yaml")
+	// Rewrite the serviceaccount-token probe too, so IS_KUBERNETES is decided
+	// by the test's KUBERNETES_SERVICE_HOST alone. Without this, the real
+	// in-cluster token file flips every "Docker mode" test into the K8s
+	// branch on in-cluster CI runners and dev hives.
+	body = strings.ReplaceAll(body,
+		"/var/run/secrets/kubernetes.io/serviceaccount/token",
+		root+"/var/run/secrets/kubernetes.io/serviceaccount/token")
+	// Map the runtime uid onto the sandbox. The prelude's "is this file owned
+	// by the runtime user" fast paths compare against the literal uid 1001
+	// (dev in the shipped image). Under `go test` every seeded file is owned
+	// by the CURRENT uid, and a non-root test cannot chown, so on any host
+	// where tests do not happen to run as uid 1001 hive_harden_runtime_config
+	// takes its cannot-chown branch by design (#5360) and the 0600 assertions
+	// fail for a reason that has nothing to do with the hardening under test.
+	body = strings.ReplaceAll(body, `"1001"`, `"`+strconv.Itoa(os.Getuid())+`"`)
 
 	for _, rel := range readOnly {
 		p := filepath.Join(root, rel)
@@ -69,12 +102,83 @@ func runBootPreludeRO(t *testing.T, env map[string]string, files map[string]stri
 	}
 
 	cmd := exec.Command("bash", "-c", body)
-	cmd.Env = append(os.Environ(), "HIVE_CONFIG="+root+"/etc/hive/hive.yaml")
+	// Drop the host's own KUBERNETES_SERVICE_HOST so IS_KUBERNETES is decided
+	// by the case's env alone. On an in-cluster runner or a live hive host the
+	// inherited variable flips every "Docker mode" case into the K8s branch —
+	// the env-var half of the same leak the serviceaccount-token path rewrite
+	// above closes for the file half of the probe.
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "KUBERNETES_SERVICE_HOST=") {
+			continue
+		}
+		cmd.Env = append(cmd.Env, kv)
+	}
+	cmd.Env = append(cmd.Env, "HIVE_CONFIG="+root+"/etc/hive/hive.yaml")
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
 	out, _ := cmd.CombinedOutput()
-	return string(out)
+	return string(out), root
+}
+
+// TestEntrypointHardensRuntimeConfigItRecreates is the regression guard for
+// #5331: every `cp` that (re)creates /data/hive.yaml.runtime must leave it
+// 0600.
+//
+// The boot-time chmod loop only covers files that already exist when the
+// script starts. These three branches CREATE the runtime copy from a 0644
+// source (the ConfigMap seed or the bind-mounted hive.yaml), and cp gives a
+// newly created destination the source's mode — so without the explicit
+// hardening the file is re-widened to 0644 on every boot, after the loop has
+// already run. The runtime config carries dashboard.auth_token, and /data is
+// world-traversable, so 0644 hands the dashboard owner credential to every
+// unprivileged agent uid on the host.
+//
+// The harness writes its seed files 0644, which is exactly the production
+// mode, so this test fails against the unhardened script.
+func TestEntrypointHardensRuntimeConfigItRecreates(t *testing.T) {
+	cases := []struct {
+		name  string
+		env   map[string]string
+		files map[string]string
+	}{
+		{
+			// K8s first boot: seeded from the 0644 ConfigMap seed.
+			name: "k8s seeds runtime from ConfigMap",
+			env:  map[string]string{"KUBERNETES_SERVICE_HOST": "10.0.0.1"},
+			files: map[string]string{
+				"etc/hive/hive.yaml": "acmm_level: 3\n",
+			},
+		},
+		{
+			// Docker first boot: seeded from the 0644 bind-mounted config.
+			name:  "docker first boot seeds runtime",
+			env:   map[string]string{},
+			files: map[string]string{"etc/hive/hive.yaml": "acmm_level: 3\n"},
+		},
+		{
+			// Docker migration: the new name is created from legacy .bak.
+			name: "docker migration seeds runtime from legacy bak",
+			env:  map[string]string{},
+			files: map[string]string{
+				"etc/hive/hive.yaml": "acmm_level: 3\n",
+				"data/hive.yaml.bak": "acmm_level: 5\n",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, root := runBootPreludeRoot(t, tc.env, tc.files, nil)
+			p := filepath.Join(root, "data/hive.yaml.runtime")
+			info, err := os.Stat(p)
+			if err != nil {
+				t.Fatalf("the prelude did not create the runtime config (%v); this branch no longer covers what the test claims:\n%s", err, out)
+			}
+			if got := info.Mode().Perm(); got != 0o600 {
+				t.Fatalf("runtime config is %04o, want 0600 — it carries dashboard.auth_token and /data is world-traversable (#5331):\n%s", got, out)
+			}
+		})
+	}
 }
 
 // TestK8sBootsFromRuntimeConfigNotTheSeed pins the phase-2 precedence: the PVC

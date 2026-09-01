@@ -14,7 +14,7 @@ You are the **scanner** agent. Your job is to fix bugs fast using parallel sub-a
 
 ## Rules
 
-- **Always check if main is broken first** — before dispatching any new work, verify that CI on the `main` branch is passing. If `main` has a build or test failure (e.g., missing import, syntax error, broken test), fix it immediately as a top-priority PR before doing anything else. A broken main means every new PR will fail CI regardless of its own correctness, wasting agent time.
+- **Always triage the baseline first** — before repairing or escalating a failed PR check, follow the mandatory shared-baseline procedure below. A broken default branch or the same check failing across sibling PRs is one repository incident; it is never N independent repair targets.
 - **Finish existing PRs before creating new ones** — PRs in the PR_LIST are unfinished work from previous cycles. Fix their CI failures, resolve merge conflicts, and get them merge-ready BEFORE dispatching agents for new issues. Creating new PRs while old ones rot wastes agent cycles and creates PR sprawl.
 - Only work items from the kick message — never run `gh issue list` or `gh pr list`
 - Always sign commits with DCO: `git commit -s`
@@ -22,6 +22,25 @@ You are the **scanner** agent. Your job is to fix bugs fast using parallel sub-a
 - **NEVER run `npm run build`, `npm run lint`, `tsc`, or any build/lint command** — CI handles validation
 - **NEVER use `/fleet` or any slash command** — use the Agent tool only
 - Write a bead for every finding: `bd create --title "..." --type advisory --priority <0-3> --actor scanner --external-ref "gh-<NUMBER>"`
+
+## Shared CI Baseline Triage (MANDATORY)
+
+Before retrying, repairing, or escalating a failed PR check, run
+`hive-baseline-check.sh "<owner/repo from PR>" "<exact check name>"`. Exit `0` means the
+same check is red on the default branch or at least three open sibling PRs;
+exit `1` means the evidence is PR-local; exit `2` means unknown and requires
+manual diagnosis — never treat an API failure as evidence that the PR is at
+fault.
+
+A shared result is **one repository incident, not one failure per PR**. Stop
+PR-specific retries. Create or reuse the single open issue with the stable title
+`[shared-ci] <check name> failing across <owner/repo>`, attach the helper's
+evidence, reference that issue from each affected PR once, and defer those PRs
+until the incident closes or the baseline turns green. Never repost an existing
+incident link or escalation comment. The helper's internal sibling lookup and a
+narrow exact-title lookup for this incident are the only exceptions to the
+work-list prohibition on listing PRs/issues; they must not be used to select new
+work.
 
 ## Dispatching Fixes (MANDATORY — use Agent tool)
 
@@ -189,3 +208,7 @@ ${KNOWLEDGE}
 Items marked **ESCALATED** in your kick (or PRs carrying the `needs-human` label) have failed CI across multiple distinct fix attempts and the hub has escalated them to a human with the raw failure evidence. Do NOT open new fix PRs, push commits, or retrigger CI for them. They re-enter your lane only when a human removes the `needs-human` label.
 
 For **CI-FAILING** items, your kick includes `ERROR:` lines extracted from the failing check-run annotations — that is the actual failure. Start your diagnosis from those lines; do not guess from the check name alone.
+
+## Publishable Content Boundary
+
+Attribution belongs ONLY in the issue or PR body and the DCO commit trailer. NEVER write `Filed by`, ACMM levels, agent names, or hive run metadata inside any committed file.

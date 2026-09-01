@@ -19,10 +19,13 @@ package dashboard
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/kubestellar/hive/pkg/agent"
+	"github.com/kubestellar/hive/pkg/github"
 	"github.com/kubestellar/hive/pkg/linearagent"
 )
 
@@ -172,7 +175,80 @@ func (s *Server) resolveLinearSessionAgent() (string, error) {
 			return name, nil
 		}
 	}
+	// ACMM-shaped fallback: when exactly one enabled agent may write to the
+	// tracker (CanCreateIssues — ISSUES_ONLY and above), it is the only agent
+	// that could do anything with a delegated issue beyond acknowledging it,
+	// so it takes sessions. This is what makes the L3 pack (six agents, quality
+	// the sole writer) work without an explicit session_agent. Two or more
+	// writers is still ambiguous and still an error.
+	level := 0
+	if cfg.ACMMLevel != nil {
+		level = *cfg.ACMMLevel
+	}
+	writer := ""
+	for name, ac := range cfg.EnabledAgents() {
+		mode, ok := agent.ParseAgentMode(ac.Mode)
+		if !ok {
+			mode = agent.DefaultAgentMode(name, level)
+		}
+		if !mode.CanCreateIssues() {
+			continue
+		}
+		if writer != "" {
+			return "", errSessionAgentUnset
+		}
+		writer = name
+	}
+	if writer != "" {
+		return writer, nil
+	}
 	return "", errSessionAgentUnset
+}
+
+// LinearSessionHolder is the scheduler's in-flight lookup (see
+// pkg/scheduler.InflightLookup): a Linear-sourced work item whose identifier
+// has a working agent session is held by that session's agent.
+func (s *Server) LinearSessionHolder(issue github.Issue) (string, bool) {
+	if issue.SourceType != "linear" || issue.ExternalID == "" {
+		return "", false
+	}
+	svc := s.linearAgent()
+	if svc == nil || svc.tracker == nil {
+		return "", false
+	}
+	sess, ok := svc.tracker.ActiveSessionForIssue(issue.ExternalID)
+	if !ok {
+		return "", false
+	}
+	return fmt.Sprintf("agent %s via Linear session %s", sess.Agent, sess.ID), true
+}
+
+// LinearAgentPROpened is the pr-request watcher's PR-opened hook: it narrates
+// the PR into the agent's active Linear session, if any.
+func (s *Server) LinearAgentPROpened(agentName, repo string, number int, url string) {
+	svc := s.linearAgent()
+	if svc == nil || svc.responder == nil {
+		return
+	}
+	svc.responder.HandlePROpened(agentName, repo, number, url)
+}
+
+// linearAgentCredentialKind reports which credential ISSUES_ONLY+ agents
+// receive for api.linear.app: "oauth" (connected app), "api_key" (the
+// work-source key), or "none". Status-only; values are never exposed.
+func (s *Server) linearAgentCredentialKind(svc *linearAgentService) string {
+	if svc != nil && svc.store != nil {
+		if inst, ok := svc.store.Get(); ok && inst.Token.AccessToken != "" {
+			return "oauth"
+		}
+	}
+	if s.deps != nil && s.deps.Config != nil {
+		ws := s.deps.Config.Governor.WorkSource
+		if ws.Type == "linear" && strings.TrimSpace(ws.Linear.APIKey) != "" {
+			return "api_key"
+		}
+	}
+	return "none"
 }
 
 type unknownSessionAgentError struct{ name string }
@@ -332,6 +408,7 @@ func (s *Server) handleLinearAgentStatus(w http.ResponseWriter, r *http.Request)
 	if svc.tracker != nil {
 		resp["sessions"] = svc.tracker.Snapshot()
 	}
+	resp["agent_credential"] = s.linearAgentCredentialKind(svc)
 	jsonResponse(w, resp)
 }
 

@@ -29,6 +29,11 @@ const WebSocket = require('ws');
 const { execSync, execFile, execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const {
+  parsePiModelSelection,
+  redactPiCredentials,
+  piReadiness,
+} = require('./pi-backend.js');
 
 const rawHub = process.env.HIVE_HUB || 'wss://hive.kubestellar.io:3001/contribute';
 // Multi-hub (kubestellar/hive#multi-hive): HIVE_HUB and HIVE_REGISTRATION_TOKEN
@@ -44,7 +49,16 @@ if (rawHubList.length > 1 && rawTokenList.length !== rawHubList.length) {
   process.exit(1);
 }
 const BACKEND = process.env.AGENT_BACKEND || 'claude';
-const MODEL = process.env.AGENT_MODEL || process.env.GOOSE_MODEL || '';
+// GOOSE_MODEL is a Goose-only compatibility input. Letting it fall back for Pi
+// made a restart silently select a Goose model the initial Pi launcher never
+// requested (#5039).
+const MODEL = process.env.AGENT_MODEL || (BACKEND === 'goose' ? process.env.GOOSE_MODEL : '') || '';
+const PI_SELECTION = parsePiModelSelection(MODEL);
+// Process environment is immutable for a running container in normal use. Keep
+// the startup view so readiness/redaction stays consistent across reconnects
+// (and so a later test/process mutation cannot change the declared contract).
+const PI_ENV = BACKEND === 'pi' ? { ...process.env } : {};
+let piInvocationState = 'untested';
 const REASONING_EFFORT = process.env.AGENT_REASONING_EFFORT || '';
 const AGENT_ROLE = (process.env.HIVE_AGENT_ROLE || '').trim();
 // Neutral directory both entrypoints launch the CLI from ($HOME). Used to pin
@@ -118,6 +132,90 @@ const HEADLESS_STATE_FAILED = 'failed';   // last task failed (non-zero/spawn er
 const PANE_STATE_WORKING = 'WORKING';
 const PANE_STATE_BLOCKED_ON_HUMAN = 'BLOCKED_ON_HUMAN';
 const PANE_STATE_IDLE_COMPLETE = 'IDLE_COMPLETE';
+// A retryable API failure left the CLI parked at its idle prompt with the
+// response truncated (kubestellar/hive#5094). This is NOT completion and NOT a
+// stall: the turn ended, but it ended in an error, and the same request can
+// succeed on a retry.
+const PANE_STATE_TRANSIENT_API_ERROR = 'TRANSIENT_API_ERROR';
+// An API failure a retry CANNOT clear — an authorization refusal or an exhausted
+// quota — left the CLI parked at its idle prompt. Also not completion: the turn
+// ended having shipped nothing. Retrying it would loop the agent against a wall,
+// so this is failed at once rather than nudged.
+const PANE_STATE_FATAL_API_ERROR = 'FATAL_API_ERROR';
+// An API failure matching NEITHER curated list ended the turn at the idle
+// prompt (kubestellar/hive#5121). Still not completion: the turn shipped
+// nothing. Nobody can say from a pattern table whether a retry clears it, so
+// it takes the bounded transient path — if it was retryable the retry wins,
+// and if not the budget runs out and the task is handed back as an honest
+// environment failure. Either way, never a fabricated completion.
+const PANE_STATE_UNKNOWN_API_ERROR = 'UNKNOWN_API_ERROR';
+
+// ── Transient API-error recovery (kubestellar/hive#5094) ─────────────────────
+//
+// THE DEFECT: Claude Code prints a turn-duration summary ("✻ Cogitated for
+// 9m 24s") whenever a turn ENDS — including when it ends in an API error — and
+// classifyTmuxPane's claude branch matched exactly that line as its completion
+// marker. An errored turn was therefore indistinguishable from a finished one,
+// so the relay reported task_complete for work that shipped nothing. Observed
+// live: issue #5061 was picked up at 11:46:38 and booked "completed" at
+// 11:57:40 with no PR, its half-written work still uncommitted in the tree.
+//
+// These patterns mirror src/pkg/agent/manager.go's transientAPIErrorPatterns
+// (#4697), which the hub's own fleet has used for this same error since. Keep
+// the two lists in step. Membership is deliberately narrow: every entry must be
+// an error where REPEATING THE SAME REQUEST CAN SUCCEED.
+const TRANSIENT_API_ERROR_PATTERNS = [
+  'connection lost mid-response',
+  'connection error',
+  'request timed out',
+  'overloaded_error',
+];
+// 500/502/503/529 are retryable upstream failures. Whole tokens only, so a
+// request id or token count under the same "API Error:" chrome cannot trip it.
+const TRANSIENT_API_ERROR_STATUS_RE = /\b(?:500|502|503|529)\b/;
+// Errors a retry CANNOT fix. Claude Code renders every API failure under the
+// same "API Error:" prefix, so a substring match alone cannot tell an
+// overloaded upstream from a refused one — these are re-checked separately and
+// veto the retry, exactly as the hub path does via
+// lineShowsUpstreamAuthorizationError / paneShowsQuotaExhausted. Nudging one of
+// these loops the agent against a wall and burns tokens to no effect.
+const UNRETRYABLE_API_ERROR_PATTERNS = [
+  'not allowed to access model',
+  'team not allowed to access',
+  'exceeded your monthly quota',
+  'used all your copilot free chat requests',
+  'budget_exceeded',
+  'budget has been exceeded',
+  'provider spending limit reached',
+  'refused the request on a spending limit',
+  'gone over your budget allowance',
+  'bobcoins',
+];
+// 403 is authorization, not authentication: the caller IS identified and is not
+// permitted, so neither a retry nor a login changes anything (#4400).
+const UNRETRYABLE_API_ERROR_STATUS_RE = /\bAPI Error: 403\b/i;
+// The visible tail the error must appear in. Matching the whole pane would let
+// an error the agent already recovered from read as current.
+const TRANSIENT_API_ERROR_TAIL_LINES = 12;
+// What we type. Short and free of shell metacharacters by construction — it is
+// interpolated into a tmux send-keys command line below.
+const TRANSIENT_API_ERROR_NUDGE_MESSAGE = 'try again';
+// Bounded so a persistent upstream failure ends as an honest task failure
+// rather than an infinite typing loop. Mirrors the hub's cap and cooldown.
+const TRANSIENT_API_ERROR_MAX_NUDGES = 3;
+const TRANSIENT_API_ERROR_NUDGE_COOLDOWN_MS = 90000;
+
+// What the relay types at an unattended pane that stopped to ask a question
+// (kubestellar/hive#5281). The task prompts already tell agents to decide for
+// themselves — an agent that stops to ask is one that forgot, and a human
+// watching would type exactly this line. When nobody is watching, nobody does.
+//
+// Letters, spaces and one comma, by construction: tmuxSendNudge interpolates
+// this into a single-quoted `tmux send-keys -l '...'`, so a quote or a shell
+// metacharacter here would be a command-injection shaped bug rather than a
+// typo. There is a test pinning that.
+const AUTONOMY_NUDGE_MESSAGE =
+  'no human is available to answer, so proceed autonomously with your best judgment';
 
 // Cap on captured child output kept in memory / sent to the hub, so a chatty
 // CLI cannot grow the buffer without bound. The tail is what matters for an
@@ -131,13 +229,47 @@ const PROGRESS_REPORT_INTERVAL_MS = 120000;
 const MAX_RECONNECT_DELAY_MS = 60000;
 const BASE_RECONNECT_DELAY_MS = 1000;
 const TOKEN_REFRESH_MARGIN_MS = 300000;
+// MAX_TASK_DURATION_MS is a PROGRESS lease, not a wall-clock budget
+// (kubestellar/hive#5321). It bounds how long a task may go without the relay
+// observing forward progress; every tick that sees new pane output re-arms it
+// from now. It is NOT "the longest a task may take".
+//
+// It used to be exactly that, and the result was a bug: the timer was armed
+// once in startProgressReporting() and never re-armed, so a task was killed at
+// a flat 30 minutes however hard the agent was working. Observed live on
+// 2026-08-31 it killed an agent that had already committed and pushed and was
+// blocked on a green `go test` run — the hub booked the task `failed` 57
+// seconds before that task's PR (#5320) was opened, and returned the issue to
+// the failure cooldown. Any task whose honest duration exceeds this bound was
+// not slow, it was impossible.
+//
+// The hang case the wall was nominally there for is covered — better — by
+// PANE_STALL_TIMEOUT_MS, which fails a frozen pane in 20 minutes and confirms
+// the verdict over multiple ticks. What remains here is a coarser second
+// opinion on the same question, kept because it is armed from the timer wheel
+// rather than from the tick loop and so still fires if the tick loop itself
+// dies.
 const MAX_TASK_DURATION_MS = 1800000;
+
+// ABSOLUTE_TASK_DEADLINE_MS is the backstop the progress lease deliberately
+// does not provide: a ceiling on total elapsed time from task assignment,
+// re-armed by nothing. A task that produces output forever (a retry loop
+// redrawing a spinner is output) would otherwise hold its lease indefinitely.
+//
+// Set far above the working range — the point is to bound the pathological
+// case, not to second-guess a long one. Crossing it is a statement about this
+// runtime, not about the agent's work, so it is reported as an `environment`
+// failure (see the failCurrentTask contract).
+const ABSOLUTE_TASK_DEADLINE_MS = Number(process.env.HIVE_ABSOLUTE_TASK_DEADLINE_MS) || 4 * 60 * 60 * 1000;
+
 // Hard ceiling on a single headless one-shot invocation (kubestellar/hive#2538).
-// The interactive path bounds a task with MAX_TASK_DURATION_MS via a
-// tmux-scraping watchdog; the headless child gets the SAME bound enforced
-// directly on the process, so a wedged CLI is killed and reported failed rather
-// than hanging the pod forever.
-const HEADLESS_TASK_TIMEOUT_MS = MAX_TASK_DURATION_MS;
+// The interactive path has no pane to scrape for progress on the headless path,
+// so a headless child cannot use the progress lease above: there is no
+// equivalent signal. It gets the ABSOLUTE bound enforced directly on the
+// process instead, so a wedged CLI is killed and reported failed rather than
+// hanging the pod forever — and, per #5321, a long-but-live headless run is no
+// longer killed at 30 minutes either.
+const HEADLESS_TASK_TIMEOUT_MS = Number(process.env.HIVE_HEADLESS_TASK_TIMEOUT_MS) || ABSOLUTE_TASK_DEADLINE_MS;
 const NETWORK_ERROR_RETRY_DELAY_MS = 5000;
 // After the hub sends an explicit task_unavailable negative-ack (no admissible
 // work, a disabled tier, a concurrency limit, or a token-mint failure — see
@@ -273,6 +405,27 @@ function injectGhToken(token) {
 const CLI_READY_POLL_MS = 2000;
 const CLI_READY_TIMEOUT_MS = 600000;
 const CONTAINER_NAME = process.env.HIVE_CONTAINER_NAME || 'hive-contributor';
+// ATTACH_COMMAND is the paste-able command that puts a human on the CLI's tmux
+// pane. It is computed once, here, because it is printed at the one moment a
+// wrong answer really costs: the "needs authentication" banner fires when the
+// agent is BLOCKED and a person must intervene, so a command that fails is
+// worse than no command at all (kubestellar/hive#5145).
+//
+// Two facts the relay cannot infer and so is told:
+//
+//   * HIVE_CONTAINER_NAME is set ONLY by the container arm of the
+//     `just contribute-hive` recipe. Local mode runs this relay directly on the
+//     host, beside the tmux server it drives — there is no container to exec
+//     into, and the hint is plain `tmux attach`, which is what the recipe's own
+//     status line four lines earlier already says.
+//   * HIVE_CONTAINER_RUNTIME carries the engine the recipe resolved. A
+//     container cannot see its own launcher, so hardcoding "docker" handed
+//     every podman operator a command that fails. It defaults to docker, so a
+//     bare-docker launch prints exactly what it printed before.
+const CONTAINER_RUNTIME = process.env.HIVE_CONTAINER_RUNTIME || 'docker';
+const ATTACH_COMMAND = process.env.HIVE_CONTAINER_NAME
+  ? `${CONTAINER_RUNTIME} exec -it ${CONTAINER_NAME} tmux attach -t ${TMUX_SESSION}`
+  : `tmux attach -t ${TMUX_SESSION}`;
 
 // detectCapabilities builds the OPTIONAL, client-declared capability object the
 // relay reports in auth_response (kubestellar/hive#2547, declare half). Every
@@ -316,6 +469,7 @@ function detectCapabilities() {
   // operator could not see. Best-effort: omitted entirely when the probe fails.
   const cliVersion = detectAgentCLIVersion();
   if (cliVersion) caps.agent_cli_version = cliVersion;
+  if (BACKEND === 'pi') Object.assign(caps, piReadiness(PI_SELECTION, !!cliVersion, piInvocationState, PI_ENV));
   cachedCapabilities = caps;
   return caps;
 }
@@ -486,7 +640,30 @@ function resolveBackend() {
 // effectiveReasoningEffort() below, which must agree on whether a model is in
 // play — agy's effort is conditional on exactly that.
 function modelFlagFor() {
+  if (BACKEND === 'pi' && !PI_SELECTION.valid) throw new Error(PI_SELECTION.error);
   return MODEL && !NO_MODEL_FLAG_BACKENDS.includes(BACKEND) ? `--model ${MODEL}` : '';
+}
+
+function effectiveProvider() {
+  return BACKEND === 'pi' && PI_SELECTION.valid ? PI_SELECTION.provider : '';
+}
+
+// Receipt fields are bounded selections, never credentials. Provider is
+// transported canonically inside model; the separate field is evidence for
+// local status/receipts, not another input or authority source.
+function effectiveSelectionFields() {
+  const out = { cli_backend: BACKEND };
+  const model = effectiveModel();
+  const provider = effectiveProvider();
+  if (provider) out.provider = provider;
+  if (model) out.model = model;
+  return out;
+}
+
+function setPiInvocationState(state) {
+  if (BACKEND !== 'pi') return;
+  piInvocationState = state;
+  if (cachedCapabilities) Object.assign(cachedCapabilities, piReadiness(PI_SELECTION, !!cachedCapabilities.agent_cli_version, state, PI_ENV));
 }
 
 // effectiveReasoningEffort is the SINGLE source of truth for the effort actually
@@ -734,7 +911,7 @@ function buildLaunchCommand() {
 //          prompt is appended as the final, distinct argv element.
 //
 // Backends NOT listed here have no known non-interactive entry point (bob /
-// pi drive an interactive TUI), so headless mode refuses them LOUDLY at
+// aider drive an interactive TUI), so headless mode refuses them LOUDLY at
 // task time rather than silently stalling. Extending this table is how a
 // future PR adds a backend once its headless invocation is verified.
 const HEADLESS_BACKENDS = {
@@ -757,6 +934,10 @@ const HEADLESS_BACKENDS = {
   // that `run`, `-t` and `--no-session` all exist and that a failed run exits
   // non-zero, which is the exit-code contract runHeadlessTask() relies on.
   goose: { flag: ['run', '--no-session', '-t'] },
+  // pi --print --mode json <prompt> — Pi's bounded non-interactive entry point.
+  // AGENT_MODEL is already the canonical provider/model token, so no separate
+  // --provider input is needed (or allowed) and restart/headless stay identical.
+  pi: { flag: ['--print', '--mode', 'json'] },
   // agy -p "<prompt>" — Antigravity's print mode ("Run a single prompt
   // non-interactively and print the response", `agy --help`). Verified against
   // agy 1.1.13: a print-mode run answers on stdout and exits 0, which is the
@@ -767,6 +948,16 @@ const HEADLESS_BACKENDS = {
   // K8S_HEADLESS_BACKENDS on the /contribute page and out of the contributor
   // image. The capability and the credential are separate questions.
   agy: { flag: '-p' },
+  // opencode run "<prompt>" — opencode's one-shot headless invocation
+  // (kubestellar/hive#4970). Unlike agy, opencode is the ONLY launch mode
+  // this backend gets: there is no interactive-tmux wiring for it (see the
+  // getCLIState()/classifyTmuxPane() backend lists below, which opencode
+  // deliberately does not join), so it is only ever reached through
+  // CONTRIBUTOR_MODE=headless. `opencode run` exits with a real status code
+  // on completion, the exit-code contract runHeadlessTask() relies on.
+  opencode: { flag: 'run' },
+  // Kilo is OpenCode-derived but uses distinct credentials and config.
+  kilo: { flag: 'run' },
 };
 
 // headlessSupportsBackend reports whether the configured backend has a known
@@ -784,6 +975,7 @@ function headlessSupportsBackend() {
 function buildHeadlessArgv(prompt) {
   const spec = HEADLESS_BACKENDS[BACKEND];
   if (!spec) return null;
+  if (BACKEND === 'pi' && !PI_SELECTION.valid) throw new Error(PI_SELECTION.error);
   const { cmd, perm } = resolveBackend();
   const permArgs = perm ? perm.split(/\s+/).filter(Boolean) : [];
   const modelArgs = MODEL && !NO_MODEL_FLAG_BACKENDS.includes(BACKEND) ? ['--model', MODEL] : [];
@@ -806,6 +998,8 @@ function writeHeadlessStatus(state, extra) {
   const payload = Object.assign({
     mode: MODE_HEADLESS,
     backend: BACKEND,
+    ...effectiveSelectionFields(),
+    ...(BACKEND === 'pi' ? piReadiness(PI_SELECTION, !!detectCapabilities().agent_cli_version, piInvocationState, PI_ENV) : {}),
     state,
     updated_at: new Date().toISOString(),
   }, extra || {});
@@ -837,10 +1031,19 @@ function runHeadlessTask(task) {
     return;
   }
 
-  const { bin, args } = buildHeadlessArgv(prompt);
+  let built;
+  try {
+    built = buildHeadlessArgv(prompt);
+  } catch (e) {
+    const reason = e.message;
+    writeHeadlessStatus(HEADLESS_STATE_FAILED, { task_id: task.task_id, task_gen: task.task_gen, result: 'failed', reason });
+    failCurrentTask(reason, { permanent: true, kind: 'environment' });
+    return;
+  }
+  const { bin, args } = built;
   console.log(`Headless: running ${bin} (one-shot) for ${task.repo}#${task.number}`);
-  writeHeadlessStatus(HEADLESS_STATE_WORKING, { task_id: task.task_id, repo: task.repo, number: task.number });
-  send({ type: 'task_progress', seq: nextSeq(), task_id: task.task_id, task_gen: task.task_gen, kind: task.kind, repo: task.repo, number: task.number, title: task.title, status: 'working' });
+  writeHeadlessStatus(HEADLESS_STATE_WORKING, { task_id: task.task_id, task_gen: task.task_gen, repo: task.repo, number: task.number, result: 'working' });
+  send({ type: 'task_progress', seq: nextSeq(), task_id: task.task_id, task_gen: task.task_gen, kind: task.kind, repo: task.repo, number: task.number, title: task.title, status: 'working', ...effectiveSelectionFields() });
 
   let settled = false;
   const finish = (fn) => { if (settled) return; settled = true; fn(); };
@@ -855,6 +1058,13 @@ function runHeadlessTask(task) {
     // Tokens can appear in agent output; redact before the tail leaves the host.
     const outTail = redactTokens(String(stdout || '') + String(stderr || ''))
       .split('\n').slice(-TMUX_TAIL_LINES);
+    // A revoke clears currentTask before killing the child. Ignore any callback
+    // that arrives afterwards — including a raced exit 0 — so stale work cannot
+    // emit completion after its assignment generation was fenced out.
+    if (!currentTask || currentTask.task_id !== task.task_id || currentTask.task_gen !== task.task_gen) {
+      writeHeadlessStatus(HEADLESS_STATE_WAITING, { revoked_task_id: task.task_id });
+      return;
+    }
     if (err) {
       // A non-zero exit, a spawn failure (ENOENT), or the timeout kill all land
       // here. err.killed && err.signal signals the timeout; report a real
@@ -870,13 +1080,18 @@ function runHeadlessTask(task) {
         ? `headless task exceeded ${HEADLESS_TASK_TIMEOUT_MS / 60000}min and was killed`
         : `headless CLI exited with error: ${err.code !== undefined ? `code ${err.code}` : err.message}${diagnosticSuffix}`;
       finish(() => {
+        setPiInvocationState('failed');
         console.error(`Headless task ${task.task_id} failed: ${reason}`);
-        writeHeadlessStatus(HEADLESS_STATE_FAILED, { task_id: task.task_id, reason });
-        failCurrentTask(reason, { permanent: false });
+        writeHeadlessStatus(HEADLESS_STATE_FAILED, { task_id: task.task_id, task_gen: task.task_gen, result: 'failed', reason });
+        failCurrentTask(reason, {
+          permanent: false,
+          kind: BACKEND === 'pi' ? 'environment' : undefined,
+        });
       });
       return;
     }
     finish(() => {
+      setPiInvocationState('succeeded');
       console.log(`Headless task ${task.task_id} completed (exit 0)`);
       const prURL = detectPRURL(outTail, task.repo);
       if (prURL) console.log(`Detected PR for ${task.task_id}: ${prURL}`);
@@ -885,8 +1100,13 @@ function runHeadlessTask(task) {
       // the claim with "shipped" anyway).
       const noWork = prURL ? null : detectNoWorkVerdict(outTail);
       if (noWork) console.log(`Detected no_work_needed verdict for ${task.task_id}: ${noWork.reason || '(no reason)'}`);
-      writeHeadlessStatus(HEADLESS_STATE_DONE, { task_id: task.task_id, pr_url: prURL });
-      send({ type: 'task_complete', seq: nextSeq(), task_id: task.task_id, task_gen: task.task_gen, result: 'completed', summary: 'Headless one-shot invocation exited 0', tmux_output: outTail, pr_url: prURL, verdict: noWork ? noWork.verdict : undefined, verdict_reason: noWork ? noWork.reason : undefined });
+      writeHeadlessStatus(HEADLESS_STATE_DONE, { task_id: task.task_id, task_gen: task.task_gen, result: 'completed', pr_url: prURL });
+      // #5353: the one-shot child has already exited (this callback is its
+      // exit), so there is no process to stop — but the task-scoped token it
+      // was given stays valid for the rest of wsTokenTTL. Drop it with the
+      // task, so a credential never outlives the assignment it belongs to.
+      stopAgentForTaskExit();
+      send({ type: 'task_complete', seq: nextSeq(), task_id: task.task_id, task_gen: task.task_gen, result: 'completed', summary: 'Headless one-shot invocation exited 0', tmux_output: outTail, pr_url: prURL, verdict: noWork ? noWork.verdict : undefined, verdict_reason: noWork ? noWork.reason : undefined, ...effectiveSelectionFields() });
       currentTask = null;
       taskAssignedAt = 0;
       tasksCompletedCount++;
@@ -1135,7 +1355,7 @@ function waitForCLI() {
         console.log('╔══════════════════════════════════════════════════════════╗');
         console.log('║  Claude Code needs authentication.                      ║');
         console.log('║  In another terminal, run:                              ║');
-        console.log(`║  docker exec -it ${CONTAINER_NAME} tmux attach -t ${TMUX_SESSION}`);
+        console.log(`║  ${ATTACH_COMMAND}`);
         console.log('║  Then type: /login                                      ║');
         console.log('║  Complete the login, then press Ctrl-B D to detach.     ║');
         console.log('║  Waiting for login to complete...                       ║');
@@ -1158,6 +1378,8 @@ let pendingTask = null;
 // Used so the eventual recovery re-advertises availability to the hub, which
 // we deliberately withheld at failure time (see armCLIReadyWait).
 let cliReadyFailed = false;
+// Set only by an interactive revoke. The next ready is delayed until a fresh CLI is confirmed.
+let readyAfterInteractiveRevoke = false;
 
 if (CONTRIBUTOR_MODE === MODE_HEADLESS) {
   // Headless mode has no tmux pane to scrape for readiness. Each task spawns
@@ -1196,9 +1418,14 @@ if (CONTRIBUTOR_MODE === MODE_HEADLESS) {
 // churn one task per timeout window forever.
 function armCLIReadyWait() {
   const hadFailed = cliReadyFailed;
+  const becameReadyAfterRevoke = readyAfterInteractiveRevoke;
   waitForCLI().then(() => {
     cliReady = true;
     cliReadyFailed = false;
+    if (becameReadyAfterRevoke) {
+      readyAfterInteractiveRevoke = false;
+      send({ type: 'ready', seq: nextSeq() });
+    }
     // Only re-advertise if we previously withdrew by failing a task; the normal
     // startup path is already advertised by the auth_ok handler.
     if (hadFailed) send({ type: 'ready', seq: nextSeq() });
@@ -1212,7 +1439,11 @@ function armCLIReadyWait() {
     pendingTask = null;
     if (currentTask) {
       // environment: the agent CLI never reached its prompt on this host.
-      failCurrentTask(`CLI never became ready: ${e.message}`, { skipReady: true, kind: 'environment' });
+      // skipCLI: this IS the relaunch path — armCLIReadyWait() re-arms itself
+      // below and the pane already has a launch in flight. Quitting and
+      // relaunching from here would nest a second launch inside the first
+      // (#5353). The credential is still dropped by failCurrentTask.
+      failCurrentTask(`CLI never became ready: ${e.message}`, { skipReady: true, skipCLI: true, kind: 'environment' });
     }
     // Keep waiting. The CLI may still come up (a slow login, an operator
     // attaching to clear a prompt we don't recognize), and when it does the
@@ -1382,11 +1613,16 @@ function redactTokens(text) {
   // {36,} not {36}: GitHub documents that token length may grow, and an exact
   // bound would redact only the first 36 characters of a longer token, leaking
   // its tail into the hub log line (kubestellar/hive#4267).
-  return text.replace(/gho_[A-Za-z0-9]{36,}/g, 'gho_***REDACTED***')
+  const githubRedacted = text.replace(/gho_[A-Za-z0-9]{36,}/g, 'gho_***REDACTED***')
     .replace(/ghp_[A-Za-z0-9]{36,}/g, 'ghp_***REDACTED***')
     .replace(/ghs_[A-Za-z0-9]{36,}/g, 'ghs_***REDACTED***')
     .replace(/ghu_[A-Za-z0-9]{36,}/g, 'ghu_***REDACTED***')
-    .replace(/ghr_[A-Za-z0-9]{36,}/g, 'ghr_***REDACTED***');
+    .replace(/ghr_[A-Za-z0-9]{36,}/g, 'ghr_***REDACTED***')
+    // Fine-grained PATs: github_pat_ + 82 chars of [A-Za-z0-9_]. The Go-side
+    // redactors (dashboard, status_builder, prompt_history) already scrub this
+    // prefix; the relay must match or PAT material leaks into hub log lines.
+    .replace(/github_pat_[A-Za-z0-9_]{36,}/g, 'github_pat_***REDACTED***');
+  return BACKEND === 'pi' ? redactPiCredentials(githubRedacted, PI_SELECTION, PI_ENV) : githubRedacted;
 }
 
 function captureTmuxLines(n) {
@@ -1429,40 +1665,91 @@ function detectPRURL(lines, repo) {
   return repoMatch || anyMatch;
 }
 
-// Best-effort scan of the agent's recent output for the no_work_needed
-// sentinel (kubestellar/hive#3987). The hub's task prompt instructs the agent:
-// when it affirmatively determines there is NOTHING shippable (the remainder
-// is gated on an unanswered maintainer decision, or merged PRs already cover
-// it), it prints a line of the exact form
-//   HIVE_VERDICT: no_work_needed — <short reason>
-// instead of opening a PR. Reported on task_complete as verdict/verdict_reason
-// so the hub can park the issue for the long offer-suppression window instead
-// of re-offering it every short-cooldown period forever (the #2547 shape that
-// escalation only bounded). Returns null when no marker is found — the hub
-// then treats the completion exactly as an idle one (today's semantics). The
-// marker spelling must stay in sync with buildTaskPrompt in
+// ── The HIVE_VERDICT: sentinel family (kubestellar/hive#3987, #5376) ─────────
+//
+// The hub's task prompt asks the agent to end a task by printing ONE line of
+// the exact form
+//
+//   HIVE_VERDICT: <verdict> — <short reason>
+//
+// Two verdicts are defined:
+//
+//   no_work_needed  (#3987) — the agent affirmatively determined there is
+//     NOTHING shippable (the remainder is gated on an unanswered maintainer
+//     decision, or merged PRs already cover it). Reported on task_complete as
+//     verdict/verdict_reason so the hub parks the issue for the long
+//     offer-suppression window instead of re-offering it every short-cooldown
+//     period forever (the #2547 shape that escalation only bounded).
+//
+//   complete        (#5376) — the agent is DONE with the task, whatever it
+//     shipped. This is the completion signal the interactive relay lacked:
+//     before it, "is this task done" was inferred from the vendor's terminal
+//     rendering (see classifyTmuxPane), which produced thirteen separate
+//     issues (#1566, #4026, #4064, #4067, #4078, #4080, #4128, #4182, #4265,
+//     #5094, #5121, #5156, #5162) as one CLI after another restyled its
+//     chrome. Chrome is a vendor's cosmetic output; this line is the agent's
+//     own statement. Only the second is a contract.
+//
+// Both are parsed by ONE anchored, echo-guarded scanner below, deliberately:
+// the anti-false-positive handling is the hard-won part and there must not be
+// a second copy of it to drift.
+//
+// The marker spelling must stay in sync with buildTaskPrompt in
 // src/pkg/dashboard/contribute_ws.go.
-function detectNoWorkVerdict(lines) {
+const HIVE_VERDICT_NO_WORK = 'no_work_needed';
+const HIVE_VERDICT_COMPLETE = 'complete';
+
+// detectHiveVerdict scans `lines` newest-first for any of `wanted` (an array of
+// verdict tokens) and returns { verdict, reason } for the first — i.e. the
+// LAST-printed — match, or null.
+//
+// Returns null rather than throwing on junk input: every caller is on a
+// best-effort path reading a terminal capture that may be empty.
+function detectHiveVerdict(lines, wanted) {
   if (!Array.isArray(lines) || lines.length === 0) return null;
+  if (!Array.isArray(wanted) || wanted.length === 0) return null;
   // Anchored at line start: the task PROMPT quotes the marker mid-sentence
   // ("...the exact form 'HIVE_VERDICT: ...'"), and an anchored match keeps
   // that instruction echo from reading as the agent's own verdict. Codex
   // renders its completed assistant messages with a leading bullet, which is
   // presentation chrome rather than part of the verdict.
-  const VERDICT_RE = /^\s*(?:•\s*)?HIVE_VERDICT:\s*no_work_needed\b[\s:—–-]*(.*)$/i;
+  //
+  // The verdict token is an alternation of exactly the wanted tokens with a \b
+  // after it, so "no_work_neededX" and "completely rewrote the parser" are both
+  // non-matches — a prose line that merely STARTS with a verdict word must not
+  // become a verdict.
+  const alt = wanted.map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  const VERDICT_RE = new RegExp(`^\\s*(?:•\\s*)?HIVE_VERDICT:\\s*(${alt})\\b[\\s:—–-]*(.*)$`, 'i');
   // Scan newest-first so the agent's final conclusion wins over anything it
   // merely quoted or considered earlier in the transcript.
   for (let i = lines.length - 1; i >= 0; i--) {
     const m = VERDICT_RE.exec(lines[i]);
     if (!m) continue;
-    const reason = (m[1] || '').trim();
+    const reason = (m[2] || '').trim();
     // tmux may wrap the prompt's instruction so its quoted marker lands at a
     // visual line start; its giveaway is the literal "<short reason>"
     // placeholder. Never treat that echo as a real verdict.
     if (reason.startsWith('<')) continue;
-    return { verdict: 'no_work_needed', reason };
+    return { verdict: m[1].toLowerCase(), reason };
   }
   return null;
+}
+
+// Best-effort scan for the no_work_needed sentinel. Unchanged in behaviour
+// from #3987/#4265; it now shares the scanner above. Returns null when no
+// marker is found — the hub then treats the completion exactly as an idle one.
+function detectNoWorkVerdict(lines) {
+  return detectHiveVerdict(lines, [HIVE_VERDICT_NO_WORK]);
+}
+
+// detectCompletionVerdict reports whether the agent SAID it finished (#5376).
+//
+// Either verdict counts as "the agent declared this task over": no_work_needed
+// is a completion too — it is the agent concluding the task with nothing to
+// ship — and requiring a second `complete` line after it would make a
+// compliant agent look non-compliant.
+function detectCompletionVerdict(lines) {
+  return detectHiveVerdict(lines, [HIVE_VERDICT_COMPLETE, HIVE_VERDICT_NO_WORK]);
 }
 
 // True while a bob CLI process is alive. bob exits at the end of every turn,
@@ -1498,9 +1785,49 @@ function recentPaneLines(text, limit = 12) {
     .slice(-limit);
 }
 
-function paneLooksBlockedOnHuman(text) {
+// Why a blocked pane is blocked (kubestellar/hive#5281). BLOCKED_ON_HUMAN
+// conflates two populations, and only one of them can be helped without a
+// person:
+//
+//   question       — a plain "?", a y/N, an elicitation form. The agent forgot
+//                    its standing instruction to decide for itself, and a
+//                    one-line reminder is usually all it takes.
+//   menu           — a numbered menu. Deliberately NOT nudge-eligible: a menu
+//                    TUI may read typed text as a selection filter rather than
+//                    as chat input, so covering it properly needs Escape
+//                    handling this does not attempt.
+//   human-required — login, credential entry, trust/consent, permission. Only
+//                    a person can answer these, and typing at them is actively
+//                    harmful.
+const BLOCKED_REASON_QUESTION = 'question';
+const BLOCKED_REASON_MENU = 'menu';
+const BLOCKED_REASON_HUMAN_REQUIRED = 'human-required';
+
+// The confirmation half of the old blockingPatterns list: prompts an agent
+// working autonomously is entitled to answer for itself.
+const QUESTION_BLOCKING_PATTERNS = [
+  /\[[Yy]\/[Nn]\]|\([Yy]\/[Nn]\)|\b[Yy]es\/[Nn]o\b/,
+  /\b(?:continue|proceed|confirm|approve|allow|deny|accept|reject|choose|select)\b.*\?/i,
+  /\bPress Enter to continue\b/i,
+  /\bEnter to confirm\b/i,
+];
+
+// The other half: prompts where a person is the only possible answer. Kept as
+// its own list because it is a veto, not a detector — see
+// classifyBlockedOnHumanReason.
+const HUMAN_REQUIRED_BLOCKING_PATTERNS = [
+  /\b(?:approval|consent|trust this folder|Do you trust|Confirm folder trust)\b/i,
+  /\bpermission\b.*\b(?:allow|approve|confirm|continue|proceed)\b/i,
+  /\b(?:allow|approve|confirm|continue|proceed)\b.*\bpermission\b/i,
+  /\b(?:Allow|Approve|Run|Execute)\b.*\b(?:command|tool|edit|file|operation)\b/i,
+  /\b(?:Paste|Enter).*(?:API key|token|code|password)\b/i,
+];
+
+// classifyBlockedOnHumanReason returns one of the BLOCKED_REASON_* constants,
+// or null when the pane is not blocked at all.
+function classifyBlockedOnHumanReason(text) {
   const lines = recentPaneLines(text);
-  if (lines.length === 0) return false;
+  if (lines.length === 0) return null;
   const recent = lines.join('\n');
   const last = lines[lines.length - 1];
   const beforePrompt = [...lines].reverse().find(line =>
@@ -1541,31 +1868,241 @@ function paneLooksBlockedOnHuman(text) {
     /\bElicitation request timed out\b/i.test(recent) ||
     /\bTimeout waiting for user response\b/i.test(recent);
   const hasElicitationForm = (hasInputRequestLeadIn && hasFormStructure) || hasElicitationMarker;
-  const blockingPatterns = [
-    // Confirmation prompts and TUI continuation screens.
-    /\[[Yy]\/[Nn]\]|\([Yy]\/[Nn]\)|\b[Yy]es\/[Nn]o\b/,
-    /\b(?:continue|proceed|confirm|approve|allow|deny|accept|reject|choose|select)\b.*\?/i,
-    /\bPress Enter to continue\b/i,
-    /\bEnter to confirm\b/i,
-    // Permission/auth/onboarding prompts seen from Claude/Copilot/Goose/Bob.
-    /\b(?:approval|consent|trust this folder|Do you trust|Confirm folder trust)\b/i,
-    /\bpermission\b.*\b(?:allow|approve|confirm|continue|proceed)\b/i,
-    /\b(?:allow|approve|confirm|continue|proceed)\b.*\bpermission\b/i,
-    /\b(?:Allow|Approve|Run|Execute)\b.*\b(?:command|tool|edit|file|operation)\b/i,
-    /\b(?:Paste|Enter).*(?:API key|token|code|password)\b/i,
-  ];
+  const blockingPatterns = [...QUESTION_BLOCKING_PATTERNS, ...HUMAN_REQUIRED_BLOCKING_PATTERNS];
 
-  return hasQuestion || hasNumberedMenu || hasElicitationForm || blockingPatterns.some(re => re.test(beforePrompt));
+  const blocked = hasQuestion || hasNumberedMenu || hasElicitationForm ||
+    blockingPatterns.some(re => re.test(beforePrompt));
+  if (!blocked) return null;
+
+  // Human-required WINS over every other signal, and is asked of the whole
+  // recent window rather than just the line above the prompt (#5281). A trust
+  // dialog or a credential request often renders its heading a few lines up
+  // while the cursor line is a bare "Do you want to proceed?" — classifying
+  // that as an ordinary question is exactly the mistake that would type an
+  // autonomy reminder into a /login flow or submit it as a password.
+  //
+  // Widening the window can only move a pane from question to human-required,
+  // never make an unblocked pane blocked: `blocked` above is computed exactly
+  // as it always was. When in doubt, human-required — waiting costs 30 minutes,
+  // a wrong nudge costs a credential prompt answered with prose.
+  if (HUMAN_REQUIRED_BLOCKING_PATTERNS.some(re => re.test(recent))) {
+    return BLOCKED_REASON_HUMAN_REQUIRED;
+  }
+  if (hasNumberedMenu) return BLOCKED_REASON_MENU;
+  return BLOCKED_REASON_QUESTION;
+}
+
+// paneLooksBlockedOnHuman is the original boolean, now derived from the
+// classifier so there is exactly one definition of "blocked". Its answer is
+// unchanged: classifyBlockedOnHumanReason returns non-null for precisely the
+// panes this used to return true for.
+function paneLooksBlockedOnHuman(text) {
+  return classifyBlockedOnHumanReason(text) !== null;
+}
+
+// paneTail returns the last n lines of a pane capture. Pure, so the detectors
+// below are table-testable without tmux.
+function paneTail(text, n) {
+  return String(text || '').split('\n').slice(-n).join('\n');
+}
+
+// paneShowsTransientAPIError reports whether the visible tail carries a
+// retryable API failure. Every candidate line must carry the "API Error:"
+// chrome AND a known-retryable pattern, so prose that merely mentions a dropped
+// connection ("the user reported connection lost mid-response earlier") does
+// not trip it.
+function paneShowsTransientAPIError(text) {
+  const lines = paneTail(text, TRANSIENT_API_ERROR_TAIL_LINES).split('\n');
+  return lines.some((line) => {
+    const lower = line.toLowerCase();
+    if (!lower.includes('api error:')) return false;
+    if (TRANSIENT_API_ERROR_PATTERNS.some((pat) => lower.includes(pat))) return true;
+    return TRANSIENT_API_ERROR_STATUS_RE.test(line);
+  });
+}
+
+// paneShowsUnretryableAPIError detects failures a repeat cannot clear — an
+// authorization refusal or an exhausted quota. LINE-WISE and gated on the same
+// "API Error:" chrome as the transient detector, and the gate matters MORE
+// here: this verdict actively fails the task, so a false positive fails work
+// that genuinely completed. An agent working on hive's own quota-handling code
+// can legitimately print "budget_exceeded" in its final summary (the repo's
+// test files contain these strings verbatim); without the chrome gate that
+// completed turn would be booked as an environment failure. Claude renders
+// every real quota/authorization error under the chrome on the same line
+// ("API Error: 429 {\"type\":\"budget_exceeded\"...}"), so the gate costs
+// nothing for the errors this exists to catch. A chrome-less quota banner
+// (copilot/bob render some) falls through to the pre-#5094 behavior and is
+// part of the documented #5121 residual.
+function paneShowsUnretryableAPIError(text) {
+  const lines = paneTail(text, TRANSIENT_API_ERROR_TAIL_LINES).split('\n');
+  return lines.some((line) => {
+    const lower = line.toLowerCase();
+    if (!lower.includes('api error:')) return false;
+    if (UNRETRYABLE_API_ERROR_PATTERNS.some((pat) => lower.includes(pat))) return true;
+    return UNRETRYABLE_API_ERROR_STATUS_RE.test(line);
+  });
+}
+
+// paneShowsLoginRequiredError detects an AUTHENTICATION failure — the CLI's
+// credential expired mid-session and it is asking for /login. Neither of the
+// other two buckets fits: a retry cannot clear it (typing "try again" at an
+// expired credential is a wall), and failing it releases a task a human can
+// rescue in thirty seconds by logging in. The honest state is BLOCKED_ON_HUMAN
+// — a person genuinely is the only thing that can move it — which the hub
+// already renders with an attention flag.
+//
+// 401 is authentication, NOT the 403 the fatal bucket catches: the hub's #4400
+// rule is that /login fixes a 401 and fixes nothing about a 403. Ordering in
+// classifyTmuxPane preserves that: the fatal check runs first, so a line
+// carrying both a login hint and a 403/authorization refusal stays fatal.
+//
+// Without this, a mid-session credential expiry — the exact scenario #5088
+// reported — rendered "● Please run /login · API Error: 401 …" above the idle
+// prompt and was booked as a COMPLETED task.
+function paneShowsLoginRequiredError(text) {
+  const lines = paneTail(text, TRANSIENT_API_ERROR_TAIL_LINES).split('\n');
+  return lines.some((line) => {
+    const lower = line.toLowerCase();
+    if (lower.includes('please run /login')) return true;
+    return lower.includes('api error:') && /\b401\b/.test(line);
+  });
+}
+
+// How long an attached tmux client must have been silent before the relay
+// stops treating it as a person who owns the pane (kubestellar/hive#5277).
+//
+// The guard this feeds exists so a watchdog never types over someone
+// mid-keystroke, and that is worth keeping. But "a client is connected" is not
+// "a human is here": a dashboard terminal tab left open an hour ago
+// (bin/ttyd-tmux.sh attaches one, and the dashboard's browser terminal proxies
+// to it) was indistinguishable from someone actively typing, and it disabled
+// API-error auto-retry for the whole 30-minute task ceiling.
+//
+// Five minutes, and the two bounds are asymmetric. Below ~2 minutes the
+// threshold is not observable at all: the only caller runs on the
+// PROGRESS_REPORT_INTERVAL_MS tick, 120s apart. Above it, every extra minute is
+// a minute of a stranded task, and the cost of being wrong in that direction is
+// mild — "try again" typed at a prompt nobody is typing at is visible and
+// harmless, while the cost of being wrong in the other direction is the bug
+// this fixes. Long enough to cover reading a diff; far short of the 30-minute
+// strand it replaces.
+const HUMAN_PRESENCE_IDLE_MS = Number(process.env.HIVE_HUMAN_PRESENCE_IDLE_MS) || 5 * 60 * 1000;
+
+// tmuxSessionHumanPresence reports whether a human is at the agent's tmux
+// session, and how confident that answer is.
+//
+//   attached — some client is connected at all.
+//   active   — some client has typed within HUMAN_PRESENCE_IDLE_MS. This, not
+//               `attached`, is the question a watchdog must ask before typing.
+//   idleMs   — how long the most recently active client has been quiet, or
+//               null when tmux did not say.
+//
+// `client_activity` is tmux's per-client timestamp of last input, in epoch
+// seconds — the signal that distinguishes an abandoned tab from a person.
+//
+// EVERY uncertain answer resolves to active:true, because the failure this
+// guard prevents (typing over someone mid-keystroke) is worse than the failure
+// it causes (a retry deferred one tick). tmux erroring, tmux returning
+// unparseable activity values, and a clock skewed into the future all take that
+// branch. Only a client that positively reports itself quiet for long enough
+// releases the pane.
+function tmuxSessionHumanPresence() {
+  try {
+    const out = execSync(
+      `tmux list-clients -t ${TMUX_SESSION} -F '#{client_activity}' 2>/dev/null || true`,
+      { encoding: 'utf8', timeout: 15000 });
+    const text = String(out).trim();
+    if (!text) return { attached: false, active: false, idleMs: null };
+
+    let newestSec = null;
+    for (const line of text.split('\n')) {
+      const seconds = Number(String(line).trim());
+      if (!Number.isFinite(seconds) || seconds <= 0) continue;
+      if (newestSec === null || seconds > newestSec) newestSec = seconds;
+    }
+    if (newestSec === null) {
+      // Attached, but tmux told us nothing usable about when — an old tmux
+      // whose client_activity is not an epoch integer, say. Presence unknown,
+      // so presence assumed.
+      return { attached: true, active: true, idleMs: null };
+    }
+
+    // A negative age means the client's clock is ahead of ours; clamping to
+    // zero makes that read as "just now", which is the cautious direction.
+    const idleMs = Math.max(0, Date.now() - newestSec * 1000);
+    return { attached: true, active: idleMs < HUMAN_PRESENCE_IDLE_MS, idleMs };
+  } catch (_) {
+    return { attached: true, active: true, idleMs: null };
+  }
+}
+
+// tmuxSessionHasAttachedClient reports only whether a client is CONNECTED. It
+// deliberately says nothing about whether a person is there — see
+// tmuxSessionHumanPresence for the question callers actually want. Kept because
+// "is anything attached at all" is still a real question, and because failing
+// closed on a tmux error is the same rule at both layers.
+function tmuxSessionHasAttachedClient() {
+  return tmuxSessionHumanPresence().attached;
+}
+
+// tmuxSendNudge types a short literal message and submits it.
+//
+// Deliberately NOT tmuxSendKeys(): that function is the TASK-PROMPT path and
+// carries machinery a nudge must not trigger — a /clear once the context
+// crosses CLEAR_CONTEXT_THRESHOLD_PCT, the periodic every-N-tasks CLI restart,
+// and the /tmp sweep. A nudge exists precisely to preserve the session context
+// that makes recovery cheap; clearing or restarting would throw away the very
+// thing being rescued.
+function tmuxSendNudge(message) {
+  execSync(`tmux send-keys -t ${TMUX_SESSION} -l '${message}'`, { timeout: 15000 });
+  sleepMs(ENTER_DELAY_MS);
+  tmuxSendEnters();
+}
+
+// paneUnknownAPIErrorLine returns the first line of the visible tail that
+// carries Claude Code's own error rendering — a line-leading "● API Error:" —
+// or null. Reached only after the three curated detectors above have NOT
+// matched (classifyTmuxPane's ordering), so a hit here is an API failure the
+// tables cannot name (kubestellar/hive#5121): a 400, a 404, a 429 phrased in a
+// way nobody anticipated, a brand-new gateway message.
+//
+// The anchor is deliberately STRICTER than the curated detectors' anywhere-in-
+// the-line match. They pair the chrome with a known pattern, which is already
+// two independent signals; this one has no pattern to pair with, so the chrome
+// must be the CLI's own rendering — the ● bullet at line start is how Claude
+// Code prints its errors — or an agent whose completed-turn prose merely
+// mentions "API Error: 418" would be held and retried instead of credited.
+// The residual is an agent whose rendered message BEGINS with the literal
+// string "API Error:", which is as narrow as this can get from pane text.
+//
+// Returning the line (not a boolean) is the instrumentation half of #5121:
+// every hit is logged verbatim at the call site, so the curated lists can be
+// grown from what actually occurs in the wild instead of from guesses.
+function paneUnknownAPIErrorLine(text) {
+  const lines = paneTail(text, TRANSIENT_API_ERROR_TAIL_LINES).split('\n');
+  for (const line of lines) {
+    if (/^\s*●\s*API Error:/i.test(line)) return line.trim();
+  }
+  return null;
 }
 
 function classifyTmuxPane(text) {
   let hasIdlePrompt, hasCompletionMarker, isWorking;
 
   if (BACKEND === 'claude') {
-    const lastLines = text.split('\n').slice(-15).join('\n');
-    hasIdlePrompt = /bypass permissions|shift\+tab to cycle/.test(text);
+    const claudeTail = text.split('\n').slice(-15).join('\n');
+    // Claude's optional footer hints change when a background shell is still
+    // running. Its own state markers do not: an in-flight turn renders
+    // "esc to interrupt", while an idle turn retains the ⏵⏵ / agents chrome.
+    // Prefer those markers over transcript verbs, which may describe finished
+    // work. Keep the verb heuristic only for an unrecognised footer so an
+    // unknown Claude UI still errs toward busy.
+    hasIdlePrompt = /⏵⏵|← for agents|bypass permissions|shift\+tab to cycle/.test(claudeTail);
     hasCompletionMarker = /[✻✶✽] \S+ed for \d+[ms]|Honking|tokens\)/.test(text);
-    isWorking = /─.*Bash\(|Reading|Editing|Writing|Searching/.test(lastLines) || /ing…/.test(lastLines);
+    const claudeBusyMarker = /esc to interrupt/i.test(claudeTail);
+    isWorking = claudeBusyMarker ||
+      (!hasIdlePrompt && (/─.*Bash\(|Reading|Editing|Writing|Searching/.test(claudeTail) || /ing…/.test(claudeTail)));
   } else if (BACKEND === 'copilot') {
     hasIdlePrompt = /\/ commands.*help/.test(text);
     hasCompletionMarker = true;
@@ -1724,6 +2261,46 @@ function classifyTmuxPane(text) {
 
   if (paneLooksBlockedOnHuman(text)) return PANE_STATE_BLOCKED_ON_HUMAN;
   if (isWorking) return PANE_STATE_WORKING;
+  // A turn that ended in a RETRYABLE API failure is not a completed turn
+  // (kubestellar/hive#5094). This must sit above the completion test: the
+  // completion markers below are "the turn stopped" signals — claude's
+  // "✻ …ed for 9m 24s" duration summary is printed for an errored turn exactly
+  // as for a successful one — so without this check an API error reads as
+  // success and the task is reported complete having shipped nothing.
+  //
+  // Below isWorking, though: a CLI that is streaming or mid-retry (Claude Code
+  // retries some failures itself, rendering a countdown) is left alone, because
+  // interrupting that would CAUSE the stall this is meant to prevent.
+  // Unretryable FIRST, so a pane carrying both signals fails rather than retries
+  // — the veto has to win, or a 403 rendered under the same "API Error:" chrome
+  // as a dropped connection would be nudged forever.
+  //
+  // Both branches exist for one reason: a turn that ended in an API error did not
+  // complete. Closing only the retryable half (the original #5094 fix) left a 403
+  // or an exhausted quota falling straight through to the completion test and
+  // being booked as a finished task — the same defect, one branch over.
+  if (paneShowsUnretryableAPIError(text)) {
+    return PANE_STATE_FATAL_API_ERROR;
+  }
+  // Authentication (401 / "Please run /login") AFTER the fatal check — a line
+  // carrying both a login hint and an authorization refusal must stay fatal,
+  // because /login fixes a 401 and fixes nothing about a 403 (#4400). A human
+  // logging in is the only recovery, so this is blocked-on-human, not an error
+  // to retry or fail.
+  if (paneShowsLoginRequiredError(text)) {
+    return PANE_STATE_BLOCKED_ON_HUMAN;
+  }
+  if (paneShowsTransientAPIError(text)) {
+    return PANE_STATE_TRANSIENT_API_ERROR;
+  }
+  // LAST of the error checks, FIRST before completion: an anchored API error
+  // the curated lists cannot name (#5121). Order matters twice over — the
+  // curated buckets get first claim on their lines, and a turn that ended in
+  // ANY API error must not fall through to the completion test below, which is
+  // exactly how #5094's false completions happened.
+  if (paneUnknownAPIErrorLine(text) !== null) {
+    return PANE_STATE_UNKNOWN_API_ERROR;
+  }
   if (hasIdlePrompt && hasCompletionMarker) return PANE_STATE_IDLE_COMPLETE;
   return PANE_STATE_WORKING;
 }
@@ -1792,6 +2369,86 @@ function relaunchCLI() {
   return launchCmd;
 }
 
+// dropTaskCredential removes the repo-scoped GitHub token this relay was given
+// for the task that is ending.
+//
+// The token lives in exactly one place — the 0600 GH_TOKEN_CACHE written by
+// injectGhToken — and it stays valid for the remainder of wsTokenTTL (~55min)
+// no matter what the relay reports. Leaving it on disk after the hub has
+// released the work means a turn that is still running can keep pushing and
+// opening PRs against an issue the hub has already offered to someone else.
+//
+// Kept separate from the stop so the ordering in stopAgentForTaskExit() is
+// visible at its single call site rather than buried in a compound helper.
+function dropTaskCredential() {
+  try { fs.unlinkSync(GH_TOKEN_CACHE); } catch (_) {}
+  tokenExpiresAt = null;
+}
+
+// stopAgentForTaskExit ends the AGENT, not just the bookkeeping, when a task
+// stops being ours (kubestellar/hive#5353 cause B).
+//
+// Reporting task_complete or task_failed tells the hub to revoke the lease,
+// book a cooldown and offer the issue to someone else. Before this existed,
+// only five of the relay's task-exit paths touched the pane, so the other
+// paths left the original agent running in the same pane, on the same context,
+// holding a live scoped token — and it would eventually open a PR against an
+// issue the hub had already reassigned. That is the duplicate-PR shape #2356
+// exists to prevent, produced from inside the contributor rather than outside
+// it, which is why the hub's cooldown accounting cannot see it.
+//
+// The sequence is the one the task_revoke handler already got right, and the
+// ORDER is load-bearing:
+//
+//  1. Unlink the credential FIRST, so a turn that survives the interrupt (or
+//     races it) cannot keep using it. Interrupting first leaves a window in
+//     which the agent is being killed but is still authorized.
+//  2. Two Ctrl-Cs via quitLiveCLI() — one only cancels a claude/codex/agy
+//     turn and leaves the CLI running, so the relaunch command that follows
+//     would be typed into the CLI as a chat message (#2203).
+//  3. Relaunch, which sets cliReady=false and re-arms armCLIReadyWait(), so
+//     the next task's prompt is queued until a clean prompt is confirmed.
+//
+// Re-entrancy: callers that have ALREADY stopped or relaunched the pane pass
+// { skipCLI: true } and get only step 1 — nesting a second quit/relaunch into
+// a relaunch already in flight is how double-launches happen. Headless mode
+// has no pane at all; there the in-flight one-shot child is killed instead,
+// matching what the revoke handler does.
+//
+// opts.reason names the exit in the relaunch log line, and opts.onRelaunchFailed
+// lets a caller with its own post-relaunch latch (the revoke handler's
+// readyAfterInteractiveRevoke) unwind it — the latch is only meaningful if a
+// relaunch actually happened.
+//
+// Best-effort by design, like quitLiveCLI(): every caller is already on an
+// exit path, and a relaunch that lands badly is recovered by the
+// armCLIReadyWait() contract.
+function stopAgentForTaskExit(opts) {
+  const skipCLI = !!(opts && opts.skipCLI);
+  const reason = (opts && opts.reason) || 'a task exit';
+  // Step 1, always — even when the pane is deliberately left alone. A task
+  // that is no longer ours must not keep its credential under any branch.
+  dropTaskCredential();
+  if (skipCLI) return;
+  if (CONTRIBUTOR_MODE === MODE_HEADLESS) {
+    if (headlessChild) {
+      try { headlessChild.kill('SIGKILL'); } catch (_) {}
+      headlessChild = null;
+      writeHeadlessStatus(HEADLESS_STATE_WAITING);
+    }
+    return;
+  }
+  cliReady = false;
+  quitLiveCLI();
+  try {
+    console.log(`Relaunching ${BACKEND} after ${reason}: ${relaunchCLI()}`);
+  } catch (e) {
+    cliReadyFailed = true;
+    if (opts && opts.onRelaunchFailed) opts.onRelaunchFailed();
+    console.error(`Failed to stop and relaunch ${BACKEND} after ${reason}: ${e.message}`);
+  }
+}
+
 // --- Pane stall backstop ------------------------------------------------
 //
 // A relay that BELIEVES it is working renews the hub's task lease on every
@@ -1829,6 +2486,75 @@ const PANE_STALL_TIMEOUT_MS = Number(process.env.HIVE_PANE_STALL_TIMEOUT_MS) || 
 // path before the confirm count is ever consulted.
 const PANE_STALL_CONFIRM_TICKS = Math.max(1, Number(process.env.HIVE_PANE_STALL_CONFIRM_TICKS) || 2);
 
+// ── Chrome-idle grace before an unverdicted completion (#5376) ───────────────
+//
+// THE DEMOTION. classifyTmuxPane() used to be the whole completion contract:
+// PANE_STATE_IDLE_COMPLETE meant "task done", full stop. It is no longer
+// allowed to say that on its own. It says "this pane looks idle" — a liveness
+// judgement its per-backend chrome CAN support — and the agent's own
+// HIVE_VERDICT: line says whether the task is done.
+//
+// THE FALLBACK, and why this shape. Not every backend will emit the sentinel
+// reliably; some builds ignore instructions in a long prompt, and the marker
+// can scroll out of the fifteen-line tail on a chatty summary. Two honest
+// options were on the table:
+//
+//   (a) idle-without-verdict is "still running" until the progress lease
+//       expires. Rejected. A non-compliant agent that genuinely finished draws
+//       nothing more, so paneChangedSince() stops re-arming the lease and the
+//       task dies at PANE_STALL_TIMEOUT_MS as an `environment` FAILURE — with
+//       its PR already open. That converts every success by a non-compliant
+//       backend into a false failure and a wasted re-offer. It is the #4182 /
+//       #4127 shape (a finished task killed by the stall backstop) reintroduced
+//       deliberately, and it is worse than the bug this issue exists to end.
+//
+//   (b) a BOUNDED grace period after idle, then complete anyway. Chosen.
+//
+// What (b) buys, precisely: the sentinel becomes the fast path — an agent that
+// says it is done is believed on the spot, verdict recorded — while chrome
+// alone must hold idle for CHROME_IDLE_GRACE_TICKS consecutive ticks before it
+// is allowed to conclude anything. That directly targets the failure mode the
+// thirteen issues share: every one of them was a MOMENTARY misread — a
+// duration summary printed mid-turn, a status row between tool calls, an
+// errored turn parked at the prompt. A pane that has rendered idle chrome and
+// nothing else across several minutes is a far weaker claim than a single
+// frame, and any new output at all resets the count (see recordChromeIdleTick).
+//
+// What (b) does NOT buy: it is still chrome, so it is still fallible, just
+// slower and much harder to trip. The verdict path is the one that is
+// trustworthy. The grace exists so that adopting it costs nothing when an
+// agent does not comply, which is what makes the demotion shippable at all.
+//
+// The completion is marked `chrome_idle` when it comes from this path, so the
+// hub and the operator can see which signal ended a task and per-backend
+// non-compliance is measurable rather than guessed at.
+const CHROME_IDLE_GRACE_TICKS = Math.max(1, Number(process.env.HIVE_CHROME_IDLE_GRACE_TICKS) || 3);
+
+// How many CONSECUTIVE ticks the pane has classified IDLE_COMPLETE with no
+// completion verdict in sight. Reset on task start and on any tick that does
+// not see an unverdicted idle pane.
+let chromeIdleTicks = 0;
+
+// recordChromeIdleTick advances (or resets) the grace counter and reports
+// whether chrome alone has now earned the right to end the task.
+//
+// PURE with respect to the pane fingerprint: it takes the already-captured
+// lines and never reads the pane itself. paneStalled() is destructive — the
+// first call seeing new output consumes it (#5333) — so nothing on the tick
+// path may take a second reading.
+function recordChromeIdleTick(idleWithoutVerdict) {
+  if (!idleWithoutVerdict) {
+    chromeIdleTicks = 0;
+    return false;
+  }
+  chromeIdleTicks++;
+  return chromeIdleTicks >= CHROME_IDLE_GRACE_TICKS;
+}
+
+function resetChromeIdleGrace() {
+  chromeIdleTicks = 0;
+}
+
 let lastPaneFingerprint = null;
 let lastPaneChangeAt = 0;
 // How many CONSECUTIVE ticks paneStalled() has now returned true. Distinct
@@ -1838,6 +2564,29 @@ let lastPaneChangeAt = 0;
 // where paneStalled() is false (new output resets the whole stall story).
 let stallConfirmCount = 0;
 
+// Transient-API-error nudge state (kubestellar/hive#5094), scoped to the
+// CURRENT task: how many retries we have typed and when the last one went out.
+// Both are reset at task start — a previous task's exhausted budget must not
+// deny this one its retries.
+let transientNudgeCount = 0;
+let lastTransientNudgeAt = 0;
+
+function resetTransientNudgeState() {
+  transientNudgeCount = 0;
+  lastTransientNudgeAt = 0;
+}
+
+// Autonomy-nudge state (kubestellar/hive#5281), scoped to the CURRENT task.
+// Budget of exactly one: a question the agent re-asks AFTER being told to
+// proceed autonomously is a question it genuinely cannot answer itself, and
+// re-nudging it would loop until the max-duration ceiling. Once spent, the pane
+// reports blocked_on_human exactly as it does today.
+let autonomyNudgeSent = false;
+
+function resetAutonomyNudgeState() {
+  autonomyNudgeSent = false;
+}
+
 function resetPaneStallClock() {
   lastPaneFingerprint = null;
   lastPaneChangeAt = Date.now();
@@ -1845,6 +2594,9 @@ function resetPaneStallClock() {
   // A new task also starts with a clean CLI-liveness count: shell readings from
   // the previous task say nothing about this one.
   consecutiveShellReadings = 0;
+  // Likewise the chrome-idle grace (#5376): idle ticks accumulated while the
+  // PREVIOUS task wound down must never count toward ending this one.
+  resetChromeIdleGrace();
 }
 
 // paneStalled records the current pane content and reports whether it has been
@@ -1863,6 +2615,31 @@ function paneStalled(tmuxLines) {
   if (!fingerprint) return false;
   if (!lastPaneChangeAt) { lastPaneChangeAt = now; return false; }
   return now - lastPaneChangeAt >= PANE_STALL_TIMEOUT_MS;
+}
+
+// paneChangedSince reports whether the pane differs from the last fingerprint
+// paneStalled() recorded — i.e. whether the agent produced output since the
+// previous tick (kubestellar/hive#5321).
+//
+// PURE BY CONSTRUCTION: it must not update lastPaneFingerprint or
+// lastPaneChangeAt. paneStalled() is destructive — the first call that sees new
+// output records it and returns false, so a second call in the same tick sees
+// no change. progressTick() calls this one FIRST and paneStalled() (via
+// paneStallConfirmed) later in the same tick; if this function recorded, the
+// stall detector would see an already-consumed change every time and could
+// never accumulate a stall. Read only.
+//
+// A null fingerprint means no tick has recorded one yet (fresh task): that is
+// not evidence of progress, and treating it as such would hand a task that has
+// never drawn anything a free lease renewal.
+function paneChangedSince(tmuxLines) {
+  if (lastPaneFingerprint === null) return false;
+  const fingerprint = Array.isArray(tmuxLines) ? tmuxLines.join('\n') : String(tmuxLines || '');
+  // An empty capture means tmux told us nothing (session gone, capture failed).
+  // paneStalled() refuses to read that as a stall; symmetrically it must not be
+  // read as progress either.
+  if (!fingerprint) return false;
+  return fingerprint !== lastPaneFingerprint;
 }
 
 // paneStallConfirmed wraps paneStalled() with the multi-tick confirmation
@@ -1945,15 +2722,38 @@ function restartBackoffMs(attempt) {
 //
 // It is advisory: the hub records and displays it and does not route, gate, or
 // change the work item's failure cooldown on it. Older hubs ignore the field.
+//
+// opts.skipCLI (kubestellar/hive#5353) says the CALLER has already dealt with
+// the pane — it quit and relaunched the CLI itself, or the CLI is already gone.
+// The credential is still dropped; only the quit/relaunch is skipped, so a
+// relaunch already in flight is not nested inside another one.
 function failCurrentTask(reason, opts) {
   if (!currentTask) return;
   const permanent = !!(opts && opts.permanent);
   const kind = (opts && opts.kind) || undefined;
   const taskId = currentTask.task_id;
   const taskGen = currentTask.task_gen;
+  // Captured BEFORE the agent is stopped: the pane text is the evidence the
+  // hub and the operator read to understand the failure, and quitLiveCLI()
+  // followed by a relaunch overwrites it with launch chrome.
   const tmuxLines = captureTmuxLines(TMUX_TAIL_LINES);
+  // Cause B (#5353): the hub is about to release this issue and offer it to
+  // someone else. Stop the agent and drop its token FIRST, so the report and
+  // the reality agree at the instant the hub acts on it.
+  stopAgentForTaskExit({ skipCLI: !!(opts && opts.skipCLI) });
   console.error(`Task ${taskId} failed${permanent ? ' permanently' : ''}${kind ? ` [${kind}]` : ''}: ${reason}`);
-  send({ type: 'task_failed', seq: nextSeq(), task_id: taskId, task_gen: taskGen, reason, permanent, failure_kind: kind, tmux_output: tmuxLines });
+  send({
+    type: 'task_failed',
+    seq: nextSeq(),
+    task_id: taskId,
+    task_gen: taskGen,
+    result: 'failed',
+    reason,
+    permanent,
+    failure_kind: kind,
+    tmux_output: tmuxLines,
+    ...effectiveSelectionFields(),
+  });
   currentTask = null;
   taskAssignedAt = 0;
   if (progressInterval) { clearInterval(progressInterval); progressInterval = null; }
@@ -1975,18 +2775,239 @@ function startProgressReporting() {
   // Every task starts with a clean stall clock — the previous task's pane
   // fingerprint says nothing about this one.
   resetPaneStallClock();
+  // Likewise the retry budget: a previous task that exhausted its API-error
+  // retries must not deny this one its own (#5094).
+  resetTransientNudgeState();
+  // And the one-shot autonomy reminder (#5281), for the same reason.
+  resetAutonomyNudgeState();
 
-  taskTimeoutHandle = setTimeout(() => {
-    if (currentTask) {
-      failCurrentTask(`task exceeded max duration (${MAX_TASK_DURATION_MS / 60000}min)`);
-    }
-  }, MAX_TASK_DURATION_MS);
+  armTaskProgressLease();
 
   progressInterval = setInterval(progressTick, PROGRESS_REPORT_INTERVAL_MS);
 }
 
+// armTaskProgressLease (re)starts the max-duration timer from NOW.
+//
+// Called once at task start and again from every tick that observes forward
+// progress, which is what turns MAX_TASK_DURATION_MS from a wall-clock budget
+// into a lease (kubestellar/hive#5321). An agent producing output keeps its
+// lease; a silent one lets it run down.
+//
+// Deliberately mirrors the sibling per-task clocks armed alongside it —
+// resetPaneStallClock(), resetTransientNudgeState(), resetAutonomyNudgeState()
+// — all of which were already progress-aware. This one was the odd clock out.
+//
+// Takes no locks and touches no shared connection state: it clears and re-sets
+// a timer handle owned by this module, so it is safe to call from inside
+// progressTick without regard to what the caller already holds.
+function armTaskProgressLease() {
+  if (taskTimeoutHandle) clearTimeout(taskTimeoutHandle);
+  // Deliberately NOT unref'd: no other timer in this relay is, and the handle
+  // is cleared on every task exit (completion, failure, revoke), so it never
+  // outlives the task it bounds. Changing process-exit semantics is not part of
+  // this fix.
+  taskTimeoutHandle = setTimeout(onTaskProgressLeaseExpired, MAX_TASK_DURATION_MS);
+}
+
+// onTaskProgressLeaseExpired runs when MAX_TASK_DURATION_MS elapsed with no
+// observed progress.
+//
+// It re-checks the progress signal rather than trusting the timer alone: the
+// tick loop re-arms on output, but a tick that lands microseconds after the
+// timer fired would otherwise lose the race and kill a live agent for it. If
+// the pane HAS changed within the lease window, the lease is simply renewed.
+//
+// Reaching the kill means the relay saw no progress for the lease window AND
+// (normally) the stall detector already had its say — so this is a runtime
+// verdict, not a judgement of the work: kind 'environment' (#5321). Previously
+// this path passed no opts at all, so an infrastructure ceiling was recorded as
+// a plain task failure.
+function onTaskProgressLeaseExpired() {
+  if (!currentTask) return;
+  const now = Date.now();
+  const elapsed = taskAssignedAt ? now - taskAssignedAt : 0;
+
+  // Absolute backstop first: past this, no amount of output buys more time.
+  if (elapsed >= ABSOLUTE_TASK_DEADLINE_MS) {
+    failCurrentTask(
+      `task exceeded the absolute deadline (${Math.round(ABSOLUTE_TASK_DEADLINE_MS / 60000)}min) without completing`,
+      { kind: 'environment' }
+    );
+    return;
+  }
+
+  // Forward progress since the lease was armed? Renew it and say nothing.
+  // lastPaneChangeAt is maintained by paneStalled() on every tick, so it is the
+  // same signal the stall detector uses — one definition of "progress", not two.
+  if (lastPaneChangeAt && now - lastPaneChangeAt < MAX_TASK_DURATION_MS) {
+    armTaskProgressLease();
+    return;
+  }
+
+  failCurrentTask(
+    `no observed progress for ${MAX_TASK_DURATION_MS / 60000}min — the agent CLI is not visibly working`,
+    { kind: 'environment' }
+  );
+}
+
 // One iteration of the progress/completion/crash-detection loop. Extracted from
 // the setInterval body so it can be driven deterministically from tests.
+// handleTransientAPIError recovers a task whose turn ended in a retryable API
+// failure (kubestellar/hive#5094).
+//
+// Before this existed the pane classified as IDLE_COMPLETE and the relay
+// reported the task COMPLETED — the hub booked a completion that shipped
+// nothing, reassigned the contributor, and the half-finished work was orphaned.
+// Every branch here is a way of NOT doing that: retry it, hand it to the human
+// already watching, or fail it honestly. None of them claims success.
+//
+// The goose backend has had this shape since long before #5094 — see
+// checkTmuxPaneState, which presses Enter on a goose network error and returns
+// WORKING. This generalises that precedent rather than inventing one.
+function handleTransientAPIError(tmuxLines) {
+  if (!currentTask) return;
+  const now = Date.now();
+  const progressBase = {
+    type: 'task_progress',
+    seq: nextSeq(),
+    task_id: currentTask.task_id,
+    task_gen: currentTask.task_gen,
+    tmux_output: tmuxLines,
+  };
+
+  // A human AT the pane owns it, and a watchdog must never type over someone
+  // mid-keystroke. But presence is a recency question, not a connection one
+  // (#5277): a dashboard terminal tab left open is a connected client and not a
+  // person, and treating the two alike disabled recovery entirely for as long
+  // as the tab lived. An attached-but-quiet client falls through to the retry
+  // below; only a recently active one still takes this branch.
+  const presence = tmuxSessionHumanPresence();
+  if (presence.active) {
+    const since = presence.idleMs === null
+      ? 'activity unknown'
+      : `last input ${Math.round(presence.idleMs / 1000)}s ago`;
+    console.warn(`Task ${currentTask.task_id} stopped on a retryable API error; ` +
+      `someone is active on ${TMUX_SESSION} (${since}), so not typing a retry`);
+    send({
+      ...progressBase,
+      status: 'blocked_on_human',
+      attention: true,
+      summary: 'Agent stopped on a retryable API error; a human is active in the pane',
+      ...progressModelFields(),
+    });
+    return;
+  }
+  if (presence.attached) {
+    console.warn(`Task ${currentTask.task_id} stopped on a retryable API error; ` +
+      `a client is attached to ${TMUX_SESSION} but has been idle ` +
+      `${Math.round(presence.idleMs / 1000)}s, so proceeding with the retry`);
+  }
+
+  // Bounded: a persistent upstream failure ends as an honest environment
+  // failure, which the hub records and can re-offer, rather than an infinite
+  // typing loop or a fabricated completion.
+  if (transientNudgeCount >= TRANSIENT_API_ERROR_MAX_NUDGES) {
+    failCurrentTask(
+      `agent stopped on a retryable API error and did not recover after ` +
+      `${TRANSIENT_API_ERROR_MAX_NUDGES} retries`,
+      { kind: 'environment' }
+    );
+    return;
+  }
+
+  // Give the previous retry time to land before typing another.
+  if (lastTransientNudgeAt && now - lastTransientNudgeAt < TRANSIENT_API_ERROR_NUDGE_COOLDOWN_MS) {
+    send({ ...progressBase, status: 'working', ...progressModelFields() });
+    return;
+  }
+
+  transientNudgeCount++;
+  lastTransientNudgeAt = now;
+  console.warn(`Transient API error on ${currentTask.task_id} — sending retry ` +
+    `${transientNudgeCount}/${TRANSIENT_API_ERROR_MAX_NUDGES}`);
+  try {
+    tmuxSendNudge(TRANSIENT_API_ERROR_NUDGE_MESSAGE);
+  } catch (e) {
+    console.error('Failed to send the retry nudge:', e.message);
+  }
+  send({
+    ...progressBase,
+    status: 'working',
+    summary: `Retrying after a transient API error ` +
+      `(${transientNudgeCount}/${TRANSIENT_API_ERROR_MAX_NUDGES})`,
+    ...progressModelFields(),
+  });
+}
+
+// paneHasPresentHuman is the one place this file asks "is a person there?".
+//
+// It exists as a named seam because #5281 and #5094 must answer it the SAME
+// way: a guard that diverges between two nudges is how you get a pane that is
+// safe from one watchdog and not the other.
+//
+// Today it is the bare attached check — a client is connected. #5277 is
+// replacing that with a recency test on tmux's `client_activity`, because a
+// dashboard terminal tab left open is a connected client and not a person.
+// When that lands this body becomes `return tmuxSessionHumanPresence().active;`
+// and both callers inherit it; that one line is the whole follow-up.
+function paneHasPresentHuman() {
+  return tmuxSessionHasAttachedClient();
+}
+
+// maybeSendAutonomyNudge types a one-shot reminder at an unattended pane that
+// stopped to ask a question it was already instructed to answer for itself
+// (kubestellar/hive#5281), and reports whether it did.
+//
+// Detection without recovery is what this fixes. The relay already SEES the
+// question and raises `attention`, but an attention flag only helps someone who
+// is watching something, and a contributor run by a user who never attaches to
+// tmux is a supported way to run one. For that user every question the agent
+// asks costs 20-30 minutes and a failed task.
+//
+// Four things must all hold, and each one is a separate way to get this wrong:
+//
+//  1. The pane is blocked on a QUESTION, not on something only a person can
+//     answer. See classifyBlockedOnHumanReason.
+//  2. It is not a login/401 pane. Belt to the classifier's braces: a /login
+//     flow is reached by a different route through checkTmuxPaneState (#4400),
+//     so excluding it here makes "never nudge a login" true by construction
+//     rather than true by coincidence.
+//  3. Nobody is at the pane.
+//  4. The one-shot budget is unspent.
+function maybeSendAutonomyNudge(tmuxLines) {
+  if (!currentTask) return false;
+  if (autonomyNudgeSent) return false;
+
+  const pane = tmuxLines.join('\n');
+  if (paneShowsLoginRequiredError(pane)) return false;
+  if (classifyBlockedOnHumanReason(pane) !== BLOCKED_REASON_QUESTION) return false;
+  if (paneHasPresentHuman()) return false;
+
+  // Spend the budget BEFORE typing. A send that throws has still disturbed the
+  // pane, and retrying it on the next tick is the loop this budget exists to
+  // prevent.
+  autonomyNudgeSent = true;
+  console.warn(`Task ${currentTask.task_id} is blocked on a question with nobody attached to ` +
+    `${TMUX_SESSION} — reminding it to proceed autonomously (once per task)`);
+  try {
+    tmuxSendNudge(AUTONOMY_NUDGE_MESSAGE);
+  } catch (e) {
+    console.error('Failed to send the autonomy reminder:', e.message);
+    return false;
+  }
+  send({
+    type: 'task_progress',
+    seq: nextSeq(),
+    task_id: currentTask.task_id,
+    task_gen: currentTask.task_gen,
+    status: 'working',
+    summary: 'Agent asked a question with no human attached; reminded it to proceed autonomously',
+    tmux_output: tmuxLines,
+    ...progressModelFields(),
+  });
+  return true;
+}
+
 function progressTick() {
   lastProgressTick = Date.now();
   if (!currentTask) return;
@@ -2023,9 +3044,14 @@ function progressTick() {
         // never wedge the whole contributor.
         givenUpTasks.set(key, Date.now());
         cliRestartCounts.delete(key);
+        // skipCLI: this branch's premise is that the CLI process is ALREADY
+        // gone (probeCLIPresence confirmed it), and the relaunch that follows
+        // is this path's own. There is no live turn to interrupt, so quitting
+        // here would only send Ctrl-Cs at a bare shell and then race the
+        // relaunch below. The token is dropped regardless (#5353).
         failCurrentTask(
           `CLI process exited ${MAX_TASK_CLI_RESTARTS} times for ${key} — giving up on this task (relay still accepting other work)`,
-          { permanent: true }
+          { permanent: true, skipCLI: true }
         );
         // Bring the CLI back so the next, different task can run.
         try { console.log(`CLI restarted: ${relaunchCLI()}`); } catch (e) { console.error('Failed to restart CLI:', e.message); }
@@ -2041,7 +3067,9 @@ function progressTick() {
         console.error('Failed to restart CLI:', e.message);
       }
       // environment: the agent CLI process died; nothing was judged about the work.
-      failCurrentTask('CLI process exited — restarted', { kind: 'environment' });
+      // skipCLI for the same reason as the give-up branch above — the process
+      // is gone and the relaunch just above is this path's own (#5353).
+      failCurrentTask('CLI process exited — restarted', { kind: 'environment', skipCLI: true });
       return;
     }
     // A pane sitting at a shell is never evidence that the AGENT finished: the
@@ -2062,8 +3090,54 @@ function progressTick() {
 
   const paneState = checkTmuxPaneState();
   const tmuxLines = captureTmuxLines(TMUX_TAIL_LINES);
-  if (paneState === PANE_STATE_IDLE_COMPLETE) {
-    console.log(`Task ${currentTask.task_id} completed — agent idle`);
+
+  // #5321: forward progress renews the max-duration lease. Recorded here,
+  // before any branch below can return, so EVERY pane state gets the credit —
+  // an agent stepping through blocked_on_human or a retried API error is still
+  // visibly alive, and none of those states should burn down a deadline whose
+  // question is "is this thing moving at all". paneChangedSince() is a pure
+  // read of the fingerprint clock paneStalled() maintains; the stall detector
+  // below still does its own recording, unaffected.
+  if (paneChangedSince(tmuxLines)) armTaskProgressLease();
+
+  // #5376: the agent's own completion sentinel, read BEFORE the pane state is
+  // consulted, because it — not the chrome — is what now decides the task is
+  // done. Both HIVE_VERDICT: complete and HIVE_VERDICT: no_work_needed count.
+  //
+  // Read from the already-captured tmuxLines: no second pane read, so the
+  // destructive paneStalled() fingerprint (#5333) is untouched.
+  const completionVerdict = detectCompletionVerdict(tmuxLines);
+
+  // Chrome-idle grace (#5376). classifyTmuxPane() saying IDLE_COMPLETE is now
+  // only a hint; it must repeat across CHROME_IDLE_GRACE_TICKS ticks before it
+  // may end a task on its own. A verdict short-circuits the wait entirely.
+  const idleWithoutVerdict = paneState === PANE_STATE_IDLE_COMPLETE && !completionVerdict;
+  const chromeIdleGraceElapsed = recordChromeIdleTick(idleWithoutVerdict);
+
+  // A verdict ends the task from ANY pane state. This is the point of the
+  // change: an agent that says it is finished is finished, whatever its CLI
+  // chose to render around the statement. It is precisely the case the
+  // thirteen chrome issues kept getting wrong from the other side — a real
+  // completion the classifier read as WORKING (#4127, #4181, #4259) and the
+  // stall backstop then failed with the PR already open.
+  //
+  // The two error states are excluded, and deliberately: a pane showing an
+  // authorization refusal or a truncated retryable response has NOT completed,
+  // and a stale verdict line still on screen from earlier in the transcript
+  // must not launder that into a success. Those branches below own those panes.
+  const apiErrorState = paneState === PANE_STATE_TRANSIENT_API_ERROR ||
+    paneState === PANE_STATE_UNKNOWN_API_ERROR ||
+    paneState === PANE_STATE_FATAL_API_ERROR;
+  const verdictCompletes = !!completionVerdict && !apiErrorState;
+
+  if (verdictCompletes || (paneState === PANE_STATE_IDLE_COMPLETE && chromeIdleGraceElapsed)) {
+    // How this task ended, recorded so the hub and the operator can tell the
+    // trustworthy signal from the fallback — and so per-backend sentinel
+    // non-compliance is measurable rather than guessed at.
+    const completionSignal = verdictCompletes ? 'verdict' : 'chrome_idle';
+    console.log(`Task ${currentTask.task_id} completed — signal=${completionSignal}` +
+      (verdictCompletes ? ` (HIVE_VERDICT: ${completionVerdict.verdict})` : ` (pane idle for ${chromeIdleTicks} consecutive checks, no verdict emitted)`));
+    resetChromeIdleGrace();
     // Successful completion clears this work item's crash-retry budget.
     cliRestartCounts.delete(taskKey(currentTask));
     // Best-effort: report the PR the agent opened, if one is visible in its
@@ -2075,13 +3149,40 @@ function progressTick() {
     // #3987: only report a no_work_needed verdict when no PR was shipped — a
     // visible PR contradicts "nothing shippable" (the hub would override the
     // claim with "shipped" anyway).
-    const noWork = prURL ? null : detectNoWorkVerdict(tmuxLines);
+    const noWork = prURL || !completionVerdict || completionVerdict.verdict !== HIVE_VERDICT_NO_WORK
+      ? null
+      : completionVerdict;
     if (noWork) console.log(`Detected no_work_needed verdict for ${currentTask.task_id}: ${noWork.reason || '(no reason)'}`);
-    send({ type: 'task_complete', seq: nextSeq(), task_id: currentTask.task_id, task_gen: currentTask.task_gen, result: 'completed', summary: noWork ? 'Agent returned to idle (reported no_work_needed)' : 'Agent returned to idle', tmux_output: tmuxLines, pr_url: prURL, verdict: noWork ? noWork.verdict : undefined, verdict_reason: noWork ? noWork.reason : undefined });
+    // Cause B (#5353). "Idle" here is a verdict read off the pane's rendering
+    // chrome, and it is wrong often enough to have produced thirteen separate
+    // issues. When it is wrong, the agent is still mid-turn — and reporting
+    // task_complete makes the hub revoke the lease, book the cooldown, and
+    // offer the issue to somebody else while that turn keeps running in this
+    // pane on this token. Stopping the CLI and dropping the credential here
+    // makes the misread cost a retry instead of a duplicate PR.
+    //
+    // Note the ordering against `send` below: the agent is stopped BEFORE the
+    // hub is told, so at the instant the hub acts on the completion the claim
+    // is already true. tmuxLines was captured above, so the evidence the hub
+    // receives is still the agent's own output and not launch chrome.
+    //
+    // bob is exempt from the quit half: it is not a persistent REPL and has
+    // already exited at the end of its turn, so the pane is a bare shell and
+    // there is nothing to interrupt — sending Ctrl-C at that shell and then
+    // racing the bob-specific relaunch below is how a pane ends up with two
+    // launches in flight. Its credential is still dropped.
+    const bobAlreadyExited = BACKEND === 'bob' && !bobIsRunning();
+    stopAgentForTaskExit({ skipCLI: bobAlreadyExited });
+    const completionSummary = noWork
+      ? 'Agent returned to idle (reported no_work_needed)'
+      : (verdictCompletes
+        ? 'Agent reported the task complete (HIVE_VERDICT)'
+        : `Agent returned to idle (no verdict emitted; pane idle for ${CHROME_IDLE_GRACE_TICKS} consecutive checks)`);
+    send({ type: 'task_complete', seq: nextSeq(), task_id: currentTask.task_id, task_gen: currentTask.task_gen, result: 'completed', summary: completionSummary, tmux_output: tmuxLines, pr_url: prURL, completion_signal: completionSignal, verdict: noWork ? noWork.verdict : undefined, verdict_reason: noWork ? noWork.reason : undefined });
     // bob exits after each turn, so the pane is now a bare shell. Bring it
     // back up before the next task, or the prompt would be typed into bash
     // ("-bash: <prompt>: command not found") and silently lost.
-    if (BACKEND === 'bob' && !bobIsRunning()) {
+    if (bobAlreadyExited) {
       try {
         // relaunchCLI() clears cliReady and re-arms the readiness callback,
         // which flushes any queued prompt once the CLI is confirmed up.
@@ -2110,7 +3211,27 @@ function progressTick() {
     } else {
       send({ type: 'ready', seq: nextSeq() });
     }
+  } else if (paneState === PANE_STATE_IDLE_COMPLETE) {
+    // Idle chrome, no verdict, grace not yet elapsed (#5376). Report progress
+    // and wait — this is the tick or two in which a momentary misread (a
+    // duration summary printed mid-turn, a status row between tool calls)
+    // resolves itself by the pane simply carrying on.
+    //
+    // This branch MUST exist ahead of the stall backstop below rather than
+    // falling into it. An idle pane is byte-for-byte identical frame to frame,
+    // so the stall detector would accumulate against it and eventually hand the
+    // task back as an `environment` failure — a finished task reported as a
+    // failure, which is exactly the #4127/#4182 shape and strictly worse than
+    // the false completion this change is removing. The grace counter above is
+    // the bound here; the stall clock is not.
+    console.log(`Task ${currentTask.task_id}: pane looks idle but no HIVE_VERDICT yet — ${chromeIdleTicks}/${CHROME_IDLE_GRACE_TICKS} checks before completing on chrome alone`);
+    send({ type: 'task_progress', seq: nextSeq(), task_id: currentTask.task_id, task_gen: currentTask.task_gen, status: 'working', tmux_output: tmuxLines, ...progressModelFields() });
   } else if (paneState === PANE_STATE_BLOCKED_ON_HUMAN) {
+    // #5281: before reporting a blocked pane to a human who may not be there,
+    // see whether this is a question the agent was already told to answer
+    // itself. At most once per task; everything below is unchanged and is what
+    // runs on every later tick.
+    if (maybeSendAutonomyNudge(tmuxLines)) return;
     console.warn(`Task ${currentTask.task_id} is blocked waiting for human input`);
     send({
       type: 'task_progress',
@@ -2123,6 +3244,26 @@ function progressTick() {
       tmux_output: tmuxLines,
       ...progressModelFields(),
     });
+  } else if (paneState === PANE_STATE_TRANSIENT_API_ERROR) {
+    handleTransientAPIError(tmuxLines);
+  } else if (paneState === PANE_STATE_UNKNOWN_API_ERROR) {
+    // Instrumentation first (#5121): log the exact line the curated lists
+    // could not name, so the lists can be grown from real occurrences. Then
+    // the bounded transient path — retry up to the budget, honest environment
+    // failure after it, blocked_on_human if someone is attached. Shared budget
+    // and cooldown with the transient state: it is the same task either way.
+    console.warn(`Unrecognised API error (kubestellar/hive#5121) — treating as transient: ` +
+      `${paneUnknownAPIErrorLine(tmuxLines.join('\n')) || '(line scrolled away)'}`);
+    handleTransientAPIError(tmuxLines);
+  } else if (paneState === PANE_STATE_FATAL_API_ERROR) {
+    // No retry: an authorization refusal or an exhausted quota cannot be cleared
+    // by repeating the request (#4400, #4583). Hand the task back honestly so the
+    // hub records it and can re-offer it once an operator fixes the cause —
+    // rather than claiming a completion that shipped nothing.
+    failCurrentTask(
+      'agent stopped on an API failure a retry cannot clear (authorization or quota)',
+      { kind: 'environment' }
+    );
   } else {
     // Stall backstop: a pane frozen this long is not evidence of work, and
     // continuing to report "working" would renew the hub's lease forever.
@@ -2145,12 +3286,11 @@ function progressTick() {
       // a live CLI that cancels the turn without exiting, and the launch command
       // is then typed into the CLI as a chat prompt — #2203 again, and worse here
       // because the "prompt" is a shell command an agent may simply run.
-      quitLiveCLI();
-      try {
-        console.log(`Relaunching ${BACKEND} after a confirmed pane stall: ${relaunchCLI()}`);
-      } catch (e) {
-        console.error('Failed to relaunch after a confirmed pane stall:', e.message);
-      }
+      //
+      // Now done by failCurrentTask via stopAgentForTaskExit (#5353), which
+      // adds the credential unlink ahead of the interrupt and captures the
+      // stalled pane as evidence BEFORE the relaunch overwrites it — this path
+      // previously reported the launch chrome as the failure's tmux_output.
       failCurrentTask(
         `no pane activity for ${Math.round(PANE_STALL_TIMEOUT_MS / 60000)}+ minutes, confirmed over ${PANE_STALL_CONFIRM_TICKS} checks — the agent CLI is not visibly working`,
         { kind: 'environment' }
@@ -2181,6 +3321,9 @@ function handleMessage(data, hub) {
         seq: nextSeq(),
         registration_token: hub.regToken,
         cli_backend: BACKEND,
+        // Pi derives this evidence from the canonical provider/model input. It
+        // remains advisory and is never used by the hub to route work.
+        provider: effectiveProvider() || undefined,
         // #4117: AGENT_MODEL if set, else the model detected from the CLI's
         // own session transcript, else '' (today's degrade for backends with
         // no known transcript format).
@@ -2293,7 +3436,15 @@ function handleMessage(data, hub) {
         injectGhToken(msg.github_token);
         tokenExpiresAt = msg.token_expires_at ? new Date(msg.token_expires_at).getTime() : null;
       }
-      fs.writeFileSync(TASK_FILE, JSON.stringify(msg, null, 2));
+      // TASK_FILE is observability/debug state with no reader that needs the
+      // credential; the live token's one legitimate on-disk home is the 0600
+      // GH_TOKEN_CACHE written by injectGhToken above. Strip it and keep the
+      // file owner-only (chmod covers overwriting a pre-existing 0644 file)
+      // so a task-scoped GitHub token never sits world-readable under /tmp
+      // (kubestellar/hive#5065).
+      const { github_token: _omittedToken, ...taskFileRecord } = msg;
+      fs.writeFileSync(TASK_FILE, JSON.stringify(taskFileRecord, null, 2), { mode: 0o600 });
+      try { fs.chmodSync(TASK_FILE, 0o600); } catch (_) { /* content is already token-free */ }
       send({ type: 'task_accepted', seq: nextSeq(), task_id: msg.task_id, task_gen: msg.task_gen });
       if (CONTRIBUTOR_MODE === MODE_HEADLESS) {
         // Non-interactive path (kubestellar/hive#2538): drive a one-shot CLI
@@ -2334,17 +3485,33 @@ function handleMessage(data, hub) {
       currentTask = null;
       taskAssignedAt = 0;
       if (progressInterval) { clearInterval(progressInterval); progressInterval = null; }
-      // Headless mode: kill the in-flight one-shot child so the revoked task's
-      // process does not keep running (and holding the credential) after the
-      // hub took the work back.
-      if (CONTRIBUTOR_MODE === MODE_HEADLESS && headlessChild) {
-        try { headlessChild.kill('SIGKILL'); } catch (_) {}
-        headlessChild = null;
-        writeHeadlessStatus(HEADLESS_STATE_WAITING);
+      // The max-duration lease dies with the task it bounds. Previously leaked
+      // here — harmless only because the callback guards on currentTask, so a
+      // revoke followed by a NEW task within the window would have had the old
+      // timer fire against the new task's assignment. startProgressReporting()
+      // re-arms it, which masked this; clearing it makes the lifecycle explicit
+      // and matches every other task-exit path (#5321).
+      if (taskTimeoutHandle) { clearTimeout(taskTimeoutHandle); taskTimeoutHandle = null; }
+      // Stop the agent and drop its credential. This is the sequence
+      // stopAgentForTaskExit() was factored out of (#5353): the token is
+      // unlinked BEFORE the interrupt so a surviving turn cannot keep using
+      // it; two Ctrl-C events are required because one cancels a Claude/Codex/
+      // Pi turn but leaves the CLI alive; relaunchCLI gates ready on a clean
+      // prompt; and in headless mode the in-flight one-shot child is killed
+      // instead, so the revoked task's process does not keep running.
+      if (CONTRIBUTOR_MODE !== MODE_HEADLESS) {
+        // Set before the stop: the relaunch's readiness callback consumes this
+        // latch to re-advertise availability, and it is only meaningful if a
+        // relaunch actually happened — hence the unwind on failure.
+        readyAfterInteractiveRevoke = true;
       }
+      stopAgentForTaskExit({
+        reason: 'task revoke',
+        onRelaunchFailed: () => { readyAfterInteractiveRevoke = false; },
+      });
       // Stay with the hub that just revoked — it's clearly alive and reachable.
       activeHubIndex = hubs.indexOf(hub);
-      sendTo(hub, { type: 'ready', seq: nextSeq() });
+      if (CONTRIBUTOR_MODE === MODE_HEADLESS) sendTo(hub, { type: 'ready', seq: nextSeq() });
       break;
 
     case 'task_unavailable':
@@ -2395,6 +3562,47 @@ function handleMessage(data, hub) {
   }
 }
 
+// WebSocket close codes the relay can meaningfully name. Anything else is
+// reported by number rather than guessed at.
+const WS_CLOSE_CODE_NAMES = {
+  1000: 'normal closure',
+  1001: 'going away',
+  1002: 'protocol error',
+  1003: 'unsupported data',
+  1005: 'no status received',
+  1006: 'abnormal closure',
+  1008: 'policy violation',
+  1009: 'message too big',
+  1011: 'internal server error',
+  1012: 'service restart',
+  1013: 'try again later',
+  1015: 'TLS handshake failure',
+};
+
+// describeWsClose renders the close code and reason for the log line.
+//
+// THE GAP THIS FILLS (kubestellar/hive#5090): this handler used to ignore both
+// arguments and log only "closed. Reconnecting in 1000ms...", so a contributor
+// whose socket flapped every 30-90 seconds had no way to tell a deliberate
+// server hangup from a network drop — the two produce identical output, and the
+// backoff never grows past 1s because each reconnect succeeds, so even the delay
+// carries no signal.
+//
+// 1006 is called out explicitly because it is the one code that is never sent
+// on the wire: the `ws` library synthesises it when the connection died WITHOUT
+// a close frame. Seeing it means the socket was cut — by the network, a proxy,
+// or a peer calling close() without the courtesy frame — rather than closed
+// with a stated reason. That distinction is the whole diagnostic.
+function describeWsClose(code, reason) {
+  const text = reason === undefined || reason === null ? '' : String(reason).trim();
+  const name = WS_CLOSE_CODE_NAMES[code];
+  const label = name ? `code=${code} ${name}` : `code=${code}`;
+  if (code === 1006) {
+    return `${label} — no close frame; the socket was cut (network, proxy, or an abrupt peer close)`;
+  }
+  return text ? `${label}: ${text}` : label;
+}
+
 function connectHub(hub) {
   if (hub.reconnectTimer) { clearTimeout(hub.reconnectTimer); hub.reconnectTimer = null; }
   if (hub.heartbeatInterval) { clearInterval(hub.heartbeatInterval); hub.heartbeatInterval = null; }
@@ -2417,6 +3625,16 @@ function connectHub(hub) {
         return;
       }
       sendTo(hub, { type: 'ping', seq: nextSeq() });
+      // Also emit a PROTOCOL-level Ping control frame (kubestellar/hive#5090).
+      // The JSON ping above is an ordinary text frame; an L7 proxy that scores
+      // tunnel idleness on control-frame traffic does not count it, so a
+      // connection heartbeating every 30s was still reaped as idle — the
+      // frameless-1006 flap this issue measured. `ws` answers an inbound Ping
+      // with a Pong automatically, so the hub needs nothing extra to see this.
+      // Wrapped because ping() throws if the socket left OPEN between the
+      // readyState check and the call; the heartbeat-timeout check above stays
+      // the authority on when to give up.
+      try { hub.ws.ping(); } catch { /* socket already closing; close handler reconnects */ }
     }, HEARTBEAT_INTERVAL_MS);
   });
 
@@ -2425,9 +3643,23 @@ function connectHub(hub) {
     handleMessage(data.toString(), hub);
   });
 
-  hub.ws.on('close', () => {
+  // A PROTOCOL-level Pong counts as liveness exactly as the JSON 'pong' does
+  // (kubestellar/hive#5090), so a hub answering only control frames cannot trip
+  // this relay's HEARTBEAT_TIMEOUT_MS sweep. An inbound Ping is likewise
+  // evidence the hub is alive; `ws` auto-replies with a Pong for us.
+  hub.ws.on('pong', () => {
     if (gen !== hub.connectGeneration) return;
-    console.log(`Connection to ${hub.url} closed. Reconnecting in ${hub.reconnectDelay}ms...`);
+    hub.lastPong = Date.now();
+  });
+  hub.ws.on('ping', () => {
+    if (gen !== hub.connectGeneration) return;
+    hub.lastPong = Date.now();
+  });
+
+  hub.ws.on('close', (code, reason) => {
+    if (gen !== hub.connectGeneration) return;
+    console.log(`Connection to ${hub.url} closed (${describeWsClose(code, reason)}). ` +
+      `Reconnecting in ${hub.reconnectDelay}ms...`);
     if (hub.heartbeatInterval) { clearInterval(hub.heartbeatInterval); hub.heartbeatInterval = null; }
     hub.reconnectTimer = setTimeout(() => connectHub(hub), hub.reconnectDelay);
     hub.reconnectDelay = Math.min(hub.reconnectDelay * 2, MAX_RECONNECT_DELAY_MS);
@@ -2479,17 +3711,64 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     PANE_STATE_WORKING,
     PANE_STATE_BLOCKED_ON_HUMAN,
     PANE_STATE_IDLE_COMPLETE,
+    PANE_STATE_TRANSIENT_API_ERROR,
+    PANE_STATE_FATAL_API_ERROR,
+    PANE_STATE_UNKNOWN_API_ERROR,
+    paneUnknownAPIErrorLine,
+    paneShowsTransientAPIError,
+    paneShowsUnretryableAPIError,
+    paneShowsLoginRequiredError,
+    handleTransientAPIError,
+    resetTransientNudgeState,
+    classifyBlockedOnHumanReason,
+    BLOCKED_REASON_QUESTION,
+    BLOCKED_REASON_MENU,
+    BLOCKED_REASON_HUMAN_REQUIRED,
+    maybeSendAutonomyNudge,
+    resetAutonomyNudgeState,
+    AUTONOMY_NUDGE_MESSAGE,
+    tmuxSessionHasAttachedClient,
+    tmuxSessionHumanPresence,
+    HUMAN_PRESENCE_IDLE_MS,
+    TRANSIENT_API_ERROR_MAX_NUDGES,
+    TRANSIENT_API_ERROR_NUDGE_MESSAGE,
+    getTransientNudgeCount: () => transientNudgeCount,
+    __clearTransientNudgeCooldown: () => { lastTransientNudgeAt = 0; },
     // Run one progress tick with the grace period already elapsed.
     __crashTick: () => { taskAssignedAt = Date.now() - TASK_GRACE_PERIOD_MS - 1; progressTick(); },
     paneStalled,
     paneStallConfirmed,
+    paneChangedSince,
     resetPaneStallClock,
     PANE_STALL_CONFIRM_TICKS,
+    // Completion-signal surface (kubestellar/hive#5376).
+    CHROME_IDLE_GRACE_TICKS,
+    HIVE_VERDICT_COMPLETE,
+    HIVE_VERDICT_NO_WORK,
+    detectHiveVerdict,
+    detectCompletionVerdict,
+    recordChromeIdleTick,
+    resetChromeIdleGrace,
+    getChromeIdleTicks: () => chromeIdleTicks,
+    // Max-duration lease surface (kubestellar/hive#5321).
+    MAX_TASK_DURATION_MS,
+    ABSOLUTE_TASK_DEADLINE_MS,
+    HEADLESS_TASK_TIMEOUT_MS,
+    armTaskProgressLease,
+    onTaskProgressLeaseExpired,
+    getTaskTimeoutHandle: () => taskTimeoutHandle,
+    // Backdate the task-assignment clock so the absolute backstop can be
+    // crossed without waiting hours.
+    __ageTaskAssignedAt: (ms) => { if (taskAssignedAt) taskAssignedAt -= ms; },
+    setTaskAssignedAt: (v) => { taskAssignedAt = v; },
+    getTaskAssignedAt: () => taskAssignedAt,
     getStallConfirmCount: () => stallConfirmCount,
     launchCommandWithCwd,
     cliProcessLooksGone,
     paneForegroundCommand,
     quitLiveCLI,
+    stopAgentForTaskExit,
+    dropTaskCredential,
     CLI_GONE_CONFIRMATIONS,
     PANE_STALL_TIMEOUT_MS,
     // Backdate the stall clock so a test can cross the timeout without
@@ -2507,6 +3786,9 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     refreshDetectedModel,
     effectiveModel,
     progressModelFields,
+    effectiveProvider,
+    effectiveSelectionFields,
+    PI_SELECTION,
     __setDetectedModel: (v) => { detectedModel = v; },
     MAX_TASK_CLI_RESTARTS,
     setCliReady: (v) => { cliReady = v; },
@@ -2532,6 +3814,7 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     parseProtocolVersion,
     classifyPeerProtocol,
     warnOnProtocolDrift,
+    describeWsClose,
     // Headless (non-interactive) mode surface (kubestellar/hive#2538).
     CONTRIBUTOR_MODE,
     MODE_INTERACTIVE,
@@ -2545,6 +3828,11 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     buildHeadlessArgv,
     runHeadlessTask,
     getHeadlessChild: () => headlessChild,
+    // Attach-hint surface (kubestellar/hive#5145): the exact command the
+    // needs-authentication banner tells a human to paste.
+    ATTACH_COMMAND,
+    CONTAINER_NAME,
+    CONTAINER_RUNTIME,
     // Coverage for previously untested pure/isolated functions (#4267).
     redactTokens,
     detectNoWorkVerdict,
@@ -2569,6 +3857,13 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     __setGivenUp: (key, at) => { givenUpTasks.set(key, at); },
   };
 } else {
+  if (BACKEND === 'pi' && !PI_SELECTION.valid) {
+    console.error(`FATAL: ${PI_SELECTION.error}`);
+    if (CONTRIBUTOR_MODE === MODE_HEADLESS) {
+      writeHeadlessStatus(HEADLESS_STATE_FAILED, { result: 'failed', reason: PI_SELECTION.error });
+    }
+    process.exit(1);
+  }
   // Warm the capability cache BEFORE the first hub connection. detectCapabilities()
   // is called from the auth_challenge handler, and the hub bounds a handshake at
   // 30s (wsAuthTimeout); doing the probes here keeps every one of them — backend

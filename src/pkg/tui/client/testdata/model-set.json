@@ -1,0 +1,6 @@
+{
+  "ok": true,
+  "status": "model_set",
+  "agent": "review/team",
+  "model": "meta/llama-3.1"
+}

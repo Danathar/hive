@@ -1,42 +1,59 @@
 # AGENTS.md repo instructions
 
-> **⚠️ Parsed and tested, but NOT wired into kicks.** Hive ships a complete
-> `AGENTS.md` parser (`src/pkg/agentsmd`) and a call site that would prepend its
-> output to every kick prompt — but the call site is permanently disabled. The
-> single function that supplies it a repo checkout path,
-> `Scheduler.agentsRepoRoot()`, unconditionally returns `""`
-> (`src/pkg/scheduler/scheduler.go:1385-1390`), and `primeAgentsMd` treats an
-> empty root as "nothing to inject" (`scheduler.go:1394-1396`). **An `AGENTS.md`
-> file you add to a monitored repo today is never read by Hive and has no
-> effect on any agent's kick prompt.** This page documents the file format Hive
-> already understands, for when the wiring lands — not a feature you can rely
-> on to change agent behavior now.
+> **⚠️ Wired, but off unless you supply a checkout.** Hive ships a complete
+> `AGENTS.md` parser (`src/pkg/agentsmd`) and a call site that prepends its
+> output to every kick prompt. That call site used to be permanently disabled —
+> `Scheduler.agentsRepoRoot()` returned `""` unconditionally, so no `AGENTS.md`
+> was ever read. It now resolves a real per-repo checkout root
+> ([#5227](https://github.com/kubestellar/hive/issues/5227)), but Hive agents
+> work over the API and keep no clones, so **there is still no root unless you
+> configure one**. Set `project.checkouts_dir` (below). Without it, an
+> `AGENTS.md` you add to a monitored repo has no effect on any agent's prompt —
+> the same as before, and still the default.
 
-## Why it doesn't run today
+## Turning it on
 
 Hive agents work over the GitHub API — they do not keep a local git checkout of
-the repos they monitor. `agentsRepoRoot()` has no local path to hand back, so
-returning `""` is the deliberate, conservative choice rather than a bug. The
-comment on the function says so directly:
+the repos they monitor. So the file has to already be on the hive host, and you
+tell Hive where:
 
-> "Hive agents operate over GitHub rather than local clones, so this is
-> usually empty today; the hook exists so that when a checkout root becomes
-> available (e.g. a git source's `LocalDir`) the AGENTS.md convention is
-> honored without further wiring."
+```yaml
+project:
+  org: your-org
+  repos: [repo-one, repo-two]
+  primary_repo: repo-one
+  checkouts_dir: /data/checkouts   # repo-one is at /data/checkouts/repo-one
+```
 
-The one call site, in `Scheduler.buildKickForAgent`-adjacent code, is guarded
-and additive — it only prepends when `primeAgentsMd` returns non-empty text —
-and carries an explicit `TODO(agentsmd)` marking the missing piece: threading a
-per-repo checkout root through, and preferring `agentsmd.ParseNearest` for
-closest-wins nested files once file-level targeting exists
-(`scheduler.go:242-248`).
+Each repo is looked up at `<checkouts_dir>/<repo name>` — the bare name from
+`repos`, without the org — so a multi-repo hive gets each repo's own file and
+never another repo's. The kick reads the **primary repo's** `AGENTS.md`, since
+that is the repo the kick's instructions are about.
 
-This is the same shape as two other recently-documented gaps in Hive:
-[`enqueue-approval`](https://github.com/kubestellar/hive/issues/4911) and the
-[skill registry](skills.md) (`pkg/skillreg`) — a complete, tested package that
-nothing in the runtime calls yet.
+How you populate that directory is yours: a mounted volume, a sidecar that
+clones and pulls, an NFS export. Hive only reads it.
 
-## What Hive's parser supports (the format, once wired)
+One other source is used when it happens to be the same repo:
+`policies.local_dir`, the checkout of `policies.repo`, is a genuine checkout
+root that Hive already reads policy files from. If `policies.repo` names the
+repo being asked about, it supplies the root. It is ignored otherwise, so a
+config repo's `AGENTS.md` never leaks into work on an unrelated repo.
+`checkouts_dir` wins when both apply.
+
+Everything stays fail-open: an absent directory, a missing `AGENTS.md`, or a
+blank one all yield no injection and never fail a kick. When nothing is
+injected, the scheduler logs at debug which root came up empty — so a
+wired-but-empty repo is now distinguishable from an unconfigured hive, which it
+was not before.
+
+### Still deferred
+
+The call site keeps a `TODO(agentsmd)`, narrowed to its second half: preferring
+`agentsmd.ParseNearest` for closest-wins nested `AGENTS.md`. That needs
+file-level targeting — nothing on the kick path knows which *file* an agent will
+touch — so `Parse` (repo root only) is what runs.
+
+## What Hive's parser supports
 
 `src/pkg/agentsmd` (`agentsmd.go:119`, `Parse`) reads a plain Markdown
 `AGENTS.md` file at a repo root, with two additive extensions on top of
@@ -89,53 +106,52 @@ is the "body" — general instructions that would always apply
 `ParseNearest(repoRoot, relPath, logger)` (`agentsmd.go:127`) walks from a
 target file's directory up to the repo root and uses the first `AGENTS.md` it
 finds; the root file is the required baseline nested files override for their
-own subtree. This exists in the package today but has no caller — the
-scheduler's `TODO(agentsmd)` names it as the intended future entry point once
-file-level targeting exists; the disabled call in `scheduler.go` currently
-only ever calls the flat `Parse`, and even that call never runs because its
-root argument is always `""`.
+own subtree. This still has no caller: the scheduler's `TODO(agentsmd)` names
+it as the intended entry point once file-level targeting exists, and nothing on
+the kick path knows which file an agent will touch. The live call uses the flat
+`Parse` against the repo root.
 
-### Rendered injection text (if it ran)
+### Rendered injection text
 
-`AgentsConfig.InjectionText(requestedSkills)` (`agentsmd.go:330`) is what would
-be prepended to a kick: a `# Repository Agent Instructions (AGENTS.md)`
+`AgentsConfig.InjectionText(requestedSkills)` (`agentsmd.go:330`) is what gets
+prepended to a kick: a `# Repository Agent Instructions (AGENTS.md)`
 header, the body, and (if any skills resolve) a `## Requested Skills`
 subsection with each skill's text under a `### <name>` heading. It returns
 `""` — and therefore injects nothing — when both the body and the resolved
 skills are empty.
 
-## Parsing is tolerant, wiring is not the risk
+## Parsing is tolerant
 
 Everything about the *parser* is designed to fail safe: a missing file yields
 an empty, non-nil config (`agentsmd.go:171-174`); an unreadable file logs and
 returns empty (`agentsmd.go:175-178`); malformed front-matter logs and falls
-back to using the body alone. None of that tolerance is why the feature is
-inert today — the parser is simply never invoked, because `agentsRepoRoot()`
-never has anything to hand it.
+back to using the body alone. Combined with the guarded call site — which
+prepends only non-empty text — a bad `AGENTS.md` degrades to no injection
+rather than a failed kick.
 
 ## Connection to the skill registry
 
 The `skills:` front-matter key names skills by the same kind of identifier the
-[skill registry](skills.md) (`/data/skills/`, `pkg/skillreg`) would resolve —
-but the two systems are **separately unwired** from each other and from the
-runtime:
+[skill registry](skills.md) (`/data/skills/`, `pkg/skillreg`) resolves. There
+are two request paths with different precedence:
 
-- `pkg/agentsmd` can resolve a skill name to text from an inline `## Skill:`
-  section or a `skills/<name>.md` file **in the same repo** — this is
-  self-contained and does not consult the registry at all.
-- The skill registry is a **different, hive-wide** store, loaded and counted
-  on the dashboard but — per its own page — not delivered into any agent's
-  context either.
+- `pkg/agentsmd` resolves a skill name to text from an inline `## Skill:`
+  section or a `skills/<name>.md` file **in the same repo** — self-contained,
+  and it does not consult the registry at all.
+- An agent's own `skills:` config is resolved by `pkg/skillreg`: it checks the
+  **hive-wide** `/data/skills/` store first, then falls back to the primary
+  repo's inline or adjacent definition when that repo has a configured checkout.
+  Registry definitions therefore retain precedence when both sources use the
+  same name, while a missing checkout does not affect registry-only operation.
 
-Neither pipeline reaches a live kick prompt today. Don't read the shared
-`skills:` vocabulary as evidence that authoring one wires up the other; they
-are independent, parallel gaps.
+Both reach a live kick prompt. A repo's front-matter request stays self-contained
+inside `pkg/agentsmd`; registry precedence applies to names requested by the
+agent config through `pkg/skillreg.ResolveRequested`.
 
 ## What to read next
 
-- **[Skill registry](skills.md)** — the sibling not-yet-wired feature: file
-  format, where it's loaded from, and what "loaded and counted" actually means
-  today.
+- **[Skill registry](skills.md)** — the sibling injection path: file format,
+  where it's loaded from, and how an agent declares which skills it wants.
 - **[Agent configuration](agent-configuration.md)** — the `definition_source`
   and `channels`/`tools`/`connections` fields that *are* live.
 - **[ADR-0012: Skill registry](adr/0012-skill-registry.md)** — the design

@@ -95,6 +95,15 @@ text**, by two independent mechanisms:
 calls it at `src/pkg/agent/manager.go:4627`. This gate is the only thing that
 stops hive typing a new prompt on top of an in-flight response.
 
+The gate is bounded by `inputPromptTimeout` (120s), which is why operator kicks
+from the dashboard do **not** use `SendKick` directly. `SendKickAsync`
+(`src/pkg/agent/kick_async.go`) keeps the fast, deterministic preconditions
+synchronous and runs this gate plus the typing on a background goroutine, so the
+HTTP handler cannot outlive an ingress idle timeout and report a succeeding kick
+as a 504 failure (kubestellar/hive#5325). Delivery is deduplicated per agent, so
+a retried click cannot type the prompt twice. The governor's tick still calls
+`SendKick` synchronously — it has no proxy in front of it.
+
 **The pane poller.** `pollTmuxOutputForAgent`
 (`src/pkg/agent/manager.go:2847`) runs a `3 * time.Second` ticker
 (`src/pkg/agent/manager.go:2848`) for the agent's whole lifetime, diffing
@@ -634,3 +643,9 @@ and is otherwise behaviour-preserving.
 It does not say the RFC is infeasible, and it does not say it is worthwhile.
 Step 4 is where that judgement belongs, and it should be made with §5.1's fork
 named explicitly and Open question 3 answered.
+
+Step 3 — the handoff evaluation — is now written up separately in
+[Evaluating a handoff path for the re-entrant turn model](agent-turn-handoff.md).
+It re-checks §6.3's residuals against `v4`, and reports that §5.1's fork is no
+longer deferrable: the envelope it describes is handoff-able on the headless
+path only.

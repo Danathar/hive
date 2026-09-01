@@ -127,8 +127,17 @@ contribute-check-backend backend="claude":
       pi)
         if command -v pi &>/dev/null; then
           echo "Pi CLI detected ($(pi --version 2>&1 | head -1))"
-          echo "  Supports: Anthropic, OpenAI, Google, Ollama, and more"
-          echo "  Set provider: --provider anthropic --model claude-sonnet-4-6"
+          if [[ -z "${AGENT_MODEL:-}" ]]; then
+            echo "ERROR: Pi requires one canonical provider-qualified model."
+            echo "  export AGENT_MODEL=anthropic/claude-sonnet-4-6"
+            exit 1
+          fi
+          if ! PI_READINESS=$(node bin/pi-backend.js "${AGENT_MODEL}" 2>&1); then
+            echo "ERROR: ${PI_READINESS}"
+            exit 1
+          fi
+          echo "HIVE_BACKEND_READINESS=${PI_READINESS}"
+          echo "  Credential presence is reported as configured_unverified, never as proof of authentication."
         else
           echo "ERROR: Pi CLI not found. Install: curl -fsSL https://pi.dev/install.sh | sh"
           exit 1
@@ -162,21 +171,49 @@ contribute-check-backend backend="claude":
           echo "  Models: gemini-3.6-flash, claude-sonnet-4-6, gpt-oss-120b, and more"
           echo "  Set model: export AGENT_MODEL=gemini-3.6-flash-high"
           echo "  Effort:    export AGENT_REASONING_EFFORT=low|medium|high (agy needs --effort with --model)"
-          # agy signs in through an interactive Google OAuth flow (browser URL
-          # plus a pasted code) and offers no API-key mode, so run it on the
-          # HOST: a container cannot inherit the sign-in. Sign in once with a
-          # bare `agy` before starting the relay.
-          echo "  Sign in once interactively (run: agy) — agy's Google OAuth cannot be"
-          echo "  completed by an unattended container, so run this backend on the host:"
-          echo "    just contribute-hive agy local"
+          # agy has NO OS-level sandbox of its own (config/backends.conf's "no
+          # confinement mechanism at all" list) — Container is the only mode
+          # with any host boundary, and is now possible: src/Dockerfile.contributor
+          # installs the agy binary (#5048; it did not before). agy signs in
+          # through an interactive Google OAuth flow with no API-key mode, so
+          # sign in once — either on the host first (this recipe stages a
+          # signed-in ~/.gemini into the container) or interactively inside the
+          # container itself.
+          echo "  Recommended: sign in once (run: agy), then run this backend CONTAINERIZED:"
+          echo "    just contribute-hive agy"
+          echo "  Local mode has no sandbox for agy and REFUSES to launch unless you set"
+          echo "  HIVE_AGY_DANGEROUSLY_RUN_UNCONFINED=1, which runs agy directly against your"
+          echo "  host filesystem with no boundary at all — not recommended."
         else
           echo "ERROR: agy CLI not found. Install: https://antigravity.google/product/antigravity-cli"
           echo "  Homebrew: brew install --cask antigravity-cli"
           exit 1
         fi
         ;;
+      opencode)
+        if command -v opencode &>/dev/null; then
+          echo "opencode CLI detected ($(opencode --version 2>&1 | head -1))"
+          echo "  Provider-agnostic (75+ providers); set model: export AGENT_MODEL=provider/model"
+          echo "  Auth: run 'opencode auth login' — credential stored at ~/.local/share/opencode/auth.json"
+          echo "  opencode only runs in headless mode (CONTRIBUTOR_MODE=headless): 'opencode run' is its"
+          echo "  one-shot entry point and there is no interactive-tmux wiring for it."
+        else
+          echo "ERROR: opencode CLI not found. Install: https://opencode.ai/docs/"
+          exit 1
+        fi
+        ;;
+      kilo)
+        if command -v kilo &>/dev/null; then
+          echo "Kilo CLI detected ($(kilo --version 2>&1 | head -1))"
+          echo "  Headless only: kilo run <prompt> --model provider/model --format json --auto"
+          echo "  Set KILO_AUTH_CONTENT or KILO_API_KEY (optionally KILO_ORG_ID); do not mount Kilo config."
+        else
+          echo "ERROR: kilo CLI not found. Install @kilocode/cli: https://kilo.ai/docs/code-with-ai/platforms/cli"
+          exit 1
+        fi
+        ;;
       *)
-        echo "ERROR: Unknown backend '{{backend}}'. Supported: claude, copilot, goose, codex, pi, bob, agy, litellm"
+        echo "ERROR: Unknown backend '{{backend}}'. Supported: claude, copilot, goose, codex, pi, bob, agy, litellm, opencode, kilo"
         exit 1
         ;;
     esac
@@ -763,9 +800,32 @@ contribute-hive backend="" mode="docker": check-version
       echo "  then re-run: just contribute-hive bob"
       exit 1
     fi
+    if [[ "$BACKEND" == "pi" ]]; then
+      if ! PI_READINESS=$(node bin/pi-backend.js "${AGENT_MODEL:-}" 2>&1); then
+        echo "ERROR: ${PI_READINESS}"
+        echo "  export AGENT_MODEL=provider/model"
+        exit 1
+      fi
+      echo "HIVE_BACKEND_READINESS=${PI_READINESS}"
+      # This recipe runs in its own shell, so narrowing the environment does not
+      # alter the contributor's login shell. It does ensure both local relay/CLI
+      # launches and the container path can see only the selected provider's
+      # official credential variables.
+      while IFS= read -r name; do
+        if [[ -n "$name" ]]; then unset "$name"; fi
+      done < <(node bin/pi-backend.js --unselected-env-names "${AGENT_MODEL}")
+    fi
     echo "=== Hive Contributor Agent (ClankeR) ==="
     echo "Backend:  ${BACKEND}"
-    echo "Hub:      {{hive_hub}}"
+    # The SOURCED value, not {{hive_hub}}. `hive_hub := env("HIVE_HUB", …)` is
+    # resolved by just at PARSE time, from the environment just itself was
+    # started with — but HIVE_HUB arrives only when this recipe sources
+    # contributor.env above. Interpolating {{hive_hub}} here therefore printed
+    # the built-in default on every machine whose hub comes from the config
+    # file, i.e. every hosted spoke, while the relay connected somewhere else
+    # entirely. Same shape as the ${_HUB:-{{hive_hub}}} fallback contribute-setup
+    # already uses.
+    echo "Hub:      ${HIVE_HUB:-{{hive_hub}}}"
     echo "GitHub:   $(gh api user --jq '.login' 2>/dev/null || echo 'authenticated')"
     echo ""
 
@@ -796,49 +856,97 @@ contribute-hive backend="" mode="docker": check-version
       _local_truthy() {
         case "${1:-}" in 1|true|TRUE|yes|YES|on|ON) return 0 ;; *) return 1 ;; esac
       }
-      _LOCAL_WRITE_CONFINED=false
+      # Three postures, not two — an operator reading this banner needs to
+      # know which one they're actually getting:
+      #   sandboxed   — an OS-enforced filesystem boundary (claude/litellm's
+      #                 native sandbox, codex/copilot's own sandbox modes)
+      #   denylisted  — a command-name floor with NO filesystem boundary
+      #                 (opencode's permission.bash denials); real, but not a
+      #                 sandbox, and saying "confined" here would be exactly
+      #                 the overclaim #4918 is about
+      #   unconfined  — nothing at all unless the operator opted in
+      _LOCAL_POSTURE="unconfined"
       case "$BACKEND" in
         claude|litellm)
           if ! _local_truthy "${HIVE_CLAUDE_DANGEROUSLY_BYPASS_APPROVALS_AND_SANDBOX:-}"; then
-            _LOCAL_WRITE_CONFINED=true
+            _LOCAL_POSTURE="sandboxed"
           fi
           ;;
         codex)
           if ! _local_truthy "${HIVE_CODEX_DANGEROUSLY_BYPASS_APPROVALS_AND_SANDBOX:-}"; then
-            _LOCAL_WRITE_CONFINED=true
+            _LOCAL_POSTURE="sandboxed"
+          fi
+          ;;
+        copilot)
+          if ! _local_truthy "${HIVE_COPILOT_DANGEROUSLY_BYPASS_SANDBOX:-}" \
+              && copilot --help 2>&1 | grep -qe '--sandbox'; then
+            _LOCAL_POSTURE="sandboxed"
+          fi
+          ;;
+        opencode)
+          if ! _local_truthy "${HIVE_OPENCODE_DANGEROUSLY_ALLOW_HOST_STATE:-}" \
+              && command -v jq >/dev/null 2>&1; then
+            _LOCAL_POSTURE="denylisted"
           fi
           ;;
       esac
-      if [[ "$_LOCAL_WRITE_CONFINED" == "true" ]]; then
-        echo "🔒 LOCAL MODE — workspace write confinement is enabled for ${BACKEND}."
-        echo ""
-        echo "    The CLI still runs as $(id -un) on this machine, but commands and"
-        echo "    file edits may write only under the agent state directory and"
-        echo "    ${HIVE_WORKSPACE_DIR:-$HOME/workspace}."
-        if [[ "$BACKEND" == "claude" || "$BACKEND" == "litellm" ]]; then
-          echo "    Claude's native sandbox is mandatory: startup fails rather than"
-          echo "    falling back unconfined when its OS sandbox is unavailable."
-        fi
-        echo ""
-        echo "    Container mode remains the stronger backend-independent boundary:"
-        echo "      just contribute-hive ${BACKEND}"
-        echo ""
-      else
-        echo "⚠️  LOCAL MODE — the agent is NOT confined to a workspace."
-        echo ""
-        echo "    The backend CLI runs as $(id -un) on this machine, with permission"
-        echo "    prompts bypassed. It can read and write anything your user can,"
-        echo "    including files outside ${HIVE_WORKSPACE_DIR:-$HOME/workspace}."
-        echo "    Assigned repos are third-party code and their test suites run for real."
-        echo ""
-        echo "    Still constrained: supported host-state commands are denied, and no"
-        echo "    agent receives a GitHub token or pushes directly."
-        echo "    NOT constrained: everything else your user can reach."
-        echo ""
-        echo "    For a confined agent, drop 'local' and use container mode:"
-        echo "      just contribute-hive ${BACKEND}"
-        echo ""
-      fi
+      case "$_LOCAL_POSTURE" in
+        sandboxed)
+          echo "🔒 LOCAL MODE — workspace write confinement is enabled for ${BACKEND}."
+          echo ""
+          echo "    The CLI still runs as $(id -un) on this machine, but commands and"
+          echo "    file edits may write only under the agent state directory and"
+          echo "    ${HIVE_WORKSPACE_DIR:-$HOME/workspace}."
+          if [[ "$BACKEND" == "claude" || "$BACKEND" == "litellm" ]]; then
+            echo "    Claude's native sandbox is mandatory: startup fails rather than"
+            echo "    falling back unconfined when its OS sandbox is unavailable."
+          elif [[ "$BACKEND" == "copilot" ]]; then
+            echo "    Copilot's own --sandbox flag (OS-enforced: Seatbelt on macOS,"
+            echo "    bubblewrap on Linux) provides the boundary."
+          fi
+          echo ""
+          echo "    Container mode remains the stronger backend-independent boundary:"
+          echo "      just contribute-hive ${BACKEND}"
+          echo ""
+          ;;
+        denylisted)
+          echo "🟡 LOCAL MODE — ${BACKEND} is NOT filesystem-confined, but named"
+          echo "    host-state commands are denied."
+          echo ""
+          echo "    opencode has no OS sandbox and no filesystem write-allowlist. The"
+          echo "    same command family the claude deny-list covers (sudo, pkexec,"
+          echo "    rpm-ostree, bootc, ...) is denied via opencode's own permission"
+          echo "    config, but this is a command-name floor, not a boundary: anything"
+          echo "    not on that list, and anything reached another way, is unconstrained."
+          echo ""
+          echo "    Container mode remains the stronger backend-independent boundary:"
+          echo "      just contribute-hive ${BACKEND}"
+          echo ""
+          ;;
+        *)
+          echo "⚠️  LOCAL MODE — the agent is NOT confined to a workspace."
+          echo ""
+          echo "    The backend CLI runs as $(id -un) on this machine, with permission"
+          echo "    prompts bypassed. It can read and write anything your user can,"
+          echo "    including files outside ${HIVE_WORKSPACE_DIR:-$HOME/workspace}."
+          echo "    Assigned repos are third-party code and their test suites run for real."
+          echo ""
+          if [[ "$BACKEND" == "claude" || "$BACKEND" == "litellm" || "$BACKEND" == "codex" || "$BACKEND" == "copilot" ]]; then
+            echo "    Still constrained: supported host-state commands are denied, and no"
+            echo "    agent receives a GitHub token or pushes directly."
+            echo "    NOT constrained: everything else your user can reach."
+          else
+            echo "    ${BACKEND} has no sandbox, filesystem allowlist, or command deny-list"
+            echo "    hive can wire on this path — nothing stands between the agent and"
+            echo "    anything your user can reach. No agent receives a GitHub token or"
+            echo "    pushes directly, but that is the only guardrail left."
+          fi
+          echo ""
+          echo "    For a confined agent, drop 'local' and use container mode:"
+          echo "      just contribute-hive ${BACKEND}"
+          echo ""
+          ;;
+      esac
       TMUX_SESSION="hive-${BACKEND}-$(head -c 2 /dev/urandom | od -An -tx1 | tr -d ' ')"
       SCRIPT_DIR="$(pwd)/bin"
       RELAY="${SCRIPT_DIR}/contributor-relay.sh"
@@ -901,6 +1009,24 @@ contribute-hive backend="" mode="docker": check-version
         claude|litellm)
           PERM_FLAG=$(claude_family_local_perm_flag_shell)
           ;;
+        copilot)
+          PERM_FLAG=$(copilot_local_perm_flag_shell)
+          ;;
+        opencode)
+          PERM_FLAG=$(opencode_local_perm_flag_shell)
+          ;;
+        codex)
+          PERM_FLAG=$(backend_perm_flag_shell "$BACKEND" 2>/dev/null || echo "")
+          ;;
+        goose|agy|bob|pi|aider|kilo)
+          # No sandbox, filesystem allowlist, or command deny-list exists for
+          # any of these six (see the "no confinement mechanism at all"
+          # block in backends.conf) — refuse to launch unconfined by
+          # default rather than silently grant full host access (#4918).
+          if ! PERM_FLAG=$(unconfined_local_perm_flag_shell "$BACKEND"); then
+            exit 1
+          fi
+          ;;
         *)
           PERM_FLAG=$(backend_perm_flag_shell "$BACKEND" 2>/dev/null || echo "")
           ;;
@@ -943,6 +1069,10 @@ contribute-hive backend="" mode="docker": check-version
         if [[ -n "${AGENT_MODEL:-}" ]]; then
           PERM_FLAG="${PERM_FLAG} --model ${AGENT_MODEL}"
         fi
+      elif [[ "$BACKEND" == "pi" ]]; then
+        # Same canonical selection used by the container entrypoint and every
+        # relay restart. %q keeps model IDs with shell metacharacters one argv.
+        PERM_FLAG="${PERM_FLAG:+${PERM_FLAG} }--model $(printf %q "$AGENT_MODEL")"
       fi
 
       # Create tmux session with the CLI.
@@ -1114,6 +1244,26 @@ contribute-hive backend="" mode="docker": check-version
           cp -a "$src" "$dst" 2>/dev/null || true
         fi
       }
+      # claude_staged_credential_usable <path> : can the container authenticate
+      # with the credential we just staged, without a human completing a login?
+      #
+      # Mirrors pkg/claude's ReadAccessToken rule — a claudeAiOauth block with a
+      # non-empty accessToken, not past its expiresAt — with ONE deliberate
+      # addition: an expired access token that still carries a refreshToken is
+      # treated as usable, because Claude Code refreshes it silently and no
+      # login prompt appears. Warning there would be crying wolf, and the
+      # refreshed token being discarded with the staging dir costs nothing,
+      # since the host's refreshToken still works on the next run.
+      #
+      # Without jq the check cannot run; stay silent rather than guess. Expiry is
+      # compared in milliseconds (what Claude Code writes) built from `date +%s`
+      # rather than %3N, which BSD/macOS date does not support.
+      claude_staged_credential_usable() {
+        local path="$1"
+        [ -f "$path" ] || return 1
+        command -v jq >/dev/null 2>&1 || return 0
+        jq -e --argjson now "$(( $(date +%s) * 1000 ))" '.claudeAiOauth as $o | (($o.accessToken // "") != "") and ((($o.expiresAt // 0) == 0) or (($o.expiresAt // 0) >= $now) or (($o.refreshToken // "") != ""))' "$path" >/dev/null 2>&1
+      }
       CLI_MOUNTS=""
       case "${BACKEND}" in
         claude)
@@ -1121,6 +1271,58 @@ contribute-hive backend="" mode="docker": check-version
           stage_copy "${HOME}/.config/claude-code" "claude-code"
           mkdir -p "${CLI_STAGE}/.claude" "${CLI_STAGE}/claude-code"
           CLI_MOUNTS="-v ${CLI_STAGE}/.claude:/home/dev/.claude${VOLSUF} -v ${CLI_STAGE}/claude-code:/home/dev/.config/claude-code${VOLSUF}"
+          # #5088: say so when the staged credential cannot authenticate.
+          #
+          # The container gets a COPY of ~/.claude in an ephemeral staging dir
+          # that the cleanup trap deletes on exit (see the H6/CWE-668 note
+          # above). That containment is deliberate and stays. What it also does,
+          # silently, is throw away a login performed INSIDE the container — so
+          # a contributor whose host credential has expired reaches the CLI's
+          # login menu, completes the whole browser flow, works for a session,
+          # and is back at the login menu on the next run with nothing to show
+          # for it. Reported in #5088 after exactly that sequence.
+          #
+          # Interactive: warn, and name the fix (log in on the HOST once, where
+          # the credential persists). Headless: fail, because there is no human
+          # to answer a login prompt and the pod would sit at it forever —
+          # #2538's "never wait silently" rule.
+          # ANTHROPIC_API_KEY is a complete alternative to the OAuth file: the
+          # provider-env block below forwards it into the container with -e, so a
+          # contributor authenticating that way needs no .credentials.json at all
+          # and must never be warned — let alone hard-failed in headless mode,
+          # which would refuse to start a run that would have worked. Checked here
+          # rather than at the forwarding site because the headless refusal exits
+          # long before that code is reached.
+          if [[ -z "${ANTHROPIC_API_KEY:-}" ]] && ! claude_staged_credential_usable "${CLI_STAGE}/.claude/.credentials.json"; then
+            if [[ "${CONTRIBUTOR_MODE:-}" == "headless" ]]; then
+              echo "ERROR: no usable Claude credential to stage into the container." >&2
+              echo "  A headless run has no way to complete a login prompt, so it would" >&2
+              echo "  sit at one indefinitely. Authenticate on this host first:" >&2
+              echo "" >&2
+              echo "      claude   # then /login, and quit once it reports you signed in" >&2
+              echo "" >&2
+              echo "  Then re-run this command." >&2
+              # The staging dir already holds a copy of ~/.claude, and the
+              # cleanup trap that would remove it is not registered until just
+              # before the container starts — exiting here without this rm would
+              # leave that credential copy sitting in /tmp indefinitely.
+              rm -rf "${CLI_STAGE}"
+              exit 1
+            fi
+            echo "⚠  No usable Claude credential was staged into the container."
+            echo ""
+            echo "    The CLI will come up at its login menu. You CAN log in there and it"
+            echo "    will work — but only for this run: the container writes to a throwaway"
+            echo "    copy of ~/.claude that is deleted when this command exits (#5088), so"
+            echo "    the next run starts from the login menu again."
+            echo ""
+            echo "    To log in once and keep it, quit this and run claude on the host:"
+            echo ""
+            echo "        claude   # then /login, and quit once it reports you signed in"
+            echo ""
+            echo "    then re-run: just contribute-hive ${BACKEND}"
+            echo ""
+          fi
           ;;
         copilot)
           if [ -d "${HOME}/.copilot" ]; then
@@ -1144,6 +1346,10 @@ contribute-hive backend="" mode="docker": check-version
         pi)
           if [ -d "${HOME}/.pi" ]; then
             stage_copy "${HOME}/.pi" ".pi"
+            # Keep only the selected provider's official auth/custom-provider
+            # entries in the ephemeral copy. The agent must not inherit keys for
+            # every provider merely because the host is signed into them.
+            node bin/pi-backend.js --stage "${AGENT_MODEL}" "${CLI_STAGE}/.pi"
             CLI_MOUNTS="-v ${CLI_STAGE}/.pi:/home/dev/.pi${VOLSUF}"
           fi
           # SECURITY (H6 / CWE-668) EXCEPTION: pi alone gets host networking.
@@ -1167,21 +1373,73 @@ contribute-hive backend="" mode="docker": check-version
           # was a silent no-op. Stage whichever is present (legacy first-run
           # installs may still use the old path) so neither layout is dropped.
           #
-          # Staging state is NOT the same as staging a session: agy authenticates
-          # through an interactive Google OAuth flow and keeps no credential file
-          # under HOME that a container can inherit (verified on 1.1.13 — a clean
-          # container asks for a browser login regardless of what is mounted).
-          # The /contribute page therefore offers agy in HOST mode only.
-          if [ -d "${HOME}/.gemini/antigravity-cli" ]; then
-            stage_copy "${HOME}/.gemini/antigravity-cli" "antigravity-cli"
-            CLI_MOUNTS="-v ${CLI_STAGE}/antigravity-cli:/home/dev/.gemini/antigravity-cli${VOLSUF}"
+          # CORRECTION (#5048): an earlier version of this comment claimed agy
+          # "keeps no credential file under HOME that a container can inherit."
+          # That was wrong. agy DOES persist OAuth state under ${HOME}/.gemini —
+          # ${HOME}/.gemini/oauth_creds.json (with a refresh_token, not just a
+          # short-lived access_token) and ${HOME}/.gemini/google_accounts.json —
+          # but as SIBLINGS of antigravity-cli/, one level up from what this
+          # recipe staged. Staging only antigravity-cli/ mounted agy's state
+          # directory (conversations, cache, settings) while silently omitting
+          # both credential files, so a "clean container asks for a browser
+          # login regardless of what is mounted" was actually observing an
+          # incomplete mount, not an absence of inheritable credentials. Stage
+          # the whole ${HOME}/.gemini directory so the credential files travel
+          # alongside the state dir.
+          #
+          # This still does NOT make agy's headless/unattended container
+          # authentication a verified path: whether a mounted refresh_token
+          # actually re-authenticates a headless agy (vs. agy consulting an OS
+          # keyring/Secret Service in some auth modes — the binary links
+          # go-keyring) has not been confirmed end-to-end. Treat a mounted
+          # ${HOME}/.gemini as "gives agy in the container the best chance of
+          # inheriting a signed-in session," not as a guarantee. If the mount
+          # is insufficient, sign in interactively inside the container once
+          # (same `agy` interactive OAuth flow as on a host).
+          #
+          # H6 (CWE-668) is unaffected: this stages into the same ephemeral,
+          # 0700, cleanup_container-destroyed staging dir as every other
+          # backend below, not the host's real ${HOME}/.gemini. A poisoned
+          # agent still cannot write back to the host's real credentials.
+          if [ -d "${HOME}/.gemini" ]; then
+            stage_copy "${HOME}/.gemini" ".gemini"
+            CLI_MOUNTS="-v ${CLI_STAGE}/.gemini:/home/dev/.gemini${VOLSUF}"
           elif [ -d "${HOME}/.antigravitycli" ]; then
             stage_copy "${HOME}/.antigravitycli" ".antigravitycli"
             CLI_MOUNTS="-v ${CLI_STAGE}/.antigravitycli:/home/dev/.antigravitycli${VOLSUF}"
           fi
           ;;
+        opencode)
+          # opencode auth login writes a credential file (not an interactive
+          # per-session OAuth flow like agy), so it CAN inherit a signed-in
+          # session via a mount — stage it if present.
+          if [ -d "${HOME}/.local/share/opencode" ]; then
+            stage_copy "${HOME}/.local/share/opencode" "opencode"
+            CLI_MOUNTS="-v ${CLI_STAGE}/opencode:/home/dev/.local/share/opencode${VOLSUF}"
+          fi
+          ;;
       esac
       CONTAINER_NAME="hive-contributor-${BACKEND}-$(head -c 4 /dev/urandom | od -An -tx1 | tr -d ' ')"
+      # Pi receives ONLY the selected provider's official credential variables.
+      # A contributor may have keys for several providers in their shell; handing
+      # all of them to an unconfined agent would violate least privilege and make
+      # provider selection observable through unrelated secrets (#5039).
+      PROVIDER_ENV_ARGS=()
+      add_provider_env() {
+        local name="$1"
+        # Docker/Podman resolve a name-only --env from this process. The secret
+        # value therefore never appears in the runtime command's argv.
+        if [[ -n "${!name:-}" ]]; then PROVIDER_ENV_ARGS+=("-e" "${name}"); fi
+      }
+      if [[ "$BACKEND" == "pi" ]]; then
+        while IFS= read -r name; do
+          if [[ -n "$name" ]]; then add_provider_env "$name"; fi
+        done < <(node bin/pi-backend.js --env-names "${AGENT_MODEL}")
+      else
+        for name in ANTHROPIC_API_KEY OPENAI_API_KEY GOOGLE_API_KEY GOOSE_API_KEY GOOSE_PROVIDER GOOSE_MODEL BOBSHELL_API_KEY HIVE_LITELLM_ENDPOINT HIVE_LITELLM_API_KEY KILO_AUTH_CONTENT KILO_CONFIG_CONTENT KILO_API_KEY KILO_ORG_ID; do
+          add_provider_env "$name"
+        done
+      fi
       # NOTE: deliberately NOT --rm. With --rm the runtime deletes the
       # container the instant it exits, taking its logs with it — so a
       # container that dies during startup leaves nothing to diagnose
@@ -1207,17 +1465,11 @@ contribute-hive backend="" mode="docker": check-version
         -e GH_TOKEN="${GH_TOKEN:-}" \
         -e HIVE_USE_CONTRIBUTOR_GH=true \
         -e HIVE_CONTAINER_NAME="${CONTAINER_NAME}" \
-        ${ANTHROPIC_API_KEY:+-e ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY}"} \
-        ${GOOGLE_API_KEY:+-e GOOGLE_API_KEY="${GOOGLE_API_KEY}"} \
-        ${GOOSE_API_KEY:+-e GOOSE_API_KEY="${GOOSE_API_KEY}"} \
-        ${GOOSE_PROVIDER:+-e GOOSE_PROVIDER="${GOOSE_PROVIDER}"} \
-        ${GOOSE_MODEL:+-e GOOSE_MODEL="${GOOSE_MODEL}"} \
-        ${OPENAI_API_KEY:+-e OPENAI_API_KEY="${OPENAI_API_KEY}"} \
-        ${BOBSHELL_API_KEY:+-e BOBSHELL_API_KEY="${BOBSHELL_API_KEY}"} \
-        ${HIVE_LITELLM_ENDPOINT:+-e HIVE_LITELLM_ENDPOINT="${HIVE_LITELLM_ENDPOINT}"} \
-        ${HIVE_LITELLM_API_KEY:+-e HIVE_LITELLM_API_KEY="${HIVE_LITELLM_API_KEY}"} \
+        -e HIVE_CONTAINER_RUNTIME="${RUNTIME}" \
+        "${PROVIDER_ENV_ARGS[@]}" \
         ${AGENT_MODEL:+-e AGENT_MODEL="${AGENT_MODEL}"} \
         ${AGENT_REASONING_EFFORT:+-e AGENT_REASONING_EFFORT="${AGENT_REASONING_EFFORT}"} \
+        ${CONTRIBUTOR_MODE:+-e CONTRIBUTOR_MODE="${CONTRIBUTOR_MODE}"} \
         {{hive_image}} > /dev/null
 
       echo "Container: ${CONTAINER_NAME}"
@@ -1316,15 +1568,34 @@ contribute-hive backend="" mode="docker": check-version
 contribute-status:
     #!/usr/bin/env bash
     set -euo pipefail
-    HUB_HTTP=$(echo "{{hive_hub}}" | sed 's|^wss://|https://|;s|^ws://|http://|;s|/contribute$||')
-    echo "=== Hub Status ==="
-    curl -sf "${HUB_HTTP}/api/contribute/status" 2>/dev/null | jq . || echo "Hub unreachable at ${HUB_HTTP}"
+    # Resolve the hub from contributor.env BEFORE deriving any URL from it.
+    # {{hive_hub}} is just's PARSE-time value and cannot see the config file this
+    # recipe sources, so every query below used to go to the built-in default hub
+    # while reporting a CONTRIBUTOR_ID that only exists on the configured one —
+    # a guaranteed 404 ("Could not fetch profile") for anyone on a hosted spoke.
+    CONTRIBUTOR_ID=""
     if [[ -f "{{config_dir}}/contributor.env" ]]; then
+      # shellcheck source=/dev/null
       source "{{config_dir}}/contributor.env"
-      echo ""
-      echo "=== Your Profile ==="
-      curl -sf "${HUB_HTTP}/api/contributors/${CONTRIBUTOR_ID}" 2>/dev/null | jq . || echo "Could not fetch profile"
     fi
+    HIVE_HUB="${HIVE_HUB:-{{hive_hub}}}"
+    # HIVE_HUB and CONTRIBUTOR_ID are comma-separated and POSITION-ALIGNED
+    # (hub[i] ↔ id[i]) for a contributor registered with more than one hub — the
+    # same convention contributor.env documents and the relay already honors. Walk
+    # them together rather than reporting only the first.
+    IFS=',' read -r -a _HUBS <<< "${HIVE_HUB}"
+    IFS=',' read -r -a _IDS <<< "${CONTRIBUTOR_ID}"
+    for i in "${!_HUBS[@]}"; do
+      HUB_HTTP=$(echo "${_HUBS[$i]}" | sed 's|^wss://|https://|;s|^ws://|http://|;s|/contribute$||')
+      echo "=== Hub Status (${HUB_HTTP}) ==="
+      curl -sf "${HUB_HTTP}/api/contribute/status" 2>/dev/null | jq . || echo "Hub unreachable at ${HUB_HTTP}"
+      if [[ -n "${_IDS[$i]:-}" ]]; then
+        echo ""
+        echo "=== Your Profile (${_IDS[$i]}) ==="
+        curl -sf "${HUB_HTTP}/api/contributors/${_IDS[$i]}" 2>/dev/null | jq . || echo "Could not fetch profile"
+      fi
+      echo ""
+    done
 
 # Browse available Hive projects to contribute to
 contribute-browse:
@@ -1471,6 +1742,99 @@ contribute-k8s namespace="hive-contributor" outfile="" image_tag="v4":
       printf '%s' "$1" | base64 | tr -d '\n'
     }
 
+    # ── Backend credential preflight (#5103) ──
+    #
+    # Before this existed the generated workload carried NO credential for the
+    # agent CLI it was told to run: the pod authenticated to the hub
+    # (HIVE_REGISTRATION_TOKEN) and to GitHub (GH_TOKEN), then launched a
+    # backend with nothing to authenticate WITH — it deployed cleanly, went
+    # Ready, accepted a task, and could do no work. All five allow-listed
+    # headless backends had the gap.
+    #
+    # Each backend below either contributes its credential material to the
+    # Secret, or the generation REFUSES with a message naming exactly what is
+    # missing — a refusal at generation beats a manifest that cannot work.
+    # HIVE_K8S_ALLOW_MISSING_BACKEND_CREDENTIALS=1 is the explicit escape hatch
+    # for an operator who supplies credentials out of band (their own Secret,
+    # an injector, a patched pod); it downgrades every refusal to a stderr
+    # warning, mirroring the unsupported-backend warning above.
+    #
+    # A backend that is not headless-capable at all skips this preflight: the
+    # warning above already says the pod cannot work, and failing it again over
+    # credentials would bury the real message.
+    CRED_YAML=""
+    add_cred() { CRED_YAML+="  $1: $2"$'\n'; }
+    CRED_MISSING=""
+    if [[ "$BACKEND_HEADLESS_OK" == true ]]; then
+      case "$BACKEND" in
+        claude)
+          # Two routes, explicit key first (operator intent beats a file that
+          # happens to exist): ANTHROPIC_API_KEY travels as itself and the CLI
+          # reads it natively; otherwise the operator's logged-in OAuth
+          # credential file travels base64-wrapped in one env var and the
+          # container entrypoint materializes it at ~/.claude/.credentials.json
+          # (bin/contributor-agent.sh). The pod refreshes tokens against its
+          # own ephemeral copy; the laptop's file is never written back.
+          if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+            add_cred "ANTHROPIC_API_KEY" "$(b64 "${ANTHROPIC_API_KEY}")"
+          elif [[ -f "${HOME}/.claude/.credentials.json" ]]; then
+            add_cred "HIVE_CLAUDE_CREDENTIALS_B64" "$(b64 "$(base64 < "${HOME}/.claude/.credentials.json" | tr -d '\n')")"
+          else
+            CRED_MISSING="claude has no credential to ship: set ANTHROPIC_API_KEY in this shell, or log the CLI in once on this machine (run 'claude', then /login) so ~/.claude/.credentials.json exists."
+          fi
+          ;;
+        litellm)
+          # The entrypoint maps these to ANTHROPIC_BASE_URL/ANTHROPIC_API_KEY
+          # for the claude CLI (bin/contributor-agent.sh) — same wiring the
+          # laptop container path uses. The endpoint is persisted by setup; the
+          # key is env-only by design and must be present when generating.
+          if [[ -n "${HIVE_LITELLM_ENDPOINT:-}" && -n "${HIVE_LITELLM_API_KEY:-}" ]]; then
+            add_cred "HIVE_LITELLM_ENDPOINT" "$(b64 "${HIVE_LITELLM_ENDPOINT}")"
+            add_cred "HIVE_LITELLM_API_KEY" "$(b64 "${HIVE_LITELLM_API_KEY}")"
+          else
+            CRED_MISSING="litellm needs HIVE_LITELLM_ENDPOINT and HIVE_LITELLM_API_KEY set in this shell when generating."
+          fi
+          ;;
+        goose)
+          # The entrypoint writes ~/.config/goose/config.yaml from
+          # GOOSE_PROVIDER/GOOSE_MODEL if absent; goose reads GOOSE_API_KEY
+          # from the environment. A hosted provider without its key cannot
+          # work, so the key is required alongside the provider; the local
+          # ollama default that works on a laptop does not exist in a pod.
+          if [[ -n "${GOOSE_PROVIDER:-}" && -n "${GOOSE_API_KEY:-}" ]]; then
+            add_cred "GOOSE_PROVIDER" "$(b64 "${GOOSE_PROVIDER}")"
+            add_cred "GOOSE_API_KEY" "$(b64 "${GOOSE_API_KEY}")"
+            if [[ -n "${GOOSE_MODEL:-}" ]]; then add_cred "GOOSE_MODEL" "$(b64 "${GOOSE_MODEL}")"; fi
+          else
+            CRED_MISSING="goose needs GOOSE_PROVIDER and GOOSE_API_KEY set in this shell when generating (GOOSE_MODEL optional)."
+          fi
+          ;;
+        copilot|codex)
+          # Both authenticate through OAuth state directories (~/.copilot,
+          # ~/.codex) whose refresh/rewrite behavior inside an unattended pod
+          # is UNVERIFIED — shipping a mechanism that may sign the pod out
+          # mid-task would recreate this bug with extra steps. Refuse honestly
+          # and point at the paths that are verified. Plumbing these is
+          # tracked in kubestellar/hive#5103.
+          CRED_MISSING="${BACKEND} authenticates via an OAuth state directory whose behavior in an unattended pod is unverified (kubestellar/hive#5103); use 'just contribute-hive ${BACKEND}' (container) or a claude/litellm/goose pod instead."
+          ;;
+      esac
+    fi
+    if [[ -n "$CRED_MISSING" ]]; then
+      if [[ "${HIVE_K8S_ALLOW_MISSING_BACKEND_CREDENTIALS:-}" == "1" ]]; then
+        echo "WARNING: emitting a workload with NO ${BACKEND} credential (escape hatch set)." >&2
+        echo "         ${CRED_MISSING}" >&2
+        echo "         The pod will deploy, go Ready, accept a task, and be unable to run it" >&2
+        echo "         unless you provide the credential out of band." >&2
+      else
+        echo "ERROR: ${CRED_MISSING}" >&2
+        echo "       Refusing to emit a workload whose agent CLI cannot authenticate" >&2
+        echo "       (kubestellar/hive#5103). Set HIVE_K8S_ALLOW_MISSING_BACKEND_CREDENTIALS=1" >&2
+        echo "       to emit anyway if you provide the credential out of band." >&2
+        exit 1
+      fi
+    fi
+
     # ── Build the YAML ──
     REG_TOKEN_B64=$(b64 "${HIVE_REGISTRATION_TOKEN:-}")
     GH_TOKEN_B64=$(b64 "${GH_TOKEN:-}")
@@ -1517,6 +1881,10 @@ contribute-k8s namespace="hive-contributor" outfile="" image_tag="v4":
     YAML+="data:"$'\n'
     YAML+="  HIVE_REGISTRATION_TOKEN: ${REG_TOKEN_B64}"$'\n'
     YAML+="  GH_TOKEN: ${GH_TOKEN_B64}"$'\n'
+    # Backend credential material from the preflight above (#5103): the agent
+    # CLI's own credential, delivered the same way as GH_TOKEN and covered by
+    # the same interim credential note on the Deployment below.
+    YAML+="${CRED_YAML}"
 
     # ── Probe command (#2660 status file) ──
     # The kubelet execs this against the pod. It reads the coarse lifecycle state
@@ -1545,8 +1913,11 @@ contribute-k8s namespace="hive-contributor" outfile="" image_tag="v4":
     YAML+="# Kubernetes restarts it on failure and keeps a stable identity — the"$'\n'
     YAML+="# exact reason an operator wants a cluster over a laptop."$'\n'
     YAML+="#"$'\n'
-    YAML+="# INTERIM CREDENTIAL NOTE (#2537): the Secret above carries a long-lived,"$'\n'
-    YAML+="# personal GH_TOKEN (scope repo,read:org). In a cluster it is base64 (NOT"$'\n'
+    YAML+="# INTERIM CREDENTIAL NOTE (#2537, #5103): the Secret above carries a"$'\n'
+    YAML+="# long-lived, personal GH_TOKEN (scope repo,read:org) and, when the"$'\n'
+    YAML+="# selected backend requires one, that backend's own credential (an API"$'\n'
+    YAML+="# key, or a Claude OAuth credential file with a refresh token)."$'\n'
+    YAML+="# In a cluster these are base64 (NOT"$'\n'
     YAML+="# encrypted), readable by anyone with 'get secrets' in this namespace and"$'\n'
     YAML+="# by cluster-scoped operators/backups. This is materially more exposed"$'\n'
     YAML+="# than a 0600 file on a laptop. Revoke any time with: gh auth logout (or"$'\n'

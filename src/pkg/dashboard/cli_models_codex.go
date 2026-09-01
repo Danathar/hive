@@ -141,7 +141,7 @@ func execCodexModelProbe() ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create probe CODEX_HOME: %w", err)
 	}
-	defer os.RemoveAll(home)
+	defer func() { _ = os.RemoveAll(home) }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), codexProbeTimeout)
 	defer cancel()

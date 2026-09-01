@@ -91,7 +91,7 @@ rational response to having one road, not duplicated effort.
 > and only ever *adds*, so a deleted agent reappears on the next config reload.
 > Tracked in #2361.
 
-## `hive.yaml.runtime` — a snapshot on Kubernetes, an input on Docker/LXC
+## `hive.yaml.runtime` — a snapshot on Kubernetes, an input everywhere else
 
 This file was called `hive.yaml.bak` until the rename. The old name implied
 "the restorable backup", which is true of only half its behaviour, and the
@@ -102,7 +102,7 @@ and *reads* it only when the ConfigMap is missing or empty — the disaster
 fallback. A minority of older hives run a `copy-config` init container variant
 that does restore from it first; that variant is not what new hives get.
 
-**On Docker/LXC it is a live boot input, and the source of truth.** There is no
+**Outside Kubernetes it is a live boot input, and the source of truth.** There is no
 ConfigMap and no overlay in that mode, so the entrypoint restores this file over
 the config path on every boot (or points `HIVE_CONFIG` straight at it, and
 pins the same path into the launch argv as `--config`, when the config path is
@@ -113,19 +113,73 @@ outside Kubernetes because this file already plays that role.
 
 > An earlier version of this section was headed "`hive.yaml.bak` is a backup,
 > not an input" and mentioned Docker only in passing. That was wrong for every
-> Docker/LXC hive, where the file is precisely an input.
+> non-Kubernetes hive, where the file is precisely an input.
+
+### Which mode am I in?
+
+There is no Docker-specific or Podman-specific code path. The entrypoint and
+`config.IsKubernetesPod()` both ask one question — *is this a Kubernetes pod?*
+— and everything that is not one takes the same branch:
+
+```sh
+# src/deploy/entrypoint.sh
+if [ -n "${KUBERNETES_SERVICE_HOST:-}" ] || [ -f /var/run/secrets/kubernetes.io/serviceaccount/token ]; then
+  IS_KUBERNETES=true
+```
+
+So **Docker, Podman (rootful or rootless) and LXC all behave identically here**,
+as does any other container runtime and a bare binary on a host. This document
+says "outside Kubernetes" rather than naming runtimes, because naming a subset
+of them is how a Podman operator concludes the section is about someone else's
+deployment ([#5220](https://github.com/kubestellar/hive/issues/5220)).
+
+Ask the running hive which file actually decides a field:
+
+```bash
+# Same endpoint as above; use whichever port this hive serves the dashboard on
+# (3002 direct, or 3001 when an nginx gateway fronts it).
+curl -s localhost:3002/api/config/provenance | jq '.fields[] | select(.field=="acmm_level")'
+```
+
+```jsonc
+{
+  "field": "acmm_level",
+  "layer": "configmap-seed",        // the layer's stable contract name…
+  "path": "/data/hive.yaml.runtime", // …but outside Kubernetes this is the real file (#4971)
+  "writer": "spoke (Config.Save)",
+  "writable": true,
+  "value": "4"
+}
+```
+
+Note the `layer` name stays `configmap-seed` on a host that has no ConfigMap:
+the layer identity is a stable part of the provenance contract, while `path`
+and `writer` are the environment-aware fields that tell you where to write.
+Trust `path`, not the layer name.
+
+Two consequences worth stating outright for a non-Kubernetes hive:
+
+- **The bind-mounted seed at `/etc/hive/hive.yaml` goes stale and stays stale.**
+  A dashboard change to `acmm_level` is written to `/data/hive.yaml.runtime`;
+  nothing writes it back to the seed. Reading the seed to find out what level a
+  hive is running will mislead you. This is by design (issue #1856 — letting
+  the seed win reverted a hive to its provisioned level on every restart), not
+  drift to be repaired.
+- **`/data` is the only copy of the live config.** Losing that volume reverts
+  the hive to whatever the seed was provisioned with, silently downgrading
+  every hold-gated agent. Back up the volume, not just the seed file.
 
 ### Migration
 
 The rename is **copy-forward, never destructive**. Writers emit
 `/data/hive.yaml.runtime`; readers prefer it and fall back to
 `/data/hive.yaml.bak` when it is absent. Nothing renames or deletes the legacy
-file on a PVC — on Docker/LXC it is the single copy of the live config, so
+file on a PVC — outside Kubernetes it is the single copy of the live config, so
 mutating it at boot could lose owner customisations with no warning.
 
 A hive booting new code with only the legacy file present therefore boots
 normally from that file, and gains the new name on the next config save (on
-Docker/LXC, the entrypoint also copies it forward immediately). Backups capture
+non-Kubernetes, the entrypoint also copies it forward immediately). Backups capture
 both names for the same reason. The legacy fallback can be removed one release
 after every live hive has written the new name.
 

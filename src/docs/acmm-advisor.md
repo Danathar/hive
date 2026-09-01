@@ -12,7 +12,7 @@ The advisor evaluates a fixed set of six signals (`Signals` struct, `src/pkg/acm
 |---|---|
 | `CurrentLevel` | The ACMM level the hive is applying right now (1–6). |
 | `CoveragePct` | Current test-coverage percentage (0–100). |
-| `GreenStreak` | Count of consecutive green CI runs with no red. **Not yet measured — always zero.** See below. |
+| `GreenStreak` | Count of consecutive green CI runs with no red, measured from default-branch Actions history. See below. |
 | `MergeSuccessRate` | Fraction (0.0–1.0) of recent PRs that merged cleanly. |
 | `ActionableIssues` | Count of open actionable issues the hive has surfaced but not yet resolved. |
 | `HoldCount` | Count of open PRs still carrying a `hold` label awaiting human review. |
@@ -28,7 +28,7 @@ The dashboard assembles `Signals` for the running hive in `buildACMMStatusInputs
 - `MergeSuccessRate` is read from the fleet-stats collector's cached 90-day merged/rejected counts (`mergeSuccessRateFromFleetStats`, `src/pkg/dashboard/api_acmm_recommendation.go:135-141`) — no fresh GitHub call is made on the request path.
 - `ActionableIssues` and `HoldCount` come from the most recent published status snapshot (`status.Governor.Issues`, `status.Hold.Total`).
 - `CoveragePct` is read from `status.AgentMetrics["ci-maintainer"]["coverage"]`, the value the coverage badge collector populates (`coverageFromAgentMetrics`, `src/pkg/dashboard/api_acmm_recommendation.go:148-166`).
-- `GreenStreak` is **always zero** — the hive does not yet track a real green-CI streak as a first-class signal. The code comment is explicit that this must never be fabricated (`src/pkg/dashboard/api_acmm_recommendation.go:52-59`), and a zero streak only ever makes the advisor *more* conservative (it will never propose a raise on the strength of a made-up streak).
+- `GreenStreak` is the count of consecutive non-red completed runs on the primary repo's **default branch**, counting back from the most recent run (`Client.GreenCIStreak`, `src/pkg/github/health.go`). It is measured on the status-build path — the same pass that already fetches workflow health — and cached, so no fresh GitHub call is made on the request path. When no measurement has ever succeeded (no GitHub client, an Actions API failure, or a repo with **no CI history at all**) the signal stays at zero and reads as *unknown / not yet earned* rather than as a measured zero — a repo with no CI must never read as green. A failed refresh leaves the last real reading in place rather than clobbering it with an unknown.
 
 All of the above is nil-safe: a freshly-booted hive with no config, no status snapshot yet, or a nil fleet-stats collector collapses to conservative zero-value signals rather than panicking or fabricating data (comment at `src/pkg/dashboard/api_acmm_recommendation.go:41-45`, confirmed by `TestHandleACMMRecommendationEmpty` in `src/pkg/dashboard/api_acmm_recommendation_test.go`).
 
@@ -61,10 +61,10 @@ A recommendation (`Recommendation` struct, `src/pkg/acmmadvisor/acmmadvisor.go:1
 ## What this does NOT do
 
 - **It never changes the applied ACMM level.** The package comment states this explicitly: "This package is ADVISORY ONLY. It never changes the applied ACMM level... A human always approves the actual level change." (`src/pkg/acmmadvisor/acmmadvisor.go:12-17`). The only code path that changes a hive's level is `PUT /api/packs/level` → `handlePackSetLevel` → `ApplyPack`, documented in [ACMM policy matrix — Changing a hive's ACMM level](acmm-policy-matrix.md#changing-a-hives-acmm-level). Nothing in `pkg/acmmadvisor` or the `/api/acmm-recommendation` handler calls that path.
-- **It is a pure function with no I/O.** `Recommend` and `RecommendFromStatus` take already-collected signals and return a value; they do not read config, call GitHub, or touch the clock (`src/pkg/acmmadvisor/wire.go:1-12`).
-- **It is not currently rendered anywhere in the dashboard UI.** As of this writing there are no references to `acmm-recommendation` or the advisor under `src/dashboard`. The only way to obtain a recommendation today is to call the API endpoint directly (see below); there is no dashboard pill, tab, or card that displays it. A `TODO(acmm2-wiring)` comment in `src/pkg/acmmadvisor/wire.go` describes wiring `RecommendFromStatus` into the status payload as still-outstanding follow-up work — treat any documentation or issue text implying the dashboard already surfaces a recommendation pill as **not yet true**.
+- **It is a pure function with no I/O.** `Recommend` and `RecommendFromStatus` take already-collected signals and return a value; they do not read config, call GitHub, or touch the clock. Signal *collection* does talk to GitHub, but only on the status-build path, and its results are cached — neither the API endpoint nor the status payload triggers a GitHub call of its own.
+- **It never auto-applies a recommendation.** The recommendation now travels on the status payload as `acmmAdvice` (#5225) in addition to the API endpoint, but both are read-only advice. Nothing consumes them to change a level.
 - **Thresholds are not configurable.** All coverage/streak/rate/backlog numbers are Go constants in `pkg/acmmadvisor`; there is no `hive.yaml` field or environment variable to adjust them.
-- **`GreenStreak` is not measured yet, and its zero is deliberate rather than a bug.** The hive does not track a real green-CI streak, and the code refuses to fabricate one. Because a zero streak can only ever *withhold* a recommendation, the advisor stays conservative rather than proposing a raise on a fabricated signal — the safe direction to fail in. The practical effect is that any criterion gated on streak thresholds (L3 and above) will not pass until that wiring lands, so the advisor currently under-recommends rather than over-recommends.
+- **It does not measure streak quality, only streak length.** `GreenStreak` resets on **any** red, including a flake unrelated to code quality, and a repo that rarely commits can hold a stale streak indefinitely because the signal is count-based rather than time-based. The scan also reads at most one page of runs (`ciStreakRunsLimit`), so a very long streak is reported as "at least N" — the cap sits above every advisor threshold, so it can only ever under-report.
 
 ## The API endpoint
 
@@ -72,5 +72,5 @@ A recommendation (`Recommendation` struct, `src/pkg/acmmadvisor/acmmadvisor.go:1
 
 ## Open questions
 
-- The exact date/PR that will wire `RecommendFromStatus` into the dashboard status payload and UI is not yet known — `src/pkg/acmmadvisor/wire.go` marks it `TODO(acmm2-wiring)` with no linked issue found in this repo at the time of writing.
-- Whether `GreenStreak` will be sourced from CI history or another signal once implemented is left open by the `TODO(acmm-signals)` comment in `src/pkg/dashboard/api_acmm_recommendation.go:58-59`.
+- Whether the streak should become time-based ("days since last red") rather than count-based is unresolved. A count-based streak lets a quiet repo hold a stale value; a time-based one would change the meaning of the existing `greenStreakL3..L6` thresholds, so it is deliberately not attempted here.
+- Whether a "green" streak should require the run to have actually executed gates is unresolved: `skipped` runs are currently transparent to the streak (matching `ciPassRate`), so a repo whose workflows are entirely skipped on the default branch could accumulate a streak without any gate ever running.

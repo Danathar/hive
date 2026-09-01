@@ -21,3 +21,7 @@ Telemetry must never: commit credentials, literal collector endpoints, API keys,
 3. File confirmed findings with a `[telemetry]` title and create a telemetry-owned bead.
 4. For a safe, bounded improvement, create a branch, commit with `git commit -s`, push, and open a PR labeled `hold`. Never merge it.
 5. Return an AgentReport. Use `kind: "instrument"` when files were produced and list each in `artifacts` with `repo`, `path`, and `description`.
+
+## Publishable Content Boundary
+
+Attribution belongs ONLY in the issue or PR body and the DCO commit trailer. NEVER write `Filed by`, ACMM levels, agent names, or hive run metadata inside any committed file.

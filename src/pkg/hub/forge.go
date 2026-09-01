@@ -37,18 +37,50 @@ const (
 	// both resolve through the same identity/credential machinery.
 	ForgeGitHubEnterprise ForgeKind = "github-enterprise"
 	// ForgeGitLab is a GitLab instance (gitlab.com or self-managed). Unlike the
-	// GitHub kinds it does NOT use the GitHub App identity machinery: the spoke
-	// executes against it via pkg/forge's GitLab adapter using a PRIVATE-TOKEN
-	// from the env. These values match pkg/forge.KindGitLab.
+	// GitHub kinds it does NOT use the GitHub App identity machinery. It is
+	// DISPLAY-ONLY today: accepting this kind records the forge family and host
+	// on the hive and changes what the dashboard shows. No spoke executes
+	// against GitLab. The value matches pkg/forge.KindGitLab so a future wiring
+	// need not translate, but pkg/forge is not reached from here.
 	ForgeGitLab ForgeKind = "gitlab"
 	// ForgeGitea is a Gitea/Forgejo instance (self-managed or Codeberg). Same
-	// story as GitLab — executed via pkg/forge's Gitea adapter. Matches
-	// pkg/forge.KindGitea.
+	// story as GitLab: display-only, matching pkg/forge.KindGitea by value only.
 	ForgeGitea ForgeKind = "gitea"
 )
 
+// WHY "DISPLAY-ONLY" IS THE ACCURATE WORD FOR GITLAB/GITEA
+//
+// src/pkg/forge is a complete, tested adapter package with THREE implementations
+// (GitHub, GitLab, Gitea) and ZERO non-test importers:
+//
+//	$ grep -rn "kubestellar/hive/pkg/forge" --include="*.go" src/ \
+//	    | grep -v _test | grep -v "^src/pkg/forge/"
+//	(no output)
+//
+// Nothing in the running system constructs an adapter. Agents reach their forge
+// through the gh CLI wrapper, which is GitHub-only. So a hive switched to
+// ForgeGitLab gets a recorded kind/host and a different dashboard tile, and its
+// agents do not run.
+//
+// The hub-side SaaSHive.Forge field this endpoint writes is also NOT delivered
+// to spokes: no heartbeat struct carries a forge field. Wiring the path would
+// mean adding one to HeartbeatResponse, adding a spoke-side consumer that
+// constructs the adapter, and extending the interface (below).
+//
+// THE INTERFACE CEILING, worth knowing before anyone plans that work: the
+// pkg/forge.Forge interface exposes GetRepo, ListOpenIssues,
+// ListOpenChangeRequests, CreateIssueComment, AddLabels, RemoveLabel and
+// SetHold — but NO CreateIssue and NO CreatePR. Merge is a separate, optional
+// Merger interface that no adapter implements. Even fully delivered and wired,
+// these adapters could comment, label and hold, but could not open the issue or
+// change request an agent's work has to land in.
+//
+// The verified support matrix lives in src/docs/forge-app-setup.md; keep this
+// comment and that document in agreement.
+
 // FORGE API-PATH CONTRACT, hub side. The REST API base paths for the non-GitHub
-// forges are appended by the spoke-side pkg/forge adapters themselves
+// forges are appended by the pkg/forge adapters themselves (which, per the note
+// above, no running code path constructs today)
 // (gitLabAPIPath="/api/v4", giteaAPIPath="/api/v1"), so for those kinds a
 // ForgeTarget carries the BARE instance URL in BaseURL and leaves APIURL empty —
 // the opposite of the GHE case below, where the hub pre-appends /api/v3. The hub
@@ -109,10 +141,29 @@ func parseForgeTarget(raw string) (ForgeTarget, error) {
 // parseForgeTargetWithKind is parseForgeTarget with an explicit forge kind.
 // An empty kind preserves the original behavior (public github.com, else GHE
 // inferred from the host). "gitlab"/"gitea" produce non-GitHub targets whose
-// BaseURL is the bare instance root and whose APIURL is left empty — the
-// spoke-side pkg/forge adapter appends the /api/v4 or /api/v1 suffix itself
-// (see the forge API-path contract note above). "github"/
+// BaseURL is the bare instance root and whose APIURL is left EMPTY. "github"/
 // "github-enterprise" fall through to the host-based GitHub path.
+//
+// WHAT AN EMPTY APIURL MEANS TODAY: nothing appends the /api/v4 or /api/v1
+// suffix to it. The pkg/forge adapters own those constants and would append
+// them, but nothing constructs an adapter (see the display-only note above), so
+// for a gitlab/gitea target the empty APIURL is simply never completed by
+// anyone. It is a placeholder for a consumer that does not exist, not a value
+// something downstream fills in.
+//
+// It is also not delivered anywhere. The only path that would push it,
+// pendingForgeAPIURL, passes h.Forge to THIS function rather than re-parsing
+// the stored host kind-lessly, so a gitlab/gitea hive resolves to this empty
+// APIURL and pendingForgeAPIURL pushes nothing at all. Before #5336 it called
+// the kind-less parseForgeTarget, which cannot see that the hive is on
+// GitLab/Gitea and classified every well-formed non-github.com host as GitHub
+// Enterprise — so a GitLab hive would have been sent
+// "https://<gitlab-host>/api/v3", a GHE path aimed at a GitLab instance. The
+// kind must survive the round trip through the stored host; it now does.
+//
+// Keep the empty APIURL: it is the correct hub-side value under the API-path
+// contract below, and pre-appending a suffix here would be the duplicate that
+// contract exists to prevent. The gap is the missing consumer, not this field.
 func parseForgeTargetWithKind(kind, raw string) (ForgeTarget, error) {
 	switch ForgeKind(strings.ToLower(strings.TrimSpace(kind))) {
 	case ForgeGitLab, ForgeGitea:
@@ -127,7 +178,9 @@ func parseForgeTargetWithKind(kind, raw string) (ForgeTarget, error) {
 		if !isValidForgeHostLabel(host) {
 			return ForgeTarget{}, fmt.Errorf("%q is not a valid %s host", raw, fk)
 		}
-		// BaseURL only; the spoke adapter appends the REST API path. APIURL empty.
+		// BaseURL only; APIURL empty. Under the API-path contract the adapter
+		// would append the REST path — but no adapter is constructed today, so
+		// nothing completes it (see the doc comment above).
 		return ForgeTarget{Kind: fk, Host: host, BaseURL: "https://" + host}, nil
 	}
 	// kind is empty or a GitHub kind → the original host-based GitHub resolution.
@@ -387,10 +440,12 @@ func (s *HubServer) handleSwitchForge(w http.ResponseWriter, r *http.Request) {
 		fromHost = publicForgeHost // "" has always meant public github.com
 	}
 
-	// NON-GITHUB FORGES (GitLab / Gitea): these authenticate with a
-	// PRIVATE-TOKEN via pkg/forge, not a GitHub App, so the App-identity
-	// resolution, PendingAppConfig, and IdentitySet machinery below do not
-	// apply. Record the forge family + host durably and re-arm the same
+	// NON-GITHUB FORGES (GitLab / Gitea): these do not use a GitHub App, so the
+	// App-identity resolution, PendingAppConfig, and IdentitySet machinery below
+	// do not apply. (The pkg/forge adapters are written to authenticate with a
+	// PRIVATE-TOKEN, but nothing constructs one — see the display-only note at
+	// the top of this file — so no credential of either kind is in play for
+	// these hives today.) Record the forge family + host durably and re-arm the same
 	// requested/delivered handshake used for GitHub, then return. GitHub App
 	// fields are cleared so a stale app_id/installation from a prior GitHub
 	// forge can't be sent to a spoke that no longer talks to GitHub.
@@ -398,7 +453,7 @@ func (s *HubServer) handleSwitchForge(w http.ResponseWriter, r *http.Request) {
 		h.Forge = string(target.Kind)
 		h.GitHubHost = target.Host
 		h.GitHubBaseURL = target.BaseURL
-		h.GitHubAPIURL = "" // adapter appends /api/v4 or /api/v1 to BaseURL
+		h.GitHubAPIURL = "" // no API URL for a non-GitHub forge; nothing consumes BaseURL today
 		h.RequestedGitHubHost = target.Host
 		h.ForgeDelivered = false
 		h.PendingAppConfig = nil // no GitHub App on GitLab/Gitea
@@ -408,7 +463,7 @@ func (s *HubServer) handleSwitchForge(w http.ResponseWriter, r *http.Request) {
 		}
 		s.logger.Info("forge switch queued (non-GitHub)",
 			"hive_id", id, "kind", target.Kind, "host", target.Host)
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"ok":   true,
 			"kind": string(target.Kind),
 			"host": target.Host,
@@ -439,7 +494,7 @@ func (s *HubServer) handleSwitchForge(w http.ResponseWriter, r *http.Request) {
 	// missing so an operator can populate clusters.json and re-run.
 	if len(missing) > 0 {
 		w.WriteHeader(http.StatusConflict)
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"error": fmt.Sprintf("refusing to switch %s to %s: the target forge identity is incomplete for cluster %q, and a partial switch produces a broken hive (a wrong App install link 404s)",
 				id, target.Host, clusterIDForHive(h)),
 			"missing": missing,
@@ -586,7 +641,7 @@ func (s *HubServer) handleSwitchForge(w http.ResponseWriter, r *http.Request) {
 	if appID > 0 {
 		resp.AppID = strconv.FormatInt(appID, 10)
 	}
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // forgeIdentity is the COMPLETE App identity for one forge. A forge switch
@@ -757,12 +812,27 @@ func pendingForgeAPIURL(h *SaaSHive, curAPIURL string) string {
 	if h == nil || h.ForgeDelivered || h.RequestedGitHubHost == "" {
 		return ""
 	}
-	target, err := parseForgeTarget(h.RequestedGitHubHost)
+	// Pass the STORED KIND through. A host alone cannot distinguish GitLab or
+	// Gitea from GitHub Enterprise, so the kind-less parseForgeTarget would
+	// classify every well-formed non-github.com host as GHE and hand a GitLab
+	// hive "https://<gitlab-host>/api/v3" — a GHE path aimed at a GitLab
+	// instance (#5336). h.Forge is written by handleForgeSwitch alongside
+	// RequestedGitHubHost and is the authoritative family for this record.
+	target, err := parseForgeTargetWithKind(h.Forge, h.RequestedGitHubHost)
 	if err != nil {
 		return "" // an unparseable stored target is never pushed
 	}
 	want := target.APIURL
 	if want == "" {
+		if !target.IsPublic() {
+			// A non-public target with no APIURL is a GitLab/Gitea hive. Its
+			// empty APIURL is the correct hub-side value under the API-path
+			// contract — the adapter appends /api/v4 or /api/v1 — so there is
+			// nothing to push. Falling through to defaultPublicAPIURL here
+			// would aim a GitLab spoke at api.github.com, which is the same
+			// class of wrong value this fix removes.
+			return ""
+		}
 		// Public github.com — send the explicit default, not "" (see above).
 		want = defaultPublicAPIURL
 	}
