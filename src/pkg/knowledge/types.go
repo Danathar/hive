@@ -112,9 +112,23 @@ func (b BeadSynthesizerConfig) IsEnabled() bool {
 
 // CuratorConfig controls automated knowledge extraction from merged PRs.
 type CuratorConfig struct {
-	Schedule              string   `yaml:"schedule"                json:"schedule"`
-	ExtractFrom           []string `yaml:"extract_from"            json:"extract_from"`
-	AutoPromoteThreshold  float64  `yaml:"auto_promote_threshold"  json:"auto_promote_threshold"`
+	// Enabled gates the scheduled auto-promotion loop and defaults to FALSE
+	// when absent — see config.KnowledgeCurator.Enabled for the reasoning.
+	// Scheduled promotion writes into a higher layer without human review, so
+	// it must be opted into explicitly; a bare `schedule` does not start it.
+	Enabled              *bool    `yaml:"enabled,omitempty"       json:"enabled"`
+	Schedule             string   `yaml:"schedule"                json:"schedule"`
+	ExtractFrom          []string `yaml:"extract_from"            json:"extract_from"`
+	AutoPromoteThreshold float64  `yaml:"auto_promote_threshold"  json:"auto_promote_threshold"`
+	PromoteFrom          string   `yaml:"promote_from,omitempty"  json:"promote_from,omitempty"`
+	PromoteTo            string   `yaml:"promote_to,omitempty"    json:"promote_to,omitempty"`
+}
+
+// IsEnabled reports whether scheduled auto-promotion is active. Absent (nil)
+// means DISABLED. This is the single guard the promotion scheduler consults;
+// removing it turns scheduled, unreviewed layer mutation on fleet-wide.
+func (c CuratorConfig) IsEnabled() bool {
+	return c.Enabled != nil && *c.Enabled
 }
 
 // PrimerConfig controls how facts are selected and injected into agent kicks.
@@ -304,19 +318,19 @@ type Question struct {
 
 // InceptionState tracks the progress of a Level 1 ideation workflow.
 type InceptionState struct {
-	Phase          InceptionPhase    `json:"phase"`
-	Mode           InceptionMode     `json:"mode"`
-	IdeaText       string            `json:"idea_text"`
-	IdeaSlug       string            `json:"idea_slug"`
-	RepoURL        string            `json:"repo_url,omitempty"`
-	Questions      []Question        `json:"questions"`
-	Answers        map[string]string `json:"answers"`
-	FactSlugs      []string          `json:"fact_slugs"`
-	StartedAt      time.Time         `json:"started_at"`
-	PhaseChangedAt *time.Time        `json:"phase_changed_at,omitempty"`
-	WikiName       string            `json:"wiki_name,omitempty"`
-	AutoFactCount     int            `json:"auto_fact_count,omitempty"`
-	AutoQuestionCount int            `json:"auto_question_count,omitempty"`
+	Phase             InceptionPhase    `json:"phase"`
+	Mode              InceptionMode     `json:"mode"`
+	IdeaText          string            `json:"idea_text"`
+	IdeaSlug          string            `json:"idea_slug"`
+	RepoURL           string            `json:"repo_url,omitempty"`
+	Questions         []Question        `json:"questions"`
+	Answers           map[string]string `json:"answers"`
+	FactSlugs         []string          `json:"fact_slugs"`
+	StartedAt         time.Time         `json:"started_at"`
+	PhaseChangedAt    *time.Time        `json:"phase_changed_at,omitempty"`
+	WikiName          string            `json:"wiki_name,omitempty"`
+	AutoFactCount     int               `json:"auto_fact_count,omitempty"`
+	AutoQuestionCount int               `json:"auto_question_count,omitempty"`
 }
 
 // ScaffoldFile is a single generated file in the scaffold output.
