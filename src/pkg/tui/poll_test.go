@@ -25,6 +25,17 @@ const agentsFixture = `[
   {"name":"reviewer","id":"agt_3","displayName":"Reviewer","enabled":false,"managed":false,"backend":"claude","model":"claude-sonnet-4-5"}
 ]`
 
+// eventsFixture is the newest-first /api/audit snapshot the Events wiring
+// tests serve. The ordering is intentionally visible in both timestamps and
+// action names so an app-level sort or reversal cannot pass unnoticed.
+const eventsFixture = `{"entries":[
+  {"ts":"2026-09-01T12:04:05Z","user":"operator","action":"newest","agent":"scanner"},
+  {"ts":"2026-09-01T12:04:04Z","user":"governor","action":"anchored","agent":"quality"},
+  {"ts":"2026-09-01T12:04:03Z","user":"operator","action":"oldest","agent":"reviewer"}
+]}`
+
+const emptyEventsFixture = `{"entries":[]}`
+
 // closedDashboard is an address nothing listens on, used by the tests that
 // must not reach a dashboard at all.
 //
@@ -415,8 +426,8 @@ const hiveIDFixture = `{"id": "acme-prod"}`
 // governorEvalInterval is what governorConfigFixture decodes to.
 const governorEvalInterval = 300 * time.Second
 
-// dashboardServer serves the four endpoints the poll reads, with a per-path
-// failure switch.
+// dashboardServer serves every endpoint the poll reads, with per-path controls
+// for the failure and replacement cases under test.
 //
 // FAILING BY PATH IS THE WHOLE POINT. T29's core invariant is that these reads
 // fail independently, and a server that could only be all-up or all-down could
@@ -428,16 +439,22 @@ const governorEvalInterval = 300 * time.Second
 // applies twice over: the Tokens pane's whole failure contract is that the two
 // halves are independently losable, and only a per-path switch can serve the
 // "counts fine, estimate forbidden" shape that contract is about.
+// T31 adds the mutable /api/audit body and status plus request counters that
+// distinguish its poll-shaped activity feed from the /api/events SSE stream.
 type dashboardServer struct {
 	*httptest.Server
-	failStatus atomic.Bool
-	failConfig atomic.Bool
-	failHiveID atomic.Bool
-	failTokens atomic.Bool
-	failCost   atomic.Bool
-	hiveID     atomic.Value // string body for /api/hive-id
-	tokens     atomic.Value // string body for /api/tokens
-	cost       atomic.Value // string body for /api/cost
+	failStatus          atomic.Bool
+	failConfig          atomic.Bool
+	failHiveID          atomic.Bool
+	failTokens          atomic.Bool
+	failCost            atomic.Bool
+	hiveID              atomic.Value // string body for /api/hive-id
+	tokens              atomic.Value // string body for /api/tokens
+	cost                atomic.Value // string body for /api/cost
+	audit               atomic.Value // string body for /api/audit
+	auditStatus         atomic.Int64
+	auditRequests       atomic.Int64
+	eventStreamRequests atomic.Int64
 }
 
 func newDashboardServer(t *testing.T) *dashboardServer {
@@ -446,6 +463,7 @@ func newDashboardServer(t *testing.T) *dashboardServer {
 	s.hiveID.Store(hiveIDFixture)
 	s.tokens.Store(tokensFixture)
 	s.cost.Store(costFixture)
+	s.audit.Store(eventsFixture)
 	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fail := func() {
 			w.WriteHeader(http.StatusForbidden)
@@ -488,6 +506,16 @@ func newDashboardServer(t *testing.T) *dashboardServer {
 			}
 			body, _ := s.cost.Load().(string)
 			_, _ = w.Write([]byte(body))
+		case "/api/audit":
+			s.auditRequests.Add(1)
+			if status := int(s.auditStatus.Load()); status != 0 {
+				w.WriteHeader(status)
+			}
+			body, _ := s.audit.Load().(string)
+			_, _ = w.Write([]byte(body))
+		case "/api/events":
+			s.eventStreamRequests.Add(1)
+			w.WriteHeader(http.StatusInternalServerError)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -859,7 +887,7 @@ func TestPollIssuesEveryRead(t *testing.T) {
 
 	msgs := drain(m.poll())
 
-	var agents, governor, interval, hiveID, tokens, cost bool
+	var agents, governor, interval, hiveID, tokens, cost, events bool
 	for _, msg := range msgs {
 		switch msg.(type) {
 		case panes.AgentsMsg:
@@ -874,6 +902,8 @@ func TestPollIssuesEveryRead(t *testing.T) {
 			tokens = true
 		case costSummaryMsg:
 			cost = true
+		case panes.EventsMsg:
+			events = true
 		}
 	}
 	if !agents {
@@ -893,6 +923,139 @@ func TestPollIssuesEveryRead(t *testing.T) {
 	}
 	if !cost {
 		t.Error("poll did not fetch the cost estimate; every cost column would render a dash")
+	}
+	if !events {
+		t.Error("poll did not fetch audit events; the Events pane would stay on its placeholder")
+	}
+	if got := server.auditRequests.Load(); got != 1 {
+		t.Errorf("poll made %d /api/audit requests, want exactly 1", got)
+	}
+	if got := server.eventStreamRequests.Load(); got != 0 {
+		t.Errorf("poll made %d /api/events requests for activity rows, want none", got)
+	}
+}
+
+// paneEventsIndex is the Events pane's slot in the model's pane array, fixed by
+// the frame layout in app.go.
+const paneEventsIndex = 3
+
+const eventsPlaceholder = "waiting for data"
+
+// TestStartupPollFillsTheEventsPane drives the client response through the root
+// broadcast and into the real pane. Client and pane tests in isolation cannot
+// catch the missing app command that left this pane waiting forever.
+func TestStartupPollFillsTheEventsPane(t *testing.T) {
+	server := newDashboardServer(t)
+	m := pollTestModel(t, server.URL)
+
+	before := m.panes[paneEventsIndex].View(60, 12)
+	if !strings.Contains(before, eventsPlaceholder) {
+		t.Fatalf("the Events pane did not start on its placeholder; this test would pass vacuously:\n%s", before)
+	}
+
+	m = pollAndApply(t, m)
+	view := m.panes[paneEventsIndex].View(60, 12)
+	if strings.Contains(view, eventsPlaceholder) {
+		t.Fatalf("the Events pane still shows %q after a successful audit poll:\n%s", eventsPlaceholder, view)
+	}
+	newest := strings.Index(view, "newest")
+	oldest := strings.Index(view, "oldest")
+	if newest < 0 || oldest < 0 || newest >= oldest {
+		t.Errorf("audit rows are not rendered newest first:\n%s", view)
+	}
+}
+
+// TestSuccessfulEmptyAuditLoadsTheEventsPane distinguishes a healthy idle hive
+// from a fetch that never completed.
+func TestSuccessfulEmptyAuditLoadsTheEventsPane(t *testing.T) {
+	server := newDashboardServer(t)
+	server.audit.Store(emptyEventsFixture)
+	m := pollAndApply(t, pollTestModel(t, server.URL))
+
+	view := m.panes[paneEventsIndex].View(60, 12)
+	if !strings.Contains(view, "no events yet") || strings.Contains(view, eventsPlaceholder) {
+		t.Errorf("successful empty audit response did not render the loaded empty state:\n%s", view)
+	}
+}
+
+// TestAuditRefreshPreservesTheEventsScrollAnchor proves the root passes each
+// replacement snapshot through to the pane unchanged and lets the pane retain
+// the operator's anchored row as newer activity arrives.
+func TestAuditRefreshPreservesTheEventsScrollAnchor(t *testing.T) {
+	server := newDashboardServer(t)
+	m := pollAndApply(t, pollTestModel(t, server.URL))
+	m.focus = paneEventsIndex
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	m = next.(model)
+	if view := m.panes[paneEventsIndex].View(60, 3); !strings.Contains(view, "anchored") {
+		t.Fatalf("test did not scroll to the anchor row:\n%s", view)
+	}
+
+	server.audit.Store(`{"entries":[
+  {"ts":"2026-09-01T12:04:06Z","user":"system","action":"new arrival"},
+  {"ts":"2026-09-01T12:04:05Z","user":"operator","action":"newest","agent":"scanner"},
+  {"ts":"2026-09-01T12:04:04Z","user":"governor","action":"anchored","agent":"quality"},
+  {"ts":"2026-09-01T12:04:03Z","user":"operator","action":"oldest","agent":"reviewer"}
+]}`)
+	m = pollAndApply(t, m)
+
+	view := m.panes[paneEventsIndex].View(60, 3)
+	if !strings.Contains(view, "anchored") || strings.Contains(view, "new arrival") {
+		t.Errorf("audit refresh moved the anchored viewport to the newest row:\n%s", view)
+	}
+}
+
+// TestAuditFailuresPreservePriorEvents covers every failure class called out by
+// the issue. None may broadcast an empty EventsMsg, terminate the model, erase
+// the last good rows, or reset the pane's scroll position.
+func TestAuditFailuresPreservePriorEvents(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   string
+		close  bool
+	}{
+		{name: "forbidden", status: http.StatusForbidden, body: `{"error":"forbidden"}`},
+		{name: "server error", status: http.StatusInternalServerError, body: `{"error":"audit unavailable"}`},
+		{name: "malformed JSON", body: `{"entries":`},
+		{name: "transport", close: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := newDashboardServer(t)
+			m := pollAndApply(t, pollTestModel(t, server.URL))
+			m.focus = paneEventsIndex
+			next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+			m = next.(model)
+			before := m.panes[paneEventsIndex].View(60, 3)
+
+			if tc.close {
+				server.Close()
+			} else {
+				server.auditStatus.Store(int64(tc.status))
+				server.audit.Store(tc.body)
+			}
+
+			msg := m.fetchEvents()()
+			fetchErr, ok := msg.(fetchErrMsg)
+			if !ok {
+				t.Fatalf("failed audit fetch produced %T, want fetchErrMsg", msg)
+			}
+			if fetchErr.source != "events" {
+				t.Errorf("failure source = %q, want events", fetchErr.source)
+			}
+
+			next, cmd := m.Update(fetchErr)
+			if cmd != nil {
+				t.Error("nonfatal audit failure produced a command")
+			}
+			m = next.(model)
+			if after := m.panes[paneEventsIndex].View(60, 3); after != before {
+				t.Errorf("audit failure changed the anchored Events pane.\nbefore:\n%s\nafter:\n%s", before, after)
+			}
+		})
 	}
 }
 
