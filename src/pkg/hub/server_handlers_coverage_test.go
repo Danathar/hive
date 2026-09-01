@@ -2,7 +2,6 @@ package hub
 
 import (
 	"encoding/json"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -30,7 +29,7 @@ const f24TestHiveID = "hive-f24"
 // TestHeartbeatBearerOK_LegacyRawSecret and _DerivedKey. Both tokens the deleted
 // acceptor honoured must now be refused.
 func TestF24_FleetWideHeartbeatBearerIsRejected(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	// POSITIVE CONTROL FIRST: prove the per-hive bearer DOES verify, so that a
 	// verifier which rejected everything could not pass this test. Without this
@@ -61,7 +60,7 @@ func TestF24_FleetWideHeartbeatBearerIsRejected(t *testing.T) {
 // bearer must not authenticate hive B. A fleet-wide lane of any shape breaks
 // this, so it guards the invariant rather than one deleted function.
 func TestF24_PerHiveBearerDoesNotCrossHives(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	keyA := srv.heartbeatKeyFor("hive-a")
 	keyB := srv.heartbeatKeyFor("hive-b")
@@ -94,7 +93,7 @@ func TestF24_PerHiveBearerDoesNotCrossHives(t *testing.T) {
 // over every live generation; a fleet-wide lane re-added to ANY generation would
 // be invisible to a single-generation test.
 func TestF24_CrossHiveRejectedUnderEveryLiveGeneration(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	if srv.keyGenerations == nil {
 		t.Fatal("precondition: no generation set on a default hub server")
 	}
@@ -134,7 +133,7 @@ func TestF24_CrossHiveRejectedUnderEveryLiveGeneration(t *testing.T) {
 // verifyHeartbeatBearer takes the token itself, so the header-parsing cases
 // become token-shaped and the empty-hiveID fail-closed case is added.
 func TestF24_MalformedAndEmptyBearersRejected(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	valid := srv.heartbeatKeyFor(f24TestHiveID)
 	if valid == "" {
 		t.Fatal("precondition: heartbeatKeyFor returned empty")
@@ -190,7 +189,7 @@ func TestF24_NoFleetWideHeartbeatLaneInSource(t *testing.T) {
 // --- storePendingGitHubAppConfig / consumePendingGitHubAppConfig tests ---
 
 func TestPendingGitHubAppConfig_StoreAndConsume(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	cfg := &HeartbeatGitHubAppConfig{AppID: 42, InstallationID: 99}
 
 	srv.storePendingGitHubAppConfig("hive-1", cfg)
@@ -210,14 +209,14 @@ func TestPendingGitHubAppConfig_StoreAndConsume(t *testing.T) {
 }
 
 func TestPendingGitHubAppConfig_ConsumeNonExistent(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	if got := srv.consumePendingGitHubAppConfig("no-such-hive"); got != nil {
 		t.Errorf("consume on empty map returned %v, want nil", got)
 	}
 }
 
 func TestPendingGitHubAppConfig_OverwritesPrevious(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.storePendingGitHubAppConfig("hive-1", &HeartbeatGitHubAppConfig{AppID: 1})
 	srv.storePendingGitHubAppConfig("hive-1", &HeartbeatGitHubAppConfig{AppID: 2})
 
@@ -230,7 +229,7 @@ func TestPendingGitHubAppConfig_OverwritesPrevious(t *testing.T) {
 // --- handleLeaderboard tests ---
 
 func TestHandleLeaderboard_EmptyRegistry(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	req := httptest.NewRequest("GET", "/api/leaderboard", nil)
 	w := httptest.NewRecorder()
 
@@ -254,7 +253,7 @@ func TestHandleLeaderboard_EmptyRegistry(t *testing.T) {
 }
 
 func TestHandleLeaderboard_WithEntries(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.registry.Hives = []RegistryEntry{
 		{
 			ID:       "hive-1",
@@ -296,7 +295,7 @@ func TestHandleLeaderboard_WithEntries(t *testing.T) {
 }
 
 func TestHandleLeaderboard_PrivateHivesExcluded(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.registry.Hives = []RegistryEntry{
 		{
 			ID:       "priv",
@@ -325,7 +324,7 @@ func TestHandleLeaderboard_PrivateHivesExcluded(t *testing.T) {
 // --- handleStats tests ---
 
 func TestHandleStats_EmptyRegistry(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	req := httptest.NewRequest("GET", "/api/stats", nil)
 	w := httptest.NewRecorder()
 	srv.handleStats(w, req)
@@ -359,7 +358,7 @@ func TestHandleStats_EmptyRegistry(t *testing.T) {
 }
 
 func TestHandleStats_OnlyCountsPublicHives(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.registry.Hives = []RegistryEntry{
 		{ID: "pub1", IsPublic: true, Online: true, AgentCount: 3, ActiveContributors: 2, ActionableIssues: 5, ActionablePRs: 4},
 		{ID: "priv1", IsPublic: false, Online: true, AgentCount: 10, ActiveContributors: 10, ActionableIssues: 10, ActionablePRs: 10},
@@ -398,7 +397,7 @@ func TestHandleStats_OnlyCountsPublicHives(t *testing.T) {
 // --- handleTaskStatus tests ---
 
 func TestHandleTaskStatus_Unauthorized(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	body := `{"hive_id":"hive-1","leaderboard":[],"contributors":{"registered":0,"active":0}}`
 	req := httptest.NewRequest("POST", "/api/task-status", strings.NewReader(body))
@@ -412,7 +411,7 @@ func TestHandleTaskStatus_Unauthorized(t *testing.T) {
 }
 
 func TestHandleTaskStatus_ValidPayload(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.registry.Hives = []RegistryEntry{
 		{ID: "hive-1", Name: "TestHive", Online: true},
 	}
@@ -443,7 +442,7 @@ func TestHandleTaskStatus_ValidPayload(t *testing.T) {
 }
 
 func TestHandleTaskStatus_OfflineHiveRejected(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.registry.Hives = []RegistryEntry{
 		{ID: "hive-1", Name: "TestHive", Online: false},
 	}
@@ -463,7 +462,7 @@ func TestHandleTaskStatus_OfflineHiveRejected(t *testing.T) {
 }
 
 func TestHandleTaskStatus_InvalidJSON(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	req := httptest.NewRequest("POST", "/api/task-status", strings.NewReader("not json"))
 	// Post-F2 task-status auth is fail-closed AND identity-bound: it accepts ONLY
@@ -479,7 +478,7 @@ func TestHandleTaskStatus_InvalidJSON(t *testing.T) {
 }
 
 func TestHandleTaskStatus_EmptyHiveID(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	body := `{"hive_id":"","leaderboard":[],"contributors":{}}`
 	req := httptest.NewRequest("POST", "/api/task-status", strings.NewReader(body))
@@ -503,7 +502,7 @@ func TestHandleTaskStatus_EmptyHiveID(t *testing.T) {
 // with a positive control so a handler that rejected everything cannot pass.
 func TestHandleTaskStatus_AcceptsPerHiveKeyOnly(t *testing.T) {
 	newSrv := func() *HubServer {
-		s := NewHubServer(0, slog.Default(), "test", "v2")
+		s := newHubServerForTest(t)
 		s.registry.Hives = []RegistryEntry{{ID: "hive-1", Name: "TestHive", Online: true}}
 		return s
 	}
@@ -538,7 +537,7 @@ func TestHandleTaskStatus_AcceptsPerHiveKeyOnly(t *testing.T) {
 // --- regPath tests ---
 
 func TestRegPath_ReturnsNonEmpty(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	p := srv.regPath()
 	if p == "" {
 		t.Error("regPath() returned empty string")

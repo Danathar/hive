@@ -1,7 +1,6 @@
 package hub
 
 import (
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,7 +12,7 @@ import (
 // (reached via heartbeat, not hub-kubectl) show real token consumption on the
 // My Hives token column.
 func TestHeartbeatStoresTokenTotal(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.setHubSecret("")
 
 	const wantTokens = int64(1234567)
@@ -49,7 +48,7 @@ func TestHeartbeatStoresTokenTotal(t *testing.T) {
 // TestHeartbeatTokenTotalClamped verifies the token total is clamped to a sane
 // maximum so a corrupt/hostile spoke cannot inject an absurd value.
 func TestHeartbeatTokenTotalClamped(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.setHubSecret("")
 
 	payload := `{

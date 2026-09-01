@@ -18,7 +18,7 @@ func bulkTestHub(t *testing.T) *HubServer {
 	cleanup := helperSetupTempDirs(t)
 	t.Cleanup(cleanup)
 	// NewHubServer -> registerSaaSRoutes already wires the bulk route.
-	return NewHubServer(0, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), "test", "v2")
+	return newHubServerForTest(t, withHubLogger(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))))
 }
 
 // bulkSeedHive writes a hosted hive owned by owner into the temp SaaS store,

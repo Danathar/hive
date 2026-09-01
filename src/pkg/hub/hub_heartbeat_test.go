@@ -325,7 +325,7 @@ func TestSendHeartbeatAutoUpgradeInPayload(t *testing.T) {
 }
 
 func TestHeartbeatNoUpgradeToForHubManagedHives(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.setHubSecret("")
 
 	// Simulate a heartbeat from a spoke with auto_upgrade=true
@@ -360,7 +360,7 @@ func TestHeartbeatNoUpgradeToForHubManagedHives(t *testing.T) {
 }
 
 func TestHeartbeatUpgradeToForSpokeManaged(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.setHubSecret("")
 
 	// Spoke declares auto_upgrade but no SaaS hive exists on hub

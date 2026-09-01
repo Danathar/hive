@@ -2,7 +2,6 @@ package hub
 
 import (
 	"encoding/json"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -139,7 +138,7 @@ func TestWhoamiUnauthenticated(t *testing.T) {
 func TestWhoamiIsGETOnly(t *testing.T) {
 	cleanup := helperSetupTempDirs(t)
 	defer cleanup()
-	s := NewHubServer(0, slog.Default(), "", "")
+	s := newHubServerForTest(t, withHubIdentity("", ""))
 	req := httptest.NewRequest(http.MethodPost, "https://hive.kubestellar.io/api/saas/whoami", nil)
 	rec := httptest.NewRecorder()
 	s.mux.ServeHTTP(rec, req)
