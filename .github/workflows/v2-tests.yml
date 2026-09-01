@@ -202,10 +202,33 @@ jobs:
           go-version: '1.25'
           cache-dependency-path: src/go.sum
 
+      # tmux is what makes HIVE_TEST_REQUIRE_BEHAVIOURAL legitimate below.
+      # ubuntu-latest happens to ship it, but "happens to" is not a guarantee —
+      # a runner image change would silently turn ~50 pkg/agent tests back into
+      # skips, which is the exact failure #5388 exists to prevent. Install it
+      # explicitly and fail the job if it is absent, so the flag below is
+      # asserting something this lane actually enforces.
+      - name: Install tmux (precondition for the behavioural gate)
+        run: |
+          set -euo pipefail
+          if ! command -v tmux >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq tmux
+          fi
+          tmux -V
+
       - name: Test slice of pkg/agent
         env:
           IDX: ${{ matrix.idx }}
           TOTAL: ${{ strategy.job-total }}
+          # This lane GUARANTEES the preconditions the pkg/agent skips gate on:
+          # tmux is installed and verified above, and the rest are t.TempDir()
+          # writes and TestMain-built fixtures. So a skip at a converted site
+          # here means the test broke, not that the environment is unsuitable —
+          # make it fatal (#5388). Only sites judged guaranteed were converted;
+          # genuine capability gates (tmuxAvailable() itself) stay permissive,
+          # matching the shell half's treatment of docker/tmux gates.
+          HIVE_TEST_REQUIRE_BEHAVIOURAL: '1'
         run: |
           set -o pipefail
           # -list compiles the test binary (cached for the run below) and
