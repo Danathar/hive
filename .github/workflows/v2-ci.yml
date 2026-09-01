@@ -647,6 +647,31 @@ jobs:
         env:
           HIVE_TEST_REQUIRE_BEHAVIOURAL: '1'
         run: bash src/deploy/test_entrypoint_system_gitconfig.sh
+
+      # #5529: this suite was referenced by NO workflow at all — not v2-ci.yml,
+      # not any specialised lane — so it had never run in CI. It passes 8/0, so
+      # nothing was broken; the point is that the Copilot token-persistence
+      # symlinks it guards were not being checked either. Those symlinks are a
+      # recurring incident surface: a lost ~/.copilot -> /data/home/.copilot
+      # link drops the CLI's stored token on every container restart, which
+      # presents as an agent that silently stops authenticating rather than as
+      # anything that fails loudly.
+      #
+      # It reads entrypoint.sh and bin/agent-launch.sh from the checkout, so it
+      # needs no runtime and belongs in this lane rather than a container one.
+      - name: Entrypoint Copilot token symlink contract (#5529)
+        working-directory: .
+        run: bash src/deploy/test_entrypoint_symlinks.sh
+
+      # The guard that keeps the omission above from recurring: every
+      # src/deploy/test_*.sh must be named by at least one workflow. This is
+      # the src/deploy/ sibling of bin/test_bin_suites_wired.sh (#4363).
+      #
+      # It is registered here, which is also what makes it pass its own check —
+      # exempting itself would be the hole it exists to close.
+      - name: Every src/deploy/ test suite is wired into a workflow (#5529)
+        working-directory: .
+        run: bash src/deploy/test_deploy_suites_wired.sh
   create-issue-on-failure:
     if: failure() && github.event_name == 'push' && github.ref == 'refs/heads/v2'
     runs-on: ubuntu-latest
