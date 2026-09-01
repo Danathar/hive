@@ -347,6 +347,25 @@ type model struct {
 	// different facts: the header shows a dash for both, and only the latter
 	// should reach the pane as a frame.
 	governorLoaded bool
+
+	// tokenUsage and costSummary are the last successful /api/tokens and
+	// /api/cost reads, joined into one frame by tokensMsg (T30).
+	//
+	// TOKENS ARE PRIMARY, COST IS OPTIONAL, and the two flags below are what
+	// encode that. tokensLoaded gates delivery entirely: with no successful
+	// count read there is nothing to draw, so a token failure leaves the pane
+	// exactly as it was. costLoaded gates only the dollar columns, so a cost
+	// failure still delivers fresh counts — every row simply renders "—".
+	//
+	// costLoaded is CLEARED, not held, when a cost read fails, and that is the
+	// one place this differs from the governor cache above. A held governor
+	// mode is still true of the hive; a held dollar estimate would be attached
+	// to token counts that have since moved, and a cost-per-agent that no
+	// longer corresponds to the row it sits on is worse than an honest dash.
+	tokenUsage   client.TokenUsage
+	tokensLoaded bool
+	costSummary  client.CostSummary
+	costLoaded   bool
 }
 
 // newModel returns the root model in its initial state. Unexported because the
@@ -416,6 +435,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// rather than falling through to the broadcast below is the mechanism:
 		// the panes never see the error, so they never have to decide whether
 		// to clear their data, and the previous frame simply persists.
+		//
+		// The one exception is the cost read, and it is an exception in the
+		// same direction: a failed cost read INVALIDATES the estimate rather
+		// than preserving it, because the counts it was priced against are
+		// about to be replaced by this same poll's token read, and a dollar
+		// figure attached to a row whose counts have moved is worse than a
+		// dash. The re-delivery is what makes that hold REGARDLESS OF ARRIVAL
+		// ORDER: the two Cmds race, so a frame built by the token result that
+		// arrived first would still be carrying the previous poll's costs, and
+		// the pane would show a stale estimate until the next tick. Rebuilding
+		// here clears it in the same frame instead. It is skipped before the
+		// first successful token read, when there is no frame to rebuild.
+		if msg.source == costFetchSource {
+			hadCost := m.costLoaded
+			m.costLoaded = false
+			if hadCost && m.tokensLoaded {
+				return m.broadcastTokens()
+			}
+		}
 		return m, nil
 	case sseOpenMsg:
 		return m.handleSSEOpen(msg)
@@ -453,6 +491,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m.broadcastGovernor()
+	case tokenUsageMsg:
+		// Cache first, then deliver — the frame is built from the cache so it
+		// carries whatever cost is currently known, not just what this fetch
+		// knew (which is none). An all-zero usage document is stored as a real
+		// observation: tokensLoaded is what turns the pane's "waiting for data"
+		// into a loaded zero-usage table, and a hive that has burned nothing is
+		// entitled to that frame.
+		m.tokenUsage = msg.usage
+		m.tokensLoaded = true
+		return m.broadcastTokens()
+	case costSummaryMsg:
+		m.costSummary = msg.summary
+		m.costLoaded = true
+		if !m.tokensLoaded {
+			// Cost answered before any count read did. There is no frame to
+			// send: rows come from /api/tokens, so a TokensMsg now would be a
+			// loaded pane with no rows and a fleet total of zero — which the
+			// pane cannot tell from a hive that has genuinely spent nothing.
+			// The estimate is cached and the first token read delivers both.
+			return m, nil
+		}
+		return m.broadcastTokens()
 	case hiveIDMsg:
 		// Header-only, so no pane delivery. An empty id is stored as-is: the
 		// hive genuinely has no configured identity and the header says so.
@@ -629,6 +689,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // that can be built.
 func (m model) broadcastGovernor() (tea.Model, tea.Cmd) {
 	next, cmd := m.broadcast(m.governorMsg())
+	return next, cmd
+}
+
+// broadcastTokens delivers the joined token/cost frame (T30). Like
+// broadcastGovernor it exists so every delivery goes through the single
+// projection in tokensMsg rather than assembling a frame at each call site.
+func (m model) broadcastTokens() (tea.Model, tea.Cmd) {
+	next, cmd := m.broadcast(m.tokensMsg())
 	return next, cmd
 }
 
