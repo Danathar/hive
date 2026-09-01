@@ -301,6 +301,35 @@ jobs:
         working-directory: .
         run: bash bin/test_kick_governor.sh
 
+      # bin/merge-gate.sh reads actionable.json (enumerate-actionable.sh's
+      # output) and writes merge-eligible.json — the ONE file agents are told
+      # to trust before running `gh pr merge`. Every CI-check/mergeable/hold-
+      # label/author gate that decides "safe to merge" lives in this one
+      # script, called from conflict-sweeper.sh, gh-wrapper.sh and kick-
+      # agents.sh, and it had NO tests. This EXECUTES the gate against a stub
+      # gh (canned `pr checks` TSV and `pr view --json` fixtures) and asserts
+      # on the written JSON's eligible/not_ready split and block_reasons, with
+      # a positive control beside every exclusion so a gate that admits
+      # everything cannot pass. Runs in ~1s, no network.
+      - name: merge-gate contract tests
+        working-directory: .
+        run: bash bin/test_merge_gate.sh
+
+      # bin/gh-rate-check.sh scans agent tmux panes for GitHub API rate-limit
+      # text and decides which agents to PAUSE and for how long — called from
+      # kick-agents.sh every cycle. A regression here either stops pausing
+      # agents during a real rate limit (burns the fleet's shared quota
+      # faster) or pauses agents on a false positive (the script's own header
+      # warns that Claude/Copilot CLI usage-limit text looks similar but is a
+      # DIFFERENT limit). It had NO tests. This EXECUTES the script against
+      # stub tmux/gh/curl and asserts on the governor pause flags, the
+      # pullback state file and the ntfy calls it makes, with positive and
+      # negative controls on the CLI-usage-limit exclusion pattern. Runs in
+      # ~2s, no network (the ntfy curl call is stubbed).
+      - name: gh-rate-check contract tests
+        working-directory: .
+        run: bash bin/test_gh_rate_check.sh
+
       # #4289: git-credential-hive.sh is the fetch/clone AND push credential
       # source for every agent. Its mode block used to exit 1 in ADVISORY/
       # ISSUES_ONLY/NO_GITHUB modes, cutting off every git READ for advisory
