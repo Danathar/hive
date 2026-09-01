@@ -134,6 +134,272 @@
         }
       }
     },
+    "/api/approvals": {
+      "get": {
+        "tags": [
+          "Approvals"
+        ],
+        "summary": "List pending approvals",
+        "description": "Returns the operator-lane approval inbox: pending tool/agent requests awaiting an operator decision, with each row's matching rule re-evaluated against the current rule set. Requires the owner role. When the approval desk is not enabled on this hive, returns enabled=false with an empty list.",
+        "responses": {
+          "200": {
+            "description": "ApprovalsResponse (src/pkg/dashboard/api_approvals.go)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean",
+                      "description": "Whether the approval desk is configured on this hive."
+                    },
+                    "count": {
+                      "type": "integer",
+                      "description": "Pending total (the dashboard badge value)."
+                    },
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "description": "ApprovalRow (src/pkg/dashboard/api_approvals.go).",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "description": "Idempotency key identifying the pending item."
+                          },
+                          "kind": {
+                            "type": "string",
+                            "description": "Request kind (e.g. agent-tool)."
+                          },
+                          "tool": {
+                            "type": "string",
+                            "description": "Tool the verdict queued for review."
+                          },
+                          "agent": {
+                            "type": "string",
+                            "description": "Agent that made the request."
+                          },
+                          "repo": {
+                            "type": "string",
+                            "description": "Repository, when the request is repo-scoped."
+                          },
+                          "number": {
+                            "type": "integer",
+                            "description": "Issue/PR number, when applicable."
+                          },
+                          "title": {
+                            "type": "string",
+                            "description": "Human title for the request."
+                          },
+                          "rationale": {
+                            "type": "string",
+                            "description": "Verdict rationale explaining why this queued."
+                          },
+                          "queued_at": {
+                            "type": "string",
+                            "format": "date-time",
+                            "description": "When the item entered the inbox (UTC)."
+                          },
+                          "acmm_level": {
+                            "type": "integer",
+                            "description": "Hive ACMM level at enqueue time."
+                          },
+                          "rule": {
+                            "type": "string",
+                            "description": "Operator rule that would resolve this item, re-evaluated against the current rule set."
+                          },
+                          "rule_action": {
+                            "type": "string",
+                            "description": "Action that rule asks for."
+                          },
+                          "policy_bug": {
+                            "type": "boolean",
+                            "description": "True when the item queued on a hive at ACMM L6+ (misconfiguration signal)."
+                          }
+                        }
+                      }
+                    },
+                    "rule_chips": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "Distinct rule names across pending items, for filters."
+                    },
+                    "policy_bug_count": {
+                      "type": "integer",
+                      "description": "How many pending items are queued at ACMM L6+."
+                    },
+                    "acmm_level": {
+                      "type": "integer",
+                      "description": "The hive's current ACMM level."
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/approvals/resolve": {
+      "post": {
+        "tags": [
+          "Approvals"
+        ],
+        "summary": "Resolve one pending approval",
+        "description": "Approves or denies a single pending approval by id. Requires the owner role. A replayed resolve returns 409 with the original outcome (the journal prevents re-execution). Returns 404 when the desk is disabled or the id is unknown.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "id",
+                  "approved"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "description": "Pending approval id."
+                  },
+                  "approved": {
+                    "type": "boolean",
+                    "description": "true approves, false denies."
+                  },
+                  "rationale": {
+                    "type": "string",
+                    "description": "Optional operator rationale."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Resolution outcome",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "approved": {
+                      "type": "boolean"
+                    },
+                    "resolved_at": {
+                      "type": "string",
+                      "description": "When the item was resolved."
+                    },
+                    "pending": {
+                      "type": "integer",
+                      "description": "Remaining pending count."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing or invalid body / id"
+          },
+          "404": {
+            "description": "Approval desk disabled or id unknown"
+          },
+          "409": {
+            "description": "Already resolved - body carries the original outcome"
+          }
+        }
+      }
+    },
+    "/api/approvals/bulk": {
+      "post": {
+        "tags": [
+          "Approvals"
+        ],
+        "summary": "Resolve many approvals",
+        "description": "Resolves many pending approvals as N individual resolutions. Partial failure is the normal case (an item may have been resolved by another operator between the list and the click), so the response is a per-item result list. Requires the owner role.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "ids",
+                  "approved"
+                ],
+                "properties": {
+                  "ids": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Pending approval ids."
+                  },
+                  "approved": {
+                    "type": "boolean",
+                    "description": "true approves, false denies."
+                  },
+                  "rationale": {
+                    "type": "string",
+                    "description": "Optional operator rationale applied to each resolution."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Per-item results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "results": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "ok": {
+                            "type": "boolean"
+                          },
+                          "error": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "pending": {
+                      "type": "integer",
+                      "description": "Remaining pending count."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing or invalid body / ids"
+          },
+          "404": {
+            "description": "Approval desk disabled"
+          }
+        }
+      }
+    },
     "/api/status": {
       "get": {
         "tags": [
