@@ -324,4 +324,41 @@ $tmpd/home"
   trap - EXIT
 fi
 
+# ---------------------------------------------------------------------------
+# Every interactive-auth CLI credential dir must be group-writable AND repaired
+# by the ongoing perm guard.
+#
+# This is the drift that broke agy sign-in. .gemini was in no list at all, so
+# agy created it itself at 2750 — group READ-only. Every sign-in then succeeded
+# in-process and evaporated, because the agent UID could not write the token
+# file. Nothing reported a permission problem; the operator saw four logins in
+# a row appear to fail.
+#
+# A dir being mkdir'd and chowned is NOT enough, which is why this is separate
+# from the sweep check above: the credential file itself is rewritten 0600 by
+# the CLI on every refresh (copilot's config.json, agy's oauth token), so a dir
+# that is not in the ONGOING guard silently re-locks after the first refresh.
+echo
+echo "Interactive-auth credential dirs are group-writable and guarded:"
+for cred_dir in .claude .copilot .codex .gemini .bob; do
+  path="/data/home/$cred_dir"
+
+  if grep -qE "chmod (2770|2775) [^&|;]*${path}( |$|/)" "$ENTRYPOINT"; then
+    ok "$cred_dir is created group-writable + setgid"
+  else
+    bad "$cred_dir has no 'chmod 277x' at its creation site" \
+        "an agent UID cannot write it; a CLI sign-in there succeeds in memory and is lost on exit"
+  fi
+
+  # The ongoing repair: either an inotify watcher on the dir, or the polling
+  # slow-cycle chmod -R. One is enough; neither is the bug.
+  if grep -qE "inotifywait [^|]*${path}/" "$ENTRYPOINT" || \
+     grep -qE "chmod -R g\+rwX [^&|;]*${path}( |$)" "$ENTRYPOINT"; then
+    ok "$cred_dir is repaired by the ongoing perm guard"
+  else
+    bad "$cred_dir is never re-opened after the CLI rewrites its credential 0600" \
+        "add it to the inotify guard or the polling slow-cycle chmod, beside .claude/.codex"
+  fi
+done
+
 hive_test_report

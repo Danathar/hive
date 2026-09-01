@@ -814,7 +814,7 @@ if [ "$(id -u)" = "0" ]; then
   # Shared CLI auth/cache lives in /data/home (persistent volume).
   # Make it group-writable so all agent UIDs (node group) can use it.
   # The manager sets HOME=/data/home for agent tmux sessions.
-  mkdir -p /data/home/.config /data/home/.copilot /data/home/.claude/session-env /data/home/.codex /data/home/.bob/settings /data/config/github-copilot /home/dev/.config
+  mkdir -p /data/home/.config /data/home/.copilot /data/home/.claude/session-env /data/home/.codex /data/home/.gemini /data/home/.bob/settings /data/config/github-copilot /home/dev/.config
   # $HOME itself must be group-writable, not just its children. bob calls
   # mkdirSync('$HOME/.bob') on first run, which needs write on /data/home — a
   # 0755 root-owned $HOME makes that EACCES even though every child dir below
@@ -838,6 +838,22 @@ if [ "$(id -u)" = "0" ]; then
   # codex backend fails with "Permission denied" initializing state_N.sqlite.
   chmod 2775 /data/home/.codex 2>/dev/null || true
   chown -R dev:node /data/home/.codex 2>/dev/null || true
+  # Antigravity (`agy`) persists its OAuth session to
+  # $HOME/.gemini/antigravity-cli/antigravity-oauth-token. Pre-create the tree
+  # group-writable + setgid for the same reason as .codex above.
+  #
+  # This was measured, not assumed. On a live hive .gemini existed at 2750 —
+  # group READ-only, because nothing here had ever created or repaired it and
+  # agy made it itself. The agent UID could not write the directory, so every
+  # sign-in succeeded in-process and then evaporated: `agy models` in any new
+  # process reported "Please sign in", and each hive restart lost the session
+  # again. The operator saw four consecutive logins "fail" with no error that
+  # named a permission. One chmod produced the token file immediately.
+  #
+  # 2770 rather than .codex's 2775: this directory holds an OAuth token, so it
+  # follows .copilot/.bob in keeping world off it.
+  chmod 2770 /data/home/.gemini 2>/dev/null || true
+  chown -R dev:node /data/home/.gemini 2>/dev/null || true
   # bob writes installation_id, settings.json, trustedFolders.json and tmp/ under
   # $HOME/.bob, plus custom modes under $HOME/.bob/settings. Pre-create both
   # group-writable + setgid so the FIRST agent to launch (a 2001+ UID in group
@@ -859,7 +875,7 @@ if [ "$(id -u)" = "0" ]; then
   # too so that gap cannot reopen.
   NEED_PERM_FIX=false
   if [ -d "/data/home/.copilot" ] && [ -d "/data/home/.claude" ]; then
-    for perm_dir in /data/home /data/home/.copilot /data/home/.claude /data/home/.bob; do
+    for perm_dir in /data/home /data/home/.copilot /data/home/.claude /data/home/.gemini /data/home/.bob; do
       # Missing dir → repair. Default 755 → repair (no group-write/setgid).
       DIR_PERMS=$(stat -c '%a' "$perm_dir" 2>/dev/null || echo "755")
       case "$DIR_PERMS" in
@@ -920,7 +936,19 @@ if [ "$(id -u)" = "0" ]; then
         chown -R dev:node /data/home/.codex 2>/dev/null
       done
     ) &
-    echo "[entrypoint] inotify perm guard active (copilot + claude + codex)"
+    (
+      # agy writes antigravity-oauth-token 0600 owned by the agent that signed
+      # in, which locks every other agent UID out of a credential the shared
+      # CLI home exists to share — the same shape as copilot's config.json
+      # above. Re-opening it to the node group is what makes ONE agy login
+      # serve the fleet instead of one login per agent.
+      while inotifywait -qq -e close_write,moved_to,create /data/home/.gemini/ 2>/dev/null; do
+        chmod -R g+rwX /data/home/.gemini 2>/dev/null
+        find /data/home/.gemini -type d -exec chmod g+s {} + 2>/dev/null
+        chown -R dev:node /data/home/.gemini 2>/dev/null
+      done
+    ) &
+    echo "[entrypoint] inotify perm guard active (copilot + claude + codex + gemini)"
   fi
   (
     CYCLE=0
@@ -931,8 +959,8 @@ if [ "$(id -u)" = "0" ]; then
       # Slow cycle: fix entire /data/home tree every 5 min (new dirs from agents)
       CYCLE=$((CYCLE + 1))
       if [ "$CYCLE" -ge 60 ]; then
-        chmod -R g+rwX /data/home/.cache /data/home/.copilot /data/home/.claude /data/home/.codex /data/home/.bob 2>/dev/null
-        find /data/home/.cache /data/home/.claude /data/home/.codex /data/home/.bob -type d -exec chmod g+s {} + 2>/dev/null
+        chmod -R g+rwX /data/home/.cache /data/home/.copilot /data/home/.claude /data/home/.codex /data/home/.gemini /data/home/.bob 2>/dev/null
+        find /data/home/.cache /data/home/.claude /data/home/.codex /data/home/.gemini /data/home/.bob -type d -exec chmod g+s {} + 2>/dev/null
         CYCLE=0
       fi
       sleep 5
