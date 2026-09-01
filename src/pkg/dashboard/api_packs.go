@@ -476,16 +476,38 @@ func (s *Server) handlePackApply(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.auditFromRequest(r, "apply_pack", auditDetail("level", levelStr, "name", result.Name), "")
+
+	// This path applied the pack — creating agents, pausing and resuming others
+	// — but never asked for a status rebuild, so the dashboard kept rendering
+	// the pre-apply snapshot until some unrelated broadcast happened to land.
+	// Kick the rebuild and hand back the StatusSeq floor so the browser can
+	// reject any snapshot built before this apply (#5492).
+	floor := s.refreshAndPersistSeq()
+
+	// packAgents mirrors handlePackSetLevel: the dashboard reads it to scope
+	// ACMM section visibility. It was absent here, so the client always fell
+	// back to an empty list after an apply.
+	var packAgentNames []string
+	if pack, err := config.ACMMPackByLevel(level); err == nil {
+		for _, a := range pack.Agents {
+			if !a.Hidden {
+				packAgentNames = append(packAgentNames, a.Name)
+			}
+		}
+	}
+
 	jsonResponse(w, map[string]interface{}{
-		"ok":      true,
-		"status":  "applied",
-		"level":   level,
-		"name":    result.Name,
-		"created": result.Created,
-		"updated": result.Updated,
-		"skipped": result.Skipped,
-		"paused":  result.Paused,
-		"resumed": result.Resumed,
+		"ok":           true,
+		"status":       "applied",
+		"level":        level,
+		"name":         result.Name,
+		"created":      result.Created,
+		"updated":      result.Updated,
+		"skipped":      result.Skipped,
+		"paused":       result.Paused,
+		"resumed":      result.Resumed,
+		"packAgents":   packAgentNames,
+		"minStatusSeq": floor,
 		// Exact before/after values let the dashboard warn before a restart
 		// activates a different evaluation cadence.
 		"governor_changes": result.GovernorChanges,
@@ -561,7 +583,13 @@ func (s *Server) handlePackSetLevel(w http.ResponseWriter, r *http.Request) {
 	s.deps.AgentMgr.SyncModeFiles(level)
 
 	s.persistOnly()
-	s.refreshAsync()
+	// refreshAfterMutationSeq (not the bare refreshAsync) so the mutation epoch
+	// is bumped and the caller gets the StatusSeq floor. Without the floor, the
+	// dashboard's post-write refetch can be served a snapshot built before this
+	// level change and repaint the PREVIOUS level — the operator sees L4 after
+	// moving to L5 and may re-apply, triggering a second fleet-wide reconcile
+	// (#5492).
+	floor := s.refreshAfterMutationSeq()
 
 	pack, packLookupErr := config.ACMMPackByLevel(level)
 	var packAgentNames []string
@@ -624,6 +652,7 @@ func (s *Server) handlePackSetLevel(w http.ResponseWriter, r *http.Request) {
 		"governor_changes": packResult.GovernorChanges,
 		"paused":           paused,
 		"resumed":          resumed,
+		"minStatusSeq":     floor,
 	})
 }
 

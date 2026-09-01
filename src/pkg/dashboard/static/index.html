@@ -16344,9 +16344,17 @@ function burnAreaChart() {
         const skipped = (data.skipped || []).length;
         const governorChanges = formatGovernorChanges(data.governor_changes);
         closeACMMDialog();
-        window._acmmOverride = { level: level, packAgents: data.packAgents || [] };
+        // Render the level the SERVER confirmed, never the one we asked for
+        // (#5492). We only reach here on a 2xx, so the write is committed; the
+        // body is authoritative. Falling back to `level` keeps an older spoke
+        // that omits the field working.
+        const confirmedLevel = (data && Number.isFinite(Number(data.level))) ? Number(data.level) : level;
+        // Drop any status snapshot built before this apply, so the async
+        // rebuild's predecessor cannot repaint the previous level (#4348).
+        noteStatusMutation(data.minStatusSeq);
+        window._acmmOverride = { level: confirmedLevel, packAgents: data.packAgents || [] };
         if (window._lastStatus) {
-          window._lastStatus.acmmLevel = level;
+          window._lastStatus.acmmLevel = confirmedLevel;
           window._lastStatus.acmmLevelConfigured = true;
           window._lastStatus.acmmPackAgents = data.packAgents || [];
           render(window._lastStatus);
@@ -16381,14 +16389,17 @@ function burnAreaChart() {
         }
         const governorChanges = formatGovernorChanges(data.governor_changes);
         closeACMMDialog();
-        window._acmmOverride = { level: level, packAgents: data.packAgents || [] };
+        // Server-confirmed level only — see applyACMMPack above (#5492).
+        const confirmedLevel = (data && Number.isFinite(Number(data.level))) ? Number(data.level) : level;
+        noteStatusMutation(data.minStatusSeq);
+        window._acmmOverride = { level: confirmedLevel, packAgents: data.packAgents || [] };
         if (window._lastStatus) {
-          window._lastStatus.acmmLevel = level;
+          window._lastStatus.acmmLevel = confirmedLevel;
           window._lastStatus.acmmLevelConfigured = true;
           window._lastStatus.acmmPackAgents = data.packAgents || [];
           render(window._lastStatus);
         }
-        showToast(`ACMM level set to L${level} (${name})` + (governorChanges ? ' — governor settings changed' : ''), governorChanges ? 'info' : 'success');
+        showToast(`ACMM level set to L${confirmedLevel} (${name})` + (governorChanges ? ' — governor settings changed' : ''), governorChanges ? 'info' : 'success');
         if (governorChanges) await hiveAlert(governorChanges, 'Governor settings changed');
         _acmmPacks = null;
       } catch (err) {
@@ -22128,6 +22139,10 @@ function burnAreaChart() {
           !(await ensureGatewayMethodConfigured(dirty.general.cliPinValue))) return;
       const base = _configState.type === 'governor' ? '/api/config/governor' : `/api/config/agent/${_configState.agent}`;
       let success = true;
+      // Set once a cadences section has been accepted by the server, so the
+      // success path knows to repaint the governor cadence matrix even when
+      // no `general` field changed (#5492).
+      let savedCadences = false;
       for (const [section, values] of Object.entries(dirty)) {
         try {
           if (_configState.type === 'governor' && section === 'general' && values.hiveId !== undefined) {
@@ -22202,6 +22217,19 @@ function burnAreaChart() {
               body: JSON.stringify(values)
             });
             if (!res.ok) throw new Error(await saveErrorMessage(res));
+            if (section === 'cadences') {
+              // A cadence write kicks an ASYNC status rebuild server-side, so
+              // the refetch below can be served the cached pre-write snapshot
+              // and repaint the OLD cadence — the operator waits for a later
+              // broadcast to see their own change (#5492). Raise the
+              // stale-snapshot floor from the write ack so any snapshot built
+              // before this mutation is discarded instead of rendered.
+              // Reached only after the !res.ok throw above, so a failed write
+              // never advances the floor.
+              const cadenceAck = await res.json().catch(() => ({}));
+              noteStatusMutation(cadenceAck.minStatusSeq);
+              savedCadences = true;
+            }
             if (_configState.type === 'governor' && section === 'litellm') {
               // Saving the LiteLLM tab auto-runs the live connection test
               // server-side; surface its result exactly like the Test
@@ -22258,8 +22286,48 @@ function burnAreaChart() {
           renderGovernor(lastData.governor || {}, lastData.cadenceMatrix || [], lastData);
           renderTokens(lastData.tokens || {});
         }
-        fetch('/api/status').then(r => r.json()).then(render).catch(() => {});
+        if (savedCadences) {
+          // A cadence-only save has no `general` block, so the optimistic
+          // block above is skipped entirely and nothing repaints the governor
+          // cadence matrix. The matrix is server-derived (cadenceMatrix), so
+          // there is no confirmed value to patch in locally — instead pull the
+          // post-mutation snapshot, which the raised floor guarantees is not a
+          // pre-write one (#5492).
+          refreshStatusUntilFresh();
+        } else {
+          fetch('/api/status').then(r => r.json()).then(render).catch(() => {});
+        }
       }
+    }
+
+    // Poll /api/status until a snapshot at or above the stale-snapshot floor
+    // arrives, then render it. The server rebuild kicked by a config write is
+    // asynchronous, so the first refetch usually still returns the cached
+    // pre-write snapshot; render() drops it via the floor guard and this
+    // retries briefly rather than leaving the panel stale until the next
+    // broadcast (#5492).
+    //
+    // This never invents a value: every render is a real server snapshot. If
+    // the rebuild never produces a fresh one, we simply stop retrying and the
+    // regular SSE stream repaints whenever it next delivers — the operator is
+    // never shown an unconfirmed value.
+    var STATUS_FRESH_RETRY_MS = 400;
+    var STATUS_FRESH_MAX_ATTEMPTS = 12;
+    function refreshStatusUntilFresh(attempt) {
+      const n = attempt || 0;
+      fetch('/api/status')
+        .then(r => r.json())
+        .then(data => {
+          // render() itself enforces the floor, but we need to know whether it
+          // took, so test the same condition here before delegating.
+          const seq = (data && data.statusSeq != null) ? Number(data.statusSeq) : null;
+          const stale = seq != null && seq < _statusSeqFloor;
+          if (!stale) { render(data); return; }
+          if (n + 1 < STATUS_FRESH_MAX_ATTEMPTS) {
+            setTimeout(() => refreshStatusUntilFresh(n + 1), STATUS_FRESH_RETRY_MS);
+          }
+        })
+        .catch(() => {});
     }
 
     // --- Chat rich formatting ---
