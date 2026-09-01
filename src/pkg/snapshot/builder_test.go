@@ -10,6 +10,7 @@ import (
 
 	"log/slog"
 
+	"github.com/kubestellar/hive/internal/testutil"
 	"github.com/kubestellar/hive/pkg/dashboard"
 )
 
@@ -272,13 +273,25 @@ func TestBuild_MultipleCalls_CreateMultipleTimestampedFiles(t *testing.T) {
 		}
 
 		if i < calls-1 {
-			time.Sleep(time.Second)
+			waitForNextSecond(t)
 		}
 	}
 
 	if len(seen) < calls {
 		t.Errorf("expected %d distinct timestamped files, got %d", calls, len(seen))
 	}
+}
+
+// waitForNextSecond blocks until the wall clock has crossed a second boundary,
+// so the next Build gets a distinct second-granular status-<ts>.json name.
+// Polling for the boundary costs on average half the fixed 1s sleep it
+// replaces, and never less than what distinctness actually requires.
+func waitForNextSecond(t *testing.T) {
+	t.Helper()
+	start := time.Now().UTC().Truncate(time.Second)
+	testutil.Eventually(t, 2*time.Second, func() bool {
+		return time.Now().UTC().Truncate(time.Second).After(start)
+	}, "wall clock did not advance past %s", start.Format(time.RFC3339))
 }
 
 func TestBuild_EmptyAgents_Succeeds(t *testing.T) {
@@ -571,7 +584,7 @@ func TestBuild_SecondCall_UpdatesLatestJSON(t *testing.T) {
 		t.Fatalf("first Build() error: %v", err)
 	}
 
-	time.Sleep(time.Second)
+	waitForNextSecond(t)
 
 	s2 := minimalStatus()
 	s2.Governor.Mode = "SURGE"

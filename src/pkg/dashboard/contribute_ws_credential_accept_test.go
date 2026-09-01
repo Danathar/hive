@@ -35,6 +35,7 @@ import (
 func wsPipe(t *testing.T) (server *websocket.Conn, client *websocket.Conn) {
 	t.Helper()
 	connReady := make(chan struct{})
+	handlerDone := make(chan struct{})
 	upgrader := websocket.Upgrader{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, err := upgrader.Upgrade(w, r, nil)
@@ -44,10 +45,12 @@ func wsPipe(t *testing.T) (server *websocket.Conn, client *websocket.Conn) {
 		}
 		server = c
 		close(connReady)
-		// Keep the handler alive so the conn stays open for the reads below.
-		time.Sleep(3 * time.Second)
+		// Keep the handler alive until the test is done with the conn; released
+		// by the cleanup below (LIFO: runs before srv.Close) rather than a timer.
+		<-handlerDone
 	}))
 	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(handlerDone) })
 
 	c, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http"), nil)
 	if err != nil {

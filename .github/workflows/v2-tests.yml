@@ -268,7 +268,10 @@ jobs:
           # Anchored: drops exactly pkg/hub and exactly pkg/agent — the sliced
           # jobs run those two bare package paths. A subpackage of either
           # would land here, never nowhere. pkg/hubbackup et al. stay here.
-          go list ./pkg/... ./cmd/... \
+          # ./internal/... carries the shared test helpers (internal/testutil)
+          # and their contract tests, such as the time.Sleep ratchet in
+          # sleep_ratchet_test.go.
+          go list ./pkg/... ./cmd/... ./internal/... \
             | grep -Ev '^github\.com/kubestellar/hive/pkg/hub$' \
             | grep -Ev '^github\.com/kubestellar/hive/pkg/agent$' \
             | LC_ALL=C sort > rest-pkgs.txt
