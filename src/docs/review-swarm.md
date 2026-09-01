@@ -48,6 +48,43 @@ When `review.require_approval` is false or omitted, `merge-eligible.json` is pro
 
 `review.fan_out` is separately defaulted to false. When both `require_approval` and `fan_out` are true, the governor eval cycle plans review kicks for agent-authored PRs that do not yet have a fresh aggregate verdict for their current head SHA.
 
+## Reviewer selection
+
+An agent is considered review-capable if it is enabled, not paused, and not on-demand,
+**and** one of the following is true:
+
+1. **Explicit list** — `review.reviewer_agents` names the agent exactly. When this list is
+   non-empty, only agents on it qualify; the keyword scan below is skipped entirely.
+2. **Keyword scan** — the string `review` (case-insensitive) appears in any of:
+   the agent's name, `role`, `aliases`, `lane_keywords`, or `detect_keywords`.
+
+The dashboard security summary (`GET /api/security`) exposes a `reviewCapableAgents`
+count. If `review.require_approval` is true and that count is zero, the dashboard
+shows a warning:
+
+> Review approval is required, but no enabled review-capable agents were detected.
+
+To make an agent review-capable without the explicit list, set its `role` or add a
+keyword:
+
+```yaml
+agents:
+  my-reviewer:
+    engine: claude
+    role: reviewer        # contains "review" → qualifies automatically
+```
+
+Or use the explicit list to name any agent regardless of its keywords:
+
+```yaml
+review:
+  require_approval: true
+  fan_out: true
+  reviewer_agents: [my-reviewer, scanner]
+```
+
+Source: `dashboardAgentReviewCapable` in `src/pkg/dashboard/status_builder.go`.
+
 ## Dispatch and prompt construction
 
 `pkg/review` provides prompt builders for one prompt per perspective plus a sequential fallback prompt. These prompts instruct review-capable agents to emit the extended AgentReport JSON shape above.
