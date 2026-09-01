@@ -36,6 +36,10 @@ on:
       - 'Justfile'
       - 'dashboard/openapi.json'
       - '.github/workflows/v2-tests.yml'
+      # The slowest-tests reporter runs in every shard; an edit to it must run
+      # the job that executes it (same rule dashboard-lint applies to its
+      # checker, #5388).
+      - '.github/scripts/slowest-tests.sh'
 
 permissions:
   contents: read
@@ -59,7 +63,14 @@ concurrency:
 # all run concurrently inside one `go test` invocation. Round-robin over the
 # 840 sorted agent test names measures a worst slice of ~127s at N=5. So:
 #
-#   test (hub)         ./pkg/hub/...          its own job, starts immediately
+#   test (hub i/H)     ./pkg/hub              H jobs, each running a
+#                                             deterministic 1/H slice of the
+#                                             package's test FUNCTIONS via -run
+#                                             (one ~2,700-function package at
+#                                             ~125s serial: it was the PR gate's
+#                                             critical path until sliced the
+#                                             same way as agent) — starts
+#                                             immediately, self-partitions
 #   test (agent i/N)   ./pkg/agent            N jobs, each running a
 #                                             deterministic 1/N slice of the
 #                                             package's test FUNCTIONS via -run
@@ -72,20 +83,44 @@ concurrency:
 #   test (rest i/R)    one bucket each
 #
 # Every shard uses the exact same flags: -short -race -count=1 (untouched),
-# plus -coverprofile for the parse-only coverage gate below.
+# plus -coverprofile for the parse-only coverage gate below, plus:
+#  - -v, with the `=== RUN/PAUSE/CONT` lines stripped before tee, so the log
+#    carries a per-test-function duration and .github/scripts/slowest-tests.sh
+#    can rank the slice's slowest tests into the step summary. That table is
+#    how a slow shard gets diagnosed without a local reproduction.
+#  - -shuffle=on on every NON-pull_request run (the hourly schedule and manual
+#    dispatches). Order-dependent tests (#5102's golden splash race, the
+#    package-var seams in #4795) pass in a fixed order and only fail when the
+#    order moves; shuffling the post-merge net finds them and files an issue
+#    with the seed in the log, while the PR gate stays deterministic so a
+#    contributor is never failed by an ordering their change did not cause.
 #
 # Completeness invariants (nothing can be silently untested):
-#  - rest buckets are computed by EXCLUDING hub/agent from the full `go list`
-#    and PARTITIONING the remainder — a new package always lands in a bucket,
-#    a removed one just disappears from its bucket.
-#  - agent slices partition the sorted `go test -list` output round-robin —
+#  - rest buckets are computed by EXCLUDING exactly pkg/hub and pkg/agent from
+#    the full `go list` and PARTITIONING the remainder — a new package always
+#    lands in a bucket (a future subpackage of either sliced package included,
+#    since the slices run the bare package path), a removed one just
+#    disappears from its bucket.
+#  - hub and agent slices partition the sorted `go test -list` output round-robin —
 #    a new test function always lands in a slice. Anchored full-name regexes
 #    (^(A|B|...)$) make slices pairwise disjoint and jointly exhaustive.
 #  - the aggregate `test` job (the required-check name) fails closed: it
 #    requires list-packages AND every shard to succeed.
 jobs:
+  # pkg/hub is one package of ~2,700 test functions that takes ~125s serially
+  # under -race — after #4118 sliced pkg/agent, this single job was the PR
+  # gate's critical path (~3.3 min wall clock against ~2.4 min for the widest
+  # rest bucket). It is sliced exactly like test-agent below: each job derives
+  # the same sorted `go test -list` output and runs rows where NR mod H ==
+  # idx-1. The coverage job merges the H partial profiles before scoring the
+  # hub floor. Adding a hub test no longer moves the gate's wall clock by its
+  # full duration — only by 1/H of it.
   test-hub:
-    name: test (hub)
+    name: test (hub ${{ matrix.idx }}/3)
+    strategy:
+      fail-fast: false
+      matrix:
+        idx: [1, 2, 3]
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -98,11 +133,28 @@ jobs:
           go-version: '1.25'
           cache-dependency-path: src/go.sum
 
-      - name: Test
+      - name: Test slice of pkg/hub
+        env:
+          IDX: ${{ matrix.idx }}
+          TOTAL: ${{ strategy.job-total }}
         run: |
           set -o pipefail
-          go test ./pkg/hub/... -short -race -count=1 -coverprofile=coverage-hub.out \
-            2>&1 | tee test-hub.log
+          go test ./pkg/hub -short -list '.*' | grep -E '^(Test|Example|Fuzz)' | LC_ALL=C sort > all-tests.txt
+          if [ ! -s all-tests.txt ]; then
+            echo "::error::go test -list produced no test functions for pkg/hub — refusing to run an empty slice (fail closed)"
+            exit 1
+          fi
+          awk -v n="$TOTAL" -v i="$IDX" 'NR % n == i - 1' all-tests.txt > slice.txt
+          echo "slice $IDX/$TOTAL: $(wc -l < slice.txt) of $(wc -l < all-tests.txt) test functions"
+          RUN="^($(paste -sd'|' slice.txt))$"
+          SHUFFLE=""
+          if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then SHUFFLE="-shuffle=on"; fi
+          go test ./pkg/hub -short -race -count=1 -v $SHUFFLE -run "$RUN" -coverprofile=coverage-hub-"$IDX".out \
+            2>&1 | grep --line-buffered -vE '^=== (RUN|PAUSE|CONT) ' | tee test-hub-"$IDX".log
+
+      - name: Slowest tests in this slice
+        if: always()
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/slowest-tests.sh" "hub ${{ matrix.idx }}/3" test-hub-${{ matrix.idx }}.log
 
       # Uploaded even on failure so the coverage job (and humans) can inspect
       # the raw `go test` output. `warn` not `error`: on a compile failure the
@@ -112,10 +164,10 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: test-shard-hub
+          name: test-shard-hub-${{ matrix.idx }}
           path: |
-            src/coverage-hub.out
-            src/test-hub.log
+            src/coverage-hub-${{ matrix.idx }}.out
+            src/test-hub-${{ matrix.idx }}.log
           if-no-files-found: warn
           retention-days: 1
 
@@ -168,8 +220,14 @@ jobs:
           awk -v n="$TOTAL" -v i="$IDX" 'NR % n == i - 1' all-tests.txt > slice.txt
           echo "slice $IDX/$TOTAL: $(wc -l < slice.txt) of $(wc -l < all-tests.txt) test functions"
           RUN="^($(paste -sd'|' slice.txt))$"
-          go test ./pkg/agent -short -race -count=1 -run "$RUN" -coverprofile=coverage-agent-"$IDX".out \
-            2>&1 | tee test-agent-"$IDX".log
+          SHUFFLE=""
+          if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then SHUFFLE="-shuffle=on"; fi
+          go test ./pkg/agent -short -race -count=1 -v $SHUFFLE -run "$RUN" -coverprofile=coverage-agent-"$IDX".out \
+            2>&1 | grep --line-buffered -vE '^=== (RUN|PAUSE|CONT) ' | tee test-agent-"$IDX".log
+
+      - name: Slowest tests in this slice
+        if: always()
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/slowest-tests.sh" "agent ${{ matrix.idx }}/5" test-agent-${{ matrix.idx }}.log
 
       - name: Upload shard coverage artifacts
         if: always()
@@ -207,11 +265,11 @@ jobs:
         id: partition
         run: |
           R=3
-          # Anchored: drops pkg/hub and its subpackages (the hub job runs
-          # ./pkg/hub/...) and exactly pkg/agent (the agent jobs run it).
-          # pkg/hubbackup et al. stay here.
+          # Anchored: drops exactly pkg/hub and exactly pkg/agent — the sliced
+          # jobs run those two bare package paths. A subpackage of either
+          # would land here, never nowhere. pkg/hubbackup et al. stay here.
           go list ./pkg/... ./cmd/... \
-            | grep -Ev '^github\.com/kubestellar/hive/pkg/hub(/|$)' \
+            | grep -Ev '^github\.com/kubestellar/hive/pkg/hub$' \
             | grep -Ev '^github\.com/kubestellar/hive/pkg/agent$' \
             | LC_ALL=C sort > rest-pkgs.txt
           if [ ! -s rest-pkgs.txt ]; then
@@ -291,8 +349,14 @@ jobs:
             exit 1
           fi
           # shellcheck disable=SC2086 # PKGS is a deliberate word-split list
-          go test $PKGS -short -race -count=1 -coverprofile=coverage-rest-${{ matrix.idx }}.out \
-            2>&1 | tee test-rest-${{ matrix.idx }}.log
+          SHUFFLE=""
+          if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then SHUFFLE="-shuffle=on"; fi
+          go test $PKGS -short -race -count=1 -v $SHUFFLE -coverprofile=coverage-rest-${{ matrix.idx }}.out \
+            2>&1 | grep --line-buffered -vE '^=== (RUN|PAUSE|CONT) ' | tee test-rest-${{ matrix.idx }}.log
+
+      - name: Slowest tests in this bucket
+        if: always()
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/slowest-tests.sh" "rest ${{ matrix.idx }}/${{ matrix.total }}" test-rest-${{ matrix.idx }}.log
 
       - name: Upload shard coverage artifacts
         if: always()
@@ -369,7 +433,7 @@ jobs:
           # KEEP IN SYNC with coverage-hourly.yml, which applies the same floors
           # on its hourly scheduled run.
           declare -A PKG_THRESHOLD=(
-            [dashboard]=82   # ~17% is inception tmux watcher + copilot/claude device-flow + /data file I/O + k8s
+            [dashboard]=84   # 86.2% on 2026-09-01; the residue is the inception tmux watcher + copilot/claude device-flow + /data file I/O + k8s
             [hub]=87         # kubectl-shelling + live-GitHub paths; see #2355. Was 89 against v2's 89.9%; v4 measures 87.6%.
             [agent]=89       # pre-existing shortfall inherited from #2350, NOT a new regression. See #2355.
 
@@ -391,7 +455,7 @@ jobs:
             [tracing]=85
             [review]=80
             [retro]=82
-            [github]=88
+            [github]=89      # 91.8% on 2026-09-01
             [hivectl]=88
             [knowledge]=89
             [proxy]=89
@@ -404,10 +468,17 @@ jobs:
             # ("cmd/<name>") so cmd/hivectl can never collide with
             # pkg/hivectl's floor. Recorded just below what v4 measures after
             # #4700/#4719 so the ratchet can turn as CLI tests land.
-            [cmd/bd]=58       # 60.4% after #4700's kb-CLI tests
-            [cmd/hive]=17     # 18.8% after #4719's merge-authz tests; bulk is main()/run-loop wiring
+            # ── Ratchet turned 2026-09-01 ────────────────────────────────────
+            # cmd/bd, cmd/hive, cmd/hive-backup, dashboard, github: NO code
+            #   change — each had drifted 4–20 points above its recorded floor
+            #   (cmd/hive most of all: 18.8 → 37.5 as eval-cycle helpers grew
+            #   tests) and the gate was no longer catching a drop. Re-measured
+            #   on the 2026-09-01 hourly run and moved to ~2–4 points under
+            #   what they hold. cmd/apiproxy is unchanged at 13.9%.
+            [cmd/bd]=75       # 78.8% on 2026-09-01 (60.4% after #4700's kb-CLI tests)
+            [cmd/hive]=35     # 37.5% on 2026-09-01 (18.8% after #4719); bulk is main()/run-loop wiring
             [cmd/apiproxy]=13 # 14.7%
-            [cmd/hive-backup]=68 # 71.1% after #4736's CLI entry-point tests
+            [cmd/hive-backup]=78 # 81.9% on 2026-09-01 (71.1% after #4736's CLI entry-point tests)
           )
 
           # Thin flag-parsing mains with no test files, wrapping packages the
