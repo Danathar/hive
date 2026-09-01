@@ -99,6 +99,23 @@ func (f WatchdogFleet) Observe(name string) (watchdog.Observation, error) {
 	backend := effectiveBackend(agent)
 	running := agent.State == StateRunning
 	authAvailable, authKnown := f.M.AgentAuthState(name, agent.UID, backend, running, needsLogin)
+	// Positive-evidence-only probe (#5291), deliberately separate from
+	// AgentAuthState above: it answers "is this backend demonstrably able to
+	// authenticate?" without letting the pane's own login chrome outrank the
+	// credential. The reconciler needs that unclouded answer to tell a
+	// credential a restart can fix from one only a human can.
+	//
+	// CLAUDE ONLY, and the restriction is the point. credentialFileProves
+	// verifies an EXPIRY only for claude; it answers copilot and codex by the
+	// PRESENCE of a token file, and presence is not proof of usability. The
+	// reconciler uses this to decide whether to page an operator, so a
+	// stale-but-present copilot token reading as "proven" would silence the
+	// alert that is the only thing telling a human their fleet is logged out.
+	// #5291's login detector can live with presence-only evidence because
+	// suppressing a PAUSE hands the pane to the restart heal; suppressing a
+	// PAGE hands it to nobody. Every non-claude backend therefore keeps its
+	// pre-existing behaviour exactly.
+	credentialProven := backend == "claude" && f.M.AgentHasValidCredential(name)
 
 	// StartedAt dates the current launch so the reconciler can suppress dead
 	// verdicts during boot. Copied by value: the field is a pointer the
@@ -120,6 +137,7 @@ func (f WatchdogFleet) Observe(name string) (watchdog.Observation, error) {
 		StartedAt:        startedAt,
 		AuthAvailable:    authAvailable,
 		AuthKnown:        authKnown,
+		CredentialProven: credentialProven,
 	}, nil
 }
 
