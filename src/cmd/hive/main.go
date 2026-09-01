@@ -3389,38 +3389,17 @@ func main() {
 					// pointer — the config watcher swaps its contents in
 					// place on reload.
 					lc := cfg.Governor.LiteLLM
-					endpoint := lc.ResolveEndpoint()
-					if lc.LocalProxy {
-						// Local fallback: the Go translator forwards to the
-						// bundled litellm proxy on loopback instead of the
-						// remote endpoint.
-						endpoint = litellmLocalProxyURL()
-					}
-					if endpoint == "" {
-						// A hive configured ONLY through the Model Gateways tab
-						// (an explicit gateway named "litellm") leaves the
-						// legacy governor.litellm block empty. The key and CA
-						// bundle below already resolve from that gateway — the
-						// endpoint must too, or NO route is ever installed and
-						// every agent call dies "502 no inference route" while
-						// the Gateways tab Test button (which uses the gateway)
-						// happily passes (ains-validation/pocketmini,
-						// 2026-08-31).
-						if gw := cfg.Governor.ResolveGateway(backend); gw != nil && gw.Endpoint != "" {
-							endpoint = gw.Endpoint
-							if model == "" {
-								model = gw.DefaultModel
-							}
-						}
-					}
-					if endpoint == "" {
+					// Endpoint/model resolution lives in a pure function so the
+					// decision tree (local proxy / legacy block / explicit-gateway
+					// fallback / no route at all) is unit-testable — it is not
+					// reachable from a test while inline in main(). See #5460.
+					endpoint, resolvedModel, ok := resolveLiteLLMInferenceRoute(cfg, backend, model)
+					if !ok {
 						logger.Warn("litellm backend selected but no endpoint configured",
 							"agent", agentName, "model", model)
 						return
 					}
-					if model == "" {
-						model = lc.DefaultModel
-					}
+					model = resolvedModel
 					// Key source must MATCH the entitlement/probe path (gateways.go,
 					// cost.go, openrouter.go), which resolve the key from the gateway
 					// via ResolveGateway(backend).ResolveAPIKey(). When an EXPLICIT
@@ -9093,6 +9072,57 @@ func runHub(logger *slog.Logger, configPath string) {
 		os.Exit(1)
 	}
 	logger.Info("hub server stopped")
+}
+
+// resolveLiteLLMInferenceRoute resolves the endpoint and model an agent's
+// inference route should use for the built-in "litellm" backend. It is the
+// whole route-install decision tree for that backend, lifted out of main() so
+// it can be unit-tested (#5460); main() calls it and keeps ownership of key,
+// CA bundle and logging.
+//
+// requestedModel is the model the agent asked for ("" when it named none). The
+// returned model is that request when non-empty, otherwise the default
+// inherited from whichever source supplied the endpoint.
+//
+// Resolution order — each step matches the behavior shipped in 231ca4b:
+//
+//  1. local_proxy: the Go translator forwards to the bundled litellm proxy on
+//     loopback, overriding any configured remote endpoint.
+//  2. the legacy governor.litellm block (HIVE_LITELLM_ENDPOINT or yaml), whose
+//     default_model supplies the model.
+//  3. the EXPLICIT gateway named by this backend. A hive configured only
+//     through the Model Gateways tab leaves the legacy block empty; the key
+//     and CA bundle already resolve from that gateway, so the endpoint must
+//     too, or NO route is installed and every agent call dies "502 no
+//     inference route" while the Gateways tab Test button happily passes
+//     (ains-validation/pocketmini, 2026-08-31 — #5393).
+//
+// ok is false when no source yields an endpoint: the caller must warn and
+// install NO route. It never invents an endpoint, and never returns a route
+// with an empty endpoint — a silently empty endpoint is the 502 this whole
+// path exists to prevent.
+func resolveLiteLLMInferenceRoute(cfg *config.Config, backend, requestedModel string) (endpoint, model string, ok bool) {
+	lc := cfg.Governor.LiteLLM
+	model = requestedModel
+	endpoint = lc.ResolveEndpoint()
+	if lc.LocalProxy {
+		endpoint = litellmLocalProxyURL()
+	}
+	if endpoint == "" {
+		if gw := cfg.Governor.ResolveGateway(backend); gw != nil && gw.Endpoint != "" {
+			endpoint = gw.Endpoint
+			if model == "" {
+				model = gw.DefaultModel
+			}
+		}
+	}
+	if endpoint == "" {
+		return "", requestedModel, false
+	}
+	if model == "" {
+		model = lc.DefaultModel
+	}
+	return endpoint, model, true
 }
 
 // resolveWatsonxGateway finds the gateway backing the built-in "watsonx" agent
