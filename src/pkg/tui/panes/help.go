@@ -45,7 +45,7 @@ func HelpBindings() []Binding {
 		{Keys: "q / ctrl+c", Action: "Quit", Scope: "global", Available: true},
 		{Keys: "j / k, ↓ / ↑", Action: "Move the selection within the focused pane", Scope: "Agents / Events panes", Available: true},
 		{Keys: "p", Action: "Pause or resume the selected agent", Scope: "Agents pane", Available: true},
-		{Keys: "m", Action: "Open the model picker for the selected agent", Scope: "Agents pane"},
+		{Keys: "m", Action: "Open the model picker for the selected agent", Scope: "Agents pane", Available: true},
 		{Keys: "K", Action: "Kick the selected agent now", Scope: "Agents pane", Available: true},
 		{Keys: "A", Action: "Open the ACMM level overlay", Scope: "global"},
 		{Keys: "a", Action: "Attach to the selected agent's tmux session", Scope: "Agents pane (local)", Available: true},

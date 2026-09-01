@@ -12,11 +12,11 @@
       ┃ q / ctrl+c       Quit                                          global                ┃      
       ┃ j / k, ↓ / ↑     Move the selection within the focused pane    Agents / Events panes ┃      
       ┃ p                Pause or resume the selected agent            Agents pane           ┃      
+      ┃ m                Open the model picker for the selected agent  Agents pane           ┃      
       ┃ K                Kick the selected agent now                   Agents pane           ┃      
       ┃ a                Attach to the selected agent's tmux session   Agents pane (local)   ┃      
       ┃                                                                                      ┃      
       ┃ Not wired up yet — listed because the design reserves them                           ┃      
-      ┃ m                Open the model picker for the selected agent  Agents pane           ┃      
       ┃ A                Open the ACMM level overlay                   global                ┃      
       ┃                                                                                      ┃      
       ┃ press any key to dismiss                                                             ┃      

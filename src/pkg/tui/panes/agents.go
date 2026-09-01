@@ -75,6 +75,62 @@ func (p Agents) SelectedAgent() (name string, paused bool, ok bool) {
 	return agent.Name, !agent.Enabled, true
 }
 
+// SelectedAgentDetail returns the fields the model picker needs about the row
+// under the cursor: the canonical config-key name the /api/model write is
+// addressed to, the display label, the configured backend whose catalogue is
+// fetched, and the configured model to preselect.
+//
+// It is a second narrow accessor rather than a widening of SelectedAgent
+// because the two callers want different things and SelectedAgent's paused bit
+// is joined from supplemental status data that this caller has no use for.
+// Both exist so the app never reaches into pane internals for a row.
+//
+// Name is deliberately separate from Display: the write must address the agent
+// by its config key, and an agent whose displayName differs would be sent to a
+// path that does not exist if the label leaked into the request.
+func (p Agents) SelectedAgentDetail() (name, display, backend, model string, ok bool) {
+	if p.selected < 0 || p.selected >= len(p.agents) {
+		return "", "", "", "", false
+	}
+	agent := p.agents[p.selected]
+	display = agent.DisplayName
+	if display == "" {
+		display = agent.Name
+	}
+	return agent.Name, display, agent.Backend, agent.Model, true
+}
+
+// SetAgentModel applies the authoritative model returned by a successful model
+// change immediately, for the same reason SetAgentPaused does: the app also
+// refreshes the fleet afterwards, but reflecting the response here stops a
+// successful change from leaving the old model on screen while that refresh is
+// in flight, or if it fails.
+//
+// An unknown agent is ignored rather than inserted. A response naming an agent
+// that is not in the current roster is either stale or wrong, and inventing a
+// row from it would put an agent on screen that /api/agents does not list.
+func (p Agents) SetAgentModel(name, model string) Agents {
+	if model == "" {
+		// The write's authoritative response is the only source for this. An
+		// empty model would blank the column with no fact behind it.
+		return p
+	}
+	agents := append([]client.Agent(nil), p.agents...)
+	found := false
+	for i := range agents {
+		if agents[i].Name == name {
+			agents[i].Model = model
+			found = true
+			break
+		}
+	}
+	if !found {
+		return p
+	}
+	p.agents = agents
+	return p
+}
+
 // SetAgentPaused applies the authoritative state returned by a pause/resume
 // operation immediately. The app still refreshes the full fleet afterwards,
 // but reflecting the response here prevents a successful action from leaving

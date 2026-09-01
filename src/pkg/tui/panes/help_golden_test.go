@@ -104,6 +104,7 @@ func TestHelpMarksOnlyWiredBindingsAvailable(t *testing.T) {
 		"q / ctrl+c":      true, // T1
 		"j / k, ↓ / ↑":    true, // T5 and T11
 		"p":               true, // T15
+		"m":               true, // T17
 		"K":               true, // T21
 		"a":               true, // T22
 	}
