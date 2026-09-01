@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -675,6 +677,36 @@ func (s *Store) UnsetMetadata(id, key string) error {
 
 const beadsFileName = "beads.json"
 
+// beadsFilePerms is the on-disk mode for beads.json: owner+group read/write
+// (0660), matching the shared-node-group FilePerms model used across /data
+// (pkg/agent/permissions_watcher FilePerms=0o660, DirPerms=0o770). Group read
+// is what lets the main hive process reload a store persisted by a per-agent
+// uid (hive-<agent>): a 0600 beads.json makes every hub reload fail with
+// EACCES ("failed to reload beads from disk: open
+// /data/beads/supervisor/beads.json: permission denied" — kubestellar/hive#5505),
+// permanently staling that agent's in-memory store.
+const beadsFilePerms os.FileMode = 0o660
+
+// widenBeadsFileMode ORs the group read/write bits (beadsFilePerms) into an
+// existing beads.json that lacks them — never narrowing owner or other bits,
+// so an already-correct file is left byte-identical. Only the file's owner (or
+// a privileged uid) can chmod, which is exactly the point: an agent's own
+// bd/store processes own the file and repair it here, healing a legacy 0600
+// file for the hub reader without any cross-uid privilege (#5505). Returns the
+// chmod error for the caller that needs to know the repair failed; a nil
+// return with nothing to do is success.
+func widenBeadsFileMode(path string) error {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	perm := fi.Mode().Perm()
+	if perm&beadsFilePerms == beadsFilePerms {
+		return nil
+	}
+	return os.Chmod(path, perm|beadsFilePerms)
+}
+
 // Reload re-reads beads from disk. Agents write directly to the JSON file
 // via the bd CLI, so the in-memory store can become stale.
 func (s *Store) Reload() error {
@@ -701,9 +733,32 @@ func (s *Store) load() error {
 	if os.IsNotExist(err) {
 		return nil
 	}
+	if errors.Is(err, fs.ErrPermission) {
+		// A beads.json persisted 0600 by an older writer (or narrowed
+		// externally) is unreadable by every other node-group uid, and nothing
+		// else ever repairs it: persist() only runs on mutation (an idle agent
+		// never rewrites), and the permissions watcher deliberately skips files
+		// owned by other non-root uids. Attempt the repair — it succeeds when
+		// this process owns the file — and retry the read once (#5505).
+		if chmodErr := widenBeadsFileMode(path); chmodErr == nil {
+			data, err = os.ReadFile(path)
+		} else {
+			// Unrepairable from this uid. Return ONE actionable error naming
+			// the fix so the caller's log line tells the operator what to do,
+			// instead of a bare "permission denied" every reload cycle.
+			return fmt.Errorf("%s is not readable by uid %d and could not be repaired (%v); run `chmod g+rw %s` as the file's owner: %w",
+				path, os.Getuid(), chmodErr, path, err)
+		}
+	}
 	if err != nil {
 		return err
 	}
+
+	// Self-heal a readable-but-narrow file (e.g. this process owns a legacy
+	// 0600 beads.json): widen it so OTHER node-group uids — the main hive
+	// process reloading this store — can read it too. Best-effort: a chmod this
+	// uid is not permitted to make is not a load failure; the data was read.
+	_ = widenBeadsFileMode(path)
 
 	var beads []*Bead
 	if err := json.Unmarshal(data, &beads); err != nil {
@@ -797,11 +852,12 @@ func (s *Store) persist(_ *Bead) error {
 		return fmt.Errorf("creating tmp beads file: %w", err)
 	}
 	tmpPath := tmp.Name()
-	// 0660 (group-writable) so a bead file created by one node-group member can be
-	// rewritten by another (e.g. the architect agent and the dashboard both write
-	// the architect store). Matches the /data/home/* FilePerms model. CreateTemp
-	// makes 0600, so widen explicitly.
-	_ = tmp.Chmod(0660)
+	// beadsFilePerms (0660, group-writable) so a bead file created by one
+	// node-group member can be rewritten by another (e.g. the architect agent
+	// and the dashboard both write the architect store) and READ by the main
+	// hive process reloading the store as a different uid (#5505). Matches the
+	// /data/home/* FilePerms model. CreateTemp makes 0600, so widen explicitly.
+	_ = tmp.Chmod(beadsFilePerms)
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()        // best-effort cleanup; the write error is what's returned
 		_ = os.Remove(tmpPath) // best-effort cleanup; the write error is what's returned

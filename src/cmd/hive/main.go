@@ -6378,12 +6378,9 @@ func runEvalCycle(
 
 	// Reload bead stores from disk before building the digest. Agents write
 	// beads via the bd CLI which persists directly to disk, so the in-memory
-	// stores can become stale between eval cycles.
-	for name, store := range beadStores {
-		if err := store.Reload(); err != nil {
-			logger.Warn("failed to reload beads from disk", "agent", name, "error", err)
-		}
-	}
+	// stores can become stale between eval cycles. Reload failures are deduped
+	// (WARN once per distinct error, then DEBUG) — see beads_reload.go (#5505).
+	reloadBeadStores(beadStores, logger)
 
 	// Phase 4 Part B: `plan`/`epic` label trigger. An actionable issue carrying a
 	// plan label auto-mints an epic and requests decomposition — the same flow as
