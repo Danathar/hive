@@ -27,27 +27,62 @@ import (
 // data comes from without changing how often the frame moves. It is also the
 // cadence the fallback returns to: while the stream is up the loop stretches to
 // sseReconcileInterval (app.go), and a dropped stream puts it back here.
+//
+// T32 splits the loop in two, and this is the cadence of both — for opposite
+// reasons. The ACTIVITY loop runs at it unconditionally, because no stream
+// event can refresh what it reads and 5s is the freshest the server rebuilds
+// at. The RECONCILIATION loop runs at it only while the stream is down, and
+// stretches to sseReconcileInterval once the stream proves itself.
 const pollInterval = 5 * time.Second
 
-// tickMsg is the poll heartbeat. It carries no time: the tick is a "go fetch
-// now" signal, not a clock, and nothing reads when it fired. tea.Tick supplies
-// the instant to the callback, which discards it — T13b made this a struct for
-// the generation below, and a field kept only because the callback is handed
-// one would be a value no reader could rely on.
+// The two poll heartbeats. Neither carries a time: a tick is a "go fetch now"
+// signal, not a clock, and nothing reads when it fired. tea.Tick supplies the
+// instant to the callback, which discards it — T13b made this a struct for the
+// generation below, and a field kept only because the callback is handed one
+// would be a value no reader could rely on.
 //
-// GEN IS WHAT KEEPS THE LOOP SINGLE. tea.Tick fires once and the loop stays
-// alive by re-arming from the handler, so "arm the new cadence" and "the old
-// cadence is still armed" are the same instant: T13b changes the cadence when
-// the SSE stream connects or drops, and arming a replacement chain without
-// retiring the old one would leave two live chains ticking forever — one
-// cadence change doubling the fetch rate for the rest of the process's life.
-// Each chain therefore carries the model's tick generation, and a tick whose
+// THERE ARE TWO CHAINS BECAUSE THERE ARE TWO KINDS OF DATA, not because there
+// are two intervals. The stream carries live agent and governor state, so the
+// reconciliation loop can afford to slow to a minute once it is healthy — it
+// is only there to catch a roster change or a silently stalled stream. Nothing
+// on the stream carries token counts, estimated cost, or audit rows, so the
+// activity loop's endpoints are the ONLY source those three panes have. Attach
+// them to the stretching timer, as they were before T32, and a healthy `ws:`
+// indicator would paradoxically make half the screen twelve times staler —
+// the frame looking its most alive at the moment it stopped being.
+//
+// GEN IS WHAT KEEPS EACH LOOP SINGLE. tea.Tick fires once and a loop stays
+// alive by re-arming from its handler, so "arm the new cadence" and "the old
+// cadence is still armed" are the same instant: T13b changes the reconcile
+// cadence when the stream connects or drops, and arming a replacement chain
+// without retiring the old one would leave two live chains ticking forever —
+// one cadence change doubling the fetch rate for the rest of the process's
+// life. Each chain therefore carries its own generation, and a tick whose
 // generation no longer matches is dropped instead of re-armed. That is what
 // ends the superseded chain at its next fire rather than running it alongside
 // the new one.
-type tickMsg struct {
-	gen uint64
-}
+//
+// THE GENERATIONS ARE SEPARATE COUNTERS, and that separation is load-bearing
+// rather than symmetry for its own sake. A shared counter would mean the bump
+// that retires the stretched reconcile chain on an SSE drop also retires the
+// pending activity tick — which nothing re-arms, because the drop path arms a
+// reconcile chain and only a reconcile chain. The Tokens and Events panes
+// would freeze permanently at the first stream drop, which is the exact
+// failure this task exists to prevent, arrived at from the other direction.
+type (
+	// reconcileTickMsg drives the loop whose cadence the stream changes.
+	reconcileTickMsg struct {
+		gen uint64
+	}
+
+	// activityTickMsg drives the fixed loop. Its generation is never bumped
+	// today — the cadence has nothing to respond to — and the guard is kept
+	// anyway because it is what makes that true STRUCTURALLY: the chain cannot
+	// be retired by a reconcile-side bump, only by a deliberate one here.
+	activityTickMsg struct {
+		gen uint64
+	}
+)
 
 // fetchErrMsg reports that one poll failed.
 //
@@ -77,30 +112,50 @@ func (e fetchErrMsg) Error() string {
 	return fmt.Sprintf("%s poll failed: %v", e.source, e.err)
 }
 
-// scheduleTick arms the next heartbeat.
+// scheduleReconcileTick arms the next reconciliation heartbeat.
 //
-// tea.Tick fires ONCE, so the loop is kept alive by re-arming from the tickMsg
+// tea.Tick fires ONCE, so a loop is kept alive by re-arming from its own tick
 // handler rather than by a repeating timer. That is not merely how bubbletea
 // spells it — it is what stops ticks stacking: the next one is scheduled
 // relative to the moment this one was handled, so a slow dashboard cannot
 // queue up a backlog of pending fetches that all land at once when it
 // recovers.
-func (m model) scheduleTick() tea.Cmd {
-	gen := m.tickGen
-	return tea.Tick(m.interval, func(time.Time) tea.Msg {
-		return tickMsg{gen: gen}
+func (m model) scheduleReconcileTick() tea.Cmd {
+	gen := m.reconcileGen
+	return tea.Tick(m.reconcileInterval, func(time.Time) tea.Msg {
+		return reconcileTickMsg{gen: gen}
+	})
+}
+
+// scheduleActivityTick arms the next activity heartbeat.
+//
+// Same shape, deliberately separate function rather than one parameterised by
+// which class it is arming. The pair a caller must get right is (interval,
+// generation), and every caller here picks it by naming the loop instead of by
+// passing two arguments that could be mismatched — arming the activity chain
+// with the reconcile generation would stamp it for retirement by the next
+// cadence change, and nothing about the call site would look wrong.
+func (m model) scheduleActivityTick() tea.Cmd {
+	gen := m.activityGen
+	return tea.Tick(m.activityInterval, func(time.Time) tea.Msg {
+		return activityTickMsg{gen: gen}
 	})
 }
 
 // poll issues every fetch the client can currently make, as one batch.
 //
-// Seven reads today: /api/agents (T4, #5067), the three T29 wired for the
-// Governor pane and the header — /api/status for live governor state,
-// /api/config/governor for the evaluation cadence, and /api/hive-id for the
-// hive's identity — and the two T30 wires for the Tokens pane: /api/tokens for
-// the counts and /api/cost for the estimated spend joined onto them, plus
-// /api/audit for the Events pane (T31). /api/events is deliberately absent: it
-// is the long-lived SSE status stream, not the poll-shaped activity feed.
+// It is the ONE-SHOT full refresh, not a loop: nothing here arms a tick. It is
+// what Init uses to fill the whole frame before either chain's first interval
+// elapses, and what an action handler uses after a write — a pause, a model
+// apply, an ACMM apply, or returning from an attached tmux session — where
+// every class of data is stale at once. A write moves the roster AND appends
+// the operator's own action to the audit log, so refreshing one class and
+// waiting out the other's cadence would show the effect of an action before
+// the record of it.
+//
+// Seven reads today, split between the two loops below: see pollReconcile for
+// the four the stream reconciles against and pollActivity for the three it
+// cannot carry.
 //
 // EACH FETCH FAILS ALONE. They are separate Cmds in one batch rather than one
 // Cmd making seven calls, and that is the failure-isolation property T29 is
@@ -110,18 +165,61 @@ func (m model) scheduleTick() tea.Cmd {
 // Folding them together would make every value only as available as the least
 // available endpoint, because one error return would discard three good
 // results. Batched Cmds also run concurrently, so seven reads cost one round
-// trip of wall time, not seven.
+// trip of wall time, not seven — and that is why splitting the batch in two
+// costs nothing: two concurrent batches are still one round trip.
 //
 // Deliberately NOT polled: /api/health. It exists and would succeed, but
 // nothing in the frame renders it — the header's `ws:` field is SSE connection
 // state, which is T13b's, not API reachability. Polling an endpoint whose
 // result cannot be displayed would spend a request every 5s to learn nothing.
 func (m model) poll() tea.Cmd {
+	return tea.Batch(m.pollReconcile(), m.pollActivity())
+}
+
+// pollReconcile reads the state the SSE stream also carries.
+//
+// Four reads: /api/agents (T4, #5067) and the three T29 wired for the Governor
+// pane and the header — /api/status for live governor state,
+// /api/config/governor for the evaluation cadence, and /api/hive-id for the
+// hive's identity.
+//
+// This is the batch whose cadence the stream changes, and it is the batch that
+// can afford to: every value here either arrives on the stream (agent states,
+// governor status) or changes on human timescales (identity, the configured
+// eval interval). At 60s it is doing the job sseReconcileInterval describes —
+// noticing a roster change the stream does not announce, and bounding how long
+// a silently stalled stream can show a stale frame.
+//
+// /api/config/governor and /api/hive-id are in the reconcile class rather than
+// the activity one even though no stream event carries them, because the class
+// is about how fast the DATA moves, not about which endpoint feeds it. A hive
+// whose name or evaluation cadence changed a minute ago is not a stale frame;
+// a token count that is a minute old, on a fleet burning tokens continuously,
+// is.
+func (m model) pollReconcile() tea.Cmd {
 	return tea.Batch(
 		m.fetchAgents(),
 		m.fetchGovernor(),
 		m.fetchGovernorInterval(),
 		m.fetchHiveID(),
+	)
+}
+
+// pollActivity reads what the SSE stream cannot carry.
+//
+// Three reads: /api/tokens for the counts and /api/cost for the estimated
+// spend joined onto them (T30), and /api/audit for the Events pane (T31).
+// /api/events is deliberately absent: it is the long-lived SSE status stream,
+// not the poll-shaped activity feed, and its payload contains none of these.
+//
+// This batch's cadence NEVER changes. There is no stream event that refreshes
+// a token count or appends an audit row, so slowing it while the stream is
+// healthy would not be trading polling for pushing — it would just be polling
+// less. Before T32 these three shared the reconciliation timer, which meant a
+// connected stream stretched them to 60s: the Tokens and Events panes were at
+// their stalest precisely when the header said the frame was live.
+func (m model) pollActivity() tea.Cmd {
+	return tea.Batch(
 		m.fetchTokens(),
 		m.fetchCosts(),
 		m.fetchEvents(),

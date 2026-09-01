@@ -31,6 +31,15 @@
 // fallback and the reconciler: healthy stream, 60s reconcile; dropped stream,
 // back to the 5s poll and a header that says so. See the SSE section at the
 // bottom of this file.
+//
+// T32 (#5421): there are TWO poll loops, because the stretch above is only
+// correct for the data the stream carries. Once T30 and T31 hung /api/tokens,
+// /api/cost and /api/audit off the same timer, a healthy stream stretched them
+// to 60s as well — so the Tokens and Events panes became twelve times staler
+// at exactly the moment the header started saying `ws: connected`. The
+// reconciliation loop keeps the 5s/60s behaviour above; the activity loop runs
+// at 5s unconditionally, with its own message type and generation. See poll.go
+// for the split and which reads belong to which class.
 package tui
 
 import (
@@ -313,20 +322,42 @@ type model struct {
 	// the operator sees. Kick success describes only queueing or deduplication.
 	footerStatus string
 
-	// interval is this model's poll cadence, defaulting to pollInterval.
+	// reconcileInterval is the cadence of the reconciliation loop
+	// (pollReconcile), defaulting to pollInterval.
 	//
 	// It is a field rather than a bare constant read for two reasons. Tests
 	// drive a whole tick — fetch, delivery, and the re-arm — without waiting
 	// five real seconds for it. And T13b needs exactly this knob: once the SSE
-	// stream is connected the poll becomes a fallback and should slow down,
-	// not keep hammering an endpoint the stream has already superseded.
-	interval time.Duration
+	// stream is connected this poll becomes a fallback and should slow down,
+	// not keep hammering endpoints the stream has already superseded.
+	reconcileInterval time.Duration
 
-	// tickGen retires superseded poll chains. Changing interval only affects
-	// the NEXT re-arm, so switching cadence means arming a fresh chain while
-	// the old one is still pending; bumping this makes the pending tick a
-	// no-op instead of a second, permanent loop. See tickMsg in poll.go.
-	tickGen uint64
+	// reconcileGen retires superseded reconciliation chains. Changing the
+	// interval only affects the NEXT re-arm, so switching cadence means arming
+	// a fresh chain while the old one is still pending; bumping this makes the
+	// pending tick a no-op instead of a second, permanent loop. See
+	// reconcileTickMsg in poll.go.
+	reconcileGen uint64
+
+	// activityInterval is the cadence of the activity loop (pollActivity). It
+	// is pollInterval and STAYS pollInterval for the life of the process: no
+	// stream event can refresh a token count or an audit row, so there is
+	// nothing for this cadence to respond to.
+	//
+	// It is a field anyway, for the first of the two reasons above only —
+	// tests must be able to run a whole activity tick without sleeping five
+	// real seconds. Nothing in production writes it.
+	activityInterval time.Duration
+
+	// activityGen is the activity loop's own retirement counter.
+	//
+	// It exists so the two chains have independent lifetimes. Sharing
+	// reconcileGen would make the bump that retires a stretched reconcile
+	// chain on an SSE drop also retire the pending activity tick — and the
+	// drop path re-arms only the reconcile chain, so the Tokens and Events
+	// panes would go permanently dark at the first stream blip. See
+	// activityTickMsg in poll.go.
+	activityGen uint64
 
 	// agents is the last fleet roster a poll returned.
 	//
@@ -419,8 +450,9 @@ func newModel() model {
 			panes.NewTokens(),
 			panes.NewEvents(),
 		},
-		api:      client.New(),
-		interval: pollInterval,
+		api:               client.New(),
+		reconcileInterval: pollInterval,
+		activityInterval:  pollInterval,
 	}
 }
 
@@ -434,18 +466,22 @@ func New() tea.Model {
 
 // Init implements tea.Model.
 //
-// It gathers the panes' initial commands and starts the poll loop: one fetch
-// immediately, and the first tick armed for pollInterval later. The immediate
-// fetch is what keeps startup honest — without it every pane would show
-// "waiting for data" for a full interval while a perfectly reachable dashboard
-// sat there answering, and an operator would read that as the TUI being broken.
+// It gathers the panes' initial commands and starts BOTH poll loops: one full
+// fetch immediately, and each loop's first tick armed for its own interval
+// later. The immediate fetch is what keeps startup honest — without it every
+// pane would show "waiting for data" for a full interval while a perfectly
+// reachable dashboard sat there answering, and an operator would read that as
+// the TUI being broken. Both classes are covered by that one m.poll(), so
+// neither loop waits out an interval before its panes have anything, and the
+// two chains are armed separately because they are two chains.
 //
-// The SSE subscription starts here too, and starts ALONGSIDE the poll rather
-// than instead of it: the stream's first event may be seconds away (or never
+// The SSE subscription starts here too, and starts ALONGSIDE the polls rather
+// than instead of them: the stream's first event may be seconds away (or never
 // arrive, on a dashboard that is down), and the first frame must not wait on
-// it. The poll stretches only once the stream has proved itself.
+// it. Only the reconciliation loop stretches, and only once the stream has
+// proved itself.
 func (m model) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.poll(), m.scheduleTick(), m.connectSSE()}
+	cmds := []tea.Cmd{m.poll(), m.scheduleReconcileTick(), m.scheduleActivityTick(), m.connectSSE()}
 	for _, p := range m.panes {
 		if c := p.Init(); c != nil {
 			cmds = append(cmds, c)
@@ -460,16 +496,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		return m, nil
-	case tickMsg:
-		if msg.gen != m.tickGen {
+	case reconcileTickMsg:
+		if msg.gen != m.reconcileGen {
 			// A tick from a chain the cadence change retired. Dropping it
-			// without re-arming is what ends that chain; see tickMsg.
+			// without re-arming is what ends that chain; see reconcileTickMsg.
 			return m, nil
 		}
 		// Re-arm BEFORE the fetches are issued, not after they resolve: the
 		// loop's cadence must not depend on how long a fetch takes, and a
 		// dashboard that never answers must not be able to stop the clock.
-		return m, tea.Batch(m.scheduleTick(), m.poll())
+		return m, tea.Batch(m.scheduleReconcileTick(), m.pollReconcile())
+	case activityTickMsg:
+		if msg.gen != m.activityGen {
+			return m, nil
+		}
+		// Same re-arm-first rule, and it matters more here: this loop is the
+		// only source the Tokens and Events panes have, so a /api/audit read
+		// that hangs until its 5s client timeout must not also be the thing
+		// deciding when the next one is attempted.
+		return m, tea.Batch(m.scheduleActivityTick(), m.pollActivity())
 	case fetchErrMsg:
 		// Swallowed on purpose — see fetchErrMsg's doc comment. Returning here
 		// rather than falling through to the broadcast below is the mechanism:
@@ -1560,13 +1605,20 @@ func (m model) handleSSEEvent(msg sseEventMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	// A received event is the only proof the stream is up (see wsConnected),
-	// so it is what resets the backoff and stretches the poll. No new tick
-	// chain is armed for the stretch: the pending tick re-arms itself from
-	// m.interval, so the new cadence takes effect within one pollInterval
-	// without a second chain ever existing.
+	// so it is what resets the backoff and stretches the reconciliation poll.
+	// No new tick chain is armed for the stretch: the pending tick re-arms
+	// itself from m.reconcileInterval, so the new cadence takes effect within
+	// one pollInterval without a second chain ever existing.
+	//
+	// ONLY RECONCILIATION STRETCHES. The activity loop is not touched here —
+	// not its interval, not its generation, not with an extra tick — because
+	// this event carried no token counts and no audit rows, so there is
+	// nothing it could have superseded. Stretching it too is the bug T32
+	// closes: a healthy stream would make the Tokens and Events panes twelve
+	// times staler than a broken one.
 	m.sseConnected = true
 	m.sseBackoff = 0
-	m.interval = sseReconcileInterval
+	m.reconcileInterval = sseReconcileInterval
 
 	cmds := []tea.Cmd{waitSSE(m.sse)}
 
@@ -1630,19 +1682,28 @@ func (m model) handleSSEDropped(msg sseDroppedMsg) (tea.Model, tea.Cmd) {
 		return sseReconnectMsg{gen: gen}
 	})}
 
-	// Only the first drop after a healthy stream restores the poll, because it
-	// is the only one with a stretched cadence to undo. Retiring the 60s chain
-	// and arming a 5s one on EVERY failed reconnect as well would issue a
-	// fetch per backoff step — which is how a dashboard that is down ends up
+	// Only the first drop after a healthy stream restores the cadence, because
+	// it is the only one with a stretched cadence to undo. Retiring the 60s
+	// chain and arming a 5s one on EVERY failed reconnect as well would issue
+	// a fetch per backoff step — which is how a dashboard that is down ends up
 	// receiving more requests than one that is up.
-	if m.interval != pollInterval {
-		m.interval = pollInterval
-		m.tickGen++
+	//
+	// THE FALLBACK FETCH IS pollReconcile, NOT poll. The activity loop never
+	// stretched, so it has been reading /api/tokens, /api/cost and /api/audit
+	// every 5s throughout the healthy stream and is still doing so right now.
+	// A full poll here would issue a second copy of those three reads on top
+	// of a chain that is already mid-interval — duplicate requests that buy no
+	// freshness, on the exact code path a flapping dashboard walks repeatedly.
+	// Nothing here touches activityGen either: this bump retires the stretched
+	// reconcile chain, and the activity chain must survive it untouched.
+	if m.reconcileInterval != pollInterval {
+		m.reconcileInterval = pollInterval
+		m.reconcileGen++
 		// Fetch now as well as re-arming: the pending tick belonged to the 60s
-		// chain this retires, so without an immediate poll the fallback's
+		// chain this retires, so without an immediate fetch the fallback's
 		// first data would be a whole pollInterval away — spent showing a
 		// frame the stream has already stopped updating.
-		cmds = append(cmds, m.scheduleTick(), m.poll())
+		cmds = append(cmds, m.scheduleReconcileTick(), m.pollReconcile())
 	}
 	return m, tea.Batch(cmds...)
 }
