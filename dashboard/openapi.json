@@ -2838,6 +2838,75 @@
         }
       }
     },
+    "/api/agents/{name}/login-code": {
+      "post": {
+        "tags": [
+          "Agents"
+        ],
+        "summary": "Submit an authorization code to the agent's terminal",
+        "description": "Owner only. Types an operator-supplied OAuth/device authorization code into the agent's tmux pane and submits it with a single Enter. The write-side twin of `GET /api/agents/{name}/terminal-urls`: that endpoint exists because the embedded ttyd terminal cannot deliver a copy (#5188), and this one because it cannot reliably accept a paste either, which leaves an operator unable to finish a sign-in hand-off from the dashboard at all. It grants no capability the writable ttyd terminal does not already give the same operator; it is strictly narrower, and takes the strictest gate rather than inheriting the read endpoint's any-authenticated-role rule. The code is validated as printable and whitespace-free before it is typed, so it cannot carry a newline and become a second command in the agent's shell, and it is never logged or echoed back.",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Agent name"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "code"
+                ],
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "maxLength": 512,
+                    "description": "The authorization code from the sign-in page. Must be printable and contain no whitespace or control characters; a value carrying a newline is refused rather than sanitised, because typing it would submit at that point and run everything after it as a fresh line."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Code typed into the agent's pane",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "agent": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Code was empty, too long, or carried whitespace or control characters; nothing was typed"
+          },
+          "403": {
+            "description": "Owner access required"
+          },
+          "503": {
+            "description": "Agent manager unavailable"
+          }
+        }
+      }
+    },
     "/api/agents/{name}/terminal-urls": {
       "get": {
         "tags": [
