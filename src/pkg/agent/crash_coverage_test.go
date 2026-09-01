@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kubestellar/hive/internal/testutil"
 	"github.com/kubestellar/hive/pkg/config"
 )
 
@@ -26,7 +27,11 @@ func TestCheckAndRestartCrashedAgents_BarePaneRestarts(t *testing.T) {
 
 	// Create a live session with a bare shell (no CLI marker).
 	if err := testTmuxCommand("new-session", "-d", "-s", agent.tmuxSession).Run(); err != nil {
-		t.Skipf("cannot create tmux session: %v", err)
+		// tmuxAvailable() already passed above, so tmux is on PATH and
+		// TMUX_TMPDIR points into TestMain's temp tree. A failure here is a
+		// broken test (stale socket, uncleaned server, name collision), not
+		// a missing capability (#5388).
+		testutil.SkipfUnlessRequired(t, "cannot create tmux session: %v", err)
 	}
 	defer testTmuxCommand("kill-session", "-t", agent.tmuxSession).Run()
 
@@ -54,7 +59,11 @@ func TestCheckAndRestartCrashedAgents_BootGrace(t *testing.T) {
 	agent := m.agents["cxa"]
 	m.mu.RUnlock()
 	if err := testTmuxCommand("new-session", "-d", "-s", agent.tmuxSession).Run(); err != nil {
-		t.Skipf("cannot create tmux session: %v", err)
+		// tmuxAvailable() already passed above, so tmux is on PATH and
+		// TMUX_TMPDIR points into TestMain's temp tree. A failure here is a
+		// broken test (stale socket, uncleaned server, name collision), not
+		// a missing capability (#5388).
+		testutil.SkipfUnlessRequired(t, "cannot create tmux session: %v", err)
 	}
 	defer testTmuxCommand("kill-session", "-t", agent.tmuxSession).Run()
 
@@ -81,7 +90,11 @@ func TestCheckAndRestartCrashedAgents_InferenceHealthy(t *testing.T) {
 	agent := m.agents["cxa"]
 	m.mu.RUnlock()
 	if err := testTmuxCommand("new-session", "-d", "-s", agent.tmuxSession).Run(); err != nil {
-		t.Skipf("cannot create tmux session: %v", err)
+		// tmuxAvailable() already passed above, so tmux is on PATH and
+		// TMUX_TMPDIR points into TestMain's temp tree. A failure here is a
+		// broken test (stale socket, uncleaned server, name collision), not
+		// a missing capability (#5388).
+		testutil.SkipfUnlessRequired(t, "cannot create tmux session: %v", err)
 	}
 	defer testTmuxCommand("kill-session", "-t", agent.tmuxSession).Run()
 	// Live CLI marker, not a consent screen.
