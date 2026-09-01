@@ -177,7 +177,7 @@ func TestPollLatestSHAsTick_HubAutoUpgradeCheckedEveryTick(t *testing.T) {
 		case strings.Contains(r.URL.Path, "/token"):
 			w.Write([]byte(`{"token":"anon"}`))
 		case strings.Contains(r.URL.Path, "/branches/"):
-			w.Write([]byte(`{"commit":{"sha":"newhubsha00000","commit":{"message":"m"}}}`))
+			w.Write([]byte(`{"commit":{"sha":"0123456789abcdef0123456789abcdef01234567","commit":{"message":"m"}}}`))
 		default:
 			w.Write([]byte(`{}`))
 		}
