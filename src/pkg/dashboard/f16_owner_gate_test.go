@@ -90,11 +90,45 @@ func TestF16PrivilegedHandlersAreOwnerGated(t *testing.T) {
 // explicitly, so the reason this fix exists survives even if someone prunes the
 // table above. handleGovernorSecurity is the only handler that writes
 // cfg.AgentSandbox.Enabled from request input.
+//
+// #5388 item 2: this test previously anchored on the Go identifier
+// "AgentSandboxEnabled" and SKIPPED when it was absent. That made the skip
+// condition identical to the coupling being guarded, so the guard retired
+// itself on the one edit most likely to disturb it. Demonstrated: renaming the
+// struct field to SandboxOn — leaving the JSON tag, the config write and the
+// whole wire contract untouched, so the toggle is still fully reachable —
+// turned this from an owner-gate security assertion into a silent SKIP, and
+// nothing else in the file re-asserts that THIS surface writes the sandbox
+// toggle. The sibling table test still catches an outright gate removal, but it
+// does not know the sandbox toggle exists, so after a rename the highest-impact
+// item is guarded only generically and this test never speaks again.
+//
+// The fix anchors on the two things that are the actual contract rather than a
+// private naming choice: the JSON wire field the browser sends, and the config
+// field the handler writes. Both must change for the toggle to genuinely move,
+// and if they do, this test FAILS and names itself rather than skipping.
 func TestF16AgentSandboxToggleIsOwnerOnly(t *testing.T) {
 	body := f16HandlerBody(t, f16ReadSource(t, "api_governor_security.go"), "handleGovernorSecurity")
-	if !strings.Contains(body, "AgentSandboxEnabled") {
-		t.Skip("handleGovernorSecurity no longer accepts agentSandboxEnabled; the sandbox toggle moved — re-point this test")
+
+	// The wire field and the config write, not the Go identifier that carries
+	// them between the two. A rename of the local struct field changes neither.
+	const wireField = `json:"agentSandboxEnabled"`
+	const configWrite = "cfg.AgentSandbox.Enabled ="
+
+	hasWire := strings.Contains(body, wireField)
+	hasWrite := strings.Contains(body, configWrite)
+
+	// If the toggle really did move, that is a deliberate change to a security
+	// surface and must be re-pointed by a human — so fail loudly. It is never
+	// correct for this assertion to go quiet on its own.
+	if !hasWire || !hasWrite {
+		t.Fatalf("handleGovernorSecurity no longer both accepts %s (found=%v) and writes %s (found=%v) — "+
+			"the agent-sandbox toggle moved. Re-point this test at whichever handler now writes "+
+			"cfg.AgentSandbox.Enabled and confirm THAT handler is owner-gated. Do not delete this case: "+
+			"it is the only assertion that names the sandbox toggle specifically (audit F16, #5388)",
+			wireField, hasWire, configWrite, hasWrite)
 	}
+
 	if !strings.Contains(body, "requireOwnerRole(w, r)") {
 		t.Error("handleGovernorSecurity accepts agentSandboxEnabled but is not owner-gated — " +
 			"a read-write member can disable the agent sandbox (audit F16)")
