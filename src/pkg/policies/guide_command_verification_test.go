@@ -58,3 +58,53 @@ func TestGuidePoliciesRequireCommandVerification(t *testing.T) {
 		})
 	}
 }
+
+// TestGuideFilingPoliciesRequireGapVerification asserts that every guide policy
+// which can record a finding carries the "documented limitation is not a gap"
+// guardrail, in both the source tree and the embedded defaults. guide.md is
+// excluded: it never files.
+func TestGuideFilingPoliciesRequireGapVerification(t *testing.T) {
+	t.Parallel()
+
+	policyNames := []string{
+		"guide-advisory.md",
+		"guide-issues.md",
+		"guide-holdgated.md",
+		"guide-full.md",
+	}
+	required := [][]byte{
+		[]byte("## Before Filing a Finding (MANDATORY)"),
+		[]byte("A documented limitation is not a documentation gap"),
+		[]byte("cross-links to"),
+		[]byte("would a reader who actually hit this situation find the"),
+		[]byte("Search closed issues and the code before claiming nothing tracks this"),
+		[]byte("Follow cross-references before concluding something is undocumented"),
+		[]byte("zero mentions"),
+	}
+
+	for _, name := range policyNames {
+		name := name
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			embedded, err := DefaultPolicies.ReadFile(path.Join("defaults", name))
+			if err != nil {
+				t.Fatalf("read embedded policy: %v", err)
+			}
+			source, err := os.ReadFile(filepath.Join("..", "..", "policies", name))
+			if err != nil {
+				t.Fatalf("read source policy: %v", err)
+			}
+			for sourceName, policy := range map[string][]byte{
+				"embedded": embedded,
+				"source":   source,
+			} {
+				for _, marker := range required {
+					if !bytes.Contains(policy, marker) {
+						t.Errorf("%s policy is missing gap-verification guardrail %q", sourceName, marker)
+					}
+				}
+			}
+		})
+	}
+}
