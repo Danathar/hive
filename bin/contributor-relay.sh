@@ -1683,20 +1683,29 @@ function shellQuote(s) {
   return "'" + s.replace(/'/g, "'\\''") + "'";
 }
 
+// Keep category names in exact parity with src/pkg/logscrub/handler.go. The Go
+// test reads this declaration and fails if one implementation gains or loses a
+// category without the other (kubestellar/hive#5478).
+const RELAY_SECRET_PATTERNS = [
+  { category: 'hive-canary', pattern: /HIVE-CANARY-[A-Fa-f0-9]{48}/g },
+  // The open-ended body is deliberate: an exact upper bound would redact only
+  // a prefix of a longer future token and leak its tail (#4267). The 10-char
+  // floor and underscore support match pkg/logscrub.
+  { category: 'github-token', pattern: /(ghs_|ghp_|gho_|ghu_|ghr_|github_pat_)[A-Za-z0-9_]{10,}/g },
+  { category: 'jwt', pattern: /eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}/g },
+  { category: 'aws-access-key', pattern: /\b(AKIA|ASIA)[0-9A-Z]{16}\b/g },
+  { category: 'bearer-token', pattern: /\bBearer\s+[A-Za-z0-9._~+/=-]{16,}\b/gi },
+  { category: 'private-key', pattern: /-----BEGIN\s+(?:(?:RSA|EC|OPENSSH|DSA)\s+)?PRIVATE\s+KEY-----.*?-----END\s+(?:(?:RSA|EC|OPENSSH|DSA)\s+)?PRIVATE\s+KEY-----/gs },
+  { category: 'encrypted-private-key', pattern: /-----BEGIN\s+ENCRYPTED\s+PRIVATE\s+KEY-----.*?-----END\s+ENCRYPTED\s+PRIVATE\s+KEY-----/gs },
+  { category: 'pgp-private-key', pattern: /-----BEGIN\s+PGP\s+PRIVATE\s+KEY\s+BLOCK-----.*?-----END\s+PGP\s+PRIVATE\s+KEY\s+BLOCK-----/gs },
+];
+
 function redactTokens(text) {
-  // {36,} not {36}: GitHub documents that token length may grow, and an exact
-  // bound would redact only the first 36 characters of a longer token, leaking
-  // its tail into the hub log line (kubestellar/hive#4267).
-  const githubRedacted = text.replace(/gho_[A-Za-z0-9]{36,}/g, 'gho_***REDACTED***')
-    .replace(/ghp_[A-Za-z0-9]{36,}/g, 'ghp_***REDACTED***')
-    .replace(/ghs_[A-Za-z0-9]{36,}/g, 'ghs_***REDACTED***')
-    .replace(/ghu_[A-Za-z0-9]{36,}/g, 'ghu_***REDACTED***')
-    .replace(/ghr_[A-Za-z0-9]{36,}/g, 'ghr_***REDACTED***')
-    // Fine-grained PATs: github_pat_ + 82 chars of [A-Za-z0-9_]. The Go-side
-    // redactors (dashboard, status_builder, prompt_history) already scrub this
-    // prefix; the relay must match or PAT material leaks into hub log lines.
-    .replace(/github_pat_[A-Za-z0-9_]{36,}/g, 'github_pat_***REDACTED***');
-  return BACKEND === 'pi' ? redactPiCredentials(githubRedacted, PI_SELECTION, PI_ENV) : githubRedacted;
+  let output = text;
+  for (const { pattern } of RELAY_SECRET_PATTERNS) {
+    output = output.replace(pattern, '[REDACTED]');
+  }
+  return BACKEND === 'pi' ? redactPiCredentials(output, PI_SELECTION, PI_ENV) : output;
 }
 
 function captureTmuxLines(n) {
@@ -1705,7 +1714,10 @@ function captureTmuxLines(n) {
       `tmux capture-pane -t ${TMUX_SESSION} -p -S -${n} 2>/dev/null`,
       { encoding: 'utf8', timeout: 15000 }
     );
-    return output.trim().split('\n').slice(-n).map(l => redactTokens(l));
+    // Scrub the pane as one string before splitting it into protocol lines.
+    // Private-key patterns span several terminal lines and cannot match if each
+    // line is redacted independently.
+    return redactTokens(output).trim().split('\n').slice(-n);
   } catch (_) {
     return [];
   }
@@ -3954,6 +3966,7 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     CONTAINER_RUNTIME,
     // Coverage for previously untested pure/isolated functions (#4267).
     redactTokens,
+    captureTmuxLines,
     detectNoWorkVerdict,
     detectPRURL,
     resolveBackend,

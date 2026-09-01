@@ -6,23 +6,34 @@ import (
 	"regexp"
 )
 
+const (
+	githubTokenPattern = `(ghs_|ghp_|gho_|ghu_|ghr_|github_pat_)[A-Za-z0-9_]{10,}`
+	jwtPattern         = `eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}`
+)
+
 // TokenPattern matches GitHub token forms (ghs_/ghp_/gho_/ghu_/ghr_/github_pat_)
 // and JWT-shaped triples. It is exported so other packages (e.g. pkg/ioscan) can
 // reuse the same secret-detection regex instead of duplicating it; keep this
 // the single source of truth for these shapes.
-var TokenPattern = regexp.MustCompile(
-	`(ghs_|ghp_|gho_|ghu_|ghr_|github_pat_)[A-Za-z0-9_]{10,}` +
-		`|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}`,
-)
+var TokenPattern = regexp.MustCompile(githubTokenPattern + `|` + jwtPattern)
 
-var secretPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`HIVE-CANARY-[A-Fa-f0-9]{48}`),
-	TokenPattern,
-	regexp.MustCompile(`\b(AKIA|ASIA)[0-9A-Z]{16}\b`),
-	regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{16,}\b`),
-	regexp.MustCompile(`(?s)-----BEGIN\s+(?:(?:RSA|EC|OPENSSH|DSA)\s+)?PRIVATE\s+KEY-----.*?-----END\s+(?:(?:RSA|EC|OPENSSH|DSA)\s+)?PRIVATE\s+KEY-----`),
-	regexp.MustCompile(`(?s)-----BEGIN\s+ENCRYPTED\s+PRIVATE\s+KEY-----.*?-----END\s+ENCRYPTED\s+PRIVATE\s+KEY-----`),
-	regexp.MustCompile(`(?s)-----BEGIN\s+PGP\s+PRIVATE\s+KEY\s+BLOCK-----.*?-----END\s+PGP\s+PRIVATE\s+KEY\s+BLOCK-----`),
+// secretPattern gives every scrubbed credential shape a stable category name.
+// bin/contributor-relay.sh declares the same closed category set, and the parity
+// test in scrub_test.go fails when either implementation grows without the other.
+type secretPattern struct {
+	category string
+	regexp   *regexp.Regexp
+}
+
+var secretPatterns = []secretPattern{
+	{category: "hive-canary", regexp: regexp.MustCompile(`HIVE-CANARY-[A-Fa-f0-9]{48}`)},
+	{category: "github-token", regexp: regexp.MustCompile(githubTokenPattern)},
+	{category: "jwt", regexp: regexp.MustCompile(jwtPattern)},
+	{category: "aws-access-key", regexp: regexp.MustCompile(`\b(AKIA|ASIA)[0-9A-Z]{16}\b`)},
+	{category: "bearer-token", regexp: regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{16,}\b`)},
+	{category: "private-key", regexp: regexp.MustCompile(`(?s)-----BEGIN\s+(?:(?:RSA|EC|OPENSSH|DSA)\s+)?PRIVATE\s+KEY-----.*?-----END\s+(?:(?:RSA|EC|OPENSSH|DSA)\s+)?PRIVATE\s+KEY-----`)},
+	{category: "encrypted-private-key", regexp: regexp.MustCompile(`(?s)-----BEGIN\s+ENCRYPTED\s+PRIVATE\s+KEY-----.*?-----END\s+ENCRYPTED\s+PRIVATE\s+KEY-----`)},
+	{category: "pgp-private-key", regexp: regexp.MustCompile(`(?s)-----BEGIN\s+PGP\s+PRIVATE\s+KEY\s+BLOCK-----.*?-----END\s+PGP\s+PRIVATE\s+KEY\s+BLOCK-----`)},
 }
 
 const redacted = "[REDACTED]"
@@ -71,7 +82,7 @@ func scrub(s string) string {
 // GitHub tokens, AWS access keys, bearer tokens, JWTs, and private-key blocks.
 func ScrubString(s string) string {
 	for _, p := range secretPatterns {
-		s = p.ReplaceAllString(s, redacted)
+		s = p.regexp.ReplaceAllString(s, redacted)
 	}
 	return s
 }

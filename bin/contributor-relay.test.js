@@ -3454,9 +3454,37 @@ test('#4267 redactTokens scrubs every GitHub token prefix', () => {
   try {
     for (const prefix of ['gho_', 'ghp_', 'ghs_', 'ghu_', 'ghr_', 'github_pat_']) {
       const out = relay.redactTokens(`token=${prefix}${TOKEN_BODY} end`);
-      assert.strictEqual(out, `token=${prefix}***REDACTED*** end`,
+      assert.strictEqual(out, 'token=[REDACTED] end',
         `${prefix} token must be redacted, got: ${out}`);
     }
+  } finally { teardown(relay); }
+});
+
+test('#5478 redactTokens matches the Go scrubber credential categories', () => {
+  const relay = loadRelay({});
+  const jwt = `eyJ${'a'.repeat(20)}.${'b'.repeat(20)}.${'c'.repeat(20)}`;
+  const cases = [
+    ['JWT', jwt],
+    ['AKIA access key', 'AKIA1234567890ABCDEF'],
+    ['ASIA access key', 'ASIA1234567890ABCDEF'],
+    ['Bearer value', 'Bearer abcdefghijklmnop'],
+    ['canary', `HIVE-CANARY-${'0123456789abcdef'.repeat(3)}`],
+    ['PEM key', '-----BEGIN RSA PRIVATE KEY-----\nkey-data\n-----END RSA PRIVATE KEY-----'],
+    ['encrypted PEM key', '-----BEGIN ENCRYPTED PRIVATE KEY-----\nkey-data\n-----END ENCRYPTED PRIVATE KEY-----'],
+    ['PGP key', '-----BEGIN PGP PRIVATE KEY BLOCK-----\nkey-data\n-----END PGP PRIVATE KEY BLOCK-----'],
+  ];
+  try {
+    for (const [name, secret] of cases) {
+      assert.strictEqual(relay.redactTokens(`secret=${secret} end`), 'secret=[REDACTED] end',
+        `${name} must use the shared placeholder`);
+    }
+  } finally { teardown(relay); }
+});
+
+test('#5478 redactTokens scrubs short and underscore-bearing GitHub token bodies', () => {
+  const relay = loadRelay({});
+  try {
+    assert.strictEqual(relay.redactTokens('token=gho_ab_cdEF1234 end'), 'token=[REDACTED] end');
   } finally { teardown(relay); }
 });
 
@@ -3464,9 +3492,9 @@ test('#4267 redactTokens scrubs tokens embedded in JSON and URLs', () => {
   const relay = loadRelay({});
   try {
     const json = `{"auth":"gho_${TOKEN_BODY}","other":1}`;
-    assert.strictEqual(relay.redactTokens(json), `{"auth":"gho_***REDACTED***","other":1}`);
+    assert.strictEqual(relay.redactTokens(json), `{"auth":"[REDACTED]","other":1}`);
     const url = `https://x-access-token:ghs_${TOKEN_BODY}@github.com/o/r.git`;
-    assert.strictEqual(relay.redactTokens(url), 'https://x-access-token:ghs_***REDACTED***@github.com/o/r.git');
+    assert.strictEqual(relay.redactTokens(url), 'https://x-access-token:[REDACTED]@github.com/o/r.git');
   } finally { teardown(relay); }
 });
 
@@ -3475,7 +3503,7 @@ test('#4267 redactTokens scrubs multiple tokens in one string', () => {
   try {
     const out = relay.redactTokens(`a gho_${TOKEN_BODY} b ghp_${TOKEN_BODY} c gho_${TOKEN_BODY}`);
     assert.ok(!out.includes(TOKEN_BODY), `a token body survived: ${out}`);
-    assert.strictEqual((out.match(/\*\*\*REDACTED\*\*\*/g) || []).length, 3);
+    assert.strictEqual((out.match(/\[REDACTED\]/g) || []).length, 3);
   } finally { teardown(relay); }
 });
 
@@ -3496,7 +3524,7 @@ test('#4267 redactTokens scrubs the WHOLE body of a longer-than-36-char token', 
   try {
     const long = TOKEN_BODY + 'Zz19';
     const out = relay.redactTokens(`log: gho_${long}.`);
-    assert.strictEqual(out, 'log: gho_***REDACTED***.',
+    assert.strictEqual(out, 'log: [REDACTED].',
       `tail of a long token leaked: ${out}`);
   } finally { teardown(relay); }
 });
@@ -3506,6 +3534,21 @@ test('#4267 redactTokens redacts a token even when glued to a preceding word', (
   try {
     const out = relay.redactTokens(`x=Xgho_${TOKEN_BODY}`);
     assert.ok(!out.includes(TOKEN_BODY), `boundary-glued token leaked: ${out}`);
+    assert.strictEqual(out, 'x=X[REDACTED]');
+  } finally { teardown(relay); }
+});
+
+test('#5478 captureTmuxLines scrubs multiline private keys before splitting the pane', () => {
+  const paneText = [
+    'before',
+    '-----BEGIN PRIVATE KEY-----',
+    'sensitive-pane-key-material',
+    '-----END PRIVATE KEY-----',
+    'after',
+  ].join('\n');
+  const relay = loadRelay({ paneText });
+  try {
+    assert.deepStrictEqual(relay.captureTmuxLines(20), ['before', '[REDACTED]', 'after']);
   } finally { teardown(relay); }
 });
 
