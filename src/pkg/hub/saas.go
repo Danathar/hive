@@ -5953,68 +5953,78 @@ func (s *HubServer) StartLatestSHAPoller(ctx context.Context) {
 			return
 		case <-ticker.C:
 		}
-		oldSHAs := getLatestSHAs()
-		oldInfos := snapshotBranchSHAs()
-		// Re-resolve each tick so branches from newly registered hives are
-		// picked up without a hub restart.
-		fetchAllBranchSHAs(s.logger, s.trackedBranchList())
-		newSHAs := getLatestSHAs()
-		if !maps.Equal(snapshotBranchSHAs(), oldInfos) {
-			persistLatestSHAs(s.logger)
+		s.pollLatestSHAsTick(ctx, time.Now())
+	}
+}
+
+// pollLatestSHAsTick is the body of StartLatestSHAPoller's ticker loop,
+// extracted so it can be invoked directly by tests without waiting on the
+// live ticker: re-fetches every tracked branch SHA, persists on change, drives
+// the throttled reconciliation lanes, and runs the hub auto-upgrade check.
+// now is injected so tests control the clock the same way
+// maybeSnapshotImagePulls already does.
+func (s *HubServer) pollLatestSHAsTick(ctx context.Context, now time.Time) {
+	oldSHAs := getLatestSHAs()
+	oldInfos := snapshotBranchSHAs()
+	// Re-resolve each tick so branches from newly registered hives are
+	// picked up without a hub restart.
+	fetchAllBranchSHAs(s.logger, s.trackedBranchList())
+	newSHAs := getLatestSHAs()
+	if !maps.Equal(snapshotBranchSHAs(), oldInfos) {
+		persistLatestSHAs(s.logger)
+	}
+	// Always check for pending auto-upgrades (retries failed/missed hives).
+	s.triggerAutoUpgrades()
+	s.sweepOrphanedUpgradesIfDue()
+	s.sweepStuckAssignmentsIfDue()
+	s.reconcileNetAdminIfDue()
+	s.reconcilePerHiveEnvIfDue()
+	s.reapOrphanedPodsIfDue()
+	s.retireExpiredGenerationsIfDue()
+	s.sweepExpiredAccessIfDue()
+	s.replenishPoolsIfDue()
+	s.maybeSnapshotImagePulls(ctx, now)
+	changed := false
+	for branch, sha := range newSHAs {
+		if sha != "" && sha != oldSHAs[branch] {
+			changed = true
+			break
 		}
-		// Always check for pending auto-upgrades (retries failed/missed hives).
-		s.triggerAutoUpgrades()
-		s.sweepOrphanedUpgradesIfDue()
-		s.sweepStuckAssignmentsIfDue()
-		s.reconcileNetAdminIfDue()
-		s.reconcilePerHiveEnvIfDue()
-		s.reapOrphanedPodsIfDue()
-		s.retireExpiredGenerationsIfDue()
-		s.sweepExpiredAccessIfDue()
-		s.replenishPoolsIfDue()
-		s.maybeSnapshotImagePulls(ctx, time.Now())
-		changed := false
-		for branch, sha := range newSHAs {
-			if sha != "" && sha != oldSHAs[branch] {
-				changed = true
-				break
-			}
+	}
+	_ = changed
+	// Hub auto-upgrade — checked EVERY cycle, not only when the SHA just
+	// changed. Previously this lived inside `if changed {}`, so if the hub
+	// missed the one poll where v2's SHA flipped (busy, mid-restart, or the
+	// SHA moved between polls), it stayed "queued" forever and never retried,
+	// while spokes retry every cycle via triggerAutoUpgrades() above. Mirror
+	// that: whenever auto-upgrade is on and the hub is behind latest v2, trigger
+	// a rollout restart. A debounce prevents re-restarting every 2min while a
+	// restart is already rolling out (the new pod reports the new hash, which
+	// clears the condition, but the poll can fire before the rollout lands).
+	// Use the hub's OWN branch, not a hardcoded "v2": hubUpgradeState() and
+	// handleHubSelfUpgrade() both read s.hubGitBranch, so hardcoding here
+	// made the badge and the poller disagree the moment a hub ran on v3.
+	hubBranchSHA := getLatestHubSHAForBranch(s.hubGitBranch)
+	s.hubUpgradeMu.Lock()
+	debounced := time.Since(s.lastHubUpgradeTrigger) > hubUpgradeDebounce
+	s.hubUpgradeMu.Unlock()
+	// Admin kill switch: while hub upgrades are paused the hub stays on its
+	// current build regardless of new tags — the auto-trigger below never
+	// fires. Checked every cycle (like the trigger itself), so flipping the
+	// switch takes effect on the next poll without a restart.
+	if hubPauseSw, hubPaused := s.hubUpgradesPaused(); hubPaused {
+		if isHubAutoUpgrade() && hubBranchSHA != "" && !sameCommit(hubBranchSHA, s.hubGitHash) {
+			s.logger.Debug("hub auto-upgrade suppressed — hub upgrades are paused",
+				"behind", hubBranchSHA, "paused_by", hubPauseSw.By, "paused_at", hubPauseSw.At)
 		}
-		_ = changed
-		// Hub auto-upgrade — checked EVERY cycle, not only when the SHA just
-		// changed. Previously this lived inside `if changed {}`, so if the hub
-		// missed the one poll where v2's SHA flipped (busy, mid-restart, or the
-		// SHA moved between polls), it stayed "queued" forever and never retried,
-		// while spokes retry every cycle via triggerAutoUpgrades() above. Mirror
-		// that: whenever auto-upgrade is on and the hub is behind latest v2, trigger
-		// a rollout restart. A debounce prevents re-restarting every 2min while a
-		// restart is already rolling out (the new pod reports the new hash, which
-		// clears the condition, but the poll can fire before the rollout lands).
-		// Use the hub's OWN branch, not a hardcoded "v2": hubUpgradeState() and
-		// handleHubSelfUpgrade() both read s.hubGitBranch, so hardcoding here
-		// made the badge and the poller disagree the moment a hub ran on v3.
-		hubBranchSHA := getLatestHubSHAForBranch(s.hubGitBranch)
-		s.hubUpgradeMu.Lock()
-		debounced := time.Since(s.lastHubUpgradeTrigger) > hubUpgradeDebounce
-		s.hubUpgradeMu.Unlock()
-		// Admin kill switch: while hub upgrades are paused the hub stays on its
-		// current build regardless of new tags — the auto-trigger below never
-		// fires. Checked every cycle (like the trigger itself), so flipping the
-		// switch takes effect on the next poll without a restart.
-		if hubPauseSw, hubPaused := s.hubUpgradesPaused(); hubPaused {
-			if isHubAutoUpgrade() && hubBranchSHA != "" && !sameCommit(hubBranchSHA, s.hubGitHash) {
-				s.logger.Debug("hub auto-upgrade suppressed — hub upgrades are paused",
-					"behind", hubBranchSHA, "paused_by", hubPauseSw.By, "paused_at", hubPauseSw.At)
-			}
-		} else if isHubAutoUpgrade() && hubBranchSHA != "" && !sameCommit(hubBranchSHA, s.hubGitHash) && debounced {
-			s.logger.Info("audit: hub auto-upgrade triggered", "from", s.hubGitHash, "to", hubBranchSHA)
-			// rolloutHubToSHA verifies the hub image exists (skips a doomed roll
-			// when the hive-hub build for this SHA failed) and pins the SHA so a
-			// stale cached v2-latest can't come back up. It records the in-flight
-			// state on success so the dashboard shows "Upgrading", not "queued".
-			if err := s.rolloutHubToSHA(hubBranchSHA); err != nil {
-				s.logger.Warn("hub auto-upgrade skipped", "to", hubBranchSHA, "reason", err)
-			}
+	} else if isHubAutoUpgrade() && hubBranchSHA != "" && !sameCommit(hubBranchSHA, s.hubGitHash) && debounced {
+		s.logger.Info("audit: hub auto-upgrade triggered", "from", s.hubGitHash, "to", hubBranchSHA)
+		// rolloutHubToSHA verifies the hub image exists (skips a doomed roll
+		// when the hive-hub build for this SHA failed) and pins the SHA so a
+		// stale cached v2-latest can't come back up. It records the in-flight
+		// state on success so the dashboard shows "Upgrading", not "queued".
+		if err := s.rolloutHubToSHA(hubBranchSHA); err != nil {
+			s.logger.Warn("hub auto-upgrade skipped", "to", hubBranchSHA, "reason", err)
 		}
 	}
 }
