@@ -362,6 +362,33 @@ an operator dismisses the overlay first (see the modal rule above).
 - **Feature parity with the web dashboard's operator loop, not visual
   parity.** The TUI does not attempt to look like the web dashboard.
 
+#### Seeing it run
+
+Everything above is recorded as a VHS tape at
+[`src/docs/design/tui.tape`](design/tui.tape) — launch, the four populated
+panes, focus and navigation, the help overlay, and each write action in its
+safe state. Render it with [VHS](https://github.com/charmbracelet/vhs)
+(`brew install vhs`) and a Go toolchain; it needs no Docker, no network and no
+cluster:
+
+```bash
+cd src
+go build -o bin/hivectl ./cmd/hivectl
+go run ./pkg/tui/testdata/demohive &     # loopback fixture; kill %1 to stop
+vhs docs/design/tui.tape                 # writes docs/design/_out/tui.gif
+```
+
+The tape records against `src/pkg/tui/testdata/demohive`, a single-file,
+stdlib-only, loopback-only fixture that serves fixed literals for the routes
+the TUI reads — so the recording never captures a real hive's identity, agent
+names or spend, and renders identically every time. The GIF is a build product
+and is gitignored; the tape is the committed source of truth.
+
+The tape deliberately does **not** complete a model apply or an ACMM apply (it
+drives each to its confirmation and cancels), and omits local tmux attach and
+SSE degradation, both of which need state the fixture cannot produce
+deterministically. Each omission is explained in a comment in the tape itself.
+
 Track any further work under the `hive tui` epic
 ([#4907](https://github.com/kubestellar/hive/issues/4907)).
 
