@@ -2,7 +2,6 @@ package hub
 
 import (
 	"encoding/json"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -98,7 +97,7 @@ func TestHubVersionDistinguishesBuildingFromWedgedPoller(t *testing.T) {
 			defer resetSHACaches(t)
 			seedSHACaches(tc.spoke, tc.hub, tc.head, tc.status)
 
-			srv := NewHubServer(0, slog.Default(), tc.hub, "v2")
+			srv := newHubServerForTest(t, withHubIdentity(tc.hub, "v2"))
 			got := getHubVersion(t, srv)
 
 			if got.ImageStatuses["v2"] != tc.wantStatus {
@@ -132,7 +131,7 @@ func TestHubVersionUpgradeStateUsesHubCacheNotSpokeCache(t *testing.T) {
 	// Hub image is at c6ec89d (what the hub runs); spoke image lags at f2b4719.
 	seedSHACaches("f2b4719", "c6ec89d", "c6ec89d", imageStatusBuilding)
 
-	srv := NewHubServer(0, slog.Default(), "c6ec89d", "v2")
+	srv := newHubServerForTest(t, withHubIdentity("c6ec89d", "v2"))
 	got := getHubVersion(t, srv)
 
 	if got.UpgradeState != "current" {
@@ -153,7 +152,7 @@ func TestHubVersionEmptyHeadSHAsSignalsPollerNotRunning(t *testing.T) {
 	// Only the persisted spoke cache is warm (as after loadPersistedSHAs).
 	seedSHACaches("f2b4719", "", "", "")
 
-	srv := NewHubServer(0, slog.Default(), "f2b4719", "v2")
+	srv := newHubServerForTest(t, withHubIdentity("f2b4719", "v2"))
 	got := getHubVersion(t, srv)
 
 	if _, ok := got.HeadSHAs["v2"]; ok {

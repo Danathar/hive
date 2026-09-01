@@ -2,7 +2,6 @@ package hub
 
 import (
 	"encoding/json"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -35,7 +34,7 @@ func adminAssignHub(t *testing.T) *HubServer {
 	cleanup := helperSetupTempDirs(t)
 	t.Cleanup(cleanup)
 	ensureSaaSUser(hubAdminUsername)
-	return NewHubServer(0, slog.Default(), "test", "v2")
+	return newHubServerForTest(t)
 }
 
 // adminPut issues the admin edit through the REAL requireAdmin wrapper and the

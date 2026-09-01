@@ -2,7 +2,6 @@ package hub
 
 import (
 	"encoding/json"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -44,7 +43,7 @@ func TestAdminUpdateUserContactAuthorization(t *testing.T) {
 	// requireAdmin resolves the cookie through loadSaaSUser, so the admin needs a
 	// real record on disk for an authenticated admin request to be possible.
 	ensureSaaSUser(hubAdminUsername)
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	handler := contactUpdateHandler(srv)
 
 	tests := []struct {
@@ -97,7 +96,7 @@ func TestAdminUpdateUserContactFieldCaps(t *testing.T) {
 	// requireAdmin resolves the cookie through loadSaaSUser, so the admin needs a
 	// real record on disk for an authenticated admin request to be possible.
 	ensureSaaSUser(hubAdminUsername)
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	handler := contactUpdateHandler(srv)
 
 	tests := []struct {
@@ -168,7 +167,7 @@ func TestAdminUpdateUserContactPreservesOtherFields(t *testing.T) {
 	// requireAdmin resolves the cookie through loadSaaSUser, so the admin needs a
 	// real record on disk for an authenticated admin request to be possible.
 	ensureSaaSUser(hubAdminUsername)
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	handler := contactUpdateHandler(srv)
 
 	seed := func(t *testing.T) {

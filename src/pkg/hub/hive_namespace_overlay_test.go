@@ -1,7 +1,6 @@
 package hub
 
 import (
-	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
@@ -35,7 +34,7 @@ func TestHeartbeatOverlaysHostedNamespace(t *testing.T) {
 	useTempHiveDir(t) // restored via t.Cleanup — no leaked global for -race to catch
 
 	t.Run("hosted hive with a SaaSHive record gets hive-hosted-<id>", func(t *testing.T) {
-		srv := NewHubServer(0, slog.Default(), "test", "v2")
+		srv := newHubServerForTest(t)
 		srv.setHubSecret("")
 
 		const hiveID = "hosted-available-oke-07-placeholder-a1b2"
@@ -62,7 +61,7 @@ func TestHeartbeatOverlaysHostedNamespace(t *testing.T) {
 	})
 
 	t.Run("hive with no SaaSHive record keeps Namespace empty", func(t *testing.T) {
-		srv := NewHubServer(0, slog.Default(), "test", "v2")
+		srv := newHubServerForTest(t)
 		srv.setHubSecret("")
 
 		// No saveSaaSHive: this is a self-hosted/BYO spoke the hub did not

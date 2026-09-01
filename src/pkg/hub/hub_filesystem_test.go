@@ -401,7 +401,7 @@ func TestHandleAdminUpdateUserWithFilesystem(t *testing.T) {
 
 	ensureSaaSUser("target-user")
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("PUT /api/saas/admin/users/{username}", srv.handleAdminUpdateUser)
@@ -433,7 +433,7 @@ func TestHandleAdminUsersWithFilesystem(t *testing.T) {
 	ensureSaaSUser("user-a")
 	ensureSaaSUser("user-b")
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	req := httptest.NewRequest("GET", "/admin-users", nil)
 	w := httptest.NewRecorder()
@@ -457,7 +457,7 @@ func TestRequireAuthWithFilesystem(t *testing.T) {
 	authCleanup := helperSetupAuthUser(t, "ghp_auth_fs", "fs-auth-user")
 	defer authCleanup()
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	var calledWith string
 	handler := srv.requireAuth(func(w http.ResponseWriter, r *http.Request) {
 		calledWith = srv.getAuthUser(r)
@@ -489,7 +489,7 @@ func TestRequireAuthBlockedUserFS(t *testing.T) {
 	authCleanup := helperSetupAuthUser(t, "ghp_blocked_fs", "blocked-user")
 	defer authCleanup()
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	handler := srv.requireAuth(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -529,7 +529,7 @@ func TestHandleMyHivesWithFilesystem(t *testing.T) {
 		AutoUpgrade: true,
 	})
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	now := time.Now().Format(time.RFC3339)
 	srv.mu.Lock()
 	srv.registry.Hives = []RegistryEntry{
@@ -569,7 +569,7 @@ func TestHandleHiveStatusWithFilesystem(t *testing.T) {
 
 	saveSaaSHive(&SaaSHive{ID: "status-hive", Owner: "status-user", Status: "running"})
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/saas/hives/{id}/status", srv.handleHiveStatus)
 
@@ -593,7 +593,7 @@ func TestHandleDeleteHiveWithFilesystem(t *testing.T) {
 	ensureSaaSUser("delete-user")
 	saveSaaSHive(&SaaSHive{ID: "del-hive", Owner: "delete-user", Status: "running"})
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("DELETE /api/saas/hives/{id}", srv.handleDeleteHive)
 
@@ -624,7 +624,7 @@ func TestHandleAccessListWithFilesystem(t *testing.T) {
 	u.Hives["acl-hive"] = "read"
 	saveSaaSUser(u)
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/saas/hives/{id}/access", srv.handleAccessList)
 
@@ -654,7 +654,7 @@ func TestHandleAccessAddWithFilesystem(t *testing.T) {
 	ensureSaaSUser("add-owner")
 	saveSaaSHive(&SaaSHive{ID: "add-hive", Owner: "add-owner"})
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/saas/hives/{id}/access", srv.handleAccessAdd)
 
@@ -686,7 +686,7 @@ func TestHandleAccessAddBadRole(t *testing.T) {
 	ensureSaaSUser("role-owner")
 	saveSaaSHive(&SaaSHive{ID: "role-hive", Owner: "role-owner"})
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/saas/hives/{id}/access", srv.handleAccessAdd)
 
@@ -716,7 +716,7 @@ func TestHandleAccessRemoveWithFilesystem(t *testing.T) {
 	target.Hives["rm-hive"] = "read"
 	saveSaaSUser(target)
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("DELETE /api/saas/hives/{id}/access/{username}", srv.handleAccessRemove)
 
@@ -744,7 +744,7 @@ func TestHandleAccessRemoveLastOwner(t *testing.T) {
 	target.Hives["lastowner-hive"] = "owner"
 	saveSaaSUser(target)
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("DELETE /api/saas/hives/{id}/access/{username}", srv.handleAccessRemove)
 
@@ -768,7 +768,7 @@ func TestHandleRequestAccessWithFilesystem(t *testing.T) {
 	ensureSaaSUser("requesting-user")
 	saveSaaSHive(&SaaSHive{ID: "req-hive-fs", Owner: "someone-else"})
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/saas/hives/{id}/request-access", srv.handleRequestAccess)
 
@@ -806,7 +806,7 @@ func TestHandleRequestAccessAlreadyHasAccess(t *testing.T) {
 	saveSaaSUser(u)
 	saveSaaSHive(&SaaSHive{ID: "has-hive", Owner: "other"})
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/saas/hives/{id}/request-access", srv.handleRequestAccess)
 
@@ -841,7 +841,7 @@ func TestHandleGetRequestsWithFilesystem(t *testing.T) {
 		{Username: "req2", RequestedAt: "2024-01-02T00:00:00Z", Status: "approved"},
 	})
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/saas/hives/{id}/requests", srv.handleGetRequests)
 
@@ -877,7 +877,7 @@ func TestHandleApproveRequestWithFilesystem(t *testing.T) {
 		{Username: "pending-user", RequestedAt: "2024-01-01T00:00:00Z", Status: "pending"},
 	})
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/saas/hives/{id}/requests/{username}/approve", srv.handleApproveRequest)
 
@@ -909,7 +909,7 @@ func TestHandleDenyRequestWithFilesystem(t *testing.T) {
 		{Username: "denied-user", RequestedAt: "2024-01-01T00:00:00Z", Status: "pending"},
 	})
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/saas/hives/{id}/requests/{username}/deny", srv.handleDenyRequest)
 
@@ -939,7 +939,7 @@ func TestHandleApproveAccessWithFilesystem(t *testing.T) {
 		{Username: "approved-user", RequestedAt: "2024-01-01T00:00:00Z", Status: "pending"},
 	})
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("PUT /api/saas/hives/{id}/approve-access/{username}", srv.handleApproveAccess)
 
@@ -969,7 +969,7 @@ func TestHandleDenyAccessWithFilesystem(t *testing.T) {
 		{Username: "denied-acc-user", RequestedAt: "2024-01-01T00:00:00Z", Status: "pending"},
 	})
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("DELETE /api/saas/hives/{id}/deny-access/{username}", srv.handleDenyAccess)
 
@@ -990,7 +990,7 @@ func TestHandleRequestProvisionWithFilesystem(t *testing.T) {
 	authCleanup := helperSetupAuthUser(t, "ghp_reqprov_fs", "reqprov-user")
 	defer authCleanup()
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	// github_host is required — the forge the org lives on must be captured at
 	// request time, so this end-to-end save fixture carries one.
@@ -1034,7 +1034,7 @@ func TestHandleRequestProvisionClampsAboveOnboardingCeiling(t *testing.T) {
 			authCleanup := helperSetupAuthUser(t, token, username)
 			defer authCleanup()
 
-			srv := NewHubServer(0, slog.Default(), "test", "v2")
+			srv := newHubServerForTest(t)
 
 			body := fmt.Sprintf(`{"org":"validorg","github_host":"github.com","repos":"repo1","primary_repo":"repo1","acmm_level":%d,"full_name":"Ada Lovelace"}`, requested)
 			req := httptest.NewRequest("POST", "/provision", strings.NewReader(body))
@@ -1070,7 +1070,7 @@ func TestHandleRequestProvisionAcceptsOnboardingLevels(t *testing.T) {
 			authCleanup := helperSetupAuthUser(t, token, username)
 			defer authCleanup()
 
-			srv := NewHubServer(0, slog.Default(), "test", "v2")
+			srv := newHubServerForTest(t)
 
 			body := fmt.Sprintf(`{"org":"validorg","github_host":"github.com","repos":"repo1","primary_repo":"repo1","acmm_level":%d,"full_name":"Ada Lovelace"}`, requested)
 			req := httptest.NewRequest("POST", "/provision", strings.NewReader(body))
@@ -1120,7 +1120,7 @@ func TestHandleApproveProvisionWithFilesystem(t *testing.T) {
 		t.Fatalf("seed placeholder: %v", err)
 	}
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("PUT /api/saas/approve-provision/{username}", srv.handleApproveProvision)
 
@@ -1176,7 +1176,7 @@ func TestHandleApproveProvisionNoPlaceholderWithFilesystem(t *testing.T) {
 	})
 
 	// No available placeholder seeded -> the admin must be told to provision more.
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("PUT /api/saas/approve-provision/{username}", srv.handleApproveProvision)
 
@@ -1207,7 +1207,7 @@ func TestHandleAssignHiveWithFilesystem(t *testing.T) {
 		t.Fatalf("seed placeholder: %v", err)
 	}
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	// Assign only adopts a vanity URL once the host is actually SERVABLE, and
 	// kubectl does not exist under test, so stub the seam to report success.
 	// Without this the assign correctly declines to adopt an unservable host —
@@ -1284,7 +1284,7 @@ func TestHandleDenyProvisionWithFilesystem(t *testing.T) {
 		Status:   provisionStatusPending,
 	})
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("DELETE /api/saas/deny-provision/{username}", srv.handleDenyProvision)
 
@@ -1327,7 +1327,7 @@ func TestHandleUserTokenWithFilesystem(t *testing.T) {
 	u.EncryptedToken = enc
 	saveSaaSUser(u)
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	body := `{"hive_id":"token-hive","username":"token-fs-user"}`
 	req := httptest.NewRequest("POST", "/user-token", strings.NewReader(body))
@@ -1358,7 +1358,7 @@ func TestHandleUserTokenNoToken(t *testing.T) {
 	u.Hives["token-hive"] = "owner"
 	saveSaaSUser(u)
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	body := `{"hive_id":"token-hive","username":"notoken-user"}`
 	req := httptest.NewRequest("POST", "/user-token", strings.NewReader(body))
@@ -1381,7 +1381,7 @@ func TestHandleUserTokenNoHiveAccess(t *testing.T) {
 
 	ensureSaaSUser("noacc-user")
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	body := `{"hive_id":"no-access-hive","username":"noacc-user"}`
 	req := httptest.NewRequest("POST", "/user-token", strings.NewReader(body))
@@ -1406,7 +1406,7 @@ func TestHandleSaaSAuthCheckWithFilesystem(t *testing.T) {
 	u.Hives["check-hive"] = "read"
 	saveSaaSUser(u)
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	req := httptest.NewRequest("GET", "/api/saas/auth-check?hive=check-hive", nil)
 	req.Header.Set("Authorization", "Bearer ghp_authcheck_fs")
@@ -1443,7 +1443,7 @@ func TestHandleSaaSAuthCheckProxyAuthHeader(t *testing.T) {
 	u.Hives["proxy-hive"] = "admin"
 	saveSaaSUser(u)
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	// The hive must be in the registry with a known cluster so the hub can
 	// resolve its dashboard token in the auth-check handler.
 	srv.registry.Hives = []RegistryEntry{{ID: "proxy-hive", ClusterID: "hive-oke"}}
@@ -1484,7 +1484,7 @@ func TestHandleSaaSAuthCheckNoAccess(t *testing.T) {
 
 	ensureSaaSUser("noauth-user")
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	req := httptest.NewRequest("GET", "/api/saas/auth-check?hive=no-access-hive", nil)
 	req.Header.Set("Authorization", "Bearer ghp_noauth_fs")
@@ -1507,7 +1507,7 @@ func TestHandleCreateHiveWithFilesystem(t *testing.T) {
 	u.SaaSQuota = 5
 	saveSaaSUser(u)
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	body := `{"org":"myorg","repos":"repo1","github_token":"ghp_faketoken12345678","project_name":"My Project","acmm_level":2}`
 	req := httptest.NewRequest("POST", "/create", strings.NewReader(body))
@@ -1541,7 +1541,7 @@ func TestHandleCreateHiveQuotaReached(t *testing.T) {
 	// Pre-create a hive owned by this user
 	saveSaaSHive(&SaaSHive{ID: "existing-hive", Owner: "quota-user"})
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	body := `{"org":"myorg","repos":"repo1","github_token":"ghp_faketoken12345678"}`
 	req := httptest.NewRequest("POST", "/create", strings.NewReader(body))

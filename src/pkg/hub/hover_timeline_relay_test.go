@@ -2,7 +2,6 @@ package hub
 
 import (
 	"encoding/json"
-	"log/slog"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -186,7 +185,7 @@ func TestMyHivesEmbedsRecentEvents(t *testing.T) {
 	cleanup := helperSetupAuthUser(t, token, owner)
 	defer cleanup()
 
-	s := NewHubServer(0, slog.Default(), "test", "v2")
+	s := newHubServerForTest(t)
 	s.mu.Lock()
 	s.registry.Hives = []RegistryEntry{{
 		ID:            hiveID,

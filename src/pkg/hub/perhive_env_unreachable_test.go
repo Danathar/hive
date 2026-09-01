@@ -1,7 +1,6 @@
 package hub
 
 import (
-	"log/slog"
 	"testing"
 	"time"
 )
@@ -154,7 +153,7 @@ func TestSafeToRetirePreviousBlocksOnUnreachableSpokes(t *testing.T) {
 // This is the test that fails if someone reverts the noteUnreachable calls and
 // restores the bare `continue`.
 func TestPullOnlyClusterHivesCountAsUnreachable(t *testing.T) {
-	s := NewHubServer(0, slog.Default(), "test", "v2")
+	s := newHubServerForTest(t)
 	s.clusters = map[string]ClusterConfig{
 		"vllm-d": {ID: "vllm-d", PullOnly: true, KubeconfigPath: "/etc/hive/kubeconfigs/vllm-d.yaml", Domain: "d"},
 	}

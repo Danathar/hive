@@ -16,7 +16,7 @@ import (
 // ran (2xx, or the 400/403/409 the old handler used to return).
 func TestMigrateRouteIsGone(t *testing.T) {
 	t.Cleanup(helperSetupTempDirs(t))
-	srv := NewHubServer(0, discardLogger(), "test", "v2")
+	srv := newHubServerForTest(t, withHubLogger(discardLogger()))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/saas/hives/hosted-x/migrate",
 		strings.NewReader(`{"target_cluster_id":"c2"}`))

@@ -47,6 +47,16 @@ var registryPath = "/data/hub-registry.json"
 // banner). A var (not a const) so tests can redirect it at a temp file.
 var hubBannersPath = "/data/saas/hub-banners.json"
 
+// hubSecretPath is the on-disk file holding the hub's MASTER secret when
+// HIVE_HUB_SECRET is unset: NewHubServer reads it, and generates + writes it
+// when absent; provisionMasterSecret (hub_keys.go) reads it at provision time.
+// A var (not a const) for the same reason as registryPath: NewHubServer
+// touches this path UNCONDITIONALLY on construction, so every test that builds
+// a real server would otherwise read — or worse, create — /data/saas on the
+// host running the suite. newHubServerForTest points it into a per-test
+// t.TempDir. Production never reassigns it.
+var hubSecretPath = "/data/saas/hub-secret.key"
+
 // hubBannerMaxAge bounds how long a persisted banner is honored after it was
 // sent. On load, entries older than this are dropped so a long-forgotten banner
 // does not resurrect across an upgrade months later. Admins still clear banners
@@ -1308,7 +1318,7 @@ func NewHubServer(port int, logger *slog.Logger, gitHash, gitBranch string) *Hub
 	}
 	secret := os.Getenv("HIVE_HUB_SECRET")
 	if secret == "" {
-		if data, err := os.ReadFile("/data/saas/hub-secret.key"); err == nil {
+		if data, err := os.ReadFile(hubSecretPath); err == nil {
 			secret = strings.TrimSpace(string(data))
 		}
 	}
@@ -1318,11 +1328,11 @@ func NewHubServer(port int, logger *slog.Logger, gitHash, gitBranch string) *Hub
 		cryptoRand.Read(b)
 		secret = fmt.Sprintf("%x", b)
 		// Best-effort: a failed mkdir surfaces via the WriteFile error below.
-		_ = os.MkdirAll("/data/saas", 0o755)
-		if err := os.WriteFile("/data/saas/hub-secret.key", []byte(secret), 0o600); err != nil {
+		_ = os.MkdirAll(filepath.Dir(hubSecretPath), 0o755)
+		if err := os.WriteFile(hubSecretPath, []byte(secret), 0o600); err != nil {
 			logger.Error("failed to write hub secret", "error", err)
 		}
-		logger.Info("generated hub secret", "path", "/data/saas/hub-secret.key")
+		logger.Info("generated hub secret", "path", hubSecretPath)
 	}
 	s := &HubServer{
 		mux:          http.NewServeMux(),
