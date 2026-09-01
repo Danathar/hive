@@ -73,6 +73,23 @@ func TestCovH2_BuildHealthAndRateLimits(t *testing.T) {
 	deps := testDeps(t)
 	logger := covH2Logger()
 
+	// This test drives buildHealth with a live client below, and that
+	// production path writes the package-level cachedHealth cache
+	// (status_builder.go). Nothing in the non-test code clears it, so without
+	// a restore here the cache leaks into every later test that exercises the
+	// nil-client branch — those tests assert the *default* {"ci": 100} and
+	// instead observe this test's fixture. Snapshot and restore around the
+	// whole test via t.Cleanup rather than defer: cleanup must run even if an
+	// assertion below calls t.Fatalf. Refs #5570.
+	cachedHealthMu.Lock()
+	prevCachedHealth := cachedHealth
+	cachedHealthMu.Unlock()
+	t.Cleanup(func() {
+		cachedHealthMu.Lock()
+		cachedHealth = prevCachedHealth
+		cachedHealthMu.Unlock()
+	})
+
 	// nil client → cached/default fallback branch.
 	h := buildHealth(nil, nil)
 	if h == nil {
