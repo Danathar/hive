@@ -616,6 +616,11 @@ func (s *Scheduler) BuildAgentMessage(agentName string, issues []github.Issue, a
 	// operator overrides vulnerable indefinitely (kubestellar/hive#4744).
 	defer func() {
 		message = s.addHeldPRCoordination(agentName, actionable, message)
+		// Formal verification is an operator-enabled quality capability, not a
+		// property of one particular prompt file. Inject its contract after
+		// template resolution so local edits, remote prompts, replicas, scheduled
+		// kicks, and manual kicks cannot accidentally omit it.
+		message = s.addFormalQualityCapability(agentName, message)
 		// Fix-before-new: an agent with red PRs of its own must see them —
 		// with the CI evidence — ahead of any new work. Injected at the same
 		// post-resolution seam as the held-PR preflight so no template path

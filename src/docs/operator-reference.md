@@ -58,6 +58,7 @@ Top-level YAML keys accepted by `config.Config`:
 | `hub` | Hub/spoke hosted-hive metadata. | Usually provisioner-owned. |
 | `hive_id` | Stable spoke identifier. | Usually provisioner-owned. |
 | `acmm_level` | Current ACMM pack level. | May be set by hub/dashboard. |
+| `quality` | Optional quality-lane capabilities. | `formal: true` enables agent-authored Spin models only at ACMM L5/L6; see [Formal verification](formal-verification.md). |
 | `variables` | Trusted variable resolver definitions. | Env-only substitution works without this block. |
 | `removed_agents` | Persistent tombstones for deleted agents. | Dashboard/overlay-owned; do not seed casually. |
 
