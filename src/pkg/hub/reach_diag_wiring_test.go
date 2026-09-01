@@ -2,6 +2,7 @@ package hub
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http/httptest"
@@ -56,19 +57,22 @@ func TestAdvisoryDiagnosticsEndpoint(t *testing.T) {
 	}
 }
 
-// Under `go test` the diagnostics ticker must refuse to start (it would leak
-// a goroutine logging every 30 minutes into unrelated tests).
-func TestStartAdvisoryDiagnosticsNoopInTests(t *testing.T) {
+// The diagnostics ticker must honor context cancellation so the pollers all
+// stop when the composition root's context ends (and so tests can bound it).
+// It performs one immediate sample, then exits on a cancelled context.
+func TestStartAdvisoryDiagnosticsStopsOnCancel(t *testing.T) {
 	srv := newHubServerForTest(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
 	done := make(chan struct{})
 	go func() {
-		srv.StartAdvisoryDiagnostics(t.Context())
+		srv.StartAdvisoryDiagnostics(ctx)
 		close(done)
 	}()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("StartAdvisoryDiagnostics did not return under testing.Testing()")
+		t.Fatal("StartAdvisoryDiagnostics did not return on cancelled context")
 	}
 }
 

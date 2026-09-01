@@ -9032,6 +9032,12 @@ func runHub(logger *slog.Logger, configPath string) {
 	// the endpoint would keep answering from the empty stub forever.
 	hubSrv.SetReachReporter(hubSrv.RegistryReachReporter())
 
+	// Long-lived SaaS pollers (provision watcher, SHA poller, auth audit,
+	// advisory diagnostics) are started here — at the composition root — not
+	// inside route registration, so constructing a HubServer stays free of
+	// background goroutines.
+	hubSrv.StartBackgroundPollers(context.Background())
+
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
