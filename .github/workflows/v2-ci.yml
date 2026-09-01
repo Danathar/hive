@@ -552,6 +552,17 @@ jobs:
         working-directory: .
         run: bash src/deploy/test_hive_discord_unit_contract.sh
 
+      # #5483: hive-snapshot.service is the same class as #5435 — it ran
+      # ExecStart=/tmp/hive/dashboard/publish-snapshot.sh, resolving the executed
+      # script out of the same world-writable, reboot-cleared parent. Lower
+      # severity (Type=oneshot on a timer, no EnvironmentFile) but the script
+      # reads a GitHub App token and pushes to kubestellar/docs. The same guard
+      # generalizes unmodified. Registered separately because these deploy tests
+      # are wired INDIVIDUALLY here — an unregistered test silently never runs.
+      - name: hive-snapshot.service does not execute planted code (#5483)
+        working-directory: .
+        run: bash src/deploy/test_hive_snapshot_unit_contract.sh
+
       # #4440: the changelog reminder promises it "always succeeds" and "never
       # blocks a merge", and it did neither on a fork PR — GITHUB_TOKEN is
       # read-only there, the comment POST 403s, and `bash -e` made that a red

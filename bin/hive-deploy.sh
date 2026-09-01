@@ -103,11 +103,12 @@ if [ -f "$BASELINE_HELPER_SRC" ] && ! cmp -s "$BASELINE_HELPER_SRC" "$BASELINE_H
   SYNCED="$SYNCED hive-baseline-check.sh"
 fi
 
-# Same bootstrap problem as the baseline helper above: hive-discord.service's
-# ExecStartPre references /usr/local/bin/hive-checkout-guard.sh (#5435), and
+# Same bootstrap problem as the baseline helper above: the ExecStartPre of both
+# hive-discord.service (#5435) and hive-snapshot.service (#5483) references
+# /usr/local/bin/hive-checkout-guard.sh, and
 # neither sync loop above can create it — both skip any file that is not
 # already installed. Without this block an upgraded host would pull a unit that
-# calls a script it does not have, and systemd would refuse to start the bot.
+# calls a script it does not have, and systemd would refuse to start the unit.
 # Install it BEFORE the unit files are reinstalled by kick-agents.sh.
 CHECKOUT_GUARD_SRC="$HIVE_REPO/bin/hive-checkout-guard.sh"
 CHECKOUT_GUARD_DST="$INSTALL_DIR/hive-checkout-guard.sh"
