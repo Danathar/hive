@@ -173,7 +173,36 @@ RATE_LIMIT_COOLDOWN="${RATE_LIMIT_COOLDOWN:-1800}"  # 30 min
 
 # ── Paths ───────────────────────────────────────────────────────────────────
 STATE_DIR="/var/run/kick-governor"
-_is_agent_paused() { hive_is_paused "$1"; }
+
+# Pause check — FAILS CLOSED.
+#
+# hive_is_paused() is defined in bin/hive-config.sh, which is sourced above
+# only when HIVE_REPOS is unset. When HIVE_REPOS arrives preset (from
+# /etc/hive/governor.env, or the env), hive-config.sh is never sourced and
+# hive_is_paused is undefined. Every _is_agent_paused call site sits inside an
+# `if`/`&&`, which is a `set -e` EXEMPT context — so the resulting exit 127
+# ("hive_is_paused: command not found") was silently read as "NOT paused" and
+# every dashboard pause, operator pause and cadence-zero pause was ignored.
+#
+# hive-config.sh is deliberately NOT sourced unconditionally to repair this:
+# it also assigns AGENTS_ENABLED and PROJECT_REPOS from hive-runtime.yaml and
+# can shell out to mint a GitHub App token, so sourcing it here would silently
+# override the operator's own AGENTS_ENABLED. Instead the pause predicate is
+# self-contained, and if a future refactor removes it the check fails CLOSED:
+# an agent we cannot prove is unpaused is treated as paused. A spuriously
+# paused agent is recoverable by the operator; an agent that ignores a pause
+# is not.
+_is_agent_paused() {
+  local agent="${1:?agent name required}"
+  if declare -F hive_is_paused >/dev/null 2>&1; then
+    hive_is_paused "$agent"
+    return
+  fi
+  # Local equivalent of hive_is_paused (bin/hive-config.sh) against STATE_DIR.
+  [[ -f "$STATE_DIR/paused_${agent}" ]] ||
+    [[ -f "$STATE_DIR/operator_paused_${agent}" ]] ||
+    [[ -f "$STATE_DIR/cadence_paused_${agent}" ]]
+}
 
 # Structured audit log — every governor kick decision records pause state
 KICK_AUDIT_LOG="/var/log/kick-audit.jsonl"
@@ -389,6 +418,58 @@ get_model_selection() {
   echo "$selection"
 }
 
+# ── Budget-pressure tier downgrade ───────────────────────────────────────────
+# The >95% ladder used to downgrade by literal string substitution
+# (${model/sonnet/haiku}), which swapped the tier word but kept the ORIGINAL
+# tier's version suffix: "claude-sonnet-4-6" became "claude-haiku-4-6", a model
+# that does not exist (every haiku default in this file, and config/backends.conf's
+# own model_tier(), use claude-haiku-4-5). The budget-critical path handed the
+# CLI an unavailable model at exactly the moment it existed to protect spend.
+#
+# Map tier AND version together, to this file's own constants. Anything whose
+# tier we do not recognise is returned unchanged — an unknown model is left for
+# the operator rather than being rewritten into a guess.
+GOVERNOR_MODEL_SONNET="${GOVERNOR_MODEL_SONNET:-claude-sonnet-4-6}"
+GOVERNOR_MODEL_HAIKU="${GOVERNOR_MODEL_HAIKU:-claude-haiku-4-5}"
+
+downgrade_model_one_tier() {
+  local model="$1"
+  local tier="unknown"
+  if declare -F model_tier >/dev/null 2>&1; then
+    tier=$(model_tier "$model")
+  fi
+  # model_tier() only knows the claude-* families; fall back to a tier-word
+  # match so a copilot-notation or newer model still ladders down correctly.
+  if [[ "$tier" != "opus" && "$tier" != "sonnet" && "$tier" != "haiku" ]]; then
+    case "$model" in
+      *opus*)   tier="opus" ;;
+      *sonnet*) tier="sonnet" ;;
+      *haiku*)  tier="haiku" ;;
+    esac
+  fi
+  case "$tier" in
+    opus)   echo "$GOVERNOR_MODEL_SONNET" ;;
+    sonnet) echo "$GOVERNOR_MODEL_HAIKU" ;;
+    *)      echo "$model" ;;   # haiku is the floor; unknown is left alone
+  esac
+}
+
+# Priority agents — always kicked, and laddered opus->sonnet->haiku under
+# budget pressure rather than being pushed straight to copilot. Global (not a
+# local inside optimize_model_assignment) so _is_priority_agent below does not
+# depend on dynamic scoping from its caller.
+priority_agents=(scanner ci-maintainer)
+
+# Is this agent on the priority ladder (scanner/ci-maintainer)? Used to keep
+# the budget loops from downgrading a priority agent twice.
+_is_priority_agent() {
+  local agent="$1" p
+  for p in "${priority_agents[@]}"; do
+    [[ "$p" == "$agent" ]] && return 0
+  done
+  return 1
+}
+
 get_cost_weight() {
   local backend="$1" model="$2"
   case "$backend" in
@@ -494,7 +575,6 @@ BUDGETEOF
 optimize_model_assignment() {
   local mode="$1"
   local agents=($AGENTS_ENABLED)
-  local priority_agents=(scanner ci-maintainer)
 
   local projected_pct
   projected_pct=$(compute_budget_state)
@@ -511,7 +591,16 @@ optimize_model_assignment() {
   elif (( projected_pct > TOKEN_BUDGET_SAFETY_PCT )); then
     log "BUDGET PRESSURE: projected ${projected_pct}% > safety ${TOKEN_BUDGET_SAFETY_PCT}%"
 
-    for agent in outreach architect supervisor; do
+    # Only agents this fleet actually runs. This list used to be the hardcoded
+    # `outreach architect supervisor`, but `assignments` is populated from
+    # AGENTS_ENABLED — so an operator whose AGENTS_ENABLED omitted any one of
+    # those names hit `${assignments[$agent]}: unbound variable` under set -u,
+    # aborting optimize_model_assignment (a bare statement, so set -e DOES
+    # fire) before maybe_kick ever ran. One missing name meant NO agent was
+    # kicked that cycle — precisely when the budget was under pressure.
+    for agent in "${agents[@]}"; do
+      # Priority agents ride the opus->sonnet->haiku ladder below instead.
+      _is_priority_agent "$agent" && continue
       local current="${assignments[$agent]}"
       local backend="${current%%:*}"
       if [[ "$backend" != "copilot" && "$backend" != "goose" ]]; then
@@ -526,23 +615,19 @@ optimize_model_assignment() {
 
     if (( projected_pct > 95 )); then
       for agent in "${priority_agents[@]}"; do
+        # A priority agent this fleet does not run has no assignment; skip it
+        # rather than reading an unset key under set -u.
+        [[ -n "${assignments[$agent]+set}" ]] || continue
         local current="${assignments[$agent]}"
         local backend="${current%%:*}"
         local model="${current#*:}"
-        case "$model" in
-          *opus*)
-            local new_model="${model/opus/sonnet}"
-            assignments[$agent]="${backend}:${new_model}"
-            override_reasons[$agent]="budget_downgrade"
-            log "  budget override: $agent opus->sonnet"
-            ;;
-          *sonnet*)
-            local new_model="${model/sonnet/haiku}"
-            assignments[$agent]="${backend}:${new_model}"
-            override_reasons[$agent]="budget_downgrade"
-            log "  budget override: $agent sonnet->haiku"
-            ;;
-        esac
+        local new_model
+        new_model=$(downgrade_model_one_tier "$model")
+        if [[ "$new_model" != "$model" ]]; then
+          assignments[$agent]="${backend}:${new_model}"
+          override_reasons[$agent]="budget_downgrade"
+          log "  budget override: $agent ${model} -> ${new_model}"
+        fi
       done
     fi
 
