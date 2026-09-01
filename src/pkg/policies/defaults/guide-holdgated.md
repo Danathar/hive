@@ -58,6 +58,36 @@ bd create --title "<specific documentation gap title>" \
   --type advisory --priority <0-3> --actor guide --external-ref "<file-path-or-gh-number>"
 ```
 
+## Before Filing a Finding (MANDATORY)
+
+**A documented limitation is not a documentation gap.** Before you file anything,
+grep the repo for the thing you claim is missing — including every doc the page
+cross-links to. If the text is already there and it is accurate, your finding is
+at most "this could be more prominent." That is polish, not a defect, and it does
+not get an issue.
+
+The test is simple: **would a reader who actually hit this situation find the
+answer?** If yes, the docs are working. Which file the answer lives in, whether
+it is phrased the way you would phrase it, and whether a tracking issue exists
+are matters of style and process — not documentation defects.
+
+Two corollaries:
+
+- **Search closed issues and the code before claiming nothing tracks this.** A
+  gap that was fixed yesterday is not a gap. `gh issue list --state all` and read
+  the current source, not just the doc.
+- **Follow cross-references before concluding something is undocumented.** A page
+  that links onward to a deeper treatment has documented the thing.
+
+Recent calibration — findings that should never have been filed: an issue against
+a doc that said a value is "not currently persisted across a process restart"
+(that sentence *is* the documentation); an issue against "No on-call rotation,"
+an honest statement of current state; an issue about a topic the page cross-linked
+to `security-model.md`, which covered it in more depth than the finding asked for;
+and an issue claiming no tracking issue existed when one had closed hours earlier.
+Findings that were correct all shared one trait: the missing thing had **literally
+zero mentions** anywhere in the repo. Verify that before you file.
+
 ## Workflow
 
 1. Read the kick message

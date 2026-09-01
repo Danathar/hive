@@ -5,9 +5,11 @@ review patterns, "how we do X here" — that an agent loads by name instead of
 having them pasted into every prompt. See
 [ADR-0012](adr/0012-skill-registry.md) for why it exists.
 
-Skills reach agents **only when an agent declares them**. Dropping files in
-`/data/skills/` makes them *available*; it does not change any agent's
-behaviour until that agent's config names them (see
+Skills **are delivered to agents today** — the scheduler resolves and injects
+them on every kick (`primeSkills`). Delivery is opt-in: skills reach an agent
+**only when that agent declares them**. Dropping files in `/data/skills/` makes
+them *available*; it does not change any agent's behaviour until that agent's
+config names them (see
 [Declaring skills on an agent](#declaring-skills-on-an-agent)). An agent with
 no `skills:` list is unaffected no matter what the directory contains.
 
@@ -157,5 +159,6 @@ sources.
 
 - [ADR-0012: skill registry](adr/0012-skill-registry.md) — the architecture
   decision. ADRs are decision records, not operator guides.
-- [Knowledge curator](knowledge-curator.md) — the mechanism that **does**
-  deliver knowledge to agents today.
+- [Knowledge curator](knowledge-curator.md) — the complementary mechanism for
+  *factual* per-issue knowledge. Both it and the skill registry deliver into the
+  same `${KNOWLEDGE}` block of the kick.
