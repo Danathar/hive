@@ -227,6 +227,16 @@ contribute-check backend="claude": (contribute-check-backend backend)
     @echo ""
     @echo "✓ Machine looks ready for 'just contribute-setup {{backend}}'."
 
+# End-to-end smoke of the contributor backend integration: the real relay
+# against a fake hub, and — where a CLI + credential exist locally — the real
+# backend on a one-line task. Keyless machines still run the drift checks and
+# the stub wire-contract scenarios; live scenarios skip cleanly. The scheduled
+# lane (.github/workflows/backend-smoke.yml) runs the same suite with skips
+# escalated to failures.
+# Usage: just backend-smoke            (or: just backend-smoke claude)
+backend-smoke backends="claude codex":
+    HIVE_SMOKE_BACKENDS="{{backends}}" bash bin/test_backend_smoke.sh
+
 # One-time setup: register with hub + authenticate GitHub + authenticate CLI
 # Ordering note (#2543): the backend-readiness preflight runs FIRST, before
 # any credential is written to disk or a contributor slot is registered —

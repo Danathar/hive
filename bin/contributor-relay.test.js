@@ -2262,7 +2262,9 @@ test('buildHeadlessArgv maps each supported backend to its one-shot invocation',
     { backend: 'claude', tail: ['-p', PROMPT] },
     { backend: 'litellm', tail: ['-p', PROMPT] },
     { backend: 'copilot', tail: ['-p', PROMPT] },
-    { backend: 'codex', tail: ['exec', PROMPT] },
+    // --skip-git-repo-check: codex exec refuses a non-git cwd outright, and
+    // the task workspace root is not a repo until the agent clones into it.
+    { backend: 'codex', tail: ['exec', '--skip-git-repo-check', PROMPT] },
     // goose needs its `run` sub-command AND -t (whose VALUE is the prompt) —
     // two leading tokens, unlike every other entry (#2828).
     { backend: 'goose', tail: ['run', '--no-session', '-t', PROMPT] },
@@ -2349,7 +2351,7 @@ test('codex headless transports model and reasoning effort without affecting oth
     assert.ok(a.args.includes('gpt-5.6-luna'), `codex must receive the configured model: ${JSON.stringify(a.args)}`);
     assert.ok(a.args.includes('-c'), `codex must receive a config override: ${JSON.stringify(a.args)}`);
     assert.ok(a.args.includes('model_reasoning_effort="low"'), `codex must receive the configured effort: ${JSON.stringify(a.args)}`);
-    assert.deepStrictEqual(a.args.slice(-2), ['exec', 'review this'],
+    assert.deepStrictEqual(a.args.slice(-3), ['exec', '--skip-git-repo-check', 'review this'],
       'codex one-shot mode and prompt must remain at the tail');
   } finally { teardown(relay); }
 
@@ -3691,6 +3693,13 @@ test('#4267 detectNoWorkVerdict extracts the verdict and reason', () => {
     // Codex bullet chrome and indentation are presentation, not content.
     const b = relay.detectNoWorkVerdict(['  • HIVE_VERDICT: no_work_needed - gated on maintainer decision']);
     assert.strictEqual(b.reason, 'gated on maintainer decision');
+    // Claude Code renders assistant lines with ● (U+25CF), not codex's •
+    // (U+2022). The glyph was missing from the scanner until a live claude
+    // pane driven by bin/test_backend_smoke.sh showed the sentinel being
+    // printed and missed — every interactive claude completion degraded to
+    // the chrome_idle fallback.
+    const c = relay.detectNoWorkVerdict(['● HIVE_VERDICT: no_work_needed — backend smoke']);
+    assert.deepStrictEqual(c, { verdict: 'no_work_needed', reason: 'backend smoke' });
     // Case-insensitive, empty reason allowed.
     assert.strictEqual(relay.detectNoWorkVerdict(['hive_verdict: NO_WORK_NEEDED']).verdict, 'no_work_needed');
   } finally { teardown(relay); }

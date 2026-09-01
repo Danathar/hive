@@ -102,6 +102,12 @@ type ContributorConnection struct {
 	// cleanupLoop auto-releases a task whose lease has not been renewed within
 	// wsTaskTimeout. Zero when no task is active.
 	lastLeaseRenew time.Time
+	// taskAssignedAt is when currentTask was assigned, kept SEPARATE from
+	// lastLeaseRenew (which task_progress refreshes) so a terminal report can
+	// record the task's real wall-clock duration in the run log
+	// (task_run_log.go). Zero when no task is active or the task was adopted
+	// via the resume path without a fresh assignment.
+	taskAssignedAt time.Time
 	lastPong       time.Time
 	tmuxOutput     []string
 	// tokenMintedAt is when the scoped GitHub token for currentTask was last
@@ -3729,6 +3735,10 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 				}
 				hasTask := contributor.currentTask != nil && contributor.currentTask.TaskID == msg.TaskID
 				completedTask := contributor.currentTask
+				// Captured before the clear below so the run log can record the
+				// task's wall-clock duration. Zero when the task was adopted
+				// without a fresh assignment; the record then omits duration.
+				taskAssignedAt := contributor.taskAssignedAt
 				// SECURITY (audit N9, CWE-862/639): clear ONLY when the reported
 				// task_id actually matches the held assignment.
 				//
@@ -3750,6 +3760,7 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 					contributor.currentPrompt = ""
 					contributor.currentLabels = nil
 					contributor.tokenMintedAt = time.Time{}
+					contributor.taskAssignedAt = time.Time{}
 					// #2537: clear any pending/delivered credential state with the task.
 					contributor.pendingToken = ""
 					contributor.credentialDelivered = false
@@ -3850,6 +3861,33 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 						// inject arbitrary text into the hub's structured logs.
 						"completion_signal", normalizeCompletionSignal(msg.CompletionSignal),
 					)
+					// Durable per-run record (task_run_log.go) — the same
+					// normalized fields the slog line above carries, plus the
+					// duration nothing recorded before. DECLARE only.
+					runRec := TaskRunRecord{
+						TaskID:           msg.TaskID,
+						TaskGen:          msg.TaskGen,
+						Username:         contributor.profile.GitHubUsername,
+						Backend:          contributor.cliBackend,
+						Provider:         provider,
+						Model:            contributor.model,
+						Effort:           contributor.reasoningEffort,
+						Role:             contributor.role,
+						Outcome:          "completed",
+						CompletionSignal: normalizeCompletionSignal(msg.CompletionSignal),
+						Verdict:          verdict,
+						VerdictReason:    strings.TrimSpace(msg.VerdictReason),
+						PRURL:            verifiedPR,
+						PRVerified:       verifiedPR != "",
+					}
+					if completedTask != nil {
+						runRec.Repo = completedTask.Repo
+						runRec.Number = completedTask.Number
+					}
+					if !taskAssignedAt.IsZero() {
+						runRec.DurationS = time.Since(taskAssignedAt).Seconds()
+					}
+					h.appendTaskRun(runRec)
 					contributor.mu.Lock()
 					contributor.profile.TasksCompleted++
 					// Trust credit is gated on the VERIFIED PR, not the reported one:
@@ -3920,6 +3958,9 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 				}
 				hasTask := contributor.currentTask != nil && contributor.currentTask.TaskID == msg.TaskID
 				failedTask := contributor.currentTask
+				// Duration anchor for the run log, captured before the clear —
+				// same shape as task_complete above.
+				taskAssignedAt := contributor.taskAssignedAt
 				// SECURITY (audit N9, CWE-862/639): same hole as task_complete —
 				// clear only on a genuine TaskID match. Unconditionally, a failure
 				// naming any other task released the assignment while revokeLease
@@ -3929,6 +3970,7 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 				if hasTask {
 					contributor.currentTask = nil
 					contributor.tokenMintedAt = time.Time{}
+					contributor.taskAssignedAt = time.Time{}
 					// #2537: clear any pending/delivered credential state with the task.
 					contributor.pendingToken = ""
 					contributor.credentialDelivered = false
@@ -3992,6 +4034,31 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 						"failure_kind", failureKind,
 						"permanent", msg.Permanent,
 					)
+					// Durable per-run record (task_run_log.go). The reason is
+					// the same bounded, fleet-view-displayed text stored on
+					// lastFailure above; failure_kind is already normalized.
+					runRec := TaskRunRecord{
+						TaskID:      msg.TaskID,
+						TaskGen:     msg.TaskGen,
+						Username:    contributor.profile.GitHubUsername,
+						Backend:     contributor.cliBackend,
+						Provider:    provider,
+						Model:       contributor.model,
+						Effort:      contributor.reasoningEffort,
+						Role:        contributor.role,
+						Outcome:     "failed",
+						FailureKind: failureKind,
+						Reason:      msg.Reason,
+						Permanent:   msg.Permanent,
+					}
+					if failedTask != nil {
+						runRec.Repo = failedTask.Repo
+						runRec.Number = failedTask.Number
+					}
+					if !taskAssignedAt.IsZero() {
+						runRec.DurationS = time.Since(taskAssignedAt).Seconds()
+					}
+					h.appendTaskRun(runRec)
 					contributor.mu.Lock()
 					contributor.profile.TasksFailed++
 					contributor.mu.Unlock()
@@ -5636,6 +5703,9 @@ func (h *ContributeWSHub) selectTask(c *ContributorConnection) *WSMessage {
 	// #2568: start the hub-owned lease clock. task_progress renews it; cleanupLoop
 	// auto-releases the task if it is not renewed within wsTaskTimeout.
 	c.lastLeaseRenew = time.Now()
+	// Duration anchor for the run log — lastLeaseRenew moves on every
+	// progress report, so it cannot serve as the start time.
+	c.taskAssignedAt = time.Now()
 	// Store the prompt (never the token) so FleetSnapshot can preview it (#2539),
 	// and clear any stale idle reason now that this connection has real work.
 	c.currentPrompt = prompt
