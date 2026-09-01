@@ -3008,7 +3008,22 @@ func (m *Manager) pollTmuxOutputForAgent(agent *AgentProcess, ctx context.Contex
 			//      login agent that was kicked long ago restarts after the
 			//      grace expires; delivered work is never killed mid-scan.
 			//   3. The existing cooldown.
-			if showsLogin && loginStreak >= loginStreakRestartMin && configHasTokens() {
+			//   4. THE CREDENTIAL MUST BE THIS AGENT'S. configHasTokens() is
+			//      backend-blind: it answers true when EITHER the shared claude
+			//      or copilot credential is usable, whatever backend the agent
+			//      in front of it runs. So an agy agent parked at its Google
+			//      OAuth prompt was restarted on the strength of an unrelated
+			//      claude login. A restart cannot mint a Google session, so it
+			//      looped — and each relaunch minted a fresh PKCE challenge,
+			//      invalidating the code the operator was in the middle of
+			//      pasting. Observed live 2026-09-01: 15 restarts in an hour
+			//      and 8 distinct challenges, which made signing in impossible
+			//      rather than merely slow. AgentHasValidCredential resolves
+			//      the agent's OWN backend and is positive-evidence-only, so a
+			//      backend whose credential this process cannot verify (agy,
+			//      gemini) answers false and is left alone — which is correct:
+			//      do not restart when you cannot show a restart would help.
+			if showsLogin && loginStreak >= loginStreakRestartMin && m.AgentHasValidCredential(agent.Name) {
 				m.mu.RLock()
 				lastKick := agent.LastKick
 				m.mu.RUnlock()
