@@ -11,6 +11,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/kubestellar/hive/pkg/tui/client"
 	"github.com/kubestellar/hive/pkg/tui/panes"
@@ -887,5 +888,45 @@ func TestIntervalBeforeStatusDeliversNoFrame(t *testing.T) {
 	}
 	if got.EvalInterval != governorEvalInterval {
 		t.Errorf("EvalInterval = %v, want the cached %v", got.EvalInterval, governorEvalInterval)
+	}
+}
+
+// TestHeaderIsClippedNotWrappedAtTheMinimumWidth guards the frame's height
+// against a long hive identity.
+//
+// lipgloss's Width() WRAPS rather than truncates, so a header wider than the
+// terminal silently becomes two lines and pushes the whole frame one row past
+// the terminal's height — the same cliff the footer strip sits on. T29 is what
+// makes this reachable for the header: before it, `hive: —` was a constant two
+// cells wide, and no input could overflow. Now the field carries a
+// server-supplied string of unbounded length, and identities of this shape are
+// ordinary rather than adversarial.
+//
+// The assertion is on the RENDERED FRAME's line count, not on the header
+// string, because the bug is a layout overflow — a test that only measured the
+// text would pass while the frame was a row too tall.
+func TestHeaderIsClippedNotWrappedAtTheMinimumWidth(t *testing.T) {
+	pinDashboard(t, closedDashboard)
+	m := newModel()
+	m.width, m.height = minWidth, minHeight
+	m.hiveID = "acme-production-us-east-1-primary"
+	m.governorStatus = client.GovernorStatus{
+		GovernorState: client.GovernorState{Active: true, Mode: "surge"},
+	}
+
+	if lipgloss.Width(m.headerText()) <= minWidth {
+		t.Fatalf("the fixture no longer overflows (%d <= %d); this test would pass vacuously",
+			lipgloss.Width(m.headerText()), minWidth)
+	}
+
+	frame := m.View()
+	lines := strings.Split(frame, "\n")
+	if len(lines) != minHeight {
+		t.Errorf("frame is %d lines at height %d; a wrapped header cost a row", len(lines), minHeight)
+	}
+	for i, line := range lines {
+		if got := lipgloss.Width(line); got > minWidth {
+			t.Errorf("line %d is %d columns wide, want at most %d", i, got, minWidth)
+		}
 	}
 }

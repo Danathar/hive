@@ -626,7 +626,17 @@ func (m model) View() string {
 	bottom := lipgloss.JoinHorizontal(lipgloss.Top,
 		cell(2, leftW, botH), cell(3, rightW, botH))
 
-	header := headerStyle.Width(m.width).Render(m.headerText())
+	// CLIPPED INLINE, THEN PADDED. Width() WRAPS text that overflows rather
+	// than truncating it, so a header wider than the terminal silently becomes
+	// two lines and pushes the frame one row past the terminal's height —
+	// exactly the cliff the footer sits on. This is not hypothetical for the
+	// header now that T29 renders a real hive id: at the 60-column minimum,
+	// `hive:` plus a routine identity like "acme-production-us-east-1" already
+	// overflows. MaxWidth() alone cannot fix it, because the wrap has happened
+	// by the time it clips. Inline(true) collapses the text to one line first,
+	// so MaxWidth truncates instead.
+	header := headerStyle.Width(m.width).Render(
+		lipgloss.NewStyle().Inline(true).MaxWidth(m.width).Render(m.headerText()))
 	footerTextForFrame := footerText
 	if m.footerStatus != "" {
 		footerTextForFrame = m.footerStatus
