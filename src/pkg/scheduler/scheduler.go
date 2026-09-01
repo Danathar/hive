@@ -700,6 +700,14 @@ func (s *Scheduler) BuildAgentMessage(agentName string, issues []github.Issue, a
 
 	// 3. Legacy hardcoded fallback (removed in Phase 4 when all agents use templates)
 	s.logger.Info("no prompt template found, using hardcoded kick", "agent", agentName)
+	// Role-based routing (#5480): an operator-added agent with `role: reviewer`
+	// gets the escalated-PR adjudication kick regardless of its name. Checked
+	// before the name switch because the lane is enabled by ROLE — the agent
+	// may be named anything. (The pack-defined on-demand "reviewer" agent
+	// never reaches this fallback: its kick_template resolves above.)
+	if s.agentRole(agentName) == RoleReviewer {
+		return s.buildReviewerMessage(agentName, actionable)
+	}
 	switch baseName {
 	case "scanner":
 		return s.buildScannerMessage(issues, actionable)

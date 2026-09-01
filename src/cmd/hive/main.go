@@ -8506,6 +8506,11 @@ func writeMergeEligible(actionable *github.ActionableResult, hold github.HoldRes
 		// fix-before-new section routes each red PR back to its author; empty
 		// means unattributed (kick builders default it to scanner).
 		Agent string `json:"agent,omitempty"`
+		// Labels carries the PR's current labels into the kick builders. The
+		// reviewer lane (#5480) reads them to exclude PRs already carrying
+		// reviewer-passed — a PR that re-escalates after a reviewer pass
+		// belongs to a true human, never to another automated pass.
+		Labels []string `json:"labels,omitempty"`
 	}
 
 	prAgents := auditPRAgents(org, time.Now().Add(-auditPRAttributionWindow), "")
@@ -8570,6 +8575,7 @@ func writeMergeEligible(actionable *github.ActionableResult, hold github.HoldRes
 					Excerpt:       pr.CIFailureExcerpt,
 					Escalated:     escalatedPRs[escalation.Key(fullRepo, pr.Number)],
 					Agent:         prAgents[fmt.Sprintf("%s#%d", fullRepo, pr.Number)],
+					Labels:        pr.Labels,
 				})
 				continue
 			}
