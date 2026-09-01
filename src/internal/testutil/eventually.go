@@ -45,6 +45,22 @@ const pollInterval = 10 * time.Millisecond
 //     strictly worse.
 func Eventually(t testing.TB, timeout time.Duration, cond func() bool, msg string, args ...any) {
 	t.Helper()
+	EventuallyEvery(t, timeout, pollInterval, cond, msg, args...)
+}
+
+// EventuallyEvery is Eventually with a caller-chosen sampling interval.
+//
+// The default 10ms suits a condition that becomes true after real work — a
+// server responding, a file appearing. It is far too coarse for an in-process
+// harness whose state changes in microseconds: sampling ten times slower than
+// the thing you are watching turns a fast suite into a slow one, and a suite
+// that takes minutes stops being run under -count=N, which is where genuine
+// flakes surface.
+//
+// Prefer plain Eventually. Reach for this only when you have measured that
+// the default interval dominates the wait, and say so at the call site.
+func EventuallyEvery(t testing.TB, timeout, interval time.Duration, cond func() bool, msg string, args ...any) {
+	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
 		if cond() {
@@ -54,7 +70,7 @@ func Eventually(t testing.TB, timeout time.Duration, cond func() bool, msg strin
 			t.Fatalf("%s (condition not met within %s)", fmt.Sprintf(msg, args...), timeout)
 			return
 		}
-		time.Sleep(pollInterval)
+		time.Sleep(interval)
 	}
 }
 

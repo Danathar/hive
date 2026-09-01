@@ -737,21 +737,21 @@ func (h *harness) stop() {
 // regression fail loudly instead of flakily.
 func (h *harness) waitFor(why string, cond func(model) bool) {
 	h.t.Helper()
-	testutil.Eventually(h.t, waitTimeout, func() bool { return cond(h.snapshot()) },
+	testutil.EventuallyEvery(h.t, waitTimeout, pollStep, func() bool { return cond(h.snapshot()) },
 		"timed out waiting for %s\nlast frame:\n%s", why, h.view())
 }
 
 // waitForView blocks until the rendered frame satisfies cond.
 func (h *harness) waitForView(why string, cond func(string) bool) {
 	h.t.Helper()
-	testutil.Eventually(h.t, waitTimeout, func() bool { return cond(h.view()) },
+	testutil.EventuallyEvery(h.t, waitTimeout, pollStep, func() bool { return cond(h.view()) },
 		"timed out waiting for %s\nlast frame:\n%s", why, h.view())
 }
 
 // waitForFixture blocks until cond holds on the fixture's recorded traffic.
 func (h *harness) waitForFixture(why string, cond func() bool) {
 	h.t.Helper()
-	testutil.Eventually(h.t, waitTimeout, cond,
+	testutil.EventuallyEvery(h.t, waitTimeout, pollStep, cond,
 		"timed out waiting for %s\nlast frame:\n%s", why, h.view())
 }
 
@@ -769,7 +769,7 @@ func (h *harness) settle() {
 	// waits for a condition to BECOME true, and here we need the absence of
 	// activity to PERSIST.
 	for i := 0; i < 2; i++ {
-		testutil.Eventually(h.t, waitTimeout, func() bool { return len(h.msgs) == 0 },
+		testutil.EventuallyEvery(h.t, waitTimeout, pollStep, func() bool { return len(h.msgs) == 0 },
 			"message queue did not drain")
 		timer := time.NewTimer(5 * pollStep)
 		<-timer.C
