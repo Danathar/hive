@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -384,5 +385,507 @@ func TestPollSurvivesAnUnreachableDashboard(t *testing.T) {
 		}
 	case <-time.After(finalWait):
 		t.Fatal("a poll against an unreachable dashboard did not return")
+	}
+}
+
+// ── T29: governor + header wiring ────────────────────────────────────────────
+
+// governorStatusFixture is the /api/status body the T29 tests serve, trimmed
+// to the keys client.GovernorStatus reads. The mode is deliberately lowercase,
+// as buildGovernor sends it, so a test can tell a case-folding header from one
+// that echoes the wire.
+const governorStatusFixture = `{
+  "governor": {
+    "active": true, "mode": "surge", "issues": 12, "prs": 3,
+    "thresholds": {"quiet": 1, "busy": 5, "surge": 20},
+    "nextKick": "9/1 12:05 PM UTC"
+  },
+  "acmmLevel": 4,
+  "acmmLevelConfigured": true
+}`
+
+// governorConfigFixture is the /api/config/governor body. Only the one nested
+// key GovernorEvalInterval reads is present; the real response is far larger.
+const governorConfigFixture = `{"general_advanced": {"eval_interval_s": 300}}`
+
+// hiveIDFixture is the /api/hive-id body (T6b, #5412).
+const hiveIDFixture = `{"id": "acme-prod"}`
+
+// governorEvalInterval is what governorConfigFixture decodes to.
+const governorEvalInterval = 300 * time.Second
+
+// dashboardServer serves the four endpoints the poll reads, with a per-path
+// failure switch.
+//
+// FAILING BY PATH IS THE WHOLE POINT. T29's core invariant is that these reads
+// fail independently, and a server that could only be all-up or all-down could
+// not express the case that matters: /api/status fine, /api/config/governor
+// forbidden. Each path also counts its requests, so a test can prove a second
+// tick re-read rather than replaying a cache.
+type dashboardServer struct {
+	*httptest.Server
+	failStatus atomic.Bool
+	failConfig atomic.Bool
+	failHiveID atomic.Bool
+	hiveID     atomic.Value // string body for /api/hive-id
+}
+
+func newDashboardServer(t *testing.T) *dashboardServer {
+	t.Helper()
+	s := &dashboardServer{}
+	s.hiveID.Store(hiveIDFixture)
+	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fail := func() {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":"forbidden"}`))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/agents":
+			_, _ = w.Write([]byte(agentsFixture))
+		case "/api/status":
+			if s.failStatus.Load() {
+				fail()
+				return
+			}
+			_, _ = w.Write([]byte(governorStatusFixture))
+		case "/api/config/governor":
+			if s.failConfig.Load() {
+				fail()
+				return
+			}
+			_, _ = w.Write([]byte(governorConfigFixture))
+		case "/api/hive-id":
+			if s.failHiveID.Load() {
+				fail()
+				return
+			}
+			body, _ := s.hiveID.Load().(string)
+			_, _ = w.Write([]byte(body))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(s.Close)
+	return s
+}
+
+// applyAll feeds every message a poll produced back into the model, the way
+// bubbletea's runtime would, and returns the settled model.
+//
+// It exists because T29's behaviour is a two-stage pipeline — a fetch produces
+// an app-level message, and Update turns cached app state into a pane message
+// — so a test that only inspected the poll's output would be asserting on the
+// wrong half.
+func applyAll(m model, msgs []tea.Msg) model {
+	for _, msg := range msgs {
+		next, _ := m.Update(msg)
+		m = next.(model)
+	}
+	return m
+}
+
+// pollAndApply runs one poll against the server and settles every result.
+func pollAndApply(t *testing.T, m model) model {
+	t.Helper()
+	return applyAll(m, drain(m.poll()))
+}
+
+// deliveredGovernor is the frame the model would hand the panes, or nil when
+// no successful status read has happened yet.
+//
+// It reads model state rather than intercepting a message because broadcast
+// delivers INTO the panes and returns only their commands — the frame itself
+// never appears in any Cmd's output. governorLoaded is the same distinction
+// the app makes: no status read yet is not the same fact as a status read that
+// reported an inactive governor.
+func deliveredGovernor(m model) *panes.GovernorMsg {
+	if !m.governorLoaded {
+		return nil
+	}
+	msg := m.governorMsg()
+	return &msg
+}
+
+// TestPollPopulatesGovernorAndHeaderWithoutSSE is the first acceptance
+// criterion: startup polling alone fills the Governor pane and both header
+// fields, with no stream event involved.
+func TestPollPopulatesGovernorAndHeaderWithoutSSE(t *testing.T) {
+	server := newDashboardServer(t)
+	m := pollTestModel(t, server.URL)
+
+	settled := applyAll(m, drain(m.poll()))
+
+	got := deliveredGovernor(settled)
+	if got == nil {
+		t.Fatal("a successful poll delivered no GovernorMsg; the pane would stay on its waiting placeholder")
+	}
+	if got.Status.Mode != "surge" {
+		t.Errorf("GovernorMsg.Status.Mode = %q, want %q", got.Status.Mode, "surge")
+	}
+	if got.EvalInterval != governorEvalInterval {
+		t.Errorf("GovernorMsg.EvalInterval = %v, want %v", got.EvalInterval, governorEvalInterval)
+	}
+
+	want := fmt.Sprintf(headerFormat, "acme-prod", "SURGE", wsNotConnected)
+	if settled.headerText() != want {
+		t.Errorf("header = %q, want %q", settled.headerText(), want)
+	}
+}
+
+// TestGovernorMsgAlwaysCarriesTheCachedInterval is the bug this task exists to
+// close, stated directly: a stream event carries no evaluation interval, so a
+// GovernorMsg built from one alone reverts `next eval` to unknown.
+func TestGovernorMsgAlwaysCarriesTheCachedInterval(t *testing.T) {
+	server := newDashboardServer(t)
+	m := pollTestModel(t, server.URL)
+	m = pollAndApply(t, m)
+
+	if m.governorInterval != governorEvalInterval {
+		t.Fatalf("poll cached interval %v, want %v", m.governorInterval, governorEvalInterval)
+	}
+
+	// Now let the stream deliver a full status event, as it would a moment
+	// later. Before T29 this is the message that blanked the interval.
+	m = connectedStream(t, m)
+	// The command is deliberately NOT drained: handleSSEEvent re-arms the
+	// stream pump, and running that Cmd would block forever on a test stream
+	// nothing writes to. The frame is read from the settled model instead.
+	next, _ := m.Update(sseEventMsg{
+		gen:   m.sseGen,
+		event: sseEvent(client.SSEEventTypeMessage, statusFixture),
+	})
+	m = next.(model)
+
+	got := deliveredGovernor(m)
+	if got == nil {
+		t.Fatal("a full SSE status event delivered no GovernorMsg")
+	}
+	if got.EvalInterval != governorEvalInterval {
+		t.Errorf("SSE-sourced GovernorMsg.EvalInterval = %v, want the cached %v; a zero here is the `next eval` regression",
+			got.EvalInterval, governorEvalInterval)
+	}
+	// The stream's own mode must land too — that is the "updates immediately"
+	// half of the same criterion.
+	if got.Status.Mode != "busy" {
+		t.Errorf("GovernorMsg.Status.Mode = %q, want the streamed %q", got.Status.Mode, "busy")
+	}
+	if m.governorInterval != governorEvalInterval {
+		t.Errorf("model interval = %v after an SSE event, want it retained", m.governorInterval)
+	}
+
+	// The pane-message builder itself must carry the interval too. This is the
+	// exact call site that shipped `panes.GovernorMsg{Status: status}` with no
+	// interval, so asserting on it directly is what stops the regression
+	// reappearing there specifically.
+	direct := findGovernorMsg(m.paneMsgs(sseEvent(client.SSEEventTypeMessage, statusFixture)))
+	if direct == nil {
+		t.Fatal("paneMsgs produced no governor frame for a full status event")
+	}
+	if direct.EvalInterval != governorEvalInterval {
+		t.Errorf("paneMsgs GovernorMsg.EvalInterval = %v, want the cached %v", direct.EvalInterval, governorEvalInterval)
+	}
+}
+
+// connectedStream puts m into the connected state with a live stream attached,
+// so sseEventMsg is not dropped by the generation guard.
+func connectedStream(t *testing.T, m model) model {
+	t.Helper()
+	stream := &sseStream{
+		events: make(chan client.SSEEvent),
+		errs:   make(chan error),
+		cancel: func() {},
+		gen:    m.sseGen,
+	}
+	m.sse = stream
+	m.sseConnected = true
+	return m
+}
+
+// TestAgentOnlySSEEventPreservesGovernorAndHeader pins that the light
+// agent-status push, which carries no governor object, leaves the cached mode
+// and the header alone rather than clearing them.
+func TestAgentOnlySSEEventPreservesGovernorAndHeader(t *testing.T) {
+	server := newDashboardServer(t)
+	m := pollTestModel(t, server.URL)
+	m = pollAndApply(t, m)
+	before := m.headerText()
+
+	m = connectedStream(t, m)
+	next, _ := m.Update(sseEventMsg{
+		gen:   m.sseGen,
+		event: sseEvent(client.SSEEventTypeAgentStatus, agentStatusFixture),
+	})
+	got := next.(model)
+
+	if got.governorStatus.Mode != "surge" {
+		t.Errorf("governor mode = %q after an agent-only event, want the cached %q", got.governorStatus.Mode, "surge")
+	}
+	if got.governorInterval != governorEvalInterval {
+		t.Errorf("interval = %v after an agent-only event, want it retained", got.governorInterval)
+	}
+	// The header's ws field legitimately flips to connected; the data fields
+	// must not move.
+	want := fmt.Sprintf(headerFormat, "acme-prod", "SURGE", wsConnected)
+	if got.headerText() != want {
+		t.Errorf("header = %q after an agent-only event, want %q (was %q)", got.headerText(), want, before)
+	}
+}
+
+// TestForbiddenConfigReadKeepsLiveGovernorMode is the failure-isolation
+// criterion in its most concrete form: a read-only token that cannot see
+// /api/config/governor must still get a live mode in the header and a loaded
+// Governor pane.
+func TestForbiddenConfigReadKeepsLiveGovernorMode(t *testing.T) {
+	server := newDashboardServer(t)
+	server.failConfig.Store(true)
+	m := pollTestModel(t, server.URL)
+
+	settled := applyAll(m, drain(m.poll()))
+
+	got := deliveredGovernor(settled)
+	if got == nil {
+		t.Fatal("a forbidden config read suppressed the whole governor frame")
+	}
+	if got.Status.Mode != "surge" {
+		t.Errorf("Status.Mode = %q, want the live %q despite the config failure", got.Status.Mode, "surge")
+	}
+	// The interval is honestly unknown, which the pane renders as a dash.
+	if got.EvalInterval != 0 {
+		t.Errorf("EvalInterval = %v, want zero when the config read failed", got.EvalInterval)
+	}
+	want := fmt.Sprintf(headerFormat, "acme-prod", "SURGE", wsNotConnected)
+	if settled.headerText() != want {
+		t.Errorf("header = %q, want %q; a config failure must not blank the mode", settled.headerText(), want)
+	}
+}
+
+// TestFailedStatusReadKeepsHiveIdentity is the mirror case: /api/status down
+// must not take the header's identity with it.
+func TestFailedStatusReadKeepsHiveIdentity(t *testing.T) {
+	server := newDashboardServer(t)
+	server.failStatus.Store(true)
+	m := pollTestModel(t, server.URL)
+
+	settled := applyAll(m, drain(m.poll()))
+
+	if deliveredGovernor(settled) != nil {
+		t.Error("a failed status read still delivered a governor frame; the pane would show invented values")
+	}
+	want := fmt.Sprintf(headerFormat, "acme-prod", headerUnknown, wsNotConnected)
+	if settled.headerText() != want {
+		t.Errorf("header = %q, want %q; the identity read succeeded", settled.headerText(), want)
+	}
+}
+
+// TestEmptyHiveIDDoesNotBlockTheGovernorPane pins the other half of the
+// issue's isolation clause: an unnamed hive renders an honest dash and the
+// Governor pane still loads.
+func TestEmptyHiveIDDoesNotBlockTheGovernorPane(t *testing.T) {
+	server := newDashboardServer(t)
+	server.hiveID.Store(`{"id": ""}`)
+	m := pollTestModel(t, server.URL)
+
+	settled := applyAll(m, drain(m.poll()))
+
+	if deliveredGovernor(settled) == nil {
+		t.Fatal("an empty hive id stopped the Governor pane loading")
+	}
+	want := fmt.Sprintf(headerFormat, headerUnknown, "SURGE", wsNotConnected)
+	if settled.headerText() != want {
+		t.Errorf("header = %q, want %q for a hive with no configured identity", settled.headerText(), want)
+	}
+}
+
+// TestInactiveGovernorRendersADash pins that an inactive governor is a dash in
+// the header rather than an empty or invented mode.
+func TestInactiveGovernorRendersADash(t *testing.T) {
+	m := newModel()
+	m.hiveID = "acme-prod"
+	m.governorStatus = client.GovernorStatus{
+		GovernorState: client.GovernorState{Active: false, Mode: "busy"},
+	}
+
+	want := fmt.Sprintf(headerFormat, "acme-prod", headerUnknown, wsNotConnected)
+	if m.headerText() != want {
+		t.Errorf("header = %q, want %q; an inactive governor has no mode to report", m.headerText(), want)
+	}
+}
+
+// TestMalformedResponsesRenderDashes pins that a body the client cannot decode
+// is a failed read — dashes — rather than a zero value rendered as fact.
+func TestMalformedResponsesRenderDashes(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"this": "is not the shape you asked for"`))
+	}))
+	t.Cleanup(server.Close)
+	m := pollTestModel(t, server.URL)
+
+	settled := applyAll(m, drain(m.poll()))
+
+	if deliveredGovernor(settled) != nil {
+		t.Error("a malformed status body still produced a governor frame")
+	}
+	want := fmt.Sprintf(headerFormat, headerUnknown, headerUnknown, wsNotConnected)
+	if settled.headerText() != want {
+		t.Errorf("header = %q, want all dashes for undecodable responses", settled.headerText())
+	}
+}
+
+// TestHeaderSurvivesStreamDropAndRecovers walks the four states the AC asks to
+// be pinned — startup, connected, degraded, recovered — as one sequence,
+// because the property under test is precisely that the data fields do NOT
+// move while the ws field does.
+func TestHeaderSurvivesStreamDropAndRecovers(t *testing.T) {
+	server := newDashboardServer(t)
+	m := pollTestModel(t, server.URL)
+
+	// 1. Startup: nothing fetched yet. Every field honest about that.
+	startup := fmt.Sprintf(headerFormat, headerUnknown, headerUnknown, wsNotConnected)
+	if m.headerText() != startup {
+		t.Errorf("startup header = %q, want %q", m.headerText(), startup)
+	}
+
+	// 2. Connected: the poll has data and the stream is up.
+	m = pollAndApply(t, m)
+	m = connectedStream(t, m)
+	connected := fmt.Sprintf(headerFormat, "acme-prod", "SURGE", wsConnected)
+	if m.headerText() != connected {
+		t.Errorf("connected header = %q, want %q", m.headerText(), connected)
+	}
+
+	// 3. Degraded: the stream drops. ONLY ws changes — this is the "do not
+	// treat an SSE connection as the data value" clause. A header that
+	// derived identity or mode from the connection blanks them here.
+	next, _ := m.Update(sseDroppedMsg{gen: m.sseGen, err: errSSEClosed})
+	m = next.(model)
+	degraded := fmt.Sprintf(headerFormat, "acme-prod", "SURGE", wsNotConnected)
+	if m.headerText() != degraded {
+		t.Errorf("degraded header = %q, want %q; identity and mode must survive a stream drop", m.headerText(), degraded)
+	}
+
+	// 4. Recovered: the fallback poll keeps refreshing while the stream is
+	// gone. The server now reports a different mode, and the header must
+	// follow it without any stream event.
+	if m.interval != pollInterval {
+		t.Errorf("interval = %v after a drop, want the fallback cadence %v", m.interval, pollInterval)
+	}
+	m = pollAndApply(t, m)
+	recovered := fmt.Sprintf(headerFormat, "acme-prod", "SURGE", wsNotConnected)
+	if m.headerText() != recovered {
+		t.Errorf("recovered header = %q, want %q", m.headerText(), recovered)
+	}
+}
+
+// TestPollFallbackKeepsRefreshingGovernorAfterADrop is the fourth acceptance
+// criterion. It changes what the server returns between ticks, so a model that
+// merely retained its cache — rather than re-reading — fails.
+func TestPollFallbackKeepsRefreshingGovernorAfterADrop(t *testing.T) {
+	mode := atomic.Value{}
+	mode.Store("quiet")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/status":
+			current, _ := mode.Load().(string)
+			_, _ = fmt.Fprintf(w, `{"governor":{"active":true,"mode":%q,"issues":1,"prs":0},
+			  "acmmLevel":2,"acmmLevelConfigured":true}`, current)
+		case "/api/config/governor":
+			_, _ = w.Write([]byte(governorConfigFixture))
+		case "/api/hive-id":
+			_, _ = w.Write([]byte(hiveIDFixture))
+		default:
+			_, _ = w.Write([]byte(agentsFixture))
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	m := pollTestModel(t, server.URL)
+	m = connectedStream(t, m)
+	m = pollAndApply(t, m)
+	if m.governorStatus.Mode != "quiet" {
+		t.Fatalf("mode = %q before the drop, want %q", m.governorStatus.Mode, "quiet")
+	}
+
+	next, _ := m.Update(sseDroppedMsg{gen: m.sseGen, err: errSSEClosed})
+	m = next.(model)
+
+	// The hive gets busier while there is no stream to say so.
+	mode.Store("surge")
+	m = pollAndApply(t, m)
+
+	if m.governorStatus.Mode != "surge" {
+		t.Errorf("mode = %q after a fallback poll, want %q; the fallback stopped refreshing the governor",
+			m.governorStatus.Mode, "surge")
+	}
+	if m.governorInterval != governorEvalInterval {
+		t.Errorf("interval = %v after a fallback poll, want %v", m.governorInterval, governorEvalInterval)
+	}
+}
+
+// TestPollIssuesAllFourReads pins that the batch actually contains every fetch
+// T29 added. A regression that dropped one would otherwise only show up as a
+// field that quietly never updates.
+func TestPollIssuesAllFourReads(t *testing.T) {
+	server := newDashboardServer(t)
+	m := pollTestModel(t, server.URL)
+
+	msgs := drain(m.poll())
+
+	var agents, governor, interval, hiveID bool
+	for _, msg := range msgs {
+		switch msg.(type) {
+		case panes.AgentsMsg:
+			agents = true
+		case governorStatusMsg:
+			governor = true
+		case governorIntervalMsg:
+			interval = true
+		case hiveIDMsg:
+			hiveID = true
+		}
+	}
+	if !agents {
+		t.Error("poll did not fetch agents")
+	}
+	if !governor {
+		t.Error("poll did not fetch governor status")
+	}
+	if !interval {
+		t.Error("poll did not fetch the governor eval interval")
+	}
+	if !hiveID {
+		t.Error("poll did not fetch the hive id")
+	}
+}
+
+// TestIntervalBeforeStatusDeliversNoFrame pins the ordering guard: config can
+// answer before live state does, and a GovernorMsg then would carry a zero
+// status the pane cannot tell from an inactive governor.
+func TestIntervalBeforeStatusDeliversNoFrame(t *testing.T) {
+	m := newModel()
+
+	next, _ := m.Update(governorIntervalMsg{interval: governorEvalInterval})
+	m = next.(model)
+
+	if got := deliveredGovernor(m); got != nil {
+		t.Errorf("an interval arriving before any status delivered a frame with status %+v", got.Status)
+	}
+	if m.governorInterval != governorEvalInterval {
+		t.Errorf("interval = %v, want it cached for the first status read", m.governorInterval)
+	}
+
+	// The first status read then delivers both halves at once.
+	next, _ = m.Update(governorStatusMsg{status: client.GovernorStatus{
+		GovernorState: client.GovernorState{Active: true, Mode: "busy"},
+	}})
+	m = next.(model)
+	got := deliveredGovernor(m)
+	if got == nil {
+		t.Fatal("the first status read delivered no frame")
+	}
+	if got.EvalInterval != governorEvalInterval {
+		t.Errorf("EvalInterval = %v, want the cached %v", got.EvalInterval, governorEvalInterval)
 	}
 }
