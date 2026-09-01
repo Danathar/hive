@@ -166,16 +166,28 @@ func publishHeartbeatIdentity(p *HeartbeatPayload) {
 }
 
 // PublishHeartbeatIdentity registers this spoke's collect-independent identity
-// (hive id, org, reporter, started-at, git hash) so the heartbeat loop can send
-// a liveness beat before — or without ever — completing a stats collect.
+// (hive id, org, primary repo, repos, reporter, started-at, git hash) so the
+// heartbeat loop can send a liveness beat before — or without ever — completing
+// a stats collect.
+//
+// PrimaryRepo and Repos are part of this identity for the same reason Org is:
+// they come straight from config, require no network call, and the hub rebuilds
+// its registry entry from each payload verbatim — an identity beat that omitted
+// them blanked the entry's primaryRepo/repos (org set, name "org/"), which broke
+// the public-directory row (no repo link) for the whole window until the first
+// successful collect.
 //
 // Call this as soon as config is loaded, BEFORE StartHeartbeat. It is the piece
 // that makes liveness independent of GitHub: without it, a spoke that restarts
 // while GitHub is slow has nothing it can legitimately address to the hub.
-func PublishHeartbeatIdentity(hiveID, org, reporter, startedAt, gitHash string) {
+func PublishHeartbeatIdentity(hiveID, org, primaryRepo string, repos []string, reporter, startedAt, gitHash string) {
 	publishHeartbeatIdentity(&HeartbeatPayload{
-		HiveID:    hiveID,
-		Org:       org,
+		HiveID:      hiveID,
+		Org:         org,
+		PrimaryRepo: primaryRepo,
+		// Defensive copy: the caller's slice is live config that a hub-delivered
+		// project claim can mutate later; the stored identity must be a snapshot.
+		Repos:     append([]string(nil), repos...),
 		Reporter:  reporter,
 		StartedAt: startedAt,
 		GitHash:   gitHash,

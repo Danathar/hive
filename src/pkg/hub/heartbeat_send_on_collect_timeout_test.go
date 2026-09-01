@@ -170,7 +170,7 @@ func TestSendHeartbeat_FirstBeatTimeoutWithNoCacheStillReportsLiveness(t *testin
 	ResetHeartbeatStateForTest()
 
 	// Identity is known (published at startup) but NO collect has ever run.
-	PublishHeartbeatIdentity("fresh-hive", "org", "pod-1", "2026-01-01T00:00:00Z", "abc1234")
+	PublishHeartbeatIdentity("fresh-hive", "org", "repo", []string{"repo", "other"}, "pod-1", "2026-01-01T00:00:00Z", "abc1234")
 
 	var posts atomic.Int32
 	got := make(chan HeartbeatPayload, 8)
@@ -209,6 +209,17 @@ func TestSendHeartbeat_FirstBeatTimeoutWithNoCacheStillReportsLiveness(t *testin
 	}
 	if !p.StatsStale {
 		t.Error("minimal beat was not marked StatsStale — the hub would treat absent stats as freshly-observed zeros")
+	}
+	// The hub rebuilds its registry entry from each payload verbatim, so the
+	// minimal beat must carry the config-derived project identity: an
+	// identity beat without primary_repo/repos blanked the registry entry
+	// (org set, primaryRepo "", repos []), which broke the public-directory
+	// row's repo link and rendered the hive name as "org/".
+	if p.PrimaryRepo != "repo" {
+		t.Errorf("minimal beat carried primary_repo %q, want %q — an empty value blanks the hub registry entry for the whole restart window", p.PrimaryRepo, "repo")
+	}
+	if len(p.Repos) != 2 || p.Repos[0] != "repo" || p.Repos[1] != "other" {
+		t.Errorf("minimal beat carried repos %v, want [repo other]", p.Repos)
 	}
 	att, ok := LastHeartbeatAttempt()
 	if !ok || att.Before(before) {
@@ -269,7 +280,7 @@ func TestSendHeartbeat_CachedPayloadPreferredOverMinimal(t *testing.T) {
 	t.Cleanup(ResetHeartbeatStateForTest)
 	ResetHeartbeatStateForTest()
 
-	PublishHeartbeatIdentity("hive", "org", "pod-1", "2026-01-01T00:00:00Z", "abc1234")
+	PublishHeartbeatIdentity("hive", "org", "repo", []string{"repo"}, "pod-1", "2026-01-01T00:00:00Z", "abc1234")
 
 	got := make(chan HeartbeatPayload, 8)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
