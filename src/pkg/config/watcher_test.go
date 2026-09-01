@@ -43,23 +43,34 @@ func TestWatcher_ReloadsOnChange(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Wait for debounce + reload
-	const waitForReload = 2 * time.Second
+	// Wait for the debounced reload to deliver the *new* content.
+	//
+	// Poll on the observable outcome (lastOrg) rather than on reloadCount.
+	// The callback increments reloadCount before it stores lastOrg, so a
+	// loop that exits on reloadCount > 0 can observe the counter in the
+	// window between those two statements and then read a still-unset
+	// lastOrg — yielding org == "" and a spurious failure. That window is
+	// tiny locally but is readily hit under -race on a loaded CI runner.
+	const waitForReload = 10 * time.Second
+	const pollInterval = 10 * time.Millisecond
 	deadline := time.Now().Add(waitForReload)
+	var org string
 	for time.Now().Before(deadline) {
-		if reloadCount.Load() > 0 {
+		if v, ok := lastOrg.Load().(string); ok && v == "updated-org" {
+			org = v
 			break
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(pollInterval)
 	}
 
 	if reloadCount.Load() == 0 {
 		t.Fatal("expected at least one reload after file change")
 	}
 
-	org, ok := lastOrg.Load().(string)
-	if !ok || org != "updated-org" {
-		t.Errorf("expected org = %q after reload, got %q", "updated-org", org)
+	if org != "updated-org" {
+		last, _ := lastOrg.Load().(string)
+		t.Errorf("expected org = %q after reload, got %q (reloads=%d)",
+			"updated-org", last, reloadCount.Load())
 	}
 }
 
