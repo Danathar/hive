@@ -38,6 +38,11 @@
 #                                    inversion, same shape as
 #                                    HIVE_TEST_REQUIRE_BEHAVIOURAL in
 #                                    src/deploy/test_entrypoint_*.sh)
+#   HIVE_SMOKE_CLAUDE_CREDENTIALS_B64 / HIVE_SMOKE_CODEX_AUTH_B64
+#                                    base64 subscription-login blobs, used
+#                                    when no API key is set — see
+#                                    seed_backend_auth for sources, order,
+#                                    and the staleness caveat
 #
 # Run: bash bin/test_backend_smoke.sh          (keyless: A + S run, B skips)
 #      ANTHROPIC_API_KEY=... bash bin/test_backend_smoke.sh   (full claude arm)
@@ -375,15 +380,48 @@ fi
 # ── B. Live per-backend scenarios ────────────────────────────────────────────
 
 # seed_backend_auth BACKEND HOME_DIR — puts a credential into a throwaway HOME.
-# Prefers the API-key path (what the scheduled lane uses); falls back to
-# copying the operator's own logged-in credential so a maintainer's laptop run
-# exercises the full arm too. Echoes "ok" or "missing".
+# Three sources, in order of preference:
+#   1. an API key (ANTHROPIC_API_KEY / OPENAI_API_KEY) — the scheduled lane's
+#      first choice: keys never expire mid-schedule;
+#   2. a base64-encoded subscription login blob
+#      (HIVE_SMOKE_CLAUDE_CREDENTIALS_B64 = ~/.claude/.credentials.json,
+#      HIVE_SMOKE_CODEX_AUTH_B64 = ~/.codex/auth.json) — for projects running
+#      the lane on a Claude Pro/Max or ChatGPT account instead of metered
+#      keys. Same shape as HIVE_CLAUDE_CREDENTIALS_B64 (#5103). CAVEAT: these
+#      are OAuth tokens with rotating refresh chains, so the stored secret
+#      goes stale after a while and must be re-captured from a fresh login —
+#      a stale one surfaces as NOT_AUTHED-style live-scenario failures;
+#   3. copying the operator's own logged-in credential from the real HOME, so
+#      a maintainer's laptop run exercises the full arm with zero setup.
+# Echoes "ok" or "missing".
+
+# decode_b64_credential B64_VALUE DEST — the careful-decode shape from
+# contributor-agent.sh (#5103): decode to a temp file first and discard on
+# failure, so a corrupt secret leaves no half-written credential behind.
+decode_b64_credential() {
+  local b64="$1" dest="$2" tmp
+  mkdir -p "$(dirname "$dest")"
+  tmp="$(mktemp "$dest.tmp.XXXXXX")"
+  if printf '%s' "$b64" | base64 -d > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+    chmod 600 "$tmp"
+    mv "$tmp" "$dest"
+    return 0
+  fi
+  rm -f "$tmp"
+  # stderr: callers run inside command substitution, which would swallow (and
+  # worse, capture) a stdout note into the ok/missing result.
+  echo "  note: a base64 credential for $dest did not decode to a non-empty file; ignoring it" >&2
+  return 1
+}
 seed_backend_auth() {
   local b="$1" home="$2"
   mkdir -p "$home"
   case "$b" in
     claude)
       if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+        seeded=ok
+      elif [ -n "${HIVE_SMOKE_CLAUDE_CREDENTIALS_B64:-}" ] \
+          && decode_b64_credential "$HIVE_SMOKE_CLAUDE_CREDENTIALS_B64" "$home/.claude/.credentials.json"; then
         seeded=ok
       elif [ -f "$REAL_HOME/.claude/.credentials.json" ]; then
         mkdir -p "$home/.claude"
@@ -433,6 +471,9 @@ PYEOF
         mkdir -p "$home/.codex"
         printf '{"OPENAI_API_KEY": "%s"}\n' "$OPENAI_API_KEY" > "$home/.codex/auth.json"
         chmod 600 "$home/.codex/auth.json"
+        echo ok
+      elif [ -n "${HIVE_SMOKE_CODEX_AUTH_B64:-}" ] \
+          && decode_b64_credential "$HIVE_SMOKE_CODEX_AUTH_B64" "$home/.codex/auth.json"; then
         echo ok
       elif [ -f "$REAL_HOME/.codex/auth.json" ]; then
         mkdir -p "$home/.codex"

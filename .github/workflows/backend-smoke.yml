@@ -19,11 +19,22 @@
 #            against the CLI versions hive actually ships. A red here means
 #            contributors are broken TODAY.
 #
-# This is the only workflow in the repo holding model credentials
-# (ANTHROPIC_API_KEY / OPENAI_API_KEY repo secrets), which is exactly why it is
-# its own file: the podman arm64 lane's documented contract is "no secrets",
-# and nothing here may be folded into it. Keys are scoped per matrix arm —
-# claude arms never see the OpenAI key and vice versa.
+# This is the only workflow in the repo holding model credentials, which is
+# exactly why it is its own file: the podman arm64 lane's documented contract
+# is "no secrets", and nothing here may be folded into it. Credentials are
+# scoped per matrix arm — claude arms never see codex credentials and vice
+# versa — and come in two forms, either of which is sufficient:
+#   ANTHROPIC_API_KEY / OPENAI_API_KEY — metered API keys; never expire, the
+#     preferred form for an unattended schedule.
+#   HIVE_SMOKE_CLAUDE_CREDENTIALS_B64 / HIVE_SMOKE_CODEX_AUTH_B64 — base64 of
+#     a subscription login (~/.claude/.credentials.json from Claude Pro/Max,
+#     ~/.codex/auth.json from a ChatGPT sign-in), for projects funding the
+#     smoke from a flat-rate account instead. Two caveats, accepted: the OAuth
+#     refresh chain rotates, so the stored secret goes stale eventually and a
+#     maintainer re-captures it from a fresh login (the per-lane issue dedupe
+#     keeps a stale-credential red from spamming the tracker); and the smoke
+#     shares the account's rate limits with its human, so a heavy usage day
+#     can red a run without a hive bug. API keys have neither problem.
 #
 # Cost control: 4 runs/day × 2 backends × 2 lanes × 2 single-turn calls on the
 # cheapest model tier (haiku / mini). The suite's live task is one line with no
@@ -71,9 +82,13 @@ jobs:
         backend: [claude, codex]
         lane: [latest, pinned]
     env:
-      # Per-arm key scoping: each backend arm gets only its own vendor's key.
+      # Per-arm credential scoping: each backend arm gets only its own
+      # vendor's credential, in whichever form the repo provisioned (see the
+      # header). The suite prefers the API key when both are set.
       ANTHROPIC_API_KEY: ${{ matrix.backend == 'claude' && secrets.ANTHROPIC_API_KEY || '' }}
       OPENAI_API_KEY: ${{ matrix.backend == 'codex' && secrets.OPENAI_API_KEY || '' }}
+      HIVE_SMOKE_CLAUDE_CREDENTIALS_B64: ${{ matrix.backend == 'claude' && secrets.HIVE_SMOKE_CLAUDE_CREDENTIALS_B64 || '' }}
+      HIVE_SMOKE_CODEX_AUTH_B64: ${{ matrix.backend == 'codex' && secrets.HIVE_SMOKE_CODEX_AUTH_B64 || '' }}
       SMOKE_BACKENDS: ${{ github.event_name == 'workflow_dispatch' && inputs.backends || 'claude codex' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -125,6 +140,8 @@ jobs:
             -e HIVE_SMOKE_BACKENDS='${{ matrix.backend }}' \
             -e ANTHROPIC_API_KEY \
             -e OPENAI_API_KEY \
+            -e HIVE_SMOKE_CLAUDE_CREDENTIALS_B64 \
+            -e HIVE_SMOKE_CODEX_AUTH_B64 \
             -v "${GITHUB_WORKSPACE}:/opt/hive-src:ro,Z" \
             ghcr.io/kubestellar/hive-contributor:latest \
             -lc 'bash /opt/hive-src/bin/test_backend_smoke.sh' |& tee smoke.log
