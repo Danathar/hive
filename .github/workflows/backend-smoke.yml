@@ -70,17 +70,22 @@ jobs:
   smoke:
     # Forks have no model credentials; a scheduled run there would only
     # produce a permanently red workflow.
-    if: >-
-      github.repository == 'kubestellar/hive' &&
-      (github.event_name != 'workflow_dispatch' ||
-       inputs.lane == 'both' || inputs.lane == matrix.lane)
+    if: github.repository == 'kubestellar/hive'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
         backend: [claude, codex]
-        lane: [latest, pinned]
+        # The dispatch lane filter lives HERE, not in the job-level `if`: that
+        # `if` is evaluated before the matrix expands, so `matrix` is not in
+        # scope there and GitHub rejects the whole file (#5550). Selecting the
+        # lane list up front also means an unwanted lane never schedules a
+        # runner at all, rather than starting one that immediately no-ops.
+        lane: >-
+          ${{ (github.event_name == 'workflow_dispatch' && inputs.lane != 'both')
+              && fromJSON(format('["{0}"]', inputs.lane))
+              || fromJSON('["latest","pinned"]') }}
     env:
       # Per-arm credential scoping: each backend arm gets only its own
       # vendor's credential, in whichever form the repo provisioned (see the
