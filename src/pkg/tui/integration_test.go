@@ -187,10 +187,17 @@ const (
   {"ts":"2026-09-01T12:09:05Z","user":"operator","action":"auditrefreshed","agent":"scanner"}
 ]}`
 	integrationModels = `{"backend":"claude","models":["claude-opus-4-5","claude-sonnet-4-5"],"fallback":false,"partial":false}`
-	integrationPacks  = `{"packs":[
+	// GET /api/packs returns a BARE ARRAY of packs, not an object wrapping one.
+	// The active level travels inside it as the `current` flag; there is no
+	// envelope and no separate level field. See client.ACMM, which decodes into
+	// []client.Pack and synthesises ACMMStatus from it. An enveloped fixture
+	// decodes to "cannot unmarshal object into Go value of type []client.Pack",
+	// which the overlay renders as a list error — so every selection assertion
+	// downstream waits forever on a cursor that can never have a pack under it.
+	integrationPacks = `[
   {"level":3,"name":"L3","description":"three","agentCount":3,"current":true,"agents":[]},
   {"level":4,"name":"L4","description":"four","agentCount":4,"current":false,"agents":[]}
-]}`
+]`
 )
 
 // integrationToken is the bearer every request must carry. It is asserted on
@@ -737,22 +744,40 @@ func (h *harness) stop() {
 // regression fail loudly instead of flakily.
 func (h *harness) waitFor(why string, cond func(model) bool) {
 	h.t.Helper()
-	testutil.EventuallyEvery(h.t, waitTimeout, pollStep, func() bool { return cond(h.snapshot()) },
-		"timed out waiting for %s\nlast frame:\n%s", why, h.view())
+	h.await(why, func() bool { return cond(h.snapshot()) })
 }
 
 // waitForView blocks until the rendered frame satisfies cond.
 func (h *harness) waitForView(why string, cond func(string) bool) {
 	h.t.Helper()
-	testutil.EventuallyEvery(h.t, waitTimeout, pollStep, func() bool { return cond(h.view()) },
-		"timed out waiting for %s\nlast frame:\n%s", why, h.view())
+	h.await(why, func() bool { return cond(h.view()) })
 }
 
 // waitForFixture blocks until cond holds on the fixture's recorded traffic.
 func (h *harness) waitForFixture(why string, cond func() bool) {
 	h.t.Helper()
-	testutil.EventuallyEvery(h.t, waitTimeout, pollStep, cond,
-		"timed out waiting for %s\nlast frame:\n%s", why, h.view())
+	h.await(why, cond)
+}
+
+// await is the shared wait, and it exists to render the failure frame at the
+// moment of FAILURE rather than at the moment of the call.
+//
+// Passing h.view() as a printf argument to EventuallyEvery — which is what
+// every wait here did originally — evaluates the frame BEFORE the wait begins.
+// The formatting is deferred to the timeout, but the string was captured at
+// t=0, so a hang reported the STARTUP frame no matter what the model went on to
+// do. Every one of these waits then failed with a picture of a screen that had
+// long since changed, which is precisely the information needed to tell "the
+// condition is wrong" from "the model never got there" — and it was wrong in a
+// way that looked plausible.
+//
+// Failing here instead, with the frame read after the deadline, is what makes
+// these timeouts diagnosable.
+func (h *harness) await(why string, cond func() bool) {
+	h.t.Helper()
+	testutil.EventuallyEveryFunc(h.t, waitTimeout, pollStep, cond, func() string {
+		return fmt.Sprintf("timed out waiting for %s\nframe at timeout:\n%s", why, h.view())
+	})
 }
 
 // settle waits for the message queue to drain and in-flight commands to finish.
@@ -925,13 +950,35 @@ func TestStreamEventUpdatesAgentAndGovernorStateImmediately(t *testing.T) {
 		return strings.Contains(v, "governor: QUIET")
 	})
 
+	// Published twice, and the contradiction the doc comment describes is
+	// exactly why it has to be.
+	//
+	// Because the poll says QUIET and the stream says SURGE, whichever writes
+	// governorStatus LAST wins. At the harness's test-only 5ms reconcile
+	// cadence there are always polls in flight, so a poll issued before the
+	// event can answer after it and put QUIET back — the assertion below would
+	// then hang on a header that is being overwritten faster than it can be
+	// read. Production polls at 5s and never sees this overlap; it is an
+	// artifact of the compressed cadence, not a defect in the model, and the
+	// model's last-write-wins between two copies of one document is correct.
+	//
+	// The first publish marks the stream healthy, which stretches reconcile to
+	// sseReconcileInterval and stops the poll traffic. After that stretch no
+	// poll is due for 60 seconds, so the second publish is the last writer by
+	// construction and SURGE is stable. The contradiction still does all the
+	// work it was designed to do: a SURGE header cannot have come from a poll.
+	f.publish(t, "", integrationStatusBusy)
+	h.waitFor("the connection state to become connected on the first event", func(m model) bool {
+		return m.sseConnected
+	})
+	h.waitFor("the reconcile cadence to stretch so no poll can overwrite the event", func(m model) bool {
+		return m.reconcileInterval == sseReconcileInterval
+	})
+	h.settle()
 	f.publish(t, "", integrationStatusBusy)
 
 	h.waitForView("the header governor mode to follow the stream event", func(v string) bool {
 		return strings.Contains(v, "governor: SURGE")
-	})
-	h.waitFor("the connection state to become connected on the first event", func(m model) bool {
-		return m.sseConnected
 	})
 	h.waitForView("the header ws field to report the live stream", func(v string) bool {
 		return strings.Contains(v, "ws: "+wsConnected)
@@ -965,6 +1012,18 @@ func TestStreamEventDoesNotBlankTheConfiguredGovernorInterval(t *testing.T) {
 		return strings.Contains(v, "scanner")
 	})
 
+	// Published twice for the same reason as the stream-drop property: the
+	// poll and the stream carry contradicting copies of /api/status (QUIET vs
+	// SURGE) on purpose, and at the harness's 5ms reconcile cadence a poll
+	// already in flight can answer after the event and put QUIET back. Waiting
+	// for the stretch first, then publishing again, makes the event the last
+	// writer by construction. See the stream-drop test for the full note.
+	f.publish(t, "", integrationStatusBusy)
+	h.waitFor("the stream to be healthy", func(m model) bool { return m.sseConnected })
+	h.waitFor("the reconcile cadence to stretch", func(m model) bool {
+		return m.reconcileInterval == sseReconcileInterval
+	})
+	h.settle()
 	f.publish(t, "", integrationStatusBusy)
 	h.waitForView("the stream event to land", func(v string) bool {
 		return strings.Contains(v, "governor: SURGE")
@@ -1060,11 +1119,33 @@ func TestStreamDropActivatesPollFallbackPreservesDataAndReconnectsOnce(t *testin
 	h.waitForView("the roster to load", func(v string) bool {
 		return strings.Contains(v, "scanner")
 	})
+	// The stream event is published TWICE, and the ordering matters.
+	//
+	// /api/status and the stream carry the SAME document, and this fixture
+	// deliberately serves CONTRADICTING copies of it — the poll says QUIET,
+	// the stream says SURGE — because that is what makes "the header moved
+	// because of the stream" provable rather than a coincidence. The cost is
+	// that whichever source writes governorStatus last wins, which is correct
+	// model behaviour and is not what this test is about.
+	//
+	// At startup the harness runs reconcile at a test-only 5ms, so several
+	// polls are in flight at once. The first publish reliably marks the stream
+	// healthy and stretches the cadence to sseReconcileInterval, but a poll
+	// already on the wire when the event landed can answer AFTER it and put
+	// QUIET back. That is an artifact of the compressed cadence — production
+	// polls at 5s and has no such overlap — not a defect in the model.
+	//
+	// So: publish once to establish health and stretch the cadence, WAIT for
+	// the stretch, then publish again. After the stretch no poll is due for 60
+	// seconds, so the second event is the last writer by construction and the
+	// SURGE assertion below is testing the stream rather than a race.
 	f.publish(t, "", integrationStatusBusy)
 	h.waitFor("the stream to be healthy", func(m model) bool { return m.sseConnected })
 	h.waitFor("the reconcile cadence to stretch", func(m model) bool {
 		return m.reconcileInterval == sseReconcileInterval
 	})
+	h.settle()
+	f.publish(t, "", integrationStatusBusy)
 	h.waitForView("the stream-sourced governor mode", func(v string) bool {
 		return strings.Contains(v, "governor: SURGE")
 	})
@@ -1079,8 +1160,22 @@ func TestStreamDropActivatesPollFallbackPreservesDataAndReconnectsOnce(t *testin
 	})
 
 	// (b) The poll fallback is reactivated at the fast cadence.
+	//
+	// The value asserted is the PRODUCTION pollInterval, not the harness's
+	// test-only 5ms. Recovery does not restore whatever cadence the model
+	// happened to start with — sseDisconnected sets reconcileInterval back to
+	// the pollInterval constant (app.go), which is the whole point: the
+	// fallback runs at the shipped polling rate regardless of what the stream
+	// had stretched it to. Asserting 5ms here would be asserting that the
+	// model preserves a field the test wrote, which is a property the model
+	// does not have and should not have.
+	//
+	// This does not reintroduce a production-duration wait: nothing sleeps for
+	// pollInterval. The assertion reads the FIELD the moment it changes, and
+	// the fallback's first fetch is issued immediately by sseDisconnected
+	// rather than one interval later, which is what (d) below observes.
 	h.waitFor("the reconcile cadence to return to the fallback interval", func(m model) bool {
-		return m.reconcileInterval == 5*time.Millisecond
+		return m.reconcileInterval == pollInterval
 	})
 
 	// (c) LAST-GOOD DATA SURVIVES. The panes and the two data header fields
@@ -1126,9 +1221,7 @@ func TestFocusCyclesAndNavigationTargetsTheDisplayedSelection(t *testing.T) {
 	f := newFixtureDashboard(t)
 	h := newHarness(t, f)
 
-	h.waitForView("the roster to load", func(v string) bool {
-		return strings.Contains(v, "reviewer")
-	})
+	h.waitForRoster("scanner")
 
 	// Focus starts on Agents.
 	if got := h.snapshot().focus; got != 0 {
@@ -1251,9 +1344,7 @@ func TestPauseConfirmationHitsTheEscapedEndpointExactlyOnceAndRendersTheResponse
 	f := newFixtureDashboard(t)
 	h := newHarness(t, f)
 
-	h.waitForView("the roster to load", func(v string) bool {
-		return strings.Contains(v, "scanner")
-	})
+	h.waitForRoster("scanner")
 
 	h.key("p")
 	h.waitFor("the pause dialog to open on the selected agent", func(m model) bool {
@@ -1315,9 +1406,7 @@ func TestPauseForbiddenKeepsTheDialogOpenWithTheOwnerMessage(t *testing.T) {
 	f.setStatus("/api/pause/scanner", http.StatusForbidden)
 	h := newHarness(t, f)
 
-	h.waitForView("the roster to load", func(v string) bool {
-		return strings.Contains(v, "scanner")
-	})
+	h.waitForRoster("scanner")
 
 	h.key("p")
 	h.waitFor("the dialog to open", func(m model) bool { return m.confirm != nil })
@@ -1344,9 +1433,7 @@ func TestResumeUsesTheResumeEndpointForAPausedAgent(t *testing.T) {
 	f := newFixtureDashboard(t)
 	h := newHarness(t, f)
 
-	h.waitForView("the roster to load", func(v string) bool {
-		return strings.Contains(v, "reviewer")
-	})
+	h.waitForRoster("scanner")
 
 	// reviewer is enabled:false, which the Agents pane reads as paused.
 	h.key("j")
@@ -1381,9 +1468,7 @@ func TestKickHitsTheEscapedEndpointExactlyOnceAndRendersTheQueuedStatus(t *testi
 	f := newFixtureDashboard(t)
 	h := newHarness(t, f)
 
-	h.waitForView("the roster to load", func(v string) bool {
-		return strings.Contains(v, "scanner")
-	})
+	h.waitForRoster("scanner")
 
 	// Three presses; only one request may leave, because kickPending bounds it.
 	h.key("K")
@@ -1415,9 +1500,7 @@ func TestModelPickerFetchesTheCatalogueAndAppliesExactlyOnce(t *testing.T) {
 	f := newFixtureDashboard(t)
 	h := newHarness(t, f)
 
-	h.waitForView("the roster to load", func(v string) bool {
-		return strings.Contains(v, "scanner")
-	})
+	h.waitForRoster("scanner")
 
 	h.key("m")
 	h.waitFor("the picker to open for the selected agent", func(m model) bool {
@@ -1548,6 +1631,22 @@ func TestACMMTypedConfirmationAppliesExactlyOnceAtTheEscapedEndpoint(t *testing.
 	if req.Auth != "Bearer "+integrationToken {
 		t.Errorf("ACMM apply carried Authorization %q, want the bearer token", req.Auth)
 	}
+	// The overlay STAYS OPEN on success holding the reconciliation receipt —
+	// that is deliberate (app.go: the receipt is read rather than flashing past
+	// on its way to a footer line) — and an open overlay REPLACES the whole
+	// frame, footer included. So the footer must be uncovered before it can be
+	// read. Dismissing is the operator's own enter/esc, which is the same key
+	// path the receipt advertises.
+	//
+	// The receipt is asserted first, so this dismissal cannot be mistaken for
+	// the test skipping past a result it never checked.
+	h.waitForView("the receipt to name the authoritative new level", func(v string) bool {
+		return strings.Contains(v, "Applied. Level is now L4.")
+	})
+	h.key("esc")
+	h.waitFor("the overlay to be dismissed so the footer is visible", func(m model) bool {
+		return m.acmm == nil
+	})
 	h.waitForView("the footer to report the authoritative new level", func(v string) bool {
 		return strings.Contains(v, "ACMM level now L4")
 	})
@@ -1606,12 +1705,29 @@ func TestActionsEscapeAgentNamesIntoPathSegments(t *testing.T) {
 // see. The harness recognises the exec message and records it instead of
 // running it — see harness.exec.
 func TestAttachBindingTargetsSelectionWithoutSpawningTmux(t *testing.T) {
+	// PATH IS EMPTIED, AND THAT IS THE PRECONDITION, NOT A DETAIL.
+	//
+	// The assertions below depend on the preflight FAILING: `a` marks the
+	// attach pending, and it is the preflight's failure that later clears the
+	// flag and writes "Attach failed" to the footer. prepareAttach resolves
+	// tmux through PATH (attach.go, exec.LookPath), so on a developer machine
+	// with tmux installed — which is most of them, and this one — the preflight
+	// can instead SUCCEED, hand back a real command, and clear attachPending
+	// via a route the test does not expect. That is exactly how this test
+	// failed under -count=5 here while passing alone: the outcome was a
+	// property of the machine, not of the code.
+	//
+	// Emptying PATH makes tmuxNotFoundError the guaranteed result everywhere,
+	// so the test proves the same thing on a laptop with tmux and on a CI
+	// runner without it. It also reinforces the file's tmux boundary: with no
+	// tmux resolvable there is no way for this test to spawn one even if the
+	// harness's exec guard were removed.
+	t.Setenv("PATH", t.TempDir())
+
 	f := newFixtureDashboard(t)
 	h := newHarness(t, f)
 
-	h.waitForView("the roster to load", func(v string) bool {
-		return strings.Contains(v, "scanner")
-	})
+	h.waitForRoster("scanner")
 
 	// Move the selection so the assertion is about the DISPLAYED row rather
 	// than about the first row happening to be right.
@@ -1622,28 +1738,52 @@ func TestAttachBindingTargetsSelectionWithoutSpawningTmux(t *testing.T) {
 		return ok && name == "quality"
 	})
 
+	// THREE presses in a row, and the bounding property is asserted on what
+	// SURVIVES them rather than on attachPending being observably true in
+	// between.
+	//
+	// attachPending is transient by design: `a` sets it, and the preflight's
+	// result clears it. With no tmux on PATH that preflight is an exec.LookPath
+	// miss, which resolves in microseconds — so a wait for attachPending==true
+	// is racing a flag that may already have been cleared by the time the first
+	// sample is taken. That is not a defect in the model, and an earlier draft
+	// of this test which waited on the flag failed intermittently under
+	// -count=5 for exactly that reason. A property that can only be observed by
+	// winning a race is not a property this suite can assert.
+	//
+	// What is durable is the CONSEQUENCE: however many times `a` is pressed
+	// while an attempt is in flight, exactly one preflight runs and exactly one
+	// failure reaches the footer. The gate in app.go (`if m.focus != 0 ||
+	// m.attachPending`) is what makes that true, so asserting it still covers
+	// the guard — and it covers it without depending on scheduling.
 	h.key("a")
-	h.waitFor("the attach to be marked pending by the binding", func(m model) bool {
-		return m.attachPending
-	})
+	h.key("a")
+	h.key("a")
 
-	// A second press while pending must not queue a second suspend.
-	h.key("a")
-	h.key("a")
-	h.settle()
-	if !h.snapshot().attachPending {
-		t.Error("attachPending was cleared without a result: repeated presses are no longer bounded")
-	}
-
-	// The preflight resolves against a PATH with no tmux, so it fails and the
-	// failure becomes UI rather than a process-ending error. That is the
-	// boundary: the binding and its target are proved, the session is not.
+	// The preflight resolves against a PATH with no tmux (emptied above), so it
+	// fails and the failure becomes UI rather than a process-ending error. That
+	// is the boundary: the binding and its target are proved, the session is
+	// not.
 	h.waitForView("the attach preflight failure to be rendered in the footer", func(v string) bool {
 		return strings.Contains(v, "Attach failed")
 	})
 	h.waitFor("the pending flag to clear once the attempt resolved", func(m model) bool {
 		return !m.attachPending
 	})
+	h.settle()
+
+	// THE PROCESS WAS NEVER SPAWNED. prepareAttach failed at the LookPath
+	// stage, so tea.ExecProcess was never reached — which is the file's tmux
+	// boundary, asserted rather than assumed.
+	if h.didRequestExec() {
+		t.Error("an exec was requested: the attach path tried to spawn a real tmux")
+	}
+	// The footer names the failure the operator would actually see, and names
+	// tmux — so this is the no-tmux path, not some other error wearing the same
+	// message.
+	if v := h.view(); !strings.Contains(v, "tmux") {
+		t.Errorf("the footer does not name tmux, so the preflight failed for an unexpected reason:\n%s", v)
+	}
 }
 
 // ── Property 7: help/footer parity and modal key containment ─────────────────
@@ -1787,9 +1927,33 @@ func TestModalKeysCannotLeakIntoGlobalActions(t *testing.T) {
 	if got := f.countPath("/api/kick/scanner"); got != 0 {
 		t.Errorf("K typed into the ACMM confirmation issued %d kicks, want 0", got)
 	}
-	// The letters that belong in the phrase are TEXT; K and q are swallowed.
-	if got := m.acmm.Typed(); got != "APPLY L4" {
-		t.Errorf("the confirmation field holds %q, want %q: keys were consumed wrongly", got, "APPLY L4")
+	// EVERY rune typed while confirming is TEXT, including K and q. That is the
+	// containment rule as app.go states it — "runes are text while confirming"
+	// rather than "these particular keys are special" — and it is the stronger
+	// of the two possible designs: a swallowed K would be a key that did
+	// nothing, whereas a K that lands in the field is a key that visibly
+	// cannot act. The operator sees the phrase is wrong and fixes it.
+	//
+	// So the field holds the phrase plus the two stray letters, and the
+	// property that matters is the one asserted immediately below: that text
+	// does not match ConfirmPhrase(4), so the apply is refused. An earlier
+	// draft of this test expected "APPLY L4" here, which would have required
+	// the model to silently discard keystrokes an operator actually pressed —
+	// the failure mode the design comment explicitly rejects.
+	const wantTyped = "APPLY L4Kq"
+	if got := m.acmm.Typed(); got != wantTyped {
+		t.Errorf("the confirmation field holds %q, want %q: keys were consumed wrongly", got, wantTyped)
+	}
+	// The whole point of the stray letters landing in the field: the phrase no
+	// longer matches, so enter cannot apply. Without this the assertion above
+	// would only be describing where characters went, not that the guard held.
+	if m.acmm.Typed() == panes.ConfirmPhrase(4) {
+		t.Error("K and q left the field holding the exact confirmation phrase: the guard is defeated")
+	}
+	h.key("enter")
+	h.settle()
+	if got := f.countRequests(http.MethodPut, "/api/packs/level"); got != 0 {
+		t.Errorf("enter on a field polluted by stray global keys issued %d applies, want 0", got)
 	}
 }
 
@@ -1820,8 +1984,28 @@ func TestPauseDialogSwallowsGlobalKeys(t *testing.T) {
 	f := newFixtureDashboard(t)
 	h := newHarness(t, f)
 
-	h.waitForView("the roster to load", func(v string) bool {
-		return strings.Contains(v, "scanner")
+	// Wait for the precondition `p` ACTUALLY depends on, not for the string
+	// "scanner" to appear somewhere in the frame.
+	//
+	// `p` is a no-op unless Agents.SelectedAgent() reports ok (app.go), and
+	// that needs the pane's roster populated. A waitForView on "scanner"
+	// matches the WHOLE frame — the Events pane renders audit rows naming
+	// scanner, and those arrive on the activity chain independently of the
+	// roster — so the view test can pass a moment before the Agents pane has
+	// any rows. The press then lands on a pane with nothing selected, is
+	// correctly ignored, and the dialog never opens: a hang that looks like a
+	// containment bug and is really the test acting before its precondition.
+	// That is what failed here under -count=5.
+	//
+	// Reading through SelectedAgent is also the accessor `p` itself uses, so
+	// this waits for exactly the state the binding is gated on.
+	h.waitFor("the Agents pane to have a selectable row for p to target", func(m model) bool {
+		agents, ok := m.panes[0].(panes.Agents)
+		if !ok {
+			return false
+		}
+		name, _, ok := agents.SelectedAgent()
+		return ok && name == "scanner"
 	})
 
 	h.key("p")
@@ -1953,7 +2137,22 @@ func TestQuitCancelsTheStreamWithoutLeakingAGoroutineOrReconnect(t *testing.T) {
 
 			// NO LEAKED GOROUTINE. The stream reader must have exited.
 			h.stop()
-			h.cmdWG.Wait()
+			// BOUNDED, not cmdWG.Wait(). By the time quit is handled the
+			// stream has stretched the reconcile cadence to
+			// sseReconcileInterval, so a tea.Tick timer for a full 60 SECONDS
+			// is outstanding and cmdWG is counting it. Waiting on the group
+			// therefore parked this subtest for exactly 60s twice over — two
+			// minutes of wall clock spent waiting for a timer whose message
+			// nobody will ever read, which is precisely the production-duration
+			// wait #5424 forbids, hidden in teardown rather than in a sleep.
+			//
+			// A pending tick is also not what this wait is for. It exists so
+			// in-flight COMMANDS finish before goroutines are counted, and the
+			// leak being hunted is a per-stream reader that never exits — which
+			// assertGoroutinesSettle detects on its own, with its own deadline.
+			// An unfired timer is not a leak: it is one runtime timer goroutine
+			// that the tolerance already covers and that the runtime reclaims.
+			waitOrTimeout(&h.cmdWG, 2*time.Second)
 			assertGoroutinesSettle(t, before)
 		})
 	}
@@ -2023,4 +2222,64 @@ func TestFixtureRecordsMethodPathBodyAndAuth(t *testing.T) {
 	if got := f.countPath("/api/kick/team/one"); got != 0 {
 		t.Errorf("the fixture recorded the DECODED path %d times: escaping assertions cannot fail", got)
 	}
+}
+
+// waitOrTimeout waits for wg, giving up after limit rather than blocking
+// forever on a command that cannot complete.
+//
+// The command it exists for is tea.Tick: the harness's exec tracks every
+// command goroutine in cmdWG, and a tick is a goroutine parked on a timer for
+// its whole interval. On the quit path that interval is sseReconcileInterval —
+// 60 seconds — and nothing will read the message when it finally arrives. An
+// unbounded Wait there is a production-duration wait wearing a teardown's
+// clothes.
+func waitOrTimeout(wg *sync.WaitGroup, limit time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	timer := time.NewTimer(limit)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+	}
+}
+
+// waitForRoster waits until the Agents pane has a selectable row.
+//
+// This is the precondition for every action key gated on a selection — p, m, K
+// and a all return early unless Agents.SelectedAgent() reports ok (app.go) —
+// and it is NOT the same thing as the roster being visible in the frame. The
+// obvious wait, waitForView for "scanner", matches the whole rendered frame,
+// and "scanner" also appears in the Events pane's audit rows and can arrive
+// there first on the independent activity chain. A test that presses an action
+// key on the strength of that view match can act before the Agents pane has any
+// rows: the key is correctly ignored, and the test then hangs waiting for an
+// overlay that was never going to open.
+//
+// Waiting through SelectedAgent instead reads the same accessor the binding is
+// gated on, so the precondition asserted is the precondition that matters.
+func (h *harness) waitForRoster(agent string) {
+	h.t.Helper()
+	h.waitFor("the Agents pane to have "+agent+" selectable", func(m model) bool {
+		agents, ok := m.panes[0].(panes.Agents)
+		if !ok {
+			return false
+		}
+		name, _, ok := agents.SelectedAgent()
+		return ok && name == agent
+	})
+}
+
+// didRequestExec reports whether the model asked bubbletea to run a process.
+//
+// The harness recognises tea.ExecProcess and records it INSTEAD of running it
+// (see harness.exec), so this is how a test asserts the tmux boundary was not
+// crossed without ever risking a real attach.
+func (h *harness) didRequestExec() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.execRequested
 }

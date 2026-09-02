@@ -91,3 +91,36 @@ func EventuallyValue[T any](t testing.TB, timeout time.Duration, get func() (T, 
 	}, msg, args...)
 	return got
 }
+
+// EventuallyEveryFunc is EventuallyEvery with the failure message produced
+// LAZILY, at the deadline, instead of being formatted by the caller up front.
+//
+// It exists because a diagnostic captured eagerly is a diagnostic about the
+// wrong moment. Passing a rendered snapshot of the system into EventuallyEvery
+// as a printf argument:
+//
+//	EventuallyEvery(t, d, i, cond, "timed out\n%s", h.render())
+//
+// looks deferred — the formatting genuinely is — but h.render() is evaluated
+// BEFORE the wait starts. When the condition then never holds, the failure
+// prints the state the system was in at t=0 rather than at the timeout. For a
+// wait that hangs, that is the difference between seeing why it hung and
+// seeing a snapshot that has long since been superseded. This bit a TUI
+// acceptance harness where every hang reported the startup frame.
+//
+// describe is called at most once, only on the failure path, so it is free to
+// do real work: render a frame, dump a queue, walk recorded traffic.
+func EventuallyEveryFunc(t testing.TB, timeout, interval time.Duration, cond func() bool, describe func() string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if cond() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s (condition not met within %s)", describe(), timeout)
+			return
+		}
+		time.Sleep(interval)
+	}
+}
