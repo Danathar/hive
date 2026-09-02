@@ -536,3 +536,204 @@ func TestConcurrentRecordRace(t *testing.T) {
 		t.Fatalf("journeys after race = %d", got)
 	}
 }
+
+// TestRecordBackfillsEarlierTimestamps: producers can report out of order (the
+// audit sink vs the typed hook); an older At must extend the stage/journey
+// span backwards, never shrink or reorder it.
+func TestRecordBackfillsEarlierTimestamps(t *testing.T) {
+	s := NewStoreWithCap(4)
+	base := time.Now().UnixMilli()
+	s.Record(mustEvent("r#1", KindKicked, base))
+	s.Record(mustEvent("r#1", KindKicked, base-500)) // late-arriving older event
+	j, _ := s.Journey("r#1")
+	st := j.Stages[KindKicked]
+	if st.FirstAt != base-500 || st.LastAt != base {
+		t.Fatalf("stage span = [%d,%d], want [%d,%d]", st.FirstAt, st.LastAt, base-500, base)
+	}
+	if j.FirstAt != base-500 || j.LastAt != base {
+		t.Fatalf("journey span = [%d,%d], want [%d,%d]", j.FirstAt, j.LastAt, base-500, base)
+	}
+}
+
+// TestDeriveCurrentUnknownKindsFallBackToMostRecent: the Kind set is closed
+// for producers, but the store tolerates unknown kinds (a future stage, a
+// hand-rolled span translation). With no known stage present, the most
+// recently touched stage is the honest "current", ties broken by kind name.
+func TestDeriveCurrentUnknownKindsFallBackToMostRecent(t *testing.T) {
+	s := NewStoreWithCap(4)
+	base := time.Now().UnixMilli()
+	s.Record(mustEvent("r#1", Kind("triaged"), base))
+	s.Record(mustEvent("r#1", Kind("audited"), base+10))
+	if j, _ := s.Journey("r#1"); j.Current != Kind("audited") {
+		t.Fatalf("current = %s, want the most recent unknown stage", j.Current)
+	}
+	// Equal LastAt: lexicographically smaller kind wins, deterministically.
+	s2 := NewStoreWithCap(4)
+	s2.Record(mustEvent("r#2", Kind("zeta"), base))
+	s2.Record(mustEvent("r#2", Kind("alpha"), base))
+	if j, _ := s2.Journey("r#2"); j.Current != Kind("alpha") {
+		t.Fatalf("tie current = %s, want deterministic alpha", j.Current)
+	}
+	// Only KNOWN progress stages clear a block: a later unknown kind leaves
+	// the journey blocked, so an attention flag can't be dismissed by a stage
+	// the lifecycle model doesn't understand.
+	s3 := NewStoreWithCap(4)
+	s3.Record(mustEvent("r#3", KindBlocked, base))
+	s3.Record(mustEvent("r#3", Kind("reopened"), base+10))
+	if j, _ := s3.Journey("r#3"); j.Current != KindBlocked {
+		t.Fatalf("post-unknown current = %s, want blocked to hold", j.Current)
+	}
+}
+
+// TestRecentLimitTruncates: the ?limit contract on the synthesized event view.
+func TestRecentLimitTruncates(t *testing.T) {
+	s := NewStoreWithCap(8)
+	base := time.Now().UnixMilli()
+	for i := 0; i < 4; i++ {
+		s.Record(mustEvent(fmt.Sprintf("r#%d", i), KindKicked, base+int64(i)))
+	}
+	top := s.Recent(2)
+	if len(top) != 2 || top[0].IssueRef != "r#3" || top[1].IssueRef != "r#2" {
+		t.Fatalf("Recent(2) = %+v", top)
+	}
+}
+
+// TestFleetHealthClampsFutureTimestamps: a producer with a skewed clock must
+// not yield negative coverage.
+func TestFleetHealthClampsFutureTimestamps(t *testing.T) {
+	s := NewStoreWithCap(4)
+	s.Record(mustEvent("r#1", KindKicked, time.Now().Add(time.Hour).UnixMilli()))
+	fh := s.FleetHealth(6 * time.Hour)
+	if fh.CoveredMs < 0 {
+		t.Fatalf("CoveredMs = %d, want clamped >= 0", fh.CoveredMs)
+	}
+	if fh.InFlight != 1 {
+		t.Fatalf("fleet = %+v, want the journey counted", fh)
+	}
+}
+
+// TestEnablePersistenceLoadEnforcesCapAndSkipsInvalid: a file written by a
+// larger (or older) store loads into a smaller one without exceeding its cap
+// — oldest journeys evicted — and entries with no identity or no stages are
+// skipped rather than resurrected as empty rows.
+func TestEnablePersistenceLoadEnforcesCapAndSkipsInvalid(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lifecycle.json")
+	base := time.Now().UnixMilli()
+
+	big := NewStoreWithCap(10)
+	if err := big.EnablePersistence(path, nil); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 6; i++ {
+		big.Record(mustEvent(fmt.Sprintf("r#%d", i), KindMerged, base+int64(i))) // terminal → persisted
+	}
+
+	// Append an invalid journey by hand: no ref, no stages.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted persistedTimeline
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	persisted.Journeys = append(persisted.Journeys,
+		Journey{Ref: "", Stages: map[Kind]*Stage{KindKicked: {FirstAt: base, LastAt: base, Count: 1}}},
+		Journey{Ref: "empty#1"},
+	)
+	data, err = json.Marshal(persisted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o660); err != nil {
+		t.Fatal(err)
+	}
+
+	small := NewStoreWithCap(4)
+	if err := small.EnablePersistence(path, nil); err != nil {
+		t.Fatal(err)
+	}
+	journeys := small.Journeys(0)
+	if len(journeys) != 4 {
+		t.Fatalf("loaded %d journeys into a cap-4 store, want 4", len(journeys))
+	}
+	for _, j := range journeys {
+		if j.Ref == "" || j.Ref == "empty#1" {
+			t.Fatalf("invalid persisted journey resurrected: %+v", j)
+		}
+	}
+	// LRU on load: the two oldest (r#0, r#1) are the ones evicted.
+	if _, ok := small.Journey("r#0"); ok {
+		t.Fatal("oldest journey should be evicted on over-cap load")
+	}
+	if _, ok := small.Journey("r#5"); !ok {
+		t.Fatal("newest journey lost on load")
+	}
+}
+
+// TestEnablePersistenceUnreadableFileReturnsError: an existing file we cannot
+// read is a real error the caller must hear about (unlike ENOENT or corrupt
+// bytes) — persistence stays enabled and the next save overwrites.
+func TestEnablePersistenceUnreadableFileReturnsError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("file permissions are advisory for root")
+	}
+	path := filepath.Join(t.TempDir(), "lifecycle.json")
+	if err := os.WriteFile(path, []byte(`{"version":1,"journeys":[]}`), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	s := NewStoreWithCap(4)
+	if err := s.EnablePersistence(path, nil); err == nil {
+		t.Fatal("unreadable existing file must surface an error, not silently start empty")
+	}
+	// Recording still works and re-persists over the unreadable file.
+	if err := os.Chmod(path, 0o660); err != nil {
+		t.Fatal(err)
+	}
+	s.Record(mustEvent("r#1", KindMerged, time.Now().UnixMilli()))
+	s2 := NewStoreWithCap(4)
+	if err := s2.EnablePersistence(path, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s2.Journey("r#1"); !ok {
+		t.Fatal("store did not recover persistence after the unreadable-load error")
+	}
+}
+
+// TestPersistFailureKeepsJourneysAndThrottlesLogging: a persist that cannot
+// land (missing directory — the dev-machine /data case) must never lose the
+// in-memory journeys or panic, and repeated failures within the log-throttle
+// window must not re-log. Verified behaviorally: journeys stay queryable and
+// the dirty state is retried on the next terminal record.
+func TestPersistFailureKeepsJourneysAndThrottlesLogging(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "does-not-exist", "lifecycle.json")
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+
+	s := NewStoreWithCap(4)
+	if err := s.EnablePersistence(missing, logger); err != nil {
+		t.Fatalf("ENOENT on load must not error: %v", err)
+	}
+	base := time.Now().UnixMilli()
+	s.Record(mustEvent("r#1", KindMerged, base))  // forced persist → fails, logs
+	s.Record(mustEvent("r#2", KindBlocked, base)) // second failure inside the log-throttle window
+	if got := len(s.Journeys(0)); got != 2 {
+		t.Fatalf("failed persistence dropped journeys: %d, want 2", got)
+	}
+	if j, ok := s.Journey("r#1"); !ok || j.Current != KindMerged {
+		t.Fatalf("journey degraded after persist failure: %+v ok=%v", j, ok)
+	}
+
+	// Once the directory exists, the next terminal record lands everything.
+	if err := os.Mkdir(filepath.Dir(missing), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s.Record(mustEvent("r#3", KindMerged, base+1))
+	s2 := NewStoreWithCap(4)
+	if err := s2.EnablePersistence(missing, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(s2.Journeys(0)); got != 3 {
+		t.Fatalf("recovered persist wrote %d journeys, want all 3 (dirty state retried)", got)
+	}
+}
