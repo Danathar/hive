@@ -466,6 +466,20 @@ Crossing either ceiling is reported with `failure_kind: environment`. It is a st
 
 The hang case these ceilings nominally guard is covered better and sooner by the pane-stall detector above: 20 minutes of byte-identical output, confirmed over `PANE_STALL_CONFIRM_TICKS` ticks. The headless path has no pane to scrape and therefore no progress signal, so its one-shot child is bounded by the absolute backstop directly (`HIVE_HEADLESS_TASK_TIMEOUT_MS`).
 
+One pane state deliberately counts as busy even though the CLI looks idle:
+Claude Code's silent API retry
+([#5654](https://github.com/kubestellar/hive/issues/5654)). When the API
+connection drops mid-turn, Claude Code does not print its `● API Error:`
+chrome — it retries internally and renders a spinner countdown (`✻ Waiting for
+API response · will retry in 1m 57s · check your network`) while the persistent
+`⏵⏵` footer and the *previous* turn's `✻ Worked for …` summary are still on
+screen. The retry countdown is a busy marker: the pane classifies as working,
+the relay never types over a retry the CLI is recovering from on its own, and
+the task is not booked idle-complete mid-turn. A retry loop that never resolves
+is still bounded by the pane-stall detector and the absolute duration ceiling
+above; genuine idle completion — the same chrome with no retry line — is
+detected exactly as before.
+
 ### The GitHub token outlives the task, because the hub re-mints it
 
 The scoped GitHub token the relay pushes with is valid for **55 minutes**
@@ -536,6 +550,18 @@ and dropping the credential there would destroy the token belonging to the task
 still being worked. Unlinking the file does not revoke the token — it stays
 valid at GitHub for the remainder of its 55 minutes — so removal bounds *this
 relay's* use of it, not the credential's lifetime.
+
+Relay *shutdown* is a task-exit path too
+([#5655](https://github.com/kubestellar/hive/issues/5655)). Stopping a busy
+relay with Ctrl-C (or SIGTERM) runs the same task-exit contract before the
+process dies: credential unlink first, then an interrupt of the live agent —
+which matters when a detached or container-owned tmux session outlives the
+relay — and no relaunch, since the process is exiting. A `process.on('exit')`
+backstop additionally unlinks the token on **every** exit, including a crash
+from an uncaught exception, so the credential cannot outlive the process short
+of SIGKILL. The hub is not messaged on shutdown; the socket drop already books
+the release through the disconnect cooldown path
+([#5097](https://github.com/kubestellar/hive/issues/5097)).
 
 ## Troubleshooting: the backend dies seconds after every task
 
