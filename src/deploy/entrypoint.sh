@@ -814,7 +814,7 @@ if [ "$(id -u)" = "0" ]; then
   # Shared CLI auth/cache lives in /data/home (persistent volume).
   # Make it group-writable so all agent UIDs (node group) can use it.
   # The manager sets HOME=/data/home for agent tmux sessions.
-  mkdir -p /data/home/.config /data/home/.copilot /data/home/.claude/session-env /data/home/.codex /data/home/.gemini /data/home/.bob/settings /data/config/github-copilot /home/dev/.config
+  mkdir -p /data/home/.config /data/home/.copilot /data/home/.claude/session-env /data/home/.codex /data/home/.gemini/antigravity-cli /data/home/.bob/settings /data/config/github-copilot /home/dev/.config
   # $HOME itself must be group-writable, not just its children. bob calls
   # mkdirSync('$HOME/.bob') on first run, which needs write on /data/home — a
   # 0755 root-owned $HOME makes that EACCES even though every child dir below
@@ -852,7 +852,15 @@ if [ "$(id -u)" = "0" ]; then
   #
   # 2770 rather than .codex's 2775: this directory holds an OAuth token, so it
   # follows .copilot/.bob in keeping world off it.
-  chmod 2770 /data/home/.gemini 2>/dev/null || true
+  #
+  # antigravity-cli/ is pre-created rather than left to agy (kubestellar/hive
+  # #5734). The token is one level DEEPER than the guard's watch, and a watch
+  # can only be established on a directory that exists — so a subdirectory agy
+  # creates itself after boot may never be covered, depending on the
+  # inotify-tools version's handling of directories created under a recursive
+  # watch. Creating it here removes that dependency entirely: the directory is
+  # on disk, with the right mode, before any watch is set up.
+  chmod 2770 /data/home/.gemini /data/home/.gemini/antigravity-cli 2>/dev/null || true
   chown -R dev:node /data/home/.gemini 2>/dev/null || true
   # bob writes installation_id, settings.json, trustedFolders.json and tmp/ under
   # $HOME/.bob, plus custom modes under $HOME/.bob/settings. Pre-create both
@@ -1006,9 +1014,14 @@ if [ "$(id -u)" = "0" ]; then
   # exists to share — the same shape as copilot's config.json and claude's
   # .credentials.json. Re-opening it to the node group is what makes ONE agy
   # login serve the fleet instead of one login per agent.
+  #
+  # Credential first and NO tree walk, for the same reason the .claude instant
+  # path has none: this body now runs under a RECURSIVE watch (#5734), so it
+  # fires on writes anywhere under .gemini rather than only on the top level.
+  # The recursive sweep stays on the 5-minute cycle.
   hive_fix_gemini_instant() {
-    hive_fix_tree /data/home/.gemini
     hive_fix_shared_credential /data/home/.gemini/antigravity-cli/antigravity-oauth-token
+    chmod g+rwx /data/home/.gemini /data/home/.gemini/antigravity-cli 2>/dev/null || true
     return 0
   }
 
@@ -1030,15 +1043,42 @@ if [ "$(id -u)" = "0" ]; then
     return 0
   }
 
-  # hive_guard_forever LABEL DIR EVENTS BODY_FN — run BODY_FN every time DIR
-  # changes, forever. Restarts inotifywait when it exits (rule 2) instead of
-  # letting the loop end, which is exactly what a bare `while inotifywait; do`
-  # does the first time inotifywait returns non-zero: exits, silently, for good.
+  # hive_watch_once DIR EVENTS RECURSE — block until DIR changes, then return.
+  # RECURSE is "-r" to watch subdirectories too, "" for the directory alone.
+  #
+  # The depth matters, and getting it wrong is invisible (kubestellar/hive
+  # #5734). `inotifywait` without -r reports events only for entries DIRECTLY
+  # inside the watched directory, so the .gemini guard — watching
+  # /data/home/.gemini/ while agy keeps its token at
+  # .gemini/antigravity-cli/antigravity-oauth-token — could never fire. It was
+  # not merely untested: it was structurally incapable of firing, and it read
+  # as protection the whole time. Measured on a live hive: sixteen minutes and
+  # one token rewrite after boot, the .claude guard's inotifywait pid had
+  # advanced (its credential sits at depth 1) while .gemini's was still the
+  # boot pid.
+  #
+  # Recursion is per-guard, not the default: .claude is 161 MB and 8413 entries
+  # on a working hive, and watching it recursively would cost a watch per
+  # subdirectory for a credential that sits at the top level anyway.
+  hive_watch_once() {
+    if [ -n "$3" ]; then
+      inotifywait -qq -r -e "$2" "$1" 2>/dev/null
+    else
+      inotifywait -qq -e "$2" "$1" 2>/dev/null
+    fi
+  }
+
+  # hive_guard_forever LABEL DIR EVENTS BODY_FN [RECURSE] — run BODY_FN every
+  # time DIR changes, forever. Restarts the watcher when it exits (rule 2)
+  # instead of letting the loop end, which is exactly what a bare
+  # `while inotifywait; do` does the first time inotifywait returns non-zero:
+  # exits, silently, for good. RECURSE is "-r" for a guard whose credential
+  # lives below the watched directory.
   hive_guard_forever() {
-    _label="$1"; _dir="$2"; _events="$3"; _body="$4"
+    _label="$1"; _dir="$2"; _events="$3"; _body="$4"; _recurse="${5:-}"
     _backoff=1
     while true; do
-      if inotifywait -qq -e "$_events" "$_dir" 2>/dev/null; then
+      if hive_watch_once "$_dir" "$_events" "$_recurse"; then
         _backoff=1
         "$_body" || true
         continue
@@ -1059,7 +1099,8 @@ if [ "$(id -u)" = "0" ]; then
     hive_guard_forever copilot /data/home/.copilot/ close_write,moved_to hive_fix_copilot_config &
     hive_guard_forever claude /data/home/.claude/ close_write,moved_to,create hive_fix_claude_instant &
     hive_guard_forever codex /data/home/.codex/ close_write,moved_to,create hive_fix_codex_instant &
-    hive_guard_forever gemini /data/home/.gemini/ close_write,moved_to,create hive_fix_gemini_instant &
+    # -r: agy's token is one directory deeper than this watch (#5734).
+    hive_guard_forever gemini /data/home/.gemini/ close_write,moved_to,create hive_fix_gemini_instant -r &
     echo "[entrypoint] inotify perm guard active (copilot + claude + codex + gemini)"
   fi
   (

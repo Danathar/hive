@@ -351,7 +351,8 @@ for cred_dir in .claude .copilot .codex .gemini .bob; do
   fi
 
   # The ongoing repair: an inotify watcher on the dir, or the polling
-  # slow-cycle sweep. One is enough; neither is the bug.
+  # slow-cycle sweep. One is enough at the DIRECTORY level; the per-credential
+  # block below is what decides whether that guard can actually fire.
   #
   # Four spellings are accepted because #5730 changed how the guards are
   # written without changing what they must cover: the watchers are now
@@ -371,5 +372,112 @@ for cred_dir in .claude .copilot .codex .gemini .bob; do
         "add it to the inotify guard or the polling slow-cycle chmod, beside .claude/.codex"
   fi
 done
+
+# ---------------------------------------------------------------------------
+# Every KNOWN credential FILE must be reachable by the guard that exists for it.
+#
+# The directory checks above passed for .gemini while the credential they exist
+# to protect sat outside the guard's reach (kubestellar/hive#5734). agy keeps
+# its OAuth token at .gemini/antigravity-cli/antigravity-oauth-token — one
+# level below the watch — and `inotifywait` without -r reports events only for
+# entries DIRECTLY inside the watched directory. The guard was not merely
+# untested; it was structurally incapable of firing, and it read as protection
+# the whole time. Measured on a live hive: sixteen minutes and one token
+# rewrite after boot, .claude's inotifywait pid had advanced (its credential is
+# at depth 1) while .gemini's was still the boot pid.
+#
+# So this block asserts on PATHS rather than directories. A credential that
+# moves into a subdirectory — exactly what happened — now fails here instead of
+# passing silently.
+#
+# Adding a CLI: put its real credential path in the table. A directory with no
+# known credential file (.codex and .bob at the time of writing) is deliberately
+# absent: guessing a path would assert nothing, and a wrong guess would assert
+# something false.
+#
+# The loop reads from a here-doc, NOT a pipe: `printf ... | while` would run the
+# body in a subshell and every ok/bad below would increment a counter that dies
+# with it, so a real failure would print and then be forgotten by the tally.
+echo
+echo "Known credential files are reachable by their guard:"
+
+# _fn_body FILE NAME — print one shell function's definition from the
+# entrypoint, handling both the multi-line form (closing "  }" on its own line)
+# and the one-liner form.
+_fn_body() {
+  awk -v fn="  $2() {" '
+    index($0, fn) == 1 { f = 1; print; if ($0 ~ /\}[ \t]*$/) exit; next }
+    f { print; if ($0 ~ /^  \}[ \t]*$/) exit }
+  ' "$1"
+}
+
+# _fast_poll_reach — everything the 5s poll actually repairs, following one
+# level of indirection. The poll body calls named helpers (hive_fix_copilot_config
+# and friends) rather than spelling every path inline, so a check that read only
+# the poll body would report a credential as unprotected when it is repaired on
+# every cycle. One level is enough for the current shape and keeps the check
+# honest about what it verified.
+_fast_poll_reach() {
+  _fast="$(_fn_body "$ENTRYPOINT" hive_fix_credentials_fast)"
+  printf '%s\n' "$_fast"
+  for _callee in $(printf '%s\n' "$_fast" | grep -oE 'hive_fix_[a-z_]+' | sort -u); do
+    [ "$_callee" = "hive_fix_credentials_fast" ] && continue
+    _fn_body "$ENTRYPOINT" "$_callee"
+  done
+}
+FAST_POLL_REACH="$(_fast_poll_reach)"
+
+while IFS='|' read -r cli cred; do
+  [ -n "$cli" ] || continue
+  cred_parent="${cred%/*}"
+
+  # 1. Some repair must name the file itself. A guard that only chmods the
+  #    directory does not reopen a credential the CLI has just rewritten 0600.
+  if grep -qF "$cred" "$ENTRYPOINT"; then
+    ok "$cli: the entrypoint names $cred"
+  else
+    bad "$cli: no repair names $cred" \
+        "a directory-level chmod does not reopen a file the CLI rewrote 0600"
+  fi
+
+  # 2. The watch must be able to SEE a write to it: either the watch is on the
+  #    credential's own parent directory, or an ancestor is watched with -r.
+  #    This is the assertion #5734 was missing.
+  watched=""
+  if grep -qE "hive_guard_forever [a-z]+ ${cred_parent}/ " "$ENTRYPOINT" || \
+     grep -qE "inotifywait [^|]*${cred_parent}/( |$)" "$ENTRYPOINT"; then
+    watched="direct"
+  else
+    ancestor="$cred_parent"
+    while [ -n "$ancestor" ] && [ "$ancestor" != "/data/home" ] && [ "$ancestor" != "/" ]; do
+      ancestor="${ancestor%/*}"
+      if grep -qE "hive_guard_forever [a-z]+ ${ancestor}/ [^ ]+ [a-z_]+ -r" "$ENTRYPOINT"; then
+        watched="recursive on $ancestor"
+        break
+      fi
+    done
+  fi
+
+  if [ -n "$watched" ]; then
+    ok "$cli: the inotify guard covers $cred_parent ($watched)"
+  else
+    bad "$cli: no inotify guard can ever fire for $cred" \
+        "the watch is on an ancestor without -r, so a write to this file is invisible to it — watch ${cred_parent}/ directly, or add -r to the ancestor's guard"
+  fi
+
+  # 3. The 5s poll must name it too. That is the backstop when inotify is
+  #    unavailable (NFS) or its per-user watch limit is exhausted — and after
+  #    #5730 it is the arm that cannot die silently.
+  if printf '%s\n' "$FAST_POLL_REACH" | grep -qF "$cred"; then
+    ok "$cli: the 5s poll repairs $cred"
+  else
+    bad "$cli: the 5s poll does not repair $cred" \
+        "inotify is unreliable on NFS and has a per-user watch limit; the poll is the backstop"
+  fi
+done <<'CREDENTIAL_PATHS'
+copilot|/data/home/.copilot/config.json
+claude|/data/home/.claude/.credentials.json
+agy|/data/home/.gemini/antigravity-cli/antigravity-oauth-token
+CREDENTIAL_PATHS
 
 hive_test_report

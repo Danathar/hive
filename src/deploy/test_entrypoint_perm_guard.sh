@@ -58,7 +58,8 @@ fi
 ok "guard functions extracted from entrypoint.sh ($(grep -c '^  hive_.*() {' "$GUARDS") functions)"
 
 for fn in hive_fix_shared_credential hive_fix_copilot_config hive_fix_tree \
-          hive_fix_claude_instant hive_fix_credentials_fast hive_guard_forever; do
+          hive_fix_claude_instant hive_fix_credentials_fast hive_guard_forever \
+          hive_watch_once; do
   if grep -q "^  ${fn}() {" "$GUARDS" || grep -q "^  ${fn}() " "$GUARDS"; then
     ok "guard function $fn is defined"
   else
@@ -235,6 +236,76 @@ if [ -s "$MARKER" ]; then
 else
   bad "the guard still repairs while its watcher is unavailable" "body never ran"
 fi
+
+# ── 6b. The watch depth reaches the credential (#5734) ──────────────────────
+# agy keeps its OAuth token one directory BELOW the watched dir, and
+# `inotifywait` without -r reports events only for entries directly inside the
+# watched directory — so the .gemini guard could never fire, for the entire life
+# of every container. It read as protection while doing nothing.
+#
+# Asserted by running hive_watch_once against a stub that records its argv,
+# because the whole failure was a flag that was not there.
+ARGV_LOG="$WORK/inotify-argv.log"
+cat > "$STUB/inotifywait" <<STUBEOF
+#!/bin/sh
+echo "\$@" >> "$ARGV_LOG"
+exit 0
+STUBEOF
+chmod +x "$STUB/inotifywait"
+
+: > "$ARGV_LOG"
+sh -c '
+  set -e
+  . "$1"
+  PATH="$2:$PATH"
+  hive_watch_once "$3" close_write,create -r
+  hive_watch_once "$3" close_write,create ""
+' sh "$WORK/guards.local.sh" "$STUB" "$HOMEDIR/.gemini/" >/dev/null 2>&1
+
+RECURSIVE_CALL="$(sed -n 1p "$ARGV_LOG")"
+FLAT_CALL="$(sed -n 2p "$ARGV_LOG")"
+
+case "$RECURSIVE_CALL" in
+  *" -r "*) ok "hive_watch_once passes -r through to inotifywait when asked" ;;
+  *) bad "hive_watch_once passes -r through to inotifywait when asked" \
+         "argv was: $RECURSIVE_CALL" ;;
+esac
+case "$FLAT_CALL" in
+  *" -r "*) bad "a non-recursive guard stays non-recursive" \
+                "argv was: $FLAT_CALL — .claude is 161 MB / 8413 entries; -r there costs a watch per subdirectory" ;;
+  *) ok "a non-recursive guard stays non-recursive" ;;
+esac
+
+# The dispatch itself: .gemini must be the recursive one, .claude must not be.
+GEMINI_DISPATCH="$(grep -E '^ *hive_guard_forever gemini ' "$ENTRYPOINT" || true)"
+case "$GEMINI_DISPATCH" in
+  *" -r "*|*" -r&"*|*" -r &"*) ok "the .gemini guard is dispatched recursively" ;;
+  *) bad "the .gemini guard is dispatched recursively" \
+         "agy's token is at .gemini/antigravity-cli/, one level below the watch: $GEMINI_DISPATCH" ;;
+esac
+CLAUDE_DISPATCH="$(grep -E '^ *hive_guard_forever claude ' "$ENTRYPOINT" || true)"
+case "$CLAUDE_DISPATCH" in
+  *" -r"*) bad "the .claude guard is NOT recursive" \
+               "that tree is 161 MB / 8413 entries on a working hive: $CLAUDE_DISPATCH" ;;
+  *) ok "the .claude guard is not recursive (its credential is at depth 1)" ;;
+esac
+
+# And the directory must exist before any watch is established: a watch cannot
+# be placed on a directory that is not there, so agy creating it after boot
+# would leave the guard covering nothing.
+if grep -qE 'mkdir -p[^&|;]*/data/home/\.gemini/antigravity-cli' "$ENTRYPOINT"; then
+  ok "the credential's directory is pre-created at boot, before the watch is set up"
+else
+  bad "the credential's directory is pre-created at boot" \
+      "a recursive watch established before agy creates .gemini/antigravity-cli/ may never cover it"
+fi
+
+# Restore the always-failing stub for any later test.
+cat > "$STUB/inotifywait" <<'STUBEOF'
+#!/bin/sh
+exit 1
+STUBEOF
+chmod +x "$STUB/inotifywait"
 
 # ── 7. Structural: no unguarded failure-prone command in the guard block ────
 UNGUARDED="$(grep -nE '^\s+(chmod|chown|chgrp|find|sleep) ' "$GUARDS" | grep -v '|| true' || true)"

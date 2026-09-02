@@ -141,6 +141,19 @@ var WatchedHomeDirs = []string{
 	// fixPermissions walks each root recursively (filepath.Walk) so anything
 	// created root-owned underneath is corrected on the next tick anyway.
 	"/data/home/.bob",
+	// Antigravity (`agy`) keeps its OAuth session at
+	// .gemini/antigravity-cli/antigravity-oauth-token. The directory was absent
+	// from this list entirely (kubestellar/hive#5734), so agy had NO Go-side
+	// fallback: the entrypoint's inotify guard could not fire for it (it watched
+	// one directory above the token), which left the 5-minute polling sweep as
+	// the single mechanism protecting a shared credential — and #5730 is the
+	// record of that sweep dying silently.
+	//
+	// fixPermissions walks each root recursively, so the nested token is reached
+	// from this one entry, and sharedCredentialBases already recognises its
+	// basename. The tree is small — an OAuth token and a little session state —
+	// so the walk costs nothing next to .cache or .local.
+	"/data/home/.gemini",
 	"/data/agents",
 	// Per-agent bead stores (/data/beads/<agent>) must be group-writable so the
 	// dashboard/hub process can mint an issue-sourced epic into an agent's store

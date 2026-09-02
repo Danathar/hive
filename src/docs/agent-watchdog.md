@@ -91,6 +91,11 @@ restored`.
 boot-time repair that made the file readable in the first place, which hides
 the cause.
 
+The same shape applies to antigravity (`agy`), whose token lives one directory
+deeper, at `/data/home/.gemini/antigravity-cli/antigravity-oauth-token`
+([#5734](https://github.com/kubestellar/hive/issues/5734)) — check and fix it
+the same way.
+
 Two layers keep this from recurring, and both report rather than hide a
 failure: the entrypoint's permission guards reopen the credential on every
 write and on a 5s poll (they are the only actor that can, since they run as
