@@ -19,7 +19,7 @@ Listed below are organizations that have adopted, or benefitted from, KubeStella
 | [Frostyard](https://github.com/frostyard) | Autonomous development operations for frostyard projects | Pre-production | |
 | [Open Horizon](https://github.com/open-horizon) | Standardization and enforcement for code consistency | Pre-production | |
 | [Open Horizon Services](https://github.com/open-horizon-services) | Ensuring code consistency over community contributions | Pre-production | |
-| [Danathar](https://github.com/Danathar) | Autonomous development operations for Danathar projects | Pre-production | |
+| [Danathar](https://github.com/Danathar) | Autonomous development operations for Danathar projects | Pre-production | https://github.com/Danathar |
 
 
 
