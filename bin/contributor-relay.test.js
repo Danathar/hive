@@ -5697,6 +5697,153 @@ test('#5376 recordChromeIdleTick fires only after the full consecutive window', 
 });
 
 // ---------------------------------------------------------------------------
+// kubestellar/hive#5715 — the PR review cycle is aborted by its own progress
+// report, and by any WebSocket flap.
+//
+// Every PR_REVIEW_EVERY_N completions the relay builds a review task ITSELF and
+// puts it in currentTask. The hub never assigned it and holds no lease for it,
+// but every path that reports on currentTask kept asserting it to the hub —
+// which honours a claim only against a server-issued lease (#C4) and so answers
+// with a task_revoke. The relay treated that revoke as terminal: it stopped the
+// agent, relaunched the CLI and asked for fresh work, losing the review.
+//
+// The report frames this as a reconnect bug. It is broader: the ordinary
+// progress tick asserts the same task, so the FIRST report after
+// TASK_GRACE_PERIOD_MS is revoked with no flap involved at all. A flap only
+// makes it immediate by re-asserting on reconnect. Both are covered here.
+// ---------------------------------------------------------------------------
+
+// A synthetic review task, shaped exactly as the completion path builds it.
+function reviewTask(id) {
+  return { task_id: id || 'pr-review-1788370993120', kind: 'review', repo: 'foo/bar', number: 0, title: 'Review open PRs for comments' };
+}
+
+function ownershipClaims(relay, taskID) {
+  return relay.__sent.filter(m =>
+    (m.type === 'task_accepted' || m.type === 'task_progress') && m.task_id === taskID);
+}
+
+test('#5715 a progress tick during a review cycle claims nothing from the hub', () => {
+  // The deeper cause, and the one the report does not name: no flap is needed.
+  const relay = loadRelay({ backend: 'claude', paneText: 'esc to interrupt\n' });
+  try {
+    relay.setCliReady(true);
+    const task = reviewTask();
+    relay.setCurrentTask(task);
+    relay.__crashTick();
+
+    assert.deepStrictEqual(ownershipClaims(relay, task.task_id), [],
+      '#5715: reporting progress for a task the hub never issued can only be ' +
+      'answered with a revoke, which ends the review');
+    assert.ok(relay.getCurrentTask(), 'the review must still be in flight');
+  } finally { teardown(relay); }
+});
+
+test('#5715 reconnecting mid-review does not re-assert the task', () => {
+  // The reported sequence: flap, then "Reconnected while working on
+  // kubestellar/hive#0 — resuming", then a revoke of that same task.
+  const relay = loadRelay({ backend: 'claude' });
+  try {
+    relay.setCliReady(true);
+    const task = reviewTask();
+    relay.setCurrentTask(task);
+    relay.handleMessage(JSON.stringify({ type: 'auth_ok', contributor_id: 'c1', trust_tier: 'contributor' }));
+
+    assert.deepStrictEqual(ownershipClaims(relay, task.task_id), [],
+      '#5715: there is no lease for the hub to match, so the resume could only ' +
+      'come back as a revoke');
+    assert.ok(!relay.__sent.some(m => m.type === 'ready'),
+      'the relay is mid-review, so it must not ask for new work either');
+    assert.ok(relay.getCurrentTask(), 'the review must survive the reconnect');
+  } finally { teardown(relay); }
+});
+
+test('#5715 a revoke of a review cycle does not stop the agent', () => {
+  // The second, independently sufficient fix. Unreachable in normal operation
+  // once nothing is claimed, but it is what makes the cycle robust to a revoke
+  // arriving for any other reason — an older hub, a racing frame.
+  const relay = loadRelay({ backend: 'claude' });
+  try {
+    relay.setCliReady(true);
+    const task = reviewTask();
+    relay.setCurrentTask(task);
+    const before = relay.__tmuxSends().length;
+
+    relay.handleMessage(JSON.stringify({ type: 'task_revoke', task_id: task.task_id, reason: 'no active lease for this task' }));
+
+    assert.ok(relay.getCurrentTask(), '#5715: the review must not be torn down');
+    assert.strictEqual(relay.getCurrentTask().task_id, task.task_id);
+    assert.deepStrictEqual(relay.__tmuxSends().slice(before), [],
+      'no other contributor can have been given this task, so there is nothing ' +
+      'to stop the agent for');
+  } finally { teardown(relay); }
+});
+
+test('#5715 a hub-issued task still resumes and is still revocable', () => {
+  // The control. Without it the fix could pass by simply never resuming and
+  // never honouring a revoke, which would break every real issue task.
+  const relay = loadRelay({ backend: 'claude' });
+  try {
+    relay.setCliReady(true);
+    const task = { task_id: 'ct-foo/bar-5715-1', task_gen: 9, kind: 'issue', repo: 'foo/bar', number: 5715, title: 'real work' };
+    relay.setCurrentTask(task);
+
+    relay.handleMessage(JSON.stringify({ type: 'auth_ok', contributor_id: 'c1', trust_tier: 'contributor' }));
+    const claims = ownershipClaims(relay, task.task_id);
+    assert.ok(claims.some(m => m.type === 'task_accepted'), 'a real task must still re-assert on reconnect');
+    assert.ok(claims.some(m => m.type === 'task_progress'), 'a real task must still report progress on reconnect');
+
+    relay.handleMessage(JSON.stringify({ type: 'task_revoke', task_id: task.task_id, reason: 'operator requeue' }));
+    assert.ok(!relay.getCurrentTask(), 'a revoke of real work is still terminal');
+  } finally { teardown(relay); }
+});
+
+test('#5715 an external work item with number 0 is not mistaken for a local task', () => {
+  // The trap in the report's own suggestion that "Number == 0 already identifies
+  // it". Linear and Jira items deliberately carry number 0 and put their
+  // identity in key/external_id (#4245) — and they hold REAL leases. Treating
+  // them as local would withhold the progress reports that keep those leases
+  // alive and get live work reclaimed as wedged.
+  const relay = loadRelay({ backend: 'claude', paneText: 'esc to interrupt\n' });
+  try {
+    relay.setCliReady(true);
+    const task = { task_id: 'ct-acme/team-ENG-42-1', task_gen: 3, kind: 'issue', repo: 'acme/team', number: 0, title: 'Linear item', key: 'linear:ENG-42' };
+    relay.setCurrentTask(task);
+    relay.__crashTick();
+
+    assert.ok(ownershipClaims(relay, task.task_id).length > 0,
+      'a zero-numbered EXTERNAL item holds a real lease and must keep reporting');
+
+    // The reconnect resume is where this bites hardest: that payload carries
+    // `number`, so a guard keyed on it would withhold the re-assertion and the
+    // hub would reclaim genuinely live work as wedged.
+    relay.handleMessage(JSON.stringify({ type: 'auth_ok', contributor_id: 'c1', trust_tier: 'contributor' }));
+    const claims = ownershipClaims(relay, task.task_id);
+    assert.ok(claims.some(m => m.type === 'task_accepted'),
+      'a zero-numbered external item must still re-assert on reconnect');
+    assert.ok(claims.some(m => m.type === 'task_progress' && m.number === 0),
+      'and its resume must still carry number 0 to the hub');
+  } finally { teardown(relay); }
+});
+
+test('#5715 terminal frames for a review cycle still reach the hub', () => {
+  // Only the two OWNERSHIP-asserting frames are withheld. task_complete and
+  // task_failed assert nothing, are no-ops hub-side for a task the hub never
+  // issued, and are what the routing-fallback regression above observes — so the
+  // guard must not swallow them.
+  const relay = loadRelay({ backend: 'claude' });
+  try {
+    relay.setCliReady(true);
+    const task = reviewTask();
+    relay.setCurrentTask(task);
+    relay.failCurrentTask('review blew up');
+
+    assert.ok(relay.__sent.some(m => m.type === 'task_failed' && m.task_id === task.task_id),
+      'the guard must be scoped to ownership claims, not to every task frame');
+  } finally { teardown(relay); }
+});
+
+// ---------------------------------------------------------------------------
 
 let failed = 0;
 // RELAY_TEST_ONLY=<substring> runs a single test, for debugging in isolation.

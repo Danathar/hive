@@ -344,7 +344,55 @@ let tokenExpiresAt = null;
 
 function nextSeq() { return ++seq; }
 
+// LOCAL_TASK_ID_PREFIX marks a task the RELAY invented rather than one the hub
+// assigned: today that is the PR review cycle built after every
+// PR_REVIEW_EVERY_N completions (kubestellar/hive#5715).
+//
+// Identity is the ID PREFIX, deliberately, and NOT `number === 0`. External work
+// items — Linear, Jira — legitimately carry number 0 and put their identity in
+// key/external_id (#4245), and they DO hold real hub leases. Classifying those
+// as local would withhold the progress reports that keep their lease alive and
+// get live work reclaimed as wedged, which is a worse bug than the one being
+// fixed. The prefix is minted in exactly one place, so it cannot collide.
+const LOCAL_TASK_ID_PREFIX = 'pr-review-';
+
+function isLocalOnlyTaskId(taskID) {
+  return typeof taskID === 'string' && taskID.startsWith(LOCAL_TASK_ID_PREFIX);
+}
+
+function isLocalOnlyTask(task) {
+  return !!task && isLocalOnlyTaskId(task.task_id);
+}
+
+// TASK_OWNERSHIP_MESSAGES are the frames that ASSERT to the hub that this relay
+// holds a task. The hub honours such a claim only against a server-issued lease
+// (the #C4 rule that stops a client asserting ownership of work it was not
+// given), so for a task the hub never issued the only possible answer is a
+// task_revoke — which the relay then treated as terminal, stopping the agent and
+// abandoning the review (#5715).
+//
+// The revoke did NOT need a WebSocket flap. progressTick reports on the same
+// currentTask, so the first ordinary report after TASK_GRACE_PERIOD_MS asserted
+// the synthetic task and was revoked on its own; a flap only makes it immediate
+// by re-asserting on reconnect.
+//
+// task_complete / task_failed are deliberately NOT in this set. They assert
+// nothing about ownership, the hub treats them as no-ops for a task it never
+// issued (hasTask is false, so neither the lease revoke nor the completion
+// booking runs), and they are what the existing routing-fallback regression test
+// observes. Only the two claiming frames are withheld.
+const TASK_OWNERSHIP_MESSAGES = new Set(['task_accepted', 'task_progress']);
+
 function sendTo(hub, msg) {
+  // #5715: never claim a task the hub did not issue. Enforced HERE rather than
+  // at each call site because the claim can originate from the reconnect
+  // handler, the progress tick, the transient-API-error path and the autonomy
+  // nudge — six sites today, and a seventh added later would silently
+  // reintroduce this. Keyed off the message's own task_id, not currentTask, so
+  // it stays correct if the task changed between building and sending.
+  if (msg && TASK_OWNERSHIP_MESSAGES.has(msg.type) && isLocalOnlyTaskId(msg.task_id)) {
+    return;
+  }
   if (hub && hub.ws && hub.ws.readyState === WebSocket.OPEN) {
     hub.ws.send(JSON.stringify(msg));
   }
@@ -361,10 +409,18 @@ function sendTo(hub, msg) {
 // padding: not every currentTask comes from a task_assign. The synthetic
 // pr-review task built after every PR_REVIEW_EVERY_N completions is assembled
 // locally and has no _hub, so keying strictly off currentTask._hub sent its
-// progress and completion frames to `undefined` — silently dropped, leaving
-// the hub to watch the contributor go mute mid-review and time it out.
-// Falling back to the active hub is also the correct target there: it is the
-// hub whose task we just finished.
+// frames to `undefined` — silently dropped. Falling back to the active hub is
+// the correct target: it is the hub whose task we just finished.
+//
+// That fallback stands, but its original justification does not. It said the
+// dropped frames left "the hub to watch the contributor go mute mid-review and
+// time it out". It cannot: the real task's task_complete goes out BEFORE the
+// review cycle starts, so by then the hub has cleared its currentTask and
+// revoked the lease and holds nothing to time out — hub-side liveness is the
+// ping/pong heartbeat, independent of these frames. Sending the OWNERSHIP-
+// asserting frames for that task was in fact the #5715 bug: the hub answered
+// each one with a revoke. sendTo now withholds exactly those two; the terminal
+// frames still route through this fallback.
 function send(msg) {
   sendTo((currentTask && currentTask._hub) || hubs[activeHubIndex], msg);
 }
@@ -3319,7 +3375,7 @@ function progressTick() {
     tasksCompletedCount++;
     if (tasksCompletedCount % PR_REVIEW_EVERY_N === 0) {
       console.log(`PR review cycle (${tasksCompletedCount} tasks completed) — checking open PRs`);
-      currentTask = { task_id: `pr-review-${Date.now()}`, kind: 'review', repo: completedRepo, number: 0, title: 'Review open PRs for comments' };
+      currentTask = { task_id: `${LOCAL_TASK_ID_PREFIX}${Date.now()}`, kind: 'review', repo: completedRepo, number: 0, title: 'Review open PRs for comments' };
       taskAssignedAt = Date.now();
       const reviewPrompt = `Check your open PRs on ${completedRepo} for review comments. ` +
         `Run 'GH_TOKEN=$GH_TOKEN gh pr list --repo ${completedRepo} --author @me --state open' to find them. ` +
@@ -3480,7 +3536,19 @@ function handleMessage(data, hub) {
       hub.authenticated = true;
       hub.authFailed = false;
       hub.reconnectDelay = BASE_RECONNECT_DELAY_MS;
-      if (currentTask && hub === currentTaskHub()) {
+      if (currentTask && isLocalOnlyTask(currentTask) && hub === currentTaskHub()) {
+        // #5715: nothing to resume — the hub never issued this task, so there is
+        // no lease to match and the claim could only come back as a revoke. The
+        // local work is unaffected by the socket having dropped, so it carries
+        // on: the progress interval was never cleared (no task-exit path ran)
+        // and the max-duration lease keeps the arming it got when the cycle
+        // started.
+        //
+        // The old line announced "Reconnected while working on <repo>#0 —
+        // resuming" and was immediately followed by a revoke of that same task,
+        // which is what made the failure read as a hub problem.
+        console.log(`Reconnected during a local ${currentTask.kind} cycle (${currentTask.task_id}) — continuing; the hub issued no lease to resume`);
+      } else if (currentTask && hub === currentTaskHub()) {
         console.log(`Reconnected while working on ${currentTask.repo}#${currentTask.number} — resuming`);
         sendTo(hub, { type: 'task_accepted', seq: nextSeq(), task_id: currentTask.task_id });
         sendTo(hub, { type: 'task_progress', seq: nextSeq(), task_id: currentTask.task_id, task_gen: currentTask.task_gen, kind: currentTask.kind, repo: currentTask.repo, number: currentTask.number, title: currentTask.title, status: 'working' });
@@ -3598,6 +3666,20 @@ function handleMessage(data, hub) {
       }
       if (currentTaskHub() !== hub || currentTask.task_id !== msg.task_id) {
         console.log(`Ignoring task_revoked from ${hub.url} for ${msg.task_id} — active task belongs to another hub`);
+        break;
+      }
+      // #5715: the terminal handling below assumes the work now belongs to
+      // somebody else — that is why it stops the agent, drops the credential and
+      // relaunches. That cannot apply to a task the hub never issued: no other
+      // contributor can have been given it, and the agent's turn is still valid.
+      //
+      // With the send guard above the hub is no longer told about these tasks at
+      // all, so this should be unreachable in normal operation. It is kept as the
+      // second of the two independently sufficient fixes the report asked for:
+      // it makes the review cycle robust to a revoke arriving for ANY reason,
+      // including from a hub or relay version that predates the guard.
+      if (isLocalOnlyTask(currentTask)) {
+        console.log(`Ignoring task_revoke for ${msg.task_id} — a local ${currentTask.kind} cycle the hub never issued; it keeps running`);
         break;
       }
       console.log(`Task revoked: ${msg.task_id} — ${msg.reason}`);
