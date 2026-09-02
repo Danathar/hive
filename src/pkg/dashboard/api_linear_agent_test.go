@@ -46,7 +46,7 @@ func linearAgentTestServer(t *testing.T) (*Server, *Dependencies, *httptest.Serv
 	t.Cleanup(fake.Close)
 
 	s, deps := apiServer(t)
-	s.linearAgentSvc = s.newLinearAgentService(fake.URL+"/oauth/token", fake.URL+"/graphql")
+	deps.NewLinearAgent = newTestLinearAgentFactory(s.logger, fake.URL+"/oauth/token", fake.URL+"/graphql")
 	return s, deps, fake
 }
 
@@ -125,7 +125,7 @@ func TestLinearAgentCallbackFlow(t *testing.T) {
 	}
 
 	// Happy path with a real single-use state.
-	state, err := s.linearAgent().states.Create()
+	state, err := s.linearAgent().NewFlowState()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +261,7 @@ func TestResolveLinearSessionAgent(t *testing.T) {
 
 func TestLinearSessionHolder(t *testing.T) {
 	s, _, _ := linearAgentTestServer(t)
-	tr := s.linearAgent().tracker
+	tr := s.linearAgent().(*testLinearService).tracker
 	var ev linearagent.SessionEvent
 	ev.AgentSession.ID = "sess-9"
 	ev.AgentSession.Issue.Identifier = "ENG-9"

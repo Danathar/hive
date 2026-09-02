@@ -2637,19 +2637,27 @@ func main() {
 	}
 
 	dashSrv.RegisterAPI(&dashboard.Dependencies{
-		Config:           cfg,
-		AgentMgr:         agentMgr,
-		Governor:         gov,
-		GHClient:         ghClient,
-		GHAppAuth:        appAuth,
-		GHTokenScopes:    ghAuth.TokenScopes,
-		Tokens:           tokenCollector,
-		Knowledge:        knowledgeAPI,
-		Inception:        inceptionEngine,
-		Nous:             nousState,
-		Scheduler:        sched,
-		MetricsCollector: metricsCollector,
-		RotationMgr:      rotationMgr,
+		Config:   cfg,
+		AgentMgr: agentMgr,
+		// Provider gateways (#5565 slice 3): concrete openrouter/watsonx/
+		// linearagent adapters behind the dashboard's consumer-defined
+		// interfaces — this composition root is the only non-test place that
+		// names the concrete types.
+		Watsonx:              watsonxGateway{},
+		OpenRouter:           openRouterGateway{},
+		NewLinearAgent:       newLinearAgentGateway(logger),
+		LinearStoredViewerID: linearStoredViewerID,
+		Governor:             gov,
+		GHClient:             ghClient,
+		GHAppAuth:            appAuth,
+		GHTokenScopes:        ghAuth.TokenScopes,
+		Tokens:               tokenCollector,
+		Knowledge:            knowledgeAPI,
+		Inception:            inceptionEngine,
+		Nous:                 nousState,
+		Scheduler:            sched,
+		MetricsCollector:     metricsCollector,
+		RotationMgr:          rotationMgr,
 		// #3972: hand the ACMM advisor the SAME cached fleet-stats collector
 		// the heartbeat reads, so its merge-success signal reuses the existing
 		// 30-minute collect loop instead of issuing a second GitHub fetch.

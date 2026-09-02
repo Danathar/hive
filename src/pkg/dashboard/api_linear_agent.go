@@ -26,7 +26,6 @@ import (
 
 	"github.com/kubestellar/hive/pkg/agent"
 	"github.com/kubestellar/hive/pkg/github"
-	"github.com/kubestellar/hive/pkg/linearagent"
 )
 
 const (
@@ -49,74 +48,49 @@ const (
 	linearAgentExchangeTimeout = 30 * time.Second
 )
 
-// linearAgentService bundles the linearagent components the handlers share.
-type linearAgentService struct {
-	store     *linearagent.Store
-	client    *linearagent.Client
-	tracker   *linearagent.Tracker
-	responder *linearagent.Responder
-	receiver  *linearagent.WebhookReceiver
-	states    *linearagent.StateStore
-	creds     linearagent.Credentials
-	// tokenURL / graphqlURL default to production; tests point them at fakes
-	// before first use via newLinearAgentServiceForTest.
-	tokenURL   string
-	graphqlURL string
-	// storeErr is a store-open failure (corrupt token file). Kept rather than
-	// swallowed so status can surface it; install/webhook fail cleanly.
-	storeErr error
-}
-
-// linearAgent lazily builds the service. sync.Once so the store is read and
-// the responder wired exactly once per server.
-func (s *Server) linearAgent() *linearAgentService {
+// linearAgent lazily builds the service through the Dependencies factory
+// (#5565 slice 3: the concrete pkg/linearagent bundle is constructed behind
+// the LinearAgentGateway interface — in cmd/hive for production, in the test
+// helper for tests). sync.Once so the store is read and the responder wired
+// exactly once per server. Nil when no factory is wired.
+func (s *Server) linearAgent() LinearAgentGateway {
+	if s.linearAgentSvc == nil && (s.deps == nil || s.deps.NewLinearAgent == nil) {
+		// No factory wired (bare test server): leave the Once unconsumed so a
+		// factory wired later still constructs on the next call.
+		return nil
+	}
 	s.linearAgentOnce.Do(func() {
-		if s.linearAgentSvc == nil {
-			s.linearAgentSvc = s.newLinearAgentService("", "")
+		if s.linearAgentSvc != nil {
+			return
 		}
+		svc := s.deps.NewLinearAgent(LinearAgentPorts{
+			Kick:                s.linearAgentKick,
+			ResolveSessionAgent: s.resolveLinearSessionAgent,
+		})
+		// Component D: run completion → response activity. The observer no-ops
+		// for agents with no active Linear session, so installing it
+		// unconditionally costs nothing.
+		if svc != nil && s.deps.AgentMgr != nil {
+			if obs := svc.AgentEventObserver(); obs != nil {
+				s.deps.AgentMgr.SetKickObserver(obs)
+			}
+		}
+		s.linearAgentSvc = svc
 	})
 	return s.linearAgentSvc
 }
 
-// newLinearAgentService constructs the service. Empty tokenURL/graphqlURL mean
-// production Linear.
-func (s *Server) newLinearAgentService(tokenURL, graphqlURL string) *linearAgentService {
-	svc := &linearAgentService{
-		creds:      linearagent.CredentialsFromEnv(),
-		states:     linearagent.NewStateStore(linearagent.StateTTL),
-		tracker:    linearagent.NewTracker(),
-		tokenURL:   tokenURL,
-		graphqlURL: graphqlURL,
+// linearAgentKick is the responder's kick port: send the message to the named
+// agent and record the kick with the governor.
+func (s *Server) linearAgentKick(agentName, message string) error {
+	if s.deps == nil || s.deps.AgentMgr == nil {
+		return errNoAgentManager
 	}
-	store, err := linearagent.NewStore(linearagent.DefaultStorePath())
-	if err != nil {
-		s.logger.Error("linear agent: install store unreadable", "error", err)
-		svc.storeErr = err
-		return svc
+	err := s.deps.AgentMgr.SendKick(agentName, message)
+	if err == nil && s.deps.Governor != nil {
+		s.deps.Governor.RecordKick(agentName)
 	}
-	svc.store = store
-	svc.client = linearagent.NewClient(store, svc.creds, nil, tokenURL, graphqlURL, s.logger)
-
-	kick := func(agentName, message string) error {
-		if s.deps == nil || s.deps.AgentMgr == nil {
-			return errNoAgentManager
-		}
-		err := s.deps.AgentMgr.SendKick(agentName, message)
-		if err == nil && s.deps.Governor != nil {
-			s.deps.Governor.RecordKick(agentName)
-		}
-		return err
-	}
-	svc.responder = linearagent.NewResponder(svc.client, kick, s.resolveLinearSessionAgent, svc.tracker, s.logger)
-	svc.receiver = linearagent.NewWebhookReceiver(svc.responder.HandleSessionEvent, s.logger)
-
-	// Component D: run completion → response activity. The observer no-ops
-	// for agents with no active Linear session, so installing it
-	// unconditionally costs nothing.
-	if s.deps != nil && s.deps.AgentMgr != nil {
-		s.deps.AgentMgr.SetKickObserver(svc.responder.HandleAgentEvent)
-	}
-	return svc
+	return err
 }
 
 // errNoAgentManager is the kick failure when the server has no agent manager
@@ -141,12 +115,12 @@ const linearAgentTokenTimeout = 5 * time.Second
 // App token pushed as GITHUB_TOKEN. Never logged by callers.
 func (s *Server) LinearAgentAccessToken() string {
 	svc := s.linearAgent()
-	if svc == nil || svc.client == nil {
+	if svc == nil {
 		return ""
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), linearAgentTokenTimeout)
 	defer cancel()
-	tok, err := svc.client.AccessToken(ctx)
+	tok, err := svc.AccessToken(ctx)
 	if err != nil {
 		// "not installed" is the steady state of every hive without a Linear
 		// workspace; log only at debug so GitHub-only hives stay quiet.
@@ -213,32 +187,32 @@ func (s *Server) LinearSessionHolder(issue github.Issue) (string, bool) {
 		return "", false
 	}
 	svc := s.linearAgent()
-	if svc == nil || svc.tracker == nil {
+	if svc == nil {
 		return "", false
 	}
-	sess, ok := svc.tracker.ActiveSessionForIssue(issue.ExternalID)
+	agentName, sessionID, ok := svc.ActiveSessionForIssue(issue.ExternalID)
 	if !ok {
 		return "", false
 	}
-	return fmt.Sprintf("agent %s via Linear session %s", sess.Agent, sess.ID), true
+	return fmt.Sprintf("agent %s via Linear session %s", agentName, sessionID), true
 }
 
 // LinearAgentPROpened is the pr-request watcher's PR-opened hook: it narrates
 // the PR into the agent's active Linear session, if any.
 func (s *Server) LinearAgentPROpened(agentName, repo string, number int, url string) {
 	svc := s.linearAgent()
-	if svc == nil || svc.responder == nil {
+	if svc == nil {
 		return
 	}
-	svc.responder.HandlePROpened(agentName, repo, number, url)
+	svc.HandlePROpened(agentName, repo, number, url)
 }
 
 // linearAgentCredentialKind reports which credential ISSUES_ONLY+ agents
 // receive for api.linear.app: "oauth" (connected app), "api_key" (the
 // work-source key), or "none". Status-only; values are never exposed.
-func (s *Server) linearAgentCredentialKind(svc *linearAgentService) string {
-	if svc != nil && svc.store != nil {
-		if inst, ok := svc.store.Get(); ok && inst.Token.AccessToken != "" {
+func (s *Server) linearAgentCredentialKind(svc LinearAgentGateway) string {
+	if svc != nil {
+		if inst, ok := svc.Install(); ok && inst.HasAccessToken {
 			return "oauth"
 		}
 	}
@@ -288,21 +262,25 @@ func (s *Server) handleLinearAgentInstall(w http.ResponseWriter, r *http.Request
 		return
 	}
 	svc := s.linearAgent()
-	if svc.storeErr != nil {
+	if svc == nil {
+		jsonError(w, "linear agent unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if svc.StoreErr() != nil {
 		jsonError(w, "linear install store unreadable; see server log", http.StatusServiceUnavailable)
 		return
 	}
-	if !svc.creds.Configured() {
+	if !svc.Configured() {
 		jsonError(w, "LINEAR_CLIENT_ID / LINEAR_CLIENT_SECRET are not set", http.StatusPreconditionFailed)
 		return
 	}
-	state, err := svc.states.Create()
+	state, err := svc.NewFlowState()
 	if err != nil {
 		jsonError(w, "failed to start flow", http.StatusInternalServerError)
 		return
 	}
 	redirectURI := s.linearAgentCallbackURL(r)
-	authorizeURL := linearagent.BuildAuthorizeURL(svc.creds.ClientID, redirectURI, state)
+	authorizeURL := svc.AuthorizeURL(redirectURI, state)
 	s.auditFromRequest(r, "linear_agent_install_start", "", "")
 	// redirect_uri is echoed so an operator can see the exact value the Linear
 	// app's Callback URL must match without decoding authorize_url.
@@ -317,11 +295,11 @@ func (s *Server) handleLinearAgentCallback(w http.ResponseWriter, r *http.Reques
 	code := strings.TrimSpace(q.Get("code"))
 	state := strings.TrimSpace(q.Get("state"))
 	svc := s.linearAgent()
-	if code == "" || state == "" || svc.storeErr != nil || !svc.creds.Configured() {
+	if svc == nil || code == "" || state == "" || svc.StoreErr() != nil || !svc.Configured() {
 		s.redirectLinearAgent(w, r, linearAgentErrorFlag)
 		return
 	}
-	if !svc.states.Consume(state) {
+	if !svc.ConsumeFlowState(state) {
 		// Unknown / expired / replayed state — reject.
 		s.redirectLinearAgent(w, r, linearAgentErrorFlag)
 		return
@@ -329,36 +307,14 @@ func (s *Server) handleLinearAgentCallback(w http.ResponseWriter, r *http.Reques
 
 	ctx, cancel := context.WithTimeout(r.Context(), linearAgentExchangeTimeout)
 	defer cancel()
-	tokenURL := svc.tokenURL
-	if tokenURL == "" {
-		tokenURL = linearagent.TokenURL
-	}
-	tok, err := linearagent.ExchangeCode(ctx, nil, tokenURL, svc.creds, code, s.linearAgentCallbackURL(r))
+	// Exchange + identity + persist happen provider-side (CompleteInstall),
+	// with the same step-level warn/error logging as before the interface cut.
+	workspace, err := svc.CompleteInstall(ctx, code, s.linearAgentCallbackURL(r))
 	if err != nil {
-		s.logger.Warn("linear agent: code exchange failed", "error", err.Error())
 		s.redirectLinearAgent(w, r, linearAgentErrorFlag)
 		return
 	}
-	ident, err := linearagent.FetchIdentity(ctx, nil, svc.graphqlURL, tok.AccessToken)
-	if err != nil {
-		s.logger.Warn("linear agent: identity query failed", "error", err.Error())
-		s.redirectLinearAgent(w, r, linearAgentErrorFlag)
-		return
-	}
-	inst := linearagent.Install{
-		ViewerID:           ident.ViewerID,
-		OrganizationID:     ident.OrganizationID,
-		OrganizationName:   ident.OrganizationName,
-		OrganizationURLKey: ident.OrganizationURLKey,
-		Token:              tok,
-		ConnectedAt:        time.Now(),
-	}
-	if err := svc.store.Set(inst); err != nil {
-		s.logger.Error("linear agent: failed to persist install", "error", err.Error())
-		s.redirectLinearAgent(w, r, linearAgentErrorFlag)
-		return
-	}
-	s.auditFromRequest(r, "linear_agent_connected", auditDetail("workspace", ident.OrganizationName), "")
+	s.auditFromRequest(r, "linear_agent_connected", auditDetail("workspace", workspace), "")
 	s.redirectLinearAgent(w, r, linearAgentConnectedFlag)
 }
 
@@ -366,11 +322,16 @@ func (s *Server) handleLinearAgentCallback(w http.ResponseWriter, r *http.Reques
 // verification (HMAC over raw body, replay window) lives in the receiver.
 func (s *Server) handleLinearAgentWebhook(w http.ResponseWriter, r *http.Request) {
 	svc := s.linearAgent()
-	if svc.receiver == nil {
+	if svc == nil {
 		http.Error(w, "linear agent unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	svc.receiver.ServeHTTP(w, r)
+	h := svc.WebhookHandler()
+	if h == nil {
+		http.Error(w, "linear agent unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	h.ServeHTTP(w, r)
 }
 
 // handleLinearAgentStatus (owner) reports install state and tracked sessions.
@@ -379,13 +340,17 @@ func (s *Server) handleLinearAgentStatus(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	svc := s.linearAgent()
+	if svc == nil {
+		jsonError(w, "linear agent unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	resp := map[string]interface{}{
-		"configured":    svc.creds.Configured(),
+		"configured":    svc.Configured(),
 		"connected":     false,
 		"webhook_path":  linearAgentWebhookPath,
 		"callback_path": linearAgentCallbackPath,
 	}
-	if svc.storeErr != nil {
+	if svc.StoreErr() != nil {
 		resp["store_error"] = "install store unreadable; see server log"
 	}
 	if name, err := s.resolveLinearSessionAgent(); err == nil {
@@ -393,20 +358,18 @@ func (s *Server) handleLinearAgentStatus(w http.ResponseWriter, r *http.Request)
 	} else {
 		resp["session_agent_error"] = err.Error()
 	}
-	if svc.store != nil {
-		if inst, ok := svc.store.Get(); ok {
-			resp["connected"] = true
-			resp["viewer_id"] = inst.ViewerID
-			resp["workspace"] = map[string]string{
-				"id":      inst.OrganizationID,
-				"name":    inst.OrganizationName,
-				"url_key": inst.OrganizationURLKey,
-			}
-			resp["connected_at"] = inst.ConnectedAt
+	if inst, ok := svc.Install(); ok {
+		resp["connected"] = true
+		resp["viewer_id"] = inst.ViewerID
+		resp["workspace"] = map[string]string{
+			"id":      inst.OrganizationID,
+			"name":    inst.OrganizationName,
+			"url_key": inst.OrganizationURLKey,
 		}
+		resp["connected_at"] = inst.ConnectedAt
 	}
-	if svc.tracker != nil {
-		resp["sessions"] = svc.tracker.Snapshot()
+	if sessions, ok := svc.SessionsSnapshot(); ok {
+		resp["sessions"] = sessions
 	}
 	resp["agent_credential"] = s.linearAgentCredentialKind(svc)
 	jsonResponse(w, resp)
@@ -420,11 +383,11 @@ func (s *Server) handleLinearAgentDisconnect(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	svc := s.linearAgent()
-	if svc.store == nil {
+	if svc == nil || !svc.HasInstallStore() {
 		jsonError(w, "linear install store unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	if err := svc.store.Clear(); err != nil {
+	if err := svc.ClearInstall(); err != nil {
 		jsonError(w, "failed to clear install", http.StatusInternalServerError)
 		return
 	}

@@ -11,8 +11,10 @@ package dashboard
 // echoed, or inlined.
 //
 // The shared PKCE crypto, URL builders, key-exchange/credit HTTP calls, QR PNG
-// encoder, and the single-use TTL state store all live in pkg/openrouter; this
-// file wires them to the spoke's HTTP routes and to the gateway config.
+// encoder, and the single-use TTL state store all live in pkg/openrouter,
+// reached through the consumer-defined OpenRouterGateway interface on
+// Dependencies (#5565 slice 3); this file wires them to the spoke's HTTP
+// routes and to the gateway config.
 //
 // SECURITY:
 //   - PKCE S256; the code_verifier NEVER leaves the server.
@@ -29,7 +31,6 @@ import (
 	"strings"
 
 	"github.com/kubestellar/hive/pkg/config"
-	"github.com/kubestellar/hive/pkg/openrouter"
 )
 
 const (
@@ -50,13 +51,25 @@ const (
 	openRouterErrorFlag = "?openrouter=error"
 )
 
+// openRouter returns the wired provider gateway, or nil when Dependencies
+// does not carry one (bare test servers — the funding routes then answer 503).
+func (s *Server) openRouter() OpenRouterGateway {
+	if s.deps == nil {
+		return nil
+	}
+	return s.deps.OpenRouter
+}
+
 // openRouterState returns the lazily-initialized single-use PKCE state store,
-// created once per Server with the production TTL.
-func (s *Server) openRouterState() *openrouter.StateStore {
+// created once per Server with the production TTL. Nil when no provider
+// gateway is wired.
+func (s *Server) openRouterState() OpenRouterFlowStore {
 	s.openRouterStateOnce.Do(func() {
-		s.openRouterStateStore = openrouter.NewStateStore(openrouter.StateTTL)
+		if or := s.openRouter(); or != nil {
+			s.openRouterFlows = or.NewFlowStore()
+		}
 	})
-	return s.openRouterStateStore
+	return s.openRouterFlows
 }
 
 // registerOpenRouterRoutes registers the spoke-side OpenRouter funding routes.
@@ -84,9 +97,14 @@ func (s *Server) openRouterCallbackURL(r *http.Request) string {
 // model), and returns the openrouter.ai/auth URL plus the state. The spoke
 // implies "self" — the hive_id is always this hive.
 func (s *Server) handleOpenRouterStart(w http.ResponseWriter, r *http.Request) {
+	or := s.openRouter()
+	if or == nil {
+		jsonError(w, "openrouter gateway unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	model := strings.TrimSpace(r.URL.Query().Get("model"))
 
-	verifier, challenge, err := openrouter.GeneratePKCE()
+	verifier, challenge, err := or.GeneratePKCE()
 	if err != nil {
 		jsonError(w, "failed to start flow", http.StatusInternalServerError)
 		return
@@ -100,7 +118,7 @@ func (s *Server) handleOpenRouterStart(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "failed to start flow", http.StatusInternalServerError)
 		return
 	}
-	authURL, err := openrouter.BuildAuthorizeURL(s.openRouterCallbackURL(r), challenge, state)
+	authURL, err := or.BuildAuthorizeURL(s.openRouterCallbackURL(r), challenge, state)
 	if err != nil {
 		jsonError(w, "failed to build authorize URL", http.StatusInternalServerError)
 		return
@@ -114,12 +132,17 @@ func (s *Server) handleOpenRouterStart(w http.ResponseWriter, r *http.Request) {
 // (no vendored JS). Only openrouter.ai/auth URLs are encoded — the data param is
 // validated to that host so this cannot be turned into an open QR generator.
 func (s *Server) handleOpenRouterQR(w http.ResponseWriter, r *http.Request) {
+	or := s.openRouter()
+	if or == nil {
+		http.Error(w, "openrouter gateway unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	data := r.URL.Query().Get("data")
-	if !strings.HasPrefix(data, openrouter.AuthURL) {
+	if !strings.HasPrefix(data, or.AuthURL()) {
 		http.Error(w, "data must be an OpenRouter authorize URL", http.StatusBadRequest)
 		return
 	}
-	png, err := openrouter.QRPNG(data)
+	png, err := or.QRPNG(data)
 	if err != nil {
 		http.Error(w, "failed to render QR", http.StatusInternalServerError)
 		return
@@ -133,11 +156,16 @@ func (s *Server) handleOpenRouterQR(w http.ResponseWriter, r *http.Request) {
 // live model catalog (best-effort) so the funding screen's picker can offer
 // sensible options and manual entry. No key is needed — /v1/models is public.
 func (s *Server) handleOpenRouterModels(w http.ResponseWriter, r *http.Request) {
-	live, _ := fetchModelsFromEndpoint(openrouter.BaseURL, "")
+	or := s.openRouter()
+	if or == nil {
+		jsonError(w, "openrouter gateway unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	live, _ := fetchModelsFromEndpoint(or.BaseURL(), "")
 	jsonResponse(w, map[string]interface{}{
-		"suggested": openrouter.SuggestedModels,
+		"suggested": or.SuggestedModels(),
 		"models":    live,
-		"default":   openrouter.DefaultModel,
+		"default":   or.DefaultModel(),
 	})
 }
 
@@ -146,12 +174,17 @@ func (s *Server) handleOpenRouterModels(w http.ResponseWriter, r *http.Request) 
 // show "$X remaining". It NEVER returns the key itself. hive_id is accepted for
 // symmetry with the hub route but is ignored on the spoke (always self).
 func (s *Server) handleOpenRouterCredit(w http.ResponseWriter, r *http.Request) {
+	or := s.openRouter()
+	if or == nil {
+		jsonError(w, "openrouter gateway unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	key := s.resolveOpenRouterKey()
 	if key == "" {
 		jsonResponse(w, map[string]interface{}{"connected": false})
 		return
 	}
-	credit, err := openrouter.FetchCredit(key)
+	credit, err := or.FetchCredit(key)
 	if err != nil {
 		jsonResponse(w, map[string]interface{}{"connected": true, "error": "could not read credit"})
 		return
@@ -173,7 +206,8 @@ func (s *Server) handleOpenRouterCallback(w http.ResponseWriter, r *http.Request
 	q := r.URL.Query()
 	code := strings.TrimSpace(q.Get("code"))
 	state := strings.TrimSpace(q.Get("state"))
-	if code == "" || state == "" {
+	or := s.openRouter()
+	if or == nil || code == "" || state == "" {
 		s.redirectOpenRouter(w, r, openRouterErrorFlag)
 		return
 	}
@@ -193,7 +227,7 @@ func (s *Server) handleOpenRouterCallback(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	key, err := openrouter.ExchangeCode(code, flow.Verifier)
+	key, err := or.ExchangeCode(code, flow.Verifier)
 	if err != nil {
 		// Never echo the key material; ExchangeCode errors carry only OpenRouter
 		// status text, but log at warn without the code/verifier.
@@ -204,7 +238,7 @@ func (s *Server) handleOpenRouterCallback(w http.ResponseWriter, r *http.Request
 
 	model := flow.Model
 	if model == "" {
-		model = openrouter.DefaultModel
+		model = or.DefaultModel()
 	}
 	if err := s.upsertOpenRouterGateway(key, model); err != nil {
 		s.logger.Error("failed to store openrouter gateway", "error", err.Error())
@@ -236,10 +270,14 @@ func (s *Server) upsertOpenRouterGateway(key, model string) error {
 			break
 		}
 	}
+	endpoint := ""
+	if or := s.openRouter(); or != nil {
+		endpoint = or.BaseURL()
+	}
 	gw := config.GatewayConfig{
 		Name:         openRouterGatewayName,
 		Kind:         config.GatewayKindOpenRouter,
-		Endpoint:     openrouter.BaseURL,
+		Endpoint:     endpoint,
 		APIKeyFile:   path,
 		DefaultModel: model,
 	}
@@ -279,7 +317,9 @@ func (s *Server) ApplyDeliveredGateway(name, kind, endpoint, defaultModel, key s
 	}
 	model := strings.TrimSpace(defaultModel)
 	if model == "" {
-		model = openrouter.DefaultModel
+		if or := s.openRouter(); or != nil {
+			model = or.DefaultModel()
+		}
 	}
 	if err := s.upsertOpenRouterGateway(key, model); err != nil {
 		return err

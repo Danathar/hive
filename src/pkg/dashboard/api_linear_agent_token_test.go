@@ -20,7 +20,7 @@ import (
 // seedLinearInstall writes a connected install into the service's store.
 func seedLinearInstall(t *testing.T, s *Server, tok linearagent.Token) {
 	t.Helper()
-	svc := s.linearAgent()
+	svc := s.linearAgent().(*testLinearService)
 	if svc.store == nil {
 		t.Fatal("test service has no store")
 	}
@@ -62,7 +62,7 @@ func TestLinearAgentAccessToken_NilClientIsEmpty(t *testing.T) {
 	// A corrupt store file leaves svc.client nil (newLinearAgentService
 	// returns early); the token export must degrade to "" not panic.
 	s, _, _ := linearAgentTestServer(t)
-	s.linearAgentSvc.client = nil
+	s.linearAgent().(*testLinearService).client = nil
 
 	if got := s.LinearAgentAccessToken(); got != "" {
 		t.Errorf("LinearAgentAccessToken() = %q, want empty with nil client", got)
@@ -85,8 +85,8 @@ func TestLinearAgentAccessToken_RefreshesExpiredToken(t *testing.T) {
 	}))
 	t.Cleanup(fake.Close)
 
-	s, _ := apiServer(t)
-	s.linearAgentSvc = s.newLinearAgentService(fake.URL+"/oauth/token", fake.URL+"/graphql")
+	s, deps := apiServer(t)
+	deps.NewLinearAgent = newTestLinearAgentFactory(s.logger, fake.URL+"/oauth/token", fake.URL+"/graphql")
 	seedLinearInstall(t, s, linearagent.Token{
 		AccessToken:  "at-stale",
 		RefreshToken: "rt-1",

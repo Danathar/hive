@@ -105,7 +105,7 @@ func TestLinearAgentInstallAndCallbackAgreeOnRedirectURI(t *testing.T) {
 	t.Cleanup(fake.Close)
 
 	s, deps := apiServer(t)
-	s.linearAgentSvc = s.newLinearAgentService(fake.URL+"/oauth/token", fake.URL+"/graphql")
+	deps.NewLinearAgent = newTestLinearAgentFactory(s.logger, fake.URL+"/oauth/token", fake.URL+"/graphql")
 	deps.Config.Hub.Enabled = false
 	deps.Config.Hub.DashboardURL = ""
 	deps.Config.Dashboard.PublicURL = "https://hive-public.example/"
@@ -139,7 +139,7 @@ func TestLinearAgentInstallAndCallbackAgreeOnRedirectURI(t *testing.T) {
 	// Leg 2: the callback, arriving through the PUBLIC ingress with a different
 	// X-Forwarded-Host than the install leg saw. Deriving the origin from the
 	// request here would produce a redirect_uri that disagrees with leg 1.
-	state, err := s.linearAgent().states.Create()
+	state, err := s.linearAgent().NewFlowState()
 	if err != nil {
 		t.Fatal(err)
 	}

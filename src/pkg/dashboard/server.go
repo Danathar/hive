@@ -21,7 +21,6 @@ import (
 	"github.com/kubestellar/hive/pkg/dashboard/webstatic"
 	"github.com/kubestellar/hive/pkg/github"
 	"github.com/kubestellar/hive/pkg/hub"
-	"github.com/kubestellar/hive/pkg/openrouter"
 	"github.com/kubestellar/hive/pkg/planning"
 	"github.com/kubestellar/hive/pkg/watchdog"
 )
@@ -207,14 +206,14 @@ type Server struct {
 	// openRouterStateStore holds in-progress OpenRouter "scan-to-fund" PKCE
 	// flows (single-use state → verifier/hive/model). Lazily initialized via
 	// openRouterState() so the zero-value Server needs no constructor change.
-	openRouterStateOnce  sync.Once
-	openRouterStateStore *openrouter.StateStore
+	openRouterStateOnce sync.Once
+	openRouterFlows     OpenRouterFlowStore
 
 	// Linear agent integration (RFC #4492 Part 2): lazily-built service
 	// bundling the install store, control-plane client, webhook receiver, and
 	// session responder. See api_linear_agent.go.
 	linearAgentOnce sync.Once
-	linearAgentSvc  *linearAgentService
+	linearAgentSvc  LinearAgentGateway
 
 	audit *AuditLog
 
