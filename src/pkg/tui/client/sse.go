@@ -72,9 +72,7 @@ func (c *Client) streamEvents(ctx context.Context, events chan<- SSEEvent) error
 		return fmt.Errorf("build request for %s: %w", sseEventsPath, err)
 	}
 	req.Header.Set("Accept", "text/event-stream")
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
-	}
+	c.authorize(req)
 
 	// Client.Timeout includes reading the entire response body, which is right
 	// for polling but would kill every healthy long-lived stream after five

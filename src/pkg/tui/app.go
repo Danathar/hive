@@ -1868,8 +1868,18 @@ func Run() error {
 // the operator's scrollback on exit, so `hivectl tui` leaves the terminal the
 // way it found it.
 func run(in io.Reader, out io.Writer) error {
+	m := newModel()
+
+	// Ask once, before the alt screen, whether this hive will talk to us at
+	// all. The model's own client is reused rather than a second one built
+	// here: a probe that authenticated differently from the polls could pass
+	// while every pane went on to fail, which is worse than not probing.
+	if err := preflight(context.Background(), m.api); err != nil {
+		return err
+	}
+
 	_, err := tea.NewProgram(
-		newModel(),
+		m,
 		tea.WithAltScreen(),
 		tea.WithInput(in),
 		tea.WithOutput(out),
