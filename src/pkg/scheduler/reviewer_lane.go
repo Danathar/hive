@@ -72,6 +72,21 @@ const (
 	// like ReviewerPassedLabel; the kick contract instructs the reviewer to
 	// add the label alongside the recommend-close comment.
 	ReviewerRecommendCloseLabel = "reviewer-recommend-close"
+
+	// reviewerLaneTemplate is the shipped kick template for the reviewer LANE
+	// (kubestellar/hive#5617 item 2). It is deliberately a different file from
+	// reviewer-advisory.md, which belongs to the pack-defined on-demand reviewer
+	// described in the file header — that agent votes on HEALTHY PRs pre-merge
+	// and never touches the needs-human queue, so the two must never resolve to
+	// each other's prompt.
+	//
+	// The lane reaches this template through buildReviewerMessage rather than the
+	// ordinary kick_template chain, because an operator enables the lane by ROLE
+	// on an agent that may be named anything and carries no kick_template. It
+	// ships in pkg/policies/defaults, so loadNamedTemplate finds it after the
+	// operator override and git-clone paths — an operator can still customise the
+	// contract, and the safety gates below are the reason that is safe.
+	reviewerLaneTemplate = "reviewer-lane.md"
 )
 
 // agentRole resolves the effective role for an agent name: the configured
@@ -94,31 +109,103 @@ func (s *Scheduler) agentRole(agentName string) string {
 // hive-authored PR work list (from ci-failing.json) and the adjudication
 // contract — or a dormant notice when the hive's ACMM level is below the gate.
 func (s *Scheduler) buildReviewerMessage(agentName string, actionable *github.ActionableResult) string {
-	var b strings.Builder
-	b.WriteString(fmt.Sprintf("[agent:%s]\n", agentName))
-	b.WriteString("REVIEWER — adjudicate escalated (needs-human) hive-authored PRs.\n\n")
-
 	level := 0
 	if s.cfg.ACMMLevel != nil {
 		level = *s.cfg.ACMMLevel
 	}
+
+	// THE TWO GATES BELOW ARE EVALUATED IN GO, BEFORE ANY TEMPLATE IS READ, AND
+	// THAT IS THE WHOLE REASON A TEMPLATE IS SAFE TO SHIP (#5617 item 2).
+	//
+	// loadNamedTemplate honours operator overrides on disk, so the contract text
+	// is editable — which is the point of templating it. Neither of these
+	// decisions is: an edited template must not be able to un-dormant the lane on
+	// a low-trust hive, and must not be able to invent work when the queue is
+	// empty. Keeping both in code means the worst an operator can do to this
+	// template is change the WORDING of a kick that was already going to be sent.
 	if level < reviewerLaneMinACMMLevel {
-		b.WriteString(fmt.Sprintf(
+		return reviewerKickHeader(agentName) + fmt.Sprintf(
 			"⛔ REVIEWER LANE DORMANT: this hive runs at ACMM level %d; the escalated-PR\n"+
 				"adjudication lane requires level %d or above. The needs-human queue belongs\n"+
 				"entirely to human operators at this level. Do NOT touch, comment on, relabel,\n"+
 				"rebase, or close any PR. Stand down this kick.\n",
-			level, reviewerLaneMinACMMLevel))
-		return b.String()
+			level, reviewerLaneMinACMMLevel)
 	}
 
 	workList := s.buildReviewerWorkList()
 	if workList == "" {
-		b.WriteString("ESCALATED PRs AWAITING ADJUDICATION: (none)\n")
-		b.WriteString("Nothing to adjudicate — stand down this kick. Do NOT go hunting for other work.\n")
-		return b.String()
+		return reviewerKickHeader(agentName) +
+			"ESCALATED PRs AWAITING ADJUDICATION: (none)\n" +
+			"Nothing to adjudicate — stand down this kick. Do NOT go hunting for other work.\n"
 	}
 
+	// The shipped template renders the same contract from
+	// pkg/policies/defaults/reviewer-lane.md. It is proven byte-identical to the
+	// fallback below by TestReviewerLaneTemplate_ByteIdenticalToBuilder, so this
+	// is an extraction and not a rewrite. The fallback stays for the case the
+	// template cannot be resolved at all — a stripped binary, or an operator
+	// override that reads as empty — because a reviewer with no contract is far
+	// worse than one with the compiled-in wording.
+	if rendered := s.renderReviewerLaneTemplate(agentName, actionable, level, workList); rendered != "" {
+		return rendered
+	}
+	return s.buildReviewerMessageHardcoded(agentName, level, workList)
+}
+
+// reviewerKickHeader is the two-line preamble every reviewer kick opens with,
+// including the two stand-down cases that never reach a template.
+func reviewerKickHeader(agentName string) string {
+	return fmt.Sprintf("[agent:%s]\nREVIEWER — adjudicate escalated (needs-human) hive-authored PRs.\n\n", agentName)
+}
+
+// renderReviewerLaneTemplate renders the shipped reviewer-lane template, or ""
+// when it cannot be resolved or renders empty so the caller falls back.
+//
+// The reviewer-specific values are passed in rather than recomputed inside the
+// substitution: buildReviewerMessage has ALREADY decided, from this exact work
+// list, that there is work to adjudicate. Re-reading ci-failing.json here would
+// let a rewrite between the two reads render a full adjudication contract over
+// an empty list.
+func (s *Scheduler) renderReviewerLaneTemplate(agentName string, actionable *github.ActionableResult, level int, workList string) string {
+	tmpl := s.loadNamedTemplate(reviewerLaneTemplate)
+	if tmpl == "" {
+		return ""
+	}
+	extra := map[string]func() string{
+		"REVIEWER_WORK_LIST":             func() string { return workList },
+		"REVIEWER_MAX_PRS":               func() string { return fmt.Sprintf("%d", reviewerMaxPRsPerKick) },
+		"REVIEWER_PASSED_LABEL":          func() string { return ReviewerPassedLabel },
+		"REVIEWER_RECOMMEND_CLOSE_LABEL": func() string { return ReviewerRecommendCloseLabel },
+		"REVIEWER_CLOSE_AUTHORITY":       func() string { return reviewerCloseAuthority(level) },
+	}
+	body, failClosed := s.substituteTemplateWithVars(tmpl, actionable, agentName, nil, extra)
+	if failClosed || strings.TrimSpace(body) == "" {
+		return ""
+	}
+	return body
+}
+
+// reviewerCloseAuthority renders the close-authority clause for a hive's ACMM
+// level. It is computed HERE, not expressed as template logic, for the same
+// reason the dormancy gate is: whether this agent may close a human-queued PR is
+// a trust decision, and an operator editing prompt wording must not be able to
+// grant it. Returns no trailing newline; the template supplies the spacing.
+func reviewerCloseAuthority(level int) string {
+	if level >= reviewerCloseACMMLevel {
+		return fmt.Sprintf("     At this hive's ACMM level (%d) you MAY then close the PR yourself\n", level) +
+			"     (gh pr close <number>) after the audited review and bead are recorded."
+	}
+	return fmt.Sprintf("     ⛔ NEVER close the PR yourself: closing is operator-only below ACMM level %d.\n", reviewerCloseACMMLevel) +
+		"     The audited recommendation is your entire verdict; leave needs-human in place."
+}
+
+// buildReviewerMessageHardcoded is the compiled-in contract the template was
+// extracted from, kept as the resolution fallback. Any edit here must be mirrored
+// in pkg/policies/defaults/reviewer-lane.md — the parity test fails otherwise,
+// which is exactly the drift guard that makes keeping both safe.
+func (s *Scheduler) buildReviewerMessageHardcoded(agentName string, level int, workList string) string {
+	var b strings.Builder
+	b.WriteString(reviewerKickHeader(agentName))
 	b.WriteString(s.ghAuthInstructions())
 	b.WriteString(fmt.Sprintf("ESCALATED PRs AWAITING ADJUDICATION (max %d per kick, oldest first):\n", reviewerMaxPRsPerKick))
 	b.WriteString(workList)
