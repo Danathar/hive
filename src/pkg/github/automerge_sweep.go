@@ -510,6 +510,18 @@ func (c *Client) trySweepSelfAuthoredPR(ctx context.Context, displayRepo, owner,
 		// listing and evaluating it here.
 		return AutoMergeSweepEvent{}, "not-app-authored", nil
 	}
+	// Hold and do-not-merge labels must gate this path too (#5589): the
+	// enumeration hold gate lives upstream in fetchPRs, but this sweep lists
+	// PRs independently, so without this check a hold label — including one
+	// the hold guard re-applied because the branch moved while hold-gated —
+	// would not stop the App from squashing its own PR on green.
+	selfLabels := labelNames(pr.Labels)
+	if HasHoldLabel(selfLabels) {
+		return AutoMergeSweepEvent{}, "held", nil
+	}
+	if c.isExempt(selfLabels) {
+		return AutoMergeSweepEvent{}, "exempt-label", nil
+	}
 
 	evaluatedHeadSHA := ""
 	if pr.GetHead() != nil {
@@ -637,8 +649,18 @@ func (c *Client) trySweepQueuedPR(ctx context.Context, displayRepo, owner, repo 
 	if pr.GetDraft() {
 		return AutoMergeSweepEvent{}, "draft", nil
 	}
-	if !hasLabel(extractPRLabels(pr.Labels), label) {
+	labels := extractPRLabels(pr.Labels)
+	if !hasLabel(labels, label) {
 		return AutoMergeSweepEvent{}, "label-removed", nil
+	}
+	// Hold labels outrank the merger queue (#5589): a hold applied AFTER a
+	// merger queued the PR — including the hold guard re-applying one because
+	// the branch moved while hold-gated — must stop the sweep, not race it.
+	if HasHoldLabel(labels) {
+		return AutoMergeSweepEvent{}, "held", nil
+	}
+	if c.isExempt(labels) {
+		return AutoMergeSweepEvent{}, "exempt-label", nil
 	}
 
 	author := safeGetLogin(pr.GetUser())

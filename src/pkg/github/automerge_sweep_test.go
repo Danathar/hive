@@ -25,6 +25,7 @@ type sweepPR struct {
 	headSHA         string
 	reviewCommitID  *string
 	label           bool
+	extraLabels     []string
 	draft           bool
 	mergeableState  string
 	statusState     string
@@ -1341,6 +1342,10 @@ func newAutoMergeSweepAPI(t *testing.T, expectedLabel string, prs []sweepPR, mer
 			if pr.headSHA != "" {
 				headSHA = pr.headSHA
 			}
+			prLabels := []map[string]string{{"name": expectedLabel}}
+			for _, extra := range pr.extraLabels {
+				prLabels = append(prLabels, map[string]string{"name": extra})
+			}
 			json.NewEncoder(w).Encode(map[string]any{
 				"number":          pr.number,
 				"state":           "open",
@@ -1349,7 +1354,7 @@ func newAutoMergeSweepAPI(t *testing.T, expectedLabel string, prs []sweepPR, mer
 				"mergeable":       pr.mergeableState == "clean",
 				"user":            map[string]string{"login": pr.author},
 				"head":            map[string]string{"sha": headSHA},
-				"labels":          []map[string]string{{"name": expectedLabel}},
+				"labels":          prLabels,
 			})
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/acme/widget/commits/") && strings.HasSuffix(r.URL.Path, "/status"):
 			number := shaNumber(t, r.URL.Path)
