@@ -1480,7 +1480,12 @@ contribute-hive backend="" mode="docker": check-version
         ${AGENT_MODEL:+-e AGENT_MODEL="${AGENT_MODEL}"} \
         ${AGENT_REASONING_EFFORT:+-e AGENT_REASONING_EFFORT="${AGENT_REASONING_EFFORT}"} \
         ${CONTRIBUTOR_MODE:+-e CONTRIBUTOR_MODE="${CONTRIBUTOR_MODE}"} \
+        ${HIVE_SESSION+-e HIVE_SESSION="${HIVE_SESSION}"} \
         {{hive_image}} > /dev/null
+      # ^ HIVE_SESSION uses ${VAR+...} (no colon) on purpose: an explicit
+      #   empty string is the relay's opt-out of session labeling and must be
+      #   forwarded, while an unset variable must stay unset so the relay
+      #   defaults the session to the backend name (kubestellar/hive#5605).
 
       echo "Container: ${CONTAINER_NAME}"
       echo "Waiting for CLI session to start..."
