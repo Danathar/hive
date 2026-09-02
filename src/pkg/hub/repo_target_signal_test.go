@@ -27,9 +27,9 @@ func TestHeartbeatPayloadCarriesRepoTargetMisconfig(t *testing.T) {
 }
 
 func TestMyHivesHealthBadgeShowsRepoTargetMisconfig(t *testing.T) {
-	body, err := os.ReadFile("saas.go")
+	body, err := os.ReadFile("saas_dashboard_html.go")
 	if err != nil {
-		t.Fatalf("read saas.go: %v", err)
+		t.Fatalf("read saas_dashboard_html.go: %v", err)
 	}
 	html := string(body)
 	for _, snippet := range []string{
