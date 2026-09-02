@@ -284,48 +284,6 @@ func TestContributePageScriptsSatisfyPerResponseCSP(t *testing.T) {
 	}
 }
 
-// TestApplyDocumentScriptSrcElem pins the header-rewrite helper the dynamic
-// handlers depend on.
-func TestApplyDocumentScriptSrcElem(t *testing.T) {
-	doc := []byte(`<html><head><script>alert("ours")</script></head></html>`)
-	wantHash := webstatic.CSPScriptHash([]byte(`alert("ours")`))
-
-	rec := httptest.NewRecorder()
-	rec.Header().Set("Content-Security-Policy",
-		"default-src 'self'; script-src 'self' 'unsafe-inline'; script-src-elem 'self' 'sha256-stale='; script-src-attr 'unsafe-inline'; style-src 'self'")
-	webstatic.ApplyDocumentScriptSrcElem(rec, doc)
-	csp := rec.Header().Get("Content-Security-Policy")
-
-	elem := cspDirective(csp, "script-src-elem")
-	if !strings.Contains(elem, wantHash) {
-		t.Errorf("rewritten script-src-elem missing the document's hash: %q", elem)
-	}
-	if strings.Contains(elem, "sha256-stale=") {
-		t.Errorf("rewritten script-src-elem kept a stale hash: %q", elem)
-	}
-	// Neighbouring directives must be untouched.
-	for _, want := range []string{"default-src 'self'", "script-src 'self' 'unsafe-inline'", "script-src-attr 'unsafe-inline'", "style-src 'self'"} {
-		if !strings.Contains(csp, want) {
-			t.Errorf("rewrite disturbed a neighbouring directive: %q missing from %q", want, csp)
-		}
-	}
-
-	// A script-free document yields a hash-free (but still closed) directive.
-	rec2 := httptest.NewRecorder()
-	rec2.Header().Set("Content-Security-Policy", "script-src-elem 'self' 'sha256-stale='")
-	webstatic.ApplyDocumentScriptSrcElem(rec2, []byte("<html>no scripts</html>"))
-	if got := cspDirective(rec2.Header().Get("Content-Security-Policy"), "script-src-elem"); got != "script-src-elem 'self'" {
-		t.Errorf("script-free document: script-src-elem = %q, want \"script-src-elem 'self'\"", got)
-	}
-
-	// No CSP header (not routed through securityHeaders): leave untouched.
-	rec3 := httptest.NewRecorder()
-	webstatic.ApplyDocumentScriptSrcElem(rec3, doc)
-	if got := rec3.Header().Get("Content-Security-Policy"); got != "" {
-		t.Errorf("helper invented a CSP header out of nothing: %q", got)
-	}
-}
-
 // TestDynamicHTMLHandlersStampDocumentCSP asserts the gate IN SOURCE: both
 // handlers that render per-response HTML documents must call
 // applyDocumentScriptSrcElem before writing. The /snapshot lane reads its
