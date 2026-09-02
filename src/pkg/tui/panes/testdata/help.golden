@@ -16,7 +16,7 @@
       ┃ m                Open the model picker for the selected agent  Agents pane           ┃      
       ┃ K                Kick the selected agent now                   Agents pane           ┃      
       ┃ A                Open the ACMM level overlay                   global                ┃      
-      ┃ a                Attach to the selected agent's tmux session   Agents pane (local)   ┃      
+      ┃ a                Attach to the selected agent's tmux session   Agents pane           ┃      
       ┃                                                                                      ┃      
       ┃ press any key to dismiss                                                             ┃      
       ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛      

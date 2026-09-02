@@ -618,8 +618,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case attachReadyMsg:
 		if msg.err != nil {
 			m.attachPending = false
-			m.footerStatus = "Attach failed: " + msg.err.Error()
+			m.footerStatus = attachFailureStatus(msg.err)
 			return m, nil
+		}
+		if msg.remote != nil {
+			// tea.Exec, not ExecProcess: the remote bridge is an in-process
+			// tea.ExecCommand, but the suspend/resume contract is identical —
+			// the terminal is released for the duration and attachDoneMsg
+			// arrives once it is restored.
+			return m, tea.Exec(msg.remote, func(err error) tea.Msg {
+				return attachDoneMsg{err: err}
+			})
 		}
 		return m, tea.ExecProcess(msg.cmd, func(err error) tea.Msg {
 			return attachDoneMsg{err: err}
@@ -627,7 +636,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case attachDoneMsg:
 		m.attachPending = false
 		if msg.err != nil {
-			m.footerStatus = "Attach failed: " + msg.err.Error()
+			m.footerStatus = attachFailureStatus(msg.err)
 		} else {
 			m.footerStatus = ""
 		}
@@ -759,7 +768,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.attachPending = true
 			m.footerStatus = ""
-			return m, prepareAttach(name)
+			return m, prepareAttach(name, m.api)
 		}
 		// Any other key belongs to the focused pane. The T3 stubs ignore
 		// everything, but routing through this seam now is what lets a pane
