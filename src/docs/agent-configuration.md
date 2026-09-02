@@ -573,6 +573,22 @@ The fetched file must be a valid portable `AgentDefinition`: `kind: AgentDefinit
 
 Resolution order: the agent's explicit `kick_template` wins; otherwise the ACMM pack's template for that agent at the current level; otherwise convention — `/data/agents/<name>/CLAUDE.md`, then `<name>.md` in the policies checkout, then the embedded default. Pack templates carry the level's policy in their names — `scanner-holdgated.md` is scanner-at-L5; the same scanner at L6 gets `scanner-automerge.md`.
 
+### The reviewer lane's template, and what an override cannot change
+
+One agent reaches its template by **role** rather than by `kick_template`: an agent with `role: reviewer` runs the escalated-PR adjudication lane ([#5480](https://github.com/kubestellar/hive/issues/5480)) and renders `reviewer-lane.md`. An operator enables that lane by adding a cadence agent with that role, under any name and with no `kick_template`, so the ordinary resolution order above never reaches it.
+
+`reviewer-lane.md` resolves through the same paths as every other template, so the contract **is** editable — the operator-saved copy wins, then the policies checkout, then the embedded default. That matters because this contract governs an agent acting on PRs sitting in a human queue, so three decisions are deliberately **not** in the template and cannot be changed by editing it ([#5617](https://github.com/kubestellar/hive/issues/5617)):
+
+| Decision | Where it lives | Why |
+|---|---|---|
+| Is the lane awake? | Go, before any template is read | Below ACMM L5 the kick is a stand-down. An edited template must not be able to wake a lane on a low-trust hive. |
+| Is there work? | Go, before any template is read | An empty escalated queue is a stand-down. A template must not be able to manufacture a contract with nothing to adjudicate. |
+| May this agent close a PR? | Go, rendered into `${REVIEWER_CLOSE_AUTHORITY}` | Closing is operator-only below ACMM L6. Whether an agent may close a human-queued PR is a trust decision, not wording. |
+
+So the worst an override can do is change the *wording* of a kick that was already going to be sent. The template-specific variables are `${REVIEWER_WORK_LIST}`, `${REVIEWER_MAX_PRS}`, `${REVIEWER_PASSED_LABEL}`, `${REVIEWER_RECOMMEND_CLOSE_LABEL}` and `${REVIEWER_CLOSE_AUTHORITY}`, alongside the usual built-ins.
+
+Do not confuse it with `reviewer-advisory.md`, which belongs to the pack-defined on-demand reviewer: that agent votes on *healthy* PRs pre-merge in advisory mode and never touches the needs-human queue.
+
 Portable agents bundle everything — config plus a `promptTemplate` — in a single `AgentDefinition` YAML you can import from a URL in the dashboard. The reference schema is [`../AGENT-DEFINITION.md`](../AGENT-DEFINITION.md), and a worked example lives at [`../examples/agents/customized-agent.yaml`](../examples/agents/customized-agent.yaml).
 
 ## Label policy: which issues agents may work
