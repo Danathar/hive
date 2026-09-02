@@ -4316,6 +4316,123 @@ test('#5094 with a human attached the relay asks for attention instead of typing
 
 
 // ---------------------------------------------------------------------------
+// kubestellar/hive#5654 — Claude Code's SILENT API retry must not read as
+// IDLE_COMPLETE.
+//
+// When the connection drops mid-turn, Claude Code does not print its
+// "● API Error:" chrome — it retries internally and renders a countdown under
+// its spinner glyph. That pane answered "no" to busy (no "esc to interrupt"),
+// "no" to every error detector, and "yes" to the completion test: the ⏵⏵
+// footer is still drawn, and the PREVIOUS turn's "✻ Worked for …" summary
+// satisfies hasCompletionMarker — the same ✻ glyph the retry line itself uses.
+// So a stalled agent was bookable as complete mid-turn, the hub revoked the
+// lease and offered the issue to someone else while the turn kept running.
+// The retry countdown is the CLI saying it is still working: it is a BUSY
+// marker now.
+// ---------------------------------------------------------------------------
+
+// The pane the issue was filed from: a prior turn's duration summary still on
+// screen, the silent-retry countdown, and Claude's persistent idle footer.
+const CLAUDE_SILENT_RETRY_PANE = [
+  '● Pushed the branch; opening the PR next.',
+  '',
+  '✻ Worked for 15m 39s',
+  '',
+  '✻ Waiting for API response · will retry in 1m 57s · check your network',
+  '',
+  '❯ ',
+  '  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents',
+].join('\n');
+
+// The same pane once the retry resolved and the turn actually finished.
+const CLAUDE_RETRY_RECOVERED_PANE = [
+  '● Pushed the branch; opening the PR next.',
+  '',
+  '● Done — opened https://github.com/kubestellar/hive/pull/5655',
+  '',
+  '✻ Worked for 15m 39s',
+  '',
+  '❯ ',
+  '  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents',
+].join('\n');
+
+test('#5654 a claude pane waiting on a silent API retry classifies as WORKING, not complete', () => {
+  const relay = loadRelay({ backend: 'claude', paneText: CLAUDE_SILENT_RETRY_PANE });
+  try {
+    assert.strictEqual(relay.classifyTmuxPane(CLAUDE_SILENT_RETRY_PANE),
+      relay.PANE_STATE_WORKING,
+      'a retry countdown is the CLI still working — the previous turn\'s ✻ summary must not certify it complete');
+  } finally { teardown(relay); }
+});
+
+test('#5654 a wrapped retry line still reads as WORKING on either fragment', () => {
+  // Narrow panes wrap the countdown line, so either half alone must hold.
+  const relay = loadRelay({ backend: 'claude' });
+  try {
+    for (const fragment of [
+      '✻ Waiting for API response',
+      'will retry in 3s · check your network',
+    ]) {
+      const pane = CLAUDE_SILENT_RETRY_PANE.replace(
+        '✻ Waiting for API response · will retry in 1m 57s · check your network',
+        fragment);
+      assert.strictEqual(relay.classifyTmuxPane(pane), relay.PANE_STATE_WORKING,
+        `retry fragment must classify WORKING: ${fragment}`);
+    }
+  } finally { teardown(relay); }
+});
+
+test('#5654 a turn that really finished after a retry still classifies as complete', () => {
+  // The guard that matters as much as the fix: genuine idle detection must not
+  // be weakened. Same chrome, same prior-turn summary, no retry line.
+  const relay = loadRelay({ backend: 'claude', paneText: CLAUDE_RETRY_RECOVERED_PANE });
+  try {
+    assert.strictEqual(relay.classifyTmuxPane(CLAUDE_RETRY_RECOVERED_PANE),
+      relay.PANE_STATE_IDLE_COMPLETE);
+  } finally { teardown(relay); }
+});
+
+test('#5654 completed-turn prose about retrying does not pin an idle pane to WORKING', () => {
+  // The digit anchor on "will retry in": an agent whose finished summary
+  // DESCRIBES retry behaviour must still be credited with its completion.
+  const relay = loadRelay({ backend: 'claude' });
+  try {
+    const pane = [
+      '● Done — the workflow will retry indefinitely on transient failures.',
+      '',
+      '✻ Worked for 4m 2s',
+      '',
+      '❯ ',
+      '  ⏵⏵ auto mode on (shift+tab to cycle)',
+    ].join('\n');
+    assert.strictEqual(relay.classifyTmuxPane(pane), relay.PANE_STATE_IDLE_COMPLETE,
+      'prose about retries carries no countdown digit and must not read as busy');
+  } finally { teardown(relay); }
+});
+
+test('#5654 the relay never books a task complete off a pane waiting on a retry', () => {
+  // End to end: even across the full chrome-idle grace window, a retrying pane
+  // must keep reporting working — not complete, and not typed into either
+  // (interrupting a self-recovering retry would cause the stall it prevents).
+  const relay = loadRelay({ backend: 'claude', paneText: CLAUDE_SILENT_RETRY_PANE });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-silent-retry');
+    const before = relay.__tmuxSends().length;
+    graceTicks(relay, () => relay.__crashTick());
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 0,
+      'a mid-retry turn must not be booked complete, even after the grace window');
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_failed').length, 0,
+      'waiting on a retry is not a failure either');
+    assert.ok(relay.getCurrentTask(), 'the task must still be held');
+    const sends = relay.__tmuxSends().slice(before);
+    assert.ok(!sends.some(c => /send-keys.*-l/.test(c)),
+      `nothing may be typed into a pane the CLI is about to recover itself: ${JSON.stringify(sends)}`);
+  } finally { teardown(relay); }
+});
+
+
+// ---------------------------------------------------------------------------
 // kubestellar/hive#5277 — "a client is attached" is not "a human is here".
 //
 // The #5094 guard above is right to refuse to type over someone, but it tested

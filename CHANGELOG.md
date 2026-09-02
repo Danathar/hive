@@ -11,6 +11,10 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+### Fixed
+
+- The contributor relay no longer books a task complete while Claude Code is silently retrying a dropped API connection ([#5654](https://github.com/kubestellar/hive/issues/5654)). When the connection drops mid-turn, Claude Code does not print its `● API Error:` chrome — it retries internally and renders a spinner countdown (`✻ Waiting for API response · will retry in 1m 57s · check your network`). That pane carried no busy marker, matched no error detector, and still showed the persistent `⏵⏵` footer plus the *previous* turn's `✻ Worked for …` summary, so `classifyTmuxPane` returned `IDLE_COMPLETE` for an agent mid-turn; after the chrome-idle grace window the relay reported the task complete, and the hub revoked the lease, booked the cooldown, and offered the issue to someone else while the turn kept running. The retry countdown now counts as a busy marker: the pane classifies `WORKING`, nothing is typed over a retry the CLI is recovering from on its own, and a retry loop that never resolves is still bounded by the existing stall backstop and task duration ceiling. Genuine idle completion — the same chrome with no retry line — is unchanged.
+
 ## 2026-09-02 (v4.1.0)
 
 ### Added
