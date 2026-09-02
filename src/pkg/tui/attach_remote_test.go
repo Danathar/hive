@@ -212,6 +212,79 @@ func TestRemoteAttachBridgeRoundTrip(t *testing.T) {
 	}
 }
 
+// TestRemoteAttachRunReportsStartFailure: a session whose transport dies
+// between the dial and the bridge starting (here: closed under it) must
+// surface as an error naming the start, not hang or pretend to attach.
+func TestRemoteAttachRunReportsStartFailure(t *testing.T) {
+	server, _ := startAttachFixture(t, func(conn *websocket.Conn) {
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	})
+	t.Setenv(client.BaseURLEnv, server.URL)
+	t.Setenv(client.TokenEnv, "tok")
+
+	msg := prepareRemoteAttach("scanner", client.New(), nil).(attachReadyMsg)
+	if msg.err != nil {
+		t.Fatalf("prepareRemoteAttach: %v", msg.err)
+	}
+	_ = msg.remote.session.Close()
+
+	bridge := msg.remote
+	bridge.SetStdin(strings.NewReader(""))
+	var stdout bytes.Buffer
+	bridge.SetStdout(&stdout)
+	bridge.SetStderr(io.Discard)
+
+	err := bridge.Run()
+	if err == nil {
+		t.Fatal("Run() = nil on a dead session, want a start error")
+	}
+	if !strings.Contains(err.Error(), "start remote terminal") {
+		t.Errorf("Run error = %v, want it to name the failed start", err)
+	}
+}
+
+// TestPumpBlockingStops pins the blocking pump's two exits: a closed done
+// channel is honoured between reads, and a failed send ends the pump rather
+// than looping on a dead websocket.
+func TestPumpBlockingStops(t *testing.T) {
+	t.Run("done closed", func(t *testing.T) {
+		done := make(chan struct{})
+		close(done)
+		finished := make(chan struct{})
+		go func() {
+			// The reader has bytes ready; the pump must still notice done
+			// first and forward nothing.
+			pumpBlocking(done, strings.NewReader("unsent"), func(p []byte) error {
+				t.Errorf("pump forwarded %q after done closed", p)
+				return nil
+			})
+			close(finished)
+		}()
+		select {
+		case <-finished:
+		case <-time.After(remoteWait):
+			t.Fatal("pumpBlocking did not stop on a closed done channel")
+		}
+	})
+
+	t.Run("send failure", func(t *testing.T) {
+		done := make(chan struct{})
+		defer close(done)
+		calls := 0
+		pumpBlocking(done, strings.NewReader("xy"), func([]byte) error {
+			calls++
+			return io.ErrClosedPipe
+		})
+		if calls != 1 {
+			t.Errorf("send called %d times after failing, want 1", calls)
+		}
+	})
+}
+
 // TestIsDetachClassification pins which endings are quiet. 1000/1001/1005 and
 // EOF are how detaches and session exits arrive; an abnormal 1006 is a broken
 // transport mid-session, which the operator must hear about.
