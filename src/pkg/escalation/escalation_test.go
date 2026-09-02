@@ -388,3 +388,84 @@ func TestTryReEngage_RefusesEscalatedEntry(t *testing.T) {
 		t.Fatal("amnesty must still release an older-generation escalated entry")
 	}
 }
+
+// pendingObs is a CI-still-running observation (Red=false, Pending=true), as
+// runEscalationSweep supplies it for every fresh push's pending window.
+func pendingObs(repo string, num int, sha string) Observation {
+	return Observation{Repo: repo, Number: num, HeadSHA: sha, Pending: true}
+}
+
+func TestSweep_PendingObservationPreservesAttemptHistory(t *testing.T) {
+	s := Load(filepath.Join(t.TempDir(), "streaks.json"))
+
+	// Two failed attempts on the books.
+	s.Sweep([]Observation{obs("org/repo", 7, "sha1", true)}, 3)
+	s.Sweep([]Observation{obs("org/repo", 7, "sha2", true)}, 3)
+
+	// A third fix is pushed; the sweep catches it mid-CI-window. Before the
+	// #5617 G2 fix this took the green branch and wiped the entry, restarting
+	// the distinct-SHA count and making the breaker probabilistic.
+	r := s.Sweep([]Observation{pendingObs("org/repo", 7, "sha3")}, 3)
+	got := r[Key("org/repo", 7)]
+	if got.Attempts != 2 || got.NewlyEscala {
+		t.Fatalf("pending must report existing history without escalating: got %+v", got)
+	}
+	if s.Attempts("org/repo", 7) != 2 {
+		t.Fatalf("pending observation must not wipe the ledger: attempts=%d", s.Attempts("org/repo", 7))
+	}
+
+	// The pending SHA resolves red: threshold crossed on attempt 3.
+	r = s.Sweep([]Observation{obs("org/repo", 7, "sha3", true)}, 3)
+	if got := r[Key("org/repo", 7)]; got.Attempts != 3 || !got.NewlyEscala {
+		t.Fatalf("attempt 3 after a pending window must escalate: got %+v", got)
+	}
+
+	// Green still clears, pending or not before it.
+	s.Sweep([]Observation{obs("org/repo", 7, "sha4", false)}, 3)
+	if s.Attempts("org/repo", 7) != 0 {
+		t.Fatal("green must still forget the history entirely")
+	}
+}
+
+func TestSweep_PendingKeepsEscalatedViewStable(t *testing.T) {
+	s := Load(filepath.Join(t.TempDir(), "streaks.json"))
+
+	for _, sha := range []string{"sha1", "sha2", "sha3"} {
+		s.Sweep([]Observation{obs("org/repo", 7, sha, true)}, 3)
+	}
+	s.MarkEscalated("org/repo", 7)
+
+	// A repair push's pending window must not drop the PR out of the
+	// escalatedPRs view the reaper and ci-failing.json consume same-tick.
+	r := s.Sweep([]Observation{pendingObs("org/repo", 7, "sha4")}, 3)
+	got := r[Key("org/repo", 7)]
+	if !got.Escalated || got.NewlyEscala {
+		t.Fatalf("pending must keep reporting Escalated without re-firing: got %+v", got)
+	}
+}
+
+func TestObserveRed_PendingDoesNotClearStalenessClock(t *testing.T) {
+	s := Load(filepath.Join(t.TempDir(), "streaks.json"))
+	clock, cur := mkClock(time.Unix(3_000_000, 0).UTC())
+	s.SetClock(clock)
+
+	s.ObserveRed([]Observation{{Repo: "org/repo", Number: 7, HeadSHA: "sha1", Red: true}})
+	s.TryReEngage("org/repo", 7, "sha1")
+	*cur = cur.Add(RedPRStaleAfter + time.Second)
+
+	// A pending re-observation (e.g. a re-run in flight) must leave both the
+	// staleness clock and the re-engagement counter untouched.
+	s.ObserveRed([]Observation{pendingObs("org/repo", 7, "sha1")})
+	if !s.StaleRed("org/repo", 7, "sha1") {
+		t.Fatal("pending observation must not reset the staleness clock")
+	}
+	if s.ReEngagements("org/repo", 7) != 1 {
+		t.Fatalf("pending observation must not reset re-engagements: got %d", s.ReEngagements("org/repo", 7))
+	}
+
+	// Green still clears the record.
+	s.ObserveRed([]Observation{{Repo: "org/repo", Number: 7, HeadSHA: "sha1", Red: false}})
+	if s.StaleRed("org/repo", 7, "sha1") || s.ReEngagements("org/repo", 7) != 0 {
+		t.Fatal("green must still clear the staleness/re-engagement record")
+	}
+}

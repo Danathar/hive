@@ -135,6 +135,14 @@ type Observation struct {
 	Number  int
 	HeadSHA string
 	Red     bool // CI status is failure
+	// Pending is set when CI for the head SHA has not resolved yet (checks
+	// still running). A pending observation is a NO-OP for the ledger (#5617,
+	// gap G2): it must not clear the distinct-SHA attempt history the way a
+	// green observation does — every fresh push opens a pending window, and a
+	// PR enumerated mid-window would otherwise restart its count every time,
+	// making the escalation breaker probabilistic. Only green clears, only
+	// red counts.
+	Pending bool
 	Excerpt string
 	// Labels are the PR's current forge labels. Sweep reads them to reconcile
 	// reviewer-lane verdicts (which are expressed as label edits, possibly made
@@ -153,8 +161,10 @@ type Result struct {
 // Sweep folds a full enumeration pass into the ledger: increments attempt
 // counts for red PRs with unseen head SHAs, clears entries for PRs that went
 // green, prunes PRs no longer present, and reports which PRs crossed the
-// escalation threshold on this pass. The caller performs the side effects
-// (comment, label, notify) and then calls MarkEscalated for each.
+// escalation threshold on this pass. Pending observations (checks still
+// running) are no-ops: they neither count nor clear (#5617, gap G2). The
+// caller performs the side effects (comment, label, notify) and then calls
+// MarkEscalated for each.
 func (s *Store) Sweep(obs []Observation, threshold int) map[string]Result {
 	if threshold <= 0 {
 		threshold = DefaultThreshold
@@ -168,6 +178,23 @@ func (s *Store) Sweep(obs []Observation, threshold int) map[string]Result {
 		key := Key(o.Repo, o.Number)
 		seen[key] = true
 		if !o.Red {
+			if o.Pending {
+				// CI still running: a no-op observation (#5617, gap G2).
+				// Before this guard a pending observation took the green
+				// branch below and DELETED the entry, discarding the
+				// distinct-SHA attempt count (Spin witness w_pending_wipe,
+				// src/formal/escalation). The entry, if any, still reports
+				// its current verdict so the escalatedPRs view consumed
+				// same-tick by the reaper and ci-failing.json does not
+				// flicker while a fix attempt's checks run.
+				if e := s.entries[key]; e != nil {
+					results[key] = Result{
+						Attempts:  len(e.RedSHAs),
+						Escalated: e.Escalated,
+					}
+				}
+				continue
+			}
 			// Green: the loop converged — forget the history entirely so a
 			// future regression on the same PR starts a fresh count.
 			delete(s.entries, key)
@@ -317,6 +344,12 @@ func (s *Store) ObserveRed(obs []Observation) {
 	for _, o := range obs {
 		key := Key(o.Repo, o.Number)
 		if !o.Red {
+			if o.Pending {
+				// CI still running: leave the staleness clock and the
+				// re-engagement counter untouched (#5617, gap G2) — only an
+				// affirmative green clears them.
+				continue
+			}
 			// Green now: drop the staleness/re-engagement record so a future
 			// regression starts a fresh clock. (Attempt history is managed by
 			// Sweep, not here.)

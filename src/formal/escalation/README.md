@@ -13,7 +13,9 @@ escalated guard in `Store.TryReEngage`, and the recommend-close work-list
 marker. Model and code moved together — the formerly-hypothetical
 `-DPATCH_REVIEWER` behavior is now the shipped (and modeled) default, and the
 properties it was shown to close (P4b, P5) now hold on the default build.
-Gap G2 remains open and its witness is still pinned as an expected failure.
+Gap G2 (the pending-window ledger wipe) was closed by the #5617 follow-up:
+pending observations are now no-ops in `Store.Sweep`/`Store.ObserveRed`, and
+the formerly-pinned `w_pending_wipe` witness is expected to hold.
 
 Run everything:
 
@@ -22,9 +24,10 @@ $ bash run.sh        # requires spin + a C compiler; ~1 minute
 ```
 
 `run.sh` runs every property exhaustively and compares each verdict against
-its expected result. Properties that must hold must pass; properties with a
-**documented counterexample** (the design gaps below) must still *fail* — if
-one stops failing, the code or the model changed and a human must re-check.
+its expected result. Properties that must hold must pass; a property pinned
+with a **documented counterexample** (a still-open design gap) must still
+*fail* — if one stops failing, the code or the model changed and a human must
+re-check. (All four gaps are now fixed, so every current row expects pass.)
 Either divergence exits nonzero. CI runs this via
 `.github/workflows/formal-verify.yml` (reporting-only, not a required check).
 
@@ -53,8 +56,9 @@ Either divergence exits nonzero. CI runs this via
 
 Faithfully carried quirks: `Store.TryReEngage` creates missing entries as
 `&Entry{}` (Machinery **0**, → immediate no-op amnesty), while `Store.Sweep`
-creates them with `Machinery: MachineryVersion`; `Sweep`'s green branch is
-`!o.Red`, which **includes CI-pending observations** (see gap G2).
+creates them with `Machinery: MachineryVersion`; since the #5617 G2 fix,
+`Sweep` distinguishes green (delete entry) from CI-pending (no-op) — only
+green clears, only red counts.
 
 Faithfully carried **fixes** (#5511): the reviewer still edits labels only —
 the ledger sync happens SWEEP-side, exactly as shipped: `Store.Sweep` resets
@@ -93,7 +97,9 @@ amnesty check (gap G3); a below-ACMM-6 RECOMMEND-CLOSE marks the row with
 Spin 6.5.2, exhaustive (`./pan -m500000`, DFS + COLLAPSE; liveness with weak
 fairness `-a -f`). Every state count is a completed full search, on the
 post-#5511 model (the G1/G3/G4 fixes are the modeled default, so the counts
-differ from the pre-fix runs recorded in the #5511 discussion).
+differ from the pre-fix runs recorded in the #5511 discussion). The #5617 G2
+fix changes the Sweeper's pending branch, so counts will shift slightly on
+the next full run — the CI `formal-verify` workflow reports current numbers.
 
 | # | Property | Run(s) | Result | States |
 |---|---|---|---|---|
@@ -105,7 +111,7 @@ differ from the pre-fix runs recorded in the #5511 discussion).
 | P5 | Every escalated PR eventually terminal (merged / closed / human-owned) | `p5_termination` (LTL, weak fairness) | **holds** — gap G1 FIXED | 3,224,760 |
 | P6 | Escalated entries are invisible to the reaper and to FIX-BEFORE-NEW | `p4a_p6_safety`, `p6_watcher_safety` (asserts) | **holds** | 3,215,657 / 27,818,920 |
 | W1 | "One reviewer pass per PR, ever" — every verdict class, every level | `w_onepass_acmm5` / `w_onepass_acmm6` | **holds** at both levels — gap G4 FIXED (#5511: `reviewer-recommend-close` marker) | 3,215,657 / 2,140,034 |
-| W2 | Ledger history survives until green | `w_pending_wipe` | **witness found** — gap G2 (still open) | 7,706 |
+| W2 | Ledger history survives until green | `w_pending_wipe` | **holds** — gap G2 FIXED (#5617 follow-up: pending is a no-op observation; pre-fix witness at 7,706 states) | see CI |
 | W3 | The merge watcher never burns re-engage budget on an escalated PR | `w_watcher_reengage` (`-DWATCHER`) | **holds** — gap G3 FIXED (#5511: `TryReEngage` escalated guard) | 27,818,920 |
 
 Pre-fix baseline (the counterexamples that motivated #5511): P4b acceptance
@@ -117,9 +123,9 @@ now the default build.
 ## Design gaps found
 
 Gaps G1, G3, and G4 were **fixed in #5511** (the same PR that promoted this
-model's `-DPATCH_REVIEWER` hypothetical to shipped behavior); their sections
-below keep the original counterexample narratives, followed by the shipped
-fix. G2 remains open.
+model's `-DPATCH_REVIEWER` hypothetical to shipped behavior); gap G2 was
+**fixed in the #5617 follow-up**. The sections below keep the original
+counterexample narratives, followed by the shipped fix.
 
 ### G1 — a reviewer pass on a PR that stays red orphans it (FIXED in #5511)
 
@@ -170,18 +176,26 @@ comment's "remove the label" promise remains label-pair-scoped, not fully
 honored (deliberate: an unlabeled un-escalation has no marker distinguishing
 it from a label sync race). P4b and P5 now hold on the default build.
 
-### G2 — a CI-pending observation wipes the attempt ledger (REAL, still open)
+### G2 — a CI-pending observation wipes the attempt ledger (FIXED in #5617 follow-up)
 
-`Store.Sweep` branches on `!o.Red`, and `runEscalationSweep` computes
+`Store.Sweep` branched on `!o.Red`, and `runEscalationSweep` computes
 `Red: pr.CIStatus == "failure"` — so a **pending** observation (every fresh
-push has a pending window) takes the "went green" branch and **deletes the
-entry**, discarding the distinct-SHA attempt count. A PR that always happens
-to be enumerated mid-window restarts its count every time and can evade the
+push has a pending window) took the "went green" branch and **deleted the
+entry**, discarding the distinct-SHA attempt count. A PR that always happened
+to be enumerated mid-window restarted its count every time and could evade the
 threshold indefinitely (witness `w_pending_wipe`). In practice sweeps usually
-catch settled states, which is why escalation still fires — but the breaker
-is probabilistic where the code intends it to be deterministic. (This wipe is
-also what accidentally rescues some G1 orphans.) A fix would treat pending as
-a no-op observation: only green clears, only red counts.
+caught settled states, which is why escalation still fired — but the breaker
+was probabilistic where the code intends it to be deterministic. (This wipe is
+also what accidentally rescued some G1 orphans pre-#5511.)
+
+**Shipped fix (#5617 follow-up)**: `escalation.Observation` carries a
+`Pending` flag (`CIStatus == "pending"`, threaded from both enumeration
+sites in `main.go`), and pending is a **no-op observation**: `Store.Sweep`
+neither counts nor clears (the entry still reports its current
+attempts/escalated verdict so the `escalatedPRs` view does not flicker
+mid-CI-window), and `Store.ObserveRed` leaves the staleness clock and
+re-engagement counter untouched. Only green clears, only red counts.
+`w_pending_wipe` now holds.
 
 ### G3 — the merge watcher re-engages escalated PRs (FIXED in #5511)
 
@@ -219,7 +233,9 @@ the work-list builder excludes labeled rows exactly like `reviewer-passed`.
 
 ## Reproducing a counterexample
 
-The only remaining expected counterexample is gap G2's witness:
+No expected counterexamples remain: every run in `run.sh` must pass. To
+replay the RETIRED G2 pending-wipe witness (pre-fix machinery), check out the
+model as it stood before the #5617 follow-up and run:
 
 ```console
 $ spin -a -DMON_PENDING escalation.pml && gcc -O2 -o pan pan.c
