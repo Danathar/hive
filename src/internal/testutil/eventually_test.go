@@ -89,3 +89,76 @@ func TestEventuallyValue_ZeroValueAndFailureOnDeadline(t *testing.T) {
 		t.Fatalf("EventuallyValue returned %d on failure, want the zero value", got)
 	}
 }
+
+func TestEventuallyEveryFunc_ReturnsOnceConditionHolds(t *testing.T) {
+	const trueOnCall = 3
+	var calls atomic.Int32
+	var describeCalls atomic.Int32
+	start := time.Now()
+	EventuallyEveryFunc(t, 5*time.Second, time.Millisecond, func() bool {
+		return calls.Add(1) >= trueOnCall
+	}, func() string {
+		describeCalls.Add(1)
+		return "must never be rendered"
+	})
+	if got := calls.Load(); got != trueOnCall {
+		t.Fatalf("cond called %d times, want exactly %d (must stop polling once true)", got, trueOnCall)
+	}
+	// describe's contract is "at most once, only on the failure path": a
+	// describe that renders frames or dumps queues must cost nothing when the
+	// wait succeeds.
+	if got := describeCalls.Load(); got != 0 {
+		t.Fatalf("describe called %d times on the success path, want 0", got)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("EventuallyEveryFunc took %s after the condition held; expected a few polls' worth", elapsed)
+	}
+}
+
+// The function's entire reason to exist: the failure message must describe the
+// system AT THE DEADLINE, not at t=0. cond counts its own polls and describe
+// reports the count; an implementation that captured the description eagerly
+// (at entry, before the first poll — exactly what the printf-argument form it
+// replaces did) would report 0.
+func TestEventuallyEveryFunc_DescribeIsLazyAndAtMostOnce(t *testing.T) {
+	rec := &recordingTB{}
+	var polls atomic.Int32
+	var describeCalls atomic.Int32
+	const timeout = 30 * time.Millisecond
+	start := time.Now()
+	EventuallyEveryFunc(rec, timeout, 5*time.Millisecond, func() bool {
+		polls.Add(1)
+		return false
+	}, func() string {
+		describeCalls.Add(1)
+		return fmt.Sprintf("state after %d polls", polls.Load())
+	})
+
+	if !rec.failed {
+		t.Fatal("EventuallyEveryFunc did not call Fatalf on deadline")
+	}
+	if rec.helperCalls == 0 {
+		t.Error("EventuallyEveryFunc did not call t.Helper()")
+	}
+	if elapsed := time.Since(start); elapsed < timeout {
+		t.Errorf("EventuallyEveryFunc gave up after %s, before the %s timeout", elapsed, timeout)
+	}
+	if got := describeCalls.Load(); got != 1 {
+		t.Errorf("describe called %d times, want exactly once (it may do real work: render a frame, dump a queue)", got)
+	}
+	finalPolls := polls.Load()
+	if finalPolls < 2 {
+		t.Fatalf("cond polled only %d times in %s at a 5ms interval; the wait did not sample", finalPolls, timeout)
+	}
+	if strings.Contains(rec.fatal, "state after 0 polls") {
+		t.Errorf("failure message describes t=0 — the description was captured eagerly:\n%s", rec.fatal)
+	}
+	for _, want := range []string{
+		fmt.Sprintf("state after %d polls", finalPolls), // the deadline-time state
+		timeout.String(), // how long it waited
+	} {
+		if !strings.Contains(rec.fatal, want) {
+			t.Errorf("Fatalf message %q does not contain %q", rec.fatal, want)
+		}
+	}
+}
