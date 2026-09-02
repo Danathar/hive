@@ -719,6 +719,16 @@ jobs:
         working-directory: .
         run: bash src/deploy/test_entrypoint_symlinks.sh
 
+      # #5646: the hivectl distribution route for image-based hosts rests on
+      # src/Dockerfile (which stows the binary in the image as cargo) and
+      # bin/hive-podman-setup.sh (which extracts it onto the host) agreeing on
+      # one path — and nothing at runtime checks that they do. A rename on
+      # either side fails only on an operator's machine, after a green CI run.
+      # Pure string analysis over the checkout; no image is built.
+      - name: hivectl extraction route contract (#5646)
+        working-directory: .
+        run: bash src/deploy/test_hivectl_extraction_contract.sh
+
       # The guard that keeps the omission above from recurring: every
       # src/deploy/test_*.sh must be named by at least one workflow. This is
       # the src/deploy/ sibling of bin/test_bin_suites_wired.sh (#4363).

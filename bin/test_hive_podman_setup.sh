@@ -95,6 +95,21 @@ if [[ "${1:-}" == "volume" ]]; then
       ;;
   esac
 fi
+# The hivectl extraction pair (#5646). `create` answers with a container id the
+# way podman does; `cp` materialises a recognisable stand-in at the destination
+# — its content is what proves the installed binary CAME OUT OF THE IMAGE
+# rather than from a build — unless FAKE_HIVECTL_CP_FAIL drives the
+# image-predates-#5646 case.
+if [[ "${1:-}" == "create" ]]; then
+  printf 'deadbeefcafe\n'
+  exit 0
+fi
+if [[ "${1:-}" == "cp" ]]; then
+  [[ "${FAKE_HIVECTL_CP_FAIL:-0}" == "1" ]] && exit 125
+  printf '#!/bin/sh\necho fake-hivectl-from-image\n' >"${3:?podman cp needs a destination}"
+  chmod +x "$3"
+  exit 0
+fi
 exit 0
 FAKE
 
@@ -174,7 +189,10 @@ FAKE
 
 # Tripwires. #4470 is explicit that this must not install packages, clone
 # anything, or speak to Docker; each of these fails the run loudly if called.
-for tripwire in apt-get dnf yum apk zypper git docker; do
+# `go` joined the list with #5646: hivectl must be EXTRACTED from the image,
+# never compiled on the host — the target hosts have no toolchain to compile
+# with, so a setup script that reaches for one has regressed the whole point.
+for tripwire in apt-get dnf yum apk zypper git docker go; do
   cat >"${FAKE_BIN}/${tripwire}" <<FAKE
 #!/usr/bin/env bash
 printf '${tripwire} %s\n' "\$*" >>"\$FAKE_TRIPWIRE_LOG"
@@ -228,6 +246,7 @@ RUN_RC=0
 CONF=""
 UNITS_DIR=""
 SYSTEMD_UNITS_DIR=""
+HOSTBIN=""
 CALL_LOG=""
 PREFLIGHT_LOG=""
 TRIPWIRE_LOG=""
@@ -241,6 +260,7 @@ new_case() {
   CONF="${dir}/conf"
   UNITS_DIR="${dir}/units"
   SYSTEMD_UNITS_DIR="${dir}/systemd-units"
+  HOSTBIN="${dir}/hostbin"
   CALL_LOG="${dir}/calls.log"
   PREFLIGHT_LOG="${dir}/preflight.log"
   TRIPWIRE_LOG="${dir}/tripwire.log"
@@ -265,6 +285,7 @@ run_setup() {
     HIVE_SETUP_CONF_DIR="$CONF" \
     HIVE_SETUP_UNIT_DIR="$UNITS_DIR" \
     HIVE_SETUP_SYSTEMD_UNIT_DIR="$SYSTEMD_UNITS_DIR" \
+    HIVE_SETUP_BIN_DIR="$HOSTBIN" \
     HIVE_SETUP_HEALTH_RETRIES=2 \
     HIVE_SETUP_HEALTH_DELAY=0 \
     env "$@" \
@@ -622,7 +643,72 @@ assert_contains "$RUN_OUT" "rootless-only" "says which flag misunderstands which
 if [[ ! -e "${CONF}/hive.yaml" ]]; then pass "wrote nothing"; else fail "wrote config despite the usage error"; fi
 
 # ---------------------------------------------------------------------------
-# 13. Usage.
+# 13. #5646 — hivectl onto the host, extracted from the image, never built.
+#
+# The target hosts are exactly the ones with no Go toolchain, so the only
+# acceptable source for the binary is the image the deployment already runs:
+# `podman create` (nothing executes) + `podman cp` + `podman rm`. The fake's
+# recognisable content is what proves the installed file came out of the
+# image; the `go` tripwire is what proves nothing was compiled instead.
+# ---------------------------------------------------------------------------
+new_case "hivectl is extracted from the image onto the host"
+SETUP_ARGS="" run_setup
+assert_eq 0 "$RUN_RC" "exits 0"
+if [[ -x "${HOSTBIN}/hivectl" ]]; then pass "installed an executable hivectl"; else fail "no executable at ${HOSTBIN}/hivectl"; fi
+assert_file_contains "${HOSTBIN}/hivectl" "fake-hivectl-from-image" \
+  "the binary came out of the image, not from a host build"
+calls="$(cat "$CALL_LOG")"
+assert_contains "$calls" "podman create --name hive-hivectl-extract-" \
+  "made the image addressable with create — nothing was executed"
+assert_contains "$calls" ":/usr/local/share/hive/hivectl" \
+  "copied from the in-image cargo path the Dockerfile stows it at"
+assert_contains "$calls" "podman rm hive-hivectl-extract-" "removed the throwaway container"
+create_line="$(grep -n 'podman create --name hive-hivectl-extract-' "$CALL_LOG" | head -n1 | cut -d: -f1)"
+rm_line="$(grep -n 'podman rm hive-hivectl-extract-' "$CALL_LOG" | head -n1 | cut -d: -f1)"
+if [[ -n "$create_line" && -n "$rm_line" && "$create_line" -lt "$rm_line" ]]; then
+  pass "create precedes rm — the container existed only for the copy"
+else
+  fail "extraction container ordering wrong (create at ${create_line:-none}, rm at ${rm_line:-none})"
+fi
+assert_contains "$RUN_OUT" "wrote   hivectl" "reports the write"
+assert_contains "$RUN_OUT" "hivectl --server" "prints a first command pointed at the gateway"
+assert_eq "" "$(cat "$TRIPWIRE_LOG")" "no host go build, package manager, git, or docker (#5646)"
+
+new_case "a re-run keeps a matching hivectl and converges a tampered one"
+SETUP_ARGS="" run_setup
+assert_eq 0 "$RUN_RC" "first run succeeds"
+SETUP_ARGS="" run_setup
+assert_eq 0 "$RUN_RC" "second run succeeds"
+assert_contains "$RUN_OUT" "keep    hivectl" \
+  "a binary already matching the image is kept, and the keep is reported"
+printf 'tampered\n' >"${HOSTBIN}/hivectl"
+SETUP_ARGS="" run_setup
+assert_eq 0 "$RUN_RC" "third run succeeds"
+assert_file_contains "${HOSTBIN}/hivectl" "fake-hivectl-from-image" \
+  "a binary differing from the image converges back to the image's version"
+
+new_case "an image without hivectl warns but does not fail a healthy install"
+SETUP_ARGS="" run_setup FAKE_HIVECTL_CP_FAIL=1
+assert_eq 0 "$RUN_RC" "still exits 0 — the hive IS healthy; only the host CLI is missing"
+assert_contains "$RUN_OUT" "could not extract" "says what failed"
+assert_contains "$RUN_OUT" "before #5646" "names the likely cause: an image predating the cargo"
+assert_contains "$RUN_OUT" "Hive is running" "still reports the deployment is up"
+assert_contains "$RUN_OUT" "NOT installed" "the summary does not claim a CLI it did not install"
+assert_contains "$(cat "$CALL_LOG")" "podman rm hive-hivectl-extract-" \
+  "the throwaway container is removed on the failure path too"
+if [[ ! -e "${HOSTBIN}/hivectl" ]]; then pass "left no half-written binary"; else fail "left a binary it could not extract"; fi
+
+new_case "rootful extracts and installs hivectl through sudo"
+SETUP_ARGS="--rootful" run_setup
+assert_eq 0 "$RUN_RC" "exits 0"
+calls="$(cat "$CALL_LOG")"
+assert_contains "$calls" "sudo podman create --name hive-hivectl-extract-" \
+  "the extraction container is driven through sudo podman"
+assert_contains "$calls" "sudo install -Dm755" "the binary lands through sudo, like every rootful write"
+if [[ -x "${HOSTBIN}/hivectl" ]]; then pass "installed an executable hivectl"; else fail "no executable at ${HOSTBIN}/hivectl"; fi
+
+# ---------------------------------------------------------------------------
+# 14. Usage.
 # ---------------------------------------------------------------------------
 new_case "an unknown argument is a usage error"
 SETUP_ARGS="--wat" run_setup
