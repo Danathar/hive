@@ -1,0 +1,201 @@
+name: Prune GHCR untagged images (hivecommons)
+
+# TWIN of prune-ghcr.yml for the hivecommons org, part of the kubestellar ->
+# hivecommons repo transfer. During the dual-publish window docker.yml mirrors
+# every image push into ghcr.io/hivecommons/{hive,hive-contributor,hive-hub},
+# so that namespace accumulates the same untagged per-arch garbage, orphaned
+# <branch>-latest tags, and aged pure-SHA tags the kubestellar one does, and
+# needs the same pruning. The pruning LOGIC below is a faithful copy of
+# prune-ghcr.yml (read the comments there for the multi-arch child-manifest
+# history — they all still apply); only the target org, the auth, and the
+# safety posture differ, as follows.
+#
+# prune-ghcr.yml itself is deliberately left UNTOUCHED: it must keep pruning
+# the OLD kubestellar org for as long as the dual-publish window lasts (its
+# GHCR_PRUNE_TOKEN is a kubestellar-scoped PAT and travels with the repo
+# transfer, so it keeps working from either org). Retiring it is a separate,
+# later step once the kubestellar packages are frozen.
+#
+# INERT UNTIL TRANSFER: every job below is gated on
+# `github.repository_owner == 'hivecommons'`. While the repo still lives in
+# kubestellar this workflow schedules, starts, and skips every job — zero
+# API calls, zero deletions.
+#
+# DRY RUN BY DEFAULT: unlike prune-ghcr.yml (whose scheduled runs delete for
+# real), every job here honors the workflow-level DRY_RUN env, which defaults
+# to "true" — each run only LOGS what it would delete. Flipping it to "false"
+# is a deliberate follow-up edit after a maintainer has reviewed the log of
+# the first observed post-transfer run and confirmed nothing live would be
+# deleted.
+#
+# AUTH: each job tries GHCR_PRUNE_TOKEN_HC first and falls back to the
+# workflow's GITHUB_TOKEN (granted packages: write below). NOTE: deleting
+# versions of an ORG-owned package has historically required a classic PAT
+# with the delete:packages scope — the default GITHUB_TOKEN could not do it,
+# which is exactly why the kubestellar twin carries GHCR_PRUNE_TOKEN (see the
+# NOTE in prune-ghcr.yml's header). If the GITHUB_TOKEN fallback turns out
+# insufficient here too (deletions fail 403 on a real run), create a classic
+# PAT with delete:packages from a hivecommons owner and store it as
+# GHCR_PRUNE_TOKEN_HC — every job below already prefers it when present.
+on:
+  schedule:
+    - cron: '43 4 * * *'   # daily, deliberately offset from prune-ghcr.yml's
+                           # 04:17 so the two twins never hit GHCR at once
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # write, not read: the GITHUB_TOKEN fallback path needs it to even attempt
+  # version deletion (the kubestellar twin uses packages: read because its
+  # deletions go exclusively through the GHCR_PRUNE_TOKEN PAT).
+  packages: write
+
+env:
+  # SAFETY DEFAULT — every job logs what it WOULD delete and deletes nothing.
+  # Flip to "false" only after reviewing the first observed post-transfer
+  # run's log (see the DRY RUN BY DEFAULT note in the header).
+  DRY_RUN: "true"
+
+jobs:
+  prune:
+    if: github.repository_owner == 'hivecommons'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prune untagged hive images
+        # v3.1.0+ AUTOMATICALLY protects per-architecture child manifests that
+        # are referenced by a tagged multi-arch manifest list (fail-closed: if
+        # it can't read a tag's manifest it skips deletion entirely). v3.0.0 did
+        # NOT — with tag-selection: untagged it deleted the arm64/amd64 children
+        # of live tagged images (only the manifest LIST is tagged; its per-arch
+        # children are untagged), which left every -latest / SHA tag dangling and
+        # made fresh multi-arch pulls fail with "manifest unknown" (404) on the
+        # child. Cached images kept running, which masked it, but any new node /
+        # fresh pull broke daily right after the scheduled prune. Do NOT pin
+        # back below v3.1.0. (Same pin, same reason as prune-ghcr.yml.)
+        uses: snok/container-retention-policy@d3bdcf5ce9b05f685154e4a16c39233b245e3d53 # v3.1.0
+        with:
+          account: hivecommons
+          # PAT if present, GITHUB_TOKEN otherwise — see the AUTH header note.
+          token: ${{ secrets.GHCR_PRUNE_TOKEN_HC || secrets.GITHUB_TOKEN }}
+          image-names: "hive hive-hub hive-contributor"
+          tag-selection: untagged
+          cut-off: 3h              # untagged digests are unreachable by name; only
+                                  # spare the last few hours so an in-flight build's
+                                  # per-arch children aren't deleted before their
+                                  # manifest list is created. (Belt-and-suspenders
+                                  # on top of the v3.1.0 multi-arch protection.)
+          dry-run: ${{ env.DRY_RUN }}
+
+  # Prune <branch>-latest tags whose branch no longer exists — same logic and
+  # same keep/delete rules as prune-ghcr.yml's job of the same name, pointed
+  # at the hivecommons packages and this repo's own branch list.
+  prune-orphan-branch-tags:
+    if: github.repository_owner == 'hivecommons'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete orphaned <branch>-latest tags
+        env:
+          GH_TOKEN: ${{ secrets.GHCR_PRUNE_TOKEN_HC || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Live branch names -> their sanitized tag form (/ -> -), the same
+          # transform the docker workflow applies to build <branch>-latest.
+          # ${{ github.repository }} rather than a hardcoded slug: after the
+          # transfer this repo is hivecommons/hive, and the branch list must
+          # come from wherever the repo actually lives.
+          mapfile -t BRANCHES < <(
+            gh api --paginate "/repos/${{ github.repository }}/branches" --jq '.[].name'
+          )
+          declare -A LIVE
+          for b in "${BRANCHES[@]}"; do LIVE["${b//\//-}"]=1; done
+          echo "Live branches: ${#LIVE[@]}"
+
+          for image in hive hive-hub hive-contributor; do
+            echo "=== image: $image ==="
+            # A <branch>-latest tag and its <sha> tag share ONE version (the
+            # docker workflow tags the manifest with both). GHCR can only delete
+            # a whole version, not an individual tag — so the co-located SHA tag
+            # must NOT block deletion (the PR-branch SHA is itself orphaned once
+            # the branch is squash-merged). The rule:
+            #   * version has >=1 <branch>-latest tag AND every such tag's branch
+            #     is dead  -> DELETE (spares v4-latest etc., whose branches are
+            #     live).
+            #   * version has NO -latest tag (pure SHA) -> KEEP (may be pinned;
+            #     small; untagged pruning handles genuine garbage).
+            gh api --paginate \
+              "/orgs/hivecommons/packages/container/$image/versions" \
+              --jq '.[] | {id: .id, tags: .metadata.container.tags}' \
+            | jq -c '.' | while read -r row; do
+                id=$(echo "$row" | jq -r '.id')
+                tags=$(echo "$row" | jq -r '.tags[]?')
+                [ -z "$tags" ] && continue
+                has_latest=false
+                all_latest_dead=true
+                while IFS= read -r t; do
+                  case "$t" in
+                    *-latest)
+                      has_latest=true
+                      base="${t%-latest}"
+                      [ -n "${LIVE[$base]:-}" ] && all_latest_dead=false ;;
+                  esac
+                done <<< "$tags"
+                if [ "$has_latest" = true ] && [ "$all_latest_dead" = true ]; then
+                  echo "orphan version $id tags=[$(echo "$tags" | tr '\n' ',')]"
+                  if [ "$DRY_RUN" != "true" ]; then
+                    gh api -X DELETE \
+                      "/orgs/hivecommons/packages/container/$image/versions/$id" \
+                      && echo "  deleted $id" || echo "  FAILED $id"
+                  fi
+                fi
+              done
+          done
+          [ "$DRY_RUN" = "true" ] && echo "(dry-run: nothing deleted above)" || true
+
+  # Bound the immutable short-SHA tag history — same retention rule as
+  # prune-ghcr.yml's job of the same name, pointed at the hivecommons
+  # packages. Versions that still carry any non-SHA tag (v4-latest, stable,
+  # candidate, edge, latest, or future channel names) are never deleted.
+  prune-old-sha-tags:
+    if: github.repository_owner == 'hivecommons'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete old pure short-SHA image tags
+        env:
+          GH_TOKEN: ${{ secrets.GHCR_PRUNE_TOKEN_HC || secrets.GITHUB_TOKEN }}
+          RETENTION_DAYS: "90"
+        run: |
+          set -euo pipefail
+          cutoff=$(date -u -d "$RETENTION_DAYS days ago" +%s)
+          for image in hive hive-hub hive-contributor; do
+            echo "=== image: $image (pure short-SHA tags older than ${RETENTION_DAYS}d) ==="
+            gh api --paginate \
+              "/orgs/hivecommons/packages/container/$image/versions" \
+              --jq '.[] | {id: .id, created_at: .created_at, tags: .metadata.container.tags}' \
+            | jq -c '.' | while read -r row; do
+                id=$(echo "$row" | jq -r '.id')
+                created_at=$(echo "$row" | jq -r '.created_at')
+                mapfile -t tags < <(echo "$row" | jq -r '.tags[]?')
+                [ "${#tags[@]}" -gt 0 ] || continue
+
+                all_short_sha=true
+                for t in "${tags[@]}"; do
+                  if ! [[ $t =~ ^[0-9a-f]{7}$ ]]; then
+                    all_short_sha=false
+                    break
+                  fi
+                done
+                [ "$all_short_sha" = true ] || continue
+
+                created_epoch=$(date -u -d "$created_at" +%s)
+                [ "$created_epoch" -lt "$cutoff" ] || continue
+
+                joined=$(printf '%s,' "${tags[@]}")
+                echo "old pure-SHA version $id created=$created_at tags=[${joined%,}]"
+                if [ "$DRY_RUN" != "true" ]; then
+                  gh api -X DELETE \
+                    "/orgs/hivecommons/packages/container/$image/versions/$id" \
+                    && echo "  deleted $id" || echo "  FAILED $id"
+                fi
+              done
+          done
+          [ "$DRY_RUN" = "true" ] && echo "(dry-run: nothing deleted above)" || true
