@@ -158,13 +158,14 @@ rationale and the fixed architecture decisions behind it are recorded in
 
 `hivectl tui` takes no flags — it is a bare subcommand. In particular it does
 **not** honour the root `--server` / `--token-env` flags the other `hivectl`
-commands read: it builds its own client directly from two environment
+commands read: it builds its own client directly from three environment
 variables, checked once at startup:
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `HIVE_DASHBOARD_URL` | `http://localhost:3001` | Dashboard API base URL |
-| `HIVE_DASHBOARD_TOKEN` | *(empty)* | Auth token — the same variable `--token-env` defaults to |
+| `HIVE_DASHBOARD_TOKEN` | *(empty)* | Shared dashboard token — the same variable `--token-env` defaults to |
+| `HIVE_DASHBOARD_COOKIE` | *(empty)* | Session cookie header, for hives that do not accept the shared token — see [Credentials](#credentials) |
 
 If you already have `HIVE_DASHBOARD_TOKEN` exported for the commands above,
 `hivectl tui` picks it up for free — the token variable name is shared on
@@ -173,6 +174,57 @@ purpose. The base URL default differs by one detail from `--server`'s
 same loopback dashboard, but set `HIVE_DASHBOARD_URL` explicitly if you also
 pass `--server` to other commands against a non-default host, since the TUI
 will not pick that flag up.
+
+#### Credentials
+
+The dashboard has two credential lanes and they are **not** interchangeable.
+Which one your hive accepts is a property of how it was deployed, not a
+preference:
+
+| Your hive | What it accepts | Set |
+|---|---|---|
+| Self-hosted, `dashboard.auth_token` set, no `authorized_users` | Shared bearer token | `HIVE_DASHBOARD_TOKEN` |
+| Spoke with an `authorized_users` allowlist (direct-route) | Per-user session **only** | `HIVE_DASHBOARD_COOKIE` |
+| Hub-hosted | The hub's per-user session | `HIVE_DASHBOARD_COOKIE` |
+
+The shared token grants unscoped owner and carries no per-user identity, which
+is exactly why a spoke with an allowlist **disables** it — accepting it would
+let any holder act as an owner and defeat the per-hive allowlist. Those hives
+identify callers by the `hive_session` cookie the GitHub device-flow login
+mints, resolved on every request against the live allowlist.
+
+`HIVE_DASHBOARD_COOKIE` is a **cookie header value**, not a bare session id —
+the same string a browser would send:
+
+```bash
+export HIVE_DASHBOARD_COOKIE='hive_session=8f3c…'
+hivectl tui
+```
+
+Several cookies are joined with `; `, which is what a hub-hosted hive needs
+when its per-hive terminal assertion rides alongside the hub session. Taking a
+header value rather than a named id is what lets one variable serve every
+cookie-based deployment without the TUI having to know which kind of hive it
+is talking to.
+
+Obtaining the value today means copying it out of a browser already logged in
+to that dashboard (devtools → Application → Cookies). There is no
+`hivectl login` yet; adding one so the credential can be acquired from the
+terminal is tracked in
+[#5645](https://github.com/kubestellar/hive/issues/5645).
+
+Both variables may be set at once, and both are sent. That is not redundancy:
+a shared-token hive ignores the cookie and an allowlist hive ignores the token,
+so setting both is how one exported environment works against every hive you
+operate.
+
+**If the credentials are rejected, `hivectl tui` refuses to start** rather than
+opening a screen of empty panes. A `401` is a standing answer — no keypress in
+the TUI can fix it — so it prints which variables to set and exits, leaving
+your scrollback intact. Every other failure still opens normally: a hive that
+is merely *down* is one of the main reasons to open the TUI, and the panes fill
+themselves when it returns. A `403` also opens: that is a working session whose
+role is too narrow for some reads, which the panes already handle individually.
 
 #### The four panes
 
@@ -355,8 +407,12 @@ an operator dismisses the overlay first (see the modal rule above).
 
 #### v1 boundaries
 
-- **Self-hosted, token auth only.** `HIVE_DASHBOARD_TOKEN` against a
-  self-hosted hive's dashboard; there is no hub OAuth login flow.
+- **No login flow.** Both credentials must already exist in your environment:
+  the TUI reads `HIVE_DASHBOARD_TOKEN` and `HIVE_DASHBOARD_COOKIE` and cannot
+  acquire either. Session-based hives (hub-hosted, or a spoke with an
+  `authorized_users` allowlist) are reachable, but the cookie has to be lifted
+  from a browser — see [Credentials](#credentials) and
+  [#5645](https://github.com/kubestellar/hive/issues/5645).
 - **Local tmux attach only.** No remote terminal embedding over the ttyd
   WebSocket — that is a follow-up epic.
 - **Feature parity with the web dashboard's operator loop, not visual
