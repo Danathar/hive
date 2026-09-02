@@ -19,8 +19,9 @@
 #   hive-review [<number>|<url>] --repo <owner/repo> --comment --body "<b>"
 #
 # request_changes and comment REQUIRE a body (GitHub rejects an empty one);
-# approve may omit it. On success it prints the request path and returns 0; the
-# review is submitted within one watcher tick.
+# approve may omit it. On success it prints the request and result paths and
+# returns 0; the review is submitted within one watcher tick. Callers that need
+# delivery confirmation must wait for the result JSON and require `"ok": true`.
 
 set -euo pipefail
 
@@ -106,4 +107,4 @@ os.replace(temporary, path)
 PY
 
 echo "hive-review: requested $EVENT review on $REPO#$NUMBER as the App bot"
-echo "hive-review: request $REQ_FILE (Hive submits it within one watcher tick)"
+echo "hive-review: request $REQ_FILE (Hive submits it within one watcher tick; result appears at ${REQ_FILE%.json}.result.json)"
