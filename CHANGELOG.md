@@ -11,6 +11,10 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+### Added
+
+- A paused agent whose session is also down now offers a single **▶ start & resume** button on its dashboard card ([#5594](https://github.com/kubestellar/hive/issues/5594)). This completes the combined-action half of that issue: the card already named every blocker at once, but clearing a pause and a dead session still took two separate clicks (resume, then ↻ restart). The combined button chains the two existing endpoints client-side — resume first, so the fresh session is never born paused, then restart, which for a down session is simply "start" — and its tooltip still names any cadence blockers that one click will not clear. A paused agent with a live session keeps the plain **▶ resume**; a bare Start is never shown on a paused agent.
+
 ### Fixed
 
 - Dashboard model and method changes now update the managed agent's per-agent overlay as well as its runtime override and `hive.yaml` entry ([#5558](https://github.com/kubestellar/hive/issues/5558)). Previously the overlay remained at the pack-provided value and replaced the dashboard's saved choice on every config load; `/data/hive-state.json` replayed the runtime override after restarts, hiding the disagreement until that override was cleared. The dropdowns now persist the selected backend/model together with its operator-ownership marker in the authoritative overlay, and raise a system alert if that write fails.
