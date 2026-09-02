@@ -209,11 +209,32 @@ Set your model: export AGENT_MODEL=<model>
 ## What happens on a task
 
 1. The hive assigns an issue that fits your trust tier's rate limits and passes the admin's filters.
-2. The relay writes the task context, injects a short-lived GitHub token, and drives your CLI in a tmux session (attach to it to watch — or intervene).
+2. The relay writes the task context, injects a short-lived GitHub token, and drives your CLI in a tmux session (watch it, or intervene — see below for how to watch without taking the pane).
 3. Progress is reported back every 2 minutes; the result (PR opened, success/failure) is reported when the CLI finishes.
 4. Completed tasks that open a PR count toward automatic tier promotion — and toward the hive's public `/leaderboard`.
 
 Contributors never hold long-lived repo credentials: the relay receives short-lived GitHub tokens per task, and API keys for the contributor's own model provider never leave their machine.
+
+### Watching without taking the pane
+
+The relay treats the pane as **yours** while it looks like someone is using it: a watchdog must never type over somebody mid-keystroke, so recovery actions — the API-error retry in particular — stand down. Attaching a client is how you tell it you are there.
+
+That matters more than it sounds, because *attaching* is not the same as *looking*:
+
+| How you watch | Registers a tmux client? | Blocks automatic recovery? |
+|---|---|---|
+| `tmux capture-pane -p -t <session>` | no | no |
+| `tmux attach -t <session>` | yes | while the pane looks in use |
+| The dashboard's browser terminal (`/terminal/?arg=…`) | yes — it proxies to a real `tmux attach-session` | same as a local attach |
+
+So `tmux capture-pane -p -t <session>` is the read-only way to look: it returns a snapshot without ever appearing in `tmux list-clients`. `tmux attach` and the dashboard terminal both put a real client on the session, and the dashboard route is **not** a read-only viewer despite feeling like one.
+
+Leaving a tab attached is fine — it does not park a task by itself. Two things bound it ([#5685](https://github.com/kubestellar/hive/issues/5685)):
+
+- The relay corroborates tmux's `client_activity` against whether the pane actually **changed**. A keystroke draws something; a terminal answering the capability, colour and cursor-position queries the CLI writes does not. So an attached-but-unused tab — which advances `client_activity` on its own — no longer reads as a person.
+- Deferral is capped at `HIVE_HUMAN_PRESENCE_MAX_DEFERRALS` ticks (3, roughly six minutes) regardless. Presence is a signal the relay cannot verify, and a task parked forever on an unverifiable signal is worse than one `try again` landing next to somebody.
+
+`tmux detach-client` remains the unambiguous way to hand the pane back.
 
 ## Multi-hub subscription
 

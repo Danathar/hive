@@ -1989,6 +1989,23 @@ function paneShowsLoginRequiredError(text) {
 // strand it replaces.
 const HUMAN_PRESENCE_IDLE_MS = Number(process.env.HIVE_HUMAN_PRESENCE_IDLE_MS) || 5 * 60 * 1000;
 
+// HUMAN_PRESENCE_MAX_DEFERRALS bounds how many consecutive progress ticks a
+// presence reading may park a retryable API error before the relay retries
+// anyway (kubestellar/hive#5685).
+//
+// It exists because presence is the one input here the relay cannot verify. If
+// the signal is wrong — and #5685 is the second time it has been, after #5277 —
+// a task stalls until a person happens to notice, which is precisely the
+// unattended-operation property this recovery path exists to provide. A task
+// parked forever on an unverifiable signal is worse than one `try again`
+// landing next to a human, who can see it and say so.
+//
+// Three ticks is ~6 minutes at PROGRESS_REPORT_INTERVAL_MS — long enough that
+// somebody genuinely mid-keystroke finishes their thought, short enough that a
+// misread does not consume the task's whole 30-minute ceiling. The budget is
+// per task, reset with the rest of the transient-error state.
+const HUMAN_PRESENCE_MAX_DEFERRALS = Number(process.env.HIVE_HUMAN_PRESENCE_MAX_DEFERRALS) || 3;
+
 // tmuxSessionHumanPresence reports whether a human is at the agent's tmux
 // session, and how confident that answer is.
 //
@@ -2035,6 +2052,68 @@ function tmuxSessionHumanPresence() {
   } catch (_) {
     return { attached: true, active: true, idleMs: null };
   }
+}
+
+// lastPresencePaneFingerprint is the pane as it looked the last time a presence
+// question was asked, and presenceDeferralCount how many consecutive ticks that
+// answer has parked a retry. Both are scoped to the CURRENT task and reset with
+// the rest of the transient-error state (kubestellar/hive#5685).
+//
+// The fingerprint is deliberately SEPARATE from lastPaneFingerprint, which the
+// stall backstop owns. That one is consumed destructively — the first read that
+// sees new output records it and reports no change to the next reader — so
+// sharing it would make the two detectors eat each other's evidence. See the
+// note on paneChangedSince for the same hazard in the other direction.
+let lastPresencePaneFingerprint = null;
+let presenceDeferralCount = 0;
+
+function resetHumanPresenceEvidence() {
+  lastPresencePaneFingerprint = null;
+  presenceDeferralCount = 0;
+}
+
+// paneEditedSincePresenceCheck records the pane and reports whether it differs
+// from the previous recording — the observation that decides #5685.
+//
+// A KEYSTROKE CHANGES THE SCREEN. A TERMINAL'S AUTOMATIC REPLIES DO NOT.
+//
+// tmux's `client_activity` advances whenever a client sends bytes, and a
+// terminal emulator sends bytes for reasons that have nothing to do with a
+// person: replies to the capability, colour and cursor-position queries the
+// running application writes, plus mouse and focus reports where those are
+// enabled. A Claude Code TUI issues such queries on its own schedule, so an
+// ATTACHED BUT UNUSED tab keeps client_activity advancing indefinitely — and
+// every retryable API error parked until someone noticed. Confirmed causally
+// (#5685): four consecutive deferrals with nobody typing, each recomputing a
+// fresh "last input" age from gaps of 3 and 4.5 minutes, released the instant
+// `tmux detach-client` ran, with mouse reporting and focus-events both off.
+//
+// So client_activity cannot decide this alone. It is kept as a NECESSARY
+// condition — no bytes at all means nobody typed — and corroborated here with
+// the thing that actually distinguishes the two cases. An unchanged pane is
+// positive evidence that the bytes tmux counted were the terminal talking.
+//
+// The converse is weaker: a pane can change because the CLI redrew something of
+// its own. That direction stays cautious (it defers) and is bounded by
+// HUMAN_PRESENCE_MAX_DEFERRALS rather than by being made cleverer — the lesson
+// of #5277 and #5685 together is that replacing one proxy with a slightly
+// better proxy buys one release, so the second mechanism is a cap, not a
+// sharper guess.
+//
+// DESTRUCTIVE, and called exactly once per tick from handleTransientAPIError.
+function paneEditedSincePresenceCheck(tmuxLines) {
+  const fingerprint = Array.isArray(tmuxLines) ? tmuxLines.join('\n') : String(tmuxLines || '');
+  // An empty capture means tmux told us nothing, not that the pane is quiet.
+  // Unknown resolves to "someone is there", the same rule every other uncertain
+  // presence answer in this file follows.
+  if (!fingerprint) return true;
+  const previous = lastPresencePaneFingerprint;
+  lastPresencePaneFingerprint = fingerprint;
+  // First reading of this task: there is nothing to compare against, so the
+  // pane cannot yet be called quiet. Costs at most one deferred tick, which the
+  // cap bounds anyway.
+  if (previous === null) return true;
+  return fingerprint !== previous;
 }
 
 // tmuxSessionHasAttachedClient reports only whether a client is CONNECTED. It
@@ -2574,6 +2653,11 @@ let lastTransientNudgeAt = 0;
 function resetTransientNudgeState() {
   transientNudgeCount = 0;
   lastTransientNudgeAt = 0;
+  // #5685: the presence evidence is scoped to the task too. A previous task's
+  // final pane is not a baseline for this one — comparing against it would read
+  // the first tick of new work as "someone edited the pane" — and a budget
+  // spent deferring one task must not deny the next its retries.
+  resetHumanPresenceEvidence();
 }
 
 // Autonomy-nudge state (kubestellar/hive#5281), scoped to the CURRENT task.
@@ -2876,18 +2960,39 @@ function handleTransientAPIError(tmuxLines) {
   };
 
   // A human AT the pane owns it, and a watchdog must never type over someone
-  // mid-keystroke. But presence is a recency question, not a connection one
-  // (#5277): a dashboard terminal tab left open is a connected client and not a
-  // person, and treating the two alike disabled recovery entirely for as long
-  // as the tab lived. An attached-but-quiet client falls through to the retry
-  // below; only a recently active one still takes this branch.
+  // mid-keystroke. Deciding whether one is there has now been wrong twice in
+  // the same direction, each time by trusting a proxy:
+  //
+  //   #5277 — "a client is attached" is not "a human is here". A dashboard tab
+  //           left open is a connected client and not a person.
+  //   #5685 — "this client sent bytes" is not "a human typed". An attached but
+  //           UNUSED terminal answers the queries the CLI writes, so
+  //           client_activity advances on its own, forever.
+  //
+  // So two signals must now agree before a retry is withheld: tmux saw input
+  // recently (necessary — no bytes, nobody typed) AND the pane actually changed
+  // since the last time we looked (what tells a keystroke from a terminal
+  // reply, because only one of those draws anything). And whatever they say,
+  // the deferral is capped: an unverifiable signal must not be able to park a
+  // task indefinitely.
   const presence = tmuxSessionHumanPresence();
-  if (presence.active) {
+  const paneEdited = paneEditedSincePresenceCheck(tmuxLines);
+  const deferralsLeft = presenceDeferralCount < HUMAN_PRESENCE_MAX_DEFERRALS;
+
+  if (presence.active && paneEdited && deferralsLeft) {
+    presenceDeferralCount++;
+    // Report the EVIDENCE, not a conclusion drawn from it. The old wording said
+    // "someone is active … last input Ns ago", which stated the assumption as
+    // fact — and that is what made #5685 hard to see: the message asserted a
+    // human had typed, so the natural reading was to doubt the contributor
+    // rather than the field.
     const since = presence.idleMs === null
-      ? 'activity unknown'
-      : `last input ${Math.round(presence.idleMs / 1000)}s ago`;
+      ? 'client activity unknown'
+      : `client sent input ${Math.round(presence.idleMs / 1000)}s ago`;
     console.warn(`Task ${currentTask.task_id} stopped on a retryable API error; ` +
-      `someone is active on ${TMUX_SESSION} (${since}), so not typing a retry`);
+      `${TMUX_SESSION} looks in use (${since}, and the pane changed since the ` +
+      `last check), so not typing a retry ` +
+      `(${presenceDeferralCount}/${HUMAN_PRESENCE_MAX_DEFERRALS} deferrals)`);
     send({
       ...progressBase,
       status: 'blocked_on_human',
@@ -2897,9 +3002,23 @@ function handleTransientAPIError(tmuxLines) {
     });
     return;
   }
-  if (presence.attached) {
+
+  if (presence.active && !paneEdited) {
+    // The #5685 case: tmux counted bytes, but nothing was drawn. A person
+    // composing at the pane changes it; a terminal answering a capability query
+    // does not.
     console.warn(`Task ${currentTask.task_id} stopped on a retryable API error; ` +
-      `a client is attached to ${TMUX_SESSION} but has been idle ` +
+      `${TMUX_SESSION} reported client input but the pane is unchanged — that is ` +
+      `the terminal answering the CLI's queries, not someone typing, so ` +
+      `proceeding with the retry`);
+  } else if (presence.active && !deferralsLeft) {
+    console.warn(`Task ${currentTask.task_id} stopped on a retryable API error; ` +
+      `${TMUX_SESSION} still looks in use, but ${HUMAN_PRESENCE_MAX_DEFERRALS} ` +
+      `deferrals is the cap — retrying rather than parking the task on a signal ` +
+      `we cannot verify`);
+  } else if (presence.attached) {
+    console.warn(`Task ${currentTask.task_id} stopped on a retryable API error; ` +
+      `a client is attached to ${TMUX_SESSION} but has sent no input for ` +
       `${Math.round(presence.idleMs / 1000)}s, so proceeding with the retry`);
   }
 
@@ -3730,6 +3849,10 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     tmuxSessionHasAttachedClient,
     tmuxSessionHumanPresence,
     HUMAN_PRESENCE_IDLE_MS,
+    HUMAN_PRESENCE_MAX_DEFERRALS,
+    paneEditedSincePresenceCheck,
+    resetHumanPresenceEvidence,
+    getPresenceDeferralCount: () => presenceDeferralCount,
     TRANSIENT_API_ERROR_MAX_NUDGES,
     TRANSIENT_API_ERROR_NUDGE_MESSAGE,
     getTransientNudgeCount: () => transientNudgeCount,
