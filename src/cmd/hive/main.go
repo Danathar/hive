@@ -2001,14 +2001,27 @@ func main() {
 	// history persist).
 	dashSrv.EnableSessionPersistence("/data/dashboard-sessions.json")
 
+	// Lifecycle timeline journeys persist on the PVC too (#5656): the ring is
+	// the panel's only memory of merged/blocked outcomes, so a pod roll must
+	// not zero the fleet counters. Enabled before any producer records.
+	dashSrv.EnableLifecyclePersistence("/data/lifecycle-timeline.json")
+
+	// The scheduler's classifier pass records KindClassified journeys the
+	// moment lane routing decides an issue's lane — same store, no extra work.
+	sched.SetLifecycleRecorder(dashSrv.LifecycleTimeline())
+
 	// Attribution audit sink: every hive-mediated PR/issue creation lands in
 	// the dashboard audit log (audit.jsonl + ring) UNCONDITIONALLY — the
 	// trailer toggle never gates this. Creations before this point (the
 	// startup advisory-issue ensure) fall back to the hive log inside
-	// recordCreationAudit, so no creation goes unrecorded.
+	// recordCreationAudit, so no creation goes unrecorded. The same stream
+	// feeds the lifecycle timeline: agent_pr_created → pr_opened and
+	// pr_merged → merged (both automerge sweep paths, MergePR from the
+	// dashboard queue and the merge watcher), see recordLifecycleFromAudit.
 	if ghClient != nil {
 		ghClient.SetAttributionAudit(func(action, detail, agent string) {
 			dashSrv.AuditLog("system", action, detail, agent)
+			recordLifecycleFromAudit(dashSrv, cfg.Project.Org, action, detail, agent)
 		})
 	}
 
@@ -2642,7 +2655,14 @@ func main() {
 	// the pr-request watcher narrates opened PRs into the session.
 	sched.SetInflightLookup(dashSrv.LinearSessionHolder)
 	if ghClient != nil {
-		ghClient.SetPROpenedHook(dashSrv.LinearAgentPROpened)
+		ghClient.SetPROpenedHook(func(agentName, repo string, number int, url string) {
+			dashSrv.LinearAgentPROpened(agentName, repo, number, url)
+			// Same typed hook feeds the lifecycle timeline: the watcher fires
+			// it on the exact path that opened the PR, with the agent name the
+			// audit stream attributes to the governor flow (#5656). The store
+			// dedupes with the audit-sink bridge by (ref, kind).
+			recordPROpened(dashSrv, cfg.Project.Org, agentName, repo, number, url)
+		})
 	}
 
 	dashSrv.RegisterAPI(&dashboard.Dependencies{
@@ -5449,11 +5469,12 @@ func diagnoseGitHubAppFull(ctx context.Context, appAuth *github.AppAuth, expecte
 }
 
 // maxTimelineEnumeratePerCycle bounds how many enumerated-issue events a single
-// eval cycle records into the lifecycle timeline. The timeline Store is a
-// bounded ring (timeline.MaxEvents); capping per-cycle enumeration keeps a large
-// actionable backlog from evicting the entire ring in one pass and keeps the
-// recording loop O(1)-bounded so it never slows the eval cycle.
-const maxTimelineEnumeratePerCycle = 50
+// eval cycle records into the lifecycle timeline, keeping the recording loop
+// O(1)-bounded so it never slows the eval cycle. Since #5656 the store dedupes
+// by (ref, kind) — re-enumeration refreshes the journey instead of appending —
+// so the cap no longer protects the ring from eviction floods; it matches the
+// endpoint's default journey limit so every renderable journey gets refreshed.
+const maxTimelineEnumeratePerCycle = 200
 
 // lifecycleRecorder narrows *dashboard.Server to just the timeline accessor the
 // recording helpers need, so they stay trivially testable with a fake and never
@@ -5463,10 +5484,12 @@ type lifecycleRecorder interface {
 }
 
 // recordEnumeratedIssues records a KindEnumerated event for each enumerated
-// actionable issue, bounded by maxTimelineEnumeratePerCycle. It is fully
-// guarded: a nil recorder, nil store, or nil actionable set is a no-op, and
-// Record itself is nil-safe. This must never slow or break the eval loop, so it
-// does no I/O and touches only the in-memory bounded ring.
+// actionable issue, bounded by maxTimelineEnumeratePerCycle. The store dedupes
+// by (ref, kind), so each cycle refreshes the journeys' enumerated stage
+// rather than appending a flood (#5656). It is fully guarded: a nil recorder,
+// nil store, or nil actionable set is a no-op, and Record itself is nil-safe.
+// This must never slow or break the eval loop, so it does no blocking I/O
+// (journey persistence is throttled and atomic inside the store).
 //
 // PR-open/merge lifecycle spans are emitted by the same tracing mapper when
 // callers record those timeline events; this helper only has enumerated issues.
@@ -6012,11 +6035,12 @@ func runEvalCycle(
 	// Record enumerated issues into the lifecycle timeline so the dashboard's
 	// lifecycle view has real data. Cheap and fully guarded: a nil dashboard or
 	// nil store is a no-op (timeline.Store.Record is nil-safe), the loop is
-	// bounded by maxTimelineEnumeratePerCycle so a huge backlog never floods the
-	// bounded ring in one cycle, and no I/O happens on this path.
+	// bounded by maxTimelineEnumeratePerCycle, and the store dedupes by
+	// (ref, kind) so this per-cycle sweep refreshes journeys instead of
+	// flooding them (#5656).
 	recordEnumeratedIssues(ctx, dashSrv, actionable)
 
-	escalatedPRs := runEscalationSweep(ctx, cfg, governorForge(cfg, ghClient, logger), actionable, notifier, logger)
+	escalatedPRs := runEscalationSweep(ctx, cfg, governorForge(cfg, ghClient, logger), actionable, notifier, dashSrv, logger)
 
 	intentVerdicts := writeIntentVerdicts(ctx, cfg, ghClient, actionable, beadStores, logger)
 	refreshReviewVerdicts(cfg, logger)
@@ -7636,12 +7660,16 @@ func reapStuckRedPRs(cfg *config.Config, actionable *github.ActionableResult, es
 // so the evidence lands on whichever forge the hive is actually configured for
 // (see governorForge in forgewire.go). On a GitHub hive the writer IS the
 // *github.Client this used to take, so nothing about that path changed.
+//
+// rec receives a KindBlocked lifecycle event for each newly-escalated PR
+// (#5656); a nil rec is a no-op, matching the other timeline producers.
 func runEscalationSweep(
 	ctx context.Context,
 	cfg *config.Config,
 	writer forge.IssueWriter,
 	actionable *github.ActionableResult,
 	notifier *notify.Notifier,
+	rec lifecycleRecorder,
 	logger *slog.Logger,
 ) map[string]bool {
 	escalated := map[string]bool{}
@@ -7708,6 +7736,11 @@ func runEscalationSweep(
 			logger.Warn("escalation label failed", "repo", o.Repo, "pr", o.Number, "error", err)
 		}
 		escalationStore.MarkEscalated(o.Repo, o.Number)
+		// The escalation IS the real "blocked" lifecycle signal (#5656): a PR
+		// out of automated fix attempts, handed to a human. Record it on the
+		// item's journey so the panel's Blocked counter reflects reality, not
+		// just hook annotations.
+		recordBlocked(ctx, rec, cfg.Project.Org, o.Repo, o.Number, r.Attempts, meta[key].checks)
 		logger.Info("fix loop escalated to human",
 			"repo", o.Repo, "pr", o.Number, "attempts", r.Attempts,
 			"failing_checks", strings.Join(meta[key].checks, ","))

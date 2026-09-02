@@ -47,7 +47,7 @@ func TestRunEscalationSweepWritesThroughANonGitHubForge(t *testing.T) {
 
 	// One red SHA is below the threshold: nothing is written to the forge.
 	if got := runEscalationSweep(ctx, cfg, w,
-		actionableWith(redPR("widgets", 7, "hive-agent", "sha-1")), nil, discardLogger()); len(got) != 0 {
+		actionableWith(redPR("widgets", 7, "hive-agent", "sha-1")), nil, nil, discardLogger()); len(got) != 0 {
 		t.Fatalf("escalated = %v, want empty below the threshold", got)
 	}
 	if len(w.comments) != 0 || len(w.labels) != 0 {
@@ -56,7 +56,7 @@ func TestRunEscalationSweepWritesThroughANonGitHubForge(t *testing.T) {
 
 	// A second distinct red SHA crosses it: evidence comment, then the label.
 	got := runEscalationSweep(ctx, cfg, w,
-		actionableWith(redPR("widgets", 7, "hive-agent", "sha-2")), nil, discardLogger())
+		actionableWith(redPR("widgets", 7, "hive-agent", "sha-2")), nil, nil, discardLogger())
 	if !got[prKey] {
 		t.Fatalf("escalated = %v, want %s marked escalated", got, prKey)
 	}

@@ -1189,7 +1189,7 @@
     .reco-advisory-note { margin-top: 12px; font-size: 0.68rem; color: var(--muted); font-style: italic; }
     .reco-calm { color: var(--muted); font-size: 0.85rem; }
 
-    .lc-fleet { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+    .lc-fleet { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
     .lc-fleet-stat { flex: 1 1 100px; min-width: 90px; background: var(--bg); border: 1px solid var(--border);
       border-radius: 6px; padding: 8px 12px; }
     .lc-fleet-stat .val { font-size: 1.3rem; font-weight: 700; }
@@ -1197,9 +1197,10 @@
     .lc-fleet-stat .val.merged { color: var(--green); }
     .lc-fleet-stat .val.blocked { color: var(--red); }
     .lc-fleet-stat .lbl { font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-top: 2px; }
-    .lc-events { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px;
+    .lc-window { color: var(--muted); font-size: 0.68rem; margin-bottom: 12px; }
+    .lc-journeys { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px;
       max-height: 320px; overflow-y: auto; }
-    .lc-event { display: flex; align-items: center; gap: 8px; font-size: 0.78rem; padding: 5px 8px;
+    .lc-journey { display: flex; align-items: center; gap: 8px; font-size: 0.78rem; padding: 5px 8px;
       border-radius: 6px; background: var(--bg); border: 1px solid var(--border); }
     .lc-kind { flex: 0 0 auto; font-size: 0.6rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
       padding: 2px 7px; border-radius: 8px; }
@@ -1207,10 +1208,13 @@
     .lc-kind.blue { background: color-mix(in srgb, var(--blue) 18%, transparent); color: var(--blue); }
     .lc-kind.green { background: var(--green-bg); color: var(--green); }
     .lc-kind.red { background: var(--red-bg); color: var(--red); }
-    .lc-event .lc-ref { color: var(--text); font-weight: 600; font-family: var(--font-mono); font-size: 0.72rem;
+    .lc-journey .lc-ref { color: var(--text); font-weight: 600; font-family: var(--font-mono); font-size: 0.72rem;
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .lc-event .lc-agent { color: var(--muted); font-size: 0.72rem; }
-    .lc-event .lc-time { color: var(--muted); font-size: 0.7rem; margin-left: auto; flex: 0 0 auto; }
+    .lc-stages { display: flex; align-items: center; gap: 3px; flex: 0 1 auto; min-width: 0; flex-wrap: wrap; }
+    .lc-stage-arrow { color: var(--muted); font-size: 0.6rem; }
+    .lc-stage.past { opacity: 0.55; }
+    .lc-journey .lc-agent { color: var(--muted); font-size: 0.72rem; }
+    .lc-journey .lc-time { color: var(--muted); font-size: 0.7rem; margin-left: auto; flex: 0 0 auto; }
     .lc-empty { color: var(--muted); font-size: 0.85rem; padding: 6px 0; }
 
     /* Repos */
@@ -9728,14 +9732,44 @@ function burnAreaChart() {
       } catch (e) { /* transient — leave last render in place */ }
     }
 
-    // PANEL B — lifecycle timeline + fleet health.
+    // Short chip labels for the journey stage axis; keys are the closed Kind
+    // set served by /api/lifecycle-timeline.
+    const LC_STAGE_AXIS = ['enumerated', 'classified', 'kicked', 'pr_opened', 'merged', 'blocked'];
+    const LC_STAGE_LABEL = {
+      enumerated: 'enum', classified: 'class', kicked: 'kick',
+      pr_opened: 'pr', merged: 'merged', blocked: 'blocked'
+    };
+
+    // Format the fleet-health coverage note: counts are honest only relative
+    // to how much history the store actually holds (coveredMs), which can be
+    // shorter than the requested window right after first deploy.
+    function lcWindowLabel(fleet) {
+      const windowMs = Number(fleet.windowMs) || 0;
+      const coveredMs = Number(fleet.coveredMs) || 0;
+      const fmt = (ms) => {
+        const min = Math.round(ms / 60000);
+        if (min < 60) return min + 'm';
+        const hr = Math.round(min / 60);
+        if (hr < 48) return hr + 'h';
+        return Math.round(hr / 24) + 'd';
+      };
+      if (!windowMs) return '';
+      if (coveredMs > 0 && coveredMs < windowMs) {
+        return `over the last ${fmt(coveredMs)} of recorded history (window ${fmt(windowMs)})`;
+      }
+      return `over the last ${fmt(windowMs)}`;
+    }
+
+    // PANEL B — lifecycle journeys + fleet health. One row per work item:
+    // reached stage chips in journey order (current stage colored, earlier
+    // ones dimmed), latest agent, last activity.
     function renderLifecycle(dto) {
       const section = document.getElementById('lifecycle-section');
       const card = document.getElementById('lifecycle-card');
       if (!section || !card) return;
       dto = dto || {};
       const fleet = dto.fleet || {};
-      const events = Array.isArray(dto.events) ? dto.events : [];
+      const journeys = Array.isArray(dto.journeys) ? dto.journeys : [];
 
       section.style.display = '';
 
@@ -9747,27 +9781,38 @@ function burnAreaChart() {
         <div class="lc-fleet-stat"><div class="val merged">${merged}</div><div class="lbl">Merged</div></div>
         <div class="lc-fleet-stat"><div class="val blocked">${blocked}</div><div class="lbl">Blocked</div></div>
       </div>`;
+      const windowLabel = lcWindowLabel(fleet);
+      const windowHtml = windowLabel ? `<div class="lc-window">${escapeHtml(windowLabel)}</div>` : '';
 
       let listHtml;
-      if (events.length === 0) {
-        listHtml = `<div class="lc-empty">No lifecycle events yet — the governor only recently started recording them.</div>`;
+      if (journeys.length === 0) {
+        listHtml = `<div class="lc-empty">No lifecycle journeys yet — they appear as the governor enumerates and works issues.</div>`;
       } else {
-        listHtml = `<ul class="lc-events">${events.map((e) => {
-          e = e || {};
-          const kind = e.kind || '';
-          const ref = escapeHtml(e.issueRef || '');
-          const agent = e.agent ? escapeHtml(e.agent) : '';
-          const rel = v4RelTime(e.at);
+        listHtml = `<ul class="lc-journeys">${journeys.map((j) => {
+          j = j || {};
+          const stages = j.stages || {};
+          const current = j.current || '';
+          const ref = escapeHtml(j.ref || '');
+          const chips = LC_STAGE_AXIS.filter((k) => stages[k]).map((k) => {
+            const st = stages[k] || {};
+            const isCurrent = k === current;
+            const cls = isCurrent ? `lc-kind ${v4KindClass(k)}` : 'lc-kind neutral lc-stage past';
+            const count = Number(st.count) > 1 ? ` ×${Number(st.count)}` : '';
+            const title = `${k}${count} — ${v4RelTime(st.lastAt) || ''}`;
+            return `<span class="${cls}" title="${escapeHtml(title)}">${escapeHtml(LC_STAGE_LABEL[k] || k)}</span>`;
+          }).join('<span class="lc-stage-arrow">→</span>');
+          const agent = j.agent ? escapeHtml(j.agent) : '';
+          const rel = v4RelTime(j.lastAt);
           const agentHtml = agent ? `<span class="lc-agent">${agent}</span>` : '';
           const timeHtml = rel ? `<span class="lc-time">${escapeHtml(rel)}</span>` : '';
-          return `<li class="lc-event">
-            <span class="lc-kind ${v4KindClass(kind)}">${escapeHtml(kind || '—')}</span>
-            <span class="lc-ref">${ref || '—'}</span>${agentHtml}${timeHtml}
+          return `<li class="lc-journey">
+            <span class="lc-ref">${ref || '—'}</span>
+            <span class="lc-stages">${chips}</span>${agentHtml}${timeHtml}
           </li>`;
         }).join('')}</ul>`;
       }
 
-      card.innerHTML = fleetHtml + listHtml;
+      card.innerHTML = fleetHtml + windowHtml + listHtml;
       applySectionCollapse('lifecycle-section');
     }
 
