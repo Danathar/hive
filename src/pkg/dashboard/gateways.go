@@ -26,7 +26,6 @@ import (
 	"time"
 
 	"github.com/kubestellar/hive/pkg/config"
-	"github.com/kubestellar/hive/pkg/watsonx"
 )
 
 // watsonxProbeMintTimeout bounds the IAM token mint done just to run a
@@ -40,9 +39,23 @@ const watsonxProbeMintTimeout = 10 * time.Second
 //
 // The template itself now lives in pkg/watsonx so the AGENT LAUNCH path can
 // resolve the same endpoint for an agent whose backend is "watsonx"; this is a
-// thin delegate kept for call-site readability inside the dashboard.
-func watsonxEndpointForRegion(region string) string {
-	return watsonx.EndpointForRegion(region)
+// thin delegate kept for call-site readability inside the dashboard, reached
+// through the WatsonxGateway interface (#5565 slice 3). An unwired gateway
+// yields "" — the same "no endpoint" the caller already handles.
+func (s *Server) watsonxEndpointForRegion(region string) string {
+	if s.deps == nil || s.deps.Watsonx == nil {
+		return ""
+	}
+	return s.deps.Watsonx.EndpointForRegion(region)
+}
+
+// watsonxGraniteFallback returns the static Granite list (empty when no
+// watsonx gateway is wired).
+func (s *Server) watsonxGraniteFallback() []string {
+	if wx := s.watsonx(); wx != nil {
+		return wx.GraniteFallbackModels()
+	}
+	return nil
 }
 
 // gatewayProbeAuth resolves the bearer + extra request headers a /v1/models
@@ -52,22 +65,42 @@ func watsonxEndpointForRegion(region string) string {
 // an IAM token from the resolved IBM Cloud API key and adds the X-IBM-Project-ID
 // header; a mint failure is returned so the probe surfaces a real error instead
 // of silently sending the raw key. Never logs the key or token.
-func gatewayProbeAuth(kind, key, projectID string) (bearer string, headers map[string]string, err error) {
+func (s *Server) gatewayProbeAuth(kind, key, projectID string) (bearer string, headers map[string]string, err error) {
 	if kind != config.GatewayKindWatsonx {
 		return key, nil, nil
 	}
+	wx := s.watsonx()
+	if wx == nil {
+		return "", nil, errWatsonxUnavailable
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), watsonxProbeMintTimeout)
 	defer cancel()
-	token, err := watsonx.DefaultMinter.Token(ctx, key)
+	token, err := wx.MintToken(ctx, key)
 	if err != nil {
 		return "", nil, err
 	}
 	headers = map[string]string{}
 	if projectID != "" {
-		headers[watsonx.ProjectIDHeader] = projectID
+		headers[wx.ProjectIDHeader()] = projectID
 	}
 	return token, headers, nil
 }
+
+// watsonx returns the wired provider gateway, or nil (bare test servers).
+func (s *Server) watsonx() WatsonxGateway {
+	if s.deps == nil {
+		return nil
+	}
+	return s.deps.Watsonx
+}
+
+// errWatsonxUnavailable is the probe failure when no watsonx gateway is wired
+// (never a production shape — cmd/hive always wires one).
+var errWatsonxUnavailable = &watsonxUnavailableError{}
+
+type watsonxUnavailableError struct{}
+
+func (*watsonxUnavailableError) Error() string { return "watsonx gateway unavailable" }
 
 const (
 	// gatewaySecretFileMode / gatewaySecretDirMode keep gateway key files
@@ -213,7 +246,7 @@ func (s *Server) handleGovernorGatewaysUpsert(w http.ResponseWriter, r *http.Req
 		if body.Region != nil {
 			region = strings.TrimSpace(*body.Region)
 		}
-		endpoint = watsonxEndpointForRegion(region)
+		endpoint = s.watsonxEndpointForRegion(region)
 	}
 	if endpoint == "" {
 		jsonError(w, "endpoint is required", http.StatusBadRequest)
@@ -544,7 +577,7 @@ func (s *Server) handleGovernorGatewaysDiscover(w http.ResponseWriter, r *http.R
 			}
 		}
 	}
-	bearer, headers, err := gatewayProbeAuth(kind, key, projectID)
+	bearer, headers, err := s.gatewayProbeAuth(kind, key, projectID)
 	if err != nil {
 		// A watsonx mint failure means the key is missing or invalid — model
 		// population must NOT happen until a valid key is entered, so this is
@@ -560,14 +593,14 @@ func (s *Server) handleGovernorGatewaysDiscover(w http.ResponseWriter, r *http.R
 		// Granite list here keeps the Default Model dropdown usable without
 		// ever populating models for an unvalidated key.
 		if kind == config.GatewayKindWatsonx {
-			jsonResponse(w, map[string]interface{}{"ok": true, "models": watsonx.GraniteFallbackModels, "fallback": true})
+			jsonResponse(w, map[string]interface{}{"ok": true, "models": s.watsonxGraniteFallback(), "fallback": true})
 			return
 		}
 		jsonResponse(w, map[string]interface{}{"ok": false, "error": redactSecret(redactSecret(err.Error(), key), bearer)})
 		return
 	}
 	if len(models) == 0 && kind == config.GatewayKindWatsonx {
-		models = watsonx.GraniteFallbackModels
+		models = s.watsonxGraniteFallback()
 	}
 	jsonResponse(w, map[string]interface{}{"ok": true, "models": models})
 }
@@ -603,7 +636,7 @@ func (s *Server) gatewayProbeResult(gw config.GatewayConfig, overrideKey string)
 	if probeKey == "" {
 		probeKey = gw.ResolveAPIKey()
 	}
-	bearer, headers, err := gatewayProbeAuth(gw.Kind, probeKey, gw.ProjectID)
+	bearer, headers, err := s.gatewayProbeAuth(gw.Kind, probeKey, gw.ProjectID)
 	if err != nil {
 		return map[string]interface{}{"ok": false, "error": redactSecret(err.Error(), probeKey)}
 	}

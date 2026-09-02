@@ -99,6 +99,22 @@ type Dependencies struct {
 	// form); a nil func means "no claim data" and disables the check.
 	IssueClaimed func(repo string, number int) (ghpkg.IssueClaim, bool)
 
+	// Watsonx / OpenRouter are the LLM-provider gateway views (#5565 slice 3):
+	// narrow consumer-defined interfaces over pkg/watsonx and pkg/openrouter,
+	// with concrete adapters constructed in cmd/hive. Nil is safe — the
+	// affected routes then answer with explicit errors instead of panicking.
+	Watsonx    WatsonxGateway
+	OpenRouter OpenRouterGateway
+	// NewLinearAgent constructs the Linear agent service bundle
+	// (pkg/linearagent) behind the LinearAgentGateway interface; the dashboard
+	// calls it lazily, once, passing its kick/session-agent callbacks. Nil
+	// means Linear integration is unavailable (bare test servers).
+	NewLinearAgent func(LinearAgentPorts) LinearAgentGateway
+	// LinearStoredViewerID reports the persisted Linear install's viewer id
+	// ("" when none) plus the store path, for the assigned_only validation
+	// message. Nil disables the check's install probe.
+	LinearStoredViewerID func() (viewerID, storePath string)
+
 	// ApprovalDesk is the single tool-approval decision point (RFC #4000). Nil
 	// when `tool_approval.enabled` is false — the default — in which case every
 	// legacy gate stays authoritative and the Approvals panel renders as "not

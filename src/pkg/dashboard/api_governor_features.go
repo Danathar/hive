@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/kubestellar/hive/pkg/config"
-	"github.com/kubestellar/hive/pkg/linearagent"
 )
 
 // Sampling-ratio bounds for the tracing head-based sampler. The config treats a
@@ -523,7 +522,7 @@ func (s *Server) handleGovernorWorkSourcePut(w http.ResponseWriter, r *http.Requ
 	}
 	cfg := s.deps.Config
 	if body.Linear != nil {
-		if msg := validateLinearWorkSourcePatch(cfg, body.Linear.SessionAgent, body.Linear.AssignedOnly, body.Linear.Teams); msg != "" {
+		if msg := validateLinearWorkSourcePatch(cfg, body.Linear.SessionAgent, body.Linear.AssignedOnly, body.Linear.Teams, s.linearStoredViewerID()); msg != "" {
 			jsonError(w, msg, http.StatusBadRequest)
 			return
 		}
@@ -665,6 +664,14 @@ func linearTeamsResponse(teams []config.LinearTeamSourceConfig) []map[string]int
 	return out
 }
 
+// linearStoredViewerID returns the Dependencies install probe, or nil.
+func (s *Server) linearStoredViewerID() func() (string, string) {
+	if s.deps == nil {
+		return nil
+	}
+	return s.deps.LinearStoredViewerID
+}
+
 // validateLinearWorkSourcePatch checks the Linear fields of a work-source PUT
 // before anything is mutated. It mirrors the rules the work-source factory
 // and the session responder enforce at runtime, so the dashboard refuses to
@@ -676,7 +683,9 @@ func linearTeamsResponse(teams []config.LinearTeamSourceConfig) []map[string]int
 //     worksource.New).
 //
 // Returns the 400 message, or "" when the patch is acceptable.
-func validateLinearWorkSourcePatch(cfg *config.Config, sessionAgent *string, assignedOnly *bool, teams []config.LinearTeamSourceConfig) string {
+// storedViewerID probes the persisted Linear install (viewer id + store
+// path); nil disables the probe (bare test servers), reading as no install.
+func validateLinearWorkSourcePatch(cfg *config.Config, sessionAgent *string, assignedOnly *bool, teams []config.LinearTeamSourceConfig, storedViewerID func() (string, string)) string {
 	for i, t := range teams {
 		if strings.TrimSpace(t.Key) == "" {
 			return fmt.Sprintf("linear.teams[%d].key is required", i)
@@ -701,8 +710,12 @@ func validateLinearWorkSourcePatch(cfg *config.Config, sessionAgent *string, ass
 		}
 	}
 	if assignedOnly != nil && *assignedOnly {
-		if linearagent.StoredViewerID(linearagent.DefaultStorePath()) == "" {
-			return "assigned_only requires a connected Linear agent: connect the workspace via POST /api/linear/agent/install first (no install found at " + linearagent.DefaultStorePath() + ")"
+		viewerID, storePath := "", ""
+		if storedViewerID != nil {
+			viewerID, storePath = storedViewerID()
+		}
+		if viewerID == "" {
+			return "assigned_only requires a connected Linear agent: connect the workspace via POST /api/linear/agent/install first (no install found at " + storePath + ")"
 		}
 	}
 	return ""

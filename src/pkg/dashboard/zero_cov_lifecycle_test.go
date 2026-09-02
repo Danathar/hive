@@ -68,7 +68,7 @@ func TestSetReleaseChannel_DoesNotAffectUpstreamBranch(t *testing.T) {
 // prOpenedServer builds a Server whose lazy linearAgent() returns the given
 // pre-built service, so the test never touches linearagent.DefaultStorePath()
 // on disk (hermetic: no /data reads).
-func prOpenedServer(t *testing.T, svc *linearAgentService) *Server {
+func prOpenedServer(t *testing.T, svc *testLinearService) *Server {
 	t.Helper()
 	s := NewServer(0, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	s.linearAgentSvc = svc
@@ -79,7 +79,7 @@ func prOpenedServer(t *testing.T, svc *linearAgentService) *Server {
 // the Linear agent service exists but has no responder (store-open failure
 // path) — the pr-request watcher calls this unconditionally on every PR.
 func TestLinearAgentPROpened_NilResponder(t *testing.T) {
-	s := prOpenedServer(t, &linearAgentService{})
+	s := prOpenedServer(t, &testLinearService{})
 	// Must not panic.
 	s.LinearAgentPROpened("quality", "org/repo", 42, "https://example.test/pr/42")
 }
@@ -90,7 +90,7 @@ func TestLinearAgentPROpened_NilResponder(t *testing.T) {
 func TestLinearAgentPROpened_NoActiveSession(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	responder := linearagent.NewResponder(nil, nil, nil, linearagent.NewTracker(), logger)
-	s := prOpenedServer(t, &linearAgentService{responder: responder})
+	s := prOpenedServer(t, &testLinearService{responder: responder})
 	// Empty tracker -> HandlePROpened's ActiveSessionForAgent miss -> no-op.
 	s.LinearAgentPROpened("quality", "org/repo", 7, "https://example.test/pr/7")
 }

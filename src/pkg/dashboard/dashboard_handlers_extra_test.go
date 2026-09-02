@@ -57,6 +57,8 @@ func newFullServer(t *testing.T) *Server {
 		Config:         cfg,
 		AgentMgr:       mgr,
 		Governor:       gov,
+		Watsonx:        testWatsonxGateway{},
+		OpenRouter:     testOpenRouterGateway{},
 		BeadStores:     map[string]*beads.Store{"scanner": scannerStore},
 		Logger:         logger,
 		Ctx:            context.Background(),

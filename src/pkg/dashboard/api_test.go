@@ -61,13 +61,19 @@ func testDeps(t *testing.T) *Dependencies {
 	_ = &refreshCalled
 	_ = &persistCalled
 	return &Dependencies{
-		Config:      cfg,
-		AgentMgr:    mgr,
-		Governor:    gov,
-		Logger:      logger,
-		Ctx:         context.Background(),
-		RefreshFunc: func() { refreshCalled.Store(true) },
-		PersistFunc: func() { persistCalled.Store(true) },
+		Config:   cfg,
+		AgentMgr: mgr,
+		Governor: gov,
+		Logger:   logger,
+		Ctx:      context.Background(),
+		// Provider gateways: same real-provider adapters production wires in
+		// cmd/hive, so handler tests exercise identical behavior (#5565).
+		Watsonx:              testWatsonxGateway{},
+		OpenRouter:           testOpenRouterGateway{},
+		NewLinearAgent:       newTestLinearAgentFactory(logger, "", ""),
+		LinearStoredViewerID: testLinearStoredViewerID,
+		RefreshFunc:          func() { refreshCalled.Store(true) },
+		PersistFunc:          func() { persistCalled.Store(true) },
 	}
 }
 

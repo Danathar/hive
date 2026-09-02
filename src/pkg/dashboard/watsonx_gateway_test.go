@@ -187,7 +187,8 @@ func TestWatsonxProbeCountsModels(t *testing.T) {
 // bearer, no extra headers) so existing gateways are unaffected by the watsonx
 // wiring.
 func TestGatewayProbeAuthNonWatsonxPassthrough(t *testing.T) {
-	bearer, headers, err := gatewayProbeAuth(config.GatewayKindOpenRouter, "sk-raw-key", "")
+	s, _ := apiServer(t)
+	bearer, headers, err := s.gatewayProbeAuth(config.GatewayKindOpenRouter, "sk-raw-key", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -202,10 +203,11 @@ func TestGatewayProbeAuthNonWatsonxPassthrough(t *testing.T) {
 // The region template builds the watsonx model-gateway base URL, and a blank
 // region falls back to the default so the endpoint always resolves.
 func TestWatsonxEndpointForRegion(t *testing.T) {
-	if got := watsonxEndpointForRegion("eu-de"); got != "https://eu-de.ml.cloud.ibm.com/ml/gateway" {
+	s, _ := apiServer(t)
+	if got := s.watsonxEndpointForRegion("eu-de"); got != "https://eu-de.ml.cloud.ibm.com/ml/gateway" {
 		t.Fatalf("eu-de endpoint = %q", got)
 	}
-	if got := watsonxEndpointForRegion("  "); got != "https://us-south.ml.cloud.ibm.com/ml/gateway" {
+	if got := s.watsonxEndpointForRegion("  "); got != "https://us-south.ml.cloud.ibm.com/ml/gateway" {
 		t.Fatalf("blank region should fall back to the default region, got %q", got)
 	}
 }

@@ -7047,7 +7047,7 @@ func (s *Server) fetchInferenceModelsForBackendDetailed(backend string, endpoint
 	if gw == nil || !gatewayKindNeedsProbeAuth(gw.Kind) {
 		return fetchModelsFromEndpointsDetailed(endpoints, s.inferenceAPIKey(backend))
 	}
-	bearer, headers, err := gatewayProbeAuth(gw.Kind, gw.ResolveAPIKey(), gw.ProjectID)
+	bearer, headers, err := s.gatewayProbeAuth(gw.Kind, gw.ResolveAPIKey(), gw.ProjectID)
 	if err != nil {
 		s.logger.Warn("gateway auth for model discovery failed",
 			"backend", backend, "kind", gw.Kind, "error", err)
