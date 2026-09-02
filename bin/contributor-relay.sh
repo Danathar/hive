@@ -2213,7 +2213,30 @@ function classifyTmuxPane(text) {
     // unknown Claude UI still errs toward busy.
     hasIdlePrompt = /⏵⏵|← for agents|bypass permissions|shift\+tab to cycle/.test(claudeTail);
     hasCompletionMarker = /[✻✶✽] \S+ed for \d+[ms]|Honking|tokens\)/.test(text);
-    const claudeBusyMarker = /esc to interrupt/i.test(claudeTail);
+    // #5654: Claude Code retries a dropped API connection SILENTLY — no
+    // "● API Error:" chrome, just a spinner-glyph countdown line:
+    //
+    //   ✻ Waiting for API response · will retry in 1m 57s · check your network
+    //
+    // That pane is mid-turn, but every gate below said otherwise: no busy
+    // marker, no recognised error line, and the persistent ⏵⏵ footer plus a
+    // PREVIOUS turn's "✻ Worked for …" summary satisfied the completion test —
+    // the ✻ glyph is Claude's spinner, not a completion signal — so a stalled
+    // agent could be booked IDLE_COMPLETE mid-turn. A retry countdown is the
+    // CLI saying it is still working, so it counts as a BUSY marker: the task
+    // stays WORKING, nothing is typed into the pane (interrupting a self-
+    // recovering retry would cause the stall it prevents — see the ordering
+    // note above paneShowsUnretryableAPIError below), and a retry loop that
+    // never resolves is bounded by the existing stall backstop and
+    // MAX_TASK_DURATION rather than mis-booked here.
+    //
+    // The two halves of the line are matched independently because a narrow
+    // pane wraps it; the digit anchor on "will retry in" keeps completed-turn
+    // prose ("the job will retry indefinitely") from pinning an idle pane, and
+    // the tail scope — same window as every other marker in this branch —
+    // keeps a scrolled-past mention from doing so either.
+    const claudeRetryMarker = /Waiting for API response|will retry in \d/i.test(claudeTail);
+    const claudeBusyMarker = /esc to interrupt/i.test(claudeTail) || claudeRetryMarker;
     isWorking = claudeBusyMarker ||
       (!hasIdlePrompt && (/─.*Bash\(|Reading|Editing|Writing|Searching/.test(claudeTail) || /ing…/.test(claudeTail)));
   } else if (BACKEND === 'copilot') {
