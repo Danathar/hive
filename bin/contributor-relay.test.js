@@ -4420,14 +4420,25 @@ test('#5277 the newest client decides — one active client protects the pane', 
 });
 
 test('#5277 a suppressed nudge still consumes no retry budget', () => {
+  // The pane CHANGES on every tick here, which is what a person composing at it
+  // looks like. It used to be a constant — but #5685 established that a
+  // constant pane with advancing client_activity is an attached-but-unused
+  // terminal answering the CLI's queries, not a human, and that case now
+  // correctly retries. The property this test exists for is unchanged: while
+  // the relay is refusing to type, it must not spend a retry the agent never
+  // got. Ticked to the deferral cap, since past it the relay retries by design
+  // (see the #5685 block below).
+  let typed = '';
   const relay = loadRelay({
-    backend: 'claude', paneText: CLAUDE_API_ERROR_PANE,
+    backend: 'claude',
+    paneText: () => CLAUDE_API_ERROR_PANE.replace('\u276f ', `\u276f ${typed}`),
     attachedClients: true, attachedIdleMs: 10 * 1000,
   });
   try {
     relay.setCliReady(true);
     assignTask(relay, 't-budget');
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < relay.HUMAN_PRESENCE_MAX_DEFERRALS; i++) {
+      typed += 'x';
       relay.__clearTransientNudgeCooldown();
       relay.__crashTick();
     }
@@ -4435,6 +4446,179 @@ test('#5277 a suppressed nudge still consumes no retry budget', () => {
       'refusing to type must not spend a retry the agent never got');
     assert.strictEqual(relay.__sent.filter(m => m.type === 'task_failed').length, 0,
       'and it must not exhaust the budget into a failure either');
+  } finally { teardown(relay); }
+});
+
+// ---------------------------------------------------------------------------
+// kubestellar/hive#5685 — "this client sent bytes" is not "a human typed".
+//
+// #5277 replaced one proxy (a client is attached) with a slightly better proxy
+// (a client sent input recently). tmux's `client_activity` advances whenever a
+// client sends BYTES, and a terminal emulator sends bytes on its own: replies
+// to the capability, colour and cursor-position queries the running application
+// writes, plus mouse and focus reports where enabled. A Claude Code TUI issues
+// such queries on its own schedule, so an ATTACHED BUT UNUSED tab keeps
+// client_activity advancing forever and every retryable API error parked.
+//
+// Observed live and confirmed causally: four consecutive deferrals over six
+// minutes with nobody typing (mouse reporting off, focus-events off), released
+// the instant `tmux detach-client` ran — same relay, same task, same error, no
+// keystrokes. The old tests could only exercise the proxy, which is why this
+// passed: every one of them held the pane CONSTANT while claiming a human was
+// there, which is precisely the state that is now known not to be a human.
+//
+// The fix corroborates client_activity with the observation that actually
+// separates the two cases — a keystroke draws something, a query reply does
+// not — and caps the deferral so no presence signal can park a task forever.
+// ---------------------------------------------------------------------------
+
+test('#5685 an attached-but-unused terminal no longer blocks recovery', () => {
+  // The incident, exactly. The stub answers list-clients with a FRESH timestamp
+  // on every call, so client_activity advances on every tick just as a real
+  // terminal answering queries makes it. The pane never changes, because nobody
+  // is typing into it.
+  const relay = loadRelay({
+    backend: 'claude', paneText: CLAUDE_API_ERROR_PANE,
+    attachedClients: true, attachedIdleMs: 60 * 1000,
+  });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-unused-tab');
+    const before = relay.__tmuxSends().length;
+
+    // Tick one has no earlier pane to compare against, so it defers — one tick,
+    // by design, and the cap bounds it even if that reasoning were wrong.
+    relay.__crashTick();
+    assert.strictEqual(relay.getTransientNudgeCount(), 0,
+      'the first reading has no baseline, so it defers');
+
+    // Tick two can see the pane is byte-for-byte what it was, while tmux still
+    // reports input a minute ago. That combination is a terminal talking.
+    relay.__clearTransientNudgeCooldown();
+    relay.__crashTick();
+    assert.ok(relay.__tmuxSends().slice(before).some(c => c.includes(relay.TRANSIENT_API_ERROR_NUDGE_MESSAGE)),
+      'client_activity advancing over an unchanged pane is the terminal answering ' +
+      'the CLI, not a person — the retry must be typed');
+    assert.strictEqual(relay.getTransientNudgeCount(), 1);
+  } finally { teardown(relay); }
+});
+
+test('#5685 someone actually typing still owns the pane', () => {
+  // The control, and the reason the fix is not just "ignore client_activity".
+  // A person composing changes what is drawn; that, plus recent input, is a
+  // human. Without this the fix could pass by never deferring at all.
+  let typed = '';
+  const relay = loadRelay({
+    backend: 'claude',
+    paneText: () => CLAUDE_API_ERROR_PANE.replace('\u276f ', `\u276f ${typed}`),
+    attachedClients: true, attachedIdleMs: 10 * 1000,
+  });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-real-human');
+    const before = relay.__tmuxSends().length;
+    for (let i = 0; i < 2; i++) {
+      typed += 'why did you ';
+      relay.__clearTransientNudgeCooldown();
+      relay.__crashTick();
+    }
+    assert.ok(!relay.__tmuxSends().slice(before).some(c => c.includes(relay.TRANSIENT_API_ERROR_NUDGE_MESSAGE)),
+      'a pane that changes while a client reports input is someone composing');
+    const blocked = relay.__sent.filter(m => m.status === 'blocked_on_human');
+    assert.strictEqual(blocked.length, 2, 'and they should be told the agent needs them');
+    assert.strictEqual(blocked[0].attention, true);
+  } finally { teardown(relay); }
+});
+
+test('#5685 no presence signal can park a task forever', () => {
+  // Option (4) from the issue: whatever presence says, stop deferring after N
+  // ticks. This is the mechanism that bounds the damage of the NEXT wrong
+  // proxy, so it is pinned against the strongest possible presence reading —
+  // a pane changing every tick with input reported seconds ago.
+  let typed = '';
+  const relay = loadRelay({
+    backend: 'claude',
+    paneText: () => CLAUDE_API_ERROR_PANE.replace('\u276f ', `\u276f ${typed}`),
+    attachedClients: true, attachedIdleMs: 5 * 1000,
+  });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-capped');
+    const before = relay.__tmuxSends().length;
+    const cap = relay.HUMAN_PRESENCE_MAX_DEFERRALS;
+
+    for (let i = 0; i < cap; i++) {
+      typed += 'x';
+      relay.__clearTransientNudgeCooldown();
+      relay.__crashTick();
+    }
+    assert.strictEqual(relay.getTransientNudgeCount(), 0,
+      `the first ${cap} ticks are the human's`);
+    assert.strictEqual(relay.getPresenceDeferralCount(), cap);
+
+    typed += 'x';
+    relay.__clearTransientNudgeCooldown();
+    relay.__crashTick();
+    assert.ok(relay.__tmuxSends().slice(before).some(c => c.includes(relay.TRANSIENT_API_ERROR_NUDGE_MESSAGE)),
+      'past the cap the relay retries rather than parking the task on a signal ' +
+      'it cannot verify');
+  } finally { teardown(relay); }
+});
+
+test('#5685 paneEditedSincePresenceCheck reads keystrokes, not client chatter', () => {
+  const relay = loadRelay({ backend: 'claude' });
+  try {
+    const pane = ['● API Error: Connection lost mid-response.', '❯ '];
+
+    assert.strictEqual(relay.paneEditedSincePresenceCheck(pane), true,
+      'the first reading has nothing to compare against, so it must not claim quiet');
+    assert.strictEqual(relay.paneEditedSincePresenceCheck(pane), false,
+      'an identical pane is positive evidence that nobody typed');
+    assert.strictEqual(relay.paneEditedSincePresenceCheck(['● API Error: Connection lost mid-response.', '❯ wait']), true,
+      'a composed character changes the pane');
+    assert.strictEqual(relay.paneEditedSincePresenceCheck([]), true,
+      'an empty capture is tmux telling us nothing, which resolves to "someone is there"');
+
+    // The reset is what keeps one task's final pane from being the next task's
+    // baseline — which would read the first tick of new work as a keystroke.
+    relay.resetHumanPresenceEvidence();
+    assert.strictEqual(relay.paneEditedSincePresenceCheck(pane), true,
+      'after a reset there is no baseline again');
+  } finally { teardown(relay); }
+});
+
+test('#5685 a new task starts with a clean deferral budget', () => {
+  // A budget spent deferring one task must not deny the next its retries, and
+  // one task's final pane must not be the next task's baseline. Sequenced the
+  // way #5094 does it — and the way the hub actually drives it — with the first
+  // task handed back before a second is assigned.
+  let typed = '';
+  const relay = loadRelay({
+    backend: 'claude',
+    paneText: () => CLAUDE_API_ERROR_PANE.replace('\u276f ', `\u276f ${typed}`),
+    attachedClients: true, attachedIdleMs: 10 * 1000,
+  });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-first');
+    typed += 'x';
+    relay.__crashTick();
+    assert.ok(relay.getPresenceDeferralCount() > 0, 'the first task deferred at least once');
+
+    // Burn the rest of the first task: deferrals to the cap, then retries to
+    // the retry budget, which hands it back.
+    for (let i = 0; i < relay.HUMAN_PRESENCE_MAX_DEFERRALS + relay.TRANSIENT_API_ERROR_MAX_NUDGES + 1; i++) {
+      typed += 'x';
+      relay.__clearTransientNudgeCooldown();
+      relay.__crashTick();
+    }
+    assert.ok(!relay.getCurrentTask(), 'the first task must be released before the next');
+
+    assignTask(relay, 't-second');
+    assert.strictEqual(relay.getPresenceDeferralCount(), 0,
+      'the new task starts with its own deferral budget');
+    assert.strictEqual(relay.getTransientNudgeCount(), 0,
+      'and its own retry budget');
   } finally { teardown(relay); }
 });
 
