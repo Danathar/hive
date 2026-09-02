@@ -1168,6 +1168,39 @@ func (a AgentConfig) BackendIsOperatorOwned() bool {
 	return a.BackendOwner == FieldOwnerOperator
 }
 
+// CadenceIsOperatorOwned reports whether an operator explicitly set the
+// cadence for agent in the given governor mode, which makes it immune to pack
+// reconciliation — the same contract ModelIsOperatorOwned provides for models.
+func (g *GovernorConfig) CadenceIsOperatorOwned(mode, agent string) bool {
+	return g.CadenceOwners[mode][agent] == FieldOwnerOperator
+}
+
+// ClaimCadenceOwnership marks the (mode, agent) cadence as operator-owned so
+// no subsequent pack apply reconciles it back to the pack default.
+func (g *GovernorConfig) ClaimCadenceOwnership(mode, agent string) {
+	if g.CadenceOwners == nil {
+		g.CadenceOwners = make(map[string]map[string]string)
+	}
+	if g.CadenceOwners[mode] == nil {
+		g.CadenceOwners[mode] = make(map[string]string)
+	}
+	g.CadenceOwners[mode][agent] = FieldOwnerOperator
+}
+
+// ReleaseCadenceOwnership drops the ownership marker for (mode, agent). Called
+// when the cadence entry itself is removed (e.g. the agent left the roster) so
+// a stale claim cannot outlive the value it protected.
+func (g *GovernorConfig) ReleaseCadenceOwnership(mode, agent string) {
+	owners, ok := g.CadenceOwners[mode]
+	if !ok {
+		return
+	}
+	delete(owners, agent)
+	if len(owners) == 0 {
+		delete(g.CadenceOwners, mode)
+	}
+}
+
 // EnabledExplicitlySet returns true when the user's YAML explicitly set the
 // "enabled" field (allowing us to distinguish "not specified" from "enabled: false").
 func (a *AgentConfig) EnabledExplicitlySet() bool {
@@ -1253,6 +1286,23 @@ type GovernorConfig struct {
 	// which cannot invert. It also keeps `threshold_source` out of ModeConfig's
 	// flat YAML map, where every non-`threshold` key is an agent cadence.
 	ThresholdsSource string `yaml:"thresholds_source,omitempty" json:"thresholds_source,omitempty"`
+
+	// CadenceOwners records WHO last set each governor mode cadence, keyed
+	// mode → agent → owner (FieldOwnerOperator). It is the cadence analogue of
+	// AgentConfig.ModelOwner/BackendOwner (#5558): a pack could never stomp an
+	// operator's model, but could always stomp their cadence — the asymmetry
+	// behind #5632, where every steady-state ApplyPack silently reverted
+	// operator-set cadences to the pack defaults. Only operator claims are
+	// recorded; an absent entry means "pack-owned (or pre-dating this field)",
+	// which keeps existing hives on today's behavior until an operator
+	// actually edits a cadence.
+	//
+	// Unlike ThresholdsSource this IS per-entry: cadences cannot invert a mode
+	// ladder the way thresholds can, and per-entry is exactly the granularity
+	// the Governor grid edits at. It lives here, not in ModeConfig, because
+	// ModeConfig's flat YAML map treats every non-`threshold` key as an agent
+	// cadence.
+	CadenceOwners map[string]map[string]string `yaml:"cadence_owners,omitempty" json:"cadence_owners,omitempty"`
 
 	// Advisory tunes the advisory digest experience: how many findings the
 	// digest shows, and how long a finding may go un-reconfirmed before the
@@ -4053,6 +4103,13 @@ func LoadWithDashboardOverlay(path string) (*Config, error) {
 	if !overlay.Governor.WorkSource.IsZero() {
 		cfg.Governor.WorkSource = overlay.Governor.WorkSource
 	}
+	// Operator-owned governor cadences (#5632): PUT /api/config/agent/{name}/
+	// cadences persists to the overlay, but this reload used to rebuild
+	// Governor.Modes from the seed alone — so a ConfigMap remount dropped both
+	// the operator's cadence AND its ownership marker from memory, and the next
+	// pack apply saw nothing to respect. Adopt them BEFORE the fullness guard,
+	// like WorkSource, so a short overlay still carries them.
+	adoptOperatorCadenceOverrides(cfg, &overlay)
 	if len(overlay.RemovedAgents) > 0 {
 		cfg.RemovedAgents = overlay.RemovedAgents
 		cfg.PruneRemovedAgents()
@@ -4085,6 +4142,41 @@ func LoadWithDashboardOverlay(path string) (*Config, error) {
 	// so honoring its resolver policy would let a compromised overlay enable
 	// script/http execution. Keep this true if overlay merging is ever expanded.
 	return cfg, nil
+}
+
+// adoptOperatorCadenceOverrides re-applies the dashboard overlay's
+// OPERATOR-OWNED governor cadences (and their ownership markers) on top of the
+// seed's governor config. Only entries the overlay marks FieldOwnerOperator
+// are copied — pack-seeded cadences keep following the seed, so this cannot
+// carry a stale pack value forward. Nothing here touches overlay.Variables or
+// any other security-sensitive block (see the invariant at the end of
+// LoadWithDashboardOverlay).
+func adoptOperatorCadenceOverrides(cfg *Config, overlay *Config) {
+	for modeName, owners := range overlay.Governor.CadenceOwners {
+		overlayMode, hasMode := overlay.Governor.Modes[modeName]
+		if !hasMode {
+			continue
+		}
+		for agentName, owner := range owners {
+			if owner != FieldOwnerOperator {
+				continue
+			}
+			cadence, hasCadence := overlayMode.Cadences[agentName]
+			if !hasCadence {
+				continue
+			}
+			if cfg.Governor.Modes == nil {
+				cfg.Governor.Modes = make(map[string]ModeConfig)
+			}
+			mode := cfg.Governor.Modes[modeName]
+			if mode.Cadences == nil {
+				mode.Cadences = make(map[string]Cadence)
+			}
+			mode.Cadences[agentName] = cadence
+			cfg.Governor.Modes[modeName] = mode
+			cfg.Governor.ClaimCadenceOwnership(modeName, agentName)
+		}
+	}
 }
 
 // findConfigEnv returns the path to a config.env file, or "" if none found.

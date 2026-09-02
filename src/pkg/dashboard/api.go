@@ -3726,6 +3726,11 @@ func (s *Server) handleAgentConfigCadences(w http.ResponseWriter, r *http.Reques
 			mode.Cadences[name] = cadence
 		}
 		s.deps.Config.Governor.Modes[modeName] = mode
+		// Operator edits claim ownership so the pack apply that runs on every
+		// restart (and on steady-state re-applies) cannot reconcile the cadence
+		// back to the pack default — the same contract model/backend edits
+		// already have (#5632).
+		s.deps.Config.Governor.ClaimCadenceOwnership(modeName, name)
 	}
 
 	if err := s.saveConfig(); err != nil {
