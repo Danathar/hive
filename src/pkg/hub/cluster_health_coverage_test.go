@@ -118,6 +118,10 @@ func TestHandleUpgradeHiveSuccess(t *testing.T) {
 		ID: "h1", GitBranch: "v2",
 		LastHeartbeat: time.Now().UTC().Format(time.RFC3339),
 	}}
+	// The handler can only arm an upgrade after the image poller has resolved a
+	// build for the hive's branch. Seed that production precondition explicitly
+	// instead of depending on a preceding test to leak its v2 cache entry.
+	setLatestSHAForBranchForTest(t, "v2", "upgrade-target")
 
 	rec := httptest.NewRecorder()
 	req := setPathValue(reqWithUser("POST", "/up", "", "alice"), "id", "h1")
