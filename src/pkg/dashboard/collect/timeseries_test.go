@@ -1,6 +1,9 @@
-package dashboard
+package collect
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // tsEntry is a minimal entry type for exercising the generic timeSeries.
 type tsEntry struct {
@@ -12,20 +15,20 @@ func tsTsOf(e tsEntry) int64 { return e.T }
 
 // TestTimeSeriesAppendAndSnapshot verifies appends land and snapshot copies.
 func TestTimeSeriesAppendAndSnapshot(t *testing.T) {
-	ts := newTimeSeries(10, 0, tsTsOf)
-	if ts.len() != 0 {
-		t.Fatalf("fresh len = %d, want 0", ts.len())
+	ts := NewTimeSeries(10, 0, tsTsOf)
+	if ts.Len() != 0 {
+		t.Fatalf("fresh len = %d, want 0", ts.Len())
 	}
-	if !ts.append(tsEntry{T: 1, Val: 100}) {
+	if !ts.Append(tsEntry{T: 1, Val: 100}) {
 		t.Fatal("first append should store")
 	}
-	got := ts.snapshot()
+	got := ts.Snapshot()
 	if len(got) != 1 || got[0].Val != 100 {
 		t.Fatalf("snapshot = %+v, want one entry val=100", got)
 	}
 	// Mutating the returned copy must not leak into the buffer.
 	got[0].Val = 999
-	if again := ts.snapshot(); again[0].Val != 100 {
+	if again := ts.Snapshot(); again[0].Val != 100 {
 		t.Errorf("snapshot is not a copy: got %d", again[0].Val)
 	}
 }
@@ -34,49 +37,49 @@ func TestTimeSeriesAppendAndSnapshot(t *testing.T) {
 // second append and admits one past the interval.
 func TestTimeSeriesThrottle(t *testing.T) {
 	const interval = 300_000
-	ts := newTimeSeries(10, interval, tsTsOf)
+	ts := NewTimeSeries(10, interval, tsTsOf)
 
-	if !ts.append(tsEntry{T: 1000}) {
+	if !ts.Append(tsEntry{T: 1000}) {
 		t.Fatal("first append should store")
 	}
 	// Within the interval → suppressed.
-	if ts.append(tsEntry{T: 1000 + interval - 1}) {
+	if ts.Append(tsEntry{T: 1000 + interval - 1}) {
 		t.Error("append within interval should be suppressed")
 	}
-	if ts.len() != 1 {
-		t.Fatalf("len = %d, want 1 after throttled append", ts.len())
+	if ts.Len() != 1 {
+		t.Fatalf("len = %d, want 1 after throttled append", ts.Len())
 	}
 	// At/after the interval → admitted.
-	if !ts.append(tsEntry{T: 1000 + interval}) {
+	if !ts.Append(tsEntry{T: 1000 + interval}) {
 		t.Error("append at interval boundary should be admitted")
 	}
-	if ts.len() != 2 {
-		t.Fatalf("len = %d, want 2", ts.len())
+	if ts.Len() != 2 {
+		t.Fatalf("len = %d, want 2", ts.Len())
 	}
 }
 
 // TestTimeSeriesNoThrottle verifies a 0 interval admits every append (token
 // history behavior).
 func TestTimeSeriesNoThrottle(t *testing.T) {
-	ts := newTimeSeries(10, 0, tsTsOf)
+	ts := NewTimeSeries(10, 0, tsTsOf)
 	for i := 0; i < 5; i++ {
-		if !ts.append(tsEntry{T: int64(i)}) {
+		if !ts.Append(tsEntry{T: int64(i)}) {
 			t.Fatalf("append %d suppressed with no throttle", i)
 		}
 	}
-	if ts.len() != 5 {
-		t.Fatalf("len = %d, want 5", ts.len())
+	if ts.Len() != 5 {
+		t.Fatalf("len = %d, want 5", ts.Len())
 	}
 }
 
 // TestTimeSeriesCap verifies the ring buffer keeps only the most-recent tail.
 func TestTimeSeriesCap(t *testing.T) {
 	const capacity = 3
-	ts := newTimeSeries(capacity, 0, tsTsOf)
+	ts := NewTimeSeries(capacity, 0, tsTsOf)
 	for i := 0; i < 6; i++ {
-		ts.append(tsEntry{T: int64(i), Val: i})
+		ts.Append(tsEntry{T: int64(i), Val: i})
 	}
-	got := ts.snapshot()
+	got := ts.Snapshot()
 	if len(got) != capacity {
 		t.Fatalf("len = %d, want cap %d", len(got), capacity)
 	}
@@ -90,19 +93,31 @@ func TestTimeSeriesCap(t *testing.T) {
 // most-recent tail and preserves ordering.
 func TestTimeSeriesSeedTrimsToTail(t *testing.T) {
 	const capacity = 4
-	ts := newTimeSeries(capacity, 0, tsTsOf)
+	ts := NewTimeSeries(capacity, 0, tsTsOf)
 
 	over := make([]tsEntry, 10)
 	for i := range over {
 		over[i] = tsEntry{T: int64(i), Val: i}
 	}
-	ts.seed(over)
+	ts.Seed(over)
 
-	got := ts.snapshot()
+	got := ts.Snapshot()
 	if len(got) != capacity {
 		t.Fatalf("seeded len = %d, want cap %d", len(got), capacity)
 	}
 	if got[0].Val != 6 || got[len(got)-1].Val != 9 {
 		t.Errorf("kept tail = %d..%d, want 6..9", got[0].Val, got[len(got)-1].Val)
+	}
+}
+
+// NowMillis is the stamping clock for every history entry; pin it to the
+// wall clock's millisecond epoch so a drifting implementation cannot skew
+// throttle comparisons.
+func TestNowMillis(t *testing.T) {
+	before := time.Now().UnixMilli()
+	got := NowMillis()
+	after := time.Now().UnixMilli()
+	if got < before || got > after {
+		t.Fatalf("NowMillis() = %d, want within [%d, %d]", got, before, after)
 	}
 }

@@ -54,6 +54,7 @@ import (
 	"github.com/kubestellar/hive/pkg/classify"
 	"github.com/kubestellar/hive/pkg/config"
 	"github.com/kubestellar/hive/pkg/dashboard"
+	"github.com/kubestellar/hive/pkg/dashboard/collect"
 	"github.com/kubestellar/hive/pkg/defsrc"
 	"github.com/kubestellar/hive/pkg/discord"
 	"github.com/kubestellar/hive/pkg/escalation"
@@ -1384,7 +1385,7 @@ func main() {
 	// A missing or unparseable file is ordinary on a hive upgrading into this
 	// feature — it simply starts with no history rather than failing to boot.
 	const budgetWindowHistoryPath = "/data/budget-window-history.json"
-	var pendingBudgetWindowSeed []dashboard.BudgetWindowEntry
+	var pendingBudgetWindowSeed []collect.BudgetWindowEntry
 	if budgetData, err := os.ReadFile(budgetWindowHistoryPath); err == nil {
 		if err := json.Unmarshal(budgetData, &pendingBudgetWindowSeed); err == nil && len(pendingBudgetWindowSeed) > 0 {
 			logger.Info("budget window history loaded", "entries", len(pendingBudgetWindowSeed))
@@ -2183,7 +2184,7 @@ func main() {
 			"set project.ai_author in hive.yaml so this hive contributes to the fleet total",
 			"author", fleetStatsAuthor, "org", cfg.Project.Org)
 	}
-	fleetStatsCollector := dashboard.NewFleetStatsCollector(ghClient, fleetStatsAuthor, cfg.Project.Org, logger)
+	fleetStatsCollector := collect.NewFleetStatsCollector(ghClient, fleetStatsAuthor, cfg.Project.Org, logger)
 	// Persist the collected counts on the /data PVC (same store as sessions and
 	// cost/fact history) so a restart resumes from the last-known counts instead
 	// of nil. Without this, a fleet-wide upgrade clears every spoke's in-memory
@@ -2198,7 +2199,7 @@ func main() {
 	// hive is producing output back to its work source. Persisted to the /data
 	// PVC so a restart resumes the last summary; the collector loop reads
 	// /data/audit.jsonl every few minutes.
-	activityCollector := dashboard.NewActivityCollector(dashSrv.GetAudit(), "", logger)
+	activityCollector := collect.NewActivityCollector(dashSrv.GetAudit(), "", logger)
 	activityCollector.EnablePersistence("/data/activity.json")
 	go activityCollector.Start(ctx)
 
@@ -2209,7 +2210,7 @@ func main() {
 	// the same expensive audit read the activity collector does — ran on
 	// every 60s dashboard poll, per open browser tab, instead of once per
 	// collection interval.
-	repoCostCollector := dashboard.NewRepoCostCollector(dashSrv.GetAudit(), tokenCollector, "", logger)
+	repoCostCollector := collect.NewRepoCostCollector(dashSrv.GetAudit(), tokenCollector, "", logger)
 	repoCostCollector.EnablePersistence("/data/repo-cost.json")
 	go repoCostCollector.Start(ctx)
 
@@ -5056,11 +5057,11 @@ const (
 // import pkg/dashboard back — that would be an import cycle, since dashboard
 // already imports hub. A field-by-field copy, mirroring how the fleet-stat
 // scalars are lifted out of their snapshot at the beat's build site.
-func buildRepoActivityWire(repos []dashboard.RepoActivity) []hub.RepoActivityWire {
+func buildRepoActivityWire(repos []collect.RepoActivity) []hub.RepoActivityWire {
 	if len(repos) == 0 {
 		return nil
 	}
-	stat := func(s dashboard.ActivityActionStat) hub.ActivityStatWire {
+	stat := func(s collect.ActivityActionStat) hub.ActivityStatWire {
 		return hub.ActivityStatWire{Count: s.Count, NewestAt: s.NewestAt}
 	}
 	out := make([]hub.RepoActivityWire, 0, len(repos))

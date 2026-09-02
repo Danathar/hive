@@ -1,4 +1,4 @@
-package dashboard
+package collect
 
 import (
 	"testing"
@@ -37,7 +37,7 @@ func rcSession(id, agent string, usage ...tokens.UsageEvent) tokens.SessionSumma
 	return s
 }
 
-func findRepo(t *testing.T, resp repoCostResponse, repo string) repoCostEntry {
+func findRepo(t *testing.T, resp RepoCostResponse, repo string) RepoCostEntry {
 	t.Helper()
 	for _, e := range resp.ByRepo {
 		if e.Repo == repo {
@@ -45,7 +45,7 @@ func findRepo(t *testing.T, resp repoCostResponse, repo string) repoCostEntry {
 		}
 	}
 	t.Fatalf("repo %q not in by_repo: %+v", repo, resp.ByRepo)
-	return repoCostEntry{}
+	return RepoCostEntry{}
 }
 
 // TestRepoCostPartitionInvariant is the epic's hard requirement #1, written as
@@ -86,7 +86,7 @@ func TestRepoCostPartitionInvariant(t *testing.T) {
 		rcEvent(rcTime(base, 20), "scanner", "org/repo-b"),
 	}
 
-	resp := computeRepoCost(summary, entries, now)
+	resp := ComputeRepoCost(summary, entries, now)
 
 	sum := resp.Unattributed.Tokens + resp.BackendUnsupported.Tokens
 	for _, e := range resp.ByRepo {
@@ -117,7 +117,7 @@ func TestRepoCostAttributesToClosingEvent(t *testing.T) {
 		rcEvent(rcTime(base, 20), "scanner", "org/repo-b"),
 	}
 
-	resp := computeRepoCost(summary, entries, now)
+	resp := ComputeRepoCost(summary, entries, now)
 	b := findRepo(t, resp, "org/repo-b")
 	if b.Tokens != 1100 {
 		t.Fatalf("closing repo tokens = %d, want 1100", b.Tokens)
@@ -140,7 +140,7 @@ func TestRepoCostNeverAttributesLeadingInterval(t *testing.T) {
 	}}
 	entries := []AuditEntry{rcEvent(rcTime(base, 10), "scanner", "org/repo-a")}
 
-	resp := computeRepoCost(summary, entries, now)
+	resp := ComputeRepoCost(summary, entries, now)
 	if len(resp.ByRepo) != 0 {
 		t.Fatalf("leading interval was attributed: %+v", resp.ByRepo)
 	}
@@ -157,7 +157,7 @@ func TestRepoCostBackendUnsupportedCarriesNonClaude(t *testing.T) {
 		{SessionID: "c1", Agent: "a", Model: "gpt-5", Backend: tokens.BackendCopilot, InputTokens: 100, OutputTokens: 10, TotalTokens: 110},
 		{SessionID: "b1", Agent: "a", Model: "bob", Backend: tokens.BackendBob, InputTokens: 200, OutputTokens: 20, TotalTokens: 220},
 	}}
-	resp := computeRepoCost(summary, nil, now)
+	resp := ComputeRepoCost(summary, nil, now)
 	if resp.BackendUnsupported.Tokens != 330 {
 		t.Fatalf("backend_unsupported tokens = %d, want 330", resp.BackendUnsupported.Tokens)
 	}
@@ -169,7 +169,7 @@ func TestRepoCostBackendUnsupportedCarriesNonClaude(t *testing.T) {
 // TestRepoCostNilNotZero: hard requirement #3. An untouched bucket reports null
 // so the UI renders "—", never "$0.00".
 func TestRepoCostNilNotZero(t *testing.T) {
-	resp := computeRepoCost(&tokens.AggregateSummary{}, nil, time.Now())
+	resp := ComputeRepoCost(&tokens.AggregateSummary{}, nil, time.Now())
 	if resp.Unattributed.USD != nil {
 		t.Fatalf("unattributed USD = %v, want nil (no cost attributed != $0.00)", *resp.Unattributed.USD)
 	}
@@ -177,7 +177,7 @@ func TestRepoCostNilNotZero(t *testing.T) {
 		t.Fatalf("backend_unsupported USD = %v, want nil", *resp.BackendUnsupported.USD)
 	}
 	// The mandatory buckets must still be PRESENT even when empty.
-	if resp.Unattributed.Repo != repoCostBucketUnattributed || resp.BackendUnsupported.Repo != repoCostBucketBackendUnsupported {
+	if resp.Unattributed.Repo != RepoCostBucketUnattributed || resp.BackendUnsupported.Repo != RepoCostBucketBackendUnsupported {
 		t.Fatalf("mandatory buckets missing: %+v %+v", resp.Unattributed, resp.BackendUnsupported)
 	}
 }
@@ -197,7 +197,7 @@ func TestRepoCostUnknownTimestampIsUnattributed(t *testing.T) {
 		rcEvent(rcTime(base, 10), "scanner", "org/repo-a"),
 		rcEvent(rcTime(base, 20), "scanner", "org/repo-b"),
 	}
-	resp := computeRepoCost(summary, entries, now)
+	resp := ComputeRepoCost(summary, entries, now)
 	if resp.Unattributed.Tokens != 500 {
 		t.Fatalf("unattributed = %d, want 500 (the zero-timestamp event)", resp.Unattributed.Tokens)
 	}
@@ -218,7 +218,7 @@ func TestRepoCostPerAgentIsolation(t *testing.T) {
 		rcEvent(rcTime(base, 10), "scanner", "org/repo-a"),
 		rcEvent(rcTime(base, 20), "scanner", "org/repo-b"),
 	}
-	resp := computeRepoCost(summary, entries, now)
+	resp := ComputeRepoCost(summary, entries, now)
 	if len(resp.ByRepo) != 0 {
 		t.Fatalf("another agent's events attributed these tokens: %+v", resp.ByRepo)
 	}
@@ -236,8 +236,8 @@ func TestRepoCostReportsWindow(t *testing.T) {
 		rcEvent(rcTime(base, 20), "scanner", "org/repo-b"),
 		rcEvent(rcTime(base, 10), "scanner", "org/repo-a"),
 	}
-	resp := computeRepoCost(&tokens.AggregateSummary{}, entries, now)
-	if resp.WindowHours != int(repoCostWindow/time.Hour) {
+	resp := ComputeRepoCost(&tokens.AggregateSummary{}, entries, now)
+	if resp.WindowHours != int(RepoCostWindow/time.Hour) {
 		t.Fatalf("WindowHours = %d", resp.WindowHours)
 	}
 	if resp.OldestEventAt != rcTime(base, 10).UTC().Format(time.RFC3339) {
@@ -268,7 +268,7 @@ func TestRepoCostEventsCountOnlyRealClosers(t *testing.T) {
 		rcEvent(rcTime(base, 30), "scanner", "org/repo-a"), // closes an EMPTY interval
 	}
 
-	resp := computeRepoCost(summary, entries, now)
+	resp := ComputeRepoCost(summary, entries, now)
 	a := findRepo(t, resp, "org/repo-a")
 	if a.Events != 1 {
 		t.Fatalf("Events = %d, want 1 (only the event that closed a non-empty interval)", a.Events)
@@ -292,7 +292,7 @@ func TestRepoCostTierPricingIsTagged(t *testing.T) {
 		rcEvent(rcTime(base, 10), "scanner", "org/repo-a"),
 		rcEvent(rcTime(base, 20), "scanner", "org/repo-b"),
 	}
-	resp := computeRepoCost(summary, entries, now)
+	resp := ComputeRepoCost(summary, entries, now)
 	if got := findRepo(t, resp, "org/repo-b").Source; got != "estimated_tier" {
 		t.Fatalf("Source = %q, want estimated_tier for an unpriced model", got)
 	}

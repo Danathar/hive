@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/kubestellar/hive/pkg/config"
+	"github.com/kubestellar/hive/pkg/dashboard/collect"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
@@ -43,17 +44,10 @@ var auditPseudoUsers = map[string]bool{
 	"unknown": true,
 }
 
-type AuditEntry struct {
-	Timestamp string `json:"ts"`
-	User      string `json:"user"`
-	Action    string `json:"action"`
-	Detail    string `json:"detail,omitempty"`
-	Agent     string `json:"agent,omitempty"`
-	// UserName is the hub-delivered display name when User is an opaque OIDC
-	// identity key. Stamped at SERVE time only (handleAuditLog) — the ring and
-	// the on-disk log keep the raw key, so history survives name changes.
-	UserName string `json:"user_name,omitempty"`
-}
+// AuditEntry moved to pkg/dashboard/collect with its consumers (the
+// collectors); the alias keeps this package's write side (AuditLog) and every
+// existing call site source-compatible, with an identical JSON contract.
+type AuditEntry = collect.AuditEntry
 
 type AuditLog struct {
 	mu     sync.Mutex

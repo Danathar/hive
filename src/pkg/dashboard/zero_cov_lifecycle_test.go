@@ -11,13 +11,13 @@ import (
 	"time"
 
 	"github.com/kubestellar/hive/pkg/linearagent"
-	"github.com/kubestellar/hive/pkg/tokens"
 )
 
 // Covers previously 0%-covered exported funcs in pkg/dashboard:
 // SetReleaseChannel (api.go), LinearAgentPROpened (api_linear_agent.go),
-// Server.sampleMetricsInputs + StartContributeMetrics (contribute_metrics.go),
-// and RepoCostCollector.Start + CollectedAt (repo_cost_collector.go).
+// Server.sampleMetricsInputs + StartContributeMetrics (contribute_metrics.go).
+// The RepoCostCollector.Start/CollectedAt tests moved to
+// pkg/dashboard/collect with the collector (kubestellar/hive#5565 slice 2).
 
 // ---- SetReleaseChannel ----
 
@@ -191,78 +191,5 @@ func TestStartContributeMetrics_RollsUpAndStopsOnCancel(t *testing.T) {
 	store.mu.Unlock()
 	if final != after {
 		t.Errorf("rollup kept running after ctx cancel: buckets %d -> %d", after, final)
-	}
-}
-
-// ---- RepoCostCollector.Start / CollectedAt ----
-
-// TestRepoCostCollector_StartCollectsAndStops asserts Start performs the
-// up-front collect (Snapshot ready, CollectedAt set), keeps collecting on the
-// ticker, and exits on ctx cancel.
-func TestRepoCostCollector_StartCollectsAndStops(t *testing.T) {
-	origInterval := repoCostCollectInterval
-	repoCostCollectInterval = 5 * time.Millisecond
-	t.Cleanup(func() { repoCostCollectInterval = origInterval })
-
-	audit := &fakeFixedAudit{}
-	rc := NewRepoCostCollector(audit, &fakeTokensSummary{summary: &tokens.AggregateSummary{}}, "", nil)
-
-	if !rc.CollectedAt().IsZero() {
-		t.Fatalf("CollectedAt = %v before any collect, want zero", rc.CollectedAt())
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		rc.Start(ctx)
-		close(done)
-	}()
-
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if _, ready := rc.Snapshot(); ready {
-			break
-		}
-		if time.Now().After(deadline) {
-			cancel()
-			t.Fatal("Start never produced a ready snapshot")
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	if rc.CollectedAt().IsZero() {
-		t.Error("CollectedAt still zero after a successful collect")
-	}
-
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Start did not return after ctx cancel — goroutine leak")
-	}
-}
-
-// TestRepoCostCollector_StartInertWithoutInputs asserts the documented inert
-// contract: Start returns immediately (rather than spinning a ticker) when
-// either side of the audit/tokens join is missing, and on a nil receiver.
-func TestRepoCostCollector_StartInertWithoutInputs(t *testing.T) {
-	cases := map[string]*RepoCostCollector{
-		"nil collector": nil,
-		"nil audit":     NewRepoCostCollector(nil, &fakeTokensSummary{}, "", nil),
-		"nil tokens":    NewRepoCostCollector(&fakeFixedAudit{}, nil, "", nil),
-	}
-	for name, rc := range cases {
-		done := make(chan struct{})
-		go func() {
-			rc.Start(context.Background())
-			close(done)
-		}()
-		select {
-		case <-done:
-		case <-time.After(2 * time.Second):
-			t.Fatalf("%s: Start must return immediately when inert", name)
-		}
-		if !rc.CollectedAt().IsZero() {
-			t.Errorf("%s: CollectedAt = %v, want zero (no collect must have run)", name, rc.CollectedAt())
-		}
 	}
 }

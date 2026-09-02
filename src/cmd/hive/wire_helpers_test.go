@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/kubestellar/hive/pkg/config"
-	"github.com/kubestellar/hive/pkg/dashboard"
+	"github.com/kubestellar/hive/pkg/dashboard/collect"
 	"github.com/kubestellar/hive/pkg/knowledge"
 )
 
@@ -14,28 +14,28 @@ func TestBuildRepoActivityWireEmpty(t *testing.T) {
 	if got := buildRepoActivityWire(nil); got != nil {
 		t.Errorf("buildRepoActivityWire(nil) = %v, want nil", got)
 	}
-	if got := buildRepoActivityWire([]dashboard.RepoActivity{}); got != nil {
+	if got := buildRepoActivityWire([]collect.RepoActivity{}); got != nil {
 		t.Errorf("buildRepoActivityWire(empty) = %v, want nil", got)
 	}
 }
 
 func TestBuildRepoActivityWireMapsEveryStat(t *testing.T) {
 	at := func(i int) string { return fmt.Sprintf("2026-08-26T04:0%d:00Z", i) }
-	in := []dashboard.RepoActivity{
+	in := []collect.RepoActivity{
 		{
 			Repo:       "kubestellar/hive",
-			Issues:     dashboard.ActivityActionStat{Count: 1, NewestAt: at(0)},
-			PRs:        dashboard.ActivityActionStat{Count: 2, NewestAt: at(1)},
-			Comments:   dashboard.ActivityActionStat{Count: 3, NewestAt: at(2)},
-			Merges:     dashboard.ActivityActionStat{Count: 4, NewestAt: at(3)},
-			Claims:     dashboard.ActivityActionStat{Count: 5, NewestAt: at(4)},
-			Reviews:    dashboard.ActivityActionStat{Count: 6, NewestAt: at(5)},
-			Advisory:   dashboard.ActivityActionStat{Count: 7, NewestAt: at(6)},
-			Reconciled: dashboard.ActivityActionStat{Count: 9, NewestAt: at(8)},
-			Agents: []dashboard.AgentRepoActivity{{
+			Issues:     collect.ActivityActionStat{Count: 1, NewestAt: at(0)},
+			PRs:        collect.ActivityActionStat{Count: 2, NewestAt: at(1)},
+			Comments:   collect.ActivityActionStat{Count: 3, NewestAt: at(2)},
+			Merges:     collect.ActivityActionStat{Count: 4, NewestAt: at(3)},
+			Claims:     collect.ActivityActionStat{Count: 5, NewestAt: at(4)},
+			Reviews:    collect.ActivityActionStat{Count: 6, NewestAt: at(5)},
+			Advisory:   collect.ActivityActionStat{Count: 7, NewestAt: at(6)},
+			Reconciled: collect.ActivityActionStat{Count: 9, NewestAt: at(8)},
+			Agents: []collect.AgentRepoActivity{{
 				Agent:      "quality",
-				Issues:     dashboard.ActivityActionStat{Count: 8, NewestAt: at(7)},
-				Reconciled: dashboard.ActivityActionStat{Count: 10, NewestAt: at(9)},
+				Issues:     collect.ActivityActionStat{Count: 8, NewestAt: at(7)},
+				Reconciled: collect.ActivityActionStat{Count: 10, NewestAt: at(9)},
 			}},
 		},
 		{Repo: "kubestellar/other"},
