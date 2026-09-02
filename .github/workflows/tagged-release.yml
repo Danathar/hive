@@ -523,10 +523,39 @@ jobs:
           scratch="release-gate/v${VERSION}"
           commit_sha="$(git rev-parse HEAD)"
 
-          # NOTE: no cleanup trap here — unlike the pre-#5222 version of this
-          # step, the scratch branch must survive past this step so the next
-          # step can open a PR from it. It is deleted after the PR merges (or
-          # on any failure exit) below, not here.
+          # NOTE: the scratch branch must survive a SUCCESSFUL exit of this
+          # step — unlike the pre-#5222 version, the next step opens the
+          # release PR from it and deletes it in its own trap. But on a
+          # FAILED exit that next-step trap never runs, so failure cleanup
+          # has to happen here (see the trap below).
+
+          # #5629: a prior attempt for this SAME version can die between its
+          # scratch push and the next step's cleanup trap (gate timeout,
+          # cancelled run, runner death), leaving a stale
+          # release-gate/v<VERSION> tip behind. A plain push is then rejected
+          # non-fast-forward on every retry of that version, wedging the
+          # release (run 33581129180, v4.0.3). Delete any stale scratch ref
+          # before pushing so retries are idempotent. This delete is scoped to
+          # the ephemeral scratch ref ONLY — this workflow owns release-gate/*
+          # exclusively, and the `concurrency` group serializes runs — it must
+          # NEVER be widened or generalized to v4, main, or any release-line
+          # branch, and no force-push to those branches is acceptable either.
+          echo "Deleting any stale ${scratch} left by a prior failed attempt (#5629)..."
+          git push origin --delete "refs/heads/${scratch}" >/dev/null 2>&1 || true
+
+          # Failure-path cleanup (#5629): if this step fails after the push
+          # (gate red, wait timeout), delete the scratch ref on the way out so
+          # the next retry starts clean even before the pre-push delete above.
+          # Success keeps the branch — the next step needs it. Hard runner
+          # death can still skip this trap; the pre-push delete is the
+          # backstop for that case.
+          cleanup_scratch_on_failure() {
+            status=$?
+            if [ "$status" -ne 0 ]; then
+              git push origin --delete "refs/heads/${scratch}" >/dev/null 2>&1 || true
+            fi
+          }
+          trap cleanup_scratch_on_failure EXIT
 
           echo "Pushing release commit ${commit_sha} to scratch branch ${scratch} to earn a 'gate' check..."
           git push origin "HEAD:refs/heads/${scratch}"
