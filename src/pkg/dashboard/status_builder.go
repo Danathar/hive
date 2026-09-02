@@ -1640,11 +1640,21 @@ func buildGHRateLimits(ghClient *github.Client, ctx context.Context, cfg *config
 	if ghClient != nil && ctx != nil {
 		limits, err := ghClient.RateLimits(ctx)
 		if err == nil && limits != nil {
-			result["core"] = map[string]any{
+			core := map[string]any{
 				"limit":     limits.Core.Limit,
 				"remaining": limits.Core.Remaining,
 				"reset":     limits.Core.Reset.Format(time.RFC3339),
 			}
+			// observed_at is when this reading was actually taken
+			// (kubestellar/hive#5733). reset cannot answer that — it moves
+			// independently of the sample, and was 8.5 minutes adrift of
+			// reality while the card sat pinned at the full limit. Emitted
+			// only when known, so a client that has never observed a bucket
+			// does not publish a zero timestamp that renders as 1970.
+			if !limits.Core.ObservedAt.IsZero() {
+				core["observed_at"] = limits.Core.ObservedAt.Format(time.RFC3339)
+			}
+			result["core"] = core
 		}
 	}
 

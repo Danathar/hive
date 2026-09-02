@@ -14312,6 +14312,31 @@ function burnAreaChart() {
       const ghCorePct = ghCoreLimit > 0 ? Math.round((ghCoreUsed / ghCoreLimit) * 100) : 0;
       const ghResetRaw = ghRate.core?.reset;
       const ghResetAt = ghResetRaw ? new Date(typeof ghResetRaw === 'number' ? ghResetRaw * 1000 : ghResetRaw).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—';
+      // How old is this reading? (#5733) The card used to show only `reset`,
+      // which moves independently of when the sample was taken — so a value
+      // that had stopped updating looked exactly like a fresh one. A reading
+      // held back by the monotone clamp keeps its original observed_at, so the
+      // age below is what makes that visible.
+      const GH_RATE_STALE_SECONDS = 300;
+      const ghObservedRaw = ghRate.core?.observed_at;
+      let ghObservedHtml = '';
+      if (ghObservedRaw) {
+        const observedMs = new Date(ghObservedRaw).getTime();
+        if (!Number.isNaN(observedMs)) {
+          const ageSec = Math.max(0, Math.floor((Date.now() - observedMs) / 1000));
+          const ageStr = ageSec < 60
+            ? ageSec + 's ago'
+            : ageSec < 3600
+              ? Math.floor(ageSec / 60) + 'm ago'
+              : Math.floor(ageSec / 3600) + 'h ago';
+          const stale = ageSec >= GH_RATE_STALE_SECONDS;
+          const color = stale ? 'var(--yellow)' : 'var(--muted)';
+          const title = stale
+            ? 'This reading has not refreshed recently — treat the headroom above as a floor, not a live value'
+            : 'When this rate-limit reading was taken';
+          ghObservedHtml = `<div style="${rowStyle}"><span>Measured</span><span style="color:${color}" title="${escapeHtml(title)}">${ageStr}</span></div>`;
+        }
+      }
       const ghIdentity = ghRate.identity || {};
       const ghIdentityLabel = ghIdentity.label || 'unknown';
       const ghIdentityType = ghIdentity.type || 'unknown';
@@ -14336,6 +14361,7 @@ function burnAreaChart() {
           <div style="${rowStyle}"><span>Identity</span><span>${ghIdentityBadge} ${esc(ghIdentityLabel)}</span></div>
           <div style="${rowStyle}"><span>Core API</span><span style="font-weight:600">${ghCoreUsed} / ${ghCoreLimit} (${ghCorePct}%)</span></div>
           <div style="${rowStyle}"><span>Resets at</span><span>${ghResetAt}</span></div>
+          ${ghObservedHtml}
           <div style="margin-top:6px;height:6px;background:var(--line);border-radius:3px;overflow:hidden">
             <div style="height:100%;width:${ghCorePct}%;background:${ghCorePct > 80 ? 'var(--red)' : ghCorePct > 50 ? 'var(--yellow)' : 'var(--green)'};border-radius:3px;transition:width 0.3s"></div>
           </div>

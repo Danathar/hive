@@ -31,7 +31,11 @@ import (
 var ErrNoGitHubClient = errors.New("no github client configured (hive is running without GitHub credentials)")
 
 type Client struct {
-	client       *gh.Client
+	client *gh.Client
+	// rateLimits clamps rate-limit readings to be monotone within a window
+	// (kubestellar/hive#5733). Per-client because the artifact it corrects is a
+	// property of THIS client's token minting. Zero value is ready to use.
+	rateLimits   rateLimitTracker
 	org          string
 	reposMu      sync.RWMutex
 	repos        []string
@@ -1278,6 +1282,12 @@ type RateLimitEntry struct {
 	Limit     int       `json:"limit"`
 	Remaining int       `json:"remaining"`
 	Reset     time.Time `json:"reset"`
+	// ObservedAt is when this reading was actually taken. Reset alone cannot
+	// answer "how old is this number" — it moves independently of the sample,
+	// and on the deployment in kubestellar/hive#5733 it was 8.5 minutes adrift
+	// of reality while the card sat pinned at the full limit. A value that
+	// stops updating is now visibly stale rather than silently confident.
+	ObservedAt time.Time `json:"observed_at"`
 }
 
 func (c *Client) RateLimits(ctx context.Context) (*RateLimitInfo, error) {
@@ -1308,6 +1318,19 @@ func (c *Client) RateLimits(ctx context.Context) (*RateLimitInfo, error) {
 			Reset:     limits.GraphQL.Reset.Time,
 		}
 	}
+
+	// Clamp to monotone-within-window before anything sees these numbers
+	// (kubestellar/hive#5733). A just-minted installation token reports a fresh,
+	// EMPTY bucket for the installation's shared budget, and latching that made
+	// the dashboard claim 100% headroom at ~89% real usage. Applied here rather
+	// than in the dashboard so every consumer of RateLimits() inherits it — the
+	// status card and /api/gh-rate-limits are both display paths, and a future
+	// caller that gates work on headroom must not be handed the raw artifact.
+	// See ratelimit_window.go for the mechanism and why the obvious
+	// reset-based clamp does not work.
+	info.Core = c.rateLimits.observe("core", info.Core)
+	info.Search = c.rateLimits.observe("search", info.Search)
+	info.GraphQL = c.rateLimits.observe("graphql", info.GraphQL)
 
 	return info, nil
 }
