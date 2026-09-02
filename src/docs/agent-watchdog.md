@@ -55,6 +55,57 @@ Each agent carries k8s-style conditions in the `/api/agents` payload:
 `lastTransitionTime` only moves when the status flips; the reason/message may
 refresh in place. A probe that cannot tell reports `Unknown`.
 
+### When most of the fleet goes `auth-required` at once
+
+A burst — every Claude agent but ONE flipping to `auth-required` /
+`PaneShowsLogin` within a few minutes, hours after a healthy boot — is almost
+never an expired login, and re-authenticating will not fix it
+([#5730](https://github.com/kubestellar/hive/issues/5730)).
+
+Agents share one operator login: each runs as its own uid, but their
+`~/.claude` all symlink to `/data/home/.claude` (#4619). Claude Code refreshes
+that OAuth credential roughly every 8 hours and rewrites it as whichever agent
+refreshed it, mode `0600`. The surviving agent is the one that owns the file;
+every other uid, which reaches it through the shared `node` group, is locked
+out of a credential that is otherwise perfectly healthy.
+
+Check the mode before you touch the login:
+
+```console
+$ podman exec hive ls -l /data/home/.claude/.credentials.json
+-rw-------. 1 hive-supervisor node 508 Sep  2 19:06 /data/home/.claude/.credentials.json
+```
+
+Owner-only (no group `r`) is the failure. One command fixes it, with no restart
+and no re-login:
+
+```console
+$ podman exec hive chmod g+r /data/home/.claude/.credentials.json
+```
+
+Agents recover within seconds — the log shows `auto-restarting agent after
+token detected in shared config`, then `credential watchdog: durable credential
+restored`.
+
+**Do not restart the container.** It is unnecessary, and it only re-runs the
+boot-time repair that made the file readable in the first place, which hides
+the cause.
+
+Two layers keep this from recurring, and both report rather than hide a
+failure: the entrypoint's permission guards reopen the credential on every
+write and on a 5s poll (they are the only actor that can, since they run as
+root and the file is owned by an agent uid), and the in-process permissions
+watcher logs at ERROR — naming the mode, the owner and the `chmod` — when it
+finds a shared credential it cannot repair itself. If the watchdog reports
+
+```
+reason=unreadable by the hive process (permission denied)
+recovery=chmod g+r /data/home/.claude/.credentials.json
+```
+
+that is this condition, stated plainly. A report of `login expired (no usable
+refresh grant)` is the other condition and does need an operator login.
+
 ## Configuration
 
 Everything lives under `governor.watchdog` and is optional; an absent block

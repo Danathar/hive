@@ -62,19 +62,19 @@ func TestBackendInUse(t *testing.T) {
 func TestCopilotTokenUsable(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "copilot-user-token")
 
-	if ok, reason := copilotTokenUsable(path); ok || reason != "missing" {
-		t.Fatalf("absent file: expected (false,\"missing\"), got (%v,%q)", ok, reason)
+	if res := copilotTokenUsable(path); res.ok || res.reason != "missing" {
+		t.Fatalf("absent file: expected (false,\"missing\"), got (%v,%q)", res.ok, res.reason)
 	}
 	if err := os.WriteFile(path, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if ok, reason := copilotTokenUsable(path); ok || reason != "missing" {
-		t.Fatalf("empty file: expected (false,\"missing\"), got (%v,%q)", ok, reason)
+	if res := copilotTokenUsable(path); res.ok || res.reason != "missing" {
+		t.Fatalf("empty file: expected (false,\"missing\"), got (%v,%q)", res.ok, res.reason)
 	}
 	if err := os.WriteFile(path, []byte("ghu_exampletoken"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if ok, _ := copilotTokenUsable(path); !ok {
+	if res := copilotTokenUsable(path); !res.ok {
 		t.Fatal("populated file: expected usable")
 	}
 }
@@ -125,22 +125,22 @@ func writeClaudeCredsRefreshable(t *testing.T, path string) {
 func TestClaudeTokenUsable(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".credentials.json")
 
-	if ok, reason := claudeTokenUsable(path); ok || reason != "missing" {
-		t.Fatalf("absent file: expected (false,\"missing\"), got (%v,%q)", ok, reason)
+	if res := claudeTokenUsable(path); res.ok || res.reason != "missing" {
+		t.Fatalf("absent file: expected (false,\"missing\"), got (%v,%q)", res.ok, res.reason)
 	}
 
 	// Expired access token, no refresh grant: genuinely spent, only a human
 	// can fix it, and the watchdog's operator alert is correct.
 	past := time.Now().Add(-time.Hour).UnixMilli()
 	writeClaudeCredsWithExpiry(t, path, "sk-ant-oat-old", past)
-	if ok, reason := claudeTokenUsable(path); ok || reason != "login expired (no usable refresh grant)" {
-		t.Fatalf("expired file: expected (false,\"login expired (no usable refresh grant)\"), got (%v,%q)", ok, reason)
+	if res := claudeTokenUsable(path); res.ok || res.reason != "login expired (no usable refresh grant)" {
+		t.Fatalf("expired file: expected (false,\"login expired (no usable refresh grant)\"), got (%v,%q)", res.ok, res.reason)
 	}
 
 	// Present and valid (expiresAt in the future).
 	future := time.Now().Add(time.Hour).UnixMilli()
 	writeClaudeCredsWithExpiry(t, path, "sk-ant-oat-fresh", future)
-	if ok, _ := claudeTokenUsable(path); !ok {
+	if res := claudeTokenUsable(path); !res.ok {
 		t.Fatal("valid file: expected usable")
 	}
 
@@ -149,8 +149,8 @@ func TestClaudeTokenUsable(t *testing.T) {
 	// it mints a new one on the next CLI start, so alerting here prescribed an
 	// interactive login for a fleet that only needed a restart.
 	writeClaudeCredsRefreshable(t, path)
-	if ok, reason := claudeTokenUsable(path); !ok {
-		t.Fatalf("expired-but-refreshable file: expected usable, got (%v,%q)", ok, reason)
+	if res := claudeTokenUsable(path); !res.ok {
+		t.Fatalf("expired-but-refreshable file: expected usable, got (%v,%q)", res.ok, res.reason)
 	}
 }
 

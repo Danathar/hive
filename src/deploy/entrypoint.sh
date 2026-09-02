@@ -915,58 +915,169 @@ if [ "$(id -u)" = "0" ]; then
   # locking out other agent UIDs. Run inotify (if available) AND polling
   # as belt-and-suspenders — inotify is unreliable on NFS but instant on
   # local storage; polling is reliable everywhere but has a 5s delay.
+  #
+  # -- Why these loops are written so defensively (kubestellar/hive#5730) ------
+  #
+  # This file runs under `set -e`, and a `( ... ) &` subshell INHERITS it. One
+  # non-zero command in a guard body therefore does not merely skip a repair, it
+  # terminates that guard permanently for the life of the container. A `while
+  # inotifywait ...; do` is exempt from `set -e` only in its CONDITION; the body
+  # is not.
+  #
+  # That is not theoretical. Measured on a live standalone hive nine hours after
+  # boot (2026-09-02): of the four inotify guards, .copilot, .codex and .gemini
+  # were still running as root and the .claude one was gone — and the polling
+  # guard was gone too. The two dead loops were exactly the two that walked
+  # /data/home/.claude (161 MB, 8413 entries on that hive) with `chmod -R`.
+  # Claude Code writes into that tree constantly (history.jsonl,
+  # projects/*.jsonl, file-history/), and `chmod -R` returns non-zero the moment
+  # an entry vanishes mid-walk, which under `set -e` ends the subshell. `-qq`
+  # and `2>/dev/null` then erased the evidence, so the guard that keeps ONE
+  # operator login serving the whole fleet was simply absent, silently, while
+  # every agent but one dropped to a login prompt.
+  #
+  # Three rules follow, and every guard below obeys them:
+  #   1. No command in a loop body may be able to fail — `|| true` on each.
+  #   2. A watcher that exits is logged and restarted with backoff, never
+  #      treated as "this guard is finished".
+  #   3. Do not re-walk a churning multi-hundred-megabyte tree on every write.
+  #      The credential is what must be reopened instantly; the recursive sweep
+  #      belongs on the slow cycle, where a churn failure costs one cycle.
+  #
+  # The functions between the markers below are extracted and executed verbatim
+  # by src/deploy/test_entrypoint_perm_guard.sh — keep them self-contained.
+  #
+  # >>> hive perm guard functions
+
+  # hive_fix_shared_credential FILE — reopen one shared CLI credential to the
+  # node group. This is what the guards exist for: the CLIs rewrite these files
+  # 0600 as whichever agent UID refreshed the token, and every OTHER agent
+  # reaching the shared home through the `node` group is then locked out of a
+  # credential that is otherwise perfectly healthy — live access token, valid
+  # refresh grant, and a watchdog reporting an expired login that no re-login
+  # can fix.
+  #
+  # Group READ, not g+rwX: the CLIs replace the file by temp-file-and-rename in
+  # a group-writable directory, so no agent needs write on the file itself, and
+  # this is an OAuth token. The chown restores dev ownership as well, because
+  # that is the invariant the in-process Go permissions watcher depends on — it
+  # runs as dev after the privilege drop and can only chmod what dev owns.
+  hive_fix_shared_credential() {
+    [ -f "$1" ] || return 0
+    chmod g+r "$1" 2>/dev/null || true
+    chown dev:node "$1" 2>/dev/null || true
+    return 0
+  }
+
+  # hive_fix_copilot_config — copilot rewrites config.json 0600 on refresh.
+  hive_fix_copilot_config() {
+    [ -f /data/home/.copilot/config.json ] || return 0
+    chmod 660 /data/home/.copilot/config.json 2>/dev/null || true
+    chown dev:node /data/home/.copilot/config.json 2>/dev/null || true
+    return 0
+  }
+
+  # hive_fix_tree DIR — the recursive sweep, for trees that do not churn under
+  # an active CLI. Every arm is `|| true`: `chmod -R` over a live tree returns
+  # non-zero whenever an entry vanishes mid-walk, and that must cost one sweep,
+  # never the guard.
+  hive_fix_tree() {
+    [ -d "$1" ] || return 0
+    chmod -R g+rwX "$1" 2>/dev/null || true
+    find "$1" -type d -exec chmod g+s {} + 2>/dev/null || true
+    chown -R dev:node "$1" 2>/dev/null || true
+    return 0
+  }
+
+  # hive_fix_claude_instant — the INSTANT path for .claude. Deliberately does
+  # not touch the wider tree: that walk was 8413 entries per write event on the
+  # hive that produced #5730, and it is what killed this guard. The recursive
+  # sweep still happens, on the 5-minute cycle.
+  hive_fix_claude_instant() {
+    hive_fix_shared_credential /data/home/.claude/.credentials.json
+    chmod g+rwx /data/home/.claude 2>/dev/null || true
+    return 0
+  }
+
+  hive_fix_codex_instant() { hive_fix_tree /data/home/.codex; }
+
+  # agy writes antigravity-oauth-token 0600 owned by the agent that signed in,
+  # which locks every other agent UID out of a credential the shared CLI home
+  # exists to share — the same shape as copilot's config.json and claude's
+  # .credentials.json. Re-opening it to the node group is what makes ONE agy
+  # login serve the fleet instead of one login per agent.
+  hive_fix_gemini_instant() {
+    hive_fix_tree /data/home/.gemini
+    hive_fix_shared_credential /data/home/.gemini/antigravity-cli/antigravity-oauth-token
+    return 0
+  }
+
+  # hive_fix_credentials_fast — the 5s polling path. Bounded and cheap: the two
+  # files a CLI rewrites owner-only on a token refresh, and no tree walk at all.
+  # This is the backstop that would have repaired #5730 within five seconds.
+  hive_fix_credentials_fast() {
+    hive_fix_copilot_config
+    hive_fix_shared_credential /data/home/.claude/.credentials.json
+    hive_fix_shared_credential /data/home/.gemini/antigravity-cli/antigravity-oauth-token
+    return 0
+  }
+
+  hive_fix_slow_cycle() {
+    hive_fix_credentials_fast
+    for _t in /data/home/.cache /data/home/.copilot /data/home/.claude /data/home/.codex /data/home/.gemini /data/home/.bob; do
+      hive_fix_tree "$_t"
+    done
+    return 0
+  }
+
+  # hive_guard_forever LABEL DIR EVENTS BODY_FN — run BODY_FN every time DIR
+  # changes, forever. Restarts inotifywait when it exits (rule 2) instead of
+  # letting the loop end, which is exactly what a bare `while inotifywait; do`
+  # does the first time inotifywait returns non-zero: exits, silently, for good.
+  hive_guard_forever() {
+    _label="$1"; _dir="$2"; _events="$3"; _body="$4"
+    _backoff=1
+    while true; do
+      if inotifywait -qq -e "$_events" "$_dir" 2>/dev/null; then
+        _backoff=1
+        "$_body" || true
+        continue
+      fi
+      # inotifywait failed (watch limit, the directory went away, a signal).
+      # Say so — the silence here is what made #5730 undiagnosable — then repair
+      # once and try again, so a hive with no working inotify at all is still
+      # served by this loop rather than only by the 5s poller.
+      echo "[entrypoint] WARN: perm guard '$_label' watcher exited on $_dir; repairing and retrying in ${_backoff}s"
+      "$_body" || true
+      sleep "$_backoff" || true
+      [ "$_backoff" -ge 60 ] || _backoff=$((_backoff * 2))
+    done
+  }
+  # <<< hive perm guard functions
+
   if command -v inotifywait >/dev/null 2>&1; then
-    (
-      while inotifywait -qq -e close_write,moved_to /data/home/.copilot/ 2>/dev/null; do
-        chmod 660 /data/home/.copilot/config.json 2>/dev/null
-        chown dev:node /data/home/.copilot/config.json 2>/dev/null
-      done
-    ) &
-    (
-      while inotifywait -qq -e close_write,moved_to,create /data/home/.claude/ 2>/dev/null; do
-        chmod -R g+rwX /data/home/.claude 2>/dev/null
-        find /data/home/.claude -type d -exec chmod g+s {} + 2>/dev/null
-        chown -R dev:node /data/home/.claude 2>/dev/null
-      done
-    ) &
-    (
-      while inotifywait -qq -e close_write,moved_to,create /data/home/.codex/ 2>/dev/null; do
-        chmod -R g+rwX /data/home/.codex 2>/dev/null
-        find /data/home/.codex -type d -exec chmod g+s {} + 2>/dev/null
-        chown -R dev:node /data/home/.codex 2>/dev/null
-      done
-    ) &
-    (
-      # agy writes antigravity-oauth-token 0600 owned by the agent that signed
-      # in, which locks every other agent UID out of a credential the shared
-      # CLI home exists to share — the same shape as copilot's config.json
-      # above. Re-opening it to the node group is what makes ONE agy login
-      # serve the fleet instead of one login per agent.
-      while inotifywait -qq -e close_write,moved_to,create /data/home/.gemini/ 2>/dev/null; do
-        chmod -R g+rwX /data/home/.gemini 2>/dev/null
-        find /data/home/.gemini -type d -exec chmod g+s {} + 2>/dev/null
-        chown -R dev:node /data/home/.gemini 2>/dev/null
-      done
-    ) &
+    hive_guard_forever copilot /data/home/.copilot/ close_write,moved_to hive_fix_copilot_config &
+    hive_guard_forever claude /data/home/.claude/ close_write,moved_to,create hive_fix_claude_instant &
+    hive_guard_forever codex /data/home/.codex/ close_write,moved_to,create hive_fix_codex_instant &
+    hive_guard_forever gemini /data/home/.gemini/ close_write,moved_to,create hive_fix_gemini_instant &
     echo "[entrypoint] inotify perm guard active (copilot + claude + codex + gemini)"
   fi
   (
     CYCLE=0
     while true; do
-      # Fast cycle: fix config.json every 5s (copilot rewrites it with 600)
-      chmod 660 /data/home/.copilot/config.json 2>/dev/null
-      chown dev:node /data/home/.copilot/config.json 2>/dev/null
-      # Slow cycle: fix entire /data/home tree every 5 min (new dirs from agents)
+      # Fast cycle every 5s: the credential files a CLI rewrites owner-only on a
+      # token refresh. Cheap and bounded — no tree walk on this path.
+      hive_fix_credentials_fast
+      # Slow cycle: sweep the shared dot-dirs every 5 min (new dirs from agents)
       CYCLE=$((CYCLE + 1))
       if [ "$CYCLE" -ge 60 ]; then
-        chmod -R g+rwX /data/home/.cache /data/home/.copilot /data/home/.claude /data/home/.codex /data/home/.gemini /data/home/.bob 2>/dev/null
-        find /data/home/.cache /data/home/.claude /data/home/.codex /data/home/.gemini /data/home/.bob -type d -exec chmod g+s {} + 2>/dev/null
+        hive_fix_slow_cycle
         CYCLE=0
       fi
-      sleep 5
+      sleep 5 || true
     done
   ) &
-  echo "[entrypoint] polling perm guard active (config.json 5s, cache 5m)"
+  echo "[entrypoint] polling perm guard active (credentials 5s, tree sweep 5m)"
   echo "[entrypoint] CLI config: /data/home (shared, group-writable for agent UIDs)"
 
   # Write .bashrc for agent shells. GH_TOKEN is NOT exported here — gh-wrapper.sh

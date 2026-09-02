@@ -350,10 +350,21 @@ for cred_dir in .claude .copilot .codex .gemini .bob; do
         "an agent UID cannot write it; a CLI sign-in there succeeds in memory and is lost on exit"
   fi
 
-  # The ongoing repair: either an inotify watcher on the dir, or the polling
-  # slow-cycle chmod -R. One is enough; neither is the bug.
+  # The ongoing repair: an inotify watcher on the dir, or the polling
+  # slow-cycle sweep. One is enough; neither is the bug.
+  #
+  # Four spellings are accepted because #5730 changed how the guards are
+  # written without changing what they must cover: the watchers are now
+  # dispatched through `hive_guard_forever LABEL DIR ...` (a bare
+  # `while inotifywait` exits permanently and silently the first time
+  # inotifywait returns non-zero), and the recursive sweep now runs through
+  # `hive_fix_tree` over a list rather than one inline `chmod -R`. What this
+  # assertion is actually about — every credential dir is covered by SOME
+  # ongoing repair — is unchanged, so it accepts both the old and new forms.
   if grep -qE "inotifywait [^|]*${path}/" "$ENTRYPOINT" || \
-     grep -qE "chmod -R g\+rwX [^&|;]*${path}( |$)" "$ENTRYPOINT"; then
+     grep -qE "hive_guard_forever [a-z]+ ${path}/ " "$ENTRYPOINT" || \
+     grep -qE "chmod -R g\+rwX [^&|;]*${path}( |$)" "$ENTRYPOINT" || \
+     grep -qE "for _t in [^;]*${path}( |;)" "$ENTRYPOINT"; then
     ok "$cred_dir is repaired by the ongoing perm guard"
   else
     bad "$cred_dir is never re-opened after the CLI rewrites its credential 0600" \
