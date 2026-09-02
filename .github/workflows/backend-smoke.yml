@@ -70,7 +70,12 @@ jobs:
   smoke:
     # Forks have no model credentials; a scheduled run there would only
     # produce a permanently red workflow.
-    if: github.repository == 'kubestellar/hive'
+    # Match BOTH homes: the repo is moving kubestellar/hive → hivecommons/hive
+    # (split-consensus + CNCF Sandbox prep). An equality guard on the old name
+    # would make this job skip SILENTLY on transfer day — smoke coverage gone
+    # with no red anywhere. Both names listed explicitly (rather than
+    # github.repository_owner) so forks still skip as before.
+    if: github.repository == 'kubestellar/hive' || github.repository == 'hivecommons/hive'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     strategy:
