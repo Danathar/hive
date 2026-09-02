@@ -435,6 +435,81 @@ test('relaunchCLI sends the cd-prefixed command to tmux', () => {
   } finally { teardown(relay); }
 });
 
+// ---------------------------------------------------------------------------
+// kubestellar/hive#5652, remaining edges — a relaunch must reuse the
+// LAUNCHER's resolved launch line, never re-derive one that drops local
+// mode's sandbox.
+//
+// The positive half (an exported AGENT_LAUNCH_CMD wins over the container
+// posture for claude/copilot/opencode, byte-identical) is pinned by
+// "#5652 relaunch reuses the entrypoint launch command" above. These are the
+// negative controls: the fix pins launch == relaunch, so it must neither
+// invent a sandbox the operator explicitly opted out of, nor append flags the
+// launcher deliberately omitted, nor break the container/older-launcher path
+// where nothing is exported and the derived posture IS the launched posture.
+// backendPerm is the container bypass string on purpose: the assertion is
+// precisely about when it may and may not win.
+// ---------------------------------------------------------------------------
+
+// A faithful reduction of what claude_family_local_perm_flag_shell emits.
+const LOCAL_SANDBOXED_CLAUDE_CMD = 'claude --permission-mode dontAsk ' +
+  '--settings \\{\\"permissions\\":\\{\\"allow\\":\\[\\"Write\\(/home/dev/workspace/\\*\\*\\)\\"\\]\\},' +
+  '\\"sandbox\\":\\{\\"enabled\\":true,\\"failIfUnavailable\\":true,\\"allowUnsandboxedCommands\\":false\\}\\} ' +
+  '--add-dir /home/dev/workspace --disallowed-tools Bash\\(sudo:\\*\\),Bash\\(rpm-ostree:\\*\\)';
+const CONTAINER_BYPASS_PERM = '--dangerously-skip-permissions --permission-mode bypassPermissions';
+
+test('#5652 negative control: a sandbox-off launch relaunches unchanged, no sandbox is invented', () => {
+  // HIVE_CLAUDE_DANGEROUSLY_BYPASS_APPROVALS_AND_SANDBOX makes the launcher
+  // resolve — and export — the bypass posture itself. Reusing the line verbatim
+  // must preserve THAT choice too: the fix pins launch == relaunch, it does not
+  // force a sandbox into either.
+  const optedOut = `claude ${CONTAINER_BYPASS_PERM} --disallowed-tools Bash\\(sudo:\\*\\)`;
+  const relay = loadRelay({
+    backend: 'claude',
+    backendPerm: CONTAINER_BYPASS_PERM,
+    env: { AGENT_LAUNCH_CMD: optedOut },
+  });
+  try {
+    assert.strictEqual(relay.buildLaunchCommand(), optedOut);
+    const before = relay.__tmuxSends().length;
+    relay.relaunchCLI();
+    const launch = relay.__tmuxSends().slice(before).find(c => /claude/.test(c));
+    assert.ok(launch, 'no relaunch command was sent to tmux');
+    assert.match(launch, /--dangerously-skip-permissions/,
+      `an explicitly opted-out launch must relaunch as launched: ${launch}`);
+    assert.ok(!/--settings/.test(launch),
+      `the relaunch must not add sandbox flags the launcher omitted: ${launch}`);
+  } finally { teardown(relay); }
+});
+
+test('#5652 negative control: without a launcher-resolved line the backends.conf derivation still applies', () => {
+  // Container mode (and any older launcher) exports nothing; there the
+  // derived posture IS the launched posture, and it must keep working.
+  const relay = loadRelay({ backend: 'claude', backendPerm: CONTAINER_BYPASS_PERM });
+  try {
+    const cmd = relay.buildLaunchCommand();
+    assert.match(cmd, /claude/);
+    assert.match(cmd, /--dangerously-skip-permissions/,
+      `fallback derivation no longer reflects backends.conf: ${cmd}`);
+  } finally { teardown(relay); }
+});
+
+test('#5652 the launcher-resolved line is the WHOLE command — no flags are appended to it', () => {
+  // The local launcher includes any model flag it wants in the line itself
+  // (litellm/pi append to PERM_FLAG); re-adding one here would be the same
+  // two-derivations drift in the other direction.
+  const relay = loadRelay({
+    backend: 'claude',
+    model: 'claude-opus-4-6',
+    backendPerm: CONTAINER_BYPASS_PERM,
+    env: { AGENT_LAUNCH_CMD: LOCAL_SANDBOXED_CLAUDE_CMD },
+  });
+  try {
+    assert.strictEqual(relay.buildLaunchCommand(), LOCAL_SANDBOXED_CLAUDE_CMD,
+      'AGENT_MODEL must not be appended onto the launcher-resolved line');
+  } finally { teardown(relay); }
+});
+
 test('a shell in the pane is only a death after consecutive confirmations', () => {
   const relay = loadRelay({ backend: 'agy', procAlive: false });
   try {
