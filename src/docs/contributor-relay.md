@@ -249,6 +249,16 @@ Set your model: export AGENT_MODEL=<model>
 
 Contributors never hold long-lived repo credentials: the relay receives short-lived GitHub tokens per task, and API keys for the contributor's own model provider never leave their machine.
 
+### The base branch comes from the assignment, not from the checkout
+
+Your relay works one issue at a time out of a single **persistent** checkout under `$HIVE_WORKSPACE_DIR`, and nothing resets it between tasks. The branch you find on disk therefore answers the *previous* task, not the current one.
+
+So the assignment prompt names the branch each task's work belongs on, and asks the agent to start its work branch from that base (`git checkout -b <your-branch> upstream/<base>`) and open the PR against it (`gh pr create --base <base>`). The base is the branch this hive is built from — the same branch the onboarding page's `git clone -b` command names ([#3990](https://github.com/kubestellar/hive/issues/3990)) — unless the issue's title carries a release-line tag such as `[v5]`, which wins.
+
+Before this, the prompt mentioned a branch exactly once ("push your branch to your fork") and never said which one to target, so one branch-specific issue redirected every later PR of a session: on 2026-09-02 five consecutive PRs landed on `v5`, only the first correctly, and three of the rest were fixes for defects live on the deployed `v4` ([#5729](https://github.com/kubestellar/hive/issues/5729)). Nobody in the loop could see it — the agent had nothing to check against, the contributor saw PRs opening and merging normally, and a maintainer saw correctly-formed PRs on a plausible branch.
+
+Watching the pane, the base is the thing worth a glance: it is stated in the prompt, and the agent is asked to confirm it on the opened PR before reporting done.
+
 ## Multi-hub subscription
 
 A single relay can subscribe to multiple hives. Register with each hive first, then provide matching comma-separated lists:
