@@ -549,7 +549,7 @@ test('agy pane still working ("esc to cancel") is not COMPLETE', () => {
 test('agy Gemini idle pane reports its visible PR as task_complete', () => {
   const relay = loadRelay({ backend: 'agy', paneText: AGY_GEMINI_IDLE_PANE });
   try {
-    assignTask(relay, 'ct-agy-gemini-idle');
+    dispatchTask(relay, 'ct-agy-gemini-idle');
     // #5376: this pane carries no HIVE_VERDICT line, so it completes on the
     // chrome-idle FALLBACK — after the grace window, not on the first tick.
     graceTicks(relay, () => relay.__crashTick());
@@ -1340,6 +1340,27 @@ function assignTask(relay, taskId, number = 421) {
   }));
 }
 
+// assignTask, plus the two things a STATIC pane fixture cannot express by
+// itself (kubestellar/hive#5650).
+//
+//  1. The CLI is up, so the prompt was typed rather than queued. tmuxSendKeys()
+//     queues whenever cliReady is false, and progressTick() now refuses to judge
+//     a task whose prompt is still sitting in that queue — nothing on the pane
+//     is evidence about a task the agent was never given.
+//  2. The pane held no EARLIER verdict when the prompt was typed. The harness
+//     serves one static paneText for every capture, so a fixture showing a
+//     finished turn is also what the relay sees at the instant it dispatches;
+//     a real pane cannot do that, because the agent's verdict is printed after
+//     it runs. Clearing the delivery baseline states what these fixtures mean:
+//     "this task started from a pane with no verdict of its own on it".
+//
+// Tests that are ABOUT either of those conditions set them up themselves.
+function dispatchTask(relay, taskId, number) {
+  relay.setCliReady(true);
+  assignTask(relay, taskId, number);
+  relay.setDeliveredVerdictBaseline(null);
+}
+
 // Drive the crash path directly: assign, then let the progress tick observe a
 // dead CLI. startProgressReporting() uses a long interval, so instead of
 // waiting we re-enter via repeated assign/crash cycles using fake timers.
@@ -1729,7 +1750,10 @@ test('#5281 the budget is per task, not per process', () => {
     // A fresh task must get its own reminder — a previous task's spent budget
     // denying this one is the same bug #5094 fixed for the retry budget.
     pane = QUESTION_PANE;
-    assignTask(relay, 't-second');
+    // The completion above stopped the agent and relaunched the CLI, which
+    // clears cliReady — so this second dispatch has to say the CLI came back,
+    // or the prompt is queued and progressTick() rightly judges nothing (#5650).
+    dispatchTask(relay, 't-second');
     const mid = relay.__tmuxSends().length;
     relay.__crashTick();
     assert.strictEqual(nudges(relay, mid).length, 1, 'the next task gets its own one-shot');
@@ -2521,7 +2545,7 @@ test('codex no-work verdict is COMPLETE despite stale activity in scrollback', (
 test('a bullet-prefixed Codex no-work verdict is reported as task_complete', () => {
   const relay = loadRelay({ backend: 'codex', paneText: CODEX_COMPLETED_NO_WORK_PANE });
   try {
-    assignTask(relay, 'ct-codex-no-work');
+    dispatchTask(relay, 'ct-codex-no-work');
     relay.__crashTick();
     const complete = relay.__sent.find(m => m.type === 'task_complete');
     assert.ok(complete, 'the live Codex pane shape must complete the task rather than remain working');
@@ -3689,7 +3713,13 @@ test('#4267 detectNoWorkVerdict extracts the verdict and reason', () => {
   const relay = loadRelay({});
   try {
     const v = relay.detectNoWorkVerdict(['some output', 'HIVE_VERDICT: no_work_needed — already merged in #123']);
-    assert.deepStrictEqual(v, { verdict: 'no_work_needed', reason: 'already merged in #123' });
+    // `line` carries the RAW pane line the verdict came from, which is what
+    // makes a verdict attributable to a task rather than to the pane (#5650).
+    assert.deepStrictEqual(v, {
+      verdict: 'no_work_needed',
+      reason: 'already merged in #123',
+      line: 'HIVE_VERDICT: no_work_needed — already merged in #123',
+    });
     // Codex bullet chrome and indentation are presentation, not content.
     const b = relay.detectNoWorkVerdict(['  • HIVE_VERDICT: no_work_needed - gated on maintainer decision']);
     assert.strictEqual(b.reason, 'gated on maintainer decision');
@@ -3699,7 +3729,11 @@ test('#4267 detectNoWorkVerdict extracts the verdict and reason', () => {
     // printed and missed — every interactive claude completion degraded to
     // the chrome_idle fallback.
     const c = relay.detectNoWorkVerdict(['● HIVE_VERDICT: no_work_needed — backend smoke']);
-    assert.deepStrictEqual(c, { verdict: 'no_work_needed', reason: 'backend smoke' });
+    assert.deepStrictEqual(c, {
+      verdict: 'no_work_needed',
+      reason: 'backend smoke',
+      line: '● HIVE_VERDICT: no_work_needed — backend smoke',
+    });
     // Case-insensitive, empty reason allowed.
     assert.strictEqual(relay.detectNoWorkVerdict(['hive_verdict: NO_WORK_NEEDED']).verdict, 'no_work_needed');
   } finally { teardown(relay); }
@@ -5077,8 +5111,7 @@ test('#5353 a reported completion stops the agent and drops its token', () => {
   // whatever ended the task, the agent must be stopped and its token gone.
   const relay = loadRelay({ backend: 'copilot', paneText: `HIVE_VERDICT: complete — shipped it\n${IDLE_PANE}` });
   try {
-    relay.setCliReady(true);
-    assignTask(relay, 't-complete');
+    dispatchTask(relay, 't-complete');
     plantTaskToken(relay);
     const before = relay.__tmuxSends().length;
     relay.__stallTick();
@@ -5100,8 +5133,7 @@ test('#5353 the completion report still carries the AGENT output, not the relaun
     paneText: 'Pull request opened: https://github.com/foo/bar/pull/909\n/ commands for help\nHIVE_VERDICT: complete — PR is open\n',
   });
   try {
-    relay.setCliReady(true);
-    assignTask(relay, 't-evidence');
+    dispatchTask(relay, 't-evidence');
     relay.__stallTick();
     const completed = relay.__sent.find(m => m.type === 'task_complete');
     assert.ok(completed, 'expected a completion');
@@ -5327,8 +5359,7 @@ test('#5376 a task completes on the sentinel even while the chrome says the CLI 
     assert.strictEqual(relay.classifyTmuxPane(VERDICT_UNDER_BUSY_CHROME), relay.PANE_STATE_WORKING,
       'setup: the chrome must still classify as busy, or this test proves nothing');
 
-    relay.setCliReady(true);
-    assignTask(relay, 't-verdict-busy');
+    dispatchTask(relay, 't-verdict-busy');
     relay.__crashTick();
 
     const completed = relay.__sent.filter(m => m.type === 'task_complete');
@@ -5357,8 +5388,7 @@ test('#5376 the sentinel completes a task through chrome no backend branch has e
   try {
     assert.notStrictEqual(relay.classifyTmuxPane(ALIEN_CHROME), relay.PANE_STATE_IDLE_COMPLETE,
       'setup: unrecognised chrome must not classify as complete on its own');
-    relay.setCliReady(true);
-    assignTask(relay, 't-alien');
+    dispatchTask(relay, 't-alien');
     relay.__crashTick();
     const completed = relay.__sent.filter(m => m.type === 'task_complete');
     assert.strictEqual(completed.length, 1,
@@ -5617,8 +5647,7 @@ test('#5376 a no_work_needed verdict still completes the task and reports the ve
   ].join('\n');
   const relay = loadRelay({ backend: 'claude', paneText: NO_WORK_PANE });
   try {
-    relay.setCliReady(true);
-    assignTask(relay, 't-nowork');
+    dispatchTask(relay, 't-nowork');
     relay.__crashTick();
     const completed = relay.__sent.filter(m => m.type === 'task_complete');
     assert.strictEqual(completed.length, 1, 'no_work_needed is a completion');
@@ -5639,8 +5668,7 @@ test('#5376 a shipped PR still overrides a no_work_needed claim', () => {
   ].join('\n');
   const relay = loadRelay({ backend: 'claude', paneText: PANE });
   try {
-    relay.setCliReady(true);
-    assignTask(relay, 't-nowork-with-pr');
+    dispatchTask(relay, 't-nowork-with-pr');
     relay.__crashTick();
     const completed = relay.__sent.filter(m => m.type === 'task_complete');
     assert.strictEqual(completed.length, 1);
@@ -5965,6 +5993,178 @@ test('#5655 a crash exit (uncaught exception) still takes the scoped token with 
     assert.ok(!fs.existsSync(tokenPath),
       'the process.on(exit) backstop must unlink the token even on a crash exit');
   } finally { cleanupTmp(); }
+});
+
+// kubestellar/hive#5650 — the relay lost track of a live claude after the first
+// task of a session, then booked the NEXT task complete off the previous one's
+// transcript.
+//
+// Two defects, back to back, both reproduced below against the pane shape the
+// incident actually had. The fixtures here are the missing half of the existing
+// coverage: every completion fixture in this file is copilot- or codex-shaped,
+// which is why neither defect ever failed a test.
+// ---------------------------------------------------------------------------
+
+// A steady-state local-mode Claude pane: the FINISHED transcript of the task
+// that just ended, an idle input prompt, and the footer Claude Code draws at
+// all times. No splash, no welcome banner, no account line — the session
+// started hours ago. This is what the relay was looking at while it logged
+// "CLI not ready — queuing task prompt instead of typing into the pane" for
+// every remaining task of the session.
+const CLAUDE_STEADY_STATE_PANE = [
+  '● Pushed the branch and opened https://github.com/kubestellar/hive/pull/5649.',
+  '',
+  '● HIVE_VERDICT: complete — PR #5649',
+  '',
+  '✻ Cogitated for 21m 6s',
+  '',
+  '❯ ',
+  '  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents',
+].join('\n');
+
+test('#5650 a steady-state local-mode claude pane is READY, not "starting" forever', () => {
+  // getCLIState() only ever matched startup artifacts for claude, so readiness
+  // was a one-shot property of the splash screen. cliReady is cleared on every
+  // task exit and re-latched only from there, so after the first task of a
+  // session the latch could never re-latch: every later prompt was queued and
+  // its task handed back at CLI_READY_TIMEOUT_MS.
+  const relay = loadRelay({ backend: 'claude', paneText: CLAUDE_STEADY_STATE_PANE });
+  try {
+    assert.strictEqual(relay.getCLIState(), 'ready',
+      'a healthy idle claude pane must re-confirm readiness without a fresh splash screen');
+  } finally { teardown(relay); }
+});
+
+test('#5650 the two claude pane detectors agree that the CLI is there', () => {
+  // classifyTmuxPane()'s hasIdlePrompt has recognised this chrome since #5170.
+  // Two detectors reading one pane and reaching opposite conclusions about
+  // whether the CLI even exists is the bug, so pin the agreement.
+  const relay = loadRelay({ backend: 'claude', paneText: CLAUDE_STEADY_STATE_PANE });
+  try {
+    assert.strictEqual(relay.getCLIState(), 'ready');
+    assert.strictEqual(relay.classifyTmuxPane(CLAUDE_STEADY_STATE_PANE), relay.PANE_STATE_IDLE_COMPLETE);
+  } finally { teardown(relay); }
+});
+
+test('#5650 a busy claude pane is READY too — readiness is not idleness', () => {
+  // "Is the CLI up and past its gates" is a different question from "is it
+  // idle". busy-vs-idle belongs to classifyTmuxPane, and tmuxSendKeys has its
+  // own guard against typing into a bare shell.
+  const busy = '✻ Cogitating… (esc to interrupt)';
+  const relay = loadRelay({ backend: 'claude', paneText: busy });
+  try {
+    assert.strictEqual(relay.getCLIState(), 'ready');
+    assert.strictEqual(relay.classifyTmuxPane(busy), relay.PANE_STATE_WORKING);
+  } finally { teardown(relay); }
+});
+
+test('#5650 the claude login and trust gates still win over the persistent chrome', () => {
+  // The widened ready alternation must not be able to wave through a pane that
+  // is actually blocked — the same ordering hazard the bob and codex branches
+  // document. Both gates render the footer chrome behind them.
+  const footer = '\n  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents';
+  for (const [pane, expected] of [
+    ['Not logged in · Please run /login' + footer, 'needs-login'],
+    ['Do you trust this folder?' + footer, 'onboarding'],
+    ['Choose the text style that looks best' + footer, 'onboarding'],
+  ]) {
+    const relay = loadRelay({ backend: 'claude', paneText: pane });
+    try {
+      assert.strictEqual(relay.getCLIState(), expected,
+        `a blocked claude pane must not be reported ready: ${JSON.stringify(pane)}`);
+    } finally { teardown(relay); }
+  }
+});
+
+test('#5650 a task whose prompt is still QUEUED is never completed off the pane', () => {
+  // The ghost completion. The relay could not confirm readiness, so the prompt
+  // was queued and the agent was never told anything — but progressTick() read
+  // the pane anyway, found the PREVIOUS task's "HIVE_VERDICT: complete" line
+  // still on it, and booked this task completed with no PR and an untouched
+  // issue.
+  const relay = loadRelay({ backend: 'claude', paneText: CLAUDE_STEADY_STATE_PANE });
+  try {
+    relay.setCliReady(false);
+    assignTask(relay, 'ct-ghost', 5646);
+    assert.ok(relay.getPendingTask(), 'setup: the prompt must be queued, not typed');
+    assert.strictEqual(relay.getTaskPromptDelivered(), false);
+
+    graceTicks(relay, () => relay.__crashTick());
+
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 0,
+      'a task the agent was never given must never be reported completed');
+    assert.strictEqual(relay.getCurrentTask() && relay.getCurrentTask().task_id, 'ct-ghost',
+      'the task is still ours until the readiness wait hands it back with a real reason');
+    assert.ok(relay.__sent.some(m => m.type === 'task_progress' && m.status === 'working'),
+      'an undelivered task should still report progress rather than go silent');
+  } finally { teardown(relay); }
+});
+
+test('#5650 the previous task\'s verdict does not complete the next task', () => {
+  // The prompt WAS delivered this time, so the pane is judged — but the only
+  // verdict on it is the line that was already there when the prompt was typed.
+  // A verdict printed before the task existed cannot be about the task.
+  const relay = loadRelay({ backend: 'claude', paneText: CLAUDE_STEADY_STATE_PANE });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 'ct-stale-verdict', 5646);
+    assert.strictEqual(relay.getTaskPromptDelivered(), true, 'setup: the prompt must have been typed');
+    assert.strictEqual(relay.getDeliveredVerdictBaseline(), '● HIVE_VERDICT: complete — PR #5649',
+      'setup: the baseline must be the verdict that was already on the pane');
+
+    relay.__crashTick();
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 0,
+      "the previous task's verdict must not complete this one on the first tick past the grace period");
+  } finally { teardown(relay); }
+});
+
+test('#5650 the agent\'s OWN verdict still completes the task on the first tick', () => {
+  // The other half of the guard: suppressing a stale verdict must not cost the
+  // sentinel its speed (#5376). As soon as a line the pane did not already have
+  // appears, the task completes on the verdict signal.
+  let pane = CLAUDE_STEADY_STATE_PANE;
+  const relay = loadRelay({ backend: 'claude', paneText: () => pane });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 'ct-fresh-verdict', 5646);
+    relay.__crashTick();
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 0,
+      'setup: nothing new on the pane yet');
+
+    pane = [
+      '● Pushed the branch and opened https://github.com/foo/bar/pull/5652.',
+      '',
+      '● HIVE_VERDICT: complete — PR #5652',
+      '',
+      '✻ Cogitated for 8m 12s',
+      '',
+      '❯ ',
+      '  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents',
+    ].join('\n');
+    relay.__crashTick();
+
+    const completed = relay.__sent.filter(m => m.type === 'task_complete');
+    assert.strictEqual(completed.length, 1, "the agent's own verdict must still end the task");
+    assert.strictEqual(completed[0].completion_signal, 'verdict');
+    assert.strictEqual(completed[0].pr_url, 'https://github.com/foo/bar/pull/5652');
+  } finally { teardown(relay); }
+});
+
+test('#5650 a stale verdict does not block the chrome-idle fallback either', () => {
+  // Suppressing the verdict must not strand the task. With no verdict of its
+  // own the pane falls back to the chrome-idle grace window, exactly as it does
+  // for an agent that never prints the sentinel at all.
+  const relay = loadRelay({ backend: 'claude', paneText: CLAUDE_STEADY_STATE_PANE });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 'ct-fallback', 5646);
+    graceTicks(relay, () => relay.__crashTick());
+    const completed = relay.__sent.filter(m => m.type === 'task_complete');
+    assert.strictEqual(completed.length, 1,
+      'an idle pane with only a stale verdict must still complete on the chrome fallback');
+    assert.strictEqual(completed[0].completion_signal, 'chrome_idle',
+      'and it must be labelled as the fallback, not as the agent\'s own statement');
+  } finally { teardown(relay); }
 });
 
 // ---------------------------------------------------------------------------

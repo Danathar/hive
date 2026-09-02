@@ -1367,9 +1367,37 @@ function getCLIState() {
   try {
     const text = capturePaneText();
     if (BACKEND === 'claude') {
+      // Order matters, as it does for bob and codex below: the blocked states
+      // are classified FIRST, so a pane sitting on a login or trust gate is
+      // never reported ready by persistent chrome it happens to draw as well.
       if (/Not logged in|Please run \/login/.test(text)) return 'needs-login';
-      if (/bypass permissions|Welcome back|Try "how does|medium.*effort|@gmail\.com|@.*\.com.*Organization/.test(text)) return 'ready';
       if (/Choose the text style|trust this folder/.test(text)) return 'onboarding';
+      // The first alternation below is startup-only: a welcome banner, the
+      // account line printed just after login, the first-run tip. That made
+      // claude readiness a one-shot property of the SPLASH SCREEN — and
+      // cliReady is cleared on EVERY task exit (stopAgentForTaskExit), then
+      // re-latched only from here. Once the splash had scrolled away, a
+      // perfectly healthy idle pane matched none of these, so the latch never
+      // re-latched: every task prompt after the first was queued instead of
+      // typed, and each of those tasks was handed back at CLI_READY_TIMEOUT_MS
+      // with "CLI never became ready" (kubestellar/hive#5156, seen again in
+      // #5650). Recovery depended on a fresh splash, which needs the CLI to
+      // actually exit — and quitLiveCLI()'s two C-c keystrokes routinely do not
+      // end claude.
+      //
+      // The second alternation is the footer chrome a live claude draws at ALL
+      // times, splash or not: the auto-mode indicator, the agents hint, the
+      // shift+tab cycle hint, and the in-turn interrupt hint. It is the same
+      // evidence classifyTmuxPane's claude hasIdlePrompt has always used — two
+      // detectors reading one pane must not disagree about whether the CLI is
+      // even there.
+      //
+      // Readiness asks "is the CLI up and past its gates", not "is it idle":
+      // busy-vs-idle is classifyTmuxPane's job, and tmuxSendKeys separately
+      // refuses to type into a pane whose foreground command is a shell. So
+      // matching "esc to interrupt", which is drawn mid-turn, is correct here.
+      if (/bypass permissions|Welcome back|Try "how does|medium.*effort|@gmail\.com|@.*\.com.*Organization/.test(text)) return 'ready';
+      if (/⏵⏵|← for agents|shift\+tab to cycle|esc to interrupt/.test(text)) return 'ready';
     } else if (BACKEND === 'copilot') {
       if (/copilot login|gh auth login/.test(text)) return 'needs-login';
       if (/Confirm folder trust|trust the files|Do you trust/.test(text)) return 'onboarding';
@@ -1476,6 +1504,26 @@ let pendingTask = null;
 let cliReadyFailed = false;
 // Set only by an interactive revoke. The next ready is delayed until a fresh CLI is confirmed.
 let readyAfterInteractiveRevoke = false;
+
+// False until the CURRENT task's prompt actually reached the pane
+// (kubestellar/hive#5650). tmuxSendKeys() queues rather than types whenever the
+// CLI is not confirmed ready or the pane has fallen back to a shell, and a task
+// whose prompt is still queued has told the agent nothing — so nothing on the
+// pane is evidence about it. progressTick() consults this before judging.
+let taskPromptDelivered = false;
+
+// The HIVE_VERDICT: line already on the pane when the current task's prompt was
+// typed into it, or null when the pane held none (kubestellar/hive#5650).
+//
+// The relay drives ONE long-lived CLI, so a new task starts against a pane that
+// still shows the previous task's finished transcript — including its
+// "HIVE_VERDICT: complete — ..." line. detectCompletionVerdict() has no notion
+// of which task a verdict belongs to, so progressTick() read that line and
+// booked the NEW task completed minutes after assigning it, with no PR and the
+// issue untouched. Remembering the line that was already there is what makes
+// the verdict per-task: a verdict byte-identical to the one present at delivery
+// time is, by construction, not this task's statement.
+let deliveredVerdictBaseline = null;
 
 if (CONTRIBUTOR_MODE === MODE_HEADLESS) {
   // Headless mode has no tmux pane to scrape for readiness. Each task spawns
@@ -1584,6 +1632,10 @@ function checkContextUsage() {
 }
 
 function tmuxSendKeys(text) {
+  // Cleared up front and set again only by a send that actually happened: every
+  // early return below leaves the agent WITHOUT this prompt, and progressTick()
+  // must not judge a task in that state (kubestellar/hive#5650).
+  taskPromptDelivered = false;
   // Hard gate (issue #2203, bug 2): `send-keys -l` types literal keystrokes
   // into whatever owns the pane. If the CLI is not confirmed ready, those
   // keystrokes land on bash, whose readline chokes on the apostrophes in the
@@ -1671,6 +1723,13 @@ function tmuxSendKeys(text) {
       }
       return;
     }
+    // Snapshot the verdict line already on the pane BEFORE this prompt is
+    // typed, so progressTick() can refuse to read the PREVIOUS task's
+    // HIVE_VERDICT line as this task's completion (#5650). Captured here rather
+    // than at assignment because this is the moment the transcript stops being
+    // "whatever was there" and starts being this task's own.
+    const priorVerdict = detectCompletionVerdict(captureTmuxLines(TMUX_TAIL_LINES));
+    deliveredVerdictBaseline = priorVerdict ? priorVerdict.line : null;
     const MAX_SEND_RETRIES = 3;
     const RETRY_DELAY_MS = 10000;
     let sent = false;
@@ -1685,6 +1744,7 @@ function tmuxSendKeys(text) {
         sleepMs(300);
         tmuxSendEnters();
         console.log('Task prompt sent to CLI');
+        taskPromptDelivered = true;
         sent = true;
         break;
       } catch (e) {
@@ -1843,7 +1903,11 @@ function detectHiveVerdict(lines, wanted) {
     // visual line start; its giveaway is the literal "<short reason>"
     // placeholder. Never treat that echo as a real verdict.
     if (reason.startsWith('<')) continue;
-    return { verdict: m[1].toLowerCase(), reason };
+    // `line` is the RAW pane line this verdict was read from. progressTick()
+    // compares it against the line that was already on the pane when the task's
+    // prompt was delivered, which is how a verdict gets attributed to a task at
+    // all (#5650).
+    return { verdict: m[1].toLowerCase(), reason, line: lines[i] };
   }
   return null;
 }
@@ -3244,6 +3308,29 @@ function progressTick() {
     }
   } catch (_) {}
 
+  // Never judge a task the agent has not been given (kubestellar/hive#5650).
+  //
+  // tmuxSendKeys() QUEUES the prompt instead of typing it whenever the CLI is
+  // not confirmed ready (or the pane has fallen back to a shell), and
+  // flushPendingTask() delivers it later. Until that happens the pane holds
+  // only the PREVIOUS task's transcript, so everything read below — the
+  // completion verdict, the idle chrome, the stall fingerprint — is evidence
+  // about work this task never touched. That is how a task whose prompt was
+  // still queued got booked `completed` with no PR: the pane still showed the
+  // prior task's HIVE_VERDICT line and satisfied the completion check on the
+  // first tick past the grace period.
+  //
+  // Reporting `working` and returning is deliberate rather than failing here:
+  // armCLIReadyWait() already owns this case and hands the task back with a
+  // real reason at CLI_READY_TIMEOUT_MS. The max-duration lease is the second
+  // backstop, and it is deliberately NOT renewed by this path — a pane the
+  // agent was never prompted with is not forward progress.
+  if (CONTRIBUTOR_MODE !== MODE_HEADLESS && !taskPromptDelivered) {
+    console.warn(`Task ${currentTask.task_id} has not been typed into the ${BACKEND} pane yet — reporting progress without judging the pane`);
+    send({ type: 'task_progress', seq: nextSeq(), task_id: currentTask.task_id, task_gen: currentTask.task_gen, status: 'working', tmux_output: captureTmuxLines(TMUX_TAIL_LINES), ...progressModelFields() });
+    return;
+  }
+
   const paneState = checkTmuxPaneState();
   const tmuxLines = captureTmuxLines(TMUX_TAIL_LINES);
 
@@ -3262,7 +3349,24 @@ function progressTick() {
   //
   // Read from the already-captured tmuxLines: no second pane read, so the
   // destructive paneStalled() fingerprint (#5333) is untouched.
-  const completionVerdict = detectCompletionVerdict(tmuxLines);
+  const paneVerdict = detectCompletionVerdict(tmuxLines);
+
+  // #5650: a verdict has to belong to THIS task. The relay drives one
+  // long-lived CLI, so a task begins against a pane still showing the previous
+  // task's finished transcript — HIVE_VERDICT line included — and reading that
+  // line back is not a completion, it is the last task's statement being
+  // re-read. deliveredVerdictBaseline is exactly the line that was on the pane
+  // when this task's prompt was typed, so an identical line cannot be about
+  // this task.
+  //
+  // Suppressing it does not strand the task: with no verdict the chrome-idle
+  // grace below becomes the signal, precisely as it is for an agent that never
+  // prints the sentinel at all.
+  const staleVerdict = !!paneVerdict && paneVerdict.line === deliveredVerdictBaseline;
+  if (staleVerdict) {
+    console.warn(`Ignoring the HIVE_VERDICT line already on the pane when ${currentTask.task_id} was dispatched — it is the previous task's verdict, not this one's`);
+  }
+  const completionVerdict = staleVerdict ? null : paneVerdict;
 
   // Chrome-idle grace (#5376). classifyTmuxPane() saying IDLE_COMPLETE is now
   // only a hint; it must repeat across CHROME_IDLE_GRACE_TICKS ticks before it
@@ -4017,6 +4121,11 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     getCliReadyFailed: () => cliReadyFailed,
     getPendingTask: () => pendingTask,
     setPendingTask: (v) => { pendingTask = v; },
+    // Per-task prompt-delivery surface (kubestellar/hive#5650).
+    getTaskPromptDelivered: () => taskPromptDelivered,
+    setTaskPromptDelivered: (v) => { taskPromptDelivered = v; },
+    getDeliveredVerdictBaseline: () => deliveredVerdictBaseline,
+    setDeliveredVerdictBaseline: (v) => { deliveredVerdictBaseline = v; },
     setTasksCompletedCount: (v) => { tasksCompletedCount = v; },
     getTasksCompletedCount: () => tasksCompletedCount,
     setLastResetAtCount: (v) => { lastResetAtCount = v; },
