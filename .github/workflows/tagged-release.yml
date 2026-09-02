@@ -110,6 +110,15 @@ name: Tagged Release
 # images docker.yml has long since published, so it releases the accumulated
 # Unreleased section without ever tagging content the images do not contain.
 # On a healthy repo it is a no-op (Unreleased is empty => release=false).
+#
+# DUAL-PUBLISH (kubestellar -> hivecommons org transfer): during the transfer
+# window every publish targets BOTH ghcr.io/kubestellar and
+# ghcr.io/hivecommons. docker.yml's gate job carries the full
+# direction-agnostic story (native org = github.repository_owner, cross org +
+# PAT secret derived from it). In THIS workflow the native-org registry
+# references are owner-derived, and the immutable v<VERSION> tags are
+# additionally mirrored into the cross org by digest — see the cross-org
+# mirror steps in the release job below.
 on:
   workflow_run:
     workflows: ["Build and Push Docker Image"]
@@ -272,6 +281,12 @@ jobs:
     env:
       VERSION: ${{ needs.decide.outputs.version }}
       SHA: ${{ needs.decide.outputs.sha }}
+      # Dual-publish (see the DUAL-PUBLISH note in this file's header): the
+      # NATIVE org is wherever this repo lives — the only org GITHUB_TOKEN
+      # can write packages to — and the CROSS org is the other side of the
+      # kubestellar <-> hivecommons transfer, written to with a classic PAT.
+      NATIVE_ORG: ${{ github.repository_owner }}
+      CROSS_ORG: ${{ github.repository_owner == 'kubestellar' && 'hivecommons' || 'kubestellar' }}
     steps:
       - name: Checkout the commit docker.yml just built
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -330,8 +345,8 @@ jobs:
           set -euo pipefail
           short="${SHA:0:7}"
           for image in hive hive-contributor hive-hub; do
-            src="ghcr.io/kubestellar/${image}:${short}"
-            dst="ghcr.io/kubestellar/${image}:v${VERSION}"
+            src="ghcr.io/${NATIVE_ORG}/${image}:${short}"
+            dst="ghcr.io/${NATIVE_ORG}/${image}:v${VERSION}"
             echo "Tagging ${dst} from ${src}"
             docker buildx imagetools create -t "$dst" "$src"
           done
@@ -340,7 +355,7 @@ jobs:
       # release" (the operator's framing). Because this workflow retags rather
       # than rebuilds (see above), there is no fresh --version output to check
       # against the tag the way docker.yml's freshness guard checks a commit
-      # hash — the binary inside ghcr.io/kubestellar/hive:v${VERSION} was
+      # hash — the binary inside the native org's hive:v${VERSION} was
       # built by an ordinary docker.yml run that never received a VERSION
       # build-arg, so today it always reports the "0.0.0-dev" fallback (see
       # cmd/hive/main.go and src/docs/releases.md, "What still blocks cutting
@@ -353,7 +368,7 @@ jobs:
       - name: Confirm the newly tagged image runs, and report its embedded version
         run: |
           set -euo pipefail
-          img="ghcr.io/kubestellar/hive:v${VERSION}"
+          img="ghcr.io/${NATIVE_ORG}/hive:v${VERSION}"
           docker pull "$img"
           reported="$(docker run --rm --entrypoint /usr/local/bin/hive "$img" --version)"
           echo "image reports: ${reported}"
@@ -362,6 +377,72 @@ jobs:
           else
             echo "::warning::v${VERSION} is tagged but the image's --version output does not embed that string (reports: ${reported}). This is the known gap in src/docs/releases.md — the image was built by an ordinary docker.yml run with no VERSION build-arg. The GHCR TAG is still correct and immutable; only the binary's self-report is stale."
           fi
+
+      # ---- Cross-org mirror of the immutable version tags (kubestellar <->
+      # hivecommons dual-publish; docker.yml's gate job has the full
+      # direction-agnostic story). The v${VERSION} tag just created above is
+      # copied into the other org's registry BY DIGEST, so both registries'
+      # version tags are digest-identical — REUSE, NOT REBUILD, one level
+      # further out.
+      #
+      # Missing-secret asymmetry, same as docker.yml's merge jobs and on
+      # purpose: post-transfer (owner=hivecommons) a missing PAT is a hard
+      # ::error failure — a release tagged in only one registry is the
+      # dangerous one-sided publish; pre-transfer (owner=kubestellar) the PAT
+      # may simply not exist yet, the mirror is purely additive, so it is
+      # only a ::warning and the release proceeds.
+      #
+      # ORDERING: ghcr.io is ONE registry host and docker keeps one
+      # credential per host, so the cross login below REPLACES the
+      # GITHUB_TOKEN login above. Every native-registry WRITE is already done
+      # at this point; the later steps (verify pull happened above, SBOMs
+      # below) only READ the native image, which remains possible because
+      # these packages are public.
+      - name: Check cross-registry credential
+        id: crosspat
+        env:
+          # Env indirection: `if:` cannot read the secrets context. The
+          # secret NAME follows the direction of the transfer:
+          #   owner=kubestellar -> GHCR_HIVECOMMONS_PAT (writes hivecommons)
+          #   owner=hivecommons -> GHCR_KUBESTELLAR_PAT (writes kubestellar)
+          CROSS_PAT: ${{ secrets[github.repository_owner == 'kubestellar' && 'GHCR_HIVECOMMONS_PAT' || 'GHCR_KUBESTELLAR_PAT'] }}
+          CROSS_SECRET_NAME: ${{ github.repository_owner == 'kubestellar' && 'GHCR_HIVECOMMONS_PAT' || 'GHCR_KUBESTELLAR_PAT' }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          if [ -n "$CROSS_PAT" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "available=false" >> "$GITHUB_OUTPUT"
+          if [ "$OWNER" = "hivecommons" ]; then
+            echo "::error::secret ${CROSS_SECRET_NAME} is not set, so this release cannot mirror v${VERSION} to ghcr.io/${CROSS_ORG}. Post-transfer that is a silent one-sided publish, so this fails hard (the release is retried by the hourly backstop once the secret exists). Create a classic PAT with write:packages from a ${CROSS_ORG} member and store it as ${CROSS_SECRET_NAME}."
+            exit 1
+          fi
+          echo "::warning::secret ${CROSS_SECRET_NAME} is not set — v${VERSION} will exist only in ghcr.io/${NATIVE_ORG}. Pre-transfer this is expected until that PAT is created."
+
+      - name: Log in to GHCR as the cross-org publisher
+        if: steps.crosspat.outputs.available == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets[github.repository_owner == 'kubestellar' && 'GHCR_HIVECOMMONS_PAT' || 'GHCR_KUBESTELLAR_PAT'] }}
+
+      - name: Mirror immutable version tags into the cross-org registry (by digest)
+        if: steps.crosspat.outputs.available == 'true'
+        run: |
+          set -euo pipefail
+          for image in hive hive-contributor hive-hub; do
+            native="ghcr.io/${NATIVE_ORG}/${image}"
+            # The native v tag was created a few steps up in this same job,
+            # so ANY inspect failure here (including manifest unknown) is a
+            # hard error, not a skippable absence.
+            digest="$(docker buildx imagetools inspect "${native}:v${VERSION}" --format '{{.Manifest.Digest}}')"
+            dst="ghcr.io/${CROSS_ORG}/${image}:v${VERSION}"
+            echo "Mirroring ${dst} <- ${native}@${digest}"
+            docker buildx imagetools create -t "$dst" "${native}@${digest}"
+          done
 
       # NOT stable/candidate/edge. Channel promotion is deliberate, separate
       # policy (src/docs/release-channels.md) and this workflow must never
@@ -406,10 +487,16 @@ jobs:
       # package manifest is representative of both. This is recorded here
       # AND in the generated release notes rather than silently shipping one
       # file and implying full multi-arch coverage.
+      #
+      # REGISTRIES: the scans below reference the NATIVE org's v tag. That
+      # one SBOM per image covers BOTH registries: the cross-org v tag
+      # mirrored above is a by-digest copy of the very same manifest, so the
+      # two references resolve to byte-identical content and a second scan
+      # could only ever produce the same document twice.
       - name: Generate per-image SBOMs (SPDX JSON, Syft, linux/amd64)
         uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
-          image: ghcr.io/kubestellar/hive:v${{ env.VERSION }}
+          image: ghcr.io/${{ github.repository_owner }}/hive:v${{ env.VERSION }}
           output-file: hive-v${{ env.VERSION }}-sbom.spdx.json
           format: spdx-json
           artifact-name: "" # do not also attach to a GH Actions run artifact; the release upload below is the distribution point
@@ -417,7 +504,7 @@ jobs:
       - name: Generate contributor image SBOM
         uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
-          image: ghcr.io/kubestellar/hive-contributor:v${{ env.VERSION }}
+          image: ghcr.io/${{ github.repository_owner }}/hive-contributor:v${{ env.VERSION }}
           output-file: hive-contributor-v${{ env.VERSION }}-sbom.spdx.json
           format: spdx-json
           artifact-name: ""
@@ -425,7 +512,7 @@ jobs:
       - name: Generate hub image SBOM
         uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
-          image: ghcr.io/kubestellar/hive-hub:v${{ env.VERSION }}
+          image: ghcr.io/${{ github.repository_owner }}/hive-hub:v${{ env.VERSION }}
           output-file: hive-hub-v${{ env.VERSION }}-sbom.spdx.json
           format: spdx-json
           artifact-name: ""
