@@ -2561,11 +2561,18 @@ function dropTaskCredential() {
 // readyAfterInteractiveRevoke) unwind it — the latch is only meaningful if a
 // relaunch actually happened.
 //
+// opts.noRelaunch runs steps 1 and 2 but not step 3 — for the signal-shutdown
+// path (kubestellar/hive#5655), where the PROCESS is exiting: relaunching
+// would type a fresh CLI launch into a pane that may outlive the relay (a
+// detached or container-owned tmux session), leaving an orphaned agent nobody
+// drives, and would re-arm armCLIReadyWait() timers that can never fire.
+//
 // Best-effort by design, like quitLiveCLI(): every caller is already on an
 // exit path, and a relaunch that lands badly is recovered by the
 // armCLIReadyWait() contract.
 function stopAgentForTaskExit(opts) {
   const skipCLI = !!(opts && opts.skipCLI);
+  const noRelaunch = !!(opts && opts.noRelaunch);
   const reason = (opts && opts.reason) || 'a task exit';
   // Step 1, always — even when the pane is deliberately left alone. A task
   // that is no longer ours must not keep its credential under any branch.
@@ -2581,6 +2588,7 @@ function stopAgentForTaskExit(opts) {
   }
   cliReady = false;
   quitLiveCLI();
+  if (noRelaunch) return;
   try {
     console.log(`Relaunching ${BACKEND} after ${reason}: ${relaunchCLI()}`);
   } catch (e) {
@@ -3863,10 +3871,38 @@ function cleanup() {
     if (hub.heartbeatInterval) { clearInterval(hub.heartbeatInterval); hub.heartbeatInterval = null; }
   });
   if (progressInterval) { clearInterval(progressInterval); progressInterval = null; }
+  // A shutdown with a task in flight must run the same task-exit contract as
+  // every other way a task stops being ours (kubestellar/hive#5655, #5353).
+  // Ctrl-C is the NORMAL way a contributor stops a relay, and this path used
+  // to clear timers only: the per-task scoped token stayed on disk at
+  // GH_TOKEN_CACHE, valid for the rest of its ~55-minute lifetime, after the
+  // hub had already released the issue and could offer it to someone else —
+  // the #2356 shape, reached from the shutdown direction.
+  //
+  // stopAgentForTaskExit() unlinks the credential FIRST (its step 1, always),
+  // then interrupts the live agent — which matters when the tmux session is
+  // detached or container-owned and does not die with the relay. noRelaunch:
+  // this process is exiting, so starting a fresh CLI would only orphan one.
+  // The hub is deliberately NOT messaged here: the socket drop already books
+  // the release through the disconnect handler's cooldown path (#5097).
+  if (currentTask) {
+    stopAgentForTaskExit({ reason: 'relay shutdown', noRelaunch: true });
+    currentTask = null;
+  }
 }
 
 process.on('SIGTERM', () => { cleanup(); process.exit(0); });
 process.on('SIGINT', () => { cleanup(); process.exit(0); });
+
+// Last-resort backstop (kubestellar/hive#5655): the scoped token must never
+// outlive the process, however it exits. 'exit' fires on a normal return, on
+// the process.exit(0) in the signal handlers above, and on the default
+// crash path of an uncaught exception — everything short of SIGKILL. Exit
+// handlers must be synchronous; a bare unlink is, and it is a no-op when
+// cleanup() already dropped the credential (or none was ever written).
+process.on('exit', () => {
+  try { fs.unlinkSync(GH_TOKEN_CACHE); } catch (_) {}
+});
 
 // Test hook: when HIVE_RELAY_TEST_MODE=1 the relay exposes its internals and
 // does NOT open a hub connection, so contributor-relay.test.js can drive the
