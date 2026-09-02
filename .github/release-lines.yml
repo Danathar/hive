@@ -76,6 +76,11 @@ pinned:
   # See src/docs/release-line-guard.md, "The infra workflow sync".
   scorecard.yml: [main, -v2]
   suid-contract.yml: []
+  # PR-level guard for src/internal/testutil (#5603). Pinned to the release
+  # lines and nothing else: it is a pull_request-only path-gated check, and a
+  # testutil regression can only reach a release line through a PR targeting
+  # one.
+  testutil-guard.yml: []
   v2-ci.yml: []
   v2-tests.yml: []
 
