@@ -11,6 +11,8 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-02 (v4.1.0)
+
 ### Added
 
 - A paused agent whose session is also down now offers a single **▶ start & resume** button on its dashboard card ([#5594](https://github.com/kubestellar/hive/issues/5594)). This completes the combined-action half of that issue: the card already named every blocker at once, but clearing a pause and a dead session still took two separate clicks (resume, then ↻ restart). The combined button chains the two existing endpoints client-side — resume first, so the fresh session is never born paused, then restart, which for a down session is simply "start" — and its tooltip still names any cadence blockers that one click will not clear. A paused agent with a live session keeps the plain **▶ resume**; a bare Start is never shown on a paused agent.
