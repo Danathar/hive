@@ -5,6 +5,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/kubestellar/hive/internal/testutil"
 )
 
 // backendsConfPath is the shell half of this policy. Both launch paths must
@@ -88,7 +90,7 @@ func TestGitHubWriteDenialsSurvive(t *testing.T) {
 // same way whichever launched it.
 func TestShellAndGoDenyListsAgree(t *testing.T) {
 	if _, err := os.Stat(backendsConfPath); err != nil {
-		t.Skipf("backends.conf not reachable from the test working directory: %v", err)
+		testutil.SkipfUnlessRequired(t, "backends.conf not reachable from the test working directory: %v", err)
 	}
 	out, err := exec.Command("bash", "-c",
 		"source "+backendsConfPath+" && printf '%s' \"$CLAUDE_HOST_DENY_TOOLS\"").Output()

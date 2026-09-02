@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/kubestellar/hive/internal/testutil"
 )
 
 // These tests pin the IPv6 half of the forced-proxy egress gate (#4319).
@@ -35,7 +37,7 @@ func runEgressGate(t *testing.T, env map[string]string, shims []string, ipv6Stac
 	t.Helper()
 	src, err := os.ReadFile(entrypointPath)
 	if err != nil {
-		t.Skipf("entrypoint.sh not readable from this package: %v", err)
+		testutil.SkipfUnlessRequired(t, "entrypoint.sh not readable from this package: %v", err)
 	}
 	text := string(src)
 	start := strings.Index(text, "PROXY_PORT=18443")
