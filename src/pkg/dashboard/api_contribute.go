@@ -6567,12 +6567,67 @@ func (s *Server) contributeSurface() string {
 	return surfaceHub
 }
 
+// limitActivity returns at most limit entries taken from the END of the feed —
+// the most RECENT ones — preserving the oldest-first order callers already rely
+// on (the dashboard's own field-log consumer does `acts.slice(-6).reverse()`).
+//
+// limit <= 0 means "everything retained", which is what every caller received
+// before the parameter was honoured, so an omitted or unparseable limit changes
+// nothing for them.
+func limitActivity(entries []ActivityEntry, limit int) []ActivityEntry {
+	if limit <= 0 || len(entries) <= limit {
+		return entries
+	}
+	return entries[len(entries)-limit:]
+}
+
+// handleContributeActivity serves the recent contributor activity feed.
+//
+// Query params:
+//
+//	limit — how many of the MOST RECENT events to return. Omitted, non-numeric
+//	        or <= 0 returns everything retained.
+//
+// `limit` used to be accepted and silently ignored: every request returned the
+// whole ring whether it asked for 5 or for 300 (kubestellar/hive#5704).
+//
+// The response reports `retained` and `capacity` alongside the events because
+// this feed is a BOUNDED RING and truncating it invisibly produced confidently
+// wrong analysis rather than an obvious error — a reader counted one
+// contributor's events over what they believed was a full day while actually
+// reading a 50-event window shared with every other contributor on the hive.
+// Two integers let a caller tell the three cases apart, which no amount of
+// looking at the array alone can:
+//
+//	len(activity) < retained  — this response was cut short by `limit`
+//	retained == capacity      — the ring is full, so older events have been
+//	                            evicted; this is NOT the hive's full history
+//	retained < capacity       — the hive really has produced only this many
+//
+// Deliberately NOT done here: growing the ring. `capacity` is the honest
+// ceiling, and a request above it clamps visibly rather than pretending to
+// serve history the hub never kept.
 func (s *Server) handleContributeActivity(w http.ResponseWriter, r *http.Request) {
+	limit := 0 // 0 = everything retained
+	if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
 	if s.contributeHub == nil {
-		jsonResponse(w, map[string]any{"activity": []any{}})
+		jsonResponse(w, map[string]any{
+			"activity": []ActivityEntry{},
+			"retained": 0,
+			"capacity": maxActivityEntries,
+		})
 		return
 	}
-	jsonResponse(w, map[string]any{"activity": s.contributeHub.RecentActivity()})
+	all := s.contributeHub.RecentActivity()
+	jsonResponse(w, map[string]any{
+		"activity": limitActivity(all, limit),
+		"retained": len(all),
+		"capacity": maxActivityEntries,
+	})
 }
 
 // ContributeAdmissionPolicy is a read-only summary of the merge/automation
