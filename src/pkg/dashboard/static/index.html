@@ -4432,10 +4432,18 @@
         // button would otherwise persist until the user navigates away.
         const fastToggle = detail.querySelector('.oc-detail-actions .btn-toggle');
         if (fastToggle && !isOnDemand) {
-          fastToggle.className = `btn-toggle ${isPaused ? 'paused' : isOff ? 'off' : 'running'}`;
-          fastToggle.textContent = isPaused ? '▶ resume' : isOff ? '▶ start' : '⏸ pause';
-          fastToggle.dataset.paused = String(isPaused);
-          fastToggle.title = agentToggleTitle(a, isPaused, isOff);
+          if (isPaused) {
+            // Paused gets the full combined-action rebuild — '▶ start &
+            // resume' when the session is also down — so data-action tracks
+            // the session state too, not just the label (#5594 follow-up).
+            fastToggle.outerHTML = pausedAgentActionHtml(a);
+          } else {
+            fastToggle.className = `btn-toggle ${isOff ? 'off' : 'running'}`;
+            fastToggle.textContent = isOff ? '▶ start' : '⏸ pause';
+            fastToggle.dataset.action = 'toggleAgent';
+            fastToggle.dataset.paused = 'false';
+            fastToggle.title = agentToggleTitle(a, false, isOff);
+          }
         }
         // Same for the blockers line, the stat fields and the indicators — they
         // live outside the scroll region, so replacing them wholesale cannot
@@ -4541,7 +4549,9 @@
             ? '<button class="btn-toggle on-demand" title="On-demand agent — kicked manually, not by governor cadence">⚡ on demand</button>'
             : !dashboardRoleAtLeast(window._hiveRole || 'read', 'owner')
             ? ''
-            : `<button class="btn-toggle ${isPaused ? 'paused' : isOff ? 'off' : 'running'}" data-action="toggleAgent" data-agent="${esc(a.name)}" data-paused="${isPaused}" title="${esc(agentToggleTitle(a, isPaused, isOff))}">${isPaused ? '▶ resume' : isOff ? '▶ start' : '⏸ pause'}</button>`}
+            : isPaused
+            ? pausedAgentActionHtml(a)
+            : `<button class="btn-toggle ${isOff ? 'off' : 'running'}" data-action="toggleAgent" data-agent="${esc(a.name)}" data-paused="false" title="${esc(agentToggleTitle(a, false, isOff))}">${isOff ? '▶ start' : '⏸ pause'}</button>`}
           ${sessionChip(a, '▶ terminal', `<a href="${terminalUrl(a.name)}" target="_blank" rel="noopener" class="terminal-link" data-action="openTerminal" data-agent="${esc(a.name)}" title="Open the live tmux terminal session for this agent in a new tab">▶ terminal</a>`)}
           ${sessionChip(a, '📄 full log', `<a href="${fullLogUrl(a.name, false)}" target="_blank" rel="noopener" class="terminal-link" title="Open the full retained log of this agent's latest run as selectable, searchable text in a new tab">📄 full log</a>`)}
           ${sessionChip(a, '⬇ log', `<a href="${fullLogUrl(a.name, true)}" download class="terminal-link" title="Download the full retained log of this agent's latest run as a text file">⬇ log</a>`)}
@@ -6435,6 +6445,29 @@
       if (isOff) return 'Start this agent \u2014 it is currently off in this governor mode';
       return 'Pause this agent \u2014 stops governor from kicking it until resumed';
     }
+    /* Combined primary action for a PAUSED agent \u2014 the follow-up to
+       resume-leads (#5594). Resume-leads guarantees the pause is never
+       hidden, and its tooltip names the session as a blocker resuming will
+       not clear; this removes that residual two-step dance: when the session
+       is ALSO down, the one button reads '\u25b6 start & resume' and clears both
+       flags in a single click via startResumeAgent (a client-side chain of
+       the two existing endpoints \u2014 resume, then restart \u2014 no new backend
+       surface). A session-up paused agent keeps the plain '\u25b6 resume' with
+       agentToggleTitle's blocker-naming tooltip. Every render site (card
+       grid, detail panel, detail fast path) builds the paused action here,
+       which is the single place that guarantees a paused agent never shows
+       a bare Start. */
+    function pausedAgentActionHtml(a) {
+      if (a.state === 'running') {
+        return `<button class="btn-toggle paused" data-action="toggleAgent" data-agent="${esc(a.name)}" data-paused="true" title="${esc(agentToggleTitle(a, true, false))}">\u25b6 resume</button>`;
+      }
+      const rest = [];
+      if (a.offByCadence === true) rest.push('its cadence for the current governor mode is off (\u2699\ufe0f \u2192 Cadences)');
+      if (a.noCadence === true) rest.push('no governor mode gives it a cadence (\u2699\ufe0f \u2192 Cadences)');
+      let title = 'This agent is paused AND its session is down \u2014 one click resumes it and asks the supervisor to start the session. No second Resume step.';
+      if (rest.length > 0) title += ` Still not enough on its own: ${rest.join('; ')}.`;
+      return `<button class="btn-toggle paused" data-action="startResumeAgent" data-agent="${esc(a.name)}" data-paused="true" title="${esc(title)}">\u25b6 start &amp; resume</button>`;
+    }
     function neverScheduledChipHtml(a, configTarget) {
       if (a.noCadence !== true) return '';
       const who = a.displayName || a.name;
@@ -6520,7 +6553,7 @@
            blockers ride in the tooltip and on the blockers line below, so the
            operator learns them before the click, not after. */
         const toggleBtn = canToggle ? (isPaused && canPauseToggle
-          ? `<button class="btn-toggle paused" data-action="toggleAgent" data-agent="${esc(a.name)}" data-paused="true" title="${esc(agentToggleTitle(a, true, false))}">▶ resume</button>`
+          ? pausedAgentActionHtml(a)
           : isOff
           ? `<button class="btn-toggle off" data-action="openConfigDialog" data-config-type="agent" data-agent="${esc(a.name)}" title="Agent is off in this governor mode — click to configure per-mode cadences">⚙ off</button>`
           : isOnDemand
@@ -14460,6 +14493,7 @@ function burnAreaChart() {
       const agent = el.dataset.agent || '';
       switch (action) {
         case 'toggleAgent': toggleAgent(agent, el.dataset.paused === 'true'); break;
+        case 'startResumeAgent': startResumeAgent(agent); break;
         case 'restartAgent': restartAgent(agent); break;
         case 'openConfigDialog': { const ct = el.dataset.configType || el.dataset.arg0 || 'agent'; const tab = el.dataset.tab || el.dataset.arg2 || null; if (el.classList.contains('agent-link')) { closeConfigDialog(); setTimeout(() => openConfigDialog(ct, agent, tab), 100); } else { openConfigDialog(ct, agent || null, tab); } } break;
         case 'ocSendKick': ocSendKick(agent); break;
@@ -14838,7 +14872,14 @@ function burnAreaChart() {
         document.querySelectorAll(`.agent-card[data-agent="${CSS.escape(agent)}"] .agent-blockers`)
           .forEach(el => { el.outerHTML = agentBlockerLineHtml(agentObj); });
         document.querySelectorAll(`.agent-card[data-agent="${CSS.escape(agent)}"] .btn-toggle`)
-          .forEach(el => { el.title = agentToggleTitle(agentObj, nowPaused, false); });
+          .forEach(el => {
+            // A just-paused agent gets the full combined-action rebuild —
+            // the combined start-and-resume button when its session is also
+            // down (#5594 follow-up); an unpaused one only needs its tooltip
+            // refreshed.
+            if (nowPaused) el.outerHTML = pausedAgentActionHtml(agentObj);
+            else el.title = agentToggleTitle(agentObj, false, false);
+          });
       }
       // The focused agent-detail panel renders its own toggle button — the
       // .agent-card loop above never reaches it, so re-render it from the
@@ -14859,6 +14900,40 @@ function burnAreaChart() {
       } else {
         dismissToast(toast, `${agent} ${action}d`, 'success');
       }
+    }
+
+    // Combined start & resume for a paused agent whose session is also down
+    // (#5594 follow-up to resume-leads). Client-side chain of the two
+    // existing endpoints — resume FIRST so the pause is cleared before the
+    // supervisor spawns the session (a session started while still paused
+    // would just sit unkickable), then restart, which for a down session is
+    // simply "start". No confirm dialog: unlike restartAgent there is no
+    // live session to kill.
+    async function startResumeAgent(agent) {
+      const toast = showToast(`Starting & resuming ${agent}...`, 'info', true);
+      try {
+        const res = await fetch(`/api/resume/${agent}`, { method: 'POST' });
+        const data = await res.json();
+        if (!data.ok) { dismissToast(toast, `Resume failed: ${data.error || 'unknown'}`, 'error'); return; }
+        const res2 = await fetch(`/api/restart/${agent}`, { method: 'POST' });
+        const data2 = await res2.json();
+        if (!data2.ok) { dismissToast(toast, `Resumed, but session start failed: ${data2.error || 'unknown'}`, 'error'); return; }
+      } catch (e) {
+        dismissToast(toast, `Start & resume failed: ${e}`, 'error');
+        return;
+      }
+      // Same optimistic patch discipline as toggleAgent: the blockers line
+      // and the action button render from the agent object, so update it and
+      // repaint before the next poll confirms.
+      const agentObj = (window._lastAgents || []).find(x => x.name === agent);
+      if (agentObj) {
+        agentObj.paused = false;
+        document.querySelectorAll(`.agent-card[data-agent="${CSS.escape(agent)}"] .agent-blockers`)
+          .forEach(el => { el.outerHTML = agentBlockerLineHtml(agentObj); });
+      }
+      if (typeof ocRenderAgentDetail === 'function') ocRenderAgentDetail();
+      refreshStatus();
+      dismissToast(toast, `${agent} resumed — supervisor is starting the session`, 'success');
     }
 
     async function restartAgent(agent) {
