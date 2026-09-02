@@ -555,6 +555,7 @@ func buildAgents(statuses map[string]*agent.AgentProcess, cfg *config.Config, go
 		}
 		cadence := cadenceDisplay(cadenceValue)
 		nextKick := computeNextKickFromCadence(proc.LastKick, cadenceValue)
+		nextKickIn := computeNextKickETA(proc.LastKick, cadenceValue)
 
 		// offByCadence: the agent's cadence for the CURRENT governor mode is a
 		// non-kicking value ("pause"/"off"), so the governor will never kick it
@@ -574,6 +575,23 @@ func buildAgents(statuses map[string]*agent.AgentProcess, cfg *config.Config, go
 		modeCadence := cfg.CadenceValueForMode(name, currentMode)
 		offByCadence := modeCadence != "" && modeCadence.IsPaused() &&
 			!proc.Config.OnDemand && !onDemandSet[name]
+
+		// noCadence: NO governor mode names this agent in its cadence map and it
+		// has never been kicked, so nothing will ever schedule it — the silent
+		// idle class named by governor.NoCadenceAgents (#5577). offByCadence is
+		// the OPPOSITE situation (an explicit pause/off entry, i.e. an operator
+		// choice), which is why the two are separate flags and both can be false.
+		//
+		// Predicate deliberately identical to the governor's, down to the
+		// never-kicked clause, so the fleet banner and the agent card cannot
+		// name different agents (#5594). The cadence lookup itself is the shared
+		// config.HasAnyCadenceIn the governor calls.
+		agentEnabled := !agentDisabledInConfig(cfg, name, proc)
+		noCadence := agentEnabled &&
+			!proc.Config.OnDemand && !onDemandSet[name] &&
+			proc.Config.UsesGovernorKick() &&
+			!cfg.HasAnyCadence(name) &&
+			proc.LastKick == nil
 
 		pinnedCli := proc.PinnedCLI != "" || proc.Config.CLIPinned
 		pinnedModel := proc.PinnedModel != ""
@@ -615,7 +633,7 @@ func buildAgents(statuses map[string]*agent.AgentProcess, cfg *config.Config, go
 			Color:         agentCfg.Color,
 			BeadRole:      agentCfg.GetBeadRole(),
 			Managed:       agentCfg.Managed,
-			Enabled:       !agentDisabledInConfig(cfg, name, proc),
+			Enabled:       agentEnabled,
 			ReplicaBase:   agentCfg.ReplicaOf,
 			ReplicaIndex:  agentCfg.ReplicaIndex,
 			ReplicaCount:  agentCfg.ReplicaCount,
@@ -630,6 +648,7 @@ func buildAgents(statuses map[string]*agent.AgentProcess, cfg *config.Config, go
 			PausedTrigger: proc.PausedTrigger,
 			PausedBy:      proc.PausedBy,
 			OffByCadence:  offByCadence,
+			NoCadence:     noCadence,
 			CLI:           cli,
 			Model:         model,
 			Cadence:       cadence,
@@ -639,6 +658,7 @@ func buildAgents(statuses map[string]*agent.AgentProcess, cfg *config.Config, go
 			Pinned:        pinnedCli || pinnedModel,
 			LastKick:      lastKick,
 			NextKick:      nextKick,
+			NextKickIn:    nextKickIn,
 			Restarts:      proc.RestartCount,
 			GovBackend:    cli,
 			GovModel:      model,

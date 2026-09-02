@@ -473,6 +473,7 @@ type FrontendAgent struct {
 	PausedTrigger    string `json:"pausedTrigger,omitempty"`
 	PausedBy         string `json:"pausedBy,omitempty"`
 	OffByCadence     bool   `json:"offByCadence"`
+	NoCadence        bool   `json:"noCadence"`
 	NeedsLogin       bool   `json:"needsLogin"`
 	AuthAvailable    bool   `json:"authAvailable"`
 	AuthKnown        bool   `json:"authKnown"`
@@ -486,6 +487,7 @@ type FrontendAgent struct {
 	Pinned           bool   `json:"pinned"`
 	LastKick         string `json:"lastKick,omitempty"`
 	NextKick         string `json:"nextKick,omitempty"`
+	NextKickIn       string `json:"nextKickIn,omitempty"`
 	Restarts         int    `json:"restarts"`
 	LiveSummary      string `json:"liveSummary,omitempty"`
 	DetailSummary    string `json:"detailSummary,omitempty"`

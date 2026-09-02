@@ -24,6 +24,42 @@ func (c *Config) CadenceValueForMode(agentName, modeName string) Cadence {
 	return ""
 }
 
+// HasAnyCadenceIn reports whether ANY mode in modes carries a cadence entry for
+// agentName — directly, or under baseName (pass the agent's replica base, or
+// agentName itself when there is none), mirroring CadenceValueForMode's
+// fallback. An explicit "off"/"pause" entry COUNTS as configured: that is an
+// operator choice, not an omission. False therefore means "no mode names this
+// agent at all", i.e. the governor will never timer-kick it in any mode.
+//
+// Shared by the governor's NoCadenceAgents fleet detector (#5577) and the
+// dashboard's per-agent noCadence card signal (#5594) so the fleet banner and
+// the agent card can never disagree about which agents are unscheduled.
+func HasAnyCadenceIn(modes map[string]ModeConfig, agentName, baseName string) bool {
+	for _, mode := range modes {
+		if _, ok := mode.Cadences[agentName]; ok {
+			return true
+		}
+		if baseName != "" && baseName != agentName {
+			if _, ok := mode.Cadences[baseName]; ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// HasAnyCadence is HasAnyCadenceIn for this config's governor modes, resolving
+// the agent's replica base itself.
+func (c *Config) HasAnyCadence(agentName string) bool {
+	if c == nil {
+		// "cannot tell", not "unscheduled" — the dashboard turns a false here
+		// into an operator-facing warning, and a missing config must not
+		// accuse every agent of never being scheduled.
+		return true
+	}
+	return HasAnyCadenceIn(c.Governor.Modes, agentName, c.BaseAgentName(agentName))
+}
+
 // ExpectedActive reports whether the governor's CURRENT mode schedules this
 // agent on a kicking cadence right now — i.e. the governor is expected to be
 // driving it. It is the inverse of the dashboard's offByCadence: false when the
