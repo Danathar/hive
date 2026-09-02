@@ -35,6 +35,77 @@ package tui
 // `a` is gated on the Agents pane being focused, that it targets the displayed
 // selection, and that a second press cannot queue a second suspend. The process
 // is never spawned. See TestAttachBindingTargetsSelectionWithoutSpawningTmux.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// MUTATION EVIDENCE (#5424 final acceptance criterion)
+//
+// A green suite proves the tests do not error. It does NOT prove they would
+// catch the regression they name — and eleven vacuous checks were found in this
+// repo in one week, including one inside the tool built to prevent them. So
+// each property below was verified by BREAKING IT IN PRODUCTION CODE and
+// confirming the named test fails. Each mutation was checked to be physically
+// present in the file and to COMPILE first: a mutation that fails to build
+// demonstrates nothing.
+//
+//	# production defect introduced          → test that caught it
+//	1 pollActivity drops fetchEvents()      → TestStartupLoadsEveryPaneAndBoth
+//	                                          LiveHeaderFieldsWithoutWaitingAnInterval
+//	2 handleSSEEvent stops caching the      → TestStreamEventUpdatesAgentAnd
+//	  governor slice                          GovernorStateImmediately
+//	3 handleSSEEvent stretches              → TestActivityDataKeepsRefreshing
+//	  activityInterval too (pre-T32 bug)      WhileTheStreamIsHealthy
+//	4 handleSSEDropped never restores       → TestStreamDropActivatesPollFallback
+//	  pollInterval (fallback never arms)      PreservesDataAndReconnectsOnce
+//	5 tab focus cycles by 2, skipping a     → TestFocusCyclesAndNavigation
+//	  pane                                    TargetsTheDisplayedSelection
+//	6a kick path drops url.PathEscape       → TestActionsEscapeAgentNamesInto
+//	                                          PathSegments
+//	6b confirm dialog clears `pending`,     → TestPauseConfirmationHitsThe
+//	   so enter re-fires the write            EscapedEndpointExactlyOnceAndRendersTheResponse
+//	6c `K` drops the kickPending guard      → TestKickHitsTheEscapedEndpoint
+//	                                          ExactlyOnceAndRendersTheQueuedStatus
+//	6d model-apply path drops PathEscape    → TestActionsEscapeAgentNamesInto
+//	                                          PathSegments  [test fixed, see below]
+//	6e pause/resume path drops PathEscape   → TestActionsEscapeAgentNamesInto
+//	                                          PathSegments  [test fixed, see below]
+//	6f ACMM typing guard drops Pending()    → TestACMMTypedConfirmationApplies
+//	   (BOTH the app-level acmmType guard     ExactlyOnceAtTheEscapedEndpoint
+//	   and ACMMOverlay.Type must be           [test fixed, see below]
+//	   removed together — see note)
+//	7a footerText drops a binding           → TestHelpAndFooterListTheSame
+//	                                          AvailableBindings
+//	7b ACMM overlay falls through to the    → TestModalKeysCannotLeakInto
+//	   global bindings                        GlobalActions
+//	8 View checks only minWidth, ignoring   → TestResizeBelowAndAboveTheMinimum
+//	  minHeight                               SwapsTheFrameCleanly
+//	9 stopSSE no longer calls cancelSSE()   → TestQuitCancelsTheStreamWithout
+//	  (stream reader leaks)                   LeakingAGoroutineOrReconnect
+//	                                          [test fixed, see below]
+//
+// FOUR MUTATIONS SURVIVED THE ORIGINAL SUITE. Each is fixed above:
+//
+//   - 6d/6e — TestActionsEscapeAgentNamesIntoPathSegments asserted the escaped
+//     path for KICK ONLY, so removing url.PathEscape from PauseAgent,
+//     ResumeAgent or SetAgentModel left the whole package green. The test now
+//     drives pause and model-apply through the assembled loop with the same
+//     slash-bearing name and asserts both the escaped and the raw spelling.
+//
+//   - 9 — the goroutine assertion ran AFTER harness.stop(), which calls
+//     model.cancelSSE() in its own teardown: the harness cleaned up the very
+//     leak the test was hunting, so the count settled whether or not the quit
+//     path cancelled anything. The fixture now records client cancellations
+//     (r.Context().Done()) and the test asserts the quit path released the
+//     connection BEFORE teardown runs.
+//
+//   - 6f — NOT a vacuous test, and worth recording as such. The pending guard
+//     is enforced in two places (model.acmmType and ACMMOverlay.Type) which are
+//     redundant with each other, so removing either alone leaves the other
+//     enforcing the property. Removing BOTH fails the test. The single-guard
+//     survival is defence-in-depth, not a gap; the test gained a fixture gate
+//     (fixtureDashboard.gate) so the in-flight window is observable at all,
+//     which is what makes the two-guard mutation detectable.
+//
+// ─────────────────────────────────────────────────────────────────────────────
 
 import (
 	"encoding/json"
@@ -96,6 +167,22 @@ type fixtureDashboard struct {
 	// frames is the SSE channel the test publishes on. Each value is one
 	// complete event; the handler frames it as `event:`/`data:` lines.
 	frames chan sseFrame
+
+	// gates hold a response open per logical path until the test releases it.
+	// See fixtureDashboard.gate.
+	gates map[string]chan struct{}
+
+	// streamClientCancels counts stream handlers that returned because the
+	// CLIENT cancelled the request (r.Context().Done()), as opposed to a
+	// server-side drop or shutdown.
+	//
+	// This is the only server-observable proof that the quit path actually
+	// cancelled the stream. Counting goroutines cannot do that job here: the
+	// harness's own teardown calls model.cancelSSE(), so by the time
+	// assertGoroutinesSettle runs, a reader the quit path leaked has already
+	// been cleaned up by the test itself and the count settles either way.
+	// See TestQuitCancelsTheStreamWithoutLeakingAGoroutineOrReconnect.
+	streamClientCancels int
 
 	// streamOpens counts how many times /api/events has been dialled. It is
 	// how the reconnect properties tell "reconnected once" from "spawned a
@@ -271,6 +358,21 @@ func (f *fixtureDashboard) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A gated endpoint parks here until the test releases it, which is how a
+	// test observes the window while a write is genuinely PENDING. Without it
+	// the fixture answers instantly and the in-flight state is gone before the
+	// next key can be delivered — so a guard that only matters during that
+	// window cannot be asserted at all.
+	f.mu.Lock()
+	gate := f.gates[r.URL.Path]
+	f.mu.Unlock()
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-time.After(waitTimeout):
+		}
+	}
+
 	// Decoded path for the response table: writes are addressed with escaped
 	// segments, and the table is keyed by the logical endpoint.
 	f.mu.Lock()
@@ -385,6 +487,13 @@ func (f *fixtureDashboard) serveStream(w http.ResponseWriter, r *http.Request) {
 			// restarting behind a proxy looks like.
 			return
 		case <-r.Context().Done():
+			// The CLIENT went away: either the model cancelled the stream
+			// (quit, or a generation being retired) or the process is
+			// tearing down. Recording it is what lets a test assert that the
+			// quit path released the connection itself.
+			f.mu.Lock()
+			f.streamClientCancels++
+			f.mu.Unlock()
 			return
 		}
 	}
@@ -467,6 +576,37 @@ func (f *fixtureDashboard) streamConnections() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.streamOpens
+}
+
+// gate holds every response for path open until the returned release func is
+// called, so a test can assert what the model does while the write is in
+// flight. Releasing is idempotent and safe to defer.
+func (f *fixtureDashboard) gate(path string) func() {
+	ch := make(chan struct{})
+	f.mu.Lock()
+	if f.gates == nil {
+		f.gates = map[string]chan struct{}{}
+	}
+	f.gates[path] = ch
+	f.mu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			f.mu.Lock()
+			delete(f.gates, path)
+			f.mu.Unlock()
+			close(ch)
+		})
+	}
+}
+
+// streamClientCancellations returns how many stream handlers ended because the
+// client cancelled the request.
+func (f *fixtureDashboard) streamClientCancellations() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.streamClientCancels
 }
 
 // shutdownStreams releases every parked stream handler for good.
@@ -1607,9 +1747,36 @@ func TestACMMTypedConfirmationAppliesExactlyOnceAtTheEscapedEndpoint(t *testing.
 		return m.acmm != nil && m.acmm.Typed() == want
 	})
 
+	// THE FIELD IS FROZEN WHILE THE APPLY IS IN FLIGHT.
+	//
+	// acmmType is guarded on `!Confirming() || Pending()`. Hammering enter
+	// exercises the Apply() half of the exactly-once guard but never the
+	// Pending() half, because it types no CHARACTERS while the write is
+	// pending — so deleting `|| m.acmm.Pending()` from acmmType survived the
+	// whole package. Typing during the window is what tells them apart: a
+	// character accepted now would edit the confirmed phrase out from under a
+	// write already addressed to level 4, leaving the overlay reporting a
+	// phrase that no longer matches what was sent.
+	//
+	// The apply is GATED so the window is observable at all: the fixture
+	// otherwise answers instantly and the pending state is gone before the
+	// next key arrives.
+	release := f.gate("/api/packs/level")
+
 	h.key("enter")
 	h.key("enter")
 	h.key("enter")
+
+	h.waitFor("the apply to be in flight", func(m model) bool {
+		return m.acmm != nil && m.acmm.Pending()
+	})
+	h.typeText("X")
+	h.settle()
+	if typed := h.snapshot().acmm.Typed(); typed != want {
+		t.Errorf("the confirmation field accepted a keystroke while the apply was pending: typed %q, want %q",
+			typed, want)
+	}
+	release()
 
 	h.waitFor("the apply to complete and the overlay to hold the receipt", func(m model) bool {
 		return m.acmm != nil && m.acmm.Done()
@@ -1687,6 +1854,62 @@ func TestActionsEscapeAgentNamesIntoPathSegments(t *testing.T) {
 	}
 	if got := f.countRequests(http.MethodPost, "/api/kick/team/one"); got != 0 {
 		t.Errorf("kick sent a RAW-interpolated path %d times: the name leaked into the route", got)
+	}
+
+	// EVERY per-agent write, not just kick. Kick was the only escaped path
+	// asserted here originally, so dropping url.PathEscape from PauseAgent,
+	// ResumeAgent or SetAgentModel left the whole suite green — three live
+	// mutations that survived. The client's own comment is the reason this has
+	// to be deliberate: "Ordinary agent names need no escaping, which is
+	// exactly why this has to be deliberate rather than left to the common
+	// case." A name with a slash is the case that tells them apart, because a
+	// raw one silently becomes an extra path segment and reaches a different
+	// route (or none).
+
+	// Pause: `p` opens the confirmation, `y` sends it.
+	h.key("p")
+	h.waitFor("the pause dialog to open for the awkwardly-named agent", func(m model) bool {
+		return m.confirm != nil && m.confirm.agent == "team/one"
+	})
+	h.key("y")
+	h.waitFor("the pause dialog to close on the authoritative response", func(m model) bool {
+		return m.confirm == nil
+	})
+	h.settle()
+
+	escapedPause := "/api/pause/" + url.PathEscape("team/one")
+	if got := f.countRequests(http.MethodPost, escapedPause); got != 1 {
+		t.Errorf("pause did not address the escaped path %s exactly once (got %d)", escapedPause, got)
+	}
+	if got := f.countRequests(http.MethodPost, "/api/pause/team/one"); got != 0 {
+		t.Errorf("pause sent a RAW-interpolated path %d times: the name leaked into the route", got)
+	}
+
+	// Model apply: the agent name AND the model id are both path segments.
+	h.key("m")
+	h.waitFor("the picker to open for the awkwardly-named agent", func(m model) bool {
+		return m.picker != nil && m.picker.Agent() == "team/one"
+	})
+	h.waitFor("the catalogue to populate the overlay", func(m model) bool {
+		return m.picker != nil && !m.picker.Loading()
+	})
+	h.key("j")
+	h.waitFor("the picker selection to move off the current model", func(m model) bool {
+		sel, ok := m.picker.Selected()
+		return ok && sel == "claude-sonnet-4-5"
+	})
+	h.key("enter")
+	h.waitFor("the picker to close on a successful apply", func(m model) bool {
+		return m.picker == nil
+	})
+	h.settle()
+
+	escapedModel := "/api/model/" + url.PathEscape("team/one") + "/claude-sonnet-4-5"
+	if got := f.countRequests(http.MethodPost, escapedModel); got != 1 {
+		t.Errorf("model apply did not address the escaped path %s exactly once (got %d)", escapedModel, got)
+	}
+	if got := f.countRequests(http.MethodPost, "/api/model/team/one/claude-sonnet-4-5"); got != 0 {
+		t.Errorf("model apply sent a RAW-interpolated path %d times: the name leaked into the route", got)
 	}
 }
 
@@ -2134,6 +2357,24 @@ func TestQuitCancelsTheStreamWithoutLeakingAGoroutineOrReconnect(t *testing.T) {
 				t.Errorf("the stream was re-dialled %d time(s) after quit: the quit path scheduled a reconnect",
 					got-connectionsBefore)
 			}
+
+			// THE QUIT PATH ITSELF RELEASED THE CONNECTION.
+			//
+			// This must be asserted BEFORE h.stop(), and that ordering is the
+			// whole point. harness.stop() calls model.cancelSSE() in its own
+			// teardown, so every goroutine check after it passes whether or
+			// not the quit path cancelled anything — the harness cleans up the
+			// very leak the test is hunting. A mutation deleting cancelSSE()
+			// from stopSSE survived the goroutine assertion for exactly that
+			// reason.
+			//
+			// The fixture's handler records a client cancellation when
+			// r.Context() is done, which happens only when the model's own
+			// context is cancelled. Waiting for it here proves quit did the
+			// work rather than teardown doing it later.
+			h.waitForFixture("the quit path to cancel the stream request", func() bool {
+				return f.streamClientCancellations() > 0
+			})
 
 			// NO LEAKED GOROUTINE. The stream reader must have exited.
 			h.stop()
