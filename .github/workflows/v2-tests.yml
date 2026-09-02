@@ -143,6 +143,13 @@ jobs:
         env:
           IDX: ${{ matrix.idx }}
           TOTAL: ${{ strategy.job-total }}
+          # The converted skips in pkg/hub gate on repo files being present in
+          # the checkout (deploy/k8s/error-pages.yaml) — a precondition
+          # actions/checkout above GUARANTEES here, so a skip at a converted
+          # site means the test broke, not that the environment is unsuitable
+          # (#5388). Only testutil.SkipUnlessRequired sites become fatal;
+          # plain t.Skip capability gates are unaffected.
+          HIVE_TEST_REQUIRE_BEHAVIOURAL: '1'
         run: |
           set -o pipefail
           go test ./pkg/hub -short -list '.*' | grep -E '^(Test|Example|Fuzz)' | LC_ALL=C sort > all-tests.txt
@@ -374,6 +381,16 @@ jobs:
       - name: Test
         env:
           PKGS: ${{ matrix.pkgs }}
+          # The converted skips in the rest packages gate on repo files being
+          # present in the checkout (deploy/entrypoint.sh, Dockerfile,
+          # deploy/nginx.conf, config/backends.conf, bin/gh-app-token.sh,
+          # bin/hive-open-pr.sh) — a precondition actions/checkout above
+          # GUARANTEES here, so a skip at a converted site means the test
+          # broke, not that the environment is unsuitable (#5388). Only
+          # testutil.SkipUnlessRequired sites become fatal; plain t.Skip
+          # capability gates (root, symlinks, git, /data writability, tool
+          # availability) are unaffected and stay permissive.
+          HIVE_TEST_REQUIRE_BEHAVIOURAL: '1'
         run: |
           set -o pipefail
           if [ -z "$PKGS" ]; then

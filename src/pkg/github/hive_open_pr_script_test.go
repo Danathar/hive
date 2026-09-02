@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/kubestellar/hive/internal/testutil"
 )
 
 // bin/hive-open-pr.sh is what agents run INSTEAD of `gh pr create`; it writes
@@ -27,7 +29,7 @@ func runHiveOpenPR(t *testing.T, args ...string) PRRequest {
 	t.Helper()
 	src, err := os.ReadFile(hiveOpenPRScriptPath)
 	if err != nil {
-		t.Skipf("hive-open-pr.sh not readable from this package: %v", err)
+		testutil.SkipfUnlessRequired(t, "hive-open-pr.sh not readable from this package: %v", err)
 	}
 	for _, tool := range []string{"bash", "python3"} {
 		if _, err := exec.LookPath(tool); err != nil {
