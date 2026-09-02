@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -292,11 +293,55 @@ func (l *Ledger) persistLocked() error {
 	if err != nil {
 		return fmt.Errorf("marshaling mutation claim ledger: %w", err)
 	}
-	tmpPath := l.path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, ledgerFileMode); err != nil {
+	// A UNIQUE temp name per writer (the beads #4742 pattern): a fixed
+	// path+".tmp" lets a second writer on the same path clobber an in-flight
+	// persist, so one rename wins the race and the loser's entries silently
+	// vanish. The ledger mutex serializes writers within one process; the
+	// unique name keeps a non-cooperating process from corrupting a commit.
+	dir := filepath.Dir(l.path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(l.path)+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("creating tmp mutation claim ledger: %w", err)
+	}
+	tmpPath := tmp.Name()
+	keep := false
+	defer func() {
+		_ = tmp.Close()
+		if !keep {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	// CreateTemp makes 0600; widen to the outcome/proof/beads persistence
+	// idiom the fixed-name os.WriteFile used to apply.
+	if err := tmp.Chmod(ledgerFileMode); err != nil {
+		return fmt.Errorf("protecting tmp mutation claim ledger: %w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
 		return fmt.Errorf("writing tmp mutation claim ledger: %w", err)
 	}
-	return os.Rename(tmpPath, l.path)
+	// fsync before rename: Acquire's contract is that an epoch is never
+	// handed out that a restart could forget, and that requires the bytes —
+	// not just the directory entry — to be durable before persistLocked
+	// returns and the caller acts on the new epoch.
+	if err := tmp.Sync(); err != nil {
+		return fmt.Errorf("syncing tmp mutation claim ledger: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("closing tmp mutation claim ledger: %w", err)
+	}
+	if err := os.Rename(tmpPath, l.path); err != nil {
+		return fmt.Errorf("committing mutation claim ledger: %w", err)
+	}
+	keep = true
+	directory, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("opening mutation claim ledger directory: %w", err)
+	}
+	defer func() { _ = directory.Close() }()
+	if err := directory.Sync(); err != nil {
+		return fmt.Errorf("syncing mutation claim ledger directory: %w", err)
+	}
+	return nil
 }
 
 func keysOf(m map[string]bool) []string {
