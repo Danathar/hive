@@ -307,6 +307,58 @@ func TestLoginAndLogoutAreRegistered(t *testing.T) {
 	}
 }
 
+// TestLogoutClearsCacheWhenServerRefuses pins logout's failure policy: the
+// local credential is removed even when the hive cannot confirm — it is the
+// half only this command can clear, and the server-side session expires on its
+// own — and the non-confirmation is REPORTED, not swallowed.
+func TestLogoutClearsCacheWhenServerRefuses(t *testing.T) {
+	store := isolatedStore(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"failed to remove persisted GitHub credentials"}`, http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	if err := store.Save(server.URL, hivectl.Session{
+		Cookie: "hive_session=abc", ObtainedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _, err := execute(t, server, "", "logout")
+	if err != nil {
+		t.Fatalf("logout = %v, want success with the server failure reported in the output", err)
+	}
+	if !strings.Contains(stdout, "could not confirm") {
+		t.Errorf("stdout = %q, want the unconfirmed-logout note", stdout)
+	}
+	if sess, err := store.Load(server.URL); err != nil || sess != nil {
+		t.Fatalf("Load() after logout = (%+v, %v), want the cache cleared regardless", sess, err)
+	}
+}
+
+// TestLoginReportsCacheWriteFailure pins the half-succeeded login: the device
+// flow completed but the session could not be written. Saying nothing would
+// leave the operator believing they are logged in until the next command 401s
+// — the error must say the login worked and the CACHE failed.
+func TestLoginReportsCacheWriteFailure(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configDir)
+	// Block the config subdirectory with a regular file so Save cannot create it.
+	if err := os.WriteFile(configDir+"/hive", []byte("in the way"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := deviceFlowServer(t, "s3ss10n")
+	defer server.Close()
+
+	_, _, err := execute(t, server, "", "login")
+	if err == nil || !strings.Contains(err.Error(), "could not be cached") {
+		t.Fatalf("login = %v, want an error saying the session could not be cached", err)
+	}
+	if strings.Contains(err.Error(), "s3ss10n") {
+		t.Errorf("error %q leaks the session credential", err)
+	}
+}
+
 // TestLogoutWithNothingCached pins the empty case as a calm no-op, not an
 // error: logging out of a hive you never logged in to is not a failure.
 func TestLogoutWithNothingCached(t *testing.T) {

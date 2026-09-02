@@ -84,9 +84,10 @@ func newLoginCommand(env *commandEnv) *cobra.Command {
 // cookie sitting on disk. The server failure is reported, not swallowed.
 func newLogoutCommand(env *commandEnv) *cobra.Command {
 	return &cobra.Command{
-		Use:   "logout",
-		Short: "Log out of the hive and remove the cached session",
-		Args:  argsNone(),
+		Use:     "logout",
+		Short:   "Log out of the hive and remove the cached session",
+		Args:    argsNone(),
+		Example: "  hivectl logout",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			store, err := hivectl.DefaultSessionStore()
 			if err != nil {

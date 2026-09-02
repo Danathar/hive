@@ -149,6 +149,92 @@ func TestSessionStoreCorruptCacheIsAnError(t *testing.T) {
 	}
 }
 
+// TestSessionStoreCorruptCacheBlocksSaveAndDelete pins that the mutating
+// operations refuse a cache they cannot parse rather than replacing it: the
+// file may hold sessions for OTHER hives, and a Save that started from an
+// empty map would silently discard them all.
+func TestSessionStoreCorruptCacheBlocksSaveAndDelete(t *testing.T) {
+	store := tempStore(t)
+	if err := os.MkdirAll(filepath.Dir(store.Path()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(store.Path(), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Save("http://127.0.0.1:3001", testSession("hive_session=x")); err == nil {
+		t.Error("Save() over a corrupt cache = nil, want a refusal that names the file")
+	}
+	if _, err := store.Delete("http://127.0.0.1:3001"); err == nil {
+		t.Error("Delete() over a corrupt cache = nil, want a refusal that names the file")
+	}
+	// The corrupt file must still be there: refusing means not touching it.
+	data, err := os.ReadFile(store.Path())
+	if err != nil || string(data) != "{not json" {
+		t.Errorf("cache after refused writes = (%q, %v), want the original bytes untouched", data, err)
+	}
+}
+
+// TestSessionStoreUnreadableCache covers the read failure that is not
+// not-exist and not a parse error: the path exists but cannot be read as a
+// file (here: it is a directory). Still an error, still named.
+func TestSessionStoreUnreadableCache(t *testing.T) {
+	store := NewSessionStore(t.TempDir()) // the path IS a directory
+	if _, err := store.Load("http://127.0.0.1:3001"); err == nil {
+		t.Fatal("Load() on a directory = nil error, want a read failure")
+	}
+}
+
+// TestSessionStoreWriteFailures covers write's refusal exits: a config path
+// whose parent cannot be created, and a rename target that cannot be replaced.
+// Both must surface — a login whose Save fails silently would leave the
+// operator believing they are logged in until the next command 401s.
+func TestSessionStoreWriteFailures(t *testing.T) {
+	t.Run("parent dir is a file", func(t *testing.T) {
+		base := t.TempDir()
+		blocker := filepath.Join(base, "hive")
+		if err := os.WriteFile(blocker, []byte("in the way"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		store := NewSessionStore(filepath.Join(blocker, "sessions.json"))
+		if err := store.Save("http://127.0.0.1:3001", testSession("hive_session=x")); err == nil {
+			t.Fatal("Save() = nil with a file blocking the config dir, want an error")
+		}
+	})
+
+	t.Run("target is a directory", func(t *testing.T) {
+		base := t.TempDir()
+		target := filepath.Join(base, "sessions.json")
+		if err := os.MkdirAll(target, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		store := NewSessionStore(target)
+		// read() sees a directory and fails first on some platforms; on others
+		// the rename fails. Either way Save must error rather than succeed.
+		if err := store.Save("http://127.0.0.1:3001", testSession("hive_session=x")); err == nil {
+			t.Fatal("Save() = nil onto a directory path, want an error")
+		}
+	})
+
+	if runtime.GOOS != "windows" {
+		t.Run("unwritable config dir", func(t *testing.T) {
+			if os.Getuid() == 0 {
+				t.Skip("root ignores directory write bits")
+			}
+			base := t.TempDir()
+			dir := filepath.Join(base, "hive")
+			if err := os.MkdirAll(dir, 0o500); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+			store := NewSessionStore(filepath.Join(dir, "sessions.json"))
+			if err := store.Save("http://127.0.0.1:3001", testSession("hive_session=x")); err == nil {
+				t.Fatal("Save() = nil into an unwritable dir, want an error")
+			}
+		})
+	}
+}
+
 // TestSessionKey pins the normalization that makes one login serve both
 // spellings of the same loopback dashboard: hivectl's --server default is
 // 127.0.0.1, the TUI's HIVE_DASHBOARD_URL default is localhost, and a session
@@ -165,6 +251,9 @@ func TestSessionKey(t *testing.T) {
 		{"default port drops", "https://hive.example.com:443", "https://hive.example.com", true},
 		{"different hosts stay distinct", "http://spoke-a:3001", "http://spoke-b:3001", false},
 		{"different ports stay distinct", "http://localhost:3001", "http://localhost:3002", false},
+		{"schemeless input folds case and slash", "Hive.Example.com/", "hive.example.com", true},
+		{"ipv6 non-loopback keeps its brackets", "http://[2001:db8::1]:3001", "http://[2001:DB8::1]:3001", true},
+		{"ipv6 non-loopback is not localhost", "http://[2001:db8::1]:3001", "http://localhost:3001", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ka, kb := SessionKey(tc.a), SessionKey(tc.b)
