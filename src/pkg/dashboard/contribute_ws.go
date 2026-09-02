@@ -75,9 +75,9 @@ var wsUpgrader = websocket.Upgrader{
 }
 
 type ContributorConnection struct {
-	ws              *websocket.Conn
-	profile         *ContributorProfile
-	cliBackend      string
+	ws         *websocket.Conn
+	profile    *ContributorProfile
+	cliBackend string
 	// session is the OPTIONAL client-declared session label from auth_response
 	// (multi-session-per-account). Empty for a single-session contributor, which
 	// keeps identityOf() at the bare ContributorID. When set, identityOf()
@@ -240,8 +240,8 @@ type WSMessage struct {
 	// Provider is optional, bounded receipt evidence derived by Pi relays from
 	// their canonical provider/model preference. It is never assignment or
 	// routing authority; Model remains the canonical selection transport.
-	Provider        string `json:"provider,omitempty"`
-	Model           string `json:"model,omitempty"`
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model,omitempty"`
 	// Session is an OPTIONAL client-declared session label (kubestellar/hive:
 	// multi-session-per-account). One GitHub account has ONE contributor profile
 	// (one ContributorID, one auth token, one trust tier), but a contributor may
@@ -873,17 +873,60 @@ func (h *ContributeWSHub) saveLeasesLocked() {
 		h.logger.Warn("[contribute-ws] task leases directory creation failed", "error", err)
 		return
 	}
-	tmpPath := path + ".tmp"
+	// Crash-safe persist per the #5625 idiom: a UNIQUE temp name (a fixed name
+	// lets a non-cooperating process clobber a commit in flight), fsync of the
+	// bytes before the rename (the whole point of this file is that the next
+	// process boots from it, so the record must be durable, not just renamed),
+	// and an fsync of the directory so the rename itself survives a crash.
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".*.tmp")
+	if err != nil {
+		h.logger.Warn("[contribute-ws] task leases temp creation failed", "error", err)
+		return
+	}
+	tmpPath := tmp.Name()
+	keep := false
+	defer func() {
+		_ = tmp.Close()
+		if !keep {
+			_ = os.Remove(tmpPath)
+		}
+	}()
 	// 0600, unlike the sibling ledgers: this file is the C4 authorization record
 	// that lookupLease matches a resume against, so it is owner-only on both sides
 	// — nothing else on the host has any business reading which contributor holds
-	// which work item, and nothing else has any business writing it.
-	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
+	// which work item, and nothing else has any business writing it. CreateTemp
+	// already makes 0600; the explicit chmod pins the invariant rather than
+	// inheriting it.
+	if err := tmp.Chmod(0o600); err != nil {
+		h.logger.Warn("[contribute-ws] task leases chmod failed", "error", err)
+		return
+	}
+	if _, err := tmp.Write(data); err != nil {
 		h.logger.Warn("[contribute-ws] task leases write failed", "error", err)
+		return
+	}
+	if err := tmp.Sync(); err != nil {
+		h.logger.Warn("[contribute-ws] task leases sync failed", "error", err)
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		h.logger.Warn("[contribute-ws] task leases close failed", "error", err)
 		return
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		h.logger.Warn("[contribute-ws] task leases rename failed", "error", err)
+		return
+	}
+	keep = true
+	directory, err := os.Open(dir)
+	if err != nil {
+		h.logger.Warn("[contribute-ws] task leases directory open failed", "error", err)
+		return
+	}
+	defer func() { _ = directory.Close() }()
+	if err := directory.Sync(); err != nil {
+		h.logger.Warn("[contribute-ws] task leases directory sync failed", "error", err)
 	}
 }
 
