@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -427,36 +428,78 @@ func applyPRMetadata(b *beads.Bead, r *RetroRecord) {
 	}
 }
 
+// applyTimeline folds the item's lifecycle journey into the record. The
+// timeline store dedupes events by (ref, kind) — one Stage per kind with a
+// Count — so cardinality (kicks received, drift pauses) comes from
+// Stage.Count, not from iterating raw events (#5656).
 func applyTimeline(tl *timeline.Store, r *RetroRecord) {
 	if tl == nil || r.IssueRef == "" {
 		return
 	}
-	events := tl.ByIssue(r.IssueRef)
-	for i := len(events) - 1; i >= 0; i-- {
-		e := events[i]
-		switch e.Kind {
-		case timeline.KindKicked:
-			r.KicksReceived++
-			if r.ClaimedAt.IsZero() {
-				r.ClaimedAt = time.UnixMilli(e.At)
-			}
-		case timeline.KindPROpened:
-			if r.PRRef == "" {
-				r.PRRef = firstNonEmpty(attr(e, "pr_ref"), attr(e, "pr"), prRefFromAttrs(e.Attrs, r.IssueRef))
-			}
-		case timeline.KindMerged:
-			if r.PRRef == "" {
-				r.PRRef = firstNonEmpty(attr(e, "pr_ref"), attr(e, "pr"), prRefFromAttrs(e.Attrs, r.IssueRef))
-			}
+	j, ok := tl.Journey(r.IssueRef)
+	if !ok {
+		return
+	}
+	if st := j.Stages[timeline.KindKicked]; st != nil {
+		r.KicksReceived += st.Count
+		if r.ClaimedAt.IsZero() {
+			r.ClaimedAt = time.UnixMilli(st.FirstAt)
+		}
+	}
+	for _, kind := range []timeline.Kind{timeline.KindPROpened, timeline.KindMerged} {
+		st := j.Stages[kind]
+		if st == nil {
+			continue
+		}
+		if r.PRRef == "" {
+			r.PRRef = firstNonEmpty(stageAttr(st, "pr_ref"), stageAttr(st, "pr"), prRefFromAttrs(st.Attrs, r.IssueRef))
+		}
+		if kind == timeline.KindMerged {
 			r.PRState = "merged"
 		}
-		if isDriftPause(e) {
-			r.DriftPauses++
+	}
+	// Attr-carried state and drift pauses can ride on any stage; scan them in
+	// LastAt order so the most recent stage's pr_state wins deterministically.
+	for _, kind := range stagesByLastAt(j) {
+		st := j.Stages[kind]
+		if isDriftPauseStage(kind, st) {
+			r.DriftPauses += st.Count
 		}
-		if state := strings.ToLower(firstNonEmpty(attr(e, "pr_state"), attr(e, "state"))); state == "closed" || state == "merged" {
+		if state := strings.ToLower(firstNonEmpty(stageAttr(st, "pr_state"), stageAttr(st, "state"))); state == "closed" || state == "merged" {
 			r.PRState = state
 		}
 	}
+}
+
+// stagesByLastAt returns the journey's stage kinds ordered oldest→newest by
+// LastAt (ties by kind) so "latest wins" scans are deterministic.
+func stagesByLastAt(j timeline.Journey) []timeline.Kind {
+	kinds := make([]timeline.Kind, 0, len(j.Stages))
+	for k := range j.Stages {
+		kinds = append(kinds, k)
+	}
+	sort.Slice(kinds, func(a, b int) bool {
+		sa, sb := j.Stages[kinds[a]], j.Stages[kinds[b]]
+		if sa.LastAt != sb.LastAt {
+			return sa.LastAt < sb.LastAt
+		}
+		return kinds[a] < kinds[b]
+	})
+	return kinds
+}
+
+func stageAttr(st *timeline.Stage, key string) string {
+	if st == nil || st.Attrs == nil {
+		return ""
+	}
+	return st.Attrs[key]
+}
+
+func isDriftPauseStage(kind timeline.Kind, st *timeline.Stage) bool {
+	if st == nil {
+		return false
+	}
+	return isDriftPause(timeline.Event{Kind: kind, Agent: st.Agent, Attrs: st.Attrs})
 }
 
 func isDriftPause(e timeline.Event) bool {

@@ -100,21 +100,21 @@ func TestRunEscalationSweepGates(t *testing.T) {
 	t.Run("disabled config returns empty and calls nothing", func(t *testing.T) {
 		cfg := escalationTestConfig()
 		cfg.Escalation.Disabled = true
-		got := runEscalationSweep(context.Background(), cfg, client, actionable, nil, logger)
+		got := runEscalationSweep(context.Background(), cfg, client, actionable, nil, nil, logger)
 		if len(got) != 0 {
 			t.Fatalf("escalated = %v, want empty when escalation is disabled", got)
 		}
 	})
 
 	t.Run("nil github client returns empty", func(t *testing.T) {
-		got := runEscalationSweep(context.Background(), escalationTestConfig(), nil, actionable, nil, logger)
+		got := runEscalationSweep(context.Background(), escalationTestConfig(), nil, actionable, nil, nil, logger)
 		if len(got) != 0 {
 			t.Fatalf("escalated = %v, want empty with nil client", got)
 		}
 	})
 
 	t.Run("nil actionable returns empty", func(t *testing.T) {
-		got := runEscalationSweep(context.Background(), escalationTestConfig(), client, nil, nil, logger)
+		got := runEscalationSweep(context.Background(), escalationTestConfig(), client, nil, nil, nil, logger)
 		if len(got) != 0 {
 			t.Fatalf("escalated = %v, want empty with nil actionable set", got)
 		}
@@ -142,7 +142,7 @@ func TestRunEscalationSweepEscalatesAtThresholdOnce(t *testing.T) {
 
 	// Passes 1 and 2: below threshold, no side effects, nothing escalated.
 	for i, sha := range []string{"sha-1", "sha-2"} {
-		got := runEscalationSweep(context.Background(), cfg, client, pr(sha), nil, logger)
+		got := runEscalationSweep(context.Background(), cfg, client, pr(sha), nil, nil, logger)
 		if len(got) != 0 {
 			t.Fatalf("pass %d: escalated = %v, want empty below threshold", i+1, got)
 		}
@@ -154,7 +154,7 @@ func TestRunEscalationSweepEscalatesAtThresholdOnce(t *testing.T) {
 	// Pass 3: third distinct red SHA crosses DefaultThreshold. A notifier
 	// with no channels configured exercises the notify branch as a no-op.
 	notifier := notify.New(config.NotificationsConfig{}, logger)
-	got := runEscalationSweep(context.Background(), cfg, client, pr("sha-3"), notifier, logger)
+	got := runEscalationSweep(context.Background(), cfg, client, pr("sha-3"), notifier, nil, logger)
 	key := escalation.Key("acme/widgets", 7)
 	if !got[key] {
 		t.Fatalf("escalated = %v, want %q true at threshold", got, key)
@@ -181,7 +181,7 @@ func TestRunEscalationSweepEscalatesAtThresholdOnce(t *testing.T) {
 	}
 
 	// Pass 4: already escalated — still reported, but no repeat side effects.
-	got = runEscalationSweep(context.Background(), cfg, client, pr("sha-4"), nil, logger)
+	got = runEscalationSweep(context.Background(), cfg, client, pr("sha-4"), nil, nil, logger)
 	if !got[key] {
 		t.Fatalf("escalated = %v, want %q to stay true after escalation", got, key)
 	}
@@ -201,7 +201,7 @@ func TestRunEscalationSweepRetriesCommentNextPass(t *testing.T) {
 
 	sweep := func(sha string) map[string]bool {
 		return runEscalationSweep(context.Background(), cfg, client,
-			actionableWith(redPR("widgets", 9, "helper[bot]", sha)), nil, logger)
+			actionableWith(redPR("widgets", 9, "helper[bot]", sha)), nil, nil, logger)
 	}
 	sweep("sha-1")
 	sweep("sha-2")
@@ -247,7 +247,7 @@ func TestRunEscalationSweepLabelFailureIsNonFatal(t *testing.T) {
 
 	sweep := func(sha string) map[string]bool {
 		return runEscalationSweep(context.Background(), cfg, client,
-			actionableWith(redPR("widgets", 4, "hive-agent", sha)), nil, logger)
+			actionableWith(redPR("widgets", 4, "hive-agent", sha)), nil, nil, logger)
 	}
 	sweep("sha-1")
 	sweep("sha-2")
@@ -280,7 +280,7 @@ func TestRunEscalationSweepAuthorGateAndExcerptFallback(t *testing.T) {
 	human := redPR("widgets", 11, "jane-dev", "sha-h1")
 	for _, sha := range []string{"sha-h1", "sha-h2", "sha-h3", "sha-h4"} {
 		human.HeadSHA = sha
-		got := runEscalationSweep(context.Background(), cfg, client, actionableWith(human), nil, logger)
+		got := runEscalationSweep(context.Background(), cfg, client, actionableWith(human), nil, nil, logger)
 		if len(got) != 0 {
 			t.Fatalf("escalated = %v, want empty for a human-authored PR", got)
 		}
@@ -293,12 +293,12 @@ func TestRunEscalationSweepAuthorGateAndExcerptFallback(t *testing.T) {
 	// pass: the comment must fall back to the excerpt stored in the ledger.
 	withExcerpt := redPR("widgets", 12, "hive-agent", "sha-1")
 	withExcerpt.CIFailureExcerpt = "panic: index out of range"
-	runEscalationSweep(context.Background(), cfg, client, actionableWith(withExcerpt), nil, logger)
+	runEscalationSweep(context.Background(), cfg, client, actionableWith(withExcerpt), nil, nil, logger)
 	withExcerpt.HeadSHA = "sha-2"
-	runEscalationSweep(context.Background(), cfg, client, actionableWith(withExcerpt), nil, logger)
+	runEscalationSweep(context.Background(), cfg, client, actionableWith(withExcerpt), nil, nil, logger)
 
 	bare := redPR("widgets", 12, "hive-agent", "sha-3") // no excerpt this pass
-	got := runEscalationSweep(context.Background(), cfg, client, actionableWith(bare), nil, logger)
+	got := runEscalationSweep(context.Background(), cfg, client, actionableWith(bare), nil, nil, logger)
 	if !got[escalation.Key("acme/widgets", 12)] {
 		t.Fatalf("escalated = %v, want acme/widgets#12 true", got)
 	}

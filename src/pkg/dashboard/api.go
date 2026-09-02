@@ -1328,13 +1328,12 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 
 // lifecycleTimelineOnce/lifecycleStore back the lazily-constructed lifecycle
 // timeline Store. Lazy construction keeps the zero-value Server valid (no
-// constructor change) and keeps memory bounded via timeline.MaxEvents.
+// constructor change) and keeps memory bounded via timeline.MaxJourneys.
 //
-// TODO(timeline): the governor eval loop should Record() real lifecycle events
-// into LifecycleTimeline() (issue enumerated → classified → kicked → pr_opened
-// → merged/blocked), e.g. via a tracing SpanProcessor adapter that calls
-// timeline.FromSpan. Until then the store is present but empty, and the
-// endpoint safely returns empty arrays.
+// The store is fed by real producers now (#5656): the governor eval loop
+// (enumerated, kicked), the scheduler's classifier (classified), the
+// attribution audit sink + PR-opened hook (pr_opened, merged) and the
+// escalation sweep (blocked) — see cmd/hive/lifecyclewire.go.
 var (
 	lifecycleTimelineOnce sync.Once
 	lifecycleStore        *timeline.Store
@@ -1349,18 +1348,29 @@ func (s *Server) LifecycleTimeline() *timeline.Store {
 	return lifecycleStore
 }
 
-// lifecycleTimelineDefaultLimit bounds how many recent events the
+// EnableLifecyclePersistence loads previously persisted lifecycle journeys
+// from path and turns on atomic re-persistence, so a pod restart no longer
+// zeroes the panel's merged/blocked history (#5656). Call once at startup,
+// before the governor starts recording; mirrors EnableSessionPersistence.
+func (s *Server) EnableLifecyclePersistence(path string) {
+	if err := s.LifecycleTimeline().EnablePersistence(path, s.logger); err != nil && s.logger != nil {
+		s.logger.Warn("lifecycle timeline persistence unavailable — journeys reset on restart",
+			"path", path, "error", err)
+	}
+}
+
+// lifecycleTimelineDefaultLimit bounds how many journeys the
 // /api/lifecycle-timeline endpoint returns by default when the caller does not
 // pass ?limit=.
 const lifecycleTimelineDefaultLimit = 200
 
-// handleLifecycleTimeline serves the issue→PR lifecycle timeline plus derived
+// handleLifecycleTimeline serves the issue→PR lifecycle journeys plus derived
 // fleet health as JSON. It is additive and read-only; an empty store yields
 // empty arrays (never null), so the dashboard can render unconditionally.
 //
 // Query params:
 //
-//	limit  — max recent events to return (default lifecycleTimelineDefaultLimit)
+//	limit  — max journeys to return (default lifecycleTimelineDefaultLimit)
 //	window — fleet-health look-back, in minutes (default timeline.DefaultFleetWindow)
 func (s *Server) handleLifecycleTimeline(w http.ResponseWriter, r *http.Request) {
 	limit := lifecycleTimelineDefaultLimit
@@ -1380,13 +1390,15 @@ func (s *Server) handleLifecycleTimeline(w http.ResponseWriter, r *http.Request)
 	store := s.LifecycleTimeline()
 	dto := store.Snapshot(limit, window)
 	if level := s.lifecycleACMMLevel(); level > 0 {
-		dto.Events = filterTimelineEventsByACMMLevel(dto.Events, level)
-		dto.Fleet = fleetHealthForTimelineEvents(store.Recent(0), window, level)
+		dto.Journeys = filterJourneysByACMMLevel(dto.Journeys, level)
+		// Re-derive fleet counts over the FULL filtered journey set (not the
+		// limit-truncated one) so the counters match what the level may see.
+		dto.Fleet = timeline.DeriveFleetHealth(filterJourneysByACMMLevel(store.Journeys(0), level), window)
 	}
 	// Defensive nil-guard: Snapshot already guarantees a non-nil slice, but
 	// keep the endpoint's array-always contract explicit.
-	if dto.Events == nil {
-		dto.Events = []timeline.Event{}
+	if dto.Journeys == nil {
+		dto.Journeys = []timeline.Journey{}
 	}
 	jsonResponse(w, dto)
 }
@@ -1398,53 +1410,17 @@ func (s *Server) lifecycleACMMLevel() int {
 	return detectACMMLevel(s.deps.Config)
 }
 
-func filterTimelineEventsByACMMLevel(events []timeline.Event, level int) []timeline.Event {
-	filtered := make([]timeline.Event, 0, len(events))
-	for _, event := range events {
-		if agent.AgentAvailableAtACMMLevel(event.Agent, level) {
-			filtered = append(filtered, event)
+// filterJourneysByACMMLevel drops journeys whose most recent agent is not
+// available at the given maturity level (the operability agents below L5).
+// Journeys with no agent yet (enumerated/classified only) always pass.
+func filterJourneysByACMMLevel(journeys []timeline.Journey, level int) []timeline.Journey {
+	filtered := make([]timeline.Journey, 0, len(journeys))
+	for _, j := range journeys {
+		if agent.AgentAvailableAtACMMLevel(j.Agent, level) {
+			filtered = append(filtered, j)
 		}
 	}
 	return filtered
-}
-
-func fleetHealthForTimelineEvents(events []timeline.Event, window time.Duration, level int) timeline.FleetHealth {
-	if window <= 0 {
-		window = timeline.DefaultFleetWindow
-	}
-	fh := timeline.FleetHealth{WindowMs: window.Milliseconds()}
-	cutoff := time.Now().Add(-window).UnixMilli()
-	merged := map[string]bool{}
-	blocked := map[string]bool{}
-	active := map[string]bool{}
-	for _, event := range events {
-		if event.At < cutoff || !agent.AgentAvailableAtACMMLevel(event.Agent, level) {
-			continue
-		}
-		fh.Events++
-		if event.IssueRef == "" {
-			continue
-		}
-		switch event.Kind {
-		case timeline.KindMerged:
-			merged[event.IssueRef] = true
-		case timeline.KindBlocked:
-			blocked[event.IssueRef] = true
-		default:
-			active[event.IssueRef] = true
-		}
-	}
-	for ref := range merged {
-		fh.Merged++
-		delete(active, ref)
-		delete(blocked, ref)
-	}
-	for ref := range blocked {
-		fh.Blocked++
-		delete(active, ref)
-	}
-	fh.InFlight = len(active)
-	return fh
 }
 
 func (s *Server) handleWidget(w http.ResponseWriter, r *http.Request) {
