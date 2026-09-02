@@ -306,3 +306,61 @@ func TestRunEscalationSweepAuthorGateAndExcerptFallback(t *testing.T) {
 		t.Fatalf("comment must carry the ledger's stored excerpt, got: %v", fake.comments)
 	}
 }
+
+// #5617 item 3: a PR that re-escalates AFTER a reviewer-lane pass must reach
+// its human with the structured hand-off note — what the reviewer left on the
+// branch, and that no second automated pass is coming — rather than the
+// generic first-escalation body. One reviewer pass per PR is the whole ladder,
+// so this comment is the last thing the machinery will ever say about the PR.
+func TestRunEscalationSweepHandsOffAfterReviewerPass(t *testing.T) {
+	newTestEscalationStore(t)
+	client, fake := newEscalationSweepClient(t)
+	cfg := escalationTestConfig()
+	logger := discardLogger()
+
+	red := func(sha string, labels ...string) *github.ActionableResult {
+		p := redPR("widgets", 7, "hive-agent", sha)
+		p.CIFailureExcerpt = "TestFoo: want 2, got 3"
+		p.Labels = labels
+		return actionableWith(p)
+	}
+
+	// First escalation: three distinct red SHAs cross the threshold.
+	for _, sha := range []string{"sha-1", "sha-2", "sha-3"} {
+		runEscalationSweep(context.Background(), cfg, client, red(sha), nil, logger)
+	}
+	if len(fake.comments) != 1 {
+		t.Fatalf("comments = %d, want the first escalation comment", len(fake.comments))
+	}
+	if strings.Contains(fake.comments[0], "A reviewer already adjudicated") {
+		t.Errorf("a first escalation must not claim a prior reviewer pass:\n%s", fake.comments[0])
+	}
+
+	// The reviewer repairs, drops needs-human and adds reviewer-passed; its
+	// pushed fix is red. Sweep reconciles the verdict and restarts the ledger.
+	runEscalationSweep(context.Background(), cfg, client,
+		red("reviewer-fix", escalation.ReviewerPassedLabel), nil, logger)
+	if len(fake.comments) != 1 {
+		t.Fatalf("comments = %d, want no comment for the reviewer-verdict reconciliation", len(fake.comments))
+	}
+
+	// Two more distinct red SHAs re-cross the threshold on the fresh ledger.
+	for _, sha := range []string{"sha-4", "sha-5"} {
+		runEscalationSweep(context.Background(), cfg, client,
+			red(sha, escalation.ReviewerPassedLabel, escalation.NeedsHumanLabel), nil, logger)
+	}
+	if len(fake.comments) != 2 {
+		t.Fatalf("comments = %d, want a second escalation comment after the reviewer pass", len(fake.comments))
+	}
+	handoff := fake.comments[1]
+	for _, want := range []string{
+		"A reviewer already adjudicated this PR",
+		"`reviewer-fix`",
+		"No further automated pass is coming",
+		"TestFoo: want 2, got 3",
+	} {
+		if !strings.Contains(handoff, want) {
+			t.Errorf("re-escalation comment missing %q:\n%s", want, handoff)
+		}
+	}
+}

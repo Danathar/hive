@@ -97,6 +97,17 @@ type Entry struct {
 	// were burned. Older-generation entries are granted amnesty (see
 	// MachineryVersion).
 	Machinery int `json:"machinery,omitempty"`
+
+	// ReviewerPassedSHA / ReviewerPassedAt record the reviewer-lane pass that
+	// Sweep reconciled into this entry: the head SHA the reviewer left on the
+	// branch, and when the hub first observed that verdict. They deliberately
+	// SURVIVE the ledger reset that reconciliation performs, so a later
+	// re-escalation can hand the PR to a human with the reviewer's context
+	// attached (#5617 item 3) rather than the bare label set a human used to
+	// get. They are cleared only with the entry itself: a PR that goes green
+	// has converged, and a future regression starts a fresh story.
+	ReviewerPassedSHA string    `json:"reviewer_passed_sha,omitempty"`
+	ReviewerPassedAt  time.Time `json:"reviewer_passed_at,omitempty"`
 }
 
 // Store is the on-PVC attempt ledger. All methods are safe for concurrent use.
@@ -235,6 +246,15 @@ func (s *Store) Sweep(obs []Observation, threshold int) map[string]Result {
 			e.Escalated = false
 			e.RedSHAs = nil
 			e.ReEngagements = 0
+			// Remember WHAT the reviewer left on the branch and WHEN, so a
+			// later re-escalation can hand the human the reviewer's context
+			// instead of a bare label (#5617 item 3). Keyed on the SHA so a
+			// repeat reconciliation of the same verdict cannot walk the
+			// timestamp forward and misdate the hand-off.
+			if e.ReviewerPassedSHA != o.HeadSHA {
+				e.ReviewerPassedSHA = o.HeadSHA
+				e.ReviewerPassedAt = s.now()
+			}
 		}
 		if o.HeadSHA != "" && !containsSHA(e.RedSHAs, o.HeadSHA) {
 			e.RedSHAs = append(e.RedSHAs, o.HeadSHA)
@@ -311,6 +331,21 @@ func (s *Store) Attempts(repo string, number int) int {
 		return len(e.RedSHAs)
 	}
 	return 0
+}
+
+// ReviewerPass reports the reviewer-lane pass recorded for a PR: the head SHA
+// the reviewer left on the branch, and when Sweep reconciled that verdict into
+// the ledger. ok is false when no reviewer has ever passed on this PR — which
+// is what routes the escalation sweep between the plain first-escalation
+// comment and the structured hand-off note.
+func (s *Store) ReviewerPass(repo string, number int) (sha string, at time.Time, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e := s.entries[Key(repo, number)]
+	if e == nil || e.ReviewerPassedAt.IsZero() {
+		return "", time.Time{}, false
+	}
+	return e.ReviewerPassedSHA, e.ReviewerPassedAt, true
 }
 
 // nowFn is the store's clock, overridable for tests via SetClock.
@@ -496,14 +531,61 @@ func containsLabel(labels []string, label string) bool {
 	return false
 }
 
+// ReviewerHandoff is the record of a completed reviewer-lane pass, carried
+// into the escalation comment when a PR the reviewer already adjudicated goes
+// red again. SHA is the head commit the reviewer left on the branch; At is
+// when Sweep reconciled that verdict into the ledger.
+type ReviewerHandoff struct {
+	SHA string
+	At  time.Time
+}
+
 // CommentBody renders the escalation comment posted on the PR. It leads with
 // the raw CI evidence — the whole point is that a human (or the next agent
 // pass) sees the actual error, not just "CI failed".
 func CommentBody(attempts int, failingChecks []string, excerpt string) string {
+	return commentBody(attempts, failingChecks, excerpt, nil)
+}
+
+// HandoffCommentBody renders the escalation comment for a PR that has ALREADY
+// had a reviewer-lane pass (#5617 item 3). The lane is a one-pass ladder: a PR
+// that re-escalates after `reviewer-passed` is excluded from the reviewer work
+// list forever and belongs to a true human. Until now that human's only
+// context was the label set — nothing distinguished a first escalation from a
+// second one, nor said that a mechanical repair had already been tried and had
+// not held. This body says both, and points at the reviewer's own audited
+// record rather than restating it (the hub never saw the reviewer's reasoning;
+// claiming to summarise it would be invention).
+func HandoffCommentBody(attempts int, failingChecks []string, excerpt string, h ReviewerHandoff) string {
+	return commentBody(attempts, failingChecks, excerpt, &h)
+}
+
+func commentBody(attempts int, failingChecks []string, excerpt string, h *ReviewerHandoff) string {
 	var b strings.Builder
 	b.WriteString("## 🛑 Fix loop escalated — human attention needed\n\n")
 	fmt.Fprintf(&b, "This PR has failed CI on **%d distinct fix attempts** (new commits, still red). ", attempts)
 	b.WriteString("The hive has stopped dispatching further automated fixes for it.\n\n")
+	if h != nil {
+		b.WriteString("### A reviewer already adjudicated this PR — this is the second failure\n\n")
+		b.WriteString("The reviewer lane repaired or de-escalated this PR once and returned it to the\n")
+		b.WriteString("automated lane; that is what the `" + ReviewerPassedLabel + "` label records.\n\n")
+		if h.SHA != "" {
+			fmt.Fprintf(&b, "- **Head commit the reviewer left on the branch:** `%s`\n", h.SHA)
+		}
+		if !h.At.IsZero() {
+			fmt.Fprintf(&b, "- **Returned to the automated lane:** %s\n", h.At.UTC().Format(time.RFC3339))
+		}
+		fmt.Fprintf(&b, "- **Since then:** %d distinct fix attempts, all still red. That count is\n", attempts)
+		b.WriteString("  measured FROM the reviewer's pass — the ledger restarts at the verdict.\n\n")
+		b.WriteString("What the reviewer tried, and why it believed the repair sufficient, is recorded on\n")
+		b.WriteString("this PR: look for its `Reviewer adjudication:` comment (posted through the hive\n")
+		b.WriteString("relay and attributed as `agent_pr_reviewed`) and the matching advisory bead. Read\n")
+		b.WriteString("that first — the repair it describes has now been tried and has not held, so\n")
+		b.WriteString("repeating it is the one approach already known to fail here.\n\n")
+		b.WriteString("**No further automated pass is coming.** One reviewer pass per PR is the whole\n")
+		b.WriteString("ladder: the reviewer work list excludes `" + ReviewerPassedLabel + "` rows permanently, so from\n")
+		b.WriteString("here this PR is a human's or it is nobody's.\n\n")
+	}
 	if len(failingChecks) > 0 {
 		sorted := append([]string(nil), failingChecks...)
 		sort.Strings(sorted)

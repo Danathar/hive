@@ -469,3 +469,95 @@ func TestObserveRed_PendingDoesNotClearStalenessClock(t *testing.T) {
 		t.Fatal("green must still clear the staleness/re-engagement record")
 	}
 }
+
+// #5617 item 3: the reviewer-verdict reset must REMEMBER the pass it is
+// reconciling — the head SHA the reviewer left and when — because that reset
+// is the only moment the hub can observe a reviewer verdict at all. Without
+// the record, a PR re-escalating after a reviewer pass reaches its human with
+// nothing but the label set to say a repair was already tried.
+func TestSweep_RecordsReviewerPassForHandoff(t *testing.T) {
+	s := Load(filepath.Join(t.TempDir(), "ledger.json"))
+	at := time.Date(2026, 9, 2, 10, 0, 0, 0, time.UTC)
+	s.SetClock(func() time.Time { return at })
+
+	if _, _, ok := s.ReviewerPass("o/r", 7); ok {
+		t.Fatal("no reviewer has passed yet; ReviewerPass must report ok=false")
+	}
+
+	// Burn the ledger down to an escalated entry.
+	for _, sha := range []string{"a", "b", "c"} {
+		s.Sweep([]Observation{obs("o/r", 7, sha, true)}, 3)
+	}
+	s.MarkEscalated("o/r", 7)
+
+	// The reviewer repaired and relabeled; its pushed fix is red again.
+	s.Sweep([]Observation{obsLabeled("o/r", 7, "reviewer-fix", true, ReviewerPassedLabel)}, 3)
+
+	sha, got, ok := s.ReviewerPass("o/r", 7)
+	if !ok {
+		t.Fatal("the reviewer pass must be recorded for the later hand-off note")
+	}
+	if sha != "reviewer-fix" {
+		t.Errorf("recorded SHA = %q, want the head the reviewer left behind", sha)
+	}
+	if !got.Equal(at) {
+		t.Errorf("recorded time = %s, want %s", got, at)
+	}
+	// The record must survive the ledger reset it accompanies.
+	if s.Attempts("o/r", 7) != 1 {
+		t.Errorf("attempts = %d, want the reviewer pass to have restarted the count at 1", s.Attempts("o/r", 7))
+	}
+
+	// It must also stay pinned to the verdict: the hand-off note dates the
+	// reviewer's pass, not the most recent sweep that saw the same red head.
+	later := at.Add(2 * time.Hour)
+	s.SetClock(func() time.Time { return later })
+	s.Sweep([]Observation{obsLabeled("o/r", 7, "reviewer-fix", true, ReviewerPassedLabel)}, 3)
+	if _, got, _ := s.ReviewerPass("o/r", 7); !got.Equal(at) {
+		t.Errorf("reviewer-pass timestamp moved to %s; it must stay pinned to the verdict at %s", got, at)
+	}
+}
+
+// The hand-off body must tell the human the three things the label set cannot:
+// that a reviewer already had its one pass, what it left behind, and that
+// nothing automated is coming after this (#5617 item 3).
+func TestHandoffCommentBody_CarriesReviewerContext(t *testing.T) {
+	at := time.Date(2026, 9, 2, 10, 0, 0, 0, time.UTC)
+	body := HandoffCommentBody(2, []string{"build-gate"}, "panic: assignment to entry in nil map",
+		ReviewerHandoff{SHA: "deadbeef", At: at})
+	for _, want := range []string{
+		"2 distinct fix attempts",
+		"A reviewer already adjudicated this PR",
+		"`deadbeef`",
+		"2026-09-02T10:00:00Z",
+		ReviewerPassedLabel,
+		"Reviewer adjudication:",
+		"agent_pr_reviewed",
+		"No further automated pass is coming",
+		// The generic evidence the plain body carries must not be lost.
+		"build-gate",
+		"panic: assignment to entry in nil map",
+		"Remove the `needs-human` label",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("hand-off comment missing %q:\n%s", want, body)
+		}
+	}
+
+	// A FIRST escalation must never claim a reviewer pass that never happened.
+	plain := CommentBody(2, []string{"build-gate"}, "panic: assignment to entry in nil map")
+	for _, banned := range []string{"A reviewer already adjudicated", "No further automated pass"} {
+		if strings.Contains(plain, banned) {
+			t.Errorf("first-escalation comment must not mention a reviewer pass (%q):\n%s", banned, plain)
+		}
+	}
+
+	// Partial records still render: a ledger entry written before the SHA was
+	// observable must not emit an empty backtick pair or a zero timestamp.
+	bare := HandoffCommentBody(1, nil, "", ReviewerHandoff{})
+	for _, banned := range []string{"``", "0001-01-01"} {
+		if strings.Contains(bare, banned) {
+			t.Errorf("empty hand-off record must omit the field, not render %q:\n%s", banned, bare)
+		}
+	}
+}
