@@ -17,6 +17,7 @@ import (
 	"github.com/kubestellar/hive/pkg/acmmadvisor"
 	"github.com/kubestellar/hive/pkg/agent"
 	"github.com/kubestellar/hive/pkg/config"
+	"github.com/kubestellar/hive/pkg/dashboard/collect"
 	"github.com/kubestellar/hive/pkg/dashboard/webstatic"
 	"github.com/kubestellar/hive/pkg/github"
 	"github.com/kubestellar/hive/pkg/hub"
@@ -119,13 +120,13 @@ type Server struct {
 	// change. Each keeps its own typed entry struct and JSON contract, so the
 	// unification is internal — on-disk files and /api/* endpoints are unchanged.
 	histOnce  sync.Once
-	tokenHist *timeSeries[TokenSparklineEntry]
-	factHist  *timeSeries[FactHistoryEntry]
-	costHist  *timeSeries[CostHistoryEntry]
+	tokenHist *collect.TimeSeries[TokenSparklineEntry]
+	factHist  *collect.TimeSeries[FactHistoryEntry]
+	costHist  *collect.TimeSeries[CostHistoryEntry]
 	// budgetWindowHist records one row per CLOSED budget window (#4298). Lazily
 	// built like the sparkline rings so a zero-value Server works in tests.
 	budgetWindowOnce sync.Once
-	budgetWindowHist *budgetWindowTracker
+	budgetWindowHist *collect.BudgetWindowTracker
 
 	// convergenceModeTrk captures one (mode, generation) pair per enrolled
 	// eval pass and detects transitions (#4263). convergenceSoakTrk records the
@@ -2564,26 +2565,26 @@ func (s *Server) broadcastFrame(frame string) {
 // on-disk shape are preserved.
 func (s *Server) initHistories() {
 	s.histOnce.Do(func() {
-		s.tokenHist = newTimeSeries(tokenSparklineMaxEntries, 0,
+		s.tokenHist = collect.NewTimeSeries(tokenSparklineMaxEntries, 0,
 			func(e TokenSparklineEntry) int64 { return e.Timestamp })
-		s.factHist = newTimeSeries(factHistoryMaxEntries, factHistoryMinIntervalMs,
+		s.factHist = collect.NewTimeSeries(factHistoryMaxEntries, factHistoryMinIntervalMs,
 			func(e FactHistoryEntry) int64 { return e.Timestamp })
-		s.costHist = newTimeSeries(costHistoryMaxEntries, costHistoryMinIntervalMs,
+		s.costHist = collect.NewTimeSeries(costHistoryMaxEntries, costHistoryMinIntervalMs,
 			func(e CostHistoryEntry) int64 { return e.Timestamp })
 	})
 }
 
-func (s *Server) tokenSeries() *timeSeries[TokenSparklineEntry] {
+func (s *Server) tokenSeries() *collect.TimeSeries[TokenSparklineEntry] {
 	s.initHistories()
 	return s.tokenHist
 }
 
-func (s *Server) factSeries() *timeSeries[FactHistoryEntry] {
+func (s *Server) factSeries() *collect.TimeSeries[FactHistoryEntry] {
 	s.initHistories()
 	return s.factHist
 }
 
-func (s *Server) costSeries() *timeSeries[CostHistoryEntry] {
+func (s *Server) costSeries() *collect.TimeSeries[CostHistoryEntry] {
 	s.initHistories()
 	return s.costHist
 }
@@ -2596,7 +2597,7 @@ func (s *Server) AppendTokenSparkline(status *StatusPayload) {
 	}
 
 	entry := TokenSparklineEntry{
-		Timestamp:   nowMillis(),
+		Timestamp:   collect.NowMillis(),
 		Input:       status.Tokens.Totals.Input,
 		Output:      status.Tokens.Totals.Output,
 		CacheRead:   status.Tokens.Totals.CacheRead,
@@ -2613,35 +2614,35 @@ func (s *Server) AppendTokenSparkline(status *StatusPayload) {
 		entry.ByModel[name] = bucket.Input + bucket.Output + bucket.CacheRead
 	}
 
-	s.tokenSeries().append(entry)
+	s.tokenSeries().Append(entry)
 }
 
 // TokenSparklineHistory returns a copy of the current token sparkline history.
 func (s *Server) TokenSparklineHistory() []TokenSparklineEntry {
-	return s.tokenSeries().snapshot()
+	return s.tokenSeries().Snapshot()
 }
 
 // SeedTokenSparklineHistory restores persisted token history on startup.
 func (s *Server) SeedTokenSparklineHistory(entries []TokenSparklineEntry) {
-	s.tokenSeries().seed(entries)
+	s.tokenSeries().Seed(entries)
 }
 
 // AppendFactHistory records a total-facts count if enough time has passed.
 func (s *Server) AppendFactHistory(count int) {
-	s.factSeries().append(FactHistoryEntry{
-		Timestamp: nowMillis(),
+	s.factSeries().Append(FactHistoryEntry{
+		Timestamp: collect.NowMillis(),
 		Count:     count,
 	})
 }
 
 // FactHistory returns a copy of the fact count history.
 func (s *Server) FactHistory() []FactHistoryEntry {
-	return s.factSeries().snapshot()
+	return s.factSeries().Snapshot()
 }
 
 // SeedFactHistory restores persisted fact history on startup.
 func (s *Server) SeedFactHistory(entries []FactHistoryEntry) {
-	s.factSeries().seed(entries)
+	s.factSeries().Seed(entries)
 }
 
 // AppendCostHistory records an estimated-cost ($) snapshot if enough time has
@@ -2661,7 +2662,7 @@ func (s *Server) AppendCostHistory(usd float64, agents ...map[string]float64) {
 // that feeds the cost table's mini sparklines.
 func (s *Server) AppendCostHistoryFull(usd float64, agents map[string]float64, models map[string]CostModelSnap) {
 	entry := CostHistoryEntry{
-		Timestamp: nowMillis(),
+		Timestamp: collect.NowMillis(),
 		USD:       usd,
 	}
 	if len(agents) > 0 {
@@ -2670,17 +2671,17 @@ func (s *Server) AppendCostHistoryFull(usd float64, agents map[string]float64, m
 	if len(models) > 0 {
 		entry.Models = models
 	}
-	s.costSeries().append(entry)
+	s.costSeries().Append(entry)
 }
 
 // CostHistory returns a copy of the estimated-cost history.
 func (s *Server) CostHistory() []CostHistoryEntry {
-	return s.costSeries().snapshot()
+	return s.costSeries().Snapshot()
 }
 
 // SeedCostHistory restores persisted cost history on startup.
 func (s *Server) SeedCostHistory(entries []CostHistoryEntry) {
-	s.costSeries().seed(entries)
+	s.costSeries().Seed(entries)
 }
 
 // AppendTrendHistory samples the governor / per-repo / beads / system-gauge

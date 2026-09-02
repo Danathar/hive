@@ -26,6 +26,7 @@ import (
 	"github.com/kubestellar/hive/pkg/beads"
 	"github.com/kubestellar/hive/pkg/classify"
 	"github.com/kubestellar/hive/pkg/config"
+	"github.com/kubestellar/hive/pkg/dashboard/collect"
 	"github.com/kubestellar/hive/pkg/dashboard/webstatic"
 	"github.com/kubestellar/hive/pkg/github"
 	"github.com/kubestellar/hive/pkg/hub"
@@ -7694,7 +7695,7 @@ func (s *Server) handleTrendHistory(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleBudgetHistory(w http.ResponseWriter, r *http.Request) {
 	windows := s.BudgetWindowHistory()
 	if windows == nil {
-		windows = []BudgetWindowEntry{}
+		windows = []collect.BudgetWindowEntry{}
 	}
 
 	resp := map[string]any{"windows": windows}

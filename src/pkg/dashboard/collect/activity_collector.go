@@ -1,10 +1,16 @@
-package dashboard
+// Package collect holds pkg/dashboard's producer-side collectors: the
+// background cache/aggregation types (activity, repo-cost, fleet-stats), the
+// generic timeSeries ring buffer behind every persisted sparkline history, and
+// the budget-window tracker. Slice 2 of the kubestellar/hive#5565
+// decomposition: pure moves out of the dashboard god package, wired back in
+// through Dependencies fields exactly as before. This package deliberately
+// imports only leaf vocabulary (pkg/github, pkg/tokens) — never pkg/dashboard.
+package collect
 
 import (
 	"context"
 	"encoding/json"
 	"log/slog"
-	"net/http"
 	"os"
 	"regexp"
 	"sort"
@@ -13,6 +19,22 @@ import (
 
 	ghpkg "github.com/kubestellar/hive/pkg/github"
 )
+
+// AuditEntry is one line of the dashboard's audit log. The type lives here —
+// with its consumers, the collectors — and pkg/dashboard aliases it
+// (type AuditEntry = collect.AuditEntry), so the write side (AuditLog) and the
+// wire/JSON contract are byte-identical to before the split.
+type AuditEntry struct {
+	Timestamp string `json:"ts"`
+	User      string `json:"user"`
+	Action    string `json:"action"`
+	Detail    string `json:"detail,omitempty"`
+	Agent     string `json:"agent,omitempty"`
+	// UserName is the hub-delivered display name when User is an opaque OIDC
+	// identity key. Stamped at SERVE time only (handleAuditLog) — the ring and
+	// the on-disk log keep the raw key, so history survives name changes.
+	UserName string `json:"user_name,omitempty"`
+}
 
 // activityCollectInterval is how often the spoke recomputes its per-repo output
 // activity from the audit log. Unlike the fleet-stats collector this makes ZERO
@@ -35,10 +57,11 @@ const activityWindow = 14 * 24 * time.Hour
 // that divides Count by window_hours to get a rate overstates activity by 28x.
 const activityHealthWindowHours = 12
 
-// Audit action names the collector counts as OUTPUT to a work source. Kept in
-// sync with pkg/github/attribution.go. Advisory is counted separately because it
-// is the L2 output signal.
-var activityOutputActions = map[string]bool{
+// ActivityOutputActions is the set of audit action names the collector counts
+// as OUTPUT to a work source. Kept in sync with pkg/github/attribution.go.
+// Advisory is counted separately because it is the L2 output signal. Exported
+// because pkg/dashboard's handleRepoCost fallback path reads the same set.
+var ActivityOutputActions = map[string]bool{
 	ghpkg.AuditActionAgentIssueCreated:       true,
 	ghpkg.AuditActionAgentPRCreated:          true,
 	ghpkg.AuditActionAgentCommentCreated:     true,
@@ -105,9 +128,9 @@ type ActivitySnapshot struct {
 	CollectedAt      time.Time `json:"collected_at"`
 }
 
-// auditReader is the subset of *AuditLog the collector needs, so it can be
-// faked in tests without a full dashboard Server.
-type auditReader interface {
+// AuditReader is the subset of pkg/dashboard's *AuditLog the collectors need,
+// so they can be faked in tests without a full dashboard Server.
+type AuditReader interface {
 	OutputActionsSince(since time.Time, actions map[string]bool, filePath string) []AuditEntry
 }
 
@@ -116,7 +139,7 @@ type auditReader interface {
 // CollectedAt) but reads the local audit file instead of the GitHub API.
 type ActivityCollector struct {
 	mu          sync.Mutex
-	audit       auditReader
+	audit       AuditReader
 	auditPath   string // "" → the default auditLogPath (used by OutputActionsSince)
 	logger      *slog.Logger
 	nowFn       func() time.Time
@@ -136,7 +159,7 @@ type persistedActivity struct {
 // NewActivityCollector builds a collector over the given audit reader. audit nil
 // makes it inert (Snapshot ready=false). auditPath is where OutputActionsSince
 // reads ("" → the production audit log).
-func NewActivityCollector(audit auditReader, auditPath string, logger *slog.Logger) *ActivityCollector {
+func NewActivityCollector(audit AuditReader, auditPath string, logger *slog.Logger) *ActivityCollector {
 	return &ActivityCollector{
 		audit:     audit,
 		auditPath: auditPath,
@@ -226,7 +249,7 @@ var agentRe = regexp.MustCompile(`(?:^|[,\s])agent=([^,\s]+)`)
 func (ac *ActivityCollector) collect() {
 	now := ac.nowFn()
 	since := now.Add(-activityWindow)
-	entries := ac.audit.OutputActionsSince(since, activityOutputActions, ac.auditPath)
+	entries := ac.audit.OutputActionsSince(since, ActivityOutputActions, ac.auditPath)
 
 	byRepo := map[string]*RepoActivity{}
 	byRepoAgent := map[string]map[string]*AgentRepoActivity{}
@@ -337,28 +360,12 @@ func (ac *ActivityCollector) CollectedAt() time.Time {
 	return ac.collectedAt
 }
 
-type repoActivityResponse struct {
-	Ready       bool             `json:"ready"`
-	Phase       string           `json:"phase"`
-	Snapshot    ActivitySnapshot `json:"snapshot"`
-	Limitations []string         `json:"limitations"`
-}
-
-func (s *Server) handleRepoActivity(w http.ResponseWriter, r *http.Request) {
-	var snap ActivitySnapshot
-	ready := false
-	if s.deps != nil && s.deps.Activity != nil {
-		snap, ready = s.deps.Activity.Snapshot()
+// AuditPath returns the audit file path this collector was configured with
+// ("" = the production default). pkg/dashboard's handleRepoCost fallback uses
+// it so the cost join reads exactly the same log file set.
+func (ac *ActivityCollector) AuditPath() string {
+	if ac == nil {
+		return ""
 	}
-	jsonResponse(w, repoActivityResponse{
-		Ready:    ready,
-		Phase:    "phase_1_activity_only",
-		Snapshot: snap,
-		Limitations: []string{
-			"Counts are recorded audit facts only; no token cost is attributed in this phase.",
-			"Entries without repo= are reported as unattributed and are never spread across repos.",
-			"window_hours is the freshness window used by the hub health verdict; per-repo counts are accumulated over count_window_hours. Divide by count_window_hours for a rate — window_hours would overstate it by 28x.",
-			"Counts are bounded by audit-log retention: rotated and compressed backups are read, but only MaxBackups of them are kept, so a busy hive's effective lookback can be shorter than count_window_hours.",
-		},
-	})
+	return ac.auditPath
 }

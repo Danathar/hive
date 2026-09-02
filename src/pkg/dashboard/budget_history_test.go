@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/kubestellar/hive/pkg/dashboard/collect"
 )
 
 // ── Per-budget-window history (#4298) ───────────────────────────────────────
@@ -164,17 +166,17 @@ func TestZeroValueServerAndNilStatusAreSafe(t *testing.T) {
 // TestRetentionKeepsNewest pins the ring bound and that it drops the OLDEST.
 func TestRetentionKeepsNewest(t *testing.T) {
 	s := &Server{}
-	start := time.Now().Add(-time.Duration(budgetWindowMaxEntries+10) * 7 * 24 * time.Hour)
+	start := time.Now().Add(-time.Duration(collect.BudgetWindowMaxEntries+10) * 7 * 24 * time.Hour)
 	week := 7 * 24 * time.Hour
-	total := budgetWindowMaxEntries + 5
+	total := collect.BudgetWindowMaxEntries + 5
 	for i := 0; i < total+1; i++ {
 		ws := start.Add(time.Duration(i) * week)
 		s.ObserveBudgetWindow(windowStatus(ws, ws.Add(week), 1000, int64(i), false))
 	}
 
 	hist := s.BudgetWindowHistory()
-	if len(hist) != budgetWindowMaxEntries {
-		t.Fatalf("history = %d entries, want the cap %d", len(hist), budgetWindowMaxEntries)
+	if len(hist) != collect.BudgetWindowMaxEntries {
+		t.Fatalf("history = %d entries, want the cap %d", len(hist), collect.BudgetWindowMaxEntries)
 	}
 	// Newest first, and the newest closed window is the one before the open one.
 	if hist[0].Used != int64(total-1) {
@@ -201,7 +203,7 @@ func TestSeedRoundTripsThroughJSON(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 
-	var reloaded []BudgetWindowEntry
+	var reloaded []collect.BudgetWindowEntry
 	if err := json.Unmarshal(data, &reloaded); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
@@ -237,7 +239,7 @@ func TestBudgetHistoryEndpointAlwaysReturnsAnArray(t *testing.T) {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 	var body struct {
-		Windows []BudgetWindowEntry `json:"windows"`
+		Windows []collect.BudgetWindowEntry `json:"windows"`
 	}
 	raw := rec.Body.String()
 	if err := json.Unmarshal([]byte(raw), &body); err != nil {

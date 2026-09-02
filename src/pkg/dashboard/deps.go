@@ -12,6 +12,7 @@ import (
 	"github.com/kubestellar/hive/pkg/agent"
 	"github.com/kubestellar/hive/pkg/beads"
 	"github.com/kubestellar/hive/pkg/config"
+	"github.com/kubestellar/hive/pkg/dashboard/collect"
 	ghpkg "github.com/kubestellar/hive/pkg/github"
 	"github.com/kubestellar/hive/pkg/governor"
 	"github.com/kubestellar/hive/pkg/hooks"
@@ -51,13 +52,13 @@ type Dependencies struct {
 	// already uses keeps the advisor read-only and adds zero GitHub traffic.
 	// Nil is safe: Snapshot() on a nil collector reports ready=false and the
 	// advisor leaves the signal at its conservative zero.
-	FleetStats *FleetStatsCollector
-	Activity   *ActivityCollector
+	FleetStats *collect.FleetStatsCollector
+	Activity   *collect.ActivityCollector
 	// RepoCost caches the /api/repo-cost interval join on a ticker (see
 	// repo_cost_collector.go), mirroring Activity's caching of
 	// /api/repo-activity. Nil is safe: handleRepoCost falls back to computing
 	// inline (used by tests that construct a bare Dependencies).
-	RepoCost        *RepoCostCollector
+	RepoCost        *collect.RepoCostCollector
 	BeadSynthesizer *knowledge.BeadSynthesizer
 	BeadStores      map[string]*beads.Store
 	// BeadStoreLoadFailures counts configured bead stores that failed to open at

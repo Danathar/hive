@@ -1,4 +1,4 @@
-package dashboard
+package collect
 
 // RepoCostCollector caches the /api/repo-cost interval join on a ticker,
 // exactly the way ActivityCollector (activity_collector.go) already caches
@@ -21,7 +21,7 @@ import (
 
 // repoCostCollectInterval mirrors activityCollectInterval on purpose: this
 // collector reads the SAME audit window as the activity collector (see
-// repoCostWindow = activityWindow) to feed the interval join, so there is no
+// RepoCostWindow = activityWindow) to feed the interval join, so there is no
 // reason for the two caches to go stale at different rates — a dashboard
 // comparing repo-activity counts against repo-cost dollars would otherwise be
 // looking at two different moments in time. If a reason to diverge ever shows
@@ -40,7 +40,7 @@ type tokensSummaryReader interface {
 // Mirrors ActivityCollector's lifecycle (EnablePersistence/Start/Snapshot).
 type RepoCostCollector struct {
 	mu     sync.Mutex
-	audit  auditReader
+	audit  AuditReader
 	tokens tokensSummaryReader
 	// auditPath is where OutputActionsSince reads ("" -> the production audit
 	// log). Kept in sync with the activity collector's path so both caches
@@ -50,14 +50,14 @@ type RepoCostCollector struct {
 	nowFn       func() time.Time
 	persistPath string
 
-	snap        repoCostResponse
+	snap        RepoCostResponse
 	ready       bool
 	collectedAt time.Time
 }
 
 // persistedRepoCost is the on-disk sidecar shape, mirroring persistedActivity.
 type persistedRepoCost struct {
-	Snapshot    repoCostResponse `json:"snapshot"`
+	Snapshot    RepoCostResponse `json:"snapshot"`
 	CollectedAt time.Time        `json:"collected_at"`
 }
 
@@ -66,7 +66,7 @@ type persistedRepoCost struct {
 // inert (Snapshot ready=false forever). auditPath is where OutputActionsSince
 // reads ("" -> the production audit log; pass the same path the activity
 // collector uses so both read one file set).
-func NewRepoCostCollector(audit auditReader, tok tokensSummaryReader, auditPath string, logger *slog.Logger) *RepoCostCollector {
+func NewRepoCostCollector(audit AuditReader, tok tokensSummaryReader, auditPath string, logger *slog.Logger) *RepoCostCollector {
 	return &RepoCostCollector{
 		audit:     audit,
 		tokens:    tok,
@@ -156,8 +156,8 @@ func (rc *RepoCostCollector) Start(ctx context.Context) {
 func (rc *RepoCostCollector) collect() {
 	now := rc.nowFn()
 	summary := rc.tokens.Summary()
-	entries := rc.audit.OutputActionsSince(now.Add(-repoCostWindow), activityOutputActions, rc.auditPath)
-	resp := computeRepoCost(summary, entries, now)
+	entries := rc.audit.OutputActionsSince(now.Add(-RepoCostWindow), ActivityOutputActions, rc.auditPath)
+	resp := ComputeRepoCost(summary, entries, now)
 
 	rc.mu.Lock()
 	rc.snap = resp
@@ -168,14 +168,14 @@ func (rc *RepoCostCollector) collect() {
 }
 
 // Snapshot returns the last computed response and whether a collect has ever
-// succeeded (i.e. produced a non-nil token summary; see computeRepoCost).
+// succeeded (i.e. produced a non-nil token summary; see ComputeRepoCost).
 // Ready=false must never be papered over with a zero-valued response by the
 // caller — a cost endpoint reporting $0.00 before its first collection is
 // indistinguishable from a hive that genuinely spent nothing, which is
 // exactly the misreporting #4836 exists to prevent.
-func (rc *RepoCostCollector) Snapshot() (repoCostResponse, bool) {
+func (rc *RepoCostCollector) Snapshot() (RepoCostResponse, bool) {
 	if rc == nil {
-		return repoCostResponse{}, false
+		return RepoCostResponse{}, false
 	}
 	rc.mu.Lock()
 	defer rc.mu.Unlock()

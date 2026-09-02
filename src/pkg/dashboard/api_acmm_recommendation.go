@@ -5,6 +5,7 @@ import (
 
 	"github.com/kubestellar/hive/pkg/acmmadvisor"
 	"github.com/kubestellar/hive/pkg/config"
+	"github.com/kubestellar/hive/pkg/dashboard/collect"
 )
 
 // qualityAgentName is the config-level name of the quality/coverage agent that
@@ -142,7 +143,7 @@ func hasQualityAgent(cfg *config.Config) bool {
 // archival destroys the post-merge history it needs). The denominator
 // deliberately counts superseded/duplicate PRs as non-successes: stricter,
 // and harder to game by re-proposing the same change.
-func mergeSuccessRateFromFleetStats(fc *FleetStatsCollector) (rate float64, measured bool) {
+func mergeSuccessRateFromFleetStats(fc *collect.FleetStatsCollector) (rate float64, measured bool) {
 	counts, ready := fc.Snapshot()
 	if !ready {
 		return 0, false

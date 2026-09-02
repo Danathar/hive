@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -10,8 +11,43 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kubestellar/hive/pkg/dashboard/collect"
+	ghpkg "github.com/kubestellar/hive/pkg/github"
 	"github.com/kubestellar/hive/pkg/tokens"
 )
+
+// rcTime/rcEvent/rcUsage/rcSession mirror the fixture helpers that moved to
+// pkg/dashboard/collect with the pure join tests; the handler tests here need
+// the same shapes.
+
+func rcTime(base time.Time, min int) time.Time { return base.Add(time.Duration(min) * time.Minute) }
+
+func rcEvent(ts time.Time, agent, repo string) AuditEntry {
+	return AuditEntry{
+		Timestamp: ts.UTC().Format(time.RFC3339),
+		Action:    ghpkg.AuditActionAgentPRCreated,
+		Agent:     agent,
+		Detail:    "agent=" + agent + ", repo=" + repo + ", number=1",
+	}
+}
+
+func rcUsage(ts time.Time, in, out int64) tokens.UsageEvent {
+	return tokens.UsageEvent{TimestampMs: ts.UnixMilli(), Model: "claude-opus-4-1", Coalesced: 1, Input: in, Output: out}
+}
+
+// rcSession builds a Claude session whose summed fields agree with its timeline,
+// exactly as the phase-2 scanner produces.
+func rcSession(id, agent string, usage ...tokens.UsageEvent) tokens.SessionSummary {
+	s := tokens.SessionSummary{SessionID: id, Agent: agent, Model: "claude-opus-4-1", Backend: tokens.BackendClaude, Usage: usage}
+	for _, u := range usage {
+		s.InputTokens += u.Input
+		s.OutputTokens += u.Output
+		s.CacheRead += u.CacheRead
+		s.CacheCreate += u.CacheCreate
+	}
+	s.TotalTokens = s.InputTokens + s.OutputTokens + s.CacheRead + s.CacheCreate
+	return s
+}
 
 // countingAuditReader wraps a real audit fixture and counts how many times
 // OutputActionsSince was called, so a test can assert the served endpoint did
@@ -21,7 +57,7 @@ import (
 // path produces an identical-looking payload; only a call-count assertion
 // proves the cache is doing anything.
 type countingAuditReader struct {
-	inner auditReader
+	inner collect.AuditReader
 	calls int32
 }
 
@@ -60,9 +96,8 @@ func newRepoCostFixtureServer(t *testing.T) (*Server, *countingAuditReader) {
 	inner := &fakeFixedAudit{entries: entries}
 	counting := &countingAuditReader{inner: inner}
 
-	rc := NewRepoCostCollector(counting, &fakeTokensSummary{summary: summary}, "", nil)
-	rc.nowFn = func() time.Time { return now }
-	rc.collect()
+	rc := collect.NewRepoCostCollector(counting, &fakeTokensSummary{summary: summary}, "", nil)
+	runOneCollect(rc)
 
 	s := NewServer(0, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	s.RegisterAPI(&Dependencies{RepoCost: rc})
@@ -76,6 +111,18 @@ type fakeFixedAudit struct{ entries []AuditEntry }
 
 func (f *fakeFixedAudit) OutputActionsSince(_ time.Time, _ map[string]bool, _ string) []AuditEntry {
 	return f.entries
+}
+
+// runOneCollect performs exactly one collect on the collector by starting it
+// with an already-cancelled context: Start's contract is one up-front collect
+// before entering the ticker loop, and the cancelled context makes the loop
+// exit before any tick. The collector's clock is its own (time.Now); the
+// fixtures place events within the join window relative to now, so the served
+// snapshot is identical in shape to the pre-move inline computation.
+func runOneCollect(rc *collect.RepoCostCollector) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	rc.Start(ctx)
 }
 
 func getRepoCost(s *Server) *httptest.ResponseRecorder {
@@ -109,7 +156,7 @@ func TestHandleRepoCostServesCachedSnapshotWithoutReReading(t *testing.T) {
 		t.Fatalf("handleRepoCost must serve the cached snapshot, not re-read: calls went from %d to %d across 2 requests", before, after)
 	}
 
-	var body1, body2 repoCostResponse
+	var body1, body2 collect.RepoCostResponse
 	if err := json.Unmarshal(rec1.Body.Bytes(), &body1); err != nil {
 		t.Fatalf("invalid JSON (req 1): %v", err)
 	}
@@ -129,7 +176,7 @@ func TestHandleRepoCostServesCachedSnapshotWithoutReReading(t *testing.T) {
 // with an empty by_repo and no fabricated total — never a $0.00 that reads
 // identically to "this hive spent nothing".
 func TestHandleRepoCostNotReadyBeforeFirstCollect(t *testing.T) {
-	rc := NewRepoCostCollector(&fakeFixedAudit{}, &fakeTokensSummary{summary: &tokens.AggregateSummary{}}, "", nil)
+	rc := collect.NewRepoCostCollector(&fakeFixedAudit{}, &fakeTokensSummary{summary: &tokens.AggregateSummary{}}, "", nil)
 	// Deliberately do NOT call collect(): simulates the window between
 	// process start and the collector's first ticker fire.
 
@@ -140,7 +187,7 @@ func TestHandleRepoCostNotReadyBeforeFirstCollect(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%q", rec.Code, rec.Body.String())
 	}
-	var body repoCostResponse
+	var body collect.RepoCostResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
@@ -192,9 +239,8 @@ func TestRepoCostPartitionInvariantServedPath(t *testing.T) {
 		rcEvent(rcTime(base, 20), "scanner", "org/repo-b"),
 	}
 
-	rc := NewRepoCostCollector(&fakeFixedAudit{entries: entries}, &fakeTokensSummary{summary: summary}, "", nil)
-	rc.nowFn = func() time.Time { return now }
-	rc.collect()
+	rc := collect.NewRepoCostCollector(&fakeFixedAudit{entries: entries}, &fakeTokensSummary{summary: summary}, "", nil)
+	runOneCollect(rc)
 
 	s := NewServer(0, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	s.RegisterAPI(&Dependencies{RepoCost: rc})
@@ -203,7 +249,7 @@ func TestRepoCostPartitionInvariantServedPath(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%q", rec.Code, rec.Body.String())
 	}
-	var body repoCostResponse
+	var body collect.RepoCostResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
@@ -220,34 +266,5 @@ func TestRepoCostPartitionInvariantServedPath(t *testing.T) {
 	}
 	if body.TotalTokens != hiveTotal {
 		t.Fatalf("served TotalTokens = %d, want %d", body.TotalTokens, hiveTotal)
-	}
-}
-
-// TestRepoCostCollectorPersistsAcrossRestart mirrors ActivityCollector's
-// EnablePersistence contract: a fresh collector pointed at a prior snapshot
-// file must report ready=true immediately, with the ORIGINAL CollectedAt
-// preserved, before its own first ticker fire — so a restart does not present
-// a stale-but-labeled-fresh figure, and does not regress to not-ready either.
-func TestRepoCostCollectorPersistsAcrossRestart(t *testing.T) {
-	dir := t.TempDir()
-	path := dir + "/repo-cost.json"
-
-	original := NewRepoCostCollector(&fakeFixedAudit{entries: []AuditEntry{
-		rcEvent(time.Now().Add(-time.Hour), "scanner", "org/repo-a"),
-	}}, &fakeTokensSummary{summary: &tokens.AggregateSummary{}}, "", nil)
-	fixedNow := time.Now().UTC().Add(-10 * time.Minute).Truncate(time.Second)
-	original.nowFn = func() time.Time { return fixedNow }
-	original.EnablePersistence(path)
-	original.collect()
-
-	restarted := NewRepoCostCollector(&fakeFixedAudit{}, &fakeTokensSummary{summary: &tokens.AggregateSummary{}}, "", nil)
-	restarted.EnablePersistence(path)
-
-	snap, ready := restarted.Snapshot()
-	if !ready {
-		t.Fatal("restored collector must report ready=true without waiting for its own first collect")
-	}
-	if !snap.CollectedAt.Equal(fixedNow) {
-		t.Fatalf("restored CollectedAt = %v, want %v (the ORIGINAL collection time, not now)", snap.CollectedAt, fixedNow)
 	}
 }

@@ -1,4 +1,4 @@
-package dashboard
+package collect
 
 // Per-repo estimated cost attribution — phase 3 of #4836.
 //
@@ -51,7 +51,6 @@ package dashboard
 // respected rather than bypassed.
 
 import (
-	"net/http"
 	"sort"
 	"strconv"
 	"time"
@@ -59,26 +58,33 @@ import (
 	"github.com/kubestellar/hive/pkg/tokens"
 )
 
-// repoCostWindow is the lookback for BOTH sides of the join. It matches the
+// CostEstimateDisclaimer travels with every estimated-cost payload (moved here
+// from pkg/dashboard's cost.go so both the /api/cost handler and the repo-cost
+// join stamp the identical sentence).
+const CostEstimateDisclaimer = "Estimated from token counts × published list prices. " +
+	"Subscription plans (Claude, Copilot), self-hosted inference (vLLM), and negotiated rates differ from list price. " +
+	"Not a bill."
+
+// RepoCostWindow is the lookback for BOTH sides of the join. It matches the
 // activity collector's activityWindow so the audit events and the usage events
 // cover the same span — joining a 14d event stream against a 30d usage stream
 // would silently push 16 days of real spend into `unattributed`.
-const repoCostWindow = activityWindow
+const RepoCostWindow = activityWindow
 
-// repoCostBucketUnattributed and repoCostBucketBackendUnsupported are the two
+// RepoCostBucketUnattributed and RepoCostBucketBackendUnsupported are the two
 // mandatory buckets. They are exported in the payload under fixed keys because
 // a UI must be able to render them without inferring their meaning, and they
 // are always present even when zero.
 const (
-	repoCostBucketUnattributed       = "unattributed"
-	repoCostBucketBackendUnsupported = "backend_unsupported"
+	RepoCostBucketUnattributed       = "unattributed"
+	RepoCostBucketBackendUnsupported = "backend_unsupported"
 )
 
-// repoCostEntry is one repo's attributed estimated cost. USD is a POINTER so a
+// RepoCostEntry is one repo's attributed estimated cost. USD is a POINTER so a
 // repo with no attributable cost renders as "—" and never as "$0.00": those are
 // different facts and conflating them is how an operator concludes a repo was
 // cheap when it was merely unobserved.
-type repoCostEntry struct {
+type RepoCostEntry struct {
 	Repo string   `json:"repo"`
 	USD  *float64 `json:"usd"`
 	// Source is "estimated" when every model contributing to this repo had an
@@ -104,16 +110,16 @@ type repoCostEntry struct {
 	Agents []string `json:"agents,omitempty"`
 }
 
-// repoCostResponse is the GET /api/repo-cost payload.
-type repoCostResponse struct {
+// RepoCostResponse is the GET /api/repo-cost payload.
+type RepoCostResponse struct {
 	Ready bool   `json:"ready"`
 	Phase string `json:"phase"`
 	// ByRepo excludes the two mandatory buckets, which are reported separately
 	// so no consumer can accidentally sum them into a "per-repo" total or
 	// normalize them away as rounding.
-	ByRepo             []repoCostEntry `json:"by_repo"`
-	Unattributed       repoCostEntry   `json:"unattributed"`
-	BackendUnsupported repoCostEntry   `json:"backend_unsupported"`
+	ByRepo             []RepoCostEntry `json:"by_repo"`
+	Unattributed       RepoCostEntry   `json:"unattributed"`
+	BackendUnsupported RepoCostEntry   `json:"backend_unsupported"`
 
 	// TotalUSD is the sum of every bucket below — the hive-wide estimated total
 	// this response partitions. Pricing is linear in token counts, so it tracks
@@ -153,9 +159,9 @@ type repoCostResponse struct {
 	CollectedAt time.Time `json:"collected_at,omitempty"`
 }
 
-// repoCostLimitations is surfaced in the payload so the UI renders the method's
+// RepoCostLimitations is surfaced in the payload so the UI renders the method's
 // caveats alongside the numbers rather than burying them in code comments.
-func repoCostLimitations() []string {
+func RepoCostLimitations() []string {
 	return []string{
 		"Claude sessions only. Copilot records all token usage in a single lump at session shutdown and bob parses no per-message timestamps, so neither can be placed in time. Their spend is real and is reported in full under backend_unsupported — it is not missing, it is not attributable.",
 		"Attribution is inferred from TIMING, not measured. Tokens spent between two audited repo= events are billed to the repo named by the later event.",
@@ -223,8 +229,8 @@ func (a *repoCostAccumulator) add(p repoUsagePoint) {
 	a.touched = true
 }
 
-func (a *repoCostAccumulator) entry(name string) repoCostEntry {
-	e := repoCostEntry{
+func (a *repoCostAccumulator) entry(name string) RepoCostEntry {
+	e := RepoCostEntry{
 		Repo:        name,
 		Input:       a.input,
 		Output:      a.output,
@@ -256,21 +262,21 @@ type repoAuditEvent struct {
 	repo string
 }
 
-// computeRepoCost performs the interval join. It is a pure function of its
+// ComputeRepoCost performs the interval join. It is a pure function of its
 // inputs — no clock, no I/O — so the invariant test can drive it directly.
 //
 // summary is the hive's merged token summary (the same one /api/cost prices).
 // entries are audited output actions carrying repo= over the window.
-func computeRepoCost(summary *tokens.AggregateSummary, entries []AuditEntry, now time.Time) repoCostResponse {
-	resp := repoCostResponse{
+func ComputeRepoCost(summary *tokens.AggregateSummary, entries []AuditEntry, now time.Time) RepoCostResponse {
+	resp := RepoCostResponse{
 		Phase:              "phase_3_interval_join",
-		ByRepo:             []repoCostEntry{},
-		WindowHours:        int(repoCostWindow / time.Hour),
+		ByRepo:             []RepoCostEntry{},
+		WindowHours:        int(RepoCostWindow / time.Hour),
 		PriceTableDate:     tokens.PriceTableDate(),
-		Disclaimer:         costEstimateDisclaimer,
-		Limitations:        repoCostLimitations(),
-		Unattributed:       repoCostEntry{Repo: repoCostBucketUnattributed, Source: "estimated"},
-		BackendUnsupported: repoCostEntry{Repo: repoCostBucketBackendUnsupported, Source: "estimated"},
+		Disclaimer:         CostEstimateDisclaimer,
+		Limitations:        RepoCostLimitations(),
+		Unattributed:       RepoCostEntry{Repo: RepoCostBucketUnattributed, Source: "estimated"},
+		BackendUnsupported: RepoCostEntry{Repo: RepoCostBucketBackendUnsupported, Source: "estimated"},
 		CollectedAt:        now,
 	}
 	if summary == nil {
@@ -304,7 +310,7 @@ func computeRepoCost(summary *tokens.AggregateSummary, entries []AuditEntry, now
 	resp.OldestEventAt = oldest
 
 	// --- Side B: usage points, split by whether they are placeable in time ---
-	windowStartMs := now.Add(-repoCostWindow).UnixMilli()
+	windowStartMs := now.Add(-RepoCostWindow).UnixMilli()
 	byRepo := map[string]*repoCostAccumulator{}
 	unattributed := &repoCostAccumulator{}
 	backendUnsupported := &repoCostAccumulator{}
@@ -375,8 +381,8 @@ func computeRepoCost(summary *tokens.AggregateSummary, entries []AuditEntry, now
 		return a.Repo < b.Repo
 	})
 
-	resp.Unattributed = unattributed.entry(repoCostBucketUnattributed)
-	resp.BackendUnsupported = backendUnsupported.entry(repoCostBucketBackendUnsupported)
+	resp.Unattributed = unattributed.entry(RepoCostBucketUnattributed)
+	resp.BackendUnsupported = backendUnsupported.entry(RepoCostBucketBackendUnsupported)
 	resp.TotalUSD += unattributed.usd + backendUnsupported.usd
 	resp.TotalTokens = resp.AttributedTokens + resp.Unattributed.Tokens + resp.BackendUnsupported.Tokens
 
@@ -425,61 +431,4 @@ func attributeRepo(events []repoAuditEvent, tsMs, windowStartMs int64) (repoAudi
 		return repoAuditEvent{}, false
 	}
 	return events[i], true
-}
-
-// handleRepoCost serves GET /api/repo-cost from the cached RepoCostCollector
-// snapshot (see repo_cost_collector.go) rather than recomputing the interval
-// join per request. The join reads every rotated/compressed audit backup
-// (up to 64MB decompressed each) and walks every retained Claude usage
-// event in the window — recomputing that on every 60s dashboard poll, per
-// open tab, was the defect fixed by #4943.
-//
-// When the collector has not produced a snapshot yet (fresh boot, before its
-// first ticker fire), this reports ready=false with an EMPTY by_repo/zero
-// totals and no CollectedAt — never a fabricated $0.00. A cost payload with
-// ready=true and an empty by_repo is indistinguishable from "this hive spent
-// nothing", which is exactly the misreporting the #4836 epic exists to
-// prevent, so the not-ready state must stay visibly different from that.
-func (s *Server) handleRepoCost(w http.ResponseWriter, r *http.Request) {
-	if s.deps != nil && s.deps.RepoCost != nil {
-		snap, ready := s.deps.RepoCost.Snapshot()
-		if !ready {
-			jsonResponse(w, repoCostResponse{
-				Phase:              "phase_3_interval_join",
-				ByRepo:             []repoCostEntry{},
-				PriceTableDate:     tokens.PriceTableDate(),
-				Disclaimer:         costEstimateDisclaimer,
-				Limitations:        repoCostLimitations(),
-				Unattributed:       repoCostEntry{Repo: repoCostBucketUnattributed, Source: "estimated"},
-				BackendUnsupported: repoCostEntry{Repo: repoCostBucketBackendUnsupported, Source: "estimated"},
-			})
-			return
-		}
-		jsonResponse(w, snap)
-		return
-	}
-
-	// No collector wired (e.g. a minimal test Server): fall back to computing
-	// inline so the endpoint still degrades to a correct answer rather than
-	// 503ing. Production always wires RepoCost (see cmd/hive/main.go).
-	now := time.Now()
-	var summary *tokens.AggregateSummary
-	if s.deps != nil && s.deps.Tokens != nil {
-		summary = s.deps.Tokens.Summary()
-	}
-	var entries []AuditEntry
-	if s.audit != nil {
-		entries = s.audit.OutputActionsSince(now.Add(-repoCostWindow), activityOutputActions, s.auditPathForActivity())
-	}
-	jsonResponse(w, computeRepoCost(summary, entries, now))
-}
-
-// auditPathForActivity returns the audit file path the activity collector was
-// configured with, so the cost join reads exactly the same log. "" means the
-// production default (see OutputActionsSince).
-func (s *Server) auditPathForActivity() string {
-	if s.deps != nil && s.deps.Activity != nil {
-		return s.deps.Activity.auditPath
-	}
-	return ""
 }

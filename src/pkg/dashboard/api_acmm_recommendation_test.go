@@ -4,11 +4,15 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kubestellar/hive/pkg/acmmadvisor"
 	"github.com/kubestellar/hive/pkg/config"
+	"github.com/kubestellar/hive/pkg/dashboard/collect"
 	ghpkg "github.com/kubestellar/hive/pkg/github"
 )
 
@@ -267,9 +271,26 @@ func TestStatusPayloadCarriesACMMAdvice(t *testing.T) {
 // and when counts are absent or the window is empty the input stays at the
 // honest, conservative zero instead of a fabricated rate.
 func TestBuildACMMStatusInputs_MergeSuccessRate(t *testing.T) {
+	// seededFleetStats builds a ready collector carrying the given counts
+	// through its public persistence API (the tracker's fields moved to
+	// pkg/dashboard/collect with the collector and are no longer pokeable).
+	seededFleetStats := func(counts ghpkg.FleetContribCounts) *collect.FleetStatsCollector {
+		blob, err := json.Marshal(map[string]any{"counts": counts, "collected_at": time.Now().UTC()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(t.TempDir(), "fleet-stats.json")
+		if err := os.WriteFile(path, blob, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		fc := collect.NewFleetStatsCollector(nil, "bot", "org", nil)
+		fc.EnablePersistence(path)
+		return fc
+	}
+
 	cases := []struct {
 		name string
-		fc   *FleetStatsCollector
+		fc   *collect.FleetStatsCollector
 		want float64
 	}{
 		{
@@ -277,7 +298,7 @@ func TestBuildACMMStatusInputs_MergeSuccessRate(t *testing.T) {
 			// 30 merged / 10 rejected over the window → 0.75. Before #3972
 			// this input was hardcoded to 0, so this case fails against the
 			// unfixed behavior.
-			fc:   &FleetStatsCollector{counts: ghpkg.FleetContribCounts{PRsMerged: 30, PRsRejected: 10}, ready: true},
+			fc:   seededFleetStats(ghpkg.FleetContribCounts{PRsMerged: 30, PRsRejected: 10}),
 			want: 0.75,
 		},
 		{
@@ -287,24 +308,24 @@ func TestBuildACMMStatusInputs_MergeSuccessRate(t *testing.T) {
 		},
 		{
 			name: "collector never collected stays zero",
-			fc:   &FleetStatsCollector{},
+			fc:   collect.NewFleetStatsCollector(nil, "bot", "org", nil),
 			want: 0,
 		},
 		{
 			name: "empty window stays zero, not a fabricated 1.0",
 			// A successful collect that found no resolved PRs: the rate is
 			// unknown, and the advisor must not see a measured value.
-			fc:   &FleetStatsCollector{counts: ghpkg.FleetContribCounts{}, ready: true},
+			fc:   seededFleetStats(ghpkg.FleetContribCounts{}),
 			want: 0,
 		},
 		{
 			name: "all rejected reads as measured zero",
-			fc:   &FleetStatsCollector{counts: ghpkg.FleetContribCounts{PRsRejected: 5}, ready: true},
+			fc:   seededFleetStats(ghpkg.FleetContribCounts{PRsRejected: 5}),
 			want: 0,
 		},
 		{
 			name: "all merged reads as measured 1.0",
-			fc:   &FleetStatsCollector{counts: ghpkg.FleetContribCounts{PRsMerged: 4}, ready: true},
+			fc:   seededFleetStats(ghpkg.FleetContribCounts{PRsMerged: 4}),
 			want: 1.0,
 		},
 	}

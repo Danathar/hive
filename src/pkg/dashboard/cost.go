@@ -36,6 +36,7 @@ import (
 	"time"
 
 	"github.com/kubestellar/hive/pkg/config"
+	"github.com/kubestellar/hive/pkg/dashboard/collect"
 	"github.com/kubestellar/hive/pkg/tokens"
 )
 
@@ -147,9 +148,9 @@ type costSessionEntry struct {
 // default session ordering.
 const maxCostSessions = 200
 
-const costEstimateDisclaimer = "Estimated from token counts × published list prices. " +
-	"Subscription plans (Claude, Copilot), self-hosted inference (vLLM), and negotiated rates differ from list price. " +
-	"Not a bill."
+// costEstimateDisclaimer moved to pkg/dashboard/collect (the repo-cost join
+// stamps the identical sentence); aliased so every payload keeps one source.
+const costEstimateDisclaimer = collect.CostEstimateDisclaimer
 
 // handleCost serves GET /api/cost — the unified estimated + native cost view.
 func (s *Server) handleCost(w http.ResponseWriter, r *http.Request) {
