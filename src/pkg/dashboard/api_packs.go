@@ -735,7 +735,8 @@ func (s *Server) syncAgentVisibility(level int) (paused, resumed []string) {
 
 	// Collect agents to resume and agents to pause.
 	var toResume []string
-	for name := range s.deps.Config.Agents {
+	var leftRunning []string
+	for name, ac := range s.deps.Config.Agents {
 		if packAgents[name] {
 			// On-demand agents (e.g. brainstorm) should never auto-resume;
 			// they are triggered explicitly by workflows like inception.
@@ -750,12 +751,32 @@ func (s *Server) syncAgentVisibility(level int) (paused, resumed []string) {
 			}
 		} else {
 			// Pause sequentially — it's fast and order can matter.
-			if !s.deps.AgentMgr.IsPaused(name) {
-				if err := s.deps.AgentMgr.Pause(name, "acmm-pack", fmt.Sprintf("agent not in pack level %d", level)); err == nil {
-					paused = append(paused, name)
-				}
+			if s.deps.AgentMgr.IsPaused(name) {
+				continue
+			}
+			// An agent whose pause state the operator owns — created by hand
+			// via the dashboard API, or explicitly resumed after a pack pause
+			// — is left running, not re-paused as "not in pack": it was never
+			// a member of any pack's roster, so the roster says nothing about
+			// whether it should run. Without this, the apply that runs on
+			// EVERY restart re-paused such agents on every pod roll (#5706 —
+			// the same pack-clobbers-operator-config family as #5632; models,
+			// backends and cadences already carry this ownership marker).
+			if ac.PauseIsOperatorOwned() {
+				leftRunning = append(leftRunning, name)
+				continue
+			}
+			if err := s.deps.AgentMgr.Pause(name, "acmm-pack", fmt.Sprintf("agent not in pack level %d", level)); err == nil {
+				paused = append(paused, name)
 			}
 		}
+	}
+	if len(leftRunning) > 0 {
+		sort.Strings(leftRunning)
+		// Name the agents the sweep deliberately did NOT pause: a silent skip
+		// is indistinguishable from a sweep that never considered them.
+		s.logger.Info("ACMM pack: non-pack agents left running (operator owns their pause state)",
+			"level", level, "agents", strings.Join(leftRunning, ", "))
 	}
 
 	// Resume agents in parallel — each Resume() call takes ~2s,

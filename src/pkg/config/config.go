@@ -830,8 +830,23 @@ type AgentConfig struct {
 	// Stored as a string owner rather than a bool so "never set" (empty),
 	// "pack-owned" and "operator-owned" stay distinguishable across upgrades
 	// of hives whose config predates this field.
-	ModelOwner      string `yaml:"model_owner" json:"model_owner,omitempty"`
-	BackendOwner    string `yaml:"backend_owner" json:"backend_owner,omitempty"`
+	ModelOwner   string `yaml:"model_owner" json:"model_owner,omitempty"`
+	BackendOwner string `yaml:"backend_owner" json:"backend_owner,omitempty"`
+	// PauseOwner records WHO owns this agent's pause/run state, with the same
+	// FieldOwner* vocabulary as ModelOwner/BackendOwner. It is stamped
+	// FieldOwnerOperator when the operator creates the agent by hand via the
+	// dashboard API (such an agent is never a member of any pack's roster) and
+	// when the operator explicitly resumes the agent.
+	//
+	// Without this, the ACMM pack visibility sweep — which runs on EVERY
+	// restart ("ACMM pack applied on startup") — paused every non-pack agent
+	// with reason "agent not in pack level N", including reviewer-role agents
+	// the operator had explicitly created and resumed from the dashboard. The
+	// operator's run-state silently reverted on the next pod roll, every pod
+	// roll (#5706 — same clobber family as #5632; cadences grew the equivalent
+	// marker in #5668). Empty means "no operator claim": pack-created agents
+	// keep the sweep's pause/resume reconciliation unchanged.
+	PauseOwner      string `yaml:"pause_owner" json:"pause_owner,omitempty"`
 	StaleTimeout    int    `yaml:"stale_timeout" json:"stale_timeout,omitempty"`
 	RestartStrategy string `yaml:"restart_strategy" json:"restart_strategy,omitempty"`
 	LaunchCmd       string `yaml:"launch_cmd" json:"launch_cmd,omitempty"`
@@ -1166,6 +1181,15 @@ func (a AgentConfig) ModelIsOperatorOwned() bool {
 // agent's backend (the grid's "method" column).
 func (a AgentConfig) BackendIsOperatorOwned() bool {
 	return a.BackendOwner == FieldOwnerOperator
+}
+
+// PauseIsOperatorOwned reports whether an operator explicitly owns this
+// agent's pause/run state — stamped at dashboard-API create and on an explicit
+// operator resume — which makes the agent immune to the ACMM pack visibility
+// sweep's "agent not in pack level N" pause on apply/restart (#5706), the same
+// contract ModelIsOperatorOwned provides for models.
+func (a AgentConfig) PauseIsOperatorOwned() bool {
+	return a.PauseOwner == FieldOwnerOperator
 }
 
 // CadenceIsOperatorOwned reports whether an operator explicitly set the

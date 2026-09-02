@@ -1662,6 +1662,44 @@ func (s *Server) claimAgentFieldOwnership(name, model, backend string) {
 	s.ClearSystemAlert("agent-field-save-failed")
 }
 
+// claimAgentPauseOwnership marks name's pause/run state operator-owned and
+// persists the marker to hive.yaml and the per-agent overlay — the same
+// two-layer durability as claimAgentFieldOwnership above, and for the same
+// reason: for managed agents the overlay replaces the hive.yaml entry on every
+// config load, so a marker written to only one layer does not survive. An
+// operator-owned pause state makes the agent immune to the ACMM pack
+// visibility sweep's "agent not in pack level N" pause (#5706). A no-op when
+// the claim is already recorded, so a routine resume does not rewrite config.
+func (s *Server) claimAgentPauseOwnership(name string) {
+	if s.deps == nil || s.deps.Config == nil {
+		return
+	}
+	ac, ok := s.deps.Config.Agents[name]
+	if !ok || ac.PauseIsOperatorOwned() {
+		return
+	}
+	ac.PauseOwner = config.FieldOwnerOperator
+	s.deps.Config.Agents[name] = ac
+	_ = s.deps.AgentMgr.UpdateConfig(name, ac)
+	if err := s.saveConfig(); err != nil {
+		s.deps.Logger.Error("failed to persist pause-state ownership", "agent", name, "error", err)
+		s.AddSystemAlert("agent-pause-owner-save-failed", "error",
+			"Could not record that you resumed "+name+" — an ACMM pack apply may re-pause it on the next restart: "+err.Error())
+		return
+	}
+	if ac.Managed {
+		if agentsDir := s.deps.Config.Data.AgentsDir; agentsDir != "" {
+			if err := config.SaveAgentFile(agentsDir, name, ac); err != nil {
+				s.deps.Logger.Error("failed to persist pause-state ownership to agent overlay", "agent", name, "error", err)
+				s.AddSystemAlert("agent-pause-owner-save-failed", "error",
+					"Could not record that you resumed "+name+" in its agent overlay — an ACMM pack apply may re-pause it on the next config load: "+err.Error())
+				return
+			}
+		}
+	}
+	s.ClearSystemAlert("agent-pause-owner-save-failed")
+}
+
 // validateModelForAgent rejects a model the agent's effective backend does not
 // offer, so an unhonorable choice surfaces as a 400 the operator can see
 // instead of silently degrading to a default at launch time.
@@ -1872,6 +1910,12 @@ func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	// An explicit operator resume claims ownership of the agent's pause state
+	// (#5706). Without the claim, the ACMM pack visibility sweep that runs on
+	// every restart re-paused any non-pack agent as "agent not in pack level
+	// N" — so this resume silently lasted only until the next pod roll.
+	s.claimAgentPauseOwnership(name)
 
 	s.auditFromRequest(r, "resume", "", name)
 	s.refreshAndPersist()

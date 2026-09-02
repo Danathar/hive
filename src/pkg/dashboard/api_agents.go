@@ -102,6 +102,12 @@ func (s *Server) handleAgentCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	body.Agent.Managed = true
+	// An agent the operator creates by hand is never a member of any pack's
+	// roster, so the operator owns its pause/run state from birth: without
+	// this claim, the ACMM pack visibility sweep — which runs on every
+	// restart — paused it as "agent not in pack level N" on every pod roll
+	// (#5706, same ownership contract as ModelOwner/#5632).
+	body.Agent.PauseOwner = config.FieldOwnerOperator
 
 	// If a GitHub prompt source is declared, validate it against the seed-only
 	// allowlist and bake an initial copy so the very first kick has content even
@@ -392,6 +398,12 @@ func (s *Server) handleAgentImport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	agentCfg := agentConfigFromDefinition(def)
+	// An import is an operator create (#5706): claim pause-state ownership so
+	// the ACMM pack sweep never pauses the imported agent as "not in pack".
+	// Stamped here rather than in agentConfigFromDefinition because that
+	// mapping is shared with the live definition_source re-apply path, which
+	// must not mint ownership claims on its own.
+	agentCfg.PauseOwner = config.FieldOwnerOperator
 
 	// Keep-linked (source=="url" only): persist a definition_source so the hive
 	// re-fetches and re-applies this definition's operator-safe fields on reload.
