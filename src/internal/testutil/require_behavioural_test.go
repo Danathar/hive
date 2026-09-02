@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -15,15 +16,24 @@ import (
 // printed a false PASS in CI), so the observation here has to be the actual
 // outcome of a real *testing.T.
 //
-// Doing that in-process is not possible: a failing subtest marks every ancestor
-// failed, so t.Run's return value cannot be used to "absorb" the failure — the
-// parent goes red too. (That is itself worth stating, because the obvious
-// in-process version of this test LOOKS correct and turns the suite red.)
+// Doing that in-process against a REAL *testing.T is not possible: a failing
+// subtest marks every ancestor failed, so t.Run's return value cannot be used
+// to "absorb" the failure — the parent goes red too. (That is itself worth
+// stating, because the obvious in-process version of this test LOOKS correct
+// and turns the suite red.)
 //
-// So the subject runs in a SUBPROCESS: TestGuardSubject below is a helper that
-// only executes when HIVE_TESTUTIL_SUBPROCESS is set, and the tests re-exec the
-// test binary to run it, then inspect the child's exit status and output. The
-// child's failure is then data, not a verdict on this process.
+// So the real-T half runs in a SUBPROCESS: TestGuardSubject below is a helper
+// that only executes when HIVE_TESTUTIL_SUBPROCESS is set, and the tests
+// re-exec the test binary to run it, then inspect the child's exit status and
+// output. The child's failure is then data, not a verdict on this process.
+//
+// The subprocess proves the guard against the genuine article, but the child's
+// coverage counters die with the child, so the guard measures 0% and trips the
+// coverage gate (#5597). The *_InProcess tests further down therefore exercise
+// the same contract against guardTB — a testing.TB double whose Fatalf/Skip
+// end the goroutine exactly as the real methods do — in this process, where
+// the profile can see it. Both halves stay: the double for the counters and
+// the fine-grained observations, the subprocess for proof against a real T.
 
 const subprocessEnv = "HIVE_TESTUTIL_SUBPROCESS"
 
@@ -165,3 +175,160 @@ func TestFailureMessageNamesFlagAndDiagnosis(t *testing.T) {
 type errStub struct{}
 
 func (errStub) Error() string { return "permission denied" }
+
+// ── In-process tests against a testing.TB double ────────────────────────────
+
+// guardTB is a testing.TB double for the guards. Unlike recordingTB (whose
+// Fatalf must RETURN so Eventually's deadline test can keep asserting),
+// guardTB's Fatalf/Skip/Skipf end the calling goroutine via runtime.Goexit,
+// exactly as the real *testing.T methods do — the guards' documented contract
+// is that they do not return, and a double that returned would let the code
+// after the guard run and hide a missing-termination bug (the "guard returned"
+// defect the subprocess tests also watch for). Embedding testing.TB satisfies
+// the interface's unexported method; any method the guard newly grows a
+// dependency on panics on the nil embed, which is the desired signal.
+type guardTB struct {
+	testing.TB
+	helperCalls int
+	fataled     bool
+	fatal       string
+	skipped     bool
+	skip        string
+}
+
+func (g *guardTB) Helper() { g.helperCalls++ }
+
+func (g *guardTB) Fatalf(format string, args ...any) {
+	g.fataled = true
+	g.fatal = fmt.Sprintf(format, args...)
+	runtime.Goexit()
+}
+
+func (g *guardTB) Skip(args ...any) {
+	g.skipped = true
+	g.skip = fmt.Sprint(args...)
+	runtime.Goexit()
+}
+
+func (g *guardTB) Skipf(format string, args ...any) {
+	g.skipped = true
+	g.skip = fmt.Sprintf(format, args...)
+	runtime.Goexit()
+}
+
+// callGuard invokes fn against a fresh guardTB on a dedicated goroutine —
+// necessary because the guard is expected to END that goroutine — and reports
+// whether fn returned normally instead, which is always a bug in the guard.
+func callGuard(fn func(tb testing.TB)) (tb *guardTB, returned bool) {
+	tb = &guardTB{}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn(tb)
+		returned = true
+	}()
+	<-done
+	return tb, returned
+}
+
+func TestSkipUnlessRequired_InProcess_SkipsByDefault(t *testing.T) {
+	t.Setenv(RequireBehaviouralEnv, "")
+
+	tb, returned := callGuard(func(tb testing.TB) {
+		SkipUnlessRequired(tb, "no tmux on this runner")
+	})
+
+	if returned {
+		t.Fatal("guard returned; like t.Skip it must end the calling goroutine")
+	}
+	if tb.fataled {
+		t.Errorf("guard failed the test with the flag unset:\n%s", tb.fatal)
+	}
+	if !tb.skipped {
+		t.Fatal("guard neither skipped nor failed")
+	}
+	if tb.skip != "no tmux on this runner" {
+		t.Errorf("skip reason = %q, want the caller's reason verbatim", tb.skip)
+	}
+	if tb.helperCalls == 0 {
+		t.Error("guard did not call t.Helper(); failures would point at the guard, not the caller")
+	}
+}
+
+func TestSkipUnlessRequired_InProcess_FailsWhenArmed(t *testing.T) {
+	t.Setenv(RequireBehaviouralEnv, "1")
+
+	tb, returned := callGuard(func(tb testing.TB) {
+		SkipUnlessRequired(tb, "planted precondition")
+	})
+
+	if returned {
+		t.Fatal("guard returned; like t.Fatal it must end the calling goroutine")
+	}
+	if tb.skipped {
+		t.Errorf("guard skipped under %s=1: %q", RequireBehaviouralEnv, tb.skip)
+	}
+	if !tb.fataled {
+		t.Fatal("guard did not fail the test under the flag")
+	}
+	if tb.helperCalls == 0 {
+		t.Error("guard did not call t.Helper()")
+	}
+	for _, want := range []string{
+		"planted precondition",       // the caller's reason survives
+		RequireBehaviouralEnv + "=1", // which flag armed this
+		"BROKEN TEST",                // the diagnosis
+	} {
+		if !strings.Contains(tb.fatal, want) {
+			t.Errorf("failure message does not mention %q:\n%s", want, tb.fatal)
+		}
+	}
+}
+
+func TestSkipfUnlessRequired_InProcess_SkipsFormattedByDefault(t *testing.T) {
+	t.Setenv(RequireBehaviouralEnv, "")
+
+	tb, returned := callGuard(func(tb testing.TB) {
+		SkipfUnlessRequired(tb, "cannot write %s: %v", "config.json", errStub{})
+	})
+
+	if returned {
+		t.Fatal("guard returned; like t.Skipf it must end the calling goroutine")
+	}
+	if tb.fataled {
+		t.Errorf("guard failed the test with the flag unset:\n%s", tb.fatal)
+	}
+	if !tb.skipped {
+		t.Fatal("guard neither skipped nor failed")
+	}
+	if want := "cannot write config.json: permission denied"; tb.skip != want {
+		t.Errorf("skip reason = %q, want %q (format must be rendered, not passed raw)", tb.skip, want)
+	}
+}
+
+func TestSkipfUnlessRequired_InProcess_FailsFormattedWhenArmed(t *testing.T) {
+	t.Setenv(RequireBehaviouralEnv, "1")
+
+	tb, returned := callGuard(func(tb testing.TB) {
+		SkipfUnlessRequired(tb, "cannot write %s: %v", "config.json", errStub{})
+	})
+
+	if returned {
+		t.Fatal("guard returned; like t.Fatal it must end the calling goroutine")
+	}
+	if tb.skipped {
+		t.Errorf("guard skipped under %s=1: %q", RequireBehaviouralEnv, tb.skip)
+	}
+	if !tb.fataled {
+		t.Fatal("guard did not fail the test under the flag")
+	}
+	if !strings.Contains(tb.fatal, "cannot write config.json: permission denied") {
+		t.Errorf("formatted reason missing from failure message:\n%s", tb.fatal)
+	}
+	if strings.Contains(tb.fatal, "%s") || strings.Contains(tb.fatal, "%v") {
+		t.Errorf("format verbs leaked unrendered into the failure message:\n%s", tb.fatal)
+	}
+	if !strings.Contains(tb.fatal, "BROKEN TEST") {
+		t.Errorf("failure message lacks the diagnosis:\n%s", tb.fatal)
+	}
+}
