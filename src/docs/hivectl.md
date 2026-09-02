@@ -312,7 +312,7 @@ simply keeps its last successful snapshot rather than showing an error.
 | `m` | Open the model picker for the selected agent | Agents pane |
 | `K` | Kick the selected agent now | Agents pane |
 | `A` | Open the ACMM level overlay | global |
-| `a` | Attach to the selected agent's tmux session (**local only**) | Agents pane |
+| `a` | Attach to the selected agent's tmux session (local, or via the dashboard's terminal proxy) | Agents pane |
 | `?` | Toggle the help overlay (lists this table; dismisses on any key) | global |
 | `q` / `ctrl+c` | Quit | global |
 
@@ -394,17 +394,42 @@ reconciled to it — a 500 after the write took effect), the overlay still
 shows an apply error, but the app also triggers an immediate refresh anyway,
 because the panes underneath may already describe a hive that has moved.
 
-#### Local tmux attach
+#### Attach: local tmux, or the dashboard's terminal proxy
 
-`a` on a selected agent runs a preflight check (`tmux has-session -t
-hive-<agent>`) before suspending the TUI, so a missing `tmux` binary or a
-session that does not exist yet surfaces as a footer message
-(`Attach failed: …`) instead of a redraw flicker. A successful preflight hands
-the terminal to `tmux attach` directly; returning from the session (however it
-ends) restores the TUI and immediately refreshes the fleet, since the agent's
-state may have moved while attached. **This is local-only** — it execs a
-`tmux` binary next to the TUI process and cannot attach to a session running
-on a remote hive.
+`a` on a selected agent attaches to that agent's tmux session. Where the
+session actually is decides how ([#5644](https://github.com/kubestellar/hive/issues/5644)):
+
+- **Local fast path.** When `HIVE_DASHBOARD_URL` is loopback (or unset) and a
+  local `tmux has-session -t hive-<agent>` succeeds, the terminal is handed to
+  `tmux attach` directly — the original, zero-network behavior.
+- **Remote attach.** When the dashboard is not loopback, or the local session
+  does not exist — the recommended Podman install, where the sessions live
+  inside the container under other UIDs — the TUI dials the dashboard's own
+  `/terminal` websocket instead: the same authenticated reverse proxy the web
+  dashboard's "▶ terminal" links use, in front of the container's ttyd.
+  Nothing new is exposed for this; ttyd's port stays loopback-only inside the
+  container, and the attach carries the same credentials as every other TUI
+  request (`HIVE_DASHBOARD_TOKEN` and/or `HIVE_DASHBOARD_COOKIE` — see
+  [Credentials](#credentials)), plus ttyd's own basic-auth credential derived
+  the way the container derives it (`hive:<token>`, overridable with
+  `HIVE_TTYD_CREDENTIAL` if the deployment overrode it too).
+
+The fallback is never silent: a remote attach prints one line before the
+session's first byte saying which hive it went through and which session it
+attached to, so there is no ambiguity about what you are typing into. That
+line never contains the token.
+
+Both paths preflight before suspending the TUI, so a missing `tmux` binary, a
+session that does not exist anywhere, an unreachable dashboard, or a refused
+authorization surfaces as a footer message (`Attach failed: …`) instead of a
+redraw flicker — a 403 reads `owner access required` like the other actions,
+a 401 names both credential variables. Inside a remote session every
+keystroke, `ctrl+c` included, belongs to the agent's terminal; you leave with
+tmux's own detach (`prefix + d`, i.e. `Ctrl-b d` by default). Returning from
+the session (however it ends, on either path) restores the TUI and
+immediately refreshes the fleet, since the agent's state may have moved while
+attached. If the connection drops mid-session rather than closing cleanly,
+the footer says so — your last keystrokes may not have arrived.
 
 #### Connection status and the poll fallback
 
@@ -445,8 +470,11 @@ an operator dismisses the overlay first (see the modal rule above).
   `authorized_users` allowlist) are reachable, but the cookie has to be lifted
   from a browser — see [Credentials](#credentials) and
   [#5651](https://github.com/kubestellar/hive/issues/5651).
-- **Local tmux attach only.** No remote terminal embedding over the ttyd
-  WebSocket — that is a follow-up epic.
+- **No terminal emulation in-frame.** Remote attach
+  ([#5644](https://github.com/kubestellar/hive/issues/5644)) suspends the TUI
+  and streams the ttyd websocket through your own terminal, exactly as the
+  local path suspends into `tmux attach`; the session is not re-rendered
+  inside a pane.
 - **Feature parity with the web dashboard's operator loop, not visual
   parity.** The TUI does not attempt to look like the web dashboard.
 

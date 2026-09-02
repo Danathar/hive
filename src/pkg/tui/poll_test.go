@@ -72,6 +72,12 @@ func TestMain(m *testing.M) {
 	if err := os.Setenv(client.CookieEnv, ""); err != nil {
 		panic(err)
 	}
+	// Same containment for the terminal credential override: a developer
+	// with a real HIVE_TTYD_CREDENTIAL exported must not have the attach
+	// tests present it to their fixture servers.
+	if err := os.Setenv(client.TtydCredentialEnv, ""); err != nil {
+		panic(err)
+	}
 	os.Exit(m.Run())
 }
 

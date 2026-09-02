@@ -125,8 +125,19 @@ type Client struct {
 	baseURL string
 	token   string
 	cookie  string
-	http    *http.Client
+	// ttydCred is the operator's explicit HIVE_TTYD_CREDENTIAL override for
+	// the terminal websocket's basic-auth lane; empty means "derive from the
+	// token the way the container's entrypoint does". See terminal.go.
+	ttydCred string
+	http     *http.Client
 }
+
+// BaseURL reports the dashboard base URL this client resolved at
+// construction. It exists for the attach path, which needs to (a) decide
+// whether the dashboard is loopback — the local-vs-remote fast-path rule —
+// and (b) tell the operator WHICH hive's session they are looking at, without
+// re-reading the environment and risking a second, different answer.
+func (c *Client) BaseURL() string { return c.baseURL }
 
 // New builds a Client from the environment: base URL from HIVE_DASHBOARD_URL
 // (default DefaultBaseURL), token from HIVE_DASHBOARD_TOKEN, session cookie
@@ -153,10 +164,11 @@ func New() *Client {
 	return &Client{
 		// Trailing slash is trimmed so joining a leading-slash path cannot
 		// produce "//api/health", which some reverse proxies do not normalize.
-		baseURL: strings.TrimRight(base, "/"),
-		token:   strings.TrimSpace(os.Getenv(TokenEnv)),
-		cookie:  strings.TrimSpace(os.Getenv(CookieEnv)),
-		http:    &http.Client{Timeout: requestTimeout, Transport: newTransport()},
+		baseURL:  strings.TrimRight(base, "/"),
+		token:    strings.TrimSpace(os.Getenv(TokenEnv)),
+		cookie:   strings.TrimSpace(os.Getenv(CookieEnv)),
+		ttydCred: strings.TrimSpace(os.Getenv(TtydCredentialEnv)),
+		http:     &http.Client{Timeout: requestTimeout, Transport: newTransport()},
 	}
 }
 

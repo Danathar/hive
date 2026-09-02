@@ -48,7 +48,10 @@ func HelpBindings() []Binding {
 		{Keys: "m", Action: "Open the model picker for the selected agent", Scope: "Agents pane", Available: true},
 		{Keys: "K", Action: "Kick the selected agent now", Scope: "Agents pane", Available: true},
 		{Keys: "A", Action: "Open the ACMM level overlay", Scope: "global", Available: true},
-		{Keys: "a", Action: "Attach to the selected agent's tmux session", Scope: "Agents pane (local)", Available: true},
+		// "(local)" was dropped from the scope when #5644 landed: `a` now
+		// reaches remote and containerized hives through the dashboard's
+		// terminal proxy, with local tmux kept as the co-located fast path.
+		{Keys: "a", Action: "Attach to the selected agent's tmux session", Scope: "Agents pane", Available: true},
 	}
 }
 
