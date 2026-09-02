@@ -244,3 +244,53 @@ func TestBuildAgentMessage_RoutesReviewerRole(t *testing.T) {
 		t.Errorf("scanner must not receive the reviewer kick:\n%s", scanner)
 	}
 }
+
+// #5617 item 4: "oldest first" now means the PR's real creation time. The old
+// (repo, number) proxy sorted by repo NAME first, so against the per-kick cap
+// an old escalated PR in a late-alphabet repo was starved behind newer ones in
+// an early-alphabet repo on every kick, forever.
+func TestFormatReviewerWorkList_TrueCreationTimeOrdering(t *testing.T) {
+	data := `{"ci_failing":[
+	  {"number":9001,"repo":"alpha/console","title":"newest","escalated":true,"created_at":"2026-09-01T00:00:00Z"},
+	  {"number":12,"repo":"zeta/service","title":"oldest","escalated":true,"created_at":"2026-06-01T00:00:00Z"},
+	  {"number":9000,"repo":"alpha/console","title":"middle","escalated":true,"created_at":"2026-07-01T00:00:00Z"}
+	]}`
+	out := formatReviewerWorkList([]byte(data))
+	oldest := strings.Index(out, "zeta/service#12")
+	middle := strings.Index(out, "alpha/console#9000")
+	newest := strings.Index(out, "alpha/console#9001")
+	if oldest < 0 || middle < 0 || newest < 0 {
+		t.Fatalf("every escalated row must be listed:\n%s", out)
+	}
+	// Under the old key the two alpha/console rows came first purely because
+	// "alpha" < "zeta", and the genuinely oldest PR came last.
+	if oldest > middle || middle > newest {
+		t.Errorf("rows must order by creation time, not (repo, number):\n%s", out)
+	}
+	if !strings.Contains(out, "opened: 2026-06-01T00:00:00Z") {
+		t.Errorf("the ordering key must be visible in the row so the reviewer can check it:\n%s", out)
+	}
+}
+
+// A ci-failing.json from a hub that recorded no creation times still works:
+// those rows keep the old (repo, number) proxy among themselves and sort AFTER
+// every row whose age is actually known — an unproven age must not jump ahead
+// of a measured one.
+func TestFormatReviewerWorkList_UnknownCreationTimeSortsLast(t *testing.T) {
+	data := `{"ci_failing":[
+	  {"number":1,"repo":"aaa/repo","title":"no timestamp","escalated":true},
+	  {"number":2,"repo":"aaa/repo","title":"also none","escalated":true},
+	  {"number":900,"repo":"zzz/repo","title":"known age","escalated":true,"created_at":"2026-08-01T00:00:00Z"}
+	]}`
+	out := formatReviewerWorkList([]byte(data))
+	known := strings.Index(out, "zzz/repo#900")
+	if known < 0 || known > strings.Index(out, "aaa/repo#1") {
+		t.Errorf("a row with a known creation time must precede every row without one:\n%s", out)
+	}
+	if strings.Index(out, "aaa/repo#1") > strings.Index(out, "aaa/repo#2") {
+		t.Errorf("timestamp-less rows must keep the (repo, number) proxy among themselves:\n%s", out)
+	}
+	if n := strings.Count(out, "opened:"); n != 1 {
+		t.Errorf("only the row with a known creation time may render an opened line (got %d):\n%s", n, out)
+	}
+}

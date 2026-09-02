@@ -24,6 +24,18 @@ For unchanged red heads, track staleness separately and cap re-engagements at
 three per current SHA. A branch that moves resets the re-engagement counter; a
 permanently red, never-moving branch is not nudged forever.
 
+A PR escalating for the SECOND time — after the reviewer lane ([#5480]) already
+repaired or de-escalated it once — gets a structured hand-off note instead of
+the generic body. The ledger stamps the head SHA the reviewer left on the branch
+and when its verdict was reconciled, and keeps both across the reset that
+reconciliation performs, so the comment can say what was already tried, that the
+attempt count is measured from the reviewer's pass, and that no further
+automated pass is coming. One reviewer pass per PR is the whole ladder: without
+the note, nothing distinguished that terminal hand-off from a first escalation
+except the label set.
+
+[#5480]: https://github.com/kubestellar/hive/issues/5480
+
 ## Consequences
 
 The fleet stops spending cycles on fix loops that are not converging and gives a

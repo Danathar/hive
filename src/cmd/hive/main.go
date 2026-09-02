@@ -7881,7 +7881,18 @@ func runEscalationSweep(
 		if excerpt == "" {
 			excerpt = escalationStore.Excerpt(o.Repo, o.Number)
 		}
+		// A PR that re-escalates AFTER a reviewer-lane pass reaches its human
+		// with a structured hand-off note (#5617 item 3): what the reviewer
+		// left on the branch, when, and that no second automated pass is
+		// coming. Before this, the only thing distinguishing that hand-off
+		// from a first escalation was the label set.
 		body := escalation.CommentBody(r.Attempts, meta[key].checks, excerpt)
+		afterReviewerPass := false
+		if sha, at, ok := escalationStore.ReviewerPass(o.Repo, o.Number); ok {
+			body = escalation.HandoffCommentBody(r.Attempts, meta[key].checks, excerpt,
+				escalation.ReviewerHandoff{SHA: sha, At: at})
+			afterReviewerPass = true
+		}
 		if err := writer.CreateIssueComment(ctx, o.Repo, o.Number, body); err != nil {
 			// Retry next pass rather than marking escalated with no comment:
 			// the whole point is that the evidence reaches a human.
@@ -7897,9 +7908,16 @@ func runEscalationSweep(
 			"repo", o.Repo, "pr", o.Number, "attempts", r.Attempts,
 			"failing_checks", strings.Join(meta[key].checks, ","))
 		if notifier != nil {
-			notifier.Send("Fix loop escalated",
-				fmt.Sprintf("%s#%d red on %d fix attempts — needs a human (see PR comment for the raw error)", o.Repo, o.Number, r.Attempts),
-				notify.PriorityHigh)
+			title := "Fix loop escalated"
+			detail := fmt.Sprintf("%s#%d red on %d fix attempts — needs a human (see PR comment for the raw error)", o.Repo, o.Number, r.Attempts)
+			if afterReviewerPass {
+				// Materially more urgent than a first escalation: a reviewer
+				// has already had its one pass, so nothing automated remains
+				// behind this page.
+				title = "Fix loop escalated after reviewer pass"
+				detail = fmt.Sprintf("%s#%d red again on %d fix attempts since the reviewer's pass — no further automated pass will run (see PR comment)", o.Repo, o.Number, r.Attempts)
+			}
+			notifier.Send(title, detail, notify.PriorityHigh)
 		}
 	}
 	return escalated
@@ -8712,6 +8730,14 @@ func writeMergeEligible(actionable *github.ActionableResult, hold github.HoldRes
 		// reviewer-passed — a PR that re-escalates after a reviewer pass
 		// belongs to a true human, never to another automated pass.
 		Labels []string `json:"labels,omitempty"`
+		// CreatedAt is the PR's forge creation time — the reviewer lane's
+		// ordering key (#5617 item 4). Its work list is capped at a few PRs
+		// per kick and documented "oldest first", but until this field the
+		// rows carried no age signal at all and were ordered by (repo name, PR
+		// number). Numbers are monotonic only WITHIN a repo, so that proxy
+		// sorted by repo NAME first and could starve an old escalated PR in a
+		// late-alphabet repo behind newer ones, on every kick, forever.
+		CreatedAt time.Time `json:"created_at"`
 	}
 
 	prAgents := auditPRAgents(org, time.Now().Add(-auditPRAttributionWindow), "")
@@ -8777,6 +8803,7 @@ func writeMergeEligible(actionable *github.ActionableResult, hold github.HoldRes
 					Escalated:     escalatedPRs[escalation.Key(fullRepo, pr.Number)],
 					Agent:         prAgents[fmt.Sprintf("%s#%d", fullRepo, pr.Number)],
 					Labels:        pr.Labels,
+					CreatedAt:     pr.CreatedAt,
 				})
 				continue
 			}
