@@ -200,6 +200,24 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+// stubUIDMapPath points UIDMapPath at a file inside this test's own temp dir
+// and restores it on cleanup. Every test that can WRITE the uid-map must use
+// it: AddAgent and ReconcileAgents both call uidMap.Save(UIDMapPath) whenever
+// a UID map is live, and TestMain's shared uid-map.json path persists for the
+// whole binary run. A map saved there is silently loaded by every later
+// NewManager, whose AddAgent then allocates and RE-SAVES unrelated agent
+// names — handing later tests' agents real UIDs, per-UID tmux sockets and
+// per-UID homes. Under -shuffle=on that chain made TestWatchdogLastProduction
+// inherit a UID for "a1" and scan the wrong HOME for production evidence
+// (#5580).
+func stubUIDMapPath(t *testing.T) string {
+	t.Helper()
+	old := UIDMapPath
+	UIDMapPath = filepath.Join(t.TempDir(), "uid-map.json")
+	t.Cleanup(func() { UIDMapPath = old })
+	return UIDMapPath
+}
+
 func makeAgentConfig(backend, model string) config.AgentConfig {
 	return config.AgentConfig{
 		Backend: backend,

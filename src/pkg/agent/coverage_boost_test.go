@@ -1117,12 +1117,11 @@ func TestAddAgent_WithUIDMap(t *testing.T) {
 	m.uidMap = NewUIDMap()
 	m.uidMap.AllocateUIDs([]string{"existing"})
 
-	// Save to temp dir
-	dir := t.TempDir()
-	uidMapFile := filepath.Join(dir, "uid-map.json")
+	// AddAgent allocates a UID and persists the map to UIDMapPath. Redirect
+	// the path into this test's own temp dir: saving to the binary-wide
+	// TestMain path leaks the map into every later NewManager (#5580).
+	uidMapFile := stubUIDMapPath(t)
 
-	// AddAgent should allocate UID and try to save
-	// The save will fail since UIDMapPath is a const, but that's OK
 	m.AddAgent("new-agent", config.AgentConfig{Backend: "claude"})
 
 	m.mu.RLock()
@@ -1135,7 +1134,9 @@ func TestAddAgent_WithUIDMap(t *testing.T) {
 	if agent.tmuxSocket == "" {
 		t.Error("agent with UID should have tmux socket set")
 	}
-	_ = uidMapFile
+	if _, err := os.Stat(uidMapFile); err != nil {
+		t.Errorf("AddAgent should persist the uid-map at UIDMapPath: %v", err)
+	}
 }
 
 // ---------------------------------------------------------------------------
