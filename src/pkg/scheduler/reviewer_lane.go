@@ -24,6 +24,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/kubestellar/hive/pkg/escalation"
 	"github.com/kubestellar/hive/pkg/github"
@@ -196,19 +197,20 @@ func (s *Scheduler) buildReviewerWorkList() string {
 // enumeration with per-agent attribution, so every row is hive work; rows
 // whose Labels carry ReviewerPassedLabel or ReviewerRecommendCloseLabel are
 // excluded (one reviewer pass per PR, ever — whatever the verdict was).
-// Output is capped at reviewerMaxPRsPerKick rows, oldest first
-// (ascending PR number per repo — the enumeration carries no creation time,
-// and numbers are monotonic per repo).
+// Output is capped at reviewerMaxPRsPerKick rows, oldest first by the PR's
+// real forge creation time; rows written by a hub that recorded none fall back
+// to the old (repo, number) proxy and sort last (#5617 item 4).
 func formatReviewerWorkList(data []byte) string {
 	type ciFailingRow struct {
-		Number        int      `json:"number"`
-		Repo          string   `json:"repo"`
-		Title         string   `json:"title"`
-		Agent         string   `json:"agent"`
-		Labels        []string `json:"labels"`
-		FailingChecks []string `json:"failing_checks"`
-		Excerpt       string   `json:"excerpt"`
-		Escalated     bool     `json:"escalated"`
+		Number        int       `json:"number"`
+		Repo          string    `json:"repo"`
+		Title         string    `json:"title"`
+		Agent         string    `json:"agent"`
+		Labels        []string  `json:"labels"`
+		FailingChecks []string  `json:"failing_checks"`
+		Excerpt       string    `json:"excerpt"`
+		Escalated     bool      `json:"escalated"`
+		CreatedAt     time.Time `json:"created_at"`
 	}
 	var payload struct {
 		Items []ciFailingRow `json:"ci_failing"`
@@ -240,13 +242,28 @@ func formatReviewerWorkList(data []byte) string {
 	if len(rows) == 0 {
 		return ""
 	}
-	// Oldest first: PR numbers are monotonic per repo, the only age signal
-	// these rows carry.
+	// Oldest first, by the PR's TRUE creation time (#5617 item 4). The old key
+	// carried no age signal at all: PR numbers are monotonic only WITHIN a
+	// repo, so ordering on (repo, number) sorted by repo NAME first. Against
+	// the reviewerMaxPRsPerKick cap that is a starvation bug rather than a
+	// cosmetic one — a month-old escalated PR in "zeta/service" sits behind
+	// three newer ones in "alpha/console" on every kick, forever, and the
+	// reviewer never reaches it. Rows whose creation time is unknown (a
+	// ci-failing.json written by an older hub, or a forge that omitted the
+	// field) sort LAST and keep the old proxy among themselves: an unproven
+	// age must not jump ahead of a measured one.
 	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].Repo != rows[j].Repo {
-			return rows[i].Repo < rows[j].Repo
+		a, b := rows[i], rows[j]
+		if a.CreatedAt.IsZero() != b.CreatedAt.IsZero() {
+			return !a.CreatedAt.IsZero()
 		}
-		return rows[i].Number < rows[j].Number
+		if !a.CreatedAt.IsZero() && !a.CreatedAt.Equal(b.CreatedAt) {
+			return a.CreatedAt.Before(b.CreatedAt)
+		}
+		if a.Repo != b.Repo {
+			return a.Repo < b.Repo
+		}
+		return a.Number < b.Number
 	})
 
 	var b strings.Builder
@@ -262,6 +279,12 @@ func formatReviewerWorkList(data []byte) string {
 		}
 		b.WriteString(fmt.Sprintf("  %s#%d — %s\n", pr.Repo, pr.Number, pr.Title))
 		b.WriteString(fmt.Sprintf("    original author agent: %s\n", author))
+		if !pr.CreatedAt.IsZero() {
+			// The ordering key, shown so the reviewer can see for itself that
+			// the list really is oldest-first — the INVARIANTS below forbid
+			// running `gh pr list` to check.
+			b.WriteString(fmt.Sprintf("    opened: %s\n", pr.CreatedAt.UTC().Format(time.RFC3339)))
+		}
 		b.WriteString(fmt.Sprintf("    checkout: gh pr checkout %d --repo %s\n", pr.Number, pr.Repo))
 		if len(pr.FailingChecks) > 0 {
 			b.WriteString(fmt.Sprintf("    failing: %s\n", strings.Join(pr.FailingChecks, ", ")))

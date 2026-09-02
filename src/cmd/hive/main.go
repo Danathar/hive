@@ -8712,6 +8712,14 @@ func writeMergeEligible(actionable *github.ActionableResult, hold github.HoldRes
 		// reviewer-passed — a PR that re-escalates after a reviewer pass
 		// belongs to a true human, never to another automated pass.
 		Labels []string `json:"labels,omitempty"`
+		// CreatedAt is the PR's forge creation time — the reviewer lane's
+		// ordering key (#5617 item 4). Its work list is capped at a few PRs
+		// per kick and documented "oldest first", but until this field the
+		// rows carried no age signal at all and were ordered by (repo name, PR
+		// number). Numbers are monotonic only WITHIN a repo, so that proxy
+		// sorted by repo NAME first and could starve an old escalated PR in a
+		// late-alphabet repo behind newer ones, on every kick, forever.
+		CreatedAt time.Time `json:"created_at"`
 	}
 
 	prAgents := auditPRAgents(org, time.Now().Add(-auditPRAttributionWindow), "")
@@ -8777,6 +8785,7 @@ func writeMergeEligible(actionable *github.ActionableResult, hold github.HoldRes
 					Escalated:     escalatedPRs[escalation.Key(fullRepo, pr.Number)],
 					Agent:         prAgents[fmt.Sprintf("%s#%d", fullRepo, pr.Number)],
 					Labels:        pr.Labels,
+					CreatedAt:     pr.CreatedAt,
 				})
 				continue
 			}
