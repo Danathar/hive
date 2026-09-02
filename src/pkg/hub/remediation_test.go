@@ -243,6 +243,66 @@ func TestRemediationPerSignature(t *testing.T) {
 			wantState:  HealthStateGreen,
 			wantAction: "NONE",
 		},
+		// --- #5699: the three families the 2026-09-02 fleet sweep found
+		// rendering a WHY chip with nothing under it. Each verdict already
+		// named its condition; none named a fix, so eleven non-green spokes
+		// told an operator what was wrong and not what to do. ---
+		{
+			name:  "agents down → restart-from-the-card hint",
+			entry: stale(remEntry(4)),
+			rollup: agentFleetRollup{Expected: 3, Running: 1, Known: 3,
+				Problems: 2, DeadOrGone: 2},
+			app:        okApp(),
+			queued:     5,
+			wantState:  HealthStateRed,
+			wantReason: "down — restart needed",
+			wantAction: "Restart the agent from its card",
+			wantLink:   "https://spoke.example.com",
+		},
+		{
+			// Amber, and the hint must offer BOTH resolutions: every agent is
+			// paused ON PURPOSE, so "resume them" alone reads as an instruction
+			// to undo a deliberate choice.
+			name:  "all agents paused → resume-or-mark-idle hint",
+			entry: stale(remEntry(4)),
+			rollup: agentFleetRollup{Expected: 3, Running: 0, Known: 3,
+				Paused: 3},
+			app:        okApp(),
+			queued:     5,
+			wantState:  HealthStateAmber,
+			wantReason: "all agents paused",
+			wantAction: "Resume agents, or mark the hive idle",
+			wantLink:   "https://spoke.example.com",
+		},
+		{
+			name:  "agents out of provider quota → rotate-or-raise hint",
+			entry: stale(remEntry(4)),
+			rollup: agentFleetRollup{Expected: 2, Running: 2, Known: 2,
+				Problems: 2, QuotaExhausted: 2},
+			app:        okApp(),
+			queued:     5,
+			wantState:  HealthStateRed,
+			wantReason: "out of provider quota",
+			wantAction: "Rotate the agent to a provider with headroom",
+		},
+		{
+			// The SPOKE-level provider limit is a different code path from the
+			// agent rollup above — a precondition red that returns before the
+			// rollup is consulted — and it was equally hint-less. Same remedy,
+			// so it carries the same hint rather than an arbitrarily different
+			// one.
+			name: "spoke-level provider limit → same rotate-or-raise hint",
+			entry: func() RegistryEntry {
+				e := stale(remEntry(4))
+				e.ProviderLimitReason = "credit balance too low"
+				return e
+			}(),
+			rollup:     okRollup(),
+			app:        okApp(),
+			queued:     5,
+			wantState:  HealthStateRed,
+			wantAction: "Rotate the agent to a provider with headroom",
+		},
 	}
 
 	for _, tc := range tests {

@@ -39,6 +39,13 @@ const (
 	causeNoCadence           = "no-cadence"
 	causeHoldStale           = "hold-stale"
 	causeChannelLag          = "channel-lag"
+	// The three families the 2026-09-02 fleet sweep found carrying no hint at
+	// all (#5699). Each verdict already named its condition precisely; none
+	// named a fix, so eleven non-green spokes rendered a WHY chip with nothing
+	// under it. These are verdicts the sweep OBSERVED, not hypothetical ones.
+	causeAgentsDown    = "agents-down"
+	causeAllPaused     = "all-paused"
+	causeProviderQuota = "provider-quota"
 )
 
 // errorStreakRedThreshold is how many consecutive failed model calls turn a
@@ -198,6 +205,35 @@ func attachRemediation(v *HealthVerdict, e RegistryEntry) {
 		v.Remediation = &Remediation{
 			Action:  "Spoke lags its channel — check auto-upgrade / force rollout",
 			Surface: "hub fleet version controls",
+		}
+	case causeAgentsDown:
+		// Three spokes at the sweep, one of them running supervisor-down for
+		// two days. The fix is the agent card's restart, so the hint points
+		// there rather than at the pod.
+		v.Remediation = &Remediation{
+			Action:  "Restart the agent from its card",
+			Surface: "spoke dashboard agent card",
+			Link:    link(""),
+		}
+	case causeAllPaused:
+		// Seven spokes. Amber, not red: every agent is paused ON PURPOSE, so
+		// the hint has to offer BOTH resolutions — resume, or say out loud that
+		// the hive is mothballed — or it reads as an instruction to undo a
+		// deliberate choice.
+		v.Remediation = &Remediation{
+			Action:  "Resume agents, or mark the hive idle if it is mothballed",
+			Surface: "spoke dashboard",
+			Link:    link(""),
+		}
+	case causeProviderQuota:
+		// Re-authenticating does not help here and the operator's two real
+		// options are on different surfaces: move the agent to a provider with
+		// headroom (agent card) or raise the cap (provider account). Name both,
+		// and link the one the hub can address.
+		v.Remediation = &Remediation{
+			Action:  "Rotate the agent to a provider with headroom, or raise the provider quota",
+			Surface: "spoke dashboard agent card / provider account",
+			Link:    link(""),
 		}
 	}
 }
