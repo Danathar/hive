@@ -45,6 +45,22 @@ const pollInterval = 10 * time.Millisecond
 //     strictly worse.
 func Eventually(t testing.TB, timeout time.Duration, cond func() bool, msg string, args ...any) {
 	t.Helper()
+	EventuallyEvery(t, timeout, pollInterval, cond, msg, args...)
+}
+
+// EventuallyEvery is Eventually with a caller-chosen sampling interval.
+//
+// The default 10ms suits a condition that becomes true after real work — a
+// server responding, a file appearing. It is far too coarse for an in-process
+// harness whose state changes in microseconds: sampling ten times slower than
+// the thing you are watching turns a fast suite into a slow one, and a suite
+// that takes minutes stops being run under -count=N, which is where genuine
+// flakes surface.
+//
+// Prefer plain Eventually. Reach for this only when you have measured that
+// the default interval dominates the wait, and say so at the call site.
+func EventuallyEvery(t testing.TB, timeout, interval time.Duration, cond func() bool, msg string, args ...any) {
+	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
 		if cond() {
@@ -54,7 +70,7 @@ func Eventually(t testing.TB, timeout time.Duration, cond func() bool, msg strin
 			t.Fatalf("%s (condition not met within %s)", fmt.Sprintf(msg, args...), timeout)
 			return
 		}
-		time.Sleep(pollInterval)
+		time.Sleep(interval)
 	}
 }
 
@@ -74,4 +90,37 @@ func EventuallyValue[T any](t testing.TB, timeout time.Duration, get func() (T, 
 		return ok
 	}, msg, args...)
 	return got
+}
+
+// EventuallyEveryFunc is EventuallyEvery with the failure message produced
+// LAZILY, at the deadline, instead of being formatted by the caller up front.
+//
+// It exists because a diagnostic captured eagerly is a diagnostic about the
+// wrong moment. Passing a rendered snapshot of the system into EventuallyEvery
+// as a printf argument:
+//
+//	EventuallyEvery(t, d, i, cond, "timed out\n%s", h.render())
+//
+// looks deferred — the formatting genuinely is — but h.render() is evaluated
+// BEFORE the wait starts. When the condition then never holds, the failure
+// prints the state the system was in at t=0 rather than at the timeout. For a
+// wait that hangs, that is the difference between seeing why it hung and
+// seeing a snapshot that has long since been superseded. This bit a TUI
+// acceptance harness where every hang reported the startup frame.
+//
+// describe is called at most once, only on the failure path, so it is free to
+// do real work: render a frame, dump a queue, walk recorded traffic.
+func EventuallyEveryFunc(t testing.TB, timeout, interval time.Duration, cond func() bool, describe func() string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if cond() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s (condition not met within %s)", describe(), timeout)
+			return
+		}
+		time.Sleep(interval)
+	}
 }
