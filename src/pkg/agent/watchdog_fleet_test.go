@@ -15,6 +15,15 @@ import (
 // running, with the tmux seams faked so no subprocess ever runs.
 func newWatchdogTestManager(t *testing.T, backends map[string]string) (*Manager, *map[string]string) {
 	t.Helper()
+	// NewManager silently loads whatever uid-map sits at UIDMapPath, and the
+	// TestMain path is shared by the whole binary. A map leaked there by an
+	// earlier test (any writer that skips stubUIDMapPath — the #5580 chain,
+	// re-observed as #5631) hands these agents real UIDs, so AgentHome
+	// resolves to a per-UID home instead of $HOME and LastProduction scans
+	// the wrong directory, silently falling back to pane evidence. Watchdog
+	// tests never exercise UID plumbing; isolate the path so no leak — past
+	// or future — can reach them.
+	stubUIDMapPath(t)
 	cfgs := make(map[string]config.AgentConfig, len(backends))
 	for name, backend := range backends {
 		cfgs[name] = config.AgentConfig{Backend: backend}
@@ -368,6 +377,18 @@ func TestWatchdogLastProduction(t *testing.T) {
 	m, _ := newWatchdogTestManager(t, map[string]string{"a1": "claude", "b1": "bob"})
 	fleet := WatchdogFleet{M: m}
 
+	// Pin the invariant every assertion below rests on: with UID 0, AgentHome
+	// is $HOME, so the evidence written under this test's HOME is the evidence
+	// LastProduction scans. A nonzero UID means a uid-map leaked into
+	// NewManager and re-routed the scan to a per-UID home — which used to
+	// surface as a baffling "LastProduction is the pane time, two hours off"
+	// failure (#5631) instead of naming the cause.
+	for _, name := range []string{"a1", "b1"} {
+		if uid := m.agents[name].UID; uid != 0 {
+			t.Fatalf("agent %s inherited UID %d from a leaked uid-map; AgentHome would skip $HOME and miss the state-file evidence", name, uid)
+		}
+	}
+
 	// No evidence anywhere: pane never changed, no state dirs.
 	if _, ok := fleet.LastProduction("a1"); ok {
 		t.Fatal("no evidence must report ok=false")
@@ -376,8 +397,14 @@ func TestWatchdogLastProduction(t *testing.T) {
 		t.Fatal("unknown agent has no evidence")
 	}
 
+	// Both fixtures derive from ONE clock read so their 1h59m spread is fixed
+	// by construction: pane evidence sits 2h back (coincidentally the
+	// watchdog's NoProductionFor default — no production threshold is in play
+	// here) and the state-file mtime 1m back, so the mtime must win.
+	now := time.Now()
+
 	// Pane activity alone is evidence.
-	paneTime := time.Now().Add(-2 * time.Hour).Truncate(time.Second)
+	paneTime := now.Add(-2 * time.Hour).Truncate(time.Second)
 	m.agents["a1"].LastPaneChange = paneTime
 	got, ok := fleet.LastProduction("a1")
 	if !ok || !got.Equal(paneTime) {
@@ -393,7 +420,7 @@ func TestWatchdogLastProduction(t *testing.T) {
 	if err := os.WriteFile(convo, []byte("{}"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	newer := time.Now().Add(-time.Minute).Truncate(time.Second)
+	newer := now.Add(-time.Minute).Truncate(time.Second)
 	if err := os.Chtimes(convo, newer, newer); err != nil {
 		t.Fatal(err)
 	}
