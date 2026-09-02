@@ -394,7 +394,14 @@ func (s *Server) applyPack(level int, forceGovernor bool) (*ApplyPackResult, err
 	// field report, so also list WHICH agents were tombstoned (deleted by the operator
 	// and NOT re-created) vs skipped (already present) — a grep by agent name against
 	// this single line answers "did the pack try to re-add the agent I removed?".
-	s.logger.Info("ACMM pack applied", "hive_id", s.deps.Config.HiveID, "level", level, "name", pack.Name, "created", len(created), "updated", len(updated), "skipped", len(skipped), "paused", len(paused), "resumed", len(resumed), "tombstoned", len(tombstoned), "gate_removed", len(removedByGate), "tombstoned_agents", tombstoned, "skipped_agents", skipped)
+	// created_agents is listed by NAME for the same reason #2439 added
+	// tombstoned_agents and skipped_agents: the count alone is not actionable.
+	// `created` is what sets isFirstApplyOrExpansion, which re-asserts the
+	// pack's governor cadences over the operator's — so a steady-state apply
+	// that unexpectedly reports created:1 silently resets every custom cadence,
+	// and the log gives no way to tell WHICH agent authorized that reset. A
+	// grep by agent name against this one line answers it.
+	s.logger.Info("ACMM pack applied", "hive_id", s.deps.Config.HiveID, "level", level, "name", pack.Name, "created", len(created), "updated", len(updated), "skipped", len(skipped), "paused", len(paused), "resumed", len(resumed), "tombstoned", len(tombstoned), "gate_removed", len(removedByGate), "created_agents", created, "tombstoned_agents", tombstoned, "skipped_agents", skipped)
 	if len(tombstoned) > 0 {
 		// Say it plainly in the log too: an operator reading "this level has 6
 		// agents but I see 4" needs the reason, not a silent gap.
