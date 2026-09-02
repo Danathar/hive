@@ -2568,6 +2568,17 @@ func (m *Manager) launchInTmux(ctx context.Context, agent *AgentProcess) error {
 		m.clearInferenceRouteCallback(agent.Name)
 	}
 
+	// #5607: every claude-CLI launch re-asserts that the Remote Control bridge
+	// (session publishing to claude.ai/code) does not auto-start. Inference
+	// agents already got the pin via inferenceSettingsSeed in
+	// ensureClaudeSettings above; this covers the plain claude backend, whose
+	// userSettings is the SHARED /data/home/.claude/settings.json that hive
+	// never otherwise writes — the exact gap that let a CLI-side rollout
+	// default expose the whole fleet under one claude.ai account.
+	if backend == "claude" && !isInference {
+		m.ensureClaudeRemoteControlDefault(agent)
+	}
+
 	if agent.Config.CavemanMode != "" {
 		m.installCavemanForAgent(agent, backend)
 	}
@@ -7708,6 +7719,12 @@ func inferenceUserConfigSeed(agentName string) map[string]any {
 // this key every --dangerously-skip-permissions launch shows a consent menu
 // whose default selection is "No, exit" — if dismissal loses the race, the
 // CLI exits and the pane degrades to bare bash.
+// "remoteControlAtStartup" is pinned false because an ABSENT key delegates
+// the decision to a server-side rollout that flipped to auto-ON (#5607, CLI
+// 2.1.226+). Seeding it into both the userSettings and the --settings
+// flagSettings file keeps the Remote Control bridge off at every relaunch;
+// the merge-only repair in seedJSONFile preserves an operator's explicit
+// true. See claude_remote_control.go for the full mechanism.
 func inferenceSettingsSeed() map[string]any {
 	return map[string]any{
 		"permissions":                       map[string]any{"allow": []any{}, "deny": []any{}},
@@ -7715,6 +7732,7 @@ func inferenceSettingsSeed() map[string]any {
 		"bypassPermissions":                 true,
 		"hasAcknowledgedDisclaimer":         true,
 		"skipDangerousModePermissionPrompt": true,
+		remoteControlSettingKey:             false,
 	}
 }
 
