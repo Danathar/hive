@@ -4,8 +4,8 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## How we maintain this file
 
-- Add entries under `Unreleased` for user-visible features, fixes, security changes, migrations, deprecations, and breaking changes.
-- Move entries into a dated release section when a release is cut. If the repository has no release tag for the change, use the merge date rather than inventing a version.
+- In your PR, add the entry as a fragment file `changelog.d/<category>-<pr-or-slug>.md` (category one of `added`/`changed`/`deprecated`/`fixed`/`security` — see [changelog.d/README.md](changelog.d/README.md)) for user-visible features, fixes, security changes, migrations, deprecations, and breaking changes. Do not append to `## Unreleased` directly: one shared heading edited by every PR made unrelated PRs merge-conflict with each other ([#5675](https://github.com/kubestellar/hive/issues/5675)). Direct edits remain accepted for PRs in flight until 2026-09-09.
+- Fragments are compiled into `Unreleased` and moved into a dated release section automatically when a release is cut (`src/scripts/compile-changelog.sh`, driven by `.github/workflows/tagged-release.yml`). If the repository has no release tag for the change, use the merge date rather than inventing a version.
 - Link issues or PRs when useful, but keep entries readable for operators who are not following every PR.
 - Do not include routine refactors, test-only changes, or dependency churn unless they affect users.
 
