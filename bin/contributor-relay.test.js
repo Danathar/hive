@@ -5847,6 +5847,127 @@ test('#5447 an expired token still does NOT refuse the work (clock skew)', () =>
 });
 
 // ---------------------------------------------------------------------------
+// kubestellar/hive#5655 — Ctrl-C on a busy relay left the task's scoped GitHub
+// token on disk: the signal handlers cleared timers only and never ran the
+// task-exit contract (#5353), so the 0600 GH_TOKEN_CACHE credential stayed
+// valid for the rest of its ~55-minute lifetime after the hub had already
+// released the issue. The property pinned here is the issue's own ask: a
+// shutdown with a task in flight leaves NO file at GH_TOKEN_CACHE.
+// ---------------------------------------------------------------------------
+
+const { spawnSync } = require('child_process');
+
+test('#5655 cleanup() with a task in flight unlinks the scoped token, interrupts the agent, and does not relaunch', () => {
+  const relay = loadRelay({ backend: 'claude' });
+  try {
+    relay.injectGhToken('scoped-token-5655');
+    relay.setCurrentTask({ task_id: 'ct-kubestellar/hive-5655', task_gen: 1 });
+    const tokenPath = path.join(relay.__tmpDir, 'gh-token.cache');
+    assert.ok(fs.existsSync(tokenPath), 'precondition: the scoped token is on disk while the task is in flight');
+    relay.cleanup();
+    assert.ok(!fs.existsSync(tokenPath),
+      'shutdown must not leave the task\'s scoped token on disk (#5655)');
+    assert.strictEqual(relay.getCurrentTask(), null, 'the task is no longer ours after shutdown cleanup');
+    const sends = relay.__tmuxSends();
+    assert.ok(sends.some(c => /C-c/.test(c)),
+      'shutdown must interrupt the live agent, not just clear timers — a detached pane does not die with the relay');
+    assert.ok(!sends.some(c => /claude/.test(c)),
+      'a process on its way out must NOT relaunch the CLI — that would orphan a fresh agent in a surviving pane');
+  } finally { teardown(relay); }
+});
+
+test('#5655 cleanup() with no task in flight stays timers-only', () => {
+  const relay = loadRelay({ backend: 'claude' });
+  try {
+    relay.cleanup();
+    assert.strictEqual(relay.__tmuxSends().length, 0,
+      'an idle shutdown has no agent to stop and must not touch the pane');
+  } finally { teardown(relay); }
+});
+
+// The subprocess property test: a REAL relay process, a REAL signal, and the
+// assertion the issue asks for — the file is gone once the process is. The
+// child stubs 'ws' exactly as loadRelay does (TEST_MODE never dials a hub and
+// bin/ has no node_modules in CI) and runs headless so no tmux is needed.
+const SHUTDOWN_CHILD_DRIVER = `
+  'use strict';
+  const fs = require('fs');
+  const Module = require('module');
+  const origLoad = Module._load;
+  Module._load = function (request, parent, isMain) {
+    if (request === 'ws') return class { on() {} send() {} close() {} ping() {} };
+    return origLoad.apply(this, arguments);
+  };
+  Module._extensions['.sh'] = Module._extensions['.js'];
+  const relay = require(process.env.RELAY_UNDER_TEST);
+  Module._load = origLoad;
+  relay.injectGhToken('scoped-token-5655');
+  relay.setCurrentTask({ task_id: 'ct-kubestellar/hive-5655', task_gen: 1 });
+  if (!fs.existsSync(process.env.HIVE_GH_TOKEN_CACHE)) process.exit(3);
+  console.log('TOKEN_ON_DISK');
+  // Keep the event loop alive: the process must end via the signal handler
+  // (or the simulated crash), never by simply running out of work.
+  setInterval(() => {}, 1000);
+  if (process.env.RELAY_EXIT_VIA === 'crash') {
+    setImmediate(() => { throw new Error('simulated relay crash'); });
+  } else {
+    process.kill(process.pid, process.env.RELAY_EXIT_VIA);
+  }
+`;
+
+function runShutdownChild(exitVia) {
+  const scratchRoot = path.join(__dirname, '..', '.relay-test-tmp');
+  fs.mkdirSync(scratchRoot, { recursive: true });
+  const tmpDir = fs.mkdtempSync(path.join(scratchRoot, 'relay-shutdown-'));
+  const tokenPath = path.join(tmpDir, 'gh-token.cache');
+  const res = spawnSync(process.execPath, ['-e', SHUTDOWN_CHILD_DRIVER], {
+    env: {
+      ...process.env,
+      HIVE_RELAY_TEST_MODE: '1',
+      CONTRIBUTOR_MODE: 'headless',
+      AGENT_BACKEND: 'claude',
+      HIVE_REGISTRATION_TOKEN: 'test-token',
+      RELAY_UNDER_TEST: RELAY_PATH,
+      RELAY_EXIT_VIA: exitVia,
+      HIVE_GH_TOKEN_CACHE: tokenPath,
+      HIVE_TASK_FILE: path.join(tmpDir, 'contributor-task.json'),
+      HIVE_HEADLESS_STATUS_FILE: path.join(tmpDir, 'headless-status.json'),
+    },
+    encoding: 'utf8',
+    // A child that never exits is this test's own failure mode; cap it so the
+    // suite fails loudly instead of hanging CI.
+    timeout: 30000,
+  });
+  const cleanupTmp = () => { try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {} };
+  return { res, tokenPath, cleanupTmp };
+}
+
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  test(`#5655 ${sig} on a relay with a task in flight leaves no file at GH_TOKEN_CACHE`, () => {
+    const { res, tokenPath, cleanupTmp } = runShutdownChild(sig);
+    try {
+      assert.ok(res.stdout.includes('TOKEN_ON_DISK'),
+        `the child never staged the token (stdout: ${res.stdout} stderr: ${res.stderr})`);
+      assert.strictEqual(res.status, 0,
+        `the ${sig} handler must still exit 0 (status: ${res.status}, stderr: ${res.stderr})`);
+      assert.ok(!fs.existsSync(tokenPath),
+        `${sig} shutdown left the scoped token on disk — the exact leak of #5655`);
+    } finally { cleanupTmp(); }
+  });
+}
+
+test('#5655 a crash exit (uncaught exception) still takes the scoped token with it', () => {
+  const { res, tokenPath, cleanupTmp } = runShutdownChild('crash');
+  try {
+    assert.ok(res.stdout.includes('TOKEN_ON_DISK'),
+      `the child never staged the token (stdout: ${res.stdout} stderr: ${res.stderr})`);
+    assert.notStrictEqual(res.status, 0, 'the simulated crash must be a real crash, not a clean exit');
+    assert.ok(!fs.existsSync(tokenPath),
+      'the process.on(exit) backstop must unlink the token even on a crash exit');
+  } finally { cleanupTmp(); }
+});
+
+// ---------------------------------------------------------------------------
 
 let failed = 0;
 // RELAY_TEST_ONLY=<substring> runs a single test, for debugging in isolation.
