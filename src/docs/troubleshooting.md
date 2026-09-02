@@ -70,6 +70,23 @@ On GitHub Enterprise, a 404 from the install link usually means the hive is poin
 
 ## Agents are stuck, paused, or need CLI login
 
+### Start on the agent card, not in tmux
+
+Since v4.1.0 ([#5594](https://github.com/kubestellar/hive/issues/5594)) the dashboard agent card states **every** reason an agent will not run at once, so read it before reaching for `tmux`. Under the card state (and on the ops-center detail panel) is a blockers line with three segments:
+
+- **`session`** — `up` (live tmux session), `down` (no live session; `↻ restart` asks the supervisor to respawn it), or `disabled` (disabled in config; the governor never starts it — enable it with ⚙️).
+- **`scheduling`** — the governor cadence for the current mode when the agent is kickable, or **every** live reason it is not, joined together (for example `paused + off in surge mode`). All of the listed reasons must be cleared; fixing one is not enough. On-demand agents show `on demand`.
+- **`next kick`** — an ETA (`in 12m`, `due now`) rather than a wall-clock time, or `never` while any scheduling blocker exists.
+
+Two more card behaviors remove the old one-reason-per-click treasure hunt:
+
+- **Zero cadence is named.** An enabled, governor-kickable agent with no cadence in *any* mode that has never been kicked shows a `⏱ never scheduled — set cadences` chip; clicking it opens the agent's Cadences tab. This is the per-agent form of the fleet-level "never kicked" banner — both are driven by the same predicate, so they cannot name different agents.
+- **A paused agent's primary action is always its pause toggle.** With a live session the button is `▶ resume`, and its tooltip names anything resuming will *not* clear. If the session is also down, the one button reads `▶ start & resume` and clears both flags in a single click — client-side chaining of the two existing endpoints (`POST /api/resume/{agent}` first, so the fresh session is never born paused, then `POST /api/restart/{agent}`). No new API surface; scripts can chain the same two calls. A paused agent never offers a bare Start.
+
+If the card says the agent should be running (session up, scheduling shows a cadence, next kick has an ETA) and it still misbehaves, *then* drop into the session as described below.
+
+### Inspecting the session
+
 Agents run in tmux sessions named `hive-<agent>` managed by Hive's agent manager. There is no v1 `AGENT_READY_MARKER` or `bin/supervisor.sh` loop: the manager drives each agent by delivering a *kick* (its next work prompt) directly into the session and, once running, auto-dismisses the CLI's own startup consent screens.
 
 The login detector (`scanForLoginRequired` in `src/cmd/hive/main.go`) scans recent tmux pane output for the regexes in `governor.sensing.login_patterns`. On a match it logs `login required detected`, pauses the agent, and sends a high-priority notification telling you to attach to `hive-<agent>` and run that backend's login command.
@@ -87,7 +104,7 @@ Detach from tmux with `Ctrl+B`, then `D` — the session keeps running.
 To recover a paused agent:
 
 1. Complete the CLI login for that backend outside the pause. Attach to the session (`tmux attach -t hive-<agent>`) and run the login command shown in the notification: `claude login`, `copilot auth login`, `gemini auth login`, or the backend-specific command. The picker expects an interactive OAuth/browser flow, so complete it from a terminal you control rather than leaving the unattended session blocked on it.
-2. Resume the agent from the dashboard, or `POST /api/resume/{agent}`.
+2. Resume the agent from the dashboard, or `POST /api/resume/{agent}`. If the pause outlived its session, the card offers a single `▶ start & resume` instead — see [Start on the agent card, not in tmux](#start-on-the-agent-card-not-in-tmux).
 
 If an agent returns to "needs login" immediately after resuming, the credentials themselves are the problem (expired token, revoked API key, or an account-level sign-out). Re-authenticate that backend's CLI as the agent user, then resume again so the fresh session is picked up.
 
