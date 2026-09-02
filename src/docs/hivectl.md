@@ -6,19 +6,51 @@ operates it.
 
 ## Quick start
 
+### Getting the binary
+
+On a host installed with `bin/hive-podman-setup.sh` there is nothing to do:
+the installer extracts `hivectl` from the Hive image onto the host —
+`~/.local/bin/hivectl` rootless, `/usr/local/bin/hivectl` rootful — and
+refreshes it on every re-run, so it always matches the running hive. This is
+the supported route on image-based hosts (Fedora Silverblue/Bluefin, RHEL
+image mode), which have no Go toolchain and a read-only `/usr` (#5646).
+
+The same extraction works by hand against any pulled Hive image. The image
+carries the binary as cargo at `/usr/local/share/hive/hivectl` (deliberately
+off the container's PATH — it is a client of the dashboard API, not part of
+the runtime; run it on the host, never inside the container):
+
+```bash
+podman create --name hivectl-extract ghcr.io/kubestellar/hive:stable
+podman cp hivectl-extract:/usr/local/share/hive/hivectl ~/.local/bin/hivectl
+podman rm hivectl-extract
+```
+
+Contributors working from a checkout build it from source instead:
+
 ```bash
 go build -o bin/hivectl ./cmd/hivectl
+```
 
+### First commands
+
+```bash
 # Point at a server (default: http://127.0.0.1:3001) and provide the token
 # via an environment variable, never as a flag value. The value must match the
 # server's dashboard token — see "Generating and rotating HIVE_DASHBOARD_TOKEN"
 # in env-vars.md (generate with: openssl rand -hex 32).
 export HIVE_DASHBOARD_TOKEN="..."
-bin/hivectl system status
+hivectl system status
+
+# On a Podman-standalone host, talk to the gateway's published port — the
+# installer prints the exact URL at the end of its run:
+hivectl --server http://127.0.0.1:3001 system status
 
 # Enroll a repository in clusterless, zero-secret Hive lite mode.
-bin/hivectl enroll kubestellar/hive
+hivectl enroll kubestellar/hive
 ```
+
+(From a source checkout the binary is `bin/hivectl` instead.)
 
 ## Running against a local Hive
 
