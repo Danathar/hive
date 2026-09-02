@@ -31,16 +31,19 @@ func setupContributeEnv(t *testing.T) {
 func redirectContributeWSDisk(t *testing.T, dir string) {
 	t.Helper()
 	oldActivity, oldCompleted, oldFailed, oldNoPR := activityFilePath, completedTasksFile, failedTasksFile, noPRStreaksFile
+	oldLeases := taskLeasesFile
 	oldAsyncActivitySave := asyncActivitySave
 	oldActivityPersistenceEnabled := activityPersistenceEnabled
 	activityFilePath = filepath.Join(dir, "activity.json")
 	completedTasksFile = filepath.Join(dir, "completed-tasks.json")
 	failedTasksFile = filepath.Join(dir, "failed-tasks.json")
 	noPRStreaksFile = filepath.Join(dir, "no-pr-streaks.json")
+	taskLeasesFile = filepath.Join(dir, "task-leases.json")
 	asyncActivitySave = false
 	activityPersistenceEnabled = false
 	t.Cleanup(func() {
 		activityFilePath, completedTasksFile, failedTasksFile, noPRStreaksFile = oldActivity, oldCompleted, oldFailed, oldNoPR
+		taskLeasesFile = oldLeases
 		asyncActivitySave = oldAsyncActivitySave
 		activityPersistenceEnabled = oldActivityPersistenceEnabled
 	})
