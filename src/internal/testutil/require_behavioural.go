@@ -78,7 +78,11 @@ func RequireBehavioural() bool {
 //
 // Like t.Skip and t.Fatal, SkipUnlessRequired does not return: it ends the
 // calling goroutine's test. It must be called from the test goroutine.
-func SkipUnlessRequired(t *testing.T, reason string) {
+//
+// t is a testing.TB — matching Eventually above — so the guard is callable
+// from benchmarks and testable against a double; test callers pass their
+// *testing.T unchanged.
+func SkipUnlessRequired(t testing.TB, reason string) {
 	t.Helper()
 	if RequireBehavioural() {
 		t.Fatalf(failureTemplate, reason, RequireBehaviouralEnv)
@@ -88,7 +92,7 @@ func SkipUnlessRequired(t *testing.T, reason string) {
 
 // SkipfUnlessRequired is SkipUnlessRequired with printf-style formatting, for
 // the common case of embedding the underlying error in the reason.
-func SkipfUnlessRequired(t *testing.T, format string, args ...any) {
+func SkipfUnlessRequired(t testing.TB, format string, args ...any) {
 	t.Helper()
 	if RequireBehavioural() {
 		t.Fatalf(failureTemplate, fmt.Sprintf(format, args...), RequireBehaviouralEnv)
