@@ -24,6 +24,7 @@ type selfSweepFixture struct {
 	firstGetStatus   int    // non-zero: first PR fetch returns this HTTP status
 	state            string // PR state; default "open"
 	draft            bool
+	labels           []string
 	author           string // default testHiveAppBotLogin
 	headSHA          *string
 	mergeableState   string // default "clean"
@@ -73,10 +74,15 @@ func newSelfSweepGuardAPI(t *testing.T, fx selfSweepFixture) *httptest.Server {
 			if fetches > 1 {
 				head = *fx.recheckHeadSHA
 			}
+			var prLabels []map[string]string
+			for _, name := range fx.labels {
+				prLabels = append(prLabels, map[string]string{"name": name})
+			}
 			json.NewEncoder(w).Encode(map[string]any{
 				"number":          7,
 				"state":           fx.state,
 				"draft":           fx.draft,
+				"labels":          prLabels,
 				"mergeable_state": fx.mergeableState,
 				"mergeable":       fx.mergeableState == "clean",
 				"user":            map[string]string{"login": fx.author},
@@ -118,6 +124,13 @@ func TestTrySweepSelfAuthoredPRGuardBranches(t *testing.T) {
 		{name: "closed PR is never merged", fx: selfSweepFixture{state: "closed"}, wantReason: "closed"},
 		{name: "draft PR is never merged", fx: selfSweepFixture{draft: true}, wantReason: "draft"},
 		{name: "authorship changed between list and eval", fx: selfSweepFixture{author: "mallory"}, wantReason: "not-app-authored"},
+		// #5589: a hold label — including one the hold guard re-applied
+		// because the branch moved while hold-gated — must stop the App from
+		// squashing its own PR on green. This path lists PRs independently of
+		// the enumeration hold gate, so it needs its own check.
+		{name: "hold label blocks self-merge", fx: selfSweepFixture{labels: []string{"hold"}}, wantReason: "held"},
+		{name: "hold-review label blocks self-merge", fx: selfSweepFixture{labels: []string{"hold/review"}}, wantReason: "held"},
+		{name: "do-not-merge label blocks self-merge", fx: selfSweepFixture{labels: []string{"do-not-merge"}}, wantReason: "exempt-label"},
 		{name: "missing head SHA blocks merge", fx: selfSweepFixture{headSHA: gh.Ptr("")}, wantReason: "missing-head-sha"},
 		{name: "not mergeable blocks merge", fx: selfSweepFixture{mergeableState: "dirty"}, wantReason: "not-mergeable"},
 		{name: "commitGreen API error propagates", fx: selfSweepFixture{statusHTTPCode: http.StatusInternalServerError}, wantReason: "status-check", wantErr: true},

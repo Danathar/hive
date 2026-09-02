@@ -430,6 +430,13 @@ type HoldItem struct {
 	Repo   string `json:"repo"`
 	Title  string `json:"title"`
 	Type   string `json:"type"`
+	// HeadSHA and Author are populated for Type=="pr" holds (both come free
+	// with the PR list response — no extra API call). The hold guard (#5589)
+	// snapshots HeadSHA while a PR sits hold-gated so a branch that moves
+	// before the hold lifts can be forced back through review. Always empty
+	// for Type=="issue".
+	HeadSHA string `json:"head_sha,omitempty"`
+	Author  string `json:"author,omitempty"`
 }
 
 type IssueCluster struct {
@@ -721,11 +728,17 @@ func (c *Client) fetchPRs(ctx context.Context, repo string) (actionable []PullRe
 		labels := extractPRLabels(pr.Labels)
 
 		if isHeld(labels) {
+			heldHeadSHA := ""
+			if pr.GetHead() != nil {
+				heldHeadSHA = pr.GetHead().GetSHA()
+			}
 			held = append(held, HoldItem{
-				Number: pr.GetNumber(),
-				Repo:   repo,
-				Title:  pr.GetTitle(),
-				Type:   "pr",
+				Number:  pr.GetNumber(),
+				Repo:    repo,
+				Title:   pr.GetTitle(),
+				Type:    "pr",
+				HeadSHA: heldHeadSHA,
+				Author:  safeGetLogin(pr.GetUser()),
 			})
 			continue
 		}

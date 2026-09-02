@@ -60,6 +60,7 @@ import (
 	"github.com/kubestellar/hive/pkg/forge"
 	"github.com/kubestellar/hive/pkg/github"
 	"github.com/kubestellar/hive/pkg/governor"
+	"github.com/kubestellar/hive/pkg/holdguard"
 	"github.com/kubestellar/hive/pkg/hooks"
 	"github.com/kubestellar/hive/pkg/hub"
 	"github.com/kubestellar/hive/pkg/intent"
@@ -5988,7 +5989,14 @@ func runEvalCycle(
 	intentVerdicts := writeIntentVerdicts(ctx, cfg, ghClient, actionable, beadStores, logger)
 	refreshReviewVerdicts(cfg, logger)
 	requiredCheckSet, _ := cfg.AutoMerge.RequiredCheckSet()
-	writeMergeEligible(actionable, actionable.Hold, cfg.Project.Org, escalatedPRs, cfg.Intent.Enforce, intentVerdicts, cfg.Review.RequireApproval, requiredCheckSet, logger)
+
+	// Hold guard (#5589): snapshot hold-gated PR heads, and when a hold lifts
+	// on a branch that moved, block the merge lanes and force a fresh review.
+	// Runs before writeMergeEligible so drifted PRs are excluded from the very
+	// tick their hold lifted — no window for the sweep to race the re-hold.
+	holdDriftPRs := enforceHoldGuard(ctx, cfg, ghClient, governorForge(cfg, ghClient, logger), actionable, logger)
+
+	writeMergeEligible(actionable, actionable.Hold, cfg.Project.Org, escalatedPRs, cfg.Intent.Enforce, intentVerdicts, cfg.Review.RequireApproval, requiredCheckSet, holdDriftPRs, logger)
 
 	// Stuck-PR reaper (backstop): re-dispatch a fix for any hive-authored PR
 	// that is red on a required check AND stale (its red head SHA unchanged past
@@ -7491,6 +7499,168 @@ func getEscalationStore() *escalation.Store {
 	return escalationStore
 }
 
+var (
+	holdGuardStoreOnce sync.Once
+	holdGuardStore     *holdguard.Store
+)
+
+// holdGuardLedgerPath sits beside the fix-loop ledger on the PVC: same
+// lifetime, same operator expectations, same backup story.
+const holdGuardLedgerPath = "/data/metrics/hold-guard.json"
+
+// getHoldGuardStore lazily loads the hold-gate snapshot ledger (#5589) — a
+// sidecar to (never a tenant of) the escalation store, so the formally
+// verified escalation Entry lifecycle is untouched by this concern.
+func getHoldGuardStore() *holdguard.Store {
+	holdGuardStoreOnce.Do(func() {
+		holdGuardStore = holdguard.Load(holdGuardLedgerPath)
+	})
+	return holdGuardStore
+}
+
+// enforceHoldGuard closes #5589: a hold-gated PR that accumulates commits —
+// from ANY author, but especially from other agents via contaminated worktree
+// bases — must not sail into the merge lanes when the hold lifts, because the
+// diff the human approved under the hold is no longer the diff that merges.
+//
+// Per eval tick it (1) snapshots the head SHA + commit/author sets of every
+// newly-held PR (first-held snapshot wins), (2) on lift compares the current
+// head against the snapshot — an unchanged head pins the entire history, so
+// the entry simply clears — and (3) on drift posts a one-time evidence
+// comment naming the unreviewed commits and authors (plain text, no
+// @-mentions), re-applies the hold label so every merge lane re-gates, and
+// re-arms the snapshot at the drifted head so the NEXT human lift is the
+// fresh approval. Side-effect ordering fails safe: the comment must land
+// before the label (a bare re-hold with no explanation is exactly the silent
+// state this guard exists to prevent), and the snapshot only re-arms after
+// the label sticks (re-arming first would make the next tick read the drifted
+// head as clean and merge it).
+//
+// Returns the drifted PR keys ("repo/number", matching writeMergeEligible's
+// hold-set keying) so the SAME tick's merge-eligible artifact already
+// excludes them — no one-tick window between detection and the re-applied
+// label reaching enumeration.
+func enforceHoldGuard(
+	ctx context.Context,
+	cfg *config.Config,
+	ghClient *github.Client,
+	writer forge.IssueWriter,
+	actionable *github.ActionableResult,
+	logger *slog.Logger,
+) map[string]bool {
+	reReview := map[string]bool{}
+	if actionable == nil {
+		return reReview
+	}
+	store := getHoldGuardStore()
+	org := ""
+	if cfg != nil {
+		org = cfg.Project.Org
+	}
+
+	fetchCommits := func(repo string, number int) []holdguard.Commit {
+		if ghClient == nil {
+			return nil
+		}
+		got, err := ghClient.ListPRCommits(ctx, repo, number)
+		if err != nil {
+			// The head SHA alone still pins the tree; a missing commit list
+			// only degrades the drift comment's evidence, never the gate.
+			logger.Warn("hold guard: commit list unavailable", "repo", repo, "pr", number, "error", err)
+			return nil
+		}
+		commits := make([]holdguard.Commit, 0, len(got))
+		for _, c := range got {
+			commits = append(commits, holdguard.Commit{SHA: c.SHA, Author: c.Author, Title: c.Title})
+		}
+		return commits
+	}
+
+	// (1) Snapshot newly-held PRs; keep long-standing holds out of retention's
+	// reach. The FIRST held observation is the baseline — later pushes while
+	// still held must show up as drift at lift time, not become the baseline.
+	for _, h := range actionable.Hold.Items {
+		if h.Type != "pr" {
+			continue
+		}
+		repo := fullRepoName(h.Repo, org)
+		if _, ok := store.Recorded(repo, h.Number); ok {
+			store.Touch(repo, h.Number)
+			continue
+		}
+		if h.HeadSHA == "" {
+			// Enumeration carried no head for this hold (sparse response);
+			// nothing to pin yet — retry next tick.
+			continue
+		}
+		if store.Snapshot(repo, h.Number, h.HeadSHA, fetchCommits(h.Repo, h.Number)) {
+			logger.Info("hold guard: snapshot recorded for hold-gated PR",
+				"repo", repo, "pr", h.Number, "head_sha", h.HeadSHA)
+		}
+	}
+
+	// (2) Check every open PR that WAS hold-gated (has a snapshot) and no
+	// longer is (it enumerated as actionable): the hold lifted this window.
+	for _, pr := range actionable.PRs.Items {
+		repo := fullRepoName(pr.Repo, org)
+		rec, ok := store.Recorded(repo, pr.Number)
+		if !ok {
+			continue
+		}
+		if pr.HeadSHA != "" && pr.HeadSHA == rec.HeadSHA {
+			// Head unchanged ⇒ identical history ⇒ the tree the human
+			// approved under the hold is the tree that merges. Clear and go.
+			store.Clear(repo, pr.Number)
+			logger.Info("hold guard: hold lifted with head unchanged; merge lanes reopened",
+				"repo", repo, "pr", pr.Number, "head_sha", pr.HeadSHA)
+			continue
+		}
+
+		// Drift: keep it out of this tick's merge-eligible artifact
+		// unconditionally, keyed the way writeMergeEligible keys its hold set.
+		key := fmt.Sprintf("%s/%d", pr.Repo, pr.Number)
+		reReview[key] = true
+
+		current := fetchCommits(pr.Repo, pr.Number)
+		drift := holdguard.Diff(rec, pr.HeadSHA, current)
+		logger.Warn("hold guard: branch moved while hold-gated — blocking auto-merge, requiring fresh review",
+			"repo", repo, "pr", pr.Number,
+			"recorded_head", rec.HeadSHA, "current_head", pr.HeadSHA,
+			"new_commits", len(drift.NewCommits), "new_authors", strings.Join(drift.NewAuthors, ","))
+
+		if writer == nil {
+			// No forge writer (booted without credentials): the reReview
+			// exclusion above still holds every tick; side effects wait.
+			continue
+		}
+		if !rec.Commented {
+			if err := writer.CreateIssueComment(ctx, pr.Repo, pr.Number, holdguard.CommentBody(drift)); err != nil {
+				// Retry the whole episode next tick rather than re-holding
+				// with no explanation — the evidence reaching a human is the
+				// point, and the exclusion above already blocks the merge.
+				logger.Warn("hold guard: drift comment failed; will retry next pass",
+					"repo", repo, "pr", pr.Number, "error", err)
+				continue
+			}
+			store.MarkCommented(repo, pr.Number)
+		}
+		if err := writer.AddLabels(ctx, pr.Repo, pr.Number, []string{holdguard.ReHoldLabel}); err != nil {
+			// Commented but not re-held: the snapshot stays on the OLD head,
+			// so next tick re-detects the drift (comment deduped) and retries
+			// the label. Never re-arm before the label sticks.
+			logger.Warn("hold guard: re-applying hold label failed; will retry next pass",
+				"repo", repo, "pr", pr.Number, "error", err)
+			continue
+		}
+		store.ReArm(repo, pr.Number, pr.HeadSHA, current)
+	}
+
+	// (3) Age out entries with no clearing event (PR merged or closed while
+	// held). See holdguard.Retention for why absence-pruning would be unsafe.
+	store.Prune(holdguard.Retention)
+	return reReview
+}
+
 // hivePRObservations projects the enumerated hive-authored PRs into escalation
 // observations (repo fully-qualified, Red == a required check failed). Shared by
 // recordRedStaleness and the reaper so both classify PRs identically. A PR is
@@ -8468,10 +8638,18 @@ func anyRequiredCheckFailing(failing []string, required map[string]bool) bool {
 	return false
 }
 
-func writeMergeEligible(actionable *github.ActionableResult, hold github.HoldResult, org string, escalatedPRs map[string]bool, enforceIntent bool, intentVerdicts map[string]intent.Verdict, requireReviewApproval bool, requiredChecks map[string]bool, logger *slog.Logger) {
+func writeMergeEligible(actionable *github.ActionableResult, hold github.HoldResult, org string, escalatedPRs map[string]bool, enforceIntent bool, intentVerdicts map[string]intent.Verdict, requireReviewApproval bool, requiredChecks map[string]bool, holdDriftPRs map[string]bool, logger *slog.Logger) {
+	// holdDriftPRs ("repo/number", same keying as holdSet) are PRs whose hold
+	// just lifted on a branch that MOVED while hold-gated (#5589). They are
+	// treated exactly like held PRs — invisible to both the eligible and the
+	// ci-failing buckets — because neither the merge sweep nor a fix agent
+	// should touch a branch whose unreviewed drift is awaiting a human.
 	holdSet := make(map[string]bool)
 	for _, h := range hold.Items {
 		key := fmt.Sprintf("%s/%d", h.Repo, h.Number)
+		holdSet[key] = true
+	}
+	for key := range holdDriftPRs {
 		holdSet[key] = true
 	}
 
