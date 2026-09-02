@@ -2928,6 +2928,16 @@ func (s *HubServer) consumePendingGitHubAppConfig(hiveID string) *HeartbeatGitHu
 	return cfg
 }
 
+// registryResponse is the /api/registry wire shape: the persisted Registry plus
+// read-time derivations. The embedding is deliberate — it flattens, so every
+// existing field keeps its exact place and an old client sees no change.
+type registryResponse struct {
+	Registry
+	// RepoOverlaps lists work items claimed by more than one spoke (#5691).
+	// Omitted entirely when the fleet is clean, so its presence is the signal.
+	RepoOverlaps []RepoOverlap `json:"repoOverlaps,omitempty"`
+}
+
 func (s *HubServer) handleRegistry(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	offlineEvents := s.markStaleHives()
@@ -2950,7 +2960,15 @@ func (s *HubServer) handleRegistry(w http.ResponseWriter, r *http.Request) {
 		}
 		filtered.Hives = append(filtered.Hives, h)
 	}
-	data, _ := json.Marshal(filtered)
+	// #5691: repo-ownership overlaps, derived from the repo lists already in the
+	// response. Computed over the FILTERED set so the answer is consistent with
+	// the hives the caller can actually see — naming a conflict with a hive that
+	// is not in the payload would be unreadable — and computed at read time
+	// rather than stored, which is why it rides a response wrapper instead of
+	// Registry itself: Registry is what saveRegistryNow persists, and derived
+	// state has no business on disk.
+	resp := registryResponse{Registry: filtered, RepoOverlaps: computeRepoOverlaps(filtered.Hives)}
+	data, _ := json.Marshal(resp)
 	s.mu.RUnlock()
 
 	w.Header().Set("Content-Type", "application/json")
