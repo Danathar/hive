@@ -102,8 +102,10 @@ byte amnestiesThisSha  = 0;  /* amnesties granted while current red SHA unchange
 byte adjudications = 0;      /* reviewer adjudication passes (saturates at 2) */
 #endif
 #ifdef MON_PENDING
-bool wipedPendingWithHistory = false; /* witness: sweep deleted a non-empty entry
-                                       * on a PENDING (not green) observation */
+bool wipedPendingWithHistory = false; /* violation flag: sweep deleted a
+                                       * non-empty entry on a PENDING (not
+                                       * green) observation (must stay false
+                                       * post-G2 fix, #5617) */
 #endif
 #ifdef WATCHER
 bool mergeReqPending           = false; /* a stale merge request sits in the watcher dir */
@@ -208,9 +210,10 @@ inline try_reengage(obsSha, ok) {
 /* ---------------- processes ---------------- */
 
 /* One Store.Sweep pass over this PR's observation, as driven by
- * runEscalationSweep (main.go:7631). Red := (CIStatus == "failure"), so a
- * PENDING observation takes the !o.Red branch and DELETES the entry — modeled
- * faithfully; see witness w_pending. The escalatedPRs view consumed by the
+ * runEscalationSweep (main.go:7631). Red := (CIStatus == "failure"),
+ * Pending := (CIStatus == "pending"). Since the #5617 G2 fix a PENDING
+ * observation is a NO-OP: only green clears the entry, only red counts
+ * (witness w_pending now holds). The escalatedPRs view consumed by the
  * reaper and by ci-failing.json is refreshed at the end of the pass, matching
  * the same-tick ordering sweep -> writeMergeEligible -> reap in main.go. */
 active proctype Sweeper() {
@@ -220,7 +223,13 @@ active proctype Sweeper() {
 		amnestyThisPass = false;
 #endif
 		if
-		:: ci != CI_RED ->   /* green OR pending: Go's !o.Red -> delete entry */
+		:: ci == CI_PENDING ->  /* G2 fix (#5617): pending is a no-op
+			 * observation — the entry (and its distinct-SHA history)
+			 * survives; only green clears, only red counts. The pre-fix
+			 * code deleted the entry here (witness w_pending); the
+			 * MON_PENDING flag can no longer be set on this path. */
+			skip
+		:: ci == CI_GREEN ->  /* green: Go's green branch -> delete entry */
 #ifdef MON_PENDING
 			if
 			:: entryExists && ci == CI_PENDING && attempts > 0 ->
@@ -487,9 +496,10 @@ ltl w_onepass { [] (adjudications <= 1) }
 #endif
 
 #ifdef MON_PENDING
-/* Witness (expected to "fail" = counterexample found): Store.Sweep treats a
- * PENDING observation as !Red and deletes the entry, wiping accumulated
- * distinct-SHA attempt history that never converged green. */
+/* Ledger history survives until green: a PENDING observation never deletes the
+ * entry. HOLDS since the #5617 G2 fix (pending is a no-op observation — only
+ * green clears, only red counts); the pre-fix Store.Sweep treated pending as
+ * !Red and wiped accumulated distinct-SHA attempt history — gap G2. */
 ltl w_pending { [] (!wipedPendingWithHistory) }
 #endif
 

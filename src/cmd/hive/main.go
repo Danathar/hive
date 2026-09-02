@@ -7698,6 +7698,9 @@ func hivePRObservations(cfg *config.Config, actionable *github.ActionableResult)
 			Number:  pr.Number,
 			HeadSHA: pr.HeadSHA,
 			Red:     pr.HasFailingRequiredCheck(),
+			// Pending marks an unresolved CI window as a no-op observation so
+			// it does not clear the staleness clock (#5617, gap G2).
+			Pending: pr.CIStatus == "pending",
 			Excerpt: pr.CIFailureExcerpt,
 			Labels:  pr.Labels,
 		})
@@ -7845,6 +7848,11 @@ func runEscalationSweep(
 			Number:  pr.Number,
 			HeadSHA: pr.HeadSHA,
 			Red:     pr.CIStatus == "failure",
+			// Pending marks an unresolved CI window as a no-op observation:
+			// without it every fresh push's pending window wiped the
+			// distinct-SHA attempt ledger, making the escalation breaker
+			// probabilistic (#5617, gap G2 — Spin witness w_pending_wipe).
+			Pending: pr.CIStatus == "pending",
 			Excerpt: pr.CIFailureExcerpt,
 			// Labels let Sweep reconcile reviewer-lane verdicts (label-only
 			// edits: needs-human removed, reviewer-passed added) back into the

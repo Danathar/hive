@@ -89,6 +89,31 @@ func TestHivePRObservationsRedRequiresFailingCheck(t *testing.T) {
 	}
 }
 
+// Pending must be threaded through so a CI-in-flight window is a no-op
+// observation for the escalation ledger (#5617, gap G2) — neither red (no
+// attempt counted) nor green (no history/staleness wiped).
+func TestHivePRObservationsMarksPendingWindows(t *testing.T) {
+	cfg := observationsTestConfig()
+	actionable := &github.ActionableResult{PRs: github.PRResult{Items: []github.PullRequest{
+		{Repo: "hive", Number: 1, Author: "hive-bee", HeadSHA: "aaa", CIStatus: "pending"},
+		{Repo: "hive", Number: 2, Author: "hive-bee", HeadSHA: "bbb", CIStatus: "success"},
+		{Repo: "hive", Number: 3, Author: "hive-bee", HeadSHA: "ccc",
+			CIStatus: "failure", FailingChecks: []string{"build"}},
+	}}}
+
+	obs := hivePRObservations(cfg, actionable)
+
+	if len(obs) != 3 {
+		t.Fatalf("got %d observations, want 3", len(obs))
+	}
+	if !obs[0].Pending || obs[0].Red {
+		t.Errorf("CI-pending PR must project as Pending, not Red: %+v", obs[0])
+	}
+	if obs[1].Pending || obs[2].Pending {
+		t.Error("settled (green/red) PRs must not project as Pending")
+	}
+}
+
 // A nil enumeration yields nil — the eval cycle calls this before the first
 // successful GitHub pass.
 func TestHivePRObservationsNilActionable(t *testing.T) {

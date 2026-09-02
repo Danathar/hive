@@ -84,7 +84,8 @@ run p4a_p6_safety        pass ""                       "$SAFETY" ""
 run p6_watcher_safety    pass "-DWATCHER"              "$SAFETY" ""
 run w_onepass_acmm6      pass "-DMON_ADJ -DACMM6"      ""        "-a -N w_onepass"
 
-# --- properties closed by the #5511 G1/G3/G4 fixes (previously pinned fails) -
+# --- properties closed by gap fixes (previously pinned fails) ---------------
+# #5511 closed G1/G3/G4; the #5617 follow-up closed G2.
 # G1: Sweep's reviewer-verdict reconciliation (the former -DPATCH_REVIEWER
 # hypothetical, now the shipped default) closes the P4b/P5 orphan path.
 run p4b_handoff          pass ""                       "$FAIR"   "-a -f -N p4_handoff"
@@ -93,10 +94,8 @@ run p5_termination       pass ""                       "$FAIR"   "-a -f -N p5_te
 run w_onepass_acmm5      pass "-DMON_ADJ"              ""        "-a -N w_onepass"
 # G3: TryReEngage's escalated guard — no budget burned on needs-human PRs.
 run w_watcher_reengage   pass "-DWATCHER"              ""        "-a -N w_watcher"
-
-# --- known counterexamples (documented gaps/witnesses; see README.md) ------
-# G2 (pending observation wipes the attempt ledger) is still open.
-run w_pending_wipe       fail "-DMON_PENDING"          ""        "-a -N w_pending"
+# G2 (#5617): pending observations are no-ops — the ledger survives CI windows.
+run w_pending_wipe       pass "-DMON_PENDING"          ""        "-a -N w_pending"
 
 echo
 if [ "$failures" -ne 0 ]; then
