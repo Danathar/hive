@@ -169,6 +169,50 @@ hivectl observe timeline
 hivectl observe trends --range week        # or --hours 12 (1-720); not both
 ```
 
+### login / logout — hold a per-user session from the terminal
+
+```bash
+hivectl login                                    # against the default --server
+hivectl --server https://hive.example.com login  # against a specific hive
+hivectl logout
+```
+
+A hive dashboard identifies callers two ways, and they are not
+interchangeable: self-hosted hives accept the shared bearer token
+(`HIVE_DASHBOARD_TOKEN`), while hub-hosted hives and spokes with an
+`authorized_users` allowlist accept only a **per-user session** — the
+`hive_session` cookie the GitHub device-flow login mints, resolved on every
+request against the live allowlist. `hivectl login` runs that device flow from
+the terminal ([#5651](https://github.com/kubestellar/hive/issues/5651)): it
+prints a one-time code and `https://github.com/login/device`, waits for you to
+approve there, and caches the minted session so every subcommand — and
+`hivectl tui` — presents it automatically.
+
+Details worth knowing:
+
+- **The login proves identity only.** It requests no OAuth scope at all, and
+  your role (owner or viewer) is re-resolved by the hive on every request —
+  caching a session caches who you are, never what you may do.
+- **The cache** lives at `$XDG_CONFIG_HOME/hive/sessions.json` (default
+  `~/.config/hive/sessions.json`), owner-only (0600), keyed by dashboard URL
+  so one operator can hold sessions for several hives. The credential is never
+  printed.
+- **Precedence:** an explicitly exported `HIVE_DASHBOARD_COOKIE` always wins
+  over the cache. The token lane is independent — both credentials are
+  presented when both exist, and the hive honours whichever lane its
+  deployment implements.
+- **A hive runs one device flow at a time.** If another operator's login
+  starts while yours is pending, yours is replaced and `hivectl login` says
+  so — just run it again.
+- **On an allowlist spoke, an unauthorized GitHub account is refused** with
+  the server's own explanation naming the account; nothing is cached.
+- **Sessions expire** (30 days server-side). When a cached session stops
+  working, hivectl says to run `hivectl login` again instead of showing a bare
+  401.
+- `hivectl logout` ends the session server-side via the existing endpoint and
+  removes the cached credential; the cache is cleared even when the hive is
+  unreachable.
+
 ### tui — live terminal dashboard
 
 ```bash
