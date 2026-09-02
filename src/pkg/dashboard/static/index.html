@@ -1047,6 +1047,15 @@
     /* Last upstream/launch error — stacked below .agent-state, never under the
        working-indicator dot, so a retry in progress cannot hide it (#3604). */
     .agent-error { font-size: 0.72rem; color: var(--red); margin-top: 4px; text-align: right; word-break: break-word; }
+    .agent-blockers { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 2px 6px; font-size: 0.68rem; margin-top: 4px; color: var(--muted); }
+    .agent-blockers .ab-key { opacity: 0.65; margin-right: 3px; }
+    .agent-blockers .ab-seg { white-space: nowrap; }
+    .agent-blockers .ab-sep { opacity: 0.35; }
+    .agent-blockers .ab-ok { color: var(--green); }
+    .agent-blockers .ab-bad { color: var(--red); font-weight: 600; }
+    .oc-detail-blockers { margin-top: 6px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+    .never-scheduled-chip { font-size: 0.62rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; color: var(--yellow); background: none; border: 1px solid var(--yellow); border-radius: 3px; padding: 1px 5px; margin-left: 6px; cursor: pointer; vertical-align: middle; white-space: nowrap; }
+    .never-scheduled-chip:hover { background: color-mix(in srgb, var(--yellow) 18%, transparent); }
     .agent-name { font-size: 1.1rem; font-weight: 700; margin-bottom: 8px; }
     .agent-name .dot {
       display: inline-block; width: 8px; height: 8px;
@@ -4426,11 +4435,13 @@
           fastToggle.className = `btn-toggle ${isPaused ? 'paused' : isOff ? 'off' : 'running'}`;
           fastToggle.textContent = isPaused ? '▶ resume' : isOff ? '▶ start' : '⏸ pause';
           fastToggle.dataset.paused = String(isPaused);
-          fastToggle.title = isPaused ? 'Resume this agent — it will start running on its configured cadence' : isOff ? 'Start this agent — it is currently off in this governor mode' : 'Pause this agent — stops governor from kicking it until resumed';
+          fastToggle.title = agentToggleTitle(a, isPaused, isOff);
         }
-        // Same for the stat fields and indicators — they live outside the
-        // scroll region, so replacing them wholesale cannot cause the scroll
-        // jumps the fast path exists to prevent.
+        // Same for the blockers line, the stat fields and the indicators — they
+        // live outside the scroll region, so replacing them wholesale cannot
+        // cause the scroll jumps the fast path exists to prevent.
+        const blockersEl = detail.querySelector('.oc-detail-blockers');
+        if (blockersEl) blockersEl.innerHTML = agentBlockerLineHtml(a) + neverScheduledChipHtml(a, a.name);
         const fieldsEl = detail.querySelector('.oc-detail-fields');
         if (fieldsEl) fieldsEl.outerHTML = ocDetailFieldsHtml(a, isPaused, isOff, isOnDemand);
         const indEl = detail.querySelector('.oc-detail-indicators');
@@ -4530,7 +4541,7 @@
             ? '<button class="btn-toggle on-demand" title="On-demand agent — kicked manually, not by governor cadence">⚡ on demand</button>'
             : !dashboardRoleAtLeast(window._hiveRole || 'read', 'owner')
             ? ''
-            : `<button class="btn-toggle ${isPaused ? 'paused' : isOff ? 'off' : 'running'}" data-action="toggleAgent" data-agent="${esc(a.name)}" data-paused="${isPaused}" title="${isPaused ? 'Resume this agent — it will start running on its configured cadence' : isOff ? 'Start this agent — it is currently off in this governor mode' : 'Pause this agent — stops governor from kicking it until resumed'}">${isPaused ? '▶ resume' : isOff ? '▶ start' : '⏸ pause'}</button>`}
+            : `<button class="btn-toggle ${isPaused ? 'paused' : isOff ? 'off' : 'running'}" data-action="toggleAgent" data-agent="${esc(a.name)}" data-paused="${isPaused}" title="${esc(agentToggleTitle(a, isPaused, isOff))}">${isPaused ? '▶ resume' : isOff ? '▶ start' : '⏸ pause'}</button>`}
           ${sessionChip(a, '▶ terminal', `<a href="${terminalUrl(a.name)}" target="_blank" rel="noopener" class="terminal-link" data-action="openTerminal" data-agent="${esc(a.name)}" title="Open the live tmux terminal session for this agent in a new tab">▶ terminal</a>`)}
           ${sessionChip(a, '📄 full log', `<a href="${fullLogUrl(a.name, false)}" target="_blank" rel="noopener" class="terminal-link" title="Open the full retained log of this agent's latest run as selectable, searchable text in a new tab">📄 full log</a>`)}
           ${sessionChip(a, '⬇ log', `<a href="${fullLogUrl(a.name, true)}" download class="terminal-link" title="Download the full retained log of this agent's latest run as a text file">⬇ log</a>`)}
@@ -4547,6 +4558,7 @@
             ${modelOptionsHtml(a.cli, a.model)}
           </select>
         </div>
+        <div class="oc-detail-blockers">${agentBlockerLineHtml(a)}${neverScheduledChipHtml(a, a.name)}</div>
         ${terminalCopyHintHtml(needsLoginDown, agentSessionUnavailable(a), a.name)}
         ${ocDetailFieldsHtml(a, isPaused, isOff, isOnDemand)}
         <div class="oc-detail-indicators">${agentIndicators(a.name)}</div>
@@ -6386,6 +6398,85 @@
       return down && a.authKnown === true && a.authAvailable !== true;
     }
 
+    /* Agent blockers (#5594). THREE orthogonal flags decide whether an agent
+       will ever do work: is its session up, has an operator paused it, and is
+       a cadence configured at all. The card used to reveal them one at a
+       time — a single action button cleared the first, which uncovered the
+       second, and the third (no cadence in any mode) was not on the card at
+       all — so operators walked a serial treasure hunt and still ended up
+       with an agent that never ran.
+
+       These read the RAW server flags rather than the mutually-exclusive
+       display state (isPaused/isOff/isStopped, which deliberately suppress
+       one another for styling), so every live blocker is legible BEFORE the
+       first click. agentSchedulingBlockers returns them in the order an
+       operator must clear them; empty means the governor really will kick
+       this agent. */
+    function agentSchedulingBlockers(a) {
+      const out = [];
+      if (a.paused === true) out.push('paused');
+      if (a.offByCadence === true) {
+        const mode = (window._lastStatus?.governor?.mode || '').toLowerCase();
+        out.push(mode ? `off in ${mode} mode` : 'off in this governor mode');
+      }
+      if (a.noCadence === true) out.push('never scheduled');
+      return out;
+    }
+    function agentToggleTitle(a, isPaused, isOff) {
+      if (isPaused) {
+        const rest = [];
+        if (a.state !== 'running') rest.push('its session is down (use \u21bb restart)');
+        if (a.offByCadence === true) rest.push('its cadence for the current governor mode is off (\u2699\uFE0F \u2192 Cadences)');
+        if (a.noCadence === true) rest.push('no governor mode gives it a cadence (\u2699\uFE0F \u2192 Cadences)');
+        const base = 'Resume this agent \u2014 it will start running on its configured cadence';
+        if (rest.length === 0) return base;
+        return `${base}. Resuming alone is NOT enough: ${rest.join('; ')}.`;
+      }
+      if (isOff) return 'Start this agent \u2014 it is currently off in this governor mode';
+      return 'Pause this agent \u2014 stops governor from kicking it until resumed';
+    }
+    function neverScheduledChipHtml(a, configTarget) {
+      if (a.noCadence !== true) return '';
+      const who = a.displayName || a.name;
+      const tip = `${who} is enabled but NO governor mode gives it a cadence, and it has never been kicked \u2014 it will sit idle forever. Click to set cadences.`;
+      return `<button class="never-scheduled-chip" data-action="openConfigDialog" data-config-type="agent" data-agent="${esc(configTarget)}" data-tab="Cadences" title="${esc(tip)}">\u23F1 never scheduled \u2014 set cadences</button>`;
+    }
+    function agentBlockerLineHtml(a) {
+      const onDemand = a.onDemand === true;
+      let session = 'up', sessionCls = 'ab-ok';
+      let sessionTip = 'The tmux session is alive.';
+      if (agentIsDisabled(a)) {
+        session = 'disabled'; sessionCls = 'ab-bad';
+        sessionTip = 'Disabled in config \u2014 the governor never starts this agent. Enable it with \u2699\uFE0F.';
+      } else if (a.state !== 'running') {
+        session = 'down'; sessionCls = 'ab-bad';
+        sessionTip = 'No live tmux session \u2014 \u21bb restart asks the supervisor to respawn it.';
+      }
+      const blockers = agentSchedulingBlockers(a);
+      let sched = a.cadence || '\u2014', schedCls = 'ab-ok';
+      let schedTip = 'Governor cadence for the current mode.';
+      if (onDemand) {
+        sched = 'on demand'; schedCls = '';
+        schedTip = 'On-demand agent \u2014 kicked manually, never by governor cadence.';
+      } else if (blockers.length > 0) {
+        sched = blockers.join(' + '); schedCls = 'ab-bad';
+        schedTip = `EVERY reason the governor will not kick ${a.displayName || a.name} right now \u2014 all of them must be cleared: ${blockers.join('; ')}.`;
+      }
+      let next = a.nextKickIn ? `in ${a.nextKickIn}` : (a.nextKick || '\u2014');
+      let nextCls = '';
+      if (onDemand) next = 'on demand';
+      else if (blockers.length > 0) { next = 'never'; nextCls = 'ab-bad'; }
+      const nextTip = (!onDemand && blockers.length === 0 && a.nextKick)
+        ? `Next governor kick at ${a.nextKick}.`
+        : 'Nothing is scheduled to kick this agent.';
+      return `<div class="agent-blockers">`
+        + `<span class="ab-seg ${sessionCls}" title="${esc(sessionTip)}"><span class="ab-key">session</span>${esc(session)}</span>`
+        + `<span class="ab-sep">\u00B7</span>`
+        + `<span class="ab-seg ${schedCls}" title="${esc(schedTip)}"><span class="ab-key">scheduling</span>${esc(sched)}</span>`
+        + `<span class="ab-sep">\u00B7</span>`
+        + `<span class="ab-seg ${nextCls}" title="${esc(nextTip)}"><span class="ab-key">next kick</span>${esc(next)}</span>`
+        + `</div>`;
+    }
     function renderAgents(agents) {
       const el = document.getElementById('agents');
       // Preserve custom prompt input values across re-renders
@@ -6420,12 +6511,22 @@
         const dotState = isOff ? 'off-healthy' : dotCls;
         const canToggle = a.beadRole !== 'supervisor';
         const canPauseToggle = canToggle && dashboardRoleAtLeast(window._hiveRole || 'read', 'owner');
-        const toggleBtn = canToggle ? (isOff
+        /* RESUME LEADS (#5594). A paused agent's card offers its pause toggle
+           FIRST and unconditionally; the governor-cadence gear must never take
+           the slot, or the pause stays hidden until the gear's blocker is
+           cleared and a second button appears. isOff already excludes isPaused
+           today, so this renders identically — stating the order here is what
+           keeps it true if that derivation ever changes. The remaining
+           blockers ride in the tooltip and on the blockers line below, so the
+           operator learns them before the click, not after. */
+        const toggleBtn = canToggle ? (isPaused && canPauseToggle
+          ? `<button class="btn-toggle paused" data-action="toggleAgent" data-agent="${esc(a.name)}" data-paused="true" title="${esc(agentToggleTitle(a, true, false))}">▶ resume</button>`
+          : isOff
           ? `<button class="btn-toggle off" data-action="openConfigDialog" data-config-type="agent" data-agent="${esc(a.name)}" title="Agent is off in this governor mode — click to configure per-mode cadences">⚙ off</button>`
           : isOnDemand
           ? `<button class="btn-toggle on-demand" title="On-demand agent — kicked manually, not by governor cadence">⚡ on demand</button>`
           : canPauseToggle
-          ? `<button class="btn-toggle ${isPaused ? 'paused' : 'running'}" data-action="toggleAgent" data-agent="${esc(a.name)}" data-paused="${isPaused}" title="${isPaused ? 'Resume this agent — it will start running on its configured cadence' : 'Pause this agent — stops governor from kicking it until resumed'}">${isPaused ? '▶ resume' : '⏸ pause'}</button>`
+          ? `<button class="btn-toggle running" data-action="toggleAgent" data-agent="${esc(a.name)}" data-paused="false" title="${esc(agentToggleTitle(a, false, false))}">⏸ pause</button>`
           : '') : '';
         // liveSummary is pushed via SSE every 5s — no separate fetch needed
         let summaryEl = '';
@@ -6452,7 +6553,7 @@
         const disabledBadge = agentIsDisabled(a) ? ` <span class="status-badge disabled" title="Disabled in config — the governor never starts this agent. Configure it with the gear to enable.">disabled</span>` : '';
         return `<div class="agent-card ${cls}${compactCls}" data-agent="${esc(a.name)}">
           <span class="working-indicator"></span>
-          <div class="agent-name"><span class="dot ${dotState}"${isOff ? ` title="${esc(OFF_HEALTHY_TITLE)}"` : ''}></span>${a.emoji ? a.emoji + ' ' : ''}${esc(a.displayName || a.name)}${needsLogin ? ' <span title="CLI needs login">\uD83D\uDD11</span>' : ''}${a.sandboxed ? ' <span class="status-badge done" title="Sandboxed runner active">sandboxed</span>' : ''}${disabledBadge}${replicaBadge} ${toggleBtn} <button class="compact-toggle" data-action="toggleAgentCompact" data-arg0="${esc(a.name)}" data-stop="1" title="Toggle compact/expanded view for this agent card">${isAgentCompact(a.name) ? '&#9655; expand' : '&#9661; compact'}</button> ${sessionChip(a, '▶ terminal', `<a href="${terminalUrl(a.name)}" target="_blank" rel="noopener" class="terminal-link" data-action="openTerminal" data-agent="${esc(a.name)}" title="Open tmux session">▶ terminal</a>`)} ${sessionChip(a, '📄 full log', `<a href="${fullLogUrl(a.name, false)}" target="_blank" rel="noopener" class="terminal-link" title="Full log of the latest run as selectable, searchable text">📄 full log</a>`)} <a href="${kickHistoryUrl(a.name)}" target="_blank" rel="noopener" class="terminal-link" title="Archived logs of previous kicks — survives restarts and upgrades">🕘 past kicks</a> <button class="restart-btn" data-action="restartAgent" data-agent="${esc(a.name)}" title="Kill tmux session — supervisor will respawn with fresh context">↻ restart</button> <button class="config-gear" data-action="openConfigDialog" data-config-type="agent" data-agent="${esc(configTarget)}" title="Configure ${esc(a.replicaBase ? (a.replicaBase + ' (base for ' + a.name + ')') : (a.displayName || a.name))}">⚙️</button></div>
+          <div class="agent-name"><span class="dot ${dotState}"${isOff ? ` title="${esc(OFF_HEALTHY_TITLE)}"` : ''}></span>${a.emoji ? a.emoji + ' ' : ''}${esc(a.displayName || a.name)}${needsLogin ? ' <span title="CLI needs login">\uD83D\uDD11</span>' : ''}${a.sandboxed ? ' <span class="status-badge done" title="Sandboxed runner active">sandboxed</span>' : ''}${disabledBadge}${replicaBadge} ${toggleBtn}${neverScheduledChipHtml(a, configTarget)} <button class="compact-toggle" data-action="toggleAgentCompact" data-arg0="${esc(a.name)}" data-stop="1" title="Toggle compact/expanded view for this agent card">${isAgentCompact(a.name) ? '&#9655; expand' : '&#9661; compact'}</button> ${sessionChip(a, '▶ terminal', `<a href="${terminalUrl(a.name)}" target="_blank" rel="noopener" class="terminal-link" data-action="openTerminal" data-agent="${esc(a.name)}" title="Open tmux session">▶ terminal</a>`)} ${sessionChip(a, '📄 full log', `<a href="${fullLogUrl(a.name, false)}" target="_blank" rel="noopener" class="terminal-link" title="Full log of the latest run as selectable, searchable text">📄 full log</a>`)} <a href="${kickHistoryUrl(a.name)}" target="_blank" rel="noopener" class="terminal-link" title="Archived logs of previous kicks — survives restarts and upgrades">🕘 past kicks</a> <button class="restart-btn" data-action="restartAgent" data-agent="${esc(a.name)}" title="Kill tmux session — supervisor will respawn with fresh context">↻ restart</button> <button class="config-gear" data-action="openConfigDialog" data-config-type="agent" data-agent="${esc(configTarget)}" title="Configure ${esc(a.replicaBase ? (a.replicaBase + ' (base for ' + a.name + ')') : (a.displayName || a.name))}">⚙️</button></div>
           ${terminalCopyHintHtml(needsLogin, agentSessionUnavailable(a), a.name)}
           <div class="agent-state ${isOnDemand ? 'on-demand' : isPaused ? 'paused' : isOff ? 'off' : a.busy}">${isOnDemand ? 'on demand' : isPaused ? 'paused' : isOff ? 'off' : a.busy}${pauseInfoIcon(a)}${(() => {
             if (a.structuredStatus === 'BLOCKED') return '<span class="status-badge blocked" title="' + esc(a.statusEvidence) + '">blocked</span>';
@@ -6462,6 +6563,7 @@
             if (isStale) return '<span class="status-badge needs-context">stale</span>';
             return '';
           })()}${agentSpendChip(a.name)}</div>
+          ${agentBlockerLineHtml(a)}
           ${(() => {
             // Last upstream/launch error stays on its own line below the state
             // badge, never behind the working-indicator dot — previously the
@@ -14727,6 +14829,17 @@ function burnAreaChart() {
       // Update in-memory agent state so cadence table re-renders correctly
       const agentObj = (window._lastAgents || []).find(a => a.name === agent);
       if (agentObj) { agentObj.paused = nowPaused; }
+      // The blockers line and the toggle tooltip (#5594) both render from the
+      // agent object, so patch them from the SAME authoritative state. Left
+      // alone they would keep saying "paused" after a successful resume until
+      // the next poll — the stale-control bug this function already exists to
+      // prevent for the button label.
+      if (agentObj) {
+        document.querySelectorAll(`.agent-card[data-agent="${CSS.escape(agent)}"] .agent-blockers`)
+          .forEach(el => { el.outerHTML = agentBlockerLineHtml(agentObj); });
+        document.querySelectorAll(`.agent-card[data-agent="${CSS.escape(agent)}"] .btn-toggle`)
+          .forEach(el => { el.title = agentToggleTitle(agentObj, nowPaused, false); });
+      }
       // The focused agent-detail panel renders its own toggle button — the
       // .agent-card loop above never reaches it, so re-render it from the
       // just-updated state or the button stays stale until navigation.

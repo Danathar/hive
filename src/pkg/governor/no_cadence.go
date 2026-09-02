@@ -1,6 +1,10 @@
 package governor
 
-import "sort"
+import (
+	"sort"
+
+	"github.com/kubestellar/hive/pkg/config"
+)
 
 // No-cadence detection (#5577). An agent that is enabled and governor-kickable
 // but appears in NO mode's cadence map is never timer-kicked; if it has also
@@ -41,20 +45,14 @@ func (g *Governor) NoCadenceAgents() []string {
 // agentHasAnyCadenceLocked reports whether ANY mode's cadence map names this
 // agent (directly or via its replica base, mirroring resolveCadence's
 // fallback). Caller must hold g.mu.
+//
+// The predicate lives in config.HasAnyCadenceIn so the spoke dashboard's
+// per-agent card signal (#5594) evaluates the SAME rule: a second copy here
+// is how the fleet banner and the agent card would come to disagree.
 func (g *Governor) agentHasAnyCadenceLocked(agentName string) bool {
 	baseName := agentName
 	if ac, ok := g.agents[agentName]; ok && ac.ReplicaOf != "" {
 		baseName = ac.ReplicaOf
 	}
-	for _, mode := range g.cfg.Modes {
-		if _, ok := mode.Cadences[agentName]; ok {
-			return true
-		}
-		if baseName != agentName {
-			if _, ok := mode.Cadences[baseName]; ok {
-				return true
-			}
-		}
-	}
-	return false
+	return config.HasAnyCadenceIn(g.cfg.Modes, agentName, baseName)
 }
