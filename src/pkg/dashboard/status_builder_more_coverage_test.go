@@ -74,21 +74,14 @@ func TestCovH2_BuildHealthAndRateLimits(t *testing.T) {
 	logger := covH2Logger()
 
 	// This test drives buildHealth with a live client below, and that
-	// production path writes the package-level cachedHealth cache
-	// (status_builder.go). Nothing in the non-test code clears it, so without
-	// a restore here the cache leaks into every later test that exercises the
-	// nil-client branch — those tests assert the *default* {"ci": 100} and
-	// instead observe this test's fixture. Snapshot and restore around the
-	// whole test via t.Cleanup rather than defer: cleanup must run even if an
-	// assertion below calls t.Fatalf. Refs #5570.
-	cachedHealthMu.Lock()
-	prevCachedHealth := cachedHealth
-	cachedHealthMu.Unlock()
-	t.Cleanup(func() {
-		cachedHealthMu.Lock()
-		cachedHealth = prevCachedHealth
-		cachedHealthMu.Unlock()
-	})
+	// production path writes the package-level cachedHealth cache and can
+	// refresh cachedGreenStreak (status_builder.go). Nothing in the non-test
+	// code clears either, so without a restore the caches leak into every
+	// later test that exercises the nil-client branch — those tests assert
+	// the *default* {"ci": 100} and instead observe this test's fixture. The
+	// shared hook snapshots both caches and restores them in t.Cleanup, so
+	// the restore runs even when an assertion below calls t.Fatalf (#5570).
+	restoreHealthCaches(t)
 
 	// nil client → cached/default fallback branch.
 	h := buildHealth(nil, nil)
@@ -132,26 +125,11 @@ func TestCovH2_BuildHealthAndRateLimits(t *testing.T) {
 	}
 
 	// The live branch of buildHealth CACHES what it fetched into the package
-	// global cachedHealth. The mock above answers the workflow endpoints with
-	// an empty run list, so the cached map carries ci=0 — and every later
-	// buildHealth(nil, nil) in this package then returns that instead of the
-	// ci=100 default it asserts on. Restore the global so the pollution cannot
-	// outlive this test (#5553: TestBuildHealth_NilClient_Boost failed with
-	// "ci = 0" only on the shuffle orders that put this test first).
-	// The same call can also refresh cachedGreenStreak, so restore that pair
-	// too rather than leaving a second global dirtied for later tests.
-	cachedGreenStreakMu.Lock()
-	prevStreak, prevStreakOK := cachedGreenStreak, cachedGreenStreakOK
-	cachedGreenStreakMu.Unlock()
-	t.Cleanup(func() {
-		cachedHealthMu.Lock()
-		cachedHealth = nil
-		cachedHealthMu.Unlock()
-
-		cachedGreenStreakMu.Lock()
-		cachedGreenStreak, cachedGreenStreakOK = prevStreak, prevStreakOK
-		cachedGreenStreakMu.Unlock()
-	})
+	// global cachedHealth — the mock above answers the workflow endpoints with
+	// an empty run list, so the cached map carries ci=0 (#5553:
+	// TestBuildHealth_NilClient_Boost failed with "ci = 0" only on the
+	// shuffle orders that put this test first). Both dirtied globals are
+	// restored by the restoreHealthCaches hook registered at the top.
 	_ = buildHealth(ghc, ctx)
 
 	// App-auth identity branch: set an AppID so buildGHRateLimits takes the "app" path.
