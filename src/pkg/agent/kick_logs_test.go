@@ -37,9 +37,9 @@ func kickLogTestManager(t *testing.T, captured string) (*Manager, *AgentProcess,
 		kickLogDir:       dir,
 		kickLogRetention: defaultKickLogRetention,
 		kickLogMaxBytes:  defaultKickLogMaxBytes,
-		captureFullLogFn: func(*AgentProcess) (string, error) { return captured, nil },
-		clearHistoryFn:   func(*AgentProcess) {},
 	}
+	termSeams(m).captureFullLog = func(*AgentProcess) (string, error) { return captured, nil }
+	termSeams(m).clearHistory = func(*AgentProcess) {}
 	return m, agent, dir
 }
 
@@ -153,7 +153,7 @@ func TestArchiveKickLogLocked_RetentionZeroDisables(t *testing.T) {
 // must proceed.
 func TestArchiveKickLogLocked_CaptureErrorIsNonFatal(t *testing.T) {
 	m, agent, _ := kickLogTestManager(t, "")
-	m.captureFullLogFn = func(*AgentProcess) (string, error) { return "", fmt.Errorf("boom") }
+	termSeams(m).captureFullLog = func(*AgentProcess) (string, error) { return "", fmt.Errorf("boom") }
 	if m.archiveKickLogLocked(agent, "restart") {
 		t.Fatal("archived despite capture error")
 	}
@@ -222,15 +222,15 @@ func TestPruneKickLogs_SizeCapKeepsNewest(t *testing.T) {
 func TestDeliverKickLocked_ArchivesAndClearsBeforeInput(t *testing.T) {
 	m, agent, _ := kickLogTestManager(t, "previous kick output")
 	var events []string
-	m.captureFullLogFn = func(*AgentProcess) (string, error) {
+	termSeams(m).captureFullLog = func(*AgentProcess) (string, error) {
 		events = append(events, "capture")
 		return "previous kick output", nil
 	}
-	m.clearHistoryFn = func(*AgentProcess) { events = append(events, "clear") }
-	m.sendKeysForAgent = func(_ *AgentProcess, keys ...string) {
+	termSeams(m).clearHistory = func(*AgentProcess) { events = append(events, "clear") }
+	termSeams(m).sendKeys = func(_ *AgentProcess, keys ...string) {
 		events = append(events, "sendkeys:"+strings.Join(keys, "+"))
 	}
-	m.visiblePaneCapture = func(*AgentProcess) string { return "" }
+	termSeams(m).captureVisiblePane = func(*AgentProcess) string { return "" }
 	agent.kickLogPending = true
 
 	m.deliverKickLocked(agent, "next task", "send-kick")
@@ -257,9 +257,9 @@ func TestDeliverKickLocked_ArchivesAndClearsBeforeInput(t *testing.T) {
 func TestDeliverKickLocked_NoRotationWithoutPendingOutput(t *testing.T) {
 	m, agent, _ := kickLogTestManager(t, "boot banner")
 	captured := false
-	m.captureFullLogFn = func(*AgentProcess) (string, error) { captured = true; return "boot banner", nil }
-	m.sendKeysForAgent = func(*AgentProcess, ...string) {}
-	m.visiblePaneCapture = func(*AgentProcess) string { return "" }
+	termSeams(m).captureFullLog = func(*AgentProcess) (string, error) { captured = true; return "boot banner", nil }
+	termSeams(m).sendKeys = func(*AgentProcess, ...string) {}
+	termSeams(m).captureVisiblePane = func(*AgentProcess) string { return "" }
 
 	m.deliverKickLocked(agent, "first task", "startup")
 
@@ -279,7 +279,7 @@ func TestDeliverKickLocked_NoRotationWithoutPendingOutput(t *testing.T) {
 // fails (no tmux in the environment): the archive is the whole point.
 func TestRestart_ArchivesPendingKickOutput(t *testing.T) {
 	m, agent, dir := kickLogTestManager(t, "output of the run being restarted")
-	m.sendKeysForAgent = func(*AgentProcess, ...string) {}
+	termSeams(m).sendKeys = func(*AgentProcess, ...string) {}
 	agent.kickLogPending = true
 	// Paused short-circuits Restart right after ensureTmuxSession, keeping the
 	// test away from token minting and a real CLI launch.

@@ -569,23 +569,21 @@ type Manager struct {
 	sandboxPRClient                   PRCreator
 	sandboxAuditCallback              atomic.Pointer[func(agent, action, detail string)]
 
-	paneCapture          func(agent *AgentProcess) string
-	visiblePaneCapture   func(agent *AgentProcess) string
-	sessionAttached      func(agent *AgentProcess) bool
-	sendLiteralForAgent  func(agent *AgentProcess, text string)
-	sendKeysForAgent     func(agent *AgentProcess, keys ...string)
-	promptDismissSleep   func(time.Duration)
+	// terminal is every interaction with the agent's interactive terminal
+	// (pane capture, keystrokes, scrollback). nil means the real tmux-backed
+	// implementation (see Manager.term / tmuxTerminal in terminal.go); tests
+	// install a funcTerminal to fake individual methods. Replaces the eight
+	// ad-hoc func-typed seam fields removed in issue #5636 phase 1.
+	terminal             TerminalSession
 	promptDismissTimeout time.Duration
 
 	// Per-kick durable log archiving (#4296, #4295) — see kick_logs.go.
 	// kickLogDir/kickLogRetention/kickLogMaxBytes are resolved once in
-	// NewManager from env overrides; captureFullLogFn and clearHistoryFn are
-	// test seams over the tmux capture-pane / clear-history subprocesses.
+	// NewManager from env overrides; the capture/clear-history subprocesses
+	// are reached through m.terminal above.
 	kickLogDir       string
 	kickLogRetention int
 	kickLogMaxBytes  int64
-	captureFullLogFn func(agent *AgentProcess) (string, error)
-	clearHistoryFn   func(agent *AgentProcess)
 }
 
 // SetPersistPauseCallback wires a function that persists an agent's paused
@@ -4047,16 +4045,7 @@ func (m *Manager) tmuxRawCmd(args ...string) *exec.Cmd {
 // captureTmuxPaneForAgent captures pane content using the agent's tmux socket.
 // Includes scrollback for diff-based output signal detection.
 func (m *Manager) captureTmuxPaneForAgent(agent *AgentProcess) string {
-	if m.paneCapture != nil {
-		return m.paneCapture(agent)
-	}
-	cmd := m.tmuxCmd(agent, "capture-pane", "-t", agent.tmuxSession, "-p",
-		"-S", fmt.Sprintf("-%d", tmuxCaptureLines))
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	return string(out)
+	return m.term().CapturePane(agent)
 }
 
 // CaptureFullLog returns the agent's full retained tmux scrollback for its
@@ -4088,33 +4077,11 @@ func (m *Manager) CaptureFullLog(name string) (string, error) {
 
 // captureVisiblePaneForAgent captures only the visible pane (no scrollback).
 func (m *Manager) captureVisiblePaneForAgent(agent *AgentProcess) string {
-	if m.visiblePaneCapture != nil {
-		return m.visiblePaneCapture(agent)
-	}
-	cmd := m.tmuxCmd(agent, "capture-pane", "-t", agent.tmuxSession, "-p")
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	return string(out)
+	return m.term().CaptureVisiblePane(agent)
 }
 
 func (m *Manager) tmuxSessionHasAttachedClientForAgent(agent *AgentProcess) bool {
-	if m.sessionAttached != nil {
-		return m.sessionAttached(agent)
-	}
-	if agent == nil || agent.tmuxSession == "" {
-		return true
-	}
-	out, err := m.tmuxCmd(agent, "display-message", "-p", "-t", agent.tmuxSession, "#{session_attached}").Output()
-	if err != nil {
-		return true
-	}
-	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
-	if err != nil {
-		return true
-	}
-	return n > 0
+	return m.term().SessionAttached(agent)
 }
 
 func (m *Manager) Stop(name string) error {
@@ -5066,11 +5033,7 @@ func (m *Manager) deliverStartupKick(agent *AgentProcess, prompt string, gen int
 
 // tmuxSendLiteralForAgent sends text using the agent's tmux socket.
 func (m *Manager) tmuxSendLiteralForAgent(agent *AgentProcess, text string) {
-	if m.sendLiteralForAgent != nil {
-		m.sendLiteralForAgent(agent, text)
-		return
-	}
-	_ = m.tmuxCmd(agent, "send-keys", "-t", agent.tmuxSession, "-l", text).Run()
+	m.term().SendLiteral(agent, text)
 }
 
 // launchFailurePrefix opens every in-pane launch-failure banner so the line is
@@ -5270,11 +5233,7 @@ func (m *Manager) dismissInferencePrompts(agent *AgentProcess) {
 }
 
 func (m *Manager) sleepDuringPromptDismiss(d time.Duration) {
-	if m.promptDismissSleep != nil {
-		m.promptDismissSleep(d)
-		return
-	}
-	time.Sleep(d)
+	m.term().Sleep(d)
 }
 
 // selectedMenuOption returns the trimmed text of the "❯"-selected line of an
@@ -5868,12 +5827,7 @@ func (m *Manager) tmuxSendEntersForAgent(agent *AgentProcess) {
 
 // tmuxSendKeysForAgent sends key sequences (C-c, C-u, etc.) using the agent's tmux socket.
 func (m *Manager) tmuxSendKeysForAgent(agent *AgentProcess, keys ...string) {
-	if m.sendKeysForAgent != nil {
-		m.sendKeysForAgent(agent, keys...)
-		return
-	}
-	args := append([]string{"send-keys", "-t", agent.tmuxSession}, keys...)
-	_ = m.tmuxCmd(agent, args...).Run()
+	m.term().SendKeys(agent, keys...)
 }
 
 const (

@@ -57,7 +57,7 @@ func TestSubmitLoginCodeTypesCodeAndSubmitsOnce(t *testing.T) {
 	t.Cleanup(func() { tmuxSessionExists = origExists })
 
 	var typed []string
-	m.sendLiteralForAgent = func(_ *AgentProcess, text string) { typed = append(typed, text) }
+	termSeams(m).sendLiteral = func(_ *AgentProcess, text string) { typed = append(typed, text) }
 
 	if err := m.SubmitLoginCode("scanner", "  4/0AVMBsJh-code  "); err != nil {
 		t.Fatalf("SubmitLoginCode: %v", err)
@@ -74,7 +74,7 @@ func TestSubmitLoginCodeRefusesWithoutTyping(t *testing.T) {
 	}, discardLogger(), ProjectContext{ACMMLevel: 5})
 
 	var typed []string
-	m.sendLiteralForAgent = func(_ *AgentProcess, text string) { typed = append(typed, text) }
+	termSeams(m).sendLiteral = func(_ *AgentProcess, text string) { typed = append(typed, text) }
 
 	if err := m.SubmitLoginCode("scanner", "code\nrm -rf /"); err == nil {
 		t.Fatal("accepted a newline-bearing code")

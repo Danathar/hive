@@ -100,7 +100,7 @@ func TestHermeticWaitForInputPromptForAgentSkipsConsentScreen(t *testing.T) {
 
 	var mu sync.Mutex
 	visibleCalls := 0
-	m.visiblePaneCapture = func(*AgentProcess) string {
+	termSeams(m).captureVisiblePane = func(*AgentProcess) string {
 		mu.Lock()
 		defer mu.Unlock()
 		visibleCalls++
@@ -109,7 +109,7 @@ func TestHermeticWaitForInputPromptForAgentSkipsConsentScreen(t *testing.T) {
 		}
 		return ""
 	}
-	m.paneCapture = func(*AgentProcess) string {
+	termSeams(m).capturePane = func(*AgentProcess) string {
 		return "goose is ready\n"
 	}
 
@@ -129,7 +129,7 @@ func TestHermeticWatchForTrustPromptForAgentSendsBackendSpecificKeys(t *testing.
 	agent := m.agents["coder"]
 	m.mu.RUnlock()
 	agent.tmuxSession = "hive-coder"
-	m.paneCapture = func(*AgentProcess) string {
+	termSeams(m).capturePane = func(*AgentProcess) string {
 		return "✨ Update available! 1.0.0 -> 1.0.1\n1. Update now\n3. Skip until next version\n"
 	}
 
@@ -137,7 +137,7 @@ func TestHermeticWatchForTrustPromptForAgentSendsBackendSpecificKeys(t *testing.
 	defer cancel()
 	done := make(chan struct{})
 	var keys []string
-	m.sendKeysForAgent = func(_ *AgentProcess, sent ...string) {
+	termSeams(m).sendKeys = func(_ *AgentProcess, sent ...string) {
 		keys = append(keys, sent...)
 		if len(sent) == 1 && sent[0] == "Enter" {
 			cancel()
