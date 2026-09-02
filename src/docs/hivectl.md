@@ -211,7 +211,7 @@ Obtaining the value today means copying it out of a browser already logged in
 to that dashboard (devtools → Application → Cookies). There is no
 `hivectl login` yet; adding one so the credential can be acquired from the
 terminal is tracked in
-[#5645](https://github.com/kubestellar/hive/issues/5645).
+[#5651](https://github.com/kubestellar/hive/issues/5651).
 
 Both variables may be set at once, and both are sent. That is not redundancy:
 a shared-token hive ignores the cookie and an allowlist hive ignores the token,
@@ -412,7 +412,7 @@ an operator dismisses the overlay first (see the modal rule above).
   acquire either. Session-based hives (hub-hosted, or a spoke with an
   `authorized_users` allowlist) are reachable, but the cookie has to be lifted
   from a browser — see [Credentials](#credentials) and
-  [#5645](https://github.com/kubestellar/hive/issues/5645).
+  [#5651](https://github.com/kubestellar/hive/issues/5651).
 - **Local tmux attach only.** No remote terminal embedding over the ttyd
   WebSocket — that is a follow-up epic.
 - **Feature parity with the web dashboard's operator loop, not visual
