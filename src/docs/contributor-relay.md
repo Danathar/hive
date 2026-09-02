@@ -208,6 +208,8 @@ HIVE_SESSION=claude-a just contribute-hive claude   # terminal 1
 HIVE_SESSION=claude-b just contribute-hive claude   # terminal 2
 ```
 
+The labels must be distinct: two same-backend relays with identical labels (including the identical *default* label) share one session identity and collide on a single active-task slot, exactly as if no label were set.
+
 What the session label does **not** scope: auth, trust tier, model admission, and rate-limit accounting all stay per-account. Extra sessions share your account's rate limits — this is a way to run several backends concurrently, not a way to get more throughput headroom.
 
 Notes:
