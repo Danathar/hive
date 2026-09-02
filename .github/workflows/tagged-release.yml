@@ -23,6 +23,16 @@ name: Tagged Release
 # CHANGELOG.md `<!-- release: none|major|minor|patch -->` marker is the human
 # escape hatch when inference would be wrong.
 #
+# FRAGMENTS (#5675): PR-time entries land as changelog.d/<category>-<slug>.md
+# fragment files rather than direct Unreleased appends (which made any two
+# landing PRs conflict on the same lines). src/scripts/compile-changelog.sh
+# folds fragments into `## Unreleased` and is run twice below: in `decide`,
+# working-tree only, so the derivation above sees fragment content; and in
+# `release` just before the Unreleased section is moved into its dated
+# heading, with the release commit carrying the compiled CHANGELOG.md AND the
+# fragment deletions. An empty Unreleased with an empty changelog.d/ is still
+# the release=false no-op, so the IDEMPOTENCY loop below is unchanged.
+#
 # RACES (#5142, #5222): the gate-earning dance below takes minutes, and v4
 # can advance underneath it. Two rules keep that from starving releases or
 # painting red runs for normal traffic:
@@ -210,6 +220,16 @@ jobs:
           fi
           echo "docker.yml succeeded on ${sha} — images are published, safe to retag."
           echo "published=true" >> "$GITHUB_OUTPUT"
+
+      # #5675: changelog entries arrive as changelog.d/ fragments, which are
+      # release-worthy content the Unreleased section does not carry yet.
+      # Compile them into the WORKING TREE first so the derivation below sees
+      # them — nothing is committed here; the release job repeats the compile
+      # on its own checkout of the same SHA and commits that. Same `if` as the
+      # derive step: the two are one decision and must read the same tree.
+      - name: Compile changelog.d fragments so the derivation sees them
+        if: github.event_name == 'workflow_run' || steps.images.outputs.published == 'true'
+        run: src/scripts/compile-changelog.sh
 
       - name: Derive whether this merge warrants a release
         id: derive
@@ -444,6 +464,16 @@ jobs:
       - name: Copy NOTICE under a versioned release-asset name
         run: cp NOTICE "hive-v${VERSION}-NOTICE"
 
+      # #5675: same compile the decide job ran, this time for keeps — this
+      # checkout is a fresh clone of the same SHA, so the fragments are back
+      # and the working-tree compile from `decide` is not visible here. Runs
+      # BEFORE the move step below so the compiled entries ride into the dated
+      # release section; the commit step then records both the CHANGELOG.md
+      # update and the fragment deletions, which is what makes the follow-up
+      # run (empty Unreleased, empty changelog.d/) the usual no-op.
+      - name: Compile changelog.d fragments into Unreleased
+        run: src/scripts/compile-changelog.sh
+
       - name: Move CHANGELOG.md Unreleased section into a dated release entry
         run: |
           set -euo pipefail
@@ -484,10 +514,15 @@ jobs:
           git config user.name "hive-release-bot"
           git config user.email "actions@github.com"
           git add CHANGELOG.md
+          # #5675: the compile step above deleted the changelog.d/ fragments it
+          # folded into CHANGELOG.md — record those deletions in the same
+          # commit, or the next run would compile the same entries twice.
+          git add -A changelog.d
           git commit -s -m "🔖 release: v${VERSION}
 
-          Automated release commit. Moves the CHANGELOG.md Unreleased section
-          into a dated v${VERSION} entry. See src/docs/releases.md."
+          Automated release commit. Compiles changelog.d/ fragments and moves
+          the CHANGELOG.md Unreleased section into a dated v${VERSION} entry.
+          See src/docs/releases.md."
 
       # v4 branch protection requires the "gate" status check (the only
       # required context — see docker.yml) on the exact SHA being pushed.

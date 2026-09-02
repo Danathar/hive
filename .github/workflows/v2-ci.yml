@@ -151,6 +151,19 @@ jobs:
       - name: Release push retry/deferral state machine (#5142)
         run: bash scripts/test-release-push-retry.sh
 
+      # #5675: changelog entries land as changelog.d/ fragments and
+      # tagged-release.yml folds them into CHANGELOG.md's Unreleased section
+      # via scripts/compile-changelog.sh before deriving the release. A
+      # compiler bug here silently drops or miscategorizes entries — which
+      # changes the derived semver bump — so this drives the real script over
+      # fixture fragments and asserts the exact compiled output, the
+      # empty/absent-dir byte-identical no-op the release loop's idempotency
+      # rides on, loud all-or-nothing failure on a bad category prefix, and
+      # the end-to-end property that a compiled added- fragment flips
+      # derive-release-version.sh from no-release to a minor release.
+      - name: Changelog fragment compiler properties (#5675)
+        run: bash scripts/test-compile-changelog.sh
+
       # #4206: the standalone stack's image references live in exactly one
       # place, src/deploy/standalone-images.sh, so the Docker Compose assets
       # and the Podman assets that land later cannot drift onto different
