@@ -100,9 +100,18 @@ func TestCovC_AgentConfigChannels(t *testing.T) {
 		t.Errorf("unknown agent status = %d, want 404", rec.Code)
 	}
 
-	// valid update -> 200
+	// channel type with no trigger runtime -> 400 (#5591: persisting it
+	// would leave the agent permanently unkicked)
 	rec = doPut(s, "/api/config/agent/scanner/channels", map[string]any{
 		"channels": []map[string]any{{"type": "slack", "target": "#x"}},
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("runtime-less channel type status = %d, want 400", rec.Code)
+	}
+
+	// valid update -> 200
+	rec = doPut(s, "/api/config/agent/scanner/channels", map[string]any{
+		"channels": []map[string]any{{"type": "kick"}},
 	})
 	if rec.Code != http.StatusOK {
 		t.Errorf("valid channels status = %d, want 200", rec.Code)

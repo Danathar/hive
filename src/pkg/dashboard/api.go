@@ -3960,6 +3960,13 @@ func (s *Server) handleAgentConfigChannels(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Fail fast on channel types with no trigger runtime (#5591): persisting
+	// them would validate a config that silently never kicks the agent.
+	if err := config.ValidateChannels(name, body.Channels); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	agentCfg.Channels = body.Channels
 	s.deps.Config.Agents[name] = agentCfg
 	s.auditFromRequest(r, "config_agent_channels", auditDetail("section", "channels"), name)
@@ -4333,33 +4340,6 @@ func (s *Server) buildExportYAML(name string, cfg config.AgentConfig, cadences m
 			b.WriteString(fmt.Sprintf("    - type: %s\n", ch.Type))
 			if ch.Enabled != nil {
 				b.WriteString(fmt.Sprintf("      enabled: %t\n", *ch.Enabled))
-			}
-			if len(ch.Events) > 0 {
-				b.WriteString("      events:\n")
-				for _, e := range ch.Events {
-					b.WriteString(fmt.Sprintf("        - %s\n", e))
-				}
-			}
-			if len(ch.Patterns) > 0 {
-				b.WriteString("      patterns:\n")
-				for _, p := range ch.Patterns {
-					b.WriteString(fmt.Sprintf("        - %q\n", p))
-				}
-			}
-			if ch.Schedule != "" {
-				b.WriteString(fmt.Sprintf("      schedule: %q\n", ch.Schedule))
-			}
-			if len(ch.Match) > 0 {
-				b.WriteString("      match:\n")
-				for k, v := range ch.Match {
-					b.WriteString(fmt.Sprintf("        %s: %q\n", k, v))
-				}
-			}
-			if len(ch.Repos) > 0 {
-				b.WriteString("      repos:\n")
-				for _, r := range ch.Repos {
-					b.WriteString(fmt.Sprintf("        - %s\n", r))
-				}
 			}
 		}
 	}

@@ -722,15 +722,21 @@ type StatsDisplayEntry struct {
 }
 
 // ChannelConfig declares a trigger channel for an agent.
+//
+// Only ChannelTypeKick (governor timer kicks) has a runtime. The former
+// webhook/discord/schedule/bead trigger types were declarative-only: the
+// pkg/channels runtime meant to serve them was never wired into the binary
+// and was removed (#5591). Declaring one of those types used to validate
+// cleanly while suppressing governor kicks, leaving the agent permanently
+// dormant with no diagnostics; ValidateChannels now rejects them instead.
 type ChannelConfig struct {
-	Type     string            `yaml:"type" json:"type"`
-	Enabled  *bool             `yaml:"enabled,omitempty" json:"enabled,omitempty"`
-	Events   []string          `yaml:"events,omitempty" json:"events,omitempty"`
-	Patterns []string          `yaml:"patterns,omitempty" json:"patterns,omitempty"`
-	Schedule string            `yaml:"schedule,omitempty" json:"schedule,omitempty"`
-	Match    map[string]string `yaml:"match,omitempty" json:"match,omitempty"`
-	Repos    []string          `yaml:"repos,omitempty" json:"repos,omitempty"`
+	Type    string `yaml:"type" json:"type"`
+	Enabled *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 }
+
+// ChannelTypeKick is the only channel type with a live trigger runtime:
+// ordinary governor timer kicks.
+const ChannelTypeKick = "kick"
 
 // IsEnabled returns whether this channel is active (defaults to true).
 func (c *ChannelConfig) IsEnabled() bool {
@@ -1002,8 +1008,10 @@ type AgentConfig struct {
 	// agent_sandbox.enabled gate is also true.
 	Sandbox *AgentSandboxOverride `yaml:"sandbox,omitempty" json:"sandbox,omitempty"`
 
-	// Channels declares how this agent gets triggered (kick, webhook, discord, schedule, bead).
-	// When nil/empty, the agent uses governor timer kicks by default (implicit kick channel).
+	// Channels declares how this agent gets triggered. Only "kick" (governor
+	// timer kicks) is a valid type; when nil/empty, the agent uses governor
+	// timer kicks by default (implicit kick channel). See ChannelConfig for
+	// why the former webhook/discord/schedule/bead types are rejected.
 	Channels []ChannelConfig `yaml:"channels,omitempty" json:"channels,omitempty"`
 
 	// Tools declares what tools this agent can use. When nil, the existing Mode field governs.
@@ -1086,7 +1094,7 @@ func (a *AgentConfig) UsesGovernorKick() bool {
 	if len(a.Channels) == 0 {
 		return true
 	}
-	return a.HasChannel("kick")
+	return a.HasChannel(ChannelTypeKick)
 }
 
 // ShouldIncludeRepos returns whether the repos section should be appended to kicks.
@@ -5090,28 +5098,20 @@ func (c *Config) validate() error {
 }
 
 func validateChannels(agentName string, channels []ChannelConfig) error {
-	validTypes := map[string]bool{"kick": true, "webhook": true, "discord": true, "schedule": true, "bead": true}
+	return ValidateChannels(agentName, channels)
+}
+
+// ValidateChannels rejects any channel declaration whose type has no trigger
+// runtime. Only ChannelTypeKick is valid: the webhook/discord/schedule/bead
+// runtime (pkg/channels) was never wired into the binary and was removed
+// (#5591). Accepting those types would silently suppress governor kicks (see
+// UsesGovernorKick) with no runtime left to fire the declared trigger,
+// leaving the agent permanently dormant. Exported so config writers such as
+// the dashboard channels endpoint can fail fast before persisting.
+func ValidateChannels(agentName string, channels []ChannelConfig) error {
 	for i, ch := range channels {
-		if !validTypes[ch.Type] {
-			return fmt.Errorf("agent %s: channel[%d]: invalid type %q", agentName, i, ch.Type)
-		}
-		switch ch.Type {
-		case "webhook":
-			if len(ch.Events) == 0 {
-				return fmt.Errorf("agent %s: channel[%d]: webhook requires at least one event", agentName, i)
-			}
-		case "discord":
-			if len(ch.Patterns) == 0 {
-				return fmt.Errorf("agent %s: channel[%d]: discord requires at least one pattern", agentName, i)
-			}
-		case "schedule":
-			if ch.Schedule == "" {
-				return fmt.Errorf("agent %s: channel[%d]: schedule requires a cron expression", agentName, i)
-			}
-		case "bead":
-			if len(ch.Match) == 0 {
-				return fmt.Errorf("agent %s: channel[%d]: bead requires at least one match criterion", agentName, i)
-			}
+		if ch.Type != ChannelTypeKick {
+			return fmt.Errorf("agent %s: channel[%d]: type %q has no trigger runtime (only %q is supported; the webhook/discord/schedule/bead runtime was removed, see #5591) — declaring it would leave the agent permanently unkicked", agentName, i, ch.Type, ChannelTypeKick)
 		}
 	}
 	return nil

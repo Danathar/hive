@@ -16,9 +16,9 @@ import (
 
 // Linear webhook receiver (RFC #4492 Part 2, component B).
 //
-// A sibling of pkg/channels/webhook.go, which is GitHub-shaped: it hardcodes
-// X-Hub-Signature-256 (a "sha256=<hex>" prefix scheme) and X-GitHub-Event.
-// Linear's contract is different on every axis this handler touches:
+// Linear's contract differs from GitHub's webhook convention (which hardcodes
+// X-Hub-Signature-256, a "sha256=<hex>" prefix scheme, and X-GitHub-Event) on
+// every axis this handler touches:
 //
 //   - the signature header is `Linear-Signature`, a BARE hex HMAC-SHA256 of
 //     the raw body (no "sha256=" prefix);
@@ -26,7 +26,7 @@ import (
 //   - replay protection is IN-BAND: the signed body carries a
 //     `webhookTimestamp` (Unix ms) and Linear's docs say to reject anything
 //     more than a minute from local time. GitHub has no equivalent, which is
-//     why the channels receiver has no replay guard and this one must.
+//     why a GitHub-shaped receiver needs no replay guard and this one must.
 //
 // Ordering is deliberate: signature FIRST (over the raw bytes, before any
 // JSON parse), then the timestamp read from the now-authenticated body. A
