@@ -203,6 +203,22 @@ func (s *Scheduler) substituteTemplate(template string, actionable *github.Actio
 }
 
 func (s *Scheduler) substituteTemplateWithPolicy(template string, actionable *github.ActionableResult, agentName string, issues []github.Issue) (string, bool) {
+	return s.substituteTemplateWithVars(template, actionable, agentName, issues, nil)
+}
+
+// substituteTemplateWithVars is substituteTemplateWithPolicy plus caller-supplied
+// ${VAR}s, for a template whose values only one call site can compute.
+//
+// The reviewer lane (#5617 item 2) is the first such caller: its work list is
+// read from ci-failing.json and then GATED on — buildReviewerMessage refuses to
+// send a contract at all when that list is empty — so the list the template
+// renders must be the same one the gate saw. Recomputing it inside the
+// substitution would reopen the window where a rewrite between the two reads
+// renders a full adjudication contract over an empty list.
+//
+// The built-ins still WIN on a name collision, so an extra var can never shadow
+// ${GH_AUTH} or ${AGENT_NAME}.
+func (s *Scheduler) substituteTemplateWithVars(template string, actionable *github.ActionableResult, agentName string, issues []github.Issue, extra map[string]func() string) (string, bool) {
 	baseName := s.cfg.BaseAgentName(agentName)
 	if actionable == nil {
 		actionable = &github.ActionableResult{}
@@ -319,6 +335,14 @@ func (s *Scheduler) substituteTemplateWithPolicy(template string, actionable *gi
 		"MERGE_ELIGIBLE":        lit(mergeEligibleList),
 		"CI_FAILING":            lit(ciFailingList),
 	}}
+	// Caller-supplied vars lose a name clash: one already claimed by a built-in
+	// above is left alone, so no call site can redefine ${GH_AUTH}.
+	for name, fn := range extra {
+		if _, taken := rt.Vars[name]; taken {
+			continue
+		}
+		rt.Vars[name] = fn
+	}
 	return s.registry().Expand(context.Background(), template, resolve.ScopeTemplate, rt), false
 }
 
