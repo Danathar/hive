@@ -132,6 +132,7 @@ func hiveHealthBase(e RegistryEntry, rollup agentFleetRollup, app GitHubAppHealt
 		}
 		if reason := strings.TrimSpace(e.ProviderLimitReason); reason != "" {
 			v.State = HealthStateRed
+			v.cause = causeProviderQuota
 			v.Reason = providerLimitHealthReason(reason, e.ProviderLimitRebuffs)
 			return v
 		}
@@ -171,6 +172,7 @@ func hiveHealthBase(e RegistryEntry, rollup agentFleetRollup, app GitHubAppHealt
 			v.State = HealthStateRed
 			switch {
 			case rollup.QuotaExhausted == rollup.Problems:
+				v.cause = causeProviderQuota
 				v.Reason = fmt.Sprintf("%d agent(s) out of provider quota", rollup.QuotaExhausted)
 			case rollup.LoginStuck == rollup.Problems:
 				// Every blocked agent is wedged at a login prompt: name the one
@@ -183,6 +185,7 @@ func hiveHealthBase(e RegistryEntry, rollup agentFleetRollup, app GitHubAppHealt
 				// need a restart whether the outage is partial or every expected
 				// agent is down. Name that cause instead of the generic "blocked"
 				// or "no agents running" wording.
+				v.cause = causeAgentsDown
 				v.Reason = fmt.Sprintf("%d agent(s) down — restart needed", rollup.DeadOrGone)
 			case rollup.IdleWithWork == rollup.Problems:
 				// Sessions are alive but every scheduled agent is sitting past
@@ -206,6 +209,7 @@ func hiveHealthBase(e RegistryEntry, rollup agentFleetRollup, app GitHubAppHealt
 				// still, queued work will not move until somebody resumes them, so
 				// amber is more honest than the green "off by schedule" verdict.
 				v.State = HealthStateAmber
+				v.cause = causeAllPaused
 				v.Reason = "all agents paused — resume to produce output"
 				return v
 			}
