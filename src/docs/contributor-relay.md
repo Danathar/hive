@@ -435,6 +435,14 @@ This does not loosen who may claim what. The restored record is one the *hub its
 
 A resume that is genuinely refused — an operator yanked the task, or the relay stopped reporting for longer than the lease window — still ends in `task_revoke`, and that is correct. The relay clears its task and asks for new work.
 
+**Except for the work the relay gave itself.** After every fifth completed task the relay runs a **PR review cycle**: it stops taking new issues and asks its agent to look over the open PRs it has filed, so review comments get answered. That task is built locally — the hub never assigned it, and holds no lease for it.
+
+Everything above therefore does *not* apply to it, and for a while the relay did not know that ([#5715](https://github.com/kubestellar/hive/issues/5715)). It reported progress on the review the same way it reports on real work, the hub answered each claim with `task_revoke` because no lease matched, and the relay treated that revoke as terminal — stopping the agent and asking for fresh work. On a hive where sockets flap this meant PR review coverage silently almost never happened. The revoke did not even need a flap: the first ordinary progress report, three minutes in, was enough.
+
+The relay now withholds the two frames that *claim* a task (`task_accepted`, `task_progress`) for locally-created tasks, and ignores a `task_revoke` for one. Terminal frames still go out, and every hub-assigned task — including external Linear/Jira items, which legitimately carry issue number 0 — behaves exactly as before. A review cycle is now unaffected by a flap.
+
+One consequence worth knowing: an aborted review is *skipped*, not retried. The cycle counter only advances on a real completion, so a review that does not run waits for the next multiple of five rather than being retried at the next opportunity.
+
 **A dropped socket is not a failed issue.** The disconnect books a short cooldown on the issue so a second session cannot pick it up during the reconnect window and file a duplicate PR ([#2356](https://github.com/kubestellar/hive/issues/2356)). That cooldown no longer counts toward the consecutive-failure quarantine: three drops on a flaky connection used to park a perfectly workable issue for six hours with nothing having actually failed. Real failures — `task_failed`, the relay's own progress watchdog giving up, the wedged-task backstop — still count, and still quarantine.
 
 ### The relay's max-duration ceiling is a progress lease
