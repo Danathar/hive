@@ -110,3 +110,47 @@ The hub registers heartbeat, registry, SaaS, contributor, OAuth, webhook, backup
 - `/api/registry` and leaderboard/fleet views — public or authenticated hub registry views.
 
 See `api-reference.md` and the dashboard OpenAPI file for route details, and `manual-provisioning.md` for known failure modes.
+
+## Running several spokes under one hub
+
+Splitting one large hive into several subject-scoped spokes stops agents competing over unrelated work. It also surfaces things that are fleet-wide in reality but per-hive in the implementation — provider quota, the shared GitHub App rate limit, agent credentials, and repo ownership ([#5691](https://github.com/kubestellar/hive/issues/5691) is the RFC tracking those).
+
+The first of those the hub now checks for you is **repo ownership**.
+
+### Repo-ownership overlap
+
+Two spokes managing the same repo puts two fleets on one backlog, opening competing PRs on it — the exact thing a split exists to prevent. Nothing stopped that, even though the hub receives every spoke's repo list on every heartbeat.
+
+The hub now compares those lists and reports any repo claimed by more than one spoke:
+
+- `GET /api/registry` gains a `repoOverlaps` array. It is **omitted entirely** when the fleet is clean, so its presence is the signal:
+
+  ```json
+  {
+    "hives": [ ... ],
+    "repoOverlaps": [
+      {
+        "host": "github.com",
+        "repo": "tunaos/docs",
+        "hives": [
+          { "id": "h-hive", "name": "hive" },
+          { "id": "h-reef", "name": "reef" }
+        ]
+      }
+    ]
+  }
+  ```
+
+- A **warning** fleet alert (`repo-overlap`) is raised on *both* hives in the pair, naming the other spoke and the shared repos. Either operator can act, and alerting on only one would read as that hive being at fault rather than the pair being ambiguous.
+
+Matching is deliberate about what counts as the same repo, because two spokes are configured separately and so are the pair most likely to spell one repo differently:
+
+| Compared | Rule |
+|---|---|
+| `docs`, `tunaos/docs`, `https://github.com/tunaos/docs.git` | the same repo — bare, owner-qualified and URL forms all resolve to `owner/repo` |
+| `TunaOS/Docs` vs `tunaos/docs` | the same repo — GitHub owner/repo names are case-insensitive |
+| `acme/ui` on `github.com` vs on `github.ibm.com` | **different** repos — the GitHub host is part of the identity |
+| a spoke listing its own primary repo in `repos[]` | one claim, not a conflict with itself |
+| a repo with no owner (no `org` recorded) | ignored — inventing an owner would invent conflicts between unrelated repos that share a name |
+
+This is **read-side only**: it is derived per request from data the registry already holds, adds nothing to the heartbeat protocol, and is not persisted. It reports and does not refuse — an overlap is a warning, not a bar. A repo two subject areas legitimately share (a docs repo is the common case) is real, so the alert is acknowledgeable like any other; whether overlap should ever *block* assignment, and how such a repo would be allowlisted, is still open on the RFC.

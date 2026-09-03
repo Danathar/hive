@@ -138,6 +138,17 @@ const (
 	// on its own once the key is delivered and the spoke reports a healthy
 	// state.
 	AlertTypeAppCredsUndelivered = "app-creds-undelivered"
+	// AlertTypeRepoOverlap — this hive manages a repo ANOTHER hive also manages
+	// (kubestellar/hive#5691). Splitting one hive into several subject-scoped
+	// spokes exists so two fleets stop competing over one backlog; nothing
+	// checked that, and two spokes on the same repo open competing PRs on it.
+	//
+	// WARNING rather than critical, deliberately: both fleets are working, and a
+	// repo two subject areas legitimately share (a docs repo, the RFC's own
+	// example) is a real case. Whether overlap should ever BLOCK assignment, and
+	// how such a repo would be allowlisted, is still open on #5691 — so this
+	// reports and does not refuse.
+	AlertTypeRepoOverlap = "repo-overlap"
 )
 
 // --- Thresholds. Every one is a named constant with a rationale. ---
@@ -560,6 +571,13 @@ type alertHive struct {
 	GitHubAppState    string
 	ClusterID         string
 	ClusterHasKey     bool
+
+	// RepoOverlaps are the work items this hive claims that another hive claims
+	// too (#5691). Like ClusterHasKey above it is hub-observed FLEET fact — a
+	// relationship between hives, not a property of one — so it is stamped by
+	// fleetAlerts and never derived in alertHiveFromEntry, which must stay
+	// constructible from a single entry in unit tests.
+	RepoOverlaps []RepoOverlap
 }
 
 // alertHiveFromEntry projects a MyHiveEntry into the evaluator's view.
@@ -1011,6 +1029,22 @@ func evaluateAlerts(state *alertState, hives []alertHive, driftAlerts []Alert, n
 				appCredsUndeliveredReason(h))
 		}
 
+		// --- Rule: this hive's backlog overlaps another spoke's (#5691). ---
+		// The condition is NOT derived here: RepoOverlaps is stamped by
+		// fleetAlerts from one index over the whole snapshot, because an overlap
+		// is a relationship BETWEEN hives and re-deriving it per hive is how the
+		// two ends of the same conflict would start disagreeing about whether it
+		// exists.
+		//
+		// Both fleets are still working, so this is a WARNING. It fires on both
+		// hives in the pair deliberately: either operator can act, and an alert
+		// on only one of them reads as that hive being at fault rather than the
+		// pair being ambiguous.
+		if len(h.RepoOverlaps) > 0 {
+			add(h.ID, h.Name, AlertTypeRepoOverlap, AlertSeverityWarning,
+				repoOverlapAlertReason(h.ID, h.RepoOverlaps))
+		}
+
 		// --- Rule: agents are running but not working. ---
 		// The condition is NOT re-derived here: it is precomputed by
 		// evaluateInactiveAgents(), which already excludes paused and
@@ -1200,6 +1234,19 @@ func (s *HubServer) fleetAlerts(entries []MyHiveEntry) AlertSummary {
 		}
 		hives[i].ClusterHasKey = hasKey
 	}
+	// #5691: repo-ownership overlap is a relationship BETWEEN hives, so like
+	// ClusterHasKey above it is computed once over the whole snapshot and
+	// stamped, never derived per hive. Placeholders fall out for free: an
+	// unassigned pool slot has no repos to claim.
+	regsForOverlap := make([]RegistryEntry, 0, len(entries))
+	for _, e := range entries {
+		regsForOverlap = append(regsForOverlap, e.RegistryEntry)
+	}
+	if overlaps := computeRepoOverlaps(regsForOverlap); len(overlaps) > 0 {
+		for i := range hives {
+			hives[i].RepoOverlaps = repoOverlapsFor(hives[i].ID, overlaps)
+		}
+	}
 	// driftAlerts is nil today. When the config-drift evaluator lands, its
 	// signals are passed here and flow through the same ordering, ack and
 	// counting pipeline — see the file header.
@@ -1385,6 +1432,7 @@ var knownAlertTypes = map[string]bool{
 	AlertTypeURLPrivateNetwork:   true,
 	AlertTypeInferenceAuthFailed: true,
 	AlertTypeAppCredsUndelivered: true,
+	AlertTypeRepoOverlap:         true,
 }
 
 func isKnownAlertType(t string) bool { return knownAlertTypes[t] }
