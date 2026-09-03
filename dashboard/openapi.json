@@ -10816,7 +10816,7 @@
           "Contribute"
         ],
         "summary": "Recent contributor activity",
-        "description": "Returns the recent contributor activity feed held by the contribute hub. Public (no auth) \u2014 lives under the /api/contribute prefix which isPublicPath treats as public, read-only, no side effects. Returns an empty activity list if the contribute hub is not initialized.",
+        "description": "Returns the recent contributor activity feed held by the contribute hub. Public (no auth) \u2014 lives under the /api/contribute prefix which isPublicPath treats as public, read-only, no side effects. Returns an empty activity list if the contribute hub is not initialized. The feed is a BOUNDED RING, not a full history: the hub keeps at most `capacity` events across ALL contributors and evicts older ones. `retained` reports how many it currently holds, so a caller can tell three cases apart \u2014 activity.length < retained means this response was cut short by `limit`; retained == capacity means the ring is full and older events are gone; retained < capacity means the hive really has produced only this many. Before kubestellar/hive#5704 `limit` was accepted and silently ignored, and the response carried neither count, so a truncated read was indistinguishable from a short history.",
         "responses": {
           "200": {
             "description": "Recent activity",
@@ -10831,13 +10831,33 @@
                         "type": "object"
                       },
                       "description": "Recent ActivityEntry records (untyped here \u2014 see contribute_sse.go ActivityEntry for the full shape)"
+                    },
+                    "retained": {
+                      "type": "integer",
+                      "description": "How many events the hub currently holds, before `limit` is applied. Greater than activity.length exactly when this response was truncated by `limit`."
+                    },
+                    "capacity": {
+                      "type": "integer",
+                      "description": "The ring's size \u2014 the hard ceiling on what this endpoint can ever return, shared across all contributors. retained == capacity means older events have already been evicted."
                     }
                   }
                 }
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "How many of the MOST RECENT events to return, preserving the oldest-first order within the window. Omitted, non-numeric or <= 0 returns everything retained. A value above what the hub retains clamps to it rather than padding \u2014 compare against retained/capacity to detect that.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ]
       }
     },
     "/api/contribute/dossier": {
