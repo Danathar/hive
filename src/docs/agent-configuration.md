@@ -351,6 +351,38 @@ Each agent shows a 📌 pin on its CLI and its model in the dashboard. The seman
 
 Pin a model when reproducibility matters more than the governor's budget optimizations. Leave it unpinned when you want the hive to manage cost for you.
 
+### Changing backend and model together: use the atomic endpoint
+
+Three API routes can change an agent's method or model. If you are changing **both**, use the single atomic one:
+
+```
+PUT /api/config/agent/{name}/models     {"backend": "codex", "model": "gpt-5-codex"}
+```
+
+The other two set one field each and are fine on their own — but using them **in sequence** to change both is a live footgun ([#5698](https://github.com/kubestellar/hive/issues/5698)):
+
+```
+POST /api/switch/{agent}/{backend}      # then
+POST /api/model/{agent}/{model}
+```
+
+There is no transaction across those two calls. If the second fails, times out, or is simply never made, the agent is left with the new backend and the **old** backend's model — a pair like `codex --model claude-opus-5` that cannot launch. The failure does not surface at set time; it surfaces later as a dead pane.
+
+The three routes differ in ways that matter here:
+
+| | `switch` + `model` (two calls) | `PUT .../models` (one call) |
+|---|---|---|
+| Backend and model applied together | **no** — separate requests | **yes** |
+| Backend value validated | yes | yes |
+| Model value validated | yes, but see below | **not yet** — [#5698](https://github.com/kubestellar/hive/issues/5698) phase 2 |
+| Restarts the agent | yes, **once per call** | no — syncs into the live process config |
+| Claims operator ownership | yes | yes |
+
+Two consequences worth knowing:
+
+- **Model validation does not save you here.** `POST /api/model/...` checks the model against the agent's *current effective* backend, and deliberately fails **open** when that backend's model list cannot be enumerated (see `validateModelForAgent`). Codex is exactly such a backend, so `switch` to codex followed by `model` set to a Claude id is accepted. Reverse the order and the model is validated against the backend you are about to leave. Neither order gives you a checked pair.
+- **The atomic route does not restart the agent.** It persists the pair and syncs it into the live process config, so the running CLI keeps its current method until the agent next restarts. That is usually what you want for a scripted change — the two-call path pays for two restarts — but if you need the change to take effect now, restart the agent afterwards.
+
 ## Cadences and the governor
 
 Agents don't schedule themselves. The **governor** evaluates the work queue every `eval_interval_s` (default 300s), computes a mode from queue depth — **idle → quiet → busy → surge** (default thresholds: quiet > 2, busy > 10, surge > 20 **per watched repo**; override with `threshold:`) — and kicks each agent on the cadence that mode assigns it:

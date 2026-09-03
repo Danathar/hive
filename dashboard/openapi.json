@@ -3344,7 +3344,7 @@
           "Agents"
         ],
         "summary": "Set an agent's model",
-        "description": "Sets and persists the agent's model override, claims operator ownership of the field (so a pack re-apply on restart cannot revert it), and restarts the agent's session so the change takes effect immediately. Rejects a model the agent's effective backend does not serve.",
+        "description": "Sets and persists the agent's model override, claims operator ownership of the field (so a pack re-apply on restart cannot revert it), and restarts the agent's session so the change takes effect immediately. Rejects a model the agent's effective backend does not serve.\n\nThat rejection is checked against the agent's CURRENT effective backend and fails OPEN when the backend's model list cannot be enumerated, so it cannot validate a backend+model pair you are changing in the same operation. To change both, use PUT /api/config/agent/{name}/models (kubestellar/hive#5698).",
         "parameters": [
           {
             "name": "agent",
@@ -3617,7 +3617,7 @@
           "Agents"
         ],
         "summary": "Switch an agent's backend",
-        "description": "Sets and persists the agent's backend override, claims operator ownership of the field, and restarts the agent's session so the new backend takes effect immediately.",
+        "description": "Sets and persists the agent's backend override, claims operator ownership of the field, and restarts the agent's session so the new backend takes effect immediately.\n\nChanging the backend alone is what this route is for. To change backend AND model, use PUT /api/config/agent/{name}/models instead \u2014 pairing this call with POST /api/model is not atomic and can leave an unlaunchable backend/model combination (kubestellar/hive#5698).",
         "parameters": [
           {
             "name": "agent",
@@ -4493,7 +4493,7 @@
           "Agents"
         ],
         "summary": "Update an agent's backend/model",
-        "description": "Owner-only. Sets backend and/or model (either may be omitted/empty to leave unchanged), claiming operator ownership of whichever field is set so a pack re-apply cannot revert it. Does not restart the agent itself; syncs the change into the live process config.",
+        "description": "Owner-only. Sets backend and/or model (either may be omitted/empty to leave unchanged), claiming operator ownership of whichever field is set so a pack re-apply cannot revert it. Does not restart the agent itself; syncs the change into the live process config.\n\nPREFERRED when changing BOTH backend and model (kubestellar/hive#5698). This is the only route that applies the pair in one request. Doing it as POST /api/switch/{agent}/{backend} followed by POST /api/model/{agent}/{model} has no transaction across the two calls: if the second fails or times out the agent is left with the new backend and the previous backend's model \u2014 an unlaunchable pair such as `codex --model claude-opus-5` \u2014 which surfaces later as a dead pane rather than as an error at set time. The two-call path also restarts the agent once per call.\n\nKnown gap: this route validates the BACKEND but does not yet validate the model id against live inventory before persisting (kubestellar/hive#5698 phase 2). POST /api/model does validate, but only against the agent's current effective backend and only when that backend's model list can be enumerated, so it cannot check the pair either.",
         "parameters": [
           {
             "name": "name",
