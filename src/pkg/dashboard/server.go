@@ -973,12 +973,32 @@ func (s *Server) Start() error {
 	// on every visit. "/{$}" matches the root path exactly; every other static
 	// path falls through to the plain file server below.
 	if rawIndex, err := fs.ReadFile(staticContent, "index.html"); err == nil {
-		idx := newIndexDocument(rawIndex)
+		// Strings are baked in ONCE here, unlike custom.css which is read per
+		// request: the document carries a precomputed gzip body and a strong
+		// ETag, so its content cannot vary per request without discarding both.
+		// Editing branding.json therefore needs a restart; editing the
+		// stylesheet does not. That asymmetry is documented in branding.md.
+		idx := newIndexDocument(rawIndex, s.loadBranding())
+		// Hand the FINAL served bytes to the CSP layer explicitly, rather than
+		// having newIndexDocument reach out and set global state: constructing a
+		// document should not silently change the process-wide CSP, and a test
+		// building a throwaway document must not shrink the real allowlist.
+		setBrandedIndex(idx.raw)
 		s.mux.Handle("GET /{$}", idx)
 		s.mux.Handle("GET /index.html", idx)
 	} else {
 		s.logger.Warn("embedded index.html unavailable; falling back to plain file serving", "error", err)
 	}
+	// Operator branding override: an optional stylesheet on the data volume,
+	// served at the path the index document links to. Lets a deployment carry
+	// its own colours/logo without forking the embedded SPA or rebuilding the
+	// image — the override is data, not code.
+	//
+	// Read per request (not cached at startup) so dropping a file in takes
+	// effect on reload. It is a single small stylesheet on local disk; the
+	// index document itself remains startup-precompressed.
+	s.mux.HandleFunc("GET /branding/custom.css", s.handleBrandingCSS)
+
 	s.mux.Handle("GET /", http.FileServer(http.FS(staticContent)))
 
 	// authenticate is outermost so the identity headers it injects from a
