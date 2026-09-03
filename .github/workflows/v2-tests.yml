@@ -838,7 +838,7 @@ jobs:
 
   create-issue-on-failure:
     if: (failure() || cancelled()) && github.event_name == 'schedule'
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","hive"]') || 'ubuntu-latest' }}
     needs: [list-packages, test-hub, test-agent, test-rest, test-dashboard-shuffle]
     permissions:
       contents: read
