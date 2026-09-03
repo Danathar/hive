@@ -1,1 +1,0 @@
-- The dashboard can now carry operator branding through configurable product strings, colors, and an optional custom stylesheet ([#5690](https://github.com/kubestellar/hive/pull/5690)). A deployment can override the visible title/brand without patching the bundled UI, while the default experience remains unchanged when no branding config is supplied.
