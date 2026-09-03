@@ -55,7 +55,7 @@ func TestBuildSingleClusterHealth(t *testing.T) {
 	installScriptedKubectl(t)
 
 	cluster := &ClusterConfig{ID: "hive-oke", InCluster: true}
-	health, err := buildSingleClusterHealth(cluster, 2, slog.Default())
+	health, err := buildSingleClusterHealth(cluster, 2, nil, slog.Default())
 	if err != nil {
 		t.Fatalf("buildSingleClusterHealth: %v", err)
 	}
