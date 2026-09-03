@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -9076,6 +9077,22 @@ func initAgentConfigDrivenSystems(cfg *config.Config) {
 		}
 	}
 
+	// DETERMINISTIC LANE ORDER (#5856). classifyLane is first-match-wins over
+	// this slice, and the loop above built it by ranging over cfg.Agents — a Go
+	// MAP, whose iteration order is randomized per range. So an issue matching
+	// two lanes went to whichever of them happened to come out of the map
+	// first, and the winner could differ between two runs of the same binary on
+	// the same config. The reported example matched sec-check on its title
+	// ("security") and scanner on its label; which one it landed in was a coin
+	// flip that nothing recorded.
+	//
+	// Sorting by name is a STABLE order, not a meaningful precedence — it does
+	// not claim architect deserves an issue more than scanner does. What it buys
+	// is reproducibility: the same issue and the same config now classify the
+	// same way every time, so a misroute is a bug someone can chase instead of
+	// an intermittency. Choosing a deliberate precedence between colliding lanes
+	// is a separate call for whoever owns the lane table.
+	sort.Slice(lanes, func(i, j int) bool { return lanes[i].Name < lanes[j].Name })
 	if len(lanes) > 0 {
 		classify.SetLanes(lanes)
 	}
