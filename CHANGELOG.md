@@ -6,6 +6,8 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 - In your PR, add the entry as a fragment file `changelog.d/<category>-<pr-or-slug>.md` (category one of `added`/`changed`/`deprecated`/`fixed`/`security` — see [changelog.d/README.md](changelog.d/README.md)) for user-visible features, fixes, security changes, migrations, deprecations, and breaking changes. Do not append to `## Unreleased
 
+## 2026-09-03 (v4.9.0)
+
 ## 2026-09-03 (v4.8.0)
 
 ## 2026-09-03 (v4.7.0)
