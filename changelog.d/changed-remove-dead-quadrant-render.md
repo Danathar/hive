@@ -1,1 +1,0 @@
-- Removed the unused Go-side hub SVG quadrant renderer; the dashboard uses the maintained JavaScript renderer instead.
