@@ -158,10 +158,13 @@ func TestSharedCredentialBasesCoversClaudeCredentialsPath(t *testing.T) {
 // that fired on them would hand a directory a mode nothing asked for.
 func TestFixEntry_CarveOutIsFileOnly(t *testing.T) {
 	resetPermWarnDedupe()
-	// DevUID is deliberately left pointing at the production dev uid here: this
-	// test user does not own DevUID, so the directory arm below fixEntry's owner
-	// guard cannot run, and anything that changes this directory's mode came
-	// from the carve-out. That is exactly what is being ruled out.
+	// Point DevUID away from the test user's UID so the directory arm below
+	// fixEntry's owner guard cannot run. GitHub's Linux runner happens to use
+	// uid 1001, the production DevUID, so relying on the default made this test
+	// exercise the generic directory repair rather than the credential carve-out.
+	origDevUID := DevUID
+	DevUID = os.Getuid() + 1
+	t.Cleanup(func() { DevUID = origDevUID })
 	path := filepath.Join(t.TempDir(), ".credentials.json")
 	if err := os.Mkdir(path, 0o700); err != nil {
 		t.Fatal(err)

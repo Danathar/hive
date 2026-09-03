@@ -524,6 +524,7 @@ func fixEntry(path string, fi os.FileInfo, logger *slog.Logger) {
 	// so an already-correct file is left byte-identical.
 	if !fi.IsDir() && sharedCredentialBases[filepath.Base(path)] {
 		fixSharedCredentialGroupRead(path, fi.Mode(), stat.Uid, logger)
+		return
 	}
 
 	// Only fix permissions on files we own or just chowned.
