@@ -11534,6 +11534,8 @@ const dashboardHTML = `<!DOCTYPE html>
        install or reconfigure. */
     var GH_APP_STATE_KEY_MISSING = 'key-missing';
     var GH_APP_STATE_KEY_INVALID = 'key-invalid';
+    var GH_APP_STATE_REPO_NOT_COVERED = 'repo-not-covered';
+    var GH_APP_STATE_REPO_MOVED = 'repo-moved';
     var GH_APP_OPERATOR_STATES = {};
     GH_APP_OPERATOR_STATES[GH_APP_STATE_KEY_MISSING] = true;
     GH_APP_OPERATOR_STATES[GH_APP_STATE_KEY_INVALID] = true;
@@ -11551,6 +11553,8 @@ const dashboardHTML = `<!DOCTYPE html>
       var s = String(state || '').trim();
       if (s === 'wrong-installation') return 'wrong installation (installation_id points at another account)';
       if (s === 'write-forbidden') return 'write forbidden (repo not in the App installation)';
+      if (s === GH_APP_STATE_REPO_NOT_COVERED) return 'repo not covered (repo not ticked in the App installation)';
+      if (s === GH_APP_STATE_REPO_MOVED) return 'repo moved (hive config still points at the old account)';
       if (s === 'no-app-assigned') return 'no App assigned yet';
       return 'permissions insufficient';
     }
