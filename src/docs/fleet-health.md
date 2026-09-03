@@ -250,6 +250,7 @@ them is simply not judged on them.
 | Symptom on `/fleet` | What it means | Fix, and where |
 |---|---|---|
 | "GitHub App broken" / "GitHub App: repo-not-covered" | The hive cannot authenticate to its repo, or the App is installed but this repo is not selected | Install or repair the App; for repo-not-covered, add the repo to the App installation. Follow the row's **open** link, or see [GitHub App setup](github-app-setup.md) |
+| "GitHub App: repo-moved" | The App installation is healthy, but it covers this hive's repositories under a **different account** — they were transferred to another org | Point the hive's configured organization at the account named in the message. Do **not** add the repo to the old org's installation: it has left that account, so there is nothing there to add |
 | "provider spending limit reached — N refused calls" | The model provider is refusing calls on billing/limit grounds | Raise the provider's spending limit or wait for it to reset (provider console — no hint link) |
 | "budget exhausted — spend X of Y, kicks suppressed" | The hive spent its window's tokens; the governor halted kicks | Raise the limit in the spoke dashboard (Settings → Budget), or wait for the window to roll |
 | "budget limit misconfigured (N tokens) …" | The limit is too small to fund one model call — likely a unit mistake | Fix the number in Settings → Budget. Window reset will **not** help |
