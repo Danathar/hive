@@ -29,7 +29,7 @@ var realFetchCommitCompareStatus func(base, head string, logger *slog.Logger) (s
 // seeds the SHA cache with the fixture value "target1" and calls
 // handleHubSelfUpgrade, producing a literal
 //
-//	kubectl set image deployment/hive-hub hub=ghcr.io/kubestellar/hive-hub:target1 -n hive-hub
+//	kubectl set image deployment/hive-hub hub=ghcr.io/hivecommons/hive-hub:target1 -n hive-hub
 //
 // against the live cluster. `target1` was never a published tag, so the new
 // ReplicaSet went ImagePullBackOff while the old one kept serving — the hub
@@ -45,6 +45,8 @@ func TestMain(m *testing.M) {
 	// KUBECONFIG could equally point a real kubectl at a real cluster for the
 	// non-InCluster branch, so neutralize it to a path that cannot exist.
 	os.Setenv("KUBECONFIG", os.DevNull)
+	k8sTokenPath = "testdata/no-such-serviceaccount-token"
+	k8sCACertPath = "testdata/no-such-serviceaccount-ca.crt"
 
 	// Provider and forge credentials. The suite is run inside hive pods and on
 	// developer machines whose environment carries REAL keys, and handlers

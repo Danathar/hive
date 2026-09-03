@@ -266,6 +266,14 @@ jobs:
             GIT_BRANCH=${{ github.ref_name }}
           # Monotonic moving-tag guard metadata (#4804). This config label is
           # inherited by each platform manifest without changing its media type.
+          # ORG-MIGRATION KEEP DECISION (kubestellar -> hivecommons): the
+          # io.kubestellar.hive.* label PREFIX is deliberately NOT renamed. It is
+          # a data-format identifier baked into every already-published manifest
+          # and read back by consumers (the moving-tag guard and
+          # src/deploy/test_standalone_runtime_parity.sh), not an org pointer;
+          # renaming it would make old and new images disagree on the same
+          # field. The identical labels in build-contributor and build-hub
+          # below keep the prefix for the same reason.
           labels: |
             io.kubestellar.hive.github-actions-run-number=${{ github.run_number }}
             org.opencontainers.image.revision=${{ github.sha }}
@@ -424,7 +432,7 @@ jobs:
           src/scripts/publish-image-tags.sh \
             ghcr.io/${{ github.repository_owner }}/hive /tmp/digests \
             '${{ github.ref_name }}' '${{ github.sha }}' '${{ github.run_number }}' \
-            v4 false stable,candidate
+            v4 true stable,candidate
 
       # ---- Cross-org mirror (kubestellar <-> hivecommons dual-publish) ----
       # Copy the tags just published above into the other org's GHCR
@@ -486,7 +494,7 @@ jobs:
           GIT_SHA: ${{ github.sha }}
           # These three mirror publish-image-tags.sh's positional args in the
           # publish step above — keep them in lockstep with that call.
-          INCLUDE_LATEST: "false"
+          INCLUDE_LATEST: "true"
           RELEASE_BRANCH: "v4"
           CHANNELS: "stable,candidate"
         run: |

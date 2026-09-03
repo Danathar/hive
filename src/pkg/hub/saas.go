@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/hivecommons/hive/pkg/config"
+	"golang.org/x/net/publicsuffix"
 )
 
 var saasUsersDir = "/data/saas/users"
@@ -1089,16 +1090,72 @@ func isNonBrowserAPIRequest(r *http.Request) bool {
 	return true
 }
 
+const (
+	defaultHubPublicURL          = "https://hive.kubestellar.io"
+	defaultHubCanonicalHost      = "hive.kubestellar.io"
+	defaultHubSpokeDomain        = "hive.kubestellar.io"
+	defaultLegacyHubCookieDomain = ".hive.kubestellar.io"
+)
+
+// hubPublicURL is the canonical public origin used to build absolute URLs.
+func hubPublicURL() string {
+	if v := strings.TrimSpace(os.Getenv("HIVE_HUB_PUBLIC_URL")); v != "" {
+		return strings.TrimRight(v, "/")
+	}
+	return defaultHubPublicURL
+}
+
+// oauthRedirectURI is the single OAuth/OIDC callback registered on every
+// provider's side. All providers share one callback path; the state parameter
+// carries which provider to complete against.
+func oauthRedirectURI() string {
+	return hubPublicURL() + "/api/auth/callback"
+}
+
 // hubCanonicalHost is the ONE host that serves the hub's own dashboard and API.
 // Every legitimate browser mutation against the hub is issued by a document
 // loaded from this host — tenant spokes are separate origins that talk to the
 // hub through their own proxy, never by scripting a cross-origin POST at it.
-const hubCanonicalHost = "hive.kubestellar.io"
+func hubCanonicalHost() string {
+	u, err := url.Parse(hubPublicURL())
+	if err != nil || u.Hostname() == "" {
+		return defaultHubCanonicalHost
+	}
+	return strings.ToLower(u.Hostname())
+}
 
-// hubDomainSuffix is the shared parent domain the hosted tenants live under
-// (<id>.hive.kubestellar.io). It is a REDIRECT-trust boundary only — see
-// isTrustedRedirectTarget — and deliberately NOT a CSRF or CORS boundary.
-const hubDomainSuffix = ".hive.kubestellar.io"
+// hubSpokeDomain is the shared parent domain the hosted tenants live under
+// (<id>.hive.kubestellar.io by default). It is a REDIRECT-trust boundary only
+// — see isTrustedRedirectTarget — and deliberately NOT a CSRF or CORS boundary.
+func hubSpokeDomain() string {
+	if v := strings.TrimSpace(os.Getenv("HIVE_HUB_SPOKE_DOMAIN")); v != "" {
+		return strings.TrimPrefix(strings.TrimSuffix(strings.ToLower(v), "."), ".")
+	}
+	return defaultHubSpokeDomain
+}
+
+func hubDomainSuffix() string {
+	return "." + hubSpokeDomain()
+}
+
+func legacyHubCookieDomain() string {
+	v := strings.TrimSpace(os.Getenv("HIVE_HUB_LEGACY_COOKIE_DOMAIN"))
+	if v == "" {
+		return ""
+	}
+	return "." + strings.TrimPrefix(strings.TrimSuffix(strings.ToLower(v), "."), ".")
+}
+
+func legacySessionCookieDomains(liveDomain string) []string {
+	var domains []string
+	if liveDomain != "" && liveDomain != defaultLegacyHubCookieDomain {
+		domains = append(domains, defaultLegacyHubCookieDomain)
+	}
+	if legacy := legacyHubCookieDomain(); legacy != "" && legacy != liveDomain && legacy != defaultLegacyHubCookieDomain {
+		domains = append(domains, legacy)
+	}
+	return domains
+}
 
 // sessionCookieParentDomain is the registrable parent domain the hub session
 // cookie is scoped to, so first-party sibling products on other kubestellar.io
@@ -1106,10 +1163,13 @@ const hubDomainSuffix = ".hive.kubestellar.io"
 // GET /api/saas/whoami. Derived from hubCanonicalHost (its parent domain)
 // rather than spelled out so the two can never disagree.
 func sessionCookieParentDomain() string {
-	if _, parent, ok := strings.Cut(hubCanonicalHost, "."); ok {
+	if parent, err := publicsuffix.EffectiveTLDPlusOne(hubCanonicalHost()); err == nil {
 		return parent
 	}
-	return hubCanonicalHost
+	if _, parent, ok := strings.Cut(hubCanonicalHost(), "."); ok {
+		return parent
+	}
+	return hubCanonicalHost()
 }
 
 // sessionCookieDomain returns the Domain attribute the hub session cookie
@@ -1177,7 +1237,7 @@ func isSameOriginAsHub(raw string) bool {
 	if !ok {
 		return false
 	}
-	return host == hubCanonicalHost || host == "localhost" || host == "127.0.0.1"
+	return host == hubCanonicalHost() || host == "localhost" || host == "127.0.0.1"
 }
 
 // isTrustedRedirectTarget reports whether raw is a URL the hub may bounce a
@@ -1202,8 +1262,8 @@ func isTrustedRedirectTarget(raw string) bool {
 	if !ok {
 		return false
 	}
-	return host == hubCanonicalHost ||
-		strings.HasSuffix(host, hubDomainSuffix) ||
+	return host == hubCanonicalHost() ||
+		strings.HasSuffix(host, hubDomainSuffix()) ||
 		host == "localhost" ||
 		host == "127.0.0.1"
 }
@@ -2192,6 +2252,15 @@ type PerClusterHealth struct {
 	// weeks precisely because nothing distinguished "none" from "nobody
 	// checked". See orphaned_pod_visibility.go.
 	StuckPods *StuckPodReport `json:"stuck_pods,omitempty"`
+	// LeakedNamespaces reports hive-hosted-* namespaces the cluster holds that
+	// this hub has no hive record for — provisioning namespaces that were
+	// created and never torn down (#5768). Nil means the hub could not
+	// determine it (unreachable cluster, pull-only pool, failed listing, or an
+	// empty hive registry, which cannot be told apart from an unreadable one);
+	// a non-nil report with Total 0 means it looked and the cluster is clean.
+	// Those must not render alike, for the same reason StuckPods above draws
+	// the distinction. See leaked_hosted_namespace.go.
+	LeakedNamespaces *LeakedNamespaceReport `json:"leaked_namespaces,omitempty"`
 }
 
 type ClusterHealthResponse struct {
@@ -2260,7 +2329,8 @@ func buildClusterHealth(s *HubServer) (*ClusterHealthResponse, error) {
 		hiveIDsByCluster[clusterID][hiveID] = true
 		allHiveIDs[hiveID] = true
 	}
-	for _, sh := range listSaaSHives() {
+	saasHives, saasHivesReadable := listSaaSHivesWithReadStatus()
+	for _, sh := range saasHives {
 		addHive(clusterIDForSaaSHive(sh), sh.ID)
 	}
 	s.mu.RLock()
@@ -2279,6 +2349,20 @@ func buildClusterHealth(s *HubServer) (*ClusterHealthResponse, error) {
 	}
 	totalHiveCount := len(allHiveIDs)
 
+	// One registry snapshot for the whole health build, so two clusters queried
+	// in parallel cannot disagree about which namespaces are accounted for.
+	// Built from the UNION of the on-disk SaaS hive records and the in-memory
+	// registry — the widest set of "the hub knows about this id" available —
+	// because the leak predicate convicts a namespace for being absent from it,
+	// and a narrower set would convict namespaces that are merely recorded
+	// somewhere else. See leaked_hosted_namespace.go.
+	var knownHostedNamespaces map[string]struct{}
+	if saasHivesReadable {
+		knownHostedNamespaces = hostedNamespacesForHiveIDs(allHiveIDs)
+	} else if s.logger != nil {
+		s.logger.Warn("leaked-namespace detection disabled: SaaS hive directory could not be read")
+	}
+
 	// Query all clusters in parallel.
 	type clusterResult struct {
 		health PerClusterHealth
@@ -2293,7 +2377,7 @@ func buildClusterHealth(s *HubServer) (*ClusterHealthResponse, error) {
 		ch := make(chan clusterResult, 1)
 		results[c.ID] = clusterQuery{cluster: c, ch: ch}
 		go func(cluster ClusterConfig) {
-			health, err := buildSingleClusterHealth(&cluster, hiveCounts[cluster.ID], s.logger)
+			health, err := buildSingleClusterHealth(&cluster, hiveCounts[cluster.ID], knownHostedNamespaces, s.logger)
 			ch <- clusterResult{health: health, err: err}
 		}(c)
 	}
@@ -2448,7 +2532,11 @@ func clusterHealthQueryTimeoutFor(cluster *ClusterConfig) time.Duration {
 var errClusterPullOnly = errors.New("cluster is pull-only: not reachable from the hub")
 
 // buildSingleClusterHealth queries a single cluster for node health data.
-func buildSingleClusterHealth(cluster *ClusterConfig, hiveCount int, logger *slog.Logger) (PerClusterHealth, error) {
+// knownHostedNamespaces is the fleet-wide set of hosted namespace names the
+// hub has a hive for, threaded in from buildClusterHealth rather than re-read
+// here so every cluster in one health build judges leaks against the SAME
+// registry snapshot. See hostedNamespacesForHiveIDs.
+func buildSingleClusterHealth(cluster *ClusterConfig, hiveCount int, knownHostedNamespaces map[string]struct{}, logger *slog.Logger) (PerClusterHealth, error) {
 	if cluster.PullOnly {
 		// Node-level health comes from kubectl, which cannot run here. This is
 		// not a new failure mode: the caller already falls back to the health
@@ -2754,6 +2842,27 @@ func buildSingleClusterHealth(cluster *ClusterConfig, hiveCount int, logger *slo
 				"cluster", cluster.ID,
 				"stuck_pods", stuck.Total,
 				"namespaces_affected", stuck.NamespacesAffected)
+		}
+	}
+
+	// Leaked hosted-namespace count (#5768 ask 3). READ-ONLY: one extra
+	// `kubectl get namespaces`. It cannot reuse any listing above — the pod
+	// queries cannot see a namespace whose pods are gone, and the
+	// registry-derived sweeps cannot see a namespace with no registry entry by
+	// construction, which is exactly the leak class.
+	//
+	// Best-effort: nil on failure or on an empty registry, so a cluster the hub
+	// could not interrogate reports UNKNOWN rather than a reassuring zero.
+	if leaked := collectLeakedHostedNamespaces(ctx, cluster, timeout, knownHostedNamespaces, time.Now(), logger); leaked != nil {
+		result.LeakedNamespaces = leaked
+		// A non-zero count is a standing quota/PVC leak on a shared cluster, and
+		// permanent noise in any surface that reads pod issues — the console
+		// canary that found this read 76 stuck pods across these namespaces.
+		// Nothing deletes them, so this stays warm until a human acts.
+		if leaked.Total > 0 && logger != nil {
+			logger.Warn("cluster holds hive-hosted namespaces with no hive record — leaked provisioning namespaces, nothing will reclaim them",
+				"cluster", cluster.ID,
+				"leaked_namespaces", leaked.Total)
 		}
 	}
 
@@ -3581,6 +3690,7 @@ func (s *HubServer) handleMyHives(w http.ResponseWriter, r *http.Request) {
 					})
 				}
 			}
+			pending = s.decoratePendingAccessRequests(pending)
 			result[i].PendingRequestCount = len(pending)
 			result[i].PendingRequests = pending
 		}
@@ -4856,7 +4966,7 @@ func (s *HubServer) handleSwitchBranch(w http.ResponseWriter, r *http.Request) {
 	ns := "hive-hosted-" + id
 	// A channel IS the tag ("stable"); a branch's moving tag is "<branch>-latest".
 	imageTag := upgradeTargetTag(body.Branch)
-	image := "ghcr.io/kubestellar/hive:" + imageTag
+	image := "ghcr.io/hivecommons/hive:" + imageTag
 	// Refuse a branch name that sanitizes into something that is not a valid
 	// channel tag, rather than stranding the spoke on ImagePullBackOff behind a
 	// still-serving old ReplicaSet.
@@ -5325,8 +5435,8 @@ var (
 // chasing a SHA whose hub image was never pushed, and the rollout falls back to
 // a stale cached image.
 const (
-	ghcrRepoSpoke = "kubestellar/hive"
-	ghcrRepoHub   = "kubestellar/hive-hub"
+	ghcrRepoSpoke = "hivecommons/hive"
+	ghcrRepoHub   = "hivecommons/hive-hub"
 
 	// hubDeploymentName / hubContainerName / hubNamespace identify the hub's own
 	// Kubernetes objects for self-upgrade. NOTE the container is named "hub", not
@@ -5434,7 +5544,7 @@ var (
 const imageBranchCacheTTL = 5 * time.Minute
 
 // discoveredImageBranches returns branch names inferred from published
-// ghcr.io/kubestellar/hive:<branch>-latest tags (cached). A tag with a '-'
+// ghcr.io/hivecommons/hive:<branch>-latest tags (cached). A tag with a '-'
 // that our sanitizer would have produced can't be reversed unambiguously, so
 // we only surface tags that round-trip: the tag minus the "-latest" suffix.
 // Slashless branches (v2, mk) round-trip exactly; slashed branches
@@ -5481,12 +5591,12 @@ func discoveredImageBranches() []string {
 	return branches
 }
 
-// listRepoBranches returns the names of branches on kubestellar/hive via the
+// listRepoBranches returns the names of branches on hivecommons/hive via the
 // GitHub API (paginated). Best-effort: returns nil on any failure so callers
 // treat "unknown" as "don't filter" rather than hiding valid branches.
 func listRepoBranches(client *http.Client) []string {
 	var names []string
-	url := githubAPIBase + "/repos/kubestellar/hive/branches?per_page=100"
+	url := githubAPIBase + "/repos/hivecommons/hive/branches?per_page=100"
 	const maxPages = 10
 	for page := 0; url != "" && page < maxPages; page++ {
 		req, _ := http.NewRequest("GET", url, nil)
@@ -5527,10 +5637,10 @@ func nextGitHubLink(link string) string {
 }
 
 // listLatestImageBranches queries the GHCR tag list for
-// ghcr.io/kubestellar/hive and returns the branch name of every "<x>-latest"
+// ghcr.io/hivecommons/hive and returns the branch name of every "<x>-latest"
 // tag (the "<x>" part).
 func listLatestImageBranches(client *http.Client) []string {
-	tokenResp, err := client.Get(ghcrBase + "/token?scope=repository:kubestellar/hive:pull")
+	tokenResp, err := client.Get(ghcrBase + "/token?scope=repository:hivecommons/hive:pull")
 	if err != nil {
 		return nil
 	}
@@ -5547,7 +5657,7 @@ func listLatestImageBranches(client *http.Client) []string {
 	// "<branch>-latest" tags we want may live on a later page — follow Link
 	// until exhausted (bounded) rather than reading only the first page.
 	branchSet := map[string]struct{}{}
-	next := ghcrBase + "/v2/kubestellar/hive/tags/list?n=1000"
+	next := ghcrBase + "/v2/hivecommons/hive/tags/list?n=1000"
 	const maxPages = 20 // bound: up to ~20k tags
 	for page := 0; next != "" && page < maxPages; page++ {
 		req, _ := http.NewRequest("GET", next, nil)
@@ -6553,7 +6663,7 @@ func fetchBranchSHA(logger *slog.Logger, branch string) {
 	// Step 1: get the latest commit SHA on the branch from the GitHub API
 	const shaFetchTimeout = 10 * time.Second
 	client := &http.Client{Timeout: shaFetchTimeout}
-	branchURL := fmt.Sprintf("%s/repos/kubestellar/hive/branches/%s", githubAPIBase, branch)
+	branchURL := fmt.Sprintf("%s/repos/hivecommons/hive/branches/%s", githubAPIBase, branch)
 	req, _ := http.NewRequest("GET", branchURL, nil)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	resp, err := client.Do(req)
@@ -6650,7 +6760,7 @@ func fetchBranchSHA(logger *slog.Logger, branch string) {
 }
 
 // dockerWorkflowFile is the workflow that builds and pushes the container
-// images (ghcr.io/kubestellar/hive:<branch>-latest and :<short-sha>) on
+// images (ghcr.io/hivecommons/hive:<branch>-latest and :<short-sha>) on
 // every push to a tracked branch.
 const dockerWorkflowFile = "docker.yml"
 
@@ -6659,7 +6769,7 @@ const dockerWorkflowFile = "docker.yml"
 // unavailable so the caller can keep the last-known status instead of
 // flapping ready/building on transient errors.
 func fetchImageBuildStatus(client *http.Client, fullSHA string, logger *slog.Logger) string {
-	runsURL := fmt.Sprintf("%s/repos/kubestellar/hive/actions/workflows/%s/runs?head_sha=%s&per_page=1", githubAPIBase, dockerWorkflowFile, fullSHA)
+	runsURL := fmt.Sprintf("%s/repos/hivecommons/hive/actions/workflows/%s/runs?head_sha=%s&per_page=1", githubAPIBase, dockerWorkflowFile, fullSHA)
 	req, _ := http.NewRequest("GET", runsURL, nil)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	resp, err := client.Do(req)
@@ -6702,7 +6812,7 @@ func fetchImageBuildStatus(client *http.Client, fullSHA string, logger *slog.Log
 // Uses a separate endpoint that's less likely to be rate-limited since it's called
 // only once per new SHA (not every poll cycle).
 func fetchCommitMessage(client *http.Client, fullSHA string, logger *slog.Logger) string {
-	commitURL := fmt.Sprintf("%s/repos/kubestellar/hive/commits/%s", githubAPIBase, fullSHA)
+	commitURL := fmt.Sprintf("%s/repos/hivecommons/hive/commits/%s", githubAPIBase, fullSHA)
 	req, _ := http.NewRequest("GET", commitURL, nil)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	resp, err := client.Do(req)
@@ -7430,6 +7540,28 @@ func loadAccessRequests(hiveID string) []AccessRequest {
 	return reqs
 }
 
+func (s *HubServer) decoratePendingAccessRequests(reqs []PendingAccessRequest) []PendingAccessRequest {
+	for i := range reqs {
+		username := strings.TrimSpace(reqs[i].Username)
+		if username == "" {
+			continue
+		}
+		label, avatar := s.displayIdentity(username)
+		reqs[i].DisplayLabel = label
+		reqs[i].AvatarURL = avatar
+		if u := loadSaaSUser(username); u != nil {
+			reqs[i].Provider = grantableUserProvider(u)
+			continue
+		}
+		if provider, _ := splitIdentityKey(username); provider != "" {
+			reqs[i].Provider = normalizeIdentityProvider(provider)
+		} else {
+			reqs[i].Provider = legacyProvider
+		}
+	}
+	return reqs
+}
+
 func saveAccessRequests(hiveID string, reqs []AccessRequest) {
 	if strings.Contains(hiveID, "..") || strings.Contains(hiveID, "/") || strings.Contains(hiveID, "\\") {
 		slog.Warn("saveAccessRequests: invalid hiveID", "hiveID", hiveID)
@@ -7541,12 +7673,17 @@ func (s *HubServer) handleGetRequests(w http.ResponseWriter, r *http.Request) {
 	}
 
 	reqs := loadAccessRequests(hiveID)
-	pending := make([]AccessRequest, 0)
+	pending := make([]PendingAccessRequest, 0)
 	for _, req := range reqs {
 		if req.Status == "pending" {
-			pending = append(pending, req)
+			pending = append(pending, PendingAccessRequest{
+				Username:    req.Username,
+				RequestedAt: req.RequestedAt,
+				Note:        req.Note,
+			})
 		}
 	}
+	pending = s.decoratePendingAccessRequests(pending)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"requests": pending})
@@ -7806,9 +7943,11 @@ type ProvisionRequest struct {
 	// for an approval — which hive the requester actually got. That made the
 	// history unauditable: an approved request and a denied one looked equally
 	// anonymous. Empty on records decided before these fields existed.
-	DecidedBy    string `json:"decided_by,omitempty"`
-	DecidedAt    string `json:"decided_at,omitempty"`
-	AssignedHive string `json:"assigned_hive,omitempty"`
+	DecidedBy string `json:"decided_by,omitempty"`
+	// DecidedByName is the display-only label for DecidedBy, resolved on read.
+	DecidedByName string `json:"decided_by_name,omitempty"`
+	DecidedAt     string `json:"decided_at,omitempty"`
+	AssignedHive  string `json:"assigned_hive,omitempty"`
 	// DenyReason is the optional free-text explanation shown back to the
 	// requester when a request is turned down.
 	DenyReason string `json:"deny_reason,omitempty"`
@@ -7963,6 +8102,7 @@ func enrichProvisionRequests(requests []ProvisionRequest) []ProvisionRequest {
 		return requests
 	}
 	users := listAllSaaSUsers()
+	label := (&HubServer{}).identityLabeler()
 	for i := range requests {
 		if requests[i].UserID == "" {
 			requests[i].UserID, requests[i].UserIDSource = provisionRequestUserIdentity(requests[i].Username, provisionRequestUserFromRoster(requests[i].Username, users), requests[i].FullName)
@@ -7970,6 +8110,9 @@ func enrichProvisionRequests(requests []ProvisionRequest) []ProvisionRequest {
 			if requests[i].UserID == requests[i].Username {
 				requests[i].UserIDSource = "native"
 			}
+		}
+		if l := label(requests[i].DecidedBy); l != requests[i].DecidedBy {
+			requests[i].DecidedByName = l
 		}
 		requests[i].AssignedRole = roleForUserOnHive(requests[i].Username, requests[i].AssignedHive, users)
 		requests[i].OtherHives = hivesForUser(requests[i].Username, requests[i].AssignedHive, users)
@@ -10443,7 +10586,7 @@ const dashboardHTML = `<!DOCTYPE html>
         <p style="margin-top:8px;padding:8px 14px;border:1px solid var(--line);border-radius:8px;background:rgba(244,199,95,0.08);font-size:0.85rem">👋 New to Hive? Read the <a href="https://docs.kubestellar.io/docs/hive/getting-started" target="_blank" rel="noopener" style="color:var(--amber);font-weight:700">Getting Started Guide</a> before diving in.</p>
         <p id="latest-image-sha" style="font-size:0.7rem;color:var(--muted);margin-top:4px"></p>
         <!-- Image-pulls bar chart: per-release container-image PULLS of the
-             public spoke image (ghcr.io/kubestellar/hive), bucketed by the
+             public spoke image (ghcr.io/hivecommons/hive), bucketed by the
              ACTIVE release line's release boundaries (the line the "stable"
              channel currently resolves to — v4 today, v5 after the next
              rollover, with no code change). Gauges external adoption beyond
@@ -10453,7 +10596,7 @@ const dashboardHTML = `<!DOCTYPE html>
              which also fills the per-line mini charts in the
              "Latest available images" rows. Hidden until there is data. -->
         <div id="image-pulls-spark" style="display:none;margin-top:8px"
-             title="Container-image pulls per release of the active release line: the pulls that landed while each of the last ~10 releases was the newest, of the public hive image (ghcr.io/kubestellar/hive). Derived from GitHub's cumulative download counter — pulls, not unique downloads."></div>
+             title="Container-image pulls per release of the active release line: the pulls that landed while each of the last ~10 releases was the newest, of the public hive image (ghcr.io/hivecommons/hive). Derived from GitHub's cumulative download counter — pulls, not unique downloads."></div>
       </div>
       <div style="display:flex;gap:8px;align-items:center">
         <button class="btn-primary" id="btn-send-banner-top" style="display:none;background:#d97706" onclick="_bannerTargetHive=null;document.getElementById('banner-modal').style.display='flex';loadBannerHiveList()">Send Banner</button>
@@ -11391,6 +11534,8 @@ const dashboardHTML = `<!DOCTYPE html>
        install or reconfigure. */
     var GH_APP_STATE_KEY_MISSING = 'key-missing';
     var GH_APP_STATE_KEY_INVALID = 'key-invalid';
+    var GH_APP_STATE_REPO_NOT_COVERED = 'repo-not-covered';
+    var GH_APP_STATE_REPO_MOVED = 'repo-moved';
     var GH_APP_OPERATOR_STATES = {};
     GH_APP_OPERATOR_STATES[GH_APP_STATE_KEY_MISSING] = true;
     GH_APP_OPERATOR_STATES[GH_APP_STATE_KEY_INVALID] = true;
@@ -11408,6 +11553,8 @@ const dashboardHTML = `<!DOCTYPE html>
       var s = String(state || '').trim();
       if (s === 'wrong-installation') return 'wrong installation (installation_id points at another account)';
       if (s === 'write-forbidden') return 'write forbidden (repo not in the App installation)';
+      if (s === GH_APP_STATE_REPO_NOT_COVERED) return 'repo not covered (repo not ticked in the App installation)';
+      if (s === GH_APP_STATE_REPO_MOVED) return 'repo moved (hive config still points at the old account)';
       if (s === 'no-app-assigned') return 'no App assigned yet';
       return 'permissions insufficient';
     }
@@ -12762,6 +12909,7 @@ const dashboardHTML = `<!DOCTYPE html>
        paint are stored, but a huge fleet could still overflow the ~5 MB quota
        and make every write fail. */
     var HIVES_CACHE_MAX_ROWS = 200;
+    var _expandedPendingRows = new Set();
 
     function readHivesCache() {
       try {
@@ -15646,7 +15794,7 @@ const dashboardHTML = `<!DOCTYPE html>
        no frontend change — and (b) a mini per-line chart in each
        "Latest available images" row from data.lines. One bar per release,
        newest on the right. Gauges external adoption of the public spoke image
-       (ghcr.io/kubestellar/hive) beyond the hosted fleet. Honest labelling:
+       (ghcr.io/hivecommons/hive) beyond the hosted fleet. Honest labelling:
        derived from GitHub's cumulative download counter (pulls, NOT unique
        downloads; GitHub publishes one package-wide counter, not per-tag). Cold
        start (fewer than two release snapshots → no window can be closed yet)
@@ -16186,6 +16334,19 @@ const dashboardHTML = `<!DOCTYPE html>
         '<div style="margin-top:10px;text-align:left;max-height:220px;overflow:auto">' + failedRows + '</div>', true);
     }
 
+    function pruneExpandedPendingRows(allHives) {
+      if (!_expandedPendingRows || !_expandedPendingRows.size) return;
+      var pendingHiveIds = new Set();
+      (allHives || []).forEach(function(h) {
+        if (h && h.id && h.pendingRequestCount > 0 && roleAtLeast(h.role, 'read-write') && (h.pending_requests || []).length > 0) {
+          pendingHiveIds.add(String(h.id));
+        }
+      });
+      _expandedPendingRows.forEach(function(hiveId) {
+        if (!pendingHiveIds.has(hiveId)) _expandedPendingRows.delete(hiveId);
+      });
+    }
+
     /* True while any row's branch/channel dropdown is open. renderHives
        rebuilds the row DOM, which would destroy the open menu mid-click —
        the fleet heartbeats change some hive field on nearly every poll, so
@@ -16236,6 +16397,7 @@ const dashboardHTML = `<!DOCTYPE html>
          next render call (poll tick, or the catch-up fired when the menu
          closes) sees a stale _lastHivesJSON and repaints normally. */
       if (branchMenuOpen()) return;
+      pruneExpandedPendingRows(allHives);
       /* The signature must include EVERY piece of render-affecting view state,
          otherwise changing it while the hive data is unchanged is silently a
          no-op — toggling a chip, drilling into an alert type, expanding the
@@ -16789,20 +16951,29 @@ const dashboardHTML = `<!DOCTYPE html>
         var pendingExpandRow = '';
         if (h.pendingRequestCount > 0 && (roleAtLeast(h.role, 'read-write')) && (h.pending_requests || []).length > 0) {
           var prItems = (h.pending_requests || []).map(function(pr) {
-            var avatar = linkedAvatar(pr.username, LIST_AVATAR_PX, pr.username, 'margin-right:6px');
+            var rawUser = String(pr.username || '');
+            var userLabel = String(pr.display_label || rawUser);
+            var provider = pr.provider || identityProviderFromKey(rawUser);
+            var avatar = (provider === 'github' && rawUser.indexOf(':') === -1)
+              ? linkedAvatar(rawUser, LIST_AVATAR_PX, userLabel, 'margin-right:6px')
+              : userAvatar({display_name: userLabel, avatar_url: pr.avatar_url, github_username: rawUser}, LIST_AVATAR_PX, 'margin-right:6px');
+            var authKey = userLabel && rawUser && userLabel !== rawUser
+              ? '<span style="display:block;font-size:0.68rem;color:var(--muted);word-break:break-word" title="Auth key">' + esc(rawUser) + '</span>'
+              : '';
             var note = (pr.note || '').trim();
             var noteHtml = note
               ? '<div style="margin-top:4px;font-size:0.75rem;color:var(--text);white-space:pre-wrap;word-break:break-word;background:rgba(0,0,0,0.15);border-left:2px solid var(--accent);padding:4px 8px;border-radius:2px">' + esc(note) + '</div>'
               : '<div style="margin-top:4px;font-size:0.72rem;color:var(--muted);font-style:italic">(no note)</div>';
             return '<div style="padding:6px 0;border-bottom:1px solid var(--border)">' +
               '<div style="display:flex;align-items:center;justify-content:space-between">' +
-              '<div>' + avatar + '<span style="font-size:0.85rem">' + esc(pr.username) + '</span></div>' +
+              '<div>' + avatar + '<span style="font-size:0.85rem">' + esc(userLabel || rawUser) + '</span>' + authKey + '</div>' +
               '<div style="display:flex;gap:4px">' +
               '<button onclick="inlineApproveAccess(\'' + esc(h.id) + '\',\'' + esc(pr.username) + '\',this)" style="padding:2px 8px;background:var(--green);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:0.65rem">Approve</button>' +
               '<button onclick="inlineDenyAccess(\'' + esc(h.id) + '\',\'' + esc(pr.username) + '\',this)" style="padding:2px 8px;background:var(--red);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:0.65rem">Deny</button>' +
               '</div></div>' + noteHtml + '</div>';
           }).join('');
-          pendingExpandRow = '<tr id="pending-row-' + esc(h.id) + '"' + ((i % 2 === 1) ? ' class="hive-row-alt"' : '') + ' style="display:none"><td colspan="' + TOTAL_COLUMNS + '"><div style="padding:8px 16px;background:rgba(59,130,246,0.05);border-radius:6px;margin:4px 0">' + prItems + '</div></td></tr>';
+          var pendingRowStyle = _expandedPendingRows.has(String(h.id || '')) ? '' : 'display:none';
+          pendingExpandRow = '<tr id="pending-row-' + esc(h.id) + '"' + ((i % 2 === 1) ? ' class="hive-row-alt"' : '') + ' style="' + pendingRowStyle + '"><td colspan="' + TOTAL_COLUMNS + '"><div style="padding:8px 16px;background:rgba(59,130,246,0.05);border-radius:6px;margin:4px 0">' + prItems + '</div></td></tr>';
         }
         /* Stable per-hive anchor so the "Attention needed" panel can scroll a
            specific row into view and highlight it. Built from the hive id, which
@@ -17758,8 +17929,16 @@ const dashboardHTML = `<!DOCTYPE html>
     }
 
     function togglePendingRow(hiveId) {
+      var key = String(hiveId || '');
       var row = document.getElementById('pending-row-' + hiveId);
-      if (row) row.style.display = row.style.display === 'none' ? '' : 'none';
+      if (!row) {
+        _expandedPendingRows.delete(key);
+        return;
+      }
+      var opening = row.style.display === 'none';
+      row.style.display = opening ? '' : 'none';
+      if (opening) _expandedPendingRows.add(key);
+      else _expandedPendingRows.delete(key);
     }
 
     async function inlineApproveAccess(hiveId, username, btn) {
@@ -18142,7 +18321,7 @@ const dashboardHTML = `<!DOCTYPE html>
           '<td style="white-space:nowrap">' + acmmBadge(pr.acmm_level) + '</td>' +
           '<td style="white-space:nowrap;color:var(--muted);font-size:0.7rem">' + esc((pr.requested_at || '').substring(0, 10)) + '</td>' +
           '<td style="white-space:nowrap"><span style="color:' + color + ';font-weight:600;font-size:0.72rem">' + esc(pr.status) + '</span></td>' +
-          '<td style="white-space:nowrap">' + esc(pr.decided_by || '—') + '</td>' +
+          '<td style="white-space:nowrap">' + esc(pr.decided_by_name || pr.decided_by || '—') + '</td>' +
           '<td style="white-space:nowrap;color:var(--muted);font-size:0.7rem">' + esc((pr.decided_at || '').substring(0, 10) || '—') + '</td>' +
           '<td>' + outcome + '</td>' +
           '<td>' + otherHivesCell(pr.other_hives) + '</td>' +
@@ -18220,6 +18399,11 @@ const dashboardHTML = `<!DOCTYPE html>
 
     var _provisionRequestsByUser = {};
 
+    function provisionRequesterDisplay(username) {
+      var pr = _provisionRequestsByUser[username] || {username: username};
+      return provisionRequesterPrimary(pr) || String(username || '');
+    }
+
     /* openAssignForUser is the entry point from a click on a user in the admin
        users table. It routes to whichever existing flow fits, rather than adding
        a third assign path:
@@ -18254,7 +18438,7 @@ const dashboardHTML = `<!DOCTYPE html>
       var reposText = pr.primary_repo || pr.repos || '';
       var summary =
         '<div style="padding:10px 12px;background:var(--surface);border:1px solid var(--border);border-radius:6px;font-size:0.8rem;margin-bottom:4px">' +
-        '<div><span style="color:var(--muted)">User:</span> <strong>' + esc(username) + '</strong></div>' +
+        '<div><span style="color:var(--muted)">User:</span> <strong>' + esc(provisionRequesterDisplay(username)) + '</strong></div>' +
         '<div><span style="color:var(--muted)">Org:</span> ' + esc(pr.org || '') + '</div>' +
         '<div><span style="color:var(--muted)">Repos:</span> ' + esc(pr.repos || '') + '</div>' +
         '<div><span style="color:var(--muted)">Primary:</span> ' + esc(pr.primary_repo || '') + '</div>' +
@@ -18340,20 +18524,20 @@ const dashboardHTML = `<!DOCTYPE html>
         var data = await resp.json();
         if (!resp.ok) { hiveToast(data.error || 'Assign failed', 'error'); if (submit) { submit.disabled = false; submit.textContent = 'Approve'; } return; }
         closeApproveModal();
-        hiveToast('Approved ' + username + ' → ' + (hiveId || 'auto') + ' (' + (data.hive_id || 'a hive') + ')', 'success');
+        hiveToast('Approved ' + provisionRequesterDisplay(username) + ' → ' + (hiveId || 'auto') + ' (' + (data.hive_id || 'a hive') + ')', 'success');
         loadHives();
       } catch(e) { hiveToast('Error: ' + e.message, 'error'); if (submit) { submit.disabled = false; submit.textContent = 'Approve'; } }
     }
 
     async function denyProvision(username, btn) {
-      if (!await hiveConfirm('Deny provision request from ' + username + '?')) return;
+      if (!await hiveConfirm('Deny provision request from ' + provisionRequesterDisplay(username) + '?')) return;
       btn.disabled = true;
       btn.textContent = 'Denying...';
       try {
         var resp = await fetch('/api/saas/deny-provision/' + encodeURIComponent(username), {method: 'DELETE'});
         var data = await resp.json();
         if (!resp.ok) { hiveToast(data.error || 'Deny failed', 'error'); btn.disabled = false; btn.textContent = 'Deny'; return; }
-        hiveToast('Provision request denied for ' + username, 'success');
+        hiveToast('Provision request denied for ' + provisionRequesterDisplay(username), 'success');
         loadHives();
       } catch(e) { hiveToast('Error: ' + e.message, 'error'); btn.disabled = false; btn.textContent = 'Deny'; }
     }
@@ -21527,14 +21711,22 @@ const dashboardHTML = `<!DOCTYPE html>
         if (!el) return;
         if (!reqs.length) { el.innerHTML = '<span style="color:var(--muted);font-size:0.8rem">No pending requests</span>'; return; }
         el.innerHTML = reqs.map(function(r) {
-          var avatar = linkedAvatar(r.username, LIST_AVATAR_PX, r.username, 'margin-right:6px');
+          var rawUser = String(r.username || '');
+          var userLabel = String(r.display_label || rawUser);
+          var provider = r.provider || identityProviderFromKey(rawUser);
+          var avatar = (provider === 'github' && rawUser.indexOf(':') === -1)
+            ? linkedAvatar(rawUser, LIST_AVATAR_PX, userLabel, 'margin-right:6px')
+            : userAvatar({display_name: userLabel, avatar_url: r.avatar_url, github_username: rawUser}, LIST_AVATAR_PX, 'margin-right:6px');
+          var authKey = userLabel && rawUser && userLabel !== rawUser
+            ? '<span style="display:block;font-size:0.68rem;color:var(--muted);word-break:break-word" title="Auth key">' + esc(rawUser) + '</span>'
+            : '';
           var note = (r.note || '').trim();
           var noteHtml = note
             ? '<div style="margin-top:4px;font-size:0.75rem;color:var(--text);white-space:pre-wrap;word-break:break-word;background:var(--bg);border-left:2px solid var(--accent);padding:4px 8px;border-radius:2px">' + esc(note) + '</div>'
             : '<div style="margin-top:4px;font-size:0.72rem;color:var(--muted);font-style:italic">(no note)</div>';
           return '<div style="padding:6px 0;border-bottom:1px solid var(--border)">' +
             '<div style="display:flex;align-items:center;justify-content:space-between">' +
-            '<div>' + avatar + '<span style="font-size:0.85rem">' + esc(r.username) + '</span> <span style="font-size:0.7rem;color:var(--muted)">' + esc(r.requested_at.substring(0,10)) + '</span></div>' +
+            '<div>' + avatar + '<span style="font-size:0.85rem">' + esc(userLabel || rawUser) + '</span> <span style="font-size:0.7rem;color:var(--muted)">' + esc(r.requested_at.substring(0,10)) + '</span>' + authKey + '</div>' +
             '<div style="display:flex;gap:4px">' +
             '<select id="req-role-' + esc(r.username) + '" title="Role to grant on approval" style="padding:2px 6px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:0.7rem"><option value="read" title="' + escAttr(roleDescription('read')) + '">Read</option><option value="read-write" title="' + escAttr(roleDescription('read-write')) + '">Read-Write</option><option value="merger" title="' + escAttr(roleDescription('merger')) + '">Merger</option></select>' +
             '<button onclick="approveRequest(\'' + esc(r.username) + '\')" style="padding:2px 8px;background:var(--green);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:0.65rem">Approve</button>' +

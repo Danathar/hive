@@ -491,6 +491,11 @@ func loadClusters(logger *slog.Logger) map[string]ClusterConfig {
 type PendingAccessRequest struct {
 	Username    string `json:"username"`
 	RequestedAt string `json:"requested_at"`
+	// DisplayLabel is the human-facing name resolved at serve time for opaque
+	// OIDC identities. Username remains the raw auth key used by approve/deny.
+	DisplayLabel string `json:"display_label,omitempty"`
+	Provider     string `json:"provider,omitempty"`
+	AvatarURL    string `json:"avatar_url,omitempty"`
 	// Note is the requester's justification for wanting access,
 	// surfaced to owners/approvers. May be empty for legacy records.
 	Note string `json:"note,omitempty"`
@@ -1808,9 +1813,14 @@ func removeHiveRecord(id string, logger *slog.Logger) {
 }
 
 func listSaaSHives() []SaaSHive {
+	hives, _ := listSaaSHivesWithReadStatus()
+	return hives
+}
+
+func listSaaSHivesWithReadStatus() ([]SaaSHive, bool) {
 	entries, err := os.ReadDir(saasHivesDir)
 	if err != nil {
-		return nil
+		return nil, false
 	}
 	var hives []SaaSHive
 	for _, e := range entries {
@@ -1822,7 +1832,7 @@ func listSaaSHives() []SaaSHive {
 			hives = append(hives, *h)
 		}
 	}
-	return hives
+	return hives, true
 }
 
 func countUserHives(username string) int {
@@ -2277,6 +2287,7 @@ func provisionHive(h *SaaSHive, req *CreateHiveRequest, cluster *ClusterConfig, 
 		// symmetric; per-hive so an invite link cannot travel between tenants.
 		"InviteKey": provisionInviteKey(h.ID),
 		// Cluster-aware fields.
+		"HubPublicURL":       hubPublicURL(),
 		"DashboardHost":      dashboardHost,
 		"DashboardURL":       dashboardURL,
 		"DashboardPort":      dashboardPort,
@@ -2395,6 +2406,17 @@ func provisionHive(h *SaaSHive, req *CreateHiveRequest, cluster *ClusterConfig, 
 		return fmt.Errorf("close manifest: %w", err)
 	}
 
+	// Record whether the hosted namespace already exists BEFORE the apply gets
+	// a chance to create it. The manifest's first object is the Namespace —
+	// every other object in the file is namespaced into it — so an apply that
+	// fails partway leaves that namespace behind with nothing owning it, which
+	// is one of the two ways a cluster accumulates leaked hive-hosted-*
+	// namespaces (#5768). This snapshot is what lets the rollback below tell
+	// "we just created this" from "this was already here", and it is only
+	// meaningful taken BEFORE the apply.
+	hostedNS := hostedNamespaceForHive(h)
+	nsBeforeApply := hostedNamespaceExistedBeforeApply(cluster, hostedNS)
+
 	cmd := kubectlForCluster(cluster, "apply", "-f", manifestPath)
 	out, err := cmd.CombinedOutput()
 
@@ -2405,6 +2427,12 @@ func provisionHive(h *SaaSHive, req *CreateHiveRequest, cluster *ClusterConfig, 
 
 	if err != nil {
 		logger.Warn("kubectl apply failed", "hive", h.ID, "cluster", cluster.ID, "output", string(out), "error", err)
+		// Tear down the namespace this failed apply created — and only that
+		// case. See provision_namespace_rollback.go for why a pre-existing or
+		// undeterminable namespace is deliberately left alone. Best-effort: the
+		// error returned to the caller stays the ORIGINAL provisioning failure,
+		// never a cleanup failure layered over it.
+		rollbackProvisionNamespace(cluster, hostedNS, nsBeforeApply, logger)
 		return fmt.Errorf("provisioning failed — check hub logs for details")
 	}
 
@@ -2827,7 +2855,7 @@ data:
       hub_proxied: {{.IsNginxIngress}}
     hub:
       enabled: true
-      url: https://hive.kubestellar.io
+      url: {{.HubPublicURL}}
       dashboard_url: {{.DashboardURL}}
       hive_type: {{.HiveType}}
       is_public: {{.IsPublic}}
@@ -2952,7 +2980,7 @@ spec:
 {{- end}}
       initContainers:
       - name: copy-config
-        image: ghcr.io/kubestellar/hive:{{.ImageTag}}
+        image: ghcr.io/hivecommons/hive:{{.ImageTag}}
         imagePullPolicy: {{.ImagePullPolicy}}
         # SEED-ONLY variant (phase 3 of the layer collapse). The ConfigMap is
         # copied ONLY when the PVC carries no runtime config — i.e. first boot.
@@ -2978,7 +3006,7 @@ spec:
           mountPath: /data
 {{- if .RequiresSCC}}
       - name: init-permissions
-        image: ghcr.io/kubestellar/hive:{{.ImageTag}}
+        image: ghcr.io/hivecommons/hive:{{.ImageTag}}
         imagePullPolicy: {{.ImagePullPolicy}}
         # Best-effort ownership normalization. /data is already 1001:1000 on
         # these hives, so this recursive chown is belt-and-suspenders and must
@@ -2999,7 +3027,7 @@ spec:
 {{- end}}
       containers:
       - name: hive
-        image: ghcr.io/kubestellar/hive:{{.ImageTag}}
+        image: ghcr.io/hivecommons/hive:{{.ImageTag}}
         imagePullPolicy: {{.ImagePullPolicy}}
         securityContext:
           # COVERAGE (#4379): src/deploy/test_manifest_caps_runtime.sh boots the
@@ -3081,7 +3109,7 @@ spec:
         - name: HIVE_LEVEL
           value: "{{.ACMMLevel}}"
         - name: HIVE_HUB_URL
-          value: https://hive.kubestellar.io
+          value: {{.HubPublicURL}}
         # C2 domain separation: derived per-domain sub-keys ONLY — never the
         # master HIVE_HUB_SECRET. HEARTBEAT authenticates beats to the hub;
         # SESSION verifies hub-minted cookies. SSO is ASYMMETRIC (C2 follow-up):
@@ -3226,10 +3254,10 @@ metadata:
   namespace: {{.Namespace}}
   annotations:
     cert-manager.io/cluster-issuer: {{.CertIssuer}}
-    nginx.ingress.kubernetes.io/auth-url: "https://hive.kubestellar.io/api/saas/auth-check?hive={{.ID}}&uri=$request_uri"
+    nginx.ingress.kubernetes.io/auth-url: "{{.HubPublicURL}}/api/saas/auth-check?hive={{.ID}}&uri=$request_uri"
     nginx.ingress.kubernetes.io/custom-http-errors: "502,503"
     nginx.ingress.kubernetes.io/default-backend: hive-error-pages
-    nginx.ingress.kubernetes.io/auth-signin: "https://hive.kubestellar.io/login?redirect=$scheme://$http_host$request_uri"
+    nginx.ingress.kubernetes.io/auth-signin: "{{.HubPublicURL}}/login?redirect=$scheme://$http_host$request_uri"
     nginx.ingress.kubernetes.io/auth-response-headers: "X-Hive-User,X-Hive-Role,X-Hive-Proxy-Auth"
 spec:
   ingressClassName: {{.IngressClass}}
@@ -3317,8 +3345,8 @@ metadata:
     # shared .hive.kubestellar.io cookie) reaches ANY tenant's /terminal. The
     # auth-check endpoint verifies the caller against THIS hive's authorized
     # users (user.Hives[{{.ID}}]) and 403s a user with no access to this hive.
-    nginx.ingress.kubernetes.io/auth-url: "https://hive.kubestellar.io/api/saas/auth-check?hive={{.ID}}&uri=$request_uri"
-    nginx.ingress.kubernetes.io/auth-signin: "https://hive.kubestellar.io/login?redirect=$scheme://$http_host$request_uri"
+    nginx.ingress.kubernetes.io/auth-url: "{{.HubPublicURL}}/api/saas/auth-check?hive={{.ID}}&uri=$request_uri"
+    nginx.ingress.kubernetes.io/auth-signin: "{{.HubPublicURL}}/login?redirect=$scheme://$http_host$request_uri"
     nginx.ingress.kubernetes.io/auth-response-headers: "X-Hive-User,X-Hive-Role,X-Hive-Proxy-Auth"
 spec:
   ingressClassName: {{.IngressClass}}

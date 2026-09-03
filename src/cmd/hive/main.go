@@ -4642,7 +4642,7 @@ func main() {
 			// the in-cluster K8s API — the pod has no kubectl binary, but its
 			// SA holds the hive-self-upgrade role (patch on deployment/hive).
 			// K8s then rolls the pod onto the new tag.
-			image := "ghcr.io/kubestellar/hive:" + tag
+			image := "ghcr.io/hivecommons/hive:" + tag
 			if err := hub.SwitchImageSelf(logger, image); err != nil {
 				logger.Warn("branch switch via heartbeat failed", "tag", tag, "image", image, "error", err)
 				return
@@ -5684,10 +5684,21 @@ func classifyGitHubAppFailure(ctx context.Context, appAuth *github.AppAuth, expe
 	// every caller reaches here from a failed GitHub call or from the
 	// dashboard's Re-check. Re-check is therefore the operator-invokable way to
 	// read a specific installation's grants.
+	// #5774: record the write-path grants on the SAME line, for the same
+	// reason and with the same posture. The App migration that blocked every
+	// agent PR flow was invisible here because this verdict read Issues and
+	// nothing else: a hive that could file issues and could not push a branch
+	// reported "ok", and so did a healthy one. Contents/Pull-requests/Workflows
+	// are recorded, never enforced — see GrantsAgentPushFlow for why requiring
+	// them would misreport the read-only advisory tier — and, like the grants
+	// above, they are emitted for EVERY verdict including AppStateOK, because
+	// the installation that looks healthy is precisely the one worth counting.
 	logger.Info("github app credential verdict",
 		"owner", expectedOwner, "state", state.String(),
 		"grants", d.ExecutionGrants(),
-		"visual_hive_execution_grants", d.GrantsVisualHiveExecution())
+		"visual_hive_execution_grants", d.GrantsVisualHiveExecution(),
+		"push_flow_grants", d.PushFlowGrants(),
+		"agent_push_flow_grants", d.GrantsAgentPushFlow())
 	if state == github.AppStateOK {
 		return false, "", github.AppStateOK
 	}
@@ -5770,6 +5781,27 @@ func classifyGitHubAppRepoCoverage(ctx context.Context, appAuth *github.AppAuth,
 	missing := cov.Missing(org, repos)
 	if len(missing) == 0 {
 		return false, "", github.AppStateOK
+	}
+
+	// #5774: a coverage miss whose shape is an org TRANSFER gets its own
+	// verdict, checked first because the not-covered copy is actively wrong for
+	// it. "Tick this repo in the installation's repository access" cannot be
+	// followed when the repository has left that account — there is nothing
+	// there to tick — and this classifier exists in the first place because
+	// sending an operator to a fix that cannot work costs them real debugging
+	// time. MovedTo returns nothing unless the shape is unambiguous (see its
+	// three clauses), so the not-covered verdict below remains the default.
+	if moves := cov.MovedTo(org, repos); len(moves) > 0 {
+		d := github.AppAuthDiagnosis{
+			State:           github.AppStateRepoMoved,
+			ExpectedAccount: org,
+			InstallationID:  appAuth.InstallationID(),
+			APIURL:          appAuth.APIURL(),
+			RepoMoves:       moves,
+		}
+		logger.Warn("github app repo coverage: configured repositories were transferred to another account",
+			"configured_org", org, "now_under", github.MovedOwner(moves), "repos", len(moves))
+		return true, d.Message(), github.AppStateRepoMoved
 	}
 
 	d := github.AppAuthDiagnosis{
@@ -6922,7 +6954,7 @@ func loginScanMatch(backend, paneText string, compiled []*regexp.Regexp) *regexp
 	// is on screen: that is not a login problem, and pausing the agent for it
 	// cancels the trust-prompt watcher that would answer it — the deadlock that
 	// kept copilot agents "sitting at login prompt" through every operator
-	// re-login (kubestellar/hive, 2026-08-22). The watcher answers the modal
+	// re-login (hivecommons/hive, 2026-08-22). The watcher answers the modal
 	// within seconds; if a REAL login prompt follows, the next detector tick
 	// sees it on a clean pane.
 	if agent.PaneShowsBlockingPrompt(backend, paneText) {
@@ -6990,7 +7022,7 @@ func scanForLoginRequired(
 	// reached deep into scrollback, where agent WORK OUTPUT that merely
 	// mentions a pattern phrase lives — quality's scan findings quoting
 	// "gh auth login" from auth documentation got the agent paused mid-kick
-	// (kubestellar/hive, 2026-08-22 08:27, on a fully-authenticated CLI).
+	// (hivecommons/hive, 2026-08-22 08:27, on a fully-authenticated CLI).
 	// Same discipline as the poller's tail-only match (#4577).
 	const paneLines = 12
 	statuses := agentMgr.AllStatuses()
@@ -9134,7 +9166,7 @@ func runHub(logger *slog.Logger, configPath string) {
 	// endpoint reports 503 rather than serving fabricated data. The base
 	// branch is the hub's own running branch — the lineage its fleet runs.
 	if ghToken := os.Getenv("HIVE_GITHUB_TOKEN"); ghToken != "" {
-		reachGH := github.NewClient(ghToken, "kubestellar", []string{"hive"}, logger, "")
+		reachGH := github.NewClient(ghToken, "hivecommons", []string{"hive"}, logger, "")
 		hubSrv.SetReachPRSource(hub.NewGitHubPRSource(reachGH, gitBranch))
 	}
 	// Wire 2a's heartbeat-fed registry store into the /api/reach endpoint

@@ -15788,10 +15788,11 @@ function burnAreaChart() {
       const active = acmmGetActiveData();
       const codeLevel = active.codebase_level !== undefined ? active.codebase_level : active.CodebaseLevel;
       const name = ACMM_LEVEL_NAMES[codeLevel] || 'None';
+      const scopeNote = _acmmSelectedRepo ? ' Showing ' + escapeHtml(_acmmSelectedRepo) + '.' : (hasMultiRepo ? ' A criterion passes if it exists in <em>any</em> repo.' : '');
 
       let html = '<div style="margin-bottom:14px">' +
         '<p style="font-size:0.78rem;color:var(--muted);margin:0 0 10px">Each level requires ≥70% of its criteria to pass. Levels must pass in order.' +
-        (hasMultiRepo ? ' A criterion passes if it exists in <em>any</em> repo.' : '') + '</p></div>';
+        scopeNote + '</p></div>';
 
       // Find first failing level for the "blocked at" callout
       const levels = active.levels || active.Levels || [];
@@ -15806,7 +15807,7 @@ function burnAreaChart() {
           '<span data-action="acmmShowLevelDialog" data-arg0="' + firstFail.level + '" data-arg-types="j" style="color:var(--blue);cursor:pointer;text-decoration:underline">View missing criteria →</span></div>';
       }
 
-      if (hasMultiRepo) {
+      if (hasMultiRepo && !_acmmSelectedRepo) {
         // Multi-repo: level bars only inside each repo's expandable
         html += '<div>';
         for (let ri = 0; ri < d.repo_results.length; ri++) {
@@ -15879,18 +15880,23 @@ function burnAreaChart() {
     function acmmShowOverallDialog() {
       if (!_acmmEvalData) return;
       const d = _acmmEvalData;
-      const overallName = ACMM_LEVEL_NAMES[d.overall_level] || 'None';
-      const lower = d.codebase_level <= d.operational_level ? 'codebase readiness' : 'operational autonomy';
-      acmmShowDialog('Overall ACMM Level — L' + d.overall_level + ' ' + escapeHtml(overallName),
+      const active = acmmGetActiveData();
+      const codebaseLevel = Number.isFinite(active.codebase_level) ? active.codebase_level : d.codebase_level;
+      const overallLevel = Math.min(codebaseLevel, d.operational_level);
+      const scope = _acmmSelectedRepo ? escapeHtml(_acmmSelectedRepo) : 'all repos (union aggregate)';
+      const overallName = ACMM_LEVEL_NAMES[overallLevel] || 'None';
+      const lower = codebaseLevel <= d.operational_level ? 'codebase readiness' : 'operational autonomy';
+      acmmShowDialog('Overall ACMM Level — L' + overallLevel + ' ' + escapeHtml(overallName),
         '<p class="dialog-note">The overall ACMM level is the <strong>minimum</strong> of codebase readiness and operational autonomy. Both dimensions must align — a high operational level means nothing if the repo lacks foundational tooling, and vice versa.</p>' +
+        '<p class="dialog-note">Codebase scope: ' + scope + '. Operational autonomy is hive-wide.</p>' +
         '<div style="display:flex;gap:12px;margin-bottom:12px">' +
         '<div class="card-tile" data-action="gh23">' +
-        '<div class="stat-num">L' + d.codebase_level + '</div><div class="muted-xs">Codebase</div></div>' +
+        '<div class="stat-num">L' + codebaseLevel + '</div><div class="muted-xs">Codebase</div></div>' +
         '<div class="card-tile" data-action="gh24">' +
         '<div class="stat-num">L' + d.operational_level + '</div><div class="muted-xs">Operational</div></div>' +
         '</div>' +
         '<div style="padding:10px;background:var(--bg);border-radius:6px;border:1px solid var(--border);font-size:0.8rem">' +
-        '→ Overall is <strong>L' + d.overall_level + '</strong> because ' + lower + ' is the limiting factor.</div>'
+        '→ Overall is <strong>L' + overallLevel + '</strong> because ' + lower + ' is the limiting factor.</div>'
       );
     }
 
@@ -15903,7 +15909,8 @@ function burnAreaChart() {
       const totalPassed = results.filter(c => c.passed).length;
       const hasMultiRepo = (d.repo_results || []).length > 1;
 
-      let html = '<p class="dialog-note">' + totalPassed + ' of ' + results.length + ' criteria detected' + (hasMultiRepo ? ' (aggregate across ' + d.repo_results.length + ' repos)' : '') + '. Click a level row to see details.</p>';
+      const criteriaScope = _acmmSelectedRepo ? ' for ' + escapeHtml(_acmmSelectedRepo) : (hasMultiRepo ? ' (union aggregate across ' + d.repo_results.length + ' repos)' : '');
+      let html = '<p class="dialog-note">' + totalPassed + ' of ' + results.length + ' criteria detected' + criteriaScope + '. Click a level row to see details.</p>';
 
       for (const lvl of levels) {
         const criteria = results.filter(c => c.level === lvl.level);
@@ -16122,7 +16129,7 @@ function burnAreaChart() {
 
       // Repo selector
       const selectorEl = document.getElementById('acmm-repo-selector');
-      if (selectorEl && d.repo_results && d.repo_results.length > 1) {
+      if (selectorEl && multiRepo) {
         selectorEl.style.display = 'flex';
         const allBtn = document.getElementById('acmm-repo-btn-all');
         if (allBtn) allBtn.style.fontWeight = _acmmSelectedRepo ? '400' : '600';
@@ -16141,6 +16148,7 @@ function burnAreaChart() {
           // and by how much" was previously N clicks away for N repos.
           btn.textContent = rr.repo + ' (L' + rr.codebase_level + ' · ' + rr.criteria_passed + '/' + rr.criteria_total + ')';
           btn.style.fontWeight = _acmmSelectedRepo === rr.repo ? '600' : '400';
+          selectorEl.appendChild(btn);
         }
       } else if (selectorEl) {
         selectorEl.style.display = 'none';
@@ -17013,7 +17021,7 @@ function burnAreaChart() {
 
     function renderAgentImport() {
       var exampleURL = 'https://github.com/hivecommons/hive/blob/HEAD/src/examples/agents/customized-agent.yaml';
-      var rawURL = 'https://raw.githubusercontent.com/kubestellar/hive/HEAD/src/examples/agents/customized-agent.yaml';
+      var rawURL = 'https://raw.githubusercontent.com/hivecommons/hive/HEAD/src/examples/agents/customized-agent.yaml';
       // Field-by-field reference on the docs site (documents the same v2 schema
       // as the example, and explains the ref+path "v2/src" URL). See #1929/#1930.
       var docsURL = 'https://docs.kubestellar.io/hive/agent-definition-yaml';
@@ -17053,7 +17061,12 @@ function burnAreaChart() {
       // path/ref from whichever URL it receives, so keep the raw form here and
       // let the server round-trip it back in _importBody.
       var keepLinked = !!(document.getElementById('import-keep-linked') || {}).checked;
-      url = url.replace('github.com/hivecommons/hive/blob/', 'raw.githubusercontent.com/kubestellar/hive/');
+      // Org migration: rewrite blob->raw for BOTH the new (hivecommons) org and
+      // the legacy (kubestellar) one, so pre-transfer links pasted from old
+      // docs/bookmarks still import; raw.githubusercontent follows the repo
+      // transfer for the old spelling.
+      url = url.replace('github.com/hivecommons/hive/blob/', 'raw.githubusercontent.com/hivecommons/hive/');
+      url = url.replace('github.com/kubestellar/hive/blob/', 'raw.githubusercontent.com/kubestellar/hive/');
       try {
         var resp = await fetch('/api/agents/import', {method:'POST', headers:_inceptionAuthHeaders(), body:JSON.stringify({source:'url',url:url,preview:true,keepLinked:keepLinked})});
         var d = await resp.json();
