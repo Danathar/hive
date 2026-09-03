@@ -1171,26 +1171,83 @@ func credentialWatchdogInterval() time.Duration {
 // their creds under the agent's own $HOME (or do no CLI login at all), so there
 // is no hive-managed file for a presence check to watch.
 //
-// probe reports (ok, reason): ok=true means the credential is usable; when
-// false, reason is a short human string ("missing" / "invalid or expired") for
+// probe reports a credentialProbe: ok=true means the credential is usable;
+// when false, reason is a short human string ("missing" / "login expired") for
 // the audit detail and log. It must only stat/parse the file — never emit,
 // mutate, or return token material.
 type credentialWatch struct {
 	backend     string
 	path        string
 	auditAction string
-	probe       func(path string) (ok bool, reason string)
+	probe       func(path string) credentialProbe
+}
+
+// credentialProbe is one probe's verdict on a durable credential.
+//
+// recovery exists because the watchdog used to hardcode "operator dashboard
+// device-flow login" for every unusable credential, and that is wrong for the
+// failure #5730 describes: the shared Claude credential rewritten 0600 by a
+// token refresh holds a live access token and a valid refresh grant, and no
+// number of re-logins fixes it — the next refresh re-tightens the file. An
+// operator sent to redo an OAuth flow reads that as "hive needs a daily
+// re-login", which is exactly how #5454 stayed misdiagnosed for so long. The
+// probe knows which condition it found, so the probe names the recovery.
+//
+// fields carries extra structured log context (mode, owner) and must never
+// carry token material.
+type credentialProbe struct {
+	ok       bool
+	reason   string
+	recovery string
+	fields   []any
+}
+
+// credentialOK is the usable verdict.
+func credentialOK() credentialProbe { return credentialProbe{ok: true} }
+
+// defaultCredentialRecovery is the recovery for a credential that genuinely
+// needs a human to authenticate — the only case the watchdog used to know.
+const defaultCredentialRecovery = "operator dashboard device-flow login"
+
+// credentialReadable reports whether this process can actually OPEN the file,
+// separating "the credential is spent" from "the credential is fine and we
+// cannot read it". os.Stat is not enough: stat succeeds on a 0600 file owned by
+// another uid as long as the directory is traversable, which is precisely the
+// #5730 state — so every check built on Stat plus a parse reported a perfectly
+// healthy credential as an expired login.
+func credentialReadable(path string) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	_ = f.Close()
+	return true, nil
+}
+
+// credentialModeAndOwner reports the file's permission bits and owning uid for
+// the operator-facing log. Best-effort: an unreadable stat yields zero values
+// and the caller simply logs less.
+func credentialModeAndOwner(path string) (mode string, ownerUID uint32) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return "", 0
+	}
+	mode = fi.Mode().Perm().String()
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		ownerUID = st.Uid
+	}
+	return mode, ownerUID
 }
 
 // copilotTokenUsable reports whether the durable Copilot device-flow token file
 // is present and non-empty. It reads only the file's presence and size — never
 // its contents.
-func copilotTokenUsable(path string) (bool, string) {
+func copilotTokenUsable(path string) credentialProbe {
 	info, err := os.Stat(path)
 	if err != nil || info.Size() == 0 {
-		return false, "missing"
+		return credentialProbe{reason: "missing", recovery: defaultCredentialRecovery}
 	}
-	return true, ""
+	return credentialOK()
 }
 
 // claudeTokenUsable reports whether the Claude credentials file can still put
@@ -1204,14 +1261,37 @@ func copilotTokenUsable(path string) (bool, string) {
 // Reporting that state as unusable is what made this watchdog prescribe an
 // interactive login every time a hive ran longer than a Claude access token
 // lives — roughly once a day, for a credential that was fine.
-func claudeTokenUsable(path string) (bool, string) {
+func claudeTokenUsable(path string) credentialProbe {
 	if _, err := os.Stat(path); err != nil {
-		return false, "missing"
+		return credentialProbe{reason: "missing", recovery: defaultCredentialRecovery}
+	}
+	// Readability BEFORE usability. claude.HasUsableToken reports positive
+	// evidence only, so it cannot distinguish a spent credential from one it was
+	// not allowed to open — and on the shared CLI home those are opposite
+	// conditions with opposite recoveries (#5730). Asking first is what turns
+	// "login expired (no usable refresh grant) -> operator device-flow login"
+	// into the truth: the grant is live, the file is 0600, and one chmod fixes
+	// it without touching the login at all.
+	if _, err := credentialReadable(path); errors.Is(err, fs.ErrPermission) {
+		mode, ownerUID := credentialModeAndOwner(path)
+		return credentialProbe{
+			reason:   "unreadable by the hive process (permission denied)",
+			recovery: "chmod g+r " + path + " — the credential itself is fine; a re-login will not help",
+			fields: []any{
+				"mode", mode,
+				"owner_uid", ownerUID,
+				"reader_uid", os.Geteuid(),
+				"cause", "a CLI token refresh rewrote the shared credential owner-only; the fleet reaches it through the node group",
+			},
+		}
 	}
 	if !claude.HasUsableToken(path) {
-		return false, "login expired (no usable refresh grant)"
+		return credentialProbe{
+			reason:   "login expired (no usable refresh grant)",
+			recovery: defaultCredentialRecovery,
+		}
 	}
-	return true, ""
+	return credentialOK()
 }
 
 // credentialWatches is the set of durable-credential files the watchdog guards,
@@ -1435,17 +1515,23 @@ func (m *Manager) evalCredentialWatch(w credentialWatch, lastUnusable map[string
 		delete(lastUnusable, w.backend)
 		return
 	}
-	ok, reason := w.probe(w.path)
-	unusable := !ok
+	res := w.probe(w.path)
+	unusable := !res.ok
 	if unusable && !lastUnusable[w.backend] {
-		m.logger.Warn("credential watchdog: durable credential unusable",
+		recovery := res.recovery
+		if recovery == "" {
+			recovery = defaultCredentialRecovery
+		}
+		args := []any{
 			"backend", w.backend,
 			"path", w.path,
-			"reason", reason,
+			"reason", res.reason,
 			"impact", "agents on this backend hang at login; new pods cannot start work",
-			"recovery", "operator dashboard device-flow login")
+			"recovery", recovery,
+		}
+		m.logger.Warn("credential watchdog: durable credential unusable", append(args, res.fields...)...)
 		m.audit(w.auditAction, "", auditFields(
-			"outcome", reason,
+			"outcome", res.reason,
 			"backend", w.backend,
 			"path", w.path,
 			"trigger", "watchdog",
@@ -6481,11 +6567,24 @@ func paneShowsTransientAPIError(lines []string) bool {
 // It is a REACHABILITY check, not a permission check, and the distinction is
 // worth stating: this runs in the hive process, so it proves the file is there
 // and parseable, not that the agent's UID can open it. The deployment keeps
-// those the same — the entrypoint's inotify guard chowns /data/home/.claude to
-// dev:node and holds it group-readable on every write, precisely so every
-// agent UID can read it (#4619). If that ever drifts, an agent lands at a login
-// prompt with no injected token instead of a working one; that is a loud,
-// alerting state, not a silent one, which is the right direction to fail in.
+// those the same — the entrypoint's perm guard holds /data/home/.claude
+// group-readable on every write, precisely so every agent UID can read it
+// (#4619).
+//
+// This comment used to end by saying that a drift there would be "a loud,
+// alerting state, not a silent one". It was not. The drift happened (#5730): a
+// token refresh rewrote the shared credential 0600 as one agent's uid, the
+// entrypoint guard that would have reopened it had died silently under `set -e`
+// hours earlier, and five of six agents dropped to login prompts while the
+// credential watchdog reported an expired login for a credential holding a live
+// access token and a valid refresh grant. Nothing in the loop was loud.
+//
+// What makes it loud NOW is deliberate, and neither part is this function:
+// claudeTokenUsable separates "cannot read it" from "it is spent" and reports
+// the mode, the owner and the chmod; and the permissions watcher logs at ERROR
+// when it finds a shared credential it cannot reopen. This check remains what
+// its name says, so read it as one input, not as evidence the agent's uid is
+// fine.
 //
 // HasUsableToken, not HasValidToken: an access token that has aged out is
 // exactly the case the CLI fixes for itself on start, by redeeming the refresh

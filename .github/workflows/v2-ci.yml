@@ -719,6 +719,21 @@ jobs:
         working-directory: .
         run: bash src/deploy/test_entrypoint_symlinks.sh
 
+      # #5730: the entrypoint's permission guards keep ONE operator login
+      # serving the whole Claude fleet by reopening the shared credential the
+      # CLI rewrites 0600 on every token refresh. They run under `set -e` in
+      # backgrounded subshells, so a single non-zero command in a guard body
+      # ended the guard permanently and silently — measured live, with five of
+      # six agents dropping to a login prompt hours after boot.
+      #
+      # This suite EXTRACTS the shipped guard functions from entrypoint.sh and
+      # executes them, rather than grepping: the pre-fix code read perfectly
+      # well, so only running it catches the regression. No runtime or image
+      # needed, which is why it belongs in this lane.
+      - name: Entrypoint permission-guard survivability (#5730)
+        working-directory: .
+        run: bash src/deploy/test_entrypoint_perm_guard.sh
+
       # #5646: the hivectl distribution route for image-based hosts rests on
       # src/Dockerfile (which stows the binary in the image as cargo) and
       # bin/hive-podman-setup.sh (which extracts it onto the host) agreeing on
