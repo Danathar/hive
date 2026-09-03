@@ -334,6 +334,11 @@ func (s *Server) registerContributeRoutes() {
 	// reads (only counts + already-public usernames; no tokens, no PII). GET only,
 	// no side effects. See contribute_metrics.go.
 	s.mux.HandleFunc("GET /api/contribute/metrics", s.handleContributeMetrics)
+	// Read-only per-backend RUN SCENARIOS: aggregates over the durable task-run
+	// log (task_run_log.go) — scenario counts, sentinel-compliance share, and
+	// duration percentiles per backend. Public like the other /api/contribute*
+	// reads (aggregate counts only; no usernames, no reasons, no tokens).
+	s.mux.HandleFunc("GET /api/contribute/run-stats", s.handleContributeRunStats)
 	// Read-only TRIAGE ladder (#2612 part b): the contribute issues grouped into a
 	// Warp-style lifecycle (Triaging → Ready → Implementing → Reviewing → Closed),
 	// DERIVED LIVE from the ready queue + fleet snapshot + the PR→issue link (part

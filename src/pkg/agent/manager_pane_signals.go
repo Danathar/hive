@@ -548,6 +548,9 @@ var loginPromptPatterns = []string{
 	// GitHub device-flow screen (Copilot CLI)
 	"Enter one-time code",
 	"github.com/login/device",
+	// Antigravity OAuth hand-off
+	"accounts.google.com/o/oauth2/auth",
+	"If you aren't automatically redirected, paste the authorization code below:",
 }
 
 // fatalNetworkErrorPatterns are substrings that indicate a transient TLS or

@@ -2,6 +2,7 @@ package hub
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http/httptest"
@@ -18,7 +19,7 @@ import (
 // prevalence question; the snapshot, log line, and HTTP surface must all
 // agree with buildAdvisoryDiagnostics over the live registry.
 func TestAdvisoryDiagnosticsEndpoint(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	now := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
 	srv.registry.Hives = []RegistryEntry{
 		{ID: "h-fresh", Online: true, AdvisoryLastPostedAt: now.Add(-10 * time.Minute).UTC().Format(time.RFC3339)},
@@ -56,26 +57,29 @@ func TestAdvisoryDiagnosticsEndpoint(t *testing.T) {
 	}
 }
 
-// Under `go test` the diagnostics ticker must refuse to start (it would leak
-// a goroutine logging every 30 minutes into unrelated tests).
-func TestStartAdvisoryDiagnosticsNoopInTests(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+// The diagnostics ticker must honor context cancellation so the pollers all
+// stop when the composition root's context ends (and so tests can bound it).
+// It performs one immediate sample, then exits on a cancelled context.
+func TestStartAdvisoryDiagnosticsStopsOnCancel(t *testing.T) {
+	srv := newHubServerForTest(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
 	done := make(chan struct{})
 	go func() {
-		srv.StartAdvisoryDiagnostics(t.Context())
+		srv.StartAdvisoryDiagnostics(ctx)
 		close(done)
 	}()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("StartAdvisoryDiagnostics did not return under testing.Testing()")
+		t.Fatal("StartAdvisoryDiagnostics did not return on cancelled context")
 	}
 }
 
 // RegistryReachReporter is the producer→consumer wiring of the reach epic:
 // it must snapshot only well-formed entries and skip hives without reports.
 func TestRegistryReachReporterLatestReach(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.registry.Hives = []RegistryEntry{
 		{ID: "h-good", ComponentReach: &tracing.ReachReport{Entries: []tracing.ReachEntry{
 			{Component: "hub", Commit: "abc1234", SpansTotal: 10, SpansError: 1,
@@ -100,7 +104,7 @@ func TestRegistryReachReporterLatestReach(t *testing.T) {
 }
 
 func TestSetReachWiring(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	// nil reporter must keep the stub (fail-safe default), non-nil replaces it.
 	before := srv.reachReporter

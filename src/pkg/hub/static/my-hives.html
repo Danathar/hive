@@ -169,6 +169,12 @@
   .why-chip.bad { color: var(--red); border-color: rgba(229,72,77,.45); background: rgba(229,72,77,.06); }
   .why-chip.warn { color: var(--amber); border-color: rgba(224,168,0,.55); background: rgba(224,168,0,.08); }
   .why-chip.unknown { color: var(--gray); border-style: dashed; }
+  /* Remediation hint (#5577): the one-line "do this" rendered under the WHY
+     chip on non-green rows. Muted like the chip's green form — the chip
+     already carries the severity tint; this line is the instruction, not a
+     second alarm. */
+  .rem-hint { font-size: 10.5px; color: var(--gray); margin: 2px 0 0 22px; }
+  .rem-hint .rem-link { color: inherit; text-decoration: underline; }
   .hive-access-faces a:hover img { filter: brightness(1.12); }
   /* Attach chip: one-click copy of the kubectl+tmux attach command for the
      hive's spoke pod, so an operator can jump from a problematic /fleet row
@@ -619,6 +625,12 @@ function budgetHealthHTML(b) {
     : "budget " + pct + "% used this window (" + (b.usedTokens || 0) + " / " + (b.limitTokens || 0) + " tokens)";
   if (b.providerLimited) title = b.reason || label;
   if (b.exhausted && !b.providerLimited) title += " — exhausted; governor may throttle";
+  // A below-floor LIMIT is not a spending problem (#5508): the percentage is
+  // meaningless and a window reset changes nothing, so say so instead.
+  if (b.misconfigured) {
+    label = "budget misconfigured";
+    title = b.reason || label;
+  }
   return '<span class="budget-health ' + esc(bucket) + '" title="' + esc(title) + '">' +
     '<span class="light"></span><span class="rel">' + esc(label) + '</span></span>';
 }
@@ -764,6 +776,19 @@ function whyChipHTML(h, health) {
   var cls = v.state === "red" ? "why-chip bad" : (v.state === "amber" ? "why-chip warn" : (v.state === "unknown" ? "why-chip unknown" : "why-chip"));
   return '<span class="' + cls + '" title="' + esc(v.outputKind ? "output judged on: " + v.outputKind : "hive-health") + '">' + esc(v.reason) + '</span>';
 }
+// remediationHTML renders the verdict's remediation hint (#5577) under the
+// WHY chip: the one-line "do this" + a short link when the hub resolved one.
+// Only on non-green rows (problem/warning) — the backend never attaches a
+// hint to a green verdict, and parked/offline/unknown rows have their own
+// signals. Purely additive markup: sort, filters and expand behavior are
+// untouched.
+function remediationHTML(h, health) {
+  if (health !== "problem" && health !== "warning") return "";
+  var r = (h.healthVerdict || {}).remediation;
+  if (!r || !r.action) return "";
+  var link = r.link ? ' <a class="rem-link" href="' + esc(r.link) + '" target="_blank" rel="noopener">open</a>' : "";
+  return '<div class="rem-hint" title="' + esc(r.surface || "") + '">→ ' + esc(r.action) + link + '</div>';
+}
 function rosterMismatchChipHTML(h) {
   var m = h.agentRosterMismatch || {};
   if (!m.reason) return "";
@@ -853,7 +878,7 @@ function renderHives(hives) {
     tr.className = "spoke health-" + health + (open ? " open" : "");
     tr.innerHTML =
       '<td><span class="chev">▶</span></td>' +
-      '<td><span class="hdot ' + health + '" title="' + health + '"></span>' + hiveNameHTML(h) + hiveAccessAvatars(h) + (health === "parked" ? '<span class="parked-chip" title="every agent is paused or off-schedule — hive not in use">parked</span>' : "") + whyChipHTML(h, health) + rosterMismatchChipHTML(h) + attachChipHTML(h) + '</td>' +
+      '<td><span class="hdot ' + health + '" title="' + health + '"></span>' + hiveNameHTML(h) + hiveAccessAvatars(h) + (health === "parked" ? '<span class="parked-chip" title="every agent is paused or off-schedule — hive not in use">parked</span>' : "") + whyChipHTML(h, health) + rosterMismatchChipHTML(h) + attachChipHTML(h) + remediationHTML(h, health) + '</td>' +
       '<td>' + acmmBadge(h.acmmLevel) + '</td>' +
       '<td>' + modeBadge(h.governorMode) + '</td>' +
       '<td>' + versionHTML(h) + '</td>' +
@@ -862,6 +887,9 @@ function renderHives(hives) {
     tb.appendChild(tr);
     var link = tr.querySelector(".hive-link");
     if (link) link.addEventListener("click", function (e) { e.stopPropagation(); });
+    // The remediation "open" link must navigate, not toggle the row expand.
+    var remLink = tr.querySelector(".rem-link");
+    if (remLink) remLink.addEventListener("click", function (e) { e.stopPropagation(); });
     tr.querySelectorAll(".hive-access-faces a").forEach(function (a) {
       a.addEventListener("click", function (e) { e.stopPropagation(); });
     });

@@ -124,6 +124,13 @@ func LoadWithDashboardOverlay(path string) (*Config, error) {
 	if !overlay.Governor.WorkSource.IsZero() {
 		cfg.Governor.WorkSource = overlay.Governor.WorkSource
 	}
+	// Operator-owned governor cadences (#5632): PUT /api/config/agent/{name}/
+	// cadences persists to the overlay, but this reload used to rebuild
+	// Governor.Modes from the seed alone — so a ConfigMap remount dropped both
+	// the operator's cadence AND its ownership marker from memory, and the next
+	// pack apply saw nothing to respect. Adopt them BEFORE the fullness guard,
+	// like WorkSource, so a short overlay still carries them.
+	adoptOperatorCadenceOverrides(cfg, &overlay)
 	if len(overlay.RemovedAgents) > 0 {
 		cfg.RemovedAgents = overlay.RemovedAgents
 		cfg.PruneRemovedAgents()
@@ -156,4 +163,39 @@ func LoadWithDashboardOverlay(path string) (*Config, error) {
 	// so honoring its resolver policy would let a compromised overlay enable
 	// script/http execution. Keep this true if overlay merging is ever expanded.
 	return cfg, nil
+}
+
+// adoptOperatorCadenceOverrides re-applies the dashboard overlay's
+// OPERATOR-OWNED governor cadences (and their ownership markers) on top of the
+// seed's governor config. Only entries the overlay marks FieldOwnerOperator
+// are copied — pack-seeded cadences keep following the seed, so this cannot
+// carry a stale pack value forward. Nothing here touches overlay.Variables or
+// any other security-sensitive block (see the invariant at the end of
+// LoadWithDashboardOverlay).
+func adoptOperatorCadenceOverrides(cfg *Config, overlay *Config) {
+	for modeName, owners := range overlay.Governor.CadenceOwners {
+		overlayMode, hasMode := overlay.Governor.Modes[modeName]
+		if !hasMode {
+			continue
+		}
+		for agentName, owner := range owners {
+			if owner != FieldOwnerOperator {
+				continue
+			}
+			cadence, hasCadence := overlayMode.Cadences[agentName]
+			if !hasCadence {
+				continue
+			}
+			if cfg.Governor.Modes == nil {
+				cfg.Governor.Modes = make(map[string]ModeConfig)
+			}
+			mode := cfg.Governor.Modes[modeName]
+			if mode.Cadences == nil {
+				mode.Cadences = make(map[string]Cadence)
+			}
+			mode.Cadences[agentName] = cadence
+			cfg.Governor.Modes[modeName] = mode
+			cfg.Governor.ClaimCadenceOwnership(modeName, agentName)
+		}
+	}
 }

@@ -191,7 +191,14 @@ func TestCLIPinTooltipNamesNoUndispatchableBackend(t *testing.T) {
 	const marker = "Which CLI backend to pin this agent to when CLI Pinned is on. Options:"
 	i := strings.Index(src, marker)
 	if i < 0 {
-		t.Skip("CLI Pin Value tooltip not found; it was reworded and this guard needs re-pointing")
+		// Fail rather than skip (#5388): the tooltip text is repo content, so
+		// this condition is identical on every machine and a skip could never
+		// mean "unsuitable environment" — it means the marker moved and the
+		// prose guard #4988 asked for silently stopped covering anything.
+		// Rewording the tooltip is fine; re-point the marker in the same PR.
+		t.Fatal("CLI Pin Value tooltip marker not found; the tooltip was reworded — " +
+			"re-point the marker in TestCLIPinTooltipNamesNoUndispatchableBackend " +
+			"in the PR that reworded it")
 	}
 	rest := src[i+len(marker):]
 	if end := strings.Index(rest, "."); end >= 0 {

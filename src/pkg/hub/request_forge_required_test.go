@@ -2,7 +2,6 @@ package hub
 
 import (
 	"encoding/json"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -115,7 +114,7 @@ func postProvisionRequest(t *testing.T, srv *HubServer, token, body string) *htt
 // Client-side validation is not enforcement — a curl or a stale page bypasses
 // it entirely.
 func TestRequestProvisionRejectsMissingForge(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	authAsForgeTester(t, "ghp_forge_missing", "forge-missing-user")
 
 	w := postProvisionRequest(t, srv, "ghp_forge_missing", `{"org":"z-innersource","repos":"repo1,repo2"}`)
@@ -130,7 +129,7 @@ func TestRequestProvisionRejectsMissingForge(t *testing.T) {
 // TestRequestProvisionRejectsGarbageForge — a non-empty but nonsensical forge
 // is no better than a missing one.
 func TestRequestProvisionRejectsGarbageForge(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	authAsForgeTester(t, "ghp_forge_garbage", "forge-garbage-user")
 
 	w := postProvisionRequest(t, srv, "ghp_forge_garbage",
@@ -161,7 +160,7 @@ func TestRequestProvisionAcceptsAllForgeForms(t *testing.T) {
 	}
 
 	for i, tc := range cases {
-		srv := NewHubServer(0, slog.Default(), "test", "v2")
+		srv := newHubServerForTest(t)
 		// A fresh username per case: the handler refuses a second pending
 		// request from the same user.
 		user := "forge-form-user-" + string(rune('a'+i))

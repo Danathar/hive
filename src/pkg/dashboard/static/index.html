@@ -1047,6 +1047,15 @@
     /* Last upstream/launch error — stacked below .agent-state, never under the
        working-indicator dot, so a retry in progress cannot hide it (#3604). */
     .agent-error { font-size: 0.72rem; color: var(--red); margin-top: 4px; text-align: right; word-break: break-word; }
+    .agent-blockers { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 2px 6px; font-size: 0.68rem; margin-top: 4px; color: var(--muted); }
+    .agent-blockers .ab-key { opacity: 0.65; margin-right: 3px; }
+    .agent-blockers .ab-seg { white-space: nowrap; }
+    .agent-blockers .ab-sep { opacity: 0.35; }
+    .agent-blockers .ab-ok { color: var(--green); }
+    .agent-blockers .ab-bad { color: var(--red); font-weight: 600; }
+    .oc-detail-blockers { margin-top: 6px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+    .never-scheduled-chip { font-size: 0.62rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; color: var(--yellow); background: none; border: 1px solid var(--yellow); border-radius: 3px; padding: 1px 5px; margin-left: 6px; cursor: pointer; vertical-align: middle; white-space: nowrap; }
+    .never-scheduled-chip:hover { background: color-mix(in srgb, var(--yellow) 18%, transparent); }
     .agent-name { font-size: 1.1rem; font-weight: 700; margin-bottom: 8px; }
     .agent-name .dot {
       display: inline-block; width: 8px; height: 8px;
@@ -1180,7 +1189,7 @@
     .reco-advisory-note { margin-top: 12px; font-size: 0.68rem; color: var(--muted); font-style: italic; }
     .reco-calm { color: var(--muted); font-size: 0.85rem; }
 
-    .lc-fleet { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+    .lc-fleet { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
     .lc-fleet-stat { flex: 1 1 100px; min-width: 90px; background: var(--bg); border: 1px solid var(--border);
       border-radius: 6px; padding: 8px 12px; }
     .lc-fleet-stat .val { font-size: 1.3rem; font-weight: 700; }
@@ -1188,9 +1197,10 @@
     .lc-fleet-stat .val.merged { color: var(--green); }
     .lc-fleet-stat .val.blocked { color: var(--red); }
     .lc-fleet-stat .lbl { font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-top: 2px; }
-    .lc-events { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px;
+    .lc-window { color: var(--muted); font-size: 0.68rem; margin-bottom: 12px; }
+    .lc-journeys { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px;
       max-height: 320px; overflow-y: auto; }
-    .lc-event { display: flex; align-items: center; gap: 8px; font-size: 0.78rem; padding: 5px 8px;
+    .lc-journey { display: flex; align-items: center; gap: 8px; font-size: 0.78rem; padding: 5px 8px;
       border-radius: 6px; background: var(--bg); border: 1px solid var(--border); }
     .lc-kind { flex: 0 0 auto; font-size: 0.6rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
       padding: 2px 7px; border-radius: 8px; }
@@ -1198,10 +1208,13 @@
     .lc-kind.blue { background: color-mix(in srgb, var(--blue) 18%, transparent); color: var(--blue); }
     .lc-kind.green { background: var(--green-bg); color: var(--green); }
     .lc-kind.red { background: var(--red-bg); color: var(--red); }
-    .lc-event .lc-ref { color: var(--text); font-weight: 600; font-family: var(--font-mono); font-size: 0.72rem;
+    .lc-journey .lc-ref { color: var(--text); font-weight: 600; font-family: var(--font-mono); font-size: 0.72rem;
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .lc-event .lc-agent { color: var(--muted); font-size: 0.72rem; }
-    .lc-event .lc-time { color: var(--muted); font-size: 0.7rem; margin-left: auto; flex: 0 0 auto; }
+    .lc-stages { display: flex; align-items: center; gap: 3px; flex: 0 1 auto; min-width: 0; flex-wrap: wrap; }
+    .lc-stage-arrow { color: var(--muted); font-size: 0.6rem; }
+    .lc-stage.past { opacity: 0.55; }
+    .lc-journey .lc-agent { color: var(--muted); font-size: 0.72rem; }
+    .lc-journey .lc-time { color: var(--muted); font-size: 0.7rem; margin-left: auto; flex: 0 0 auto; }
     .lc-empty { color: var(--muted); font-size: 0.85rem; padding: 6px 0; }
 
     /* Repos */
@@ -1241,6 +1254,16 @@
     .repo-pr-pill .pill-num { font-weight: 700; white-space: nowrap; }
     .repo-pr-pill .pill-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .repo-pr-pill .pill-merge-icon { font-size: 0.6rem; margin-left: 1px; }
+    /* needs-human: the escalation ledger (pkg/escalation) applies the
+       `needs-human` GitHub label to a PR once automated fix attempts are
+       exhausted. The pill turns status-alert orange (NOT brand amber) and a
+       compact companion badge names the state, so parked PRs stand out
+       instead of blending into the purple PR list — nine escalated PRs were
+       invisible to the operator for a week without this. */
+    .repo-pr-pill.needs-human { --pill-c: var(--orange); }
+    .pill-needs-human-badge { flex: 0 0 auto; font-weight: 600; white-space: nowrap; }
+    /* Section-header counter: "· N need human review" next to the host badge. */
+    .repos-needs-human-count { display: none; font-size: 0.62em; font-weight: 600; vertical-align: middle; margin-left: 6px; color: var(--orange); }
 
     /* Sparklines */
     .sparkline { display: inline-block; vertical-align: middle; margin-left: 6px; flex-shrink: 0; }
@@ -3219,7 +3242,7 @@
   <div class="cost-usage" id="cost-panel" style="margin-bottom: 24px;"></div>
 
   <div class="repos" id="repos-section">
-    <h2 class="section-header-toggle" data-action="toggleSection" data-arg0="repos-section"><span class="section-chevron">▼</span> Repositories <span id="repos-host-badge" title="Every repo in this hive is on this single GitHub host" style="font-size:0.62em;font-weight:600;vertical-align:middle;padding:2px 7px;border-radius:10px;margin-left:6px"></span> <button class="config-gear" data-action="gh1" data-stop="1" title="Manage monitored repositories" style="font-size:0.7em;vertical-align:middle">⚙️</button></h2>
+    <h2 class="section-header-toggle" data-action="toggleSection" data-arg0="repos-section"><span class="section-chevron">▼</span> Repositories <span id="repos-host-badge" title="Every repo in this hive is on this single GitHub host" style="font-size:0.62em;font-weight:600;vertical-align:middle;padding:2px 7px;border-radius:10px;margin-left:6px"></span> <span id="repos-needs-human" class="repos-needs-human-count" title="Open PRs labeled needs-human: automated fix attempts exhausted — operator review required"></span> <button class="config-gear" data-action="gh1" data-stop="1" title="Manage monitored repositories" style="font-size:0.7em;vertical-align:middle">⚙️</button></h2>
     <div class="section-body">
       <!-- Read-only view of project.issue_filter: which issues agents may
            initiate work on, by label. Hidden unless a filter is configured;
@@ -4434,14 +4457,24 @@
         // button would otherwise persist until the user navigates away.
         const fastToggle = detail.querySelector('.oc-detail-actions .btn-toggle');
         if (fastToggle && !isOnDemand) {
-          fastToggle.className = `btn-toggle ${isPaused ? 'paused' : isOff ? 'off' : 'running'}`;
-          fastToggle.textContent = isPaused ? '▶ resume' : isOff ? '▶ start' : '⏸ pause';
-          fastToggle.dataset.paused = String(isPaused);
-          fastToggle.title = isPaused ? 'Resume this agent — it will start running on its configured cadence' : isOff ? 'Start this agent — it is currently off in this governor mode' : 'Pause this agent — stops governor from kicking it until resumed';
+          if (isPaused) {
+            // Paused gets the full combined-action rebuild — '▶ start &
+            // resume' when the session is also down — so data-action tracks
+            // the session state too, not just the label (#5594 follow-up).
+            fastToggle.outerHTML = pausedAgentActionHtml(a);
+          } else {
+            fastToggle.className = `btn-toggle ${isOff ? 'off' : 'running'}`;
+            fastToggle.textContent = isOff ? '▶ start' : '⏸ pause';
+            fastToggle.dataset.action = 'toggleAgent';
+            fastToggle.dataset.paused = 'false';
+            fastToggle.title = agentToggleTitle(a, false, isOff);
+          }
         }
-        // Same for the stat fields and indicators — they live outside the
-        // scroll region, so replacing them wholesale cannot cause the scroll
-        // jumps the fast path exists to prevent.
+        // Same for the blockers line, the stat fields and the indicators — they
+        // live outside the scroll region, so replacing them wholesale cannot
+        // cause the scroll jumps the fast path exists to prevent.
+        const blockersEl = detail.querySelector('.oc-detail-blockers');
+        if (blockersEl) blockersEl.innerHTML = agentBlockerLineHtml(a) + neverScheduledChipHtml(a, a.name);
         const fieldsEl = detail.querySelector('.oc-detail-fields');
         if (fieldsEl) fieldsEl.outerHTML = ocDetailFieldsHtml(a, isPaused, isOff, isOnDemand);
         const indEl = detail.querySelector('.oc-detail-indicators');
@@ -4541,7 +4574,9 @@
             ? '<button class="btn-toggle on-demand" title="On-demand agent — kicked manually, not by governor cadence">⚡ on demand</button>'
             : !dashboardRoleAtLeast(window._hiveRole || 'read', 'owner')
             ? ''
-            : `<button class="btn-toggle ${isPaused ? 'paused' : isOff ? 'off' : 'running'}" data-action="toggleAgent" data-agent="${esc(a.name)}" data-paused="${isPaused}" title="${isPaused ? 'Resume this agent — it will start running on its configured cadence' : isOff ? 'Start this agent — it is currently off in this governor mode' : 'Pause this agent — stops governor from kicking it until resumed'}">${isPaused ? '▶ resume' : isOff ? '▶ start' : '⏸ pause'}</button>`}
+            : isPaused
+            ? pausedAgentActionHtml(a)
+            : `<button class="btn-toggle ${isOff ? 'off' : 'running'}" data-action="toggleAgent" data-agent="${esc(a.name)}" data-paused="false" title="${esc(agentToggleTitle(a, false, isOff))}">${isOff ? '▶ start' : '⏸ pause'}</button>`}
           ${sessionChip(a, '▶ terminal', `<a href="${terminalUrl(a.name)}" target="_blank" rel="noopener" class="terminal-link" data-action="openTerminal" data-agent="${esc(a.name)}" title="Open the live tmux terminal session for this agent in a new tab">▶ terminal</a>`)}
           ${sessionChip(a, '📄 full log', `<a href="${fullLogUrl(a.name, false)}" target="_blank" rel="noopener" class="terminal-link" title="Open the full retained log of this agent's latest run as selectable, searchable text in a new tab">📄 full log</a>`)}
           ${sessionChip(a, '⬇ log', `<a href="${fullLogUrl(a.name, true)}" download class="terminal-link" title="Download the full retained log of this agent's latest run as a text file">⬇ log</a>`)}
@@ -4558,6 +4593,7 @@
             ${modelOptionsHtml(a.cli, a.model)}
           </select>
         </div>
+        <div class="oc-detail-blockers">${agentBlockerLineHtml(a)}${neverScheduledChipHtml(a, a.name)}</div>
         ${terminalCopyHintHtml(needsLoginDown, agentSessionUnavailable(a), a.name)}
         ${ocDetailFieldsHtml(a, isPaused, isOff, isOnDemand)}
         <div class="oc-detail-indicators">${agentIndicators(a.name)}</div>
@@ -6186,7 +6222,8 @@
        hover a tooltip to find out what it is for. */
     function terminalCopyUrlButtonHtml(agentName, needsLogin) {
       if (!agentName || !needsLogin) return '';
-      return `<button type="button" class="terminal-copy-url-btn" data-action="copyTerminalUrl" data-agent="${esc(agentName)}" title="Show this agent\u2019s sign-in URL, captured whole from its terminal — wrapped lines are rejoined so the OAuth link is not broken by the wrap">🔑 Copy login URL</button>`;
+      return `<button type="button" class="terminal-copy-url-btn" data-action="copyTerminalUrl" data-agent="${esc(agentName)}" title="Show this agent\u2019s sign-in URL, captured whole from its terminal — wrapped lines are rejoined so the OAuth link is not broken by the wrap">🔑 Copy login URL</button>`
+        + `<button type="button" class="terminal-copy-url-btn" data-action="submitLoginCode" data-agent="${esc(agentName)}" title="Paste the authorization code the sign-in page gave you. It is typed into the agent\u2019s terminal by the server, so the browser terminal cannot mangle it.">↩ Submit login code</button>`;
     }
 
     /* Writes text to the clipboard, reporting honestly when it cannot.
@@ -6216,6 +6253,39 @@
       } catch { ok = false; }
       ta.remove();
       return ok;
+    }
+
+    /* The write-side twin of copyTerminalUrl.
+
+       Copying OUT of the dashboard terminal is broken (#5188) and this is the
+       same defect in the other direction: an operator who has opened the
+       sign-in URL must paste a code BACK, and ttyd/xterm.js over tmux mangles
+       it. Without this the only route left is a host shell and `tmux
+       send-keys`, which is not an answer for an operator whose interface is a
+       web dashboard.
+
+       The code goes to the server, which types it into the pane — the browser
+       terminal is never involved. It is refused rather than sanitised if it
+       carries whitespace or control characters, so a value that could submit a
+       second command into the agent's shell cannot be typed at all; the reason
+       is surfaced verbatim rather than as a generic failure. */
+    async function submitLoginCode(agentName) {
+      if (!agentName) return;
+      const code = prompt(`Paste the authorization code for "${agentName}".\n\nIt is sent to the server and typed into the agent's terminal, so the browser terminal cannot corrupt it.`);
+      if (code === null) return;
+      if (!code.trim()) { showToast('No code entered', 'error'); return; }
+      try {
+        const r = await fetch(`/api/agents/${encodeURIComponent(agentName)}/login-code`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code: code.trim() }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) { showToast(d.error || `Could not submit the code (HTTP ${r.status})`, 'error'); return; }
+        showToast(`Code submitted to ${agentName}`, 'success');
+      } catch (err) {
+        showToast(`Could not submit the code: ${err && err.message ? err.message : err}`, 'error');
+      }
     }
 
     async function copyTerminalUrl(agentName) {
@@ -6363,6 +6433,108 @@
       return down && a.authKnown === true && a.authAvailable !== true;
     }
 
+    /* Agent blockers (#5594). THREE orthogonal flags decide whether an agent
+       will ever do work: is its session up, has an operator paused it, and is
+       a cadence configured at all. The card used to reveal them one at a
+       time — a single action button cleared the first, which uncovered the
+       second, and the third (no cadence in any mode) was not on the card at
+       all — so operators walked a serial treasure hunt and still ended up
+       with an agent that never ran.
+
+       These read the RAW server flags rather than the mutually-exclusive
+       display state (isPaused/isOff/isStopped, which deliberately suppress
+       one another for styling), so every live blocker is legible BEFORE the
+       first click. agentSchedulingBlockers returns them in the order an
+       operator must clear them; empty means the governor really will kick
+       this agent. */
+    function agentSchedulingBlockers(a) {
+      const out = [];
+      if (a.paused === true) out.push('paused');
+      if (a.offByCadence === true) {
+        const mode = (window._lastStatus?.governor?.mode || '').toLowerCase();
+        out.push(mode ? `off in ${mode} mode` : 'off in this governor mode');
+      }
+      if (a.noCadence === true) out.push('never scheduled');
+      return out;
+    }
+    function agentToggleTitle(a, isPaused, isOff) {
+      if (isPaused) {
+        const rest = [];
+        if (a.state !== 'running') rest.push('its session is down (use \u21bb restart)');
+        if (a.offByCadence === true) rest.push('its cadence for the current governor mode is off (\u2699\uFE0F \u2192 Cadences)');
+        if (a.noCadence === true) rest.push('no governor mode gives it a cadence (\u2699\uFE0F \u2192 Cadences)');
+        const base = 'Resume this agent \u2014 it will start running on its configured cadence';
+        if (rest.length === 0) return base;
+        return `${base}. Resuming alone is NOT enough: ${rest.join('; ')}.`;
+      }
+      if (isOff) return 'Start this agent \u2014 it is currently off in this governor mode';
+      return 'Pause this agent \u2014 stops governor from kicking it until resumed';
+    }
+    /* Combined primary action for a PAUSED agent \u2014 the follow-up to
+       resume-leads (#5594). Resume-leads guarantees the pause is never
+       hidden, and its tooltip names the session as a blocker resuming will
+       not clear; this removes that residual two-step dance: when the session
+       is ALSO down, the one button reads '\u25b6 start & resume' and clears both
+       flags in a single click via startResumeAgent (a client-side chain of
+       the two existing endpoints \u2014 resume, then restart \u2014 no new backend
+       surface). A session-up paused agent keeps the plain '\u25b6 resume' with
+       agentToggleTitle's blocker-naming tooltip. Every render site (card
+       grid, detail panel, detail fast path) builds the paused action here,
+       which is the single place that guarantees a paused agent never shows
+       a bare Start. */
+    function pausedAgentActionHtml(a) {
+      if (a.state === 'running') {
+        return `<button class="btn-toggle paused" data-action="toggleAgent" data-agent="${esc(a.name)}" data-paused="true" title="${esc(agentToggleTitle(a, true, false))}">\u25b6 resume</button>`;
+      }
+      const rest = [];
+      if (a.offByCadence === true) rest.push('its cadence for the current governor mode is off (\u2699\ufe0f \u2192 Cadences)');
+      if (a.noCadence === true) rest.push('no governor mode gives it a cadence (\u2699\ufe0f \u2192 Cadences)');
+      let title = 'This agent is paused AND its session is down \u2014 one click resumes it and asks the supervisor to start the session. No second Resume step.';
+      if (rest.length > 0) title += ` Still not enough on its own: ${rest.join('; ')}.`;
+      return `<button class="btn-toggle paused" data-action="startResumeAgent" data-agent="${esc(a.name)}" data-paused="true" title="${esc(title)}">\u25b6 start &amp; resume</button>`;
+    }
+    function neverScheduledChipHtml(a, configTarget) {
+      if (a.noCadence !== true) return '';
+      const who = a.displayName || a.name;
+      const tip = `${who} is enabled but NO governor mode gives it a cadence, and it has never been kicked \u2014 it will sit idle forever. Click to set cadences.`;
+      return `<button class="never-scheduled-chip" data-action="openConfigDialog" data-config-type="agent" data-agent="${esc(configTarget)}" data-tab="Cadences" title="${esc(tip)}">\u23F1 never scheduled \u2014 set cadences</button>`;
+    }
+    function agentBlockerLineHtml(a) {
+      const onDemand = a.onDemand === true;
+      let session = 'up', sessionCls = 'ab-ok';
+      let sessionTip = 'The tmux session is alive.';
+      if (agentIsDisabled(a)) {
+        session = 'disabled'; sessionCls = 'ab-bad';
+        sessionTip = 'Disabled in config \u2014 the governor never starts this agent. Enable it with \u2699\uFE0F.';
+      } else if (a.state !== 'running') {
+        session = 'down'; sessionCls = 'ab-bad';
+        sessionTip = 'No live tmux session \u2014 \u21bb restart asks the supervisor to respawn it.';
+      }
+      const blockers = agentSchedulingBlockers(a);
+      let sched = a.cadence || '\u2014', schedCls = 'ab-ok';
+      let schedTip = 'Governor cadence for the current mode.';
+      if (onDemand) {
+        sched = 'on demand'; schedCls = '';
+        schedTip = 'On-demand agent \u2014 kicked manually, never by governor cadence.';
+      } else if (blockers.length > 0) {
+        sched = blockers.join(' + '); schedCls = 'ab-bad';
+        schedTip = `EVERY reason the governor will not kick ${a.displayName || a.name} right now \u2014 all of them must be cleared: ${blockers.join('; ')}.`;
+      }
+      let next = a.nextKickIn ? `in ${a.nextKickIn}` : (a.nextKick || '\u2014');
+      let nextCls = '';
+      if (onDemand) next = 'on demand';
+      else if (blockers.length > 0) { next = 'never'; nextCls = 'ab-bad'; }
+      const nextTip = (!onDemand && blockers.length === 0 && a.nextKick)
+        ? `Next governor kick at ${a.nextKick}.`
+        : 'Nothing is scheduled to kick this agent.';
+      return `<div class="agent-blockers">`
+        + `<span class="ab-seg ${sessionCls}" title="${esc(sessionTip)}"><span class="ab-key">session</span>${esc(session)}</span>`
+        + `<span class="ab-sep">\u00B7</span>`
+        + `<span class="ab-seg ${schedCls}" title="${esc(schedTip)}"><span class="ab-key">scheduling</span>${esc(sched)}</span>`
+        + `<span class="ab-sep">\u00B7</span>`
+        + `<span class="ab-seg ${nextCls}" title="${esc(nextTip)}"><span class="ab-key">next kick</span>${esc(next)}</span>`
+        + `</div>`;
+    }
     function renderAgents(agents) {
       const el = document.getElementById('agents');
       // Preserve custom prompt input values across re-renders
@@ -6397,12 +6569,22 @@
         const dotState = isOff ? 'off-healthy' : dotCls;
         const canToggle = a.beadRole !== 'supervisor';
         const canPauseToggle = canToggle && dashboardRoleAtLeast(window._hiveRole || 'read', 'owner');
-        const toggleBtn = canToggle ? (isOff
+        /* RESUME LEADS (#5594). A paused agent's card offers its pause toggle
+           FIRST and unconditionally; the governor-cadence gear must never take
+           the slot, or the pause stays hidden until the gear's blocker is
+           cleared and a second button appears. isOff already excludes isPaused
+           today, so this renders identically — stating the order here is what
+           keeps it true if that derivation ever changes. The remaining
+           blockers ride in the tooltip and on the blockers line below, so the
+           operator learns them before the click, not after. */
+        const toggleBtn = canToggle ? (isPaused && canPauseToggle
+          ? pausedAgentActionHtml(a)
+          : isOff
           ? `<button class="btn-toggle off" data-action="openConfigDialog" data-config-type="agent" data-agent="${esc(a.name)}" title="Agent is off in this governor mode — click to configure per-mode cadences">⚙ off</button>`
           : isOnDemand
           ? `<button class="btn-toggle on-demand" title="On-demand agent — kicked manually, not by governor cadence">⚡ on demand</button>`
           : canPauseToggle
-          ? `<button class="btn-toggle ${isPaused ? 'paused' : 'running'}" data-action="toggleAgent" data-agent="${esc(a.name)}" data-paused="${isPaused}" title="${isPaused ? 'Resume this agent — it will start running on its configured cadence' : 'Pause this agent — stops governor from kicking it until resumed'}">${isPaused ? '▶ resume' : '⏸ pause'}</button>`
+          ? `<button class="btn-toggle running" data-action="toggleAgent" data-agent="${esc(a.name)}" data-paused="false" title="${esc(agentToggleTitle(a, false, false))}">⏸ pause</button>`
           : '') : '';
         // liveSummary is pushed via SSE every 5s — no separate fetch needed
         let summaryEl = '';
@@ -6429,7 +6611,7 @@
         const disabledBadge = agentIsDisabled(a) ? ` <span class="status-badge disabled" title="Disabled in config — the governor never starts this agent. Configure it with the gear to enable.">disabled</span>` : '';
         return `<div class="agent-card ${cls}${compactCls}" data-agent="${esc(a.name)}">
           <span class="working-indicator"></span>
-          <div class="agent-name"><span class="dot ${dotState}"${isOff ? ` title="${esc(OFF_HEALTHY_TITLE)}"` : ''}></span>${a.emoji ? a.emoji + ' ' : ''}${esc(a.displayName || a.name)}${needsLogin ? ' <span title="CLI needs login">\uD83D\uDD11</span>' : ''}${a.sandboxed ? ' <span class="status-badge done" title="Sandboxed runner active">sandboxed</span>' : ''}${disabledBadge}${replicaBadge} ${toggleBtn} <button class="compact-toggle" data-action="toggleAgentCompact" data-arg0="${esc(a.name)}" data-stop="1" title="Toggle compact/expanded view for this agent card">${isAgentCompact(a.name) ? '&#9655; expand' : '&#9661; compact'}</button> ${sessionChip(a, '▶ terminal', `<a href="${terminalUrl(a.name)}" target="_blank" rel="noopener" class="terminal-link" data-action="openTerminal" data-agent="${esc(a.name)}" title="Open tmux session">▶ terminal</a>`)} ${sessionChip(a, '📄 full log', `<a href="${fullLogUrl(a.name, false)}" target="_blank" rel="noopener" class="terminal-link" title="Full log of the latest run as selectable, searchable text">📄 full log</a>`)} <a href="${kickHistoryUrl(a.name)}" target="_blank" rel="noopener" class="terminal-link" title="Archived logs of previous kicks — survives restarts and upgrades">🕘 past kicks</a> <button class="restart-btn" data-action="restartAgent" data-agent="${esc(a.name)}" title="Kill tmux session — supervisor will respawn with fresh context">↻ restart</button> <button class="config-gear" data-action="openConfigDialog" data-config-type="agent" data-agent="${esc(configTarget)}" title="Configure ${esc(a.replicaBase ? (a.replicaBase + ' (base for ' + a.name + ')') : (a.displayName || a.name))}">⚙️</button></div>
+          <div class="agent-name"><span class="dot ${dotState}"${isOff ? ` title="${esc(OFF_HEALTHY_TITLE)}"` : ''}></span>${a.emoji ? a.emoji + ' ' : ''}${esc(a.displayName || a.name)}${needsLogin ? ' <span title="CLI needs login">\uD83D\uDD11</span>' : ''}${a.sandboxed ? ' <span class="status-badge done" title="Sandboxed runner active">sandboxed</span>' : ''}${disabledBadge}${replicaBadge} ${toggleBtn}${neverScheduledChipHtml(a, configTarget)} <button class="compact-toggle" data-action="toggleAgentCompact" data-arg0="${esc(a.name)}" data-stop="1" title="Toggle compact/expanded view for this agent card">${isAgentCompact(a.name) ? '&#9655; expand' : '&#9661; compact'}</button> ${sessionChip(a, '▶ terminal', `<a href="${terminalUrl(a.name)}" target="_blank" rel="noopener" class="terminal-link" data-action="openTerminal" data-agent="${esc(a.name)}" title="Open tmux session">▶ terminal</a>`)} ${sessionChip(a, '📄 full log', `<a href="${fullLogUrl(a.name, false)}" target="_blank" rel="noopener" class="terminal-link" title="Full log of the latest run as selectable, searchable text">📄 full log</a>`)} <a href="${kickHistoryUrl(a.name)}" target="_blank" rel="noopener" class="terminal-link" title="Archived logs of previous kicks — survives restarts and upgrades">🕘 past kicks</a> <button class="restart-btn" data-action="restartAgent" data-agent="${esc(a.name)}" title="Kill tmux session — supervisor will respawn with fresh context">↻ restart</button> <button class="config-gear" data-action="openConfigDialog" data-config-type="agent" data-agent="${esc(configTarget)}" title="Configure ${esc(a.replicaBase ? (a.replicaBase + ' (base for ' + a.name + ')') : (a.displayName || a.name))}">⚙️</button></div>
           ${terminalCopyHintHtml(needsLogin, agentSessionUnavailable(a), a.name)}
           <div class="agent-state ${isOnDemand ? 'on-demand' : isPaused ? 'paused' : isOff ? 'off' : a.busy}">${isOnDemand ? 'on demand' : isPaused ? 'paused' : isOff ? 'off' : a.busy}${pauseInfoIcon(a)}${(() => {
             if (a.structuredStatus === 'BLOCKED') return '<span class="status-badge blocked" title="' + esc(a.statusEvidence) + '">blocked</span>';
@@ -6439,6 +6621,7 @@
             if (isStale) return '<span class="status-badge needs-context">stale</span>';
             return '';
           })()}${agentSpendChip(a.name)}</div>
+          ${agentBlockerLineHtml(a)}
           ${(() => {
             // Last upstream/launch error stays on its own line below the state
             // badge, never behind the working-indicator dot — previously the
@@ -7475,6 +7658,22 @@
         badge.style.color = isPublic ? 'var(--green)' : 'var(--indigo)';
         badge.title = 'Every repo in this hive is on ' + hostLabel + (isPublic ? '' : ' (GitHub Enterprise)') + ' — this hive is single-host';
       }
+      // Section-header escalation counter: "· N need human review". Escalated
+      // PRs (needs-human label from the escalation ledger) previously had no
+      // section-level signal — nine parked PRs sat invisible to the operator
+      // for a week (kubestellar/console, 2026-09-01). Hidden at zero so a
+      // healthy hive shows nothing extra.
+      const needHumanTotal = repos.reduce((n, r) => n + (r.openPrs || []).filter(p => (p.labels || []).map(l => String(l)).includes('needs-human')).length, 0);
+      const nhEl = document.getElementById('repos-needs-human');
+      if (nhEl) {
+        if (needHumanTotal > 0) {
+          nhEl.textContent = '· ' + needHumanTotal + ' need' + (needHumanTotal === 1 ? 's' : '') + ' human review';
+          nhEl.style.display = 'inline';
+        } else {
+          nhEl.textContent = '';
+          nhEl.style.display = 'none';
+        }
+      }
       setIfChanged(el, repos.map(r => {
         const iSpark = sparkSvg(historyData.map(s => s.repos?.[r.name]?.issues ?? 0), 'var(--blue)');
         const pSpark = sparkSvg(historyData.map(s => s.repos?.[r.name]?.prs ?? 0), 'var(--purple)');
@@ -7499,17 +7698,34 @@
           const prAge = pillAge(p.created_at);
           const labels = (p.labels || []).map(l => String(l));
           const queued = labels.includes(window._hiveAutoMergeLabel || 'lgtm');
-          const prTip = (p.title || '') + (p.author ? ' — @' + p.author : '') + (prAge ? ' (' + prAge + ')' : '') + (p.mergeable ? ' (merge eligible)' : '') + (queued ? ' (queued for auto-merge)' : '');
+          // Escalated out of the automated fix lane: the escalation ledger
+          // (pkg/escalation) applies the `needs-human` label once automated
+          // fix attempts are exhausted. The label list is the single source
+          // of truth — the same signal the ledger writes to GitHub — so this
+          // view cannot drift from the ledger.
+          const needsHuman = labels.includes('needs-human');
+          const prTip = (p.title || '') + (p.author ? ' — @' + p.author : '') + (prAge ? ' (' + prAge + ')' : '') + (p.mergeable ? ' (merge eligible)' : '') + (queued ? ' (queued for auto-merge)' : '') + (needsHuman ? ' (needs human review)' : '');
           const canQueue = dashboardRoleAtLeast(window._hiveRole || 'read', 'merger') && (window._hiveUser || dashboardRoleAtLeast(window._hiveRole || 'read', 'owner')) && !(p.author && window._hiveUser && p.author.toLowerCase() === window._hiveUser.toLowerCase());
           const parts = (r.full || r.name || '').split('/');
           const owner = parts.length > 1 ? parts[0] : '';
           const repoName = parts.length > 1 ? parts.slice(1).join('/') : (r.name || '');
-          const queueBtn = canQueue
-            ? (queued
-                ? '<span class="repo-pr-pill mergeable" title="Already queued for Hive auto-merge on green CI">Queued</span>'
-                : `<button class="repo-pr-pill" style="cursor:pointer" data-action="queuePRAutoMerge" data-arg0="${esc(owner)}" data-arg1="${esc(repoName)}" data-arg2="${p.number}" data-arg-types="s,s,j,t" data-stop="1" data-prevent="1">Queue auto-merge</button>`)
-            : '';
-          return `<a class="repo-pr-pill${mergeClass}" href="${esc(p.url)}" target="_blank" rel="noopener" title="${esc(prTip)}"><span class="pill-num">#${p.number}</span><span class="pill-title">${esc(title)}</span>${mergeIcon}</a>${queueBtn}`;
+          // The action-chip slot after the PR pill. needs-human takes
+          // precedence over the Queue auto-merge action: an escalated PR is
+          // out of the automated lane by definition, so offering to queue it
+          // for auto-merge would contradict the escalation. Removing the
+          // needs-human label on GitHub returns the PR to the automated lane
+          // and brings the queue action back on the next refresh.
+          const queueBtn = needsHuman
+            ? '<span class="repo-pr-pill needs-human pill-needs-human-badge" title="Automated fix attempts exhausted — a human must review this PR. Remove the needs-human label after addressing the root cause to return it to the automated fix lane.">⚠ needs human</span>'
+            : (canQueue
+                ? (queued
+                    ? '<span class="repo-pr-pill mergeable" title="Already queued for Hive auto-merge on green CI">Queued</span>'
+                    : `<button class="repo-pr-pill" style="cursor:pointer" data-action="queuePRAutoMerge" data-arg0="${esc(owner)}" data-arg1="${esc(repoName)}" data-arg2="${p.number}" data-arg-types="s,s,j,t" data-stop="1" data-prevent="1">Queue auto-merge</button>`)
+                : '');
+          // needs-human wins the pill tint over mergeable green: a PR can be
+          // technically mergeable AND escalated, and the escalation is what
+          // the operator must see.
+          return `<a class="repo-pr-pill${needsHuman ? ' needs-human' : mergeClass}" href="${esc(p.url)}" target="_blank" rel="noopener" title="${esc(prTip)}"><span class="pill-num">#${p.number}</span><span class="pill-title">${esc(title)}</span>${mergeIcon}</a>${queueBtn}`;
         }).join('');
         const allPills = issuePills + prPills;
         const pillsHtml = allPills ? `<div class="repo-issues">${allPills}</div>` : '';
@@ -9537,14 +9753,44 @@ function burnAreaChart() {
       } catch (e) { /* transient — leave last render in place */ }
     }
 
-    // PANEL B — lifecycle timeline + fleet health.
+    // Short chip labels for the journey stage axis; keys are the closed Kind
+    // set served by /api/lifecycle-timeline.
+    const LC_STAGE_AXIS = ['enumerated', 'classified', 'kicked', 'pr_opened', 'merged', 'blocked'];
+    const LC_STAGE_LABEL = {
+      enumerated: 'enum', classified: 'class', kicked: 'kick',
+      pr_opened: 'pr', merged: 'merged', blocked: 'blocked'
+    };
+
+    // Format the fleet-health coverage note: counts are honest only relative
+    // to how much history the store actually holds (coveredMs), which can be
+    // shorter than the requested window right after first deploy.
+    function lcWindowLabel(fleet) {
+      const windowMs = Number(fleet.windowMs) || 0;
+      const coveredMs = Number(fleet.coveredMs) || 0;
+      const fmt = (ms) => {
+        const min = Math.round(ms / 60000);
+        if (min < 60) return min + 'm';
+        const hr = Math.round(min / 60);
+        if (hr < 48) return hr + 'h';
+        return Math.round(hr / 24) + 'd';
+      };
+      if (!windowMs) return '';
+      if (coveredMs > 0 && coveredMs < windowMs) {
+        return `over the last ${fmt(coveredMs)} of recorded history (window ${fmt(windowMs)})`;
+      }
+      return `over the last ${fmt(windowMs)}`;
+    }
+
+    // PANEL B — lifecycle journeys + fleet health. One row per work item:
+    // reached stage chips in journey order (current stage colored, earlier
+    // ones dimmed), latest agent, last activity.
     function renderLifecycle(dto) {
       const section = document.getElementById('lifecycle-section');
       const card = document.getElementById('lifecycle-card');
       if (!section || !card) return;
       dto = dto || {};
       const fleet = dto.fleet || {};
-      const events = Array.isArray(dto.events) ? dto.events : [];
+      const journeys = Array.isArray(dto.journeys) ? dto.journeys : [];
 
       section.style.display = '';
 
@@ -9556,27 +9802,38 @@ function burnAreaChart() {
         <div class="lc-fleet-stat"><div class="val merged">${merged}</div><div class="lbl">Merged</div></div>
         <div class="lc-fleet-stat"><div class="val blocked">${blocked}</div><div class="lbl">Blocked</div></div>
       </div>`;
+      const windowLabel = lcWindowLabel(fleet);
+      const windowHtml = windowLabel ? `<div class="lc-window">${escapeHtml(windowLabel)}</div>` : '';
 
       let listHtml;
-      if (events.length === 0) {
-        listHtml = `<div class="lc-empty">No lifecycle events yet — the governor only recently started recording them.</div>`;
+      if (journeys.length === 0) {
+        listHtml = `<div class="lc-empty">No lifecycle journeys yet — they appear as the governor enumerates and works issues.</div>`;
       } else {
-        listHtml = `<ul class="lc-events">${events.map((e) => {
-          e = e || {};
-          const kind = e.kind || '';
-          const ref = escapeHtml(e.issueRef || '');
-          const agent = e.agent ? escapeHtml(e.agent) : '';
-          const rel = v4RelTime(e.at);
+        listHtml = `<ul class="lc-journeys">${journeys.map((j) => {
+          j = j || {};
+          const stages = j.stages || {};
+          const current = j.current || '';
+          const ref = escapeHtml(j.ref || '');
+          const chips = LC_STAGE_AXIS.filter((k) => stages[k]).map((k) => {
+            const st = stages[k] || {};
+            const isCurrent = k === current;
+            const cls = isCurrent ? `lc-kind ${v4KindClass(k)}` : 'lc-kind neutral lc-stage past';
+            const count = Number(st.count) > 1 ? ` ×${Number(st.count)}` : '';
+            const title = `${k}${count} — ${v4RelTime(st.lastAt) || ''}`;
+            return `<span class="${cls}" title="${escapeHtml(title)}">${escapeHtml(LC_STAGE_LABEL[k] || k)}</span>`;
+          }).join('<span class="lc-stage-arrow">→</span>');
+          const agent = j.agent ? escapeHtml(j.agent) : '';
+          const rel = v4RelTime(j.lastAt);
           const agentHtml = agent ? `<span class="lc-agent">${agent}</span>` : '';
           const timeHtml = rel ? `<span class="lc-time">${escapeHtml(rel)}</span>` : '';
-          return `<li class="lc-event">
-            <span class="lc-kind ${v4KindClass(kind)}">${escapeHtml(kind || '—')}</span>
-            <span class="lc-ref">${ref || '—'}</span>${agentHtml}${timeHtml}
+          return `<li class="lc-journey">
+            <span class="lc-ref">${ref || '—'}</span>
+            <span class="lc-stages">${chips}</span>${agentHtml}${timeHtml}
           </li>`;
         }).join('')}</ul>`;
       }
 
-      card.innerHTML = fleetHtml + listHtml;
+      card.innerHTML = fleetHtml + windowHtml + listHtml;
       applySectionCollapse('lifecycle-section');
     }
 
@@ -14228,6 +14485,31 @@ function burnAreaChart() {
       const ghCorePct = ghCoreLimit > 0 ? Math.round((ghCoreUsed / ghCoreLimit) * 100) : 0;
       const ghResetRaw = ghRate.core?.reset;
       const ghResetAt = ghResetRaw ? new Date(typeof ghResetRaw === 'number' ? ghResetRaw * 1000 : ghResetRaw).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—';
+      // How old is this reading? (#5733) The card used to show only `reset`,
+      // which moves independently of when the sample was taken — so a value
+      // that had stopped updating looked exactly like a fresh one. A reading
+      // held back by the monotone clamp keeps its original observed_at, so the
+      // age below is what makes that visible.
+      const GH_RATE_STALE_SECONDS = 300;
+      const ghObservedRaw = ghRate.core?.observed_at;
+      let ghObservedHtml = '';
+      if (ghObservedRaw) {
+        const observedMs = new Date(ghObservedRaw).getTime();
+        if (!Number.isNaN(observedMs)) {
+          const ageSec = Math.max(0, Math.floor((Date.now() - observedMs) / 1000));
+          const ageStr = ageSec < 60
+            ? ageSec + 's ago'
+            : ageSec < 3600
+              ? Math.floor(ageSec / 60) + 'm ago'
+              : Math.floor(ageSec / 3600) + 'h ago';
+          const stale = ageSec >= GH_RATE_STALE_SECONDS;
+          const color = stale ? 'var(--yellow)' : 'var(--muted)';
+          const title = stale
+            ? 'This reading has not refreshed recently — treat the headroom above as a floor, not a live value'
+            : 'When this rate-limit reading was taken';
+          ghObservedHtml = `<div style="${rowStyle}"><span>Measured</span><span style="color:${color}" title="${escapeHtml(title)}">${ageStr}</span></div>`;
+        }
+      }
       const ghIdentity = ghRate.identity || {};
       const ghIdentityLabel = ghIdentity.label || 'unknown';
       const ghIdentityType = ghIdentity.type || 'unknown';
@@ -14252,6 +14534,7 @@ function burnAreaChart() {
           <div style="${rowStyle}"><span>Identity</span><span>${ghIdentityBadge} ${esc(ghIdentityLabel)}</span></div>
           <div style="${rowStyle}"><span>Core API</span><span style="font-weight:600">${ghCoreUsed} / ${ghCoreLimit} (${ghCorePct}%)</span></div>
           <div style="${rowStyle}"><span>Resets at</span><span>${ghResetAt}</span></div>
+          ${ghObservedHtml}
           <div style="margin-top:6px;height:6px;background:var(--line);border-radius:3px;overflow:hidden">
             <div style="height:100%;width:${ghCorePct}%;background:${ghCorePct > 80 ? 'var(--red)' : ghCorePct > 50 ? 'var(--yellow)' : 'var(--green)'};border-radius:3px;transition:width 0.3s"></div>
           </div>
@@ -14454,6 +14737,7 @@ function burnAreaChart() {
       const agent = el.dataset.agent || '';
       switch (action) {
         case 'toggleAgent': toggleAgent(agent, el.dataset.paused === 'true'); break;
+        case 'startResumeAgent': startResumeAgent(agent); break;
         case 'restartAgent': restartAgent(agent); break;
         case 'openConfigDialog': { const ct = el.dataset.configType || el.dataset.arg0 || 'agent'; const tab = el.dataset.tab || el.dataset.arg2 || null; if (el.classList.contains('agent-link')) { closeConfigDialog(); setTimeout(() => openConfigDialog(ct, agent, tab), 100); } else { openConfigDialog(ct, agent || null, tab); } } break;
         case 'ocSendKick': ocSendKick(agent); break;
@@ -14462,6 +14746,7 @@ function burnAreaChart() {
         case 'kickEmpty': { const inp = document.getElementById('kick-prompt-' + agent); if (inp) inp.value = ''; kick(agent); } break;
         case 'openTerminal': e.preventDefault(); openTerminal(agent, el.href); break;
         case 'copyTerminalUrl': e.stopPropagation(); copyTerminalUrl(agent); break;
+        case 'submitLoginCode': e.stopPropagation(); submitLoginCode(agent); break;
         case 'showTerminalKeyboardHint': e.stopPropagation(); showTerminalKeyboardHint(); break;
         case 'togglePin': togglePin(agent, el.dataset.pinType, el.dataset.unpin === 'true'); break;
         case 'resetRestarts': resetRestarts(agent); break;
@@ -14822,6 +15107,24 @@ function burnAreaChart() {
       // Update in-memory agent state so cadence table re-renders correctly
       const agentObj = (window._lastAgents || []).find(a => a.name === agent);
       if (agentObj) { agentObj.paused = nowPaused; }
+      // The blockers line and the toggle tooltip (#5594) both render from the
+      // agent object, so patch them from the SAME authoritative state. Left
+      // alone they would keep saying "paused" after a successful resume until
+      // the next poll — the stale-control bug this function already exists to
+      // prevent for the button label.
+      if (agentObj) {
+        document.querySelectorAll(`.agent-card[data-agent="${CSS.escape(agent)}"] .agent-blockers`)
+          .forEach(el => { el.outerHTML = agentBlockerLineHtml(agentObj); });
+        document.querySelectorAll(`.agent-card[data-agent="${CSS.escape(agent)}"] .btn-toggle`)
+          .forEach(el => {
+            // A just-paused agent gets the full combined-action rebuild —
+            // the combined start-and-resume button when its session is also
+            // down (#5594 follow-up); an unpaused one only needs its tooltip
+            // refreshed.
+            if (nowPaused) el.outerHTML = pausedAgentActionHtml(agentObj);
+            else el.title = agentToggleTitle(agentObj, false, false);
+          });
+      }
       // The focused agent-detail panel renders its own toggle button — the
       // .agent-card loop above never reaches it, so re-render it from the
       // just-updated state or the button stays stale until navigation.
@@ -14841,6 +15144,40 @@ function burnAreaChart() {
       } else {
         dismissToast(toast, `${agent} ${action}d`, 'success');
       }
+    }
+
+    // Combined start & resume for a paused agent whose session is also down
+    // (#5594 follow-up to resume-leads). Client-side chain of the two
+    // existing endpoints — resume FIRST so the pause is cleared before the
+    // supervisor spawns the session (a session started while still paused
+    // would just sit unkickable), then restart, which for a down session is
+    // simply "start". No confirm dialog: unlike restartAgent there is no
+    // live session to kill.
+    async function startResumeAgent(agent) {
+      const toast = showToast(`Starting & resuming ${agent}...`, 'info', true);
+      try {
+        const res = await fetch(`/api/resume/${agent}`, { method: 'POST' });
+        const data = await res.json();
+        if (!data.ok) { dismissToast(toast, `Resume failed: ${data.error || 'unknown'}`, 'error'); return; }
+        const res2 = await fetch(`/api/restart/${agent}`, { method: 'POST' });
+        const data2 = await res2.json();
+        if (!data2.ok) { dismissToast(toast, `Resumed, but session start failed: ${data2.error || 'unknown'}`, 'error'); return; }
+      } catch (e) {
+        dismissToast(toast, `Start & resume failed: ${e}`, 'error');
+        return;
+      }
+      // Same optimistic patch discipline as toggleAgent: the blockers line
+      // and the action button render from the agent object, so update it and
+      // repaint before the next poll confirms.
+      const agentObj = (window._lastAgents || []).find(x => x.name === agent);
+      if (agentObj) {
+        agentObj.paused = false;
+        document.querySelectorAll(`.agent-card[data-agent="${CSS.escape(agent)}"] .agent-blockers`)
+          .forEach(el => { el.outerHTML = agentBlockerLineHtml(agentObj); });
+      }
+      if (typeof ocRenderAgentDetail === 'function') ocRenderAgentDetail();
+      refreshStatus();
+      dismissToast(toast, `${agent} resumed — supervisor is starting the session`, 'success');
     }
 
     async function restartAgent(agent) {
@@ -16439,9 +16776,17 @@ function burnAreaChart() {
         const skipped = (data.skipped || []).length;
         const governorChanges = formatGovernorChanges(data.governor_changes);
         closeACMMDialog();
-        window._acmmOverride = { level: level, packAgents: data.packAgents || [] };
+        // Render the level the SERVER confirmed, never the one we asked for
+        // (#5492). We only reach here on a 2xx, so the write is committed; the
+        // body is authoritative. Falling back to `level` keeps an older spoke
+        // that omits the field working.
+        const confirmedLevel = (data && Number.isFinite(Number(data.level))) ? Number(data.level) : level;
+        // Drop any status snapshot built before this apply, so the async
+        // rebuild's predecessor cannot repaint the previous level (#4348).
+        noteStatusMutation(data.minStatusSeq);
+        window._acmmOverride = { level: confirmedLevel, packAgents: data.packAgents || [] };
         if (window._lastStatus) {
-          window._lastStatus.acmmLevel = level;
+          window._lastStatus.acmmLevel = confirmedLevel;
           window._lastStatus.acmmLevelConfigured = true;
           window._lastStatus.acmmPackAgents = data.packAgents || [];
           render(window._lastStatus);
@@ -16476,14 +16821,17 @@ function burnAreaChart() {
         }
         const governorChanges = formatGovernorChanges(data.governor_changes);
         closeACMMDialog();
-        window._acmmOverride = { level: level, packAgents: data.packAgents || [] };
+        // Server-confirmed level only — see applyACMMPack above (#5492).
+        const confirmedLevel = (data && Number.isFinite(Number(data.level))) ? Number(data.level) : level;
+        noteStatusMutation(data.minStatusSeq);
+        window._acmmOverride = { level: confirmedLevel, packAgents: data.packAgents || [] };
         if (window._lastStatus) {
-          window._lastStatus.acmmLevel = level;
+          window._lastStatus.acmmLevel = confirmedLevel;
           window._lastStatus.acmmLevelConfigured = true;
           window._lastStatus.acmmPackAgents = data.packAgents || [];
           render(window._lastStatus);
         }
-        showToast(`ACMM level set to L${level} (${name})` + (governorChanges ? ' — governor settings changed' : ''), governorChanges ? 'info' : 'success');
+        showToast(`ACMM level set to L${confirmedLevel} (${name})` + (governorChanges ? ' — governor settings changed' : ''), governorChanges ? 'info' : 'success');
         if (governorChanges) await hiveAlert(governorChanges, 'Governor settings changed');
         _acmmPacks = null;
       } catch (err) {
@@ -22223,6 +22571,10 @@ function burnAreaChart() {
           !(await ensureGatewayMethodConfigured(dirty.general.cliPinValue))) return;
       const base = _configState.type === 'governor' ? '/api/config/governor' : `/api/config/agent/${_configState.agent}`;
       let success = true;
+      // Set once a cadences section has been accepted by the server, so the
+      // success path knows to repaint the governor cadence matrix even when
+      // no `general` field changed (#5492).
+      let savedCadences = false;
       for (const [section, values] of Object.entries(dirty)) {
         try {
           if (_configState.type === 'governor' && section === 'general' && values.hiveId !== undefined) {
@@ -22297,6 +22649,19 @@ function burnAreaChart() {
               body: JSON.stringify(values)
             });
             if (!res.ok) throw new Error(await saveErrorMessage(res));
+            if (section === 'cadences') {
+              // A cadence write kicks an ASYNC status rebuild server-side, so
+              // the refetch below can be served the cached pre-write snapshot
+              // and repaint the OLD cadence — the operator waits for a later
+              // broadcast to see their own change (#5492). Raise the
+              // stale-snapshot floor from the write ack so any snapshot built
+              // before this mutation is discarded instead of rendered.
+              // Reached only after the !res.ok throw above, so a failed write
+              // never advances the floor.
+              const cadenceAck = await res.json().catch(() => ({}));
+              noteStatusMutation(cadenceAck.minStatusSeq);
+              savedCadences = true;
+            }
             if (_configState.type === 'governor' && section === 'litellm') {
               // Saving the LiteLLM tab auto-runs the live connection test
               // server-side; surface its result exactly like the Test
@@ -22353,8 +22718,48 @@ function burnAreaChart() {
           renderGovernor(lastData.governor || {}, lastData.cadenceMatrix || [], lastData);
           renderTokens(lastData.tokens || {});
         }
-        fetch('/api/status').then(r => r.json()).then(render).catch(() => {});
+        if (savedCadences) {
+          // A cadence-only save has no `general` block, so the optimistic
+          // block above is skipped entirely and nothing repaints the governor
+          // cadence matrix. The matrix is server-derived (cadenceMatrix), so
+          // there is no confirmed value to patch in locally — instead pull the
+          // post-mutation snapshot, which the raised floor guarantees is not a
+          // pre-write one (#5492).
+          refreshStatusUntilFresh();
+        } else {
+          fetch('/api/status').then(r => r.json()).then(render).catch(() => {});
+        }
       }
+    }
+
+    // Poll /api/status until a snapshot at or above the stale-snapshot floor
+    // arrives, then render it. The server rebuild kicked by a config write is
+    // asynchronous, so the first refetch usually still returns the cached
+    // pre-write snapshot; render() drops it via the floor guard and this
+    // retries briefly rather than leaving the panel stale until the next
+    // broadcast (#5492).
+    //
+    // This never invents a value: every render is a real server snapshot. If
+    // the rebuild never produces a fresh one, we simply stop retrying and the
+    // regular SSE stream repaints whenever it next delivers — the operator is
+    // never shown an unconfirmed value.
+    var STATUS_FRESH_RETRY_MS = 400;
+    var STATUS_FRESH_MAX_ATTEMPTS = 12;
+    function refreshStatusUntilFresh(attempt) {
+      const n = attempt || 0;
+      fetch('/api/status')
+        .then(r => r.json())
+        .then(data => {
+          // render() itself enforces the floor, but we need to know whether it
+          // took, so test the same condition here before delegating.
+          const seq = (data && data.statusSeq != null) ? Number(data.statusSeq) : null;
+          const stale = seq != null && seq < _statusSeqFloor;
+          if (!stale) { render(data); return; }
+          if (n + 1 < STATUS_FRESH_MAX_ATTEMPTS) {
+            setTimeout(() => refreshStatusUntilFresh(n + 1), STATUS_FRESH_RETRY_MS);
+          }
+        })
+        .catch(() => {});
     }
 
     // --- Chat rich formatting ---

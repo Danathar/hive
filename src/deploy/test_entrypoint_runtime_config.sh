@@ -13,8 +13,11 @@
 # Run: bash src/deploy/test_entrypoint_runtime_config.sh
 set -euo pipefail
 
-PASS=0
-FAIL=0
+# Shared skip discipline (#5388): hive_test_skip is permissive by default and
+# FATAL under HIVE_TEST_REQUIRE_BEHAVIOURAL=1. Extracted from this file and its
+# sibling by #5388 so every deploy suite can use the same contract.
+# shellcheck source=src/deploy/test_lib.sh
+. "$(cd "$(dirname "$0")" && pwd)/test_lib.sh"
 
 ENTRYPOINT="$(cd "$(dirname "$0")" && pwd)/entrypoint.sh"
 
@@ -29,34 +32,6 @@ check() {
     echo "        got:  '$got'"
     FAIL=$((FAIL + 1))
   fi
-}
-
-# ── Skipping is a result, and where it is wrong it must be fatal (#5380) ──
-#
-# The behavioural block below needs root and a `dev` account. On a bare
-# ubuntu-latest runner or a laptop it has neither, so it skips LOUDLY rather
-# than faking a pass — that stays, and this suite remains runnable anywhere.
-#
-# But a loud skip that nothing acts on is still a guard that cannot fail, and
-# that is #5380: the assertions which would catch a regression never executed
-# on any PR. So when the caller KNOWS the preconditions are met — the podman
-# arm64 lane runs this inside the image, as root, where `dev` exists — it sets
-# HIVE_TEST_REQUIRE_BEHAVIOURAL=1 and a skip becomes a FAILURE. There, a skip
-# does not mean "unsuitable environment", it means the test is broken.
-REQUIRE_BEHAVIOURAL="${HIVE_TEST_REQUIRE_BEHAVIOURAL:-0}"
-
-skip() {
-  if [ "$REQUIRE_BEHAVIOURAL" = "1" ]; then
-    echo "  FAIL: $1"
-    echo "        HIVE_TEST_REQUIRE_BEHAVIOURAL=1 — the caller asserts root and a"
-    echo "        'dev' account are present, so this is a BROKEN TEST, not an"
-    echo "        unsuitable environment (#5380)."
-    FAIL=$((FAIL + 1))
-  else
-    echo "  SKIP: $1"
-    [ -n "${2:-}" ] && echo "        $2"
-  fi
-  return 0
 }
 
 echo "=== entrypoint runtime-config migration tests ==="
@@ -183,10 +158,10 @@ fi
 # pass — a silent skip here is how the original gap shipped.
 RUNTIME_UID=1001
 if [ "$(id -u)" != "0" ]; then
-  skip "not root — cannot exercise the root-creates/dev-reads path" \
+  hive_test_skip "not root — cannot exercise the root-creates/dev-reads path" \
        "(this is the case CI must run; see #5360)"
 elif ! id -u dev >/dev/null 2>&1; then
-  skip "no 'dev' account on this host — cannot exercise the drop"
+  hive_test_skip "no 'dev' account on this host — cannot exercise the drop"
 else
   tmpd="$(mktemp -d)"
   trap 'rm -rf "$tmpd"' EXIT
@@ -256,6 +231,4 @@ else
   trap - EXIT
 fi
 
-echo
-echo "=== $PASS passed, $FAIL failed ==="
-[ "$FAIL" -eq 0 ]
+hive_test_report

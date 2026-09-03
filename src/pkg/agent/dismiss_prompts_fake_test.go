@@ -28,11 +28,9 @@ func newDismissPromptHarness(t *testing.T, name, initialPane string, readyAfterK
 	m.mu.RUnlock()
 
 	script := &scriptedPromptPane{initialPane: initialPane, readyAfterKeys: readyAfterKeys}
-	m.terminal = funcTerminal{
-		captureVisiblePane:       script.capture,
-		sendKeys:                 script.sendKeys,
-		sleepDuringPromptDismiss: func(time.Duration) { runtime.Gosched() },
-	}
+	termSeams(m).captureVisiblePane = script.capture
+	termSeams(m).sendKeys = script.sendKeys
+	termSeams(m).sleepDuringPromptDismiss = func(time.Duration) { runtime.Gosched() }
 	m.promptDismissTimeout = 200 * time.Millisecond
 	return m, agent, script
 }

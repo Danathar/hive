@@ -1,7 +1,6 @@
 package hub
 
 import (
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -259,7 +258,7 @@ func TestProvisionRequestUserIDRenderingPinned(t *testing.T) {
 // only ever reach the hub admin. A non-admin (or anonymous) caller hitting an
 // admin route gets a 4xx and no body at all.
 func TestPastRequestsContextStaysAdminOnly(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	// Stand-in for any handler that would serve enriched provision requests.
 	handler := srv.requireAdmin(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

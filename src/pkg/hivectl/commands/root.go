@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/hivecommons/hive/pkg/hivectl"
@@ -72,6 +73,8 @@ func NewRootCommand(in io.Reader, out, errOut io.Writer) *cobra.Command {
 	root.AddCommand(newObserveCommand(env))
 	root.AddCommand(newEnrollCommand(env))
 	root.AddCommand(newTUICommand(env))
+	root.AddCommand(newLoginCommand(env))
+	root.AddCommand(newLogoutCommand(env))
 	return root
 }
 
@@ -88,7 +91,49 @@ func (e *commandEnv) client() (*hivectl.Client, error) {
 		// Invalid --server or --timeout are usage mistakes, not runtime failures.
 		return nil, &usageError{message: err.Error()}
 	}
+	e.attachSession(client)
 	return client, nil
+}
+
+// attachSession wires the per-user session lane (#5651) onto every client the
+// commands build: HIVE_DASHBOARD_COOKIE when exported, else the session
+// `hivectl login` cached for this --server.
+//
+// The env var wins UNCONDITIONALLY over the cache — an operator who exported a
+// credential did so deliberately, and a cache able to override it would make
+// the exported value silently inert. The token lane is untouched either way:
+// which lane a hive honours depends on how it was deployed, so both are
+// presented and the server picks the one it implements.
+//
+// A cache that cannot be read degrades to "no cached session" HERE — a broken
+// cache file must not brick every hivectl command, including the `hivectl
+// login` that would fix it — and the failure is surfaced where it can be acted
+// on: Load's error names the file and the remedy, and login/logout return it.
+func (e *commandEnv) attachSession(client *hivectl.Client) {
+	if cookie := strings.TrimSpace(os.Getenv(hivectl.CookieEnv)); cookie != "" {
+		client.SetSessionCookie(cookie)
+		return
+	}
+	store, err := hivectl.DefaultSessionStore()
+	if err != nil {
+		return
+	}
+	sess, err := store.Load(e.options.server)
+	if sess == nil {
+		return
+	}
+	// An expired session is still PRESENTED — the server re-validates every
+	// request, so a stale cookie costs nothing and clock skew means "expired
+	// here" is not proof of "expired there". What changes is the advice on a
+	// 401: a cached session that stops working means "log in again", not
+	// "your token is wrong", and without this hint the operator gets a bare
+	// 401 that reads like the latter.
+	client.SetSessionCookie(sess.Cookie)
+	if errors.Is(err, hivectl.ErrSessionExpired) {
+		client.SetLoginHint("Your cached hive session has expired — run 'hivectl login' to obtain a new one.")
+		return
+	}
+	client.SetLoginHint("Your cached hive session was rejected — it may have been revoked or expired; run 'hivectl login' to obtain a new one.")
 }
 
 // wrapArgs adapts a cobra positional-args validator so violations report the

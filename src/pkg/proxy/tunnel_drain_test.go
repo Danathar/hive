@@ -40,9 +40,8 @@ func tcpPair(t *testing.T) (client, server net.Conn) {
 
 func shortenTunnelDrain(t *testing.T, d time.Duration) {
 	t.Helper()
-	old := tunnelHalfCloseDrain
-	tunnelHalfCloseDrain = d
-	t.Cleanup(func() { tunnelHalfCloseDrain = old })
+	old := tunnelHalfCloseDrain.Swap(int64(d))
+	t.Cleanup(func() { tunnelHalfCloseDrain.Store(old) })
 }
 
 func runRelay(conn, upstream net.Conn) chan struct{} {

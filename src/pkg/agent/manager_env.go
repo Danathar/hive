@@ -4,6 +4,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -25,6 +26,34 @@ func (m *Manager) buildBootstrapPrompt(agent *AgentProcess) string {
 	// removed, so it is gone too.
 	_ = agent // signature kept for the call site; the arg is no longer read
 	return ""
+}
+
+// metricsCachePath is a var so tests can redirect readCoveragePreamble without
+// requiring the production /data volume.
+var metricsCachePath = "/data/metrics/agent-metrics-cache.json"
+
+func (m *Manager) readCoveragePreamble() string {
+	data, err := os.ReadFile(metricsCachePath)
+	if err != nil {
+		return ""
+	}
+	var metrics map[string]map[string]json.Number
+	if err := json.Unmarshal(data, &metrics); err != nil {
+		return ""
+	}
+	ci, ok := metrics["ci-maintainer"]
+	if !ok {
+		return ""
+	}
+	cov, err := ci["coverage"].Int64()
+	if err != nil {
+		return ""
+	}
+	target, err := ci["coverageTarget"].Int64()
+	if err != nil {
+		target = 91
+	}
+	return fmt.Sprintf("[COVERAGE] Current: %d%% | Target: %d%%.", cov, target)
 }
 
 // shellEnvVar formats KEY='value' with single-quoting so values containing

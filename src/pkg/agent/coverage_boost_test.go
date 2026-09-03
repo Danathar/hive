@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hivecommons/hive/internal/testutil"
 	"github.com/hivecommons/hive/pkg/config"
 )
 
@@ -322,7 +323,11 @@ func TestSyncModeFiles_WritesCorrectMode(t *testing.T) {
 
 	data, err := os.ReadFile(filepath.Join(agentStateDir, ".hive-mode-scanner"))
 	if err != nil {
-		t.Skipf("could not read mode file: %v", err)
+		// agentStateDir is redirected by TestMain into its temp tree and
+		// MkdirAll-ed there, and SyncModeFiles above just wrote this file.
+		// Unreadable here means SyncModeFiles silently did not write --
+		// exactly the assertion this test exists to make (#5388).
+		testutil.SkipfUnlessRequired(t, "could not read mode file: %v", err)
 	}
 	mode := string(data)
 	if mode != "ISSUES_ONLY" {
@@ -1022,12 +1027,11 @@ func TestAddAgent_WithUIDMap(t *testing.T) {
 	m.uidMap = NewUIDMap()
 	m.uidMap.AllocateUIDs([]string{"existing"})
 
-	// Save to temp dir
-	dir := t.TempDir()
-	uidMapFile := filepath.Join(dir, "uid-map.json")
+	// AddAgent allocates a UID and persists the map to UIDMapPath. Redirect
+	// the path into this test's own temp dir: saving to the binary-wide
+	// TestMain path leaks the map into every later NewManager (#5580).
+	uidMapFile := stubUIDMapPath(t)
 
-	// AddAgent should allocate UID and try to save
-	// The save will fail since UIDMapPath is a const, but that's OK
 	m.AddAgent("new-agent", config.AgentConfig{Backend: "claude"})
 
 	m.mu.RLock()
@@ -1040,7 +1044,9 @@ func TestAddAgent_WithUIDMap(t *testing.T) {
 	if agent.tmuxSocket == "" {
 		t.Error("agent with UID should have tmux socket set")
 	}
-	_ = uidMapFile
+	if _, err := os.Stat(uidMapFile); err != nil {
+		t.Errorf("AddAgent should persist the uid-map at UIDMapPath: %v", err)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1498,6 +1504,108 @@ func TestLoginPromptPatterns_HasExpectedEntries(t *testing.T) {
 // readCoveragePreamble — redirected metricsCachePath
 // ---------------------------------------------------------------------------
 
+func TestReadCoveragePreamble_WithActualFile(t *testing.T) {
+	dir := t.TempDir()
+	cacheFile := filepath.Join(dir, "agent-metrics-cache.json")
+	orig := metricsCachePath
+	metricsCachePath = cacheFile
+	t.Cleanup(func() { metricsCachePath = orig })
+
+	metrics := map[string]map[string]json.Number{
+		"ci-maintainer": {
+			"coverage":       json.Number("85"),
+			"coverageTarget": json.Number("91"),
+		},
+	}
+	data, _ := json.Marshal(metrics)
+	if err := os.WriteFile(cacheFile, data, 0o644); err != nil {
+		// cacheFile lives in t.TempDir() -- guaranteed writable (#5388).
+		testutil.SkipfUnlessRequired(t, "cannot write metrics file: %v", err)
+	}
+
+	m := &Manager{logger: discardLogger()}
+	got := m.readCoveragePreamble()
+	if got != "[COVERAGE] Current: 85% | Target: 91%." {
+		t.Errorf("readCoveragePreamble = %q, want '[COVERAGE] Current: 85%% | Target: 91%%.'", got)
+	}
+}
+
+func TestReadCoveragePreamble_InvalidJSON_AtPath(t *testing.T) {
+	dir := t.TempDir()
+	cacheFile := filepath.Join(dir, "agent-metrics-cache.json")
+	orig := metricsCachePath
+	metricsCachePath = cacheFile
+	t.Cleanup(func() { metricsCachePath = orig })
+	os.WriteFile(cacheFile, []byte("not json"), 0o644)
+
+	m := &Manager{logger: discardLogger()}
+	got := m.readCoveragePreamble()
+	if got != "" {
+		t.Errorf("invalid JSON should return empty, got %q", got)
+	}
+}
+
+func TestReadCoveragePreamble_NoCIMaintainer(t *testing.T) {
+	dir := t.TempDir()
+	cacheFile := filepath.Join(dir, "agent-metrics-cache.json")
+	orig := metricsCachePath
+	metricsCachePath = cacheFile
+	t.Cleanup(func() { metricsCachePath = orig })
+	metrics := map[string]map[string]json.Number{
+		"other": {"coverage": json.Number("50")},
+	}
+	data, _ := json.Marshal(metrics)
+	os.WriteFile(cacheFile, data, 0o644)
+
+	m := &Manager{logger: discardLogger()}
+	got := m.readCoveragePreamble()
+	if got != "" {
+		t.Errorf("no ci-maintainer should return empty, got %q", got)
+	}
+}
+
+func TestReadCoveragePreamble_BadCoverage(t *testing.T) {
+	dir := t.TempDir()
+	cacheFile := filepath.Join(dir, "agent-metrics-cache.json")
+	orig := metricsCachePath
+	metricsCachePath = cacheFile
+	t.Cleanup(func() { metricsCachePath = orig })
+	metrics := map[string]map[string]json.Number{
+		"ci-maintainer": {"coverage": json.Number("not-a-number")},
+	}
+	data, _ := json.Marshal(metrics)
+	os.WriteFile(cacheFile, data, 0o644)
+
+	m := &Manager{logger: discardLogger()}
+	got := m.readCoveragePreamble()
+	if got != "" {
+		t.Errorf("bad coverage number should return empty, got %q", got)
+	}
+}
+
+func TestReadCoveragePreamble_DefaultTarget(t *testing.T) {
+	dir := t.TempDir()
+	cacheFile := filepath.Join(dir, "agent-metrics-cache.json")
+	orig := metricsCachePath
+	metricsCachePath = cacheFile
+	t.Cleanup(func() { metricsCachePath = orig })
+	metrics := map[string]map[string]json.Number{
+		"ci-maintainer": {"coverage": json.Number("80")},
+	}
+	data, _ := json.Marshal(metrics)
+	if err := os.WriteFile(cacheFile, data, 0o644); err != nil {
+		// cacheFile lives in t.TempDir() -- guaranteed writable (#5388).
+		testutil.SkipfUnlessRequired(t, "cannot write metrics file: %v", err)
+	}
+
+	m := &Manager{logger: discardLogger()}
+	got := m.readCoveragePreamble()
+	// Missing target defaults to 91
+	if got != "[COVERAGE] Current: 80% | Target: 91%." {
+		t.Errorf("readCoveragePreamble = %q, want '[COVERAGE] Current: 80%% | Target: 91%%.'", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // configHasTokens — via the redirectable shared path
 // ---------------------------------------------------------------------------
@@ -1538,7 +1646,10 @@ func TestConfigHasTokens_EmptyTokens_AtPath(t *testing.T) {
 	defer cleanup()
 
 	if err := os.WriteFile(sharedCopilotConfigPath, []byte(`{"copilotTokens": {}}`), 0o660); err != nil {
-		t.Skipf("cannot write: %v", err)
+		// sharedCopilotConfigPath points into t.TempDir(), which the testing
+		// package guarantees is writable. A failure here is a broken test,
+		// not an unsuitable environment (#5388).
+		testutil.SkipfUnlessRequired(t, "cannot write: %v", err)
 	}
 	if configHasTokens() {
 		t.Error("configHasTokens should return false for empty tokens")
@@ -1550,7 +1661,10 @@ func TestConfigHasTokens_NoTokensField(t *testing.T) {
 	defer cleanup()
 
 	if err := os.WriteFile(sharedCopilotConfigPath, []byte(`{"someOther": true}`), 0o660); err != nil {
-		t.Skipf("cannot write: %v", err)
+		// sharedCopilotConfigPath points into t.TempDir(), which the testing
+		// package guarantees is writable. A failure here is a broken test,
+		// not an unsuitable environment (#5388).
+		testutil.SkipfUnlessRequired(t, "cannot write: %v", err)
 	}
 	if configHasTokens() {
 		t.Error("configHasTokens should return false when field missing")
@@ -1563,7 +1677,10 @@ func TestConfigHasTokens_WithComments_AtPath(t *testing.T) {
 
 	cfg := "// comment line\n{\"copilotTokens\": {\"github.com\": {\"token\": \"gho_test\"}}}"
 	if err := os.WriteFile(sharedCopilotConfigPath, []byte(cfg), 0o660); err != nil {
-		t.Skipf("cannot write: %v", err)
+		// sharedCopilotConfigPath points into t.TempDir(), which the testing
+		// package guarantees is writable. A failure here is a broken test,
+		// not an unsuitable environment (#5388).
+		testutil.SkipfUnlessRequired(t, "cannot write: %v", err)
 	}
 	if !configHasTokens() {
 		t.Error("configHasTokens should handle // comments and still find tokens")
@@ -1585,7 +1702,10 @@ func TestClearExpiredTokens_ClearsAndPreservesOther(t *testing.T) {
   "otherSetting": "keep-me"
 }`
 	if err := os.WriteFile(sharedCopilotConfigPath, []byte(cfg), 0o660); err != nil {
-		t.Skipf("cannot write: %v", err)
+		// sharedCopilotConfigPath points into t.TempDir(), which the testing
+		// package guarantees is writable. A failure here is a broken test,
+		// not an unsuitable environment (#5388).
+		testutil.SkipfUnlessRequired(t, "cannot write: %v", err)
 	}
 
 	err := clearExpiredTokens()
@@ -1659,7 +1779,10 @@ func TestFixSharedConfigPerms_FixesPerms(t *testing.T) {
 
 	// Write with restrictive perms
 	if err := os.WriteFile(sharedCopilotConfigPath, []byte(`{}`), 0o600); err != nil {
-		t.Skipf("cannot write: %v", err)
+		// sharedCopilotConfigPath points into t.TempDir(), which the testing
+		// package guarantees is writable. A failure here is a broken test,
+		// not an unsuitable environment (#5388).
+		testutil.SkipfUnlessRequired(t, "cannot write: %v", err)
 	}
 
 	m := NewManager(map[string]config.AgentConfig{
@@ -1687,7 +1810,10 @@ func TestFixSharedConfigPerms_AlreadyCorrect(t *testing.T) {
 
 	// Write with correct perms
 	if err := os.WriteFile(sharedCopilotConfigPath, []byte(`{}`), sharedConfigDesiredMode); err != nil {
-		t.Skipf("cannot write: %v", err)
+		// sharedCopilotConfigPath points into t.TempDir(), which the testing
+		// package guarantees is writable. A failure here is a broken test,
+		// not an unsuitable environment (#5388).
+		testutil.SkipfUnlessRequired(t, "cannot write: %v", err)
 	}
 
 	m := NewManager(map[string]config.AgentConfig{

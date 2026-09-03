@@ -175,6 +175,9 @@ func (m *Manager) launchInTmux(ctx context.Context, agent *AgentProcess) error {
 	} else if m.clearInferenceRouteCallback != nil {
 		m.clearInferenceRouteCallback(agent.Name)
 	}
+	if backend == "claude" && !isInference {
+		m.ensureClaudeRemoteControlDefault(agent)
+	}
 
 	if agent.Config.CavemanMode != "" {
 		m.installCavemanForAgent(agent, backend)

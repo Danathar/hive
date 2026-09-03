@@ -519,7 +519,24 @@ flowchart LR
 
 **See [src/docs/architecture.md](src/docs/architecture.md) for the full reference architecture** — process model, the governor loop, the deterministic pipeline, layered guardrails, ACMM, beads, hub & spoke, and an end-to-end walkthrough, with Mermaid diagrams throughout. Operator safety references include [trajectory review](src/docs/trajectory-review.md), [dashboard health checks](src/docs/health-checks.md), [sandbox guardrails](src/docs/sandbox-isolation.md), [manual provisioning](src/docs/manual-provisioning.md), [cross-cluster migration](src/docs/cross-cluster-migration.md), and [config layering](src/docs/config-layering.md). The dashboard API reference is published as [dashboard/openapi.json](dashboard/openapi.json).
 
-See also the [documentation index](src/docs/README.md), [public roadmap](src/docs/roadmap.md), and [landscape comparison](src/docs/landscape.md) for community-facing documentation and positioning.
+See also the [roadmap](ROADMAP.md) (release-line trajectory, with the [detailed near-term plan](src/docs/roadmap.md)), the [upgrade guide](UPGRADE.md), the [documentation index](src/docs/README.md), and the [landscape comparison](src/docs/landscape.md) for community-facing documentation and positioning.
+
+## Terminal dashboard
+
+`hivectl tui` is a full-screen, keyboard-driven terminal view of the fleet —
+agents, governor, token spend, and activity in a live 2×2 grid, with
+pause/resume, model apply, kick, and ACMM level actions. It is **not a second
+Hive runtime**: it is another client of the same dashboard API the web
+dashboard at `:3001` uses, over the same auth token and the same SSE stream.
+
+```bash
+export HIVE_DASHBOARD_TOKEN="..."
+hivectl tui
+```
+
+See [`hivectl tui` in the command reference](src/docs/hivectl.md#tui--live-terminal-dashboard)
+for keybindings, pane cadence, and v1 boundaries, and
+[the design record](src/docs/design/tui.md) for the reasoning behind it.
 
 ## Contribute to a Hive
 

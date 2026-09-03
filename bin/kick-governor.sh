@@ -6,7 +6,10 @@
 # agent at a cadence that reflects the current workload:
 #
 # Architect and outreach are OPPORTUNISTIC — they fill idle cycles and yield
-# entirely under load. Scanner and ci-maintainer always have priority.
+# entirely under load. Scanner and ci-maintainer are the PRIORITY agents: they
+# get metered Claude rather than copilot in surge/busy (see the model table).
+# "Priority" is about model quality, not about always being kicked — under
+# SURGE, ci-maintainer still yields so scanner owns the queue.
 #
 #   SURGE (queue > SURGE_THRESHOLD, default 20):
 #     scanner   → every 15 min
@@ -92,10 +95,15 @@ CADENCE_SCANNER_BUSY_SEC="${CADENCE_SCANNER_BUSY_SEC:-900}"       # 15 min
 CADENCE_SCANNER_QUIET_SEC="${CADENCE_SCANNER_QUIET_SEC:-900}"     # 15 min
 CADENCE_SCANNER_IDLE_SEC="${CADENCE_SCANNER_IDLE_SEC:-900}"       # 15 min
 
-CADENCE_REVIEWER_SURGE_SEC="${CADENCE_REVIEWER_SURGE_SEC:-0}"       # PAUSED
-CADENCE_REVIEWER_BUSY_SEC="${CADENCE_REVIEWER_BUSY_SEC:-3600}"     # 1 hour
-CADENCE_REVIEWER_QUIET_SEC="${CADENCE_REVIEWER_QUIET_SEC:-2700}"   # 45 min
-CADENCE_REVIEWER_IDLE_SEC="${CADENCE_REVIEWER_IDLE_SEC:-900}"      # 15 min
+# ci-maintainer. The values below are the ones this script's own header has
+# always documented for ci-maintainer; they were unreachable because the keys
+# were named REVIEWER, an agent that never appears in AGENTS_ENABLED.
+# CADENCE_REVIEWER_*_SEC is still honoured as a deprecated alias so operators
+# who set the old name in governor.env are not silently changed underneath.
+CADENCE_CI_MAINTAINER_SURGE_SEC="${CADENCE_CI_MAINTAINER_SURGE_SEC:-${CADENCE_REVIEWER_SURGE_SEC:-0}}"      # PAUSED — yields to scanner under load
+CADENCE_CI_MAINTAINER_BUSY_SEC="${CADENCE_CI_MAINTAINER_BUSY_SEC:-${CADENCE_REVIEWER_BUSY_SEC:-3600}}"      # 1 hour
+CADENCE_CI_MAINTAINER_QUIET_SEC="${CADENCE_CI_MAINTAINER_QUIET_SEC:-${CADENCE_REVIEWER_QUIET_SEC:-2700}}"   # 45 min
+CADENCE_CI_MAINTAINER_IDLE_SEC="${CADENCE_CI_MAINTAINER_IDLE_SEC:-${CADENCE_REVIEWER_IDLE_SEC:-900}}"       # 15 min
 
 CADENCE_ARCHITECT_SURGE_SEC="${CADENCE_ARCHITECT_SURGE_SEC:-0}"     # PAUSED
 CADENCE_ARCHITECT_BUSY_SEC="${CADENCE_ARCHITECT_BUSY_SEC:-0}"      # PAUSED
@@ -145,25 +153,25 @@ COST_WEIGHT_HAIKU="${COST_WEIGHT_HAIKU:-1}"
 # Non-priority agents (architect, outreach) use copilot (free/unlimited).
 # Supervisor is lightweight — Haiku or copilot.
 MODEL_SURGE_SCANNER="${MODEL_SURGE_SCANNER:-claude:claude-sonnet-4-6}"
-MODEL_SURGE_REVIEWER="${MODEL_SURGE_REVIEWER:-claude:claude-sonnet-4-6}"
+MODEL_SURGE_CI_MAINTAINER="${MODEL_SURGE_CI_MAINTAINER:-${MODEL_SURGE_REVIEWER:-claude:claude-sonnet-4-6}}"
 MODEL_SURGE_ARCHITECT="${MODEL_SURGE_ARCHITECT:-claude:claude-opus-4-6}"
 MODEL_SURGE_OUTREACH="${MODEL_SURGE_OUTREACH:-copilot:claude-opus-4-6}"
 MODEL_SURGE_SUPERVISOR="${MODEL_SURGE_SUPERVISOR:-claude:claude-haiku-4-5}"
 
 MODEL_BUSY_SCANNER="${MODEL_BUSY_SCANNER:-claude:claude-sonnet-4-6}"
-MODEL_BUSY_REVIEWER="${MODEL_BUSY_REVIEWER:-claude:claude-sonnet-4-6}"
+MODEL_BUSY_CI_MAINTAINER="${MODEL_BUSY_CI_MAINTAINER:-${MODEL_BUSY_REVIEWER:-claude:claude-sonnet-4-6}}"
 MODEL_BUSY_ARCHITECT="${MODEL_BUSY_ARCHITECT:-copilot:claude-sonnet-4-6}"
 MODEL_BUSY_OUTREACH="${MODEL_BUSY_OUTREACH:-copilot:claude-sonnet-4-6}"
 MODEL_BUSY_SUPERVISOR="${MODEL_BUSY_SUPERVISOR:-claude:claude-haiku-4-5}"
 
 MODEL_QUIET_SCANNER="${MODEL_QUIET_SCANNER:-claude:claude-haiku-4-5}"
-MODEL_QUIET_REVIEWER="${MODEL_QUIET_REVIEWER:-copilot:claude-sonnet-4-6}"
+MODEL_QUIET_CI_MAINTAINER="${MODEL_QUIET_CI_MAINTAINER:-${MODEL_QUIET_REVIEWER:-copilot:claude-sonnet-4-6}}"
 MODEL_QUIET_ARCHITECT="${MODEL_QUIET_ARCHITECT:-copilot:claude-opus-4-6}"
 MODEL_QUIET_OUTREACH="${MODEL_QUIET_OUTREACH:-copilot:claude-sonnet-4-6}"
 MODEL_QUIET_SUPERVISOR="${MODEL_QUIET_SUPERVISOR:-claude:claude-haiku-4-5}"
 
 MODEL_IDLE_SCANNER="${MODEL_IDLE_SCANNER:-copilot:claude-sonnet-4-6}"
-MODEL_IDLE_REVIEWER="${MODEL_IDLE_REVIEWER:-copilot:claude-sonnet-4-6}"
+MODEL_IDLE_CI_MAINTAINER="${MODEL_IDLE_CI_MAINTAINER:-${MODEL_IDLE_REVIEWER:-copilot:claude-sonnet-4-6}}"
 MODEL_IDLE_ARCHITECT="${MODEL_IDLE_ARCHITECT:-copilot:claude-opus-4-6}"
 MODEL_IDLE_OUTREACH="${MODEL_IDLE_OUTREACH:-copilot:claude-sonnet-4-6}"
 MODEL_IDLE_SUPERVISOR="${MODEL_IDLE_SUPERVISOR:-copilot:claude-sonnet-4-6}"
@@ -173,7 +181,36 @@ RATE_LIMIT_COOLDOWN="${RATE_LIMIT_COOLDOWN:-1800}"  # 30 min
 
 # ── Paths ───────────────────────────────────────────────────────────────────
 STATE_DIR="/var/run/kick-governor"
-_is_agent_paused() { hive_is_paused "$1"; }
+
+# Pause check — FAILS CLOSED.
+#
+# hive_is_paused() is defined in bin/hive-config.sh, which is sourced above
+# only when HIVE_REPOS is unset. When HIVE_REPOS arrives preset (from
+# /etc/hive/governor.env, or the env), hive-config.sh is never sourced and
+# hive_is_paused is undefined. Every _is_agent_paused call site sits inside an
+# `if`/`&&`, which is a `set -e` EXEMPT context — so the resulting exit 127
+# ("hive_is_paused: command not found") was silently read as "NOT paused" and
+# every dashboard pause, operator pause and cadence-zero pause was ignored.
+#
+# hive-config.sh is deliberately NOT sourced unconditionally to repair this:
+# it also assigns AGENTS_ENABLED and PROJECT_REPOS from hive-runtime.yaml and
+# can shell out to mint a GitHub App token, so sourcing it here would silently
+# override the operator's own AGENTS_ENABLED. Instead the pause predicate is
+# self-contained, and if a future refactor removes it the check fails CLOSED:
+# an agent we cannot prove is unpaused is treated as paused. A spuriously
+# paused agent is recoverable by the operator; an agent that ignores a pause
+# is not.
+_is_agent_paused() {
+  local agent="${1:?agent name required}"
+  if declare -F hive_is_paused >/dev/null 2>&1; then
+    hive_is_paused "$agent"
+    return
+  fi
+  # Local equivalent of hive_is_paused (bin/hive-config.sh) against STATE_DIR.
+  [[ -f "$STATE_DIR/paused_${agent}" ]] ||
+    [[ -f "$STATE_DIR/operator_paused_${agent}" ]] ||
+    [[ -f "$STATE_DIR/cadence_paused_${agent}" ]]
+}
 
 # Structured audit log — every governor kick decision records pause state
 KICK_AUDIT_LOG="/var/log/kick-audit.jsonl"
@@ -360,14 +397,29 @@ determine_mode() {
 
 # ── Cadence selection ────────────────────────────────────────────────────────
 
+# A cadence of 0 means PAUSED. That is a legitimate, deliberate configuration —
+# but it must never be reached by ACCIDENT. A missing key used to fall through
+# to :-0, so a typo'd or unlisted agent name silently disabled that agent with
+# no error and no log line (see #5571: ci-maintainer was keyed to REVIEWER).
+#
+# So the two states are now distinguished:
+#   - key is SET (to 0 or anything else) → honoured exactly as written
+#   - key is UNSET                       → loud CONFIG error on stderr, and the
+#                                          agent is still skipped, but visibly
+# Skipping on an unset key keeps the failure safe (we never invent a cadence and
+# start kicking an agent the operator never configured) while making it audible.
 get_cadence() {
   local agent="$1" mode="$2"
   local upper_agent upper_mode
   upper_agent=$(echo "$agent" | tr '[:lower:]-' '[:upper:]_')
   upper_mode=$(echo "$mode" | tr '[:lower:]' '[:upper:]')
   local var_name="CADENCE_${upper_agent}_${upper_mode}_SEC"
-  local val="${!var_name:-0}"
-  echo "$val"
+  if [[ -z "${!var_name+x}" ]]; then
+    log "CONFIG ERROR: ${var_name} is not defined — '${agent}' has no cadence for mode '${mode}' and will NOT be kicked. Set ${var_name} in /etc/hive/governor.env (0 to pause deliberately)."
+    echo 0
+    return
+  fi
+  echo "${!var_name}"
 }
 
 # ── Model selection ──────────────────────────────────────────────────────────
@@ -387,6 +439,58 @@ get_model_selection() {
     selection="copilot:claude-sonnet-4-6"
   fi
   echo "$selection"
+}
+
+# ── Budget-pressure tier downgrade ───────────────────────────────────────────
+# The >95% ladder used to downgrade by literal string substitution
+# (${model/sonnet/haiku}), which swapped the tier word but kept the ORIGINAL
+# tier's version suffix: "claude-sonnet-4-6" became "claude-haiku-4-6", a model
+# that does not exist (every haiku default in this file, and config/backends.conf's
+# own model_tier(), use claude-haiku-4-5). The budget-critical path handed the
+# CLI an unavailable model at exactly the moment it existed to protect spend.
+#
+# Map tier AND version together, to this file's own constants. Anything whose
+# tier we do not recognise is returned unchanged — an unknown model is left for
+# the operator rather than being rewritten into a guess.
+GOVERNOR_MODEL_SONNET="${GOVERNOR_MODEL_SONNET:-claude-sonnet-4-6}"
+GOVERNOR_MODEL_HAIKU="${GOVERNOR_MODEL_HAIKU:-claude-haiku-4-5}"
+
+downgrade_model_one_tier() {
+  local model="$1"
+  local tier="unknown"
+  if declare -F model_tier >/dev/null 2>&1; then
+    tier=$(model_tier "$model")
+  fi
+  # model_tier() only knows the claude-* families; fall back to a tier-word
+  # match so a copilot-notation or newer model still ladders down correctly.
+  if [[ "$tier" != "opus" && "$tier" != "sonnet" && "$tier" != "haiku" ]]; then
+    case "$model" in
+      *opus*)   tier="opus" ;;
+      *sonnet*) tier="sonnet" ;;
+      *haiku*)  tier="haiku" ;;
+    esac
+  fi
+  case "$tier" in
+    opus)   echo "$GOVERNOR_MODEL_SONNET" ;;
+    sonnet) echo "$GOVERNOR_MODEL_HAIKU" ;;
+    *)      echo "$model" ;;   # haiku is the floor; unknown is left alone
+  esac
+}
+
+# Priority agents — always kicked, and laddered opus->sonnet->haiku under
+# budget pressure rather than being pushed straight to copilot. Global (not a
+# local inside optimize_model_assignment) so _is_priority_agent below does not
+# depend on dynamic scoping from its caller.
+priority_agents=(scanner ci-maintainer)
+
+# Is this agent on the priority ladder (scanner/ci-maintainer)? Used to keep
+# the budget loops from downgrading a priority agent twice.
+_is_priority_agent() {
+  local agent="$1" p
+  for p in "${priority_agents[@]}"; do
+    [[ "$p" == "$agent" ]] && return 0
+  done
+  return 1
 }
 
 get_cost_weight() {
@@ -494,7 +598,6 @@ BUDGETEOF
 optimize_model_assignment() {
   local mode="$1"
   local agents=($AGENTS_ENABLED)
-  local priority_agents=(scanner ci-maintainer)
 
   local projected_pct
   projected_pct=$(compute_budget_state)
@@ -511,7 +614,16 @@ optimize_model_assignment() {
   elif (( projected_pct > TOKEN_BUDGET_SAFETY_PCT )); then
     log "BUDGET PRESSURE: projected ${projected_pct}% > safety ${TOKEN_BUDGET_SAFETY_PCT}%"
 
-    for agent in outreach architect supervisor; do
+    # Only agents this fleet actually runs. This list used to be the hardcoded
+    # `outreach architect supervisor`, but `assignments` is populated from
+    # AGENTS_ENABLED — so an operator whose AGENTS_ENABLED omitted any one of
+    # those names hit `${assignments[$agent]}: unbound variable` under set -u,
+    # aborting optimize_model_assignment (a bare statement, so set -e DOES
+    # fire) before maybe_kick ever ran. One missing name meant NO agent was
+    # kicked that cycle — precisely when the budget was under pressure.
+    for agent in "${agents[@]}"; do
+      # Priority agents ride the opus->sonnet->haiku ladder below instead.
+      _is_priority_agent "$agent" && continue
       local current="${assignments[$agent]}"
       local backend="${current%%:*}"
       if [[ "$backend" != "copilot" && "$backend" != "goose" ]]; then
@@ -526,23 +638,19 @@ optimize_model_assignment() {
 
     if (( projected_pct > 95 )); then
       for agent in "${priority_agents[@]}"; do
+        # A priority agent this fleet does not run has no assignment; skip it
+        # rather than reading an unset key under set -u.
+        [[ -n "${assignments[$agent]+set}" ]] || continue
         local current="${assignments[$agent]}"
         local backend="${current%%:*}"
         local model="${current#*:}"
-        case "$model" in
-          *opus*)
-            local new_model="${model/opus/sonnet}"
-            assignments[$agent]="${backend}:${new_model}"
-            override_reasons[$agent]="budget_downgrade"
-            log "  budget override: $agent opus->sonnet"
-            ;;
-          *sonnet*)
-            local new_model="${model/sonnet/haiku}"
-            assignments[$agent]="${backend}:${new_model}"
-            override_reasons[$agent]="budget_downgrade"
-            log "  budget override: $agent sonnet->haiku"
-            ;;
-        esac
+        local new_model
+        new_model=$(downgrade_model_one_tier "$model")
+        if [[ "$new_model" != "$model" ]]; then
+          assignments[$agent]="${backend}:${new_model}"
+          override_reasons[$agent]="budget_downgrade"
+          log "  budget override: $agent ${model} -> ${new_model}"
+        fi
       done
     fi
 

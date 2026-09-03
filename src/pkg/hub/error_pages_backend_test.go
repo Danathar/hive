@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hivecommons/hive/internal/testutil"
 	"gopkg.in/yaml.v3"
 )
 
@@ -21,7 +22,7 @@ func errorPagesConfigMaps(t *testing.T) (docs, conf map[string]string) {
 	t.Helper()
 	raw, err := os.ReadFile(errorPagesManifestPath)
 	if err != nil {
-		t.Skipf("error-pages.yaml not readable from this package: %v", err)
+		testutil.SkipfUnlessRequired(t, "error-pages.yaml not readable from this package: %v", err)
 	}
 	dec := yaml.NewDecoder(strings.NewReader(string(raw)))
 	for {
@@ -186,7 +187,14 @@ func TestErrorBackendKeepsHealthProbe(t *testing.T) {
 // anything and should be revisited rather than silently kept green.
 func TestHiveIngressStillRoutesErrorsToThisBackend(t *testing.T) {
 	if !strings.Contains(k8sManifestTemplate, `nginx.ingress.kubernetes.io/custom-http-errors: "502,503"`) {
-		t.Skip("the hive Ingress no longer intercepts 502/503; the error backend contract needs re-review")
+		// Fail rather than skip (#5388): k8sManifestTemplate is repo content,
+		// identical everywhere, so a skip here could never mean "unsuitable
+		// environment" — it means the premise of this whole suite moved and
+		// every error-pages assertion above silently stopped guarding anything.
+		// If dropping the interception is deliberate, re-review this file's
+		// contract in the same PR rather than letting it stay green vacuously.
+		t.Fatal("the hive Ingress no longer intercepts 502/503; the error backend contract " +
+			"this suite pins needs re-review in the PR that removed the custom-http-errors annotation")
 	}
 	if !strings.Contains(k8sManifestTemplate, "nginx.ingress.kubernetes.io/default-backend: hive-error-pages") {
 		t.Error("custom-http-errors is set without pointing at hive-error-pages, so intercepted " +

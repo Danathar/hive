@@ -19,8 +19,11 @@
 # Run: bash src/deploy/test_entrypoint_data_ownership.sh
 set -uo pipefail
 
-PASS=0
-FAIL=0
+# Shared skip discipline (#5388): hive_test_skip is permissive by default and
+# FATAL under HIVE_TEST_REQUIRE_BEHAVIOURAL=1. Extracted from this file and its
+# sibling by #5388 so every deploy suite can use the same contract.
+# shellcheck source=src/deploy/test_lib.sh
+. "$(cd "$(dirname "$0")" && pwd)/test_lib.sh"
 
 ENTRYPOINT="$(cd "$(dirname "$0")" && pwd)/entrypoint.sh"
 RUNTIME_UID=1001
@@ -40,31 +43,6 @@ check() {
 
 ok()   { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 bad()  { echo "  FAIL: $1"; [ -n "${2:-}" ] && echo "        $2"; FAIL=$((FAIL + 1)); }
-
-# ── Skipping is a result, and where it is wrong it must be fatal (#5380) ──
-#
-# The behavioural block below needs root and a `dev` account. On a bare
-# ubuntu-latest runner or a laptop it has neither, so it skips LOUDLY rather
-# than faking a pass — that stays, and this suite remains runnable anywhere.
-#
-# But a loud skip that nothing acts on is still a guard that cannot fail, and
-# that is #5380: the assertions which would catch a regression never executed
-# on any PR. So when the caller KNOWS the preconditions are met — the podman
-# arm64 lane runs this inside the image, as root, where `dev` exists — it sets
-# HIVE_TEST_REQUIRE_BEHAVIOURAL=1 and a skip becomes a FAILURE. There, a skip
-# does not mean "unsuitable environment", it means the test is broken.
-REQUIRE_BEHAVIOURAL="${HIVE_TEST_REQUIRE_BEHAVIOURAL:-0}"
-
-skip() {
-  if [ "$REQUIRE_BEHAVIOURAL" = "1" ]; then
-    bad "$1" \
-        "HIVE_TEST_REQUIRE_BEHAVIOURAL=1 — the caller asserts root and a 'dev' account are present, so this is a BROKEN TEST, not an unsuitable environment (#5380)"
-  else
-    echo "  SKIP: $1"
-    [ -n "${2:-}" ] && echo "        $2"
-  fi
-  return 0
-}
 
 echo "=== #5369: /data ownership invariant ==="
 
@@ -231,12 +209,12 @@ echo
 echo "=== behavioural: swept paths are readable by the runtime user ==="
 
 if [ "$(id -u)" != "0" ]; then
-  skip "not root — cannot create root-owned files or drop to another uid" \
+  hive_test_skip "not root — cannot create root-owned files or drop to another uid" \
        "(this is the case a container lane must run; see #5360/#5369)"
 elif ! id -u dev >/dev/null 2>&1; then
-  skip "no 'dev' account on this host — cannot exercise the drop"
+  hive_test_skip "no 'dev' account on this host — cannot exercise the drop"
 elif ! stat -c '%u' / >/dev/null 2>&1; then
-  skip "no GNU stat -c on this host — the helpers require it"
+  hive_test_skip "no GNU stat -c on this host — the helpers require it"
 else
   SWEEP_FN="$SWEEP"
   ASSERT_FN="$(sed -n '/^hive_assert_runtime_readable() {/,/^}/p' "$ENTRYPOINT")"
@@ -346,6 +324,160 @@ $tmpd/home"
   trap - EXIT
 fi
 
+# ---------------------------------------------------------------------------
+# Every interactive-auth CLI credential dir must be group-writable AND repaired
+# by the ongoing perm guard.
+#
+# This is the drift that broke agy sign-in. .gemini was in no list at all, so
+# agy created it itself at 2750 — group READ-only. Every sign-in then succeeded
+# in-process and evaporated, because the agent UID could not write the token
+# file. Nothing reported a permission problem; the operator saw four logins in
+# a row appear to fail.
+#
+# A dir being mkdir'd and chowned is NOT enough, which is why this is separate
+# from the sweep check above: the credential file itself is rewritten 0600 by
+# the CLI on every refresh (copilot's config.json, agy's oauth token), so a dir
+# that is not in the ONGOING guard silently re-locks after the first refresh.
 echo
-echo "=== $PASS passed, $FAIL failed ==="
-[ "$FAIL" -eq 0 ]
+echo "Interactive-auth credential dirs are group-writable and guarded:"
+for cred_dir in .claude .copilot .codex .gemini .bob; do
+  path="/data/home/$cred_dir"
+
+  if grep -qE "chmod (2770|2775) [^&|;]*${path}( |$|/)" "$ENTRYPOINT"; then
+    ok "$cred_dir is created group-writable + setgid"
+  else
+    bad "$cred_dir has no 'chmod 277x' at its creation site" \
+        "an agent UID cannot write it; a CLI sign-in there succeeds in memory and is lost on exit"
+  fi
+
+  # The ongoing repair: an inotify watcher on the dir, or the polling
+  # slow-cycle sweep. One is enough at the DIRECTORY level; the per-credential
+  # block below is what decides whether that guard can actually fire.
+  #
+  # Four spellings are accepted because #5730 changed how the guards are
+  # written without changing what they must cover: the watchers are now
+  # dispatched through `hive_guard_forever LABEL DIR ...` (a bare
+  # `while inotifywait` exits permanently and silently the first time
+  # inotifywait returns non-zero), and the recursive sweep now runs through
+  # `hive_fix_tree` over a list rather than one inline `chmod -R`. What this
+  # assertion is actually about — every credential dir is covered by SOME
+  # ongoing repair — is unchanged, so it accepts both the old and new forms.
+  if grep -qE "inotifywait [^|]*${path}/" "$ENTRYPOINT" || \
+     grep -qE "hive_guard_forever [a-z]+ ${path}/ " "$ENTRYPOINT" || \
+     grep -qE "chmod -R g\+rwX [^&|;]*${path}( |$)" "$ENTRYPOINT" || \
+     grep -qE "for _t in [^;]*${path}( |;)" "$ENTRYPOINT"; then
+    ok "$cred_dir is repaired by the ongoing perm guard"
+  else
+    bad "$cred_dir is never re-opened after the CLI rewrites its credential 0600" \
+        "add it to the inotify guard or the polling slow-cycle chmod, beside .claude/.codex"
+  fi
+done
+
+# ---------------------------------------------------------------------------
+# Every KNOWN credential FILE must be reachable by the guard that exists for it.
+#
+# The directory checks above passed for .gemini while the credential they exist
+# to protect sat outside the guard's reach (kubestellar/hive#5734). agy keeps
+# its OAuth token at .gemini/antigravity-cli/antigravity-oauth-token — one
+# level below the watch — and `inotifywait` without -r reports events only for
+# entries DIRECTLY inside the watched directory. The guard was not merely
+# untested; it was structurally incapable of firing, and it read as protection
+# the whole time. Measured on a live hive: sixteen minutes and one token
+# rewrite after boot, .claude's inotifywait pid had advanced (its credential is
+# at depth 1) while .gemini's was still the boot pid.
+#
+# So this block asserts on PATHS rather than directories. A credential that
+# moves into a subdirectory — exactly what happened — now fails here instead of
+# passing silently.
+#
+# Adding a CLI: put its real credential path in the table. A directory with no
+# known credential file (.codex and .bob at the time of writing) is deliberately
+# absent: guessing a path would assert nothing, and a wrong guess would assert
+# something false.
+#
+# The loop reads from a here-doc, NOT a pipe: `printf ... | while` would run the
+# body in a subshell and every ok/bad below would increment a counter that dies
+# with it, so a real failure would print and then be forgotten by the tally.
+echo
+echo "Known credential files are reachable by their guard:"
+
+# _fn_body FILE NAME — print one shell function's definition from the
+# entrypoint, handling both the multi-line form (closing "  }" on its own line)
+# and the one-liner form.
+_fn_body() {
+  awk -v fn="  $2() {" '
+    index($0, fn) == 1 { f = 1; print; if ($0 ~ /\}[ \t]*$/) exit; next }
+    f { print; if ($0 ~ /^  \}[ \t]*$/) exit }
+  ' "$1"
+}
+
+# _fast_poll_reach — everything the 5s poll actually repairs, following one
+# level of indirection. The poll body calls named helpers (hive_fix_copilot_config
+# and friends) rather than spelling every path inline, so a check that read only
+# the poll body would report a credential as unprotected when it is repaired on
+# every cycle. One level is enough for the current shape and keeps the check
+# honest about what it verified.
+_fast_poll_reach() {
+  _fast="$(_fn_body "$ENTRYPOINT" hive_fix_credentials_fast)"
+  printf '%s\n' "$_fast"
+  for _callee in $(printf '%s\n' "$_fast" | grep -oE 'hive_fix_[a-z_]+' | sort -u); do
+    [ "$_callee" = "hive_fix_credentials_fast" ] && continue
+    _fn_body "$ENTRYPOINT" "$_callee"
+  done
+}
+FAST_POLL_REACH="$(_fast_poll_reach)"
+
+while IFS='|' read -r cli cred; do
+  [ -n "$cli" ] || continue
+  cred_parent="${cred%/*}"
+
+  # 1. Some repair must name the file itself. A guard that only chmods the
+  #    directory does not reopen a credential the CLI has just rewritten 0600.
+  if grep -qF "$cred" "$ENTRYPOINT"; then
+    ok "$cli: the entrypoint names $cred"
+  else
+    bad "$cli: no repair names $cred" \
+        "a directory-level chmod does not reopen a file the CLI rewrote 0600"
+  fi
+
+  # 2. The watch must be able to SEE a write to it: either the watch is on the
+  #    credential's own parent directory, or an ancestor is watched with -r.
+  #    This is the assertion #5734 was missing.
+  watched=""
+  if grep -qE "hive_guard_forever [a-z]+ ${cred_parent}/ " "$ENTRYPOINT" || \
+     grep -qE "inotifywait [^|]*${cred_parent}/( |$)" "$ENTRYPOINT"; then
+    watched="direct"
+  else
+    ancestor="$cred_parent"
+    while [ -n "$ancestor" ] && [ "$ancestor" != "/data/home" ] && [ "$ancestor" != "/" ]; do
+      ancestor="${ancestor%/*}"
+      if grep -qE "hive_guard_forever [a-z]+ ${ancestor}/ [^ ]+ [a-z_]+ -r" "$ENTRYPOINT"; then
+        watched="recursive on $ancestor"
+        break
+      fi
+    done
+  fi
+
+  if [ -n "$watched" ]; then
+    ok "$cli: the inotify guard covers $cred_parent ($watched)"
+  else
+    bad "$cli: no inotify guard can ever fire for $cred" \
+        "the watch is on an ancestor without -r, so a write to this file is invisible to it — watch ${cred_parent}/ directly, or add -r to the ancestor's guard"
+  fi
+
+  # 3. The 5s poll must name it too. That is the backstop when inotify is
+  #    unavailable (NFS) or its per-user watch limit is exhausted — and after
+  #    #5730 it is the arm that cannot die silently.
+  if printf '%s\n' "$FAST_POLL_REACH" | grep -qF "$cred"; then
+    ok "$cli: the 5s poll repairs $cred"
+  else
+    bad "$cli: the 5s poll does not repair $cred" \
+        "inotify is unreliable on NFS and has a per-user watch limit; the poll is the backstop"
+  fi
+done <<'CREDENTIAL_PATHS'
+copilot|/data/home/.copilot/config.json
+claude|/data/home/.claude/.credentials.json
+agy|/data/home/.gemini/antigravity-cli/antigravity-oauth-token
+CREDENTIAL_PATHS
+
+hive_test_report

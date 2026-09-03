@@ -73,6 +73,16 @@ func TestCovH2_BuildHealthAndRateLimits(t *testing.T) {
 	deps := testDeps(t)
 	logger := covH2Logger()
 
+	// This test drives buildHealth with a live client below, and that
+	// production path writes the package-level cachedHealth cache and can
+	// refresh cachedGreenStreak (status_builder.go). Nothing in the non-test
+	// code clears either, so without a restore the caches leak into every
+	// later test that exercises the nil-client branch — those tests assert
+	// the *default* {"ci": 100} and instead observe this test's fixture. The
+	// shared hook snapshots both caches and restores them in t.Cleanup, so
+	// the restore runs even when an assertion below calls t.Fatalf (#5570).
+	restoreHealthCaches(t)
+
 	// nil client → cached/default fallback branch.
 	h := buildHealth(nil, nil)
 	if h == nil {
@@ -113,6 +123,13 @@ func TestCovH2_BuildHealthAndRateLimits(t *testing.T) {
 	if rl2 == nil {
 		t.Fatalf("buildGHRateLimits(live) returned nil")
 	}
+
+	// The live branch of buildHealth CACHES what it fetched into the package
+	// global cachedHealth — the mock above answers the workflow endpoints with
+	// an empty run list, so the cached map carries ci=0 (#5553:
+	// TestBuildHealth_NilClient_Boost failed with "ci = 0" only on the
+	// shuffle orders that put this test first). Both dirtied globals are
+	// restored by the restoreHealthCaches hook registered at the top.
 	_ = buildHealth(ghc, ctx)
 
 	// App-auth identity branch: set an AppID so buildGHRateLimits takes the "app" path.

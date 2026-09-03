@@ -1,0 +1,15 @@
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ ACMM level                                                             ┃
+┃ current L4                                                             ┃
+┃                                                                        ┃
+┃ Apply L5 Autonomous?                                                   ┃
+┃                                                                        ┃
+┃ This applies FLEET-WIDE: it can replace the agent roster, pause and    ┃
+┃ resume agents, reset every per-agent mode override, and change         ┃
+┃ governor cadences, thresholds and the evaluation interval.             ┃
+┃                                                                        ┃
+┃ Type APPLY L5 to confirm:                                              ┃
+┃   [APPLY L]                                                            ┃
+┃                                                                        ┃
+┃ type to confirm  backspace edit  enter apply  esc cancel               ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛

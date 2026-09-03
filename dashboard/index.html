@@ -2767,10 +2767,18 @@
     let budgetIgnored = false;
     fetch('/api/budget-ignore').then(r => r.json()).then(d => { budgetIgnored = d.ignored; }).catch(() => {});
 
+    // Re-fetches /api/status and repaints in place; mirrors the shipped
+    // dashboard's refreshStatus(). The toggle used to call an undefined
+    // renderAll() here (the class of bug the dashboard-lint no-undef pass
+    // now catches), so the click threw ReferenceError after the POST.
+    function refreshStatus() {
+      return fetch('/api/status').then(r => r.json()).then(render).catch(() => {});
+    }
+
     function toggleBudgetIgnore() {
       budgetIgnored = !budgetIgnored;
       fetch('/api/budget-ignore', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ignored: budgetIgnored }) })
-        .then(r => r.json()).then(d => { budgetIgnored = d.ignored; renderAll(); });
+        .then(r => r.json()).then(d => { budgetIgnored = d.ignored; refreshStatus(); });
     }
 
     function renderBudgetBar(budget) {

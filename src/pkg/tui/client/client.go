@@ -42,6 +42,30 @@ const (
 	BaseURLEnv = "HIVE_DASHBOARD_URL"
 	TokenEnv   = "HIVE_DASHBOARD_TOKEN"
 
+	// CookieEnv carries a per-user session instead of the shared token, for the
+	// deployments where the shared token is not accepted at all.
+	//
+	// WHY A COOKIE AND NOT A SECOND TOKEN. The dashboard has two credential
+	// lanes and they are not interchangeable (pkg/dashboard/server.go,
+	// authenticate). The Bearer lane is a SHARED secret that grants unscoped
+	// owner, and it is DISABLED on a direct-route spoke — one with an
+	// authorized_users allowlist — precisely because it carries no per-user
+	// identity: "Direct-route callers must use a per-user session instead."
+	// The other lane is the hive_session cookie the device flow mints, which
+	// resolves to a username and that user's live allowlist role. A hub-fronted
+	// hive is the same story with the hub's own cookie. Neither is reachable
+	// through an Authorization header, so a client that can only set one is
+	// locked out of both kinds of hive no matter what secret it is given.
+	//
+	// The value is a COOKIE HEADER, not a bare session id: `hive_session=abc`,
+	// or several separated by "; ". That is deliberately the same string a
+	// browser would send, so an operator can lift it from their dashboard
+	// session verbatim, and one variable covers every cookie the deployment
+	// happens to need — the spoke's hive_session, a hub's hive_hub_user, and
+	// the per-hive terminal assertion that rides alongside it — without this
+	// package having to enumerate them or learn which lane it is talking to.
+	CookieEnv = "HIVE_DASHBOARD_COOKIE"
+
 	// requestTimeout bounds a single dashboard request. The TUI repaints on a
 	// timer, so a request that outlives its frame is not worth waiting for —
 	// better to fail the pane and retry on the next tick than to stall the UI
@@ -100,11 +124,32 @@ func IsForbidden(err error) bool {
 type Client struct {
 	baseURL string
 	token   string
-	http    *http.Client
+	cookie  string
+	// ttydCred is the operator's explicit HIVE_TTYD_CREDENTIAL override for
+	// the terminal websocket's basic-auth lane; empty means "derive from the
+	// token the way the container's entrypoint does". See terminal.go.
+	ttydCred string
+	http     *http.Client
 }
 
+// BaseURL reports the dashboard base URL this client resolved at
+// construction. It exists for the attach path, which needs to (a) decide
+// whether the dashboard is loopback — the local-vs-remote fast-path rule —
+// and (b) tell the operator WHICH hive's session they are looking at, without
+// re-reading the environment and risking a second, different answer.
+func (c *Client) BaseURL() string { return c.baseURL }
+
 // New builds a Client from the environment: base URL from HIVE_DASHBOARD_URL
-// (default DefaultBaseURL), token from HIVE_DASHBOARD_TOKEN.
+// (default DefaultBaseURL), token from HIVE_DASHBOARD_TOKEN, session cookie
+// from HIVE_DASHBOARD_COOKIE.
+//
+// The token and the cookie are independent, and BOTH are sent when both are
+// set. That is not belt-and-braces: which one the server honours depends on
+// how the hive is deployed, not on which one the operator considers primary,
+// and the client cannot tell the deployments apart from here. A shared-token
+// spoke ignores the cookie; a direct-route spoke ignores the token. Making the
+// operator work out which of their two credentials this particular hive wants
+// would be asking them to know something the server already knows.
 //
 // It cannot fail. A malformed HIVE_DASHBOARD_URL surfaces on the first request
 // as a request error rather than at construction, because the alternative — a
@@ -119,9 +164,11 @@ func New() *Client {
 	return &Client{
 		// Trailing slash is trimmed so joining a leading-slash path cannot
 		// produce "//api/health", which some reverse proxies do not normalize.
-		baseURL: strings.TrimRight(base, "/"),
-		token:   strings.TrimSpace(os.Getenv(TokenEnv)),
-		http:    &http.Client{Timeout: requestTimeout, Transport: newTransport()},
+		baseURL:  strings.TrimRight(base, "/"),
+		token:    strings.TrimSpace(os.Getenv(TokenEnv)),
+		cookie:   strings.TrimSpace(os.Getenv(CookieEnv)),
+		ttydCred: strings.TrimSpace(os.Getenv(TtydCredentialEnv)),
+		http:     &http.Client{Timeout: requestTimeout, Transport: newTransport()},
 	}
 }
 
@@ -141,6 +188,35 @@ func newTransport() http.RoundTripper {
 	return http.DefaultTransport
 }
 
+// authorize attaches whichever credentials are configured to req.
+//
+// It is the ONE place this package decides how a dashboard request proves who
+// it is, and it is shared by the polling path (doJSON) and the stream (sse.go)
+// so the two cannot drift — a stream that authenticated differently from the
+// polls would produce the worst possible symptom, panes that fill while the
+// header says the connection is down, or the reverse.
+//
+// An empty credential is OMITTED rather than sent empty. Sending "Bearer " is
+// not equivalent to sending nothing: the dashboard compares the whole header
+// against its expected value, so an empty one is a WRONG credential rather
+// than an absent one, and it turns a public endpoint's 200 into a 401.
+func (c *Client) authorize(req *http.Request) {
+	if c.token != "" {
+		// Authorization: Bearer is what the proxy's requireAuth verifies
+		// (src/proxy/server.js) and what hivectl already sends
+		// (src/pkg/hivectl/client.go). The published spec documents no security
+		// scheme at all, so this is read from the verifier, not from the spec —
+		// see kubestellar/hive#4912.
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	if c.cookie != "" {
+		// Set, not Add: the value is already a complete Cookie header (possibly
+		// several cookies joined by "; "), so adding would emit a second Cookie
+		// header line rather than extending this one.
+		req.Header.Set("Cookie", c.cookie)
+	}
+}
+
 // Health reports whether the dashboard is up, returning nil on 2xx.
 //
 // /api/health is a PUBLIC path on the Go API (src/pkg/dashboard/server.go,
@@ -150,6 +226,36 @@ func newTransport() http.RoundTripper {
 // things to tell an operator.
 func (c *Client) Health(ctx context.Context) error {
 	return c.getJSON(ctx, "/api/health", nil)
+}
+
+// IsUnauthorized reports whether err is an APIError carrying 401.
+//
+// It is the counterpart to IsForbidden and the distinction between them is the
+// whole point. 403 is a working credential belonging to someone whose ROLE does
+// not cover the action — the hive is fine, the operator is simply not its
+// owner, and the rest of the TUI still works for them. 401 is no usable
+// credential AT ALL: every authenticated endpoint will answer the same way, so
+// there is nothing for a retry, another pane, or another tick to accomplish.
+func IsUnauthorized(err error) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusUnauthorized
+}
+
+// CheckCredentials issues one authenticated read and reports what the dashboard
+// made of the caller's credentials, returning nil when they are accepted.
+//
+// It reads /api/status because that endpoint is already on the TUI's critical
+// path — the Governor pane polls it every cycle (governor.go) — so a hive where
+// this probe passes is one where the frame will fill, and a probe that passes
+// against an endpoint the app never calls would prove nothing. The body is
+// discarded: this asks whether the request is allowed, not what it returned.
+//
+// The error is returned unwrapped so the caller can classify it with
+// IsUnauthorized or IsForbidden. Note that "not nil" is NOT the same as "the
+// credentials are wrong" — an unreachable dashboard fails here too, and telling
+// those apart is the caller's job, not this method's.
+func (c *Client) CheckCredentials(ctx context.Context) error {
+	return c.getJSON(ctx, "/api/status", nil)
 }
 
 // getJSON performs a GET and decodes the response body into v.
@@ -202,14 +308,7 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body, v any) e
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if c.token != "" {
-		// Authorization: Bearer is what the proxy's requireAuth verifies
-		// (src/proxy/server.js) and what hivectl already sends
-		// (src/pkg/hivectl/client.go). The published spec documents no security
-		// scheme at all, so this is read from the verifier, not from the spec —
-		// see kubestellar/hive#4912.
-		req.Header.Set("Authorization", "Bearer "+c.token)
-	}
+	c.authorize(req)
 
 	resp, err := c.http.Do(req)
 	if err != nil {

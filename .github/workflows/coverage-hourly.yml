@@ -89,7 +89,7 @@ jobs:
         id: cover
         continue-on-error: true
         run: |
-          go test ./pkg/... ./cmd/... -short -race -coverprofile=coverage.out -count=1 -timeout 600s \
+          go test ./pkg/... ./cmd/... ./internal/... -short -race -coverprofile=coverage.out -count=1 -timeout 600s \
             2>&1 | tee race-run.log
           exit "${PIPESTATUS[0]}"
 
@@ -187,7 +187,7 @@ jobs:
           # Both were therefore incapable of failing the gate, so adding a
           # package with zero tests was the one guaranteed way to stay green.
           # They are now hard failures in their own right.
-          go test -cover ./pkg/... ./cmd/... -short -count=1 -timeout 600s 2>&1 | tee cover-run.log || true
+          go test -cover ./pkg/... ./cmd/... ./internal/... -short -count=1 -timeout 600s 2>&1 | tee cover-run.log || true
 
           # Floor-map key for a package import path: cmd packages are keyed
           # with a "cmd/" prefix so cmd/hivectl can never resolve to

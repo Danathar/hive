@@ -81,6 +81,7 @@ Important environment variables:
 | `AGENT_REASONING_EFFORT` | unset | Reasoning effort override. Consumed by `codex` (`-c model_reasoning_effort`) and by `agy` (`--effort low\|medium\|high`, required whenever a model is set, else agy ignores the model). Ignored by other backends. |
 | `CONTRIBUTOR_MODE` | `interactive` | `interactive` keeps a tmux/TTY session. `headless` is for one-shot/no-TTY task delivery. |
 | `HIVE_AGENT_SESSION` | `contributor` | tmux session name for interactive mode. |
+| `HIVE_SESSION` | backend name (`AGENT_BACKEND`) | Optional session label for running multiple relays under one GitHub account (see [Running multiple backends under one account](#running-multiple-backends-under-one-account)). Relays with distinct labels get independent session-scoped identities (`ContributorID#session`) on the hub, so their task leases, assignment cooldowns, failure streaks, and ownership fences do not collide. Auth, trust tier, model admission, and rate-limit accounting stay per-account. Sanitized on the hub: only `[A-Za-z0-9._-]` survive, capped at 32 bytes; a label that sanitizes to empty counts as unset. Set it to the **empty string** to opt out — the relay then declares no session and keeps the bare per-account identity (the historical single-session behavior). |
 | `HIVE_CODEX_APPROVALS_REVIEWER` | `auto_review` | Codex reviewer for boundary requests. The default prevents Hive-delivered work from waiting on an interactive operator while retaining `workspace-write`; set `user` only for an intentionally attended contributor. Set it to the **empty string** to omit the `-c approvals_reviewer=` key entirely — the escape hatch if a Codex release rejects that config key at startup. Doing so keeps the sandbox posture; it is not the same as the dangerous bypass. |
 | `HIVE_CLAUDE_DANGEROUSLY_ALLOW_HOST_STATE` | unset | Drops the defense-in-depth Claude command denylist. In local mode the native filesystem sandbox still applies, so this does not grant host writes. |
 | `HIVE_CLAUDE_DANGEROUSLY_BYPASS_APPROVALS_AND_SANDBOX` | unset | Restores the pre-#4918 unconfined Claude/LiteLLM local posture. Use only on a disposable or externally sandboxed host. |
@@ -141,6 +142,9 @@ file edits may write only to `HIVE_AGENT_CWD` and `HIVE_WORKSPACE_DIR`.
 Network domains are unrestricted because assigned third-party repositories
 must be able to fetch arbitrary test/build dependencies; this is write
 confinement, not a claim that the process can read or exfiltrate nothing.
+The local launcher exports the resolved `AGENT_LAUNCH_CMD`, and the relay reuses
+that exact command for post-task, revoke, and recovery relaunches so the
+stricter host-mode sandbox flags cannot drift back to container defaults.
 
 On Linux/WSL2 the native sandbox requires `bubblewrap` and `socat`; macOS uses
 Seatbelt. Missing dependencies are a hard launch failure, never a silent
@@ -194,6 +198,36 @@ The relay speaks to whatever backend you set up — pass it to `contribute-setup
 | `opencode` | Provider-agnostic (75+ providers); `opencode auth login` writes a credential to `~/.local/share/opencode/auth.json`. Headless-only: `opencode run "<prompt>"` is its one-shot entry point, wired via `CONTRIBUTOR_MODE=headless`; there is no interactive-tmux launch path for it |
 | `kilo` | Headless-only: `kilo run "<prompt>" --auto`; set `KILO_AUTH_CONTENT` / `KILO_CONFIG_CONTENT` or `KILO_API_KEY` (optional `KILO_ORG_ID`). Hive forwards only those values and never mounts a Kilo home/config directory. `--auto` is approval, not a sandbox. |
 
+## Running multiple backends under one account
+
+One GitHub account maps to one contributor profile per hub — one `ContributorID`, one auth token, one trust tier. The hub keys task leases, assignment cooldowns, failure streaks, and ownership fences on that identity, so without a distinguisher two relays under the same account collide on a single active-task slot.
+
+The optional `HIVE_SESSION` session label removes that limit. When a relay declares a session, the hub keys the per-identity state above on `ContributorID#session` instead, so each labeled relay holds its own task independently. Because `HIVE_SESSION` **defaults to the backend name**, the common case needs no configuration at all — this runs three concurrent relays under one account, with sessions `claude`, `agy`, and `pi`:
+
+```bash
+just contribute-hive claude   # terminal 1 — session "claude"
+just contribute-hive agy      # terminal 2 — session "agy"
+just contribute-hive pi       # terminal 3 — session "pi"
+```
+
+Set `HIVE_SESSION` explicitly when you want two relays of the *same* backend:
+
+```bash
+HIVE_SESSION=claude-a just contribute-hive claude   # terminal 1
+HIVE_SESSION=claude-b just contribute-hive claude   # terminal 2
+```
+
+The labels must be distinct: two same-backend relays with identical labels (including the identical *default* label) share one session identity and collide on a single active-task slot, exactly as if no label were set.
+
+What the session label does **not** scope: auth, trust tier, model admission, and rate-limit accounting all stay per-account. Extra sessions share your account's rate limits — this is a way to run several backends concurrently, not a way to get more throughput headroom.
+
+Notes:
+
+- Both launch modes honor `HIVE_SESSION` from your shell environment: local mode inherits it directly, and `just contribute-hive` / `src/compose-contributor.yaml` forward it into the container.
+- The hub sanitizes the label before use: only `[A-Za-z0-9._-]` survive, capped at 32 bytes. `HIVE_SESSION="my session!"` becomes `mysession` — you will not get the label you typed. A label that sanitizes to empty counts as unset.
+- `HIVE_SESSION=""` (explicit empty string) opts out entirely: the relay declares no session and the hub uses the bare per-account identity — byte-for-byte the pre-session single-relay behavior.
+- The feature is additive and backward-compatible: an older hub ignores the unknown field and treats the relay as a single session, and an existing single relay that never sets `HIVE_SESSION` still defaults to its backend name, which only matters once a second relay connects.
+
 ## Choosing a model
 
 Set the model before starting the relay:
@@ -241,6 +275,15 @@ Leaving a tab attached is fine — it does not park a task by itself. Two things
 - Deferral is capped at `HIVE_HUMAN_PRESENCE_MAX_DEFERRALS` ticks (3, roughly six minutes) regardless. Presence is a signal the relay cannot verify, and a task parked forever on an unverifiable signal is worse than one `try again` landing next to somebody.
 
 `tmux detach-client` remains the unambiguous way to hand the pane back.
+### The base branch comes from the assignment, not from the checkout
+
+Your relay works one issue at a time out of a single **persistent** checkout under `$HIVE_WORKSPACE_DIR`, and nothing resets it between tasks. The branch you find on disk therefore answers the *previous* task, not the current one.
+
+So the assignment prompt names the branch each task's work belongs on, and asks the agent to start its work branch from that base (`git checkout -b <your-branch> upstream/<base>`) and open the PR against it (`gh pr create --base <base>`). The base is the branch this hive is built from — the same branch the onboarding page's `git clone -b` command names ([#3990](https://github.com/hivecommons/hive/issues/3990)) — unless the issue's title carries a release-line tag such as `[v5]`, which wins.
+
+Before this, the prompt mentioned a branch exactly once ("push your branch to your fork") and never said which one to target, so one branch-specific issue redirected every later PR of a session: on 2026-09-02 five consecutive PRs landed on `v5`, only the first correctly, and three of the rest were fixes for defects live on the deployed `v4` ([#5729](https://github.com/hivecommons/hive/issues/5729)). Nobody in the loop could see it — the agent had nothing to check against, the contributor saw PRs opening and merging normally, and a maintainer saw correctly-formed PRs on a plausible branch.
+
+Watching the pane, the base is the thing worth a glance: it is stated in the prompt, and the agent is asked to confirm it on the opened PR before reporting done.
 
 ## Multi-hub subscription
 
@@ -377,6 +420,17 @@ kubectl -n my-namespace rollout status deploy/hive-contributor
 
 The generated pod sets `CONTRIBUTOR_MODE=headless` because Kubernetes pods have no TTY; interactive tmux mode would stall. Headless mode is currently verified for `claude`, `litellm`, `copilot`, `codex`, `goose`, and `agy` (`agy -p`, verified on 1.1.13) — but **`agy` stays out of `just contribute-k8s`'s `HEADLESS_BACKENDS` allowlist regardless**: it signs in through an interactive Google OAuth flow with no API-key mode, and a pod has no way to complete that sign-in even once (unlike the container path, where an operator can attach and run `agy` interactively, or the relay can stage an already-signed-in `~/.gemini`). Headless `agy` is verified only on a host that has already signed in. `opencode` has a verified one-shot invocation (`opencode run "<prompt>"`, [#4970](https://github.com/hivecommons/hive/issues/4970)) but is **not yet** in `just contribute-k8s`'s `HEADLESS_BACKENDS` allowlist: whether `opencode auth login`'s credential file supports non-interactive, unattended use in a fresh pod is unverified, so it currently runs headless on a host that has already signed in, the same posture as `agy`. The Deployment has one replica per registered contributor identity and uses readiness/liveness probes that read the relay's headless status file (`waiting`, `working`, `done` pass; missing/failed state fails).
 
+**If you need `agy`, `opencode`, or `kilo` on the K8s path**, the allowlist is
+`HEADLESS_BACKENDS="claude litellm copilot codex goose"` (`Justfile:1692`) and
+`just contribute-k8s` refuses anything outside it. Two workarounds: pick a
+supported headless backend, or run the backend attended on the container/local
+path (`just contribute-hive <backend>`), where an operator can complete an
+interactive sign-in. Tracking issue:
+[#5406](https://github.com/hivecommons/hive/issues/5406). Whether these backends
+can run unattended at all is still an open question — some may require an
+interactive login that a pod cannot satisfy — so treat the allowlist as a
+deliberate gate, not an oversight.
+
 The generated Secret contains the registration token and `GH_TOKEN` as Kubernetes Secret data. Treat it as sensitive cluster-readable material and prefer a pinned image tag/digest for repeatable operation.
 
 ## How the hub picks work for contributors
@@ -463,6 +517,20 @@ Crossing either ceiling is reported with `failure_kind: environment`. It is a st
 
 The hang case these ceilings nominally guard is covered better and sooner by the pane-stall detector above: 20 minutes of byte-identical output, confirmed over `PANE_STALL_CONFIRM_TICKS` ticks. The headless path has no pane to scrape and therefore no progress signal, so its one-shot child is bounded by the absolute backstop directly (`HIVE_HEADLESS_TASK_TIMEOUT_MS`).
 
+One pane state deliberately counts as busy even though the CLI looks idle:
+Claude Code's silent API retry
+([#5654](https://github.com/hivecommons/hive/issues/5654)). When the API
+connection drops mid-turn, Claude Code does not print its `● API Error:`
+chrome — it retries internally and renders a spinner countdown (`✻ Waiting for
+API response · will retry in 1m 57s · check your network`) while the persistent
+`⏵⏵` footer and the *previous* turn's `✻ Worked for …` summary are still on
+screen. The retry countdown is a busy marker: the pane classifies as working,
+the relay never types over a retry the CLI is recovering from on its own, and
+the task is not booked idle-complete mid-turn. A retry loop that never resolves
+is still bounded by the pane-stall detector and the absolute duration ceiling
+above; genuine idle completion — the same chrome with no retry line — is
+detected exactly as before.
+
 ### The GitHub token outlives the task, because the hub re-mints it
 
 The scoped GitHub token the relay pushes with is valid for **55 minutes**
@@ -496,21 +564,32 @@ Two things follow from refresh being driven by the hub's heartbeat:
   re-arms the cycle — without that step the resumed session's mint time would
   stay zero and refresh would never fire again for the life of the connection
   ([#2610](https://github.com/hivecommons/hive/issues/2610)).
-- **A failed re-mint is not fatal and is not announced.** If the mint errors, or
-  the hive has no App auth to mint from, the hub logs it and leaves the relay's
-  existing token in place, retrying on the next heartbeat. The relay is told
-  nothing. So the observable failure mode is not a "token expired" message: it
-  is a push or `gh` call that starts returning an authentication error partway
-  through a long task, with the previous 55 minutes having worked normally.
+- **A failed re-mint is not fatal, but it is announced.** If the mint errors the
+  hub logs it, leaves the relay's existing token in place, and retries on the
+  next heartbeat — and it now also sends the relay a `token_refresh_failed`
+  carrying a reason and no token material, so the relay logs the condition
+  against the task it belongs to
+  ([#5447](https://github.com/hivecommons/hive/issues/5447)). Both the heartbeat
+  and the resume path do this, and the hub advertises `token_refresh_failed` in
+  its `auth_ok` capability set. The message is advisory: nothing is revoked, no
+  task is failed, and a relay that ignores it behaves exactly as before. The
+  no-App-auth case is still silent — it is a deployment posture, not a failure.
 
-**Expiry is advertised but not enforced by the relay.** Each `token_refresh`
-carries a `token_expires_at` timestamp, and the relay records it — but it never
-checks it. Nothing in the relay warns as expiry approaches, refuses to start a
-push against a stale token, or asks the hub for a new one. The relay finds out
-that a token has died the same way it finds out about any other GitHub error:
-the command fails. If you see an authentication failure on a task that has been
-running for around an hour, a re-mint that quietly failed on the hub side is the
-first thing to check, and the hub's log is the only place that records it.
+**Expiry is now read, and warned on — but never enforced.** Each `token_refresh`
+carries a `token_expires_at` timestamp. The relay records it and, on each
+progress tick, compares it against the clock: it warns once the credential is
+within five minutes of expiry or already past it, and says so more pointedly
+when the hub has separately reported a failed renewal. The warning is throttled
+to once every ten minutes so a long task does not spam its log.
+
+It stops at warning deliberately. `token_expires_at` is the *hub's* wall clock
+read on the *relay's*, so a machine with a few minutes of skew would refuse work
+on a perfectly valid credential — strictly worse than today, where the token
+simply works. GitHub's answer to the actual call remains the authority on
+whether a token is good; the warning exists so that when the call does fail, the
+cause is already named in the log rather than surfacing as a generic
+authentication error. If you see an authentication failure on a task that has
+been running for around an hour, look for these two lines first.
 
 **Removal.** The token is unlinked on **every** task-exit path, before the agent
 is interrupted, so a turn that survives the stop cannot keep pushing against an
@@ -522,6 +601,18 @@ and dropping the credential there would destroy the token belonging to the task
 still being worked. Unlinking the file does not revoke the token — it stays
 valid at GitHub for the remainder of its 55 minutes — so removal bounds *this
 relay's* use of it, not the credential's lifetime.
+
+Relay *shutdown* is a task-exit path too
+([#5655](https://github.com/hivecommons/hive/issues/5655)). Stopping a busy
+relay with Ctrl-C (or SIGTERM) runs the same task-exit contract before the
+process dies: credential unlink first, then an interrupt of the live agent —
+which matters when a detached or container-owned tmux session outlives the
+relay — and no relaunch, since the process is exiting. A `process.on('exit')`
+backstop additionally unlinks the token on **every** exit, including a crash
+from an uncaught exception, so the credential cannot outlive the process short
+of SIGKILL. The hub is not messaged on shutdown; the socket drop already books
+the release through the disconnect cooldown path
+([#5097](https://github.com/hivecommons/hive/issues/5097)).
 
 ## Troubleshooting: the backend dies seconds after every task
 

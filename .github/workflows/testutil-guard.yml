@@ -1,0 +1,197 @@
+# testutil-guard (#5603): PR-level guard for src/internal/testutil.
+#
+# Twice on 2026-09-01/02 a PR whose primary subject lived elsewhere added an
+# untested helper to internal/testutil and turned the hourly coverage gate red
+# only AFTER merge (#5597 SkipUnlessRequired, #5600 EventuallyEveryFunc). The
+# pre-merge coverage job in v2-tests.yml cannot catch this class: its scoring
+# step admits only pkg/ and cmd/ package paths, so the shards RUN the
+# internal/testutil tests but the floor is never applied to them on PRs. Only
+# coverage-hourly.yml scores ./internal/... — hence the merge -> red gate ->
+# issue -> fix-PR round-trip this workflow exists to close.
+#
+# Two layers in one job; they compose:
+#
+#   1. Path pairing (intent guard): a changed non-test .go file under
+#      src/internal/testutil must be accompanied by a changed *_test.go in the
+#      SAME directory (= same package). Catches "helper added, tests
+#      forgotten" before any compiler runs.
+#
+#   2. Coverage floor (effectiveness guard): go test -coverprofile over
+#      ./internal/testutil/... with a 90% floor. Catches tests that exist but
+#      do not cover — the #5597 failure mode, where subprocess re-exec proofs
+#      exercise the helper for real but the child's coverage counters die with
+#      the child, leaving the profile at 0%.
+#
+# The diff is computed against the MERGE BASE (origin/<base>...HEAD, three-dot)
+# so commits that land on the base branch after the PR forked are never
+# misattributed to the PR.
+#
+# REPORTING JOB — deliberately not a required context anywhere; the operator
+# can promote it later. If promoted, beware that GitHub leaves path-filtered
+# required checks pending forever on PRs that don't trigger them: promotion
+# means moving the path gate from `on.paths` into the job itself (or folding
+# the job into v2-tests.yml, which already fires on all src/** PRs).
+name: testutil-guard
+
+on:
+  pull_request:
+    branches: [v2, v4]
+    paths:
+      # Whole subtree, not *.go: a change to testdata or embedded fixtures can
+      # move coverage too, and layer 2 should re-score on any of it. Layer 1
+      # itself only pairs .go files.
+      - 'src/internal/testutil/**'
+      # An edit to the guard must run the guard (same rule v2-tests.yml and
+      # dashboard-lint apply to their own workflow files).
+      - '.github/workflows/testutil-guard.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: testutil-guard-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  testutil-guard:
+    name: testutil-guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history so the merge base with the target branch exists
+          # locally and the three-dot diff below is computable.
+          fetch-depth: 0
+
+      - name: Non-test testutil changes must carry same-package tests
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+
+          git diff --name-only "origin/${BASE_REF}...HEAD" > changed-files.txt
+          echo "Changed files vs merge base with origin/${BASE_REF}:"
+          sed 's/^/  /' changed-files.txt
+
+          # .go files under the guarded subtree, split into code vs tests.
+          grep -E '^src/internal/testutil/.*\.go$' changed-files.txt > tu-go.txt || true
+          if [ ! -s tu-go.txt ]; then
+            echo "No .go changes under src/internal/testutil — nothing to pair."
+            exit 0
+          fi
+          # Each grep legitimately matches nothing when the PR changes only
+          # tests (or only non-tests); guard the pipelines so set -e/pipefail
+          # doesn't abort the script on that empty case.
+          { grep -vE '_test\.go$' tu-go.txt || true; } | xargs -r -n1 dirname | LC_ALL=C sort -u > tu-code-dirs.txt
+          { grep -E  '_test\.go$' tu-go.txt || true; } | xargs -r -n1 dirname | LC_ALL=C sort -u > tu-test-dirs.txt
+
+          # Pairing is per DIRECTORY, i.e. per package: a test touched in a
+          # sibling package proves nothing about the helper that changed.
+          MISSING=$(LC_ALL=C comm -23 tu-code-dirs.txt tu-test-dirs.txt)
+          if [ -z "$MISSING" ]; then
+            echo "OK: every testutil package with non-test .go changes also changes a same-package *_test.go."
+            exit 0
+          fi
+
+          echo "::error::src/internal/testutil changed without same-package test changes (see job log; #5603)"
+          cat <<EOF
+
+          TESTUTIL GUARD FAILED (#5603)
+
+          These package directories change non-test .go files without touching
+          any *_test.go in the same directory:
+
+          $MISSING
+
+          internal/testutil helpers back every test in the tree, and the hourly
+          coverage gate scores the package at the default 90% floor — an
+          untested helper turns that gate red only AFTER merge (#5597, #5600).
+          Add or extend same-package tests in this PR.
+
+          Conventions (#5598, src/internal/testutil/require_behavioural_test.go):
+          assert the PROPERTY the helper guarantees, not the shape of its code.
+          If the helper must be proven against a real *testing.T (Fatalf/Skip
+          end the goroutine), remember that subprocess re-exec proofs are
+          INVISIBLE to the coverage profile — the child's counters die with the
+          child. Pair them with in-process tests against a testing.TB double
+          (guardTB / recordingTB) so the profile sees the same code paths.
+          EOF
+          exit 1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.25'
+          cache-dependency-path: src/go.sum
+
+      - name: internal/testutil coverage floor
+        working-directory: src
+        run: |
+          set -o pipefail
+
+          # Floor: internal/testutil has NO entry in the PKG_THRESHOLD maps
+          # (coverage-hourly.yml and v2-tests.yml's coverage job), so both
+          # score it at their default THRESHOLD=90. Hardcoded to the same 90
+          # rather than extracting the map for one package; if testutil ever
+          # gains an explicit entry there, KEEP THIS IN SYNC.
+          FLOOR=90
+
+          # ./... so future testutil subpackages are scored the day they
+          # appear instead of silently escaping the guard.
+          go test -coverprofile=testutil-cover.out -covermode=atomic \
+            ./internal/testutil/... -count=1 -timeout 300s 2>&1 \
+            | tee testutil-cover.log || true
+
+          # Classify every package line, same states as the hourly gate: a
+          # FAIL or a "? [no test files]" package scores nothing and must be a
+          # hard failure in its own right, or breaking the tests becomes the
+          # one guaranteed way to stay green.
+          FAILED=""
+          scored=0
+          while IFS= read -r line; do
+            case "$line" in
+              ok*)
+                pkgpath=$(echo "$line" | awk '{print $2}')
+                pct=$(echo "$line" | grep -o '[0-9]*\.[0-9]*%' | tr -d '%')
+                if [ -z "$pct" ]; then continue; fi
+                scored=1
+                echo "${pkgpath}: ${pct}% (floor ${FLOOR}%)"
+                if [ "${pct%.*}" -lt "$FLOOR" ]; then
+                  FAILED="${FAILED}${pkgpath}: ${pct}% (floor ${FLOOR}%)\n"
+                fi
+                ;;
+              FAIL*)
+                pkgpath=$(echo "$line" | awk '{print $2}')
+                if [ -n "$pkgpath" ] && [ "$pkgpath" != "FAIL" ]; then
+                  FAILED="${FAILED}${pkgpath}: TESTS FAILING\n"
+                fi
+                ;;
+              \?*)
+                pkgpath=$(echo "$line" | awk '{print $2}')
+                if [ -n "$pkgpath" ]; then
+                  FAILED="${FAILED}${pkgpath}: NO TEST FILES\n"
+                fi
+                ;;
+            esac
+          done < testutil-cover.log
+
+          if [ "$scored" -eq 0 ] && [ -z "$FAILED" ]; then
+            echo "::error::no scorable go test output for ./internal/testutil/... — failing closed"
+            exit 1
+          fi
+
+          if [ -n "$FAILED" ]; then
+            echo "::error::internal/testutil coverage guard failed (see job log; #5603)"
+            printf '\nTESTUTIL COVERAGE GUARD FAILED (#5603):\n\n'
+            echo -e "$FAILED"
+            cat <<EOF
+          The hourly gate (coverage-hourly.yml) scores this package at the same
+          floor on merged v4 — below-floor coverage here WILL go red after
+          merge. If your tests prove the helper via subprocess re-exec, the
+          child's coverage counters are invisible to the profile (#5597); add
+          in-process coverage via the guardTB / recordingTB doubles described
+          in src/internal/testutil/require_behavioural_test.go (#5598).
+          EOF
+            exit 1
+          fi
+
+          echo "internal/testutil meets its ${FLOOR}% floor."

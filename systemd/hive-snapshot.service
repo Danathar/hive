@@ -9,7 +9,47 @@ User=dev
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=HIVE_DASHBOARD_URL=http://localhost:3001
 Environment=DOCS_REPO_DIR=/tmp/kubestellar-docs-snapshot
+# Refuse to start unless the checkout we execute from is owned by this service
+# user and is not group/other-writable (#5483, same class as #5435).
+#
+# WHY THIS GUARD EXISTS. ExecStart resolves out of /tmp/hive, which sits under a
+# world-writable parent that is cleared on reboot. /tmp's sticky bit only stops
+# a user deleting or renaming entries owned by someone ELSE — it does not stop
+# them CREATING /tmp/hive/dashboard/publish-snapshot.sh in the window after a
+# reboot wipes /tmp and before hive-deploy repopulates the checkout. systemd
+# would then run that file as `dev` the next time hive-snapshot.timer fires.
+#
+# Lower severity than #5435 but not zero. This unit is Type=oneshot on a timer,
+# not Restart=always, so the attacker executes on the timer's 15-minute schedule
+# rather than immediately at boot, and the unit carries no EnvironmentFile so no
+# token is handed to it by systemd. The script itself, however, reads a GitHub
+# App token from /var/run/hive-metrics/gh-app-token.cache and pushes to
+# kubestellar/docs, so `dev` execution here still reaches a write credential.
+#
+# The path stays under /tmp deliberately: the literal /tmp/hive is hardcoded in
+# bin/hive.sh, bin/kick-agents.sh and this ExecStart, so relocating the checkout
+# is a deploy-layout change across all of them, not a fix to this unit.
+#
+# The guard is a script, not an inline `test`/`find`: `find ... -print -quit`
+# exits 0 even when it matches nothing, so an inline find would be a no-op guard.
+#
+# Test with: bash src/deploy/test_hive_snapshot_unit_contract.sh
+ExecStartPre=/usr/local/bin/hive-checkout-guard.sh /tmp/hive/dashboard publish-snapshot.sh
 ExecStart=/tmp/hive/dashboard/publish-snapshot.sh
+# Hardening. PrivateTmp is deliberately NOT set: it would give this unit a
+# private /tmp namespace, hiding both the checkout ExecStart runs from AND
+# DOCS_REPO_DIR=/tmp/kubestellar-docs-snapshot, which the script clones into and
+# commits from. ProtectSystem=full leaves /tmp writable (strict would not) while
+# making /usr and /etc read-only.
+#
+# ProtectHome is NOT read-only here, unlike hive-discord.service: this script
+# drives `git` and `gh`, which write to $HOME (gh refreshes ~/.config/gh state,
+# git writes lock files next to ~/.gitconfig). A read-only home would break the
+# push/PR path rather than harden it.
+NoNewPrivileges=yes
+ProtectSystem=full
+PrivateDevices=yes
+RestrictSUIDSGID=yes
 TimeoutStartSec=120
 StandardOutput=journal
 StandardError=journal

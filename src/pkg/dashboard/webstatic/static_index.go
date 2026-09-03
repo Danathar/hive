@@ -38,6 +38,33 @@ type IndexDocument struct {
 	etag    string
 }
 
+// BrandingLinkTag is injected into the served index document so an operator
+// can restyle the dashboard without forking the embedded SPA.
+//
+// It is injected UNCONDITIONALLY, not "only when the file exists": the index
+// document is built once at startup with a precomputed gzip body and a strong
+// ETag, so making its content depend on a file that can appear later would
+// mean either rebuilding it per request or serving a stale page forever. An
+// absent override simply 404s, and a 404'd stylesheet is inert.
+const BrandingLinkTag = `<link rel="stylesheet" href="/branding/custom.css">`
+
+// InjectBranding places the override link immediately before </head> so it
+// wins the cascade against everything the embedded document defines. Falls
+// back to returning the document untouched if there is no </head> to anchor
+// to, rather than corrupting the markup.
+func InjectBranding(raw []byte) []byte {
+	marker := []byte("</head>")
+	i := bytes.Index(raw, marker)
+	if i < 0 {
+		return raw
+	}
+	out := make([]byte, 0, len(raw)+len(BrandingLinkTag))
+	out = append(out, raw[:i]...)
+	out = append(out, []byte(BrandingLinkTag)...)
+	out = append(out, raw[i:]...)
+	return out
+}
+
 func NewIndexDocument(raw []byte) *IndexDocument {
 	sum := sha256.Sum256(raw)
 	// 16 hex bytes of the digest is plenty for cache validation and keeps the

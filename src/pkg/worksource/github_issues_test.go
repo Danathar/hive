@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/hivecommons/hive/pkg/github"
@@ -76,15 +77,28 @@ func TestGitHubIssuesSource_ListIssues_Error(t *testing.T) {
 	defer srv.Close()
 
 	client := github.NewClientForTest(srv.URL, "org", []string{"repo"}, testLogger())
+
+	// This used to skip when EnumerateActionable returned nil — which is
+	// exactly when it should fail (#5388): with a single repo whose every
+	// request 500s, a nil error means the all-repos-failed guard in
+	// EnumerateActionable regressed, and a zero-count result would tell the
+	// governor the queue is empty and idle the agents. The guard's absence is
+	// the bug this test exists to catch, not a reason to stand aside.
 	if _, err := client.EnumerateActionable(context.Background()); err == nil {
-		// Some client paths tolerate per-repo failures; only assert the
-		// worksource error wrapping when enumeration itself fails.
-		t.Skip("EnumerateActionable tolerates repo errors; skipping error-path assertion")
+		t.Fatal("EnumerateActionable returned nil error although every request to its " +
+			"only repo failed; the all-repos-failed guard has regressed and a zero-count " +
+			"result would silently idle the agents")
 	}
 
 	src := worksource.NewGitHubIssuesSource(client)
-	if _, err := src.ListIssues(context.Background()); err == nil {
+	_, err := src.ListIssues(context.Background())
+	if err == nil {
 		t.Fatal("expected error from ListIssues, got nil")
+	}
+	// The worksource must wrap, not swallow or rephrase, the enumeration
+	// error, so callers can trace a failure back through the source boundary.
+	if !strings.Contains(err.Error(), "worksource/github: enumerate:") {
+		t.Errorf("ListIssues error %q does not carry the worksource/github: enumerate: wrap", err)
 	}
 }
 

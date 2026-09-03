@@ -148,7 +148,7 @@ func TestConvertHeartbeatToPerClusterHealthNoGPU(t *testing.T) {
 // ============================================================
 
 func TestGetHeartbeatHealthForCluster(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	// No data
 	if got := srv.getHeartbeatHealthForCluster("nonexistent"); got != nil {
@@ -191,7 +191,7 @@ func TestGetHeartbeatHealthForCluster(t *testing.T) {
 // ============================================================
 
 func TestHandleClusterHealthNotAdmin(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	req := httptest.NewRequest("GET", "/api/saas/cluster-health", nil)
 	w := httptest.NewRecorder()
@@ -207,7 +207,7 @@ func TestHandleClusterHealthNotAdmin(t *testing.T) {
 // ============================================================
 
 func TestHandleAccessStatusWithBearerAuth(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	// Pre-populate cache for bearer auth
 	ghTokenCacheMu.Lock()
@@ -250,7 +250,7 @@ func TestHandleAccessStatusWithBearerAuth(t *testing.T) {
 // ============================================================
 
 func TestHandleCreateHiveNotAuthenticatedDirect(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	req := httptest.NewRequest("POST", "/test", strings.NewReader(`{}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -271,7 +271,7 @@ func TestHandleCreateHiveNotAuthenticatedDirect(t *testing.T) {
 // ============================================================
 
 func TestHandleToggleVisibilityCORSHeaders(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("PUT /visibility/{id}", srv.handleToggleVisibility)
@@ -288,7 +288,7 @@ func TestHandleToggleVisibilityCORSHeaders(t *testing.T) {
 }
 
 func TestHandleToggleVisibilityUntrustedOrigin(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("PUT /visibility/{id}", srv.handleToggleVisibility)
@@ -309,7 +309,7 @@ func TestHandleToggleVisibilityUntrustedOrigin(t *testing.T) {
 // ============================================================
 
 func TestHandleUpgradeHiveCORSHeaders(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /upgrade/{id}", srv.handleUpgradeHive)
@@ -329,7 +329,7 @@ func TestHandleUpgradeHiveCORSHeaders(t *testing.T) {
 // ============================================================
 
 func TestHandleToggleAutoUpgradeCORSHeaders(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("PUT /auto-upgrade/{id}", srv.handleToggleAutoUpgrade)
@@ -351,7 +351,7 @@ func TestHandleToggleAutoUpgradeCORSHeaders(t *testing.T) {
 
 func TestHandleHubAutoUpgradeValid(t *testing.T) {
 	defer helperSetupTempDirs(t)()
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	req := httptest.NewRequest("PUT", "/hub-auto-upgrade", strings.NewReader(`{"auto_upgrade":false}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -368,7 +368,7 @@ func TestHandleHubAutoUpgradeValid(t *testing.T) {
 
 func TestHandleHubAutoUpgradeEnable(t *testing.T) {
 	defer helperSetupTempDirs(t)()
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	req := httptest.NewRequest("PUT", "/hub-auto-upgrade", strings.NewReader(`{"auto_upgrade":true}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -417,7 +417,7 @@ func TestHandleHubSelfUpgrade(t *testing.T) {
 		latestSHAMu.Unlock()
 	})
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	req := httptest.NewRequest("POST", "/hub-self-upgrade", nil)
 	w := httptest.NewRecorder()
@@ -437,7 +437,7 @@ func TestHandleHubSelfUpgrade(t *testing.T) {
 // ============================================================
 
 func TestHandleHiveStatusPathTraversal(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/saas/hives/{id}/status", srv.handleHiveStatus)
@@ -456,7 +456,7 @@ func TestHandleHiveStatusPathTraversal(t *testing.T) {
 // ============================================================
 
 func TestHandleDeleteHiveNotOwner(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("DELETE /api/saas/hives/{id}", srv.handleDeleteHive)
@@ -500,7 +500,7 @@ func TestLoadClustersWithTempFile(t *testing.T) {
 // ============================================================
 
 func TestHandleSaaSAuthCheckPublicPathSnapshot(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	req := httptest.NewRequest("GET", "/api/saas/auth-check?hive=test", nil)
 	req.Header.Set("X-Original-URI", "/snapshot/something")
@@ -513,7 +513,7 @@ func TestHandleSaaSAuthCheckPublicPathSnapshot(t *testing.T) {
 }
 
 func TestHandleSaaSAuthCheckPublicPathContribute(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	req := httptest.NewRequest("GET", "/api/saas/auth-check?hive=test", nil)
 	req.Header.Set("X-Original-URI", "/contribute/something")
@@ -530,7 +530,7 @@ func TestHandleSaaSAuthCheckPublicPathContribute(t *testing.T) {
 // ============================================================
 
 func TestHandleMyHivesAdminSeesAllHives(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	// Pre-populate cache for admin user
 	ghTokenCacheMu.Lock()
@@ -566,7 +566,7 @@ func TestHandleMyHivesAdminSeesAllHives(t *testing.T) {
 // ============================================================
 
 func TestHandleApproveAccessNotAuthorized(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("PUT /api/saas/hives/{id}/approve-access/{username}", srv.handleApproveAccess)
@@ -582,7 +582,7 @@ func TestHandleApproveAccessNotAuthorized(t *testing.T) {
 }
 
 func TestHandleDenyAccessNotAuthorized(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("DELETE /api/saas/hives/{id}/deny-access/{username}", srv.handleDenyAccess)
@@ -601,7 +601,7 @@ func TestHandleDenyAccessNotAuthorized(t *testing.T) {
 // ============================================================
 
 func TestHandleRequestAccessHiveNotFound(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/saas/hives/{id}/request-access", srv.handleRequestAccess)
@@ -620,7 +620,7 @@ func TestHandleRequestAccessHiveNotFound(t *testing.T) {
 // ============================================================
 
 func TestHandleGetRequestsHiveNotFound(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/saas/hives/{id}/requests", srv.handleGetRequests)
@@ -639,7 +639,7 @@ func TestHandleGetRequestsHiveNotFound(t *testing.T) {
 // ============================================================
 
 func TestHandleApproveRequestHiveNotFound(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/saas/hives/{id}/requests/{username}/approve", srv.handleApproveRequest)
@@ -659,7 +659,7 @@ func TestHandleApproveRequestHiveNotFound(t *testing.T) {
 // ============================================================
 
 func TestHandleDenyRequestHiveNotFound(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/saas/hives/{id}/requests/{username}/deny", srv.handleDenyRequest)
@@ -678,7 +678,7 @@ func TestHandleDenyRequestHiveNotFound(t *testing.T) {
 // ============================================================
 
 func TestHandleHeartbeatUpdateExistingWithSparkline(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.setHubSecret("")
 
 	// Pre-populate a hive with sparkline data from 20 minutes ago
@@ -724,7 +724,7 @@ func TestHandleHeartbeatUpdateExistingWithSparkline(t *testing.T) {
 // ============================================================
 
 func TestHandleHeartbeatUpgradeCompleted(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.setHubSecret("")
 
 	srv.mu.Lock()
@@ -763,7 +763,7 @@ func TestHandleHeartbeatUpgradeCompleted(t *testing.T) {
 }
 
 func TestHandleHeartbeatUpgradeInProgress(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.setHubSecret("")
 
 	srv.mu.Lock()
@@ -806,7 +806,7 @@ func TestHandleHeartbeatUpgradeInProgress(t *testing.T) {
 // ============================================================
 
 func TestHandleHeartbeatResponseAutoUpgrade(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.setHubSecret("")
 
 	// Set up a latestSHA for v2
@@ -849,7 +849,7 @@ func TestHandleHeartbeatResponseAutoUpgrade(t *testing.T) {
 // ============================================================
 
 func TestHandleHeartbeatStoresClusterHealth(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.setHubSecret("")
 
 	payload := HeartbeatPayload{
@@ -887,7 +887,7 @@ func TestHandleHeartbeatStoresClusterHealth(t *testing.T) {
 // ============================================================
 
 func TestRequestSave(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	// Should not panic when called multiple times
 	srv.requestSave()
 	srv.requestSave()
@@ -905,7 +905,7 @@ func TestHandleContributeProxyRejectsPrivateURL(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.mu.Lock()
 	srv.registry.Hives = []RegistryEntry{
 		{ID: "contribute-hive", Online: true, IsPublic: true, DashboardURL: upstream.URL, Owner: "user1"},
@@ -928,7 +928,7 @@ func TestHandleContributeProxyRejectsPrivateURL(t *testing.T) {
 // ============================================================
 
 func TestHandleContributeWSProxyNoHive(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	req := httptest.NewRequest("GET", "/api/contribute/ws", nil)
 	w := httptest.NewRecorder()
@@ -944,7 +944,7 @@ func TestHandleContributeWSProxyNoHive(t *testing.T) {
 // ============================================================
 
 func TestHandleUserTokenEmptyBody(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	req := httptest.NewRequest("POST", "/test", strings.NewReader(`{}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -957,7 +957,7 @@ func TestHandleUserTokenEmptyBody(t *testing.T) {
 }
 
 func TestHandleUserTokenInvalidJSON(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	req := httptest.NewRequest("POST", "/test", strings.NewReader(`{invalid`))
 	req.Header.Set("Content-Type", "application/json")
@@ -974,7 +974,7 @@ func TestHandleUserTokenInvalidJSON(t *testing.T) {
 // ============================================================
 
 func TestHandleRequestProvisionDefaultPrimaryRepo(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	ghTokenCacheMu.Lock()
 	ghTokenCache["ghp_prov_default"] = ghTokenCacheEntry{
@@ -1008,7 +1008,7 @@ func TestHandleRequestProvisionDefaultPrimaryRepo(t *testing.T) {
 // ============================================================
 
 func TestHandleAdminUsersResponse(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	req := httptest.NewRequest("GET", "/admin-users", nil)
 	w := httptest.NewRecorder()
@@ -1049,7 +1049,7 @@ func TestDecryptTokenWithBadCiphertext(t *testing.T) {
 // ============================================================
 
 func TestHandleHeartbeatTriggersRegistrySave(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.setHubSecret("")
 
 	payload := `{"hive_id":"save-trigger-hive"}`
@@ -1069,7 +1069,7 @@ func TestHandleHeartbeatTriggersRegistrySave(t *testing.T) {
 // ============================================================
 
 func TestHandleDashboardRegularBrowserWithCookie(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	req := httptest.NewRequest("GET", "/dashboard", nil)
 	req.AddCookie(&http.Cookie{Name: "hive_hub_user", Value: "user123"})
@@ -1090,7 +1090,7 @@ func TestHandleDashboardRegularBrowserWithCookie(t *testing.T) {
 // ============================================================
 
 func TestHandleOAuthCallbackMissingCodeParam(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	req := httptest.NewRequest("GET", "/callback", nil)
 	w := httptest.NewRecorder()
@@ -1106,7 +1106,7 @@ func TestHandleOAuthCallbackMissingCodeParam(t *testing.T) {
 // ============================================================
 
 func TestHandleContributeProxyBadURL(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	// Set a hive with an unparseable URL
 	srv.mu.Lock()
@@ -1136,7 +1136,7 @@ func TestHandleProxyHiveConfigUpstreamError(t *testing.T) {
 	hiveConfigSSRFGuard = func(context.Context, string) bool { return false }
 	defer func() { hiveConfigSSRFGuard = orig }()
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	// Ownerless entry: after the F9 fix the unauthenticated test caller cannot
 	// reach the upstream, so the ownership check (403) preempts any proxy fetch.
@@ -1174,7 +1174,7 @@ func TestHandleProxyHiveConfigUpstreamError(t *testing.T) {
 // ============================================================
 
 func TestStartAndShutdown(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	// Start in background
 	errCh := make(chan error, 1)
@@ -1196,7 +1196,7 @@ func TestStartAndShutdown(t *testing.T) {
 // ============================================================
 
 func TestTriggerAutoUpgradesNoHives(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	// Should not panic with no hives
 	srv.triggerAutoUpgrades()
 }
@@ -1206,7 +1206,7 @@ func TestTriggerAutoUpgradesNoHives(t *testing.T) {
 // ============================================================
 
 func TestHandleHeartbeatSaaSHivePrefix(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	secret := srv.hubSecret
 
 	// saas- prefix without SaaS entry should be rejected
@@ -1223,7 +1223,7 @@ func TestHandleHeartbeatSaaSHivePrefix(t *testing.T) {
 }
 
 func TestHandleHeartbeatUpgradingFlag(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.setHubSecret("")
 
 	payload := `{"hive_id":"upgrading-flag-test","upgrading":true,"upgrade_target_sha":"7a41e01"}`
@@ -1246,7 +1246,7 @@ func TestHandleHeartbeatUpgradingFlag(t *testing.T) {
 }
 
 func TestHandleLeaderboardWithData(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.mu.Lock()
 	srv.registry.Hives = []RegistryEntry{
 		{
@@ -1286,7 +1286,7 @@ func TestGetLatestSHAForBranchNotFound(t *testing.T) {
 }
 
 func TestHandleHeartbeatHiveTypeExplicit(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.setHubSecret("")
 
 	payload := `{"hive_id":"explicit-type","hive_type":"custom-type"}`
@@ -1311,7 +1311,7 @@ func TestHandleHeartbeatHiveTypeExplicit(t *testing.T) {
 }
 
 func TestHandleHeartbeatMaxAgents(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.setHubSecret("")
 
 	// Create 60 agents to test the max agents cap (50)
@@ -1346,7 +1346,7 @@ func TestHandleHeartbeatMaxAgents(t *testing.T) {
 }
 
 func TestHandleHeartbeatSnapshotURL(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.setHubSecret("")
 
 	// First heartbeat with snapshot

@@ -3104,6 +3104,75 @@
         }
       }
     },
+    "/api/agents/{name}/login-code": {
+      "post": {
+        "tags": [
+          "Agents"
+        ],
+        "summary": "Submit an authorization code to the agent's terminal",
+        "description": "Owner only. Types an operator-supplied OAuth/device authorization code into the agent's tmux pane and submits it with a single Enter. The write-side twin of `GET /api/agents/{name}/terminal-urls`: that endpoint exists because the embedded ttyd terminal cannot deliver a copy (#5188), and this one because it cannot reliably accept a paste either, which leaves an operator unable to finish a sign-in hand-off from the dashboard at all. It grants no capability the writable ttyd terminal does not already give the same operator; it is strictly narrower, and takes the strictest gate rather than inheriting the read endpoint's any-authenticated-role rule. The code is validated as printable and whitespace-free before it is typed, so it cannot carry a newline and become a second command in the agent's shell, and it is never logged or echoed back.",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Agent name"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "code"
+                ],
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "maxLength": 512,
+                    "description": "The authorization code from the sign-in page. Must be printable and contain no whitespace or control characters; a value carrying a newline is refused rather than sanitised, because typing it would submit at that point and run everything after it as a fresh line."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Code typed into the agent's pane",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "agent": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Code was empty, too long, or carried whitespace or control characters; nothing was typed"
+          },
+          "403": {
+            "description": "Owner access required"
+          },
+          "503": {
+            "description": "Agent manager unavailable"
+          }
+        }
+      }
+    },
     "/api/agents/{name}/terminal-urls": {
       "get": {
         "tags": [
@@ -11380,6 +11449,86 @@
         }
       }
     },
+    "/api/contribute/run-stats": {
+      "get": {
+        "tags": [
+          "Contribute"
+        ],
+        "summary": "Per-backend run-scenario aggregates",
+        "description": "Aggregates the durable contributor task-run log into per-backend scenario counts (verdict_complete, idle_complete, headless_complete, env_failure, task_failure, unspecified_failure), the chrome-idle share (the completion-sentinel non-compliance rate), and duration percentiles, over a trailing window. Public, GET only, no side effects \u2014 aggregate counts only, no usernames, reasons, or tokens.",
+        "parameters": [
+          {
+            "name": "days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 365,
+              "default": 7
+            },
+            "description": "Trailing window in days; 0 aggregates everything in the live log."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Per-backend run-scenario aggregates",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "window_days": {
+                      "type": "integer"
+                    },
+                    "total": {
+                      "type": "integer"
+                    },
+                    "backends": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "backend": {
+                            "type": "string"
+                          },
+                          "total": {
+                            "type": "integer"
+                          },
+                          "completed": {
+                            "type": "integer"
+                          },
+                          "failed": {
+                            "type": "integer"
+                          },
+                          "scenarios": {
+                            "type": "object",
+                            "description": "Map of scenario name -> count",
+                            "additionalProperties": {
+                              "type": "integer"
+                            }
+                          },
+                          "chrome_idle_share": {
+                            "type": "number",
+                            "description": "idle_complete / completed \u2014 the completion-sentinel non-compliance rate to ratchet toward zero"
+                          },
+                          "duration_p50_s": {
+                            "type": "number"
+                          },
+                          "duration_p95_s": {
+                            "type": "number"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/contribute/opportunistic": {
       "get": {
         "tags": [
@@ -16765,16 +16914,26 @@
                     },
                     "models": {
                       "type": "array",
+                      "description": "Model ids the backend offers, as advertised by the inference gateway (\"openai/gpt-5\", \"claude_opus_4.8\"). A FLOOR rather than a census whenever `fallback` or `partial` is set.",
                       "items": {
-                        "type": "object"
+                        "type": "string"
                       }
                     },
                     "fallback": {
-                      "type": "boolean"
+                      "type": "boolean",
+                      "description": "True when endpoint discovery found nothing and the server substituted its static alias list. These ids are common guesses, unverified against the configured endpoint or key."
                     },
                     "partial": {
                       "type": "boolean",
-                      "description": "True when some but not all endpoints answered."
+                      "description": "True when some but not all endpoints answered. Every id present really was discovered, but a model's ABSENCE proves nothing."
+                    },
+                    "entitled": {
+                      "type": "boolean",
+                      "description": "Present and true when the server narrowed `models` to the set the configured key may actually use. Omitted otherwise, and never set alongside `fallback`."
+                    },
+                    "entitledSource": {
+                      "type": "string",
+                      "description": "How the entitled set was learned (key-info probe, or a \"team not allowed\" 403). Present only when `entitled` is true."
                     }
                   }
                 }

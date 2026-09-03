@@ -1,7 +1,6 @@
 package hub
 
 import (
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -52,7 +51,7 @@ func TestAuthCheck_SSOHandoffBypassesGate(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			srv := NewHubServer(0, slog.Default(), "test", "v2")
+			srv := newHubServerForTest(t)
 			req := httptest.NewRequest("GET", "/api/saas/auth-check?hive=test-hive", nil)
 			req.Header.Set("X-Original-URI", tc.originalURI)
 			w := httptest.NewRecorder()
@@ -70,7 +69,7 @@ func TestAuthCheck_SSOHandoffBypassesGate(t *testing.T) {
 // a public-path bypass. If the /sso bypass leaked the hive's dashboard token,
 // anyone could fetch it by hitting the auth-check with X-Original-URI=/sso.
 func TestAuthCheck_SSOBypassSetsNoProxyProof(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	req := httptest.NewRequest("GET", "/api/saas/auth-check?hive=test-hive", nil)
 	req.Header.Set("X-Original-URI", ssoHandoffPath)
 	w := httptest.NewRecorder()

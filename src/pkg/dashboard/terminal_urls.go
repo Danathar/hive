@@ -37,6 +37,89 @@ const maxTerminalURLs = 20
 // swallow the words after it.
 var terminalURLPattern = regexp.MustCompile(`https?://[^\s"'` + "`" + `<>]+`)
 
+// urlContinuationLine matches a pane line that is nothing but RFC 3986 URL
+// characters — no whitespace, no prose, no scheme of its own.
+//
+// It is the signature of a CLI that hard-wrapped a long URL itself.
+//
+// It does NOT exclude a redaction marker on its own: `*` is an RFC 3986
+// sub-delimiter and is legitimately in this class, so "***REDACTED***" matches
+// it. The redaction guard is therefore an explicit test in the join loop, not
+// an accident of the character class — an earlier revision of this code relied
+// on the class and bridged a redacted line, which is what
+// TestRejoinNeverBridgesRedaction pins.
+var urlContinuationLine = regexp.MustCompile(`^[A-Za-z0-9%._~:/?#\[\]@!$&'()*+,;=-]+$`)
+
+const (
+	// maxURLContinuationLines bounds how far a single URL may be reassembled.
+	// A 700-character OAuth URL at an 80-column pane is ~9 lines; 12 leaves
+	// headroom without letting a runaway match swallow a screen.
+	maxURLContinuationLines = 12
+	maxRejoinedURLLen       = 4096
+)
+
+// rejoinHardWrappedURLs puts a URL back together that the CLI — not tmux —
+// broke across lines.
+//
+// THE DEFECT THIS FIXES. handleAgentTerminalURLs was built on `capture-pane
+// -J`, whose join only covers lines TMUX wrapped: tmux flags those, and -J
+// honours the flag. A CLI that wraps a URL to the terminal width *itself*
+// emits real newlines, tmux has nothing to flag, and -J is a no-op. The
+// endpoint then hands the operator the first line of the URL and calls it a
+// login link. Measured live against antigravity (`agy`) on a six-agent hive
+// (2026-09-01): the URL is 704 characters, and the endpoint returned 209 of
+// them at a 211-column pane and 498 at a 500-column one — always exactly one
+// line, always "malformed URL" on paste, and worse at the narrow widths a
+// browser terminal actually runs at.
+//
+// The heuristic is deliberately narrow: a line is only extended when its LAST
+// URL match runs to the end of the line (a wrap point, not a URL that merely
+// sits mid-sentence) and the following line is nothing but URL characters. A
+// prose line has spaces; a fresh URL has "://"; a redacted line has "*". All
+// three stop the join, as does a redaction marker.
+//
+// Residual false positive: a line ending in a URL followed by a lone
+// space-free token — a bare path, a hash — would be appended. That yields a
+// URL that fails visibly at the identity provider, which is no worse than the
+// truncated URL it replaces, and it costs nothing on the flow this exists for.
+// Joining is preferred over offering both because a control labelled "Copy
+// login URL" that presents two candidates is a worse answer than one.
+func rejoinHardWrappedURLs(capture string) string {
+	lines := strings.Split(capture, "\n")
+	out := make([]string, 0, len(lines))
+
+	for i := 0; i < len(lines); i++ {
+		line := strings.TrimRight(lines[i], " \t")
+		matches := terminalURLPattern.FindAllStringIndex(line, -1)
+		if len(matches) == 0 || matches[len(matches)-1][1] != len(line) {
+			out = append(out, lines[i])
+			continue
+		}
+
+		joined := line
+		for n := 0; n < maxURLContinuationLines && i+1 < len(lines); n++ {
+			next := strings.TrimSpace(lines[i+1])
+			// Never bridge a redacted segment: redactTokens is entitled to cut
+			// a credential out of a line, and reassembling across that cut
+			// would hand back bytes it removed. Checked against the same
+			// vocabulary the caller's drop-filter uses.
+			if strings.Contains(next, "REDACTED") || strings.Contains(next, "***") {
+				break
+			}
+			if next == "" || strings.Contains(next, "://") || !urlContinuationLine.MatchString(next) {
+				break
+			}
+			if len(joined)+len(next) > maxRejoinedURLLen {
+				break
+			}
+			joined += next
+			i++
+		}
+		out = append(out, joined)
+	}
+	return strings.Join(out, "\n")
+}
+
 // terminalURLTrailing is punctuation a terminal line commonly puts AFTER a URL
 // — a sentence period, a closing paren, a trailing comma — which is not part
 // of the URL. Stripped from the right only.
@@ -99,8 +182,12 @@ func (s *Server) handleAgentTerminalURLs(w http.ResponseWriter, r *http.Request)
 // exists for, a Claude Code `/login` OAuth URL, is not device-flow shaped and
 // comes through whole.
 func prepareTerminalURLs(log string) []string {
+	// Redact FIRST (see above), then rejoin. The order is a security property,
+	// not a style choice: rejoining first would splice a URL back together
+	// across a boundary redactTokens is entitled to cut, handing the operator
+	// bytes the redactor had already decided must not leave the server.
 	redacted := redactTokens(log)
-	matches := terminalURLPattern.FindAllString(redacted, -1)
+	matches := terminalURLPattern.FindAllString(rejoinHardWrappedURLs(redacted), -1)
 
 	seen := make(map[string]bool, len(matches))
 	// Collected newest-first: the pane is chronological, so the URL an

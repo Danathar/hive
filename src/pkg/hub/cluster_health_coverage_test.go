@@ -106,6 +106,17 @@ func TestHandleUpgradeHiveSuccess(t *testing.T) {
 
 	mkUser(t, "alice")
 	saveSaaSHive(&SaaSHive{ID: "h1", Owner: "alice", ClusterID: "hive-oke"})
+	// The success path requires a known build target for the hive's branch:
+	// handleUpgradeHive hard-fails with 502 when getLatestSHAForBranch("v2")
+	// is empty. Seed it here rather than inherit whatever an earlier test left
+	// in the process-global SHA cache — under -shuffle=on this test ran before
+	// any seeder and got "" (#5580). Reset before AND after so this seed never
+	// leaks into another test the same way.
+	resetSHACaches(t)
+	latestSHAMu.Lock()
+	latestSHAByBranch["v2"] = branchSHAInfo{SHA: "abc1234"}
+	latestSHAMu.Unlock()
+	t.Cleanup(func() { resetSHACaches(t) })
 	s := &HubServer{
 		hubSecret: testHubSecret,
 		logger:    slog.Default(),
@@ -118,6 +129,10 @@ func TestHandleUpgradeHiveSuccess(t *testing.T) {
 		ID: "h1", GitBranch: "v2",
 		LastHeartbeat: time.Now().UTC().Format(time.RFC3339),
 	}}
+	// The handler can only arm an upgrade after the image poller has resolved a
+	// build for the hive's branch. Seed that production precondition explicitly
+	// instead of depending on a preceding test to leak its v2 cache entry.
+	setLatestSHAForBranchForTest(t, "v2", "upgrade-target")
 
 	rec := httptest.NewRecorder()
 	req := setPathValue(reqWithUser("POST", "/up", "", "alice"), "id", "h1")

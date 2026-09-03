@@ -18,6 +18,11 @@ services:
       - AGENT_BACKEND=${AGENT_BACKEND:-claude}
       - AGENT_MODEL=${AGENT_MODEL:-}
       - AGENT_REASONING_EFFORT=${AGENT_REASONING_EFFORT:-}
+      # Optional session label for multi-session-per-account (#5605). Bare
+      # passthrough form on purpose: unset on the host must stay unset in the
+      # container (the relay then defaults the session to the backend name),
+      # while an explicit empty string is the opt-out and must be forwarded.
+      - HIVE_SESSION
       # Task-delivery mode (kubestellar/hive#2538): interactive (default, tmux)
       # or headless (one-shot CLI, no TTY). This compose file keeps stdin/tty on
       # for the default interactive path; a headless deployment (a future K8s

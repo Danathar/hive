@@ -1,7 +1,6 @@
 package hub
 
 import (
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,7 +14,7 @@ import (
 // /api/saas/my-hives is intentionally unchanged.
 func TestFleetRouteServesPageAndMyHivesRedirects(t *testing.T) {
 	t.Setenv("HUB_DATA_DIR", t.TempDir())
-	srv := NewHubServer(0, slog.Default(), "test", "v4")
+	srv := newHubServerForTest(t, withHubIdentity("test", "v4"))
 
 	req := httptest.NewRequest("GET", "/fleet", nil)
 	w := httptest.NewRecorder()

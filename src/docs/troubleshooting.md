@@ -70,6 +70,23 @@ On GitHub Enterprise, a 404 from the install link usually means the hive is poin
 
 ## Agents are stuck, paused, or need CLI login
 
+### Start on the agent card, not in tmux
+
+Since v4.1.0 ([#5594](https://github.com/hivecommons/hive/issues/5594)) the dashboard agent card states **every** reason an agent will not run at once, so read it before reaching for `tmux`. Under the card state (and on the ops-center detail panel) is a blockers line with three segments:
+
+- **`session`** — `up` (live tmux session), `down` (no live session; `↻ restart` asks the supervisor to respawn it), or `disabled` (disabled in config; the governor never starts it — enable it with ⚙️).
+- **`scheduling`** — the governor cadence for the current mode when the agent is kickable, or **every** live reason it is not, joined together (for example `paused + off in surge mode`). All of the listed reasons must be cleared; fixing one is not enough. On-demand agents show `on demand`.
+- **`next kick`** — an ETA (`in 12m`, `due now`) rather than a wall-clock time, or `never` while any scheduling blocker exists.
+
+Two more card behaviors remove the old one-reason-per-click treasure hunt:
+
+- **Zero cadence is named.** An enabled, governor-kickable agent with no cadence in *any* mode that has never been kicked shows a `⏱ never scheduled — set cadences` chip; clicking it opens the agent's Cadences tab. This is the per-agent form of the fleet-level "never kicked" banner — both are driven by the same predicate, so they cannot name different agents.
+- **A paused agent's primary action is always its pause toggle.** With a live session the button is `▶ resume`, and its tooltip names anything resuming will *not* clear. If the session is also down, the one button reads `▶ start & resume` and clears both flags in a single click — client-side chaining of the two existing endpoints (`POST /api/resume/{agent}` first, so the fresh session is never born paused, then `POST /api/restart/{agent}`). No new API surface; scripts can chain the same two calls. A paused agent never offers a bare Start.
+
+If the card says the agent should be running (session up, scheduling shows a cadence, next kick has an ETA) and it still misbehaves, *then* drop into the session as described below.
+
+### Inspecting the session
+
 Agents run in tmux sessions named `hive-<agent>` managed by Hive's agent manager. There is no v1 `AGENT_READY_MARKER` or `bin/supervisor.sh` loop: the manager drives each agent by delivering a *kick* (its next work prompt) directly into the session and, once running, auto-dismisses the CLI's own startup consent screens.
 
 The login detector (`scanForLoginRequired` in `src/cmd/hive/main.go`) scans recent tmux pane output for the regexes in `governor.sensing.login_patterns`. On a match it logs `login required detected`, pauses the agent, and sends a high-priority notification telling you to attach to `hive-<agent>` and run that backend's login command.
@@ -87,7 +104,7 @@ Detach from tmux with `Ctrl+B`, then `D` — the session keeps running.
 To recover a paused agent:
 
 1. Complete the CLI login for that backend outside the pause. Attach to the session (`tmux attach -t hive-<agent>`) and run the login command shown in the notification: `claude login`, `copilot auth login`, `gemini auth login`, or the backend-specific command. The picker expects an interactive OAuth/browser flow, so complete it from a terminal you control rather than leaving the unattended session blocked on it.
-2. Resume the agent from the dashboard, or `POST /api/resume/{agent}`.
+2. Resume the agent from the dashboard, or `POST /api/resume/{agent}`. If the pause outlived its session, the card offers a single `▶ start & resume` instead — see [Start on the agent card, not in tmux](#start-on-the-agent-card-not-in-tmux).
 
 If an agent returns to "needs login" immediately after resuming, the credentials themselves are the problem (expired token, revoked API key, or an account-level sign-out). Re-authenticate that backend's CLI as the agent user, then resume again so the fresh session is picked up.
 
@@ -128,6 +145,90 @@ Liveness is judged by the governor's in-process health check, so an agent that k
 
 1. **Read the work counts, not just liveness.** If an agent reports "Issues triaged: 0" cycle after cycle in the logs, that is the signal — `kubectl -n hive logs deploy/hive | grep <agent>` or attach to the session.
 2. **Cross-check an external surface.** Confirm the effect the agent is supposed to produce (a GitHub API query for the PRs/issues it claims to have handled) rather than trusting its self-reported state.
+
+## An agent session completes but no branch or PR appears
+
+The agent ran, the session ended cleanly, the fleet view shows it healthy — and there is no PR and no branch on the remote. Often the agent's own summary says so plainly, in words like "branch committed locally but push failed due to git authentication issue."
+
+This is not the agent deciding no work was needed. The work was done; it could not be published. The fleet view cannot tell you which, because from the governor's point of view the session *is* healthy — the agent hit an auth error, correctly refused to manipulate git credentials, and wrote an honest summary. See [kubestellar/hive#5343](https://github.com/hivecommons/hive/issues/5343).
+
+There are two distinct causes with the same symptom, and they are distinguishable.
+
+### First: confirm the work exists and is unpublished
+
+```sh
+# Does the branch exist on the remote at all?
+gh api "repos/<owner>/<repo>/git/ref/heads/<branch>" 2>&1 | head -3
+
+# Did the agent commit it locally? (per-agent HOME, not the dev user's)
+ls -d /data/home/agents/<agent>/* 2>/dev/null
+```
+
+A 404 from the first command plus commits in the agent's working copy is this scenario. If the branch *is* on the remote, the problem is downstream — go to [`hive-open-pr`](hive-open-pr.md#diagnosing-a-pr-request-that-never-opens) instead.
+
+### Cause 1 — the credential helper is not reachable from the agent's UID
+
+The helper is invoked per-UID, and agents do **not** share the dev user's `$HOME`: each per-agent UID runs with its own `$HOME` under `/data/home/agents/<name>`, which has no `.gitconfig`. `git config --global` writes to the *caller's* `$HOME`, so wiring the helper that way makes it invisible to every agent. The helper is therefore wired **system-wide in `/etc/gitconfig`**, written from the entrypoint's root phase — see [#5343](https://github.com/hivecommons/hive/issues/5343) for the original defect and [#5352](https://github.com/hivecommons/hive/pull/5352) for the fix.
+
+Check the layer that actually matters, from a process with no per-user config — this is the same probe the entrypoint runs at boot:
+
+```sh
+# Inside the hive container. Empty output = the helper is invisible to agents.
+HOME=/nonexistent XDG_CONFIG_HOME=/nonexistent \
+  git config --get-regexp '^credential\.' | grep git-credential-hive.sh
+
+# Or ask as the agent UID directly:
+su -s /bin/sh hive-<agent> -c 'git config --get-regexp credential'
+
+# The file that supplies it — must exist and be world-readable (0644).
+ls -l /etc/gitconfig
+```
+
+Each should list `/usr/local/bin/git-credential-hive.sh`. The boot log records the same verdict, so you can also just read it back:
+
+```sh
+kubectl -n hive logs deploy/hive | grep 'git credential helper'
+```
+
+- `git credential helper VERIFIED reachable without a per-user .gitconfig` — this cause is ruled out. Go to cause 2.
+- `WARN: git credential helper is NOT reachable ...` — this is your cause. Every agent on this hive will commit branches it cannot push. Restart the hive so the entrypoint's root phase rewrites `/etc/gitconfig`; if that phase never ran (a boot that could not become root), only the dev user's global config exists and no agent will ever push.
+
+Also confirm the agent's own scoped token is present and readable by its UID — the helper needs it:
+
+```sh
+su -s /bin/sh hive-<agent> -c 'test -r "$HIVE_AGENT_TOKEN_CACHE" && echo readable || echo MISSING'
+```
+
+Never print the file's contents.
+
+### Cause 2 — the credential went stale mid-task (silent refresh failure)
+
+Contributor-relay tasks are pushed with a scoped token the hub re-mints periodically, a few minutes before its TTL expires. When a re-mint **fails**, the hub logs a warning and keeps the old token; the relay is told nothing. See [kubestellar/hive#5447](https://github.com/hivecommons/hive/issues/5447).
+
+The signature is different from cause 1, and it is a timing signature:
+
+| | Cause 1 (helper unreachable) | Cause 2 (refresh failed) |
+| --- | --- | --- |
+| Which agents | **all** agents on the hive | usually one long-running task |
+| When the push fails | the **first** push of any task | roughly an hour in, after earlier pushes in the *same* task succeeded |
+| Boot-log probe | `WARN: ... NOT reachable` | `VERIFIED reachable` |
+| Where it is recorded | entrypoint boot log | hub log only — nothing agent-side |
+
+So: **a task whose earlier pushes worked and whose later ones did not is cause 2, not cause 1.** Confirm from the hub log:
+
+```sh
+kubectl -n hive logs deploy/hive | grep -iE 'token.*(refresh|mint)'
+```
+
+A short task that never pushes successfully at all is cause 1.
+
+### If neither fits
+
+Read what the PR-request watcher itself concluded. It probes the repository and then the head ref before blaming a push, and writes its verdict to the request's result file — the shapes and where to find them are in [`hive-open-pr`](hive-open-pr.md#diagnosing-a-pr-request-that-never-opens).
+
+```sh
+kubectl -n hive logs deploy/hive | grep 'pr-request watcher'
+```
 
 ## An agent says "Please run /login" but logging in changes nothing
 

@@ -1,9 +1,13 @@
 package dashboard
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"sort"
 	"testing"
+	"time"
 )
 
 // covG2ServeRaw sends a request with a raw (possibly malformed) JSON body and a
@@ -32,6 +36,100 @@ func TestCovG2_HistoryTrendsTimeline(t *testing.T) {
 	}
 	if rec := doGet(s, "/api/timeline"); rec.Code != http.StatusOK {
 		t.Errorf("timeline status = %d", rec.Code)
+	}
+}
+
+// TestCovG2_TrendsHonoursRangeAndHours is the #5388 fix for the loop above.
+//
+// The loop passes five query variants to /api/trends and asserts only that each
+// returns 200. It never decodes a body, so it asserts the shape of the response
+// (a status code) rather than the property the parameters are supposed to have
+// (selecting a time window). Demonstrated: replacing the whole range/hours
+// switch in handleTrends with a hardcoded `hours := hoursPerDay` — a handler
+// that ignores its parameters completely — left the loop green, and in fact left
+// EVERY test in package dashboard green.
+//
+// This test seeds token-sparkline entries at known ages and asserts each
+// parameter selects a provably different subset. Ages are chosen so every
+// documented branch of the switch separates from its neighbours:
+//
+//	range=day / no param → 24h  → picks up 1h, 12h
+//	hours=48             → 48h  → additionally 30h
+//	range=week           → 168h → additionally 100h
+//	hours=99999          → clamped to maxTrendHours (720h/30d), so 800h stays
+//	                       excluded — that clamp is the reason 99999 is in the
+//	                       original list, and it was never actually checked.
+func TestCovG2_TrendsHonoursRangeAndHours(t *testing.T) {
+	s, _ := apiServer(t)
+
+	now := time.Now()
+	// ageHours → the entry's token count, used as an identifying marker.
+	ages := []int{1, 12, 30, 100, 800}
+	entries := make([]TokenSparklineEntry, 0, len(ages))
+	for _, age := range ages {
+		entries = append(entries, TokenSparklineEntry{
+			Timestamp: now.Add(-time.Duration(age)*time.Hour - time.Minute).UnixMilli(),
+			Input:     int64(age),
+		})
+	}
+	s.SeedTokenSparklineHistory(entries)
+
+	// Guard against the seam itself silently doing nothing: if seeding stops
+	// working, every expectation below collapses to "0 == 0" and this test
+	// would pass while checking nothing (#5388 anti-vacuity, per #5409).
+	if got := len(s.TokenSparklineHistory()); got != len(ages) {
+		t.Fatalf("seed did not take: history has %d entries, want %d — "+
+			"the assertions below would be vacuous", got, len(ages))
+	}
+
+	// wantAges is the set of seeded entries each query must return, keyed by the
+	// marker written into Input above.
+	for _, tc := range []struct {
+		query    string
+		wantAges []int
+	}{
+		{"", []int{1, 12}},
+		{"?range=day", []int{1, 12}},
+		{"?hours=48", []int{1, 12, 30}},
+		{"?range=week", []int{1, 12, 30, 100}},
+		{"?hours=99999", []int{1, 12, 30, 100}}, // clamped to 720h, so 800 excluded
+	} {
+		rec := doGet(s, "/api/trends"+tc.query)
+		if rec.Code != http.StatusOK {
+			t.Errorf("trends%s status = %d", tc.query, rec.Code)
+			continue
+		}
+
+		var body struct {
+			TokenHistory []TokenSparklineEntry `json:"tokenHistory"`
+		}
+		if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+			t.Errorf("trends%s: decode: %v", tc.query, err)
+			continue
+		}
+
+		got := make([]int, 0, len(body.TokenHistory))
+		for _, e := range body.TokenHistory {
+			got = append(got, int(e.Input))
+		}
+		sort.Ints(got)
+
+		want := append([]int(nil), tc.wantAges...)
+		sort.Ints(want)
+
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("trends%s returned entries aged %v, want %v — "+
+				"the time-window parameter is not being honoured", tc.query, got, want)
+		}
+	}
+
+	// The five variants must not all mean the same thing, or the table above
+	// could be satisfied by a handler with a single fixed window.
+	dayRec := doGet(s, "/api/trends?range=day")
+	weekRec := doGet(s, "/api/trends?range=week")
+	if dayRec.Body.String() == weekRec.Body.String() {
+		t.Error("range=day and range=week returned identical bodies — " +
+			"handleTrends is ignoring the range parameter")
 	}
 }
 
@@ -306,13 +404,29 @@ func TestCovG2_BudgetIgnore(t *testing.T) {
 	if rec := doGet(s, "/api/budget-ignore"); rec.Code != http.StatusOK {
 		t.Errorf("budget-ignore get = %d", rec.Code)
 	}
-	// Bool form.
+	// Bool form. #5388: assert the write actually took, not just that the
+	// handler returned 200 — a no-op handler satisfies the status alone.
 	if rec := doPost(s, "/api/budget-ignore", map[string]any{"ignored": true}); rec.Code != http.StatusOK {
 		t.Errorf("budget-ignore bool = %d", rec.Code)
+	} else if got := decodeJSON(t, rec)["ignored"]; got != true {
+		t.Errorf("budget-ignore bool: response ignored = %v, want true — the global bypass was not applied", got)
+	}
+	if got := decodeJSON(t, doGet(s, "/api/budget-ignore"))["ignored"]; got != true {
+		t.Errorf("budget-ignore: re-read ignored = %v, want true — the bool form did not persist", got)
+	}
+	// Setting it back to false must also take, or the field is simply stuck on.
+	if rec := doPost(s, "/api/budget-ignore", map[string]any{"ignored": false}); rec.Code != http.StatusOK {
+		t.Errorf("budget-ignore bool false = %d", rec.Code)
+	}
+	if got := decodeJSON(t, doGet(s, "/api/budget-ignore"))["ignored"]; got != false {
+		t.Errorf("budget-ignore: re-read ignored = %v, want false — the toggle is stuck on", got)
 	}
 	// List form.
 	if rec := doPost(s, "/api/budget-ignore", map[string]any{"ignored": []string{"scanner"}}); rec.Code != http.StatusOK {
 		t.Errorf("budget-ignore list = %d", rec.Code)
+	}
+	if got := decodeJSON(t, doGet(s, "/api/budget-ignore"))["agents"]; !reflect.DeepEqual(got, []any{"scanner"}) {
+		t.Errorf("budget-ignore: re-read agents = %v, want [scanner] — the per-agent exemption list did not persist", got)
 	}
 	// Bad body → 400.
 	if rec := covG2ServeRaw(s, http.MethodPost, "/api/budget-ignore", `{bad`); rec.Code != http.StatusBadRequest {
@@ -416,18 +530,26 @@ func TestCovG2_KnowledgeCluster(t *testing.T) {
 }
 
 func TestCovG2_KnowledgeToggle(t *testing.T) {
-	s, _ := apiServer(t)
+	s, deps := apiServer(t)
 
 	// Bad body → 400.
 	if rec := covG2ServeRaw(s, http.MethodPut, "/api/knowledge/enabled", `{bad`); rec.Code != http.StatusBadRequest {
 		t.Errorf("knowledge toggle bad body = %d, want 400", rec.Code)
 	}
-	// Enable then disable.
+	// Enable then disable. #5388: a handler that parsed the body and did
+	// nothing with it passed the status-only form of this test in both
+	// directions; assert the config field the toggle exists to write.
 	if rec := doPut(s, "/api/knowledge/enabled", map[string]bool{"enabled": true}); rec.Code != http.StatusOK {
 		t.Errorf("knowledge toggle enable = %d", rec.Code)
 	}
+	if !deps.Config.Knowledge.Enabled {
+		t.Error("knowledge toggle enable returned 200 but Config.Knowledge.Enabled is false — the toggle did not take")
+	}
 	if rec := doPut(s, "/api/knowledge/enabled", map[string]bool{"enabled": false}); rec.Code != http.StatusOK {
 		t.Errorf("knowledge toggle disable = %d", rec.Code)
+	}
+	if deps.Config.Knowledge.Enabled {
+		t.Error("knowledge toggle disable returned 200 but Config.Knowledge.Enabled is still true — the toggle is stuck on")
 	}
 }
 
@@ -511,18 +633,27 @@ func TestCovG2_Documents(t *testing.T) {
 // ---------- Bead synthesizer ----------
 
 func TestCovG2_BeadSynth(t *testing.T) {
-	s, _ := apiServer(t)
+	s, deps := apiServer(t)
 	if rec := doGet(s, "/api/knowledge/bead-synthesizer"); rec.Code != http.StatusOK {
 		t.Errorf("bead-synth status = %d", rec.Code)
 	}
 	if rec := covG2ServeRaw(s, http.MethodPut, "/api/knowledge/bead-synthesizer/enabled", `{bad`); rec.Code != http.StatusBadRequest {
 		t.Errorf("bead-synth bad body = %d, want 400", rec.Code)
 	}
+	// #5388: assert the toggle writes the config field it exists to write.
+	// IsEnabled() is the accessor the rest of the codebase reads, so assert
+	// through it rather than the raw pointer.
 	if rec := doPut(s, "/api/knowledge/bead-synthesizer/enabled", map[string]bool{"enabled": true}); rec.Code != http.StatusOK {
 		t.Errorf("bead-synth enable = %d", rec.Code)
 	}
+	if !deps.Config.Knowledge.BeadSynthesizer.IsEnabled() {
+		t.Error("bead-synth enable returned 200 but BeadSynthesizer.IsEnabled() is false — the toggle did not take")
+	}
 	if rec := doPut(s, "/api/knowledge/bead-synthesizer/enabled", map[string]bool{"enabled": false}); rec.Code != http.StatusOK {
 		t.Errorf("bead-synth disable = %d", rec.Code)
+	}
+	if deps.Config.Knowledge.BeadSynthesizer.IsEnabled() {
+		t.Error("bead-synth disable returned 200 but BeadSynthesizer.IsEnabled() is still true — the toggle is stuck on")
 	}
 }
 

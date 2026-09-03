@@ -140,6 +140,7 @@ func TestSendTokenRefreshShape(t *testing.T) {
 	// client can read back and inspect.
 	var serverConn *websocket.Conn
 	connReady := make(chan struct{})
+	handlerDone := make(chan struct{})
 	upgrader := websocket.Upgrader{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, err := upgrader.Upgrade(w, r, nil)
@@ -149,10 +150,12 @@ func TestSendTokenRefreshShape(t *testing.T) {
 		}
 		serverConn = c
 		close(connReady)
-		// Keep the handler alive so the conn stays open for the read below.
-		time.Sleep(2 * time.Second)
+		// Keep the handler alive until the test body is done with the conn;
+		// released by the deferred close below rather than a fixed timer.
+		<-handlerDone
 	}))
 	defer srv.Close()
+	defer close(handlerDone)
 
 	client, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http"), nil)
 	if err != nil {
@@ -226,6 +229,7 @@ func TestResumeTaskTokenReArmsRefresh(t *testing.T) {
 	// Real websocket pair so resumeTaskToken -> sendTokenRefresh writes a frame.
 	var serverConn *websocket.Conn
 	connReady := make(chan struct{})
+	handlerDone := make(chan struct{})
 	upgrader := websocket.Upgrader{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, err := upgrader.Upgrade(w, r, nil)
@@ -235,9 +239,12 @@ func TestResumeTaskTokenReArmsRefresh(t *testing.T) {
 		}
 		serverConn = c
 		close(connReady)
-		time.Sleep(2 * time.Second)
+		// Keep the handler alive until the test body is done with the conn;
+		// released by the deferred close below rather than a fixed timer.
+		<-handlerDone
 	}))
 	defer srv.Close()
+	defer close(handlerDone)
 
 	client, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http"), nil)
 	if err != nil {

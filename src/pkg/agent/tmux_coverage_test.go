@@ -9,11 +9,21 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hivecommons/hive/internal/testutil"
 	"github.com/hivecommons/hive/pkg/config"
 )
 
 // tmuxAvailable reports whether a usable tmux binary is on PATH. All tmux-based
 // coverage tests skip when it is absent so the suite still passes in minimal CI.
+//
+// This gate stays PERMISSIVE under HIVE_TEST_REQUIRE_BEHAVIOURAL (#5388): a
+// runner without tmux is a genuine capability difference, not a broken test,
+// and making it fatal would manufacture false reds on any laptop or minimal
+// image. The lane that wants these tests to actually run installs tmux and
+// asserts that via the flag; everything DOWNSTREAM of this check — creating a
+// session, driving a pane — is then a broken test if it fails, and those sites
+// use testutil.SkipUnlessRequired. This mirrors the shell half, which likewise
+// left docker- and tmux-gated skips permissive.
 func tmuxAvailable() bool {
 	_, err := exec.LookPath("tmux")
 	return err == nil
@@ -82,7 +92,12 @@ func overrideStub(t *testing.T, name, firstLine string) {
 	p := filepath.Join(stubBinDir, name)
 	orig, err := os.ReadFile(p)
 	if err != nil {
-		t.Skipf("global stub %q not present: %v", name, err)
+		// TestMain writes every stub in this list unconditionally and
+		// os.Exit(1)s if any write fails, so a missing stub here cannot mean
+		// "unsuitable environment" — it means the harness changed underneath
+		// this helper (a renamed stub, a mutated stubBinDir). Under the flag
+		// that is a broken test, not a reason to stop asserting (#5388).
+		testutil.SkipfUnlessRequired(t, "global stub %q not present: %v", name, err)
 	}
 	// Print the custom line AND the ❯ ready marker so readiness gates resolve
 	// (so no exec-looping goroutine leaks past the test), while the custom line
@@ -110,7 +125,12 @@ func inferenceReadyStub(t *testing.T) {
 func newRawTmuxSession(t *testing.T, session string) {
 	t.Helper()
 	if err := testTmuxCommand("new-session", "-d", "-s", session).Run(); err != nil {
-		t.Skipf("cannot create tmux session: %v", err)
+		// Every caller gates on tmuxAvailable() first, so tmux IS on PATH by
+		// the time we get here and TMUX_TMPDIR points at a directory TestMain
+		// created. A failure now is a broken test — a stale socket, a server
+		// the suite failed to clean up, a session name collision — not a
+		// missing capability (#5388).
+		testutil.SkipfUnlessRequired(t, "cannot create tmux session: %v", err)
 	}
 	t.Cleanup(func() {
 		_ = testTmuxCommand("kill-session", "-t", session).Run()

@@ -1,7 +1,6 @@
 package hub
 
 import (
-	"log/slog"
 	"testing"
 
 	"github.com/hivecommons/hive/pkg/config"
@@ -17,7 +16,7 @@ import (
 // the GHE App is a build constant, so assign must still answer with the full
 // identity set.
 func TestAssignTimeAppIdentityUnregisteredGHECluster(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.clusters = map[string]ClusterConfig{
 		"hive-oke": {ID: "hive-oke", InCluster: true, Domain: "hive.kubestellar.io"},
 	}
@@ -65,7 +64,7 @@ func TestAssignTimeAppIdentityUnregisteredGHECluster(t *testing.T) {
 // asserts the public case does NOT pin forge URLs — the spoke already defaults
 // to public github.com, so writing them would state a value as an override.
 func TestAssignTimeAppIdentityPublicForge(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.clusters = map[string]ClusterConfig{}
 
 	h := &SaaSHive{
@@ -93,7 +92,7 @@ func TestAssignTimeAppIdentityPublicForge(t *testing.T) {
 // a forge this build cannot name must yield nil so assign leaves the spoke
 // alone rather than guessing an App ID that would 404 against that host.
 func TestAssignTimeAppIdentityUnknownForgeSaysNothing(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.clusters = map[string]ClusterConfig{}
 
 	h := &SaaSHive{
@@ -115,7 +114,7 @@ func TestAssignTimeAppIdentityUnknownForgeSaysNothing(t *testing.T) {
 // unregistered cluster, never an override of a configured App.
 func TestAssignTimeAppIdentityRegisteredClusterWins(t *testing.T) {
 	const customAppID int64 = 4242
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.clusters = map[string]ClusterConfig{
 		"custom": {
 			ID:            "custom",
@@ -152,7 +151,7 @@ func TestAssignTimeAppIdentityRegisteredClusterWins(t *testing.T) {
 // returned nil for an unknown cluster and produced the misleading
 // "cluster names no github app — cannot repair" warning forever.
 func TestAppIdentityForHiveUnregisteredClusterRepairs(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.clusters = map[string]ClusterConfig{
 		"hive-oke": {ID: "hive-oke", InCluster: true, Domain: "hive.kubestellar.io"},
 	}
@@ -184,7 +183,7 @@ func TestAppIdentityForHiveUnregisteredClusterRepairs(t *testing.T) {
 // placeholder has elected nothing, so inferring a forge for it would be exactly
 // the 2026-08-05 mistake (public hives flipped onto the GHE App).
 func TestAppIdentityForHiveUnregisteredClusterUnclaimedSaysNothing(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.clusters = map[string]ClusterConfig{}
 
 	h := &SaaSHive{

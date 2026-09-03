@@ -322,6 +322,7 @@ func inferenceSettingsSeed() map[string]any {
 		"bypassPermissions":                 true,
 		"hasAcknowledgedDisclaimer":         true,
 		"skipDangerousModePermissionPrompt": true,
+		remoteControlSettingKey:             false,
 	}
 }
 

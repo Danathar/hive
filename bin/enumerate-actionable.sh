@@ -328,7 +328,7 @@ done > "$sha_recheck_tmp"
 
 SHA_RECHECK_PARALLELISM=8
 if [ -s "$sha_recheck_tmp" ]; then
-  cat "$sha_recheck_tmp" | xargs -P "$SHA_RECHECK_PARALLELISM" -I {} bash -c '
+  cat "$sha_recheck_tmp" | xargs -P "$SHA_RECHECK_PARALLELISM" -n 1 bash -c '
     entry="$1"
     repo="${entry%%:*}"
     rest="${entry#*:}"
@@ -346,7 +346,8 @@ if [ -s "$sha_recheck_tmp" ]; then
             comments(last:20) { nodes { author { login } body } }
           }
         }
-      }" 2>/dev/null) || { echo "${repo}:${num}:${marker_file}:skip"; exit 0; }
+      }" 2>&1) || { echo "SHA-RECHECK: ${repo}#${num} — gh api graphql failed: ${result}" >&2; echo "${repo}:${num}:${marker_file}:skip"; exit 0; }
+    py_err=$(mktemp)
     state=$(echo "$result" | python3 -c "
 import json, sys, re
 d = json.load(sys.stdin)
@@ -364,9 +365,10 @@ reporter_text = body + \" \" + \" \".join(
 )
 SHA_RE = re.compile(r\"[0-9a-f]{7,40}\\b\")
 print(\"has_sha\" if SHA_RE.search(reporter_text) else \"no_sha\")
-" 2>/dev/null || echo "skip")
+" 2>"$py_err" || { echo "SHA-RECHECK: ${repo}#${num} — python parse failed: $(cat "$py_err")" >&2; echo "skip"; })
+    rm -f "$py_err"
     echo "${repo}:${num}:${marker_file}:${state}"
-  ' _ {} >> "$sha_recheck_results"
+  ' _ >> "$sha_recheck_results"
 fi
 
 while IFS=: read -r repo num marker_file state; do

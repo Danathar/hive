@@ -14,18 +14,20 @@ This reference is compiled by hand from the Go source under `src/`, the deployme
 | `GH_APP_KEY_FILE` | No | configured `github.key_file`, then `/data/gh-app-key.pem` or `/secrets/gh-app-key.pem` in provisioned paths | GitHub App private-key file fallback. |
 | `DASHBOARD_AUTH_TOKEN` | No | none | Dashboard shared-token **value** used by Kubernetes/provisioned deployments; read before `HIVE_DASHBOARD_TOKEN` when `dashboard.auth_token` is empty. Same format rules as `HIVE_DASHBOARD_TOKEN` — see [Generating and rotating `HIVE_DASHBOARD_TOKEN`](#generating-and-rotating-hive_dashboard_token). |
 | `HIVE_DASHBOARD_TOKEN` | No | none | Dashboard/API shared-token fallback and default `hivectl --token-env` variable. See [Generating and rotating `HIVE_DASHBOARD_TOKEN`](#generating-and-rotating-hive_dashboard_token). |
+| `HIVE_DASHBOARD_COOKIE` | No | none | **Client-side only** - read by `hivectl tui`, never by the server. Cookie header value (e.g. `hive_session=...`) carrying a per-user session, for hives that do not accept the shared token: hub-hosted ones, and spokes with an `authorized_users` allowlist. See [hivectl.md, Credentials](hivectl.md#credentials). |
 | `HIVE_AUTHORIZED_USERS` | No | none | Comma-separated direct-route dashboard allowlist, with optional `user:role` entries. Used when `dashboard.authorized_users` is empty. |
 | `HIVE_REPO` | No | none | Bootstrap shortcut in `owner/repo` form; fills `project.org`, `project.repos`, and `project.primary_repo` if missing. |
 | `HIVE_LEVEL` | No | config/pack value | ACMM level bootstrap/override used by hosted flows and the entrypoint pack selection. |
 | `HIVE_ID` | No | config or generated id | Stable hive/spoke identifier override; passed through to launched agents. |
 | `HIVE_CLUSTER_ID` | No | config or hub-provisioned value | Hosted cluster identifier override. |
-| `HIVE_HUB_URL` | No | `hub.url` from config | Hub URL override for spoke heartbeats/registration. |
+| `HIVE_HUB_URL` | No | `hub.url` from config | Hub URL override for spoke heartbeats/registration. On the hub it is also the last environment variable consulted in the hub public-origin chain (see `HIVE_HUB_PUBLIC_URL`). |
 | `HIVE_HUB_SECRET` | Required for spokes registered to a protected hub; optional for a standalone hub with `/data/saas/hub-secret.key` | `/data/saas/hub-secret.key` on the hub when present; no fallback for spoke heartbeat auth | Bearer secret for spoke heartbeats and hub/spoke SaaS APIs. |
 | `HIVE_COVERAGE_BADGE_URL` | No | none | Optional coverage badge URL exposed in dashboard status. |
 | `HIVE_WORK_DIR` | No | `/data/agents` | Agent manager working directory. |
 | `HIVE_SHA` | No | build SHA | Passed to launched agents and used in hub upgrade/status paths. |
 | `HIVE_ADVISORY_ISSUE` | No | none | Passed to launched agents so advisory findings can target a configured issue. |
 | `HIVE_TTYD_PORT` | No | `7681` | Web terminal port used by the entrypoint and terminal proxy. |
+| `HIVE_TTYD_CREDENTIAL` | No | `hive:<HIVE_DASHBOARD_TOKEN>` when a token is set, else none | ttyd basic-auth credential (`user:pass`) the entrypoint starts the web terminal with. Also read by `hivectl tui`'s remote attach ([#5644](https://github.com/hivecommons/hive/issues/5644)), which must present the same credential through the terminal proxy and derives the same default from `HIVE_DASHBOARD_TOKEN` — set it on the client only if the deployment overrode it on the server. |
 | `HIVE_METRICS_ENABLED` | No | disabled | Registers Prometheus `/metrics` when set to `1`, `true`, `yes`, or `on`. Requires `HIVE_METRICS_TOKEN` — enabled-but-tokenless returns 403 ([#3804](https://github.com/hivecommons/hive/pull/3804)). |
 | `HIVE_METRICS_TOKEN` | Yes when metrics enabled | none | Bearer token for `/metrics` (`Authorization: Bearer <token>`; Prometheus `bearer_token`). `/metrics` bypasses dashboard session auth, so this token is its only guard; the cost/agent series are never served without it. |
 | `HIVE_METRICS_FILE` | No | `/var/run/hive-metrics/contribute.json` | Contributor metrics JSON file override. |
@@ -34,12 +36,14 @@ This reference is compiled by hand from the Go source under `src/`, the deployme
 | `HIVE_FEDERATION_REGISTRY_PATH` | No | `/data/federation/registry.json` | Federation registry path override. |
 | `HIVE_WEBHOOK_SECRET` | No | none | HMAC secret for the spoke `/webhook` channel. |
 | `GITHUB_WEBHOOK_SECRET` | No | `/data/saas/webhook-secret.key` when present | Hub GitHub webhook HMAC secret. |
-| `HIVE_DASHBOARD_URL` | No | none | Base URL the `hive tui` client targets (`pkg/tui/client`). A bad value surfaces as a request error on the first call, not at startup. |
+| `HIVE_DASHBOARD_URL` | No | none | Base URL the `hive tui` client targets (`pkg/tui/client`). A bad value surfaces as a request error on the first call, not at startup. On the hub it is also consulted (fourth) in the hub public-origin chain (see `HIVE_HUB_PUBLIC_URL`). |
 | `HIVE_CONVERGENCE_MODE` | No | `convergence.mode` in `hive.yaml`, else `off` | Process-level override of the convergence mode (`off`, `shadow`, `enforce`) so an operator can flip shadow mode without editing `hive.yaml`. Any unrecognised value — a typo, or a mode this build does not know — resolves to `off`. |
 | `HIVE_WATCHDOG_PAUSE` | No | unset (not paused) | Fleet-wide watchdog kill switch (`1`, `true`, `yes`, `on`). Read at every config resolve, so it takes effect without a restart. It can only ever REDUCE authority: it never turns a watchdog on and never promotes observe to heal. |
 | `HIVE_ALLOW_PRIVATE_GIT_SOURCE` | No | `false` | Opt-in to knowledge Git sources whose host resolves to a private/internal address (self-hosted GitLab and similar). Off by default as SSRF protection. |
 | `HIVE_SHARED_AGENT_HOME` | No | per-agent HOME | Escape hatch (`1`) restoring the legacy shared-HOME layout for agents. |
 | `HIVE_WORKSPACE_CLEANUP_ENABLED` | No | enabled | Set `0` to opt out of automatic agent workspace cleanup. |
+| `HIVE_WORKSPACE_CLEANUP_INTERVAL` | No | `1h` | How often the workspace cleanup sweep runs (Go duration, e.g. `30m`). Unset, unparseable, or non-positive values fall back to the default. |
+| `HIVE_WORKSPACE_CLEANUP_MAX_AGE` | No | `2h` | How old an entry under `/data/agents/*/` must be before the cleanup sweep removes it (Go duration, e.g. `6h`). Unset, unparseable, or non-positive values fall back to the default. |
 | `HIVE_DOSSIER_CACHE_MAX_ENTRIES` | No | `512` | Caps each public dossier cache. Bounds username-spray memory while keeping normal contributor reuse hot. |
 
 ## Generating and rotating `HIVE_DASHBOARD_TOKEN`
@@ -211,6 +215,11 @@ Inside an **agent** session (set by the hive, never by the operator): ISSUES_ONL
 | `HIVE_UPGRADE_WAVE_SIZE` | No | saved scale setting, else built-in default | Number of spokes upgraded per wave. |
 | `HIVE_UPGRADE_DEBOUNCE_SECONDS` | No | built-in default | Debounce window before an upgrade wave starts. |
 | `HIVE_UPGRADE_MAX_HOLD_SECONDS` | No | built-in default | Maximum time an upgrade may be held before proceeding. |
+| `HIVE_ADVISORY_ISSUE_AGING_AFTER` | No | `24h` | Age (Go duration) after which a hive's advisory/issue output is bucketed `aging` in hub activity reporting (`pkg/hub/advisory_issue_activity.go`). Must be set **below** `HIVE_ADVISORY_ISSUE_STALE_AFTER`: if stale ≤ aging, **both** thresholds silently revert to their defaults. |
+| `HIVE_ADVISORY_ISSUE_STALE_AFTER` | No | `72h` | Age (Go duration) after which advisory/issue output is bucketed `stale` — the operator-action threshold. Same pairing rule as above: a value ≤ the aging threshold makes both revert to defaults. |
+| `HIVE_HUB_PUBLIC_URL` | No | none (chain continues) | First variable in the hub public-origin chain used to build notification deep links and to match the hub domain suffix. Precedence: `HIVE_HUB_PUBLIC_URL` → `HIVE_PUBLIC_URL` → `HIVE_HUB_BASE_URL` → `HIVE_DASHBOARD_URL` → `HIVE_HUB_URL`, then the compiled-in canonical public origin (links) or the default cluster domain (suffix match). |
+| `HIVE_PUBLIC_URL` | No | none (chain continues) | Second variable in the hub public-origin chain — see `HIVE_HUB_PUBLIC_URL` for the full precedence order. |
+| `HIVE_HUB_BASE_URL` | No | none (chain continues) | Third variable in the hub public-origin chain — see `HIVE_HUB_PUBLIC_URL` for the full precedence order. |
 
 ### Spoke-side derived keys
 
@@ -268,6 +277,7 @@ With two or more providers configured, `/login` renders a provider picker; with 
 | `AGENT_BACKEND` | No | `claude` | Contributor/agent CLI backend selector. |
 | `AGENT_MODEL` | No | backend default, or `GOOSE_MODEL` for Goose fallback | Contributor/agent model override. |
 | `CONTRIBUTOR_MODE` | No | `interactive` | Contributor relay mode: `interactive` uses tmux; `headless` uses one-shot CLI execution for supported backends. |
+| `HIVE_SESSION` | No | backend name (`AGENT_BACKEND`) | Optional session label for running multiple relays concurrently under one GitHub account. The hub keys task leases, assignment cooldowns, failure streaks, and ownership fences on `ContributorID#session`, so distinctly labeled relays hold independent task slots; auth, trust tier, model admission, and rate-limit accounting stay per-account. Sanitized to `[A-Za-z0-9._-]`, max 32 bytes. Set to the empty string to opt out (bare per-account identity, the historical single-session behavior). See `src/docs/contributor-relay.md`, "Running multiple backends under one account". |
 | `HIVE_HEADLESS_STATUS_FILE` | No | `/tmp/contributor-headless-status.json` | Status file written by headless contributor relay. |
 | `HIVE_CONTRIBUTOR_IMAGE` | No | `ghcr.io/hivecommons/hive-contributor:latest` | Image used by `just contribute-hive`. |
 | `HIVE_CONTAINER_RUNTIME` | No | autodetect `docker` or `podman` | Container runtime override for contributor helpers. `just contribute-hive` also passes the runtime it resolved into the container, so the attach hints printed from inside it name the engine that actually launched it rather than assuming `docker` ([#5145](https://github.com/hivecommons/hive/issues/5145)). |

@@ -42,6 +42,12 @@ release_lines: [v2, v4, v5]
 # somebody has to justify, and a new release line still has to be added or
 # explicitly excluded here before the guard goes green again.
 pinned:
+  # PR-level guard for the changelog.d/ fragment convention (#5675). v4 only:
+  # changelog.d/ and src/scripts/compile-changelog.sh exist only on v4, v2 is
+  # sunset, and a PR targeting v2 runs the v2 merge-ref's workflows anyway,
+  # where this file does not exist. Same excluded-not-backfilled reasoning as
+  # docs-link-check.yml below.
+  changelog-fragment-guard.yml: [-v2]
   # Static analysis and vulnerability scanning for the Go module. Pinned to the
   # release lines and nothing else: a feature branch gets the same gate through
   # `pull_request`, and running it on every pushed branch would burn runner
@@ -76,6 +82,11 @@ pinned:
   # See src/docs/release-line-guard.md, "The infra workflow sync".
   scorecard.yml: [main, -v2, -v5]
   suid-contract.yml: []
+  # PR-level guard for src/internal/testutil (#5603). Pinned to the release
+  # lines and nothing else: it is a pull_request-only path-gated check, and a
+  # testutil regression can only reach a release line through a PR targeting
+  # one.
+  testutil-guard.yml: []
   v2-ci.yml: []
   v2-tests.yml: []
 

@@ -19,6 +19,23 @@ Hive validates backend names in `src/pkg/config` and launches CLIs in `src/pkg/a
 | `opencode` | `opencode` | Install the opencode CLI ([opencode.ai/docs](https://opencode.ai/docs/)) and run `opencode auth login`; the credential is written to `~/.local/share/opencode/auth.json`. Provider-agnostic (75+ providers) — the model provider is configured in opencode's own config/auth, not in Hive, so `AGENT_MODEL` is passed through as `provider/model` on the relay path (e.g. `export AGENT_MODEL=anthropic/claude-sonnet-4-6`). | **Contributor relay only; headless mode only.** Dispatches through `opencode run "<prompt>" --auto` under `CONTRIBUTOR_MODE=headless`; there is no interactive-tmux wiring for opencode, so `CONTRIBUTOR_MODE=interactive` does not apply to it. `backend_perm_flag` maps opencode to `--auto`, opencode's unattended auto-approve flag. **Confinement note:** opencode has no OS-enforced filesystem sandbox of its own. `just contribute-hive opencode local` narrows it with a host-state command deny-list only (via opencode's own `permission.bash` config, the same command family the claude deny-list covers) — a floor, not a sandbox boundary. Container mode is the default and the stronger boundary. See [sandbox-isolation.md](../src/docs/sandbox-isolation.md#per-backend-confinement-on-the-contributor-local-path) for the full per-backend matrix. Set `HIVE_OPENCODE_DANGEROUSLY_ALLOW_HOST_STATE=1` to drop the deny-list. Not yet in `just contribute-k8s`'s headless-pod allowlist: whether the auth credential supports unattended use in a fresh pod is unverified, so it currently runs headless only on a host that has already signed in (same posture as `agy`). |
 | `kilo` | `kilo` | Install `@kilocode/cli` (pinned via `KILO_CLI_VERSION` in `src/Dockerfile.contributor`, currently `7.5.6`) and set credentials as environment values only — `KILO_AUTH_CONTENT` or `KILO_CONFIG_CONTENT`, or `KILO_API_KEY` (optional `KILO_ORG_ID`). No Kilo config directory is mounted; the Justfile's `PROVIDER_ENV_ARGS` mechanism forwards these four variables to the container by name, so the values themselves never appear in the container runtime's argv. | **Contributor relay only; headless mode only** (`CONTRIBUTOR_MODE=headless`; no interactive-tmux wiring). Dispatches through `kilo run "<prompt>" --auto` (optional `--model provider/model`). `backend_perm_flag` maps kilo to `--auto`, kilo's unattended auto-approve flag. **Confinement note:** kilo has **no OS-enforced sandbox and no command deny-list floor** in `config/backends.conf` — `--auto` approves prompts, it is not a boundary. Local mode therefore **refuses to launch** kilo without `HIVE_KILO_DANGEROUSLY_RUN_UNCONFINED=1`, the same #4918 refusal gate as goose/agy/bob/pi/aider (unlike `opencode`, no host-state denylist exists for it — whether kilo honors an `OPENCODE_PERMISSION`-style config is unverified). Treat it as fully unconfined, same posture as goose/bob/pi/aider (see [sandbox-isolation.md](../src/docs/sandbox-isolation.md)). Kilo is intentionally **excluded from `just contribute-k8s`'s headless-pod allowlist** (`HEADLESS_BACKENDS="claude litellm copilot codex goose"`), pending independent credential and confinement verification. |
 
+### Backends excluded from the headless K8s allowlist
+
+`just contribute-k8s` runs backends in a TTY-less pod and only permits the
+backends in its `HEADLESS_BACKENDS` allowlist, currently
+`claude litellm copilot codex goose` (`Justfile:1692`). `agy`, `opencode`, and
+`kilo` are deliberately excluded: their credentials are not verified for
+unattended use in a fresh pod, and `agy` in particular has no API-key mode at
+all.
+
+If you need one of the excluded backends, either choose a supported headless
+backend, or run it attended on the container or local path
+(`just contribute-hive <backend>`), where an operator can complete an
+interactive sign-in once. Tracking issue:
+[#5406](https://github.com/hivecommons/hive/issues/5406). Whether these backends
+can run headless at all remains an open question, so the allowlist is a
+deliberate gate rather than an oversight.
+
 ## IBM Bob headless setup
 
 `backend: bob` launches IBM bobshell (`bob`), the IBM watsonx Code Assistant CLI. In a Hive pod or contributor container it must use API-key auth: the default IBMid/W3ID browser SSO flow opens a browser and waits on a localhost callback, which a headless pod cannot satisfy, then times out after about three minutes. Hive checks for a key before launch and parks the agent with an actionable error instead of burning that timeout.

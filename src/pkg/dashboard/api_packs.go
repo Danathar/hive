@@ -135,6 +135,10 @@ func (s *Server) applyPack(level int, forceGovernor bool) (*ApplyPackResult, err
 	// them. Reported back so the caller (and the apply-pack response) can say
 	// so out loud instead of silently under-delivering the level's roster.
 	var tombstoned []string
+	// readded collects config-existing ENABLED agents that were missing from
+	// the manager's process table and were re-registered. A repair, not a
+	// creation — it never feeds `created` or isFirstApplyOrExpansion (#5632).
+	var readded []string
 	for _, pa := range pack.Agents {
 		// A deliberately deleted agent is NOT re-created, at any level. The
 		// pack listing it is exactly why deletion did not stick: ApplyPack
@@ -221,14 +225,30 @@ func (s *Server) applyPack(level int, forceGovernor bool) (*ApplyPackResult, err
 			} else {
 				skipped = append(skipped, pa.Name)
 			}
-			if _, err := s.deps.AgentMgr.GetStatus(pa.Name); err != nil {
+			// The manager's process table tracks ENABLED agents only — it is
+			// built from EnabledAgents() at boot and re-filtered to it by
+			// ReconcileAgents on every config reload. So a pack agent the
+			// operator disabled is LEGITIMATELY absent here, forever: re-adding
+			// it just queues it for eviction on the next reload, and counting
+			// that re-add as "created" made every steady-state apply look like
+			// a roster expansion — which authorized a full governor cadence
+			// reset from the pack on every apply (#5632: disabled `brainstorm`
+			// was "created:1" on every merge, silently reverting operator
+			// cadences ~once a minute).
+			//
+			// Repairing the table for an ENABLED agent is kept, but it is a
+			// repair, not a creation: the agent already exists in the config,
+			// the level's roster did not grow, and its governor cadences were
+			// seeded when it first joined — so it must not unlock a governor
+			// reset either.
+			if _, err := s.deps.AgentMgr.GetStatus(pa.Name); err != nil && existing.Enabled {
 				s.deps.AgentMgr.AddAgent(pa.Name, existing)
-				if !pa.OnDemand && existing.Enabled {
+				if !pa.OnDemand {
 					if err := s.deps.AgentMgr.Start(s.deps.Ctx, pa.Name); err != nil {
 						s.logger.Warn("failed to start reconciled agent", "agent", pa.Name, "error", err)
 					}
 				}
-				created = append(created, pa.Name)
+				readded = append(readded, pa.Name)
 			}
 			continue
 		}
@@ -317,6 +337,14 @@ func (s *Server) applyPack(level int, forceGovernor bool) (*ApplyPackResult, err
 				mode.Cadences = make(map[string]config.Cadence)
 			}
 			for agent, interval := range agentCadences {
+				// An operator-claimed cadence is NEVER reconciled back to the
+				// pack — the same contract Model/Backend ownership provides
+				// (#5558, #5632). This holds for the forced (explicit level
+				// change) path too, exactly as an operator's model survives a
+				// level change.
+				if s.deps.Config.Governor.CadenceIsOperatorOwned(modeName, agent) {
+					continue
+				}
 				if isFirstApplyOrExpansion {
 					from := string(mode.Cadences[agent])
 					if from != interval {
@@ -394,7 +422,24 @@ func (s *Server) applyPack(level int, forceGovernor bool) (*ApplyPackResult, err
 	// field report, so also list WHICH agents were tombstoned (deleted by the operator
 	// and NOT re-created) vs skipped (already present) — a grep by agent name against
 	// this single line answers "did the pack try to re-add the agent I removed?".
-	s.logger.Info("ACMM pack applied", "hive_id", s.deps.Config.HiveID, "level", level, "name", pack.Name, "created", len(created), "updated", len(updated), "skipped", len(skipped), "paused", len(paused), "resumed", len(resumed), "tombstoned", len(tombstoned), "gate_removed", len(removedByGate), "tombstoned_agents", tombstoned, "skipped_agents", skipped)
+	// created_agents is listed by NAME for the same reason #2439 added
+	// tombstoned_agents and skipped_agents: the count alone is not actionable.
+	// `created` is what sets isFirstApplyOrExpansion, which re-asserts the
+	// pack's governor cadences over the operator's — so a steady-state apply
+	// that unexpectedly reports created:1 silently resets every custom cadence,
+	// and the log gives no way to tell WHICH agent authorized that reset. A
+	// grep by agent name against this one line answers it. Since #5632 the
+	// list holds genuinely NEW roster members only — manager-table repairs are
+	// logged separately as readded_agents below.
+	s.logger.Info("ACMM pack applied", "hive_id", s.deps.Config.HiveID, "level", level, "name", pack.Name, "created", len(created), "updated", len(updated), "skipped", len(skipped), "paused", len(paused), "resumed", len(resumed), "tombstoned", len(tombstoned), "gate_removed", len(removedByGate), "created_agents", created, "tombstoned_agents", tombstoned, "skipped_agents", skipped)
+	if len(readded) > 0 {
+		// A repair worth naming, at INFO not buried in `created`: an ENABLED
+		// agent missing from the manager's process table is unusual (the table
+		// mirrors EnabledAgents), and before #5632 these re-adds were
+		// mislabeled as creations.
+		s.logger.Info("ACMM pack re-registered existing enabled agents missing from the manager",
+			"hive_id", s.deps.Config.HiveID, "level", level, "readded_agents", readded)
+	}
 	if len(tombstoned) > 0 {
 		// Say it plainly in the log too: an operator reading "this level has 6
 		// agents but I see 4" needs the reason, not a silent gap.
@@ -444,6 +489,9 @@ func (s *Server) removeAgentsUnavailableAtLevel(level int, agentsDir string) []s
 				delete(mode.Cadences, name)
 				s.deps.Config.Governor.Modes[modeName] = mode
 			}
+			// The cadence entry is gone; drop any operator-ownership marker
+			// with it so a stale claim cannot block a future pack seed.
+			s.deps.Config.Governor.ReleaseCadenceOwnership(modeName, name)
 		}
 		removed = append(removed, name)
 	}
@@ -476,16 +524,38 @@ func (s *Server) handlePackApply(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.auditFromRequest(r, "apply_pack", auditDetail("level", levelStr, "name", result.Name), "")
+
+	// This path applied the pack — creating agents, pausing and resuming others
+	// — but never asked for a status rebuild, so the dashboard kept rendering
+	// the pre-apply snapshot until some unrelated broadcast happened to land.
+	// Kick the rebuild and hand back the StatusSeq floor so the browser can
+	// reject any snapshot built before this apply (#5492).
+	floor := s.refreshAndPersistSeq()
+
+	// packAgents mirrors handlePackSetLevel: the dashboard reads it to scope
+	// ACMM section visibility. It was absent here, so the client always fell
+	// back to an empty list after an apply.
+	var packAgentNames []string
+	if pack, err := config.ACMMPackByLevel(level); err == nil {
+		for _, a := range pack.Agents {
+			if !a.Hidden {
+				packAgentNames = append(packAgentNames, a.Name)
+			}
+		}
+	}
+
 	jsonResponse(w, map[string]interface{}{
-		"ok":      true,
-		"status":  "applied",
-		"level":   level,
-		"name":    result.Name,
-		"created": result.Created,
-		"updated": result.Updated,
-		"skipped": result.Skipped,
-		"paused":  result.Paused,
-		"resumed": result.Resumed,
+		"ok":           true,
+		"status":       "applied",
+		"level":        level,
+		"name":         result.Name,
+		"created":      result.Created,
+		"updated":      result.Updated,
+		"skipped":      result.Skipped,
+		"paused":       result.Paused,
+		"resumed":      result.Resumed,
+		"packAgents":   packAgentNames,
+		"minStatusSeq": floor,
 		// Exact before/after values let the dashboard warn before a restart
 		// activates a different evaluation cadence.
 		"governor_changes": result.GovernorChanges,
@@ -561,7 +631,13 @@ func (s *Server) handlePackSetLevel(w http.ResponseWriter, r *http.Request) {
 	s.deps.AgentMgr.SyncModeFiles(level)
 
 	s.persistOnly()
-	s.refreshAsync()
+	// refreshAfterMutationSeq (not the bare refreshAsync) so the mutation epoch
+	// is bumped and the caller gets the StatusSeq floor. Without the floor, the
+	// dashboard's post-write refetch can be served a snapshot built before this
+	// level change and repaint the PREVIOUS level — the operator sees L4 after
+	// moving to L5 and may re-apply, triggering a second fleet-wide reconcile
+	// (#5492).
+	floor := s.refreshAfterMutationSeq()
 
 	pack, packLookupErr := config.ACMMPackByLevel(level)
 	var packAgentNames []string
@@ -577,8 +653,20 @@ func (s *Server) handlePackSetLevel(w http.ResponseWriter, r *http.Request) {
 			}
 			for modeName, agentCadences := range pack.Governor.Cadences {
 				mode := s.deps.Config.Governor.Modes[modeName]
+				prev := mode.Cadences
 				mode.Cadences = make(map[string]config.Cadence)
+				// Operator-claimed cadences survive an explicit level change,
+				// exactly as operator-claimed models do (#5632). Everything
+				// else is re-derived from the new level's pack.
+				for agent, cadence := range prev {
+					if s.deps.Config.Governor.CadenceIsOperatorOwned(modeName, agent) {
+						mode.Cadences[agent] = cadence
+					}
+				}
 				for agent, interval := range agentCadences {
+					if _, operatorOwned := mode.Cadences[agent]; operatorOwned {
+						continue
+					}
 					mode.Cadences[agent] = config.Cadence(interval)
 				}
 				s.deps.Config.Governor.Modes[modeName] = mode
@@ -624,6 +712,7 @@ func (s *Server) handlePackSetLevel(w http.ResponseWriter, r *http.Request) {
 		"governor_changes": packResult.GovernorChanges,
 		"paused":           paused,
 		"resumed":          resumed,
+		"minStatusSeq":     floor,
 	})
 }
 
@@ -646,7 +735,8 @@ func (s *Server) syncAgentVisibility(level int) (paused, resumed []string) {
 
 	// Collect agents to resume and agents to pause.
 	var toResume []string
-	for name := range s.deps.Config.Agents {
+	var leftRunning []string
+	for name, ac := range s.deps.Config.Agents {
 		if packAgents[name] {
 			// On-demand agents (e.g. brainstorm) should never auto-resume;
 			// they are triggered explicitly by workflows like inception.
@@ -661,12 +751,32 @@ func (s *Server) syncAgentVisibility(level int) (paused, resumed []string) {
 			}
 		} else {
 			// Pause sequentially — it's fast and order can matter.
-			if !s.deps.AgentMgr.IsPaused(name) {
-				if err := s.deps.AgentMgr.Pause(name, "acmm-pack", fmt.Sprintf("agent not in pack level %d", level)); err == nil {
-					paused = append(paused, name)
-				}
+			if s.deps.AgentMgr.IsPaused(name) {
+				continue
+			}
+			// An agent whose pause state the operator owns — created by hand
+			// via the dashboard API, or explicitly resumed after a pack pause
+			// — is left running, not re-paused as "not in pack": it was never
+			// a member of any pack's roster, so the roster says nothing about
+			// whether it should run. Without this, the apply that runs on
+			// EVERY restart re-paused such agents on every pod roll (#5706 —
+			// the same pack-clobbers-operator-config family as #5632; models,
+			// backends and cadences already carry this ownership marker).
+			if ac.PauseIsOperatorOwned() {
+				leftRunning = append(leftRunning, name)
+				continue
+			}
+			if err := s.deps.AgentMgr.Pause(name, "acmm-pack", fmt.Sprintf("agent not in pack level %d", level)); err == nil {
+				paused = append(paused, name)
 			}
 		}
+	}
+	if len(leftRunning) > 0 {
+		sort.Strings(leftRunning)
+		// Name the agents the sweep deliberately did NOT pause: a silent skip
+		// is indistinguishable from a sweep that never considered them.
+		s.logger.Info("ACMM pack: non-pack agents left running (operator owns their pause state)",
+			"level", level, "agents", strings.Join(leftRunning, ", "))
 	}
 
 	// Resume agents in parallel — each Resume() call takes ~2s,

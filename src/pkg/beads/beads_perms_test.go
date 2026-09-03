@@ -96,6 +96,52 @@ func TestNewStore_PinsDirGroupToCreatorEgid(t *testing.T) {
 	}
 }
 
+// TestReload_WidensNarrowedBeadsFile verifies the #5505 self-heal: a beads.json
+// narrowed to 0600 (legacy writer, external chmod) is widened back to include
+// the group read/write bits on the next load, by the uid that owns it. This is
+// what un-wedges the live failure — a per-agent-owned 0600 file that the main
+// hive process could never read ("failed to reload beads from disk: ...
+// permission denied") and that nothing else repairs, because persist() only
+// runs on mutation and the permissions watcher skips foreign-uid files.
+func TestReload_WidensNarrowedBeadsFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not meaningful on Windows")
+	}
+	dir := filepath.Join(t.TempDir(), "beads", "supervisor")
+	s, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if _, err := s.Create("finding", TypeAdvisory, PriorityLow, "supervisor", ""); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	fpath := filepath.Join(dir, beadsFileName)
+	// Reproduce the broken fleet state: owner-only file, no group access.
+	if err := os.Chmod(fpath, 0o600); err != nil {
+		t.Fatalf("chmod 0600: %v", err)
+	}
+
+	if err := s.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+
+	fi, err := os.Stat(fpath)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if perm := fi.Mode().Perm(); perm&beadsFilePerms != beadsFilePerms {
+		t.Errorf("beads file mode = %o after Reload, want group rw restored (>= %o)", perm, beadsFilePerms)
+	}
+	// The widen must never narrow what the owner already had.
+	if perm := fi.Mode().Perm(); perm&0o600 != 0o600 {
+		t.Errorf("beads file mode = %o after Reload, owner rw bits were narrowed", perm)
+	}
+	if got := s.Count(); got != 1 {
+		t.Errorf("Reload lost data: count = %d, want 1", got)
+	}
+}
+
 // umaskAllowsGroupWrite reports whether the process umask leaves the group-write
 // bit (0020) unmasked, so a group-writable create can actually land it. It reads
 // and restores the umask non-destructively.

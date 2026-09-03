@@ -1,0 +1,11 @@
+{
+  "name": "hive-ci-scripts",
+  "version": "1.0.0",
+  "private": true,
+  "description": "CI-only tooling for .github/scripts (not shipped). Versions are exact-pinned; install with `npm ci --ignore-scripts`.",
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "eslint": "10.9.1",
+    "globals": "17.12.0"
+  }
+}

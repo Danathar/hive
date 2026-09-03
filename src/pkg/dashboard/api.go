@@ -2,7 +2,10 @@ package dashboard
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -103,6 +106,9 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	s.mux.HandleFunc("POST /api/breaker/release", s.handleBreakerRelease)
 	s.mux.HandleFunc("POST /api/pin/{agent}/{dimension}", s.handlePin)
 	s.mux.HandleFunc("POST /api/unpin/{agent}/{dimension}", s.handleUnpin)
+	// Write-side twin of the terminal-urls copy control: the dashboard terminal
+	// can neither hand an operator a wrapped login URL nor accept the code back.
+	s.mux.HandleFunc("POST /api/agents/{name}/login-code", s.handleAgentLoginCode)
 	s.mux.HandleFunc("POST /api/restart/{agent}", s.handleRestart)
 	s.mux.HandleFunc("POST /api/reset-restarts/{agent}", s.handleResetRestarts)
 
@@ -826,6 +832,11 @@ var (
 const ghcrCacheTTL = 2 * time.Minute
 const ghcrCheckTimeout = 5 * time.Second
 
+var (
+	ghcrCheckBaseURL = "https://ghcr.io"
+	ghcrCheckClient  = &http.Client{Timeout: ghcrCheckTimeout}
+)
+
 func ghcrTagExistsCached(tag string) bool {
 	ghcrCacheMu.RLock()
 	if exp, ok := ghcrCacheExpiry[tag]; ok && time.Now().Before(exp) {
@@ -844,8 +855,15 @@ func ghcrTagExistsCached(tag string) bool {
 }
 
 func ghcrTagExists(tag string) bool {
-	client := &http.Client{Timeout: ghcrCheckTimeout}
-	tokenResp, err := client.Get("https://ghcr.io/token?scope=repository:hivecommons/hive:pull")
+	return ghcrTagExistsWithClient(ghcrCheckClient, ghcrCheckBaseURL, tag)
+}
+
+func ghcrTagExistsWithClient(client *http.Client, baseURL, tag string) bool {
+	if client == nil {
+		client = &http.Client{Timeout: ghcrCheckTimeout}
+	}
+	baseURL = strings.TrimRight(baseURL, "/")
+	tokenResp, err := client.Get(baseURL + "/token?scope=repository:hivecommons/hive:pull")
 	if err != nil {
 		return false
 	}
@@ -857,7 +875,7 @@ func ghcrTagExists(tag string) bool {
 		return false
 	}
 
-	manifestURL := fmt.Sprintf("https://ghcr.io/v2/hivecommons/hive/manifests/%s", tag)
+	manifestURL := fmt.Sprintf("%s/v2/hivecommons/hive/manifests/%s", baseURL, tag)
 	req, _ := http.NewRequest("HEAD", manifestURL, nil)
 	req.Header.Set("Authorization", "Bearer "+tok.Token)
 	req.Header.Set("Accept", "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json")
@@ -1331,13 +1349,12 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 
 // lifecycleTimelineOnce/lifecycleStore back the lazily-constructed lifecycle
 // timeline Store. Lazy construction keeps the zero-value Server valid (no
-// constructor change) and keeps memory bounded via timeline.MaxEvents.
+// constructor change) and keeps memory bounded via timeline.MaxJourneys.
 //
-// TODO(timeline): the governor eval loop should Record() real lifecycle events
-// into LifecycleTimeline() (issue enumerated → classified → kicked → pr_opened
-// → merged/blocked), e.g. via a tracing SpanProcessor adapter that calls
-// timeline.FromSpan. Until then the store is present but empty, and the
-// endpoint safely returns empty arrays.
+// The store is fed by real producers now (#5656): the governor eval loop
+// (enumerated, kicked), the scheduler's classifier (classified), the
+// attribution audit sink + PR-opened hook (pr_opened, merged) and the
+// escalation sweep (blocked) — see cmd/hive/lifecyclewire.go.
 var (
 	lifecycleTimelineOnce sync.Once
 	lifecycleStore        *timeline.Store
@@ -1352,18 +1369,29 @@ func (s *Server) LifecycleTimeline() *timeline.Store {
 	return lifecycleStore
 }
 
-// lifecycleTimelineDefaultLimit bounds how many recent events the
+// EnableLifecyclePersistence loads previously persisted lifecycle journeys
+// from path and turns on atomic re-persistence, so a pod restart no longer
+// zeroes the panel's merged/blocked history (#5656). Call once at startup,
+// before the governor starts recording; mirrors EnableSessionPersistence.
+func (s *Server) EnableLifecyclePersistence(path string) {
+	if err := s.LifecycleTimeline().EnablePersistence(path, s.logger); err != nil && s.logger != nil {
+		s.logger.Warn("lifecycle timeline persistence unavailable — journeys reset on restart",
+			"path", path, "error", err)
+	}
+}
+
+// lifecycleTimelineDefaultLimit bounds how many journeys the
 // /api/lifecycle-timeline endpoint returns by default when the caller does not
 // pass ?limit=.
 const lifecycleTimelineDefaultLimit = 200
 
-// handleLifecycleTimeline serves the issue→PR lifecycle timeline plus derived
+// handleLifecycleTimeline serves the issue→PR lifecycle journeys plus derived
 // fleet health as JSON. It is additive and read-only; an empty store yields
 // empty arrays (never null), so the dashboard can render unconditionally.
 //
 // Query params:
 //
-//	limit  — max recent events to return (default lifecycleTimelineDefaultLimit)
+//	limit  — max journeys to return (default lifecycleTimelineDefaultLimit)
 //	window — fleet-health look-back, in minutes (default timeline.DefaultFleetWindow)
 func (s *Server) handleLifecycleTimeline(w http.ResponseWriter, r *http.Request) {
 	limit := lifecycleTimelineDefaultLimit
@@ -1383,13 +1411,15 @@ func (s *Server) handleLifecycleTimeline(w http.ResponseWriter, r *http.Request)
 	store := s.LifecycleTimeline()
 	dto := store.Snapshot(limit, window)
 	if level := s.lifecycleACMMLevel(); level > 0 {
-		dto.Events = filterTimelineEventsByACMMLevel(dto.Events, level)
-		dto.Fleet = fleetHealthForTimelineEvents(store.Recent(0), window, level)
+		dto.Journeys = filterJourneysByACMMLevel(dto.Journeys, level)
+		// Re-derive fleet counts over the FULL filtered journey set (not the
+		// limit-truncated one) so the counters match what the level may see.
+		dto.Fleet = timeline.DeriveFleetHealth(filterJourneysByACMMLevel(store.Journeys(0), level), window)
 	}
 	// Defensive nil-guard: Snapshot already guarantees a non-nil slice, but
 	// keep the endpoint's array-always contract explicit.
-	if dto.Events == nil {
-		dto.Events = []timeline.Event{}
+	if dto.Journeys == nil {
+		dto.Journeys = []timeline.Journey{}
 	}
 	jsonResponse(w, dto)
 }
@@ -1401,53 +1431,17 @@ func (s *Server) lifecycleACMMLevel() int {
 	return detectACMMLevel(s.deps.Config)
 }
 
-func filterTimelineEventsByACMMLevel(events []timeline.Event, level int) []timeline.Event {
-	filtered := make([]timeline.Event, 0, len(events))
-	for _, event := range events {
-		if agent.AgentAvailableAtACMMLevel(event.Agent, level) {
-			filtered = append(filtered, event)
+// filterJourneysByACMMLevel drops journeys whose most recent agent is not
+// available at the given maturity level (the operability agents below L5).
+// Journeys with no agent yet (enumerated/classified only) always pass.
+func filterJourneysByACMMLevel(journeys []timeline.Journey, level int) []timeline.Journey {
+	filtered := make([]timeline.Journey, 0, len(journeys))
+	for _, j := range journeys {
+		if agent.AgentAvailableAtACMMLevel(j.Agent, level) {
+			filtered = append(filtered, j)
 		}
 	}
 	return filtered
-}
-
-func fleetHealthForTimelineEvents(events []timeline.Event, window time.Duration, level int) timeline.FleetHealth {
-	if window <= 0 {
-		window = timeline.DefaultFleetWindow
-	}
-	fh := timeline.FleetHealth{WindowMs: window.Milliseconds()}
-	cutoff := time.Now().Add(-window).UnixMilli()
-	merged := map[string]bool{}
-	blocked := map[string]bool{}
-	active := map[string]bool{}
-	for _, event := range events {
-		if event.At < cutoff || !agent.AgentAvailableAtACMMLevel(event.Agent, level) {
-			continue
-		}
-		fh.Events++
-		if event.IssueRef == "" {
-			continue
-		}
-		switch event.Kind {
-		case timeline.KindMerged:
-			merged[event.IssueRef] = true
-		case timeline.KindBlocked:
-			blocked[event.IssueRef] = true
-		default:
-			active[event.IssueRef] = true
-		}
-	}
-	for ref := range merged {
-		fh.Merged++
-		delete(active, ref)
-		delete(blocked, ref)
-	}
-	for ref := range blocked {
-		fh.Blocked++
-		delete(active, ref)
-	}
-	fh.InFlight = len(active)
-	return fh
 }
 
 func (s *Server) handleWidget(w http.ResponseWriter, r *http.Request) {
@@ -1644,15 +1638,16 @@ func kickPhaseStatus(phase string) string {
 }
 
 // claimAgentFieldOwnership writes an operator's model and/or backend choice
-// into hive.yaml and marks those fields operator-owned. Empty arguments leave
-// the corresponding field untouched.
+// into hive.yaml and the per-agent overlay, and marks those fields
+// operator-owned. Empty arguments leave the corresponding field untouched.
 //
 // This is the durability half of the model/method revert fix. The in-memory
 // ModelOverride/BackendOverride on the agent process is replayed from
-// /data/hive-state.json on restart, but hive.yaml still carried the PACK's
-// model — and ApplyPack re-reconciles from the pack on every restart. Writing
-// the operator's value to the same layer the pack writes, plus an ownership
-// marker, is what makes the choice actually survive.
+// /data/hive-state.json on restart, but the saved config still carried the
+// PACK's model — and ApplyPack re-reconciles from the pack on every restart.
+// For managed agents the per-agent overlay replaces the hive.yaml entry on
+// every config load, so both persistent layers must receive the operator's
+// value and ownership marker for the choice to actually survive.
 func (s *Server) claimAgentFieldOwnership(name, model, backend string) {
 	if s.deps == nil || s.deps.Config == nil {
 		return
@@ -1677,7 +1672,53 @@ func (s *Server) claimAgentFieldOwnership(name, model, backend string) {
 			"Could not save the model/method choice for "+name+" — it will revert on the next restart: "+err.Error())
 		return
 	}
+	if agentsDir := s.deps.Config.Data.AgentsDir; agentsDir != "" {
+		if err := config.SaveAgentFile(agentsDir, name, ac); err != nil {
+			s.deps.Logger.Error("failed to persist agent overlay after model/method choice", "agent", name, "error", err)
+			s.AddSystemAlert("agent-field-save-failed", "error",
+				"Could not save the model/method choice for "+name+" to its agent overlay — it will revert on the next config load: "+err.Error())
+			return
+		}
+	}
 	s.ClearSystemAlert("agent-field-save-failed")
+}
+
+// claimAgentPauseOwnership marks name's pause/run state operator-owned and
+// persists the marker to hive.yaml and the per-agent overlay — the same
+// two-layer durability as claimAgentFieldOwnership above, and for the same
+// reason: for managed agents the overlay replaces the hive.yaml entry on every
+// config load, so a marker written to only one layer does not survive. An
+// operator-owned pause state makes the agent immune to the ACMM pack
+// visibility sweep's "agent not in pack level N" pause (#5706). A no-op when
+// the claim is already recorded, so a routine resume does not rewrite config.
+func (s *Server) claimAgentPauseOwnership(name string) {
+	if s.deps == nil || s.deps.Config == nil {
+		return
+	}
+	ac, ok := s.deps.Config.Agents[name]
+	if !ok || ac.PauseIsOperatorOwned() {
+		return
+	}
+	ac.PauseOwner = config.FieldOwnerOperator
+	s.deps.Config.Agents[name] = ac
+	_ = s.deps.AgentMgr.UpdateConfig(name, ac)
+	if err := s.saveConfig(); err != nil {
+		s.deps.Logger.Error("failed to persist pause-state ownership", "agent", name, "error", err)
+		s.AddSystemAlert("agent-pause-owner-save-failed", "error",
+			"Could not record that you resumed "+name+" — an ACMM pack apply may re-pause it on the next restart: "+err.Error())
+		return
+	}
+	if ac.Managed {
+		if agentsDir := s.deps.Config.Data.AgentsDir; agentsDir != "" {
+			if err := config.SaveAgentFile(agentsDir, name, ac); err != nil {
+				s.deps.Logger.Error("failed to persist pause-state ownership to agent overlay", "agent", name, "error", err)
+				s.AddSystemAlert("agent-pause-owner-save-failed", "error",
+					"Could not record that you resumed "+name+" in its agent overlay — an ACMM pack apply may re-pause it on the next config load: "+err.Error())
+				return
+			}
+		}
+	}
+	s.ClearSystemAlert("agent-pause-owner-save-failed")
 }
 
 // validateModelForAgent rejects a model the agent's effective backend does not
@@ -1890,6 +1931,12 @@ func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	// An explicit operator resume claims ownership of the agent's pause state
+	// (#5706). Without the claim, the ACMM pack visibility sweep that runs on
+	// every restart re-paused any non-pack agent as "agent not in pack level
+	// N" — so this resume silently lasted only until the next pod roll.
+	s.claimAgentPauseOwnership(name)
 
 	s.auditFromRequest(r, "resume", "", name)
 	s.refreshAndPersist()
@@ -2286,21 +2333,62 @@ func (s *Server) handleGHUserAuthStart(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Bind the flow to THIS caller. Both start and poll are public
+	// (isPublicPath), and the session cookie is minted on the POLL response —
+	// so without a client-held secret, any unauthenticated poller could race
+	// the legitimate operator and walk away with their freshly approved
+	// session. flow_id is that secret: crypto-random, returned only to the
+	// caller who started the flow, and required (constant-time) on every poll.
+	// The GitHub device_code stays server-side as before.
+	flowID, err := newDeviceFlowID()
+	if err != nil {
+		jsonError(w, "failed to start device flow", http.StatusInternalServerError)
+		return
+	}
 	s.deviceFlowState = state
+	s.deviceFlowID = flowID
 	s.auditFromRequest(r, "gh_auth_start", "", "")
 	jsonResponse(w, map[string]interface{}{
 		"user_code":        state.UserCode,
 		"verification_uri": state.VerificationURI,
 		"expires_in":       state.ExpiresIn,
 		"interval":         state.Interval,
+		"flow_id":          flowID,
 	})
 }
 
+// newDeviceFlowID mints the opaque per-flow secret handed to the client that
+// starts a device flow. 128 bits of crypto randomness, hex-encoded.
+func newDeviceFlowID() (string, error) {
+	buf := make([]byte, 16)
+	if _, err := cryptorand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
+}
+
 func (s *Server) handleGHUserAuthPoll(w http.ResponseWriter, r *http.Request) {
+	// Read the caller's flow binding BEFORE taking the lock — decodeBody does
+	// network I/O and must not serialize behind another poll's GitHub call.
+	var pollReq struct {
+		FlowID string `json:"flow_id"`
+	}
+	_ = decodeBody(r, &pollReq) // absent/invalid body leaves FlowID empty; enforced below
+
 	s.deviceFlowMu.Lock()
 	defer s.deviceFlowMu.Unlock()
 
 	if s.deviceFlowState == nil {
+		jsonError(w, "no device flow in progress — call /api/gh-user-auth/start first", http.StatusBadRequest)
+		return
+	}
+	// Enforce the client binding whenever this flow was minted with one (every
+	// flow started through handleGHUserAuthStart is). A poll that cannot prove
+	// it started the flow gets nothing — in particular it must never be the
+	// request the session cookie is set on. Constant-time compare: flow_id is
+	// a secret. State stays intact so the legitimate holder's polls proceed.
+	if s.deviceFlowID != "" &&
+		subtle.ConstantTimeCompare([]byte(pollReq.FlowID), []byte(s.deviceFlowID)) != 1 {
 		jsonError(w, "no device flow in progress — call /api/gh-user-auth/start first", http.StatusBadRequest)
 		return
 	}
@@ -2309,6 +2397,7 @@ func (s *Server) handleGHUserAuthPoll(w http.ResponseWriter, r *http.Request) {
 	token, status, err := github.PollDeviceFlow(clientID, s.deviceFlowState.DeviceCode, s.deps.Config.GitHub.OAuthBaseURL(), s.deps.Config.GitHub.OAuthAPIURL())
 	if err != nil {
 		s.deviceFlowState = nil
+		s.deviceFlowID = ""
 		jsonResponse(w, map[string]interface{}{"status": "error", "error": err.Error()})
 		return
 	}
@@ -2328,6 +2417,7 @@ func (s *Server) handleGHUserAuthPoll(w http.ResponseWriter, r *http.Request) {
 	user, err := github.ValidateToken(token, s.deps.Config.GitHub.OAuthAPIURL())
 	if err != nil || user == nil || user.Login == "" {
 		s.deviceFlowState = nil
+		s.deviceFlowID = ""
 		// Audit the failed login so the owner can see attempts that never got
 		// far enough to resolve a GitHub identity. Actor is "unknown" because we
 		// could not verify who they are.
@@ -2336,6 +2426,7 @@ func (s *Server) handleGHUserAuthPoll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.deviceFlowState = nil
+	s.deviceFlowID = ""
 	username := user.Login
 	avatarURL := user.AvatarURL
 
@@ -3729,14 +3820,27 @@ func (s *Server) handleAgentConfigCadences(w http.ResponseWriter, r *http.Reques
 			mode.Cadences[name] = cadence
 		}
 		s.deps.Config.Governor.Modes[modeName] = mode
+		// Operator edits claim ownership so the pack apply that runs on every
+		// restart (and on steady-state re-applies) cannot reconcile the cadence
+		// back to the pack default — the same contract model/backend edits
+		// already have (#5632).
+		s.deps.Config.Governor.ClaimCadenceOwnership(modeName, name)
 	}
 
 	if err := s.saveConfig(); err != nil {
 		s.logger.Error("failed to persist config after cadence update", "agent", name, "error", err)
 	}
 	s.auditFromRequest(r, "config_agent_cadences", auditDetail("section", "cadences"), name)
-	s.refreshAndPersist()
-	okResponse(w, map[string]string{"status": "updated", "agent": name})
+	// The rebuild kicked here is asynchronous, so the browser's post-save
+	// GET /api/status can be served the CACHED pre-mutation snapshot and
+	// repaint the OLD cadence — the operator then waits for a later broadcast
+	// to see their own write (#5492). minStatusSeq is the lowest StatusSeq
+	// guaranteed to reflect this mutation; the dashboard raises its
+	// stale-snapshot floor to it and drops anything built earlier (#4348).
+	floor := s.refreshAndPersistSeq()
+	// jsonResponse rather than okResponse: the latter is typed map[string]string
+	// and cannot carry the numeric floor. "ok" is preserved for callers.
+	jsonResponse(w, map[string]any{"ok": true, "status": "updated", "agent": name, "minStatusSeq": floor})
 }
 
 func (s *Server) handleAgentConfigModels(w http.ResponseWriter, r *http.Request) {
@@ -3952,6 +4056,13 @@ func (s *Server) handleAgentConfigChannels(w http.ResponseWriter, r *http.Reques
 	}
 	if err := decodeBody(r, &body); err != nil {
 		jsonError(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+
+	// Fail fast on channel types with no trigger runtime (#5591): persisting
+	// them would validate a config that silently never kicks the agent.
+	if err := config.ValidateChannels(name, body.Channels); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -4328,33 +4439,6 @@ func (s *Server) buildExportYAML(name string, cfg config.AgentConfig, cadences m
 			b.WriteString(fmt.Sprintf("    - type: %s\n", ch.Type))
 			if ch.Enabled != nil {
 				b.WriteString(fmt.Sprintf("      enabled: %t\n", *ch.Enabled))
-			}
-			if len(ch.Events) > 0 {
-				b.WriteString("      events:\n")
-				for _, e := range ch.Events {
-					b.WriteString(fmt.Sprintf("        - %s\n", e))
-				}
-			}
-			if len(ch.Patterns) > 0 {
-				b.WriteString("      patterns:\n")
-				for _, p := range ch.Patterns {
-					b.WriteString(fmt.Sprintf("        - %q\n", p))
-				}
-			}
-			if ch.Schedule != "" {
-				b.WriteString(fmt.Sprintf("      schedule: %q\n", ch.Schedule))
-			}
-			if len(ch.Match) > 0 {
-				b.WriteString("      match:\n")
-				for k, v := range ch.Match {
-					b.WriteString(fmt.Sprintf("        %s: %q\n", k, v))
-				}
-			}
-			if len(ch.Repos) > 0 {
-				b.WriteString("      repos:\n")
-				for _, r := range ch.Repos {
-					b.WriteString(fmt.Sprintf("        - %s\n", r))
-				}
 			}
 		}
 	}
@@ -4983,6 +5067,15 @@ func (s *Server) handleGovernorBudget(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.CriticalPct != nil {
 		criticalPct = *body.CriticalPct
+	}
+
+	// The sanity floor judges only what THIS request supplied, so a spoke
+	// already storing a below-floor limit can still edit its other budget
+	// fields (#5508). Checked before the range validation so the operator is
+	// told about the unit mistake first.
+	if err := validateSuppliedBudgetFloor(body.TotalTokens); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 
 	if err := validateGovernorBudget(totalTokens, periodDays, criticalPct); err != nil {
@@ -6954,7 +7047,7 @@ func (s *Server) handleSidebarSet(w http.ResponseWriter, r *http.Request) {
 	okResponse(w, map[string]string{"status": "updated"})
 }
 
-const sidebarFile = "/data/sidebar.json"
+var sidebarFile = "/data/sidebar.json"
 
 func (s *Server) loadSidebarFromDisk() {
 	data, err := os.ReadFile(sidebarFile)

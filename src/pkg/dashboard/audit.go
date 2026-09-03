@@ -20,8 +20,9 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
+var auditLogPath = "/data/audit.jsonl"
+
 const (
-	auditLogPath    = "/data/audit.jsonl"
 	auditMaxSizeMB  = 5
 	auditMaxBackups = 3
 	auditMaxAgeDays = 90
@@ -85,7 +86,11 @@ func newAuditLog() *AuditLog {
 }
 
 func (a *AuditLog) loadFromDisk() {
-	data, err := os.ReadFile(auditLogPath)
+	a.loadFromDiskPath(auditLogPath)
+}
+
+func (a *AuditLog) loadFromDiskPath(path string) {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return
 	}

@@ -376,15 +376,9 @@ func TestHandleKnowledgeCreate_MissingFields_Boost(t *testing.T) {
 // --- buildHealth with cached health ---
 
 func TestBuildHealth_Cached(t *testing.T) {
-	// Set cached health first
-	cachedHealthMu.Lock()
-	cachedHealth = map[string]any{"ci": 95, "nightly": 100}
-	cachedHealthMu.Unlock()
-	defer func() {
-		cachedHealthMu.Lock()
-		cachedHealth = nil
-		cachedHealthMu.Unlock()
-	}()
+	// Seed cached health first; the shared hook restores the pre-test cache
+	// state in t.Cleanup (#5570).
+	setCachedHealth(t, map[string]any{"ci": 95, "nightly": 100})
 
 	// Call with nil client to get cached
 	result := buildHealth(nil, nil)
@@ -705,7 +699,7 @@ func TestHandleContributorTrust_UserNotFound(t *testing.T) {
 	body := `{"username":"nonexistent","tier":"contributor"}`
 	req := httptest.NewRequest("PUT", "/api/contribute/trust", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Hive-Role", "owner") // mutation gate fails closed on a missing role (C5)
+	req.Header.Set("X-Hive-Role", "owner")          // mutation gate fails closed on a missing role (C5)
 	req.Header.Set(ownerRoleVerifiedHeader, "true") // requireOwnerRole needs the verified marker too (F14)
 	w := httptest.NewRecorder()
 	srv.handleContributorTrust(w, req)

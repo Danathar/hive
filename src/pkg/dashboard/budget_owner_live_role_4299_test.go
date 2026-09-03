@@ -30,7 +30,7 @@ func seedBudget4299(s *Server) {
 
 func putBudget4299(s *Server, sid string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPut, "/api/config/governor/budget",
-		strings.NewReader(`{"totalTokens":50000}`))
+		strings.NewReader(`{"totalTokens":50000000}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: sid})
 	w := httptest.NewRecorder()
@@ -53,8 +53,8 @@ func TestBudgetSave4299_GithubGrantedOwnerWithStaleSession(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("granted owner budget save = %d, want 200; body=%q", w.Code, w.Body.String())
 	}
-	if got := s.deps.Config.Governor.Budget.TotalTokens; got != 50000 {
-		t.Fatalf("totalTokens = %d, want 50000 (save did not persist)", got)
+	if got := s.deps.Config.Governor.Budget.TotalTokens; got != 50000000 {
+		t.Fatalf("totalTokens = %d, want 50000000 (save did not persist)", got)
 	}
 }
 

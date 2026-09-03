@@ -4,6 +4,8 @@ import (
 	"os"
 	"regexp"
 	"testing"
+
+	"github.com/hivecommons/hive/internal/testutil"
 )
 
 // nginxConfPath is the gateway config under test, relative to this package.
@@ -25,7 +27,7 @@ func readNginxConf(t *testing.T) string {
 	t.Helper()
 	src, err := os.ReadFile(nginxConfPath)
 	if err != nil {
-		t.Skipf("nginx.conf not readable from this package: %v", err)
+		testutil.SkipfUnlessRequired(t, "nginx.conf not readable from this package: %v", err)
 	}
 	return string(src)
 }
@@ -68,8 +70,14 @@ func TestGatewayConfDoesNotRelyOnConfD(t *testing.T) {
 	conf := readNginxConf(t)
 	includeConfD := regexp.MustCompile(`(?m)^\s*include\s+/etc/nginx/conf\.d/`)
 	if includeConfD.MatchString(conf) {
-		t.Skip("nginx.conf now includes conf.d; the upstream IPv6 fixup may apply " +
-			"and the dual-stack rationale in TestGatewayListensDualStack needs review")
+		// Fail rather than skip (#5388): nginx.conf is repo content, identical
+		// everywhere, so a skip here could never mean "unsuitable environment"
+		// — it means the premise TestGatewayListensDualStack rests on moved.
+		// If including conf.d is deliberate, revisit that test's rationale in
+		// the same PR rather than letting this guard disarm itself silently.
+		t.Fatal("nginx.conf now includes /etc/nginx/conf.d; the upstream IPv6 fixup may " +
+			"apply and the dual-stack rationale in TestGatewayListensDualStack needs review " +
+			"in the PR that added the include")
 	}
 }
 
