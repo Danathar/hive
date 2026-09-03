@@ -5262,6 +5262,12 @@ func (h *ContributeWSHub) taskUnavailable(reason string) *WSMessage {
 // buildTaskPrompt is the GitHub-shaped entry point retained for existing call
 // sites (ops-tab prompt preview, tests). New identity-aware callers use
 // buildTaskPromptForRef.
+//
+// One value comes from outside the task's own metadata: the base branch this
+// work belongs on (#5729), which taskBaseBranch derives from the issue title
+// and the branch this hive was built from. That is process-wide build metadata
+// rather than per-request state, so the preview still renders exactly what the
+// agent is sent.
 func buildTaskPrompt(repoFull string, number int, title string) string {
 	return buildTaskPromptForRef(worksource.Ref{Repo: repoFull, Number: number}, title)
 }
@@ -5293,7 +5299,16 @@ func buildTaskPromptForRef(ref worksource.Ref, title string) string {
 			" This work item lives in the %s work source, not in GitHub Issues; read it at %s.",
 			sourceLabel(ref.SourceType), ref.URL)
 	}
-	return buildTaskPromptBody(repoFull, issueRef, title, sourceHint)
+	// #5729: the prompt has to CARRY the base branch. The checkout is reused
+	// across tasks and nothing resets it, so the branch on disk answers the
+	// previous task, not this one — and an agent follows the instruction it was
+	// given over the state it finds. That was measured, not assumed: a working
+	// branch reset from v5 onto v4 mid-task, with zero commits and a clean tree,
+	// was put back on v5 by the agent, because the plan it had already formed
+	// said v5. Fixing the workspace alone cannot work; the instruction has to
+	// carry the answer.
+	return buildTaskPromptBody(repoFull, issueRef, title, sourceHint,
+		taskBaseBranch(title, upstreamBranch()))
 }
 
 // taskIDSegment is the per-item component of a task id. For GitHub-backed work
@@ -5316,7 +5331,68 @@ func sourceLabel(sourceType string) string {
 	return sourceType
 }
 
-func buildTaskPromptBody(repoFull, issueRef, title, sourceHint string) string {
+// releaseLineFromTitle extracts a leading release-line tag — "[v5] reviewer
+// lane follow-ups …" yields "v5" — and returns "" for every other title.
+//
+// The shape is deliberately narrow: `v` followed by digits and nothing else,
+// the same `^v(\d+)$` release-line shape pkg/hub's image_pulls.go matches and
+// .github/release-lines.yml's `release_lines` list uses. The lane prefixes the
+// classifier already routes on ("[quality]", "[architect]", …) cannot collide
+// with it, and a tag naming no real branch fails loudly at `gh pr create`
+// rather than silently redirecting the PR — which is the failure mode this
+// whole change exists to remove.
+func releaseLineFromTitle(title string) string {
+	t := strings.TrimSpace(title)
+	if !strings.HasPrefix(t, "[") {
+		return ""
+	}
+	end := strings.Index(t, "]")
+	if end < 0 {
+		return ""
+	}
+	tag := strings.ToLower(strings.TrimSpace(t[1:end]))
+	if len(tag) < 2 || tag[0] != 'v' {
+		return ""
+	}
+	for _, r := range tag[1:] {
+		if r < '0' || r > '9' {
+			return ""
+		}
+	}
+	return tag
+}
+
+// taskBaseBranch is the branch a task's work must be based on and its PR opened
+// against (kubestellar/hive#5729).
+//
+// A contributor relay works one issue at a time out of a single PERSISTENT
+// checkout, and nothing resets that checkout between tasks. The prompt never
+// named a base, so the base was whatever the PREVIOUS task happened to leave
+// checked out: on 2026-09-02 one `[v5]`-titled issue put the checkout on `v5`
+// and the four PRs after it — three of them fixes for defects live on the
+// deployed `v4` — were opened against `v5` too, and had to be backported by
+// hand. Nobody in the loop can see that going wrong: the agent has nothing to
+// check against, the contributor sees PRs opening and merging normally, and a
+// maintainer sees correctly-formed PRs on a plausible branch.
+//
+// hubBranch is the branch this hive itself is built from (upstreamBranch()) —
+// the same branch the contribute onboarding page already tells contributors to
+// clone (#3990), so "base your work on it" is the answer that was always
+// implied and never stated. A branch-specific issue overrides it: an issue
+// titled "[v5] …" is work for `v5` whatever branch this hive runs, which is
+// also why the inheritance had a plausible-looking first PR to start from.
+func taskBaseBranch(title, hubBranch string) string {
+	if line := releaseLineFromTitle(title); line != "" {
+		return line
+	}
+	return strings.TrimSpace(hubBranch)
+}
+
+// buildTaskPromptBody renders the assignment prompt's text. baseBranch is the
+// branch this task's work belongs on; it is empty only when the hive cannot
+// resolve one at all, which changes the wording below but never licenses
+// inheriting whatever branch the checkout happens to be on.
+func buildTaskPromptBody(repoFull, issueRef, title, sourceHint, baseBranch string) string {
 	// The workspace contract (kubestellar/hive#2545): your tmux pane already
 	// starts rooted in $HIVE_WORKSPACE_DIR (contributor-agent.sh creates it and
 	// launches the session with -c pointed there), but nothing had put a repo
@@ -5326,6 +5402,27 @@ func buildTaskPromptBody(repoFull, issueRef, title, sourceHint string) string {
 	// its own clone, was left sitting in an empty directory while the
 	// assignment slot stayed held. Spell out an actual clone into that known
 	// directory so there is a concrete first step rather than an implied one.
+	baseHint := fmt.Sprintf(
+		// An unresolved base is not a licence to inherit one. Name the only
+		// trustworthy substitute — the upstream repository's own default
+		// branch, read from the clone rather than from whatever the last task
+		// left behind — and keep the "do not use the branch you find" clause,
+		// which is the load-bearing half in both wordings.
+		"Do not assume the branch the checkout is currently on is the right base: it may "+
+			"be left over from a previous task. Resolve %s's own default branch "+
+			"('gh repo view %s --json defaultBranchRef'), start your work branch from it, "+
+			"and open the PR against it. ",
+		repoFull, repoFull)
+	if b := strings.TrimSpace(baseBranch); b != "" {
+		baseHint = fmt.Sprintf(
+			"Base this work on the '%s' branch of %s. The checkout may be left on a "+
+				"DIFFERENT branch by a previous task, so do not use whatever branch you "+
+				"find there: run 'git fetch upstream' and start your work branch from the "+
+				"base with 'git checkout -b <your-branch> upstream/%s'. Open the PR against "+
+				"the same branch with 'gh pr create --base %s', and confirm the PR's base "+
+				"is '%s' before you report done. ",
+			b, repoFull, b, b, b)
+	}
 	return fmt.Sprintf(
 		"You are a contributor to the %s hive. Work on issue %s: \"%s\".%s "+
 			"You do NOT have push access to the upstream repo. "+
@@ -5335,6 +5432,13 @@ func buildTaskPromptBody(repoFull, issueRef, title, sourceHint string) string {
 			"from a prior task, 'cd' into it and 'git fetch' instead of "+
 			"re-forking). Then 'cd' into that checkout, read the issue, "+
 			"understand what's needed, and take action. "+
+			// #5729: the base branch. Everything above deliberately REUSES a
+			// checkout across tasks, which is exactly what makes the branch
+			// left on disk the previous task's answer rather than this one's.
+			// Name the branch, name it before the agent forms a plan, and ask
+			// for the base back at the end — an agent never told a base cannot
+			// notice it inherited the wrong one.
+			"%s"+
 			// DCO is enforced on this repo (CONTRIBUTING.md) and an unsigned
 			// commit blocks the merge, but the prompt used to leave sign-off
 			// entirely to whatever each agent inferred from the repo. That
@@ -5394,7 +5498,7 @@ func buildTaskPromptBody(repoFull, issueRef, title, sourceHint string) string {
 			"only when you are actually done, and never before starting work. "+
 			"If you printed the no_work_needed line above, that already counts "+
 			"as your completion — do not print both.",
-		repoFull, issueRef, title, sourceHint, repoFull, repoFull,
+		repoFull, issueRef, title, sourceHint, repoFull, repoFull, baseHint,
 	)
 }
 
