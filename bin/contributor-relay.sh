@@ -1368,6 +1368,14 @@ function blockingPromptKey(text) {
   // persists, so this prompt stops coming back on every restart the way a
   // plain "Skip" would.
   if (/Update available!/.test(text) && /Skip until next version/.test(text)) return '3';
+  const recent = paneTail(text, 15);
+  // agy: "Terms of Service & Data Use" ends on a [Previous] [Done] button row
+  // with focus on the CHECKBOX above it, where Enter toggles consent instead of
+  // advancing ("enter Toggle"). A bare Enter therefore never leaves this page.
+  // Down moves to the button row, Right selects [Done]; the caller appends
+  // Enter. The other two steps (theme picker, folder trust) do advance on a
+  // bare Enter and deliberately fall through to null.
+  if (BACKEND === 'agy' && /Terms of Service & Data Use/.test(recent) && /\[(?:Previous|Back)\]\s+\[Done\]/.test(recent)) return 'Down Right';
   return null;
 }
 
@@ -1449,9 +1457,18 @@ function getCLIState() {
     } else if (BACKEND === 'pi') {
       if (/pi v\d|0\.0%|auto\)|\d+\.\d+%/.test(text)) return 'ready';
     } else if (BACKEND === 'agy') {
+      // Antigravity gates first run behind login plus a three-step wizard, and
+      // every agent that shares a $HOME can re-enter it whenever another agent
+      // writes antigravity-cli/cache/onboarding.json mode 600. Check the
+      // visible tail only: old task output may quote the wizard text, and a
+      // stale quote must not make a live prompt look blocked.
+      const recent = paneTail(text, 15);
+      if (/not signed in|Select login method/i.test(recent)) return 'needs-login';
+      if (/Choose your color scheme|Terms of Service & Data Use|Do you trust the contents|I trust this (?:folder|directory)|Welcome to (?:the )?Antigravity/i.test(recent)) return 'onboarding';
       // agy shows "? for shortcuts" at the bottom when its interactive prompt
-      // is ready. The generic />\s*$/ fires too early (during the splash).
-      if (/\? for shortcuts/.test(text)) return 'ready';
+      // is ready. The generic />\s*$/ fires too early during splash, and the
+      // wizard's selection cursor is also ❯.
+      if (/\? for shortcuts/.test(recent)) return 'ready';
     } else {
       if (/>\s*$|❯|\$\s*$/.test(text)) return 'ready';
     }
