@@ -102,16 +102,6 @@ Channels declare how an agent gets triggered. When omitted or empty, the agent u
 ```yaml
 channels:
   - type: kick                              # governor timer (default behavior)
-  - type: webhook
-    events: ["issues.opened", "push"]
-    repos: ["console"]                      # optional: filter to specific repos
-  - type: schedule
-    schedule: "0 */6 * * *"                 # cron expression
-  - type: discord
-    patterns: ["!deploy*", "!scan*"]        # glob patterns
-  - type: bead
-    match:
-      nudge_target: scanner                 # match bead metadata key=value
 ```
 
 ### Channel Types
@@ -119,10 +109,13 @@ channels:
 | Type | Required Fields | Description |
 |------|----------------|-------------|
 | `kick` | — | Governor timer kicks (cadence-based) |
-| `webhook` | `events` | GitHub webhook events (e.g. `issues.opened`, `push`) |
-| `schedule` | `schedule` | Cron-based scheduling (`github.com/robfig/cron/v3` syntax) |
-| `discord` | `patterns` | Discord message pattern matching |
-| `bead` | `match` | Trigger on bead metadata match |
+
+`kick` is the only supported type. The former `webhook` / `schedule` / `discord` /
+`bead` trigger types were declarative-only: the runtime meant to serve them
+(`pkg/channels`) was never wired into the binary and was removed (#5591).
+Declaring one of them used to validate cleanly and then silently suppress
+governor kicks, leaving the agent permanently dormant — config validation now
+rejects them instead.
 
 ### Common Fields
 
@@ -130,23 +123,12 @@ channels:
 |-------|------|---------|-------------|
 | `type` | string | **required** | Channel type |
 | `enabled` | *bool | true | Toggle without removing |
-| `repos` | []string | — | Webhook: filter events to these repos |
 
 ### Backward Compatibility
 
 - **No channels field** → agent uses governor timer kicks (identical to pre-v3 behavior)
 - **Explicit `kick` channel** → same as no channels, but makes the intent visible
-- **Channels without `kick`** → agent is NOT kicked by the governor; only receives triggers from its declared channels
 - `on_demand: true` still overrides all scheduling regardless of channels
-
-### Template Variables
-
-Kick messages can reference the trigger context:
-
-| Variable | Description |
-|----------|-------------|
-| `${CHANNEL_TYPE}` | What triggered this kick: `kick`, `webhook`, `schedule`, `discord`, `bead` |
-| `${CHANNEL_EVENT}` | Event detail: webhook event name, cron expression, bead ID |
 
 ---
 
@@ -366,11 +348,6 @@ agents:
 
     channels:
       - type: kick
-      - type: webhook
-        events: ["issues.opened", "issues.labeled"]
-      - type: bead
-        match:
-          nudge_target: scanner
 
     tools:
       preset: full

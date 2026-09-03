@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	gh "github.com/google/go-github/v72/github"
@@ -150,6 +151,33 @@ const (
 	// this forces roughly one real write per hour — enough to keep the
 	// App-banner logic honest while still eliminating ~98% of the no-op edits.
 	advisoryDigestWriteThroughInterval = 60
+	// advisoryDigestCommentsPerPage is the page size used when scanning a
+	// target's comments for the bot's own digest. 100 is GitHub's maximum for
+	// this endpoint; using anything smaller only multiplies the number of
+	// round trips needed to cover the same history.
+	advisoryDigestCommentsPerPage = 100
+	// advisoryDigestScanMaxPages bounds that scan (#5522). findDigestComment
+	// used to read ONE page of 50 and stop, so on any target carrying more
+	// than ~50 comments the bot could not see its own digest and CREATEd a
+	// fresh one every cycle instead of EDITing — each new comment pushing the
+	// digest one position further out of reach. That is the mechanism that
+	// turned a repeat-post bug into 250 separate comments on
+	// ibm/alchemy-logging#686.
+	//
+	// The scan now walks pages NEWEST-FIRST (direction=desc), because the
+	// bot's own digest is overwhelmingly likely to be recent: the common case
+	// resolves on page 1 at the same one-call cost as before, and a target
+	// with thousands of ancient comments is still covered near its head.
+	//
+	// 10 pages x 100 = the most recent 1,000 comments per cycle. WHEN THE CAP
+	// IS HIT the scan stops and reports "not found" — the same answer it gives
+	// for a genuinely absent digest, so the post path CREATEs a new digest
+	// comment. That is a deliberate trade: a digest older than the 1,000 most
+	// recent comments on a target is effectively unreachable, and one new
+	// comment (which every later cycle then finds on page 1 and edits) is
+	// preferable to walking unbounded history on every ~60s cycle. The cap
+	// being hit is logged at Warn so the case is visible rather than silent.
+	advisoryDigestScanMaxPages = 10
 )
 
 // PostAdvisoryDigest updates the existing digest comment on the advisory issue,
@@ -199,23 +227,80 @@ func (c *Client) PostAdvisoryDigest(ctx context.Context, repo string, issueNum i
 	if c.advisoryDigestSkips == nil {
 		c.advisoryDigestSkips = make(map[string]int)
 	}
-	if c.advisoryDigestHashes[key] == digestHash &&
-		c.advisoryDigestSkips[key] < advisoryDigestWriteThroughInterval-1 {
-		c.advisoryDigestSkips[key]++
-		skips := c.advisoryDigestSkips[key]
-		c.advisoryMu.Unlock()
-		c.logger.Debug("advisory digest unchanged — skipping forge write",
-			slog.String("repo", repo), slog.Int("issue", issueNum),
-			slog.Int("consecutive_skips", skips))
-		return nil
+	// writeThrough records that this cycle is the periodic re-proof of write
+	// permission rather than a content update. The #5507 suppression below
+	// must NOT swallow it: its whole purpose is to make a 403 regression
+	// visible, and a suppressed cycle performs no write and so proves nothing.
+	writeThrough := false
+	if c.advisoryDigestHashes[key] == digestHash {
+		if c.advisoryDigestSkips[key] < advisoryDigestWriteThroughInterval-1 {
+			c.advisoryDigestSkips[key]++
+			skips := c.advisoryDigestSkips[key]
+			c.advisoryMu.Unlock()
+			c.logger.Debug("advisory digest unchanged — skipping forge write",
+				slog.String("repo", repo), slog.Int("issue", issueNum),
+				slog.Int("consecutive_skips", skips))
+			return nil
+		}
+		writeThrough = true
 	}
 	c.advisoryMu.Unlock()
 
-	commentID, err := c.findDigestComment(ctx, owner, repoName, issueNum)
+	existing, err := c.findDigestCommentDetail(ctx, owner, repoName, issueNum)
 	if err != nil {
 		c.logger.Warn("could not search for existing digest comment, creating new", slog.String("error", err.Error()))
 	}
 
+	// Repeat suppression (#5507). The baseline is the digest ALREADY ON THE
+	// TARGET, just fetched above — not process memory — so a governor that
+	// restarts (the login-blocked spokes in the report restart often) reaches
+	// the same decision instead of forgetting and resuming the spam. See
+	// advisory_suppress.go for why the material fingerprint must exclude
+	// timestamps, and for the zero-finding cap.
+	//
+	// Note this suppresses the EDIT of an existing digest comment as well as
+	// the creation of a new one. Editing is cheap for subscribers (GitHub does
+	// not re-notify on an edit), but the runaway in #5507 was CREATION: once a
+	// target accumulates more than one page of comments, findDigestComment no
+	// longer sees the bot's own digest and every cycle creates a fresh one.
+	// Suppressing on material content stops that at the source regardless of
+	// which branch the write would have taken.
+	sup := evaluateDigestSuppression(digest, existing.body, existing.found(), existing.updatedAt, time.Now())
+	if sup.suppress && writeThrough {
+		c.logger.Debug("advisory digest suppression overridden by periodic write-through",
+			slog.String("repo", repo), slog.Int("issue", issueNum),
+			slog.String("reason", sup.reason))
+		sup = digestSuppression{}
+	}
+	if sup.suppress {
+		// A suppressed cycle counts toward the write-through streak exactly as
+		// an #4818 unchanged-skip does. Without this the streak would never
+		// advance past 0 — every cycle would be suppressed here BEFORE the
+		// counter was touched — and the periodic permission re-proof would
+		// stop firing forever, silently disabling the 403 regression probe.
+		c.advisoryMu.Lock()
+		c.advisoryDigestHashes = ensureStringMap(c.advisoryDigestHashes)
+		c.advisoryDigestHashes[key] = digestHash
+		c.advisoryDigestSkips[key]++
+		c.advisoryMu.Unlock()
+
+		// Audit-log only — deliberately NOT a comment on the issue, which
+		// would swap one kind of subscriber noise for another.
+		c.recordCreationAudit(AuditActionAdvisoryDigestSuppressed, InvocationMeta{Agent: AttributionAgentGovernor},
+			"repo", owner+"/"+repoName,
+			"number", strconv.Itoa(issueNum),
+			"reason", sup.reason,
+			"flow", "advisory-digest")
+		c.logger.Info("advisory digest suppressed — not posting",
+			slog.String("repo", repo), slog.Int("issue", issueNum),
+			slog.String("reason", sup.reason))
+		// nil, like the #4818 unchanged-skip: a suppressed cycle is a HEALTHY
+		// cycle, so the caller's success path still advances the
+		// advisory-staleness freshness record rather than alarming the hub.
+		return nil
+	}
+
+	commentID := existing.id
 	var author string
 	if commentID > 0 {
 		edited, _, err := c.client.Issues.EditComment(ctx, owner, repoName, int64(commentID), &gh.IssueComment{
@@ -331,15 +416,77 @@ func (c *Client) ensureAdvisoryLabel(ctx context.Context, owner, repo string, is
 	_, _, _ = c.client.Issues.AddLabelsToIssue(ctx, owner, repo, issueNum, []string{advisoryLabelName})
 }
 
+// findDigestComment returns the ID of the digest comment this client should
+// edit, or 0 if none exists. It is the narrow form of findDigestCommentDetail,
+// kept because most callers only need the ID.
 func (c *Client) findDigestComment(ctx context.Context, owner, repo string, issueNum int) (int, error) {
+	d, err := c.findDigestCommentDetail(ctx, owner, repo, issueNum)
+	return d.id, err
+}
+
+// digestComment is the existing digest comment on a target, used both as the
+// edit destination and as the restart-safe baseline for repeat suppression
+// (#5507): its body is what the pending digest is compared against, and its
+// last-update time is what the zero-finding cap measures from.
+type digestComment struct {
+	// id is the comment ID to edit, 0 when no adoptable digest comment exists.
+	id int
+	// body is the comment's current rendered body.
+	body string
+	// updatedAt is when the comment was last written.
+	updatedAt time.Time
+}
+
+// found reports whether an existing digest comment was located.
+func (d digestComment) found() bool { return d.id > 0 }
+
+func (c *Client) findDigestCommentDetail(ctx context.Context, owner, repo string, issueNum int) (digestComment, error) {
+	// #5522: scan newest-first and paginate. See advisoryDigestScanMaxPages
+	// for the bound and for what happens when it is reached.
 	opts := &gh.IssueListCommentsOptions{
-		ListOptions: gh.ListOptions{PerPage: 50},
+		Sort:      gh.Ptr("created"),
+		Direction: gh.Ptr("desc"),
+		ListOptions: gh.ListOptions{
+			PerPage: advisoryDigestCommentsPerPage,
+		},
 	}
-	comments, _, err := c.client.Issues.ListComments(ctx, owner, repo, issueNum, opts)
-	if err != nil {
-		return 0, err
+	var botAuthored digestComment
+	pages := 0
+	for {
+		comments, resp, err := c.client.Issues.ListComments(ctx, owner, repo, issueNum, opts)
+		if err != nil {
+			// A partial scan that already found a usable fallback still
+			// beats creating a duplicate, so surface the error but keep
+			// whatever the earlier pages turned up.
+			return botAuthored, err
+		}
+		pages++
+		found, done := c.scanDigestPage(owner, repo, issueNum, comments, &botAuthored)
+		if done {
+			return found, nil
+		}
+		if resp == nil || resp.NextPage == 0 {
+			return botAuthored, nil
+		}
+		if pages >= advisoryDigestScanMaxPages {
+			c.logger.Warn("advisory digest comment scan hit its page cap — treating the digest as absent, which will CREATE a new one",
+				slog.String("repo", owner+"/"+repo),
+				slog.Int("issue", issueNum),
+				slog.Int("pages_scanned", pages),
+				slog.Int("comments_scanned", pages*advisoryDigestCommentsPerPage))
+			return botAuthored, nil
+		}
+		opts.Page = resp.NextPage
 	}
-	var botAuthored int64
+}
+
+// scanDigestPage applies the authorship rules to one page of comments. It
+// returns (comment, true) when it has found the definitive digest to edit and
+// the scan can stop, or (_, false) to continue to the next page. A
+// bot-authored-but-not-provably-ours comment is remembered in botAuthored as a
+// fallback rather than ending the scan, so a later page can still yield an
+// exact match.
+func (c *Client) scanDigestPage(owner, repo string, issueNum int, comments []*gh.IssueComment, botAuthored *digestComment) (digestComment, bool) {
 	for _, comment := range comments {
 		if !strings.HasPrefix(comment.GetBody(), advisoryDigestPrefix) {
 			continue
@@ -348,20 +495,22 @@ func (c *Client) findDigestComment(ctx context.Context, owner, repo string, issu
 			// Token (PAT) client: historical prefix-only match. The credential
 			// may legitimately be the human who authored the comment, and
 			// authorship cannot be verified without an extra /user round trip.
-			return int(comment.GetID()), nil
+			return digestCommentFrom(comment), true
 		}
 		login := comment.GetUser().GetLogin()
 		if c.appBotLogin != "" && login == c.appBotLogin {
 			// Exactly our own bot comment — the one credential-safe choice.
-			return int(comment.GetID()), nil
+			return digestCommentFrom(comment), true
 		}
 		if strings.HasSuffix(login, "[bot]") || comment.GetUser().GetType() == "Bot" {
 			// Bot-authored but not provably ours (bot login unknown, or a slug
 			// mismatch between config and the real App). Remember the first as
 			// a fallback rather than skipping it: refusing our own comment on
 			// a misconfigured slug would create a duplicate every cycle.
-			if botAuthored == 0 {
-				botAuthored = comment.GetID()
+			// "First" is now the NEWEST such comment, since the scan runs
+			// newest-first.
+			if !botAuthored.found() {
+				*botAuthored = digestCommentFrom(comment)
 			}
 			continue
 		}
@@ -379,7 +528,25 @@ func (c *Client) findDigestComment(ctx context.Context, owner, repo string, issu
 			slog.Int64("comment_id", comment.GetID()),
 			slog.String("author", login))
 	}
-	return int(botAuthored), nil
+	return digestComment{}, false
+}
+
+// digestCommentFrom projects the fields the post path needs out of a forge
+// comment. UpdatedAt is preferred over CreatedAt: the digest comment is EDITED
+// in place, so the last write — not the original creation — is what the
+// zero-finding cap must measure from. A comment that has never been edited
+// reports UpdatedAt == CreatedAt, so the fallback is only for forges that omit
+// it entirely.
+func digestCommentFrom(comment *gh.IssueComment) digestComment {
+	at := comment.GetUpdatedAt().Time
+	if at.IsZero() {
+		at = comment.GetCreatedAt().Time
+	}
+	return digestComment{
+		id:        int(comment.GetID()),
+		body:      comment.GetBody(),
+		updatedAt: at,
+	}
 }
 
 func (c *Client) findAdvisoryIssue(ctx context.Context, owner, repo string) (int, error) {

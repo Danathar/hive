@@ -231,8 +231,13 @@ func (m *Manager) deliverKickAsync(name, message string) error {
 	// consumed by the menu, or by bash once "No, exit" exits the CLI.
 	pane := m.captureVisiblePaneForAgent(agent)
 	if !paneHasCLIMarker(pane) || paneShowsConsentScreen(pane) {
+		consentScreen := paneShowsConsentScreen(pane)
+		if consentScreen {
+			// Same wedge bookkeeping as SendKick — see noteConsentWedge.
+			m.noteConsentWedge(name)
+		}
 		m.logger.Warn("agent CLI crashed or stuck on consent screen, restarting before kick",
-			"name", name, "consent_screen", paneShowsConsentScreen(pane))
+			"name", name, "consent_screen", consentScreen)
 		m.mu.Unlock()
 		if err := m.Restart(context.Background(), name); err != nil {
 			return fmt.Errorf("failed to restart crashed agent %s: %w", name, err)

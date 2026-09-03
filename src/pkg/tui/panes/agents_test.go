@@ -188,3 +188,79 @@ func TestAgentsViewFillsItsBoxExactly(t *testing.T) {
 		}
 	}
 }
+
+// TestSelectedAgentDetailReportsTheRowUnderTheCursor is the accessor the model
+// picker opens through. It exists so the app never reaches into pane internals
+// for a row, and it returns Name separately from Display because the write it
+// feeds addresses the agent by its CONFIG KEY.
+func TestSelectedAgentDetailReportsTheRowUnderTheCursor(t *testing.T) {
+	if _, _, _, _, ok := NewAgents().SelectedAgentDetail(); ok {
+		t.Error("a pre-poll pane offers a selected agent, so m would open on nothing")
+	}
+
+	loaded, _ := NewAgents().Update(AgentsMsg{Agents: []client.Agent{
+		{Name: "scanner", DisplayName: "Fleet Scanner", Backend: "claude", Model: "claude-opus-4-5", Enabled: true},
+		{Name: "quality", Backend: "copilot", Model: "gpt-5", Enabled: true},
+	}})
+	name, display, backend, model, ok := loaded.(Agents).SelectedAgentDetail()
+	if !ok {
+		t.Fatal("a loaded pane reports no selected agent")
+	}
+	if name != "scanner" || display != "Fleet Scanner" || backend != "claude" || model != "claude-opus-4-5" {
+		t.Errorf("SelectedAgentDetail() = (%q, %q, %q, %q), want the first row", name, display, backend, model)
+	}
+
+	moved, _ := loaded.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	name, display, backend, _, _ = moved.(Agents).SelectedAgentDetail()
+	if name != "quality" || backend != "copilot" {
+		t.Errorf("after j, SelectedAgentDetail() = (%q, %q), want the second row", name, backend)
+	}
+	// client.Agent marshals displayName with omitempty, so the pane falls back
+	// to Name exactly as the handler does.
+	if display != "quality" {
+		t.Errorf("display = %q, want a fallback to the agent's name", display)
+	}
+}
+
+// TestSetAgentModelAppliesTheAuthoritativeResponse: the write's response is
+// applied to the visible row immediately, so a successful change is not left
+// showing the old model for a poll interval.
+func TestSetAgentModelAppliesTheAuthoritativeResponse(t *testing.T) {
+	loaded, _ := NewAgents().Update(AgentsMsg{Agents: []client.Agent{agent("scanner")}})
+	p := loaded.(Agents)
+
+	updated := p.SetAgentModel("scanner", "claude-sonnet-4-5")
+	if _, _, _, model, _ := updated.SelectedAgentDetail(); model != "claude-sonnet-4-5" {
+		t.Errorf("row model = %q, want the applied model", model)
+	}
+	if !strings.Contains(updated.View(60, 10), "claude-sonnet") {
+		t.Errorf("the rendered row does not show the applied model:\n%s", updated.View(60, 10))
+	}
+	// The original value is untouched: Update's rule is that the input model
+	// is never mutated, and the roster is a slice shared by value.
+	if _, _, _, model, _ := p.SelectedAgentDetail(); model != "claude-opus-4-5" {
+		t.Errorf("SetAgentModel mutated the receiver's roster; model = %q", model)
+	}
+}
+
+// TestSetAgentModelIgnoresUnknownAgentsAndEmptyModels. A response naming an
+// agent the roster does not list is stale or wrong, and inventing a row from
+// it would show an agent /api/agents does not. An empty model would blank the
+// column with no fact behind it.
+func TestSetAgentModelIgnoresUnknownAgentsAndEmptyModels(t *testing.T) {
+	loaded, _ := NewAgents().Update(AgentsMsg{Agents: []client.Agent{agent("scanner")}})
+	p := loaded.(Agents)
+
+	for _, tc := range []struct{ name, model string }{
+		{"ghost", "claude-sonnet-4-5"},
+		{"scanner", ""},
+	} {
+		got := p.SetAgentModel(tc.name, tc.model)
+		if _, _, _, model, _ := got.SelectedAgentDetail(); model != "claude-opus-4-5" {
+			t.Errorf("SetAgentModel(%q, %q) changed the row to %q", tc.name, tc.model, model)
+		}
+		if view := got.View(60, 10); !strings.Contains(view, "claude-opus") {
+			t.Errorf("SetAgentModel(%q, %q) corrupted the row:\n%s", tc.name, tc.model, view)
+		}
+	}
+}

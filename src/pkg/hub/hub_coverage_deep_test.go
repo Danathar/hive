@@ -2,7 +2,6 @@ package hub
 
 import (
 	"encoding/json"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -34,7 +33,7 @@ func TestHandleToggleAutoUpgradeRegistryHiveOwnerMatch(t *testing.T) {
 	cleanup := helperSetupAuthUser(t, "ghp_toggle_owner", "toggle-owner")
 	defer cleanup()
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.mu.Lock()
 	srv.registry.Hives = []RegistryEntry{
 		{ID: "toggle-reg-hive", Owner: "toggle-owner", Online: true, GitHash: "abc123", GitBranch: "v2"},
@@ -61,7 +60,7 @@ func TestHandleToggleAutoUpgradeRegistryHiveForbidden(t *testing.T) {
 	cleanup := helperSetupAuthUser(t, "ghp_toggle_nonowner", "not-the-owner")
 	defer cleanup()
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.mu.Lock()
 	srv.registry.Hives = []RegistryEntry{
 		{ID: "forbidden-hive", Owner: "actual-owner", Online: true},
@@ -87,7 +86,7 @@ func TestHandleToggleAutoUpgradeRegistryHiveBadBody(t *testing.T) {
 	cleanup := helperSetupAuthUser(t, "ghp_toggle_bad", "toggle-owner-bad")
 	defer cleanup()
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.mu.Lock()
 	srv.registry.Hives = []RegistryEntry{
 		{ID: "badbody-hive", Owner: "toggle-owner-bad", Online: true},
@@ -117,7 +116,7 @@ func TestHandleUpgradeHiveForbidden(t *testing.T) {
 	cleanup := helperSetupAuthUser(t, "ghp_upgrade_notown", "not-owner")
 	defer cleanup()
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	// We can't create a SaaS hive file, so loadSaaSHive returns nil → 404
 	mux := http.NewServeMux()
@@ -142,7 +141,7 @@ func TestHandleToggleVisibilityForbidden(t *testing.T) {
 	cleanup := helperSetupAuthUser(t, "ghp_vis_notown", "not-vis-owner")
 	defer cleanup()
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("PUT /api/saas/hives/{id}/visibility", srv.handleToggleVisibility)
@@ -168,7 +167,7 @@ func TestHandleDeleteHiveWithAuth(t *testing.T) {
 	cleanup := helperSetupAuthUser(t, "ghp_del_user", "del-user")
 	defer cleanup()
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("DELETE /api/saas/hives/{id}", srv.handleDeleteHive)
@@ -205,7 +204,7 @@ func TestHandleAccessListWithAuth(t *testing.T) {
 	cleanup := helperSetupAuthUser(t, "ghp_acl_user", "acl-user")
 	defer cleanup()
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/saas/hives/{id}/access", srv.handleAccessList)
@@ -224,7 +223,7 @@ func TestHandleAccessAddWithAuth(t *testing.T) {
 	cleanup := helperSetupAuthUser(t, "ghp_add_user", "add-user")
 	defer cleanup()
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/saas/hives/{id}/access", srv.handleAccessAdd)
@@ -245,7 +244,7 @@ func TestHandleAccessRemoveWithAuth(t *testing.T) {
 	cleanup := helperSetupAuthUser(t, "ghp_rm_user", "rm-user")
 	defer cleanup()
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("DELETE /api/saas/hives/{id}/access/{username}", srv.handleAccessRemove)
@@ -265,7 +264,7 @@ func TestHandleAccessRemoveWithAuth(t *testing.T) {
 // ============================================================
 
 func TestHandleAccessAddBadBody(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/saas/hives/{id}/access", srv.handleAccessAdd)
@@ -290,7 +289,7 @@ func TestHandleRequestAccessWithAuth(t *testing.T) {
 	cleanup := helperSetupAuthUser(t, "ghp_reqacc", "req-user")
 	defer cleanup()
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/saas/hives/{id}/request-access", srv.handleRequestAccess)
 
@@ -308,7 +307,7 @@ func TestHandleGetRequestsWithAuth(t *testing.T) {
 	cleanup := helperSetupAuthUser(t, "ghp_getreq", "getreq-user")
 	defer cleanup()
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/saas/hives/{id}/requests", srv.handleGetRequests)
 
@@ -326,7 +325,7 @@ func TestHandleApproveRequestWithAuth(t *testing.T) {
 	cleanup := helperSetupAuthUser(t, "ghp_approve", "approver")
 	defer cleanup()
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/saas/hives/{id}/requests/{username}/approve", srv.handleApproveRequest)
 
@@ -346,7 +345,7 @@ func TestHandleDenyRequestWithAuth(t *testing.T) {
 	cleanup := helperSetupAuthUser(t, "ghp_deny", "denier")
 	defer cleanup()
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/saas/hives/{id}/requests/{username}/deny", srv.handleDenyRequest)
 
@@ -368,7 +367,7 @@ func TestHandleApproveAccessWithAuth(t *testing.T) {
 	cleanup := helperSetupAuthUser(t, "ghp_appracc", "approver-acc")
 	defer cleanup()
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("PUT /api/saas/hives/{id}/approve-access/{username}", srv.handleApproveAccess)
 
@@ -386,7 +385,7 @@ func TestHandleDenyAccessWithAuth(t *testing.T) {
 	cleanup := helperSetupAuthUser(t, "ghp_denyacc", "denier-acc")
 	defer cleanup()
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("DELETE /api/saas/hives/{id}/deny-access/{username}", srv.handleDenyAccess)
 
@@ -408,7 +407,7 @@ func TestHandleCreateHiveWithAuthNoUser(t *testing.T) {
 	cleanup := helperSetupAuthUser(t, "ghp_create_nouser", "create-user")
 	defer cleanup()
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	req := httptest.NewRequest("POST", "/create-hive",
 		strings.NewReader(`{"org":"myorg","repos":"repo1","github_token":"ghp_fake123"}`))
@@ -431,7 +430,7 @@ func TestHandleHiveStatusWithAuth(t *testing.T) {
 	cleanup := helperSetupAuthUser(t, "ghp_status_user", "status-user")
 	defer cleanup()
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/saas/hives/{id}/status", srv.handleHiveStatus)
 
@@ -453,7 +452,7 @@ func TestHandleAccessStatusWithUserAndHives(t *testing.T) {
 	cleanup := helperSetupAuthUser(t, "ghp_accstat_user", "accstat-user")
 	defer cleanup()
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	now := time.Now().Format(time.RFC3339)
 	srv.mu.Lock()
 	srv.registry.Hives = []RegistryEntry{
@@ -489,7 +488,7 @@ func TestHandleSaaSAuthCheckUserNoAccessFile(t *testing.T) {
 	cleanup := helperSetupAuthUser(t, "ghp_authcheck_user", "authcheck-user")
 	defer cleanup()
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	req := httptest.NewRequest("GET", "/api/saas/auth-check?hive=some-hive", nil)
 	req.Header.Set("Authorization", "Bearer ghp_authcheck_user")
@@ -510,7 +509,7 @@ func TestHandleMyHivesAdminWithBearer(t *testing.T) {
 	cleanup := helperSetupAuthUser(t, "ghp_admin_my", hubAdminUsername)
 	defer cleanup()
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	now := time.Now().Format(time.RFC3339)
 	srv.mu.Lock()
 	srv.registry.Hives = []RegistryEntry{
@@ -537,7 +536,7 @@ func TestHandleUserTokenSelfRequest(t *testing.T) {
 	cleanup := helperSetupAuthUser(t, "ghp_usertoken", "token-user")
 	defer cleanup()
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	body := `{"hive_id":"h1","username":"token-user"}`
 	req := httptest.NewRequest("POST", "/user-token", strings.NewReader(body))
@@ -556,7 +555,7 @@ func TestHandleUserTokenAdminRequestOther(t *testing.T) {
 	cleanup := helperSetupAuthUser(t, "ghp_admin_token", hubAdminUsername)
 	defer cleanup()
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	body := `{"hive_id":"h1","username":"other-user"}`
 	req := httptest.NewRequest("POST", "/user-token", strings.NewReader(body))
@@ -579,7 +578,7 @@ func TestHandleRequestProvisionValidBody(t *testing.T) {
 	cleanup := helperSetupAuthUser(t, "ghp_prov_valid", "prov-valid-user")
 	defer cleanup()
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	// github_host is required: a request must name the GitHub forge its org
 	// lives on, so a "valid body" fixture has to carry one.
@@ -601,7 +600,7 @@ func TestHandleRequestProvisionACMMLevelDefault(t *testing.T) {
 	cleanup := helperSetupAuthUser(t, "ghp_prov_acmm", "prov-acmm-user")
 	defer cleanup()
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	// Carries github_host AND full_name on purpose: both are required, and
 	// omitting either makes the handler 400 long before the ACMM clamp this
@@ -629,7 +628,7 @@ func TestHandleRequestProvisionACMMLevelHigh(t *testing.T) {
 	cleanup := helperSetupAuthUser(t, "ghp_prov_high", "prov-high-user")
 	defer cleanup()
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	// See TestHandleRequestProvisionACMMLevelDefault: github_host and full_name
 	// are required, so a fixture missing them never reaches the clamp.
@@ -655,7 +654,7 @@ func TestHandleApproveProvisionWithAdminAuth(t *testing.T) {
 	cleanup := helperSetupAuthUser(t, "ghp_approv_admin", hubAdminUsername)
 	defer cleanup()
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("PUT /api/saas/approve-provision/{username}", srv.handleApproveProvision)
@@ -674,7 +673,7 @@ func TestHandleDenyProvisionWithAdminAuth(t *testing.T) {
 	cleanup := helperSetupAuthUser(t, "ghp_deny_admin", hubAdminUsername)
 	defer cleanup()
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("DELETE /api/saas/deny-provision/{username}", srv.handleDenyProvision)
@@ -694,7 +693,7 @@ func TestHandleDenyProvisionWithAdminAuth(t *testing.T) {
 // ============================================================
 
 func TestHandleAdminUpdateUserWithAdminAuth(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("PUT /api/saas/admin/users/{username}", srv.handleAdminUpdateUser)
@@ -720,7 +719,7 @@ func TestRequireAuthUserNilAfterEnsure(t *testing.T) {
 	cleanup := helperSetupAuthUser(t, "ghp_blocked_test", "blocked-test-user")
 	defer cleanup()
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	handler := srv.requireAuth(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -745,7 +744,7 @@ func TestHandleAuthUserKnownButNotInFile(t *testing.T) {
 	cleanup := helperSetupAuthUser(t, "ghp_authuser_known", "known-user")
 	defer cleanup()
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 
 	req := httptest.NewRequest("GET", "/test", nil)
 	req.Header.Set("Authorization", "Bearer ghp_authuser_known")
@@ -767,7 +766,7 @@ func TestHandleAuthUserKnownButNotInFile(t *testing.T) {
 // ============================================================
 
 func TestHandleHeartbeatAutoUpgradeSpokeRequest(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.setHubSecret("")
 
 	// Set latest SHA
@@ -798,7 +797,7 @@ func TestHandleHeartbeatAutoUpgradeSpokeRequest(t *testing.T) {
 }
 
 func TestHandleHeartbeatAutoUpgradeNoUpgradeNeeded(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.setHubSecret("")
 
 	latestSHAMu.Lock()
@@ -824,7 +823,7 @@ func TestHandleHeartbeatAutoUpgradeNoUpgradeNeeded(t *testing.T) {
 }
 
 func TestHandleHeartbeatAutoUpgradeEmptyGitHash(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.setHubSecret("")
 
 	latestSHAMu.Lock()
@@ -851,7 +850,7 @@ func TestHandleHeartbeatAutoUpgradeEmptyGitHash(t *testing.T) {
 }
 
 func TestHandleHeartbeatDefaultBranch(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.setHubSecret("")
 
 	// No git_branch → defaults to "v2"

@@ -65,7 +65,7 @@ func (f *fakeReachAncestry) IsAncestor(ancestor, descendant string) (bool, error
 // would reach handleReach and answer 200 with reach data, so every assertion
 // below fails (verified by mutating the registration during development).
 func TestReachEndpointRequiresAdmin(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	// Data IS available — the gate, not a missing dependency, must refuse.
 	mergedAt := time.Now().Add(-48 * time.Hour)
 	srv.reachPRSource = &fakeReachPRSource{prs: map[int]reach.PRInfo{
@@ -106,7 +106,7 @@ func TestReachEndpointRequiresAdmin(t *testing.T) {
 // TestHandleReachNoSource: with no GitHub PR source wired (hub without
 // credentials), the handler reports 503 — never fabricated data.
 func TestHandleReachNoSource(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	req := httptest.NewRequest("GET", "/api/reach", nil)
 	w := httptest.NewRecorder()
 	srv.handleReach(w, req)
@@ -117,7 +117,7 @@ func TestHandleReachNoSource(t *testing.T) {
 
 // TestHandleReachBadParams: malformed queries are 400s, not upstream calls.
 func TestHandleReachBadParams(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.reachPRSource = &fakeReachPRSource{err: errors.New("must not be called")}
 	for _, q := range []string{"?pr=abc", "?pr=-1", "?recent=0", "?recent=99999", "?recent=x"} {
 		req := httptest.NewRequest("GET", "/api/reach"+q, nil)
@@ -136,7 +136,7 @@ func TestHandleReachSinglePR(t *testing.T) {
 	mergedAt := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
 	firstRun := mergedAt.Add(90 * time.Minute)
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.reachPRSource = &fakeReachPRSource{prs: map[int]reach.PRInfo{
 		3994: {
 			Number:      3994,
@@ -276,7 +276,7 @@ func TestHandleReachErrorDeltas(t *testing.T) {
 	mergedAt := time.Now().UTC().Add(-4 * time.Hour)
 	firstRun := mergedAt.Add(30 * time.Minute)
 
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.reachPRSource = &fakeReachPRSource{prs: map[int]reach.PRInfo{
 		3995: {
 			Number:      3995,

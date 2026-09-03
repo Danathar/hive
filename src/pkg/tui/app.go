@@ -31,6 +31,15 @@
 // fallback and the reconciler: healthy stream, 60s reconcile; dropped stream,
 // back to the 5s poll and a header that says so. See the SSE section at the
 // bottom of this file.
+//
+// T32 (#5421): there are TWO poll loops, because the stretch above is only
+// correct for the data the stream carries. Once T30 and T31 hung /api/tokens,
+// /api/cost and /api/audit off the same timer, a healthy stream stretched them
+// to 60s as well — so the Tokens and Events panes became twelve times staler
+// at exactly the moment the header started saying `ws: connected`. The
+// reconciliation loop keeps the 5s/60s behaviour above; the activity loop runs
+// at 5s unconditionally, with its own message type and generation. See poll.go
+// for the split and which reads belong to which class.
 package tui
 
 import (
@@ -39,6 +48,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -101,19 +111,28 @@ var (
 	confirmErrorStyle = lipgloss.NewStyle().Bold(true)
 )
 
-// headerFormat is the header bar, with the SSE connection state as its only
-// live field after T13b. The other two still carry placeholders, and each one
-// is a fact about what is not fetched yet rather than an oversight:
+// headerFormat is the header bar. All three fields are live after T29.
 //
-//   - `hive:` — the hive's name is on GET /api/status (StatusPayload.HiveID),
-//     which no merged client method reads. T6's /api/status client decodes the
-//     governor slice; until a client call exposes the id, inventing one here
-//     would be a guess rendered as a fact.
-//   - `governor:` — same endpoint, T6/T7's to fill.
+// THE THREE FIELDS ARE INDEPENDENT, and the format string is written to make
+// that hard to undo. `hive:` and `governor:` come from two separately-failing
+// polls, and `ws:` is not data at all — it is whether the stream is up. A
+// header that derived identity or mode from the connection would go blank on
+// every reconnect while the cached values were still perfectly good, which is
+// the specific mistake T29's "do not treat an SSE connection as the data
+// value" exists to rule out.
 //
-// A dash is "not known", which is true; any value polled data does not support
-// would be false.
-const headerFormat = "hive: —   governor: —   ws: %s"
+// A dash is "not known", which is true; any value the polled data does not
+// support would be false. That covers four distinct situations deliberately
+// rendered the same way — no successful read yet, a read that failed, a hive
+// with no configured identity, and a governor that is not active — because the
+// operator's question is what the frame can be trusted to show, and the answer
+// in all four cases is "not this field".
+const headerFormat = "hive: %s   governor: %s   ws: %s"
+
+// headerUnknown is the header's dash for any field without a trustworthy
+// value. It is the em dash the design sketch and the Governor pane already
+// use, named once so the header and the pane cannot drift apart.
+const headerUnknown = "—"
 
 // The two `ws:` values, and why there are only two.
 //
@@ -131,11 +150,17 @@ const (
 	wsNotConnected = "not connected"
 )
 
-// footerText lists only the bindings that EXIST. The sketch's full strip
-// (m model, A acmm, …) documents keys whose tasks have not landed;
-// showing them now would advertise actions that silently do nothing. Each
-// action task appends its own binding when it wires the key.
-const footerText = "tab focus  p pause/resume  K kick  a attach  ? help  q quit"
+// footerText lists only the bindings that EXIST. The design sketch's strip
+// documents the whole roadmap, and showing a key before its task lands would
+// advertise an action that silently does nothing — so each action task appends
+// its own binding when it wires the key. As of T19 (`A acmm`) the strip has
+// caught up with the sketch, but the rule is what matters, not the parity.
+//
+// The strip is now LONGER than the 60-column minimum terminal, which is not
+// free: lipgloss's Width() wraps rather than truncates, so it has to be clipped
+// before it is padded or it becomes a second footer row. See View, and
+// TestFooterIsClippedNotWrappedAtTheMinimumWidth.
+const footerText = "tab focus  p pause/resume  m model  A acmm  K kick  a attach  ? help  q quit"
 
 // confirmState is the pause/resume dialog. It remains present while the HTTP
 // command is in flight so every other key stays behind the modal, and it also
@@ -167,6 +192,49 @@ type kickResultMsg struct {
 	agent  string
 	result client.KickResult
 	err    error
+}
+
+// modelListMsg is the asynchronous result of the model picker's catalogue
+// call. The pickerID it was issued for travels with it so a response for an
+// overlay the operator has already closed — or closed and reopened — cannot
+// populate the newer one with the older one's backend.
+type modelListMsg struct {
+	pickerID uint64
+	list     client.ModelList
+	err      error
+}
+
+// modelSetMsg is the asynchronous result of applying a model. Like
+// agentActionMsg it carries its own identity plus the target, because this
+// write RESTARTS the agent's session: a response matched to the wrong overlay
+// would report a restart that did not happen to that agent.
+type modelSetMsg struct {
+	pickerID uint64
+	agent    string
+	model    string
+	result   client.ModelSetResult
+	err      error
+}
+
+// acmmPacksMsg is the asynchronous result of the ACMM overlay's pack list
+// call. Like modelListMsg it carries the overlayID it was issued for, so a
+// response for an overlay the operator has already closed — or closed and
+// reopened — cannot populate the newer one with the older one's snapshot.
+type acmmPacksMsg struct {
+	overlayID uint64
+	status    client.ACMMStatus
+	err       error
+}
+
+// acmmApplyMsg is the asynchronous result of applying a level. It carries the
+// level as well as the overlay identity because this is the widest write in the
+// API: a response matched to the wrong overlay would report a fleet-wide
+// reconciliation against a level nobody asked for.
+type acmmApplyMsg struct {
+	overlayID uint64
+	level     int
+	result    client.ACMMLevelResult
+	err       error
 }
 
 // model is the root bubbletea model.
@@ -208,6 +276,31 @@ type model struct {
 	// owns every key while visible; unlike help, only y, n and esc act on it.
 	confirm *confirmState
 
+	// picker is non-nil while the model picker overlay is open. Like confirm
+	// it owns every key while visible, so no key an operator presses inside it
+	// can reach quit, focus, pause, kick, attach or the ACMM binding.
+	picker *panes.ModelPicker
+
+	// pickerSeq identifies each opened overlay so a late catalogue or set
+	// response can be discarded if it belongs to a superseded one.
+	pickerSeq uint64
+
+	// pickerID is the sequence number of the currently open overlay.
+	pickerID uint64
+
+	// acmm is non-nil while the ACMM level overlay is open. It owns every key
+	// while visible for the same reason the picker does, and more so: the write
+	// behind it is fleet-wide, so a stray `p` or `q` reaching the frame from
+	// inside a typed confirmation is precisely what the confirmation exists to
+	// make impossible.
+	acmm *panes.ACMMOverlay
+
+	// acmmSeq and acmmID identify each opened ACMM overlay so a late pack list
+	// or apply response belonging to a superseded one is discarded. Same
+	// pattern as pickerSeq/pickerID.
+	acmmSeq uint64
+	acmmID  uint64
+
 	// actionSeq identifies each confirmed HTTP call. Agent and verb alone are
 	// not enough: an operator can dismiss an in-flight request and open the
 	// same action again, and the first response must not close the new modal.
@@ -229,20 +322,42 @@ type model struct {
 	// the operator sees. Kick success describes only queueing or deduplication.
 	footerStatus string
 
-	// interval is this model's poll cadence, defaulting to pollInterval.
+	// reconcileInterval is the cadence of the reconciliation loop
+	// (pollReconcile), defaulting to pollInterval.
 	//
 	// It is a field rather than a bare constant read for two reasons. Tests
 	// drive a whole tick — fetch, delivery, and the re-arm — without waiting
 	// five real seconds for it. And T13b needs exactly this knob: once the SSE
-	// stream is connected the poll becomes a fallback and should slow down,
-	// not keep hammering an endpoint the stream has already superseded.
-	interval time.Duration
+	// stream is connected this poll becomes a fallback and should slow down,
+	// not keep hammering endpoints the stream has already superseded.
+	reconcileInterval time.Duration
 
-	// tickGen retires superseded poll chains. Changing interval only affects
-	// the NEXT re-arm, so switching cadence means arming a fresh chain while
-	// the old one is still pending; bumping this makes the pending tick a
-	// no-op instead of a second, permanent loop. See tickMsg in poll.go.
-	tickGen uint64
+	// reconcileGen retires superseded reconciliation chains. Changing the
+	// interval only affects the NEXT re-arm, so switching cadence means arming
+	// a fresh chain while the old one is still pending; bumping this makes the
+	// pending tick a no-op instead of a second, permanent loop. See
+	// reconcileTickMsg in poll.go.
+	reconcileGen uint64
+
+	// activityInterval is the cadence of the activity loop (pollActivity). It
+	// is pollInterval and STAYS pollInterval for the life of the process: no
+	// stream event can refresh a token count or an audit row, so there is
+	// nothing for this cadence to respond to.
+	//
+	// It is a field anyway, for the first of the two reasons above only —
+	// tests must be able to run a whole activity tick without sleeping five
+	// real seconds. Nothing in production writes it.
+	activityInterval time.Duration
+
+	// activityGen is the activity loop's own retirement counter.
+	//
+	// It exists so the two chains have independent lifetimes. Sharing
+	// reconcileGen would make the bump that retires a stretched reconcile
+	// chain on an SSE drop also retire the pending activity tick — and the
+	// drop path re-arms only the reconcile chain, so the Tokens and Events
+	// panes would go permanently dark at the first stream blip. See
+	// activityTickMsg in poll.go.
+	activityGen uint64
 
 	// agents is the last fleet roster a poll returned.
 	//
@@ -274,6 +389,54 @@ type model struct {
 	// the first failure. It doubles per consecutive failure and is reset by
 	// any received event.
 	sseBackoff time.Duration
+
+	// hiveID is the last successful identity read, and governorStatus and
+	// governorInterval the last successful live and configured governor reads
+	// (T29). All three are the header's and the Governor pane's data.
+	//
+	// THEY ARE THREE FIELDS BECAUSE THEY ARE THREE FAILURES. Each is written
+	// only by its own successful fetch, so a forbidden config read cannot
+	// blank a live mode and a missing identity cannot stop the pane loading —
+	// the isolation is structural rather than something each handler has to
+	// remember. Holding the last good value is the same policy fetchErrMsg
+	// already applies to panes: an error is swallowed, so the previous
+	// observation stands until a successful one replaces it.
+	//
+	// governorInterval in particular is cached rather than passed through
+	// because EVERY panes.GovernorMsg must carry it — including the
+	// SSE-sourced ones, which come from a payload that does not contain it.
+	// That is the bug T29 closes: without this cache the stream's messages
+	// carry a zero interval and overwrite a good one, so `next eval` reverts
+	// to unknown the moment the stream delivers its first event.
+	hiveID           string
+	governorStatus   client.GovernorStatus
+	governorInterval time.Duration
+
+	// governorLoaded is whether governorStatus is a real observation rather
+	// than the zero value. It separates "no successful status read yet" from
+	// "the hive reported an inactive governor", which are the same struct but
+	// different facts: the header shows a dash for both, and only the latter
+	// should reach the pane as a frame.
+	governorLoaded bool
+
+	// tokenUsage and costSummary are the last successful /api/tokens and
+	// /api/cost reads, joined into one frame by tokensMsg (T30).
+	//
+	// TOKENS ARE PRIMARY, COST IS OPTIONAL, and the two flags below are what
+	// encode that. tokensLoaded gates delivery entirely: with no successful
+	// count read there is nothing to draw, so a token failure leaves the pane
+	// exactly as it was. costLoaded gates only the dollar columns, so a cost
+	// failure still delivers fresh counts — every row simply renders "—".
+	//
+	// costLoaded is CLEARED, not held, when a cost read fails, and that is the
+	// one place this differs from the governor cache above. A held governor
+	// mode is still true of the hive; a held dollar estimate would be attached
+	// to token counts that have since moved, and a cost-per-agent that no
+	// longer corresponds to the row it sits on is worse than an honest dash.
+	tokenUsage   client.TokenUsage
+	tokensLoaded bool
+	costSummary  client.CostSummary
+	costLoaded   bool
 }
 
 // newModel returns the root model in its initial state. Unexported because the
@@ -287,8 +450,9 @@ func newModel() model {
 			panes.NewTokens(),
 			panes.NewEvents(),
 		},
-		api:      client.New(),
-		interval: pollInterval,
+		api:               client.New(),
+		reconcileInterval: pollInterval,
+		activityInterval:  pollInterval,
 	}
 }
 
@@ -302,18 +466,22 @@ func New() tea.Model {
 
 // Init implements tea.Model.
 //
-// It gathers the panes' initial commands and starts the poll loop: one fetch
-// immediately, and the first tick armed for pollInterval later. The immediate
-// fetch is what keeps startup honest — without it every pane would show
-// "waiting for data" for a full interval while a perfectly reachable dashboard
-// sat there answering, and an operator would read that as the TUI being broken.
+// It gathers the panes' initial commands and starts BOTH poll loops: one full
+// fetch immediately, and each loop's first tick armed for its own interval
+// later. The immediate fetch is what keeps startup honest — without it every
+// pane would show "waiting for data" for a full interval while a perfectly
+// reachable dashboard sat there answering, and an operator would read that as
+// the TUI being broken. Both classes are covered by that one m.poll(), so
+// neither loop waits out an interval before its panes have anything, and the
+// two chains are armed separately because they are two chains.
 //
-// The SSE subscription starts here too, and starts ALONGSIDE the poll rather
-// than instead of it: the stream's first event may be seconds away (or never
+// The SSE subscription starts here too, and starts ALONGSIDE the polls rather
+// than instead of them: the stream's first event may be seconds away (or never
 // arrive, on a dashboard that is down), and the first frame must not wait on
-// it. The poll stretches only once the stream has proved itself.
+// it. Only the reconciliation loop stretches, and only once the stream has
+// proved itself.
 func (m model) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.poll(), m.scheduleTick(), m.connectSSE()}
+	cmds := []tea.Cmd{m.poll(), m.scheduleReconcileTick(), m.scheduleActivityTick(), m.connectSSE()}
 	for _, p := range m.panes {
 		if c := p.Init(); c != nil {
 			cmds = append(cmds, c)
@@ -328,21 +496,49 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		return m, nil
-	case tickMsg:
-		if msg.gen != m.tickGen {
+	case reconcileTickMsg:
+		if msg.gen != m.reconcileGen {
 			// A tick from a chain the cadence change retired. Dropping it
-			// without re-arming is what ends that chain; see tickMsg.
+			// without re-arming is what ends that chain; see reconcileTickMsg.
 			return m, nil
 		}
 		// Re-arm BEFORE the fetches are issued, not after they resolve: the
 		// loop's cadence must not depend on how long a fetch takes, and a
 		// dashboard that never answers must not be able to stop the clock.
-		return m, tea.Batch(m.scheduleTick(), m.poll())
+		return m, tea.Batch(m.scheduleReconcileTick(), m.pollReconcile())
+	case activityTickMsg:
+		if msg.gen != m.activityGen {
+			return m, nil
+		}
+		// Same re-arm-first rule, and it matters more here: this loop is the
+		// only source the Tokens and Events panes have, so a /api/audit read
+		// that hangs until its 5s client timeout must not also be the thing
+		// deciding when the next one is attempted.
+		return m, tea.Batch(m.scheduleActivityTick(), m.pollActivity())
 	case fetchErrMsg:
 		// Swallowed on purpose — see fetchErrMsg's doc comment. Returning here
 		// rather than falling through to the broadcast below is the mechanism:
 		// the panes never see the error, so they never have to decide whether
 		// to clear their data, and the previous frame simply persists.
+		//
+		// The one exception is the cost read, and it is an exception in the
+		// same direction: a failed cost read INVALIDATES the estimate rather
+		// than preserving it, because the counts it was priced against are
+		// about to be replaced by this same poll's token read, and a dollar
+		// figure attached to a row whose counts have moved is worse than a
+		// dash. The re-delivery is what makes that hold REGARDLESS OF ARRIVAL
+		// ORDER: the two Cmds race, so a frame built by the token result that
+		// arrived first would still be carrying the previous poll's costs, and
+		// the pane would show a stale estimate until the next tick. Rebuilding
+		// here clears it in the same frame instead. It is skipped before the
+		// first successful token read, when there is no frame to rebuild.
+		if msg.source == costFetchSource {
+			hadCost := m.costLoaded
+			m.costLoaded = false
+			if hadCost && m.tokensLoaded {
+				return m.broadcastTokens()
+			}
+		}
 		return m, nil
 	case sseOpenMsg:
 		return m.handleSSEOpen(msg)
@@ -364,15 +560,75 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		next, cmd := m.broadcast(msg)
 		return next, cmd
+	case governorStatusMsg:
+		// Cache first, then deliver — the pane's frame is built from the cache
+		// so it always carries the interval, never just what this fetch knew.
+		m.governorStatus = msg.status
+		m.governorLoaded = true
+		return m.broadcastGovernor()
+	case governorIntervalMsg:
+		m.governorInterval = msg.interval
+		if !m.governorLoaded {
+			// Configuration answered before any live read did. There is no
+			// frame to send yet: a GovernorMsg now would carry a zero status
+			// the pane cannot distinguish from an inactive governor. The
+			// interval is cached and the first status read delivers both.
+			return m, nil
+		}
+		return m.broadcastGovernor()
+	case tokenUsageMsg:
+		// Cache first, then deliver — the frame is built from the cache so it
+		// carries whatever cost is currently known, not just what this fetch
+		// knew (which is none). An all-zero usage document is stored as a real
+		// observation: tokensLoaded is what turns the pane's "waiting for data"
+		// into a loaded zero-usage table, and a hive that has burned nothing is
+		// entitled to that frame.
+		m.tokenUsage = msg.usage
+		m.tokensLoaded = true
+		return m.broadcastTokens()
+	case costSummaryMsg:
+		m.costSummary = msg.summary
+		m.costLoaded = true
+		if !m.tokensLoaded {
+			// Cost answered before any count read did. There is no frame to
+			// send: rows come from /api/tokens, so a TokensMsg now would be a
+			// loaded pane with no rows and a fleet total of zero — which the
+			// pane cannot tell from a hive that has genuinely spent nothing.
+			// The estimate is cached and the first token read delivers both.
+			return m, nil
+		}
+		return m.broadcastTokens()
+	case hiveIDMsg:
+		// Header-only, so no pane delivery. An empty id is stored as-is: the
+		// hive genuinely has no configured identity and the header says so.
+		m.hiveID = msg.id
+		return m, nil
 	case agentActionMsg:
 		return m.handleAgentAction(msg)
 	case kickResultMsg:
 		return m.handleKickResult(msg)
+	case modelListMsg:
+		return m.handleModelList(msg)
+	case modelSetMsg:
+		return m.handleModelSet(msg)
+	case acmmPacksMsg:
+		return m.handleACMMPacks(msg)
+	case acmmApplyMsg:
+		return m.handleACMMApply(msg)
 	case attachReadyMsg:
 		if msg.err != nil {
 			m.attachPending = false
-			m.footerStatus = "Attach failed: " + msg.err.Error()
+			m.footerStatus = attachFailureStatus(msg.err)
 			return m, nil
+		}
+		if msg.remote != nil {
+			// tea.Exec, not ExecProcess: the remote bridge is an in-process
+			// tea.ExecCommand, but the suspend/resume contract is identical —
+			// the terminal is released for the duration and attachDoneMsg
+			// arrives once it is restored.
+			return m, tea.Exec(msg.remote, func(err error) tea.Msg {
+				return attachDoneMsg{err: err}
+			})
 		}
 		return m, tea.ExecProcess(msg.cmd, func(err error) tea.Msg {
 			return attachDoneMsg{err: err}
@@ -380,7 +636,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case attachDoneMsg:
 		m.attachPending = false
 		if msg.err != nil {
-			m.footerStatus = "Attach failed: " + msg.err.Error()
+			m.footerStatus = attachFailureStatus(msg.err)
 		} else {
 			m.footerStatus = ""
 		}
@@ -388,6 +644,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		if m.confirm != nil {
 			return m.updateConfirm(msg)
+		}
+		// The model picker is modal for the same reason and is checked in the
+		// same place: every key it does not act on is SWALLOWED, so no key
+		// pressed while choosing a model can reach quit, focus, pause, kick,
+		// attach or the ACMM binding underneath it.
+		if m.picker != nil {
+			return m.updateModelPicker(msg)
+		}
+		// The ACMM overlay is modal for the same reason, and is the one that
+		// matters most: it is the only overlay in which ordinary letters are
+		// TEXT rather than bindings, so a key leaking out of it would both fail
+		// to type and fire an action the operator did not mean.
+		if m.acmm != nil {
+			return m.updateACMM(msg)
 		}
 		// The help overlay is modal and dismisses on ANY key, so it is handled
 		// before the global bindings rather than as one of them. Order is the
@@ -431,6 +701,44 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.confirm = &confirmState{agent: name, pause: !paused}
 			return m, nil
+		case "m":
+			if m.focus != 0 {
+				return m, nil
+			}
+			agents, ok := m.panes[0].(panes.Agents)
+			if !ok {
+				return m, nil
+			}
+			name, display, backend, current, ok := agents.SelectedAgentDetail()
+			if !ok {
+				// No row selected yet — before the first successful fleet
+				// snapshot there is no agent to change, so `m` is a no-op
+				// rather than an overlay addressed at nothing.
+				return m, nil
+			}
+			if backend == "" {
+				// Models() requires a backend, and asking with an empty one
+				// would 404 on the routing table rather than on the backend.
+				// Say what is missing instead of showing a fetch error.
+				m.footerStatus = "Model picker unavailable: " + name + " has no configured backend"
+				return m, nil
+			}
+			m.pickerSeq++
+			m.pickerID = m.pickerSeq
+			picker := panes.NewModelPicker(name, display, backend, current)
+			m.picker = &picker
+			m.footerStatus = ""
+			return m, m.fetchModels(m.pickerID, backend)
+		case "A":
+			// GLOBAL, unlike p/m/K/a: the ACMM level is a property of the hive
+			// rather than of a selected agent, so there is no focused pane or
+			// row for it to be addressed at. It opens from anywhere.
+			m.acmmSeq++
+			m.acmmID = m.acmmSeq
+			overlay := panes.NewACMMOverlay()
+			m.acmm = &overlay
+			m.footerStatus = ""
+			return m, m.fetchACMM(m.acmmID)
 		case "K":
 			if m.focus != 0 || m.kickPending != "" {
 				return m, nil
@@ -460,7 +768,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.attachPending = true
 			m.footerStatus = ""
-			return m, prepareAttach(name)
+			return m, prepareAttach(name, m.api)
 		}
 		// Any other key belongs to the focused pane. The T3 stubs ignore
 		// everything, but routing through this seam now is what lets a pane
@@ -483,6 +791,42 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // governor snapshot from the same status payload — by threading the result of
 // one broadcast into the next, instead of discarding the panes each one
 // updated.
+// broadcastGovernor delivers the cached governor frame to the panes.
+//
+// THIS IS THE ONE PLACE A panes.GovernorMsg IS BUILT, and that is the design
+// rather than a tidiness preference. The pane's contract is that a message
+// carries both live status and configured cadence, but those arrive from two
+// endpoints on two schedules and, for SSE, from a payload that contains only
+// one of them. Every construction site is therefore an opportunity to send a
+// zero interval and blank `next eval` — which is exactly the bug T29 closes,
+// and it was introduced by a single literal built at the SSE site. Funnelling
+// every delivery through the cache makes the complete frame the only frame
+// that can be built.
+func (m model) broadcastGovernor() (tea.Model, tea.Cmd) {
+	next, cmd := m.broadcast(m.governorMsg())
+	return next, cmd
+}
+
+// broadcastTokens delivers the joined token/cost frame (T30). Like
+// broadcastGovernor it exists so every delivery goes through the single
+// projection in tokensMsg rather than assembling a frame at each call site.
+func (m model) broadcastTokens() (tea.Model, tea.Cmd) {
+	next, cmd := m.broadcast(m.tokensMsg())
+	return next, cmd
+}
+
+// governorMsg is the complete governor frame for the model's current cache:
+// the last successful live status joined with the last successful configured
+// interval. Splitting it out from broadcastGovernor is what lets a test assert
+// on the frame the panes are handed without reaching inside them, since
+// broadcast delivers into the panes rather than returning the message.
+func (m model) governorMsg() panes.GovernorMsg {
+	return panes.GovernorMsg{
+		Status:       m.governorStatus,
+		EvalInterval: m.governorInterval,
+	}
+}
+
 func (m model) broadcast(msg tea.Msg) (model, tea.Cmd) {
 	var cmds []tea.Cmd
 	for i, p := range m.panes {
@@ -538,16 +882,39 @@ func (m model) View() string {
 	bottom := lipgloss.JoinHorizontal(lipgloss.Top,
 		cell(2, leftW, botH), cell(3, rightW, botH))
 
-	header := headerStyle.Width(m.width).Render(m.headerText())
+	// CLIPPED INLINE, THEN PADDED. Width() WRAPS text that overflows rather
+	// than truncating it, so a header wider than the terminal silently becomes
+	// two lines and pushes the frame one row past the terminal's height —
+	// exactly the cliff the footer sits on. This is not hypothetical for the
+	// header now that T29 renders a real hive id: at the 60-column minimum,
+	// `hive:` plus a routine identity like "acme-production-us-east-1" already
+	// overflows. MaxWidth() alone cannot fix it, because the wrap has happened
+	// by the time it clips. Inline(true) collapses the text to one line first,
+	// so MaxWidth truncates instead.
+	header := headerStyle.Width(m.width).Render(
+		lipgloss.NewStyle().Inline(true).MaxWidth(m.width).Render(m.headerText()))
 	footerTextForFrame := footerText
 	if m.footerStatus != "" {
 		footerTextForFrame = m.footerStatus
 	}
-	footer := footerStyle.Width(m.width).MaxWidth(m.width).Render(footerTextForFrame)
+	// Clipped BEFORE the width is applied, then padded to it. Width() wraps
+	// rather than truncates, so a strip longer than the terminal — which the
+	// binding list became once `m model` was added, at 68 columns against a
+	// 60-column minimum — would silently become a SECOND footer line and push
+	// the frame one row past the terminal's height. MaxWidth() alone cannot
+	// undo that: by the time it runs the newline is already in the string.
+	footer := footerStyle.Width(m.width).Render(
+		lipgloss.NewStyle().Inline(true).MaxWidth(m.width).Render(footerTextForFrame))
 
 	frame := lipgloss.JoinVertical(lipgloss.Left, header, top, bottom, footer)
 	if m.confirm != nil {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.confirmView())
+	}
+	if m.picker != nil {
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.picker.View(m.width))
+	}
+	if m.acmm != nil {
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.acmm.View(m.width))
 	}
 	if m.helpVisible {
 		// Place, not Join: the overlay sits ON the frame rather than taking
@@ -686,6 +1053,316 @@ func (m model) handleKickResult(msg kickResultMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// ── Model picker (T17) ───────────────────────────────────────────────────────
+
+// updateModelPicker consumes EVERY key while the overlay is open. Unknown keys
+// — including q, tab, p, K, a and A — deliberately do nothing rather than
+// leaking to the frame underneath, which is the whole point of the modal: an
+// operator scrolling a model list must not be able to quit the program or
+// pause an agent by pressing the wrong letter.
+func (m model) updateModelPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		if m.picker.Pending() {
+			// A set request is already with the server and has already
+			// restarted (or is restarting) the session. Closing the overlay
+			// would not undo that, and it would hide the result, so the modal
+			// stays until the request answers.
+			return m, nil
+		}
+		m.picker = nil
+		return m, nil
+	case "j", "down":
+		next := m.picker.Move(1)
+		m.picker = &next
+		return m, nil
+	case "k", "up":
+		next := m.picker.Move(-1)
+		m.picker = &next
+		return m, nil
+	case "enter":
+		// Apply refuses while pending, which is what bounds this to exactly
+		// one session-restarting request no matter how many times enter is
+		// pressed before the first one answers.
+		next, chosen, ok := m.picker.Apply()
+		if !ok {
+			return m, nil
+		}
+		m.picker = &next
+		return m, m.setAgentModel(m.pickerID, next.Agent(), chosen)
+	default:
+		return m, nil
+	}
+}
+
+func (m model) fetchModels(pickerID uint64, backend string) tea.Cmd {
+	return func() tea.Msg {
+		list, err := m.api.Models(context.Background(), backend)
+		return modelListMsg{pickerID: pickerID, list: list, err: err}
+	}
+}
+
+func (m model) setAgentModel(pickerID uint64, agent, modelID string) tea.Cmd {
+	return func() tea.Msg {
+		result, err := m.api.SetAgentModel(context.Background(), agent, modelID)
+		return modelSetMsg{pickerID: pickerID, agent: agent, model: modelID, result: result, err: err}
+	}
+}
+
+func (m model) handleModelList(msg modelListMsg) (tea.Model, tea.Cmd) {
+	// A response for a closed or superseded overlay is dropped. It carries a
+	// catalogue for a backend the current overlay may not even be showing.
+	if m.picker == nil || m.pickerID != msg.pickerID {
+		return m, nil
+	}
+	var next panes.ModelPicker
+	if msg.err != nil {
+		next = m.picker.SetCatalogueError(msg.err)
+	} else {
+		next = m.picker.SetCatalogue(msg.list)
+	}
+	m.picker = &next
+	return m, nil
+}
+
+func (m model) handleModelSet(msg modelSetMsg) (tea.Model, tea.Cmd) {
+	matchesOpenModal := m.picker != nil && m.pickerID == msg.pickerID
+
+	if msg.err != nil {
+		if matchesOpenModal {
+			// The overlay stays open with the failure and retry/cancel
+			// guidance, and the Agents row is untouched: a failed write means
+			// the agent still has the model it had.
+			next := m.picker.SetApplyError(msg.err)
+			m.picker = &next
+		}
+		return m, nil
+	}
+
+	// The response is authoritative for what the agent now runs. Prefer it
+	// over the id that was requested so an alias the server canonicalized is
+	// shown as the server resolved it.
+	agent := msg.result.Agent
+	if agent == "" {
+		agent = msg.agent
+	}
+	applied := msg.result.Model
+	if applied == "" {
+		applied = msg.model
+	}
+	if agents, ok := m.panes[0].(panes.Agents); ok {
+		m.panes[0] = agents.SetAgentModel(agent, applied)
+	}
+	if matchesOpenModal {
+		m.picker = nil
+	}
+	m.footerStatus = fmt.Sprintf("%s now on %s (session restarted)", agent, applied)
+	// Reconcile: the write restarted the session, so the roster's live fields
+	// are stale by definition and the next frame should not wait a poll
+	// interval to say so.
+	return m, m.poll()
+}
+
+// ── ACMM overlay (T19) ───────────────────────────────────────────────────────
+
+// updateACMM consumes EVERY key while the overlay is open.
+//
+// The consumption rule is stricter here than in any other modal, and the reason
+// is the typed confirmation: while it is composing, ordinary letters are TEXT.
+// `q` is a character in nothing operators type here, but `p`, `a`, `A` and `K`
+// all appear in "APPLY L4" — so a key leaking through would not merely fail to
+// type, it would pause an agent or open a second overlay while the operator was
+// spelling out a fleet-wide change. Every branch below therefore ends in this
+// function, and the default case does nothing rather than routing to a pane.
+func (m model) updateACMM(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// A receipt is on screen: the write is done and the only thing left is to
+	// read it. Both dismissal keys are accepted, nothing else does anything,
+	// and enter in particular cannot re-apply — the overlay cleared its
+	// confirmation state when the result landed.
+	if m.acmm.Done() {
+		switch msg.String() {
+		case "enter", "esc":
+			m.acmm = nil
+			return m, nil
+		default:
+			return m, nil
+		}
+	}
+
+	switch msg.String() {
+	case "esc":
+		if m.acmm.Pending() {
+			// The apply is already with the server and is reconciling the
+			// fleet. Closing the overlay would not undo it and would hide the
+			// receipt, so the modal stays until the request answers.
+			return m, nil
+		}
+		if m.acmm.Confirming() {
+			// esc backs OUT of the confirmation to the list rather than closing
+			// the overlay outright, so a mistyped phrase costs one key rather
+			// than the whole navigation.
+			next := m.acmm.CancelConfirm()
+			m.acmm = &next
+			return m, nil
+		}
+		m.acmm = nil
+		return m, nil
+	case "enter":
+		if m.acmm.Pending() {
+			return m, nil
+		}
+		if m.acmm.Confirming() {
+			// Apply refuses unless the typed phrase matches exactly, which is
+			// what makes a wrong or incomplete confirmation a no-op, and
+			// refuses while pending, which bounds this to one PUT.
+			next, level, ok := m.acmm.Apply()
+			if !ok {
+				return m, nil
+			}
+			m.acmm = &next
+			return m, m.applyACMM(m.acmmID, level)
+		}
+		// First enter only moves into the confirmation state. It never writes,
+		// and on the level already in force it does not even do that: the
+		// overlay records the no-op message instead.
+		// The refusal cases are already rendered by the overlay (the no-op
+		// message for the current level, the loading or error body for a list
+		// there is nothing to select in), so the ok flag has nothing left for
+		// this layer to do with it.
+		next, _ := m.acmm.BeginConfirm()
+		m.acmm = &next
+		return m, nil
+	case "backspace":
+		next := m.acmm.Backspace()
+		m.acmm = &next
+		return m, nil
+	case "j", "down":
+		// Move is a no-op while confirming or pending; see ACMMOverlay.Move for
+		// why the cursor must not slide under a half-typed phrase. Handled
+		// there rather than here so the rule holds for every caller.
+		if m.acmm.Confirming() {
+			return m.acmmType(msg)
+		}
+		next := m.acmm.Move(1)
+		m.acmm = &next
+		return m, nil
+	case "k", "up":
+		if m.acmm.Confirming() {
+			return m.acmmType(msg)
+		}
+		next := m.acmm.Move(-1)
+		m.acmm = &next
+		return m, nil
+	default:
+		return m.acmmType(msg)
+	}
+}
+
+// acmmType feeds a key press to the confirmation field, if one is open.
+//
+// Only genuine RUNE presses become text. A function or control key — f5,
+// ctrl+w, the arrows — is swallowed rather than rendered into the phrase,
+// because "APPLY L4" cannot contain one and letting them accumulate invisibly
+// would leave an operator staring at a field that looks right and will not
+// match.
+//
+// The j/k branches above route here as well, and that is the point: while
+// confirming they are the letters j and k, not navigation. `j` appears in no
+// confirmation phrase today, but making the rule "runes are text while
+// confirming" rather than "these two keys are special" is what keeps it true if
+// the phrase ever changes.
+func (m model) acmmType(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if !m.acmm.Confirming() || m.acmm.Pending() {
+		return m, nil
+	}
+	if msg.Type != tea.KeyRunes && msg.Type != tea.KeySpace {
+		return m, nil
+	}
+	text := string(msg.Runes)
+	if msg.Type == tea.KeySpace {
+		// tea.KeySpace carries its rune too, but only on some input paths;
+		// naming the character is what makes a spacebar press reliably produce
+		// the space in "APPLY L4".
+		text = " "
+	}
+	if msg.Alt {
+		// alt+r is not the letter r. Treating it as one would silently insert
+		// characters an operator did not type.
+		return m, nil
+	}
+	next := m.acmm.Type(text)
+	m.acmm = &next
+	return m, nil
+}
+
+func (m model) fetchACMM(overlayID uint64) tea.Cmd {
+	return func() tea.Msg {
+		status, err := m.api.ACMM(context.Background())
+		return acmmPacksMsg{overlayID: overlayID, status: status, err: err}
+	}
+}
+
+func (m model) applyACMM(overlayID uint64, level int) tea.Cmd {
+	return func() tea.Msg {
+		result, err := m.api.ApplyACMM(context.Background(), level)
+		return acmmApplyMsg{overlayID: overlayID, level: level, result: result, err: err}
+	}
+}
+
+func (m model) handleACMMPacks(msg acmmPacksMsg) (tea.Model, tea.Cmd) {
+	// A response for a closed or superseded overlay is dropped: it carries a
+	// snapshot of a level the current overlay may already have moved past.
+	if m.acmm == nil || m.acmmID != msg.overlayID {
+		return m, nil
+	}
+	var next panes.ACMMOverlay
+	if msg.err != nil {
+		next = m.acmm.SetStatusError(msg.err)
+	} else {
+		next = m.acmm.SetStatus(msg.status)
+	}
+	m.acmm = &next
+	return m, nil
+}
+
+func (m model) handleACMMApply(msg acmmApplyMsg) (tea.Model, tea.Cmd) {
+	matchesOpenModal := m.acmm != nil && m.acmmID == msg.overlayID
+
+	if msg.err != nil {
+		if !matchesOpenModal {
+			return m, nil
+		}
+		next := m.acmm.SetApplyError(msg.err)
+		m.acmm = &next
+		if next.PartiallyReconciled() {
+			// THE 500 PATH. The level may already be persisted while the roster
+			// is not reconciled to it, so this is the one failure that must
+			// still refresh: the panes underneath may be describing a hive that
+			// has already moved, and leaving them alone would make the frame
+			// agree with the false reading that nothing happened.
+			return m, m.poll()
+		}
+		return m, nil
+	}
+
+	// The overlay stays OPEN on success, holding the receipt, so the
+	// reconciliation is read rather than flashing past on its way to a footer
+	// line. Dismissal is the operator's, on enter or esc.
+	if matchesOpenModal {
+		next := m.acmm.SetResult(msg.result)
+		m.acmm = &next
+	}
+	level := msg.result.Level
+	if level == 0 {
+		level = msg.level
+	}
+	m.footerStatus = fmt.Sprintf("ACMM level now L%d", level)
+	// Refresh regardless of whether the overlay is still open: the roster,
+	// every agent's run state and the governor's configuration have all just
+	// been rewritten, so the Agents and Governor panes are stale by definition.
+	return m, m.poll()
+}
+
 func (m model) confirmView() string {
 	verb := "Pause"
 	if !m.confirm.pause {
@@ -708,13 +1385,34 @@ func (m model) confirmView() string {
 	return confirmBoxStyle.Width(contentWidth).Render(body)
 }
 
-// headerText renders the header bar for this model's connection state.
+// headerText renders the header bar from the model's last successful reads.
+//
+// Every field reads its own cache and nothing else. In particular the two data
+// fields do not consult m.sseConnected: a stream drop changes `ws:` and leaves
+// identity and mode exactly as they were, which is what makes the header
+// survive a degraded stream instead of flickering to dashes and back on every
+// reconnect.
 func (m model) headerText() string {
+	hive := headerUnknown
+	if m.hiveID != "" {
+		hive = m.hiveID
+	}
+
+	// Active is the payload's "this document had a governor section" bit, so
+	// both halves are required: an inactive governor has no mode to report,
+	// and an active one with an empty mode string is a payload this frame
+	// cannot describe. Upper-casing matches the pane, which case-folds because
+	// the wire carries the mode lowercased on one path and uncased on another.
+	governor := headerUnknown
+	if m.governorStatus.Active && m.governorStatus.Mode != "" {
+		governor = strings.ToUpper(m.governorStatus.Mode)
+	}
+
 	ws := wsNotConnected
 	if m.sseConnected {
 		ws = wsConnected
 	}
-	return fmt.Sprintf(headerFormat, ws)
+	return fmt.Sprintf(headerFormat, hive, governor, ws)
 }
 
 // tooSmallView renders the below-minimum frame: the message alone, centred in
@@ -916,15 +1614,34 @@ func (m model) handleSSEEvent(msg sseEventMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	// A received event is the only proof the stream is up (see wsConnected),
-	// so it is what resets the backoff and stretches the poll. No new tick
-	// chain is armed for the stretch: the pending tick re-arms itself from
-	// m.interval, so the new cadence takes effect within one pollInterval
-	// without a second chain ever existing.
+	// so it is what resets the backoff and stretches the reconciliation poll.
+	// No new tick chain is armed for the stretch: the pending tick re-arms
+	// itself from m.reconcileInterval, so the new cadence takes effect within
+	// one pollInterval without a second chain ever existing.
+	//
+	// ONLY RECONCILIATION STRETCHES. The activity loop is not touched here —
+	// not its interval, not its generation, not with an extra tick — because
+	// this event carried no token counts and no audit rows, so there is
+	// nothing it could have superseded. Stretching it too is the bug T32
+	// closes: a healthy stream would make the Tokens and Events panes twelve
+	// times staler than a broken one.
 	m.sseConnected = true
 	m.sseBackoff = 0
-	m.interval = sseReconcileInterval
+	m.reconcileInterval = sseReconcileInterval
 
 	cmds := []tea.Cmd{waitSSE(m.sse)}
+
+	// A full status event carries the governor slice; an agent-only one does
+	// not. Caching before broadcasting is what keeps the header's mode as
+	// current as the pane's, and doing it ONLY when the event actually carried
+	// a governor section is what stops an agent-only push from clearing either
+	// — sseGovernorStatus returns false for those, so the cache is untouched
+	// and the last full snapshot stands.
+	if status, ok := sseGovernorStatus(msg.event); ok {
+		m.governorStatus = status
+		m.governorLoaded = true
+	}
+
 	for _, paneMsg := range m.paneMsgs(msg.event) {
 		var cmd tea.Cmd
 		m, cmd = m.broadcast(paneMsg)
@@ -933,6 +1650,26 @@ func (m model) handleSSEEvent(msg sseEventMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, tea.Batch(cmds...)
+}
+
+// sseGovernorStatus extracts the governor slice from a stream event, reporting
+// whether the event carried one at all.
+//
+// Three ways to have no governor: the event is the agent-only push, the
+// payload does not decode, or it decodes with Active false — the payload's own
+// "this document has a governor section" bit. All three mean the same thing to
+// the caller and must leave the cache alone, because overwriting a good
+// snapshot with an all-dashes one is indistinguishable, on screen, from the
+// governor having stopped.
+func sseGovernorStatus(event client.SSEEvent) (client.GovernorStatus, bool) {
+	if event.Type == client.SSEEventTypeAgentStatus {
+		return client.GovernorStatus{}, false
+	}
+	var status client.GovernorStatus
+	if err := event.Decode(&status); err != nil || !status.Active {
+		return client.GovernorStatus{}, false
+	}
+	return status, true
 }
 
 func (m model) handleSSEDropped(msg sseDroppedMsg) (tea.Model, tea.Cmd) {
@@ -954,19 +1691,28 @@ func (m model) handleSSEDropped(msg sseDroppedMsg) (tea.Model, tea.Cmd) {
 		return sseReconnectMsg{gen: gen}
 	})}
 
-	// Only the first drop after a healthy stream restores the poll, because it
-	// is the only one with a stretched cadence to undo. Retiring the 60s chain
-	// and arming a 5s one on EVERY failed reconnect as well would issue a
-	// fetch per backoff step — which is how a dashboard that is down ends up
+	// Only the first drop after a healthy stream restores the cadence, because
+	// it is the only one with a stretched cadence to undo. Retiring the 60s
+	// chain and arming a 5s one on EVERY failed reconnect as well would issue
+	// a fetch per backoff step — which is how a dashboard that is down ends up
 	// receiving more requests than one that is up.
-	if m.interval != pollInterval {
-		m.interval = pollInterval
-		m.tickGen++
+	//
+	// THE FALLBACK FETCH IS pollReconcile, NOT poll. The activity loop never
+	// stretched, so it has been reading /api/tokens, /api/cost and /api/audit
+	// every 5s throughout the healthy stream and is still doing so right now.
+	// A full poll here would issue a second copy of those three reads on top
+	// of a chain that is already mid-interval — duplicate requests that buy no
+	// freshness, on the exact code path a flapping dashboard walks repeatedly.
+	// Nothing here touches activityGen either: this bump retires the stretched
+	// reconcile chain, and the activity chain must survive it untouched.
+	if m.reconcileInterval != pollInterval {
+		m.reconcileInterval = pollInterval
+		m.reconcileGen++
 		// Fetch now as well as re-arming: the pending tick belonged to the 60s
-		// chain this retires, so without an immediate poll the fallback's
+		// chain this retires, so without an immediate fetch the fallback's
 		// first data would be a whole pollInterval away — spent showing a
 		// frame the stream has already stopped updating.
-		cmds = append(cmds, m.scheduleTick(), m.poll())
+		cmds = append(cmds, m.scheduleReconcileTick(), m.pollReconcile())
 	}
 	return m, tea.Batch(cmds...)
 }
@@ -1016,14 +1762,14 @@ type sseStatusPayload struct {
 //     document, which is why the governor delivery costs one more Decode of
 //     the same bytes rather than a second endpoint.
 //
-// WHAT IS DELIBERATELY NOT FILLED IN. GovernorMsg.EvalInterval is left zero:
-// it is configuration from /api/config/governor, not live state, and this task
-// adds no fetches. The pane already renders an unknown interval as a dash, so
-// the result is an honest partial frame instead of no governor frame at all —
-// nothing else feeds that pane today. AgentState.LastActivity is left zero for
-// the same kind of reason: the payload's per-agent timestamp (`lastKick`) is a
-// pre-formatted server-local display string, so a real instant cannot be
-// recovered from it, and panes.Agents renders zero as "—".
+// GovernorMsg.EvalInterval is filled from the model's cache (T29). It is
+// configuration from /api/config/governor and is absent from this payload, so
+// before T29 it was sent as zero — which meant the first stream event silently
+// blanked an interval the poll had already fetched. AgentState.LastActivity is
+// still left zero, for a reason no cache can fix: the payload's per-agent
+// timestamp (`lastKick`) is a pre-formatted server-local display string, so a
+// real instant cannot be recovered from it, and panes.Agents renders zero as
+// "—".
 func (m model) paneMsgs(event client.SSEEvent) []tea.Msg {
 	var payload sseStatusPayload
 	if err := event.Decode(&payload); err != nil {
@@ -1046,15 +1792,16 @@ func (m model) paneMsgs(event client.SSEEvent) []tea.Msg {
 		})
 	}
 
-	if event.Type != client.SSEEventTypeAgentStatus {
-		var status client.GovernorStatus
-		// Active is the payload's own "this document has a governor section"
-		// bit — buildGovernor hardcodes it true — so this both skips a
-		// governor-less snapshot and avoids overwriting a good frame with an
-		// all-dashes one.
-		if err := event.Decode(&status); err == nil && status.Active {
-			msgs = append(msgs, panes.GovernorMsg{Status: status})
-		}
+	// The interval comes from the model's cache, NOT from this payload, which
+	// does not contain it: /api/status derives NextKick from the configured
+	// cadence but never sends the cadence itself. Reading the cache here is
+	// what stops a stream event from overwriting a known interval with zero
+	// and reverting `next eval` to unknown — the failure this task fixes.
+	if status, ok := sseGovernorStatus(event); ok {
+		msgs = append(msgs, panes.GovernorMsg{
+			Status:       status,
+			EvalInterval: m.governorInterval,
+		})
 	}
 	return msgs
 }
@@ -1130,8 +1877,18 @@ func Run() error {
 // the operator's scrollback on exit, so `hivectl tui` leaves the terminal the
 // way it found it.
 func run(in io.Reader, out io.Writer) error {
+	m := newModel()
+
+	// Ask once, before the alt screen, whether this hive will talk to us at
+	// all. The model's own client is reused rather than a second one built
+	// here: a probe that authenticated differently from the polls could pass
+	// while every pane went on to fail, which is worse than not probing.
+	if err := preflight(context.Background(), m.api); err != nil {
+		return err
+	}
+
 	_, err := tea.NewProgram(
-		newModel(),
+		m,
 		tea.WithAltScreen(),
 		tea.WithInput(in),
 		tea.WithOutput(out),

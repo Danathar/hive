@@ -77,8 +77,8 @@ func TestAgentConfig_HasChannel(t *testing.T) {
 
 func TestAgentConfig_ChannelsOfType(t *testing.T) {
 	a := AgentConfig{Channels: []ChannelConfig{
-		{Type: "webhook", Events: []string{"push"}},
-		{Type: "webhook", Events: []string{"pr"}},
+		{Type: "webhook"},
+		{Type: "webhook"},
 		{Type: "kick"},
 	}}
 	webhooks := a.ChannelsOfType("webhook")
@@ -98,7 +98,7 @@ func TestAgentConfig_UsesGovernorKick(t *testing.T) {
 	}{
 		{"no channels implies kick", AgentConfig{}, true},
 		{"explicit kick channel", AgentConfig{Channels: []ChannelConfig{{Type: "kick"}}}, true},
-		{"only webhook channel, no kick", AgentConfig{Channels: []ChannelConfig{{Type: "webhook", Events: []string{"push"}}}}, false},
+		{"only webhook channel, no kick", AgentConfig{Channels: []ChannelConfig{{Type: "webhook"}}}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -532,16 +532,16 @@ func TestValidateChannels(t *testing.T) {
 		wantErr bool
 	}{
 		{"empty is valid", nil, false},
-		{"valid kick", []ChannelConfig{{Type: "kick"}}, false},
+		{"valid kick", []ChannelConfig{{Type: ChannelTypeKick}}, false},
 		{"invalid type", []ChannelConfig{{Type: "carrier-pigeon"}}, true},
-		{"webhook missing events", []ChannelConfig{{Type: "webhook"}}, true},
-		{"webhook with events", []ChannelConfig{{Type: "webhook", Events: []string{"push"}}}, false},
-		{"discord missing patterns", []ChannelConfig{{Type: "discord"}}, true},
-		{"discord with patterns", []ChannelConfig{{Type: "discord", Patterns: []string{"*.go"}}}, false},
-		{"schedule missing cron", []ChannelConfig{{Type: "schedule"}}, true},
-		{"schedule with cron", []ChannelConfig{{Type: "schedule", Schedule: "0 * * * *"}}, false},
-		{"bead missing match", []ChannelConfig{{Type: "bead"}}, true},
-		{"bead with match", []ChannelConfig{{Type: "bead", Match: map[string]string{"status": "open"}}}, false},
+		// The webhook/discord/schedule/bead trigger runtime (pkg/channels)
+		// was removed in #5591; declaring those types must fail fast instead
+		// of silently leaving the agent unkicked.
+		{"webhook has no runtime", []ChannelConfig{{Type: "webhook"}}, true},
+		{"discord has no runtime", []ChannelConfig{{Type: "discord"}}, true},
+		{"schedule has no runtime", []ChannelConfig{{Type: "schedule"}}, true},
+		{"bead has no runtime", []ChannelConfig{{Type: "bead"}}, true},
+		{"kick alongside dead type still fails", []ChannelConfig{{Type: ChannelTypeKick}, {Type: "webhook"}}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

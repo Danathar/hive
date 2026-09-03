@@ -386,9 +386,20 @@ type PauseTransitionEvent struct {
 }
 
 type Manager struct {
-	agents           map[string]*AgentProcess
-	idToName         map[string]string
-	mu               sync.RWMutex
+	agents   map[string]*AgentProcess
+	idToName map[string]string
+	mu       sync.RWMutex
+
+	// thrashMu guards thrash — its own mutex, NEVER m.mu: the breaker runs on
+	// the output-capture goroutines, and taking m.mu there risks startup
+	// re-entrancy deadlocks.
+	thrashMu sync.Mutex
+	thrash   map[string]*thrashState
+
+	// consentWedges records consent-screen restarts for the heartbeat's
+	// ConsentWedged signal (#5577). Own mutex, NEVER m.mu — the recording
+	// sites can run with m.mu held. Zero value ready.
+	consentWedges    consentWedgeTracker
 	logger           *slog.Logger
 	workDir          string
 	project          ProjectContext

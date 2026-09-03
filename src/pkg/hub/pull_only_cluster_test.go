@@ -129,7 +129,7 @@ func TestKubectlNeverFallsBackToAmbientClusterForPullOnly(t *testing.T) {
 // the hub never pays the dial timeout that made a pool of hives serialise into
 // tens of minutes of blocking.
 func TestPullOnlyClusterCountsAsUnreachableWithoutDialing(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	srv.clusters = map[string]ClusterConfig{
 		"a-ks-wec2": {ID: "a-ks-wec2", PullOnly: true, Domain: "wec2.example.cloud"},
 		"hive-oke":  {ID: "hive-oke", InCluster: true, Domain: "hive.kubestellar.io"},
@@ -162,7 +162,7 @@ func TestPullOnlyClusterHealthUsesHeartbeat(t *testing.T) {
 // live: vanity repair for an a-ks-wec2 hive ran kubectl against hive-oke and
 // reported "no ingress found" for a namespace on another cluster.
 func TestPullOnlyVanityHostIsNotSilentlyAttempted(t *testing.T) {
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	called := false
 	srv.vanityHostServable = func(hiveID, vanityHost string, cluster *ClusterConfig) error {
 		called = true

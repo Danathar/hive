@@ -30,7 +30,7 @@ func seedBudget4134(s *Server) {
 
 func putBudget4134(s *Server, decorate func(*http.Request)) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPut, "/api/config/governor/budget",
-		strings.NewReader(`{"totalTokens":50000}`))
+		strings.NewReader(`{"totalTokens":50000000}`))
 	req.Header.Set("Content-Type", "application/json")
 	if decorate != nil {
 		decorate(req)
@@ -53,8 +53,8 @@ func TestBudgetSave4134_OwnerViaBearerToken(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("owner budget save via bearer token = %d, want 200; body=%q", w.Code, w.Body.String())
 	}
-	if got := s.deps.Config.Governor.Budget.TotalTokens; got != 50000 {
-		t.Fatalf("totalTokens = %d, want 50000 (save did not persist)", got)
+	if got := s.deps.Config.Governor.Budget.TotalTokens; got != 50000000 {
+		t.Fatalf("totalTokens = %d, want 50000000 (save did not persist)", got)
 	}
 }
 
@@ -71,8 +71,8 @@ func TestBudgetSave4134_OwnerViaInternalToken(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("owner budget save via internal token = %d, want 200; body=%q", w.Code, w.Body.String())
 	}
-	if got := s.deps.Config.Governor.Budget.TotalTokens; got != 50000 {
-		t.Fatalf("totalTokens = %d, want 50000 (save did not persist)", got)
+	if got := s.deps.Config.Governor.Budget.TotalTokens; got != 50000000 {
+		t.Fatalf("totalTokens = %d, want 50000000 (save did not persist)", got)
 	}
 }
 

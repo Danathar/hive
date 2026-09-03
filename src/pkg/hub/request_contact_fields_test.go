@@ -2,7 +2,6 @@ package hub
 
 import (
 	"encoding/json"
-	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
@@ -43,7 +42,7 @@ func helperContactRequestBody(t *testing.T, fullName, slackID string) string {
 func TestRequestProvisionRequiresName(t *testing.T) {
 	cleanup := helperSetupTempDirs(t)
 	defer cleanup()
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	authAsForgeTester(t, "ghp_contact_noname", "contact-noname-user")
 
 	for _, name := range []string{"", "   ", "\t\n"} {
@@ -63,7 +62,7 @@ func TestRequestProvisionRequiresName(t *testing.T) {
 func TestRequestProvisionSlackIDIsOptional(t *testing.T) {
 	cleanup := helperSetupTempDirs(t)
 	defer cleanup()
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	const user = "contact-noslack-user"
 	authAsForgeTester(t, "ghp_contact_noslack", user)
 
@@ -89,7 +88,7 @@ func TestRequestProvisionSlackIDIsOptional(t *testing.T) {
 func TestRequestProvisionPersistsContactFields(t *testing.T) {
 	cleanup := helperSetupTempDirs(t)
 	defer cleanup()
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	const user = "contact-persist-user"
 	authAsForgeTester(t, "ghp_contact_persist", user)
 
@@ -113,7 +112,7 @@ func TestRequestProvisionPersistsContactFields(t *testing.T) {
 func TestRequestProvisionPersistsFriendlyUserID(t *testing.T) {
 	cleanup := helperSetupTempDirs(t)
 	defer cleanup()
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	const user = "ibmid:650001ABCD"
 	if err := saveSaaSUser(&SaaSUser{
 		GitHubUsername:    user,
@@ -151,7 +150,7 @@ func TestRequestProvisionPersistsFriendlyUserID(t *testing.T) {
 func TestRequestProvisionCapsContactFields(t *testing.T) {
 	cleanup := helperSetupTempDirs(t)
 	defer cleanup()
-	srv := NewHubServer(0, slog.Default(), "test", "v2")
+	srv := newHubServerForTest(t)
 	const user = "contact-cap-user"
 	authAsForgeTester(t, "ghp_contact_cap", user)
 
@@ -194,7 +193,7 @@ func TestRequestProvisionStoresHostileNameVerbatim(t *testing.T) {
 		t.Run(tc.user, func(t *testing.T) {
 			cleanup := helperSetupTempDirs(t)
 			defer cleanup()
-			srv := NewHubServer(0, slog.Default(), "test", "v2")
+			srv := newHubServerForTest(t)
 			authAsForgeTester(t, tc.token, tc.user)
 
 			w := postProvisionRequest(t, srv, tc.token, helperContactRequestBody(t, tc.name, ""))

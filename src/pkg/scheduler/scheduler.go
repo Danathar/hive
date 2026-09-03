@@ -20,6 +20,7 @@ import (
 	"github.com/hivecommons/hive/pkg/promptsrc"
 	"github.com/hivecommons/hive/pkg/resolve"
 	"github.com/hivecommons/hive/pkg/skillreg"
+	"github.com/hivecommons/hive/pkg/timeline"
 	"github.com/hivecommons/hive/pkg/worksource"
 )
 
@@ -36,7 +37,52 @@ type Scheduler struct {
 	classifierThresholds ioscan.Thresholds
 	classifierBudget     int
 	inflight             InflightLookup
+	lifecycle            timeline.Recorder
 	mu                   sync.RWMutex
+}
+
+// SetLifecycleRecorder attaches the lifecycle timeline sink. Once set, every
+// classifier pass records a KindClassified stage (lane/tier/model) for each
+// classified issue — this is the point where lane routing decides an issue's
+// lane, so it is the honest producer for the "classified" stage (#5656).
+// A nil recorder (or never calling this) keeps classification silent.
+func (s *Scheduler) SetLifecycleRecorder(r timeline.Recorder) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lifecycle = r
+}
+
+// lifecycleRecorder returns the attached recorder, or nil if none is set.
+func (s *Scheduler) lifecycleRecorder() timeline.Recorder {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.lifecycle
+}
+
+// recordClassified records one KindClassified journey stage per classified
+// issue. The timeline store dedupes by (ref, kind), so per-cycle reruns of the
+// classifier refresh the stage rather than appending. No I/O beyond the
+// store's own throttled persistence; a nil recorder is a no-op.
+func (s *Scheduler) recordClassified(issues []github.Issue) {
+	rec := s.lifecycleRecorder()
+	if rec == nil {
+		return
+	}
+	for _, issue := range issues {
+		ref := issueKey(issue)
+		if ref == "" {
+			continue
+		}
+		rec.Record(timeline.Event{
+			IssueRef: ref,
+			Kind:     timeline.KindClassified,
+			Attrs: map[string]string{
+				"lane":  issue.Lane,
+				"tier":  issue.ComplexityTier,
+				"model": issue.ModelRec,
+			},
+		})
+	}
 }
 
 // registry builds the variable-resolution registry from the current config's
@@ -472,6 +518,7 @@ type KickMessage struct {
 func (s *Scheduler) BuildKickMessages(actionable *github.ActionableResult, agentsDue []string) []KickMessage {
 	s.resetClassifierBudget()
 	classifiedIssues := classify.ClassifyAll(actionable.Issues.Items)
+	s.recordClassified(classifiedIssues)
 	reposSection := s.buildReposSection()
 
 	var messages []KickMessage
@@ -569,6 +616,7 @@ func (s *Scheduler) BuildAgentMessageFromLastActionable(agentName string) string
 	var classified []github.Issue
 	if actionable != nil {
 		classified = classify.ClassifyAll(actionable.Issues.Items)
+		s.recordClassified(classified)
 	}
 	return s.BuildAgentMessage(agentName, classified, actionable)
 }

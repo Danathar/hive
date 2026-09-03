@@ -166,16 +166,28 @@ func publishHeartbeatIdentity(p *HeartbeatPayload) {
 }
 
 // PublishHeartbeatIdentity registers this spoke's collect-independent identity
-// (hive id, org, reporter, started-at, git hash) so the heartbeat loop can send
-// a liveness beat before — or without ever — completing a stats collect.
+// (hive id, org, primary repo, repos, reporter, started-at, git hash) so the
+// heartbeat loop can send a liveness beat before — or without ever — completing
+// a stats collect.
+//
+// PrimaryRepo and Repos are part of this identity for the same reason Org is:
+// they come straight from config, require no network call, and the hub rebuilds
+// its registry entry from each payload verbatim — an identity beat that omitted
+// them blanked the entry's primaryRepo/repos (org set, name "org/"), which broke
+// the public-directory row (no repo link) for the whole window until the first
+// successful collect.
 //
 // Call this as soon as config is loaded, BEFORE StartHeartbeat. It is the piece
 // that makes liveness independent of GitHub: without it, a spoke that restarts
 // while GitHub is slow has nothing it can legitimately address to the hub.
-func PublishHeartbeatIdentity(hiveID, org, reporter, startedAt, gitHash string) {
+func PublishHeartbeatIdentity(hiveID, org, primaryRepo string, repos []string, reporter, startedAt, gitHash string) {
 	publishHeartbeatIdentity(&HeartbeatPayload{
-		HiveID:    hiveID,
-		Org:       org,
+		HiveID:      hiveID,
+		Org:         org,
+		PrimaryRepo: primaryRepo,
+		// Defensive copy: the caller's slice is live config that a hub-delivered
+		// project claim can mutate later; the stored identity must be a snapshot.
+		Repos:     append([]string(nil), repos...),
 		Reporter:  reporter,
 		StartedAt: startedAt,
 		GitHash:   gitHash,
@@ -786,6 +798,30 @@ type HeartbeatPayload struct {
 	// is stalled on a person rather than on the agents.
 	HoldTotal      *int `json:"hold_total,omitempty"`
 	AwaitingReview *int `json:"awaiting_review,omitempty"`
+
+	// --- Remediation-hint detectors (#5577) -------------------------------
+	// Three silent-failure classes a 2026-09-01 fleet audit could only find by
+	// exec'ing into pods. All follow the PRsMerged90d convention: absent means
+	// "not measured" (old spoke, collector not warm) and is carried forward
+	// hub-side — BUT, unlike the count pointers, a MEASURED empty result must
+	// also be distinguishable from absent so a recovered hive clears its own
+	// signal. These therefore omit `omitempty`: nil encodes as null ("not
+	// measured", hub carries forward) while a measured all-clear encodes as
+	// {} / [] and overwrites.
+	//
+	// AgentErrorStreaks maps agent name → consecutive failed model calls
+	// (zero-usage turns from the token scanner's chat recordings — the #5338
+	// bobshell crash-loop signal, where turns run, every call dies, and the
+	// agent stays green).
+	AgentErrorStreaks map[string]int `json:"agent_error_streaks"`
+	// ConsentWedged lists agents whose kick path hit a consent-screen restart
+	// in the last hour — the Copilot consent wedge that restarts an agent
+	// ~1/min while it reads green.
+	ConsentWedged []string `json:"consent_wedged"`
+	// NoCadenceAgents lists enabled, governor-kickable agents with no cadence
+	// configured in any mode AND no kick ever — agents that will idle forever
+	// until the operator sets a cadence.
+	NoCadenceAgents []string `json:"no_cadence_agents"`
 
 	// SLAViolations is work aging past its service threshold, taken from the
 	// governor's eval snapshot.

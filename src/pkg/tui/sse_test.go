@@ -184,8 +184,13 @@ func hasMsg[T tea.Msg](msgs []tea.Msg) bool {
 }
 
 // connectedModel is a model in the state a healthy stream leaves behind: an
-// open subscription, the header reporting connected, and the poll stretched to
-// the reconcile cadence.
+// open subscription, the header reporting connected, and the RECONCILIATION
+// poll stretched to the reconcile cadence.
+//
+// activityInterval is deliberately left at its constructed pollInterval, which
+// is the whole point of T32: a healthy stream is not a reason for the activity
+// loop to slow down, so the state a healthy stream leaves behind has it still
+// at 5s.
 func connectedModel(t *testing.T, url string) model {
 	t.Helper()
 	pinDashboard(t, url)
@@ -197,24 +202,30 @@ func connectedModel(t *testing.T, url string) model {
 		gen:    m.sseGen,
 	}
 	m.sseConnected = true
-	m.interval = sseReconcileInterval
+	m.reconcileInterval = sseReconcileInterval
 	return m
 }
 
 // TestSSEEventUpdatesAPaneWithoutATick is the AC's first case, driven through
 // the real program.
 //
-// The model's poll interval is set to an hour, so no tick can fire inside the
-// test: everything on screen beyond the single startup fetch arrived because
-// the stream pushed it. Each assertion is something polling cannot produce —
-// /api/agents carries no live state at all, and nothing polled feeds the
-// governor pane today.
+// BOTH poll intervals are set to an hour, so no tick of either class can fire
+// inside the test: everything on screen beyond the single startup fetch
+// arrived because the stream pushed it. Each assertion is something polling
+// cannot produce — /api/agents carries no live state at all, and nothing
+// polled feeds the governor pane today.
+//
+// The activity interval has to be stretched explicitly since T32. It no longer
+// follows the reconcile one, and at its production 5s it would fire twice
+// inside this test's window — not changing the outcome, but making "nothing
+// polled" a claim the test no longer actually establishes.
 func TestSSEEventUpdatesAPaneWithoutATick(t *testing.T) {
 	server := newStreamServer(t, statusFixture)
 	pinDashboard(t, server.URL)
 
 	m := newModel()
-	m.interval = time.Hour
+	m.reconcileInterval = time.Hour
+	m.activityInterval = time.Hour
 
 	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(100, 30))
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
@@ -234,9 +245,9 @@ func TestSSEEventUpdatesAPaneWithoutATick(t *testing.T) {
 	if !final.sseConnected {
 		t.Error("a stream that delivered events left the header disconnected")
 	}
-	if final.interval != sseReconcileInterval {
+	if final.reconcileInterval != sseReconcileInterval {
 		t.Errorf("interval = %v after a healthy stream, want the reconcile cadence %v",
-			final.interval, sseReconcileInterval)
+			final.reconcileInterval, sseReconcileInterval)
 	}
 }
 
@@ -258,8 +269,8 @@ func TestSSEDropFallsBackToPolling(t *testing.T) {
 		t.Fatalf("a dropped stream returned %T, want the root model", next)
 	}
 
-	if got.interval != pollInterval {
-		t.Errorf("interval = %v after a drop, want the fallback cadence %v", got.interval, pollInterval)
+	if got.reconcileInterval != pollInterval {
+		t.Errorf("interval = %v after a drop, want the fallback cadence %v", got.reconcileInterval, pollInterval)
 	}
 	if got.sseConnected {
 		t.Error("a dropped stream still reports connected")
@@ -267,7 +278,7 @@ func TestSSEDropFallsBackToPolling(t *testing.T) {
 	if got.sse != nil {
 		t.Error("a dropped stream was not released")
 	}
-	if got.tickGen == m.tickGen {
+	if got.reconcileGen == m.reconcileGen {
 		t.Error("the stretched tick chain was not retired; the 60s chain would keep ticking alongside the 5s one")
 	}
 	if got.sseGen == m.sseGen {
@@ -314,11 +325,11 @@ func TestRepeatedDropsDoNotRestartTheFallback(t *testing.T) {
 	second, cmd := degraded.Update(sseDroppedMsg{gen: degraded.sseGen, err: errSSEClosed})
 	again := second.(model)
 
-	if again.tickGen != degraded.tickGen {
+	if again.reconcileGen != degraded.reconcileGen {
 		t.Error("a repeated drop armed a second tick chain")
 	}
-	if again.interval != pollInterval {
-		t.Errorf("interval = %v after a repeated drop, want %v", again.interval, pollInterval)
+	if again.reconcileInterval != pollInterval {
+		t.Errorf("interval = %v after a repeated drop, want %v", again.reconcileInterval, pollInterval)
 	}
 	msgs := drainUntil(cmd, finalWait, func(msgs []tea.Msg) bool { return hasMsg[sseReconnectMsg](msgs) })
 	if findAgentsMsg(msgs) != nil {
@@ -336,7 +347,7 @@ func TestRepeatedDropsDoNotRestartTheFallback(t *testing.T) {
 func TestSSEEventStretchesThePollWithoutASecondChain(t *testing.T) {
 	m := connectedModel(t, closedDashboard)
 	m.sseConnected = false
-	m.interval = pollInterval
+	m.reconcileInterval = pollInterval
 	m.sseBackoff = sseBackoffMax
 
 	next, cmd := m.Update(sseEventMsg{
@@ -345,10 +356,10 @@ func TestSSEEventStretchesThePollWithoutASecondChain(t *testing.T) {
 	})
 	got := next.(model)
 
-	if got.interval != sseReconcileInterval {
-		t.Errorf("interval = %v while the stream is healthy, want %v", got.interval, sseReconcileInterval)
+	if got.reconcileInterval != sseReconcileInterval {
+		t.Errorf("interval = %v while the stream is healthy, want %v", got.reconcileInterval, sseReconcileInterval)
 	}
-	if got.tickGen != m.tickGen {
+	if got.reconcileGen != m.reconcileGen {
 		t.Error("stretching the poll armed a second tick chain")
 	}
 	if !got.sseConnected {
@@ -357,7 +368,10 @@ func TestSSEEventStretchesThePollWithoutASecondChain(t *testing.T) {
 	if got.sseBackoff != 0 {
 		t.Errorf("sseBackoff = %v after a received event, want it reset", got.sseBackoff)
 	}
-	if got.headerText() != fmt.Sprintf(headerFormat, wsConnected) {
+	// The identity is still a dash — nothing polled /api/hive-id in this test —
+	// but the mode is live off the event the model just applied (T29), which is
+	// the point of the stream updating the header immediately.
+	if got.headerText() != fmt.Sprintf(headerFormat, headerUnknown, "BUSY", wsConnected) {
 		t.Errorf("header = %q, want it to report a live stream", got.headerText())
 	}
 	// The pump must re-arm, or the stream delivers exactly one event and then
@@ -407,8 +421,8 @@ func TestStaleSSEMessagesAreIgnored(t *testing.T) {
 		if got.sseConnected {
 			t.Error("a stale event reported the replacement stream healthy")
 		}
-		if got.interval != pollInterval {
-			t.Errorf("interval = %v, want the fallback cadence untouched by a stale event", got.interval)
+		if got.reconcileInterval != pollInterval {
+			t.Errorf("interval = %v, want the fallback cadence untouched by a stale event", got.reconcileInterval)
 		}
 	})
 
@@ -421,7 +435,7 @@ func TestStaleSSEMessagesAreIgnored(t *testing.T) {
 		if cmd != nil {
 			t.Error("a stale drop produced a command")
 		}
-		if !got.sseConnected || got.interval != sseReconcileInterval {
+		if !got.sseConnected || got.reconcileInterval != sseReconcileInterval {
 			t.Error("a stale drop degraded a healthy stream")
 		}
 	})
@@ -457,39 +471,80 @@ func TestStaleSSEMessagesAreIgnored(t *testing.T) {
 
 // TestStaleTickDoesNotRearm pins the mechanism the fallback relies on: the
 // retired chain ends at its next fire instead of running forever beside the
-// new one.
+// new one. Both classes carry the guard, so both are checked.
 func TestStaleTickDoesNotRearm(t *testing.T) {
-	m := pollTestModel(t, closedDashboard)
-	m.tickGen = 1
+	t.Run("reconcile", func(t *testing.T) {
+		m := pollTestModel(t, closedDashboard)
+		m.reconcileGen = 1
 
-	next, cmd := m.Update(tickMsg{})
-	if cmd != nil {
-		t.Error("a tick from a retired chain re-armed itself")
-	}
-	if next.(model).tickGen != 1 {
-		t.Error("a stale tick changed the tick generation")
-	}
+		next, cmd := m.Update(reconcileTickMsg{})
+		if cmd != nil {
+			t.Error("a tick from a retired chain re-armed itself")
+		}
+		if next.(model).reconcileGen != 1 {
+			t.Error("a stale tick changed the tick generation")
+		}
+	})
+
+	t.Run("activity", func(t *testing.T) {
+		m := pollTestModel(t, closedDashboard)
+		m.activityGen = 1
+
+		next, cmd := m.Update(activityTickMsg{})
+		if cmd != nil {
+			t.Error("a tick from a retired activity chain re-armed itself")
+		}
+		if next.(model).activityGen != 1 {
+			t.Error("a stale activity tick changed the activity generation")
+		}
+	})
 }
 
 // TestScheduleTickStampsTheCurrentGeneration is the other half of that
 // mechanism: a chain armed after a cadence change must carry the new
 // generation, or the guard above would drop the live chain instead of the dead
 // one and the poll would stop entirely.
+//
+// The two cases also pin that each scheduler reads its OWN generation. Arming
+// the activity chain with reconcileGen would compile, run, and look correct
+// until the first stream drop bumped that counter and silently retired a chain
+// nothing re-arms.
 func TestScheduleTickStampsTheCurrentGeneration(t *testing.T) {
-	m := pollTestModel(t, closedDashboard)
-	m.tickGen = 7
+	t.Run("reconcile", func(t *testing.T) {
+		m := pollTestModel(t, closedDashboard)
+		m.reconcileGen = 7
+		m.activityGen = 99
 
-	msgs := drain(m.scheduleTick())
-	if len(msgs) != 1 {
-		t.Fatalf("scheduleTick produced %d messages, want 1", len(msgs))
-	}
-	tick, ok := msgs[0].(tickMsg)
-	if !ok {
-		t.Fatalf("scheduleTick produced %T, want a tickMsg", msgs[0])
-	}
-	if tick.gen != 7 {
-		t.Errorf("tick carries generation %d, want the model's 7", tick.gen)
-	}
+		msgs := drain(m.scheduleReconcileTick())
+		if len(msgs) != 1 {
+			t.Fatalf("scheduleReconcileTick produced %d messages, want 1", len(msgs))
+		}
+		tick, ok := msgs[0].(reconcileTickMsg)
+		if !ok {
+			t.Fatalf("scheduleReconcileTick produced %T, want a reconcileTickMsg", msgs[0])
+		}
+		if tick.gen != 7 {
+			t.Errorf("tick carries generation %d, want the model's reconcileGen 7", tick.gen)
+		}
+	})
+
+	t.Run("activity", func(t *testing.T) {
+		m := pollTestModel(t, closedDashboard)
+		m.reconcileGen = 99
+		m.activityGen = 7
+
+		msgs := drain(m.scheduleActivityTick())
+		if len(msgs) != 1 {
+			t.Fatalf("scheduleActivityTick produced %d messages, want 1", len(msgs))
+		}
+		tick, ok := msgs[0].(activityTickMsg)
+		if !ok {
+			t.Fatalf("scheduleActivityTick produced %T, want an activityTickMsg", msgs[0])
+		}
+		if tick.gen != 7 {
+			t.Errorf("tick carries generation %d, want the model's activityGen 7", tick.gen)
+		}
+	})
 }
 
 // TestPaneMsgsTranslateStatusEvents pins the translation itself: which pane
@@ -625,13 +680,20 @@ func TestCleanStreamCloseIsADrop(t *testing.T) {
 	}
 }
 
-// findGovernorMsg returns the delivered governor snapshot, or nil if none was
-// produced.
+// findGovernorMsg returns the LAST delivered governor snapshot, or nil if none
+// was produced.
+//
+// Last rather than first, because the frame the pane ends up showing is the
+// one delivered last. A helper that returned the first would pass even when a
+// subsequent delivery overwrote a good evaluation interval with zero — which
+// is exactly the T29 regression these tests exist to catch.
 func findGovernorMsg(msgs []tea.Msg) *panes.GovernorMsg {
+	var found *panes.GovernorMsg
 	for _, msg := range msgs {
 		if g, ok := msg.(panes.GovernorMsg); ok {
-			return &g
+			g := g
+			found = &g
 		}
 	}
-	return nil
+	return found
 }

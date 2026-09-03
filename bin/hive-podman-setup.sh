@@ -51,6 +51,22 @@
 # re-copies the config files from the repository's examples. NOTHING under
 # secrets/ is ever overwritten, with or without --force.
 #
+# HIVECTL (#5646). The operator CLI, hivectl, is a client of the dashboard API
+# with no supported way onto these hosts otherwise: the documented route is
+# `go build`, and the target hosts are exactly the ones where a Go toolchain
+# cannot be installed. The image therefore carries the binary as cargo (not on
+# the container's PATH — the client never runs inside the thing it inspects),
+# and step 8 extracts it onto the host with `podman create` + `podman cp`. No
+# package is installed and nothing is downloaded that the install did not
+# already pull; the client is always the same version as the running hive.
+# Unlike the operator-owned config files, hivectl is OUR artifact: a re-run
+# refreshes it to match the image, which is what an operator who just updated
+# wants. It lands in ~/.local/bin rootless and /usr/local/bin rootful — both
+# writable on image-based hosts (/usr/local is /var/usrlocal there) — and
+# HIVE_SETUP_BIN_DIR overrides either. A missing binary in an image built
+# before #5646 is reported loudly but does not fail an otherwise healthy
+# install.
+#
 # Rootless by default; --rootful drives the system manager through sudo, the
 # same flag convention as bin/hive-podman-update.sh.
 #
@@ -97,6 +113,12 @@ PREFLIGHT_DIR="${HIVE_SETUP_PREFLIGHT_DIR:-${ROOT}/bin}"
 # `fsGroup: 1002` on the Kubernetes path. bin/hive-podman-preflight-host.sh
 # checks the same number under the same name (#4359).
 LAUNCH_GID="${HIVE_SETUP_LAUNCH_GID:-1002}"
+
+# Where src/Dockerfile stows the hivectl binary inside the image (#5646). This
+# is a contract with the Dockerfile, not something a unit can be asked for, so
+# src/deploy/test_hivectl_extraction_contract.sh pins the two spellings to each
+# other — the drift this file's philosophy otherwise forbids is caught there.
+HIVECTL_IMAGE_PATH="/usr/local/share/hive/hivectl"
 
 # The four units, in the order they are installed. systemd resolves the real
 # ordering from the Requires=/After= the generator derives; this order is for a
@@ -154,8 +176,11 @@ Usage: hive-podman-setup.sh [--rootful|--rootless] [--force] [--skip-pull]
                             [--enable-linger]
 
 Installs the standalone Hive Podman deployment: runs the existing preflights,
-materialises the configuration, installs the four Quadlet units, and confirms
-the gateway answers before returning.
+materialises the configuration, installs the four Quadlet units, confirms the
+gateway answers, and extracts the hivectl operator CLI from the image onto the
+host (~/.local/bin rootless, /usr/local/bin rootful; HIVE_SETUP_BIN_DIR
+overrides either). hivectl is refreshed from the image on every run, so it
+always matches the hive it operates.
 
   --rootful    system manager, config in /etc/hive, units in
                /etc/containers/systemd, systemctl and podman through sudo
@@ -207,6 +232,9 @@ if [ "$ROOTFUL" -eq 1 ]; then
   CONF_DIR="${HIVE_SETUP_CONF_DIR:-/etc/hive}"
   UNIT_DIR="${HIVE_SETUP_UNIT_DIR:-/etc/containers/systemd}"
   SYSTEMD_UNIT_DIR="${HIVE_SETUP_SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
+  # /usr/local/bin, not /usr/bin: on image-based hosts /usr is read-only but
+  # /usr/local is a symlink into /var/usrlocal, which is writable (#5646).
+  BIN_DIR="${HIVE_SETUP_BIN_DIR:-/usr/local/bin}"
   SCTL_LABEL="sudo systemctl"
   sctl() { sudo systemctl "$@"; }
   pod()  { sudo podman "$@"; }
@@ -217,6 +245,9 @@ else
   CONF_DIR="${HIVE_SETUP_CONF_DIR:-$HOME/.config/hive}"
   UNIT_DIR="${HIVE_SETUP_UNIT_DIR:-$HOME/.config/containers/systemd}"
   SYSTEMD_UNIT_DIR="${HIVE_SETUP_SYSTEMD_UNIT_DIR:-$HOME/.config/systemd/user}"
+  # The XDG user binary directory (systemd file-hierarchy(7)); on Fedora-family
+  # hosts it is on PATH by default, and step 8 says so when it is not (#5646).
+  BIN_DIR="${HIVE_SETUP_BIN_DIR:-$HOME/.local/bin}"
   SCTL_LABEL="systemctl --user"
   sctl() { systemctl --user "$@"; }
   pod()  { podman "$@"; }
@@ -327,7 +358,7 @@ say "  units:   ${UNIT_DIR}"
 say "  source:  ${SRC_DIR}"
 
 # --- step 1: this really is the Podman path ---------------------------------
-step "1/8  Runtime selection"
+step "1/9  Runtime selection"
 
 # The standalone runtime selector (#4205) defaults to Docker. Refuse if an
 # operator has explicitly selected something else — this script speaks only to
@@ -377,7 +408,7 @@ fi
 info "image: ${HIVE_IMAGE}"
 
 # --- step 2: the host preflights, before anything is written ----------------
-step "2/8  Host preflight (engine, root mode, cgroups; subordinate IDs, storage, networking)"
+step "2/9  Host preflight (engine, root mode, cgroups; subordinate IDs, storage, networking)"
 
 # Their output IS the guidance. Restating it here would be a second copy to
 # keep in sync, and the copy would be the one the operator reads.
@@ -403,7 +434,7 @@ run_preflight hive-podman-preflight-ids.sh "Subordinate-ID/graphroot/network pre
 ok "both pre-write preflights passed"
 
 # --- step 3: configuration ---------------------------------------------------
-step "3/8  Configuration in ${CONF_DIR}"
+step "3/9  Configuration in ${CONF_DIR}"
 
 as_owner mkdir -p "$CONF_DIR" || die "$EX_CONFIG" "could not create ${CONF_DIR}"
 as_owner mkdir -p "$SECRETS_DIR" || die "$EX_CONFIG" "could not create ${SECRETS_DIR}"
@@ -447,7 +478,7 @@ fi
 info "HIVE_GITHUB_TOKEN is yours to add: see src/docs/github-app-setup.md for the PAT scopes."
 
 # --- step 4: the #4367 coupling, enforced -----------------------------------
-step "4/8  dashboard.port must equal the unit's HealthCmd port (#4367)"
+step "4/9  dashboard.port must equal the unit's HealthCmd port (#4367)"
 
 current="$(dashboard_port "${CONF_DIR}/hive.yaml")"
 if [ -z "$current" ]; then
@@ -475,7 +506,7 @@ fi
 ok "verified from the file that will be mounted: ${verified} == ${HEALTH_PORT}"
 
 # --- step 5: secrets the container can actually reach (#4359) ---------------
-step "5/8  Secrets directory mode and group (#4359)"
+step "5/9  Secrets directory mode and group (#4359)"
 
 as_owner chmod 750 "$SECRETS_DIR" || die "$EX_CONFIG" "could not chmod 750 ${SECRETS_DIR}"
 ok "mode 750 on ${SECRETS_DIR}"
@@ -497,7 +528,7 @@ fi
 info "Nothing under secrets/ is created or overwritten here; put your GitHub App key in it yourself."
 
 # --- step 6: the post-write preflight, then the units -----------------------
-step "6/8  Host preflight over what was just written, then install the units"
+step "6/9  Host preflight over what was just written, then install the units"
 
 # This one checks the files the steps above created — SELinux labels on the
 # bind sources, secrets reachability, hive.env, the gateway port — so it can
@@ -557,7 +588,7 @@ sctl enable hive-boot-gate.service || die "$EX_CONFIG" "systemctl enable hive-bo
 ok "hive-boot-gate.service enabled — Hive starts at boot without holding the boot (#4478)"
 
 # --- step 7: started is not the same as healthy -----------------------------
-step "7/8  Start, and confirm HEALTHY rather than started"
+step "7/9  Start, and confirm HEALTHY rather than started"
 
 # THE VOLUME MUST EXIST WITH ITS OWNERSHIP LABELS BEFORE ANYTHING STARTS
 # (#4485). systemd starts hive-data-volume.service only when it is inactive;
@@ -650,8 +681,71 @@ if [ "$answered" -ne 1 ]; then
 fi
 ok "gateway answered on ${GATEWAY_PORT} — healthy end to end"
 
-# --- step 8: healthy now is not the same as back after a reboot (#4489) ------
-step "8/8  Boot persistence — will this install survive a reboot?"
+# --- step 8: hivectl onto the host (#5646) -----------------------------------
+step "8/9  hivectl onto the host (#5646)"
+
+# The image the deployment runs carries hivectl as cargo at
+# ${HIVECTL_IMAGE_PATH} — deliberately off the container's PATH, because the
+# client must never run inside the thing it inspects. `podman create` makes the
+# image's filesystem addressable WITHOUT executing anything, `podman cp` lifts
+# the binary out, and the throwaway container is removed on every path out of
+# the function. This step runs after the health check on purpose: the container
+# is running, so the image is guaranteed present even under --skip-pull.
+#
+# Failure here is reported loudly but does not fail the install: the hive
+# itself is healthy, and the one known cause is an image built before #5646,
+# which the next update fixes.
+install_hivectl() {
+  local staging ctr
+  staging="$(mktemp -d)" || return 1
+  ctr="hive-hivectl-extract-$$"
+  if ! pod create --name "$ctr" "$HIVE_IMAGE" >/dev/null; then
+    rm -rf "$staging"
+    return 1
+  fi
+  if ! pod cp "${ctr}:${HIVECTL_IMAGE_PATH}" "${staging}/hivectl"; then
+    pod rm "$ctr" >/dev/null
+    as_owner rm -rf "$staging"
+    return 1
+  fi
+  pod rm "$ctr" >/dev/null || warn "could not remove the throwaway container ${ctr}"
+  # hivectl is this script's artifact, not the operator's, so unlike hive.yaml
+  # it converges on the image's version: refreshed when it differs, kept — and
+  # reported as kept — when it already matches.
+  if [ -f "${BIN_DIR}/hivectl" ] && cmp -s "${staging}/hivectl" "${BIN_DIR}/hivectl"; then
+    ok "keep    hivectl: ${BIN_DIR}/hivectl already matches the image"
+  else
+    if ! as_owner install -Dm755 "${staging}/hivectl" "${BIN_DIR}/hivectl"; then
+      as_owner rm -rf "$staging"
+      return 1
+    fi
+    ok "wrote   hivectl: ${BIN_DIR}/hivectl (extracted from the image)"
+  fi
+  as_owner rm -rf "$staging"
+}
+
+HIVECTL_OK=0
+if install_hivectl; then
+  HIVECTL_OK=1
+  case ":${PATH}:" in
+    *":${BIN_DIR}:"*)
+      ok "${BIN_DIR} is on PATH" ;;
+    *)
+      warn "${BIN_DIR} is not on this shell's PATH"
+      info "add it, or call the binary by its full path: ${BIN_DIR}/hivectl" ;;
+  esac
+  info "point it at the gateway: hivectl --server http://127.0.0.1:${GATEWAY_PORT} system status"
+  info "auth comes from HIVE_DASHBOARD_TOKEN in ${CONF_DIR}/hive.env — see src/docs/hivectl.md"
+else
+  bad "could not extract ${HIVECTL_IMAGE_PATH} from ${HIVE_IMAGE}"
+  info "The likely cause is an image built before #5646, which does not carry the binary."
+  info "Hive itself is healthy and running; only the host CLI is missing. Update the image"
+  info "(bin/hive-podman-update.sh) and re-run this installer, or build from source where a"
+  info "Go toolchain exists: go build -o hivectl ./cmd/hivectl (src/docs/hivectl.md)."
+fi
+
+# --- step 9: healthy now is not the same as back after a reboot (#4489) ------
+step "9/9  Boot persistence — will this install survive a reboot?"
 
 # Rootless boot persistence hinges on ONE fact this script can read: lingering.
 # At boot there is no session, so with Linger=no logind never starts the user
@@ -714,6 +808,11 @@ say "  Dashboard:  http://localhost:${GATEWAY_PORT}"
 say "  Config:     ${CONF_DIR}/hive.yaml   (edit for your project, then: ${SCTL_LABEL} restart hive.service)"
 say "  Secrets:    ${SECRETS_DIR}          (mode 750, group ${LAUNCH_GID}; put your GitHub App key here)"
 say "  Tokens:     ${CONF_DIR}/hive.env    (HIVE_GITHUB_TOKEN, HIVE_DASHBOARD_TOKEN)"
+if [ "$HIVECTL_OK" -eq 1 ]; then
+  say "  hivectl:    ${BIN_DIR}/hivectl    (matches the image; try: hivectl --server http://127.0.0.1:${GATEWAY_PORT} system status)"
+else
+  say "  ${c_yellow}hivectl:    NOT installed — see step 8 above for why and the fix${c_reset}"
+fi
 if [ "$LINGER_OK" -eq 1 ]; then
   if [ "$ROOTFUL" -eq 1 ]; then
     say "  Reboot:     survives a reboot — the system manager is PID 1"

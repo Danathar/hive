@@ -16,6 +16,7 @@ const (
 	defaultPollIntervalMins       = 5
 	defaultKnowledgeMaxFacts      = 25
 	defaultKnowledgeEngine        = "llm-wiki"
+	defaultCuratorSchedule        = "daily"
 	defaultPromoteThreshold       = 0.9
 	defaultSensingTTLSeconds      = 900
 	defaultSensingPullbackSeconds = 900
@@ -256,6 +257,21 @@ func (c *Config) applyDefaults() {
 	if c.Governor.Budget.CriticalPct == 0 {
 		c.Governor.Budget.CriticalPct = defaultBudgetCriticalPct
 	}
+	// WARN, NEVER REJECT, on the load path (#5508). Three spokes are live
+	// right now with below-floor limits. If load REFUSED them they would fail
+	// to start on the next restart — converting a starving hive into a dead
+	// one, which is strictly worse than the bug being fixed. The operator can
+	// only correct the value through a hive that boots.
+	//
+	// Rejection belongs solely to the dashboard SAVE path, where a human is
+	// present to read the message and fix the number. Do not "make validation
+	// consistent" by promoting this to an error; the asymmetry is the fix.
+	// TestBelowFloorBudgetStillLoads pins it.
+	if msg := SuggestBudgetUnitMistake(c.Governor.Budget.TotalTokens); msg != "" {
+		log.Printf("WARNING: governor.budget.total_tokens: %s "+
+			"— agents will exhaust this budget on their first model call and stop working; "+
+			"config loaded unchanged, correct it in the dashboard (Governor → Budget)", msg)
+	}
 	if c.Governor.Logging.Dir == "" {
 		c.Governor.Logging.Dir = c.Data.LogsDir
 	}
@@ -297,6 +313,15 @@ func (c *Config) applyDefaults() {
 		}
 		if len(c.Knowledge.Primer.Priority) == 0 {
 			c.Knowledge.Primer.Priority = []string{"regression", "gotcha", "test_scaffold", "pattern", "decision"}
+		}
+		// Schedule is only defaulted when the curator has been explicitly
+		// enabled. Defaulting it unconditionally (the pre-#5430 behaviour) was
+		// harmless while nothing read the field, but now that it drives a
+		// promotion loop a blanket default would hand every hive a cadence it
+		// never asked for. The Enabled gate is the real guard; leaving Schedule
+		// empty on disabled hives keeps the config honest about what will run.
+		if c.Knowledge.Curator.IsEnabled() && c.Knowledge.Curator.Schedule == "" {
+			c.Knowledge.Curator.Schedule = defaultCuratorSchedule
 		}
 		if c.Knowledge.Curator.AutoPromoteThreshold == 0 {
 			c.Knowledge.Curator.AutoPromoteThreshold = defaultPromoteThreshold

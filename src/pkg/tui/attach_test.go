@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/hivecommons/hive/pkg/tui/client"
 )
 
 var attachKey = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")}
@@ -52,12 +54,19 @@ if [ "$1" = "has-session" ]; then
 fi
 exit 99`)
 
-	msg, ok := prepareAttach("scanner")().(attachReadyMsg)
+	// The pinned closedDashboard URL is loopback, so the missing local
+	// session triggers the proxy fallback (#5644) — which fails too, against
+	// an address nothing listens on. The footer must still lead with the
+	// local cause the operator can see from their own machine.
+	msg, ok := prepareAttach("scanner", client.New())().(attachReadyMsg)
 	if !ok {
 		t.Fatalf("preflight returned %T, want attachReadyMsg", msg)
 	}
 	if msg.cmd != nil {
 		t.Fatal("missing session returned an attach command")
+	}
+	if msg.remote != nil {
+		t.Fatal("missing session and unreachable dashboard returned a remote session")
 	}
 	var missing *tmuxSessionMissingError
 	if !errors.As(msg.err, &missing) {

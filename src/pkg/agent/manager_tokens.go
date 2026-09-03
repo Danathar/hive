@@ -6,9 +6,12 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/hivecommons/hive/pkg/claude"
@@ -417,26 +420,57 @@ func credentialWatchdogInterval() time.Duration {
 // their creds under the agent's own $HOME (or do no CLI login at all), so there
 // is no hive-managed file for a presence check to watch.
 //
-// probe reports (ok, reason): ok=true means the credential is usable; when
-// false, reason is a short human string ("missing" / "invalid or expired") for
-// the audit detail and log. It must only stat/parse the file — never emit,
-// mutate, or return token material.
+// probe reports whether the credential is usable plus the operator-facing
+// reason/recovery. It must only stat/parse the file — never emit, mutate, or
+// return token material.
 type credentialWatch struct {
 	backend     string
 	path        string
 	auditAction string
-	probe       func(path string) (ok bool, reason string)
+	probe       func(path string) credentialProbe
+}
+
+type credentialProbe struct {
+	ok       bool
+	reason   string
+	recovery string
+	fields   []any
+}
+
+func credentialOK() credentialProbe { return credentialProbe{ok: true} }
+
+const defaultCredentialRecovery = "operator dashboard device-flow login"
+
+func credentialReadable(path string) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	_ = f.Close()
+	return true, nil
+}
+
+func credentialModeAndOwner(path string) (mode string, ownerUID uint32) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return "", 0
+	}
+	mode = fi.Mode().Perm().String()
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		ownerUID = st.Uid
+	}
+	return mode, ownerUID
 }
 
 // copilotTokenUsable reports whether the durable Copilot device-flow token file
 // is present and non-empty. It reads only the file's presence and size — never
 // its contents.
-func copilotTokenUsable(path string) (bool, string) {
+func copilotTokenUsable(path string) credentialProbe {
 	info, err := os.Stat(path)
 	if err != nil || info.Size() == 0 {
-		return false, "missing"
+		return credentialProbe{reason: "missing", recovery: defaultCredentialRecovery}
 	}
-	return true, ""
+	return credentialOK()
 }
 
 // claudeTokenUsable reports whether the Claude credentials file can still put
@@ -450,14 +484,27 @@ func copilotTokenUsable(path string) (bool, string) {
 // Reporting that state as unusable is what made this watchdog prescribe an
 // interactive login every time a hive ran longer than a Claude access token
 // lives — roughly once a day, for a credential that was fine.
-func claudeTokenUsable(path string) (bool, string) {
+func claudeTokenUsable(path string) credentialProbe {
 	if _, err := os.Stat(path); err != nil {
-		return false, "missing"
+		return credentialProbe{reason: "missing", recovery: defaultCredentialRecovery}
+	}
+	if _, err := credentialReadable(path); errors.Is(err, fs.ErrPermission) {
+		mode, ownerUID := credentialModeAndOwner(path)
+		return credentialProbe{
+			reason:   "unreadable by the hive process (permission denied)",
+			recovery: "chmod g+r " + path + " — the credential itself is fine; a re-login will not help",
+			fields: []any{
+				"mode", mode,
+				"owner_uid", ownerUID,
+				"reader_uid", os.Geteuid(),
+				"cause", "a CLI token refresh rewrote the shared credential owner-only; the fleet reaches it through the node group",
+			},
+		}
 	}
 	if !claude.HasUsableToken(path) {
-		return false, "login expired (no usable refresh grant)"
+		return credentialProbe{reason: "login expired (no usable refresh grant)", recovery: defaultCredentialRecovery}
 	}
-	return true, ""
+	return credentialOK()
 }
 
 // credentialWatches is the set of durable-credential files the watchdog guards,
@@ -681,17 +728,23 @@ func (m *Manager) evalCredentialWatch(w credentialWatch, lastUnusable map[string
 		delete(lastUnusable, w.backend)
 		return
 	}
-	ok, reason := w.probe(w.path)
-	unusable := !ok
+	res := w.probe(w.path)
+	unusable := !res.ok
 	if unusable && !lastUnusable[w.backend] {
-		m.logger.Warn("credential watchdog: durable credential unusable",
+		recovery := res.recovery
+		if recovery == "" {
+			recovery = defaultCredentialRecovery
+		}
+		args := []any{
 			"backend", w.backend,
 			"path", w.path,
-			"reason", reason,
+			"reason", res.reason,
 			"impact", "agents on this backend hang at login; new pods cannot start work",
-			"recovery", "operator dashboard device-flow login")
+			"recovery", recovery,
+		}
+		m.logger.Warn("credential watchdog: durable credential unusable", append(args, res.fields...)...)
 		m.audit(w.auditAction, "", auditFields(
-			"outcome", reason,
+			"outcome", res.reason,
 			"backend", w.backend,
 			"path", w.path,
 			"trigger", "watchdog",

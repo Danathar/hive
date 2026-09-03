@@ -4,9 +4,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/hivecommons/hive/internal/testutil"
 )
 
 // entrypointPath is the script under test, relative to this package.
@@ -41,7 +44,7 @@ func runBootPreludeRoot(t *testing.T, env map[string]string, files map[string]st
 	t.Helper()
 	src, err := os.ReadFile(entrypointPath)
 	if err != nil {
-		t.Skipf("entrypoint.sh not readable from this package: %v", err)
+		testutil.SkipfUnlessRequired(t, "entrypoint.sh not readable from this package: %v", err)
 	}
 	text := string(src)
 	// Cut at the cleanup marker that follows the config branch.
@@ -86,6 +89,10 @@ func runBootPreludeRoot(t *testing.T, env map[string]string, files map[string]st
 	// takes its cannot-chown branch by design (#5360) and the 0600 assertions
 	// fail for a reason that has nothing to do with the hardening under test.
 	body = strings.ReplaceAll(body, `"1001"`, `"`+strconv.Itoa(os.Getuid())+`"`)
+	if runtime.GOOS == "darwin" {
+		body = strings.ReplaceAll(body, "stat -c '%u'", "stat -f '%u'")
+		body = strings.ReplaceAll(body, "stat -c '%a'", "stat -f '%Lp'")
+	}
 
 	for _, rel := range readOnly {
 		p := filepath.Join(root, rel)
@@ -290,7 +297,7 @@ func launchArgvAfterReconciliation(t *testing.T, hiveConfigEnv string) []string 
 	t.Helper()
 	src, err := os.ReadFile(entrypointPath)
 	if err != nil {
-		t.Skipf("entrypoint.sh not readable from this package: %v", err)
+		testutil.SkipfUnlessRequired(t, "entrypoint.sh not readable from this package: %v", err)
 	}
 	text := string(src)
 
@@ -369,7 +376,7 @@ func TestUnsetHiveConfigLeavesArgvAlone(t *testing.T) {
 func TestLaunchUsesTheReconciledArgv(t *testing.T) {
 	src, err := os.ReadFile(entrypointPath)
 	if err != nil {
-		t.Skipf("entrypoint.sh not readable from this package: %v", err)
+		testutil.SkipfUnlessRequired(t, "entrypoint.sh not readable from this package: %v", err)
 	}
 	if !strings.Contains(string(src), `hive "$@" &`) {
 		t.Error(`entrypoint.sh no longer launches the binary as 'hive "$@" &'; the argv reconciliation above it can no longer reach the process`)
@@ -386,14 +393,21 @@ func TestLaunchUsesTheReconciledArgv(t *testing.T) {
 func TestDockerfileCMDAndEntrypointAgreeOnConfigPath(t *testing.T) {
 	dockerfile, err := os.ReadFile("../../Dockerfile")
 	if err != nil {
-		t.Skipf("Dockerfile not readable from this package: %v", err)
+		testutil.SkipfUnlessRequired(t, "Dockerfile not readable from this package: %v", err)
 	}
 	if !strings.Contains(string(dockerfile), `CMD ["--config"`) {
-		t.Skip("the image CMD no longer passes -config explicitly; the coupling this guards is gone")
+		// Fail rather than skip (#5388): this condition depends only on repo
+		// content, so it is identical on every machine — a skip here is never
+		// "unsuitable environment", it means the coupling this test pins moved.
+		// If the CMD change is deliberate, retire or re-point this test in the
+		// same PR instead of letting it silently stop asserting anything.
+		t.Fatal("the image CMD no longer passes -config explicitly; the coupling this " +
+			"test guards is gone — update or retire TestDockerfileCMDAndEntrypointAgreeOnConfigPath " +
+			"in the PR that changed the Dockerfile CMD")
 	}
 	entry, err := os.ReadFile(entrypointPath)
 	if err != nil {
-		t.Skipf("entrypoint.sh not readable from this package: %v", err)
+		testutil.SkipfUnlessRequired(t, "entrypoint.sh not readable from this package: %v", err)
 	}
 	if !strings.Contains(string(entry), `set -- "$@" --config "$HIVE_CONFIG"`) {
 		t.Error("the image CMD passes -config explicitly but entrypoint.sh no longer appends its own; HIVE_CONFIG is inert again (#4973)")

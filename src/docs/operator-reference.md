@@ -79,7 +79,7 @@ For runtime precedence and provenance, see [config-layering.md](config-layering.
 
 ## Image provenance and tags
 
-Pre-built images are published by [`.github/workflows/docker.yml`](../../.github/workflows/docker.yml) to `ghcr.io/hivecommons/hive` (plus `hive-contributor` and `hive-hub`). A build of the mainline branch `v4` publishes, in one multi-architecture manifest operation:
+Pre-built images are published by [`.github/workflows/docker.yml`](../../.github/workflows/docker.yml) to `ghcr.io/hivecommons/hive` (plus `hive-contributor` and `hive-hub`) and mirrored to the matching `ghcr.io/kubestellar/*` packages during the Hive Commons org transfer, so both orgs serve digest-identical manifest lists for the same tag. A build of the mainline branch `v4` publishes, in one multi-architecture manifest operation:
 
 - `ghcr.io/hivecommons/hive:v4-latest` — rolling tag for the current HEAD of `origin/v4`;
 - `ghcr.io/hivecommons/hive:<git-short-sha>` — immutable per-commit tag;

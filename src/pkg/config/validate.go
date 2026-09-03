@@ -93,28 +93,20 @@ func (c *Config) validate() error {
 }
 
 func validateChannels(agentName string, channels []ChannelConfig) error {
-	validTypes := map[string]bool{"kick": true, "webhook": true, "discord": true, "schedule": true, "bead": true}
+	return ValidateChannels(agentName, channels)
+}
+
+// ValidateChannels rejects any channel declaration whose type has no trigger
+// runtime. Only ChannelTypeKick is valid: the webhook/discord/schedule/bead
+// runtime (pkg/channels) was never wired into the binary and was removed
+// (#5591). Accepting those types would silently suppress governor kicks (see
+// UsesGovernorKick) with no runtime left to fire the declared trigger,
+// leaving the agent permanently dormant. Exported so config writers such as
+// the dashboard channels endpoint can fail fast before persisting.
+func ValidateChannels(agentName string, channels []ChannelConfig) error {
 	for i, ch := range channels {
-		if !validTypes[ch.Type] {
-			return fmt.Errorf("agent %s: channel[%d]: invalid type %q", agentName, i, ch.Type)
-		}
-		switch ch.Type {
-		case "webhook":
-			if len(ch.Events) == 0 {
-				return fmt.Errorf("agent %s: channel[%d]: webhook requires at least one event", agentName, i)
-			}
-		case "discord":
-			if len(ch.Patterns) == 0 {
-				return fmt.Errorf("agent %s: channel[%d]: discord requires at least one pattern", agentName, i)
-			}
-		case "schedule":
-			if ch.Schedule == "" {
-				return fmt.Errorf("agent %s: channel[%d]: schedule requires a cron expression", agentName, i)
-			}
-		case "bead":
-			if len(ch.Match) == 0 {
-				return fmt.Errorf("agent %s: channel[%d]: bead requires at least one match criterion", agentName, i)
-			}
+		if ch.Type != ChannelTypeKick {
+			return fmt.Errorf("agent %s: channel[%d]: type %q has no trigger runtime (only %q is supported; the webhook/discord/schedule/bead runtime was removed, see #5591) — declaring it would leave the agent permanently unkicked", agentName, i, ch.Type, ChannelTypeKick)
 		}
 	}
 	return nil

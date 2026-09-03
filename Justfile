@@ -227,6 +227,16 @@ contribute-check backend="claude": (contribute-check-backend backend)
     @echo ""
     @echo "✓ Machine looks ready for 'just contribute-setup {{backend}}'."
 
+# End-to-end smoke of the contributor backend integration: the real relay
+# against a fake hub, and — where a CLI + credential exist locally — the real
+# backend on a one-line task. Keyless machines still run the drift checks and
+# the stub wire-contract scenarios; live scenarios skip cleanly. The scheduled
+# lane (.github/workflows/backend-smoke.yml) runs the same suite with skips
+# escalated to failures.
+# Usage: just backend-smoke            (or: just backend-smoke claude)
+backend-smoke backends="claude codex":
+    HIVE_SMOKE_BACKENDS="{{backends}}" bash bin/test_backend_smoke.sh
+
 # One-time setup: register with hub + authenticate GitHub + authenticate CLI
 # Ordering note (#2543): the backend-readiness preflight runs FIRST, before
 # any credential is written to disk or a contributor slot is registered —
@@ -1121,9 +1131,10 @@ contribute-hive backend="" mode="docker": check-version
       # costs nothing and keeps the default blast radius off the user's home.
       export HIVE_AGENT_CWD="${XDG_STATE_HOME:-${HOME}/.local/state}/hive/agent-cwd"
       mkdir -p "$HIVE_AGENT_CWD"
+      export AGENT_LAUNCH_CMD="${LITELLM_ENV:+$LITELLM_ENV }$CMD${PERM_FLAG:+ $PERM_FLAG}"
       tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
       tmux new-session -d -s "$TMUX_SESSION" -x 200 -y 50 -c "$HIVE_WORKSPACE_DIR"
-      tmux send-keys -t "$TMUX_SESSION" "cd $(printf %q "$HIVE_AGENT_CWD") && ${LITELLM_ENV:+$LITELLM_ENV }$CMD $PERM_FLAG" Enter
+      tmux send-keys -t "$TMUX_SESSION" "cd $(printf %q "$HIVE_AGENT_CWD") && $AGENT_LAUNCH_CMD" Enter
 
       # Surface a poisoned tmux server rather than letting the backend die a
       # silent, unexplained death 30 seconds into its first task.
@@ -1470,7 +1481,12 @@ contribute-hive backend="" mode="docker": check-version
         ${AGENT_MODEL:+-e AGENT_MODEL="${AGENT_MODEL}"} \
         ${AGENT_REASONING_EFFORT:+-e AGENT_REASONING_EFFORT="${AGENT_REASONING_EFFORT}"} \
         ${CONTRIBUTOR_MODE:+-e CONTRIBUTOR_MODE="${CONTRIBUTOR_MODE}"} \
+        ${HIVE_SESSION+-e HIVE_SESSION="${HIVE_SESSION}"} \
         {{hive_image}} > /dev/null
+      # ^ HIVE_SESSION uses ${VAR+...} (no colon) on purpose: an explicit
+      #   empty string is the relay's opt-out of session labeling and must be
+      #   forwarded, while an unset variable must stay unset so the relay
+      #   defaults the session to the backend name (kubestellar/hive#5605).
 
       echo "Container: ${CONTAINER_NAME}"
       echo "Waiting for CLI session to start..."

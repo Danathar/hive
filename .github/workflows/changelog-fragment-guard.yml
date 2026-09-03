@@ -1,0 +1,193 @@
+# changelog-fragment-guard (#5675): PR-level guard for the changelog.d/
+# fragment convention, modelled on testutil-guard.yml (#5603).
+#
+# Changelog entries used to be appended directly under CHANGELOG.md's
+# `## Unreleased` heading, so any two PRs landing near each other edited the
+# same lines under the same heading and the second one to merge always hit a
+# structural conflict — six rebases of unrelated PRs on 2026-09-02 alone.
+# Entries now land as one file per PR under changelog.d/ (see its README.md),
+# compiled into Unreleased at release time by src/scripts/compile-changelog.sh
+# inside tagged-release.yml. This guard is what keeps new PRs on the fragment
+# path.
+#
+# WHAT IT ASKS: a PR changing code under src/** must either
+#   - add a changelog.d/<category>-<pr-or-slug>.md fragment, or
+#   - carry the `no-changelog` label.
+# Docs-only and test-only changes are exempt without the label — the same
+# exemption the changelog discipline has always had (CHANGELOG.md's "How we
+# maintain this file": routine refactors, test-only changes, and dependency
+# churn are out of scope; changelog-reminder.yml applies the same carve-out).
+# It also validates any fragments the PR does add (name and shape), so a
+# miscategorized fragment fails at PR time rather than at release time —
+# the category prefix drives the semver bump.
+#
+# TRANSITION (date-gated below, remove after it lapses): until 2026-09-09 a
+# direct CHANGELOG.md edit still satisfies the guard, so PRs already in flight
+# with entries under `## Unreleased` land without rework. The pass message
+# tells those authors to prefer fragments. After the window a direct-edit-only
+# PR goes red here — still non-blocking — because a direct edit is exactly the
+# conflict generator this migration removes.
+#
+# REPORTING JOB — deliberately not a required context anywhere, same posture
+# as testutil-guard.yml; the operator can promote it later. If promoted,
+# beware that GitHub leaves path-filtered required checks pending forever on
+# PRs that don't trigger them: promotion means moving the path gate from
+# `on.paths` into the job itself.
+#
+# Registered in .github/release-lines.yml (`[-v2]`): changelog.d/ and the
+# compiler exist only on v4, and v2 is sunset — a PR to v2 would run the v2
+# merge-ref's workflows anyway, where this file does not exist.
+name: changelog-fragment-guard
+
+on:
+  pull_request:
+    branches: [v4, v5]
+    # Default types plus labeled/unlabeled: adding or removing `no-changelog`
+    # must re-evaluate the verdict without waiting for a push.
+    types: [opened, reopened, synchronize, labeled, unlabeled]
+    paths:
+      - 'src/**'
+      # Fragment-only PRs still get their fragments validated.
+      - 'changelog.d/**'
+      # An edit to the guard must run the guard (same rule testutil-guard.yml,
+      # v2-tests.yml and dashboard-lint apply to their own workflow files).
+      - '.github/workflows/changelog-fragment-guard.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: changelog-fragment-guard-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  changelog-fragment-guard:
+    name: changelog-fragment-guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history so the merge base with the target branch exists
+          # locally and the three-dot diff below is computable.
+          fetch-depth: 0
+
+      - name: Code changes must carry a changelog.d fragment (or no-changelog)
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          # Read from the event payload, not the API: needs no token scope and
+          # therefore behaves identically on fork PRs (#4440's lesson).
+          HAS_NO_CHANGELOG_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'no-changelog') }}
+        run: |
+          set -euo pipefail
+
+          # Two views of the diff: ALL changed paths (deletions included — a
+          # PR that only removes code is still a code change an operator can
+          # see), and the paths still present at HEAD (a deleted fragment can
+          # be neither validated nor counted as this PR's entry).
+          git diff --name-only "origin/${BASE_REF}...HEAD" > changed-files.txt
+          git diff --name-only --diff-filter=d "origin/${BASE_REF}...HEAD" > present-files.txt
+          echo "Changed files vs merge base with origin/${BASE_REF}:"
+          sed 's/^/  /' changed-files.txt
+
+          # ------------------------------------------------------------------
+          # 1) Validate any fragments this PR adds or edits, whatever else it
+          #    touches: the category prefix drives the semver bump, and the
+          #    compiler would otherwise reject the file at release time, long
+          #    after the author is gone.
+          # ------------------------------------------------------------------
+          grep -E '^changelog\.d/[^/]+\.md$' present-files.txt | grep -v '^changelog\.d/README\.md$' > fragments.txt || true
+          bad=0
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            base="$(basename "$f")"
+            if ! printf '%s' "$base" | grep -qE '^(added|changed|deprecated|fixed|security)-[A-Za-z0-9][A-Za-z0-9._-]*\.md$'; then
+              echo "::error file=$f::fragment name must be <category>-<pr-or-slug>.md with category one of added/changed/deprecated/fixed/security (see changelog.d/README.md)"
+              bad=1
+              continue
+            fi
+            first_line="$(grep -m1 '[^[:space:]]' "$f" || true)"
+            case "$first_line" in
+              '- '*|'<!-- release:'*|'<!--release:'*) ;;
+              *)
+                echo "::error file=$f::a fragment must start with a '- ' entry bullet (or a '<!-- release: ... -->' marker) — it IS the entry; the compiler owns the ### headings"
+                bad=1
+                ;;
+            esac
+          done < fragments.txt
+          if [ "$bad" -ne 0 ]; then
+            exit 1
+          fi
+
+          # ------------------------------------------------------------------
+          # 2) Does this PR change code at all? "Code" here means src/** minus
+          #    the surfaces the changelog discipline has always exempted:
+          #    src/docs/** (docs-only) and test files (test-only). Everything
+          #    else under src/** is presumed potentially user-visible; the
+          #    author's honest "it is not" is the no-changelog label.
+          # ------------------------------------------------------------------
+          grep -E '^src/' changed-files.txt \
+            | grep -vE '^src/docs/' \
+            | grep -vE '_test\.go$' \
+            | grep -vE '^src/(deploy|scripts)/test[-_][^/]+\.sh$' \
+            > code-files.txt || true
+
+          if [ ! -s code-files.txt ]; then
+            echo "OK: no non-exempt code changes under src/ — no fragment needed."
+            exit 0
+          fi
+          echo "Code files that make this PR changelog-relevant:"
+          sed 's/^/  /' code-files.txt
+
+          if [ -s fragments.txt ]; then
+            echo "OK: the PR adds a changelog.d fragment."
+            exit 0
+          fi
+
+          if [ "$HAS_NO_CHANGELOG_LABEL" = "true" ]; then
+            echo "OK: the PR carries the no-changelog label — author judged it not user-visible."
+            exit 0
+          fi
+
+          # ------------------------------------------------------------------
+          # 3) TRANSITION WINDOW (#5675): accept a direct CHANGELOG.md edit
+          #    until 2026-09-09 so PRs already in flight with entries under
+          #    `## Unreleased` merge without rework. Date-gated on purpose —
+          #    delete this block (and this comment) once the date has lapsed;
+          #    until then it self-disables.
+          # ------------------------------------------------------------------
+          TRANSITION_END=20260909
+          if grep -qx 'CHANGELOG.md' changed-files.txt; then
+            if [ "$(date -u +%Y%m%d)" -le "$TRANSITION_END" ]; then
+              echo "::notice title=changelog fragments::This PR edits CHANGELOG.md directly. That still passes during the transition (until 2026-09-09), but direct edits to '## Unreleased' are the merge-conflict generator #5675 removed — prefer a changelog.d/<category>-<slug>.md fragment for new work (see changelog.d/README.md)."
+              echo "OK (transition): direct CHANGELOG.md edit accepted until 2026-09-09."
+              exit 0
+            fi
+            echo "::error::This PR edits CHANGELOG.md's Unreleased section directly; the transition window ended 2026-09-09. Move the entry into a changelog.d/<category>-<slug>.md fragment (see below; #5675)."
+          fi
+
+          echo "::error::src/ code changed without a changelog.d fragment or a no-changelog label (see job log; #5675)"
+          cat <<'EOF'
+
+          CHANGELOG FRAGMENT GUARD (#5675) — reporting-only, but please act:
+
+          This PR changes code under src/ and neither adds a changelog
+          fragment nor carries the `no-changelog` label.
+
+          If the change is user-visible (feature, fix an operator would
+          notice, security change, migration, deprecation, breaking change):
+
+            add ONE file  changelog.d/<category>-<pr-or-slug>.md
+            category      added | changed | deprecated | fixed | security
+            content       exactly your entry: a single '- ' bullet in the
+                          same narrative style as existing CHANGELOG.md
+                          entries. See changelog.d/README.md.
+
+          If it is a refactor, test-only, or dependency churn — not
+          user-visible — add the `no-changelog` label instead.
+
+          Do NOT append to CHANGELOG.md's '## Unreleased' directly: that is
+          the shared line every PR used to fight over, and the reason this
+          guard exists. Fragments are compiled into CHANGELOG.md
+          automatically at release time (src/scripts/compile-changelog.sh).
+          EOF
+          exit 1

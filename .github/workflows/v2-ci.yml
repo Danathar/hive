@@ -91,6 +91,12 @@ jobs:
       # github_auth: fail. EXECUTES the real merge block extracted from the
       # shipped entrypoint, so a regression fails the PR rather than a hive.
       - name: Entrypoint dangling key_file tests (#4368)
+        env:
+          # #5388: ubuntu-latest GUARANTEES python3 with PyYAML (actions/runner-images
+          # ships both preinstalled), so this suite's "python3/PyYAML unavailable"
+          # skip cannot be true here. If it fires, the precondition moved and the
+          # suite stopped asserting — that must be red, not a silent exit 0.
+          HIVE_TEST_REQUIRE_BEHAVIOURAL: '1'
         run: bash deploy/test_entrypoint_dangling_keyfile.sh
 
       # #5369: the `chown -R dev:node /data` in the entrypoint's root phase is
@@ -156,6 +162,19 @@ jobs:
       - name: Release push retry/deferral state machine (#5142)
         run: bash scripts/test-release-push-retry.sh
 
+      # #5675: changelog entries land as changelog.d/ fragments and
+      # tagged-release.yml folds them into CHANGELOG.md's Unreleased section
+      # via scripts/compile-changelog.sh before deriving the release. A
+      # compiler bug here silently drops or miscategorizes entries — which
+      # changes the derived semver bump — so this drives the real script over
+      # fixture fragments and asserts the exact compiled output, the
+      # empty/absent-dir byte-identical no-op the release loop's idempotency
+      # rides on, loud all-or-nothing failure on a bad category prefix, and
+      # the end-to-end property that a compiled added- fragment flips
+      # derive-release-version.sh from no-release to a minor release.
+      - name: Changelog fragment compiler properties (#5675)
+        run: bash scripts/test-compile-changelog.sh
+
       # #4206: the standalone stack's image references live in exactly one
       # place, src/deploy/standalone-images.sh, so the Docker Compose assets
       # and the Podman assets that land later cannot drift onto different
@@ -174,6 +193,12 @@ jobs:
       # other tool, the proxy attached to the network the hive runs on) and none
       # of those break anything at runtime — so they need a gate, not a review.
       - name: Docker-socket containment guard (#3865)
+        env:
+          # #5388: ubuntu-latest GUARANTEES python3 with PyYAML (actions/runner-images
+          # ships both preinstalled), so this suite's "python3/PyYAML unavailable"
+          # skip cannot be true here. If it fires, the precondition moved and the
+          # suite stopped asserting — that must be red, not a silent exit 0.
+          HIVE_TEST_REQUIRE_BEHAVIOURAL: '1'
         run: bash deploy/test_watchtower_socket_contract.sh
 
       # #4204: the socket guard above covers the auto-update profile, and the
@@ -185,6 +210,12 @@ jobs:
       # and just loses agent state on the next recreate. This is also the
       # snapshot the Podman runtime work (#4188) has to keep passing.
       - name: Standalone service deployment contract (#4204)
+        env:
+          # #5388: ubuntu-latest GUARANTEES python3 with PyYAML (actions/runner-images
+          # ships both preinstalled), so this suite's "python3/PyYAML unavailable"
+          # skip cannot be true here. If it fires, the precondition moved and the
+          # suite stopped asserting — that must be red, not a silent exit 0.
+          HIVE_TEST_REQUIRE_BEHAVIOURAL: '1'
         run: bash deploy/test_standalone_service_contract.sh
 
       # #4375: the guard above parses docker-compose.yaml and therefore cannot
@@ -226,6 +257,12 @@ jobs:
       # rather than listing them, so a fourth copy of the quick start is gated
       # the day it is written.
       - name: Documented Compose quick start contract (#4477)
+        env:
+          # #5388: actions/checkout GUARANTEES a real git checkout, so this
+          # suite's "not a git checkout" skip — which would silently retire the
+          # assertion that src/.env is gitignored, on a path the quick start
+          # tells operators to put a PAT in — cannot legitimately fire here.
+          HIVE_TEST_REQUIRE_BEHAVIOURAL: '1'
         run: bash deploy/test_compose_quickstart_contract.sh
 
       # #4404: every guard above looks at ONE runtime. test_standalone_service_
@@ -241,6 +278,12 @@ jobs:
       # reason. Entries are swept in reverse too: an exception that no longer
       # matches a real divergence is itself a failure, so the table cannot rot.
       - name: Docker/Podman contract parity (#4404)
+        env:
+          # #5388: ubuntu-latest GUARANTEES python3 with PyYAML (actions/runner-images
+          # ships both preinstalled), so this suite's "python3/PyYAML unavailable"
+          # skip cannot be true here. If it fires, the precondition moved and the
+          # suite stopped asserting — that must be red, not a silent exit 0.
+          HIVE_TEST_REQUIRE_BEHAVIOURAL: '1'
         run: bash deploy/test_standalone_runtime_parity.sh
 
       # bin/gh-wrapper.sh is the merge gate standing behind the proxy hard-deny:
@@ -252,6 +295,64 @@ jobs:
       - name: gh-wrapper gate tests
         working-directory: .
         run: bash bin/test_gh_wrapper_gates.sh
+
+      # bin/enumerate-actionable.sh writes the actionable.json that
+      # merge-gate.sh, kick-agents.sh and the dashboard's contribute lane
+      # (src/pkg/dashboard/contribute_ws.go) consume instead of running their
+      # own gh queries. Every hold/blocked/draft/ADOPTERS exclusion and the
+      # external-issue SHA hold/unhold lifecycle — which WRITES labels and
+      # comments to GitHub — live in that one script. It has been patched by
+      # fix PRs (#4772 most recently) and had NO tests. This EXECUTES a
+      # path-rewritten copy against a stub gh (canned REST/GraphQL fixtures,
+      # real jq for --jq) and asserts on the written JSON and on which GitHub
+      # calls were made, with positive controls so an enumerator that emits
+      # nothing cannot pass. Runs in ~2s, no network.
+      - name: enumerate-actionable contract tests
+        working-directory: .
+        run: bash bin/test_enumerate_actionable.sh
+
+      # bin/kick-governor.sh (923 lines, called from bin/hive.sh, run every 15
+      # min via kick-governor.timer) is the adaptive kick decision engine that
+      # reads enumerate-actionable's actionable.json: it measures the backlog,
+      # ladders every agent's cadence and model through SURGE/BUSY/QUIET/IDLE,
+      # downgrades models under token-budget pressure, and decides who gets
+      # kicked (or paused) this tick. It had no tests. This EXECUTES a
+      # path-rewritten copy against fixture actionable.json/tokens.json state
+      # and asserts on the state files it writes and which kicks fire, with
+      # positive controls beside every pause/exclusion so a governor that
+      # kicks nothing (or ignores every pause) cannot pass.
+      - name: kick-governor contract tests
+        working-directory: .
+        run: bash bin/test_kick_governor.sh
+
+      # bin/merge-gate.sh reads actionable.json (enumerate-actionable.sh's
+      # output) and writes merge-eligible.json — the ONE file agents are told
+      # to trust before running `gh pr merge`. Every CI-check/mergeable/hold-
+      # label/author gate that decides "safe to merge" lives in this one
+      # script, called from conflict-sweeper.sh, gh-wrapper.sh and kick-
+      # agents.sh, and it had NO tests. This EXECUTES the gate against a stub
+      # gh (canned `pr checks` TSV and `pr view --json` fixtures) and asserts
+      # on the written JSON's eligible/not_ready split and block_reasons, with
+      # a positive control beside every exclusion so a gate that admits
+      # everything cannot pass. Runs in ~1s, no network.
+      - name: merge-gate contract tests
+        working-directory: .
+        run: bash bin/test_merge_gate.sh
+
+      # bin/gh-rate-check.sh scans agent tmux panes for GitHub API rate-limit
+      # text and decides which agents to PAUSE and for how long — called from
+      # kick-agents.sh every cycle. A regression here either stops pausing
+      # agents during a real rate limit (burns the fleet's shared quota
+      # faster) or pauses agents on a false positive (the script's own header
+      # warns that Claude/Copilot CLI usage-limit text looks similar but is a
+      # DIFFERENT limit). It had NO tests. This EXECUTES the script against
+      # stub tmux/gh/curl and asserts on the governor pause flags, the
+      # pullback state file and the ntfy calls it makes, with positive and
+      # negative controls on the CLI-usage-limit exclusion pattern. Runs in
+      # ~2s, no network (the ntfy curl call is stubbed).
+      - name: gh-rate-check contract tests
+        working-directory: .
+        run: bash bin/test_gh_rate_check.sh
 
       # #4289: git-credential-hive.sh is the fetch/clone AND push credential
       # source for every agent. Its mode block used to exit 1 in ADVISORY/
@@ -454,6 +555,15 @@ jobs:
           node --check "${RUNNER_TEMP}/contributor-relay.js"
           node bin/contributor-relay.test.js
 
+      # Keyless subset of the backend smoke: backend-list/Dockerfile-pin drift
+      # checks plus the stub wire-contract scenarios (real relay, fake hub, a
+      # stub CLI binary — no credentials, no network beyond localhost). The
+      # live scenarios skip here by design; they run with real vendor CLIs on
+      # a schedule in backend-smoke.yml, which is deliberately NOT merge-gating.
+      - name: Backend smoke (keyless subset)
+        working-directory: .
+        run: bash bin/test_backend_smoke.sh
+
       # `just contribute-k8s` now emits a runnable contributor workload (#2549):
       # a headless Deployment (#2660) with a status-file probe. This runs the
       # real recipe and asserts the workload it produces, so a regression (a
@@ -479,6 +589,12 @@ jobs:
           just --version
       - name: Contributor K8s Workload Generation
         working-directory: .
+        env:
+          # #5388: the "Install just" step above GUARANTEES the binary, and
+          # ubuntu-latest guarantees python3+PyYAML, so neither of this suite's
+          # skips can legitimately fire here. Before this, a failed install
+          # silently turned the whole suite into an exit-0 no-op.
+          HIVE_TEST_REQUIRE_BEHAVIOURAL: '1'
         run: bash src/deploy/test_contribute_k8s_workload.sh
 
       # #4399: the browser terminal must say when it is NOT showing live output.
@@ -505,6 +621,30 @@ jobs:
         working-directory: .
         run: bash src/deploy/test_ttyd_url_arg.sh
 
+      # #5435: hive-discord.service ran `node bot.js` with
+      # WorkingDirectory=/tmp/hive/discord, resolving the executed code out of a
+      # world-writable parent that is cleared on every reboot — a local user who
+      # created the path first got code execution as the service user holding the
+      # Discord bot token. The unit now refuses to start via hive-checkout-guard.sh.
+      # A grep for "ExecStartPre" would pass against a guard that never rejects
+      # anything (the obvious inline `find ... -print -quit` exits 0 even when it
+      # matches nothing), so this EXECUTES the guard against real directory trees
+      # and asserts on its exit status, once per attack shape.
+      - name: hive-discord.service does not execute planted code (#5435)
+        working-directory: .
+        run: bash src/deploy/test_hive_discord_unit_contract.sh
+
+      # #5483: hive-snapshot.service is the same class as #5435 — it ran
+      # ExecStart=/tmp/hive/dashboard/publish-snapshot.sh, resolving the executed
+      # script out of the same world-writable, reboot-cleared parent. Lower
+      # severity (Type=oneshot on a timer, no EnvironmentFile) but the script
+      # reads a GitHub App token and pushes to kubestellar/docs. The same guard
+      # generalizes unmodified. Registered separately because these deploy tests
+      # are wired INDIVIDUALLY here — an unregistered test silently never runs.
+      - name: hive-snapshot.service does not execute planted code (#5483)
+        working-directory: .
+        run: bash src/deploy/test_hive_snapshot_unit_contract.sh
+
       # #4440: the changelog reminder promises it "always succeeds" and "never
       # blocks a merge", and it did neither on a fork PR — GITHUB_TOKEN is
       # read-only there, the comment POST 403s, and `bash -e` made that a red
@@ -514,6 +654,12 @@ jobs:
       # that still dies on the first non-zero command.
       - name: Changelog reminder never blocks a merge (#4440)
         working-directory: .
+        env:
+          # #5388: ubuntu-latest GUARANTEES python3 with PyYAML (actions/runner-images
+          # ships both preinstalled), so this suite's "python3/PyYAML unavailable"
+          # skip cannot be true here. If it fires, the precondition moved and the
+          # suite stopped asserting — that must be red, not a silent exit 0.
+          HIVE_TEST_REQUIRE_BEHAVIOURAL: '1'
         run: bash src/deploy/test_changelog_reminder.sh
 
       # #4408: `just contribute-move` relocates an already-registered
@@ -542,6 +688,82 @@ jobs:
       - name: In-container attach hints name the real runtime (#5145)
         working-directory: .
         run: bash src/deploy/test_attach_hint_runtime.sh
+
+      # #5388 item 3: the guard on the skip discipline itself.
+      #
+      # test_lib.sh only helps if the suites that source it ACTUALLY go fatal
+      # under HIVE_TEST_REQUIRE_BEHAVIOURAL=1. This does not grep for adoption —
+      # a grep passes on a suite that sources the lib and never reaches the
+      # call. It RUNS each registered suite in a sandbox PATH with the tool its
+      # behavioural block needs genuinely absent, and requires exit 0 without
+      # the flag and exit 1 with it. The suite's own exit status is the
+      # assertion, so this cannot green while proving nothing.
+      #
+      # Deliberately NOT given HIVE_TEST_REQUIRE_BEHAVIOURAL itself: its method
+      # is running children with the flag off and on, so it unsets it.
+      - name: A skip is fatal where the caller guarantees the precondition (#5388)
+        working-directory: .
+        run: bash src/deploy/test_skip_discipline.sh
+
+      # #5388: this suite existed but was wired into NO workflow, so it had
+      # never run in CI — the same silent-non-execution failure the issue is
+      # about, one level out. Registering it here; git is guaranteed by
+      # actions/checkout, so its "git not available" skip is fatal.
+      - name: Entrypoint system gitconfig contract
+        working-directory: .
+        env:
+          HIVE_TEST_REQUIRE_BEHAVIOURAL: '1'
+        run: bash src/deploy/test_entrypoint_system_gitconfig.sh
+
+      # #5529: this suite was referenced by NO workflow at all — not v2-ci.yml,
+      # not any specialised lane — so it had never run in CI. It passes 8/0, so
+      # nothing was broken; the point is that the Copilot token-persistence
+      # symlinks it guards were not being checked either. Those symlinks are a
+      # recurring incident surface: a lost ~/.copilot -> /data/home/.copilot
+      # link drops the CLI's stored token on every container restart, which
+      # presents as an agent that silently stops authenticating rather than as
+      # anything that fails loudly.
+      #
+      # It reads entrypoint.sh and bin/agent-launch.sh from the checkout, so it
+      # needs no runtime and belongs in this lane rather than a container one.
+      - name: Entrypoint Copilot token symlink contract (#5529)
+        working-directory: .
+        run: bash src/deploy/test_entrypoint_symlinks.sh
+
+      # #5730: the entrypoint's permission guards keep ONE operator login
+      # serving the whole Claude fleet by reopening the shared credential the
+      # CLI rewrites 0600 on every token refresh. They run under `set -e` in
+      # backgrounded subshells, so a single non-zero command in a guard body
+      # ended the guard permanently and silently — measured live, with five of
+      # six agents dropping to a login prompt hours after boot.
+      #
+      # This suite EXTRACTS the shipped guard functions from entrypoint.sh and
+      # executes them, rather than grepping: the pre-fix code read perfectly
+      # well, so only running it catches the regression. No runtime or image
+      # needed, which is why it belongs in this lane.
+      - name: Entrypoint permission-guard survivability (#5730)
+        working-directory: .
+        run: bash src/deploy/test_entrypoint_perm_guard.sh
+
+      # #5646: the hivectl distribution route for image-based hosts rests on
+      # src/Dockerfile (which stows the binary in the image as cargo) and
+      # bin/hive-podman-setup.sh (which extracts it onto the host) agreeing on
+      # one path — and nothing at runtime checks that they do. A rename on
+      # either side fails only on an operator's machine, after a green CI run.
+      # Pure string analysis over the checkout; no image is built.
+      - name: hivectl extraction route contract (#5646)
+        working-directory: .
+        run: bash src/deploy/test_hivectl_extraction_contract.sh
+
+      # The guard that keeps the omission above from recurring: every
+      # src/deploy/test_*.sh must be named by at least one workflow. This is
+      # the src/deploy/ sibling of bin/test_bin_suites_wired.sh (#4363).
+      #
+      # It is registered here, which is also what makes it pass its own check —
+      # exempting itself would be the hole it exists to close.
+      - name: Every src/deploy/ test suite is wired into a workflow (#5529)
+        working-directory: .
+        run: bash src/deploy/test_deploy_suites_wired.sh
   create-issue-on-failure:
     if: failure() && github.event_name == 'push' && github.ref == 'refs/heads/v2'
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","hive"]') || 'ubuntu-latest' }}
@@ -585,9 +807,21 @@ jobs:
               labels: ['ci-failure', 'kind/bug'],
             });
 
+  # Deliberately NO `needs: build-and-test` here or on overlayfs-exec-guard.
+  # Neither job consumes anything build-and-test produces — each compiles the
+  # PR's own tree from scratch inside src/Dockerfile — so chaining them behind
+  # the test gate bought no correctness and put the gate's wall time PLUS a
+  # second trip through the shared runner queue on every PR's time-to-green
+  # (measured 2026-09-01 across three PR runs: ~2.75 min of build-and-test,
+  # then 10-11 min queued before either image job started, then 3.5-4.5 min
+  # of build). Running all three from t=0 makes the guard (~4.5 min) the
+  # ceiling instead of the sum. Cost of the trade: on the ~2% of runs where
+  # build-and-test is red, a compile error also fails the in-Dockerfile
+  # `go build` within ~1 min, and a test-only failure lets these two run to
+  # completion (~8 wasted runner-minutes). nightly-release still requires
+  # BOTH build-and-test and docker, so the v2 nightly gate is unchanged.
   docker:
     runs-on: ubuntu-latest
-    needs: build-and-test
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -627,7 +861,7 @@ jobs:
   # binary EPERMs here and the PR is blocked.
   overlayfs-exec-guard:
     runs-on: ubuntu-latest
-    needs: build-and-test
+    # No `needs: build-and-test` — see the note above the `docker` job.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -638,6 +872,21 @@ jobs:
       # image — buildx (BuildKit), attestations OFF (provenance:false/sbom:false
       # as in the #3760 fix) — and export it as an OCI archive so containerd
       # imports the real BuildKit layer layout (not the docker daemon's).
+      #
+      # cache-from: read docker.yml's `tmux-linux-amd64` gha scope, the same
+      # one its own amd64 build reads. That scope only ever receives
+      # `--target tmux-builder` exports (docker.yml's warm step, run on every
+      # PR and every v4 push), and tmux-builder's inputs are a pinned base
+      # image and a pinned tarball — so no layer carrying /usr/local/bin/hive
+      # can be served from it and the stale-COPY hazard the stale-binary guard
+      # below exists for cannot arise here. Every other stage is still built
+      # from scratch on THIS commit (there is no cache-to and no other scope),
+      # so the assertions below still test the PR's own binary. Read-only: a
+      # miss, a renamed scope, or a cache-service hiccup just recompiles tmux
+      # as before. Measured 2026-09-01: the runtime stage blocks on
+      # tmux-builder (~51s) at its third layer while its own apt layer takes
+      # ~20s, so a hit removes ~30s from a ~3.5 min build; a whole-image
+      # cache-to would instead ADD the 130-225s export docker.yml measured.
       - name: Build image via buildx (OCI archive, no attestations)
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -647,6 +896,7 @@ jobs:
           provenance: false
           sbom: false
           outputs: type=oci,oci-mediatypes=true,dest=/tmp/hive-oci.tar,tar=true
+          cache-from: type=gha,scope=tmux-linux-amd64
           build-args: |
             GIT_HASH=${{ github.sha }}
             GIT_BRANCH=${{ github.ref_name }}

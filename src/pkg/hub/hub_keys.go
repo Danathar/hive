@@ -603,13 +603,14 @@ func SSOSigningSeedFromMaster(master string) string {
 
 // provisionMasterSecret resolves the hub's MASTER secret at provision time, the
 // same way NewHubServer does: prefer HIVE_HUB_SECRET, else the persisted
-// /data/saas/hub-secret.key. Used ONLY to derive the per-domain sub-keys that get
-// injected into a spoke — the master itself is never placed in the Deployment.
+// hubSecretPath (/data/saas/hub-secret.key in production). Used ONLY to derive
+// the per-domain sub-keys that get injected into a spoke — the master itself is
+// never placed in the Deployment.
 func provisionMasterSecret() string {
 	if s := strings.TrimSpace(os.Getenv("HIVE_HUB_SECRET")); s != "" {
 		return s
 	}
-	if data, err := os.ReadFile("/data/saas/hub-secret.key"); err == nil {
+	if data, err := os.ReadFile(hubSecretPath); err == nil {
 		return strings.TrimSpace(string(data))
 	}
 	return ""

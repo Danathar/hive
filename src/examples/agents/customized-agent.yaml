@@ -27,14 +27,11 @@ spec:
     - customized
   aliases:
     - cu
-  # Channels — declare how this agent gets triggered
-  # Uncomment to use explicit channels instead of governor-only kicks:
+  # Channels — declare how this agent gets triggered.
+  # "kick" (governor timer kicks, the default) is the only supported type;
+  # declaring it just makes the default explicit:
   # channels:
   #   - type: kick
-  #   - type: webhook
-  #     events: ["issues.opened"]
-  #   - type: schedule
-  #     schedule: "0 */4 * * *"
 
   # Tools — declarative tool permissions
   # Uncomment to use instead of the mode field above:

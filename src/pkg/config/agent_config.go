@@ -32,15 +32,21 @@ type AgentSandboxOverride struct {
 }
 
 // ChannelConfig declares a trigger channel for an agent.
+//
+// Only ChannelTypeKick (governor timer kicks) has a runtime. The former
+// webhook/discord/schedule/bead trigger types were declarative-only: the
+// pkg/channels runtime meant to serve them was never wired into the binary
+// and was removed (#5591). Declaring one of those types used to validate
+// cleanly while suppressing governor kicks, leaving the agent permanently
+// dormant with no diagnostics; ValidateChannels now rejects them instead.
 type ChannelConfig struct {
-	Type     string            `yaml:"type" json:"type"`
-	Enabled  *bool             `yaml:"enabled,omitempty" json:"enabled,omitempty"`
-	Events   []string          `yaml:"events,omitempty" json:"events,omitempty"`
-	Patterns []string          `yaml:"patterns,omitempty" json:"patterns,omitempty"`
-	Schedule string            `yaml:"schedule,omitempty" json:"schedule,omitempty"`
-	Match    map[string]string `yaml:"match,omitempty" json:"match,omitempty"`
-	Repos    []string          `yaml:"repos,omitempty" json:"repos,omitempty"`
+	Type    string `yaml:"type" json:"type"`
+	Enabled *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 }
+
+// ChannelTypeKick is the only channel type with a live trigger runtime:
+// ordinary governor timer kicks.
+const ChannelTypeKick = "kick"
 
 // IsEnabled returns whether this channel is active (defaults to true).
 func (c *ChannelConfig) IsEnabled() bool {
@@ -111,8 +117,23 @@ type AgentConfig struct {
 	// Stored as a string owner rather than a bool so "never set" (empty),
 	// "pack-owned" and "operator-owned" stay distinguishable across upgrades
 	// of hives whose config predates this field.
-	ModelOwner      string `yaml:"model_owner" json:"model_owner,omitempty"`
-	BackendOwner    string `yaml:"backend_owner" json:"backend_owner,omitempty"`
+	ModelOwner   string `yaml:"model_owner" json:"model_owner,omitempty"`
+	BackendOwner string `yaml:"backend_owner" json:"backend_owner,omitempty"`
+	// PauseOwner records WHO owns this agent's pause/run state, with the same
+	// FieldOwner* vocabulary as ModelOwner/BackendOwner. It is stamped
+	// FieldOwnerOperator when the operator creates the agent by hand via the
+	// dashboard API (such an agent is never a member of any pack's roster) and
+	// when the operator explicitly resumes the agent.
+	//
+	// Without this, the ACMM pack visibility sweep — which runs on EVERY
+	// restart ("ACMM pack applied on startup") — paused every non-pack agent
+	// with reason "agent not in pack level N", including reviewer-role agents
+	// the operator had explicitly created and resumed from the dashboard. The
+	// operator's run-state silently reverted on the next pod roll, every pod
+	// roll (#5706 — same clobber family as #5632; cadences grew the equivalent
+	// marker in #5668). Empty means "no operator claim": pack-created agents
+	// keep the sweep's pause/resume reconciliation unchanged.
+	PauseOwner      string `yaml:"pause_owner" json:"pause_owner,omitempty"`
 	StaleTimeout    int    `yaml:"stale_timeout" json:"stale_timeout,omitempty"`
 	RestartStrategy string `yaml:"restart_strategy" json:"restart_strategy,omitempty"`
 	LaunchCmd       string `yaml:"launch_cmd" json:"launch_cmd,omitempty"`
@@ -185,8 +206,10 @@ type AgentConfig struct {
 	// global turn.reentrant.enabled rollout gate is also true.
 	ReentrantTurn *bool `yaml:"reentrant_turn,omitempty" json:"reentrant_turn,omitempty"`
 
-	// Channels declares how this agent gets triggered (kick, webhook, discord, schedule, bead).
-	// When nil/empty, the agent uses governor timer kicks by default (implicit kick channel).
+	// Channels declares how this agent gets triggered. Only "kick" (governor
+	// timer kicks) is a valid type; when nil/empty, the agent uses governor
+	// timer kicks by default (implicit kick channel). See ChannelConfig for
+	// why the former webhook/discord/schedule/bead types are rejected.
 	Channels []ChannelConfig `yaml:"channels,omitempty" json:"channels,omitempty"`
 
 	// Tools declares what tools this agent can use. When nil, the existing Mode field governs.
@@ -269,7 +292,7 @@ func (a *AgentConfig) UsesGovernorKick() bool {
 	if len(a.Channels) == 0 {
 		return true
 	}
-	return a.HasChannel("kick")
+	return a.HasChannel(ChannelTypeKick)
 }
 
 // ShouldIncludeRepos returns whether the repos section should be appended to kicks.
@@ -448,6 +471,15 @@ func (a AgentConfig) ModelIsOperatorOwned() bool {
 // agent's backend (the grid's "method" column).
 func (a AgentConfig) BackendIsOperatorOwned() bool {
 	return a.BackendOwner == FieldOwnerOperator
+}
+
+// PauseIsOperatorOwned reports whether an operator explicitly owns this
+// agent's pause/run state — stamped at dashboard-API create and on an explicit
+// operator resume — which makes the agent immune to the ACMM pack visibility
+// sweep's "agent not in pack level N" pause on apply/restart (#5706), the same
+// contract ModelIsOperatorOwned provides for models.
+func (a AgentConfig) PauseIsOperatorOwned() bool {
+	return a.PauseOwner == FieldOwnerOperator
 }
 
 // EnabledExplicitlySet returns true when the user's YAML explicitly set the

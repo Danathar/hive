@@ -103,6 +103,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       push: ${{ steps.decide.outputs.push }}
+      cross_org: ${{ steps.registries.outputs.cross_org }}
+      cross_secret: ${{ steps.registries.outputs.cross_secret }}
     steps:
       - name: Decide push policy
         id: decide
@@ -138,6 +140,37 @@ jobs:
           esac
           echo "push=$push" >> "$GITHUB_OUTPUT"
           echo "Push to GHCR: $push (branch=$REF_NAME event=$EVENT)"
+
+      # DUAL-PUBLISH (kubestellar -> hivecommons org transfer). During the
+      # transfer window every image publish is mirrored into the OTHER org's
+      # GHCR namespace, so a hive pinned to either registry path keeps
+      # resolving fresh tags no matter which side of the transfer the repo is
+      # on. The NATIVE org is wherever this repo currently lives
+      # (github.repository_owner — the only org this job's GITHUB_TOKEN can
+      # write packages to); the CROSS org and the classic-PAT secret that can
+      # write to it are derived here once, direction-agnostically, so the
+      # workflow needs no edit when the transfer actually happens:
+      #   owner=kubestellar -> cross=hivecommons, secret GHCR_HIVECOMMONS_PAT
+      #   owner=hivecommons -> cross=kubestellar, secret GHCR_KUBESTELLAR_PAT
+      # The merge jobs consume these outputs. Whether a MISSING secret is a
+      # warning or a hard failure is decided there — see the asymmetry
+      # comment on each "Check cross-registry credential" step.
+      - name: Decide cross-registry mirror target
+        id: registries
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          if [ "$OWNER" = "kubestellar" ]; then
+            cross_org=hivecommons
+            cross_secret=GHCR_HIVECOMMONS_PAT
+          else
+            cross_org=kubestellar
+            cross_secret=GHCR_KUBESTELLAR_PAT
+          fi
+          echo "cross_org=${cross_org}" >> "$GITHUB_OUTPUT"
+          echo "cross_secret=${cross_secret}" >> "$GITHUB_OUTPUT"
+          echo "Native org: ${OWNER}; mirroring publishes to ghcr.io/${cross_org} using secret ${cross_secret}."
 
   build:
     needs: gate
@@ -270,7 +303,11 @@ jobs:
           # Push the per-arch digest only for long-lived branches; on a PR
           # branch build without pushing so the image is still validated (CI
           # gate) but nothing lands on GHCR.
-          outputs: type=image,name=ghcr.io/hivecommons/hive,push-by-digest=true,name-canonical=true,push=${{ needs.gate.outputs.push }},oci-mediatypes=false
+          # The image name is owner-derived (dual-publish, see the gate job):
+          # GITHUB_TOKEN can only push packages in the org that hosts the
+          # repo, so the build always targets the NATIVE org and the merge
+          # job mirrors the finished manifest list into the cross org.
+          outputs: type=image,name=ghcr.io/${{ github.repository_owner }}/hive,push-by-digest=true,name-canonical=true,push=${{ needs.gate.outputs.push }},oci-mediatypes=false
           # tmux-builder layers come from the local cache warmed above; every
           # other stage is forced to re-execute by no-cache-filters, so there
           # is nothing worth exporting — deliberately NO cache-to here (the
@@ -297,7 +334,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ needs.gate.outputs.push }}" = "true" ]; then
-            IMG="ghcr.io/hivecommons/hive@${{ steps.build.outputs.digest }}"
+            IMG="ghcr.io/${{ github.repository_owner }}/hive@${{ steps.build.outputs.digest }}"
             docker pull "$IMG"
           else
             IMG=hive-freshness-probe:local
@@ -337,7 +374,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ needs.gate.outputs.push }}" = "true" ]; then
-            IMG="ghcr.io/hivecommons/hive@${{ steps.build.outputs.digest }}"
+            IMG="ghcr.io/${{ github.repository_owner }}/hive@${{ steps.build.outputs.digest }}"
           else
             IMG=hive-freshness-probe:local
           fi
@@ -391,9 +428,103 @@ jobs:
       - name: Create manifest list and push
         run: |
           src/scripts/publish-image-tags.sh \
-            ghcr.io/hivecommons/hive /tmp/digests \
+            ghcr.io/${{ github.repository_owner }}/hive /tmp/digests \
             '${{ github.ref_name }}' '${{ github.sha }}' '${{ github.run_number }}' \
             v5 false edge
+
+      # ---- Cross-org mirror (kubestellar <-> hivecommons dual-publish) ----
+      # Copy the tags just published above into the other org's GHCR
+      # namespace BY DIGEST (`imagetools create -t <cross>:<tag>
+      # <native>@<digest>`): both registries then serve the byte-identical,
+      # digest-identical manifest list — no second build, no drift. The gate
+      # job computed which org is "cross" and which secret can write to it.
+      #
+      # ASYMMETRY of the missing-secret handling, on purpose:
+      #   - owner=hivecommons (post-transfer): a missing PAT would mean the
+      #     OLD kubestellar registry silently stops receiving images while
+      #     every spoke still pinned there keeps pulling stale tags — the
+      #     dangerous one-sided publish — so it is a hard ::error failure.
+      #   - owner=kubestellar (pre-transfer staging): the PAT may simply not
+      #     exist yet; the mirror is purely additive and nothing that exists
+      #     today degrades, so it is only a ::warning and the run stays green.
+      - name: Check cross-registry credential
+        id: crosspat
+        env:
+          # Env indirection: `if:` cannot read the secrets context, and the
+          # secret NAME itself is computed by the gate job.
+          CROSS_PAT: ${{ secrets[needs.gate.outputs.cross_secret] }}
+          CROSS_ORG: ${{ needs.gate.outputs.cross_org }}
+          CROSS_SECRET_NAME: ${{ needs.gate.outputs.cross_secret }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          if [ -n "$CROSS_PAT" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "available=false" >> "$GITHUB_OUTPUT"
+          if [ "$OWNER" = "hivecommons" ]; then
+            echo "::error::secret ${CROSS_SECRET_NAME} is not set, so this run cannot mirror to ghcr.io/${CROSS_ORG}. Post-transfer that is a silent one-sided publish (spokes pinned to the old org keep pulling stale tags), so this fails hard. Create a classic PAT with write:packages from a ${CROSS_ORG} member and store it as ${CROSS_SECRET_NAME}."
+            exit 1
+          fi
+          echo "::warning::secret ${CROSS_SECRET_NAME} is not set — skipping the ghcr.io/${CROSS_ORG} mirror. Pre-transfer this is expected until that PAT is created; nothing that exists today degrades."
+
+      # ghcr.io is ONE registry host and docker keeps one credential per
+      # host, so this login REPLACES the GITHUB_TOKEN login above. Every
+      # native-org write is already done (the publish step above was the
+      # last one). Reading the native image back for the digest copy still
+      # works: these packages are public, and the PAT is a valid ghcr.io
+      # credential for public reads regardless of org.
+      - name: Log in to GHCR as the cross-org publisher
+        if: steps.crosspat.outputs.available == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets[needs.gate.outputs.cross_secret] }}
+
+      - name: Mirror published tags into the cross-org registry (by digest)
+        if: steps.crosspat.outputs.available == 'true'
+        env:
+          NATIVE_IMAGE: ghcr.io/${{ github.repository_owner }}/hive
+          CROSS_IMAGE: ghcr.io/${{ needs.gate.outputs.cross_org }}/hive
+          BRANCH: ${{ github.ref_name }}
+          GIT_SHA: ${{ github.sha }}
+          # These three mirror publish-image-tags.sh's positional args in the
+          # publish step above — keep them in lockstep with that call.
+          INCLUDE_LATEST: "false"
+          RELEASE_BRANCH: "v5"
+          CHANNELS: "edge"
+        run: |
+          set -euo pipefail
+          # Same tag set publish-image-tags.sh manages for this image. Each
+          # tag is copied from whatever the NATIVE tag currently points at,
+          # so the monotonic moving-tag guard's decisions carry over: the
+          # cross org can never regress a tag the native org did not.
+          branch_tag="${BRANCH//\//-}"
+          tags=("${GIT_SHA:0:7}" "${branch_tag}-latest")
+          if [ "$INCLUDE_LATEST" = "true" ]; then tags+=("latest"); fi
+          if [ "$BRANCH" = "$RELEASE_BRANCH" ] && [ -n "$CHANNELS" ]; then
+            IFS=, read -ra channel_tags <<<"$CHANNELS"
+            for ch in "${channel_tags[@]}"; do [ -n "$ch" ] && tags+=("$ch"); done
+          fi
+          for tag in "${tags[@]}"; do
+            if ! digest=$(docker buildx imagetools inspect \
+                "${NATIVE_IMAGE}:${tag}" --format '{{.Manifest.Digest}}' 2>&1); then
+              # Distinguish "tag does not exist" (fine: e.g. the monotonic
+              # guard published nothing this run) from a transport/auth
+              # failure (red, same policy as publish-image-tags.sh).
+              if grep -Eqi 'manifest unknown|manifest.*not found|not found.*manifest|no such manifest|(^|[[:space:]:])not found$' <<<"$digest"; then
+                echo "native tag ${NATIVE_IMAGE}:${tag} does not exist — nothing to mirror for it"
+                continue
+              fi
+              echo "::error::could not inspect ${NATIVE_IMAGE}:${tag}; refusing to silently skip a mirror on a transport/auth failure" >&2
+              echo "$digest" >&2
+              exit 1
+            fi
+            echo "Mirroring ${CROSS_IMAGE}:${tag} <- ${NATIVE_IMAGE}@${digest}"
+            docker buildx imagetools create -t "${CROSS_IMAGE}:${tag}" "${NATIVE_IMAGE}@${digest}"
+          done
 
   build-contributor:
     needs: gate
@@ -450,7 +581,8 @@ jobs:
           # manifests, not an OCI index. See the note on the main build above.
           provenance: false
           sbom: false
-          outputs: type=image,name=ghcr.io/hivecommons/hive-contributor,push-by-digest=true,name-canonical=true,push=${{ needs.gate.outputs.push }},oci-mediatypes=false
+          # Owner-derived image name (dual-publish) — see the main build step.
+          outputs: type=image,name=ghcr.io/${{ github.repository_owner }}/hive-contributor,push-by-digest=true,name-canonical=true,push=${{ needs.gate.outputs.push }},oci-mediatypes=false
           cache-from: type=gha,scope=contributor-${{ steps.slug.outputs.slug }}
           cache-to: type=gha,scope=contributor-${{ steps.slug.outputs.slug }},mode=max
 
@@ -498,9 +630,75 @@ jobs:
       - name: Create contributor manifest list and push
         run: |
           src/scripts/publish-image-tags.sh \
-            ghcr.io/hivecommons/hive-contributor /tmp/contrib-digests \
+            ghcr.io/${{ github.repository_owner }}/hive-contributor /tmp/contrib-digests \
             '${{ github.ref_name }}' '${{ github.sha }}' '${{ github.run_number }}' \
             v5 true edge
+
+      # Cross-org mirror — same mechanics, same missing-secret asymmetry, and
+      # same "one credential per registry host" ordering constraint as the
+      # fully commented block in the `merge` job above.
+      - name: Check cross-registry credential
+        id: crosspat
+        env:
+          CROSS_PAT: ${{ secrets[needs.gate.outputs.cross_secret] }}
+          CROSS_ORG: ${{ needs.gate.outputs.cross_org }}
+          CROSS_SECRET_NAME: ${{ needs.gate.outputs.cross_secret }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          if [ -n "$CROSS_PAT" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "available=false" >> "$GITHUB_OUTPUT"
+          if [ "$OWNER" = "hivecommons" ]; then
+            echo "::error::secret ${CROSS_SECRET_NAME} is not set, so this run cannot mirror to ghcr.io/${CROSS_ORG}. Post-transfer that is a silent one-sided publish (spokes pinned to the old org keep pulling stale tags), so this fails hard. Create a classic PAT with write:packages from a ${CROSS_ORG} member and store it as ${CROSS_SECRET_NAME}."
+            exit 1
+          fi
+          echo "::warning::secret ${CROSS_SECRET_NAME} is not set — skipping the ghcr.io/${CROSS_ORG} mirror. Pre-transfer this is expected until that PAT is created; nothing that exists today degrades."
+
+      - name: Log in to GHCR as the cross-org publisher
+        if: steps.crosspat.outputs.available == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets[needs.gate.outputs.cross_secret] }}
+
+      - name: Mirror published tags into the cross-org registry (by digest)
+        if: steps.crosspat.outputs.available == 'true'
+        env:
+          NATIVE_IMAGE: ghcr.io/${{ github.repository_owner }}/hive-contributor
+          CROSS_IMAGE: ghcr.io/${{ needs.gate.outputs.cross_org }}/hive-contributor
+          BRANCH: ${{ github.ref_name }}
+          GIT_SHA: ${{ github.sha }}
+          # Lockstep with the publish-image-tags.sh args above.
+          INCLUDE_LATEST: "true"
+          RELEASE_BRANCH: "v5"
+          CHANNELS: "edge"
+        run: |
+          set -euo pipefail
+          branch_tag="${BRANCH//\//-}"
+          tags=("${GIT_SHA:0:7}" "${branch_tag}-latest")
+          if [ "$INCLUDE_LATEST" = "true" ]; then tags+=("latest"); fi
+          if [ "$BRANCH" = "$RELEASE_BRANCH" ] && [ -n "$CHANNELS" ]; then
+            IFS=, read -ra channel_tags <<<"$CHANNELS"
+            for ch in "${channel_tags[@]}"; do [ -n "$ch" ] && tags+=("$ch"); done
+          fi
+          for tag in "${tags[@]}"; do
+            if ! digest=$(docker buildx imagetools inspect \
+                "${NATIVE_IMAGE}:${tag}" --format '{{.Manifest.Digest}}' 2>&1); then
+              if grep -Eqi 'manifest unknown|manifest.*not found|not found.*manifest|no such manifest|(^|[[:space:]:])not found$' <<<"$digest"; then
+                echo "native tag ${NATIVE_IMAGE}:${tag} does not exist — nothing to mirror for it"
+                continue
+              fi
+              echo "::error::could not inspect ${NATIVE_IMAGE}:${tag}; refusing to silently skip a mirror on a transport/auth failure" >&2
+              echo "$digest" >&2
+              exit 1
+            fi
+            echo "Mirroring ${CROSS_IMAGE}:${tag} <- ${NATIVE_IMAGE}@${digest}"
+            docker buildx imagetools create -t "${CROSS_IMAGE}:${tag}" "${NATIVE_IMAGE}@${digest}"
+          done
 
   build-hub:
     needs: gate
@@ -566,7 +764,8 @@ jobs:
           # manifests, not an OCI index. See the note on the main build above.
           provenance: false
           sbom: false
-          outputs: type=image,name=ghcr.io/hivecommons/hive-hub,push-by-digest=true,name-canonical=true,push=${{ needs.gate.outputs.push }},oci-mediatypes=false
+          # Owner-derived image name (dual-publish) — see the main build step.
+          outputs: type=image,name=ghcr.io/${{ github.repository_owner }}/hive-hub,push-by-digest=true,name-canonical=true,push=${{ needs.gate.outputs.push }},oci-mediatypes=false
           cache-from: type=gha,scope=hub-${{ steps.slug.outputs.slug }}
           cache-to: type=gha,scope=hub-${{ steps.slug.outputs.slug }},mode=max
 
@@ -614,6 +813,72 @@ jobs:
       - name: Create hub manifest list and push
         run: |
           src/scripts/publish-image-tags.sh \
-            ghcr.io/hivecommons/hive-hub /tmp/hub-digests \
+            ghcr.io/${{ github.repository_owner }}/hive-hub /tmp/hub-digests \
             '${{ github.ref_name }}' '${{ github.sha }}' '${{ github.run_number }}' \
             v5 true edge
+
+      # Cross-org mirror — same mechanics, same missing-secret asymmetry, and
+      # same "one credential per registry host" ordering constraint as the
+      # fully commented block in the `merge` job above.
+      - name: Check cross-registry credential
+        id: crosspat
+        env:
+          CROSS_PAT: ${{ secrets[needs.gate.outputs.cross_secret] }}
+          CROSS_ORG: ${{ needs.gate.outputs.cross_org }}
+          CROSS_SECRET_NAME: ${{ needs.gate.outputs.cross_secret }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          if [ -n "$CROSS_PAT" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "available=false" >> "$GITHUB_OUTPUT"
+          if [ "$OWNER" = "hivecommons" ]; then
+            echo "::error::secret ${CROSS_SECRET_NAME} is not set, so this run cannot mirror to ghcr.io/${CROSS_ORG}. Post-transfer that is a silent one-sided publish (spokes pinned to the old org keep pulling stale tags), so this fails hard. Create a classic PAT with write:packages from a ${CROSS_ORG} member and store it as ${CROSS_SECRET_NAME}."
+            exit 1
+          fi
+          echo "::warning::secret ${CROSS_SECRET_NAME} is not set — skipping the ghcr.io/${CROSS_ORG} mirror. Pre-transfer this is expected until that PAT is created; nothing that exists today degrades."
+
+      - name: Log in to GHCR as the cross-org publisher
+        if: steps.crosspat.outputs.available == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets[needs.gate.outputs.cross_secret] }}
+
+      - name: Mirror published tags into the cross-org registry (by digest)
+        if: steps.crosspat.outputs.available == 'true'
+        env:
+          NATIVE_IMAGE: ghcr.io/${{ github.repository_owner }}/hive-hub
+          CROSS_IMAGE: ghcr.io/${{ needs.gate.outputs.cross_org }}/hive-hub
+          BRANCH: ${{ github.ref_name }}
+          GIT_SHA: ${{ github.sha }}
+          # Lockstep with the publish-image-tags.sh args above.
+          INCLUDE_LATEST: "true"
+          RELEASE_BRANCH: "v5"
+          CHANNELS: "edge"
+        run: |
+          set -euo pipefail
+          branch_tag="${BRANCH//\//-}"
+          tags=("${GIT_SHA:0:7}" "${branch_tag}-latest")
+          if [ "$INCLUDE_LATEST" = "true" ]; then tags+=("latest"); fi
+          if [ "$BRANCH" = "$RELEASE_BRANCH" ] && [ -n "$CHANNELS" ]; then
+            IFS=, read -ra channel_tags <<<"$CHANNELS"
+            for ch in "${channel_tags[@]}"; do [ -n "$ch" ] && tags+=("$ch"); done
+          fi
+          for tag in "${tags[@]}"; do
+            if ! digest=$(docker buildx imagetools inspect \
+                "${NATIVE_IMAGE}:${tag}" --format '{{.Manifest.Digest}}' 2>&1); then
+              if grep -Eqi 'manifest unknown|manifest.*not found|not found.*manifest|no such manifest|(^|[[:space:]:])not found$' <<<"$digest"; then
+                echo "native tag ${NATIVE_IMAGE}:${tag} does not exist — nothing to mirror for it"
+                continue
+              fi
+              echo "::error::could not inspect ${NATIVE_IMAGE}:${tag}; refusing to silently skip a mirror on a transport/auth failure" >&2
+              echo "$digest" >&2
+              exit 1
+            fi
+            echo "Mirroring ${CROSS_IMAGE}:${tag} <- ${NATIVE_IMAGE}@${digest}"
+            docker buildx imagetools create -t "${CROSS_IMAGE}:${tag}" "${NATIVE_IMAGE}@${digest}"
+          done

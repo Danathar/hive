@@ -61,10 +61,25 @@ const PI_ENV = BACKEND === 'pi' ? { ...process.env } : {};
 let piInvocationState = 'untested';
 const REASONING_EFFORT = process.env.AGENT_REASONING_EFFORT || '';
 const AGENT_ROLE = (process.env.HIVE_AGENT_ROLE || '').trim();
+// HIVE_SESSION — optional session label (multi-session-per-account). One GitHub
+// account has one contributor identity per hub, and the hub keys task
+// leases/cooldowns/ownership on that identity, so two relays under the same
+// account would collide on a single active-task slot. Declaring a distinct
+// session gives each relay an independent session-scoped identity
+// (ContributorID#session) on the hub while auth/tier stay per-account. Defaults
+// to the backend name so the common case — one relay per CLI backend under one
+// account — works with no extra config. Omitted only if explicitly emptied.
+const AGENT_SESSION = (process.env.HIVE_SESSION !== undefined
+  ? process.env.HIVE_SESSION
+  : BACKEND).trim();
 // Neutral directory both entrypoints launch the CLI from ($HOME). Used to pin
 // the cwd on relaunch; see launchCommandWithCwd for why the relay's own cwd is
 // the wrong answer in local mode.
 const AGENT_CWD = (process.env.HIVE_AGENT_CWD || '').trim();
+// AGENT_LAUNCH_CMD is the launch line resolved by the entrypoint that started
+// the pane. Local mode uses stricter sandbox flags than container mode; a relay
+// restart must reuse that exact posture instead of deriving container defaults.
+const ENTRYPOINT_LAUNCH_CMD = (process.env.AGENT_LAUNCH_CMD || '').trim();
 const TMUX_SESSION = process.env.HIVE_AGENT_SESSION || 'contributor';
 // Where the hub-delivered, task-scoped token is written (injectGhToken). This
 // deliberately does NOT default to /var/run/hive-metrics/gh-app-token.cache:
@@ -343,6 +358,80 @@ let seq = 0;
 let currentTask = null;
 let progressInterval = null;
 let tokenExpiresAt = null;
+// tokenRefreshFailedAt records when the hub last told us a mid-task re-mint
+// FAILED (a token_refresh_failed, kubestellar/hive#5447). Null means "no known
+// refresh problem"; a successful token_refresh clears it, because a fresh
+// credential resolves the condition. It exists so the expiry warning below can
+// distinguish "the hub is quiet and our clock may simply be off" from "the hub
+// told us it could not renew this credential", which is the difference between a
+// guess and a diagnosis.
+let tokenRefreshFailedAt = null;
+
+// TOKEN_EXPIRY_WARN_MS is how far ahead of expiry the relay starts warning. It
+// is one full progress interval plus a margin, so a task that is about to lose
+// push access says so at least one tick BEFORE the first push can fail, rather
+// than reporting it afterwards.
+const TOKEN_EXPIRY_WARN_MS = 5 * 60 * 1000;
+// TOKEN_EXPIRY_WARN_INTERVAL_MS throttles the warning so a long task past expiry
+// logs periodically instead of on every single progress tick.
+const TOKEN_EXPIRY_WARN_INTERVAL_MS = 10 * 60 * 1000;
+let lastTokenExpiryWarnAt = 0;
+
+// tokenLifetimeStatus turns the hub-supplied token_expires_at into the relay's
+// own read of its credential: how long is left, whether we are inside the warning
+// window, and whether the hub has reported a failed renewal.
+//
+// It is PURE and clock-injectable so the expiry logic can be tested without
+// waiting an hour, and it deliberately reports rather than decides — see
+// warnOnTokenExpiry() for why this only ever warns.
+function tokenLifetimeStatus(now = Date.now()) {
+  if (!tokenExpiresAt) {
+    return { known: false, expired: false, expiring: false, remainingMs: null, refreshFailed: tokenRefreshFailedAt !== null };
+  }
+  const remainingMs = tokenExpiresAt - now;
+  return {
+    known: true,
+    expired: remainingMs <= 0,
+    expiring: remainingMs <= TOKEN_EXPIRY_WARN_MS,
+    remainingMs,
+    refreshFailed: tokenRefreshFailedAt !== null,
+  };
+}
+
+function formatDuration(ms) {
+  const abs = Math.abs(ms);
+  const mins = Math.floor(abs / 60000);
+  const secs = Math.floor((abs % 60000) / 1000);
+  return mins > 0 ? `${mins}m${secs}s` : `${secs}s`;
+}
+
+// warnOnTokenExpiry logs — and ONLY logs — when the task's credential is at or
+// past its advertised expiry (kubestellar/hive#5447).
+//
+// It does NOT refuse the push, and that is deliberate. The relay's clock and the
+// hub's are independent; tokenExpiresAt is the HUB's wall-clock stamp read on the
+// relay's, so a machine with a few minutes of skew would refuse work on a
+// perfectly valid credential. Refusing on a bad clock is strictly worse than
+// today's behaviour, where the token simply works. The authority on whether a
+// token is good remains GitHub's answer to the actual call; this turns the
+// resulting failure from an unexplained auth error into a named, already-logged
+// condition — which is the whole point of the issue.
+//
+// Throttled, and never touches the token itself.
+function warnOnTokenExpiry(now = Date.now()) {
+  const status = tokenLifetimeStatus(now);
+  if (!status.known || !status.expiring) return null;
+  if (now - lastTokenExpiryWarnAt < TOKEN_EXPIRY_WARN_INTERVAL_MS) return null;
+  lastTokenExpiryWarnAt = now;
+  const cause = status.refreshFailed
+    ? ' — the hub reported that it could not renew this credential, so pushes may fail with a generic auth error'
+    : '';
+  const msg = status.expired
+    ? `GitHub token expired ${formatDuration(status.remainingMs)} ago${cause}`
+    : `GitHub token expires in ${formatDuration(status.remainingMs)}${cause}`;
+  console.warn(msg);
+  return msg;
+}
 
 function nextSeq() { return ++seq; }
 
@@ -665,10 +754,10 @@ const AGY_EFFORTS = ['low', 'medium', 'high'];
 const agyEffort = AGY_EFFORTS.includes(REASONING_EFFORT) ? REASONING_EFFORT : AGY_DEFAULT_EFFORT;
 
 // Single source of truth for the CLI launch command (issue #2203, bug 1).
-// contributor-agent.sh builds "$CMD $PERM_FLAG $MODEL_FLAG" for the FIRST
-// launch; every restart path in this file previously rebuilt only "$CMD $PERM"
-// inline, silently dropping the resolved model for the rest of the container's
-// life. Build it once here and reuse it everywhere so the paths cannot drift.
+// The entrypoint may export AGENT_LAUNCH_CMD with the exact command used for
+// the FIRST launch. Prefer it so local mode keeps its sandbox/allowlist posture
+// across restarts instead of rebuilding the more-permissive container default
+// (#5652). Older entrypoints fall back to resolving backend flags here.
 let cachedLaunchCommand = null;
 let cachedBackendResolution = null;
 
@@ -942,6 +1031,10 @@ function progressModelFields() {
 
 function buildLaunchCommand() {
   if (cachedLaunchCommand) return cachedLaunchCommand;
+  if (ENTRYPOINT_LAUNCH_CMD) {
+    cachedLaunchCommand = ENTRYPOINT_LAUNCH_CMD;
+    return cachedLaunchCommand;
+  }
   const { cmd, perm } = resolveBackend();
   const modelFlag = modelFlagFor();
   const reasoningFlag = BACKEND === 'codex' && REASONING_EFFORT
@@ -982,7 +1075,11 @@ const HEADLESS_BACKENDS = {
   // copilot -p "<prompt>" — non-interactive programmatic mode.
   copilot: { flag: '-p' },
   // codex exec "<prompt>" — Codex's non-interactive execution sub-command.
-  codex: { flag: 'exec' },
+  // --skip-git-repo-check: exec refuses to run at all in a cwd that is not a
+  // git repository ("Not inside a trusted directory..."), and the task
+  // workspace root is exactly that — the agent clones INTO it as its first
+  // act. Verified live against codex 0.146.0 via bin/test_backend_smoke.sh.
+  codex: { flag: ['exec', '--skip-git-repo-check'] },
   // goose run --no-session -t "<prompt>" — goose's one-shot sub-command. The
   // bare `goose` binary drives the interactive TUI, but `goose run` is a
   // documented non-interactive entry point (#2828): `-t` takes the prompt as
@@ -1172,6 +1269,13 @@ function runHeadlessTask(task) {
       send({ type: 'ready', seq: nextSeq() });
     });
   });
+  // codex exec prints "Reading additional input from stdin..." and then blocks
+  // on stdin-EOF even with the prompt already passed as an argv element; with
+  // execFile's default piped stdio nothing ever closes that pipe, so a
+  // headless codex task produced zero output and hung until the timeout
+  // killed it (found live by bin/test_backend_smoke.sh). Close stdin for
+  // every backend — a one-shot child has no interactive input coming.
+  if (headlessChild && headlessChild.stdin) headlessChild.stdin.end();
 }
 
 // A tmux pane can be left in bash's PS2 continuation state ("> ") when task
@@ -1322,6 +1426,14 @@ function blockingPromptKey(text) {
   // persists, so this prompt stops coming back on every restart the way a
   // plain "Skip" would.
   if (/Update available!/.test(text) && /Skip until next version/.test(text)) return '3';
+  const recent = paneTail(text, 15);
+  // agy: "Terms of Service & Data Use" ends on a [Previous] [Done] button row
+  // with focus on the CHECKBOX above it, where Enter toggles consent instead of
+  // advancing ("enter Toggle"). A bare Enter therefore never leaves this page.
+  // Down moves to the button row, Right selects [Done]; the caller appends
+  // Enter. The other two steps (theme picker, folder trust) do advance on a
+  // bare Enter and deliberately fall through to null.
+  if (BACKEND === 'agy' && /Terms of Service & Data Use/.test(recent) && /\[(?:Previous|Back)\]\s+\[Done\]/.test(recent)) return 'Down Right';
   return null;
 }
 
@@ -1329,9 +1441,37 @@ function getCLIState() {
   try {
     const text = capturePaneText();
     if (BACKEND === 'claude') {
+      // Order matters, as it does for bob and codex below: the blocked states
+      // are classified FIRST, so a pane sitting on a login or trust gate is
+      // never reported ready by persistent chrome it happens to draw as well.
       if (/Not logged in|Please run \/login/.test(text)) return 'needs-login';
-      if (/bypass permissions|Welcome back|Try "how does|medium.*effort|@gmail\.com|@.*\.com.*Organization/.test(text)) return 'ready';
       if (/Choose the text style|trust this folder/.test(text)) return 'onboarding';
+      // The first alternation below is startup-only: a welcome banner, the
+      // account line printed just after login, the first-run tip. That made
+      // claude readiness a one-shot property of the SPLASH SCREEN — and
+      // cliReady is cleared on EVERY task exit (stopAgentForTaskExit), then
+      // re-latched only from here. Once the splash had scrolled away, a
+      // perfectly healthy idle pane matched none of these, so the latch never
+      // re-latched: every task prompt after the first was queued instead of
+      // typed, and each of those tasks was handed back at CLI_READY_TIMEOUT_MS
+      // with "CLI never became ready" (kubestellar/hive#5156, seen again in
+      // #5650). Recovery depended on a fresh splash, which needs the CLI to
+      // actually exit — and quitLiveCLI()'s two C-c keystrokes routinely do not
+      // end claude.
+      //
+      // The second alternation is the footer chrome a live claude draws at ALL
+      // times, splash or not: the auto-mode indicator, the agents hint, the
+      // shift+tab cycle hint, and the in-turn interrupt hint. It is the same
+      // evidence classifyTmuxPane's claude hasIdlePrompt has always used — two
+      // detectors reading one pane must not disagree about whether the CLI is
+      // even there.
+      //
+      // Readiness asks "is the CLI up and past its gates", not "is it idle":
+      // busy-vs-idle is classifyTmuxPane's job, and tmuxSendKeys separately
+      // refuses to type into a pane whose foreground command is a shell. So
+      // matching "esc to interrupt", which is drawn mid-turn, is correct here.
+      if (/bypass permissions|Welcome back|Try "how does|medium.*effort|@gmail\.com|@.*\.com.*Organization/.test(text)) return 'ready';
+      if (/⏵⏵|← for agents|shift\+tab to cycle|esc to interrupt/.test(text)) return 'ready';
     } else if (BACKEND === 'copilot') {
       if (/copilot login|gh auth login/.test(text)) return 'needs-login';
       if (/Confirm folder trust|trust the files|Do you trust/.test(text)) return 'onboarding';
@@ -1375,9 +1515,18 @@ function getCLIState() {
     } else if (BACKEND === 'pi') {
       if (/pi v\d|0\.0%|auto\)|\d+\.\d+%/.test(text)) return 'ready';
     } else if (BACKEND === 'agy') {
+      // Antigravity gates first run behind login plus a three-step wizard, and
+      // every agent that shares a $HOME can re-enter it whenever another agent
+      // writes antigravity-cli/cache/onboarding.json mode 600. Check the
+      // visible tail only: old task output may quote the wizard text, and a
+      // stale quote must not make a live prompt look blocked.
+      const recent = paneTail(text, 15);
+      if (/not signed in|Select login method/i.test(recent)) return 'needs-login';
+      if (/Choose your color scheme|Terms of Service & Data Use|Do you trust the contents|I trust this (?:folder|directory)|Welcome to (?:the )?Antigravity/i.test(recent)) return 'onboarding';
       // agy shows "? for shortcuts" at the bottom when its interactive prompt
-      // is ready. The generic />\s*$/ fires too early (during the splash).
-      if (/\? for shortcuts/.test(text)) return 'ready';
+      // is ready. The generic />\s*$/ fires too early during splash, and the
+      // wizard's selection cursor is also ❯.
+      if (/\? for shortcuts/.test(recent)) return 'ready';
     } else {
       if (/>\s*$|❯|\$\s*$/.test(text)) return 'ready';
     }
@@ -1438,6 +1587,26 @@ let pendingTask = null;
 let cliReadyFailed = false;
 // Set only by an interactive revoke. The next ready is delayed until a fresh CLI is confirmed.
 let readyAfterInteractiveRevoke = false;
+
+// False until the CURRENT task's prompt actually reached the pane
+// (kubestellar/hive#5650). tmuxSendKeys() queues rather than types whenever the
+// CLI is not confirmed ready or the pane has fallen back to a shell, and a task
+// whose prompt is still queued has told the agent nothing — so nothing on the
+// pane is evidence about it. progressTick() consults this before judging.
+let taskPromptDelivered = false;
+
+// The HIVE_VERDICT: line already on the pane when the current task's prompt was
+// typed into it, or null when the pane held none (kubestellar/hive#5650).
+//
+// The relay drives ONE long-lived CLI, so a new task starts against a pane that
+// still shows the previous task's finished transcript — including its
+// "HIVE_VERDICT: complete — ..." line. detectCompletionVerdict() has no notion
+// of which task a verdict belongs to, so progressTick() read that line and
+// booked the NEW task completed minutes after assigning it, with no PR and the
+// issue untouched. Remembering the line that was already there is what makes
+// the verdict per-task: a verdict byte-identical to the one present at delivery
+// time is, by construction, not this task's statement.
+let deliveredVerdictBaseline = null;
 
 if (CONTRIBUTOR_MODE === MODE_HEADLESS) {
   // Headless mode has no tmux pane to scrape for readiness. Each task spawns
@@ -1546,6 +1715,10 @@ function checkContextUsage() {
 }
 
 function tmuxSendKeys(text) {
+  // Cleared up front and set again only by a send that actually happened: every
+  // early return below leaves the agent WITHOUT this prompt, and progressTick()
+  // must not judge a task in that state (kubestellar/hive#5650).
+  taskPromptDelivered = false;
   // Hard gate (issue #2203, bug 2): `send-keys -l` types literal keystrokes
   // into whatever owns the pane. If the CLI is not confirmed ready, those
   // keystrokes land on bash, whose readline chokes on the apostrophes in the
@@ -1633,6 +1806,13 @@ function tmuxSendKeys(text) {
       }
       return;
     }
+    // Snapshot the verdict line already on the pane BEFORE this prompt is
+    // typed, so progressTick() can refuse to read the PREVIOUS task's
+    // HIVE_VERDICT line as this task's completion (#5650). Captured here rather
+    // than at assignment because this is the moment the transcript stops being
+    // "whatever was there" and starts being this task's own.
+    const priorVerdict = detectCompletionVerdict(captureTmuxLines(TMUX_TAIL_LINES));
+    deliveredVerdictBaseline = priorVerdict ? priorVerdict.line : null;
     const MAX_SEND_RETRIES = 3;
     const RETRY_DELAY_MS = 10000;
     let sent = false;
@@ -1647,6 +1827,7 @@ function tmuxSendKeys(text) {
         sleepMs(300);
         tmuxSendEnters();
         console.log('Task prompt sent to CLI');
+        taskPromptDelivered = true;
         sent = true;
         break;
       } catch (e) {
@@ -1667,20 +1848,29 @@ function shellQuote(s) {
   return "'" + s.replace(/'/g, "'\\''") + "'";
 }
 
+// Keep category names in exact parity with src/pkg/logscrub/handler.go. The Go
+// test reads this declaration and fails if one implementation gains or loses a
+// category without the other (kubestellar/hive#5478).
+const RELAY_SECRET_PATTERNS = [
+  { category: 'hive-canary', pattern: /HIVE-CANARY-[A-Fa-f0-9]{48}/g },
+  // The open-ended body is deliberate: an exact upper bound would redact only
+  // a prefix of a longer future token and leak its tail (#4267). The 10-char
+  // floor and underscore support match pkg/logscrub.
+  { category: 'github-token', pattern: /(ghs_|ghp_|gho_|ghu_|ghr_|github_pat_)[A-Za-z0-9_]{10,}/g },
+  { category: 'jwt', pattern: /eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}/g },
+  { category: 'aws-access-key', pattern: /\b(AKIA|ASIA)[0-9A-Z]{16}\b/g },
+  { category: 'bearer-token', pattern: /\bBearer\s+[A-Za-z0-9._~+/=-]{16,}\b/gi },
+  { category: 'private-key', pattern: /-----BEGIN\s+(?:(?:RSA|EC|OPENSSH|DSA)\s+)?PRIVATE\s+KEY-----.*?-----END\s+(?:(?:RSA|EC|OPENSSH|DSA)\s+)?PRIVATE\s+KEY-----/gs },
+  { category: 'encrypted-private-key', pattern: /-----BEGIN\s+ENCRYPTED\s+PRIVATE\s+KEY-----.*?-----END\s+ENCRYPTED\s+PRIVATE\s+KEY-----/gs },
+  { category: 'pgp-private-key', pattern: /-----BEGIN\s+PGP\s+PRIVATE\s+KEY\s+BLOCK-----.*?-----END\s+PGP\s+PRIVATE\s+KEY\s+BLOCK-----/gs },
+];
+
 function redactTokens(text) {
-  // {36,} not {36}: GitHub documents that token length may grow, and an exact
-  // bound would redact only the first 36 characters of a longer token, leaking
-  // its tail into the hub log line (kubestellar/hive#4267).
-  const githubRedacted = text.replace(/gho_[A-Za-z0-9]{36,}/g, 'gho_***REDACTED***')
-    .replace(/ghp_[A-Za-z0-9]{36,}/g, 'ghp_***REDACTED***')
-    .replace(/ghs_[A-Za-z0-9]{36,}/g, 'ghs_***REDACTED***')
-    .replace(/ghu_[A-Za-z0-9]{36,}/g, 'ghu_***REDACTED***')
-    .replace(/ghr_[A-Za-z0-9]{36,}/g, 'ghr_***REDACTED***')
-    // Fine-grained PATs: github_pat_ + 82 chars of [A-Za-z0-9_]. The Go-side
-    // redactors (dashboard, status_builder, prompt_history) already scrub this
-    // prefix; the relay must match or PAT material leaks into hub log lines.
-    .replace(/github_pat_[A-Za-z0-9_]{36,}/g, 'github_pat_***REDACTED***');
-  return BACKEND === 'pi' ? redactPiCredentials(githubRedacted, PI_SELECTION, PI_ENV) : githubRedacted;
+  let output = text;
+  for (const { pattern } of RELAY_SECRET_PATTERNS) {
+    output = output.replace(pattern, '[REDACTED]');
+  }
+  return BACKEND === 'pi' ? redactPiCredentials(output, PI_SELECTION, PI_ENV) : output;
 }
 
 function captureTmuxLines(n) {
@@ -1689,7 +1879,10 @@ function captureTmuxLines(n) {
       `tmux capture-pane -t ${TMUX_SESSION} -p -S -${n} 2>/dev/null`,
       { encoding: 'utf8', timeout: 15000 }
     );
-    return output.trim().split('\n').slice(-n).map(l => redactTokens(l));
+    // Scrub the pane as one string before splitting it into protocol lines.
+    // Private-key patterns span several terminal lines and cannot match if each
+    // line is redacted independently.
+    return redactTokens(output).trim().split('\n').slice(-n);
   } catch (_) {
     return [];
   }
@@ -1769,15 +1962,20 @@ function detectHiveVerdict(lines, wanted) {
   // Anchored at line start: the task PROMPT quotes the marker mid-sentence
   // ("...the exact form 'HIVE_VERDICT: ...'"), and an anchored match keeps
   // that instruction echo from reading as the agent's own verdict. Codex
-  // renders its completed assistant messages with a leading bullet, which is
-  // presentation chrome rather than part of the verdict.
+  // renders its completed assistant messages with a leading bullet (•,
+  // U+2022) and Claude Code with a filled circle (●, U+25CF) — presentation
+  // chrome rather than part of the verdict. The claude glyph was missing
+  // until bin/test_backend_smoke.sh drove a REAL claude pane through the
+  // relay: the agent printed the sentinel, this regex missed it, and every
+  // interactive claude completion silently degraded to the chrome_idle
+  // fallback the sentinel exists to replace.
   //
   // The verdict token is an alternation of exactly the wanted tokens with a \b
   // after it, so "no_work_neededX" and "completely rewrote the parser" are both
   // non-matches — a prose line that merely STARTS with a verdict word must not
   // become a verdict.
   const alt = wanted.map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
-  const VERDICT_RE = new RegExp(`^\\s*(?:•\\s*)?HIVE_VERDICT:\\s*(${alt})\\b[\\s:—–-]*(.*)$`, 'i');
+  const VERDICT_RE = new RegExp(`^\\s*(?:[•●]\\s*)?HIVE_VERDICT:\\s*(${alt})\\b[\\s:—–-]*(.*)$`, 'i');
   // Scan newest-first so the agent's final conclusion wins over anything it
   // merely quoted or considered earlier in the transcript.
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -1788,7 +1986,11 @@ function detectHiveVerdict(lines, wanted) {
     // visual line start; its giveaway is the literal "<short reason>"
     // placeholder. Never treat that echo as a real verdict.
     if (reason.startsWith('<')) continue;
-    return { verdict: m[1].toLowerCase(), reason };
+    // `line` is the RAW pane line this verdict was read from. progressTick()
+    // compares it against the line that was already on the pane when the task's
+    // prompt was delivered, which is how a verdict gets attributed to a task at
+    // all (#5650).
+    return { verdict: m[1].toLowerCase(), reason, line: lines[i] };
   }
   return null;
 }
@@ -2237,7 +2439,30 @@ function classifyTmuxPane(text) {
     // unknown Claude UI still errs toward busy.
     hasIdlePrompt = /⏵⏵|← for agents|bypass permissions|shift\+tab to cycle/.test(claudeTail);
     hasCompletionMarker = /[✻✶✽] \S+ed for \d+[ms]|Honking|tokens\)/.test(text);
-    const claudeBusyMarker = /esc to interrupt/i.test(claudeTail);
+    // #5654: Claude Code retries a dropped API connection SILENTLY — no
+    // "● API Error:" chrome, just a spinner-glyph countdown line:
+    //
+    //   ✻ Waiting for API response · will retry in 1m 57s · check your network
+    //
+    // That pane is mid-turn, but every gate below said otherwise: no busy
+    // marker, no recognised error line, and the persistent ⏵⏵ footer plus a
+    // PREVIOUS turn's "✻ Worked for …" summary satisfied the completion test —
+    // the ✻ glyph is Claude's spinner, not a completion signal — so a stalled
+    // agent could be booked IDLE_COMPLETE mid-turn. A retry countdown is the
+    // CLI saying it is still working, so it counts as a BUSY marker: the task
+    // stays WORKING, nothing is typed into the pane (interrupting a self-
+    // recovering retry would cause the stall it prevents — see the ordering
+    // note above paneShowsUnretryableAPIError below), and a retry loop that
+    // never resolves is bounded by the existing stall backstop and
+    // MAX_TASK_DURATION rather than mis-booked here.
+    //
+    // The two halves of the line are matched independently because a narrow
+    // pane wraps it; the digit anchor on "will retry in" keeps completed-turn
+    // prose ("the job will retry indefinitely") from pinning an idle pane, and
+    // the tail scope — same window as every other marker in this branch —
+    // keeps a scrolled-past mention from doing so either.
+    const claudeRetryMarker = /Waiting for API response|will retry in \d/i.test(claudeTail);
+    const claudeBusyMarker = /esc to interrupt/i.test(claudeTail) || claudeRetryMarker;
     isWorking = claudeBusyMarker ||
       (!hasIdlePrompt && (/─.*Bash\(|Reading|Editing|Writing|Searching/.test(claudeTail) || /ing…/.test(claudeTail)));
   } else if (BACKEND === 'copilot') {
@@ -2520,6 +2745,11 @@ function relaunchCLI() {
 function dropTaskCredential() {
   try { fs.unlinkSync(GH_TOKEN_CACHE); } catch (_) {}
   tokenExpiresAt = null;
+  // The credential this failure was ABOUT is gone, so the condition dies with
+  // it — otherwise a stale "refresh failed" would colour the next task's
+  // warnings (#5447).
+  tokenRefreshFailedAt = null;
+  lastTokenExpiryWarnAt = 0;
 }
 
 // stopAgentForTaskExit ends the AGENT, not just the bookkeeping, when a task
@@ -2557,11 +2787,18 @@ function dropTaskCredential() {
 // readyAfterInteractiveRevoke) unwind it — the latch is only meaningful if a
 // relaunch actually happened.
 //
+// opts.noRelaunch runs steps 1 and 2 but not step 3 — for the signal-shutdown
+// path (kubestellar/hive#5655), where the PROCESS is exiting: relaunching
+// would type a fresh CLI launch into a pane that may outlive the relay (a
+// detached or container-owned tmux session), leaving an orphaned agent nobody
+// drives, and would re-arm armCLIReadyWait() timers that can never fire.
+//
 // Best-effort by design, like quitLiveCLI(): every caller is already on an
 // exit path, and a relaunch that lands badly is recovered by the
 // armCLIReadyWait() contract.
 function stopAgentForTaskExit(opts) {
   const skipCLI = !!(opts && opts.skipCLI);
+  const noRelaunch = !!(opts && opts.noRelaunch);
   const reason = (opts && opts.reason) || 'a task exit';
   // Step 1, always — even when the pane is deliberately left alone. A task
   // that is no longer ours must not keep its credential under any branch.
@@ -2577,6 +2814,7 @@ function stopAgentForTaskExit(opts) {
   }
   cliReady = false;
   quitLiveCLI();
+  if (noRelaunch) return;
   try {
     console.log(`Relaunching ${BACKEND} after ${reason}: ${relaunchCLI()}`);
   } catch (e) {
@@ -3188,6 +3426,13 @@ function maybeSendAutonomyNudge(tmuxLines) {
 function progressTick() {
   lastProgressTick = Date.now();
   if (!currentTask) return;
+
+  // Surface the credential's remaining lifetime BEFORE the grace-period return
+  // and before any of the pane judging below, so a token that is about to lapse
+  // is reported on its own schedule rather than only on ticks that happen to get
+  // as far as a progress report (#5447). Warn-only — see warnOnTokenExpiry.
+  warnOnTokenExpiry();
+
   if (Date.now() - taskAssignedAt < TASK_GRACE_PERIOD_MS) return;
 
   // #4117: re-detect the running model each tick so a mid-session model switch
@@ -3265,6 +3510,29 @@ function progressTick() {
     }
   } catch (_) {}
 
+  // Never judge a task the agent has not been given (kubestellar/hive#5650).
+  //
+  // tmuxSendKeys() QUEUES the prompt instead of typing it whenever the CLI is
+  // not confirmed ready (or the pane has fallen back to a shell), and
+  // flushPendingTask() delivers it later. Until that happens the pane holds
+  // only the PREVIOUS task's transcript, so everything read below — the
+  // completion verdict, the idle chrome, the stall fingerprint — is evidence
+  // about work this task never touched. That is how a task whose prompt was
+  // still queued got booked `completed` with no PR: the pane still showed the
+  // prior task's HIVE_VERDICT line and satisfied the completion check on the
+  // first tick past the grace period.
+  //
+  // Reporting `working` and returning is deliberate rather than failing here:
+  // armCLIReadyWait() already owns this case and hands the task back with a
+  // real reason at CLI_READY_TIMEOUT_MS. The max-duration lease is the second
+  // backstop, and it is deliberately NOT renewed by this path — a pane the
+  // agent was never prompted with is not forward progress.
+  if (CONTRIBUTOR_MODE !== MODE_HEADLESS && !taskPromptDelivered) {
+    console.warn(`Task ${currentTask.task_id} has not been typed into the ${BACKEND} pane yet — reporting progress without judging the pane`);
+    send({ type: 'task_progress', seq: nextSeq(), task_id: currentTask.task_id, task_gen: currentTask.task_gen, status: 'working', tmux_output: captureTmuxLines(TMUX_TAIL_LINES), ...progressModelFields() });
+    return;
+  }
+
   const paneState = checkTmuxPaneState();
   const tmuxLines = captureTmuxLines(TMUX_TAIL_LINES);
 
@@ -3283,7 +3551,24 @@ function progressTick() {
   //
   // Read from the already-captured tmuxLines: no second pane read, so the
   // destructive paneStalled() fingerprint (#5333) is untouched.
-  const completionVerdict = detectCompletionVerdict(tmuxLines);
+  const paneVerdict = detectCompletionVerdict(tmuxLines);
+
+  // #5650: a verdict has to belong to THIS task. The relay drives one
+  // long-lived CLI, so a task begins against a pane still showing the previous
+  // task's finished transcript — HIVE_VERDICT line included — and reading that
+  // line back is not a completion, it is the last task's statement being
+  // re-read. deliveredVerdictBaseline is exactly the line that was on the pane
+  // when this task's prompt was typed, so an identical line cannot be about
+  // this task.
+  //
+  // Suppressing it does not strand the task: with no verdict the chrome-idle
+  // grace below becomes the signal, precisely as it is for an agent that never
+  // prints the sentinel at all.
+  const staleVerdict = !!paneVerdict && paneVerdict.line === deliveredVerdictBaseline;
+  if (staleVerdict) {
+    console.warn(`Ignoring the HIVE_VERDICT line already on the pane when ${currentTask.task_id} was dispatched — it is the previous task's verdict, not this one's`);
+  }
+  const completionVerdict = staleVerdict ? null : paneVerdict;
 
   // Chrome-idle grace (#5376). classifyTmuxPane() saying IDLE_COMPLETE is now
   // only a hint; it must repeat across CHROME_IDLE_GRACE_TICKS ticks before it
@@ -3507,6 +3792,9 @@ function handleMessage(data, hub) {
         model: refreshDetectedModel(),
         reasoning_effort: effectiveReasoningEffort() || undefined,
         role: AGENT_ROLE,
+        // Multi-session-per-account: additive, optional. An older hub ignores
+        // this unknown field and treats the relay as a single session.
+        session: AGENT_SESSION || undefined,
         // #2547 declare half + #2567: additive, optional self-report of runtime
         // posture and protocol version. An older hub ignores these unknown fields.
         protocol_version: RELAY_PROTOCOL_VERSION,
@@ -3625,6 +3913,9 @@ function handleMessage(data, hub) {
       if (msg.github_token) {
         injectGhToken(msg.github_token);
         tokenExpiresAt = msg.token_expires_at ? new Date(msg.token_expires_at).getTime() : null;
+        // Fresh task, fresh credential: no inherited refresh failure (#5447).
+        tokenRefreshFailedAt = null;
+        lastTokenExpiryWarnAt = 0;
       }
       // TASK_FILE is observability/debug state with no reader that needs the
       // credential; the live token's one legitimate on-disk home is the 0600
@@ -3658,9 +3949,36 @@ function handleMessage(data, hub) {
       if (msg.github_token) {
         injectGhToken(msg.github_token);
         tokenExpiresAt = msg.token_expires_at ? new Date(msg.token_expires_at).getTime() : null;
+        // A delivered credential resolves any earlier renewal failure, and
+        // re-arms the expiry warning for the new token's own window (#5447).
+        tokenRefreshFailedAt = null;
+        lastTokenExpiryWarnAt = 0;
         console.log('GitHub token refreshed');
       }
       break;
+
+    // token_refresh_failed (kubestellar/hive#5447): the hub could not re-mint
+    // this task's credential. The token we hold is still the OLD one and stays
+    // installed — the hub retries on its next heartbeat — so there is nothing to
+    // drop and nothing to fail here. Recording it is the entire point: without
+    // it, the first evidence of a stale credential is a push failing about an
+    // hour into a long task, surfaced to the agent as a generic auth error
+    // (#5343's misleading-symptom class).
+    case 'token_refresh_failed': {
+      if (!currentTask || currentTaskHub() !== hub) {
+        console.log(`Ignoring token_refresh_failed from ${hub.url} — it does not own the active task`);
+        break;
+      }
+      tokenRefreshFailedAt = Date.now();
+      const status = tokenLifetimeStatus();
+      const remaining = status.known
+        ? (status.expired
+          ? `the current token expired ${formatDuration(status.remainingMs)} ago`
+          : `the current token expires in ${formatDuration(status.remainingMs)}`)
+        : 'the current token has no known expiry';
+      console.error(`GitHub token refresh FAILED for ${taskKey(currentTask)}: ${msg.reason || 'no reason given'} — ${remaining}. Pushes may fail with a generic auth error until the hub renews it.`);
+      break;
+    }
 
     case 'task_revoke':
       if (!currentTask) {
@@ -3898,10 +4216,38 @@ function cleanup() {
     if (hub.heartbeatInterval) { clearInterval(hub.heartbeatInterval); hub.heartbeatInterval = null; }
   });
   if (progressInterval) { clearInterval(progressInterval); progressInterval = null; }
+  // A shutdown with a task in flight must run the same task-exit contract as
+  // every other way a task stops being ours (kubestellar/hive#5655, #5353).
+  // Ctrl-C is the NORMAL way a contributor stops a relay, and this path used
+  // to clear timers only: the per-task scoped token stayed on disk at
+  // GH_TOKEN_CACHE, valid for the rest of its ~55-minute lifetime, after the
+  // hub had already released the issue and could offer it to someone else —
+  // the #2356 shape, reached from the shutdown direction.
+  //
+  // stopAgentForTaskExit() unlinks the credential FIRST (its step 1, always),
+  // then interrupts the live agent — which matters when the tmux session is
+  // detached or container-owned and does not die with the relay. noRelaunch:
+  // this process is exiting, so starting a fresh CLI would only orphan one.
+  // The hub is deliberately NOT messaged here: the socket drop already books
+  // the release through the disconnect handler's cooldown path (#5097).
+  if (currentTask) {
+    stopAgentForTaskExit({ reason: 'relay shutdown', noRelaunch: true });
+    currentTask = null;
+  }
 }
 
 process.on('SIGTERM', () => { cleanup(); process.exit(0); });
 process.on('SIGINT', () => { cleanup(); process.exit(0); });
+
+// Last-resort backstop (kubestellar/hive#5655): the scoped token must never
+// outlive the process, however it exits. 'exit' fires on a normal return, on
+// the process.exit(0) in the signal handlers above, and on the default
+// crash path of an uncaught exception — everything short of SIGKILL. Exit
+// handlers must be synchronous; a bare unlink is, and it is a no-op when
+// cleanup() already dropped the credential (or none was ever written).
+process.on('exit', () => {
+  try { fs.unlinkSync(GH_TOKEN_CACHE); } catch (_) {}
+});
 
 // Test hook: when HIVE_RELAY_TEST_MODE=1 the relay exposes its internals and
 // does NOT open a hub connection, so contributor-relay.test.js can drive the
@@ -3915,6 +4261,9 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     handleMessage,
     injectGhToken,
     GH_TOKEN_CACHE,
+    tokenLifetimeStatus,
+    warnOnTokenExpiry,
+    TOKEN_EXPIRY_WARN_MS,
     tmuxSendKeys,
     flushPendingTask,
     relaunchCLI,
@@ -4017,6 +4366,11 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     getCliReadyFailed: () => cliReadyFailed,
     getPendingTask: () => pendingTask,
     setPendingTask: (v) => { pendingTask = v; },
+    // Per-task prompt-delivery surface (kubestellar/hive#5650).
+    getTaskPromptDelivered: () => taskPromptDelivered,
+    setTaskPromptDelivered: (v) => { taskPromptDelivered = v; },
+    getDeliveredVerdictBaseline: () => deliveredVerdictBaseline,
+    setDeliveredVerdictBaseline: (v) => { deliveredVerdictBaseline = v; },
     setTasksCompletedCount: (v) => { tasksCompletedCount = v; },
     getTasksCompletedCount: () => tasksCompletedCount,
     setLastResetAtCount: (v) => { lastResetAtCount = v; },
@@ -4056,6 +4410,7 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     CONTAINER_RUNTIME,
     // Coverage for previously untested pure/isolated functions (#4267).
     redactTokens,
+    captureTmuxLines,
     detectNoWorkVerdict,
     detectPRURL,
     resolveBackend,

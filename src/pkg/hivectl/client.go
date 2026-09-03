@@ -63,7 +63,37 @@ func (e *ConnectionError) Unwrap() error { return e.Err }
 type Client struct {
 	baseURL *url.URL
 	token   string
-	http    *http.Client
+	// cookie is a complete Cookie header value carrying a per-user session
+	// ("hive_session=...", several joined with "; "), for the deployments that
+	// do not accept the shared token at all: hub-hosted hives, and spokes with
+	// an authorized_users allowlist, where the Bearer lane is deliberately
+	// disabled because it grants unscoped owner with no per-user identity.
+	// Token and cookie are independent and BOTH are sent when both are set —
+	// which lane a hive honours is a property of how it was deployed, and the
+	// client cannot tell the deployments apart from here.
+	cookie string
+	// loginHint, when set, is appended to a 401's message. It exists for the
+	// cached-session path: a session minted by `hivectl login` can expire or be
+	// revoked server-side, and the operator holding one should be told to run
+	// `hivectl login` again — not shown a bare 401 that reads like a wrong
+	// token. Only 401 qualifies: a 403 is a WORKING credential whose role is
+	// too narrow, and telling that operator to log in again would send them
+	// through a flow that changes nothing.
+	loginHint string
+	http      *http.Client
+}
+
+// SetSessionCookie configures the per-user session lane. The value is a Cookie
+// header value, sent verbatim — reformatting it (trimming a name, re-encoding)
+// would produce a request that authenticates as nobody while looking correct
+// in a log. Empty clears the lane and the header is omitted entirely.
+func (c *Client) SetSessionCookie(header string) {
+	c.cookie = strings.TrimSpace(header)
+}
+
+// SetLoginHint attaches advice to append to 401 responses — see the field doc.
+func (c *Client) SetLoginHint(hint string) {
+	c.loginHint = hint
 }
 
 func NewClient(server, token string, timeout time.Duration) (*Client, error) {
@@ -149,7 +179,7 @@ func (c *Client) StreamSSE(ctx context.Context, apiPath string, query url.Values
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return apiError(resp.StatusCode, data)
+		return c.responseError(resp.StatusCode, data)
 	}
 
 	scanner := bufio.NewScanner(resp.Body)
@@ -222,7 +252,7 @@ func (c *Client) do(ctx context.Context, method, apiPath string, query url.Value
 		return nil, "", fmt.Errorf("hive response exceeds the %d MiB client limit", maxResponseBytes>>20)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, "", apiError(resp.StatusCode, data)
+		return nil, "", c.responseError(resp.StatusCode, data)
 	}
 	return data, resp.Header.Get("Content-Type"), nil
 }
@@ -254,6 +284,14 @@ func (c *Client) request(ctx context.Context, method, apiPath string, query url.
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
+	if c.cookie != "" {
+		// Set, not Add: the value is already a complete Cookie header (possibly
+		// several cookies joined by "; "), so adding would emit a second Cookie
+		// header line rather than extending this one. Omitted entirely when
+		// empty — an empty Cookie header is not the same as no Cookie header to
+		// every intermediary between here and the hive.
+		req.Header.Set("Cookie", c.cookie)
+	}
 	req.Header.Set("User-Agent", "hivectl/0.1")
 	for key, values := range headers {
 		for _, value := range values {
@@ -261,6 +299,22 @@ func (c *Client) request(ctx context.Context, method, apiPath string, query url.
 		}
 	}
 	return req, nil
+}
+
+// responseError builds the APIError for a non-2xx response, appending the
+// configured login hint on 401 only — the one status where "run 'hivectl
+// login' again" is the right advice (see the loginHint field doc for why 403
+// is excluded).
+func (c *Client) responseError(status int, body []byte) error {
+	err := apiError(status, body)
+	if c.loginHint == "" || status != http.StatusUnauthorized {
+		return err
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		apiErr.Message = strings.TrimSpace(apiErr.Message + "\n" + c.loginHint)
+	}
+	return err
 }
 
 func apiError(status int, body []byte) error {

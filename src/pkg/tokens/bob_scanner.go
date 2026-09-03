@@ -40,6 +40,10 @@ type bobChatMessage struct {
 	// Type is the role discriminator: "user", "bob-shell", etc.
 	Type    string `json:"type"`
 	Content string `json:"content"`
+	// Timestamp is the per-message RFC3339 stamp bobshell records. Used by
+	// the error-streak scan (error_streak.go) to age turns; the token
+	// aggregation itself only needs the session-level times.
+	Timestamp string `json:"timestamp,omitempty"`
 	// Model is per-message (e.g. "premium", "standard").
 	Model string `json:"model,omitempty"`
 	// Tokens carries usage for assistant ("bob-shell") messages.

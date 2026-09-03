@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/hivecommons/hive/pkg/config"
 )
 
 // Hive-health verdict: does this spoke have RECENT OUTPUT back to its work
@@ -58,12 +60,39 @@ type HealthVerdict struct {
 	// QueuedWork is the actionable backlog (issues+PRs) that output would drain;
 	// zero means "nothing to do", which makes "no output" healthy.
 	QueuedWork int `json:"queuedWork"`
+	// Remediation is the one-line "do this, there" hint for a non-green
+	// verdict (#5577) — see remediation.go for the signature→action map.
+	// ALWAYS nil on green: a healthy hive gets no instruction.
+	Remediation *Remediation `json:"remediation,omitempty"`
+
+	// cause is the machine-readable signature that produced this verdict
+	// (remediation.go's cause* tokens). Unexported: it exists so the
+	// remediation mapping and the handleMyHives link enrichment switch on a
+	// token instead of string-matching the human reason.
+	cause string
+	// staleOutput marks the two bandFreshness red shapes ("no <verb> in Nh" /
+	// "no <verb> output") — the GENERIC no-output reds that the error-streak
+	// signature is allowed to re-explain. Precondition reds (App, budget,
+	// login) never set it, which is what makes them win by construction.
+	staleOutput bool
 }
 
 // hiveHealthFor computes the verdict for one registry entry. rollup is the
 // already-computed agent fleet rollup (Known/Running/Expected/Problems);
 // queuedWork is ActionableIssues+ActionablePRs; app is the GitHub App health.
+//
+// It layers three passes (#5577): the banded base verdict, then the detector
+// states (error-streak re-explains a generic no-output red; consent-wedge and
+// no-cadence demote green to amber), then the remediation hint mapping — so
+// every non-green verdict that matches a known signature also names its fix.
 func hiveHealthFor(e RegistryEntry, rollup agentFleetRollup, app GitHubAppHealth, queuedWork int, now time.Time) HealthVerdict {
+	v := hiveHealthBase(e, rollup, app, queuedWork, now)
+	v = applyDetectorStates(v, e)
+	attachRemediation(&v, e)
+	return v
+}
+
+func hiveHealthBase(e RegistryEntry, rollup agentFleetRollup, app GitHubAppHealth, queuedWork int, now time.Time) HealthVerdict {
 	v := HealthVerdict{QueuedWork: queuedWork}
 
 	// --- Unknown gates first: never claim health for a hive we can't see. ---
@@ -90,6 +119,7 @@ func hiveHealthFor(e RegistryEntry, rollup agentFleetRollup, app GitHubAppHealth
 	if e.ACMMLevel > acmmInceptionMax {
 		if app.Bucket == ghAppBucketBroken {
 			v.State = HealthStateRed
+			v.cause = causeAppBroken
 			// Name the specific failure when the spoke reported one —
 			// "repo-not-covered" (App installed but this repo not ticked) needs
 			// a completely different remedy than a missing/invalid key.
@@ -102,6 +132,7 @@ func hiveHealthFor(e RegistryEntry, rollup agentFleetRollup, app GitHubAppHealth
 		}
 		if reason := strings.TrimSpace(e.ProviderLimitReason); reason != "" {
 			v.State = HealthStateRed
+			v.cause = causeProviderQuota
 			v.Reason = providerLimitHealthReason(reason, e.ProviderLimitRebuffs)
 			return v
 		}
@@ -111,6 +142,29 @@ func hiveHealthFor(e RegistryEntry, rollup agentFleetRollup, app GitHubAppHealth
 		// entirely different from debugging a stuck agent.
 		if e.BudgetExhausted != nil && *e.BudgetExhausted {
 			v.State = HealthStateRed
+			v.cause = causeBudgetExhausted
+			// Separate the two ways a budget closes the gate, because the
+			// remedies are unrelated (#5508). A spoke whose LIMIT is too small
+			// to fund one model call never spent anything — waiting for the
+			// window to roll changes nothing, and the operator must fix the
+			// number. Collapsing that into the generic "exhausted" chip is what
+			// let limits of 5, 50 and 1000 tokens sit unnoticed on the fleet.
+			if e.BudgetLimit != nil && config.BudgetLimitBelowFloor(*e.BudgetLimit) {
+				v.cause = causeBudgetMisconfigured
+				v.Reason = fmt.Sprintf("budget limit misconfigured (%d tokens) — agents halted, window reset will not help",
+					*e.BudgetLimit)
+				return v
+			}
+			// Name the numbers when the beat carried them (#5577): "spend X
+			// of Y" tells the operator at a glance whether this is a rolled
+			// window away from healing or a 3x blowout that needs a bigger
+			// limit — the 2026-09-01 audit's spend-3x-limit case read as
+			// generic quiet without them.
+			if e.BudgetCurrentSpend != nil && e.BudgetLimit != nil && *e.BudgetLimit > 0 {
+				v.Reason = fmt.Sprintf("budget exhausted — spend %d of %d, kicks suppressed",
+					*e.BudgetCurrentSpend, *e.BudgetLimit)
+				return v
+			}
 			v.Reason = "budget exhausted — agents halted"
 			return v
 		}
@@ -118,17 +172,20 @@ func hiveHealthFor(e RegistryEntry, rollup agentFleetRollup, app GitHubAppHealth
 			v.State = HealthStateRed
 			switch {
 			case rollup.QuotaExhausted == rollup.Problems:
+				v.cause = causeProviderQuota
 				v.Reason = fmt.Sprintf("%d agent(s) out of provider quota", rollup.QuotaExhausted)
 			case rollup.LoginStuck == rollup.Problems:
 				// Every blocked agent is wedged at a login prompt: name the one
 				// actionable cause (operator re-login) instead of the generic
 				// count — the EPM/alchemy at-a-glance case.
+				v.cause = causeLoginStuck
 				v.Reason = fmt.Sprintf("%d agent(s) stuck at login — re-login needed", rollup.LoginStuck)
 			case rollup.DeadOrGone == rollup.Problems:
 				// Katamari/ibm-aiops-orchestrator live shapes: failed/dead agents
 				// need a restart whether the outage is partial or every expected
 				// agent is down. Name that cause instead of the generic "blocked"
 				// or "no agents running" wording.
+				v.cause = causeAgentsDown
 				v.Reason = fmt.Sprintf("%d agent(s) down — restart needed", rollup.DeadOrGone)
 			case rollup.IdleWithWork == rollup.Problems:
 				// Sessions are alive but every scheduled agent is sitting past
@@ -152,6 +209,7 @@ func hiveHealthFor(e RegistryEntry, rollup agentFleetRollup, app GitHubAppHealth
 				// still, queued work will not move until somebody resumes them, so
 				// amber is more honest than the green "off by schedule" verdict.
 				v.State = HealthStateAmber
+				v.cause = causeAllPaused
 				v.Reason = "all agents paused — resume to produce output"
 				return v
 			}
@@ -264,6 +322,8 @@ func hiveHealthFor(e RegistryEntry, rollup agentFleetRollup, app GitHubAppHealth
 		// green: the hive is healthy but a human action is pending.
 		if verdict.State == HealthStateRed && e.HoldTotal != nil && *e.HoldTotal > 0 {
 			verdict.State = HealthStateAmber
+			verdict.cause = causeHoldStale
+			verdict.staleOutput = false
 			verdict.Reason = fmt.Sprintf("awaiting human review — %d held for approval", *e.HoldTotal)
 		}
 		return verdict
@@ -347,11 +407,13 @@ func bandFreshness(v HealthVerdict, last time.Time, ok bool, queuedWork int, now
 		}
 	case ok:
 		v.State = HealthStateRed
+		v.staleOutput = true
 		// TrimSuffix: humanizeAge says "18h ago" for badge use; "no create in
 		// 18h ago" is not English, so drop the suffix here.
 		v.Reason = fmt.Sprintf("no %s in %s (%d queued)", verb, strings.TrimSuffix(humanizeAge(now.Sub(last)), " ago"), queuedWork)
 	default:
 		v.State = HealthStateRed
+		v.staleOutput = true
 		v.Reason = fmt.Sprintf("no %s output (%d queued)", verb, queuedWork)
 	}
 	return v

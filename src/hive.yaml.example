@@ -561,7 +561,21 @@ knowledge:
     #   url: https://wiki.hive.dev/mcp       # Public, read-only
     #   shared: true
   curator:
+    # enabled: true                          # OPT-IN. Absent or false = scheduled
+                                             # auto-promotion never runs, even with a
+                                             # schedule set below. Auto-promotion copies
+                                             # facts into a higher layer with NO human
+                                             # review, so it is off unless you ask for it.
+    schedule: daily                          # Cadence for the promotion sweep once
+                                             # enabled: true. Accepts daily or hourly.
+                                             # Ignored entirely while disabled.
+    extract_from:
+      - pr_comments
+      - ci_failures
+      - review_comments
     auto_promote_threshold: 0.9              # Confidence to auto-promote project→org
+    # promote_from: project                  # Source layer (default: project)
+    # promote_to: org                        # Target layer (default: org)
   git_sources:                               # Remote git repos indexed as knowledge
     # - name: dakota-skills                  # Display name for this source
     #   url: https://github.com/projectbluefin/dakota

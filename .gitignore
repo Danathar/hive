@@ -30,3 +30,8 @@ _inline.js
 # Test-run scratch: bin/contributor-relay.test.js writes per-task status files
 # into randomly-suffixed workspace dirs under here. Generated per run.
 .relay-test-tmp/
+
+# Rendered output of src/docs/design/tui.tape (VHS). The TAPE is the
+# reproducible source of truth; the GIF is a build product and is not
+# committed — see #5423.
+src/docs/design/_out/

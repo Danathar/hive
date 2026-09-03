@@ -1,0 +1,17 @@
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ ACMM level                                                             ┃
+┃ current L4                                                             ┃
+┃                                                                        ┃
+┃   L2 Assisted                                                          ┃
+┃       Agents propose, humans merge.                                    ┃
+┃       4 agents   governor advisory   merge human                       ┃
+┃ ▸ L4 Supervised  (current)                                             ┃
+┃       Agents merge green PRs under review.                             ┃
+┃       9 agents   governor supervised   merge lgtm                      ┃
+┃   L5 Autonomous                                                        ┃
+┃       Agents own the merge path.                                       ┃
+┃       12 agents   governor autonomous   merge auto                     ┃
+┃ 2 of 3                                                                 ┃
+┃                                                                        ┃
+┃ j/k move  enter select  esc cancel                                     ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛

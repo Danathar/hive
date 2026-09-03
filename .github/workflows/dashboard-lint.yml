@@ -7,16 +7,32 @@ name: Dashboard Lint
 # would then pass against a checker nobody had exercised. The workflow file is
 # listed for the same reason: an edit to the `find` invocation here changes
 # what gets checked, and that edit must run the job it changes.
+#
+# THE SHIPPED DASHBOARD IS src/pkg/dashboard/static/ (#5516). That is the tree
+# `//go:embed static` compiles into the binary and serves; dashboard/index.html
+# is a different, smaller file. Until this was added, every edit to the
+# dashboard an operator actually loads ran no lint at all — which is how a
+# call to an undefined helper reached a released image and broke the login
+# flow. Both trees are checked now, and both are in the path filter, so a PR
+# touching either runs the job.
+#
+# Two passes (see .github/scripts/check-inline-js.js): `node --check` for
+# syntax, then ESLint `no-undef` over the concatenated inline blocks. The
+# second pass is what would have caught #5516 — `apiFetch is not defined`
+# parses fine. Its dependency is exact-pinned under .github/scripts/, which is
+# why '.github/scripts/**' (package.json, lockfile, checker) is in the filter.
 on:
   push:
     paths:
       - 'dashboard/**'
-      - '.github/scripts/check-inline-js.js'
+      - 'src/pkg/dashboard/static/**'
+      - '.github/scripts/**'
       - '.github/workflows/dashboard-lint.yml'
   pull_request:
     paths:
       - 'dashboard/**'
-      - '.github/scripts/check-inline-js.js'
+      - 'src/pkg/dashboard/static/**'
+      - '.github/scripts/**'
       - '.github/workflows/dashboard-lint.yml'
 
 permissions:
@@ -28,7 +44,20 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Extract and syntax-check inline JavaScript
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: .github/scripts/package-lock.json
+
+      # eslint + globals are exact-pinned in .github/scripts/package.json and
+      # resolved from its lockfile; --ignore-scripts keeps install hooks out of
+      # CI. The checker fails (does not skip) if this step was not run.
+      - name: Install pinned ESLint for the no-undef pass
+        run: npm ci --ignore-scripts --no-audit --no-fund
+        working-directory: .github/scripts
+
+      - name: Syntax-check and no-undef-check inline JavaScript
         run: |
-          find dashboard -name '*.html' -print0 \
+          find dashboard src/pkg/dashboard/static -name '*.html' -print0 \
             | xargs -0 --no-run-if-empty node .github/scripts/check-inline-js.js

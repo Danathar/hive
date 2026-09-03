@@ -201,6 +201,23 @@ type GovernorConfig struct {
 	// default.
 	ThresholdScaling string `yaml:"threshold_scaling,omitempty" json:"threshold_scaling,omitempty"`
 
+	// CadenceOwners records WHO last set each governor mode cadence, keyed
+	// mode → agent → owner (FieldOwnerOperator). It is the cadence analogue of
+	// AgentConfig.ModelOwner/BackendOwner (#5558): a pack could never stomp an
+	// operator's model, but could always stomp their cadence — the asymmetry
+	// behind #5632, where every steady-state ApplyPack silently reverted
+	// operator-set cadences to the pack defaults. Only operator claims are
+	// recorded; an absent entry means "pack-owned (or pre-dating this field)",
+	// which keeps existing hives on today's behavior until an operator
+	// actually edits a cadence.
+	//
+	// Unlike ThresholdsSource this IS per-entry: cadences cannot invert a mode
+	// ladder the way thresholds can, and per-entry is exactly the granularity
+	// the Governor grid edits at. It lives here, not in ModeConfig, because
+	// ModeConfig's flat YAML map treats every non-`threshold` key as an agent
+	// cadence.
+	CadenceOwners map[string]map[string]string `yaml:"cadence_owners,omitempty" json:"cadence_owners,omitempty"`
+
 	// ThresholdsSource records WHERE the explicit thresholds in Modes came
 	// from, so "explicit always wins" can apply to the values an operator
 	// typed without also applying to the ones an ACMM pack seeded (#4037).
@@ -630,4 +647,37 @@ func (g GovernorConfig) EffectiveThreshold(modeName string, repoCount int) int {
 // by this.
 func (g *GovernorConfig) AttributionTrailerEnabled() bool {
 	return g.AttributionTrailer == nil || *g.AttributionTrailer
+}
+
+// CadenceIsOperatorOwned reports whether an operator explicitly set the
+// cadence for agent in the given governor mode, which makes it immune to pack
+// reconciliation — the same contract ModelIsOperatorOwned provides for models.
+func (g *GovernorConfig) CadenceIsOperatorOwned(mode, agent string) bool {
+	return g.CadenceOwners[mode][agent] == FieldOwnerOperator
+}
+
+// ClaimCadenceOwnership marks the (mode, agent) cadence as operator-owned so
+// no subsequent pack apply reconciles it back to the pack default.
+func (g *GovernorConfig) ClaimCadenceOwnership(mode, agent string) {
+	if g.CadenceOwners == nil {
+		g.CadenceOwners = make(map[string]map[string]string)
+	}
+	if g.CadenceOwners[mode] == nil {
+		g.CadenceOwners[mode] = make(map[string]string)
+	}
+	g.CadenceOwners[mode][agent] = FieldOwnerOperator
+}
+
+// ReleaseCadenceOwnership drops the ownership marker for (mode, agent). Called
+// when the cadence entry itself is removed (e.g. the agent left the roster) so
+// a stale claim cannot outlive the value it protected.
+func (g *GovernorConfig) ReleaseCadenceOwnership(mode, agent string) {
+	owners, ok := g.CadenceOwners[mode]
+	if !ok {
+		return
+	}
+	delete(owners, agent)
+	if len(owners) == 0 {
+		delete(g.CadenceOwners, mode)
+	}
 }

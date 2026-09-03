@@ -2,7 +2,6 @@ package hub
 
 import (
 	"encoding/json"
-	"log/slog"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -401,7 +400,7 @@ func TestMyHivesPlaceholderRowShipsGreenHealth(t *testing.T) {
 	defer cleanup()
 
 	now := time.Now().UTC().Format(time.RFC3339)
-	s := NewHubServer(0, slog.Default(), "test", "v2")
+	s := newHubServerForTest(t)
 	s.mu.Lock()
 	s.registry.Hives = []RegistryEntry{
 		{

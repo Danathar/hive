@@ -29,15 +29,14 @@ that status is the thing to check before treating a page as current behaviour:
   (`src/pkg/hub/hub_generations*.go`, `hub_cookie_generations.go`); the
   remaining per-domain adoptions listed under "Follow-on PRs" are still pending.
 - [Wrapped master delivery to pull-only spokes](master-delivery-wrapped.md) —
-  **partly shipped**, and page-level **design only**. Read it after
-  master-key-rotation.md: rotation is complete on the hub and delivers nothing to
-  the two thirds of the fleet on pull-only clusters, which the hub cannot write
-  to by design. Records Option D — the spoke generates a keypair, publishes the
-  public half over its own outbound heartbeat, and the hub seals each new master
-  to it — and why Options A and B were rejected. The sealing primitive and the
-  spoke-side wrapping-key lifecycle have since landed (`src/pkg/hub/wrapkey.go`,
-  `wrapkey_store.go`); the page is not updated post hoc as later stages ship, so
-  its own header still reads DESIGN ONLY.
+  **design only**. Read it after master-key-rotation.md: rotation is complete on
+  the hub and delivers nothing to the two thirds of the fleet on pull-only
+  clusters, which the hub cannot write to by design. Records Option D — the spoke
+  generates a keypair, publishes the public half over its own outbound heartbeat,
+  and the hub seals each new master to it — and why Options A and B were
+  rejected. Earlier unwired wrapkey primitives were removed as dead code in
+  [#5697](https://github.com/hivecommons/hive/pull/5697), so no sealing
+  primitive or spoke-side wrapping-key lifecycle is currently implemented.
 - [PR reach telemetry](pr-reach-telemetry.md) — **partly shipped.** The design
   behind attributing merged code to what is actually running, and the anchoring
   rule that governs it: **merged ≠ deployed ≠ running**, so reach must attribute
@@ -93,15 +92,17 @@ that status is the thing to check before treating a page as current behaviour:
   with its timestamp would move Copilot from "structurally impossible" to
   phase 3's existing join, in `pkg/tokens` only and off the request path.
 
-- [`hive tui` — a terminal dashboard for Hive](tui.md) — **design only.** The
-  accepted plan for the k9s-style terminal client tracked in #4907: scope,
-  the fixed architecture decisions, the default 2x2 pane layout, the keybinding
-  table, and the golden-file testing convention. Read it before picking up any
-  #4907 sub-issue, for two corrections it carries that the sub-issue bodies do
-  not: their `v2/...` paths are pre-#3996 spellings and map to `src/pkg/tui/...`,
-  and `dashboard/openapi.json` — which the epic names as the contract for every
-  client task — publishes 32 of the dashboard's 298 routes and **no write
-  operations at all**, so the four action tasks have no spec to build against.
+- [`hive tui` — a terminal dashboard for Hive](tui.md) — **shipped (v1).** The
+  design record for the k9s-style terminal client tracked in #4907: scope, the
+  fixed architecture decisions, the default 2x2 pane layout, the keybinding
+  table, and the golden-file testing convention. Every v1 sub-issue has landed;
+  [`src/docs/hivectl.md`](../hivectl.md#tui--live-terminal-dashboard) is the
+  operator reference for what actually shipped and the one to read first — this
+  page is read afterward, for the reasoning and the two corrections it carries
+  against the sub-issue bodies: their `v2/...` paths are pre-#3996 spellings
+  that map to `src/pkg/tui/...`, and `dashboard/openapi.json` — which the epic
+  names as the contract for every client task — originally published 32 of the
+  dashboard's 298 routes and no write operations at all, closed by #5023.
 - [Agent host confinement on the default (unconfined) launch path](agent-host-confinement.md)
   — **investigation, no decision taken.** #4918: an agent doing correct,
   benign work on an assigned third-party repo ran that repo's own test suite,

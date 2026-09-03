@@ -81,14 +81,19 @@ workflow that publishes the required `test` check — uses the same three flags:
 
 ```bash
 cd src
-go test ./pkg/hub/... -short -race -count=1     # test (hub)
-go test ./pkg/agent   -short -race -count=1 -run '<1/5 slice>'
-go test $PKGS         -short -race -count=1     # test (rest i/3)
+go test ./pkg/hub     -short -race -count=1 -run '<1/3 slice>'   # test (hub i/3)
+go test ./pkg/agent   -short -race -count=1 -run '<1/5 slice>'   # test (agent i/5)
+go test $PKGS         -short -race -count=1                      # test (rest i/3)
 ```
 
-The workflow shards for wall-clock only: `pkg/hub` and `pkg/agent` get dedicated
-jobs, and everything else from `go list ./pkg/... ./cmd/...` is partitioned into
-balanced buckets. The union of the shards is the whole of `./pkg/...` and
+The workflow shards for wall-clock only: `pkg/hub` and `pkg/agent` are each
+sliced across several jobs by test *function* (they are single packages too
+slow to run whole), and everything else from `go list ./pkg/... ./cmd/...` is
+partitioned into balanced buckets. Every shard also runs with `-v` and posts
+its slowest test functions to the job's step summary — look there before
+reaching for a local profile when the gate feels slow. Scheduled runs add
+`-shuffle=on` (the seed is in the log); the PR gate does not, so an
+order-dependent test shows up as a filed issue rather than as a red PR. The union of the shards is the whole of `./pkg/...` and
 `./cmd/...`, so what changes between your loop and the gate is the *flags*, not
 the coverage. To reproduce the gate locally in one unsharded run:
 

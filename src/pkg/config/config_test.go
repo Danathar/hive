@@ -936,6 +936,20 @@ func TestApplyDefaults_KnowledgeDefaults(t *testing.T) {
 	if len(cfg.Knowledge.Primer.Priority) == 0 {
 		t.Error("expected default priority")
 	}
+	// Curator schedule is deliberately NOT defaulted here. Since #5430 wired
+	// the schedule to a real promotion loop, stamping "daily" onto a hive that
+	// never set knowledge.curator.enabled would advertise a cadence that (a)
+	// will not run, and (b) must not run — auto-promotion writes into a higher
+	// knowledge layer without review. The default applies only once opted in;
+	// see TestCuratorEnabledGetsScheduleDefault in curator_optin_test.go.
+	if cfg.Knowledge.Curator.IsEnabled() {
+		t.Error("curator must default to disabled")
+	}
+	if cfg.Knowledge.Curator.Schedule != "" {
+		t.Errorf("schedule = %q, want empty on a hive that did not opt in", cfg.Knowledge.Curator.Schedule)
+	}
+	// The threshold is still defaulted unconditionally: it is a ceiling on what
+	// may ever be promoted, so a value is useful even when nothing is running.
 	if cfg.Knowledge.Curator.AutoPromoteThreshold != defaultPromoteThreshold {
 		t.Errorf("threshold = %f", cfg.Knowledge.Curator.AutoPromoteThreshold)
 	}

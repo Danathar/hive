@@ -52,7 +52,8 @@ RUN --mount=type=cache,id=hive-go-build,target=/tmp/gobuild \
     if [ -n "$VERSION" ]; then VERSION_LDFLAG="-X main.version=${VERSION}"; fi && \
     GOCACHE=/tmp/gobuild CGO_ENABLED=0 go build -ldflags "-X main.gitHash=${GIT_HASH} -X main.gitShort=${GIT_SHORT} -X main.gitBranch=${GIT_BRANCH} ${VERSION_LDFLAG}" -o /hive ./cmd/hive && \
     GOCACHE=/tmp/gobuild CGO_ENABLED=0 go build -o /bd ./cmd/bd && \
-    GOCACHE=/tmp/gobuild CGO_ENABLED=0 go build -o /hive-backup ./cmd/hive-backup
+    GOCACHE=/tmp/gobuild CGO_ENABLED=0 go build -o /hive-backup ./cmd/hive-backup && \
+    GOCACHE=/tmp/gobuild CGO_ENABLED=0 go build -o /hivectl ./cmd/hivectl
 
 
 # --- tmux from source (cached until TMUX_VERSION changes) ---
@@ -400,6 +401,20 @@ COPY --from=builder /hive /usr/local/bin/hive
 COPY --from=builder /bd /usr/local/bin/bd
 COPY --from=builder /hive-backup /usr/local/bin/hive-backup
 
+# #5646 — hivectl travels in the image as CARGO, not as part of the runtime.
+# It is the host-side client of the dashboard API, and the whole premise of
+# that client (see #4907) is that it is not a second implementation of Hive
+# logic — so it deliberately does NOT go into /usr/local/bin: nothing inside
+# the container should run it against itself over loopback. It sits at a
+# well-known non-PATH location so bin/hive-podman-setup.sh can `podman cp` it
+# onto the host, which is the only supported way to obtain hivectl on
+# image-based hosts (Silverblue/Bluefin, RHEL image mode) where a Go toolchain
+# cannot be installed. Extracting from the image the deployment already runs
+# means the client can never be a different version than the server.
+# src/deploy/test_hivectl_extraction_contract.sh pins this path to the one the
+# installer extracts, so the two cannot drift apart silently.
+COPY --from=builder /hivectl /usr/local/share/hive/hivectl
+
 # #3760 — defeat the BuildKit/overlayfs metacopy redirect on the cross-stage
 # COPY above. When BuildKit builds these images it can emit a layer where a
 # file brought in by `COPY --from` is stored as an overlay *metacopy redirect*
@@ -419,10 +434,11 @@ COPY --from=builder /hive-backup /usr/local/bin/hive-backup
 # attestation/OCI-index flags; the workflow-side `provenance:false / sbom:false`
 # change (which stops the OCI-index form that enables the metacopy layout in the
 # first place) and this rewrite are independent, belt-and-suspenders defenses.
-RUN for b in hive bd hive-backup; do \
-      cp --remove-destination "/usr/local/bin/$b" "/usr/local/bin/$b.fresh" && \
-      mv -f "/usr/local/bin/$b.fresh" "/usr/local/bin/$b" && \
-      chmod 0755 "/usr/local/bin/$b"; \
+RUN for b in /usr/local/bin/hive /usr/local/bin/bd /usr/local/bin/hive-backup \
+             /usr/local/share/hive/hivectl; do \
+      cp --remove-destination "$b" "$b.fresh" && \
+      mv -f "$b.fresh" "$b" && \
+      chmod 0755 "$b"; \
     done
 
 COPY src/proxy/ /opt/hive/proxy/

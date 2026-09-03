@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hivecommons/hive/internal/testutil"
 	"github.com/hivecommons/hive/pkg/config"
 )
 
@@ -30,7 +31,11 @@ func TestStart_CLIAlreadyRunning(t *testing.T) {
 	// instead, where the manager never looks, so the adopt branch under test
 	// would silently never trigger (#4628).
 	if err := testTmuxCommand("new-session", "-d", "-s", agent.tmuxSession).Run(); err != nil {
-		t.Skipf("cannot create tmux session: %v", err)
+		// tmuxAvailable() already passed above, so tmux is on PATH and
+		// TMUX_TMPDIR points into TestMain's temp tree. A failure here is a
+		// broken test (stale socket, uncleaned server, name collision), not
+		// a missing capability (#5388).
+		testutil.SkipfUnlessRequired(t, "cannot create tmux session: %v", err)
 	}
 	defer testTmuxCommand("kill-session", "-t", agent.tmuxSession).Run()
 	// Inject a marker; forceRelaunch defaults to false.
@@ -67,7 +72,11 @@ func TestStart_InferenceCLIAlreadyRunning(t *testing.T) {
 
 	// Same-server requirement as TestStart_CLIAlreadyRunning above.
 	if err := testTmuxCommand("new-session", "-d", "-s", agent.tmuxSession).Run(); err != nil {
-		t.Skipf("cannot create tmux session: %v", err)
+		// tmuxAvailable() already passed above, so tmux is on PATH and
+		// TMUX_TMPDIR points into TestMain's temp tree. A failure here is a
+		// broken test (stale socket, uncleaned server, name collision), not
+		// a missing capability (#5388).
+		testutil.SkipfUnlessRequired(t, "cannot create tmux session: %v", err)
 	}
 	defer testTmuxCommand("kill-session", "-t", agent.tmuxSession).Run()
 	testTmuxCommand("send-keys", "-t", agent.tmuxSession, "-l", ": esc to interrupt bypass permissions on Claude").Run()
@@ -97,7 +106,11 @@ func TestStart_CopilotAdoptsRunning(t *testing.T) {
 
 	// Same-server requirement as TestStart_CLIAlreadyRunning above.
 	if err := testTmuxCommand("new-session", "-d", "-s", agent.tmuxSession).Run(); err != nil {
-		t.Skipf("cannot create tmux session: %v", err)
+		// tmuxAvailable() already passed above, so tmux is on PATH and
+		// TMUX_TMPDIR points into TestMain's temp tree. A failure here is a
+		// broken test (stale socket, uncleaned server, name collision), not
+		// a missing capability (#5388).
+		testutil.SkipfUnlessRequired(t, "cannot create tmux session: %v", err)
 	}
 	defer testTmuxCommand("kill-session", "-t", agent.tmuxSession).Run()
 	testTmuxCommand("send-keys", "-t", agent.tmuxSession, "-l", ": Copilot ready").Run()

@@ -44,7 +44,7 @@ jobs:
       github.actor != 'copilot-swe-agent[bot]'
     runs-on: ubuntu-latest
     steps:
-      - name: Check whether this PR touches CHANGELOG.md
+      - name: Check whether this PR touches CHANGELOG.md or changelog.d/
         id: check
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -55,14 +55,16 @@ jobs:
           # Paginate: a large PR can exceed one page, and a missed page would
           # produce a false reminder on a PR that did update the changelog.
           files="$(gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[].filename')"
-          if printf '%s\n' "$files" | grep -qx 'CHANGELOG.md'; then
+          # A changelog.d/ fragment (#5675) IS the changelog entry now; a
+          # direct CHANGELOG.md edit still counts during the transition.
+          if printf '%s\n' "$files" | grep -qxE 'CHANGELOG\.md|changelog\.d/[^/]+\.md'; then
             echo "touched=true" >> "$GITHUB_OUTPUT"
           else
             echo "touched=false" >> "$GITHUB_OUTPUT"
           fi
           # Docs-only and CI-only changes are not user-facing in the sense the
           # changelog means, so they are never worth a reminder.
-          if printf '%s\n' "$files" | grep -qvE '^(src/docs/|docs/|\.github/|README\.md$|CHANGELOG\.md$)'; then
+          if printf '%s\n' "$files" | grep -qvE '^(src/docs/|docs/|\.github/|changelog\.d/|README\.md$|CHANGELOG\.md$)'; then
             echo "code=true" >> "$GITHUB_OUTPUT"
           else
             echo "code=false" >> "$GITHUB_OUTPUT"
@@ -98,13 +100,18 @@ jobs:
           body_file="$(mktemp)"
           cat > "$body_file" <<EOF
           $marker
-          **Changelog:** this PR changes code but does not touch \`CHANGELOG.md\`.
+          **Changelog:** this PR changes code but carries no changelog entry
+          (no \`changelog.d/\` fragment and no \`CHANGELOG.md\` edit).
 
           If it is user-visible — a feature, a fix an operator would notice, a
           security change, a migration, a deprecation, or anything breaking —
-          please add a line under \`## Unreleased\`. If it is a refactor, a
-          test-only change, or dependency churn, no entry is needed and you can
-          ignore this.
+          please add a fragment file \`changelog.d/<category>-<pr-or-slug>.md\`
+          containing exactly your entry (see \`changelog.d/README.md\`; the
+          category is one of added/changed/deprecated/fixed/security). Please
+          do not append to \`CHANGELOG.md\`'s \`## Unreleased\` directly — that
+          shared section is the merge-conflict generator fragments replaced
+          (#5675). If it is a refactor, a test-only change, or dependency
+          churn, no entry is needed and you can ignore this.
 
           This is a reminder, not a gate; it never blocks a merge.
           EOF
@@ -120,7 +127,7 @@ jobs:
             printf '### Changelog reminder\n\n'
             grep -v "^${marker}$" "$body_file"
           } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
-          echo "::notice title=Changelog reminder::This PR changes code but does not touch CHANGELOG.md. If it is user-visible, please add a line under '## Unreleased'. Not a gate."
+          echo "::notice title=Changelog reminder::This PR changes code but carries no changelog entry. If it is user-visible, please add a changelog.d/<category>-<slug>.md fragment (see changelog.d/README.md; #5675). Not a gate."
 
           # A fork PR cannot post, so do not try: a 403 in the log invites the
           # next reader to debug a permission that is working as designed.

@@ -226,6 +226,7 @@ func (m *Manager) pollTmuxOutputForAgent(agent *AgentProcess, ctx context.Contex
 					agent.OutputBuffer.Write(l)
 				}
 				m.logOutputSignals(agent.Name, l)
+				m.checkBlockedThrash(agent.Name, l)
 				if !agent.KickRefused {
 					m.checkKickRefusal(agent, l)
 				}

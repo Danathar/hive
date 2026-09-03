@@ -767,15 +767,15 @@ func TestHandleGovernorBudget_WithTotalTokens(t *testing.T) {
 	s, deps := apiServer(t)
 
 	rec := doPut(s, "/api/config/governor/budget", map[string]interface{}{
-		"totalTokens": 50000,
+		"totalTokens": 50000000,
 		"periodDays":  7,
 		"criticalPct": 90,
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
 	}
-	if deps.Config.Governor.Budget.TotalTokens != 50000 {
-		t.Errorf("totalTokens = %d, want 50000", deps.Config.Governor.Budget.TotalTokens)
+	if deps.Config.Governor.Budget.TotalTokens != 50000000 {
+		t.Errorf("totalTokens = %d, want 50000000", deps.Config.Governor.Budget.TotalTokens)
 	}
 }
 

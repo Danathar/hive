@@ -34,14 +34,15 @@ func (f *fakePane) Update(tea.Msg) (panes.Pane, tea.Cmd) {
 func (f *fakePane) View(width, height int) string { return f.title }
 func (f *fakePane) Title() string                 { return f.title }
 
-// modelWithFakes swaps every pane for a fake and shortens the poll cadence so
-// a test can run a whole tick — fetch, delivery and re-arm — without waiting
-// out a real interval. The dashboard URL is pinned for the whole package in
-// TestMain, so the fakes' model polls a closed port rather than whatever the
-// developer has running on localhost:3001.
+// modelWithFakes swaps every pane for a fake and shortens both poll cadences
+// so a test can run a whole tick — fetch, delivery and re-arm — without
+// waiting out a real interval. The dashboard URL is pinned for the whole
+// package in TestMain, so the fakes' model polls a closed port rather than
+// whatever the developer has running on localhost:3001.
 func modelWithFakes() (model, []*fakePane) {
 	m := newModel()
-	m.interval = time.Millisecond
+	m.reconcileInterval = time.Millisecond
+	m.activityInterval = time.Millisecond
 	fakes := make([]*fakePane, paneCount)
 	for i := range fakes {
 		fakes[i] = &fakePane{title: m.panes[i].Title()}
@@ -74,7 +75,7 @@ func TestInitBatchesPaneCommands(t *testing.T) {
 		switch msg := msg.(type) {
 		case fakeInitMsg:
 			seen[msg.title] = true
-		case tickMsg:
+		case reconcileTickMsg:
 			sawTick = true
 		}
 	}

@@ -119,6 +119,38 @@ type BudgetConfig struct {
 	CriticalPct int   `yaml:"critical_pct"`
 }
 
+// MinUsableBudgetTokens is the sanity floor for governor.budget.total_tokens.
+// A fleet audit (#5508) found LIVE spokes configured with limits of 5, 50 and
+// 1000 tokens — unit mistakes where the operator meant 5M/50M. A single model
+// call consumes more than any of those, so the budget gate closes on the first
+// kick and the spoke sits permanently budget-exhausted, doing no work, while
+// the fleet view shows only a generic quiet hive.
+//
+// The floor is a plausibility test, not a policy minimum: it separates "a
+// small budget" from "a value that cannot fund one call". Zero is exempt
+// everywhere — total_tokens: 0 is the documented way to disable budget
+// tracking entirely and must keep working.
+const MinUsableBudgetTokens int64 = 100_000
+
+// BudgetLimitBelowFloor reports whether a configured token limit is a likely
+// unit mistake: positive, but too small to fund a single model call. Zero
+// (budget tracking disabled) and negative values are NOT below-floor — zero is
+// a legitimate mode and negatives are rejected by the normal range checks.
+func BudgetLimitBelowFloor(totalTokens int64) bool {
+	return totalTokens > 0 && totalTokens < MinUsableBudgetTokens
+}
+
+// SuggestBudgetUnitMistake renders the "did you mean" hint for a below-floor
+// limit — "50" almost always means "50M". Returns "" when the value is not
+// below the floor, so callers can use it as both the test and the message.
+func SuggestBudgetUnitMistake(totalTokens int64) string {
+	if !BudgetLimitBelowFloor(totalTokens) {
+		return ""
+	}
+	return fmt.Sprintf("limit of %d tokens is below any usable budget (floor %d) — did you mean %dM?",
+		totalTokens, MinUsableBudgetTokens, totalTokens)
+}
+
 type ModeConfig struct {
 	Threshold int                `yaml:"threshold"`
 	Cadences  map[string]Cadence `yaml:"cadences"`

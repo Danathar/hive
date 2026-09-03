@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/hivecommons/hive/internal/testutil"
 )
 
 // bin/gh-app-token.sh mints two very different things from the same GitHub App
@@ -51,7 +53,7 @@ func runGHAppTokenScript(t *testing.T, warmCache bool, args ...string) scriptRun
 
 	src, err := os.ReadFile(ghAppTokenScriptPath)
 	if err != nil {
-		t.Skipf("gh-app-token.sh not readable from this package: %v", err)
+		testutil.SkipfUnlessRequired(t, "gh-app-token.sh not readable from this package: %v", err)
 	}
 	for _, tool := range []string{"bash", "openssl", "jq", "python3"} {
 		if _, err := exec.LookPath(tool); err != nil {

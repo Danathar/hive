@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/hivecommons/hive/internal/testutil"
 )
 
 // backendListsConfPath is the shell half of the CLI-backend list. config.go's
@@ -70,7 +72,7 @@ func exceptedCLINames() map[string]bool {
 func shellKnownBackends(t *testing.T) []string {
 	t.Helper()
 	if _, err := os.Stat(backendListsConfPath); err != nil {
-		t.Skipf("backends.conf not reachable from the test working directory: %v", err)
+		testutil.SkipfUnlessRequired(t, "backends.conf not reachable from the test working directory: %v", err)
 	}
 	out, err := exec.Command("bash", "-c",
 		"source "+backendListsConfPath+" && printf '%s' \"$KNOWN_BACKENDS\"").Output()
@@ -163,7 +165,7 @@ func TestLiteLLMExceptionIsAnInferenceBackend(t *testing.T) {
 // name the shell has no path to at all.
 func TestGeminiExceptionRoutesByModelPrefix(t *testing.T) {
 	if _, err := os.Stat(backendListsConfPath); err != nil {
-		t.Skipf("backends.conf not reachable from the test working directory: %v", err)
+		testutil.SkipfUnlessRequired(t, "backends.conf not reachable from the test working directory: %v", err)
 	}
 	out, err := exec.Command("bash", "-c",
 		"source "+backendListsConfPath+" && detect_backend_from_model gemini-2.5-pro").Output()
@@ -186,7 +188,7 @@ func TestGeminiExceptionRoutesByModelPrefix(t *testing.T) {
 // fallback.
 func TestBackendBinaryAndPermFlagCoverKnownBackends(t *testing.T) {
 	if _, err := os.Stat(backendListsConfPath); err != nil {
-		t.Skipf("backends.conf not reachable from the test working directory: %v", err)
+		testutil.SkipfUnlessRequired(t, "backends.conf not reachable from the test working directory: %v", err)
 	}
 	for _, name := range shellKnownBackends(t) {
 		script := "source " + backendListsConfPath + " && " +

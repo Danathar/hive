@@ -206,7 +206,31 @@ type KnowledgeLayer struct {
 }
 
 type KnowledgeCurator struct {
-	AutoPromoteThreshold float64 `yaml:"auto_promote_threshold"`
+	// Enabled gates the scheduled auto-promotion loop. It is a pointer so an
+	// absent key is distinguishable from an explicit `enabled: false`, and it
+	// defaults to FALSE — unlike BeadSynthesizer, which defaults to true.
+	//
+	// The asymmetry is deliberate. Auto-promotion copies facts into a
+	// higher-precedence knowledge layer with no human review, and `schedule`
+	// has been parsed-but-unactioned since it was introduced (#5430), so every
+	// existing hive that set it did so without ever having the loop run. If
+	// the loop defaulted on, upgrading would silently begin mutating the org
+	// layer on hives that never opted in. Scheduled promotion is therefore
+	// opt-in: `schedule` alone does NOT start it.
+	Enabled              *bool    `yaml:"enabled,omitempty"`
+	Schedule             string   `yaml:"schedule"`
+	ExtractFrom          []string `yaml:"extract_from"`
+	AutoPromoteThreshold float64  `yaml:"auto_promote_threshold"`
+	// PromoteFrom / PromoteTo name the source and target layers for the
+	// scheduled promotion sweep. Empty values fall back to project→org.
+	PromoteFrom string `yaml:"promote_from,omitempty"`
+	PromoteTo   string `yaml:"promote_to,omitempty"`
+}
+
+// IsEnabled reports whether scheduled auto-promotion is active. Absent (nil)
+// means DISABLED — see the Enabled field comment for why this defaults false.
+func (k KnowledgeCurator) IsEnabled() bool {
+	return k.Enabled != nil && *k.Enabled
 }
 
 type KnowledgePrimer struct {
