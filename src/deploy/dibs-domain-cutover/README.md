@@ -27,9 +27,10 @@ operator sequence is ready.
   the three manifests above encode: the controller default certificate, the
   Certificate's namespace/name and current SANs, drift between the live
   `dibs/dibs` Ingress and the staged copy, host collisions between the app and
-  redirect Ingresses, and the DNS record. Run it EARLY; every check is free
-  before the Let's Encrypt hold expires and expensive after issuance is spent.
-  Contract tests: `bin/test_dibs_cutover_preflight.sh`.
+  redirect Ingresses, the DNS record, and Let's Encrypt registered-domain
+  headroom via a read-only crt.sh query. Run it EARLY; every check is free before
+  the Let's Encrypt hold expires and expensive after issuance is spent. Contract
+  tests: `bin/test_dibs_cutover_preflight.sh`.
 
 Before applying, compare each staged object with the live object and preserve any
 cluster-local annotations, labels, ingress class, service port, or issuer details

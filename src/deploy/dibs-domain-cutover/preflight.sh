@@ -12,7 +12,7 @@
 # Every assumption the staged manifests rest on is checkable BEFORE the hold
 # expires, read-only, at zero quota cost. That is all this script does.
 #
-# It answers five questions and nothing else:
+# It answers six questions and nothing else:
 #
 #   1. Will the new host actually get a real certificate? The staged Ingress
 #      gives dibs.hivecommons.dev NO tls: block and relies on the ingress-nginx
@@ -36,10 +36,13 @@
 #      and only logs a warning, so a collision does not fail loudly — it makes
 #      the redirect quietly not happen.
 #   5. Does the DNS record exist yet, and does it point where step 1 says?
+#   6. Does the Let's Encrypt registered-domain window have headroom? This is a
+#      read-only crt.sh count of recent Let's Encrypt certificates, not an ACME
+#      probe and not a dry-run issuance.
 #
-# Nothing here mutates anything: only `kubectl get`, and a DNS lookup. It is
-# safe to run at any time, and is meant to be run EARLY — the whole value is in
-# learning the answers before 2026-09-10, not during.
+# Nothing here mutates anything: only `kubectl get`, DNS lookup, and a read-only
+# crt.sh query. It is safe to run at any time, and is meant to be run EARLY —
+# the whole value is in learning the answers before 2026-09-10, not during.
 #
 # Run: bash src/deploy/dibs-domain-cutover/preflight.sh
 # Exit codes: 0 no failing check, 78 at least one failing check (EX_CONFIG).
@@ -60,6 +63,10 @@ INGRESS_NS="${INGRESS_NS:-ingress-nginx}"
 INGRESS_DEPLOY="${INGRESS_DEPLOY:-ingress-nginx-controller}"
 # Expected A record, from the issue's step 1.
 DIBS_EXPECTED_A="${DIBS_EXPECTED_A:-157.151.252.29}"
+LE_REGISTERED_DOMAIN="${LE_REGISTERED_DOMAIN:-hivecommons.dev}"
+LE_CERT_WINDOW_HOURS="${LE_CERT_WINDOW_HOURS:-168}"
+LE_CERT_LIMIT="${LE_CERT_LIMIT:-50}"
+CRT_SH_TIMEOUT_SEC="${CRT_SH_TIMEOUT_SEC:-20}"
 
 PASS=0
 WARN=0
@@ -248,6 +255,103 @@ check_dns() {
   esac
 }
 
+# ── 6. Let's Encrypt registered-domain headroom ────────────────────────────
+check_le_headroom() {
+  echo "6. Let's Encrypt headroom for ${LE_REGISTERED_DOMAIN}"
+  if ! command -v curl >/dev/null 2>&1; then
+    _pf_skip "curl is not available to query crt.sh; cannot estimate Let's Encrypt headroom"
+    return
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    _pf_skip "python3 is not available to parse crt.sh JSON; cannot estimate Let's Encrypt headroom"
+    return
+  fi
+
+  local url json count
+  url="https://crt.sh/?q=${LE_REGISTERED_DOMAIN}&output=json"
+  if ! json="$(curl -fsSL --max-time "$CRT_SH_TIMEOUT_SEC" "$url" 2>/dev/null)"; then
+    _pf_skip "could not query crt.sh for ${LE_REGISTERED_DOMAIN}; do not treat this as quota headroom"
+    return
+  fi
+
+  if ! count="$(printf '%s' "$json" | \
+      LE_CERT_WINDOW_HOURS="$LE_CERT_WINDOW_HOURS" \
+      LE_REGISTERED_DOMAIN="$LE_REGISTERED_DOMAIN" \
+      CRT_SH_NOW_UTC="${CRT_SH_NOW_UTC:-}" \
+      python3 -c '
+import datetime as dt
+import json
+import os
+import sys
+
+def parse_time(value):
+    value = str(value or "").strip().replace(" ", "T")
+    if not value:
+        return None
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+    try:
+        parsed = dt.datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(dt.timezone.utc)
+
+now = parse_time(os.environ.get("CRT_SH_NOW_UTC")) or dt.datetime.now(dt.timezone.utc)
+window_hours = int(os.environ.get("LE_CERT_WINDOW_HOURS", "168"))
+domain = os.environ.get("LE_REGISTERED_DOMAIN", "").lower()
+cutoff = now - dt.timedelta(hours=window_hours)
+
+try:
+    rows = json.load(sys.stdin)
+except json.JSONDecodeError:
+    print("parse-error", file=sys.stderr)
+    sys.exit(2)
+if isinstance(rows, dict):
+    rows = [rows]
+
+seen = set()
+count = 0
+for row in rows:
+    issuer = str(row.get("issuer_name", ""))
+    if "let" not in issuer.lower() or "encrypt" not in issuer.lower():
+        continue
+    names = (str(row.get("common_name", "")) + "\n" + str(row.get("name_value", ""))).lower()
+    if domain and domain not in names:
+        continue
+    not_before = parse_time(row.get("not_before"))
+    if not_before is None or not_before < cutoff:
+        continue
+    ident = str(row.get("id") or row.get("min_cert_id") or row)
+    if ident in seen:
+        continue
+    seen.add(ident)
+    count += 1
+print(count)
+')"; then
+    _pf_skip "crt.sh returned data that could not be parsed; do not treat this as quota headroom"
+    return
+  fi
+
+  case "$count" in
+    ''|*[!0-9]*)
+      _pf_skip "crt.sh returned an unexpected count '${count}'; do not treat this as quota headroom"
+      return ;;
+  esac
+  case "$LE_CERT_LIMIT" in
+    ''|*[!0-9]*)
+      _pf_skip "LE_CERT_LIMIT='${LE_CERT_LIMIT}' is not a positive integer; cannot estimate headroom"
+      return ;;
+  esac
+
+  if [ "$count" -ge "$LE_CERT_LIMIT" ]; then
+    _pf_fail "${count} Let's Encrypt certificate(s) for ${LE_REGISTERED_DOMAIN} in the last ${LE_CERT_WINDOW_HOURS}h; limit is ${LE_CERT_LIMIT}, so issuing now risks a 429"
+    return
+  fi
+  _pf_pass "${count} Let's Encrypt certificate(s) for ${LE_REGISTERED_DOMAIN} in the last ${LE_CERT_WINDOW_HOURS}h; headroom $((LE_CERT_LIMIT - count))"
+}
+
 main() {
   echo "=== dibs.hivecommons.dev cutover preflight (#5925) ==="
   echo "Read-only. Run this BEFORE the Let's Encrypt hold expires: every check here"
@@ -270,6 +374,8 @@ main() {
     echo
   fi
   check_dns
+  echo
+  check_le_headroom
 
   echo
   echo "pass=${PASS} warn=${WARN} fail=${FAIL}"

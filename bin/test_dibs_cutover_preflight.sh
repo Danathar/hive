@@ -7,8 +7,8 @@
 # passes when it should fail is worse than no check, because it is the thing
 # someone will trust before spending the window.
 #
-# Every case here EXECUTES the script against a stub kubectl and a stub dig, and
-# asserts on its exit code and its report. No cluster, no network.
+# Every case here EXECUTES the script against stub kubectl/dig/curl, and asserts
+# on its exit code and its report. No cluster, no network.
 #
 # Run: bash bin/test_dibs_cutover_preflight.sh
 # Exit codes: 0 all cases pass, 1 at least one failed.
@@ -29,7 +29,9 @@ bad()  { echo "  ✗ $1"; fail=$((fail + 1)); }
 STUB_DIR=""
 
 setup_stubs() {
-  STUB_DIR="$(mktemp -d)"
+  STUB_DIR="$ROOT/.dibs-preflight-test-stubs"
+  rm -rf "$STUB_DIR"
+  mkdir -p "$STUB_DIR"
   cat >"$STUB_DIR/kubectl" <<'STUB'
 #!/usr/bin/env bash
 # Stub kubectl: answers only the read-only queries the preflight makes.
@@ -62,7 +64,17 @@ printf '%s' "${STUB_DIG_A-}"
 [ -n "${STUB_DIG_A-}" ] && echo
 exit 0
 STUB
-  chmod +x "$STUB_DIR/kubectl" "$STUB_DIR/dig"
+  cat >"$STUB_DIR/curl" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *crt.sh*)
+    [ "${STUB_CRT_FAIL:-0}" = "0" ] || exit 22
+    printf '%s' "${STUB_CRT_JSON:-[]}"
+    exit 0 ;;
+  *) exit 1 ;;
+esac
+STUB
+  chmod +x "$STUB_DIR/kubectl" "$STUB_DIR/dig" "$STUB_DIR/curl"
 }
 
 teardown_stubs() { [ -n "$STUB_DIR" ] && rm -rf "$STUB_DIR"; }
@@ -85,11 +97,13 @@ healthy_env() {
   export STUB_INGRESS_ANNOS=""
   export STUB_INGRESS_LIST="dibs dibs.kubestellar.io,"
   export STUB_DIG_A="157.151.252.29"
+  export STUB_CRT_JSON="[]"
 }
 
 clear_env() {
   unset STUB_NS_OK STUB_CONTROLLER_ARGS STUB_CERT_SANS STUB_INGRESS_CLASS \
-        STUB_INGRESS_SECRET STUB_INGRESS_ANNOS STUB_INGRESS_LIST STUB_DIG_A
+        STUB_INGRESS_SECRET STUB_INGRESS_ANNOS STUB_INGRESS_LIST STUB_DIG_A \
+        STUB_CRT_JSON STUB_CRT_FAIL LE_CERT_LIMIT CRT_SH_NOW_UTC
 }
 
 echo "=== dibs cutover preflight contract (#5925) ==="
@@ -238,6 +252,35 @@ if [ "$RC" -eq 78 ]; then
 else
   bad "wrong A record exited $RC, want 78:\n$OUT"
 fi
+
+# ── check 6: Let's Encrypt headroom via crt.sh ─────────────────────────────
+echo
+echo "check 6: Let's Encrypt headroom"
+clear_env; healthy_env
+export STUB_CRT_JSON='[
+  {"issuer_name":"C=US, O=Let'\''s Encrypt, CN=R13","common_name":"dibs.hivecommons.dev","name_value":"dibs.hivecommons.dev","not_before":"2026-09-04T14:00:00"},
+  {"issuer_name":"C=US, O=Let'\''s Encrypt, CN=R13","common_name":"hive.hivecommons.dev","name_value":"hive.hivecommons.dev","not_before":"2026-09-04T13:00:00"}
+]'
+export LE_CERT_LIMIT=2
+export CRT_SH_NOW_UTC=2026-09-04T15:00:00Z
+run_preflight
+if [ "$RC" -eq 78 ]; then
+  ok "an exhausted Let's Encrypt registered-domain window blocks"
+else
+  bad "exhausted LE window exited $RC, want 78:\n$OUT"
+fi
+case "$OUT" in
+  *"2 Let's Encrypt certificate(s)"*) ok "reports the crt.sh count used for the decision" ;;
+  *) bad "LE count not reported:\n$OUT" ;;
+esac
+
+clear_env; healthy_env
+export STUB_CRT_FAIL=1
+run_preflight
+case "$OUT" in
+  *"could not query crt.sh"*) ok "crt.sh unavailability warns instead of pretending there is headroom" ;;
+  *) bad "crt.sh failure not reported as a warning:\n$OUT" ;;
+esac
 
 # ── the skip contract ──────────────────────────────────────────────────────
 # A check that could not run must never read as a passed one. This is the

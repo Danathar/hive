@@ -47,11 +47,17 @@ cert-manager, or releases until an operator intentionally executes the sequence.
    `hive-hub`. That is why the default-certificate path is load-bearing here and
    worth confirming in advance.
 
+   It also estimates the Let's Encrypt registered-domain window with a read-only
+   crt.sh query for recent `hivecommons.dev` certificates. That is not an ACME
+   probe and does not trigger issuance; it is only a headroom check before the
+   date-gated Certificate patch is applied.
+
 1. **DNS:** In Cloudflare, create `dibs.hivecommons.dev` as an A record pointing
    to `157.151.252.29`. Leave it **DNS only / grey cloud**.
-2. **Let's Encrypt hold:** Wait until the certificate quota window has headroom,
-   expected around **2026-09-10**. Do not trigger cert-manager re-issuance before
-   then; an early 429 can push the retry window out further.
+2. **Let's Encrypt hold:** Wait until the certificate quota window has headroom
+   (the preflight's crt.sh count must be below the limit), expected around
+   **2026-09-10**. Do not trigger cert-manager re-issuance before then; an early
+   429 can push the retry window out further.
 3. **Certificate SAN:** After the hold, confirm the SAN is not already present,
    then apply the JSON Patch in
    `src/deploy/dibs-domain-cutover/01-hive-wildcard-tls-certificate.yaml` so
