@@ -218,6 +218,14 @@ func agentActivityFor(mgr *agent.Manager, cfg *config.Config, govState governor.
 		act.Backend = backend
 	}
 
+	// #5958: an agent the spoke has stopped relaunching must say so, with the
+	// reason. Without this the hub sees state=failed and renders the same
+	// "restart needed" that sent operators clicking a button which could not
+	// fix a login prompt or a rejected key.
+	if reason, _, blocked, ok := mgr.StartFailureState(name); ok && blocked {
+		act.StartBlockedReason = reason
+	}
+
 	return act
 }
 
