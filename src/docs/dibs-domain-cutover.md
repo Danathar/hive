@@ -72,6 +72,20 @@ outside the cluster (`pass=4 warn=2 fail=2`):
    probe and does not trigger issuance; it is only a headroom check before the
    date-gated Certificate patch is applied.
 
+   **crt.sh not answering is not headroom, and it does not look like an error.**
+   When crt.sh cannot service a query it replies `HTTP 200` with a body of
+   `[]` — measured 2026-09-04, six consecutive times for `hivecommons.dev`,
+   while that domain has a live Let's Encrypt wildcard and (per the issue) ~50
+   certificates minted the previous afternoon. Read naively that is "0
+   certificates this week, headroom 50": a confident green on the one gate
+   protecting the irreversible step. The preflight now treats *no rows at all*
+   for the domain as an unanswered query and warns; zero rows **inside the
+   window**, out of rows it did receive, is a real answer and still passes.
+
+   So if check 6 reports `crt.sh returned NO certificates at all`, retry it
+   later or count the window from the CA's own rate-limit tooling. Do not read
+   it as a go.
+
    Its counterpart, `verify.sh`, answers the question that comes AFTER — "did
    it work?" — and is run at steps 5 and 7 below. Keep them distinct: the
    preflight protects the issuance, the verifier protects the conclusion.
@@ -85,6 +99,14 @@ outside the cluster (`pass=4 warn=2 fail=2`):
    ```sh
    dig +short A dibs.hivecommons.dev
    ```
+
+   Run this from a host with a working resolver. `dig +short` prints its
+   `;; communications error ...` diagnostics to **stdout** and signals an
+   unreachable resolver only through its exit status, so a machine with no
+   resolver produces output that reads like an answer. Both scripts now check
+   that exit status and report the lookup as *unchecked* rather than as a wrong
+   or missing record — but by hand, at a terminal, the raw output is still
+   easy to misread as "the record points somewhere unexpected".
 2. **Let's Encrypt hold:** Wait until the certificate quota window has headroom
    (the preflight's crt.sh count must be below the limit), expected around
    **2026-09-10**. Do not trigger cert-manager re-issuance before then; an early

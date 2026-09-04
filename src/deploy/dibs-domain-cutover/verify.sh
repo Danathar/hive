@@ -92,11 +92,43 @@ kget() { kubectl "$@" 2>/dev/null; }
 # ── 1. DNS ─────────────────────────────────────────────────────────────────
 check_dns() {
   echo "1. DNS for ${DIBS_NEW_HOST}"
-  local answer=""
+  local answer="" rc=0
+  # WHY THE EXIT STATUS IS READ AND NOT JUST THE OUTPUT.
+  #
+  # `dig +short` writes its ";; communications error ..." diagnostics to
+  # STDOUT, and signals a resolver it could not reach through its EXIT STATUS
+  # (9) rather than through an empty answer. Reading stdout alone therefore
+  # turns "there is no resolver here" into a non-empty answer string, which
+  # compares unequal to the expected address and gets reported as a WRONG
+  # RECORD. Measured 2026-09-04 on a host with no local resolver: this check
+  # reported
+  #
+  #   dibs.hivecommons.dev resolves to ';; communications error to
+  #   127.0.0.53#53: connection refused ...', expected 157.151.252.29
+  #
+  # which is the one conclusion this check must never reach on its own
+  # evidence — #5925 records that the A record ALREADY EXISTS and warns to
+  # confirm it "rather than re-create" it. Both scripts state the contract
+  # that a check which could not RUN is a warning and never a pass; this is
+  # that contract applied to the direction nobody tested.
   if command -v dig >/dev/null 2>&1; then
-    answer="$(dig +short A "$DIBS_NEW_HOST" 2>/dev/null | tr '\n' ' ')"
+    answer="$(dig +short A "$DIBS_NEW_HOST" 2>/dev/null)"; rc=$?
+    if [ "$rc" -ne 0 ]; then
+      _vf_skip "the resolver could not answer for ${DIBS_NEW_HOST} (dig exit ${rc}) — DNS was NOT checked, and this says nothing about the record"
+      return
+    fi
+    # Strip the diagnostics even on a zero exit: a partial answer must not
+    # carry them into the address comparison either.
+    answer="$(printf '%s\n' "$answer" | grep -v '^;;' | tr '\n' ' ')"
   elif command -v getent >/dev/null 2>&1; then
-    answer="$(getent ahostsv4 "$DIBS_NEW_HOST" 2>/dev/null | awk '{print $1}' | sort -u | tr '\n' ' ')"
+    answer="$(getent ahostsv4 "$DIBS_NEW_HOST" 2>/dev/null | awk '{print $1}' | sort -u | tr '\n' ' ')"; rc=$?
+    # getent exits 2 for "name not found", which IS an answer and falls through
+    # to the empty-answer verdict below. Any other non-zero code is a lookup it
+    # could not perform.
+    if [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ]; then
+      _vf_skip "the resolver could not answer for ${DIBS_NEW_HOST} (getent exit ${rc}) — DNS was NOT checked, and this says nothing about the record"
+      return
+    fi
   else
     _vf_skip "no dig or getent available to resolve ${DIBS_NEW_HOST}"
     return
@@ -104,7 +136,9 @@ check_dns() {
   answer="$(printf '%s' "$answer" | sed 's/[[:space:]]*$//')"
 
   if [ -z "$answer" ]; then
-    _vf_fail "${DIBS_NEW_HOST} does not resolve — step 1 (the Cloudflare A record) is missing, so nothing below can be trusted"
+    # Earned now that a resolver failure returns above: the resolver answered,
+    # and its answer was "no A record".
+    _vf_fail "${DIBS_NEW_HOST} has no A record — step 1 (the Cloudflare A record) is missing, so nothing below can be trusted"
     return
   fi
   case " $answer " in
