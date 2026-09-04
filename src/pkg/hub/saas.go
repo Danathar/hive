@@ -6351,7 +6351,13 @@ func (s *HubServer) triggerAutoUpgrades() {
 			// up to date; clear the latch here instead of advancing the target.
 			// Commit-pinned hives are unaffected — their tag resolves to exactly
 			// one build, so the specific-target check still governs them.
-			registryLatestSHA := getLatestSHAForBranch(branch)
+			//
+			// "Latest for its branch" is resolved THROUGH the tracked tag
+			// (#5994). A :stable spoke's ceiling is the digest :stable carries,
+			// not branch HEAD, so judging it against HEAD kept it latched for
+			// the whole soak window — the 41 spokes measured stuck this way —
+			// while it had already converged on everything its tag offers.
+			registryLatestSHA := s.reachableUpgradeTarget(branch, imageRef, h.TrackedChannel).SHA
 			if imageTagIsMutable(imageRef) && registryLatestSHA != "" &&
 				sameCommit(currentSHA, registryLatestSHA) {
 				s.mu.Lock()
@@ -6579,8 +6585,36 @@ func (s *HubServer) triggerAutoUpgrades() {
 		if currentSHA == "" {
 			continue
 		}
-		latestSHA := getLatestSHAForBranch(branch)
+		// Target what this spoke's TAG can actually deliver (#5994). Branch HEAD
+		// is the right answer only for a spoke tracking that branch's moving
+		// tag; a spoke on :stable can reach exactly the digest :stable carries,
+		// and instructing anything else is an instruction it will spend its
+		// entire retry budget failing to satisfy.
+		reach := s.reachableUpgradeTarget(branch, imageRef, h.TrackedChannel)
+		if !reach.Resolved {
+			// Channel-tracking spoke whose channel would not resolve. Refuse
+			// LOUDLY and instruct nothing. Falling back to branch HEAD here is
+			// exactly the bug, and it would be the worst-evidenced fallback
+			// available: we know the spoke's ceiling is not HEAD, and we do not
+			// know what it is. The next cycle retries.
+			s.logger.Warn("auto-upgrade held — the spoke's release channel did not resolve to a commit",
+				"hive_id", h.ID, "channel", reach.Channel, "branch", branch,
+				"current", currentSHA, "image_ref", imageRef)
+			continue
+		}
+		latestSHA := reach.SHA
 		if latestSHA == "" || sameCommit(currentSHA, latestSHA) {
+			continue
+		}
+		// A channel is a moving POINTER, not a monotonic branch, so a spoke can
+		// legitimately sit AHEAD of the one it tracks — it was rolled while the
+		// channel was further along, or it tracked :candidate until a moment
+		// ago. Targeting the channel SHA there would instruct a DOWNGRADE: a
+		// failure mode this path never had while it only ever chased HEAD.
+		if reach.Channel != "" && commitAtOrAheadOfTarget(currentSHA, latestSHA, s.logger) {
+			s.logger.Debug("auto-upgrade skipped — hive is at or ahead of its release channel",
+				"hive_id", h.ID, "channel", reach.Channel,
+				"current", currentSHA, "channel_sha", latestSHA)
 			continue
 		}
 		// Merge-driven debounce (#5391). Reached ONLY on the automatic
