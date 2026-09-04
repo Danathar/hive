@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-04 (v4.12.1)
+
+### Fixed
+
+- The release changelog mover now anchors on the real `## Unreleased` heading line instead of the first prose mention, and this repair restores the stranded entries for the affected v4 releases ([#5891](https://github.com/hivecommons/hive/issues/5891)).
+
 ## 2026-09-04 (v4.12.0)
 
 ### Fixed
