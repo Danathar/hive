@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-04 (v4.13.2)
+
+### Fixed
+
+- The stable promotion gate could never promote. It queried the Actions runs API with the 7-character revision read from the candidate image's label, but that API matches `head_sha` exactly and returns zero runs for a short SHA, so green release evidence was always absent - including under an emergency exception, which by design refuses to bypass missing green evidence. The revision is now expanded to the full 40-character SHA before the query, falling back to the input when it cannot be resolved so an unconfirmable candidate still holds.
+
 ## 2026-09-04 (v4.13.1)
 
 ### Fixed
