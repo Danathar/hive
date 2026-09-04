@@ -1158,10 +1158,20 @@ func legacySessionCookieDomains(liveDomain string) []string {
 }
 
 // sessionCookieParentDomain is the registrable parent domain the hub session
-// cookie is scoped to, so first-party sibling products on other kubestellar.io
-// subdomains (dibs.kubestellar.io) receive it and can SSO against the hub via
-// GET /api/saas/whoami. Derived from hubCanonicalHost (its parent domain)
-// rather than spelled out so the two can never disagree.
+// cookie is scoped to, so first-party sibling products on other subdomains of it
+// (dibs) receive the cookie and can SSO against the hub via GET /api/saas/whoami.
+// Derived from hubCanonicalHost (its parent domain) rather than spelled out so
+// the two can never disagree.
+//
+// That derivation is also the sibling bridge's precondition: the hub and the
+// sibling must share a REGISTRABLE DOMAIN, whichever one it is. Moving the hub
+// across registrable domains — hive.kubestellar.io to hive.hivecommons.dev —
+// therefore signs users out of every sibling left behind on the old one, and no
+// configuration rescues those siblings, because a browser ignores a Set-Cookie
+// whose Domain does not cover the sending host (RFC 6265 5.3). The old sibling
+// host has to REDIRECT to the new one; dual-serving both cannot work (#5925).
+// Pinned by sibling_host_migration_test.go, explained in
+// src/docs/hivecommons-migration.md.
 func sessionCookieParentDomain() string {
 	if parent, err := publicsuffix.EffectiveTLDPlusOne(hubCanonicalHost()); err == nil {
 		return parent
@@ -1176,17 +1186,22 @@ func sessionCookieParentDomain() string {
 // (hive_hub_user) must carry for a request served on host, or "" for a
 // host-only cookie.
 //
-// Production (any host under kubestellar.io, including the hub itself) gets
-// Domain=.kubestellar.io so that BOTH consumers of the cookie receive it:
-//   - every hosted spoke's Node proxy on <id>.hive.kubestellar.io, which
-//     independently verifies it for the tenant dashboard and terminal (the
-//     original reason the cookie carried Domain=.hive.kubestellar.io); and
-//   - sibling first-party products such as dibs.kubestellar.io, which read it
-//     and call back to /api/saas/whoami (#4171).
+// Production (any host under the hub's own registrable domain, including the
+// hub itself) gets Domain=.<that domain> — .kubestellar.io by default, or
+// .hivecommons.dev once HIVE_HUB_PUBLIC_URL moves the hub there — so that BOTH
+// consumers of the cookie receive it:
+//   - every hosted spoke's Node proxy on <id>.hive.<domain>, which independently
+//     verifies it for the tenant dashboard and terminal (the original reason the
+//     cookie carried Domain=.hive.kubestellar.io); and
+//   - sibling first-party products such as dibs, which read it and call back to
+//     /api/saas/whoami (#4171) — but ONLY while the sibling lives under the same
+//     registrable domain (#5925; see sessionCookieParentDomain).
 //
-// Local/dev hosts (localhost, 127.0.0.1, anything not under kubestellar.io)
-// get a host-only cookie: a browser rejects a Set-Cookie whose Domain does not
-// cover the request host, so widening there would break local login outright.
+// Every other host — localhost, 127.0.0.1, and any host outside that domain,
+// which includes a sibling stranded on the PREVIOUS registrable domain — gets a
+// host-only cookie: a browser rejects a Set-Cookie whose Domain does not cover
+// the request host, so widening there would emit a cookie no browser stores and
+// would break local login outright.
 func sessionCookieDomain(host string) string {
 	h := host
 	if hp, _, err := net.SplitHostPort(host); err == nil {
