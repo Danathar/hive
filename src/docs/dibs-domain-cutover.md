@@ -19,6 +19,26 @@ cert-manager, or releases until an operator intentionally executes the sequence.
   not found in git, so staged Kubernetes manifests live under
   `src/deploy/dibs-domain-cutover/`.
 
+## Measured state
+
+Re-measured 2026-09-04 by `src/deploy/dibs-domain-cutover/verify.sh` from
+outside the cluster (`pass=4 warn=2 fail=2`):
+
+- **Step 1 is already done.** `dibs.hivecommons.dev` resolves to
+  `157.151.252.29`. The issue body recorded it as not resolving at all; that is
+  no longer true, so nobody needs to create the A record.
+- **Step 3 has not happened.** The certificate served for the new host is a
+  real Let's Encrypt one (`CN=YR1`) but its SANs are still
+  `*.hive.hivecommons.dev`, `*.lke.hive.hivecommons.dev`, `hive.hivecommons.dev`
+  only — so `https://dibs.hivecommons.dev` currently fails hostname
+  verification. This is the expected state while the Let's Encrypt hold is on.
+- **The SSO precondition already holds on the new name.** The hub at
+  `hive.hivecommons.dev` scopes `hive_hub_user` to `.hivecommons.dev`, which
+  covers `dibs.hivecommons.dev` and does not cover `dibs.kubestellar.io` —
+  confirming both that the move repairs the bridge and that dual-serving cannot.
+- `dibs.kubestellar.io` answers `200` on `/` and `401` on an authenticated deep
+  path. Either way it is still being served by the application, not redirected.
+
 ## Ordered operator sequence
 
 0. **Preflight — do this now, not on the day.** Every assumption the staged
@@ -52,8 +72,19 @@ cert-manager, or releases until an operator intentionally executes the sequence.
    probe and does not trigger issuance; it is only a headroom check before the
    date-gated Certificate patch is applied.
 
+   Its counterpart, `verify.sh`, answers the question that comes AFTER — "did
+   it work?" — and is run at steps 5 and 7 below. Keep them distinct: the
+   preflight protects the issuance, the verifier protects the conclusion.
+
 1. **DNS:** In Cloudflare, create `dibs.hivecommons.dev` as an A record pointing
    to `157.151.252.29`. Leave it **DNS only / grey cloud**.
+
+   Already satisfied as of 2026-09-04 — the name resolves to that address (see
+   [Measured state](#measured-state)). Confirm rather than re-create:
+
+   ```sh
+   dig +short A dibs.hivecommons.dev
+   ```
 2. **Let's Encrypt hold:** Wait until the certificate quota window has headroom
    (the preflight's crt.sh count must be below the limit), expected around
    **2026-09-10**. Do not trigger cert-manager re-issuance before then; an early
@@ -78,7 +109,19 @@ cert-manager, or releases until an operator intentionally executes the sequence.
    does not hold.
 5. **Verify the new canonical host.** A `200` is necessary and not
    sufficient here — both failure modes this step exists to catch still answer
-   `200`:
+   `200`. Run the verifier, which performs every check below and fails on the
+   ones a human reading `curl` output by eye tends to wave through:
+
+   ```sh
+   bash src/deploy/dibs-domain-cutover/verify.sh
+   ```
+
+   At this point checks 1-4 must pass and check 5 will report the dual-host
+   window as OPEN — that is the expected shape here, not a problem. The
+   verifier exits `78` if anything is actually wrong, and treats a check it
+   could not run as a warning, never as a pass.
+
+   What it runs, if you would rather do it by hand:
 
    ```sh
    # Fails outright on an invalid chain, rather than reporting a cheerful 200
@@ -121,7 +164,18 @@ cert-manager, or releases until an operator intentionally executes the sequence.
 7. **Verify the redirect, on a deep path.** The redirect annotation relies on
    `$request_uri` to carry the path and query across, and a redirect that drops
    them passes a `/`-only check while silently breaking every deep link into
-   `dibs`:
+   `dibs`. Re-run the verifier — this time every check should pass:
+
+   ```sh
+   bash src/deploy/dibs-domain-cutover/verify.sh
+   ```
+
+   A `pass=N warn=0 fail=0` report here is the finish line. Anything less is
+   not: in particular the verifier fails a `308` whose `Location` has lost the
+   path or query, and fails a duplicate host claim that leaves the redirect
+   inert.
+
+   What it runs, if you would rather do it by hand:
 
    ```sh
    # Root: expect 308 to https://dibs.hivecommons.dev/
