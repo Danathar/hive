@@ -23,8 +23,20 @@ operator sequence is ready.
 - `03-dibs-kubestellar-redirect.yaml` stages the final ingress-nginx 308 redirect
   from `dibs.kubestellar.io` to `dibs.hivecommons.dev`.
 
+- `preflight.sh` checks — read-only, at zero certificate cost — the assumptions
+  the three manifests above encode: the controller default certificate, the
+  Certificate's namespace/name and current SANs, drift between the live
+  `dibs/dibs` Ingress and the staged copy, host collisions between the app and
+  redirect Ingresses, the DNS record, and Let's Encrypt registered-domain
+  headroom via a read-only crt.sh query. Run it EARLY; every check is free before
+  the Let's Encrypt hold expires and expensive after issuance is spent. Contract
+  tests: `bin/test_dibs_cutover_preflight.sh`.
+
 Before applying, compare each staged object with the live object and preserve any
 cluster-local annotations, labels, ingress class, service port, or issuer details
-that differ from these captured assumptions. For the Certificate, first confirm
-`dibs.hivecommons.dev` is not already present, then apply the patch instead of
-replacing the whole Certificate object.
+that differ from these captured assumptions. `preflight.sh` performs that
+comparison for the fields it knows about, and warns when the live Ingress carries
+annotations that `02-dibs-ingress-dual-host.yaml` — a full object, not a patch —
+would drop on apply. For the Certificate, first confirm `dibs.hivecommons.dev` is
+not already present, then apply the patch instead of replacing the whole
+Certificate object.
