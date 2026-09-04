@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-04 (v4.12.6)
+
+### Security
+
+- Bump the transitive `qs` dependency used by dashboard and proxy Node tooling to 6.16.0 to address [GHSA-f9cm-2x4f-4r3g](https://github.com/advisories/GHSA-f9cm-2x4f-4r3g) ([#5970](https://github.com/hivecommons/hive/issues/5970)).
+
 ## 2026-09-04 (v4.12.5)
 
 ### Fixed
