@@ -3242,7 +3242,7 @@
   <div class="cost-usage" id="cost-panel" style="margin-bottom: 24px;"></div>
 
   <div class="repos" id="repos-section">
-    <h2 class="section-header-toggle" data-action="toggleSection" data-arg0="repos-section"><span class="section-chevron">▼</span> Repositories <span id="repos-host-badge" title="Every repo in this hive is on this single GitHub host" style="font-size:0.62em;font-weight:600;vertical-align:middle;padding:2px 7px;border-radius:10px;margin-left:6px"></span> <span id="repos-needs-human" class="repos-needs-human-count" title="Open PRs labeled needs-human: automated fix attempts exhausted — operator review required"></span> <button class="config-gear" data-action="gh1" data-stop="1" title="Manage monitored repositories" style="font-size:0.7em;vertical-align:middle">⚙️</button></h2>
+    <h2 class="section-header-toggle" data-action="toggleSection" data-arg0="repos-section"><span class="section-chevron">▼</span> Repositories <span id="repos-host-badge" title="Every repo in this hive is on this single GitHub host" style="font-size:0.62em;font-weight:600;vertical-align:middle;padding:2px 7px;border-radius:10px;margin-left:6px"></span> <span id="repos-needs-human" class="repos-needs-human-count" title="Open PRs labeled needs-human: automated fix attempts exhausted — operator review required"></span> <button class="btn" id="repos-rescan-btn" data-action="reposForceRescan" data-stop="1" title="Scan the monitored repositories for issue/PR changes now instead of waiting for the governor's next eval cycle (read-only — no agents are kicked; server-debounced)" style="font-size:0.62em;vertical-align:middle;margin-left:8px;font-weight:400">🔄 Rescan</button> <button class="config-gear" data-action="gh1" data-stop="1" title="Manage monitored repositories" style="font-size:0.7em;vertical-align:middle">⚙️</button></h2>
     <div class="section-body">
       <!-- Read-only view of project.issue_filter: which issues agents may
            initiate work on, by label. Hidden unless a filter is configured;
@@ -7730,6 +7730,48 @@
           </div>${pillsHtml}
         </div>`;
       }).join(''));
+    }
+
+    // Operator-initiated repository rescan. The REPOSITORIES cards repaint
+    // from the governor's eval cycle, whose cadence stretches to minutes on a
+    // quiet hive — so an operator who has just closed an issue or opened a PR
+    // is stuck looking at stale pills with no way to ask for a fresh read.
+    // This button asks for one.
+    //
+    // Modelled on the ACMM Re-evaluate button next door: the server enforces
+    // its own debounce, so holding this down cannot spend the GitHub API
+    // budget, and a debounced reply means "already this fresh" — it is
+    // reported as such, never as a failure. The scan is read-only: it
+    // re-enumerates issues and PRs and does NOT kick any agent.
+    async function reposForceRescan() {
+      const btn = document.getElementById('repos-rescan-btn');
+      if (btn && btn.disabled) return;
+      const prev = btn ? btn.textContent : '';
+      if (btn) { btn.disabled = true; btn.textContent = '\u23f3 Scanning...'; }
+      try {
+        const r = await fetch('/api/repos/rescan', { method: 'POST', headers: _inceptionAuthHeaders() });
+        let d = {};
+        try { d = await r.json(); } catch { d = {}; }
+        if (!r.ok) {
+          showToast('Repository rescan failed: ' + (d.error || ('HTTP ' + r.status)), 'error');
+          return;
+        }
+        // The server republishes the status snapshot as part of the scan, so
+        // re-fetch it here rather than waiting for the next poll to repaint.
+        await refreshStatus();
+        if (d.status === 'debounced') {
+          showToast('Repositories are already up to date - next scan in ' + (d.retry_after_s || 0) + 's', 'info');
+        } else if (d.status === 'in-progress') {
+          showToast('A repository scan is already running', 'info');
+        } else {
+          const n = d.repos || 0;
+          showToast('Scanned ' + n + ' repositor' + (n === 1 ? 'y' : 'ies') + ' - ' + (d.issues || 0) + ' issues, ' + (d.prs || 0) + ' PRs', 'success');
+        }
+      } catch (e) {
+        showToast('Repository rescan failed: ' + e.message, 'error');
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = prev; }
+      }
     }
 
     // Contributors-style empty-state card, reused by sections that would
