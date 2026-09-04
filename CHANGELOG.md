@@ -11,6 +11,14 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-04 (v4.12.2)
+
+### Fixed
+
+- Fleet health now attributes silent agents to failing model gateways before blaming the GitHub App: spokes report per-gateway DNS/connect/5xx/auth/budget failures from runtime proxy traffic and Gateway Test, agents on failed gateways no longer count as able, and the fleet hint points operators to Settings → Model Gateways ([#5914](https://github.com/hivecommons/hive/issues/5914), [#5917](https://github.com/hivecommons/hive/issues/5917)).
+- Inference-backed agents now classify provider API failures before the anti-narration watchdog fires, back off retries, and show the blocked inference error in the dashboard instead of looping on “execute it yourself” nudges ([#5915](https://github.com/hivecommons/hive/issues/5915)).
+- The hub fleet row now uses one advisory-digest freshness calculation for both the right-side freshness chip and stale verdict, so a hive cannot show `advisories fresh` and `advisory stale` in the same render; rows without an advisory signal render `n/a` instead ([#5916](https://github.com/hivecommons/hive/issues/5916)).
+
 ## 2026-09-04 (v4.12.1)
 
 ### Fixed
