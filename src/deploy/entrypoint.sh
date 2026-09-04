@@ -1463,6 +1463,7 @@ print('[entrypoint] UID map written to /var/run/hive/uid-map.json')
         echo "[entrypoint] WARN: iptables chain creation attempt ${_ipt_try}/5 failed: $(hive_iptables_error_text "$_ipt_err_log") — retrying"
         sleep $(( _ipt_try * 2 + $$ % 3 ))
       done
+      # HIVE-EGRESS-RULESET-V4-BEGIN (extracted by test_entrypoint_egress_ruleset.sh)
       if [ "$_ipt_chain_ok" = "true" ]; then
         # OKE: owner-match exemption (reliable where xt_owner is present).
         # `|| true` keeps a failed append non-fatal on OpenShift (no xt_owner).
@@ -1510,6 +1511,7 @@ with open('/var/run/hive/uid-map.json', 'w') as f:
       else
         echo "[entrypoint] ERROR: iptables chain creation failed after ${_ipt_try} attempts: $(hive_iptables_error_text "$_ipt_err_log")"
       fi
+      # HIVE-EGRESS-RULESET-V4-END
     else
       echo "[entrypoint] ERROR: iptables not found — cannot force proxy egress"
     fi
@@ -1622,6 +1624,7 @@ with open('/var/run/hive/uid-map.json', 'w') as f:
           echo "[entrypoint] WARN: ip6tables chain creation attempt ${_ip6_try}/5 failed: $(hive_iptables_error_text "$_ip6t_err_log") — retrying"
           sleep $(( _ip6_try * 2 + $$ % 3 ))
         done
+        # HIVE-EGRESS-RULESET-V6-BEGIN (extracted by test_entrypoint_egress_ruleset.sh)
         if [ "$_ip6_chain_ok" = "true" ]; then
           # Exemptions mirror the IPv4 chain exactly, in the same order, for
           # the same two-platform reasons (owner-UID where xt_owner exists,
@@ -1662,6 +1665,7 @@ with open('/var/run/hive/uid-map.json', 'w') as f:
           echo "[entrypoint] ERROR: ip6tables chain creation failed after ${_ip6_try} attempts: $(hive_iptables_error_text "$_ip6t_err_log")"
         fi
         unset _ip6t_err_log
+        # HIVE-EGRESS-RULESET-V6-END
       else
         echo "[entrypoint] ERROR: ip6tables not found — IPv6 egress cannot be gated"
       fi
