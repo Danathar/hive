@@ -959,6 +959,16 @@ type HubServer struct {
 	// keep arriving every ~2 min; without this guard the attempts pile up
 	// goroutines all hanging against the same dead cluster.
 	vanityRepairInFlight sync.Map // hive ID → struct{}
+	// vanityMintTimes are the timestamps of vanity-host MINTS performed by the
+	// retroactive repair path within the current vanityMintWindow — the
+	// fleet-wide budget guarding the registered domain's shared ACME quota
+	// (#5923: an unbounded re-mint storm exhausted Let's Encrypt's
+	// 50-certs/168h cap in about an hour). Persisted to the SaaS data directory
+	// so a hub restart cannot forget the registered domain's still-live 168h
+	// ACME debt and reopen the storm. Guarded by vanityMintMu, never s.mu.
+	vanityMintTimes        []time.Time
+	vanityMintLedgerLoaded bool
+	vanityMintMu           sync.Mutex
 	// claimWorkInFlight tracks hive IDs whose claim-time cluster work
 	// (namespace identity stamp + vanity mint) is currently running in the
 	// background (kickClaimClusterWorkAsync), so assign/approve start at most
