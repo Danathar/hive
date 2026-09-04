@@ -370,6 +370,20 @@ jobs:
         working-directory: .
         run: bash bin/test_dibs_cutover_preflight.sh
 
+      # #5925: the verifier is what someone reads before deciding the cutover
+      # is finished and the old certificate can be retired. Every failure mode
+      # it exists to catch — a self-signed certificate, a certificate missing
+      # the new SAN, an inert redirect, a redirect that drops the path and
+      # query, a hub on a foreign registrable domain leaving dibs signed out —
+      # still answers HTTP 200, so a verifier that passes when one of those is
+      # true is worse than no verifier at all. This EXECUTES it against stub
+      # openssl/curl/dig/kubectl and asserts its exit codes and report,
+      # including that an open dual-host window never reads as finished. No
+      # cluster, no network.
+      - name: dibs cutover verification contract (#5925)
+        working-directory: .
+        run: bash bin/test_dibs_cutover_verify.sh
+
       # #4289: git-credential-hive.sh is the fetch/clone AND push credential
       # source for every agent. Its mode block used to exit 1 in ADVISORY/
       # ISSUES_ONLY/NO_GITHUB modes, cutting off every git READ for advisory
