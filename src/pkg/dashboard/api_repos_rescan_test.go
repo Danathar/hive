@@ -92,6 +92,49 @@ func TestHandleReposRescan_ReportsFreshCounts(t *testing.T) {
 	}
 }
 
+func TestReposRescanRouteRequiresDashboardAuth(t *testing.T) {
+	var calls int32
+	s := NewServerWithAuth(0, "secret-token", nil)
+	s.RegisterAPI(&Dependencies{
+		Config: &config.Config{Project: config.ProjectConfig{Repos: []string{"a"}}},
+		RescanReposFunc: func(context.Context) (*ghpkg.ActionableResult, error) {
+			atomic.AddInt32(&calls, 1)
+			return sampleActionable(), nil
+		},
+	})
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+
+	resp, err := http.Post(ts.URL+"/api/repos/rescan", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST without auth: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	}
+	if calls != 0 {
+		t.Fatalf("unauthenticated request ran rescan %d times", calls)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/repos/rescan", nil)
+	if err != nil {
+		t.Fatalf("build authenticated request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer secret-token")
+	resp, err = ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("POST with auth: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("authenticated status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	if calls != 1 {
+		t.Fatalf("authenticated request ran rescan %d times, want 1", calls)
+	}
+}
+
 // An enumeration that returned nothing per-repo (a forge error tolerated by
 // the work-source path, say) still names how many repos the hive watches, so
 // the toast never reads "Scanned 0 repositories" on a hive with repos.
