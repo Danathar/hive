@@ -2276,6 +2276,16 @@ type PerClusterHealth struct {
 	// Those must not render alike, for the same reason StuckPods above draws
 	// the distinction. See leaked_hosted_namespace.go.
 	LeakedNamespaces *LeakedNamespaceReport `json:"leaked_namespaces,omitempty"`
+	// WildcardTLS reports the health of the wildcard certificate this cluster
+	// serves its spokes from (#5977). Present ONLY for clusters that opted in
+	// with wildcard_tls_secret, because only those have spokes depending on it:
+	// on an opted-in cluster provisioned Ingresses carry no tls: block of their
+	// own, so this one certificate stands behind every hosted dashboard and its
+	// renewal is a single point of failure for all of them. Nil means either
+	// "this cluster does not use the wildcard" or "the hub could not look" —
+	// the same unknown-is-not-healthy contract the two fields above carry. See
+	// wildcard_tls_health.go.
+	WildcardTLS *WildcardTLSReport `json:"wildcard_tls,omitempty"`
 }
 
 type ClusterHealthResponse struct {
@@ -2878,6 +2888,32 @@ func buildSingleClusterHealth(cluster *ClusterConfig, hiveCount int, knownHosted
 			logger.Warn("cluster holds hive-hosted namespaces with no hive record — leaked provisioning namespaces, nothing will reclaim them",
 				"cluster", cluster.ID,
 				"leaked_namespaces", leaked.Total)
+		}
+	}
+
+	// Wildcard certificate health (#5977). READ-ONLY: one extra `kubectl get
+	// secret`, and ONLY on clusters that opted in with wildcard_tls_secret —
+	// everywhere else spokes still carry per-host certificates and there is
+	// nothing here to be a single point of failure.
+	//
+	// This is also the only place the operator's opt-in assertion is ever
+	// checked against the cluster. The provisioner cannot check it (it must
+	// decide without a round-trip, and guessing wrong takes the cluster down),
+	// so until now "flag set, secret absent" was silent until a user opened a
+	// dashboard and got a self-signed certificate.
+	if wildcard := collectWildcardTLSHealth(ctx, cluster, timeout, time.Now(), logger); wildcard != nil {
+		result.WildcardTLS = wildcard
+		// Every non-ok status is worth a line: unlike the two signals above,
+		// which count things that accumulate, this one is binary and fleet-wide
+		// — when it is wrong, every hosted dashboard on the cluster is already
+		// serving a certificate that does not validate.
+		if !wildcard.Healthy() && logger != nil {
+			logger.Warn("wildcard TLS certificate needs attention — it serves EVERY wildcard-covered spoke on this cluster",
+				"cluster", cluster.ID,
+				"secret", wildcard.Secret,
+				"status", wildcard.Status,
+				"detail", wildcard.Detail,
+				"not_after", wildcard.NotAfter)
 		}
 	}
 
@@ -19025,6 +19061,42 @@ const dashboardHTML = `<!DOCTYPE html>
                 sp.total + ' stuck pod' + (sp.total === 1 ? '' : 's') +
                 ' in ' + sp.namespaces_affected + ' ns</span>';
             }
+            // Wildcard certificate health (#5977). ABSENT means either this
+            // cluster does not serve spokes from a wildcard or the hub could not
+            // look, and nothing is claimed either way. A present "ok" is
+            // deliberately silent, like the stuck-pod line above: a healthy fleet
+            // stays quiet. Only a finding renders — and every finding here is
+            // fleet-wide, because on an opted-in cluster this one certificate is
+            // what every hosted dashboard is served with.
+            var wildcardLine = '';
+            if (c.wildcard_tls && c.wildcard_tls.status && c.wildcard_tls.status !== 'ok') {
+              var wt = c.wildcard_tls;
+              var wtLabel;
+              if (wt.status === 'expiring') {
+                // days_remaining is always set alongside an 'expiring' status,
+                // but the label must not depend on that: falling through to the
+                // catch-all would report an expiring certificate as unreadable.
+                wtLabel = wt.days_remaining != null
+                  ? 'wildcard cert expires in ' + wt.days_remaining + 'd'
+                  : 'wildcard cert expiring soon';
+              } else if (wt.status === 'expired') {
+                wtLabel = 'wildcard cert EXPIRED';
+              } else if (wt.status === 'missing') {
+                wtLabel = 'wildcard cert MISSING';
+              } else if (wt.status === 'domain_mismatch') {
+                wtLabel = 'wildcard cert does not cover this domain';
+              } else {
+                wtLabel = 'wildcard cert unreadable';
+              }
+              var wtTitle = (wt.detail || '') +
+                ' Secret: ' + (wt.secret || '?') + '.' +
+                (wt.not_after ? ' Expires ' + wt.not_after + '.' : '') +
+                (wt.issuer ? ' Issuer: ' + wt.issuer + '.' : '') +
+                ((wt.dns_names || []).length ? ' SANs: ' + (wt.dns_names || []).join(', ') + '.' : '') +
+                ' Every wildcard-covered spoke on this cluster is served by this one certificate.';
+              wildcardLine = ' · <span style="color:var(--red)" title="' + esc(wtTitle) + '">' +
+                esc(wtLabel) + '</span>';
+            }
             var errorLine = c.error ? '<div style="margin:8px 0;padding:6px 10px;background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:6px;font-size:0.75rem;color:var(--red)">' + esc(c.error) + '</div>' : '';
             var headerHtml = '<div style="display:flex;align-items:center;gap:8px;margin:16px 0 8px">' +
               clusterBadge(c.id, c.name) +
@@ -19034,7 +19106,7 @@ const dashboardHTML = `<!DOCTYPE html>
               '<span style="color:' + cCpuColor + '">' + (cs.total_cpu_percent || 0) + '% cpu</span> · ' +
               '<span style="color:' + cMemColor + '">' + (cs.total_mem_percent || 0) + '% mem</span> · ' +
               cDiskSegment +
-              (c.hive_count || 0) + ' hives' + capacityLine + gpuLine + stuckLine +
+              (c.hive_count || 0) + ' hives' + capacityLine + gpuLine + stuckLine + wildcardLine +
               '</span></div>';
             var nodesHtml = (c.nodes || []).length > 0
               ? '<div style="display:grid;grid-template-columns:repeat(2,1fr);gap:12px">' + (c.nodes || []).map(renderNodeCard).join('') + '</div>'
