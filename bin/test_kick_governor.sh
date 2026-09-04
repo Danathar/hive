@@ -255,6 +255,24 @@ BASE_ENV=(AGENTS_ENABLED="supervisor scanner ci-maintainer architect outreach" H
 TEST_BUDGET_RESET_DAY="$(python3 -c 'import datetime; print((datetime.datetime.now().weekday() + 1) % 7)')"
 BUDGET_ENV=(TOKEN_BUDGET_WEEKLY=100 TOKEN_BUDGET_SAFETY_PCT=85 TOKEN_BUDGET_RESET_DAY="$TEST_BUDGET_RESET_DAY")
 
+# Pin the governor's budget clock to one hour before the weekly reset. With
+# TOKEN_BUDGET_RESET_DAY=4 (Friday 00:00 local) that is Thursday 23:00:
+# hours_left=1, hours_elapsed=167, so the week-pace projection collapses to
+# `projected == used` and the >85/>95/>99 ladder assertions below are exact.
+# Without this the projection is `used * 168 / hours_elapsed` — 90% used on a
+# Friday morning projects to >99% and every ladder step reads budget_critical
+# (the suite only passed when run on a Thursday evening).
+BUDGET_RESET_DAY_T=4
+BUDGET_CLOCK_EPOCH_T="$(python3 -c "
+import datetime
+now = datetime.datetime.now()
+reset_day = $BUDGET_RESET_DAY_T
+days_back = (now.weekday() - (reset_day - 1)) % 7
+pinned = (now - datetime.timedelta(days=days_back)).replace(hour=23, minute=0, second=0, microsecond=0)
+print(int(pinned.timestamp()))
+")"
+BUDGET_ENV=(TOKEN_BUDGET_WEEKLY=100 TOKEN_BUDGET_SAFETY_PCT=85 TOKEN_BUDGET_RESET_DAY="$BUDGET_RESET_DAY_T" TOKEN_BUDGET_NOW_EPOCH="$BUDGET_CLOCK_EPOCH_T")
+
 echo "=== kick-governor.sh contract tests ==="
 
 # ── 0. Path rewrite sanity: a bare run reaches GOVERNOR DONE ────────────────
@@ -488,8 +506,8 @@ echo "-- budget pressure ladder --"
 reset_state
 write_actionable 25 0   # surge -> MODEL_SURGE_ARCHITECT defaults to claude:claude-opus-4-6
 mkdir -p "$METRICS_DIR_T"
-# used=90% of a 100-token budget, 0 hours elapsed history -> avg_hourly ~ used
-# (hours_elapsed floors at 1), so projected == used == 90% for a same-tick read.
+# used=90% of a 100-token budget with the clock pinned one hour before reset
+# (BUDGET_ENV), so the pace projection is projected == used == 90%.
 printf '{"weekly":{"billableTokens":90},"hourlyBurnRate":{"billable":0}}\n' \
   >"${METRICS_DIR_T}/tokens.json"
 run_gov "${BASE_ENV[@]}" "${BUDGET_ENV[@]}" >/dev/null
