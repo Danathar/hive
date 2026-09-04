@@ -355,6 +355,18 @@ jobs:
         working-directory: .
         run: bash bin/test_gh_rate_check.sh
 
+      # #5925: the dibs domain cutover is scheduled around a Let's Encrypt quota
+      # window — a step that fails AFTER issuance costs a week, so the preflight
+      # that checks the plan's assumptions beforehand is itself load-bearing. A
+      # check that silently passes when it should fail is worse than no check,
+      # because it is the thing someone trusts before spending the window. This
+      # EXECUTES the preflight against a stub kubectl and stub dig and asserts
+      # its exit codes and report, including that an unreachable cluster never
+      # reads as a pass. No cluster, no network.
+      - name: dibs cutover preflight contract (#5925)
+        working-directory: .
+        run: bash bin/test_dibs_cutover_preflight.sh
+
       # #4289: git-credential-hive.sh is the fetch/clone AND push credential
       # source for every agent. Its mode block used to exit 1 in ADVISORY/
       # ISSUES_ONLY/NO_GITHUB modes, cutting off every git READ for advisory
