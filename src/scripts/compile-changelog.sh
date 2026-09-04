@@ -49,6 +49,10 @@ set -euo pipefail
 CHANGELOG="${1:-CHANGELOG.md}"
 FRAGDIR="${2:-changelog.d}"
 
+# Shared fence-aware `## Unreleased` scanner (single source of truth, #5939).
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+UNRELEASED_AWK="${script_dir}/lib/changelog-unreleased.awk"
+
 # Canonical subsection order for newly created subsections (keep-a-changelog
 # order; existing subsections keep their position, entries are only appended).
 CATEGORIES=(added changed deprecated fixed security)
@@ -91,7 +95,7 @@ fi
 # The Unreleased heading must exist, or the awk below would pass the file
 # through unchanged and the fragments would be deleted without ever landing
 # anywhere — silent data loss, the one failure mode a compiler cannot have.
-if ! grep -qE '^## Unreleased[[:space:]]*$' "$CHANGELOG"; then
+if ! awk -v mode=exists -f "$UNRELEASED_AWK" "$CHANGELOG"; then
   echo "::error::${CHANGELOG} has no '## Unreleased' heading — refusing to compile fragments into nowhere." >&2
   exit 1
 fi
@@ -154,7 +158,9 @@ for cat in "${CATEGORIES[@]}"; do
   [[ -s "$catfile" ]] || continue
   heading="$(category_heading "$cat")"
   next="${workdir}/CHANGELOG.next"
-  awk -v heading="$heading" -v ef="$catfile" '
+  # Uses lib/changelog-unreleased.awk's canonical fence/heading predicates;
+  # only the rewrite state lives here.
+  awk -v mode=lib -v heading="$heading" -v ef="$catfile" -f "$UNRELEASED_AWK" -f - "$compiled" > "$next" <<'AWK'
     function dump(   line) {
       while ((getline line < ef) > 0) print line
       close(ef)
@@ -165,12 +171,13 @@ for cat in "${CATEGORIES[@]}"; do
     }
     BEGIN { in_unrel = 0; in_cat = 0; inserted = 0; nb = 0 }
     {
+      if (changelog_is_fence($0)) in_fence = !in_fence
       if (!in_unrel) {
         print
-        if ($0 ~ /^## Unreleased[[:space:]]*$/) in_unrel = 1
+        if (!in_fence && changelog_is_unreleased_heading($0)) in_unrel = 1
         next
       }
-      if ($0 ~ /^## /) {
+      if (!in_fence && changelog_is_release_heading($0)) {
         # Unreleased ends here. Land the entries first, then exactly one
         # blank line before this next release heading.
         if (in_cat && !inserted) { dump(); inserted = 1; in_cat = 0 }
@@ -202,7 +209,7 @@ for cat in "${CATEGORIES[@]}"; do
         print ""
       }
     }
-  ' "$compiled" > "$next"
+AWK
   mv "$next" "$compiled"
 done
 
