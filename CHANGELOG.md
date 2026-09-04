@@ -11,6 +11,13 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-04 (v4.13.3)
+
+### Fixed
+
+- The stable promotion gate no longer treats a path-filtered workflow as a failure. `docker.yml` publishes a candidate on every push, while `v2-ci.yml` and `v2-tests.yml` only run on pushes touching `src/**`, so a docs-only or workflow-only merge produced a candidate the required suites never looked at - and, because only the newest candidate is evaluated, that blocked promotion until the next code change. Evidence now distinguishes success, failure and did-not-run: when a required workflow did not run on the candidate, the gate inherits the verdict of the nearest ancestor that did run it, stopping at the first ancestor where it ran so a real failure is never inherited past.
+- `v2-tests.yml` now also runs on push to `v2` and `v4`. It previously ran only on a schedule and on pull requests, so it landed on whatever SHA happened to be HEAD at :30 and no merged commit carried a `v2-tests` success. The stable promotion gate requires one, so it held on every candidate - including under an emergency exception, which by design refuses to bypass missing green evidence. The push paths filter mirrors the pull_request one.
+
 ## 2026-09-04 (v4.13.2)
 
 ### Fixed
