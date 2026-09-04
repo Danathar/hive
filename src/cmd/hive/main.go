@@ -137,14 +137,6 @@ const traceShutdownTimeout = 5 * time.Second
 // (persistState), loaded once at boot.
 const reachStatePath = "/data/reach-state.json"
 
-// perAppIDKeyPath returns the on-disk path of the key file a spoke uses for a
-// specific app_id — /data/gh-app-key-<appid>.pem. This is what lets one spoke
-// hold BOTH the github.com App key AND its cluster's GitHub Enterprise App key
-// at once and sign with whichever matches its configured app_id.
-//
-// Returns "" for a non-positive app_id (0 = unknown/unset, the placeholder
-// sentinel, or a hand-corrupted value): there is no meaningful per-app file for
-// those, and the caller falls back to the existing single-file behaviour.
 // agentActivityFor gathers the per-agent liveness evidence the hub needs to
 // tell a deliberately-paused agent from one that is running but unable to
 // work. Shared by both heartbeat build sites so the ordinary beat and the
