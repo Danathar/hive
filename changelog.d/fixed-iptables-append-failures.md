@@ -1,1 +1,0 @@
-- Handle failed non-optional HIVE_PROXY iptables appends explicitly by logging stderr, flushing partial rules, and using the advisory/fail-closed proxy path.

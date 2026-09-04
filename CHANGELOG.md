@@ -11,6 +11,18 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-04 (v4.14.0)
+
+### Added
+
+- The dibs domain cutover (#5925) gains a post-cutover verifier, `src/deploy/dibs-domain-cutover/verify.sh`, alongside the preflight that already guarded the Let's Encrypt window. The two answer different questions: the preflight asks "is it safe to spend the issuance?", the verifier asks "did it actually work?" — and for this sequence the obvious answer is wrong five separate ways, because every failure mode still returns HTTP 200. A host served ingress-nginx's self-signed default certificate answers 200; a certificate without `dibs.hivecommons.dev` in its SANs answers 200; a redirect Ingress rendered inert by the application Ingress still claiming the same host answers 200; a redirect that drops `$request_uri` passes a bare-root check while breaking every deep link; and a `dibs` that renders every visitor as signed out — the broken state this cutover exists to repair — looks perfectly healthy from outside. So the verifier never accepts a status code as evidence on its own: it reads the issuer and SAN list off the certificate the host actually serves, computes whether the hub session cookie's `Domain` can reach that host at all, tests the redirect on a path *with* a query string, and checks that exactly one Ingress claims the legacy host. It is read-only (DNS lookup, HTTPS GETs, one TLS handshake, `kubectl get`), exits `78` on any failing check, reports a check it could not run as a warning rather than a pass, and treats the open dual-host window as a warning rather than a finish line. Contract tests (`bin/test_dibs_cutover_verify.sh`, 37 cases against stub `openssl`/`curl`/`dig`/`kubectl`) run in CI. Running it against the live hosts also re-measured the cutover's state: the DNS A record the issue recorded as missing now exists, so step 1 is already done.
+- The dashboard's **Repositories** section has a **🔄 Rescan** button, next to the one the ACMM Evaluation panel already had. The repo cards — the issue and PR counts and the ticket pills under each repo — are repainted only when the governor's eval cycle runs, and that cadence stretches to minutes on a quiet hive, so an operator who had just closed an issue or opened a PR had no way to ask for a fresh read and was left staring at pills they knew were stale. Pressing Rescan re-enumerates every monitored repository's open issues and pull requests now (`POST /api/repos/rescan`) and republishes the dashboard snapshot. The scan is read-only with respect to the hive: it runs the enumeration half of the eval cycle — issues, PRs, PR CI status, the duplicate-PR claim guard — and none of the acting half, so it never changes the governor's mode, kicks an agent, posts an advisory, or ages a PR toward escalation. It is debounced server-side at 30 seconds and collapses concurrent presses onto a single sweep, so holding the button down cannot spend the hive's GitHub API budget.
+
+### Fixed
+
+- Handle failed non-optional HIVE_PROXY iptables appends explicitly by logging stderr, flushing partial rules, and using the advisory/fail-closed proxy path.
+- A failed self-upgrade no longer reports `self-upgrade failed after 5 attempts:` with nothing after the colon. `recordUpgradeError` used to return early when the marker file could not be read, dropping the cause; it now records the error against a fresh marker and warns. When no cause was captured at all, the operator-facing summary says so and names the usual reason - the deployment tracks a tag that does not carry the target SHA - instead of ending in a dangling colon.
+
 ## 2026-09-04 (v4.13.5)
 
 ### Fixed
