@@ -195,6 +195,26 @@ type ClusterConfig struct {
 	RequiresSCC    bool   `json:"requires_scc" yaml:"requires_scc"`
 	SCCName        string `json:"scc_name,omitempty" yaml:"scc_name,omitempty"`
 	HasGPU         bool   `json:"has_gpu" yaml:"has_gpu"`
+
+	// WildcardTLSSecret names the wildcard certificate this cluster's
+	// ingress-nginx controller already serves as its --default-ssl-certificate,
+	// in "<namespace>/<secret>" form (e.g. "hive-hub/hive-wildcard-tls"). When
+	// set, provisioned spoke Ingresses OMIT their per-host tls: block and the
+	// cert-manager issuer annotation for every host the wildcard covers, so one
+	// certificate serves the cluster instead of one per hive (#5977).
+	//
+	// This is an operator ASSERTION about cluster state, not something the hub
+	// verifies, and setting it wrongly is not a soft failure: with no
+	// --default-ssl-certificate actually configured, ingress-nginx serves its
+	// built-in SELF-SIGNED certificate and every spoke dashboard on the cluster
+	// fails TLS validation at once. Set it only after BOTH prerequisites hold —
+	// the wildcard secret exists on the cluster, and the controller's
+	// --default-ssl-certificate names it. Empty (the default) keeps the
+	// historical per-host behaviour, which always works.
+	//
+	// See src/docs/spoke-wildcard-tls.md and wildcard_tls.go.
+	WildcardTLSSecret string `json:"wildcard_tls_secret,omitempty" yaml:"wildcard_tls_secret,omitempty"`
+
 	// MaxHives caps how many hosted hives (SaaS records, assigned or pooled)
 	// may exist on this cluster. 0 = unlimited. This is the HARD per-cluster
 	// gate: the bin-packed capacity estimate (hiveSlotsForNode) is advisory
@@ -2615,6 +2635,13 @@ func provisionHive(h *SaaSHive, req *CreateHiveRequest, cluster *ClusterConfig, 
 		"IngressClass": cluster.IngressClass,
 		"Domain":       cluster.Domain,
 		"InCluster":    cluster.InCluster,
+		// #5977: when the cluster's controller already serves a wildcard covering
+		// this host, the spoke's Ingresses omit their tls: block and issuer
+		// annotation so the wildcard is what serves them — instead of minting a
+		// per-hive certificate against a 50/week ACME cap. Decided per HOST, not
+		// per cluster: a host outside the wildcard's single-label scope keeps its
+		// own certificate on a cluster where every other host does not.
+		"UseWildcardTLS": cluster.servesHostFromWildcard(dashboardHost),
 	}
 
 	// For NFS storage: auto-create OCI File System + NFS export.
@@ -3525,7 +3552,9 @@ metadata:
   name: hive
   namespace: {{.Namespace}}
   annotations:
+{{- if not .UseWildcardTLS}}
     cert-manager.io/cluster-issuer: {{.CertIssuer}}
+{{- end}}
     nginx.ingress.kubernetes.io/auth-url: "{{.HubPublicURL}}/api/saas/auth-check?hive={{.ID}}&uri=$request_uri"
     nginx.ingress.kubernetes.io/custom-http-errors: "502,503"
     nginx.ingress.kubernetes.io/default-backend: hive-error-pages
@@ -3544,18 +3573,22 @@ spec:
             name: hive
             port:
               number: {{.DashboardPort}}
+{{- if not .UseWildcardTLS}}
   tls:
   - hosts:
     - {{.DashboardHost}}
     secretName: hive-tls
+{{- end}}
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: hive-api
   namespace: {{.Namespace}}
+{{- if not .UseWildcardTLS}}
   annotations:
     cert-manager.io/cluster-issuer: {{.CertIssuer}}
+{{- end}}
 spec:
   ingressClassName: {{.IngressClass}}
   rules:
@@ -3569,10 +3602,12 @@ spec:
             name: hive
             port:
               number: {{.DashboardPort}}
+{{- if not .UseWildcardTLS}}
   tls:
   - hosts:
     - {{.DashboardHost}}
     secretName: hive-tls
+{{- end}}
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -3580,7 +3615,9 @@ metadata:
   name: hive-contribute
   namespace: {{.Namespace}}
   annotations:
+{{- if not .UseWildcardTLS}}
     cert-manager.io/cluster-issuer: {{.CertIssuer}}
+{{- end}}
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
 spec:
@@ -3596,10 +3633,12 @@ spec:
             name: hive
             port:
               number: {{.DashboardPort}}
+{{- if not .UseWildcardTLS}}
   tls:
   - hosts:
     - {{.DashboardHost}}
     secretName: hive-tls
+{{- end}}
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -3607,7 +3646,9 @@ metadata:
   name: hive-terminal
   namespace: {{.Namespace}}
   annotations:
+{{- if not .UseWildcardTLS}}
     cert-manager.io/cluster-issuer: {{.CertIssuer}}
+{{- end}}
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
     # SECURITY (CWE-862, finding C3): the terminal opens a live shell inside a
@@ -3633,10 +3674,12 @@ spec:
             name: hive
             port:
               number: {{.TerminalPort}}
+{{- if not .UseWildcardTLS}}
   tls:
   - hosts:
     - {{.DashboardHost}}
     secretName: hive-tls
+{{- end}}
 {{- end}}
 {{- if .IsOpenShiftRoute}}
 ---
