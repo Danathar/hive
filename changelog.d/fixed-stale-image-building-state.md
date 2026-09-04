@@ -1,1 +1,0 @@
-- Hub latest-image status now marks long-unavailable builds as stale/unknown and links failed Docker runs instead of spinning forever.
