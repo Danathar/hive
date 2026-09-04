@@ -276,7 +276,13 @@ func deriveAgentVerdict(a AgentSummary, blockers hiveBlockers, queuedWork int, n
 	quotaBlocked := a.QuotaExhausted
 	gwFault, gatewayBlocked := gatewayFaultForBackend(blockers.GatewayHealth, a.Backend)
 	hiveBlocked := blockers.any()
-	blocked := loginBlocked || quotaBlocked || gatewayBlocked || hiveBlocked
+	// #5958: the spoke has given up relaunching this agent after repeated
+	// identical start failures. It is not running and cannot be made to run by
+	// anything the hive does on its own, so it can never be ABLE — counting it
+	// toward "K able" is the specific over-count that let a hive show agents
+	// green while none of them had started.
+	startBlocked := strings.TrimSpace(a.StartBlockedReason) != ""
+	blocked := loginBlocked || quotaBlocked || gatewayBlocked || hiveBlocked || startBlocked
 
 	// modeGrantsWrite: the agent's mode grants at least one write action (open
 	// PR or merge) beyond opening issues. An advisory issues-only agent does
@@ -311,6 +317,12 @@ func deriveAgentVerdict(a AgentSummary, blockers hiveBlockers, queuedWork int, n
 	// Reason + tier. An unblocked advisory-only agent carries NO reason: its
 	// lack of write capability is the ACMM level working as designed.
 	switch {
+	// First: the spoke has already diagnosed this one concretely, and its reason
+	// ("copilot: not logged in") beats every generic phrasing below — including
+	// "sitting at login prompt", which describes the same fault less usefully
+	// and without saying that relaunching has been given up on.
+	case startBlocked:
+		v.BlockedReason = a.StartBlockedReason
 	case loginBlocked:
 		v.BlockedReason = "sitting at login prompt"
 	case quotaBlocked:
@@ -334,7 +346,11 @@ func deriveAgentVerdict(a AgentSummary, blockers hiveBlockers, queuedWork int, n
 	switch {
 	case capable:
 		v.CapabilityTier = tierGreen
-	case a.CanOpenIssue && blocked && modeGrantsWrite && !gatewayBlocked:
+	case a.CanOpenIssue && blocked && modeGrantsWrite && !gatewayBlocked && !startBlocked:
+		// Amber means "half its job works". An agent that never started does no
+		// half of its job, so it is excluded here for the same reason a dead
+		// gateway is — the badge must not read as partial capability when the
+		// CLI is not running at all.
 		v.CapabilityTier = tierAmber
 	default:
 		v.CapabilityTier = tierRed
@@ -358,6 +374,12 @@ func deriveAgentVerdict(a AgentSummary, blockers hiveBlockers, queuedWork int, n
 			// schedule bit is absent on the wire.
 			v.Stuck = true
 		}
+		// An agent the spoke has stopped relaunching is stuck by definition, in
+		// whatever run-state the wire reports it (#5958). Set after the switch so
+		// it cannot be lost to a run-state the cases above do not name.
+		if startBlocked {
+			v.Stuck = true
+		}
 		// IMPOTENT: running but not capable of its mission (blocked/gated). Uses
 		// `capable`, not v.Able, because v.Able already requires runWorking —
 		// an idle-at-prompt running agent that is blocked should still read as
@@ -378,6 +400,15 @@ func deriveAgentVerdict(a AgentSummary, blockers hiveBlockers, queuedWork int, n
 	// runStuckAtLogin bypasses the expectedActive gate: the credential fault is
 	// real whether or not the wire carries the schedule bit (see the ACTUAL-leg
 	// ordering above).
+	// A start-blocked agent is deliberately NOT given a bypass here, unlike
+	// runStuckAtLogin. A wedged interactive credential is hive-wide — every kick
+	// to that backend fails — so it is a fault whatever the schedule says. A
+	// failed start is one agent, and if the governor is not scheduling that
+	// agent in this mode, the operator has not asked it to run and must not be
+	// alarmed about it (#5958). It is still never ABLE: the quiet-by-design run
+	// state already denies that above, so the count stays honest without the
+	// alarm. When the mode next schedules the agent, ExpectedActive carries it
+	// into this gate on its own.
 	v.Problem = (a.ExpectedActive || v.RunState == runStuckAtLogin || v.RunState == runQuotaExhausted) && !v.QuietByDesign && !v.Able
 
 	return v

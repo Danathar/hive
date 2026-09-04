@@ -353,6 +353,19 @@ type AgentProcess struct {
 	// Set only on the missing-key branch, cleared on every launch attempt.
 	awaitingBobKey bool
 
+	// Start-failure record (#5958, incident #5921). StartFailureClass is the
+	// stable kind, StartFailureReason the operator-facing sentence, and
+	// StartFailureCount how many CONSECUTIVE failures of that same class have
+	// happened. StartBlocked is set once the count reaches
+	// startFailureBlockThreshold; StartBackoffUntil paces the automatic relaunch
+	// loop from the first failure onward. See start_failure.go — the mechanism
+	// deliberately mirrors the ProviderError* fields above.
+	StartFailureClass  string
+	StartFailureReason string
+	StartFailureCount  int
+	StartBlocked       bool
+	StartBackoffUntil  time.Time
+
 	// lastLaunchFailureBanner is the exact in-pane shell line typed by the most
 	// recent aborted launch (see announceLaunchFailureInPane), "" after a
 	// successful launch. A launch aborted before send-keys used to leave a
@@ -2548,6 +2561,7 @@ func (m *Manager) launchInTmux(ctx context.Context, agent *AgentProcess) error {
 	if err != nil {
 		agent.State = StateFailed
 		agent.LastError = err.Error()
+		m.recordStartFailureLocked(agent, backend, StartFailureBinaryMissing, "")
 		m.logger.Warn("backend binary not found", "name", agent.Name, "backend", backend, "error", err)
 		// The tmux session already exists (Start/Restart ran ensureTmuxSession
 		// before this), so without a banner the pane is a silent bare shell —
@@ -2576,6 +2590,7 @@ func (m *Manager) launchInTmux(ctx context.Context, agent *AgentProcess) error {
 			agent.State = StateFailed
 			agent.awaitingBobKey = true
 			agent.LastError = "no bob API key configured (" + config.BobAPIKeyEnvVar + ")"
+			m.recordStartFailureLocked(agent, backend, StartFailureCredentialMissing, config.BobAPIKeyEnvVar)
 			m.logger.Warn("bob requires "+config.BobAPIKeyEnvVar+" for headless operation; ask your hub admin to configure it",
 				"name", agent.Name,
 				"backend", backend,
@@ -2745,6 +2760,13 @@ func (m *Manager) launchInTmux(ctx context.Context, agent *AgentProcess) error {
 		agent.State = StateRunning
 		agent.LastError = ""
 		agent.lastLaunchFailureBanner = ""
+		// tmuxPaneHasCLIForAgent just proved a live CLI marker, which is the one
+		// thing a start-failure record must be retired on (#5958). The other
+		// StateRunning assignment below is NOT such proof — it fires right after
+		// the launch command is typed, before the CLI has rendered anything, and
+		// clearing there would erase the record on every relaunch of an agent
+		// that never comes up. That is precisely the loop this exists to stop.
+		m.clearStartFailureLocked(agent)
 		agent.StartedAt = &now
 
 		agentCtx, cancel := context.WithCancel(ctx)
@@ -3223,13 +3245,80 @@ func (m *Manager) pollTmuxOutputForAgent(agent *AgentProcess, ctx context.Contex
 				m.nudgeIfTransientAPIError(agent, m.captureVisiblePaneForAgent(agent))
 			}
 
+			// A live CLI marker is the success signal for the start-failure
+			// record: whatever failed before, this agent is up now (#5958).
+			// Checked before the hang branch below so a recovered agent stops
+			// carrying a stale blocked reason on the dashboard.
+			if paneShowsCLIReady(filtered) {
+				m.mu.Lock()
+				m.clearStartFailureLocked(agent)
+				m.mu.Unlock()
+			}
+
 			// Detect copilot hung: if running long enough with no CLI prompt,
 			// launch bare `copilot` to diagnose the error. Only clear the
 			// token if the diagnostic shows an auth error.
 			// Skip for inference backends — they use Claude -p mode (non-interactive).
-			if agent.Config.Backend == "copilot" && !IsInferenceBackend(agent.BackendOverride) && agent.StartedAt != nil &&
+			//
+			// effectiveBackend, not Config.Backend (#5958): an agent with a
+			// backend override was already being judged by the wrong CLI's
+			// readiness signature here, which is the same class of bug as #5921's
+			// root cause 1 — launched as one thing, health-checked as another.
+			if effectiveBackend(agent) == "copilot" && !IsInferenceBackend(agent.BackendOverride) && agent.StartedAt != nil &&
 				time.Since(*agent.StartedAt).Seconds() >= expiredTokenHangTimeoutSec &&
 				!paneShowsCLIReady(filtered) {
+				// #5921 root cause 1: launch_cmd runs a DIFFERENT CLI than the
+				// configured backend, so this readiness probe is waiting for a
+				// prompt the launched binary never prints. A copilot diagnostic
+				// cannot resolve that — it would relaunch bare copilot, succeed,
+				// restart the agent back into bob, and hang again, forever (the
+				// observed 4,025-line loop). Name the contradiction instead and
+				// let the backoff hold it.
+				// #5921's other user-side cause: the pane says
+				// "Please use /login to sign in to use Copilot" and the hive
+				// reported "hung". The CLI is telling us exactly what is wrong;
+				// record THAT rather than running a diagnostic to rediscover it.
+				if showsLogin {
+					m.mu.Lock()
+					delay, blocked := m.recordStartFailureLocked(agent, effectiveBackend(agent), StartFailureLoginRequired, "")
+					m.mu.Unlock()
+					m.logger.Warn("agent CLI is sitting at a login prompt and never became ready",
+						"agent", agent.Name,
+						"backend", effectiveBackend(agent),
+						"blocked", blocked,
+						"retry_in", delay.Round(time.Second).String(),
+					)
+					return
+				}
+				if declared := backendMismatch(agent.Config.Backend, agent.Config.LaunchCmd); declared != "" {
+					m.mu.Lock()
+					delay, blocked := m.recordStartFailureLocked(agent, agent.Config.Backend, StartFailureBackendMismatch,
+						"configured "+agent.Config.Backend+", launches "+declared)
+					m.mu.Unlock()
+					m.logger.Warn("agent backend/launch_cmd mismatch; not running a diagnostic that cannot converge",
+						"agent", agent.Name,
+						"configured_backend", agent.Config.Backend,
+						"launch_cmd_backend", declared,
+						"blocked", blocked,
+						"retry_in", delay.Round(time.Second).String(),
+					)
+					return
+				}
+				m.mu.Lock()
+				startBackoff := m.startFailureBackoffRemainingLocked(agent, time.Now())
+				startReason := agent.StartFailureReason
+				m.mu.Unlock()
+				if startBackoff > 0 {
+					// Already diagnosed, already paced. Re-running the diagnostic
+					// here is what recreated a tmux session every ~3 minutes for
+					// a condition only a human can clear.
+					m.logger.Debug("copilot hang diagnostic suppressed by start-failure backoff",
+						"agent", agent.Name,
+						"reason", startReason,
+						"retry_in", startBackoff.Round(time.Second).String(),
+					)
+					return
+				}
 				sinceLastRestart := time.Since(agent.lastTokenRestart).Seconds()
 				if sinceLastRestart >= float64(tokenRestartCooldownSec) {
 					m.logger.Warn("copilot hung with no CLI prompt, running diagnostic",
@@ -4440,6 +4529,21 @@ func (m *Manager) CheckAndRestartCrashedAgents(ctx context.Context) []string {
 		if m.agentSandboxEnabledLocked(agent) {
 			continue
 		}
+		// #5958: an agent whose starts keep failing the same way is paced by its
+		// own ladder. Without this the crash loop is a SECOND relaunch driver
+		// racing the backoff — it would recreate the session on the next tick
+		// and the ladder would govern nothing, which is the same "two owners,
+		// one unbounded loop" problem SetDeadSessionRecoveryOwner exists to fix.
+		if remaining := m.startFailureBackoffRemainingLocked(agent, time.Now()); remaining > 0 {
+			m.logger.Debug("crash-restart suppressed by start-failure backoff",
+				"name", name,
+				"reason", agent.StartFailureReason,
+				"consecutive_failures", agent.StartFailureCount,
+				"blocked", agent.StartBlocked,
+				"retry_in", remaining.Round(time.Second).String(),
+			)
+			continue
+		}
 		if !m.tmuxSessionExistsForAgent(agent) {
 			var uptimeSeconds float64
 			if agent.StartedAt != nil {
@@ -4599,6 +4703,11 @@ func (m *Manager) RelaunchBobAgentsAwaitingKey(ctx context.Context) []string {
 			m.logger.Warn("could not kill stale session before bob relaunch; launching anyway",
 				"name", name, "error", err)
 		}
+		// The saved key is new information about the exact condition that
+		// parked this agent, so the backoff must not hold the retry (#5958).
+		m.mu.Lock()
+		m.clearStartFailureLocked(m.agents[name])
+		m.mu.Unlock()
 		if err := m.Start(ctx, name); err != nil {
 			// One agent's failure must never abort the rest of the fleet,
 			// exactly as in the crash-restart loop above.
@@ -4698,6 +4807,13 @@ func notRunningReason(agent *AgentProcess) string {
 		}
 		return reason
 	case agent.State == StateFailed:
+		// A blocked agent gets the recurrence, not just the error: "it failed to
+		// start: copilot: not logged in" invites another restart click, which is
+		// exactly the loop #5921 was stuck in. Saying it has failed the same way
+		// N times tells the operator the restart button is not the fix.
+		if desc := startBlockedDescription(agent); desc != "" {
+			return "it is blocked after repeated failed starts: " + desc
+		}
 		reason := "it failed to start"
 		if e := strings.TrimSpace(agent.LastError); e != "" {
 			reason += ": " + e
@@ -6208,6 +6324,11 @@ func (a *AgentProcess) snapshot() AgentProcess {
 		ProviderErrorClass:        a.ProviderErrorClass,
 		ProviderErrorLine:         a.ProviderErrorLine,
 		ProviderErrorBackoffUntil: a.ProviderErrorBackoffUntil,
+		StartFailureClass:         a.StartFailureClass,
+		StartFailureReason:        a.StartFailureReason,
+		StartFailureCount:         a.StartFailureCount,
+		StartBlocked:              a.StartBlocked,
+		StartBackoffUntil:         a.StartBackoffUntil,
 		HasLaunched:               a.HasLaunched,
 		LaunchedMode:              a.LaunchedMode,
 		tmuxSession:               a.tmuxSession,
@@ -7403,6 +7524,13 @@ func (m *Manager) runCopilotDiagnostic(ctx context.Context, agent *AgentProcess)
 			m.logger.Warn("diagnostic: timed out waiting for copilot error output", "agent", agent.Name)
 			agent.LastError = "copilot hung with no output (diagnostic timed out)"
 			agent.State = StateFailed
+			// The honest residual class (#5958): we know it did not start and the
+			// diagnostic could not say why. It still counts toward the block —
+			// an unexplained failure repeating identically is no more fixable by
+			// relaunching than a named one.
+			m.mu.Lock()
+			m.recordStartFailureLocked(agent, "copilot", StartFailureNoOutput, "diagnostic timed out")
+			m.mu.Unlock()
 			m.audit(AuditAgentStartFailed, agent.Name, auditFields(
 				"outcome", "failure",
 				"backend", agent.effectiveBackend(),
@@ -7417,6 +7545,13 @@ func (m *Manager) runCopilotDiagnostic(ctx context.Context, agent *AgentProcess)
 			}
 			if matchesAuthError(output) {
 				agent.LastError = "auth token expired or invalid"
+				// #5958: the reason the fleet page could never show. The token
+				// restore/clear below may fix it, so this is recorded but the
+				// relaunch at the end of this branch is deliberately still
+				// attempted — the backoff paces the NEXT one if it fails again.
+				m.mu.Lock()
+				m.recordStartFailureLocked(agent, "copilot", StartFailureCredentialRejected, "server rejected the stored token")
+				m.mu.Unlock()
 				// Prefer to RESTORE the stored token over merely clearing it: an
 				// empty copilotTokens leaves CLI 1.0.78 stuck at /login (it does
 				// not re-populate from the injected env token), and every roll
@@ -7444,6 +7579,13 @@ func (m *Manager) runCopilotDiagnostic(ctx context.Context, agent *AgentProcess)
 			} else if paneShowsCLIReady(strings.Split(output, "\n")) {
 				m.logger.Info("diagnostic: copilot started successfully in bare mode", "agent", agent.Name)
 				agent.LastError = ""
+				// Bare copilot works, so the credential is fine and the fault is
+				// in how THIS agent launches. Do not clear the record: the
+				// relaunch below is the retry, and if it hangs again the poller
+				// will land here once more and the count must survive to reach
+				// the block. Clearing on a diagnostic's success rather than the
+				// agent's own readiness is what would make the ladder unable to
+				// ever reach its threshold.
 			} else {
 				continue
 			}
@@ -9902,6 +10044,13 @@ func (m *Manager) Restart(ctx context.Context, name string) error {
 	if !ok {
 		return fmt.Errorf("agent %s not found", name)
 	}
+
+	// A restart is a deliberate retry — by an operator at the dashboard button,
+	// or by a recovery path that believes it has changed the conditions. The
+	// backoff exists to pace the AUTOMATIC loop, never to make a human wait, so
+	// clear the record and let this attempt run. If it fails the same way, the
+	// ladder starts again from the first rung (#5958).
+	m.clearStartFailureLocked(agent)
 
 	if agent.State == StateRunning {
 		m.tmuxSendKeysForAgent(agent, "C-c", "")

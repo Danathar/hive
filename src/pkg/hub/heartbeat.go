@@ -356,6 +356,15 @@ type AgentSummary struct {
 	// unconfigured one, which is exactly the STUCK-vs-disabled ambiguity the
 	// fleet view exists to resolve.
 	Enabled bool `json:"enabled,omitempty"`
+	// StartBlockedReason is set when the spoke has given up relaunching this
+	// agent: it failed to start the same way N times running, and the spoke has
+	// backed off instead of recreating its session every few minutes (#5958).
+	// The value is the operator-facing reason — "copilot: not logged in",
+	// "bob: API key rejected", "backend/launch_cmd mismatch" — because the whole
+	// point is that "restart needed" was never actionable. Empty means not
+	// blocked, which is also what a legacy spoke that predates the field sends,
+	// so its absence is read as "no such fault", never as unknown.
+	StartBlockedReason string `json:"startBlockedReason,omitempty"`
 }
 
 // AgentActivity is the per-agent liveness evidence the spoke has and the hub
@@ -382,6 +391,8 @@ type AgentActivity struct {
 	CanMerge       bool
 	Backend        string
 	Enabled        bool
+	// StartBlockedReason — see the matching AgentSummary field.
+	StartBlockedReason string
 }
 
 // NewAgentSummary builds one AgentSummary from an agent's name, state, mode and
@@ -405,6 +416,8 @@ func NewAgentSummary(name, state, mode string, act AgentActivity) AgentSummary {
 		CanMerge:       act.CanMerge,
 		Backend:        act.Backend,
 		Enabled:        act.Enabled,
+
+		StartBlockedReason: act.StartBlockedReason,
 	}
 	if !act.PausedAt.IsZero() {
 		as.PausedAt = act.PausedAt.UTC().Format(time.RFC3339)
