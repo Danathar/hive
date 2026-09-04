@@ -2,6 +2,8 @@ package agent
 
 import (
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,9 +27,9 @@ import (
 //     an operator can act on ("copilot: not logged in"), which then rides state
 //     out to the dashboard card, the heartbeat and the fleet verdict.
 //  2. A LIMIT. Consecutive failures with the SAME reason escalate a backoff and,
-//     past startFailureBlockThreshold, mark the agent blocked. A blocked agent
-//     is not relaunched on the tick, and does not count toward the fleet's
-//     "able" total.
+//     past startFailureBlockThreshold(), mark the agent blocked. A blocked
+//     agent is not relaunched on the tick, and does not count toward the
+//     fleet's "able" total.
 //
 // The shape deliberately mirrors the inference-provider backoff already in
 // manager.go (markProviderErrorLocked and friends): same "same-signal repeat
@@ -66,8 +68,9 @@ const (
 	StartFailureNoOutput StartFailureClass = "no-output"
 )
 
-// startFailureBlockThreshold is how many CONSECUTIVE failures of the same class
-// mark an agent blocked.
+// startFailureBlockThresholdDefault is how many CONSECUTIVE failures of the
+// same class mark an agent blocked, unless StartFailureBlockThresholdEnv
+// overrides it.
 //
 // Three, not one: a single failed start is routinely transient — a cold pod
 // whose CLI lost a race with its own config write, a token refreshed a second
@@ -75,7 +78,14 @@ const (
 // an operator has to un-wedge by hand. Three identical outcomes in a row is no
 // longer bad luck. Backoff is applied from the FIRST failure regardless, so the
 // two retries before the block are already paced, not a free burst.
-const startFailureBlockThreshold = 3
+const startFailureBlockThresholdDefault = 3
+
+// StartFailureBlockThresholdEnv overrides startFailureBlockThresholdDefault.
+const StartFailureBlockThresholdEnv = "HIVE_START_FAILURE_BLOCK_THRESHOLD"
+
+// StartFailureBackoffLadderEnv overrides startFailureBackoffLadderDefault with
+// a comma-separated list of positive Go durations, for example "30s,2m,10m".
+const StartFailureBackoffLadderEnv = "HIVE_START_FAILURE_BACKOFF_LADDER"
 
 // startFailureBackoffLadder is the delay before the next relaunch attempt,
 // indexed by consecutive-failure count. It is capped rather than unbounded: a
@@ -88,11 +98,38 @@ const startFailureBlockThreshold = 3
 // the explicit relaunch paths (RelaunchBobAgentsAwaitingKey on a key save, the
 // dashboard restart button) clear the backoff outright — the ladder governs the
 // AUTOMATIC loop, never a human's deliberate retry.
-var startFailureBackoffLadder = []time.Duration{
+var startFailureBackoffLadderDefault = []time.Duration{
 	1 * time.Minute,
 	5 * time.Minute,
 	15 * time.Minute,
 	30 * time.Minute,
+}
+
+func startFailureBlockThreshold() int {
+	if v := strings.TrimSpace(os.Getenv(StartFailureBlockThresholdEnv)); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return startFailureBlockThresholdDefault
+}
+
+func startFailureBackoffLadder() []time.Duration {
+	if v := strings.TrimSpace(os.Getenv(StartFailureBackoffLadderEnv)); v != "" {
+		parts := strings.Split(v, ",")
+		ladder := make([]time.Duration, 0, len(parts))
+		for _, part := range parts {
+			d, err := time.ParseDuration(strings.TrimSpace(part))
+			if err != nil || d <= 0 {
+				return startFailureBackoffLadderDefault
+			}
+			ladder = append(ladder, d)
+		}
+		if len(ladder) > 0 {
+			return ladder
+		}
+	}
+	return startFailureBackoffLadderDefault
 }
 
 // startFailureBackoffDelay returns the ladder delay for the n-th consecutive
@@ -101,10 +138,11 @@ func startFailureBackoffDelay(attempt int) time.Duration {
 	if attempt < 1 {
 		attempt = 1
 	}
-	if attempt > len(startFailureBackoffLadder) {
-		attempt = len(startFailureBackoffLadder)
+	ladder := startFailureBackoffLadder()
+	if attempt > len(ladder) {
+		attempt = len(ladder)
 	}
-	return startFailureBackoffLadder[attempt-1]
+	return ladder[attempt-1]
 }
 
 // startFailureReason renders the operator-facing sentence for a class, scoped
@@ -257,7 +295,7 @@ func (m *Manager) markStartFailureLocked(agent *AgentProcess, class StartFailure
 	agent.StartFailureReason = reason
 	agent.StartFailureCount++
 	agent.LastError = reason
-	agent.StartBlocked = agent.StartFailureCount >= startFailureBlockThreshold
+	agent.StartBlocked = agent.StartFailureCount >= startFailureBlockThreshold()
 	delay := startFailureBackoffDelay(agent.StartFailureCount)
 	agent.StartBackoffUntil = now.Add(delay)
 	return delay, agent.StartBlocked

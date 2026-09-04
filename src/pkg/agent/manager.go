@@ -357,9 +357,9 @@ type AgentProcess struct {
 	// stable kind, StartFailureReason the operator-facing sentence, and
 	// StartFailureCount how many CONSECUTIVE failures of that same class have
 	// happened. StartBlocked is set once the count reaches
-	// startFailureBlockThreshold; StartBackoffUntil paces the automatic relaunch
-	// loop from the first failure onward. See start_failure.go — the mechanism
-	// deliberately mirrors the ProviderError* fields above.
+	// startFailureBlockThreshold(); StartBackoffUntil paces the automatic
+	// relaunch loop from the first failure onward. See start_failure.go — the
+	// mechanism deliberately mirrors the ProviderError* fields above.
 	StartFailureClass  string
 	StartFailureReason string
 	StartFailureCount  int

@@ -17,6 +17,12 @@ func newStartFailureAgent(name string) *AgentProcess {
 	return &AgentProcess{Name: name}
 }
 
+func clearStartFailureEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv(StartFailureBlockThresholdEnv, "")
+	t.Setenv(StartFailureBackoffLadderEnv, "")
+}
+
 // ── the reason ─────────────────────────────────────────────────────────────
 
 // TestStartFailureReasonsAreActionable pins the exact sentences #5921 asked
@@ -66,12 +72,14 @@ func TestStartFailureReasonNeverSaysRestartNeeded(t *testing.T) {
 // TestRepeatedSameReasonBlocksAndBacksOff is the core contract: identical
 // failures escalate a backoff and, at the threshold, block.
 func TestRepeatedSameReasonBlocksAndBacksOff(t *testing.T) {
+	clearStartFailureEnv(t)
 	m := &Manager{}
 	a := newStartFailureAgent("supervisor")
 	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
 
 	var lastDelay time.Duration
-	for i := 1; i <= startFailureBlockThreshold; i++ {
+	threshold := startFailureBlockThreshold()
+	for i := 1; i <= threshold; i++ {
 		// Advance past the previous backoff so each call is a genuinely new
 		// observation rather than a repeat inside one window.
 		now = now.Add(lastDelay + time.Second)
@@ -85,27 +93,59 @@ func TestRepeatedSameReasonBlocksAndBacksOff(t *testing.T) {
 		if delay <= 0 {
 			t.Errorf("failure %d armed no backoff — the loop would retry at tick rate", i)
 		}
-		wantBlocked := i >= startFailureBlockThreshold
+		wantBlocked := i >= threshold
 		if blocked != wantBlocked {
 			t.Errorf("failure %d: blocked = %v, want %v", i, blocked, wantBlocked)
 		}
 	}
 	if !a.StartBlocked {
-		t.Fatalf("agent not blocked after %d identical failures", startFailureBlockThreshold)
+		t.Fatalf("agent not blocked after %d identical failures", threshold)
 	}
 	if a.StartFailureReason != "copilot: not logged in" {
 		t.Errorf("StartFailureReason = %q, want the actionable reason", a.StartFailureReason)
 	}
 	// The delay must ESCALATE, or a bounded ladder is just a fixed cooldown
 	// under another name — which is what the incident already had.
-	if startFailureBackoffDelay(1) >= startFailureBackoffDelay(startFailureBlockThreshold) {
+	if startFailureBackoffDelay(1) >= startFailureBackoffDelay(threshold) {
 		t.Error("backoff does not escalate across the ladder")
+	}
+}
+
+func TestStartFailureThresholdUsesEnv(t *testing.T) {
+	t.Setenv(StartFailureBackoffLadderEnv, "")
+	t.Setenv(StartFailureBlockThresholdEnv, "2")
+	if got := startFailureBlockThreshold(); got != 2 {
+		t.Fatalf("startFailureBlockThreshold() = %d, want env override 2", got)
+	}
+
+	m := &Manager{}
+	a := newStartFailureAgent("supervisor")
+	now := time.Now()
+	m.markStartFailureLocked(a, StartFailureLoginRequired, "copilot: not logged in", now)
+	if a.StartBlocked {
+		t.Fatal("first failure blocked with threshold=2")
+	}
+	m.markStartFailureLocked(a, StartFailureLoginRequired, "copilot: not logged in", now.Add(2*time.Minute))
+	if !a.StartBlocked {
+		t.Fatal("second identical failure did not block with threshold=2")
+	}
+}
+
+func TestStartFailureBackoffLadderUsesEnvAndCaps(t *testing.T) {
+	t.Setenv(StartFailureBlockThresholdEnv, "")
+	t.Setenv(StartFailureBackoffLadderEnv, "2s,7s")
+	if got := startFailureBackoffDelay(1); got != 2*time.Second {
+		t.Fatalf("startFailureBackoffDelay(1) = %v, want 2s", got)
+	}
+	if got := startFailureBackoffDelay(3); got != 7*time.Second {
+		t.Fatalf("startFailureBackoffDelay(3) = %v, want capped 7s", got)
 	}
 }
 
 // A single failure must NOT block: cold starts lose races, and blocking on the
 // first would turn recoverable noise into an agent a human has to un-wedge.
 func TestSingleFailureDoesNotBlockButStillPaces(t *testing.T) {
+	clearStartFailureEnv(t)
 	m := &Manager{}
 	a := newStartFailureAgent("guide")
 	now := time.Now()
@@ -170,10 +210,11 @@ func TestDifferentClassRestartsTheLadder(t *testing.T) {
 // Success retires the record completely — including the LastError it wrote, so
 // a healed agent does not keep displaying the reason it recovered from.
 func TestClearStartFailureRetiresTheWholeRecord(t *testing.T) {
+	clearStartFailureEnv(t)
 	m := &Manager{}
 	a := newStartFailureAgent("architect")
 	now := time.Now()
-	for i := 0; i < startFailureBlockThreshold; i++ {
+	for i := 0; i < startFailureBlockThreshold(); i++ {
 		m.markStartFailureLocked(a, StartFailureLoginRequired, "copilot: not logged in", now.Add(time.Duration(i)*time.Hour))
 	}
 	if !a.StartBlocked || a.LastError == "" {
@@ -256,11 +297,12 @@ func TestBackendMismatchDetection(t *testing.T) {
 // text ("it failed to start: ...") reads as "click restart"; a blocked agent
 // has to say that restarting is not the fix.
 func TestNotRunningReasonNamesRepeatedFailure(t *testing.T) {
+	clearStartFailureEnv(t)
 	m := &Manager{}
 	a := newStartFailureAgent("supervisor")
 	a.State = StateFailed
 	now := time.Now()
-	for i := 0; i < startFailureBlockThreshold; i++ {
+	for i := 0; i < startFailureBlockThreshold(); i++ {
 		m.markStartFailureLocked(a, StartFailureLoginRequired, "copilot: not logged in", now.Add(time.Duration(i)*time.Hour))
 	}
 
@@ -292,10 +334,11 @@ func TestNotRunningReasonUnchangedBeforeBlock(t *testing.T) {
 // The snapshot AllStatuses hands to the dashboard and heartbeat must carry the
 // record — a reason that never leaves the manager is the bug, not the fix.
 func TestSnapshotCarriesStartFailureRecord(t *testing.T) {
+	clearStartFailureEnv(t)
 	m := &Manager{}
 	a := newStartFailureAgent("supervisor")
 	now := time.Now()
-	for i := 0; i < startFailureBlockThreshold; i++ {
+	for i := 0; i < startFailureBlockThreshold(); i++ {
 		m.markStartFailureLocked(a, StartFailureCredentialRejected, "bob: API key rejected (401)", now.Add(time.Duration(i)*time.Hour))
 	}
 
@@ -307,8 +350,8 @@ func TestSnapshotCarriesStartFailureRecord(t *testing.T) {
 	if !snap.StartBlocked {
 		t.Error("snapshot lost StartBlocked")
 	}
-	if snap.StartFailureCount != startFailureBlockThreshold {
-		t.Errorf("snapshot StartFailureCount = %d, want %d", snap.StartFailureCount, startFailureBlockThreshold)
+	if snap.StartFailureCount != startFailureBlockThreshold() {
+		t.Errorf("snapshot StartFailureCount = %d, want %d", snap.StartFailureCount, startFailureBlockThreshold())
 	}
 	if snap.StartBackoffUntil.IsZero() {
 		t.Error("snapshot lost StartBackoffUntil")
