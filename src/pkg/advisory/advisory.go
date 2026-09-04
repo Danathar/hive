@@ -378,6 +378,29 @@ func collapseNearDuplicates(findings []Finding) []Finding {
 	return kept
 }
 
+// evidenceUnverified reports whether nothing has re-checked this finding's
+// evidence at the commit the digest is stamped with. It is exactly the set of
+// conditions the renderer already captions as not-current, kept in one place so
+// the ranking and the caption can never disagree:
+//
+//   - PathStale — the cited file does not exist at the analyzed commit (#3704).
+//   - ProvenanceStale — the evidence was computed at some OTHER commit and
+//     nothing re-ran it here (#5130).
+//   - CachedReplays with no provenance — the finding's only "confirmations"
+//     were byte-identical replays of cached text (#5236).
+//
+// None of the three proves the finding is FIXED, only that it is unconfirmed
+// here, so applyTopN demotes on it rather than dropping.
+func (f Finding) evidenceUnverified() bool {
+	if f.PathStale {
+		return true
+	}
+	if f.ProvenanceStale && f.ProvenanceSHA != "" {
+		return true
+	}
+	return f.CachedReplays > 0 && f.ProvenanceSHA == ""
+}
+
 // severityRank orders severities so the most serious wins a merge. Unknown and
 // empty severities rank lowest, so they can never displace a real one.
 func severityRank(sev string) int {
@@ -461,23 +484,31 @@ func (o DigestOptions) resolvedRenderCap() int {
 // The ranking is global rather than per-agent on purpose: a repo owner cares
 // which findings matter most, not which agent produced them, and a per-agent
 // quota would let a chatty agent's low-severity items displace another agent's
-// critical one. Ordering is severity first, then — when verify is supplied —
-// findings whose file still exists, then most-recent-first: the newest report of
+// critical one. Ordering is severity first, then findings whose evidence is
+// confirmed at the analyzed commit, then most-recent-first: the newest report of
 // an equally severe problem is the one still happening.
 //
-// verify, when non-nil, reports whether a finding's file path still exists at
-// the analyzed snapshot. A finding whose path is gone is one the renderer must
-// caption "may be outdated" (#3704), so it does not hold a top-N slot ahead of
-// a live finding of the SAME severity — it is set aside and used only to
-// backfill slots no fresh finding of that severity claims. This is the same
-// principle as capping AFTER collapseNearDuplicates: a scarce top-N is spent on
-// distinct, current problems or it is not worth reading. Freshness deliberately
-// does not cross severity bands (see the loop below).
+// A finding the renderer would caption as not-current does not hold a top-N slot
+// ahead of a confirmed finding of the SAME severity: it is set aside and used
+// only to backfill slots no confirmed finding of that severity claims. This is
+// the same principle as capping AFTER collapseNearDuplicates — a scarce top-N is
+// spent on distinct, current problems or it is not worth reading. Freshness
+// deliberately does not cross severity bands (see the loop below).
 //
-// Verification is on-demand and ordered: the ranked list is walked from the top
-// and verify is called only until cap findings are in hand, at most once per
-// distinct path. Ranking the full set therefore costs about as many lookups as
-// verifying the survivors alone did, not one per finding.
+// The demotion covers every unverified-evidence signal, not just a missing file
+// (evidenceUnverified). A finding republished from cached text, or from evidence
+// computed at another commit, is as unconfirmed at the analyzed commit as one
+// whose path is gone — the renderer says so on all three — so none of them may
+// displace a finding that WAS confirmed here. The other two signals are already
+// resolved on the findings by the time ranking runs, so only the path check
+// needs verify.
+//
+// verify, when non-nil, reports whether a finding's file path still exists at
+// the analyzed snapshot. Verification is on-demand and ordered: the ranked list
+// is walked from the top and verify is called only until cap findings are in
+// hand, at most once per distinct path. Ranking the full set therefore costs
+// about as many lookups as verifying the survivors alone did, not one per
+// finding.
 func applyTopN(byAgent map[string][]Finding, cap int, verify func(path string) bool) (map[string][]Finding, int) {
 	if cap <= 0 {
 		return byAgent, 0
@@ -506,55 +537,51 @@ func applyTopN(byAgent map[string][]Finding, cap int, verify func(path string) b
 	})
 
 	overflow := len(all) - cap
+	checked := make(map[string]bool)
+	markPathStale := func(f *Finding) {
+		if verify == nil || !isFilePathRef(f.File) {
+			return
+		}
+		path := splitFilePathRef(f.File)
+		ok, seen := checked[path]
+		if !seen {
+			ok = verify(path)
+			checked[path] = ok
+		}
+		f.PathStale = !ok
+	}
+	// Walk severity band by severity band, highest first. Freshness only breaks
+	// ties WITHIN a band: an unverified finding is one nothing re-checked here,
+	// not one shown to be gone, so an unverified critical must still outrank a
+	// confirmed low — demoting across bands would let a cosmetic nit displace a
+	// security finding whose file was merely renamed.
 	var kept []Finding
-	if verify == nil {
-		kept = all[:cap]
-	} else {
-		checked := make(map[string]bool)
-		markStale := func(f *Finding) {
-			if !isFilePathRef(f.File) {
-				return
-			}
-			path := splitFilePathRef(f.File)
-			ok, seen := checked[path]
-			if !seen {
-				ok = verify(path)
-				checked[path] = ok
-			}
-			f.PathStale = !ok
+	for i := 0; i < len(all) && len(kept) < cap; {
+		rank := severityRank(all[i].Severity)
+		j := i
+		for j < len(all) && severityRank(all[j].Severity) == rank {
+			j++
 		}
-		// Walk severity band by severity band, highest first. Freshness only
-		// breaks ties WITHIN a band: PathStale means the cited path moved, not
-		// that the problem is gone, so a stale critical must still outrank a
-		// live low — demoting across bands would let a cosmetic nit displace a
-		// security finding whose file was merely renamed.
-		for i := 0; i < len(all) && len(kept) < cap; {
-			rank := severityRank(all[i].Severity)
-			j := i
-			for j < len(all) && severityRank(all[j].Severity) == rank {
-				j++
+		// Unverified findings in this band are set aside rather than dropped so
+		// they can backfill slots no confirmed finding of equal severity claims
+		// — rendering 6 findings under a cap of 10 would hide work for no
+		// reason.
+		var unverified []Finding
+		for _, f := range all[i:j] {
+			if len(kept) == cap {
+				break
 			}
-			// Stale findings in this band are set aside rather than dropped so
-			// they can backfill slots no fresh finding of equal severity claims
-			// — rendering 6 findings under a cap of 10 would hide work for no
-			// reason.
-			var stale []Finding
-			for _, f := range all[i:j] {
-				if len(kept) == cap {
-					break
-				}
-				markStale(&f)
-				if f.PathStale {
-					stale = append(stale, f)
-					continue
-				}
-				kept = append(kept, f)
+			markPathStale(&f)
+			if f.evidenceUnverified() {
+				unverified = append(unverified, f)
+				continue
 			}
-			for k := 0; len(kept) < cap && k < len(stale); k++ {
-				kept = append(kept, stale[k])
-			}
-			i = j
+			kept = append(kept, f)
 		}
+		for k := 0; len(kept) < cap && k < len(unverified); k++ {
+			kept = append(kept, unverified[k])
+		}
+		i = j
 	}
 
 	capped := make(map[string][]Finding, len(byAgent))
@@ -642,6 +669,16 @@ func BuildDigestFromBeads(stores map[string]*beads.Store, mode string, opts Dige
 		byAgent[agent] = collapseNearDuplicates(fs)
 		total += len(byAgent[agent])
 	}
+	// Resolve provenance staleness BEFORE the cap, for the same reason the cap
+	// consults opts.VerifyPath: a finding whose evidence was computed at another
+	// commit, or republished from cached text, is one the renderer captions as
+	// not re-verified, and it must not take a slot from a finding that WAS
+	// confirmed at the analyzed commit (#2364). Unlike path verification this
+	// costs no lookups — it reads the finding's own metadata and prose — so
+	// running it over the full set before ranking is free.
+	if opts.Snapshot != nil {
+		markStaleProvenanceIn(byAgent, opts.Snapshot.SHA)
+	}
 	// Cap AFTER collapsing: a top-10 built from uncollapsed restatements would
 	// spend its ten slots on one recurring problem. For the same reason the cap
 	// is staleness-aware (opts.VerifyPath) — a finding whose file no longer
@@ -675,12 +712,6 @@ func BuildDigestFromBeads(stores map[string]*beads.Store, mode string, opts Dige
 	if opts.VerifyPath != nil && overflow == 0 {
 		VerifyFindingPaths(d, opts.VerifyPath)
 	}
-	// Path existence is not freshness. A finding can cite a file that still
-	// exists and yet have been computed several commits ago, against evidence
-	// the analyzed commit no longer reproduces — the #5130 findings were
-	// exactly that shape, and VerifyFindingPaths waved both of them through.
-	// Run after the cap so only rendered findings are examined.
-	MarkStaleProvenance(d)
 	return d
 }
 
