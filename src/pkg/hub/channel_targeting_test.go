@@ -309,6 +309,76 @@ func TestGhcrTagRevisionMissingLabelResolvesEmpty(t *testing.T) {
 	}
 }
 
+func TestGhcrManifestBodyFailureModes(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"non-OK", http.StatusServiceUnavailable, `{"config":{"digest":"sha256:config"}}`},
+		{"invalid JSON", http.StatusOK, `<html>not a manifest</html>`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/v2/"+ghcrRepoSpoke+"/manifests/stable" {
+					t.Errorf("unexpected registry request: %s", r.URL.Path)
+				}
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			t.Cleanup(srv.Close)
+
+			savedBase := ghcrBase
+			ghcrBase = srv.URL
+			t.Cleanup(func() { ghcrBase = savedBase })
+
+			if got := ghcrManifestBody(srv.Client(), "t", ghcrRepoSpoke, ReleaseChannelStable, targetingLogger()); got != nil {
+				t.Errorf("ghcrManifestBody() = %+v, want nil", got)
+			}
+		})
+	}
+}
+
+func TestGhcrTagRevisionBlobFailureModes(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"blob non-OK", http.StatusForbidden, `{}`},
+		{"blob invalid JSON", http.StatusOK, `<html>not a config</html>`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			const cfgDigest = "sha256:config"
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/token":
+					_, _ = io.WriteString(w, `{"token":"t"}`)
+				case strings.HasSuffix(r.URL.Path, "/manifests/stable"):
+					_, _ = io.WriteString(w, `{"config":{"digest":"`+cfgDigest+`"}}`)
+				case strings.HasSuffix(r.URL.Path, "/blobs/"+cfgDigest):
+					w.WriteHeader(tc.status)
+					_, _ = io.WriteString(w, tc.body)
+				default:
+					t.Errorf("unexpected registry request: %s", r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			t.Cleanup(srv.Close)
+
+			savedBase := ghcrBase
+			ghcrBase = srv.URL
+			t.Cleanup(func() { ghcrBase = savedBase })
+
+			if got := ghcrTagRevision(ghcrRepoSpoke, ReleaseChannelStable, targetingLogger()); got != "" {
+				t.Errorf("ghcrTagRevision = %q, want \"\" when config blob cannot be read", got)
+			}
+		})
+	}
+}
+
 // ============================================================
 // The heartbeat path, end to end
 // ============================================================
