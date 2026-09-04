@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-04 (v4.12.4)
+
+### Fixed
+
+- Hub latest-image status now marks long-unavailable builds as stale/unknown and links failed Docker runs instead of spinning forever.
+
 ## 2026-09-04 (v4.12.3)
 
 ### Changed
