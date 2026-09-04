@@ -2258,8 +2258,7 @@ func main() {
 		dashSrv.UpdateStatusIfFresh(payload, buildEpoch)
 	}
 
-	const cachedActionablePath = "/data/last-actionable.json"
-	if data, err := os.ReadFile(cachedActionablePath); err == nil {
+	if data, err := os.ReadFile(lastActionablePath); err == nil {
 		var cached github.ActionableResult
 		if err := json.Unmarshal(data, &cached); err == nil {
 			lastActionable.Store(&cached)
@@ -2721,6 +2720,12 @@ func main() {
 		},
 		EnumerateFunc: func() {
 			runEvalCycle(ctx, cfg, ghClient, gov, sched, agentMgr, dashSrv, notifier, beadStores, tokenCollector, metricsCollector, nousState, &lastActionable, advisoryStore, advisoryIssues, nil, logger)
+		},
+		// The REPOSITORIES "Rescan" button. Unlike EnumerateFunc above — which
+		// runs the WHOLE eval cycle, kicks included — this only refreshes what
+		// the operator is looking at. See rescanRepos.
+		RescanReposFunc: func(rescanCtx context.Context) (*github.ActionableResult, error) {
+			return rescanRepos(rescanCtx, cfg, ghClient, &lastActionable, refreshDashboard, logger)
 		},
 		AdvisoryResetFunc: func(newPrimaryRepo string) {
 			logger.Info("advisory reset: primary repo changed, creating new advisory issue", "repo", newPrimaryRepo)
@@ -6074,7 +6079,7 @@ func runEvalCycle(
 
 	lastActionable.Store(actionable)
 	if data, err := json.Marshal(actionable); err == nil {
-		atomicWrite("/data/last-actionable.json", data)
+		atomicWrite(lastActionablePath, data)
 	}
 
 	// Record enumerated issues into the lifecycle timeline so the dashboard's

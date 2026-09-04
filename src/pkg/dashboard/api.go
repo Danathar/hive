@@ -241,6 +241,11 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	s.mux.HandleFunc("POST /api/packs/{level}/apply", s.handlePackApply)
 	s.mux.HandleFunc("PUT /api/packs/level", s.handlePackSetLevel)
 
+	// Operator-initiated refresh of the REPOSITORIES cards: re-enumerate
+	// every watched repo's open issues/PRs now instead of waiting out the
+	// governor's eval interval. Read-only — see handleReposRescan.
+	s.mux.HandleFunc("POST /api/repos/rescan", s.handleReposRescan)
+
 	s.mux.HandleFunc("GET /api/acmm/evaluation", s.handleACMMEvaluation)
 	s.mux.HandleFunc("POST /api/acmm/issue", s.handleACMMCreateIssue)
 	s.mux.HandleFunc("GET /api/acmm-recommendation", s.handleACMMRecommendation)

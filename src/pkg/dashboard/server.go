@@ -95,6 +95,16 @@ type Server struct {
 	acmmEvalMu       sync.RWMutex
 	acmmEvalCache    *ACMMEvaluation
 	acmmEvalCachedAt time.Time
+
+	// Operator-initiated repository rescan (POST /api/repos/rescan). The
+	// mutex guards all three: repoRescanInFlight collapses concurrent
+	// presses onto one GitHub sweep, repoRescanAt is the debounce clock, and
+	// repoRescanLast is the counts a debounced/in-flight caller is answered
+	// with so the UI never has to render an empty result.
+	repoRescanMu       sync.Mutex
+	repoRescanInFlight bool
+	repoRescanAt       time.Time
+	repoRescanLast     ReposRescanResult
 	// acmmLinearBaseURL overrides the Linear GraphQL endpoint the ACMM
 	// "Open Issue" path posts issueCreate to. Empty = production; tests
 	// point it at an httptest server.
