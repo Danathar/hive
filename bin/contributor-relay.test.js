@@ -36,8 +36,8 @@ function loadRelay({ backend = 'copilot', backendBinary = null, backendPerm = '-
   // Guard against a runaway loop in the code under test eating all memory.
   const MAX_RECORDED_COMMANDS = 10000;
 
-  // #5281: lets a test model a tmux send that fails, so the one-shot budget's
-  // behaviour on a throwing send is pinned rather than assumed.
+  // #5281: lets a test model a literal tmux send that fails, so the one-shot
+  // budget's behaviour on a throwing send is pinned rather than assumed.
   let failNextLiteralSend = false;
 
   const fakeExecSync = (cmd) => {
@@ -116,13 +116,22 @@ function loadRelay({ backend = 'copilot', backendBinary = null, backendPerm = '-
     return child;
   };
 
-  // The capability probe (`<cli> --version`, kubestellar/hive#2547) is the only
-  // execFileSync caller. `cliVersion` is what the CLI "prints"; an Error instance
-  // makes the probe throw, standing in for an absent binary, an unsupported flag
-  // or a timeout kill — every one of which must leave the field simply absent.
+  // execFileSync covers literal tmux sends plus the capability probe
+  // (`<cli> --version`, kubestellar/hive#2547). `cliVersion` is what the CLI
+  // "prints"; an Error instance makes the probe throw, standing in for an
+  // absent binary, an unsupported flag or a timeout kill — every one of which
+  // must leave the field simply absent.
   const execFileSyncCalls = [];
   const fakeExecFileSync = (bin, args, opts) => {
     execFileSyncCalls.push({ bin, args, opts });
+    if (bin === 'tmux' && args[0] === 'send-keys' && args.includes('-l')) {
+      if (commands.length < MAX_RECORDED_COMMANDS) commands.push(`tmux ${args.join(' ')}`);
+      if (failNextLiteralSend) {
+        failNextLiteralSend = false;
+        throw new Error('tmux: server exited unexpectedly');
+      }
+      return '';
+    }
     if (cliVersion instanceof Error) throw cliVersion;
     if (cliVersion === null) throw new Error('spawnSync ENOENT');
     return cliVersion;
@@ -2011,13 +2020,32 @@ test('#5281 an unblocked pane classifies as no reason at all', () => {
 });
 
 test('#5281 the reminder carries no shell metacharacters', () => {
-  // tmuxSendNudge interpolates this into a single-quoted `send-keys -l '...'`.
-  // A quote or a metacharacter here would be a command-injection shaped bug,
-  // not a typo, so the constraint is pinned rather than trusted.
+  // Belt: tmuxSendNudge passes its argument as argv (see the injection test
+  // below), but the nudge text staying trivially plain is still the cheaper
+  // property to keep, so the constraint stays pinned rather than trusted.
   const relay = loadRelay({ backend: 'goose' });
   try {
     assert.match(relay.AUTONOMY_NUDGE_MESSAGE, /^[A-Za-z0-9 ,.]+$/,
       `the nudge text must stay trivially quotable, got: ${relay.AUTONOMY_NUDGE_MESSAGE}`);
+  } finally { teardown(relay); }
+});
+
+test("a nudge message containing '; rm -rf / is sent as one literal argv element", () => {
+  // tmuxSendNudge used to interpolate its argument into naked single quotes:
+  // `send-keys -l '${message}'`. A message containing a single quote would
+  // have escaped the quoting and executed as shell — command injection shaped,
+  // even though today's callers only pass vetted constants. The function now
+  // uses execFileSync() with the message as an argv element, so there is no
+  // shell for hostile bytes to break out into.
+  const relay = loadRelay({ backend: 'goose' });
+  try {
+    const hostile = "ok'; rm -rf / # $(trap) `msg`";
+    const before = relay.__execFileSyncCalls.length;
+    relay.tmuxSendNudge(hostile);
+    const sent = relay.__execFileSyncCalls.slice(before).find((c) => c.bin === 'tmux' && c.args[0] === 'send-keys');
+    assert.ok(sent, 'the nudge produced a literal send-keys execFileSync call');
+    assert.deepStrictEqual(sent.args, ['send-keys', '-t', 'contributor', '-l', hostile],
+      'the hostile message must be delivered literally as one argv element');
   } finally { teardown(relay); }
 });
 

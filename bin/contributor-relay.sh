@@ -225,10 +225,9 @@ const TRANSIENT_API_ERROR_NUDGE_COOLDOWN_MS = 90000;
 // themselves — an agent that stops to ask is one that forgot, and a human
 // watching would type exactly this line. When nobody is watching, nobody does.
 //
-// Letters, spaces and one comma, by construction: tmuxSendNudge interpolates
-// this into a single-quoted `tmux send-keys -l '...'`, so a quote or a shell
-// metacharacter here would be a command-injection shaped bug rather than a
-// typo. There is a test pinning that.
+// Letters, spaces and one comma, by construction. tmuxSendNudge passes this as
+// a literal argv element, so punctuation is safe; the test remains as a cheap
+// pin that this unattended prompt stays plain.
 const AUTONOMY_NUDGE_MESSAGE =
   'no human is available to answer, so proceed autonomously with your best judgment';
 
@@ -2257,7 +2256,7 @@ function tmuxSessionHasAttachedClient() {
 // that makes recovery cheap; clearing or restarting would throw away the very
 // thing being rescued.
 function tmuxSendNudge(message) {
-  execSync(`tmux send-keys -t ${TMUX_SESSION} -l '${message}'`, { timeout: 15000 });
+  execFileSync('tmux', ['send-keys', '-t', TMUX_SESSION, '-l', message], { timeout: 15000 });
   sleepMs(ENTER_DELAY_MS);
   tmuxSendEnters();
 }
@@ -4206,6 +4205,7 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     recentPaneLines,
     sendTo,
     tmuxSendEnters,
+    tmuxSendNudge,
     GIVE_UP_MEMORY_MS,
     // Test hook: mark a task key given-up at a chosen timestamp so isGivenUp's
     // expiry pruning can be exercised without waiting an hour.
