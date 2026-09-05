@@ -11,6 +11,17 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-05 (v4.16.1)
+
+### Fixed
+
+- Classify Bob API-key 401/expired failures as login/credential problems instead of restart-needed agents.
+- Do not default vLLM to a cluster-specific in-cluster Service; report DNS gateway faults with the unresolved host.
+
+### Security
+
+- Stop accepting the shared dashboard owner token from `?token=` URLs; browser terminal links now use authenticated, short-lived single-use handoff codes and query `token`/`code` values are redacted in dashboard request logs.
+
 ## 2026-09-05 (v4.16.0)
 
 ### Added
