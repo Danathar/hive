@@ -86,6 +86,7 @@ const (
 	wildcardStatusMissing        = "missing"
 	wildcardStatusUnreadable     = "unreadable"
 	wildcardStatusDomainMismatch = "domain_mismatch"
+	wildcardStatusNotServed      = "not_served"
 )
 
 // Sentinel parse failures, so a caller can tell "this secret is not a TLS
@@ -137,6 +138,11 @@ type WildcardTLSReport struct {
 	// — the exact predicate servesHostFromWildcard assumes when it omits a
 	// spoke's tls: block.
 	CoversClusterDomain bool `json:"covers_cluster_domain"`
+
+	// DefaultSSLConfigured records whether ingress-nginx's
+	// --default-ssl-certificate names this secret. It is false for findings
+	// where the hub could not prove the controller serves the wildcard.
+	DefaultSSLConfigured bool `json:"default_ssl_configured"`
 }
 
 // Healthy reports whether the certificate needs no attention.
@@ -261,6 +267,19 @@ func splitSecretRef(ref string) (namespace, name string, ok bool) {
 	return namespace, name, true
 }
 
+func ingressNginxDefaultSSLArgsCover(args, secretRef string) bool {
+	fields := strings.Fields(args)
+	for i, arg := range fields {
+		if strings.TrimSpace(arg) == "--default-ssl-certificate="+secretRef {
+			return true
+		}
+		if strings.TrimSpace(arg) == "--default-ssl-certificate" && i+1 < len(fields) && strings.TrimSpace(fields[i+1]) == secretRef {
+			return true
+		}
+	}
+	return false
+}
+
 // kubectlSaysNotFound reports whether a failed kubectl invocation failed
 // because the object does not exist, rather than because the cluster could not
 // be reached.
@@ -320,6 +339,32 @@ func collectWildcardTLSHealth(ctx context.Context, cluster *ClusterConfig, timeo
 		}
 	}
 
+	args, err := kubectlForClusterContext(ctx, cluster,
+		"--request-timeout", timeout.String(),
+		"get", "deployment", "ingress-nginx-controller", "-n", "ingress-nginx",
+		"-o", "jsonpath={.spec.template.spec.containers[*].args[*]}").Output()
+	if err != nil {
+		if kubectlSaysNotFound(err) {
+			return &WildcardTLSReport{
+				Secret: secretRef,
+				Status: wildcardStatusNotServed,
+				Detail: "the cluster opted in to wildcard TLS but the ingress-nginx controller deployment was not found, so the hub cannot prove the wildcard is served by default",
+			}
+		}
+		if logger != nil {
+			logger.Warn("wildcard TLS check: could not read ingress-nginx controller args — reporting UNKNOWN, not healthy",
+				"cluster", cluster.ID, "secret", secretRef, "error", err)
+		}
+		return nil
+	}
+	if !ingressNginxDefaultSSLArgsCover(string(args), secretRef) {
+		return &WildcardTLSReport{
+			Secret: secretRef,
+			Status: wildcardStatusNotServed,
+			Detail: "the cluster opted in to wildcard TLS but ingress-nginx does not advertise --default-ssl-certificate=" + secretRef + ", so spokes without tls blocks may be served the controller's self-signed certificate",
+		}
+	}
+
 	out, err := kubectlForClusterContext(ctx, cluster,
 		"--request-timeout", timeout.String(),
 		"get", "secret", name, "-n", namespace, "-o", "json").Output()
@@ -352,5 +397,6 @@ func collectWildcardTLSHealth(ctx context.Context, cluster *ClusterConfig, timeo
 		}
 	}
 	rep := summarizeWildcardTLS(cert, secretRef, cluster.Domain, now, wildcardExpiryWarnWindow)
+	rep.DefaultSSLConfigured = true
 	return &rep
 }

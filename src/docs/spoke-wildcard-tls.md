@@ -127,6 +127,7 @@ of the fleet-health panel. A healthy certificate is deliberately silent.
 | `expired` | Past `notAfter` | Every wildcard-served spoke on the cluster is failing TLS validation now |
 | `missing` | Opted in, and the secret does not exist | Spokes provisioned without a `tls:` block are being served ingress-nginx's self-signed certificate. Either restore the secret or remove `wildcard_tls_secret` from the cluster |
 | `domain_mismatch` | The certificate does not carry `*.<cluster domain>` | The opt-in is pointing at a certificate that cannot serve the hosts it caused `tls:` blocks to be dropped from |
+| `not_served` | ingress-nginx is not advertising `--default-ssl-certificate=<wildcard_tls_secret>` | Configure the controller to serve the wildcard secret by default before relying on omitted `tls:` blocks |
 | `unreadable` | The secret exists but its `tls.crt` will not parse | Look at the secret directly |
 
 The 21-day threshold is "renewal is overdue", not "expiry is close". Warning at

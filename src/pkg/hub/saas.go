@@ -19085,6 +19085,8 @@ const dashboardHTML = `<!DOCTYPE html>
                 wtLabel = 'wildcard cert MISSING';
               } else if (wt.status === 'domain_mismatch') {
                 wtLabel = 'wildcard cert does not cover this domain';
+              } else if (wt.status === 'not_served') {
+                wtLabel = 'wildcard cert is not the ingress default';
               } else {
                 wtLabel = 'wildcard cert unreadable';
               }

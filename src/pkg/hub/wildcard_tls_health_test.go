@@ -450,6 +450,26 @@ func TestKubectlSaysNotFound(t *testing.T) {
 	}
 }
 
+func TestIngressNginxDefaultSSLArgsCover(t *testing.T) {
+	cases := []struct {
+		name string
+		args string
+		want bool
+	}{
+		{"equals form", "--watch-ingress-without-class --default-ssl-certificate=hive-hub/hive-wildcard-tls", true},
+		{"separate value form", "--watch-ingress-without-class --default-ssl-certificate hive-hub/hive-wildcard-tls", true},
+		{"missing flag", "--watch-ingress-without-class", false},
+		{"wrong secret", "--default-ssl-certificate=other/wildcard", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ingressNginxDefaultSSLArgsCover(tc.args, "hive-hub/hive-wildcard-tls"); got != tc.want {
+				t.Errorf("ingressNginxDefaultSSLArgsCover = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // ── collectWildcardTLSHealth vetoes ────────────────────────────────────────
 
 // Each of these returns before any kubectl runs, which is also why the test can
@@ -546,7 +566,7 @@ func TestWildcardTLSReportJSONShape(t *testing.T) {
 	}
 	// The dashboard switches on these two, so a rename must fail here rather
 	// than render nothing on a cluster whose certificate is about to expire.
-	for _, key := range []string{"status", "secret", "days_remaining", "covers_cluster_domain"} {
+	for _, key := range []string{"status", "secret", "days_remaining", "covers_cluster_domain", "default_ssl_configured"} {
 		if _, ok := decoded[key]; !ok {
 			t.Errorf("report JSON is missing %q: %s", key, raw)
 		}
@@ -572,11 +592,24 @@ func installWildcardKubectl(t *testing.T, mode, payload string) {
 	var body string
 	switch mode {
 	case "found":
-		body = "cat <<'JSON'\n" + payload + "\nJSON\nexit 0\n"
+		body = "case \"$*\" in\n" +
+			"  *'get deployment ingress-nginx-controller'*) printf '%s\\n' '--default-ssl-certificate=hive-hub/hive-wildcard-tls'; exit 0 ;;\n" +
+			"  *'get secret hive-wildcard-tls'*) cat <<'JSON'\n" + payload + "\nJSON\nexit 0 ;;\n" +
+			"esac\n" +
+			"echo 'unexpected kubectl args:' \"$*\" >&2\nexit 1\n"
+	case "nodefault":
+		body = "case \"$*\" in\n" +
+			"  *'get deployment ingress-nginx-controller'*) printf '%s\\n' '--watch-ingress-without-class'; exit 0 ;;\n" +
+			"  *'get secret hive-wildcard-tls'*) cat <<'JSON'\n" + payload + "\nJSON\nexit 0 ;;\n" +
+			"esac\n" +
+			"echo 'unexpected kubectl args:' \"$*\" >&2\nexit 1\n"
 	case "notfound":
 		// kubectl's real shape: a non-zero exit with the message on STDERR,
 		// which is where kubectlSaysNotFound reads it from.
-		body = `echo 'Error from server (NotFound): secrets "hive-wildcard-tls" not found' >&2` + "\nexit 1\n"
+		body = "case \"$*\" in\n" +
+			"  *'get deployment ingress-nginx-controller'*) printf '%s\\n' '--default-ssl-certificate=hive-hub/hive-wildcard-tls'; exit 0 ;;\n" +
+			"esac\n" +
+			`echo 'Error from server (NotFound): secrets "hive-wildcard-tls" not found' >&2` + "\nexit 1\n"
 	case "unreachable":
 		body = `echo 'Unable to connect to the server: dial tcp 10.0.0.1:443: i/o timeout' >&2` + "\nexit 1\n"
 	default:
@@ -632,6 +665,27 @@ func TestCollectWildcardTLSHealthUnreachableClusterReportsNothing(t *testing.T) 
 	}
 }
 
+func TestCollectWildcardTLSHealthReportsDefaultSSLNotConfigured(t *testing.T) {
+	_, pemBytes := testCert(t, "R3",
+		[]string{"*.hive.hivecommons.dev"},
+		time.Now().Add(-24*time.Hour), time.Now().Add(75*24*time.Hour))
+	installWildcardKubectl(t, "nodefault", string(tlsSecretJSON(t, pemBytes)))
+
+	rep := collectWildcardTLSHealth(context.Background(), optedInCluster(), time.Second, time.Now(), healthTestLogger())
+	if rep == nil {
+		t.Fatal("an opted-in cluster whose controller does not serve the wildcard must be reported")
+	}
+	if rep.Status != wildcardStatusNotServed {
+		t.Errorf("Status = %q, want %q", rep.Status, wildcardStatusNotServed)
+	}
+	if rep.Healthy() {
+		t.Error("a controller that does not serve the wildcard must never read as healthy")
+	}
+	if rep.DefaultSSLConfigured {
+		t.Error("DefaultSSLConfigured = true when ingress-nginx lacks the default SSL flag")
+	}
+}
+
 func TestCollectWildcardTLSHealthReadsALiveCertificate(t *testing.T) {
 	_, pemBytes := testCert(t, "R3",
 		[]string{"*.hive.hivecommons.dev", "*.lke.hive.hivecommons.dev", "hive.hivecommons.dev"},
@@ -647,6 +701,9 @@ func TestCollectWildcardTLSHealthReadsALiveCertificate(t *testing.T) {
 	}
 	if !rep.CoversClusterDomain {
 		t.Error("CoversClusterDomain = false for a certificate carrying *.hive.hivecommons.dev")
+	}
+	if !rep.DefaultSSLConfigured {
+		t.Error("DefaultSSLConfigured = false even though ingress-nginx names the wildcard as its default certificate")
 	}
 	if len(rep.DNSNames) != 3 {
 		t.Errorf("DNSNames = %v, want all three SANs carried through for the operator", rep.DNSNames)
