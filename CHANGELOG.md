@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-05 (v4.18.1)
+
+### Security
+
+- The contributor relay's `tmuxSendNudge()` now passes its message to `tmux send-keys -l` as a literal argv element instead of interpolating it into naked single quotes in a shell command ([#6069](https://github.com/hivecommons/hive/issues/6069)). Both current callers pass vetted quote-free constants, so this was not exploitable today — but a single apostrophe added to a future nudge message would have escaped the quoting and executed as shell inside the contributor container. A regression test now sends a hostile message through the nudge path and pins that it arrives as one literal argv element.
+
 ## 2026-09-05 (v4.18.0)
 
 ### Added
