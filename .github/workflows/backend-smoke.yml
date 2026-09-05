@@ -190,8 +190,19 @@ jobs:
         # that has not published yet still gets a meaningful run rather than a
         # pull failure), and prints which image the lane pinned either way so
         # the fallback is legible rather than silent.
+        env:
+          REPO_OWNER: ${{ github.repository_owner }}
         run: |
-          OWNER_IMAGE="ghcr.io/${{ github.repository_owner }}/hive-contributor:latest"
+          # Lowercased, because a container reference's path components must
+          # match [a-z0-9] and separators -- "ghcr.io/Tuna-OS/hive-contributor"
+          # is not a valid reference at all, and podman rejects it before any
+          # registry is contacted. Left as-is, every fork whose org is not
+          # already all-lowercase takes the fallback below on EVERY run: the
+          # same "your lane tests upstream's image" defect this change exists
+          # to remove, reached by a different route. GHCR serves the owner
+          # lowercased, so this is the canonical path rather than a guess.
+          OWNER="$(printf '%s' "$REPO_OWNER" | tr '[:upper:]' '[:lower:]')"
+          OWNER_IMAGE="ghcr.io/${OWNER}/hive-contributor:latest"
           UPSTREAM_IMAGE="ghcr.io/hivecommons/hive-contributor:latest"
           if podman pull "$OWNER_IMAGE"; then
             IMAGE="$OWNER_IMAGE"
