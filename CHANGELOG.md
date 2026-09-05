@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-05 (v4.16.0)
+
+### Added
+
+- Surface agent restart storms as hosted-fleet problems and add per-agent restart-counter resets from `/fleet`.
+
 ## 2026-09-05 (v4.15.0)
 
 ### Added
