@@ -60,6 +60,16 @@ esac
 STUB
   cat >"$STUB_DIR/dig" <<'STUB'
 #!/usr/bin/env bash
+# A resolver that could not be reached is NOT an empty answer. dig writes its
+# ";; communications error ..." diagnostics to STDOUT and reports the failure
+# through its EXIT STATUS (9). The stub could not express that shape before, so
+# nothing tested the direction where the script reads a broken resolver as a
+# wrong A record.
+if [ "${STUB_DIG_FAIL:-0}" != "0" ]; then
+  echo ";; communications error to 127.0.0.53#53: connection refused"
+  echo ";; no servers could be reached"
+  exit "${STUB_DIG_FAIL}"
+fi
 printf '%s' "${STUB_DIG_A-}"
 [ -n "${STUB_DIG_A-}" ] && echo
 exit 0
@@ -77,6 +87,7 @@ STUB
   chmod +x "$STUB_DIR/kubectl" "$STUB_DIR/dig" "$STUB_DIR/curl"
 }
 
+# shellcheck disable=SC2329 # invoked by the EXIT trap below.
 teardown_stubs() { [ -n "$STUB_DIR" ] && rm -rf "$STUB_DIR"; }
 
 # run_preflight prints the report and sets RC. PATH is replaced, not prefixed,
@@ -97,13 +108,21 @@ healthy_env() {
   export STUB_INGRESS_ANNOS=""
   export STUB_INGRESS_LIST="dibs dibs.kubestellar.io,"
   export STUB_DIG_A="157.151.252.29"
-  export STUB_CRT_JSON="[]"
+  # Genuine headroom: crt.sh DID observe the domain, and the certificates it
+  # returned are older than the window. This used to be "[]", which is the
+  # response crt.sh gives when it cannot service the query at all — a baseline
+  # that encoded the defect below as the healthy state, so nothing could catch
+  # it.
+  export STUB_CRT_JSON='[
+  {"issuer_name":"C=US, O=Let'"'"'s Encrypt, CN=R13","common_name":"hive.hivecommons.dev","name_value":"hive.hivecommons.dev","not_before":"2026-08-01T10:00:00"}
+]'
+  export CRT_SH_NOW_UTC=2026-09-04T15:00:00Z
 }
 
 clear_env() {
   unset STUB_NS_OK STUB_CONTROLLER_ARGS STUB_CERT_SANS STUB_INGRESS_CLASS \
         STUB_INGRESS_SECRET STUB_INGRESS_ANNOS STUB_INGRESS_LIST STUB_DIG_A \
-        STUB_CRT_JSON STUB_CRT_FAIL LE_CERT_LIMIT CRT_SH_NOW_UTC
+        STUB_CRT_JSON STUB_CRT_FAIL STUB_DIG_FAIL LE_CERT_LIMIT CRT_SH_NOW_UTC
 }
 
 echo "=== dibs cutover preflight contract (#5925) ==="
@@ -281,6 +300,69 @@ case "$OUT" in
   *"could not query crt.sh"*) ok "crt.sh unavailability warns instead of pretending there is headroom" ;;
   *) bad "crt.sh failure not reported as a warning:\n$OUT" ;;
 esac
+
+# The positive control for the guard below: rows WERE returned, none of them in
+# the window. That is a real zero and must still pass, or the guard is simply
+# refusing to ever report headroom.
+clear_env; healthy_env
+export LE_CERT_LIMIT=50
+run_preflight
+case "$OUT" in
+  *"0 Let's Encrypt certificate(s)"*"headroom 50"*) ok "certificates outside the window are real headroom and still pass" ;;
+  *) bad "genuine headroom not reported:\n$OUT" ;;
+esac
+
+# The defect. crt.sh answers a query it cannot service with HTTP 200 and a body
+# of "[]" — measured 2026-09-04, six consecutive times for hivecommons.dev,
+# while that domain has a live Let's Encrypt wildcard and ~50 certificates
+# minted the previous afternoon. Every guard in the script passed and the parse
+# yielded 0, so this reported "✓ 0 certificate(s) ... headroom 50": a confident
+# PASS on the one gate protecting the irreversible, quota-spending step, and a
+# 429 there costs TWO slots against the weekly cap, not one.
+clear_env; healthy_env
+export STUB_CRT_JSON="[]"
+run_preflight
+# Matched on the PASS line's shape ("; headroom N"), not the bare word: the
+# warning this must produce says "NOT headroom" and would match a looser test.
+case "$OUT" in
+  *"; headroom "*) bad "an empty crt.sh answer was reported as quota headroom:\n$OUT" ;;
+  *) ok "an empty crt.sh answer is never reported as headroom" ;;
+esac
+case "$OUT" in
+  *"NO certificates at all"*) ok "an empty crt.sh answer is reported as an unanswered query" ;;
+  *) bad "empty crt.sh answer not called out:\n$OUT" ;;
+esac
+case "$OUT" in
+  *"✓ 0 Let's Encrypt"*) bad "an empty crt.sh answer still rendered as a PASS:\n$OUT" ;;
+  *) ok "an empty crt.sh answer does not render as a pass" ;;
+esac
+
+# ── check 5 again: a resolver that could not answer ─────────────────────────
+# Sharper here than in verify.sh: this check's empty-answer verdict tells the
+# operator the A record "has not been done", which under a resolver outage is
+# an instruction to create a record #5925 has already confirmed exists.
+echo
+echo "check 5: a resolver that could not answer"
+clear_env; healthy_env
+export STUB_DIG_FAIL=9
+run_preflight
+case "$OUT" in
+  *"resolver could not answer"*) ok "a resolver that could not answer is reported as unchecked" ;;
+  *) bad "resolver failure not reported as unchecked:\n$OUT" ;;
+esac
+case "$OUT" in
+  *"has not been done"*) bad "a resolver failure told the operator to create an existing record:\n$OUT" ;;
+  *) ok "a resolver failure never claims step 1 is undone" ;;
+esac
+case "$OUT" in
+  *"expected 157.151.252.29"*) bad "a resolver failure was reported as a WRONG record:\n$OUT" ;;
+  *) ok "a resolver failure is never reported as a wrong record" ;;
+esac
+if [ "$RC" -eq 0 ]; then
+  ok "a resolver failure warns rather than blocking"
+else
+  bad "resolver failure exited $RC, want 0:\n$OUT"
+fi
 
 # ── the skip contract ──────────────────────────────────────────────────────
 # A check that could not run must never read as a passed one. This is the

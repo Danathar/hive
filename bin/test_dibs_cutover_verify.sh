@@ -78,6 +78,16 @@ STUB
 
   cat >"$STUB_DIR/bin/dig" <<'STUB'
 #!/usr/bin/env bash
+# A resolver that could not be reached is NOT an empty answer. dig writes its
+# ";; communications error ..." diagnostics to STDOUT and reports the failure
+# through its EXIT STATUS (9). The stub could not express that shape before, so
+# nothing tested the direction where the script reads a broken resolver as a
+# wrong A record.
+if [ "${STUB_DIG_FAIL:-0}" != "0" ]; then
+  echo ";; communications error to 127.0.0.53#53: connection refused"
+  echo ";; no servers could be reached"
+  exit "${STUB_DIG_FAIL}"
+fi
 printf '%s' "${STUB_DIG_A-}"
 [ -n "${STUB_DIG_A-}" ] && echo
 exit 0
@@ -128,7 +138,7 @@ dibs-kubestellar-redirect dibs.kubestellar.io"
 
 clear_env() {
   unset STUB_DIG_A STUB_CERT_TEXT STUB_NEW_CODE STUB_LEGACY_PROBE \
-        STUB_INGRESS_LIST STUB_TLS_FAIL STUB_NEW_CURL_FAIL \
+        STUB_INGRESS_LIST STUB_TLS_FAIL STUB_NEW_CURL_FAIL STUB_DIG_FAIL \
         STUB_LEGACY_CURL_FAIL STUB_WHOAMI_CODE STUB_KUBECTL_OK \
         HIVE_HUB_COOKIE HUB_HOST
 }
@@ -180,6 +190,43 @@ if [ "$RC" -eq 78 ]; then
 else
   bad "wrong A record exited $RC, want 78:\n$OUT"
 fi
+
+# A resolver that could not answer is not a wrong record. Measured 2026-09-04
+# on a host with no local resolver, this check reported "resolves to ';;
+# communications error ...', expected 157.151.252.29" — a hard FAIL naming the
+# one conclusion it had no evidence for. #5925 records that the A record
+# ALREADY EXISTS and says to confirm it "rather than re-create", so this
+# message sends an operator to undo a step that is already done.
+clear_env; healthy_env
+export STUB_DIG_FAIL=9
+run_verify
+case "$OUT" in
+  *"resolver could not answer"*) ok "a resolver that could not answer is reported as unchecked" ;;
+  *) bad "resolver failure not reported as unchecked:\n$OUT" ;;
+esac
+case "$OUT" in
+  *"communications error"*) bad "dig's stdout diagnostics were read as an address:\n$OUT" ;;
+  *) ok "dig's stdout diagnostics never reach the address comparison" ;;
+esac
+case "$OUT" in
+  *"expected 157.151.252.29"*) bad "a resolver failure was reported as a WRONG record:\n$OUT" ;;
+  *) ok "a resolver failure is never reported as a wrong record" ;;
+esac
+if [ "$RC" -eq 0 ]; then
+  ok "a resolver failure warns rather than blocking an otherwise-complete cutover"
+else
+  bad "resolver failure exited $RC, want 0 (everything else healthy):\n$OUT"
+fi
+
+# The other half of the contract: a resolver that DID answer, with no record,
+# is still a genuine finding. The guard above must not swallow it.
+clear_env; healthy_env
+export STUB_DIG_A=""
+run_verify
+case "$OUT" in
+  *"has no A record"*) ok "an answered lookup with no A record is still a failure" ;;
+  *) bad "NXDOMAIN no longer reported as a missing record:\n$OUT" ;;
+esac
 
 # ── check 2: the served certificate ────────────────────────────────────────
 # The failure the issue's review flagged as only discoverable after the

@@ -232,11 +232,43 @@ EOF
 # ── 5. DNS ─────────────────────────────────────────────────────────────────
 check_dns() {
   echo "5. DNS for ${DIBS_NEW_HOST}"
-  local answer=""
+  local answer="" rc=0
+  # WHY THE EXIT STATUS IS READ AND NOT JUST THE OUTPUT.
+  #
+  # `dig +short` writes its ";; communications error ..." diagnostics to
+  # STDOUT, and signals a resolver it could not reach through its EXIT STATUS
+  # (9) rather than through an empty answer. Reading stdout alone therefore
+  # turns "there is no resolver here" into a non-empty answer string, which
+  # compares unequal to the expected address and gets reported as a WRONG
+  # RECORD. Measured 2026-09-04 on a host with no local resolver: this check
+  # reported
+  #
+  #   dibs.hivecommons.dev resolves to ';; communications error to
+  #   127.0.0.53#53: connection refused ...', expected 157.151.252.29
+  #
+  # which is the one conclusion this check must never reach on its own
+  # evidence — #5925 records that the A record ALREADY EXISTS and warns to
+  # confirm it "rather than re-create" it. Both scripts state the contract
+  # that a check which could not RUN is a warning and never a pass; this is
+  # that contract applied to the direction nobody tested.
+  #
+  # It matters more here than in verify.sh: this check's empty-answer verdict
+  # tells the operator the A record "has not been done", which under a resolver
+  # outage is an instruction to create a record that already exists.
   if command -v dig >/dev/null 2>&1; then
-    answer="$(dig +short A "$DIBS_NEW_HOST" 2>/dev/null | tr '\n' ' ')"
+    answer="$(dig +short A "$DIBS_NEW_HOST" 2>/dev/null)"; rc=$?
+    if [ "$rc" -ne 0 ]; then
+      _pf_skip "the resolver could not answer for ${DIBS_NEW_HOST} (dig exit ${rc}) — DNS was NOT checked, and this says nothing about the record"
+      return
+    fi
+    answer="$(printf '%s\n' "$answer" | grep -v '^;;' | tr '\n' ' ')"
   elif command -v getent >/dev/null 2>&1; then
-    answer="$(getent ahostsv4 "$DIBS_NEW_HOST" 2>/dev/null | awk '{print $1}' | sort -u | tr '\n' ' ')"
+    answer="$(getent ahostsv4 "$DIBS_NEW_HOST" 2>/dev/null | awk '{print $1}' | sort -u | tr '\n' ' ')"; rc=$?
+    # getent exits 2 for "name not found" — an answer, not a failure to look.
+    if [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ]; then
+      _pf_skip "the resolver could not answer for ${DIBS_NEW_HOST} (getent exit ${rc}) — DNS was NOT checked, and this says nothing about the record"
+      return
+    fi
   else
     _pf_skip "no dig or getent available to resolve ${DIBS_NEW_HOST}"
     return
@@ -267,14 +299,35 @@ check_le_headroom() {
     return
   fi
 
-  local url json count
+  local url json counts total count
   url="https://crt.sh/?q=${LE_REGISTERED_DOMAIN}&output=json"
   if ! json="$(curl -fsSL --max-time "$CRT_SH_TIMEOUT_SEC" "$url" 2>/dev/null)"; then
     _pf_skip "could not query crt.sh for ${LE_REGISTERED_DOMAIN}; do not treat this as quota headroom"
     return
   fi
 
-  if ! count="$(printf '%s' "$json" | \
+  # WHY THE ROW TOTAL IS READ AND NOT JUST THE IN-WINDOW COUNT.
+  #
+  # crt.sh answers a query it cannot service with HTTP 200 and a body of "[]" —
+  # not a 5xx, not malformed JSON, so every guard above passes and the parse
+  # below yields 0. Measured 2026-09-04: six consecutive requests for
+  # hivecommons.dev returned exactly that, while the domain demonstrably has a
+  # live Let's Encrypt wildcard and, per #5925, ~50 certificates minted in a
+  # burst the previous afternoon. This check reported
+  #
+  #   ✓ 0 Let's Encrypt certificate(s) for hivecommons.dev in the last 168h;
+  #     headroom 50
+  #
+  # which is a confident PASS on the one gate that guards the irreversible,
+  # quota-spending step — and it is the reading this script's own contract
+  # forbids: a check that could not RUN is a warning, never a pass.
+  #
+  # Zero rows is genuinely ambiguous. It means either "this domain has never
+  # had a certificate" or "crt.sh did not answer". For a domain we are about to
+  # re-issue an EXISTING wildcard for, the first is not a possibility, so zero
+  # rows can only be the second. Zero rows IN THE WINDOW, out of rows that were
+  # actually returned, is a real and useful answer and still passes.
+  if ! counts="$(printf '%s' "$json" | \
       LE_CERT_WINDOW_HOURS="$LE_CERT_WINDOW_HOURS" \
       LE_REGISTERED_DOMAIN="$LE_REGISTERED_DOMAIN" \
       CRT_SH_NOW_UTC="${CRT_SH_NOW_UTC:-}" \
@@ -313,12 +366,19 @@ if isinstance(rows, dict):
 
 seen = set()
 count = 0
+# total counts every row crt.sh returned FOR THIS DOMAIN, regardless of issuer
+# or age. It answers "did crt.sh observe this domain at all", which is what
+# separates a real zero from an unanswered query. Deliberately not filtered by
+# issuer: a domain whose only certificates came from another CA has still been
+# observed, and reading that as "no data" would be its own false alarm.
+total = 0
 for row in rows:
-    issuer = str(row.get("issuer_name", ""))
-    if "let" not in issuer.lower() or "encrypt" not in issuer.lower():
-        continue
     names = (str(row.get("common_name", "")) + "\n" + str(row.get("name_value", ""))).lower()
     if domain and domain not in names:
+        continue
+    total += 1
+    issuer = str(row.get("issuer_name", ""))
+    if "let" not in issuer.lower() or "encrypt" not in issuer.lower():
         continue
     not_before = parse_time(row.get("not_before"))
     if not_before is None or not_before < cutoff:
@@ -328,17 +388,25 @@ for row in rows:
         continue
     seen.add(ident)
     count += 1
-print(count)
+print(total, count)
 ')"; then
     _pf_skip "crt.sh returned data that could not be parsed; do not treat this as quota headroom"
     return
   fi
 
-  case "$count" in
+  total="${counts%% *}"
+  count="${counts##* }"
+  case "$total$count" in
     ''|*[!0-9]*)
-      _pf_skip "crt.sh returned an unexpected count '${count}'; do not treat this as quota headroom"
+      _pf_skip "crt.sh returned an unexpected count '${counts}'; do not treat this as quota headroom"
       return ;;
   esac
+  if [ "$total" -eq 0 ]; then
+    # See the note above: for a domain already serving Let's Encrypt
+    # certificates, "no rows at all" is an unanswered query wearing a 200.
+    _pf_skip "crt.sh returned NO certificates at all for ${LE_REGISTERED_DOMAIN} — not credible for a domain already serving Let's Encrypt certificates, so this is an unanswered query and NOT headroom; retry, or count from the CA's own rate-limit tooling before spending the window"
+    return
+  fi
   case "$LE_CERT_LIMIT" in
     ''|*[!0-9]*)
       _pf_skip "LE_CERT_LIMIT='${LE_CERT_LIMIT}' is not a positive integer; cannot estimate headroom"
