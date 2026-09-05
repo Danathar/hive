@@ -11,6 +11,16 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-05 (v4.17.0)
+
+### Added
+
+- Fleet health now carries output-freshness telemetry so L3-L6 no-write verdicts explain whether kicks are broken, intentionally idle, advisory-only, budget-suppressed, or queued work is not writable ([#6036](https://github.com/hivecommons/hive/issues/6036)).
+
+### Fixed
+
+- Spoke health now treats on-demand/off-schedule stopped agents as idle instead of down, and zero-token checks explain the cause while skipping all-paused or no-due hives ([#6030](https://github.com/hivecommons/hive/issues/6030), [#6032](https://github.com/hivecommons/hive/issues/6032)).
+
 ## 2026-09-05 (v4.16.1)
 
 ### Fixed
