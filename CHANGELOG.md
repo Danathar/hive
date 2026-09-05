@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-05 (v4.14.1)
+
+### Fixed
+
+- The `dibs` cutover preflight no longer reports an unanswered crt.sh query as Let's Encrypt headroom ([#5925](https://github.com/hivecommons/hive/issues/5925)). crt.sh answers a query it cannot service with `HTTP 200` and a body of `[]` — measured six consecutive times for `hivecommons.dev`, a domain that has a live Let's Encrypt wildcard and ~50 certificates minted the day before — so every guard in the check passed and the parse yielded zero, rendering `✓ 0 certificate(s) in the last 168h; headroom 50`. That was a confident green on the one gate gating the irreversible, quota-spending step, where a 429 costs two slots against the weekly cap rather than one. Zero rows *for the domain at all* is now reported as an unanswered query; zero rows *inside the window*, out of rows actually returned, is still real headroom and still passes. Both cutover scripts also stop reading an unreachable DNS resolver as a wrong or missing A record: `dig +short` prints its `;; communications error …` diagnostics to stdout and signals the failure only through its exit status, so a host with no resolver was told `dibs.hivecommons.dev resolves to ';; communications error …', expected 157.151.252.29` — and the preflight told the operator to create a record the issue had already confirmed exists. Both now report the lookup as unchecked, matching the contract both scripts already stated: a check that could not run is a warning, never a pass.
+
 ## 2026-09-04 (v4.14.0)
 
 ### Added
