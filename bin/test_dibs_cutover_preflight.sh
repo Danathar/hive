@@ -87,6 +87,7 @@ STUB
   chmod +x "$STUB_DIR/kubectl" "$STUB_DIR/dig" "$STUB_DIR/curl"
 }
 
+# shellcheck disable=SC2329 # invoked by the EXIT trap below.
 teardown_stubs() { [ -n "$STUB_DIR" ] && rm -rf "$STUB_DIR"; }
 
 # run_preflight prints the report and sets RC. PATH is replaced, not prefixed,
