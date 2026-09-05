@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-05 (v4.17.1)
+
+### Fixed
+
+- Fleet health now counts only the agents actually named by provider-quota telemetry, surfaces pre-threshold start-failure causes in agent verdicts, and renders structured GitHub App auth failures with App/installation/host details ([#6031](https://github.com/hivecommons/hive/issues/6031), [#6035](https://github.com/hivecommons/hive/issues/6035), [#6037](https://github.com/hivecommons/hive/issues/6037)).
+
 ## 2026-09-05 (v4.17.0)
 
 ### Added
