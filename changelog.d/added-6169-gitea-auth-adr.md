@@ -1,0 +1,1 @@
+- ADR-0018 decides the Gitea auth & egress model for the forge-support series: one bot account with three ACMM-tier scoped tokens held only by the hive, the Gitea host joining `api.github.com` and Linear as an enforced MITM host with proxy-side credential injection, and no forge credential ever entering an agent session ([#6169](https://github.com/hivecommons/hive/issues/6169)).

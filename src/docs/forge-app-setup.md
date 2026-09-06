@@ -209,9 +209,11 @@ Listed so the size of the gap is legible, not as a plan of record:
 3. A forge-neutral agent execution path, since agents reach their forge through
    the `gh` CLI wrapper rather than through `pkg/forge`.
 4. Credential plumbing for token-based forges alongside the GitHub App minting
-   machinery, including per-tier scoping.
+   machinery, including per-tier scoping. For Gitea, the decided model is
+   [ADR-0018](adr/0018-gitea-tier-token-auth.md).
 5. A GitLab/Gitea dashboard login provider.
-6. Egress-proxy mode enforcement registration for the non-GitHub hosts.
+6. Egress-proxy mode enforcement registration for the non-GitHub hosts — also
+   covered, for Gitea, by [ADR-0018](adr/0018-gitea-tier-token-auth.md).
 
 ## See also
 
