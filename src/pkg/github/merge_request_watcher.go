@@ -246,6 +246,17 @@ func (c *Client) handleOneMergeRequest(ctx context.Context, path string, nowFn f
 		return
 	}
 
+	// Per-repo pause (#6203), on the same footing as the PR relay above and for
+	// the same reason: `PUT /pulls/{n}/merge` is hard-denied at the proxy for
+	// every mode, so this watcher is the only agent-reachable merge path and
+	// the only place a pause can stop one. Checked before the optional
+	// branch-update so a paused repo receives no write at all, not even the
+	// head-branch push that "update branch" performs.
+	if c.RepoIsPaused(req.Repo) {
+		c.denyMergeRequest(path, req, RepoPausedReason(req.Repo), nowFn)
+		return
+	}
+
 	// Optional branch-update-first (resolves "behind main"). A failure here is
 	// not fatal — the merge attempt below will surface the real blocker.
 	if req.UpdateBranch {

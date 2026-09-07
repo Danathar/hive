@@ -82,6 +82,21 @@ func (c *Engine) ready() bool {
 	return c != nil && c.transport != nil && c.gh != nil
 }
 
+// activeRepos is Repositories() minus the repos under an operator pause
+// (#6203). The narrowing lives behind an optional transport capability, the
+// same shape New uses for MutationBoundary: a transport that does not know
+// about pauses (the sweep's own fakes) keeps its full repository list, so
+// pause support is additive rather than a Transport-interface break.
+func (c *Engine) activeRepos() []string {
+	if c == nil || c.transport == nil {
+		return nil
+	}
+	if provider, ok := c.transport.(interface{ ActiveRepositories() []string }); ok {
+		return provider.ActiveRepositories()
+	}
+	return c.transport.Repositories()
+}
+
 // SweepQueuedAutoMerges consumes queued automerge requests using a one-shot engine.
 func SweepQueuedAutoMerges(ctx context.Context, transport Transport, opts Options, sweepOpts AutoMergeSweepOptions) (*AutoMergeSweepResult, error) {
 	return New(transport, opts).SweepQueuedAutoMerges(ctx, sweepOpts)
@@ -339,7 +354,10 @@ func (c *Engine) SweepQueuedAutoMerges(ctx context.Context, opts AutoMergeSweepO
 	noAppBotLoginWarned := false
 	noMergerAuthzWarned := false
 
-	for _, repo := range c.transport.Repositories() {
+	// activeRepos: an operator-paused repo receives no automerges (#6203). This
+	// sweep is hive-driven, not kick-driven, so leaving it on Repositories()
+	// would have kept merging into a repo during its release freeze.
+	for _, repo := range c.activeRepos() {
 		if len(result.Merged) >= maxMerges {
 			break
 		}
@@ -435,7 +453,8 @@ func (c *Engine) SweepSelfAuthoredAutoMerges(ctx context.Context, opts AutoMerge
 		return result, nil
 	}
 
-	for _, repo := range c.transport.Repositories() {
+	// See the queued sweep above: paused repos are out of scope for automerge.
+	for _, repo := range c.activeRepos() {
 		if len(result.Merged) >= maxMerges {
 			break
 		}

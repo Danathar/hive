@@ -285,7 +285,9 @@ func (s *Scheduler) substituteTemplateWithVars(template string, actionable *gith
 		return "", true
 	}
 
-	reposList := strings.Join(s.cfg.Project.Repos, ", ")
+	// ActiveRepos, not Project.Repos: ${PROJECT_REPOS_LIST} is what a template
+	// tells an agent to work through, and a paused repo is not work (#6203).
+	reposList := strings.Join(s.cfg.ActiveRepos(), ", ")
 	primaryRepo := s.cfg.Project.PrimaryRepo
 	fullPrimaryRepo := fmt.Sprintf("%s/%s", s.cfg.Project.Org, primaryRepo)
 
@@ -624,9 +626,17 @@ func (s *Scheduler) BuildAgentMessageFromLastActionable(agentName string) string
 func (s *Scheduler) buildReposSection() string {
 	var b strings.Builder
 	host := s.cfg.GitHub.ResolvedBaseURL() // always a full URL; github.com or the GHE instance
-	b.WriteString(fmt.Sprintf("AUTHORIZED REPOS (all on %s — you may ONLY interact with these):\n", host))
 	org := s.cfg.Project.Org
-	for _, repo := range s.cfg.Project.Repos {
+	// A paused repo is still a repo this hive watches — it keeps its dashboard
+	// card and its ACMM eval — but it is NOT work, so it is absent from the
+	// authorized list and named separately below (#6203). Naming it rather than
+	// silently omitting it matters: an agent that has filed issues in that repo
+	// for weeks would otherwise read the shorter list as scope loss and file a
+	// finding about it.
+	active := s.cfg.ActiveRepos()
+	paused := s.cfg.PausedRepoNames()
+	b.WriteString(fmt.Sprintf("AUTHORIZED REPOS (all on %s — you may ONLY interact with these):\n", host))
+	for _, repo := range active {
 		full := repo
 		if !strings.Contains(repo, "/") {
 			full = org + "/" + repo
@@ -634,6 +644,17 @@ func (s *Scheduler) buildReposSection() string {
 		// Print the fully-qualified URL so the host is unambiguous in the prompt —
 		// a github.ibm.com repo must never be mistaken for a github.com one.
 		b.WriteString(fmt.Sprintf("  %s/%s\n", strings.TrimRight(host, "/"), full))
+	}
+	if len(active) == 0 {
+		b.WriteString("  (none — every repo this hive watches is currently paused)\n")
+	}
+	if len(paused) > 0 {
+		pausedFull := make([]string, 0, len(paused))
+		for _, repo := range paused {
+			pausedFull = append(pausedFull, config.QualifyRepo(org, repo))
+		}
+		b.WriteString(fmt.Sprintf("⏸️ PAUSED BY THE OPERATOR (watched, but OUT OF SCOPE this session): %s\n", strings.Join(pausedFull, ", ")))
+		b.WriteString("   The hive is deliberately quiet on those repos — a release freeze, an incident, a repo declared but not yet onboarded. Writes to them are refused deterministically by the proxy and by the hive-open-pr/hive-merge relays, so retrying cannot succeed. This is an operator decision, NOT an outage and NOT scope loss: do not work them, do not route around it, and do not file an issue about it.\n")
 	}
 	b.WriteString("⛔ NEVER access, search, list, file issues in, or open PRs on repos not listed above.\n")
 	b.WriteString(fmt.Sprintf("⛔ Every repo above is on %s. This hive is single-host — never touch a repo on a different GitHub host.\n", host))
@@ -654,10 +675,14 @@ func (s *Scheduler) buildReposSection() string {
 	// touched (root-caused on a live 3-repo hive: sec-check scanned only
 	// the primary across every session). The kick is the one place every
 	// agent/template combination sees, so the instruction lives here.
-	if len(s.cfg.Project.Repos) > 1 {
+	if len(active) > 1 {
+		// Rotate over the ACTIVE repos, and never name a paused repo as the one
+		// to fall back on: telling an agent "all of them are in scope, not just
+		// the primary" while the primary is frozen is a contradiction it will
+		// try to resolve by writing there.
 		primary := s.cfg.Project.PrimaryRepo
-		if primary == "" {
-			primary = s.cfg.Project.Repos[0]
+		if primary == "" || s.cfg.IsRepoPaused(primary) {
+			primary = active[0]
 		}
 		b.WriteString(fmt.Sprintf(`🔁 MULTI-REPO COVERAGE — REQUIRED: this project has %d authorized repos; ALL of them are in scope, not just the primary (%s).
 Your workdir is, at most, a checkout of the primary repo — never of the others. Each session, pick the authorized repo you have LEAST RECENTLY covered (check your beads and the [<your-role>] issues you previously filed in each repo) and work THAT repo this session:
@@ -665,7 +690,7 @@ Your workdir is, at most, a checkout of the primary repo — never of the others
   - Pass the chosen repo EXPLICITLY to every gh command: --repo "<org>/<repo>" (do not rely on $HIVE_REPO, which always names the primary repo).
   - $HIVE_REPOS lists every authorized repo, comma-separated.
 ⛔ Do NOT default to the primary repo every session — repos you never visit accumulate unseen problems.
-`, len(s.cfg.Project.Repos), org+"/"+primary, strings.TrimRight(host, "/")))
+`, len(active), config.QualifyRepo(org, primary), strings.TrimRight(host, "/")))
 	}
 	return b.String()
 }

@@ -1284,6 +1284,18 @@ func buildRepos(cfg *config.Config, actionable *github.ActionableResult) []Front
 			ActionableIssues: issuesByRepo[repoName],
 			OpenPrs:          prsByRepo[repoName],
 		}
+		// Deliberately iterating cfg.Project.Repos above, not ActiveRepos: a
+		// paused repo keeps its card and its counts. Dropping it here would
+		// reproduce the very thing pause exists to avoid — a repo that vanishes
+		// from the operator's view and is easy to forget to bring back (#6203).
+		if rp, paused := cfg.RepoPauseFor(repoName); paused {
+			r.Paused = true
+			r.PausedBy = rp.By
+			r.PauseReason = rp.Reason
+			if rp.At != nil && !rp.At.IsZero() {
+				r.PausedAt = rp.At.UTC().Format(time.RFC3339)
+			}
+		}
 		if r.ActionableIssues == nil {
 			r.ActionableIssues = []any{}
 		}
