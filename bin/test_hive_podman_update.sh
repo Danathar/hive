@@ -261,7 +261,9 @@ case_expect() {
   local out rc why=""
   out="$(run_update "$@")"; rc=$?
   [ "$rc" != "$want_rc" ] && why="exit $rc, wanted $want_rc"
-  if [ -n "$want_txt" ] && ! printf '%s' "$out" | grep -qF -- "$want_txt"; then
+  # herestring, not a pipe: grep -q closing the pipe early would EPIPE printf
+  # and, under pipefail, turn a successful match into a spurious FAIL (#5969)
+  if [ -n "$want_txt" ] && ! grep -qF -- "$want_txt" <<<"$out"; then
     why="${why:+$why; }missing text: $want_txt"
   fi
   if [ -z "$why" ]; then
@@ -311,7 +313,7 @@ reset_env
 case_expect "a tag resolves to the registry's list digest" 0 "${REPO}@${DIGEST_NEW}" resolve "${REPO}:stable"
 reset_env
 out="$(run_update resolve "${REPO}:stable")"
-check "resolve never returns the per-architecture digest" '! printf "%s" "$out" | grep -q "$DIGEST_ARCH"'
+check "resolve never returns the per-architecture digest" '! grep -q "$DIGEST_ARCH" <<<"$out"'
 reset_env; export HIVE_UPDATE_SKOPEO="skopeo-not-installed"
 case_expect "without skopeo it falls back to the podman digest column, still the list digest" 0 "${REPO}@${DIGEST_NEW}" resolve "${REPO}:stable"
 reset_env
@@ -452,8 +454,8 @@ reset_env; seed_failed_over_healthy
 export FAKE_GATEWAY_CURL_RC=7
 out="$(run_update rollback)"; rc=$?
 check "a rollback whose gateway never answers exits 78, not 0" '[ "$rc" = "78" ]'
-check "and never prints 'and it is serving'" '! printf "%s" "$out" | grep -q "and it is serving"'
-check "and says the gateway did not answer" 'printf "%s" "$out" | grep -q "the gateway did not answer"'
+check "and never prints 'and it is serving'" '! grep -q "and it is serving" <<<"$out"'
+check "and says the gateway did not answer" 'grep -q "the gateway did not answer" <<<"$out"'
 check "while the restored digest is still recorded healthy -- hive itself served on it" \
   'grep -q "^# HIVE-PIN healthy .* ${DIGEST_OLD} " "$(dropin)"'
 reset_env; seed_failed_over_healthy
@@ -500,8 +502,13 @@ check "the history is capped rather than growing without bound" \
 check "the newest entry survives the cap" \
   'grep -q "^# HIVE-PIN healthy .* ${DIGEST_NEW} " "$(dropin)"'
 
+# Captured at each stage rather than piped, for the same reason as case_expect:
+# `grep -qv` stops at its first non-matching line, and the EPIPE that sends
+# upstream turns the pipeline false under pipefail whatever was actually found.
+status_out="$(run_update status)"
+pin_history_block="$(grep -A3 "Pin history" <<<"$status_out")"
 check "the header prose is not parsed as a history entry" \
-  'run_update status | grep -A3 "Pin history" | grep -qv "newest first; the top"'
+  'grep -qv "newest first; the top" <<<"$pin_history_block"'
 
 echo
 echo "== unpin =="
@@ -798,7 +805,7 @@ check "pin left the checkout's gateway config on the host" \
 reset_env; seed_managed_host
 out="$(run_update pin "${REPO}:stable")"
 check "pin says nothing about the gateway config when it already matches" \
-  '! printf "%s" "$out" | grep -qF "refreshed the gateway config"'
+  '! grep -qF "refreshed the gateway config" <<<"$out"'
 
 # Unit files are reported, never rewritten by pin: a unit change needs a
 # container recreate to mean anything, and rewriting hive.container under an
@@ -849,11 +856,11 @@ check "reconcile covers exactly the boot units setup installs" \
 reset_env; seed_managed_host
 out="$(run_update reconcile check)"
 check "nginx.conf is one of the files reconcile manages" \
-  'printf "%s" "$out" | grep -qF "match   gateway config"'
+  'grep -qF "match   gateway config" <<<"$out"'
 check "hive.yaml is never listed as a managed file" \
-  '! printf "%s" "$out" | grep -qE "(match|STALE|missing) +[a-z ]*: .*hive[.]yaml"'
+  '! grep -qE "(match|STALE|missing) +[a-z ]*: .*hive[.]yaml" <<<"$out"'
 check "hive.env is never listed as a managed file" \
-  '! printf "%s" "$out" | grep -qE "(match|STALE|missing) +[a-z ]*: .*hive[.]env"'
+  '! grep -qE "(match|STALE|missing) +[a-z ]*: .*hive[.]env" <<<"$out"'
 
 echo "== invocation =="
 reset_env
