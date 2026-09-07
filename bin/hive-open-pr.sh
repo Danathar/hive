@@ -63,6 +63,15 @@ while [ $# -gt 0 ]; do
     --issues=*|--issue=*) ISSUES="$ISSUES,${1#*=}"; shift;;
     # Tolerate value-less flags gh accepts but we don't need.
     --draft|--fill|--web|--no-maintainer-edit) shift;;
+    # `--label hold` is in every hold-gated policy template, so it arrives on
+    # essentially every agent PR. The label IS applied -- server-side, by the
+    # watcher's F6 block -- so warning about it is not merely noise: to an
+    # agent reading its own transcript mid-run, "ignoring unrecognized flag
+    # --label" reads as "your PR will not be held", which is the opposite of
+    # what happens. Accept it quietly, and drop its value like any other
+    # two-argument flag.
+    --label|-l) shift 2;;
+    --label=*) shift;;
     # An unrecognized flag is DROPPED, and if it takes a value the value is
     # dropped by the `*)` arm below. That silence is how `--body-file` losing
     # the entire PR body went unnoticed — so at least say what is ignored.
@@ -157,8 +166,33 @@ if issues:
 json.dump(req, open(path,"w"))
 PY
 else
-  # Minimal fallback escaper (no python): escape backslash and double-quote.
-  esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+  # Fallback escaper (no python3). Escaping only backslash and double-quote is
+  # not enough for the case this script exists to get right: `--body-file`
+  # bodies are multi-line, and a literal newline inside a JSON string is
+  # invalid JSON, so on a python3-less host the fix for lost bodies produced a
+  # request the watcher could only quarantine. It failed safe -- loudly, and
+  # without opening a bodyless PR -- but it did not work.
+  #
+  # Newline, carriage return and tab are what a PR body actually contains. The
+  # remaining C0 controls would still be invalid, so they are refused rather
+  # than emitted: a hand-rolled escaper that quietly writes broken JSON is the
+  # shape of the bug this PR is closing.
+  esc() {
+    printf '%s' "$1" | awk '
+      BEGIN { RS = "^$"; ORS = "" }
+      {
+        if (match($0, /[\001-\010\013\014\016-\037]/)) {
+          print "hive-open-pr: cannot encode a control character without python3" > "/dev/stderr"
+          exit 3
+        }
+        gsub(/\\/, "\\\\")
+        gsub(/"/,  "\\\"")
+        gsub(/\n/, "\\n")
+        gsub(/\r/, "\\r")
+        gsub(/\t/, "\\t")
+        print
+      }'
+  }
   ISSUES_JSON=""
   [ -n "$ISSUE_LIST" ] && ISSUES_JSON=",\"issues\":[$ISSUE_LIST]"
   printf '{"repo":"%s","head":"%s","base":"%s","title":"%s","body":"%s","agent":"%s"%s}\n' \
