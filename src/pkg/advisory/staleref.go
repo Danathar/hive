@@ -2,6 +2,7 @@ package advisory
 
 import (
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -44,12 +45,23 @@ import (
 // reach: the finding named its own remediation, and whether that remediation
 // landed is one lookup.
 
-// refClosedWindow bounds how far back a closure counts as evidence that this
-// finding healed. An issue closed a year ago is not why a finding computed
-// yesterday no longer holds -- far more likely the agent cited old context, or
-// the bead has been re-filed since. Deliberately more generous than
-// recentlyResolvedWindow: the closure has to predate the digest by enough for a
-// fix to have landed, not by little enough to still be news.
+// refClosedWindow bounds how long a retirement stays NEWS. A finding retired
+// because everything it named has closed is announced under Recently Resolved
+// for this long; after that it is simply absent from the digest.
+//
+// It deliberately does not gate the retirement itself. It used to, and that made
+// the verdict decay: with the closure ages measured against "now", the same
+// finding naming the same closed work -- no new evidence, nothing re-checked --
+// was retired for thirty days and then re-entered the OPEN set as a counted,
+// severity-ranked finding, permanently. "Is this still open?" is a question
+// about the finding and the work it names, and both stopped changing when that
+// work closed. Only "is this still worth announcing?" is a question about how
+// long ago that was.
+//
+// Still more generous than recentlyResolvedWindow, for the original reason:
+// that window bounds beads an agent closed itself, which is news measured in
+// hours, while this one bounds a retirement inferred from somebody else's
+// closure, which the reader may never have seen.
 const refClosedWindow = 30 * 24 * time.Hour
 
 // bareRefPattern matches a bare "#123" reference in finding prose.
@@ -171,7 +183,6 @@ func findingIssueRefs(f Finding, defaultOwner, defaultRepo string) []issueRef {
 //   - no resolver, or no repo context: nothing is looked up.
 //   - the finding names no references: nothing to conclude from.
 //   - a lookup returns ok=false: this is not evidence of anything.
-//   - a reference is closed outside refClosedWindow: too old to be why.
 //
 // Returning the LATEST closure is what the Recently Resolved section sorts and
 // renders on: it is the moment after which nothing this finding names was still
@@ -194,15 +205,11 @@ func staleFindingSettled(f Finding, refs []issueRef, resolve ResolveRef, now tim
 			return time.Time{}, false
 		}
 		// A closure with no timestamp still counts as closed -- it is the state
-		// that matters -- but it cannot advance the "healed at" moment, and it
-		// cannot be window-checked, so it is accepted without either.
-		if !st.ClosedAt.IsZero() {
-			if now.Sub(st.ClosedAt) > refClosedWindow {
-				return time.Time{}, false
-			}
-			if st.ClosedAt.After(latest) {
-				latest = st.ClosedAt
-			}
+		// that matters -- but it cannot advance the "healed at" moment, so it is
+		// accepted without one. How old the closure is does not enter the
+		// verdict; see refClosedWindow for why it decides only the announcement.
+		if st.ClosedAt.After(latest) {
+			latest = st.ClosedAt
 		}
 		resolvedAny = true
 	}
@@ -218,6 +225,76 @@ func staleFindingSettled(f Finding, refs []issueRef, resolve ResolveRef, now tim
 	return latest, true
 }
 
+// refVerdict is one memoized ResolveRef answer, including the "cannot tell"
+// case: a failed lookup is worth remembering too, or else a rate-limited build
+// repeats the same doomed call once per finding that names the reference.
+type refVerdict struct {
+	state RefState
+	ok    bool
+}
+
+// staleRefLookupBudget caps how many DISTINCT issues one digest build will look
+// up. It is set far above what a healthy digest needs -- the ~292-finding
+// digest behind #6080 named well under a hundred distinct items -- so that it
+// bounds a pathological build rather than shaping a normal one.
+const staleRefLookupBudget = 250
+
+// staleRefResolver is opts.ResolveRef with per-build memoization and an overall
+// lookup budget.
+//
+// partitionSettledStale runs over the FULL pre-cap finding set, so the number of
+// lookups is driven by how much the agents wrote, not by the digest's render
+// cap. Two consequences, neither of them handled before:
+//
+//   - The same issue is named by many findings. A tracking issue cited by every
+//     finding it tracks is the ordinary case, and each mention issued its own
+//     synchronous API call. Answers are memoized for the build, exactly as
+//     VerifyFindingPaths caches path existence and markPathStale dedups through
+//     its own "checked" map: an issue does not open or close while a single
+//     digest is being assembled.
+//   - Prose full of bare "#123" can name hundreds of distinct issues. The budget
+//     bounds that. Exhausting it reports "cannot tell", which every caller here
+//     already reads as "leave the finding open" -- the same fail-open posture as
+//     a network error, and the reason exhaustion can never retire anything by
+//     accident.
+//
+// Both matter for correctness and not only cost: a rate-limited lookup reports
+// ok=false and aborts that finding's whole verdict, so an unbounded, unmemoized
+// pass stops retiring findings exactly when the digest is large enough to need
+// it.
+type staleRefResolver struct {
+	resolve ResolveRef
+	cache   map[issueRef]refVerdict
+	budget  int
+}
+
+func newStaleRefResolver(resolve ResolveRef) *staleRefResolver {
+	return &staleRefResolver{
+		resolve: resolve,
+		cache:   make(map[issueRef]refVerdict),
+		budget:  staleRefLookupBudget,
+	}
+}
+
+// ResolveRef has the ResolveRef signature so it can be handed to
+// staleFindingSettled in place of the raw resolver.
+func (r *staleRefResolver) ResolveRef(owner, repo string, number int) (RefState, bool) {
+	ref := issueRef{Owner: owner, Repo: repo, Number: number}
+	if v, seen := r.cache[ref]; seen {
+		return v.state, v.ok
+	}
+	if r.budget <= 0 {
+		// A lookup that will not happen. Report "cannot tell" rather than an
+		// answer, and do not cache it: exhaustion is a property of this build,
+		// not a fact about this reference.
+		return RefState{}, false
+	}
+	r.budget--
+	state, ok := r.resolve(owner, repo, number)
+	r.cache[ref] = refVerdict{state: state, ok: ok}
+	return state, ok
+}
+
 // partitionSettledStale moves findings that are provenance-stale AND name only
 // closed GitHub work out of the open set, returning them as resolved entries.
 //
@@ -229,19 +306,37 @@ func staleFindingSettled(f Finding, refs []issueRef, resolve ResolveRef, now tim
 // analyzed commit is current evidence whatever it names, and retiring it because
 // it mentions a closed issue would silently delete the report of a
 // closed-too-early issue -- turning this guard into a way to lose findings.
-func partitionSettledStale(byAgent map[string][]Finding, opts DigestOptions, now time.Time) (map[string][]Finding, []ResolvedFinding) {
+//
+// It returns the surviving open findings, the retirements worth ANNOUNCING, and
+// how many findings were retired in total. Those last two differ: a retirement
+// leaves the open set whatever the age of the closure, but stops being news
+// after refClosedWindow. The caller needs the count rather than len(announced)
+// because the digest header must not keep counting a finding it no longer
+// renders anywhere.
+func partitionSettledStale(byAgent map[string][]Finding, opts DigestOptions, now time.Time) (map[string][]Finding, []ResolvedFinding, int) {
 	if opts.ResolveRef == nil {
-		return byAgent, nil
+		return byAgent, nil, 0
 	}
 	owner, repo := opts.snapshotRepo()
 	if owner == "" || repo == "" {
 		// With no repo context a bare "#123" names nothing resolvable, and the
 		// qualified refs are the minority. Rather than act on a partial view,
 		// leave everything as it is.
-		return byAgent, nil
+		return byAgent, nil, 0
 	}
+	resolver := newStaleRefResolver(opts.ResolveRef)
 	var settled []ResolvedFinding
-	for agent, findings := range byAgent {
+	retired := 0
+	// Agents in a fixed order so the lookup budget, if it is ever reached, falls
+	// in the same place twice. Ranging the map directly would make WHICH
+	// findings got retired depend on Go's map ordering.
+	agents := make([]string, 0, len(byAgent))
+	for agent := range byAgent {
+		agents = append(agents, agent)
+	}
+	sort.Strings(agents)
+	for _, agent := range agents {
+		findings := byAgent[agent]
 		kept := findings[:0:0]
 		for _, f := range findings {
 			if !f.ProvenanceStale || f.ProvenanceSHA == "" {
@@ -249,9 +344,18 @@ func partitionSettledStale(byAgent map[string][]Finding, opts DigestOptions, now
 				continue
 			}
 			refs := findingIssueRefs(f, owner, repo)
-			closedAt, ok := staleFindingSettled(f, refs, opts.ResolveRef, now)
+			closedAt, ok := staleFindingSettled(f, refs, resolver.ResolveRef, now)
 			if !ok {
 				kept = append(kept, f)
+				continue
+			}
+			retired++
+			if now.Sub(closedAt) > refClosedWindow {
+				// Retired, but no longer news: the work this finding named
+				// closed over a month ago. It leaves the open set exactly as any
+				// other retirement does -- announcing every long-settled finding
+				// forever would crowd the changelog with items the reader has
+				// had a month to see.
 				continue
 			}
 			settled = append(settled, ResolvedFinding{
@@ -267,7 +371,7 @@ func partitionSettledStale(byAgent map[string][]Finding, opts DigestOptions, now
 		}
 		byAgent[agent] = kept
 	}
-	return byAgent, settled
+	return byAgent, settled, retired
 }
 
 // snapshotRepo is the owner/repo the digest is being written about, or empty

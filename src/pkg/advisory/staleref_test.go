@@ -175,13 +175,23 @@ func TestStaleFindingSettledUnanimity(t *testing.T) {
 		}
 	})
 
-	t.Run("a closure older than the window is not why this finding healed", func(t *testing.T) {
+	// The age of a closure is no longer part of the verdict. It used to be, and
+	// the verdict decayed: the finding came back OPEN once every closure it
+	// named aged past refClosedWindow, with nothing about the finding or the
+	// work changed. Age now decides only whether the retirement is announced,
+	// which partitionSettledStale owns -- see
+	// TestSettledStaleFindingStaysRetiredPastTheWindow.
+	t.Run("an old closure still settles the finding", func(t *testing.T) {
 		resolve, _ := closedRefs(map[string]time.Time{
 			"Danathar/atomic-image-builder#208": refBase.Add(-refClosedWindow - time.Hour),
 			"Danathar/atomic-image-builder#209": closedAt,
 		})
-		if _, ok := staleFindingSettled(Finding{}, refs, resolve, refBase); ok {
-			t.Error("ok = true on a year-old closure; that is stale context, not a fix")
+		at, ok := staleFindingSettled(Finding{}, refs, resolve, refBase)
+		if !ok {
+			t.Fatal("ok = false; every item this finding names is closed, however long ago")
+		}
+		if !at.Equal(closedAt) {
+			t.Errorf("closedAt = %v, want the LATEST closure %v", at, closedAt)
 		}
 	})
 
@@ -434,4 +444,189 @@ func TestStaleFindingSettledUnknownRefBlocksEvenWhenOthersClosed(t *testing.T) {
 	if _, ok := staleFindingSettled(Finding{}, refs, resolve, refBase); ok {
 		t.Error("ok = true with one item unreadable; a lookup that failed is not evidence it closed")
 	}
+}
+
+// --- Scanner review on #6093 -------------------------------------------------
+
+// TestSettledStaleFindingStaysRetiredPastTheWindow is the resurrection defect.
+//
+// The retirement verdict was computed fresh every build and gated on
+// now.Sub(ClosedAt) <= refClosedWindow, so it decayed: the finding this PR
+// exists to retire (#208/#209) was retired for thirty days and then, with every
+// input unchanged, re-entered the OPEN set as a counted, severity-ranked HIGH --
+// permanently. A window that makes the output right for a month and then
+// permanently wrong is not a caution, so the age of the closure no longer
+// decides whether the finding is OPEN. It decides only whether the retirement is
+// still worth announcing.
+func TestSettledStaleFindingStaysRetiredPastTheWindow(t *testing.T) {
+	store := staleFindingStore(t, staleDetail)
+	closedAt := time.Now().Add(-45 * 24 * time.Hour)
+	resolve, _ := closedRefs(map[string]time.Time{
+		"Danathar/atomic-image-builder#208": closedAt,
+		"Danathar/atomic-image-builder#209": closedAt.Add(time.Minute),
+	})
+
+	d := BuildDigestFromBeads(map[string]*beads.Store{"quality": store}, "advisory", DigestOptions{
+		MaxFindings: 10,
+		ResolveRef:  resolve,
+		Snapshot:    &Snapshot{Owner: "Danathar", Repo: "atomic-image-builder", SHA: analyzedAt},
+	})
+
+	if got := len(digestFindings(d)); got != 0 {
+		t.Errorf("%d findings open 45 days after the work it names closed; retirement must not decay", got)
+	}
+	if d.TotalCount != 0 {
+		t.Errorf("TotalCount = %d, want 0 -- a retired finding stays uncounted however old the closure", d.TotalCount)
+	}
+	if len(d.RecentlyResolved) != 0 {
+		t.Errorf("RecentlyResolved has %d entries, want 0 -- a closure 45 days old is retired but no longer news", len(d.RecentlyResolved))
+	}
+}
+
+// A closure inside the window is still announced, so the test above cannot be
+// satisfied by dropping the Recently Resolved entry in every case.
+func TestSettledStaleFindingInsideTheWindowIsStillAnnounced(t *testing.T) {
+	store := staleFindingStore(t, staleDetail)
+	closedAt := time.Now().Add(-24 * time.Hour)
+	resolve, _ := closedRefs(map[string]time.Time{
+		"Danathar/atomic-image-builder#208": closedAt,
+		"Danathar/atomic-image-builder#209": closedAt,
+	})
+
+	d := BuildDigestFromBeads(map[string]*beads.Store{"quality": store}, "advisory", DigestOptions{
+		MaxFindings: 10,
+		ResolveRef:  resolve,
+		Snapshot:    &Snapshot{Owner: "Danathar", Repo: "atomic-image-builder", SHA: analyzedAt},
+	})
+
+	if len(d.RecentlyResolved) != 1 {
+		t.Errorf("RecentlyResolved has %d entries, want 1 -- a day-old closure is still news", len(d.RecentlyResolved))
+	}
+}
+
+// twoStaleFindingsNamingTheSameWork builds two DISTINCT findings that name the
+// same issue and PR. Distinct titles matter: collapseNearDuplicates would
+// otherwise merge them and there would be nothing to deduplicate at lookup time.
+func twoStaleFindingsNamingTheSameWork(t *testing.T) *beads.Store {
+	t.Helper()
+	store, err := beads.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("creating store: %v", err)
+	}
+	for _, title := range []string{
+		"format_markdown_tables absent from coveragerc",
+		"bashcov never wired into the coverage lane",
+	} {
+		b, err := store.Create(title, beads.TypeAdvisory, severityToPriority("high"), "quality", "")
+		if err != nil {
+			t.Fatalf("creating bead: %v", err)
+		}
+		if err := store.Update(b.ID, func(bead *beads.Bead) { bead.Notes = staleDetail }); err != nil {
+			t.Fatalf("setting notes: %v", err)
+		}
+	}
+	return store
+}
+
+// TestSettledStaleLookupsAreMemoizedPerBuild pins the lookup budget.
+//
+// partitionSettledStale runs over the FULL pre-cap finding set and issued one
+// synchronous Issues.Get per (finding x named ref) with no memoization, so two
+// findings naming the same issue queried it twice. On the digest sizes that
+// motivated this work -- ~292 findings, agent prose full of bare "#123" -- that
+// is hundreds of sequential calls per cycle, and because a rate-limited lookup
+// reports ok=false and aborts that finding's verdict, retirement stops working
+// exactly when the digest is large enough to need it.
+func TestSettledStaleLookupsAreMemoizedPerBuild(t *testing.T) {
+	store := twoStaleFindingsNamingTheSameWork(t)
+	closedAt := time.Now().Add(-24 * time.Hour)
+	resolve, calls := closedRefs(map[string]time.Time{
+		"Danathar/atomic-image-builder#208": closedAt,
+		"Danathar/atomic-image-builder#209": closedAt,
+	})
+
+	d := BuildDigestFromBeads(map[string]*beads.Store{"quality": store}, "advisory", DigestOptions{
+		MaxFindings: 10,
+		ResolveRef:  resolve,
+		Snapshot:    &Snapshot{Owner: "Danathar", Repo: "atomic-image-builder", SHA: analyzedAt},
+	})
+
+	if got := len(digestFindings(d)); got != 0 {
+		t.Fatalf("%d findings still open; both name only work that has closed", got)
+	}
+	// Two findings x two refs = four lookups without memoization; the two
+	// distinct refs are the whole truth being queried.
+	if *calls != 2 {
+		t.Errorf("made %d lookups for 2 distinct refs across 2 findings; results must be memoized per build", *calls)
+	}
+}
+
+// TestStaleRefResolverMemoizesAndBounds covers the resolver itself: the failed
+// lookup is cached as deliberately as the successful one, and exhausting the
+// budget reports "cannot tell" rather than inventing an answer.
+func TestStaleRefResolverMemoizesAndBounds(t *testing.T) {
+	t.Run("a repeated ref is looked up once", func(t *testing.T) {
+		resolve, calls := closedRefs(map[string]time.Time{
+			"Danathar/atomic-image-builder#208": refBase.Add(-24 * time.Hour),
+		})
+		r := newStaleRefResolver(resolve)
+		for i := 0; i < 5; i++ {
+			if _, ok := r.ResolveRef("Danathar", "atomic-image-builder", 208); !ok {
+				t.Fatal("ok = false on a resolvable ref")
+			}
+		}
+		if *calls != 1 {
+			t.Errorf("made %d lookups for the same ref 5 times, want 1", *calls)
+		}
+	})
+
+	t.Run("a failed lookup is cached too", func(t *testing.T) {
+		calls := 0
+		r := newStaleRefResolver(func(string, string, int) (RefState, bool) {
+			calls++
+			return RefState{}, false
+		})
+		for i := 0; i < 4; i++ {
+			if _, ok := r.ResolveRef("Danathar", "atomic-image-builder", 208); ok {
+				t.Fatal("ok = true from a resolver that can never tell")
+			}
+		}
+		// Without this a rate-limited build retries the same doomed call once
+		// per finding naming the ref -- worst behaviour at the worst moment.
+		if calls != 1 {
+			t.Errorf("retried a failed lookup %d times, want 1", calls)
+		}
+	})
+
+	t.Run("exhausting the budget reports cannot-tell, and retires nothing", func(t *testing.T) {
+		calls := 0
+		r := &staleRefResolver{
+			resolve: func(string, string, int) (RefState, bool) {
+				calls++
+				return RefState{Closed: true, ClosedAt: refBase}, true
+			},
+			cache:  make(map[issueRef]refVerdict),
+			budget: 2,
+		}
+		for n := 1; n <= 2; n++ {
+			if _, ok := r.ResolveRef("Danathar", "atomic-image-builder", n); !ok {
+				t.Fatalf("ref #%d within budget reported not-ok", n)
+			}
+		}
+		state, ok := r.ResolveRef("Danathar", "atomic-image-builder", 3)
+		if ok {
+			t.Error("ok = true past the budget; exhaustion must read as cannot-tell so the finding stays open")
+		}
+		if state.Closed {
+			t.Error("a budget-exhausted lookup reported Closed; it must report nothing at all")
+		}
+		if calls != 2 {
+			t.Errorf("made %d lookups against a budget of 2", calls)
+		}
+		// Exhaustion is a property of the build, not of ref #3: a ref already
+		// answered stays answered from cache.
+		if _, ok := r.ResolveRef("Danathar", "atomic-image-builder", 1); !ok {
+			t.Error("a cached ref stopped resolving once the budget ran out")
+		}
+	})
 }

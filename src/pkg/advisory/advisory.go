@@ -695,12 +695,19 @@ func BuildDigestFromBeads(stores map[string]*beads.Store, mode string, opts Dige
 	// exact commit that fixed it. Retiring them after the cap would leave the
 	// slot spent on a finding nobody needed to read.
 	var settledStale []ResolvedFinding
-	byAgent, settledStale = partitionSettledStale(byAgent, opts, time.Now())
-	if len(settledStale) > 0 {
-		resolved = append(resolved, settledStale...)
+	var retiredStale int
+	byAgent, settledStale, retiredStale = partitionSettledStale(byAgent, opts, time.Now())
+	resolved = append(resolved, settledStale...)
+	if retiredStale > 0 {
 		// The header count is recomputed from the survivors for the same reason
 		// collapseNearDuplicates recomputes it: a total that still counts
 		// retired findings misstates how much is open.
+		//
+		// Keyed on how many findings were RETIRED, not on how many are being
+		// announced. A retirement whose closure is older than refClosedWindow
+		// leaves the open set without appearing under Recently Resolved, and
+		// counting len(settledStale) here would leave the header claiming a
+		// finding the digest no longer lists anywhere.
 		total = 0
 		for _, fs := range byAgent {
 			total += len(fs)
