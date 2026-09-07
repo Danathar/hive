@@ -615,13 +615,11 @@ func (c *Client) SetRepoPausedFunc(fn func(repo string) bool) {
 // RepoIsPaused reports whether repo is under an operator pause (#6203). repo
 // may be bare or "owner/repo" — the configured predicate normalizes both.
 //
-// This is what the hive-mediated PR and merge relays ask. They MUST ask it
-// themselves: the proxy hard-denies direct POST /pulls and PUT /pulls/{n}/merge
-// for every agent mode precisely so those two operations route through the
-// hive, and a request the hive fulfils never traverses the proxy at all. Pause
-// enforced only at the proxy would therefore have left agents able to open PRs
-// and merge them on a paused repo — the exact activity the pause exists to
-// stop.
+// The hive-mediated PR, merge, issue and review relays MUST check this
+// themselves: they fulfil agent requests with the hive's credentials, without
+// traversing the agent proxy. Proxy-only enforcement would leave agents able
+// to open and merge PRs, file issues, comment, claim issues and submit reviews
+// on a paused repo.
 func (c *Client) RepoIsPaused(repo string) bool {
 	if c == nil {
 		return false

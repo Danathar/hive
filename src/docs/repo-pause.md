@@ -101,6 +101,8 @@ depends on an agent reading the kick and choosing to comply.
 | MITM GitHub proxy | Every agent **write** (`POST`/`PUT`/`PATCH`/`DELETE`, and `git push`) is answered `403` with a message naming the pause. Whatever mode the agent holds — including `ISSUES_PRS_MERGE`. |
 | [`hive-open-pr`](hive-open-pr.md) relay | The request is rejected before any GitHub call and quarantined, with the reason in its result file. |
 | [`hive-merge`](hive-merge.md) relay | Same, checked before the optional branch update so the repo receives no write at all. |
+| [`hive-open-issue`](hive-open-issue.md) relay | Issue creation (including label setup), issue/PR comments and claim labels are rejected before any GitHub call. Requests are quarantined as `.denied`, with the pause reason in their result files. |
+| `hive-review` relay | Approvals, change requests and review comments are rejected before any GitHub call, quarantined as `.denied`, with the pause reason in their result files. |
 | Work enumeration | The repo contributes no actionable issues or PRs, so nothing downstream — kicks, claims, advisories, the contribute queue — can hand an agent work on it. |
 | Auto-merge sweeps | Both the queued (`lgtm`) and self-authored sweeps skip the repo. |
 | Kick text | The repo is absent from `AUTHORIZED REPOS` and from `$HIVE_REPOS`, and is named separately as paused so an agent does not read the shorter list as scope loss. |
@@ -109,7 +111,12 @@ The proxy and relay gates are both required, and neither is redundant. The proxy
 hard-denies direct `POST /pulls` and `PUT /pulls/{n}/merge` for *every* agent
 mode precisely so those operations route through the hive — and a request the
 hive fulfils never traverses the proxy. Enforcing pause only at the proxy would
-have left agents able to open PRs and merge them on a paused repo.
+have left agents able to open and merge PRs, file issues, post comments, claim
+issues and submit reviews on a paused repo.
+
+Denied relay requests stay quarantined after resume; they are not replayed.
+Submit a fresh request once the repository is resumed. Requests to other,
+unpaused repositories continue normally.
 
 ### What a pause does **not** stop
 
@@ -171,8 +178,9 @@ not need a hand edit.
 
 ## What to read next
 
-- [`hive-open-pr`](hive-open-pr.md) and [`hive-merge`](hive-merge.md) — the two
-  hive-mediated write paths that enforce the pause alongside the proxy.
+- [`hive-open-pr`](hive-open-pr.md), [`hive-merge`](hive-merge.md) and
+  [`hive-open-issue`](hive-open-issue.md) — relay usage. These and `hive-review`
+  enforce the pause alongside the proxy.
 - [ACMM policy matrix](acmm-policy-matrix.md) — the autonomy tiers pause is
   orthogonal to.
 - [Audit log format](audit-log.md) — `repo_pause` / `repo_resume` entries.

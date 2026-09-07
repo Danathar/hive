@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -172,5 +175,204 @@ func TestMergeRequestWatcher_RefusesPausedRepo(t *testing.T) {
 	}
 	if !strings.Contains(resp.Error, "paused") {
 		t.Errorf("result does not say the repo is paused: %q", resp.Error)
+	}
+}
+
+// Issue, comment and claim requests use the hive's credentials, bypassing the
+// proxy. A paused repo must receive no API calls from any of these paths.
+func TestIssueRequestWatcher_RepoPause(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		req      IssueRequest
+		endpoint string
+		response string
+	}{
+		{
+			name:     "default issue",
+			req:      IssueRequest{Title: "[scanner] finding", Body: "detail", Labels: []string{"agent/security"}},
+			endpoint: "/repos/o/r/issues",
+			response: `{"number":99,"html_url":"https://github.example/o/r/issues/99"}`,
+		},
+		{
+			name:     "explicit issue",
+			req:      IssueRequest{Kind: "issue", Title: "[scanner] finding", Body: "detail", Labels: []string{"agent/security"}},
+			endpoint: "/repos/o/r/issues",
+			response: `{"number":99,"html_url":"https://github.example/o/r/issues/99"}`,
+		},
+		{
+			name:     "comment",
+			req:      IssueRequest{Kind: "comment", Number: 42, Body: "triage note"},
+			endpoint: "/repos/o/r/issues/42/comments",
+			response: `{"id":1}`,
+		},
+		{
+			name:     "claim",
+			req:      IssueRequest{Kind: "claim", Number: 42},
+			endpoint: "/repos/o/r/issues/42/labels",
+			response: `[{"name":"hive/claimed-by-scanner"}]`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls, writes atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues":
+					_, _ = io.WriteString(w, `[]`)
+				case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/o/r/labels/"):
+					_, _ = io.WriteString(w, `{"name":"agent/security"}`)
+				case r.Method == http.MethodPost && r.URL.Path == tc.endpoint:
+					writes.Add(1)
+					_, _ = io.WriteString(w, tc.response)
+				default:
+					t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer srv.Close()
+			c := issueTestClient(t, srv.URL)
+			c.SetRepoPausedFunc(pauseAll("r"))
+			dir := withIssueDir(t)
+			req := tc.req
+			req.Repo = "o/r"
+			req.Agent = "scanner"
+			reqPath, err := WriteIssueRequest(dir, req)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			c.ProcessIssueRequestsOnce(context.Background())
+
+			if got := calls.Load(); got != 0 {
+				t.Errorf("paused repo received %d GitHub calls, want 0", got)
+			}
+			if _, err := os.Stat(reqPath); !os.IsNotExist(err) {
+				t.Errorf("denied request remains in the queue: %v", err)
+			}
+			if _, err := os.Stat(reqPath + ".denied"); err != nil {
+				t.Errorf("request was not quarantined: %v", err)
+			}
+			resultPath := strings.TrimSuffix(reqPath, ".json") + ".result.json"
+			b, err := os.ReadFile(resultPath)
+			if err != nil {
+				t.Fatalf("result file missing: %v", err)
+			}
+			var res IssueResponse
+			if err := json.Unmarshal(b, &res); err != nil {
+				t.Fatal(err)
+			}
+			if res.OK || !strings.Contains(res.Error, "paused") || !strings.Contains(res.Error, req.Repo) {
+				t.Errorf("want a refusal naming the paused repo, got %+v", res)
+			}
+
+			// Resume this repo while another stays paused. Quarantined requests
+			// must not replay; a fresh request must succeed on the same client.
+			c.SetRepoPausedFunc(pauseAll("some-other-repo"))
+			c.ProcessIssueRequestsOnce(context.Background())
+			if got := calls.Load(); got != 0 {
+				t.Errorf("quarantined request was replayed: %d GitHub calls, want 0", got)
+			}
+			reqPath, err = WriteIssueRequest(dir, req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.ProcessIssueRequestsOnce(context.Background())
+			if got := writes.Load(); got != 1 {
+				t.Errorf("unpaused repo received %d writes, want 1", got)
+			}
+			if _, err := os.Stat(reqPath); !os.IsNotExist(err) {
+				t.Errorf("successful request was not consumed: %v", err)
+			}
+			b, err = os.ReadFile(strings.TrimSuffix(reqPath, ".json") + ".result.json")
+			if err != nil {
+				t.Fatalf("result file missing: %v", err)
+			}
+			var resumed IssueResponse
+			if err := json.Unmarshal(b, &resumed); err != nil {
+				t.Fatal(err)
+			}
+			if !resumed.OK {
+				t.Errorf("fresh request on resumed repo failed: %+v", resumed)
+			}
+		})
+	}
+}
+
+func TestReviewRequestWatcher_RepoPause(t *testing.T) {
+	for _, event := range []string{"approve", "request_changes", "comment"} {
+		t.Run(event, func(t *testing.T) {
+			var calls atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				if r.Method != http.MethodPost || r.URL.Path != "/repos/o/r/pulls/7/reviews" {
+					t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"id":1}`)
+			}))
+			defer srv.Close()
+			c := reviewTestClient(t, srv.URL)
+			c.SetRepoPausedFunc(pauseAll("r"))
+			dir := withReviewDir(t)
+			req := ReviewRequest{Repo: "o/r", Number: 7, Event: event, Body: "review feedback", Agent: "reviewer"}
+			reqPath, err := WriteReviewRequest(dir, req)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			c.ProcessReviewRequestsOnce(context.Background())
+
+			if got := calls.Load(); got != 0 {
+				t.Errorf("paused repo received %d GitHub calls, want 0", got)
+			}
+			if _, err := os.Stat(reqPath); !os.IsNotExist(err) {
+				t.Errorf("denied request remains in the queue: %v", err)
+			}
+			if _, err := os.Stat(reqPath + ".denied"); err != nil {
+				t.Errorf("request was not quarantined: %v", err)
+			}
+			b, err := os.ReadFile(strings.TrimSuffix(reqPath, ".json") + ".result.json")
+			if err != nil {
+				t.Fatalf("result file missing: %v", err)
+			}
+			var res ReviewResponse
+			if err := json.Unmarshal(b, &res); err != nil {
+				t.Fatal(err)
+			}
+			if res.OK || !strings.Contains(res.Error, "paused") || !strings.Contains(res.Error, req.Repo) {
+				t.Errorf("want a refusal naming the paused repo, got %+v", res)
+			}
+
+			c.SetRepoPausedFunc(pauseAll("some-other-repo"))
+			c.ProcessReviewRequestsOnce(context.Background())
+			if got := calls.Load(); got != 0 {
+				t.Errorf("quarantined request was replayed: %d GitHub calls, want 0", got)
+			}
+			reqPath, err = WriteReviewRequest(dir, req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.ProcessReviewRequestsOnce(context.Background())
+			if got := calls.Load(); got != 1 {
+				t.Errorf("unpaused repo received %d GitHub calls, want 1", got)
+			}
+			if _, err := os.Stat(reqPath); !os.IsNotExist(err) {
+				t.Errorf("successful request was not consumed: %v", err)
+			}
+			b, err = os.ReadFile(strings.TrimSuffix(reqPath, ".json") + ".result.json")
+			if err != nil {
+				t.Fatalf("result file missing: %v", err)
+			}
+			var resumed ReviewResponse
+			if err := json.Unmarshal(b, &resumed); err != nil {
+				t.Fatal(err)
+			}
+			if !resumed.OK {
+				t.Errorf("fresh request on resumed repo failed: %+v", resumed)
+			}
+		})
 	}
 }
