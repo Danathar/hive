@@ -58,16 +58,85 @@ ok "${#files[@]} workflow file(s) to check"
 # ── No runs-on may name the fleet without going through the variable ──────
 #
 # Comments and job steps legitimately mention self-hosted runners in prose, so
-# this looks only at runs-on lines rather than at the whole file.
-bare=""
-for f in "${files[@]}"; do
-  while IFS= read -r line; do
-    case "$line" in
-      *HIVE_RUNNER_LABELS*) continue ;;
-    esac
-    bare+="$(basename "$f"): ${line#"${line%%[![:space:]]*}"}"$'\n'
-  done < <(grep -h 'runs-on:.*self-hosted' "$f" 2>/dev/null)
-done
+# this looks only at runs-on VALUES rather than at the whole file.
+#
+# Read structurally rather than by line. `grep 'runs-on:.*self-hosted'` sees
+# only the flow spelling:
+#
+#   runs-on: [self-hosted, hive]
+#
+# and is blind to the equally valid block one:
+#
+#   runs-on:
+#     - self-hosted
+#     - hive
+#
+# which is the same regression in a different spelling of the same YAML. A
+# guard that exists because bare labels were reintroduced once already cannot
+# be spelling-sensitive about the thing it is watching for.
+#
+# python3 + PyYAML is a hard requirement here rather than a skip. This guard's
+# entire subject is a check that fails to run being invisible; declining to
+# check and reporting PASS would reproduce that fault inside the fix for it.
+if ! command -v python3 >/dev/null 2>&1 || ! python3 -c 'import yaml' >/dev/null 2>&1; then
+  bad "python3 with PyYAML is required to read runs-on structurally" \
+      "a skip here would report PASS without having checked anything"
+  echo; echo "=== $PASS passed, $FAIL failed ==="; exit 1
+fi
+
+bare="$(python3 - "${files[@]}" <<'PY'
+import os
+import sys
+
+import yaml
+
+
+def labels_of(value):
+    """Every label a runs-on value names, whatever shape it was written in."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        out = []
+        for item in value:
+            out.extend(labels_of(item))
+        return out
+    if isinstance(value, dict):
+        # `runs-on: {group: ..., labels: [...]}` is a real spelling.
+        out = []
+        for key in ("labels", "group"):
+            if key in value:
+                out.extend(labels_of(value[key]))
+        return out
+    return []
+
+
+for path in sys.argv[1:]:
+    try:
+        with open(path, encoding="utf-8") as handle:
+            doc = yaml.safe_load(handle)
+    except (yaml.YAMLError, OSError) as err:
+        # An unreadable workflow is not a pass. Say which and why.
+        print(f"{os.path.basename(path)}: could not parse: {err}")
+        continue
+    if not isinstance(doc, dict):
+        continue
+    jobs = doc.get("jobs")
+    if not isinstance(jobs, dict):
+        continue
+    for job_name, job in jobs.items():
+        if not isinstance(job, dict) or "runs-on" not in job:
+            continue
+        raw = job["runs-on"]
+        # The indirection is what makes a bare label safe, so an expression
+        # that goes through the variable is exactly what this check wants to
+        # find. Test the written form, not the resolved labels.
+        if "HIVE_RUNNER_LABELS" in str(raw):
+            continue
+        if any("self-hosted" in label for label in labels_of(raw)):
+            print(f"{os.path.basename(path)}: {job_name}: runs-on: {raw}")
+PY
+)"
+[ -n "$bare" ] && bare="${bare}"$'\n'
 if [ -z "$bare" ]; then
   ok "every runs-on naming the fleet goes through vars.HIVE_RUNNER_LABELS"
 else
