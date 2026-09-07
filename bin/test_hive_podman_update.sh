@@ -506,6 +506,9 @@ check "the newest entry survives the cap" \
 # `grep -qv` stops at its first non-matching line, and the EPIPE that sends
 # upstream turns the pipeline false under pipefail whatever was actually found.
 status_out="$(run_update status)"
+# shellcheck disable=SC2034 # consumed by the single-quoted condition below,
+# which check() eval's -- shellcheck cannot see through that, the same reason
+# every other condition in this file reports SC2016.
 pin_history_block="$(grep -A3 "Pin history" <<<"$status_out")"
 check "the header prose is not parsed as a history entry" \
   'grep -qv "newest first; the top" <<<"$pin_history_block"'
@@ -806,6 +809,55 @@ reset_env; seed_managed_host
 out="$(run_update pin "${REPO}:stable")"
 check "pin says nothing about the gateway config when it already matches" \
   '! grep -qF "refreshed the gateway config" <<<"$out"'
+
+echo
+echo "== the refreshed gateway config can be taken back =="
+
+# `rollback` moves the image. It did not move the config, so a config that
+# broke the deployment survived the rollback sent to undo it, and the config
+# it replaced existed nowhere on the host.
+reset_env; seed_managed_host
+# An earlier healthy pin, so rollback has somewhere to go -- the whole point is
+# the pairing between the image it returns to and the config that shipped with it.
+seed_dropin "${REPO}@${DIGEST_OLD}" "healthy 2026-08-20T10:00:00Z ${DIGEST_OLD} ${REPO}:b35e9cc"
+printf 'user nginx;\n# the config this host was installed with\n' >"${CONF_DIR}/nginx.conf"
+run_update pin "${REPO}:stable" >/dev/null
+check "pin keeps the config it replaced" \
+  '[ -f "${CONF_DIR}/nginx.conf.prev" ]'
+check "and what it kept is the config that was there before" \
+  'grep -qF "the config this host was installed with" "${CONF_DIR}/nginx.conf.prev"'
+
+out="$(run_update rollback)"
+check "rollback puts the saved gateway config back" \
+  'cmp -s <(printf "user nginx;\n# the config this host was installed with\n") "${CONF_DIR}/nginx.conf"'
+check "and says so" \
+  'grep -qF "restored the gateway config" <<<"$out"'
+# Consumed, not kept: it describes one step back, and after that step it would
+# describe a state no longer adjacent to the host.
+check "and does not leave the backup behind to be restored twice" \
+  '[ ! -f "${CONF_DIR}/nginx.conf.prev" ]'
+
+# A host no pin ever touched has nothing to restore, and that is not a fault.
+reset_env; seed_managed_host
+seed_dropin "${REPO}@${DIGEST_BAD}" \
+  "failed  2026-08-21T10:00:00Z ${DIGEST_BAD} ${REPO}:stable" \
+  "healthy 2026-08-20T10:00:00Z ${DIGEST_OLD} ${REPO}:b35e9cc"
+out="$(run_update rollback)"
+check "rollback with no saved config says so rather than failing" \
+  'grep -qF "no saved gateway config to restore" <<<"$out"'
+
+# The branch where the refreshed config is a live suspect: Hive healthy, the
+# thing in front of it not. The operator is deciding what to try here, so the
+# revert has to be on screen rather than discovered after rollback fails to
+# undo it.
+reset_env; seed_managed_host; export FAKE_GATEWAY_CURL_RC=7
+printf 'user nginx;\n# the config this host was installed with\n' >"${CONF_DIR}/nginx.conf"
+out="$(run_update pin "${REPO}:stable")"
+check "a pin that leaves the deployment not serving names the config it changed" \
+  'grep -qF "rollback does not undo that" <<<"$out"'
+check "and prints the command that puts it back" \
+  'grep -qF "nginx.conf.prev ${CONF_DIR}/nginx.conf" <<<"$out"'
+unset FAKE_GATEWAY_CURL_RC
 
 # Unit files are reported, never rewritten by pin: a unit change needs a
 # container recreate to mean anything, and rewriting hive.container under an

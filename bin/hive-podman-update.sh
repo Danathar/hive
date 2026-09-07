@@ -581,12 +581,55 @@ refresh_gateway_config() {
     nosrc)  warn "no ${src} in this checkout -- leaving the installed gateway config alone"
             return 0 ;;
   esac
+  # Keep the config being replaced, because `rollback` moves the image and
+  # nothing else. Without this the two ways a refreshed config goes wrong are
+  # both dead ends: if the new config is what stops the deployment serving,
+  # the operator is sent to `rollback`, which restores the old image under the
+  # new config and leaves the host just as broken; and `pin <older-digest>` --
+  # which this script itself recommends when rollback has nowhere to go --
+  # pairs an older image with the newest checkout's config on purpose. In
+  # neither case did the previous config exist anywhere on the host.
+  #
+  # One generation, not a stack: rollback is a single step backwards, so the
+  # config that pairs with the image it returns to is the one the last pin
+  # replaced.
+  if [ -f "$dest" ] && ! as_owner cp -p "$dest" "${dest}.prev"; then
+    bad "could not save ${dest}.prev -- refusing to overwrite a config with no way back"
+    return 1
+  fi
   if ! as_owner install -Dm644 "$src" "$dest"; then
     bad "could not write ${dest} -- the gateway keeps the config it had"
     return 1
   fi
   ok "refreshed the gateway config: ${dest}"
   info "it differed from ${src}; nothing else on this host was rewritten"
+  [ -f "${dest}.prev" ] && info "the config it replaced is kept at ${dest}.prev"
+  restart_gateway_onto_new_config
+}
+
+# The other half of the backup refresh_gateway_config takes: put it back when
+# the image goes back, so rollback returns the whole deployment rather than
+# half of it.
+#
+# A missing .prev is the normal case, not a fault -- it means no pin on this
+# host ever replaced the config, so the one installed is already the one that
+# pairs with the image being restored. The backup is consumed rather than
+# kept: it describes one step back, and after that step it would describe a
+# state no longer adjacent to where the host is.
+restore_gateway_config() {
+  local dest="${CONF_DIR}/nginx.conf"
+  if [ ! -f "${dest}.prev" ]; then
+    info "no saved gateway config to restore -- the installed one is unchanged by any pin"
+    return 0
+  fi
+  if ! as_owner cp -p "${dest}.prev" "$dest"; then
+    bad "could not restore ${dest} from ${dest}.prev"
+    info "the image is being rolled back regardless; put the config back by hand:"
+    info "    cp ${dest}.prev ${dest} && $SCTL_LABEL restart $GATEWAY_UNIT"
+    return 1
+  fi
+  as_owner rm -f "${dest}.prev"
+  ok "restored the gateway config that pairs with this image: ${dest}"
   restart_gateway_onto_new_config
 }
 
@@ -864,6 +907,15 @@ do_pin() {
     head1 "Result"
     bad "updated to $digest and Hive is healthy, but the DEPLOYMENT is not serving"
     info "the dashboard stays dead until the gateway is up: $SCTL_LABEL start $GATEWAY_UNIT"
+    # This is the branch where the refreshed config is a live suspect: Hive
+    # itself is healthy and the thing in front of it is not. Say so here, where
+    # the operator is deciding what to try, rather than leaving them to find
+    # out that `rollback` does not undo it.
+    if [ -f "${CONF_DIR}/nginx.conf.prev" ]; then
+      info "this run also refreshed the gateway config, and rollback does not undo that"
+      info "put the previous one back with:"
+      info "    cp ${CONF_DIR}/nginx.conf.prev ${CONF_DIR}/nginx.conf && $SCTL_LABEL restart $GATEWAY_UNIT"
+    fi
     exit "$EX_CONFIG"
   fi
   mark_top_outcome failed
@@ -901,6 +953,14 @@ do_rollback() {
     info "image on the host, or roll back to one that is still in local storage"
     exit "$EX_CONFIG"
   fi
+
+  # Take the gateway config back with the image. `pin` refreshes it from the
+  # checkout, so an image and a config move together on the way forward and
+  # have to move together on the way back -- otherwise a rollback restores the
+  # old image under the new config, which is not the state it claims to
+  # return to, and is a state that has never been known to work.
+  head1 "Managed files"
+  restore_gateway_config
 
   head1 "Write the pin"
   local new_history
