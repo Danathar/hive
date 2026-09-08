@@ -568,6 +568,8 @@ func TestHandoffCommentBody_CarriesReviewerContext(t *testing.T) {
 		if strings.Contains(bare, banned) {
 			t.Errorf("empty hand-off record must omit the field, not render %q:\n%s", banned, bare)
 		}
+	}
+}
 
 // A pending pass (checks running, or the check-run fetch failed — which
 // EnrichCIStatus also reports as "pending") is no information: it must leave
