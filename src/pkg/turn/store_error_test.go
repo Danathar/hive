@@ -1,91 +1,14 @@
 package turn
 
+// Ported from v4's #6189 store/envelope/journal error-branch tests. The
+// FileStore and envelope-version cases target v4's FileStore{Path}/Load()
+// API, which v5's turn package replaced (FileStore{Dir}, Load(ctx, id),
+// no envelope version), so only the journal and executor cases carry over.
+
 import (
-	"context"
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
-
-// testEnvelope is the fixture the v4 runner_test.go supplied; v5 dropped that
-// file, so the store error tests carry their own copy.
-func testEnvelope() SessionEnvelope {
-	return SessionEnvelope{
-		Version:   EnvelopeVersion,
-		SessionID: "session-4002",
-		Agent:     "contributor",
-		TaskRef:   "hivecommons/hive#4002",
-		Status:    StatusActive,
-		Messages: []Message{{
-			Role:      RoleUser,
-			Content:   "implement the re-entrant turn spike",
-			Timestamp: time.Unix(1, 0).UTC(),
-		}},
-	}
-}
-
-func TestPersistFailsWhenDirectoryMissing(t *testing.T) {
-	store := FileStore{Path: filepath.Join(t.TempDir(), "missing", "turn.json")}
-	err := store.Persist(context.Background(), testEnvelope())
-	if err == nil {
-		t.Fatal("Persist succeeded without a containing directory")
-	}
-	if !strings.Contains(err.Error(), "create temporary envelope") {
-		t.Fatalf("error = %v, want temp-file creation failure", err)
-	}
-}
-
-func TestPersistCommitFailureCleansUpTempFile(t *testing.T) {
-	// The destination path is an existing non-empty directory, so the final
-	// rename must fail after the temp file was written and synced.
-	dir := t.TempDir()
-	target := filepath.Join(dir, "occupied")
-	if err := os.Mkdir(target, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	inner := FileStore{Path: filepath.Join(target, "turn.json")}
-	if err := inner.Persist(context.Background(), testEnvelope()); err != nil {
-		t.Fatalf("seed inner envelope: %v", err)
-	}
-
-	err := FileStore{Path: target}.Persist(context.Background(), testEnvelope())
-	if err == nil {
-		t.Fatal("Persist committed over a non-empty directory")
-	}
-	if !strings.Contains(err.Error(), "commit envelope") {
-		t.Fatalf("error = %v, want commit failure", err)
-	}
-	matches, globErr := filepath.Glob(filepath.Join(dir, ".turn-envelope-*.tmp"))
-	if globErr != nil || len(matches) != 0 {
-		t.Fatalf("temporary files after failed commit = %v, err = %v", matches, globErr)
-	}
-}
-
-func TestLoadFailsWhenEnvelopeMissing(t *testing.T) {
-	store := FileStore{Path: filepath.Join(t.TempDir(), "turn.json")}
-	if _, err := store.Load(); err == nil {
-		t.Fatal("Load succeeded on a missing envelope")
-	} else if !strings.Contains(err.Error(), "read envelope") {
-		t.Fatalf("error = %v, want read failure", err)
-	}
-}
-
-func TestValidateRejectsVersionMismatch(t *testing.T) {
-	env := testEnvelope()
-	env.Version = EnvelopeVersion + 1
-	err := env.Validate()
-	if err == nil {
-		t.Fatal("Validate accepted a future envelope version")
-	}
-	if !strings.Contains(err.Error(), "envelope version") {
-		t.Fatalf("error = %v, want version mismatch", err)
-	}
-	if _, err := ParseEnvelope([]byte(`{"version":99,"session_id":"s"}`)); err == nil {
-		t.Fatal("ParseEnvelope accepted a version mismatch")
-	}
-}
 
 func TestJournalAmbiguousReturnsOnlyIntendedEntries(t *testing.T) {
 	j := Journal{Entries: []JournalEntry{
