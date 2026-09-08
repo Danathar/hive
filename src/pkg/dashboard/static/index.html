@@ -1225,7 +1225,19 @@
       background: var(--surface); border: 1px solid var(--border);
       border-radius: 6px; padding: 12px; overflow: hidden;
     }
-    .repo-name { font-size: 0.85rem; font-weight: 600; margin-bottom: 6px; }
+    .repo-name { font-size: 0.85rem; font-weight: 600; margin-bottom: 6px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    /* Per-repo agent pause (#6203). A paused repo KEEPS its card — that is the
+       point of pause over deleting it from project.repos — so the card has to
+       say so, or a deliberately quiet repo looks exactly like an idle one. The
+       dimmed surface reads at a glance across a grid of cards; the pill carries
+       the provenance (who/when/why) in its tooltip. */
+    .repo-card.repo-paused { border-color: color-mix(in srgb, var(--yellow) 45%, var(--border)); background: color-mix(in srgb, var(--yellow) 5%, var(--surface)); }
+    .repo-card.repo-paused .repo-stats { opacity: 0.55; }
+    .repo-paused-pill { flex: 0 0 auto; font-size: 0.62rem; font-weight: 700; letter-spacing: 0.02em; line-height: 1; padding: 3px 7px; border-radius: 999px; white-space: nowrap; text-transform: uppercase; border: 1px solid color-mix(in srgb, var(--yellow) 45%, transparent); background: color-mix(in srgb, var(--yellow) 15%, transparent); color: var(--yellow); cursor: help; }
+    .repo-pause-btn { flex: 0 0 auto; margin-left: auto; font-size: 0.66rem; font-weight: 600; line-height: 1; padding: 3px 7px; border-radius: 999px; white-space: nowrap; cursor: pointer; border: 1px solid var(--border); background: transparent; color: var(--muted); opacity: 0.7; transition: opacity 0.15s, color 0.15s, border-color 0.15s; }
+    .repo-card:hover .repo-pause-btn { opacity: 1; }
+    .repo-pause-btn:hover { color: var(--fg); border-color: color-mix(in srgb, var(--fg) 35%, transparent); }
+    .repo-pause-btn[data-busy="1"] { opacity: 0.5; cursor: default; }
     .repo-name a:hover { text-decoration: underline !important; }
     .repo-stats { display: flex; gap: 16px; font-size: 0.8rem; }
     .repo-stat .num { font-weight: 700; font-size: 1rem; }
@@ -7725,6 +7737,43 @@
       }
     }
 
+    // Per-repo agent pause (#6203): quiet ONE repo without stopping the hive.
+    //
+    // The reason prompt is not optional politeness. An unexplained pause is its
+    // own support burden — a week later nobody can tell a deliberate freeze
+    // from a malfunction — so the reason is collected here, at the only moment
+    // the person who knows it is present, and stored with the acting user and
+    // the timestamp. Cancelling the prompt cancels the pause.
+    async function toggleRepoPause(repo, paused, btn) {
+      if (btn && btn.dataset.busy === '1') return;
+      const resuming = !!paused;
+      let reason = '';
+      if (!resuming) {
+        reason = prompt('Pause ' + repo + ' — why?\n\nAgents stop writing to this repo and stop being handed work on it. It stays watched, scored and visible here. Recorded with your name and the time.', '');
+        if (reason === null) return;
+      }
+      const label = btn ? btn.textContent : '';
+      if (btn) { btn.dataset.busy = '1'; btn.textContent = resuming ? 'Resuming…' : 'Pausing…'; }
+      try {
+        const resp = await fetch('/api/repos/' + (resuming ? 'resume' : 'pause'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ repo: repo, reason: reason })
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+        // persisted:false means the pause IS in force but could not be written
+        // to config — it will not survive a restart. Saying "done" without that
+        // would be a lie in the direction that matters.
+        if (data.warning) showToast(data.warning, 'error', true);
+        else showToast(resuming ? ('Resumed ' + repo) : ('Paused ' + repo + ' — agents will not write to it or be handed work on it'), 'success');
+        fetch('/api/status').then(r => r.json()).then(render).catch(() => {});
+      } catch (e) {
+        showToast((resuming ? 'Resume' : 'Pause') + ' failed: ' + (e && e.message ? e.message : 'network error'), 'error');
+        if (btn) { btn.dataset.busy = ''; btn.textContent = label || (resuming ? '▶ resume' : '⏸ pause'); }
+      }
+    }
+
     function renderRepos(repos) {
       const el = document.getElementById('repos');
       const showPlan = planningAllowed();
@@ -7819,10 +7868,25 @@
         }).join('');
         const allPills = issuePills + prPills;
         const pillsHtml = allPills ? `<div class="repo-issues">${allPills}</div>` : '';
+        // Per-repo agent pause (#6203). The tooltip carries the provenance the
+        // pill has no room for; without it a paused repo raises "who did this
+        // and why" every time someone new looks at the dashboard.
+        const pauseTip = r.paused
+          ? 'Agents are paused on this repo'
+            + (r.pausedBy ? ' by ' + r.pausedBy : '')
+            + (r.pausedAt ? ' at ' + r.pausedAt : '')
+            + (r.pauseReason ? ' — ' + r.pauseReason : '')
+            + '. No agent writes to it and none is handed work on it; it is still watched, scored and counted here.'
+          : '';
+        const pausedPill = r.paused ? `<span class="repo-paused-pill" title="${esc(pauseTip)}">⏸ paused</span>` : '';
+        const canPauseRepo = dashboardRoleAtLeast(window._hiveRole || 'read', 'owner');
+        const pauseBtn = canPauseRepo
+          ? `<button class="repo-pause-btn" data-action="toggleRepoPause" data-arg0="${esc(r.name || '')}" data-arg1="${r.paused ? 'true' : 'false'}" data-arg-types="s,j,t" data-stop="1" data-prevent="1" title="${r.paused ? 'Resume agent activity on this repo' : 'Quiet this repo — agents stop writing to it and stop being handed work on it — without stopping the rest of the hive'}">${r.paused ? '▶ resume' : '⏸ pause'}</button>`
+          : '';
         return `
-        <div class="repo-card">
+        <div class="repo-card${r.paused ? ' repo-paused' : ''}">
           <div style="font-size:0.62rem;font-weight:600;letter-spacing:0.02em;color:${isPublic ? 'var(--muted)' : 'var(--indigo)'};margin-bottom:2px" title="This repo lives on ${esc(hostLabel)}${isPublic ? '' : ' (GitHub Enterprise), not public github.com'}">${esc(hostLabel)}${isPublic ? '' : ' · Enterprise'}</div>
-          <div class="repo-name"><a href="${esc(repoUrl)}" target="_blank" rel="noopener" style="color:inherit;text-decoration:none">${esc(r.full || r.name)}</a></div>
+          <div class="repo-name"><a href="${esc(repoUrl)}" target="_blank" rel="noopener" style="color:inherit;text-decoration:none">${esc(r.full || r.name)}</a>${pausedPill}${pauseBtn}</div>
           <div class="repo-stats">
             <div class="repo-stat"><a href="${esc(repoUrl)}/issues" target="_blank" rel="noopener" style="color:inherit;text-decoration:none"><div class="spark-row"><span class="num">${r.issues >= 0 ? r.issues : '?'}</span>${iSpark}</div><div class="label">issues</div></a></div>
             <div class="repo-stat"><a href="${esc(repoUrl)}/pulls" target="_blank" rel="noopener" style="color:inherit;text-decoration:none"><div class="spark-row"><span class="num">${r.prs >= 0 ? r.prs : '?'}</span>${pSpark}</div><div class="label">PRs</div></a></div>

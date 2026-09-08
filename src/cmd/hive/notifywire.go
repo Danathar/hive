@@ -95,8 +95,12 @@ func (w *spokeWire) wireSpokeAgentsAndRequests() {
 	}
 
 	w.projectCtx = agent.ProjectContext{
-		Org:             w.cfg.Project.Org,
+		Org: w.cfg.Project.Org,
+		// Repos is the full watched set; RepoPaused narrows it to the work
+		// scope at read time (#6203), so a pause taken mid-run reaches the next
+		// agent's $HIVE_REPOS without rebuilding this context.
 		Repos:           w.cfg.Project.Repos,
+		RepoPaused:      w.cfg.IsRepoPaused,
 		PrimaryRepoName: w.cfg.Project.PrimaryRepo,
 		ACMMLevel:       w.acmmLevel,
 		PRsAllowed:      w.cfg.Project.PRsAllowed(),
