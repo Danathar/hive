@@ -743,6 +743,11 @@ func (s *HubServer) handleMyHives(w http.ResponseWriter, r *http.Request) {
 			rollup := rollupAgents(result[i].Agents, blockers, queuedWork, journeyNow)
 			result[i].FleetRollup = &rollup
 			result[i].AgentVerdicts = buildAgentVerdicts(result[i].Agents, blockers, queuedWork, journeyNow)
+			if rollup.RestartStorms > 0 {
+				appendDriftSignal(&result[i].Drift, DriftKindAgentRestartStorm, DriftCritical,
+					fmt.Sprintf("%d agent(s) restarted at least %d times in the last 24h",
+						rollup.RestartStorms, AgentRestartProblemThreshold()))
+			}
 			result[i].AgentRosterMismatch = computeAgentRosterMismatch(result[i].ACMMLevel, result[i].Agents)
 
 			// Hive-health verdict: reuse the rollup + app-health + queue depth we

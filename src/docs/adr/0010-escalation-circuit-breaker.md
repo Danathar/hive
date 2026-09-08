@@ -36,6 +36,19 @@ except the label set.
 
 [#5480]: https://github.com/hivecommons/hive/issues/5480
 
+The `needs-human` label on the forge, not the ledger, is the authoritative
+record that a PR has been escalated. The ledger is a cache of it: a PR that
+wears the label reads as escalated even to an empty ledger (so the evidence
+comment is never posted twice, whatever happens to `/data`), and a PR whose
+confirmed label a human removes is un-parked with a fresh budget. A pass that
+cannot conclude CI state (checks running, or the check-run fetch failed — both
+surface as `pending`) leaves the ledger untouched; only a conclusive green
+clears history. Entries are pruned 24h after their PR stops being enumerated,
+not on the first pass that misses it.
+
+Dependency bots (`renovate[bot]`, `dependabot[bot]`, `mergeraptor[bot]`) are
+not agent authors: their red PRs are not fix loops to break.
+
 ## Consequences
 
 The fleet stops spending cycles on fix loops that are not converging and gives a

@@ -1424,6 +1424,25 @@ func runEvalCycle(
 						}
 						return exists
 					}
+					// #6080: a finding computed at an OLDER commit that names its
+					// own remediation ("Filed issue #208, hold-gated PR #209") can
+					// be settled without re-running its evidence -- ask whether that
+					// work closed. Scoped to the analyzed repo, consulted only for
+					// provenance-stale findings, and every failure keeps the finding
+					// open (the digest retires one only when EVERY reference it
+					// names is closed).
+					digestOpts.ResolveRef = func(refOwner, refRepo string, number int) (advisory.RefState, bool) {
+						closedAt, closed, rerr := ghClient.IssueClosedAt(ctx, refOwner, refRepo, number)
+						if rerr != nil {
+							// Inconclusive (network, rate limit): "cannot tell", so
+							// the finding stays open. Never treat a failed lookup as
+							// evidence that a finding healed.
+							logger.Warn("advisory: issue state lookup failed",
+								"ref", fmt.Sprintf("%s/%s#%d", refOwner, refRepo, number), "error", rerr)
+							return advisory.RefState{}, false
+						}
+						return advisory.RefState{Closed: closed, ClosedAt: closedAt}, true
+					}
 					logger.Info("advisory digest pinned to commit", "repo", primaryRepo, "branch", branch, "sha", sha)
 				} else if serr != nil {
 					logger.Warn("advisory: could not resolve latest commit for snapshot", "repo", primaryRepo, "branch", branch, "error", serr)
@@ -2676,33 +2695,73 @@ func hivePRObservations(cfg *config.Config, actionable *github.ActionableResult)
 	if actionable == nil {
 		return nil
 	}
-	fullRepo := func(repo string) string {
-		if !strings.Contains(repo, "/") && cfg.Project.Org != "" {
-			return cfg.Project.Org + "/" + repo
-		}
-		return repo
-	}
-	isAgentAuthor := func(author string) bool {
-		return author == cfg.Project.AIAuthor || strings.HasSuffix(author, "[bot]")
-	}
 	var obs []escalation.Observation
 	for _, pr := range actionable.PRs.Items {
-		if !isAgentAuthor(pr.Author) {
+		if !isHiveAgentAuthor(cfg, pr.Author) {
 			continue
 		}
-		obs = append(obs, escalation.Observation{
-			Repo:    fullRepo(pr.Repo),
-			Number:  pr.Number,
-			HeadSHA: pr.HeadSHA,
-			Red:     pr.HasFailingRequiredCheck(),
-			// Pending marks an unresolved CI window as a no-op observation so
-			// it does not clear the staleness clock (#5617, gap G2).
-			Pending: pr.CIStatus == "pending",
-			Excerpt: pr.CIFailureExcerpt,
-			Labels:  pr.Labels,
-		})
+		obs = append(obs, escalationObservation(cfg, pr))
 	}
 	return obs
+}
+
+// escalationObservation projects one enumerated PR into the fix-loop ledger's
+// view of it. Red means a required check concluded failure. Pending means this
+// pass could not conclude CI at all — checks still running, no check runs, or
+// (per EnrichCIStatus) the check-run fetch errored — which the ledger must
+// treat as "no information", never as "went green". Labeled mirrors the forge's
+// needs-human label so the ledger and the label can never disagree about
+// whether a PR has already been handed to a human. Labels carry the PR's
+// current forge labels so Sweep can reconcile reviewer-lane verdicts
+// (label-only edits: needs-human removed, reviewer-passed added) back into
+// the ledger (#5511, gap G1).
+func escalationObservation(cfg *config.Config, pr github.PullRequest) escalation.Observation {
+	repo := pr.Repo
+	if !strings.Contains(repo, "/") && cfg.Project.Org != "" {
+		repo = cfg.Project.Org + "/" + repo
+	}
+	red := pr.HasFailingRequiredCheck()
+	return escalation.Observation{
+		Repo:    repo,
+		Number:  pr.Number,
+		HeadSHA: pr.HeadSHA,
+		Red:     red,
+		Pending: !red && pr.CIStatus != "success",
+		Labeled: escalation.HasNeedsHumanLabel(pr.Labels),
+		Excerpt: pr.CIFailureExcerpt,
+		Labels:  pr.Labels,
+	}
+}
+
+// dependencyBots are forge bots whose PRs are dependency bumps, not hive fix
+// attempts. They carry the "[bot]" suffix that otherwise marks a PR as
+// agent-authored, but nothing in the hive opened them and no hive agent is
+// iterating on them, so a red one is not a fix loop to break: escalating it
+// only pages a human with "1 distinct fix attempts" about a crate bump that
+// renovate will rebase on its own. Mirrors the hub's default contribute
+// deny-authors list (config: hub.contribute_deny_authors).
+var dependencyBots = map[string]bool{
+	"renovate[bot]":    true,
+	"dependabot[bot]":  true,
+	"mergeraptor[bot]": true,
+}
+
+// isHiveAgentAuthor reports whether a PR author is one of OUR agents — the
+// configured ai_author, the App bot identity agents author as, or another
+// bot account — excluding the dependency bots above. Shared by every fix-loop
+// path (staleness clock, reaper, escalation sweep) so they classify PRs
+// identically.
+func isHiveAgentAuthor(cfg *config.Config, author string) bool {
+	if author == "" {
+		return false
+	}
+	if author == cfg.Project.AIAuthor {
+		return true
+	}
+	if eff := cfg.EffectiveAIAuthor(); eff != "" && author == eff {
+		return true
+	}
+	return strings.HasSuffix(author, "[bot]") && !dependencyBots[author]
 }
 
 // recordRedStaleness updates the shared staleness clock (first-seen-red per red
@@ -2826,42 +2885,16 @@ func runEscalationSweep(
 	}
 	getEscalationStore()
 
-	fullRepo := func(repo string) string {
-		if !strings.Contains(repo, "/") && cfg.Project.Org != "" {
-			return cfg.Project.Org + "/" + repo
-		}
-		return repo
-	}
-	isAgentAuthor := func(author string) bool {
-		return author == cfg.Project.AIAuthor || strings.HasSuffix(author, "[bot]")
-	}
-
 	var obs []escalation.Observation
 	type prMeta struct{ checks []string }
 	meta := map[string]prMeta{}
 	for _, pr := range actionable.PRs.Items {
-		if !isAgentAuthor(pr.Author) {
+		if !isHiveAgentAuthor(cfg, pr.Author) {
 			continue
 		}
-		repo := fullRepo(pr.Repo)
-		obs = append(obs, escalation.Observation{
-			Repo:    repo,
-			Number:  pr.Number,
-			HeadSHA: pr.HeadSHA,
-			Red:     pr.CIStatus == "failure",
-			// Pending marks an unresolved CI window as a no-op observation:
-			// without it every fresh push's pending window wiped the
-			// distinct-SHA attempt ledger, making the escalation breaker
-			// probabilistic (#5617, gap G2 — Spin witness w_pending_wipe).
-			Pending: pr.CIStatus == "pending",
-			Excerpt: pr.CIFailureExcerpt,
-			// Labels let Sweep reconcile reviewer-lane verdicts (label-only
-			// edits: needs-human removed, reviewer-passed added) back into the
-			// ledger so a reviewer-repaired PR that goes red again re-enters
-			// the fix lifecycle instead of being orphaned (#5511, gap G1).
-			Labels: pr.Labels,
-		})
-		meta[escalation.Key(repo, pr.Number)] = prMeta{checks: pr.FailingChecks}
+		o := escalationObservation(cfg, pr)
+		obs = append(obs, o)
+		meta[escalation.Key(o.Repo, o.Number)] = prMeta{checks: pr.FailingChecks}
 	}
 	results := escalationStore.Sweep(obs, cfg.Escalation.EffectiveThreshold())
 
@@ -2873,6 +2906,16 @@ func runEscalationSweep(
 		}
 		if r.Escalated {
 			escalated[key] = true
+		}
+		if r.NeedsLabel && !o.Labeled {
+			// Escalated on an earlier pass but the label never landed (the
+			// AddLabels call failed). Retry the LABEL ONLY — the evidence
+			// comment already reached the human and must not be repeated.
+			if err := writer.AddLabels(ctx, o.Repo, o.Number, []string{escalation.NeedsHumanLabel}); err != nil {
+				logger.Warn("escalation label retry failed", "repo", o.Repo, "pr", o.Number, "error", err)
+			} else {
+				escalationStore.MarkLabelApplied(o.Repo, o.Number)
+			}
 		}
 		if !r.NewlyEscala {
 			continue
@@ -2887,10 +2930,10 @@ func runEscalationSweep(
 		// left on the branch, when, and that no second automated pass is
 		// coming. Before this, the only thing distinguishing that hand-off
 		// from a first escalation was the label set.
-		body := escalation.CommentBody(r.Attempts, meta[key].checks, excerpt)
+		body := escalation.CommentBody(r.Attempts, meta[key].checks, excerpt, r.Exhausted)
 		afterReviewerPass := false
 		if sha, at, ok := escalationStore.ReviewerPass(o.Repo, o.Number); ok {
-			body = escalation.HandoffCommentBody(r.Attempts, meta[key].checks, excerpt,
+			body = escalation.HandoffCommentBody(r.Attempts, meta[key].checks, excerpt, r.Exhausted,
 				escalation.ReviewerHandoff{SHA: sha, At: at})
 			afterReviewerPass = true
 		}
@@ -2901,10 +2944,14 @@ func runEscalationSweep(
 				"repo", o.Repo, "pr", o.Number, "error", err)
 			continue
 		}
-		if err := writer.AddLabels(ctx, o.Repo, o.Number, []string{escalation.NeedsHumanLabel}); err != nil {
-			logger.Warn("escalation label failed", "repo", o.Repo, "pr", o.Number, "error", err)
-		}
+		// Mark escalated BEFORE the label call: once the comment is on the
+		// PR, nothing may post it again, whatever happens to the label.
 		escalationStore.MarkEscalated(o.Repo, o.Number)
+		if err := writer.AddLabels(ctx, o.Repo, o.Number, []string{escalation.NeedsHumanLabel}); err != nil {
+			logger.Warn("escalation label failed; will retry next pass", "repo", o.Repo, "pr", o.Number, "error", err)
+		} else {
+			escalationStore.MarkLabelApplied(o.Repo, o.Number)
+		}
 		// The escalation IS the real "blocked" lifecycle signal (#5656): a PR
 		// out of automated fix attempts, handed to a human. Record it on the
 		// item's journey so the panel's Blocked counter reflects reality, not
@@ -3545,9 +3592,20 @@ func recordIntentAlignmentAdvisory(stores map[string]*beads.Store, repo string, 
 		return
 	}
 	title := fmt.Sprintf("Intent alignment drift in %s#%d", repo, number)
-	ref := fmt.Sprintf("gh-%s#%d", repo, number)
+	// "<owner>/<repo>#<n>", NOT "gh-<owner>/<repo>#<n>". The old form fused the
+	// source prefix into the org when the digest built its URL, so every one of
+	// these rendered a link to a github.com/gh-<owner> that does not exist
+	// (#6080). The renderer strips the prefix defensively for beads already
+	// written this way; this stops writing new ones.
+	ref := fmt.Sprintf("%s#%d", repo, number)
+	// Beads created before that change carry the prefixed form. Matching both
+	// keeps this idempotent across the change: without it the first run after
+	// upgrading would fail to recognise the existing bead and open a duplicate.
+	legacyRef := "gh-" + ref
 	for _, b := range store.List(beads.ListFilter{}) {
-		if b.Type == beads.TypeAdvisory && b.Title == title && b.ExternalRef == ref && b.Status != beads.StatusClosed && b.Status != beads.StatusDone {
+		if b.Type == beads.TypeAdvisory && b.Title == title &&
+			(b.ExternalRef == ref || b.ExternalRef == legacyRef) &&
+			b.Status != beads.StatusClosed && b.Status != beads.StatusDone {
 			return
 		}
 	}

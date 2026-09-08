@@ -50,7 +50,11 @@ type PRRequest struct {
 	Title  string `json:"title"`
 	Body   string `json:"body,omitempty"`
 	Agent  string `json:"agent,omitempty"`
-	IssueN []int  `json:"issues,omitempty"` // informational; the body already carries "Fixes #N"
+	// IssueN declares the originating issue(s) this PR is for (hive-open-pr
+	// --issues). When set, the watcher verifies the body actually references
+	// each one (Closes #N / Refs #N) and rejects the request otherwise — a
+	// body that lost its issue line is lost content (see validatePRRequestBody).
+	IssueN []int `json:"issues,omitempty"`
 }
 
 // PRResponse is written back next to a consumed request (as <name>.result.json)
@@ -261,6 +265,16 @@ func (c *Client) handleOnePRRequest(ctx context.Context, path string, nowFn func
 	// anyway — and so a paused repo spends no API quota on validation.
 	if c.RepoIsPaused(req.Repo) {
 		c.rejectPRRequest(path, req, "repo-pause", RepoPausedReason(req.Repo), nowFn)
+		return
+	}
+
+	// Cheap local body checks first — before anything that spends API quota.
+	// An empty body, or a body missing the reference to its declared
+	// originating issue, is lost content (the observed failure: hive-open-pr
+	// dropping --body-file shipped PRs whose whole body was the attribution
+	// footer). Fail the request loudly rather than opening a content-less PR.
+	if reason := c.validatePRRequestBody(req); reason != "" {
+		c.rejectPRRequest(path, req, "body", reason, nowFn)
 		return
 	}
 

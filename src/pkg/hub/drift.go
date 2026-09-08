@@ -709,6 +709,22 @@ func computeDrift(h MyHiveEntry, norm fleetNorm, latestSHAs map[string]string, n
 	return report
 }
 
+// appendDriftSignal is the read-time appender the My Hives roster uses to fold
+// a signal computed after the drift report was built (the restart-storm
+// rollup) into a hive's DriftReport. It keeps Count in lockstep with Signals
+// and applies "worst wins" to WorstSeverity — never downgrading a report that
+// already carries a worse signal. A nil report is a no-op.
+func appendDriftSignal(report *DriftReport, kind string, sev DriftSeverity, reason string) {
+	if report == nil {
+		return
+	}
+	report.Signals = append(report.Signals, DriftSignal{Kind: kind, Severity: sev, Reason: reason})
+	report.Count = len(report.Signals)
+	if driftSeverityRank[sev] > driftSeverityRank[report.WorstSeverity] {
+		report.WorstSeverity = sev
+	}
+}
+
 // parseRFC3339OrTime accepts an already-parsed time.Time (the registry stores
 // UpgradeStartedAt as one) and falls back to parsing a string form. ok is false
 // only when neither yields a usable instant.
