@@ -9,6 +9,23 @@ import (
 	"time"
 )
 
+// testEnvelope is the fixture the v4 runner_test.go supplied; v5 dropped that
+// file, so the store error tests carry their own copy.
+func testEnvelope() SessionEnvelope {
+	return SessionEnvelope{
+		Version:   EnvelopeVersion,
+		SessionID: "session-4002",
+		Agent:     "contributor",
+		TaskRef:   "hivecommons/hive#4002",
+		Status:    StatusActive,
+		Messages: []Message{{
+			Role:      RoleUser,
+			Content:   "implement the re-entrant turn spike",
+			Timestamp: time.Unix(1, 0).UTC(),
+		}},
+	}
+}
+
 func TestPersistFailsWhenDirectoryMissing(t *testing.T) {
 	store := FileStore{Path: filepath.Join(t.TempDir(), "missing", "turn.json")}
 	err := store.Persist(context.Background(), testEnvelope())
