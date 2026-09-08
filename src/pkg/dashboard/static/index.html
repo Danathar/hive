@@ -7668,6 +7668,39 @@
       }
     }
 
+    function advisoryFindingTime(iso) {
+      const time = iso ? new Date(iso).getTime() : NaN;
+      if (!Number.isFinite(time) || time <= 0) return 'unknown';
+      const seconds = Math.max(0, Math.floor((Date.now() - time) / 1000));
+      const age = seconds < 60 ? 'just now' : seconds < 3600 ? Math.floor(seconds / 60) + 'm ago'
+        : seconds < 86400 ? Math.floor(seconds / 3600) + 'h ago' : Math.floor(seconds / 86400) + 'd ago';
+      return `<time datetime="${escapeHtml(iso)}" title="${escapeHtml(new Date(time).toLocaleString())}">${age}</time>`;
+    }
+
+    function advisoryFindingStateHTML(f) {
+      const warnings = [];
+      if (f.provenance_stale) warnings.push('provenance stale — not re-verified at the analyzed snapshot');
+      // Match Hive's existing cached-evidence caption: a pinned provenance
+      // takes precedence over the no-provenance replay counter.
+      if (f.cached_replays > 0 && !f.provenance_sha) warnings.push('cached replay — not re-verified');
+      if (f.path_stale) warnings.push('referenced file/path stale');
+      const evidence = f.provenance_sha ? ` @ <code title="${escapeHtml(f.provenance_sha)}">${escapeHtml(f.provenance_sha.slice(0, 12))}</code>` : '';
+      let html = `<div class="advisory-finding-state" style="margin-top:5px;color:var(--muted);font-size:0.75rem">
+        <div>Created ${advisoryFindingTime(f.timestamp)} · last seen ${advisoryFindingTime(f.last_seen_at)}</div>
+        <div${warnings.length ? ' style="color:var(--yellow)"' : ''}>${warnings.length ? '⚠ ' : ''}Evidence${evidence} · ${warnings.length ? warnings.map(escapeHtml).join('; ') : 'no known freshness warning'}</div>`;
+      const work = f.linked_work || [];
+      if (!work.length) html += '<div>No linked remediation</div>';
+      for (const ref of work) {
+        const kind = ref.kind === 'pr' ? 'PR' : ref.kind === 'issue' ? 'Issue' : 'Work';
+        const label = `${kind} #${ref.number} (${ref.owner}/${ref.repo})`;
+        const url = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/(issues|pull)\/[1-9][0-9]*$/.test(ref.url || '') ? ref.url : '';
+        const link = url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}</a>` : escapeHtml(label);
+        const state = ['OPEN', 'CLOSED', 'MERGED'].includes(ref.state) ? ref.state : 'UNKNOWN';
+        html += `<div>${link} · ${state}${state === 'UNKNOWN' ? ' (state unavailable)' : ref.kind === 'pr' && state === 'OPEN' ? ' · in flight' : ''}${ref.checked_at ? ' · checked ' + advisoryFindingTime(ref.checked_at) : ''}</div>`;
+      }
+      return html + '</div>';
+    }
+
     function renderAdvisoryDigest(digest) {
       const el = document.getElementById('advisory-digest');
       if (!el) return;
@@ -7699,6 +7732,7 @@
           html += `<div style="font-size:0.8rem;padding:6px 10px;background:var(--bg);border-radius:4px;border-left:3px solid ${f.severity === 'critical' ? 'var(--red)' : f.severity === 'high' ? 'var(--orange)' : f.severity === 'medium' ? 'var(--yellow)' : 'var(--muted)'}">
             ${sevIcon(f.severity)} <strong>[${escapeHtml(f.type || 'finding')}]</strong> ${escapeHtml(f.title)}${loc}
             ${f.detail ? `<div style="margin-top:4px;color:var(--muted);font-size:0.75rem">${escapeHtml(f.detail)}</div>` : ''}
+            ${advisoryFindingStateHTML(f)}
           </div>`;
         }
         html += '</div></div>';

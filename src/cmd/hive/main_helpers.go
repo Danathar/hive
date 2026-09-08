@@ -1431,6 +1431,7 @@ func runEvalCycle(
 			}
 		}
 		digest := advisory.BuildDigestFromBeads(beadStores, string(govState.Mode), digestOpts)
+		enrichAdvisoryLinkedWork(ctx, ghClient, digest, org, repoName, logger)
 		if advisoryStore != nil {
 			advisoryStore.SetLatestDigest(digest)
 		}
