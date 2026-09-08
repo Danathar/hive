@@ -1009,6 +1009,12 @@ contribute-hive backend="" mode="docker": check-version
 
       # Get CLI binary and permission flags from backends.conf
       #
+      # HIVE_AGENT_CWD is exported BEFORE the permission flags are resolved:
+      # claude_family_local_perm_flag_shell grants it as a writable root
+      # (#6082), so it must exist in the environment when that function runs.
+      # The directory's rationale is with the cd below, where it is used.
+      export HIVE_AGENT_CWD="${XDG_STATE_HOME:-${HOME}/.local/state}/hive/agent-cwd"
+      mkdir -p "$HIVE_AGENT_CWD"
       # HIVE_AGENT_CACHE_DIR is exported BEFORE the permission flags resolve:
       # claude_family_local_perm_flag_shell grants it as a sandbox write root
       # (#6100), so it has to be in the environment when that function runs.
@@ -1136,8 +1142,8 @@ contribute-hive backend="" mode="docker": check-version
       # `ls`, `grep -r` and relative write lands. cwd is not a boundary — the
       # process runs as the user regardless — but an empty dedicated directory
       # costs nothing and keeps the default blast radius off the user's home.
-      export HIVE_AGENT_CWD="${XDG_STATE_HOME:-${HOME}/.local/state}/hive/agent-cwd"
-      mkdir -p "$HIVE_AGENT_CWD"
+      # (HIVE_AGENT_CWD itself is exported above, before the permission flags
+      # resolve, because the Claude local sandbox grants it as a write root.)
       # Point every compiled toolchain at the granted cache root (#6100), so a
       # sandboxed agent never reaches a default under $HOME. Prefixed onto the
       # launch line as VAR=value assignments, the same shape LITELLM_ENV
