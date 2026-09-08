@@ -113,7 +113,7 @@ fi
 
 capture="$tmp/create-transient"
 run_case transient-then-success 100 "$capture"
-grep -q 'hive:v4-latest' "$capture"
+grep -q 'hive:v5-latest' "$capture"
 if [[ $(cat "$capture.inspect-fails") != 2 ]]; then
   echo "transient inspect failures were not retried" >&2
   exit 1
