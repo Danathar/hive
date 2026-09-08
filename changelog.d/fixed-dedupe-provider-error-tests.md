@@ -1,1 +1,0 @@
-- Removed duplicate `TestProviderErrorStatusClass`, `TestPaneAfterKickBaseline` and `TestClearProviderErrorLocked` declarations in `pkg/agent` that landed via #6107 and #6151 and broke `go vet` / `golangci-lint` on v4.
