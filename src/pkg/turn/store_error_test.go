@@ -45,7 +45,9 @@ func TestExecutorNowFallsBackToWallClock(t *testing.T) {
 
 	fixed := time.Date(2026, 9, 7, 0, 0, 0, 0, time.FixedZone("EST", -5*3600))
 	x.Now = func() time.Time { return fixed }
-	if got := x.now(); !got.Equal(fixed) || got.Location() != time.UTC {
-		t.Fatalf("now() with injected clock = %v (loc %v), want %v in UTC", got, got.Location(), fixed)
+	// v5's now() returns the injected clock unchanged (no UTC normalisation);
+	// only the wall-clock fallback is pinned to UTC.
+	if got := x.now(); !got.Equal(fixed) {
+		t.Fatalf("now() with injected clock = %v, want %v", got, fixed)
 	}
 }

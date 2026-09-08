@@ -8,7 +8,7 @@ import (
 	"github.com/hivecommons/hive/pkg/agent"
 	"github.com/hivecommons/hive/pkg/config"
 	"github.com/hivecommons/hive/pkg/governor"
-	"github.com/hivecommons/hive/pkg/hub"
+	"github.com/hivecommons/hive/pkg/hub/spoke"
 )
 
 // #6237: an agent whose CLI died on every launch reported the same
@@ -45,7 +45,7 @@ func buildOneAgent(t *testing.T, proc *agent.AgentProcess) FrontendAgent {
 func TestBuildAgents_CrashLoopEscalatesToBlocked(t *testing.T) {
 	now := time.Now()
 	var events []agent.RestartEvent
-	for i := 0; i < hub.AgentRestartProblemThreshold(); i++ {
+	for i := 0; i < spoke.AgentRestartProblemThreshold(); i++ {
 		events = append(events, agent.RestartEvent{
 			At:     now.Add(-time.Duration(i+1) * time.Minute),
 			Reason: "crash",
@@ -78,7 +78,7 @@ func TestBuildAgents_CrashLoopEscalatesToBlocked(t *testing.T) {
 func TestBuildAgents_RestartsBelowThresholdStayHealthy(t *testing.T) {
 	now := time.Now()
 	var events []agent.RestartEvent
-	for i := 0; i < hub.AgentRestartProblemThreshold()-1; i++ {
+	for i := 0; i < spoke.AgentRestartProblemThreshold()-1; i++ {
 		events = append(events, agent.RestartEvent{At: now.Add(-time.Duration(i+1) * time.Minute), Reason: "crash"})
 	}
 	a := buildOneAgent(t, crashLoopProc("scanner", events))
@@ -92,7 +92,7 @@ func TestBuildAgents_StaleRestartsOutsideWindowIgnored(t *testing.T) {
 	// window may trip the escalation, exactly like the hub's Restarts.Last24h.
 	now := time.Now()
 	var events []agent.RestartEvent
-	for i := 0; i < hub.AgentRestartProblemThreshold()+3; i++ {
+	for i := 0; i < spoke.AgentRestartProblemThreshold()+3; i++ {
 		events = append(events, agent.RestartEvent{At: now.Add(-25 * time.Hour), Reason: "crash"})
 	}
 	proc := crashLoopProc("scanner", events)
@@ -111,7 +111,7 @@ func TestBuildAgents_StartBlockedOutranksCrashLoop(t *testing.T) {
 	// it must win over the generic crash-loop evidence.
 	now := time.Now()
 	var events []agent.RestartEvent
-	for i := 0; i < hub.AgentRestartProblemThreshold(); i++ {
+	for i := 0; i < spoke.AgentRestartProblemThreshold(); i++ {
 		events = append(events, agent.RestartEvent{At: now.Add(-time.Duration(i+1) * time.Minute), Reason: "crash"})
 	}
 	proc := crashLoopProc("scanner", events)

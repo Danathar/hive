@@ -20,7 +20,7 @@ import (
 	"github.com/hivecommons/hive/pkg/config"
 	"github.com/hivecommons/hive/pkg/github"
 	"github.com/hivecommons/hive/pkg/governor"
-	"github.com/hivecommons/hive/pkg/hub"
+	"github.com/hivecommons/hive/pkg/hub/spoke"
 	"github.com/hivecommons/hive/pkg/planning"
 	"github.com/hivecommons/hive/pkg/resolve"
 	"github.com/hivecommons/hive/pkg/skillreg"
@@ -714,12 +714,12 @@ func buildAgents(statuses map[string]*agent.AgentProcess, cfg *config.Config, go
 		// the permanently-failing loop into a visible fault. Escalate a restart
 		// storm through the same StructuredStatus channel as the other launch
 		// faults, using the SAME rolling-24h threshold the hub's fleet verdict
-		// applies (hub.AgentRestartProblemThreshold, overridable via
+		// applies (spoke.AgentRestartProblemThreshold, overridable via
 		// HIVE_HUB_AGENT_RESTART_PROBLEM_THRESHOLD) so the local card and the
 		// fleet view can never disagree about the same agent. Written before
 		// the StartBlocked block on purpose: a spoke that has STOPPED
 		// relaunching carries the more specific reason, so it wins.
-		if n, reason := restartsLast24h(proc, time.Now()); n >= hub.AgentRestartProblemThreshold() {
+		if n, reason := restartsLast24h(proc, time.Now()); n >= spoke.AgentRestartProblemThreshold() {
 			a.StructuredStatus = "BLOCKED"
 			a.StatusEvidence = fmt.Sprintf("blocked: crash-looping (%d restarts in 24h)", n)
 			if reason != "" {

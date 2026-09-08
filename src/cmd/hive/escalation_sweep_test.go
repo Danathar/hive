@@ -472,9 +472,13 @@ func TestRunEscalationSweepHandsOffAfterReviewerPass(t *testing.T) {
 	}
 
 	// Two more distinct red SHAs re-cross the threshold on the fresh ledger.
+	// The reviewer removed needs-human and nothing has re-added it: under the
+	// label-authoritative ledger (#6135) a PR still wearing needs-human counts
+	// as already escalated, so the re-escalation is only observable while the
+	// label is absent.
 	for _, sha := range []string{"sha-4", "sha-5"} {
 		runEscalationSweep(context.Background(), cfg, client,
-			red(sha, escalation.ReviewerPassedLabel, escalation.NeedsHumanLabel), nil, nil, logger)
+			red(sha, escalation.ReviewerPassedLabel), nil, nil, logger)
 	}
 	if len(fake.comments) != 2 {
 		t.Fatalf("comments = %d, want a second escalation comment after the reviewer pass", len(fake.comments))
