@@ -636,6 +636,15 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time) (a
 		totalIssues++
 		labels := extractLabels(issue.Labels)
 
+		// Standing meta issues — the hive's own advisory report and bot
+		// dependency dashboards — are structurally not work and never enter
+		// the actionable OR held sets (standing_issues.go). Before hold/exempt
+		// on purpose: a hold label on the advisory report must not surface it
+		// in the Hold list either.
+		if reason := standingMetaIssueReason(issue.GetTitle(), safeGetLogin(issue.GetUser()), labels); reason != "" {
+			continue
+		}
+
 		if isHeld(labels) {
 			held = append(held, HoldItem{
 				Number: issue.GetNumber(),
