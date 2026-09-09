@@ -1,1 +1,0 @@
-- Contributor relay: agy readiness/login/onboarding detection no longer reads a blank pane tail, so interactive agy contributors become ready and receive tasks ([#6413](https://github.com/hivecommons/hive/issues/6413)).
