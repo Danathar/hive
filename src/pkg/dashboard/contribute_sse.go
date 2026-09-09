@@ -308,6 +308,9 @@ func (h *ContributeWSHub) admissionQueueSnapshot(limit int, withDiagnostics bool
 	if status == nil {
 		return snap
 	}
+	for _, repo := range status.Repos {
+		snap.candidateTotal += len(repo.ActionableIssues)
+	}
 
 	// Which issues are already being worked right now — exclude them from "ready"
 	// exactly as selectTask does (an in-flight issue is not waiting to be picked).
@@ -500,6 +503,10 @@ func (h *ContributeWSHub) admissionQueueSnapshot(limit int, withDiagnostics bool
 
 	// Cap AFTER ordering so the operator's pinned items are guaranteed to survive the
 	// truncation (they sort to the front), not be dropped by an arbitrary scan cut.
+	// Preserve the totals before truncation: status and queue metadata must describe
+	// the whole population, not merely the bounded rendering window.
+	snap.offerableTotal = len(out)
+	snap.heldTotal = len(heldItems)
 	if len(out) > limit {
 		out = out[:limit]
 	}

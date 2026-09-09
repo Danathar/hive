@@ -2649,8 +2649,8 @@ It clears automatically when the period elapses. An operator can shorten or disa
 </div>
 <!-- ── Triage ladder (#2612 part b) — a Warp-style lifecycle view over the hive's
      contribute issues, grouped Triaging → Ready → Implementing → Reviewing →
-     Closed. Each level is DERIVED LIVE from the ready queue + fleet snapshot +
-     the PR→issue link (part c); there is no persistent per-issue lifecycle store
+     Closed. Each level is DERIVED LIVE from the raw candidate pool + ready queue
+     + fleet snapshot + the PR→issue link (part c); there is no persistent per-issue lifecycle store
      (a future enhancement, out of scope). A SECTION within Operations — NOT a new
      page/tab. Fetched from /api/contribute/triage after load so a slow GitHub
      PR-link lookup never delays the page. Full-width card below the ops grid. -->
@@ -2660,7 +2660,7 @@ It clears automatically when the period elapses. An operator can shorten or disa
 <div class="cc-triage-ladder" id="cc-triage-ladder"><div class="ops-empty">Loading triage&hellip;</div></div>
 <!-- Grouped per-level issue lists (each collapsible-ish section, capped). -->
 <div class="cc-triage-groups" id="cc-triage-groups"></div>
-<p class="ops-note" style="padding:10px 20px 14px;margin:0">A live lifecycle view of this hive&rsquo;s contribute issues &mdash; each issue is placed on the ladder from what the hive can observe right now (the ready queue, the fleet&rsquo;s in-flight work, and whether a fixing PR is open or merged). Read-only and recomputed on each load; there is no stored per-issue state.</p>
+<p class="ops-note" style="padding:10px 20px 14px;margin:0">A live lifecycle view of this hive&rsquo;s contribute issues &mdash; raw candidates withheld by admission remain in Triaging, while ready work, the fleet&rsquo;s in-flight work, and fixing PRs advance issues through the ladder. Read-only and recomputed on each load; there is no stored per-issue state.</p>
 </div>
 </div>
 <!-- Dedicated full-height LIVE ACTIVITY RAIL. Holds ONLY the live activity feed
@@ -5189,7 +5189,7 @@ function ccRenderQueue(flip){
   // or read-write; a read/anon viewer never gets the handles and cannot reorder.
   // The server enforces the same boundary independently (403 on the order endpoint).
   el.classList.toggle('cc-q-draggable',!!adminEnabled);
-  if(!ccQueue.length){el.innerHTML='<div class="ops-empty">No work waiting &mdash; the backlog is clear or everything is in flight.</div>';ccUpdateFilterNote(0,0);ccKnownQueueKeys={};return;}
+  if(!ccQueue.length){el.innerHTML='<div class="ops-empty">No work is currently assignable &mdash; candidates may be disabled, filtered, on cooldown, dependency-blocked, or in flight.</div>';ccUpdateFilterNote(0,0);ccKnownQueueKeys={};return;}
   var shown=0,total=ccQueue.length;
   // Render over the FULL model, tagging each row with its TRUE position (i) so the
   // shown index and the move-to menu reflect the real queue position even while a
@@ -6549,17 +6549,28 @@ func (s *Server) handleContributeReissueToken(w http.ResponseWriter, r *http.Req
 func (s *Server) handleContributeStatus(w http.ResponseWriter, r *http.Request) {
 	profiles := listContributorProfiles()
 	active := 0
+	actionable, candidates := 0, 0
 	if s.contributeHub != nil {
 		active = s.contributeHub.ActiveCount()
-	}
-	actionable := 0
-	s.statusMu.RLock()
-	if s.status != nil {
-		for _, repo := range s.status.Repos {
-			actionable += len(repo.ActionableIssues)
+		// "Actionable" is the work a contributor can actually be offered, not the
+		// scanner's raw candidate population. Reuse the same admission sweep as the
+		// queue/assignment projection so disabled repositories, holds, cooldowns,
+		// dependency gates, in-flight work and configured filters cannot make this
+		// endpoint advertise work that the relay will reject as no_matching_work.
+		snap := s.contributeHub.admissionQueueSnapshot(readyQueueDefaultLimit, false)
+		actionable = snap.offerableTotal
+		candidates = snap.candidateTotal
+	} else {
+		// Defensive fallback for partially constructed test/embedding servers. A
+		// production route always has a contribute hub after registration.
+		s.statusMu.RLock()
+		if s.status != nil {
+			for _, repo := range s.status.Repos {
+				candidates += len(repo.ActionableIssues)
+			}
 		}
+		s.statusMu.RUnlock()
 	}
-	s.statusMu.RUnlock()
 	// #2567: identify WHICH surface answered. The Hub discovery front door and a
 	// selected spoke both serve this exact handler with disjoint-looking payloads
 	// and, until now, no discriminator — a wrong-base-URL request returned 200 and
@@ -6574,9 +6585,13 @@ func (s *Server) handleContributeStatus(w http.ResponseWriter, r *http.Request) 
 		"active_contributors": active,
 		"total_registered":    len(profiles),
 		"actionable_items":    actionable,
-		"surface":             s.contributeSurface(),
-		"api_version":         contributorProtocolVersion,
-		"served_sha":          versionShort,
+		// Additive compatibility field for callers that need scanner health or want
+		// to explain why admission reduced the raw population. This is deliberately
+		// not named actionable: candidates may still be disabled or filtered out.
+		"candidate_items": candidates,
+		"surface":         s.contributeSurface(),
+		"api_version":     contributorProtocolVersion,
+		"served_sha":      versionShort,
 	})
 }
 
@@ -6737,7 +6752,10 @@ func (s *Server) handleContributeFleet(w http.ResponseWriter, r *http.Request) {
 // the SSE "hello" frame carries, so the queue renders even if the stream drops.
 func (s *Server) handleContributeQueue(w http.ResponseWriter, r *http.Request) {
 	queue := []ReadyQueueItem{}
-	resp := map[string]any{}
+	resp := map[string]any{
+		"queue_total": 0,
+		"held_total":  0,
+	}
 	if s.contributeHub != nil {
 		// One snapshot serves the queue and — only when the convergence toggle
 		// is in shadow mode (#4246, default off) — the additive withheld /
@@ -6746,6 +6764,8 @@ func (s *Server) handleContributeQueue(w http.ResponseWriter, r *http.Request) {
 		diag := s.convergenceDiagnosticsEnabled()
 		snap := s.contributeHub.admissionQueueSnapshot(readyQueueDefaultLimit, diag)
 		queue = snap.queue
+		resp["queue_total"] = snap.offerableTotal
+		resp["held_total"] = snap.heldTotal
 		if diag {
 			resp["withheld"] = snap.withheld
 			resp["admission_coverage"] = snap.coverage

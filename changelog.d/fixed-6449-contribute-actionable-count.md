@@ -1,0 +1,1 @@
+- Contributor status no longer labels the raw scanner pool as assignable work: `actionable_items` and the ready queue now share the same admission pass, while `candidate_items` preserves the pre-admission count and excluded candidates remain visible in the triage ladder instead of disappearing ([#6449](https://github.com/hivecommons/hive/issues/6449)).
