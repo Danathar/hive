@@ -58,7 +58,7 @@ func TestBackendLaunchCmdRemainingBranches(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := backendLaunchCmd(tc.binary, tc.model, tc.backend, tc.inference); got != tc.want {
+			if got := backendLaunchCmd(tc.binary, tc.model, tc.backend, tc.inference, ""); got != tc.want {
 				t.Fatalf("backendLaunchCmd() = %q, want %q", got, tc.want)
 			}
 		})
