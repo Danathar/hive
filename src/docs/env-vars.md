@@ -172,6 +172,8 @@ new value at the same time.
 | `BD_DIR` | No | current directory | `bd` beads CLI data directory. |
 | `BD_DASHBOARD_URL` | No | none | Dashboard URL used by `bd kb` integration. |
 | `OPENAI_API_KEY` | No | none | OpenAI-compatible API key consulted by agent credential probing (`pkg/agent/authprobe.go`) for Codex API-key mode, including `CODEX_HOME/auth.json` entries written under the same key. |
+| `OPENAI_HOST` | No | Goose CLI default | OpenAI-compatible API host consumed by Goose and forwarded into contributor containers. |
+| `OPENAI_BASE_PATH` | No | Goose CLI default | OpenAI-compatible API request path consumed by Goose and forwarded into contributor containers. |
 | `CODEX_API_KEY` | No | none | API key read by `pkg/agent/authprobe.go` for the Codex CLI backend; either this or `OPENAI_API_KEY` makes Codex API-key mode count as configured. |
 | `HIVE_AGENT_TOKEN_REFRESH_INTERVAL` | No | `40m` | Go duration overriding the per-agent token refresh interval. Invalid or non-positive values fall back to the default. |
 | `HIVE_CREDENTIAL_WATCHDOG_INTERVAL` | No | `5m` | Go duration overriding how often the credential watchdog verifies each in-use backend credential file. `0` does NOT disable the watchdog — disabling is intentionally not offered. |
