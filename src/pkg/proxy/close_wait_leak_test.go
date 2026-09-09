@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -106,6 +107,7 @@ func TestProxyHTTPGitRelayReleasesAfterUpstreamFIN(t *testing.T) {
 func TestProxyHTTPBodyStallReleasesHandler(t *testing.T) {
 	shortenBodyStall(t, 300*time.Millisecond)
 	p := leakTestProxy()
+	p.bodyStallTimeout = 300 * time.Millisecond
 	agentSide, proxyClientSide := tcpPair(t)
 	proxyUpstreamSide, forgeSide := tcpPair(t)
 
@@ -143,6 +145,7 @@ func TestProxyHTTPBodyStallReleasesHandler(t *testing.T) {
 func TestProxyHTTPBodyRelayToleratesSlowButFlowingBody(t *testing.T) {
 	shortenBodyStall(t, 500*time.Millisecond)
 	p := leakTestProxy()
+	p.bodyStallTimeout = 500 * time.Millisecond
 	agentSide, proxyClientSide := tcpPair(t)
 	proxyUpstreamSide, forgeSide := tcpPair(t)
 
@@ -219,5 +222,74 @@ func TestProxyHTTPHasNoInlineCopyPairs(t *testing.T) {
 	// And the API branch must bound its body relay.
 	if !strings.Contains(text, "resp.Body = &stallBoundedBody{") {
 		t.Fatal("proxyHTTP response body relay must be wrapped in stallBoundedBody — an unbounded body read parks the handler and leaks its sockets (#3875)")
+	}
+}
+
+// TestResponseBodyStallConcurrentWithProxyHTTP tests concurrent shortenBodyStall
+// and proxy instance bodyStallTimeout queries under the race detector (issue #6338).
+func TestResponseBodyStallConcurrentWithProxyHTTP(t *testing.T) {
+	const iters = 100
+	var wg sync.WaitGroup
+
+	p := leakTestProxy()
+
+	// Goroutine 1: repeatedly mutate package-level stall timeout via shortenBodyStall
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iters; i++ {
+			d := time.Duration(100+i) * time.Millisecond
+			shortenBodyStall(t, d)
+		}
+	}()
+
+	// Goroutine 2: concurrent reads through p.bodyStallTimeoutDuration()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iters; i++ {
+			_ = p.bodyStallTimeoutDuration()
+		}
+	}()
+
+	// Goroutine 3: concurrent reads with instance-level override set
+	pOverride := leakTestProxy()
+	pOverride.bodyStallTimeout = 250 * time.Millisecond
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iters; i++ {
+			if got := pOverride.bodyStallTimeoutDuration(); got != 250*time.Millisecond {
+				t.Errorf("instance override = %v, want 250ms", got)
+			}
+		}
+	}()
+
+	wg.Wait()
+}
+
+// TestProxyHTTPResponseWriteErrorNoGoroutineLeak verifies that TestProxyHTTPResponseWriteError
+// joins all helper and handler goroutines so none are leaked after the test returns (issue #6338).
+func TestProxyHTTPResponseWriteErrorNoGoroutineLeak(t *testing.T) {
+	before := runtime.NumGoroutine()
+
+	for i := 0; i < 5; i++ {
+		TestProxyHTTPResponseWriteError(t)
+	}
+
+	// Wait for goroutines to settle back to baseline (with a small tolerance for runtime background workers)
+	const tolerance = 2
+	deadline := time.Now().Add(2 * time.Second)
+	var after int
+	for time.Now().Before(deadline) {
+		after = runtime.NumGoroutine()
+		if after <= before+tolerance {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if after > before+tolerance {
+		t.Errorf("goroutines leaked: before=%d, after=%d (tolerance %d)", before, after, tolerance)
 	}
 }
