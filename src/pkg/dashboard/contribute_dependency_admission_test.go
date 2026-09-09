@@ -852,6 +852,7 @@ func BenchmarkAdmissionSweep(b *testing.B) {
 	srv := NewServer(0, logger)
 	srv.deps = &Dependencies{BeadStores: stores}
 	hub := NewContributeWSHub(logger, srv)
+	b.Cleanup(hub.Close)
 
 	b.ReportAllocs()
 	b.ResetTimer()

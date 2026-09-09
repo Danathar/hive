@@ -251,6 +251,11 @@ type GitHubProxy struct {
 	// injectLinearCredential. nil (the default) leaves agent requests
 	// carrying whatever credential the agent supplied.
 	linearCredential func() agent.LinearCredential
+
+	// bodyStallTimeout, when > 0, overrides the package-level
+	// responseBodyStallTimeout for this proxy instance. This test seam
+	// allows tests to adjust the stall bound per-proxy without mutating shared state.
+	bodyStallTimeout time.Duration
 }
 
 // SetLinearCredentialResolver installs the resolver injectLinearCredential
@@ -1276,7 +1281,7 @@ func (p *GitHubProxy) proxyHTTPHost(client net.Conn, upstream net.Conn, host str
 		// deadline, so a body that keeps flowing is never cut while a stall
 		// longer than responseBodyStallTimeout errors out and lets the
 		// handler's deferred Closes reclaim the sockets.
-		resp.Body = &stallBoundedBody{body: resp.Body, conn: upstream, idle: bodyStallTimeout()}
+		resp.Body = &stallBoundedBody{body: resp.Body, conn: upstream, idle: p.bodyStallTimeoutDuration()}
 
 		_ = client.SetWriteDeadline(time.Now().Add(httpWriteTimeout))
 		if err := resp.Write(client); err != nil {
@@ -1563,6 +1568,15 @@ func init() { responseBodyStallTimeout.Store(int64(httpReadTimeout)) }
 // bodyStallTimeout returns the current response-body stall bound.
 func bodyStallTimeout() time.Duration {
 	return time.Duration(responseBodyStallTimeout.Load())
+}
+
+// bodyStallTimeoutDuration returns the body-stall timeout for this proxy instance,
+// falling back to the package-level responseBodyStallTimeout.
+func (p *GitHubProxy) bodyStallTimeoutDuration() time.Duration {
+	if p != nil && p.bodyStallTimeout > 0 {
+		return p.bodyStallTimeout
+	}
+	return bodyStallTimeout()
 }
 
 // stallBoundedBody wraps a proxied response body so every underlying Read is

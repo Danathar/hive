@@ -52,6 +52,10 @@ func (s *Server) brandingWarn(key string, msg string, args ...any) {
 	s.logger.Warn(msg, args...)
 }
 
+// brandingFileOwnerUIDFn routes file ownership lookups through an injectable seam
+// so ownership security branches can be exercised in tests without root.
+var brandingFileOwnerUIDFn = brandingFileOwnerUID
+
 // brandingAllowUnsafeOwner reports whether the operator has explicitly accepted
 // a branding file owned by another uid.
 func brandingAllowUnsafeOwner() bool {
@@ -119,7 +123,7 @@ func (s *Server) readBrandingFile(path, kind string) ([]byte, error) {
 		return nil, fmt.Errorf("branding: file is group- or world-writable")
 	}
 
-	if uid := brandingFileOwnerUID(fi); uid >= 0 {
+	if uid := brandingFileOwnerUIDFn(fi); uid >= 0 {
 		self := os.Getuid()
 		// root-owned is accepted on purpose: the documented read-only Secret
 		// mount (defaultMode 0444, uid 0) is the recommended hardened shape and

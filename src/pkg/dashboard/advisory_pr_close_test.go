@@ -59,7 +59,10 @@ func advisoryPRHub(t *testing.T, merged bool, prTitle, findingTitle string, prAu
 	}
 	deps.Config.Governor.Advisory.PRAutoClose = prAutoClose
 	s.RegisterAPI(deps)
-	return NewContributeWSHub(logger, s), store, bead.ID
+	t.Cleanup(s.CloseContributeHub)
+	hub := NewContributeWSHub(logger, s)
+	t.Cleanup(hub.Close)
+	return hub, store, bead.ID
 }
 
 const advisoryFindingTitle = "pr-verifier workflow fails on every pull request"

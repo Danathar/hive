@@ -562,7 +562,7 @@ func (m *Manager) tmuxSendKeysForAgent(agent *AgentProcess, keys ...string) {
 }
 
 func (t tmuxTerminal) CapturePane(agent *AgentProcess) string {
-	cmd := t.manager.tmuxCmd(agent, "capture-pane", "-t", agent.tmuxSession, "-p",
+	cmd := t.manager.tmuxCmd(agent, "capture-pane", "-t", agent.tmuxSession, "-p", "-J",
 		"-S", fmt.Sprintf("-%d", tmuxCaptureLines))
 	out, err := cmd.Output()
 	if err != nil {

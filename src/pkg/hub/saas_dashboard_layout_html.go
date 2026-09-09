@@ -2769,6 +2769,7 @@ const dashboardHTMLLayout = `<!DOCTYPE html>
         var t = _channelTargets[i];
         if (t && t.channel === v) {
           if (t.branch) return v + ' (' + t.branch + ')';
+          if (t.sha) return v + ' (' + t.sha + ')';
           if (t.digest) return v + ' (' + shortDigest(t.digest) + ')';
           return v + ' (?)';
         }

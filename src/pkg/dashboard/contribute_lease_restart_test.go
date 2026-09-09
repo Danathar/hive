@@ -106,6 +106,7 @@ func TestLeaseRestart_ResumeSurvivesHubRestart(t *testing.T) {
 	// defer writes the release-cooldown ledger under ws-state/. Let it finish
 	// before the "restarted" hub boots over the same files.
 	waitContribDisconnect(t, s1.contributeHub, "restart-resume-user")
+	s1.contributeHub.Close()
 
 	s2 := NewServer(0, slog.Default())
 	s2.registerContributeRoutes()
@@ -132,7 +133,10 @@ func TestLeaseRestart_ResumeSurvivesHubRestart(t *testing.T) {
 	// Run after the deferred conn2.Close, before t.TempDir's RemoveAll: s2's
 	// handler defer must finish its ws-state/ writes before cleanup deletes the
 	// tree (the "directory not empty" TempDir flake).
-	t.Cleanup(func() { waitContribDisconnect(t, s2.contributeHub, "restart-resume-user") })
+	t.Cleanup(func() {
+		waitContribDisconnect(t, s2.contributeHub, "restart-resume-user")
+		s2.contributeHub.Close()
+	})
 	readMsg(t, conn2) // auth_challenge
 	conn2.WriteJSON(WSMessage{Type: "auth_response", RegistrationToken: reg["registration_token"], CLIBackend: "claude"})
 	readMsg(t, conn2) // auth_ok
