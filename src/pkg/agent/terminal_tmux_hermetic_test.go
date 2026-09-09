@@ -96,7 +96,7 @@ func TestTmuxTerminalSessionAttachedReachesManagerSeam(t *testing.T) {
 
 func TestTmuxTerminalCapturePaneJoinsWrappedLinesCommand(t *testing.T) {
 	logPath := installAttachFakeTmux(t)
-	term := tmuxTerminal{m: NewManager(nil, discardLogger(), ProjectContext{})}
+	term := tmuxTerminal{manager: NewManager(nil, discardLogger(), ProjectContext{})}
 	agent := &AgentProcess{Name: "quality", tmuxSession: "hive-capture-join-test"}
 
 	_ = term.CapturePane(agent)

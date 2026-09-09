@@ -173,7 +173,7 @@ func TestCapturePaneJoinsWrappedBlockedActionMarker(t *testing.T) {
 	var output string
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		output = tmuxTerminal{m: m}.CapturePane(agent)
+		output = tmuxTerminal{manager: m}.CapturePane(agent)
 		if strings.Contains(output, blockedActionMarkers[0]) {
 			break
 		}
