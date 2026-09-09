@@ -1266,6 +1266,11 @@
     .repo-pr-pill .pill-num { font-weight: 700; white-space: nowrap; }
     .repo-pr-pill .pill-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .repo-pr-pill .pill-merge-icon { font-size: 0.6rem; margin-left: 1px; }
+    /* Review-priority class badge (#6183): the snapshot orders PRs fixes >
+       refactors/docs > tests, then by age; the badge says WHY a PR sits
+       where it does. Presentational only — no agent reads it. */
+    .repo-pr-pill .pill-class { font-size: 0.6rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.02em; margin-right: 3px; opacity: 0.75; }
+    .repo-pr-pill .pill-class.fix { color: var(--red); opacity: 1; }
     /* needs-human: the escalation ledger (pkg/escalation) applies the
        `needs-human` GitHub label to a PR once automated fix attempts are
        exhausted. The pill turns status-alert orange (NOT brand amber) and a
@@ -4535,7 +4540,7 @@
           <div class="gov-metric"><span class="gm-label">actionable</span><span class="gm-val">${govActionable}</span></div>
           <div class="gov-metric"><span class="gm-label">PRs</span><span class="gm-val">${govPrs}</span></div>
           <div class="gov-metric"><span class="gm-label">MTTR</span><span class="gm-val">${formatFixTime(itmMedian)}</span></div>
-          <div class="gov-metric" title="${esc((window._lastStatus?.hold?.items || []).map(h => (h.type === 'pr' ? 'PR' : 'Issue') + ' ' + h.repo + '#' + h.number + ': ' + h.title).join('\n') || 'No items on hold')}"><span class="gm-label">on hold</span><span class="gm-val">${window._lastStatus?.hold?.total || 0}</span></div>
+          <div class="gov-metric" title="${esc((window._lastStatus?.hold?.items || []).map(h => (h.type === 'pr' ? 'PR' : 'Issue') + ' ' + h.repo + '#' + h.number + (h.review_class ? ' [' + h.review_class + ']' : '') + ': ' + h.title).join('\n') || 'No items on hold')}"><span class="gm-label">on hold</span><span class="gm-val">${window._lastStatus?.hold?.total || 0}</span></div>
           ${(() => {
             const plan = window._lastStatus?.planning || {};
             // Planning only runs at ACMM >= 5 (architect scheduled); hide the tile
@@ -4616,6 +4621,7 @@
             <option value="" disabled${a.model ? '' : ' selected'}>model ▾</option>
             ${modelOptionsHtml(a.cli, a.model)}
           </select>
+          ${effortSelectHtml(a)}
         </div>
         <div class="oc-detail-blockers">${agentBlockerLineHtml(a)}${neverScheduledChipHtml(a, a.name)}</div>
         ${terminalCopyHintHtml(needsLoginDown, agentSessionUnavailable(a), a.name)}
@@ -6777,6 +6783,7 @@
               <option value="" disabled${a.model ? '' : ' selected'}>model ▾</option>
               ${modelOptionsHtml(a.cli, a.model)}
             </select>
+            ${effortSelectHtml(a)}
           </div>
           </div>
         </div>`;
@@ -7499,7 +7506,9 @@
       const holdTotal = holdData.total || 0;
       const holdItems = holdData.items || [];
       const holdExplain = 'ON HOLD — work intentionally paused, awaiting a human.\n\nWHAT: Issues and PRs that agents will NOT act on until a maintainer clears them. Excluded from the actionable-issue count that drives the mode.\n\nHOW: Count of open issues/PRs carrying a hold label (hold / do-not-merge / blocked). The list below names each held item; the sparkline shows how the backlog of held work is trending.\n\n';
-      const holdTooltip = holdItems.length > 0 ? escapeHtml(holdExplain + holdItems.map(h => `${h.type === 'pr' ? 'PR' : 'Issue'} ${h.repo}#${h.number}: ${h.title}`).join('\n')) : escapeHtml(holdExplain + 'Nothing is currently on hold.');
+      // Hold items arrive pre-sorted by review class (fixes > refactors/docs
+      // > tests) then age (#6183); the class tag makes that order legible.
+      const holdTooltip = holdItems.length > 0 ? escapeHtml(holdExplain + holdItems.map(h => `${h.type === 'pr' ? 'PR' : 'Issue'} ${h.repo}#${h.number}${h.review_class ? ' [' + h.review_class + ']' : ''}: ${h.title}`).join('\n')) : escapeHtml(holdExplain + 'Nothing is currently on hold.');
       const holdSpark = sparkline('govHold');
 
       el.innerHTML = `
@@ -7843,7 +7852,12 @@
           // of truth — the same signal the ledger writes to GitHub — so this
           // view cannot drift from the ledger.
           const needsHuman = labels.includes('needs-human');
-          const prTip = (p.title || '') + (p.author ? ' — @' + p.author : '') + (prAge ? ' (' + prAge + ')' : '') + (p.mergeable ? ' (merge eligible)' : '') + (queued ? ' (queued for auto-merge)' : '') + (needsHuman ? ' (needs human review)' : '');
+          // review_class is the presentational triage class the snapshot is
+          // ordered by (fix > refactor-docs > tests, then age; #6183). It is
+          // derived server-side from the title prefix and lane label only.
+          const reviewClass = p.review_class ? String(p.review_class) : '';
+          const classBadge = reviewClass ? `<span class="pill-class ${esc(reviewClass)}">${esc(reviewClass === 'refactor-docs' ? 'refactor' : reviewClass)}</span>` : '';
+          const prTip = (p.title || '') + (p.author ? ' — @' + p.author : '') + (prAge ? ' (' + prAge + ')' : '') + (reviewClass ? ' [review class: ' + reviewClass + ']' : '') + (p.mergeable ? ' (merge eligible)' : '') + (queued ? ' (queued for auto-merge)' : '') + (needsHuman ? ' (needs human review)' : '');
           const canQueue = dashboardRoleAtLeast(window._hiveRole || 'read', 'merger') && (window._hiveUser || dashboardRoleAtLeast(window._hiveRole || 'read', 'owner')) && !(p.author && window._hiveUser && p.author.toLowerCase() === window._hiveUser.toLowerCase());
           const parts = (r.full || r.name || '').split('/');
           const owner = parts.length > 1 ? parts[0] : '';
@@ -7864,7 +7878,7 @@
           // needs-human wins the pill tint over mergeable green: a PR can be
           // technically mergeable AND escalated, and the escalation is what
           // the operator must see.
-          return `<a class="repo-pr-pill${needsHuman ? ' needs-human' : mergeClass}" href="${esc(p.url)}" target="_blank" rel="noopener" title="${esc(prTip)}"><span class="pill-num">#${p.number}</span><span class="pill-title">${esc(title)}</span>${mergeIcon}</a>${queueBtn}`;
+          return `<a class="repo-pr-pill${needsHuman ? ' needs-human' : mergeClass}" href="${esc(p.url)}" target="_blank" rel="noopener" title="${esc(prTip)}">${classBadge}<span class="pill-num">#${p.number}</span><span class="pill-title">${esc(title)}</span>${mergeIcon}</a>${queueBtn}`;
         }).join('');
         const allPills = issuePills + prPills;
         const pillsHtml = allPills ? `<div class="repo-issues">${allPills}</div>` : '';
@@ -8364,6 +8378,29 @@
     const AUTO_MODEL_SENTINELS = { copilot: ['auto'], bob: ['auto'] };
     function isAutoModelSentinel(backend, model) {
       return (AUTO_MODEL_SENTINELS[backend] || []).includes(model);
+    }
+    // Backends with a reasoning-effort control and the values each accepts.
+    // Mirrors config.ReasoningEffortsByBackend server-side: codex is launched
+    // with -c model_reasoning_effort="<v>", agy with --effort <v>. Backends
+    // absent here have no effort flag, so they get no dropdown at all.
+    const BACKEND_REASONING_EFFORTS = {
+      codex: ['minimal', 'low', 'medium', 'high', 'xhigh'],
+      agy: ['low', 'medium', 'high'],
+    };
+    // effortSelectHtml renders the reasoning-effort dropdown beside the model
+    // dropdown, only for backends that have an effort control. "default"
+    // clears the stored effort back to the backend's own default (the server
+    // treats the path value "default" as clear — a path segment cannot be
+    // empty).
+    function effortSelectHtml(a) {
+      const efforts = BACKEND_REASONING_EFFORTS[a.cli] || [];
+      if (!efforts.length) return '';
+      const cur = a.reasoningEffort || '';
+      return `<select class="btn backend-select" data-change-action="switchEffort" data-agent="${esc(a.name)}" title="Set this agent's reasoning effort (restarts the session). 'default' uses the backend's own default effort.">
+            <option value="" disabled selected>${cur ? esc(cur) : 'effort'} ▾</option>
+            <option value="default"${cur ? '' : ' disabled'}>default</option>
+            ${efforts.map(e => `<option value="${e}"${e === cur ? ' disabled' : ''}>${e}</option>`).join('')}
+          </select>`;
     }
     // Backends whose model list is a single fixed option, so there is nothing
     // for a user to choose and nothing meaningful to store per agent.
@@ -15001,6 +15038,7 @@ function burnAreaChart() {
       switch (action) {
         case 'switchCli': switchCli(agent, el.value); el.selectedIndex = 0; break;
         case 'switchModel': switchModel(agent, el.value); el.selectedIndex = 0; break;
+        case 'switchEffort': switchEffort(agent, el.value); el.selectedIndex = 0; break;
         default: hiveDispatchAction('change-action', e); break;
       }
     });
@@ -15732,6 +15770,25 @@ function burnAreaChart() {
       ocRenderAgentDetail();
       const lastData = window._lastStatus || {};
       renderGovernor(lastData.governor || {}, lastData.cadenceMatrix || [], lastData);
+      fetch('/api/status').then(r => r.json()).then(render).catch(() => {});
+    }
+
+    // switchEffort mirrors switchModel for the reasoning-effort dropdown:
+    // persist via POST /api/effort (which restarts the session — the effort
+    // only exists on the launch command line), update the local copy, and
+    // confirm against the server. "default" clears the stored effort.
+    async function switchEffort(agent, effort) {
+      if (!effort) return;
+      const toast = showToast(`Switching ${agent} reasoning effort → ${effort} (restarting session)...`, 'info', true);
+      const res = await fetch(`/api/effort/${agent}/${encodeURIComponent(effort)}`, { method: 'POST' });
+      const data = await res.json();
+      if (!data.ok) { dismissToast(toast, `Effort switch failed: ${data.error || 'unknown'}`, 'error'); return; }
+      dismissToast(toast, `${agent} reasoning effort → ${effort} (session restarted)`, 'success');
+      if (window._lastAgents) {
+        const a = window._lastAgents.find(x => x.name === agent);
+        if (a) { a.reasoningEffort = effort === 'default' ? '' : effort; renderAgents(window._lastAgents); }
+      }
+      ocRenderAgentDetail();
       fetch('/api/status').then(r => r.json()).then(render).catch(() => {});
     }
 

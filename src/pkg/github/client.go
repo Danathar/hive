@@ -376,6 +376,11 @@ type PullRequest struct {
 	// an ADVISORY grounding anchor, never a merge-safety input — nothing gates
 	// a merge on this field.
 	BaseSHA string `json:"base_sha,omitempty"`
+	// ReviewClass is the presentational triage class (fix / refactor-docs /
+	// tests) the queue snapshot is ordered by — see review_priority.go and
+	// src/docs/review-queue-triage.md (#6183). Derived from Title + Labels
+	// at enumeration time; never read by the governor or any agent.
+	ReviewClass ReviewClass `json:"review_class,omitempty"`
 }
 
 // HasFailingRequiredCheck reports whether this PR has a completed, non-meta
@@ -499,6 +504,13 @@ type HoldItem struct {
 	// for Type=="issue".
 	HeadSHA string `json:"head_sha,omitempty"`
 	Author  string `json:"author,omitempty"`
+	// CreatedAt and ReviewClass exist so the hold list — the human review
+	// queue at ACMM L5 hold-gated — can be ordered class-then-age
+	// (SortHoldItemsForReview, #6183). Both are omitted from the JSON when
+	// unset so older snapshots and held issues (which have no class) still
+	// round-trip unchanged.
+	CreatedAt   time.Time   `json:"created_at,omitzero"`
+	ReviewClass ReviewClass `json:"review_class,omitempty"`
 }
 
 type IssueCluster struct {
@@ -737,6 +749,13 @@ func (c *Client) EnumerateActionable(ctx context.Context) (*ActionableResult, er
 		return allIssues[i].AgeMinutes > allIssues[j].AgeMinutes
 	})
 
+	// Review-priority order for the PR side of the snapshot: fixes >
+	// refactors/docs > tests, oldest first within a class (#6183). Purely
+	// presentational — this is the order last-actionable.json and the
+	// dashboard show, not a signal any agent or the governor acts on.
+	SortPullRequestsForReview(allPRs)
+	SortHoldItemsForReview(holdItems)
+
 	holdIssueCount := 0
 	holdPRCount := 0
 	for _, h := range holdItems {
@@ -813,10 +832,11 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time) (a
 
 		if isHeld(labels) {
 			held = append(held, HoldItem{
-				Number: issue.GetNumber(),
-				Repo:   repo,
-				Title:  issue.GetTitle(),
-				Type:   "issue",
+				Number:    issue.GetNumber(),
+				Repo:      repo,
+				Title:     issue.GetTitle(),
+				Type:      "issue",
+				CreatedAt: issue.GetCreatedAt().Time,
 			})
 			continue
 		}
@@ -898,12 +918,14 @@ func (c *Client) fetchPRs(ctx context.Context, repo string) (actionable []PullRe
 				heldHeadSHA = pr.GetHead().GetSHA()
 			}
 			held = append(held, HoldItem{
-				Number:  pr.GetNumber(),
-				Repo:    repo,
-				Title:   pr.GetTitle(),
-				Type:    "pr",
-				HeadSHA: heldHeadSHA,
-				Author:  safeGetLogin(pr.GetUser()),
+				Number:      pr.GetNumber(),
+				Repo:        repo,
+				Title:       pr.GetTitle(),
+				Type:        "pr",
+				HeadSHA:     heldHeadSHA,
+				Author:      safeGetLogin(pr.GetUser()),
+				CreatedAt:   pr.GetCreatedAt().Time,
+				ReviewClass: ClassifyReviewClass(pr.GetTitle(), labels),
 			})
 			continue
 		}
