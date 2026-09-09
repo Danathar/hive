@@ -8,8 +8,6 @@ const (
 	ReleaseChannelEdge      = "edge"
 )
 
-var releaseChannels = []string{ReleaseChannelStable, ReleaseChannelCandidate, ReleaseChannelEdge}
-
 func isReleaseChannel(tag string) bool {
 	return imageref.IsReleaseChannel(tag)
 }
