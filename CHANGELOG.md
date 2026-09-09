@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-09 (v4.22.1)
+
+### Fixed
+
+- Model Gateways config panel now points operators looking for Copilot/Claude/Codex/Gemini to the agent CLI backend docs instead of leaving them without a signpost ([#6410](https://github.com/hivecommons/hive/issues/6410)). The Copilot guidance banner already added under **Governor Config → Model Gateways** now names Claude, Codex, and Gemini explicitly instead of only Copilot, and still links to `docs/inference-backends.md`'s "Looking for Copilot (or Claude, Codex, Gemini…)? It is not a Model Gateway" section.
+
 ## 2026-09-09 (v4.22.0)
 
 ### Added
