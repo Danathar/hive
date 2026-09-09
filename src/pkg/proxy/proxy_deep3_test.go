@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -250,36 +251,53 @@ func TestProxyHTTPUpstreamReadError(t *testing.T) {
 
 	clientConn, proxyClient := net.Pipe()
 	upstreamConn, proxyUpstream := net.Pipe()
+	t.Cleanup(func() {
+		clientConn.Close()
+		proxyClient.Close()
+		upstreamConn.Close()
+		proxyUpstream.Close()
+	})
 
-	returned := make(chan struct{})
+	var wg sync.WaitGroup
+	reqReceived := make(chan struct{})
+
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		p.proxyHTTP(proxyClient, proxyUpstream, "scanner", agent.ModeAdvisory, agent.AgentCapabilities{})
-		close(returned)
 	}()
 
+	wg.Add(1)
 	go func() {
-		fmt.Fprintf(clientConn, "GET /repos/org/repo HTTP/1.1\r\nHost: api.github.com\r\n\r\n")
+		defer wg.Done()
+		_, _ = fmt.Fprintf(clientConn, "GET /repos/org/repo HTTP/1.1\r\nHost: api.github.com\r\n\r\n")
+		// Wait until upstream has received the request before closing client
+		<-reqReceived
+		clientConn.Close()
 	}()
 
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		// Read the forwarded request
 		buf := make([]byte, 4096)
-		upstreamConn.Read(buf)
-		// Then close to simulate upstream error
+		_, _ = upstreamConn.Read(buf)
+		// Close upstream to simulate upstream error on response read
 		upstreamConn.Close()
+		close(reqReceived)
 	}()
 
-	// proxyHTTP should return when upstream closes
-	time.Sleep(200 * time.Millisecond)
-	clientConn.Close()
+	// Join all goroutines before the test exits to prevent leaks (issue #6338).
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
 
-	// Join the handler before the test exits: a leaked proxyHTTP goroutine
-	// reads responseBodyStallTimeout, racing with the next test's
-	// shortenBodyStall write (v4 CI race, issue #6110).
 	select {
-	case <-returned:
+	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("proxyHTTP did not return after upstream close")
+		t.Fatal("proxyHTTP and helper goroutines did not return after upstream close")
 	}
 }
 
@@ -290,39 +308,67 @@ func TestProxyHTTPResponseWriteError(t *testing.T) {
 
 	clientConn, proxyClient := net.Pipe()
 	upstreamConn, proxyUpstream := net.Pipe()
-
-	returned := make(chan struct{})
-	go func() {
-		p.proxyHTTP(proxyClient, proxyUpstream, "scanner", agent.ModeAdvisory, agent.AgentCapabilities{})
-		close(returned)
-	}()
-
-	go func() {
-		fmt.Fprintf(clientConn, "GET /repos/org/repo HTTP/1.1\r\nHost: api.github.com\r\n\r\n")
-		// Close client before response is written
-		time.Sleep(100 * time.Millisecond)
+	t.Cleanup(func() {
 		clientConn.Close()
+		proxyClient.Close()
+		upstreamConn.Close()
+		proxyUpstream.Close()
+	})
+
+	var wg sync.WaitGroup
+	reqReceived := make(chan struct{})
+	clientClosed := make(chan struct{})
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		p.proxyHTTP(proxyClient, proxyUpstream, "scanner", agent.ModeAdvisory, agent.AgentCapabilities{})
 	}()
 
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
+		if _, err := fmt.Fprintf(clientConn, "GET /repos/org/repo HTTP/1.1\r\nHost: api.github.com\r\n\r\n"); err != nil {
+			return
+		}
+		// Wait until upstream receives the forwarded request before closing client
+		<-reqReceived
+		clientConn.Close()
+		close(clientClosed)
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
 		buf := make([]byte, 4096)
-		n, _ := upstreamConn.Read(buf)
-		_ = n
-		// Send response after client closes
-		time.Sleep(200 * time.Millisecond)
+		n, err := upstreamConn.Read(buf)
+		if err != nil || n == 0 {
+			close(reqReceived)
+			return
+		}
+		close(reqReceived)
+
+		// Wait until client has closed its connection so proxy's response write fails
+		<-clientClosed
+
 		resp := "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"
-		upstreamConn.Write([]byte(resp))
+		_, _ = upstreamConn.Write([]byte(resp))
 		upstreamConn.Close()
 	}()
 
-	// Join the handler before the test exits: the leaked proxyHTTP goroutine
-	// read responseBodyStallTimeout (github_proxy.go stall bound) while the
-	// next test's shortenBodyStall wrote it — the data race that failed v4 CI
-	// run 33979236903 (issue #6110).
+	// Join all handler and helper goroutines before the test exits:
+	// leaked proxy goroutines and unjoined helpers can race with subsequent
+	// tests (issue #6338).
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
 	select {
-	case <-returned:
+	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("proxyHTTP did not return after client close and upstream close")
+		t.Fatal("proxyHTTP and helper goroutines did not return after client close and upstream close")
 	}
 }
 
