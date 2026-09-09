@@ -1,0 +1,1 @@
+- Added test injection seam and regression coverage for dashboard branding file ownership verification and HIVE_BRANDING_ALLOW_UNSAFE_OWNER escape hatch ([#6341](https://github.com/hivecommons/hive/issues/6341)).
