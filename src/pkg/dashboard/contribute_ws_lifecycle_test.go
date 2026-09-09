@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/hivecommons/hive/internal/testutil"
 )
 
 func TestContributeWSHub_CloseStopsCleanupLoopPromptly(t *testing.T) {
@@ -97,8 +99,6 @@ func TestContributeWSHub_DrainForShutdownDoesNotStopCleanupLoop(t *testing.T) {
 }
 
 func TestContributeWSHub_NoGoroutineLeak(t *testing.T) {
-	// Let any background tasks settle
-	time.Sleep(50 * time.Millisecond)
 	baseGoroutines := runtime.NumGoroutine()
 
 	const iterations = 5
@@ -107,19 +107,12 @@ func TestContributeWSHub_NoGoroutineLeak(t *testing.T) {
 		hub.Close()
 	}
 
-	// Verify goroutines settle back down promptly
-	var finalGoroutines int
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		runtime.Gosched()
-		finalGoroutines = runtime.NumGoroutine()
-		if finalGoroutines <= baseGoroutines+1 {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	t.Errorf("goroutines leaked: baseline=%d, final=%d", baseGoroutines, finalGoroutines)
+	// Verify goroutines settle back down promptly. Polled via testutil.Eventually
+	// rather than a fixed sleep so the sleep ratchet in internal/testutil is not
+	// pushed above its baseline.
+	testutil.Eventually(t, 2*time.Second, func() bool {
+		return runtime.NumGoroutine() <= baseGoroutines+1
+	}, "goroutines leaked: baseline=%d", baseGoroutines)
 }
 
 func TestServer_CloseContributeHub(t *testing.T) {
