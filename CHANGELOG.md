@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-09 (v4.20.1)
+
+### Fixed
+
+- `docs/backend-setup.md` no longer claims "hive has no per-agent effort setting yet": since [#6163](https://github.com/hivecommons/hive/pull/6163) server-launched codex and agy honor the per-agent `reasoning_effort` config field, and the backend table's agy/codex rows now say so instead of describing the old fixed `--effort low` behaviour ([#6322](https://github.com/hivecommons/hive/issues/6322)).
+
 ## 2026-09-08 (v4.20.0)
 
 ### Added
