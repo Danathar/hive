@@ -4,6 +4,7 @@
 package config
 
 import (
+	"fmt"
 	"math"
 	"os"
 	"strings"
@@ -139,6 +140,38 @@ var ValidCavemanModes = map[string]bool{
 
 // ValidateCavemanMode reports whether v is an accepted caveman_mode value.
 func ValidateCavemanMode(v string) bool { return ValidCavemanModes[v] }
+
+// ReasoningEffortsByBackend lists the reasoning-effort values each CLI
+// backend accepts, for the backends that expose an effort control at all:
+// codex takes `-c model_reasoning_effort="<v>"` and agy takes `--effort <v>`.
+// Backends absent here have no effort flag; a configured effort is ignored
+// for them rather than breaking their launch command.
+var ReasoningEffortsByBackend = map[string][]string{
+	"codex": {"minimal", "low", "medium", "high", "xhigh"},
+	"agy":   {"low", "medium", "high"},
+}
+
+// ValidateReasoningEffort reports whether effort is settable for backend:
+// empty is always valid (the backend's own default), otherwise the backend
+// must have an effort control and the value must be one it accepts. Rejecting
+// at set time keeps the failure at the dashboard, not hours later on the kick
+// path — the same rationale as ValidateBackend.
+func ValidateReasoningEffort(backend, effort string) error {
+	if effort == "" {
+		return nil
+	}
+	accepted, ok := ReasoningEffortsByBackend[backend]
+	if !ok {
+		return fmt.Errorf("backend %s has no reasoning-effort control", backend)
+	}
+	for _, v := range accepted {
+		if v == effort {
+			return nil
+		}
+	}
+	return fmt.Errorf("invalid reasoning effort %q for backend %s (accepted: %s)",
+		effort, backend, strings.Join(accepted, ", "))
+}
 
 type GovernorConfig struct {
 	Modes         map[string]ModeConfig `yaml:"modes"`

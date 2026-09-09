@@ -156,15 +156,24 @@ type ConnectionConfig struct {
 }
 
 type AgentConfig struct {
-	ID           string `yaml:"id" json:"id,omitempty"`
-	Backend      string `yaml:"backend" json:"backend,omitempty"`
-	Model        string `yaml:"model" json:"model,omitempty"`
-	BeadsDir     string `yaml:"beads_dir" json:"beads_dir,omitempty"`
-	Enabled      bool   `yaml:"enabled" json:"enabled,omitempty"`
-	Replicas     int    `yaml:"replicas,omitempty" json:"replicas,omitempty"`
-	ReplicaOf    string `yaml:"-" json:"replicaOf,omitempty"`
-	ReplicaIndex int    `yaml:"-" json:"replicaIndex,omitempty"`
-	ReplicaCount int    `yaml:"-" json:"replicaCount,omitempty"`
+	ID      string `yaml:"id" json:"id,omitempty"`
+	Backend string `yaml:"backend" json:"backend,omitempty"`
+	Model   string `yaml:"model" json:"model,omitempty"`
+	// ReasoningEffort pins the reasoning effort the agent's CLI is launched
+	// with, for backends that expose one (see ReasoningEffortsByBackend):
+	// codex is passed `-c model_reasoning_effort="<v>"`, agy `--effort <v>`.
+	// Empty means the backend's own default. Backends with no effort control
+	// ignore it. The scripted launch paths (bin/agent-launch.sh, the
+	// contributor relay) already honor the same choice via
+	// AGENT_REASONING_EFFORT; this field is the in-config analogue for
+	// manager-launched agents.
+	ReasoningEffort string `yaml:"reasoning_effort,omitempty" json:"reasoning_effort,omitempty"`
+	BeadsDir        string `yaml:"beads_dir" json:"beads_dir,omitempty"`
+	Enabled         bool   `yaml:"enabled" json:"enabled,omitempty"`
+	Replicas        int    `yaml:"replicas,omitempty" json:"replicas,omitempty"`
+	ReplicaOf       string `yaml:"-" json:"replicaOf,omitempty"`
+	ReplicaIndex    int    `yaml:"-" json:"replicaIndex,omitempty"`
+	ReplicaCount    int    `yaml:"-" json:"replicaCount,omitempty"`
 	// Paused persists an operator pause across restarts/upgrades. Without
 	// this, every pod restart rebuilt agents un-paused (Go zero value), so
 	// an operator pause was silently undone on the next upgrade.

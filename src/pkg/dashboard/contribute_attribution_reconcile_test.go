@@ -83,7 +83,9 @@ func TestContributeWSHub_ReconcilePRAttribution(t *testing.T) {
 	deps := testDeps(t)
 	deps.GHClient = ghpkg.NewClientForTest(ts.URL, "myorg", []string{"repo1"}, logger)
 	s.RegisterAPI(deps)
+	t.Cleanup(s.CloseContributeHub)
 	hub := NewContributeWSHub(logger, s)
+	t.Cleanup(hub.Close)
 
 	conn := &ContributorConnection{
 		cliBackend:      "codex",

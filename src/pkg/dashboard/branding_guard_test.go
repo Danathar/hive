@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"bytes"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -353,5 +354,291 @@ func TestBrandingAbsentFileIsSilent(t *testing.T) {
 	}
 	if logs.Len() != 0 {
 		t.Errorf("absent override logged something; it must be silent:\n%s", logs.String())
+	}
+}
+
+// setMockBrandingOwnerUID overrides brandingFileOwnerUIDFn for the duration of
+// a test and restores the original implementation in t.Cleanup.
+func setMockBrandingOwnerUID(t *testing.T, uid int) {
+	t.Helper()
+	orig := brandingFileOwnerUIDFn
+	brandingFileOwnerUIDFn = func(fs.FileInfo) int { return uid }
+	t.Cleanup(func() {
+		brandingFileOwnerUIDFn = orig
+	})
+}
+
+// A foreign-owned file must be REFUSED by default: whoever can write it injects
+// CSS into the operator's dashboard, and hive cannot vouch for another user's file.
+func TestBrandingCSSRefusesForeignOwnerByDefault(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "custom.css")
+	t.Setenv("HIVE_BRANDING_CSS", path)
+	css := ":root{--accent:#0aa}"
+	if err := os.WriteFile(path, []byte(css), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	foreignUID := os.Getuid() + 1000
+	if foreignUID == 0 {
+		foreignUID = 4242
+	}
+	setMockBrandingOwnerUID(t, foreignUID)
+
+	s, logs := brandingGuardServer(t)
+	w := getBrandingCSS(s)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("foreign-owned custom.css: got %d, want 404 (refused)", w.Code)
+	}
+	if strings.Contains(w.Body.String(), "--accent") {
+		t.Error("foreign-owned custom.css was served; the ownership guard is not enforcing")
+	}
+	for _, want := range []string{"owned by another user", "owner_uid", "hive_uid"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("refusal log missing %q; got:\n%s", want, logs.String())
+		}
+	}
+}
+
+// A foreign-owned file is ACCEPTED if HIVE_BRANDING_ALLOW_UNSAFE_OWNER is explicitly true.
+func TestBrandingCSSAcceptsForeignOwnerWithEscapeHatch(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "custom.css")
+	t.Setenv("HIVE_BRANDING_CSS", path)
+	css := ":root{--accent:#0aa}"
+	if err := os.WriteFile(path, []byte(css), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	foreignUID := os.Getuid() + 1000
+	if foreignUID == 0 {
+		foreignUID = 4242
+	}
+	setMockBrandingOwnerUID(t, foreignUID)
+	t.Setenv(brandingAllowUnsafeEnv, "true")
+
+	s, logs := brandingGuardServer(t)
+	w := getBrandingCSS(s)
+
+	if w.Code != http.StatusOK || w.Body.String() != css {
+		t.Errorf("foreign-owned custom.css with escape hatch: got %d %q, want 200 %q.\nlogs:\n%s",
+			w.Code, w.Body.String(), css, logs.String())
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "text/css; charset=utf-8" {
+		t.Errorf("Content-Type = %q, want text/css; charset=utf-8", ct)
+	}
+}
+
+// A root-owned file (uid 0) is accepted unconditionally (e.g. read-only Kubernetes Secret mounts).
+func TestBrandingCSSAcceptsRootOwnerViaSeam(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "custom.css")
+	t.Setenv("HIVE_BRANDING_CSS", path)
+	css := ":root{--accent:#0aa}"
+	if err := os.WriteFile(path, []byte(css), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	setMockBrandingOwnerUID(t, 0)
+
+	s, logs := brandingGuardServer(t)
+	w := getBrandingCSS(s)
+
+	if w.Code != http.StatusOK || w.Body.String() != css {
+		t.Errorf("root-owned custom.css via seam: got %d %q, want 200 %q.\nlogs:\n%s",
+			w.Code, w.Body.String(), css, logs.String())
+	}
+}
+
+// Current process UID is accepted unconditionally.
+func TestBrandingCSSAcceptsCurrentProcessOwnerViaSeam(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "custom.css")
+	t.Setenv("HIVE_BRANDING_CSS", path)
+	css := ":root{--accent:#0aa}"
+	if err := os.WriteFile(path, []byte(css), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	setMockBrandingOwnerUID(t, os.Getuid())
+
+	s, logs := brandingGuardServer(t)
+	w := getBrandingCSS(s)
+
+	if w.Code != http.StatusOK || w.Body.String() != css {
+		t.Errorf("self-owned custom.css via seam: got %d %q, want 200 %q.\nlogs:\n%s",
+			w.Code, w.Body.String(), css, logs.String())
+	}
+}
+
+// An unknown/unavailable UID (-1) is treated as unverifiable rather than as a refusal.
+func TestBrandingCSSAcceptsUnknownOwnerUID(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "custom.css")
+	t.Setenv("HIVE_BRANDING_CSS", path)
+	css := ":root{--accent:#0aa}"
+	if err := os.WriteFile(path, []byte(css), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	setMockBrandingOwnerUID(t, -1)
+
+	s, logs := brandingGuardServer(t)
+	w := getBrandingCSS(s)
+
+	if w.Code != http.StatusOK || w.Body.String() != css {
+		t.Errorf("unknown owner UID (-1) custom.css: got %d %q, want 200 %q.\nlogs:\n%s",
+			w.Code, w.Body.String(), css, logs.String())
+	}
+}
+
+// Tests the parsing of HIVE_BRANDING_ALLOW_UNSAFE_OWNER under various values.
+func TestBrandingCSSUnsafeOwnerEscapeHatchValues(t *testing.T) {
+	cases := []struct {
+		name     string
+		envVal   string
+		wantCode int
+	}{
+		// Gate remains closed:
+		{"unset", "", http.StatusNotFound},
+		{"false", "false", http.StatusNotFound},
+		{"FALSE", "FALSE", http.StatusNotFound},
+		{"False", "False", http.StatusNotFound},
+		{"zero", "0", http.StatusNotFound},
+		{"invalid yes", "yes", http.StatusNotFound},
+		{"invalid no", "no", http.StatusNotFound},
+		{"invalid enabled", "enabled", http.StatusNotFound},
+		{"invalid whitespace", " true ", http.StatusNotFound},
+		// Gate opens:
+		{"true", "true", http.StatusOK},
+		{"TRUE", "TRUE", http.StatusOK},
+		{"True", "True", http.StatusOK},
+		{"one", "1", http.StatusOK},
+		{"t", "t", http.StatusOK},
+		{"T", "T", http.StatusOK},
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "custom.css")
+	t.Setenv("HIVE_BRANDING_CSS", path)
+	css := ":root{--accent:#0aa}"
+	if err := os.WriteFile(path, []byte(css), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	foreignUID := os.Getuid() + 1000
+	if foreignUID == 0 {
+		foreignUID = 4242
+	}
+	setMockBrandingOwnerUID(t, foreignUID)
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(brandingAllowUnsafeEnv, tc.envVal)
+			s, _ := brandingGuardServer(t)
+			w := getBrandingCSS(s)
+			if w.Code != tc.wantCode {
+				t.Errorf("env %q = %q: got status %d, want %d",
+					brandingAllowUnsafeEnv, tc.envVal, w.Code, tc.wantCode)
+			}
+			if tc.wantCode == http.StatusOK && w.Body.String() != css {
+				t.Errorf("env %q = %q: body = %q, want %q",
+					brandingAllowUnsafeEnv, tc.envVal, w.Body.String(), css)
+			}
+		})
+	}
+}
+
+// The unsafe-owner override does NOT bypass the group/world-writable protection.
+func TestBrandingCSSUnsafeOwnerDoesNotBypassWritableCheck(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "custom.css")
+	t.Setenv("HIVE_BRANDING_CSS", path)
+	if err := os.WriteFile(path, []byte(":root{--accent:#f00}"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o666); err != nil {
+		t.Fatal(err)
+	}
+
+	foreignUID := os.Getuid() + 1000
+	if foreignUID == 0 {
+		foreignUID = 4242
+	}
+	setMockBrandingOwnerUID(t, foreignUID)
+	t.Setenv(brandingAllowUnsafeEnv, "true")
+
+	s, logs := brandingGuardServer(t)
+	w := getBrandingCSS(s)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("world-writable custom.css with unsafe owner override: got %d, want 404 (refused)", w.Code)
+	}
+	if strings.Contains(w.Body.String(), "--accent") {
+		t.Error("world-writable custom.css was SERVED despite mode check")
+	}
+	if !strings.Contains(logs.String(), "group- or world-writable") {
+		t.Errorf("expected mode refusal log, got:\n%s", logs.String())
+	}
+}
+
+// loadBranding also enforces the ownership guard on branding.json.
+func TestLoadBrandingOwnershipGuard(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HIVE_BRANDING_CSS", filepath.Join(dir, "custom.css"))
+	jsonPath := filepath.Join(dir, "branding.json")
+	if err := os.WriteFile(jsonPath, []byte(`{"product_name":"REEF"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	foreignUID := os.Getuid() + 1000
+	if foreignUID == 0 {
+		foreignUID = 4242
+	}
+	setMockBrandingOwnerUID(t, foreignUID)
+
+	// Without escape hatch -> refused
+	s, _ := brandingGuardServer(t)
+	if got := s.loadBranding(); got.ProductName != "" {
+		t.Errorf("foreign-owned branding.json was APPLIED without escape hatch: ProductName = %q, want empty", got.ProductName)
+	}
+
+	// With escape hatch -> accepted
+	t.Setenv(brandingAllowUnsafeEnv, "true")
+	s, _ = brandingGuardServer(t)
+	if got := s.loadBranding(); got.ProductName != "REEF" {
+		t.Errorf("foreign-owned branding.json was REFUSED with escape hatch: ProductName = %q, want REEF", got.ProductName)
+	}
+}
+
+// Directly tests brandingAllowUnsafeOwner parsing against known values.
+func TestBrandingAllowUnsafeOwner(t *testing.T) {
+	cases := []struct {
+		name string
+		val  string
+		want bool
+	}{
+		{"empty", "", false},
+		{"zero", "0", false},
+		{"false", "false", false},
+		{"FALSE", "FALSE", false},
+		{"no", "no", false},
+		{"yes", "yes", false},
+		{"enabled", "enabled", false},
+		{"one", "1", true},
+		{"true", "true", true},
+		{"TRUE", "TRUE", true},
+		{"True", "True", true},
+		{"t", "t", true},
+		{"T", "T", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(brandingAllowUnsafeEnv, tc.val)
+			if got := brandingAllowUnsafeOwner(); got != tc.want {
+				t.Errorf("brandingAllowUnsafeOwner() for %q = %v, want %v", tc.val, got, tc.want)
+			}
+		})
 	}
 }

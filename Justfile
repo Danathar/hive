@@ -212,8 +212,27 @@ contribute-check-backend backend="claude":
           exit 1
         fi
         ;;
+      muse)
+        if command -v muse &>/dev/null; then
+          echo "Muse Code CLI detected ($(muse --version 2>&1 | head -1))"
+          echo "  Headless only: muse exec \"<prompt>\" --approval-mode never --user-input-auto-resolve"
+          echo "  Model:  export AGENT_MODEL=<id from GET https://api.meta.ai/v1/models>"
+          echo "          Query it from the machine that runs muse — the catalog is caller-dependent."
+          echo "  Effort: export AGENT_REASONING_EFFORT=none|minimal|low|medium|high|xhigh|max|ultra"
+          echo "  Auth:   export META_API_KEY=..., or run 'muse login' / 'muse auth set --api-key-stdin'"
+          echo "          (credential stored at ~/.config/muse/auth.json; META_API_KEY takes priority)"
+          echo "  muse keeps its OWN OS sandbox on (bubblewrap/seccomp on Linux, seatbelt on macOS);"
+          echo "  local mode narrows it further rather than refusing to launch."
+          if [[ -z "${META_API_KEY:-}" && ! -s "${HOME}/.config/muse/auth.json" ]]; then
+            echo "  WARNING: no META_API_KEY and no ~/.config/muse/auth.json — muse will exit 1 at task time."
+          fi
+        else
+          echo "ERROR: muse CLI not found. Install: curl -fsSL https://dev.meta.ai/install.sh | bash"
+          exit 1
+        fi
+        ;;
       *)
-        echo "ERROR: Unknown backend '{{backend}}'. Supported: claude, copilot, goose, codex, pi, bob, agy, litellm, opencode, kilo"
+        echo "ERROR: Unknown backend '{{backend}}'. Supported: claude, copilot, goose, codex, pi, bob, agy, litellm, opencode, kilo, muse"
         exit 1
         ;;
     esac
@@ -1008,6 +1027,19 @@ contribute-hive backend="" mode="docker": check-version
       fi
 
       # Get CLI binary and permission flags from backends.conf
+      #
+      # HIVE_AGENT_CWD is exported BEFORE the permission flags are resolved:
+      # claude_family_local_perm_flag_shell grants it as a writable root
+      # (#6082), so it must exist in the environment when that function runs.
+      # The directory's rationale is with the cd below, where it is used.
+      export HIVE_AGENT_CWD="${XDG_STATE_HOME:-${HOME}/.local/state}/hive/agent-cwd"
+      mkdir -p "$HIVE_AGENT_CWD"
+      # HIVE_AGENT_CACHE_DIR is exported BEFORE the permission flags resolve:
+      # claude_family_local_perm_flag_shell grants it as a sandbox write root
+      # (#6100), so it has to be in the environment when that function runs.
+      # What it is for is with the toolchain exports below.
+      export HIVE_AGENT_CACHE_DIR="${XDG_CACHE_HOME:-${HOME}/.cache}/hive/agent-build"
+      mkdir -p "$HIVE_AGENT_CACHE_DIR"
       source "${SCRIPT_DIR}/../config/backends.conf" 2>/dev/null || true
       CMD=$(backend_binary "$BACKEND" 2>/dev/null || echo "$BACKEND")
       # _shell variant: this flag string is pasted into a tmux send-keys shell
@@ -1024,6 +1056,15 @@ contribute-hive backend="" mode="docker": check-version
           ;;
         opencode)
           PERM_FLAG=$(opencode_local_perm_flag_shell)
+          ;;
+        muse)
+          # muse has a real OS sandbox of its own (bubblewrap/seccomp on
+          # Linux, seatbelt on macOS), ON by default — so local mode wires
+          # that boundary rather than refusing to launch. See
+          # muse_local_perm_flag_shell in backends.conf.
+          if ! PERM_FLAG=$(muse_local_perm_flag_shell); then
+            exit 1
+          fi
           ;;
         codex)
           PERM_FLAG=$(backend_perm_flag_shell "$BACKEND" 2>/dev/null || echo "")
@@ -1129,9 +1170,26 @@ contribute-hive backend="" mode="docker": check-version
       # `ls`, `grep -r` and relative write lands. cwd is not a boundary — the
       # process runs as the user regardless — but an empty dedicated directory
       # costs nothing and keeps the default blast radius off the user's home.
-      export HIVE_AGENT_CWD="${XDG_STATE_HOME:-${HOME}/.local/state}/hive/agent-cwd"
-      mkdir -p "$HIVE_AGENT_CWD"
-      export AGENT_LAUNCH_CMD="${LITELLM_ENV:+$LITELLM_ENV }$CMD${PERM_FLAG:+ $PERM_FLAG}"
+      # (HIVE_AGENT_CWD itself is exported above, before the permission flags
+      # resolve, because the Claude local sandbox grants it as a write root.)
+      # Point every compiled toolchain at the granted cache root (#6100), so a
+      # sandboxed agent never reaches a default under $HOME. Prefixed onto the
+      # launch line as VAR=value assignments, the same shape LITELLM_ENV
+      # already uses -- rather than relying on `export` reaching the pane,
+      # because the agent is started through `tmux send-keys` and a tmux server
+      # that is already running does not necessarily carry this shell's
+      # environment into a new session.
+      #
+      # TMPDIR and GOTMPDIR are here for the same reason as the caches: on an
+      # image-based host /tmp is a small tmpfs and /var/tmp is read-only to the
+      # sandbox, so a build's scratch data has nowhere else to go.
+      mkdir -p "$HIVE_AGENT_CACHE_DIR"/{go-build,go-mod,ccache,tmp}
+      BUILD_CACHE_ENV="GOCACHE=$(printf %q "$HIVE_AGENT_CACHE_DIR/go-build")"
+      BUILD_CACHE_ENV="$BUILD_CACHE_ENV GOMODCACHE=$(printf %q "$HIVE_AGENT_CACHE_DIR/go-mod")"
+      BUILD_CACHE_ENV="$BUILD_CACHE_ENV GOTMPDIR=$(printf %q "$HIVE_AGENT_CACHE_DIR/tmp")"
+      BUILD_CACHE_ENV="$BUILD_CACHE_ENV TMPDIR=$(printf %q "$HIVE_AGENT_CACHE_DIR/tmp")"
+      BUILD_CACHE_ENV="$BUILD_CACHE_ENV CCACHE_DIR=$(printf %q "$HIVE_AGENT_CACHE_DIR/ccache")"
+      export AGENT_LAUNCH_CMD="${LITELLM_ENV:+$LITELLM_ENV }${BUILD_CACHE_ENV} $CMD${PERM_FLAG:+ $PERM_FLAG}"
       tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
       tmux new-session -d -s "$TMUX_SESSION" -x 200 -y 50 -c "$HIVE_WORKSPACE_DIR"
       tmux send-keys -t "$TMUX_SESSION" "cd $(printf %q "$HIVE_AGENT_CWD") && $AGENT_LAUNCH_CMD" Enter
@@ -1447,7 +1505,7 @@ contribute-hive backend="" mode="docker": check-version
           if [[ -n "$name" ]]; then add_provider_env "$name"; fi
         done < <(node bin/pi-backend.js --env-names "${AGENT_MODEL}")
       else
-        for name in ANTHROPIC_API_KEY OPENAI_API_KEY GOOGLE_API_KEY GOOSE_API_KEY GOOSE_PROVIDER GOOSE_MODEL BOBSHELL_API_KEY HIVE_LITELLM_ENDPOINT HIVE_LITELLM_API_KEY KILO_AUTH_CONTENT KILO_CONFIG_CONTENT KILO_API_KEY KILO_ORG_ID; do
+        for name in ANTHROPIC_API_KEY OPENAI_API_KEY GOOGLE_API_KEY GOOSE_API_KEY GOOSE_PROVIDER GOOSE_MODEL BOBSHELL_API_KEY HIVE_LITELLM_ENDPOINT HIVE_LITELLM_API_KEY KILO_AUTH_CONTENT KILO_CONFIG_CONTENT KILO_API_KEY KILO_ORG_ID META_API_KEY; do
           add_provider_env "$name"
         done
       fi

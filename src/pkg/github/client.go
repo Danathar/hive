@@ -383,6 +383,11 @@ type PullRequest struct {
 	// an ADVISORY grounding anchor, never a merge-safety input — nothing gates
 	// a merge on this field.
 	BaseSHA string `json:"base_sha,omitempty"`
+	// ReviewClass is the presentational triage class (fix / refactor-docs /
+	// tests) the queue snapshot is ordered by — see review_priority.go and
+	// src/docs/review-queue-triage.md (#6183). Derived from Title + Labels
+	// at enumeration time; never read by the governor or any agent.
+	ReviewClass ReviewClass `json:"review_class,omitempty"`
 }
 
 // HasFailingRequiredCheck reports whether this PR has a completed, non-meta
@@ -540,6 +545,13 @@ type HoldItem struct {
 	// for Type=="issue".
 	HeadSHA string `json:"head_sha,omitempty"`
 	Author  string `json:"author,omitempty"`
+	// CreatedAt and ReviewClass exist so the hold list — the human review
+	// queue at ACMM L5 hold-gated — can be ordered class-then-age
+	// (SortHoldItemsForReview, #6183). Both are omitted from the JSON when
+	// unset so older snapshots and held issues (which have no class) still
+	// round-trip unchanged.
+	CreatedAt   time.Time   `json:"created_at,omitzero"`
+	ReviewClass ReviewClass `json:"review_class,omitempty"`
 }
 
 type IssueCluster struct {
@@ -780,6 +792,13 @@ func (c *Client) EnumerateActionable(ctx context.Context) (*ActionableResult, er
 		return allIssues[i].AgeMinutes > allIssues[j].AgeMinutes
 	})
 
+	// Review-priority order for the PR side of the snapshot: fixes >
+	// refactors/docs > tests, oldest first within a class (#6183). Purely
+	// presentational — this is the order last-actionable.json and the
+	// dashboard show, not a signal any agent or the governor acts on.
+	SortPullRequestsForReview(allPRs)
+	SortHoldItemsForReview(holdItems)
+
 	holdIssueCount := 0
 	holdPRCount := 0
 	for _, h := range holdItems {
@@ -854,13 +873,23 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time) (a
 			continue
 		}
 
+		// Standing meta issues — the hive's own advisory report and bot
+		// dependency dashboards — are structurally not work and never enter
+		// the actionable OR held sets (standing_issues.go). Before hold/exempt
+		// on purpose: a hold label on the advisory report must not surface it
+		// in the Hold list either.
+		if reason := standingMetaIssueReason(issue.GetTitle(), safeGetLogin(issue.GetUser()), labels); reason != "" {
+			continue
+		}
+
 		if isHeld(labels) {
 			breakdown.Hold++
 			held = append(held, HoldItem{
-				Number: issue.GetNumber(),
-				Repo:   repo,
-				Title:  issue.GetTitle(),
-				Type:   "issue",
+				Number:    issue.GetNumber(),
+				Repo:      repo,
+				Title:     issue.GetTitle(),
+				Type:      "issue",
+				CreatedAt: issue.GetCreatedAt().Time,
 			})
 			continue
 		}
@@ -952,12 +981,14 @@ func (c *Client) fetchPRs(ctx context.Context, repo string) (actionable []PullRe
 				heldHeadSHA = pr.GetHead().GetSHA()
 			}
 			held = append(held, HoldItem{
-				Number:  pr.GetNumber(),
-				Repo:    repo,
-				Title:   pr.GetTitle(),
-				Type:    "pr",
-				HeadSHA: heldHeadSHA,
-				Author:  safeGetLogin(pr.GetUser()),
+				Number:      pr.GetNumber(),
+				Repo:        repo,
+				Title:       pr.GetTitle(),
+				Type:        "pr",
+				HeadSHA:     heldHeadSHA,
+				Author:      safeGetLogin(pr.GetUser()),
+				CreatedAt:   pr.GetCreatedAt().Time,
+				ReviewClass: ClassifyReviewClass(pr.GetTitle(), labels),
 			})
 			continue
 		}
@@ -1753,6 +1784,37 @@ func (c *Client) PathExistsAtRef(ctx context.Context, owner, repo, path, ref str
 		return false, fmt.Errorf("checking %s/%s/%s@%s: %w", owner, repo, path, ref, err)
 	}
 	return fileContent != nil || len(dirContent) > 0, nil
+}
+
+// IssueClosedAt reports whether a GitHub issue or pull request is closed, and
+// when. A pull request IS an issue to this endpoint, so one call covers both and
+// a merged PR reports closed -- which is what the advisory digest needs to know.
+//
+// It exists for #6080: the digest was re-emitting findings computed at an older
+// commit as counted, severity-ranked open HIGH items, including one listed open
+// at the exact commit that fixed it. When such a finding names its own
+// remediation ("Filed issue #208, hold-gated PR #209"), this is the lookup that
+// settles whether that remediation landed.
+//
+// A 404 reports (zero, false, nil): not found is not closed. The caller retires
+// a finding only when EVERY reference it names is closed, so an unreadable
+// reference keeps the finding open, which is the safe direction. Any other error
+// is returned so the caller can distinguish "open" from "could not tell".
+func (c *Client) IssueClosedAt(ctx context.Context, owner, repo string, number int) (time.Time, bool, error) {
+	if c == nil {
+		return time.Time{}, false, ErrNoGitHubClient
+	}
+	issue, resp, err := c.client.Issues.Get(ctx, owner, repo, number)
+	if err != nil {
+		if resp != nil && resp.StatusCode == http.StatusNotFound {
+			return time.Time{}, false, nil
+		}
+		return time.Time{}, false, fmt.Errorf("reading %s/%s#%d: %w", owner, repo, number, err)
+	}
+	if issue == nil || issue.GetState() != "closed" {
+		return time.Time{}, false, nil
+	}
+	return issue.GetClosedAt().Time, true, nil
 }
 
 // SearchPRCount searches GitHub for PRs by author within an org.

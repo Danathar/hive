@@ -24,7 +24,9 @@ func covK2Hub(t *testing.T) (*ContributeWSHub, *Server) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
 	s := NewServer(0, logger)
 	s.RegisterAPI(testDeps(t))
+	t.Cleanup(s.CloseContributeHub)
 	hub := NewContributeWSHub(logger, s)
+	t.Cleanup(hub.Close)
 	return hub, s
 }
 

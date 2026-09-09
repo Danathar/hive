@@ -2,29 +2,30 @@ package hub
 
 import (
 	"fmt"
-	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/hivecommons/hive/pkg/agent"
 	"github.com/hivecommons/hive/pkg/config"
+	"github.com/hivecommons/hive/pkg/hub/spoke"
 	"github.com/hivecommons/hive/pkg/inferencehealth"
 )
 
 const (
-	EnvAgentRestartProblemThreshold     = "HIVE_HUB_AGENT_RESTART_PROBLEM_THRESHOLD"
-	DefaultAgentRestartProblemThreshold = 5
+	EnvAgentRestartProblemThreshold     = spoke.EnvAgentRestartProblemThreshold
+	DefaultAgentRestartProblemThreshold = spoke.DefaultAgentRestartProblemThreshold
 )
 
-func agentRestartProblemThreshold() int {
-	if raw := strings.TrimSpace(os.Getenv(EnvAgentRestartProblemThreshold)); raw != "" {
-		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
-			return n
-		}
-	}
-	return DefaultAgentRestartProblemThreshold
+// AgentRestartProblemThreshold is the restart-storm bar: an agent that has
+// restarted at least this many times in the rolling 24h window is a problem,
+// not a quiet agent. The definition lives in pkg/hub/spoke so the spoke's own
+// status builder (pkg/dashboard) can escalate a crash-looping agent with the
+// SAME threshold the hub's fleet verdict applies — otherwise the local card
+// and the fleet view could disagree about the same agent (#6237) — without
+// crossing the spoke/hub import boundary.
+func AgentRestartProblemThreshold() int {
+	return spoke.AgentRestartProblemThreshold()
 }
 
 // Fleet-divergence derivation.
@@ -443,7 +444,7 @@ func deriveAgentVerdict(a AgentSummary, blockers hiveBlockers, queuedWork int, n
 }
 
 func agentRestartStorm(a AgentSummary) bool {
-	return a.Restarts.Last24h >= agentRestartProblemThreshold()
+	return a.Restarts.Last24h >= AgentRestartProblemThreshold()
 }
 
 func agentRestartProblemReason(a AgentSummary) string {

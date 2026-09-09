@@ -76,9 +76,9 @@ Important environment variables:
 | --- | --- | --- |
 | `HIVE_HUB` | value from `contributor.env`, else public hub default | WebSocket hub(s) to subscribe to. Use comma-separated URLs for multi-hub mode. Direct Compose reads the registered value from the mounted config file. |
 | `HIVE_REGISTRATION_TOKEN` | value from `contributor.env` | Registration token(s), positional with `HIVE_HUB` when multiple hubs are listed. Required; run `just contribute-setup` first. |
-| `AGENT_BACKEND` | `claude` | CLI/backend to run (`claude`, `copilot`, `goose`, `bob`, `codex`, `pi`, `aider`, `litellm`, `agy`, `opencode`, `kilo`, depending on image support and credentials). `agy` has no OS-level sandbox of its own, so run it containerized (`just contribute-hive agy`) — the contributor image ships the `agy` binary; local mode refuses to launch it without `HIVE_AGY_DANGEROUSLY_RUN_UNCONFINED=1`. `opencode` and `kilo` only run headless (`CONTRIBUTOR_MODE=headless`) — it has no interactive-tmux wiring. |
+| `AGENT_BACKEND` | `claude` | CLI/backend to run (`claude`, `copilot`, `goose`, `bob`, `codex`, `pi`, `aider`, `litellm`, `agy`, `opencode`, `kilo`, `muse`, depending on image support and credentials). `agy` has no OS-level sandbox of its own, so run it containerized (`just contribute-hive agy`) — the contributor image ships the `agy` binary; local mode refuses to launch it without `HIVE_AGY_DANGEROUSLY_RUN_UNCONFINED=1`. `opencode`, `kilo`, and `muse` only run headless (`CONTRIBUTOR_MODE=headless`) — hive has no interactive-tmux wiring for them. |
 | `AGENT_MODEL` | unset (backend default) | Optional model override passed to the contributor agent (e.g. `claude-sonnet-4-6`, `gpt-4o`, `gemini-2.5-pro`). Declared to the hive when the relay connects. |
-| `AGENT_REASONING_EFFORT` | unset | Reasoning effort override. Consumed by `codex` (`-c model_reasoning_effort`) and by `agy` (`--effort low\|medium\|high`, required whenever a model is set, else agy ignores the model). Ignored by other backends. |
+| `AGENT_REASONING_EFFORT` | unset | Reasoning effort override. Consumed by `codex` (`-c model_reasoning_effort`), by `agy` (`--effort low\|medium\|high`, required whenever a model is set, else agy ignores the model), and by `muse` (`--reasoning-effort none\|minimal\|low\|medium\|high\|xhigh\|max\|ultra`, applied with or without a model; a value outside that set is dropped rather than passed, because muse exits 2 on it). Ignored by other backends. |
 | `CONTRIBUTOR_MODE` | `interactive` | `interactive` keeps a tmux/TTY session. `headless` is for one-shot/no-TTY task delivery. |
 | `HIVE_AGENT_SESSION` | `contributor` | tmux session name for interactive mode. |
 | `HIVE_SESSION` | backend name (`AGENT_BACKEND`) | Optional session label for running multiple relays under one GitHub account (see [Running multiple backends under one account](#running-multiple-backends-under-one-account)). Relays with distinct labels get independent session-scoped identities (`ContributorID#session`) on the hub, so their task leases, assignment cooldowns, failure streaks, and ownership fences do not collide. Auth, trust tier, model admission, and rate-limit accounting stay per-account. Sanitized on the hub: only `[A-Za-z0-9._-]` survive, capped at 32 bytes; a label that sanitizes to empty counts as unset. Set it to the **empty string** to opt out — the relay then declares no session and keeps the bare per-account identity (the historical single-session behavior). |
@@ -113,6 +113,7 @@ mode fixed for Goose in [#2393](https://github.com/hivecommons/hive/issues/2393)
 | `agy` | `CLAUDE.md` |
 | `opencode` | `AGENTS.md`, `CLAUDE.md` |
 | `kilo` | `AGENTS.md`, `CLAUDE.md` |
+| `muse` | `AGENTS.md`, `CLAUDE.md` |
 | anything else | `CLAUDE.md` only — the `*` fallback |
 
 A backend that reads neither `CLAUDE.md` nor one of the names above falls into
@@ -197,6 +198,7 @@ The relay speaks to whatever backend you set up — pass it to `contribute-setup
 | `agy` | Antigravity — no OS-level sandbox of its own, so container mode (default) is its only mode with any host boundary; local mode refuses without `HIVE_AGY_DANGEROUSLY_RUN_UNCONFINED=1`. Signs in through an interactive Google OAuth flow with no API-key mode: sign in once inside the container, or on the host first (`just contribute-hive agy` stages a signed-in `~/.gemini` into the container — unverified whether that alone re-authenticates an unattended run) |
 | `opencode` | Provider-agnostic (75+ providers); `opencode auth login` writes a credential to `~/.local/share/opencode/auth.json`. Headless-only: `opencode run "<prompt>"` is its one-shot entry point, wired via `CONTRIBUTOR_MODE=headless`; there is no interactive-tmux launch path for it |
 | `kilo` | Headless-only: `kilo run "<prompt>" --auto`; set `KILO_AUTH_CONTENT` / `KILO_CONFIG_CONTENT` or `KILO_API_KEY` (optional `KILO_ORG_ID`). Hive forwards only those values and never mounts a Kilo home/config directory. `--auto` is approval, not a sandbox. |
+| `muse` | Muse Code (`curl -fsSL https://dev.meta.ai/install.sh | bash`). Headless-only: `muse exec "<prompt>"` is its documented non-interactive sub-command. Auth is `META_API_KEY` (which muse says always takes priority) or `~/.config/muse/auth.json` written by `muse login` / `muse auth set --api-key-stdin`. Set `AGENT_MODEL` to a catalog id from `GET https://api.meta.ai/v1/models`, queried **from the machine that will run muse** — the catalog is caller-dependent (a workstation and an AWS container saw different model sets for the same key on 2026-09-08), and an id the caller cannot see fails at task time. **muse brings its own OS sandbox** (bubblewrap/seccomp on Linux, seatbelt on macOS), on by default — hive narrows it rather than refusing local launch. Installed in both images, pinned by version and per-arch SHA-256 from muse's release manifest. |
 
 ## Running multiple backends under one account
 
@@ -380,10 +382,40 @@ Only issues that pass **all** of these filters are offered to contributors:
 |---|---|---|
 | **Repos for Contribute** | `disabled_repos` | Per-repo toggle. A monitored repo serves work unless it is listed in `disabled_repos`; newly added repos default to **on**. |
 | **Label filter** | `contribute_labels_mode` + `contribute_deny_labels` | Set `contribute_labels_mode` to `deny` (default) so listed labels exclude an issue (e.g. `hold`, `wontfix`, `duplicate`), or to `allow` so an issue must carry one of the listed labels to queue (e.g. `good-first-issue`, `help-wanted`). |
-| **Deny Titles** | `contribute_deny_titles` | Title patterns to exclude. Supports `*`-wildcards (`*dashboard*`, `epic:*`) and slash-delimited regex (`/renovate/`, always case-insensitive). |
-| **Deny Authors** | `contribute_deny_authors` | Issues opened by these authors are excluded (e.g. `dependabot*`, `renovate[bot]`). Same wildcard/regex syntax as Deny Titles. |
+| **Title filter** | `contribute_titles_mode` + `contribute_deny_titles` | Title patterns. With `contribute_titles_mode` set to `deny` (default) a matching title excludes the issue; set it to `allow` so only issues whose title matches one of the patterns queue. Supports `*`-wildcards (`*dashboard*`, `epic:*`) and slash-delimited regex (`/renovate/`, always case-insensitive). |
+| **Author filter** | `contribute_authors_mode` + `contribute_deny_authors` | Author patterns (e.g. `dependabot*`, `renovate[bot]`). Same `deny` (default) / `allow` mode semantics as the title filter, and the same wildcard/regex syntax. |
+| **Skip Assigned to Others** | `contribute_skip_assigned_to_others` | When on, an issue already assigned to someone other than the requesting contributor is skipped. Unassigned issues, and issues assigned to the contributor themselves, stay eligible. Default off, so issues are offered regardless of assignment. |
 
 The legacy `contribute_allow_labels` field is retained only for one-time migration into `contribute_deny_labels` + `contribute_labels_mode`; configure the label filter through those two keys.
+
+The list keys keep their `deny_*` names in every mode for backward compatibility with existing on-disk config; the `*_mode` key decides whether the list is a denylist or an allowlist. An empty list in `allow` mode is treated as "filter off" rather than "nothing passes", so a half-configured filter never silently empties the queue.
+
+### Cooldown
+
+After a contributor completes an issue, the hub keeps that issue out of the queue for a while so the same work is not handed straight back out:
+
+| Control | Config key | Behavior |
+|---|---|---|
+| **Cooldown** | `contribute_cooldown_enabled` | Toggles the post-completion cooldown. Absent (older config) or `true` means enabled; an explicit `false` disables it, so no completed issue is ever excluded for cooldown. Failure quarantine is separate and stays on either way. |
+| **Cooldown Hours** | `contribute_cooldown_hours` | Length of the with-PR completion cooldown in hours. `0` or unset means the default of `168` (one week); any positive value is clamped to `1`-`8760`. The short no-PR cooldown is fixed and not tuned here. |
+
+### Queue hold and priority
+
+The **Operations** tab lets an operator reorder and park individual issues in the ready-work queue. Both controls persist on the hub configuration alongside the filters above, but they are edited only through two authenticated endpoints (owner or read-write role; a read-only or anonymous caller gets `403`):
+
+| Endpoint | Config key | Behavior |
+|---|---|---|
+| `PUT /api/contribute/queue/order` | `contribute_queue_order` | Body `{"order":["owner/repo#number", ...]}`. Listed issues are offered first, in exactly this order; everything else follows in the default order. This only reorders offer priority: a listed issue that fails admission, cooldown, disabled-repo, or in-flight checks is still excluded, and a stale key is skipped. |
+| `POST /api/contribute/queue/hold` | `contribute_queue_hold` + `contribute_queue_hold_reasons` | Body `{"key":"owner/repo#number","held":true,"reason":"optional note"}`. A held issue is never offered until it is resumed (`"held":false`), unlike cooldown, which clears itself. Held rows stay visible on the Operations tab, greyed with an "on hold" badge; the optional reason is shown in the badge tooltip and pruned automatically when the hold is lifted. |
+| `POST /api/contribute/queue/hold/clear` | `contribute_queue_hold` | Resumes every held issue in one call. Same role gate and persistence as the single-issue endpoint. |
+
+### Explicit acceptance
+
+| Control | Config key | Behavior |
+|---|---|---|
+| **Require Explicit Accept** | `contribute_require_explicit_accept` | Chooses who accepts a task before the scoped GitHub credential is delivered (kubestellar/hive#2537). Absent or `false` (default) auto-accepts any task that already passed admission, so an unattended fleet keeps running. `true` withholds the credential until the relay sends `task_accepted`; a task that is declined, times out, or is lost to a reconnect never receives one. |
+
+Delegated agent roles (`contribute_delegatable_roles`) are covered in [Contributor trust tiers and delegated agent roles](contributor-trust-and-roles.md).
 
 ### Which models are acceptable
 
@@ -402,7 +434,7 @@ Each trust tier can be toggled on/off and given its own rate limits (`0` = unlim
 
 ### Filter timing
 
-- **Queue-time vs. connect-time.** Repo, label, title, and author filters apply when the queue is next built, so tightening them affects the *next* queue build. The Model Filter applies at connect time, so tightening it affects the *next* connection, not agents already mid-task.
+- **Queue-time vs. connect-time.** Repo, label, title, author, and assignment filters, cooldown, and the hold/priority sets apply when the queue is next built, so tightening them affects the *next* queue build. The Model Filter applies at connect time, so tightening it affects the *next* connection, not agents already mid-task.
 - **Suspending vs. revoking.** Suspension idles everyone and is instant to undo; revocation is per-contributor and blocks reconnection.
 
 ## Kubernetes contributor workload
@@ -613,6 +645,50 @@ from an uncaught exception, so the credential cannot outlive the process short
 of SIGKILL. The hub is not messaged on shutdown; the socket drop already books
 the release through the disconnect cooldown path
 ([#5097](https://github.com/hivecommons/hive/issues/5097)).
+
+## Extending the contributor image (downstream hooks)
+
+The contributor entrypoint (`bin/contributor-agent.sh`) ships an extension seam
+for derived images ([#2393](https://github.com/hivecommons/hive/issues/2393)
+item 4), so a downstream front end (for example `projectbluefin/donate-clanker`)
+can inject setup without forking the entrypoint and re-implementing its tmux
+wait/attach logic:
+
+1. **Hook directory** — every readable `*.sh` in `/etc/hive/entrypoint.d/`
+   (override the directory with `HIVE_ENTRYPOINT_HOOK_DIR`) is run, in shell
+   glob order.
+2. **Inline hook** — if `HIVE_PRE_AGENT_HOOK` is set, its value is then
+   `eval`'d.
+
+Both run at a deliberate point in startup: **after** the contributor env
+(`contributor.env`) and the default backend helpers (`backends.conf`) are
+loaded, and **before** backend detection and the tmux/CLI launch. Hooks are
+**sourced, not exec'd**, which is what makes the seam useful:
+
+- anything a hook `export`s is inherited by the relay, the tmux session, and
+  the CLI backend;
+- a hook can override shell helpers such as `backend_binary()` or
+  `backend_perm_flag()` and the override survives, because nothing reloads the
+  defaults after the seam runs.
+
+A minimal derived image:
+
+```dockerfile
+FROM ghcr.io/hivecommons/hive-contributor:latest
+COPY 10-my-setup.sh /etc/hive/entrypoint.d/10-my-setup.sh
+```
+
+```bash
+# /etc/hive/entrypoint.d/10-my-setup.sh — sourced by the entrypoint
+export MY_TOOL_CONFIG=/etc/mytool.yaml
+backend_binary() { echo "my-wrapped-cli"; }
+```
+
+Trust note: hooks run with the entrypoint's full privileges inside the
+contributor container, and `HIVE_PRE_AGENT_HOOK` is `eval`'d verbatim — only
+bake hooks into images you build, and only pass `HIVE_PRE_AGENT_HOOK` values
+you would be willing to type into that container's shell yourself. Both knobs
+are listed in the [environment variable reference](env-vars.md).
 
 ## Troubleshooting: the backend dies seconds after every task
 

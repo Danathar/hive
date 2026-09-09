@@ -30,9 +30,12 @@ v4 is the default branch and the supported stable line.
   (see [SECURITY.md](SECURITY.md)).
 - Structural or protocol-level changes do not land here directly; they go
   through the v5 RFC process first, keeping v4 low-risk to track.
-- Support window: v4 remains supported through v5 development; an explicit
-  EOL relative to the first stable v5 release will be announced before
-  v5 GA.
+- Support window: v4 remains supported through v5 development. The v4 EOL
+  announcement is **blocked on completion of the
+  [v5 GA readiness bar](https://github.com/hivecommons/hive/blob/v5/src/docs/v5-ga.md)**
+  (live tracker: [#6016](https://github.com/hivecommons/hive/issues/6016)):
+  no EOL date is announced before that checklist is closed, and any EOL is
+  stated relative to the first stable v5 release.
 
 ## v5 — Next Generation
 
@@ -79,6 +82,7 @@ issues. Accepted workstreams:
   ([#5691](https://github.com/hivecommons/hive/issues/5691),
   [RFC doc](https://github.com/hivecommons/hive/blob/v5/docs/rfc-5691-constellation.md),
   [#5796](https://github.com/hivecommons/hive/pull/5796)).
+- **Per-repo policy scoping.** Proposed — awaiting maintainer sign-off on [#6208](https://github.com/hivecommons/hive/issues/6208): use one repo-scoped policy model for pause, per-repo agents, and per-repo ACMM/onboarding; hive-wide ACMM remains the ceiling, and repo overrides only narrow scope.
 - **Backend capacity, model inventory, and placement.** The same
   multi-spoke evidence made provider quota and model availability the
   practical constraint on splitting a hive. The accepted v5 capacity RFC
@@ -91,7 +95,9 @@ issues. Accepted workstreams:
   [#5784](https://github.com/hivecommons/hive/pull/5784)).
 
 A documented migration path from v4 hubs and spokes, with dual-version
-operation during the transition, is part of the v5 GA bar.
+operation during the transition, is part of the
+[v5 GA readiness bar](https://github.com/hivecommons/hive/blob/v5/src/docs/v5-ga.md)
+(live tracker: [#6016](https://github.com/hivecommons/hive/issues/6016)).
 
 ## Hosted Hive Hub
 
@@ -170,6 +176,7 @@ Highlights from the last month of merges to `v4` (and `v5` where noted):
 Candidate themes, deliberately not committed — see the
 [Later section of the detailed roadmap](src/docs/roadmap.md#later):
 
+- Gitea/Forgejo forge program sequencing is proposed against the v5 GA bar: Wave 0 docs-only ADRs now, Wave 1 behind `pkg/forge` on `v5`, and enumeration-policy extraction only post-GA-cut or v5-first without resetting the required-gate soak ([#6177](https://github.com/hivecommons/hive/issues/6177), [#6167](https://github.com/hivecommons/hive/issues/6167)).
 - Cross-forge orchestration (GitHub, GitLab, Forgejo/Gitea) on the
   `pkg/forge` abstraction.
 - Memory and learning maturation: durable, auditable priming from retro

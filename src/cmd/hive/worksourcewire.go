@@ -111,15 +111,15 @@ func (w *spokeWire) wireSpokeManagersAndLinear() {
 	// reaches agents on their next launch / hourly token refresh. Values are
 	// never logged. Wired before RegisterAPI so the resolver is in place
 	// before any agent launches.
-	w.agentMgr.SetLinearCredentialResolver(func() agent.LinearCredential {
-		if tok := w.dashSrv.LinearAgentAccessToken(); tok != "" {
-			return agent.LinearCredential{AccessToken: tok}
-		}
-		if w.cfg.Governor.WorkSource.Type == "linear" {
-			return agent.LinearCredential{APIKey: strings.TrimSpace(w.cfg.Governor.WorkSource.Linear.APIKey)}
-		}
-		return agent.LinearCredential{}
-	})
+	//
+	// The same resolver is handed to the egress proxy
+	// (githubProxy.SetLinearCredentialResolver in wireSpokeProxyReadyAndLaunch),
+	// which attaches the CURRENT credential to every ISSUES_ONLY+ agent request
+	// to api.linear.app — the rotated OAuth token never reaches a running CLI
+	// through the session environment (a process keeps the environment it was
+	// forked with), so the proxy, not the environment, is what keeps agent
+	// Linear writes authenticated across rotations.
+	w.agentMgr.SetLinearCredentialResolver(w.linearCredentialResolver)
 
 	// In-flight ledger + session PR link (Linear GitHub-parity follow-ups):
 	// the scheduler withholds work a Linear session is already working, and
@@ -586,4 +586,18 @@ func (w *spokeWire) wireSpokeAppCallbacks() {
 		}
 	}
 
+}
+
+// linearCredentialResolver resolves the hive's CURRENT Linear write credential:
+// the connected Linear agent app's OAuth token first, then the work-source API
+// key from hive.yaml. Shared by the agent manager (session environment at
+// launch / hourly refresh) and the egress proxy (per-request injection).
+func (w *spokeWire) linearCredentialResolver() agent.LinearCredential {
+	if tok := w.dashSrv.LinearAgentAccessToken(); tok != "" {
+		return agent.LinearCredential{AccessToken: tok}
+	}
+	if w.cfg.Governor.WorkSource.Type == "linear" {
+		return agent.LinearCredential{APIKey: strings.TrimSpace(w.cfg.Governor.WorkSource.Linear.APIKey)}
+	}
+	return agent.LinearCredential{}
 }

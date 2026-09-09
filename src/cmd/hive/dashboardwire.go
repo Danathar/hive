@@ -151,6 +151,14 @@ func (w *spokeWire) wireSpokeStateDashboard() {
 	w.preShutdownHooks.addUrgent("drain-contributor-websockets", func() {
 		w.dashSrv.DrainContributorsForShutdown()
 	})
+	// Stop the contributor hub's background cleanup loop on the way out
+	// (#6272). On v4 this is a `defer dashSrv.CloseContributeHub()` in main();
+	// v5 has no such single-function scope, so it rides the same shutdown-hook
+	// mechanism as the drain — deliberately NOT urgent, and registered after
+	// it, so the 1012 close frames are on the wire before the loop stops.
+	w.preShutdownHooks.add("close-contribute-hub", func() {
+		w.dashSrv.CloseContributeHub()
+	})
 
 	// Wire ioscan input enforcement (opt-in via ioscan.enabled) to the dashboard
 	// audit log so a blocked/redacted issue title surfaces in the existing

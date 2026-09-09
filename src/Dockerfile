@@ -5,7 +5,7 @@
 #     -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json" \
 #     https://registry-1.docker.io/v2/library/golang/manifests/1.27-alpine | grep -i docker-content-digest
 # and update both the tag and the @sha256 digest together.
-FROM golang:1.27-alpine@sha256:4c9fe60190a2a3350ddc51de80d0224b8a6698d12bdfc999fee45ea9d6c46dbc AS builder
+FROM golang:1.27-alpine@sha256:cf6fca6641884b8433441b2b0652976f975e1d0fdd26d177eaaf8596087f3125 AS builder
 RUN apk add --no-cache git
 WORKDIR /src
 
@@ -238,7 +238,7 @@ RUN npm install -g --ignore-scripts --no-fund --no-audit \
 # dashboard's codex model discovery (`codex app-server` model/list — pure
 # local stdio, no network, unaffected by the proxy CA) falls back to the
 # static list, and non-codex backends are unaffected.
-ARG CODEX_VERSION=0.146.0
+ARG CODEX_VERSION=0.153.4
 RUN npm install -g --ignore-scripts --no-fund --no-audit @openai/codex@${CODEX_VERSION} && npm cache clean --force || \
     echo "WARN: OpenAI Codex CLI install failed — skipping"
 
@@ -308,6 +308,41 @@ RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" && \
     install -m 0755 /tmp/antigravity /usr/local/bin/agy && \
     rm -f /tmp/agy.tar.gz /tmp/antigravity && \
     agy --version
+
+# --- Layer 8.3: Muse Code CLI (backend: muse) ---
+# Meta distributes a self-contained executable, not an npm package. The public
+# installer (`https://dev.meta.ai/install.sh`) drops a *launcher* that resolves
+# the current release at runtime and verifies a checksum only when the server
+# volunteers one — that pins nothing, so it is deliberately NOT used here.
+# Instead, fetch the exact per-arch artifact and SHA-256 from the release
+# manifest, the same posture as the agy layer above:
+#   https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=${MUSE_VERSION}&file=manifest.json
+#
+# SIZE: this is a ~250-265 MB static binary per arch — by far the largest CLI
+# layer in this image. That cost is deliberate and worth stating: muse is the
+# only backend besides Claude Code that brings its own OS sandbox
+# (bubblewrap/seccomp on Linux), so it is the one fallback rung that does not
+# trade confinement for availability.
+#
+# Auth is NOT baked in: muse needs META_API_KEY in the environment, or a
+# credential at $HOME/.config/muse/auth.json seeded by an operator
+# (`muse login` / `muse auth set --api-key-stdin`). The image supplies only the
+# binary, exactly as the agy layer does for Google OAuth.
+ARG MUSE_VERSION=1.0.3-R2198.1
+ARG MUSE_SHA256_AMD64=75a68f98c437dfd17d264730c5bc72d57e5f1e18d10472a9f53261ffcc091352
+ARG MUSE_SHA256_ARM64=4ffcf55f5eb0668643f30c5febd90d188b9a2da65858918444d31f6046940120
+RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" && \
+    case "$ARCH" in \
+      amd64|x86_64) MUSE_FILE=muse-x86-linux; MUSE_SHA256="$MUSE_SHA256_AMD64" ;; \
+      arm64|aarch64) MUSE_FILE=muse-aarch64-linux; MUSE_SHA256="$MUSE_SHA256_ARM64" ;; \
+      *) echo "unsupported arch for muse: $ARCH" >&2; exit 1 ;; \
+    esac && \
+    curl -fsSL --retry 8 --retry-delay 5 --retry-max-time 300 --retry-connrefused --retry-all-errors \
+      -o /tmp/muse "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=${MUSE_VERSION}&file=${MUSE_FILE}" && \
+    echo "${MUSE_SHA256}  /tmp/muse" | sha256sum -c - && \
+    install -m 0755 /tmp/muse /usr/local/bin/muse && \
+    rm -f /tmp/muse && \
+    muse --version
 
 # --- Layer 8.5: pi CLI (@earendil-works/pi-coding-agent — backend: pi) ---
 # Tolerant of failure like the copilot/codex layers: agents configured for
@@ -630,7 +665,23 @@ RUN find / -xdev -type f \( -perm -4000 -o -perm -2000 \) \
 # agent on the same provider (EACCES -> login/onboarding screens). Launch
 # through wrappers that set umask 007 so shared state stays group-readable.
 # See RFC #4665.
-RUN for b in agy claude; do \
+#
+# muse belongs here for the same reason, and it fails HARDER than the two
+# above: muse does not degrade to a login screen, it exits non-zero before
+# doing any work at all —
+#
+#   failed to create session lock directory for session <uuid>:
+#   Permission denied (os error 13)
+#
+# and the agent then crash-loops. Observed on a live spoke where every
+# muse-backed agent reported state=running/busy=working while restarting
+# hundreds of times, because muse creates its whole state tree
+# ($XDG_DATA_HOME/muse: sessions/, runtime/, skills/, plugins/,
+# model-catalog/) on first launch and the default umask made those dirs
+# group-unwritable. The first agent to start muse then locked out every other
+# agent sharing /data/home. umask 007 makes that tree group-writable, so any
+# agent in the `node` group can take the next session.
+RUN for b in agy claude muse; do \
       [ -e "/usr/local/bin/$b" ] || continue; \
       mv "/usr/local/bin/$b" "/usr/local/bin/$b.real"; \
       printf '#!/bin/sh\numask 007\nexec /usr/local/bin/%s.real "$@"\n' "$b" > "/usr/local/bin/$b"; \

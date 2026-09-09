@@ -631,8 +631,11 @@ type ContributeWSHub struct {
 	// release path (revokeLease: disconnect, ready-abandon, complete, fail, operator
 	// requeue, lease-TTL expiry), so a released task can never be re-adopted. Guarded
 	// by leaseMu.
-	leases  map[string]*taskLease
-	leaseMu sync.Mutex
+	leases   map[string]*taskLease
+	leaseMu  sync.Mutex
+	stopCh   chan struct{}
+	doneCh   chan struct{}
+	stopOnce sync.Once
 }
 
 // taskLease is the server-authoritative record of a task the hub issued to a
@@ -1261,6 +1264,8 @@ func NewContributeWSHub(logger *slog.Logger, server *Server) *ContributeWSHub {
 		logger:                logger,
 		server:                server,
 		sse:                   newSSERegistry(),
+		stopCh:                make(chan struct{}),
+		doneCh:                make(chan struct{}),
 	}
 	hub.loadCompletedTasks()
 	hub.loadFailedTasks()
@@ -4963,64 +4968,93 @@ func (h *ContributeWSHub) checkModelAllowed(model string) (bool, []string) {
 }
 
 func (h *ContributeWSHub) cleanupLoop() {
+	if h.doneCh != nil {
+		defer close(h.doneCh)
+	}
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
-		// #2568: reclaim wedged-but-connected task leases first (the backstop). A
-		// connection whose lastPong is still fresh (so the heartbeat sweep below will
-		// NOT remove it) but that has stopped renewing its task lease is exactly the
-		// "connected but wedged" case the issue describes; this releases its task
-		// through the SAME cooldown+generation-bump path a manual requeue uses.
-		h.reclaimExpiredLeases(time.Now())
+	for {
+		select {
+		case <-h.stopCh:
+			return
+		case <-ticker.C:
+			// #2568: reclaim wedged-but-connected task leases first (the backstop). A
+			// connection whose lastPong is still fresh (so the heartbeat sweep below will
+			// NOT remove it) but that has stopped renewing its task lease is exactly the
+			// "connected but wedged" case the issue describes; this releases its task
+			// through the SAME cooldown+generation-bump path a manual requeue uses.
+			h.reclaimExpiredLeases(time.Now())
 
-		// #5681: drop leases that aged out without ever being looked up — a relay
-		// that never came back after a restart leaves one behind, and it would
-		// otherwise keep its issue out of the assignment pool until the process
-		// ended.
-		h.pruneExpiredLeases(time.Now())
+			// #5681: drop leases that aged out without ever being looked up — a relay
+			// that never came back after a restart leaves one behind, and it would
+			// otherwise keep its issue out of the assignment pool until the process
+			// ended.
+			h.pruneExpiredLeases(time.Now())
 
-		// Deregister under the lock; CLOSE outside it.
-		//
-		// closeWithReason writes a Close frame with a deadline, so it can block for
-		// up to wsCloseFrameDeadline against a peer that has stopped reading — which
-		// is exactly what a stale connection is. Doing that while holding h.mu would
-		// hold the hub-wide lock for up to one second PER stale socket, serially:
-		// against the maxWSConnections cap of 50 that is a worst case near a minute
-		// during which no contributor can register, no sequence number can be
-		// allocated, and every other hub operation stalls. The bare c.ws.Close() this
-		// replaced could not block, so the risk arrived with the close frame and is
-		// removed here rather than traded for it.
-		var staleConns []*websocket.Conn
-		h.mu.Lock()
-		for id, c := range h.connections {
-			c.mu.Lock()
-			stale := time.Since(c.lastPong) > wsHeartbeatTimeout
-			username := ""
-			if c.profile != nil {
-				username = c.profile.GitHubUsername
-			}
-			c.mu.Unlock()
-			if stale {
-				h.logger.Info("[contribute-ws] cleanup: removing stale connection", "username", username, "conn", id)
-				// Nil-guard: a connection may carry no live socket (e.g. a
-				// test-injected in-flight entry, or a connection torn down elsewhere),
-				// and cleanupLoop iterates ALL registered connections. Mirrors the
-				// existing guard in RequeueContributorTask so a ws-less entry is pruned
-				// rather than nil-dereferenced.
-				if c.ws != nil {
-					staleConns = append(staleConns, c.ws)
+			// Deregister under the lock; CLOSE outside it.
+			//
+			// closeWithReason writes a Close frame with a deadline, so it can block for
+			// up to wsCloseFrameDeadline against a peer that has stopped reading — which
+			// is exactly what a stale connection is. Doing that while holding h.mu would
+			// hold the hub-wide lock for up to one second PER stale socket, serially:
+			// against the maxWSConnections cap of 50 that is a worst case near a minute
+			// during which no contributor can register, no sequence number can be
+			// allocated, and every other hub operation stalls. The bare c.ws.Close() this
+			// replaced could not block, so the risk arrived with the close frame and is
+			// removed here rather than traded for it.
+			var staleConns []*websocket.Conn
+			h.mu.Lock()
+			for id, c := range h.connections {
+				c.mu.Lock()
+				stale := time.Since(c.lastPong) > wsHeartbeatTimeout
+				username := ""
+				if c.profile != nil {
+					username = c.profile.GitHubUsername
 				}
-				delete(h.connections, id)
+				c.mu.Unlock()
+				if stale {
+					h.logger.Info("[contribute-ws] cleanup: removing stale connection", "username", username, "conn", id)
+					// Nil-guard: a connection may carry no live socket (e.g. a
+					// test-injected in-flight entry, or a connection torn down elsewhere),
+					// and cleanupLoop iterates ALL registered connections. Mirrors the
+					// existing guard in RequeueContributorTask so a ws-less entry is pruned
+					// rather than nil-dereferenced.
+					if c.ws != nil {
+						staleConns = append(staleConns, c.ws)
+					}
+					delete(h.connections, id)
+				}
 			}
-		}
-		h.mu.Unlock()
+			h.mu.Unlock()
 
-		// Already deregistered above, so a slow or wedged peer here delays nothing
-		// but this sweep — the next tick is 30s away and re-observes fresh state.
-		for _, ws := range staleConns {
-			closeWithReason(ws, websocket.CloseGoingAway, "connection went stale: no pong within the heartbeat window")
+			// Already deregistered above, so a slow or wedged peer here delays nothing
+			// but this sweep — the next tick is 30s away and re-observes fresh state.
+			for _, ws := range staleConns {
+				closeWithReason(ws, websocket.CloseGoingAway, "connection went stale: no pong within the heartbeat window")
+			}
 		}
 	}
+}
+
+// Close terminates the hub's background cleanup loop and blocks until it
+// exits. It is safe to call concurrently and multiple times (idempotent).
+func (h *ContributeWSHub) Close() {
+	if h == nil {
+		return
+	}
+	h.stopOnce.Do(func() {
+		if h.stopCh != nil {
+			close(h.stopCh)
+		}
+	})
+	if h.doneCh != nil {
+		<-h.doneCh
+	}
+}
+
+// Stop terminates the hub's background cleanup loop, matching Close.
+func (h *ContributeWSHub) Stop() {
+	h.Close()
 }
 
 // reclaimExpiredLeases is the hub-owned LEASE-TTL backstop (kubestellar/hive#2568,
@@ -5373,7 +5407,7 @@ func buildTaskPromptForRef(ref worksource.Ref, title string) string {
 	// said v5. Fixing the workspace alone cannot work; the instruction has to
 	// carry the answer.
 	return buildTaskPromptBody(repoFull, issueRef, title, sourceHint,
-		taskBaseBranch(title, upstreamBranch()))
+		taskBaseBranch(title, repoFull, upstreamBranch()))
 }
 
 // taskIDSegment is the per-item component of a task id. For GitHub-backed work
@@ -5427,6 +5461,43 @@ func releaseLineFromTitle(title string) string {
 	return tag
 }
 
+// hiveOwnRepoName is the repository this hive's own source lives in, and
+// hiveOwnRepoOwners are the orgs it has lived under. Both owners are accepted
+// because the repo moved orgs: a hive configured before the transfer still
+// names "kubestellar", and metrics_collector.go already accepts both for the
+// same reason.
+//
+// Deliberately NOT the same thing as the "hivecommons/hive" literals in api.go.
+// Those pin the CANONICAL UPSTREAM the self-version check compares a build
+// against, and a fork's binary still checks itself against upstream. This asks
+// a different question: is the repository this task is FOR the one whose
+// branches this hive's build branch is a statement about.
+const hiveOwnRepoName = "hive"
+
+var hiveOwnRepoOwners = []string{"hivecommons", "kubestellar"}
+
+// isHiveOwnRepo reports whether repoFull ("owner/repo") names the repository
+// this hive's own source lives in.
+//
+// An unqualified or malformed value reports false, routing the task to the
+// resolve-the-default-branch wording. That is the safe direction in every case:
+// that wording is correct for any repository, including this one, where the
+// only cost is naming the branch less explicitly than #5729 would like.
+// Inheriting a branch on a guess is the failure this exists to prevent.
+func isHiveOwnRepo(repoFull string) bool {
+	owner, name, found := strings.Cut(strings.TrimSpace(repoFull), "/")
+	if !found || !strings.EqualFold(strings.TrimSpace(name), hiveOwnRepoName) {
+		return false
+	}
+	owner = strings.TrimSpace(owner)
+	for _, o := range hiveOwnRepoOwners {
+		if strings.EqualFold(owner, o) {
+			return true
+		}
+	}
+	return false
+}
+
 // taskBaseBranch is the branch a task's work must be based on and its PR opened
 // against (kubestellar/hive#5729).
 //
@@ -5446,9 +5517,29 @@ func releaseLineFromTitle(title string) string {
 // implied and never stated. A branch-specific issue overrides it: an issue
 // titled "[v5] …" is work for `v5` whatever branch this hive runs, which is
 // also why the inheritance had a plausible-looking first PR to start from.
-func taskBaseBranch(title, hubBranch string) string {
+//
+// repoFull is the task's repository. hubBranch is inherited only when that
+// repository IS this hive's own source repo (hivecommons/hive#6081). A hive
+// dispatching for someone else's repository has no reason to think its own
+// build branch means anything there, and the observed result was `v4` stamped
+// onto 100% of a self-hosted hive's tasks across four repositories that have no
+// such branch. That case self-corrected only because a MISSING branch is loud;
+// a repository that happens to have a `v4` which is not its default would have
+// resolved, opened the PR against it, and satisfied the prompt's own "confirm
+// the base" step. Wrong base, no error, anywhere.
+//
+// Declining leaves the base empty, which is not a gap: buildTaskPromptBody's
+// unresolved-base wording already tells the agent to read the repository's own
+// defaultBranchRef, and it keeps the "do not use the branch you find" clause —
+// the load-bearing half of #5729 — so both constraints hold at once. That
+// wording was previously unreachable, because upstreamBranch() can never return
+// empty.
+func taskBaseBranch(title, repoFull, hubBranch string) string {
 	if line := releaseLineFromTitle(title); line != "" {
 		return line
+	}
+	if !isHiveOwnRepo(repoFull) {
+		return ""
 	}
 	return strings.TrimSpace(hubBranch)
 }
@@ -5475,8 +5566,11 @@ func buildTaskPromptBody(repoFull, issueRef, title, sourceHint, baseBranch strin
 		// which is the load-bearing half in both wordings.
 		"Do not assume the branch the checkout is currently on is the right base: it may "+
 			"be left over from a previous task. Resolve %s's own default branch "+
-			"('gh repo view %s --json defaultBranchRef'), start your work branch from it, "+
-			"and open the PR against it. ",
+			"('gh repo view %s --json defaultBranchRef'), run 'git fetch upstream', and "+
+			"start your work branch from it with "+
+			"'git checkout -b <your-branch> upstream/<default-branch>'. Open the PR "+
+			"against the same branch, and confirm the PR's base is that branch before "+
+			"you report done. ",
 		repoFull, repoFull)
 	if b := strings.TrimSpace(baseBranch); b != "" {
 		baseHint = fmt.Sprintf(
@@ -6674,3 +6768,24 @@ func (s *Server) DrainContributorsForShutdown() int {
 	}
 	return s.contributeHub.DrainForShutdown()
 }
+
+// CloseContributeHub is the Server-level entry point for stopping the
+// contributor hub's background cleanup loop. It is idempotent and safe to
+// call multiple times, and is a no-op on a Server whose contribute routes
+// were never registered.
+func (s *Server) CloseContributeHub() {
+	if s == nil || s.contributeHub == nil {
+		return
+	}
+	s.contributeHub.Close()
+}
+
+// Close shuts down server-managed background resources, including the
+// contributor hub.
+func (s *Server) Close() {
+	if s == nil {
+		return
+	}
+	s.CloseContributeHub()
+}
+

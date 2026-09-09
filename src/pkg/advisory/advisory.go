@@ -66,6 +66,10 @@ type Finding struct {
 	// stale claim and the downstream issue refuting it cannot both read as
 	// live work.
 	CachedReplays int `json:"cached_replays,omitempty"`
+	// StaleUnverified is set when the configured staleness window has passed
+	// without a fresh agent re-report. Silence is not proof of resolution, so
+	// the finding stays open and is captioned as unverified.
+	StaleUnverified bool `json:"stale_unverified,omitempty"`
 }
 
 // Snapshot identifies the single commit that a digest's analysis is pinned to.
@@ -395,11 +399,16 @@ func collapseNearDuplicates(findings []Finding) []Finding {
 //     nothing re-ran it here (#5130).
 //   - CachedReplays with no provenance — the finding's only "confirmations"
 //     were byte-identical replays of cached text (#5236).
+//   - StaleUnverified — no agent refreshed the finding inside the configured
+//     staleness window, which is absence of evidence rather than a fix.
 //
-// None of the three proves the finding is FIXED, only that it is unconfirmed
+// None of these proves the finding is FIXED, only that it is unconfirmed
 // here, so applyTopN demotes on it rather than dropping.
 func (f Finding) evidenceUnverified() bool {
 	if f.PathStale {
+		return true
+	}
+	if f.StaleUnverified {
 		return true
 	}
 	if f.ProvenanceStale && f.ProvenanceSHA != "" {
@@ -453,6 +462,16 @@ type DigestOptions struct {
 	// file-path refs, only for findings the ranking actually reaches, and at
 	// most once per distinct path. nil disables verification entirely.
 	VerifyPath func(path string) bool
+	// ResolveRef reports whether a GitHub issue or pull request has closed.
+	//
+	// When set, BuildDigestFromBeads uses it to retire findings that were
+	// computed at some OTHER commit and name only GitHub work that has since
+	// closed -- the #6080 case, where a finding sat in the counted open HIGH
+	// list at the exact commit that fixed it. It is consulted only for
+	// provenance-stale findings, and only for references those findings name
+	// themselves. nil disables the check, leaving the pre-#6080 behaviour
+	// exactly: stale findings are captioned and demoted, never retired.
+	ResolveRef ResolveRef
 }
 
 // effectiveCap returns the number of findings to render, or 0 for "no cap".
@@ -510,6 +529,16 @@ func (o DigestOptions) resolvedRenderCap() int {
 // resolved on the findings by the time ranking runs, so only the path check
 // needs verify.
 //
+// A finding its own author has WITHDRAWN (findingRetracted) ranks below every
+// finding nobody has withdrawn, in ANY band. This is the one demotion that
+// crosses severity bands, and the reason is the same sentence that keeps the
+// others inside theirs: unverified means nobody re-checked, so an unverified
+// critical may still be the worst thing here. A retraction is the opposite --
+// the reporting agent DID re-check and said the finding does not stand -- so
+// its filed severity is the one claim it no longer makes. It still backfills
+// rather than being dropped, because the bead is open and only a maintainer
+// closes it (hivecommons/hive#2364).
+//
 // verify, when non-nil, reports whether a finding's file path still exists at
 // the analyzed snapshot. Verification is on-demand and ordered: the ranked list
 // is walked from the top and verify is called only until cap findings are in
@@ -563,6 +592,9 @@ func applyTopN(byAgent map[string][]Finding, cap int, verify func(path string) b
 	// confirmed low — demoting across bands would let a cosmetic nit displace a
 	// security finding whose file was merely renamed.
 	var kept []Finding
+	// Withdrawn findings are collected across ALL bands and placed last -- see
+	// the band-crossing paragraph in the doc comment above.
+	var retracted []Finding
 	for i := 0; i < len(all) && len(kept) < cap; {
 		rank := severityRank(all[i].Severity)
 		j := i
@@ -578,6 +610,13 @@ func applyTopN(byAgent map[string][]Finding, cap int, verify func(path string) b
 			if len(kept) == cap {
 				break
 			}
+			if findingRetracted(f) {
+				// Set aside BEFORE markPathStale: a withdrawn finding is only
+				// reached if slots go unclaimed, and verify is a lookup the
+				// ranking promises not to spend on findings it never renders.
+				retracted = append(retracted, f)
+				continue
+			}
 			markPathStale(&f)
 			if f.evidenceUnverified() {
 				unverified = append(unverified, f)
@@ -589,6 +628,15 @@ func applyTopN(byAgent map[string][]Finding, cap int, verify func(path string) b
 			kept = append(kept, unverified[k])
 		}
 		i = j
+	}
+	// Nothing live is left to show: rather than render a short digest, fill the
+	// remaining slots with the withdrawn findings, in the order they ranked.
+	// They arrive carrying the renderer's withdrawal caption, which is what
+	// tells a maintainer the bead wants closing rather than fixing.
+	for k := 0; len(kept) < cap && k < len(retracted); k++ {
+		f := retracted[k]
+		markPathStale(&f)
+		kept = append(kept, f)
 	}
 
 	capped := make(map[string][]Finding, len(byAgent))
@@ -667,6 +715,7 @@ func BuildDigestFromBeads(stores map[string]*beads.Store, mode string, opts Dige
 			}
 			f.ProvenanceSHA = b.Meta(provenanceSHAMetadataKey)
 			f.CachedReplays, _ = strconv.Atoi(b.Meta(evidenceReplayCountMetadataKey))
+			f.StaleUnverified = b.Meta(staleUnverifiedMetadataKey) != ""
 			f = capCoverageGapSeverity(f)
 			byAgent[agentName] = append(byAgent[agentName], f)
 			total++
@@ -689,6 +738,30 @@ func BuildDigestFromBeads(stores map[string]*beads.Store, mode string, opts Dige
 	// running it over the full set before ranking is free.
 	if opts.Snapshot != nil {
 		markStaleProvenanceIn(byAgent, opts.Snapshot.SHA)
+	}
+	// Retire the stale findings whose own text names GitHub work that has since
+	// closed (#6080), BEFORE the cap. These were not merely mislabelled: they
+	// were counted, severity-ranked and holding top-N slots, one of them at the
+	// exact commit that fixed it. Retiring them after the cap would leave the
+	// slot spent on a finding nobody needed to read.
+	var settledStale []ResolvedFinding
+	var retiredStale int
+	byAgent, settledStale, retiredStale = partitionSettledStale(byAgent, opts, time.Now())
+	resolved = append(resolved, settledStale...)
+	if retiredStale > 0 {
+		// The header count is recomputed from the survivors for the same reason
+		// collapseNearDuplicates recomputes it: a total that still counts
+		// retired findings misstates how much is open.
+		//
+		// Keyed on how many findings were RETIRED, not on how many are being
+		// announced. A retirement whose closure is older than refClosedWindow
+		// leaves the open set without appearing under Recently Resolved, and
+		// counting len(settledStale) here would leave the header claiming a
+		// finding the digest no longer lists anywhere.
+		total = 0
+		for _, fs := range byAgent {
+			total += len(fs)
+		}
 	}
 	// Cap AFTER collapsing: a top-10 built from uncollapsed restatements would
 	// spend its ten slots on one recurring problem. For the same reason the cap
@@ -870,9 +943,14 @@ func formatFindingRef(ref string, line int, org, primaryRepo, title string) stri
 			}
 			return fmt.Sprintf(" [#%d](%s)", num, issueURL(owner, repo, num))
 		}
-		if inlineRefPattern.FindString(ref) == ref {
-			if owner, repo, num, ok := splitInlineRef(ref, org); ok {
-				return fmt.Sprintf(" [%s](%s)", ref, issueURL(owner, repo, num))
+		// The prefix is stripped before the URL is built: beads carry
+		// "gh-<owner>/<repo>#<n>", and the prefix was being read as part of
+		// the OWNER, so every cross-repo reference in the digest pointed at a
+		// github.com/gh-<owner> that does not exist (#6080). Only the link and
+		// its visible text lose the prefix; the stored reference is untouched.
+		if bare := stripGHSourcePrefix(ref); inlineRefPattern.FindString(bare) == bare {
+			if owner, repo, num, ok := splitInlineRef(bare, org); ok {
+				return fmt.Sprintf(" [%s](%s)", bare, issueURL(owner, repo, num))
 			}
 		}
 	}
@@ -1103,7 +1181,14 @@ func FormatDigestMarkdown(d *Digest, opts DigestOptions) string {
 			// letting it cover this one is the overclaim that got a stale
 			// finding reported as a fabrication.
 			prov := ""
-			if f.ProvenanceStale && f.ProvenanceSHA != "" {
+			if findingRetracted(f) {
+				// The reporting agent withdrew this finding in the detail
+				// rendered directly below, but the bead is still open at this
+				// severity -- only a maintainer closes it. Say which of the two
+				// the reader is looking at, so the entry reads as a bead to
+				// close rather than a problem to fix (#2364).
+				prov = " ⚠️ _(withdrawn by the reporting agent in the detail below — the bead is still open at this severity, so it wants closing rather than fixing)_"
+			} else if f.ProvenanceStale && f.ProvenanceSHA != "" {
 				prov = fmt.Sprintf(" ⚠️ _(evidence computed at `%s`, not re-verified at the analyzed commit)_", shortSHA(f.ProvenanceSHA))
 			} else if f.CachedReplays > 0 && f.ProvenanceSHA == "" {
 				// A no-provenance finding whose only "confirmations" were
@@ -1112,6 +1197,8 @@ func FormatDigestMarkdown(d *Digest, opts DigestOptions) string {
 				// presents a possibly-disproved claim as live work alongside
 				// whatever downstream issue refutes it (#5236).
 				prov = fmt.Sprintf(" ⚠️ _(re-reported %d× from cached evidence, not re-verified)_", f.CachedReplays)
+			} else if f.StaleUnverified {
+				prov = " ⚠️ _(not re-reported within the staleness window — still open, but not recently verified)_"
 			}
 			b.WriteString(fmt.Sprintf("- **[%s]** %s%s%s%s _%s_\n", f.Type, linkifyRefs(title, org), loc, repeat, prov, f.Agent))
 			if detail != "" {
@@ -1243,9 +1330,9 @@ func PersistAsBeads(findings []Finding, stores map[string]*beads.Store) (created
 		// confirmation that the condition still holds. Refreshing LastSeenAt
 		// for it is what let fixed findings outlive their fix: agents re-report
 		// from cached prior findings, PersistAsBeads read that as "still
-		// happening", and PruneStaleAdvisoryBeads never got to age them out
+		// happening", and MarkStaleAdvisoryBeads never got to flag them
 		// (#5130). Skipping the whole finding leaves the staleness clock
-		// running, so silence retires it on the normal schedule.
+		// running, so silence marks it unverified on the normal schedule.
 		//
 		// Gated on an explicit provenance SHA on BOTH sides; findings that
 		// record none take the evidence-identity gate below instead.
@@ -1290,11 +1377,11 @@ func PersistAsBeads(findings []Finding, stores map[string]*beads.Store) (created
 			if b.Title == f.Title && b.Type == beads.TypeAdvisory {
 				// The finding is being re-reported from evidence this bead has
 				// not seen before (identical-provenance re-reports were skipped
-				// above), which is exactly the signal staleness pruning
-				// consumes: stamp it so PruneStaleAdvisoryBeads keeps this bead
-				// alive for another window. Skipping the stamp here would let a
-				// finding an agent reports every single cycle still age out and
-				// be auto-closed.
+				// above), which is exactly the signal staleness marking
+				// consumes: stamp it so MarkStaleAdvisoryBeads knows this bead
+				// was recently verified. Skipping the stamp here would let a
+				// finding an agent reports every single cycle still be marked
+				// stale.
 				_ = store.SetLastSeenAt(b.ID, time.Now())
 				if prov != "" {
 					_ = store.SetMetadata(b.ID, provenanceSHAMetadataKey, prov)
@@ -1304,6 +1391,7 @@ func PersistAsBeads(findings []Finding, stores map[string]*beads.Store) (created
 				// the evidence visibly changed.
 				_ = store.SetMetadata(b.ID, evidenceHashMetadataKey, hash)
 				_ = store.SetMetadata(b.ID, evidenceReplayCountMetadataKey, "0")
+				_ = store.UnsetMetadata(b.ID, staleUnverifiedMetadataKey)
 				dup = true
 				break
 			}
@@ -1347,6 +1435,7 @@ func PersistAsBeads(findings []Finding, stores map[string]*beads.Store) (created
 		for k, v := range meta {
 			_ = store.SetMetadata(b.ID, k, v)
 		}
+		_ = store.UnsetMetadata(b.ID, staleUnverifiedMetadataKey)
 		created++
 	}
 	return created

@@ -77,6 +77,9 @@ func (w *spokeWire) wireSpokeProxyReadyAndLaunch() {
 		// agents (litellm/vllm/llm-d) never write a scannable session file and
 		// their consumption reads as zero.
 		w.githubProxy.SetTokenSink(tokens.NewInferenceSink(w.cfg.Data.MetricsDir, w.logger))
+		// Live Linear credential for agent requests — see
+		// spokeWire.linearCredentialResolver and proxy.injectLinearCredential.
+		w.githubProxy.SetLinearCredentialResolver(w.linearCredentialResolver)
 
 		// With the sink active, the proxy also MITMs the Copilot completion host
 		// (api.githubcopilot.com) to record Copilot token usage live per

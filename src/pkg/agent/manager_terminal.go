@@ -4,6 +4,9 @@ import "time"
 
 // TerminalSession is the nil-safe boundary around tmux pane/session I/O.
 type TerminalSession interface {
+	// CapturePane returns the agent's pane content including scrollback
+	// (bounded by tmuxCaptureLines), for diff-based output detection. Wrapped
+	// display lines are joined so substring detectors see the original output.
 	CapturePane(agent *AgentProcess) string
 	CaptureVisiblePane(agent *AgentProcess) string
 	SessionAttached(agent *AgentProcess) bool

@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/hivecommons/hive/pkg/config"
+	"github.com/hivecommons/hive/pkg/hub"
 )
 
 func TestTerminalHandoffExpires(t *testing.T) {
@@ -123,4 +125,184 @@ func TestTrustedTerminalRequestBurnsHandoffCode(t *testing.T) {
 	if _, _, ok := s.redeemTerminalHandoff(code); ok {
 		t.Fatal("trusted terminal request did not burn handoff code")
 	}
+}
+
+func TestHandleCreateTerminalHandoff_RoleForbiddenContentType(t *testing.T) {
+	s := newRenewServer(t, "hosted-alpha")
+	req := httptest.NewRequest("POST", terminalHandoffPath, nil)
+	req.Header.Set("X-Hive-Role", config.RoleRead)
+	rec := httptest.NewRecorder()
+	s.mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Fatalf("Content-Type = %q, want application/json", ct)
+	}
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("body is not JSON: %v (body %q)", err, rec.Body.String())
+	}
+	if body["error"] != "terminal access requires owner or read-write role" {
+		t.Fatalf("error = %q, want %q", body["error"], "terminal access requires owner or read-write role")
+	}
+}
+
+func TestHandleCreateTerminalHandoff_NoSigningKey503ContentType(t *testing.T) {
+	s := newRenewServer(t, "hosted-alpha")
+	t.Setenv(hub.EnvTerminalKey, "")
+	t.Setenv("HIVE_HUB_SECRET", "")
+
+	req := httptest.NewRequest("POST", terminalHandoffPath, nil)
+	req.Header.Set("X-Hive-Role", config.RoleOwner)
+	rec := httptest.NewRecorder()
+	s.mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Fatalf("Content-Type = %q, want application/json", ct)
+	}
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("body is not JSON: %v (body %q)", err, rec.Body.String())
+	}
+	if body["error"] != "terminal handoff requires terminal signing key and hive id" {
+		t.Fatalf("error = %q, want %q", body["error"], "terminal handoff requires terminal signing key and hive id")
+	}
+}
+
+func TestHandleCreateTerminalHandoff_NoHiveID503ContentType(t *testing.T) {
+	s := newRenewServer(t, "hosted-alpha")
+	s.deps.Config.HiveID = ""
+
+	req := httptest.NewRequest("POST", terminalHandoffPath, nil)
+	req.Header.Set("X-Hive-Role", config.RoleOwner)
+	rec := httptest.NewRecorder()
+	s.mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Fatalf("Content-Type = %q, want application/json", ct)
+	}
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("body is not JSON: %v (body %q)", err, rec.Body.String())
+	}
+	if body["error"] != "terminal handoff requires terminal signing key and hive id" {
+		t.Fatalf("error = %q, want %q", body["error"], "terminal handoff requires terminal signing key and hive id")
+	}
+}
+
+func TestWriteTerminalRoleForbidden_ContentType(t *testing.T) {
+	t.Run("API path gets JSON", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/api/terminal/handoff", nil)
+
+		writeTerminalRoleForbidden(rec, req)
+
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403", rec.Code)
+		}
+		if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+			t.Fatalf("Content-Type = %q, want application/json", ct)
+		}
+		var body map[string]string
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || body["error"] != "terminal access requires owner or read-write role" {
+			t.Fatalf("API refusal body = %q (err=%v)", rec.Body.String(), err)
+		}
+	})
+
+	t.Run("Browser path gets text/plain", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/terminal/", nil)
+
+		writeTerminalRoleForbidden(rec, req)
+
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403", rec.Code)
+		}
+		if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+			t.Fatalf("Content-Type = %q, want text/plain", ct)
+		}
+		if strings.Contains(rec.Body.String(), "{") {
+			t.Fatalf("browser-facing refusal looks like JSON: %q", rec.Body.String())
+		}
+	})
+}
+
+func TestWriteQueryTokenRejected_ContentType(t *testing.T) {
+	t.Run("API path gets JSON", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/api/status?token=legacy", nil)
+
+		writeQueryTokenRejected(rec, req)
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401", rec.Code)
+		}
+		if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+			t.Fatalf("Content-Type = %q, want application/json", ct)
+		}
+		var body map[string]string
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || !strings.Contains(body["error"], "query-string dashboard token authentication is no longer supported") {
+			t.Fatalf("API refusal body = %q (err=%v)", rec.Body.String(), err)
+		}
+	})
+
+	t.Run("Browser path gets text/plain", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/terminal/?token=legacy", nil)
+
+		writeQueryTokenRejected(rec, req)
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401", rec.Code)
+		}
+		if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+			t.Fatalf("Content-Type = %q, want text/plain", ct)
+		}
+		if strings.Contains(rec.Body.String(), "{") {
+			t.Fatalf("browser-facing refusal looks like JSON: %q", rec.Body.String())
+		}
+	})
+}
+
+func TestAuthenticateMiddleware_QueryTokenRejected_ContentType(t *testing.T) {
+	s := NewServerWithAuth(0, "secret", nil)
+	s.deps = &Dependencies{Config: &config.Config{}}
+
+	t.Run("API route with query token gets 401 JSON", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/api/status?token=legacy", nil)
+		rec := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401", rec.Code)
+		}
+		if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+			t.Fatalf("Content-Type = %q, want application/json", ct)
+		}
+		var body map[string]string
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || !strings.Contains(body["error"], "query-string dashboard token authentication is no longer supported") {
+			t.Fatalf("API refusal body = %q (err=%v)", rec.Body.String(), err)
+		}
+	})
+
+	t.Run("Non-API route with query token gets 401 text/plain", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/terminal/?token=legacy", nil)
+		rec := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401", rec.Code)
+		}
+		if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+			t.Fatalf("Content-Type = %q, want text/plain", ct)
+		}
+	})
 }

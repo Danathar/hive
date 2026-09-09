@@ -27,12 +27,12 @@ var (
 
 const (
 	sharedConfigDesiredMode = 0o660
-	// agyDefaultEffort is the reasoning effort passed alongside agy's --model.
-	// agy requires --effort whenever --model is given and otherwise ignores the
-	// model entirely; "low" is the effort agy defaults to on its own, so this
-	// makes the configured model take effect without changing behaviour. Hive
-	// has no per-agent reasoning-effort setting yet — when it grows one, this
-	// is the constant it should replace.
+	// agyDefaultEffort is the reasoning effort passed alongside agy's --model
+	// when the agent has no usable reasoning_effort configured (see
+	// agyLaunchEffort). agy requires --effort whenever --model is given and
+	// otherwise ignores the model entirely; "low" is the effort agy defaults
+	// to on its own, so this makes the configured model take effect without
+	// changing behaviour.
 	agyDefaultEffort = "low"
 
 	tokenRestartCooldownSec = 60 // minimum seconds between token-triggered restarts per agent

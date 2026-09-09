@@ -180,14 +180,21 @@ func (m *Manager) linearEnvPairs(agent *AgentProcess) []agentEnvPair {
 // below ISSUES_ONLY keeps its session, and tmux forks a fresh CLI per turn, so
 // without them every post-downgrade turn would inherit the last pushed value
 // indefinitely — LINEAR_API_KEY never expires. They are unconditional on prior
-// state (set-environment -u is idempotent) so a downgrade is closed on the
+// state (set-environment -r is idempotent) so a downgrade is closed on the
 // first tick regardless of which variable, if any, was pushed before.
+//
+// -r, not -u: -u only deletes the SESSION entry, and when the variable also
+// sits in the server's GLOBAL environment (inherited from the hive process —
+// LINEAR_API_KEY is exactly such a variable) the global value shows through
+// to the next pane. -r records a removal that hides the global value from
+// every process the server forks afterwards; a later plain set overrides it,
+// so the ISSUES_ONLY+ push above is unaffected. See applySessionEnv.
 // Callers must skip agents with no tmux session.
 func (m *Manager) linearRefreshTmuxArgs(a *AgentProcess) [][]string {
 	if !m.agentMode(a).CanCreateIssues() {
 		return [][]string{
-			{"set-environment", "-t", a.tmuxSession, "-u", linearAccessTokenEnvVar},
-			{"set-environment", "-t", a.tmuxSession, "-u", linearAPIKeyEnvVar},
+			{"set-environment", "-t", a.tmuxSession, "-r", linearAccessTokenEnvVar},
+			{"set-environment", "-t", a.tmuxSession, "-r", linearAPIKeyEnvVar},
 		}
 	}
 	var out [][]string

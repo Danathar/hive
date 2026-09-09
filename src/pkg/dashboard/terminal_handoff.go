@@ -40,18 +40,18 @@ func (s *Server) handleCreateTerminalHandoff(w http.ResponseWriter, r *http.Requ
 		role = config.RoleOwner
 	}
 	if !terminalRoleAllowed(role) {
-		http.Error(w, `{"error":"terminal access requires owner or read-write role"}`, http.StatusForbidden)
+		jsonStatusResponse(w, http.StatusForbidden, map[string]string{"error": "terminal access requires owner or read-write role"})
 		return
 	}
 	user := requestUser(r)
 	if !s.canMintTerminalAssertion() {
-		http.Error(w, `{"error":"terminal handoff requires terminal signing key and hive id"}`, http.StatusServiceUnavailable)
+		jsonStatusResponse(w, http.StatusServiceUnavailable, map[string]string{"error": "terminal handoff requires terminal signing key and hive id"})
 		return
 	}
 	s.setTerminalAssertionCookie(w, r, user, role)
 	code := s.createTerminalHandoff(user, role)
 	if code == "" {
-		http.Error(w, `{"error":"failed to create terminal handoff"}`, http.StatusInternalServerError)
+		jsonStatusResponse(w, http.StatusInternalServerError, map[string]string{"error": "failed to create terminal handoff"})
 		return
 	}
 	jsonResponse(w, map[string]string{"code": code, "expires_in": "60"})
@@ -125,8 +125,7 @@ func (s *Server) terminalAssertionFromRequest(r *http.Request) (username, role s
 func writeTerminalRoleForbidden(w http.ResponseWriter, r *http.Request) {
 	msg := "terminal access requires owner or read-write role"
 	if strings.HasPrefix(r.URL.Path, "/api/") {
-		w.Header().Set("Content-Type", "application/json")
-		http.Error(w, `{"error":"`+msg+`"}`, http.StatusForbidden)
+		jsonStatusResponse(w, http.StatusForbidden, map[string]string{"error": msg})
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -136,8 +135,7 @@ func writeTerminalRoleForbidden(w http.ResponseWriter, r *http.Request) {
 func writeQueryTokenRejected(w http.ResponseWriter, r *http.Request) {
 	msg := "query-string dashboard token authentication is no longer supported; use the Authorization header, sign in with a session cookie, or upgrade the hub/client that generated this link"
 	if strings.HasPrefix(r.URL.Path, "/api/") {
-		w.Header().Set("Content-Type", "application/json")
-		http.Error(w, `{"error":"`+msg+`"}`, http.StatusUnauthorized)
+		jsonStatusResponse(w, http.StatusUnauthorized, map[string]string{"error": msg})
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")

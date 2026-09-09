@@ -1269,6 +1269,11 @@
     .repo-pr-pill .pill-num { font-weight: 700; white-space: nowrap; }
     .repo-pr-pill .pill-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .repo-pr-pill .pill-merge-icon { font-size: 0.6rem; margin-left: 1px; }
+    /* Review-priority class badge (#6183): the snapshot orders PRs fixes >
+       refactors/docs > tests, then by age; the badge says WHY a PR sits
+       where it does. Presentational only — no agent reads it. */
+    .repo-pr-pill .pill-class { font-size: 0.6rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.02em; margin-right: 3px; opacity: 0.75; }
+    .repo-pr-pill .pill-class.fix { color: var(--red); opacity: 1; }
     /* needs-human: the escalation ledger (pkg/escalation) applies the
        `needs-human` GitHub label to a PR once automated fix attempts are
        exhausted. The pill turns status-alert orange (NOT brand amber) and a
@@ -4538,7 +4543,7 @@
           <div class="gov-metric"><span class="gm-label">actionable</span><span class="gm-val">${govActionable}</span></div>
           <div class="gov-metric"><span class="gm-label">PRs</span><span class="gm-val">${govPrs}</span></div>
           <div class="gov-metric"><span class="gm-label">MTTR</span><span class="gm-val">${formatFixTime(itmMedian)}</span></div>
-          <div class="gov-metric" title="${esc((window._lastStatus?.hold?.items || []).map(h => (h.type === 'pr' ? 'PR' : 'Issue') + ' ' + h.repo + '#' + h.number + ': ' + h.title).join('\n') || 'No items on hold')}"><span class="gm-label">on hold</span><span class="gm-val">${window._lastStatus?.hold?.total || 0}</span></div>
+          <div class="gov-metric" title="${esc((window._lastStatus?.hold?.items || []).map(h => (h.type === 'pr' ? 'PR' : 'Issue') + ' ' + h.repo + '#' + h.number + (h.review_class ? ' [' + h.review_class + ']' : '') + ': ' + h.title).join('\n') || 'No items on hold')}"><span class="gm-label">on hold</span><span class="gm-val">${window._lastStatus?.hold?.total || 0}</span></div>
           ${(() => {
             const plan = window._lastStatus?.planning || {};
             // Planning only runs at ACMM >= 5 (architect scheduled); hide the tile
@@ -4619,6 +4624,7 @@
             <option value="" disabled${a.model ? '' : ' selected'}>model ▾</option>
             ${modelOptionsHtml(a.cli, a.model)}
           </select>
+          ${effortSelectHtml(a)}
         </div>
         <div class="oc-detail-blockers">${agentBlockerLineHtml(a)}${neverScheduledChipHtml(a, a.name)}</div>
         ${terminalCopyHintHtml(needsLoginDown, agentSessionUnavailable(a), a.name)}
@@ -6780,6 +6786,7 @@
               <option value="" disabled${a.model ? '' : ' selected'}>model ▾</option>
               ${modelOptionsHtml(a.cli, a.model)}
             </select>
+            ${effortSelectHtml(a)}
           </div>
           </div>
         </div>`;
@@ -7502,7 +7509,9 @@
       const holdTotal = holdData.total || 0;
       const holdItems = holdData.items || [];
       const holdExplain = 'ON HOLD — work intentionally paused, awaiting a human.\n\nWHAT: Issues and PRs that agents will NOT act on until a maintainer clears them. Excluded from the actionable-issue count that drives the mode.\n\nHOW: Count of open issues/PRs carrying a hold label (hold / do-not-merge / blocked). The list below names each held item; the sparkline shows how the backlog of held work is trending.\n\n';
-      const holdTooltip = holdItems.length > 0 ? escapeHtml(holdExplain + holdItems.map(h => `${h.type === 'pr' ? 'PR' : 'Issue'} ${h.repo}#${h.number}: ${h.title}`).join('\n')) : escapeHtml(holdExplain + 'Nothing is currently on hold.');
+      // Hold items arrive pre-sorted by review class (fixes > refactors/docs
+      // > tests) then age (#6183); the class tag makes that order legible.
+      const holdTooltip = holdItems.length > 0 ? escapeHtml(holdExplain + holdItems.map(h => `${h.type === 'pr' ? 'PR' : 'Issue'} ${h.repo}#${h.number}${h.review_class ? ' [' + h.review_class + ']' : ''}: ${h.title}`).join('\n')) : escapeHtml(holdExplain + 'Nothing is currently on hold.');
       const holdSpark = sparkline('govHold');
 
       el.innerHTML = `
@@ -7906,7 +7915,12 @@
           // of truth — the same signal the ledger writes to GitHub — so this
           // view cannot drift from the ledger.
           const needsHuman = labels.includes('needs-human');
-          const prTip = (p.title || '') + (p.author ? ' — @' + p.author : '') + (prAge ? ' (' + prAge + ')' : '') + (p.mergeable ? ' (merge eligible)' : '') + (queued ? ' (queued for auto-merge)' : '') + (needsHuman ? ' (needs human review)' : '');
+          // review_class is the presentational triage class the snapshot is
+          // ordered by (fix > refactor-docs > tests, then age; #6183). It is
+          // derived server-side from the title prefix and lane label only.
+          const reviewClass = p.review_class ? String(p.review_class) : '';
+          const classBadge = reviewClass ? `<span class="pill-class ${esc(reviewClass)}">${esc(reviewClass === 'refactor-docs' ? 'refactor' : reviewClass)}</span>` : '';
+          const prTip = (p.title || '') + (p.author ? ' — @' + p.author : '') + (prAge ? ' (' + prAge + ')' : '') + (reviewClass ? ' [review class: ' + reviewClass + ']' : '') + (p.mergeable ? ' (merge eligible)' : '') + (queued ? ' (queued for auto-merge)' : '') + (needsHuman ? ' (needs human review)' : '');
           const canQueue = dashboardRoleAtLeast(window._hiveRole || 'read', 'merger') && (window._hiveUser || dashboardRoleAtLeast(window._hiveRole || 'read', 'owner')) && !(p.author && window._hiveUser && p.author.toLowerCase() === window._hiveUser.toLowerCase());
           const parts = (r.full || r.name || '').split('/');
           const owner = parts.length > 1 ? parts[0] : '';
@@ -7927,7 +7941,7 @@
           // needs-human wins the pill tint over mergeable green: a PR can be
           // technically mergeable AND escalated, and the escalation is what
           // the operator must see.
-          return `<a class="repo-pr-pill${needsHuman ? ' needs-human' : mergeClass}" href="${esc(p.url)}" target="_blank" rel="noopener" title="${esc(prTip)}"><span class="pill-num">#${p.number}</span><span class="pill-title">${esc(title)}</span>${mergeIcon}</a>${queueBtn}`;
+          return `<a class="repo-pr-pill${needsHuman ? ' needs-human' : mergeClass}" href="${esc(p.url)}" target="_blank" rel="noopener" title="${esc(prTip)}">${classBadge}<span class="pill-num">#${p.number}</span><span class="pill-title">${esc(title)}</span>${mergeIcon}</a>${queueBtn}`;
         }).join('');
         const allPills = issuePills + prPills;
         const pillsHtml = allPills ? `<div class="repo-issues">${allPills}</div>` : '';
@@ -8335,16 +8349,19 @@
     // using Codex with a ChatGPT account"), so codex must NOT fall through to
     // the copilot list. The server discovers the live catalog via
     // `codex app-server` model/list (per-CLI-version, baked into the binary);
-    // this is only the pre-discovery fallback. Snapshot of codex 0.146.0:
-    // visible ids in picker order (sol is the default), then hidden ids —
+    // this is only the pre-discovery fallback. Snapshot of codex 0.153.4:
+    // visible ids in picker order (astra is the default), then hidden ids —
     // hidden entries are still valid --model values. Keep in sync with
     // codexStaticModels in cli_models.go.
     const CODEX_CLI_MODELS = [
+      { value: 'gpt-6-astra', label: 'GPT-6 Astra' },
       { value: 'gpt-5.6-sol', label: 'GPT-5.6 Sol' },
       { value: 'gpt-5.6-terra', label: 'GPT-5.6 Terra' },
       { value: 'gpt-5.6-luna', label: 'GPT-5.6 Luna' },
       { value: 'gpt-5.5', label: 'GPT-5.5' },
       { value: 'gpt-5.2', label: 'GPT-5.2' },
+      { value: 'gpt-daybreak-blue-latest', label: 'GPT Daybreak Blue' },
+      { value: 'gpt-daybreak-red-latest', label: 'GPT Daybreak Red' },
       { value: 'gpt-5.4', label: 'GPT-5.4' },
       { value: 'gpt-5.4-mini', label: 'GPT-5.4 Mini' },
       { value: 'codex-auto-review', label: 'Codex Auto Review' },
@@ -8424,6 +8441,29 @@
     const AUTO_MODEL_SENTINELS = { copilot: ['auto'], bob: ['auto'] };
     function isAutoModelSentinel(backend, model) {
       return (AUTO_MODEL_SENTINELS[backend] || []).includes(model);
+    }
+    // Backends with a reasoning-effort control and the values each accepts.
+    // Mirrors config.ReasoningEffortsByBackend server-side: codex is launched
+    // with -c model_reasoning_effort="<v>", agy with --effort <v>. Backends
+    // absent here have no effort flag, so they get no dropdown at all.
+    const BACKEND_REASONING_EFFORTS = {
+      codex: ['minimal', 'low', 'medium', 'high', 'xhigh'],
+      agy: ['low', 'medium', 'high'],
+    };
+    // effortSelectHtml renders the reasoning-effort dropdown beside the model
+    // dropdown, only for backends that have an effort control. "default"
+    // clears the stored effort back to the backend's own default (the server
+    // treats the path value "default" as clear — a path segment cannot be
+    // empty).
+    function effortSelectHtml(a) {
+      const efforts = BACKEND_REASONING_EFFORTS[a.cli] || [];
+      if (!efforts.length) return '';
+      const cur = a.reasoningEffort || '';
+      return `<select class="btn backend-select" data-change-action="switchEffort" data-agent="${esc(a.name)}" title="Set this agent's reasoning effort (restarts the session). 'default' uses the backend's own default effort.">
+            <option value="" disabled selected>${cur ? esc(cur) : 'effort'} ▾</option>
+            <option value="default"${cur ? '' : ' disabled'}>default</option>
+            ${efforts.map(e => `<option value="${e}"${e === cur ? ' disabled' : ''}>${e}</option>`).join('')}
+          </select>`;
     }
     // Backends whose model list is a single fixed option, so there is nothing
     // for a user to choose and nothing meaningful to store per agent.
@@ -15061,6 +15101,7 @@ function burnAreaChart() {
       switch (action) {
         case 'switchCli': switchCli(agent, el.value); el.selectedIndex = 0; break;
         case 'switchModel': switchModel(agent, el.value); el.selectedIndex = 0; break;
+        case 'switchEffort': switchEffort(agent, el.value); el.selectedIndex = 0; break;
         default: hiveDispatchAction('change-action', e); break;
       }
     });
@@ -15792,6 +15833,25 @@ function burnAreaChart() {
       ocRenderAgentDetail();
       const lastData = window._lastStatus || {};
       renderGovernor(lastData.governor || {}, lastData.cadenceMatrix || [], lastData);
+      fetch('/api/status').then(r => r.json()).then(render).catch(() => {});
+    }
+
+    // switchEffort mirrors switchModel for the reasoning-effort dropdown:
+    // persist via POST /api/effort (which restarts the session — the effort
+    // only exists on the launch command line), update the local copy, and
+    // confirm against the server. "default" clears the stored effort.
+    async function switchEffort(agent, effort) {
+      if (!effort) return;
+      const toast = showToast(`Switching ${agent} reasoning effort → ${effort} (restarting session)...`, 'info', true);
+      const res = await fetch(`/api/effort/${agent}/${encodeURIComponent(effort)}`, { method: 'POST' });
+      const data = await res.json();
+      if (!data.ok) { dismissToast(toast, `Effort switch failed: ${data.error || 'unknown'}`, 'error'); return; }
+      dismissToast(toast, `${agent} reasoning effort → ${effort} (session restarted)`, 'success');
+      if (window._lastAgents) {
+        const a = window._lastAgents.find(x => x.name === agent);
+        if (a) { a.reasoningEffort = effort === 'default' ? '' : effort; renderAgents(window._lastAgents); }
+      }
+      ocRenderAgentDetail();
       fetch('/api/status').then(r => r.json()).then(render).catch(() => {});
     }
 
@@ -23644,6 +23704,15 @@ function burnAreaChart() {
     // GitHub Device Flow Auth
     let ghPollTimer = null;
     let ghPollIntervalMs = 6000;
+    // The opaque per-flow secret /api/gh-user-auth/start mints. #5748 made it
+    // MANDATORY on every poll — a poll that cannot prove it started the flow is
+    // refused 400 and never gets the session cookie — but this page was missed
+    // in that change and kept polling with an empty body, so the overlay spun on
+    // "Waiting for authorization..." forever while GitHub reported the device
+    // activated (#6216). Keep it here for the same reason the standalone login
+    // page threads it through poll(): it is the only thing that identifies this
+    // browser as the one that asked.
+    let ghFlowID = '';
     const GH_AUTH_CHECK_INTERVAL_MS = 300000;
     const GH_AUTH_SUCCESS_DISMISS_MS = 1500;
 
@@ -23877,6 +23946,7 @@ function burnAreaChart() {
           }
           return;
         }
+        ghFlowID = data.flow_id || '';
         document.getElementById('gh-device-code').textContent = data.user_code;
         document.getElementById('gh-verify-link').href = data.verification_uri;
         document.getElementById('gh-poll-status').textContent = 'Waiting for authorization...';
@@ -23890,9 +23960,27 @@ function burnAreaChart() {
       }
     }
 
+    // Paint a terminal failure into the overlay and stop polling. Shared by the
+    // server's own {"status":"error"} and by the unrecognized-response branch
+    // below, so both look the same to the operator.
+    function failGHAuth(msg) {
+      if (ghPollTimer) { clearInterval(ghPollTimer); ghPollTimer = null; }
+      ghFlowID = '';
+      const status = document.getElementById('gh-poll-status');
+      status.textContent = 'Error: ' + (msg || 'unknown');
+      status.style.color = 'var(--red)';
+    }
+
     async function pollGHAuth() {
       try {
-        const resp = await fetch('/api/gh-user-auth/poll', { method: 'POST' });
+        // flow_id proves this poll belongs to the flow WE started; without it
+        // the server refuses every poll with 400 and the login can never
+        // complete (#6216). Same contract as the standalone login page.
+        const resp = await fetch('/api/gh-user-auth/poll', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ flow_id: ghFlowID }),
+        });
         const data = await resp.json();
         if (data.status === 'complete') {
           clearInterval(ghPollTimer);
@@ -23903,6 +23991,7 @@ function burnAreaChart() {
           status.style.fontWeight = '700';
           document.getElementById('gh-device-code').textContent = data.username;
           document.getElementById('gh-device-code').style.color = 'var(--green)';
+          ghFlowID = '';
           setTimeout(() => {
             document.getElementById('gh-auth-modal-overlay').style.display = 'none';
             document.getElementById('gh-device-code').style.color = '';
@@ -23915,10 +24004,18 @@ function burnAreaChart() {
           ghPollIntervalMs += SLOWDOWN_BACKOFF_MS;
           ghPollTimer = setInterval(pollGHAuth, ghPollIntervalMs);
         } else if (data.status === 'error') {
-          clearInterval(ghPollTimer);
-          ghPollTimer = null;
-          document.getElementById('gh-poll-status').textContent = 'Error: ' + (data.error || 'unknown');
-          document.getElementById('gh-poll-status').style.color = 'var(--red)';
+          failGHAuth(data.error);
+        } else if (data.status === 'pending') {
+          // The expected steady state while the operator is still at
+          // github.com/login/device — keep the timer running.
+        } else if (!resp.ok || data.error) {
+          // Any other shape is terminal: an HTTP error body carries {"ok":false,
+          // "error":"..."} and no `status` at all, so it matched none of the
+          // branches above and the loop just fired again. That is exactly how
+          // #6216 presented — an eternal spinner and no message, from #5748
+          // through v4.18.1. Surface it, so the next protocol change shows up
+          // as a visible error rather than a silent hang.
+          failGHAuth(data.error || ('login failed (HTTP ' + resp.status + ')'));
         }
       } catch (e) {
         // network hiccup — keep polling
@@ -23927,6 +24024,9 @@ function burnAreaChart() {
 
     function cancelGHLogin() {
       if (ghPollTimer) { clearInterval(ghPollTimer); ghPollTimer = null; }
+      // Drop the abandoned flow's secret rather than carrying it into whatever
+      // the operator does next.
+      ghFlowID = '';
       document.getElementById('gh-auth-modal-overlay').style.display = 'none';
     }
 

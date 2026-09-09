@@ -20,6 +20,13 @@ that status is the thing to check before treating a page as current behaviour:
 
 ## Records
 
+- [Gate-integrity invariants for agent lanes](gate-integrity-invariants.md) — **design only / proposed.** Names the write-gate invariants for agent lanes: no history rewrites on branches a lane did not create, no agent sign-off on other authors' commits, and ACMM demotion for gate manipulation.
+- [Automatic repo ACMM onboarding reconciler](repo-acmm-onboarding.md) — **proposed.**
+  Design for per-repo ACMM targets, gap-to-work reconciliation, explicit
+  `agent-actionable` / `needs-human` / `waived` classification, and the
+  anti-gaming controls required before agents generate onboarding PRs. Credits
+  RFC #6235 and relates it to #6111, #6264, and #6208.
+
 - [Hub master secret rotation](master-key-rotation.md) — **partly shipped.** Why
   every signing value on the platform (heartbeat bearer, session cookie, session
   and SSO Ed25519 seeds, impersonate, terminal, invite keys) is a pure function
@@ -47,6 +54,11 @@ that status is the thing to check before treating a page as current behaviour:
   `v2/pkg/...` path examples are **deliberately historical** — PRs merged before
   the `v2/` → `src/` rename report those paths from the forge API forever, and
   the component mapper still handles both eras (`src/pkg/reach/mapping.go`).
+- [Sourcing token metering from ccusage behind a tokens.Source seam](token-metering-ccusage.md) — **proposed.**
+  Design for replacing most hand-written token parsing with a pinned offline
+  ccusage subprocess behind a `tokens.Source` seam, while preserving Hive's
+  attribution layer, native-versus-estimated cost labeling, and Bob coverage.
+  Credits RFC #6234 and incorporates the v5 #6142 scanner cleanup.
 - [Knowledge system and the ACMM developer journey](knowledge-system.md) —
   **partly shipped.** The layered llm-wiki knowledge base — layers,
   subscriptions, the pre-seeded deployment vault, and the extraction/promotion
@@ -91,6 +103,12 @@ that status is the thing to check before treating a page as current behaviour:
   timestamps and `InferenceSink` discards them, so persisting per-request usage
   with its timestamp would move Copilot from "structurally impossible" to
   phase 3's existing join, in `pkg/tokens` only and off the request path.
+- [Discord reaction-consensus issue promotion](discord-issue-promotion.md) — **proposed.**
+  Design for turning Discord community reaction consensus into the same
+  approval label that `project.issue_filter.require_labels` already uses, while
+  keeping the bot credential-free and having Hive perform the audited,
+  server-side allowlisted label write. Credits RFC #6239 and records the
+  Discord intents/partials trap before implementation.
 
 - [`hive tui` — a terminal dashboard for Hive](tui.md) — **shipped (v1).** The
   design record for the k9s-style terminal client tracked in #4907: scope, the

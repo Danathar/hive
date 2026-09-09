@@ -35,9 +35,10 @@ This table is the ground truth for `just contribute-hive <backend> local` — th
 
 | Backend | Mechanism | What it actually bounds | Escape hatch (unconfined opt-in) |
 |---|---|---|---|
-| `claude` / `litellm` | Claude Code's native OS sandbox (`--settings` sandbox JSON; Seatbelt on macOS, bubblewrap on Linux) | Filesystem writes confined to the agent cwd and `HIVE_WORKSPACE_DIR`; `failIfUnavailable: true`, no unsandboxed fallback | `HIVE_CLAUDE_DANGEROUSLY_BYPASS_APPROVALS_AND_SANDBOX=1` |
+| `claude` / `litellm` | Claude Code's native OS sandbox (`--settings` sandbox JSON; Seatbelt on macOS, bubblewrap on Linux) | Filesystem writes confined to the agent cwd, `HIVE_WORKSPACE_DIR`, and the hive-created build-cache root `HIVE_AGENT_CACHE_DIR` (#6100); `failIfUnavailable: true`, no unsandboxed fallback | `HIVE_CLAUDE_DANGEROUSLY_BYPASS_APPROVALS_AND_SANDBOX=1` |
 | `codex` | Codex's own `--sandbox workspace-write` | Filesystem writes confined to the workspace root(s) codex is given | `HIVE_CODEX_DANGEROUSLY_BYPASS_APPROVALS_AND_SANDBOX=1` |
 | `copilot` | Copilot CLI's own `--sandbox` flag (MXC: Seatbelt on macOS, bubblewrap on Linux, ProcessContainer on Windows Insiders) | Filesystem/network/process access of the commands and tools Copilot runs, restricted by the OS-level backend; `--add-dir` grants the exact workspace | `HIVE_COPILOT_DANGEROUSLY_BYPASS_SANDBOX=1`, or automatic fallback with a loud warning if the installed CLI predates `--sandbox` (copilot-cli < 1.0.60) |
+| `muse` | Muse Code's own OS sandbox (bubblewrap/seccomp + namespaces on Linux, seatbelt/`sandbox-exec` on macOS), **on by default**; hive narrows it with `--workspace $HIVE_WORKSPACE_DIR`, `--sandbox-network proxy-only`, and `--no-foreign-personal-context` | Filesystem/network reach of the shell muse runs, bounded by the OS mechanism; `--workspace` roots its policy-gated workspace tools at the exact workspace. Approval is turned off with `--approval-mode never`, which is a *policy*, not the boundary — the sandbox stays on. `--no-foreign-personal-context` additionally stops muse loading the operator's own `~/.claude` personal skills into an unattended agent. | `HIVE_MUSE_DANGEROUSLY_BYPASS_APPROVALS_AND_SANDBOX=1` |
 | `opencode` | opencode's own `permission.bash` deny rules (inline via `OPENCODE_PERMISSION`), denying the same host-state command family the claude deny-list covers | **Not a filesystem boundary.** A command-name floor only — anything not on the list, or reached another way, is unconstrained. Deny rules are documented to hold even under `--auto`. | `HIVE_OPENCODE_DANGEROUSLY_ALLOW_HOST_STATE=1` |
 | `goose` | **None.** `GOOSE_MODE` (`auto`/`approve`/`chat`/`smart_approve`) governs interactive approval only; no mode confines writes to a directory, and only `auto` is usable unattended. | Nothing — local mode refuses to launch without explicit opt-in | `HIVE_GOOSE_DANGEROUSLY_RUN_UNCONFINED=1` |
 | `agy` | **None.** Antigravity CLI's execution modes (`default`/`accept-edits`/`plan`) govern approval only, same shape as goose; `--dangerously-skip-permissions` is what hive already passes and there is no lesser mode that confines the filesystem. agy 1.1.22 also advertises `--sandbox`, but its binary's own strings point to Google's remote/cloud sandbox machinery (a `Sandbox` proto with a network endpoint+port), not a local OS boundary — treat it as unrelated to host confinement until verified otherwise. | Nothing — local mode refuses to launch without explicit opt-in | `HIVE_AGY_DANGEROUSLY_RUN_UNCONFINED=1` |
@@ -45,7 +46,22 @@ This table is the ground truth for `just contribute-hive <backend> local` — th
 | `pi` | **None.** `@earendil-works/pi-coding-agent` ships with no sandbox by default; directory confinement exists only via a third-party extension (`pi-permission-modes`) hive does not install or depend on. | Nothing — local mode refuses to launch without explicit opt-in | `HIVE_PI_DANGEROUSLY_RUN_UNCONFINED=1` |
 | `aider` | **None.** No Docker/OS isolation option of any kind. | Nothing — local mode refuses to launch without explicit opt-in | `HIVE_AIDER_DANGEROUSLY_RUN_UNCONFINED=1` |
 
-The five backends with no mechanism (goose, agy, bob, pi, aider) are a hard stop, by design: `just contribute-hive <backend> local` prints an honest refusal and a non-zero exit rather than a silent unconfined launch, unless the operator sets that backend's own escape-hatch env var. This is deliberately not a blanket `HIVE_DANGEROUSLY_RUN_UNCONFINED` — a single shared flag would let opting into one unconfined backend silently opt into all five.
+**The build-cache root, and why it is a grant rather than a hole (#6100).** Every
+compiled toolchain writes to a cache under `$HOME` by default — `GOCACHE` at
+`~/.cache/go-build`, `ccache`, `$TMPDIR` — and all of those sit outside the
+workspace. So `go build`, `go test` and `go vet` failed on a hive contributor
+task, in hive's own Go repo, with an error naming a cache file rather than a
+sandbox boundary; eight local-mode sessions over five days each rediscovered it
+and invented its own `GOCACHE` redirect. The launcher now creates
+`${XDG_CACHE_HOME:-~/.cache}/hive/agent-build`, exports `GOCACHE`, `GOMODCACHE`,
+`GOTMPDIR`, `TMPDIR` and `CCACHE_DIR` into it, and the sandbox grants it as a
+write root. That is strictly narrower than widening the sandbox: one directory
+hive owns, rather than `$HOME`. It is a **write root only** — deliberately not in
+`permissions.allow` and not an `--add-dir`, because Bash is what compilers run
+under, an agent has no reason to `Edit` a build cache, and adding it as a working
+directory would put megabytes of object files in the agent's view of the tree.
+
+The backends with no mechanism (goose, agy, bob, pi, aider, kilo) are a hard stop, by design: `just contribute-hive <backend> local` prints an honest refusal and a non-zero exit rather than a silent unconfined launch, unless the operator sets that backend's own escape-hatch env var. This is deliberately not a blanket `HIVE_DANGEROUSLY_RUN_UNCONFINED` — a single shared flag would let opting into one unconfined backend silently opt into all six.
 
 For `agy` specifically, this local-mode refusal used to be a dead end (#5048): `src/Dockerfile.contributor` never installed the `agy` binary, so container mode — the only real boundary any of these five backends can get on this path — was unavailable too, leaving no working path at all. That is now fixed: the image installs `agy` from Google's published, checksummed release tarball, so `just contribute-hive agy` (container mode, the default) actually works. Nothing above about agy's *local*-mode posture changed — it still has no sandbox and still refuses without the escape hatch, exactly like goose/bob/pi/aider.
 

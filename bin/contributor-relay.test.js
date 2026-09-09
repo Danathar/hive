@@ -36,8 +36,8 @@ function loadRelay({ backend = 'copilot', backendBinary = null, backendPerm = '-
   // Guard against a runaway loop in the code under test eating all memory.
   const MAX_RECORDED_COMMANDS = 10000;
 
-  // #5281: lets a test model a tmux send that fails, so the one-shot budget's
-  // behaviour on a throwing send is pinned rather than assumed.
+  // #5281: lets a test model a literal tmux send that fails, so the one-shot
+  // budget's behaviour on a throwing send is pinned rather than assumed.
   let failNextLiteralSend = false;
 
   const fakeExecSync = (cmd) => {
@@ -116,13 +116,22 @@ function loadRelay({ backend = 'copilot', backendBinary = null, backendPerm = '-
     return child;
   };
 
-  // The capability probe (`<cli> --version`, kubestellar/hive#2547) is the only
-  // execFileSync caller. `cliVersion` is what the CLI "prints"; an Error instance
-  // makes the probe throw, standing in for an absent binary, an unsupported flag
-  // or a timeout kill — every one of which must leave the field simply absent.
+  // execFileSync covers literal tmux sends plus the capability probe
+  // (`<cli> --version`, kubestellar/hive#2547). `cliVersion` is what the CLI
+  // "prints"; an Error instance makes the probe throw, standing in for an
+  // absent binary, an unsupported flag or a timeout kill — every one of which
+  // must leave the field simply absent.
   const execFileSyncCalls = [];
   const fakeExecFileSync = (bin, args, opts) => {
     execFileSyncCalls.push({ bin, args, opts });
+    if (bin === 'tmux' && args[0] === 'send-keys' && args.includes('-l')) {
+      if (commands.length < MAX_RECORDED_COMMANDS) commands.push(`tmux ${args.join(' ')}`);
+      if (failNextLiteralSend) {
+        failNextLiteralSend = false;
+        throw new Error('tmux: server exited unexpectedly');
+      }
+      return '';
+    }
     if (cliVersion instanceof Error) throw cliVersion;
     if (cliVersion === null) throw new Error('spawnSync ENOENT');
     return cliVersion;
@@ -453,7 +462,7 @@ test('relaunchCLI sends the cd-prefixed command to tmux', () => {
 
 // A faithful reduction of what claude_family_local_perm_flag_shell emits.
 const LOCAL_SANDBOXED_CLAUDE_CMD = 'claude --permission-mode dontAsk ' +
-  '--settings \\{\\"permissions\\":\\{\\"allow\\":\\[\\"Write\\(/home/dev/workspace/\\*\\*\\)\\"\\]\\},' +
+  '--settings \\{\\"permissions\\":\\{\\"allow\\":\\[\\"Edit\\(//home/dev/workspace/\\*\\*\\)\\"\\]\\},' +
   '\\"sandbox\\":\\{\\"enabled\\":true,\\"failIfUnavailable\\":true,\\"allowUnsandboxedCommands\\":false\\}\\} ' +
   '--add-dir /home/dev/workspace --disallowed-tools Bash\\(sudo:\\*\\),Bash\\(rpm-ostree:\\*\\)';
 const CONTAINER_BYPASS_PERM = '--dangerously-skip-permissions --permission-mode bypassPermissions';
@@ -894,6 +903,70 @@ test('agy effort honors AGENT_REASONING_EFFORT but rejects values agy cannot tak
     const cmd = bogus.buildLaunchCommand();
     assert.match(cmd, /--effort low/, `unknown effort must fall back to low, got: ${cmd}`);
     assert.ok(!/minimal/.test(cmd), `agy must not receive codex-only effort values: ${cmd}`);
+  } finally { teardown(bogus); }
+});
+
+test('muse headless argv uses `muse exec` with the prompt as a trailing positional', () => {
+  const relay = loadRelay({
+    backend: 'muse', mode: 'headless',
+    backendPerm: '--approval-mode never --user-input-auto-resolve',
+  });
+  try {
+    const a = relay.buildHeadlessArgv('fix the flaky test');
+    assert.equal(a.bin, 'muse');
+    assert.equal(a.args[0], 'exec', `muse headless must dispatch through exec: ${JSON.stringify(a.args)}`);
+    assert.equal(a.args[a.args.length - 1], 'fix the flaky test',
+      `prompt must be the final, distinct argv element: ${JSON.stringify(a.args)}`);
+    // --yolo is muse's disable-approval-AND-sandbox flag; the unattended
+    // posture must never reach for it (#4918).
+    assert.ok(!a.args.includes('--yolo'), `muse headless must not disable its own sandbox: ${JSON.stringify(a.args)}`);
+    assert.ok(a.args.includes('--approval-mode'), `muse headless lost its approval policy: ${JSON.stringify(a.args)}`);
+  } finally { teardown(relay); }
+});
+
+test('muse headless argv carries --reasoning-effort exactly once', () => {
+  // The effort is assembled in two places (buildLaunchCommand for the
+  // interactive path, buildHeadlessArgv for the one-shot path). A stray
+  // duplicate would reach muse as a repeated flag, and muse rejects repeats
+  // ("--approval-mode may only be provided once" is the same family of error),
+  // so a task would die at argv parsing rather than run.
+  const relay = loadRelay({
+    backend: 'muse', mode: 'headless', reasoningEffort: 'high',
+    backendPerm: '--approval-mode never --user-input-auto-resolve',
+  });
+  try {
+    const a = relay.buildHeadlessArgv('do the thing');
+    const n = a.args.filter(x => x === '--reasoning-effort').length;
+    assert.equal(n, 1, `--reasoning-effort must appear exactly once: ${JSON.stringify(a.args)}`);
+    assert.equal(a.args[a.args.indexOf('--reasoning-effort') + 1], 'high');
+    // and it must still land AFTER the sub-command, like every other muse flag
+    assert.ok(a.args.indexOf('exec') < a.args.indexOf('--reasoning-effort'),
+      `flags must follow the sub-command: ${JSON.stringify(a.args)}`);
+  } finally { teardown(relay); }
+});
+
+test('muse effort applies without a model and drops values muse would reject', () => {
+  // Unlike agy, muse takes --reasoning-effort with or without --model. But it
+  // exits 2 on an unrecognised value, so an unknown token must be dropped
+  // rather than turned into a launch that cannot start.
+  const noModel = loadRelay({ backend: 'muse', reasoningEffort: 'xhigh' });
+  try {
+    assert.match(noModel.buildLaunchCommand(), /--reasoning-effort xhigh/);
+  } finally { teardown(noModel); }
+
+  const bogus = loadRelay({ backend: 'muse', reasoningEffort: 'sorta-hard' });
+  try {
+    const cmd = bogus.buildLaunchCommand();
+    assert.ok(!/--reasoning-effort/.test(cmd), `unknown muse effort must be dropped, got: ${cmd}`);
+  } finally { teardown(bogus); }
+});
+
+test('muse reports only the effort it actually applied', () => {
+  // The effort travels twice — onto the argv and up to the hub — so a value
+  // muse rejected must not be advertised as in effect.
+  const bogus = loadRelay({ backend: 'muse', reasoningEffort: 'sorta-hard' });
+  try {
+    assert.equal(bogus.effectiveReasoningEffort(), '');
   } finally { teardown(bogus); }
 });
 
@@ -2030,13 +2103,32 @@ test('#5281 an unblocked pane classifies as no reason at all', () => {
 });
 
 test('#5281 the reminder carries no shell metacharacters', () => {
-  // tmuxSendNudge interpolates this into a single-quoted `send-keys -l '...'`.
-  // A quote or a metacharacter here would be a command-injection shaped bug,
-  // not a typo, so the constraint is pinned rather than trusted.
+  // Belt: tmuxSendNudge passes its argument as argv (see the injection test
+  // below), but the nudge text staying trivially plain is still the cheaper
+  // property to keep, so the constraint stays pinned rather than trusted.
   const relay = loadRelay({ backend: 'goose' });
   try {
     assert.match(relay.AUTONOMY_NUDGE_MESSAGE, /^[A-Za-z0-9 ,.]+$/,
       `the nudge text must stay trivially quotable, got: ${relay.AUTONOMY_NUDGE_MESSAGE}`);
+  } finally { teardown(relay); }
+});
+
+test("a nudge message containing '; rm -rf / is sent as one literal argv element", () => {
+  // tmuxSendNudge used to interpolate its argument into naked single quotes:
+  // `send-keys -l '${message}'`. A message containing a single quote would
+  // have escaped the quoting and executed as shell — command injection shaped,
+  // even though today's callers only pass vetted constants. The function now
+  // uses execFileSync() with the message as an argv element, so there is no
+  // shell for hostile bytes to break out into.
+  const relay = loadRelay({ backend: 'goose' });
+  try {
+    const hostile = "ok'; rm -rf / # $(trap) `msg`";
+    const before = relay.__execFileSyncCalls.length;
+    relay.tmuxSendNudge(hostile);
+    const sent = relay.__execFileSyncCalls.slice(before).find((c) => c.bin === 'tmux' && c.args[0] === 'send-keys');
+    assert.ok(sent, 'the nudge produced a literal send-keys execFileSync call');
+    assert.deepStrictEqual(sent.args, ['send-keys', '-t', 'contributor', '-l', hostile],
+      'the hostile message must be delivered literally as one argv element');
   } finally { teardown(relay); }
 });
 
