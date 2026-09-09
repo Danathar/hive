@@ -1526,6 +1526,108 @@ function getCLIState() {
   }
 }
 
+// BACKEND_LOGIN_HELP says what a blocked pane actually needs, per backend.
+//
+// getCLIState() can return 'needs-login' for five backends -- claude, copilot,
+// gemini, bob and agy -- and the banner below used to be one hardcoded block
+// announcing "Claude Code needs authentication" and "Then type: /login" for all
+// of them (#6437). Four fifths of the time that named the wrong product and
+// gave an instruction that cannot work.
+//
+// bob is the clearest case and the reason this is a table rather than a
+// substituted product name: its needs-login patterns are the Bob-Shell API-key
+// prompt, and the fix is an environment variable the Justfile already fails
+// fast on -- attaching to the pane and typing anything cannot resolve it. The
+// remedy is per-backend, not just the name.
+const BACKEND_LOGIN_HELP = {
+  claude: {
+    product: 'Claude Code',
+    steps: (attach) => [
+      'In another terminal, run:',
+      `  ${attach}`,
+      'Then type: /login',
+      'Complete the login, then press Ctrl-B D to detach.',
+    ],
+  },
+  copilot: {
+    product: 'GitHub Copilot CLI',
+    steps: (attach) => [
+      'In another terminal, run:',
+      `  ${attach}`,
+      'Then run: copilot login   (or: gh auth login)',
+      'Complete the login, then press Ctrl-B D to detach.',
+    ],
+  },
+  gemini: {
+    product: 'Gemini CLI',
+    steps: (attach) => [
+      'In another terminal, run:',
+      `  ${attach}`,
+      'Then complete the sign-in the CLI prompts for.',
+      'When it is done, press Ctrl-B D to detach.',
+    ],
+  },
+  agy: {
+    product: 'Antigravity (agy)',
+    steps: (attach) => [
+      'In another terminal, run:',
+      `  ${attach}`,
+      'Then complete the Antigravity sign-in the CLI prompts for.',
+      'When it is done, press Ctrl-B D to detach.',
+    ],
+  },
+  bob: {
+    product: 'bob (Bob-Shell)',
+    // No attach step: bob takes an API key from the environment, so there is
+    // nothing a human can type into the pane that fixes this.
+    steps: () => [
+      'bob authenticates with an API key, not an interactive login.',
+      'Stop the relay, set the key, and start it again:',
+      '  export BOBSHELL_API_KEY=<your-bob-api-key>',
+      '  just contribute-hive bob',
+    ],
+    // The generic closing line would be a lie here: no login is coming, and the
+    // readiness wait will simply expire. Say what will actually happen.
+    waiting: 'Until then this relay will wait, and time out.',
+  },
+};
+
+// loginBannerLines returns the banner's content lines for a backend. Pure, so
+// the per-backend text is table-testable without driving waitForCLI().
+function loginBannerLines(backend, attach) {
+  const help = BACKEND_LOGIN_HELP[backend];
+  if (!help) {
+    // An unknown backend still gets an honest banner rather than another
+    // backend's instructions.
+    return [
+      `The ${backend} CLI needs authentication.`,
+      'In another terminal, run:',
+      `  ${attach}`,
+      'Complete the sign-in it prompts for, then press Ctrl-B D to detach.',
+      'Waiting for login to complete...',
+    ];
+  }
+  return [
+    `${help.product} needs authentication.`,
+    ...help.steps(attach),
+    help.waiting || 'Waiting for login to complete...',
+  ];
+}
+
+// renderBoxedBanner draws lines in a box sized to its content.
+//
+// The old block used a fixed-width box with hand-padded borders, and printed
+// ATTACH_COMMAND on a line with no closing bar -- so any attach command longer
+// than the box (every container-mode one, which carries a runtime, a container
+// name and a session name) broke the border (#6437).
+function renderBoxedBanner(lines) {
+  const width = Math.max(...lines.map((l) => l.length));
+  const rule = '\u2550'.repeat(width + 2);
+  return [`\u2554${rule}\u2557`]
+    .concat(lines.map((l) => `\u2551 ${l.padEnd(width)} \u2551`))
+    .concat([`\u255a${rule}\u255d`]);
+}
+
 function waitForCLI() {
   let loginMessageShown = false;
   return new Promise((resolve, reject) => {
@@ -1549,14 +1651,9 @@ function waitForCLI() {
       } else if (state === 'needs-login' && !loginMessageShown) {
         loginMessageShown = true;
         console.log('');
-        console.log('╔══════════════════════════════════════════════════════════╗');
-        console.log('║  Claude Code needs authentication.                      ║');
-        console.log('║  In another terminal, run:                              ║');
-        console.log(`║  ${ATTACH_COMMAND}`);
-        console.log('║  Then type: /login                                      ║');
-        console.log('║  Complete the login, then press Ctrl-B D to detach.     ║');
-        console.log('║  Waiting for login to complete...                       ║');
-        console.log('╚══════════════════════════════════════════════════════════╝');
+        for (const line of renderBoxedBanner(loginBannerLines(BACKEND, ATTACH_COMMAND))) {
+          console.log(line);
+        }
         console.log('');
         setTimeout(check, CLI_READY_POLL_MS);
       } else if (Date.now() - start > CLI_READY_TIMEOUT_MS) {
@@ -4249,6 +4346,8 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     // Attach-hint surface (kubestellar/hive#5145): the exact command the
     // needs-authentication banner tells a human to paste.
     ATTACH_COMMAND,
+    loginBannerLines,
+    renderBoxedBanner,
     CONTAINER_NAME,
     CONTAINER_RUNTIME,
     // Coverage for previously untested pure/isolated functions (#4267).
