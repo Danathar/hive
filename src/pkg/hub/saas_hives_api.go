@@ -187,6 +187,18 @@ type MyHiveEntry struct {
 	// so there is nothing to compute on read the way AdvisoryStale is computed.
 	CommitsBehindStableV4 *int `json:"commitsBehindStableV4,omitempty"`
 
+	// CommitsBehindTarget is how far this hive sits behind what its OWN tag
+	// can deliver (behindTargetFor): branch HEAD for a branch tag, the
+	// channel's current commit for :stable. This is the number the "behind"
+	// badge, the queued pill and the channel-lag verdict use, so a stable
+	// spoke that is current on its channel reads as current even while the
+	// branch has moved on. CommitsBehindStableV4 above stays the branch-tip
+	// distance for the tooltip. BehindTargetRef/SHA name the target so the UI
+	// can say WHAT the count is relative to.
+	CommitsBehindTarget *int   `json:"commitsBehindTarget,omitempty"`
+	BehindTargetRef     string `json:"behindTargetRef,omitempty"`
+	BehindTargetSHA     string `json:"behindTargetSHA,omitempty"`
+
 	// InactiveAgents is how many of this hive's agents are RUNNING but not
 	// doing any work — session gone, sitting on a login prompt, or producing
 	// nothing while work is queued. Computed on read by
@@ -673,6 +685,17 @@ func (s *HubServer) handleMyHives(w http.ResponseWriter, r *http.Request) {
 		if count, known := commitsBehindStableV4(result[i].GitHash, s.logger); known {
 			result[i].CommitsBehindStableV4 = &count
 		}
+		// Measure "behind" against the target this spoke can actually reach —
+		// the same resolution the auto-upgrade engine uses — not the branch
+		// tip. A :stable spoke at the channel's commit is 0 behind here even
+		// when CommitsBehindStableV4 says 128.
+		if bt := s.behindTargetFor(&result[i].RegistryEntry, result[i].TrackedChannel); bt.SHA != "" {
+			result[i].BehindTargetRef = bt.Ref
+			result[i].BehindTargetSHA = bt.SHA
+			if count, known := commitsBehindTarget(result[i].GitHash, bt.SHA, s.logger); known {
+				result[i].CommitsBehindTarget = &count
+			}
+		}
 
 		st := s.journey.get(result[i].ID)
 		status := JourneyStatusFor(&result[i].RegistryEntry, st, journeyNow)
@@ -759,6 +782,21 @@ func (s *HubServer) handleMyHives(w http.ResponseWriter, r *http.Request) {
 			// just computed. Only for real (non-placeholder) hives with reported
 			// agents — a placeholder has nothing to produce.
 			verdict := hiveHealthFor(result[i].RegistryEntry, rollup, result[i].GitHubAppHealth, queuedWork, journeyNow)
+			// Digest-lag amber (#5577): the channel/behind-count divergence
+			// info lives on MyHiveEntry (TrackedChannel is hub-owned, the
+			// behind-count was computed just above), so this row of the
+			// signature table is applied here rather than in hiveHealthFor.
+			applyChannelLag(&verdict, result[i].TrackedChannel, result[i].CommitsBehindTarget, result[i].Upgrading)
+			// The App-broken hint's install URL is cluster-scoped (a GHE
+			// cluster must never be handed a github.com link), so resolve it
+			// from this hive's cluster config — the same single URL builder
+			// the create-hive modal uses.
+			if verdict.cause == causeAppBroken && verdict.Remediation != nil {
+				if c, ok := s.clusters[result[i].ClusterID]; ok {
+					gh := clusterGitHubConfig(&c)
+					verdict.Remediation.Link = gh.AppInstallURL()
+				}
+			}
 			result[i].HealthVerdict = &verdict
 		}
 

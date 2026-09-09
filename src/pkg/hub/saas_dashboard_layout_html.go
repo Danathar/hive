@@ -2696,6 +2696,9 @@ const dashboardHTMLLayout = `<!DOCTYPE html>
     var _currentUser = '';
     var _latestSHA = '';
     var _stableV4SHA = '';
+    /* Name of the branch _stableV4SHA is the tip of; the server's
+       stable_v4_sha is that branch's HEAD, not the :stable channel. */
+    var STABLE_BRANCH_LABEL = 'v4';
     var _latestSHAs = {};
     var _latestSHAMessages = {};
     var _latestImageStatus = {};
@@ -3016,7 +3019,11 @@ const dashboardHTMLLayout = `<!DOCTYPE html>
         branchName = h.gitBranch || 'v2';
       }
       if (branchLatest === undefined || branchLatest === null) {
-        branchLatest = _latestSHAs[branchName] || _latestSHA || '';
+        /* The hub resolves what THIS spoke's tag can deliver
+           (behindTargetSHA): the channel's commit for :stable, branch HEAD
+           for a branch tag. Prefer it, so a stable spoke is judged against
+           stable and not against a HEAD it cannot reach. */
+        branchLatest = h.behindTargetSHA || _latestSHAs[branchName] || _latestSHA || '';
       }
       /* A branch switch is an upgrade in flight even though h.upgrading may
          still be false — the spoke keeps reporting the OLD branch until the new
