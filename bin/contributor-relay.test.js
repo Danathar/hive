@@ -5177,6 +5177,104 @@ test('#5121 the curated buckets keep first claim on their lines', () => {
 // BLOCKED and a human must attach to complete a login. A paste-able command
 // that fails there reads as "the whole thing is broken".
 //
+// --- #6437: the needs-login banner must name the backend that is blocked ----
+//
+// getCLIState() returns 'needs-login' for five backends, and waitForCLI() used
+// to print one hardcoded block announcing "Claude Code needs authentication"
+// and "Then type: /login" for every one of them. bob is the case that shows why
+// substituting the product name is not enough: it authenticates with
+// BOBSHELL_API_KEY, so no instruction to attach and type can fix it.
+const NEEDS_LOGIN_BACKENDS = ['claude', 'copilot', 'gemini', 'bob', 'agy'];
+
+test('#6437 every needs-login backend names itself, not Claude Code', () => {
+  for (const backend of NEEDS_LOGIN_BACKENDS) {
+    const relay = loadRelay({ backend });
+    try {
+      const text = relay.loginBannerLines(backend, 'tmux attach -t s').join('\n');
+      if (backend !== 'claude') {
+        assert.ok(!/Claude Code/.test(text),
+          `${backend}'s banner still announces Claude Code — the operator is told to fix the wrong product`);
+      }
+      assert.ok(/needs authentication|authenticates with/.test(text),
+        `${backend}'s banner does not say what is blocked`);
+    } finally { teardown(relay); }
+  }
+});
+
+test('#6437 bob is told about its API key, not to type /login', () => {
+  const relay = loadRelay({ backend: 'bob' });
+  try {
+    const text = relay.loginBannerLines('bob', 'podman exec -it c tmux attach -t contributor').join('\n');
+    assert.ok(/BOBSHELL_API_KEY/.test(text), 'bob needs its API key named');
+    assert.ok(!/\/login/.test(text), 'typing /login cannot authenticate bob');
+    assert.ok(!/tmux attach/.test(text),
+      'attaching to the pane cannot fix a missing API key, so the banner must not send the operator there');
+    assert.ok(!/Waiting for login to complete/.test(text),
+      'no login is coming for bob; promising one misdescribes what the relay will do');
+  } finally { teardown(relay); }
+});
+
+test('#6437 an unknown backend gets an honest banner, not another backend\'s', () => {
+  const relay = loadRelay({ backend: 'agy' });
+  try {
+    const text = relay.loginBannerLines('somenewcli', 'tmux attach -t s').join('\n');
+    assert.ok(/somenewcli/.test(text), 'the unknown backend should be named');
+    assert.ok(!/Claude Code|\/login/.test(text), 'and must not inherit claude\'s instructions');
+  } finally { teardown(relay); }
+});
+
+// The three tests above exercise the pure helpers. This one drives the REAL
+// path: armCLIReadyWait() -> waitForCLI() -> check() runs synchronously during
+// module load, so a relay loaded with a needs-login pane prints its banner
+// while loadRelay() is still on the stack. Capturing that is what pins the
+// wiring -- without it, reverting the call site to the hardcoded block leaves
+// every assertion above green.
+function captureBannerDuringLoad(opts) {
+  const lines = [];
+  const real = console.log;
+  console.log = (...args) => { lines.push(args.join(' ')); };
+  let relay;
+  try {
+    relay = loadRelay(opts);
+  } finally {
+    console.log = real;
+  }
+  return { relay, output: lines.join('\n') };
+}
+
+test('#6437 waitForCLI prints the blocked backend\'s own banner, not Claude Code\'s', () => {
+  const { relay, output } = captureBannerDuringLoad({
+    backend: 'bob',
+    cliStates: ['Enter Bob-Shell API Key\n'],
+  });
+  try {
+    assert.ok(/needs authentication/.test(output),
+      'the needs-login banner should have been printed during startup');
+    assert.ok(/BOBSHELL_API_KEY/.test(output),
+      'bob was told to authenticate some other way than with its API key');
+    assert.ok(!/Claude Code/.test(output),
+      'a blocked bob is announced as Claude Code');
+    assert.ok(!/Then type: \/login/.test(output),
+      'bob cannot be authenticated by typing /login into the pane');
+  } finally { teardown(relay); }
+});
+
+test('#6437 the box border survives a long container-mode attach command', () => {
+  const relay = loadRelay({ backend: 'agy' });
+  try {
+    // The exact shape that broke the old fixed-width box: runtime + container
+    // name + session name, comfortably wider than 58 columns.
+    const attach = 'podman exec -it hive-contributor-agy-aadef0c8 tmux attach -t contributor';
+    const rendered = relay.renderBoxedBanner(relay.loginBannerLines('agy', attach));
+    const widths = new Set(rendered.map((l) => l.length));
+    assert.strictEqual(widths.size, 1,
+      `every banner row must be the same width; got ${[...widths].join(', ')}`);
+    assert.ok(rendered.every((l) => /^[\u2554\u2551\u255a]/.test(l) && /[\u2557\u2551\u255d]$/.test(l)),
+      'every row must open and close with a border character');
+    assert.ok(rendered.some((l) => l.includes(attach)), 'the attach command must still be present in full');
+  } finally { teardown(relay); }
+});
+
 // ATTACH_COMMAND is resolved at module load from the environment the recipe
 // passes in, so these load the relay with that environment and read the value
 // the banner will print.
