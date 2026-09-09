@@ -2140,10 +2140,37 @@ function paneLooksBlockedOnHuman(text) {
   return classifyBlockedOnHumanReason(text) !== null;
 }
 
-// paneTail returns the last n lines of a pane capture. Pure, so the detectors
-// below are table-testable without tmux.
+// paneTail returns the last n NON-BLANK lines of a pane capture. Pure, so the
+// detectors below are table-testable without tmux.
+//
+// The blank-line filter is the whole point (hivecommons/hive#6413).
+// `tmux capture-pane -p` returns the pane's full height — 50 rows, the geometry
+// the Justfile sets — regardless of how much of it the CLI has drawn on. A CLI
+// that renders INLINE rather than pinning a footer to the bottom row therefore
+// leaves every row below its output blank, and a plain `.slice(-n)` returns
+// nothing but that padding.
+//
+// agy is the case that exposed it: it draws its banner, input box and
+// "? for shortcuts" footer at rows 1-16 and leaves rows 17-50 empty, so
+// getCLIState()'s 15-line window was pure whitespace and a live, idle agy pane
+// classified as 'starting' forever. The relay then queued every task prompt it
+// was handed and returned the task at CLI_READY_TIMEOUT_MS, meaning a fresh agy
+// contributor could not run a single task.
+//
+// Counting only non-blank lines keeps the "recent output only" semantics the
+// callers want — a stale wizard line quoted in old task output must not make a
+// live prompt look blocked — while making the window track actual content
+// instead of the pane's fixed height. This mirrors the Go helper of the same
+// name and purpose, paneTail in src/pkg/agent/manager.go, which has always
+// filtered blank lines.
 function paneTail(text, n) {
-  return String(text || '').split('\n').slice(-n).join('\n');
+  const lines = String(text || '').split('\n');
+  const kept = [];
+  for (let i = lines.length - 1; i >= 0 && kept.length < n; i--) {
+    if (lines[i].trim() === '') continue;
+    kept.push(lines[i]);
+  }
+  return kept.reverse().join('\n');
 }
 
 // paneShowsTransientAPIError reports whether the visible tail carries a
@@ -4197,6 +4224,7 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     setCurrentTask: (v) => { currentTask = v; },
     blockingPromptKey,
     getCLIState,
+    paneTail,
     setWs: (w) => { hubs[0].ws = w; },
     getHubs: () => hubs,
     // Peer-protocol compatibility (kubestellar/hive#2547). Exported so the

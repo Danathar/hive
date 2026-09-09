@@ -2805,6 +2805,93 @@ test('agy ToS wizard selects Done, but non-agy or prose matches do not', () => {
   } finally { teardown(codex); }
 });
 
+// --- #6413: pane captures are BLANK-PADDED to the full pane height ----------
+//
+// Every agy fixture above is a tight synthetic string with no trailing blank
+// lines, which is not what the relay ever sees. `tmux capture-pane -p` returns
+// the pane's full height — 50 rows, the geometry the Justfile sets at
+// `tmux new-session -x 200 -y 50` — however few of them the CLI has drawn on.
+//
+// agy renders INLINE: banner, input box and "? for shortcuts" all land in the
+// first ~16 rows, and rows 17-50 come back empty. paneTail() used to slice the
+// last n array elements, so its window was 15 blank strings and getCLIState()
+// answered 'starting' for a live, idle agy prompt — forever. The relay queued
+// every task prompt it was handed and returned the task at
+// CLI_READY_TIMEOUT_MS, so a fresh agy contributor ran nothing at all.
+//
+// These fixtures keep the blank padding. Without the blank-line filter in
+// paneTail() they classify 'starting' and the assertions below fail.
+
+// Rows 1-16 of a real `tmux capture-pane -p`, padded to the full 50 rows.
+function padToPaneHeight(lines, height = 50) {
+  const out = lines.slice();
+  while (out.length < height) out.push('');
+  return out.join('\n');
+}
+
+const AGY_READY_PANE_FULL_HEIGHT = padToPaneHeight([
+  '      \u2584\u2580\u2580\u2584        Antigravity CLI 1.1.27',
+  '     \u2580\u2580\u2580\u2580\u2580\u2580       contributor@example.com (Google AI Pro)',
+  '    \u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580      Gemini 3.8 Flash (High)',
+  '   \u2584\u2580\u2580    \u2580\u2580\u2584     ~/.local/state/hive/agent-cwd',
+  '  \u2584\u2580\u2580      \u2580\u2580\u2584',
+  '',
+  '\u2500'.repeat(60),
+  '> ',
+  '\u2500'.repeat(60),
+  '? for shortcuts                                    Gemini 3.8 Flash \u00b7 high',
+]);
+
+test('#6413 a live agy pane classifies ready even though tmux pads it to full height', () => {
+  const relay = loadRelay({ backend: 'agy', cliStates: [AGY_READY_PANE_FULL_HEIGHT] });
+  try {
+    assert.strictEqual(relay.getCLIState(), 'ready',
+      'agy readiness was never detected on a real blank-padded capture, so every task was queued and handed back at CLI_READY_TIMEOUT_MS — the backend could not run a single task');
+  } finally { teardown(relay); }
+});
+
+test('#6413 agy startup gates are still classified first on a full-height pane', () => {
+  const cases = [
+    [padToPaneHeight(['Antigravity CLI', '', 'You are not signed in', 'Select login method']), 'needs-login'],
+    [padToPaneHeight(AGY_TOS_PANE.split('\n')), 'onboarding'],
+    [padToPaneHeight(AGY_TRUST_PANE.split('\n')), 'onboarding'],
+  ];
+  for (const [pane, want] of cases) {
+    const relay = loadRelay({ backend: 'agy', cliStates: [pane] });
+    try {
+      assert.strictEqual(relay.getCLIState(), want,
+        'a wizard drawn inline at the top of a padded pane must still be seen, or the auto-dismiss never fires');
+    } finally { teardown(relay); }
+  }
+});
+
+test('#6413 the ToS wizard on a full-height pane still selects Done', () => {
+  const relay = loadRelay({ backend: 'agy' });
+  try {
+    assert.strictEqual(relay.blockingPromptKey(padToPaneHeight(AGY_TOS_PANE.split('\n'))), 'Down Right',
+      'blockingPromptKey() reads the same window; blank padding must not hide the button row');
+  } finally { teardown(relay); }
+});
+
+test('#6413 paneTail counts non-blank lines, matching the Go helper it mirrors', () => {
+  const relay = loadRelay({ backend: 'agy' });
+  try {
+    // Blank padding must not consume the window.
+    assert.strictEqual(relay.paneTail('a\nb\nc' + '\n'.repeat(40), 2), 'b\nc');
+    // Order is preserved, not reversed.
+    assert.strictEqual(relay.paneTail('one\ntwo\nthree\n', 3), 'one\ntwo\nthree');
+    // n larger than the content is not an error.
+    assert.strictEqual(relay.paneTail('only\n\n\n', 15), 'only');
+    // Genuinely old content still falls outside the window — the property the
+    // tail exists for in the first place.
+    const old = ['stale Terms of Service & Data Use quote', ...Array.from({ length: 20 }, (_, i) => `line ${i}`)].join('\n');
+    assert.ok(!/stale/.test(relay.paneTail(old + '\n'.repeat(30), 15)),
+      'the tail must still exclude old scrollback; the fix is about blank padding, not about widening the window');
+    assert.strictEqual(relay.paneTail('', 15), '');
+    assert.strictEqual(relay.paneTail(null, 15), '');
+  } finally { teardown(relay); }
+});
+
 test('codex no-work verdict is COMPLETE despite stale activity in scrollback', () => {
   const relay = loadRelay({ backend: 'codex' });
   try {
