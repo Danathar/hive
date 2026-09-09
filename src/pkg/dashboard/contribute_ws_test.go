@@ -26,6 +26,7 @@ func setupWSTest(t *testing.T) (*Server, *httptest.Server) {
 
 	s := NewServer(0, slog.Default())
 	s.registerContributeRoutes()
+	t.Cleanup(s.contributeHub.Close)
 	ts := httptest.NewServer(s.mux)
 	return s, ts
 }

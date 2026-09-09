@@ -65,6 +65,7 @@ func newFullServer(t *testing.T) *Server {
 		SkipReloadFunc: func() {},
 	}
 	srv.RegisterAPI(srv.deps)
+	t.Cleanup(srv.CloseContributeHub)
 	return srv
 }
 
@@ -256,6 +257,7 @@ func TestHandleGovernorReposValid(t *testing.T) {
 func TestHandleContributorsListWithHubExtra(t *testing.T) {
 	srv := newFullServer(t)
 	srv.contributeHub = NewContributeWSHub(slog.Default(), nil)
+	t.Cleanup(srv.contributeHub.Close)
 
 	req := httptest.NewRequest("GET", "/api/contributors", nil)
 	w := httptest.NewRecorder()
@@ -318,6 +320,7 @@ func TestHandleHivesOnboardBadJSON(t *testing.T) {
 func TestLeaderboardForHubEmpty(t *testing.T) {
 	srv := newFullServer(t)
 	srv.contributeHub = NewContributeWSHub(slog.Default(), nil)
+	t.Cleanup(srv.contributeHub.Close)
 
 	lb := srv.LeaderboardForHub()
 	if lb == nil {
@@ -872,6 +875,7 @@ func TestHandleContributeActivityNilHub(t *testing.T) {
 func TestHandleContributeActivityWithHubExtra(t *testing.T) {
 	srv := newFullServer(t)
 	srv.contributeHub = NewContributeWSHub(slog.Default(), nil)
+	t.Cleanup(srv.contributeHub.Close)
 	srv.contributeHub.addActivity("user1", "joined", "newcomer", "claude", "sonnet", "", "")
 
 	req := httptest.NewRequest("GET", "/api/contribute/activity", nil)

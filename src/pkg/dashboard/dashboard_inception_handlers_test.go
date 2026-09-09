@@ -24,6 +24,7 @@ func newMinimalServer(t *testing.T) *Server {
 		Ctx:    context.Background(),
 	}
 	srv.RegisterAPI(srv.deps)
+	t.Cleanup(srv.CloseContributeHub)
 	return srv
 }
 

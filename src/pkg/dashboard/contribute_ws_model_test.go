@@ -12,6 +12,7 @@ import (
 
 func TestCheckModelAllowedNoConfig(t *testing.T) {
 	hub := NewContributeWSHub(slog.Default(), nil)
+	t.Cleanup(hub.Close)
 	allowed, models := hub.checkModelAllowed("claude-sonnet")
 	if !allowed {
 		t.Error("should allow when no server config")
@@ -26,6 +27,7 @@ func TestCheckModelAllowedEmptyList(t *testing.T) {
 	srv.deps.Config.Hub.ContributeAllowModels = []string{}
 
 	hub := NewContributeWSHub(slog.Default(), nil)
+	t.Cleanup(hub.Close)
 	hub.server = srv
 
 	allowed, _ := hub.checkModelAllowed("any-model")
@@ -39,6 +41,7 @@ func TestCheckModelAllowedMatchesModel(t *testing.T) {
 	srv.deps.Config.Hub.ContributeAllowModels = []string{"claude-*", "gpt-4o"}
 
 	hub := NewContributeWSHub(slog.Default(), nil)
+	t.Cleanup(hub.Close)
 	hub.server = srv
 
 	allowed, _ := hub.checkModelAllowed("claude-sonnet")
@@ -58,6 +61,7 @@ func TestCheckModelAllowedRejectsUnknown(t *testing.T) {
 	srv.deps.Config.Hub.ContributeRejectUnknownModels = true
 
 	hub := NewContributeWSHub(slog.Default(), nil)
+	t.Cleanup(hub.Close)
 	hub.server = srv
 
 	allowed, acceptedModels := hub.checkModelAllowed("gpt-4o")
@@ -75,6 +79,7 @@ func TestCheckModelAllowedEmptyModelNoReject(t *testing.T) {
 	srv.deps.Config.Hub.ContributeRejectUnknownModels = false
 
 	hub := NewContributeWSHub(slog.Default(), nil)
+	t.Cleanup(hub.Close)
 	hub.server = srv
 
 	allowed, _ := hub.checkModelAllowed("")
@@ -89,6 +94,7 @@ func TestCheckModelAllowedEmptyModelReject(t *testing.T) {
 	srv.deps.Config.Hub.ContributeRejectUnknownModels = true
 
 	hub := NewContributeWSHub(slog.Default(), nil)
+	t.Cleanup(hub.Close)
 	hub.server = srv
 
 	allowed, acceptedModels := hub.checkModelAllowed("")
@@ -106,6 +112,7 @@ func TestCheckModelAllowedNoRejectUnknown(t *testing.T) {
 	srv.deps.Config.Hub.ContributeRejectUnknownModels = false
 
 	hub := NewContributeWSHub(slog.Default(), nil)
+	t.Cleanup(hub.Close)
 	hub.server = srv
 
 	allowed, _ := hub.checkModelAllowed("unknown-model")

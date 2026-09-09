@@ -86,7 +86,10 @@ func prVerifyHub(t *testing.T, status int, authorLogin string, prNum int) *Contr
 	deps := testDeps(t)
 	deps.GHClient = ghpkg.NewClientForTest(ts.URL, "myorg", []string{"repo1"}, logger)
 	s.RegisterAPI(deps)
-	return NewContributeWSHub(logger, s)
+	t.Cleanup(s.CloseContributeHub)
+	hub := NewContributeWSHub(logger, s)
+	t.Cleanup(hub.Close)
+	return hub
 }
 
 const prVerifyURL = "https://github.com/myorg/repo1/pull/7"
@@ -165,7 +168,9 @@ func TestVerifyReportedPR_HubNoClient(t *testing.T) {
 	deps := testDeps(t)
 	deps.GHClient = nil
 	s.RegisterAPI(deps)
+	t.Cleanup(s.CloseContributeHub)
 	hub := NewContributeWSHub(logger, s)
+	t.Cleanup(hub.Close)
 
 	if hub.verifyReportedPR("repo1", prVerifyURL, "alice") {
 		t.Fatalf("no-client hub must not verify")
