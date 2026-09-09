@@ -80,7 +80,7 @@ func TestEnumerateActionable_SkipsStandingMetaIssues(t *testing.T) {
 	}
 }
 
-func TestStandingMetaIssueReason(t *testing.T) {
+func TestStandingMetaIssueReasonSkipMatrix(t *testing.T) {
 	cases := []struct {
 		name, title, author string
 		labels              []string

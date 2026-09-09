@@ -28,6 +28,13 @@ type Finding struct {
 	Detail    string    `json:"detail,omitempty"`
 	File      string    `json:"file,omitempty"`
 	Line      int       `json:"line,omitempty"`
+	// LastSeenAt is the bead's last report time, not evidence verification.
+	// Timestamp retains its original creation-time semantics. Older beads may
+	// have no last-seen time; do not invent one from their creation/update time.
+	LastSeenAt *time.Time `json:"last_seen_at,omitempty"`
+	// LinkedWork contains only references explicitly named by this finding.
+	// State is resolved server-side; UNKNOWN means the lookup was inconclusive.
+	LinkedWork []LinkedWork `json:"linked_work,omitempty"`
 	// DuplicateCount is how many ADDITIONAL reports of the same finding were
 	// collapsed into this one by collapseNearDuplicates (0 = reported once).
 	// It is rendered as "(reported N×)" so a recurring problem still reads as
@@ -686,6 +693,10 @@ func BuildDigestFromBeads(stores map[string]*beads.Store, mode string, opts Dige
 				Title:     b.Title,
 				Detail:    b.Notes,
 				File:      b.ExternalRef,
+			}
+			if b.LastSeenAt != nil && !b.LastSeenAt.Time.IsZero() {
+				lastSeen := b.LastSeenAt.Time
+				f.LastSeenAt = &lastSeen
 			}
 			if ft := b.Meta("finding_type"); ft != "" {
 				f.Type = ft

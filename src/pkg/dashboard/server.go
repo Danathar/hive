@@ -660,12 +660,13 @@ type FrontendSession struct {
 }
 
 type FrontendRepo struct {
-	Name             string `json:"name"`
-	Full             string `json:"full"`
-	Issues           int    `json:"issues"`
-	PRs              int    `json:"prs"`
-	ActionableIssues []any  `json:"actionableIssues"`
-	OpenPrs          []any  `json:"openPrs"`
+	Name             string                    `json:"name"`
+	Full             string                    `json:"full"`
+	Issues           int                       `json:"issues"`
+	PRs              int                       `json:"prs"`
+	WorkBreakdown    *github.RepoWorkBreakdown `json:"workBreakdown,omitempty"`
+	ActionableIssues []any                     `json:"actionableIssues"`
+	OpenPrs          []any                     `json:"openPrs"`
 	// Paused and its provenance (#6203). A paused repo still gets a card —
 	// that is the point of pause over deleting it from project.repos — so the
 	// card has to say so, or a deliberately quiet repo is indistinguishable

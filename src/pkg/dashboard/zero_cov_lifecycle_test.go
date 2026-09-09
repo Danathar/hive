@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -60,6 +61,68 @@ func TestSetReleaseChannel_DoesNotAffectUpstreamBranch(t *testing.T) {
 	SetReleaseChannel("edge")
 	if got := upstreamBranch(); got != before {
 		t.Errorf("upstreamBranch changed from %q to %q after SetReleaseChannel — channel must be display-only", before, got)
+	}
+}
+
+// TestSetDeploymentImage_VersionResponse exercises the dashboard-facing API
+// contract for all delivery shapes called out in #6321. Classification itself
+// lives in pkg/imageref; this test proves the spoke wires that shared result to
+// /api/version and withholds untrusted refs when provenance is unknown.
+func TestSetDeploymentImage_VersionResponse(t *testing.T) {
+	origSource, origChannel, origBranch := versionImageSource, versionChannel, versionBranch
+	t.Cleanup(func() { versionImageSource, versionChannel, versionBranch = origSource, origChannel, origBranch })
+	SetGitBranch("v5")
+	SetReleaseChannel("stale-channel") // must never override the current image
+	imageRef, calls := "", 0
+	SetDeploymentImageSource(func() string { calls++; return imageRef })
+
+	s, _ := apiServer(t)
+	tests := []struct {
+		name         string
+		imageRef     string
+		wantTracking string
+		wantImageRef bool
+		wantChannel  string
+	}{
+		{name: "initially unavailable", wantTracking: "unknown"},
+		{name: "stable channel", imageRef: "ghcr.io/hivecommons/hive:stable", wantTracking: "floating", wantImageRef: true, wantChannel: "stable"},
+		{name: "candidate channel", imageRef: "ghcr.io/hivecommons/hive:candidate", wantTracking: "floating", wantImageRef: true, wantChannel: "candidate"},
+		{name: "edge channel", imageRef: "ghcr.io/hivecommons/hive:edge", wantTracking: "floating", wantImageRef: true, wantChannel: "edge"},
+		{name: "branch latest", imageRef: "ghcr.io/hivecommons/hive:v5-latest", wantTracking: "floating", wantImageRef: true},
+		{name: "sha tag", imageRef: "ghcr.io/hivecommons/hive:61c5ad7", wantTracking: "pinned", wantImageRef: true},
+		{name: "version tag", imageRef: "ghcr.io/hivecommons/hive:v5.0.0", wantTracking: "pinned", wantImageRef: true},
+		{name: "digest", imageRef: "ghcr.io/hivecommons/hive@sha256:" + strings.Repeat("a", 64), wantTracking: "pinned", wantImageRef: true},
+		{name: "channel with digest pin", imageRef: "ghcr.io/hivecommons/hive:stable@sha256:" + strings.Repeat("a", 64), wantTracking: "pinned", wantImageRef: true, wantChannel: "stable"},
+		{name: "unavailable", imageRef: "", wantTracking: "unknown", wantImageRef: false},
+		{name: "malformed", imageRef: "ghcr.io/hivecommons/hive:not a tag", wantTracking: "unknown", wantImageRef: false},
+		{name: "secret bearing URL", imageRef: "https://user:secret@registry.example/hive:stable", wantTracking: "unknown"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			imageRef = tt.imageRef
+			before := calls
+			result := decodeJSON(t, doGet(s, "/api/version"))
+			if calls != before+1 {
+				t.Fatalf("image lookups = %d, want exactly one per response", calls-before)
+			}
+			if got := result["channel"]; (tt.wantChannel == "" && got != nil) || (tt.wantChannel != "" && got != tt.wantChannel) {
+				t.Errorf("channel = %v, want %q", got, tt.wantChannel)
+			}
+			if result["branch"] != "v5" || upstreamBranch() != "v5" {
+				t.Error("image provenance changed the build/compare branch")
+			}
+			if result["tracking"] != tt.wantTracking {
+				t.Errorf("tracking = %v, want %q", result["tracking"], tt.wantTracking)
+			}
+			gotRef, present := result["imageRef"]
+			if present != tt.wantImageRef {
+				t.Fatalf("imageRef present = %v, want %v (value %v)", present, tt.wantImageRef, gotRef)
+			}
+			if present && gotRef != tt.imageRef {
+				t.Errorf("imageRef = %v, want %q", gotRef, tt.imageRef)
+			}
+		})
 	}
 }
 

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 
@@ -40,5 +42,44 @@ func TestRescanRepos_NoCredentials(t *testing.T) {
 func TestLastActionablePathIsTheDataPVCFile(t *testing.T) {
 	if lastActionablePath != "/data/last-actionable.json" {
 		t.Fatalf("lastActionablePath = %q; the /data PVC restore path changed", lastActionablePath)
+	}
+}
+
+// A manual rescan must publish the structured breakdown from the very same
+// enumeration it uses for raw totals. Otherwise the button can refresh the
+// headline number while leaving its explanation stale.
+func TestRescanRepos_PublishesWorkBreakdown(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/testorg/repo/issues", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"number":1,"title":"Dependency Dashboard","user":{"login":"renovate[bot]"},"created_at":"2026-09-08T12:00:00Z"}]`))
+	})
+	mux.HandleFunc("/repos/testorg/repo/pulls", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[]`))
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	client := github.NewClientForTest(server.URL, "testorg", []string{"repo"}, slog.Default())
+	cfg := &config.Config{Project: config.ProjectConfig{Org: "testorg", Repos: []string{"repo"}}}
+	var last atomic.Pointer[github.ActionableResult]
+	refreshed := false
+
+	got, err := rescanRepos(context.Background(), cfg, client, &last, func() { refreshed = true }, slog.Default())
+	if err != nil {
+		t.Fatalf("rescanRepos: %v", err)
+	}
+	if !refreshed {
+		t.Fatal("manual rescan did not republish dashboard status")
+	}
+	if got.TotalByRepo["repo"].Issues != 1 {
+		t.Fatalf("raw issue total = %d, want 1", got.TotalByRepo["repo"].Issues)
+	}
+	if got.WorkBreakdownByRepo["repo"].Issues.DependencyDashboard != 1 {
+		t.Fatalf("breakdown = %+v, want one dependency dashboard", got.WorkBreakdownByRepo["repo"].Issues)
+	}
+	if last.Load() != got {
+		t.Fatal("manual rescan did not store the classified result used for the dashboard refresh")
 	}
 }

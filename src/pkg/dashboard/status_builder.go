@@ -1251,10 +1251,16 @@ func buildRepos(cfg *config.Config, actionable *github.ActionableResult) []Front
 
 		issueCount := 0
 		prCount := 0
+		var workBreakdown *github.RepoWorkBreakdown
 		if actionable != nil && actionable.TotalByRepo != nil {
 			if counts, ok := actionable.TotalByRepo[repoName]; ok {
 				issueCount = counts.Issues
 				prCount = counts.PRs
+			}
+		}
+		if actionable != nil && actionable.WorkBreakdownByRepo != nil {
+			if breakdown, ok := actionable.WorkBreakdownByRepo[repoName]; ok {
+				workBreakdown = &breakdown
 			}
 		}
 
@@ -1263,6 +1269,7 @@ func buildRepos(cfg *config.Config, actionable *github.ActionableResult) []Front
 			Full:             full,
 			Issues:           issueCount,
 			PRs:              prCount,
+			WorkBreakdown:    workBreakdown,
 			ActionableIssues: issuesByRepo[repoName],
 			OpenPrs:          prsByRepo[repoName],
 		}

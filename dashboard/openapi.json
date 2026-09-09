@@ -782,7 +782,7 @@
           "System"
         ],
         "summary": "Git version info",
-        "description": "Returns the current git commit hash and dirty state of the hive repo.",
+        "description": "Returns build identity and version status. The Go spoke dashboard also reports server-derived release channel and Deployment image tracking; unavailable or malformed image provenance is unknown.",
         "responses": {
           "200": {
             "description": "Version info",
@@ -798,6 +798,27 @@
                     "long": {
                       "type": "string",
                       "description": "Full git commit hash"
+                    },
+                    "hash": {
+                      "type": "string",
+                      "description": "Full running commit hash (Go spoke dashboard)"
+                    },
+                    "branch": {
+                      "type": "string",
+                      "description": "Build branch used by the spoke version comparison"
+                    },
+                    "channel": {
+                      "type": "string",
+                      "description": "Explicit Deployment release channel (stable, candidate, or edge); omitted when absent or unknown"
+                    },
+                    "imageRef": {
+                      "type": "string",
+                      "description": "Validated Deployment-declared image reference; omitted for unavailable or malformed provenance"
+                    },
+                    "tracking": {
+                      "type": "string",
+                      "enum": ["floating", "pinned", "unknown"],
+                      "description": "Shared Hive image-tracking classification, independent of the channel and running commit"
                     },
                     "dirty": {
                       "type": "boolean",

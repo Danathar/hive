@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/hivecommons/hive/pkg/config"
+	"github.com/hivecommons/hive/pkg/imageref"
 )
 
 // Config-drift detection.
@@ -349,20 +350,7 @@ func imageTagOf(ref string) string {
 // Returns false (no signal) for: an empty ref, and a ref with no tag separator
 // at all — both are "unknown", not "pinned".
 func imageRefIsPinned(ref string) bool {
-	ref = strings.TrimSpace(ref)
-	if ref == "" {
-		return false // unknown image: old spoke, or not running in-cluster
-	}
-	// A digest pin ("...@sha256:...") is unambiguous positive evidence.
-	if strings.Contains(ref, "@") {
-		return true
-	}
-	// Otherwise a tag must be parseable before any claim can be made. Only a
-	// colon AFTER the last '/' is a tag; an earlier one is a registry port.
-	if imageTagOf(ref) == "" {
-		return false // malformed or untagged — unknown, so stay silent
-	}
-	return !imageTagIsMutable(ref)
+	return imageref.IsPinned(ref)
 }
 
 // healthFailingChecks returns the names of checks that are not passing, with

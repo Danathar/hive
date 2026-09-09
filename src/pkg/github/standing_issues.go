@@ -30,38 +30,55 @@ import "strings"
 // dashboard title, mirroring the contribute-queue defaults — so a human's
 // issue that merely mentions dependencies can never be swallowed.
 
-// botControlPanelAuthors are the bot logins whose standing dashboard issues
-// are skipped. Kept aligned with config.Hub.ContributeDenyAuthors defaults.
+// Standing meta issues are reports or bot-maintained control panels, not
+// completable work. Keep the bot and title lists aligned with the contribute
+// queue's default deny lists. Requiring both a known bot author and a dashboard
+// title prevents human-authored issues with similar wording from being hidden.
 var botControlPanelAuthors = []string{"renovate[bot]", "dependabot[bot]", "mergeraptor[bot]"}
 
-// botControlPanelTitleFragments mark a standing dashboard title, matched
-// case-insensitively as substrings. Kept aligned with the
-// config.Hub.ContributeDenyTitles defaults (`*dependency dashboard*`,
-// `*renovate dashboard*`).
 var botControlPanelTitleFragments = []string{"dependency dashboard", "renovate dashboard"}
 
-// standingMetaIssueReason reports whether an issue is a standing meta issue
-// and, when it is, a short reason for logs/tests. Empty means actionable as
-// far as this filter is concerned.
-func standingMetaIssueReason(title, author string, labels []string) string {
+type standingMetaIssueKind uint8
+
+const (
+	standingMetaNone standingMetaIssueKind = iota
+	standingMetaHiveAdvisory
+	standingMetaDependencyDashboard
+)
+
+func standingMetaIssueKindFor(title, author string, labels []string) standingMetaIssueKind {
 	if title == advisoryTitle {
-		return "hive's own advisory report"
+		return standingMetaHiveAdvisory
 	}
-	for _, l := range labels {
-		if strings.EqualFold(l, advisoryLabelName) {
-			return "hive's own advisory report (label)"
+	for _, label := range labels {
+		if strings.EqualFold(label, advisoryLabelName) {
+			return standingMetaHiveAdvisory
 		}
 	}
 	for _, bot := range botControlPanelAuthors {
 		if !strings.EqualFold(author, bot) {
 			continue
 		}
-		lower := strings.ToLower(title)
+		lowerTitle := strings.ToLower(title)
 		for _, fragment := range botControlPanelTitleFragments {
-			if strings.Contains(lower, fragment) {
-				return "bot dependency dashboard (control panel, not work)"
+			if strings.Contains(lowerTitle, fragment) {
+				return standingMetaDependencyDashboard
 			}
 		}
 	}
-	return ""
+	return standingMetaNone
+}
+
+// standingMetaIssueReason preserves the diagnostic predicate introduced by
+// #6158 while the typed classifier lets the repository breakdown distinguish
+// advisory reports from dependency dashboards without reimplementing policy.
+func standingMetaIssueReason(title, author string, labels []string) string {
+	switch standingMetaIssueKindFor(title, author, labels) {
+	case standingMetaHiveAdvisory:
+		return "hive's own advisory report"
+	case standingMetaDependencyDashboard:
+		return "bot dependency dashboard (control panel, not work)"
+	default:
+		return ""
+	}
 }
