@@ -18129,6 +18129,17 @@ function burnAreaChart() {
           uses a gateway by naming it as its backend. Keys are stored privately on this
           hive — never in hive.yaml, logs, or config downloads.
         </div>
+        <div data-copilot-backend-help style="border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:14px;background:var(--surface);font-size:0.8rem;line-height:1.5">
+          <div style="font-weight:600;color:var(--fg);margin-bottom:3px">Looking for GitHub Copilot?</div>
+          <div style="color:var(--muted)">
+            Copilot is a subscription CLI backend, not a Model Gateway, so it will not
+            appear in this list. Open an agent's <strong>⚙ General</strong> tab, enable
+            <strong>CLI Pinned</strong>, choose <strong>Copilot</strong> under
+            <strong>CLI Pin Value</strong>, and save. Then use <strong>Login</strong> on
+            that agent's card to authenticate this hive.
+            <a href="https://github.com/hivecommons/hive/blob/v4/docs/inference-backends.md" target="_blank" rel="noopener noreferrer" style="color:var(--cyan);font-weight:600;white-space:nowrap">Copilot setup guide ↗</a>
+          </div>
+        </div>
         <div style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap">
           <button data-action="openGatewayForm" style="padding:7px 16px;border:none;border-radius:6px;background:var(--cyan);color:var(--bg);cursor:pointer;font-weight:600;font-size:0.8rem">+ Add gateway</button>
           <button data-action="openOpenRouterFund" style="padding:7px 16px;border:1px solid var(--cyan);border-radius:6px;background:transparent;color:var(--cyan);cursor:pointer;font-weight:600;font-size:0.8rem">⚡ Fund this hive with OpenRouter</button>
