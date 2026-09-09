@@ -3123,6 +3123,32 @@ function progressTick() {
   }
 }
 
+// formatContributorStanding renders only values the authenticated hub supplied.
+// The wording keeps the critical policy distinction honest: newcomer promotion
+// is automatic at the configured threshold, while trusted and later tiers need
+// a maintainer grant even when the hub reports a PR-task guideline.
+function formatContributorStanding(standing) {
+  if (!standing || typeof standing !== 'object') return '';
+  const tier = String(standing.trust_tier || 'unknown');
+  const completed = Number.isFinite(standing.tasks_completed) ? standing.tasks_completed : 0;
+  const failed = Number.isFinite(standing.tasks_failed) ? standing.tasks_failed : 0;
+  const parts = [`tier ${tier}`];
+  const progress = standing.tier_progress;
+  if (progress && typeof progress === 'object' && progress.next_tier) {
+    const prTasks = Number.isFinite(progress.pr_tasks_completed) ? progress.pr_tasks_completed : 0;
+    const required = Number.isFinite(progress.pr_tasks_required) ? progress.pr_tasks_required : 0;
+    if (progress.automatic && required > 0) {
+      parts.push(`${prTasks}/${required} PR tasks toward automatic ${progress.next_tier} promotion`);
+    } else if (required > 0) {
+      parts.push(`${prTasks}/${required} PR tasks toward ${progress.next_tier} eligibility (maintainer grant required)`);
+    } else if (progress.maintainer_grant_required) {
+      parts.push(`next tier ${progress.next_tier} requires a maintainer grant`);
+    }
+  }
+  parts.push(`${completed} completed, ${failed} failed`);
+  return parts.join('; ');
+}
+
 function handleMessage(data, hub) {
   // hub defaults to hubs[0] so existing single-hub callers (and the test
   // harness, which calls handleMessage(json) directly with no hub arg) keep
@@ -3161,6 +3187,14 @@ function handleMessage(data, hub) {
 
     case 'auth_ok':
       console.log(`Authenticated with ${hub.url} as ${msg.contributor_id} (tier: ${msg.trust_tier})`);
+      // #6450: auth_ok now includes the authenticated contributor's own
+      // non-secret standing counters and honest next-tier rule. Keep this
+      // additive: an older hub simply omits the object, and no dispatch behavior
+      // depends on it.
+      if (msg.contributor_standing) {
+        const standing = formatContributorStanding(msg.contributor_standing);
+        if (standing) console.log(`Your contributor standing on ${hub.url}: ${standing}`);
+      }
       // #2567: the hub advertises its protocol version + capability set here. We
       // log them (forward-compatible: unknown/absent fields are simply skipped)
       // so a newer relay can adapt to what the deployed server supports instead

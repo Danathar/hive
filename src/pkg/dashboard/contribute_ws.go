@@ -224,6 +224,15 @@ type WSMessage struct {
 	TrustTier     string   `json:"trust_tier,omitempty"`
 	Permissions   []string `json:"permissions,omitempty"`
 	Reason        string   `json:"reason,omitempty"`
+	// ContributorStanding is the authenticated contributor's own counters and
+	// tier progress (#6450). It is populated on auth_ok and on the notice that
+	// acknowledges an accepted task_failed. Additive and omitempty so older peers
+	// continue unchanged.
+	ContributorStanding *ContributorStanding `json:"contributor_standing,omitempty"`
+	// FailureCooldown accompanies the post-task_failed notice and names the exact
+	// work-item cooldown/quarantine just booked, including its expiry. It is never
+	// populated for a rejected/stale failure that did not mutate hub state.
+	FailureCooldown *ContributorFailureCooldown `json:"failure_cooldown,omitempty"`
 	// FailureKind is the OPTIONAL, client-declared cause of a task_failed
 	// (#2547): "environment" (the client's runtime could not run the work) or
 	// "task" (the work was attempted and failed on its merits). Absent — which
@@ -3747,8 +3756,9 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 				// #2567: advertise the protocol version and the server capability
 				// set so a client can learn what this deployed hub supports without
 				// probing. Additive — an existing client ignores these unknown fields.
-				ProtocolVersion:    contributorProtocolVersion,
-				ServerCapabilities: serverCapabilities(),
+				ProtocolVersion:     contributorProtocolVersion,
+				ServerCapabilities:  serverCapabilities(),
+				ContributorStanding: contributorStandingForProfile(profile),
 			}); err != nil {
 				h.logger.Warn("[contribute-ws] failed to send auth_ok", "username", profile.GitHubUsername, "error", err)
 				return
@@ -4430,8 +4440,28 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 					h.appendTaskRun(runRec)
 					contributor.mu.Lock()
 					contributor.profile.TasksFailed++
+					standing := contributorStandingForProfile(contributor.profile)
 					contributor.mu.Unlock()
 					_ = saveContributorProfile(contributor.profile)
+					// #6450: the hub previously booked the cooldown/quarantine and
+					// updated the failure statistics entirely in silence. Send
+					// the contributor the exact state we just committed. notice is an
+					// existing backward-compatible message: old relays already print its
+					// prose, while current/future clients can consume the structured
+					// standing and failure_cooldown fields.
+					if failedTask != nil {
+						failure := ContributorFailure{
+							Kind:      failureKind,
+							Reason:    msg.Reason,
+							Permanent: msg.Permanent,
+						}
+						if notice := h.contributorFailureNotice(standing, failedTask, failure, time.Now()); notice != nil {
+							if err := contributor.send(*notice); err != nil {
+								h.logger.Warn("[contribute-ws] failed to send contributor failure standing",
+									"username", contributor.profile.GitHubUsername, "error", err)
+							}
+						}
+					}
 				} else {
 					h.logger.Warn("[contribute-ws] task_failed for unassigned task ignored",
 						"username", contributor.profile.GitHubUsername,
@@ -6653,4 +6683,3 @@ func (s *Server) Close() {
 	}
 	s.CloseContributeHub()
 }
-

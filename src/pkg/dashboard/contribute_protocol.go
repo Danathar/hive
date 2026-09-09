@@ -89,6 +89,12 @@ const (
 	// heartbeat exactly as before, so a relay that ignores the message behaves
 	// precisely as it does today.
 	capTokenRefreshFailed = "token_refresh_failed"
+	// capContributorStanding: auth_ok carries the contributor's current standing,
+	// and an accepted task_failed is answered with a notice carrying both the
+	// updated standing and the exact failure cooldown/quarantine that was booked.
+	// Older relays already print notice.message and ignore the additive structured
+	// fields; newer clients can render the fields without parsing prose (#6450).
+	capContributorStanding = "contributor_standing"
 )
 
 // serverCapabilities returns the capability set this hub advertises on auth_ok.
@@ -104,7 +110,50 @@ func serverCapabilities() []string {
 		capAgentRoleClaim,
 		capCompletionVerdict,
 		capTokenRefreshFailed,
+		capContributorStanding,
 	}
+}
+
+// ContributorStanding is the contributor-owned view of the profile counters
+// that determine their visible standing and tier progress (#6450). It contains
+// no registration token or other credential and is sent only on the
+// authenticated contributor WebSocket.
+type ContributorStanding struct {
+	TrustTier      string                   `json:"trust_tier"`
+	TasksCompleted int                      `json:"tasks_completed"`
+	TasksWithPR    int                      `json:"tasks_with_pr"`
+	TasksFailed    int                      `json:"tasks_failed"`
+	TierProgress   *ContributorTierProgress `json:"tier_progress,omitempty"`
+}
+
+// ContributorTierProgress describes the next real trust-tier step. Automatic
+// is true only for newcomer -> contributor. Trusted and later tiers require a
+// maintainer grant even when a documented PR-task guideline exists, so that
+// fact is explicit rather than implying another automatic promotion.
+type ContributorTierProgress struct {
+	NextTier                string `json:"next_tier"`
+	PRTasksCompleted        int    `json:"pr_tasks_completed"`
+	PRTasksRequired         int    `json:"pr_tasks_required,omitempty"`
+	PRTasksRemaining        int    `json:"pr_tasks_remaining,omitempty"`
+	Automatic               bool   `json:"automatic"`
+	MaintainerGrantRequired bool   `json:"maintainer_grant_required"`
+}
+
+// ContributorFailureCooldown is the exact post-failure hold the hub booked for
+// the failed work item. ConsecutiveFailures is the hub's quarantine score: an
+// ordinary failure adds one and a permanent failure carries the existing
+// permanentFailureWeight. ExpiresAt is RFC3339 UTC; RetryAfterSeconds lets a
+// client render a countdown without parsing prose.
+type ContributorFailureCooldown struct {
+	TaskKey             string `json:"task_key"`
+	State               string `json:"state"` // "cooldown" or "quarantine"
+	ConsecutiveFailures int    `json:"consecutive_failures"`
+	QuarantineAt        int    `json:"quarantine_at"`
+	RetryAfterSeconds   int64  `json:"retry_after_seconds"`
+	ExpiresAt           string `json:"expires_at"`
+	FailureKind         string `json:"failure_kind,omitempty"`
+	FailureReason       string `json:"failure_reason,omitempty"`
+	Permanent           bool   `json:"permanent,omitempty"`
 }
 
 // Surface identifiers for the /api/contribute/status response (#2567). Two

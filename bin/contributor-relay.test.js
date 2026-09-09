@@ -2318,6 +2318,41 @@ test('hub notice messages are logged for operators', () => {
   }
 });
 
+test('#6450 auth_ok prints contributor standing and honest tier progress', () => {
+  const relay = loadRelay();
+  const lines = [];
+  const oldLog = console.log;
+  console.log = (msg) => { lines.push(String(msg)); };
+  try {
+    relay.handleMessage(JSON.stringify({
+      type: 'auth_ok',
+      contributor_id: 'c1',
+      trust_tier: 'contributor',
+      contributor_standing: {
+        trust_tier: 'contributor',
+        tasks_completed: 11,
+        tasks_with_pr: 7,
+        tasks_failed: 4,
+        tier_progress: {
+          next_tier: 'trusted',
+          pr_tasks_completed: 7,
+          pr_tasks_required: 20,
+          pr_tasks_remaining: 13,
+          automatic: false,
+          maintainer_grant_required: true,
+        },
+      },
+    }));
+    assert.ok(lines.some(l => l.includes('Your contributor standing') &&
+      l.includes('tier contributor') && l.includes('7/20 PR tasks') &&
+      l.includes('maintainer grant required') && l.includes('11 completed, 4 failed')),
+    `standing was not printed accurately: ${lines.join('\n')}`);
+  } finally {
+    console.log = oldLog;
+    teardown(relay);
+  }
+});
+
 test('token_refresh, task_revoke, and blocked progress only affect the hub that owns the active task', async () => {
   const blockedPane = 'Should I open a pull request for this change?\n> \n';
   const relay = loadRelay({ backend: 'goose', cliStates: [blockedPane, blockedPane], env: MULTI_HUB_ENV });

@@ -270,7 +270,24 @@ func TestQueueLivelock_TaskFailedHandlerRecordsCooldown(t *testing.T) {
 	}
 
 	// Report the assigned task as failed via the real handler.
-	conn.WriteJSON(WSMessage{Type: "task_failed", TaskID: assign.TaskID, Reason: "could not build", Permanent: false})
+	conn.WriteJSON(WSMessage{Type: "task_failed", TaskID: assign.TaskID, Reason: "Provider is not configured", FailureKind: TaskFailureKindEnvironment, Permanent: false})
+
+	// #6450: the same handler must acknowledge the state it booked to the
+	// contributor, not leave cooldown/quarantine and standing visible only to the
+	// hub operator. This is the wire-level proof, beyond the pure formatter tests.
+	notice := readMsg(t, conn)
+	if notice.Type != "notice" || notice.FailureCooldown == nil || notice.ContributorStanding == nil {
+		t.Fatalf("task_failed did not return contributor-visible standing/cooldown: %+v", notice)
+	}
+	if notice.FailureCooldown.State != "cooldown" || notice.FailureCooldown.TaskKey != "myorg/repo1#77" {
+		t.Fatalf("task_failed notice describes the wrong cooldown: %+v", notice.FailureCooldown)
+	}
+	if notice.ContributorStanding.TasksFailed != 1 || notice.ContributorStanding.TrustTier != "newcomer" {
+		t.Fatalf("task_failed notice carries stale standing: %+v", notice.ContributorStanding)
+	}
+	if !strings.Contains(notice.Message, "Provider is not configured") {
+		t.Fatalf("task_failed notice omitted the observable cause: %q", notice.Message)
+	}
 
 	// The handler runs asynchronously; poll briefly for the recorded cooldown.
 	deadline := time.Now().Add(2 * time.Second)

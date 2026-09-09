@@ -472,6 +472,34 @@ The shipped relay declares `environment` only where the cause is unambiguous (CL
 
 **It changes nothing about dispatch.** The kind is self-reported, so acting on it would be routing on a value the client controls: a relay could keep an issue permanently hot by tagging every failure `environment`. The work item's failure cooldown and quarantine weight (#2435) are computed exactly as before, from the repo, number and `permanent` flag alone — never from the declared kind. That separation is pinned by tests (`TestSelectionPathsDoNotReadFailureKind`, `TestRecordTaskFailure_IgnoresFailureKind`).
 
+### Contributor-visible standing and failure cooldowns
+
+The authenticated `auth_ok` response includes `contributor_standing`: the
+contributor's current trust tier, completed/PR-backed/failed task counts, and
+the next tier's real rule. Newcomer → contributor is explicitly marked
+automatic at 5 PR-backed tasks; trusted and later steps explicitly say that a
+maintainer grant is required, so the progress payload never promises an
+automatic promotion the hub does not perform. The in-tree relay prints this
+summary at connect time.
+
+After the hub accepts a `task_failed`, it answers with the existing `notice`
+message type. Its human-readable `message` names the failure kind/reason, the
+10-minute cooldown or 6-hour quarantine, the exact UTC expiry, the current
+failure score against the 3-failure quarantine threshold, and the updated
+standing. The same values are also available without parsing prose in
+`contributor_standing` and `failure_cooldown` (`state`, `task_key`,
+`consecutive_failures`, `quarantine_at`, `retry_after_seconds`, `expires_at`,
+`failure_kind`, `failure_reason`, and `permanent`). Failure reasons are bounded
+and token-redacted before they are echoed.
+
+This is visibility, not a new policy gate. The cooldown still belongs to the
+failed work item and the existing failure score is still weighted: an ordinary
+failure adds one, while a failure the relay declares permanent contributes the
+existing weight of three and therefore quarantines immediately. Stale or
+unassigned `task_failed` messages mutate nothing and receive no notice. Older
+relays already print `notice.message` and ignore the additive structured
+fields; older hubs simply omit `contributor_standing` from `auth_ok`.
+
 Whether the hub should ever *act* on client declarations — the ROUTE half of [#2547](https://github.com/hivecommons/hive/issues/2547) — remains an open maintainer decision, and needs task-side requirements metadata that does not exist yet.
 
 ## Reconnecting without losing in-flight work

@@ -66,6 +66,7 @@ func TestWS_AuthOKCarriesVersionAndCapabilities(t *testing.T) {
 	want := map[string]bool{
 		capTokenRefresh: false, capTaskUnavailableReasons: false,
 		capPromptPreview: false, capCapabilityDeclare: false,
+		capContributorStanding: false,
 	}
 	for _, c := range authOK.ServerCapabilities {
 		if _, ok := want[c]; ok {
@@ -76,6 +77,12 @@ func TestWS_AuthOKCarriesVersionAndCapabilities(t *testing.T) {
 		if !seen {
 			t.Errorf("auth_ok server_capabilities missing %q", c)
 		}
+	}
+	if authOK.ContributorStanding == nil {
+		t.Fatal("auth_ok must carry the authenticated contributor's standing")
+	}
+	if got := authOK.ContributorStanding.TierProgress; got == nil || got.NextTier != "contributor" || got.PRTasksRequired != contributorAutoPromoteAt {
+		t.Fatalf("auth_ok standing lost newcomer tier progress: %+v", authOK.ContributorStanding)
 	}
 }
 
