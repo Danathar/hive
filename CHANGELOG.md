@@ -11,6 +11,23 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-09 (v4.22.0)
+
+### Added
+
+- A repository can now declare in `.acmm.yml` that an ACMM criterion is satisfied somewhere other than the file the criterion looks for, and the dashboard counts it while marking where the capability actually lives. The ACMM evaluation detects capability by file existence, which cannot distinguish a repo that never built something from a repo that deliberately moved it off-repo — so a maintainer who removes a workflow for a good reason is scored as having lost the capability, and the cheapest way to restore the score is to put the file back. That happened concretely: `Danathar/sensi` deleted `.github/workflows/ai-fix.yml` — an in-repo agent job holding `contents`/`issues`/`pull-requests`/`id-token` write plus an API key, whose `ai-fix-requested` label gate turned out to admit whatever the issue-filing bot labelled rather than expressing a human decision — and handed that work to hive, which was already doing it at L4 across one trust boundary instead of two. Two L4 criteria (`acmm:ai-fix-workflow`, `acmm:copilot-review-apply`) name that one filename, so the security fix alone took L4 from 9/9 to 7/9. A waiver names the criterion, what satisfies it instead, and why; all three are required, and one that cannot say where the capability went is refused. Crucially a waiver **cannot advance a level**: level pass/fail is computed on detected criteria alone, so a repo that waives an entire level shows a full ratio, still does not pass it, and does not move its codebase level — waivers close the distance between *passing* and *full green*, and nothing else. Waived criteria stay visible: a chip on the row, the justification above the pattern list, and a red asterisk on the level line naming what was waived. Repos without an `.acmm.yml` pay no additional GitHub calls, since the root listing the evaluation already fetches settles it. See `src/docs/acmm-waivers.md`.
+
+### Fixed
+
+- The dashboard now explains how to configure GitHub Copilot at the point where operators were getting stuck ([#6319](https://github.com/hivecommons/hive/issues/6319)). Copilot intentionally does not appear under **Governor Config → Model Gateways** because it is a subscription CLI backend rather than an OpenAI-compatible gateway, but the tab previously neither explained that distinction nor linked to setup documentation, making the correct absence look like missing support. The Model Gateways tab now identifies Copilot as a CLI backend, gives the complete in-dashboard path (pin an agent to Copilot, save, then use the agent card's Login action), and links directly to the Copilot inference setup guide. A dashboard regression guard pins the distinction, instructions, link safety attributes, and placement before the gateway actions.
+- Goose contributor containers now inherit configured `OPENAI_HOST` and `OPENAI_BASE_PATH` values, so OpenAI-compatible local inference servers no longer silently fall back to `https://api.openai.com/v1/chat/completions` and fail authentication ([#6400](https://github.com/hivecommons/hive/issues/6400)).
+- Dashboard token-access audit endpoint now skips torn or invalid JSONL lines (reporting a `skipped` count) instead of returning an empty body when the log is read mid-append ([#6407](https://github.com/hivecommons/hive/issues/6407)).
+- The hub dashboard now keeps the full hive status hover available while a spoke is Upgrading, reusing the normal status hover panel (including namespace and access details) on the animated blue pulse indicator.
+
+### Security
+
+- The merge-request watcher now refuses to merge into a base branch that has no GitHub branch protection unless the repo is explicitly allowlisted in `auto_merge.allow_unprotected_base`, and repos with genuinely no CI can be opted in per-repo with `auto_merge.no_ci_ok` to downgrade only the "unverified" CI verdict — the default for both stays refuse (#6281)
+
 ## 2026-09-09 (v4.21.1)
 
 ### Fixed
