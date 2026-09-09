@@ -24,6 +24,26 @@ governor:
 
 ## Keeping findings current
 
+The dashboard shows each finding's original creation time and **last seen**
+time. Last seen means last reported, not last verified; older beads without
+that timestamp display `unknown`. The digest/API preserves creation time in
+`timestamp` and exposes the separate optional `last_seen_at` field.
+
+Each row also displays Hive's existing provenance-stale, cached-replay, and
+stale-file/path warnings. "No known freshness warning" is not a claim that Hive
+has re-run the finding's evidence.
+
+Explicit GitHub references in a finding's external reference, title, or detail
+appear in `linked_work`, with issue OPEN/CLOSED or PR OPEN/MERGED/CLOSED state.
+References may be GitHub URLs, `owner/repo#123`, `repo#123`, `gh-123`, or bare
+`#123` in the primary repository's context. The server resolves them once per
+distinct reference per digest (up to 250 references and 10 seconds for the
+pass); the browser makes no GitHub requests. Each successful lookup includes
+`checked_at`. Failed or skipped lookups show UNKNOWN while retaining the link.
+"No linked remediation" means the finding names no deterministic reference;
+it does not claim that no remediation exists. These annotations do not change
+the retirement rules below.
+
 A digest is only useful if the findings on it are findings that still hold. Two
 mechanisms retire the ones that do not.
 
