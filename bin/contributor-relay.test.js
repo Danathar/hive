@@ -626,6 +626,74 @@ const AGY_UNKNOWN_CHROME_WORKING = [
   '  some unrecognised footer',
 ].join('\n');
 
+// --- #6438: classifyTmuxPane's agy window must survive tmux's blank padding --
+//
+// capture-pane -p pads to the pane's full height (50 rows), and agy renders
+// inline near the top, so a raw slice(-15) window is blank padding on any short
+// transcript. hasIdlePrompt's full-text "? for shortcuts" alternative hides
+// that on builds which still print it; the bare-prompt+footer alternative --
+// the current Gemini rendering -- reads this window and cannot match when it is
+// blank, so a FINISHED turn pins to WORKING until the stall backstop fails it
+// as `environment` (the #4127 incident, whose fix widened the regex but not the
+// window it reads).
+function padToPaneHeight6438(lines, height = 50) {
+  const out = lines.slice();
+  while (out.length < height) out.push('');
+  return out.join('\n');
+}
+
+// An idle agy turn on a build with no "? for shortcuts": bare input line, rule,
+// model footer.
+const AGY_IDLE_NO_SHORTCUTS = [
+  'Antigravity CLI 1.1.27',
+  '',
+  '\u25cf Edited scripts/lib/sbom/slim.js',
+  '\u2500'.repeat(60),
+  '> ',
+  '\u2500'.repeat(60),
+  '                                                 Gemini 3.8 Flash \u00b7 high',
+];
+
+// A busy turn, short enough that its "esc to cancel" footer is also inside the
+// padding. Pinned so the fix cannot over-correct into reporting a busy agent
+// idle -- the worse bug, as the branch's own comments say.
+const AGY_BUSY_SHORT_6438 = [
+  'Antigravity CLI 1.1.27',
+  '',
+  '\u25cf Read(scripts/lib/sbom/slim.js)',
+  '\u283f  Reading file...',
+  '\u2500'.repeat(60),
+  '> ',
+  '\u2500'.repeat(60),
+  'esc to cancel                                    Gemini 3.8 Flash \u00b7 high',
+];
+
+test('#6438 a finished agy turn is COMPLETE on a blank-padded pane', () => {
+  const relay = loadRelay({ backend: 'agy' });
+  try {
+    // Control: without tmux's padding this already worked, so padding is the
+    // only variable between the two assertions.
+    assert.strictEqual(
+      relay.classifyTmuxPane(AGY_IDLE_NO_SHORTCUTS.join('\n')),
+      relay.PANE_STATE_IDLE_COMPLETE,
+      'control: the unpadded idle rendering was already COMPLETE');
+    assert.strictEqual(
+      relay.classifyTmuxPane(padToPaneHeight6438(AGY_IDLE_NO_SHORTCUTS)),
+      relay.PANE_STATE_IDLE_COMPLETE,
+      'a finished turn on a real (blank-padded) capture must not pin to WORKING — the stall backstop then fails a task that already shipped its work');
+  } finally { teardown(relay); }
+});
+
+test('#6438 a busy agy pane is still WORKING when padding hides its footer', () => {
+  const relay = loadRelay({ backend: 'agy' });
+  try {
+    assert.strictEqual(
+      relay.classifyTmuxPane(padToPaneHeight6438(AGY_BUSY_SHORT_6438)),
+      relay.PANE_STATE_WORKING,
+      'reporting a busy agent as idle is the worse direction; the fix must not buy idle detection at that price');
+  } finally { teardown(relay); }
+});
+
 test('a finished agy turn is COMPLETE even when its summary contains an activity verb', () => {
   const relay = loadRelay({ backend: 'agy' });
   try {
