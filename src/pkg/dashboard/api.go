@@ -384,6 +384,9 @@ var (
 	// versionChannel is the release channel the Deployment image tracks, ""
 	// when not channel-delivered (see SetReleaseChannel).
 	versionChannel = ""
+	// versionImageSource uses the existing cached Deployment lookup on each
+	// poll, allowing a failed initial read to recover after its cache expires.
+	versionImageSource func() string
 )
 
 // defaultUpstreamBranch is the fallback branch for the self-version check
@@ -412,9 +415,18 @@ func SetGitBranch(branch string) {
 // tracks ("stable"/"candidate"/"edge"), or "" when it tracks a branch tag or
 // SHA pin. Display-only: the navbar badge shows "stable (v4)" instead of the
 // bare built-from branch. The upstream comparison logic is untouched — the
-// binary is still a build of versionBranch.
+// binary is still a build of versionBranch. SetDeploymentImageSource takes
+// precedence when installed, so runtime image changes cannot leave a stale
+// startup channel in the response. Call setters only before serving requests.
 func SetReleaseChannel(channel string) {
 	versionChannel = channel
+}
+
+// SetDeploymentImageSource installs the cached Deployment image lookup before
+// the server starts. Channel and tracking are derived from the same snapshot.
+// Invalid refs are omitted from the API and reported as unknown tracking.
+func SetDeploymentImageSource(source func() string) {
+	versionImageSource = source
 }
 
 // upstreamBranch returns the branch to compare against for the self-version
@@ -662,15 +674,25 @@ func (s *Server) autoMergeLabel() string {
 }
 
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
-	resp := map[string]interface{}{
-		"version": "2.0.0",
-		"go":      "1.25",
-		"hash":    versionHash,
-		"short":   versionShort,
-		"branch":  upstreamBranch(),
+	imageRef, channel := "", versionChannel
+	if versionImageSource != nil {
+		imageRef = versionImageSource()
+		channel = hub.ImageReleaseChannel(imageRef)
 	}
-	if versionChannel != "" {
-		resp["channel"] = versionChannel
+	tracking := hub.ImageTrackingMode(imageRef)
+	resp := map[string]interface{}{
+		"version":  "2.0.0",
+		"go":       "1.25",
+		"hash":     versionHash,
+		"short":    versionShort,
+		"branch":   upstreamBranch(),
+		"tracking": tracking,
+	}
+	if channel != "" {
+		resp["channel"] = channel
+	}
+	if tracking != "unknown" {
+		resp["imageRef"] = imageRef
 	}
 	// autoUpgrade tells the dashboard whether the hub manages this spoke's
 	// upgrades. When true the manual spoke Upgrade button is hidden — the hub
