@@ -1,1 +1,0 @@
-- Goose contributor containers now inherit configured `OPENAI_HOST` and `OPENAI_BASE_PATH` values, so OpenAI-compatible local inference servers no longer silently fall back to `https://api.openai.com/v1/chat/completions` and fail authentication ([#6400](https://github.com/hivecommons/hive/issues/6400)).
