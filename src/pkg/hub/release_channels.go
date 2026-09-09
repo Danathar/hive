@@ -8,6 +8,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/hivecommons/hive/pkg/imageref"
 )
 
 // Release channels are MOVING container tags published by
@@ -57,12 +59,7 @@ func ReleaseChannels() []string {
 // branch — "stable" is a tag, not a ref, so the git-branch existence check
 // would reject it.
 func isReleaseChannel(tag string) bool {
-	for _, c := range releaseChannels {
-		if c == tag {
-			return true
-		}
-	}
-	return false
+	return imageref.IsReleaseChannel(tag)
 }
 
 // upgradeTargetTag maps a branch-switch target to the GHCR tag to pin. A

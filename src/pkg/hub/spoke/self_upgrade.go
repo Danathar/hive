@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/hivecommons/hive/pkg/imageref"
 )
 
 const (
@@ -114,33 +116,25 @@ func SwitchImageSelf(logger *slog.Logger, image string) error {
 	return nil
 }
 
-// mutableTagSuffix marks image tags that CI republishes in place (v2-latest,
-// v3-latest, mk-latest, ...). A restart re-pulls those and lands on the new
-// build; any other tag is an immutable SHA pin where a restart is a no-op.
+// mutableTagSuffix is retained for image-tag validation, which accepts the
+// same per-branch moving-tag shape as the shared provenance classifier.
 const mutableTagSuffix = "-latest"
 
 // imageTagIsMutable reports whether restarting the pod can pick up new code for
 // this image reference. Digest pins (@sha256:...) and SHA tags never can.
 func imageTagIsMutable(image string) bool {
-	if image == "" || strings.Contains(image, "@") {
-		return false
-	}
-	// Only the part after the LAST colon is a tag, and only if it has no slash
-	// after it — otherwise it's a registry port (host:5000/repo).
-	idx := strings.LastIndex(image, ":")
-	if idx < 0 || strings.Contains(image[idx+1:], "/") {
-		return false // no tag at all — implicitly :latest, but don't guess
-	}
-	tag := image[idx+1:]
-	// Release-channel tags ("stable"/"candidate"/"edge") are retagged digests —
-	// mutable by definition, even though they carry no "-latest" suffix.
-	// Without this, a channel-tracking hive classifies as an immutable pin and
-	// a delivered upgrade rewrites its image to a SHA tag, silently un-tracking
-	// the channel in-cluster.
-	if isReleaseChannel(tag) {
-		return true
-	}
-	return strings.HasSuffix(tag, mutableTagSuffix)
+	return imageref.IsMutable(image)
+}
+
+// ImageTrackingMode returns the shared operator-facing classification for a
+// Deployment image reference: "floating", "pinned", or "unknown".
+func ImageTrackingMode(image string) string {
+	return string(imageref.Tracking(image))
+}
+
+// ImageReleaseChannel returns the explicit channel of a valid deployment ref.
+func ImageReleaseChannel(image string) string {
+	return imageref.ReleaseChannel(image)
 }
 
 // UpgradeSelfToSHA moves this pod onto targetSHA and returns whether a restart
@@ -416,6 +410,13 @@ var (
 	selfImageAttempted bool
 )
 
+// SelfImageReleaseChannel returns the explicit channel in the validated
+// Deployment ref. It inherits SelfDeploymentImage's caching and returns an
+// empty string when discovery fails or the ref has no known channel.
+func SelfImageReleaseChannel() string {
+	return ImageReleaseChannel(SelfDeploymentImage())
+}
+
 // SelfDeploymentImage returns this pod's own Deployment image, cached.
 //
 // It is exported for the SPOKE's heartbeat collector: the hub cannot read a
@@ -427,21 +428,6 @@ var (
 // detection skips the pinned-image signal rather than inventing one. A failed
 // read is cached the same as a successful one so a non-cluster process does
 // not retry an API call it can never satisfy on every heartbeat.
-// SelfImageReleaseChannel returns the release-channel name ("stable",
-// "candidate", "edge") when this pod's own Deployment image tag IS a channel
-// tag, else "". The spoke's dashboard uses it to label its version badge
-// "stable (v4)" instead of the bare baked-in branch — the binary itself has no
-// idea it was delivered via a channel (a stable retag of a v4 build is built
-// from v4), only the deployment's image tag knows. Inherits
-// SelfDeploymentImage's caching and its "" on any failure.
-func SelfImageReleaseChannel() string {
-	tag := imageTagOf(SelfDeploymentImage())
-	if isReleaseChannel(tag) {
-		return tag
-	}
-	return ""
-}
-
 func SelfDeploymentImage() string {
 	selfImageMu.RLock()
 	if selfImageAttempted && time.Since(selfImageFetched) < selfImageCacheTTL {

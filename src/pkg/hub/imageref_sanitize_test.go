@@ -1,6 +1,9 @@
 package hub
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestSanitizeImageRefRoundTrip pins the bug that made 11 healthy hives render
 // a CRITICAL "pinned-image" badge: the shared heartbeat sanitizer's allowlist
@@ -105,7 +108,8 @@ func TestImageRefTagParseFailureIsSilent(t *testing.T) {
 		{"empty", "", false, "unknown image"},
 		{"sha tag pin", "ghcr.io/hivecommons/hive:63d8902", true, "genuine pin — MUST still be flagged"},
 		{"release tag pin", "ghcr.io/hivecommons/hive:v2.1.0", true, "immutable release tag is a real pin"},
-		{"digest pin", "ghcr.io/hivecommons/hive@sha256:abc123", true, "digest pin is a real pin"},
+		{"digest pin", "ghcr.io/hivecommons/hive@sha256:" + strings.Repeat("a", 64), true, "digest pin is a real pin"},
+		{"truncated digest", "ghcr.io/hivecommons/hive@sha256:abc123", false, "malformed digest is unknown"},
 		{"port plus sha pin", "registry.internal:5000/hivecommons/hive:63d8902", true, "genuine pin behind a port"},
 	}
 	for _, c := range cases {
@@ -132,7 +136,8 @@ func TestComputeDriftNoPinnedSignalForMangledRef(t *testing.T) {
 		{"healthy rolling tag", "ghcr.io/hivecommons/hive:v2-latest", false},
 		{"mangled colonless ref", "ghcr.io/hivecommons/hivev2-latest", false},
 		{"genuine sha pin", "ghcr.io/hivecommons/hive:63d8902", true},
-		{"genuine digest pin", "ghcr.io/hivecommons/hive@sha256:abc123", true},
+		{"genuine digest pin", "ghcr.io/hivecommons/hive@sha256:" + strings.Repeat("a", 64), true},
+		{"malformed digest", "ghcr.io/hivecommons/hive@sha256:abc123", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
