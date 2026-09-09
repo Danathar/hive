@@ -11,6 +11,16 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-09 (v4.23.0)
+
+### Added
+
+- The dashboard's release-channel rows now show how far each channel is from the stage immediately upstream of it — stable against candidate, candidate against edge — so "how much is waiting to be promoted into stable?" is answerable without leaving the page for a GitHub compare view. Each channel is measured against its ADJACENT stage rather than against the newest one: a stable-vs-edge number would roughly restate candidate's own backlog while hiding which hop is actually stalled. Diverged tracks show both counts (`↓7 ↑3`) instead of a single direction, because the channels routinely follow different branches and one signed number would misreport that. A compare that cannot be resolved renders no distance at all rather than `0`, since "level with upstream" is the one answer that must never be guessed.
+
+### Fixed
+
+- Contributor relay: agy readiness/login/onboarding detection no longer reads a blank pane tail, so interactive agy contributors become ready and receive tasks ([#6413](https://github.com/hivecommons/hive/issues/6413)).
+
 ## 2026-09-09 (v4.22.1)
 
 ### Fixed
