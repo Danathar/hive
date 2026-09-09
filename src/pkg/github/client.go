@@ -443,17 +443,51 @@ func mergeableFromState(state string, mergeable *bool) Mergeable {
 }
 
 type ActionableResult struct {
-	GeneratedAt time.Time             `json:"generated_at"`
-	Issues      IssueResult           `json:"issues"`
-	PRs         PRResult              `json:"prs"`
-	Hold        HoldResult            `json:"hold"`
-	Clusters    []IssueCluster        `json:"clusters,omitempty"`
-	TotalByRepo map[string]RepoCounts `json:"total_by_repo,omitempty"`
+	GeneratedAt         time.Time                    `json:"generated_at"`
+	Issues              IssueResult                  `json:"issues"`
+	PRs                 PRResult                     `json:"prs"`
+	Hold                HoldResult                   `json:"hold"`
+	Clusters            []IssueCluster               `json:"clusters,omitempty"`
+	TotalByRepo         map[string]RepoCounts        `json:"total_by_repo,omitempty"`
+	WorkBreakdownByRepo map[string]RepoWorkBreakdown `json:"work_breakdown_by_repo,omitempty"`
 }
 
 type RepoCounts struct {
 	Issues int `json:"issues"`
 	PRs    int `json:"prs"`
+}
+
+// RepoWorkBreakdown explains the raw open issue and PR totals for one
+// repository. Enumeration assigns every raw item to exactly one primary
+// bucket at the same choice point that determines whether it is actionable.
+type RepoWorkBreakdown struct {
+	Issues RepoIssueBreakdown `json:"issues"`
+	PRs    RepoPRBreakdown    `json:"prs"`
+}
+
+type RepoIssueBreakdown struct {
+	Actionable          int `json:"actionable"`
+	Hold                int `json:"hold"`
+	HiveAdvisory        int `json:"hive_advisory"`
+	DependencyDashboard int `json:"dependency_dashboard"`
+	Filtered            int `json:"filtered"`
+	Other               int `json:"other"`
+}
+
+func (b RepoIssueBreakdown) Total() int {
+	return b.Actionable + b.Hold + b.HiveAdvisory + b.DependencyDashboard + b.Filtered + b.Other
+}
+
+type RepoPRBreakdown struct {
+	Actionable int `json:"actionable"`
+	Hold       int `json:"hold"`
+	Draft      int `json:"draft"`
+	Filtered   int `json:"filtered"`
+	Other      int `json:"other"`
+}
+
+func (b RepoPRBreakdown) Total() int {
+	return b.Actionable + b.Hold + b.Draft + b.Filtered + b.Other
 }
 
 type IssueResult struct {
@@ -699,6 +733,7 @@ func (c *Client) EnumerateActionable(ctx context.Context) (*ActionableResult, er
 	var holdItems []HoldItem
 	var allStaleDrafts []PullRequest
 	totalByRepo := make(map[string]RepoCounts)
+	workBreakdownByRepo := make(map[string]RepoWorkBreakdown)
 
 	// activeRepos, not getRepos: a paused repo must produce no actionable
 	// issues or PRs, so no kick, claim or advisory built from this result can
@@ -708,7 +743,7 @@ func (c *Client) EnumerateActionable(ctx context.Context) (*ActionableResult, er
 	failedRepos := 0
 	var lastFetchErr error
 	for _, repo := range repos {
-		issues, held, issueTotal, err := c.fetchIssues(ctx, repo, now)
+		issues, held, issueTotal, issueBreakdown, err := c.fetchIssues(ctx, repo, now)
 		if err != nil {
 			c.logger.Warn("failed to fetch issues", "repo", repo, "error", err)
 			failedRepos++
@@ -718,7 +753,7 @@ func (c *Client) EnumerateActionable(ctx context.Context) (*ActionableResult, er
 		allIssues = append(allIssues, issues...)
 		holdItems = append(holdItems, held...)
 
-		prs, heldPRs, staleDrafts, prTotal, err := c.fetchPRs(ctx, repo)
+		prs, heldPRs, staleDrafts, prTotal, prBreakdown, err := c.fetchPRs(ctx, repo)
 		if err != nil {
 			// Issues for this repo were already collected; a PR-only failure
 			// is partial and must not count toward the all-repos-failed guard,
@@ -731,6 +766,7 @@ func (c *Client) EnumerateActionable(ctx context.Context) (*ActionableResult, er
 		allStaleDrafts = append(allStaleDrafts, staleDrafts...)
 
 		totalByRepo[repo] = RepoCounts{Issues: issueTotal, PRs: prTotal}
+		workBreakdownByRepo[repo] = RepoWorkBreakdown{Issues: issueBreakdown, PRs: prBreakdown}
 	}
 
 	// If every repo failed (e.g. API rate limit exhausted), returning a
@@ -767,6 +803,7 @@ func (c *Client) EnumerateActionable(ctx context.Context) (*ActionableResult, er
 		Items:  holdItems,
 	}
 	result.TotalByRepo = totalByRepo
+	result.WorkBreakdownByRepo = workBreakdownByRepo
 
 	return result, nil
 }
@@ -780,7 +817,7 @@ func (c *Client) splitRepo(repo string) (owner, repoName string) {
 	return c.org, repo
 }
 
-func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time) (actionable []Issue, held []HoldItem, totalIssues int, err error) {
+func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time) (actionable []Issue, held []HoldItem, totalIssues int, breakdown RepoIssueBreakdown, err error) {
 	issueFilter := c.getIssueFilter()
 	owner, repoName := c.splitRepo(repo)
 	opts := &gh.IssueListByRepoOptions{
@@ -792,7 +829,7 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time) (a
 	for {
 		issues, resp, err := c.client.Issues.ListByRepo(ctx, owner, repoName, opts)
 		if err != nil {
-			return nil, nil, 0, fmt.Errorf("listing issues for %s/%s: %w", owner, repoName, err)
+			return nil, nil, 0, RepoIssueBreakdown{}, fmt.Errorf("listing issues for %s/%s: %w", owner, repoName, err)
 		}
 		allIssues = append(allIssues, issues...)
 		if resp.NextPage == 0 {
@@ -808,8 +845,17 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time) (a
 
 		totalIssues++
 		labels := extractLabels(issue.Labels)
+		switch standingMetaIssueKindFor(issue.GetTitle(), safeGetLogin(issue.GetUser()), labels) {
+		case standingMetaHiveAdvisory:
+			breakdown.HiveAdvisory++
+			continue
+		case standingMetaDependencyDashboard:
+			breakdown.DependencyDashboard++
+			continue
+		}
 
 		if isHeld(labels) {
+			breakdown.Hold++
 			held = append(held, HoldItem{
 				Number: issue.GetNumber(),
 				Repo:   repo,
@@ -820,6 +866,7 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time) (a
 		}
 
 		if c.isExempt(labels) {
+			breakdown.Filtered++
 			continue
 		}
 
@@ -835,11 +882,13 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time) (a
 		// of governor.labels.exempt (the dashboard Labels tab) — which
 		// therefore wins over the require gate by construction.
 		if !issueFilter.Admits(labels) {
+			breakdown.Filtered++
 			continue
 		}
 
 		ageMinutes := int(now.Sub(issue.GetCreatedAt().Time).Minutes())
 
+		breakdown.Actionable++
 		actionable = append(actionable, Issue{
 			Repo:       repo,
 			Number:     issue.GetNumber(),
@@ -855,7 +904,13 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time) (a
 		})
 	}
 
-	return actionable, held, totalIssues, nil
+	// Keep an honest fallback if a future exclusion path is added without a
+	// dedicated category. This is the same enumeration snapshot, not a second
+	// scan or a browser-side subtraction.
+	if unclassified := totalIssues - breakdown.Total(); unclassified > 0 {
+		breakdown.Other += unclassified
+	}
+	return actionable, held, totalIssues, breakdown, nil
 }
 
 // staleDraftAfter matches the age threshold the scanner kick prompt already
@@ -865,7 +920,7 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time) (a
 // this way — a human's stale draft is their call, not ours to nag about.
 const staleDraftAfter = 48 * time.Hour
 
-func (c *Client) fetchPRs(ctx context.Context, repo string) (actionable []PullRequest, held []HoldItem, staleDrafts []PullRequest, totalPRs int, err error) {
+func (c *Client) fetchPRs(ctx context.Context, repo string) (actionable []PullRequest, held []HoldItem, staleDrafts []PullRequest, totalPRs int, breakdown RepoPRBreakdown, err error) {
 	now := time.Now()
 	owner, repoName := c.splitRepo(repo)
 	opts := &gh.PullRequestListOptions{
@@ -877,7 +932,7 @@ func (c *Client) fetchPRs(ctx context.Context, repo string) (actionable []PullRe
 	for {
 		prs, resp, err := c.client.PullRequests.List(ctx, owner, repoName, opts)
 		if err != nil {
-			return nil, nil, nil, 0, fmt.Errorf("listing PRs for %s/%s: %w", owner, repoName, err)
+			return nil, nil, nil, 0, RepoPRBreakdown{}, fmt.Errorf("listing PRs for %s/%s: %w", owner, repoName, err)
 		}
 		allPRs = append(allPRs, prs...)
 		if resp.NextPage == 0 {
@@ -891,6 +946,7 @@ func (c *Client) fetchPRs(ctx context.Context, repo string) (actionable []PullRe
 		labels := extractPRLabels(pr.Labels)
 
 		if isHeld(labels) {
+			breakdown.Hold++
 			heldHeadSHA := ""
 			if pr.GetHead() != nil {
 				heldHeadSHA = pr.GetHead().GetSHA()
@@ -907,10 +963,12 @@ func (c *Client) fetchPRs(ctx context.Context, repo string) (actionable []PullRe
 		}
 
 		if c.isExempt(labels) {
+			breakdown.Filtered++
 			continue
 		}
 
 		if pr.GetDraft() {
+			breakdown.Draft++
 			author := safeGetLogin(pr.GetUser())
 			if strings.EqualFold(author, c.appBotLogin) && now.Sub(pr.GetCreatedAt().Time) > staleDraftAfter {
 				staleDrafts = append(staleDrafts, PullRequest{
@@ -936,6 +994,7 @@ func (c *Client) fetchPRs(ctx context.Context, repo string) (actionable []PullRe
 			baseSHA = pr.GetBase().GetSHA()
 		}
 
+		breakdown.Actionable++
 		actionable = append(actionable, PullRequest{
 			Repo:      repo,
 			Number:    pr.GetNumber(),
@@ -955,7 +1014,10 @@ func (c *Client) fetchPRs(ctx context.Context, repo string) (actionable []PullRe
 		})
 	}
 
-	return actionable, held, staleDrafts, totalPRs, nil
+	if unclassified := totalPRs - breakdown.Total(); unclassified > 0 {
+		breakdown.Other += unclassified
+	}
+	return actionable, held, staleDrafts, totalPRs, breakdown, nil
 }
 
 // EnrichCIStatus fetches check-run results for each PR's HEAD commit

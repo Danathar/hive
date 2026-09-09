@@ -1240,8 +1240,11 @@
     .repo-pause-btn[data-busy="1"] { opacity: 0.5; cursor: default; }
     .repo-name a:hover { text-decoration: underline !important; }
     .repo-stats { display: flex; gap: 16px; font-size: 0.8rem; }
+    .repo-stat { flex: 1 1 0; min-width: 0; }
     .repo-stat .num { font-weight: 700; font-size: 1rem; }
     .repo-stat .label { color: var(--muted); font-size: 0.7rem; }
+    .repo-breakdown { color: var(--muted); font-size: 0.64rem; line-height: 1.35; margin-top: 4px; }
+    .repo-breakdown .repo-breakdown-actionable { color: var(--fg); }
     .repo-stat a:hover { text-decoration: underline !important; }
     .repo-stat a:hover .label { color: var(--fg); }
     .repo-issues { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--border); }
@@ -7808,6 +7811,30 @@
       }
     }
 
+    function formatRepoWorkBreakdown(breakdown, total, kind) {
+      if (!breakdown || total <= 0) return '';
+      const categories = kind === 'issues'
+        ? [
+            ['actionable', 'actionable'],
+            ['hold', 'hold'],
+            ['hive_advisory', 'advisory'],
+            ['dependency_dashboard', 'dependency dashboard'],
+            ['filtered', 'filtered'],
+            ['other', 'other']
+          ]
+        : [
+            ['actionable', 'actionable'],
+            ['hold', 'hold'],
+            ['draft', 'draft'],
+            ['filtered', 'filtered'],
+            ['other', 'other']
+          ];
+      const parts = categories
+        .filter(([key]) => key === 'actionable' || Number(breakdown[key] || 0) > 0)
+        .map(([key, label]) => `<span${key === 'actionable' ? ' class="repo-breakdown-actionable"' : ''}>${Number(breakdown[key] || 0)} ${label}</span>`);
+      return `<div class="repo-breakdown">${parts.join(' · ')}</div>`;
+    }
+
     function renderRepos(repos) {
       const el = document.getElementById('repos');
       const showPlan = planningAllowed();
@@ -7851,6 +7878,8 @@
         const iSpark = sparkSvg(historyData.map(s => s.repos?.[r.name]?.issues ?? 0), 'var(--blue)');
         const pSpark = sparkSvg(historyData.map(s => s.repos?.[r.name]?.prs ?? 0), 'var(--purple)');
         const repoUrl = (window._githubBaseUrl || 'https://github.com') + '/' + (r.full || r.name);
+        const issueBreakdown = formatRepoWorkBreakdown(r.workBreakdown?.issues, r.issues, 'issues');
+        const prBreakdown = formatRepoWorkBreakdown(r.workBreakdown?.prs, r.prs, 'prs');
         const MAX_PILL_TITLE_LEN = 50;
         const issuePills = (r.actionableIssues || []).map(i => {
           const title = i.title && i.title.length > MAX_PILL_TITLE_LEN ? i.title.slice(0, MAX_PILL_TITLE_LEN) + '…' : (i.title || '');
@@ -7922,8 +7951,8 @@
           <div style="font-size:0.62rem;font-weight:600;letter-spacing:0.02em;color:${isPublic ? 'var(--muted)' : 'var(--indigo)'};margin-bottom:2px" title="This repo lives on ${esc(hostLabel)}${isPublic ? '' : ' (GitHub Enterprise), not public github.com'}">${esc(hostLabel)}${isPublic ? '' : ' · Enterprise'}</div>
           <div class="repo-name"><a href="${esc(repoUrl)}" target="_blank" rel="noopener" style="color:inherit;text-decoration:none">${esc(r.full || r.name)}</a>${pausedPill}${pauseBtn}</div>
           <div class="repo-stats">
-            <div class="repo-stat"><a href="${esc(repoUrl)}/issues" target="_blank" rel="noopener" style="color:inherit;text-decoration:none"><div class="spark-row"><span class="num">${r.issues >= 0 ? r.issues : '?'}</span>${iSpark}</div><div class="label">issues</div></a></div>
-            <div class="repo-stat"><a href="${esc(repoUrl)}/pulls" target="_blank" rel="noopener" style="color:inherit;text-decoration:none"><div class="spark-row"><span class="num">${r.prs >= 0 ? r.prs : '?'}</span>${pSpark}</div><div class="label">PRs</div></a></div>
+            <div class="repo-stat"><a href="${esc(repoUrl)}/issues" target="_blank" rel="noopener" style="color:inherit;text-decoration:none"><div class="spark-row"><span class="num">${r.issues >= 0 ? r.issues : '?'}</span>${iSpark}</div><div class="label">issues</div></a>${issueBreakdown}</div>
+            <div class="repo-stat"><a href="${esc(repoUrl)}/pulls" target="_blank" rel="noopener" style="color:inherit;text-decoration:none"><div class="spark-row"><span class="num">${r.prs >= 0 ? r.prs : '?'}</span>${pSpark}</div><div class="label">PRs</div></a>${prBreakdown}</div>
           </div>${pillsHtml}
         </div>`;
       }).join(''));

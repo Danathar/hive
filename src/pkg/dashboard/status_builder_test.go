@@ -191,6 +191,10 @@ func TestBuildRepos(t *testing.T) {
 			"repo1": {Issues: 1, PRs: 0},
 			"repo2": {Issues: 0, PRs: 1},
 		},
+		WorkBreakdownByRepo: map[string]github.RepoWorkBreakdown{
+			"repo1": {Issues: github.RepoIssueBreakdown{Actionable: 1}},
+			"repo2": {PRs: github.RepoPRBreakdown{Draft: 1}},
+		},
 	}
 
 	repos := buildRepos(cfg, actionable)
@@ -206,6 +210,12 @@ func TestBuildRepos(t *testing.T) {
 	if repos[0].Issues != 1 {
 		t.Errorf("issues = %d", repos[0].Issues)
 	}
+	if repos[0].WorkBreakdown == nil || repos[0].WorkBreakdown.Issues.Actionable != 1 {
+		t.Errorf("issue breakdown = %+v", repos[0].WorkBreakdown)
+	}
+	if repos[1].WorkBreakdown == nil || repos[1].WorkBreakdown.PRs.Draft != 1 {
+		t.Errorf("PR breakdown = %+v", repos[1].WorkBreakdown)
+	}
 }
 
 func TestBuildRepos_NilActionable(t *testing.T) {
@@ -218,6 +228,9 @@ func TestBuildRepos_NilActionable(t *testing.T) {
 	}
 	if repos[0].Issues != 0 {
 		t.Errorf("issues = %d", repos[0].Issues)
+	}
+	if repos[0].WorkBreakdown != nil {
+		t.Errorf("work breakdown = %+v, want nil when no classified scan exists", repos[0].WorkBreakdown)
 	}
 }
 
