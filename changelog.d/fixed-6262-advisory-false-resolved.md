@@ -1,1 +1,0 @@
-- Fixed the Advisory Digest so findings that are merely absent from later agent output stay open and are marked unverified instead of appearing as "Recently Resolved" without positive resolution evidence.
