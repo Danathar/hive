@@ -1972,6 +1972,10 @@ func main() {
 		if set, ok := cfg.AutoMerge.RequiredCheckSet(); ok {
 			ghClient.SetRequiredChecks(set)
 		}
+		// Merge-request policy (#6281): per-repo unprotected-base allowlist
+		// and no-CI opt-in for the merge-request watcher's gates. Installed
+		// unconditionally — nil sets mean "refuse everywhere" (fail closed).
+		ghClient.SetMergeRequestPolicy(cfg.AutoMerge.AllowUnprotectedBaseSet(), cfg.AutoMerge.NoCIOKSet())
 
 		// Self-authored auto-merge: the App merges its OWN open, CI-green PRs
 		// directly over the REST API, without a human "Approved ... for Hive
@@ -2971,6 +2975,7 @@ func main() {
 			if set, ok := cfg.AutoMerge.RequiredCheckSet(); ok {
 				newClient.SetRequiredChecks(set)
 			}
+			newClient.SetMergeRequestPolicy(cfg.AutoMerge.AllowUnprotectedBaseSet(), cfg.AutoMerge.NoCIOKSet())
 
 			ghClient = newClient
 			appAuth = newAppAuth
@@ -3430,6 +3435,7 @@ func main() {
 					if set, ok := cfg.AutoMerge.RequiredCheckSet(); ok {
 						newClient.SetRequiredChecks(set)
 					}
+					newClient.SetMergeRequestPolicy(cfg.AutoMerge.AllowUnprotectedBaseSet(), cfg.AutoMerge.NoCIOKSet())
 					ghClient = newClient
 					appAuth = newAppAuth
 					agentMgr.SetAppAuth(newAppAuth)
@@ -4841,6 +4847,7 @@ func main() {
 				if set, ok := cfg.AutoMerge.RequiredCheckSet(); ok {
 					newClient.SetRequiredChecks(set)
 				}
+				newClient.SetMergeRequestPolicy(cfg.AutoMerge.AllowUnprotectedBaseSet(), cfg.AutoMerge.NoCIOKSet())
 				ghClient = newClient
 				appAuth = newAppAuth
 				agentMgr.SetAppAuth(newAppAuth)
