@@ -11,6 +11,33 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-09 (v4.23.2)
+
+### Changed
+
+- Converged the JS contributor relay's pane-tail helper onto a single
+  non-blank-lines semantics — the last *n* non-blank rows of a
+  `tmux capture-pane -p` dump, matching the Go agent manager's `paneTail`,
+  which has always filtered blanks this way. The relay previously kept a
+  second helper, `paneTailNonBlank`, beside the original blank-including
+  `paneTail`, so the four `TRANSIENT_API_ERROR_TAIL_LINES` detectors stayed on
+  the blank-including tail and were blind to a retryable API error on any CLI
+  that renders inline near the top of its pane — the same shape that caused
+  agy contributors to get stuck at `starting` forever
+  ([#6413](https://github.com/hivecommons/hive/issues/6413)). `paneTail` now
+  has the one semantics everywhere it is used, `paneTailNonBlank` is gone, and
+  new shared golden fixtures under `bin/testdata/pane-fixtures/` are asserted
+  against by both `bin/contributor-relay.test.js` and a new
+  `src/pkg/agent/pane_fixtures_test.go`, so the JS and Go implementations
+  cannot silently diverge again
+  ([#6427](https://github.com/hivecommons/hive/issues/6427)).
+
+### Fixed
+
+- Fixed the `hive.kubestellar.io` legacy redirect dropping the request path and query string on every hop to `hive.hivecommons.dev`, which was destroying GA4 landing-page and campaign-attribution data for the hub; added a drop-detection arm to `bin/ga4-anomaly-detector.sh` so a future traffic collapse (not just a traffic spike) is flagged ([#6430](https://github.com/hivecommons/hive/issues/6430)).
+- The relay's "needs authentication" banner now names the backend that is actually blocked and gives that backend's own remedy ([#6437](https://github.com/hivecommons/hive/issues/6437)). `getCLIState()` reports `needs-login` for `claude`, `copilot`, `gemini`, `bob` and `agy`, but the banner was one hardcoded block announcing "Claude Code needs authentication" and "Then type: /login" for all five — so an operator whose `bob` contributor was blocked on a missing `BOBSHELL_API_KEY` was told to attach to the pane and type a slash command that cannot help. The box is also sized to its contents, so a container-mode attach command no longer overflows the border.
+- A finished `agy` turn is no longer pinned to WORKING and failed by the stall backstop on builds that do not print `? for shortcuts` ([#6438](https://github.com/hivecommons/hive/issues/6438)). `classifyTmuxPane()`'s agy window still used a raw `slice(-15)`, so on a pane shorter than the 50 rows `tmux capture-pane -p` always pads to, it read nothing but blank padding — the same defect [#6413](https://github.com/hivecommons/hive/issues/6413) fixed in `getCLIState()`. It now uses the `paneTailNonBlank()` helper that fix introduced, which is what makes the bare-prompt-plus-model-footer idle rendering reachable again.
+
 ## 2026-09-09 (v4.23.1)
 
 ### Fixed
