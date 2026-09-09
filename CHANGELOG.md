@@ -11,6 +11,55 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-09 (v4.23.1)
+
+### Fixed
+
+- Hardened the `curl` release-tarball download retries in `src/Dockerfile`,
+  `src/Dockerfile.contributor`, and the Dockerfile test fixtures under
+  `src/deploy/` so the existing `--retry-max-time` budget is actually usable:
+  a fixed `--retry-delay 5` with `--retry 8` exhausted all retries in ~40s,
+  so a GitHub release-asset outage lasting longer than a minute failed the
+  build even though a 300s (or 600s) time budget was declared. `--retry` is
+  now 30 (300s budget) or 60 (600s budget) with `--retry-delay 10`, so the
+  full time budget can be spent absorbing a multi-minute upstream 5xx
+  incident ([#6422](https://github.com/hivecommons/hive/issues/6422)).
+- Fixed the hub advertising the retired `hive.kubestellar.io` domain to search
+  engines, social unfurlers and API users. Every public page's `og:url` still
+  named the old host — including the metadata every shared link to `/dashboard`
+  renders from — and no page carried a `rel="canonical"` at all. That matters
+  more than it looks: the legacy host's redirect to `hive.hivecommons.dev`
+  **drops the path**, so every legacy URL lands on the homepage rather than the
+  page that was linked, and with `og:url` as the only canonical signal the hub
+  was pointing crawlers at a domain it no longer serves. All seven pages now
+  carry a self-referencing canonical on the current host, and `og:url` agrees
+  with it. The `/fleet` page gets one for a second reason: `/my-hives` redirects
+  to it, so two paths served one page with nothing naming the preferred one.
+- Fixed the copy-pasteable `curl` examples in the API documentation, which named
+  the retired host and so returned the homepage's HTML instead of JSON (#5925).
+- Fixed hosted-tenant links in the hub dashboard pointing at the retired
+  `hive.kubestellar.io` domain. The dashboard builds `<id>.<domain>` URLs for
+  hosted hives that carry no explicit dashboard URL, and it built them from a
+  hardcoded hostname, so they kept naming the pre-move domain after the fleet
+  moved to `hive.hivecommons.dev`. That is not a cosmetic staleness: the
+  retired name is outside the wildcard certificate the fleet now serves, so
+  those links did not redirect — the browser refused the TLS handshake and
+  showed a certificate warning instead of the tenant's hive. The dashboard now
+  takes the parent domain from the server (`hub_spoke_domain`, derived from
+  `HIVE_HUB_SPOKE_DOMAIN`) and suppresses the link entirely when the domain is
+  not yet known, rather than guessing a host (#5925).
+
+- Fixed the same hardcoded domain in the public landing page's "Contribute Now"
+  and "Open Contribute Page" links. That page is static and cannot be handed the
+  configured domain, so it now derives it from the host it is served on — which
+  is the hub's own host, and therefore the domain hosted spokes hang off — and
+  omits the link when it cannot be derived rather than emitting a guessed one
+  (#5925).
+
+### Security
+
+- Refuse a `workflow_dispatch` `release_sha` for `docker.yml` that is not an ancestor of the dispatched branch, closing a path where any `actions: write` principal could publish an unreviewed commit under a release line's moving tags ([#6419](https://github.com/hivecommons/hive/issues/6419))
+
 ## 2026-09-09 (v4.23.0)
 
 ### Added
