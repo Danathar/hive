@@ -2081,6 +2081,7 @@ func main() {
 	}
 
 	dashSrv := dashboard.NewServerWithAuth(cfg.Dashboard.Port, cfg.Dashboard.AuthToken, logger)
+	defer dashSrv.CloseContributeHub()
 	// SIGTERM (pod roll, hive self-upgrade) kills the process and every
 	// contributor WebSocket with it, and until #5390 it did so without a word:
 	// the peer saw a bare 1006, indistinguishable from a network fault, which is

@@ -110,6 +110,7 @@ func TestReposRescanRouteRequiresDashboardAuth(t *testing.T) {
 			return sampleActionable(), nil
 		},
 	})
+	t.Cleanup(s.CloseContributeHub)
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)
 

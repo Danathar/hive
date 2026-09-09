@@ -870,6 +870,7 @@ func newFullServerWithAgents(t *testing.T) *Server {
 		SkipReloadFunc: func() {},
 	}
 	srv.RegisterAPI(srv.deps)
+	t.Cleanup(srv.CloseContributeHub)
 	return srv
 }
 

@@ -277,6 +277,9 @@ func (s *Server) BuildContributorPoolStatus() *ContributorPoolStatus {
 }
 
 func (s *Server) registerContributeRoutes() {
+	if s.contributeHub != nil {
+		s.contributeHub.Close()
+	}
 	s.contributeHub = NewContributeWSHub(s.logger, s)
 	// Seed the collaborator graph from invite attribution recorded before
 	// collaborators existed, so the dossier zone is not empty on hives that have
