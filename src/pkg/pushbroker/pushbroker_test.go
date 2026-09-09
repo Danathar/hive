@@ -55,6 +55,295 @@ func TestBrokerRejectsProtectedPaths(t *testing.T) {
 	}
 }
 
+func TestBrokerRejectsEmptyOutgoingCommitBeforePush(t *testing.T) {
+	dir := initRepo(t)
+	runGit(t, dir, "commit", "--allow-empty", "-m", "ci: retrigger tests")
+	r := &recordingRunner{}
+
+	res, err := (&Broker{Workspace: dir, Branch: "work", Repo: "hivecommons/hive", Minter: fakeMinter{"ghs_pushbroker"}, Runner: r}).Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "refusing to push empty commit") {
+		t.Fatalf("Run error = %v, want empty commit rejection", err)
+	}
+	if res.Pushed || r.argsOnPush != nil {
+		t.Fatalf("broker pushed after empty commit rejection: res=%+v args=%v", res, r.argsOnPush)
+	}
+}
+
+func TestBrokerRejectsCommitMadeEmptyByNormalisation(t *testing.T) {
+	dir := initRepo(t)
+	writeCommit(t, dir, "main.go", "package main\n\nfunc main() {}\n")
+	base := strings.TrimSpace(runGitOutput(t, dir, "rev-parse", "HEAD"))
+	runGit(t, dir, "update-ref", "refs/remotes/origin/work", base)
+	writeCommit(t, dir, "main.go", "package main\n\nfunc main() {}\n\n")
+	r := &recordingRunner{}
+
+	res, err := (&Broker{Workspace: dir, Branch: "work", Repo: "hivecommons/hive", Minter: fakeMinter{"ghs_pushbroker"}, Runner: r}).Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "made empty by broker normalisation") {
+		t.Fatalf("Run error = %v, want empty commit rejection after normalisation", err)
+	}
+	if res.Pushed || r.argsOnPush != nil {
+		t.Fatalf("broker pushed after normalisation emptied the commit: res=%+v args=%v", res, r.argsOnPush)
+	}
+}
+
+func TestBrokerFirstPushEmptyGuardChecksOnlyHead(t *testing.T) {
+	dir := initRepo(t)
+	runGit(t, dir, "commit", "--allow-empty", "-m", "historical empty commit")
+	writeCommit(t, dir, "safe.txt", "new branch work\n")
+	r := &recordingRunner{}
+
+	res, err := (&Broker{Workspace: dir, Branch: "new-work", Repo: "hivecommons/hive", Minter: fakeMinter{"ghs_pushbroker"}, Runner: r}).Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v (res=%+v)", err, res)
+	}
+	if !res.Pushed {
+		t.Fatal("Pushed=false")
+	}
+}
+
+func TestRejectEmptyOutgoingCommitsSurfacesRevListFailure(t *testing.T) {
+	git := &scriptedGit{
+		replies: map[string]string{
+			"rev-parse --verify origin/main": "base\n",
+		},
+		fails: map[string]error{
+			"rev-list --reverse origin/main..HEAD": errors.New("bad revision"),
+		},
+	}
+	err := (&Broker{Workspace: fakeGitWorkspace(t), Branch: "work", BaseRef: "origin/main", Runner: git}).rejectEmptyOutgoingCommits(context.Background(), "head")
+	if err == nil || !strings.Contains(err.Error(), "reading outgoing commits for empty-commit guard") {
+		t.Fatalf("rejectEmptyOutgoingCommits error = %v, want rev-list failure", err)
+	}
+}
+
+func TestRejectEmptyOutgoingCommitsSurfacesListedCommitFailure(t *testing.T) {
+	git := &scriptedGit{
+		replies: map[string]string{
+			"rev-parse --verify origin/main":       "base\n",
+			"rev-list --reverse origin/main..HEAD": "badhead\n",
+		},
+		fails: map[string]error{
+			"rev-list --parents -n 1 badhead": errors.New("corrupt commit"),
+		},
+	}
+	err := (&Broker{Workspace: fakeGitWorkspace(t), Branch: "work", BaseRef: "origin/main", Runner: git}).rejectEmptyOutgoingCommits(context.Background(), "head")
+	if err == nil || !strings.Contains(err.Error(), "reading parents for empty-commit guard") {
+		t.Fatalf("rejectEmptyOutgoingCommits error = %v, want listed commit failure", err)
+	}
+}
+
+func TestRejectEmptyOutgoingCommitsRejectsListedEmptyCommit(t *testing.T) {
+	git := &scriptedGit{
+		replies: map[string]string{
+			"rev-parse --verify origin/main":       "base\n",
+			"rev-list --reverse origin/main..HEAD": "deadbeef\n",
+			"rev-list --parents -n 1 deadbeef":     "deadbeef parent\n",
+			"diff-tree --quiet parent deadbeef":    "",
+		},
+	}
+	err := (&Broker{Workspace: fakeGitWorkspace(t), Branch: "work", BaseRef: "origin/main", Runner: git}).rejectEmptyOutgoingCommits(context.Background(), "head")
+	if err == nil || !strings.Contains(err.Error(), "refusing to push empty commit") {
+		t.Fatalf("rejectEmptyOutgoingCommits error = %v, want empty listed commit rejection", err)
+	}
+}
+
+func TestRejectEmptyOutgoingCommitsIgnoresEmptyUnknownHead(t *testing.T) {
+	git := &scriptedGit{
+		fails: map[string]error{
+			"rev-parse --verify refs/remotes/origin/work": errors.New("unknown revision"),
+		},
+	}
+	if err := (&Broker{Workspace: fakeGitWorkspace(t), Branch: "work", Runner: git}).rejectEmptyOutgoingCommits(context.Background(), " "); err != nil {
+		t.Fatalf("rejectEmptyOutgoingCommits = %v, want nil for empty head", err)
+	}
+}
+
+func TestRejectEmptyOutgoingCommitsSurfacesHeadOnlyParentFailure(t *testing.T) {
+	git := &scriptedGit{
+		fails: map[string]error{
+			"rev-parse --verify refs/remotes/origin/work": errors.New("unknown revision"),
+			"rev-list --parents -n 1 badhead":             errors.New("corrupt commit"),
+		},
+	}
+	err := (&Broker{Workspace: fakeGitWorkspace(t), Branch: "work", Runner: git}).rejectEmptyOutgoingCommits(context.Background(), "badhead")
+	if err == nil || !strings.Contains(err.Error(), "reading parents for empty-commit guard") {
+		t.Fatalf("rejectEmptyOutgoingCommits error = %v, want parent read failure", err)
+	}
+}
+
+func TestCommitHasEmptyTreeDeltaSurfacesParentFailure(t *testing.T) {
+	git := &scriptedGit{
+		fails: map[string]error{
+			"rev-list --parents -n 1 bad": errors.New("corrupt commit"),
+		},
+	}
+
+	_, err := (&Broker{Workspace: fakeGitWorkspace(t), Runner: git}).commitHasEmptyTreeDelta(context.Background(), "bad")
+	if err == nil || !strings.Contains(err.Error(), "reading parents for empty-commit guard") {
+		t.Fatalf("commitHasEmptyTreeDelta error = %v, want parent read failure", err)
+	}
+}
+
+func TestBrokerSurfacesEmptyCommitCheckFailureAfterNormalisation(t *testing.T) {
+	dir := initRepo(t)
+	writeCommit(t, dir, "main.go", "package main\n\nfunc main() {}\n\n")
+	r := &nthCallFailingRunner{failSubstr: "rev-list --parents -n 1", failOnCall: 2, failErr: errors.New("corrupt amended head")}
+	_, err := (&Broker{Workspace: dir, Branch: "work", Repo: "hivecommons/hive", Minter: fakeMinter{"ghs_pushbroker"}, Runner: r}).Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "reading parents for empty-commit guard") {
+		t.Fatalf("Run error = %v, want post-normalisation empty-check failure", err)
+	}
+}
+
+func TestCommitHasEmptyTreeDeltaHandlesRootCommit(t *testing.T) {
+	dir := initRepo(t)
+	writeCommit(t, dir, "safe.txt", "root content\n")
+	head := strings.TrimSpace(runGitOutput(t, dir, "rev-parse", "HEAD"))
+	empty, err := (&Broker{Workspace: dir}).commitHasEmptyTreeDelta(context.Background(), head)
+	if err != nil {
+		t.Fatalf("commitHasEmptyTreeDelta: %v", err)
+	}
+	if empty {
+		t.Fatal("root commit adding a file was classified as empty")
+	}
+}
+
+func TestShortSHALeavesShortValuesAlone(t *testing.T) {
+	if got := shortSHA("abc123"); got != "abc123" {
+		t.Fatalf("shortSHA = %q, want original short value", got)
+	}
+}
+
+func TestBrokerRejectsLaneSignoffOnOtherAuthorsCommit(t *testing.T) {
+	dir := initRepo(t)
+	path := filepath.Join(dir, "safe.txt")
+	if err := os.WriteFile(path, []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, dir, "add", "safe.txt")
+	runGit(t, dir, "commit", "--author", "Human Author <human@example.com>", "-m", "fix from human\n\nSigned-off-by: Hive Test <hive@example.com>")
+
+	r := &recordingRunner{}
+	res, err := (&Broker{Workspace: dir, Branch: "work", Repo: "hivecommons/hive", Minter: fakeMinter{"ghs_pushbroker"}, Runner: r}).Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "refusing to push commit") || !strings.Contains(err.Error(), "Signed-off-by") {
+		t.Fatalf("Run error = %v, want forged sign-off rejection", err)
+	}
+	if res.Pushed || r.argsOnPush != nil {
+		t.Fatalf("broker pushed after forged sign-off rejection: res=%+v args=%v", res, r.argsOnPush)
+	}
+}
+
+func TestBrokerAllowsLaneSignoffOnOwnCommit(t *testing.T) {
+	dir := initRepo(t)
+	runGit(t, dir, "commit", "--allow-empty", "-s", "-m", "agent-authored fix")
+	_, err := (&Broker{Workspace: dir, Branch: "work", Repo: "hivecommons/hive", Minter: fakeMinter{"ghs_pushbroker"}}).Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "refusing to push empty commit") {
+		t.Fatalf("Run error = %v, want empty-commit rejection only after sign-off guard passes", err)
+	}
+}
+
+func TestBrokerFirstPushSignoffGuardChecksOnlyHead(t *testing.T) {
+	dir := initRepo(t)
+	path := filepath.Join(dir, "history.txt")
+	if err := os.WriteFile(path, []byte("historical\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, dir, "add", "history.txt")
+	runGit(t, dir, "commit", "--author", "Human Author <human@example.com>", "-m", "historical commit\n\nSigned-off-by: Hive Test <hive@example.com>")
+	writeCommit(t, dir, "safe.txt", "new branch work\n")
+
+	r := &recordingRunner{}
+	res, err := (&Broker{Workspace: dir, Branch: "new-work", Repo: "hivecommons/hive", Minter: fakeMinter{"ghs_pushbroker"}, Runner: r}).Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v (res=%+v)", err, res)
+	}
+	if !res.Pushed {
+		t.Fatal("Pushed=false")
+	}
+}
+
+func TestRejectForgedLaneSignoffsSurfacesConfigAndLogFailures(t *testing.T) {
+	cases := []struct {
+		name    string
+		git     *scriptedGit
+		wantErr string
+	}{
+		{
+			name: "user name",
+			git: &scriptedGit{fails: map[string]error{
+				"config user.name": errors.New("missing name"),
+			}},
+			wantErr: "reading git user.name",
+		},
+		{
+			name: "user email",
+			git: &scriptedGit{fails: map[string]error{
+				"config user.email": errors.New("missing email"),
+			}},
+			wantErr: "reading git user.email",
+		},
+		{
+			name: "log",
+			git: &scriptedGit{
+				replies: map[string]string{
+					"config user.name":  "Hive Test\n",
+					"config user.email": "hive@example.com\n",
+				},
+				fails: map[string]error{
+					"log -1 --format=%H%x00%an%x00%ae%x00%B%x1e HEAD": errors.New("bad log"),
+				},
+			},
+			wantErr: "reading outgoing commits for sign-off guard",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := (&Broker{Workspace: fakeGitWorkspace(t), Runner: tc.git}).rejectForgedLaneSignoffs(context.Background(), "", false)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("rejectForgedLaneSignoffs error = %v, want %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestRejectForgedLaneSignoffsSkipsUncheckableRecords(t *testing.T) {
+	cases := []struct {
+		name    string
+		replies map[string]string
+	}{
+		{
+			name: "empty identity",
+			replies: map[string]string{
+				"config user.name":  "\n",
+				"config user.email": "hive@example.com\n",
+			},
+		},
+		{
+			name: "malformed log record",
+			replies: map[string]string{
+				"config user.name":  "Hive Test\n",
+				"config user.email": "hive@example.com\n",
+				"log -1 --format=%H%x00%an%x00%ae%x00%B%x1e HEAD": "not-enough-fields\x1e",
+			},
+		},
+		{
+			name: "own authored commit",
+			replies: map[string]string{
+				"config user.name":  "Hive Test\n",
+				"config user.email": "hive@example.com\n",
+				"log -1 --format=%H%x00%an%x00%ae%x00%B%x1e HEAD": "abc\x00Hive Test\x00hive@example.com\x00Signed-off-by: Hive Test <hive@example.com>\x1e",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := (&Broker{Workspace: fakeGitWorkspace(t), Runner: &scriptedGit{replies: tc.replies}}).rejectForgedLaneSignoffs(context.Background(), "", false)
+			if err != nil {
+				t.Fatalf("rejectForgedLaneSignoffs = %v, want nil", err)
+			}
+		})
+	}
+}
+
 func TestBrokerPushSanitizesCredentialEnvironmentAndWorkspace(t *testing.T) {
 	dir := initRepo(t)
 	writeCommit(t, dir, "safe.txt", "hello\n")

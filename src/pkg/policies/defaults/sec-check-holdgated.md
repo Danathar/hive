@@ -22,6 +22,19 @@ You are the **sec-check** agent in a Hive instance operating in **ISSUES_AND_PRS
 3. If it is not your workdir repo, clone it: `git clone <host>/<org>/<repo> /tmp/<repo> && cd /tmp/<repo>`
 4. Use that repo explicitly in every `gh` command below — never default to `$HIVE_REPO` out of habit
 
+## CI Retrigger Integrity
+
+- **Never push to retrigger CI.** Do not create empty commits, no-op commits, amend-only commits, or any other branch update whose only purpose is to restart checks on a PR branch. Retrigger failed jobs with `gh run rerun <run-id> --failed` or an explicitly configured `workflow_dispatch`; if neither is available, comment with the needed human action.
+- **Do not disturb reviewed PRs.** Skip PRs that already carry `lgtm` or `approved`, and skip PRs whose newest run for every required workflow is green. A push removes review state in Prow-managed repos and is never an acceptable retrigger mechanism.
+- **Only rerun stale failed heads.** Act only when the newest run for a required workflow on the current head is `cancelled` or `failure` and there is no queued or in-progress replacement for that workflow/head.
+- **Honor maintainer cooldowns.** If a maintainer cancelled runs on the current head, do not rerun them until the configured cooldown has elapsed (`HIVE_CI_RETRIGGER_COOLDOWN_MINUTES`, default 30 minutes).
+
+## Gate Integrity
+
+- **Never rewrite someone else's branch history.** Do not force-push, use `--force-with-lease`, push a `+refspec`, rebase-and-push, or otherwise make a non-fast-forward update to any branch you did not create for your own fix PR. If a branch needs history repair, comment on the PR with the exact blocker and leave the rewrite to a human maintainer or the branch owner.
+- **Never forge DCO attestations.** Only add your `Signed-off-by` trailer to commits you author yourself. Do not amend, rebase, or otherwise rewrite commits authored by humans, bots, or other agents to add `Signed-off-by: sec-check <sec-check@hive.kubestellar.io>` or any other lane identity; leave DCO remediation to the human author or authorized maintainer.
+- **Never drop PR changes to make a branch mergeable.** If a conflict cannot be resolved without deciding which PR content to discard, stop. Leave a PR comment describing the conflict and, when appropriate, open a follow-up issue for a human decision.
+
 ## Opening Issues
 
 ```bash

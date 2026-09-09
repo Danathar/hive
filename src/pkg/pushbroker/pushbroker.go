@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -128,6 +129,24 @@ func (b *Broker) Run(ctx context.Context) (Result, error) {
 		return b.fail(res, fmt.Errorf("reading HEAD: %w", err))
 	}
 	res.Commit = strings.TrimSpace(string(commit))
+	if err := b.rejectEmptyOutgoingCommits(ctx, res.Commit); err != nil {
+		return b.fail(res, err)
+	}
+	baseRef, baseExists := b.pushBase(ctx)
+	if remoteRef := b.remoteRef(); remoteRef != baseRef {
+		if _, err := b.git(ctx, "rev-parse", "--verify", remoteRef); err == nil {
+			if err := b.ensureFastForward(ctx, remoteRef); err != nil {
+				return b.fail(res, err)
+			}
+		}
+	} else if baseExists {
+		if err := b.ensureFastForward(ctx, baseRef); err != nil {
+			return b.fail(res, err)
+		}
+	}
+	if err := b.rejectForgedLaneSignoffs(ctx, baseRef, baseExists); err != nil {
+		return b.fail(res, err)
+	}
 
 	files, err := b.changedFiles(ctx)
 	if err != nil {
@@ -157,6 +176,17 @@ func (b *Broker) Run(ctx context.Context) (Result, error) {
 			return b.fail(res, fmt.Errorf("reading HEAD after newline normalisation: %w", err))
 		}
 		res.Commit = strings.TrimSpace(string(commit))
+		if err := b.rejectEmptyOutgoingCommits(ctx, res.Commit); err != nil {
+			return b.fail(res, err)
+		}
+		files, err = b.changedFiles(ctx)
+		if err != nil {
+			return b.fail(res, err)
+		}
+		res.ChangedFiles = files
+		if len(files) == 0 {
+			return b.fail(res, errors.New("pushbroker: no committed changes to push"))
+		}
 	}
 	diff, err := b.outgoingDiff(ctx)
 	if err != nil {
@@ -242,6 +272,146 @@ func (b *Broker) changedFiles(ctx context.Context) ([]string, error) {
 	return splitLines(out), err
 }
 
+func (b *Broker) pushBase(ctx context.Context) (string, bool) {
+	if base := strings.TrimSpace(b.BaseRef); base != "" {
+		if _, err := b.git(ctx, "rev-parse", "--verify", base); err == nil {
+			return base, true
+		}
+	}
+	base := b.remoteRef()
+	if _, err := b.git(ctx, "rev-parse", "--verify", base); err == nil {
+		return base, true
+	}
+	return "", false
+}
+
+func (b *Broker) rejectEmptyOutgoingCommits(ctx context.Context, head string) error {
+	rangeSpec := "HEAD"
+	baseExists := false
+	if base := strings.TrimSpace(b.BaseRef); base != "" {
+		if _, err := b.git(ctx, "rev-parse", "--verify", base); err == nil {
+			rangeSpec = base + "..HEAD"
+			baseExists = true
+		}
+	} else {
+		base := b.remoteRef()
+		if _, err := b.git(ctx, "rev-parse", "--verify", base); err == nil {
+			rangeSpec = base + "..HEAD"
+			baseExists = true
+		}
+	}
+	args := []string{"rev-list", "--reverse", rangeSpec}
+	if !baseExists {
+		out := strings.TrimSpace(head)
+		if out == "" {
+			return nil
+		}
+		for _, commit := range []string{out} {
+			if empty, err := b.commitHasEmptyTreeDelta(ctx, commit); err != nil {
+				return err
+			} else if empty {
+				return fmt.Errorf("pushbroker: refusing to push empty commit %s; retrigger CI with gh run rerun --failed or workflow_dispatch instead of pushing to the PR branch", shortSHA(commit))
+			}
+		}
+		return nil
+	}
+	out, err := b.git(ctx, args...)
+	if err != nil {
+		return fmt.Errorf("reading outgoing commits for empty-commit guard: %w", err)
+	}
+	for _, commit := range splitLines(out) {
+		if empty, err := b.commitHasEmptyTreeDelta(ctx, commit); err != nil {
+			return err
+		} else if empty {
+			return fmt.Errorf("pushbroker: refusing to push empty commit %s; retrigger CI with gh run rerun --failed or workflow_dispatch instead of pushing to the PR branch", shortSHA(commit))
+		}
+	}
+	return nil
+}
+
+func (b *Broker) commitHasEmptyTreeDelta(ctx context.Context, commit string) (bool, error) {
+	parentsOut, err := b.git(ctx, "rev-list", "--parents", "-n", "1", commit)
+	if err != nil {
+		return false, fmt.Errorf("reading parents for empty-commit guard: %w", err)
+	}
+	fields := strings.Fields(string(parentsOut))
+	if len(fields) <= 1 {
+		_, err = b.runner().Run(ctx, b.Workspace, PushEnv(os.Environ()), "git", "diff-tree", "--quiet", "--root", commit)
+		return err == nil, nil
+	}
+	_, err = b.runner().Run(ctx, b.Workspace, PushEnv(os.Environ()), "git", "diff-tree", "--quiet", fields[1], commit)
+	return err == nil, nil
+}
+
+func (b *Broker) ensureFastForward(ctx context.Context, base string) error {
+	if _, err := b.git(ctx, "merge-base", "--is-ancestor", base, "HEAD"); err != nil {
+		return fmt.Errorf("pushbroker: refusing non-fast-forward push to existing branch %q; comment on the PR instead of rewriting history: %w", b.Branch, err)
+	}
+	return nil
+}
+
+var signedOffByRE = regexp.MustCompile(`(?mi)^Signed-off-by:\s*(.*?)\s*<([^<>]+)>\s*$`)
+
+func (b *Broker) rejectForgedLaneSignoffs(ctx context.Context, base string, baseExists bool) error {
+	nameOut, err := b.git(ctx, "config", "user.name")
+	if err != nil {
+		return fmt.Errorf("reading git user.name for sign-off guard: %w", err)
+	}
+	emailOut, err := b.git(ctx, "config", "user.email")
+	if err != nil {
+		return fmt.Errorf("reading git user.email for sign-off guard: %w", err)
+	}
+	laneName := strings.TrimSpace(string(nameOut))
+	laneEmail := strings.TrimSpace(string(emailOut))
+	if laneName == "" || laneEmail == "" {
+		return nil
+	}
+
+	var logArgs []string
+	if baseExists {
+		rangeSpec := base + "..HEAD"
+		logArgs = []string{"log", "--format=%H%x00%an%x00%ae%x00%B%x1e", rangeSpec}
+	} else {
+		logArgs = []string{"log", "-1", "--format=%H%x00%an%x00%ae%x00%B%x1e", "HEAD"}
+	}
+	out, err := b.git(ctx, logArgs...)
+	if err != nil {
+		return fmt.Errorf("reading outgoing commits for sign-off guard: %w", err)
+	}
+	for _, record := range strings.Split(string(out), "\x1e") {
+		record = strings.Trim(record, "\n")
+		if record == "" {
+			continue
+		}
+		parts := strings.SplitN(record, "\x00", 4)
+		if len(parts) < 4 {
+			continue
+		}
+		sha, authorName, authorEmail, msg := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]), strings.TrimSpace(parts[2]), parts[3]
+		if sameIdentity(authorName, authorEmail, laneName, laneEmail) {
+			continue
+		}
+		for _, match := range signedOffByRE.FindAllStringSubmatch(msg, -1) {
+			if len(match) == 3 && sameIdentity(strings.TrimSpace(match[1]), strings.TrimSpace(match[2]), laneName, laneEmail) {
+				return fmt.Errorf("pushbroker: refusing to push commit %s authored by %s <%s> with %s's Signed-off-by trailer; leave DCO remediation to the author", shortSHA(sha), authorName, authorEmail, laneName)
+			}
+		}
+	}
+	return nil
+}
+
+func sameIdentity(name, email, wantName, wantEmail string) bool {
+	return strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(wantName)) &&
+		strings.EqualFold(strings.TrimSpace(email), strings.TrimSpace(wantEmail))
+}
+
+func shortSHA(sha string) string {
+	if len(sha) > 12 {
+		return sha[:12]
+	}
+	return sha
+}
+
 // stripTrailingBlankLines removes any blank line(s) trailing the final
 // newline of each changed, still-present, textual file, leaving exactly one
 // trailing newline. It reports whether it amended HEAD.
@@ -287,12 +457,20 @@ func (b *Broker) stripTrailingBlankLines(ctx context.Context, files []string) (b
 		return false, err
 	}
 	if _, err := b.git(ctx, "commit", "--amend", "--no-edit"); err != nil {
+		if isEmptyAmendError(err) {
+			return false, errors.New("pushbroker: refusing to push a commit made empty by broker normalisation; retrigger CI with gh run rerun --failed or workflow_dispatch instead of pushing to the PR branch")
+		}
 		return false, err
 	}
 	if b.Logger != nil {
 		b.Logger.Info("pushbroker normalised trailing blank lines", "repo", b.Repo, "branch", b.Branch, "files", touched)
 	}
 	return true, nil
+}
+
+func isEmptyAmendError(err error) bool {
+	msg := strings.ReplaceAll(err.Error(), "\n", " ")
+	return strings.Contains(msg, "would make") && strings.Contains(msg, "it empty")
 }
 
 // looksBinary reports whether data appears to be non-text, using the same
