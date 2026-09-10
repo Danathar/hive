@@ -5865,6 +5865,23 @@ test('#5376 a task completes on the sentinel even while the chrome says the CLI 
   } finally { teardown(relay); }
 });
 
+test('#6492 a Markdown-bold verdict completes goose with the verdict signal', () => {
+  const pane = [
+    '**HIVE_VERDICT: complete — Configuration validated; next steps outlined.**',
+    'unknown backend chrome',
+  ].join('\n');
+  const relay = loadRelay({ backend: 'goose', paneText: pane });
+  try {
+    dispatchTask(relay, 't-goose-bold-verdict');
+    relay.__crashTick();
+
+    const completed = relay.__sent.filter(m => m.type === 'task_complete');
+    assert.strictEqual(completed.length, 1,
+      'Markdown presentation must not force a compliant goose task through chrome_idle');
+    assert.strictEqual(completed[0].completion_signal, 'verdict');
+  } finally { teardown(relay); }
+});
+
 test('#5376 the sentinel completes a task through chrome no backend branch has ever seen', () => {
   // The generalisation of the class. Every one of the thirteen issues was
   // fixed by teaching classifyTmuxPane about some CLI's new rendering. This
@@ -6082,6 +6099,33 @@ test('#5376 detectCompletionVerdict accepts complete and no_work_needed, and not
   } finally { teardown(relay); }
 });
 
+test('#6492 detectCompletionVerdict accepts Markdown-emphasized sentinels without leaking formatting', () => {
+  const relay = loadRelay({});
+  try {
+    const bold = '**HIVE_VERDICT: complete — Configuration validated; next steps outlined.**';
+    assert.deepStrictEqual(relay.detectCompletionVerdict([bold]), {
+      verdict: 'complete',
+      reason: 'Configuration validated; next steps outlined.',
+      line: bold,
+    });
+
+    // Markdown emphasis can compose with the CLI's presentation bullet, and
+    // both verdicts use this one parser.
+    const underlined = '● __HIVE_VERDICT: no_work_needed — already fixed upstream__';
+    assert.deepStrictEqual(relay.detectCompletionVerdict([underlined]), {
+      verdict: 'no_work_needed',
+      reason: 'already fixed upstream',
+      line: underlined,
+    });
+
+    // A reason's own trailing punctuation is content when the sentinel had no
+    // leading Markdown delimiter.
+    assert.strictEqual(
+      relay.detectCompletionVerdict(['HIVE_VERDICT: complete — preserve this *']).reason,
+      'preserve this *');
+  } finally { teardown(relay); }
+});
+
 test('#5376 the completion sentinel inherits the anti-false-positive guards, not a second parser', () => {
   // These are the guards #3987/#4265 built for no_work_needed. Extending the
   // family must not have created a weaker parser alongside the hardened one —
@@ -6096,6 +6140,8 @@ test('#5376 the completion sentinel inherits the anti-false-positive guards, not
     assert.strictEqual(
       relay.detectCompletionVerdict(["print a line of the exact form 'HIVE_VERDICT: complete — <reason>'"]), null,
       'an unanchored match would complete every task the moment the prompt was typed');
+    assert.strictEqual(relay.detectCompletionVerdict(['**HIVE_VERDICT: complete — <short reason>**']), null,
+      'Markdown tolerance must not weaken the wrapped prompt-placeholder guard');
     // Prose that merely begins with the verdict word.
     assert.strictEqual(relay.detectCompletionVerdict(['HIVE_VERDICT: completely_wrong']), null);
     // Junk in, null out — every caller is on a best-effort terminal-capture path.
