@@ -11,6 +11,14 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-10 (v4.27.1)
+
+### Fixed
+
+- The dibs cutover preflight now asks crt.sh about the whole registered domain, not just its apex ([#5925](https://github.com/hivecommons/hive/issues/5925)). `q=<domain>` is an **identity** match: it returns certificates whose names are that exact domain and none for its subdomains, which is the actual reason crt.sh was measured seeing 46 of 83 in-window certificates rather than any flakiness — the Let's Encrypt cap is 50 new SAN sets per week per *registered* domain and every subdomain spends from it. The check now unions that query with crt.sh's subdomain wildcard `q=%.<domain>` and counts the two together as one source. Cert Spotter remains the required cross-check and an unreachable Cert Spotter is still refused rather than trusted, but Cert Spotter is rate-limited unauthenticated and a truncated page parses exactly like a complete one, so the point of a complete crt.sh count is that it can now *exceed* a short Cert Spotter answer and block a window that would otherwise have looked open. Feeding a knowingly partial number into a `max()` can only lose issuances. Losing the wildcard half alone degrades to the previous identity-only reading instead of turning the check into a skip.
+- Fixed `src/scripts/issue-coauthor.sh` silently crediting nobody. It folded the issue author's `Co-authored-by:` trailer in with `git interpret-trailers --if-exists doNothing`, and that policy keys on the trailer *name* rather than the whole line — so whenever a commit message already carried any `Co-authored-by:` trailer, the issue author's line was dropped. Because every commit in this repository carries `Co-authored-by: Copilot ...` by convention, the mechanism added in [#6588](https://github.com/hivecommons/hive/issues/6588) was a no-op on essentially every real commit: it exited 0, printed the trailer it had not recorded, and left the filer uncredited on their contribution graph — precisely the "the credit looks recorded while nothing was credited" failure the script was written to prevent. It now uses `addIfDifferent`, which compares the whole trailer line, so it remains idempotent on re-runs while still crediting the filer alongside existing co-authors.
+- The hub dashboard now treats missing or Go zero process start times as unknown instead of rendering multi-century uptimes, and upgrade heartbeats preserve the last known spoke start time so the Uptime column stays accurate during restarts.
+
 ## 2026-09-10 (v4.27.0)
 
 ### Added
