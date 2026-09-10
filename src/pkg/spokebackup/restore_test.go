@@ -434,3 +434,142 @@ func mustRead(t *testing.T, path string) string {
 	}
 	return string(content)
 }
+
+// TestRestoreAcceptsNilLogger keeps Restore usable from small CLI paths that do
+// not have a logger handy; it should fall back to slog.Default rather than
+// failing or panicking after decrypting a valid archive.
+func TestRestoreAcceptsNilLogger(t *testing.T) {
+	sealed, _ := sealedBackupOf(t, "hive-abc123")
+	dest := t.TempDir()
+
+	res, err := Restore(testKey(), sealed, RestoreOptions{DataDir: dest}, nil)
+	if err != nil {
+		t.Fatalf("Restore with nil logger: %v", err)
+	}
+	if got := mustRead(t, filepath.Join(dest, hiveIDFile)); got != "hive-abc123" {
+		t.Fatalf("hive-id = %q after restore with nil logger", got)
+	}
+	if res.Manifest == nil {
+		t.Fatal("restore with nil logger lost the verified manifest")
+	}
+}
+
+// TestRestoreRejectsFileAsDestination proves the destination must be a
+// directory. Treating a regular file as /data would otherwise hide a setup
+// error behind later extraction failures.
+func TestRestoreRejectsFileAsDestination(t *testing.T) {
+	sealed, _ := sealedBackupOf(t, "hive-abc123")
+	dest := filepath.Join(t.TempDir(), "data-file")
+	mustWrite(t, dest, "not a directory")
+
+	_, err := Restore(testKey(), sealed, RestoreOptions{DataDir: dest}, testLogger())
+	if err == nil {
+		t.Fatal("Restore accepted a regular file as the destination data dir")
+	}
+	if !strings.Contains(err.Error(), "prepare destination") {
+		t.Fatalf("destination preparation error should be explicit, got %v", err)
+	}
+	if got := mustRead(t, dest); got != "not a directory" {
+		t.Fatalf("destination file was modified: %q", got)
+	}
+}
+
+// TestRestoreReportsStagingCreationFailure covers a real host-side migration
+// failure mode: the destination exists but is not writable, so Restore cannot
+// safely create its same-filesystem staging directory for decrypted secrets.
+func TestRestoreReportsStagingCreationFailure(t *testing.T) {
+	sealed, _ := sealedBackupOf(t, "hive-abc123")
+	dest := t.TempDir()
+	if err := os.Chmod(dest, 0o500); err != nil {
+		t.Skipf("cannot make destination unwritable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dest, 0o700) })
+
+	_, err := Restore(testKey(), sealed, RestoreOptions{DataDir: dest}, testLogger())
+	if err == nil {
+		t.Skip("destination remained writable despite chmod; cannot exercise staging failure")
+	}
+	if !strings.Contains(err.Error(), "create staging directory") {
+		t.Fatalf("staging creation error should be explicit, got %v", err)
+	}
+}
+
+// TestRestoreFailsWhenBeadParentIsAFile proves restore does not bulldoze an
+// existing non-directory path to make room for an agent ledger; it reports the
+// conflict instead of silently dropping or flattening beads.
+func TestRestoreFailsWhenBeadParentIsAFile(t *testing.T) {
+	sealed, _ := sealedBackupOf(t, "hive-abc123")
+	dest := t.TempDir()
+	mustWrite(t, filepath.Join(dest, beadsSubdir, "scanner"), "not a directory")
+
+	_, err := Restore(testKey(), sealed, RestoreOptions{DataDir: dest}, testLogger())
+	if err == nil {
+		t.Fatal("Restore succeeded even though beads/scanner is a file")
+	}
+	if !strings.Contains(err.Error(), "create") || !strings.Contains(err.Error(), filepath.Join(beadsSubdir, "scanner")) {
+		t.Fatalf("bead parent conflict should name the path creation failure, got %v", err)
+	}
+	if got := mustRead(t, filepath.Join(dest, beadsSubdir, "scanner")); got != "not a directory" {
+		t.Fatalf("restore modified the conflicting bead path: %q", got)
+	}
+}
+
+// TestRestoreReportsFileDirectoryConflict proves a destination directory at a
+// file path is not replaced by archive content. That conflict must fail loudly
+// because replacing a directory with a config file would destroy unrelated
+// operator state.
+func TestRestoreReportsFileDirectoryConflict(t *testing.T) {
+	sealed, _ := sealedBackupOf(t, "hive-abc123")
+	dest := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dest, stateFile), restoreDirMode); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Restore(testKey(), sealed, RestoreOptions{DataDir: dest}, testLogger())
+	if err == nil {
+		t.Fatal("Restore replaced a destination directory with hive-state.json")
+	}
+	if !strings.Contains(err.Error(), "restore "+stateFile) {
+		t.Fatalf("file/directory conflict should name the restore target, got %v", err)
+	}
+	if info, statErr := os.Stat(filepath.Join(dest, stateFile)); statErr != nil || !info.IsDir() {
+		t.Fatalf("destination directory was not preserved; info=%v err=%v", info, statErr)
+	}
+}
+
+// TestPlanRestorePropagatesWalkErrors keeps low-level filesystem failures from
+// being mistaken for an empty or hub-shaped archive.
+func TestPlanRestorePropagatesWalkErrors(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing-staging")
+	_, err := planRestore(missing, t.TempDir())
+	if err == nil {
+		t.Fatal("planRestore accepted a missing staging directory")
+	}
+	if !strings.Contains(err.Error(), "scan extracted archive") {
+		t.Fatalf("walk failure should be wrapped with restore context, got %v", err)
+	}
+}
+
+// TestPlanRestoreIgnoresNonRegularEntries ensures only files extracted from the
+// verified archive can be moved into /data. Symlinks or other odd entries in a
+// staging tree are reported as ignored, not followed or restored.
+func TestPlanRestoreIgnoresNonRegularEntries(t *testing.T) {
+	staging := t.TempDir()
+	dataDir := t.TempDir()
+	mustWrite(t, filepath.Join(staging, spokePrefix, hiveIDFile), "hive-abc123")
+	link := filepath.Join(staging, spokePrefix, "gh-app-key-link.pem")
+	if err := os.Symlink("gh-app-key.pem", link); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	plan, err := planRestore(staging, dataDir)
+	if err != nil {
+		t.Fatalf("planRestore: %v", err)
+	}
+	if len(plan.moves) != 1 || plan.moves[0].rel != hiveIDFile {
+		t.Fatalf("only the regular hive-id should be planned, got %+v", plan.moves)
+	}
+	if len(plan.ignored) != 1 || plan.ignored[0] != filepath.ToSlash(filepath.Join(spokePrefix, "gh-app-key-link.pem")) {
+		t.Fatalf("symlink should be reported as ignored, got %v", plan.ignored)
+	}
+}
