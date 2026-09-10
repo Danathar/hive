@@ -318,6 +318,24 @@ func agentDisabledInConfig(cfg *config.Config, name string, proc *agent.AgentPro
 	return false
 }
 
+// activeOutsidePack reports whether a runtime entry outside the current ACMM
+// pack still represents an agent the operator expects to see. Pack membership
+// is a default roster, not an exclusivity boundary: custom agents and agents
+// explicitly enabled in YAML may legitimately run beside it. The running state
+// wins during config/reconcile races; otherwise enabled and unpaused is the
+// active configuration. Pack-paused or disabled entries remain suppressible as
+// the inactive higher-level "ghost" agents the dashboard filter targets.
+func activeOutsidePack(cfg *config.Config, name string, proc *agent.AgentProcess) bool {
+	if proc == nil {
+		return false
+	}
+	if proc.State == agent.StateRunning {
+		return true
+	}
+	return !agentDisabledInConfig(cfg, name, proc) &&
+		!proc.Paused && proc.State != agent.StatePaused
+}
+
 func buildConfiguredAgents(cfg *config.Config) []FrontendConfiguredAgent {
 	if cfg == nil {
 		return []FrontendConfiguredAgent{}
@@ -529,10 +547,20 @@ func buildAgents(statuses map[string]*agent.AgentProcess, cfg *config.Config, go
 
 	packAllowed := acmmPackAllowedSet(cfg)
 	onDemandSet := config.OnDemandAgentsFromPacks()
+	acmmLevel := 0
+	if cfg.ACMMLevel != nil {
+		acmmLevel = *cfg.ACMMLevel
+	}
 
 	names := make([]string, 0, len(statuses))
-	for name := range statuses {
-		if packAllowed != nil && !packAllowed[name] {
+	for name, proc := range statuses {
+		// The operability-agent gate is a hard availability boundary, unlike
+		// membership in a pack's default roster. Keep it authoritative even if
+		// a stale manager snapshot still contains one of those processes.
+		if !agent.AgentAvailableAtACMMLevel(name, acmmLevel) {
+			continue
+		}
+		if packAllowed != nil && !packAllowed[name] && !activeOutsidePack(cfg, name, proc) {
 			continue
 		}
 		names = append(names, name)
