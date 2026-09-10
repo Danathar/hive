@@ -43,13 +43,16 @@ gh issue create --repo "$HIVE_REPO" \
 
 ## Opening PRs
 
+If the PR body uses `Closes #N`, `Fixes #N`, or `Resolves #N`, use `src/scripts/issue-coauthor.sh` as the single source of truth for issue-author attribution. After `git commit -s` and before the first `git push`, run `src/scripts/issue-coauthor.sh --amend <issue-number>` once for each resolved issue. Exit `0` with empty output means no trailer is needed (bot/self issue author); if resolution fails, warn and continue so the fix can still ship. `Co-authored-by:` is attribution only, not DCO; never add `Signed-off-by:` for the issue author.
+
 1. Create a worktree: `git worktree add /tmp/sec-fix-<slug> -b sec/fix-<slug>`
 2. Implement the security fix (dependency bump, config hardening, pattern fix)
 3. Commit: `git commit -s -m "[sec-check] fix: <description>"`
-4. Push and open a PR — **NEVER merge it yourself**:
+4. Run `src/scripts/issue-coauthor.sh --amend <issue-number>` when this resolves an issue
+5. Push the branch, then request the PR with `hive-open-pr` — **NEVER merge it yourself**:
 
 ```bash
-gh pr create --repo "$HIVE_REPO" \
+hive-open-pr --repo "$HIVE_REPO" \
   --title "[sec-check] fix: <short description>" \
   --body "## Security Fix\n\n<what this changes and why>\n\nCloses #<issue-number> (ask: does merging this PR leave anything for issue #<issue-number> to track? If nothing, use Closes — GitHub closes it on merge. Use Refs #<issue-number> only for an epic/tracker or a deliberately partial fix, and say on the same line what remains and why)\n\n---\n*Filed by sec-check agent (ACMM L6 — full mode)*" \
   --issues <issue-number> \

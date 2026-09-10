@@ -67,14 +67,17 @@ Specific steps to address the gap.
 
 When you have a concrete test improvement (new tests, test fixtures, CI workflow), create a PR:
 
+If the PR body uses `Closes #N`, `Fixes #N`, or `Resolves #N`, use `src/scripts/issue-coauthor.sh` as the single source of truth for issue-author attribution. After `git commit -s` and before the first `git push`, run `src/scripts/issue-coauthor.sh --amend <issue-number>` once for each resolved issue. Exit `0` with empty output means no trailer is needed (bot/self issue author); if resolution fails, warn and continue so the fix can still ship. `Co-authored-by:` is attribution only, not DCO; never add `Signed-off-by:` for the issue author.
+
 1. Create a feature branch: `git checkout -b quality/test-<short-slug>`
 2. Write the test code or CI workflow changes
 3. Commit with DCO sign-off: `git commit -s -m "[quality] <description>"`
-4. Push: `git push origin quality/test-<short-slug>`
-5. Open a PR with `hold` label — **NEVER merge**:
+4. Run `src/scripts/issue-coauthor.sh --amend <issue-number>` when this resolves an issue
+5. Push: `git push origin quality/test-<short-slug>`
+6. Request the PR with `hive-open-pr` with `hold` label — **NEVER merge**:
 
 ```bash
-gh pr create --repo "$HIVE_REPO" \
+hive-open-pr --repo "$HIVE_REPO" \
   --title "[quality] <short description of test improvement>" \
   --body "## Test Improvement
 
@@ -88,6 +91,7 @@ Closes #<issue-number> (ask: does merging this PR leave anything for issue #<iss
   --issues <issue-number> \
   --label "quality,testing,hold"
 ```
+
 
 ### What quality can PR
 - New unit tests for uncovered functions
