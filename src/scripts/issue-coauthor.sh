@@ -192,12 +192,21 @@ trailer="Co-authored-by: ${clean_name} <${email}>"
 
 # add_trailer folds the trailer into a commit-message file. git interpret-trailers
 # owns the placement so the line lands in the message's trailer block rather
-# than after the prose, and --if-exists doNothing makes a re-run a no-op — a
-# duplicated co-author is not fatal to GitHub but it is noise in `git log`.
+# than after the prose — which also keeps an existing `Signed-off-by:` inside
+# that same block, where DCO tooling can still see it.
+#
+# --if-exists must be addIfDifferent, NOT doNothing. doNothing keys on the
+# trailer NAME, not the whole line, so it suppresses the new trailer whenever
+# the message already carries ANY `Co-authored-by:`. Every commit in this
+# repository carries `Co-authored-by: Copilot ...` by convention, so doNothing
+# made this script a silent no-op on essentially every real commit — the exact
+# "the credit looks recorded while nothing was credited" failure this file's
+# header warns about. addIfDifferent still makes a re-run idempotent, because
+# it compares the entire trailer line.
 add_trailer() {
   file="$1"
   tmp="${file}.coauthor.$$"
-  if ! git interpret-trailers --if-exists doNothing --trailer "$trailer" "$file" > "$tmp"; then
+  if ! git interpret-trailers --if-exists addIfDifferent --trailer "$trailer" "$file" > "$tmp"; then
     rm -f "$tmp"
     echo "failed to add the trailer to ${file}" >&2
     exit 1
