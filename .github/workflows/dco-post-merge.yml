@@ -54,7 +54,13 @@ env:
   # It cannot be repaired: rewriting a contributor's commit or adding a
   # sign-off on their behalf is forbidden by #6329 and v5-sync-policy.md, and
   # the branch is protected. Accepted by maintainer disposition in #6576.
-  DCO_WAIVED_COMMITS: 'b798382a4d98ada28b0cb813644a595db0c58b08'
+  #
+  # 8fe6bb34626af4277394fcd87de2cd7eb797cc52 — "feat: credit issue authors on
+  # hive PR commits" (#6592). The Signed-off-by IS present and matches the
+  # author, but a blank line separates it from a trailing Co-authored-by, so
+  # `git interpret-trailers --parse` sees only the last block. Cosmetic;
+  # accepted by maintainer disposition in #6605. Root cause fixed in #6606.
+  DCO_WAIVED_COMMITS: 'b798382a4d98ada28b0cb813644a595db0c58b08 8fe6bb34626af4277394fcd87de2cd7eb797cc52'
   # Tide/tagged-release failures discussed in #6276 came from human squash
   # commits and release metadata, not bot-authored commits. Skip bots here so
   # release automation is not paged for bracketed bot-address edge cases that
