@@ -11227,7 +11227,7 @@
                     },
                     "per_user_done": {
                       "type": "object",
-                      "description": "Map of github_username -> array of per-hour completion counts",
+                      "description": "Map of github_username -> array of per-hour completion counts. Index-aligned with tasks_done: every series shares one timeline and a contributor's idle hours are zero-filled, so the last N entries are the last N hours for every contributor.",
                       "additionalProperties": {
                         "type": "array",
                         "items": {
@@ -11246,6 +11246,68 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/contribute/me": {
+      "get": {
+        "tags": [
+          "Contribute"
+        ],
+        "summary": "Get the caller's own contribution stats",
+        "description": "Returns the caller's own contribution numbers: issues worked in the last 24 hours, issues worked all-time, how many of those completions reported a pull request the hub verified, and how many failed. Self-service \u2014 identity is resolved server-side via resolveContributeCaller and there is NO username parameter, so a caller only ever reads their own record. The all-time counters come from the stored ContributorProfile; the 24-hour figure is summed from the trailing 24 buckets of the caller's per-hour series in /api/contribute/metrics.",
+        "responses": {
+          "200": {
+            "description": "Caller's own contribution stats",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "github_username": {
+                      "type": "string"
+                    },
+                    "trust_tier": {
+                      "type": "string"
+                    },
+                    "total_tasks_completed": {
+                      "type": "integer",
+                      "description": "All-time issues worked by this contributor"
+                    },
+                    "total_tasks_completed_with_pr": {
+                      "type": "integer",
+                      "description": "All-time completions that reported a pull request the hub could verify. This is the figure auto-promotion reads, not the bare completion count."
+                    },
+                    "total_tasks_failed": {
+                      "type": "integer"
+                    },
+                    "tasks_completed_24h": {
+                      "type": "integer",
+                      "description": "Completions in the trailing window_hours hourly buckets. Meaningful only when history_available is true."
+                    },
+                    "window_hours": {
+                      "type": "integer",
+                      "description": "Width of the recent window in hourly buckets (24)"
+                    },
+                    "window_hours_covered": {
+                      "type": "integer",
+                      "description": "How many hourly buckets actually backed tasks_completed_24h, so a spoke with less than a day of history can say so rather than labelling a shorter span \"24h\"."
+                    },
+                    "history_available": {
+                      "type": "boolean",
+                      "description": "False when this contributor has no hourly series yet, which is distinct from a real zero (present on the timeline, finished nothing)."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in (identity could not be resolved)"
+          },
+          "403": {
+            "description": "No contributor profile exists yet for the caller"
           }
         }
       }
