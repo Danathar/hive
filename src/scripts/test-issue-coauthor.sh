@@ -244,6 +244,45 @@ else
   bad "--append on a missing file wrong (rc=${rc})"
 fi
 
+# --- regression: a pre-existing Co-authored-by must not suppress the credit ---
+#
+# This is the case every real commit in this repository is in: the contributor
+# convention already puts `Co-authored-by: Copilot ...` on the commit. An
+# --if-exists policy that keys on the trailer NAME (doNothing) silently skips
+# the issue author here, so the mechanism reports success while crediting
+# nobody — and the issue list looks correct while #6588's whole purpose is
+# defeated. Guard the behaviour, not the flag.
+msg2="$TMP/msg-existing-coauthor.txt"
+printf 'feat: thing\n\nA body paragraph.\n\nCo-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>\nSigned-off-by: Dev <dev@example.com>\n' > "$msg2"
+run --append "$msg2" 100
+if [ "$rc" -ne 0 ]; then
+  bad "--append failed alongside an existing co-author (rc=${rc}): ${err}"
+elif ! grep -q '^Co-authored-by: Fiona Filer' "$msg2"; then
+  bad "an existing Co-authored-by suppressed the issue author's credit"
+elif ! grep -q '^Co-authored-by: Copilot' "$msg2"; then
+  bad "--append dropped the pre-existing co-author"
+else
+  pass "an existing Co-authored-by does not suppress the issue author"
+fi
+# Both co-authors AND the sign-off have to remain in one trailer block. A blank
+# line between them splits the block, git interpret-trailers stops reporting the
+# sign-off, and the post-merge DCO monitor fails the protected branch (#6605).
+parsed2=$(git interpret-trailers --parse "$msg2")
+if printf '%s\n' "$parsed2" | grep -q '^Signed-off-by: Dev' \
+  && printf '%s\n' "$parsed2" | grep -q '^Co-authored-by: Fiona Filer' \
+  && printf '%s\n' "$parsed2" | grep -q '^Co-authored-by: Copilot'; then
+  pass "sign-off and both co-authors stay in a single trailer block"
+else
+  bad "the trailer block was split; DCO would fail. parsed: ${parsed2}"
+fi
+before2=$(cat "$msg2")
+run --append "$msg2" 100
+if [ "$(cat "$msg2")" = "$before2" ]; then
+  pass "--append stays idempotent alongside an existing co-author"
+else
+  bad "--append duplicated the trailer on a second run"
+fi
+
 repo="$TMP/repo"
 mkdir -p "$repo"
 (
