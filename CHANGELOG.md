@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-10 (v4.23.4)
+
+### Fixed
+
+- The contributor relay now recognizes `HIVE_VERDICT` completion sentinels wrapped in Markdown emphasis, so Goose/RamaLama tasks report verdict completion instead of degrading to `chrome_idle`; contributor prompts also request unformatted sentinel lines ([#6492](https://github.com/hivecommons/hive/issues/6492)).
+
 ## 2026-09-09 (v4.23.3)
 
 ### Changed
