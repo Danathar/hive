@@ -609,8 +609,20 @@ func buildAgentsWithHidden(statuses map[string]*agent.AgentProcess, cfg *config.
 
 	var hidden []HiddenAgentInfo
 	names := make([]string, 0, len(statuses))
+	// seen marks every name that already went through the runtime-status gate
+	// above — whether it was surfaced as a card or explicitly hidden — so the
+	// config-only pass below only ever considers agents with NO runtime entry
+	// at all. Marking it inside the runtime loop (rather than only when a name
+	// is added to `names`) is load-bearing: without it, an agent the runtime
+	// gate just decided to hide (e.g. paused-outside-pack, still present in
+	// `statuses`) could be re-evaluated by the config pass using a different,
+	// looser signal (agentCfg.Paused instead of the runtime proc state) and
+	// resurrected as a normal card — while simultaneously still listed in
+	// `hidden`. That would undo the ACMM/pack gate the runtime loop just
+	// applied instead of only filling the gap left by agents missing entirely.
 	seen := make(map[string]bool, len(statuses))
 	for name, proc := range statuses {
+		seen[name] = true
 		// The operability-agent gate is a hard availability boundary, unlike
 		// membership in a pack's default roster. Keep it authoritative even if
 		// a stale manager snapshot still contains one of those processes.
@@ -625,7 +637,6 @@ func buildAgentsWithHidden(statuses map[string]*agent.AgentProcess, cfg *config.
 			continue
 		}
 		names = append(names, name)
-		seen[name] = true
 	}
 	if cfg != nil {
 		for name, agentCfg := range cfg.Agents {
