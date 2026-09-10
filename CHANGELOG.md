@@ -11,6 +11,17 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-10 (v4.24.3)
+
+### Fixed
+
+- Standalone, non-hub-provisioned Docker Compose hives now auto-provision a persisted per-instance terminal signing key, so the dashboard's "Open a terminal" button no longer fails with `terminal handoff requires terminal signing key and hive id`; set `HIVE_TERMINAL_KEY` to override it ([#6489](https://github.com/hivecommons/hive/issues/6489)).
+- Fixed the OpenAI-to-Anthropic SSE translator applying a gateway's terminal
+  usage chunk after emitting `message_delta`, so `output_tokens`/`input_tokens`
+  reported to Anthropic-shaped streaming callers could reflect a stale, earlier
+  usage count instead of the upstream gateway's final tally. Found and covered
+  by the gateway-path canary added for #6515.
+
 ## 2026-09-10 (v4.24.2)
 
 ### Fixed
