@@ -1,1 +1,0 @@
-- The contributor relay now recognizes `HIVE_VERDICT` completion sentinels wrapped in Markdown emphasis, so Goose/RamaLama tasks report verdict completion instead of degrading to `chrome_idle`; contributor prompts also request unformatted sentinel lines ([#6492](https://github.com/hivecommons/hive/issues/6492)).
