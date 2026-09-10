@@ -11,6 +11,34 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-10 (v4.27.0)
+
+### Added
+
+- Agent PR-opening guidance now wires the existing `issue-coauthor.sh` helper into `hive-open-pr`, kick prompts, and bundled policy templates, so resolved-issue attribution is checked on the path agents actually use without duplicating the identity-resolution logic ([#6588](https://github.com/hivecommons/hive/issues/6588)).
+
+### Fixed
+
+- Fixed the staged `dibs.kubestellar.io` legacy-redirect Service, which pointed at a port nothing listens on ([#5925](https://github.com/hivecommons/hive/issues/5925)). `04-dibs-legacy-redirect-externalname.yaml` bridges the `dibs` namespace to the shared redirect backend in `hive-hub` — Ingress backends must be same-namespace — and declared `targetPort: 8080`, the backend **pod's** port. ingress-nginx connects to an ExternalName Service on the port resolved from the Service, and the name it resolves to is itself a ClusterIP Service listening on `80` that forwards to `8080`, so naming `8080` here reached that Service's ClusterIP on a closed port: `upstream timed out (110: Operation timed out) ... server: dibs.kubestellar.io`. Every legacy link hung and then rendered a generic page instead of redirecting — silently broken rather than loudly failing, and only visible once the cutover applied the manifest. Corrected to `targetPort: 80`; `https://dibs.kubestellar.io/ideas/42?x=1` now answers `308` to `https://dibs.hivecommons.dev/ideas/42?x=1` with path and query intact.
+- The dibs cutover preflight no longer reports Let's Encrypt headroom that does
+  not exist. Its quota check read a single certificate transparency source,
+  crt.sh, which for `hivecommons.dev` held 46 of the 83 certificates issued in
+  the rolling 168h window: a strict subset, missing 37 certificates spread
+  across the whole window rather than bunched at the recent end, so the two
+  services simply monitor different CT logs and a retry never cleared it. The
+  check therefore reported `✓ headroom 4` and let the run proceed while the
+  registered domain was already 33 over its cap of 50, which is the one gate
+  that guards the irreversible, quota-spending step ([#5925](https://github.com/hivecommons/hive/issues/5925)).
+  It now queries crt.sh and Cert Spotter, believes whichever sees more (neither
+  can invent an issuance that did not happen, so the higher count is always the
+  nearer one), and counts distinct certificates rather than CT log entries, so
+  a precertificate and its leaf no longer count twice. If either source cannot
+  be reached the check warns instead of passing, because a single-source answer
+  is the undercount above wearing a confident number. On the same domain that
+  previously passed, it now correctly reports 83 and blocks.
+- Fixed an uncaught `TypeError: Cannot read properties of undefined (reading 'then')` thrown on every dashboard load. The deferred-init list calls each entry as `fn().then(...)`, and twelve of its thirteen entries are `async function`s that return a promise for free — but `fetchTimeline` was an ordinary function whose body never returned the promise it created, so `.then` was called on `undefined`. The throw escaped a `setTimeout` callback with nothing to catch it, leaving that entry's promise unsettled, so `Promise.all` never settled and `_deferredLoadPromise` stayed pending for the life of the page. `_afterPaint` awaits that promise, so first-load view restoration — making the agent-detail panel visible, navigating to a section saved in the URL hash — silently never ran, and the timeline's refresh interval was never installed either. The deferred loop now wraps each entry so one bad entry costs its own feature rather than stranding the whole chain, and reports the failure to the console instead of swallowing it ([#6581](https://github.com/hivecommons/hive/issues/6581)).
+- Enabled agents whose backend is a configured model-gateway name now remain visible in the dashboard Agents section even if their runtime process is missing, with a blocked card that explains the missing process instead of silently disappearing ([#6581](https://github.com/hivecommons/hive/issues/6581)).
+
 ## 2026-09-10 (v4.26.0)
 
 ### Added
