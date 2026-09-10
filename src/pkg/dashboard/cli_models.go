@@ -184,9 +184,6 @@ const (
 
 	// --- Gemini ---
 
-	// geminiModelsURL lists models available to a Gemini API key.
-	geminiModelsURL = "https://generativelanguage.googleapis.com/v1beta/models"
-
 	// geminiModelsPageSize caps the models page (the API allows up to 1000).
 	geminiModelsPageSize = 200
 
@@ -859,6 +856,11 @@ func parseCopilotModelsResponse(r io.Reader) ([]string, error) {
 }
 
 // --- Gemini discovery ---
+
+// geminiModelsURL lists models available to a Gemini API key. It is a var (not
+// a const) solely so tests can point it at an httptest.Server (matching
+// claudePodCredentialsPath).
+var geminiModelsURL = "https://generativelanguage.googleapis.com/v1beta/models"
 
 // discoverGeminiModels lists content-generation models for the configured
 // Gemini API key. Best-effort: no key or a failed call → fallback=true.
