@@ -8436,6 +8436,39 @@
 
     const CLI_MODEL_CACHE_TTL_MS = 30000;
     let _cliModelsFetchedAt = 0;
+
+    // BACKEND_MODEL_NOTICES holds, per backend id, the server's explanation
+    // for why a static list is being served when the reason is one the owner
+    // can act on — today: the backend rejected this account's credential or
+    // entitlement (#6500). The option labels carry the short form; this map
+    // carries the full sentence onto the dropdown's tooltip, so the answer is
+    // one hover away from where the owner is already looking instead of only
+    // in a server log.
+    const BACKEND_MODEL_NOTICES = {};
+
+    // applyModelNoticeTitle puts a backend's notice detail on a model <select>
+    // as its tooltip, and clears any stale one when the backend recovers.
+    function applyModelNoticeTitle(sel, backend) {
+      if (!sel) return;
+      const notice = BACKEND_MODEL_NOTICES[backend];
+      if (notice && notice.detail) sel.title = notice.detail;
+      else if (sel.title) sel.removeAttribute('title');
+    }
+
+    // setBackendModelNotice records a backend's notice and refreshes the
+    // tooltip on every model dropdown already on screen for that backend —
+    // the agent cards are rendered independently of this fetch, so a notice
+    // that arrives after they paint still has to reach them.
+    function setBackendModelNotice(backend, notice) {
+      if (notice) BACKEND_MODEL_NOTICES[backend] = notice;
+      else delete BACKEND_MODEL_NOTICES[backend];
+      (window._lastAgents || []).forEach(a => {
+        if (!a || a.cli !== backend) return;
+        document.querySelectorAll(
+          `select[data-change-action="switchModel"][data-agent="${a.name}"]`
+        ).forEach(sel => applyModelNoticeTitle(sel, backend));
+      });
+    }
     // fetchBackendsConfig hits the same /api/config/backends endpoint that
     // powers backend discovery server-side (PR #1843) and populates
     // BACKEND_MODELS for the CLI backends (copilot/claude/gemini/goose) with
@@ -8453,7 +8486,19 @@
         _cliModelsFetchedAt = now;
         (list || []).forEach(b => {
           if (!CLI_BACKENDS.includes(b.id)) return; // inference backends handled by fetchInferenceModels
-          const labelSuffix = b.fallback ? ' (common alias, unverified)' : '';
+          // b.notice: discovery did not merely fail, it was REJECTED — the
+          // backend told hive this account cannot run inference (a Copilot
+          // seat that is no longer licensed, #6500). Say that instead of
+          // "(common alias, unverified)", which reads as a hive-side probe
+          // hiccup and let an owner with dead agents conclude the model
+          // configuration was fine. The list is still offered: blanking it
+          // would leave nothing configurable, and a seat can come back.
+          const labelSuffix = (b.notice && b.notice.label) ? ` (${b.notice.label})`
+            : (b.fallback ? ' (common alias, unverified)' : '');
+          if (b.notice && b.notice.detail) {
+            console.warn(`[models] ${b.id}: ${b.notice.detail}`);
+          }
+          setBackendModelNotice(b.id, b.notice || null);
           const models = (b.models || []).map(m => ({ value: m, label: m.split('/').pop() + labelSuffix }));
           if (!models.length) return; // keep prior (possibly fallback) list rather than blanking the dropdown
           BACKEND_MODELS[b.id] = models;
@@ -15483,6 +15528,7 @@ function burnAreaChart() {
           sel.innerHTML = '<option value="">model ▾</option>' +
             models.map(m => `<option value="${m.value}">${m.label}</option>`).join('');
           sel.disabled = false;
+          applyModelNoticeTitle(sel, backend);
         });
       } else {
         modelSelects.forEach(sel => {
@@ -15509,6 +15555,7 @@ function burnAreaChart() {
       if (!isInference && !isCli) return;
       const prev = JSON.stringify(BACKEND_MODELS[backend] || []);
       const models = isInference ? await fetchInferenceModels(backend) : (await fetchBackendsConfig(), modelsForBackend(backend));
+      applyModelNoticeTitle(sel, backend);
       if (JSON.stringify(models) !== prev) {
         const current = sel.value;
         sel.innerHTML = '<option value="">model ▾</option>' +
