@@ -67,6 +67,12 @@ The root [`Justfile`](Justfile) exposes the public contributor relay workflow. R
 | `just hive-api <endpoint>` | Calls a hub API endpoint, defaulting to `/status`, using the configured hive URL. |
 | `just hive-api-docs` | Opens the hub API documentation in a browser. |
 
+Container mode limits the contributor workload to 4 GiB of memory and 2 CPUs,
+matching the `contribute-k8s` workload ceiling. Set `HIVE_CONTAINER_MEMORY` or
+`HIVE_CONTAINER_CPUS` before `just contribute-hive` to tune those limits for
+your machine (for example, `HIVE_CONTAINER_MEMORY=6g just contribute-hive`),
+or set either value to `none` on a host that cannot enforce that controller.
+
 See [src/docs/contributor-relay.md](src/docs/contributor-relay.md) for the end-to-end contributor relay workflow and Kubernetes workload details.
 
 ## Style and quality

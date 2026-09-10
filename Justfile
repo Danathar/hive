@@ -21,6 +21,12 @@ config_dir := env("HOME") + "/.config/hive"
 # Set HIVE_CONTAINER_RUNTIME=podman to force rootless podman, or =docker.
 container_runtime := env("HIVE_CONTAINER_RUNTIME", "")
 
+# Shared contributor workload ceiling. The container runtime and Kubernetes
+# recipes render their native unit spelling from these values so the default
+# envelope cannot drift between the two deployment paths.
+contributor_memory_limit_gib := "4"
+contributor_cpu_limit := "2"
+
 # Show available commands
 default:
     @just --list
@@ -1259,6 +1265,23 @@ contribute-hive backend="" mode="docker": check-version
         fi
       fi
       RUNTIME_FLAGS=""
+      # Keep the default local-container envelope aligned with contribute-k8s.
+      # --memory-swap is the combined RAM+swap ceiling in Docker and Podman;
+      # setting it equal to --memory prevents a contributor from spilling an
+      # additional limit's worth into host swap (especially harmful with zram).
+      # Arrays preserve an operator-supplied value as one runtime argument.
+      CONTAINER_MEMORY="${HIVE_CONTAINER_MEMORY:-{{contributor_memory_limit_gib}}g}"
+      CONTAINER_CPUS="${HIVE_CONTAINER_CPUS:-{{contributor_cpu_limit}}}"
+      RESOURCE_FLAGS=()
+      if [[ "$CONTAINER_MEMORY" != "none" && "$CONTAINER_MEMORY" != "0" ]]; then
+        RESOURCE_FLAGS+=(
+          --memory "${CONTAINER_MEMORY}"
+          --memory-swap "${CONTAINER_MEMORY}"
+        )
+      fi
+      if [[ "$CONTAINER_CPUS" != "none" && "$CONTAINER_CPUS" != "0" ]]; then
+        RESOURCE_FLAGS+=(--cpus "${CONTAINER_CPUS}")
+      fi
       VOLSUF=""      # volume-option suffix for read-write mounts
       ROSUF=":ro"    # volume-option suffix for read-only mounts
       # SECURITY (H6 / CWE-668): the contributor container runs a hub-driven,
@@ -1522,9 +1545,25 @@ contribute-hive backend="" mode="docker": check-version
         [ -n "${CLI_STAGE:-}" ] && rm -rf "${CLI_STAGE}" 2>/dev/null || true
       }
       trap cleanup_container EXIT
+      report_container_termination() {
+        local exit_code="$1" oom_killed
+        oom_killed=$("$RUNTIME" inspect -f '{{ "{{" }}.State.OOMKilled{{ "}}" }}' "${CONTAINER_NAME}" 2>/dev/null || echo "unknown")
+        if [[ "$oom_killed" == "true" ]]; then
+          echo "  Cause:     the container was OOM-killed after exceeding available memory."
+          if [[ "$CONTAINER_MEMORY" == "none" || "$CONTAINER_MEMORY" == "0" ]]; then
+            echo "  Memory:    unlimited by Hive (set HIVE_CONTAINER_MEMORY, for example 4g)"
+          else
+            echo "  Memory:    ${CONTAINER_MEMORY} (raise with HIVE_CONTAINER_MEMORY, for example 6g)"
+          fi
+        elif [[ "$exit_code" == "137" ]]; then
+          echo "  Cause:     SIGKILL (exit 137); the runtime did not mark an in-container OOM."
+          echo "             Check the host's OOM logs for system-wide memory pressure."
+        fi
+      }
       "$RUNTIME" run -d \
         --name "${CONTAINER_NAME}" \
         ${RUNTIME_FLAGS} \
+        "${RESOURCE_FLAGS[@]}" \
         ${NET_FLAGS} \
         -v "{{config_dir}}:/home/dev/.config/hive${ROSUF}" \
         ${CLI_MOUNTS} \
@@ -1547,6 +1586,7 @@ contribute-hive backend="" mode="docker": check-version
       #   defaults the session to the backend name (kubestellar/hive#5605).
 
       echo "Container: ${CONTAINER_NAME}"
+      echo "Limits:    ${CONTAINER_MEMORY} memory, ${CONTAINER_CPUS} CPUs"
       echo "Waiting for CLI session to start..."
       # Grace period for the container entrypoint to bring up the tmux
       # session before we try to attach to it.
@@ -1565,6 +1605,7 @@ contribute-hive backend="" mode="docker": check-version
         echo "  Container: ${CONTAINER_NAME}"
         echo "  Runtime:   ${RUNTIME}"
         echo "  Exit code: ${CONTAINER_EXIT}"
+        report_container_termination "$CONTAINER_EXIT"
         echo ""
         echo "── Container logs ──"
         "$RUNTIME" logs "${CONTAINER_NAME}" 2>&1 || echo "(no logs captured)"
@@ -1635,6 +1676,7 @@ contribute-hive backend="" mode="docker": check-version
       if [[ "$FINAL_EXIT" != "0" && "$FINAL_EXIT" != "unknown" ]]; then
         echo ""
         echo "Container ${CONTAINER_NAME} exited with code ${FINAL_EXIT}."
+        report_container_termination "$FINAL_EXIT"
       fi
     fi
 
@@ -1768,9 +1810,9 @@ contribute-k8s namespace="hive-contributor" outfile="" image_tag="v4":
     # spawns a real coding-CLI + a repo build/test, so requests are deliberately
     # generous. Named here so an operator can see and tune them, not magic YAML.
     readonly MEM_REQUEST="1Gi"
-    readonly MEM_LIMIT="4Gi"
+    readonly MEM_LIMIT="{{contributor_memory_limit_gib}}Gi"
     readonly CPU_REQUEST="500m"
-    readonly CPU_LIMIT="2"
+    readonly CPU_LIMIT="{{contributor_cpu_limit}}"
 
     # ── Validate setup exists ──
     if [[ ! -f "$ENV_FILE" ]]; then
