@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-10 (v4.24.4)
+
+### Fixed
+
+- Stable-channel promotion no longer exits silently with code 1 when the scheduled run races a `docker.yml` publish that is still in progress; it now reports an explicit `hold` naming the in-flight candidate run ([#6537](https://github.com/hivecommons/hive/issues/6537)).
+
 ## 2026-09-10 (v4.24.3)
 
 ### Fixed
