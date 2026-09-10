@@ -11,6 +11,17 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-10 (v4.25.0)
+
+### Added
+
+- Added a paginated `GET /api/v1/queue` endpoint (`?limit=<int>&offset=<int>`) so downstream consumers can enumerate and page the full actionable backlog reported by `/api/v1/status`, instead of only the small unpaginated `/api/contribute/queue` slice ([#6537](https://github.com/hivecommons/hive/issues/6537)).
+
+### Fixed
+
+- The contributor relay now detects agy's chrome-less "⚠ Individual quota reached" provider quota banner as a fatal API error and dismisses its post-error feedback survey, instead of stalling for 20 minutes and misreporting the task as an `[environment]` failure ([#6541](https://github.com/hivecommons/hive/issues/6541)).
+- Contributors running `just contribute-hive claude` on a Claude subscription (OAuth, no `ANTHROPIC_API_KEY`) no longer stall on Claude Code's first-run "Select login method" chooser with a perfectly valid credential mounted beside it ([#6550](https://github.com/hivecommons/hive/issues/6550)). Claude Code keeps its auth in two files — the token in `~/.claude/.credentials.json` and the session state in `~/.claude.json` — and the container only ever received the first, so the CLI re-ran onboarding on every start. `bin/contributor-agent.sh` seeded the `hasCompletedOnboarding` flag that clears that gate for litellm and for API-key claude (#5103), but not for the default subscription path, which was the one configuration that needed it most; it now seeds for every backend that drives the claude CLI. The relay also recognises the login chooser as `needs-login` instead of letting it fall through to `starting`, so a blocked pane raises the boxed "needs authentication" banner naming the attach command and `/login`, rather than handing the task back at `CLI_READY_TIMEOUT_MS` with the misleading "CLI did not become ready within timeout".
+
 ## 2026-09-10 (v4.24.4)
 
 ### Fixed
