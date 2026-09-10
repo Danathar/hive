@@ -48,6 +48,22 @@ just contribute-hive claude local  # host mode — relay + CLI directly on your 
 Containerized mode auto-detects the runtime — docker first, then podman — and can be forced with `export HIVE_CONTAINER_RUNTIME=podman`.
 The resolved runtime is passed into the container, so the "attach to the CLI" hints printed from inside it (the status line, and the banner shown when the CLI needs a login) name the engine that actually launched it ([#5145](https://github.com/hivecommons/hive/issues/5145)). In host mode there is no container, and those hints are a plain `tmux attach -t <session>`.
 
+The `just contribute-hive` container defaults to the same workload ceiling as
+`contribute-k8s`: 4 GiB of memory and 2 CPUs. Its combined memory-and-swap cap
+is also 4 GiB, so the container cannot consume another 4 GiB from host swap
+after reaching the RAM limit. Tune the local container for a larger or smaller
+machine with `HIVE_CONTAINER_MEMORY` and `HIVE_CONTAINER_CPUS`:
+
+```bash
+HIVE_CONTAINER_MEMORY=6g HIVE_CONTAINER_CPUS=3 just contribute-hive claude
+```
+
+Set either override to `none` to omit that limit on a host that cannot enforce
+the corresponding cgroup controller.
+
+These overrides affect the `just contribute-hive` container only; Kubernetes
+keeps the resource requests and limits rendered in its generated manifest.
+
 Use `just contribute-check <backend>` before registering to catch missing CLIs or obvious auth gaps.
 
 ## Docker Compose workflow

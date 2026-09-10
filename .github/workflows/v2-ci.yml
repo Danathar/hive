@@ -777,6 +777,18 @@ jobs:
         working-directory: .
         run: bash src/deploy/test_attach_hint_runtime.sh
 
+      # #6485: the default contributor container had no resource ceiling, so a
+      # healthy coding task could consume enough RAM and zram for systemd-oomd
+      # to kill it (or another process in the contributor's desktop session).
+      # Run the real recipe against stub Docker/Podman CLIs: this verifies the
+      # effective argv, operator overrides, and OOM/SIGKILL diagnostics rather
+      # than merely finding resource-related strings in the Justfile.
+      - name: Contributor containers enforce resource limits (#6485)
+        working-directory: .
+        env:
+          HIVE_TEST_REQUIRE_BEHAVIOURAL: '1'
+        run: bash src/deploy/test_contributor_container_resources.sh
+
       # #5388 item 3: the guard on the skip discipline itself.
       #
       # test_lib.sh only helps if the suites that source it ACTUALLY go fatal
