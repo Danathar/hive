@@ -5569,7 +5569,8 @@ func buildTaskPromptBody(repoFull, issueRef, title, sourceHint, baseBranch strin
 			"If you determine there is genuinely NOTHING shippable — for example the "+
 			"remaining work is blocked on an unanswered maintainer decision, or merged "+
 			"PRs already cover everything actionable — do NOT open a PR; instead print "+
-			"a single line of the exact form 'HIVE_VERDICT: no_work_needed — <short reason>' "+
+			"a single line of plain text, no Markdown formatting, in the exact form "+
+			"'HIVE_VERDICT: no_work_needed — <short reason>' "+
 			"and stop. "+
 			// #5376: the completion sentinel. The interactive relay used to
 			// infer "this task is done" from the CLI's own terminal chrome —
@@ -5587,7 +5588,7 @@ func buildTaskPromptBody(repoFull, issueRef, title, sourceHint, baseBranch strin
 			// summary can scroll out of view before the relay looks.
 			"When you HAVE finished the task — the PR is open, or you have "+
 			"otherwise done everything you intend to do — print, as the very "+
-			"last thing you output and on a line by itself, "+
+			"last thing you output and on a line by itself, in plain text, no Markdown formatting: "+
 			"'HIVE_VERDICT: complete — <short reason>'. Print it exactly once, "+
 			"only when you are actually done, and never before starting work. "+
 			"If you printed the no_work_needed line above, that already counts "+
@@ -6653,4 +6654,3 @@ func (s *Server) Close() {
 	}
 	s.CloseContributeHub()
 }
-

@@ -1891,7 +1891,10 @@ function detectHiveVerdict(lines, wanted) {
   // that instruction echo from reading as the agent's own verdict. Codex
   // renders its completed assistant messages with a leading bullet (•,
   // U+2022) and Claude Code with a filled circle (●, U+25CF) — presentation
-  // chrome rather than part of the verdict. The claude glyph was missing
+  // chrome rather than part of the verdict. Some backends also wrap the whole
+  // line in Markdown emphasis (for example **HIVE_VERDICT: complete — done**),
+  // which is likewise presentation rather than sentinel content. The claude
+  // glyph was missing
   // until bin/test_backend_smoke.sh drove a REAL claude pane through the
   // relay: the agent printed the sentinel, this regex missed it, and every
   // interactive claude completion silently degraded to the chrome_idle
@@ -1902,13 +1905,21 @@ function detectHiveVerdict(lines, wanted) {
   // non-matches — a prose line that merely STARTS with a verdict word must not
   // become a verdict.
   const alt = wanted.map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
-  const VERDICT_RE = new RegExp(`^\\s*(?:[•●]\\s*)?HIVE_VERDICT:\\s*(${alt})\\b[\\s:—–-]*(.*)$`, 'i');
+  const VERDICT_RE = new RegExp(`^\\s*(?:[•●]\\s*)?([*_]{1,3})?\\s*HIVE_VERDICT:\\s*(${alt})\\b[\\s:—–-]*(.*)$`, 'i');
   // Scan newest-first so the agent's final conclusion wins over anything it
   // merely quoted or considered earlier in the transcript.
   for (let i = lines.length - 1; i >= 0; i--) {
     const m = VERDICT_RE.exec(lines[i]);
     if (!m) continue;
-    const reason = (m[2] || '').trim();
+    const emphasis = m[1] || '';
+    let reason = (m[3] || '').trim();
+    // A matching Markdown delimiter at the far end closes the optional
+    // leading emphasis; it is not part of the human-readable reason. Only
+    // remove it when an opener was present, so an ordinary reason ending in
+    // `*` or `_` is preserved verbatim.
+    if (emphasis && reason.endsWith(emphasis)) {
+      reason = reason.slice(0, -emphasis.length).trimEnd();
+    }
     // tmux may wrap the prompt's instruction so its quoted marker lands at a
     // visual line start; its giveaway is the literal "<short reason>"
     // placeholder. Never treat that echo as a real verdict.
@@ -1917,7 +1928,7 @@ function detectHiveVerdict(lines, wanted) {
     // compares it against the line that was already on the pane when the task's
     // prompt was delivered, which is how a verdict gets attributed to a task at
     // all (#5650).
-    return { verdict: m[1].toLowerCase(), reason, line: lines[i] };
+    return { verdict: m[2].toLowerCase(), reason, line: lines[i] };
   }
   return null;
 }
