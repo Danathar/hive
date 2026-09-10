@@ -72,6 +72,60 @@ func TestBuildAgentsIncludesActiveAgentOutsideCurrentPack(t *testing.T) {
 	}
 }
 
+// TestBuildAgentsWithHidden_RuntimePausedGhostNotResurrectedByConfigPass
+// guards the fix for #6581/#6488 (buildMissingRuntimeAgent): that fix added a
+// second pass over cfg.Agents to surface agents with NO runtime status entry
+// at all, using agentCfg.Paused (a config-level signal) as its own pack-gate
+// check. A ghost agent IS present in the runtime `statuses` map and is hidden
+// by the first pass because its runtime proc is paused-outside-pack — but its
+// config-level Paused flag can independently be false (e.g. runtime pause was
+// never persisted back to config). Without marking every runtime-status name
+// "seen" up front, the config pass would re-evaluate that same ghost using
+// the looser agentCfg.Paused signal, find it false, and re-add it — resulting
+// in the agent appearing as BOTH a normal visible card (because `statuses`
+// still has its live proc) and an entry in HiddenAgents. This must never
+// happen: an agent the pack gate hid stays hidden regardless of the second
+// pass.
+func TestBuildAgentsWithHidden_RuntimePausedGhostNotResurrectedByConfigPass(t *testing.T) {
+	level := 1
+	ghostCfg := config.AgentConfig{
+		Backend: "unsloth-local",
+		Enabled: true,
+		Paused:  false, // config-level Paused NOT set, unlike the runtime proc below
+	}
+	cfg := &config.Config{
+		ACMMLevel: &level,
+		Agents: map[string]config.AgentConfig{
+			"scanner": ghostCfg,
+		},
+		Governor: config.GovernorConfig{
+			Gateways: []config.GatewayConfig{{
+				Name:     "unsloth-local",
+				Kind:     config.GatewayKindCustom,
+				Endpoint: "http://host.docker.internal:8888",
+			}},
+		},
+	}
+	statuses := map[string]*agent.AgentProcess{
+		"scanner": {
+			Name:          "scanner",
+			Config:        ghostCfg,
+			State:         agent.StatePaused,
+			Paused:        true,
+			PausedTrigger: "acmm-pack",
+			OutputBuffer:  agent.NewRingBuffer(10),
+		},
+	}
+
+	agents, hidden := buildAgentsWithHidden(statuses, cfg, governor.State{Mode: governor.ModeIdle})
+	if len(agents) != 0 {
+		t.Fatalf("agents = %v, want none: a pack-paused ghost with a live (hidden) runtime entry must not be resurrected by the config-only pass", agentNamesFromFrontend(agents))
+	}
+	if len(hidden) != 1 || hidden[0].Name != "scanner" || hidden[0].Reason != hiddenReasonPackInactive {
+		t.Fatalf("hidden = %+v, want exactly one pack-inactive entry for scanner", hidden)
+	}
+}
+
 // TestBuildAgentsWithHidden_ReportsPackInactiveGhost is #6581's diagnostic
 // companion to the test above: it exercises buildAgentsWithHidden on the
 // EXACT same fixture (an active out-of-pack supervisor beside an inactive
