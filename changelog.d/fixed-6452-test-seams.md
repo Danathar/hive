@@ -1,1 +1,0 @@
-- Added test seams for Gemini model discovery and asynchronous kick status reporting ([#6452](https://github.com/hivecommons/hive/issues/6452)).
