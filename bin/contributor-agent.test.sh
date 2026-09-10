@@ -640,4 +640,106 @@ if bash -n -c "true ${claude_perm_value}" 2>/dev/null; then
   exit 1
 fi
 
+# ---------------------------------------------------------------------------
+# seed_claude_config must run for OAuth/subscription claude, not only when an
+# ANTHROPIC_API_KEY is delivered.
+#
+# Claude Code needs BOTH halves of its auth state: the token in
+# ${HOME}/.claude/.credentials.json and the session state in
+# ${HOME}/.claude.json. A contributor container mounts a staged ${HOME}/.claude
+# — so the token is fine — and the CLI writes its own ${HOME}/.claude.json,
+# which carries oauthAccount but no hasCompletedOnboarding. Without the seed
+# the CLI re-runs onboarding and parks the pane on "Select login method" with a
+# perfectly valid credential beside it. The old condition seeded litellm and
+# API-key claude only, so the default `just contribute-hive claude` path was
+# the single configuration that never got the flag.
+# ---------------------------------------------------------------------------
+
+seed_home="${WORK_DIR}/seed-home"
+seed_config="${seed_home}/.config/hive"
+mkdir -p "$seed_config"
+
+run_seed() {
+  # $1: AGENT_BACKEND. Any remaining args are extra `env` assignments.
+  local backend="$1"; shift
+  env -i \
+    PATH="${PATH}" \
+    HOME="$seed_home" \
+    HIVE_REGISTRATION_TOKEN="test-token" \
+    HIVE_CONTRIBUTOR_AGENT_TEST_SEED_CLAUDE_CONFIG=1 \
+    AGENT_BACKEND="$backend" \
+    "$@" \
+    bash "${ROOT_DIR}/bin/contributor-agent.sh"
+}
+
+seed_key() {
+  python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2]))" \
+    "${seed_home}/.claude.json" "$1" 2>/dev/null
+}
+
+# 1. Subscription/OAuth claude — no ANTHROPIC_API_KEY anywhere. This is the
+#    regression: it used to leave .claude.json untouched.
+rm -f "${seed_home}/.claude.json"
+printf '%s' '{"oauthAccount":{"emailAddress":"c@example.invalid"},"userID":"u1"}' \
+  >"${seed_home}/.claude.json"
+run_seed claude >/dev/null 2>&1 || true
+
+if [[ "$(seed_key hasCompletedOnboarding)" != "True" ]]; then
+  echo "OAuth claude must get hasCompletedOnboarding seeded; got:" >&2
+  cat "${seed_home}/.claude.json" >&2
+  exit 1
+fi
+
+# The CLI's own keys survive the merge — the seed adds, it does not replace.
+if [[ "$(seed_key userID)" != "u1" ]]; then
+  echo "seeding must MERGE into an existing .claude.json, not overwrite it" >&2
+  cat "${seed_home}/.claude.json" >&2
+  exit 1
+fi
+
+# No key delivered means no customApiKeyResponses invented for one.
+if [[ "$(seed_key customApiKeyResponses)" != "None" ]]; then
+  echo "customApiKeyResponses must stay absent when no ANTHROPIC_API_KEY is set" >&2
+  cat "${seed_home}/.claude.json" >&2
+  exit 1
+fi
+
+# 2. An operator-supplied claude-config.json is still copied in first, and the
+#    seed merges on top of it rather than discarding it.
+rm -f "${seed_home}/.claude.json"
+printf '%s' '{"operatorKey":"kept"}' >"${seed_config}/claude-config.json"
+run_seed claude >/dev/null 2>&1 || true
+
+if [[ "$(seed_key operatorKey)" != "kept" ]] || [[ "$(seed_key hasCompletedOnboarding)" != "True" ]]; then
+  echo "claude-config.json must be copied in and then merged with the seed; got:" >&2
+  cat "${seed_home}/.claude.json" >&2
+  exit 1
+fi
+rm -f "${seed_config}/claude-config.json"
+
+# 3. The API-key path (#5103) is unchanged: the key is pre-approved, in full
+#    and as its last 20 chars, because matching differs across CLI versions.
+rm -f "${seed_home}/.claude.json"
+api_key="sk-ant-test-0123456789abcdefghij"
+run_seed claude ANTHROPIC_API_KEY="$api_key" >/dev/null 2>&1 || true
+
+approved="$(python3 -c "
+import json
+d = json.load(open('${seed_home}/.claude.json'))
+print(','.join(d.get('customApiKeyResponses', {}).get('approved', [])))
+" 2>/dev/null)"
+if [[ "$approved" != "${api_key},${api_key: -20}" ]]; then
+  echo "ANTHROPIC_API_KEY must be approved in full and as its last 20 chars; got: ${approved}" >&2
+  exit 1
+fi
+
+# 4. litellm keeps its seeding too. It refuses to start without an endpoint,
+#    so supply one; the seeding itself never consults it.
+rm -f "${seed_home}/.claude.json"
+run_seed litellm HIVE_LITELLM_ENDPOINT="https://litellm.invalid:4000" >/dev/null 2>&1 || true
+if [[ "$(seed_key hasCompletedOnboarding)" != "True" ]]; then
+  echo "litellm must still get hasCompletedOnboarding seeded" >&2
+  exit 1
+fi
+
 echo "contributor-agent codex + claude contract tests passed"

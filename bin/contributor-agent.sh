@@ -407,6 +407,73 @@ if [[ "${HIVE_CONTRIBUTOR_AGENT_TEST_DETECT_CLI:-}" == "1" ]]; then
   exit 0
 fi
 
+# seed_claude_config pre-answers the first-run gates Claude Code raises in
+# ${HOME}/.claude.json, so none of them can park the tmux pane on a menu that
+# nothing inside a container is there to answer. Mirrors the hub's
+# inferenceUserConfigSeed (src/pkg/agent/manager.go) and the same seed
+# bin/test_backend_smoke.sh writes for its throwaway HOME.
+#
+# hasCompletedOnboarding matters for EVERY claude contributor, not just the
+# API-key ones. Claude Code keeps authentication in two files and needs both:
+# ${HOME}/.claude/.credentials.json holds the OAuth token, and
+# ${HOME}/.claude.json holds the session state. A container that mounts a
+# staged ${HOME}/.claude gets a perfectly good, unexpired credential — plus a
+# ${HOME}/.claude.json the CLI writes for itself on first start, carrying
+# oauthAccount but NOT hasCompletedOnboarding. The CLI then re-runs onboarding
+# and draws "Select login method" on top of working credentials. That two-file
+# split is documented for hub-side agents in
+# src/pkg/agent/claude_session_state.go (#4596); the contributor relay walks
+# into the same wall from the other direction.
+#
+# This seeding used to run only for litellm, or for claude when an
+# ANTHROPIC_API_KEY was delivered (#5103, the K8s contributor path).
+# Subscription/OAuth claude — the default `just contribute-hive claude` path —
+# matched neither branch, and so was the one configuration that never got the
+# flag it needed most.
+#
+# The customApiKeyResponses half stays keyed on a key actually being present.
+# It is stored both in full and as its last 20 chars because
+# customApiKeyResponses matching differs across Claude Code versions.
+seed_claude_config() {
+  # Colima cannot bind-mount files, so an operator-supplied .claude.json
+  # arrives as a copy in the hive config dir rather than as a mount. The merge
+  # below runs after it and preserves whatever keys it carries.
+  if [[ "$AGENT_BACKEND" == "claude" ]] && [[ -f "${CONFIG_DIR}/claude-config.json" ]]; then
+    cp "${CONFIG_DIR}/claude-config.json" "${HOME}/.claude.json"
+    chmod 600 "${HOME}/.claude.json"
+  fi
+
+  python3 - <<'SEEDEOF' 2>/dev/null || true
+import json, os
+p = os.path.join(os.path.expanduser('~'), '.claude.json')
+d = {}
+if os.path.exists(p):
+    try:
+        with open(p) as f:
+            d = json.load(f)
+    except Exception:
+        d = {}
+d['hasCompletedOnboarding'] = True
+d['autoUpdates'] = False
+d['installMethod'] = 'npm'
+key = os.environ.get('ANTHROPIC_API_KEY', '')
+if key:
+    resp = d.setdefault('customApiKeyResponses', {'approved': [], 'rejected': []})
+    approved = resp.setdefault('approved', [])
+    for k in (key, key[-20:]):
+        if k and k not in approved:
+            approved.append(k)
+with open(p, 'w') as f:
+    json.dump(d, f, indent=2)
+SEEDEOF
+  chmod 600 "${HOME}/.claude.json" 2>/dev/null || true
+}
+
+if [[ "${HIVE_CONTRIBUTOR_AGENT_TEST_SEED_CLAUDE_CONFIG:-}" == "1" ]]; then
+  seed_claude_config
+  exit 0
+fi
+
 echo "=== Hive Contributor Agent (ClankeR) ==="
 echo "Hub:     $HIVE_HUB"
 echo "Backend: $AGENT_BACKEND"
@@ -621,45 +688,11 @@ if [[ "$AGENT_BACKEND" == "codex" && -n "${AGENT_REASONING_EFFORT:-}" ]]; then
   REASONING_FLAG="-c 'model_reasoning_effort=\"${AGENT_REASONING_EFFORT}\"'"
 fi
 
-# Copy host .claude.json from hive config dir (Colima can't bind-mount files)
-if [[ "$AGENT_BACKEND" == "claude" ]] && [[ -f "${CONFIG_DIR}/claude-config.json" ]]; then
-  cp "${CONFIG_DIR}/claude-config.json" "${HOME}/.claude.json"
-  chmod 600 "${HOME}/.claude.json"
-fi
-
-# LiteLLM: pre-seed Claude Code config so first-run onboarding and the
-# custom-API-key approval prompt don't block the tmux session. Mirrors the
-# hub's ensureClaudeSettings pattern (src/pkg/agent/manager.go). The key is
-# stored both in full and as its last 20 chars — customApiKeyResponses
-# matching differs across Claude Code versions.
-# Also for claude driven by a delivered ANTHROPIC_API_KEY (#5103, the K8s
-# contributor path): the CLI raises the same custom-API-key approval prompt,
-# which nothing can answer in a headless pod.
-if [[ "$AGENT_BACKEND" == "litellm" ]] || { [[ "$AGENT_BACKEND" == "claude" ]] && [[ -n "${ANTHROPIC_API_KEY:-}" ]]; }; then
-  python3 - <<'PYEOF' 2>/dev/null || true
-import json, os
-p = os.path.join(os.path.expanduser('~'), '.claude.json')
-d = {}
-if os.path.exists(p):
-    try:
-        with open(p) as f:
-            d = json.load(f)
-    except Exception:
-        d = {}
-d['hasCompletedOnboarding'] = True
-d['autoUpdates'] = False
-d['installMethod'] = 'npm'
-key = os.environ.get('ANTHROPIC_API_KEY', '')
-if key:
-    resp = d.setdefault('customApiKeyResponses', {'approved': [], 'rejected': []})
-    approved = resp.setdefault('approved', [])
-    for k in (key, key[-20:]):
-        if k and k not in approved:
-            approved.append(k)
-with open(p, 'w') as f:
-    json.dump(d, f, indent=2)
-PYEOF
-  chmod 600 "${HOME}/.claude.json" 2>/dev/null || true
+# Seed Claude Code's first-run config for every backend that drives the claude
+# CLI. See seed_claude_config above for why OAuth/subscription claude needs
+# this just as much as the API-key paths do.
+if [[ "$AGENT_BACKEND" == "litellm" || "$AGENT_BACKEND" == "claude" ]]; then
+  seed_claude_config
 fi
 
 # Launch the interactive CLI and auto-dismiss its startup prompts — INTERACTIVE

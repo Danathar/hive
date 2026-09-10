@@ -127,6 +127,24 @@ function classifyReadiness(text, backend) {
       // are classified FIRST, so a pane sitting on a login or trust gate is
       // never reported ready by persistent chrome it happens to draw as well.
       if (/Not logged in|Please run \/login/.test(text)) return 'needs-login';
+      // The first-run login chooser. It is NOT the same screen as the two
+      // patterns above: those are what a signed-out CLI prints once it is past
+      // onboarding, while this is onboarding itself, and it appears whenever
+      // ${HOME}/.claude.json lacks hasCompletedOnboarding — including when the
+      // OAuth credential sitting next to it is perfectly valid (see
+      // seed_claude_config in bin/contributor-agent.sh, and #4596). Matching
+      // nothing, the pane fell through every branch here to 'starting', so the
+      // relay polled a menu that could never clear itself and handed the task
+      // back at CLI_READY_TIMEOUT_MS with "CLI did not become ready within
+      // timeout" — a timeout, for a CLI that was up and waiting for an answer.
+      // Classifying it 'needs-login' is what puts the boxed
+      // BACKEND_LOGIN_HELP banner on screen, which names the attach command
+      // and /login instead.
+      //
+      // Deliberately not 'onboarding': the auto-dismiss path answers menus
+      // with a keystroke, and picking an option here starts a browser OAuth
+      // flow that nothing in a container can finish. A human has to attach.
+      if (/Select login method/.test(text)) return 'needs-login';
       if (/Choose the text style|trust this folder/.test(text)) return 'onboarding';
       // The first alternation below is startup-only: a welcome banner, the
       // account line printed just after login, the first-run tip. That made

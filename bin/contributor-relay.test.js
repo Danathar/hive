@@ -6808,6 +6808,44 @@ test('pane-classifier: classifyReadiness reads backend-specific ready/login/onbo
   assert.strictEqual(paneClassifier.classifyReadiness('$ ', 'goose'), 'starting');
 });
 
+// Claude Code's first-run login chooser, as captured from a contributor
+// container whose ${HOME}/.claude/.credentials.json was valid and unexpired
+// the whole time. The pane carries none of the strings the older claude
+// branch matched — not "Not logged in", not "/login", not the theme or trust
+// wording — so it fell through to 'starting', waitForCLI() polled a menu that
+// could not clear itself, and the task came back at CLI_READY_TIMEOUT_MS as
+// "CLI did not become ready within timeout". Note the '❯' on the selected
+// option: readiness must classify this BEFORE any chrome pattern, the same
+// ordering bob and codex already depend on.
+const CLAUDE_LOGIN_METHOD_PANE = [
+  ' Claude Code can be used with your Claude subscription or billed based on',
+  ' API usage through your Console account.',
+  '',
+  ' Select login method:',
+  '',
+  ' ❯ 1. Claude account with subscription · Pro, Max, Team, or Enterprise',
+  '   2. Anthropic Console account · API usage billing',
+  '   3. 3rd-party platform · Amazon Bedrock, Microsoft Foundry, or Vertex AI',
+].join('\n');
+
+test('pane-classifier: the claude first-run login chooser is needs-login, not starting', () => {
+  assert.strictEqual(
+    paneClassifier.classifyReadiness(CLAUDE_LOGIN_METHOD_PANE, 'claude'), 'needs-login');
+  // It must not be reported ready by the '❯' its own selected row draws,
+  // and must not be treated as a dismissable onboarding menu: answering it
+  // starts a browser OAuth flow no container can finish.
+  assert.notStrictEqual(
+    paneClassifier.classifyReadiness(CLAUDE_LOGIN_METHOD_PANE, 'claude'), 'ready');
+  assert.notStrictEqual(
+    paneClassifier.classifyReadiness(CLAUDE_LOGIN_METHOD_PANE, 'claude'), 'onboarding');
+  // The gates that were already classified stay where they were.
+  assert.strictEqual(
+    paneClassifier.classifyReadiness('Choose the text style', 'claude'), 'onboarding');
+  assert.strictEqual(
+    paneClassifier.classifyReadiness('⏵⏵ bypass permissions on (shift+tab to cycle)', 'claude'),
+    'ready');
+});
+
 test('pane-classifier: blockingPromptKey takes backend as an explicit argument', () => {
   assert.strictEqual(
     paneClassifier.blockingPromptKey(CODEX_TRUST_PANE, 'codex'), '1');
