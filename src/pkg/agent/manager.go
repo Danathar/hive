@@ -460,15 +460,16 @@ type Manager struct {
 	// consentWedges records consent-screen restarts for the heartbeat's
 	// ConsentWedged signal (#5577). Own mutex, NEVER m.mu — the recording
 	// sites run with m.mu held. Zero value ready.
-	consentWedges    consentWedgeTracker
-	logger           *slog.Logger
-	workDir          string
-	project          ProjectContext
-	copilotAuthToken string
-	claudeAuthToken  string
-	uidMap           *UIDMap
-	appAuth          AppTokenMinter
-	agentMint        AgentMintIssuer // optional, opt-in mint credential (nil ⇒ off)
+	consentWedges                 consentWedgeTracker
+	logger                        *slog.Logger
+	workDir                       string
+	project                       ProjectContext
+	copilotAuthToken              string
+	copilotAuthTokenAuthoritative bool
+	claudeAuthToken               string
+	uidMap                        *UIDMap
+	appAuth                       AppTokenMinter
+	agentMint                     AgentMintIssuer // optional, opt-in mint credential (nil ⇒ off)
 
 	// bobAPIKeyResolver resolves the IBM bobshell API key at LAUNCH time (not
 	// boot), so a key an operator adds via a Secret/PVC file or the config UI
@@ -734,12 +735,27 @@ func (m *Manager) ReloadClaudeToken() {
 }
 
 // SetCopilotToken updates the cached Copilot token injected into agent
-// environments as COPILOT_GITHUB_TOKEN. Called by the dashboard after a
-// successful device-flow login.
+// environments as COPILOT_GITHUB_TOKEN. A caller setting the token explicitly
+// makes it authoritative over an older token left in the shared CLI config.
 func (m *Manager) SetCopilotToken(token string) {
+	m.setCopilotToken(token, true)
+}
+
+func (m *Manager) setCopilotToken(token string, authoritative bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.copilotAuthToken = token
+	m.copilotAuthTokenAuthoritative = authoritative
+}
+
+// ActivateCopilotToken makes token the active shared CLI identity as well as
+// the token injected into agent environments. The in-memory update happens
+// even if the config write fails, so the periodic reconciler retries in the
+// authoritative direction instead of restoring the superseded CLI token.
+func (m *Manager) ActivateCopilotToken(token string) error {
+	err := replaceCopilotTokens(sharedCopilotConfigPath, token)
+	m.setCopilotToken(token, true)
+	return err
 }
 
 // CopilotToken returns the cached Copilot (GitHub OAuth) token, or "" if
@@ -1534,10 +1550,9 @@ func copilotSessionRefreshStartDelay() time.Duration {
 //
 //   - PROMOTE (config → durable): if the CLI has a token (someone logged in
 //     INSIDE an agent with /login) but the hive's in-memory/durable token is
-//     missing or stale, mirror the CLI's token to the durable file +
-//     SetCopilotToken. This makes an in-agent login as durable as a dashboard
-//     login — it survives rolls and arms the seed direction below — closing the
-//     gap where a local /login unstuck agents now but was lost on the next roll.
+//     missing or stale, mirror the CLI's token to the durable file and memory.
+//     Explicit environment and dashboard tokens remain authoritative, so a
+//     stale CLI account cannot overwrite them.
 //   - SEED (durable → config): if the CLI's map is EMPTY but the hive holds a
 //     token, restore it so the CLI is not left stuck at /login (the #4494 case).
 //
@@ -1567,13 +1582,35 @@ const (
 func (m *Manager) syncCopilotToken(configPath, durablePath string) copilotSyncAction {
 	m.mu.RLock()
 	held := strings.TrimSpace(m.copilotAuthToken)
+	authoritative := m.copilotAuthTokenAuthoritative
 	m.mu.RUnlock()
 
 	if copilotCredentialFileHasTokens(configPath) {
-		// PROMOTE: the CLI has a token; mirror it to the durable store unless the
-		// hive already holds exactly it.
 		cliTok := extractCopilotToken(configPath)
-		if cliTok == "" || cliTok == held {
+		if cliTok != "" && cliTok == held {
+			return copilotSyncNoop
+		}
+		// SEED: explicit configuration and a just-completed dashboard login
+		// outrank whatever identity a shared config inherited. GitHub documents
+		// COPILOT_GITHUB_TOKEN as the CLI's highest-precedence credential; the
+		// reconciler must not silently reverse that precedence 30 seconds later.
+		if authoritative {
+			if held == "" {
+				return copilotSyncNoop
+			}
+			if err := replaceCopilotTokens(configPath, held); err != nil {
+				m.logger.Warn("copilot session refresh: failed to activate authoritative token",
+					"path", configPath, "error", err)
+				return copilotSyncNoop
+			}
+			m.logger.Info("copilot session refresh: replaced stale CLI identity with authoritative token",
+				"path", configPath)
+			return copilotSyncSeed
+		}
+		// PROMOTE: without an authoritative runtime token, mirror an unambiguous
+		// active CLI login to the durable store. Ambiguous multi-account configs
+		// intentionally return no token rather than choosing one at random.
+		if cliTok == "" {
 			return copilotSyncNoop
 		}
 		if err := writeDurableCopilotToken(durablePath, cliTok); err != nil {
@@ -1581,7 +1618,7 @@ func (m *Manager) syncCopilotToken(configPath, durablePath string) copilotSyncAc
 				"path", durablePath, "error", err)
 			return copilotSyncNoop
 		}
-		m.SetCopilotToken(cliTok)
+		m.setCopilotToken(cliTok, false)
 		m.logger.Info("copilot session refresh: promoted in-agent login token to the durable store",
 			"path", durablePath)
 		return copilotSyncPromote
@@ -1594,7 +1631,11 @@ func (m *Manager) syncCopilotToken(configPath, durablePath string) copilotSyncAc
 		// recovery is a manual login.
 		return copilotSyncNoop
 	}
-	if err := restoreCopilotTokens(configPath, held); err != nil {
+	seed := restoreCopilotTokens
+	if authoritative {
+		seed = replaceCopilotTokens
+	}
+	if err := seed(configPath, held); err != nil {
 		m.logger.Warn("copilot session refresh: failed to restore copilotTokens",
 			"path", configPath, "error", err)
 		return copilotSyncNoop
@@ -1789,6 +1830,7 @@ func NewManager(agents map[string]config.AgentConfig, logger *slog.Logger, proje
 	// The token stays in the process env so all agents can authenticate for AI
 	// completions; write access is gated by --enable-all-github-mcp-tools flag.
 	copilotToken := os.Getenv("COPILOT_GITHUB_TOKEN")
+	copilotTokenAuthoritative := strings.TrimSpace(copilotToken) != ""
 	if copilotToken == "" {
 		// Fall back to the token persisted by the dashboard's device-flow login.
 		if data, err := os.ReadFile(CopilotUserTokenPath); err == nil {
@@ -1808,17 +1850,18 @@ func NewManager(agents map[string]config.AgentConfig, logger *slog.Logger, proje
 	kickLogDir, kickLogRetention, kickLogMaxBytes := kickLogSettingsFromEnv()
 
 	m := &Manager{
-		agents:           make(map[string]*AgentProcess),
-		idToName:         make(map[string]string),
-		logger:           logger,
-		workDir:          workDir,
-		project:          project,
-		copilotAuthToken: copilotToken,
-		claudeAuthToken:  claudeToken,
-		uidMap:           uidMap,
-		kickLogDir:       kickLogDir,
-		kickLogRetention: kickLogRetention,
-		kickLogMaxBytes:  kickLogMaxBytes,
+		agents:                        make(map[string]*AgentProcess),
+		idToName:                      make(map[string]string),
+		logger:                        logger,
+		workDir:                       workDir,
+		project:                       project,
+		copilotAuthToken:              copilotToken,
+		copilotAuthTokenAuthoritative: copilotTokenAuthoritative,
+		claudeAuthToken:               claudeToken,
+		uidMap:                        uidMap,
+		kickLogDir:                    kickLogDir,
+		kickLogRetention:              kickLogRetention,
+		kickLogMaxBytes:               kickLogMaxBytes,
 	}
 
 	for name, cfg := range agents {
@@ -7049,6 +7092,37 @@ func restoreCopilotTokens(path, token string) error {
 	return writeCopilotConfig(path, cfg)
 }
 
+// replaceCopilotTokens makes token the sole active credential in config.json.
+// Unlike restoreCopilotTokens, it deliberately does not preserve the previous
+// lastLoggedInUser: this path is used when an explicit environment token or a
+// newly completed dashboard login must replace a stale shared CLI account.
+func replaceCopilotTokens(path, token string) error {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return nil
+	}
+	cfg, err := readCopilotConfig(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return err
+		}
+		cfg = map[string]interface{}{}
+	}
+	if login := githubTokenLogin(token); login != "" {
+		identity := map[string]interface{}{"host": "https://github.com", "login": login}
+		cfg["copilotTokens"] = map[string]interface{}{"https://github.com:" + login: token}
+		cfg["lastLoggedInUser"] = identity
+		cfg["loggedInUsers"] = []interface{}{identity}
+	} else {
+		cfg["copilotTokens"] = map[string]interface{}{
+			"github.com": map[string]interface{}{"token": token},
+		}
+		delete(cfg, "lastLoggedInUser")
+		delete(cfg, "loggedInUsers")
+	}
+	return writeCopilotConfig(path, cfg)
+}
+
 // githubTokenLogin resolves the GitHub login that owns token via GET /user, or
 // "" on any failure. Short-timeout, one call — used only on the rare seed path
 // where the config lacks a valid identity. Overridable in tests.
@@ -7105,12 +7179,15 @@ func copilotIdentityKey(v interface{}) string {
 	return ""
 }
 
-// extractCopilotToken pulls the first usable token string out of a config.json
-// copilotTokens map, or "" when there is none. The Copilot CLI stores entries
-// in two shapes across versions/login routes — a bare string
-// ({"host:user":"gho_…"}) and an object ({"github.com":{"token":"gho_…"}}) —
-// and this accepts both. It is the inverse of restoreCopilotTokens: the reader
-// side of promoting a CLI-written token back to the hive's durable store.
+// extractCopilotToken returns the active usable token from config.json. The
+// Copilot CLI stores entries in two shapes across versions/login routes — a
+// bare string ({"host:user":"gho_…"}) and an object
+// ({"github.com":{"token":"gho_…"}}) — and this accepts both.
+//
+// A valid lastLoggedInUser is authoritative. Without one, a legacy config is
+// accepted only when it contains exactly one distinct usable token. Refusing
+// an ambiguous multi-account map prevents Go's randomized map iteration from
+// promoting an unrelated (and possibly unlicensed) account fleet-wide.
 func extractCopilotToken(path string) string {
 	cfg, err := readCopilotConfig(path)
 	if err != nil {
@@ -7120,21 +7197,36 @@ func extractCopilotToken(path string) string {
 	if !ok {
 		return ""
 	}
-	for _, v := range tokens {
-		switch t := v.(type) {
-		case string:
-			if s := strings.TrimSpace(t); copilotTokenValueUsable(s) {
-				return s
-			}
-		case map[string]interface{}:
-			if s, ok := t["token"].(string); ok {
-				if s = strings.TrimSpace(s); copilotTokenValueUsable(s) {
-					return s
-				}
-			}
-		}
+	if key := copilotIdentityKey(cfg["lastLoggedInUser"]); key != "" {
+		return copilotTokenFromValue(tokens[key])
 	}
-	return ""
+	var found string
+	for _, v := range tokens {
+		token := copilotTokenFromValue(v)
+		if token == "" {
+			continue
+		}
+		if found != "" && token != found {
+			return ""
+		}
+		found = token
+	}
+	return found
+}
+
+func copilotTokenFromValue(v interface{}) string {
+	var token string
+	switch t := v.(type) {
+	case string:
+		token = t
+	case map[string]interface{}:
+		token, _ = t["token"].(string)
+	}
+	token = strings.TrimSpace(token)
+	if !copilotTokenValueUsable(token) {
+		return ""
+	}
+	return token
 }
 
 // copilotTokenValueUsable reports whether a copilotTokens value is a real
