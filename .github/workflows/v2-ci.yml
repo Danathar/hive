@@ -170,6 +170,18 @@ jobs:
       - name: Stable soak promotion policy (#5974)
         run: bash scripts/test-promote-stable.sh
 
+      # #6588: PRs that resolve somebody else's issue credit the filer with a
+      # Co-authored-by trailer, and scripts/issue-coauthor.sh builds it. A
+      # wrong trailer is worse than none — GitHub silently ignores an address
+      # it cannot resolve, so the credit looks recorded while nothing was
+      # credited. Drives the script against a stubbed API (no network, no
+      # token) over every shape that matters, and pins the invariant that
+      # co-authoring is attribution and never sign-off: a co-authored commit
+      # must still pass DCO, and a commit carrying ONLY a co-author trailer
+      # must still fail it.
+      - name: Issue co-author trailer helper (#6588)
+        run: bash scripts/test-issue-coauthor.sh
+
       # #5142: v4.0.1 failed to publish twice in a row inside tagged-release.yml's
       # final push — once on GH006 propagation lag (branch protection had not
       # yet ingested the just-earned gate check), once on a non-fast-forward
