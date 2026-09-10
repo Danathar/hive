@@ -7200,13 +7200,28 @@ func (s *Server) handleBackends(w http.ResponseWriter, r *http.Request) {
 	// copilot catalog and offers models bob cannot honor (see bobStaticModels).
 	bobCLI := s.queryCLIModels(bobBackendID)
 
+	// cliBackendEntry renders one CLI backend, attaching the discovery notice
+	// when there is one. A notice means the fallback list is being served
+	// because UPSTREAM REJECTED THIS ACCOUNT, not because a probe was absent
+	// or briefly unreachable — the dropdown says so instead of presenting a
+	// static catalog that looks like a working entitlement (#6500).
+	cliBackendEntry := func(id, name string, r cliModelResult) map[string]interface{} {
+		entry := map[string]interface{}{
+			"id": id, "name": name, "models": r.models, "fallback": r.fallback,
+		}
+		if r.notice != nil {
+			entry["notice"] = r.notice
+		}
+		return entry
+	}
+
 	jsonResponse(w, []map[string]interface{}{
-		{"id": "claude", "name": "Claude Code", "models": claudeCLI.models, "fallback": claudeCLI.fallback},
-		{"id": "copilot", "name": "GitHub Copilot", "models": copilotCLI.models, "fallback": copilotCLI.fallback},
-		{"id": bobBackendID, "name": "bob (IBM bobshell)", "models": bobCLI.models, "fallback": bobCLI.fallback},
-		{"id": "gemini", "name": "Gemini", "models": geminiCLI.models, "fallback": geminiCLI.fallback},
-		{"id": "goose", "name": "Goose", "models": gooseCLI.models, "fallback": gooseCLI.fallback},
-		{"id": agyBackendID, "name": "Google Antigravity (agy)", "models": agyCLI.models, "fallback": agyCLI.fallback},
+		cliBackendEntry("claude", "Claude Code", claudeCLI),
+		cliBackendEntry("copilot", "GitHub Copilot", copilotCLI),
+		cliBackendEntry(bobBackendID, "bob (IBM bobshell)", bobCLI),
+		cliBackendEntry("gemini", "Gemini", geminiCLI),
+		cliBackendEntry("goose", "Goose", gooseCLI),
+		cliBackendEntry(agyBackendID, "Google Antigravity (agy)", agyCLI),
 		{"id": "vllm", "name": "vLLM (self-hosted)", "models": vllmModels, "inference": true},
 		{"id": "llm-d", "name": "llm-d (self-hosted)", "models": llmdModels, "inference": true},
 		{"id": "litellm", "name": "LiteLLM (proxy)", "models": litellmModels, "inference": true},
