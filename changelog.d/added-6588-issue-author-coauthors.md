@@ -1,0 +1,1 @@
+- Agent PR-opening guidance now wires the existing `issue-coauthor.sh` helper into `hive-open-pr`, kick prompts, and bundled policy templates, so resolved-issue attribution is checked on the path agents actually use without duplicating the identity-resolution logic ([#6588](https://github.com/hivecommons/hive/issues/6588)).
