@@ -7470,6 +7470,197 @@ test('#6662 resolveTaskPR reports the three-way split it promises', () => {
 });
 
 // ---------------------------------------------------------------------------
+// kubestellar/hive#6541 (follow-up) — a quota-blocked relay must stop asking.
+//
+// Classification landed first: every cycle was correctly identified as a fatal
+// provider refusal. The relay then asked the hub for another task anyway, hit
+// the same wall seconds later, and repeated that for the whole reset window —
+// two provider rejections 45 seconds apart with distinct provider error IDs,
+// so each one really was a round-trip, an assignment slot and a hive issue
+// marked failed. Quota is a property of the provider ACCOUNT, not the task,
+// and it expires; agy prints the expiry on the banner.
+// ---------------------------------------------------------------------------
+
+const AGY_QUOTA_BANNER =
+  '⚠ Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 4h42m28s.';
+
+test('#6541 quota exhaustion is separated from the rest of the unretryable set', () => {
+  const hit = paneClassifier.paneQuotaExhaustion(AGY_QUOTA_BANNER + '\n');
+  assert.ok(hit, 'the agy banner must be recognised as quota, not just as unretryable');
+  assert.strictEqual(hit.resetMs, ((4 * 60 + 42) * 60 + 28) * 1000);
+  assert.match(hit.line, /Individual quota reached/);
+
+  // An AUTHORIZATION refusal is equally unretryable and must NOT be read as
+  // quota: it is not time-bounded, nothing expires, and parking the relay for
+  // hours on a misconfiguration would hide it instead of reporting it.
+  assert.ok(paneClassifier.paneShowsUnretryableAPIError('API Error: 403 not allowed to access model\n'));
+  assert.strictEqual(paneClassifier.paneQuotaExhaustion('API Error: 403 not allowed to access model\n'), null);
+
+  // Chromed quota (claude) is quota too, with no stated expiry.
+  const chromed = paneClassifier.paneQuotaExhaustion('● API Error: 429 {"type":"budget_exceeded"}\n');
+  assert.ok(chromed, 'a chromed quota refusal is still quota');
+  assert.strictEqual(chromed.resetMs, null);
+
+  // Two independent signals, as everywhere else in this classifier: prose that
+  // merely mentions the wording must not park a relay. This repo contains every
+  // one of these strings.
+  assert.strictEqual(paneClassifier.paneQuotaExhaustion(
+    'I added individual quota reached to the pattern list\n'), null);
+});
+
+test('#6541 parseQuotaResetMs reads the provider countdown, and refuses junk', () => {
+  const p = paneClassifier.parseQuotaResetMs;
+  assert.strictEqual(p('Resets in 38m29s.'), (38 * 60 + 29) * 1000);
+  assert.strictEqual(p('resets in 90s'), 90000);
+  assert.strictEqual(p('Resets in 2h'), 7200000);
+  assert.strictEqual(p('Resets in 1d2h3m4s'), 86400000 + 7200000 + 180000 + 4000);
+  // Anchored on the verb: a duration elsewhere on the line is not an expiry.
+  assert.strictEqual(p('Thought for 3s, 499 tokens'), null);
+  assert.strictEqual(p('⚠ Individual quota reached.'), null);
+  // An all-zero countdown is likelier a render artifact than a promise the
+  // quota is already back; the caller's fallback window is the safer answer.
+  assert.strictEqual(p('Resets in 0s'), null);
+});
+
+test('#6541 a quota refusal parks the loop instead of asking for the next task', () => {
+  const relay = loadRelay({ backend: 'agy', paneText: `● Bash(ls -la)\n${AGY_QUOTA_BANNER}\n` });
+  const warn = console.warn; console.warn = () => {};
+  try {
+    dispatchTask(relay, 't-quota');
+    const before = relay.__sent.length;
+    relay.__stallTick();
+    const after = relay.__sent.slice(before);
+
+    const failed = after.find(m => m.type === 'task_failed');
+    assert.ok(failed, `the task must still be handed back: ${JSON.stringify(after.map(m => m.type))}`);
+    // The misattribution the issue is about: "[environment] … not visibly
+    // working" reads as a broken contributor host. The CLI worked perfectly.
+    assert.match(failed.reason, /provider quota exhausted/);
+    assert.match(failed.reason, /not a fault of this host/);
+    assert.ok(!/not visibly working/.test(failed.reason),
+      `a provider refusal must not be reported as a dead CLI: ${failed.reason}`);
+
+    // THE FIX: no `ready`. Before this, the next assignment arrived seconds
+    // later and hit the same wall.
+    assert.ok(!after.some(m => m.type === 'ready'),
+      `a quota-blocked relay must not advertise for work: ${JSON.stringify(after.map(m => m.type))}`);
+    assert.strictEqual(relay.quotaHoldActive(), true);
+    // The hold runs to the reset the provider itself stated, not a guess.
+    const holdMs = relay.getQuotaHoldUntil() - Date.now();
+    assert.ok(holdMs > 4 * 60 * 60 * 1000, `expected the stated ~4h42m window, got ${holdMs}ms`);
+  } finally { console.warn = warn; teardown(relay); }
+});
+
+test('#6541 `ready` is withheld at the send choke point for the whole hold', () => {
+  const relay = loadRelay({ backend: 'agy' });
+  const warn = console.warn; console.warn = () => {};
+  try {
+    relay.enterQuotaHold({ line: AGY_QUOTA_BANNER, resetMs: 60 * 60 * 1000 });
+    const before = relay.__sent.length;
+    // Every other route back into the loop: the hub's negative-ack retry, a
+    // reconnect, a task exit. None of them may restart it.
+    relay.handleMessage(JSON.stringify({ type: 'auth_ok', contributor_id: 'c1', trust_tier: 'contributor' }));
+    relay.setCurrentTask({ task_id: 't-x', kind: 'issue', repo: 'foo/bar', number: 1, title: 'x' });
+    relay.failCurrentTask('unrelated failure during the hold');
+    const after = relay.__sent.slice(before);
+    assert.ok(!after.some(m => m.type === 'ready'),
+      `no route may advertise readiness during a quota hold: ${JSON.stringify(after.map(m => m.type))}`);
+    // ...but frames about work already in flight still go out. Withholding
+    // those would strand the hub on a task it thinks is running.
+    assert.ok(after.some(m => m.type === 'task_failed'),
+      'only `ready` is withheld — failure/progress frames must still be delivered');
+  } finally { console.warn = warn; teardown(relay); }
+});
+
+test('#6541 a pushed assignment during a hold is declined, not attempted', () => {
+  // Withholding `ready` stops us ASKING; a hub can still push an offer. Taking
+  // it would spend a provider round-trip to be refused again and mark a hive
+  // issue failed for a reason that has nothing to do with it.
+  const relay = loadRelay({ backend: 'agy' });
+  const warn = console.warn; console.warn = () => {};
+  const log = console.log; console.log = () => {};
+  try {
+    relay.enterQuotaHold({ line: AGY_QUOTA_BANNER, resetMs: 60 * 60 * 1000 });
+    const before = relay.__sent.length;
+    relay.handleMessage(JSON.stringify({
+      type: 'task_assign', task_id: 't-pushed', kind: 'issue', repo: 'foo/bar', number: 9, title: 'pushed',
+    }));
+    const after = relay.__sent.slice(before);
+    assert.strictEqual(relay.getCurrentTask(), null, 'a quota-blocked relay must not take the task');
+    const declined = after.find(m => m.type === 'task_failed' && m.task_id === 't-pushed');
+    assert.ok(declined, `the offer must be declined so another contributor gets it: ${JSON.stringify(after)}`);
+    assert.match(declined.reason, /provider quota exhausted/);
+    assert.ok(!after.some(m => m.type === 'ready'),
+      'declining must not be followed by re-advertising');
+  } finally { console.warn = warn; console.log = log; teardown(relay); }
+});
+
+test('#6541 the hold releases and re-advertises exactly once', () => {
+  const relay = loadRelay({ backend: 'agy' });
+  const warn = console.warn; console.warn = () => {};
+  const log = console.log; console.log = () => {};
+  try {
+    relay.enterQuotaHold({ line: AGY_QUOTA_BANNER, resetMs: 60 * 60 * 1000 });
+    const before = relay.__sent.length;
+    relay.releaseQuotaHold('test');
+    assert.strictEqual(relay.quotaHoldActive(), false);
+    const after = relay.__sent.slice(before);
+    assert.strictEqual(after.filter(m => m.type === 'ready').length, 1,
+      `release must restart the loop exactly once: ${JSON.stringify(after.map(m => m.type))}`);
+    // Releasing an already-released hold is a no-op, not a second ready.
+    relay.releaseQuotaHold('again');
+    assert.strictEqual(relay.__sent.slice(before).filter(m => m.type === 'ready').length, 1);
+  } finally { console.warn = warn; console.log = log; teardown(relay); }
+});
+
+test('#6541 a hold is bounded, never shortened, and survives an unparseable banner', () => {
+  const relay = loadRelay({ backend: 'agy' });
+  const warn = console.warn; console.warn = () => {};
+  try {
+    // No stated expiry — most backends print none. Still a hold: "the account
+    // is out and we do not know when" is a reason not to ask immediately.
+    relay.enterQuotaHold({ line: 'API Error: 429 budget_exceeded', resetMs: null });
+    assert.strictEqual(relay.quotaHoldActive(), true);
+    const fallbackUntil = relay.getQuotaHoldUntil();
+    assert.ok(Math.abs(fallbackUntil - (Date.now() + relay.QUOTA_HOLD_FALLBACK_MS)) < 5000);
+
+    // A second banner mid-hold restates the same exhaustion. Taking the smaller
+    // window would walk the release time backwards on every repeat.
+    relay.enterQuotaHold({ line: AGY_QUOTA_BANNER, resetMs: 1000 });
+    assert.strictEqual(relay.getQuotaHoldUntil(), fallbackUntil,
+      'a repeat banner must never shorten a live hold');
+
+    // The duration comes off provider text this relay cannot validate, so an
+    // absurd claim must not wedge a contributor out of the fleet.
+    relay.releaseQuotaHold('reset for the cap check');
+    relay.enterQuotaHold({ line: 'Resets in 999h', resetMs: 999 * 60 * 60 * 1000 });
+    assert.ok(relay.getQuotaHoldUntil() - Date.now() <= relay.QUOTA_HOLD_MAX_MS,
+      'a parsed window must be capped');
+  } finally { console.warn = warn; teardown(relay); }
+});
+
+test('#6541 negative control: an authorization refusal still fails fast and stays available', () => {
+  // The other half of the fatal bucket is unchanged. A 403 is not time-bounded,
+  // an operator has to fix it, and parking the relay would hide it.
+  const relay = loadRelay({
+    backend: 'claude',
+    paneText: '● API Error: 403 not allowed to access model\n/ commands for help\n',
+  });
+  try {
+    dispatchTask(relay, 't-403');
+    const before = relay.__sent.length;
+    relay.__stallTick();
+    const after = relay.__sent.slice(before);
+    const failed = after.find(m => m.type === 'task_failed');
+    assert.ok(failed, 'a 403 must still hand the task back');
+    assert.match(failed.reason, /a retry cannot clear/);
+    assert.ok(after.some(m => m.type === 'ready'),
+      `an authorization refusal must NOT park the loop: ${JSON.stringify(after.map(m => m.type))}`);
+    assert.strictEqual(relay.quotaHoldActive(), false);
+  } finally { teardown(relay); }
+});
+
+// ---------------------------------------------------------------------------
 
 let failed = 0;
 // RELAY_TEST_ONLY=<substring> runs a single test, for debugging in isolation.
