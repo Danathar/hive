@@ -75,8 +75,11 @@ shows "ioscan findings" is therefore not showing "attacks stopped."
   timeout, so the deterministic floor measured here is the worst case whether or
   not it is enabled.
 - **Not covered:** the output path (`EnforceOutput`) and the canary/egress path.
-  The canary egress check has a separate known weakness already filed as
-  [#6686](https://github.com/hivecommons/hive/issues/6686).
+  The canary egress check carries its own encoding corpus in
+  `TestCanaryRegistryScanDetectsEncodedCanaries`
+  ([#6686](https://github.com/hivecommons/hive/issues/6686)) — unit coverage of
+  known shapes, not a measured miss rate, so it says nothing about the
+  encodings that corpus does not model.
 
 ## Results
 
