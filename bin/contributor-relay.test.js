@@ -32,7 +32,7 @@ const RELAY_PATH = path.join(__dirname, 'contributor-relay.js');
 // bash and no WebSocket are ever touched.
 // ---------------------------------------------------------------------------
 
-function loadRelay({ backend = 'copilot', backendBinary = null, backendPerm = '--allow-all', model = '', reasoningEffort = '', cliStates = ['ready'], procAlive = true, mode = 'interactive', execFileResult = null, statusFile = null, paneText = null, env = null, cliVersion = null, attachedClients = false, attachedIdleMs = 0, clientActivityRaw = null, listClientsThrows = false } = {}) {
+function loadRelay({ backend = 'copilot', backendBinary = null, backendPerm = '--allow-all', model = '', reasoningEffort = '', cliStates = ['ready'], procAlive = true, mode = 'interactive', execFileResult = null, statusFile = null, paneText = null, env = null, cliVersion = null, attachedClients = false, attachedIdleMs = 0, clientActivityRaw = null, listClientsThrows = false, prMeta = null } = {}) {
   const commands = [];
   const sent = [];
   // Records every execFile (headless one-shot) invocation: { bin, args, opts }.
@@ -99,6 +99,17 @@ function loadRelay({ backend = 'copilot', backendBinary = null, backendPerm = '-
       // CLI is "dead" the pane is a bare shell — and crucially the string must
       // not contain any known backend name.
       return procAlive ? `${backend} --allow-all\n` : '/usr/bin/sh\n';
+    }
+    // #6662: `gh pr view --json …` is how the relay asks GitHub whether a PR it
+    // saw in the pane is actually THIS task's work. `prMeta` is the answer:
+    //   - an object  → serialized as gh's JSON (the interesting cases)
+    //   - an Error   → thrown, modelling gh missing/offline/rate-limited
+    //   - unset      → '' falls through, which is what a JSON.parse failure and
+    //                  therefore the UNVERIFIED path looks like.
+    if (/gh pr view/.test(cmd)) {
+      if (prMeta instanceof Error) throw prMeta;
+      if (prMeta) return JSON.stringify(prMeta);
+      return '';
     }
     return '';
   };
@@ -4324,7 +4335,7 @@ test('#4267 sleepMs is a no-op under HIVE_RELAY_TEST_MODE', () => {
   } finally { teardown(relay); }
 });
 
-test('#4267 detectPRURL prefers the task repo and falls back to the first URL', () => {
+test('#4267 detectPRURL prefers the task repo; #6662 there is no cross-repo fallback', () => {
   const relay = loadRelay({});
   try {
     const lines = [
@@ -4333,8 +4344,16 @@ test('#4267 detectPRURL prefers the task repo and falls back to the first URL', 
     ];
     assert.strictEqual(relay.detectPRURL(lines, 'hivecommons/hive'),
       'https://github.com/hivecommons/hive/pull/4267');
-    assert.strictEqual(relay.detectPRURL(lines, 'nomatch/repo'),
-      'https://github.com/other/repo/pull/7', 'fall back to the first PR URL seen');
+    // #6662: this used to return the other repo's PR — "better an approximate
+    // audit trail than none". It is not: pr_url is what the hub books cooldowns
+    // and credits work on, and a PR in a different repository cannot be the PR
+    // for this task's issue. An approximate value there is a wrong one.
+    assert.strictEqual(relay.detectPRURL(lines, 'nomatch/repo'), '',
+      'a PR in another repo must never be attributed to this task');
+    // With no task repo supplied there is nothing to attribute against, so the
+    // first match stands — unchanged.
+    assert.strictEqual(relay.detectPRURL(lines, ''),
+      'https://github.com/other/repo/pull/7');
     assert.strictEqual(relay.detectPRURL(['no urls here'], 'hivecommons/hive'), '');
     assert.strictEqual(relay.detectPRURL([], 'hivecommons/hive'), '');
     assert.strictEqual(relay.detectPRURL(null, 'hivecommons/hive'), '');
@@ -6197,16 +6216,31 @@ test('#5376 a no_work_needed verdict still completes the task and reports the ve
   } finally { teardown(relay); }
 });
 
-test('#5376 a shipped PR still overrides a no_work_needed claim', () => {
-  // #3987: a visible PR contradicts "nothing shippable", so the verdict is not
-  // reported (the hub would override it with "shipped" anyway). The task still
-  // completes — on the sentinel.
+test('#5376 a PR THIS TASK opened still overrides a no_work_needed claim', () => {
+  // #3987: a PR this task shipped contradicts "nothing shippable", so the
+  // verdict is not reported (the hub would override it with "shipped" anyway).
+  // The task still completes — on the sentinel.
+  //
+  // #6662 narrowed the test from "a visible PR" to "a PR this task opened", so
+  // this now states the confirming evidence rather than relying on the URL
+  // simply being on screen. The behaviour under that evidence is unchanged.
   const PANE = [
     'Opened https://github.com/foo/bar/pull/31',
     'HIVE_VERDICT: no_work_needed — I thought there was nothing to do',
     '✻ Cogitating… (esc to interrupt)',
   ].join('\n');
-  const relay = loadRelay({ backend: 'claude', paneText: PANE });
+  const relay = loadRelay({
+    backend: 'claude',
+    paneText: PANE,
+    env: { HIVE_CONTRIBUTOR_USERNAME: 'test-contributor' },
+    prMeta: {
+      url: 'https://github.com/foo/bar/pull/31',
+      author: { login: 'test-contributor' },
+      createdAt: new Date().toISOString(),
+      mergedAt: null,
+      state: 'OPEN',
+    },
+  });
   try {
     dispatchTask(relay, 't-nowork-with-pr');
     relay.__crashTick();
@@ -6214,7 +6248,7 @@ test('#5376 a shipped PR still overrides a no_work_needed claim', () => {
     assert.strictEqual(completed.length, 1);
     assert.strictEqual(completed[0].pr_url, 'https://github.com/foo/bar/pull/31');
     assert.strictEqual(completed[0].verdict, undefined,
-      'a visible PR contradicts no_work_needed, so the claim must not be forwarded');
+      'a PR this task opened contradicts no_work_needed, so the claim must not be forwarded');
   } finally { teardown(relay); }
 });
 
@@ -7159,6 +7193,211 @@ test('#5715 negative control: a revoke of a real task is still terminal', () => 
       'a revoked leased task must be released — it may already be another contributor\'s');
     assertAgentStopped(relay.__tmuxSends().slice(before), 'copilot');
   } finally { teardown(relay); }
+});
+
+// ---------------------------------------------------------------------------
+// kubestellar/hive#6662 — a PR the agent RESEARCHED is not a PR it OPENED.
+//
+// detectPRURL is a regex over pane text and cannot tell the two apart. When it
+// matched a pre-existing PR the relay credited the contributor with someone
+// else's work AND discarded a correct no_work_needed verdict — and it did that
+// in exactly #3987's target population, where a merged reference PR is present
+// by construction and the agent must cite it to justify the verdict at all.
+//
+// Three observed misattributions in one 45-minute session, all third-party PRs
+// merged weeks earlier, all surfaced by the agent running `gh pr list` /
+// `gh pr view` for prior art. The cheapest check catches every one: a PR that
+// merged before the task started cannot be the PR the task opened.
+// ---------------------------------------------------------------------------
+
+// The real metadata of the three PRs from the report.
+const OBSERVED_MISATTRIBUTIONS = [
+  { task: 'bluefin#879', url: 'https://github.com/projectbluefin/bluefin/pull/1103',
+    author: 'mrbobbytables', createdAt: '2026-08-13T00:00:00Z', mergedAt: '2026-08-24T00:00:00Z' },
+  { task: 'bluefin#1126', url: 'https://github.com/projectbluefin/bluefin/pull/1202',
+    author: 'mrbobbytables', createdAt: '2026-09-06T00:00:00Z', mergedAt: '2026-09-07T00:00:00Z' },
+  { task: 'fsdk-containers#130', url: 'https://github.com/projectbluefin/fsdk-containers/pull/136',
+    author: 'castrojo', createdAt: '2026-08-09T00:00:00Z', mergedAt: '2026-08-09T00:00:00Z' },
+];
+
+test('#6662 every observed misattribution is refuted by its own metadata', () => {
+  const relay = loadRelay({});
+  try {
+    // Task started well after all three merged — the real situation.
+    const taskStartedAt = Date.parse('2026-09-11T07:00:00Z');
+    for (const pr of OBSERVED_MISATTRIBUTIONS) {
+      const ev = relay.prAttributionEvidence(
+        { url: pr.url, author: { login: pr.author }, createdAt: pr.createdAt, mergedAt: pr.mergedAt, state: 'MERGED' },
+        { taskStartedAt, contributorLogin: 'Danathar' });
+      assert.strictEqual(ev.status, relay.PR_ATTRIBUTION_REFUTED,
+        `${pr.task}: ${pr.url} must not be attributed to this task`);
+      assert.match(ev.reason, /before this task started/);
+    }
+  } finally { teardown(relay); }
+});
+
+test('#6662 the merged-before-start check stands alone, without an identity', () => {
+  // The authorship half needs HIVE_CONTRIBUTOR_USERNAME, which
+  // contributor-agent.sh defaults to the literal "unknown". The timestamp half
+  // needs nothing, and on its own it catches all three observed cases — so a
+  // relay with no identity is still protected.
+  const relay = loadRelay({});
+  try {
+    const taskStartedAt = Date.parse('2026-09-11T07:00:00Z');
+    const meta = {
+      author: { login: 'mrbobbytables' },
+      createdAt: '2026-08-13T00:00:00Z',
+      mergedAt: '2026-08-24T00:00:00Z',
+      state: 'MERGED',
+    };
+    for (const login of ['', 'unknown', 'UNKNOWN', undefined]) {
+      const ev = relay.prAttributionEvidence(meta, { taskStartedAt, contributorLogin: login });
+      assert.strictEqual(ev.status, relay.PR_ATTRIBUTION_REFUTED,
+        `an absent identity (${JSON.stringify(login)}) must not disable the timestamp check`);
+    }
+    // ...and "unknown" must never be COMPARED as a login, or a relay without an
+    // identity would refute every PR including its own.
+    const ours = relay.prAttributionEvidence(
+      { author: { login: 'somebody' }, createdAt: new Date(taskStartedAt + 60000).toISOString(), mergedAt: null },
+      { taskStartedAt, contributorLogin: 'unknown' });
+    assert.strictEqual(ours.status, relay.PR_ATTRIBUTION_CONFIRMED,
+      'an unavailable identity must skip the authorship check, not fail it');
+  } finally { teardown(relay); }
+});
+
+test('#6662 a PR opened by this contributor during this task is confirmed', () => {
+  const relay = loadRelay({});
+  try {
+    const taskStartedAt = Date.now() - 10 * 60 * 1000;
+    const ev = relay.prAttributionEvidence({
+      author: { login: 'Danathar' },
+      createdAt: new Date(taskStartedAt + 5 * 60 * 1000).toISOString(),
+      mergedAt: null,
+      state: 'OPEN',
+    }, { taskStartedAt, contributorLogin: 'danathar' });
+    assert.strictEqual(ev.status, relay.PR_ATTRIBUTION_CONFIRMED,
+      'login comparison must be case-insensitive');
+
+    // Authored by someone else, during the task: still not ours.
+    const theirs = relay.prAttributionEvidence({
+      author: { login: 'someone-else' },
+      createdAt: new Date(taskStartedAt + 5 * 60 * 1000).toISOString(),
+      mergedAt: null,
+    }, { taskStartedAt, contributorLogin: 'Danathar' });
+    assert.strictEqual(theirs.status, relay.PR_ATTRIBUTION_REFUTED);
+    assert.match(theirs.reason, /authored by someone-else/);
+  } finally { teardown(relay); }
+});
+
+test('#6662 clock skew between this host and GitHub does not refute a real PR', () => {
+  // taskAssignedAt is this host's clock; createdAt is GitHub's. A couple of
+  // minutes of drift is ordinary, and the misattributions this catches are off
+  // by weeks — so the slack costs nothing and stops a genuine PR being refused
+  // over a clock difference.
+  const relay = loadRelay({});
+  try {
+    const taskStartedAt = Date.now();
+    const justBefore = new Date(taskStartedAt - (relay.PR_ATTRIBUTION_CLOCK_SKEW_MS - 1000)).toISOString();
+    assert.strictEqual(
+      relay.prAttributionEvidence({ author: { login: 'me' }, createdAt: justBefore, mergedAt: null },
+        { taskStartedAt, contributorLogin: 'me' }).status,
+      relay.PR_ATTRIBUTION_CONFIRMED);
+    const wellBefore = new Date(taskStartedAt - (relay.PR_ATTRIBUTION_CLOCK_SKEW_MS + 60000)).toISOString();
+    assert.strictEqual(
+      relay.prAttributionEvidence({ author: { login: 'me' }, createdAt: wellBefore, mergedAt: null },
+        { taskStartedAt, contributorLogin: 'me' }).status,
+      relay.PR_ATTRIBUTION_REFUTED);
+  } finally { teardown(relay); }
+});
+
+test('#6662 a researched PR is dropped and the no_work_needed verdict survives', () => {
+  // The headline case, end to end — the `bluefin#879` shape: the agent
+  // researched prior art, cited the merged PR that makes its verdict correct,
+  // and printed the sentinel.
+  //
+  // The URL is under the HARNESS's task repo (foo/bar) on purpose. With
+  // projectbluefin/bluefin it would be dropped by the cross-repo rule before
+  // the attribution logic ever ran, and this test would pass without exercising
+  // the thing it is named for. The metadata is #1103's real metadata.
+  const PANE = [
+    '● Bash(gh pr list --repo foo/bar --search "879" --state all)',
+    '  #1103  MERGED  fix(framework): remove stale hid_sensor_hub karg',
+    '  https://github.com/foo/bar/pull/1103',
+    'HIVE_VERDICT: no_work_needed — merged PRs cover all actionable items',
+    '✻ Cogitating… (esc to interrupt)',
+  ].join('\n');
+  const relay = loadRelay({
+    backend: 'claude',
+    paneText: PANE,
+    env: { HIVE_CONTRIBUTOR_USERNAME: 'Danathar' },
+    prMeta: {
+      url: 'https://github.com/foo/bar/pull/1103',
+      author: { login: 'mrbobbytables' },
+      createdAt: '2026-08-13T00:00:00Z',
+      mergedAt: '2026-08-24T00:00:00Z',
+      state: 'MERGED',
+    },
+  });
+  const log = console.log; console.log = () => {};
+  try {
+    dispatchTask(relay, 't-879', 879);
+    relay.__crashTick();
+    const completed = relay.__sent.filter(m => m.type === 'task_complete');
+    assert.strictEqual(completed.length, 1);
+    // Not this contributor's work — must not be reported as it.
+    assert.strictEqual(completed[0].pr_url, '',
+      "a maintainer's merged PR must not be credited to this contributor");
+    // ...and the verdict it used to discard survives, which is the serious half.
+    assert.strictEqual(completed[0].verdict, 'no_work_needed',
+      'the PR that makes the verdict correct must not be what discards it');
+    assert.match(completed[0].verdict_reason, /merged PRs cover all actionable items/);
+  } finally { console.log = log; teardown(relay); }
+});
+
+test('#6662 an unverifiable PR is still reported, but does not outrank the sentinel', () => {
+  // gh missing, offline or rate-limited. Dropping the URL here would start
+  // losing real PRs (the inverse failure, #6667), so it is still reported as a
+  // best-effort audit trail — but a regex hit on scrollback is much weaker
+  // evidence than a sentinel the agent deliberately printed, so it no longer
+  // silently overrules it.
+  const PANE = [
+    'saw https://github.com/foo/bar/pull/31 while looking around',
+    'HIVE_VERDICT: no_work_needed — already covered',
+    '✻ Cogitating… (esc to interrupt)',
+  ].join('\n');
+  const relay = loadRelay({
+    backend: 'claude',
+    paneText: PANE,
+    prMeta: new Error('gh: command not found'),
+  });
+  const log = console.log; console.log = () => {};
+  try {
+    dispatchTask(relay, 't-unverified');
+    relay.__crashTick();
+    const completed = relay.__sent.filter(m => m.type === 'task_complete');
+    assert.strictEqual(completed.length, 1);
+    assert.strictEqual(completed[0].pr_url, 'https://github.com/foo/bar/pull/31',
+      'an unverifiable PR is still worth reporting as an audit trail');
+    assert.strictEqual(completed[0].verdict, 'no_work_needed',
+      'an unverified scrape must not silently outrank the agent\'s own sentinel');
+  } finally { console.log = log; teardown(relay); }
+});
+
+test('#6662 resolveTaskPR reports the three-way split it promises', () => {
+  const relay = loadRelay({ prMeta: { author: { login: 'me' }, createdAt: new Date().toISOString(), mergedAt: null } });
+  const log = console.log; console.log = () => {};
+  try {
+    const lines = ['opened https://github.com/foo/bar/pull/9'];
+    const confirmed = relay.resolveTaskPR(lines, { repo: 'foo/bar', taskStartedAt: Date.now() - 60000, contributorLogin: 'me' });
+    assert.strictEqual(confirmed.url, 'https://github.com/foo/bar/pull/9');
+    assert.strictEqual(confirmed.suppressesVerdict, true);
+
+    // Nothing in the pane: no candidate, nothing to suppress.
+    const none = relay.resolveTaskPR(['no urls at all'], { repo: 'foo/bar', taskStartedAt: Date.now() });
+    assert.strictEqual(none.url, '');
+    assert.strictEqual(none.suppressesVerdict, false);
+    assert.strictEqual(none.evidence, null);
+  } finally { console.log = log; teardown(relay); }
 });
 
 // ---------------------------------------------------------------------------
