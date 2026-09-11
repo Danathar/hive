@@ -51,6 +51,36 @@ func TestIssueFileRefSet(t *testing.T) {
 			"the roadmap should mention token metering",
 			nil,
 		},
+		{
+			"dotted attribute chains are not files (#6674)",
+			"verified with ast.parse and py_compile.compile against hub.go",
+			[]string{"hub.go"},
+		},
+		{
+			"dotted module paths are not files (#6674)",
+			"custom_components.sensi.client fails to import",
+			nil,
+		},
+		{
+			"x-tailed version strings are not files (#6674)",
+			"a hard SyntaxError under every CPython 3.x interpreter",
+			nil,
+		},
+		{
+			"a bare basename folds into the fuller path (#6674)",
+			"client.py is broken: see custom_components/sensi/client.py:321",
+			[]string{"custom_components/sensi/client.py"},
+		},
+		{
+			"a basename with no matching path is kept (#6674)",
+			"client.py is broken: see pkg/other/hub.go:12",
+			[]string{"client.py", "pkg/other/hub.go"},
+		},
+		{
+			"schemeless host with a path is not a file (#6674)",
+			"mirrored at example.com/pkg/thing.go, fix pkg/thing.go",
+			[]string{"pkg/thing.go"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -64,6 +94,48 @@ func TestIssueFileRefSet(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestIssueFileRefSet_SurvivesRewording is the #6674 regression: the same
+// false positive filed six times on a downstream repo (Danathar/sensi #79,
+// #95, #133, #147, #148, #158), the sixth arriving AFTER the #6465 gate
+// shipped. The prose below is condensed from the real #148 (closed
+// not_planned) and the real #158 that followed it. Nothing about the finding's
+// subject changed — only the command used to verify it, the way the Python
+// version was phrased, and whether one basename appeared in a sentence.
+func TestIssueFileRefSet_SurvivesRewording(t *testing.T) {
+	rejected := issueFileRefSet(
+		"[scanner] SyntaxError: unparenthesized multi-except breaks integration at import\n" +
+			"__init__.py and client.py use Python 2 exception syntax. Verified with " +
+			"ast.parse against custom_components/sensi/client.py:290 and " +
+			"custom_components/sensi/__init__.py:35.")
+	refiled := issueFileRefSet(
+		"[scanner] Python 2 exception syntax breaks import: integration cannot load\n" +
+			"A hard SyntaxError under every CPython 3.x interpreter. Verified with " +
+			"py_compile.compile: custom_components/sensi/client.py:321 and " +
+			"custom_components/sensi/__init__.py:45, plus client.py:374.")
+	if !equalFileRefSets(rejected, refiled) {
+		t.Fatalf("same finding, reworded, must key equal:\n rejected=%v\n refiled =%v", rejected, refiled)
+	}
+	want := []string{"custom_components/sensi/client.py", "custom_components/sensi/__init__.py"}
+	if len(rejected) != len(want) {
+		t.Fatalf("key should be exactly the two paths, got %v", rejected)
+	}
+	for _, w := range want {
+		if !rejected[w] {
+			t.Errorf("key missing %q (got %v)", w, rejected)
+		}
+	}
+}
+
+// A finding that names one more file is still a different finding: the fold
+// and the allowlist must not erase that distinction.
+func TestIssueFileRefSet_ExtraFileStillDiffers(t *testing.T) {
+	a := issueFileRefSet("broken in pkg/a/hub.go:10")
+	b := issueFileRefSet("broken in pkg/a/hub.go:10 and pkg/b/relay.go:20")
+	if equalFileRefSets(a, b) {
+		t.Error("a finding touching an additional file must not be suppressed")
 	}
 }
 
