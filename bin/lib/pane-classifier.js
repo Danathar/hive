@@ -275,7 +275,35 @@ function classifyReadiness(text, backend) {
       const recent = paneTail(text, 15);
       if (/press enter to skip/i.test(recent)) return 'onboarding';
       if (/\b(?:sign in|log in|authentication required|credentials? required)\b/i.test(recent)) return 'needs-login';
+      // kubestellar/hive#6623/#6626 shipped this backend against a
+      // hand-written fixture (a 6-line pane), never a real tmux capture at
+      // the dimensions bin/contributor-agent.sh actually launches with
+      // (`-x 200 -y 50`). Verified live against omp 18.1.16/18.1.17 at that
+      // exact size: the welcome splash's "# for prompt actions" / "/ for
+      // commands" hint text is real, but it renders inside a "Tips" panel
+      // ABOVE a Tip-of-the-day banner, an "Update Available" banner, and the
+      // status footer — so on a real capture those hints sit outside the
+      // last-15-non-blank-line window `paneTail` returns (the same #6413
+      // shape, one release later: an inline-rendered panel pushed out of a
+      // fixed-size tail by the chrome that follows it). Worse, the splash
+      // renders only until the FIRST reply: one live exchange scrolls it off
+      // permanently, and every pattern below it stops matching for the rest
+      // of the task — the exact one-shot-splash defect #5156/#5650 fixed for
+      // claude, recurring here because the omp fixtures never exercised a
+      // second turn. Nothing in 18.1.16/18.1.17 ever renders a "π >" prompt;
+      // that pattern is kept only because it is harmless (never observed, so
+      // it never fires) — see the classifyPane branch below for where its
+      // absence actually broke busy/idle detection instead.
       if (/π\s*>|# for prompt actions|\/ for commands/.test(recent)) return 'ready';
+      // The persistent signal: omp draws a status footer — icons, model
+      // name, cwd, a running cost/token count, and a "─NN%─" context-usage
+      // meter — immediately above the input box's "╰─" corner, on EVERY
+      // frame once the TUI is up, splash or mid-conversation, idle or busy.
+      // Captured live (omp 18.1.16/18.1.17, tmux -x 200 -y 50): present in
+      // the first-run splash, in a plain idle prompt, in an active tool
+      // call, and in a pane six exchanges deep with the splash long since
+      // scrolled away.
+      if (/─+\d+%─|^\s*╰─/m.test(recent)) return 'ready';
   } else {
     if (/>\s*$|❯|\$\s*$/.test(text)) return 'ready';
   }
@@ -660,9 +688,20 @@ function classifyPane(text, backend, deps = {}) {
     isWorking = /Reading|Writing|Bash|Editing|thinking|running/i.test(text);
   } else if (backend === 'omp') {
     const ompTail = paneTail(text, 15);
-    hasIdlePrompt = /π\s*>/.test(ompTail);
+    // Same persistent footer/input-box chrome as classifyReadiness above —
+    // present whether the pane is idle or mid-turn, so isWorking below is
+    // what actually carries the busy/idle distinction (same shape as
+    // codex/agy in this file).
+    hasIdlePrompt = /π\s*>|─+\d+%─|^\s*╰─/m.test(ompTail);
     hasCompletionMarker = true;
-    isWorking = /(?:esc|escape) to interrupt/i.test(ompTail);
+    // "esc to interrupt" was never observed live (omp 18.1.16/18.1.17):
+    // a tool call renders "⏺ Running… (esc to cancel)" and plain generation
+    // renders a spinner glyph plus "Working…" with no "(esc to …)" suffix at
+    // all. The original pattern therefore never matched a real busy omp
+    // pane, so isWorking was always false and a still-running turn fell
+    // through to whatever hasIdlePrompt/hasCompletionMarker decided instead
+    // of being read as WORKING.
+    isWorking = /\b(?:Working|Running)…/.test(ompTail);
   } else if (backend === 'agy') {
     // Scope the activity check to the TAIL, exactly as the claude branch above
     // does. agy narrates in plain English inside the transcript ("I am running

@@ -2499,6 +2499,7 @@ var cliPaneMarkers = []string{
 	codexInputPromptMarker,
 	codexProductMarker,
 	ompInputPromptMarker,
+	ompContextMarker,
 }
 
 const (
@@ -2536,9 +2537,18 @@ const (
 	// rather than a context size keeps it valid at any model/context
 	// configuration.
 	piContextMarker = "%/"
-	// ompInputPromptMarker is the visible OMP interactive prompt. It is distinct
-	// from the generic shell `>` prompt, so it proves the OMP TUI is ready.
+	// ompInputPromptMarker is the OMP interactive prompt as originally
+	// documented for this backend. Never observed live (verified against omp
+	// 18.1.16/18.1.17): kept only because a Contains check against it can
+	// never false-positive, not because anything renders it.
 	ompInputPromptMarker = "π >"
+	// ompContextMarker is the PRIMARY readiness signal for OMP, verified live
+	// against omp 18.1.16/18.1.17 (tmux -x 200 -y 50): the status footer's
+	// "─NN%─" context-usage meter, present on every frame once the TUI is up
+	// — splash, idle, or mid-turn — the same role piContextMarker plays for
+	// pi. Digit-agnostic like piContextMarker, for the same reason: it must
+	// hold at any context size.
+	ompContextMarker = "%─"
 )
 
 // paneHasCLIMarker reports whether the given pane content contains any known
@@ -4258,7 +4268,8 @@ func paneShowsInputPrompt(output string) bool {
 		strings.Contains(output, bobInputPlaceholderDefault) ||
 		strings.Contains(output, codexInputPromptMarker) ||
 		strings.Contains(output, piContextMarker) ||
-		strings.Contains(output, ompInputPromptMarker)
+		strings.Contains(output, ompInputPromptMarker) ||
+		strings.Contains(output, ompContextMarker)
 }
 
 // waitForCLIReady polls the tmux pane until the CLI shows its ready prompt
@@ -5997,8 +6008,16 @@ func stripExplainLines(pane string) string {
 // legacy "esc to interrupt" footer hint or the live spinner counter is
 // visible. The idle input prompt "❯" alone proves nothing on v2.1.204 —
 // the input box stays rendered while a response streams.
+//
+// OMP renders neither marker (verified live, omp 18.1.16/18.1.17): a tool
+// call shows "⏺ Running… (esc to cancel)" and plain generation shows a
+// spinner glyph plus "Working…", so an in-flight OMP turn read as idle
+// without these two additions.
 func paneShowsActiveWork(pane string) bool {
-	return strings.Contains(pane, cliWorkingMarker) || strings.Contains(pane, cliActiveCounterMarker)
+	return strings.Contains(pane, cliWorkingMarker) ||
+		strings.Contains(pane, cliActiveCounterMarker) ||
+		strings.Contains(pane, "Working…") ||
+		strings.Contains(pane, "Running…")
 }
 
 func paneShowsEmptyInputPrompt(pane string) bool {
@@ -6575,7 +6594,7 @@ func isCLIChrome(s string) bool {
 		strings.HasPrefix(t, "# issues") {
 		return true
 	}
-	if strings.HasPrefix(t, ompInputPromptMarker) {
+	if strings.HasPrefix(t, ompInputPromptMarker) || t == "╰─" {
 		return true
 	}
 	// Copilot/Claude/Gemini status bar: contains "esc cancel" or model name
