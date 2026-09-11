@@ -58,6 +58,7 @@ const {
   paneTail,
   paneShowsTransientAPIError,
   paneShowsUnretryableAPIError,
+  paneQuotaExhaustion,
   paneShowsLoginRequiredError,
   paneUnknownAPIErrorLine,
   classifyPane,
@@ -266,6 +267,36 @@ const NETWORK_ERROR_RETRY_DELAY_MS = 5000;
 // (the old silent-nil behaviour) nor busy-loop the hub.
 const TASK_UNAVAILABLE_RETRY_MS = 30000;
 
+// ── Provider quota hold (kubestellar/hive#6541) ──────────────────────────────
+//
+// When the provider refuses on quota, the relay used to fail the task and go
+// straight back to `ready`. The next assignment hit the same wall seconds
+// later, and the cycle repeated for the whole reset window — the reporter
+// measured two provider rejections 45 seconds apart, with distinct provider
+// error IDs, so each one genuinely cost a round-trip, a hub assignment slot,
+// and a hive issue marked failed. Over the 4h42m window agy stated, that is a
+// steady drip of failures for a condition nothing on this host caused and
+// nothing on this host could fix.
+//
+// Quota is a property of the provider ACCOUNT, not of the task, and it EXPIRES.
+// So: stop asking for work, and come back when the provider says to.
+//
+// QUOTA_HOLD_FALLBACK_MS is used when the banner states no expiry (most
+// backends do not print one). Short enough that a wrongly-held relay costs
+// minutes rather than an evening, and the hold re-arms on the next refusal if
+// the quota is genuinely still out.
+const QUOTA_HOLD_FALLBACK_MS = RELAY_TEST_TIMING ? 50 : 15 * 60 * 1000;
+// Hard ceiling on a PARSED window. The duration comes off a provider banner —
+// text this relay does not control and cannot validate — so a malformed or
+// absurd "Resets in 999h" must not wedge a contributor out of the fleet.
+// Whatever the banner claims, the relay re-probes by this point at the latest;
+// if the quota really is still out, the next refusal re-arms the hold.
+const QUOTA_HOLD_MAX_MS = RELAY_TEST_TIMING ? 200 : 6 * 60 * 60 * 1000;
+// Providers round their own countdown down, and the relay's clock is not
+// theirs. Asking one second after the stated reset invites an immediate second
+// refusal and another full hold; a small grace makes the first re-ask count.
+const QUOTA_HOLD_GRACE_MS = RELAY_TEST_TIMING ? 10 : 30 * 1000;
+
 // RELAY_PROTOCOL_VERSION is the contributor-protocol version this relay speaks
 // (kubestellar/hive#2567). It is DECLARED to the hub in auth_response (additive,
 // optional — an older hub simply ignores it) and the hub advertises its own
@@ -407,6 +438,90 @@ function warnOnTokenExpiry(now = Date.now()) {
 
 function nextSeq() { return ++seq; }
 
+// ── Quota hold state (kubestellar/hive#6541) ─────────────────────────────────
+// quotaHoldUntil is the epoch ms at which this relay may ask for work again; 0
+// means not held. quotaHoldReason keeps the provider's own banner line so the
+// release log can say what it was waiting on.
+let quotaHoldUntil = 0;
+let quotaHoldReason = '';
+let quotaHoldTimer = null;
+
+function quotaHoldActive() {
+  return quotaHoldUntil > Date.now();
+}
+
+function formatQuotaHoldRemaining(ms) {
+  const total = Math.max(0, Math.round(ms / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  return h > 0 ? `${h}h${m}m${s}s` : (m > 0 ? `${m}m${s}s` : `${s}s`);
+}
+
+// enterQuotaHold parks the relay until the provider's stated reset.
+//
+// hint is paneQuotaExhaustion()'s { line, resetMs }. A banner with no parseable
+// expiry still gets a hold — the fallback window — because "we know the account
+// is out and we know nothing about when" is still a reason not to ask for the
+// next task immediately.
+//
+// SAID ONCE, AND SAID LOUDLY. Before this, the banner lived only inside the agy
+// pane while the relay log said `[environment]`; an operator reading the log had
+// no way to learn their provider quota was gone for the next four hours, or that
+// switching model/backend was the remedy. This is the only place that
+// information surfaces outside the pane.
+function enterQuotaHold(hint) {
+  const stated = hint && Number.isFinite(hint.resetMs) && hint.resetMs > 0 ? hint.resetMs : null;
+  const holdMs = Math.min(
+    stated !== null ? stated + QUOTA_HOLD_GRACE_MS : QUOTA_HOLD_FALLBACK_MS,
+    QUOTA_HOLD_MAX_MS
+  );
+  const until = Date.now() + holdMs;
+  // Never SHORTEN a live hold: a second banner arriving mid-hold (a raced tick,
+  // or a task that slipped through) restates the same exhaustion, and taking
+  // the smaller window would walk the release time backwards on every repeat.
+  if (until <= quotaHoldUntil) return;
+
+  quotaHoldUntil = until;
+  quotaHoldReason = (hint && hint.line) || 'provider quota exhausted';
+  if (quotaHoldTimer) clearTimeout(quotaHoldTimer);
+
+  console.warn('');
+  console.warn('┌─ PROVIDER QUOTA EXHAUSTED ─────────────────────────────────');
+  console.warn(`│ ${quotaHoldReason}`);
+  console.warn(`│ This is the provider refusing ${BACKEND}, not a fault of this machine.`);
+  console.warn(`│ Not asking the hub for work for ${formatQuotaHoldRemaining(holdMs)}` +
+    `${stated === null ? ' (the banner stated no reset time — will re-probe)' : ' (the reset the provider stated)'}.`);
+  console.warn('│ To work sooner: switch AGENT_MODEL/AGENT_BACKEND, or upgrade the plan.');
+  console.warn('└────────────────────────────────────────────────────────────');
+  console.warn('');
+
+  quotaHoldTimer = setTimeout(() => {
+    quotaHoldTimer = null;
+    releaseQuotaHold('the provider reset window has passed');
+  }, holdMs);
+  // A hold outliving the work it bounds must not keep the process alive on its
+  // own — every other timer here is cleared on a task exit, and this one has no
+  // task to hang off.
+  if (typeof quotaHoldTimer.unref === 'function') quotaHoldTimer.unref();
+}
+
+// releaseQuotaHold clears the hold and re-advertises. The explicit `ready` is
+// the whole point: `ready` is suppressed while held (see sendTo), so nothing
+// else would restart the loop — the hub has heard nothing from this contributor
+// since the hold began and is not going to offer work unprompted.
+function releaseQuotaHold(why) {
+  if (!quotaHoldUntil) return;
+  const was = quotaHoldReason;
+  quotaHoldUntil = 0;
+  quotaHoldReason = '';
+  if (quotaHoldTimer) { clearTimeout(quotaHoldTimer); quotaHoldTimer = null; }
+  console.log(`Provider quota hold released — ${why}. Asking for work again (was: ${was})`);
+  if (!currentTask && !cliReadyFailed) {
+    sendTo(hubs[activeHubIndex], { type: 'ready', seq: nextSeq() });
+  }
+}
+
 function sendTo(hub, msg) {
   // #5715: a local-only task (the synthetic pr-review cycle) has no
   // server-issued lease, so an ownership frame naming it can only ever be
@@ -418,6 +533,14 @@ function sendTo(hub, msg) {
   // rationale. Everything else about the task is unchanged — it still runs,
   // still ticks locally, and still reports task_complete/ready when it ends.
   if (msg && HUB_OWNERSHIP_FRAMES.has(msg.type) && isLocalOnlyTaskId(msg.task_id)) return;
+  // #6541: while the provider has refused this account on quota, do not ask for
+  // work. Enforced HERE, at the one point every frame passes through, rather
+  // than at each of the eight `ready` call sites — a guard per call site is the
+  // shape that lets the next call site reintroduce the bug, and the whole
+  // failure being fixed is a `ready` that should not have been sent. Only
+  // `ready` is withheld: progress, completion and failure frames for work
+  // already in flight must still reach the hub.
+  if (msg && msg.type === 'ready' && quotaHoldActive()) return;
   if (hub && hub.ws && hub.ws.readyState === WebSocket.OPEN) {
     hub.ws.send(JSON.stringify(msg));
   }
@@ -3496,10 +3619,29 @@ function progressTick() {
     // by repeating the request (#4400, #4583). Hand the task back honestly so the
     // hub records it and can re-offer it once an operator fixes the cause —
     // rather than claiming a completion that shipped nothing.
-    failCurrentTask(
-      'agent stopped on an API failure a retry cannot clear (authorization or quota)',
-      { kind: 'environment' }
-    );
+    //
+    // QUOTA IS THE SEPARABLE CASE (#6541). Both halves of this bucket refuse the
+    // task, but only quota refuses every OTHER task too, and only quota comes
+    // with an expiry. Handing the task back and immediately advertising `ready`
+    // — which is what this branch did for both — walked straight into the next
+    // refusal, once per assignment, for the whole reset window. So for quota:
+    // skipReady, park the loop, and say so in the reason the hub records, since
+    // "an API failure a retry cannot clear" gives an operator nothing to act on.
+    const quota = paneQuotaExhaustion(tmuxLines.join('\n'));
+    if (quota) {
+      enterQuotaHold(quota);
+      failCurrentTask(
+        `provider quota exhausted for ${BACKEND} — not a fault of this host; ` +
+          `the relay is standing down for ${formatQuotaHoldRemaining(quotaHoldUntil - Date.now())} ` +
+          `and will ask for work again after that (${quota.line})`,
+        { kind: 'environment', skipReady: true }
+      );
+    } else {
+      failCurrentTask(
+        'agent stopped on an API failure a retry cannot clear (authorization or quota)',
+        { kind: 'environment' }
+      );
+    }
   } else {
     // Stall backstop: a pane frozen this long is not evidence of work, and
     // continuing to report "working" would renew the hub's lease forever.
@@ -3625,7 +3767,12 @@ function handleMessage(data, hub) {
         // Only the hub currently in the poll rotation asks for work. A hub
         // that authenticates while it's not its turn just sits connected
         // (heartbeating) until task_unavailable rotates the active slot to it.
-        if (CONTRIBUTOR_MODE === MODE_HEADLESS || cliReady) {
+        if (quotaHoldActive()) {
+          // sendTo() would swallow the ready anyway; say why, or a reconnect
+          // during a hold looks like the relay silently losing interest (#6541).
+          console.log(`Authenticated, but the provider quota is exhausted — withholding ready for ` +
+            `${formatQuotaHoldRemaining(quotaHoldUntil - Date.now())} (${quotaHoldReason})`);
+        } else if (CONTRIBUTOR_MODE === MODE_HEADLESS || cliReady) {
           sendTo(hub, { type: 'ready', seq: nextSeq() });
         } else if (cliReadyFailed) {
           console.log('Authenticated, but CLI readiness previously failed — withholding ready until the CLI recovers');
@@ -3677,6 +3824,25 @@ function handleMessage(data, hub) {
         console.log(`Rejecting ${taskKey(msg)} — previously given up on after ${MAX_TASK_CLI_RESTARTS} CLI crashes`);
         sendTo(hub, { type: 'task_failed', seq: nextSeq(), task_id: msg.task_id, reason: `previously given up on after ${MAX_TASK_CLI_RESTARTS} CLI crashes`, permanent: true });
         sendTo(hub, { type: 'ready', seq: nextSeq() });
+        break;
+      }
+      // #6541: quota-blocked. Withholding `ready` stops us ASKING, but a hub can
+      // still push an assignment — a queued offer, a hub that never saw the last
+      // `ready` consumed, an operator forcing one. Accepting it would spend a
+      // provider round-trip to be refused again and mark a hive issue failed for
+      // a reason that has nothing to do with it. Decline immediately so the hub
+      // can offer it to a contributor who can actually run it, and stay silent
+      // afterwards rather than re-advertising.
+      if (quotaHoldActive()) {
+        const remaining = formatQuotaHoldRemaining(quotaHoldUntil - Date.now());
+        console.log(`Declining ${taskKey(msg)} — provider quota exhausted, standing down for ${remaining}`);
+        sendTo(hub, {
+          type: 'task_failed',
+          seq: nextSeq(),
+          task_id: msg.task_id,
+          reason: `provider quota exhausted for ${BACKEND} — not a fault of this host; declining work for ${remaining} (${quotaHoldReason})`,
+          failure_kind: 'environment',
+        });
         break;
       }
       currentTask = msg;
@@ -4065,6 +4231,16 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     paneUnknownAPIErrorLine,
     paneShowsTransientAPIError,
     paneShowsUnretryableAPIError,
+    // Provider quota hold (kubestellar/hive#6541).
+    paneQuotaExhaustion,
+    quotaHoldActive,
+    enterQuotaHold,
+    releaseQuotaHold,
+    getQuotaHoldUntil: () => quotaHoldUntil,
+    getQuotaHoldReason: () => quotaHoldReason,
+    QUOTA_HOLD_FALLBACK_MS,
+    QUOTA_HOLD_MAX_MS,
+    QUOTA_HOLD_GRACE_MS,
     paneShowsLoginRequiredError,
     handleTransientAPIError,
     resetTransientNudgeState,

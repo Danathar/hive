@@ -594,6 +594,24 @@ is still bounded by the pane-stall detector and the absolute duration ceiling
 above; genuine idle completion — the same chrome with no retry line — is
 detected exactly as before.
 
+### Provider quota parks the relay instead of burning a task per window
+
+An exhausted provider quota and an authorization refusal are both unretryable — repeating the request changes nothing either way — and the relay treated them identically: fail the task, advertise `ready`, take the next one. For a 403 that is right. For quota it is a loop, because quota is a property of the provider **account**, not of the task: it applies to every task this contributor could be given, and it **expires**.
+
+[#6541](https://github.com/hivecommons/hive/issues/6541) is what that cost. An agy contributor hit its quota and the relay kept asking for work; each assignment was refused seconds later with its own provider error ID — two rejections 45 seconds apart, confirmed as genuinely separate calls — so every cycle spent a provider round-trip, a hub assignment slot, and a hive issue marked failed, for a window agy itself stated as `Resets in 4h42m28s`. The relay had the reset time on screen and did not use it.
+
+A quota refusal now parks the loop:
+
+- **`ready` is withheld** for the duration, at the single point every frame passes through rather than at each of the eight call sites that send one. Frames about work already in flight — progress, completion, failure — still go out; only the request for *more* work stops.
+- **A pushed assignment is declined**, immediately and with the reason, so the hub can offer it to a contributor who can actually run it. Withholding `ready` stops the relay asking; it does not stop a hub offering.
+- **The window comes from the provider.** `Resets in 4h42m28s` is parsed off the banner, plus a small grace so the first re-ask is not one second early. A banner with no stated expiry — most backends print none — gets a bounded fallback instead, and the hold re-arms if the quota is genuinely still out. A parsed window is capped, because the duration is provider text the relay cannot validate and a malformed `Resets in 999h` must not wedge a contributor out of the fleet.
+- **The operator is told once, clearly.** The banner previously lived only inside the agy pane while the relay log said `[environment]`; nobody reading the log could learn their quota was gone for four hours, or that switching model or backend was the remedy.
+- **The failure says what happened.** `[environment] … the agent CLI is not visibly working` reads as a broken contributor host. The CLI was working perfectly and the provider said no, so the reason now says so.
+
+Only quota takes this path. An authorization refusal is not time-bounded, an operator has to change something, and parking the relay would hide it — a 403 still fails fast and stays available.
+
+The `failure_kind` on the wire is still `environment`: the hub's kinds are `environment` / `task` / `unspecified`, and the field is advisory — the hub records and displays it and does not route or change a work item's failure cooldown on it. A dedicated quota kind, and the cooldown exemption [#6541](https://github.com/hivecommons/hive/issues/6541) asks for, are a hub-side protocol change and are not part of this.
+
 ### The GitHub token outlives the task, because the hub re-mints it
 
 The scoped GitHub token the relay pushes with is valid for **55 minutes**
