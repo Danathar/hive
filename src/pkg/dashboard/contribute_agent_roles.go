@@ -108,13 +108,6 @@ func (h *ContributeWSHub) roleKickPrompt(role string) string {
 	return h.server.deps.Scheduler.BuildAgentMessageFromLastActionable(role)
 }
 
-// buildRoleTaskPromptForRef wraps the source-aware assignment prompt in the
-// role framing. Only the base prompt carries work identity, so the role text
-// itself is unchanged for every source.
-func buildRoleTaskPromptForRef(ref worksource.Ref, title, role, agentPrompt string) string {
-	return buildRoleTaskPromptForContributor(ref, title, role, agentPrompt, false)
-}
-
 func buildRoleTaskPromptForContributor(ref worksource.Ref, title, role, agentPrompt string, canPush bool) string {
 	base := buildTaskPromptForContributor(ref, title, canPush)
 	role = normalizeAgentRole(role)
