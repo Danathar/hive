@@ -422,18 +422,20 @@ project-level compliance signals:
   (`scorecard.yml`, via a SHA-pinned reusable workflow in
   `hivecommons/infra`); results publish to the repository's code-scanning
   alerts. No specific score floor is gated in CI at present.
-- **OpenSSF Best Practices Badge**: **not yet held — and being pursued.** At
-  first review of this assessment the project had not registered, and
-  TAG-Security's feedback was that a passing badge is achievable
-  low-hanging fruit whose criteria are things the project should be doing
-  anyway. The maintainers agree; registration and criteria completion are
-  tracked in [#6684](https://github.com/hivecommons/hive/issues/6684), and
-  this document will carry the badge ID and level once awarded rather than a
-  promise. The substantive prerequisites — OSI license, public VCS, private
-  vulnerability reporting, documented contribution process, automated test
-  suite in CI, static analysis, and no known unpatched vulnerabilities — are
-  already satisfied; what is missing is the registration and self-certification
-  itself.
+- **OpenSSF Best Practices Badge**: **held at the `passing` level** — project
+  [14261](https://www.bestpractices.dev/projects/14261), achieved 2026-08-27,
+  100% of the passing criteria (all 67 Met or Not-Applicable). This is a
+  maintainer **self**-certification against published criteria, publicly
+  auditable per-criterion — not a third-party audit, and so not a
+  counter-example to the "no formal security certification" sentence above.
+  The badge is displayed in `README.md` and its state is live, so the image
+  tracks the project's current level rather than the level at the time of this
+  writing; no level beyond `passing` is claimed here, for the same reason the
+  Scorecard number above is not frozen into this document. TAG-Security's
+  feedback was that a passing badge is achievable low-hanging fruit whose
+  criteria are things the project should be doing anyway; the maintainers
+  agreed, and [#6684](https://github.com/hivecommons/hive/issues/6684) tracked
+  it to completion.
 - **DCO (Developer Certificate of Origin)**: enforced for human contributors
   via `copilot-dco.yml` and is a stated policy requirement for agent-authored
   commits (`git commit -s`) per `security-model.md` Layer 5 — described there
