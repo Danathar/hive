@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-11 (v4.28.2)
+
+### Fixed
+
+- Fixed a second OMP readiness regression, found immediately after `#6637` landed: the welcome splash's rotating startup tip can read "Tip: Log in to several accounts of the same provider — `/login` again — and omp load-balances across them automatically", whose literal "Log in" text tripped `classifyReadiness('omp')`'s needs-login gate on an already-authenticated pane, leaving a freshly assigned task queued forever. The "Tip:" paragraph is now stripped before either the onboarding or login gate is tested.
+
 ## 2026-09-11 (v4.28.1)
 
 ### Fixed
