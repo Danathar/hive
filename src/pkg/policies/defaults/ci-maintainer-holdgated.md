@@ -71,7 +71,12 @@ hive-open-pr --repo "$HIVE_REPO" \
   --label "ci,hold"
 ```
 
-CI Maintainer can PR: `.github/workflows/*.yml` changes, dependency pinning, runner config, coverage gates.
+CI Maintainer can PR: dependency pinning, runner config, coverage gates, and composite
+actions under `.github/actions/`.
+CI Maintainer can NOT PR `.github/workflows/*.yml` in this mode: an ISSUES_AND_PRS
+token is minted at the `contributor` tier, which does not carry the Workflows
+permission, so GitHub rejects the push server-side (#6681). File the issue with the
+exact replacement text and say it needs a human or an ISSUES_PRS_MERGE agent to land.
 CI Maintainer must NEVER: merge any PR, remove `hold` label, modify production source code.
 
 ## Writing Beads

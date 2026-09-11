@@ -680,6 +680,11 @@ func (s *Scheduler) BuildAgentMessage(agentName string, issues []github.Issue, a
 		// above; say so at the same seam so a customized template cannot
 		// leave the agent wondering where its delegated issue went.
 		message = s.addInflightNote(message, issues)
+		// The workflow-push ceiling is a property of the agent's MODE, not of
+		// its policy text, and no policy path can state it correctly for every
+		// deployment — so it is stated here, at the same seam, for the one mode
+		// that has it (#6681).
+		message = s.addWorkflowPushCeiling(agentName, message)
 	}()
 
 	baseName := s.cfg.BaseAgentName(agentName)
@@ -818,13 +823,87 @@ func (s *Scheduler) isHoldGatedPRAgent(agentName string) bool {
 	if s.cfg == nil || s.cfg.ACMMLevel == nil || *s.cfg.ACMMLevel < holdGatedACMMMinLevel || *s.cfg.ACMMLevel > holdGatedACMMMaxLevel {
 		return false
 	}
-	baseName := s.cfg.BaseAgentName(agentName)
+	mode := s.agentEffectiveMode(agentName)
+	return mode == "ISSUES_AND_PRS" || mode == "ISSUES_PRS_MERGE"
+}
+
+// addWorkflowPushCeiling states the one limit an ISSUES_AND_PRS agent cannot
+// discover from its policy: a branch whose diff touches .github/workflows/**
+// is unpushable at this mode, whatever the policy says it "can PR".
+//
+// The mode maps to the `contributor` scoped-token tier, and that tier
+// deliberately does not request the Workflows permission (pkg/agent/mode.go
+// TokenTier, pkg/github/app.go ScopedToken — only trusted/merger ask for it,
+// so the push broker's protected-path rejection of .github/workflows/ stays
+// meaningful for sandboxed contributors). GitHub then rejects the ref update
+// server-side: "refusing to allow a GitHub App to create or update workflow
+// ... without `workflows` permission".
+//
+// Nothing told the agent. Observed live (#6681): a hold-gated sec-check agent
+// found an unsafe pattern in a workflow file, wrote the exact replacement into
+// an issue, and filed no PR — the right outcome, reached with no way to say
+// why, and indistinguishable to the operator from an agent that simply chose
+// not to fix it. ci-maintainer-holdgated.md meanwhile promised
+// ".github/workflows/*.yml changes" it could never land.
+//
+// Injected at the same post-resolution seam as the held-PR preflight and for
+// the same reason (kubestellar/hive#4744): a customized or remotely sourced
+// policy must not be able to omit it.
+func (s *Scheduler) addWorkflowPushCeiling(agentName, message string) string {
+	if message == "" || s.agentEffectiveMode(agentName) != "ISSUES_AND_PRS" {
+		return message
+	}
+	section := `## Workflow files are out of reach at this mode — preflight
+
+This agent runs in ISSUES_AND_PRS (hold-gated) mode, whose GitHub App token is
+minted at the ` + "`contributor`" + ` tier. That tier does not carry the Workflows
+permission, so a push whose diff touches
+
+    .github/workflows/**
+
+is rejected by GitHub server-side ("refusing to allow a GitHub App to create or
+update workflow ... without ` + "`workflows`" + ` permission"), no matter what the App
+installation grants. When this agent runs sandboxed the push broker refuses the
+same diff first ("protected paths changed"), along with the other paths it
+protects.
+
+This is a ceiling, not a bug to work around: do not rewrite the file, do not
+retry, and never weaken the finding to fit what is pushable.
+
+When a fix belongs in a workflow file:
+1. Do not open a PR for it. Nothing you can push will contain the change.
+2. File the issue with the exact replacement text, so applying it is mechanical.
+3. Say plainly in the issue that the change needs a human or an
+   ISSUES_PRS_MERGE agent to land, and why — otherwise "issue, no PR" reads as
+   a judgement call you did not make.
+4. If part of the fix lives outside ` + "`.github/workflows/`" + `, PR that part and say
+   in both the issue and the PR which part is still waiting.
+
+Everything else is pushable as normal, including composite actions under
+` + "`.github/actions/`" + ` — GitHub's restriction covers the workflows directory only.
+
+`
+	if newline := strings.IndexByte(message, '\n'); newline >= 0 {
+		return message[:newline+1] + "\n" + section + message[newline+1:]
+	}
+	return section + message
+}
+
+// agentEffectiveMode returns the agent's configured mode, preferring the
+// tools-derived effective mode when one is set. Empty when the agent is not
+// configured. This is the resolution isHoldGatedPRAgent and isPRCapableAgent
+// both did inline; it is one place now so a new caller cannot get it subtly
+// different.
+func (s *Scheduler) agentEffectiveMode(agentName string) string {
+	if s.cfg == nil {
+		return ""
+	}
 	agentCfg, ok := s.cfg.Agents[agentName]
 	if !ok {
-		agentCfg, ok = s.cfg.Agents[baseName]
+		agentCfg, ok = s.cfg.Agents[s.cfg.BaseAgentName(agentName)]
 	}
 	if !ok {
-		return false
+		return ""
 	}
 	mode := agentCfg.Mode
 	if agentCfg.Tools != nil {
@@ -832,7 +911,7 @@ func (s *Scheduler) isHoldGatedPRAgent(agentName string) bool {
 			mode = effective
 		}
 	}
-	return mode == "ISSUES_AND_PRS" || mode == "ISSUES_PRS_MERGE"
+	return mode
 }
 
 // isPRCapableAgent reports whether the agent's effective mode lets it push
@@ -842,19 +921,7 @@ func (s *Scheduler) isPRCapableAgent(agentName string) bool {
 	if s.cfg == nil {
 		return false
 	}
-	agentCfg, ok := s.cfg.Agents[agentName]
-	if !ok {
-		agentCfg, ok = s.cfg.Agents[s.cfg.BaseAgentName(agentName)]
-	}
-	if !ok {
-		return false
-	}
-	mode := agentCfg.Mode
-	if agentCfg.Tools != nil {
-		if effective := agentCfg.Tools.EffectiveMode(); effective != "" {
-			mode = effective
-		}
-	}
+	mode := s.agentEffectiveMode(agentName)
 	return mode == "ISSUES_AND_PRS" || mode == "ISSUES_PRS_MERGE"
 }
 
