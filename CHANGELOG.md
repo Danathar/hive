@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-11 (v4.27.2)
+
+### Security
+
+- Require owner role on the agent-control mutation endpoints (kick, switch, model set, restart, reset-restarts, pin, unpin), closing a gap where any authenticated read-write contributor could restart or reconfigure an agent, or inject an arbitrary prompt into its CLI session ([#6557](https://github.com/hivecommons/hive/issues/6557))
+
 ## 2026-09-10 (v4.27.1)
 
 ### Fixed
