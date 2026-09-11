@@ -56,6 +56,11 @@ const (
 	wsTokenRefreshPeriod = 50 * time.Minute
 	wsAuthTimeout        = 30 * time.Second
 	wsMaxMessageSize     = 64 * 1024
+	// repoPermissionTimeout bounds the user-specific permission lookup performed
+	// before rendering an assignment prompt. A slow GitHub API must not hold the
+	// contributor's ready request indefinitely; lookup failure safely falls back
+	// to the fork workflow.
+	repoPermissionTimeout = 5 * time.Second
 )
 
 var wsUpgrader = websocket.Upgrader{
@@ -5140,6 +5145,51 @@ func repoNameOnly(repo string) string {
 	return repo
 }
 
+// contributorCanPush reports whether the connected contributor can create a
+// branch directly in repoFull. A personal repository cannot be forked back into
+// the same account, so owner equality is both authoritative and deliberately
+// independent of API availability. For organization repositories, GitHub's
+// permission endpoint folds direct, team, organization, and enterprise grants
+// into one effective permission. Any missing dependency, malformed identity,
+// timeout, or API error fails closed to the universally safe fork workflow.
+func (h *ContributeWSHub) contributorCanPush(repoFull, username string) bool {
+	owner, repo, ok := strings.Cut(strings.TrimSpace(repoFull), "/")
+	username = strings.TrimSpace(username)
+	if !ok || owner == "" || repo == "" || username == "" {
+		return false
+	}
+	if strings.EqualFold(owner, username) {
+		return true
+	}
+	if h == nil || h.server == nil || h.server.deps == nil || h.server.deps.GHClient == nil {
+		return false
+	}
+	client := h.server.deps.GHClient.GoGitHub()
+	if client == nil {
+		return false
+	}
+	ctx := h.server.deps.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, repoPermissionTimeout)
+	defer cancel()
+	level, _, err := client.Repositories.GetPermissionLevel(ctx, owner, repo, username)
+	if err != nil {
+		if h.logger != nil {
+			h.logger.Debug("[contribute-ws] repository permission lookup failed; using fork workflow",
+				"repo", repoFull, "username", username, "error", err)
+		}
+		return false
+	}
+	switch strings.ToLower(level.GetPermission()) {
+	case "admin", "write":
+		return true
+	default:
+		return false
+	}
+}
+
 // taskUnavailableReason* are the machine-readable reasons carried on a
 // task_unavailable negative-ack. They let the relay (and operators reading the
 // log) tell "there is simply no admissible work right now" apart from "the hub
@@ -5318,21 +5368,20 @@ func (h *ContributeWSHub) taskUnavailable(reason string) *WSMessage {
 }
 
 // buildTaskPrompt constructs the exact assignment prompt sent to a contributor's
-// agent for a given issue. It is a PURE function of the task's public metadata
-// (repo / number / title) and deliberately contains NO credential: the scoped
-// github_token is attached to the task_assign WSMessage separately, so this text
-// is safe to preview read-only in the ops tab (#2539). selectTask ships whatever
-// this returns, and the ops preview reads the very same string back off the
-// connection, so "what is previewed" always matches "what runs".
+// agent for a given issue. It is a PURE function of public task metadata and a
+// pre-resolved access mode, and deliberately contains NO credential: the scoped
+// github_token is attached to the task_assign WSMessage separately. The text is
+// therefore safe to preview read-only in the ops tab (#2539). selectTask stores
+// exactly what it ships, so "what is previewed" always matches "what runs".
 // buildTaskPrompt is the GitHub-shaped entry point retained for existing call
-// sites (ops-tab prompt preview, tests). New identity-aware callers use
-// buildTaskPromptForRef.
+// sites and tests. Source-aware callers use buildTaskPromptForRef; live dispatch
+// uses buildTaskPromptForContributor after resolving the contributor's access.
 //
-// One value comes from outside the task's own metadata: the base branch this
-// work belongs on (#5729), which taskBaseBranch derives from the issue title
-// and the branch this hive was built from. That is process-wide build metadata
-// rather than per-request state, so the preview still renders exactly what the
-// agent is sent.
+// Two values come from outside the task itself: the base branch (#5729), which
+// taskBaseBranch derives from the issue title and this hive's build branch, and
+// the access mode (#6654), which selectTask resolves from the connected
+// contributor's GitHub identity. Neither is a credential, and the rendered
+// result stored on the connection is still the exact prompt sent to the agent.
 func buildTaskPrompt(repoFull string, number int, title string) string {
 	return buildTaskPromptForRef(worksource.Ref{Repo: repoFull, Number: number}, title)
 }
@@ -5347,9 +5396,17 @@ func buildTaskPrompt(repoFull string, number int, title string) string {
 // carries its URL, because that is the only way an agent can actually open it:
 // there is no `gh issue view` for a Linear ticket.
 //
-// The repository instructions are unchanged and still name the GitHub repo —
-// external work is planned elsewhere but still landed as a PR here.
+// Repository instructions always name the GitHub repo; external work is planned
+// elsewhere but still landed as a PR here.
 func buildTaskPromptForRef(ref worksource.Ref, title string) string {
+	return buildTaskPromptForContributor(ref, title, false)
+}
+
+// buildTaskPromptForContributor renders the checkout workflow selected for the
+// contributor's actual access to the target repository. canPush is resolved by
+// contributorCanPush immediately before dispatch; the credential remains
+// separate from this pure, preview-safe prompt builder.
+func buildTaskPromptForContributor(ref worksource.Ref, title string, canPush bool) string {
 	repoFull := ref.Repo
 	issueRef := ref.Key()
 	if issueRef == "" {
@@ -5372,8 +5429,8 @@ func buildTaskPromptForRef(ref worksource.Ref, title string) string {
 	// was put back on v5 by the agent, because the plan it had already formed
 	// said v5. Fixing the workspace alone cannot work; the instruction has to
 	// carry the answer.
-	return buildTaskPromptBody(repoFull, issueRef, title, sourceHint,
-		taskBaseBranch(title, repoFull, upstreamBranch()))
+	return buildTaskPromptBodyForAccess(repoFull, issueRef, title, sourceHint,
+		taskBaseBranch(title, repoFull, upstreamBranch()), canPush)
 }
 
 // taskIDSegment is the per-item component of a task id. For GitHub-backed work
@@ -5515,6 +5572,10 @@ func taskBaseBranch(title, repoFull, hubBranch string) string {
 // resolve one at all, which changes the wording below but never licenses
 // inheriting whatever branch the checkout happens to be on.
 func buildTaskPromptBody(repoFull, issueRef, title, sourceHint, baseBranch string) string {
+	return buildTaskPromptBodyForAccess(repoFull, issueRef, title, sourceHint, baseBranch, false)
+}
+
+func buildTaskPromptBodyForAccess(repoFull, issueRef, title, sourceHint, baseBranch string, canPush bool) string {
 	// The workspace contract (kubestellar/hive#2545): your tmux pane already
 	// starts rooted in $HIVE_WORKSPACE_DIR (contributor-agent.sh creates it and
 	// launches the session with -c pointed there), but nothing had put a repo
@@ -5548,14 +5609,36 @@ func buildTaskPromptBody(repoFull, issueRef, title, sourceHint, baseBranch strin
 				"is '%s' before you report done. ",
 			b, repoFull, b, b, b)
 	}
+	repoOwner, _, _ := strings.Cut(repoFull, "/")
+	if repoOwner == "" {
+		repoOwner = repoFull
+	}
+	checkoutHint := fmt.Sprintf(
+		"You do NOT have push access to the upstream repo. "+
+			"Create the checkout parent with 'mkdir -p $HIVE_WORKSPACE_DIR/%s', "+
+			"then get a real checkout on disk: "+
+			"'gh repo fork %s --clone=true -- $HIVE_WORKSPACE_DIR/%s' "+
+			"(this creates 'origin' for your fork and 'upstream' for the source repo; "+
+			"if that directory already has a clone from a prior task, 'cd' into it "+
+			"and 'git fetch upstream' instead of re-forking). ",
+		repoOwner, repoFull, repoFull)
+	pushHint := "Push your branch to your fork's 'origin' remote, then open a PR from your fork. "
+	if canPush {
+		checkoutHint = fmt.Sprintf(
+			"You have push access to the upstream repo, so do not fork it. "+
+				"Create the checkout parent with 'mkdir -p $HIVE_WORKSPACE_DIR/%s', "+
+				"then get a real checkout on disk: "+
+				"'gh repo clone %s $HIVE_WORKSPACE_DIR/%s -- --origin upstream' "+
+				"(or, if that directory already has a clone from a prior task, 'cd' "+
+				"into it and ensure the 'upstream' remote points to %s before running "+
+				"'git fetch upstream'). ",
+			repoOwner, repoFull, repoFull, repoFull)
+		pushHint = "Push your branch to the 'upstream' remote, then open a PR from that branch. "
+	}
+
 	return fmt.Sprintf(
 		"You are a contributor to the %s hive. Work on issue %s: \"%s\".%s "+
-			"You do NOT have push access to the upstream repo. "+
-			"Start by getting a real checkout on disk: "+
-			"'gh repo fork %s --clone=true --remote=true "+
-			"$HIVE_WORKSPACE_DIR/%s' (or, if that directory already has a clone "+
-			"from a prior task, 'cd' into it and 'git fetch' instead of "+
-			"re-forking). Then 'cd' into that checkout, read the issue, "+
+			"%sThen 'cd' into that checkout, read the issue, "+
 			"understand what's needed, and take action. "+
 			// #5729: the base branch. Everything above deliberately REUSES a
 			// checkout across tasks, which is exactly what makes the branch
@@ -5586,7 +5669,7 @@ func buildTaskPromptBody(repoFull, issueRef, title, sourceHint, baseBranch strin
 			// no reason to think otherwise. The contributor had to intervene by
 			// hand ("don't make them draft. Make sure they are submitted and
 			// ready for review") to get it marked ready.
-			"Push your branch to your fork remote, then open a PR from your fork. "+
+			"%s"+
 			"Open it ready for review, not as a draft (do not pass --draft): a draft "+
 			"is auto-labelled do-not-merge/work-in-progress and cannot merge. If a PR "+
 			"is already open as a draft, mark it ready for review. "+
@@ -5624,7 +5707,7 @@ func buildTaskPromptBody(repoFull, issueRef, title, sourceHint, baseBranch strin
 			"only when you are actually done, and never before starting work. "+
 			"If you printed the no_work_needed line above, that already counts "+
 			"as your completion — do not print both.",
-		repoFull, issueRef, title, sourceHint, repoFull, repoFull, baseHint,
+		repoFull, issueRef, title, sourceHint, checkoutHint, baseHint, pushHint,
 	)
 }
 
@@ -6329,9 +6412,10 @@ func (h *ContributeWSHub) selectTask(c *ContributorConnection) *WSMessage {
 	// the prompt), so previewing the prompt can never leak the token. buildTaskPrompt
 	// itself carries the #2545 workspace-clone instruction (real checkout into
 	// $HIVE_WORKSPACE_DIR rather than a fork-only --clone=false).
-	prompt := buildTaskPromptForRef(chosen.ref, chosen.title)
+	canPush := h.contributorCanPush(chosen.repoFull, ownUsername)
+	prompt := buildTaskPromptForContributor(chosen.ref, chosen.title, canPush)
 	if requestedRole != "" {
-		prompt = buildRoleTaskPromptForRef(chosen.ref, chosen.title, requestedRole, h.roleKickPrompt(requestedRole))
+		prompt = buildRoleTaskPromptForContributor(chosen.ref, chosen.title, requestedRole, h.roleKickPrompt(requestedRole), canPush)
 	}
 	// #4105: tell the agent up front — from the hub's own handshake-recorded
 	// invocation values — the exact attribution trailer its PR body must end
