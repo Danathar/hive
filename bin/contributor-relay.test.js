@@ -7076,7 +7076,9 @@ test('#6541 agy post-error survey modal is dismissed with 0 (Skip)', () => {
 
 // Complete a real task so the relay enters its own PR review cycle, and return
 // the synthetic task it built. PR_REVIEW_EVERY_N - 1 completions are staged so
-// this one crosses the threshold.
+// this one crosses the threshold, and the completing task SHIPS A PR — since
+// #6664 the cadence alone no longer starts a cycle, because a run of
+// no_work_needed completions guarantees there is nothing to review.
 function enterReviewCycle(relay) {
   relay.setTasksCompletedCount(relay.PR_REVIEW_EVERY_N - 1);
   dispatchTask(relay, 't-before-review');
@@ -7097,7 +7099,9 @@ function enterReviewCycle(relay) {
   return review;
 }
 
-const REVIEW_PANE = `HIVE_VERDICT: complete — shipped it\n${IDLE_PANE}`;
+// Carries a PR URL under the harness's task repo so the completing task counts
+// as having SHIPPED one — the #6664 precondition for the cycle running at all.
+const REVIEW_PANE = `Opened https://github.com/foo/bar/pull/77\nHIVE_VERDICT: complete — shipped it\n${IDLE_PANE}`;
 
 test('#5715 the locally-built review task is marked synthetic and carries no work item', () => {
   const relay = loadRelay({ backend: 'copilot', paneText: REVIEW_PANE });
@@ -7467,6 +7471,162 @@ test('#6662 resolveTaskPR reports the three-way split it promises', () => {
     assert.strictEqual(none.suppressesVerdict, false);
     assert.strictEqual(none.evidence, null);
   } finally { console.log = log; teardown(relay); }
+});
+
+// kubestellar/hive#6664 — the review cycle must review the contributor's PRs,
+// and must only run when there are some.
+//
+// It scoped the review to the repo of the single task that had just finished,
+// and it fired on completions rather than on PRs shipped. Observed: a cycle
+// whose five triggering completions were ALL no_work_needed ran
+// `gh pr list --repo projectbluefin/utah --author @me --state open` against a
+// repo with zero PRs, while twenty open PRs across eleven repos went unreviewed.
+// ---------------------------------------------------------------------------
+
+// Completing at the cadence boundary, with a pane the test controls.
+function completeAtCadence(relay, pane, taskId) {
+  const r = loadRelay({ backend: 'copilot', paneText: pane });
+  r.setTasksCompletedCount(r.PR_REVIEW_EVERY_N - 1);
+  dispatchTask(r, taskId);
+  r.__stallTick();
+  return r;
+}
+
+const SHIPPED_PANE = `Opened https://github.com/foo/bar/pull/77\nHIVE_VERDICT: complete — shipped it\n${IDLE_PANE}`;
+const NO_WORK_PANE = `HIVE_VERDICT: no_work_needed — merged PRs already cover this\n${IDLE_PANE}`;
+
+test('#6664 five no_work_needed completions do not start a review cycle', () => {
+  // The observed incident. The counter used to conflate "completed" with
+  // "shipped", so a run of correct no_work_needed verdicts scheduled a review
+  // of a repo that by construction had nothing in it.
+  const log = [];
+  const orig = console.log; console.log = (...a) => log.push(a.join(' '));
+  const relay = completeAtCadence(null, NO_WORK_PANE, 't-nowork');
+  try {
+    assert.strictEqual(relay.getCurrentTask(), null,
+      'a cycle must not start when nothing has shipped since the last review');
+    assert.ok(relay.__sent.some(m => m.type === 'ready'),
+      'the relay must go back to normal work instead of reviewing nothing');
+    assert.ok(log.some(l => /Skipping the PR review cycle/.test(l)),
+      `the skip must be explained, not silent: ${JSON.stringify(log)}`);
+  } finally { console.log = orig; teardown(relay); }
+});
+
+test('#6664 a completion that ships a PR does start the cycle', () => {
+  const log = [];
+  const orig = console.log; console.log = (...a) => log.push(a.join(' '));
+  const relay = completeAtCadence(null, SHIPPED_PANE, 't-shipped');
+  try {
+    const review = relay.getCurrentTask();
+    assert.ok(review && review.task_id.startsWith('pr-review-'),
+      'a shipped PR at the cadence boundary must start the review cycle');
+    // The counters reset with the cycle, or the next one would double-count.
+    assert.strictEqual(relay.getPRsShippedSinceReview(), 0);
+    assert.deepStrictEqual(relay.getReposShippedSinceReview(), []);
+    assert.ok(log.some(l => /PR review cycle .*1 PR\(s\) shipped/.test(l)),
+      `the log must say what triggered it: ${JSON.stringify(log)}`);
+  } finally { console.log = orig; teardown(relay); }
+});
+
+test('#6664 a PR shipped earlier in the window still earns a review', () => {
+  // Deliberately a COUNT, not a latch on the last completion: a PR shipped on
+  // completion 3 is still worth reviewing when completion 5 crosses the
+  // cadence. And a skipped cycle defers rather than starves — the accumulated
+  // count is picked up at the next multiple.
+  const relay = loadRelay({ backend: 'copilot', paneText: NO_WORK_PANE });
+  const orig = console.log; console.log = () => {};
+  try {
+    relay.setPRsShippedSinceReview(1);
+    relay.setReposShippedSinceReview(['foo/bar']);
+    relay.setTasksCompletedCount(relay.PR_REVIEW_EVERY_N - 1);
+    dispatchTask(relay, 't-nowork-but-shipped-earlier');
+    relay.__stallTick();
+    const review = relay.getCurrentTask();
+    assert.ok(review && review.task_id.startsWith('pr-review-'),
+      'a PR shipped earlier in the window must still be reviewed');
+  } finally { console.log = orig; teardown(relay); }
+});
+
+test('#6664 a review cycle does not re-arm the next one off its own output', () => {
+  // A review pushes fixes to PRs that already exist, so any PR URL on its pane
+  // is one it was READING. Counting that would let each cycle arm the next with
+  // no new work behind it.
+  const relay = loadRelay({ backend: 'copilot', paneText: SHIPPED_PANE });
+  const orig = console.log; console.log = () => {};
+  try {
+    relay.setCurrentTask({
+      task_id: 'pr-review-1', kind: 'review', repo: 'foo/bar', number: 0,
+      title: 'Review open PRs for comments', synthetic: true,
+    });
+    relay.setCliReady(true);
+    relay.setTaskPromptDelivered(true);
+    relay.setDeliveredVerdictBaseline(null);
+    relay.setPRsShippedSinceReview(0);
+    relay.__stallTick();
+    assert.strictEqual(relay.getPRsShippedSinceReview(), 0,
+      "a review cycle's own completion must not count as shipping a PR");
+  } finally { console.log = orig; teardown(relay); }
+});
+
+test('#6664 the review prompt is account-scoped, not scoped to one repo', () => {
+  const relay = loadRelay({});
+  try {
+    const prompt = relay.buildReviewPrompt(['foo/bar']);
+    // The bug: `gh pr list --repo <one repo>` could never reach PRs anywhere
+    // else, and the cadence is per-completion so coverage never caught up.
+    assert.ok(!/--repo\s/.test(prompt),
+      `the review must not be narrowed to a single repo: ${prompt}`);
+    assert.match(prompt, /gh search prs --author @me --state open/,
+      'the account-wide search is what spans every repo the contributor filed in');
+    assert.match(prompt, /across every repository/);
+    // Shipped repos are a hint for ordering, never a filter.
+    assert.match(prompt, /most recently shipped work to foo\/bar, so start there/);
+    // ...and the prompt still works with nothing to hint at.
+    const bare = relay.buildReviewPrompt([]);
+    assert.ok(!/start there/.test(bare), `no hint when nothing shipped: ${bare}`);
+    assert.match(bare, /gh search prs --author @me --state open/);
+  } finally { teardown(relay); }
+});
+
+test('#6664 the review prompt asks for the HIVE_VERDICT sentinel', () => {
+  // The review cycle was the one task type whose prompt never got #5376's
+  // completion sentinel, purely because it is assembled in the relay instead of
+  // by the hub — so it could only ever complete through the terminal-chrome
+  // inference that #5353 documents as having produced thirteen issues.
+  const relay = loadRelay({});
+  try {
+    const prompt = relay.buildReviewPrompt(['foo/bar']);
+    assert.match(prompt, /HIVE_VERDICT: complete — <short reason>/);
+    assert.match(prompt, /as the very last thing you output and on a line by itself/);
+    assert.match(prompt, /Print it exactly once/);
+    // The old prose ending is gone — it was the thing that had to be inferred.
+    assert.ok(!/just say "No PR comments to address\."/.test(prompt), prompt);
+    // The sentinel must be LAST, or a long summary scrolls it out of the tail
+    // the relay reads.
+    assert.ok(prompt.trimEnd().endsWith("only when you are actually done."),
+      `the sentinel instruction must be the final clause: ${prompt.slice(-160)}`);
+  } finally { teardown(relay); }
+});
+
+test('#6664 the prompt the relay actually dispatches is the account-scoped one', () => {
+  // buildReviewPrompt being right is not the same as it being what reaches the
+  // agent; the bug lived at the call site, which built its own string inline.
+  //
+  // Completing a task stops the agent and relaunches the CLI, so the review
+  // prompt is QUEUED rather than typed (tmuxSendKeys gates on cliReady, #2203
+  // bug 2) and flushed a moment later when readiness is confirmed. The queue is
+  // therefore where the dispatched prompt is observable at this instant.
+  const relay = completeAtCadence(null, SHIPPED_PANE, 't-prompt');
+  const orig = console.log; console.log = () => {};
+  try {
+    const dispatched = relay.getPendingTask() ||
+      relay.__tmuxSends().filter(c => /gh search prs|gh pr list/.test(c)).join('\n');
+    assert.ok(dispatched, 'the review prompt was neither typed nor queued');
+    assert.match(dispatched, /gh search prs --author @me --state open/);
+    assert.ok(!/gh pr list --repo/.test(dispatched),
+      `the single-repo listing must be gone from the live prompt: ${dispatched}`);
+    assert.match(dispatched, /HIVE_VERDICT: complete/);
+  } finally { console.log = orig; teardown(relay); }
 });
 
 // ---------------------------------------------------------------------------

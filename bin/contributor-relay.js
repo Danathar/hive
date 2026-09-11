@@ -2687,6 +2687,81 @@ let tasksCompletedCount = 0;
 let lastResetAtCount = -1;
 const PR_REVIEW_EVERY_N = 5;
 
+// ── What the PR review cycle is for, and what it used to review (#6664) ──────
+//
+// Every PR_REVIEW_EVERY_N completions the relay stops taking new issues and
+// asks its agent to answer review comments on the PRs it has filed. Two flaws
+// in the ten lines that did that meant it routinely reviewed NOTHING:
+//
+//   1. It scoped the review to the repo of the single task that had just
+//      finished. A contributor working across eleven repos had PRs in ten of
+//      them permanently invisible to this mechanism — the cadence is per-five-
+//      completions, not per-repo, so coverage never catches up.
+//   2. It fired on COMPLETIONS, not on PRs shipped. A task that correctly
+//      concludes "nothing shippable" still advances the counter and guarantees
+//      that repo has no new PR.
+//
+// Observed: a cycle whose five triggering completions were ALL no_work_needed
+// ran `gh pr list --repo projectbluefin/utah --author @me --state open` against
+// a repo with zero PRs, while twenty open PRs across eleven repos went
+// unreviewed.
+//
+// prsShippedSinceReview counts PRs this relay actually opened since the last
+// review cycle. It is the precondition, and it is what makes suggestion 4 of
+// the report ("skip the cycle when there is nothing to review") fall out for
+// free rather than needing another API call: a cycle now runs only when we know
+// from our own records that at least one PR exists to be reviewed.
+//
+// Deliberately a COUNT, not a latch on the last completion: a PR shipped on
+// completion 3 is still worth reviewing when completion 5 is the one that
+// crosses the cadence. And because the counter keeps accumulating when a cycle
+// is skipped, a quiet run of no_work_needed tasks defers the review rather than
+// starving it — the next multiple of PR_REVIEW_EVERY_N picks it up.
+let prsShippedSinceReview = 0;
+// The repos those PRs went to, most recent last. Used for the operator log line
+// and to give the synthetic task an honest `repo` field; the REVIEW itself is
+// account-scoped, because "which of my PRs have comments" is not a repo-scoped
+// question and scoping it to one repo is the bug.
+let reposShippedSinceReview = [];
+
+// buildReviewPrompt renders the PR review cycle's prompt (#6664).
+//
+// ACCOUNT-SCOPED, NOT REPO-SCOPED. "Which of my PRs have review comments" is
+// not a repo-scoped question, and answering it for one repo is what made this
+// cycle review nothing. `gh search prs --author @me --state open` spans every
+// repository the contributor has filed in — including PRs from earlier
+// sessions, which is most of them and none of which the old prompt could reach.
+// Verified through the contributor gh wrapper: `search prs` is on its allowlist
+// and `--author @me` resolves server-side.
+//
+// shippedRepos is a HINT, not a filter: those are the repos with work landed
+// since the last cycle, so their PRs are the likeliest to have fresh comments.
+// Naming them steers the agent's ordering without narrowing what it may look at
+// — the narrowing is the bug.
+//
+// THE VERDICT LINE IS THE OTHER HALF. The old prompt ended "just say 'No PR
+// comments to address.'" — prose, not a sentinel — so this cycle could only
+// ever complete through the terminal-chrome heuristic that #5376 added
+// HIVE_VERDICT to replace, and that #5353 documents as having produced thirteen
+// separate issues. The review cycle was the one task type that never got the
+// fix, purely because its prompt is assembled here instead of by the hub. The
+// wording mirrors contributorTaskPrompt in src/pkg/dashboard/contribute_ws.go;
+// keep the two in step.
+function buildReviewPrompt(shippedRepos) {
+  const repos = Array.isArray(shippedRepos) ? shippedRepos.filter(Boolean) : [];
+  const hint = repos.length
+    ? `You most recently shipped work to ${repos.join(', ')}, so start there. `
+    : '';
+  return 'Check the open PRs you have filed, across every repository, for review comments. ' +
+    "Run 'GH_TOKEN=$GH_TOKEN gh search prs --author @me --state open --limit 50' to find them. " +
+    hint +
+    'For each PR with review comments, read the comments, address the feedback, push fixes, and respond. ' +
+    'If no PRs have comments, say so and stop — do not look for other work. ' +
+    'When you HAVE finished — every PR with comments is addressed, or there were none — print, as the very ' +
+    'last thing you output and on a line by itself, in plain text, no Markdown formatting: ' +
+    "'HIVE_VERDICT: complete — <short reason>'. Print it exactly once, only when you are actually done.";
+}
+
 // ── Local-only tasks (kubestellar/hive#5715) ────────────────────────────────
 //
 // Almost every currentTask arrives in a task_assign and is backed by a
@@ -3303,28 +3378,56 @@ function progressTick() {
       }
     }
     const completedRepo = currentTask.repo;
+    // #6664: a review cycle's own completion must not count as having shipped.
+    // A review pushes fixes to PRs that already exist, so any PR URL on its
+    // pane is one it was READING, and counting it would let each cycle re-arm
+    // the next off its own output — a review loop with no new work behind it.
+    const completedWasReviewCycle = isLocalOnlyTask(currentTask);
     currentTask = null;
     taskAssignedAt = 0;
     clearInterval(progressInterval);
     progressInterval = null;
     if (taskTimeoutHandle) { clearTimeout(taskTimeoutHandle); taskTimeoutHandle = null; }
     tasksCompletedCount++;
-    if (tasksCompletedCount % PR_REVIEW_EVERY_N === 0) {
-      console.log(`PR review cycle (${tasksCompletedCount} tasks completed) — checking open PRs`);
+    // #6664: record what this completion actually SHIPPED, which is the thing
+    // the review cycle exists to follow up on. A completion is not a PR: the
+    // counter used to conflate the two, so five consecutive no_work_needed
+    // verdicts scheduled a review of a repo with nothing in it.
+    if (prURL && !completedWasReviewCycle) {
+      prsShippedSinceReview++;
+      if (completedRepo && !reposShippedSinceReview.includes(completedRepo)) {
+        reposShippedSinceReview.push(completedRepo);
+      }
+    }
+    if (tasksCompletedCount % PR_REVIEW_EVERY_N === 0 && prsShippedSinceReview > 0) {
+      const shippedRepos = reposShippedSinceReview.slice();
+      console.log(`PR review cycle (${tasksCompletedCount} tasks completed, ` +
+        `${prsShippedSinceReview} PR(s) shipped since the last review in ${shippedRepos.join(', ') || 'no repo'}) — ` +
+        `checking open PRs across every repo`);
+      prsShippedSinceReview = 0;
+      reposShippedSinceReview = [];
       // `synthetic: true` is the explicit half of isLocalOnlyTask() (#5715):
       // this object is built HERE, by us, and no hub holds a lease for it. The
       // `pr-review-` id prefix says the same thing and is what survives a
       // round-trip through HIVE_TASK_FILE, but stating it on the object is what
       // makes the property legible at the one place it becomes true.
-      currentTask = { task_id: `${LOCAL_TASK_ID_PREFIX}${Date.now()}`, kind: 'review', repo: completedRepo, number: 0, title: 'Review open PRs for comments', synthetic: true };
+      //
+      // `repo` is the most recent repo we actually shipped to (#6664) rather
+      // than "whichever repo the fifth task happened to be in". It is local
+      // bookkeeping — taskKey() and the log line — and the review itself is not
+      // scoped to it.
+      const reviewRepo = shippedRepos[shippedRepos.length - 1] || completedRepo;
+      currentTask = { task_id: `${LOCAL_TASK_ID_PREFIX}${Date.now()}`, kind: 'review', repo: reviewRepo, number: 0, title: 'Review open PRs for comments', synthetic: true };
       taskAssignedAt = Date.now();
-      const reviewPrompt = `Check your open PRs on ${completedRepo} for review comments. ` +
-        `Run 'GH_TOKEN=$GH_TOKEN gh pr list --repo ${completedRepo} --author @me --state open' to find them. ` +
-        `For each PR with review comments, read the comments, address the feedback, push fixes, and respond. ` +
-        `If no PRs have comments, just say "No PR comments to address."`;
-      tmuxSendKeys(reviewPrompt);
+      tmuxSendKeys(buildReviewPrompt(shippedRepos));
       startProgressReporting();
     } else {
+      if (tasksCompletedCount % PR_REVIEW_EVERY_N === 0) {
+        // Say why the cycle did not run. Silence here reads as "the review
+        // cadence is broken"; it is doing exactly what it should.
+        console.log(`Skipping the PR review cycle at ${tasksCompletedCount} completions — ` +
+          `no PRs shipped since the last review, so there is nothing new to follow up on (#6664)`);
+      }
       send({ type: 'ready', seq: nextSeq() });
     }
   } else if (paneState === PANE_STATE_IDLE_COMPLETE) {
@@ -3923,6 +4026,12 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     // PR_REVIEW_EVERY_N is exported so a test can enter the REAL cycle rather
     // than hand-build the task it is meant to be asserting about.
     PR_REVIEW_EVERY_N,
+    // PR review cycle scope and trigger (kubestellar/hive#6664).
+    buildReviewPrompt,
+    getPRsShippedSinceReview: () => prsShippedSinceReview,
+    setPRsShippedSinceReview: (v) => { prsShippedSinceReview = v; },
+    getReposShippedSinceReview: () => reposShippedSinceReview.slice(),
+    setReposShippedSinceReview: (v) => { reposShippedSinceReview = Array.isArray(v) ? v.slice() : []; },
     LOCAL_TASK_ID_PREFIX,
     isLocalOnlyTask,
     isLocalOnlyTaskId,
