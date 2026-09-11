@@ -17,7 +17,7 @@ application ([cncf/sandbox#516](https://github.com/cncf/sandbox/issues/516)).
 > | Review point | Change |
 > |---|---|
 > | "If I deploy this, what should I worry about?" | New section [If you deploy this, what should you worry about?](#if-you-deploy-this-what-should-you-worry-about) — the attack path stated plainly, a concern/mitigation/non-mitigation table, the three settings that determine exposure, and the worst realistic outcome. |
-> | "Have you red teamed `ioscan`? Is this perfect defense or partial mitigation?" | Answered: **no red-teaming exists.** Efficacy is now described as unmeasured and partial, with the containment credited to the network deny rules instead. Evaluation tracked in [#6685](https://github.com/hivecommons/hive/issues/6685). |
+> | "Have you red teamed `ioscan`? Is this perfect defense or partial mitigation?" | Answered, then **measured**: [ioscan-red-team.md](ioscan-red-team.md) runs a 43-payload adversarial corpus and publishes the result — **37% withheld, 63% reached the agent**, with the containment credited to the network deny rules and verified across all four ACMM modes on every test run ([#6685](https://github.com/hivecommons/hive/issues/6685)). |
 > | "What is redaction for? What about base64-encoded exfiltration?" | Log scrubbing re-scoped as log hygiene, explicitly **not** an exfiltration control. Running the question against the canary path found a real gap — the egress check is substring-only — now filed as [#6686](https://github.com/hivecommons/hive/issues/6686) and recorded as a known weakness. |
 > | "Get an OpenSSF passing badge." | Agreed; being pursued in [#6684](https://github.com/hivecommons/hive/issues/6684). Most passing criteria already met. |
 > | "This is a huge risk. Why not mitigate it?" | Half was mitigated: the roster went from **one maintainer to three**, across three affiliations, with a documented security-response process. The unmitigated half — unenforced code ownership — is now stated as the largest remaining process risk, with scoped enforcement tracked in [#6687](https://github.com/hivecommons/hive/issues/6687). |
@@ -281,22 +281,38 @@ repository writes:
    text, case changes, and whitespace splitting) before proxy output is
    allowed through.
 
-   **How well does it work? Honestly: unmeasured, and it should be read as a
-   partial mitigation rather than a defense.** No red-team exercise,
-   adversarial evaluation, or measured detection rate exists for `ioscan` —
-   the package has 56 unit tests across its rule, Unicode, classifier and
-   canary paths, but unit tests establish that known shapes are caught, not
-   that unknown ones are. A prospective user should assume a determined,
-   encoding-aware attacker defeats it. What `ioscan` reliably does is (a)
-   raise the cost of the *casual* injection attempt, (b) normalize away an
-   entire class of invisible-character and homoglyph tricks deterministically,
-   and (c) produce an auditable record that something was withheld. What
-   contains the *consequence* of a successful injection is not `ioscan` at
-   all: it is the hard-denied PR-create/merge relays and the mode-tiered
-   token scope, neither of which the model can argue with. Operators should
-   size their trust accordingly, and the project commits to publishing a
-   red-team evaluation rather than leaving efficacy asserted
-   ([#6685](https://github.com/hivecommons/hive/issues/6685)).
+   **How well does it work? Measured: a partial mitigation, and a narrow one**
+   — see [ioscan-red-team.md](ioscan-red-team.md) for the corpus, the
+   methodology and the full per-case table. Against 43 adversarial payloads
+   across six technique families, the shipped deterministic rules **withheld
+   37% from the agent; 63% reached it verbatim** — 44% because no rule fired,
+   and a further 19% because a rule fired but the input block policy does not
+   block at that severity (`blockedInput` requires Critical, or Injection at
+   High+, so every Medium finding is recorded and the raw text is still
+   injected). A findings count is therefore **not** a count of attacks
+   stopped.
+   Detection is strongly uneven by family: Unicode steganography 6/8 blocked —
+   the one place the design beats a regex, because hidden characters are
+   themselves a High finding — against paraphrased instruction override 2/10
+   and split-payload 0/4. The last is structural: each untrusted segment
+   (title, body, each comment) is scanned separately, so a phrase split across
+   two comments is never a single string for any rule to match. The cost side
+   is real too: **2 of 6 benign controls were redacted**, including an issue
+   *reporting* a prompt-injection bug.
+   A prospective user should assume a determined, encoding-aware attacker
+   defeats it — that is now a measurement rather than a caution. What `ioscan`
+   reliably does is (a) raise the cost of the *casual* injection attempt, (b)
+   normalize away an entire class of invisible-character and homoglyph tricks
+   deterministically, and (c) produce an auditable record that something was
+   withheld. What contains the *consequence* of a successful injection is not
+   `ioscan` at all: it is the hard-denied PR-create/merge relays and the
+   mode-tiered token scope, neither of which the model can argue with — and
+   that containment is now verified across all four ACMM modes by
+   `TestRedTeamContainmentHoldsForEveryMode` on every test run rather than
+   asserted here. Operators should size their trust accordingly. The
+   evaluation's own limits are stated in it: the optional LLM classifier is
+   default-off and its contribution remains unmeasured, and the corpus covers
+   the input path only.
 
    **Exfiltration detection (`ioscan.canaries`, default off).** A per-agent
    `HIVE-CANARY-<48 hex>` token is planted in the agent's prompt, and the
