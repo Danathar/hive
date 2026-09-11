@@ -276,6 +276,10 @@ repository writes:
    (`ioscan.classifier.enabled`, default `false`) adds semantic
    plain-English-injection detection on top. **Enabled by default**
    (`ioscan.enabled: true` is the default per `ioscan.md:9`).
+   Egress canaries (`HIVE-CANARY-*`) are matched both literally and through
+   common transport encodings/transforms (base64, hex, URL encoding, reversed
+   text, case changes, and whitespace splitting) before proxy output is
+   allowed through.
 
    **How well does it work? Honestly: unmeasured, and it should be read as a
    partial mitigation rather than a defense.** No red-team exercise,
