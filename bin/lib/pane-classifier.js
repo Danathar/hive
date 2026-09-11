@@ -273,34 +273,35 @@ function classifyReadiness(text, backend) {
       if (/\? for shortcuts/.test(recent)) return 'ready';
     } else if (backend === 'omp') {
       const recent = paneTail(text, 15);
-      // omp's welcome splash draws a rotating "Tip:" hint (wrapped onto a
-      // second, unprefixed line when it doesn't fit one row). One rotation
-      // reads "Tip: Log in to several accounts of the same provider —
-      // `/login` again — and omp load-balances across them automatically",
-      // which contains the literal words "Log in" the needs-login check
-      // below exists to catch. A freshly launched, ALREADY-authenticated
-      // session that happened to draw this tip was misclassified
-      // needs-login and its assigned task left queued forever — captured
-      // live 2026-09-11 against a real Hive OMP contributor container that
-      // hit exactly this, immediately after kubestellar/hive#6637 landed.
-      // Tips are cosmetic splash-only hints, never real CLI state, so strip
-      // the whole tip paragraph (the "Tip:" line and its wrapped
-      // continuation, up to the next blank line) before testing either gate
-      // below.
-      let inTip = false;
-      const withoutTip = recent
-        .split('\n')
-        .filter((line) => {
-          if (/^\s*Tip:/.test(line)) { inTip = true; return false; }
-          if (inTip) {
-            if (line.trim() === '') { inTip = false; return true; }
-            return false;
-          }
-          return true;
-        })
-        .join('\n');
-      if (/press enter to skip/i.test(withoutTip)) return 'onboarding';
-      if (/\b(?:sign in|log in|authentication required|credentials? required)\b/i.test(withoutTip)) return 'needs-login';
+      // kubestellar/hive#6639 tried to fix a rotating-splash-tip false
+      // positive ("Tip: Log in to several accounts of the same provider…")
+      // by stripping the "Tip:" paragraph out of the 15-line window before
+      // testing onboarding/login. That stripping loop had no way to end: it
+      // dropped every line from the "Tip:" line onward until a BLANK line,
+      // but the very next line is always a "─"-filled rule (never blank),
+      // so on every real capture it silently swallowed the rest of the
+      // window — including the actual prompt and response — hiding a real
+      // login/onboarding state behind a false 'ready' instead of a false
+      // 'needs-login'. Worse, a live Hive OMP contributor (2026-09-11, after
+      // 30 completed tasks) hit the ORIGINAL false positive by a different
+      // route the tip fix never touched: the agent's own reply in a prior
+      // turn plainly discussed authentication ("Authentication required:
+      // please sign in to continue" — reproduced live in a disposable
+      // session asking OMP to write exactly that sentence), and that turn's
+      // prose was still inside the 15-line tail when OMP relaunched,
+      // tripping needs-login on a pane that was fully idle and ready.
+      //
+      // Both are the same root cause: the CLI's real login/onboarding
+      // prompts render at the point of interaction — the last couple of
+      // non-blank lines, right where the input box sits — never buried
+      // under a splash tip or a completed turn's own output. Narrowing the
+      // window to the last 3 non-blank lines (checked directly: excludes
+      // both captured false positives, still contains the whole two-line
+      // omp_login/omp_onboarding fixtures) fixes both without needing to
+      // parse out any particular piece of splash chrome.
+      const cliEdge = paneTail(text, 3);
+      if (/press enter to skip/i.test(cliEdge)) return 'onboarding';
+      if (/\b(?:sign in|log in|authentication required|credentials? required)\b/i.test(cliEdge)) return 'needs-login';
       // kubestellar/hive#6623/#6626 shipped this backend against a
       // hand-written fixture (a 6-line pane), never a real tmux capture at
       // the dimensions bin/contributor-agent.sh actually launches with
