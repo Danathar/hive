@@ -33,6 +33,8 @@ type paneFixtureSidecar struct {
 		PaneShowsTransientAPIError  *bool `json:"paneShowsTransientAPIError"`
 		PaneShowsUnretryableAPIErr  *bool `json:"paneShowsUnretryableAPIError"`
 		PaneShowsLoginRequiredError *bool `json:"paneShowsLoginRequiredError"`
+		PaneShowsInputPrompt        *bool `json:"paneShowsInputPrompt"`
+		PaneShowsActiveWork         *bool `json:"paneShowsActiveWork"`
 	} `json:"expect"`
 	Note string `json:"note"`
 }
@@ -128,6 +130,18 @@ func TestPaneClassifiers_AgreeWithSharedGoldenFixtures(t *testing.T) {
 				got := paneShowsTransientAPIError(strings.Split(tail, "\n"))
 				if got != *want {
 					t.Errorf("paneShowsTransientAPIError(paneTail(pane, %d)) = %v, want %v\nnote: %s", transientAPIErrorTailLines, got, *want, sidecar.Note)
+				}
+			}
+
+			if want := sidecar.Expect.PaneShowsInputPrompt; want != nil {
+				if got := paneShowsInputPrompt(pane); got != *want {
+					t.Errorf("paneShowsInputPrompt(%q) = %v, want %v\nnote: %s", sidecar.Backend, got, *want, sidecar.Note)
+				}
+			}
+
+			if want := sidecar.Expect.PaneShowsActiveWork; want != nil {
+				if got := paneShowsActiveWork(pane); got != *want {
+					t.Errorf("paneShowsActiveWork(%q) = %v, want %v\nnote: %s", sidecar.Backend, got, *want, sidecar.Note)
 				}
 			}
 		})

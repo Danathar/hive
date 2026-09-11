@@ -1,0 +1,6 @@
+╭─── omp v18.1.17 ───╮
+│ Welcome back!       │
+│ # for prompt actions│
+│ / for commands      │
+╰─────────────────────╯
+π > ⬢ no-model >

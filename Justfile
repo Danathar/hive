@@ -237,8 +237,19 @@ contribute-check-backend backend="claude":
           exit 1
         fi
         ;;
+      omp)
+        if command -v omp &>/dev/null; then
+          echo "OMP CLI detected ($(omp --version 2>&1 | head -1))"
+          echo "  Set model: export AGENT_MODEL=provider/model"
+          echo "  Supply that provider's credential through OMP's documented environment or profile."
+          echo "  OMP is interactive-only; Hive does not claim a generic authentication probe or headless mode."
+        else
+          echo "ERROR: OMP CLI not found. Install: https://github.com/can1357/oh-my-pi"
+          exit 1
+        fi
+        ;;
       *)
-        echo "ERROR: Unknown backend '{{backend}}'. Supported: claude, copilot, goose, codex, pi, bob, agy, litellm, opencode, kilo, muse"
+        echo "ERROR: Unknown backend '{{backend}}'. Supported: claude, copilot, goose, codex, pi, bob, agy, litellm, opencode, kilo, muse, omp"
         exit 1
         ;;
     esac
@@ -1075,9 +1086,9 @@ contribute-hive backend="" mode="docker": check-version
         codex)
           PERM_FLAG=$(backend_perm_flag_shell "$BACKEND" 2>/dev/null || echo "")
           ;;
-        goose|agy|bob|pi|aider|kilo)
+        goose|agy|bob|pi|aider|kilo|omp)
           # No sandbox, filesystem allowlist, or command deny-list exists for
-          # any of these six (see the "no confinement mechanism at all"
+          # any of these seven (see the "no confinement mechanism at all"
           # block in backends.conf) — refuse to launch unconfined by
           # default rather than silently grant full host access (#4918).
           if ! PERM_FLAG=$(unconfined_local_perm_flag_shell "$BACKEND"); then

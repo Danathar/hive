@@ -2498,6 +2498,7 @@ var cliPaneMarkers = []string{
 	// kick is dropped after cliReadyTimeout even though codex is healthy.
 	codexInputPromptMarker,
 	codexProductMarker,
+	ompInputPromptMarker,
 }
 
 const (
@@ -2535,6 +2536,9 @@ const (
 	// rather than a context size keeps it valid at any model/context
 	// configuration.
 	piContextMarker = "%/"
+	// ompInputPromptMarker is the visible OMP interactive prompt. It is distinct
+	// from the generic shell `>` prompt, so it proves the OMP TUI is ready.
+	ompInputPromptMarker = "π >"
 )
 
 // paneHasCLIMarker reports whether the given pane content contains any known
@@ -3532,6 +3536,14 @@ type blockingPrompt struct {
 
 var blockingPrompts = []blockingPrompt{
 	{
+		backend: "omp",
+		match: func(p string) bool {
+			return strings.Contains(p, "press enter to skip")
+		},
+		key:   "",
+		label: "omp startup overlay",
+	},
+	{
 		backend: "copilot",
 		// Copilot: "Confirm folder trust" → 1. Yes (THIS SESSION ONLY).
 		//
@@ -4245,7 +4257,8 @@ func paneShowsInputPrompt(output string) bool {
 		strings.Contains(output, bobInputPlaceholder) ||
 		strings.Contains(output, bobInputPlaceholderDefault) ||
 		strings.Contains(output, codexInputPromptMarker) ||
-		strings.Contains(output, piContextMarker)
+		strings.Contains(output, piContextMarker) ||
+		strings.Contains(output, ompInputPromptMarker)
 }
 
 // waitForCLIReady polls the tmux pane until the CLI shows its ready prompt
@@ -6560,6 +6573,9 @@ func isCLIChrome(s string) bool {
 		strings.HasPrefix(t, "? help") ||
 		strings.HasPrefix(t, "@ files") ||
 		strings.HasPrefix(t, "# issues") {
+		return true
+	}
+	if strings.HasPrefix(t, ompInputPromptMarker) {
 		return true
 	}
 	// Copilot/Claude/Gemini status bar: contains "esc cancel" or model name

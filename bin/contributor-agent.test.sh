@@ -254,6 +254,48 @@ if [[ "$(readlink "${HOME_DIR}/CLAUDE.md")" != "$BOB_AGENT_MD" ]]; then
 fi
 echo "contributor-agent bob knowledge link tests passed"
 
+# OMP reads both of Hive's conventional knowledge-link names. The test hook
+# exits before launching tmux or the relay, so it proves the agent-owned seam
+# without reproducing any of its lifecycle.
+rm -f "${HOME_DIR}/AGENTS.md" "${HOME_DIR}/CLAUDE.md"
+OMP_AGENT_MD="${HOME_DIR}/agent.md"
+env -i \
+  PATH="${PATH}" \
+  HOME="$HOME_DIR" \
+  HIVE_REGISTRATION_TOKEN="test-token" \
+  HIVE_CONTRIBUTOR_AGENT_TEST_LINK_KNOWLEDGE=1 \
+  HIVE_CONTRIBUTOR_AGENT_TEST_KNOWLEDGE_DEST="$OMP_AGENT_MD" \
+  AGENT_BACKEND=omp \
+  bash "${ROOT_DIR}/bin/contributor-agent.sh"
+
+for link in "${HOME_DIR}/AGENTS.md" "${HOME_DIR}/CLAUDE.md"; do
+  if [[ "$(readlink "$link")" != "$OMP_AGENT_MD" ]]; then
+    echo "expected OMP knowledge link $link to target the Hive export" >&2
+    exit 1
+  fi
+done
+
+mkdir -p "${WORK_DIR}/omp-bin"
+cat >"${WORK_DIR}/omp-bin/omp" <<'OMP'
+#!/bin/sh
+exit 0
+OMP
+chmod +x "${WORK_DIR}/omp-bin/omp"
+omp_detect_output="$(
+  env -i \
+    PATH="${WORK_DIR}/omp-bin:${CORE_PATH}" \
+    HOME="$HOME_DIR" \
+    HIVE_REGISTRATION_TOKEN="test-token" \
+    HIVE_CONTRIBUTOR_AGENT_TEST_DETECT_CLI=1 \
+    AGENT_BACKEND=omp \
+    bash "${ROOT_DIR}/bin/contributor-agent.sh"
+)"
+if [[ "$omp_detect_output" != "UNVERIFIED" ]]; then
+  echo "expected OMP preflight to report an installed CLI without claiming authentication; got: $omp_detect_output" >&2
+  exit 1
+fi
+echo "contributor-agent OMP knowledge and preflight tests passed"
+
 codex_flags_output="$(
   env -i \
     PATH="${PATH}" \

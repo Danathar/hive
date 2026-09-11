@@ -197,7 +197,8 @@ const HEADLESS_MAX_OUTPUT_BYTES = 1048576; // 1 MiB
 const TMUX_TAIL_LINES = 15;
 const HEARTBEAT_INTERVAL_MS = 30000;
 const HEARTBEAT_TIMEOUT_MS = 90000;
-const PROGRESS_REPORT_INTERVAL_MS = 120000;
+const RELAY_TEST_TIMING = process.env.HIVE_RELAY_TEST_TIMING === '1';
+const PROGRESS_REPORT_INTERVAL_MS = RELAY_TEST_TIMING ? 100 : 120000;
 const MAX_RECONNECT_DELAY_MS = 60000;
 const BASE_RECONNECT_DELAY_MS = 1000;
 const TOKEN_REFRESH_MARGIN_MS = 300000;
@@ -1416,6 +1417,14 @@ const BACKEND_LOGIN_HELP = {
       'When it is done, press Ctrl-B D to detach.',
     ],
   },
+  omp: {
+    product: 'Oh My Pi',
+    steps: (attach) => [
+      'In another terminal, run:',
+      `  ${attach}`,
+      'Complete the provider sign-in OMP prompts for, then press Ctrl-B D to detach.',
+    ],
+  },
   bob: {
     product: 'bob (Bob-Shell)',
     // No attach step: bob takes an API key from the environment, so there is
@@ -2451,7 +2460,7 @@ function checkTmuxIdle() {
   return checkTmuxPaneState() === PANE_STATE_IDLE_COMPLETE;
 }
 
-const TASK_GRACE_PERIOD_MS = 180000;
+const TASK_GRACE_PERIOD_MS = RELAY_TEST_TIMING ? 0 : 180000;
 let taskAssignedAt = 0;
 let tasksCompletedCount = 0;
 // The completed-task count at which the periodic memory-cleanup restart last

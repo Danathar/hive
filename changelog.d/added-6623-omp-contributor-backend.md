@@ -1,0 +1,1 @@
+- Hive contributors can run Oh My Pi as an interactive backend, with Hive-owned task delivery and completion reporting ([#6623](https://github.com/hivecommons/hive/issues/6623)).

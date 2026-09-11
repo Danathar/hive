@@ -6808,6 +6808,25 @@ test('pane-classifier: classifyReadiness reads backend-specific ready/login/onbo
   assert.strictEqual(paneClassifier.classifyReadiness('$ ', 'goose'), 'starting');
 });
 
+test('pane-classifier: OMP captured chrome distinguishes ready, onboarding, login, busy, idle, and verdict states', () => {
+  const fixture = (name) => fs.readFileSync(path.join(PANE_FIXTURES_DIR, `${name}.pane.txt`), 'utf8');
+  assert.strictEqual(paneClassifier.classifyReadiness(fixture('omp_ready'), 'omp'), 'ready');
+  assert.strictEqual(paneClassifier.classifyReadiness(fixture('omp_onboarding'), 'omp'), 'onboarding');
+  assert.strictEqual(paneClassifier.blockingPromptKey(fixture('omp_onboarding'), 'omp'), null);
+  assert.strictEqual(paneClassifier.classifyReadiness(fixture('omp_login'), 'omp'), 'needs-login');
+  assert.strictEqual(
+    paneClassifier.classifyPane(fixture('omp_busy'), 'omp'), paneClassifier.PANE_STATE_WORKING);
+  assert.strictEqual(
+    paneClassifier.classifyPane(fixture('omp_idle'), 'omp'), paneClassifier.PANE_STATE_IDLE_COMPLETE);
+
+  const relay = loadRelay({ backend: 'omp' });
+  try {
+    assert.strictEqual(
+      relay.detectCompletionVerdict(fixture('omp_terminal_verdict').trim().split('\n')).verdict,
+      'complete');
+  } finally { teardown(relay); }
+});
+
 // Claude Code's first-run login chooser, as captured from a contributor
 // container whose ${HOME}/.claude/.credentials.json was valid and unexpired
 // the whole time. The pane carries none of the strings the older claude

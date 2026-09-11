@@ -86,7 +86,7 @@ Important environment variables:
 | --- | --- | --- |
 | `HIVE_HUB` | value from `contributor.env`, else public hub default | WebSocket hub(s) to subscribe to. Use comma-separated URLs for multi-hub mode. Direct Compose reads the registered value from the mounted config file. |
 | `HIVE_REGISTRATION_TOKEN` | value from `contributor.env` | Registration token(s), positional with `HIVE_HUB` when multiple hubs are listed. Required; run `just contribute-setup` first. |
-| `AGENT_BACKEND` | `claude` | CLI/backend to run (`claude`, `copilot`, `goose`, `bob`, `codex`, `pi`, `aider`, `litellm`, `agy`, `opencode`, `kilo`, `muse`, depending on image support and credentials). `agy` has no OS-level sandbox of its own, so run it containerized (`just contribute-hive agy`) — the contributor image ships the `agy` binary; local mode refuses to launch it without `HIVE_AGY_DANGEROUSLY_RUN_UNCONFINED=1`. `opencode`, `kilo`, and `muse` only run headless (`CONTRIBUTOR_MODE=headless`) — hive has no interactive-tmux wiring for them. |
+| `AGENT_BACKEND` | `claude` | CLI/backend to run (`claude`, `copilot`, `goose`, `bob`, `codex`, `pi`, `aider`, `litellm`, `agy`, `opencode`, `kilo`, `muse`, `omp`, depending on image support and credentials). `omp` is interactive-only: Hive starts normal `omp --model <id>` in the prepared tmux cwd and passes no fabricated permission flags. It has no verified local confinement mechanism, so local mode refuses it without `HIVE_OMP_DANGEROUSLY_RUN_UNCONFINED=1`; container mode is the supported boundary. `agy` has the same confinement limit. `opencode`, `kilo`, and `muse` only run headless (`CONTRIBUTOR_MODE=headless`) — hive has no interactive-tmux wiring for them. |
 | `AGENT_MODEL` | unset (backend default) | Optional model override passed to the contributor agent (e.g. `claude-sonnet-4-6`, `gpt-4o`, `gemini-2.5-pro`). Declared to the hive when the relay connects. |
 | `AGENT_REASONING_EFFORT` | unset | Reasoning effort override. Consumed by `codex` (`-c model_reasoning_effort`), by `agy` (`--effort low\|medium\|high`, required whenever a model is set, else agy ignores the model), and by `muse` (`--reasoning-effort none\|minimal\|low\|medium\|high\|xhigh\|max\|ultra`, applied with or without a model; a value outside that set is dropped rather than passed, because muse exits 2 on it). Ignored by other backends. |
 | `CONTRIBUTOR_MODE` | `interactive` | `interactive` keeps a tmux/TTY session. `headless` is for one-shot/no-TTY task delivery. |
@@ -103,6 +103,7 @@ Important environment variables:
 | `HIVE_PI_DANGEROUSLY_RUN_UNCONFINED` | unset | **Required** for `just contribute-hive pi local` to launch at all. pi ships with no sandbox by default; directory confinement exists only via a third-party extension hive does not depend on. |
 | `HIVE_AIDER_DANGEROUSLY_RUN_UNCONFINED` | unset | **Required** for `just contribute-hive aider local` to launch at all. aider has no sandbox or OS isolation option of any kind. |
 | `HIVE_KILO_DANGEROUSLY_RUN_UNCONFINED` | unset | **Required** for `just contribute-hive kilo local` to launch at all. kilo's `--auto` is an unattended auto-approve flag, not a boundary; kilo has no verified sandbox, filesystem allowlist, or command deny-list hive can wire. |
+| `HIVE_OMP_DANGEROUSLY_RUN_UNCONFINED` | unset | **Required** for `just contribute-hive omp local` to launch at all. OMP has no sandbox, filesystem allowlist, or command deny-list Hive can wire; local mode refuses to launch without this. |
 
 ### Where each backend reads its instructions
 
@@ -124,6 +125,7 @@ mode fixed for Goose in [#2393](https://github.com/hivecommons/hive/issues/2393)
 | `opencode` | `AGENTS.md`, `CLAUDE.md` |
 | `kilo` | `AGENTS.md`, `CLAUDE.md` |
 | `muse` | `AGENTS.md`, `CLAUDE.md` |
+| `omp` | `AGENTS.md`, `CLAUDE.md` |
 | anything else | `CLAUDE.md` only — the `*` fallback |
 
 A backend that reads neither `CLAUDE.md` nor one of the names above falls into
@@ -171,9 +173,9 @@ their own OS-enforced sandboxes; Copilot now uses its own `--sandbox` (also
 OS-enforced — Seatbelt/bubblewrap/ProcessContainer depending on platform),
 gated on the installed CLI actually supporting the flag; opencode gets a
 command-name deny-list via its own `permission.bash` config (a floor, not a
-filesystem boundary — opencode has no OS sandbox); goose, agy, bob, pi, and
-aider have no confinement mechanism this repo can wire at all, and local mode
-for them **refuses to launch** unless the operator sets that backend's own
+filesystem boundary — opencode has no OS sandbox); goose, agy, bob, pi, aider,
+kilo, and omp have no confinement mechanism this repo can wire at all, and local
+mode for them **refuses to launch** unless the operator sets that backend's own
 `HIVE_<BACKEND>_DANGEROUSLY_RUN_UNCONFINED=1`. See
 [sandbox-isolation.md](sandbox-isolation.md)'s per-backend confinement matrix
 for the authoritative, up-to-date state. The `agent_sandbox` Podman path

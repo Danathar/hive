@@ -129,6 +129,10 @@ GOOSECFG
         echo "Goose config: keeping existing ${HOME}/.config/goose/config.yaml"
       fi
       ;;
+    omp)
+      ln -sf "$agent_md" "${HOME}/AGENTS.md"
+      ln -sf "$agent_md" "${HOME}/CLAUDE.md"
+      ;;
     codex|pi)
       ln -sf "$agent_md" "${HOME}/AGENTS.md"
       ln -sf "$agent_md" "${HOME}/CLAUDE.md"
@@ -369,6 +373,11 @@ detect_cli() {
         echo "NOT_AUTHED"
       fi
       ;;
+    omp)
+      # OMP supports several provider credential mechanisms. A version probe
+      # proves only that the CLI is present, so do not claim authentication.
+      if omp --version &>/dev/null; then echo "UNVERIFIED"; else echo "NOT_INSTALLED"; fi
+      ;;
     pi)
       if pi --version &>/dev/null; then echo "OK"; else echo "NOT_AUTHED"; fi
       ;;
@@ -515,6 +524,9 @@ case "$STATUS" in
   BROKEN)
     echo "ERROR: $AGENT_BACKEND CLI is installed but did not run successfully."
     exit 1
+    ;;
+  UNVERIFIED)
+    echo "$AGENT_BACKEND CLI is installed; authentication will be checked in its interactive pane."
     ;;
   OK)
     if [[ "$AGENT_BACKEND" == "pi" ]]; then

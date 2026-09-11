@@ -140,6 +140,7 @@ function blockingPromptKey(text, backend) {
   // relay's call to make, and 0 persists nothing. Both halves are required so
   // a transcript that merely QUOTES the survey (this comment does) cannot
   // match without the numbered option row.
+  if (backend === 'omp' && /press enter to skip/i.test(recent)) return null;
   if (backend === 'agy' && /How'?s the CLI experience so far/i.test(recent) && /\[0\]\s*Skip/.test(recent)) return '0';
   return null;
 }
@@ -270,6 +271,11 @@ function classifyReadiness(text, backend) {
       // is ready. The generic />\s*$/ fires too early during splash, and the
       // wizard's selection cursor is also ❯.
       if (/\? for shortcuts/.test(recent)) return 'ready';
+    } else if (backend === 'omp') {
+      const recent = paneTail(text, 15);
+      if (/press enter to skip/i.test(recent)) return 'onboarding';
+      if (/\b(?:sign in|log in|authentication required|credentials? required)\b/i.test(recent)) return 'needs-login';
+      if (/π\s*>|# for prompt actions|\/ for commands/.test(recent)) return 'ready';
   } else {
     if (/>\s*$|❯|\$\s*$/.test(text)) return 'ready';
   }
@@ -652,6 +658,11 @@ function classifyPane(text, backend, deps = {}) {
     hasIdlePrompt = /pi v\d|0\.0%|auto\)|\d+\.\d+%/.test(text);
     hasCompletionMarker = /completed|done|finished|tokens\)|\d+\.\d+%/i.test(text);
     isWorking = /Reading|Writing|Bash|Editing|thinking|running/i.test(text);
+  } else if (backend === 'omp') {
+    const ompTail = paneTail(text, 15);
+    hasIdlePrompt = /π\s*>/.test(ompTail);
+    hasCompletionMarker = true;
+    isWorking = /(?:esc|escape) to interrupt/i.test(ompTail);
   } else if (backend === 'agy') {
     // Scope the activity check to the TAIL, exactly as the claude branch above
     // does. agy narrates in plain English inside the transcript ("I am running
