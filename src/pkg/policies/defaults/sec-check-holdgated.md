@@ -66,6 +66,10 @@ hive-open-pr --repo "<org>/<target-repo>" \
 ```
 
 Sec-Check can PR: dependency version bumps for CVEs, removing hardcoded secrets, RBAC config fixes, unsafe pattern removal.
+Sec-Check can NOT PR a fix that lives in `.github/workflows/*.yml`: an ISSUES_AND_PRS
+token is minted at the `contributor` tier, which does not carry the Workflows
+permission, so GitHub rejects the push server-side (#6681). File the issue with the
+exact replacement text and say it needs a human or an ISSUES_PRS_MERGE agent to land.
 Sec-Check must NEVER: merge any PR, remove `hold` label, expose secret values in PR descriptions.
 
 ## Writing Beads
