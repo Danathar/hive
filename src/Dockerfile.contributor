@@ -21,8 +21,21 @@ ARG NODE_MAJOR=24
 # contributor only re-pulls) that CLI's own layer, instead of also re-pulling
 # the base packages and Node toolchain underneath it. Total image size is
 # unchanged; only the update/re-pull cost per bump is reduced.
+#
+# bubblewrap (kubestellar/hive#6653) is the sandbox implementation every
+# sandbox-capable backend in this image reaches for on Linux — Codex's
+# workspace-write, Claude Code's local sandbox, Copilot's --sandbox. It was
+# absent, so Codex warned "could not find bubblewrap on PATH" at startup and
+# fell back to its own bundled musl copy. Under the container's DEFAULT seccomp
+# profile neither copy can work (user namespaces are denied, which is why
+# codex_default_sandbox_mode in config/backends.conf stops asking for a nested
+# sandbox there), so this does not by itself change the default posture. It
+# makes the OTHER path first-class: an operator who relaxes the runtime with
+# `--security-opt seccomp=unconfined` now gets a real, distro-maintained bwrap
+# and a nested sandbox that works, instead of a warning and a vendored binary.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash curl git jq tmux python3 ca-certificates gnupg openssh-client \
+    bubblewrap \
   && rm -rf /var/lib/apt/lists/*
 
 # The NodeSource GPG key is downloaded to a file and its SHA-256 verified

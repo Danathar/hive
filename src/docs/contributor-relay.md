@@ -92,6 +92,7 @@ Important environment variables:
 | `CONTRIBUTOR_MODE` | `interactive` | `interactive` keeps a tmux/TTY session. `headless` is for one-shot/no-TTY task delivery. |
 | `HIVE_AGENT_SESSION` | `contributor` | tmux session name for interactive mode. |
 | `HIVE_SESSION` | backend name (`AGENT_BACKEND`) | Optional session label for running multiple relays under one GitHub account (see [Running multiple backends under one account](#running-multiple-backends-under-one-account)). Relays with distinct labels get independent session-scoped identities (`ContributorID#session`) on the hub, so their task leases, assignment cooldowns, failure streaks, and ownership fences do not collide. Auth, trust tier, model admission, and rate-limit accounting stay per-account. Sanitized on the hub: only `[A-Za-z0-9._-]` survive, capped at 32 bytes; a label that sanitizes to empty counts as unset. Set it to the **empty string** to opt out — the relay then declares no session and keeps the bare per-account identity (the historical single-session behavior). |
+| `HIVE_CODEX_SANDBOX_MODE` | probed (see note) | Codex `--sandbox` value. Left unset, hive resolves it at launch instead of hard-coding one: `workspace-write` everywhere it can work, and `danger-full-access` **only** inside the contributor container when that container blocks the unprivileged user namespace `workspace-write`'s bubblewrap needs (#6653). Setting this pins one value and skips the probe. |
 | `HIVE_CODEX_APPROVALS_REVIEWER` | `auto_review` | Codex reviewer for boundary requests. The default prevents Hive-delivered work from waiting on an interactive operator while retaining `workspace-write`; set `user` only for an intentionally attended contributor. Set it to the **empty string** to omit the `-c approvals_reviewer=` key entirely — the escape hatch if a Codex release rejects that config key at startup. Doing so keeps the sandbox posture; it is not the same as the dangerous bypass. |
 | `HIVE_CLAUDE_DANGEROUSLY_ALLOW_HOST_STATE` | unset | Drops the defense-in-depth Claude command denylist. In local mode the native filesystem sandbox still applies, so this does not grant host writes. |
 | `HIVE_CLAUDE_DANGEROUSLY_BYPASS_APPROVALS_AND_SANDBOX` | unset | Restores the pre-#4918 unconfined Claude/LiteLLM local posture. Use only on a disposable or externally sandboxed host. |
@@ -181,6 +182,24 @@ mode for them **refuses to launch** unless the operator sets that backend's own
 for the authoritative, up-to-date state. The `agent_sandbox` Podman path
 documented there remains **hub-side only** — nothing on the contributor path
 reads it.
+
+Codex sandbox mode is probed, not fixed (#6653). `--sandbox workspace-write` is
+implemented with bubblewrap, and bubblewrap's first act is to create an
+unprivileged user namespace. The contributor container denies that syscall under
+the runtime's default seccomp profile, so asking for it there made **every**
+model-generated command fail — including both of Codex's patch-application
+paths, leaving the agent to rediscover a working edit mechanism by trial and
+error on each task — with a `bwrap:` error that misleadingly names a *host*
+sysctl. Hive therefore checks two things at launch: whether an outer boundary
+exists (the root-owned `/etc/hive/contributor-mode` marker baked into the
+contributor image) and whether user namespaces actually work. Only when both say
+"container, and no namespaces" does it fall back to `danger-full-access`, and it
+prints a one-line note saying so. Local mode is never downgraded — there is no
+outer boundary there, so `workspace-write` stands regardless of the probe.
+Relaxing the runtime instead (`--security-opt seccomp=unconfined`) restores
+`workspace-write` automatically, with no variable to set; the contributor image
+also ships a real `bubblewrap` so that path uses a distro-maintained binary
+rather than Codex's bundled fallback.
 
 Codex config-key compatibility: `approvals_reviewer` is passed with `-c`, so it
 depends on the installed Codex release accepting that key. If a version rejects

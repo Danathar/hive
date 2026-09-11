@@ -66,6 +66,19 @@ The backends with no mechanism (goose, agy, bob, pi, aider, kilo, omp) are a har
 
 For `agy` specifically, this local-mode refusal used to be a dead end (#5048): `src/Dockerfile.contributor` never installed the `agy` binary, so container mode — the only real boundary any of these five backends can get on this path — was unavailable too, leaving no working path at all. That is now fixed: the image installs `agy` from Google's published, checksummed release tarball, so `just contribute-hive agy` (container mode, the default) actually works. Nothing above about agy's *local*-mode posture changed — it still has no sandbox and still refuses without the escape hatch, exactly like goose/bob/pi/aider.
 
+### Codex in container mode is bounded by the container, not by `workspace-write` (#6653)
+
+The matrix above is about **local** mode, and codex's `workspace-write` entry there is unchanged. Container mode is different, and the difference was a bug for as long as the two shared one hard-coded flag.
+
+`--sandbox workspace-write` is implemented with bubblewrap, and bubblewrap's first act is to create an unprivileged user namespace. The contributor container runs under the runtime's default seccomp profile with nothing relaxed, which denies that syscall — so asking for `workspace-write` there did not produce a weaker sandbox, it produced **no working command at all**: every model-generated command died with `bwrap: No permissions to create a new namespace`, including both of Codex's patch-application paths, leaving the agent to rediscover a working edit mechanism by trial and error on each task. The error text also names a *host* sysctl, pointing operators at a machine that was never the problem.
+
+Hive now resolves the value instead of fixing it, on two independent checks made at launch:
+
+- **Does an outer boundary exist?** The root-owned `/etc/hive/contributor-mode` marker baked into `src/Dockerfile.contributor` — a file, not an env var, so an agent running as `dev` cannot forge it.
+- **Can the nested sandbox actually work?** A direct `unshare --user --map-root-user` probe, the same capability bwrap needs.
+
+Only "container, and no user namespaces" falls back to `danger-full-access`, and it says so in one line on stderr. This is not a weakening: the container is the boundary on that path, and it is the same boundary that was already load-bearing. **Local mode is never downgraded** — there is no outer boundary there, so a blocked probe leaves `workspace-write` in place rather than widening access to the operator's host. An operator who would rather have the nested sandbox can relax the runtime (`--security-opt seccomp=unconfined`) and the probe restores `workspace-write` on its own; the contributor image now ships a real `bubblewrap`, so that path uses a distro-maintained binary instead of Codex's bundled fallback. `HIVE_CODEX_SANDBOX_MODE` pins a value and skips the probe entirely.
+
 ## Current wiring
 
 Sandbox execution is opt-in and the tmux path remains unchanged for all agents unless **both** gates are set — the global one and a per-agent one:
