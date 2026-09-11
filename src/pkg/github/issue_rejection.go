@@ -58,6 +58,15 @@ import (
 //     against a human-authored issue is not this gate's mandate);
 //   - rejection older than issueRejectionWindow → file (a maintainer's "no"
 //     from months ago should not silence a world that may have changed).
+//
+// The first cut of that keying was too literal and the same false positive got
+// through a sixth time (#6674): "the set of files the finding pointed at" was
+// approximated by every dotted token in the text, so the verification command
+// the run happened to use ("ast.parse" in five filings, "py_compile.compile"
+// in the sixth), a version string ("3.x"), and a bare basename mentioned in
+// one extra sentence all counted as files — and under exact equality any one
+// of them is enough to miss. looksLikeFileRef and foldBareBasenames below
+// narrow the set back down to what the producer cannot reword: the paths.
 
 // issueRejectionWindow bounds how long a not-planned closure suppresses
 // re-filing. Mirrors advisory's refClosedWindow reasoning: the observed
@@ -84,8 +93,9 @@ var rejectedStateReasons = map[string]bool{
 // fileRefTokenPattern matches a file-path-like token: path characters ending
 // in a dot-extension that starts with a letter, optionally followed by one or
 // more :NN line/column suffixes ("client.py", "pkg/advisory/evidence.go:53",
-// "a.go:1:2"). The letter-first extension is what keeps version strings
-// ("v4.23.3") and bare numerics out.
+// "a.go:1:2"). The letter-first extension keeps numeric-tailed version
+// strings ("v4.23.3") out; it does NOT keep "3.x" or a dotted attribute
+// chain out, which is what looksLikeFileRef below is for (#6674).
 var fileRefTokenPattern = regexp.MustCompile(`[A-Za-z0-9_][A-Za-z0-9_./-]*\.[A-Za-z][A-Za-z0-9_]*(?::[0-9]+)*`)
 
 // urlPattern strips URLs before token extraction so "peps.python.org/pep-0758"
@@ -99,11 +109,96 @@ var urlPattern = regexp.MustCompile(`https?://[^\s)\]>"']+`)
 var lineSuffixPattern = regexp.MustCompile(`(:[0-9]+)+$`)
 
 // domainExtensions are dot-suffixes that make a token a hostname rather than a
-// file. Small on purpose: a miss here only ADDS a token to both sides' sets,
-// and the sets must be exactly equal anyway — noise degrades toward filing.
+// file, checked before every other rule so a schemeless "peps.python.org" or
+// "example.com/pkg/thing.go" is never mistaken for a path.
 var domainExtensions = map[string]bool{
 	"com": true, "org": true, "net": true, "io": true,
 	"dev": true, "edu": true, "gov": true,
+}
+
+// sourceExtensions are the dot-suffixes that make a SLASHLESS token a file
+// (#6674). A token containing "/" is a path on its face and needs no
+// allowlist; a bare "client.py" does, because "ast.parse" and "3.x" are
+// shaped identically and are the tokens that defeated the gate in practice.
+//
+// A miss here drops a real basename — which is safe in the direction that
+// matters: the fuller path almost always appears alongside it in the same
+// finding, and if it does not, the set shrinks on BOTH sides equally or the
+// gate simply fails toward filing, which is this file's standing posture.
+var sourceExtensions = map[string]bool{
+	"go": true, "py": true, "pyi": true, "js": true, "mjs": true, "cjs": true,
+	"ts": true, "tsx": true, "jsx": true, "rs": true, "java": true, "kt": true,
+	"rb": true, "php": true, "c": true, "h": true, "cc": true, "cpp": true,
+	"hpp": true, "cs": true, "swift": true, "sh": true, "bash": true,
+	"zsh": true, "ps1": true, "bat": true,
+	"yml": true, "yaml": true, "json": true, "toml": true, "ini": true,
+	"cfg": true, "conf": true, "properties": true, "env": true,
+	"md": true, "rst": true, "txt": true, "adoc": true,
+	"html": true, "htm": true, "css": true, "scss": true, "less": true,
+	"sql": true, "proto": true, "tf": true, "tfvars": true, "gradle": true,
+	"mk": true, "cmake": true, "lock": true, "sum": true, "mod": true,
+	"service": true, "container": true, "dockerfile": true,
+	"containerfile": true, "gitignore": true, "gitattributes": true,
+	"editorconfig": true, "csv": true, "tsv": true, "xml": true, "svg": true,
+}
+
+// looksLikeFileRef reports whether an extracted token actually names a file.
+// Two ways to qualify, neither of which a rewording producer controls: the
+// token contains a path separator, or its extension is a known source
+// extension. Everything else — dotted attribute chains ("ast.parse",
+// "py_compile.compile"), dotted module paths ("custom_components.sensi"),
+// version strings ("3.x") — is prose, and prose is exactly what changes
+// between two filings of the same finding.
+func looksLikeFileRef(tok string) bool {
+	dot := strings.LastIndex(tok, ".")
+	if dot < 0 {
+		return false
+	}
+	if domainExtensions[strings.ToLower(tok[dot+1:])] {
+		return false
+	}
+	if slash := strings.Index(tok, "/"); slash >= 0 {
+		// "example.com/pkg/thing.go": the host, not a path in the repo.
+		if hostDot := strings.LastIndex(tok[:slash], "."); hostDot >= 0 &&
+			domainExtensions[strings.ToLower(tok[hostDot+1:slash])] {
+			return false
+		}
+		return true
+	}
+	return sourceExtensions[strings.ToLower(tok[dot+1:])]
+}
+
+// foldBareBasenames drops a slashless token when a fuller path for the same
+// file is already in the set, so "client.py" mentioned in a sentence and
+// "custom_components/sensi/client.py" quoted in the evidence block count once
+// (#6674). Whether a finding's prose happens to name the basename in passing
+// is the producer's wording, not its subject; without this fold, one such
+// sentence changes the set and defeats exact equality.
+func foldBareBasenames(set map[string]bool) map[string]bool {
+	paths := make([]string, 0, len(set))
+	for tok := range set {
+		if strings.Contains(tok, "/") {
+			paths = append(paths, tok)
+		}
+	}
+	out := make(map[string]bool, len(set))
+	for tok := range set {
+		if strings.Contains(tok, "/") {
+			out[tok] = true
+			continue
+		}
+		covered := false
+		for _, p := range paths {
+			if strings.HasSuffix(p, "/"+tok) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			out[tok] = true
+		}
+	}
+	return out
 }
 
 // issueFileRefSet extracts the normalized set of file paths a finding's text
@@ -113,12 +208,12 @@ func issueFileRefSet(text string) map[string]bool {
 	out := make(map[string]bool)
 	for _, tok := range fileRefTokenPattern.FindAllString(text, -1) {
 		tok = lineSuffixPattern.ReplaceAllString(tok, "")
-		if dot := strings.LastIndex(tok, "."); dot >= 0 && domainExtensions[strings.ToLower(tok[dot+1:])] {
+		if !looksLikeFileRef(tok) {
 			continue
 		}
 		out[tok] = true
 	}
-	return out
+	return foldBareBasenames(out)
 }
 
 // equalFileRefSets reports whether two non-empty file-reference sets are
