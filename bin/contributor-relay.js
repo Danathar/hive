@@ -202,6 +202,7 @@ const AUTONOMY_NUDGE_MESSAGE =
 const HEADLESS_MAX_OUTPUT_BYTES = 1048576; // 1 MiB
 
 const TMUX_TAIL_LINES = 15;
+const NEEDS_LOGIN_CONFIRM_TICKS = 3;
 const HEARTBEAT_INTERVAL_MS = 30000;
 const HEARTBEAT_TIMEOUT_MS = 90000;
 const RELAY_TEST_TIMING = process.env.HIVE_RELAY_TEST_TIMING === '1';
@@ -1502,14 +1503,19 @@ function renderBoxedBanner(lines) {
 
 function waitForCLI() {
   let loginMessageShown = false;
+  let needsLoginTicks = 0;
   return new Promise((resolve, reject) => {
     const start = Date.now();
     const check = () => {
       const state = getCLIState();
       if (state === 'ready') {
+        if (loginMessageShown) {
+          console.log('CLI authentication prompt cleared; continuing.');
+        }
         console.log('CLI ready — accepting tasks');
         resolve();
       } else if (state === 'onboarding') {
+        needsLoginTicks = 0;
         // A numbered menu needs its option typed before Enter; a yes/no confirm
         // takes a bare Enter. blockingPromptKey() tells the two apart from the
         // pane text, so this no longer loops uselessly on menu-shaped prompts.
@@ -1520,17 +1526,21 @@ function waitForCLI() {
           else execSync(`tmux send-keys -t ${TMUX_SESSION} Enter`, { timeout: 15000 });
         } catch (_) {}
         setTimeout(check, CLI_READY_POLL_MS);
-      } else if (state === 'needs-login' && !loginMessageShown) {
-        loginMessageShown = true;
-        console.log('');
-        for (const line of renderBoxedBanner(loginBannerLines(BACKEND, ATTACH_COMMAND))) {
-          console.log(line);
+      } else if (state === 'needs-login') {
+        needsLoginTicks++;
+        if (!loginMessageShown && needsLoginTicks >= NEEDS_LOGIN_CONFIRM_TICKS) {
+          loginMessageShown = true;
+          console.log('');
+          for (const line of renderBoxedBanner(loginBannerLines(BACKEND, ATTACH_COMMAND))) {
+            console.log(line);
+          }
+          console.log('');
         }
-        console.log('');
         setTimeout(check, CLI_READY_POLL_MS);
       } else if (Date.now() - start > CLI_READY_TIMEOUT_MS) {
         reject(new Error('CLI did not become ready within timeout'));
       } else {
+        needsLoginTicks = 0;
         setTimeout(check, CLI_READY_POLL_MS);
       }
     };
@@ -4025,6 +4035,7 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     ATTACH_COMMAND,
     loginBannerLines,
     renderBoxedBanner,
+    NEEDS_LOGIN_CONFIRM_TICKS,
     CONTAINER_NAME,
     CONTAINER_RUNTIME,
     // Coverage for previously untested pure/isolated functions (#4267).
