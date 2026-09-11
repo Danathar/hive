@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-11 (v4.28.0)
+
+### Added
+
+- Hive contributors can run Oh My Pi as an interactive backend, with Hive-owned task delivery and completion reporting ([#6623](https://github.com/hivecommons/hive/issues/6623)).
+
 ## 2026-09-11 (v4.27.2)
 
 ### Security
