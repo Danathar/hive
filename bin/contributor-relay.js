@@ -392,6 +392,16 @@ function warnOnTokenExpiry(now = Date.now()) {
 function nextSeq() { return ++seq; }
 
 function sendTo(hub, msg) {
+  // #5715: a local-only task (the synthetic pr-review cycle) has no
+  // server-issued lease, so an ownership frame naming it can only ever be
+  // answered with a revoke — which the relay used to treat as terminal,
+  // aborting the review. Withhold those frames here, at the single point every
+  // one of them passes through, rather than at each call site: the bug was
+  // introduced by a call site that did not know the distinction existed, and a
+  // new one would reintroduce it. See LOCAL_TASK_ID_PREFIX for the full
+  // rationale. Everything else about the task is unchanged — it still runs,
+  // still ticks locally, and still reports task_complete/ready when it ends.
+  if (msg && HUB_OWNERSHIP_FRAMES.has(msg.type) && isLocalOnlyTaskId(msg.task_id)) return;
   if (hub && hub.ws && hub.ws.readyState === WebSocket.OPEN) {
     hub.ws.send(JSON.stringify(msg));
   }
@@ -2475,6 +2485,56 @@ let tasksCompletedCount = 0;
 // treated as already-serviced.
 let lastResetAtCount = -1;
 const PR_REVIEW_EVERY_N = 5;
+
+// ── Local-only tasks (kubestellar/hive#5715) ────────────────────────────────
+//
+// Almost every currentTask arrives in a task_assign and is backed by a
+// server-issued LEASE. The PR review cycle is the one exception: after every
+// PR_REVIEW_EVERY_N completions the relay builds a task for ITSELF, locally,
+// with a `pr-review-` id and `number: 0`. The hub never assigned it, holds no
+// lease for it, and has no work item behind it.
+//
+// That distinction was invisible to the reconnect path, and the cost was that a
+// WebSocket flap ABORTED the review. On reconnect the relay re-asserted
+// whatever was in currentTask, so it sent a task_progress for a task the hub
+// had never heard of. The hub is right to refuse that — a resume is honoured
+// only against a server-issued lease, the #C4 rule that stops a client claiming
+// ownership of work it was not given (src/pkg/dashboard/contribute_ws.go) — so
+// it answered `task_revoke: no active lease for this task`. The relay then
+// treated the revoke as terminal: stop the agent, relaunch the CLI, ask for
+// fresh work. The review was lost, every time, on a hive where 1006 closes are
+// routine (29 in under four hours in the report).
+//
+// The fix is to know which tasks the hub owns. A local-only task:
+//   - is never re-asserted to the hub (no task_accepted / task_progress), and
+//   - cannot be ended by a revoke, because no hub ever owned it and so no other
+//     contributor can have been given it.
+//
+// Both halves are checked at a choke point rather than per call site, so a
+// future frame or a future locally-built task cannot quietly reintroduce the
+// claim. task_complete and task_failed are deliberately NOT withheld: they
+// assert nothing about ownership, the hub ignores them for a task it never
+// assigned, and the `ready` that follows the review is what puts the
+// contributor back in the rotation.
+const LOCAL_TASK_ID_PREFIX = 'pr-review-';
+
+// Frames that ASSERT this connection owns the named task. These are the only
+// ones a hub can answer with a revoke, and the only ones withheld below.
+const HUB_OWNERSHIP_FRAMES = new Set(['task_accepted', 'task_progress']);
+
+// Belt and braces: the explicit marker set on the object the relay builds, and
+// the id prefix. The marker alone would be lost by anything that reconstructs
+// the task from the wire (or from HIVE_TASK_FILE); the prefix alone would be
+// forgeable by a hub that chose that id. Requiring either, not both, keeps the
+// guard working when only one survives.
+function isLocalOnlyTaskId(taskID) {
+  return typeof taskID === 'string' && taskID.startsWith(LOCAL_TASK_ID_PREFIX);
+}
+
+function isLocalOnlyTask(task) {
+  return !!task && (task.synthetic === true || isLocalOnlyTaskId(task.task_id));
+}
+
 let taskTimeoutHandle = null;
 let lastProgressTick = 0;
 
@@ -3039,7 +3099,12 @@ function progressTick() {
     tasksCompletedCount++;
     if (tasksCompletedCount % PR_REVIEW_EVERY_N === 0) {
       console.log(`PR review cycle (${tasksCompletedCount} tasks completed) — checking open PRs`);
-      currentTask = { task_id: `pr-review-${Date.now()}`, kind: 'review', repo: completedRepo, number: 0, title: 'Review open PRs for comments' };
+      // `synthetic: true` is the explicit half of isLocalOnlyTask() (#5715):
+      // this object is built HERE, by us, and no hub holds a lease for it. The
+      // `pr-review-` id prefix says the same thing and is what survives a
+      // round-trip through HIVE_TASK_FILE, but stating it on the object is what
+      // makes the property legible at the one place it becomes true.
+      currentTask = { task_id: `${LOCAL_TASK_ID_PREFIX}${Date.now()}`, kind: 'review', repo: completedRepo, number: 0, title: 'Review open PRs for comments', synthetic: true };
       taskAssignedAt = Date.now();
       const reviewPrompt = `Check your open PRs on ${completedRepo} for review comments. ` +
         `Run 'GH_TOKEN=$GH_TOKEN gh pr list --repo ${completedRepo} --author @me --state open' to find them. ` +
@@ -3203,7 +3268,23 @@ function handleMessage(data, hub) {
       hub.authenticated = true;
       hub.authFailed = false;
       hub.reconnectDelay = BASE_RECONNECT_DELAY_MS;
-      if (currentTask && hub === currentTaskHub()) {
+      // Scoped to the hub this task would have been re-asserted TO, so a
+      // second, non-active hub authenticating mid-review stays as silent as it
+      // was before — it was never going to resume anything either way.
+      if (currentTask && isLocalOnlyTask(currentTask) && hub === currentTaskHub()) {
+        // #5715: nothing to resume. The hub never leased this task, so a resume
+        // can only be answered with a revoke — and the old message named
+        // `${repo}#0`, an issue number that does not exist, which is the tell
+        // that the frame was about a task the hub had no record of.
+        //
+        // Deliberately NOT calling startProgressReporting(): the local tick loop
+        // is not torn down by a socket close (the close handler clears the
+        // heartbeat, not progressInterval), so the review has been running
+        // throughout the flap. Re-arming here would reset the stall clock and
+        // the max-duration lease, silently extending a review that may be
+        // wedged — a flap must not buy the agent more time.
+        console.log(`Reconnected during the local ${currentTask.kind} cycle (${currentTask.task_id}) — not resuming: the hub never leased it, so it continues locally`);
+      } else if (currentTask && hub === currentTaskHub()) {
         console.log(`Reconnected while working on ${currentTask.repo}#${currentTask.number} — resuming`);
         sendTo(hub, { type: 'task_accepted', seq: nextSeq(), task_id: currentTask.task_id });
         sendTo(hub, { type: 'task_progress', seq: nextSeq(), task_id: currentTask.task_id, task_gen: currentTask.task_gen, kind: currentTask.kind, repo: currentTask.repo, number: currentTask.number, title: currentTask.title, status: 'working' });
@@ -3351,6 +3432,22 @@ function handleMessage(data, hub) {
       }
       if (currentTaskHub() !== hub || currentTask.task_id !== msg.task_id) {
         console.log(`Ignoring task_revoked from ${hub.url} for ${msg.task_id} — active task belongs to another hub`);
+        break;
+      }
+      // #5715: a revoke is terminal because the work now belongs to someone
+      // else — the hub has taken the lease back and may hand it to another
+      // contributor, so continuing would be two agents on one issue. None of
+      // that reasoning survives for a task the hub never owned. There is no
+      // lease to take back and nobody else to give it to, so stopping the
+      // agent and relaunching the CLI would destroy a valid turn for nothing.
+      //
+      // Withholding the ownership frames in sendTo() means the relay no longer
+      // PROVOKES this, but a revoke can still arrive — one already in flight
+      // when the socket dropped, or a hub that revokes for its own reasons.
+      // Surviving it is the second, independent half of the fix: the review
+      // cycle now runs to completion regardless of why a revoke shows up.
+      if (isLocalOnlyTask(currentTask)) {
+        console.log(`Ignoring task_revoke for ${msg.task_id} (${msg.reason}) — locally-created ${currentTask.kind} cycle, never leased by the hub; continuing`);
         break;
       }
       console.log(`Task revoked: ${msg.task_id} — ${msg.reason}`);
@@ -3608,6 +3705,13 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     failCurrentTask,
     startProgressReporting,
     progressTick,
+    // Local-only (synthetic pr-review) task surface — kubestellar/hive#5715.
+    // PR_REVIEW_EVERY_N is exported so a test can enter the REAL cycle rather
+    // than hand-build the task it is meant to be asserting about.
+    PR_REVIEW_EVERY_N,
+    LOCAL_TASK_ID_PREFIX,
+    isLocalOnlyTask,
+    isLocalOnlyTaskId,
     classifyTmuxPane,
     paneTail,
     paneLooksBlockedOnHuman,

@@ -6955,6 +6955,213 @@ test('#6541 agy post-error survey modal is dismissed with 0 (Skip)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// kubestellar/hive#5715 — a WebSocket flap must not abort the PR review cycle.
+//
+// The review task is the one currentTask the relay builds for ITSELF: no
+// task_assign, no server-issued lease, `pr-review-` id, `number: 0`. The
+// reconnect path did not know that, so it re-asserted the task to a hub that
+// had never heard of it; the hub refused under the #C4 server-issued-lease rule
+// and answered `task_revoke: no active lease for this task`; the relay treated
+// the revoke as terminal and stopped the agent. Observed end to end twice, four
+// months apart, on two different backends.
+//
+// These drive the REAL cycle rather than hand-building the task, so the marker,
+// the id prefix and the withholding are exercised together — a fixture that
+// stated the task shape itself would pass even if the relay stopped producing
+// it that way.
+// ---------------------------------------------------------------------------
+
+// Complete a real task so the relay enters its own PR review cycle, and return
+// the synthetic task it built. PR_REVIEW_EVERY_N - 1 completions are staged so
+// this one crosses the threshold.
+function enterReviewCycle(relay) {
+  relay.setTasksCompletedCount(relay.PR_REVIEW_EVERY_N - 1);
+  dispatchTask(relay, 't-before-review');
+  relay.__stallTick();
+  const review = relay.getCurrentTask();
+  assert.ok(review, 'test setup: no review cycle was entered');
+  assert.ok(review.task_id.startsWith('pr-review-'),
+    `test setup: expected the synthetic review task, got ${review.task_id}`);
+  // Completing the previous task stops the agent and relaunches the CLI, so the
+  // review prompt is QUEUED rather than typed and progressTick() rightly
+  // refuses to judge a task the agent has not been given (#5650). The real
+  // relay clears that within a second or two — "CLI ready — accepting tasks /
+  // Task prompt sent to CLI" in both reports — so say so here, or every tick
+  // below returns early and asserts nothing.
+  relay.setCliReady(true);
+  relay.setTaskPromptDelivered(true);
+  relay.setDeliveredVerdictBaseline(null);
+  return review;
+}
+
+const REVIEW_PANE = `HIVE_VERDICT: complete — shipped it\n${IDLE_PANE}`;
+
+test('#5715 the locally-built review task is marked synthetic and carries no work item', () => {
+  const relay = loadRelay({ backend: 'copilot', paneText: REVIEW_PANE });
+  try {
+    const review = enterReviewCycle(relay);
+    assert.strictEqual(review.synthetic, true,
+      'the review task must say so on the object, not only in its id');
+    assert.strictEqual(review.number, 0, 'a review cycle has no work item behind it');
+    assert.strictEqual(relay.isLocalOnlyTask(review), true);
+    // The predicate must not be satisfiable by a hub-assigned task, or the
+    // revoke guard below would swallow a revoke that IS terminal.
+    assert.strictEqual(
+      relay.isLocalOnlyTask({ task_id: 'ct-foo/bar-1-2', kind: 'issue', repo: 'foo/bar', number: 7 }),
+      false);
+  } finally { teardown(relay); }
+});
+
+test('#5715 a reconnect mid-review sends no ownership frame and no repo#0 resume line', () => {
+  const relay = loadRelay({ backend: 'copilot', paneText: REVIEW_PANE });
+  const logs = [];
+  const origLog = console.log;
+  console.log = (...a) => logs.push(a.join(' '));
+  try {
+    const review = enterReviewCycle(relay);
+    const before = relay.__sent.length;
+
+    // The flap: the socket drops and the relay re-authenticates. This is the
+    // exact point the review used to die.
+    relay.handleMessage(JSON.stringify({ type: 'auth_ok', contributor_id: 'c1', trust_tier: 'contributor' }));
+
+    const after = relay.__sent.slice(before);
+    assert.ok(!after.some(m => m.type === 'task_accepted' && m.task_id === review.task_id),
+      `a task the hub never leased must not be accepted back to it: ${JSON.stringify(after)}`);
+    assert.ok(!after.some(m => m.type === 'task_progress' && m.task_id === review.task_id),
+      `the resume claim is what draws the revoke — it must not be sent: ${JSON.stringify(after)}`);
+    assert.strictEqual(relay.getCurrentTask(), review, 'the review must still be the active task');
+
+    const resumeLine = logs.find(l => l.includes('Reconnected'));
+    assert.ok(resumeLine, `expected the reconnect to be logged: ${JSON.stringify(logs)}`);
+    assert.ok(!/#0\b/.test(resumeLine),
+      `the resume line named an issue number that does not exist: ${resumeLine}`);
+    assert.ok(!/—\s*resuming\b/.test(resumeLine),
+      `nothing is being resumed — the hub holds no lease: ${resumeLine}`);
+    assert.ok(/not resuming/.test(resumeLine),
+      `the log must say why the review is not re-asserted: ${resumeLine}`);
+  } finally { console.log = origLog; teardown(relay); }
+});
+
+test('#5715 progress ticks during a review never claim the task at the hub', () => {
+  // The withholding is at the send choke point, not just in the reconnect
+  // branch: every task_progress a live review emits would hit the same
+  // unleased-resume rejection on the hub.
+  let pane = REVIEW_PANE;
+  const relay = loadRelay({ backend: 'copilot', paneText: () => pane });
+  try {
+    const review = enterReviewCycle(relay);
+    // Idle chrome with no verdict yet — the exact state the 2026-09-11 report
+    // was in when the socket dropped ("pane looks idle but no HIVE_VERDICT yet
+    // — 1/3 checks"). That branch reports progress and waits, so it is a live
+    // review emitting hub frames rather than a finished one.
+    pane = IDLE_PANE;
+    const before = relay.__sent.length;
+    // __stallTick backdates the assignment clock past TASK_GRACE_PERIOD_MS, so
+    // the tick actually judges the pane instead of returning inside the
+    // startup grace the freshly-started review task is still in.
+    relay.__stallTick();
+    const after = relay.__sent.slice(before);
+    assert.ok(!after.some(m => m.type === 'task_progress' && m.task_id === review.task_id),
+      `progress for an unleased task can only be answered with a revoke: ${JSON.stringify(after)}`);
+    assert.strictEqual(relay.getCurrentTask(), review, 'the review must still be running');
+  } finally { teardown(relay); }
+});
+
+test('#5715 a revoke of the synthetic review task does not stop the agent', () => {
+  // Second, independent half of the fix. Even with the ownership frames
+  // withheld a revoke can still arrive — one already in flight when the socket
+  // dropped, or a hub revoking for its own reasons. A revoke is terminal
+  // because the work now belongs to someone else; for a task no hub ever owned
+  // there is nobody to belong to, so the turn stays valid.
+  const relay = loadRelay({ backend: 'copilot', paneText: REVIEW_PANE });
+  try {
+    const review = enterReviewCycle(relay);
+    const before = relay.__tmuxSends().length;
+    relay.handleMessage(JSON.stringify({
+      type: 'task_revoke', task_id: review.task_id, reason: 'no active lease for this task',
+    }));
+
+    assert.strictEqual(relay.getCurrentTask(), review,
+      'the review cycle was abandoned by a revoke for a task the hub never owned');
+    const sends = relay.__tmuxSends().slice(before);
+    assert.ok(!sends.some(c => /C-c\s*$/.test(c)),
+      `the agent was interrupted mid-review: ${JSON.stringify(sends)}`);
+    assert.ok(!sends.some(c => /copilot/.test(c)),
+      `the CLI was relaunched mid-review: ${JSON.stringify(sends)}`);
+  } finally { teardown(relay); }
+});
+
+test('#5715 the review survives a flap AND a revoke, then finishes and re-readies', () => {
+  // The outcome the issue is actually about. Everything above asserts a frame
+  // was or was not sent; this one asserts the cycle does the job — the agent
+  // answers its review, the relay books it, and the contributor goes back into
+  // the rotation instead of losing the review and taking a fresh issue.
+  let pane = REVIEW_PANE;
+  const relay = loadRelay({ backend: 'copilot', paneText: () => pane });
+  try {
+    const review = enterReviewCycle(relay);
+    const completedBefore = relay.getTasksCompletedCount();
+    pane = IDLE_PANE;
+
+    relay.handleMessage(JSON.stringify({ type: 'auth_ok', contributor_id: 'c1', trust_tier: 'contributor' }));
+    relay.handleMessage(JSON.stringify({
+      type: 'task_revoke', task_id: review.task_id, reason: 'no active lease for this task',
+    }));
+
+    // The agent finishes its review.
+    pane = `HIVE_VERDICT: complete — no PR comments to address\n${IDLE_PANE}`;
+    const before = relay.__sent.length;
+    relay.__stallTick();
+
+    const after = relay.__sent.slice(before);
+    assert.ok(after.some(m => m.type === 'task_complete' && m.task_id === review.task_id),
+      `the review never completed: ${JSON.stringify(after.map(m => m.type))}`);
+    assert.strictEqual(relay.getCurrentTask(), null, 'the review must be released when it ends');
+    assert.strictEqual(relay.getTasksCompletedCount(), completedBefore + 1,
+      'a finished review must advance the completion count like any other task');
+    assert.ok(after.some(m => m.type === 'ready'),
+      `the relay must re-advertise for work after the review: ${JSON.stringify(after.map(m => m.type))}`);
+  } finally { teardown(relay); }
+});
+
+test('#5715 negative control: a real leased task still resumes across the same flap', () => {
+  // The guard must be narrow. #5681 depends on this exact path working for
+  // hub-assigned tasks, and a predicate that caught them too would trade one
+  // lost-work bug for another.
+  const relay = loadRelay({ backend: 'copilot' });
+  const logs = [];
+  const origLog = console.log;
+  console.log = (...a) => logs.push(a.join(' '));
+  try {
+    dispatchTask(relay, 'ct-foo/bar-421-1', 421);
+    const before = relay.__sent.length;
+    relay.handleMessage(JSON.stringify({ type: 'auth_ok', contributor_id: 'c1', trust_tier: 'contributor' }));
+    const after = relay.__sent.slice(before);
+    assert.ok(after.some(m => m.type === 'task_accepted' && m.task_id === 'ct-foo/bar-421-1'),
+      `a leased task must still re-assert itself on reconnect: ${JSON.stringify(after)}`);
+    assert.ok(after.some(m => m.type === 'task_progress' && m.task_id === 'ct-foo/bar-421-1'),
+      `a leased task must still resume: ${JSON.stringify(after)}`);
+    assert.ok(logs.some(l => /Reconnected while working on foo\/bar#421 — resuming/.test(l)),
+      `the real resume line must be unchanged: ${JSON.stringify(logs)}`);
+  } finally { console.log = origLog; teardown(relay); }
+});
+
+test('#5715 negative control: a revoke of a real task is still terminal', () => {
+  const relay = loadRelay({ backend: 'copilot' });
+  try {
+    dispatchTask(relay, 'ct-foo/bar-421-1', 421);
+    const before = relay.__tmuxSends().length;
+    relay.handleMessage(JSON.stringify({
+      type: 'task_revoke', task_id: 'ct-foo/bar-421-1', reason: 'operator stop',
+    }));
+    assert.strictEqual(relay.getCurrentTask(), null,
+      'a revoked leased task must be released — it may already be another contributor\'s');
+    assertAgentStopped(relay.__tmuxSends().slice(before), 'copilot');
+  } finally { teardown(relay); }
+});
+
+// ---------------------------------------------------------------------------
 
 let failed = 0;
 // RELAY_TEST_ONLY=<substring> runs a single test, for debugging in isolation.
