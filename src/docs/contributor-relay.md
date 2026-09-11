@@ -511,6 +511,24 @@ The shipped relay declares `environment` only where the cause is unambiguous (CL
 
 Whether the hub should ever *act* on client declarations — the ROUTE half of [#2547](https://github.com/hivecommons/hive/issues/2547) — remains an open maintainer decision, and needs task-side requirements metadata that does not exist yet.
 
+### A PR the agent researched is not a PR it opened
+
+`pr_url` on `task_complete` tells the hub whether work shipped, which picks the issue's cooldown. It comes from a regex over the agent's recent pane output — and a regex cannot tell a PR the agent **opened** from one it merely **read about**. `gh pr list` and `gh issue view --comments` both render full URLs, so an agent researching prior art prints plenty of the latter.
+
+When that happened, two things went wrong at once ([#6662](https://github.com/hivecommons/hive/issues/6662)): the contributor was credited with somebody else's PR, and — the serious half — the `prURL ? null : verdict` precedence **discarded a correct `no_work_needed` verdict**.
+
+That precedence was justified as "a visible PR contradicts 'nothing shippable'". True of a PR this task opened; exactly inverted for a PR a maintainer merged a month ago, where the PR is the evidence that makes the verdict *correct*. And that is [#3987](https://github.com/hivecommons/hive/issues/3987)'s target population by construction — its own step 1 is "an issue's shippable parts land across several PRs referencing it; those PRs merge" — so the very evidence that makes `no_work_needed` right was what discarded it. The issue was then booked as shipped and re-entered the offer pool when no merge materialised: the [#2547](https://github.com/hivecommons/hive/issues/2547) loop #3987 exists to close.
+
+Measured over one 45-minute container session: **3 of 10 completions** attributed a third party's already-merged PR to the contributor and lost a correct verdict. Which tasks landed in that 3 came down to whether the agent happened to print a bare `#1103` — which the regex does not match, so the verdict survived — or a full URL.
+
+A scraped URL is now a **candidate**, not a conclusion. It is checked against GitHub (`gh pr view --json author,createdAt,mergedAt`) and the answer is three-way:
+
+- **Refuted** — merged or created before the task started, or authored by somebody else. Not our work: dropped from `pr_url`, and the verdict stands. The merged-before-start check alone catches all three observed cases, and it needs no identity, so a relay whose `HIVE_CONTRIBUTOR_USERNAME` is unset is still protected. Timestamp comparisons carry a few minutes of slack, because `taskAssignedAt` is the contributor's clock and GitHub's timestamps are GitHub's; the misattributions are off by weeks.
+- **Confirmed** — opened by this contributor during this task. Reported, and it suppresses a `no_work_needed` claim exactly as before.
+- **Unverified** — `gh` missing, offline or rate-limited. Still reported as a best-effort audit trail, because dropping it would start losing real PRs ([#6667](https://github.com/hivecommons/hive/issues/6667) is that failure read in the opposite direction) — but it no longer silently outranks the agent's own sentinel. A regex hit on scrollback prose is much weaker evidence than a line the agent deliberately printed.
+
+The cross-repo fallback is also gone. It returned the first PR URL in *any* repo when nothing matched the task's repo, reasoning that an approximate audit trail beats none. For a value the hub books cooldowns on, an approximate one is a wrong one, and a PR in a different repository cannot be the PR for this task's issue.
+
 ## Reconnecting without losing in-flight work
 
 The relay heartbeats every 30 s and reconnects with exponential backoff (1 s to 60 s). A drop inside that window is meant to be invisible to the agent: the relay keeps its task locally, re-asserts it on the new socket, and carries on typing into the same tmux pane.

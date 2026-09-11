@@ -109,6 +109,13 @@ const AGENT_CWD = (process.env.HIVE_AGENT_CWD || '').trim();
 // restart must reuse that exact posture instead of deriving container defaults.
 const ENTRYPOINT_LAUNCH_CMD = (process.env.AGENT_LAUNCH_CMD || '').trim();
 const TMUX_SESSION = process.env.HIVE_AGENT_SESSION || 'contributor';
+// The GitHub login this contributor pushes and opens PRs as — exported by
+// contributor-agent.sh, which defaults it to the literal string "unknown" when
+// registration did not supply one. Used to decide whether a PR seen in the pane
+// is OURS (kubestellar/hive#6662); prAttributionEvidence() treats "unknown" as
+// "identity not available" rather than as a login, so the authorship check is
+// simply skipped instead of refusing every PR on a relay without one.
+const CONTRIBUTOR_LOGIN = (process.env.HIVE_CONTRIBUTOR_USERNAME || '').trim();
 // Where the hub-delivered, task-scoped token is written (injectGhToken). This
 // deliberately does NOT default to /var/run/hive-metrics/gh-app-token.cache:
 // that filename is the hub's FULL-privilege installation-token cache
@@ -1197,12 +1204,18 @@ function runHeadlessTask(task) {
     finish(() => {
       setPiInvocationState('succeeded');
       console.log(`Headless task ${task.task_id} completed (exit 0)`);
-      const prURL = detectPRURL(outTail, task.repo);
-      if (prURL) console.log(`Detected PR for ${task.task_id}: ${prURL}`);
+      const prFinding = resolveTaskPR(outTail, {
+        repo: task.repo,
+        taskId: task.task_id,
+        taskStartedAt: taskAssignedAt,
+        contributorLogin: CONTRIBUTOR_LOGIN,
+      });
+      const prURL = prFinding.url;
       // #3987: only report a no_work_needed verdict when no PR was shipped —
       // a visible PR contradicts "nothing shippable" (the hub would override
-      // the claim with "shipped" anyway).
-      const noWork = prURL ? null : detectNoWorkVerdict(outTail);
+      // the claim with "shipped" anyway). #6662: only a PR THIS TASK OPENED
+      // does; see resolveTaskPR.
+      const noWork = prFinding.suppressesVerdict ? null : detectNoWorkVerdict(outTail);
       if (noWork) console.log(`Detected no_work_needed verdict for ${task.task_id}: ${noWork.reason || '(no reason)'}`);
       writeHeadlessStatus(HEADLESS_STATE_DONE, { task_id: task.task_id, task_gen: task.task_gen, result: 'completed', pr_url: prURL });
       // #5353: the one-shot child has already exited (this callback is its
@@ -1839,27 +1852,182 @@ function captureTmuxLines(n) {
 // tell "work shipped" from "agent merely went idle" and pick the right issue
 // cooldown (kubestellar/hive#2393 item 7). This is intentionally best-effort:
 // when no PR link is visible we return '' and the hub applies its short no-PR
-// cooldown. When `repo` is known (owner/repo) we prefer a URL under that repo
-// so an unrelated PR mentioned in passing does not get attributed to the task.
+// cooldown.
+//
+// A CANDIDATE, NOT A CONCLUSION (kubestellar/hive#6662). A regex over pane text
+// cannot tell a PR the agent OPENED from one it merely READ ABOUT, and an agent
+// researching prior art prints plenty of the latter — `gh pr list` and
+// `gh issue view --comments` both render full URLs. Everything this returns is
+// run past prAttributionEvidence() below before it is reported as this task's
+// work or allowed to outrank the agent's own verdict.
+//
+// THE CROSS-REPO FALLBACK IS GONE. This used to return the first PR URL in ANY
+// repo when nothing matched the task's repo, on the reasoning that an
+// approximate audit trail beats none. It does not: pr_url is a value the hub
+// books cooldowns and credits work on, so an approximate one is a wrong one. A
+// PR in a different repository cannot be the PR for this task's issue.
 function detectPRURL(lines, repo) {
   if (!Array.isArray(lines) || lines.length === 0) return '';
   // Matches https://github.com/<owner>/<repo>/pull/<number>, capturing owner/repo.
   const PR_URL_RE = /https:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/pull\/\d+/g;
-  let repoMatch = '';
-  let anyMatch = '';
   for (const line of lines) {
     let m;
     PR_URL_RE.lastIndex = 0;
     while ((m = PR_URL_RE.exec(line)) !== null) {
-      const url = m[0];
-      if (!anyMatch) anyMatch = url;
-      if (repo && m[1] === repo) { repoMatch = url; break; }
+      if (repo && m[1] === repo) return m[0];
+      // With no task repo to compare against there is nothing to attribute the
+      // URL to either way; take the first as the old code did.
+      if (!repo) return m[0];
     }
-    if (repoMatch) break;
   }
-  // Prefer a URL under the task's own repo; otherwise fall back to the first
-  // PR URL seen (better an approximate audit trail than none).
-  return repoMatch || anyMatch;
+  return '';
+}
+
+// ── Did THIS task open that PR? (kubestellar/hive#6662) ──────────────────────
+//
+// The precedence at the completion site reads "a visible PR contradicts
+// 'nothing shippable'". That is true of a PR this task opened. It is exactly
+// inverted for a PR a maintainer merged a month ago: there, the PR is the
+// evidence that makes no_work_needed CORRECT.
+//
+// And that is not a corner case — it is the #3987 population by construction.
+// #3987's own step 1 is "an issue's shippable parts land across several PRs
+// referencing it; those PRs merge". For that shape a merged reference PR is
+// always present, and the agent must cite it to justify the verdict at all. So
+// the very evidence that makes the verdict right was what discarded it, and the
+// issue was booked as shipped — re-entering the offer pool when no merge ever
+// materialised, which is the #2547 loop #3987 exists to close.
+//
+// Measured over one 45-minute container session: 3 of 10 completions attributed
+// a third party's already-merged PR to this contributor and lost a correct
+// verdict. Whether a task landed in that 3 came down to whether the agent
+// happened to print a bare `#1103` (which PR_URL_RE does not match, verdict
+// survives) or a full URL (verdict discarded) — a clean split with nothing else
+// distinguishing the groups.
+//
+// PR_ATTRIBUTION_CLOCK_SKEW_MS guards the timestamp comparisons. taskAssignedAt
+// is this host's clock and createdAt/mergedAt are GitHub's; a couple of minutes
+// of drift between them is ordinary. The misattributions this exists to catch
+// are off by weeks, so a few minutes of slack costs nothing and stops a genuine
+// PR being refused over a clock difference.
+const PR_ATTRIBUTION_CLOCK_SKEW_MS = 5 * 60 * 1000;
+
+const PR_ATTRIBUTION_CONFIRMED = 'confirmed';
+const PR_ATTRIBUTION_REFUTED = 'refuted';
+const PR_ATTRIBUTION_UNKNOWN = 'unknown';
+
+// prAttributionEvidence decides whether PR metadata is consistent with "this
+// task opened it". PURE — it takes the already-fetched metadata, so the rules
+// are testable without a network or a gh binary.
+//
+// meta is gh's JSON shape: { url, author: {login}, createdAt, mergedAt, state }.
+// Returns { status, reason }.
+//
+// Refutation is on FACTS THAT CANNOT BE TRUE OF OUR OWN PR, in increasing order
+// of how much they depend on knowing who we are:
+//
+//   1. Merged before the task started. The cheapest and strongest check, and on
+//      its own it catches all three observed misattributions. A PR that merged
+//      before this task began cannot be the PR this task opened.
+//   2. Created before the task started. Same argument one step earlier; catches
+//      an open third-party PR the agent read about.
+//   3. Authored by somebody else. Only usable when the contributor identity is
+//      known — contributor-agent.sh defaults HIVE_CONTRIBUTOR_USERNAME to the
+//      literal "unknown", which is not a login and must not be compared as one.
+//
+// Anything else is `confirmed`. UNKNOWN is reserved for "we could not look",
+// and the caller treats it as weaker than the agent's explicit sentinel rather
+// than as a refutation — a lookup failure must not start discarding real PRs.
+function prAttributionEvidence(meta, opts) {
+  const o = opts || {};
+  if (!meta || typeof meta !== 'object') {
+    return { status: PR_ATTRIBUTION_UNKNOWN, reason: 'no PR metadata available' };
+  }
+  const startedAt = Number(o.taskStartedAt) || 0;
+  const login = typeof o.contributorLogin === 'string' ? o.contributorLogin.trim() : '';
+  // "unknown" is contributor-agent.sh's placeholder, not a GitHub login.
+  const knownLogin = login && login.toLowerCase() !== 'unknown' ? login : '';
+
+  const parseTs = (v) => {
+    const t = Date.parse(v || '');
+    return Number.isFinite(t) ? t : null;
+  };
+
+  if (startedAt > 0) {
+    const mergedAt = parseTs(meta.mergedAt);
+    if (mergedAt !== null && mergedAt < startedAt - PR_ATTRIBUTION_CLOCK_SKEW_MS) {
+      return {
+        status: PR_ATTRIBUTION_REFUTED,
+        reason: `merged ${meta.mergedAt} — before this task started`,
+      };
+    }
+    const createdAt = parseTs(meta.createdAt);
+    if (createdAt !== null && createdAt < startedAt - PR_ATTRIBUTION_CLOCK_SKEW_MS) {
+      return {
+        status: PR_ATTRIBUTION_REFUTED,
+        reason: `created ${meta.createdAt} — before this task started`,
+      };
+    }
+  }
+
+  const author = meta.author && typeof meta.author === 'object' ? (meta.author.login || '') : '';
+  if (knownLogin && author && author.toLowerCase() !== knownLogin.toLowerCase()) {
+    return {
+      status: PR_ATTRIBUTION_REFUTED,
+      reason: `authored by ${author}, not ${knownLogin}`,
+    };
+  }
+
+  return { status: PR_ATTRIBUTION_CONFIRMED, reason: 'authored by this contributor during this task' };
+}
+
+// verifyTaskPR is the effectful half: ask gh about the candidate, then apply the
+// pure rules above. Bounded and non-fatal — a gh that is missing, rate-limited
+// or offline yields UNKNOWN, never a refutation.
+function verifyTaskPR(url, opts) {
+  if (!url) return { status: PR_ATTRIBUTION_UNKNOWN, reason: 'no candidate URL' };
+  let meta = null;
+  try {
+    const raw = execSync(
+      `gh pr view ${shellQuote(url)} --json url,author,createdAt,mergedAt,state 2>/dev/null`,
+      { encoding: 'utf8', timeout: 20000 }
+    );
+    meta = JSON.parse(raw);
+  } catch (e) {
+    return {
+      status: PR_ATTRIBUTION_UNKNOWN,
+      reason: `could not query GitHub for ${url}: ${(e && e.message) || 'unknown error'}`,
+    };
+  }
+  return prAttributionEvidence(meta, opts);
+}
+
+// resolveTaskPR turns a pane scrape into the two decisions the completion site
+// needs: what to REPORT as this task's PR, and whether that PR is strong enough
+// to outrank an explicit HIVE_VERDICT.
+//
+// The split is the point (#6662 suggestion 3). A regex hit on scrollback prose
+// is much weaker evidence than a sentinel the agent deliberately printed, so
+// only a CONFIRMED PR suppresses the verdict. An UNKNOWN one is still reported
+// as a best-effort audit trail — dropping it on a transient gh failure would
+// start losing real PRs — but it no longer gets to silently overrule the agent.
+function resolveTaskPR(lines, opts) {
+  const o = opts || {};
+  const candidate = detectPRURL(lines, o.repo);
+  if (!candidate) return { url: '', evidence: null, suppressesVerdict: false };
+  const evidence = verifyTaskPR(candidate, o);
+  if (evidence.status === PR_ATTRIBUTION_REFUTED) {
+    console.log(`Ignoring PR ${candidate} for ${o.taskId || 'task'} — not this task's work (${evidence.reason}); ` +
+      `it was visible in the pane because the agent researched it (kubestellar/hive#6662)`);
+    return { url: '', evidence, suppressesVerdict: false };
+  }
+  if (evidence.status === PR_ATTRIBUTION_UNKNOWN) {
+    console.log(`Detected PR for ${o.taskId || 'task'}: ${candidate} (UNVERIFIED — ${evidence.reason}; ` +
+      `reporting it, but not letting it override the agent's verdict)`);
+    return { url: candidate, evidence, suppressesVerdict: false };
+  }
+  console.log(`Detected PR for ${o.taskId || 'task'}: ${candidate}`);
+  return { url: candidate, evidence, suppressesVerdict: true };
 }
 
 // ── The HIVE_VERDICT: sentinel family (kubestellar/hive#3987, #5376) ─────────
@@ -3043,12 +3211,23 @@ function progressTick() {
     // recent output, so the hub can distinguish "shipped a PR" from "just went
     // idle" and pick the right issue cooldown (kubestellar/hive#2393 item 7).
     // Empty when no PR link is found — the hub then applies the short cooldown.
-    const prURL = detectPRURL(tmuxLines, currentTask.repo);
-    if (prURL) console.log(`Detected PR for ${currentTask.task_id}: ${prURL}`);
+    const prFinding = resolveTaskPR(tmuxLines, {
+      repo: currentTask.repo,
+      taskId: currentTask.task_id,
+      taskStartedAt: taskAssignedAt,
+      contributorLogin: CONTRIBUTOR_LOGIN,
+    });
+    const prURL = prFinding.url;
     // #3987: only report a no_work_needed verdict when no PR was shipped — a
     // visible PR contradicts "nothing shippable" (the hub would override the
     // claim with "shipped" anyway).
-    const noWork = prURL || !completionVerdict || completionVerdict.verdict !== HIVE_VERDICT_NO_WORK
+    //
+    // #6662: "a visible PR" is the wrong test, and it inverted the inference
+    // for the population #3987 was built for. Only a PR THIS TASK OPENED
+    // contradicts "nothing shippable"; a PR a maintainer merged last month
+    // corroborates it, and is in the pane precisely because the agent had to
+    // cite it to justify the verdict. resolveTaskPR() draws that line.
+    const noWork = prFinding.suppressesVerdict || !completionVerdict || completionVerdict.verdict !== HIVE_VERDICT_NO_WORK
       ? null
       : completionVerdict;
     if (noWork) console.log(`Detected no_work_needed verdict for ${currentTask.task_id}: ${noWork.reason || '(no reason)'}`);
@@ -3853,6 +4032,17 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     captureTmuxLines,
     detectNoWorkVerdict,
     detectPRURL,
+    // PR attribution (kubestellar/hive#6662). prAttributionEvidence is the pure
+    // rule set and is where the interesting cases live; resolveTaskPR is the
+    // wiring, exercised through a stubbed gh.
+    prAttributionEvidence,
+    verifyTaskPR,
+    resolveTaskPR,
+    PR_ATTRIBUTION_CONFIRMED,
+    PR_ATTRIBUTION_REFUTED,
+    PR_ATTRIBUTION_UNKNOWN,
+    PR_ATTRIBUTION_CLOCK_SKEW_MS,
+    CONTRIBUTOR_LOGIN,
     resolveBackend,
     shellQuote,
     looksLikeModelName,
