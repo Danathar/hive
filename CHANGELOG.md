@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-12 (v4.29.1)
+
+### Fixed
+
+- The DCO monitor no longer pages on stale waivers: five sign-offs that were only ever rejected by checker bugs are removed from the waiver list, leaving just the two commits whose history genuinely cannot be repaired.
+
 ## 2026-09-11 (v4.29.0)
 
 ### Added
