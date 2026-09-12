@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-12 (v4.29.3)
+
+### Fixed
+
+- The pr-request watcher now rejects a PR whose head branch sits more than 100 commits behind its target base ([#6807](https://github.com/hivecommons/hive/issues/6807)). An agent working branch cut from the repository default while targeting a different branch carries the entire divergence between the two lines — observed as 546-commit, 170+-file unmergeable PRs whose diff is mostly the target branch's own history rendered as deletions. Such a request is now quarantined with re-cut instructions (`git checkout -b <branch> origin/<target>`) instead of silently opening an unreviewable PR, and the agent policy templates now spell out that a worktree must be cut from the branch the PR will target, never from whatever branch the checkout happens to be on.
+
 ## 2026-09-12 (v4.29.2)
 
 ### Fixed
