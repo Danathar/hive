@@ -32,8 +32,17 @@ var (
 	commitBehindInFlight = map[commitBehindKey]bool{}
 )
 
+// Keep this client's transport independent of the process-global default.
+// Some tests temporarily replace http.DefaultTransport; a background
+// commit-behind lookup may outlive the request that started it, so allowing
+// Client.Do to resolve a nil Transport through that mutable global races with
+// those tests.
+var commitBehindHTTPClient = &http.Client{
+	Transport: http.DefaultTransport.(*http.Transport).Clone(),
+	Timeout:   commitBehindCompareTimeout,
+}
+
 var fetchCommitBehindCount = func(base, head string, logger *slog.Logger) (count int, known bool, err error) {
-	client := &http.Client{Timeout: commitBehindCompareTimeout}
 	compareURL := fmt.Sprintf("%s/repos/hivecommons/hive/compare/%s...%s",
 		githubAPIBase, url.PathEscape(base), url.PathEscape(head))
 	req, err := http.NewRequest(http.MethodGet, compareURL, nil)
@@ -41,7 +50,7 @@ var fetchCommitBehindCount = func(base, head string, logger *slog.Logger) (count
 		return 0, false, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
-	resp, err := client.Do(req)
+	resp, err := commitBehindHTTPClient.Do(req)
 	if err != nil {
 		return 0, false, err
 	}

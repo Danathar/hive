@@ -160,6 +160,7 @@ func TestResolveCommitBehindErrorNotCached(t *testing.T) {
 
 func TestFetchCommitBehindCountHTTP(t *testing.T) {
 	oldBase := githubAPIBase
+	oldDefaultTransport := http.DefaultTransport
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/repos/hivecommons/hive/compare/base111...head999" {
 			t.Fatalf("unexpected path %s", r.URL.Path)
@@ -168,7 +169,16 @@ func TestFetchCommitBehindCountHTTP(t *testing.T) {
 	}))
 	defer ts.Close()
 	githubAPIBase = ts.URL
-	t.Cleanup(func() { githubAPIBase = oldBase })
+	// A nil client Transport would consult this process-global value at
+	// request time. Point it at a deterministic failure so this test proves
+	// commit-behind requests use their private transport instead.
+	http.DefaultTransport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("process-global default transport used")
+	})
+	t.Cleanup(func() {
+		githubAPIBase = oldBase
+		http.DefaultTransport = oldDefaultTransport
+	})
 
 	got, known, err := fetchCommitBehindCount("base111", "head999", nil)
 	if err != nil || !known || got != 7 {
