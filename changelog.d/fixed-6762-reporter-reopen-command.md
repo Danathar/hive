@@ -1,1 +1,0 @@
-- Reporters can now reopen their own closed issue by commenting `/reopen`, instead of being forced to re-file the same bug because GitHub would not let them reopen it.

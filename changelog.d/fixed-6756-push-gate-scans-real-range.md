@@ -1,1 +1,0 @@
-- The DCO push gate now checks exactly the commits a push introduced; on merge pushes it previously scanned the wrong set and left most pushed commits unverified while reporting success.
