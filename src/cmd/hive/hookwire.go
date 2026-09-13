@@ -201,18 +201,24 @@ func installUpgradePauseEmitter(hubSrv *hub.HubServer) {
 	if hubSrv == nil {
 		return
 	}
-	hubSrv.SetUpgradePauseObserver(func(event hub.UpgradePauseEvent) {
-		to := "off"
-		if event.Paused {
-			to = "on"
-		}
-		hookDispatcher().Fire(context.Background(), hooks.Payload{
-			Transition: hooks.TransitionUpgradePause,
-			To:         to,
-			Actor:      event.By,
-			Reason:     event.Target,
-			Attrs:      map[string]string{"target": event.Target},
-		})
+	hubSrv.SetUpgradePauseObserver(emitUpgradePauseHook)
+}
+
+// emitUpgradePauseHook translates the hub-owned durable upgrade-pause event
+// into the hook vocabulary. Keeping this as a named function makes the mapping
+// directly testable without exposing a hub test API or bypassing the admin-only
+// handler that produces UpgradePauseEvent in production.
+func emitUpgradePauseHook(event hub.UpgradePauseEvent) {
+	to := "off"
+	if event.Paused {
+		to = "on"
+	}
+	hookDispatcher().Fire(context.Background(), hooks.Payload{
+		Transition: hooks.TransitionUpgradePause,
+		To:         to,
+		Actor:      event.By,
+		Reason:     event.Target,
+		Attrs:      map[string]string{"target": event.Target},
 	})
 }
 
