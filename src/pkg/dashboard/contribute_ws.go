@@ -4555,8 +4555,14 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 func (h *ContributeWSHub) heartbeatLoop(c *ContributorConnection) {
 	ticker := time.NewTicker(wsHeartbeatInterval)
 	defer ticker.Stop()
+	h.heartbeatLoopWithTicks(c, ticker.C, wsHeartbeatTimeout)
+}
 
-	for range ticker.C {
+// heartbeatLoopWithTicks contains the heartbeat state machine. The production
+// wrapper supplies its 30-second ticker and 90-second timeout; tests supply a
+// finite tick stream so the loop ordering can be exercised without waiting.
+func (h *ContributeWSHub) heartbeatLoopWithTicks(c *ContributorConnection, ticks <-chan time.Time, timeout time.Duration) {
+	for range ticks {
 		// Stop as soon as this socket has been deregistered (kubestellar/hive#5090).
 		//
 		// The disconnect defer in HandleWS runs on the READ goroutine the moment
@@ -4590,7 +4596,7 @@ func (h *ContributeWSHub) heartbeatLoop(c *ContributorConnection) {
 		lastPong := c.lastPong
 		c.mu.Unlock()
 
-		if time.Since(lastPong) > wsHeartbeatTimeout {
+		if time.Since(lastPong) > timeout {
 			h.logger.Info("[contribute-ws] heartbeat timeout", "username", c.profile.GitHubUsername)
 			closeWithReason(c.ws, websocket.CloseGoingAway, "heartbeat timeout: no pong within the heartbeat window")
 			return
