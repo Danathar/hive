@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-13 (v4.29.5)
+
+### Security
+
+- Setup scripts (`hive-setup.sh`, `bootstrap-lxc.sh`, `install.sh`) now create token-bearing `.env` files with `0600` permissions instead of the default umask, so local users can no longer read `HIVE_GITHUB_TOKEN`, `HIVE_DASHBOARD_TOKEN`, or `ANTHROPIC_API_KEY`.
+
 ## 2026-09-12 (v4.29.4)
 
 ### Fixed
