@@ -239,6 +239,11 @@ func (m *Manager) RelaunchBobAgentsAwaitingKey(ctx context.Context) []string {
 			m.logger.Warn("could not kill stale session before bob relaunch; launching anyway",
 				"name", name, "error", err)
 		}
+		// The saved key is new information about the exact condition that
+		// parked this agent, so the backoff must not hold the retry (#5958).
+		m.mu.Lock()
+		m.clearStartFailureLocked(m.agents[name])
+		m.mu.Unlock()
 		if err := m.Start(ctx, name); err != nil {
 			// One agent's failure must never abort the rest of the fleet,
 			// exactly as in the crash-restart loop above.

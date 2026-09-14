@@ -5,11 +5,9 @@ package main
 // emission) and the nil guards of installUpgradePauseEmitter. The agent-pause
 // emitter is exercised by hookwire_test.go's causation/loop test.
 //
-// installUpgradePauseEmitter's firing path is NOT covered here: the only way
-// to reach hub.emitUpgradePause from outside pkg/hub is the admin-gated
-// POST /api/saas/upgrade-pause handler, which needs a running HubServer. Its
-// closure mirrors the governor emitter tested below; only the nil guard is
-// reachable from this package.
+// The upgrade-pause mapping is a named emitter so it can be covered without
+// exporting a hub test API or bypassing the admin-only handler that produces
+// the durable event in production.
 
 import (
 	"testing"
@@ -18,6 +16,7 @@ import (
 	"github.com/hivecommons/hive/pkg/config"
 	"github.com/hivecommons/hive/pkg/governor"
 	"github.com/hivecommons/hive/pkg/hooks"
+	"github.com/hivecommons/hive/pkg/hub"
 	"github.com/hivecommons/hive/pkg/timeline"
 )
 
@@ -151,5 +150,37 @@ func TestGovernorModeChangeEmitterSkipsWhenPredicateExcludesTransition(t *testin
 
 	if got := audit.count(hooks.AuditHookFired); got != 0 {
 		t.Fatalf("hook fired on a transition its predicate excludes: %v", audit.snapshot())
+	}
+}
+
+func TestUpgradePauseEmitterMapsHubEventToHookPayload(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		event  hub.UpgradePauseEvent
+		wantTo string
+	}{
+		{name: "pause spokes", event: hub.UpgradePauseEvent{Target: "spokes", Paused: true, By: "admin"}, wantTo: "on"},
+		{name: "resume hub", event: hub.UpgradePauseEvent{Target: "hub", Paused: false, By: "operator"}, wantTo: "off"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetHookDispatcher(t)
+			t.Cleanup(func() { resetHookDispatcher(t) })
+
+			audit := &hookWireAudit{ch: make(chan string, 2)}
+			cfg := &config.Config{Hooks: []config.HookRule{{
+				Name:   "record-upgrade-pause",
+				On:     "upgrade_pause",
+				Action: "annotate",
+				When:   `t.to == "` + tc.wantTo + `" && t.actor == "` + tc.event.By + `" && t.reason == "` + tc.event.Target + `" && attr(t.attrs, "target") == "` + tc.event.Target + `"`,
+			}}}
+			buildHookDispatcher(cfg, hookSinks{Timeline: timeline.NewStore(), Audit: audit}, hookTestLogger())
+
+			emitUpgradePauseHook(tc.event)
+			hookDispatcher().Wait()
+
+			if got := audit.count(hooks.AuditHookFired); got != 1 {
+				t.Fatalf("upgrade_pause hook fires = %d, want 1; audit=%v", got, audit.snapshot())
+			}
+		})
 	}
 }

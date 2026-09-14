@@ -8,10 +8,26 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/hivecommons/hive/internal/testutil"
 )
+
+// waitForCommitBehindResolvers blocks until no resolveCommitBehind goroutine
+// is in flight. Replacing the in-flight map (or the globals a resolver reads,
+// like githubAPIBase) while one is running is a data race; every reset or
+// global swap must drain first.
+func waitForCommitBehindResolvers(t *testing.T) {
+	t.Helper()
+	testutil.Eventually(t, 2*time.Second, func() bool {
+		commitBehindMu.Lock()
+		defer commitBehindMu.Unlock()
+		return len(commitBehindInFlight) == 0
+	}, "timed out waiting for in-flight commit-behind resolver(s)")
+}
 
 func resetCommitBehindState(t *testing.T) {
 	t.Helper()
+	waitForCommitBehindResolvers(t)
 	commitBehindMu.Lock()
 	origFetch := fetchCommitBehindCount
 	commitBehindCache = map[commitBehindKey]commitBehindValue{}
@@ -22,6 +38,7 @@ func resetCommitBehindState(t *testing.T) {
 	latestSHAByBranch[stableReleaseBranch] = branchSHAInfo{SHA: "head999"}
 	latestSHAMu.Unlock()
 	t.Cleanup(func() {
+		waitForCommitBehindResolvers(t)
 		commitBehindMu.Lock()
 		fetchCommitBehindCount = origFetch
 		commitBehindCache = map[commitBehindKey]commitBehindValue{}
@@ -105,6 +122,12 @@ func TestCommitsBehindStableV4InFlightDedupes(t *testing.T) {
 	if _, known := commitsBehindStableV4("base111", nil); known {
 		t.Fatal("in-flight compare must report unknown, not block")
 	}
+
+	// The in-flight entry was planted by hand with no resolver goroutine
+	// behind it; remove it so the reset cleanup's drain doesn't wait on it.
+	commitBehindMu.Lock()
+	delete(commitBehindInFlight, key)
+	commitBehindMu.Unlock()
 }
 
 func TestCommitsBehindStableV4DispatchesAndCaches(t *testing.T) {
@@ -160,6 +183,7 @@ func TestResolveCommitBehindErrorNotCached(t *testing.T) {
 
 func TestFetchCommitBehindCountHTTP(t *testing.T) {
 	oldBase := githubAPIBase
+	oldDefaultTransport := http.DefaultTransport
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/repos/hivecommons/hive/compare/base111...head999" {
 			t.Fatalf("unexpected path %s", r.URL.Path)
@@ -168,7 +192,16 @@ func TestFetchCommitBehindCountHTTP(t *testing.T) {
 	}))
 	defer ts.Close()
 	githubAPIBase = ts.URL
-	t.Cleanup(func() { githubAPIBase = oldBase })
+	// A nil client Transport would consult this process-global value at
+	// request time. Point it at a deterministic failure so this test proves
+	// commit-behind requests use their private transport instead.
+	http.DefaultTransport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("process-global default transport used")
+	})
+	t.Cleanup(func() {
+		githubAPIBase = oldBase
+		http.DefaultTransport = oldDefaultTransport
+	})
 
 	got, known, err := fetchCommitBehindCount("base111", "head999", nil)
 	if err != nil || !known || got != 7 {
@@ -184,6 +217,14 @@ func TestHandleMyHivesIncludesCommitsBehind(t *testing.T) {
 	saveSaaSHive(&SaaSHive{ID: "h1", Owner: "alice", Org: "acme", Status: "running"})
 	commitBehindMu.Lock()
 	commitBehindCache[commitBehindKey{base: "base111", head: "head999"}] = commitBehindValue{count: 3, known: true}
+	// handleMyHives also compares against behindTargetFor's target (the "v2"
+	// default upgrade branch here, not stableReleaseBranch). If earlier tests
+	// left latestSHAByBranch["v2"] populated, that pair is uncached and would
+	// dispatch a real-network resolver whose read of githubAPIBase races with
+	// the next fakeGitHubGHCR. Stub the fetch so any dispatch stays hermetic.
+	fetchCommitBehindCount = func(base, head string, _ *slog.Logger) (int, bool, error) {
+		return 0, false, nil
+	}
 	commitBehindMu.Unlock()
 
 	s := &HubServer{logger: slog.Default(), hubSecret: testHubSecret}

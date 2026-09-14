@@ -296,13 +296,20 @@ log "  Compose: ${COMPOSE_OUT}"
 log "Phase 7/8: Writing .env file..."
 
 ENV_FILE="${HIVE_DIR}/.env"
-cat > "$ENV_FILE" << ENVEOF
+# Contains live credentials. Remove any stale copy (an older run may have left
+# it 0644) and create the new one under umask 077 so it is 0600 from the first
+# byte — no touch-then-chmod window where another local user could open it.
+rm -f "$ENV_FILE"
+(
+  umask 077
+  cat > "$ENV_FILE" << ENVEOF
 HIVE_GITHUB_TOKEN=${GH_TOKEN}
 HIVE_DASHBOARD_TOKEN=${DASHBOARD_TOKEN}
 ANTHROPIC_API_KEY=${ANTHROPIC_KEY}
 NTFY_SERVER=
 NTFY_TOPIC=hive-${TARGET_REPO_NAME}
 ENVEOF
+)
 
 log "  .env: ${ENV_FILE}"
 

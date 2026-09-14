@@ -420,6 +420,44 @@ The **Operations** tab lets an operator reorder and park individual issues in th
 | `POST /api/contribute/queue/hold` | `contribute_queue_hold` + `contribute_queue_hold_reasons` | Body `{"key":"owner/repo#number","held":true,"reason":"optional note"}`. A held issue is never offered until it is resumed (`"held":false`), unlike cooldown, which clears itself. Held rows stay visible on the Operations tab, greyed with an "on hold" badge; the optional reason is shown in the badge tooltip and pruned automatically when the hold is lifted. |
 | `POST /api/contribute/queue/hold/clear` | `contribute_queue_hold` | Resumes every held issue in one call. Same role gate and persistence as the single-issue endpoint. |
 
+### Why an issue is not queued (Withheld)
+
+The Contributor Queue is not every open issue, and the reason a candidate is missing used to be invisible: each exclusion was a bare skip inside the admission pass, so the only symptom was an absent row. Since [#6902](https://github.com/hivecommons/hive/issues/6902) the Operations tab groups the queue into three, and the third one explains itself:
+
+| Group | What it is |
+|---|---|
+| **Ready** | The offerable queue, in offer order. Unchanged. |
+| **On hold** | Issues an operator parked (see above), greyed with the "on hold" badge and a Resume control. A manual hold is the operator's own decision and is never merged into Withheld. |
+| **Withheld** | Candidates Hive knows about — they are in the actionable set — but is not currently willing to offer, each with the reason the admission pass recorded when it refused. Collapsed by default. |
+
+Withheld rows carry a stable reason code and, where the refusing gate had one, the evidence behind it:
+
+| Reason | Meaning | Evidence |
+|---|---|---|
+| `open_pr_claim` | An open pull request already claims the issue. | Claiming PR URL and author |
+| `workflow_blocked` | The issue carries the `blocked` workflow label. | — |
+| `dependency_blocked` | A declared dependency is established as unsatisfied. | Blocker keys, observed record/generation |
+| `dependency_unknown` | A declared dependency could not be resolved, so satisfaction cannot be asserted. | Blocker keys, observed record/generation |
+| `disabled_repo` | The repository is switched off for contribution (`disabled_repos`). | — |
+| `tracker` | A tracker/umbrella issue; its children carry the work and queue independently. | — |
+| `cooldown` | The issue completed recently and is inside its post-completion cooldown. | Expiry timestamp |
+| `failure_cooldown` | The issue failed recently and is inside its failure cooldown or quarantine window. | Expiry timestamp |
+| `no_work_needed` | A live `no_work_needed` verdict is suppressing the issue until it changes again. | — |
+| `in_flight` | A contributor is working the issue right now. | — |
+| `contributor_filter` | A title, author, or label filter above rejected the candidate. | Which filter matched |
+| `assigned_to_other` | The issue is assigned to someone else and **Skip Assigned to Others** is on. | Assignee logins |
+
+Two properties are worth relying on:
+
+- **The reason is the real one.** It is retained from the same admission pass that produces the Ready queue, not recomputed by a second rule set — so a Withheld row cannot tell you something the assignment path disagrees with.
+- **Showing a row changes nothing.** Withheld is an explanation, never a control: the rows are not in the offer order, they carry no reorder or drag affordance, and nothing becomes assignable because it is displayed.
+
+Per-contributor exclusions are deliberately absent from this list. Agent-role matching, tier concurrency and rate limits, and restored-lease exclusion depend on *who* is asking rather than on the issue, so they are not properties a shared queue view can report.
+
+Candidates dropped *before* they reach the actionable set — the governor `hold` label (which has its own list on the status payload), governor exempt labels, `project.issue_filter` require-labels, and standing meta issues — are out of scope here and are not explained by this section.
+
+**API.** `GET /api/contribute/queue?withheld=1` returns the same queue plus `withheld` (the rows) and `withheld_total`. The parameter is an explicit opt-in: without it the response is byte-identical to what it has always been, so existing clients are unaffected. The list is bounded by the same limit as the queue, computed per request, and never cached or persisted. It carries only public issue metadata, reason codes, and public evidence — no credentials, prompts, or contributor execution data.
+
 ### Explicit acceptance
 
 | Control | Config key | Behavior |
@@ -464,7 +502,8 @@ kubectl -n my-namespace rollout status deploy/hive-contributor
 The generated pod sets `CONTRIBUTOR_MODE=headless` because Kubernetes pods have no TTY; interactive tmux mode would stall. Headless mode is currently verified for `claude`, `litellm`, `copilot`, `codex`, `goose`, and `agy` (`agy -p`, verified on 1.1.13) — but **`agy` stays out of `just contribute-k8s`'s `HEADLESS_BACKENDS` allowlist regardless**: it signs in through an interactive Google OAuth flow with no API-key mode, and a pod has no way to complete that sign-in even once (unlike the container path, where an operator can attach and run `agy` interactively, or the relay can stage an already-signed-in `~/.gemini`). Headless `agy` is verified only on a host that has already signed in. `opencode` has a verified one-shot invocation (`opencode run "<prompt>"`, [#4970](https://github.com/hivecommons/hive/issues/4970)) but is **not yet** in `just contribute-k8s`'s `HEADLESS_BACKENDS` allowlist: whether `opencode auth login`'s credential file supports non-interactive, unattended use in a fresh pod is unverified, so it currently runs headless on a host that has already signed in, the same posture as `agy`. The Deployment has one replica per registered contributor identity and uses readiness/liveness probes that read the relay's headless status file (`waiting`, `working`, `done` pass; missing/failed state fails).
 
 **If you need `agy`, `opencode`, or `kilo` on the K8s path**, the allowlist is
-`HEADLESS_BACKENDS="claude litellm copilot codex goose"` (`Justfile:1692`) and
+`HEADLESS_BACKENDS="claude litellm copilot codex goose"` (defined in the
+`contribute-k8s` recipe in `Justfile`) and
 `just contribute-k8s` refuses anything outside it. Two workarounds: pick a
 supported headless backend, or run the backend attended on the container/local
 path (`just contribute-hive <backend>`), where an operator can complete an
@@ -480,8 +519,8 @@ The generated Secret contains the registration token and `GH_TOKEN` as Kubernete
 
 Two admission behaviors are worth knowing when your relay seems idle:
 
-- **Issues already claimed by any open PR are skipped.** The hub's claim ledger records every open PR that references an issue with a closing keyword (`fixes #N`, `closes owner/repo#N`, …) — including PRs from external authors, not just hive agents ([#3792](https://github.com/hivecommons/hive/pull/3792)). A claimed issue is silently dropped from the contribute candidate set; if nothing else is admissible the relay receives `task_unavailable` with reason `no_matching_work` (there is no per-issue "claimed by PR #N" message). External claims — like the weaker non-closing `Refs #N` references — now DEFER the hive's own agents for a bounded 72h window from when the claim was first observed, then release the issue even while the PR stays open ([#4929](https://github.com/hivecommons/hive/issues/4929)). They previously never suppressed agent work at all, which let an agent that cannot check for existing PRs re-implement an issue a live PR already covered. Nothing is frozen: the window is a bound, and a red+stale claiming PR defers nothing.
-- **Claims expire.** Ledger entries live 72 hours (refreshed while the PR stays open); a claiming PR that goes red on a required check and stale releases the issue back to the queue.
+- **Issues already claimed by an open PR — or settled by a recently-merged one — are skipped.** The hub's claim ledger records every open PR that references an issue with a closing keyword (`fixes #N`, `closes owner/repo#N`, …) — including PRs from external authors, not just hive agents ([#3792](https://github.com/hivecommons/hive/pull/3792)). Since [#6867](https://github.com/hivecommons/hive/issues/6867) the same scan also covers **recently-merged** PRs: a fix that merged *without* a closing keyword leaves its issue open, and its claim used to vanish the moment the PR left the open set, so the settled issue went straight back to contributors (and agent dispatch) whose only possible verdict was "already resolved on `main`" — measured downstream at ~34% of contributor sessions. Merged claims are graded by the same evidence tiers as open ones and suppress identically; across tiers, evidence wins, so a merged `Fixes #N` outranks an open `Refs #N`. A claimed issue is silently dropped from the contribute candidate set; if nothing else is admissible the relay receives `task_unavailable` with reason `no_matching_work` (there is no per-issue "claimed by PR #N" message). External claims — like the weaker non-closing `Refs #N` references — now DEFER the hive's own agents for a bounded 72h window, then release the issue even while the PR stays open ([#4929](https://github.com/hivecommons/hive/issues/4929)). They previously never suppressed agent work at all, which let an agent that cannot check for existing PRs re-implement an issue a live PR already covered. Nothing is frozen: the window is a bound — anchored at first observation for an open claim, and at the **merge** for a merged one, so a merged `Refs #N` still releases an epic's remainder — and a red+stale claiming PR defers nothing.
+- **Claims expire.** Ledger entries live 72 hours — refreshed while the PR stays open, or anchored at the merge for a merged claim, so a settled issue is suppressed for 72h after its fix lands and nothing is stranded forever. An **open** claiming PR that goes red on a required check and stale releases the issue back to the queue; merged claims never take that valve — a fix already on `main` cannot go red.
 
 ## Capability declaration (DECLARE)
 

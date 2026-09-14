@@ -90,7 +90,9 @@ async function render(overrides = {}) {
   assert.ok(html.includes('Upgrade available'));
   html = await render({ behind: true, autoUpgrade: true, tracking: 'floating' });
   assert.ok(html.includes('Queued for auto-upgrade'));
-  assert.ok(!html.includes('spoke-upgrade-btn'));
+  // #6904: the passive badge no longer hides the owner's manual escape hatch.
+  assert.ok(html.includes('spoke-upgrade-btn'));
+  assert.ok(html.includes('Upgrade now'));
   html = await render({ latestHash: 'a1b2c3d0123456789', tracking: 'floating' });
   assert.ok(html.includes('Up to date with remote'));
 })().catch(err => { console.error(err); process.exitCode = 1; });

@@ -47,22 +47,178 @@ func (m *Manager) ReloadClaudeToken() {
 // environments as COPILOT_GITHUB_TOKEN. A caller setting the token explicitly
 // makes it authoritative over an older token left in the shared CLI config.
 func (m *Manager) SetCopilotToken(token string) {
-	m.setCopilotToken(token, true)
+	m.installCopilotToken(token, true)
 }
 
-func (m *Manager) setCopilotToken(token string, authoritative bool) {
+// installCopilotToken is setCopilotToken plus the fleet-side half of a token
+// change: a new credential that only ever reaches memory and the on-disk
+// stores is invisible to the agents that are already running on the old one.
+// See propagateCopilotToken.
+func (m *Manager) installCopilotToken(token string, authoritative bool) {
+	if m.setCopilotToken(token, authoritative) {
+		m.propagateCopilotToken()
+	}
+}
+
+// setCopilotToken caches token and reports whether the cached VALUE changed.
+// The bool is what gates propagateCopilotToken: re-asserting the same token
+// (the common reconciler outcome) must not churn agent sessions.
+func (m *Manager) setCopilotToken(token string, authoritative bool) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	changed := strings.TrimSpace(token) != strings.TrimSpace(m.copilotAuthToken)
+	// A newly-installed token — whether a dashboard re-login, an env var, or
+	// a promoted in-agent /login — represents fresh operator intent, so any
+	// prior "authoritative token rejected by Copilot" latch must be cleared.
+	// Without this, the recovery path #6767 depends on would only fire once.
+	if changed {
+		m.copilotAuthTokenRejected = false
+	}
 	m.copilotAuthToken = token
 	m.copilotAuthTokenAuthoritative = authoritative && strings.TrimSpace(token) != ""
+	return changed
 }
 
 // ActivateCopilotToken makes token the active shared CLI identity as well as
 // the token injected into agent environments.
 func (m *Manager) ActivateCopilotToken(token string) error {
 	err := replaceCopilotTokens(sharedCopilotConfigPath, token)
-	m.setCopilotToken(token, true)
+	m.installCopilotToken(token, true)
 	return err
+}
+
+// copilotTokenEnvVar carries the Copilot OAuth credential into an agent
+// session. It is the Copilot CLI's HIGHEST-precedence credential — it outranks
+// whatever identity sits in the shared config.json — which is why a stale
+// value here can defeat a perfectly good recovery /login (see
+// propagateCopilotToken).
+const copilotTokenEnvVar = "COPILOT_GITHUB_TOKEN"
+
+// copilotTokenRefreshTmuxArgs returns the ONE tmux invocation that puts the
+// hive's current Copilot token into session's environment.
+//
+// -r, not -u, for the empty case: COPILOT_GITHUB_TOKEN is also in the hive
+// PROCESS environment on any hive started with one (NewManager reads it), so
+// the tmux server holds it globally. -u deletes only the SESSION entry and the
+// global value shows straight through to the next pane, which would mean a
+// dashboard logout silently keeps authenticating every later CLI as the
+// account the operator just logged out of. -r records a removal that hides the
+// global value from everything the server forks afterwards, and a later plain
+// set overrides it. Same reasoning — and the same tmux 3.5a behaviour — as
+// inheritedCredentialEnvVars in applySessionEnv.
+func copilotTokenRefreshTmuxArgs(session, token string) []string {
+	if strings.TrimSpace(token) == "" {
+		return []string{"set-environment", "-t", session, "-r", copilotTokenEnvVar}
+	}
+	return []string{"set-environment", "-t", session, copilotTokenEnvVar, token}
+}
+
+// copilotTokenPropagation is one agent's share of the work a Copilot token
+// change implies: the session-environment push, and whether this agent's LIVE
+// CLI has to be relaunched to pick the new credential up.
+type copilotTokenPropagation struct {
+	Name     string
+	Agent    *AgentProcess
+	TmuxArgs []string
+	Relaunch bool
+	// BackendAuth is the verdict that justified Relaunch, snapshotted under
+	// m.mu so the logging below never reads AgentProcess state unlocked.
+	BackendAuth string
+}
+
+// copilotSessionCarriesRejectedToken reports whether an agent's last observed
+// backend-auth verdict means the CLI running in its pane RIGHT NOW is using a
+// credential Copilot has already refused. Only the two hard-auth verdicts
+// count: quota and unreachable are not credential problems, and swapping the
+// token cannot help them.
+func copilotSessionCarriesRejectedToken(a *AgentProcess) bool {
+	if a == nil || a.Config.Backend != "copilot" {
+		return false
+	}
+	switch a.BackendAuth.Status {
+	case BackendAuthUnlicensed, BackendAuthTokenExpired:
+		return true
+	default:
+		return false
+	}
+}
+
+// planCopilotTokenPropagationLocked computes what a just-changed Copilot token
+// implies for each agent. Split out from propagateCopilotToken so the rule is
+// unit-testable without a tmux server, the same way linearRefreshTmuxArgs and
+// decideTokenRestart are. Caller must hold m.mu (read is enough).
+func (m *Manager) planCopilotTokenPropagationLocked() []copilotTokenPropagation {
+	token := m.copilotAuthToken
+	// An EMPTY token can un-stick nobody: a relaunch would only bring the CLI
+	// back with no credential at all. The env removal below still runs, so the
+	// logout is not silently undone on the next pane.
+	canRelaunch := strings.TrimSpace(token) != ""
+
+	out := make([]copilotTokenPropagation, 0, len(m.agents))
+	for name, a := range m.agents {
+		if a == nil || a.Config.Backend != "copilot" || a.tmuxSession == "" {
+			continue
+		}
+		out = append(out, copilotTokenPropagation{
+			Name:        name,
+			Agent:       a,
+			TmuxArgs:    copilotTokenRefreshTmuxArgs(a.tmuxSession, token),
+			Relaunch:    canRelaunch && a.State == StateRunning && copilotSessionCarriesRejectedToken(a),
+			BackendAuth: a.BackendAuth.Status,
+		})
+	}
+	return out
+}
+
+// propagateCopilotToken pushes a just-installed Copilot token out to the
+// agents (#6500).
+//
+// The gap this closes: every earlier fix on this issue reconciled the two
+// STORES — the shared CLI config.json and the hive's durable token file — and
+// stopped there. Neither store is what an already-running agent is
+// authenticating with. COPILOT_GITHUB_TOKEN is injected into each session once,
+// when the session is created, and the Copilot CLI reads it at process start;
+// it also outranks config.json. So an operator who does the documented recovery
+// — /login inside an agent terminal with a licensed identity — gets the token
+// promoted to the durable store and gets nothing else: every CLI in the fleet,
+// including the one they just logged in from, keeps presenting the token
+// GitHub already rejected and keeps printing "You are not licensed to use
+// Copilot". The existing auto-restart detector does not cover it either,
+// because that one is gated on the pane showing a /login PROMPT, and an
+// unlicensed pane shows a licence error instead.
+//
+// So: push the new value into every copilot agent's session environment (so
+// nothing forked later inherits the superseded one), and relaunch exactly the
+// agents whose pane already carries a rejected-credential verdict. Healthy
+// agents are deliberately left alone — their next ordinary relaunch picks the
+// new token up from applySecretEnv, and a token rotation is no reason to
+// destroy work in flight.
+//
+// Runs only on a CHANGE of value (see installCopilotToken), so it cannot loop:
+// after the change the reconciler's next tick is a no-op.
+func (m *Manager) propagateCopilotToken() {
+	m.mu.RLock()
+	plan := m.planCopilotTokenPropagationLocked()
+	m.mu.RUnlock()
+
+	for _, p := range plan {
+		// Failures are ignored for the same reason applySecretEnv ignores
+		// them: a missing session is the launch path's problem, not ours.
+		_ = m.tmuxCmd(p.Agent, p.TmuxArgs...).Run()
+		if !p.Relaunch {
+			continue
+		}
+		m.logger.Info("relaunching copilot agent onto the refreshed token",
+			"agent", p.Name, "backend_auth", p.BackendAuth)
+		go func(name string) {
+			// context.Background(), not a caller context: this runs from the
+			// session reconciler and from dashboard HTTP handlers, and a
+			// relaunch must outlive the request that triggered it.
+			if err := m.RestartWithReason(context.Background(), name, "copilot token refreshed"); err != nil {
+				m.logger.Warn("copilot token relaunch failed", "agent", name, "error", err)
+			}
+		}(p.Name)
+	}
 }
 
 // CopilotToken returns the cached Copilot (GitHub OAuth) token, or "" if
@@ -701,6 +857,7 @@ func (m *Manager) syncCopilotToken(configPath, durablePath string) copilotSyncAc
 	m.mu.RLock()
 	held := strings.TrimSpace(m.copilotAuthToken)
 	authoritative := m.copilotAuthTokenAuthoritative
+	rejected := m.copilotAuthTokenRejected
 	m.mu.RUnlock()
 
 	if copilotCredentialFileHasTokens(configPath) {
@@ -708,7 +865,19 @@ func (m *Manager) syncCopilotToken(configPath, durablePath string) copilotSyncAc
 		if cliTok != "" && cliTok == held {
 			return copilotSyncNoop
 		}
-		if authoritative {
+		// #6767: if the authoritative token has been observed being rejected
+		// upstream by Copilot ("not licensed to use Copilot"), a DIFFERENT
+		// real token now sitting in the shared CLI config is almost certainly
+		// an operator's recovery /login — the exact case @MikeSpreitzer
+		// reported. Clobbering it with the known-bad authoritative token
+		// would put every agent right back at "not licensed" 30 s later,
+		// which is the loop the second closure of #6500 missed. Fall through
+		// to PROMOTE so the fresh token becomes the durable one.
+		if authoritative && !(rejected && cliTok != "" && cliTok != held) {
+			// SEED: explicit configuration and a just-completed dashboard login
+			// outrank whatever identity a shared config inherited. GitHub documents
+			// COPILOT_GITHUB_TOKEN as the CLI's highest-precedence credential; the
+			// reconciler must not silently reverse that precedence 30 seconds later.
 			if held == "" {
 				return copilotSyncNoop
 			}
@@ -729,7 +898,11 @@ func (m *Manager) syncCopilotToken(configPath, durablePath string) copilotSyncAc
 				"path", durablePath, "error", err)
 			return copilotSyncNoop
 		}
-		m.setCopilotToken(cliTok, false)
+		// installCopilotToken, not setCopilotToken: the promoted token is the
+		// operator's recovery /login, and the agents still running on the token
+		// it replaces have to be moved onto it or the whole fleet keeps
+		// reporting "not licensed" against a licence that is now fine (#6500).
+		m.installCopilotToken(cliTok, false)
 		m.logger.Info("copilot session refresh: promoted in-agent login token to the durable store",
 			"path", durablePath)
 		return copilotSyncPromote

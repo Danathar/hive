@@ -332,6 +332,47 @@ a login prompt: it badged the agent 🔑, and — because a valid token was on d
 auto-restarted it straight back into the same 403, which looked like the agent
 crash-looping. Hive no longer treats a 403 as a login signal; a 401 still is.
 
+## Every Copilot agent says "You are not licensed to use Copilot"
+
+```
+ ✗ You are not licensed to use Copilot. (Request ID: CF24:249477:13194BA:1505534:6AA2A42E)
+```
+
+The wording points at your GitHub seat, but the whole fleet failing **at once**,
+against an entitlement nobody changed, usually means the hive is presenting a
+Copilot token the account no longer owns — not that your licence lapsed
+([#6500](https://github.com/hivecommons/hive/issues/6500)). Check the seat first
+at <https://github.com/settings/copilot>; if it is active, this is the hive's
+problem, and the recovery is:
+
+1. Open any agent's Terminal and run **`/login`** with a currently-licensed
+   identity. This writes the new token into the Copilot CLI's shared
+   `config.json`.
+2. Wait about 30 seconds for the session reconciler's next tick.
+
+Within that tick the hive **promotes** the token you just logged in with to its
+durable store and then moves the fleet onto it: agents whose `backend_auth`
+reads `unlicensed` or `token-expired` (see
+[fleet-health.md](fleet-health.md#agent-backend-auth-health-canary-6558)) are
+relaunched onto the new credential, and healthy agents get it pushed into their
+session environment for their next relaunch. You should not have to restart
+agents by hand.
+
+Two log lines tell you which way it went:
+
+| line | meaning |
+| --- | --- |
+| `promoted in-agent login token to the durable store` | your `/login` won; the relaunch onto it follows immediately |
+| `replaced stale CLI identity with authoritative token` | the hive overrode your `/login` with a token it considers authoritative — that token is the one being refused |
+
+If you see the second line, the offending credential is the hive's own
+configured one: re-run the dashboard's Copilot login (or fix
+`COPILOT_GITHUB_TOKEN` in the deployment) rather than logging in inside an
+agent, because a dashboard login is authoritative and an in-agent one is not.
+
+Relaunching is deliberately limited to panes that have actually been refused, so
+a token rotation never destroys an agent's in-flight work.
+
 ## The terminal looks frozen — no new output, and reopening it doesn't help
 
 You are almost certainly **scrolled back**, not looking at a halted agent.
@@ -476,6 +517,62 @@ curl -fsS http://127.0.0.1:3002/api/livez
 Run both of the first two. They are the two halves of the container health probe, and they fail independently: a hive whose auth proxy refused to start answers the first and refuses the second ([#4476](https://github.com/hivecommons/hive/issues/4476)). Neither needs a credential — only mutating methods are authenticated.
 
 `/api/livez` is deliberately process-focused: the Kubernetes manifest notes that stale hub heartbeat state belongs in deeper health reporting and should not crash-loop a healthy pod.
+
+## The version badge says `⚠ auto-update failed` or `⟳ auto-update retrying`
+
+These two badges next to the version SHA surface the spoke's own self-upgrade
+bookkeeping ([#6765](https://github.com/hivecommons/hive/issues/6765)). A spoke
+that is instructed to upgrade (by the hub, or via **Self Upgrade**) records the
+attempt at `/data/upgrade-requested` on the PVC and restarts its pod; the marker
+is removed on the boot that actually lands the new image. A marker that is still
+present therefore always describes an upgrade that has **not** landed, and the
+badge renders its state:
+
+- **`⟳ auto-update retrying n/5`** — the pod restarted on the *same* image, so
+  the previous attempt failed; the spoke is retrying with exponential backoff
+  (2 minutes before retry #2, doubling per attempt, capped at 30 minutes).
+- **`⚠ auto-update failed`** (red) — the retry budget of 5 attempts is
+  exhausted for this (current → target) pair, the spoke has given up, and it
+  has reported the failure to the hub. It will not retry until a **new** target
+  is armed — a new target always gets a fresh budget, so a fix that arrives
+  late (an RBAC Role applied after the fact, a registry blip) still converges
+  on the next instructed upgrade.
+
+While a marker exists, the `Queued for auto-upgrade` hint is suppressed — an
+upgrade that is actively failing is not "queued", and before
+[#6765](https://github.com/hivecommons/hive/issues/6765) those two states were
+indistinguishable.
+
+Both badge tooltips carry the target SHA, the attempt count, the first-requested
+time, and the last error. The same data is available without the dashboard:
+
+```bash
+# Through the API — the upgradeMarker field of /api/version
+curl -fsS http://127.0.0.1:3002/api/version | jq .upgradeMarker
+
+# Or read the marker itself off the PVC
+kubectl -n hive exec deploy/hive -- cat /data/upgrade-requested
+```
+
+The two dominant causes, in order:
+
+1. **The spoke cannot patch its own Deployment.** Self-upgrade works by the
+   spoke get/patching the `hive` Deployment in its own namespace, which needs
+   the `hive-self-upgrade` Role and RoleBinding on the spoke's ServiceAccount.
+   The retry log (`self-upgrade retrying after a failed attempt`) and the
+   terminal error (`self-upgrade FAILED: giving up after repeated attempts`)
+   both carry the last error and this hint. The manifests are in
+   [manual-provisioning.md](manual-provisioning.md) (RBAC section).
+2. **The Deployment tracks a tag that can never deliver the target SHA** — for
+   example a pinned digest or a stale floating tag, so patching the Deployment
+   rolls the pod onto the same image every time. Check what the Deployment's
+   image field tracks against the armed target, and see
+   [release-channels.md](release-channels.md) for how targets are resolved
+   through the tracked tag.
+
+A failed self-upgrade also exits the process with code **17**
+(`selfUpgradeFailureExitCode`) rather than 0, so the failure is visible in the
+container's termination state instead of looking like a clean shutdown.
 
 ## Podman (Quadlet) deployments: failure modes Docker does not have
 
