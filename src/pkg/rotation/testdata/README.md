@@ -38,23 +38,38 @@ by `TestClaudeHeadroomRejectsUnrecognizedSchema`.
 
 # Agy usage fixture
 
-`agy_usage.json` is a structured `agy --print "/usage" --output-format json`
-response shaped to the `agyUsageResponse` schema `AgyProber` consumes
-(kubestellar/hive#6966): a `quota` map carrying the plan tier and one entry per
-usage window, each with a `remaining_fraction` (0..1), a `reset_at`, and a
-`duration_mins`. It carries a healthy `five_hour` window and a 9%-remaining
-`weekly` window, so the fixture exercises reset timing, duration banding, the
-`remaining_fraction`→percent conversion, and the worst-window-binds fold: the
-weekly window binds and pushes the reading past a default reserve even though
-the short window is healthy.
+`agy_usage.json` is a **real recorded payload** of
+`agy --print "/usage" --output-format json`, captured on **agy 1.2.1**
+(kubestellar/hive#6986). It replaces the schema-derived guess #6966 shipped.
 
-Provenance note: this fixture is **schema-derived from the field names
-#6833/#6966 document, NOT captured from a live agy account.** agy 1.1.22 exposed
-no auth surface on the verifying host, so no real payload was obtainable, and
-the exact JSON nesting/spelling (the `quota.windows` object, the `reset_at`
-field name, `duration_mins`) is therefore a best-effort instance of the
-documented `quota` map rather than a redacted real capture. When a real recorded
-payload becomes available it should replace this file and the parser field tags
-should be reconciled with it. The adapter's behaviour on an unrecognized schema
-is pinned separately and independently of these details by
+The capture is unredacted: the envelope carries no account identifier
+(`conversation_id` is empty), no email, and no plan tier. The percentages are
+the capturing account's real levels, which is what makes it useful — the 9%
+`3p-weekly` bucket is what exercises the worst-binds path and the threshold
+crossing.
+
+Shape notes, none of which matched what #6966 assumed:
+
+- `--output-format json` is a print-mode **response formatter**, not a quota
+  API, so this is a result envelope and the quota data lives under
+  `command.data`, reached when `command.name == "usage"`.
+- Buckets are `command.data.groups[].buckets[]` — two levels of array, not a
+  flat `windows` map.
+- Reset timing is `reset_time` (neither `reset_at` nor `resets_at`).
+- There is no numeric duration; `window` is a label (`"weekly"`, `"5h"`) the
+  adapter maps to one.
+- There is no plan tier anywhere in the payload.
+
+It carries **two independent quota pools** — `gemini-*` (Gemini Flash/Pro) at
+48% remaining and `3p-*` (Claude Opus/Sonnet, GPT-OSS) at 9% — which is what
+`TestAgyHeadroomSelectsPoolForModel` drives: a contributor on Gemini Flash must
+be measured against the Gemini pool, not held by the exhausted third-party one.
+`num_turns: 0` and `usage.total_tokens: 0` in the envelope are what confirm the
+reading consumes no model turn.
+
+Provenance caveat, narrower than before but real: this is **one account on one
+plan tier**. It proves the shape #6966 assumed was wrong and pins the shape that
+exists today; it does not prove the field set is complete across tiers, and a
+different tier may expose groups or fields this capture does not. The adapter's
+behaviour on an unrecognized schema is pinned separately and independently by
 `TestAgyHeadroomRejectsUnrecognizedSchema`.

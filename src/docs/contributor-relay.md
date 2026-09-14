@@ -814,14 +814,49 @@ not "fix" an adapter back to a source that was deliberately rejected:
   enters the unknown-data behaviour rather than a permissive full-headroom
   reading.
 
-- **Agy** — the documented status-line `quota` map (`remaining_fraction`,
-  reset fields, plan tier), read as structured output rather than by scraping
-  the decorative `/usage` text the earlier prober matched, and windows carry
-  their reset time ([#6966](https://github.com/hivecommons/hive/issues/6966)).
-  Capability is detected by requesting the structured form; a CLI lacking it,
-  or any payload that does not carry the documented `quota` map, is reported as
-  an explicit error and enters the unknown-data behaviour rather than the
-  earlier scraper's confident-wrong-number failure mode.
+- **Agy** — the `/usage` command's structured print-mode envelope, rather than
+  the decorative text the earlier prober scraped, and windows carry their reset
+  time ([#6966](https://github.com/hivecommons/hive/issues/6966),
+  [#6986](https://github.com/hivecommons/hive/issues/6986)).
+
+  #6966 modelled the response on the field names #6833 described in prose — a
+  root `quota` key holding a flat `windows` map with `reset_at` and
+  `duration_mins` — because no live payload was obtainable on the verifying
+  host. A capture on agy 1.2.1 showed none of that exists, so the adapter
+  rejected every real payload and reported `unknown` on a correctly configured
+  host. This documents the captured shape instead:
+
+  `--output-format json` is a **print-mode response formatter, not a quota
+  API**, so the reply is a result envelope with the quota data under
+  `command.data`, reached when `command.name == "usage"`:
+
+  ```
+  command.data.groups[].buckets[] → {id, window ("weekly"|"5h"),
+                                     remaining_fraction (0..1), reset_time}
+  ```
+
+  There is **no plan tier** in the payload, and no numeric per-window duration —
+  `window` is a label the adapter maps to a duration so the shared banding
+  applies.
+
+  **Agy meters two independent pools**: Gemini models (`gemini-*` bucket ids)
+  and third-party Claude/GPT models (`3p-*`), each with its own weekly and 5h
+  bucket, routinely at very different levels. Which pool a task consumes depends
+  on the model the relay runs, so `AgyProber.Model` selects the applicable
+  group. With no model known, the reading binds on the worst bucket across every
+  pool — deliberately the conservative direction: it can hold work the
+  contributor's real pool could have served, but it cannot admit work against an
+  exhausted one. Bucket IDs stay group-qualified so the guard's message names
+  the pool that bound.
+
+  Capability is detected from the envelope — a `SUCCESS` status carrying
+  `command.name == "usage"` and populated `command.data` — not from whether
+  `--output-format json` was accepted, which is a general print-mode flag that
+  says nothing about `/usage`. Anything else is reported as an explicit error
+  and enters the unknown-data behaviour rather than the earlier scraper's
+  confident-wrong-number failure mode. The captured envelope reports
+  `num_turns: 0` and `usage.total_tokens: 0`, so a reading consumes no model
+  turn — verified rather than argued.
 
 
 

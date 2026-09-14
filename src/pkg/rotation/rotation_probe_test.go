@@ -221,7 +221,7 @@ func TestCodexProber_ExhaustedAndErrors(t *testing.T) {
 }
 
 func TestAgyProber(t *testing.T) {
-	fakeCLI(t, "agy", `{"quota":{"plan":"pro","windows":{"weekly":{"remaining_fraction":0.55,"reset_at":"2026-09-20T00:00:00Z","duration_mins":10080}}}}`, 0)
+	fakeCLI(t, "agy", `{"status":"SUCCESS","command":{"name":"usage","data":{"groups":[{"name":"Gemini Models","buckets":[{"id":"gemini-weekly","window":"weekly","remaining_fraction":0.55,"reset_time":"2026-09-20T00:00:00Z"}]}]}}}`, 0)
 	p := AgyProber{ThresholdPct: 80}
 	if p.Provider() != "google" {
 		t.Errorf("Provider = %q, want google", p.Provider())
@@ -236,8 +236,9 @@ func TestAgyProber(t *testing.T) {
 	if h.PctRemaining != 55 {
 		t.Errorf("PctRemaining = %d, want 55", h.PctRemaining)
 	}
-	if h.PlanType != "pro" {
-		t.Errorf("PlanType = %q, want pro", h.PlanType)
+	// #6986: agy's /usage envelope carries no plan tier, so none is claimed.
+	if h.PlanType != "" {
+		t.Errorf("PlanType = %q, want empty", h.PlanType)
 	}
 	// #6966: the emitted window must carry reset timing, which the old scraper
 	// never did.
@@ -247,7 +248,7 @@ func TestAgyProber(t *testing.T) {
 }
 
 func TestAgyProber_ExhaustedAndErrors(t *testing.T) {
-	fakeCLI(t, "agy", `{"quota":{"windows":{"weekly":{"remaining_fraction":0.10,"reset_at":"2026-09-20T00:00:00Z","duration_mins":10080}}}}`, 0)
+	fakeCLI(t, "agy", `{"status":"SUCCESS","command":{"name":"usage","data":{"groups":[{"name":"Gemini Models","buckets":[{"id":"gemini-weekly","window":"weekly","remaining_fraction":0.10,"reset_time":"2026-09-20T00:00:00Z"}]}]}}}`, 0)
 	h := AgyProber{ThresholdPct: 80}.Probe(context.Background())
 	if h.Available {
 		t.Error("Available = true, want false (90 used >= 80 threshold)")
@@ -853,43 +854,104 @@ func TestAgyHeadroomFromFixture(t *testing.T) {
 	if h.ProbeErr != nil {
 		t.Fatalf("ProbeErr = %v", h.ProbeErr)
 	}
-	if len(h.Limits) != 2 {
-		t.Fatalf("len(Limits) = %d, want 2 (five_hour, weekly); Limits=%+v", len(h.Limits), h.Limits)
+	// With no Model hint every pool is folded in: 2 groups x 2 buckets.
+	if len(h.Limits) != 4 {
+		t.Fatalf("len(Limits) = %d, want 4 (gemini + 3p, weekly + 5h each); Limits=%+v", len(h.Limits), h.Limits)
 	}
 	byID := map[string]LimitWindow{}
 	for _, w := range h.Limits {
 		byID[w.ID] = w
 	}
-	// remaining_fraction 0.63 -> 63% remaining, and duration bands to five_hour.
-	if got := byID["five_hour"].PctRemaining; got != 63 {
-		t.Errorf("five_hour PctRemaining = %d, want 63 (from remaining_fraction 0.63)", got)
+	// Bucket IDs stay group-qualified so the guard can name the pool that bound.
+	for _, id := range []string{"gemini-weekly", "gemini-5h", "3p-weekly", "3p-5h"} {
+		if _, ok := byID[id]; !ok {
+			t.Errorf("missing bucket %q; got %+v", id, h.Limits)
+		}
 	}
-	if got := byID["five_hour"].Kind; got != "five_hour" {
-		t.Errorf("five_hour Kind = %q, want five_hour (banded from 300 min)", got)
+	// remaining_fraction 0.483... -> 48% remaining; window "weekly" bands to weekly.
+	if got := byID["gemini-weekly"].PctRemaining; got != 48 {
+		t.Errorf("gemini-weekly PctRemaining = %d, want 48 (from remaining_fraction 0.4831)", got)
 	}
-	if got := byID["weekly"].Kind; got != "weekly" {
-		t.Errorf("weekly Kind = %q, want weekly (banded from 10080 min)", got)
+	if got := byID["gemini-weekly"].Kind; got != "weekly" {
+		t.Errorf("gemini-weekly Kind = %q, want weekly (banded from 10080 min)", got)
 	}
-	// #6966: emitted windows must carry reset timing.
-	if byID["weekly"].ResetAt.IsZero() {
-		t.Error("weekly window carries no ResetAt")
+	if got := byID["gemini-weekly"].DurationMins; got != 10080 {
+		t.Errorf("gemini-weekly DurationMins = %d, want 10080", got)
 	}
-	if got := byID["weekly"].DurationMins; got != 10080 {
-		t.Errorf("weekly DurationMins = %d, want 10080", got)
+	// window "5h" must band to five_hour; the payload carries no numeric duration.
+	if got := byID["gemini-5h"].Kind; got != "five_hour" {
+		t.Errorf("gemini-5h Kind = %q, want five_hour (banded from the \"5h\" label)", got)
 	}
-	if h.PlanType != "pro" {
-		t.Errorf("PlanType = %q, want pro", h.PlanType)
+	if got := byID["gemini-5h"].DurationMins; got != 300 {
+		t.Errorf("gemini-5h DurationMins = %d, want 300", got)
 	}
-	// The 91%-used weekly window binds; without worst-binds the 37%-used
-	// five_hour window would over-report headroom.
+	// #6966: emitted windows must carry reset timing, from `reset_time`.
+	if byID["3p-weekly"].ResetAt.IsZero() {
+		t.Error("3p-weekly carries no ResetAt (reset_time not read?)")
+	}
+	// The payload carries no plan tier at all (#6986); claiming one would be a guess.
+	if h.PlanType != "" {
+		t.Errorf("PlanType = %q, want empty: agy's /usage envelope has no plan field", h.PlanType)
+	}
+	// Worst binds across pools when no model is known: 3p-weekly at 9% remaining.
 	if h.PctRemaining != 9 {
-		t.Errorf("PctRemaining = %d, want 9 (remaining_fraction 0.09 weekly binds)", h.PctRemaining)
+		t.Errorf("PctRemaining = %d, want 9 (3p-weekly binds)", h.PctRemaining)
 	}
-	if !h.ResetAt.Equal(byID["weekly"].ResetAt) {
-		t.Errorf("ResetAt = %v, want the binding weekly reset %v", h.ResetAt, byID["weekly"].ResetAt)
+	if !h.ResetAt.Equal(byID["3p-weekly"].ResetAt) {
+		t.Errorf("ResetAt = %v, want the binding 3p-weekly reset %v", h.ResetAt, byID["3p-weekly"].ResetAt)
 	}
 	if h.Available {
-		t.Error("Available should be false: the weekly window is past the 80% threshold")
+		t.Error("Available should be false: 3p-weekly is past the 80% threshold")
+	}
+}
+
+// TestAgyHeadroomSelectsPoolForModel pins the two-pool behaviour #6986 found:
+// agy meters Gemini and third-party Claude/GPT models against separate quotas,
+// so a contributor running Gemini Flash must be measured against the Gemini
+// pool. Without this, the exhausted 3p pool (9% remaining) binds and holds a
+// relay whose actual pool is at 48% — safe, but needlessly idle.
+func TestAgyHeadroomSelectsPoolForModel(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "agy_usage.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeCLI(t, "agy", string(raw), 0)
+	h := AgyProber{ThresholdPct: 80, Model: "gemini-flash"}.Probe(context.Background())
+	if h.ProbeErr != nil {
+		t.Fatalf("ProbeErr = %v", h.ProbeErr)
+	}
+	if len(h.Limits) != 2 {
+		t.Fatalf("len(Limits) = %d, want 2 (gemini pool only); Limits=%+v", len(h.Limits), h.Limits)
+	}
+	for _, w := range h.Limits {
+		if !strings.HasPrefix(w.ID, "gemini-") {
+			t.Errorf("bucket %q leaked in from another pool", w.ID)
+		}
+	}
+	if h.PctRemaining != 48 {
+		t.Errorf("PctRemaining = %d, want 48 (gemini-weekly binds, not the 9%% 3p pool)", h.PctRemaining)
+	}
+	if !h.Available {
+		t.Error("Available should be true: the Gemini pool is at 48%, well inside the 80% threshold")
+	}
+
+	// A model that maps to the third-party pool sees the exhausted one.
+	h = AgyProber{ThresholdPct: 80, Model: "claude-sonnet-4-6"}.Probe(context.Background())
+	if h.PctRemaining != 9 {
+		t.Errorf("claude model: PctRemaining = %d, want 9 (3p-weekly binds)", h.PctRemaining)
+	}
+	if h.Available {
+		t.Error("claude model: Available should be false: the 3p pool is past the threshold")
+	}
+
+	// An unrecognized model must not silently drop the reading; it widens the
+	// fold back to every pool (conservative), never picks one at random.
+	h = AgyProber{ThresholdPct: 80, Model: "some-unknown-model"}.Probe(context.Background())
+	if len(h.Limits) != 4 {
+		t.Errorf("unknown model: len(Limits) = %d, want 4 (fold widens to all pools)", len(h.Limits))
+	}
+	if h.PctRemaining != 9 {
+		t.Errorf("unknown model: PctRemaining = %d, want 9 (worst pool binds)", h.PctRemaining)
 	}
 }
 
@@ -909,7 +971,7 @@ func TestAgyHeadroomRejectsUnrecognizedSchema(t *testing.T) {
 		`{"somethingElse":true}`,
 		"Weekly Limit Remaining: 55%",
 	} {
-		if _, err := agyHeadroom("google", 80, []byte(body)); err == nil {
+		if _, err := agyHeadroom("google", 80, []byte(body), ""); err == nil {
 			t.Errorf("agyHeadroom(%s) err = nil, want an explicit unrecognized-schema error", body)
 		}
 	}
