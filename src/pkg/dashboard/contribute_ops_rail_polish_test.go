@@ -15,7 +15,7 @@ import (
 //     the log on connect, so the rail shows recent history immediately instead
 //     of sitting on the "Watching the hive…" empty state until the next live
 //     event arrives.
-//  3. The Ready-work queue header gets an item-count badge (like "My work"'s
+//  3. The Ready-work queue header gets an item-count badge (like Fleet work's
 //     #work-count), so the operator can see queue depth at a glance.
 
 // TestOpsRailHeadingIsLiveActivity asserts the Operations rail's own heading
@@ -168,7 +168,7 @@ func TestOpsRailResilientFromActivityPoll(t *testing.T) {
 }
 
 // TestReadyWorkQueueHeaderHasCount asserts the Ready-work queue header carries
-// an ops-card-count badge (like "My work"'s #work-count), that ccRenderQueue
+// an ops-card-count badge (like Fleet work's #work-count), that ccRenderQueue
 // populates it from the current ccQueue on every render, and that the
 // existing cc-live pill is preserved alongside it.
 func TestReadyWorkQueueHeaderHasCount(t *testing.T) {
@@ -209,13 +209,15 @@ func TestReadyWorkQueueHeaderHasCount(t *testing.T) {
 	}
 }
 
-// TestOpsRailAndQueueCountsCoexistWithMyWork is a light regression guard: the
-// pre-existing "My work" count badge (#work-count) must be untouched by these
-// changes — same class, same population pattern.
-func TestOpsRailAndQueueCountsCoexistWithMyWork(t *testing.T) {
+// TestOpsRailAndQueueCountsCoexistWithFleetWork is a light regression guard: the
+// pre-existing count badge (#work-count) on the work panel must be untouched by
+// these changes — same class, same population pattern. The panel was titled "My
+// work" when this test was written and is titled "Fleet work" since #6945; the
+// badge markup it guards is unchanged either way.
+func TestOpsRailAndQueueCountsCoexistWithFleetWork(t *testing.T) {
 	body := renderContributePage(t)
-	if !strings.Contains(body, `<h3>My work</h3><span class="ops-card-count" id="work-count"></span>`) {
-		t.Error(`"My work" count badge markup regressed`)
+	if !strings.Contains(body, `<h3>Fleet work</h3><span class="ops-card-count" id="work-count"></span>`) {
+		t.Error(`"Fleet work" count badge markup regressed`)
 	}
 	if !strings.Contains(body, "document.getElementById('work-count').textContent") {
 		t.Error("work-count population wiring regressed")
