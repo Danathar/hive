@@ -2466,6 +2466,43 @@ func (h *ContributeWSHub) isTaskInCooldownKey(key string) bool {
 	return true
 }
 
+// cooldownExpiryKey returns when this issue's COMPLETION cooldown lapses, or
+// the zero time when none is in force (#6902 evidence).
+//
+// Read-only by construction: unlike isTaskInCooldownKey it never prunes an
+// expired entry, because it is called only to explain a refusal that gate has
+// already made on this same pass — pruning here would mean the explanation
+// mutated the state it is explaining. It reads the SAME map and the SAME
+// per-key window, so the timestamp it reports is the one actually enforced.
+func (h *ContributeWSHub) cooldownExpiryKey(key string) time.Time {
+	if key == "" || !h.cooldownEnabled() {
+		return time.Time{}
+	}
+	h.completedMu.Lock()
+	defer h.completedMu.Unlock()
+	t, ok := h.completedTasks[key]
+	if !ok {
+		return time.Time{}
+	}
+	return t.Add(h.cooldownForLocked(key))
+}
+
+// failureCooldownExpiryKey returns when this issue's FAILURE cooldown (or the
+// longer quarantine window, whichever currently applies) lapses. Zero when no
+// failure is on record. Read-only for the same reason as cooldownExpiryKey.
+func (h *ContributeWSHub) failureCooldownExpiryKey(key string) time.Time {
+	if key == "" {
+		return time.Time{}
+	}
+	h.completedMu.Lock()
+	defer h.completedMu.Unlock()
+	t, ok := h.failedTasks[key]
+	if !ok {
+		return time.Time{}
+	}
+	return t.Add(h.failureCooldownForLocked(key))
+}
+
 // recordTaskFailure books a task_failed against an issue (#2435). It stamps the
 // short failure cooldown and advances the issue's consecutive-failure counter
 // (a permanent failure advances it by permanentFailureWeight rather than one),

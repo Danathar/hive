@@ -285,7 +285,7 @@ func (h *ContributeWSHub) broadcastActivity(entry ActivityEntry) {
 // draws from, minus the per-contributor own-work reshuffle. That is the documented
 // "simple recent/top-N is acceptable" fallback the spec permits.
 func (h *ContributeWSHub) ReadyQueue(limit int) []ReadyQueueItem {
-	return h.admissionQueueSnapshot(limit, false).queue
+	return h.admissionQueueSnapshot(limit, withheldNone).queue
 }
 
 // admissionQueueSnapshot is the single admission pass behind ReadyQueue and the
@@ -295,17 +295,23 @@ func (h *ContributeWSHub) ReadyQueue(limit int) []ReadyQueueItem {
 // Decision each refusal computed rather than re-evaluating it. The snapshot is
 // ephemeral: built per call, never cached, so every request re-observes current
 // authoritative state.
-func (h *ContributeWSHub) admissionQueueSnapshot(limit int, withDiagnostics bool) queueAdmissionSnapshot {
+func (h *ContributeWSHub) admissionQueueSnapshot(limit int, scope withheldScope) queueAdmissionSnapshot {
 	if limit <= 0 {
 		limit = readyQueueDefaultLimit
 	}
 	snap := queueAdmissionSnapshot{queue: []ReadyQueueItem{}}
-	if withDiagnostics {
-		snap.withheld = []AdmissionWithheldItem{}
+	// #6902: one collector for the whole ladder. Every `continue` below records
+	// its reason through it immediately before refusing, so the explanation is
+	// produced BY the refusal rather than reconstructed from it. Out-of-scope
+	// rows are dropped by the collector, so no gate has to know which surface is
+	// asking.
+	withheld := newWithheldCollector(scope, limit)
+	if scope.collects() {
 		snap.coverage.Policy = admissionCoveragePolicy
 	}
 	out := snap.queue
 	if h == nil || h.server == nil {
+		snap.withheld = withheld.items
 		return snap
 	}
 
@@ -313,6 +319,7 @@ func (h *ContributeWSHub) admissionQueueSnapshot(limit int, withDiagnostics bool
 	status := h.server.status
 	h.server.statusMu.RUnlock()
 	if status == nil {
+		snap.withheld = withheld.items
 		return snap
 	}
 	for _, repo := range status.Repos {
@@ -344,7 +351,7 @@ func (h *ContributeWSHub) admissionQueueSnapshot(limit int, withDiagnostics bool
 	// candidate — so the dependency gate stays cheap, and discarded when the pass
 	// ends so the next call re-observes current state.
 	sweep := h.newAdmissionSweep()
-	if withDiagnostics {
+	if scope.collects() {
 		snap.coverage = h.admissionCoverageFromSweep(sweep)
 	}
 
@@ -353,6 +360,20 @@ func (h *ContributeWSHub) admissionQueueSnapshot(limit int, withDiagnostics bool
 			continue
 		}
 		if config.MatchesAny(repo.Full, disabledRepos) || config.MatchesAny(repo.Name, disabledRepos) {
+			// #6902: a disabled repository is the one gate that refuses a whole
+			// repo at once, so its candidates never reach the per-issue ladder
+			// below and would otherwise be the only absent rows with no
+			// explanation at all. Decoding them costs nothing when nothing is
+			// being collected, because the loop is skipped entirely.
+			if scope.collects() {
+				for _, raw := range repo.ActionableIssues {
+					issue, ref, ok := decodeActionableIssue(repo.Full, raw)
+					if !ok {
+						continue
+					}
+					withheld.addReason(withheldCandidateFrom(repo.Full, ref, issue), withheldReasonDisabledRepo)
+				}
+			}
 			continue
 		}
 		for _, raw := range repo.ActionableIssues {
@@ -416,10 +437,18 @@ func (h *ContributeWSHub) admissionQueueSnapshot(limit int, withDiagnostics bool
 			// Deliberately NOT logged: unlike selectTask, which runs once per
 			// assignment, this function runs on every queue request and SSE
 			// hydration, so a log line here would be pure noise.
+			// #6902: from here down, every refusal records its reason through the
+			// collector on the line before its own `continue`. Keeping the two
+			// adjacent is the point — a future gate inserted without an
+			// explanation is visible in review as a bare `continue` among
+			// annotated ones, and the shared ladder test fails it.
+			cand := withheldCandidateFrom(repo.Full, ref, issue)
 			if isTracker, _ := issue["is_tracker"].(bool); isTracker {
+				withheld.addReason(cand, withheldReasonTracker)
 				continue
 			}
 			if h.isTaskInCooldownKey(itemKey) {
+				withheld.add(withheldCooldownItem(cand, withheldReasonCooldown, h.cooldownExpiryKey(itemKey)))
 				continue
 			}
 			// #3987: a live no_work_needed verdict withholds the issue from the
@@ -428,12 +457,15 @@ func (h *ContributeWSHub) admissionQueueSnapshot(limit int, withDiagnostics bool
 			// ledger admission pins). The hive AGENT pipeline does not read
 			// this ledger anywhere.
 			if h.isSuppressedByNoWorkVerdictKey(itemKey, issueUpdatedAtFromMap(issue)) {
+				withheld.addReason(cand, withheldReasonNoWorkNeeded)
 				continue
 			}
 			if h.isTaskInFailureCooldownKey(itemKey) {
+				withheld.add(withheldCooldownItem(cand, withheldReasonFailureCooldown, h.failureCooldownExpiryKey(itemKey)))
 				continue
 			}
 			if active[itemKey] {
+				withheld.addReason(cand, withheldReasonInFlight)
 				continue
 			}
 			labels := stringSliceFromAny(issue["labels"])
@@ -446,19 +478,16 @@ func (h *ContributeWSHub) admissionQueueSnapshot(limit int, withDiagnostics bool
 				dependsOn: dependenciesFromIssueMap(issue),
 			})
 			if !decision.admitted {
-				// #4246: retain the convergence Decision behind this refusal
-				// instead of discarding it. Only convergence refusals are
-				// collected (an open-PR claim never reaches the dependency gate
-				// and carries a zero Decision), only in shadow mode, and only up
-				// to the same bound as the queue so a pathological ledger can
-				// never blow out the payload. Blocked/unknown work stays OUT of
-				// the queue and out of assignment exactly as before.
-				if withDiagnostics && decision.reason != contributorAdmissionReasonOpenPRClaim && len(snap.withheld) < limit {
-					title, _ := issue["title"].(string)
-					url, _ := issue["url"].(string)
-					snap.withheld = append(snap.withheld,
-						withheldItemFromDecision(repo.Full, ref, title, url, decision.convergence))
-				}
+				// #4246 retained the convergence Decision behind this refusal
+				// instead of discarding it; #6902 keeps that verbatim and adds
+				// the two structured reasons that are NOT convergence judgments
+				// (an open-PR claim short-circuits before the dependency gate
+				// and carries a zero Decision; a `blocked` workflow label never
+				// reaches it either). Which of these a surface keeps is the
+				// collector's scope decision, so the #4246 contract is unchanged
+				// while one collection serves both. Blocked/unknown work stays
+				// OUT of the queue and out of assignment exactly as before.
+				withheld.add(withheldFromAdmissionDecision(cand, decision))
 				continue
 			}
 			title, _ := issue["title"].(string)
@@ -470,15 +499,19 @@ func (h *ContributeWSHub) admissionQueueSnapshot(limit int, withDiagnostics bool
 			// shows genuinely-admissible work, not items the filters would reject.
 			if h.server.deps != nil && h.server.deps.Config != nil {
 				hub := h.server.deps.Config.Hub
-				if !config.FilterPasses(title, hub.ContributeDenyTitles, hub.ContributeTitlesMode) ||
-					!config.FilterPasses(author, hub.ContributeDenyAuthors, hub.ContributeAuthorsMode) ||
-					!config.LabelsFilterPasses(labels, hub.ContributeDenyLabels, hub.ContributeLabelsMode) {
+				// Evaluated one filter at a time rather than as one boolean so
+				// the refusal can name WHICH filter matched (#6902). The
+				// short-circuit order and the outcome are identical to the
+				// single expression this replaces.
+				if which := rejectingContributorFilter(hub, title, author, labels); which != "" {
+					withheld.add(withheldFilterItem(cand, which))
 					continue
 				}
 				// Own-work is meaningless for an anonymous queue view, so pass an
 				// empty "self" — an issue assigned solely to OTHERS is skipped, one
 				// unassigned stays. This matches selectTask's skip-assigned toggle.
 				if hub.ContributeSkipAssignedToOthers && assignedToOthers(assignees, "") {
+					withheld.add(withheldAssignedItem(cand, assignees))
 					continue
 				}
 			}
@@ -525,6 +558,7 @@ func (h *ContributeWSHub) admissionQueueSnapshot(limit int, withDiagnostics bool
 	// Resume what they held.
 	out = append(out, heldItems...)
 	snap.queue = out
+	snap.withheld = withheld.items
 	return snap
 }
 
@@ -652,8 +686,8 @@ func (s *Server) handleContributeEvents(w http.ResponseWriter, r *http.Request) 
 	}
 	// One snapshot feeds queue AND (in shadow mode) the #4246 diagnostics, so
 	// the hello frame's queue and withheld collections come from the same sweep.
-	diag := s.convergenceDiagnosticsEnabled()
-	snap := s.contributeHub.admissionQueueSnapshot(readyQueueDefaultLimit, diag)
+	scope := s.convergenceWithheldScope()
+	snap := s.contributeHub.admissionQueueSnapshot(readyQueueDefaultLimit, scope)
 	hello := sseEvent{
 		Type:   "hello",
 		Replay: replay,
@@ -664,7 +698,7 @@ func (s *Server) handleContributeEvents(w http.ResponseWriter, r *http.Request) 
 		// waiting for a "gap" frame.
 		Seq: sub.startSeq,
 	}
-	if diag {
+	if scope.collects() {
 		hello.Withheld = snap.withheld
 		cov := snap.coverage
 		hello.AdmissionCoverage = &cov
@@ -875,7 +909,7 @@ func personalizeQueueByInterests(items []ReadyQueueItem, interests []string) []R
 // collection/filtering here previously drifted from admissionQueueSnapshot
 // (hivecommons/hive#6477 was exactly this class of bug), so there must be only
 // one place that decides what is offerable.
-func (h *ContributeWSHub) admissionQueueRange(limit int, offset int, withDiagnostics bool) (items []ReadyQueueItem, total int) {
+func (h *ContributeWSHub) admissionQueueRange(limit int, offset int, scope withheldScope) (items []ReadyQueueItem, total int) {
 	if limit <= 0 {
 		limit = readyQueueDefaultLimit
 	}
@@ -893,7 +927,7 @@ func (h *ContributeWSHub) admissionQueueRange(limit int, offset int, withDiagnos
 	// AFTER recording offerableTotal, so requesting a limit far larger than any
 	// realistic backlog yields the full ordered offerable set with an accurate
 	// total, from the exact same sweep every other queue view uses.
-	snap := h.admissionQueueSnapshot(math.MaxInt32, withDiagnostics)
+	snap := h.admissionQueueSnapshot(math.MaxInt32, scope)
 	total = snap.offerableTotal
 	if offset >= total {
 		return []ReadyQueueItem{}, total

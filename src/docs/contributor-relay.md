@@ -420,6 +420,44 @@ The **Operations** tab lets an operator reorder and park individual issues in th
 | `POST /api/contribute/queue/hold` | `contribute_queue_hold` + `contribute_queue_hold_reasons` | Body `{"key":"owner/repo#number","held":true,"reason":"optional note"}`. A held issue is never offered until it is resumed (`"held":false`), unlike cooldown, which clears itself. Held rows stay visible on the Operations tab, greyed with an "on hold" badge; the optional reason is shown in the badge tooltip and pruned automatically when the hold is lifted. |
 | `POST /api/contribute/queue/hold/clear` | `contribute_queue_hold` | Resumes every held issue in one call. Same role gate and persistence as the single-issue endpoint. |
 
+### Why an issue is not queued (Withheld)
+
+The Contributor Queue is not every open issue, and the reason a candidate is missing used to be invisible: each exclusion was a bare skip inside the admission pass, so the only symptom was an absent row. Since [#6902](https://github.com/hivecommons/hive/issues/6902) the Operations tab groups the queue into three, and the third one explains itself:
+
+| Group | What it is |
+|---|---|
+| **Ready** | The offerable queue, in offer order. Unchanged. |
+| **On hold** | Issues an operator parked (see above), greyed with the "on hold" badge and a Resume control. A manual hold is the operator's own decision and is never merged into Withheld. |
+| **Withheld** | Candidates Hive knows about — they are in the actionable set — but is not currently willing to offer, each with the reason the admission pass recorded when it refused. Collapsed by default. |
+
+Withheld rows carry a stable reason code and, where the refusing gate had one, the evidence behind it:
+
+| Reason | Meaning | Evidence |
+|---|---|---|
+| `open_pr_claim` | An open pull request already claims the issue. | Claiming PR URL and author |
+| `workflow_blocked` | The issue carries the `blocked` workflow label. | — |
+| `dependency_blocked` | A declared dependency is established as unsatisfied. | Blocker keys, observed record/generation |
+| `dependency_unknown` | A declared dependency could not be resolved, so satisfaction cannot be asserted. | Blocker keys, observed record/generation |
+| `disabled_repo` | The repository is switched off for contribution (`disabled_repos`). | — |
+| `tracker` | A tracker/umbrella issue; its children carry the work and queue independently. | — |
+| `cooldown` | The issue completed recently and is inside its post-completion cooldown. | Expiry timestamp |
+| `failure_cooldown` | The issue failed recently and is inside its failure cooldown or quarantine window. | Expiry timestamp |
+| `no_work_needed` | A live `no_work_needed` verdict is suppressing the issue until it changes again. | — |
+| `in_flight` | A contributor is working the issue right now. | — |
+| `contributor_filter` | A title, author, or label filter above rejected the candidate. | Which filter matched |
+| `assigned_to_other` | The issue is assigned to someone else and **Skip Assigned to Others** is on. | Assignee logins |
+
+Two properties are worth relying on:
+
+- **The reason is the real one.** It is retained from the same admission pass that produces the Ready queue, not recomputed by a second rule set — so a Withheld row cannot tell you something the assignment path disagrees with.
+- **Showing a row changes nothing.** Withheld is an explanation, never a control: the rows are not in the offer order, they carry no reorder or drag affordance, and nothing becomes assignable because it is displayed.
+
+Per-contributor exclusions are deliberately absent from this list. Agent-role matching, tier concurrency and rate limits, and restored-lease exclusion depend on *who* is asking rather than on the issue, so they are not properties a shared queue view can report.
+
+Candidates dropped *before* they reach the actionable set — the governor `hold` label (which has its own list on the status payload), governor exempt labels, `project.issue_filter` require-labels, and standing meta issues — are out of scope here and are not explained by this section.
+
+**API.** `GET /api/contribute/queue?withheld=1` returns the same queue plus `withheld` (the rows) and `withheld_total`. The parameter is an explicit opt-in: without it the response is byte-identical to what it has always been, so existing clients are unaffected. The list is bounded by the same limit as the queue, computed per request, and never cached or persisted. It carries only public issue metadata, reason codes, and public evidence — no credentials, prompts, or contributor execution data.
+
 ### Explicit acceptance
 
 | Control | Config key | Behavior |
