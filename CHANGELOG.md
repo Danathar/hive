@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-14 (v4.29.7)
+
+### Fixed
+
+- A refreshed Copilot token now actually reaches the agents that are already running on the old one, so a fleet stuck on `You are not licensed to use Copilot` recovers by itself ([#6500](https://github.com/hivecommons/hive/issues/6500)). Every earlier fix on this report reconciled the two token *stores* — the shared CLI `config.json` and the hive's durable token file — but neither store is what a live agent authenticates with: `COPILOT_GITHUB_TOKEN` is injected into a tmux session once, when the session is created, the Copilot CLI reads it at process start, and it outranks `config.json`. So an operator who did the documented recovery (`/login` inside an agent terminal with a licensed identity) got the token promoted to the durable store and nothing else — every pane in the hive, including the one they had just logged in from, kept presenting the token GitHub had already rejected. The existing auto-restart detector did not cover it either, because it fires on a pane showing a `/login` *prompt*, and an unlicensed pane shows a licence error instead. Installing a new token now pushes it into every Copilot agent's session environment and relaunches exactly those agents whose pane already carries a rejected-credential verdict (`unlicensed` or `token-expired`); healthy agents are left alone and pick the new token up on their next ordinary relaunch. A dashboard logout now also *removes* the variable from each session rather than leaving the superseded credential to be inherited by the next pane.
+
 ## 2026-09-13 (v4.29.6)
 
 ### Fixed
