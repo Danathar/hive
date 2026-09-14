@@ -1,1 +1,0 @@
-- Made the v2 test shard aggregate distinguish runner infrastructure cancellations from real shard failures: failed, skipped, or unknown shards still fail closed, while cancelled-only runs now surface an explicit infrastructure-cancellation warning instead of reporting a test failure.

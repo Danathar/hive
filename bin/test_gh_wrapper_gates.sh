@@ -562,6 +562,35 @@ assert_author "user token without trusted file still refuses a foreign author" \
   "$(run_author_wrapper "$USER_STUB" "${WORK}/no-such-login-file" -- issue list --repo owner/repo --author someone-else)" \
   "exit=1 last=api user --jq .login ::: *must match the authenticated GitHub identity*"
 
+# ── #6908: `search prs|issues` is on the identity-checked path too ───────────
+#
+# The check used to gate on action=list, so `gh search prs --author X` reached
+# the API with no validation at all. That is not a theoretical hole: the
+# contributor relay's PR review cycle moved from `gh pr list --author @me` to
+# `gh search prs --author @me` and thereby left this code path without the
+# change being visible at the call site.
+#
+# A foreign author must be refused for search exactly as it is for list.
+assert_author "#6908 search prs refuses a foreign author" \
+  "$(run_author_wrapper "$USER_STUB" "${WORK}/no-such-login-file" -- search prs --author someone-else --state open)" \
+  "exit=1 last=api user --jq .login ::: *must match the authenticated GitHub identity*"
+
+assert_author "#6908 search issues refuses a foreign author" \
+  "$(run_author_wrapper "$USER_STUB" "${WORK}/no-such-login-file" -- search issues --author someone-else)" \
+  "exit=1 last=api user --jq .login ::: *must match the authenticated GitHub identity*"
+
+# The matching author is still allowed, so the fix is a validation and not a ban.
+assert_author "#6908 search prs allows the authenticated login" \
+  "$(run_author_wrapper "$USER_STUB" "${WORK}/no-such-login-file" -- search prs --author someuser --state open)" \
+  "exit=0 last=search prs --author someuser --state open*"
+
+# An AUTHORLESS search names no identity to validate. Widening the --author
+# check must not quietly turn into an enumeration ban riding in on an identity
+# fix, so this stays allowed for a non-contributor agent.
+assert_author "#6908 an authorless search is still allowed" \
+  "$(run_author_wrapper "$USER_STUB" "${WORK}/no-such-login-file" -- search prs --state open)" \
+  "exit=0 last=search prs --state open*"
+
 echo
 echo "=== $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ] || exit 1

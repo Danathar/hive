@@ -1019,11 +1019,12 @@ func runEvalCycle(
 	// round-trip; self-clears the moment a cadence is set or any kick lands.
 	applyNoCadenceAlert(gov, dashSrv)
 
-	agentsDue := gov.Evaluate(
+	agentsDue := gov.EvaluateWithRepoDepths(
 		actionable.Issues.Count,
 		actionable.PRs.Count,
 		actionable.Hold.Total,
 		actionable.Issues.SLAViolations,
+		governor.RepoDepthsFromActionable(actionable),
 	)
 
 	// Crash-restarted agents may get a "resume" kick ahead of their cadence
@@ -1237,7 +1238,7 @@ func runEvalCycle(
 				persistReviewDispatchState(reviewPlan, deliveredReviewKicks, logger)
 			}
 			kickSpan.End()
-			gov.RecordKick(msg.Agent)
+			gov.RecordKickForRepo(msg.Agent, msg.Repo)
 			dashSrv.AuditLog("governor", "kick", "trigger=governor-eval", msg.Agent)
 
 			// Record issue-scoped kicks into the lifecycle timeline. Cheap,
@@ -3081,8 +3082,8 @@ func runRotationCheck(ctx context.Context, cfg *config.Config, rotMgr *rotation.
 		}
 
 		cadenceS := 0
-		if c, ok := govState.Cadences[name]; ok && c.Interval > 0 {
-			cadenceS = int(c.Interval / time.Second)
+		if interval := governorShortestActiveInterval(govState, name); interval > 0 {
+			cadenceS = int(interval / time.Second)
 		}
 
 		if !rotMgr.Exhausted(backend) {

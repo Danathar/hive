@@ -77,9 +77,41 @@ func heartbeatKickInterval(govState governor.State, name string, proc *agent.Age
 	if proc == nil || !proc.Config.UsesGovernorKick() || proc.Config.OnDemand || onDemandFromPack[name] {
 		return 0
 	}
-	cadence, ok := govState.Cadences[name]
-	if !ok || cadence.Paused || cadence.Interval <= 0 {
-		return 0
+	interval := governorShortestActiveInterval(govState, name)
+	return interval
+}
+
+func governorCadencesForAgent(govState governor.State, name string) []governor.AgentCadence {
+	var cadences []governor.AgentCadence
+	for key, cadence := range govState.Cadences {
+		agent, _ := config.SplitCadenceTargetKey(key)
+		if agent == name || cadence.Agent == name {
+			cadences = append(cadences, cadence)
+		}
 	}
-	return cadence.Interval
+	return cadences
+}
+
+func governorLastKickForAgent(govState governor.State, name string) time.Time {
+	var newest time.Time
+	for key, ts := range govState.LastKick {
+		agent, _ := config.SplitCadenceTargetKey(key)
+		if agent == name && !ts.IsZero() && ts.After(newest) {
+			newest = ts
+		}
+	}
+	return newest
+}
+
+func governorShortestActiveInterval(govState governor.State, name string) time.Duration {
+	var shortest time.Duration
+	for _, cadence := range governorCadencesForAgent(govState, name) {
+		if cadence.Paused || cadence.Interval <= 0 {
+			continue
+		}
+		if shortest == 0 || cadence.Interval < shortest {
+			shortest = cadence.Interval
+		}
+	}
+	return shortest
 }

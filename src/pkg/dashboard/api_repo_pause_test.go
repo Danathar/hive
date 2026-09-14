@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"encoding/json"
+	"github.com/hivecommons/hive/pkg/governor"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -56,7 +57,7 @@ func TestRepoPauseResumeRoundTrip(t *testing.T) {
 	}
 
 	// A paused repo keeps its card — that is pause, not deletion.
-	repos := buildRepos(srv.deps.Config, nil)
+	repos := buildRepos(srv.deps.Config, nil, governor.State{})
 	if len(repos) != 1 {
 		t.Fatalf("buildRepos returned %d cards, want 1: a paused repo must not vanish", len(repos))
 	}
@@ -75,7 +76,7 @@ func TestRepoPauseResumeRoundTrip(t *testing.T) {
 	if srv.deps.Config.IsRepoPaused("testrepo") {
 		t.Error("repo still paused after resume")
 	}
-	if repos := buildRepos(srv.deps.Config, nil); repos[0].Paused {
+	if repos := buildRepos(srv.deps.Config, nil, governor.State{}); repos[0].Paused {
 		t.Error("repo card still shows paused after resume")
 	}
 }
@@ -195,7 +196,7 @@ func TestRepoPausesListing(t *testing.T) {
 // A hive that never uses the feature must serve exactly what it served before.
 func TestRepoCards_UnpausedCarryNoPauseFields(t *testing.T) {
 	srv := newFullServer(t)
-	repos := buildRepos(srv.deps.Config, nil)
+	repos := buildRepos(srv.deps.Config, nil, governor.State{})
 	if len(repos) != 1 {
 		t.Fatalf("want 1 repo card, got %d", len(repos))
 	}
