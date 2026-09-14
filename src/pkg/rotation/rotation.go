@@ -651,52 +651,81 @@ func codexHeadroom(provider string, thresholdPct int, result json.RawMessage) (H
 	return h, nil
 }
 
-// AgyProber probes Google (Agy) subscription usage via the CLI's documented
-// status-line `quota` map.
+// AgyProber probes Google (Agy) subscription usage via the CLI's `/usage`
+// command in print mode.
 //
-// SOURCE (kubestellar/hive#6966): #6833's adapter table rules out scraping the
-// decorative `agy --print "/usage"` text — an earlier prober matched a
-// `Weekly Limit Remaining: N%` line with a regex, whose failure mode was a
-// confident WRONG number rather than an error, and whose window carried no
-// reset time. This adapter instead requests the structured status-line `quota`
-// map (`remaining_fraction`, reset fields, plan tier) and normalizes it, so
-// each window carries its reset timing and an unrecognized payload is reported
-// as an explicit error rather than silently misread. Capability is detected by
-// asking for the structured form: a CLI too old to emit it prints text or
-// errors, and either way json parsing fails and the reading becomes unknown —
-// no version-sniffing. Requesting usage sends no model prompt, so it consumes
-// no model turn.
+// SOURCE (kubestellar/hive#6966, corrected by #6986): #6833's adapter table
+// ruled out scraping the decorative `agy --print "/usage"` text — an earlier
+// prober matched a `Weekly Limit Remaining: N%` line with a regex, whose
+// failure mode was a confident WRONG number rather than an error, and whose
+// window carried no reset time. #6966 replaced that with a structured request,
+// but modelled the response on the field names #6833 documented in prose
+// rather than on a captured payload, and every guess but one was wrong: the
+// adapter looked for a root `quota` key holding a flat `windows` map, so
+// `parsed.Quota == nil` fired on every real call and the adapter reported
+// `unknown` forever on a correctly configured host (#6986).
 //
-// PROVENANCE CAVEAT: the exact JSON shape agyHeadroom parses is derived from
-// the field names #6833/#6966 document (`quota`, `remaining_fraction`, reset
-// fields, plan tier), NOT from a live agy capture — agy 1.1.22 exposed no auth
-// surface on the verifying host, so no real payload was obtainable. The
-// reject-unrecognized-schema path is fully verified; the accepted-shape details
-// (field nesting/spelling) must be validated against real agy output and the
-// fixture replaced. See testdata/README.md.
+// SHAPE, captured live on agy 1.2.1: `--output-format json` is a print-mode
+// response formatter, not a quota API, so the payload is a result envelope and
+// the quota data lives under `command.data` with `command.name == "usage"`:
+//
+//	command.data.groups[].buckets[] → {id, window ("weekly"|"5h"),
+//	                                   remaining_fraction (0..1), reset_time}
+//
+// There is no plan tier in the payload, and no per-window duration — `window`
+// is a string enum that this adapter maps to a duration for the shared banding.
+//
+// TWO POOLS: agy meters Gemini models (`gemini-*` bucket ids) and third-party
+// Claude/GPT models (`3p-*`) against separate quotas, each with its own weekly
+// and 5h bucket, and the two sit at very different levels. Which pool a task
+// consumes depends on the model the relay launches agy with, so Model selects
+// the applicable group where it is known. With Model unset or unrecognized the
+// reading binds on the worst bucket across every group: that is deliberately
+// the conservative direction — it can hold work the contributor's actual pool
+// could have served, but it cannot admit work against an exhausted one.
+// Bucket IDs stay group-qualified (`gemini-weekly`, `3p-weekly`) so the guard's
+// message names the pool that actually bound.
+//
+// Capability is detected from the envelope itself — a SUCCESS status carrying
+// `command.name == "usage"` and a populated `command.data` — not from whether
+// `--output-format json` was accepted, which is a general print-mode flag that
+// says nothing about `/usage`. Anything else is reported as an explicit error
+// and becomes unknown; there is no permissive fallback. Requesting usage sends
+// no model prompt: the captured envelope reports `num_turns: 0` and
+// `usage.total_tokens: 0`, so this consumes no model turn.
 type AgyProber struct {
 	ThresholdPct int
+	// Model is the model the relay runs agy with, used to select the quota
+	// pool. Empty means "unknown", which binds on the worst pool.
+	Model string
 }
 
-// agyUsageResponse mirrors the subset of agy's structured `/usage` output this
-// probe consumes (kubestellar/hive#6966). The `quota` map carries the plan tier
-// and one entry per usage window; each window states its remaining fraction, a
-// reset time, and (where present) its duration.
+// agyUsageResponse mirrors the subset of agy's print-mode result envelope this
+// probe consumes (kubestellar/hive#6986, captured from agy 1.2.1).
 type agyUsageResponse struct {
-	Quota *struct {
-		Plan     string                     `json:"plan"`
-		PlanTier string                     `json:"plan_tier"`
-		Windows  map[string]*agyQuotaWindow `json:"windows"`
-	} `json:"quota"`
+	Status  string `json:"status"`
+	Command *struct {
+		Name string `json:"name"`
+		Data *struct {
+			Groups []agyQuotaGroup `json:"groups"`
+		} `json:"data"`
+	} `json:"command"`
 }
 
-type agyQuotaWindow struct {
+type agyQuotaGroup struct {
+	Name    string            `json:"name"`
+	Buckets []*agyQuotaBucket `json:"buckets"`
+}
+
+type agyQuotaBucket struct {
+	ID string `json:"id"`
+	// Window is agy's own duration label ("weekly", "5h"); the payload carries
+	// no numeric duration.
+	Window string `json:"window"`
 	// RemainingFraction is 0..1; a pointer so "the field was absent" stays
 	// distinguishable from a real 0.0 (fully exhausted).
 	RemainingFraction *float64   `json:"remaining_fraction"`
-	ResetAt           *time.Time `json:"reset_at"`
-	ResetsAt          *time.Time `json:"resets_at"`
-	DurationMins      int        `json:"duration_mins"`
+	ResetTime         *time.Time `json:"reset_time"`
 }
 
 func (p AgyProber) Provider() string { return "google" }
@@ -706,23 +735,23 @@ func (p AgyProber) Probe(ctx context.Context) Headroom {
 	if err != nil {
 		return failOpen(p.Provider(), err)
 	}
-	h, err := agyHeadroom(p.Provider(), p.ThresholdPct, []byte(out))
+	h, err := agyHeadroom(p.Provider(), p.ThresholdPct, []byte(out), p.Model)
 	if err != nil {
 		return failOpen(p.Provider(), err)
 	}
 	return h
 }
 
-// agyWindowDurationMins maps a documented agy window key to its duration so the
-// reading carries #6833's duration member and the shared codexWindowKind
-// banding applies (kubestellar/hive#6966). A key with no known duration yields
-// zero, matching "the provider did not state one".
-func agyWindowDurationMins(name string) int {
-	switch name {
+// agyWindowDurationMins maps agy's `window` label to a duration so the reading
+// carries #6833's duration member and the shared codexWindowKind banding
+// applies (kubestellar/hive#6986). An unrecognized label yields zero, matching
+// "the provider did not state one".
+func agyWindowDurationMins(window string) int {
+	switch window {
+	case "5h", "five_hour", "short":
+		return 300
 	case "session":
 		return 60
-	case "five_hour", "short":
-		return 300
 	case "daily":
 		return 1440
 	case "weekly", "seven_day":
@@ -732,43 +761,92 @@ func agyWindowDurationMins(name string) int {
 	}
 }
 
-// agyHeadroom builds a normalized reading from agy's structured `quota` map
-// (kubestellar/hive#6966).
+// agyPoolForModel maps the model the relay launches agy with to the bucket-id
+// prefix of the quota pool it consumes (kubestellar/hive#6986). It matches the
+// model string this tree itself passes to agy, not any decorative text in the
+// payload. An empty string means "could not determine", which widens the fold
+// to every pool rather than guessing one.
+func agyPoolForModel(model string) string {
+	m := strings.ToLower(model)
+	switch {
+	case m == "":
+		return ""
+	case strings.Contains(m, "gemini"):
+		return "gemini"
+	case strings.Contains(m, "claude"), strings.Contains(m, "gpt"):
+		return "3p"
+	default:
+		return ""
+	}
+}
+
+// agyBucketPool returns the pool prefix of a bucket id ("gemini-weekly" →
+// "gemini"), which is how the payload distinguishes the two quotas.
+func agyBucketPool(id string) string {
+	if i := strings.IndexByte(id, '-'); i > 0 {
+		return id[:i]
+	}
+	return ""
+}
+
+// agyHeadroom builds a normalized reading from agy's print-mode `/usage`
+// envelope (kubestellar/hive#6986).
 //
 // Like codexHeadroom and claudeHeadroom it reports an error rather than a
-// permissive reading whenever the payload carries no window it recognizes — a
-// missing `quota` map, no windows, or windows with no `remaining_fraction`.
-// That must surface as unknown so the caller enters the configured unknown-data
-// behaviour: the earlier scraper's failure mode was a confident wrong number,
-// which #6833 calls worse than no guard at all.
-func agyHeadroom(provider string, thresholdPct int, body []byte) (Headroom, error) {
+// permissive reading whenever the payload carries no bucket it recognizes — a
+// missing `command.data`, a command that is not `usage`, no groups, or buckets
+// with no `remaining_fraction`. That must surface as unknown so the caller
+// enters the configured unknown-data behaviour: the original scraper's failure
+// mode was a confident wrong number, which #6833 calls worse than no guard.
+func agyHeadroom(provider string, thresholdPct int, body []byte, model string) (Headroom, error) {
 	var parsed agyUsageResponse
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return Headroom{}, err
 	}
-	if parsed.Quota == nil || len(parsed.Quota.Windows) == 0 {
-		return Headroom{}, errors.New("agy usage: no quota windows (unrecognized schema)")
+	if parsed.Command == nil || parsed.Command.Data == nil || len(parsed.Command.Data.Groups) == 0 {
+		return Headroom{}, errors.New("agy usage: no quota groups (unrecognized schema)")
 	}
-	planType := parsed.Quota.Plan
-	if planType == "" {
-		planType = parsed.Quota.PlanTier
+	if parsed.Command.Name != "usage" {
+		// The envelope came back for some other command; reading its data as a
+		// quota map would be a guess.
+		return Headroom{}, fmt.Errorf("agy usage: envelope is for command %q, not \"usage\" (unrecognized schema)", parsed.Command.Name)
 	}
-	names := make([]string, 0, len(parsed.Quota.Windows))
-	for name := range parsed.Quota.Windows {
-		names = append(names, name)
+
+	want := agyPoolForModel(model)
+	// Collect every bucket, then narrow to the applicable pool only if that
+	// pool is actually present — a model hint that matches nothing must not
+	// silently drop the whole reading.
+	type bucket struct {
+		pool string
+		b    *agyQuotaBucket
 	}
-	sort.Strings(names)
+	all := make([]bucket, 0, 4)
+	haveWanted := false
+	for _, g := range parsed.Command.Data.Groups {
+		for _, b := range g.Buckets {
+			if b == nil || b.RemainingFraction == nil {
+				// A bucket with no remaining_fraction carries no usable
+				// reading; it must not be counted as 0% used (fully available).
+				continue
+			}
+			pool := agyBucketPool(b.ID)
+			if want != "" && pool == want {
+				haveWanted = true
+			}
+			all = append(all, bucket{pool: pool, b: b})
+		}
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].b.ID < all[j].b.ID })
+
 	used := 0
 	var resetAt time.Time
-	limits := make([]LimitWindow, 0, len(names))
-	for _, name := range names {
-		w := parsed.Quota.Windows[name]
-		if w == nil || w.RemainingFraction == nil {
-			// A window with no remaining_fraction carries no usable reading; it
-			// must not be counted as 0% used (fully available).
+	limits := make([]LimitWindow, 0, len(all))
+	for _, item := range all {
+		if haveWanted && item.pool != want {
 			continue
 		}
-		remainingPct := int(*w.RemainingFraction*fullPct + 0.5)
+		b := item.b
+		remainingPct := int(*b.RemainingFraction*fullPct + 0.5)
 		if remainingPct < 0 {
 			remainingPct = 0
 		}
@@ -776,52 +854,45 @@ func agyHeadroom(provider string, thresholdPct int, body []byte) (Headroom, erro
 			remainingPct = fullPct
 		}
 		pctUsed := fullPct - remainingPct
-		duration := w.DurationMins
-		if duration == 0 {
-			duration = agyWindowDurationMins(name)
-		}
+		duration := agyWindowDurationMins(b.Window)
 		kind := codexWindowKind(duration)
 		if duration == 0 {
-			// No duration to band; fall back to the provider's own window key
+			// No duration to band; fall back to the provider's own window label
 			// so the guard still evaluates it rather than dropping it.
-			kind = name
+			kind = b.Window
 		}
 		lw := LimitWindow{
-			ID:           name,
+			ID:           b.ID,
 			Kind:         kind,
 			PercentUsed:  pctUsed,
 			PctRemaining: remainingPct,
 			DurationMins: duration,
 		}
-		reset := w.ResetAt
-		if reset == nil {
-			reset = w.ResetsAt
-		}
-		if reset != nil {
-			lw.ResetAt = *reset
+		if b.ResetTime != nil {
+			lw.ResetAt = *b.ResetTime
 		}
 		limits = append(limits, lw)
 		// The binding window is the most-used one; reporting a roomier window
 		// would let an exhausted one pass unnoticed.
 		if pctUsed > used {
 			used = pctUsed
-			if reset != nil {
-				resetAt = *reset
+			if b.ResetTime != nil {
+				resetAt = *b.ResetTime
 			}
 		}
 	}
 	if len(limits) == 0 {
-		return Headroom{}, errors.New("agy usage: no quota window carried remaining_fraction (unrecognized schema)")
+		return Headroom{}, errors.New("agy usage: no quota bucket carried remaining_fraction (unrecognized schema)")
 	}
 	return Headroom{
 		Provider:     provider,
 		Available:    used < thresholdPct,
 		PctRemaining: fullPct - used,
 		ResetAt:      resetAt,
-		PlanType:     planType,
 		Limits:       limits,
 	}, nil
 }
+
 
 // DeepSeekProber probes DeepSeek credit balance via its balance API.
 type DeepSeekProber struct {
