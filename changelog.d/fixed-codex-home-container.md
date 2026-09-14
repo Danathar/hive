@@ -1,1 +1,0 @@
-- Contributor containers now stage Codex credentials and configuration from `CODEX_HOME` when set, matching the setup preflight, and continue to use `~/.codex` otherwise.

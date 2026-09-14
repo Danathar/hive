@@ -11,6 +11,18 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-14 (v4.33.0)
+
+### Added
+
+- The dashboard now surfaces a findable **Auto-update** section in the governor Settings overlay's Hub tab, showing the configured update policy (enabled + schedule) and its live status — target line, current commit, commits behind, last attempt, and any failure reason ([#6962](https://github.com/hivecommons/hive/issues/6962)). Previously an operator could look through every Settings tab and find nothing about version and updating.
+
+### Fixed
+
+- The per-agent backend-auth canary no longer reports a bare HTTP 403 as an expired token ([#6500](https://github.com/hivecommons/hive/issues/6500)). A Copilot enterprise entitlement failure arrives as a `403 Forbidden` whose body is `unauthorized: not licensed to use Copilot`; when a pane rendered only the bare status, the fleet-health reason claimed `token-expired` and sent operators to a re-login that cannot fix an entitlement 403 — the "false claim of lack of credentials" this issue tracked. An auth-class line that is neither the explicit `not licensed` wording nor a recognised credential rejection (401 / bad credentials / invalid or expired key) is now classified `forbidden` ("authorization denied, cause undetermined") rather than asserting an expiry the code never verified. Such panes are still relaunched onto a refreshed `COPILOT_GITHUB_TOKEN`, so honest reporting costs no recovery.
+- Auto-update status is no longer reported as healthy when it is failing or unknown ([#6963](https://github.com/hivecommons/hive/issues/6963)). `/api/version` now returns an explicit `autoUpdate` object whose `healthy` flag is false for a failed, retrying, behind, or *unknown* state — an unavailable version comparison degrades to a visible "unknown" instead of a silent green ✓ — and the failure reason (e.g. a self-upgrade RBAC error) is surfaced so an operator can see *why* an update did not land, not just that it did not.
+- Contributor containers now stage Codex credentials and configuration from `CODEX_HOME` when set, matching the setup preflight, and continue to use `~/.codex` otherwise.
+
 ## 2026-09-14 (v4.32.3)
 
 ### Fixed
