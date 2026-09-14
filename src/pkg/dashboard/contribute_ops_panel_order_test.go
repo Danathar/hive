@@ -8,34 +8,38 @@ import (
 	"testing"
 )
 
-// The Operations tab's two command-center panels (My work / Ready-work queue)
-// were swapped vertically: My work now renders ABOVE the Ready-work queue (was
-// below it). This is a pure DOM reorder — same region (.ops-main), same ids,
-// same behavior, same travel/drag animations. These tests pin the new order and
-// prove both panels still hydrate (ids intact) after the swap.
+// The Operations tab's two command-center panels (the work panel / Ready-work
+// queue) were swapped vertically: the work panel now renders ABOVE the Ready-work
+// queue (was below it). This is a pure DOM reorder — same region (.ops-main), same
+// ids, same behavior, same travel/drag animations. These tests pin the new order
+// and prove both panels still hydrate (ids intact) after the swap.
+//
+// The work panel was titled "My work" when these tests were written; #6945
+// retitled it "Fleet work" (it always rendered the whole fleet). Only the heading
+// literal moved — the order, the region and every id below are unchanged.
 
-// TestOpsPanelOrderMyWorkAboveQueue pins the new vertical order: the "My work"
+// TestOpsPanelOrderFleetWorkAboveQueue pins the vertical order: the "Fleet work"
 // card head must precede the "Ready-work queue" card head in the served markup,
 // and both must still sit inside .ops-main (the main command-center area).
-func TestOpsPanelOrderMyWorkAboveQueue(t *testing.T) {
+func TestOpsPanelOrderFleetWorkAboveQueue(t *testing.T) {
 	body := renderContributePage(t)
 
 	mainStart := strings.Index(body, `class="ops-main"`)
 	railStart := strings.Index(body, `class="ops-rail"`)
-	myWork := strings.Index(body, `<h3>My work</h3>`)
+	fleetWork := strings.Index(body, `<h3>Fleet work</h3>`)
 	queue := strings.Index(body, `<h3>Ready-work queue</h3>`)
 
-	if mainStart < 0 || railStart < 0 || myWork < 0 || queue < 0 {
-		t.Fatalf("missing structure markers (main=%d rail=%d mywork=%d queue=%d)", mainStart, railStart, myWork, queue)
+	if mainStart < 0 || railStart < 0 || fleetWork < 0 || queue < 0 {
+		t.Fatalf("missing structure markers (main=%d rail=%d fleetwork=%d queue=%d)", mainStart, railStart, fleetWork, queue)
 	}
-	if mainStart >= myWork || myWork >= railStart {
-		t.Errorf("My work heading is not inside .ops-main (main=%d mywork=%d rail=%d)", mainStart, myWork, railStart)
+	if mainStart >= fleetWork || fleetWork >= railStart {
+		t.Errorf("Fleet work heading is not inside .ops-main (main=%d fleetwork=%d rail=%d)", mainStart, fleetWork, railStart)
 	}
 	if mainStart >= queue || queue >= railStart {
 		t.Errorf("Ready-work queue heading is not inside .ops-main (main=%d queue=%d rail=%d)", mainStart, queue, railStart)
 	}
-	if myWork >= queue {
-		t.Errorf("expected My work panel to render ABOVE Ready-work queue (mywork=%d, queue=%d)", myWork, queue)
+	if fleetWork >= queue {
+		t.Errorf("expected Fleet work panel to render ABOVE Ready-work queue (fleetwork=%d, queue=%d)", fleetWork, queue)
 	}
 }
 
@@ -46,7 +50,7 @@ func TestOpsPanelOrderHydrationIntact(t *testing.T) {
 	body := renderContributePage(t)
 
 	for _, want := range []string{
-		// My work panel: id, count badge, filter tabs, list container.
+		// Fleet work panel: id, count badge, filter tabs, list container.
 		`id="work-count"`,
 		`data-filter="all"`,
 		`data-filter="active"`,

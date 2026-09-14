@@ -1004,8 +1004,15 @@ code{background:var(--cc-bg);padding:2px 8px;border-radius:4px;font-size:.9rem}
 .ops-card-head h3{font-size:.95rem;color:var(--cc-text);margin:0}
 .ops-card-count{font-size:.75rem;color:var(--cc-muted);margin-left:auto}
 .ops-filters{display:flex;gap:4px;padding:12px 20px;border-bottom:1px solid var(--cc-border-2);flex-wrap:wrap}
-.ops-filter{background:var(--cc-bg);border:1px solid var(--cc-border);color:var(--cc-muted);font-size:.78rem;padding:4px 12px;border-radius:999px;cursor:pointer;font-family:inherit}
-.ops-filter.active{background:#1f6feb;border-color:var(--cc-accent-fg);color:#fff}
+/* .ops-scope (the Fleet work All/Mine chips, #6945) shares the chip LOOK with the
+   status filters and nothing else — the two are deliberately separate classes so
+   the status click handler cannot deactivate a scope chip, and vice versa. */
+.ops-filter,.ops-scope{background:var(--cc-bg);border:1px solid var(--cc-border);color:var(--cc-muted);font-size:.78rem;padding:4px 12px;border-radius:999px;cursor:pointer;font-family:inherit}
+.ops-filter.active,.ops-scope.active{background:#1f6feb;border-color:var(--cc-accent-fg);color:#fff}
+/* A hairline between the status chips and the scope chips: they are two
+   independent axes, and side by side with no divider they read as one row of
+   mutually exclusive choices. */
+.ops-filters__sep{width:1px;align-self:stretch;background:var(--cc-border-2);margin:0 6px}
 .work-list{max-height:520px;overflow-y:auto}
 .work-item{padding:14px 20px;border-bottom:1px solid var(--cc-border-2);cursor:pointer}
 .work-item:hover{background:rgba(88,166,255,.04)}
@@ -2555,7 +2562,7 @@ update();  // initial paint: copy block + branded UI in sync from first load
 </div>
 </div>
 <!-- Operations tab — MONITORING. The Connected-clankers list (with its per-row
-     trust / Revoke / Remove controls, still owner/read-write gated), My work
+     trust / Revoke / Remove controls, still owner/read-write gated), Fleet work
      queue, and the read-only Pipeline & policy panel. Split out of the former
      "Management & Operations" tab; the admin CONTROLS moved to the Management
      panel above, everything here stayed put. -->
@@ -2621,13 +2628,14 @@ Contributors subscribe to labels (e.g. <code>nvidia</code>) so matching issues a
 </div>
 </div>
 <div>
-<!-- Command center: MY WORK (this operator's in-flight items) stacked above the
-     READY-WORK QUEUE (issues waiting to be picked off, top = next up), and the live
-     DEV-LOG (a running chat log of the development, now in the rail). Both panels
-     are fed by REAL events — the queue from ActionableIssues (the same set
-     selectTask offers from), My work from the fleet snapshot. All read-only except
-     the queue's owner/read-write drag-reorder. Panel order: My work first, then
-     Ready-work queue — a pure vertical swap, no id/behavior change. -->
+<!-- Command center: FLEET WORK (in-flight items across the hive, filterable down
+     to the viewer's own) stacked above the READY-WORK QUEUE (issues waiting to be
+     picked off, top = next up), and the live DEV-LOG (a running chat log of the
+     development, now in the rail). Both panels are fed by REAL events — the queue
+     from ActionableIssues (the same set selectTask offers from), Fleet work from
+     the fleet snapshot. All read-only except the queue's owner/read-write
+     drag-reorder. Panel order: Fleet work first, then Ready-work queue — a pure
+     vertical swap, no id/behavior change. -->
 <!-- Your contribution (#6543): the signed-in contributor's OWN numbers — issues
      worked in the last 24h and all-time, how many of those produced a pull
      request, and how many failed. "Tasks completed" alone cannot tell a session
@@ -2644,13 +2652,30 @@ Contributors subscribe to labels (e.g. <code>nvidia</code>) so matching issues a
 <div class="cc-mine" id="cc-mine-body"><div class="ops-empty">Loading your stats&hellip;</div></div>
 <p class="ops-note" id="cc-mine-note" style="padding:0 20px 14px;margin:0"></p>
 </div>
+<!-- Fleet work (#6945): this panel was titled "My work" while rendering the work
+     of EVERY connected clanker to every visitor, anonymous ones included — the
+     data comes from the public /api/contribute/fleet snapshot and renderWork
+     never consulted an identity. Nothing about the data was wrong (a fleet-wide
+     view is the operator's view of their hive), but the possessive title claimed
+     a scope the contents did not honour, directly above "Your contribution",
+     which genuinely IS per-viewer. So the title now names what the panel holds,
+     and the scope the old title promised became a real, selectable filter:
+     All / Mine, alongside the existing status filters, on the same row. -->
 <div class="ops-card">
-<div class="ops-card-head"><h3>My work</h3><span class="ops-card-count" id="work-count"></span></div>
+<div class="ops-card-head"><h3>Fleet work</h3><span class="ops-card-count" id="work-count"></span></div>
 <div class="ops-filters" role="tablist">
 <button class="ops-filter active" data-filter="all">All</button>
 <button class="ops-filter" data-filter="active">Active</button>
 <button class="ops-filter" data-filter="review">Review requests</button>
 <button class="ops-filter" data-filter="done">Done</button>
+<!-- Scope chips. A SEPARATE class from .ops-filter (they share styling, not
+     wiring): the status handler deactivates every .ops-filter it finds, so
+     folding these in would make picking "Mine" silently clear the status
+     filter. data-scope=mine stays clickable while anonymous on purpose — the
+     empty state is what tells a signed-out viewer that signing in fills it. -->
+<span class="ops-filters__sep" aria-hidden="true"></span>
+<button class="ops-scope active" data-scope="all" title="Work from every connected clanker">All contributors</button>
+<button class="ops-scope" data-scope="mine" title="Only the work running under your GitHub account">Mine</button>
 </div>
 <div class="work-list" id="work-list"><div class="ops-empty">Loading work&hellip;</div></div>
 </div>
@@ -3000,7 +3025,7 @@ function activateTab(t,push){
   // opsPoll() (fleet/policy/work hydration) and ccStart() (the SSE command center)
   // are INDEPENDENT: a throw in one must never prevent the other from running. The
   // fleet panels predate the command center, so a command-center start failure must
-  // not leave Connected clankers / Pipeline & policy / My work stuck on "Loading…"
+  // not leave Connected clankers / Pipeline & policy / Fleet work stuck on "Loading…"
   // (regression #2574). Each is guarded on its own.
   if(dp==='tab-ops'&&!opsStarted){opsStarted=true;
     try{opsPoll();}catch(e){console.error('opsPoll start failed',e);}
@@ -3011,6 +3036,10 @@ function activateTab(t,push){
     // Triage ladder (#2612 part b): fetched after the tab opens so a slow GitHub
     // PR-link lookup never delays the page. A throw must not abort the panels above.
     try{ccTriagePoll();}catch(e){console.error('ccTriagePoll failed',e);}
+    // Who is looking (#6945) — needed by Fleet work's "Mine" scope, and resolved
+    // nowhere else on this tab. Guarded on its own like every sibling above: an
+    // identity lookup that throws must not leave the fleet panels on "Loading…".
+    try{ccResolveViewer();}catch(e){console.error('ccResolveViewer failed',e);}
   }
   // Leaderboard hydrates client-side on first open — read-only, no role gate.
   // The standings and the standing strip are independent: a throw in one must
@@ -3123,8 +3152,32 @@ function tierBadge(tier,extraCls){
 }
 // ccMeUsername is the logged-in viewer's GitHub username (resolved once from
 // /api/gh-user-auth/status, the SAME source the Me card uses). Empty when anonymous.
-// Used to SUBTLY highlight the viewer's own row in the Rankings list.
+// Used to SUBTLY highlight the viewer's own row in the Rankings list, and to scope
+// the Fleet work panel's "Mine" filter (#6945).
 var ccMeUsername='';
+// ccResolveViewer fills ccMeUsername on a tab that has no other reason to ask who
+// is looking. Every existing setter hangs off a DIFFERENT tab — loadMeStanding and
+// loadMeCard (Rankings, Profile) and ccLoadMine, which only assigns on a 2xx — so a
+// visitor who opens Operations directly and never leaves it had no resolved
+// identity at all, and "Mine" would have filtered everything away for a signed-in
+// contributor. Fires once per page; a failure leaves the viewer anonymous, which
+// is the safe reading (it hides nobody's work from the default All scope).
+var ccViewerResolved=false;
+function ccResolveViewer(){
+  if(ccViewerResolved)return;
+  ccViewerResolved=true;
+  if(ccMeUsername)return;
+  fetch('/api/gh-user-auth/status').then(function(r){return r.json();}).then(function(auth){
+    var who=(auth&&auth.logged_in&&auth.username)?auth.username:'';
+    if(!who||ccMeUsername===who)return;
+    ccMeUsername=who;
+    // Repaint anything already on screen that keys off identity: the work list
+    // (which may be sitting on an empty "Mine") and, if the standings happen to
+    // have rendered first, their self-highlight.
+    try{if(typeof renderWork==='function')renderWork(lastWork);}catch(e){console.error('work re-render after identity failed',e);}
+    if(typeof lbLastData!=='undefined'&&lbLastData){try{renderLeaderboard(lbLastData.contribs);}catch(e){}}
+  }).catch(function(e){console.error('viewer identity lookup failed',e);});
+}
 function lbRow(e,rank){
   var uname=e.github_username||'';
   var name=esc(uname);
@@ -3938,6 +3991,18 @@ document.querySelectorAll('.ops-filter').forEach(function(f){f.addEventListener(
   document.querySelectorAll('.ops-filter').forEach(function(x){x.classList.remove('active');});
   f.classList.add('active');
   currentFilter=f.getAttribute('data-filter');
+  renderWork(lastWork);
+});});
+// Fleet work scope (#6945): 'all' (every connected clanker, the long-standing
+// behaviour and still the default) or 'mine' (the viewer's own rows). A SECOND,
+// independent axis from currentFilter — selecting "Mine" must not disturb the
+// Active/Review/Done choice, which is why the two use different classes and two
+// handlers instead of one shared .ops-filter sweep.
+var currentScope='all';
+document.querySelectorAll('.ops-scope').forEach(function(f){f.addEventListener('click',function(){
+  document.querySelectorAll('.ops-scope').forEach(function(x){x.classList.remove('active');});
+  f.classList.add('active');
+  currentScope=f.getAttribute('data-scope');
   renderWork(lastWork);
 });});
 
@@ -4960,6 +5025,20 @@ function workMatchesFilter(w){
   if(currentFilter==='done')return w.status==='done';
   return true;
 }
+// workMatchesScope is the identity half of the Fleet work filter (#6945). The
+// comparison is the SAME one lbRow makes to highlight the viewer's own row in
+// the standings: case-insensitive, because the login a session hands us and the
+// case a profile was registered under are the same account spelled two ways.
+//
+// An anonymous viewer matches nothing — deliberately, and it is not an error:
+// every row IS somebody else's, and renderWork says so in words rather than
+// leaving an unexplained empty list.
+function workMatchesScope(w){
+  if(currentScope!=='mine')return true;
+  if(!ccMeUsername)return false;
+  var who=w&&w.github_username;
+  return !!who&&String(who).toLowerCase()===String(ccMeUsername).toLowerCase();
+}
 function statusPill(s){
   if(s==='in-progress')return '<span class="pill pill-progress">in-progress</span>';
   if(s==='review')return '<span class="pill pill-review">review</span>';
@@ -4978,12 +5057,32 @@ function renderWork(list){
   var shown;
   if(currentFilter==='done'){shown=(typeof ccCompletedWorkItems==='function')?ccCompletedWorkItems(30):[];}
   else{shown=list.filter(workMatchesFilter);}
+  // Scope is applied AFTER the status branch so it covers both sources — the
+  // in-flight array and the completed-activity rows "Done" is built from. Both
+  // carry github_username, so "Mine + Done" is as answerable as "Mine + Active".
+  shown=shown.filter(workMatchesScope);
   document.getElementById('work-count').textContent=shown.length+(shown.length===1?' item':' items');
   var el=document.getElementById('work-list');
   if(!shown.length){
-    var msg=(currentFilter==='done')
-      ?'No completed tasks yet — finished work will appear here.'
-      :('No work items in flight'+(currentFilter!=='all'?' for this filter.':'.'));
+    // An empty "Mine" is the one empty state that has a cause worth naming. For
+    // an anonymous viewer it is not "no work" at all — it is "we don't know who
+    // you are", so say that and reuse the Profile tab's .me-signin treatment
+    // rather than reporting a fleet-wide fact about a list scoped to nobody.
+    if(currentScope==='mine'&&!ccMeUsername){
+      el.innerHTML='<div class="me-signin"><b>Sign in with GitHub</b> to see your own work here. '
+        +'Switch back to <b>All contributors</b> for everything in flight across the hive.</div>';
+      return;
+    }
+    var msg;
+    if(currentScope==='mine'){
+      msg=(currentFilter==='done')
+        ?'You have no completed tasks yet — finished work will appear here.'
+        :('You have no work in flight'+(currentFilter!=='all'?' for this filter.':'.'));
+    }else{
+      msg=(currentFilter==='done')
+        ?'No completed tasks yet — finished work will appear here.'
+        :('No work items in flight'+(currentFilter!=='all'?' for this filter.':'.'));
+    }
     el.innerHTML='<div class="ops-empty">'+msg+'</div>';return;
   }
   // opsPoll re-renders this list every 4s. Without preserving state, an open
@@ -5324,7 +5423,7 @@ function ccQueueMatches(q){
   return hay.indexOf(ccQueueSearch)>=0;
 }
 function ccRenderQueue(flip){
-  // Item count badge, same style as "My work"'s #work-count — kept in sync on
+  // Item count badge, same style as "Fleet work"'s #work-count — kept in sync on
   // every render path. Populated FIRST so it stays set even if the container is absent.
   // (The interest re-float below only reorders ccQueue, never changes its length.)
   var qc=document.getElementById('queue-count');
@@ -5390,7 +5489,7 @@ function ccRenderQueue(flip){
     var qkey=ccQueueKey(q);
     var isNewQ=!flip&&qkey&&!ccKnownQueueKeys[qkey];
     // Show ALL of the issue's gh labels as pills (the backend already carries the
-    // full label set). "My work" items render every label the same way, so the
+    // full label set). "Fleet work" items render every label the same way, so the
     // queue is consistent with them. esc() guards each label.
     var labels=(q.labels&&q.labels.length)?('<div class="cc-q-labels">'+q.labels.map(function(l){return '<span class="pill pill-idle">'+esc(l)+'</span>';}).join('')+'</div>'):'';
     var next=(i===0)?'<span class="cc-q-next">next up</span>':'';
@@ -6078,7 +6177,7 @@ function ccRebuildLogFromActivity(){
   ccLogLines=src.map(ccNarrate);
   ccRenderLog();
 }
-// ccCompletedWorkItems derives "Done" My-work rows from the completed activity events
+// ccCompletedWorkItems derives "Done" Fleet-work rows from the completed activity events
 // in the shared store: the fleet work array holds ONLY in-flight tasks, so the "Done"
 // filter was always empty. Newest first, capped, deduped by task. Each row mirrors the
 // in-flight row shape so renderWork can display it.
@@ -6107,7 +6206,7 @@ function ccPollActivity(){
     for(var i=0;i<list.length;i++){if(ccIngestActivity(list[i]))added=true;}
     if(added)ccRebuildLogFromActivity();
     else if(!ccLogLines.length&&ccActivity.length)ccRebuildLogFromActivity();
-    // Keep the "Done" My-work view current from the (now-updated) completed events.
+    // Keep the "Done" Fleet-work view current from the (now-updated) completed events.
     if(added&&currentFilter==='done')renderWork(lastWork);
     // Reflect REAL connectivity: if SSE has never delivered a frame, we are running
     // on the polling fallback — say so rather than sitting on "connecting" forever.
