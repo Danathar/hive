@@ -7761,24 +7761,108 @@ test('#6664 a review cycle does not re-arm the next one off its own output', () 
   } finally { console.log = orig; teardown(relay); }
 });
 
-test('#6664 the review prompt is account-scoped, not scoped to one repo', () => {
+test('#6908 the review prompt is scoped to authorized repos, not the account', () => {
   const relay = loadRelay({});
   try {
-    const prompt = relay.buildReviewPrompt(['foo/bar']);
-    // The bug: `gh pr list --repo <one repo>` could never reach PRs anywhere
-    // else, and the cadence is per-completion so coverage never caught up.
-    assert.ok(!/--repo\s/.test(prompt),
-      `the review must not be narrowed to a single repo: ${prompt}`);
-    assert.match(prompt, /gh search prs --author @me --state open/,
-      'the account-wide search is what spans every repo the contributor filed in');
-    assert.match(prompt, /across every repository/);
-    // Shipped repos are a hint for ordering, never a filter.
-    assert.match(prompt, /most recently shipped work to foo\/bar, so start there/);
-    // ...and the prompt still works with nothing to hint at.
-    const bare = relay.buildReviewPrompt([]);
-    assert.ok(!/start there/.test(bare), `no hint when nothing shipped: ${bare}`);
-    assert.match(bare, /gh search prs --author @me --state open/);
+    relay.clearAuthorizedRepos();
+    ['foo/bar', 'foo/baz'].forEach(relay.recordAuthorizedRepo);
+    const prompt = relay.buildReviewPrompt(['foo/bar'], relay.getAuthorizedRepos(), 'ct-bot');
+
+    // The #6664 defect: one repo could never reach PRs anywhere else.
+    // The #6908 defect: the whole account reached PRs nobody authorized.
+    // The fix is the scope in between — every authorized repo, and only those.
+    assert.match(prompt, /gh pr list --repo foo\/bar --author ct-bot --state open/);
+    assert.match(prompt, /gh pr list --repo foo\/baz --author ct-bot --state open/);
+    assert.ok(!/gh search prs/.test(prompt),
+      `the account-wide search is the bug, not the fix: ${prompt}`);
+    assert.ok(!/across every repository/.test(prompt),
+      `"every repository" is the account, which is what #6908 reports: ${prompt}`);
+
+    // The instruction that makes scope load-bearing: the next sentence tells
+    // the agent to PUSH. An out-of-scope PR must be named as off limits, not
+    // merely left unlisted.
+    assert.match(prompt, /do not read, comment on, or push to a PR in any other repository/);
+
+    // Shipped repos order the list; they never shorten it.
+    assert.ok(prompt.indexOf('--repo foo/bar') < prompt.indexOf('--repo foo/baz'),
+      `the hinted repo must be listed first: ${prompt}`);
   } finally { teardown(relay); }
+});
+
+test('#6908 an unhinted authorized repo is still reviewed', () => {
+  // The half of #6664 that must survive: a PR filed in a repo that has shipped
+  // nothing SINCE the last cycle is still this relay's to follow up on. Scoping
+  // to reposShippedSinceReview would re-create the original starvation bug with
+  // a different list.
+  const relay = loadRelay({});
+  try {
+    relay.clearAuthorizedRepos();
+    ['old/repo', 'new/repo'].forEach(relay.recordAuthorizedRepo);
+    const prompt = relay.buildReviewPrompt(['new/repo'], relay.getAuthorizedRepos(), 'ct-bot');
+    assert.match(prompt, /--repo old\/repo /,
+      `a repo with nothing shipped this cycle is still authorized: ${prompt}`);
+  } finally { teardown(relay); }
+});
+
+test('#6908 no authorized repo means no review, never an account sweep', () => {
+  // The failure mode that matters: an empty scope must mean review NOTHING.
+  // Falling back to the account when the filter is empty is exactly the bug.
+  const relay = loadRelay({});
+  try {
+    relay.clearAuthorizedRepos();
+    assert.strictEqual(relay.buildReviewPrompt(['foo/bar'], [], 'ct-bot'), '',
+      'an empty authorization set must produce no prompt at all');
+    assert.strictEqual(relay.buildReviewPrompt([], relay.getAuthorizedRepos(), 'ct-bot'), '');
+  } finally { teardown(relay); }
+});
+
+test('#6908 the prompt names the hive identity, not @me', () => {
+  // `@me` resolves server-side to the TOKEN'S USER. Contributor mode keeps that
+  // resolution on purpose (#4044 rewrites to a bot identity only for staff), so
+  // on a PAT-backed session `--author @me` is the human operator — which is how
+  // the sweep surfaced hand-authored PRs.
+  const relay = loadRelay({});
+  try {
+    relay.clearAuthorizedRepos();
+    relay.recordAuthorizedRepo('foo/bar');
+    const scope = relay.getAuthorizedRepos();
+    assert.match(relay.buildReviewPrompt([], scope, 'ct-bot'), /--author ct-bot /);
+    assert.ok(!/--author @me/.test(relay.buildReviewPrompt([], scope, 'ct-bot')));
+    // Unset identity still works — the per-repo scope is what bounds reach,
+    // so the fallback degrades ordering, not authorization.
+    assert.match(relay.buildReviewPrompt([], scope, ''), /--author @me /);
+  } finally { teardown(relay); }
+});
+
+test('#6908 authorization comes from assignment', () => {
+  const relay = loadRelay({ backend: 'copilot' });
+  try {
+    relay.clearAuthorizedRepos();
+    assignTask(relay, 't-auth', 9);
+    assert.deepStrictEqual(relay.getAuthorizedRepos(), ['foo/bar'],
+      'a task_assign is what grants authority over a repo');
+  } finally { teardown(relay); }
+});
+
+test('#6908 a review cycle does not shrink the authorization set', () => {
+  // reposShippedSinceReview is cleared every cycle by design, and the cycle
+  // clears it at the same place it builds the prompt. If the authorization set
+  // were cleared alongside it — or were read from it — the review would go
+  // blind immediately after each run, which is the #6664 starvation bug
+  // wearing a different list.
+  //
+  // Driven through the REAL cycle rather than by poking the setter: the clear
+  // happens inside the completion handler, so a test that clears some other
+  // variable proves nothing about it.
+  const relay = completeAtCadence(null, SHIPPED_PANE, 't-survives');
+  const orig = console.log; console.log = () => {};
+  try {
+    assert.ok(relay.getCurrentTask(), 'the cycle must actually have started');
+    assert.deepStrictEqual(relay.getReposShippedSinceReview(), [],
+      'the per-cycle shipped list is cleared by the cycle, as before');
+    assert.deepStrictEqual(relay.getAuthorizedRepos(), ['foo/bar'],
+      'the authorization set must survive the cycle that consumed the shipped list');
+  } finally { console.log = orig; teardown(relay); }
 });
 
 test('#6664 the review prompt asks for the HIVE_VERDICT sentinel', () => {
@@ -7788,7 +7872,9 @@ test('#6664 the review prompt asks for the HIVE_VERDICT sentinel', () => {
   // inference that #5353 documents as having produced thirteen issues.
   const relay = loadRelay({});
   try {
-    const prompt = relay.buildReviewPrompt(['foo/bar']);
+    relay.clearAuthorizedRepos();
+    relay.recordAuthorizedRepo('foo/bar');
+    const prompt = relay.buildReviewPrompt(['foo/bar'], relay.getAuthorizedRepos(), 'ct-bot');
     assert.match(prompt, /HIVE_VERDICT: complete — <short reason>/);
     assert.match(prompt, /as the very last thing you output and on a line by itself/);
     assert.match(prompt, /Print it exactly once/);
@@ -7801,9 +7887,9 @@ test('#6664 the review prompt asks for the HIVE_VERDICT sentinel', () => {
   } finally { teardown(relay); }
 });
 
-test('#6664 the prompt the relay actually dispatches is the account-scoped one', () => {
+test('#6908 the prompt the relay actually dispatches is the scoped one', () => {
   // buildReviewPrompt being right is not the same as it being what reaches the
-  // agent; the bug lived at the call site, which built its own string inline.
+  // agent; the #6664 bug lived at the call site, which built its own string.
   //
   // Completing a task stops the agent and relaunches the CLI, so the review
   // prompt is QUEUED rather than typed (tmuxSendKeys gates on cliReady, #2203
@@ -7815,9 +7901,9 @@ test('#6664 the prompt the relay actually dispatches is the account-scoped one',
     const dispatched = relay.getPendingTask() ||
       relay.__tmuxSends().filter(c => /gh search prs|gh pr list/.test(c)).join('\n');
     assert.ok(dispatched, 'the review prompt was neither typed nor queued');
-    assert.match(dispatched, /gh search prs --author @me --state open/);
-    assert.ok(!/gh pr list --repo/.test(dispatched),
-      `the single-repo listing must be gone from the live prompt: ${dispatched}`);
+    assert.match(dispatched, /gh pr list --repo foo\/bar --author \S+ --state open/);
+    assert.ok(!/gh search prs/.test(dispatched),
+      `the account-wide search must be gone from the live prompt: ${dispatched}`);
     assert.match(dispatched, /HIVE_VERDICT: complete/);
   } finally { console.log = orig; teardown(relay); }
 });
