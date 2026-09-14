@@ -11,6 +11,16 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-14 (v4.31.0)
+
+### Added
+
+- Governor cadence mode resolution can now be scoped per repo, exposing each successfully scanned repo's pressure while preserving the aggregate default for existing hives ([#6916](https://github.com/hivecommons/hive/issues/6916)).
+
+### Fixed
+
+- Fixed the DCO squash-attribution gate re-flagging bot sign-offs on commits that had already landed on the default branch, which blocked every v4 to v5 sync pull request (#6923).
+
 ## 2026-09-14 (v4.30.1)
 
 ### Fixed
