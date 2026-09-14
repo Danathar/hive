@@ -177,6 +177,49 @@ someone else's behalf. That is why the post-merge checker has narrow per-commit
 waivers for already-merged history; waivers record a maintainer disposition, but
 they are not a substitute for signing new commits correctly.
 
+### How the DCO is enforced
+
+Four workflows check sign-offs, at different points and for different failure
+classes. The first two run at pull-request time, **while your branch is still
+writable** — if either fails, fix it by rewriting your branch as shown above.
+The last two report on protected-branch history that can no longer be
+rewritten; their failures are resolved by maintainer disposition, not by you.
+
+- **Copilot DCO** (`.github/workflows/copilot-dco.yml`) — runs on every pull
+  request. Every non-merge commit on the PR branch must carry a
+  `Signed-off-by:` trailer matching the commit author's email (or an
+  acceptable GitHub noreply form of it, as described above). This is the check
+  you will see most often; remediation is `git commit --amend -s` or
+  `git rebase --signoff`.
+- **DCO squash attribution** (`.github/workflows/dco-squash-attribution.yml`,
+  the "Sign-off survives the squash" check) — runs on every pull request.
+  Rejects a human-authored PR whose commits are signed off only by a bot
+  identity. GitHub's squash merge writes the landing commit with the *PR
+  author* as author while keeping the branch commit's message — and therefore
+  its bot `Signed-off-by:` — producing a human-authored commit signed off by a
+  bot on history that can no longer be fixed
+  ([#6798](https://github.com/hivecommons/hive/issues/6798)). So a sign-off
+  that is valid on each branch commit can still fail here. Fix: re-sign the
+  branch commits with your own identity (`git rebase --signoff` after setting
+  your `user.email`). The check is skipped when the PR author is itself a bot.
+- **DCO push-delta gate** (`.github/workflows/dco-push-delta.yml`) — runs on
+  direct pushes to `v4`/`v5` and checks exactly the commits that push
+  introduced ([#6756](https://github.com/hivecommons/hive/issues/6756)). This
+  is a detection gate, not a rejection gate: by the time it turns red, the
+  commits are already on the protected branch, so the failure is recorded and
+  dispositioned rather than fixed in place.
+- **Post-merge DCO trailer check** (`.github/workflows/dco-post-merge.yml`) —
+  hourly sweep of a rolling window of recent `v4`/`v5` history. It owns the
+  waiver accounting (`DCO_WAIVED_COMMITS` for single historical commits,
+  `DCO_ALLOWLIST_EMAILS` for maintainer-accepted identities) and files issues
+  on failures. The waiver semantics — what each instrument accepts and its
+  blast radius — are documented in
+  [`src/docs/v5-sync-policy.md`](src/docs/v5-sync-policy.md#inherited-dco-failures-from-v4).
+
+All four reuse the same trailer validation (`src/scripts/check-dco-trailers.sh`
+for the range-scanning gates), so they cannot disagree about what a valid
+sign-off looks like.
+
 ## Crediting issue authors
 
 When your PR resolves an issue somebody else filed, credit them on the commit with a `Co-authored-by:` trailer ([#6588](https://github.com/hivecommons/hive/issues/6588)). This is what turns "thanks, closing" into a contribution that GitHub actually records: a co-authored commit puts the filer in the repository's contributor list and on their own contribution graph.
@@ -201,6 +244,16 @@ Two things worth knowing if you write the trailer by hand instead:
 - **Co-authorship is attribution, not certification.** It does not sign off for anyone: the `Signed-off-by:` trailer is still yours alone, and a commit carrying only a `Co-authored-by:` still fails the DCO check. Adding a co-author never changes your own DCO obligations, and never satisfies theirs.
 
 Credit the filer of the issue the PR fixes, not everyone who commented. If several people's issues are genuinely resolved by one PR, add one trailer each.
+
+## Closing issues filed by humans
+
+A merged fix is not the same thing as a resolved symptom. Issue [#6500](https://github.com/hivecommons/hive/issues/6500) was closed after a fix merged while the reported symptom persisted; the reporter could not reopen it (GitHub only lets users with write access, or whoever closed the issue, reopen it — and hive issues are closed by the App bot), so the same problem came back as two fresh bug reports ([#6762](https://github.com/hivecommons/hive/issues/6762), [#6767](https://github.com/hivecommons/hive/issues/6767)). To keep the loop closed:
+
+- **Do not close a human-filed `bug` issue on "fix merged" alone.** Comment instead: link the fix PR and ask the reporter to confirm — for example, `Fix merged in #<pr> — @<reporter> please confirm the symptom is gone.` Close only after the reporter confirms, or after 7 days with no objection (say in the closing comment which of the two it was).
+- **Enforced at PR-request time.** The hive's PR-request watcher (`pkg/github.validatePRRequestClaims`) rewrites `Closes #N` to `Refs #N` in an outgoing PR body when the referenced issue looks like a human-filed bug (a bug-family label — `bug`, `kind/bug`, `type/bug`, `type:bug`, `adoption-blocker` — with no `— hive:` attribution trailer and a non-`Bot` author), so a merge cannot auto-close it under the App bot. The reporter (or a maintainer with write access) can opt back in by adding `hive: reporter-confirmed` to the issue body or applying that label; the gate then lets `Closes #N` through untouched. Tracked in [#6781](https://github.com/hivecommons/hive/issues/6781).
+- **Bot- and agent-filed issues are exempt** — verify against the stated evidence (a green run, a passing check) and close when it is green.
+- **If a reporter says a closed issue is not fixed, reopen it** (or file the reopen on their behalf if they cannot) rather than letting them re-file from scratch. A comment from the original reporter on a closed issue saying the symptom persists is always grounds to reopen.
+- **Reporters can reopen their own issue with `/reopen`.** Comment `/reopen` (optionally followed by what you are still seeing) on the closed issue and the `Issue Reopen Command` workflow reopens it. This exists because GitHub's own permission model will not let a reporter without write access reopen an issue the App bot closed — the dead end that produced [#6762](https://github.com/hivecommons/hive/issues/6762). It is limited to the issue's own author and to people with write access. It is a backstop, not the primary control: the PR-request gate above is what should stop a human-filed bug being auto-closed in the first place.
 
 ## Pull requests
 

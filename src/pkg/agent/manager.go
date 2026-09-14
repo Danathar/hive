@@ -524,6 +524,17 @@ type Manager struct {
 	project                       ProjectContext
 	copilotAuthToken              string
 	copilotAuthTokenAuthoritative bool
+	// copilotAuthTokenRejected records that the currently-held authoritative
+	// Copilot token has been observed being rejected upstream by GitHub's
+	// Copilot API ("not licensed to use Copilot" — #6500/#6767). Once set, the
+	// reconciler stops treating the authoritative claim as inviolate: a
+	// different, real token seen in the shared CLI config (an in-agent
+	// /login recovery) is PROMOTED over the known-bad authoritative token
+	// instead of being clobbered by it 30 s later. Cleared whenever
+	// setCopilotToken installs a value that differs from the current one, so
+	// a successful recovery (or dashboard re-login) rearms authoritative
+	// precedence for whatever fresh token the operator supplied.
+	copilotAuthTokenRejected bool
 	claudeAuthToken               string
 	uidMap                        *UIDMap
 	appAuth                       AppTokenMinter

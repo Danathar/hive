@@ -242,6 +242,11 @@ func (c *Client) handleOnePRRequest(ctx context.Context, path string, nowFn func
 	}
 	var req PRRequest
 	if err := json.Unmarshal(data, &req); err != nil {
+		// A torn read is not a malformed request: leave it for the next tick
+		// rather than destroying it. See quarantinable.
+		if !quarantinable(path, nowFn()) {
+			return
+		}
 		// A malformed request can never succeed; move it aside so it stops being
 		// retried every tick, and leave a result explaining why.
 		c.writePRResult(path, PRResponse{OK: false, Error: "invalid JSON: " + err.Error(), At: nowFn().UTC().Format(time.RFC3339)})
@@ -321,6 +326,13 @@ func (c *Client) handleOnePRRequest(ctx context.Context, path string, nowFn func
 	if err := c.validatePRRequestContent(ctx, req); err != nil {
 		if reason, policy := prContentMetadataReason(err); policy {
 			c.rejectPRRequest(path, req, "content", reason, nowFn)
+			return
+		}
+		// A head cut from the wrong branch (hivecommons/hive#6807) is as
+		// permanent as leaked metadata: retrying the same request can never
+		// shrink the divergence — only re-cutting the branch can.
+		if reason, policy := prBaseDriftReason(err); policy {
+			c.rejectPRRequest(path, req, "base-drift", reason, nowFn)
 			return
 		}
 		c.failPRRequest(path, req, err, nowFn)
@@ -567,7 +579,7 @@ func statUID(_ []byte, path string) int {
 func (c *Client) writePRResult(reqPath string, resp PRResponse) {
 	out := strings.TrimSuffix(reqPath, ".json") + ".result.json"
 	if b, err := json.MarshalIndent(resp, "", "  "); err == nil {
-		_ = os.WriteFile(out, b, 0o644)
+		_ = writeRequestFile(out, b)
 	}
 }
 
@@ -583,7 +595,7 @@ func WritePRRequest(dir string, req PRRequest) (string, error) {
 	}
 	name := fmt.Sprintf("%s-%d.json", sanitizeAgentName(req.Agent), time.Now().UnixNano())
 	path := filepath.Join(dir, name)
-	if err := os.WriteFile(path, b, 0o644); err != nil {
+	if err := writeRequestFile(path, b); err != nil {
 		return "", err
 	}
 	return path, nil

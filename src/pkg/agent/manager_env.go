@@ -269,7 +269,7 @@ func (m *Manager) agentEnvPairs(agent *AgentProcess) []agentEnvPair {
 		}
 	}
 	if m.copilotAuthToken != "" {
-		vars = append(vars, agentEnvPair{"COPILOT_GITHUB_TOKEN", m.copilotAuthToken, true})
+		vars = append(vars, agentEnvPair{copilotTokenEnvVar, m.copilotAuthToken, true})
 	}
 	// Point the GitHub MCP server at the App installation token so PRs, issue
 	// comments, and merges are authored by the App bot ("<slug>[bot]") — NOT by

@@ -2505,6 +2505,43 @@ func (h *ContributeWSHub) isTaskInCooldownKey(key string) bool {
 	return true
 }
 
+// cooldownExpiryKey returns when this issue's COMPLETION cooldown lapses, or
+// the zero time when none is in force (#6902 evidence).
+//
+// Read-only by construction: unlike isTaskInCooldownKey it never prunes an
+// expired entry, because it is called only to explain a refusal that gate has
+// already made on this same pass — pruning here would mean the explanation
+// mutated the state it is explaining. It reads the SAME map and the SAME
+// per-key window, so the timestamp it reports is the one actually enforced.
+func (h *ContributeWSHub) cooldownExpiryKey(key string) time.Time {
+	if key == "" || !h.cooldownEnabled() {
+		return time.Time{}
+	}
+	h.completedMu.Lock()
+	defer h.completedMu.Unlock()
+	t, ok := h.completedTasks[key]
+	if !ok {
+		return time.Time{}
+	}
+	return t.Add(h.cooldownForLocked(key))
+}
+
+// failureCooldownExpiryKey returns when this issue's FAILURE cooldown (or the
+// longer quarantine window, whichever currently applies) lapses. Zero when no
+// failure is on record. Read-only for the same reason as cooldownExpiryKey.
+func (h *ContributeWSHub) failureCooldownExpiryKey(key string) time.Time {
+	if key == "" {
+		return time.Time{}
+	}
+	h.completedMu.Lock()
+	defer h.completedMu.Unlock()
+	t, ok := h.failedTasks[key]
+	if !ok {
+		return time.Time{}
+	}
+	return t.Add(h.failureCooldownForLocked(key))
+}
+
 // recordTaskFailure books a task_failed against an issue (#2435). It stamps the
 // short failure cooldown and advances the issue's consecutive-failure counter
 // (a permanent failure advances it by permanentFailureWeight rather than one),
@@ -4606,8 +4643,14 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 func (h *ContributeWSHub) heartbeatLoop(c *ContributorConnection) {
 	ticker := time.NewTicker(wsHeartbeatInterval)
 	defer ticker.Stop()
+	h.heartbeatLoopWithTicks(c, ticker.C, wsHeartbeatTimeout)
+}
 
-	for range ticker.C {
+// heartbeatLoopWithTicks contains the heartbeat state machine. The production
+// wrapper supplies its 30-second ticker and 90-second timeout; tests supply a
+// finite tick stream so the loop ordering can be exercised without waiting.
+func (h *ContributeWSHub) heartbeatLoopWithTicks(c *ContributorConnection, ticks <-chan time.Time, timeout time.Duration) {
+	for range ticks {
 		// Stop as soon as this socket has been deregistered (kubestellar/hive#5090).
 		//
 		// The disconnect defer in HandleWS runs on the READ goroutine the moment
@@ -4641,12 +4684,12 @@ func (h *ContributeWSHub) heartbeatLoop(c *ContributorConnection) {
 		lastPong := c.lastPong
 		c.mu.Unlock()
 
-		if time.Since(lastPong) > wsHeartbeatTimeout {
+		if time.Since(lastPong) > timeout {
 			h.logger.Info("[contribute-ws] heartbeat timeout",
 				"id", c.connID,
 				"username", c.profile.GitHubUsername,
 				"last_pong_age_ms", time.Since(lastPong).Milliseconds(),
-				"heartbeat_timeout_ms", wsHeartbeatTimeout.Milliseconds(),
+				"heartbeat_timeout_ms", timeout.Milliseconds(),
 			)
 			closeWithReason(c.ws, websocket.CloseGoingAway, "heartbeat timeout: no pong within the heartbeat window")
 			return
@@ -6332,9 +6375,10 @@ func (h *ContributeWSHub) selectTask(c *ContributorConnection) *WSMessage {
 			if !decision.admitted {
 				switch decision.reason {
 				case contributorAdmissionReasonOpenPRClaim:
-					h.logger.Info("[contribute-ws] skip: issue already claimed by an open PR",
+					h.logger.Info("[contribute-ws] skip: issue already claimed by a PR",
 						"repo", repo.Full, "number", number,
-						"pr_url", decision.claim.PRURL, "pr_author", decision.claim.PRAuthor)
+						"pr_url", decision.claim.PRURL, "pr_author", decision.claim.PRAuthor,
+						"merged", decision.claim.MergedPR)
 				case contributorAdmissionReasonWorkflowBlocked:
 					h.logger.Info("[contribute-ws] skip: issue is blocked by workflow state",
 						"repo", repo.Full, "number", number)

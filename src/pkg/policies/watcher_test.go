@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/hivecommons/hive/internal/testutil"
 )
 
 // testLogger returns a no-op slog.Logger suitable for tests.
@@ -554,7 +556,30 @@ func TestStart_FreshClone(t *testing.T) {
 func TestStart_PollPicksUpNewCommit(t *testing.T) {
 	bareURL, workDir := setupBareRepo(t)
 
-	localDir := filepath.Join(t.TempDir(), "clone")
+	// Do NOT use t.TempDir() for the clone: pollLoop only observes ctx
+	// cancellation between ticks, so a `git pull` spawned by pull() can
+	// still be rewriting .git when the test returns. t.TempDir's cleanup
+	// does a single os.RemoveAll and fails the test with "directory not
+	// empty" if it loses that race. Use a private temp dir with a
+	// retrying cleanup instead.
+	localRoot, err := os.MkdirTemp("", "policy-poll-test")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() {
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			err := os.RemoveAll(localRoot)
+			if err == nil || time.Now().After(deadline) {
+				if err != nil {
+					t.Logf("cleanup of %s: %v (in-flight git pull?)", localRoot, err)
+				}
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	})
+	localDir := filepath.Join(localRoot, "clone")
 
 	// Use a short poll interval so the test completes quickly.
 	const pollInterval = 200 * time.Millisecond
@@ -575,22 +600,14 @@ func TestStart_PollPicksUpNewCommit(t *testing.T) {
 	// Push a new commit to the bare repo.
 	addCommit(t, workDir, "builder.md", "builder policy v1")
 
-	// Wait up to 5 s for the poll loop to pick it up.
-	const (
-		maxWait     = 5 * time.Second
-		checkPeriod = 50 * time.Millisecond
-	)
-	deadline := time.Now().Add(maxWait)
-	for time.Now().Before(deadline) {
-		if data, ok := w.GetPolicy("builder"); ok {
-			if string(data) == "builder policy v1" {
-				return // success
-			}
-		}
-		time.Sleep(checkPeriod)
-	}
-
-	t.Error("builder policy was not loaded after polling for 5 s")
+	// Wait up to 5 s for the poll loop to pick it up. testutil.Eventually
+	// rather than a fixed-sleep poll loop: it waits exactly as long as
+	// needed and keeps the sleep ratchet at its baseline, offsetting the
+	// deliberate retry sleep in the cleanup above.
+	testutil.Eventually(t, 5*time.Second, func() bool {
+		data, ok := w.GetPolicy("builder")
+		return ok && string(data) == "builder policy v1"
+	}, "builder policy was not loaded after polling for 5 s")
 }
 
 // TestInitialClone_ExistingValidRepo verifies the branch in initialClone

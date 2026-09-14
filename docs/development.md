@@ -5,7 +5,7 @@ This guide describes the local workflow for contributing to the Hive Go codebase
 ## Prerequisites
 
 - Git and GitHub CLI (`gh`) for normal issue and PR workflows.
-- Go `1.25.6`, as declared by [`src/go.mod`](../src/go.mod).
+- Go `1.26.6`, as declared by [`src/go.mod`](../src/go.mod) — when the two disagree, go.mod wins.
 - Docker or Podman if you are exercising containerized contributor relay or deployment paths.
 - `tmux` for local agent/contributor workflows that attach CLIs to terminal sessions.
 - `just` if you use the repository's helper recipes (`brew install just` on macOS, or install from the `just` project for your platform).
@@ -88,18 +88,20 @@ go test $PKGS         -short -race -count=1                      # test (rest i/
 
 The workflow shards for wall-clock only: `pkg/hub` and `pkg/agent` are each
 sliced across several jobs by test *function* (they are single packages too
-slow to run whole), and everything else from `go list ./pkg/... ./cmd/...` is
+slow to run whole), and everything else from
+`go list ./pkg/... ./cmd/... ./internal/...` is
 partitioned into balanced buckets. Every shard also runs with `-v` and posts
 its slowest test functions to the job's step summary — look there before
 reaching for a local profile when the gate feels slow. Scheduled runs add
 `-shuffle=on` (the seed is in the log); the PR gate does not, so an
-order-dependent test shows up as a filed issue rather than as a red PR. The union of the shards is the whole of `./pkg/...` and
-`./cmd/...`, so what changes between your loop and the gate is the *flags*, not
-the coverage. To reproduce the gate locally in one unsharded run:
+order-dependent test shows up as a filed issue rather than as a red PR. The union of the shards is the whole of `./pkg/...`,
+`./cmd/...`, and `./internal/...` (the shared test helpers in
+`internal/testutil`), so what changes between your loop and the gate is the
+*flags*, not the coverage. To reproduce the gate locally in one unsharded run:
 
 ```bash
 cd src
-go test ./pkg/... ./cmd/... -short -race -count=1
+go test ./pkg/... ./cmd/... ./internal/... -short -race -count=1
 ```
 
 What each flag changes:
@@ -137,7 +139,7 @@ Two flags that appear in CI but are *not* part of the PR gate:
   test is.
 
 Neither the PR gate nor the cron runs `./test/...`: both enumerate
-`./pkg/... ./cmd/...` explicitly, and the integration suite additionally needs
+`./pkg/... ./cmd/... ./internal/...` explicitly, and the integration suite additionally needs
 the `integration` build tag and a live hive, as described above.
 
 ## Format and lint expectations
@@ -199,7 +201,8 @@ The quickest operator path remains Docker Compose from the root README:
 cp src/hive.yaml.example src/hive.yaml
 # src/.env, NOT ./.env — `-f src/docker-compose.yaml` makes `src/` the project
 # directory, so that is the `.env` Compose reads. A root `.env` is ignored.
-echo "HIVE_GITHUB_TOKEN=ghp_..." > src/.env
+install -m 600 /dev/null src/.env   # holds live tokens — create it 0600, never world-readable
+echo "HIVE_GITHUB_TOKEN=ghp_..." >> src/.env
 # REQUIRED: the dashboard's auth proxy refuses to start without it.
 printf 'HIVE_DASHBOARD_TOKEN=%s\n' "$(openssl rand -hex 32)" >> src/.env
 docker compose -f src/docker-compose.yaml up -d
@@ -221,8 +224,10 @@ Current public recipes are centered on the **contribute** workflow:
 - `just contribute-setup <backend>` — one-time setup for GitHub auth, hub registration, and backend readiness.
 - `just contribute-hive [backend] [mode]` — start contributing work to a hive, using a container by default or local mode when requested.
 - `just contribute-status`, `just contribute-browse`, and `just contribute-stop` — inspect, discover, or stop contributor relay activity.
+- `just contribute-move [backend]` — move a contributor relay to another machine by reissuing its credential instead of hand-copying `contributor.env`; see [contributor-relay.md](../src/docs/contributor-relay.md#option-2--reissue-the-credential-just-contribute-move).
 - `just contribute-k8s [namespace] [outfile] [image_tag]` — print Kubernetes manifests for a headless contributor workload; it prints or writes the manifest you request and does not apply it.
 - `just hive-api <endpoint>` and `just hive-api-docs` — inspect hub API endpoints for the configured hive.
+- `just backend-smoke [backends]` — opt-in live smoke of the contributor CLI integration (`bin/test_backend_smoke.sh`) with this machine's own credentials; keyless machines still run the drift and stub wire-contract checks. See [backend-smoke.md](../src/docs/backend-smoke.md).
 
 Deployment and development tasks that are not listed by `just --list` are not public recipes today. Use the Go, Docker Compose, and Kubernetes commands documented in the README and `src/docs/` for those workflows.
 

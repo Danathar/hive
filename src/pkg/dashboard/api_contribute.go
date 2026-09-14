@@ -1549,6 +1549,19 @@ select.admin-act{min-width:0;max-width:100%%}
    every row and the whole queue "blinked". Mirrors .clanker-row.cc-enter above. */
 .cc-q-item{display:flex;align-items:flex-start;gap:10px;padding:11px 20px;border-bottom:1px solid var(--cc-border-2);position:relative}
 .cc-q-item.cc-q-enter{animation:cc-popin .35s ease}
+/* Withheld section (#6902). Deliberately quieter than the ready rows: this is a
+   diagnostic drawer an operator opens to answer "why isn't this queued?", not a
+   second queue competing for attention. No grip, no menu, no drag affordance. */
+.cc-withheld-toggle{display:block;width:100%%;text-align:left;padding:10px 20px;background:none;border:0;color:var(--cc-muted-2);font:inherit;font-size:.85rem;cursor:pointer}
+.cc-withheld-toggle:hover{color:var(--cc-fg)}
+.cc-withheld-toggle[aria-expanded="true"] .cc-withheld-caret{display:inline-block;transform:rotate(90deg)}
+.cc-withheld-caret{display:inline-block;transition:transform .15s ease}
+@media (prefers-reduced-motion:reduce){.cc-withheld-caret{transition:none}}
+.cc-withheld{max-height:420px;overflow-y:auto}
+.cc-w-item{padding:9px 20px 9px 38px;border-bottom:1px solid var(--cc-border-2);opacity:.72}
+.cc-w-item:last-child{border-bottom:0}
+.cc-w-title{font-size:.9rem}
+.cc-w-reason{display:block;margin-top:2px;font-size:.8rem;color:var(--cc-muted-2)}
 .cc-q-item:first-child{background:rgba(88,166,255,.05)}
 /* Drag handle (grab bar) — owner/read-write only. Hidden unless the queue root
    carries .cc-q-draggable (set by initAdmin after /api/role). Reduced-motion and
@@ -2106,7 +2119,7 @@ select.admin-act{min-width:0;max-width:100%%}
 <option value="pi" data-install="" data-host-install="curl -fsSL https://pi.dev/install.sh | sh" data-model-flag="--model" data-default-model="">Pi</option>
 <option value="goose" data-install="" data-host-install="# Install Goose: https://github.com/block/goose/releases\n# Install Ollama: https://ollama.com/download\nollama pull llama3.2:3b\nexport GOOSE_PROVIDER=ollama GOOSE_MODEL=llama3.2:3b" data-model-flag="" data-default-model="">Goose</option>
 <option value="litellm" data-install="" data-host-install="npm i -g @anthropic-ai/claude-code" data-model-flag="--model" data-default-model="" data-env="# Your own LiteLLM proxy — exported locally, never sent to the hive\nexport HIVE_LITELLM_ENDPOINT=https://your-litellm-host:4000\nexport HIVE_LITELLM_API_KEY=sk-your-litellm-key  # only if your proxy needs one">LiteLLM (Claude Code + your proxy)</option>
-<option value="openrouter" data-install="" data-host-install="npm i -g @anthropic-ai/claude-code" data-model-flag="--model" data-default-model="" data-env="# OpenRouter — Claude Code routed through OpenRouter\nexport HIVE_LITELLM_ENDPOINT=https://openrouter.ai/api/v1\nexport HIVE_LITELLM_API_KEY=sk-or-...  # your OpenRouter key">OpenRouter (Claude Code + your key)</option>
+<option value="openrouter" data-install="" data-host-install="npm i -g @anthropic-ai/claude-code" data-model-flag="--model" data-default-model="" data-env="# OpenRouter — Claude Code routed through OpenRouter (litellm backend)\nexport HIVE_LITELLM_ENDPOINT=https://openrouter.ai/api/v1\nexport HIVE_LITELLM_API_KEY=sk-or-...  # your OpenRouter key\n# Pick a model with the Model field above — any OpenRouter model ID works,\n# e.g. anthropic/claude-sonnet-4 (exported as AGENT_MODEL)">OpenRouter (Claude Code + your key)</option>
 <option value="vllm" data-install="" data-host-install="npm i -g @anthropic-ai/claude-code" data-model-flag="--model" data-default-model="" data-env="# vLLM — self-hosted OpenAI-compatible server\nexport HIVE_LITELLM_ENDPOINT=http://your-vllm-host:8000/v1\nexport HIVE_LITELLM_API_KEY=sk-your-vllm-key  # only if your server needs one">vLLM (self-hosted)</option>
 <option value="llm-d" data-install="" data-host-install="npm i -g @anthropic-ai/claude-code" data-model-flag="--model" data-default-model="" data-env="# llm-d — self-hosted OpenAI-compatible endpoint\nexport HIVE_LITELLM_ENDPOINT=http://your-llm-d-host:8000/v1\nexport HIVE_LITELLM_API_KEY=sk-your-llm-d-key  # only if your endpoint needs one">llm-d (self-hosted)</option>
 <option value="bob" data-install="" data-host-install="curl -fsSL https://bob.ibm.com/download/bobshell.sh | bash" data-model-flag="" data-default-model="" data-env="# Bob (IBM bobshell) — get a key at https://bob.ibm.com (Scope: Inference).\n# Exported locally, never sent to the hive.\nexport BOBSHELL_API_KEY=your-bob-api-key">Bob</option>
@@ -2254,6 +2267,11 @@ var K8S_HEADLESS_BACKENDS={claude:1,litellm:1,copilot:1,codex:1,watsonx:1,goose:
 // even once.
 var HOST_ONLY_BACKENDS=['other'];
 function isHostOnly(c){return HOST_ONLY_BACKENDS.indexOf(c)>=0;}
+// openrouter/vllm/llm-d/watsonx are UI flavors of the litellm backend: the
+// Justfile only accepts 'litellm' (#6821), so every generated command must
+// say litellm while the option keeps its flavor-specific env exports.
+var SETUP_BACKEND={openrouter:'litellm',vllm:'litellm','llm-d':'litellm',watsonx:'litellm'};
+function setupBackend(v){return SETUP_BACKEND[v]||v;}
 var modelRow=document.getElementById('model-row');
 var modelInput=document.getElementById('model-input');
 function updateCmds(){update();}
@@ -2264,6 +2282,7 @@ function update(){
 var os=osSel.value;
 var prereq=prereqByOS[os]||prereqByOS.macos;
 var cli=sel.value;
+var backend=setupBackend(cli);
 var opt=sel.options[sel.selectedIndex];
 var mode=modeSel.value;
 var modelFlag=opt.getAttribute('data-model-flag')||'';
@@ -2295,16 +2314,16 @@ if(mode==='kubernetes'){
 // line — but model/env exports still belong before contribute-setup so the
 // generated ConfigMap picks them up. If the chosen backend has no headless
 // mode, prepend a visible warning comment (the Justfile also warns on stderr).
-var warn=K8S_HEADLESS_BACKENDS[cli]?'':'# WARNING: '+cli+' has no headless mode; it will refuse work in a cluster.\n# Pick Claude Code, LiteLLM, Copilot, Codex or Goose for Kubernetes.\n';
+var warn=K8S_HEADLESS_BACKENDS[backend]?'':'# WARNING: '+cli+' has no headless mode; it will refuse work in a cluster.\n# Pick Claude Code, LiteLLM, Copilot, Codex or Goose for Kubernetes.\n';
 var k8sPre=envLines+modelLine;
-cmds.textContent=warn+k8sTpl.replace('PREREQ',prereq).replace('ROLEHELP',roleHelp).replace(/CLI/g,cli).replace('just contribute-setup',k8sPre+'just contribute-setup');
+cmds.textContent=warn+k8sTpl.replace('PREREQ',prereq).replace('ROLEHELP',roleHelp).replace(/CLI/g,backend).replace('just contribute-setup',k8sPre+'just contribute-setup');
 }else if(mode==='host'){
 tpl=hostTpl;
 install=opt.getAttribute('data-host-install');
 if(!install)install='# '+cli+' uses your existing gh auth';
-cmds.textContent=tpl.replace('PREREQ',prereq).replace('INSTALL',install.replace(/\\n/g,'\n')).replace('ROLEHELP',roleHelp).replace(/CLI/g,cli).replace('just contribute-setup',preLines+'just contribute-setup');
+cmds.textContent=tpl.replace('PREREQ',prereq).replace('INSTALL',install.replace(/\\n/g,'\n')).replace('ROLEHELP',roleHelp).replace(/CLI/g,backend).replace('just contribute-setup',preLines+'just contribute-setup');
 }else{
-cmds.textContent=containerTpl.replace('PREREQ',prereq).replace('ROLEHELP',roleHelp).replace(/CLI/g,cli).replace('just contribute-setup',preLines+'just contribute-setup');
+cmds.textContent=containerTpl.replace('PREREQ',prereq).replace('ROLEHELP',roleHelp).replace(/CLI/g,backend).replace('just contribute-setup',preLines+'just contribute-setup');
 }
 if(typeof syncBranded==='function')syncBranded();
 }
@@ -2416,7 +2435,7 @@ function defaultPromptFor(v){
     '  2. git clone -b {{HIVE_BRANCH}} https://github.com/hivecommons/hive && cd hive\n'+
     '  3. export HIVE_HUB='+hubURL+'\n'+
     '     For multiple hives, HIVE_HUB can be comma-separated when HIVE_REGISTRATION_TOKEN has matching tokens in the same order.\n'+
-    '  4. just contribute-setup '+v+'\n'+
+    '  4. just contribute-setup '+setupBackend(v)+'\n'+
     '  5. just contribute-hive\n\n'+
     'Explain what each step does before I run it, and stop if anything looks wrong.';
 }
@@ -2755,6 +2774,18 @@ It clears automatically when the period elapses. An operator can shorten or disa
      rate-limit settings + the viewer's daily quota. Rendered by ccRenderQueueEnd()
      only when the FULL queue is shown (no active filter). Hidden until hydrated. -->
 <div id="cc-q-end" style="display:none"></div>
+<!-- Withheld (#6902): the candidates Hive knows about and is NOT offering, with
+     the reason the admission ladder recorded when it refused them. Collapsed by
+     default and fetched only on first expand (?withheld=1), so the normal ready
+     queue stays uncluttered and nobody pays for an explanation they did not ask
+     for. Read-only: these rows carry no grip and no reorder menu, because they
+     are not in the offer order — displaying one must never make it assignable. -->
+<div id="cc-withheld-wrap" style="display:none;border-top:1px solid var(--cc-border-2)">
+  <button type="button" id="cc-withheld-toggle" class="cc-withheld-toggle" aria-expanded="false" aria-controls="cc-withheld">
+    <span class="cc-withheld-caret">&#x25B8;</span> <span id="cc-withheld-label">Withheld</span>
+  </button>
+  <div class="cc-withheld" id="cc-withheld" style="display:none"></div>
+</div>
 <p class="ops-note" style="padding:10px 20px 14px;margin:0">The stack of admissible issues waiting to be picked off &mdash; top is next up. When a clanker grabs one you&rsquo;ll see it fly from here to that clanker. Derived from this hive&rsquo;s actionable backlog; read-only.</p>
 </div>
 <!-- Opportunistic Work (#2592): a small, CALM discovery panel of admissible
@@ -5238,6 +5269,81 @@ function ccSaveInterests(next){
     })
     .catch(function(){});
 }
+// ═══ Withheld section (#6902) ════════════════════════════════════════════════
+//
+// "Why isn't this issue in the Contributor Queue?" used to be unanswerable from
+// this page: every admission refusal was a bare skip server-side and the
+// only symptom was an absent row. The server now retains the reason from the
+// SAME sweep that produced the queue, and this renders it.
+//
+// Two rules this code exists to keep:
+//   1. The reason TEXT comes from the server (item.detail). There is no
+//      client-side reason vocabulary to drift out of step with the admission
+//      ladder — if the UI invented its own wording it would eventually describe
+//      a rule the server no longer applies.
+//   2. A withheld row is inert. No grip, no ⋯ menu, no reorder, no hold control.
+//      It is not in the offer order and displaying it must never make it
+//      assignable.
+var ccWithheld=[];          // last fetched withheld rows
+var ccWithheldOpen=false;   // collapsed by default
+var ccWithheldLoaded=false; // fetched at least once
+// ccWithheldFetch pulls the explanation on demand. The opt-in query parameter is
+// what keeps the normal queue payload byte-identical for every other caller, so
+// this is the only place that asks for it.
+function ccWithheldFetch(){
+  return fetch('/api/contribute/queue?withheld=1')
+    .then(function(r){return r.json();})
+    .then(function(d){
+      ccWithheld=(d&&d.withheld)||[];
+      ccWithheldLoaded=true;
+      ccRenderWithheld();
+    })
+    .catch(function(){});
+}
+function ccWithheldRowHTML(w){
+  var key=w.key||((w.repo||'')+'#'+(w.number||''));
+  // Same issue-link helper the ready rows use, so a withheld row links to
+  // GitHub exactly as its offerable neighbours do.
+  var link=ccIssueLinkHTML(w,key);
+  // Evidence link, when the refusing gate had one. Only the claiming PR is a URL
+  // today; every other reason's evidence is already inside detail.
+  var ev='';
+  if(w.claim_url)ev=' &middot; <a href="'+esc(w.claim_url)+'" target="_blank" rel="noopener noreferrer">pull request</a>';
+  return '<div class="cc-w-item"><div class="cc-w-title">'+link+' '+esc(w.title||'(untitled)')+'</div>'+
+    '<span class="cc-w-reason">'+esc(w.detail||w.reason||'')+ev+'</span></div>';
+}
+function ccRenderWithheld(){
+  var wrap=document.getElementById('cc-withheld-wrap');
+  var body=document.getElementById('cc-withheld');
+  var label=document.getElementById('cc-withheld-label');
+  var toggle=document.getElementById('cc-withheld-toggle');
+  if(!wrap||!body||!label||!toggle)return;
+  // The section only appears once we know there is something to explain, so a
+  // hive with a fully-admitted backlog sees no extra chrome at all.
+  if(ccWithheldLoaded&&!ccWithheld.length&&!ccWithheldOpen){wrap.style.display='none';return;}
+  wrap.style.display='';
+  label.textContent=ccWithheldLoaded?(ccWithheld.length+' withheld'):'Withheld';
+  toggle.setAttribute('aria-expanded',ccWithheldOpen?'true':'false');
+  body.style.display=ccWithheldOpen?'':'none';
+  if(!ccWithheldOpen)return;
+  if(!ccWithheldLoaded){body.innerHTML='<div class="ops-empty">Loading&hellip;</div>';return;}
+  if(!ccWithheld.length){body.innerHTML='<div class="ops-empty">Nothing is being withheld &mdash; every known candidate is either offerable or on hold.</div>';return;}
+  body.innerHTML=ccWithheld.map(ccWithheldRowHTML).join('');
+}
+function ccInitWithheld(){
+  var toggle=document.getElementById('cc-withheld-toggle');
+  if(!toggle)return;
+  toggle.addEventListener('click',function(){
+    ccWithheldOpen=!ccWithheldOpen;
+    ccRenderWithheld();
+    // Fetch lazily on first expand, then refresh on each subsequent expand so a
+    // reopened drawer is not showing a stale answer.
+    if(ccWithheldOpen)ccWithheldFetch();
+  });
+  // One cheap count-only fetch on load so the operator can SEE that there is
+  // something to explain without opening the drawer first.
+  ccWithheldFetch();
+}
 function ccInitInterestsEditor(){
   var btn=document.getElementById('cc-interests-add-btn');
   if(btn)btn.addEventListener('click',ccAddInterestFromInput);
@@ -6138,6 +6244,7 @@ function ccStart(){
   // live queue stream, so each is guarded.
   try{ccInitQueueSearch();}catch(e){console.error('queue search init failed',e);}
   try{ccInitInterestsEditor();}catch(e){console.error('interests editor init failed',e);}
+  try{ccInitWithheld();}catch(e){console.error('withheld section init failed',e);}
   try{ccStartOpportunistic();}catch(e){console.error('opportunistic init failed',e);}
   if(!('EventSource' in window)){ccSetLive('poll');ccQueuePoll();return;}
   function connect(){
@@ -6773,7 +6880,7 @@ func (s *Server) handleContributeStatus(w http.ResponseWriter, r *http.Request) 
 		// queue/assignment projection so disabled repositories, holds, cooldowns,
 		// dependency gates, in-flight work and configured filters cannot make this
 		// endpoint advertise work that the relay will reject as no_matching_work.
-		snap := s.contributeHub.admissionQueueSnapshot(readyQueueDefaultLimit, false)
+		snap := s.contributeHub.admissionQueueSnapshot(readyQueueDefaultLimit, withheldNone)
 		actionable = snap.offerableTotal
 		candidates = snap.candidateTotal
 	} else {
@@ -6838,7 +6945,7 @@ func (s *Server) handleAPIv1Queue(w http.ResponseWriter, r *http.Request) {
 	}
 	items, total := []ReadyQueueItem{}, 0
 	if s.contributeHub != nil {
-		items, total = s.contributeHub.admissionQueueRange(limit, offset, false)
+		items, total = s.contributeHub.admissionQueueRange(limit, offset, withheldNone)
 	}
 	jsonResponse(w, map[string]any{
 		"queue":    items,
@@ -7064,14 +7171,26 @@ func (s *Server) handleContributeQueue(w http.ResponseWriter, r *http.Request) {
 		// is in shadow mode (#4246, default off) — the additive withheld /
 		// coverage diagnostics from the SAME sweep. With the toggle off the
 		// response is exactly the pre-diagnostics payload.
-		diag := s.convergenceDiagnosticsEnabled()
-		snap := s.contributeHub.admissionQueueSnapshot(readyQueueDefaultLimit, diag)
+		//
+		// #6902 adds an explicit opt-in on top: ?withheld=1 asks for the FULL
+		// admission explanation (every gate, not only convergence). It is opt-in
+		// precisely so the default payload every existing client already parses
+		// stays byte-identical — a queue view that does not render the Withheld
+		// section should not pay for it either.
+		scope := s.contributeQueueWithheldScope(r)
+		snap := s.contributeHub.admissionQueueSnapshot(readyQueueDefaultLimit, scope)
 		queue = snap.queue
 		resp["queue_total"] = snap.offerableTotal
 		resp["held_total"] = snap.heldTotal
-		if diag {
+		if scope.collects() {
 			resp["withheld"] = snap.withheld
 			resp["admission_coverage"] = snap.coverage
+		}
+		if scope == withheldAll {
+			// The count is of what the sweep RETAINED, which the limit bounds —
+			// stated separately from the rendered rows so a truncated list does
+			// not read as the whole population.
+			resp["withheld_total"] = len(snap.withheld)
 		}
 	}
 	resp["queue"] = queue

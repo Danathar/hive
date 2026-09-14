@@ -28,6 +28,19 @@ var (
 func (m *Manager) markProviderErrorLocked(agent *AgentProcess, match providerErrorMatch, now time.Time) time.Duration {
 	if status, ok := classifyBackendAuthStatus(match.Class, match.Line); ok {
 		agent.markBackendAuthLocked(status, match.Line, now)
+		// #6767: an unlicensed verdict against a copilot agent is direct
+		// upstream evidence that whatever Copilot token this agent is
+		// actually using has no license. If the hive currently treats a
+		// token as AUTHORITATIVE, that same token is the one being pinned
+		// into every agent's environment (COPILOT_GITHUB_TOKEN) and into
+		// the shared CLI config, so the "not licensed" verdict IS a verdict
+		// on the authoritative token. Latch that here so syncCopilotToken
+		// stops clobbering an operator's recovery /login with the known-bad
+		// authoritative token. Cleared as soon as setCopilotToken installs
+		// a different value (recovery succeeded, or dashboard re-login).
+		if status == BackendAuthUnlicensed && agent.Config.Backend == "copilot" && m.copilotAuthTokenAuthoritative {
+			m.copilotAuthTokenRejected = true
+		}
 	}
 	if !agent.ProviderErrorBackoffUntil.IsZero() && now.Before(agent.ProviderErrorBackoffUntil) &&
 		agent.ProviderErrorClass == match.Class && agent.ProviderErrorLine == match.Line {
