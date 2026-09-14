@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-14 (v4.30.0)
+
+### Added
+
+- The Operations tab now answers "why isn't this issue in the Contributor Queue?" ([#6902](https://github.com/hivecommons/hive/issues/6902)). The queue splits into **Ready**, **On hold** (the operator's own parked rows, unchanged) and a new **Withheld** section, collapsed by default, listing every candidate Hive knows about but is not offering — with the reason the admission pass recorded and the evidence behind it: the claiming pull request, the blocking dependency, a cooldown's expiry, the assignee, or which contributor filter matched. Previously every one of those decisions was a bare skip inside the admission ladder: the reason was computed and thrown away, so an absent row was the only symptom and the `candidate_items` vs `actionable_items` gap had no explanation. The reasons are retained from the *same* sweep that produces the Ready queue rather than recomputed by a second rule set, so a Withheld row cannot contradict what assignment actually does, and a shared table-driven test asserts for every exclusion cause that `selectTask` refuses it, Ready omits it, and Withheld explains it — the three together are what stop the queue projection and the assignment path from drifting apart. Nothing about admission changes: a withheld row is inert, carries no reorder or drag affordance, and never becomes assignable because it is displayed. The explanation is opt-in at `GET /api/contribute/queue?withheld=1`, so the default payload stays byte-identical for existing clients, and it is bounded by the same limit as the queue, computed per request, never cached or persisted.
+
 ## 2026-09-14 (v4.29.7)
 
 ### Fixed
