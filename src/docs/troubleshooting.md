@@ -332,6 +332,47 @@ a login prompt: it badged the agent 🔑, and — because a valid token was on d
 auto-restarted it straight back into the same 403, which looked like the agent
 crash-looping. Hive no longer treats a 403 as a login signal; a 401 still is.
 
+## Every Copilot agent says "You are not licensed to use Copilot"
+
+```
+ ✗ You are not licensed to use Copilot. (Request ID: CF24:249477:13194BA:1505534:6AA2A42E)
+```
+
+The wording points at your GitHub seat, but the whole fleet failing **at once**,
+against an entitlement nobody changed, usually means the hive is presenting a
+Copilot token the account no longer owns — not that your licence lapsed
+([#6500](https://github.com/hivecommons/hive/issues/6500)). Check the seat first
+at <https://github.com/settings/copilot>; if it is active, this is the hive's
+problem, and the recovery is:
+
+1. Open any agent's Terminal and run **`/login`** with a currently-licensed
+   identity. This writes the new token into the Copilot CLI's shared
+   `config.json`.
+2. Wait about 30 seconds for the session reconciler's next tick.
+
+Within that tick the hive **promotes** the token you just logged in with to its
+durable store and then moves the fleet onto it: agents whose `backend_auth`
+reads `unlicensed` or `token-expired` (see
+[fleet-health.md](fleet-health.md#agent-backend-auth-health-canary-6558)) are
+relaunched onto the new credential, and healthy agents get it pushed into their
+session environment for their next relaunch. You should not have to restart
+agents by hand.
+
+Two log lines tell you which way it went:
+
+| line | meaning |
+| --- | --- |
+| `promoted in-agent login token to the durable store` | your `/login` won; the relaunch onto it follows immediately |
+| `replaced stale CLI identity with authoritative token` | the hive overrode your `/login` with a token it considers authoritative — that token is the one being refused |
+
+If you see the second line, the offending credential is the hive's own
+configured one: re-run the dashboard's Copilot login (or fix
+`COPILOT_GITHUB_TOKEN` in the deployment) rather than logging in inside an
+agent, because a dashboard login is authoritative and an in-agent one is not.
+
+Relaunching is deliberately limited to panes that have actually been refused, so
+a token rotation never destroys an agent's in-flight work.
+
 ## The terminal looks frozen — no new output, and reopening it doesn't help
 
 You are almost certainly **scrolled back**, not looking at a halted agent.
