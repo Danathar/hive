@@ -1554,6 +1554,13 @@ select.admin-act{min-width:0;max-width:100%%}
 .cc-mine-tile.is-pr .cc-mine-val{color:var(--cc-green)}
 .cc-mine-lbl{font-size:.68rem;letter-spacing:.03em;text-transform:uppercase;color:var(--cc-muted);margin-top:3px}
 .cc-mine-sub{font-size:.68rem;color:var(--cc-muted-2);margin-top:2px}
+/* When the body carries a message instead of tiles (signed out, no profile yet,
+   or a load fault — #6937) the tile grid would squeeze that one sentence into a
+   94px column, so the grid steps aside for a plain block. The message itself is
+   the Profile tab's .me-signin, reused verbatim; only its trailing margin is
+   dropped because the card's own note sits directly under it. */
+.cc-mine.is-message{display:block}
+.cc-mine.is-message .me-signin{margin-bottom:0}
 /* ── My label interests (#2637) — contributor-declared label affinity ───────────
    A quiet self-service editor on the queue card: chips for the labels this viewer
    subscribed to, plus an add field. Shown only to a signed-in contributor. Matching
@@ -2635,9 +2642,12 @@ Contributors subscribe to labels (e.g. <code>nvidia</code>) so matching issues a
      fourteen times, and the PR count is also what auto-promotion actually reads,
      so showing it tells a contributor what they are being measured on instead of
      leaving them to count their own PRs on GitHub. Every field already existed on
-     ContributorProfile; nothing here is a new measurement. Hidden until
-     ccLoadMine() confirms the viewer has a contributor profile on THIS hive — an
-     anonymous or unregistered visitor has no numbers of their own to show. -->
+     ContributorProfile; nothing here is a new measurement. Starts hidden and is
+     revealed by ccLoadMine() once the server has answered — with the tiles for a
+     registered contributor, and otherwise with a .me-signin line saying WHY there
+     are no numbers (#6937). It used to stay hidden for an anonymous viewer, which
+     made an identity-dependent panel indistinguishable from a page that simply
+     had nothing more to say. -->
 <div class="ops-card" id="cc-mine-card" style="display:none;margin-bottom:20px">
 <div class="ops-card-head"><h3>Your contribution</h3><span class="ops-card-count" id="cc-mine-tier"></span><!-- Your own completions/hour, last 7 days. Same series as the quota trend;
      hydrated by ccMetricsPoll once metrics and identity have both loaded. --><span class="spark spark-inline" id="spark-mine" title="Your completions per hour, last 7 days"></span></div>
@@ -6392,18 +6402,31 @@ function ccQuotaHTML(variant){
 var ccMineData=null;   // last /api/contribute/me payload, null until first load
 var ccMineLast=0;      // epoch ms of the last fetch, for the throttle
 var ccMineMinGap=30000;
+// Sentinel returned by a status branch that has already painted the card, so
+// the render step below can tell "handled" from "a 200 arrived in a shape we
+// cannot read" instead of treating both as nothing to do.
+var ccMineHandled={};
 function ccLoadMine(force){
   var now=Date.now();
   if(!force&&ccMineLast&&(now-ccMineLast)<ccMineMinGap)return;
   ccMineLast=now;
   fetch('/api/contribute/me').then(function(r){
     // 401 (anonymous) and 403 (no profile on this hive) are the NORMAL answers
-    // for a visitor, not failures: the card simply stays hidden. Only a real
-    // transport/parse fault reaches the catch below.
-    if(!r.ok)return null;
+    // for a visitor, not failures — but they are still ANSWERS, and the card now
+    // renders them instead of staying hidden (#6937). Hiding it meant a
+    // signed-out viewer saw a page that looked complete, with nothing to suggest
+    // that signing in would reveal anything. The Profile tab already drew this
+    // distinction with .me-signin; Operations draws the same one, same class.
+    if(r.status===401){ccRenderMineSignIn();return ccMineHandled;}
+    if(r.status===403){ccRenderMineNoProfile(ccMeUsername);return ccMineHandled;}
+    // Anything else non-2xx is a fault, not a statement about who is looking.
+    if(!r.ok){console.error('contribution stats load failed: HTTP '+r.status);ccRenderMineError();return ccMineHandled;}
     return r.json();
   }).then(function(d){
-    if(!d||!d.github_username)return;
+    if(d===ccMineHandled)return;
+    // A 200 we cannot read is a BUG, not an absent profile — saying so is the
+    // same call renderMeError makes on the Profile tab.
+    if(!d||!d.github_username){console.error('contribution stats payload unusable',d);ccRenderMineError();return;}
     ccMineData=d;
     // Adopt the profile's STORED username when we have no viewer identity yet.
     // The metrics rings are keyed on that exact string, so this is also what lets
@@ -6414,7 +6437,44 @@ function ccLoadMine(force){
     // Paint the sparkline immediately if metrics already landed; otherwise the
     // next ccMetricsPoll picks it up.
     try{ccRenderMineSpark();}catch(e){}
-  }).catch(function(e){console.error('contribution stats load failed',e);});
+  }).catch(function(e){console.error('contribution stats load failed',e);ccRenderMineError();});
+}
+// ccRenderMineMessage reveals the card carrying ONE sentence in place of the
+// tiles. The tier chip, sparkline and PR note are cleared alongside it: each of
+// them annotates numbers that are not on screen, and a stale tier left over from
+// a previous render would be the only identity claim on an anonymous page.
+function ccRenderMineMessage(html){
+  var card=document.getElementById('cc-mine-card');
+  var body=document.getElementById('cc-mine-body');
+  if(!card||!body)return;
+  body.classList.add('is-message');
+  body.innerHTML='<div class="me-signin">'+html+'</div>';
+  var tier=document.getElementById('cc-mine-tier');if(tier)tier.textContent='';
+  var spark=document.getElementById('spark-mine');if(spark)spark.innerHTML='';
+  var note=document.getElementById('cc-mine-note');if(note)note.innerHTML='';
+  card.style.display='';
+}
+// Anonymous viewer (401): a prompt, not an error — the same register the Profile
+// tab's renderMeSignIn uses, named for the stats this card actually shows.
+function ccRenderMineSignIn(){
+  ccRenderMineMessage('<b>Sign in with GitHub</b> to see your own contribution stats '
+    +'&mdash; issues worked, PRs produced, and your trust tier on this hive.');
+}
+// Signed in, but no contributor profile on this hive yet (403). The username is
+// whatever identity the page already resolved; it is routinely empty on the
+// Operations tab, where nothing else fetches the viewer, so the sentence has to
+// read correctly without it.
+function ccRenderMineNoProfile(username){
+  var who=username?('<b>'+esc(username)+'</b>, you'):'You';
+  ccRenderMineMessage(who+' don’t have a contributor profile on this hive yet. '
+    +'Ship a task to start your card.');
+}
+// A transport, status or parse fault is shown AS a fault. Anonymous, profile-less
+// and broken used to render identically — as absence — so a bug here looked
+// exactly like a visitor who simply had no numbers.
+function ccRenderMineError(){
+  ccRenderMineMessage('Your contribution stats could not be loaded. This is a bug, '
+    +'not a problem with your account &mdash; the details are in the browser console.');
 }
 // ccMineTile renders one stat tile: a number, its label, and an optional short
 // sub-line that qualifies it (never decorates it).
@@ -6425,11 +6485,14 @@ function ccMineTile(val,label,sub,cls){
     (sub?('<div class="cc-mine-sub">'+esc(sub)+'</div>'):'')+
   '</div>';
 }
-// ccRenderMine paints the four tiles and reveals the card. Idempotent.
+// ccRenderMine paints the four tiles and reveals the card. Idempotent, and it
+// undoes the message layout: a viewer who signs in mid-session gets the grid
+// back rather than tiles stacked in one 94px column.
 function ccRenderMine(){
   var card=document.getElementById('cc-mine-card');
   var body=document.getElementById('cc-mine-body');
   if(!card||!body||!ccMineData)return;
+  body.classList.remove('is-message');
   var d=ccMineData;
   var num=function(x){return (typeof x==='number'&&isFinite(x))?x:0;};
   // The 24h tile is only honest when an hourly series actually backs it. A
