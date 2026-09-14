@@ -71,7 +71,7 @@ func TestAdmissionDiagnostics_OffModeAddsNothing(t *testing.T) {
 	}
 
 	// Snapshot without diagnostics collects nothing beyond the queue.
-	snap := hub.admissionQueueSnapshot(readyQueueDefaultLimit, false)
+	snap := hub.admissionQueueSnapshot(readyQueueDefaultLimit, withheldNone)
 	if snap.withheld != nil {
 		t.Fatalf("withDiagnostics=false must not collect withheld rows, got %v", snap.withheld)
 	}
@@ -91,7 +91,7 @@ func TestAdmissionDiagnostics_BlockedDependencyIsExplained(t *testing.T) {
 	assertQueue(t, hub, 700)
 	assertAssigns(t, hub, 700)
 
-	snap := hub.admissionQueueSnapshot(readyQueueDefaultLimit, true)
+	snap := hub.admissionQueueSnapshot(readyQueueDefaultLimit, withheldConvergence)
 	if got := queueNumbers(snap.queue); len(got) != 1 || got[0] != 700 {
 		t.Fatalf("queue offered %v, want [700]", got)
 	}
@@ -149,7 +149,7 @@ func TestAdmissionDiagnostics_UnknownDependencyIsUnknownNotFalse(t *testing.T) {
 	diagShadow(t, s)
 
 	assertQueue(t, hub, 700)
-	snap := hub.admissionQueueSnapshot(readyQueueDefaultLimit, true)
+	snap := hub.admissionQueueSnapshot(readyQueueDefaultLimit, withheldConvergence)
 	if got := withheldNumbers(snap.withheld); len(got) != 1 || got[0] != 601 {
 		t.Fatalf("withheld %v, want [601]", got)
 	}
@@ -175,7 +175,7 @@ func TestAdmissionDiagnostics_PositiveControls(t *testing.T) {
 	diagShadow(t, s)
 
 	// #601's dependency is satisfied; #700 has no record. Both admitted.
-	snap := hub.admissionQueueSnapshot(readyQueueDefaultLimit, true)
+	snap := hub.admissionQueueSnapshot(readyQueueDefaultLimit, withheldConvergence)
 	if got := queueNumbers(snap.queue); len(got) != 2 || got[0] != 601 || got[1] != 700 {
 		t.Fatalf("queue offered %v, want [601 700]", got)
 	}
@@ -193,7 +193,7 @@ func TestAdmissionDiagnostics_FlipsWithoutRestart(t *testing.T) {
 	hub, s := depTestHub(t, map[string]*beads.Store{"scanner": store})
 	diagShadow(t, s)
 
-	snap := hub.admissionQueueSnapshot(readyQueueDefaultLimit, true)
+	snap := hub.admissionQueueSnapshot(readyQueueDefaultLimit, withheldConvergence)
 	if got := withheldNumbers(snap.withheld); len(got) != 1 || got[0] != 601 {
 		t.Fatalf("withheld %v, want [601]", got)
 	}
@@ -201,7 +201,7 @@ func TestAdmissionDiagnostics_FlipsWithoutRestart(t *testing.T) {
 	if err := store.Close(blockerID); err != nil {
 		t.Fatalf("closing blocker: %v", err)
 	}
-	snap = hub.admissionQueueSnapshot(readyQueueDefaultLimit, true)
+	snap = hub.admissionQueueSnapshot(readyQueueDefaultLimit, withheldConvergence)
 	if len(snap.withheld) != 0 {
 		t.Fatalf("withheld %v after satisfaction, want none", snap.withheld)
 	}
@@ -215,7 +215,7 @@ func TestAdmissionDiagnostics_FlipsWithoutRestart(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("reopening blocker: %v", err)
 	}
-	snap = hub.admissionQueueSnapshot(readyQueueDefaultLimit, true)
+	snap = hub.admissionQueueSnapshot(readyQueueDefaultLimit, withheldConvergence)
 	if got := withheldNumbers(snap.withheld); len(got) != 1 || got[0] != 601 {
 		t.Fatalf("withheld %v after reopening, want [601] — no latched status", got)
 	}
@@ -232,7 +232,7 @@ func TestAdmissionDiagnostics_PartialLedgerCoverage(t *testing.T) {
 	s.deps.BeadStoreLoadFailures = 1
 	diagShadow(t, s)
 
-	snap := hub.admissionQueueSnapshot(readyQueueDefaultLimit, true)
+	snap := hub.admissionQueueSnapshot(readyQueueDefaultLimit, withheldConvergence)
 	cov := snap.coverage
 	if !cov.Partial || cov.StoresRead != 1 || cov.StoresFailed != 1 {
 		t.Fatalf("coverage %+v, want partial with 1 read / 1 failed", cov)
@@ -345,7 +345,7 @@ func TestAdmissionDiagnostics_OpenPRClaimIsNotAConvergenceDiagnostic(t *testing.
 		return ghpkg.IssueClaim{}, false
 	}
 
-	snap := hub.admissionQueueSnapshot(readyQueueDefaultLimit, true)
+	snap := hub.admissionQueueSnapshot(readyQueueDefaultLimit, withheldConvergence)
 	if got := queueNumbers(snap.queue); len(got) != 1 || got[0] != 700 {
 		t.Fatalf("queue %v, want [700]", got)
 	}
@@ -383,7 +383,7 @@ func TestAdmissionDiagnostics_WithheldIsBounded(t *testing.T) {
 	hub, s := depTestHub(t, map[string]*beads.Store{"scanner": store})
 	diagShadow(t, s)
 
-	snap := hub.admissionQueueSnapshot(1, true)
+	snap := hub.admissionQueueSnapshot(1, withheldConvergence)
 	if len(snap.withheld) > 1 {
 		t.Fatalf("withheld exceeded limit: %d", len(snap.withheld))
 	}

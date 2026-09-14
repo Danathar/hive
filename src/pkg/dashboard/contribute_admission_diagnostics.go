@@ -1,6 +1,10 @@
 package dashboard
 
 import (
+	"fmt"
+	"net/http"
+	"strings"
+
 	"github.com/hivecommons/hive/pkg/config"
 	"github.com/hivecommons/hive/pkg/convergence"
 	"github.com/hivecommons/hive/pkg/worksource"
@@ -63,6 +67,32 @@ type AdmissionWithheldItem struct {
 	// blocker (Ready=False) from irreducible uncertainty (Ready=Unknown).
 	Observed string `json:"observed,omitempty"`
 	Ready    string `json:"ready,omitempty"`
+
+	// ── #6902 evidence ────────────────────────────────────────────────────────
+	//
+	// Every field below is omitempty and populated only by the gate that owns
+	// it, so the #4246 convergence payload above is byte-identical to what it
+	// emitted before this vocabulary was generalised. None of it is new data:
+	// each value is something the refusing gate already held at the moment it
+	// said no.
+
+	// Detail is the one-line English for this refusal, rendered server-side so
+	// the operator UI never carries a second copy of the reason vocabulary —
+	// the same "one admission path" rule that governs the decisions themselves.
+	Detail string `json:"detail,omitempty"`
+	// ClaimURL / ClaimAuthor are the open pull request that claims this issue
+	// (reason open_pr_claim). Public metadata from the governor's claim ledger.
+	ClaimURL    string `json:"claim_url,omitempty"`
+	ClaimAuthor string `json:"claim_author,omitempty"`
+	// CooldownUntil is when a completion or failure cooldown lapses, RFC3339 in
+	// UTC, so a client can render a countdown without guessing the window.
+	CooldownUntil string `json:"cooldown_until,omitempty"`
+	// Assignees are the logins the skip-assigned gate saw on the issue.
+	Assignees []string `json:"assignees,omitempty"`
+	// Filter names WHICH contributor filter rejected the candidate ("title",
+	// "author" or "label"), because "a filter" is not actionable when three are
+	// configured.
+	Filter string `json:"filter,omitempty"`
 }
 
 // AdmissionCoverage reports, per snapshot, how much of the bead ledger the
@@ -112,6 +142,43 @@ func (s *Server) convergenceDiagnosticsEnabled() bool {
 	return s.deps.Config.ConvergenceMode() == config.ConvergenceModeShadow
 }
 
+// convergenceWithheldScope is the scope the #4246 surfaces ask for: the
+// convergence subset in shadow mode, nothing at all otherwise. It is what the
+// SSE hello frame uses, so that frame's contract is unchanged by #6902.
+func (s *Server) convergenceWithheldScope() withheldScope {
+	if s.convergenceDiagnosticsEnabled() {
+		return withheldConvergence
+	}
+	return withheldNone
+}
+
+// contributeQueueWithheldScope resolves what GET /api/contribute/queue should
+// retain for this request (#6902).
+//
+// ?withheld=1 is an explicit opt-in for the FULL admission explanation and
+// outranks the convergence toggle, because the gates it explains are enforced
+// whether or not convergence is rolled out — an operator asking "why isn't this
+// queued?" needs the answer in the default configuration. Without the
+// parameter the behaviour is exactly what it was: the convergence subset in
+// shadow mode, and an unchanged payload otherwise.
+func (s *Server) contributeQueueWithheldScope(r *http.Request) withheldScope {
+	if r != nil && queryFlagEnabled(r.URL.Query().Get("withheld")) {
+		return withheldAll
+	}
+	return s.convergenceWithheldScope()
+}
+
+// queryFlagEnabled reads a boolean query parameter the forgiving way callers
+// actually write them: 1/true/yes/on, case-insensitive. An absent or
+// unrecognised value is false, so a typo never silently enables a surface.
+func queryFlagEnabled(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
 // admissionCoverageFromSweep projects the sweep's ledger-coverage facts into
 // the snapshot-level report.
 func (h *ContributeWSHub) admissionCoverageFromSweep(sweep *contributorAdmissionSweep) AdmissionCoverage {
@@ -137,9 +204,15 @@ func withheldItemFromDecision(repoFull string, ref worksource.Ref, title, url st
 		Title:              title,
 		URL:                url,
 		Reason:             d.Reason,
+		Detail:             withheldReasonLabel(d.Reason),
 		Blockers:           d.Blockers,
 		ObservedRecord:     d.ObservedRecord,
 		ObservedGeneration: d.ObservedGeneration,
+	}
+	// Name the blockers in the prose when the evaluator found them: "a dependency
+	// is still open" is the rule, "#4321 is still open" is the answer.
+	if len(d.Blockers) > 0 {
+		item.Detail = fmt.Sprintf("%s: %s", item.Detail, strings.Join(d.Blockers, ", "))
 	}
 	if c, ok := d.Condition(convergence.ConditionObserved); ok {
 		item.Observed = string(c.Status)
