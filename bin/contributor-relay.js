@@ -338,9 +338,20 @@ function normalizeTaskComplexity(task) {
   return 'unknown';
 }
 
+// The window kinds this build has been taught. This list decides which reserve
+// override applies and what the hold is CALLED — never whether a window counts.
+// Gating on it is exactly the fail-open #6951 removed, so it must stay out of
+// the admit/refuse decision (kubestellar/hive#6951).
+const QUOTA_SHORT_WINDOW_KINDS = ['session', 'short', 'five_hour'];
+const QUOTA_WEEKLY_WINDOW_KINDS = ['weekly', 'weekly_scoped'];
+
+function quotaWindowKindIsKnown(kind) {
+  return QUOTA_SHORT_WINDOW_KINDS.includes(kind) || QUOTA_WEEKLY_WINDOW_KINDS.includes(kind);
+}
+
 function quotaWindowReserve(kind) {
-  if (['session', 'short', 'five_hour'].includes(kind) && QUOTA_GUARD_SHORT_RESERVE !== null) return QUOTA_GUARD_SHORT_RESERVE;
-  if (['weekly', 'weekly_scoped'].includes(kind) && QUOTA_GUARD_WEEKLY_RESERVE !== null) return QUOTA_GUARD_WEEKLY_RESERVE;
+  if (QUOTA_SHORT_WINDOW_KINDS.includes(kind) && QUOTA_GUARD_SHORT_RESERVE !== null) return QUOTA_GUARD_SHORT_RESERVE;
+  if (QUOTA_WEEKLY_WINDOW_KINDS.includes(kind) && QUOTA_GUARD_WEEKLY_RESERVE !== null) return QUOTA_GUARD_WEEKLY_RESERVE;
   return QUOTA_GUARD_DEFAULT_RESERVE;
 }
 
@@ -431,7 +442,14 @@ function evaluateContributorQuota(task, reading = readContributorQuotaReading(),
     if (!Number.isFinite(remaining)) return { admit: false, wait: true, reason: 'unknown' };
     const required = opts.baseReserveOnly ? quotaWindowReserve(kind) : quotaRequiredReserve(window, complexity);
     if (remaining <= required) {
-      return { admit: false, wait: true, reason: 'guarded', window_id: window.id || kind, remaining_pct: remaining, required_reserve_pct: required, complexity };
+      // Same refusal either way — only the label differs, so an operator can
+      // read "your quota is low" apart from "the provider showed us a window
+      // kind this build has never seen" (kubestellar/hive#6951). The second
+      // is the case worth noticing: it means the reserve overrides for that
+      // window fell back to the base percentage, and it is how a kind like
+      // `weekly_scoped` announces itself the first time.
+      const reason = quotaWindowKindIsKnown(kind) ? 'guarded' : 'guarded_unknown_window';
+      return { admit: false, wait: true, reason, window_id: window.id || kind, window_kind: kind, remaining_pct: remaining, required_reserve_pct: required, complexity };
     }
   }
   contributorQuotaPaused = false;
@@ -481,6 +499,10 @@ function logContributorQuotaDecision(task, decision) {
   console.warn('┌─ CONTRIBUTOR QUOTA GUARD ─────────────────────────────────');
   console.warn(`│ ${BACKEND} is not accepting new work: ${decision.reason}`);
   if (decision.window_id) console.warn(`│ Window ${decision.window_id}: ${decision.remaining_pct}% remaining; reserve is ${decision.required_reserve_pct}%.`);
+  if (decision.reason === 'guarded_unknown_window') {
+    console.warn(`│ Kind ${JSON.stringify(decision.window_kind)} is not one this build recognizes, so the base`);
+    console.warn('│ reserve applied and any short/weekly override did not. It is still a real limit.');
+  }
   if (task) console.warn(`│ Pending task: ${task.title || task.task_id || 'unknown'} (${normalizeTaskComplexity(task)}).`);
   console.warn('│ No new work will start while paused. Continuing may consume paid credits if your provider has them enabled.');
   console.warn('│ Set HIVE_CONTRIBUTOR_QUOTA_GUARD=off at launch to opt out for this session.');

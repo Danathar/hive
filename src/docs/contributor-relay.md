@@ -93,12 +93,12 @@ Important environment variables:
 | `HIVE_AGENT_SESSION` | `contributor` | tmux session name for interactive mode. |
 | `HIVE_SESSION` | backend name (`AGENT_BACKEND`) | Optional session label for running multiple relays under one GitHub account (see [Running multiple backends under one account](#running-multiple-backends-under-one-account)). Relays with distinct labels get independent session-scoped identities (`ContributorID#session`) on the hub, so their task leases, assignment cooldowns, failure streaks, and ownership fences do not collide. Auth, trust tier, model admission, and rate-limit accounting stay per-account. Sanitized on the hub: only `[A-Za-z0-9._-]` survive, capped at 32 bytes; a label that sanitizes to empty counts as unset. Set it to the **empty string** to opt out — the relay then declares no session and keeps the bare per-account identity (the historical single-session behavior). |
 | `HIVE_CONTRIBUTOR_QUOTA_GUARD` | `ask` | Contributor-local subscription quota guard mode. `ask` and `pause` hold new work when a normalized quota window is at or below the configured reserve; `off` is the explicit launch-time opt-out for this relay session. Headless/no-response sessions wait safely rather than spending the last quota headroom. The guard can only act when a reading source is configured — with neither `HIVE_CONTRIBUTOR_QUOTA_READING_FILE` nor `HIVE_CONTRIBUTOR_QUOTA_READING_JSON` set it has nothing to read, logs that it is not guarding anything, and admits work. |
-| `HIVE_CONTRIBUTOR_QUOTA_MIN_REMAINING_PCT` | `20` | Default remaining-percentage reserve for every recognized quota window. Valid range is `0`–`100`; invalid values fail relay startup with a message naming the bad variable. The reserve reduces the chance of consuming paid/extra usage but cannot guarantee a task will finish within a provider window. |
+| `HIVE_CONTRIBUTOR_QUOTA_MIN_REMAINING_PCT` | `20` | Default remaining-percentage reserve for every quota window, **including kinds this build does not recognize** — an exhausted unfamiliar window holds work rather than being skipped, because providers add window kinds over time (`weekly_scoped` was one). A *healthy* unrecognized window still admits. Valid range is `0`–`100`; invalid values fail relay startup with a message naming the bad variable. The reserve reduces the chance of consuming paid/extra usage but cannot guarantee a task will finish within a provider window. |
 | `HIVE_CONTRIBUTOR_QUOTA_SHORT_MIN_REMAINING_PCT` | unset | Optional short-window reserve override for normalized `session`/`five_hour` quota windows; inherits `HIVE_CONTRIBUTOR_QUOTA_MIN_REMAINING_PCT` when unset. |
 | `HIVE_CONTRIBUTOR_QUOTA_WEEKLY_MIN_REMAINING_PCT` | unset | Optional weekly reserve override for normalized `weekly` and `weekly_scoped` quota windows; inherits `HIVE_CONTRIBUTOR_QUOTA_MIN_REMAINING_PCT` when unset. |
-| `HIVE_CONTRIBUTOR_QUOTA_SIMPLE_MIN_REMAINING_PCT` / `HIVE_CONTRIBUTOR_QUOTA_MEDIUM_MIN_REMAINING_PCT` / `HIVE_CONTRIBUTOR_QUOTA_COMPLEX_MIN_REMAINING_PCT` / `HIVE_CONTRIBUTOR_QUOTA_UNKNOWN_MIN_REMAINING_PCT` | unset | Optional v5 complexity reserves. For each offered task and quota window, Hive requires the maximum of the effective window reserve and the task's configured complexity reserve; unset complexity tiers inherit the base percentage. |
-| `HIVE_CONTRIBUTOR_QUOTA_READING_FILE` | unset | Path to a JSON quota reading the guard evaluates. Re-read on each decision, so a fresh file releases a held relay. A missing, torn or malformed file is treated as `unknown` and **holds** work rather than crashing the relay or admitting blind. |
-| `HIVE_CONTRIBUTOR_QUOTA_READING_JSON` | unset | The same reading supplied inline, taking precedence over `HIVE_CONTRIBUTOR_QUOTA_READING_FILE`. Intended for tests and for supervisors that already hold the reading in memory. |
+| `HIVE_CONTRIBUTOR_QUOTA_SIMPLE_MIN_REMAINING_PCT` / `HIVE_CONTRIBUTOR_QUOTA_MEDIUM_MIN_REMAINING_PCT` / `HIVE_CONTRIBUTOR_QUOTA_COMPLEX_MIN_REMAINING_PCT` / `HIVE_CONTRIBUTOR_QUOTA_UNKNOWN_MIN_REMAINING_PCT` | unset | Optional v5 complexity reserves. For each offered task and quota window, Hive requires the maximum of the effective window reserve and the task's configured complexity reserve; unset complexity tiers inherit the base percentage. These apply to an **offered task**, which has a complexity. Whether the relay advertises readiness at all is judged against the effective *window* reserve only — there is no task in that question, so no tier applies. |
+| `HIVE_CONTRIBUTOR_QUOTA_READING_FILE` | unset | Path to a JSON quota reading the guard evaluates: `{"state": …, "limits": [{"id": …, "kind": …, "pct_remaining": …, "resets_at": …}]}`. Re-read on each decision, so a writer refreshing the file is what lifts a hold. A missing, torn or malformed file is treated as `unknown` and **holds** work rather than crashing the relay or admitting blind — so the writer should rename atomically, since a hold is still a hold. |
+| `HIVE_CONTRIBUTOR_QUOTA_READING_JSON` | unset | The same reading supplied inline, taking precedence over `HIVE_CONTRIBUTOR_QUOTA_READING_FILE`. Intended for tests and for supervisors that already hold the reading in memory. Being a fixed launch-time value it never changes, so a hold against it cannot lift by itself — prefer the file for long-running relays. |
 | `HIVE_CONTRIBUTOR_QUOTA_RETRY_MS` | `60000` | How often a guarded relay re-reads the quota and re-advertises `ready` once every effective reserve is clear. Must be a positive integer of milliseconds. An explicit contributor pause outranks a recovered reading. |
 | `HIVE_CODEX_SANDBOX_MODE` | probed (see note) | Codex `--sandbox` value. Left unset, hive resolves it at launch instead of hard-coding one: `workspace-write` everywhere it can work, and `danger-full-access` **only** inside the contributor container when that container blocks the unprivileged user namespace `workspace-write`'s bubblewrap needs (#6653). Setting this pins one value and skips the probe. |
 | `HIVE_CODEX_APPROVALS_REVIEWER` | `auto_review` | Codex reviewer for boundary requests. The default prevents Hive-delivered work from waiting on an interactive operator while retaining `workspace-write`; set `user` only for an intentionally attended contributor. Set it to the **empty string** to omit the `-c approvals_reviewer=` key entirely — the escape hatch if a Codex release rejects that config key at startup. Doing so keeps the sandbox posture; it is not the same as the dangerous bypass. |
@@ -676,6 +676,69 @@ A quota refusal now parks the loop:
 Only quota takes this path. An authorization refusal is not time-bounded, an operator has to change something, and parking the relay would hide it — a 403 still fails fast and stays available.
 
 The `failure_kind` on the wire is still `environment`: the hub's kinds are `environment` / `task` / `unspecified`, and the field is advisory — the hub records and displays it and does not route or change a work item's failure cooldown on it. A dedicated quota kind, and the cooldown exemption [#6541](https://github.com/hivecommons/hive/issues/6541) asks for, are a hub-side protocol change and are not part of this.
+
+### The contributor quota guard holds *before* the provider refuses
+
+The section above is the reaction to a provider that has already said no. The
+contributor quota guard ([#6833](https://github.com/hivecommons/hive/issues/6833))
+is the reserve meant to make that refusal unnecessary: it reads a normalized
+quota reading and declines new work while any window sits at or below the
+configured reserve, so a contributor can leave a session running without it
+spending the last of a subscription allowance.
+
+The guard lives in one place — `evaluateContributorQuota` in
+`bin/contributor-relay.js`, reached from the `task_assign` handler and from
+`sendTo`. It was briefly implemented twice, and the copy that did **not** run is
+where a fail-open fix landed while the defect stayed live in the copy that
+gates work ([#6951](https://github.com/hivecommons/hive/issues/6951)). A test
+now fails if a second unwired implementation reappears.
+
+Five behaviours are worth knowing:
+
+- **An unfamiliar window kind is still a limit.** The guard knows `session`,
+  `short`, `five_hour`, `weekly` and `weekly_scoped`. A window of any *other*
+  kind used to be skipped outright, so an exhausted window this build had not
+  been taught admitted work — the exact fail-open the guard exists to prevent,
+  and `weekly_scoped` is proof that providers add kinds. Every window is now
+  measured, and an unrecognized one against the base reserve, since the
+  short/weekly overrides key off the kind.
+
+- **The hold says which of those two it is.** A hold on a known kind reports
+  `guarded`; on an unrecognized kind, `guarded_unknown_window`, and the banner
+  names the kind. The refusal is identical — the distinction is so an operator
+  can read "your weekly quota is low" apart from "your provider reported
+  something new", the second being also the signal that any short/weekly
+  override did not apply to that window.
+
+- **A hold can lift by itself.** Every other `ready` in this relay is
+  event-driven — a task completing, a CLI recovering — and the guard suppresses
+  `ready` precisely when there is no task to complete. Without a re-arm, one
+  suppressed `ready` between tasks meant the relay never asked for work again
+  for the life of the process. A held relay now re-reads its source every
+  `HIVE_CONTRIBUTOR_QUOTA_RETRY_MS` and re-advertises on the first reading that
+  clears every effective window reserve. An explicit contributor pause outranks
+  that: headroom coming back is not consent to undo a deliberate "stay paused".
+
+- **An unreadable reading is `unknown`, not headroom, and never fatal.** A
+  reading file caught mid-write used to raise `SyntaxError` out of the hub
+  message handler and take the relay with it. A missing, malformed, or torn
+  file now reads as `unknown` and **holds** — the retry above is what bounds
+  that hold, so a transient torn read costs one retry interval rather than a
+  wedged relay.
+
+- **With no reading source at all, the guard is inert and says so.** The guard
+  defaults to `ask`, but the provider adapters that would supply a reading are
+  not built yet ([#6952](https://github.com/hivecommons/hive/issues/6952)), so
+  a default install has nothing to enforce against. That is a distinct state —
+  `unprovisioned`, not `unknown` — and it **admits** work, logging once that
+  the guard is enabled but not guarding anything and naming the two variables
+  that would give it something to read. Holding instead would stop every
+  default install on the fleet from ever asking for work again, which is why
+  this deviates from #6833's "unknown reading holds"; #6833 criterion 8 covers
+  it directly ("unsupported backends should report that the guard is
+  unavailable and retain their existing behavior"). It is no longer reported as
+  a healthy `available` reading, which was the actual misreporting. Once #6952
+  lands an adapter, flipping `unprovisioned` to a hold is a one-line change.
 
 ### The GitHub token outlives the task, because the hub re-mints it
 

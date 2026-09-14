@@ -8612,8 +8612,48 @@ test('#6951 an exhausted window of an UNRECOGNIZED kind refuses work', () => {
   const relay = loadRelay({ env: { HIVE_CONTRIBUTOR_QUOTA_READING_JSON: JSON.stringify({ state: 'available', limits: [{ id: 'd1', kind: 'daily', pct_remaining: 0 }] }) } });
   const d = relay.evaluateContributorQuota({ title: 'x', complexity: 'medium' });
   assert.strictEqual(d.admit, false, 'a window kind this build was never taught must not admit work at 0% remaining');
-  assert.strictEqual(d.reason, 'guarded');
+  assert.strictEqual(d.reason, 'guarded_unknown_window');
   assert.strictEqual(d.window_id, 'd1');
+});
+
+test('#6951 a recognized kind is held as `guarded`, an unrecognized one as `guarded_unknown_window`', () => {
+  // The two holds are identical in effect. They are named differently so an
+  // operator reading the banner can tell "your weekly quota is low" apart from
+  // "your provider reported a window kind we do not know", which is also the
+  // signal that short/weekly reserve overrides did NOT apply to that window.
+  const reading = kinds => ({ env: { HIVE_CONTRIBUTOR_QUOTA_READING_JSON: JSON.stringify({ state: 'available', limits: kinds }) } });
+  const known = loadRelay(reading([{ id: 'w1', kind: 'weekly', pct_remaining: 0 }]))
+    .evaluateContributorQuota({ title: 'x', complexity: 'medium' });
+  const novel = loadRelay(reading([{ id: 'n1', kind: 'monthly_scoped', pct_remaining: 0 }]))
+    .evaluateContributorQuota({ title: 'x', complexity: 'medium' });
+  assert.strictEqual(known.reason, 'guarded');
+  assert.strictEqual(novel.reason, 'guarded_unknown_window');
+  assert.strictEqual(novel.window_kind, 'monthly_scoped', 'the banner needs the kind to name it');
+  assert.strictEqual(known.admit, novel.admit, 'naming the hold must not change whether it holds');
+});
+
+test('#6951 an unrecognized kind takes the base reserve, not a short/weekly override', () => {
+  // Through the real `ready` path, which is the one place a window reserve is
+  // used on its own — on the task path an unset tier reserve falls back to the
+  // base percentage, so Math.max() hides which window reserve was chosen and a
+  // test there cannot see this at all.
+  //
+  // The overrides key off the kind, so an unfamiliar kind must fall through to
+  // HIVE_CONTRIBUTOR_QUOTA_MIN_REMAINING_PCT. If it ever inherited the weekly
+  // override instead, a contributor who relaxed `weekly` to 5% would silently
+  // relax every kind their provider invents next.
+  const relay = loadRelay({ backend: 'copilot', env: {
+    HIVE_CONTRIBUTOR_QUOTA_MIN_REMAINING_PCT: '30',
+    HIVE_CONTRIBUTOR_QUOTA_WEEKLY_MIN_REMAINING_PCT: '5',
+    HIVE_CONTRIBUTOR_QUOTA_READING_JSON: JSON.stringify({ state: 'available', limits: [{ id: 'n1', kind: 'daily', pct_remaining: 25 }] }),
+  } });
+  relay.setCliReady(true);
+  const sent = [];
+  relay.setWs({ readyState: 1, send: p => sent.push(JSON.parse(p)) });
+  relay.handleMessage(JSON.stringify({ type: 'auth_ok', contributor_id: 'c1', trust_tier: 'contributor' }));
+  assert.ok(!sent.some(m => m.type === 'ready'),
+    '25% remaining is under the 30% base reserve, so the relay must hold; ' +
+    'letting an unknown kind inherit the 5% weekly override would send `ready` here');
 });
 
 test('#6951 a HEALTHY window of an unrecognized kind still admits', () => {
