@@ -1,1 +1,0 @@
-- Proxy tests now pin the Linear GraphQL write gate and TLS ClientHello reader refusal paths that protect fail-closed behavior ([#6894](https://github.com/hivecommons/hive/issues/6894)).
