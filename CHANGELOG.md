@@ -11,6 +11,56 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-14 (v4.32.2)
+
+### Fixed
+
+- Fixed the dashboard's CI pass-rate reading as a catastrophic red during routine releases. `ciPassRate` counted every completed workflow run, including the zero-job "startup failure" runs that `tagged-release.yml` strands on its ephemeral `release-gate/*` branch (#6936, a recurrence of #6084). Those runs schedule no jobs at all, so they execute none of this repository's code — but there are five per release and the sample window is only ten runs, so they can be half of it. During the healthy v4.32.1 release the function returned **20%** at 17:51:36Z and stayed at 40% for over a minute. A completed run that never scheduled a job is now dropped from the sample entirely rather than counted as a failure, since it is not evidence in either direction. The check fails closed — an errored or unavailable jobs lookup keeps the run counted exactly as before — so a flaky API can only restore the old reading, never inflate the rate by discarding runs that did real work.
+- The Operations tab's **Your contribution** card no longer vanishes for a signed-out viewer ([#6937](https://github.com/hivecommons/hive/issues/6937)). The card is identity-dependent, and it used to answer an anonymous visitor by staying hidden — so `/contribute` looked complete, said nothing about why a panel was missing, and gave no hint that signing in would reveal anything. It now reveals itself and says which case applies, using the same `.me-signin` treatment the Profile tab has always used for the identical condition: *sign in with GitHub* when the viewer is anonymous, *ship a task to start your card* when they are signed in without a contributor profile on this hive, and — the distinction that was missing entirely — a plain "this is a bug" line when the stats genuinely fail to load, so a broken panel no longer renders identically to a visitor who simply has no numbers.
+- The Operations tab's work panel is no longer titled **"My work"** over contents that were never the viewer's ([#6945](https://github.com/hivecommons/hive/issues/6945)). It renders the in-flight work of every connected clanker — `/api/contribute/fleet` is public, `FleetSnapshot` takes no viewer, and the client filtered on status alone — so for an anonymous visitor every row was by definition somebody else's, under a possessive title sitting directly above "Your contribution", which genuinely is per-viewer. The data was never wrong (a fleet-wide view is the operator's view of their hive), so the panel is now called **Fleet work**, and the scope the old title promised became a real filter: an **All contributors / Mine** toggle beside the existing status chips, matching the viewer case-insensitively the same way the standings already highlight their own row. Picking "Mine" while signed out explains itself with a sign-in prompt instead of an unexplained empty list, and the Operations tab now resolves who is looking (it previously never did, so "Mine" would have hidden a signed-in contributor's own work).
+
+## 2026-09-14 (v4.32.1)
+
+### Fixed
+
+- Fixed `tagged-release.yml` stranding zero-job `failure` runs on its ephemeral `release-gate/*` scratch branch, a recurrence of the problem #6084 set out to fix. #6084 cancels whatever is queued on the scratch branch and then immediately deletes the ref, which only helps for runs that already exist at that instant. On the v4.31.1 release five runs were instead recorded with `created_at == updated_at`, zero jobs and `conclusion: failure` one second *after* the merge — GitHub materialized them straight into `completed/failure` once their head ref no longer resolved, so a single-shot sweep had nothing to cancel. The cleanup trap now cancels repeatedly until the branch's run list goes quiescent *before* deleting the ref (bounded at 60s, and converging fast because each pass cancels what it counts), and sweeps once more afterwards to catch runs that surface in the moments after the delete. Any API error makes the drain fall through to the delete immediately, so this can only reduce noise and can never wedge or meaningfully delay a release.
+
+## 2026-09-14 (v4.32.0)
+
+### Added
+
+- Keyed governor cadences by agent and repo so repo-scoped agents schedule independently (#6921).
+
+## 2026-09-14 (v4.31.1)
+
+### Fixed
+
+- **Duplicate finding suppression now survives a reworded title.** `hive-open-issue` deduped against open issues by *exact* title, but agents routinely append a model-authored qualifier to a stable subject — `[scanner] Split web/e2e/compliance/card-cache-compliance.spec.ts (1237 lines)`, then the same line with `— extract cache helpers module`, `— extract snapshot/report helpers`, and so on. The qualifier is reworded on every scan, so the exact-title check never matched and the same finding was re-filed every cycle: one 1237-line file had accumulated **six** simultaneously-open issues in `kubestellar/console`, and roughly a quarter of that hive's scanner backlog was the same handful of files filed over and over. Dedupe now compares a canonical subject (qualifier stripped, case- and whitespace-normalised) and reuses the **oldest** open match, so repeats consolidate onto the original issue instead of growing the queue without bound. Distinct findings stay distinct — a different path, a different line count, or a stem too short to be a safe key all still file a new issue.
+- **The eval-cycle log no longer reports agents it is about to skip.** `governor eval complete` logged `agents_due` *before* the on-demand and operator-paused gates ran, then dropped the gated agents with no log line at all. Operators reading the logs saw paused agents listed as due on every single cycle while those agents sat at a bare shell, which made a half-paused roster read like a healthy one. `agents_due` now names only the agents actually being kicked, and anything gated out is reported alongside it in `agents_skipped` with its reason (`operator-paused`, `on-demand`, `on-demand-in-pack`).
+
+## 2026-09-14 (v4.31.0)
+
+### Added
+
+- Governor cadence mode resolution can now be scoped per repo, exposing each successfully scanned repo's pressure while preserving the aggregate default for existing hives ([#6916](https://github.com/hivecommons/hive/issues/6916)).
+
+### Fixed
+
+- Fixed the DCO squash-attribution gate re-flagging bot sign-offs on commits that had already landed on the default branch, which blocked every v4 to v5 sync pull request (#6923).
+
+## 2026-09-14 (v4.30.1)
+
+### Fixed
+
+- The issue-request watcher now quarantines agent issue/comment requests that still contain Hive template placeholders or scanner-style mis-escaped markdown newlines, and the scanner issue examples pass real newlines to `gh issue create` so contentless placeholder reports cannot reach GitHub again ([#6839](https://github.com/hivecommons/hive/issues/6839)).
+- Made the v2 test shard aggregate distinguish runner infrastructure cancellations from real shard failures: failed, skipped, or unknown shards still fail closed, while cancelled-only runs now surface an explicit infrastructure-cancellation warning instead of reporting a test failure.
+- Made the CI package-install helper retry bounded apt network operations with backoff and clearer mirror diagnostics, so intermittent self-hosted runner egress loss no longer immediately fails `-race` shards while a true missing cgo toolchain still fails loudly (#6870).
+- Proxy tests now pin the Linear GraphQL write gate and TLS ClientHello reader refusal paths that protect fail-closed behavior ([#6894](https://github.com/hivecommons/hive/issues/6894)).
+- The TUI grid golden test now starts from a pre-sized model, removing a transient splash-frame race that could fail otherwise unchanged CI runs ([#6898](https://github.com/hivecommons/hive/issues/6898)).
+- The spoke dashboard now keeps a separate **Upgrade now** action beside the passive "Queued for auto-upgrade" badge for owners whose hive is behind with auto-upgrade enabled, matching the hub dashboard so a scheduled auto-upgrade never removes the manual upgrade path.
+- The contributor relay's PR review cycle is now scoped to the repositories a hub has actually assigned work for, instead of to the operator's whole GitHub account ([#6908](https://github.com/hivecommons/hive/issues/6908)). [#6664](https://github.com/hivecommons/hive/issues/6664) correctly fixed a cycle that reviewed only the repo of the last-finished task — with a per-five-completions cadence, PRs in ten of eleven repos were permanently unreachable — but its replacement, `gh search prs --author @me --state open`, went from too narrow straight to the entire account, skipping the correct scope in between. That matters because the next instruction in the same prompt is *address the feedback, push fixes, and respond*: an account-wide sweep ends with an agent pushing commits to whatever the token's owner has open, including pull requests they wrote by hand in repositories no hub manages. Observed on a session configured against two hubs: 26 open PRs enumerated across five unrelated repositories, stopped by the operator before it acted on any of them. Two mechanics made it more than a scoping preference — `gh search prs` was not covered by the gh wrapper's `--author` identity check, which gated on `list`, so moving the cycle off `gh pr list` silently moved it off the check added by [#3072](https://github.com/hivecommons/hive/issues/3072)/[#3096](https://github.com/hivecommons/hive/issues/3096); and `--author @me` resolves server-side to the token's *user*, which in contributor mode is the human operator, because [#4044](https://github.com/hivecommons/hive/issues/4044) rewrites `@me` to a bot identity only for staff agents. The cycle now emits one `gh pr list --repo <repo> --author <contributor> --state open` per authorized repo, which keeps #6664's real correction (the review spans every repo this relay works across, not just the last one), puts the calls back on the author-checked path, names `HIVE_CONTRIBUTOR_USERNAME` rather than `@me`, and costs one API call per repo instead of one unbounded search. Authorization accrues from `task_assign` and is never reset, so a PR filed early in a session is still reviewable late in it; an empty scope means the cycle does not run at all rather than falling back to the account; and `gh search prs|issues --author` is now identity-checked in the wrapper so the same bypass cannot be reintroduced silently.
+- fix(contribute-ws): generation fencing is no longer opt-in from the client ([#6909](https://github.com/hivecommons/hive/issues/6909)). `generationAccepted` returned true whenever the client generation was `0`, and an omitted `task_gen` field decodes to exactly `0` — so any client could bypass the #2568 stale-generation Gate at every call site simply by leaving the field out. The legacy `clientGen == 0` escape is now ratcheted per connection: once a connection has echoed a real generation it may not downgrade itself back to unstamped. Genuinely unversioned relays never arm the ratchet and are unaffected.
+
 ## 2026-09-14 (v4.30.0)
 
 ### Added

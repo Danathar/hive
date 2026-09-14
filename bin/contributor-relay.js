@@ -3350,20 +3350,94 @@ let prsShippedSinceReview = 0;
 // question and scoping it to one repo is the bug.
 let reposShippedSinceReview = [];
 
-// buildReviewPrompt renders the PR review cycle's prompt (#6664).
+// authorizedRepos is the AUTHORIZATION BOUNDARY for the review cycle (#6908):
+// every repository a hub in this session actually dispatched work for. Unlike
+// reposShippedSinceReview it is never reset — a PR filed on completion 2 is
+// still ours to follow up on at completion 40 — and unlike the account, it
+// contains nothing a hub did not hand us.
 //
-// ACCOUNT-SCOPED, NOT REPO-SCOPED. "Which of my PRs have review comments" is
-// not a repo-scoped question, and answering it for one repo is what made this
-// cycle review nothing. `gh search prs --author @me --state open` spans every
-// repository the contributor has filed in — including PRs from earlier
-// sessions, which is most of them and none of which the old prompt could reach.
-// Verified through the contributor gh wrapper: `search prs` is on its allowlist
-// and `--author @me` resolves server-side.
+// Populated from task_assign rather than from completions, because assignment
+// is where the hub grants authority. A task that failed, or that ended
+// no_work_needed, still means "this hub sent me here", and a PR opened during
+// it is still in scope.
+const authorizedRepos = new Set();
+
+// isSafeRepoName reports whether `name` has the GitHub `owner/name` shape.
+// The names in authorizedRepos end up interpolated verbatim into shell command
+// lines the review prompt pre-authorizes ("Run these, and only these"), so a
+// hub-supplied value must be proven to be an identifier — not a command
+// fragment — before it can cross from data into an executable line (#6938).
+const SAFE_REPO_NAME_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\/[A-Za-z0-9._-]+$/;
+function isSafeRepoName(name) {
+  return typeof name === 'string' && SAFE_REPO_NAME_RE.test(name);
+}
+
+// isSafeAuthorLogin reports whether `login` is a plausible GitHub login (or
+// `@me`), for the same reason: it is rendered into the `--author` position of
+// the pre-authorized command lines (#6938).
+const SAFE_AUTHOR_LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(\[bot\])?$/;
+function isSafeAuthorLogin(login) {
+  return login === '@me' || (typeof login === 'string' && SAFE_AUTHOR_LOGIN_RE.test(login));
+}
+
+// recordAuthorizedRepo notes that a hub dispatched work for `repo`. Ignores
+// blanks so a malformed assignment cannot widen the boundary to "", and
+// rejects anything that is not shaped like `owner/name` so a hostile hub
+// cannot smuggle shell syntax into the review cycle's command list (#6938).
+function recordAuthorizedRepo(repo) {
+  const name = typeof repo === 'string' ? repo.trim() : '';
+  if (!name) return;
+  if (!isSafeRepoName(name)) {
+    console.error(`Ignoring authorized-repo candidate that is not shaped like owner/name: ${JSON.stringify(name)}`);
+    return;
+  }
+  authorizedRepos.add(name);
+}
+
+// buildReviewPrompt renders the PR review cycle's prompt (#6664, rescoped by
+// #6908).
 //
-// shippedRepos is a HINT, not a filter: those are the repos with work landed
-// since the last cycle, so their PRs are the likeliest to have fresh comments.
-// Naming them steers the agent's ordering without narrowing what it may look at
-// — the narrowing is the bug.
+// SCOPED TO AUTHORIZED REPOS, NOT TO THE ACCOUNT AND NOT TO ONE REPO.
+//
+// #6664 correctly identified that scoping the review to the single repo of the
+// last-finished task left PRs in ten of eleven repos permanently unreachable —
+// the cadence is per-five-completions, not per-repo, so coverage never catches
+// up. But its fix moved from too narrow straight to `gh search prs --author
+// @me`, which is the whole GitHub account, skipping the correct scope in
+// between.
+//
+// That matters because of what the next sentence of this prompt says: address
+// the feedback, PUSH FIXES, and respond. An account-wide sweep therefore ends
+// with an agent pushing commits to whatever the token's human owner happens to
+// have open — PRs they wrote by hand, in repositories no hub in this session
+// manages. Observed live (#6908): a session configured against two hubs
+// enumerated 26 PRs across five unrelated repositories, and was stopped by the
+// operator before it acted on them.
+//
+// Two mechanics made that more than a scoping preference, and both are why the
+// fix is HERE rather than only in the wrapper:
+//
+//   1. `gh search prs` was not covered by the wrapper's --author identity
+//      check, which gated on `list` (bin/gh-wrapper.sh). Moving the cycle from
+//      `gh pr list` to `gh search prs` moved it off the path #3072/#3096 added
+//      without that being visible at the call site. #6908 closes that hole too,
+//      but a prompt that only works because a wrapper says no is a prompt that
+//      asks for the wrong thing.
+//   2. `@me` resolves to the TOKEN'S USER — the human operator — because
+//      contributor mode deliberately keeps server-side resolution (#4044
+//      rewrites to a bot identity only for staff agents). So `--author @me` is
+//      precisely what surfaced human-authored PRs.
+//
+// So: one `gh pr list --repo <repo> --author <login> --state open` per repo a
+// hub actually assigned work for. That keeps #6664's real correction (the
+// review spans every repo this relay works across, not just the last one),
+// bounds it by authorization rather than by account, puts the calls back on the
+// wrapper's author-checked path, and costs one API call per repo instead of one
+// unbounded search.
+//
+// shippedRepos stays a HINT for ORDERING only — the repos with work landed
+// since the last cycle have the freshest comments. It is a subset of
+// authorizedRepos, so naming it narrows nothing.
 //
 // THE VERDICT LINE IS THE OTHER HALF. The old prompt ended "just say 'No PR
 // comments to address.'" — prose, not a sentinel — so this cycle could only
@@ -3373,14 +3447,48 @@ let reposShippedSinceReview = [];
 // fix, purely because its prompt is assembled here instead of by the hub. The
 // wording mirrors contributorTaskPrompt in src/pkg/dashboard/contribute_ws.go;
 // keep the two in step.
-function buildReviewPrompt(shippedRepos) {
-  const repos = Array.isArray(shippedRepos) ? shippedRepos.filter(Boolean) : [];
-  const hint = repos.length
-    ? `You most recently shipped work to ${repos.join(', ')}, so start there. `
-    : '';
-  return 'Check the open PRs you have filed, across every repository, for review comments. ' +
-    "Run 'GH_TOKEN=$GH_TOKEN gh search prs --author @me --state open --limit 50' to find them. " +
-    hint +
+//
+// Returns '' when no repo is authorized yet, which the caller treats as "do not
+// run a review". An empty scope must mean review NOTHING; falling back to the
+// account is the bug.
+function buildReviewPrompt(shippedRepos, authorized, login) {
+  // Defense in depth (#6938): recordAuthorizedRepo already refuses malformed
+  // names, but this function renders whatever set it is HANDED into command
+  // lines the prompt tells the agent to run verbatim — so re-prove the shape
+  // here rather than trust every caller forever.
+  const hinted = Array.isArray(shippedRepos) ? shippedRepos.filter(isSafeRepoName) : [];
+  const scope = Array.from(authorized || []).filter(isSafeRepoName);
+  if (!scope.length) return '';
+
+  // Hinted repos first so the agent starts where comments are likeliest, then
+  // the rest of the authorized set. Order only — every repo below is listed.
+  const ordered = hinted.filter(r => scope.includes(r))
+    .concat(scope.filter(r => !hinted.includes(r)));
+
+  // The token's own login, never `@me`. HIVE_CONTRIBUTOR_USERNAME is the
+  // identity the hive issued this contributor; `@me` is whoever holds the
+  // token, which on a PAT-backed session is the operator (#6908). Falling back
+  // to `@me` keeps the cycle working where the variable is unset, and the
+  // per-repo scope still bounds what that can reach.
+  let author = (login || '').trim() || '@me';
+  if (!isSafeAuthorLogin(author)) {
+    // A login that is not shaped like a GitHub login must not reach the
+    // command line either; @me keeps the cycle working, and the per-repo
+    // scope still bounds what it can touch (#6938).
+    console.error(`Review prompt ignoring malformed author login ${JSON.stringify(author)}; using @me`);
+    author = '@me';
+  }
+
+  const commands = ordered
+    .map(repo => `GH_TOKEN=$GH_TOKEN gh pr list --repo ${repo} --author ${author} --state open`)
+    .join('\n');
+
+  return 'Check the open PRs you have filed, in the repositories this hive has assigned you work in, ' +
+    'for review comments. Run these, and only these:\n' +
+    commands + '\n' +
+    'Those repositories are the whole scope of this task. Do not search across your account, ' +
+    'and do not read, comment on, or push to a PR in any other repository — a PR outside that list ' +
+    'was not opened on this hive\'s behalf, even if you have access to it. ' +
     'For each PR with review comments, read the comments, address the feedback, push fixes, and respond. ' +
     'If no PRs have comments, say so and stop — do not look for other work. ' +
     'When you HAVE finished — every PR with comments is addressed, or there were none — print, as the very ' +
@@ -4121,11 +4229,14 @@ function progressTick() {
         reposShippedSinceReview.push(completedRepo);
       }
     }
-    if (tasksCompletedCount % PR_REVIEW_EVERY_N === 0 && prsShippedSinceReview > 0) {
+    const reviewPrompt = (tasksCompletedCount % PR_REVIEW_EVERY_N === 0 && prsShippedSinceReview > 0)
+      ? buildReviewPrompt(reposShippedSinceReview, authorizedRepos, CONTRIBUTOR_LOGIN)
+      : '';
+    if (reviewPrompt) {
       const shippedRepos = reposShippedSinceReview.slice();
       console.log(`PR review cycle (${tasksCompletedCount} tasks completed, ` +
         `${prsShippedSinceReview} PR(s) shipped since the last review in ${shippedRepos.join(', ') || 'no repo'}) — ` +
-        `checking open PRs across every repo`);
+        `checking open PRs in ${authorizedRepos.size} authorized repo(s): ${Array.from(authorizedRepos).join(', ')}`);
       prsShippedSinceReview = 0;
       reposShippedSinceReview = [];
       // `synthetic: true` is the explicit half of isLocalOnlyTask() (#5715):
@@ -4141,14 +4252,19 @@ function progressTick() {
       const reviewRepo = shippedRepos[shippedRepos.length - 1] || completedRepo;
       currentTask = { task_id: `${LOCAL_TASK_ID_PREFIX}${Date.now()}`, kind: 'review', repo: reviewRepo, number: 0, title: 'Review open PRs for comments', synthetic: true };
       taskAssignedAt = Date.now();
-      tmuxSendKeys(buildReviewPrompt(shippedRepos));
+      tmuxSendKeys(reviewPrompt);
       startProgressReporting();
     } else {
       if (tasksCompletedCount % PR_REVIEW_EVERY_N === 0) {
         // Say why the cycle did not run. Silence here reads as "the review
-        // cadence is broken"; it is doing exactly what it should.
-        console.log(`Skipping the PR review cycle at ${tasksCompletedCount} completions — ` +
-          `no PRs shipped since the last review, so there is nothing new to follow up on (#6664)`);
+        // cadence is broken"; it is doing exactly what it should. Name the
+        // actual reason: "no PRs shipped" and "no repo authorized" are
+        // different states and an operator debugging a quiet cycle needs to
+        // know which one they are in.
+        const reason = prsShippedSinceReview > 0
+          ? `no hub has assigned work for any repository in this session, so there is no authorized scope to review (#6908)`
+          : `no PRs shipped since the last review, so there is nothing new to follow up on (#6664)`;
+        console.log(`Skipping the PR review cycle at ${tasksCompletedCount} completions — ${reason}`);
       }
       send({ type: 'ready', seq: nextSeq() });
     }
@@ -4448,6 +4564,11 @@ function handleMessage(data, hub) {
         break;
       }
       currentTask = msg;
+      // #6908: assignment is where a hub grants authority over a repo, so this
+      // is where the review cycle's scope is earned. Recorded before anything
+      // below can fail, and never cleared, so a PR opened during this task
+      // stays reviewable for the rest of the session.
+      recordAuthorizedRepo(msg.repo);
       // Non-enumerable: currentTask IS msg, and msg gets JSON.stringify'd
       // wholesale to TASK_FILE a few lines down. hub carries live
       // setInterval/setTimeout handles (heartbeatInterval, reconnectTimer),
@@ -4827,6 +4948,11 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     buildReviewPrompt,
     getPRsShippedSinceReview: () => prsShippedSinceReview,
     setPRsShippedSinceReview: (v) => { prsShippedSinceReview = v; },
+    getAuthorizedRepos: () => Array.from(authorizedRepos),
+    recordAuthorizedRepo,
+    isSafeRepoName,
+    isSafeAuthorLogin,
+    clearAuthorizedRepos: () => authorizedRepos.clear(),
     getReposShippedSinceReview: () => reposShippedSinceReview.slice(),
     setReposShippedSinceReview: (v) => { reposShippedSinceReview = Array.isArray(v) ? v.slice() : []; },
     LOCAL_TASK_ID_PREFIX,

@@ -484,7 +484,25 @@ _author_matches_login() {
 # assigned work from actionable.json). Contributors are exempt so they can look
 # before they leap. `--author` self-listing is allowed only when the author value
 # matches the authenticated token identity (fixes #3072 and #3096).
+# `search prs|issues` is covered alongside `list` (#6908). It was not, and the
+# gap was invisible at the call site: this check gated on action=list, while
+# `gh search prs` is subcmd=search/action=prs and matched only the read-only
+# discovery allowlist above. So moving a caller from `gh pr list --author @me`
+# to `gh search prs --author @me` silently moved it off the identity check
+# #3072/#3096 added — which is exactly what the contributor relay's PR review
+# cycle did, and how it came to enumerate PRs belonging to the token's human
+# owner in repositories no hub manages.
+#
+# Only the --author VALIDATION is extended. An authorless `gh search prs` is
+# still read-only discovery and still allowed for every agent; see the
+# search-specific branch below.
+_gh_author_scoped=false
 if { [ "$subcmd" = "issue" ] || [ "$subcmd" = "pr" ]; } && [ "$action" = "list" ]; then
+  _gh_author_scoped=true
+elif [ "$subcmd" = "search" ] && { [ "$action" = "prs" ] || [ "$action" = "issues" ]; }; then
+  _gh_author_scoped=true
+fi
+if [ "$_gh_author_scoped" = true ]; then
   if author_value="$(_extract_author)" && [[ -n "$author_value" ]]; then
     if [[ "$author_value" = "@me" ]]; then
       # GitHub resolves @me server-side ONLY for user tokens. An App
@@ -494,7 +512,7 @@ if { [ "$subcmd" = "issue" ] || [ "$subcmd" = "pr" ]; } && [ "$action" = "list" 
       # staff agents; contributor mode keeps the server-side resolution.
       if ! _contributor_mode; then
         if ! _resolve_self_login >/dev/null; then
-          echo "⛔ BLOCKED: gh $subcmd list --author @me cannot work with an App installation token (it has no /user identity, #4044)," >&2
+          echo "⛔ BLOCKED: gh $subcmd $action --author @me cannot work with an App installation token (it has no /user identity, #4044)," >&2
           echo "and no trusted identity is available to substitute: ${BOT_LOGIN_FILE} is missing/empty and 'gh api user' did not resolve." >&2
           echo "The hive writes that file when it mints agent tokens — report this to the operator so identity delivery is repaired." >&2
           exit 1
@@ -521,20 +539,26 @@ if { [ "$subcmd" = "issue" ] || [ "$subcmd" = "pr" ]; } && [ "$action" = "list" 
         set -- "${args[@]}"
       fi
     elif ! _resolve_self_login >/dev/null; then
-      echo "⛔ BLOCKED: gh $subcmd list --author requires authenticated GitHub identity." >&2
+      echo "⛔ BLOCKED: gh $subcmd $action --author requires authenticated GitHub identity." >&2
       echo "Could not resolve the current token identity: no trusted identity file at ${BOT_LOGIN_FILE} (written by the hive when it mints agent tokens)" >&2
       echo "and 'gh api user --jq .login' did not resolve (expected for App installation tokens, which have no /user identity)." >&2
       exit 1
     elif _author_matches_login "$author_value" "$HIVE_AUTH_LOGIN_CACHED"; then
       : # Match: authenticated login, case-insensitive, with optional [bot] suffix.
     else
-      echo "⛔ BLOCKED: gh $subcmd list --author must match the authenticated GitHub identity." >&2
+      echo "⛔ BLOCKED: gh $subcmd $action --author must match the authenticated GitHub identity." >&2
       echo "--author '$author_value' does not match token identity '$HIVE_AUTH_LOGIN_CACHED'." >&2
       echo "Use --author @me or your authenticated login to list your own items." >&2
       exit 1
     fi
   elif _contributor_mode; then
     : # Allow contributor agents read-only list/search to avoid duplicate PRs (#2356).
+  elif [ "$subcmd" = "search" ]; then
+    # An authorless search names no identity to validate, and blocking it here
+    # would be a policy change riding in on an identity fix (#6908). The
+    # enumeration ban for staff agents is stated in their prompt, not enforced
+    # by this branch, and widening the --author check must not quietly move it.
+    :
   else
     # Root-caused in a live hive (2026-08-20): agents read this two-line
     # message as "all gh $subcmd commands are blocked" and silently skipped

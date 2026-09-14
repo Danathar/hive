@@ -251,6 +251,15 @@ type GovernorConfig struct {
 	// cadence.
 	CadenceOwners map[string]map[string]string `yaml:"cadence_owners,omitempty" json:"cadence_owners,omitempty"`
 
+	// CadenceScope selects whether governor mode is resolved from the whole
+	// hive queue (aggregate, the historical behavior) or separately for each
+	// successfully scanned repo. Repo-scoped mode resolution compares each
+	// repo's own actionable queue depth to the base thresholds, so repo-count
+	// threshold scaling does not apply in that scope.
+	//
+	// Valid values: "" (= aggregate) | aggregate | per_repo.
+	CadenceScope string `yaml:"cadence_scope,omitempty" json:"cadence_scope,omitempty"`
+
 	// ThresholdsSource records WHERE the explicit thresholds in Modes came
 	// from, so "explicit always wins" can apply to the values an operator
 	// typed without also applying to the ones an ACMM pack seeded (#4037).
@@ -524,6 +533,38 @@ const (
 )
 
 // Threshold scaling curves (GovernorConfig.ThresholdScaling).
+const (
+	// CadenceScopeAggregate keeps the historical governor behavior: one hive
+	// mode is computed from the aggregate actionable issue+PR queue.
+	CadenceScopeAggregate = "aggregate"
+	// CadenceScopePerRepo computes a separate mode for each successfully
+	// scanned repo from that repo's own actionable issue+PR queue.
+	CadenceScopePerRepo = "per_repo"
+)
+
+// ValidCadenceScopes are the accepted cadence_scope values. "" means "unset",
+// which resolves to aggregate.
+var ValidCadenceScopes = map[string]bool{
+	"":                    true,
+	CadenceScopeAggregate: true,
+	CadenceScopePerRepo:   true,
+}
+
+// ValidateCadenceScope reports whether v is an accepted cadence mode scope.
+func ValidateCadenceScope(v string) bool { return ValidCadenceScopes[v] }
+
+// CadenceScopeMode returns the configured cadence mode scope with its default
+// applied. Unset means aggregate to preserve the historical one-mode cadence
+// behavior for existing hives.
+func (g GovernorConfig) CadenceScopeMode() string {
+	switch g.CadenceScope {
+	case CadenceScopePerRepo:
+		return CadenceScopePerRepo
+	default:
+		return CadenceScopeAggregate
+	}
+}
+
 const (
 	// ThresholdScalingLinear multiplies the base threshold by the repo count.
 	// This is the default, and it is exactly equivalent to comparing PER-REPO

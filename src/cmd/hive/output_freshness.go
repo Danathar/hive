@@ -15,7 +15,7 @@ func outputFreshnessHeartbeatFields(acmmLevel int, govState governor.State, agen
 		if !agentCanProduceJudgedOutput(acmmLevel, a) {
 			continue
 		}
-		if t := govState.LastKick[a.Name]; !t.IsZero() && t.After(newest) {
+		if t := governorLastKickForAgent(govState, a.Name); !t.IsZero() && t.After(newest) {
 			newest = t
 		}
 	}
@@ -45,8 +45,11 @@ func outputFreshnessHeartbeatFields(acmmLevel int, govState governor.State, agen
 			if !agentCanProduceJudgedOutput(acmmLevel, a) {
 				continue
 			}
-			if cad, ok := govState.Cadences[a.Name]; ok && !cad.Paused {
-				last := govState.LastKick[a.Name]
+			for _, cad := range governorCadencesForAgent(govState, a.Name) {
+				if cad.Paused {
+					continue
+				}
+				last := govState.LastKick[config.CadenceTargetKey(cad.Agent, cad.Repo)]
 				if cad.Schedule.Mode() != config.CadenceModeInterval {
 					if _, ok := cad.Schedule.DueOccurrence(last, now, config.CadenceCatchUpWindow); ok {
 						dueCapable = true
@@ -58,6 +61,9 @@ func outputFreshnessHeartbeatFields(acmmLevel int, govState governor.State, agen
 					dueCapable = true
 					break
 				}
+			}
+			if dueCapable {
+				break
 			}
 		}
 		if !dueCapable {

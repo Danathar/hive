@@ -54,6 +54,9 @@ func (c *Config) Validate() error {
 	if !ValidateThresholdScaling(c.Governor.ThresholdScaling) {
 		return fmt.Errorf("governor: invalid threshold_scaling %q (must be linear, sqrt, or none)", c.Governor.ThresholdScaling)
 	}
+	if !ValidateCadenceScope(c.Governor.CadenceScope) {
+		return fmt.Errorf("governor: invalid cadence_scope %q (must be aggregate or per_repo)", c.Governor.CadenceScope)
+	}
 	for modeName, mode := range c.Governor.Modes {
 		for agentName, cadence := range mode.Cadences {
 			if err := cadence.Validate(); err != nil {
@@ -89,6 +92,9 @@ func (c *Config) Validate() error {
 		}
 		if !ValidateExplainMode(agent.ExplainMode) {
 			return fmt.Errorf("agent %s: invalid explain_mode %q (must be off, brief, or full, or empty to inherit %s)", name, agent.ExplainMode, ExplainModeEnvVar)
+		}
+		if !ValidateCadenceScope(agent.CadenceScope) {
+			return fmt.Errorf("agent %s: invalid cadence_scope %q (must be aggregate or per_repo)", name, agent.CadenceScope)
 		}
 		if err := validateChannels(name, agent.Channels); err != nil {
 			return err

@@ -103,6 +103,19 @@ issues. Accepted workstreams:
   ([#5698](https://github.com/hivecommons/hive/issues/5698),
   [RFC doc](https://github.com/hivecommons/hive/blob/v5/docs/rfc-5698-backend-capacity-model-inventory-placement.md),
   [#5784](https://github.com/hivecommons/hive/pull/5784)).
+- **Capability-aware contributor task assignment.** Proposed — the design is
+  written down but not adopted, and five decisions in it are still open
+  (benchmark source and licensing, acceptable model-only proxies, where task
+  assessments and maintainer overrides live, how contributor-offered inventory
+  extends the shared v5 contracts, and which launch paths may select
+  automatically). Extends the capacity RFC above to contributor-owned
+  resources: match a task's assessed capability requirement against the
+  configurations a contributor has *offered*, advisory first, with automatic
+  selection a later opt-in. Keeps imported benchmark evidence separate from
+  adopted policy, and keeps model capability distinct from backend support
+  tier and contributor trust
+  ([#6825](https://github.com/hivecommons/hive/issues/6825),
+  [RFC doc](docs/rfc-6825-capability-aware-contributor-task-assignment.md)).
 
 A documented migration path from v4 hubs and spokes, with dual-version
 operation during the transition, is part of the

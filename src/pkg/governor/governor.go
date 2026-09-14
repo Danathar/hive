@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +24,7 @@ const (
 
 type AgentCadence struct {
 	Agent          string
+	Repo           string
 	Interval       time.Duration
 	Schedule       config.Cadence
 	Paused         bool
@@ -56,13 +58,15 @@ type EvalSnapshot struct {
 }
 
 type RepoSnapshot struct {
-	Issues int `json:"issues"`
-	PRs    int `json:"prs"`
+	Issues int  `json:"issues"`
+	PRs    int  `json:"prs"`
+	Mode   Mode `json:"mode,omitempty"`
 }
 
 type KickRecord struct {
 	Timestamp time.Time `json:"timestamp"`
 	Agent     string    `json:"agent"`
+	Repo      string    `json:"repo,omitempty"`
 }
 
 type AgentReportRecord struct {
@@ -158,6 +162,7 @@ type BudgetTransitions struct {
 
 type State struct {
 	Mode          Mode                    `json:"mode"`
+	RepoModes     map[string]Mode         `json:"repo_modes,omitempty"`
 	QueueIssues   int                     `json:"queue_issues"`
 	QueuePRs      int                     `json:"queue_prs"`
 	QueueHold     int                     `json:"queue_hold"`
@@ -309,6 +314,20 @@ func (g *Governor) SetModeChangeObserver(obs ModeChangeObserver) {
 }
 
 func (g *Governor) Evaluate(queueIssues, queuePRs, queueHold, slaViolations int) []string {
+	return g.EvaluateWithRepoDepths(queueIssues, queuePRs, queueHold, slaViolations, nil)
+}
+
+// EvaluateWithRepoDepths is the Evaluate variant used by the hive runtime once
+// it has per-repo actionable depths from GitHub enumeration. In per_repo
+// cadence scope, RepoModes is populated from those depths with threshold
+// scaling neutralized (effective repo count 1).
+//
+// Cadence scheduling remains keyed by agent for this first per_repo slice,
+// because agents do not yet declare repo scope and the kick pipeline carries no
+// repo identity (#6921). State.Mode therefore remains the aggregate hive mode
+// and hive-wide agents continue to use aggregate cadences; RepoModes exposes
+// the per-repo pressure for consumers that can act on it.
+func (g *Governor) EvaluateWithRepoDepths(queueIssues, queuePRs, queueHold, slaViolations int, repoDepths map[string]RepoSnapshot) []string {
 	// pendingModeChange is captured under the lock and dispatched after it is
 	// released, so the observer never runs with g.mu held.
 	var pendingModeChange *ModeChange
@@ -333,7 +352,11 @@ func (g *Governor) Evaluate(queueIssues, queuePRs, queueHold, slaViolations int)
 	// 23 open PRs, 1 actionable issue → idle cadence → merge sweeps too rare
 	// to drain the queue). Held items stay excluded — they are waiting on a
 	// human by definition and faster kicks cannot move them.
-	newMode := g.computeMode(queueIssues + queuePRs)
+	newMode := g.computeAggregateMode(queueIssues + queuePRs)
+	g.state.RepoModes = nil
+	if g.cfg.CadenceScopeMode() == config.CadenceScopePerRepo {
+		g.state.RepoModes = g.computeRepoModes(repoDepths)
+	}
 	modeChanged := newMode != g.state.Mode
 	if modeChanged {
 		g.logger.Info("governor mode change",
@@ -362,7 +385,8 @@ func (g *Governor) Evaluate(queueIssues, queuePRs, queueHold, slaViolations int)
 	g.updateCadences()
 
 	if modeChanged {
-		for agentName, cadence := range g.state.Cadences {
+		for _, cadence := range g.state.Cadences {
+			agentName := cadence.Agent
 			if cadence.Paused {
 				g.logger.Info("agent cadence: paused by mode",
 					"agent", agentName,
@@ -407,15 +431,23 @@ func (g *Governor) Evaluate(queueIssues, queuePRs, queueHold, slaViolations int)
 }
 
 func (g *Governor) computeMode(queueDepth int) Mode {
+	return g.computeModeForRepoCount(queueDepth, g.thresholdRepoCount())
+}
+
+func (g *Governor) computeAggregateMode(queueDepth int) Mode {
+	return g.computeModeForRepoCount(queueDepth, g.repoCount)
+}
+
+func (g *Governor) computeModeForRepoCount(queueDepth, repoCount int) Mode {
 	type modeEntry struct {
 		name      Mode
 		threshold int
 	}
 
 	entries := []modeEntry{
-		{ModeSurge, g.thresholdFor("surge")},
-		{ModeBusy, g.thresholdFor("busy")},
-		{ModeQuiet, g.thresholdFor("quiet")},
+		{ModeSurge, g.thresholdForRepoCount("surge", repoCount)},
+		{ModeBusy, g.thresholdForRepoCount("busy", repoCount)},
+		{ModeQuiet, g.thresholdForRepoCount("quiet", repoCount)},
 	}
 
 	for _, e := range entries {
@@ -424,6 +456,17 @@ func (g *Governor) computeMode(queueDepth int) Mode {
 		}
 	}
 	return ModeIdle
+}
+
+func (g *Governor) computeRepoModes(repoDepths map[string]RepoSnapshot) map[string]Mode {
+	if len(repoDepths) == 0 {
+		return map[string]Mode{}
+	}
+	modes := make(map[string]Mode, len(repoDepths))
+	for repo, depth := range repoDepths {
+		modes[repo] = g.computeModeForRepoCount(depth.Issues+depth.PRs, 1)
+	}
+	return modes
 }
 
 // ladderSnapshot is the set of effective thresholds an inversion warning was
@@ -435,6 +478,7 @@ type ladderSnapshot struct {
 	busy      int
 	quiet     int
 	repoCount int
+	scope     string
 	warned    bool
 }
 
@@ -446,7 +490,18 @@ type ladderSnapshot struct {
 // threshold unset (zero); that still falls through to the defaults, because a
 // zero threshold would put every non-empty queue in that mode.
 func (g *Governor) thresholdFor(modeName string) int {
-	return g.cfg.EffectiveThreshold(modeName, g.repoCount)
+	return g.thresholdForRepoCount(modeName, g.thresholdRepoCount())
+}
+
+func (g *Governor) thresholdForRepoCount(modeName string, repoCount int) int {
+	return g.cfg.EffectiveThreshold(modeName, repoCount)
+}
+
+func (g *Governor) thresholdRepoCount() int {
+	if g.cfg.CadenceScopeMode() == config.CadenceScopePerRepo {
+		return 1
+	}
+	return g.repoCount
 }
 
 // SetRepoCount tells the governor how many repos this hive watches, so the
@@ -500,15 +555,17 @@ func (g *Governor) SetRepoCount(n int) {
 //
 // Caller must hold g.mu.
 func (g *Governor) warnIfLadderInvertedLocked() {
-	surge := g.cfg.EffectiveThreshold("surge", g.repoCount)
-	busy := g.cfg.EffectiveThreshold("busy", g.repoCount)
-	quiet := g.cfg.EffectiveThreshold("quiet", g.repoCount)
+	scope := g.cfg.CadenceScopeMode()
+	repoCount := g.thresholdRepoCount()
+	surge := g.cfg.EffectiveThreshold("surge", repoCount)
+	busy := g.cfg.EffectiveThreshold("busy", repoCount)
+	quiet := g.cfg.EffectiveThreshold("quiet", repoCount)
 
 	if surge > busy && busy > quiet {
 		g.lastLadderWarn = ladderSnapshot{}
 		return
 	}
-	cur := ladderSnapshot{surge: surge, busy: busy, quiet: quiet, repoCount: g.repoCount, warned: true}
+	cur := ladderSnapshot{surge: surge, busy: busy, quiet: quiet, repoCount: repoCount, scope: scope, warned: true}
 	if cur == g.lastLadderWarn {
 		return
 	}
@@ -517,7 +574,8 @@ func (g *Governor) warnIfLadderInvertedLocked() {
 		"surge", surge,
 		"busy", busy,
 		"quiet", quiet,
-		"repo_count", g.repoCount,
+		"repo_count", repoCount,
+		"cadence_scope", scope,
 		"threshold_scaling", g.cfg.ThresholdScalingMode(),
 		"hint", "an explicit governor.modes.<mode>.threshold is never scaled; set the others explicitly too, or remove it to let all three scale",
 	)
@@ -535,58 +593,148 @@ func (g *Governor) warnIfLadderInvertedLocked() {
 // configured (longer) one — burning backend tokens faster than any cadence
 // the operator could see or set.
 func (g *Governor) updateCadences() {
-	modeName := modeToConfigKey(g.state.Mode)
+	aggregateModeName := modeToConfigKey(g.state.Mode)
 	cadences := make(map[string]AgentCadence, len(g.agents))
 
 	for agentName := range g.agents {
-		cadence, ok := g.resolveCadence(modeName, agentName)
-		if !ok || strings.EqualFold(strings.TrimSpace(cadence.Interval()), cadenceValueOff) {
-			// No cadence configured for this agent in this mode (or an
-			// explicit "off"): no timer kicks. Leaving the agent out of the
-			// map — rather than keeping a stale entry — is the fix.
-			continue
+		repos := []string{""}
+		if g.agentUsesRepoScope(agentName) {
+			repos = sortedRepoModeKeys(g.state.RepoModes)
 		}
-
-		if cadence.IsPaused() {
-			cadences[agentName] = AgentCadence{
-				Agent:  agentName,
-				Paused: true,
+		for _, repo := range repos {
+			modeName := aggregateModeName
+			if repo != "" {
+				modeName = modeToConfigKey(g.state.RepoModes[repo])
 			}
-			continue
+			g.addCadenceForTarget(cadences, modeName, agentName, repo)
 		}
-
-		if err := cadence.Validate(); err != nil {
-			g.logger.Warn("invalid cadence — agent will receive no timer kicks until fixed",
-				"agent", agentName,
-				"mode", g.state.Mode,
-				"value", cadence.String(),
-				"error", err,
-			)
-			continue
-		}
-
-		entry := AgentCadence{Agent: agentName, Schedule: cadence}
-		if cadence.Mode() == config.CadenceModeInterval {
-			dur, err := time.ParseDuration(cadence.Interval())
-			if err != nil {
-				g.logger.Warn("invalid cadence duration — agent will receive no timer kicks until fixed",
-					"agent", agentName,
-					"mode", g.state.Mode,
-					"value", cadence.Interval(),
-					"error", err,
-				)
-				continue
-			}
-			entry.Interval = dur
-			if ac, ok := g.agents[agentName]; ok && ac.ReplicaIndex > 1 && ac.ReplicaCount > 1 && g.state.LastKick[agentName].IsZero() {
-				offset := time.Duration(int64(dur) * int64(ac.ReplicaIndex-1) / int64(ac.ReplicaCount))
-				g.state.LastKick[agentName] = g.now().Add(-dur + offset)
-			}
-		}
-		cadences[agentName] = entry
 	}
 
 	g.state.Cadences = cadences
+	g.normalizeLastKickKeysLocked()
+}
+
+func (g *Governor) addCadenceForTarget(cadences map[string]AgentCadence, modeName, agentName, repo string) {
+	cadence, ok := g.resolveCadence(modeName, agentName)
+	if !ok || strings.EqualFold(strings.TrimSpace(cadence.Interval()), cadenceValueOff) {
+		return
+	}
+
+	key := config.CadenceTargetKey(agentName, repo)
+	if cadence.IsPaused() {
+		cadences[key] = AgentCadence{Agent: agentName, Repo: repo, Paused: true}
+		return
+	}
+
+	if err := cadence.Validate(); err != nil {
+		g.logger.Warn("invalid cadence — agent will receive no timer kicks until fixed",
+			"agent", agentName,
+			"repo", repo,
+			"mode", modeName,
+			"value", cadence.String(),
+			"error", err,
+		)
+		return
+	}
+
+	entry := AgentCadence{Agent: agentName, Repo: repo, Schedule: cadence}
+	if cadence.Mode() == config.CadenceModeInterval {
+		dur, err := time.ParseDuration(cadence.Interval())
+		if err != nil {
+			g.logger.Warn("invalid cadence duration — agent will receive no timer kicks until fixed",
+				"agent", agentName,
+				"repo", repo,
+				"mode", modeName,
+				"value", cadence.Interval(),
+				"error", err,
+			)
+			return
+		}
+		entry.Interval = dur
+		if ac, ok := g.agents[agentName]; ok && ac.ReplicaIndex > 1 && ac.ReplicaCount > 1 && g.state.LastKick[key].IsZero() && g.state.LastKick[agentName].IsZero() {
+			offset := time.Duration(int64(dur) * int64(ac.ReplicaIndex-1) / int64(ac.ReplicaCount))
+			g.state.LastKick[key] = g.now().Add(-dur + offset)
+		}
+	}
+	cadences[key] = entry
+}
+
+func sortedRepoModeKeys(repoModes map[string]Mode) []string {
+	if len(repoModes) == 0 {
+		return nil
+	}
+	repos := make([]string, 0, len(repoModes))
+	for repo := range repoModes {
+		repos = append(repos, repo)
+	}
+	sort.Strings(repos)
+	return repos
+}
+
+func (g *Governor) agentUsesRepoScope(agentName string) bool {
+	if g.cfg.CadenceScopeMode() != config.CadenceScopePerRepo {
+		return false
+	}
+	if ac, ok := g.agents[agentName]; ok {
+		if ac.UsesRepoScopedCadence() {
+			return true
+		}
+		if ac.ReplicaOf != "" {
+			if base, ok := g.agents[ac.ReplicaOf]; ok {
+				return base.UsesRepoScopedCadence()
+			}
+		}
+	}
+	return false
+}
+
+func (g *Governor) normalizeLastKickKeysLocked() {
+	active := make(map[string]bool, len(g.state.Cadences))
+	for key := range g.state.Cadences {
+		active[key] = true
+	}
+
+	for agentName := range g.agents {
+		if g.agentUsesRepoScope(agentName) {
+			legacy := g.state.LastKick[agentName]
+			migrated := false
+			for key := range active {
+				agent, repo := config.SplitCadenceTargetKey(key)
+				if agent != agentName || repo == "" {
+					continue
+				}
+				migrated = true
+				if g.state.LastKick[key].IsZero() && !legacy.IsZero() {
+					g.state.LastKick[key] = legacy
+				}
+			}
+			if migrated {
+				delete(g.state.LastKick, agentName)
+			}
+			continue
+		}
+
+		legacyKey := config.CadenceTargetKey(agentName, "")
+		latest := g.state.LastKick[legacyKey]
+		for key, ts := range g.state.LastKick {
+			agent, repo := config.SplitCadenceTargetKey(key)
+			if agent != agentName || repo == "" {
+				continue
+			}
+			if latest.IsZero() || ts.After(latest) {
+				latest = ts
+			}
+		}
+		if !latest.IsZero() {
+			g.state.LastKick[legacyKey] = latest
+		}
+		for key := range g.state.LastKick {
+			agent, repo := config.SplitCadenceTargetKey(key)
+			if agent == agentName && repo != "" {
+				delete(g.state.LastKick, key)
+			}
+		}
+	}
 }
 
 // resolveCadence returns the configured cadence string for one agent in one
@@ -631,8 +779,6 @@ func (g *Governor) budgetExhausted() bool {
 
 func (g *Governor) agentsDueForKick() []string {
 	now := g.now()
-	var due []string
-
 	exhausted := g.budgetExhausted()
 	// IgnoredAgents are exempt from budget suppression: they keep getting
 	// kicked even when the weekly budget is exhausted.
@@ -642,7 +788,22 @@ func (g *Governor) agentsDueForKick() []string {
 	}
 	suppressed := 0
 
-	for agentName, cadence := range g.state.Cadences {
+	keys := make([]string, 0, len(g.state.Cadences))
+	for key := range g.state.Cadences {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	type candidate struct {
+		key      string
+		last     time.Time
+		interval time.Duration
+	}
+	selected := make(map[string]candidate)
+	agentOrder := []string{}
+	for _, cadenceKey := range keys {
+		cadence := g.state.Cadences[cadenceKey]
+		agentName := cadence.Agent
 		if cadence.Paused {
 			continue
 		}
@@ -660,23 +821,44 @@ func (g *Governor) agentsDueForKick() []string {
 			continue
 		}
 
-		lastKick := g.state.LastKick[agentName]
+		lastKick := g.state.LastKick[cadenceKey]
+		due := false
 		if cadence.Schedule.Mode() != config.CadenceModeInterval {
-			// Time-of-day cadences are exact wall-clock schedules. Governor modes
-			// only decide whether this schedule is active; they never scale the
-			// schedule's times. A short catch-up window grants at most one kick
-			// after downtime, and comparing the scheduled occurrence to LastKick
-			// dedupes repeated governor ticks inside the same minute.
 			if occurrence, ok := cadence.Schedule.DueOccurrence(lastKick, now, config.CadenceCatchUpWindow); ok {
 				cadence.LastOccurrence = occurrence
-				g.state.Cadences[agentName] = cadence
-				due = append(due, agentName)
+				g.state.Cadences[cadenceKey] = cadence
+				due = true
 			}
+		} else if lastKick.IsZero() || now.Sub(lastKick) >= cadence.Interval {
+			due = true
+		}
+		if !due {
 			continue
 		}
-		if lastKick.IsZero() || now.Sub(lastKick) >= cadence.Interval {
-			due = append(due, agentName)
+		if _, ok := selected[agentName]; !ok {
+			agentOrder = append(agentOrder, agentName)
+			selected[agentName] = candidate{key: cadenceKey, last: lastKick, interval: cadence.Interval}
+			continue
 		}
+		cur := selected[agentName]
+		if cadence.Interval > 0 && (cur.interval == 0 || cadence.Interval < cur.interval) {
+			selected[agentName] = candidate{key: cadenceKey, last: lastKick, interval: cadence.Interval}
+			continue
+		}
+		if cur.interval > 0 && cadence.Interval > cur.interval {
+			continue
+		}
+		if cur.last.IsZero() && !lastKick.IsZero() {
+			continue
+		}
+		if lastKick.IsZero() || lastKick.Before(cur.last) {
+			selected[agentName] = candidate{key: cadenceKey, last: lastKick, interval: cadence.Interval}
+		}
+	}
+
+	due := make([]string, 0, len(agentOrder))
+	for _, agentName := range agentOrder {
+		due = append(due, selected[agentName].key)
 	}
 
 	if exhausted {
@@ -707,8 +889,11 @@ func (g *Governor) AgentEligibleForCELKick(agentName string) bool {
 	defer g.mu.RUnlock()
 
 	// Cadence-pause: an agent paused by the current mode is never kicked.
-	if cadence, ok := g.state.Cadences[agentName]; ok && cadence.Paused {
-		return false
+	for key, cadence := range g.state.Cadences {
+		cadenceAgent, _ := config.SplitCadenceTargetKey(key)
+		if (cadence.Agent == agentName || cadenceAgent == agentName) && cadence.Paused {
+			return false
+		}
 	}
 
 	// On-demand and non-kick-channel agents are never governor/event-kicked.
@@ -767,7 +952,7 @@ func (g *Governor) AllowResumeKick(agentName string) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	cadence, ok := g.state.Cadences[agentName]
+	cadenceKey, cadence, ok := g.resumeCadenceForAgent(agentName)
 	if !ok || cadence.Paused || (cadence.Interval <= 0 && cadence.Schedule.Mode() == config.CadenceModeInterval) {
 		return false
 	}
@@ -780,21 +965,38 @@ func (g *Governor) AllowResumeKick(agentName string) bool {
 	if cadence.Schedule.Mode() != config.CadenceModeInterval {
 		return false
 	}
-	if last, ok := g.resumeKicks[agentName]; ok && g.now().Sub(last) < cadence.Interval {
+	if last, ok := g.resumeKicks[cadenceKey]; ok && g.now().Sub(last) < cadence.Interval {
 		return false
 	}
-	g.resumeKicks[agentName] = g.now()
+	g.resumeKicks[cadenceKey] = g.now()
 	return true
 }
 
+func (g *Governor) resumeCadenceForAgent(agentName string) (string, AgentCadence, bool) {
+	if cadence, ok := g.state.Cadences[agentName]; ok {
+		return agentName, cadence, true
+	}
+	for key, cadence := range g.state.Cadences {
+		if cadence.Agent == agentName {
+			return key, cadence, true
+		}
+	}
+	return "", AgentCadence{}, false
+}
+
 func (g *Governor) RecordKick(agentName string) {
+	g.RecordKickForRepo(agentName, "")
+}
+
+func (g *Governor) RecordKickForRepo(agentName, repo string) {
 	report, hasReport := g.validateAgentReportIfPresent(agentName)
 
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	now := g.now()
-	g.state.LastKick[agentName] = now
-	g.appendKickHistory(KickRecord{Timestamp: now, Agent: agentName})
+	key := config.CadenceTargetKey(agentName, repo)
+	g.state.LastKick[key] = now
+	g.appendKickHistory(KickRecord{Timestamp: now, Agent: agentName, Repo: repo})
 	if hasReport {
 		g.agentReports[agentName] = report
 	}
@@ -862,12 +1064,17 @@ func (g *Governor) GetState() State {
 	for k, v := range g.state.Cadences {
 		cadences[k] = v
 	}
+	repoModes := make(map[string]Mode, len(g.state.RepoModes))
+	for k, v := range g.state.RepoModes {
+		repoModes[k] = v
+	}
 	lastKick := make(map[string]time.Time, len(g.state.LastKick))
 	for k, v := range g.state.LastKick {
 		lastKick[k] = v
 	}
 	return State{
 		Mode:            g.state.Mode,
+		RepoModes:       repoModes,
 		QueueIssues:     g.state.QueueIssues,
 		QueuePRs:        g.state.QueuePRs,
 		QueueHold:       g.state.QueueHold,

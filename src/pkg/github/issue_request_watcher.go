@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -52,6 +53,21 @@ const (
 	issueRetryBase         = 30 * time.Second
 	issueRetryMax          = 15 * time.Minute
 	issueRetryRateLimitMax = time.Hour
+)
+
+var (
+	issueAngleBracketTokenRE            = regexp.MustCompile(`<([^>\n]+)>`)
+	issueTemplatePlaceholderContentRE   = regexp.MustCompile(`^(?:[a-z][a-z0-9]*(?:[ -][a-z0-9]+)+|analysis|fix)$`)
+	issueMarkdownHTMLTagsWithAttributes = map[string]bool{
+		"a": true, "br": true, "code": true, "dd": true, "del": true, "details": true,
+		"div": true, "dl": true, "dt": true, "em": true, "h1": true, "h2": true,
+		"h3": true, "h4": true, "h5": true, "h6": true, "hr": true, "img": true,
+		"ins": true, "kbd": true, "li": true, "ol": true, "p": true, "pre": true,
+		"rp": true, "rt": true, "ruby": true, "s": true, "samp": true, "source": true,
+		"span": true, "strong": true, "sub": true, "summary": true, "sup": true,
+		"table": true, "tbody": true, "td": true, "tfoot": true, "th": true,
+		"thead": true, "tr": true, "ul": true, "var": true,
+	}
 )
 
 // issueRequestMaxAge is the give-up horizon: a request that still has not
@@ -274,10 +290,20 @@ func (c *Client) handleOneIssueRequest(ctx context.Context, path string, nowFn f
 	case "issue":
 		if strings.TrimSpace(req.Repo) == "" || strings.TrimSpace(req.Title) == "" {
 			shapeErr = "issue request requires repo and title"
+		} else if placeholder, ok := issueUnsubstitutedTemplatePlaceholder(req.Title); ok {
+			shapeErr = "issue request title contains unsubstituted template placeholder " + strconv.Quote(placeholder)
+		} else if placeholder, ok := issueUnsubstitutedTemplatePlaceholder(req.Body); ok {
+			shapeErr = "issue request body contains unsubstituted template placeholder " + strconv.Quote(placeholder)
+		} else if issueBodyHasMisEscapedNewlines(req.Body) {
+			shapeErr = "issue request body contains literal newline escape sequences; use real newlines or --body-file"
 		}
 	case "comment":
 		if strings.TrimSpace(req.Repo) == "" || req.Number <= 0 || strings.TrimSpace(req.Body) == "" {
 			shapeErr = "comment request requires repo, number, and body"
+		} else if placeholder, ok := issueUnsubstitutedTemplatePlaceholder(req.Body); ok {
+			shapeErr = "comment request body contains unsubstituted template placeholder " + strconv.Quote(placeholder)
+		} else if issueBodyHasMisEscapedNewlines(req.Body) {
+			shapeErr = "comment request body contains literal newline escape sequences; use real newlines or --body-file"
 		}
 	case "claim":
 		if strings.TrimSpace(req.Repo) == "" || req.Number <= 0 || strings.TrimSpace(req.Agent) == "" {
@@ -420,6 +446,46 @@ func (c *Client) handleOneIssueRequest(ctx context.Context, path string, nowFn f
 		slog.String("agent", req.Agent))
 }
 
+func issueUnsubstitutedTemplatePlaceholder(text string) (string, bool) {
+	// Hive policy templates use human-fill placeholders like <analysis>,
+	// <fix>, and <specific description>: lowercase words, with multi-word
+	// placeholders separated by spaces or hyphens. Keep the matcher narrow:
+	// skip URLs, generic type parameters, and recognized GitHub Markdown HTML
+	// tags (including attribute forms such as <details open>) so those are not
+	// mistaken for an unfilled template.
+	for _, match := range issueAngleBracketTokenRE.FindAllStringSubmatch(text, -1) {
+		if len(match) != 2 {
+			continue
+		}
+		content := strings.TrimSpace(match[1])
+		if content == "" || strings.Contains(content, "://") || strings.ContainsAny(content, "/=,") {
+			continue
+		}
+		firstField := content
+		if fields := strings.Fields(content); len(fields) > 0 {
+			firstField = fields[0]
+		}
+		if issueMarkdownHTMLTagsWithAttributes[strings.ToLower(firstField)] {
+			continue
+		}
+		if issueTemplatePlaceholderContentRE.MatchString(content) {
+			return match[0], true
+		}
+	}
+	return "", false
+}
+
+func issueBodyHasMisEscapedNewlines(body string) bool {
+	// A body with real line breaks may legitimately discuss "\n" in prose or a
+	// fenced code block. The malformed scanner specimen had no real newlines,
+	// multiple literal \n tokens, and markdown structure encoded as \n\n / \n##;
+	// require that combination before quarantining to avoid blocking ordinary
+	// one-line text that mentions the escape sequence.
+	return !strings.Contains(body, "\n") &&
+		strings.Count(body, `\n`) >= 2 &&
+		(strings.Contains(body, `\n\n`) || strings.Contains(body, `\n## `))
+}
+
 func (c *Client) denyIssueRequest(path string, req IssueRequest, reason string, nowFn func() time.Time) {
 	c.writeIssueResult(path, IssueResponse{OK: false, Error: "authorization denied: " + reason, At: nowFn().UTC().Format(time.RFC3339)})
 	_ = os.Rename(path, path+".denied")
@@ -509,8 +575,9 @@ func (c *Client) CreateIssue(ctx context.Context, repo, title, body string, labe
 		c.logger.Warn("CreateIssue: dedupe lookup failed with terminal error, creating without dedupe",
 			slog.String("repo", repoName), slog.String("reason_class", "terminal"), slog.String("error", err.Error()))
 	} else if existing != nil {
-		c.logger.Info("CreateIssue: open issue with identical title exists, reusing",
-			slog.String("repo", repoName), slog.Int("number", existing.GetNumber()))
+		c.logger.Info("CreateIssue: open issue with the same subject exists, reusing",
+			slog.String("repo", repoName), slog.Int("number", existing.GetNumber()),
+			slog.String("existing_title", existing.GetTitle()))
 		return CreateIssueResult{Number: existing.GetNumber(), URL: existing.GetHTMLURL(), AlreadyExisted: true}, nil
 	}
 
@@ -580,10 +647,16 @@ func (c *Client) CreateIssue(ctx context.Context, repo, title, body string, labe
 }
 
 // findOpenIssueByTitle scans up to the 3 most recent pages of open issues for
-// an exact (whitespace-trimmed) title match. Bounded: agent-filed issues are
-// recent by construction, and an unbounded scan of a busy repo would burn API
-// budget on every create.
+// an exact (whitespace-trimmed) title match, falling back to a canonical
+// subject match (see canonicalIssueSubject) so a finding re-filed with a
+// different model-authored qualifier is recognised as the same finding.
+// Exact matches win; otherwise the OLDEST canonical match is returned so
+// repeats consolidate onto the original issue rather than the newest copy.
+// Bounded: agent-filed issues are recent by construction, and an unbounded
+// scan of a busy repo would burn API budget on every create.
 func (c *Client) findOpenIssueByTitle(ctx context.Context, owner, repo, title string) (*gh.Issue, error) {
+	wantCanonical := canonicalIssueSubject(title)
+	var canonicalMatch *gh.Issue
 	opts := &gh.IssueListByRepoOptions{
 		State:       "open",
 		Sort:        "created",
@@ -600,15 +673,21 @@ func (c *Client) findOpenIssueByTitle(ctx context.Context, owner, repo, title st
 			if is.IsPullRequest() {
 				continue
 			}
-			if strings.TrimSpace(is.GetTitle()) == title {
+			candidate := strings.TrimSpace(is.GetTitle())
+			if candidate == title {
 				return is, nil
+			}
+			// Pages arrive newest-first, so overwriting leaves the oldest
+			// canonical match in hand once the scan finishes.
+			if wantCanonical != "" && canonicalIssueSubject(candidate) == wantCanonical {
+				canonicalMatch = is
 			}
 		}
 		if resp == nil || resp.NextPage == 0 {
 			break
 		}
 	}
-	return nil, nil
+	return canonicalMatch, nil
 }
 
 func (c *Client) ensureCreateIssueLabel(ctx context.Context, owner, repo, name string) error {
