@@ -11,6 +11,13 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-14 (v4.33.1)
+
+### Fixed
+
+- The pre-merge sign-off attribution gate now rejects a commit signed off by *anyone who is not the pull request author*, not only by a bot ([#6971](https://github.com/hivecommons/hive/issues/6971)). `check-squash-signoff-attribution.sh` used to flag only bot `Signed-off-by` trailers, so a commit authored by one person but signed off as *another human's* GitHub noreply passed the gate and then squashed into a permanent mismatched-signoff on protected history — exactly what happened to `01bd2469` on `v5` (`author=Andy Anderson <andy@clubanderson.com>` / `signed-off-by=danathar@users.noreply.github.com`), which the post-merge monitor would have caught but the pre-merge gate did not. The gate now resolves the commit author's GitHub login (via the commits API, or `DCO_AUTHOR_LOGIN_MAP` offline) and fails unless at least one sign-off names the person the squash will be attributed to, while still accepting the author's own GitHub noreply and never misreading a `Co-authored-by:` trailer as a sign-off. The noreply-matching and author-login logic the two DCO checkers had each copied is now shared in `src/scripts/lib-dco-identity.sh` so they cannot drift apart again — the drift was how this gap survived. The already-landed `01bd2469` is dispositioned with a post-merge waiver because `v5` is protected and cannot be repaired.
+- The pre-merge squash sign-off attribution gate now also rejects a commit whose `Signed-off-by:` names a GitHub noreply address for a **different login than the pull request's author**, and the post-merge monitor records the maintainer disposition for `01bd2469`, the squash of [#6970](https://github.com/hivecommons/hive/pull/6970) that [#6971](https://github.com/hivecommons/hive/issues/6971) paged on. That commit is the human variant of the [#6798](https://github.com/hivecommons/hive/issues/6798) class: the branch commit was authored and signed off by one contributor, the squash rewrote the author to the PR's author, and the retained trailer became a permanent mismatched-signoff on protected v5 history. A noreply sign-off structurally names one account, so when that account is not the PR author the post-merge mismatch is guaranteed — the gate now fails it at PR time (`foreign-noreply-signoff`), while the commit can still be re-signed, instead of leaving the hourly monitor to page on history nobody can repair.
+
 ## 2026-09-14 (v4.33.0)
 
 ### Added
