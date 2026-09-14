@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-14 (v4.32.0)
+
+### Added
+
+- Keyed governor cadences by agent and repo so repo-scoped agents schedule independently (#6921).
+
 ## 2026-09-14 (v4.31.1)
 
 ### Fixed
