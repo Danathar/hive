@@ -20,7 +20,7 @@ func dispatchSubcommand(args []string, stdout, stderr io.Writer) (bool, int) {
 	}
 	switch args[0] {
 	case "--version", "version":
-		fmt.Fprintf(stdout, "hive %s (commit %s, branch %s)\n", version, gitShort, gitBranch)
+		fmt.Fprintf(stdout, "hive %s (commit %s, branch %s)\n", reportedVersion(), gitShort, gitBranch)
 		return true, 0
 	case "validate", "--config-check":
 		return true, runConfigCheck(args[1:], stdout, stderr)
@@ -70,6 +70,14 @@ func main() {
 	logger := slog.New(logscrub.NewHandler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	slog.SetDefault(logger)
 
+	// Auto-update visibility (#7092): before anything reads the upgrade marker,
+	// reconcile it against the commit we actually booted on. A marker whose
+	// target IS the running commit means the last instructed upgrade LANDED —
+	// record that success durably and clear the marker, so the dashboard can
+	// show "attempted and succeeded" instead of silently losing the success the
+	// moment the new image boots.
+	reconcileUpgradeOutcomeAtBoot(upgradeMarkerPath, lastUpgradeOutcomePath, gitShort, logger)
+
 	// Process singleton: refuse to become a second hive process in this
 	// container (#2453, #2496). Two concurrent processes beat as the same pod,
 	// alternate registry state every beat, and are invisible to both the
@@ -90,33 +98,6 @@ func main() {
 		// referenced so the *os.File is never garbage-collected (a collected
 		// file closes its descriptor, which would silently drop the flock).
 		defer procLock.Release()
-	}
-
-	// Clear stale upgrade marker if the current SHA differs from the marker's
-	// current_sha — this means the upgrade succeeded and the marker is from a
-	// previous version.
-	const upgradeMarkerStartupPath = "/data/upgrade-requested"
-	if markerData, err := os.ReadFile(upgradeMarkerStartupPath); err == nil {
-		m := parseUpgradeMarker(markerData)
-		if m.CurrentSHA != gitShort {
-			// We booted on a different SHA than the one that requested the
-			// upgrade: it landed. Drop the marker so the attempt budget resets.
-			if err := os.Remove(upgradeMarkerStartupPath); err != nil && !os.IsNotExist(err) {
-				logger.Warn("failed to clear stale upgrade marker", "path", upgradeMarkerStartupPath, "error", err)
-			}
-			logger.Info("upgrade landed, cleared marker",
-				"current", gitShort, "previous", m.CurrentSHA, "target", m.TargetSHA)
-		} else {
-			// Same SHA as the attempt that ran before this boot: the image never
-			// changed, so that attempt FAILED. Say so at startup — previously
-			// this restart looked completely routine in the logs.
-			logger.Error("previous self-upgrade attempt did not land (still on the same image)",
-				"current", gitShort,
-				"target", m.TargetSHA,
-				"attempts", m.Attempts,
-				"last_error", m.LastError,
-			)
-		}
 	}
 
 	if os.Getenv("HIVE_MODE") == "hub" {
