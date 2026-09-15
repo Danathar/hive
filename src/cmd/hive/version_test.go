@@ -73,22 +73,29 @@ func TestReportedVersionNormalizesInjectedValue(t *testing.T) {
 // re-open the bug. Checked at the source level so the guard holds even where
 // the payloads are assembled inline in main() and are awkward to unit-test.
 func TestAllVersionConsumersUseReportedVersion(t *testing.T) {
-	files := []string{"main.go", "hubwire.go", "proxywire.go"}
-	var b strings.Builder
-	for _, file := range files {
-		src, err := os.ReadFile(file)
-		if err != nil {
-			t.Fatalf("reading %s: %v", file, err)
-		}
-		b.Write(src)
-		b.WriteByte('\n')
+	// v5 splits main() across main.go, hubwire.go and proxywire.go, so the
+	// assertion scans every non-test source file in the package.
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("globbing package sources: %v", err)
 	}
-	s := b.String()
+	var sb strings.Builder
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("reading %s: %v", f, err)
+		}
+		sb.Write(src)
+	}
+	s := sb.String()
 
 	// The raw var must never be handed straight to a reported surface.
 	for _, bad := range []string{"Version:     version,", "Version:                 version,"} {
 		if strings.Contains(s, bad) {
-			t.Fatalf("spoke wiring passes the raw `version` var to a payload (%q); it must use reportedVersion() so the reported string is normalized semver", bad)
+			t.Fatalf("cmd/hive passes the raw `version` var to a payload (%q); it must use reportedVersion() so the reported string is normalized semver", bad)
 		}
 	}
 
