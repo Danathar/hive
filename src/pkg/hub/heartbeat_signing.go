@@ -2,9 +2,7 @@ package hub
 
 import (
 	"encoding/json"
-	"log/slog"
 	"net/http"
-	"os"
 	"sync"
 	"time"
 
@@ -97,27 +95,4 @@ func (s *HubServer) signHeartbeatResponse(w http.ResponseWriter, resp *Heartbeat
 	if sig := spoke.SignBody(seed, body); sig != "" {
 		w.Header().Set(spoke.SigHeader, sig)
 	}
-}
-
-// spokeHeartbeatVerifier is the process-wide spoke-side verifier for hub
-// heartbeat responses (issue #7082). One instance suffices: a spoke process
-// serves exactly one hive, so a single monotonic-seq floor and one
-// trust-on-first-signed flag cover it.
-//
-// The MODE is read once from HIVE_HEARTBEAT_VERIFY (spoke.EnvVerifyMode) and
-// defaults to LOG-ONLY, so upgrading a spoke to a build that carries this code
-// does NOT begin rejecting anything: it verifies and logs. An operator opts in
-// to enforcement explicitly, and even then a spoke only rejects once it has
-// already accepted a valid signed response (so it cannot hard-fail against a
-// hub that has not shipped signing yet).
-var (
-	spokeVerifierOnce sync.Once
-	spokeVerifier     *spoke.Verifier
-)
-
-func spokeHeartbeatVerifier(logger *slog.Logger) *spoke.Verifier {
-	spokeVerifierOnce.Do(func() {
-		spokeVerifier = spoke.NewVerifier(spoke.ModeFromString(os.Getenv(spoke.EnvVerifyMode)), logger)
-	})
-	return spokeVerifier
 }
