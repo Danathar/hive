@@ -79,6 +79,12 @@ A spoke running a channel image shows both delivery dimensions in its own dashbo
 
 The tooltip includes the running SHA, channel when present, built-from branch, authoritative Deployment image ref, and tracking mode. The spoke derives both channel and tracking mode server-side from its cached in-cluster Deployment image lookup; browser code does not infer mutability from tag strings. If the Deployment cannot be read (for example, during a plain `docker run`) or its image ref is malformed, the badge says `tracking unknown` and the API does not expose the untrusted ref. This preserves the distinction between unknown provenance and an intentional pin. The channel portion was introduced by [#3762](https://github.com/hivecommons/hive/pull/3762); the tracking detail is specified by [#6321](https://github.com/hivecommons/hive/issues/6321).
 
+## Spoke self-service selector
+
+Hosted spoke dashboards that are already following a release-channel tag show a **Follow channel** selector in the release-status panel. Choosing `stable`, `candidate`, or `edge` calls the spoke-local `POST /api/release-channel`, which relays the request to the hub's existing `POST /api/saas/hives/{id}/switch-branch` path using the spoke's dashboard-token proof. The hub still performs the authorization, channel/tag validation, GHCR publishability check, tracked-channel persistence, and kubectl-or-heartbeat delivery.
+
+The spoke UI keeps reported state and intent separate: after a selection it continues to show the channel observed from the Deployment image, plus a pending "switch requested" note, until the rollout/heartbeat lands on the requested tag. Spokes that are self-hosted, pinned, branch-tracking, missing hub credentials, or otherwise unresolved show an honest "selection unavailable" explanation rather than a dead control.
+
 ## Known limitations
 
 - **Bulk actions cannot set a channel.** The bulk *Switch branch* action validates against real branches only and rejects channel names (`unknown branch`); it also never writes the tracked channel. Switching to a channel is per-hive.

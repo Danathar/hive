@@ -402,7 +402,7 @@ func (s *HubServer) handleUpgradeHive(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	username := s.getAuthUser(r)
 	if username == "" {
-		username, _ = s.trustedSpokeUpgradeUser(r, id)
+		username, _ = s.trustedSpokeSelfServiceUser(r, id)
 	}
 	h := loadSaaSHive(id)
 	if h == nil {
@@ -584,6 +584,9 @@ func (s *HubServer) handleSwitchBranch(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PathValue("id")
 	username := s.getAuthUser(r)
+	if username == "" {
+		username, _ = s.trustedSpokeSelfServiceUser(r, id)
+	}
 	h := loadSaaSHive(id)
 	if h == nil {
 		http.Error(w, `{"error":"hive not found"}`, http.StatusNotFound)

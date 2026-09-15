@@ -93,9 +93,22 @@ var (
 	heartbeatVerifier     *spokesig.Verifier
 )
 
+// spokeVerifierStateDir is the durable dir the verifier persists its
+// trust-on-first-signed flag and rollback-seq floor under (issue #7121),
+// matching the /data convention of reachHistoryPath and the upgrade marker.
+// Without persistence a spoke restart resets both, letting an on-path attacker
+// strip signatures (back to pre-trust) or replay any captured signed response
+// (floor back to 0) even in enforce mode. var, not const, so tests can point it
+// at a temp dir.
+var spokeVerifierStateDir = "/data"
+
 func spokeHeartbeatVerifier(logger *slog.Logger) *spokesig.Verifier {
 	heartbeatVerifierOnce.Do(func() {
-		heartbeatVerifier = spokesig.NewVerifier(spokesig.ModeFromString(os.Getenv(spokesig.EnvVerifyMode)), logger)
+		heartbeatVerifier = spokesig.NewPersistentVerifier(
+			spokesig.ModeFromString(os.Getenv(spokesig.EnvVerifyMode)),
+			logger,
+			spokesig.DefaultStatePath(spokeVerifierStateDir),
+		)
 	})
 	return heartbeatVerifier
 }
