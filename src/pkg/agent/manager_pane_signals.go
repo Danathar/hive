@@ -279,6 +279,27 @@ func backendHasBlockingPrompts(backend string) bool {
 	return false
 }
 
+// agentWorkingMarkers are fragments that modern TUI backends render while the
+// agent is actively processing a request. Some keep the input box visible while
+// streaming, so these markers must veto readiness before a kick can interrupt
+// in-flight work.
+var agentWorkingMarkers = []string{
+	"esc interrupt",
+	"◉ Working",
+}
+
+func paneShowsAgentWorking(pane string) bool {
+	if pane == "" {
+		return false
+	}
+	for _, marker := range agentWorkingMarkers {
+		if strings.Contains(pane, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // paneShowsInputPrompt reports whether the pane content shows a CLI input
 // prompt that is ready to accept a kick.
 //

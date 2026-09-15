@@ -472,7 +472,13 @@ func (m *Manager) waitForInputPromptForAgent(agent *AgentProcess) bool {
 			// ready input prompt — sending a kick there feeds the menu.
 			// Check the visible pane only: a dismissed consent screen
 			// lingers in the scrollback that captureTmuxPaneForAgent sees.
-			if paneShowsConsentScreen(m.captureVisiblePaneForAgent(agent)) {
+			visible := m.captureVisiblePaneForAgent(agent)
+			if paneShowsConsentScreen(visible) {
+				continue
+			}
+			// A busy agent can still render its input box; never treat that
+			// as ready or the next kick will interrupt in-flight work.
+			if paneShowsAgentWorking(visible) {
 				continue
 			}
 			output := m.captureTmuxPaneForAgent(agent)

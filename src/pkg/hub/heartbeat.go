@@ -374,6 +374,10 @@ type HeartbeatResponse struct {
 	AuthorizedUserNames map[string]string         `json:"authorized_user_names,omitempty"`
 	ProjectConfig       *HeartbeatProjectConfig   `json:"project_config,omitempty"`
 	PendingGateway      *HeartbeatGatewayConfig   `json:"pending_gateway,omitempty"`
+	SigHiveID           string                    `json:"sig_hive_id,omitempty"`
+	SigSeq              int64                     `json:"sig_seq,omitempty"`
+	SigSignedAt         int64                     `json:"sig_ts,omitempty"`
+	SigVersion          int                       `json:"sig_v,omitempty"`
 }
 type HubBanner struct {
 	ID      string `json:"id"`
