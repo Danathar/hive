@@ -173,14 +173,81 @@ const IS_HOSTED = SESSION_KEY !== '' || SESSION_PUBLIC_KEY !== '';
 // the explicit public /snapshot document may be framed by an allowlisted origin.
 const SNAPSHOT_FRAME_ANCESTORS_FALLBACK = parseSnapshotFrameAncestors(process.env.HIVE_SNAPSHOT_FRAME_ANCESTORS || '');
 
-// HIVE_ID is this spoke's own hive identity, injected by the hub at provision
-// time (mirrors the HIVE_ID env the Go dashboard reads). It is the anchor for
-// per-hive terminal authorization: a hub-user cookie is authenticated hub-wide
-// (the `hive_hub_user` cookie is scoped to .kubestellar.io — widened from
-// .hive.kubestellar.io for sibling-product SSO, hive#4171 — so ANY hive's
-// domain receives it), so the signature check alone proves only "some hub user",
-// never "a user allowed on THIS hive".
-const HIVE_ID = process.env.HIVE_ID || '';
+// HIVE_ID_FILE is where the Go binary PERSISTS the hive identity it actually
+// runs as (cmd/hive's hiveIDFilePath). Overridable for tests only.
+const HIVE_ID_FILE = process.env.HIVE_ID_FILE || '/data/hive-id';
+
+// hiveID() is this spoke's own hive identity — the anchor for per-hive terminal
+// authorization. A hub-user cookie is authenticated hub-wide (the
+// `hive_hub_user` cookie is scoped to .kubestellar.io — widened from
+// .hive.kubestellar.io for sibling-product SSO, hive#4171 — so ANY hive's domain
+// receives it), so the signature check alone proves only "some hub user", never
+// "a user allowed on THIS hive". The hive id is what supplies the missing half.
+//
+// It used to be `const HIVE_ID = process.env.HIVE_ID || ''`, read once at module
+// load. That is correct on a hub-provisioned spoke and wrong everywhere else.
+//
+// WHY THIS IS A FUNCTION NOW — the standalone-spoke half that #6489 left unfixed.
+//
+// A terminal assertion carries an `h` claim and the verifier rejects any
+// assertion whose `h` is not this hive (verifyTerminalAssertion: `!expectedHiveID`
+// fails closed BEFORE anything else). So the minter and the verifier must agree
+// on one string. They did not:
+//
+//   - The MINTER (Go dashboard, setTerminalAssertionCookie) mints with
+//     cfg.HiveID, which cmd/hive resolves via loadOrGenerateHiveID: the HIVE_ID
+//     env var if set, ELSE the id persisted at HIVE_ID_FILE, ELSE a freshly
+//     generated `hive-<name>` that it persists there.
+//   - The VERIFIER (this proxy) read ONLY process.env.HIVE_ID.
+//
+// On a hub-provisioned spoke those are the same value, because the hub injects
+// HIVE_ID into the container env and both processes read it. On a STANDALONE
+// spoke (bin/hive-podman-setup.sh writes HIVE_DASHBOARD_TOKEN and nothing else)
+// nobody injects it: the Go process generates the id at boot and publishes it to
+// its OWN environment with os.Setenv — which a sibling process started by the
+// same entrypoint never sees. This proxy was therefore left with
+// expectedHiveID === '', which rejects EVERY assertion the dashboard mints, for
+// the entire life of the hive.
+//
+// The symptom is the ttyd reconnect loop (#7043). The dashboard's single-use
+// handoff `?code=` authenticates exactly one request; ttyd's client then issues
+// two more, and only one of them carries the query string:
+//
+//   GET /terminal/?arg=…&code=X  -> has code  -> Go dashboard redeems it, 200,
+//                                   and sets hive_terminal_assertion
+//   GET /terminal/token          -> NO code   -> this gate -> 401
+//   GET /terminal/ws?arg=…&code=X-> has code  -> Go dashboard, which verifies the
+//                                   assertion against its OWN cfg.HiveID -> 101
+//
+// So the socket opens and ttyd immediately closes it (its client never got a
+// token), the client reconnects, and the page flashes "Reconnected" forever.
+//
+// Reading HIVE_ID_FILE closes the gap at the only point where it can be closed
+// without an ordering race. It is read LAZILY, not at module load: the Go binary
+// writes the file early in main(), but this proxy is started by the same
+// entrypoint and may well be up first — a module-load snapshot would cache ''
+// and pin the bug. It is cached once non-empty, so the steady state is one read.
+//
+// This cannot widen access. An env HIVE_ID still wins, so a hub-provisioned
+// spoke is byte-for-byte unchanged. The file is written by the hive's own Go
+// binary inside its private data directory, it only ever supplies the value an
+// assertion's `h` claim must MATCH, and a missing/unreadable file leaves the
+// resolver empty — i.e. exactly today's fail-closed behaviour.
+let hiveIDCache = '';
+function hiveID() {
+  if (hiveIDCache) return hiveIDCache;
+  const fromEnv = (process.env.HIVE_ID || '').trim();
+  if (fromEnv) {
+    hiveIDCache = fromEnv;
+    return hiveIDCache;
+  }
+  try {
+    hiveIDCache = fs.readFileSync(HIVE_ID_FILE, 'utf8').trim();
+  } catch {
+    hiveIDCache = '';
+  }
+  return hiveIDCache;
+}
 
 // TERMINAL_ROLES are the roles sufficient to open a shell: owner and read-write.
 // A `read`-only grant authenticates and authorizes the DASHBOARD but is NOT
@@ -452,7 +519,7 @@ function resolveTerminalIdentity(cookies) {
   if (hubUser) return hubUser;
 
   const claim = verifyTerminalAssertion(
-    TERMINAL_SIGNING_KEY, cookies[TERMINAL_ASSERTION_COOKIE], HIVE_ID,
+    TERMINAL_SIGNING_KEY, cookies[TERMINAL_ASSERTION_COOKIE], hiveID(),
     Math.floor(Date.now() / 1000));
   // Only the assertion's OWN username may stand in for the hub cookie. Returning
   // it here keeps authorizeTerminal's user-binding check meaningful rather than
@@ -464,7 +531,7 @@ function resolveTerminalIdentity(cookies) {
 
 function authorizeTerminal(cookieUser, assertionCookie) {
   const nowSec = Math.floor(Date.now() / 1000);
-  const claim = verifyTerminalAssertion(TERMINAL_SIGNING_KEY, assertionCookie, HIVE_ID, nowSec);
+  const claim = verifyTerminalAssertion(TERMINAL_SIGNING_KEY, assertionCookie, hiveID(), nowSec);
 
   if (claim) {
     // The assertion VERIFIED — a correctly signed, unexpired, this-hive grant.
@@ -1046,7 +1113,7 @@ app.use('/terminal', (req, res, next) => {
     // prepared by /api/terminal/handoff, which mints the assertion cookie before
     // the browser navigates here.
     if (!authorizeTerminal(user, cookies[TERMINAL_ASSERTION_COOKIE])) {
-      console.warn(`[terminal] 403: user ${JSON.stringify(user)} not authorized for hive ${JSON.stringify(HIVE_ID)}`);
+      console.warn(`[terminal] 403: user ${JSON.stringify(user)} not authorized for hive ${JSON.stringify(hiveID())}`);
       if (req.headers.upgrade === 'websocket') {
         req.socket.destroy();
         return;
@@ -1143,7 +1210,7 @@ server.on('upgrade', (req, socket, head) => {
       // A hub-authenticated user without a usable grant for THIS hive gets the
       // socket closed, not a shell.
       if (!authorizeTerminal(wsUser, cookies[TERMINAL_ASSERTION_COOKIE])) {
-        console.warn(`[terminal-ws] 403: hub user ${JSON.stringify(wsUser)} not authorized for hive ${JSON.stringify(HIVE_ID)}`);
+        console.warn(`[terminal-ws] 403: hub user ${JSON.stringify(wsUser)} not authorized for hive ${JSON.stringify(hiveID())}`);
         socket.destroy();
         return;
       }

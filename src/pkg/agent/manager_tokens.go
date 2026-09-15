@@ -136,7 +136,7 @@ func copilotSessionCarriesRejectedToken(a *AgentProcess) bool {
 		return false
 	}
 	switch a.BackendAuth.Status {
-	case BackendAuthUnlicensed, BackendAuthTokenExpired:
+	case BackendAuthUnlicensed, BackendAuthTokenExpired, BackendAuthForbidden:
 		return true
 	default:
 		return false

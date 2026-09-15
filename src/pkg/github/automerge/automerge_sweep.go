@@ -31,6 +31,10 @@ type Transport interface {
 	RecordPRMergedAudit(repo string, number int, method, sha string)
 }
 
+type levelHoldTransport interface {
+	ReleaseLevelHoldIfEligible(ctx context.Context, owner, repo string, pr *gh.PullRequest) (bool, string, error)
+}
+
 // Options carries policy dependencies owned by the caller.
 type Options struct {
 	Logger           *slog.Logger
@@ -552,6 +556,31 @@ func (c *Engine) SweepSelfAuthoredAutoMerges(ctx context.Context, opts AutoMerge
 					continue
 				}
 			}
+			// Level-applied holds (#7060) must also be evaluated before the
+			// generic prefilter skips held PRs outright. If a hold is still
+			// required (or is not a level-applied hold), count it as the returned
+			// skip reason; if it was released, skip this tick and let the next
+			// sweep evaluate the now-unheld PR.
+			if pr != nil && hgithub.HasHoldLabel(labelNames(pr.Labels)) {
+				if _, reason, err := c.releaseLevelHoldIfEligible(ctx, owner, repoName, pr); err != nil {
+					c.warn("self-authored automerge sweep could not evaluate level hold release", "repo", repo, "pr", number, "reason", reason, "error", err)
+					result.Skipped++
+					repoSkipped++
+					if reason == "" {
+						reason = "level-hold-release-error"
+					}
+					repoSkipReasons[reason]++
+					continue
+				} else if reason != "" {
+					if reason == "hold" {
+						reason = "held"
+					}
+					result.Skipped++
+					repoSkipped++
+					repoSkipReasons[reason]++
+					continue
+				}
+			}
 			if reason := c.prefilterSelfAuthoredPR(pr); reason != "" {
 				result.Skipped++
 				repoSkipped++
@@ -772,17 +801,15 @@ func (c *Engine) trySweepSelfAuthoredPR(ctx context.Context, displayRepo, owner,
 		// listing and evaluating it here.
 		return AutoMergeSweepEvent{}, "not-app-authored", nil
 	}
-	// Hold and do-not-merge labels must gate this path too (#5589): the
-	// enumeration hold gate lives upstream in fetchPRs, but this sweep lists
-	// PRs independently, so without this check a hold label — including one
-	// the hold guard re-applied because the branch moved while hold-gated —
-	// would not stop the App from squashing its own PR on green.
 	selfLabels := labelNames(pr.Labels)
 	if hgithub.HasHoldLabel(selfLabels) {
 		return AutoMergeSweepEvent{}, "held", nil
 	}
 	if c.transport.IsExemptLabels(selfLabels) {
 		return AutoMergeSweepEvent{}, "exempt-label", nil
+	}
+	if _, reason, err := c.releaseLevelHoldIfEligible(ctx, owner, repo, pr); err != nil || reason != "" {
+		return AutoMergeSweepEvent{}, reason, err
 	}
 
 	evaluatedHeadSHA := ""
@@ -909,6 +936,17 @@ func (c *Engine) trySweepSelfAuthoredPR(ctx context.Context, displayRepo, owner,
 	}
 	c.info("self-authored automerge sweep merged PR", "repo", displayRepo, "pr", number, "author", author, "merge_sha", event.MergeSHA)
 	return event, "", nil
+}
+
+func (c *Engine) releaseLevelHoldIfEligible(ctx context.Context, owner, repo string, pr *gh.PullRequest) (bool, string, error) {
+	if c == nil || c.transport == nil {
+		return false, "", nil
+	}
+	transport, ok := c.transport.(levelHoldTransport)
+	if !ok {
+		return false, "", nil
+	}
+	return transport.ReleaseLevelHoldIfEligible(ctx, owner, repo, pr)
 }
 
 func (c *Engine) prefilterSelfAuthoredPR(pr *gh.PullRequest) string {

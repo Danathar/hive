@@ -6,7 +6,9 @@ claims an issue. Agents call it **instead of `gh issue create` /
 
 It does not perform the GitHub write itself. It writes a request file that the
 hive's issue-request watcher executes with the App installation token —
-server-side, retried with backoff, and deduplicated by exact open-issue title.
+server-side, retried with backoff, and deduplicated against open issues by
+title — exact match first, canonical subject as the fallback (see
+[Idempotency](#idempotency)).
 
 ## Why it exists
 
@@ -104,20 +106,82 @@ denial (forge-resistance failure or `CanCreateIssues` gate failure) is
 quarantined `.denied` immediately, also without retry — policy won't change
 on the next tick.
 
+### Content shape validation
+
+Structural completeness is not the only terminal check. The same pre-flight
+validates the **content** of issue and comment requests, using the shared
+validators in `pkg/issueshape` (see
+`src/pkg/github/issue_request_watcher.go`):
+
+- **Unsubstituted template placeholders.** A title or body still carrying an
+  unfilled policy-template token — `<analysis>`, `<fix>`, or a multi-word
+  lowercase phrase like `<specific description of the documentation gap>` —
+  is rejected: an agent that copied a template line without substituting it
+  has nothing worth filing. The matcher is deliberately narrow so legitimate
+  angle-bracket constructs still pass: URLs, generic type parameters
+  (`Result<T, E>`), tokens containing `/`, `=`, or `,`, and recognized
+  GitHub-flavored-Markdown HTML tags including attribute forms
+  (`<details open>`, `<img src=…>`).
+- **Mis-escaped newlines.** A body that is a single physical line whose
+  markdown structure was encoded as literal `\n` escape sequences (the
+  classic `## X\n\n…\n\n## Y` specimen, typically from shell-quoting a
+  multiline `--body`) is rejected with the hint *use real newlines or
+  `--body-file`*. A body with real line breaks may freely discuss `\n` in
+  prose or code blocks; the check requires the combination — no real
+  newline, several literal `\n` tokens, `\n\n` or `\n## ` structure —
+  before flagging.
+
+Both rejections are terminal like any other shape failure: the request is
+quarantined `.bad`, never retried, and the `.result.json` carries the exact
+reason including the offending placeholder token.
+
+**The direct path is covered too.** An agent's raw `gh issue create` /
+`gh issue comment` never touches this watcher — it becomes a REST
+`POST`/`PATCH` through the hive's egress proxy. Since
+[#7020](https://github.com/hivecommons/hive/pull/7020) (fixing
+[#7014](https://github.com/hivecommons/hive/issues/7014)) the proxy enforces
+the same two validators on issue and comment create/edit routes, denying the
+request with the same actionable reason before it leaves the sandbox.
+`pkg/issueshape` is the single source of truth for both enforcement points,
+so the rules cannot drift apart. One asymmetry to know about: a body larger
+than the proxy's buffering limit is forwarded unchecked rather than
+truncated — the watcher path has no such bypass.
+
 ### Idempotency
 
-Issue creation is deduplicated by exact (whitespace-trimmed) title against
-open issues in the target repo (scanning up to the 3 most recent pages). If a
-matching open issue already exists, the watcher reuses it instead of creating
-a duplicate — this is what makes the retry loop safe: a create that actually
-succeeded server-side but crashed before the request file was consumed (or an
-agent-side "timed out but maybe it worked" ambiguity) never produces a second
-issue. The result file's `already_existed` field reports which case
-happened.
+Issue creation is deduplicated by title against open issues in the target
+repo (scanning up to the 3 most recent pages), in two tiers
+([#6927](https://github.com/hivecommons/hive/issues/6927)):
+
+1. **Exact match** — an open issue whose whitespace-trimmed title is
+   identical is always preferred and reused.
+2. **Canonical-subject match** — otherwise, titles are compared after
+   stripping any trailing free-text qualifier (everything from a ` — `,
+   ` – `, or ` -- ` separator to the end) and normalising case and
+   whitespace. Agents append a model-authored qualifier to an otherwise
+   stable subject and reword it on every scan (`…(1237 lines) — extract
+   cache helpers module`, `…(1237 lines) — extract snapshot/report
+   helpers`), so before #6927 the same finding was re-filed every cycle —
+   one file accumulated six simultaneously-open issues. When several open
+   issues share the canonical subject, the **oldest** is reused, so repeats
+   consolidate onto the original rather than the newest copy.
+
+A canonical subject is only trusted as a dedupe key when enough of the title
+survives stripping (at least 20 characters and 3 words —
+`src/pkg/github/issue_dedupe.go`); short or generic stems such as
+`[operations] CI failure` fall back to exact-match-only, so they cannot
+collapse unrelated findings.
+
+If a matching open issue already exists, the watcher reuses it instead of
+creating a duplicate — this is what makes the retry loop safe: a create that
+actually succeeded server-side but crashed before the request file was
+consumed (or an agent-side "timed out but maybe it worked" ambiguity) never
+produces a second issue. The result file's `already_existed` field reports
+which case happened.
 
 ### Rejected findings are not re-filed
 
-Exact-title dedupe cannot stop the second failure mode observed live
+Open-issue title dedupe cannot stop the second failure mode observed live
 ([#6463](https://github.com/hivecommons/hive/issues/6463)): a maintainer
 closes an agent-filed finding as **not planned**, the closed issue leaves the
 agent's field of view (agents may not list issues), and on the next kick the

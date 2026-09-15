@@ -1156,6 +1156,8 @@ func newSelfAuthoredAutoMergeAPI(t *testing.T, prs []selfAuthoredPR, merged *[]i
 				"head":            map[string]string{"sha": headSHA},
 				"labels":          issueLabels("", pr.extraLabels),
 			})
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/acme/widget/issues/") && strings.HasSuffix(r.URL.Path, "/comments"):
+			json.NewEncoder(w).Encode([]map[string]any{})
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/acme/widget/commits/") && strings.HasSuffix(r.URL.Path, "/status"):
 			number := shaNumber(t, r.URL.Path)
 			pr := byNumber[number]

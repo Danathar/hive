@@ -11,6 +11,67 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-15 (v4.33.7)
+
+### Fixed
+
+- Merged weak PR claims now re-enter the issue queue with explicit merged-PR context instead of disappearing behind a 72-hour timer and returning unchanged, so agents and operators can verify whether the landed `Refs #N` work resolved the issue before implementing duplicate work ([#7061](https://github.com/hivecommons/hive/issues/7061)).
+
+## 2026-09-15 (v4.33.6)
+
+### Fixed
+
+- The dashboard CI health tooltip now states that failed workflow runs which scheduled no jobs are dropped from the pass-rate sample, matching the CI health calculation introduced for zero-job GitHub Actions startup failures ([#7044](https://github.com/hivecommons/hive/issues/7044)).
+
+## 2026-09-15 (v4.33.5)
+
+### Fixed
+
+- The dashboard CI health tooltip now states that completed workflow runs which scheduled no jobs are excluded from the pass-rate sample, matching the CI health calculation introduced for zero-job GitHub Actions startup failures ([#7044](https://github.com/hivecommons/hive/issues/7044)).
+
+## 2026-09-15 (v4.33.4)
+
+### Fixed
+
+- `▶ terminal` no longer loops forever on a standalone spoke, flashing "Reconnected" without ever attaching to the tmux session ([#7043](https://github.com/hivecommons/hive/issues/7043)). The dashboard mints its terminal assertion against the hive id the Go binary resolved — on a self-hosted hive, one it generated itself and persisted to `/data/hive-id` — but the Node proxy that guards `/terminal` read the hive id only from `HIVE_ID`, which nothing injects there. The two halves of the same container therefore disagreed about which hive this is, and the proxy rejected every assertion the dashboard had just issued. Since the dashboard's handoff `?code=` is single-use and ttyd's client copies the query string onto its websocket URL but not onto its token URL, the terminal document loaded, the token fetch 401'd, and ttyd reconnected in a tight loop. The proxy now falls back to the id the Go binary persisted, exactly as the Go side resolves it; a hub-injected `HIVE_ID` still wins, so hosted hives are unchanged. This is the hive-id half of the split that [#6489](https://github.com/hivecommons/hive/issues/6489) closed for the terminal signing key.
+
+## 2026-09-15 (v4.33.3)
+
+### Fixed
+
+- The egress proxy now rejects agent-authored issues and comments carrying unsubstituted `<placeholder>` template text or literal `\n` escape sequences instead of real newlines, matching the shape validation the issue-request watcher already enforced on its own creation path ([#7014](https://github.com/hivecommons/hive/issues/7014)). Previously an agent's `gh issue create` reached GitHub as a raw `POST /repos/{owner}/{repo}/issues` that passed authorization but was never shape-checked, so malformed issues like #7014 (a `[guide] <specific description of the documentation gap>` title and a one-line body of `\n` escapes) landed on the forge; the proxy now returns a clear, actionable error before the request leaves the sandbox.
+
+## 2026-09-15 (v4.33.2)
+
+### Fixed
+
+- Race-test CI can now install the cgo toolchain from an actions/cache-restored `.deb` archive when Ubuntu mirrors are unreachable, so transient self-hosted runner egress outages no longer fail every shard before tests start ([#6935](https://github.com/hivecommons/hive/issues/6935)).
+
+## 2026-09-14 (v4.33.1)
+
+### Fixed
+
+- The pre-merge sign-off attribution gate now rejects a commit signed off by *anyone who is not the pull request author*, not only by a bot ([#6971](https://github.com/hivecommons/hive/issues/6971)). `check-squash-signoff-attribution.sh` used to flag only bot `Signed-off-by` trailers, so a commit authored by one person but signed off as *another human's* GitHub noreply passed the gate and then squashed into a permanent mismatched-signoff on protected history — exactly what happened to `01bd2469` on `v5` (`author=Andy Anderson <andy@clubanderson.com>` / `signed-off-by=danathar@users.noreply.github.com`), which the post-merge monitor would have caught but the pre-merge gate did not. The gate now resolves the commit author's GitHub login (via the commits API, or `DCO_AUTHOR_LOGIN_MAP` offline) and fails unless at least one sign-off names the person the squash will be attributed to, while still accepting the author's own GitHub noreply and never misreading a `Co-authored-by:` trailer as a sign-off. The noreply-matching and author-login logic the two DCO checkers had each copied is now shared in `src/scripts/lib-dco-identity.sh` so they cannot drift apart again — the drift was how this gap survived. The already-landed `01bd2469` is dispositioned with a post-merge waiver because `v5` is protected and cannot be repaired.
+- The pre-merge squash sign-off attribution gate now also rejects a commit whose `Signed-off-by:` names a GitHub noreply address for a **different login than the pull request's author**, and the post-merge monitor records the maintainer disposition for `01bd2469`, the squash of [#6970](https://github.com/hivecommons/hive/pull/6970) that [#6971](https://github.com/hivecommons/hive/issues/6971) paged on. That commit is the human variant of the [#6798](https://github.com/hivecommons/hive/issues/6798) class: the branch commit was authored and signed off by one contributor, the squash rewrote the author to the PR's author, and the retained trailer became a permanent mismatched-signoff on protected v5 history. A noreply sign-off structurally names one account, so when that account is not the PR author the post-merge mismatch is guaranteed — the gate now fails it at PR time (`foreign-noreply-signoff`), while the commit can still be re-signed, instead of leaving the hourly monitor to page on history nobody can repair.
+
+## 2026-09-14 (v4.33.0)
+
+### Added
+
+- The dashboard now surfaces a findable **Auto-update** section in the governor Settings overlay's Hub tab, showing the configured update policy (enabled + schedule) and its live status — target line, current commit, commits behind, last attempt, and any failure reason ([#6962](https://github.com/hivecommons/hive/issues/6962)). Previously an operator could look through every Settings tab and find nothing about version and updating.
+
+### Fixed
+
+- The per-agent backend-auth canary no longer reports a bare HTTP 403 as an expired token ([#6500](https://github.com/hivecommons/hive/issues/6500)). A Copilot enterprise entitlement failure arrives as a `403 Forbidden` whose body is `unauthorized: not licensed to use Copilot`; when a pane rendered only the bare status, the fleet-health reason claimed `token-expired` and sent operators to a re-login that cannot fix an entitlement 403 — the "false claim of lack of credentials" this issue tracked. An auth-class line that is neither the explicit `not licensed` wording nor a recognised credential rejection (401 / bad credentials / invalid or expired key) is now classified `forbidden` ("authorization denied, cause undetermined") rather than asserting an expiry the code never verified. Such panes are still relaunched onto a refreshed `COPILOT_GITHUB_TOKEN`, so honest reporting costs no recovery.
+- Auto-update status is no longer reported as healthy when it is failing or unknown ([#6963](https://github.com/hivecommons/hive/issues/6963)). `/api/version` now returns an explicit `autoUpdate` object whose `healthy` flag is false for a failed, retrying, behind, or *unknown* state — an unavailable version comparison degrades to a visible "unknown" instead of a silent green ✓ — and the failure reason (e.g. a self-upgrade RBAC error) is surfaced so an operator can see *why* an update did not land, not just that it did not.
+- Contributor containers now stage Codex credentials and configuration from `CODEX_HOME` when set, matching the setup preflight, and continue to use `~/.codex` otherwise.
+
+## 2026-09-14 (v4.32.3)
+
+### Fixed
+
+- Contributor tasks now honour a `[vN]` release-line tag that follows a leading lane prefix (`[Tracker] [v5] …`) or template emoji (`🐛 [v5] …`), instead of silently discarding it and basing the work on the hive's own build branch ([#6969](https://github.com/hivecommons/hive/issues/6969)). `releaseLineFromTitle` now skips a bounded run of leading bracketed lane tokens and decorative emoji/symbol runes and reads the first bracketed release line it finds, while still rejecting a `[vN]` loose in prose (`reviewer lane [v5] follow-ups`), so trackers and RFCs filed from a template route to the branch their title names.
+
 ## 2026-09-14 (v4.32.2)
 
 ### Fixed
