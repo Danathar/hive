@@ -50,6 +50,7 @@ type HubConfig struct {
 	ClusterID           string `yaml:"cluster_id"`
 	AutoSnapshot        bool   `yaml:"auto_snapshot"`
 	AutoUpgrade         bool   `yaml:"auto_upgrade"`
+	AutoUpgradeMode     string `yaml:"auto_upgrade_mode,omitempty"`
 	ContributeSuspended bool   `yaml:"contribute_suspended"`
 	// Contribute title/author/label filters use a single list plus a mode:
 	//   - FilterModeAllow ("allow"): allowlist — an item passes ONLY if it
