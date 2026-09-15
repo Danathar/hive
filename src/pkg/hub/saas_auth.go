@@ -117,8 +117,8 @@ func (s *HubServer) requireAuthOrSpokeUpgrade(next http.HandlerFunc) http.Handle
 	return s.requireAuthOrSpokeSelfService(next)
 }
 
-// trustedSpokeUpgradeUser authenticates the spoke-relayed upgrade lane. It
-// returns the user to attribute the upgrade to and an empty reason on success,
+// trustedSpokeSelfServiceUser authenticates the spoke-relayed self-service lane.
+// It returns the user to attribute the action to and an empty reason on success,
 // or ("", reason) on failure, where reason is an operator-facing explanation of
 // exactly which credential failed (the spoke shows it verbatim in a toast).
 //
@@ -132,10 +132,6 @@ func (s *HubServer) requireAuthOrSpokeUpgrade(next http.HandlerFunc) http.Handle
 // owner. Rejecting that shape was the "Upgrade failed: not authenticated" bug:
 // a proof-verified request with no user identity is now attributed to the
 // hive's registered owner instead of being turned away.
-func (s *HubServer) trustedSpokeUpgradeUser(r *http.Request, hiveID string) (string, string) {
-	return s.trustedSpokeSelfServiceUser(r, hiveID)
-}
-
 func (s *HubServer) trustedSpokeSelfServiceUser(r *http.Request, hiveID string) (string, string) {
 	username := r.Header.Get("X-Hive-User")
 	proof := r.Header.Get(proxyAuthHeader)
