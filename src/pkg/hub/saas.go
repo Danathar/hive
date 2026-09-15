@@ -388,8 +388,8 @@ func (s *HubServer) registerSaaSRoutes() {
 	// handleOpenHive does its own auth check + login redirect.
 	s.mux.HandleFunc("GET /api/saas/hives/{id}/open", s.handleOpenHive)
 	s.mux.HandleFunc("DELETE /api/saas/hives/{id}", s.requireAuth(s.handleDeleteHive))
-	s.mux.HandleFunc("POST /api/saas/hives/{id}/upgrade", s.requireAuthOrSpokeUpgrade(s.handleUpgradeHive))
-	s.mux.HandleFunc("POST /api/saas/hives/{id}/switch-branch", s.requireAuth(s.handleSwitchBranch))
+	s.mux.HandleFunc("POST /api/saas/hives/{id}/upgrade", s.requireAuthOrSpokeSelfService(s.handleUpgradeHive))
+	s.mux.HandleFunc("POST /api/saas/hives/{id}/switch-branch", s.requireAuthOrSpokeSelfService(s.handleSwitchBranch))
 	// Digest pin: rollback as a first-class run-state (#6290). Owner-only inside
 	// the handlers, like switch-branch; the re-arm and every upgrade path
 	// honour the pin until unpin lifts it.
