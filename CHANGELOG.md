@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-15 (v4.33.2)
+
+### Fixed
+
+- Race-test CI can now install the cgo toolchain from an actions/cache-restored `.deb` archive when Ubuntu mirrors are unreachable, so transient self-hosted runner egress outages no longer fail every shard before tests start ([#6935](https://github.com/hivecommons/hive/issues/6935)).
+
 ## 2026-09-14 (v4.33.1)
 
 ### Fixed
