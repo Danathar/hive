@@ -15,6 +15,7 @@ on:
       - 'src/scripts/check-dco-trailers.sh'
       - 'src/scripts/lib-dco-identity.sh'
       - 'src/scripts/test-check-dco-trailers.sh'
+      - '.github/scripts/test-dco-waiver-integrity.py'
       - '.github/workflows/dco-post-merge.yml'
   schedule:
     - cron: '17 * * * *'
@@ -110,20 +111,40 @@ env:
   # commits sign off as a bot, at PR time, while the branch is still writable.
   # If this list ever gains a second d8f376e8-shaped entry, that gate regressed.
   #
-  # 01bd2469e7a4022fff3fc04c42226c4d90c2f410 — reported by the monitor in #6971,
-  # on v5 only. This is NOT d8f376e8-shaped, and the pre-merge bot gate did NOT
-  # regress. d8f376e8 signed off as a BOT; 01bd2469 signed off as a DIFFERENT
-  # HUMAN's GitHub noreply — author=Andy Anderson <andy@clubanderson.com>
-  # signed-off-by=danathar@users.noreply.github.com. `is_bot_identity` never
-  # matched danathar's address (it is not a bot), so the old bot-only pre-merge
-  # rule had nothing to catch: this was a genuinely different shape, a gap in
-  # coverage rather than a gate that stopped working. That gap is now closed —
-  # check-squash-signoff-attribution.sh fails ANY sign-off that does not name
-  # the PR author, human or bot (this is what #6971 fixed) — so like d8f376e8
-  # this waiver should be the LAST of ITS kind. A second different-human entry
-  # here would mean the generalised pre-merge gate regressed, exactly as a
-  # second bot-signoff entry would mean the original gate did. v5 is protected,
-  # so the already-landed 01bd2469 can only be dispositioned, not repaired.
+  # 4b9261183378a1a02a921cd0cc9df31e6f37993b — the squash of #7069, reported by
+  # the monitor in #7070. Structurally the same failure as d8f376e8 but a new
+  # SUB-CLASS, and not a regression of the gate above. Branch commit 9dcaa17a
+  # was authored as clubanderson@gmail.com and was internally consistent; the
+  # squash then wrote the landing commit with the pull request author's
+  # profile-primary identity, Andy Anderson <andy@clubanderson.com>, while
+  # keeping the branch's Signed-off-by: clubanderson <clubanderson@gmail.com>.
+  # Both identities belong to the same maintainer, so nothing about the
+  # certification is in doubt — only the two addresses differ.
+  #
+  # The d8f376e8 note says that entry should be the last of its kind because
+  # dco-squash-attribution.yml fails a human-authored PR signing off as a BOT.
+  # That gate did not regress: this sign-off is not a bot, it is the same
+  # human's second address, which the gate never claimed to cover. Like
+  # d8f376e8 the mismatch was created BY the merge, so no branch-time check
+  # could have caught it, and v4 is protected so it cannot be repaired.
+
+  # 01bd2469e7a4022fff3fc04c42226c4d90c2f410 — the squash of #6970, on v5 only,
+  # reported by the monitor in #7089. A DIFFERENT CLASS from the three above and
+  # it should be read as such: this is not one person's two addresses and not a
+  # bot, it is TWO PEOPLE. The landing commit is authored Andy Anderson
+  # <andy@clubanderson.com> while the trailer carried through from the branch is
+  # Danathar <Danathar@users.noreply.github.com>. GitHub's squash wrote the
+  # pull request author's identity over a branch signed off by its committer.
+  #
+  # What is not in doubt: both are hive maintainers and the change went through
+  # the normal review and merge gate. What IS strictly true is that the author
+  # of record did not themselves sign off, which is the condition the checker
+  # exists to surface, so it is reported here rather than quietly normalised.
+  # The commit sits on protected v5 and cannot be repaired in place.
+  #
+  # Maintainers: if you would rather this be re-signed or handled some other
+  # way than a waiver, remove this entry — it is a disposition, not a
+  # precedent, and it deliberately does not widen to "any two maintainers".
 
   # KNOWN FAILING COMMITS THAT ARE DELIBERATELY *NOT* WAIVED
   #
@@ -136,7 +157,7 @@ env:
   # regression. They are intentionally left unwaived: pre-approving them would
   # grow this list for commits that are not actually being reported, which is
   # the exact failure mode #6770 was filed about.
-  DCO_WAIVED_COMMITS: 'b798382a4d98ada28b0cb813644a595db0c58b08 7e01fee4a2c1a37f4a4072bf2d17e76e27113d01 d8f376e8e95f7b0c7d48d2b05b3a2a07ac9ee69b 01bd2469e7a4022fff3fc04c42226c4d90c2f410'
+  DCO_WAIVED_COMMITS: 'b798382a4d98ada28b0cb813644a595db0c58b08 7e01fee4a2c1a37f4a4072bf2d17e76e27113d01 d8f376e8e95f7b0c7d48d2b05b3a2a07ac9ee69b 4b9261183378a1a02a921cd0cc9df31e6f37993b 01bd2469e7a4022fff3fc04c42226c4d90c2f410'
   # Tide/tagged-release failures discussed in #6276 came from human squash
   # commits and release metadata, not bot-authored commits. Skip bots here so
   # release automation is not paged for bracketed bot-address edge cases that
@@ -156,6 +177,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run check-dco-trailers self-tests
         run: bash src/scripts/test-check-dco-trailers.sh
+      - name: Run DCO waiver integrity self-test
+        run: python3 .github/scripts/test-dco-waiver-integrity.py
 
   dco-post-merge:
     name: Check ${{ matrix.branch }} recent commits

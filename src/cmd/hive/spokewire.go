@@ -121,6 +121,7 @@ type spokeWire struct {
 	reporterName               string
 	processStartedAt           time.Time
 	lastAutoMergeSweep         time.Time
+	lastTaskListSweep          time.Time
 	refreshDashboard           func()
 	hubURL                     string
 	mutationBoundary           effects.Boundary

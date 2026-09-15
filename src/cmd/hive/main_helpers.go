@@ -4646,3 +4646,58 @@ func parseEndpointList(raw string) []string {
 	}
 	return out
 }
+
+// taskListSweepInterval is the minimum spacing between task-list sweeps. The
+// sweep enumerates every open issue in every repo — much heavier than the
+// auto-merge sweep's label-scoped query — and "done" moves at PR-merge cadence,
+// so a 15-minute floor keeps the API cost modest while still closing completed
+// epics on the same day the last box gets ticked.
+const taskListSweepInterval = 15 * time.Minute
+
+// runTaskListSweepIfDue closes hive-filed issues whose task-list bodies are
+// fully ticked, at most once per taskListSweepInterval. The finding-granularity
+// policy (guidance now in every issue-filing template) tells agents to encode
+// multi-part deliverables as `- [ ]` boxes; this is the sink that turns those
+// boxes into closures. All safety gates — hive-filed only, at-least-one-box,
+// all-boxes-ticked, hold-label respected, per-tick cap — live inside
+// SweepCompletedTaskListIssues; this function is only the scheduler and the
+// dashboard audit sink, mirroring runAutoMergeSweepIfDue above.
+func runTaskListSweepIfDue(ctx context.Context, ghClient *github.Client, dashSrv *dashboard.Server, lastRun *time.Time, logger *slog.Logger) {
+	if ghClient == nil {
+		return
+	}
+	now := time.Now()
+	if lastRun != nil && !lastRun.IsZero() && now.Sub(*lastRun) < taskListSweepInterval {
+		return
+	}
+	if lastRun != nil {
+		*lastRun = now
+	}
+	result, err := ghClient.SweepCompletedTaskListIssues(ctx, github.TaskListSweepOptions{
+		MaxCloses: github.DefaultTaskListSweepMaxCloses,
+		Audit: func(event github.TaskListSweepEvent) {
+			if dashSrv == nil {
+				return
+			}
+			detail := fmt.Sprintf("repo=%s, issue=%d, author=%s, boxes=%d",
+				event.Repo, event.Number, event.Author, event.TotalBoxes)
+			dashSrv.AuditLog("system", "task-list-sweep-closed", detail, "")
+		},
+	})
+	if err != nil {
+		logger.Warn("task-list sweep failed", "error", err)
+		return
+	}
+	if len(result.Closed) > 0 || result.Seen > 0 {
+		logger.Info("task-list sweep complete", "seen", result.Seen, "closed", len(result.Closed), "skipped", result.Skipped)
+	}
+	hookDispatcher().Fire(context.Background(), hooks.Payload{
+		Transition: hooks.TransitionSweepCompleted,
+		Reason:     "task-list sweep complete",
+		Attrs: map[string]string{
+			"seen":    strconv.Itoa(result.Seen),
+			"closed":  strconv.Itoa(len(result.Closed)),
+			"skipped": strconv.Itoa(result.Skipped),
+		},
+	})
+}
