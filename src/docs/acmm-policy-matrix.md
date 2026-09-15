@@ -13,7 +13,7 @@ Each agent runs in one of four modes, controlling what actions it can take on Gi
 
 - **Advisory**: Agent observes and records findings as beads on the dashboard. No GitHub interaction.
 - **Measured**: Agent can file GitHub issues to make findings visible to the team. No code changes.
-- **Holdgated**: Agent can write code and open PRs, but every PR gets a `hold` label. A human must review and remove `hold` before merge. Agent never merges.
+- **Holdgated**: Agent can write code and open PRs, but every PR gets a `hold` label. A human must review and remove `hold` before merge. Agent never merges. One exception: a hold the hive applied *for level reasons* is released automatically once the current level no longer calls for it — see the promotion note below. A hold **you** applied is never removed automatically.
 - **Full**: Agent operates autonomously — opens PRs and merges on green CI. Highest trust level.
 
 ## ACMM Levels
@@ -117,6 +117,32 @@ Existing autonomous lanes can open issues, create PRs, and auto-merge on green C
 6. **Brainstorm is always advisory.** It produces KB facts and beads, never GitHub issues or PRs. Its role evolves from inception (L1) to ongoing ideation (L2+), but its mode stays advisory at all levels.
 7. **Telemetry and operations are L5/L6-only opt-in agents.** Below L5 they are absent from the pack roster and dashboard, do not spawn panes, and cannot be kicked. At L5–L6 they use a paused cadence in every governor mode until an operator opts in; they may open issues and PRs but never merge.
 
+## ioscan hardening defaults per level
+
+Two `ioscan` hardening modes take their default from the pack governor rather
+than being fixed globally. Both are overridable per hive in either direction —
+the pack only supplies the default when the hive leaves the key unset.
+
+| Setting | L1–L4 default | L5–L6 default | What the default does | Override |
+|---|---|---|---|---|
+| `ioscan.canaries` | **on** | **on** | Plants a per-kick `HIVE-CANARY-*` marker and scans agent egress for it. Default flipped on ([#7083](https://github.com/hivecommons/hive/issues/7083)) now that the egress scan is encoding-aware ([#6701](https://github.com/hivecommons/hive/issues/6701), [#6720](https://github.com/hivecommons/hive/issues/6720)). | `ioscan.canaries: false` |
+| `ioscan.fail_mode` | `open` | **`closed`** (set by the L5/L6 packs' `governor.ioscan_fail_mode`) | `open` redacts a Critical injection finding and continues the kick; `closed` blocks the kick and records an `ioscan_fail_closed` audit entry. | `ioscan.fail_mode: open` (or `closed` to opt in below L5) |
+
+`fail_mode: closed` is the default only at L5–L6 because those are the levels
+where agents can merge, so a Critical finding that slips through has the highest
+blast radius. **The tradeoff is real and worth stating plainly: under `closed`,
+every Critical false-positive becomes a stalled queue item that an operator must
+clear by hand.** A hive that cannot absorb that operational load should set
+`ioscan.fail_mode: open` explicitly; an L1–L4 hive that wants the stricter
+posture sets `ioscan.fail_mode: closed`. An explicit value always wins over the
+pack default. The knob lives on the pack governor:
+
+```yaml
+# packs/level-5.yaml (and level-6.yaml)
+governor:
+  ioscan_fail_mode: closed   # "" (open) below L5; closed at L5/L6
+```
+
 ## Where ACMM gap issues are filed
 
 The dashboard's ACMM evaluation lists each criterion a repo is missing, and
@@ -185,6 +211,13 @@ Notes:
 - **Promotion adds agents and capability; demotion narrows it.** Moving up to L6
   makes agents auto-merge on green CI; moving down returns them to holdgated or
   advisory. The per-level capability grid is the table at the top of this page.
+  Promotion also **releases the level holds the hive itself applied** to open App
+  PRs that the new level no longer requires, so you do not have to clean them up
+  by hand after a level bump. Release is fail-closed: it applies only to
+  App-authored PRs carrying the hive's own attributable level-hold notice, only
+  when the most recent `hold` label event was applied by the App, and never while
+  a self-authorization hold applies. A hold a human applied — or re-applied after
+  the hive removed one — is never touched.
 - **Operator-created agents are preserved.** `ApplyPack` reconciles pack agents;
   agents you created yourself are not removed by a level change (deletion is
   tombstoned separately — see agent configuration).

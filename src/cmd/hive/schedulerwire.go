@@ -149,6 +149,7 @@ func (w *spokeWire) wireSpokeLanesAndLoop() {
 		w.wd.Tick(w.ctx)
 	}
 	runAutoMergeSweepIfDue(w.ctx, w.ghClient, w.cfg, w.dashSrv, &w.lastAutoMergeSweep, w.logger)
+	runTaskListSweepIfDue(w.ctx, w.ghClient, w.dashSrv, &w.lastTaskListSweep, w.logger)
 	persistState(w.agentMgr, w.gov, w.cfg, spokeStatePath, w.logger, w.dashSrv, w.wd)
 
 	agentTickCh := func() <-chan time.Time {
@@ -225,6 +226,7 @@ func (w *spokeWire) wireSpokeLanesAndLoop() {
 			runEvalCycle(w.ctx, w.cfg, w.ghClient, w.gov, w.sched, w.agentMgr, w.dashSrv, w.notifier, w.beadStores, w.tokenCollector, w.metricsCollector, w.nousState, &w.lastActionable, w.advisoryStore, w.advisoryIssues, restarted, w.approvalDesk, w.logger)
 			runRotationCheck(w.ctx, w.cfg, w.rotationMgr, w.gov, w.agentMgr, w.logger)
 			runAutoMergeSweepIfDue(w.ctx, w.ghClient, w.cfg, w.dashSrv, &w.lastAutoMergeSweep, w.logger)
+			runTaskListSweepIfDue(w.ctx, w.ghClient, w.dashSrv, &w.lastTaskListSweep, w.logger)
 			// Trajectory review runs after the eval cycle (so kicks/intents are
 			// current) on its own cadence, gated by Due().
 			if w.trajLane != nil && w.trajLane.Due(time.Now()) {

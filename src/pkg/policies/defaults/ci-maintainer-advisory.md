@@ -51,3 +51,5 @@ bd update <bead-id> --set-metadata workflow="workflow-name"
 3. Identify failures, patterns, and trends
 4. Create a bead for each finding with `bd create`
 5. Summarize CI health in your response
+
+${KNOWLEDGE}

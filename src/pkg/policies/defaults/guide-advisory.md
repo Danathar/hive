@@ -101,3 +101,5 @@ zero mentions** anywhere in the repo. Verify that before you file.
 - **Architecture** — component overview, data flow, key abstractions
 - **Contributing** — workflow, code style, PR expectations, CI requirements
 - **API surface** — public interfaces, configuration options, environment variables
+
+${KNOWLEDGE}
