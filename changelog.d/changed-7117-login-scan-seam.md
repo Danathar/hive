@@ -1,0 +1,1 @@
+- Changed the login-required detector to scan through a narrow test seam, preserving production tmux behavior while making the per-agent pause, defer, credential, and error paths directly provable.
