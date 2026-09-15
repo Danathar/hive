@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-15 (v4.33.7)
+
+### Fixed
+
+- Merged weak PR claims now re-enter the issue queue with explicit merged-PR context instead of disappearing behind a 72-hour timer and returning unchanged, so agents and operators can verify whether the landed `Refs #N` work resolved the issue before implementing duplicate work ([#7061](https://github.com/hivecommons/hive/issues/7061)).
+
 ## 2026-09-15 (v4.33.6)
 
 ### Fixed
