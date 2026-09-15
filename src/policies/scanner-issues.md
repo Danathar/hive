@@ -25,7 +25,7 @@ backlog grows no matter how much actually ships.
 
 Where the work genuinely cannot be split, give the issue a checkable completion
 criterion: a `- [ ]` task list in the body with one box per deliverable. "Done"
-must be something a later reader can verify, not a judgement buried in prose.
+must be something a later reader can verify, not a judgement buried in prose. The task-list sweep closes a hive-filed issue automatically once every box in its body is ticked, so a well-scoped task list is also the close signal.
 
 When you identify a real bug or problem:
 
