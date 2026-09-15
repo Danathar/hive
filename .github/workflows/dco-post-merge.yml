@@ -129,7 +129,7 @@ env:
   # could have caught it, and v4 is protected so it cannot be repaired.
 
   # 01bd2469e7a4022fff3fc04c42226c4d90c2f410 — the squash of #6970, on v5 only,
-  # reported by the monitor in #7089. A DIFFERENT CLASS from the three above and
+  # reported by the monitor in #7089, and previously in #6971. A DIFFERENT CLASS from the three above and
   # it should be read as such: this is not one person's two addresses and not a
   # bot, it is TWO PEOPLE. The landing commit is authored Andy Anderson
   # <andy@clubanderson.com> while the trailer carried through from the branch is
@@ -141,6 +141,15 @@ env:
   # of record did not themselves sign off, which is the condition the checker
   # exists to surface, so it is reported here rather than quietly normalised.
   # The commit sits on protected v5 and cannot be repaired in place.
+  #
+  # Like d8f376e8, this should be the LAST of ITS kind: check-squash-signoff-
+  # attribution.sh now fails ANY sign-off that does not name the PR author,
+  # human or bot — that generalisation is what #6971 fixed, and it closes the
+  # gap this commit fell through (the old rule was bot-only, and Danathar's
+  # noreply address is not a bot, so there was nothing for it to catch). A
+  # SECOND different-human entry below would therefore mean that generalised
+  # pre-merge gate regressed, exactly as a second bot-signoff entry would mean
+  # the original one did.
   #
   # Maintainers: if you would rather this be re-signed or handled some other
   # way than a waiver, remove this entry — it is a disposition, not a
