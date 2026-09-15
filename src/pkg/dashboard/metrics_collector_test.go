@@ -59,7 +59,7 @@ func TestMetricsCollector_CollectCoverage_NoBadgeURL(t *testing.T) {
 	mc := &MetricsCollector{
 		metrics: make(map[string]any),
 	}
-	result := mc.collectCoverage()
+	result := mc.collectCoverage(context.Background())
 	if result["coverage"] != 0 {
 		t.Errorf("coverage = %v", result["coverage"])
 	}
@@ -250,7 +250,7 @@ func TestMetricsCollector_CollectCoverage_ParsesBadgePct(t *testing.T) {
 		badgeURL: srv.URL,
 		metrics:  make(map[string]any),
 	}
-	result := mc.collectCoverage()
+	result := mc.collectCoverage(context.Background())
 	if result["coverage"] != 85 {
 		t.Errorf("coverage = %v, want 85", result["coverage"])
 	}
@@ -266,7 +266,7 @@ func TestMetricsCollector_CollectCoverage_MalformedBody(t *testing.T) {
 		badgeURL: srv.URL,
 		metrics:  make(map[string]any),
 	}
-	result := mc.collectCoverage()
+	result := mc.collectCoverage(context.Background())
 	if result["coverage"] != 0 {
 		t.Errorf("coverage = %v, want 0", result["coverage"])
 	}
@@ -449,4 +449,89 @@ func TestMetricsCollector_PRIssueCounts_SaveAndLoadDisk(t *testing.T) {
 	mc.savePRIssueCountsToDisk(&ghpkg.PRIssueCounts{MergedPRs: 3, ClosedIssues: 2, UpdatedAt: time.Now().UTC().Format(time.RFC3339)})
 	// loadPRIssueCountsFromDisk on a missing/inaccessible file should also not panic.
 	mc.loadPRIssueCountsFromDisk()
+}
+
+// An SVG badge (octocov's default, shields.io) carries its number in a <text>
+// element, so it is usable directly — no JSON endpoint needed.
+func TestMetricsCollector_CollectCoverage_SVGBadge(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/svg+xml")
+		fmt.Fprint(w, `<svg xmlns="http://www.w3.org/2000/svg" width="106" height="20"><g><text x="31" y="14">coverage</text><text x="81" y="14">98.5%</text></g></svg>`)
+	}))
+	defer srv.Close()
+
+	mc := &MetricsCollector{badgeURL: srv.URL, metrics: make(map[string]any), logger: covBLogger()}
+	result := mc.collectCoverage(context.Background())
+	if result["coverage"] != 98 {
+		t.Errorf("coverage = %v, want 98 (98.5%% truncated)", result["coverage"])
+	}
+}
+
+// repo://<ref>/<path> reads the badge from the hive's own primary repo through
+// the GitHub client — the only route that works for a private repo, whose
+// raw.githubusercontent.com URLs 404 without a token.
+func TestMetricsCollector_CollectCoverage_RepoScheme(t *testing.T) {
+	var gotPath, gotRef string
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotRef = r.URL.Path, r.URL.Query().Get("ref")
+		svg := `<svg><text>coverage</text><text>85.0%</text></svg>`
+		json.NewEncoder(w).Encode(map[string]any{
+			"type": "file", "encoding": "base64", "name": "coverage.svg", "path": "coverage.svg",
+			"content": base64.StdEncoding.EncodeToString([]byte(svg)),
+		})
+	}))
+	defer gh.Close()
+
+	mc := &MetricsCollector{
+		ghClient: ghpkg.NewClientForTest(gh.URL, "myorg", []string{"repo1"}, covBLogger()),
+		org:      "myorg",
+		repo:     "repo1",
+		badgeURL: "repo://badges/coverage.svg",
+		metrics:  make(map[string]any),
+		logger:   covBLogger(),
+	}
+	result := mc.collectCoverage(context.Background())
+	if result["coverage"] != 85 {
+		t.Errorf("coverage = %v, want 85", result["coverage"])
+	}
+	if gotPath != "/repos/myorg/repo1/contents/coverage.svg" || gotRef != "badges" {
+		t.Errorf("fetched %s?ref=%s, want /repos/myorg/repo1/contents/coverage.svg?ref=badges", gotPath, gotRef)
+	}
+}
+
+// Without a GitHub client the repo:// form has nothing to read with and must
+// report 0 rather than fall back to fetching "repo://..." over HTTP.
+func TestMetricsCollector_CollectCoverage_RepoScheme_NoClient(t *testing.T) {
+	mc := &MetricsCollector{badgeURL: "repo://badges/coverage.svg", metrics: make(map[string]any), logger: covBLogger()}
+	if result := mc.collectCoverage(context.Background()); result["coverage"] != 0 {
+		t.Errorf("coverage = %v, want 0", result["coverage"])
+	}
+	mc.badgeURL = "repo://no-path"
+	if result := mc.collectCoverage(context.Background()); result["coverage"] != 0 {
+		t.Errorf("malformed repo:// form: coverage = %v, want 0", result["coverage"])
+	}
+}
+
+func TestParseCoverageBadge(t *testing.T) {
+	cases := []struct {
+		body string
+		want int
+		ok   bool
+	}{
+		{`{"schemaVersion":1,"label":"coverage","message":"85%","color":"green"}`, 85, true},
+		{`{"message":"85.7%"}`, 85, true},
+		{`{"message":"0%"}`, 0, true},
+		{`{"message":"n/a"}`, 0, false},
+		{`<svg><text>coverage</text><text>98.5%</text></svg>`, 98, true},
+		{`coverage: 100%`, 100, true},
+		{`coverage: 250%`, 0, false},
+		{`not a badge`, 0, false},
+		{``, 0, false},
+	}
+	for _, c := range cases {
+		got, ok := parseCoverageBadge(c.body)
+		if got != c.want || ok != c.ok {
+			t.Errorf("parseCoverageBadge(%q) = %d,%v want %d,%v", c.body, got, ok, c.want, c.ok)
+		}
+	}
 }

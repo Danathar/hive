@@ -287,7 +287,7 @@ than trying to add the moved repository back to the old installation.
 | `HIVE_CLUSTER_ID` | Hosted cluster ID override. |
 | `HIVE_ID` | Hive ID override. |
 | `HIVE_LEVEL` | ACMM level bootstrap/override used by hosted flows. |
-| `HIVE_COVERAGE_BADGE_URL` | Optional coverage badge URL surfaced in dashboard status. |
+| `HIVE_COVERAGE_BADGE_URL` | Source of the coverage percentage on the ci-maintainer card: an `http(s)` badge URL (shields JSON or SVG) or `repo://<ref>/<path>` read from the primary repo via the App client. See [env-vars.md](env-vars.md). |
 
 ### Dashboard metrics
 

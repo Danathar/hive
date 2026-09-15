@@ -2265,7 +2265,7 @@ func TestMetricsCollector_CollectCoverage_WithBadge(t *testing.T) {
 		logger:   logger,
 		metrics:  make(map[string]any),
 	}
-	result := mc.collectCoverage()
+	result := mc.collectCoverage(context.Background())
 	if result["coverage"] != 85 {
 		t.Errorf("coverage = %v, want 85", result["coverage"])
 	}
@@ -2283,7 +2283,7 @@ func TestMetricsCollector_CollectCoverage_InvalidBadge(t *testing.T) {
 		logger:   logger,
 		metrics:  make(map[string]any),
 	}
-	result := mc.collectCoverage()
+	result := mc.collectCoverage(context.Background())
 	if result["coverage"] != 0 {
 		t.Errorf("coverage = %v, want 0", result["coverage"])
 	}
@@ -2477,7 +2477,7 @@ func TestMetricsCollector_CollectCoverage_ServerError(t *testing.T) {
 		badgeURL: srv.URL,
 		metrics:  make(map[string]any),
 	}
-	result := mc.collectCoverage()
+	result := mc.collectCoverage(context.Background())
 	if result["coverage"] != 0 {
 		t.Errorf("coverage = %v, want 0", result["coverage"])
 	}

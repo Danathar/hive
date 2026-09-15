@@ -89,8 +89,15 @@ func (w *spokeWire) wireSpokeMetricsAndKnowledgeAPI() {
 	go w.tokenCollector.Start(tokenStop)
 	w.addCleanup(func() { close(tokenStop) })
 
+	// The coverage figure on the ci-maintainer card must describe THIS hive's
+	// repo. The built-in gist is the flagship project's own badge, so it is
+	// the default only for that project — the same gate collectOutreach uses
+	// for adopters/ACMM. Every other hive sets HIVE_COVERAGE_BADGE_URL
+	// (an http(s) badge, or repo://<ref>/<path> read via the App client) or
+	// honestly shows 0; before this gate they all showed hivecommons/hive's
+	// number, and when that gist broke they all dropped to 0 at once.
 	badgeURL := os.Getenv("HIVE_COVERAGE_BADGE_URL")
-	if badgeURL == "" {
+	if badgeURL == "" && (w.cfg.Project.Org == "kubestellar" || w.cfg.Project.Org == "hivecommons") {
 		badgeURL = "https://gist.githubusercontent.com/clubanderson/b9a9ae8469f1897a22d5a40629bc1e82/raw/coverage-badge.json"
 	}
 	primaryRepo := w.cfg.Project.PrimaryRepo
