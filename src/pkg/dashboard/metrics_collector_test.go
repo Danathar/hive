@@ -456,7 +456,7 @@ func TestMetricsCollector_PRIssueCounts_SaveAndLoadDisk(t *testing.T) {
 func TestMetricsCollector_CollectCoverage_SVGBadge(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/svg+xml")
-		fmt.Fprint(w, `<svg xmlns="http://www.w3.org/2000/svg" width="106" height="20"><g><text x="31" y="14">coverage</text><text x="81" y="14">98.5%</text></g></svg>`)
+		fmt.Fprint(w, octocovBadgeSVG)
 	}))
 	defer srv.Close()
 
@@ -474,7 +474,7 @@ func TestMetricsCollector_CollectCoverage_RepoScheme(t *testing.T) {
 	var gotPath, gotRef string
 	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath, gotRef = r.URL.Path, r.URL.Query().Get("ref")
-		svg := `<svg><text>coverage</text><text>85.0%</text></svg>`
+		svg := strings.ReplaceAll(octocovBadgeSVG, "98.5%", "85.0%")
 		json.NewEncoder(w).Encode(map[string]any{
 			"type": "file", "encoding": "base64", "name": "coverage.svg", "path": "coverage.svg",
 			"content": base64.StdEncoding.EncodeToString([]byte(svg)),
@@ -523,6 +523,11 @@ func TestParseCoverageBadge(t *testing.T) {
 		{`{"message":"0%"}`, 0, true},
 		{`{"message":"n/a"}`, 0, false},
 		{`<svg><text>coverage</text><text>98.5%</text></svg>`, 98, true},
+		// The real shape: the gradient's y2="100%" attribute comes before the
+		// text. Read the raw markup and a 98.5% repo reports 100 (observed).
+		{octocovBadgeSVG, 98, true},
+		{`<svg><linearGradient y2="100%"/><text>coverage</text><text>0%</text></svg>`, 0, true},
+		{`<svg><linearGradient y2="100%"/><text>coverage</text><text>unknown</text></svg>`, 0, false},
 		{`coverage: 100%`, 100, true},
 		{`coverage: 250%`, 0, false},
 		{`not a badge`, 0, false},
@@ -535,3 +540,26 @@ func TestParseCoverageBadge(t *testing.T) {
 		}
 	}
 }
+
+// octocovBadgeSVG is the badge octocov (and shields.io) actually publishes:
+// a linearGradient whose y2="100%" attribute precedes the <text> nodes that
+// carry the rendered percentage.
+const octocovBadgeSVG = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="133.5" height="20" role="img" aria-label="octocov::badge">
+    <title>octocov::badge</title>
+    <linearGradient id="s" x2="0" y2="100%">
+        <stop offset="0" stop-color="#bbb" stop-opacity=".1"/>
+        <stop offset="1" stop-opacity=".1"/>
+    </linearGradient>
+    <clipPath id="r"><rect width="133.5" height="20" rx="3" fill="#fff"/></clipPath>
+    <g clip-path="url(#r)">
+        <rect width="83.5" height="20" fill="#24292E"/>
+        <rect x="83.5" width="50" height="20" fill="#97CA00"/>
+        <rect width="133.5" height="20" fill="url(#s)"/>
+    </g>
+    <g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" text-rendering="geometricPrecision" font-size="110">
+        <text aria-hidden="true" x="495" y="150" fill="#010101" fill-opacity=".3" transform="scale(.1)">coverage</text>
+        <text x="495" y="140" transform="scale(.1)" fill="#fff">coverage</text>
+        <text aria-hidden="true" x="1085" y="150" fill="#010101" fill-opacity=".3" transform="scale(.1)">98.5%</text>
+        <text x="1085" y="140" transform="scale(.1)" fill="#fff">98.5%</text>
+    </g>
+</svg>`

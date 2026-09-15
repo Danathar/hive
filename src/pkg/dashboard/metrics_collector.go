@@ -234,12 +234,21 @@ func (mc *MetricsCollector) collectOutreach(ctx context.Context) map[string]any 
 // raw.githubusercontent.com URL there is a 404.
 const coverageBadgeRepoScheme = "repo://"
 
-// coveragePercentPattern finds the first percentage in a badge body. It is
-// applied to a shields-style JSON "message" first ("85%", "85.3%") and then
-// to the whole body, which is what makes an SVG badge (octocov, shields.io)
-// usable directly: the rendered number sits in a <text> element. Fractions
-// are truncated because the dashboard renders whole percentages.
+// coveragePercentPattern finds the first percentage in badge TEXT. It is
+// applied to a shields-style JSON "message" ("85%", "85.3%"), or to the text
+// content of any other body once markup is stripped — which is what makes an
+// SVG badge (octocov, shields.io) usable directly: the rendered number sits
+// in a <text> element. Fractions are truncated because the dashboard renders
+// whole percentages.
 var coveragePercentPattern = regexp.MustCompile(`(\d{1,3})(?:\.\d+)?\s*%`)
+
+// markupTagPattern strips tags (and with them every attribute) from an SVG
+// or HTML badge before the percentage scan. Scanning the raw markup read the
+// wrong number: a shields-style badge opens with
+// <linearGradient x2="0" y2="100%"> — the gradient's extent, not the
+// coverage — so a repo at 98.5% reported 100. Only text nodes carry the
+// rendered figure.
+var markupTagPattern = regexp.MustCompile(`<[^>]*>`)
 
 // coverageTarget is the pct-bar target the ci-maintainer card renders against.
 const coverageTarget = 91
@@ -314,7 +323,8 @@ func (mc *MetricsCollector) fetchCoverageBadge(ctx context.Context) (string, boo
 
 // parseCoverageBadge extracts a whole-number percentage from a badge body.
 // A shields-style JSON badge is read from its "message" field; any other
-// body (an SVG badge, plain text) is scanned for the first percentage.
+// body (an SVG badge, plain text) has its markup stripped and its text
+// scanned for the first percentage.
 func parseCoverageBadge(body string) (int, bool) {
 	var badge struct {
 		Message string `json:"message"`
@@ -322,7 +332,7 @@ func parseCoverageBadge(body string) (int, bool) {
 	if json.Unmarshal([]byte(body), &badge) == nil && badge.Message != "" {
 		return coveragePercent(badge.Message)
 	}
-	return coveragePercent(body)
+	return coveragePercent(markupTagPattern.ReplaceAllString(body, " "))
 }
 
 func coveragePercent(text string) (int, bool) {
