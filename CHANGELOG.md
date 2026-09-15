@@ -11,6 +11,17 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-15 (v4.33.8)
+
+### Changed
+
+- Agent policy templates now tell agents to scope each issue so a single PR can close it. A finding that enumerated several independent deliverables — N untested files, N directories, a ranked list of gaps — was previously filed as one issue, and since a PR can only land one of those deliverables it had to write `Refs #N`. The issue stayed open after the work merged, so the backlog grew regardless of how much actually shipped: measured across six repos, 187 of 293 open issues were older than a week, and of 23 issues sitting behind a merged `Refs #N` claim, not one was closeable. The `## Opening Issues` section of all 18 templates that have one now asks for one issue per deliverable, or — where the work genuinely cannot be split — a `- [ ]` task list giving the issue a completion criterion a later reader can check, instead of a judgement buried in prose (#7066).
+
+### Fixed
+
+- Level-gated PR holds now leave an attributable notice and are released automatically once the hive is promoted out of the hold-gated ACMM band, while self-authorization and human holds remain fail-closed ([#7060](https://github.com/hivecommons/hive/issues/7060)).
+- Dashboard status snapshots no longer freeze under load: `DeduplicateBlocks` (run on every agent's 500-line output buffer on every status rebuild) was O(n³) with two allocating normalizations per compare and took seconds per agent on spinner-heavy panes, so rebuilds outlived the next mutation and were dropped — `statusSeq` stopped advancing, the governor cadence table and agent config dialogs stopped updating, and hub heartbeat collects timed out. It now normalizes each line once and matches blocks via a suffix table (~1,700× faster on a full buffer).
+
 ## 2026-09-15 (v4.33.7)
 
 ### Fixed
