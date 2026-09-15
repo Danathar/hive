@@ -344,7 +344,7 @@ func (w *spokeWire) wireSpokeProxyReadyAndLaunch() {
 	// paused agent(s)" into a false systemic-incident signal on every upgrade
 	// restart of a deliberately owner-quiesced fleet (#4041).
 	w.dashSrv.AuditLog("system", "hive_restart",
-		fmt.Sprintf("build=%s version=%s; %s", gitShort, version,
+		fmt.Sprintf("build=%s version=%s; %s", gitShort, reportedVersion(),
 			pausedRestoreDetail(w.cfg.EnabledAgents(), w.onDemandFromPack, w.agentMgr.AllStatuses())), "")
 
 	// Mark the dashboard READY as soon as the HTTP server can serve requests —

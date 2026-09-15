@@ -46,13 +46,48 @@ import (
 // falls back to "0.0.0-dev" rather than an empty string, so an operator who
 // builds locally or from an untagged CI run still sees a sensible, obviously
 // non-release value instead of "hive  (commit ...)" or a version that lies by
-// claiming a release number it isn't. src/Dockerfile and src/Dockerfile.hub
-// leave the VERSION build-arg empty for ordinary branch builds, so this Go
-// default is what ships; tagged-release.yml never rebuilds (it retags an
-// already-published image — see src/docs/releases.md), so today no build
-// path actually passes -X main.version=... yet. That gap is recorded as a
-// known limitation in src/docs/releases.md rather than silently masked here.
+// claiming a release number it isn't.
+//
+// src/Dockerfile and src/Dockerfile.hub now stamp this at ordinary
+// image-build time: when the VERSION build-arg is not supplied they derive it
+// from `git describe --tags --always --dirty` against the /repo/.git they copy
+// in, so a release build cut at tag v4.34.0 self-reports "4.34.0" and a branch
+// build a few commits ahead self-reports "4.34.0-7-g43a51078" (nearest tag +
+// commits-ahead + short commit). .github/workflows/docker.yml checks the build
+// out with fetch-depth: 0 so that tag history is present for `git describe`.
+// tagged-release.yml still only retags the already-published docker.yml image
+// (it never rebuilds — see src/docs/releases.md), which is exactly why the
+// version has to be embedded at the ORIGINAL build here rather than at tag
+// time. The 0.0.0-dev default below remains the safety net for any build that
+// supplies no ldflag at all (a bare local `go build`).
+//
+// The raw value is reported through reportedVersion(), which strips a leading
+// "v" so the string the three consumers see (`--version`, hub heartbeats and
+// dashboard registration payloads) is digit-leading semver ("4.34.0…"), not
+// the "v"-prefixed git tag form — matching what those surfaces already assume.
 var version = "0.0.0-dev"
+
+// normalizeVersion turns a raw build-stamped version (a git tag or
+// `git describe` output such as "v4.34.0" or "v4.34.0-7-g43a51078-dirty") into
+// the digit-leading semver form Hive reports, by trimming surrounding
+// whitespace and stripping a single leading "v"/"V" when it is immediately
+// followed by a digit. It is a pure formatter: an empty input stays empty (the
+// 0.0.0-dev fallback lives in the `version` default, not here) and a value that
+// is not "v<digit>…" (e.g. "0.0.0-dev" itself, or a bare commit sha) passes
+// through untouched.
+func normalizeVersion(raw string) string {
+	v := strings.TrimSpace(raw)
+	if len(v) >= 2 && (v[0] == 'v' || v[0] == 'V') && v[1] >= '0' && v[1] <= '9' {
+		v = v[1:]
+	}
+	return v
+}
+
+// reportedVersion is the single version string Hive exposes to operators and
+// to the hub, via `--version`, the hub heartbeat, and dashboard registration.
+func reportedVersion() string {
+	return normalizeVersion(version)
+}
 
 var (
 	gitHash   = "unknown"

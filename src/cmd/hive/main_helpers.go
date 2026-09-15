@@ -2094,6 +2094,72 @@ type upgradeMarker struct {
 	LastError   string    `json:"last_error,omitempty"`
 }
 
+// upgradeMarkerPath and lastUpgradeOutcomePath are the two on-PVC records the
+// spoke keeps for auto-upgrade visibility (#7092). The marker at
+// upgradeMarkerPath is present ONLY while an instructed upgrade has not landed
+// (in flight or terminally failed) and is cleared the moment the new image
+// boots — so it can NEVER represent a success. lastUpgradeOutcomePath is the
+// durable companion that records the last upgrade that actually LANDED, so the
+// dashboard can tell "attempted and succeeded" apart from "never attempted"
+// instead of letting a blank panel masquerade as success.
+const (
+	upgradeMarkerPath      = "/data/upgrade-requested"
+	lastUpgradeOutcomePath = "/data/last-upgrade-outcome"
+)
+
+// upgradeOutcome is the durable "last upgrade LANDED" record. Written on the
+// boot that completes an upgrade (reconcileUpgradeOutcomeAtBoot), it survives —
+// unlike upgradeMarker, which is removed the moment the target image boots.
+type upgradeOutcome struct {
+	TargetSHA   string    `json:"target_sha"`
+	CurrentSHA  string    `json:"current_sha"`
+	RequestedAt time.Time `json:"requested_at"`
+	CompletedAt time.Time `json:"completed_at"`
+}
+
+func writeUpgradeOutcome(path string, o upgradeOutcome, logger *slog.Logger) {
+	data, err := json.Marshal(o)
+	if err != nil {
+		logger.Warn("failed to encode upgrade outcome", "error", err)
+		return
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		logger.Warn("failed to write upgrade outcome", "path", path, "error", err)
+	}
+}
+
+// reconcileUpgradeOutcomeAtBoot records a SUCCESSFUL self-upgrade. An in-flight
+// marker whose target equals the now-running commit means the instructed
+// upgrade LANDED: the pod booted on the target image. That success would
+// otherwise vanish — the next upgrade instruction silently discards the stale
+// marker, so a hive that updated cleanly looks identical to one that never
+// tried. This persists the success durably and clears the in-flight marker so
+// it stops reading as "not landed". A marker whose target does NOT match the
+// running commit is still in flight or failed and is left untouched for that
+// surface. Called once at startup, before the heartbeat loop and dashboard come
+// up, so the dashboard always sees the reconciled state.
+func reconcileUpgradeOutcomeAtBoot(markerPath, outcomePath, runningSHA string, logger *slog.Logger) {
+	data, err := os.ReadFile(markerPath)
+	if err != nil {
+		return
+	}
+	m := parseUpgradeMarker(data)
+	if m.TargetSHA == "" || runningSHA == "" || !sameUpgradeTarget(m.TargetSHA, runningSHA) {
+		return
+	}
+	writeUpgradeOutcome(outcomePath, upgradeOutcome{
+		TargetSHA:   m.TargetSHA,
+		CurrentSHA:  m.CurrentSHA,
+		RequestedAt: m.RequestedAt,
+		CompletedAt: time.Now().UTC(),
+	}, logger)
+	if err := os.Remove(markerPath); err != nil && !os.IsNotExist(err) {
+		logger.Warn("failed to clear landed upgrade marker", "path", markerPath, "error", err)
+	}
+	logger.Info("self-upgrade landed: recorded successful upgrade outcome",
+		"target", m.TargetSHA, "current", runningSHA)
+}
+
 // parseUpgradeMarker decodes a marker, tolerating the legacy format that had no
 // attempts/last_error fields. A legacy marker counts as one prior attempt so an
 // already-wedged hive gets retries under the new budget instead of being

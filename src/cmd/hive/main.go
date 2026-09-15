@@ -20,7 +20,7 @@ func dispatchSubcommand(args []string, stdout, stderr io.Writer) (bool, int) {
 	}
 	switch args[0] {
 	case "--version", "version":
-		fmt.Fprintf(stdout, "hive %s (commit %s, branch %s)\n", version, gitShort, gitBranch)
+		fmt.Fprintf(stdout, "hive %s (commit %s, branch %s)\n", reportedVersion(), gitShort, gitBranch)
 		return true, 0
 	case "validate", "--config-check":
 		return true, runConfigCheck(args[1:], stdout, stderr)
@@ -91,6 +91,14 @@ func main() {
 		// file closes its descriptor, which would silently drop the flock).
 		defer procLock.Release()
 	}
+
+	// Auto-update visibility (#7092): before anything reads the upgrade marker,
+	// reconcile it against the commit we actually booted on. A marker whose
+	// target IS the running commit means the last instructed upgrade LANDED —
+	// record that success durably and clear the marker, so the dashboard can
+	// show "attempted and succeeded" instead of silently losing the success the
+	// moment the new image boots.
+	reconcileUpgradeOutcomeAtBoot(upgradeMarkerPath, lastUpgradeOutcomePath, gitShort, logger)
 
 	// Clear stale upgrade marker if the current SHA differs from the marker's
 	// current_sha — this means the upgrade succeeded and the marker is from a
