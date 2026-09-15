@@ -88,6 +88,10 @@
     .timestamp { color: var(--muted); font-size: 0.8rem; margin-left: 12px; }
     .git-version { font-size: 0.65rem; color: var(--muted); margin-left: 10px; font-weight: 400; font-family: var(--font-mono); }
     .git-version .git-behind { color: var(--yellow); font-weight: 600; }
+    /* Release channel + last upgrade attempt panel (#7092). */
+    .release-status { margin: 6px 0 10px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; background: color-mix(in srgb, var(--border) 12%, transparent); font-size: 0.82rem; line-height: 1.5; }
+    .release-status-row { display: block; }
+    .release-status code { font-family: var(--font-mono); font-size: 0.9em; }
     .git-version .git-dirty { color: var(--yellow); }
     .header-spacer { flex: 1; }
     /* .widget-dl / .layout-toggle — ghost buttons (system recipe at end of
@@ -3194,6 +3198,14 @@
     <button class="layout-toggle" id="layout-toggle" data-action="toggleLayout" title="Switch to Dark Mode" aria-label="Switch to Dark Mode">☾</button>
     <a href="/api/widget" class="widget-dl" title="Download Übersicht widget">⬇ Widget</a>
   </h1>
+
+  <!-- Release channel + last upgrade attempt (#7092). Findable on the spoke's
+       own dashboard: which channel this hive follows, and what happened on the
+       last upgrade attempt — with "never attempted", "succeeded" and "failed"
+       rendered as three visually distinct states so a blank panel can never
+       masquerade as success. Populated by renderReleaseStatus() from
+       /api/version's releaseStatus object. -->
+  <div id="release-status" class="release-status" hidden></div>
 
   <div id="gh-app-install-banner" class="gh-app-install-banner" hidden>
     <span style="font-size:1.5rem">&#9888;&#65039;</span>
@@ -7601,11 +7613,29 @@
     function renderCadenceMatrix(matrix, currentMode, modes) {
       if (!matrix || !matrix.length) return '';
       const agents = window._lastAgents || [];
-      const packAgentNames = (window._lastStatus && window._lastStatus.acmmPackAgents) || null;
-      const packSet = packAgentNames ? new Set(packAgentNames) : null;
+      // #7112: follow status.agents — the set the server already gated with the
+      // ACMM pack rule AND its "active outside pack" escape hatch
+      // (buildAgentsWithHidden) — instead of re-deriving the raw pack roster
+      // from acmmPackAgents. The raw roster omits a running/enabled agent
+      // outside the level's pack (e.g. a custom "review" agent), so filtering on
+      // it dropped that agent's cadence row even though #7110 makes its nav item
+      // and card render. Genuinely pack-inactive "ghost" agents never appear in
+      // status.agents, so they stay suppressed. acmmPackAgents keeps its raw
+      // roster meaning for its other consumer (_packAgentNote).
+      const statusAgentSet = new Set(agents.map(a => a.name));
+      // Fail open when the agent list is unpopulated — mirroring the old
+      // `!packSet ||` bypass. window._lastAgents can be empty independently of
+      // _lastStatus.cadenceMatrix: an SSE agent-status delta may carry an empty
+      // roster (it overwrites _lastAgents but not cadenceMatrix), or the first
+      // governor paint may beat the first full status. With no authoritative
+      // set to filter against, show every cadence row rather than blanking the
+      // whole matrix. When the set IS populated (the normal case, including the
+      // #7112 out-of-pack "review" agent), filtering proceeds and pack-inactive
+      // ghosts stay suppressed.
+      const filterByStatus = statusAgentSet.size > 0;
       const { sorted: sortedAgents } = _sortAgentsBySidebar(agents);
       const sidebarOrder = sortedAgents.map(a => a.name);
-      const matrixNames = matrix.map(r => r.agent).filter(n => !packSet || packSet.has(n));
+      const matrixNames = matrix.map(r => r.agent).filter(n => !filterByStatus || statusAgentSet.has(n));
       const agentOrder = sidebarOrder.filter(n => matrixNames.includes(n));
       for (const n of matrixNames) { if (!agentOrder.includes(n)) agentOrder.push(n); }
       const rows = agentOrder.map(aname => {
@@ -17007,7 +17037,92 @@ function burnAreaChart() {
         if (!v.behind) html += commitsBehindText;
         el.innerHTML = html;
         if (ocEl) ocEl.innerHTML = html;
+        renderReleaseStatus(v.releaseStatus);
       } catch (_) {}
+    }
+
+    // renderReleaseStatus paints the #7092 panel: the release channel this hive
+    // follows and what happened on the last upgrade attempt. Three attempt
+    // states are rendered with distinct colour + icon + wording so "never
+    // attempted" can never be mistaken for "succeeded", and an unresolved
+    // channel is shown honestly (with the image tag actually observed) instead
+    // of a fabricated default.
+    function renderReleaseStatus(rs) {
+      var el = document.getElementById('release-status');
+      if (!el) return;
+      if (!rs) { el.hidden = true; el.innerHTML = ''; return; }
+      el.hidden = false;
+
+      // --- Channel (honest about "unknown") ---
+      var ch = rs.channel || {};
+      var chColor, chIcon, chLabel;
+      if (ch.resolved && ch.channel) {
+        chColor = 'var(--accent)'; chIcon = '📡';
+        chLabel = 'Channel: <strong>' + escapeHtml(ch.channel) + '</strong>';
+      } else {
+        chColor = 'var(--yellow, #d4a017)'; chIcon = '❔';
+        chLabel = 'Channel: <strong>unknown</strong>' +
+          (ch.imageTag ? ' <span style="opacity:0.8">(image tag <code>' + escapeHtml(ch.imageTag) + '</code> is not a release channel)</span>' : ' <span style="opacity:0.8">(image reference unavailable)</span>');
+      }
+
+      // --- Last upgrade attempt (three distinct states) ---
+      var at = rs.attempt || {};
+      var aColor = 'var(--muted)', aIcon = 'ⓘ', aLabel = '';
+      switch (at.state) {
+        case 'succeeded':
+          aColor = 'var(--green)'; aIcon = '✅';
+          aLabel = 'Last upgrade: <strong>succeeded</strong>';
+          break;
+        case 'failed':
+          aColor = 'var(--red)'; aIcon = '⚠';
+          aLabel = 'Last upgrade: <strong>FAILED</strong>';
+          break;
+        case 'in_progress':
+          aColor = 'var(--yellow, #d4a017)'; aIcon = '⟳';
+          aLabel = 'Last upgrade: <strong>in progress</strong>';
+          break;
+        case 'never':
+        default:
+          aColor = 'var(--muted)'; aIcon = '—';
+          aLabel = 'Last upgrade: <strong>never attempted</strong>';
+          break;
+      }
+      // Timestamp — absolute always, relative age as a bonus so staleness is
+      // obvious at a glance.
+      var when = at.completedAt || at.at || '';
+      var whenHtml = '';
+      if (when) {
+        whenHtml = ' <span style="opacity:0.85" title="' + escapeHtml(when) + '">at ' +
+          escapeHtml(when) + ' (' + escapeHtml(relativeAge(when)) + ')</span>';
+      }
+      var detailHtml = at.detail ? '<div style="margin-top:2px;color:var(--muted);line-height:1.4">' + escapeHtml(at.detail) + '</div>' : '';
+
+      // --- Staleness warning: never present stale data as current truth. ---
+      var staleHtml = '';
+      if (rs.hubReachable === false) {
+        staleHtml = '<div style="margin-top:2px;color:var(--yellow, #d4a017)">⚠ This view may be stale: the hub has not been reached recently' +
+          (rs.lastHeartbeatAt ? ' (last heartbeat ' + escapeHtml(rs.lastHeartbeatAt) + ')' : '') + '.</div>';
+      }
+
+      el.innerHTML =
+        '<div class="release-status-row" style="color:' + chColor + '">' + chIcon + ' ' + chLabel + '</div>' +
+        '<div class="release-status-row" style="color:' + aColor + ';font-weight:600">' + aIcon + ' ' + aLabel + whenHtml + '</div>' +
+        detailHtml + staleHtml;
+    }
+
+    // relativeAge renders a coarse "3h ago" style age from an RFC3339 stamp,
+    // used only as a readability bonus next to the absolute time.
+    function relativeAge(ts) {
+      var t = Date.parse(ts);
+      if (isNaN(t)) return '';
+      var s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+      if (s < 60) return s + 's ago';
+      var m = Math.floor(s / 60);
+      if (m < 60) return m + 'm ago';
+      var h = Math.floor(m / 60);
+      if (h < 24) return h + 'h ago';
+      var d = Math.floor(h / 24);
+      return d + 'd ago';
     }
     // fetchGitVersion() — deferred to _deferredInit
 
@@ -17704,17 +17819,22 @@ function burnAreaChart() {
           if (section === 'nous-section' && level < ACMM_NOUS_MIN_LEVEL) hide(item);
         });
 
-        if (Array.isArray(packAgents)) {
-          const packSet = new Set(packAgents);
-          document.querySelectorAll('[data-agent-nav]').forEach(navItem => {
-            const name = navItem.getAttribute('data-agent-nav');
-            if (name && !packSet.has(name)) hide(navItem);
-          });
-          document.querySelectorAll('.agent-card[data-agent]').forEach(card => {
-            const name = card.getAttribute('data-agent');
-            if (name && !packSet.has(name)) hide(card);
-          });
-        }
+        // #7099: the pack-roster gate is NOT re-applied here. The server already
+        // filters agents through it in buildAgentsWithHidden (status_builder.go),
+        // but WITH the documented "active outside pack" exception
+        // (activeOutsidePack): a running or enabled-and-unpaused agent outside the
+        // level's roster — a custom agent, or one explicitly enabled in YAML — is
+        // deliberately published in status.agents and correctly absent from
+        // hiddenAgents. The nav items and cards this function toggles are built
+        // ONLY from status.agents (renderAgents / ocUpdateSidebarAgents), so
+        // status.agents is already authoritative. Re-deriving the pack filter here
+        // with no escape hatch could only ever DISAGREE with the server, hiding
+        // the exact agent (and its card — terminal link, Login button, restart,
+        // config gear) the server chose to surface, including one the watchdog is
+        // actively raising a re-auth alert about. It also hid the card without
+        // recording anything in hiddenAgents, reopening the diagnostic gap
+        // #6581/#6652 closed. The server decision is the only pack gate; the
+        // client no longer second-guesses it.
     }
 
     function switchConfigTab(tabId) {

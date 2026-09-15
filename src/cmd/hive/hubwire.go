@@ -730,7 +730,7 @@ func (w *spokeWire) buildFreshHeartbeatPayload() *hub.HeartbeatPayload {
 		DashboardURL:            w.dashboardURLForFreshHeartbeat(),
 		GitHash:                 gitShort,
 		GitBranch:               gitBranch,
-		Version:                 version,
+		Version:                 reportedVersion(),
 		HiveType:                w.cfg.Hub.HiveType,
 		ClusterID:               w.cfg.Hub.ClusterID,
 		IsPublic:                w.cfg.Hub.IsPublic,
@@ -1021,7 +1021,7 @@ func (w *spokeWire) buildHeartbeatPayload() *hub.HeartbeatPayload {
 		HiveType:     w.cfg.Hub.HiveType,
 		ClusterID:    w.cfg.Hub.ClusterID,
 		IsPublic:     w.cfg.Hub.IsPublic,
-		Version:      version,
+		Version:      reportedVersion(),
 		GitHash:      gitShort,
 		GitBranch:    gitBranch,
 		// The image ref the Deployment tracks, read in-cluster and
@@ -1164,8 +1164,6 @@ func (w *spokeWire) handleHubRestart() {
 }
 
 func (w *spokeWire) handleHubUpgrade(targetSHA string) {
-	const upgradeMarkerPath = "/data/upgrade-requested"
-
 	// attemptCount carries the number of PREVIOUS failed attempts for this
 	// (current_sha → target_sha) pair, read from the marker below.
 	attemptCount := 0
@@ -1365,7 +1363,7 @@ func (w *spokeWire) buildUpgradingHeartbeatPayload() *hub.HeartbeatPayload {
 		ClusterID:               w.cfg.Hub.ClusterID,
 		HiveType:                w.cfg.Hub.HiveType,
 		IsPublic:                w.cfg.Hub.IsPublic,
-		Version:                 version,
+		Version:                 reportedVersion(),
 		RepoTargetMisconfigured: w.repoTargetMisconfigured(),
 		RepoTargetIssue:         w.repoTargetIssueMessage(),
 		ProviderLimitReason:     providerLimitReason,
