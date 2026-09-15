@@ -352,3 +352,58 @@ func TestSignatureCoversEntireBody(t *testing.T) {
 	}
 	_ = io.Discard
 }
+
+// TestVerifierAccessorsAndEdgeCases pins the small helpers the staged-rollout
+// tests exercise only indirectly: constructor defaults, mode reporting, the
+// test-clock fallback, and every fail-closed branch of verifyBodySignature.
+func TestVerifierAccessorsAndEdgeCases(t *testing.T) {
+	// NewVerifier with a nil logger must fall back to slog.Default and report
+	// its configured mode.
+	v := NewVerifier(ModeEnforce, nil)
+	if v.Mode() != ModeEnforce {
+		t.Fatalf("Mode() = %v, want ModeEnforce", v.Mode())
+	}
+
+	// modeName covers all three spellings used in log lines.
+	for _, tc := range []struct {
+		mode Mode
+		want string
+	}{
+		{ModeEnforce, "enforce"},
+		{ModeOff, "off"},
+		{ModeLogOnly, "log-only"},
+	} {
+		if got := (&Verifier{mode: tc.mode}).modeName(); got != tc.want {
+			t.Errorf("modeName(%v) = %q, want %q", tc.mode, got, tc.want)
+		}
+	}
+
+	// nowOrDefault: zero time falls back to the wall clock, a real time is
+	// passed through untouched.
+	if nowOrDefault(time.Time{}).IsZero() {
+		t.Error("nowOrDefault(zero) returned zero time")
+	}
+	fixed := time.Unix(1700000000, 0)
+	if got := nowOrDefault(fixed); !got.Equal(fixed) {
+		t.Errorf("nowOrDefault(fixed) = %v, want %v", got, fixed)
+	}
+
+	// verifyBodySignature fail-closed branches. A valid signature is already
+	// covered by the staged-rollout tests; here every malformed input must be
+	// rejected without panicking (wrong-size keys would panic ed25519.Verify
+	// if not length-checked first).
+	s := newSigner(t)
+	body := []byte(`{"ok":true}`)
+	goodSig := SignBody(s.seedHex, body)
+	for name, tc := range map[string]struct{ pub, sig string }{
+		"empty key":      {"", goodSig},
+		"bad hex key":    {"zz", goodSig},
+		"wrong size key": {"abcd", goodSig},
+		"bad base64 sig": {s.pubHex, "!!!not-base64!!!"},
+		"wrong size sig": {s.pubHex, "YWJj"},
+	} {
+		if verifyBodySignature(tc.pub, tc.sig, body) {
+			t.Errorf("%s: verifyBodySignature accepted malformed input", name)
+		}
+	}
+}
