@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hivecommons/hive/pkg/hub/spoke"
+	hub "github.com/hivecommons/hive/pkg/hub/spoke"
 )
 
 // Spoke release visibility surface (#7092).
@@ -49,10 +49,10 @@ type ReleaseChannelStatus struct {
 // buildReleaseChannelStatus resolves the channel a spoke follows from its own
 // image ref (authoritative — it is what the kubelet pulls), falling back to the
 // hub's tracked channel only for spokes too old to report an image ref. It is a
-// thin, testable wrapper over spoke.ResolveReleaseChannel that adds the
+// thin, testable wrapper over hub.ResolveSpokeReleaseChannel that adds the
 // operator-facing detail string.
 func buildReleaseChannelStatus(imageRef, trackedChannel string) ReleaseChannelStatus {
-	channel, resolved, tag := spoke.ResolveReleaseChannel(imageRef, trackedChannel)
+	channel, resolved, tag := hub.ResolveSpokeReleaseChannel(imageRef, trackedChannel)
 	st := ReleaseChannelStatus{Channel: channel, Resolved: resolved, ImageTag: tag}
 	switch {
 	case resolved:

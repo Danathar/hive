@@ -3,7 +3,6 @@ package hub
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/hivecommons/hive/pkg/imageref"
 	"io"
 	"log/slog"
 	"net/http"
@@ -290,7 +289,14 @@ func spokeReleaseChannel(imageRef, trackedChannel string) string {
 // tag leads (it is what the kubelet pulls); trackedChannel is the fallback for
 // spokes too old to report an image ref.
 func ResolveSpokeReleaseChannel(imageRef, trackedChannel string) (channel string, resolved bool, tag string) {
-	return imageref.ResolveSpokeChannel(imageRef, trackedChannel)
+	tag = imageTagOf(sanitizeImageRef(imageRef))
+	if isReleaseChannel(tag) {
+		return tag, true, tag
+	}
+	if imageRef == "" && isReleaseChannel(trackedChannel) {
+		return trackedChannel, true, tag
+	}
+	return "", false, tag
 }
 
 // upgradeReachability answers "what is the newest build this spoke can actually

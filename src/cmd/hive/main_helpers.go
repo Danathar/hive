@@ -2083,17 +2083,6 @@ const (
 	selfUpgradeFailureExitCode = 17
 )
 
-// upgradeMarker is the on-PVC record at /data/upgrade-requested. It survives
-// pod restarts (that is the whole point: the process exits as part of an
-// upgrade), so it is the only place attempt bookkeeping can live.
-type upgradeMarker struct {
-	TargetSHA   string    `json:"target_sha"`
-	CurrentSHA  string    `json:"current_sha"`
-	RequestedAt time.Time `json:"requested_at"`
-	Attempts    int       `json:"attempts"`
-	LastError   string    `json:"last_error,omitempty"`
-}
-
 // upgradeMarkerPath and lastUpgradeOutcomePath are the two on-PVC records the
 // spoke keeps for auto-upgrade visibility (#7092). The marker at
 // upgradeMarkerPath is present ONLY while an instructed upgrade has not landed
@@ -2106,6 +2095,58 @@ const (
 	upgradeMarkerPath      = "/data/upgrade-requested"
 	lastUpgradeOutcomePath = "/data/last-upgrade-outcome"
 )
+
+// upgradeMarker is the on-PVC record at /data/upgrade-requested. It survives
+// pod restarts (that is the whole point: the process exits as part of an
+// upgrade), so it is the only place attempt bookkeeping can live.
+type upgradeMarker struct {
+	TargetSHA   string    `json:"target_sha"`
+	CurrentSHA  string    `json:"current_sha"`
+	RequestedAt time.Time `json:"requested_at"`
+	Attempts    int       `json:"attempts"`
+	LastError   string    `json:"last_error,omitempty"`
+}
+
+// parseUpgradeMarker decodes a marker, tolerating the legacy format that had no
+// attempts/last_error fields. A legacy marker counts as one prior attempt so an
+// already-wedged hive gets retries under the new budget instead of being
+// treated as fresh.
+func parseUpgradeMarker(data []byte) upgradeMarker {
+	var m upgradeMarker
+	if err := json.Unmarshal(data, &m); err != nil {
+		return upgradeMarker{}
+	}
+	if m.Attempts < 1 {
+		m.Attempts = 1
+	}
+	return m
+}
+
+// sameUpgradeTarget reports whether two target SHAs refer to the same commit,
+// tolerating short/full SHA length mismatch the way the hub's sameCommit does.
+// A DIFFERENT target must reset the attempt budget, so this comparison is what
+// keeps the latch from outliving the upgrade it was created for.
+func sameUpgradeTarget(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	return strings.EqualFold(a[:n], b[:n])
+}
+
+func writeUpgradeMarker(path string, m upgradeMarker, logger *slog.Logger) {
+	data, err := json.Marshal(m)
+	if err != nil {
+		logger.Warn("failed to encode upgrade marker", "error", err)
+		return
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		logger.Warn("failed to write upgrade marker", "path", path, "error", err)
+	}
+}
 
 // upgradeOutcome is the durable "last upgrade LANDED" record. Written on the
 // boot that completes an upgrade (reconcileUpgradeOutcomeAtBoot), it survives —
@@ -2158,47 +2199,6 @@ func reconcileUpgradeOutcomeAtBoot(markerPath, outcomePath, runningSHA string, l
 	}
 	logger.Info("self-upgrade landed: recorded successful upgrade outcome",
 		"target", m.TargetSHA, "current", runningSHA)
-}
-
-// parseUpgradeMarker decodes a marker, tolerating the legacy format that had no
-// attempts/last_error fields. A legacy marker counts as one prior attempt so an
-// already-wedged hive gets retries under the new budget instead of being
-// treated as fresh.
-func parseUpgradeMarker(data []byte) upgradeMarker {
-	var m upgradeMarker
-	if err := json.Unmarshal(data, &m); err != nil {
-		return upgradeMarker{}
-	}
-	if m.Attempts < 1 {
-		m.Attempts = 1
-	}
-	return m
-}
-
-// sameUpgradeTarget reports whether two target SHAs refer to the same commit,
-// tolerating short/full SHA length mismatch the way the hub's sameCommit does.
-// A DIFFERENT target must reset the attempt budget, so this comparison is what
-// keeps the latch from outliving the upgrade it was created for.
-func sameUpgradeTarget(a, b string) bool {
-	if a == "" || b == "" {
-		return false
-	}
-	n := len(a)
-	if len(b) < n {
-		n = len(b)
-	}
-	return strings.EqualFold(a[:n], b[:n])
-}
-
-func writeUpgradeMarker(path string, m upgradeMarker, logger *slog.Logger) {
-	data, err := json.Marshal(m)
-	if err != nil {
-		logger.Warn("failed to encode upgrade marker", "error", err)
-		return
-	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		logger.Warn("failed to write upgrade marker", "path", path, "error", err)
-	}
 }
 
 // recordUpgradeError annotates the existing marker with the cause of the failed
