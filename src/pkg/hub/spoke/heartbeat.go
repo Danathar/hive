@@ -24,6 +24,7 @@ import (
 
 	"github.com/hivecommons/hive/pkg/config"
 	"github.com/hivecommons/hive/pkg/inferencehealth"
+	spokesig "github.com/hivecommons/hive/pkg/spoke"
 	"github.com/hivecommons/hive/pkg/tracing"
 )
 
@@ -86,6 +87,18 @@ var heartbeatLoopStarted atomic.Bool
 // deliberate stop-then-restart stays possible; only CONCURRENT duplication is
 // refused.
 var heartbeatLoopActive atomic.Bool
+
+var (
+	heartbeatVerifierOnce sync.Once
+	heartbeatVerifier     *spokesig.Verifier
+)
+
+func spokeHeartbeatVerifier(logger *slog.Logger) *spokesig.Verifier {
+	heartbeatVerifierOnce.Do(func() {
+		heartbeatVerifier = spokesig.NewVerifier(spokesig.ModeFromString(os.Getenv(spokesig.EnvVerifyMode)), logger)
+	})
+	return heartbeatVerifier
+}
 
 // lastHeartbeatAttemptUnix holds the unix-seconds timestamp of the most
 // recent heartbeat the loop *tried* to send, regardless of whether the hub
@@ -1519,8 +1532,26 @@ func postHeartbeatToHub(ctx context.Context, hubURL string, payload *HeartbeatPa
 	// record it even if the response body below fails to decode.
 	recordHeartbeatSuccess()
 
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxPayloadBytes))
+	if err != nil {
+		logger.Warn("hub heartbeat response read failed", "error", err)
+		return nil
+	}
+	result := spokeHeartbeatVerifier(logger).Verify(
+		SpokeSSOPublicKeys(),
+		payload.HiveID,
+		raw,
+		resp.Header.Get(spokesig.SigHeader),
+		time.Now(),
+	)
+	if !result.Accepted {
+		logger.Warn("hub heartbeat response REJECTED by signature verification — not applying its config/credentials",
+			"reason", result.Reason, "hive_id", payload.HiveID)
+		return nil
+	}
+
 	var hbResp HeartbeatResponse
-	if err := json.NewDecoder(resp.Body).Decode(&hbResp); err == nil {
+	if err := json.Unmarshal(raw, &hbResp); err == nil {
 		if hbResp.HubGitHash != "" {
 			logger.Debug("hub version info", "hub_git_hash", hbResp.HubGitHash, "latest_sha", hbResp.LatestSHA)
 		}
@@ -2437,6 +2468,14 @@ type HeartbeatResponse struct {
 	// nil means "nothing to deliver". The hub sends it once (drained on delivery)
 	// rather than every beat, since it carries a secret key value.
 	PendingGateway *HeartbeatGatewayConfig `json:"pending_gateway,omitempty"`
+	// SigHiveID / SigSeq / SigSignedAt are authenticated by the detached
+	// hub->spoke heartbeat response signature. They bind the response to this
+	// hive and a monotonic sequence so signed responses cannot be replayed
+	// across hives or rolled back.
+	SigHiveID   string `json:"sig_hive_id,omitempty"`
+	SigSeq      int64  `json:"sig_seq,omitempty"`
+	SigSignedAt int64  `json:"sig_ts,omitempty"`
+	SigVersion  int    `json:"sig_v,omitempty"`
 }
 
 // HubBanner is a message from the hub admin displayed on spoke dashboards.

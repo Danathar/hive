@@ -72,7 +72,21 @@ func taskListSweepFailureServer(t *testing.T, listStatus, commentStatus, patchSt
 			"user":   map[string]any{"login": "hive-app[bot]", "type": "Bot"},
 		}})
 	})
+	mux.HandleFunc("/repos/hivecommons/hive/pulls", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([]map[string]any{{
+			"number":     44,
+			"title":      "finish task list",
+			"body":       "Refs #7",
+			"state":      "closed",
+			"merged_at":  "2099-01-01T00:00:00Z",
+			"updated_at": "2099-01-01T00:00:00Z",
+		}})
+	})
 	mux.HandleFunc("/repos/hivecommons/hive/issues/7/comments", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_ = json.NewEncoder(w).Encode([]map[string]any{})
+			return
+		}
 		w.WriteHeader(commentStatus)
 		if commentStatus == http.StatusCreated {
 			_ = json.NewEncoder(w).Encode(map[string]any{"id": 1})

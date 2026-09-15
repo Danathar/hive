@@ -53,7 +53,7 @@ func (w *spokeWire) wireSpokeProxyReadyAndLaunch() {
 		}
 	}
 	if w.ghClient != nil {
-		w.ghClient.SetCanaryScanner(w.cfg.Ioscan.IsEnabled() && w.cfg.Ioscan.Canaries, w.cfg.Ioscan.FailClosed(), ioscan.DefaultCanaries, canaryLeakHandler)
+		w.ghClient.SetCanaryScanner(w.cfg.Ioscan.IsEnabled() && w.cfg.Ioscan.CanariesEnabled(), w.cfg.Ioscan.FailClosedAtLevel(w.cfg.ACMMLevelOrZero()), ioscan.DefaultCanaries, canaryLeakHandler)
 	}
 
 	var err error
@@ -61,7 +61,7 @@ func (w *spokeWire) wireSpokeProxyReadyAndLaunch() {
 	if err != nil {
 		w.logger.Error("failed to create github proxy", "error", err)
 	} else {
-		w.githubProxy.SetCanaryScanner(w.cfg.Ioscan.IsEnabled() && w.cfg.Ioscan.Canaries, w.cfg.Ioscan.FailClosed(), ioscan.DefaultCanaries, canaryLeakHandler)
+		w.githubProxy.SetCanaryScanner(w.cfg.Ioscan.IsEnabled() && w.cfg.Ioscan.CanariesEnabled(), w.cfg.Ioscan.FailClosedAtLevel(w.cfg.ACMMLevelOrZero()), ioscan.DefaultCanaries, canaryLeakHandler)
 		// Per-repo pause (#6203). This is the deterministic refusal the feature
 		// rests on: whatever an agent believes, a write to a paused repo is
 		// answered with a 403 here. The predicate reads live config, so pausing
