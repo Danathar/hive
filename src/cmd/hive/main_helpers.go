@@ -2083,17 +2083,6 @@ const (
 	selfUpgradeFailureExitCode = 17
 )
 
-// upgradeMarker is the on-PVC record at /data/upgrade-requested. It survives
-// pod restarts (that is the whole point: the process exits as part of an
-// upgrade), so it is the only place attempt bookkeeping can live.
-type upgradeMarker struct {
-	TargetSHA   string    `json:"target_sha"`
-	CurrentSHA  string    `json:"current_sha"`
-	RequestedAt time.Time `json:"requested_at"`
-	Attempts    int       `json:"attempts"`
-	LastError   string    `json:"last_error,omitempty"`
-}
-
 // upgradeMarkerPath and lastUpgradeOutcomePath are the two on-PVC records the
 // spoke keeps for auto-upgrade visibility (#7092). The marker at
 // upgradeMarkerPath is present ONLY while an instructed upgrade has not landed
@@ -2106,6 +2095,17 @@ const (
 	upgradeMarkerPath      = "/data/upgrade-requested"
 	lastUpgradeOutcomePath = "/data/last-upgrade-outcome"
 )
+
+// upgradeMarker is the on-PVC record at /data/upgrade-requested. It survives
+// pod restarts (that is the whole point: the process exits as part of an
+// upgrade), so it is the only place attempt bookkeeping can live.
+type upgradeMarker struct {
+	TargetSHA   string    `json:"target_sha"`
+	CurrentSHA  string    `json:"current_sha"`
+	RequestedAt time.Time `json:"requested_at"`
+	Attempts    int       `json:"attempts"`
+	LastError   string    `json:"last_error,omitempty"`
+}
 
 // upgradeOutcome is the durable "last upgrade LANDED" record. Written on the
 // boot that completes an upgrade (reconcileUpgradeOutcomeAtBoot), it survives —
