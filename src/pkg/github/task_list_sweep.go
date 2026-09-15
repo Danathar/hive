@@ -568,3 +568,22 @@ func (c *Client) ensureSweepComment(ctx context.Context, owner, repo string, num
 	}
 	return nil
 }
+
+// isGitHubStatus reports whether err is a GitHub API error with the given HTTP
+// status. Kept as a package-local shim for task-list sweep tests and older v5
+// callers; production paths use githubStatusError directly.
+func isGitHubStatus(err error, status int) bool {
+	return githubStatusError(err, status)
+}
+
+func (c *Client) warn(msg string, args ...any) {
+	if c != nil && c.logger != nil {
+		c.logger.Warn(msg, args...)
+	}
+}
+
+func (c *Client) info(msg string, args ...any) {
+	if c != nil && c.logger != nil {
+		c.logger.Info(msg, args...)
+	}
+}
