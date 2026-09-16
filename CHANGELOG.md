@@ -11,6 +11,27 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-16 (v4.38.0)
+
+### Added
+
+- `just contribute-hive` now forwards `OPENROUTER_API_KEY` into the contributor container ([#7175](https://github.com/hivecommons/hive/issues/7175)). The containerized contributor path hands the agent an explicit allowlist of provider credentials rather than the whole environment, so that an unconfined agent gets only what it needs and provider choice is not made observable through unrelated secrets ([#5039](https://github.com/hivecommons/hive/issues/5039)). `OPENROUTER_API_KEY` was simply missing from that list, so a contributor running Hive → Goose → OpenRouter could configure the provider and model correctly and still have the container fail at authentication with `Configuration value not found: OPENROUTER_API_KEY`. The gap was specific to this one path: the `pi` backend already resolves `OPENROUTER_API_KEY` per model through `bin/pi-backend.js`, which is why OpenRouter worked there and not for Goose. Adding the name to the allowlist forwards the *name* only — `add_provider_env` passes `-e NAME`, so the runtime reads the value from the calling process and the secret never appears in the container command's argv — and, like every other entry, it is forwarded only when actually set. The existing LiteLLM and Claude Code workflows are unaffected.
+
+### Changed
+
+- The Copilot model host discovery endpoint and persistent Hive ID file path can now be repointed by tests without changing runtime defaults ([#7148](https://github.com/hivecommons/hive/issues/7148)), letting CI pin the enterprise-host fallback and spoke identity load/generate paths against hermetic servers and temp files instead of depending on live GitHub responses or `/data` state.
+- Git-source connect and disconnect dashboard success paths now have a hermetic test seam for their knowledge storage root, so the config persistence logic that decides which repositories are re-cloned after restart is exercised without touching the production `/data/knowledge` directory or depending on a live remote.
+
+### Fixed
+
+- The unfilled-template guard now catches the single-word placeholders that slipped past it ([#7141](https://github.com/hivecommons/hive/issues/7141)). The guard shipped for [#7153](https://github.com/hivecommons/hive/issues/7153) requires two or more words inside a `<…>` span, which is right for an issue body — a lone `<word>` there is far likelier to be markup than a placeholder, and since the guard fails closed a false positive refuses a legitimate filing. But #7141 is the same empty skeleton filed by the *scanner* agent rather than the guide, establishing this as a cross-agent bug rather than one agent's quirk, and its placeholders are single words: `<analysis>` and `<fix>`. A title is not a body — it is plain text that renders no markup, carries no autolinks and holds no code — so `<analysis>` in a title is a placeholder in a way it simply is not in a body. Titles are therefore now matched on single-word spans too, subject to a three-character floor and the existing HTML-element skip list, so `List<t>` and `<br>` remain untouched. The body rule is deliberately left conservative and a test pins that asymmetry, so a later attempt to tighten it has to argue with a failing test rather than quietly widen the false-positive surface.
+- Coverage floors are now keyed by a package's full path below `pkg/` instead of its
+bare directory name, so a nested package can no longer silently share the floor of
+the top-level package that happens to share its name. `pkg/spoke` and
+`pkg/hub/spoke` are now `spoke` and `hub/spoke` rather than both being `spoke`.
+- Repository AGENTS.md instructions now explicitly outrank hive's generic prompt defaults for repo-local conventions such as PR base branches, title formats and commit style, while hive's safety and authorization rules remain non-overridable ([#7159](https://github.com/hivecommons/hive/issues/7159)).
+- The dashboard chat bubble keeps its see-through resting state while gaining an explicit keyboard focus ring and accessible label, so operators can still read covered values without losing a clear way to open Hive Chat.
+
 ## 2026-09-16 (v4.37.5)
 
 ### Fixed
