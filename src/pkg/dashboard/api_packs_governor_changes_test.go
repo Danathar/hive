@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/hivecommons/hive/pkg/config"
@@ -13,8 +14,11 @@ import (
 
 func TestApplyPackForceReportsGovernorChanges(t *testing.T) {
 	srv := newFullServer(t)
-	var logs bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	// applyPack fans out goroutines (ensureCPUTier, refreshAsync) that log
+	// after ApplyPackForce returns, so the sink must be safe to read
+	// concurrently with those writes.
+	logs := &lockedLogBuffer{}
+	logger := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	srv.logger = logger
 	srv.deps.Logger = logger
 
@@ -86,4 +90,22 @@ func TestPackApplyResponseIncludesGovernorChanges(t *testing.T) {
 	if got := response.GovernorChanges.EvalIntervalS.From; got != 3600 {
 		t.Errorf("response interval from = %d, want 3600", got)
 	}
+}
+
+// lockedLogBuffer is a goroutine-safe bytes.Buffer for capturing slog output.
+type lockedLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
