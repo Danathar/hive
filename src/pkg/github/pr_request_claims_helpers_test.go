@@ -3,6 +3,7 @@ package github
 import (
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 
 	gh "github.com/google/go-github/v72/github"
@@ -93,7 +94,7 @@ func TestIsWorkflowFile_Classification(t *testing.T) {
 func TestDowngradeClosingReferences_Rewrites(t *testing.T) {
 	downgrade := map[string]string{
 		claimKey("o/r", 60):        "issue is a tracker",
-		claimKey("other/repo", 12): "issue has unchecked task items",
+		claimKey("other/repo", 12): "issue has unchecked task items that delegate work to other issues",
 	}
 	tests := []struct {
 		name string
@@ -139,8 +140,86 @@ func TestDowngradeClosingReferences_Rewrites(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := downgradeClosingReferences(tt.text, "o/r", downgrade); got != tt.want {
+			if got := downgradeClosingReferences(tt.text, "o/r", downgrade, false); got != tt.want {
 				t.Errorf("downgradeClosingReferences(%q) = %q, want %q", tt.text, got, tt.want)
+			}
+		})
+	}
+}
+
+// A rewritten reference must say so in the body it lands in: before #7156 the
+// only record of the rewrite was a WARN line in a container log, so a merged
+// "Refs #N" was indistinguishable from an agent's deliberate choice.
+func TestDowngradeClosingReferences_Annotates(t *testing.T) {
+	const reason = "issue is a tracker"
+	downgrade := map[string]string{claimKey("o/r", 60): reason}
+
+	t.Run("first rewritten reference carries the reason", func(t *testing.T) {
+		got := downgradeClosingReferences("## Related Issue\nCloses #60\n", "o/r", downgrade, true)
+		want := "## Related Issue\nRefs #60" + downgradeNote(reason) + "\n"
+		if got != want {
+			t.Errorf("annotated body = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("reason appears once per issue", func(t *testing.T) {
+		got := downgradeClosingReferences("Closes #60 and fixes #60", "o/r", downgrade, true)
+		if n := strings.Count(got, "closing keyword withheld"); n != 1 {
+			t.Errorf("note count = %d, want 1 (body: %q)", n, got)
+		}
+		if !strings.HasSuffix(got, "Refs #60") {
+			t.Errorf("second reference should be rewritten without a note, got %q", got)
+		}
+	})
+
+	t.Run("titles are rewritten without a note", func(t *testing.T) {
+		got := downgradeClosingReferences("fix: the thing (closes #60)", "o/r", downgrade, false)
+		if want := "fix: the thing (Refs #60)"; got != want {
+			t.Errorf("title = %q, want %q", got, want)
+		}
+	})
+
+	// The reason text quotes issue references of its own; wrapping it in a code
+	// span keeps GitHub from cross-referencing an unrelated issue.
+	t.Run("reason is wrapped in a code span", func(t *testing.T) {
+		note := downgradeNote("see kubestellar/hive#6781")
+		if !strings.Contains(note, "`see kubestellar/hive#6781`") {
+			t.Errorf("note does not code-span the reason: %q", note)
+		}
+	})
+}
+
+// The task list the policy templates mandate for an unsplittable finding must
+// NOT cost the PR its closing keyword (#7156). Only a list that delegates work
+// to other issues is a tracker.
+func TestHasUnfinishedDelegatedWork(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"no task list", "just prose about a bug", false},
+		{
+			"mandated acceptance criteria for one PR",
+			"## Recommendation\n\n- [ ] add the missing paren\n- [ ] tighten the test\n",
+			false,
+		},
+		{"prose item that merely mentions an issue", "- [ ] rename the field (see #318)", false},
+		{"unchecked delegating item", "- [ ] #4199 land the parser", true},
+		{"unchecked cross-repo delegating item", "* [ ] owner/repo#12", true},
+		{"all delegating items ticked", "- [x] #4199\n- [x] owner/repo#12\n", false},
+		{"one of several delegating items outstanding", "- [x] #4199\n- [ ] #4200\n", true},
+		{
+			"quoted policy example inside a fence does not count",
+			"The templates say:\n\n```markdown\n- [ ] #123 one box per deliverable\n```\n\nNothing outstanding.\n",
+			false,
+		},
+		{"indented delegating item still counts", "- [x] parent\n    - [ ] #77 child\n", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hasUnfinishedDelegatedWork(tt.body); got != tt.want {
+				t.Errorf("hasUnfinishedDelegatedWork(%q) = %v, want %v", tt.body, got, tt.want)
 			}
 		})
 	}
@@ -207,9 +286,24 @@ func TestIncompleteIssueReason_Classification(t *testing.T) {
 			"issue title marks it as a tracker or epic",
 		},
 		{
-			"unchecked task item",
-			&gh.Issue{Title: strp("work"), Body: strp("- [x] done\n* [ ] remaining")},
-			"issue has unchecked task items",
+			"unchecked task item delegating to another issue",
+			&gh.Issue{Title: strp("work"), Body: strp("- [x] #100 done\n* [ ] #101 remaining")},
+			"issue has unchecked task items that delegate work to other issues",
+		},
+		{
+			// #7156: the format every policy template mandates for an
+			// unsplittable finding must not disqualify its own PR from
+			// closing it.
+			"mandated acceptance-criteria checklist is not incomplete",
+			&gh.Issue{Title: strp("bug: missing paren"), Body: strp("## Recommendation\n\n- [ ] add the paren\n- [ ] tighten the test\n")},
+			"",
+		},
+		{
+			// #7156: the downgrade gate and the sweep must read a body the
+			// same way — a quoted policy example is not a task list.
+			"task list quoted inside a fenced block is not incomplete",
+			&gh.Issue{Title: strp("bug"), Body: strp("policy says:\n\n```\n- [ ] #123 one box per deliverable\n```\n")},
+			"",
 		},
 		{
 			"complete issue",

@@ -127,13 +127,30 @@ func TestPRRequestWatcher_QuarantinesArtifactClaimMismatch(t *testing.T) {
 
 func TestValidatePRRequestClaims_DowngradesIncompleteIssues(t *testing.T) {
 	tests := []struct {
-		name  string
-		issue map[string]any
+		name       string
+		issue      map[string]any
+		wantReason string
 	}{
-		{"unchecked task", map[string]any{"number": 60, "title": "work", "body": "- [x] first\n- [ ] remaining", "state": "open"}},
-		{"epic label", map[string]any{"number": 60, "title": "work", "body": "several phases", "state": "open", "labels": []map[string]string{{"name": "epic"}}}},
-		{"tracker title", map[string]any{"number": 60, "title": "[Tracker] program", "body": "children", "state": "open"}},
-		{"epic title", map[string]any{"number": 60, "title": "[EPIC] program", "body": "children", "state": "open"}},
+		{
+			"unchecked task delegating to another issue",
+			map[string]any{"number": 60, "title": "work", "body": "- [x] #100 first\n- [ ] #101 remaining", "state": "open"},
+			"issue has unchecked task items that delegate work to other issues",
+		},
+		{
+			"epic label",
+			map[string]any{"number": 60, "title": "work", "body": "several phases", "state": "open", "labels": []map[string]string{{"name": "epic"}}},
+			"issue is labeled as a tracker or epic",
+		},
+		{
+			"tracker title",
+			map[string]any{"number": 60, "title": "[Tracker] program", "body": "children", "state": "open"},
+			"issue title marks it as a tracker or epic",
+		},
+		{
+			"epic title",
+			map[string]any{"number": 60, "title": "[EPIC] program", "body": "children", "state": "open"},
+			"issue title marks it as a tracker or epic",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -146,8 +163,12 @@ func TestValidatePRRequestClaims_DowngradesIncompleteIssues(t *testing.T) {
 			if err != nil {
 				t.Fatalf("validatePRRequestClaims: %v", err)
 			}
-			if title != "Refs #60: partial work" || body != "Refs: #60\n\nDetails" {
-				t.Fatalf("downgraded title/body = %q / %q", title, body)
+			// The body names the withheld keyword and why (#7156); the title
+			// is rewritten bare, since a note does not belong in a title.
+			wantBody := "Refs: #60" + downgradeNote(tt.wantReason) + "\n\nDetails"
+			if title != "Refs #60: partial work" || body != wantBody {
+				t.Fatalf("downgraded title/body = %q / %q, want %q / %q",
+					title, body, "Refs #60: partial work", wantBody)
 			}
 		})
 	}
@@ -201,8 +222,14 @@ func TestValidatePRRequestClaims_DowngradesHumanFiledBugWithoutConfirmation(t *t
 	if err != nil {
 		t.Fatalf("validatePRRequestClaims: %v", err)
 	}
-	if body != "Refs #6500\n\nDetails" {
+	if !strings.HasPrefix(body, "Refs #6500") || strings.Contains(body, "Closes #6500") {
 		t.Fatalf("body was not downgraded (Closes # would let the App bot auto-close a maintainer bug on merge, and the reporter cannot reopen): got %q", body)
+	}
+	// The rewrite explains itself in the body so the maintainer reading the PR
+	// knows the reporter still has to confirm (#7156).
+	if !strings.Contains(body, "closing keyword withheld by the hive watcher") ||
+		!strings.Contains(body, humanFiledBugConfirmationMarker) {
+		t.Fatalf("downgraded body does not state the reason: %q", body)
 	}
 	if title != "fix copilot check" {
 		t.Fatalf("title mutated unexpectedly: %q", title)
