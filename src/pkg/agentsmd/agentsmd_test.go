@@ -250,7 +250,36 @@ func TestInjectionText(t *testing.T) {
 		t.Errorf("body should still be present: %q", bodyOnly)
 	}
 
-	// Empty config -> empty injection.
+	// #7159: the block must declare that the repository wins a conflict, and
+	// declare it BEFORE the rules it governs. Without this the repo's rules
+	// arrived as undifferentiated prose while hive's own prompt stated the same
+	// subjects as imperatives with a self-check attached, and the model
+	// followed the imperative every time — four dead-on-arrival PRs on
+	// projectbluefin repos in one night.
+	if !strings.Contains(out, injectionPrecedence) {
+		t.Errorf("injection does not state precedence: %q", out)
+	}
+	if hdr, prec := strings.Index(out, injectionHeader), strings.Index(out, injectionPrecedence); prec < hdr {
+		t.Errorf("precedence should follow the header, got header at %d and precedence at %d", hdr, prec)
+	}
+	if prec, body := strings.Index(out, injectionPrecedence), strings.Index(out, "Do the thing carefully."); prec > body {
+		t.Errorf("precedence must precede the repo's own rules, got precedence at %d and body at %d", prec, body)
+	}
+	// The carve-outs are the reason this is safe to state so forcefully: an
+	// AGENTS.md cannot license merging your own PR, and cannot override an
+	// instruction written for this specific task.
+	for _, want := range []string{"take precedence", "never merge your own PR", "explicit instruction in this assignment"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("precedence text is missing %q: %q", want, out)
+		}
+	}
+	// Body-only injections carry it too — most AGENTS.md files request no skills.
+	if !strings.Contains(bodyOnly, injectionPrecedence) {
+		t.Errorf("body-only injection does not state precedence: %q", bodyOnly)
+	}
+
+	// Empty config -> empty injection. A precedence statement with no rules
+	// under it would be noise, so nothing must be emitted at all.
 	if got := (&AgentsConfig{}).InjectionText(nil); got != "" {
 		t.Errorf("empty config should inject nothing, got %q", got)
 	}

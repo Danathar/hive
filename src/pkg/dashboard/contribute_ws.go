@@ -5917,18 +5917,37 @@ func buildTaskPromptBodyForAccess(repoFull, issueRef, title, sourceHint, baseBra
 	// assignment slot stayed held. Spell out an actual clone into that known
 	// directory so there is a concrete first step rather than an implied one.
 	baseHint := fmt.Sprintf(
-		// An unresolved base is not a licence to inherit one. Name the only
-		// trustworthy substitute — the upstream repository's own default
-		// branch, read from the clone rather than from whatever the last task
-		// left behind — and keep the "do not use the branch you find" clause,
-		// which is the load-bearing half in both wordings.
+		// An unresolved base is not a licence to inherit one. Keep the "do not
+		// use the branch you find" clause, which is the load-bearing half in
+		// both wordings, but ASK THE REPOSITORY rather than asserting its
+		// answer (hivecommons/hive#7159).
+		//
+		// This wording used to say "resolve <repo>'s own default branch … and
+		// confirm the PR's base is that branch before you report done" — an
+		// imperative with a self-check attached, stating a fact about a repo
+		// hive cannot see. It is wrong for any repository on a promotion model,
+		// where the default branch is the RELEASED line and PRs land on an
+		// integration branch. projectbluefin/bluefin says so in its AGENTS.md
+		// ("All pull requests target `testing`. Never open a content PR against
+		// `main`") and hive agents opened #1275 and #1276 against main anyway,
+		// failing its base-branch gate: the agents obeyed the imperative with
+		// the self-check over the document with neither. #4928 and #6081 were
+		// the same assumption at earlier stages — each fix replaced one wrong
+		// assertion with a better one. The remaining gap was asserting at all.
+		//
+		// The verification step survives, pointed at the repository's
+		// requirement instead of at hive's guess: an agent never asked for the
+		// base back cannot notice it inherited the wrong one (#5729).
 		"Do not assume the branch the checkout is currently on is the right base: it may "+
-			"be left over from a previous task. Resolve %s's own default branch "+
-			"('gh repo view %s --json defaultBranchRef'), run 'git fetch upstream', and "+
-			"start your work branch from it with "+
-			"'git checkout -b <your-branch> upstream/<default-branch>'. Open the PR "+
-			"against the same branch, and confirm the PR's base is that branch before "+
-			"you report done. ",
+			"be left over from a previous task. Use the base %s itself requires — check its "+
+			"AGENTS.md, CONTRIBUTING and pull-request template for a stated target branch, "+
+			"since a repository on a promotion model takes PRs on an integration branch "+
+			"rather than on its released default — and only when nothing there names one, "+
+			"fall back to its default branch ('gh repo view %s --json defaultBranchRef'). "+
+			"Run 'git fetch upstream' and start your work branch from that base with "+
+			"'git checkout -b <your-branch> upstream/<base-branch>'. Open the PR against "+
+			"the same branch, and confirm before you report done that its base is the branch "+
+			"the repository asks for. ",
 		repoFull, repoFull)
 	if b := strings.TrimSpace(baseBranch); b != "" {
 		baseHint = fmt.Sprintf(
@@ -5971,6 +5990,22 @@ func buildTaskPromptBodyForAccess(repoFull, issueRef, title, sourceHint, baseBra
 		"You are a contributor to the %s hive. Work on issue %s: \"%s\".%s "+
 			"%sThen 'cd' into that checkout, read the issue, "+
 			"understand what's needed, and take action. "+
+			// #7159: precedence. Everything else in this prompt is hive's
+			// generic default for a repository hive cannot see; the repo states
+			// its own rules in AGENTS.md. Four bot PRs died in one night on
+			// projectbluefin repos — two on a base-branch gate, two on
+			// conventional-commit title gates — because nothing told the agent
+			// which side wins, and hive's wording was the more forceful of the
+			// two every time. On this path the repo's AGENTS.md is not even
+			// injected (only the scheduler path calls primeAgentsMd), so the
+			// prompt has to send the agent to read it.
+			"Read the repository's own AGENTS.md and CONTRIBUTING before you start, and "+
+			"follow them wherever they conflict with these instructions — PR title format "+
+			"(many repositories enforce Conventional Commits and reject a title carrying a "+
+			"bracketed prefix), commit message conventions, test and lint commands, review "+
+			"etiquette. Two things they do not override: hive's safety rules (never merge "+
+			"your own PR, never bypass a write gate), and a branch or requirement this "+
+			"assignment names explicitly below. "+
 			// #5729: the base branch. Everything above deliberately REUSES a
 			// checkout across tasks, which is exactly what makes the branch
 			// left on disk the previous task's answer rather than this one's.

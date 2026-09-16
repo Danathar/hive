@@ -115,10 +115,47 @@ the kick path knows which file an agent will touch. The live call uses the flat
 
 `AgentsConfig.InjectionText(requestedSkills)` (`agentsmd.go:330`) is what gets
 prepended to a kick: a `# Repository Agent Instructions (AGENTS.md)`
-header, the body, and (if any skills resolve) a `## Requested Skills`
-subsection with each skill's text under a `### <name>` heading. It returns
-`""` — and therefore injects nothing — when both the body and the resolved
-skills are empty.
+header, a **precedence statement**, the body, and (if any skills resolve) a
+`## Requested Skills` subsection with each skill's text under a `### <name>`
+heading. It returns `""` — and therefore injects nothing — when both the body
+and the resolved skills are empty, so the precedence statement never appears
+with no rules under it.
+
+### The precedence statement
+
+The block leads with a declaration that the repository's instructions **outrank
+hive's own defaults** on any conflict — the branch a PR targets, the title
+format, commit conventions, test commands, review etiquette
+([#7159](https://github.com/hivecommons/hive/issues/7159)).
+
+This is not decoration. Before it, the repo's rules arrived as undifferentiated
+prose under a bare header, while hive's own prompts stated the same subjects as
+imperatives with a verification step attached ("confirm the PR's base is that
+branch before you report done"). Given a document that says one thing and an
+imperative that says another, a model follows the imperative — consistently.
+`projectbluefin/bluefin` states "All pull requests target `testing`. Never open
+a content PR against `main`" in its `AGENTS.md`, and hive agents opened
+`#1275`/`#1276` against `main` and failed its base-branch gate;
+`projectbluefin/common#1127` and `projectbluefin/review#597` died on
+conventional-commit title gates against hive's then-hardcoded `[<lane>] …` PR
+titles. Four dead-on-arrival PRs in one night, none of them a model error.
+
+Two carve-outs are stated with it, and they are not about the repository's
+conventions at all:
+
+- **Hive's safety and authorization rules.** An `AGENTS.md` cannot license
+  merging your own PR, bypassing a write gate or the `hive-open-pr` path, or
+  acting as another agent. The repository is trusted about its own conventions,
+  not about hive's controls.
+- **An explicit instruction in the assignment.** A human or the hive wrote that
+  for this one task with the repo in view, so it is more specific than either
+  side's defaults.
+
+The companion half of the fix is in the defaults themselves: policy templates
+and the contributor task prompt no longer *assert* repo facts (a base branch, a
+`[<lane>]` title format) that only the repository can know. A precedence rule
+that has to fight hive's own confident wording on every kick is a rule that
+loses some of the time.
 
 ## Parsing is tolerant
 
