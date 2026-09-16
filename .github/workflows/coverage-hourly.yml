@@ -169,11 +169,23 @@ jobs:
             # github.com/hivecommons/hive. Record their current ceilings so the
             # parser fix can gate new packages (pkg/effects, pkg/hub/spoke)
             # without turning unrelated backlog into a blocker.
-            [mutation]=86   # 86.7% on PR #6076
-            [webstatic]=88  # 88.9% on PR #6076
-            [automerge]=88  # 88.6% on PR #6076
+            [convergence/mutation]=86   # 86.7% on PR #6076
+            [dashboard/webstatic]=88  # 88.9% on PR #6076
+            [github/automerge]=88   # 88.6% on PR #6076
             [mint]=89       # 89.1% on PR #6076
             [turn]=87       # 87.1% on PR #6076
+
+            # ── Ratchet turned for #7146 ─────────────────────────────────────
+            # spoke had NO entry, so it sat on the 90 default and flapped across
+            # it (run 35026215085 failed at 89.6% with green runs either side and
+            # no spoke change between them) — the classic signature of timing
+            # dependent paths drifting in and out of the profile. #7146 proposed
+            # dropping spoke to 89 to quiet the noise; that would turn the
+            # ratchet the wrong way. #7130 covered those paths instead, and spoke
+            # now measures a flat 96.3% over five consecutive runs with the gate's
+            # own command (`-short -count=1`, no -race) — zero variance, so the
+            # flap is gone at the source. Floored at what it holds with headroom.
+            [spoke]=95       # 96.3% on 2026-09-16 after #7130; was unfloored/flapping
 
             # ── ./cmd/... floors (#4701) ─────────────────────────────────────
             # CI never ran ./cmd/... at all before #4701 — four cmd/bd tests
@@ -208,11 +220,19 @@ jobs:
 
           # Floor-map key for a package import path: cmd packages are keyed
           # with a "cmd/" prefix so cmd/hivectl can never resolve to
-          # pkg/hivectl's floor (#4701); everything else keeps the historical
-          # bare-basename key.
+          # pkg/hivectl's floor (#4701).
+          #
+          # pkg packages are keyed by their full path below pkg/ for the same
+          # reason: a bare basename makes every nested package an alias for the
+          # top-level one that shares its name, so they silently share a floor.
+          # v5 is the live example -- it carries both pkg/spoke (96.3%) and
+          # pkg/hub/spoke (90.7%), which both keyed to "spoke", so the [spoke]=95
+          # floor #7146 set for pkg/spoke would have been enforced against
+          # pkg/hub/spoke too and failed it. Keys are now "spoke" vs "hub/spoke".
           floor_key() {
             case "$1" in
               */cmd/*) echo "cmd/${1##*/}" ;;
+              */pkg/*) echo "${1##*/pkg/}" ;;
               *)       echo "${1##*/}" ;;
             esac
           }
