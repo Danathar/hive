@@ -295,11 +295,68 @@ func TestBuildTaskPrompt_FallbackWordingCarriesTheFullProcedure(t *testing.T) {
 	for _, want := range []string{
 		"defaultBranchRef",
 		"git fetch upstream",
-		"git checkout -b <your-branch> upstream/<default-branch>",
-		"confirm the PR's base",
+		"git checkout -b <your-branch> upstream/<base-branch>",
+		"confirm before you report done",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("fallback wording is missing %q; got: %q", want, prompt)
 		}
+	}
+}
+
+// #7159: the fallback wording must ASK the repository for its base rather than
+// assert that the base is the repository default. bluefin#1275 and #1276 failed
+// a base-branch gate that its AGENTS.md states plainly ("All pull requests
+// target `testing`"), because the prompt told the agent the default branch was
+// the answer and attached a self-check to that claim. The repository's own
+// statement has to be consulted first, and the default branch has to be the
+// fallback it is.
+func TestBuildTaskPrompt_FallbackDefersToTheRepositorysOwnBase(t *testing.T) {
+	prompt := promptForRepo(t, "v4", "Danathar/arch-bootc", "the installer drops a mount option")
+
+	for _, want := range []string{
+		"Use the base Danathar/arch-bootc itself requires",
+		"AGENTS.md, CONTRIBUTING and pull-request template",
+		"promotion model",
+		"only when nothing there names one, fall back to its default branch",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("fallback wording does not defer to the repository: missing %q; got: %q", want, prompt)
+		}
+	}
+	// The old assertion, which stated hive's guess as the answer.
+	if strings.Contains(prompt, "Resolve Danathar/arch-bootc's own default branch") {
+		t.Errorf("prompt still asserts the default branch as the base; got: %q", prompt)
+	}
+}
+
+// #7159: every task prompt — named base or not — must tell the agent that the
+// repository's own instructions outrank hive's. On the contributor path the
+// repo's AGENTS.md is not injected at all (only the scheduler calls
+// primeAgentsMd), so the prompt is the only place the agent learns to read it.
+func TestBuildTaskPrompt_StatesRepositoryPrecedence(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		repo string
+	}{
+		{"named base (the hive's own repo)", "hivecommons/hive"},
+		{"fallback base (a foreign repo)", "Danathar/arch-bootc"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prompt := promptForRepo(t, "v4", tc.repo, "a plain title")
+			for _, want := range []string{
+				"Read the repository's own AGENTS.md and CONTRIBUTING before you start",
+				"follow them wherever they conflict with these instructions",
+				"Conventional Commits",
+				// The carve-outs: safety rules and an explicitly named
+				// requirement are not the repo's to override.
+				"never merge your own PR",
+				"this assignment names explicitly",
+			} {
+				if !strings.Contains(prompt, want) {
+					t.Errorf("prompt is missing precedence text %q; got: %q", want, prompt)
+				}
+			}
+		})
 	}
 }
