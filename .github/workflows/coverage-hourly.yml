@@ -169,9 +169,9 @@ jobs:
             # github.com/hivecommons/hive. Record their current ceilings so the
             # parser fix can gate new packages (pkg/effects, pkg/hub/spoke)
             # without turning unrelated backlog into a blocker.
-            [mutation]=86   # 86.7% on PR #6076
-            [webstatic]=88  # 88.9% on PR #6076
-            [automerge]=88  # 88.6% on PR #6076
+            [convergence/mutation]=86   # 86.7% on PR #6076
+            [dashboard/webstatic]=88  # 88.9% on PR #6076
+            [github/automerge]=88   # 88.6% on PR #6076
             [mint]=89       # 89.1% on PR #6076
             [turn]=87       # 87.1% on PR #6076
 
@@ -220,13 +220,20 @@ jobs:
 
           # Floor-map key for a package import path: cmd packages are keyed
           # with a "cmd/" prefix so cmd/hivectl can never resolve to
-          # pkg/hivectl's floor (#4701); everything else keeps the historical
-          # bare-basename key.
+          # pkg/hivectl's floor (#4701).
+          #
+          # pkg packages are keyed by their full path below pkg/ for the same
+          # reason: a bare basename makes every nested package an alias for the
+          # top-level one that shares its name, so they silently share a floor.
+          # v5 is the live example -- it carries both pkg/spoke (96.3%) and
+          # pkg/hub/spoke (90.7%), which both keyed to "spoke", so the [spoke]=95
+          # floor #7146 set for pkg/spoke would have been enforced against
+          # pkg/hub/spoke too and failed it. Keys are now "spoke" vs "hub/spoke".
           floor_key() {
             case "$1" in
-              */cmd/*)         echo "cmd/${1##*/}" ;;
-              */pkg/hub/spoke) echo "hub/spoke" ;;  # v5-only; must not share pkg/spoke's [spoke] floor
-              *)               echo "${1##*/}" ;;
+              */cmd/*) echo "cmd/${1##*/}" ;;
+              */pkg/*) echo "${1##*/pkg/}" ;;
+              *)       echo "${1##*/}" ;;
             esac
           }
 

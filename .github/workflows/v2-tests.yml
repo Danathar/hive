@@ -831,9 +831,9 @@ jobs:
             # github.com/hivecommons/hive. Record their current ceilings so the
             # parser fix can gate new packages (pkg/effects, pkg/hub/spoke)
             # without turning unrelated backlog into a blocker.
-            [mutation]=86   # 86.7% on PR #6076
-            [webstatic]=88  # 88.9% on PR #6076
-            [automerge]=88  # 88.6% on PR #6076
+            [convergence/mutation]=86   # 86.7% on PR #6076
+            [dashboard/webstatic]=88  # 88.9% on PR #6076
+            [github/automerge]=88   # 88.6% on PR #6076
             [mint]=89       # 89.1% on PR #6076
             [turn]=87       # 87.1% on PR #6076
 
@@ -915,12 +915,15 @@ jobs:
             | LC_ALL=C sort -u > pkg-states.txt
 
           # Floor-map key: cmd packages get a "cmd/" prefix so cmd/hivectl can
-          # never resolve to pkg/hivectl's floor; pkg keeps the bare basename.
+          # never resolve to pkg/hivectl's floor; pkg packages are keyed by
+          # their full path below pkg/ so a nested package can never alias the
+          # top-level one sharing its name (v5 has both pkg/spoke and
+          # pkg/hub/spoke). See coverage-hourly.yml for the full rationale.
           floor_key() {
             case "$1" in
-              */cmd/*)         echo "cmd/${1##*/}" ;;
-              */pkg/hub/spoke) echo "hub/spoke" ;;  # v5-only; must not share pkg/spoke's [spoke] floor
-              *)               echo "${1##*/}" ;;
+              */cmd/*) echo "cmd/${1##*/}" ;;
+              */pkg/*) echo "${1##*/pkg/}" ;;
+              *)       echo "${1##*/}" ;;
             esac
           }
 
