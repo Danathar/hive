@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-16 (v4.39.2)
+
+### Fixed
+
+- Fixed streaming LLM responses being severed mid-generation after 60s. The MITM proxy armed a single absolute write deadline around the whole response relay, which is correct for a small buffered body but wrong for a stream: `/v1/messages` (Anthropic-shaped) completions do not match the OpenAI-style completions path, so every Claude turn took the plain relay branch and was cut at exactly `httpWriteTimeout` even while tokens were still flowing. Agents saw "Response was interrupted due to a server error", retried the same long turn, and were cut again at the same mark — livelocking them on their longest turns. Response relays now use a rolling per-write deadline (`stallBoundedWriter`, the write-side mirror of the existing `stallBoundedBody`), so the bound is "no progress for 60s" instead of "must finish within 60s"; a client that genuinely stops draining is still released within one stall window.
+
 ## 2026-09-16 (v4.39.1)
 
 ### Fixed
