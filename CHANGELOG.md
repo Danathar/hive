@@ -11,6 +11,39 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-16 (v4.38.1)
+
+### Fixed
+
+- Stopped the copilot hang detector from destroying kicks while they are being
+  typed. Delivering a kick is not instantaneous — `deliverKickLocked` types the
+  message as 400-rune chunks, so a 37KB governor kick occupies the pane for
+  roughly 100 seconds, during which the CLI's idle chrome is scrolled out of
+  the captured pane. The "copilot hung with no CLI prompt" detector keys on
+  precisely that absence, so it read a healthy mid-delivery agent as dead: on
+  the scanner agent it fired 68 seconds into a kick, recreated the tmux
+  session, and the remaining chunks landed nowhere — eleven consecutive
+  `tmux send-keys failed` lines, then a restart, then `audit: agent kicked`
+  logged as if the 37,564-character prompt had arrived. It had not, and the
+  agent sat at `Session: 0 AIC used` doing nothing until the next cadence.
+  `interruptions_total` had reached 5, so five consecutive governor kicks were
+  eaten by the detector meant to rescue the agent. Agents now carry a
+  `kickDelivering` flag held for the duration of delivery, and the three pane
+  actions that would corrupt or destroy an in-flight kick — the hang
+  diagnostic, the fatal-TLS restart, and the transient-error retry nudge, which
+  types into the pane — all stand down while it is set. The login-triggered
+  restart already had an equivalent kick grace; this closes the remaining
+  paths.
+- `hive-open-issue.md` now documents the third placeholder-enforcement point
+(`CreateIssue`'s `validateIssueTemplateFilled`) and the deliberate title/body
+asymmetry, which were undocumented after #7141. While documenting them, two
+real defects surfaced and are fixed: `CreateIssue` now consults the shared
+`pkg/issueshape` validator for bodies, so a `<analysis>`/`<fix>` skeleton body
+can no longer slip past that path; and `pkg/issueshape` no longer mistakes
+ordinary prose containing comparison operators (`a < b and c > d`) for an
+unfilled template placeholder.
+- The pull-request coverage gate enforces coverage floors again ([#7193](https://github.com/hivecommons/hive/issues/7193)). The `coverage` job selected this module's packages with the pre-rename module path `github.com/kubestellar/hive`, but the module is `github.com/hivecommons/hive`, so both of its filters matched nothing: the job scored zero packages, printed `Total coverage (./pkg/...): unavailable`, and passed on every pull request. Every per-package floor, the default 90% floor, and the `NO TEST FILES` and `TESTS FAILING` checks were silently unenforced for the whole post-rename window, so a package could lose its tests or fall to any coverage level without the gate objecting. Packages are now matched on their `/pkg/` path segment so a future rename cannot re-break the gate, and the job fails closed when it parses no coverage totals or no package states, because an empty filter result is otherwise indistinguishable from a clean run.
+
 ## 2026-09-16 (v4.38.0)
 
 ### Added
