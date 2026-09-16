@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-16 (v4.39.0)
+
+### Added
+
+- Hive-opened PRs now credit the human who asked for them ([#7208](https://github.com/hivecommons/hive/issues/7208)). The `— hive:` attribution trailer and the `agent_pr_created` audit entry carry `requested_by=@login`, resolved from the PR's rationale issues (the `Closes`/`Refs` citations and the request's declared issue list, in the same order the self-authorization gate reads them). Only a human opener is credited: an issue the hive filed itself, or one that cannot be read, adds nothing rather than crediting the bot. The trailer respects the existing `governor.attribution_trailer` toggle; the audit record is unconditional.
+
 ## 2026-09-16 (v4.38.3)
 
 ### Fixed
