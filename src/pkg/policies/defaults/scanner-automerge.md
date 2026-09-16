@@ -82,7 +82,7 @@ ISSUES:
 REPO: <org>/<repo>
 
 Steps:
-1. git worktree add /tmp/scanner-fix-<lowest-number> -b scanner/fix-<lowest-number> origin/<target-branch> (the branch the PR will target — the repository default unless the work names another; never assume `main`)
+1. git worktree add /tmp/scanner-fix-<lowest-number> -b scanner/fix-<lowest-number> origin/<target-branch> (the branch the PR will target — the base this repository requires per its AGENTS.md, CONTRIBUTING or pull-request template, falling back to its default branch only when nothing names one; never assume `main`)
 2. Read each issue: gh issue view <number> --repo <org>/<repo>
 3. Verify the bugs exist in code — read files, confirm the patterns
 4. If any issue is invalid or already fixed: comment with evidence, close as "not planned"
@@ -93,7 +93,7 @@ Steps:
 9. Run `src/scripts/issue-coauthor.sh --amend <n>` once for each issue the PR resolves; exit `0` with empty output means no human to credit, and a resolution failure should warn but not block the fix
 10. git push -u origin scanner/fix-<lowest-number>
 11. Open the PR request with **`hive-open-pr`** (the hive opens it as the App bot):
-    `hive-open-pr --repo <org>/<repo> --head scanner/fix-<lowest-number> --title "[scanner] fix: <short description>" --body "Closes #<n1>, Closes #<n2>, Closes #<n3>" --issues <n1>,<n2>,<n3>` (repeat Closes for each issue: ask does merging this PR leave anything for it to track? If nothing, use Closes; use Refs #<n> only for an epic/tracker or a deliberately partial fix, and say on the same line what remains and why).
+    `hive-open-pr --repo <org>/<repo> --head scanner/fix-<lowest-number> --base <target-branch> --title "fix: <short description>" --body "Closes #<n1>, Closes #<n2>, Closes #<n3>" --issues <n1>,<n2>,<n3>` (repeat Closes for each issue: ask does merging this PR leave anything for it to track? If nothing, use Closes; use Refs #<n> only for an epic/tracker or a deliberately partial fix, and say on the same line what remains and why). Title the PR the way the TARGET repository titles PRs (read its AGENTS.md, CONTRIBUTING and recent merged PR titles; many repositories enforce Conventional Commits and reject a `[<lane>]` prefix on the first character, which is why hive no longer prescribes one for PRs — the prefix stays required on ISSUE titles, which the hive routes by lane), and pass `--base` explicitly so it lands on the branch that repository requires.
     `src/scripts/issue-coauthor.sh` is the single source of truth for issue-author attribution. It skips bot/self authors, and this is attribution only, not DCO — never add `Signed-off-by:` for an issue author.
     Do NOT use the GitHub MCP `create_pull_request` / `create_pull_request_with_copilot`, and do NOT run raw `gh pr create` — both author the PR as the login user. `hive-open-pr` is the only sanctioned way to open a PR; the hive opens it with the App token so it is authored by the App bot. `gh pr create` is auto-redirected to `hive-open-pr` for you, but call `hive-open-pr` directly.
 12. git worktree remove /tmp/scanner-fix-<lowest-number>

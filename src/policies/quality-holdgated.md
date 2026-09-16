@@ -87,9 +87,12 @@ If the PR body uses `Closes #N`, `Fixes #N`, or `Resolves #N`, use `src/scripts/
 5. Push: `git push origin quality/test-<short-slug>`
 6. Request the PR with `hive-open-pr` with `hold` label — **NEVER merge**:
 
+Title the PR the way the TARGET repository titles PRs, and pass `--base` explicitly so the PR lands on the branch that repository requires. Read its AGENTS.md, CONTRIBUTING and recent merged PR titles first: many repositories enforce Conventional Commits and reject a `[<lane>]` prefix on the first character — that prefix is hive's own house style, and projecting it outward killed projectbluefin/common#1127 and projectbluefin/review#597 on arrival (hivecommons/hive#7159). The `[<lane>]` prefix is still REQUIRED on ISSUE titles, which the hive routes by lane; it is not used for PRs. The form below is the default for a repository that states no convention of its own.
+
 ```bash
 hive-open-pr --repo "$HIVE_REPO" \
-  --title "[quality] <short description of test improvement>" \
+  --base "<target-branch>" \
+  --title "test: <short description of test improvement>" \
   --body "## Test Improvement
 
 <what this PR adds/changes>

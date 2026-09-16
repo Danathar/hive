@@ -48,6 +48,22 @@ hive-open-pr --repo <owner/repo> --head <branch> [--base <branch>] \
 `--repo`, `--head`, and `--title` must resolve or the script exits `2`. Both
 `--flag value` and `--flag=value` forms work.
 
+**Pass `--base`, and take the title from the target repository**
+([#7159](https://github.com/hivecommons/hive/issues/7159)). Both defaults here
+are hive's guesses about a repository it cannot see:
+
+- The default branch is the wrong base for any repository on a promotion model,
+  where the default branch is the *released* line and PRs land on an
+  integration branch. `projectbluefin/bluefin` says so in its `AGENTS.md` and
+  its CI enforces it; two hive PRs failed that gate. Read the repo's
+  `AGENTS.md`, `CONTRIBUTING` and pull-request template, and pass what they
+  name.
+- A title is free-form here but not in the repository receiving it. A
+  `[<lane>]` prefix is hive's own house style; repositories enforcing
+  Conventional Commits reject it on the first character. The prefix remains
+  **required on issue titles**, which the hive routes by lane
+  (`pkg/classify.classifyLane`), and is not used on PRs.
+
 **An empty body is refused**, loudly, with exit `2` and no request written.
 Every shipped policy requires a real PR body; an empty one at this point means
 the body was lost on the way in — the observed failure was `--body-file` being

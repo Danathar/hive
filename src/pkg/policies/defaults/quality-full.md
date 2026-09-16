@@ -78,9 +78,12 @@ If the PR body uses `Closes #N`, `Fixes #N`, or `Resolves #N`, use `src/scripts/
 4. Run `src/scripts/issue-coauthor.sh --amend <issue-number>` when this resolves an issue
 5. Push the branch, then request the PR with `hive-open-pr` — **NEVER merge it yourself**:
 
+Title the PR the way the TARGET repository titles PRs, and pass `--base` explicitly so the PR lands on the branch that repository requires. Read its AGENTS.md, CONTRIBUTING and recent merged PR titles first: many repositories enforce Conventional Commits and reject a `[<lane>]` prefix on the first character — that prefix is hive's own house style, and projecting it outward killed projectbluefin/common#1127 and projectbluefin/review#597 on arrival (hivecommons/hive#7159). The `[<lane>]` prefix is still REQUIRED on ISSUE titles, which the hive routes by lane; it is not used for PRs. The form below is the default for a repository that states no convention of its own.
+
 ```bash
 hive-open-pr --repo "$HIVE_REPO" \
-  --title "[quality] <short description of test improvement>" \
+  --base "<target-branch>" \
+  --title "test: <short description of test improvement>" \
   --body "## Test Improvement\n\n<what this PR adds/changes>\n\nCloses #<issue-number> (ask: does merging this PR leave anything for issue #<issue-number> to track? If nothing, use Closes — GitHub closes it on merge. Use Refs #<issue-number> only for an epic/tracker or a deliberately partial fix, and say on the same line what remains and why)\n\n---\n*Filed by quality agent (ACMM L4/L6 — full mode)*" \
   --issues <issue-number> \
   --label "quality,testing"
