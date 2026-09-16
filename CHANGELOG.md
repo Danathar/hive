@@ -11,6 +11,18 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-16 (v4.39.2)
+
+### Fixed
+
+- Fixed streaming LLM responses being severed mid-generation after 60s. The MITM proxy armed a single absolute write deadline around the whole response relay, which is correct for a small buffered body but wrong for a stream: `/v1/messages` (Anthropic-shaped) completions do not match the OpenAI-style completions path, so every Claude turn took the plain relay branch and was cut at exactly `httpWriteTimeout` even while tokens were still flowing. Agents saw "Response was interrupted due to a server error", retried the same long turn, and were cut again at the same mark — livelocking them on their longest turns. Response relays now use a rolling per-write deadline (`stallBoundedWriter`, the write-side mirror of the existing `stallBoundedBody`), so the bound is "no progress for 60s" instead of "must finish within 60s"; a client that genuinely stops draining is still released within one stall window.
+
+## 2026-09-16 (v4.39.1)
+
+### Fixed
+
+- The CI runner image can now carry the toolchain instead of fetching it per job ([#7206](https://github.com/hivecommons/hive/issues/7206)). `src/deploy/ci-runners/Dockerfile` bakes `gcc`, `libc6-dev` and `tmux` into the ARC runner image, removing the dependency behind the recurring apt-egress failures (#6648 → #6870 → #6935 → #7124 → #7201). Those were closed four times and returned every time, because each fix softened the symptom rather than removing the need for apt: #7009's offline `.deb` cache is evicted within hours — the repo sits at 9.99 GB of its 10 GB Actions cache ceiling, buildkit blobs are 96.6% of that, and 6.57 GB were written in a single day — so `-race` shards are forced back onto the Ubuntu mirrors. No workflow change is required: `ci-install-tool.sh` already no-ops when a tool is present, so the zero-network path is taken as soon as pods run the image. The manifests are operator-applied, so this ships the reviewable definition, a rollback that leaves CI working, and tests pinning the toolchain, the in-build verification, the non-root final user, and the apt mirror/suite agreement with `apt-mirror-configmap.yaml`.
+
 ## 2026-09-16 (v4.39.0)
 
 ### Added
