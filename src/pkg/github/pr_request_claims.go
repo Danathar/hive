@@ -41,7 +41,49 @@ var titleArtifactRules = []titleArtifactRule{
 	{name: "migration", titleMatch: regexp.MustCompile(`(?i)\bmigrations?\b`), fileMatch: isMigrationFile},
 }
 
-var uncheckedTaskItemRE = regexp.MustCompile(`(?m)^\s*[-*+]\s*\[\s\]`)
+// delegatedTaskSubjectRE matches the SUBJECT of a task-list item that hands its
+// work to another issue — "#4199", "owner/repo#12". Anchored at the start of the
+// item text, exactly like trackerTaskListRe (client.go), because that is the
+// form GitHub renders as a tracked task list: it is a structural convention the
+// author opted into, not a phrase they happened to write. A prose item that
+// merely mentions an issue ("rename the field (see #318)") is not delegation.
+var delegatedTaskSubjectRE = regexp.MustCompile(`^(?:[\w.-]+/[\w.-]+)?#\d+\b`)
+
+// hasUnfinishedDelegatedWork reports whether body carries an UNCHECKED
+// task-list item whose subject is another issue — i.e. the issue is a
+// multi-phase plan that tracks work living somewhere else, so merging one PR
+// cannot finish it.
+//
+// This is deliberately narrower than "the body contains any `- [ ]`"
+// (hivecommons/hive#7156). All 18 policy templates under pkg/policies/defaults
+// instruct the filing agent that an unsplittable finding MUST carry a `- [ ]`
+// task list as its completion criterion — so the broad test downgraded the
+// closing keyword on precisely the issue format the hive mandates for itself,
+// and the compensating task-list sweep could not recover it because nothing in
+// the tree ever ticks a box. A definition-of-done checklist for one PR is not
+// a tracker; a list of issue references is.
+//
+// Genuine trackers keep their downgrade: via the epic/tracker/meta-tracker
+// labels, the "[epic]"/"[tracker]" title prefixes and IsTrackerIssue (three or
+// more issue-referencing items) in incompleteIssueReason, and via this function
+// for the one- and two-item delegating lists those three miss.
+//
+// Boxes inside fenced code blocks do not count, matching countTaskListBoxes in
+// the sweep (task_list_sweep.go). The two scanners disagreeing was its own bug:
+// an issue that merely QUOTED the policy's own `- [ ]` example was downgraded
+// for the quote, while the sweep that was supposed to close it ignored the same
+// line. Both now read a body the same way, through listTaskListItems.
+func hasUnfinishedDelegatedWork(body string) bool {
+	for _, item := range listTaskListItems(body) {
+		if item.Checked {
+			continue
+		}
+		if delegatedTaskSubjectRE.MatchString(item.Text) {
+			return true
+		}
+	}
+	return false
+}
 
 // validatePRRequestBody runs the cheap, local body checks — no API calls — so
 // they sit before any gate that spends GitHub quota. Both rejections are
@@ -174,7 +216,10 @@ func (c *Client) validatePRRequestClaims(ctx context.Context, req PRRequest) (st
 	if len(downgrade) == 0 {
 		return title, body, nil
 	}
-	return downgradeClosingReferences(title, defaultRepo, downgrade), downgradeClosingReferences(body, defaultRepo, downgrade), nil
+	// The title is rewritten without the note: a one-line title has no room for
+	// a reason, and the note belongs where a reviewer reads the reference.
+	return downgradeClosingReferences(title, defaultRepo, downgrade, false),
+		downgradeClosingReferences(body, defaultRepo, downgrade, true), nil
 }
 
 func (c *Client) prRequestRepo(repo string) (string, string) {
@@ -204,8 +249,8 @@ func incompleteIssueReason(issue *gh.Issue) string {
 	if IsTrackerIssue(issue.GetTitle(), labels, issue.GetBody()) {
 		return "issue is a tracker"
 	}
-	if uncheckedTaskItemRE.MatchString(issue.GetBody()) {
-		return "issue has unchecked task items"
+	if hasUnfinishedDelegatedWork(issue.GetBody()) {
+		return "issue has unchecked task items that delegate work to other issues"
 	}
 	return ""
 }
@@ -336,10 +381,22 @@ func hasReporterConfirmation(issue *gh.Issue) bool {
 	return false
 }
 
-func downgradeClosingReferences(text, defaultRepo string, downgrade map[string]string) string {
+// downgradeClosingReferences rewrites every closing keyword in text to "Refs"
+// for the issues named in downgrade. When annotate is true the FIRST rewritten
+// reference for each issue also carries the reason inline, so a maintainer
+// reading the opened PR can see that the issue will not close and why
+// (hivecommons/hive#7156). Before that, the only record was a WARN line in a
+// container log with a day or two of retention, and a merged "Refs #N" was
+// indistinguishable from an agent that deliberately chose not to close.
+//
+// The reason is wrapped in backticks: reasons quote issue references
+// themselves, and GitHub does not create a cross-reference from text inside a
+// code span, so the note cannot spam an unrelated issue with mentions.
+func downgradeClosingReferences(text, defaultRepo string, downgrade map[string]string, annotate bool) string {
 	if text == "" {
 		return text
 	}
+	annotated := make(map[string]bool, len(downgrade))
 	return claimRefPattern.ReplaceAllStringFunc(text, func(match string) string {
 		parts := claimRefPattern.FindStringSubmatch(match)
 		if len(parts) < 4 {
@@ -353,11 +410,26 @@ func downgradeClosingReferences(text, defaultRepo string, downgrade map[string]s
 		if repo == "" {
 			repo = defaultRepo
 		}
-		if _, ok := downgrade[claimKey(strings.ToLower(repo), issue)]; !ok {
+		key := claimKey(strings.ToLower(repo), issue)
+		reason, ok := downgrade[key]
+		if !ok {
 			return match
 		}
-		return "Refs" + match[len(parts[1]):]
+		rewritten := "Refs" + match[len(parts[1]):]
+		if !annotate || reason == "" || annotated[key] {
+			return rewritten
+		}
+		annotated[key] = true
+		return rewritten + downgradeNote(reason)
 	})
+}
+
+// downgradeNote renders the inline explanation appended to a rewritten
+// reference. Kept separate so the wording is asserted in one place by the
+// tests rather than spelled out at each call site.
+func downgradeNote(reason string) string {
+	return " — closing keyword withheld by the hive watcher: `" + reason +
+		"`. Merging this PR will not close the issue."
 }
 
 func isWorkflowFile(filename string) bool {
