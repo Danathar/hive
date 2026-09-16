@@ -122,8 +122,14 @@ unsafe:
 
 - **The issue is a tracker or epic** — an `epic`/`tracker`/`meta-tracker`
   label, an `[epic]`/`[tracker]` title prefix, or tracker-shaped content.
-- **The issue has unchecked task items** — a `- [ ]` list with open boxes means
-  the issue is not done when your PR merges.
+- **The issue delegates unfinished work to other issues** — an unchecked
+  task-list item whose subject is another issue (`- [ ] #123`,
+  `- [ ] owner/repo#12`) means the issue tracks work your PR cannot land, so
+  merging it does not finish the issue. A task list of plain deliverables —
+  the completion criterion every policy template asks a filing agent to write
+  for an unsplittable finding — does **not** trigger this, and boxes inside a
+  fenced code block never count, so quoting the policy's own `- [ ]` example is
+  free ([#7156](https://github.com/hivecommons/hive/issues/7156)).
 - **The issue is a human-filed bug that the reporter has not confirmed fixed**
   ([#6781](https://github.com/hivecommons/hive/issues/6781)). Merges land under
   the App bot, and GitHub does not let a reporter without write access reopen
@@ -142,10 +148,17 @@ unsafe:
   adding `hive: reporter-confirmed` to the issue body or applying it as a
   label; the downgrade then does not fire and `Closes #N` goes through.
 
-So if the PR that opened says `Refs #N` where you wrote `Closes #N`, the
-watcher downgraded it — check the hive log for
-`pr-request watcher: downgraded closing reference to Refs`, which names the
-issue and the reason. A merged fix is evidence the code landed, not that the
+A downgraded reference says so in the PR body it lands in:
+
+```text
+Refs #318 — closing keyword withheld by the hive watcher: `issue is a tracker`. Merging this PR will not close the issue.
+```
+
+so a maintainer reading the PR can tell a watcher rewrite from a deliberate
+`Refs` ([#7156](https://github.com/hivecommons/hive/issues/7156)). The title is
+rewritten without the note. The hive log carries the same reason under
+`pr-request watcher: downgraded closing reference to Refs`, but that log has a
+retention window and the PR body does not. A merged fix is evidence the code landed, not that the
 reporter's symptom is gone; the issue stays open until the reporter confirms.
 
 ### Base drift: a branch cut from the wrong line is rejected
