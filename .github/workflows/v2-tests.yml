@@ -918,8 +918,9 @@ jobs:
           # never resolve to pkg/hivectl's floor; pkg keeps the bare basename.
           floor_key() {
             case "$1" in
-              */cmd/*) echo "cmd/${1##*/}" ;;
-              *)       echo "${1##*/}" ;;
+              */cmd/*)         echo "cmd/${1##*/}" ;;
+              */pkg/hub/spoke) echo "hub/spoke" ;;  # v5-only; must not share pkg/spoke's [spoke] floor
+              *)               echo "${1##*/}" ;;
             esac
           }
 
