@@ -252,9 +252,27 @@ type AgentProcess struct {
 	startupKickInFlight bool
 	startupKickGen      int
 	pendingStartupKick  string
-	BootstrapOverride   string    // when set, replaces buildBootstrapPrompt output
-	LastError           string    // captured from bare copilot diagnostic launch
-	lastTokenRestart    time.Time // cooldown for auto-restart after token detection
+	BootstrapOverride   string // when set, replaces buildBootstrapPrompt output
+	LastError           string // captured from bare copilot diagnostic launch
+	// kickDelivering is true for exactly as long as deliverKickLocked is
+	// typing a kick into this agent's pane. Delivery is NOT instantaneous: a
+	// kick is typed as 400-rune chunks with a pause between them, so a 37KB
+	// governor kick occupies the pane for ~100s. For that whole window the
+	// CLI's idle chrome is scrolled out of the captured pane, which makes the
+	// pane poller's health predicates read a perfectly healthy agent as dead
+	// (#7169: "copilot hung with no CLI prompt" fired 68s into a scanner kick,
+	// recreated the tmux session, and the remaining chunks landed nowhere —
+	// eleven consecutive "send-keys failed" lines followed by a restart that
+	// threw the kick away; it happened five times before it was caught).
+	//
+	// Nothing that destroys or replaces the pane may run while this is set.
+	//
+	// An atomic, not an m.mu-guarded field, on purpose: deliverKickLocked runs
+	// with m.mu HELD for the entire delivery, so a poller that had to take
+	// m.mu to read this would serialize behind the very delivery it is trying
+	// to observe.
+	kickDelivering   atomic.Bool
+	lastTokenRestart time.Time // cooldown for auto-restart after token detection
 	// tokenRestartAttempts counts CONSECUTIVE token-triggered restarts that did
 	// not clear the login prompt. The restart is a falsifiable theory — "a valid
 	// token exists, the agent just has not picked it up yet" — and this is what
