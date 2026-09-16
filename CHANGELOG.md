@@ -11,6 +11,25 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-16 (v4.39.0)
+
+### Added
+
+- Hive-opened PRs now credit the human who asked for them ([#7208](https://github.com/hivecommons/hive/issues/7208)). The `— hive:` attribution trailer and the `agent_pr_created` audit entry carry `requested_by=@login`, resolved from the PR's rationale issues (the `Closes`/`Refs` citations and the request's declared issue list, in the same order the self-authorization gate reads them). Only a human opener is credited: an issue the hive filed itself, or one that cannot be read, adds nothing rather than crediting the bot. The trailer respects the existing `governor.attribution_trailer` toggle; the audit record is unconditional.
+
+## 2026-09-16 (v4.38.3)
+
+### Fixed
+
+- The release panel no longer claims "Last upgrade: never attempted" on hives that have been upgraded many times. The upgrade marker only records upgrades driven *through the hub*, so any hive moved by other means — a direct image bump, a redeploy, a spoke roll — reported "never attempted" no matter how many times it had actually been rolled, and the accompanying "No upgrade has been attempted on this hive yet" detail line stated it outright. Both lines are now omitted for that state; "succeeded", "failed" and "in progress" still render as distinct states, and the channel selector is unchanged.
+
+## 2026-09-16 (v4.38.2)
+
+### Fixed
+
+- The `/contribute` page's signed-out prompts are now a working sign-in control ([#7195](https://github.com/hivecommons/hive/issues/7195)). Every "Sign in with GitHub" prompt on the Profile, Operations, Rankings and Fleet-work surfaces rendered as bold text with nothing to click, so the page told a visitor to do the one thing it gave them no way to do. This was most visible on a spoke, where a session on the hub is not a session on the spoke's own origin: a contributor signed in at hive.hivecommons.dev still arrived at their spoke's `/contribute/profile` as an anonymous viewer, saw the prompt, and had no route forward. The prompts now link to the dashboard root, which is the device-flow sign-in page and already the destination the auth-error page offers.
+- Red pull requests are no longer escalated to `needs-human` before any repair has been attempted ([#7197](https://github.com/hivecommons/hive/pull/7197)). The re-engagement budget (`MaxReEngagements`) was bounding governor *ticks* rather than fix *attempts*: `StaleRed` compares `now - FirstRedAt`, and `FirstRedAt` does not advance while a head SHA is unchanged, so a stuck red PR read as stale on every tick and the reaper drained all six re-engagements back-to-back at ~2-minute cadence. PRs were handed to a human roughly 13 minutes after going stale — far less than one agent kick cycle — so they arrived labelled `needs-human` with a single red SHA and zero repair commits, and agents are forbidden from touching escalated PRs. On the kubestellar/console spoke this parked two refactor PRs permanently and stalled the merge queue behind them. Re-engagements are now spaced by `ReEngageCooldown`, so the six attempts span at least an hour of real agent cadence; the cap still halts a permanently-red PR, and a newly pushed head SHA clears the cooldown so an agent that just pushed is never throttled.
+
 ## 2026-09-16 (v4.38.1)
 
 ### Fixed
