@@ -11,6 +11,60 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-16 (v4.38.1)
+
+### Fixed
+
+- Stopped the copilot hang detector from destroying kicks while they are being
+  typed. Delivering a kick is not instantaneous — `deliverKickLocked` types the
+  message as 400-rune chunks, so a 37KB governor kick occupies the pane for
+  roughly 100 seconds, during which the CLI's idle chrome is scrolled out of
+  the captured pane. The "copilot hung with no CLI prompt" detector keys on
+  precisely that absence, so it read a healthy mid-delivery agent as dead: on
+  the scanner agent it fired 68 seconds into a kick, recreated the tmux
+  session, and the remaining chunks landed nowhere — eleven consecutive
+  `tmux send-keys failed` lines, then a restart, then `audit: agent kicked`
+  logged as if the 37,564-character prompt had arrived. It had not, and the
+  agent sat at `Session: 0 AIC used` doing nothing until the next cadence.
+  `interruptions_total` had reached 5, so five consecutive governor kicks were
+  eaten by the detector meant to rescue the agent. Agents now carry a
+  `kickDelivering` flag held for the duration of delivery, and the three pane
+  actions that would corrupt or destroy an in-flight kick — the hang
+  diagnostic, the fatal-TLS restart, and the transient-error retry nudge, which
+  types into the pane — all stand down while it is set. The login-triggered
+  restart already had an equivalent kick grace; this closes the remaining
+  paths.
+- `hive-open-issue.md` now documents the third placeholder-enforcement point
+(`CreateIssue`'s `validateIssueTemplateFilled`) and the deliberate title/body
+asymmetry, which were undocumented after #7141. While documenting them, two
+real defects surfaced and are fixed: `CreateIssue` now consults the shared
+`pkg/issueshape` validator for bodies, so a `<analysis>`/`<fix>` skeleton body
+can no longer slip past that path; and `pkg/issueshape` no longer mistakes
+ordinary prose containing comparison operators (`a < b and c > d`) for an
+unfilled template placeholder.
+- The pull-request coverage gate enforces coverage floors again ([#7193](https://github.com/hivecommons/hive/issues/7193)). The `coverage` job selected this module's packages with the pre-rename module path `github.com/kubestellar/hive`, but the module is `github.com/hivecommons/hive`, so both of its filters matched nothing: the job scored zero packages, printed `Total coverage (./pkg/...): unavailable`, and passed on every pull request. Every per-package floor, the default 90% floor, and the `NO TEST FILES` and `TESTS FAILING` checks were silently unenforced for the whole post-rename window, so a package could lose its tests or fall to any coverage level without the gate objecting. Packages are now matched on their `/pkg/` path segment so a future rename cannot re-break the gate, and the job fails closed when it parses no coverage totals or no package states, because an empty filter result is otherwise indistinguishable from a clean run.
+
+## 2026-09-16 (v4.38.0)
+
+### Added
+
+- `just contribute-hive` now forwards `OPENROUTER_API_KEY` into the contributor container ([#7175](https://github.com/hivecommons/hive/issues/7175)). The containerized contributor path hands the agent an explicit allowlist of provider credentials rather than the whole environment, so that an unconfined agent gets only what it needs and provider choice is not made observable through unrelated secrets ([#5039](https://github.com/hivecommons/hive/issues/5039)). `OPENROUTER_API_KEY` was simply missing from that list, so a contributor running Hive → Goose → OpenRouter could configure the provider and model correctly and still have the container fail at authentication with `Configuration value not found: OPENROUTER_API_KEY`. The gap was specific to this one path: the `pi` backend already resolves `OPENROUTER_API_KEY` per model through `bin/pi-backend.js`, which is why OpenRouter worked there and not for Goose. Adding the name to the allowlist forwards the *name* only — `add_provider_env` passes `-e NAME`, so the runtime reads the value from the calling process and the secret never appears in the container command's argv — and, like every other entry, it is forwarded only when actually set. The existing LiteLLM and Claude Code workflows are unaffected.
+
+### Changed
+
+- The Copilot model host discovery endpoint and persistent Hive ID file path can now be repointed by tests without changing runtime defaults ([#7148](https://github.com/hivecommons/hive/issues/7148)), letting CI pin the enterprise-host fallback and spoke identity load/generate paths against hermetic servers and temp files instead of depending on live GitHub responses or `/data` state.
+- Git-source connect and disconnect dashboard success paths now have a hermetic test seam for their knowledge storage root, so the config persistence logic that decides which repositories are re-cloned after restart is exercised without touching the production `/data/knowledge` directory or depending on a live remote.
+
+### Fixed
+
+- The unfilled-template guard now catches the single-word placeholders that slipped past it ([#7141](https://github.com/hivecommons/hive/issues/7141)). The guard shipped for [#7153](https://github.com/hivecommons/hive/issues/7153) requires two or more words inside a `<…>` span, which is right for an issue body — a lone `<word>` there is far likelier to be markup than a placeholder, and since the guard fails closed a false positive refuses a legitimate filing. But #7141 is the same empty skeleton filed by the *scanner* agent rather than the guide, establishing this as a cross-agent bug rather than one agent's quirk, and its placeholders are single words: `<analysis>` and `<fix>`. A title is not a body — it is plain text that renders no markup, carries no autolinks and holds no code — so `<analysis>` in a title is a placeholder in a way it simply is not in a body. Titles are therefore now matched on single-word spans too, subject to a three-character floor and the existing HTML-element skip list, so `List<t>` and `<br>` remain untouched. The body rule is deliberately left conservative and a test pins that asymmetry, so a later attempt to tighten it has to argue with a failing test rather than quietly widen the false-positive surface.
+- Coverage floors are now keyed by a package's full path below `pkg/` instead of its
+bare directory name, so a nested package can no longer silently share the floor of
+the top-level package that happens to share its name. `pkg/spoke` and
+`pkg/hub/spoke` are now `spoke` and `hub/spoke` rather than both being `spoke`.
+- Repository AGENTS.md instructions now explicitly outrank hive's generic prompt defaults for repo-local conventions such as PR base branches, title formats and commit style, while hive's safety and authorization rules remain non-overridable ([#7159](https://github.com/hivecommons/hive/issues/7159)).
+- The dashboard chat bubble keeps its see-through resting state while gaining an explicit keyboard focus ring and accessible label, so operators can still read covered values without losing a clear way to open Hive Chat.
+
 ## 2026-09-16 (v4.37.5)
 
 ### Fixed

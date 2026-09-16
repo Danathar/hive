@@ -233,6 +233,12 @@ func (m *Manager) deferStartupKickLocked(agent *AgentProcess, message string) bo
 // (crash detect + waitForCLIReadyForAgent + waitForInputPromptForAgent) —
 // this function does no readiness checking of its own.
 func (m *Manager) deliverKickLocked(agent *AgentProcess, message, trigger string) {
+	// Claim the pane for the whole of delivery so the pane poller does not
+	// mistake a kick-in-progress for a hung CLI and restart the session out
+	// from under the typist. See AgentProcess.kickDelivering.
+	agent.kickDelivering.Store(true)
+	defer agent.kickDelivering.Store(false)
+
 	// Archive the PREVIOUS kick's scrollback and clear the history before any
 	// input touches the pane, so each archived kick log is cleanly delimited
 	// (#4296). Must be the first thing this function does.

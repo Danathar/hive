@@ -130,7 +130,6 @@ type Entry struct {
 	// spent at the pace an agent can actually answer, not at governor-tick
 	// pace. Reset alongside ReEngagements whenever CurRedSHA changes.
 	LastReEngagedAt time.Time `json:"last_re_engaged_at,omitempty"`
-
 	// Machinery is the MachineryVersion under which this entry's attempts
 	// were burned. Older-generation entries are granted amnesty (see
 	// MachineryVersion).

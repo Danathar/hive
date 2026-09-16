@@ -172,7 +172,7 @@ func (m *Manager) pollTmuxOutputForAgent(agent *AgentProcess, ctx context.Contex
 			// its TLS had died, and the governor kick delivered seconds
 			// earlier died with the session. It looped every ~60s, so no kick
 			// ever survived long enough to run.
-			if effectiveBackend(agent) == "copilot" && paneShowsFatalNetworkError(filtered) {
+			if effectiveBackend(agent) == "copilot" && !agent.kickDelivering.Load() && paneShowsFatalNetworkError(filtered) {
 				sinceLastRestart := time.Since(agent.lastTokenRestart).Seconds()
 				if sinceLastRestart >= float64(tlsErrorRestartCooldownSec) {
 					m.logger.Warn("fatal network/TLS error detected, restarting agent",
@@ -201,7 +201,10 @@ func (m *Manager) pollTmuxOutputForAgent(agent *AgentProcess, ctx context.Contex
 			// no match means no tmux exec. The decision itself is made on the
 			// VISIBLE pane, because a matched line in scrollback is usually an
 			// error the agent already recovered from.
-			if paneShowsTransientAPIError(filtered) {
+			// kickDelivering: the nudge TYPES into the pane ("try again" +
+			// Enter). Firing it mid-delivery would splice those keystrokes
+			// into the middle of a kick and submit the truncated result.
+			if !agent.kickDelivering.Load() && paneShowsTransientAPIError(filtered) {
 				m.nudgeIfTransientAPIError(agent, m.captureVisiblePaneForAgent(agent))
 			}
 
@@ -209,7 +212,17 @@ func (m *Manager) pollTmuxOutputForAgent(agent *AgentProcess, ctx context.Contex
 			// launch bare `copilot` to diagnose the error. Only clear the
 			// token if the diagnostic shows an auth error.
 			// Skip for inference backends — they use Claude -p mode (non-interactive).
+			//
+			// kickDelivering gates this for the same reason it gates the TLS
+			// restart above, but this detector is the one that was actually
+			// observed destroying kicks: it does not look at pane CONTENT for
+			// an error, only for the ABSENCE of idle chrome, and a kick being
+			// typed is precisely a pane with no idle chrome. Delivery pushes
+			// the prompt out of the capture window for ~100s on a large kick,
+			// far longer than expiredTokenHangTimeoutSec has any reason to
+			// tolerate.
 			if agent.Config.Backend == "copilot" && !IsInferenceBackend(agent.BackendOverride) && agent.StartedAt != nil &&
+				!agent.kickDelivering.Load() &&
 				time.Since(*agent.StartedAt).Seconds() >= expiredTokenHangTimeoutSec &&
 				!paneShowsCLIReady(filtered) {
 				sinceLastRestart := time.Since(agent.lastTokenRestart).Seconds()
