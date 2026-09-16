@@ -11,6 +11,17 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-16 (v4.39.3)
+
+### Fixed
+
+- `watchHubRollout`'s success path is now testable and tested ([#7220](https://github.com/hivecommons/hive/issues/7220)). The loop that confirms a hub self-upgrade became Ready hardcoded a 15s `time.Sleep` and a `kubectl rollout status` exec, so the branch that clears `hubUpgradeFault` on success could only be exercised against a live cluster — leaving the detect-and-report half of upgrade safety unverified, where a regression is silent (a stale fault on the dashboard, or a watcher that exits before a genuinely stuck upgrade is reported). The loop moves to `watchHubRolloutWithInterval`, which takes the timeout, poll interval and readiness check as parameters, with `watchHubRollout` kept as a thin production wrapper passing the real constants — the same seam `runPermissionsWatcher` uses in `pkg/agent`. Behaviour is unchanged in production; the stuck-rollout fault now reports the timeout actually waited rather than the package constant, which only differs under test. `watchHubRollout` goes from 76.9% to 100% statement coverage.
+- Unstuck the release train: with `RELEASE_PR_TOKEN` configured (#7123), the Tagged Release workflow ran its gate-mirror commit-status POST and scratch-run drain under that fine-grained PAT too, which deliberately lacks `statuses:write`/`actions:write` — the status POST 403'd and no release could be cut ([#7222](https://github.com/hivecommons/hive/issues/7222)). Those calls are now pinned to the job's `GITHUB_TOKEN`, leaving the PAT to the one thing it exists for: opening the release PR under an identity whose `pull_request` events actually start workflows.
+- Agent cards and the cadence settings dialog now carry a 0/1 power switch for the agent's `enabled` flag, so enablement can be changed without hunting through the config dialog's General tab.
+- Fixed an inverted control: a cadence-held agent rendered "▶ start" wired to the pause toggle, so clicking it POSTed `/api/pause` and stopped the agent it offered to start. It now opens the Cadences tab, the only place that hold can be cleared.
+- Disabled agents no longer offer a pause button, which applied a temporary hold to an agent the governor already refuses to schedule.
+- Renamed the bare "off" shown on agent cards, in the governor cadence table and on the interval/next-kick fields to name the governor mode holding the agent (e.g. "disabled in surge"), leaving "disabled" to mean the enablement axis the new switch controls.
+
 ## 2026-09-16 (v4.39.2)
 
 ### Fixed
