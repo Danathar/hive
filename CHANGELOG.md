@@ -11,6 +11,13 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-16 (v4.39.4)
+
+### Fixed
+
+- Hub mode logs at boot whether the `/api/reach` GitHub PR source was wired. Previously a missing `HIVE_GITHUB_TOKEN` surfaced only as a 503 at request time, with nothing in the log connecting the broken endpoint to the missing credential. ([#7224](https://github.com/hivecommons/hive/issues/7224))
+- Renamed the per-mode cadence label from "disabled in \<mode\>" to "no cadence in \<mode\>". `enabled` is a cross-mode flag, so reusing the word "disabled" for a per-mode schedule gap re-created the ambiguity the 0/1 power switch was added to remove. "disabled" now means the enablement axis only.
+
 ## 2026-09-16 (v4.39.3)
 
 ### Fixed
