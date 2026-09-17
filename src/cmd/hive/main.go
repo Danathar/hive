@@ -6759,6 +6759,7 @@ func runEvalCycle(
 		ctx,
 		metricsCollector,
 	)
+	statusPublished := false
 	// Ingest any JSONL findings agents wrote and persist them as beads.
 	if advisoryStore != nil {
 		findings, err := advisoryStore.ReadNewFindings()
@@ -6921,6 +6922,11 @@ func runEvalCycle(
 		}
 		dashSrv.SetAdvisoryDigest(digest)
 		statusPayload.AdvisoryDigest = digest
+		statusPublished = dashSrv.UpdateStatusIfFresh(statusPayload, buildEpoch)
+		if !statusPublished {
+			return
+		}
+		hiveAdvice := statusPayload.HiveAdvice
 
 		// Post whenever there is something CURRENT to say: open findings,
 		// recently resolved ones, or an empty evaluation for a hive that already
@@ -6979,6 +6985,7 @@ func runEvalCycle(
 				Org:         org,
 				ShowEmpty:   digest.TotalCount == 0 && len(digest.RecentlyResolved) == 0,
 				PrimaryRepo: repoName,
+				Advice:      hiveAdvice,
 			})
 			if md != "" {
 				if advisoryTarget != config.AdvisoryTargetGitHub {
@@ -7161,7 +7168,9 @@ func runEvalCycle(
 		statusPayload.AdvisoryDigest = d
 	}
 
-	dashSrv.UpdateStatusIfFresh(statusPayload, buildEpoch)
+	if !statusPublished {
+		statusPublished = dashSrv.UpdateStatusIfFresh(statusPayload, buildEpoch)
+	}
 
 	if agentStats := dashboard.CollectAgentStats(statusPayload); len(agentStats) > 0 {
 		gov.AttachAgentStats(agentStats)
