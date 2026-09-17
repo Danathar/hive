@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-17 (v4.44.4)
+
+### Changed
+
+- Moved the provider-budget and no-cadence dashboard alert policy out of `cmd/hive` into a new `pkg/spokealerts` package, continuing the staged breakup of the `cmd/hive` god file (#7238 stage 4). Behaviour is unchanged.
+
 ## 2026-09-17 (v4.44.3)
 
 ### Changed
