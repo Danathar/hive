@@ -11,7 +11,7 @@ import (
 	"github.com/hivecommons/hive/pkg/dashboard"
 	"github.com/hivecommons/hive/pkg/github"
 	"github.com/hivecommons/hive/pkg/governor"
-	hub "github.com/hivecommons/hive/pkg/hub/spoke"
+	spoke "github.com/hivecommons/hive/pkg/hub/spoke"
 	"github.com/hivecommons/hive/pkg/tracing"
 )
 
@@ -43,7 +43,7 @@ func (w *spokeWire) wireHubHeartbeat() {
 		// a hive with real repos routinely exceeds the collect budget right
 		// after a restart. Without this, such a spoke sent NOTHING and read
 		// OFFLINE on the hub while being perfectly healthy.
-		hub.PublishHeartbeatIdentity(
+		spoke.PublishHeartbeatIdentity(
 			w.cfg.HiveID,
 			w.cfg.Project.Org,
 			w.cfg.Project.PrimaryRepo,
@@ -52,30 +52,30 @@ func (w *spokeWire) wireHubHeartbeat() {
 			w.processStartedAt.UTC().Format(time.RFC3339),
 			gitShort,
 		)
-		go hub.StartHeartbeat(w.ctx, w.hubURL, w.buildHeartbeatPayload, heartbeatSendInterval, w.logger,
-			hub.RestartSpokeCallback(w.handleHubRestart),
-			hub.UpgradeCallback(w.handleHubUpgrade),
-			hub.GitHubAppConfigCallback(w.handleHubGitHubAppConfig),
-			hub.HubBannerCallback(w.handleHubBanner),
-			hub.UpgradePolicyCallback(func(p *hub.HeartbeatUpgradePolicy) {
+		go spoke.StartHeartbeat(w.ctx, w.hubURL, w.buildHeartbeatPayload, heartbeatSendInterval, w.logger,
+			spoke.RestartSpokeCallback(w.handleHubRestart),
+			spoke.UpgradeCallback(w.handleHubUpgrade),
+			spoke.GitHubAppConfigCallback(w.handleHubGitHubAppConfig),
+			spoke.HubBannerCallback(w.handleHubBanner),
+			spoke.UpgradePolicyCallback(func(p *spoke.HeartbeatUpgradePolicy) {
 				// Descriptive only (#7262): the hub's upgrade posture for this
 				// spoke, so the dashboard measures "behind" against the commit
 				// the hub will actually roll us to and renders the hub's schedule.
 				w.dashSrv.SetHubUpgradePolicy(p)
 			}),
-			hub.VisibilityCallback(w.handleHubVisibility),
-			hub.SwitchBranchCallback(w.handleHubSwitchBranch),
-			hub.AuthorizedUsersCallback(w.handleHubAuthorizedUsers),
-			hub.ProjectConfigCallback(w.handleHubProjectConfig),
-			hub.GatewayConfigCallback(w.handleHubGatewayConfig),
-			hub.FreshStatusCollector(w.buildFreshHeartbeatPayload))
+			spoke.VisibilityCallback(w.handleHubVisibility),
+			spoke.SwitchBranchCallback(w.handleHubSwitchBranch),
+			spoke.AuthorizedUsersCallback(w.handleHubAuthorizedUsers),
+			spoke.ProjectConfigCallback(w.handleHubProjectConfig),
+			spoke.GatewayConfigCallback(w.handleHubGatewayConfig),
+			spoke.FreshStatusCollector(w.buildFreshHeartbeatPayload))
 
-		go hub.StartTaskStatusPush(w.ctx, w.hubURL, func() *hub.TaskStatusPayload {
+		go spoke.StartTaskStatusPush(w.ctx, w.hubURL, func() *spoke.TaskStatusPayload {
 			reg, active := w.dashSrv.ContributorSummary()
 			lb := w.dashSrv.LeaderboardForHub()
-			out := make([]hub.LeaderboardEntry, len(lb))
+			out := make([]spoke.LeaderboardEntry, len(lb))
 			for i, e := range lb {
-				out[i] = hub.LeaderboardEntry{
+				out[i] = spoke.LeaderboardEntry{
 					GitHubUsername: e.GitHubUsername,
 					AvatarURL:      e.AvatarURL,
 					TrustTier:      e.TrustTier,
@@ -85,17 +85,17 @@ func (w *spokeWire) wireHubHeartbeat() {
 					CurrentTask:    e.CurrentTask,
 				}
 			}
-			return &hub.TaskStatusPayload{
+			return &spoke.TaskStatusPayload{
 				HiveID:       w.cfg.HiveID,
 				Leaderboard:  out,
-				Contributors: hub.ContributorSummary{Registered: reg, Active: active},
+				Contributors: spoke.ContributorSummary{Registered: reg, Active: active},
 			}
 		}, w.logger)
 	}
 
 }
 
-func (w *spokeWire) handleHubGitHubAppConfig(ghCfg *hub.HeartbeatGitHubAppConfig) {
+func (w *spokeWire) handleHubGitHubAppConfig(ghCfg *spoke.HeartbeatGitHubAppConfig) {
 	w.logger.Info("received github app config via heartbeat",
 		"app_id", ghCfg.AppID,
 		"installation_id", ghCfg.InstallationID,
@@ -385,7 +385,7 @@ func (w *spokeWire) handleHubGitHubAppConfig(ghCfg *hub.HeartbeatGitHubAppConfig
 
 }
 
-func (w *spokeWire) handleHubBanner(banner *hub.HubBanner) {
+func (w *spokeWire) handleHubBanner(banner *spoke.HubBanner) {
 	if banner == nil {
 		w.dashSrv.ClearHubBanner()
 		return
@@ -410,7 +410,7 @@ func (w *spokeWire) handleHubSwitchBranch(tag string) {
 	// SA holds the hive-self-upgrade role (patch on deployment/hive).
 	// K8s then rolls the pod onto the new tag.
 	image := "ghcr.io/hivecommons/hive:" + tag
-	if err := hub.SwitchImageSelf(w.logger, image); err != nil {
+	if err := spoke.SwitchImageSelf(w.logger, image); err != nil {
 		w.logger.Warn("branch switch via heartbeat failed", "tag", tag, "image", image, "error", err)
 		return
 	}
@@ -436,7 +436,7 @@ func (w *spokeWire) handleHubAuthorizedUsers(users []string, names map[string]st
 
 }
 
-func (w *spokeWire) handleHubProjectConfig(pc *hub.HeartbeatProjectConfig) {
+func (w *spokeWire) handleHubProjectConfig(pc *spoke.HeartbeatProjectConfig) {
 	// The hub assigned this (previously placeholder) hive a real project.
 	// Reconcile our running project config so agents work the claimed
 	// org/repos at the claimed maturity level. This is the ONLY delivery
@@ -573,7 +573,7 @@ func (w *spokeWire) handleHubProjectConfig(pc *hub.HeartbeatProjectConfig) {
 
 }
 
-func (w *spokeWire) handleHubGatewayConfig(gw *hub.HeartbeatGatewayConfig) {
+func (w *spokeWire) handleHubGatewayConfig(gw *spoke.HeartbeatGatewayConfig) {
 	// The hub funded an OpenRouter gateway on this hive's behalf (scan-to-
 	// fund from My Hives) and delivered it over the heartbeat channel — the
 	// only path that reaches a firewalled/heartbeat-only spoke (the heartbeat-only cluster). We
@@ -602,7 +602,7 @@ func (w *spokeWire) heartbeatFleetStats() (*int, *int, *int, string) {
 	return prsMerged, prsRejected, cvesClosed, collectedAt
 }
 
-func (w *spokeWire) heartbeatRepoActivity() ([]hub.RepoActivityWire, string, int, int) {
+func (w *spokeWire) heartbeatRepoActivity() ([]spoke.RepoActivityWire, string, int, int) {
 	if asnap, ok := w.activityCollector.Snapshot(); ok {
 		collectedAt := ""
 		if t := w.activityCollector.CollectedAt(); !t.IsZero() {
@@ -641,20 +641,20 @@ func (w *spokeWire) heartbeatACMMLevel() int {
 	return acmmLvl
 }
 
-func (w *spokeWire) heartbeatAgents(govState governor.State, currentMode string, includeBlockingChecks bool) []hub.AgentSummary {
+func (w *spokeWire) heartbeatAgents(govState governor.State, currentMode string, includeBlockingChecks bool) []spoke.AgentSummary {
 	statuses := w.agentMgr.AllStatuses()
-	agents := make([]hub.AgentSummary, 0, len(statuses))
+	agents := make([]spoke.AgentSummary, 0, len(statuses))
 	for name, proc := range statuses {
 		mode := ""
 		if ac, ok := w.cfg.Agents[name]; (ok && ac.OnDemand) || w.onDemandFromPack[name] {
 			mode = "on_demand"
 		}
 		if includeBlockingChecks {
-			agents = append(agents, hub.NewAgentSummary(name, string(proc.State), mode,
-				hub.AgentActivityFor(w.agentMgr, w.cfg, govState, currentMode, name, proc, w.onDemandFromPack)))
+			agents = append(agents, spoke.NewAgentSummary(name, string(proc.State), mode,
+				spoke.AgentActivityFor(w.agentMgr, w.cfg, govState, currentMode, name, proc, w.onDemandFromPack)))
 			continue
 		}
-		act := hub.AgentActivity{
+		act := spoke.AgentActivity{
 			Paused:         proc.Paused,
 			PausedTrigger:  proc.PausedTrigger,
 			PausedReason:   proc.PausedReason,
@@ -663,13 +663,13 @@ func (w *spokeWire) heartbeatAgents(govState governor.State, currentMode string,
 			NeedsLogin:     proc.NeedsLogin,
 			QuotaExhausted: proc.QuotaExhausted,
 			LastActivityAt: proc.LastPaneChange,
-			KickInterval:   hub.HeartbeatKickInterval(govState, name, proc, w.onDemandFromPack),
+			KickInterval:   spoke.HeartbeatKickInterval(govState, name, proc, w.onDemandFromPack),
 			Backend:        proc.Config.Backend,
 			Enabled:        proc.Config.Enabled,
 			CanOpenIssue:   proc.LaunchedMode.CanCreateIssues(),
 			CanOpenPR:      proc.LaunchedMode.CanPush(),
 			CanMerge:       proc.LaunchedMode.CanMerge(),
-			Restarts: hub.AgentRestartTelemetry{
+			Restarts: spoke.AgentRestartTelemetry{
 				Total:      proc.RestartCount,
 				LastReason: proc.LastRestartReason,
 			},
@@ -695,13 +695,13 @@ func (w *spokeWire) heartbeatAgents(govState governor.State, currentMode string,
 			}
 			act.ExpectedActive = w.cfg.ExpectedActive(name, currentMode, onDemandAgent, w.onDemandFromPack)
 		}
-		agents = append(agents, hub.NewAgentSummary(name, string(proc.State), mode,
+		agents = append(agents, spoke.NewAgentSummary(name, string(proc.State), mode,
 			act))
 	}
 	return agents
 }
 
-func (w *spokeWire) buildFreshHeartbeatPayload() *hub.HeartbeatPayload {
+func (w *spokeWire) buildFreshHeartbeatPayload() *spoke.HeartbeatPayload {
 	if !w.cfg.Hub.Enabled {
 		return nil
 	}
@@ -709,17 +709,17 @@ func (w *spokeWire) buildFreshHeartbeatPayload() *hub.HeartbeatPayload {
 	currentMode := strings.ToLower(string(govState.Mode))
 	agents := w.heartbeatAgents(govState, currentMode, false)
 	acmmLvl := w.heartbeatACMMLevel()
-	providerLimitReason, providerLimitRebuffs, providerLimitHiveWide, providerLimitAgents := hub.ProviderLimitHeartbeatFields(agents, dashboard.InferenceBudgetExceeded)
+	providerLimitReason, providerLimitRebuffs, providerLimitHiveWide, providerLimitAgents := spoke.ProviderLimitHeartbeatFields(agents, dashboard.InferenceBudgetExceeded)
 	lastWriteKickAt, kickDisposition, kickSkipReason, notWritableQueued :=
 		outputFreshnessHeartbeatFields(acmmLvl, govState, agents)
-	return &hub.HeartbeatPayload{
+	return &spoke.HeartbeatPayload{
 		HiveID:                  w.cfg.HiveID,
 		Org:                     w.cfg.Project.Org,
 		Repos:                   w.cfg.Project.Repos,
 		PrimaryRepo:             w.cfg.Project.PrimaryRepo,
 		ACMMLevel:               acmmLvl,
 		Agents:                  agents,
-		Governor:                hub.GovernorSummary{Mode: string(govState.Mode), Issues: govState.QueueIssues, PRs: govState.QueuePRs},
+		Governor:                spoke.GovernorSummary{Mode: string(govState.Mode), Issues: govState.QueueIssues, PRs: govState.QueuePRs},
 		Health:                  freshHeartbeatHealthSummary(agents),
 		ProviderLimitReason:     providerLimitReason,
 		ProviderLimitRebuffs:    providerLimitRebuffs,
@@ -746,7 +746,7 @@ func (w *spokeWire) buildFreshHeartbeatPayload() *hub.HeartbeatPayload {
 	}
 }
 
-func freshHeartbeatHealthSummary(agents []hub.AgentSummary) map[string]any {
+func freshHeartbeatHealthSummary(agents []spoke.AgentSummary) map[string]any {
 	type check struct {
 		Name   string `json:"name"`
 		Status string `json:"status"`
@@ -796,7 +796,7 @@ func (w *spokeWire) dashboardURLForFreshHeartbeat() string {
 	return fmt.Sprintf("http://localhost:%d", w.cfg.Dashboard.Port)
 }
 
-func (w *spokeWire) buildHeartbeatPayload() *hub.HeartbeatPayload {
+func (w *spokeWire) buildHeartbeatPayload() *spoke.HeartbeatPayload {
 	if !w.cfg.Hub.Enabled {
 		return nil
 	}
@@ -859,7 +859,7 @@ func (w *spokeWire) buildHeartbeatPayload() *hub.HeartbeatPayload {
 		tasksCompleted7d = &n
 	}
 
-	providerLimitReason, providerLimitRebuffs, providerLimitHiveWide, providerLimitAgents := hub.ProviderLimitHeartbeatFields(agents, dashboard.InferenceBudgetExceeded)
+	providerLimitReason, providerLimitRebuffs, providerLimitHiveWide, providerLimitAgents := spoke.ProviderLimitHeartbeatFields(agents, dashboard.InferenceBudgetExceeded)
 	lastWriteKickAt, kickDisposition, kickSkipReason, notWritableQueued :=
 		outputFreshnessHeartbeatFields(acmmLvl, govState, agents)
 	ghAppTokenStatus, ghAppTokenLastMintAt, ghAppTokenError :=
@@ -879,7 +879,7 @@ func (w *spokeWire) buildHeartbeatPayload() *hub.HeartbeatPayload {
 	consentWedged := w.agentMgr.ConsentWedgedAgents()
 	noCadenceAgents := w.gov.NoCadenceAgents()
 
-	return &hub.HeartbeatPayload{
+	return &spoke.HeartbeatPayload{
 		AgentsWithModel:      &agentsWithModel,
 		BudgetCurrentSpend:   budgetSpend,
 		BudgetLimit:          budgetLimit,
@@ -907,7 +907,7 @@ func (w *spokeWire) buildHeartbeatPayload() *hub.HeartbeatPayload {
 			if w.cfg.Dashboard.AuthToken == "" {
 				return ""
 			}
-			return hub.HashDashboardToken(w.cfg.Dashboard.AuthToken)
+			return spoke.HashDashboardToken(w.cfg.Dashboard.AuthToken)
 		}(),
 		HiveID:            w.cfg.HiveID,
 		Org:               w.cfg.Project.Org,
@@ -918,8 +918,8 @@ func (w *spokeWire) buildHeartbeatPayload() *hub.HeartbeatPayload {
 		// self-DoSed spokes with nothing surfacing it. Report the count
 		// and its rlimit every beat so the next leak is a climbing
 		// number on the hub, not a manual /proc excavation.
-		OpenFDs:     hub.OpenFDCount(),
-		FDSoftLimit: hub.FDSoftLimit(),
+		OpenFDs:     spoke.OpenFDCount(),
+		FDSoftLimit: spoke.FDSoftLimit(),
 		// Reporter names THIS process (the pod) so the hub can tell two
 		// instances reporting as one hive apart — the pod name is the
 		// hostname inside the container.
@@ -977,7 +977,7 @@ func (w *spokeWire) buildHeartbeatPayload() *hub.HeartbeatPayload {
 		PrimaryRepo:             w.cfg.Project.PrimaryRepo,
 		ACMMLevel:               acmmLvl,
 		Agents:                  agents,
-		Governor: hub.GovernorSummary{Mode: string(govState.Mode), Issues: govState.QueueIssues, PRs: govState.QueuePRs, WorkSource: func() string {
+		Governor: spoke.GovernorSummary{Mode: string(govState.Mode), Issues: govState.QueueIssues, PRs: govState.QueuePRs, WorkSource: func() string {
 			if t := w.cfg.Governor.WorkSource.Type; t != "" && t != "github" {
 				return t
 			}
@@ -1000,9 +1000,9 @@ func (w *spokeWire) buildHeartbeatPayload() *hub.HeartbeatPayload {
 			}
 			return 0
 		}(),
-		Contributors: func() hub.ContributorSummary {
+		Contributors: func() spoke.ContributorSummary {
 			reg, active := w.dashSrv.ContributorSummary()
-			return hub.ContributorSummary{Registered: reg, Active: active}
+			return spoke.ContributorSummary{Registered: reg, Active: active}
 		}(),
 		Leaderboard: w.leaderboardForHeartbeat(),
 		// Report who has a live dashboard session so the hub can accumulate
@@ -1036,7 +1036,7 @@ func (w *spokeWire) buildHeartbeatPayload() *hub.HeartbeatPayload {
 		// is the only way to distinguish a hive pinned to an immutable
 		// SHA tag (which can never receive a rolling upgrade) from one
 		// riding <branch>-latest. Empty off-cluster — never guessed.
-		ImageRef: hub.SelfDeploymentImage(),
+		ImageRef: spoke.SelfDeploymentImage(),
 		// The GitHub instance this spoke actually runs against. Only
 		// the spoke knows this for certain: a hive's GitHub can differ
 		// from its cluster's default, so the hub cannot infer it.
@@ -1055,11 +1055,11 @@ func (w *spokeWire) buildHeartbeatPayload() *hub.HeartbeatPayload {
 		GitHubAppHTTPStatus:      ghAppHTTPStatus,
 		PendingGitHubAppInstall:  w.dashSrv.IsPendingGitHubAppInstall(),
 		AutoUpgrade:              w.cfg.Hub.AutoUpgrade,
-		ClusterHealth: func() *hub.HeartbeatClusterHealthReport {
+		ClusterHealth: func() *spoke.HeartbeatClusterHealthReport {
 			if os.Getenv("HIVE_CLUSTER_ID") == "" {
 				return nil
 			}
-			return hub.CollectClusterHealth(w.logger)
+			return spoke.CollectClusterHealth(w.logger)
 		}(),
 		PRsMerged90d:                 prsMerged,
 		PRsRejected90d:               prsRejected,
@@ -1102,11 +1102,11 @@ func (w *spokeWire) buildHeartbeatPayload() *hub.HeartbeatPayload {
 
 }
 
-func (w *spokeWire) leaderboardForHeartbeat() []hub.LeaderboardEntry {
+func (w *spokeWire) leaderboardForHeartbeat() []spoke.LeaderboardEntry {
 	lb := w.dashSrv.LeaderboardForHub()
-	out := make([]hub.LeaderboardEntry, len(lb))
+	out := make([]spoke.LeaderboardEntry, len(lb))
 	for i, e := range lb {
-		out[i] = hub.LeaderboardEntry{
+		out[i] = spoke.LeaderboardEntry{
 			GitHubUsername: e.GitHubUsername,
 			AvatarURL:      e.AvatarURL,
 			TrustTier:      e.TrustTier,
@@ -1140,7 +1140,7 @@ func (w *spokeWire) dashboardURLForHeartbeat() string {
 	// Prefer the host our OWN Route/Ingress actually serves. The synthesised
 	// "<hiveID>.<hub host>" below is only correct when this spoke is fronted by
 	// the hub's wildcard domain; pull-only clusters must report their live host.
-	if host := hub.SpokeServedHost(w.ctx); host != "" {
+	if host := spoke.SpokeServedHost(w.ctx); host != "" {
 		return "https://" + host
 	}
 	if w.cfg.HiveID != "" && w.cfg.Hub.URL != "" {
@@ -1159,7 +1159,7 @@ func (w *spokeWire) handleHubRestart() {
 	}
 	w.logger.Warn("hub requested a spoke restart — rolling this deployment",
 		"reporter", w.reporterName)
-	if err := hub.RolloutRestartSelf(w.logger); err != nil {
+	if err := spoke.RolloutRestartSelf(w.logger); err != nil {
 		// Do NOT exit here: without deployment-patch RBAC an exit would
 		// restart onto the same state every delivery and look like a
 		// crash-loop. The error names the missing Role instead.
@@ -1214,7 +1214,7 @@ func (w *spokeWire) handleHubUpgrade(targetSHA string) {
 					"last_error", m.LastError,
 					"hint", "the spoke must be able to get/patch its own Deployment; check the hive-self-upgrade Role/RoleBinding in this namespace",
 				)
-				hub.ReportUpgradeFailure(w.hubURL, w.cfg.HiveID, targetSHA, gitShort,
+				spoke.ReportUpgradeFailure(w.hubURL, w.cfg.HiveID, targetSHA, gitShort,
 					upgradeFailureSummary(m.Attempts, m.LastError), w.logger)
 				return
 			}
@@ -1279,14 +1279,14 @@ func (w *spokeWire) handleHubUpgrade(targetSHA string) {
 		"uptime", uptime.Round(time.Second),
 	)
 
-	hub.SendUpgradingHeartbeat(w.hubURL, w.buildUpgradingHeartbeatPayload, targetSHA, w.logger)
+	spoke.SendUpgradingHeartbeat(w.hubURL, w.buildUpgradingHeartbeatPayload, targetSHA, w.logger)
 
 	// A plain rollout restart only advances a deployment tracking a
 	// MUTABLE tag. On a SHA-pinned deployment it relaunches the very
 	// same image, so the hive reports the old hash and the hub re-sends
 	// this upgrade every heartbeat — a restart loop that never lands.
 	// UpgradeSelfToSHA patches the image instead when we are pinned.
-	needsRestart, err := hub.UpgradeSelfToSHA(w.logger, targetSHA)
+	needsRestart, err := spoke.UpgradeSelfToSHA(w.logger, targetSHA)
 	if err != nil {
 		w.logger.Warn("pinned-image upgrade failed, falling back to rolling restart",
 			"target", targetSHA, "error", err)
@@ -1294,7 +1294,7 @@ func (w *spokeWire) handleHubUpgrade(targetSHA string) {
 		needsRestart = true
 	}
 	if needsRestart {
-		if err := hub.RolloutRestartSelf(w.logger); err != nil {
+		if err := spoke.RolloutRestartSelf(w.logger); err != nil {
 			// This is the wedge. os.Exit here restarts the pod onto the
 			// SAME image, so the upgrade silently never lands. It is an
 			// ERROR, not a Warn, and the cause (typically a 403 because
@@ -1308,7 +1308,7 @@ func (w *spokeWire) handleHubUpgrade(targetSHA string) {
 				"hint", "grant get/patch on deployments/hive in this namespace (hive-self-upgrade Role/RoleBinding)",
 			)
 			recordUpgradeError(upgradeMarkerPath, err, w.logger)
-			hub.ReportUpgradeFailure(w.hubURL, w.cfg.HiveID, targetSHA, gitShort, err.Error(), w.logger)
+			spoke.ReportUpgradeFailure(w.hubURL, w.cfg.HiveID, targetSHA, gitShort, err.Error(), w.logger)
 			// Exit NON-ZERO. Exiting 0 on a failed upgrade told Kubernetes
 			// the process had completed successfully, so the restart looked
 			// routine and nothing — not the pod's exit code, not an event,
@@ -1326,30 +1326,30 @@ func (w *spokeWire) handleHubUpgrade(targetSHA string) {
 
 }
 
-func (w *spokeWire) buildUpgradingHeartbeatPayload() *hub.HeartbeatPayload {
+func (w *spokeWire) buildUpgradingHeartbeatPayload() *spoke.HeartbeatPayload {
 	if !w.cfg.Hub.Enabled {
 		return nil
 	}
 	statuses := w.agentMgr.AllStatuses()
 	govState := w.gov.GetState()
 	currentMode := strings.ToLower(string(govState.Mode))
-	agents := make([]hub.AgentSummary, 0, len(statuses))
+	agents := make([]spoke.AgentSummary, 0, len(statuses))
 	for name, proc := range statuses {
 		mode := ""
 		if ac, ok := w.cfg.Agents[name]; (ok && ac.OnDemand) || w.onDemandFromPack[name] {
 			mode = "on_demand"
 		}
-		agents = append(agents, hub.NewAgentSummary(name, string(proc.State), mode,
-			hub.AgentActivityFor(w.agentMgr, w.cfg, govState, currentMode, name, proc, w.onDemandFromPack)))
+		agents = append(agents, spoke.NewAgentSummary(name, string(proc.State), mode,
+			spoke.AgentActivityFor(w.agentMgr, w.cfg, govState, currentMode, name, proc, w.onDemandFromPack)))
 	}
 	acmmLvl := 0
 	if w.cfg.ACMMLevel != nil {
 		acmmLvl = *w.cfg.ACMMLevel
 	}
-	providerLimitReason, providerLimitRebuffs, providerLimitHiveWide, providerLimitAgents := hub.ProviderLimitHeartbeatFields(agents, dashboard.InferenceBudgetExceeded)
+	providerLimitReason, providerLimitRebuffs, providerLimitHiveWide, providerLimitAgents := spoke.ProviderLimitHeartbeatFields(agents, dashboard.InferenceBudgetExceeded)
 	lastWriteKickAt, kickDisposition, kickSkipReason, notWritableQueued :=
 		outputFreshnessHeartbeatFields(acmmLvl, govState, agents)
-	return &hub.HeartbeatPayload{
+	return &spoke.HeartbeatPayload{
 		HiveID: w.cfg.HiveID,
 		Org:    w.cfg.Project.Org,
 		// Project identity rides even this minimal beat. The hub

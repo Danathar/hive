@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/hivecommons/hive/pkg/config"
-	hub "github.com/hivecommons/hive/pkg/hub/spoke"
+	spoke "github.com/hivecommons/hive/pkg/hub/spoke"
 )
 
 // prospectiveGitHubIdentity must mirror the adoption rules in
@@ -21,7 +21,7 @@ func TestProspectiveIdentity_IncidentPushIsRejected(t *testing.T) {
 	}
 	// The 2026-07-31 push: the GHE App, with no api_url (this channel has no
 	// field for one).
-	push := &hub.HeartbeatGitHubAppConfig{
+	push := &spoke.HeartbeatGitHubAppConfig{
 		AppID:   config.EnterpriseGitHubAppID,
 		AppSlug: config.EnterpriseGitHubAppSlug,
 	}
@@ -56,7 +56,7 @@ func TestProspectiveIdentity_IncidentPushIsRejected(t *testing.T) {
 // app_id is dropped from the prospective identity, the guard is decorative.
 func TestProspectiveIdentity_AppIDAloneIsEnoughToReject(t *testing.T) {
 	cur := config.GitHubConfig{AppID: config.PublicGitHubAppID} // healthy public spoke, all URLs empty
-	push := &hub.HeartbeatGitHubAppConfig{AppID: config.EnterpriseGitHubAppID}
+	push := &spoke.HeartbeatGitHubAppConfig{AppID: config.EnterpriseGitHubAppID}
 
 	prospective := prospectiveGitHubIdentity(cur, push)
 	if prospective == nil {
@@ -72,7 +72,7 @@ func TestProspectiveIdentity_AppIDAloneIsEnoughToReject(t *testing.T) {
 
 func TestProspectiveIdentity_HealthyPushIsAccepted(t *testing.T) {
 	cur := config.GitHubConfig{AppID: config.PlaceholderAppID}
-	push := &hub.HeartbeatGitHubAppConfig{
+	push := &spoke.HeartbeatGitHubAppConfig{
 		AppID:   config.PublicGitHubAppID,
 		AppSlug: config.PublicGitHubAppSlug,
 	}
@@ -89,7 +89,7 @@ func TestProspectiveIdentity_GHEPushOntoAGHESpokeIsAccepted(t *testing.T) {
 	// A GHE spoke already carrying its api_url. Receiving its own cluster's App
 	// is consistent and must apply.
 	cur := config.GitHubConfig{APIURL: config.EnterpriseGitHubAPIURL}
-	push := &hub.HeartbeatGitHubAppConfig{
+	push := &spoke.HeartbeatGitHubAppConfig{
 		AppID:   config.EnterpriseGitHubAppID,
 		AppSlug: config.EnterpriseGitHubAppSlug,
 	}
@@ -105,11 +105,11 @@ func TestProspectiveIdentity_GHEPushOntoAGHESpokeIsAccepted(t *testing.T) {
 func TestProspectiveIdentity_NoIdentityFieldsMeansNothingToValidate(t *testing.T) {
 	cur := config.GitHubConfig{AppID: config.PublicGitHubAppID, AppSlug: config.PublicGitHubAppSlug}
 	// A key-only delivery: the common case, and it must not be gated.
-	if got := prospectiveGitHubIdentity(cur, &hub.HeartbeatGitHubAppConfig{PrivateKey: "pem"}); got != nil {
+	if got := prospectiveGitHubIdentity(cur, &spoke.HeartbeatGitHubAppConfig{PrivateKey: "pem"}); got != nil {
 		t.Errorf("a key-only push produced a prospective identity %+v, want nil", got)
 	}
 	// An echo of the values we already hold.
-	if got := prospectiveGitHubIdentity(cur, &hub.HeartbeatGitHubAppConfig{AppSlug: config.PublicGitHubAppSlug}); got != nil {
+	if got := prospectiveGitHubIdentity(cur, &spoke.HeartbeatGitHubAppConfig{AppSlug: config.PublicGitHubAppSlug}); got != nil {
 		t.Errorf("a no-op slug echo produced a prospective identity %+v, want nil", got)
 	}
 	if got := prospectiveGitHubIdentity(cur, nil); got != nil {
@@ -121,7 +121,7 @@ func TestProspectiveIdentity_PlaceholderIsNeverAdopted(t *testing.T) {
 	// Mirrors the callback: the placeholder sentinel must not overwrite a real
 	// app_id, so it must not appear in the prospective identity either.
 	cur := config.GitHubConfig{AppID: config.EnterpriseGitHubAppID, APIURL: config.EnterpriseGitHubAPIURL}
-	got := prospectiveGitHubIdentity(cur, &hub.HeartbeatGitHubAppConfig{AppID: config.PlaceholderAppID})
+	got := prospectiveGitHubIdentity(cur, &spoke.HeartbeatGitHubAppConfig{AppID: config.PlaceholderAppID})
 	if got != nil {
 		t.Fatalf("the placeholder sentinel was treated as an adoption: %+v", got)
 	}

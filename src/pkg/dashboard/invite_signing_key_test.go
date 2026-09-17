@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	hub "github.com/hivecommons/hive/pkg/hub/spoke"
+	spoke "github.com/hivecommons/hive/pkg/hub/spoke"
 )
 
 // Invite tokens are HMAC-signed with inviteSigningSecret(). Historically that key
@@ -55,7 +55,7 @@ func TestInviteSigningSecretSelfDerivesPerHive(t *testing.T) {
 	resetInviteSecretForTest(t)
 
 	got := string(inviteSigningSecret())
-	want := hub.SpokeInviteKey()
+	want := spoke.SpokeInviteKey()
 	if got != want {
 		t.Fatalf("inviteSigningSecret() = %q, want the self-derived per-hive key %q", got, want)
 	}

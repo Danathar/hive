@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/hivecommons/hive/pkg/config"
-	hub "github.com/hivecommons/hive/pkg/hub/spoke"
+	spoke "github.com/hivecommons/hive/pkg/hub/spoke"
 	"github.com/hivecommons/hive/pkg/terminalassert"
 )
 
@@ -159,7 +159,7 @@ func TestHandleCreateTerminalHandoff_RoleForbiddenContentType(t *testing.T) {
 // #6489 reported (masked further by nginx's error-page rewrite, #6494/#6496).
 func TestHandleCreateTerminalHandoff_NoHubLanesFallsBackAndSucceeds(t *testing.T) {
 	s := newRenewServer(t, "hosted-alpha")
-	t.Setenv(hub.EnvTerminalKey, "")
+	t.Setenv(spoke.EnvTerminalKey, "")
 	t.Setenv("HIVE_HUB_SECRET", "")
 	t.Setenv(terminalassert.EnvFallbackKeyDir, t.TempDir())
 

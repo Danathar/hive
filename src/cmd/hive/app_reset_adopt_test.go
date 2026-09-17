@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/hivecommons/hive/pkg/config"
-	hub "github.com/hivecommons/hive/pkg/hub/spoke"
+	spoke "github.com/hivecommons/hive/pkg/hub/spoke"
 )
 
 // These tests drive nextInstallationID — the REAL decision in main.go — not a
@@ -12,7 +12,7 @@ import (
 // stayed green when the production branch was disabled entirely, which is the
 // same "tested the thing beside the change" flaw that let four checks pass
 // while testing nothing this week.
-func applyInstallation(cur config.GitHubConfig, ghCfg *hub.HeartbeatGitHubAppConfig) config.GitHubConfig {
+func applyInstallation(cur config.GitHubConfig, ghCfg *spoke.HeartbeatGitHubAppConfig) config.GitHubConfig {
 	next := cur
 	next.InstallationID, _ = nextInstallationID(cur.InstallationID, ghCfg)
 	return next
@@ -29,7 +29,7 @@ func applyInstallation(cur config.GitHubConfig, ghCfg *hub.HeartbeatGitHubAppCon
 func TestPushedZeroStillCannotBlankAnInstallation(t *testing.T) {
 	cur := config.GitHubConfig{AppID: config.PublicGitHubAppID, InstallationID: 145050760}
 
-	got := applyInstallation(cur, &hub.HeartbeatGitHubAppConfig{AppID: config.PublicGitHubAppID})
+	got := applyInstallation(cur, &spoke.HeartbeatGitHubAppConfig{AppID: config.PublicGitHubAppID})
 	if got.InstallationID != 145050760 {
 		t.Fatalf("a pushed zero blanked a working installation (%d) — this is the outage the guard prevents", got.InstallationID)
 	}
@@ -45,7 +45,7 @@ func TestResetFlagClearsTheInstallation(t *testing.T) {
 		t.Fatal("precondition: the hive should start with a usable App")
 	}
 
-	got := applyInstallation(cur, &hub.HeartbeatGitHubAppConfig{ResetInstallation: true})
+	got := applyInstallation(cur, &spoke.HeartbeatGitHubAppConfig{ResetInstallation: true})
 	if got.InstallationID != 0 {
 		t.Fatalf("reset did not clear the installation: %d", got.InstallationID)
 	}
@@ -63,7 +63,7 @@ func TestResetFlagClearsTheInstallation(t *testing.T) {
 // reset. The hub never sends both, but the spoke should not depend on that.
 func TestResetWins(t *testing.T) {
 	cur := config.GitHubConfig{AppID: config.PublicGitHubAppID, InstallationID: 145050760}
-	got := applyInstallation(cur, &hub.HeartbeatGitHubAppConfig{
+	got := applyInstallation(cur, &spoke.HeartbeatGitHubAppConfig{
 		ResetInstallation: true, InstallationID: 999999,
 	})
 	if got.InstallationID != 0 {

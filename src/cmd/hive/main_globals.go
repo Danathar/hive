@@ -34,7 +34,7 @@ import (
 	"github.com/hivecommons/hive/pkg/appkey"
 	"github.com/hivecommons/hive/pkg/config"
 	"github.com/hivecommons/hive/pkg/github"
-	hub "github.com/hivecommons/hive/pkg/hub/spoke"
+	spoke "github.com/hivecommons/hive/pkg/hub/spoke"
 	"github.com/hivecommons/hive/pkg/mint"
 )
 
@@ -154,7 +154,7 @@ func defaultPersistPaths() persistPaths {
 // state is a combination of PUSHED and EXISTING fields (a GHE app_id landing
 // beside the spoke's own empty api_url), and validating the push in isolation
 // cannot see it.
-func prospectiveGitHubIdentity(cur config.GitHubConfig, ghCfg *hub.HeartbeatGitHubAppConfig) *config.GitHubConfig {
+func prospectiveGitHubIdentity(cur config.GitHubConfig, ghCfg *spoke.HeartbeatGitHubAppConfig) *config.GitHubConfig {
 	if ghCfg == nil {
 		return nil
 	}
@@ -223,7 +223,7 @@ func prospectiveGitHubIdentity(cur config.GitHubConfig, ghCfg *hub.HeartbeatGitH
 // same installation) surviving a reset that correctly cleared only
 // installation_id. On a flip-back to the original App it becomes valid again
 // on its own.
-func nextInstallationID(current int64, ghCfg *hub.HeartbeatGitHubAppConfig) (next int64, reset bool) {
+func nextInstallationID(current int64, ghCfg *spoke.HeartbeatGitHubAppConfig) (next int64, reset bool) {
 	if ghCfg == nil {
 		return current, false
 	}
@@ -298,15 +298,15 @@ func githubAppTokenHeartbeatFields(cfg *config.Config, detail string) (status, l
 	info, err := os.Stat(githubAppTokenCachePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return hub.GitHubAppTokenStatusMissing, "", detail
+			return spoke.GitHubAppTokenStatusMissing, "", detail
 		}
-		return hub.GitHubAppTokenStatusError, "", err.Error()
+		return spoke.GitHubAppTokenStatusError, "", err.Error()
 	}
 	lastMintAt = info.ModTime().UTC().Format(time.RFC3339)
-	if time.Since(info.ModTime()) > hub.GitHubAppTokenStaleAfter {
-		return hub.GitHubAppTokenStatusStale, lastMintAt, detail
+	if time.Since(info.ModTime()) > spoke.GitHubAppTokenStaleAfter {
+		return spoke.GitHubAppTokenStatusStale, lastMintAt, detail
 	}
-	return hub.GitHubAppTokenStatusOK, lastMintAt, ""
+	return spoke.GitHubAppTokenStatusOK, lastMintAt, ""
 }
 
 // githubAuth is the outcome of resolving this hive's GitHub credentials at

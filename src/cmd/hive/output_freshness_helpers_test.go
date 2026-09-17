@@ -6,7 +6,7 @@ import (
 
 	"github.com/hivecommons/hive/pkg/agent"
 	"github.com/hivecommons/hive/pkg/governor"
-	hub "github.com/hivecommons/hive/pkg/hub/spoke"
+	spoke "github.com/hivecommons/hive/pkg/hub/spoke"
 	"github.com/hivecommons/hive/pkg/snapshot"
 )
 
@@ -20,16 +20,16 @@ import (
 //   - firstNonEmpty — whitespace-skipping first-value picker
 
 func TestAgentCanProduceJudgedOutput(t *testing.T) {
-	all := hub.AgentSummary{CanOpenIssue: true, CanOpenPR: true, CanMerge: true}
-	issueOnly := hub.AgentSummary{CanOpenIssue: true}
-	prOnly := hub.AgentSummary{CanOpenPR: true}
-	mergeOnly := hub.AgentSummary{CanMerge: true}
-	none := hub.AgentSummary{}
+	all := spoke.AgentSummary{CanOpenIssue: true, CanOpenPR: true, CanMerge: true}
+	issueOnly := spoke.AgentSummary{CanOpenIssue: true}
+	prOnly := spoke.AgentSummary{CanOpenPR: true}
+	mergeOnly := spoke.AgentSummary{CanMerge: true}
+	none := spoke.AgentSummary{}
 
 	cases := []struct {
 		name  string
 		level int
-		agent hub.AgentSummary
+		agent spoke.AgentSummary
 		want  bool
 	}{
 		{"level 0 never judged", 0, all, false},
@@ -53,48 +53,48 @@ func TestAgentCanProduceJudgedOutput(t *testing.T) {
 }
 
 func TestOutputFreshnessDispositionPrecedence(t *testing.T) {
-	writer := hub.AgentSummary{Name: "quality", CanOpenPR: true}
+	writer := spoke.AgentSummary{Name: "quality", CanOpenPR: true}
 
 	cases := []struct {
 		name            string
 		acmmLevel       int
 		gov             governor.State
-		agents          []hub.AgentSummary
+		agents          []spoke.AgentSummary
 		wantDisposition string
 	}{
 		{
 			name:            "advisory band wins even with queued work",
 			acmmLevel:       2,
 			gov:             governor.State{QueueIssues: 3, BudgetExhausted: true},
-			agents:          []hub.AgentSummary{writer},
+			agents:          []spoke.AgentSummary{writer},
 			wantDisposition: "advisory-only",
 		},
 		{
 			name:            "budget exhaustion beats queue state",
 			acmmLevel:       4,
 			gov:             governor.State{QueueIssues: 3, BudgetExhausted: true},
-			agents:          []hub.AgentSummary{writer},
+			agents:          []spoke.AgentSummary{writer},
 			wantDisposition: "budget-suppressed",
 		},
 		{
 			name:            "held-only queue is agent-decided-not-writable",
 			acmmLevel:       4,
 			gov:             governor.State{QueueHold: 2},
-			agents:          []hub.AgentSummary{writer},
+			agents:          []spoke.AgentSummary{writer},
 			wantDisposition: "agent-decided-not-writable",
 		},
 		{
 			name:            "empty queue is idle",
 			acmmLevel:       4,
 			gov:             governor.State{},
-			agents:          []hub.AgentSummary{writer},
+			agents:          []spoke.AgentSummary{writer},
 			wantDisposition: "idle",
 		},
 		{
 			name:            "queued work but no cadences means no due agents",
 			acmmLevel:       4,
 			gov:             governor.State{QueueIssues: 1},
-			agents:          []hub.AgentSummary{writer},
+			agents:          []spoke.AgentSummary{writer},
 			wantDisposition: "no-due-agents",
 		},
 		{
@@ -107,7 +107,7 @@ func TestOutputFreshnessDispositionPrecedence(t *testing.T) {
 				},
 				LastKick: map[string]time.Time{},
 			},
-			agents:          []hub.AgentSummary{writer},
+			agents:          []spoke.AgentSummary{writer},
 			wantDisposition: "kick-capable",
 		},
 		{
@@ -120,7 +120,7 @@ func TestOutputFreshnessDispositionPrecedence(t *testing.T) {
 				},
 				LastKick: map[string]time.Time{},
 			},
-			agents:          []hub.AgentSummary{writer},
+			agents:          []spoke.AgentSummary{writer},
 			wantDisposition: "no-due-agents",
 		},
 		{
@@ -133,7 +133,7 @@ func TestOutputFreshnessDispositionPrecedence(t *testing.T) {
 				},
 				LastKick: map[string]time.Time{"quality": time.Now().Add(-time.Minute)},
 			},
-			agents:          []hub.AgentSummary{writer},
+			agents:          []spoke.AgentSummary{writer},
 			wantDisposition: "no-due-agents",
 		},
 		{
@@ -146,7 +146,7 @@ func TestOutputFreshnessDispositionPrecedence(t *testing.T) {
 				},
 				LastKick: map[string]time.Time{},
 			},
-			agents:          []hub.AgentSummary{{Name: "brainstorm"}},
+			agents:          []spoke.AgentSummary{{Name: "brainstorm"}},
 			wantDisposition: "no-due-agents",
 		},
 	}
@@ -176,7 +176,7 @@ func TestOutputFreshnessLastWriteKickAt(t *testing.T) {
 			"brainstorm": newest, // most recent kick, but agent cannot write
 		},
 	}
-	agents := []hub.AgentSummary{
+	agents := []spoke.AgentSummary{
 		{Name: "quality", CanOpenPR: true},
 		{Name: "scanner", CanOpenIssue: true},
 		{Name: "brainstorm"}, // advisory-only: no capabilities
@@ -195,7 +195,7 @@ func TestOutputFreshnessLastWriteKickAt(t *testing.T) {
 }
 
 func TestOutputFreshnessNoKicksYieldsEmptyTimestamp(t *testing.T) {
-	lastKick, _, _, _ := outputFreshnessHeartbeatFields(4, governor.State{}, []hub.AgentSummary{
+	lastKick, _, _, _ := outputFreshnessHeartbeatFields(4, governor.State{}, []spoke.AgentSummary{
 		{Name: "quality", CanOpenPR: true},
 	})
 	if lastKick != "" {

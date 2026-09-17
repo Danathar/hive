@@ -5,10 +5,10 @@ import (
 
 	"github.com/hivecommons/hive/pkg/config"
 	"github.com/hivecommons/hive/pkg/governor"
-	hub "github.com/hivecommons/hive/pkg/hub/spoke"
+	spoke "github.com/hivecommons/hive/pkg/hub/spoke"
 )
 
-func outputFreshnessHeartbeatFields(acmmLevel int, govState governor.State, agents []hub.AgentSummary) (lastWriteKickAt, disposition, reason string, notWritableQueued int) {
+func outputFreshnessHeartbeatFields(acmmLevel int, govState governor.State, agents []spoke.AgentSummary) (lastWriteKickAt, disposition, reason string, notWritableQueued int) {
 	notWritableQueued = govState.QueueHold
 	var newest time.Time
 	for _, a := range agents {
@@ -77,7 +77,7 @@ func outputFreshnessHeartbeatFields(acmmLevel int, govState governor.State, agen
 	return lastWriteKickAt, disposition, reason, notWritableQueued
 }
 
-func agentCanProduceJudgedOutput(acmmLevel int, a hub.AgentSummary) bool {
+func agentCanProduceJudgedOutput(acmmLevel int, a spoke.AgentSummary) bool {
 	switch {
 	case acmmLevel >= 6:
 		return a.CanMerge

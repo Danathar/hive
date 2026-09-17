@@ -12,7 +12,7 @@ import (
 	"time"
 
 	ghpkg "github.com/hivecommons/hive/pkg/github"
-	hub "github.com/hivecommons/hive/pkg/hub/spoke"
+	spoke "github.com/hivecommons/hive/pkg/hub/spoke"
 )
 
 // #7262: every version surface on the spoke must be measured against the
@@ -29,14 +29,14 @@ func TestResolveUpgradeTargetPrecedence(t *testing.T) {
 	}
 
 	// Hub-managed channel spoke: the channel revision wins over the branch tip.
-	p := &hub.HeartbeatUpgradePolicy{HubManaged: true, Branch: "v5", Channel: "edge", TargetSHA: "6a5b337", TargetResolved: true, Schedule: "instant"}
+	p := &spoke.HeartbeatUpgradePolicy{HubManaged: true, Branch: "v5", Channel: "edge", TargetSHA: "6a5b337", TargetResolved: true, Schedule: "instant"}
 	got = resolveUpgradeTarget(p, "v5", "5193426abcdef")
 	if got.Source != upgradeTargetSourceHub || got.Short != "6a5b337" || got.Channel != "edge" || got.ManagedBy != autoUpdateManagedByHub {
 		t.Errorf("hub target = %+v, want channel revision 6a5b337 managed by hub", got)
 	}
 
 	// Unresolved channel: no SHA, Resolved=false — the UI must say unknown.
-	p = &hub.HeartbeatUpgradePolicy{HubManaged: true, Branch: "v4", Channel: "stable", TargetResolved: false}
+	p = &spoke.HeartbeatUpgradePolicy{HubManaged: true, Branch: "v4", Channel: "stable", TargetResolved: false}
 	got = resolveUpgradeTarget(p, "v4", "526ef71abcdef")
 	if got.Resolved || got.SHA != "" {
 		t.Errorf("unresolved target = %+v, want no SHA and Resolved=false (branch tip must never stand in for a channel)", got)
@@ -44,7 +44,7 @@ func TestResolveUpgradeTargetPrecedence(t *testing.T) {
 
 	// Spoke-managed branch spoke whose hub has no verified image yet: the
 	// branch tip is the same answer the hub would give.
-	p = &hub.HeartbeatUpgradePolicy{SpokeManaged: true, Branch: "v4", TargetResolved: true, Paused: true}
+	p = &spoke.HeartbeatUpgradePolicy{SpokeManaged: true, Branch: "v4", TargetResolved: true, Paused: true}
 	got = resolveUpgradeTarget(p, "v4", "526ef71abcdef")
 	if got.Short != "526ef71" || got.ManagedBy != autoUpdateManagedBySpoke || !got.Paused {
 		t.Errorf("spoke-managed target = %+v, want branch tip, managed by spoke, paused", got)
@@ -59,7 +59,7 @@ func TestBuildAutoUpdateStatusHubPolicyOverridesLocalFlag(t *testing.T) {
 	// The hub is the authority.
 	st := buildAutoUpdateStatus(autoUpdateInputs{
 		Enabled: false, Period: "",
-		Policy:        &hub.HeartbeatUpgradePolicy{HubManaged: true, Schedule: "instant", Branch: "v5", Channel: "edge", TargetSHA: "6a5b337", TargetResolved: true},
+		Policy:        &spoke.HeartbeatUpgradePolicy{HubManaged: true, Schedule: "instant", Branch: "v5", Channel: "edge", TargetSHA: "6a5b337", TargetResolved: true},
 		TargetBranch:  "v5",
 		TargetChannel: "edge",
 		TargetCommit:  "6a5b337",
@@ -69,7 +69,7 @@ func TestBuildAutoUpdateStatusHubPolicyOverridesLocalFlag(t *testing.T) {
 	if !st.Enabled || st.ManagedBy != autoUpdateManagedByHub || st.PolicySource != upgradeTargetSourceHub {
 		t.Errorf("Enabled=%v ManagedBy=%q PolicySource=%q, want enabled/hub/hub", st.Enabled, st.ManagedBy, st.PolicySource)
 	}
-	if st.Period != hub.AutoUpgradeModeInstant {
+	if st.Period != spoke.AutoUpgradeModeInstant {
 		t.Errorf("Period = %q, want instant from the hub (local mode was empty)", st.Period)
 	}
 	if st.State != autoUpdateStateUpToDate || !st.Healthy {
@@ -82,7 +82,7 @@ func TestBuildAutoUpdateStatusHubPolicyOverridesLocalFlag(t *testing.T) {
 	// Paused fleet-wide: deliberate, so healthy, but never "up to date" and
 	// the behind count is still surfaced.
 	st = buildAutoUpdateStatus(autoUpdateInputs{
-		Policy:        &hub.HeartbeatUpgradePolicy{HubManaged: true, Schedule: "daily", Paused: true, TargetResolved: true},
+		Policy:        &spoke.HeartbeatUpgradePolicy{HubManaged: true, Schedule: "daily", Paused: true, TargetResolved: true},
 		TargetBranch:  "v4",
 		CommitsBehind: &three,
 	})
@@ -96,7 +96,7 @@ func TestBuildAutoUpdateStatusHubPolicyOverridesLocalFlag(t *testing.T) {
 	// Hub says nobody manages it: disabled, in the hub's voice.
 	st = buildAutoUpdateStatus(autoUpdateInputs{
 		Enabled: true, // stale local flag must not win
-		Policy:  &hub.HeartbeatUpgradePolicy{TargetResolved: true},
+		Policy:  &spoke.HeartbeatUpgradePolicy{TargetResolved: true},
 	})
 	if st.Enabled || st.State != autoUpdateStateDisabled || st.ManagedBy != "" {
 		t.Errorf("nobody-manages: %+v", st)
@@ -107,7 +107,7 @@ func TestBuildAutoUpdateStatusHubPolicyOverridesLocalFlag(t *testing.T) {
 
 	// Unresolved channel: unknown, never healthy, and says WHY.
 	st = buildAutoUpdateStatus(autoUpdateInputs{
-		Policy: &hub.HeartbeatUpgradePolicy{HubManaged: true, Channel: "stable", TargetResolved: false},
+		Policy: &spoke.HeartbeatUpgradePolicy{HubManaged: true, Channel: "stable", TargetResolved: false},
 	})
 	if st.State != autoUpdateStateUnknown || st.Healthy {
 		t.Errorf("unresolved: state=%q healthy=%v", st.State, st.Healthy)
@@ -119,7 +119,7 @@ func TestBuildAutoUpdateStatusHubPolicyOverridesLocalFlag(t *testing.T) {
 	// No policy at all (older hub / unmanaged): the local flag still rules and
 	// PolicySource says so.
 	st = buildAutoUpdateStatus(autoUpdateInputs{Enabled: true, Period: "weekly", CommitsBehind: &zero})
-	if st.PolicySource != "local" || st.ManagedBy != autoUpdateManagedBySpoke || st.Period != hub.AutoUpgradeModeWeekly {
+	if st.PolicySource != "local" || st.ManagedBy != autoUpdateManagedBySpoke || st.Period != spoke.AutoUpgradeModeWeekly {
 		t.Errorf("local fallback: %+v", st)
 	}
 }
@@ -181,7 +181,7 @@ func TestHandleVersionUsesHubUpgradePolicyTarget(t *testing.T) {
 	deps.GHClient = ghpkg.NewClientForTest(ghSrv.URL, "myorg", []string{"repo1"}, logger)
 	s.RegisterAPI(deps)
 
-	s.SetHubUpgradePolicy(&hub.HeartbeatUpgradePolicy{
+	s.SetHubUpgradePolicy(&spoke.HeartbeatUpgradePolicy{
 		HubManaged: true, Schedule: "daily", Branch: "v4", Channel: "edge",
 		TargetSHA: "6a5b337", TargetResolved: true,
 	})

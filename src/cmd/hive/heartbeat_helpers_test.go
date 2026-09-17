@@ -8,7 +8,7 @@ import (
 
 	"github.com/hivecommons/hive/pkg/agent"
 	"github.com/hivecommons/hive/pkg/config"
-	hub "github.com/hivecommons/hive/pkg/hub/spoke"
+	spoke "github.com/hivecommons/hive/pkg/hub/spoke"
 )
 
 // quotaExhaustedProcessCount must count ONLY running, unpaused processes whose
@@ -22,10 +22,10 @@ func TestQuotaExhaustedProcessCount(t *testing.T) {
 		"has-quota":  {State: agent.StateRunning, QuotaExhausted: false},
 		"nil-status": nil,
 	}
-	if got := hub.QuotaExhaustedProcessCount(statuses); got != 1 {
+	if got := spoke.QuotaExhaustedProcessCount(statuses); got != 1 {
 		t.Errorf("quotaExhaustedProcessCount = %d, want 1", got)
 	}
-	if got := hub.QuotaExhaustedProcessCount(nil); got != 0 {
+	if got := spoke.QuotaExhaustedProcessCount(nil); got != 0 {
 		t.Errorf("hub.QuotaExhaustedProcessCount(nil) = %d, want 0", got)
 	}
 }
@@ -70,13 +70,13 @@ func TestGitHubAppTokenHeartbeatFieldsNoApp(t *testing.T) {
 // quotaExhaustedAgentReason must be empty for a zero/negative count so the
 // heartbeat never carries a vacuous provider-limit reason.
 func TestQuotaExhaustedAgentReason(t *testing.T) {
-	if got := hub.QuotaExhaustedAgentReason(0); got != "" {
+	if got := spoke.QuotaExhaustedAgentReason(0); got != "" {
 		t.Errorf("hub.QuotaExhaustedAgentReason(0) = %q, want empty", got)
 	}
-	if got := hub.QuotaExhaustedAgentReason(-1); got != "" {
+	if got := spoke.QuotaExhaustedAgentReason(-1); got != "" {
 		t.Errorf("hub.QuotaExhaustedAgentReason(-1) = %q, want empty", got)
 	}
-	if got := hub.QuotaExhaustedAgentReason(3); got != "3 agent(s) out of provider quota" {
+	if got := spoke.QuotaExhaustedAgentReason(3); got != "3 agent(s) out of provider quota" {
 		t.Errorf("hub.QuotaExhaustedAgentReason(3) = %q", got)
 	}
 }
@@ -89,7 +89,7 @@ func TestGitHubAppTokenHeartbeatFields_UsesInjectableCachePath(t *testing.T) {
 
 	githubAppTokenCachePath = filepath.Join(t.TempDir(), "missing.cache")
 	status, minted, lastErr := githubAppTokenHeartbeatFields(cfg, detail)
-	if status != hub.GitHubAppTokenStatusMissing || minted != "" || lastErr != detail {
+	if status != spoke.GitHubAppTokenStatusMissing || minted != "" || lastErr != detail {
 		t.Fatalf("missing cache = %q/%q/%q, want missing/empty/detail", status, minted, lastErr)
 	}
 
@@ -99,16 +99,16 @@ func TestGitHubAppTokenHeartbeatFields_UsesInjectableCachePath(t *testing.T) {
 	}
 	githubAppTokenCachePath = nowPath
 	status, minted, lastErr = githubAppTokenHeartbeatFields(cfg, detail)
-	if status != hub.GitHubAppTokenStatusOK || minted == "" || lastErr != "" {
+	if status != spoke.GitHubAppTokenStatusOK || minted == "" || lastErr != "" {
 		t.Fatalf("fresh cache = %q/%q/%q, want ok/minted/empty", status, minted, lastErr)
 	}
 
-	staleAt := time.Now().Add(-hub.GitHubAppTokenStaleAfter - time.Minute)
+	staleAt := time.Now().Add(-spoke.GitHubAppTokenStaleAfter - time.Minute)
 	if err := os.Chtimes(nowPath, staleAt, staleAt); err != nil {
 		t.Fatalf("stale cache: %v", err)
 	}
 	status, minted, lastErr = githubAppTokenHeartbeatFields(cfg, detail)
-	if status != hub.GitHubAppTokenStatusStale || minted == "" || lastErr != detail {
+	if status != spoke.GitHubAppTokenStatusStale || minted == "" || lastErr != detail {
 		t.Fatalf("stale cache = %q/%q/%q, want stale/minted/detail", status, minted, lastErr)
 	}
 
@@ -118,7 +118,7 @@ func TestGitHubAppTokenHeartbeatFields_UsesInjectableCachePath(t *testing.T) {
 	}
 	githubAppTokenCachePath = filepath.Join(parentFile, "token.cache")
 	status, minted, lastErr = githubAppTokenHeartbeatFields(cfg, detail)
-	if status != hub.GitHubAppTokenStatusError || minted != "" || lastErr == "" {
+	if status != spoke.GitHubAppTokenStatusError || minted != "" || lastErr == "" {
 		t.Fatalf("stat error = %q/%q/%q, want error/empty/error", status, minted, lastErr)
 	}
 }

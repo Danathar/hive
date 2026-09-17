@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/hivecommons/hive/pkg/config"
-	hub "github.com/hivecommons/hive/pkg/hub/spoke"
+	spoke "github.com/hivecommons/hive/pkg/hub/spoke"
 )
 
 // TestIdentityTravelsAsOneSet pins that the App and its forge URLs arrive
@@ -26,7 +26,7 @@ func TestIdentityTravelsAsOneSet(t *testing.T) {
 	}
 
 	t.Run("a complete public set is coherent and accepted", func(t *testing.T) {
-		got := prospectiveGitHubIdentity(cur, &hub.HeartbeatGitHubAppConfig{
+		got := prospectiveGitHubIdentity(cur, &spoke.HeartbeatGitHubAppConfig{
 			AppID:   config.PublicGitHubAppID,
 			AppSlug: config.PublicGitHubAppSlug,
 			APIURL:  config.DefaultGitHubAPIURL,
@@ -45,7 +45,7 @@ func TestIdentityTravelsAsOneSet(t *testing.T) {
 
 	t.Run("App WITHOUT its urls is caught as the half-set it is", func(t *testing.T) {
 		// The old shape: public app_id delivered while the GHE urls remain.
-		got := prospectiveGitHubIdentity(cur, &hub.HeartbeatGitHubAppConfig{
+		got := prospectiveGitHubIdentity(cur, &spoke.HeartbeatGitHubAppConfig{
 			AppID:   config.PublicGitHubAppID,
 			AppSlug: config.PublicGitHubAppSlug,
 		})
@@ -59,7 +59,7 @@ func TestIdentityTravelsAsOneSet(t *testing.T) {
 
 	t.Run("empty urls mean unchanged, never blank", func(t *testing.T) {
 		// A healthy GHE hive receiving a key-only refresh must keep its urls.
-		got := prospectiveGitHubIdentity(cur, &hub.HeartbeatGitHubAppConfig{
+		got := prospectiveGitHubIdentity(cur, &spoke.HeartbeatGitHubAppConfig{
 			AppID:      config.EnterpriseGitHubAppID,
 			PrivateKey: "x",
 		})
@@ -87,7 +87,7 @@ func TestGHEClaimAdoptedAsWholeSet(t *testing.T) {
 	}
 
 	t.Run("the complete GHE set is coherent and fully adopted", func(t *testing.T) {
-		got := prospectiveGitHubIdentity(publicStart, &hub.HeartbeatGitHubAppConfig{
+		got := prospectiveGitHubIdentity(publicStart, &spoke.HeartbeatGitHubAppConfig{
 			AppID:   config.EnterpriseGitHubAppID,
 			AppSlug: config.EnterpriseGitHubAppSlug,
 			APIURL:  config.EnterpriseGitHubAPIURL,
@@ -111,7 +111,7 @@ func TestGHEClaimAdoptedAsWholeSet(t *testing.T) {
 		// The regression shape: the GHE app_id/slug arrive but the urls do not, so
 		// the spoke would pair the GHE App with its own blank (public) urls —
 		// app_id 5686 aimed at api.github.com, "404 Integration not found".
-		got := prospectiveGitHubIdentity(publicStart, &hub.HeartbeatGitHubAppConfig{
+		got := prospectiveGitHubIdentity(publicStart, &spoke.HeartbeatGitHubAppConfig{
 			AppID:   config.EnterpriseGitHubAppID,
 			AppSlug: config.EnterpriseGitHubAppSlug,
 		})
