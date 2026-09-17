@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-17 (v4.40.1)
+
+### Fixed
+
+- Two Settings labels ("Cadence mode scope" and "Multi-repo threshold scaling") no longer show two overlapping tooltips on hover. They carried both a native `title=` attribute and a nested custom `.config-tooltip`; the redundant `title=` is removed and a guard test now rejects the combination anywhere in the dashboard.
+
 ## 2026-09-17 (v4.40.0)
 
 ### Added
