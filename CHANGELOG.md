@@ -11,6 +11,18 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-17 (v4.50.1)
+
+### Changed
+
+- Extracted the SaaS user registry and admin domain (user file persistence under /data/saas/users, require-admin gating, the admin users API, and admin impersonation start/exit/status — 17 functions plus their constants) from `pkg/hub/saas.go` into a new `pkg/hub/saas_users_admin.go`, the next stage of the #7278 god-file split. Pure code motion: no behavior change.
+- Extracted the crash-recovery and restart domain (crashed-agent detection and restart, bob relaunch-awaiting-key handling, session kills, CLI process reaping, and restart-count bookkeeping — 18 functions plus their types and constants) from `pkg/agent/manager.go` into a new `pkg/agent/manager_restart.go`, the next stage of the #7303 god-file split. Pure code motion: no behavior change.
+
+### Fixed
+
+- The PR list in kick prompts is now capped, as the issue list always was ([#7368](https://github.com/hivecommons/hive/issues/7368)). Issues were cut at 100 but PRs were rendered in full, so on a hive with 302 open PRs the PR section alone was ~36 KiB and the delivered kick measured 69.5 KiB — over three times the documented worst case — and took ~3 minutes to type into the agent, which is the window that made the restart-during-delivery loop of #7363 unrecoverable in practice. Every PR list a kick renders (actionable PRs, stale drafts, merge-eligible, CI-failing) now stops at `governor.kick_limits.max_prs` (default 50) and ends with an explicit "… and N more open PRs not listed" line so the agent knows the list is partial; the issue cap moved to the same block as `governor.kick_limits.max_issues` (default 100, unchanged). Zero or absent keeps the defaults; there is deliberately no "uncapped" setting.
+- `PUT /api/config/agent/{name}/models` now applies the new model/backend to the live launch configuration instead of only persisting it ([#7374](https://github.com/hivecommons/hive/issues/7374)). The launcher prefers an agent's runtime model/backend override — left behind by `/api/model`, `/api/switch`, a pin, or the governor's auto-selection — over the config value, and this endpoint only refreshed the config, so "set the model, then restart" returned `{"ok":true,"status":"updated"}`, wrote the new model to the overlay file, performed a real respawn, and still launched the old model (observed on a spoke: six agents corrected from `gpt-4o-mini-2024-07-18` to `auto`, every fresh PID still on `gpt-4o-mini`). The endpoint now sets the override to the saved value, exactly as the agent-config dialog and the card dropdowns do, restarts the agent once when the model, backend or reasoning effort actually changed, and reports `applied`/`restarted` in its response — with an explicit status and `restart_error` if the restart failed, rather than a silent success.
+
 ## 2026-09-17 (v4.50.0)
 
 ### Added
