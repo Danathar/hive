@@ -8,50 +8,6 @@ import (
 	"github.com/hivecommons/hive/pkg/config"
 )
 
-// ============================================================================
-// THE HIVE IDENTITY RESOLVER — ONE ANSWER TO ONE QUESTION
-// ============================================================================
-//
-// "What GitHub App identity does this hive have?" had FOUR independent answers
-// in this package, and they disagreed:
-//
-//	resolveProvisionAppID   (saas_provision.go) — provisioning.  CORRECT: honours
-//	                                              the hive's public pin over the
-//	                                              cluster default.
-//	appIdentityForCluster   (cluster_app_key.go) — the heartbeat answer.  WRONG:
-//	                                              keys on cluster ID alone.
-//	loadAppPrivateKey       (webhook.go)         — the key lookup.     WRONG:
-//	                                              receives the hive and never
-//	                                              reads hive.GitHubHost.
-//	forgeIdentityForTarget  (forge.go)           — the forge endpoint.
-//
-// Four answers to one question is the bug class. On 2026-07-31 a clusters.json
-// edit stamped the GHE App onto public-GitHub hives on the heartbeat-only cluster; a
-// hand-applied repair to torch-spyre was overwritten six seconds later:
-//
-//	16:44:11  using GitHub App authentication   app_id=3568013   (correct)
-//	16:44:17  hub delivered github app config   app_id=5686      (clobbered)
-//
-// The hive's own recorded intent — meta.json "github_host": "github.com" — was
-// structurally unreachable from the path that decided its identity.
-//
-// # THE SPOKE PULLS; THE HUB ANSWERS
-//
-// The spoke initiates the heartbeat and converges on the response. The hub has
-// no network path to the heartbeat-only cluster's API server at all, so there is no "push" to
-// fix. A spoke-side repair therefore cannot hold — the hub must answer
-// correctly, and every spoke then converges on its own next beat with no
-// per-spoke editing. That is what makes this one change repair the whole set.
-//
-// # WHY THIS KEYS ON app_id
-//
-// Every rule here is expressed in terms of app_id and the hive's recorded host.
-// It deliberately does NOT key on api_url/base_url/app_slug string markers:
-// those are EMPTY on ~41 of ~50 fleet spokes (the healthy console hive on
-// the hub-reachable cluster runs all three empty), so a marker-based rule is unreachable in
-// production while passing happily against hand-built fixtures. app_id is
-// always populated.
-
 // HiveIdentity is the complete App identity the hub believes a hive should
 // have. It is produced only by ResolveHiveIdentity, so no caller has to
 // re-derive any part of it.

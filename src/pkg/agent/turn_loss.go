@@ -1,51 +1,8 @@
 package agent
 
-// Measuring what a restart COSTS, not just how often it happens (#4002).
-//
-// RFC #4002 ("re-entrant conversation-as-state agent turn model") argues from
-// "frequent spoke rolls discard agent work". The step-1 spike
-// (src/docs/design/agent-turn-model.md) found that claim unsized and recorded
-// it as open question 3: `RestartCount` (src/pkg/snapshot/state.go) counts
-// restarts but says nothing about what each one cost, and the spike's own
-// closing line makes step 4's feasibility judgement depend on answering it.
-//
-// This file is that instrument. It records, durably, what hive discarded each
-// time it tore down an agent that was mid-turn.
-//
-// WHAT COUNTS AS AN INTERRUPTION
-//
-// A turn is interrupted when hive kills an agent's CLI and tmux session while
-// a delivered kick's output has not yet been rotated (`kickLogPending`) — the
-// restart and shutdown paths. Normal kick rotation is deliberately NOT counted:
-// a kick is only delivered to a pane sitting at its input marker, so rotation
-// means the previous turn finished. Counting it would drown the signal in
-// completed work.
-//
-// WHY TWO CLOCKS, AND WHY NEITHER ALONE IS HONEST
-//
-// `kickLogPending` means "output not yet archived", which is NOT the same as
-// "the turn was still running": an agent that finished its turn and then sat
-// idle for an hour still carries pending output, and charging that whole hour
-// to the restart would overstate the loss — the exact overclaim this RFC does
-// not need. So each record carries two independent quantities and one
-// threshold-free discriminator:
-//
-//   - SinceKick is teardown minus kick delivery. It is an UPPER BOUND on what
-//     the interruption could have cost, never a measurement of what it did.
-//   - SinceOutput is teardown minus the last observed pane change — how recently
-//     the agent was visibly doing anything. A large SinceOutput next to a large
-//     SinceKick says the agent was idle and little was actually lost.
-//   - Producing is true when the pane changed AFTER the kick landed, i.e. the
-//     agent produced something during this turn. It is binary and needs no
-//     threshold, which is why the aggregate carries it: "interruptions that hit
-//     an agent doing work" is answerable from the fleet without anyone first
-//     agreeing on how many idle seconds mean idle.
-//
-// Analysis discounts with SinceOutput; nothing here decides for it. Deciding
-// would be taking the RFC's step-4 judgement inside an instrument built to
-// inform it.
-
-import "time"
+import (
+	"time"
+)
 
 // turnLossNow is the clock this file reads, seamed for tests in the same
 // var-not-const style as procRoot above it. Production value is time.Now and

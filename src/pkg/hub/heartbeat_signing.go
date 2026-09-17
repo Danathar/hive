@@ -9,22 +9,6 @@ import (
 	"github.com/hivecommons/hive/pkg/spoke"
 )
 
-// Hub-side signing for the heartbeat RESPONSE (issue #7082, cncf/toc#2286).
-//
-// The hub->spoke lane used to be authenticated by the TLS channel alone, so a
-// TLS-terminating middlebox or a misconfigured HIVE_HUB_URL could push
-// arbitrary config/credentials to a spoke, and a captured response could be
-// replayed to another hive or to roll config back. This signs the response with
-// the hub's EXISTING Ed25519 SSO key (ssoSigningSeed(), derived from the master
-// via infoSSOEd25519Seed) — no new key, no new distribution, no new primitive —
-// and binds it to the hive_id plus a monotonic seq. Spokes verify with the
-// public key they already hold as HIVE_SSO_PUBLIC_KEY; see pkg/spoke.
-//
-// The signature is DETACHED, carried in the spoke.SigHeader response header and
-// computed over the exact marshalled body bytes, so the verifier re-hashes the
-// bytes it received rather than re-encoding JSON (same rationale as
-// pkg/delegation/token.go signing over a fixed string).
-
 // heartbeatSeqState hands out a strictly-increasing seq per hive.
 //
 // Seeded from the process start time in unix-nanoseconds and advanced by at

@@ -5,17 +5,6 @@ import (
 	"strings"
 )
 
-// Remediation hints (#5577): every non-green health verdict that matches a
-// known failure signature carries a one-line "do this" + where to do it,
-// rendered under the WHY chip on /fleet. The map below is the RFC's
-// signature→action table; precedence is BY CONSTRUCTION — the base verdict
-// returns on the first matching precondition (App broken, then provider
-// limit, then budget, then blocked agents), so a budget-exhausted red can
-// never be shadowed by the generic no-output red, and App-broken beats
-// everything. A green verdict NEVER carries a hint: a healthy hive gets no
-// instruction, and the detector ambers below only ever demote green, never
-// mask a red.
-
 // Remediation is the operator hint attached to a non-green HealthVerdict.
 type Remediation struct {
 	// Action is the one-line "do this" instruction.

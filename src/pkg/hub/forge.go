@@ -10,21 +10,6 @@ import (
 	"time"
 )
 
-// ============================================================================
-// FORGE REGISTRY
-// ============================================================================
-//
-// A "forge" is the code-hosting system a hive's org and repos live on. Today
-// every hive is on a GitHub of some kind — public github.com or a GitHub
-// Enterprise instance (github.ibm.com, github.cisco.com, …) — but GitLab and
-// Gitea are coming, and the hub already has one endpoint (request-provision)
-// whose design note calls that out explicitly.
-//
-// The switch endpoint therefore validates against a KIND plus a HOST rather
-// than accepting an arbitrary string. Adding a forge kind later means adding a
-// case here and an apiURLFor* helper; it does not mean revisiting the handler,
-// the authorization, or the delivery path.
-
 // ForgeKind names a family of code-hosting system. The zero value is invalid:
 // a caller must say which forge it means.
 type ForgeKind string
@@ -47,45 +32,6 @@ const (
 	// story as GitLab: display-only, matching pkg/forge.KindGitea by value only.
 	ForgeGitea ForgeKind = "gitea"
 )
-
-// WHY "DISPLAY-ONLY" IS THE ACCURATE WORD FOR GITLAB/GITEA
-//
-// src/pkg/forge is a complete, tested adapter package with THREE implementations
-// (GitHub, GitLab, Gitea) and ZERO non-test importers:
-//
-//	$ grep -rn "hivecommons/hive/pkg/forge" --include="*.go" src/ \
-//	    | grep -v _test | grep -v "^src/pkg/forge/"
-//	(no output)
-//
-// Nothing in the running system constructs an adapter. Agents reach their forge
-// through the gh CLI wrapper, which is GitHub-only. So a hive switched to
-// ForgeGitLab gets a recorded kind/host and a different dashboard tile, and its
-// agents do not run.
-//
-// The hub-side SaaSHive.Forge field this endpoint writes is also NOT delivered
-// to spokes: no heartbeat struct carries a forge field. Wiring the path would
-// mean adding one to HeartbeatResponse, adding a spoke-side consumer that
-// constructs the adapter, and extending the interface (below).
-//
-// THE INTERFACE CEILING, worth knowing before anyone plans that work: the
-// pkg/forge.Forge interface exposes GetRepo, ListOpenIssues,
-// ListOpenChangeRequests, CreateIssueComment, AddLabels, RemoveLabel and
-// SetHold — but NO CreateIssue and NO CreatePR. Merge is a separate, optional
-// Merger interface that no adapter implements. Even fully delivered and wired,
-// these adapters could comment, label and hold, but could not open the issue or
-// change request an agent's work has to land in.
-//
-// The verified support matrix lives in src/docs/forge-app-setup.md; keep this
-// comment and that document in agreement.
-
-// FORGE API-PATH CONTRACT, hub side. The REST API base paths for the non-GitHub
-// forges are appended by the pkg/forge adapters themselves (which, per the note
-// above, no running code path constructs today)
-// (gitLabAPIPath="/api/v4", giteaAPIPath="/api/v1"), so for those kinds a
-// ForgeTarget carries the BARE instance URL in BaseURL and leaves APIURL empty —
-// the opposite of the GHE case below, where the hub pre-appends /api/v3. The hub
-// must not duplicate the GitLab/Gitea suffixes: a second copy here is how the two
-// halves would get a chance to disagree.
 
 // publicForgeHost is the canonical host of public GitHub. A hive on this host
 // carries GitHubHost == "github.com" (or "", historically) and an empty
@@ -298,10 +244,6 @@ func isValidForgeHostLabel(s string) bool {
 	}
 	return true
 }
-
-// ============================================================================
-// SWITCH ENDPOINT
-// ============================================================================
 
 // SwitchForgeRequest is the body of POST /api/saas/hives/{id}/forge.
 type SwitchForgeRequest struct {
@@ -779,10 +721,6 @@ func (s *HubServer) forgeIdentityForTarget(cluster *ClusterConfig, target ForgeT
 // only inside an operator-facing error message explaining what an empty slug
 // would fall back to — it is never used as a value.
 const defaultPublicAppSlug = "kubestellar-hive"
-
-// ============================================================================
-// FORGE DELIVERY HANDSHAKE
-// ============================================================================
 
 // pendingForgeAPIURL returns the github_api_url the hub must still push to
 // deliver an outstanding forge switch, or "" when there is nothing to deliver.

@@ -1,6 +1,8 @@
 package config
 
-import "strings"
+import (
+	"strings"
+)
 
 // CadenceValueForMode resolves an agent's Cadence for a governor mode, applying
 // the same base-agent fallback the dashboard uses: an exact per-agent cadence

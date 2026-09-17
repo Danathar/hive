@@ -1,6 +1,8 @@
 // Kick delivery: SendKick and the locked delivery path, startup kicks,
 // explain-mode kick suffixes, inference kick stall/nudge handling, and
 // kick history seeding.
+//
+// Extracted from manager.go as part of the #7303 god-file split.
 package agent
 
 import (
@@ -182,49 +184,6 @@ func (m *Manager) SendKick(name string, message string) error {
 	m.deliverKickLocked(agent, message, "send-kick")
 
 	return nil
-}
-
-// MarkStartupLaunchQueued tells SendKick that the named agents are still in the
-// boot stagger. A governor/manual kick that arrives before the agent reaches its
-// pane is then held for delivery by the startup kick path instead of being
-// refused as "stopped" and lost for the whole cadence interval.
-func (m *Manager) MarkStartupLaunchQueued(names []string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, name := range names {
-		if agent, ok := m.agents[name]; ok {
-			agent.startupLaunchQueued = true
-		}
-	}
-}
-
-// deferStartupKickLocked records the latest kick that arrives while startup
-// owns delivery. It deliberately replaces the normal bootstrap prompt: one
-// readiness-gated kick should be typed into the fresh pane, and the governor's
-// actionable queue message is the fresher, more specific instruction.
-//
-// Caller holds m.mu.
-func (m *Manager) deferStartupKickLocked(agent *AgentProcess, message string) bool {
-	if agent.Paused || agent.State == StatePaused || agent.State == StateFailed {
-		return false
-	}
-	startupKickInFlight := agent.startupKickInFlight && agent.startupKickGen == agent.launchGen
-	if agent.startupKickInFlight && !startupKickInFlight {
-		agent.startupKickInFlight = false
-	}
-	if !agent.startupLaunchQueued && !startupKickInFlight {
-		return false
-	}
-	agent.pendingStartupKick = message
-	agent.KickRefused = true
-	agent.KickRefusalReason = "deferred until startup completes"
-	m.logger.Info("agent kick deferred until startup completes",
-		"name", agent.Name,
-		"state", agent.State,
-		"startup_queued", agent.startupLaunchQueued,
-		"startup_kick_in_flight", startupKickInFlight,
-	)
-	return true
 }
 
 // deliverKickLocked types a message into the agent's CLI and records the
@@ -418,14 +377,6 @@ func (m *Manager) deliverStartupKick(agent *AgentProcess, prompt string, gen int
 	m.deliverKickLocked(agent, prompt, trigger)
 }
 
-func (m *Manager) clearStartupKickInFlight(agent *AgentProcess, gen int) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if current, ok := m.agents[agent.Name]; ok && current == agent && agent.startupKickGen == gen {
-		agent.startupKickInFlight = false
-	}
-}
-
 // inferenceKickActionSuffix is appended to every kick sent to an agent whose
 // effective backend is a self-hosted inference backend (vllm/llm-d/litellm).
 // Weak OSS models tend to answer a kick conversationally — describing steps
@@ -605,6 +556,13 @@ const (
 	cliActiveCounterMarker = "s · ↓"
 )
 
+const (
+	providerErrorBackoffBaseDefault = 2 * time.Minute
+	providerErrorBackoffMaxDefault  = 30 * time.Minute
+	ProviderErrorBackoffBaseEnv     = "HIVE_PROVIDER_ERROR_BACKOFF_BASE"
+	ProviderErrorBackoffMaxEnv      = "HIVE_PROVIDER_ERROR_BACKOFF_MAX"
+)
+
 // toolSummaryRe matches Claude Code's collapsed tool-activity summary lines,
 // rendered only when tools actually executed (verified against Claude Code
 // v2.1.204): "Running 1 shell command…" while a Bash call is in flight, and
@@ -692,42 +650,6 @@ func paneShowsActiveWork(pane string) bool {
 		strings.Contains(pane, cliActiveCounterMarker) ||
 		strings.Contains(pane, "Working…") ||
 		strings.Contains(pane, "Running…")
-}
-
-// cliChromeFooterMarkers are hint-bar fragments that the Copilot CLI renders
-// on a line BELOW the input box (e.g. "/ commands · ? help · tab next tab" and
-// "@ files · # issues", each right-padded with the backend name). Claude Code
-// puts nothing under its prompt, so paneShowsEmptyInputPrompt originally
-// assumed "❯" was the last non-empty line — which is never true on a copilot
-// pane. That made the idle check permanently false for every copilot agent and
-// silently disabled the transient-API-error watchdog for them, since its call
-// site requires this function to return true.
-var cliChromeFooterMarkers = []string{
-	"/ commands",
-	"? help",
-	"tab next tab",
-	"@ files",
-	"# issues",
-}
-
-// lineIsCLIChrome reports whether a trailing line is decoration rather than
-// content: the box rules that bracket the input area, or a hint footer.
-//
-// Only ever applied to lines BELOW the prompt while scanning upward, so it
-// cannot mask real output: scanning stops at the first non-chrome line.
-func lineIsCLIChrome(line string) bool {
-	if line == "" {
-		return true
-	}
-	if strings.TrimLeft(line, "─━—-") == "" {
-		return true
-	}
-	for _, marker := range cliChromeFooterMarkers {
-		if strings.Contains(line, marker) {
-			return true
-		}
-	}
-	return false
 }
 
 // paneShowsEmptyInputPrompt reports whether the CLI is sitting at an idle,
@@ -1044,4 +966,91 @@ func (m *Manager) SeedKickHistory(name string, records []KickRecord) {
 		agent.KickHistory = make([]KickRecord, len(records))
 		copy(agent.KickHistory, records)
 	}
+}
+
+// MarkStartupLaunchQueued tells SendKick that the named agents are still in the
+// boot stagger. A governor/manual kick that arrives before the agent reaches its
+// pane is then held for delivery by the startup kick path instead of being
+// refused as "stopped" and lost for the whole cadence interval.
+func (m *Manager) MarkStartupLaunchQueued(names []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, name := range names {
+		if agent, ok := m.agents[name]; ok {
+			agent.startupLaunchQueued = true
+		}
+	}
+}
+
+// deferStartupKickLocked records the latest kick that arrives while startup
+// owns delivery. It deliberately replaces the normal bootstrap prompt: one
+// readiness-gated kick should be typed into the fresh pane, and the governor's
+// actionable queue message is the fresher, more specific instruction.
+//
+// Caller holds m.mu.
+func (m *Manager) deferStartupKickLocked(agent *AgentProcess, message string) bool {
+	if agent.Paused || agent.State == StatePaused || agent.State == StateFailed {
+		return false
+	}
+	startupKickInFlight := agent.startupKickInFlight && agent.startupKickGen == agent.launchGen
+	if agent.startupKickInFlight && !startupKickInFlight {
+		agent.startupKickInFlight = false
+	}
+	if !agent.startupLaunchQueued && !startupKickInFlight {
+		return false
+	}
+	agent.pendingStartupKick = message
+	agent.KickRefused = true
+	agent.KickRefusalReason = "deferred until startup completes"
+	m.logger.Info("agent kick deferred until startup completes",
+		"name", agent.Name,
+		"state", agent.State,
+		"startup_queued", agent.startupLaunchQueued,
+		"startup_kick_in_flight", startupKickInFlight,
+	)
+	return true
+}
+
+func (m *Manager) clearStartupKickInFlight(agent *AgentProcess, gen int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if current, ok := m.agents[agent.Name]; ok && current == agent && agent.startupKickGen == gen {
+		agent.startupKickInFlight = false
+	}
+}
+
+// cliChromeFooterMarkers are hint-bar fragments that the Copilot CLI renders
+// on a line BELOW the input box (e.g. "/ commands · ? help · tab next tab" and
+// "@ files · # issues", each right-padded with the backend name). Claude Code
+// puts nothing under its prompt, so paneShowsEmptyInputPrompt originally
+// assumed "❯" was the last non-empty line — which is never true on a copilot
+// pane. That made the idle check permanently false for every copilot agent and
+// silently disabled the transient-API-error watchdog for them, since its call
+// site requires this function to return true.
+var cliChromeFooterMarkers = []string{
+	"/ commands",
+	"? help",
+	"tab next tab",
+	"@ files",
+	"# issues",
+}
+
+// lineIsCLIChrome reports whether a trailing line is decoration rather than
+// content: the box rules that bracket the input area, or a hint footer.
+//
+// Only ever applied to lines BELOW the prompt while scanning upward, so it
+// cannot mask real output: scanning stops at the first non-chrome line.
+func lineIsCLIChrome(line string) bool {
+	if line == "" {
+		return true
+	}
+	if strings.TrimLeft(line, "─━—-") == "" {
+		return true
+	}
+	for _, marker := range cliChromeFooterMarkers {
+		if strings.Contains(line, marker) {
+			return true
+		}
+	}
+	return false
 }

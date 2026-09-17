@@ -6,52 +6,6 @@ import (
 	"time"
 )
 
-// Merge-driven upgrade debounce (#5391).
-//
-// THE DEFECT THIS FIXES
-//
-// Instant mode fires the moment a hive is seen behind latest. `latestSHA` is
-// re-resolved every latestSHAPollInterval, so on a busy branch the hive is seen
-// behind again a couple of minutes after it lands, and it rolls again. The rate
-// is therefore set by MERGE FREQUENCY, an input with nothing to do with how
-// urgently a spoke needs the image. Measured on
-// hive-hosted-hosted-available-oke-11-placeholder-r05x: ELEVEN ReplicaSets in
-// 5.5 hours, each stamped with a distinct upgrade-target-sha matching a v4
-// merge. Each roll kills every contributor WebSocket (#5090), spends ~2m05s
-// pulling a 4.05 GB image, and interrupts in-flight agent work.
-//
-// Every individual roll was correct. Only the rate was wrong.
-//
-// WHY DEBOUNCE RATHER THAN A MINIMUM INTERVAL OR A WINDOW
-//
-// A burst of merges wants to collapse to ONE roll at the NEWEST SHA — which is
-// also the SHA you actually want to be running. Debounce gives exactly that: a
-// newer target arriving inside the quiet window REPLACES the pending one
-// instead of queuing a second roll, and the roll fires once the branch has been
-// quiet for autoUpgradeDebounceInterval. A minimum-interval gate would also cut
-// the rate, but it rolls at whatever target happened to be armed when the timer
-// expired rather than converging on the newest; a scheduled window (the daily
-// and weekly modes below) is far too coarse for a hive that wants to track a
-// branch.
-//
-// RELATIONSHIP TO shouldAutoUpgradeNow
-//
-// This is deliberately the SAME SHAPE as the daily/weekly gate in
-// upgrade_schedule.go and reuses its decision type, so there is one vocabulary
-// for "may this hive fire now". It could not simply reuse
-// shouldAutoUpgradeNow's fired-date gate, because that gate answers "have we
-// already fired in this window" from a calendar day, and debounce must answer
-// "has the TARGET stopped moving" from a target plus a timestamp. The two
-// compose rather than compete: debounce gates instant mode only, and
-// shouldAutoUpgradeNow keeps gating daily and weekly, which are already far
-// coarser than any debounce interval and so have nothing to gain from one.
-//
-// It does inherit upgrade_schedule.go's most important rule directly. Missed
-// windows do NOT accumulate there, because "only ONE upgrade is ever owed" —
-// the gate is a state, not a queue. Debounce holds exactly the same line: at
-// most ONE target is ever pending, N merges inside a window collapse into one
-// roll, and the collapsed count is reported rather than silently discarded.
-
 // defaultAutoUpgradeDebounceInterval is how long a branch must be quiet before a
 // merge-driven upgrade is allowed to roll.
 //

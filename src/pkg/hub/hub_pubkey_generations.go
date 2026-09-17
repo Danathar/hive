@@ -10,67 +10,6 @@ import (
 	"github.com/hivecommons/hive/pkg/hub/spoke"
 )
 
-// SSO / SESSION Ed25519 PUBLIC KEY plurality — follow-on PR #6 of the
-// master-key rotation design (src/docs/design/master-key-rotation.md).
-//
-// WHY THIS ONE IS SEQUENCED LAST, AND WHY IT IS A DIFFERENT SHAPE FROM #1-#5.
-// Every earlier follow-on made a HUB-side verifier accept two generations. The
-// hub holds the whole generation set, so "accept both" was a local change: read
-// one more entry out of a struct the hub already has.
-//
-// This one is not that. The SSO handoff token and the hub session cookie are
-// MINTED ON THE HUB and VERIFIED ON THE SPOKE — by Go in
-// pkg/dashboard/api.go (SSO) and, independently, by Node in src/proxy/server.js
-// (session cookie). The verifying party does not hold the generation set, does
-// not hold any master, and by design holds no private material at all. It holds
-// ONE hex Ed25519 public key that the hub put in its Deployment env.
-//
-// So the failure this PR exists to prevent is not "the hub rejects an old
-// artifact". It is the mirror image: the hub, the instant it rotates, starts
-// minting under generation N, and ~65 spokes are still holding generation N-1's
-// PUBLIC key. Those spokes cannot verify anything the hub now mints. Every
-// hosted SSO handoff 401s and every hosted terminal session fails its cookie
-// check — not for the 30 minutes an impersonation cookie lives, but for the
-// ~6 hours the rate-limited reconcile lane takes to walk the fleet at 3 patches
-// per 15-minute cycle. That is the flag day, relocated from the hub to the
-// fleet.
-//
-// THE FIX IS THEREFORE PLURALITY ON THE SPOKE, NOT SELECTION ON THE HUB. A
-// spoke must hold BOTH live generations' public keys and try each. Which puts
-// this squarely in the design doc's "CANNOT carry a marker" bucket —
-//
-//	| SSO/session PUBLIC keys | A hex Ed25519 public key has a fixed 32-byte form. |
-//
-// — so the mechanism is BOUNDED TRIAL VERIFICATION against the live
-// generations, current-then-previous, bounded by maxLiveGenerations == 2. Worst
-// case is two Ed25519 verifications on a path that already does one.
-//
-// ORDERING — THE PROPERTY THE WHOLE PR TURNS ON.
-//
-// The VERIFIER must be able to accept two public keys BEFORE the hub ever hands
-// out a second one. A spoke whose proxy understands only one key, handed a
-// second, is not merely un-improved — depending on the env contract it can be
-// actively broken (see EnvSSOPublicKeyPrevious below for the delimited-list
-// analysis that ruled that encoding out). So this PR ships ONLY the verifier
-// plurality and the provisioning of the second var. It does not, and cannot,
-// cause a rotation: rotation is triggered by the admin endpoint from #4, and
-// until an operator calls it there is exactly ONE generation.
-//
-// WITH ONE GENERATION THIS IS A NO-OP, BY CONSTRUCTION. previousPublicKeys
-// returns an empty slice whenever acceptableGenerations yields only the current
-// generation, which is the state of every hub in the fleet today and the state
-// of every hub that has never been rotated. An empty previous list means:
-//   - desiredPerHiveEnv emits NO second var, so perHiveEnvDrift sees no drift,
-//     so NO spoke is patched and NO pod rolls;
-//   - the Go and Node verifiers evaluate a zero-length candidate list after the
-//     primary key and behave byte-identically to today.
-//
-// The second var appears on a spoke for the first time only after a rotation,
-// and disappears again — via the same drift-and-patch lane — once the previous
-// generation expires out of acceptableGenerations. It is self-clearing, which
-// is what stops it becoming the unversioned permanent compat lane that F1/F2
-// were.
-
 const (
 	// EnvSSOPublicKeyPrevious carries the PREVIOUS generation's Ed25519 public
 	// key for SSO handoff verification, alongside (never instead of)

@@ -1,35 +1,5 @@
 package agent
 
-// Per-agent HOME for interactive CLI backends (#4596).
-//
-// THE DEFECT: every per-UID agent used to share HOME=/data/home. Claude Code
-// rewrites $HOME/.claude.json WHOLESALE via atomic write (tmp file + rename),
-// and rename needs only DIRECTORY write permission — /data/home is 2775
-// dev:node, so ANY agent could replace the file regardless of its mode. An
-// unauthenticated agent's rewrite stripped oauthAccount from under the
-// authenticated one, and the whole fleet fell back to the login menu. File
-// permissions can never fix this (measured in #4596: group-writable made it
-// WORSE), because the contention is on the directory entry, not the file.
-//
-// THE FIX: each per-UID interactive agent gets its own HOME under
-// /data/home/agents/<name>, mirroring the inferenceHomePath / setupCodexHome
-// per-agent precedents. Inside it, SYMLINK BRIDGES point the tool state that
-// is safe (or required) to share back at /data/home — most importantly
-// ~/.claude -> /data/home/.claude, which holds .credentials.json (the OAuth
-// TOKEN). The token was never the contended file; sharing it is what lets ONE
-// interactive login authenticate the whole fleet. Only the per-writer session
-// file (~/.claude.json) becomes truly per-agent, seeded at launch from a
-// signed-in source so existing hives migrate without any operator step.
-//
-// SYNERGY WITH #4606: the capped token-triggered restart fires for an agent
-// stuck at the login menu while the shared credential is valid. Under this
-// layout the restart re-provisions the agent's home, adopts a signed-in
-// session from the legacy shared file or a sibling, and the agent comes back
-// authenticated — the restart theory #4606 documented as unproven becomes true.
-//
-// ESCAPE HATCH: HIVE_SHARED_AGENT_HOME=1 restores the legacy shared-HOME
-// behavior wholesale (AgentHome and provisioning both honor it).
-
 import (
 	"fmt"
 	"os"
@@ -92,29 +62,6 @@ var interactiveHomeBridgeDirs = []string{
 	".claude", ".copilot", ".config", ".codex", ".bob", ".gemini",
 	".cache",
 }
-
-// Per-agent XDG data/state (#6238).
-//
-// THE DEFECT: .local used to be bridged like .cache, so every agent's
-// $HOME/.local/share and $HOME/.local/state resolved to the ONE shared
-// /data/home/.local. Each backend CLI treats those as its private state root
-// (session transcripts, run locks, sqlite, plugin caches), and whichever agent
-// UID created a subtree first owned it. The only thing keeping the others
-// working was the permissive mode the Dockerfile umask wrappers force — a
-// per-CLI allowlist that fails closed for every new backend (muse crash-looped
-// hundreds of times before it was added), and that CLIs which check their
-// state root's permissions (muse's session registry) refuse to trust.
-//
-// THE FIX: .local is a real, agent-owned directory inside the per-agent home,
-// and the launch environment exports XDG_DATA_HOME / XDG_STATE_HOME beneath
-// it explicitly, following the CODEX_HOME precedent (setupCodexHome). Sharing
-// is then explicit and narrow: only the entries in xdgDataSharedBridges are
-// symlinked back to the shared tree, exactly the way ~/.claude bridges the
-// shared OAuth token, because they hold a credential one login must propagate
-// to the whole fleet. Nothing is migrated: an existing agent's legacy .local
-// symlink is replaced by an empty real directory, and its CLIs start fresh
-// per-agent state on the next session while the shared tree stays where it
-// was for anything still pointing at it.
 
 // xdgDataHomeRel / xdgStateHomeRel are the XDG Base Directory defaults
 // relative to $HOME. They are exported EXPLICITLY (not left to the spec

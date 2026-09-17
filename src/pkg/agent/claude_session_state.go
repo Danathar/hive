@@ -8,38 +8,6 @@ import (
 	"path/filepath"
 )
 
-// Claude Code keeps its authentication in TWO files, not one, and hive has only
-// ever probed the first:
-//
-//   - $HOME/.claude/.credentials.json — the OAuth TOKEN (access/refresh pair).
-//     claude.HasValidToken reads this, and it is what configHasTokens() and the
-//     🔑 badge's file probe consult.
-//   - $HOME/.claude.json — the SESSION STATE: which account is signed in
-//     (oauthAccount) and whether first-run onboarding completed
-//     (hasCompletedOnboarding), alongside machineID/userID/migration flags.
-//
-// A valid token is NOT sufficient. When .claude.json carries no oauthAccount
-// the CLI re-runs onboarding and shows "Select login method" even though a
-// perfectly good, unexpired, readable credential sits beside it. That split is
-// what makes #4596 so hard to read from the outside: every file-level check
-// hive performs says "authenticated", while the operator is looking at a login
-// menu.
-//
-// It matters operationally because hive's token-triggered restart fires on
-// exactly that combination (pane shows login + configHasTokens() true) on the
-// theory that the agent merely has not picked the token up yet. When the
-// session state is the missing half, no number of restarts can help — the CLI
-// re-reads the same skeleton and asks again. See the restart cap in
-// pollTmuxOutputForAgent.
-//
-// Interactive-auth agents share one HOME (/data/home) while running under
-// per-agent UIDs, so they share this single file; Claude Code rewrites it
-// wholesale rather than merging. Diagnosing that is the job here — this file
-// deliberately only OBSERVES. It does not repair .claude.json, and must not:
-// writing to the shared file would add yet another writer to the contended
-// path, and making it group-writable converts "one agent cannot log in" into
-// "no agent stays logged in" (measured in #4596).
-
 // claudeSessionState classifies $HOME/.claude.json for one agent.
 type claudeSessionState int
 

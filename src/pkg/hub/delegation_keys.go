@@ -7,22 +7,6 @@ import (
 	"github.com/hivecommons/hive/pkg/delegation"
 )
 
-// Delegation-chain verification material, published for THIRD-PARTY use.
-//
-// This is the hub half of pkg/delegation's published-key story: the package
-// defines the document, and this file is where it is filled from the hub's key
-// generations and served on an unauthenticated route.
-//
-// WHY THE HUB SERVES IT. The signing seed is derived from a key generation's
-// master secret, and the hub is the only party that holds the generation set.
-// A spoke could publish its own key, but a tenant checking a chain minted
-// anywhere in the fleet would then need to discover and trust N endpoints; one
-// hub-served document covers the fleet and is the same artifact for every
-// tenant, which is what makes it citable.
-//
-// OBSERVE-ONLY: nothing here reads a chain, and no hub decision consults one.
-// This endpoint only publishes public keys.
-
 // delegationSigningSeed returns the PRIVATE Ed25519 seed for the delegation
 // domain under the hub's currently-minting generation.
 //

@@ -5,31 +5,6 @@ import (
 	"time"
 )
 
-// Running-but-inactive agent detection.
-//
-// An agent process being "up" says almost nothing about whether it is doing
-// the job it exists to do. Five situations are visually identical in a status
-// table that only shows State, and diagnosing them by hand has repeatedly cost
-// real time:
-//
-//  1. Session exists, CLI never launched — the operator PAUSED it. Not a
-//     fault. Must never alarm.
-//  2. Session exists, CLI running, but sitting on a login / device-code
-//     prompt. State reads "running" throughout; the agent can do nothing.
-//  3. Session exists, CLI running and authenticated, but producing no output.
-//     A fault only when there is work waiting.
-//  4. Session exists, CLI running and working. Healthy.
-//  5. The manager believes the agent is running but its tmux session is gone —
-//     a zombie.
-//
-// This file decides which of those the hub raises. The governing constraint is
-// that a facet which lights up constantly gets ignored, which is worse than
-// not having the facet at all — so the bar for each rule is "an operator would
-// agree something is wrong" rather than "an agent is not currently busy".
-//
-// The evidence all arrives in the heartbeat's AgentSummary; nothing here
-// re-derives a spoke-side condition, and no second channel exists.
-
 const (
 	// inactiveAgentNeedsLoginGrace is how long an agent may show a login
 	// prompt before it is reported. A CLI briefly renders its auth screen

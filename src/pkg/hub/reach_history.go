@@ -1,31 +1,5 @@
 package hub
 
-// Fleet-level error-rate history retention (#3995, phase 2c of #3973).
-//
-// The registry stores only each hive's LATEST component_reach report (2a's
-// deliberate design) — sufficient for reach, useless for before/after error
-// deltas. This store keeps a bounded ring of HOURLY activity buckets per
-// component, fed on heartbeat receive from the report's rolling window_1h
-// bucket (equivalent-period windows — cumulative-since-boot counts would
-// compare unequal periods), SUMMED across hives per (hour bucket, component,
-// running commit). Per-hive history is deliberately NOT kept — it would
-// multiply storage by fleet size for no consumer; the only per-hive state is
-// one O(1) dedupe cursor so a hive re-reporting the same window can never
-// double-count.
-//
-// All input is a sanitized-but-still-spoke-authored ReachReport, so the store
-// defends itself again: window timestamps must parse and fall inside the ring
-// span, counts are clamped non-negative, the component set and per-bucket
-// commit fan-out are capped, and over-cap input is CLIPPED AND LOGGED, never
-// silently absorbed. Honest limitation the caps cannot remove: windows are
-// fleet sums, so one high-volume (or hostile-within-clamps) spoke can skew a
-// window's error ratio; see ComputeErrorDelta's caution note.
-//
-// Persisted in its own file (reachHistoryPath), the same own-file pattern 2a
-// chose for /data/reach-state.json: atomic tmp+rename writes on a modest
-// cadence plus a final save at shutdown, loaded (and re-bounded — a
-// hand-edited file must not bypass the caps) at hub boot.
-
 import (
 	"encoding/json"
 	"log/slog"

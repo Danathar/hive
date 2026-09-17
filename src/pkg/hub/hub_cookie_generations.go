@@ -4,43 +4,6 @@ import (
 	"time"
 )
 
-// Dual-generation acceptance for the HUB SESSION COOKIE — follow-on PR #1 of
-// the master-key rotation design (src/docs/design/master-key-rotation.md).
-//
-// WHY THE SESSION COOKIE IS THE ONE THAT MATTERS. It is the longest-lived
-// artifact bound to a generation (cookieMaxAgeDays == 7, which is exactly why
-// defaultVerifyWindow is 7 days). Without dual acceptance, the instant an
-// operator rotates the master every browser session on the platform is
-// invalidated at once — the single most visible symptom of the flag day this
-// whole mechanism exists to remove.
-//
-// WHERE THE MARKER LIVES, AND WHY IT DIFFERS PER FORMAT. The session cookie
-// exists in two live shapes and they do NOT have the same amount of room:
-//
-//	v3  base64url(JSON{u,iat,exp,sid[,g]}) .v3. base64url(sig)
-//	v2  <username> .v2. base64url(sig)
-//
-//   - v3 CAN carry a marker, as the `g` claim (hub_cookie.go hubCookieClaims).
-//     It rides INSIDE the signature, so it is tamper-evident, and the Node proxy
-//     ignores JSON fields it does not recognize, so adding it needs no spoke
-//     roll. This is the design doc's "field in payload" row.
-//
-//   - v2 CANNOT. Its username sits in the clear at the head of the value with no
-//     envelope around it, and prefixing the VALUE with "g<N>." — the impersonation
-//     cookie's scheme — is not available to either shape here, because the same
-//     value is parsed independently by src/proxy/server.js. A prefix would sit in
-//     front of the username (v2) or in front of the base64url body (v3) and break
-//     the proxy's parse for every hosted tenant. Making the rotation mechanism
-//     require a fleet-wide proxy roll would defeat its entire purpose.
-//
-// So v2 gets bounded TRIAL verification instead — the same treatment the
-// heartbeat bearer gets, and bounded by the same maxLiveGenerations == 2. Two
-// Ed25519 verifications worst case, on a path that already does one.
-//
-// MINTING IS ALWAYS CURRENT-ONLY. Dual acceptance is a property of the VERIFIER.
-// If minting also used a previous generation the rotation would never converge,
-// which is the failure mode that makes a compat lane permanent.
-
 // mintHubUserCookieValueV3ForGeneration mints a v3 session cookie under the
 // CURRENT generation and stamps that generation into the signed claims.
 //

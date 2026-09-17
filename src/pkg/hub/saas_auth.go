@@ -3,6 +3,8 @@
 // origin checks, session cookie domains, identity resolution, GitHub
 // token validation, spoke proxy auth, and the whoami/auth-check
 // endpoints.
+//
+// Extracted from saas.go as part of the #7278 god-file split.
 package hub
 
 import (

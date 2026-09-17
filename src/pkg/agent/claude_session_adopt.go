@@ -1,34 +1,5 @@
 package agent
 
-// Cross-UID reads and writes of .claude.json for session adoption (#4637).
-//
-// THE DEFECT: #4619 gave every per-UID interactive agent its own HOME and
-// seeded a signed-in .claude.json into it, "so existing hives migrate without
-// any operator step". That works for a MIGRATING hive, where the signed-in
-// source is the legacy /data/home/.claude.json the hive process itself can
-// read. It cannot work on a FRESH install: the only signed-in file in
-// existence is the one agent A's own CLI just wrote, owned by A's UID at mode
-// 0600. inspectClaudeSession on that file returns claudeSessionUnreadable, so
-// findSignedInClaudeSession sees no source, agent B stays at the login menu,
-// and the operator logs in once per agent — while the docs promise "log in
-// once per method" (docs/agent-configuration.md).
-//
-// THE FIX: stop asking the hive process to read what only an agent UID can
-// read. Every other cross-UID operation in this package already goes through
-// su-exec — tmuxCmd, setupCodexHome, the tmux-dir chmod — and this is the same
-// shape. When a direct read hits EACCES, re-read as the file's OWNER; when a
-// direct write hits EACCES, write as the TARGET agent. Adoption then
-// propagates a fresh login across the fleet and the documented contract holds
-// on fresh installs too.
-//
-// POSTURE: every helper here is best-effort and fails back to the direct
-// result. su-exec is absent in unit tests and on developer laptops, unreadable
-// stays unreadable when the fallback cannot run, and no caller may treat a
-// failed fallback as evidence of anything. Files are Lstat'd (never followed)
-// and must be regular, under the size cap, and owned by a NON-ROOT uid before
-// a helper runs — a symlink or a root-owned file at a sibling path must never
-// be able to turn this into "run something as uid 0".
-
 import (
 	"bytes"
 	"context"

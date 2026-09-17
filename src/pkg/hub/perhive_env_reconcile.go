@@ -8,45 +8,6 @@ import (
 	"time"
 )
 
-// Per-hive security env reconcile — makes the fleet's key posture code-owned.
-//
-// THE GAP THIS CLOSES. The C2/N1/N2/N3 work moved every spoke off the shared
-// master onto derived, per-hive sub-keys, and the provisioning template
-// (saas_provision.go) renders all five vars. But that template is `kubectl
-// apply`ed ONLY inside provisionHive — at provision/assign time. Hives
-// provisioned BEFORE those vars entered the template never received them, and
-// nothing re-asserts them afterwards.
-//
-// What actually put the vars on the live fleet was an out-of-band `kubectl
-// patch`, not any code path: a live spoke's
-// kubectl.kubernetes.io/last-applied-configuration still lists only the
-// pre-cutover env shape (HIVE_GITHUB_TOKEN, DASHBOARD_AUTH_TOKEN, HIVE_ID,
-// HIVE_LEVEL, HIVE_HUB_URL, HIVE_HUB_SECRET) while the live .spec has the new
-// vars appended after HIVE_HUB_SECRET — and in a different order from the
-// template, which emits them instead of the master. So the fleet's security
-// posture is held in place by a manual edit that no controller maintains: any
-// re-provision, restore, or manifest reapply silently reverts a spoke to
-// master-derived fallbacks (spokeDomainKey / TerminalSigningKey /
-// SpokeSSOPublicKey all fall through to HIVE_HUB_SECRET when their dedicated
-// var is absent, which is precisely the fleet-uniform sharing N1/N3 removed).
-//
-// Four spokes were missed by that manual patch entirely and run on master-only
-// fallbacks today, including a real external user's hive. This sweep repairs
-// them and, more importantly, means the next drift is repaired automatically
-// instead of by hand.
-//
-// SCOPE / SAFETY. This lane is ADDITIVE ONLY. It never removes HIVE_HUB_SECRET.
-// Stripping the master from spoke Deployments is a separate, fleet-visible
-// cutover with its own hard preconditions (every spoke must be on an image that
-// reads the dedicated vars, and the readiness counts below must be zero across
-// a full sweep); doing it here would couple a silent repair to a breaking
-// change.
-//
-// This mirrors the NET_ADMIN reconcile (netadmin_reconcile.go) deliberately:
-// same cluster access path, same unreachable-cluster suppression, same
-// idempotent-check-then-patch shape. Divergence between two sweeps that both
-// mutate the hive Deployment would be its own maintenance hazard.
-
 const (
 	// envSessionPublicKey is the spoke-side env var carrying the Ed25519 PUBLIC
 	// key for hub session cookies (audit N2). Unlike the others there is no Go

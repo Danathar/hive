@@ -9,48 +9,6 @@ import (
 	"sync"
 )
 
-// ============================================================================
-// CHANNEL DISTANCE — "how much is queued to be promoted into this channel?"
-// ============================================================================
-//
-// The channel rows say WHICH build each track points at, but not how far apart
-// the tracks have drifted. "stable -> 55bd2bc" and "candidate -> 9eefa3a" are
-// two opaque SHAs; whether stable is one commit behind or two hundred is the
-// question an operator actually has, and answering it meant leaving the
-// dashboard for a GitHub compare view.
-//
-// WHAT EACH ROW IS MEASURED AGAINST
-//
-// Each channel is compared to the stage IMMEDIATELY upstream of it in the
-// promotion order (releaseChannels is most-stable-first, so upstream is the
-// next element): stable is measured against candidate, candidate against edge.
-// Edge has no upstream — it is where builds enter — so it carries no distance.
-//
-// Measuring stable against EDGE instead was the obvious alternative and is
-// worse on both counts: the number would be roughly the sum of the two hops,
-// so it restates what candidate's own row already says, and it hides WHICH
-// hop the backlog is stuck at — a large stable→edge gap reads identically
-// whether soak is starved or promotion is stalled. One hop per row keeps every
-// number actionable and makes the column comparable down the list.
-//
-// WHY BOTH DIRECTIONS
-//
-// A single signed number would be a lie whenever the tracks have diverged, and
-// they routinely do: channels follow different branches (v4 and v5 today), and
-// a branch that is synced from another carries commits the other has not got
-// while also missing commits merged since the last sync. GitHub's compare API
-// reports that case as "diverged" with BOTH counts non-zero, and the UI shows
-// both rather than collapsing them into a direction that does not exist.
-//
-// WHY THE CACHE IS PERMANENT
-//
-// Distance between two FIXED commits is immutable — the same property
-// commitOrderCache relies on. Channels move, but a moved channel is a new SHA
-// pair and therefore a new key, so entries are never stale; they only become
-// unreferenced. That makes a bounded permanent cache correct here, with no TTL
-// to tune and no window in which the dashboard shows a distance that has since
-// changed.
-
 // channelDistanceCacheMax bounds the resolved-distance cache. Each entry is a
 // pair of short SHAs and two ints, so the ceiling exists to stop unbounded
 // growth across many channel moves, not because entries are expensive. Dropped

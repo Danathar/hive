@@ -1,6 +1,8 @@
 package config
 
-import "strings"
+import (
+	"strings"
+)
 
 // IssueFilterConfig gates which open issues agents may INITIATE work on: an
 // issue is eligible only if it carries at least one of RequireLabels (the

@@ -1,38 +1,5 @@
 package hub
 
-// Token usage attribution rollups for the hub fleet.
-//
-// WHAT THIS DOES
-//
-// Aggregates the per-hive TotalTokens24h figure into by-org, by-owner and
-// by-cluster rollups so an operator can answer "who is burning budget?"
-// without reading 42+ individual rows.
-//
-// WHAT THE HUB ACTUALLY KNOWS — and what it does NOT
-//
-// The hub receives exactly ONE token number per hive, per heartbeat:
-// HeartbeatPayload.Tokens24h (pkg/hub/heartbeat.go), stored verbatim on
-// RegistryEntry.TotalTokens24h (pkg/hub/server.go). That is the whole of the
-// hub's token knowledge. In particular:
-//
-//   - NO per-model breakdown reaches the hub. The spoke computes one
-//     (pkg/tokens/pricing.go + pkg/dashboard/cost.go) and even estimates USD
-//     from a real list-price table, but none of that is in the heartbeat
-//     payload — only the scalar total is. So this package deliberately does
-//     NOT compute currency. Doing so would require inventing a blended
-//     per-token price with no model attribution to justify it, which would be
-//     a fabricated number wearing a dollar sign. Tokens only. See
-//     usageCurrencyNote for the string the UI shows instead.
-//
-//   - NO per-agent breakdown reaches the hub either. AgentSummary
-//     (pkg/hub/heartbeat.go) carries Name/State/Mode and no token counts.
-//
-// Despite the "24h" in the field name, the value the spoke sends is a
-// CUMULATIVE lifetime total (cmd/hive/main.go documents this explicitly:
-// "Despite the '24h'-suffixed field name this is a lifetime/window total").
-// That is what makes the snapshot history below meaningful: differences
-// between consecutive cumulative samples are real consumption deltas.
-
 import (
 	"encoding/json"
 	"net/http"

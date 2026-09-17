@@ -1,19 +1,8 @@
 package hub
 
-import "time"
-
-// Status-flip detection: a hive whose reported App-auth state keeps
-// ALTERNATING (ok → key-invalid → ok → …) is not transitioning, it is
-// oscillating — in practice two spoke instances alternating under one
-// hive_id, or a spoke whose auth check flaps every beat. Either way the
-// dashboard flips with it and every glance at the row tells a different
-// story.
-//
-// This is the reporter-blind sibling of noteReporter: it needs NOTHING from
-// the spoke (old builds included), because it watches the states the hub
-// already receives. When the spoke is new enough to also report its pod name,
-// the duplicate-spoke signal names the culprits; this signal only says the
-// row cannot be trusted.
+import (
+	"time"
+)
 
 // statusFlipsToConfirm is how many returns to a previously reported state are
 // required before a hive is declared flipping. A single bounce (degraded →

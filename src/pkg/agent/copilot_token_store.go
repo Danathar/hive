@@ -10,20 +10,6 @@ import (
 	"github.com/hivecommons/hive/pkg/claude"
 )
 
-// Copilot credential store (#7303 stage 1).
-//
-// Everything here reads, parses, rewrites or persists the credential FILES the
-// Copilot and Claude CLIs keep on disk — as opposed to the in-memory token the
-// Manager hands to agents, which stays in manager.go. Split out of manager.go
-// unchanged: this is a pure move, so `go build` and the existing pkg/agent
-// tests are the proof of equivalence.
-//
-// The cohesion is the file format, not the caller. These helpers all have to
-// know that the Copilot CLI's config is a JSON object keyed by host, that its
-// managed header must be preserved on rewrite, and that a token value can
-// arrive as several shapes — knowledge that has no business being interleaved
-// with tmux plumbing and kick orchestration.
-
 // configHasTokens returns true if either the Copilot config or Claude
 // credentials file holds a credential a restart can still use. Used to decide
 // whether an agent stuck on a login prompt can be auto-restarted.

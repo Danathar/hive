@@ -6,27 +6,6 @@ import (
 	"sort"
 )
 
-// Fleet-wide country rollup: how many hub users we can place in each country,
-// plus how many we cannot place at all.
-//
-// This is ADOPTION REPORTING. The operator's question is "where is our user
-// base?", and the honest answer to that question has two halves: the ranked
-// countries AND the size of the unknown bucket. Country is optional and
-// best-effort (see user_country.go), so early on the unknown bucket is expected
-// to be the MAJORITY of the roster. A rollup that quietly dropped it would
-// report a distribution over a self-selected subset while looking like a
-// distribution over everyone — which is how you end up confidently reading a
-// 3-user sample as a fleet trend. So unknown is a first-class, always-emitted
-// field, never a row that can be filtered out or sorted away.
-//
-// PRIVACY. This surface is aggregate-only and admin-gated (registered behind
-// requireAdmin, like the rest of the CRM/Users surface). It emits COUNTS, never
-// usernames, so it cannot be used to look up an individual's country — the
-// per-user value is already visible to the same admin in the Users table, and
-// to nobody else. Nothing is written, nothing is inferred here, and no country
-// ever appears in a URL or query string: the response is a JSON body on a GET
-// with no parameters.
-
 // countryRollupEntry is one country's share of the roster.
 //
 // Code is the normalized ISO 3166-1 alpha-2 code; the flag glyph is NOT sent.

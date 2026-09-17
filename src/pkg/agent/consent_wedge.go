@@ -6,14 +6,6 @@ import (
 	"time"
 )
 
-// Consent-wedge tracking (#5577). A Copilot CLI parked on an interactive
-// consent screen passes the "❯" marker check, so the kick path detects it
-// via paneShowsConsentScreen and restarts the agent before sending — which
-// lands right back on the same consent screen. The result is a restart loop
-// (observed live at ~1/min) that the logs record ("consent_screen=true") but
-// nothing surfaces: the agent reads green while doing no work. This tracker
-// remembers those restarts so the heartbeat can name the wedged agents.
-
 // consentWedgeWindow is how recent a consent-screen restart must be for the
 // agent to count as wedged. One restart an hour ago that never recurred means
 // the operator completed the consent flow; a live loop refreshes the stamp

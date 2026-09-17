@@ -1,29 +1,5 @@
 package hub
 
-// Owner notification for a fleet-wide agent backend-auth outage (#6558).
-//
-// When a hive's aggregate auth_health transitions to "down" — every enabled
-// agent has been failing backend auth for longer than AuthHealthDownThreshold
-// — the hive's owner gets a push notification through the SAME channel
-// notifyOwnerAccessRequest (access_notify.go, #4149) already uses: a Slack DM
-// via HIVE_HUB_SLACK_BOT_TOKEN + slack_id. There is no hub-side email sender,
-// so this deliberately does not add one; Slack is the only push channel the
-// hub has, and the dashboard's fleet badge is the in-app fallback either way.
-//
-// Deduplication is the caller's job, not this file's: handleHeartbeat only
-// calls notifyOwnerAuthHealthDown on the ok/degraded -> down EDGE (comparing
-// this beat's entry.AuthHealth against the previous beat's), so a hive that
-// stays down for hours generates exactly one notification, and the next one
-// fires only after a genuine recovery (auth_health back to ok) and a second
-// independent failure.
-//
-// TODO(#6558 follow-up): this is a single best-effort Slack DM with no retry
-// and no delivery confirmation loop back into the dashboard. If Slack
-// delivery itself fails (bad token, rate limited, owner has no slack_id) the
-// hub logs it and moves on — an operator watching the hub's own logs is the
-// only backstop. A durable notification queue / read-receipt is out of scope
-// here and worth its own issue if outages like #6500 recur despite this.
-
 import (
 	"fmt"
 	"os"

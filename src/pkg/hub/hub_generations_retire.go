@@ -7,59 +7,6 @@ import (
 	"time"
 )
 
-// Automatic retirement of expired master generations, and the alert that fires
-// when one is about to strand spokes (follow-on PR #7 of
-// src/docs/design/master-key-rotation.md).
-//
-// WHAT WAS ALREADY TRUE BEFORE THIS FILE, AND WHY THAT MATTERS. The security
-// guarantee — step 5 of the rotation procedure, "after verify_until the
-// previous generation stops being accepted, automatically, whether or not
-// anyone is watching" — was ALREADY kept by acceptableGenerations(now) in
-// hub_generations.go. That function excludes any non-current generation whose
-// VerifyUntil has passed, and treats a ZERO VerifyUntil as ALREADY EXPIRED
-// rather than as "never expires", so a hand-edited or malformed generations
-// file fails closed. Every verifier on the platform goes through it. Nothing in
-// this file weakens, duplicates, or re-implements that filter, and nothing in
-// this file is load-bearing for the guarantee: if this whole lane never ran,
-// an expired generation would still stop verifying on the wall clock.
-//
-// SO WHAT IS THIS FOR. Two things the read-path filter cannot do by itself:
-//
-//  1. PERSIST the drop. acceptableGenerations is a pure read-path predicate; it
-//     leaves the dead entry sitting in the set on disk forever. A generation
-//     that is no longer accepted but is still recorded is a plaintext master
-//     secret retained on the hub PVC past the point where it protects anything
-//     — the F1/F2 residue in a different form. Retirement rewrites
-//     hub-generations.json without it, so the secret stops existing rather than
-//     merely stopping being honoured.
-//
-//  2. ALERT. Retirement on the wall clock is unconditional, which means it can
-//     and will strand spokes that have not converged. That is the CORRECT
-//     behaviour — the alternative, waiting for convergence, is what lets one
-//     unreachable spoke pin the old master open forever — but it is not a
-//     silent one. The operator gets a warning as the window closes with spokes
-//     still on the old key, and a louder one after it closes.
-//
-// THE TWO CONDITIONS ARE DELIBERATELY NOT THE SAME CONDITION. The design states
-// both, and collapsing them would be the bug:
-//
-//   - RETIREMENT (here) is a WALL-CLOCK SECURITY GUARANTEE. It fires when
-//     VerifyUntil has passed, FULL STOP — never gated on spokes_on_previous,
-//     never gated on spokes_unattributed, never gated on whether anything was
-//     observed at all. Gating it on convergence would mean a single spoke on an
-//     unreachable cluster keeps a superseded master secret live indefinitely,
-//     which is precisely the "unversioned and permanent compat lane" failure
-//     mode the explicit-finiteness property exists to prevent.
-//
-//   - SafeToRetirePrevious (perhive_env_reconcile.go, unchanged by this file)
-//     is an OPERATOR-FACING READINESS SIGNAL meaning "retiring right now costs
-//     nothing". It fails closed on zero observations and on any unattributed
-//     spoke, deliberately. It answers "is this free?", not "will this happen?".
-//
-// Retirement does not read SafeToRetirePrevious and must never learn to. The
-// counts feed the ALERT only — they change how loudly retirement is announced,
-// never whether it occurs.
-
 const (
 	// generationRetireInterval is how often the retirement sweep runs, matching
 	// netAdminReconcileInterval and perHiveEnvReconcileInterval so the one

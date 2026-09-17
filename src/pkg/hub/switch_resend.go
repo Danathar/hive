@@ -1,6 +1,8 @@
 package hub
 
-import "time"
+import (
+	"time"
+)
 
 // switchResendInterval is the minimum gap between two deliveries of the SAME
 // switch tag to one hive. It is the stale-upgrade window on purpose: an

@@ -1,6 +1,8 @@
 package hub
 
-import "strings"
+import (
+	"strings"
+)
 
 // StandardSHALen is the canonical short-SHA length used across hive: the hub
 // stores branch SHAs as Commit.SHA[:StandardSHALen], spoke and hub binaries

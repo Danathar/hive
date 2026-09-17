@@ -1,19 +1,5 @@
 package config
 
-// Kick prompt list caps (hivecommons/hive#7368).
-//
-// A kick prompt lists the agent's actionable issues and open PRs. Both lists
-// are bounded so a hive with a large backlog does not deliver a prompt whose
-// size is dominated by items the agent will never reach in one turn: the tail
-// of a 300-item list buys nothing, costs tokens on every kick, and — because
-// delivery types the prompt into a terminal — stretches the delivery window
-// (measured ~3 minutes for a 69.5 KiB kick), which is what made the
-// restart-during-delivery loop of #7363 unrecoverable in practice.
-//
-// The issue cap has always existed (maxIssuesPerKick=100); the PR cap was
-// missing, so a spoke with 302 open PRs produced a 69.5 KiB kick against a
-// documented ~22 KiB worst case. Both are now one operator-tunable block.
-
 // Defaults for KickLimitsConfig. The issue default is the historical
 // constant; the PR default keeps the fully-expanded prompt near the budget
 // documented in pkg/dashboard/prompt_history.go (~120 B per PR line).

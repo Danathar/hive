@@ -9,23 +9,6 @@ import (
 	"time"
 )
 
-// Admin-facing rotation endpoints (follow-on PR #4).
-//
-// AUTHORISATION. Both routes are wrapped in requireAdmin (saas.go), which:
-//   - calls isCSRFSafe FIRST, before any identity resolution, so a cross-site
-//     POST never reaches the rotation logic. Verified during the F4 work: BOTH
-//     requireAuth and requireAdmin enforce it. Without that, an ambient hub
-//     session cookie would make a cross-origin form POST rotate the fleet's
-//     master secret — which is the single most destructive unauthenticated
-//     action available on the platform.
-//   - gates on the REAL logged-in user (getRealAuthUser), not the effective
-//     one, and refuses every admin route while an impersonation grant is
-//     active.
-//
-// SECRET HYGIENE. Nothing in this file logs, returns, or renders any secret
-// material. The responses carry generation IDs, counts, and timestamps — an ID
-// names a key, it is not a key. This is asserted by test, not just by review.
-
 // rotateResponse is what the rotate endpoint returns. Deliberately contains no
 // field that could hold key material.
 type rotateResponse struct {

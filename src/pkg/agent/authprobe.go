@@ -11,44 +11,6 @@ import (
 	"github.com/hivecommons/hive/pkg/config"
 )
 
-// This file computes the per-agent CLI auth state that drives the dashboard's
-// 🔑 "needs login" badge.
-//
-// WHY IT EXISTS (the bug it fixes)
-//
-// BackendAuthAvailable answers a BACKEND-level question by stat'ing ONE shared
-// path: /data/home/.claude/.credentials.json (claude.CredentialsPath). That was
-// correct when every agent ran as the same UID out of the same HOME. The fleet
-// now runs PER-AGENT UIDs — each agent has its own UID, its own tmux socket
-// (/tmp/tmux-<uid>/<name>) and its OWN HOME — so on a per-UID spoke the shared
-// legacy locations are empty even while every agent is authenticated and
-// working out of its own home. The backend probe then answered
-// (available=false, known=true), which the dashboard renders as
-// `authKnown && !authAvailable` → 🔑 Login on agents that are demonstrably
-// running, being kicked, and passing /api/health/deep.
-//
-// PRECEDENCE RULE implemented by AgentAuthState (in order — first match wins):
-//
-//  1. METHOD GATE. If the agent's backend does not use interactive login at
-//     all (inference/API-key backends: litellm, vllm, llm-d — auth is a key in
-//     config, and bob when its API key is present), the answer is
-//     "authenticated, known". A badge here is ALWAYS wrong: there is no login
-//     for the operator to perform.
-//  2. POSITIVE EVIDENCE OF HEALTH beats absence-of-file. An agent that is
-//     StateRunning and NOT sitting at a login prompt is, by observation, doing
-//     work — that is the same signal /api/health/deep reports as `pass`. A
-//     missing credentials FILE cannot outrank a working process (the CLI may
-//     hold a live session in memory, or its credentials may live under a home
-//     this process cannot see). Report unknown so the UI shows no badge.
-//  3. TRUE LOGIN SIGNAL is preserved. proc.NeedsLogin (the pane poller having
-//     literally seen a login prompt on the agent's terminal) is authoritative
-//     and is handled by the callers ahead of this probe — it is never masked
-//     by rules 1 or 2 for interactive backends.
-//  4. Only then does the FILE PROBE run, and it looks under the AGENT'S OWN
-//     home first (per-UID layout) before falling back to the shared legacy
-//     path. Absence is reported as "needs login" ONLY when the method requires
-//     interactive auth AND the agent is not successfully running.
-
 // interactiveAuthBackends are the CLI backends whose credentials come from an
 // INTERACTIVE login flow (OAuth / device flow) that a human must complete. Only
 // these can ever legitimately show a login badge.

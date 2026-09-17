@@ -8,22 +8,6 @@ import (
 	"time"
 )
 
-// Advisory-staleness DIAGNOSTICS (#4167).
-//
-// advisoryStale() answers one question per hive — "light the pill or not" — and
-// deliberately stays silent in every ambiguous case. That is the right rule for
-// an alarm, but it makes the FLEET question unanswerable from the outside: when
-// certus's digest froze for six days with no pill, there was no way to tell
-// whether the fleet had one wedged hive or twenty, because "not stale" covers
-// "healthy", "not an advisory hive", "App never delivered" and "suppressed"
-// alike.
-//
-// This file re-runs the same gates and REPORTS WHICH ONE decided, without
-// changing any of them. Nothing here feeds the pill, the alert list or any other
-// operator-visible verdict: it is pure measurement, so the fleet's suppression
-// profile can be quantified (endpoint on demand, log line every cycle) instead
-// of inferred hive by hive.
-
 // Advisory diagnosis classes. Stable strings — they are the JSON payload's keys
 // and the log line's counters, so operators and dashboards can chart them.
 const (

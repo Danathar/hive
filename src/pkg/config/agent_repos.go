@@ -7,24 +7,6 @@ import (
 	"sync"
 )
 
-// Per-repo custom agents (#6204).
-//
-// Hive could already vary what an agent KNOWS per repo — pkg/agentsmd injects a
-// repo's AGENTS.md, skillreg resolves repo-local skills — but not which agents
-// EXIST per repo. The roster was a function of the hive, so a specialist added
-// for one repository woke on cadence and went looking for its concern in every
-// other repository too: inference spend and issue noise on repos that never
-// wanted it.
-//
-// AgentConfig.Repos is that missing dimension. It is deliberately agent-side
-// rather than repo-side: it keeps a BYO agent a single self-contained
-// declaration, which is what skillreg.AgentSpec is for, and it does not require
-// project.repos to become a list of objects — the change #6111 proposes and
-// which this feature must neither depend on nor pre-empt.
-//
-// Empty scope means every repo. That is the pre-existing behaviour and the
-// right default: an agent that does not say what it is for is for everything.
-
 // agentReposMu guards AgentConfig.Repos reads against the writers that change
 // them. The scope is read from goroutines that are not the ones that write it —
 // the proxy's per-request enforcement, the scheduler assembling a kick, the

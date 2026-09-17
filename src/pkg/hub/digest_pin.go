@@ -10,44 +10,6 @@ import (
 	"time"
 )
 
-// Digest pin: rollback as a first-class run-state (#6290, #6267, #6268).
-//
-// Before this file, rolling a hosted spoke back to a known-good build meant a
-// raw `kubectl set image` in the spoke's namespace, reaching around the hub.
-// That left no record of who did it or why (#6268), and it did not even hold:
-// the tracked-channel re-arm in handleHeartbeat honoured only the admin
-// upgrade pause, so a channel-tracking hive an operator had hand-pinned was
-// dragged back to the channel head on its next beat (#6267). A rollback that
-// silently reverts is worse than none, because the operator believes the
-// fleet is on the known-good digest when it is not.
-//
-// The shape follows the per-repo pause (#6203): the pin is a RUN-STATE on the
-// hub-owned hive record, carrying who/when/digest/reason, persisted next to
-// every other hub-owned fact about the hive so it survives hub restarts and
-// hub self-upgrades. It is not an edit to the hive's identity: TrackedChannel
-// is left exactly as it was, so lifting the pin resumes the selection the
-// operator had before the incident.
-//
-// Enforcement is deterministic and lives at every path that would write an
-// image onto the spoke:
-//
-//   - the tracked-channel re-arm in handleHeartbeat skips a pinned hive
-//     (the #6267 fix, and the half that matters);
-//   - handleHeartbeat withholds any armed SwitchToTag / UpgradeTo while the
-//     pin holds, so a directive armed before the pin cannot undo it;
-//   - triggerAutoUpgrades never arms a pinned hive;
-//   - the manual upgrade, branch/channel switch and bulk equivalents refuse
-//     with 409 naming the pin, exactly as they refuse under the admin pause.
-//
-// The pin is applied through the SAME deployment-patch path handleSwitchBranch
-// already uses: `kubectl set image deployment/hive "*=<ref>" -n
-// hive-hosted-<id>`. The `*=` form covers the init containers too. Delivery is
-// PUSH only: the heartbeat fallback carries a bare tag which the spoke turns
-// into ghcr.io/hivecommons/hive:<tag>, and a digest cannot ride that channel.
-// On a cluster the hub cannot reach the pin is refused rather than recorded
-// as applied, because a recorded pin that never landed is the exact lie this
-// feature exists to remove.
-
 // DigestPin records that a hive's spoke image is held at one immutable
 // manifest digest, together with the provenance of the decision.
 type DigestPin struct {

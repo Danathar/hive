@@ -1,40 +1,5 @@
 package agent
 
-// Remote Control startup pin (#5607).
-//
-// Claude Code's Remote Control bridge publishes a local session to
-// claude.ai/code so it can be driven from a browser or the phone app. Since
-// CLI ~2.1.226 the bridge AUTO-STARTS unless an explicit
-// "remoteControlAtStartup" value exists: the resolution order is
-// policySettings > flagSettings > userSettings, and when the key is absent
-// everywhere the CLI falls through to a server-side rollout flag
-// (tengu_cobalt_harbor via GrowthBook) — i.e. the default can flip between two
-// container restarts with no local change at all, and can differ per agent
-// within one fleet (percentage rollout).
-//
-// On a hive that is much worse than on a laptop: the per-agent HOME layout
-// bridges every agent's ~/.claude to the SHARED /data/home/.claude so one
-// login authenticates the fleet, which means every agent registers as a
-// remote-controllable session under the same claude.ai account — and those
-// sessions were launched with --dangerously-skip-permissions. The in-pane
-// /remote-control toggle is session-scoped and writes nothing, so every
-// relaunch (kick, restart, watchdog recovery) re-consults the rollout default
-// and the bridge comes back.
-//
-// The durable OFF is therefore hive's to write, and it is re-asserted on
-// EVERY claude-CLI launch (mirroring ensureBobAuthSettings): seed
-// "remoteControlAtStartup": false into the shared user settings file when the
-// key is absent. The merge is add-if-missing only — an operator who genuinely
-// wants Remote Control sets the key to true in the same file and hive never
-// clobbers it (that explicit value also beats the rollout default in the CLI
-// itself). Inference agents get the identical key via inferenceSettingsSeed,
-// which lands in both their per-agent userSettings and the --settings
-// flagSettings file.
-//
-// There is no environment variable for this in the CLI — the settings key is
-// the only local lever below managed org policy (verified against the shipped
-// bundles of 2.1.226 and 2.1.236 in #5607).
-
 import (
 	"encoding/json"
 	"os"

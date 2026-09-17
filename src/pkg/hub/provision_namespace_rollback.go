@@ -7,63 +7,6 @@ import (
 	"time"
 )
 
-// Hosted-namespace ROLLBACK on a failed provision (issue #5768, ask 1 — the
-// production side of the leak).
-//
-// THE GAP. provisionHive renders one manifest containing the whole hosted
-// spoke — Namespace, Deployment, Service, ConfigMap, Secret, PVC, Route — and
-// applies it with a single `kubectl apply -f`. kubectl applies the objects in
-// that file IN ORDER, and the Namespace is necessarily first, because every
-// other object in the manifest is namespaced into it. So when the apply fails
-// PARTWAY — an admission webhook rejects the Deployment, the PVC's
-// StorageClass is missing, the quota is exhausted, the Route host collides —
-// the namespace has ALREADY been created and kubectl's non-zero exit rolls
-// back nothing. provisionHive then returns an error, the caller marks the hive
-// record "error" (saas.go ~4118, lite_enrollment.go ~370), and the namespace
-// stays on the cluster forever with whatever partial objects preceded the
-// failure.
-//
-// That is a leak with no owner. Nothing retries the apply, nothing deprovisions
-// an errored hive, and the registry-derived sweeps cannot see the namespace
-// once the record is cleaned up or the placeholder is recycled. It is one of
-// the two ways a cluster ends up holding dozens of `hive-hosted-hosted-*`
-// namespaces with unbound PVCs and unschedulable pods, which is what #5768
-// measured.
-//
-// WHY THE ROLLBACK IS SAFE HERE AND A FLEET JANITOR IS NOT. Deleting a
-// namespace cascades to its PVCs and kills anything running in it — the widest
-// destructive verb the hub owns. What makes it defensible at THIS call site,
-// and only here, is that the hub can PROVE the namespace was not there a
-// moment ago:
-//
-//   - hostedNamespaceExistedBeforeApply runs `kubectl get namespace <ns>
-//     --ignore-not-found` immediately BEFORE the apply. With that flag kubectl
-//     exits 0 and prints nothing for an absent namespace, so "absent" and
-//     "could not tell" are distinguishable — a plain `get` conflates them into
-//     one non-zero exit.
-//   - Only an ABSENT-then-failed sequence rolls back. If the namespace already
-//     existed, this is a re-apply over a live or previously-provisioned spoke
-//     and the delete would destroy exactly what it was meant to protect.
-//   - If the pre-check itself errored, NOTHING is deleted. "I could not tell"
-//     must never be resolved in the direction of a delete; the namespace is
-//     left for the read-only detector (leaked_hosted_namespace.go) and a human.
-//
-// The window between the pre-check and the apply is a genuine TOCTOU: another
-// actor could create the namespace in between, and this would then delete it.
-// It is accepted because the only writer of `hive-hosted-<id>` namespaces is
-// the hub itself, provisioning for one hive id is serialized through
-// enqueueProvision (provision_queue.go), and the id is minted fresh for the
-// hive being provisioned. The alternative — no rollback — is the leak this
-// issue exists about.
-//
-// BEST-EFFORT AND LOUD. A failed rollback never changes what provisionHive
-// returns to its caller; the provision has already failed and the error the
-// admin sees must stay the ORIGINAL failure, not a cleanup failure layered over
-// it. Every outcome is logged, including the two non-delete decisions, because
-// a rollback that silently declines to run is indistinguishable from one that
-// ran — which is the failure mode the leak detector had to be written to catch
-// in the first place.
-
 // provisionRollbackTimeout bounds each kubectl call in the rollback path.
 //
 // Matches stampNamespaceIdentityTimeout: both are single synchronous kubectl

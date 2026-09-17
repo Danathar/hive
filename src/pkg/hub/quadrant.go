@@ -6,44 +6,6 @@ import (
 	"strings"
 )
 
-// The hive quadrant: a four-axis score — Trust, Efficiency, Satisfaction,
-// Productivity — computed for every hive and for the fleet as a whole.
-//
-// It is a NUDGE INSTRUMENT, not a report card. Every sub-criterion is chosen so
-// that a low score points at a specific next action ("move the governor off
-// observe-only", "only 1 of 9 repos enrolled"), and the renderers surface those
-// nudges alongside the number. A score nobody can act on does not belong here.
-//
-// Two design rules run through the whole file and must not be relaxed:
-//
-//  1. SCORES ARE FLEET-RELATIVE, BUT GATED BY ABSOLUTE ACTIVITY. An axis is a
-//     percentile against the other hives in the same population, which keeps the
-//     chart self-calibrating as the fleet's baseline moves. A percentile ALONE,
-//     however, is blind to magnitude, and on an idle fleet that blindness is
-//     catastrophic: the percentile definition puts a uniformly-tied population
-//     at 50, so when 28 of 62 hives have merged nothing at all, all 28 score ~50
-//     for doing literally nothing, and a hive with THREE merged PRs in ninety
-//     days outranks all of them and lands near the top. The chart then reports a
-//     busy, healthy fleet that does not exist.
-//
-//     Every percentile is therefore multiplied by an ACTIVITY FACTOR derived
-//     from the criterion's raw magnitude (see activityFactor). Zero measured
-//     activity scores at/near zero regardless of rank; activity ramps the
-//     percentile in over a small absolute threshold so one PR does not vault a
-//     hive to the top of the fleet but ten does count fully.
-//
-//  2. ABSENT EVIDENCE IS NOT A ZERO — AND IS NOT THE SAME AS MEASURED ZERO.
-//     An axis with too little data reports Scored=false and renders as a
-//     collapsed spoke. A hive that genuinely reported zero is a different thing:
-//     it IS measured, it DOES score, and rule 1 means it scores LOW rather than
-//     at the median. Collapsing these two cases together is the bug in both
-//     directions — scoring a never-reporting hive at 0 nags the wrong people,
-//     and scoring a measured-zero hive at 50 flatters the whole fleet.
-//     Every axis is subject to the sufficiency floor, not just Satisfaction.
-//
-// Computed on read and never persisted on the registry entry, mirroring the
-// Journey status this file sits alongside.
-
 // Quadrant axis identifiers. These strings are the wire form (JSON keys, sort
 // keys in the dashboard) and are part of the contract with the browser; do not
 // rename them without updating sortedDashHives and the renderers.

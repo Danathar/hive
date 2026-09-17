@@ -14,37 +14,6 @@ import (
 	"github.com/hivecommons/hive/pkg/config"
 )
 
-// Per-App key storage for a cluster's SECOND (optional) GitHub App.
-//
-// WHY THIS EXISTS
-//
-// clusterAppKeyPath keys the store by cluster ID alone — one <clusterID>.pem —
-// so a cluster has exactly one slot for App key material. Uploading a second
-// App's key through the operator endpoint therefore OVERWROTE the Hive App key
-// for that cluster, and every spoke on it lost App auth on the next reconcile.
-// That is the bug #4815 exists to prevent; the optional Visual Hive App (#4030)
-// has no correct place to put its credential today.
-//
-// WHY THE PRIMARY PATH IS NOT TOUCHED
-//
-// ~55 live hives across two clusters authenticate from keys already sitting at
-// /data/saas/app-keys/<clusterID>.pem. Renaming, moving or "normalising" that
-// path is a fleet-wide auth outage for zero benefit: the primary App's key is
-// still exactly one per cluster and the existing path already names it
-// unambiguously. The second App's key therefore lands ALONGSIDE it under a new
-// name, and there is no on-disk migration of any kind — a hub rolled back to a
-// build without this file finds every primary key exactly where it left it, and
-// simply ignores the extra files.
-//
-// WHY NOT A SUBDIRECTORY PER CLUSTER
-//
-// A sibling filename keeps the store a flat directory of PEMs, which is what
-// storeClusterAppKey's atomic temp-then-rename assumes (the temp file must land
-// on the same filesystem as its target, and CreateTemp is given
-// clusterAppKeyDir). A per-cluster subdirectory would need its own MkdirAll,
-// its own 0700 enforcement per cluster, and would make a cluster ID a directory
-// name — a strictly larger traversal surface for no gain.
-
 // secondaryAppKeyInfix separates the cluster ID from the App ID in a secondary
 // key's filename: <clusterID>-app-<appID>.pem.
 //

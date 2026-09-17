@@ -1,40 +1,5 @@
 package agent
 
-// Asynchronous kick dispatch (#5325).
-//
-// SendKick is synchronous and its slow leg — waitForInputPromptForAgent — is
-// bounded by inputPromptTimeout (120s). A dashboard handler that calls it
-// inline therefore outlives any normal ingress/proxy idle timeout (commonly
-// 60s), so the proxy answers 504 while the wait is still running. The wait then
-// finishes server-side, the prompt IS typed, and the agent runs the session —
-// but the operator was told the kick failed. The natural response to a false
-// failure is to click Kick again, which delivers the prompt TWICE; on a
-// hold-gated lane that means duplicate advisory comments and beads.
-//
-// The fix is to take the prompt wait off the request path. SendKickAsync keeps
-// every FAST, deterministic precondition on the caller's goroutine — agent
-// exists, sandbox routing, state is running, tmux session exists — so a
-// genuinely un-kickable agent still fails synchronously and is still reported
-// as a failure. Only the slow legs (crash-restart recovery, the input-prompt
-// wait, and the typing itself) move to a background goroutine.
-//
-// Exactly-once delivery is enforced by an in-flight guard keyed on agent name:
-// a second SendKickAsync for an agent whose dispatch is still running does NOT
-// start a second delivery. This is the property that makes the async contract
-// safe for a UI that used to see false failures — even a retry that predates
-// this fix's UI changes cannot double-type.
-//
-// Outcome is published two ways, both off the request path:
-//   - KickDispatchState(name) — a polled snapshot for the dashboard.
-//   - the existing kick observer — "kick-delivered" still fires from
-//     deliverKickLocked exactly as before.
-//
-// Locking: SendKickAsync must NOT be called with m.mu held. It takes m.mu for
-// the precondition check, releases it, and the background goroutine then calls
-// the same lock-taking helpers SendKick uses. Nothing here re-enters m.mu on a
-// goroutine that already holds it — the repo has had startup deadlocks from
-// exactly that mistake (see the isGatewayBackend comment in manager.go).
-
 import (
 	"context"
 	"fmt"

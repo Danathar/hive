@@ -14,22 +14,6 @@ import (
 	"time"
 )
 
-// Cluster health and telemetry (#7278 stage 1).
-//
-// The hub's view of how each managed cluster is doing: the cached health
-// snapshot served to the dashboard panel, the per-cluster builders that reach
-// out to Kubernetes (or fall back to the last heartbeat for pull-only
-// clusters), node disk/CPU/memory accounting, and the Kubernetes quantity
-// parsers those need.
-//
-// Split out of saas.go unchanged — a pure move, so `go build` and the existing
-// pkg/hub tests are the proof of equivalence. saas.go had already marked this
-// run of the file with a `--- Cluster Health ---` banner; this promotes that
-// comment into a filename, which is the whole point of #7278: a diff in
-// "saas.go" said nothing about which of six domains it touched.
-
-// --- Cluster Health ---
-
 const clusterHealthCacheTTL = 30 * time.Second
 
 // CPU and memory bar thresholds are NOT declared here. The hub serves the

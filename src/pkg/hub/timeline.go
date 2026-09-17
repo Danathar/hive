@@ -12,20 +12,6 @@ import (
 	"time"
 )
 
-// Per-hive activity timeline.
-//
-// Debugging "why is hive X stuck?" used to mean shelling into a cluster and
-// reading `kubectl logs`. A hive restart-looped for hours because it was
-// pinned to an immutable image tag; another sat "upgrading" forever because
-// the hub could not reach its cluster; a third silently rejected a user.
-// Every one of those had a signal the hub ALREADY receives on the heartbeat —
-// it was just never recorded.
-//
-// This is an append-only, bounded, per-hive event store. It records state
-// TRANSITIONS, not heartbeats: at ~2 min per beat and 42 hives, writing an
-// event per beat would be 30k events/day of pure noise. An event is emitted
-// only when a watched field actually changes.
-
 // timelineMaxEvents caps the number of events retained per hive. Oldest are
 // pruned first. This store lives on the hub PVC, so it must not grow without
 // limit: 200 events is deep enough to cover several weeks of a normally quiet
@@ -275,10 +261,6 @@ func (t *timelineStore) load() {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Transition detection
-// ---------------------------------------------------------------------------
-
 // healthStatus extracts the coarse status string from a heartbeat health map.
 // The spoke reports health as a free-form map; "status" is the field the
 // dashboard already keys on.
@@ -486,10 +468,6 @@ func shortDur(d time.Duration) string {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// HubServer hooks
-// ---------------------------------------------------------------------------
-
 // recordTimeline appends a single human-initiated event. Call it alongside
 // the existing `audit:` log lines — the log answers "what did the hub do",
 // the timeline answers "what happened to this hive".
@@ -553,10 +531,6 @@ func (s *HubServer) flushOfflineEvents(evs []offlineSweepEvent) {
 		s.timeline.append(e.HiveID, TimelineWentOffline, e.Detail, "")
 	}
 }
-
-// ---------------------------------------------------------------------------
-// API
-// ---------------------------------------------------------------------------
 
 // handleHiveTimeline serves GET /api/saas/hives/{id}/timeline.
 //

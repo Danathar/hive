@@ -10,43 +10,6 @@ import (
 	"time"
 )
 
-// ============================================================================
-// COMMIT ORDER — "has this spoke reached (or surpassed) its armed target?"
-// ============================================================================
-//
-// Every upgrade-completion check in this package used to be an EQUALITY test:
-// the spoke's reported GitHash had to equal either the armed UpgradeTarget or
-// the poller's current branch latest. That test has a hole a floating-tag hive
-// falls straight through: the hub captures a target SHA, the branch advances
-// before the spoke re-pulls its …-latest tag, and the spoke lands on a commit
-// that is AHEAD of the target but — if the branch has advanced again by the
-// time the beat arrives — also behind the poller's current latest. Its
-// reported hash then equals NOTHING the hub compares against, so the upgrade
-// that in fact completed is never recognised:
-//
-//   - the heartbeat completion branch never clears the Upgrading latch,
-//   - the armed s.heartbeatUpgrade fallback never drains, so the hub keeps
-//     re-instructing the same stale, unreachable commit pin on every beat,
-//   - the spoke dutifully re-attempts, re-rolling its pod and re-latching
-//     Upgrading via SendUpgradingHeartbeat, forever.
-//
-// This is the vllmd-13 wedge (the residue of the #2691 class): target 89d4bcc
-// was armed, the spoke pulled v2-latest and came back on be8c36e (3 commits
-// ahead of the target), and the "Upgrading" badge never cleared.
-//
-// The missing primitive is ORDER, not equality: a spoke whose reported commit
-// is a DESCENDANT of the armed target has reached-or-surpassed it, and the
-// upgrade is complete. SHAs carry no order, but GitHub's compare API knows the
-// ancestry, and ancestry is immutable — one answer per (target, reported) pair
-// is correct forever, so a tiny permanent cache makes this effectively free.
-//
-// Concurrency contract: commitAtOrAheadOfTarget is CACHE-ONLY and never blocks
-// — several callers hold s.mu (the heartbeat registry scan, the orphan sweep).
-// An unknown pair kicks one deduplicated background resolve and reports false
-// for now; the next beat (or sweep cycle) sees the cached answer. A wedged
-// hive therefore clears within one heartbeat interval of the single API call
-// resolving, instead of never.
-
 // commitOrderCacheMax bounds the resolved-ancestry cache. Entries are tiny and
 // ancestry never changes, but an unbounded map keyed by attacker-influencable
 // SHAs (spokes report GitHash) must not grow forever. On overflow the whole

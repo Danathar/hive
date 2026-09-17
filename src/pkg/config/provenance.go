@@ -1,24 +1,5 @@
 package config
 
-// Field provenance — "which layer set this field, and can I even edit it?"
-//
-// This exists because that question previously had no answer short of reading
-// pod boot logs. The cost was concrete and repeated:
-//
-//   - A GitHub Enterprise hive was repaired on the FOURTH attempt, after
-//     patching the hub's meta.json, then clusters.json, then the spoke's
-//     ConfigMap — three layers that are INERT for github.app_id — before
-//     patching the dashboard overlay, the layer that actually wins.
-//
-//   - A half-applied GHE identity (app_id switched to the GHE App, api_url
-//     left empty so it defaulted to api.github.com) produced
-//     "404 Integration not found" on live hives. The two fields live in the
-//     same layer, and seeing them side by side with their sources would have
-//     made the split obvious immediately. See IdentitySetIssues.
-//
-// Provenance is derived, never authoritative: it records what MergeLayers did.
-// It changes no behaviour.
-
 import (
 	"errors"
 	"fmt"
@@ -235,10 +216,6 @@ func (p *Provenance) Report(cfg *Config) []FieldOrigin {
 	sort.Slice(out, func(i, j int) bool { return out[i].Field < out[j].Field })
 	return out
 }
-
-// ─────────────────────────────────────────────────────────────────────────
-// GitHub identity-set invariant
-// ─────────────────────────────────────────────────────────────────────────
 
 // gheAPIURLMarker identifies a GitHub Enterprise API URL. Public GitHub uses
 // api.github.com (or an empty api_url, which defaults to it).

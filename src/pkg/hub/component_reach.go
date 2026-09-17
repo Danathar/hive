@@ -1,16 +1,5 @@
 package hub
 
-// Hub receipt of spoke component-reach reports (#3993, phase 2a of #3973).
-//
-// The heartbeat's component_reach field is SPOKE INPUT parsed on the hub, so
-// everything in it is bounded and sanitized before it touches the registry:
-// entry count is clipped to tracing.MaxReachComponents (a hostile spoke must
-// not grow hub memory or the persisted registry without limit), strings go
-// through the identifier sanitizer with explicit length caps, counts are
-// clamped non-negative, and timestamps must parse as RFC3339 or are dropped.
-// The stored report is NEVER trusted for anything but storage here — no joins,
-// no ancestry, no endpoint, no UI; that is #3994's job.
-
 import (
 	"strings"
 	"time"

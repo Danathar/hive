@@ -5,30 +5,6 @@ import (
 	"strings"
 )
 
-// Repo-ownership overlap detection (kubestellar/hive#5691).
-//
-// A single hive serving a diverse org makes its agents compete over unrelated
-// work, so operators split it into several subject-scoped spokes. The whole
-// point of that split is that two fleets stop sharing a backlog — and nothing
-// enforced it. The hub receives every spoke's repo list on every heartbeat and
-// never compared them, so two spokes could manage the same repo and open
-// competing PRs on it: the exact failure the split exists to prevent.
-//
-// Reported live in #5691 while splitting one 43-repo hive into two: an org
-// watcher read one spoke's repo list, could not read the other's, concluded 18
-// repos were unmanaged, and was one step from adding them to the first hive.
-//
-// This is READ-SIDE ONLY, derived per request from data the registry already
-// holds. It is deliberately not persisted and adds nothing to the heartbeat
-// protocol — the RFC sequences overlap detection first precisely because it
-// needs neither, and it keeps the hub a directory rather than a control plane.
-//
-// It is also a WARNING, not a bar. Whether a duplicate should ever BLOCK
-// assignment, and how to allowlist a repo two subject areas legitimately share
-// (a docs repo is the RFC's own example), is an open question on #5691.
-// Answering it in code before it is answered in the issue would be the wrong
-// order, so this reports and does not refuse.
-
 // RepoOverlap is one work item claimed by more than one spoke.
 type RepoOverlap struct {
 	// Host is the resolved GitHub host the claim sits on. Two spokes claiming

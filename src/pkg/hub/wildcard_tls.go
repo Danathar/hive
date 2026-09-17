@@ -1,40 +1,8 @@
 package hub
 
-import "strings"
-
-// Wildcard TLS for provisioned spoke ingresses (#5977).
-//
-// A fleet wildcard certificate covering *.<cluster domain> already existed and
-// was serving nothing: every provisioned spoke Ingress carried its own tls:
-// block naming a per-namespace secret, and an explicit tls: block always wins
-// over the ingress controller's --default-ssl-certificate. So each spoke still
-// minted its own certificate — ~195 Ingress TLS references and ~60 Certificate
-// objects across two clusters, doing what one wildcard already covered, against
-// an ACME cap of 50 issuances per week per registered domain.
-//
-// That is not merely wasteful, it is structurally unsafe: with ~263
-// wildcard-covered hostnames on the two clusters, EVERY hostname change costs a
-// certificate, and the 2026-09-03 incident is what happens when enough of them
-// change at once.
-//
-// The fix is to stop emitting the tls: block (and the cert-manager issuer
-// annotation that turns it into a Certificate) for hosts the wildcard already
-// covers, so the controller's default certificate is what serves them.
-//
-// ── The failure mode this code is shaped around ────────────────────────────
-//
-// Omitting the tls: block on a cluster whose controller has NO
-// --default-ssl-certificate does not degrade gracefully: ingress-nginx serves
-// its built-in SELF-SIGNED certificate instead, and every spoke dashboard on
-// that cluster fails TLS validation at once. At the time of writing that is
-// exactly the state of lke648397 — wildcard secret absent, flag not set — while
-// hive-oke has both.
-//
-// So the decision is opt-in per cluster and fails SAFE in every direction: any
-// doubt at all, and the spoke keeps its own certificate. The asymmetry is
-// deliberate and worth stating, because it is the reason for every guard below:
-// wrongly minting a certificate costs one issuance out of fifty, while wrongly
-// omitting one takes down every dashboard on the cluster.
+import (
+	"strings"
+)
 
 // normalizeDNSName lowercases a DNS name and strips the optional trailing root
 // dot, so "Host.Example.COM." and "host.example.com" compare equal.

@@ -8,34 +8,6 @@ import (
 	"strings"
 )
 
-// ============================================================================
-// HUB UPGRADE TARGET WALKBACK — "the tip has no hub image; what is the newest
-// commit on this branch that does?"
-// ============================================================================
-//
-// fetchBranchSHA only ever admitted the branch TIP into latestHubSHAByBranch,
-// and only when the tip's hive-hub image was already on GHCR. Two ordinary
-// events break that:
-//
-//   - A release-bump commit (`release: vX.Y.Z`) is merged by github-actions[bot]
-//     with GITHUB_TOKEN, and GitHub fires no `push` workflows for such pushes,
-//     so docker.yml never builds an image for the release commit at all.
-//   - A commit is tip for less than one poll cycle (two merges two minutes
-//     apart), so the poller never sees it as tip once its image has landed.
-//
-// Either way the hub's target froze at whatever tip it last verified. On
-// 2026-09-09 that left the hub on bd68d95 for 13 hours while d566f97 (built,
-// published, one commit newer) sat unreachable behind the image-less v4.20.1
-// release commit; the manual Upgrade button failed because the target never
-// advanced. Spokes got the analogous fix in #6294 (reachableUpgradeTarget);
-// this is the hub side.
-//
-// When the tip's hub image is absent, walk the branch's recent commits
-// newest-first and take the first one whose hub image IS published, stopping
-// at the currently recorded target (nothing newer is published, so keep it).
-// Advancement stays monotonic: everything before `current` in a newest-first
-// listing of a linear branch is a descendant of it.
-
 // hubTargetWalkbackDepth bounds how many recent commits are inspected when
 // the tip has no hub image. Each candidate costs one GHCR manifest probe; the
 // walk stops early at the current target, so in the steady state (image-less

@@ -1,6 +1,8 @@
 package config
 
-import "log"
+import (
+	"log"
+)
 
 // deprecatedHealthcheckWarned ensures the deprecation notice is logged once per
 // process rather than on every applyDefaults call (config is re-applied on

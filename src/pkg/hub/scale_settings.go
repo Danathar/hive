@@ -9,16 +9,6 @@ import (
 	"time"
 )
 
-// Admin-editable scale settings.
-//
-// Every fleet-scale tunable the hub grew (upgrade wave size, provisioning
-// queue bounds, kubectl concurrency, per-cluster capacity/pool watermarks)
-// is edited from the hub dashboard's admin Scale Controls card and persisted
-// here — env vars and clusters.json remain only as INITIAL DEFAULTS, never
-// the only way to change a knob. Reads go through the effective* helpers so
-// a saved value takes effect live (no hub restart) wherever the machinery
-// can honor it.
-
 var scaleSettingsPath = "/data/saas/scale_settings.json"
 
 // ClusterScaleOverride is a per-cluster overlay on clusters.json. Pointers

@@ -1,35 +1,5 @@
 package hub
 
-// Version-absent detection: a hive that heartbeats but reports NO git_hash is
-// invisible to the upgrade path AND to the operator.
-//
-// The hub decides whether to instruct an upgrade by comparing the spoke's
-// reported git_hash against the branch target. With an empty git_hash that
-// comparison cannot run (see the `payload.GitHash != ""` gate on the
-// spoke-managed upgrade path), so the hub issues no instruction at all - and
-// the hive silently stops receiving upgrades while continuing to count as
-// online, because beats keep arriving. The registry row keeps whatever version
-// the last GOOD report left behind, so every operator-facing surface renders
-// the condition as health.
-//
-// Two hives sat in exactly this state for hours (#6025):
-//
-//   - hosted-llm-d-llm-d-worklo-wva1: pod 1/1 Running, hub logging its
-//     heartbeat every 120s, while the spoke's own logs showed 104 "proxy
-//     client request read timed out", 34 "hub heartbeat collect timed out",
-//     and 0 successful heartbeat collections. It sent last-good cached stats
-//     with no version, ran digest 14c75aa0 while :stable was ef5a603a, and
-//     received no upgrade instruction.
-//   - hosted-available-vllmd-01: showed "No heartbeat for 8h29m" and
-//     "Upgrading 29m" simultaneously, both stale, because the hub had no fresh
-//     version to update the row with.
-//
-// This is the same family as status_flip.go: a hub-observed fact about beats
-// that needs NOTHING new from the spoke (an old spoke cannot silence it), and
-// whose message is that the row cannot be trusted. It differs in what it adds:
-// a flipping row is untrustworthy, a version-less row is untrustworthy AND
-// frozen, because the upgrade instruction that would move it is never sent.
-
 // versionAbsentBeatsToConfirm is how many CONSECUTIVE version-less heartbeats
 // are required before the hive is declared version-absent.
 //

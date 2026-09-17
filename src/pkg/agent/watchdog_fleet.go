@@ -12,14 +12,6 @@ import (
 	"github.com/hivecommons/hive/pkg/watchdog"
 )
 
-// This file adapts the Manager to the watchdog reconciler (RFC #4665). The
-// adapter is intentionally thin: every observation reuses the manager's
-// existing machinery — the visible-pane capture (same seam the pane poller
-// uses), the cliPaneMarkers ready-signature tables, paneShowsLoginPrompt, the
-// owner-aware per-agent auth probe (AgentAuthState, #4619/#4641), and the
-// Restart/Pause paths — so the watchdog is a consumer of the manager's truth,
-// never a second source of it.
-
 // WatchdogFleet implements watchdog.Fleet over a Manager.
 type WatchdogFleet struct {
 	M *Manager

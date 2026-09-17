@@ -1,13 +1,5 @@
 package config
 
-// This file holds the YAML surface of the agent self-healing watchdog
-// (RFC #4665). Deliberately, NO defaults are materialized into these structs
-// by applyDefaults: the #4041 login-patterns migration showed that marshaling
-// defaults back into a saved config freezes them forever. The zero value of
-// every field means "use the RFC default", resolved at consumption time by
-// watchdog.SettingsFrom, so a hive that never mentions `governor.watchdog`
-// tracks the current defaults across upgrades.
-
 // WatchdogConfig configures the per-agent liveness/readiness reconciler.
 // All duration fields accept Go duration strings ("10m", "1h30m").
 type WatchdogConfig struct {

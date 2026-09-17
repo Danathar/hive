@@ -13,52 +13,6 @@ import (
 	"time"
 )
 
-// Wildcard certificate health for opted-in clusters (#5977).
-//
-// WHAT CHANGED UNDER US. Before the wildcard opt-in landed, a spoke's TLS was
-// its own problem: each Ingress carried a tls: block naming a per-namespace
-// secret, so a certificate that failed to renew took down ONE dashboard. On a
-// cluster that has set wildcard_tls_secret, provisioned Ingresses omit that
-// block entirely and the ingress controller's --default-ssl-certificate serves
-// them — so one certificate now stands behind every hosted spoke on the
-// cluster. The issue puts that at ~263 hostnames across two clusters.
-//
-// The blast radius of a renewal failure therefore went from one host to all of
-// them, and nothing was watching. This file is the monitoring #5977 named as a
-// prerequisite for enabling the opt-in fleet-wide.
-//
-// ── The verification gap this closes ───────────────────────────────────────
-//
-// wildcard_tls_secret is an operator ASSERTION. wildcard_tls.go says so
-// outright: the two prerequisites (the secret exists on the cluster, and the
-// controller serves it by default) "are not visible from here, which is
-// precisely why this is an operator assertion rather than something inferred."
-//
-// That reasoning is right at PROVISION time — the provisioner must decide
-// without a cluster round-trip, and guessing wrong takes the cluster down. It
-// is not a reason never to check. The health build already talks to every
-// cluster on a timer, so the assertion can be verified AFTER the fact, where
-// being wrong costs a warning rather than an outage. Two of the failure shapes
-// below are exactly that assertion turning out to be false:
-//
-//   - wildcardStatusMissing: the flag is set and the secret is not there. Every
-//     wildcard-served spoke on the cluster is being handed ingress-nginx's
-//     built-in self-signed certificate right now.
-//   - wildcardStatusDomainMismatch: the secret is there and does not carry
-//     "*.<cluster domain>". servesHostFromWildcard decides coverage from the
-//     domain in clusters.json; this is the only place the CERTIFICATE gets a
-//     say, and a mismatch means the hub is omitting tls: blocks for hosts this
-//     certificate cannot serve.
-//
-// Neither is visible from clusters.json, and both stay silent until a user
-// opens a dashboard.
-//
-// ── Read-only, and scoped to clusters that actually depend on it ───────────
-//
-// One `kubectl get secret` per opted-in cluster per health build. A cluster
-// without the opt-in issues no request at all: its spokes still carry per-host
-// certificates, so no wildcard is load-bearing there.
-
 const (
 	// wildcardExpiryWarnWindow is how close to expiry the certificate may get
 	// before this reports it.

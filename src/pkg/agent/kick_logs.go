@@ -1,27 +1,5 @@
 package agent
 
-// Durable per-kick agent run logs (#4296, #4295).
-//
-// The dashboard's "full log" is a live capture-pane of the agent's CURRENT
-// tmux session, so a restart — or a hive upgrade, which replaces the whole
-// container — destroys every previous run's scrollback. Operators debugging
-// why an agent misbehaved several kicks ago had nothing to look at.
-//
-// This file archives the scrollback of each kick to a durable file BEFORE the
-// content is lost:
-//
-//   - at kick delivery (deliverKickLocked), the outgoing scrollback — the
-//     previous kick's output — is snapshotted to a file and the tmux history
-//     is then cleared, so each archive covers exactly one kick;
-//   - at Restart, the scrollback is snapshotted BEFORE kill-session runs;
-//   - at graceful shutdown (SIGTERM: pod roll, hive upgrade), every agent
-//     with un-archived kick output is snapshotted via ArchiveAllKickLogs.
-//
-// Archives live under kickLogDir (default /data/logs/kicks — the /data PVC
-// survives agent restarts, pod rolls, and hive image upgrades) as
-// <agent>/<timestamp>-<reason>.log, pruned to the newest kickLogRetention
-// files and kickLogMaxBytes total bytes per agent.
-
 import (
 	"fmt"
 	"os"

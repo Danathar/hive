@@ -1,25 +1,8 @@
 package agent
 
-import "time"
-
-// TerminalSession is the nil-safe boundary around tmux pane/session I/O.
-type TerminalSession interface {
-	// CapturePane returns the agent's pane content including scrollback
-	// (bounded by tmuxCaptureLines), for diff-based output detection. Wrapped
-	// display lines are joined so substring detectors see the original output.
-	CapturePane(agent *AgentProcess) string
-	CaptureVisiblePane(agent *AgentProcess) string
-	SessionAttached(agent *AgentProcess) bool
-	SendLiteral(agent *AgentProcess, text string)
-	SendKeys(agent *AgentProcess, keys ...string)
-	SleepDuringPromptDismiss(time.Duration)
-	CaptureFullLog(agent *AgentProcess) (string, error)
-	ClearHistory(agent *AgentProcess)
-}
-
-type tmuxTerminal struct {
-	manager *Manager
-}
+import (
+	"time"
+)
 
 func (m *Manager) terminalSession() TerminalSession {
 	if m.terminal != nil {

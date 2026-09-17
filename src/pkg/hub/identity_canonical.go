@@ -5,29 +5,6 @@ import (
 	"strings"
 )
 
-// Canonical identity for a HUMAN hub/spoke user.
-//
-// Historically a user WAS their GitHub login: that one bare string was the
-// session-cookie subject, the on-disk user key, the map key for hive grants, and
-// the admin comparison value. To support additional login providers (Google,
-// IBMid, Red Hat) without collisions or cross-provider impersonation, an identity
-// is now a canonical `provider:subject` pair.
-//
-// This is strictly about WHO A HUMAN IS for login + access control. It has
-// nothing to do with the GitHub App installation token (kubestellar-hive[bot])
-// that performs the hive's actual GitHub work, nor with agent/backend logins.
-//
-// Two representations exist:
-//
-//	wire form      "github:clubanderson", "google:1078...":
-//	               used in cookies, X-Hive-User, SaaSUser.Hives keys, Owner
-//	               fields, authorized_users. The signed-cookie machinery signs an
-//	               opaque string, so it carries a canonical id with no change.
-//	filename form  "github.clubanderson", "google.1078...":
-//	               path-safe on-disk key that stays inside safeNamePattern
-//	               (^[a-zA-Z0-9._-]+$), so isValidName and the load/save traversal
-//	               guards keep protecting the storage layer unchanged.
-
 // identityProviders is the fixed, closed set of login providers. A provider name
 // contains no '.', which is what lets the filename form split provider from
 // subject on the FIRST dot. Extend this set (not the parsing) to add a provider.

@@ -12,29 +12,6 @@ import (
 	"time"
 )
 
-// This file implements the public-repo verification behind the dibs repo feed
-// (GET /api/saas/dibs/repos, #4233).
-//
-// The feed used to require is_public — an owner opt-in "registry visibility"
-// toggle that is false on every production hive — so the feed could never
-// populate. The feed's actual safety requirement is narrower: it must only
-// expose facts that are ALREADY public. A repo that is public on github.com
-// satisfies that by definition, so the gate is now "verifiably public on
-// github.com right now", checked against the GitHub API:
-//
-//	GET https://api.github.com/repos/{owner}/{repo}
-//
-// 200 with "private": false → public; 404 (GitHub's answer for both private
-// and nonexistent, deliberately indistinguishable to an unauthenticated
-// caller) or "private": true → excluded.
-//
-// The check NEVER runs on the request path. handleDibsRepos consults only the
-// in-memory verdict cache and kicks off bounded, deduplicated background
-// refreshes for missing/expired entries — an unknown repo is simply excluded
-// until its first verdict lands. The first responses after a hub restart are
-// therefore smaller and converge as the cache fills, which is fine: dibs
-// re-syncs every ~5 minutes and merges.
-
 const (
 	// dibsPublicCheckTTL is how long a definitive verdict (public or not) is
 	// trusted before re-verification. Positive AND negative verdicts are
