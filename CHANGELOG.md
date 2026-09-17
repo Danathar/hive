@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-17 (v4.49.2)
+
+### Fixed
+
+- On a hub-proxied spoke, a signed-out visitor to the Operations tab was shown the hive owner's "Your contribution" stats and reported as logged in. The owner-token fallback in `resolveViewerUsername` and `handleGHUserAuthStatus` is meant for single-owner spokes only; it now stays off when the hub is fronting the dashboard, since a request without `X-Hive-User` there is an anonymous one. Single-owner spokes are unchanged.
+
 ## 2026-09-17 (v4.49.1)
 
 ### Fixed
