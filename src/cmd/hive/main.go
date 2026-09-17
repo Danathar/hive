@@ -7169,7 +7169,7 @@ func runEvalCycle(
 	}
 
 	if !statusPublished {
-		statusPublished = dashSrv.UpdateStatusIfFresh(statusPayload, buildEpoch)
+		dashSrv.UpdateStatusIfFresh(statusPayload, buildEpoch)
 	}
 
 	if agentStats := dashboard.CollectAgentStats(statusPayload); len(agentStats) > 0 {
