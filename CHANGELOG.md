@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-17 (v4.43.0)
+
+### Added
+
+- Fleet self-reporting now also previews and optionally files hive-code defect reports when calibrated hive-owned runtime symptoms appear even without an ACMM shortfall.
+
 ## 2026-09-17 (v4.42.0)
 
 ### Added
