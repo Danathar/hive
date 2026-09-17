@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/hivecommons/hive/pkg/config"
-	hub "github.com/hivecommons/hive/pkg/hub/spoke"
+	spoke "github.com/hivecommons/hive/pkg/hub/spoke"
 	"github.com/hivecommons/hive/pkg/terminalassert"
 )
 
@@ -66,7 +66,7 @@ func TestTerminalHandoffMint_NoHubLanesFallsBackAndSucceeds(t *testing.T) {
 	s := newRenewServer(t, "hosted-alpha")
 	// Empty both lanes of hub.TerminalSigningKey: the injected per-hive key and
 	// the master secret the self-derive lane needs.
-	t.Setenv(hub.EnvTerminalKey, "")
+	t.Setenv(spoke.EnvTerminalKey, "")
 	t.Setenv("HIVE_HUB_SECRET", "")
 	t.Setenv(terminalassert.EnvFallbackKeyDir, t.TempDir())
 

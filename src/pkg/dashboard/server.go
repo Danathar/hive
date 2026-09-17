@@ -23,7 +23,7 @@ import (
 	"github.com/hivecommons/hive/pkg/fleetreport"
 	"github.com/hivecommons/hive/pkg/github"
 	"github.com/hivecommons/hive/pkg/hiveadvisor"
-	hub "github.com/hivecommons/hive/pkg/hub/spoke"
+	spoke "github.com/hivecommons/hive/pkg/hub/spoke"
 	"github.com/hivecommons/hive/pkg/planning"
 	"github.com/hivecommons/hive/pkg/tokens"
 	"github.com/hivecommons/hive/pkg/watchdog"
@@ -273,7 +273,7 @@ type Server struct {
 	// hubUpgradePolicy is the hub's upgrade posture for this spoke as last
 	// delivered on the heartbeat (#7262); nil until the first beat carrying
 	// one, or forever on a spoke the hub does not manage. Guarded by versionMu.
-	hubUpgradePolicy   *hub.HeartbeatUpgradePolicy
+	hubUpgradePolicy   *spoke.HeartbeatUpgradePolicy
 	hubUpgradePolicyAt time.Time
 
 	contributeHub *ContributeWSHub
@@ -2347,8 +2347,8 @@ func (s *Server) handleLivez(w http.ResponseWriter, r *http.Request) {
 
 	// Hives with no hub configured never run a heartbeat loop at all, so
 	// there is nothing to stall — never gate their liveness on this.
-	if hub.HeartbeatEnabled() {
-		lastAttempt, hasAttemptedOnce := hub.LastHeartbeatAttempt()
+	if spoke.HeartbeatEnabled() {
+		lastAttempt, hasAttemptedOnce := spoke.LastHeartbeatAttempt()
 		switch {
 		case !hasAttemptedOnce:
 			// The loop has not reached its first send yet. Healthy during the
@@ -2587,9 +2587,9 @@ func (s *Server) handleHealthDeep(w http.ResponseWriter, r *http.Request) {
 	// restart cannot fix. It surfaces as "warn" so operators (and the hub
 	// dashboard's gray dot) still see the connectivity problem without the
 	// kubelet killing an otherwise-healthy pod. See handleLivez.
-	if hub.HeartbeatEnabled() {
+	if spoke.HeartbeatEnabled() {
 		hbCheck := map[string]any{"status": "pass"}
-		if lastSuccess, ok := hub.LastHeartbeatSuccess(); ok {
+		if lastSuccess, ok := spoke.LastHeartbeatSuccess(); ok {
 			hbCheck["last_success"] = lastSuccess.UTC().Format(time.RFC3339)
 			hbCheck["last_success_age"] = time.Since(lastSuccess).Round(time.Second).String()
 			if time.Since(lastSuccess) > livezHeartbeatStallMax {
@@ -2600,7 +2600,7 @@ func (s *Server) handleHealthDeep(w http.ResponseWriter, r *http.Request) {
 			hbCheck["status"] = "warn"
 			hbCheck["detail"] = "no heartbeat accepted by the hub since startup"
 		}
-		if lastAttempt, ok := hub.LastHeartbeatAttempt(); ok {
+		if lastAttempt, ok := spoke.LastHeartbeatAttempt(); ok {
 			hbCheck["last_attempt"] = lastAttempt.UTC().Format(time.RFC3339)
 			hbCheck["last_attempt_age"] = time.Since(lastAttempt).Round(time.Second).String()
 		}

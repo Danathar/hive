@@ -3,38 +3,14 @@ package hub
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/hivecommons/hive/pkg/imageref"
 	"io"
 	"log/slog"
 	"net/http"
 	"sync"
 	"time"
-)
 
-// Channel-aware upgrade targeting (#5994).
-//
-// A spoke's Deployment tracks ONE image tag, and that tag is the entire set of
-// builds the spoke can reach. Rolling the pod re-pulls the tag; nothing the hub
-// says can make a restart land on a digest the tag does not carry.
-//
-// Until the stable soak policy landed, "the newest merged SHA on the release
-// branch" and "the digest :stable carries" were the same image, so the hub's
-// habit of targeting branch HEAD happened to be reachable for every spoke. The
-// soak broke that identity on purpose: per-merge publishes now move :candidate
-// only, and :stable advances hourly, 24h behind. A hub that keeps targeting
-// branch HEAD is asking a :stable spoke to reach a digest its own tag is
-// deliberately withholding.
-//
-// Measured 2026-09-04: 41 spokes in UPGRADE FAILED, 90 of 97 tracking :stable.
-// The loop is exact — the hub instructs 526ef71, the spoke rolls, re-pulls
-// :stable (a different digest), reports the SHA it started on, and the hub
-// re-sends the identical instruction. The spoke's retry budget cannot rescue
-// it: a target the tag withholds is not a transient failure.
-//
-// So the target has to be resolved THROUGH the tag, not around it. For a
-// channel-tracking spoke the reachable target is whatever the channel tag
-// currently resolves to; for everything else it is the branch's image-verified
-// latest, exactly as before.
+	"github.com/hivecommons/hive/pkg/imageref"
+)
 
 // revisionLabel is the OCI label .github/workflows/docker.yml stamps onto every
 // published image with the git SHA it was built from. It is the only thing that

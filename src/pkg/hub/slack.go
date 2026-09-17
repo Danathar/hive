@@ -11,25 +11,6 @@ import (
 	"time"
 )
 
-// ============================================================================
-// SLACK MESSAGING
-// ============================================================================
-//
-// Operator-initiated Slack messages to hub users: one user, the owner of a
-// hive, or every user.
-//
-// The practical driver is that today these messages are hand-copied. The GitHub
-// App permission notice (#2353) and the node-capacity problem (#2349) were both
-// pasted one org owner at a time, out of the hub's own user list, which already
-// carries the Slack IDs.
-//
-// REUSES THE EXISTING slack_id FIELD. SaaSUser.SlackID is already there — an
-// admin-maintained CRM contact field with a length cap (maxContactSlackIDLen),
-// an edit path (handleAdminUpdateUser), and a rendered dashboard input. Adding a
-// second "slack_handle" field would have split the same fact across two keys on
-// ~88 user records with nothing to keep them in step. Nothing about the user
-// record changes in this PR.
-
 // slackPostMessageURL is Slack's chat.postMessage endpoint. A bot token
 // posting here can DM a user by member ID, which a webhook cannot do — a
 // webhook is bound to one channel at creation time.
@@ -140,10 +121,6 @@ type slackSendResult struct {
 // growing without bound as the fleet grows.
 const maxSkippedUsersReported = 50
 
-// ============================================================================
-// SENDING
-// ============================================================================
-
 // slackClient is the shared HTTP client for Slack calls. One client (and so one
 // connection pool) rather than one per send, which matters for a paced
 // broadcast making ~88 sequential calls.
@@ -242,10 +219,6 @@ func (s *HubServer) deliverSlackMessages(token, target, message string, recipien
 		"target", target, "actor", actor, "sent", sent, "failed", failed, "total", len(recipients))
 }
 
-// ============================================================================
-// RECIPIENT RESOLUTION
-// ============================================================================
-
 // resolveSlackRecipients partitions a set of users into those that can be
 // reached and those that cannot, preserving the skipped usernames.
 //
@@ -301,10 +274,6 @@ func buildSlackResult(target, message string, recipients []SlackRecipient, skipp
 	}
 	return res
 }
-
-// ============================================================================
-// HANDLERS
-// ============================================================================
 
 // slackSendRequest is the body of the send endpoints.
 type slackSendRequest struct {

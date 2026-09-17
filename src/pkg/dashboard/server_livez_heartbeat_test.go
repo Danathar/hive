@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	hub "github.com/hivecommons/hive/pkg/hub/spoke"
+	spoke "github.com/hivecommons/hive/pkg/hub/spoke"
 )
 
 // getLivez drives a ready server's /api/livez and returns the recorder.
@@ -24,12 +24,12 @@ func getLivez(t *testing.T, s *Server) *httptest.ResponseRecorder {
 // still beating. Liveness must stay 200 — restarting the pod cannot fix a
 // network partition, and failing here crash-loops a healthy process.
 func TestLivez_StaleHeartbeatSuccessStaysAlive(t *testing.T) {
-	defer hub.ResetHeartbeatStateForTest()
+	defer spoke.ResetHeartbeatStateForTest()
 	s := healthServer(t)
 	s.MarkReady()
 
 	// Loop is beating right now, but the hub last accepted a beat an hour ago.
-	hub.SetHeartbeatStateForTest(true, time.Now(), time.Now().Add(-time.Hour))
+	spoke.SetHeartbeatStateForTest(true, time.Now(), time.Now().Add(-time.Hour))
 
 	if rec := getLivez(t, s); rec.Code != http.StatusOK {
 		t.Fatalf("stale heartbeat success must NOT fail liveness: got %d, body %s",
@@ -42,12 +42,12 @@ func TestLivez_StaleHeartbeatSuccessStaysAlive(t *testing.T) {
 // past the startup grace. The loop is attempting, so the process is healthy
 // and must not be restarted — the hub already greys its dot.
 func TestLivez_NeverSucceededButAttemptingStaysAlive(t *testing.T) {
-	defer hub.ResetHeartbeatStateForTest()
+	defer spoke.ResetHeartbeatStateForTest()
 	s := healthServer(t)
 	s.MarkReady()
 	s.startedAt = time.Now().Add(-24 * time.Hour) // long past startup grace
 
-	hub.SetHeartbeatStateForTest(true, time.Now(), time.Time{})
+	spoke.SetHeartbeatStateForTest(true, time.Now(), time.Time{})
 
 	if rec := getLivez(t, s); rec.Code != http.StatusOK {
 		t.Fatalf("never-successful but attempting must stay alive: got %d, body %s",
@@ -59,13 +59,13 @@ func TestLivez_NeverSucceededButAttemptingStaysAlive(t *testing.T) {
 // loop stops attempting entirely it is genuinely wedged, and a restart is the
 // only remedy. This is the condition /api/livez exists to catch.
 func TestLivez_StalledAttemptsFail(t *testing.T) {
-	defer hub.ResetHeartbeatStateForTest()
+	defer spoke.ResetHeartbeatStateForTest()
 	s := healthServer(t)
 	s.MarkReady()
 
 	stalled := time.Now().Add(-livezHeartbeatStallMax - time.Minute)
 	// Successes are fresh-ish relative to attempts; only attempts matter here.
-	hub.SetHeartbeatStateForTest(true, stalled, stalled)
+	spoke.SetHeartbeatStateForTest(true, stalled, stalled)
 
 	rec := getLivez(t, s)
 	if rec.Code != http.StatusServiceUnavailable {
@@ -84,13 +84,13 @@ func TestLivez_StalledAttemptsFail(t *testing.T) {
 // before the loop's first send (waitForReady legitimately delays it for
 // minutes), and unhealthy once the grace has elapsed with no attempt at all.
 func TestLivez_NoAttemptWithinStartupGrace(t *testing.T) {
-	defer hub.ResetHeartbeatStateForTest()
+	defer spoke.ResetHeartbeatStateForTest()
 
 	t.Run("within grace is alive", func(t *testing.T) {
 		s := healthServer(t)
 		s.MarkReady()
 		s.startedAt = time.Now()
-		hub.SetHeartbeatStateForTest(true, time.Time{}, time.Time{})
+		spoke.SetHeartbeatStateForTest(true, time.Time{}, time.Time{})
 
 		if rec := getLivez(t, s); rec.Code != http.StatusOK {
 			t.Fatalf("booting pod must pass liveness: got %d", rec.Code)
@@ -101,7 +101,7 @@ func TestLivez_NoAttemptWithinStartupGrace(t *testing.T) {
 		s := healthServer(t)
 		s.MarkReady()
 		s.startedAt = time.Now().Add(-livezStartupGrace - time.Minute)
-		hub.SetHeartbeatStateForTest(true, time.Time{}, time.Time{})
+		spoke.SetHeartbeatStateForTest(true, time.Time{}, time.Time{})
 
 		rec := getLivez(t, s)
 		if rec.Code != http.StatusServiceUnavailable {
@@ -113,13 +113,13 @@ func TestLivez_NoAttemptWithinStartupGrace(t *testing.T) {
 // TestLivez_NoHubConfiguredIgnoresHeartbeat guards the hub-less case: such a
 // hive never runs a loop, so it must never be gated on heartbeat state.
 func TestLivez_NoHubConfiguredIgnoresHeartbeat(t *testing.T) {
-	defer hub.ResetHeartbeatStateForTest()
+	defer spoke.ResetHeartbeatStateForTest()
 	s := healthServer(t)
 	s.MarkReady()
 	s.startedAt = time.Now().Add(-24 * time.Hour)
 
 	// Disabled loop, no attempts, no successes — still alive.
-	hub.SetHeartbeatStateForTest(false, time.Time{}, time.Time{})
+	spoke.SetHeartbeatStateForTest(false, time.Time{}, time.Time{})
 
 	if rec := getLivez(t, s); rec.Code != http.StatusOK {
 		t.Fatalf("hub-less hive must ignore heartbeat state: got %d", rec.Code)
@@ -129,11 +129,11 @@ func TestLivez_NoHubConfiguredIgnoresHeartbeat(t *testing.T) {
 // TestHealthDeep_ReportsHeartbeatStaleness confirms the connectivity signal
 // removed from liveness is still surfaced — as a warning, not a pod kill.
 func TestHealthDeep_ReportsHeartbeatStaleness(t *testing.T) {
-	defer hub.ResetHeartbeatStateForTest()
+	defer spoke.ResetHeartbeatStateForTest()
 	s := healthServer(t)
 	s.MarkReady()
 
-	hub.SetHeartbeatStateForTest(true, time.Now(), time.Now().Add(-time.Hour))
+	spoke.SetHeartbeatStateForTest(true, time.Now(), time.Now().Add(-time.Hour))
 
 	rec := httptest.NewRecorder()
 	s.mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/health/deep", nil))

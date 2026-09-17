@@ -8,7 +8,7 @@ import (
 	"github.com/hivecommons/hive/pkg/config"
 	"github.com/hivecommons/hive/pkg/dashboard"
 	"github.com/hivecommons/hive/pkg/governor"
-	hub "github.com/hivecommons/hive/pkg/hub/spoke"
+	spoke "github.com/hivecommons/hive/pkg/hub/spoke"
 )
 
 // TestProviderBudgetSuppressionProbesRatherThanDeadlocks is the regression test
@@ -244,7 +244,7 @@ func TestProviderLimitHeartbeatFieldsFallsBackToAgentQuota(t *testing.T) {
 	dashboard.SetInferenceBudgetProvider(nil)
 	t.Cleanup(func() { dashboard.SetInferenceBudgetProvider(nil) })
 
-	reason, rebuffs, hiveWide, names := hub.ProviderLimitHeartbeatFields([]hub.AgentSummary{
+	reason, rebuffs, hiveWide, names := spoke.ProviderLimitHeartbeatFields([]spoke.AgentSummary{
 		{Name: "guide", State: "running", QuotaExhausted: true},
 		{Name: "scanner", State: "running", QuotaExhausted: true},
 		{Name: "paused", State: "paused", Paused: true, QuotaExhausted: true},

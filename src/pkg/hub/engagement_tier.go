@@ -1,6 +1,8 @@
 package hub
 
-import "time"
+import (
+	"time"
+)
 
 // User engagement status tiers for the Hub Admin Users table. The old Status
 // column said "active" for every non-blocked user — an open idle tab, a user

@@ -7,54 +7,6 @@ import (
 	"time"
 )
 
-// Master-secret GENERATIONS — the mechanism that makes rotation possible.
-//
-// THE PROBLEM. Every piece of signing material on the platform is a pure
-// function of ONE value, the hub master secret, with no marker recording which
-// master produced it (hub_keys.go: heartbeat, session, session-Ed25519, SSO,
-// impersonate, terminal, invite). The "-v1" suffixes on the info labels version
-// the DOMAIN, not the key. So changing the master changes all seven derived
-// values at once, and no verifier can accept both the outgoing and the incoming
-// form. A rotation is therefore a fleet-wide flag day: every browser session
-// invalidated, every heartbeat 401'd, every SSO handoff unverifiable, across ~66
-// hosted spokes, simultaneously. Which is why the master has never been rotated
-// and, as the code stands, cannot be.
-//
-// THE SHAPE OF THE FIX. The hub holds an ORDERED SET of generations rather than
-// a single secret. Exactly one is CURRENT — the only one that MINTS — and zero
-// or more are PREVIOUS, accepted for VERIFY only and each carrying an explicit
-// expiry. Rotation promotes a new current and demotes the outgoing one, so
-// artifacts minted before the rotation keep verifying while artifacts minted
-// after it use the new material. Convergence of spoke-held material then happens
-// through the existing rate-limited reconcile lane (perhive_env_reconcile.go),
-// not through a re-provision.
-//
-// WHY THIS IS NOT THE "VERIFY-BOTH" LANE THAT TOOK FIVE AUDITS TO REMOVE. The
-// F1/F2 lanes were verify-both lanes too, and they were a real vulnerability for
-// years. What made them so was not that they accepted two credentials — it was
-// that they were UNVERSIONED and PERMANENT. Nothing in the code named which
-// alternative was the legacy one, and nothing said when it stopped being
-// accepted, so the only mechanism that could ever end them was an audit finding.
-// Both properties are fixed here deliberately:
-//
-//   - VERSIONED. A previous generation is a numbered entry in a list, not an
-//     unnamed `if` branch. "Which key accepted this request" is a value the code
-//     returns (see verifyWithGenerations) and the telemetry can count, so the
-//     question "is anything still using the old key?" has an answer that does not
-//     require reading the code.
-//   - FINITE. Every previous generation carries VerifyUntil. An expired
-//     generation is not accepted, full stop — the window closes on a wall clock
-//     whether or not anyone remembers to close it. This is the property the F1/F2
-//     lanes lacked entirely, and it is why this one cannot rot into permanence
-//     the way those did.
-//
-// DERIVATION IS UNCHANGED. Each generation's secret feeds deriveDomainKey and
-// derivePerHiveKey exactly as the single master does today. No domain's key
-// FORMAT changes, which is what lets a rotation happen without the Node proxy or
-// any spoke needing to understand generations at all: a spoke handed a
-// HIVE_SESSION_KEY derived from generation 3 just has a different string in its
-// env than it had before, and every existing code path treats it identically.
-
 // keyGeneration is one master secret plus the metadata that says what may be
 // done with it and until when.
 type keyGeneration struct {
@@ -275,23 +227,6 @@ func (gs *generationSet) rotate(newSecret string, now time.Time, window time.Dur
 	gens := append([]keyGeneration{{ID: nextID, Secret: newSecret, Created: now}}, carried...)
 	return newGenerationSet(nextID, gens)
 }
-
-// Generation markers on minted artifacts.
-//
-// An artifact that can carry a marker lets a verifier SELECT the one generation
-// to check rather than trying each in turn: cheaper, and it makes "which key
-// verified this" observable instead of inferred. The marker is a prefix
-// "g<N>." on the artifact value.
-//
-// Not every artifact can carry one. Cookies and SSO tokens have payload room;
-// a heartbeat bearer is a bare HMAC-derived string presented raw in an
-// Authorization header, and the terminal/invite keys are symmetric values read
-// from env by both Go and Node — none of those has an envelope, and giving one
-// to them would change a contract with already-deployed spokes, making the
-// rotation mechanism itself require the flag day it exists to avoid. Those
-// artifacts use bounded trial verification instead, which maxLiveGenerations
-// keeps to at most two attempts. See src/docs/design/master-key-rotation.md for
-// the per-artifact table.
 
 // generationMarkerPrefix introduces a generation marker. Chosen as a letter
 // rather than a bare digit so an unmarked legacy value can never be mistaken

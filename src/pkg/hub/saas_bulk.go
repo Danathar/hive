@@ -9,24 +9,6 @@ import (
 	"time"
 )
 
-// Bulk fleet operations for the hub dashboard's "My Hives" list.
-//
-// Every bulk action is a thin fan-out over the SAME logic the single-hive
-// handlers use (handleUpgradeHive, handleToggleAutoUpgrade, handleSwitchBranch).
-// The rules that make this safe to expose:
-//
-//  1. Authorization is re-derived PER HIVE from the hub's own store. The
-//     client-supplied ID list is treated as untrusted input: every ID is
-//     loaded with loadSaaSHive and checked against the same
-//     "owner or hub admin" predicate the single-hive handlers apply. A hive
-//     the caller may not touch is reported as a per-hive error, never applied.
-//  2. Partial failure is the normal case (a hive may be offline, unclaimed,
-//     or on a firewalled cluster), so the response is a per-hive result list
-//     rather than a single boolean.
-//  3. Blast radius is bounded by maxBulkHivesPerRequest and the work is run
-//     through a fixed-size worker pool (bulkActionConcurrency) so a 42-hive
-//     fleet never becomes 42 simultaneous kubectl processes.
-
 // maxBulkHivesPerRequest caps how many hives a single bulk request may target.
 // The fleet is ~42 hives across 2 clusters, so this comfortably covers
 // "select all" today while keeping a malicious or buggy client from asking the

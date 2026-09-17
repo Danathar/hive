@@ -1,27 +1,5 @@
 package hub
 
-// Time-limited access grants (#4150).
-//
-// An owner may attach an OPTIONAL expiry to any Manage Access grant. The
-// expiry rides on the user record next to the role itself (SaaSUser.HiveExpiry,
-// hive ID → RFC3339 instant) so a grant and its lifetime always travel — and
-// are persisted — together. No expiry means permanent, which keeps every
-// pre-#4150 record byte-identical and behaviorally unchanged.
-//
-// Enforcement is two-layered, and the layers are deliberately independent:
-//
-//  1. ON-ACCESS (authoritative): loadSaaSUser prunes expired grants from the
-//     in-memory record at READ time, on the wall clock. Every consumer of a
-//     user's role — requireAuth-gated handlers, userIsHiveOwner, accessForHive,
-//     the heartbeat's authorized-users push to spokes — resolves roles through
-//     loadSaaSUser/listAllSaaSUsers, so an expired grant stops working at its
-//     expiry instant whether or not the sweep below ever runs.
-//  2. BACKGROUND SWEEP (persistence + audit): sweepExpiredAccessIfDue, ticked
-//     from the hub's SHA-poller loop, rewrites the pruned records to disk and
-//     stamps a timeline event so the revocation is visible in the hive's
-//     Activity Timeline. It reads the RAW json files (not loadSaaSUser, whose
-//     read-time prune would hide exactly the entries this sweep must persist).
-
 import (
 	"encoding/json"
 	"fmt"

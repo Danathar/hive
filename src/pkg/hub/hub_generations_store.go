@@ -14,30 +14,6 @@ import (
 	"time"
 )
 
-// Persistence and the operator-facing rotate mechanism for master-secret
-// generations (follow-on PR #4 of src/docs/design/master-key-rotation.md).
-//
-// The foundation (hub_generations.go) can already REPRESENT a rotation:
-// generationSet.rotate is pure, maxLiveGenerations bounds the set, and every
-// previous generation carries VerifyUntil. What it cannot do is CREATE one, or
-// remember one. Both gaps are closed here, and they are closed together
-// deliberately: an endpoint that rotates without persisting would produce a
-// rotation that survives until the next hub roll — which happens several times
-// a day — and a hub that came back holding only generation 1 would reject every
-// artifact minted since the rotation while quietly re-minting on the old key.
-// That is strictly worse than never having rotated.
-//
-// WHY A SEPARATE FILE FROM hub-secret.key. /data/saas/hub-secret.key stays
-// exactly as it is — 64 hex bytes, raw, never rewritten by this code. It is
-// generation 1's secret and nothing else, so a hub that rolls BACK to
-// pre-rotation code finds precisely the file it expects and keeps working on
-// generation 1. Rewriting it in place would make rollback a data-loss event.
-// The generations live alongside it in hub-generations.json, and when that file
-// is absent — the state of every hub in the fleet today — the loader synthesizes
-// legacyGenerationSet from hub-secret.key. So there is no migration step and no
-// flag day: "never rotated" and "rotated back down to one generation" are the
-// same on-disk state.
-
 // hubGenerationsPath is where the generation set is persisted.
 //
 // A SIBLING of /data/saas/hub-secret.key on the hub PVC, which is the volume
@@ -332,8 +308,6 @@ func readGenerationsFile() ([]byte, error) {
 	}
 	return nil, lastErr
 }
-
-// Rotation.
 
 // errRotationTooSoon is returned when a second rotation would strand spokes
 // that are still converging onto the first.

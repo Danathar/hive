@@ -1,6 +1,8 @@
 package agent
 
-import "strings"
+import (
+	"strings"
+)
 
 // AgentCapabilities carries the ORTHOGONAL permissions an agent holds — the
 // ones that are not a rung on the AgentMode ladder (#4492).

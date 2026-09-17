@@ -1,32 +1,5 @@
 package hub
 
-// Admin-only upgrade kill switch.
-//
-// Two independent pauses, both admin-only and both DURABLE across hub restarts
-// (the hub auto-rolls itself frequently, so any in-memory-only flag would be
-// silently wiped by the very machinery it is meant to stop):
-//
-//   - hub:    freezes the hub's own self-upgrade machinery. While set, the
-//     poll-loop auto-upgrade never triggers and the manual
-//     /api/saas/hub/upgrade endpoint refuses with 409. The hub stays on its
-//     current build regardless of new tags.
-//
-//   - spokes: freezes EVERY automatic image-change delivery path to spokes,
-//     fleet-wide. The pause must be honoured by ALL of them or it is a lie:
-//     triggerAutoUpgrades (kubectl restarts + arming heartbeatUpgrade), the
-//     heartbeat handler's UpgradeTo / SwitchToTag sends, the tracked-channel
-//     re-arm inside the heartbeat handler, and the orphaned-upgrade sweep's
-//     heartbeatUpgrade re-arm. Heartbeats are otherwise answered normally, and
-//     armed in-memory targets are left in place — pause suppresses DELIVERY,
-//     it does not destroy state, so resuming picks up exactly where the fleet
-//     left off. Manual upgrade/switch API requests while paused get an
-//     explicit 409 naming who paused and when, never a silent queue.
-//
-// State is one small JSON file on the hub's durable data dir, next to the
-// other hub-owned SaaS state (hub-auto-upgrade, hub-generations.json), loaded
-// lazily on first use so a fresh post-restart process starts from the
-// persisted truth.
-
 import (
 	"encoding/json"
 	"net/http"

@@ -3,13 +3,6 @@ package hub
 import (
 	"sync"
 	"time"
-
-	// tzdata embeds the IANA timezone database into the binary. The hub image is
-	// built FROM alpine:3.21, which does NOT install the tzdata package (see
-	// Dockerfile.hub — only ca-certificates and curl are added), so
-	// time.LoadLocation("America/New_York") would fail at runtime with
-	// "unknown time zone" and the daily schedule would never fire. Embedding
-	// costs ~450KB in the binary and removes the dependency on the base image.
 	_ "time/tzdata"
 )
 

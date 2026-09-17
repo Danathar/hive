@@ -9,66 +9,6 @@ import (
 	"time"
 )
 
-// Leaked hosted-namespace DETECTOR (issue #5768, ask 3).
-//
-// THE CONDITION. A console Live Promote canary on 2026-09-03 read 76 pod issues
-// on one CI cluster — 64 Unschedulable and 12 Pending on unbound PVCs — spread
-// across dozens of `hive-hosted-hosted-*` namespaces. Those namespaces are
-// hosted-spoke provisioning namespaces (the `hosted-*` second segment is a pool
-// PLACEHOLDER hive id, see hosted_namespace_identity.go) that were created on
-// the cluster and never torn down. Nothing in the hub could see them, because
-// nothing in the hub ever ASKS a cluster which hosted namespaces exist.
-//
-// WHY NOTHING SAW THEM. Every hub-side sweep over hosted namespaces derives the
-// namespace list FROM THE REGISTRY — reapOrphanedPods walks listSaaSHives() and
-// calls hostedNamespaceForHive on each (orphaned_pod_reaper.go), which is what
-// confines that sweep to namespaces the hub provisioned. That derivation is
-// exactly right for a reaper and exactly WRONG for finding a leak: a namespace
-// with no registry entry is invisible to a registry-derived list BY
-// CONSTRUCTION. The leak class this file detects is the complement of that set —
-// namespaces the cluster has and the hub does not know about.
-//
-// The sibling stuck-pod signal (orphaned_pod_visibility.go) could not see them
-// either. Its predicate requires a deletionTimestamp; the pods in the incident
-// were never asked to terminate — they are Pending/Unschedulable because their
-// namespace outlived whatever was supposed to delete it. Two different
-// conditions, two different predicates, and neither existing one covers this.
-//
-// READ-ONLY. THIS FILE DELETES NOTHING. It issues exactly one `kubectl get
-// namespaces -o json` per cluster per health build and reports what it finds.
-// A janitor that DELETES leaked namespaces is ask 1 of the issue and is
-// deliberately NOT shipped here: a namespace delete cascades to every PVC and
-// every pod inside it, so it is the widest destructive verb the hub owns, and
-// the input that would drive it — "which namespaces have no registry entry" —
-// has never been measured against a real cluster. This report is that
-// measurement. Building the deleter first, on a rule validated only by reading
-// code, is how a cleanup tool becomes the outage it was meant to prevent.
-//
-// The provisioning-side half of ask 1 — a failed `kubectl apply` leaving behind
-// the namespace it just created — IS fixed, in provision_namespace_rollback.go,
-// because there the hub knows it created the namespace seconds earlier and can
-// prove nothing else was using it. That is a bounded, provable delete. A fleet
-// sweep driven by a registry read is not, and the two must not be conflated.
-//
-// THE REGISTRY-EMPTY GUARD IS THE LOAD-BEARING SAFETY PROPERTY. listSaaSHives()
-// returns nil when it cannot read saasHivesDir at all (an os.ReadDir error —
-// saas_provision.go ~1810), and nil is indistinguishable from "this hub hosts
-// no hives". If the known-namespace set is empty, EVERY hosted namespace on
-// every cluster satisfies "has no registry entry", so one transient unreadable
-// registry would report the whole fleet as leaked — and would, if a janitor
-// were ever hung off this signal, delete it. collectLeakedHostedNamespaces
-// therefore returns nil (unknown) rather than a report when the known set is
-// empty. Under-reporting a genuinely empty fleet is the cheap direction; the
-// other one is unrecoverable.
-//
-// THE KNOWN SET IS FLEET-WIDE, NOT PER-CLUSTER. A hive recorded against
-// cluster A whose namespace turns up on cluster B is NOT reported as leaked.
-// The hub's per-hive ClusterID bookkeeping is not authoritative enough to
-// convict a namespace of being orphaned — a reassignment, or a record written
-// before a migration, would read as a leak. Matching on the namespace NAME
-// alone, across all known hives, is the conservative rule: it can miss a leak,
-// it cannot manufacture one.
-
 const (
 	// leakedNamespaceMinAge is how long a hosted namespace must have existed
 	// with no registry entry before it is reported.

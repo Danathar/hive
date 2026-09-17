@@ -31,3 +31,7 @@ const (
 func imageTagIsMutable(image string) bool {
 	return imageref.IsMutable(image)
 }
+
+func SelfImageReleaseChannel() string { return spoke.SelfImageReleaseChannel() }
+
+func SelfDeploymentImage() string { return spoke.SelfDeploymentImage() }

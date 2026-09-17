@@ -1,15 +1,8 @@
 package hub
 
-import "math"
-
-// Fleet-relative assembly: turning each hive's raw sub-criteria into percentile
-// scores against the population it is being viewed with.
-//
-// The population matters. Scores are computed against the CURRENTLY FILTERED
-// set of hives, not against the whole registry, so that a filtered view and its
-// header aggregate agree with each other. Ranking a filtered hive against
-// hives the operator has filtered out would make the header polygon and the
-// rows it summarizes disagree, which is worse than either being "wrong".
+import (
+	"math"
+)
 
 // ScoreFleet computes quadrants for a population of hives at once.
 //

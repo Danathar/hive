@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	hub "github.com/hivecommons/hive/pkg/hub/spoke"
+	spoke "github.com/hivecommons/hive/pkg/hub/spoke"
 )
 
 // These tests frame the #2439 production scenario end to end at the probe level:
@@ -23,7 +23,7 @@ import (
 // hung mint froze the attempt clock and misclassified this as a wedged loop,
 // killing the pod.
 func TestLivez_NoAppGHE_TokenMintFailing_StaysAlive(t *testing.T) {
-	defer hub.ResetHeartbeatStateForTest()
+	defer spoke.ResetHeartbeatStateForTest()
 	s := healthServer(t)
 	s.MarkReady()
 	s.startedAt = time.Now().Add(-24 * time.Hour) // long past startup grace
@@ -31,7 +31,7 @@ func TestLivez_NoAppGHE_TokenMintFailing_StaysAlive(t *testing.T) {
 	// Attempts advancing NOW (loop alive), but no beat has ever succeeded — the
 	// GHE app is uninstalled so every collect/eval token mint soft-fails and the
 	// hub is unreachable.
-	hub.SetHeartbeatStateForTest(true, time.Now(), time.Time{})
+	spoke.SetHeartbeatStateForTest(true, time.Now(), time.Time{})
 
 	rec := getLivez(t, s)
 	if rec.Code != http.StatusOK {
@@ -45,12 +45,12 @@ func TestLivez_NoAppGHE_TokenMintFailing_StaysAlive(t *testing.T) {
 // external call), livez must STILL fail so kubelet restarts it. The fix must not
 // weaken this.
 func TestLivez_NoAppGHE_WedgedLoopStillFails(t *testing.T) {
-	defer hub.ResetHeartbeatStateForTest()
+	defer spoke.ResetHeartbeatStateForTest()
 	s := healthServer(t)
 	s.MarkReady()
 
 	stalled := time.Now().Add(-livezHeartbeatStallMax - time.Minute)
-	hub.SetHeartbeatStateForTest(true, stalled, time.Time{})
+	spoke.SetHeartbeatStateForTest(true, stalled, time.Time{})
 
 	if rec := getLivez(t, s); rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("a genuinely wedged loop must still fail liveness even on a no-app hive: got %d", rec.Code)
@@ -62,11 +62,11 @@ func TestLivez_NoAppGHE_WedgedLoopStillFails(t *testing.T) {
 // deps but has NO GitHub App configured and mints no token; MarkReady alone must
 // flip both probes to 200 so a no-app GHE hive can serve and complete a rollout.
 func TestReadiness_ReachesReadyWithoutGitHubToken(t *testing.T) {
-	defer hub.ResetHeartbeatStateForTest()
+	defer spoke.ResetHeartbeatStateForTest()
 	s := healthServer(t) // no GitHub App, no token ever minted
 
 	// A live heartbeat loop, no successes (can't reach hub / no token).
-	hub.SetHeartbeatStateForTest(true, time.Now(), time.Time{})
+	spoke.SetHeartbeatStateForTest(true, time.Now(), time.Time{})
 	s.startedAt = time.Now()
 
 	// Before MarkReady both gate closed.

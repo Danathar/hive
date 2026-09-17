@@ -16,24 +16,6 @@ import (
 // GovernorMode "ERROR" alongside it).
 const alertProvStatusError = "error"
 
-// Fleet alerts — "what needs a human RIGHT NOW".
-//
-// This is deliberately a different question from config drift (branch
-// feat-config-drift), which answers "how does this hive's CONFIGURATION diverge
-// from the fleet norm" (version behind, branch mismatch, ACMM 0, zero agents,
-// App missing). Drift is about steady-state configuration; alerts are about
-// OPERATIONAL conditions that are transient, time-bounded, and actionable:
-// a hive that keeps restarting, one that has gone quiet, an upgrade that never
-// finished, a named health check that is failing, an anomalous token burn, a
-// provision that errored out.
-//
-// The two are designed to compose rather than compete: evaluateAlerts takes a
-// []Alert of externally-sourced signals (see EvaluateFleetAlerts' driftAlerts
-// parameter) and merges them through the same severity ordering,
-// acknowledgement and counting pipeline. When drift lands, its signals become
-// one more SOURCE feeding this model — no rule here needs to be rewritten, and
-// nothing here recomputes a drift signal itself.
-
 // alertAcksPath is the on-disk file where admin alert acknowledgements are
 // persisted so a silenced alert stays silenced across a hub restart or upgrade.
 // A var (not a const) so tests can point it at a temp dir.
@@ -150,8 +132,6 @@ const (
 	// reports and does not refuse.
 	AlertTypeRepoOverlap = "repo-overlap"
 )
-
-// --- Thresholds. Every one is a named constant with a rationale. ---
 
 const (
 	// alertOfflineThreshold is how long a hive may go without a heartbeat
@@ -508,8 +488,6 @@ func (a *alertState) loadAcks(stored map[string]alertAck, now time.Time) bool {
 	return pruned
 }
 
-// --- Evaluation ---
-
 // alertHive is the minimal per-hive view the evaluator needs. It is built from
 // MyHiveEntry so the evaluator can be unit-tested without constructing a whole
 // HubServer, and so the rules never reach for fields they should not use.
@@ -619,10 +597,6 @@ func alertHiveFromEntry(h MyHiveEntry) alertHive {
 // placeholderOrgPrefix is the org-name prefix a pre-provisioned pool slot
 // carries before it is claimed.
 const placeholderOrgPrefix = "available-"
-
-// isPlaceholderEntry lives in drift.go — it is the Go mirror of the dashboard's
-// isPlaceholderHive() and is shared by drift and alerts so the two can never
-// disagree about what counts as a claimed hive.
 
 // failingHealthChecks extracts the names of checks reporting "fail" from the
 // spoke-reported Health map.
@@ -1178,6 +1152,7 @@ func roundedDuration(d time.Duration) string {
 
 // itoa / itoa64 avoid pulling strconv into every call site's readability.
 func itoa(n int) string { return itoa64(int64(n)) }
+
 func itoa64(n int64) string {
 	if n == 0 {
 		return "0"
@@ -1200,8 +1175,6 @@ func itoa64(n int64) string {
 	}
 	return string(buf[i:])
 }
-
-// --- HubServer integration ---
 
 // fleetAlerts evaluates alerts for the hives the caller can see.
 //

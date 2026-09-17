@@ -1,12 +1,5 @@
 package main
 
-// Concrete LLM-provider gateway adapters for pkg/dashboard's consumer-defined
-// interfaces (kubestellar/hive#5565 slice 3). Each adapter is a thin
-// delegation to the provider package; this file is the only place the
-// dashboard's provider wiring names a concrete openrouter/watsonx/linearagent
-// type, keeping cmd/hive the composition root exactly as Dependencies already
-// does for hub/scheduler/governor concretes.
-
 import (
 	"context"
 	"log/slog"
@@ -18,8 +11,6 @@ import (
 	"github.com/hivecommons/hive/pkg/openrouter"
 	"github.com/hivecommons/hive/pkg/watsonx"
 )
-
-// --- watsonx ---
 
 // watsonxGateway adapts pkg/watsonx to dashboard.WatsonxGateway. Stateless:
 // the token cache lives in watsonx.DefaultMinter, read at call time so tests
@@ -40,8 +31,6 @@ func (watsonxGateway) GraniteFallbackModels() []string {
 	return append([]string(nil), watsonx.GraniteFallbackModels...)
 }
 
-// --- openrouter ---
-
 // openRouterGateway adapts pkg/openrouter to dashboard.OpenRouterGateway.
 type openRouterGateway struct{}
 
@@ -51,8 +40,10 @@ func (openRouterGateway) BuildAuthorizeURL(callbackURL, codeChallenge, state str
 	return openrouter.BuildAuthorizeURL(callbackURL, codeChallenge, state)
 }
 
-func (openRouterGateway) AuthURL() string      { return openrouter.AuthURL }
-func (openRouterGateway) BaseURL() string      { return openrouter.BaseURL }
+func (openRouterGateway) AuthURL() string { return openrouter.AuthURL }
+
+func (openRouterGateway) BaseURL() string { return openrouter.BaseURL }
+
 func (openRouterGateway) DefaultModel() string { return openrouter.DefaultModel }
 
 func (openRouterGateway) SuggestedModels() []dashboard.OpenRouterSuggestedModel {
@@ -101,8 +92,6 @@ func (f openRouterFlowStore) Consume(state string) (dashboard.OpenRouterFlow, bo
 	}
 	return dashboard.OpenRouterFlow{Verifier: flow.Verifier, HiveID: flow.HiveID, Model: flow.Model}, true
 }
-
-// --- linearagent ---
 
 // linearStoredViewerID is the Dependencies.LinearStoredViewerID probe: the
 // persisted install's viewer id ("" when none) plus the store path for the

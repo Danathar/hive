@@ -4,27 +4,6 @@ import (
 	"time"
 )
 
-// Per-hive back-off for non-converging GitHub App key delivery.
-//
-// WHY THIS EXISTS (#2496, and the #2453 precursor)
-//
-// The key reconcile is written to be idempotent: the hub pushes key material
-// only while the spoke's reported fingerprint differs (or is absent), and the
-// push stops on the first beat after the spoke reports the delivered key. That
-// convergence assumes the spoke CAN converge. A broken sender — observed live:
-// a duplicate same-pod process holding a stale in-memory config that never
-// reflects any delivery — reports no fingerprint on every beat, forever, and
-// the hub re-sent App private-key material every ~2 minutes for 30+ minutes
-// with nothing flagging it. That is unbounded credential exposure on the wire
-// paced by someone else's bug.
-//
-// The fix keeps the first deliveries immediate — a genuinely new spoke gets
-// its keys on its first beats, exactly as before — and then, once the count of
-// CONSECUTIVE non-converging deliveries exceeds a budget, drops to one
-// delivery per backoff interval with a WARN naming the hive and the count.
-// Any sign of convergence (a beat needing no key material while the spoke
-// reports a fingerprint) resets the budget in full.
-
 const (
 	// appKeyDeliveryImmediateBudget is how many consecutive key deliveries to
 	// one hive stay immediate (every beat) before the hub concludes delivery

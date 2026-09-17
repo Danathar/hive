@@ -1,6 +1,8 @@
 package agent
 
-import "github.com/hivecommons/hive/pkg/agentmode"
+import (
+	"github.com/hivecommons/hive/pkg/agentmode"
+)
 
 // AgentMode and its constants live in the stdlib-only leaf pkg/agentmode so
 // policy-layer packages (pkg/toolapprove, pkg/turn) can name a tier without

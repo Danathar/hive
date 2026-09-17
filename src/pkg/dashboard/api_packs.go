@@ -12,7 +12,7 @@ import (
 	"github.com/hivecommons/hive/pkg/agent"
 	"github.com/hivecommons/hive/pkg/config"
 	"github.com/hivecommons/hive/pkg/hooks"
-	hub "github.com/hivecommons/hive/pkg/hub/spoke"
+	spoke "github.com/hivecommons/hive/pkg/hub/spoke"
 )
 
 func (s *Server) handlePacksList(w http.ResponseWriter, r *http.Request) {
@@ -822,7 +822,7 @@ func detectACMMLevel(cfg *config.Config) int {
 // (L5+ only; see hub.EnsureCPUTierSelf). A successful patch rolls the pod, so
 // this is logged loudly: the operator will see agents restart once.
 func (s *Server) ensureCPUTier(level int) {
-	patched, err := hub.EnsureCPUTierSelf(s.logger, level)
+	patched, err := spoke.EnsureCPUTierSelf(s.logger, level)
 	if err != nil {
 		s.logger.Warn("could not size pod CPU for ACMM level", "level", level, "error", err)
 		return

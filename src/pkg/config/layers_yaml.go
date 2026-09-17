@@ -1,30 +1,5 @@
 package config
 
-// Exact-fidelity merge entry points.
-//
-// MergeLayers operates on parsed *Config values, which is convenient but loses
-// one distinction the entrypoint heredoc depends on: whether a KEY WAS PRESENT
-// in the YAML at all.
-//
-// The heredoc gates the hub.is_public inversion on key presence:
-//
-//	if isinstance(seed.get('hub'), dict) and 'is_public' in seed['hub']:
-//	    overlay.setdefault('hub', {})['is_public'] = seed['hub']['is_public']
-//
-// HubConfig.IsPublic is a plain bool, so after parsing, "key absent" and
-// "is_public: false" are both false and indistinguishable. A Go transcription
-// that ignores this differs from the shell in exactly one case:
-//
-//	seed omits hub.is_public  AND  overlay sets it true
-//	  → heredoc keeps the overlay's true
-//	  → naive Go applies the seed's false
-//
-// That is a silent visibility flip on whichever hives happen to hit it. This
-// PR exists to END divergence between the documented rule and the running
-// behaviour, so shipping a known divergence inside it would be
-// self-defeating. MergeLayersYAML parses the raw seed YAML to recover
-// key-presence and reproduces the heredoc exactly.
-
 import (
 	"log"
 

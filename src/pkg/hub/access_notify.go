@@ -1,20 +1,5 @@
 package hub
 
-// Owner notification for new access requests (issue #4149).
-//
-// When a user files a NEW pending access request for a hive, the hive's owner
-// gets a push notification through the hub's existing notification config: a
-// Slack DM via the same HIVE_HUB_SLACK_BOT_TOKEN + slack_id plumbing the
-// operator messaging endpoints use (slack.go). There is no hub-side email
-// sender, so Slack is the only push channel; the dashboard's pending-requests
-// banner remains the in-app notification either way.
-//
-// Deduplication is inherited, not reimplemented: handleRequestAccess rejects a
-// request while one from the same user is already pending, and this notifier
-// only runs after a request is actually persisted — so a requester hammering
-// the endpoint can never generate more than one notification per pending
-// request.
-
 import (
 	"fmt"
 	"net/url"

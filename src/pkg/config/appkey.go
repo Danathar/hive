@@ -11,21 +11,6 @@ import (
 	"strings"
 )
 
-// GitHub App private-key fingerprinting.
-//
-// A spoke must be able to tell the hub WHICH App key it is running without ever
-// sending the key itself. The fingerprint below is derived from the PUBLIC half
-// of the key, so it is safe to put in a heartbeat payload, a log line, or an
-// operator-facing API response — it reveals nothing that GitHub does not already
-// publish, and it cannot be inverted back into signing material.
-//
-// The digest is taken over the DER-encoded PKIX *public* key rather than over
-// the PEM file bytes, so two byte-different encodings of the SAME key
-// (PKCS#1 "BEGIN RSA PRIVATE KEY" vs PKCS#8 "BEGIN PRIVATE KEY", CRLF vs LF,
-// trailing newline present or absent) produce the SAME fingerprint. A file-bytes
-// digest would report a spurious mismatch on all of those and make the hub
-// re-push a key that was already correct on every single heartbeat.
-
 // AppKeyFingerprintLen is the number of hex characters kept from the SHA-256
 // digest of the public key. 32 hex chars = 128 bits, far beyond what is needed
 // to distinguish the handful of App keys in a fleet while keeping log lines and

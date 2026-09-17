@@ -6,59 +6,6 @@ import (
 	"strings"
 )
 
-// User country: an OPTIONAL ISO 3166-1 alpha-2 code on a hub user record, shown
-// as a small flag beside their avatar.
-//
-// Three sources, in strict priority order:
-//
-//  1. EXPLICIT, self-service — the signed-in user sets or clears their own
-//     country at any time via PUT /api/saas/me/country (handleMyCountry, at the
-//     bottom of this file). This is the only surface an EXISTING user has: the
-//     wizard below is a one-time gate you pass through before you have a hive,
-//     so without this endpoint a country could never be corrected or removed.
-//  2. EXPLICIT, wizard — the requester picks a country in the get-started
-//     wizard (ProvisionRequest.Country), which is copied onto the SaaSUser
-//     record on approval alongside the other contact fields.
-//  3. INFERRED — best-effort, from the region subtag of the browser's
-//     Accept-Language header on a completed login. Only ever fills a record
-//     that has NO country and whose user has made no deliberate choice; it
-//     never overwrites, and never undoes, an explicit one.
-//
-//  4. ADMIN-ASSIGNED — a hub admin sets it for another user from the admin
-//     Users table (handleAdminUpdateUser). This is the only route for the
-//     thousands of users who signed up before the field existed and who will
-//     never open the wizard again; without it their country is unreachable by
-//     anyone but themselves.
-//
-// Sources 1 and 2 both stamp SaaSUser.CountrySetByUser, which is what tells
-// source 3 that an EMPTY country is a decision ("prefer not to say") rather
-// than an absence to be helpfully filled in.
-//
-// Source 4 does NOT stamp it — see the provenance block below.
-//
-// PRIVACY. Country is personal data, so the inference is deliberately the
-// weakest thing that works:
-//
-//   - Accept-Language is already on the request. Nothing new is collected, no
-//     IP is geolocated, no third-party geo/analytics service is called, and no
-//     user identifier leaves the box. A GeoIP database or a lookup API would
-//     each have been a new dependency shipping user data (or a user's IP) off
-//     the hub, so neither is used — see the PR description.
-//   - It is a language preference, not a location. "en-GB" says the browser
-//     asked for British English, which is evidence of a GB association but is
-//     not proof the person is in GB. That is exactly why it is the FALLBACK
-//     and the dropdown is the authority, and why a bare "en" (no region)
-//     infers nothing at all rather than guessing US.
-//   - The value is never put in a URL query string; it rides JSON bodies and
-//     the user's own record.
-//   - Inference is non-blocking: parseAcceptLanguageCountry cannot fail a
-//     login. It returns "" for anything it does not understand and the login
-//     proceeds exactly as before.
-//
-// The stored form is the two-letter code; the flag glyph is derived at render
-// time from regional-indicator code points, so the hub never depends on an
-// external image host for a flag.
-
 // ── Provenance ───────────────────────────────────────────────────────────────
 //
 // WHO put the country on the record, which is what decides whether the next
@@ -332,34 +279,6 @@ func applyInferredCountry(user *SaaSUser, r *http.Request) bool {
 	setUserCountry(user, code, countrySourceInferred)
 	return true
 }
-
-// ── Self-service: a user setting their OWN country ───────────────────────────
-//
-// Before this, every write to a SaaSUser was requireAdmin-gated and the only
-// place a person could state their country was the get-started wizard — a
-// surface you pass through exactly once, before you have a hive. That left the
-// entire existing fleet with no way to set, correct, or remove their country
-// ever again, which is a strange thing to say about a field whose whole purpose
-// is for the user to speak about themselves.
-//
-// /api/saas/me/country is the smallest fix: GET reads the acting user's own
-// country, PUT sets or clears it. Deliberately NOT a general profile endpoint —
-// widening it to "any field on my own record" would put quota, blocked, hives
-// and role one typo away from being self-writable, which is exactly the reason
-// the admin gate exists. One field, allowlisted, is the whole surface.
-//
-// SECURITY — the identity comes from the SESSION, never from the request.
-// The body carries a country and nothing else: no login, no id, no target. That
-// is not an oversight to be politely ignored if someone sends one; it is the
-// property that makes this endpoint safe to expose to non-admins at all. An
-// unknown JSON key is discarded by the decoder, so a request naming another
-// user is honoured as a write to the CALLER's own record and can never touch
-// the named one. See TestMyCountryCannotSetAnotherUsersCountry.
-//
-// PRIVACY — country rides the JSON BODY, never the path or a query string, so
-// it stays out of access logs, Referer headers and browser history. That is why
-// this is a PUT with a body rather than the more obvious
-// POST /api/saas/me/country/{code}.
 
 // maxCountryRequestBodyBytes caps the request body. The only legitimate payload
 // is a two-letter code in a one-key object — a few dozen bytes — so 1 KiB is

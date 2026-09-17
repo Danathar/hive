@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	hub "github.com/hivecommons/hive/pkg/hub/spoke"
+	spoke "github.com/hivecommons/hive/pkg/hub/spoke"
 )
 
 // quotaExhaustedAgentCount must count ONLY running, unpaused agents whose
@@ -12,7 +12,7 @@ import (
 // actionable heartbeat signal, and the state match must be case-insensitive
 // because summaries carry whatever casing the producer used.
 func TestQuotaExhaustedAgentCount(t *testing.T) {
-	agents := []hub.AgentSummary{
+	agents := []spoke.AgentSummary{
 		{Name: "counted", State: "running", QuotaExhausted: true},
 		{Name: "mixed-case", State: "Running", QuotaExhausted: true},
 		{Name: "paused-flag", State: "running", QuotaExhausted: true, Paused: true},
@@ -20,7 +20,7 @@ func TestQuotaExhaustedAgentCount(t *testing.T) {
 		{Name: "stopped", State: "stopped", QuotaExhausted: true},
 		{Name: "has-quota", State: "running", QuotaExhausted: false},
 	}
-	if got := hub.QuotaExhaustedAgentCount(agents); got != 2 {
+	if got := spoke.QuotaExhaustedAgentCount(agents); got != 2 {
 		t.Errorf("quotaExhaustedAgentCount = %d, want 2 (only running+unpaused out-of-quota agents)", got)
 	}
 }
@@ -28,10 +28,10 @@ func TestQuotaExhaustedAgentCount(t *testing.T) {
 // A nil or empty summary slice must count zero — the heartbeat builder calls
 // this before any agent has reported.
 func TestQuotaExhaustedAgentCountEmpty(t *testing.T) {
-	if got := hub.QuotaExhaustedAgentCount(nil); got != 0 {
+	if got := spoke.QuotaExhaustedAgentCount(nil); got != 0 {
 		t.Errorf("hub.QuotaExhaustedAgentCount(nil) = %d, want 0", got)
 	}
-	if got := hub.QuotaExhaustedAgentCount([]hub.AgentSummary{}); got != 0 {
+	if got := spoke.QuotaExhaustedAgentCount([]spoke.AgentSummary{}); got != 0 {
 		t.Errorf("hub.QuotaExhaustedAgentCount(empty) = %d, want 0", got)
 	}
 }

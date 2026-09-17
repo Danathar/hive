@@ -10,14 +10,6 @@ import (
 	"time"
 )
 
-// Auth audit: the hub periodically probes hub-fronted spokes'
-// UNAUTHENTICATED /api/status and flags any hive that answers 200 as WIDE OPEN.
-// A protected spoke redirects to login (30x) or returns 401 for an
-// unauthenticated request; a 200 means the dashboard is served to anyone with
-// the URL — the exact drift we've hit when a spoke was provisioned with an empty
-// auth_token or lost its hub-nginx gating. This is a safety net that catches
-// that drift automatically instead of relying on someone noticing.
-
 const (
 	// authAuditInterval is how often the full fleet is probed. Security drift is
 	// rare and probing every spoke has a cost, so this is deliberately slow.

@@ -32,15 +32,6 @@ type UIDMap struct {
 	mu sync.RWMutex
 }
 
-// IsolationContract returns the entrypoint's protected completion-marker
-// contract for an agent. Empty values mean the UID map predates asynchronous
-// migration, so callers preserve the legacy launch behaviour.
-func (u *UIDMap) IsolationContract(name string) (markerDir, revision string, uid int) {
-	u.mu.RLock()
-	defer u.mu.RUnlock()
-	return u.IsolationMarkerDir, u.IsolationRevision, u.Agents[name]
-}
-
 func NewUIDMap() *UIDMap {
 	return &UIDMap{
 		Agents:   make(map[string]int),
@@ -176,4 +167,13 @@ func LoadUIDMap(path string) (*UIDMap, error) {
 		u.Agents = make(map[string]int)
 	}
 	return u, nil
+}
+
+// IsolationContract returns the entrypoint's protected completion-marker
+// contract for an agent. Empty values mean the UID map predates asynchronous
+// migration, so callers preserve the legacy launch behaviour.
+func (u *UIDMap) IsolationContract(name string) (markerDir, revision string, uid int) {
+	u.mu.RLock()
+	defer u.mu.RUnlock()
+	return u.IsolationMarkerDir, u.IsolationRevision, u.Agents[name]
 }

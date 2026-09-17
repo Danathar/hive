@@ -11,26 +11,6 @@ import (
 	"github.com/hivecommons/hive/pkg/imageref"
 )
 
-// Config-drift detection.
-//
-// Every incident this exists for was silent: the hub already RECEIVED the data
-// that would have flagged it (a spoke reporting a branch nobody else runs, a
-// GitHub App that was never installed, a health check failing for hours, an
-// upgrade wedged since last week) but nothing in the UI ever compared a hive
-// against its fleet or against itself a minute ago. Drift signals do that
-// comparison server-side, once per My Hives request, and ride back on the same
-// payload so the table can render them without a second call.
-//
-// Two rules shape the whole model:
-//
-//  1. Derive the norm, don't hardcode it. "Behind" and "wrong branch" are
-//     relative to what the rest of the fleet is actually running (the modal
-//     branch/version across online hives), so the model stays correct when the
-//     fleet moves to a new branch without anyone editing this file.
-//  2. Never flag a placeholder for a claimed-hive concern. An unassigned pool
-//     slot legitimately has no GitHub App, no tokens, no agents and ACMM 0;
-//     flagging those would bury the real signals under pool noise.
-
 // DriftSeverity ranks a signal so a row can show its worst one and the fleet
 // summary can sort by urgency.
 type DriftSeverity string
@@ -706,22 +686,6 @@ func computeDrift(h MyHiveEntry, norm fleetNorm, latestSHAs map[string]string, n
 		}
 	}
 	return report
-}
-
-// appendDriftSignal is the read-time appender the My Hives roster uses to fold
-// a signal computed after the drift report was built (the restart-storm
-// rollup) into a hive's DriftReport. It keeps Count in lockstep with Signals
-// and applies "worst wins" to WorstSeverity — never downgrading a report that
-// already carries a worse signal. A nil report is a no-op.
-func appendDriftSignal(report *DriftReport, kind string, sev DriftSeverity, reason string) {
-	if report == nil {
-		return
-	}
-	report.Signals = append(report.Signals, DriftSignal{Kind: kind, Severity: sev, Reason: reason})
-	report.Count = len(report.Signals)
-	if driftSeverityRank[sev] > driftSeverityRank[report.WorstSeverity] {
-		report.WorstSeverity = sev
-	}
 }
 
 // parseRFC3339OrTime accepts an already-parsed time.Time (the registry stores

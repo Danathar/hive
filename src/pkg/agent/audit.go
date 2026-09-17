@@ -1,6 +1,8 @@
 package agent
 
-import "github.com/hivecommons/hive/pkg/agentaudit"
+import (
+	"github.com/hivecommons/hive/pkg/agentaudit"
+)
 
 // The audit vocabulary — action names, the AuditSink interface, and the
 // detail-string formatting — lives in the stdlib-only leaf pkg/agentaudit so

@@ -6,26 +6,6 @@ import (
 	"strings"
 )
 
-// Image-tag validation for every path that writes a container image onto a
-// running Deployment (hub self-upgrade and spoke upgrade/branch-switch).
-//
-// Why this exists: on 2026-07-27 the hub's own Deployment was patched to
-// `ghcr.io/hivecommons/hive-hub:target1`. `target1` is not a tag that has ever
-// been published — it is a TEST FIXTURE SHA (see setV2Latest(t, "target1") in
-// saas_edge_coverage_test.go) that reached a real cluster because the hub's
-// unit tests shell out to a real `kubectl` while KUBERNETES_SERVICE_HOST is
-// still set in the pod environment. The new ReplicaSet went
-// ImagePullBackOff, the OLD ReplicaSet kept serving, and the hub therefore
-// looked healthy for ~20 minutes while silently running stale code. Nothing
-// alerted; it was found only because an expected UI fix was missing.
-//
-// The lesson generalizes past that one fixture: writing an unresolvable tag
-// takes a component down SILENTLY, because Kubernetes keeps the old ReplicaSet
-// up. Refusing to patch is strictly safer — the component keeps running its
-// last good image and the refusal is loud and actionable. So every writer now
-// validates the tag first and refuses anything that is not a recognizable
-// build artifact.
-
 const (
 	// minImageTagSHALen / maxImageTagSHALen bound a git SHA tag. The hub
 	// normalizes branch SHAs to StandardSHALen (7) via shortSHA, but a spoke or

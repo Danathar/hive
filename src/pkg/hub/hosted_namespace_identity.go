@@ -9,38 +9,6 @@ import (
 	"time"
 )
 
-// ============================================================================
-// HOSTED NAMESPACE IDENTITY — making a namespace self-describing
-// ============================================================================
-//
-// A hosted hive's Kubernetes namespace is created ONCE, at provisioning time,
-// named after whatever ID the hive had THEN — almost always a pool
-// placeholder ID like "hive-hosted-hosted-available-oke-03-placeholder-y99x".
-// When that placeholder is later claimed by a real owner/org (approve-provision
-// or the manual assign path), the hive's meta.json is rewritten with the real
-// identity, but the NAMESPACE NAME is never renamed — Kubernetes has no atomic
-// namespace-rename primitive, and renaming would mean recreating every object
-// inside it. The namespace therefore keeps its placeholder name FOREVER, and
-// there is no way to go from "which namespace is this?" back to "which hive/
-// org is running here?" without cross-referencing the hub's hive registry and
-// reverse-engineering a mangled slug.
-//
-// The fix is not to rename the namespace — it is to make the namespace
-// self-describing by stamping identity labels (and a human-readable
-// annotation) onto it at every point the hive's identity is known or changes:
-//
-//  1. hosted namespace CREATION (provisionHive) — stamp what's known then
-//     (at minimum the hive_id; org/name may still be placeholder values).
-//  2. CLAIM (handleApproveProvision) — the hive's real name/org become known
-//     here for the first time, so the labels MUST be (re)written.
-//  3. ASSIGN / reassign (handleAssignHive) — same: refresh the labels so a
-//     reassigned placeholder's namespace reflects its new owner.
-//
-// All three call stampHostedNamespaceIdentity, which idempotently patches the
-// namespace's labels/annotations via `kubectl label`/`kubectl annotate`
-// (--overwrite) rather than recreating it, and merges into whatever labels
-// already exist instead of clobbering them.
-
 const (
 	// hiveLabelPrefix is the label/annotation prefix already established
 	// elsewhere in this package (see self_upgrade.go's restart-at/
@@ -242,43 +210,6 @@ func stampHostedNamespaceIdentity(cluster *ClusterConfig, namespace, name, org, 
 // request (or, in tests with no kubectl on PATH / no reachable API server,
 // hold the test) for kubectl's own default timeout.
 const stampNamespaceIdentityTimeout = 15 * time.Second
-
-// ============================================================================
-// OPTION B — a name-bearing Route, without renaming the namespace
-// ============================================================================
-//
-// A hosted spoke's public URL on OpenShift is an OpenShift Route host. Because
-// the namespace never renames (see above), a Route whose host is DERIVED from
-// the namespace name — the original provisioning template sets exactly one
-// host, DashboardHost = "<hive-id>.<cluster domain>" — permanently encodes the
-// placeholder slug (e.g. "hosted-available-vllmd-06.apps...") rather than the
-// hive's name, even after the hive is claimed by "TradingAsBuddies"/devx-prod.
-//
-// RENAMING OR MIGRATING THE NAMESPACE IS OFF THE TABLE: it would mean a
-// teardown + recreate + PVC/PV migration + outage. Nothing here creates a
-// replacement namespace or moves a PVC.
-//
-// The fix already exists in this file as of the vanity-URL feature
-// (addVanityHostToIngress, called from handleAssignHive and the retroactive
-// repair repairVanityURLForHive): OpenShift lets a Route's spec.host be set
-// EXPLICITLY, independent of the namespace it lives in, so an ADDITIONAL
-// "<name>-vanity" Route — same Service backend, same namespace — gives the
-// hive a name-bearing URL without touching the namespace, PVC, Deployment, or
-// Service. The ORIGINAL Route (and its placeholder host) is left completely
-// alone, so any in-flight bookmark/callback against it keeps working.
-//
-// That existing mechanism keys its hostname off org+primary-repo
-// (generateHiveID). hiveNameHostLabel below is the DNS-label-safe sanitizer
-// for building the SAME kind of name-bearing host from the hive's own display
-// NAME instead — reusing sanitizeLabelValue's stripping logic but enforcing
-// hostname-specific rules (a label value may lead/trail with '.', a DNS label
-// may not). hiveNameVanityHost composes it into a full host; handleAssignHive
-// (saas.go) calls it to prefer a name-bearing host over the org/repo-derived
-// one when the hive has a display name, then hands the result to the SAME
-// existing get-or-create path — makeVanityHostServable /
-// addVanityHostToIngress — so the idempotency, cluster-domain handling, and
-// "never adopt an unservable host" guarantees are unchanged from before this
-// feature existed.
 
 // hiveNameHostLabel converts a hive's display name into a single valid DNS
 // label (RFC 1123): lowercase, [a-z0-9-] only, no leading or trailing dash,

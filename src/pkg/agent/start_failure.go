@@ -10,33 +10,6 @@ import (
 	"github.com/hivecommons/hive/pkg/config"
 )
 
-// Start-failure classification and relaunch backoff (#5958, from incident
-// #5921).
-//
-// The incident: a hive spent 4,025 log lines and a tmux session every ~3
-// minutes relaunching agents that could not possibly start. The underlying
-// causes were ordinary and user-fixable — Copilot was not logged in, a bob API
-// key was rejected — but neither reached the operator. Every surface said the
-// same unactionable thing ("restart needed", "hung"), and the relaunch loop had
-// only a fixed cooldown, so it retried an unfixable condition forever while the
-// fleet page showed the agents green.
-//
-// Two things were missing, and this file supplies both:
-//
-//  1. A REASON. A start failure is recorded with a stable class and a sentence
-//     an operator can act on ("copilot: not logged in"), which then rides state
-//     out to the dashboard card, the heartbeat and the fleet verdict.
-//  2. A LIMIT. Consecutive failures with the SAME reason escalate a backoff and,
-//     past startFailureBlockThreshold(), mark the agent blocked. A blocked
-//     agent is not relaunched on the tick, and does not count toward the
-//     fleet's "able" total.
-//
-// The shape deliberately mirrors the inference-provider backoff already in
-// manager.go (markProviderErrorLocked and friends): same "same-signal repeat
-// does not re-arm" rule, same escalating ladder, same "cleared by success"
-// lifecycle. An operator who has learned one has learned the other, and the two
-// cannot drift into contradicting each other about what a stuck agent means.
-
 // StartFailureClass is the stable, machine-comparable kind of a start failure.
 // The class — not the human sentence — is what consecutive-failure counting
 // compares, so re-phrasing a message can never reset the ladder, and two

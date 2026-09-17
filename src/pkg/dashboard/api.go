@@ -30,7 +30,7 @@ import (
 	"github.com/hivecommons/hive/pkg/dashboard/collect"
 	"github.com/hivecommons/hive/pkg/dashboard/webstatic"
 	"github.com/hivecommons/hive/pkg/github"
-	hub "github.com/hivecommons/hive/pkg/hub/spoke"
+	spoke "github.com/hivecommons/hive/pkg/hub/spoke"
 	"github.com/hivecommons/hive/pkg/policies"
 	"github.com/hivecommons/hive/pkg/resolve"
 	"github.com/hivecommons/hive/pkg/timeline"
@@ -702,9 +702,9 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 	imageRef, channel := "", versionChannel
 	if versionImageSource != nil {
 		imageRef = versionImageSource()
-		channel = hub.ImageReleaseChannel(imageRef)
+		channel = spoke.ImageReleaseChannel(imageRef)
 	}
-	tracking := hub.ImageTrackingMode(imageRef)
+	tracking := spoke.ImageTrackingMode(imageRef)
 	resp := map[string]interface{}{
 		"version":    "2.0.0",
 		"go":         "1.25",
@@ -836,7 +836,7 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 	// outcome, so it cannot tell a hive that succeeded apart from one that never
 	// tried). Channel selection is enabled below only when the observed image
 	// proves this is a hub-managed release-channel spoke.
-	lastBeat, beatOK := hub.LastHeartbeatAttempt()
+	lastBeat, beatOK := spoke.LastHeartbeatAttempt()
 	releaseStatus := buildSpokeReleaseStatus(
 		imageRef, "",
 		readUpgradeOutcome(), marker, versionHash,
@@ -894,7 +894,7 @@ type upgradeTarget struct {
 // resolveUpgradeTarget picks the target from the hub policy when one has been
 // delivered, else from the upstream branch tip. Pure so tests pin the
 // precedence directly.
-func resolveUpgradeTarget(policy *hub.HeartbeatUpgradePolicy, branch, branchTip string) upgradeTarget {
+func resolveUpgradeTarget(policy *spoke.HeartbeatUpgradePolicy, branch, branchTip string) upgradeTarget {
 	if policy == nil {
 		return upgradeTarget{
 			Source:   upgradeTargetSourceBranch,
@@ -935,7 +935,7 @@ func resolveUpgradeTarget(policy *hub.HeartbeatUpgradePolicy, branch, branchTip 
 // SetHubUpgradePolicy records the hub's upgrade posture for this spoke as
 // delivered on the heartbeat (#7262). Called from the heartbeat callback; the
 // next /api/version measures against it.
-func (s *Server) SetHubUpgradePolicy(p *hub.HeartbeatUpgradePolicy) {
+func (s *Server) SetHubUpgradePolicy(p *spoke.HeartbeatUpgradePolicy) {
 	if p == nil {
 		return
 	}
@@ -1037,8 +1037,8 @@ func (s *Server) commitsBehindStableTip(base, head string) (int, bool) {
 
 func shortSHADashboard(s string) string {
 	s = strings.TrimSpace(s)
-	if len(s) > hub.StandardSHALen {
-		return s[:hub.StandardSHALen]
+	if len(s) > spoke.StandardSHALen {
+		return s[:spoke.StandardSHALen]
 	}
 	return s
 }
@@ -3059,7 +3059,7 @@ func (s *Server) handleSSO(w http.ResponseWriter, r *http.Request) {
 	// and returns exactly ONE key — byte-identical to SpokeSSOPublicKey — when
 	// HIVE_SSO_PUBLIC_KEY_PREV is absent, which is its state on every spoke
 	// today and on every spoke that has never seen a rotation.
-	pubKeys := hub.SpokeSSOPublicKeys()
+	pubKeys := spoke.SpokeSSOPublicKeys()
 	if len(pubKeys) == 0 {
 		// No verification key → SSO cannot be verified. Terminate with an
 		// explanation. Redirecting to "/" here is what produced the historical
@@ -3084,7 +3084,7 @@ func (s *Server) handleSSO(w http.ResponseWriter, r *http.Request) {
 		hiveID = s.deps.Config.HiveID
 	}
 
-	username, tokenRole, _, err := hub.VerifySSOTokenAcrossKeys(pubKeys, token, hiveID, time.Now())
+	username, tokenRole, _, err := spoke.VerifySSOTokenAcrossKeys(pubKeys, token, hiveID, time.Now())
 	if err != nil {
 		if s.deps != nil && s.deps.Logger != nil {
 			s.deps.Logger.Warn("sso handoff rejected", "error", err.Error())

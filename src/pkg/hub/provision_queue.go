@@ -6,22 +6,6 @@ import (
 	"sync"
 )
 
-// Provisioning queue.
-//
-// Provisions used to launch as unbounded goroutines straight from the HTTP
-// handlers. Each provision shells out repeatedly (manifest apply, OCI FSS
-// export creation, rollout waits), so a bulk request or replenish burst
-// stampedes both the hub and the target cluster/OCI tenancy. This queue
-// bounds total provisioning concurrency AND fairness per cluster: a burst
-// aimed at one cluster cannot starve provisions bound for another, and the
-// per-cluster cap doubles as the OCI FSS creation rate limit.
-//
-// Jobs are FIFO overall; a worker takes the OLDEST job whose target cluster
-// is below the per-cluster in-flight cap and skips past full clusters.
-// Callers keep the provisionWG contract (Add at enqueue, Done at completion)
-// so tests can still drain all provisioning work before swapping the
-// package-level saas*Dir variables.
-
 const (
 	// defaultProvisionWorkers bounds total concurrent provisions hub-wide.
 	defaultProvisionWorkers = 4

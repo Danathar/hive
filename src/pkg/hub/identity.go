@@ -1,67 +1,5 @@
 package hub
 
-// GitHub identity as an ATOMIC SET.
-//
-// ─────────────────────────────────────────────────────────────────────────
-// THE RULE
-// ─────────────────────────────────────────────────────────────────────────
-//
-// app_id, app_slug, api_url and base_url together name ONE GitHub App on ONE
-// forge. No valid mixture exists:
-//
-//	GHE:    app_id=<ghe app>    slug=<ghe slug>    api_url=https://<host>/api/v3
-//	Public: app_id=<public app> slug=<public slug> api_url="" (or api.github.com)
-//
-// ─────────────────────────────────────────────────────────────────────────
-// WHY THIS FILE EXISTS
-// ─────────────────────────────────────────────────────────────────────────
-//
-// A cluster-config change pushed a GHE app_id to a set of hives WITHOUT also
-// pushing api_url. Those spokes ended up with:
-//
-//	app_id: 5686          <- the GHE App
-//	api_url: ""           <- empty, so it defaults to api.github.com
-//
-// and every token request failed on hives that had been working an hour
-// earlier:
-//
-//	POST https://api.github.com/app/installations/146551814/access_tokens
-//	404 Integration not found
-//
-// The hives that also received api_url=https://github.ibm.com/api/v3 were
-// fine. The failure split exactly on that one field.
-//
-// #2360's forge endpoint already refuses to half-apply an identity — it
-// resolves the whole set up front and 409s naming what is missing, writing
-// nothing. The cluster-config push path had no equivalent guard, so it could
-// deliver one component of the set and leave the rest stale.
-//
-// This file supplies that guard in the form the transport actually allows.
-//
-// ─────────────────────────────────────────────────────────────────────────
-// WHY THIS IS A PRECONDITION AND NOT A DELIVERY LATCH
-// ─────────────────────────────────────────────────────────────────────────
-//
-// The obvious fix is a "set-valued" delivery latch — push the whole identity,
-// wait for the spoke to confirm all of it. That is NOT expressible on the
-// current transport, for two independent reasons:
-//
-//  1. The set is split across two heartbeat payloads with different gating:
-//     app_id/app_slug/installation_id ride HeartbeatGitHubAppConfig, api_url
-//     rides HeartbeatProjectConfig, and base_url is never pushed at all (the
-//     spoke derives its host from base_url with a fallback to api_url, so
-//     pushing api_url alone moves a hive between forges).
-//
-//  2. Until the read-back fields added alongside this file, the hub received
-//     back only app_id and the key fingerprint. app_slug and installation_id
-//     were structurally unconfirmable — a latch over them could arm and push
-//     but could never legitimately confirm.
-//
-// So the guarantee is provided where it can be: REFUSE TO ARM an inconsistent
-// push, and DETECT an inconsistent state that is already live. That gives the
-// atomicity property (never half-apply) without pretending three transports
-// are one.
-
 import (
 	"net/http"
 	"strings"
@@ -70,8 +8,6 @@ import (
 // gheAPIPathMarker identifies a GitHub Enterprise API URL. GHE APIs live under
 // /api/v3; public GitHub uses api.github.com.
 const gheAPIPathMarker = "/api/v3"
-
-// publicGitHubHost is declared in server.go and reused here.
 
 // PendingAppIdentity is a GitHub App identity queued for delivery to a spoke.
 //

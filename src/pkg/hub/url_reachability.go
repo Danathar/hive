@@ -9,26 +9,6 @@ import (
 	"time"
 )
 
-// URL reachability: the hub probes every spoke's dashboard URL over HTTPS
-// during the auth audit, and the spoke now reports its own self-probe verdict
-// over heartbeat. The two vantage points are intentionally distinct: a public
-// hub may not be allowed to resolve or route to a private-network hive, while
-// the hive's own cluster can still reach the dashboard URL its users need.
-//
-// This file records the reachability of the URL the hub LINKS USERS TO
-// (RegistryEntry.DashboardURL, which carries the vanity host once minted) and
-// turns a persistent failure into an alert.
-//
-// The rule is deliberately conservative in the same spirit as advisoryStale:
-// anything we are unsure about is NOT alarmed on. Specifically:
-//   - A brand-new hive is still converging (cert-manager issuing, ingress
-//     reloading), so it is exempt until urlUnreachableMinAge.
-//   - A single bad probe never alerts; it takes urlUnreachableMinFailures
-//     consecutive failures, so a rolling restart is invisible.
-//   - When an ENTIRE cluster fails at once that is an outage or a hub-side
-//     network partition, not N broken hives, so those are suppressed into one
-//     cluster-level condition rather than N alerts.
-
 const (
 	// urlUnreachableMinFailures is how many CONSECUTIVE failed probes a hive
 	// must accumulate before it is alerted on. The audit runs every
@@ -476,14 +456,4 @@ func urlUnreachableEligible(registeredAt string, now time.Time) bool {
 		return false
 	}
 	return now.Sub(t) >= urlUnreachableMinAge
-}
-
-// dashboardHost extracts the lowercase hostname from a dashboard URL, or ""
-// when the URL is unparsable or hostless.
-func dashboardHost(rawURL string) string {
-	u, err := url.Parse(strings.TrimSpace(rawURL))
-	if err != nil || u.Host == "" {
-		return ""
-	}
-	return strings.ToLower(u.Hostname())
 }

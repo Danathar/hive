@@ -9,25 +9,6 @@ import (
 	"github.com/hivecommons/hive/pkg/github"
 )
 
-// This file wires pkg/forge onto the live governor path — the same structure
-// hookwire.go and celwire.go use for their packages.
-//
-// pkg/forge ships GitHub, GitLab and Gitea adapters with the read path and the
-// core write path implemented and tested, and pkg/config already carries the
-// selector (project.forge) and the per-forge endpoint/token-env settings. What
-// was missing was any production caller: every write on the governor path went
-// straight to *github.Client, so a hive configured with project.forge: gitlab
-// silently got GitHub behavior from an abstraction that was never reached
-// (kubestellar/hive#5259).
-//
-// The seam is deliberately the SMALLEST one that removes that gap:
-// forge.IssueWriter, the comment+label pair. *github.Client satisfies it
-// already — its CreateIssueComment and AddLabels were given those exact
-// signatures for this swap — so a GitHub hive keeps calling the very same
-// client through the very same methods. Nothing about the default path changes;
-// only the static type at the call site does, which is what lets a non-GitHub
-// hive be handed an adapter instead.
-
 // governorForge returns the forge-neutral write seam the governor path should
 // use for this config, or nil when no forge can be reached at all.
 //

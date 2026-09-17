@@ -5,16 +5,6 @@ import (
 	"sync"
 )
 
-// Bounded kubectl execution.
-//
-// Every hub → cluster interaction shells out to kubectl. At fleet scale the
-// unbounded fan-out (health collection, reconcilers, provisioning, upgrade
-// sweeps all spawning subprocesses concurrently) can exhaust hub pod CPU,
-// file descriptors and the target API server's client budget. This executor
-// caps concurrent kubectl processes PER CLUSTER with a semaphore acquired at
-// execution time (Output/CombinedOutput/Run), so command CONSTRUCTION stays
-// cheap and call sites are unchanged.
-
 // defaultKubectlMaxPerCluster is the per-cluster concurrent kubectl process
 // cap when neither the dashboard Scale Controls value nor
 // HIVE_KUBECTL_MAX_PER_CLUSTER is set.

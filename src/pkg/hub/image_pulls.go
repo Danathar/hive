@@ -15,35 +15,6 @@ import (
 	"time"
 )
 
-// image_pulls.go tracks external adoption of the hive spoke image by charting
-// how many container-image PULLS (downloads) the public GHCR package receives
-// per day.
-//
-// WHY THIS IS A DAILY-DELTA, NOT A UNIQUE-DOWNLOAD COUNT
-// -----------------------------------------------------
-// GitHub exposes exactly ONE adoption number for a container package: a single
-// CUMULATIVE "Total downloads" counter, rendered on the public package page
-//
-//	https://github.com/hivecommons/hive/pkgs/container/hive
-//
-// as `<h3 title="127576">128K</h3>` under a "Total downloads" label. There is
-// NO public per-day metric and NO unique-IP / unique-puller metric anywhere in
-// the REST, GraphQL, or web surface — the REST Packages API's PackageVersion
-// object (google/go-github v72) carries no download field at all.
-//
-// So we cannot measure "how many distinct people pulled today". What we CAN do
-// is snapshot the cumulative counter once per day and plot the day-over-day
-// DELTA (cumulative[today] - cumulative[yesterday]) = pulls that landed that
-// day. That is what the sparkline shows, and it is labelled honestly as
-// "pulls/day" — never "unique downloads".
-//
-// The counter is scraped from the PUBLIC package HTML page, which needs no
-// authentication (the package is public). We deliberately do not depend on the
-// GitHub App installation token here: the REST Packages API cannot serve this
-// number even with the token, and the public page can, so scraping the public
-// page is both the only option and the more robust one (works even if the app
-// key is missing and the hive is in dashboard-only mode).
-
 const (
 	// pullReleaseWindow is how many recent RELEASES (distinct SHAs) each
 	// release line's series retains. Each release records the cumulative pull

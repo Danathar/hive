@@ -1,11 +1,8 @@
 package hub
 
-// This file holds the heartbeat wire DTOs shared between the SaaS control
-// plane (which decodes spoke heartbeats and encodes responses) and the
-// spoke-side client, which lives in pkg/hub/spoke. The push loop itself was
-// moved to pkg/hub/spoke; only the control-plane-facing types remain here.
-
 import (
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/hivecommons/hive/pkg/config"
@@ -46,6 +43,7 @@ type AgentSummary struct {
 	BackendAuthSince     string                `json:"backendAuthSince,omitempty"`
 	BackendAuthLastError string                `json:"backendAuthLastError,omitempty"`
 }
+
 type AgentRestartTelemetry struct {
 	Total         int    `json:"total,omitempty"`
 	Last24h       int    `json:"last_24h,omitempty"`
@@ -55,6 +53,7 @@ type AgentRestartTelemetry struct {
 	ResetAt       string `json:"reset_at,omitempty"`
 	ResetBy       string `json:"reset_by,omitempty"`
 }
+
 type AgentActivity struct {
 	Paused               bool
 	PausedTrigger        string
@@ -141,10 +140,12 @@ type GovernorSummary struct {
 	PRs        int    `json:"prs"`
 	WorkSource string `json:"work_source,omitempty"`
 }
+
 type ContributorSummary struct {
 	Active     int `json:"active"`
 	Registered int `json:"registered"`
 }
+
 type LeaderboardEntry struct {
 	GitHubUsername string `json:"github_username"`
 	AvatarURL      string `json:"avatar_url"`
@@ -155,12 +156,14 @@ type LeaderboardEntry struct {
 	CurrentTask    string `json:"current_task,omitempty"`
 	HiveName       string `json:"hive_name,omitempty"`
 }
+
 type HeartbeatClusterHealthReport struct {
 	Nodes       []HeartbeatNodeMetric   `json:"nodes"`
 	Summary     HeartbeatClusterSummary `json:"summary"`
 	GPUSummary  *HeartbeatGPUSummary    `json:"gpu_summary,omitempty"`
 	CollectedAt string                  `json:"collected_at"`
 }
+
 type HeartbeatNodeMetric struct {
 	Name          string   `json:"name"`
 	CPUCores      int      `json:"cpu_cores"`
@@ -181,6 +184,7 @@ type HeartbeatNodeMetric struct {
 	GPUs          int      `json:"gpus,omitempty"`
 	GPUType       string   `json:"gpu_type,omitempty"`
 }
+
 type HeartbeatClusterSummary struct {
 	TotalNodes            int  `json:"total_nodes"`
 	ReadyNodes            int  `json:"ready_nodes"`
@@ -193,11 +197,13 @@ type HeartbeatClusterSummary struct {
 	TotalPods             int  `json:"total_pods"`
 	HiveCapacityRemaining *int `json:"hive_capacity_remaining,omitempty"`
 }
+
 type HeartbeatGPUSummary struct {
 	Total     int      `json:"total"`
 	Allocated int      `json:"allocated"`
 	Types     []string `json:"types"`
 }
+
 type HeartbeatPayload struct {
 	HiveID                       string                          `json:"hive_id"`
 	Org                          string                          `json:"org"`
@@ -317,6 +323,7 @@ type PublicURLSelfCheck struct {
 	Error      string `json:"error,omitempty"`
 	HTTPStatus int    `json:"http_status,omitempty"`
 }
+
 type RouteExistenceCheck struct {
 	Status    string `json:"status"`
 	CheckedAt string `json:"checked_at,omitempty"`
@@ -324,6 +331,20 @@ type RouteExistenceCheck struct {
 	Kind      string `json:"kind,omitempty"`
 	Error     string `json:"error,omitempty"`
 }
+
+// dashboardHost extracts the lowercase hostname from a dashboard URL, or ""
+// when the URL is unparsable or hostless.
+func dashboardHost(rawURL string) string {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	return strings.ToLower(u.Hostname())
+}
+
+// serviceAccountDir is the projected service-account volume the control plane
+// reads its own token from (see readSAToken).
+var serviceAccountDir = "/var/run/secrets/kubernetes.io/serviceaccount"
 
 type HeartbeatGitHubAppConfig struct {
 	AppID             int64             `json:"app_id"`
@@ -336,11 +357,13 @@ type HeartbeatGitHubAppConfig struct {
 	AdditionalKeys    []HeartbeatAppKey `json:"additional_keys,omitempty"`
 	SecondaryKey      *HeartbeatAppKey  `json:"secondary_key,omitempty"`
 }
+
 type HeartbeatAppKey struct {
 	AppID       int64  `json:"app_id"`
 	PrivateKey  string `json:"private_key"`
 	Fingerprint string `json:"fingerprint,omitempty"`
 }
+
 type HeartbeatProjectConfig struct {
 	Org          string                    `json:"org"`
 	Repos        []string                  `json:"repos"`
@@ -351,6 +374,7 @@ type HeartbeatProjectConfig struct {
 	GitHubAPIURL string                    `json:"github_api_url,omitempty"`
 	IssueFilter  *config.IssueFilterConfig `json:"issue_filter,omitempty"`
 }
+
 type HeartbeatGatewayConfig struct {
 	Name         string `json:"name"`
 	Kind         string `json:"kind"`
@@ -358,6 +382,7 @@ type HeartbeatGatewayConfig struct {
 	DefaultModel string `json:"default_model,omitempty"`
 	Key          string `json:"key"`
 }
+
 type HeartbeatResponse struct {
 	OK                  bool                      `json:"ok"`
 	UpgradeTo           string                    `json:"upgrade_to,omitempty"`
@@ -380,6 +405,7 @@ type HeartbeatResponse struct {
 	SigSignedAt         int64                     `json:"sig_ts,omitempty"`
 	SigVersion          int                       `json:"sig_v,omitempty"`
 }
+
 type HubBanner struct {
 	ID      string `json:"id"`
 	Message string `json:"message"`

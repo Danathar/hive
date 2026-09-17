@@ -12,7 +12,7 @@ import (
 	"testing"
 
 	"github.com/hivecommons/hive/pkg/config"
-	hub "github.com/hivecommons/hive/pkg/hub/spoke"
+	spoke "github.com/hivecommons/hive/pkg/hub/spoke"
 )
 
 // startFakeTtyd runs a local HTTP server standing in for ttyd and points
@@ -41,7 +41,7 @@ func newTerminalTestHandler(t *testing.T, authToken string) http.Handler {
 	if authToken == "" {
 		return NewServer(0, logger).Handler()
 	}
-	t.Setenv(hub.EnvTerminalKey, "terminal-proxy-test-key")
+	t.Setenv(spoke.EnvTerminalKey, "terminal-proxy-test-key")
 	s := NewServerWithAuth(0, authToken, logger)
 	s.deps = &Dependencies{Config: &config.Config{HiveID: "terminal-proxy-test"}}
 	return s.Handler()

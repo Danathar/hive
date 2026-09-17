@@ -14,31 +14,6 @@ import (
 	"github.com/hivecommons/hive/pkg/config"
 )
 
-// Per-cluster GitHub App private-key store.
-//
-// WHY THIS EXISTS
-//
-// Every cluster the hub provisions onto talks to its OWN GitHub instance, and
-// each of those instances hosts its own GitHub App registration with its own
-// app_id and its own private key. Before this store the hub only ever knew a key
-// that an operator pasted into a SINGLE hive's provisioning request. A hive
-// provisioned without one — or provisioned against the wrong GitHub — had no
-// path back to a correct key, and the only working copy of a GitHub Enterprise
-// key in the fleet lived on one spoke's PVC. Reprovisioning that spoke would
-// have destroyed it.
-//
-// The store makes the HUB the authority: one key per cluster, from which every
-// spoke on that cluster is continuously reconciled over the existing heartbeat
-// channel.
-//
-// WHY THE KEY IS NOT IN clusters.json
-//
-// clusters.json is read, parsed and rendered along operator-facing paths (the
-// cluster list, the create-hive modal, provisioning templates). Putting signing
-// material in it would put that material one careless marshal away from an HTTP
-// response. The key therefore lives in its own file, referenced only by cluster
-// ID, and ClusterConfig carries nothing but the non-secret app_id.
-
 // clusterAppKeyDir is the directory holding one PEM per cluster, named
 // <clusterID>.pem. A var (not a const) so tests can redirect it at a temp dir;
 // production never reassigns it. It sits beside the hub's other secrets
@@ -347,7 +322,7 @@ func (s *HubServer) appIdentityForHive(h *SaaSHive, clusterID string) *clusterAp
 // hive should be given — app_id, app_slug, base_url and api_url, plus the key
 // when this hub holds one.
 //
-// WHY ASSIGN NEEDS ITS OWN ENTRY POINT
+// # WHY ASSIGN NEEDS ITS OWN ENTRY POINT
 //
 // Assign already knows the forge: handleAssignHive records h.GitHubHost from
 // the requested org before it reaches the credential step. Yet until now the
@@ -491,30 +466,6 @@ func (s *HubServer) appKeysByAppID() map[int64]fleetAppKey {
 	}
 	return out
 }
-
-// SECURITY (C1/N3, CWE-200/639): the fleet-wide "additional App keys" delivery
-// lane was REMOVED. It formerly attached every OTHER fleet App's private key to
-// every heartbeat response, selecting them purely from the fleet key set with no
-// binding to the authenticated caller. Combined with the heartbeat trusting the
-// body-supplied hive_id, that let any hive holding the fleet-shared bearer pull
-// every tenant's App private key by beating with any hive_id. See
-// additionalAppKeysForSpoke/attachMissingAppKeys in git history.
-//
-// A heartbeat now delivers ONLY the App identity/key for THAT hive:
-//   - its PRIMARY (cluster) key, via appKeySyncForHeartbeat's per-cluster
-//     reconcile (idempotent, gated on the hive's own cluster key), and
-//   - a targeted, operator/webhook-queued identity, via
-//     pendingAppIdentityForHeartbeat.
-//
-// A hive is never handed a key for an App it is not currently assigned. The
-// "github.com hive on a GHE cluster needs the other forge's key pre-positioned
-// for a future migration" rationale did not justify broadcasting private key
-// material: when a hive is actually re-assigned to a different App, that App's
-// key is delivered at that time through the reconcile/pending-identity lanes,
-// keyed to the hive that is authoritatively assigned it — not speculatively
-// pushed to every spoke. appKeysByAppID is retained: provisioning still renders
-// a specific hive's own manifest from it, and nothing on the heartbeat path
-// enumerates other tenants' keys any more.
 
 // appKeySyncDecision is the outcome of comparing a spoke's reported App identity
 // against its cluster's authoritative one. Returned rather than acted on inline
@@ -1159,8 +1110,6 @@ func clusterBaseURLForIdentity(s *HubServer, clusterID string) string {
 	}
 	return ""
 }
-
-// --- Operator API ---
 
 // clusterAppKeyRequest is the admin upload body for a cluster's App key.
 type clusterAppKeyRequest struct {

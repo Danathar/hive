@@ -7,7 +7,7 @@ import (
 	"github.com/hivecommons/hive/pkg/config"
 	"github.com/hivecommons/hive/pkg/dashboard"
 	"github.com/hivecommons/hive/pkg/github"
-	hub "github.com/hivecommons/hive/pkg/hub/spoke"
+	spoke "github.com/hivecommons/hive/pkg/hub/spoke"
 	"github.com/hivecommons/hive/pkg/snapshot"
 )
 
@@ -158,7 +158,7 @@ func TestProviderLimitHeartbeatFields_SingleRebuffPhrasing(t *testing.T) {
 	})
 	t.Cleanup(func() { dashboard.SetInferenceBudgetProvider(nil) })
 
-	reason, rebuffs, hiveWide, names := hub.ProviderLimitHeartbeatFields([]hub.AgentSummary{
+	reason, rebuffs, hiveWide, names := spoke.ProviderLimitHeartbeatFields([]spoke.AgentSummary{
 		{Name: "guide", State: "running", QuotaExhausted: true},
 	}, dashboard.InferenceBudgetExceeded)
 	if rebuffs != 1 {
@@ -179,7 +179,7 @@ func TestProviderLimitHeartbeatFields_MultiRebuffPhrasing(t *testing.T) {
 	})
 	t.Cleanup(func() { dashboard.SetInferenceBudgetProvider(nil) })
 
-	reason, rebuffs, hiveWide, names := hub.ProviderLimitHeartbeatFields(nil, dashboard.InferenceBudgetExceeded)
+	reason, rebuffs, hiveWide, names := spoke.ProviderLimitHeartbeatFields(nil, dashboard.InferenceBudgetExceeded)
 	if rebuffs != 4 {
 		t.Fatalf("rebuffs = %d, want 4", rebuffs)
 	}

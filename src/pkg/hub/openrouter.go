@@ -1,24 +1,5 @@
 package hub
 
-// OpenRouter "scan-to-fund" flow (hub side).
-//
-// From My Hives, an owner/admin funds a SPECIFIC hive: they pick a default model
-// and scan a QR (or click a link) that starts an OpenRouter OAuth PKCE flow on
-// the hub. On return, the hub exchanges the code for a user-controlled OpenRouter
-// API key and delivers it to the target hive as a model gateway named
-// "openrouter" via the heartbeat channel (the only channel that reaches
-// firewalled/heartbeat-only spokes like the heartbeat-only cluster uniformly). The spoke stores the
-// key in its OWN per-gateway secret-file store — the hub never persists the key.
-//
-// SECURITY:
-//   - PKCE S256; the code_verifier NEVER leaves the hub.
-//   - state is single-use + short-lived; the callback binds to the stored
-//     hive_id, so a code cannot fund a different hive.
-//   - start is gated to the owner/admin of the target hive.
-//   - callback_url is the hub's own fixed origin (never client-supplied).
-//   - the funded key travels only over the TLS heartbeat channel and is drained
-//     on delivery; it is never logged, echoed, or stored on the hub.
-
 import (
 	"encoding/json"
 	"net/http"

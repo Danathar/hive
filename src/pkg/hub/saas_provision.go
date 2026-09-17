@@ -25,10 +25,6 @@ import (
 
 var saasHivesDir = "/data/saas/hives"
 
-// serviceAccountDir is the projected service-account volume the control plane
-// reads its own token from (see readSAToken).
-var serviceAccountDir = "/var/run/secrets/kubernetes.io/serviceaccount"
-
 const (
 	maxHivesPerUser   = 3
 	maxSaaSHivesTotal = 0 // 0 = unlimited
@@ -1059,37 +1055,6 @@ func backfillGitHubHostFromCluster(h *SaaSHive, cluster *ClusterConfig) string {
 	return forge
 }
 
-// FORGE IS PER-HIVE. Two repairs used to live here that keyed a hive's forge on
-// its CLUSTER's default — repairGitHubHostForHive (filled a blank github_host
-// from the cluster forge on every beat) and guardGHEHiveNotOnPublicForge
-// (rewrote a blank-or-public github_host to the cluster's GHE host whenever the
-// spoke reported the public forge). Both are gone, on purpose.
-//
-// A cluster hosts hives of BOTH forges: the heartbeat-only cluster carries github.ibm.com projects
-// (certus, EPM, …) beside github.com projects (ibm/alchemy-logging — the org
-// "ibm" lives on public github.com). At 23:56Z on 2026-08-05, minutes after the
-// cluster-keyed guard shipped, it rewrote github_host on every heartbeat-only-cluster hive whose
-// spoke reported the public App — github.com projects included — and the
-// delivery that followed flipped their spokes onto app 5686 / github.ibm.com,
-// degrading 9 of them with "404 Not Found" on every token mint. Cluster
-// membership proves nothing about any one hive's forge; only the hive's own
-// recorded github_host (empty = public github.com, the field's documented
-// meaning) does.
-//
-// What remains, all keyed on per-hive evidence:
-//   - assign/approve record github_host from the pasted org URL (and
-//     backfillGitHubHostFromCluster fills it ONCE, at claim time, for legacy
-//     requests that named no host);
-//   - reconcileGitHubHostFromSpoke backfills an EMPTY github_host from a spoke
-//     whose whole github block coherently, workingly names a forge — it never
-//     overwrites an explicit record (a spoke's report is downstream of hub
-//     delivery, so a contradiction is a mis-delivery echo, not evidence);
-//   - repairMisflippedForgeFromRequest (below) restores a github_host the
-//     cluster-keyed guard stomped, from the provision request's own record;
-//   - the wrong-forge identity repair (decideAppKeySync /
-//     appKeyReasonWrongForgeApp) re-delivers the hive's OWN forge — in both
-//     directions — when the spoke's app_id provably belongs to another forge.
-
 // repairMisflippedForgeFromRequest restores a claimed hive's github_host after
 // the 2026-08-05 cluster-keyed guard stomped it, using the hive's own provision
 // request — the surviving record of which forge the org actually lives on — as
@@ -1575,6 +1540,170 @@ const (
 	vanityMintBudgetDefault = 20
 	vanityMintWindowDefault = 168 * time.Hour
 )
+
+func vanityRepairSuccessCooldown() time.Duration {
+	return durationEnv(vanityRepairSuccessCooldownEnv, vanityRepairSuccessCooldownDefault)
+}
+
+func vanityRepairFailureBackoff() time.Duration {
+	return durationEnv(vanityRepairFailureBackoffEnv, vanityRepairFailureBackoffDefault)
+}
+
+func vanityMintBudget() int {
+	return positiveIntEnv(vanityMintBudgetEnv, vanityMintBudgetDefault)
+}
+
+func vanityMintWindow() time.Duration {
+	return durationEnv(vanityMintWindowEnv, vanityMintWindowDefault)
+}
+
+func durationEnv(name string, fallback time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return fallback
+	}
+	return d
+}
+
+func positiveIntEnv(name string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil || v <= 0 {
+		return fallback
+	}
+	return v
+}
+
+func vanityMintLedgerPath() string {
+	return filepath.Join(filepath.Dir(saasHivesDir), "vanity-mint-times.json")
+}
+
+// vanityMintAllowed reports whether the fleet-wide mint budget has room for
+// another vanity-host mint, pruning entries older than the rolling window.
+func (s *HubServer) vanityMintAllowed() bool {
+	s.vanityMintMu.Lock()
+	defer s.vanityMintMu.Unlock()
+	s.ensureVanityMintLedgerLoadedLocked()
+	s.pruneVanityMintsLocked()
+	return len(s.vanityMintTimes) < vanityMintBudget()
+}
+
+// recordVanityMint charges one mint against the fleet-wide budget.
+func (s *HubServer) recordVanityMint() {
+	s.vanityMintMu.Lock()
+	defer s.vanityMintMu.Unlock()
+	s.ensureVanityMintLedgerLoadedLocked()
+	s.pruneVanityMintsLocked()
+	s.vanityMintTimes = append(s.vanityMintTimes, time.Now())
+	s.saveVanityMintLedgerLocked()
+}
+
+// acquireVanityMintSlot atomically reserves one fleet-wide mint slot before
+// the repair path mutates cluster ingress. The reservation happens before the
+// slow kubectl call so concurrent repairs cannot all observe the same free slot
+// and collectively exceed the ACME-protecting cap.
+func (s *HubServer) acquireVanityMintSlot() bool {
+	s.vanityMintMu.Lock()
+	defer s.vanityMintMu.Unlock()
+	s.ensureVanityMintLedgerLoadedLocked()
+	s.pruneVanityMintsLocked()
+	if len(s.vanityMintTimes) >= vanityMintBudget() {
+		return false
+	}
+	s.vanityMintTimes = append(s.vanityMintTimes, time.Now())
+	s.saveVanityMintLedgerLocked()
+	return true
+}
+
+// vanityMintRemaining returns how many mints the budget has left in the
+// current window, for the mint log line — the visibility #5923 asked for.
+func (s *HubServer) vanityMintRemaining() int {
+	s.vanityMintMu.Lock()
+	defer s.vanityMintMu.Unlock()
+	s.ensureVanityMintLedgerLoadedLocked()
+	s.pruneVanityMintsLocked()
+	if r := vanityMintBudget() - len(s.vanityMintTimes); r > 0 {
+		return r
+	}
+	return 0
+}
+
+// pruneVanityMintsLocked drops mint timestamps that have aged out of the
+// rolling window. Callers must hold vanityMintMu.
+func (s *HubServer) pruneVanityMintsLocked() {
+	cutoff := time.Now().Add(-vanityMintWindow())
+	kept := s.vanityMintTimes[:0]
+	for _, t := range s.vanityMintTimes {
+		if t.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	changed := len(kept) != len(s.vanityMintTimes)
+	s.vanityMintTimes = kept
+	if changed {
+		s.saveVanityMintLedgerLocked()
+	}
+}
+
+func (s *HubServer) ensureVanityMintLedgerLoadedLocked() {
+	if s.vanityMintLedgerLoaded || len(s.vanityMintTimes) > 0 {
+		s.vanityMintLedgerLoaded = true
+		return
+	}
+	data, err := os.ReadFile(vanityMintLedgerPath())
+	if err != nil {
+		s.vanityMintLedgerLoaded = true
+		return
+	}
+	var times []time.Time
+	if err := json.Unmarshal(data, &times); err != nil {
+		s.logger.Warn("vanity mint budget: failed to parse persisted ledger", "path", vanityMintLedgerPath(), "error", err)
+		s.vanityMintLedgerLoaded = true
+		return
+	}
+	s.vanityMintTimes = times
+	s.vanityMintLedgerLoaded = true
+}
+
+func (s *HubServer) saveVanityMintLedgerLocked() {
+	path := vanityMintLedgerPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		s.logger.Warn("vanity mint budget: failed to create ledger directory", "path", path, "error", err)
+		return
+	}
+	data, err := json.MarshalIndent(s.vanityMintTimes, "", "  ")
+	if err != nil {
+		s.logger.Warn("vanity mint budget: failed to marshal ledger", "error", err)
+		return
+	}
+	tmpPath := path + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
+		s.logger.Warn("vanity mint budget: failed to write ledger", "path", path, "error", err)
+		return
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		s.logger.Warn("vanity mint budget: failed to replace ledger", "path", path, "error", err)
+	}
+}
+
+func (s *HubServer) recordVanityRepairFailure(hiveID, reason string) {
+	h := loadSaaSHive(hiveID)
+	if h == nil {
+		return
+	}
+	h.LastVanityRepairFailureAt = time.Now()
+	h.LastVanityRepairFailure = reason
+	if err := saveSaaSHive(h); err != nil {
+		s.logger.Warn("vanity url repair: failed to persist repair failure backoff", "hive", hiveID, "error", err)
+	}
+}
 
 // kickVanityURLRepairAsync runs repairVanityURLForHive in the background, at
 // most one attempt per hive at a time, registered with provisionWG so tests can
@@ -2617,6 +2746,8 @@ func provisionHive(h *SaaSHive, req *CreateHiveRequest, cluster *ClusterConfig, 
 	logger.Info("audit: saas hive provisioned", "hive_id", h.ID, "owner", h.Owner, "org", h.Org, "cluster", cluster.ID)
 	return nil
 }
+
+func HashDashboardToken(token string) string { return spoke.HashDashboardToken(token) }
 
 // deprovisionHive performs best-effort cleanup of all resources associated
 // with a hosted hive: K8s namespace (cascading to deployment, service, ingress,

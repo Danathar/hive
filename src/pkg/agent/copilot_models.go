@@ -1,24 +1,8 @@
 package agent
 
-import "strings"
-
-// Copilot model-id nomenclature drift (#4262).
-//
-// The Copilot models catalog (the raw /models endpoint and the SDK helper
-// probe) periodically returns ids in a different nomenclature than the
-// copilot CLI's --model flag accepts, with version separators drifting
-// between "." and "-" in BOTH directions. Verified live on a spoke: copilot
-// CLI v1.0.78 rejected `--model claude-fable.5` ("is not available") and
-// switched itself to `claude-fable-5` — the CLI wants the DASHED form for
-// the -5 family (claude-fable-5, claude-sonnet-5, claude-opus-5) while
-// older families remain DOTTED (claude-opus-4.6, gpt-5.5, gemini-2.5-pro).
-//
-// Canonicalization is alias-based, never a blind rewrite: an id is matched
-// against the known CLI-accepted list with the separator drift collapsed,
-// and only an id that differs from a known-good id purely by "." vs "-"
-// drift is normalized to that known-good form. Everything else — unknown
-// ids, future models, the "auto" sentinel — passes through untouched, so a
-// catalog id we have never seen can still be selected and launched verbatim.
+import (
+	"strings"
+)
 
 // copilotCLIAcceptedModels are the model ids the copilot CLI's --model flag
 // accepts, in the CLI's own nomenclature. This is the alias target set for

@@ -1,16 +1,8 @@
 package hub
 
-import "fmt"
-
-// Per-axis scoring. Each axis is built from sub-criteria, and each sub-criterion
-// yields both a comparable raw value AND the nudge it implies when weak. The
-// nudge is not decoration: an axis that only reports a number tells an owner
-// they are a 34, which is not actionable. Carrying the specific next action —
-// "only 1 of 9 repos enrolled" — is the whole reason this instrument exists.
-//
-// Every sub-criterion may decline to report (ok=false) when its evidence is
-// missing or below a floor. An axis with no reporting sub-criteria is unscored,
-// NOT zero. See the sufficiency-floor rule in quadrant.go.
+import (
+	"fmt"
+)
 
 // subCriterion is one measured contributor to an axis.
 //
@@ -33,8 +25,6 @@ type subCriterion struct {
 	activityFloor  float64
 	nudge          string // shown when this criterion is the axis's weakest link
 }
-
-// --- Trust -------------------------------------------------------------------
 
 // trustCriteria scores how much rope the humans have given this hive.
 //
@@ -148,8 +138,6 @@ func trustCriteria(in quadrantInputs) []subCriterion {
 	return out
 }
 
-// --- Efficiency --------------------------------------------------------------
-
 // efficiencyCriteria scores the cost of an outcome.
 //
 // Cost ratios use the REPO-WIDE merged/closed counts on purpose: the numerator
@@ -245,8 +233,6 @@ func efficiencyCriteria(in quadrantInputs) []subCriterion {
 
 	return out
 }
-
-// --- Productivity ------------------------------------------------------------
 
 // productivityCriteria scores throughput that is ACTUALLY ATTRIBUTABLE to the
 // hive's agents.
@@ -388,8 +374,6 @@ func productivityCriteria(in quadrantInputs) []subCriterion {
 
 	return out
 }
-
-// --- Satisfaction ------------------------------------------------------------
 
 // satisfactionCriteria is intentionally empty.
 //

@@ -5,15 +5,6 @@ import (
 	"time"
 )
 
-// Bridging the registry to the scorer: turning what the hub stores into the
-// evidence the quadrant scores, and attaching results to a dashboard payload.
-//
-// Everything here is derived on read and never persisted, mirroring how the
-// user-journey status is attached alongside it. The difference — and the reason
-// the quadrant is attached to the row wrapper rather than the registry entry —
-// is that a quadrant is fleet-relative: it is a property of a hive WITHIN a
-// population, not of the hive alone.
-
 // budgetSpendPerDay normalises a hive's windowed token spend to a daily rate.
 //
 // The raw figure cannot be compared across hives: the budget window length is

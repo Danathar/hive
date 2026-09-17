@@ -9,23 +9,6 @@ import (
 	"github.com/hivecommons/hive/pkg/inferencehealth"
 )
 
-// Hive-health verdict: does this spoke have RECENT OUTPUT back to its work
-// source, banded by ACMM level? Computed on read in handleMyHives from signals
-// already on the registry entry — no new spoke work. The spine (operator's
-// definition): a hive is HEALTHY when it has recent output for the level it is
-// AT. Absence of output a level does not produce is NEVER a fault:
-//
-//	L1 Inception : no output at all      → preconditions only, never red for "no output"
-//	L2 Advisory  : advisory digest       → healthy when advisory is fresh
-//	L3–L5        : issues/PRs CREATED     → healthy when a create is recent; "not merged" is NOT a problem
-//	L6           : creates AND merges     → healthy when a merge is recent (created-but-unmerged + queued = red)
-//
-// Recent output is only POSSIBLE when three preconditions hold — GitHub App
-// green, ≥1 agent logged in, ≥1 agent running at cadence — so when output is
-// absent those three explain WHY. A hive with an empty work queue can't produce
-// and must not be faulted for it (the queue-gate). A hive we cannot see (old
-// spoke / silent) is UNKNOWN, never green.
-
 const (
 	HealthStateGreen   = "green"
 	HealthStateAmber   = "amber"

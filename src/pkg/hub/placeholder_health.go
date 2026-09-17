@@ -1,45 +1,8 @@
 package hub
 
-import "strings"
-
-// Placeholder (unassigned pool) rows on the My Hives dashboard.
-//
-// An UNCLAIMED pool slot has no GitHub auth BY DESIGN — credentials only
-// arrive when a project is claimed — so the spoke's auth-class health checks
-// (github_auth, and any github_app* variant) legitimately fail on every
-// placeholder. Left alone, that painted the whole "Unassigned Hives" section
-// red: every row carried a degraded dot, a warning icon and a "2 checks
-// failing" pill, burying the one placeholder that is genuinely broken. The
-// maintainer's rule: if unassigned, that is noted in the status, and the
-// hive's overall status is green.
-//
-// sanitizePlaceholderRows therefore rewrites each placeholder's spoke-reported
-// Health payload before it ships to the browser: checks whose non-passing
-// state IS the designed state of an unassigned slot — the auth-class family;
-// the tokens check's zero-consumed warning (no project means no workload to
-// spend on); and the agents check when it fails ONLY because agents await the
-// owner's CLI login (see placeholderDesignedCheckNote and
-// agentsFailIsLoginPending) — are reclassified as "skip" with a note saying why
-// as their detail, and the overall status / fails / warns are recomputed from
-// the surviving checks using the spoke's own thresholds. Genuine
-// placeholder-applicable failures — not ready, agents CRASH-LOOPING (a "down:"
-// agent, distinct from a login-pending one), queue wedged — keep their status
-// untouched and still turn the row red, exactly as drift.go's rule 2 intends
-// ("never flag a placeholder for a claimed-hive concern", and never hide a real
-// one).
-//
-// The agents distinction is why the sanitizer inspects a check's detail, not
-// just its name: on an unclaimed slot, agents "0 running / paused / need login"
-// is the by-design unclaimed state (no owner has claimed the slot or run the
-// CLI login yet) — the exact analogue of github_auth being unconfigured by
-// design. But an agent that is genuinely "down:" (crash-looping / exiting) is a
-// real fault even on a placeholder, so only the login-pending shape is exempted;
-// anything ambiguous stays degrading.
-//
-// Which rows count as placeholders is decided by isPlaceholderEntry
-// (drift.go), the SAME predicate computeDrift and the alert evaluator use, so
-// the row dot, the drift badge and the Attention Needed panel can never
-// disagree about what an unassigned hive is.
+import (
+	"strings"
+)
 
 // placeholderAuthNote is the status-hover text that replaces an auth-class
 // failure's error detail on an unassigned row, so the hover says WHY the check

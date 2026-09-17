@@ -33,7 +33,7 @@ func TestHubTerminalConstantsAliasTheSpokeDefinitions(t *testing.T) {
 // constants must be declared by referring to the spoke package, never by a
 // literal.
 func TestTerminalConstantsAreDeclaredAsAliasesNotLiterals(t *testing.T) {
-	const file = "spoke_deleted_support.go"
+	const file = "self_upgrade.go"
 
 	fset := token.NewFileSet()
 	parsed, err := parser.ParseFile(fset, file, nil, 0)

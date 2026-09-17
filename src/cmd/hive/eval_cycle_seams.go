@@ -17,51 +17,6 @@ import (
 	"github.com/hivecommons/hive/pkg/worksource"
 )
 
-// Decision points of runEvalCycle, extracted verbatim so they are testable.
-// runEvalCycle calls each in the same place and order as before; side effects
-// that are not part of the decision (SendKick, dashboard state, the probe
-// stamp) stay at the call site in main.go.
-
-// startupLaunchNames returns the persistent agents in the order the boot
-// stagger should launch them. Queue-draining, write-capable agents go first so
-// a SURGE hive can start work before advisory/operator-paused panes consume
-// stagger slots; paused agents are still visited so their restored state is
-// surfaced, just last.
-func startupLaunchNames(enabled map[string]config.AgentConfig, onDemandSet map[string]bool) []string {
-	names := make([]string, 0, len(enabled))
-	for name, ac := range enabled {
-		if ac.OnDemand || onDemandSet[name] {
-			continue
-		}
-		names = append(names, name)
-	}
-	priority := map[string]int{
-		"scanner":       0,
-		"ci-maintainer": 1,
-		"quality":       2,
-		"sec-check":     3,
-	}
-	sort.Slice(names, func(i, j int) bool {
-		ai, aj := enabled[names[i]], enabled[names[j]]
-		if ai.Paused != aj.Paused {
-			return !ai.Paused
-		}
-		pi, okI := priority[names[i]]
-		if !okI {
-			pi = len(priority)
-		}
-		pj, okJ := priority[names[j]]
-		if !okJ {
-			pj = len(priority)
-		}
-		if pi != pj {
-			return pi < pj
-		}
-		return names[i] < names[j]
-	})
-	return names
-}
-
 // workSourceIssuesForCycle is the non-GitHub work-source overlay (#4187,
 // #4731, #4975). Only the Issues half is replaced; PRs always come from
 // GitHub. Both error paths FAIL CLOSED (empty issues, PR maintenance intact)
@@ -325,8 +280,6 @@ func decideProviderBudgetAlert(latched, suppress bool, cause string, since time.
 	return providerBudgetAlert{Clear: true}
 }
 
-// ── Kick dispatch (#7232) ───────────────────────────────────────────────────
-
 // kickDispatchDeps carries the effects the kick-dispatch loop performs, so the
 // loop's DECISIONS can be exercised without a tmux session, a governor, a
 // dashboard, or a live tracing exporter.
@@ -551,4 +504,44 @@ func ensurePinnedAdvisoryIssue(
 		logger.Info("advisory issue resolved on retry", "repo", repo, "number", num)
 	}
 	return nil
+}
+
+// startupLaunchNames returns the persistent agents in the order the boot
+// stagger should launch them. Queue-draining, write-capable agents go first so
+// a SURGE hive can start work before advisory/operator-paused panes consume
+// stagger slots; paused agents are still visited so their restored state is
+// surfaced, just last.
+func startupLaunchNames(enabled map[string]config.AgentConfig, onDemandSet map[string]bool) []string {
+	names := make([]string, 0, len(enabled))
+	for name, ac := range enabled {
+		if ac.OnDemand || onDemandSet[name] {
+			continue
+		}
+		names = append(names, name)
+	}
+	priority := map[string]int{
+		"scanner":       0,
+		"ci-maintainer": 1,
+		"quality":       2,
+		"sec-check":     3,
+	}
+	sort.Slice(names, func(i, j int) bool {
+		ai, aj := enabled[names[i]], enabled[names[j]]
+		if ai.Paused != aj.Paused {
+			return !ai.Paused
+		}
+		pi, okI := priority[names[i]]
+		if !okI {
+			pi = len(priority)
+		}
+		pj, okJ := priority[names[j]]
+		if !okJ {
+			pj = len(priority)
+		}
+		if pi != pj {
+			return pi < pj
+		}
+		return names[i] < names[j]
+	})
+	return names
 }

@@ -1,6 +1,8 @@
 package agent
 
-import "sync"
+import (
+	"sync"
+)
 
 type RingBuffer struct {
 	mu    sync.RWMutex
@@ -50,7 +52,6 @@ func (r *RingBuffer) Last(n int) []string {
 	}
 	return result
 }
-
 
 func (r *RingBuffer) Count() int {
 	r.mu.RLock()

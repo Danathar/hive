@@ -8,40 +8,6 @@ import (
 	"time"
 )
 
-// Admin read-only "View as user" impersonation.
-//
-// A separate, short-lived, signed cookie (`hive_hub_impersonate`) lets the hub
-// admin — and ONLY the hub admin — see the hub dashboard exactly as another
-// registered user sees it, without ever gaining that user's privileges. The
-// impersonation is READ-ONLY: while it is active the server rejects every
-// mutating request with 403 (see requireAuth / requireAdmin), so the worst an
-// impersonating admin can do is look.
-//
-// Security properties this cookie enforces, in order of importance:
-//
-//  1. It is tamper-evident. The value is bound to the hub secret with an
-//     HMAC-SHA256 using the SAME construction as the session cookie
-//     (hub_cookie.go). A forged, edited, or unsigned value fails verification
-//     and is treated as "not impersonating" — never as an escalation.
-//  2. It carries the REAL admin login it was minted for. resolveIdentity only
-//     honors the cookie when that admin field equals BOTH the real signed
-//     session user AND hubAdminUsername. A user cannot lift the admin's
-//     impersonation cookie onto their own session to borrow the admin's view,
-//     and the admin cannot mint one that names someone else as the actor.
-//  3. It expires. The payload carries an absolute Unix expiry (impersonateTTL
-//     from mint time); a stale cookie is ignored. This bounds how long a
-//     forgotten "View as" session can linger.
-//
-// Wire format (all in the clear except the trailing signature, exactly like the
-// session cookie — none of these fields are secret; the signature is what
-// proves the hub minted them):
-//
-//	value = <admin>|<target>|<expUnix>.<base64url(HMAC-SHA256(admin|target|expUnix, hubSecret))>
-//
-// The admin and target are GitHub logins, which loadSaaSUser already validates
-// to exclude "/" "\\" and ".." — and usernames never contain "|" or "." — so
-// the delimiters cannot be smuggled.
-
 // impersonateTTL bounds how long a single "View as" session stays valid before
 // the admin must re-enter it. Deliberately short: impersonation is an
 // intentional, supervised action, not a durable mode, and a short window limits

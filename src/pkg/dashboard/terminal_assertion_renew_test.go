@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/hivecommons/hive/pkg/config"
-	hub "github.com/hivecommons/hive/pkg/hub/spoke"
+	spoke "github.com/hivecommons/hive/pkg/hub/spoke"
 )
 
 // Tests for the audit-F4 residual: the terminal assertion must be renewable from
@@ -21,7 +21,7 @@ import (
 // HiveID, which is what setTerminalAssertionCookie requires to mint at all.
 func newRenewServer(t *testing.T, hiveID string, authorized ...string) *Server {
 	t.Helper()
-	t.Setenv(hub.EnvTerminalKey, "renew-test-terminal-key")
+	t.Setenv(spoke.EnvTerminalKey, "renew-test-terminal-key")
 	s := newFullServer(t)
 	s.deps.Config.HiveID = hiveID
 	s.deps.Config.Dashboard.AuthorizedUsers = authorized
@@ -61,7 +61,7 @@ func TestRenewAssertion_SessionOnly_NoHubCookie(t *testing.T) {
 	if c == nil {
 		t.Fatal("renew minted no hive_terminal_assertion cookie")
 	}
-	user, role, err := hub.VerifyTerminalAssertion(hub.TerminalSigningKey(), c.Value, "hosted-alpha", time.Now())
+	user, role, err := spoke.VerifyTerminalAssertion(spoke.TerminalSigningKey(), c.Value, "hosted-alpha", time.Now())
 	if err != nil {
 		t.Fatalf("renewed assertion does not verify: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestRenewAssertion_ReResolvesRoleFromAllowlist(t *testing.T) {
 	if c == nil {
 		t.Fatal("renew minted no assertion cookie")
 	}
-	_, role, err := hub.VerifyTerminalAssertion(hub.TerminalSigningKey(), c.Value, "hosted-alpha", time.Now())
+	_, role, err := spoke.VerifyTerminalAssertion(spoke.TerminalSigningKey(), c.Value, "hosted-alpha", time.Now())
 	if err != nil {
 		t.Fatalf("renewed assertion does not verify: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestRenewAssertion_BoundToThisHive(t *testing.T) {
 	if c == nil {
 		t.Fatal("renew minted no assertion cookie")
 	}
-	if _, _, err := hub.VerifyTerminalAssertion(hub.TerminalSigningKey(), c.Value, "hosted-victim", time.Now()); err == nil {
+	if _, _, err := spoke.VerifyTerminalAssertion(spoke.TerminalSigningKey(), c.Value, "hosted-victim", time.Now()); err == nil {
 		t.Fatal("an assertion renewed on hosted-alpha verified against hosted-victim — the hive binding is broken")
 	}
 }
@@ -225,7 +225,7 @@ func TestPositiveControl_LegitimateTerminalGrantVerifies(t *testing.T) {
 	if c == nil {
 		t.Fatal("no assertion minted")
 	}
-	user, role, err := hub.VerifyTerminalAssertion(hub.TerminalSigningKey(), c.Value, "hosted-alpha", time.Now())
+	user, role, err := spoke.VerifyTerminalAssertion(spoke.TerminalSigningKey(), c.Value, "hosted-alpha", time.Now())
 	if err != nil {
 		t.Fatalf("a legitimate terminal grant failed to verify: %v", err)
 	}
@@ -250,7 +250,7 @@ func TestPositiveControl_RenewedAssertionIsAcceptedNotJustIssued(t *testing.T) {
 	if c == nil {
 		t.Fatal("renew minted no assertion")
 	}
-	user, role, err := hub.VerifyTerminalAssertion(hub.TerminalSigningKey(), c.Value, "hosted-alpha", time.Now())
+	user, role, err := spoke.VerifyTerminalAssertion(spoke.TerminalSigningKey(), c.Value, "hosted-alpha", time.Now())
 	if err != nil {
 		t.Fatalf("renewed assertion rejected by the same verifier the proxy mirrors: %v", err)
 	}

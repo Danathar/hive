@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	hub "github.com/hivecommons/hive/pkg/hub/spoke"
+	spoke "github.com/hivecommons/hive/pkg/hub/spoke"
 )
 
 // Auto-update status surface (#6962, #6963).
@@ -108,7 +108,7 @@ type autoUpdateInputs struct {
 	// Policy is the hub's heartbeat upgrade policy when one has been delivered
 	// (#7262). When non-nil it overrides Enabled/Period: the hub, not the
 	// spoke's config file, is the authority on who upgrades this hive and when.
-	Policy        *hub.HeartbeatUpgradePolicy
+	Policy        *spoke.HeartbeatUpgradePolicy
 	TargetBranch  string
 	TargetChannel string
 	TargetCommit  string

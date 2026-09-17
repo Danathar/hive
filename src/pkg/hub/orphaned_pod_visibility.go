@@ -7,45 +7,6 @@ import (
 	"time"
 )
 
-// Orphaned Terminating-pod VISIBILITY (issue #5328, item 3).
-//
-// WHY THIS EXISTS SEPARATELY FROM THE REAPER. orphaned_pod_reaper.go removes
-// orphaned pods. This file REPORTS them. Those are deliberately different
-// lanes, because a reaper alone trades one invisible problem for another:
-//
-// The measured incident was 27 orphaned pods across 15 hive namespaces
-// accumulating for THREE WEEKS with nothing reporting it. The reaper now
-// clears them. But orphan PRODUCTION — a node disappearing without draining —
-// is issue #5328 item 1 and is NOT fixed by the reaper. If the reaper quietly
-// deletes 30 pods every sweep forever, the fleet looks healthy and the
-// underlying node-lifecycle fault stays invisible exactly as it did for those
-// three weeks. A count on the fleet-health surface is what makes a SPIKE in
-// orphan volume legible as the upstream signal it is.
-//
-// WHY IT IS COUNTED HERE AND NOT DERIVED FROM THE REAPER'S DELETIONS. Counting
-// what the reaper deleted would report only what the hub could reach and had
-// permission to remove — a cluster whose credential lacks pod-delete, or a pod
-// inside the orphanedPodMinAge window, would silently read as zero. Counting
-// the LIVE state instead means the number is what is actually stuck right now,
-// independent of whether anything succeeded in cleaning it up. That is the
-// property the fleet-health surface needs.
-//
-// THE PREDICATE IS NOT RESTATED. Selection goes through
-// podIsOrphanedTerminating from orphaned_pod_reaper.go — the exact function the
-// reaper uses, unmodified. There is deliberately no second copy of the rule to
-// drift out of agreement with the first: if the predicate is ever changed, the
-// count and the reaping change together or not at all.
-//
-// READ-ONLY. This lane issues `kubectl get pods` and NOTHING else. It adds no
-// credential, no verb and no cluster-write of any kind beyond the read the
-// cluster-health collector already performs on this same path (saas.go runs
-// `get pods --all-namespaces` there today). The hub's blast radius is
-// unchanged.
-//
-// SCOPED TO HIVE NAMESPACES. Only namespaces carrying hiveHostedNamespacePrefix
-// are counted. A stuck pod in kube-system is somebody else's problem and
-// reporting it here would be noise the fleet view cannot act on.
-
 // orphanedPodStuckReportLimit caps how many per-namespace entries the report
 // carries.
 //

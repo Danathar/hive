@@ -27,7 +27,7 @@ import (
 	"github.com/hivecommons/hive/pkg/config"
 	"github.com/hivecommons/hive/pkg/dashboard/webstatic"
 	"github.com/hivecommons/hive/pkg/github"
-	hub "github.com/hivecommons/hive/pkg/hub/spoke"
+	spoke "github.com/hivecommons/hive/pkg/hub/spoke"
 )
 
 const (
@@ -100,7 +100,7 @@ var (
 // cut over in place while the terminal key is not re-keyed here at all.
 func inviteSigningSecret() []byte {
 	inviteSecretOnce.Do(func() {
-		if v := strings.TrimSpace(hub.SpokeInviteKey()); v != "" {
+		if v := strings.TrimSpace(spoke.SpokeInviteKey()); v != "" {
 			inviteSecretCache = []byte(v)
 			return
 		}

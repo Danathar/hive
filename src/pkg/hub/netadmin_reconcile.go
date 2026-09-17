@@ -6,33 +6,6 @@ import (
 	"time"
 )
 
-// NET_ADMIN reconcile — closes the pre-#1222 securityContext drift.
-//
-// The provisioning template (saas_provision.go) requests NET_ADMIN on the hive
-// container's securityContext, but that manifest is `kubectl apply`ed ONLY
-// inside provisionHive — at provision/assign time. Hives provisioned BEFORE
-// #1222 (when NET_ADMIN was added to the template) still carry an empty
-// `securityContext: {}` on their LIVE Deployment and were never re-applied.
-//
-// That drift is harmless today but becomes fatal the moment the F5 fatal-egress
-// image (#2664) rolls to such a hive: without NET_ADMIN the forced iptables
-// egress redirect can't be established, the F5 fatal check exits 1, and the pod
-// crash-loops. This reconcile repairs the drift fleet-wide WITHOUT a full
-// re-provision (which would re-deliver secrets/tokens and is far heavier).
-//
-// Scope: ALL hub-managed hosted hives with a resolvable cluster — not just
-// auto-upgrade hives. A drifted hive with auto-upgrade OFF still crash-loops if
-// it is ever manually rolled onto the F5 image, so the correction must reach it
-// too (issue #2674).
-//
-// OpenShift caveat (#2674): on OpenShift/OVN clusters, NET_ADMIN in the podspec
-// is necessary but NOT sufficient — `iptables -t nat -N` is denied at a layer
-// below the SCC/pod-capability grant (node/CNI/OVN or seccomp). This reconcile
-// only ensures the podspec REQUESTS NET_ADMIN, which is correct and necessary
-// everywhere. It deliberately does NOT try to solve the node-level OpenShift
-// question: those hives additionally rely on the SO_MARK path (#2678/#2696) and
-// may still need HIVE_PROXY_ADVISORY_OK=true — out of scope here.
-
 const (
 	// netAdminCapability is the Linux capability the F5 forced-egress iptables
 	// redirect requires. Named so the check and the patch can never disagree.

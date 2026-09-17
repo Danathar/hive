@@ -5,13 +5,6 @@ import (
 	"strings"
 )
 
-func agentSourceLabel(name, sourceFile string) string {
-	if sourceFile == "" {
-		return name
-	}
-	return fmt.Sprintf("%s (from %s)", name, sourceFile)
-}
-
 func (c *Config) Validate() error {
 	if c.Project.Org == "" {
 		return fmt.Errorf("project.org is required")
@@ -117,84 +110,4 @@ func validateAgentSpecRef(agentName, ref string) error {
 		return fmt.Errorf("agent %s: agent_spec contains a NUL byte", agentName)
 	}
 	return nil
-}
-
-func validateChannels(agentName string, channels []ChannelConfig) error {
-	return ValidateChannels(agentName, channels)
-}
-
-// ValidateChannels rejects any channel declaration whose type has no trigger
-// runtime. Only ChannelTypeKick is valid: the webhook/discord/schedule/bead
-// runtime (pkg/channels) was never wired into the binary and was removed
-// (#5591). Accepting those types would silently suppress governor kicks (see
-// UsesGovernorKick) with no runtime left to fire the declared trigger,
-// leaving the agent permanently dormant. Exported so config writers such as
-// the dashboard channels endpoint can fail fast before persisting.
-func ValidateChannels(agentName string, channels []ChannelConfig) error {
-	for i, ch := range channels {
-		if ch.Type != ChannelTypeKick {
-			return fmt.Errorf("agent %s: channel[%d]: type %q has no trigger runtime (only %q is supported; the webhook/discord/schedule/bead runtime was removed, see #5591) — declaring it would leave the agent permanently unkicked", agentName, i, ch.Type, ChannelTypeKick)
-		}
-	}
-	return nil
-}
-
-func validateTools(agentName string, tools *ToolsConfig) error {
-	if tools == nil {
-		return nil
-	}
-	validPresets := map[string]bool{"": true, "advisory": true, "issues-only": true, "issues-prs": true, "full": true}
-	if !validPresets[tools.Preset] {
-		return fmt.Errorf("agent %s: tools.preset %q is invalid (must be advisory, issues-only, issues-prs, or full)", agentName, tools.Preset)
-	}
-	validActions := map[string]bool{"allow": true, "deny": true}
-	for i, rule := range tools.Rules {
-		if rule.Pattern == "" {
-			return fmt.Errorf("agent %s: tools.rules[%d]: pattern is required", agentName, i)
-		}
-		if !validActions[rule.Action] {
-			return fmt.Errorf("agent %s: tools.rules[%d]: action must be allow or deny, got %q", agentName, i, rule.Action)
-		}
-	}
-	return nil
-}
-
-func validateConnections(agentName string, conns []ConnectionConfig) error {
-	validTypes := map[string]bool{"mcp": true, "api": true, "knowledge": true}
-	seen := map[string]bool{}
-	for i, conn := range conns {
-		if conn.Name == "" {
-			return fmt.Errorf("agent %s: connections[%d]: name is required", agentName, i)
-		}
-		if seen[conn.Name] {
-			return fmt.Errorf("agent %s: connections[%d]: duplicate name %q", agentName, i, conn.Name)
-		}
-		seen[conn.Name] = true
-		if !validTypes[conn.Type] {
-			return fmt.Errorf("agent %s: connections[%d]: invalid type %q (must be mcp, api, or knowledge)", agentName, i, conn.Type)
-		}
-		if (conn.Type == "mcp" || conn.Type == "api") && conn.URI == "" {
-			return fmt.Errorf("agent %s: connections[%d]: %s requires a uri", agentName, i, conn.Type)
-		}
-		if conn.Auth != nil {
-			validAuthTypes := map[string]bool{"env": true, "file": true}
-			if !validAuthTypes[conn.Auth.Type] {
-				return fmt.Errorf("agent %s: connections[%d]: auth.type must be env or file, got %q", agentName, i, conn.Auth.Type)
-			}
-			if conn.Auth.Type == "env" && conn.Auth.EnvVar == "" {
-				return fmt.Errorf("agent %s: connections[%d]: auth.env_var is required when auth.type is env", agentName, i)
-			}
-			if conn.Auth.Type == "file" && conn.Auth.File == "" {
-				return fmt.Errorf("agent %s: connections[%d]: auth.file is required when auth.type is file", agentName, i)
-			}
-		}
-	}
-	return nil
-}
-
-// MarshalYAML persists only declared agents. Runtime-derived replicas are
-// re-created by ExpandAgentReplicas on the next load so they never collide with
-
-func (c *Config) validate() error {
-	return c.Validate()
 }

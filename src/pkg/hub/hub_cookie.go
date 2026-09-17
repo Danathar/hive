@@ -10,26 +10,6 @@ import (
 	"time"
 )
 
-// Hub session cookie integrity.
-//
-// The `hive_hub_user` cookie carries the logged-in GitHub username that the hub
-// trusts for browser-originated API calls. Historically it stored the raw
-// username, which meant anyone could hand-craft the cookie and impersonate any
-// user — including the hub admin. To make the cookie tamper-evident it is now
-// bound to the hub secret with an HMAC:
-//
-//	value = <username>.<base64url(HMAC-SHA256(username, hubSecret))>
-//
-// The username stays in the clear (it is not a secret and callers already know
-// their own login); the appended signature is what proves the hub itself minted
-// the value. Verification recomputes the HMAC and compares in constant time, so
-// a forged or edited cookie fails closed.
-//
-// Legacy transition: existing sessions carry an UNSIGNED cookie (no "." + sig).
-// Those fail verification and are treated as logged out, so the user simply
-// re-authenticates through the normal login flow, which re-mints the new signed
-// cookie. No stored data changes and nobody is permanently locked out.
-
 // N2 (CWE-321/798): the session cookie is now ASYMMETRICALLY signed.
 //
 // The HMAC scheme below is verify-capable-implies-mint-capable, and the same key

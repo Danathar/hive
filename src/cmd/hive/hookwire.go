@@ -24,15 +24,6 @@ var (
 	errNoTimeline     = errors.New("hooks: timeline store not wired; annotate unavailable")
 )
 
-// This file wires pkg/hooks (RFC #4001) into the running process. It owns the
-// adapters from hive's concrete objects onto the narrow sink interfaces the
-// hooks package declares, plus the recompile-on-config-change cache — the same
-// structure celwire.go uses for CEL triggers.
-//
-// Keeping the adapters HERE rather than in pkg/hooks is what lets that package
-// declare its mutation surface as four interfaces without importing the
-// dashboard, agent manager, or notifier (which would cycle).
-
 // hookDispatcherCache memoizes the compiled hook registry so it is rebuilt only
 // when the operator's `hooks:` list actually changes, not on every config
 // reload tick. Compilation is fail-closed: a malformed hook list leaves the
@@ -144,10 +135,6 @@ func buildHookDispatcher(cfg *config.Config, sinks hookSinks, logger *slog.Logge
 	logger.Info("hooks: compiled hook set", "hooks", reg.Len())
 }
 
-// ---------------------------------------------------------------------------
-// Emitters
-// ---------------------------------------------------------------------------
-
 // installGovernorModeChangeEmitter wires the governor_mode_change transition to
 // its hooks. The governor invokes the observer AFTER committing the change and
 // AFTER releasing its mutex, which is what makes this a post-commit emission
@@ -221,10 +208,6 @@ func emitUpgradePauseHook(event hub.UpgradePauseEvent) {
 		Attrs:      map[string]string{"target": event.Target},
 	})
 }
-
-// ---------------------------------------------------------------------------
-// Adapters
-// ---------------------------------------------------------------------------
 
 // notifierAdapter bridges hooks.Notifier (which speaks plain strings, so
 // pkg/hooks need not import pkg/notify) onto the real fanout.

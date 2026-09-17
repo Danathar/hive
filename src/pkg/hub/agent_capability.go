@@ -28,35 +28,6 @@ func AgentRestartProblemThreshold() int {
 	return spoke.AgentRestartProblemThreshold()
 }
 
-// Fleet-divergence derivation.
-//
-// This file turns the raw per-agent signals a spoke reports (state, needsLogin,
-// sessionMissing, expectedActive, canOpen*/canMerge, plus the hive-level
-// blockers on the registry row) into the three-way picture the fleet view
-// exists to show:
-//
-//	EXPECTED  — the governor's current mode schedules this agent to run now.
-//	ACTUAL    — the agent's pane is truly alive and working.
-//	ABLE      — the agent can open issues, open PRs, and merge PRs.
-//
-// and makes the DELTAS between them loud:
-//
-//	STUCK     — expected active, but not actually running/working.
-//	IMPOTENT  — actually running, but not able to do its mission.
-//	quiet     — paused or expected-off; never a fault (provenance shown, not an
-//	            alarm).
-//
-// Everything here is DERIVED from signals already on the row; nothing is a new
-// wire field beyond the six raw booleans/strings. The run-state machine is
-// NOT re-implemented — it reuses classifyInactiveAgent (agent_inactivity.go) so
-// the fleet view and the agents-inactive alert can never disagree about whether
-// an agent is stuck.
-//
-// Backward compatibility is load-bearing: a spoke too old to report the new
-// fields sends them all zero-valued. ExpectedActive=false and the capability
-// bools=false must therefore read as UNKNOWN — never as "expected off" or
-// "cannot work" — so STUCK and IMPOTENT never fire on a legacy spoke.
-
 // agentRunState is the ACTUAL-leg verdict for one agent.
 type agentRunState int
 
@@ -456,54 +427,6 @@ func agentRestartProblemReason(a AgentSummary) string {
 		return fmt.Sprintf("agent restarts: %s ×%d/24h", a.Name, a.Restarts.Last24h)
 	}
 	return fmt.Sprintf("agent restarts: %s ×%d/24h (%s)", a.Name, a.Restarts.Last24h, reason)
-}
-
-func pendingAgentRestartResetsForHeartbeat(hiveID string) []string {
-	h := loadSaaSHive(hiveID)
-	if h == nil || len(h.AgentRestartResets) == 0 {
-		return nil
-	}
-	var names []string
-	changed := false
-	for name, reset := range h.AgentRestartResets {
-		if !reset.Pending {
-			continue
-		}
-		names = append(names, name)
-		reset.Pending = false
-		reset.TotalBaseline = 0
-		h.AgentRestartResets[name] = reset
-		changed = true
-	}
-	if changed {
-		_ = saveSaaSHive(h)
-	}
-	sort.Strings(names)
-	return names
-}
-
-func applyAgentRestartResetBaselines(agents []AgentSummary, resets map[string]AgentRestartReset, now time.Time) {
-	if len(resets) == 0 {
-		return
-	}
-	cutoff := now.Add(-24 * time.Hour)
-	for i := range agents {
-		reset, ok := resets[agents[i].Name]
-		if !ok {
-			continue
-		}
-		agents[i].Restarts.ResetAt = reset.ResetAt
-		agents[i].Restarts.ResetBy = reset.By
-		resetAt, err := time.Parse(time.RFC3339, reset.ResetAt)
-		if err != nil || resetAt.Before(cutoff) {
-			continue
-		}
-		delta := agents[i].Restarts.Total - reset.TotalBaseline
-		if delta < 0 {
-			delta = 0
-		}
-		agents[i].Restarts.Last24h = delta
-	}
 }
 
 func startFailureBlockerReason(a AgentSummary, now time.Time) string {

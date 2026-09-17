@@ -96,12 +96,6 @@ func sanitizeAgentRepoActivity(in []AgentRepoActivityWire) []AgentRepoActivityWi
 	return out
 }
 
-// Hub-side wire mirror of the spoke's dashboard.RepoActivity / ActivitySnapshot.
-// It is defined HERE (not imported from pkg/dashboard) because pkg/dashboard
-// imports pkg/hub — importing back would be a cycle. main.go maps the dashboard
-// snapshot into these plain wire structs field-by-field, exactly as it copies
-// the fleet-stat scalars, so the two packages stay decoupled.
-
 // ActivityStatWire is one action's count within the window plus the newest
 // timestamp seen for it (RFC3339). NewestAt lets the hub compute "within 12h"
 // itself without trusting a spoke-side clamp.

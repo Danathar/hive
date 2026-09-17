@@ -9,40 +9,6 @@ import (
 	"time"
 )
 
-// Validate-on-load for the hub's cluster registry, /data/saas/clusters.json
-// (audit 8, §6 item 11).
-//
-// WHAT THE AUDIT FOUND. The live file is owned 501:wheel — a macOS uid, not the
-// container's — with a clusters.json.bak-akswec2 sibling beside it: the
-// signature of an out-of-band `kubectl cp` from a workstation. Nothing
-// in-cluster re-asserts the file, so the hub's model of its own fleet topology
-// is drift-prone with nothing to correct it.
-//
-// WHY THIS FIX IS A LOADER AND NOT A RECONCILER. The registry is not derivable
-// from the fleet: two of its three clusters (the heartbeat-only cluster, a spoke cluster) are pull_only
-// BY DESIGN and the hub cannot reach them to enumerate anything. There is no
-// in-cluster source that could re-generate this file, so a reconciler would
-// have to invent one — and a new source of truth for the file that gates all
-// fleet routing is precisely the change most likely to cause the outage it is
-// meant to prevent. What IS available is the ability to refuse to run on bytes
-// the hub cannot vouch for, which is the same answer audit F20 reached for
-// hub-generations.json.
-//
-// THE FAILURE MODE THIS CLOSES. loadClusters previously returned an EMPTY map
-// on a JSON parse error. An empty registry is not a degraded registry, it is an
-// inverted one: clusterForHive falls through both its lookups and returns nil
-// for EVERY hive, so a truncated write silently disables the hub's writes to
-// the hub-reachable cluster — the one cluster it can reach — while logging a single line and
-// coming up otherwise healthy. A half-written file produced by an interrupted
-// `kubectl cp` (exactly the mechanism that left the .bak sibling) lands
-// squarely in this case.
-//
-// PULL_ONLY IS PRESERVED EXACTLY. Nothing here reinterprets, defaults, or
-// repairs PullOnly. The flag is what gates whether the hub attempts to write to
-// a cluster (KubectlReachable tests it first, unconditionally), so this code
-// round-trips it verbatim and the tests assert routing decisions are identical
-// before and after.
-
 // clustersQuarantineSuffix preserves an unparseable registry for inspection
 // instead of overwriting or discarding it.
 //

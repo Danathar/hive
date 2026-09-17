@@ -280,6 +280,7 @@ func (s *HubServer) pushGitHubConfigToSpoke(hive *RegistryEntry, appID, installa
 }
 
 const sharedKeyNamespace = "hive-shared"
+
 const sharedKeySecretName = "hive-app-key"
 
 func (s *HubServer) loadAppPrivateKey(hive *RegistryEntry) string {

@@ -9,22 +9,6 @@ import (
 	"github.com/hivecommons/hive/pkg/agent"
 )
 
-// Fleet-wide agent backend-auth canary (#6558).
-//
-// #6500 showed a hosted hive whose every enabled agent was dead on "You are
-// not licensed to use Copilot" for hours, discovered only when a human opened
-// an agent Terminal and read the pane. #6489 was the same shape for a
-// self-hosted LLM gateway. Neither incident had a fleet- or hub-level signal
-// that said "every agent on this hive has failing backend auth" — this file
-// is that signal.
-//
-// The per-agent evidence already arrives on the heartbeat: AgentSummary's
-// BackendAuthStatus/BackendAuthSince fields (agent.BackendAuthState, set by
-// the spoke's classifyProviderError-derived canary). Nothing here re-derives
-// a spoke-side condition; evaluateAuthHealth only aggregates what the spoke
-// already reported, exactly as evaluateInactiveAgents does for the
-// running-but-idle facet beside it.
-
 const (
 	// EnvAuthHealthDownThreshold overrides how long ALL enabled agents on a
 	// hive must report a failing BackendAuth status before the hive's

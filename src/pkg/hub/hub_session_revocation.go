@@ -8,31 +8,6 @@ import (
 	"time"
 )
 
-// AUDIT F10, part 2: server-side session revocation.
-//
-// Signing the expiry (hub_cookie.go) bounds how long a copied cookie survives.
-// It does not make logout mean anything before that bound: a value captured
-// while it was valid keeps working until its own `exp` passes. Revocation is
-// what closes that window on demand — logout, a compromised account, an admin
-// pulling a session — by recording the session ID and rejecting it at verify
-// time regardless of what the signature says.
-//
-// WHY THIS IS ON DISK AND NOT IN A MAP.
-//
-// The hub restarts frequently (auto-upgrades roll it several times a day). An
-// in-memory-only revocation set is therefore not merely lossy, it is a
-// vulnerability with a published schedule: revoke a session, wait for the next
-// roll, and the cookie you revoked works again. /data is a real RWX PVC
-// (hive-hub-data-rwx) that already holds alert acks, banners and registry
-// state, so the revocation set persists exactly as those do.
-//
-// The stored shape is deliberately minimal — {sid: exp} and nothing else. There
-// is no reason for the hub to retain who a revoked session belonged to, and an
-// entry is useless once the cookie it names would fail the expiry check anyway,
-// so entries are evicted at their own `exp`. That eviction is what keeps the
-// file bounded: the set can only ever be as large as the sessions revoked
-// within one cookie lifetime, not the sessions revoked ever.
-
 // revokedSessionsPath is the on-disk file holding revoked session IDs so a
 // logout survives a hub restart. A var (not a const) so tests can point it at a
 // temp dir — same shape as alertAcksPath.

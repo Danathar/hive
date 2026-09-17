@@ -14,19 +14,6 @@ import (
 	"github.com/hivecommons/hive/pkg/reach"
 )
 
-// ============================================================================
-// /api/reach — read-only PR reach telemetry (#3994, phase 2b of #3973)
-// ============================================================================
-//
-// Joins merged PRs (changed files → components, D3) against the per-hive
-// component_reach reports phase 2a (#3993) persists from the heartbeat, via
-// the ancestry rule: a hive counts only when the commit it reports RUNNING
-// contains the PR's merge commit (the #3816 anchoring rule — merged is not
-// deployed). Co-deployed PRs share one window and are labeled shared (D4).
-//
-// Read-only by construction: no GitHub writes, no state mutation beyond the
-// caches the underlying clients already keep.
-
 // reachRepoOwner / reachRepoName pin the repo the reach join is defined
 // over — the same repo commit_order.go compares against.
 const (

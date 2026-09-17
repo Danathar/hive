@@ -8,15 +8,6 @@ import (
 	"strings"
 )
 
-// Server-side filter / sort / pagination for /api/saas/my-hives.
-//
-// At fleet scale the My Hives payload is the hub's hottest endpoint and used
-// to ship EVERY visible row on every poll. The set-wide computations (drift
-// norm, fleet alerts, cluster-outage suppression) are properties of the whole
-// visible set and still run over it — this layer scopes only what goes on the
-// WIRE afterwards. With no query parameters the response is byte-compatible
-// with the old behavior (all rows), so existing dashboards keep working.
-
 // maxMyHivesPerPage caps per_page so a caller cannot ask for a pathological
 // page size; 0/absent per_page means "no pagination" (full set, back-compat).
 const maxMyHivesPerPage = 500

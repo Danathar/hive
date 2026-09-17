@@ -1,6 +1,8 @@
 // Crash recovery and restarts: crashed-agent detection and restart,
 // bob relaunch-awaiting-key handling, session kills, CLI process
 // reaping, and restart-count bookkeeping.
+//
+// Extracted from manager.go as part of the #7303 god-file split.
 package agent
 
 import (

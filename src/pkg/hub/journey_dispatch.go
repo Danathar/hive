@@ -104,8 +104,6 @@ func (s *HubServer) attachJourneyStatus(hives []RegistryEntry, now time.Time) {
 	}
 }
 
-// ── Admin snooze API ────────────────────────────────────────────────────────
-
 // handleJourneySnooze sets or clears an admin exemption for one hive. Some
 // hives are legitimately exempt (vendor pilots, demo spokes, hives parked
 // between events) and must not be nagged or threatened.

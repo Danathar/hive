@@ -7,18 +7,6 @@ import (
 	"time"
 )
 
-// Watermark pool replenisher.
-//
-// The placeholder pool ("Available slot" hives an admin assigns to approved
-// requests) was seeded by hand; when it ran dry, approvals failed with
-// "provision more placeholders". This control loop keeps each cluster's pool
-// at a configured watermark: when clean available placeholders drop below
-// pool_min, it provisions up to pool_target through the bounded provisioning
-// queue, gated by the same capacity checks manual provisioning uses
-// (max_hives, global cap). pool_target == 0 disables the loop for a cluster,
-// which is also the default — nothing changes until an operator opts in via
-// clusters.json.
-
 const (
 	// poolReplenishInterval throttles the replenish sweep on the mega-poller
 	// tick. Co-prime-ish with the other lane periods (7/9/15 min) so the lanes
