@@ -300,4 +300,3 @@ func TestFormatAuditDetail_ToolApproval(t *testing.T) {
 		t.Errorf("FormatAuditDetail(tool approval) =\n  %q\nwant\n  %q", got, want)
 	}
 }
-

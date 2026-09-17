@@ -49,17 +49,17 @@ func TestContributeMetricsSparklineClientWired(t *testing.T) {
 	body := renderContributePage(t)
 
 	for _, want := range []string{
-		"function sparkline(",              // the dependency-free SVG renderer
-		"<svg width=",                      // renders an inline SVG (CSP-safe, no lib)
-		"/api/contribute/metrics",          // the fetch target
-		"function ccMetricsPoll(",          // the poll driver, called from opsPoll
-		"ccMetricsPoll();",                 // actually invoked
-		`id="spark-queue"`,                 // (a) ready-work queue header trend
-		`id="spark-throughput"`,            // (b) tasks/hour throughput
-		`id="spark-fleet"`,                 // (c) connected-clanker fleet trend
-		`id="spark-quota"`,                 // (d) your daily-quota usage trend
-		`id="spark-lb-trend"`,              // (f) hive-wide total-tasks trend
-		`class="lb-spark" data-user=`,      // (e) leaderboard per-row sparkline slot
+		"function sparkline(",                     // the dependency-free SVG renderer
+		"<svg width=",                             // renders an inline SVG (CSP-safe, no lib)
+		"/api/contribute/metrics",                 // the fetch target
+		"function ccMetricsPoll(",                 // the poll driver, called from opsPoll
+		"ccMetricsPoll();",                        // actually invoked
+		`id="spark-queue"`,                        // (a) ready-work queue header trend
+		`id="spark-throughput"`,                   // (b) tasks/hour throughput
+		`id="spark-fleet"`,                        // (c) connected-clanker fleet trend
+		`id="spark-quota"`,                        // (d) your daily-quota usage trend
+		`id="spark-lb-trend"`,                     // (f) hive-wide total-tasks trend
+		`class="lb-spark" data-user=`,             // (e) leaderboard per-row sparkline slot
 		"function ccRenderLeaderboardSparklines(", // leaderboard painter
 	} {
 		if !strings.Contains(body, want) {

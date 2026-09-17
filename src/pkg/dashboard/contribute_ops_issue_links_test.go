@@ -52,7 +52,7 @@ func TestIssueLinkHelpersExistAndPreferURLField(t *testing.T) {
 		`target="_blank"`,
 		`rel="noopener noreferrer"`,
 		`title="Open on GitHub"`,
-		"data-stop-prop", // delegated stopPropagation for click+mousedown (#3848)
+		"data-stop-prop",   // delegated stopPropagation for click+mousedown (#3848)
 		"cc-issue-link-ic", // the external-link icon
 	} {
 		if !strings.Contains(linkBody, want) {

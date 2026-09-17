@@ -92,12 +92,12 @@ func TestLeaseExpiry_ClearsPendingCredential(t *testing.T) {
 
 	now := time.Now()
 	wedged := &ContributorConnection{
-		profile:            &ContributorProfile{GitHubUsername: "cred-leak", ContributorID: "c-cred", TrustTier: "contributor"},
-		currentTask:        &WSTaskAssign{TaskID: "t-cred", Repo: "myorg/repo1", Number: 55},
-		currentTaskGen:     9,
-		lastLeaseRenew:     now.Add(-(wsTaskTimeout + time.Minute)),
-		lastPong:           now,
-		pendingToken:       "ghp_LEAKED_TOKEN_12345",
+		profile:             &ContributorProfile{GitHubUsername: "cred-leak", ContributorID: "c-cred", TrustTier: "contributor"},
+		currentTask:         &WSTaskAssign{TaskID: "t-cred", Repo: "myorg/repo1", Number: 55},
+		currentTaskGen:      9,
+		lastLeaseRenew:      now.Add(-(wsTaskTimeout + time.Minute)),
+		lastPong:            now,
+		pendingToken:        "ghp_LEAKED_TOKEN_12345",
 		credentialDelivered: false,
 	}
 	hub.mu.Lock()
@@ -129,12 +129,12 @@ func TestLeaseExpiry_ClearsDeliveredCredentialFlag(t *testing.T) {
 
 	now := time.Now()
 	wedged := &ContributorConnection{
-		profile:            &ContributorProfile{GitHubUsername: "delivered", ContributorID: "c-del", TrustTier: "contributor"},
-		currentTask:        &WSTaskAssign{TaskID: "t-del", Repo: "myorg/repo1", Number: 56},
-		currentTaskGen:     4,
-		lastLeaseRenew:     now.Add(-(wsTaskTimeout + 2*time.Minute)),
-		lastPong:           now,
-		pendingToken:       "",
+		profile:             &ContributorProfile{GitHubUsername: "delivered", ContributorID: "c-del", TrustTier: "contributor"},
+		currentTask:         &WSTaskAssign{TaskID: "t-del", Repo: "myorg/repo1", Number: 56},
+		currentTaskGen:      4,
+		lastLeaseRenew:      now.Add(-(wsTaskTimeout + 2*time.Minute)),
+		lastPong:            now,
+		pendingToken:        "",
 		credentialDelivered: true,
 	}
 	hub.mu.Lock()

@@ -11,6 +11,34 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-17 (v4.52.2)
+
+### Changed
+
+- Split `pkg/dashboard/api_contribute.go` god file: move the contributor profile store/invite tokens, contributor-management handlers, federation registry, and leaderboard verbatim into `contribute_profiles.go`, `contribute_admin.go`, `contribute_federation.go`, and `contribute_leaderboard.go` (#7435 god-file split; no behavior change).
+
+### Fixed
+
+- Dashboard: the Getting Started "Trajectory Review" deep link now opens the tab it names. Its `actionArg` was written as the single-quoted string `'${TRAJECTORY_CONFIG_TAB}'`, which does not interpolate, so `openConfigDialog()` could not match it against `GOVERNOR_CONFIG_TABS` and silently fell back to the remembered tab or `GOVERNOR_CONFIG_TABS[0]`. The link now references the constant. Trajectory Review itself moved from Settings → General to Settings → Features, where the other default-off, opt-in capability lanes live, and `TRAJECTORY_CONFIG_TAB` is `'Features'` to match. A new test asserts that every Getting Started deep link routed to `welcomeShowConfigTab` resolves to a real member of `GOVERNOR_CONFIG_TABS`, so a mis-quoted or stale tab name fails CI instead of quietly opening the wrong tab. (#7452)
+- Kick issue/PR lists are now allocated fairly across repos instead of being cut at a flat prefix, so no repo can be shut out by its position in the order. On a 16-repo project with 423 open PRs and a cap of 50, fourteen repos previously contributed nothing to any kick, which caused agents to duplicate work they could not see. Unused slots from small repos are redistributed to repos that still have work. `governor.kick_limits.max_issues`/`max_prs` now accept `0` to mean unlimited; an absent key still uses the default.
+
+## 2026-09-17 (v4.52.1)
+
+### Changed
+
+- Extract the launch-command/caveman-installer domain from `pkg/agent/manager.go` into `manager_launch.go` (#7303 god-file split; no behavior change).
+
+## 2026-09-17 (v4.52.0)
+
+### Added
+
+- The agent settings dialog now lets an operator turn **On Demand** off ([#7446](https://github.com/hivecommons/hive/issues/7446)). `on_demand` is a real per-agent config field, but it was only ever *rendered* — as a read-only "on demand" badge on the agent card — so an operator could see that an agent was on-demand and had no way to change it without hand-editing `hive.yaml`. `GET /api/config/agent/{name}` did not return the field and `PUT /api/config/agent/{name}/general` silently dropped it. Both now carry it, and the General tab gains a toggle beside Clear on Kick. The flag reaches further than scheduling: `reviewCapableAgents` skips any agent with `OnDemand` set, so a reviewer left on-demand is excluded from review fan-out entirely — the hive reports `reviewCapableAgents: 0`, no PR ever receives a verdict, and the auto-merge sweep then skips every PR with `no-hive-queue-approval`. The tooltip states both gotchas, since clearing the flag is necessary but not sufficient: the agent also needs a cadence entry in the ACTIVE governor mode before it is kicked. A save that does not mention `onDemand` leaves it untouched, so editing an unrelated field on an on-demand agent cannot silently un-demand it.
+
+### Fixed
+
+- The governor no longer counts a kick as successful just because the prompt was delivered ([#7421](https://github.com/hivecommons/hive/issues/7421)). On the projectbluefin spoke an agent that ended its turn with `What should I focus on? Awaiting your kick or specific task assignment.` — twice — and one that ended with `STAND DOWN. … No issue opened, no PR opened, no bead created` were recorded exactly like an agent that opened a PR, the card said `working` while the pane sat at an idle prompt, and the cadence waited a full interval because the last kick "worked". Now: (1) once the CLI is back at its prompt after a kick, the manager classifies how the turn **ended** — `question` (asked the operator what to do), `stand-down` (explicit policy refusal), `no-op` (explicit nothing-produced report) or `ended` (no no-op recognised; deliberately not a productivity claim) — from the agent's own final message, ignoring echoed kick text and mid-sentence policy mentions; (2) the governor stamps the verdict on the kick-history record (persisted as `outcome`/`outcomeReason`), re-kicks a question-ended turn ~5 minutes later instead of waiting out the cadence — at most once per hour, so a model that answers every kick with a question cannot turn the cadence into a token-burning loop — and never re-kicks a stand-down early; (3) the dashboard reports a finished turn as `idle`, not `working`, shows a stand-down as **blocked** with its reason, and a question as **asked for direction**; (4) `quality-holdgated.md` gains the queue-directed rule scanner's template already had — choose the next item yourself, never ask the operator what to do, a turn that ends on a question is a failed kick.
+- A PR the ACMM level gate holds for human review is repaired again instead of sitting red forever ([#7438](https://github.com/hivecommons/hive/issues/7438)). The hold is a merge checkpoint, but it was acting as a repair checkpoint too: `fetchPRs` moves every held PR out of the actionable population into `HoldResult.Items`, and a `HoldItem` carries no head SHA, no CI status and no failing-check names — so CI was never enriched for it, it never reached `ci-failing.json`, and no agent ever got a FIX-BEFORE-NEW block for it. The PR stayed red, so it stayed held, so nothing ever fixed it (observed on `Danathar/zfs-kinoite-complex#188`, whose own new test failed on the first run). Now `PRResult.Held` carries the full `PullRequest` for each held, non-draft PR, the governor enriches its CI status on the eval tick and on a manual rescan, and `writeMergeEligible` classifies held PRs into `ci_failing` with `held: true`. The gate itself is untouched: a held PR is still never merge-eligible, still absent from `PRs.Items` (so the merge sweep, escalation, the duplicate-PR guard and the queue counts see exactly what they saw before), and each held entry in the kick carries `held for human review — fix CI, do not remove the hold`. Escalated (`needs-human`) PRs stay excluded as before, and a held **outreach** PR stays excluded too — the level-hold comment promises a human reviews those, so they are not edited underneath the reviewer.
+
 ## 2026-09-17 (v4.51.2)
 
 ### Fixed
