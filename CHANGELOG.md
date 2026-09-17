@@ -11,6 +11,13 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-17 (v4.47.1)
+
+### Changed
+
+- Split cluster health and telemetry out of `pkg/hub/saas.go` into `pkg/hub/saas_cluster_health.go` ([#7278](https://github.com/hivecommons/hive/issues/7278)). A pure move of 1,001 lines with no API or behaviour change; saas.go drops from 23,348 to 22,346 lines. First of the staged same-package splits that issue proposes.
+- Split the Copilot credential-file helpers out of `pkg/agent/manager.go` into `pkg/agent/copilot_token_store.go` ([#7303](https://github.com/hivecommons/hive/issues/7303)). A pure move of 397 lines with no API or behaviour change; manager.go drops from 10,797 to 10,400 lines. First of the staged splits that issue proposes.
+
 ## 2026-09-17 (v4.47.0)
 
 ### Added
