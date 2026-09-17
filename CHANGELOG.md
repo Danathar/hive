@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-17 (v4.40.0)
+
+### Added
+
+- The dashboard and pinned advisory digest now share a weekly-frozen Hive Advice section that ranks the top owner actions by governor mode, so quiet hives get throughput-building suggestions while surge hives get inflow-reduction guidance.
+
 ## 2026-09-17 (v4.39.6)
 
 ### Fixed
