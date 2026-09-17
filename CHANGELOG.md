@@ -11,6 +11,16 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-17 (v4.42.0)
+
+### Added
+
+- Every labelled control on Settings → Features now carries an (i) tooltip, including the previously unexplained Quality Loops section and its Retro loop toggle, where the help text spells out that the loop is deterministic and spends no tokens until an Analysis model is set (#7256). A new coverage guard fails the build if a control is added to that tab without help text.
+
+### Changed
+
+- Removed the "Enable telemetry agent" / "Enable operations agent" toggles from Settings → Project Observability (#7261). They were a third, conflicting way to turn an agent on: writing one rewrote that agent's cadence in every governor mode, destroying per-mode tuning owned by the Cadences tab, while reading it back reported whether any mode was unpaused — a fact unrelated to the agent's own enabled flag, so the agent card and this tab could disagree. The tab now shows a read-only status line per agent and can no longer write cadences at all.
+
 ## 2026-09-17 (v4.41.0)
 
 ### Added
