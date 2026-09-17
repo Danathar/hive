@@ -435,6 +435,11 @@ func (s *Scheduler) issueFilterNotice() string {
 	return b.String()
 }
 
+func (s *Scheduler) formatIssueList(issues []github.Issue) string {
+	out, _ := s.formatIssueListWithPolicy(issues)
+	return out
+}
+
 func (s *Scheduler) formatIssueListWithPolicy(issues []github.Issue) (string, bool) {
 	notice := s.issueFilterNotice()
 	if len(issues) == 0 {
@@ -446,7 +451,7 @@ func (s *Scheduler) formatIssueListWithPolicy(issues []github.Issue) (string, bo
 	shown := 0
 	failClosed := false
 	for _, issue := range issues {
-		if shown >= maxIssuesPerKick {
+		if shown >= s.issueCap() {
 			break
 		}
 		// The issue title AND labels are untrusted external text about to be
@@ -497,6 +502,11 @@ func issuePriorityMarker(issue github.Issue) string {
 	return "[hive-filed]"
 }
 
+func (s *Scheduler) formatPRList(actionable *github.ActionableResult) string {
+	out, _ := s.formatPRListWithPolicy(actionable)
+	return out
+}
+
 func (s *Scheduler) formatPRListWithPolicy(actionable *github.ActionableResult) (string, bool) {
 	return s.formatPRListWithPolicyForAgent(actionable, "")
 }
@@ -507,7 +517,12 @@ func (s *Scheduler) formatPRListWithPolicyForAgent(actionable *github.Actionable
 	}
 	var b strings.Builder
 	failClosed := false
-	for _, pr := range actionable.PRs.Items {
+	limit := s.prCap()
+	for i, pr := range actionable.PRs.Items {
+		if i >= limit {
+			b.WriteString(prListOverflowLine(len(actionable.PRs.Items)-i, limit))
+			break
+		}
 		// The PR title and author login are untrusted external text about to be
 		// injected into an agent kick (F11). PR titles in particular drive
 		// classification routing, and an attacker controls both the title and their
@@ -662,7 +677,7 @@ func (s *Scheduler) BuildKickMessages(actionable *github.ActionableResult, agent
 				Agent:     agentName,
 				Repo:      repo,
 				Message:   msg,
-				IssueRefs: issueRefsForAgent(agentName, s.freeOfInflight(targetIssues)),
+				IssueRefs: issueRefsForAgent(agentName, s.freeOfInflight(targetIssues), s.issueCap()),
 			})
 		}
 	}
@@ -725,13 +740,16 @@ func filterHoldByRepo(hold github.HoldResult, repo string) github.HoldResult {
 	return out
 }
 
-func issueRefsForAgent(agentName string, issues []github.Issue) []string {
+func issueRefsForAgent(agentName string, issues []github.Issue, limit int) []string {
 	agentIssues := issues
 	if agentName != "scanner" {
 		agentIssues = filterByLane(issues, agentName)
 	}
-	if len(agentIssues) > maxIssuesPerKick {
-		agentIssues = agentIssues[:maxIssuesPerKick]
+	if limit <= 0 {
+		limit = maxIssuesPerKick
+	}
+	if len(agentIssues) > limit {
+		agentIssues = agentIssues[:limit]
 	}
 	refs := make([]string, 0, len(agentIssues))
 	seen := make(map[string]bool, len(agentIssues))
@@ -915,7 +933,42 @@ Your workdir is, at most, a checkout of the primary repo — never of the others
 	return b.String()
 }
 
-const maxIssuesPerKick = 100
+// maxIssuesPerKick / maxPRsPerKick are the DEFAULT list caps; the live values
+// come from governor.kick_limits via issueCap/prCap (hivecommons/hive#7368).
+// The PR cap is the one that was missing: a spoke with 302 open PRs delivered
+// a 69.5 KiB kick — the PR list alone ~36 KiB, over half the prompt and 3x the
+// budget documented in pkg/dashboard/prompt_history.go — and every extra
+// kilobyte lengthens the terminal-typed delivery window that #7363 hangs on.
+const (
+	maxIssuesPerKick = config.DefaultMaxIssuesPerKick
+	maxPRsPerKick    = config.DefaultMaxPRsPerKick
+)
+
+// issueCap is how many issues one kick list may carry (governor.kick_limits
+// .max_issues, default maxIssuesPerKick). Nil-safe for bare test schedulers.
+func (s *Scheduler) issueCap() int {
+	if s == nil || s.cfg == nil {
+		return maxIssuesPerKick
+	}
+	return s.cfg.Governor.KickLimits.IssuesPerKick()
+}
+
+// prCap is how many PRs one kick list may carry (governor.kick_limits.max_prs,
+// default maxPRsPerKick). Applied to every PR list a kick renders: actionable
+// PRs, stale drafts, merge-eligible, CI-failing.
+func (s *Scheduler) prCap() int {
+	if s == nil || s.cfg == nil {
+		return maxPRsPerKick
+	}
+	return s.cfg.Governor.KickLimits.PRsPerKick()
+}
+
+// prListOverflowLine is the explicit marker appended when a PR list was cut
+// at the cap, so the agent knows the list is partial rather than complete —
+// a silent slice would read as "these are all the PRs".
+func prListOverflowLine(omitted, limit int) string {
+	return fmt.Sprintf("  … and %d more open PRs not listed (cap %d per kick; they return on later kicks as this list drains)\n", omitted, limit)
+}
 
 const (
 	holdGatedACMMMinLevel = 3
@@ -1449,7 +1502,7 @@ func (s *Scheduler) formatHeldPRClaimsWithPolicy(actionable *github.ActionableRe
 		if item.Type != "pr" {
 			continue
 		}
-		if shown >= maxIssuesPerKick {
+		if shown >= s.issueCap() {
 			omitted++
 			continue
 		}
@@ -1486,7 +1539,7 @@ func (s *Scheduler) buildScannerMessage(issues []github.Issue, actionable *githu
 	}
 	shown := 0
 	for _, issue := range scannerIssues {
-		if shown >= maxIssuesPerKick {
+		if shown >= s.issueCap() {
 			break
 		}
 		tier := string(issue.ComplexityTier)
@@ -1511,7 +1564,12 @@ func (s *Scheduler) buildScannerMessage(issues []github.Issue, actionable *githu
 	}
 
 	b.WriteString(fmt.Sprintf("ACTIONABLE PRs (%d):\n", actionable.PRs.Count))
-	for _, pr := range actionable.PRs.Items {
+	prLimit := s.prCap()
+	for i, pr := range actionable.PRs.Items {
+		if i >= prLimit {
+			b.WriteString(prListOverflowLine(len(actionable.PRs.Items)-i, prLimit))
+			break
+		}
 		title := pr.Title
 		const maxPRTitleRunes = 70
 		if runes := []rune(title); len(runes) > maxPRTitleRunes {
@@ -1531,7 +1589,11 @@ func (s *Scheduler) buildScannerMessage(issues []github.Issue, actionable *githu
 	// prompt is ever built. See kubestellar/hive#3963.
 	if len(actionable.PRs.StaleDrafts) > 0 {
 		b.WriteString(fmt.Sprintf("\nYOUR STALE DRAFT PRs (%d, >48h old — finish, mark ready, or close):\n", len(actionable.PRs.StaleDrafts)))
-		for _, d := range actionable.PRs.StaleDrafts {
+		for i, d := range actionable.PRs.StaleDrafts {
+			if i >= prLimit {
+				b.WriteString(prListOverflowLine(len(actionable.PRs.StaleDrafts)-i, prLimit))
+				break
+			}
 			title := d.Title
 			const maxDraftTitleRunes = 70
 			if runes := []rune(title); len(runes) > maxDraftTitleRunes {
@@ -1605,14 +1667,17 @@ func (s *Scheduler) buildMergeEligibleListFor(keep func(repo string) bool) strin
 	if err != nil {
 		return "(none)\n"
 	}
-	return formatMergeEligibleDataFor(data, keep)
+	return formatMergeEligibleDataFor(data, keep, s.prCap())
 }
 
-func formatMergeEligibleData(data []byte) string {
-	return formatMergeEligibleDataFor(data, nil)
+func formatMergeEligibleData(data []byte, limit int) string {
+	return formatMergeEligibleDataFor(data, nil, limit)
 }
 
-func formatMergeEligibleDataFor(data []byte, keep func(repo string) bool) string {
+// formatMergeEligibleDataFor narrows to the repos keep accepts (#6204, nil =
+// all) and caps the rendered list at limit (governor.kick_limits.max_prs,
+// hivecommons/hive#7368; 0 = uncapped).
+func formatMergeEligibleDataFor(data []byte, keep func(repo string) bool, limit int) string {
 	var payload struct {
 		Items []struct {
 			Number int    `json:"number"`
@@ -1625,10 +1690,16 @@ func formatMergeEligibleDataFor(data []byte, keep func(repo string) bool) string
 		return "(none)\n"
 	}
 	var b strings.Builder
-	for _, pr := range payload.Items {
+	shown := 0
+	for i, pr := range payload.Items {
 		if keep != nil && !keep(pr.Repo) {
 			continue
 		}
+		if limit > 0 && shown >= limit {
+			b.WriteString(prListOverflowLine(len(payload.Items)-i, limit))
+			break
+		}
+		shown++
 		queued := ""
 		if pr.Queued {
 			queued = " [queued for auto-merge]"
@@ -1665,10 +1736,17 @@ func (s *Scheduler) buildCIFailingListFor(keep func(repo string) bool) string {
 		return "(none)\n"
 	}
 	var b strings.Builder
-	for _, pr := range payload.Items {
+	limit := s.prCap()
+	shown := 0
+	for i, pr := range payload.Items {
 		if keep != nil && !keep(pr.Repo) {
 			continue
 		}
+		if shown >= limit {
+			b.WriteString(prListOverflowLine(len(payload.Items)-i, limit))
+			break
+		}
+		shown++
 		b.WriteString(fmt.Sprintf("  #%d %s by @%s (sha:%s) — %s\n", pr.Number, pr.Repo, pr.Author, pr.HeadSHA, pr.Title))
 	}
 	if b.Len() == 0 {
@@ -1813,7 +1891,7 @@ func (s *Scheduler) buildQualityMessage(issues []github.Issue, actionable *githu
 		b.WriteString(issuePriorityNote)
 		shown := 0
 		for _, issue := range qualityIssues {
-			if shown >= maxIssuesPerKick {
+			if shown >= s.issueCap() {
 				break
 			}
 			title := issue.Title
@@ -1872,7 +1950,7 @@ func (s *Scheduler) buildArchitectMessage(issues []github.Issue, actionable *git
 		b.WriteString(issuePriorityNote)
 		shown := 0
 		for _, issue := range architectIssues {
-			if shown >= maxIssuesPerKick {
+			if shown >= s.issueCap() {
 				break
 			}
 			title := issue.Title

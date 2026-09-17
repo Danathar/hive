@@ -151,16 +151,16 @@ func TestSubstituteTemplate_FiltersIssuesToAgentRepos(t *testing.T) {
 func TestFormatMergeEligibleDataFor_FiltersByRepo(t *testing.T) {
 	data := []byte(`{"merge_eligible":[{"number":1,"repo":"console","title":"a"},{"number":2,"repo":"dashboard","title":"b"}]}`)
 
-	all := formatMergeEligibleData(data)
+	all := formatMergeEligibleData(data, 0)
 	if !strings.Contains(all, "console") || !strings.Contains(all, "dashboard") {
 		t.Errorf("unfiltered list lost an entry: %q", all)
 	}
-	only := formatMergeEligibleDataFor(data, func(repo string) bool { return repo == "dashboard" })
+	only := formatMergeEligibleDataFor(data, func(repo string) bool { return repo == "dashboard" }, 0)
 	if strings.Contains(only, "console") || !strings.Contains(only, "dashboard") {
 		t.Errorf("filtered list = %q, want only dashboard", only)
 	}
 	// Everything filtered out reads as "(none)", not as an empty block.
-	none := formatMergeEligibleDataFor(data, func(string) bool { return false })
+	none := formatMergeEligibleDataFor(data, func(string) bool { return false }, 0)
 	if strings.TrimSpace(none) != "(none)" {
 		t.Errorf("fully filtered list = %q, want (none)", none)
 	}
