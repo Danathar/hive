@@ -11,6 +11,19 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-17 (v4.49.0)
+
+### Added
+
+- The Operations tab now renders the hub's per-contributor decisions beside the run history, filled by the same login lookup, so an operator can see the reports the hub fenced or ignored without curling `/api/contribute/decisions`. A read-only viewer gets an explanation of the gate rather than a load error. ([#7330](https://github.com/hivecommons/hive/issues/7330))
+
+### Fixed
+
+- Fix the `/terminal` auth gate failing OPEN on the `hive.hivecommons.dev` fleet. The proxy's hosted-host check suffix-matched one hardcoded apex (`.hive.kubestellar.io`), and hosted spokes run with `HIVE_DASHBOARD_TOKEN` unset by design, so on the rebranded apex both halves of `isHosted || DASHBOARD_TOKEN` were false and the gate was skipped for the HTTP handler *and* the WebSocket upgrade: an anonymous `GET /terminal/?arg=hive-<agent>` and an anonymous `wss://` upgrade were proxied straight to ttyd — an unauthenticated interactive shell in a container holding the GitHub App private key, every agent token and the hub secret. The check now matches every known hosted apex, accepts extras via `HIVE_HOSTED_HOST_SUFFIXES`, and treats a resolved hub session key (`IS_HOSTED`) as authoritative, so an unrecognized, vanity or forged `Host` fails CLOSED instead of skipping authentication.
+- Collapse the `/terminal` WebSocket upgrade onto the same `terminalGateApplies()` predicate as the HTTP handler. The upgrade path branched `if (isHosted) … else if (DASHBOARD_TOKEN) …`, which left a silent third case that reached the same ttyd with no identity at all; the two gates can no longer drift apart.
+- Stop the dashboard closing the tab it just opened when the terminal button cannot mint a handoff code on a hosted hive. `dashboardTokenConfigured()` read the 404 that a hosted hive answers `/api/auth/token` with as "a shared token IS configured", so `openTerminal()` took the `tab.close()` branch instead of falling back to the plain terminal URL.
+- Renew the terminal assertion on every hosted apex. `isHostedHiveHost()` carried the same single-apex hardcode, so on `hive.hivecommons.dev` `renewTerminalAssertion()` returned early, the 15-minute `hive_terminal_assertion` expired with nothing to refresh it, and ttyd's reconnect was rejected.
+
 ## 2026-09-17 (v4.48.1)
 
 ### Changed
