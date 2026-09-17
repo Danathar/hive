@@ -504,6 +504,13 @@ type ContributeWSHub struct {
 	// RWMutex). Lock-free is also what the -race coverage job wants — see the standing
 	// "never re-lock m.mu from a path that holds it" rule.
 	taskGen atomic.Uint64
+	// decisions is the bounded per-contributor record of the hub's OWN
+	// decisions — the refusals, fences and ignored reports that until #7330
+	// existed only as slog lines on the hub's stdout. Its own mutex, never
+	// h.mu: it is written from the connection goroutines and read from an HTTP
+	// handler, and a diagnostic must not share a lock graph with the routing it
+	// observes. See hub_decisions.go; zero value is ready.
+	decisions hubDecisionLog
 	// pendingConns counts sockets that have been upgraded but have not yet
 	// authenticated (audit F9). h.connections only gains an entry AFTER auth
 	// succeeds, so capping on that map alone left the pre-auth window — a full
@@ -4114,6 +4121,8 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 					"username", contributor.profile.GitHubUsername,
 					"abandoned_task", abandoned.TaskID,
 				)
+				h.recordTaskDecision(contributor.profile.GitHubUsername, decisionAbandoned, abandoned,
+					"relay asked for new work while still holding this task")
 				// kubestellar/hive#2545: a contributor that sends "ready" while
 				// still holding a task (e.g. the relay's own MAX_TASK_DURATION_MS
 				// watchdog gives up and requeues, or an agent that never actually
@@ -4298,6 +4307,9 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 							"repo", canonRepo,
 							"client_gen", msg.TaskGen,
 						)
+						h.recordDecision(contributor.profile.GitHubUsername, decisionResumeRejected,
+							msg.TaskID, canonRepo, msg.Number,
+							"no matching server-issued lease; task_revoke sent")
 						// Tell the relay this task is not (or no longer) its to hold, so
 						// it stops reporting and re-asks for work rather than silently
 						// believing it owns something the hub has no record of.
@@ -4309,6 +4321,9 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 					// disabled the tier, or revoked the contributor must NOT silently
 					// resume (and re-mint a credential) after the gate closed.
 					if reason := h.resumeGateReason(contributor); reason != "" {
+						h.recordDecision(contributor.profile.GitHubUsername, decisionResumeRejected,
+							msg.TaskID, canonRepo, msg.Number,
+							"refused by the admission gate: "+reason)
 						h.logger.Warn("[contribute-ws] task_progress resume refused by admission gate",
 							"username", contributor.profile.GitHubUsername,
 							"task", msg.TaskID,
@@ -4382,6 +4397,9 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 						"task", msg.TaskID,
 						"client_gen", staleGen,
 					)
+					h.recordDecision(contributor.profile.GitHubUsername, decisionStaleGenRejected,
+						msg.TaskID, "", 0,
+						"task_progress fenced: client_gen "+strconv.FormatUint(staleGen, 10)+" no longer matches the assignment")
 					continue
 				}
 				contributor.tmuxOutput = msg.TmuxOutput
@@ -4455,6 +4473,9 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 						"task", msg.TaskID,
 						"client_gen", staleGen,
 					)
+					h.recordDecision(contributor.profile.GitHubUsername, decisionStaleGenRejected,
+						msg.TaskID, "", 0,
+						"task_complete fenced: client_gen "+strconv.FormatUint(staleGen, 10)+" no longer matches the assignment")
 					continue
 				}
 				hasTask := contributor.currentTask != nil && contributor.currentTask.TaskID == msg.TaskID
@@ -4662,6 +4683,9 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 						"username", contributor.profile.GitHubUsername,
 						"task", msg.TaskID,
 					)
+					h.recordDecision(contributor.profile.GitHubUsername, decisionUnassignedIgnored,
+						msg.TaskID, "", 0,
+						"task_complete ignored: this connection does not hold that task")
 				}
 			}
 
@@ -4685,6 +4709,15 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 						"task", msg.TaskID,
 						"client_gen", staleGen,
 					)
+					// #7330: THE event the issue was filed for. A relay whose
+					// up-front rejection paths send task_failed with no task_gen
+					// gets fenced here once the connection has sent a non-zero
+					// one — the relay believes it reported a failure, the hub
+					// believes it never did, and until now the disagreement was
+					// visible only in the hub's stdout.
+					h.recordDecision(contributor.profile.GitHubUsername, decisionStaleGenRejected,
+						msg.TaskID, "", 0,
+						"task_failed fenced: client_gen "+strconv.FormatUint(staleGen, 10)+" no longer matches the assignment")
 					continue
 				}
 				hasTask := contributor.currentTask != nil && contributor.currentTask.TaskID == msg.TaskID
@@ -4808,6 +4841,9 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 					contributor.mu.Unlock()
 					_ = saveContributorProfile(contributor.profile)
 				} else {
+					h.recordDecision(contributor.profile.GitHubUsername, decisionUnassignedIgnored,
+						msg.TaskID, "", 0,
+						"task_failed ignored: this connection does not hold that task")
 					h.logger.Warn("[contribute-ws] task_failed for unassigned task ignored",
 						"username", contributor.profile.GitHubUsername,
 						"task", msg.TaskID,
@@ -5477,6 +5513,8 @@ func (h *ContributeWSHub) reclaimExpiredLeases(now time.Time) int {
 			"number", tgt.task.Number,
 			"lease_ttl", wsTaskTimeout.String(),
 		)
+		h.recordTaskDecision(username, decisionLeaseExpired, &tgt.task,
+			"lease went unrenewed for "+wsTaskTimeout.String()+"; task auto-released and revoked")
 		h.addActivity(username, "lease expired: auto-released", tgt.conn.role, tgt.conn.cliBackend, tgt.conn.model, tgt.conn.reasoningEffort, tgt.task.TaskID)
 		if tgt.conn.ws != nil {
 			_ = tgt.conn.send(WSMessage{
@@ -6378,6 +6416,8 @@ func (h *ContributeWSHub) selectTask(c *ContributorConnection) *WSMessage {
 		if ok, reason := h.roleClaimAllowed(c, requestedRole); !ok {
 			h.logger.Warn("[contribute-ws] refusing task: agent role not permitted",
 				"username", identityOf(c), "role", requestedRole, "reason", reason)
+			h.recordDecision(decisionUsername(c), decisionRefused, "", "", 0,
+				"agent role "+requestedRole+" not permitted: "+reason)
 			return h.taskUnavailable(taskUnavailableRoleNotPermitted)
 		}
 	}
@@ -6414,6 +6454,8 @@ func (h *ContributeWSHub) selectTask(c *ContributorConnection) *WSMessage {
 			if dt == tier {
 				h.logger.Warn("[contribute-ws] refusing task: tier disabled",
 					"username", identityOf(c), "tier", tier)
+				h.recordDecision(decisionUsername(c), decisionRefused, "", "", 0,
+					"tier "+tier+" is disabled on this hive")
 				return h.taskUnavailable(taskUnavailableTierDisabled)
 			}
 		}
@@ -6472,6 +6514,10 @@ func (h *ContributeWSHub) selectTask(c *ContributorConnection) *WSMessage {
 				h.logger.Warn("[contribute-ws] refusing task: concurrency limit reached",
 					"username", identityOf(c), "tier", tier,
 					"held", identityHolds[identityOf(c)], "max_concurrent", limits.MaxConcurrent)
+				h.recordDecision(decisionUsername(c), decisionRefused, "", "", 0,
+					"concurrency limit for tier "+tier+": holding "+
+						strconv.Itoa(identityHolds[identityOf(c)])+" of "+
+						strconv.Itoa(limits.MaxConcurrent))
 				return h.taskUnavailable(taskUnavailableConcurrencyLimit)
 			}
 			if limits.MaxPerHour > 0 || limits.MaxPerDay > 0 {
@@ -6480,12 +6526,18 @@ func (h *ContributeWSHub) selectTask(c *ContributorConnection) *WSMessage {
 					h.logger.Warn("[contribute-ws] refusing task: hourly rate limit reached",
 						"username", identityOf(c), "tier", tier,
 						"assigned_last_hour", hourCount, "max_per_hour", limits.MaxPerHour)
+					h.recordDecision(decisionUsername(c), decisionRefused, "", "", 0,
+						"hourly rate limit for tier "+tier+": "+strconv.Itoa(hourCount)+
+							" assigned in the last hour, max "+strconv.Itoa(limits.MaxPerHour))
 					return h.taskUnavailable(taskUnavailableHourlyLimit)
 				}
 				if limits.MaxPerDay > 0 && dayCount >= limits.MaxPerDay {
 					h.logger.Warn("[contribute-ws] refusing task: daily rate limit reached",
 						"username", identityOf(c), "tier", tier,
 						"assigned_last_day", dayCount, "max_per_day", limits.MaxPerDay)
+					h.recordDecision(decisionUsername(c), decisionRefused, "", "", 0,
+						"daily rate limit for tier "+tier+": "+strconv.Itoa(dayCount)+
+							" assigned in the last day, max "+strconv.Itoa(limits.MaxPerDay))
 					return h.taskUnavailable(taskUnavailableDailyLimit)
 				}
 			}
@@ -6502,6 +6554,9 @@ func (h *ContributeWSHub) selectTask(c *ContributorConnection) *WSMessage {
 			"username", identityOf(c),
 			"consecutive_fast_failures", streak.Count,
 			"paused_until", until.UTC().Format(time.RFC3339))
+		h.recordDecision(decisionUsername(c), decisionRefused, "", "", 0,
+			"contributor failure streak: "+strconv.Itoa(streak.Count)+
+				" consecutive fast failures, paused until "+until.UTC().Format(time.RFC3339))
 		msg := h.taskUnavailable(taskUnavailableFailureStreak)
 		msg.Message = contributorFailureStreakMessage(streak, until)
 		return msg
