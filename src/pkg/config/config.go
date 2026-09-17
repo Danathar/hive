@@ -67,6 +67,10 @@ type Config struct {
 	// Convergence toggles the convergence-driven admission surfaces
 	// (kubestellar/hive#3845 follow-ons). Default off → zero behaviour change.
 	Convergence ConvergenceConfig `yaml:"convergence,omitempty" json:"convergence,omitempty"`
+	// Classification mirrors the Go-consumed subset of hive-project.yaml's
+	// `classification:` block (currently review_bots, hivecommons/hive#7360).
+	// Default empty → the review-thread reconciler is off.
+	Classification ClassificationConfig `yaml:"classification,omitempty" json:"classification,omitempty"`
 	// Turn gates the re-entrant conversation-as-state rollout (#5799). Default
 	// off leaves every agent on the legacy tmux loop until an operator opts in.
 	Turn TurnConfig `yaml:"turn,omitempty" json:"turn,omitempty"`

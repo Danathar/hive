@@ -314,6 +314,7 @@ func (w *spokeWire) dashboardDependencies() *dashboard.Dependencies {
 				newClient.SetAutoMergeLabel(normalizedAutoMergeLabel(w.cfg.Governor.Labels.AutoMerge))
 			}
 			newClient.SetIssueFilter(w.cfg.Project.IssueFilter)
+			installReviewBots(newClient, w.cfg, w.logger)
 			newClient.SetRepoPausedFunc(w.cfg.IsRepoPaused)        // #6203: a client rebuild must not un-pause repos
 			newClient.SetAgentRepoScopeFunc(w.cfg.AgentServesRepo) // #6204: a client rebuild must not un-scope agents
 			syncAutoMergePolicyToGitHubClient(w.cfg, newClient)
