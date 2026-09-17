@@ -38,6 +38,7 @@ func (w *spokeWire) wireSpokeAuthGovernor() {
 	// gates which issues become actionable at all, so it must be installed
 	// even when no exempt labels are configured.
 	w.ghClient.SetIssueFilter(w.cfg.Project.IssueFilter)
+	installReviewBots(w.ghClient, w.cfg, w.logger)
 	// The user write-token client (userGHClient) was removed: every GitHub write
 	// — issues, PRs, comments, merges, and the advisory digest — now goes through
 	// the hive's App installation token (w.ghClient / kubestellar-hive[bot]). The
@@ -355,6 +356,7 @@ func (w *spokeWire) wireSpokeConfigReloadAndHooks() {
 						newClient.SetAutoMergeLabel(normalizedAutoMergeLabel(w.cfg.Governor.Labels.AutoMerge))
 					}
 					newClient.SetIssueFilter(w.cfg.Project.IssueFilter)
+					installReviewBots(newClient, w.cfg, w.logger)
 					newClient.SetRepoPausedFunc(w.cfg.IsRepoPaused)        // #6203: a client rebuild must not un-pause repos
 					newClient.SetAgentRepoScopeFunc(w.cfg.AgentServesRepo) // #6204: a client rebuild must not un-scope agents
 					syncAutoMergePolicyToGitHubClient(w.cfg, newClient)
