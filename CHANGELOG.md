@@ -11,6 +11,20 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-17 (v4.51.1)
+
+### Changed
+
+- Extract per-user hive listing/lifecycle API domain from `pkg/hub/saas.go` into `saas_hives_api.go` (#7278 god-file split; no behavior change).
+- Extract the tmux terminal-seam domain from `pkg/agent/manager.go` into `manager_tmux.go` (#7303 god-file split; no behavior change).
+- Extracted the embedded contribute landing/dossier page (6,390 lines: `handleContributeLanding`, `handleContributorDossierPage`, and their HTML/JS template) from `pkg/dashboard/api_contribute.go` into a new `pkg/dashboard/contribute_landing.go`, first stage of the #7435 god-file split. Pure code motion: no behavior change. api_contribute.go: 9,407 → 3,014 lines. Includes api-reference.md citation refresh (six /api/v1 rows were already pointing into template strings; repointed to the real handlers).
+
+### Fixed
+
+- Corrected the kick prompt size budget quoted in the Repos tab's cap help text from ~22 KiB to ~25 KiB, matching the measured worst-case sizing in `pkg/dashboard/prompt_history.go` after the issue and PR list caps landed (#7368).
+- Pinned `src/deploy/ci-runners/runner-image-patch.yaml` to the runner image that `ci-runner-image.yml` actually published, `ghcr.io/hivecommons/hive-ci-runner:v2.337.0-ubuntu-24.04-toolchain-1` (digest `sha256:5a26c5dd7c4bbfd7d2707c99ed51b3fb6115b44f5532569452ad036b35c31224`). The file shipped a `REPLACE_ME` placeholder, so the `kubectl patch --patch-file` command the README documents rolled every runner pod into `ImagePullBackOff` unless the operator remembered to hand-edit it first — friction on the one step that ends the #6648 apt-mirror egress failure class. The README and the workflow's job summary were updated to match, and `pkg/config` now fails if the patch carries a placeholder or a mutable tag, or if the README names a different image than the patch sets. Applying the patch to the cluster is still an operator action; nothing in this repository can perform it.
+- A newly created `reviewer` agent no longer inherits ci-maintainer's CI/coverage stat strip and shows a fabricated `COVERAGE 0% vs goal 91%` ([#7411](https://github.com/hivecommons/hive/issues/7411)). The strip did not come from the create API or the built-in defaults (which are empty for an unknown name): the image shipped `deploy/data/agents/reviewer/stats.json`, a retired seed that was a byte-copy of ci-maintainer's set, and the entrypoint copies every seed into `/data` on boot — so any spoke that later created an agent named `reviewer` (ADVISORY, on-demand, owning no repository) picked it up. Now: (1) the seed is removed, and a test pins that no seed other than ci-maintainer's carries that strip; (2) spokes that already have the copy on disk heal themselves — the stats readers recognise ci-maintainer's strip on another agent, ignore it and delete the file (logged once); (3) the `health` stat source (the primary repo's workflow checks) is scoped to role — `GET /api/config/stat-sources?agent=<name>` and the agent config's Stats tab never offer it to an `ADVISORY` or `on_demand` agent, while a leftover health row stays visible and removable; (4) a `pct`/`pct-bar` stat with no underlying metric renders `—`, matching LAST KICK / AVG/PASS on the same card, instead of a hard `0%` that is indistinguishable from a real catastrophic result.
+
 ## 2026-09-17 (v4.51.0)
 
 ### Added
