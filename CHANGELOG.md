@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-17 (v4.49.1)
+
+### Fixed
+
+- Contribute websocket tests no longer flake with `TempDir RemoveAll cleanup: directory not empty`. A hijacked `HandleWS` goroutine can outlive its test — `httptest.Server.Close` does not wait for hijacked connections — so its deferred bookkeeping (the disconnect-abandonment task-run append, decision-ring writes) landed after the test returned, racing `t.TempDir()` removal and restored globals. The hub now counts live handlers in a `sync.WaitGroup` and `setupWSTest` drains it at cleanup, after the hub closes and before the scratch directories are removed.
+
 ## 2026-09-17 (v4.49.0)
 
 ### Added
