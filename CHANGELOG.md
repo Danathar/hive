@@ -11,6 +11,25 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-17 (v4.44.0)
+
+### Added
+
+- Documented fleet self-reporting (#7280). `governor.fleet_report` can file issues on `hivecommons/hive` from an operator's hive once opted in, but had no doc page at all, so the privacy-relevant questions — what leaves the hive, what never does, and how to preview it before opting in — had no answer outside the source. `src/docs/fleet-report.md` covers the `file_upstream` opt-in and its dry-run default, both triggers and the thresholds that gate them, the exact field list, the truncated-digest anonymisation of the hive ID, fingerprint dedup via comment + reaction, and recovery behaviour.
+
+### Changed
+
+- Extracted `runEvalCycle`'s kick-dispatch loop behind an injectable seam (#7232). The two skip rules (provider-error backoff, failed send) and the single-probe rule were previously unreachable without a tmux session, a live governor, and a dashboard, so none of them had a test; they are now covered directly, including the effect ORDER the extraction had to preserve. No behaviour change.
+- Convergence rollout now defaults to `shadow` instead of `off` (#7260). Shadow is dispatch-identical to off — no kick is withheld and no queue row changes — but it records what enforcement *would* have done, so the soak evidence the documented promote-to-enforce path depends on actually accumulates instead of staying empty on every hive whose owner never opted in. `off` remains fully selectable as the rollback and as the control arm for fixed-commit A/B comparison, and an explicitly configured mode is never migrated. A non-empty but unrecognised mode still fails safe to `off`. The Features tab now explains what convergence does, and its soak summary says outright whether enforcement would have differed.
+- Marked `pkg/convergence/{mutation,outcome,proof}` as staged-and-unwired (#7281). These 2,580 lines compile and are maintained but are reachable from no binary, and unlike `pkg/turn` they carried no marker saying so, leaving readers unable to tell staged work from abandoned work. Each now has a package doc stating it, and a new guard enforces the claim in both directions: an unwired convergence package must be marked, and a marked one must still be unwired — so wiring one up forces the doc to be corrected in the same change instead of leaving a comment that lies.
+
+### Fixed
+
+- **Spoke dashboards now measure "N behind" against the commit the hub will actually roll them to, and show the hub's real upgrade policy** ([#7262](https://github.com/hivecommons/hive/issues/7262)). The hub previously never told a spoke who upgrades it, on what schedule, or toward which commit — so a hub-managed v5 spoke on the `:edge` channel rendered "35 behind" (its distance to a hard-wired v4 tip; the real distance to anything it could reach was 28), "Automatic updates are turned off for this hive" (its own unused local flag), "Update schedule: Unknown — managed by the hub", and a "Last upgrade SUCCEEDED — running the target image" line that stayed up after a floating-tag pull had moved the pod. The heartbeat response now carries an `upgrade_policy` (hub-managed vs spoke-managed, instant/daily/weekly schedule, fleet-wide pause, tracked branch/channel and the resolved reachable target SHA — the same inputs the hub's own `UpgradeTo` decision uses). The spoke's `/api/version`, top-bar badge and Settings → Hub tab use it: "behind" is the distance to the hub's target (never a hard-coded stable branch; unmanaged spokes fall back to their own branch tip), the Automatic Updates switch is locked and labelled "managed by the hub" when the hub owns it, the schedule shows the hub's cadence (with a fleet-wide "paused" state), and a recorded spoke-side success now says "has since moved to Y" when the running commit differs. Older hubs send no policy and the spoke keeps its local view, with `policySource: "local"` saying so.
+- Fleet self-reporting no longer mistakes healthy scheduled cycling for an agent crash loop. The detector thresholded on each agent's cumulative restart counter, which every cadence kick increments, so a spoke running normally reported all six of its agents as high-severity crash loops; crash evidence now requires an actual crash state, and a cumulative count no longer claims a 24-hour observation window it was never measured over.
+- Hive-code defect fingerprints now include the agent, so reports from different lanes no longer collapse onto one issue. Every agent shares the `agent-runtime` component, so per-agent reports previously produced one issue plus a comment per agent per cycle instead of one issue per problem.
+- Fleet self-report recovery comments no longer render an empty criterion reference. A hive-code defect carries no ACMM criterion, so its recovery comment read "no longer observes the ACMM shortfall/evidence for ``"; recovery text now names the ACMM criterion only when there is one, and names the defect otherwise.
+
 ## 2026-09-17 (v4.43.1)
 
 ### Fixed
