@@ -11,6 +11,17 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-17 (v4.51.0)
+
+### Added
+
+- Documented the **large-spoke scale envelope** — the backlog size one spoke is known to work at, and what changes beyond it — in `src/docs/scale-envelope.md`, with a roadmap row tracking it. It states the design rule that overflow must paginate, prioritize, or shed load and never fail closed on the work that would drain the backlog; records that Hive's caps are render-side (kick prompts) while issue/PR enumeration is uncapped, so the governor always sees true queue depth; and inventories every cap that changes behaviour at scale — kick issue/PR list caps and their `500` ceiling, the per-repo held-PR stand-down, fix-before-new detail limits, skill-injection bytes, sweep rates, prompt-history retention — with its default, its overflow behaviour, and whether an operator can tune it. It also names an inconsistency the inventory exposes: the only cap whose overflow *fails closed* (`maxHeldPRsPerRepoPerKick`) is hardcoded, while the truncating caps are the tunable ones, and proposes one policy for which kind should be which.
+
+### Fixed
+
+- Turned the `./cmd/...` coverage ratchet in `coverage-hourly.yml` and `v2-tests.yml`, which had drifted 27-82 points below what the packages actually hold (`cmd/apiproxy` 13 vs 95.6%, `cmd/bd` 58 vs 95.7%, `cmd/hive-backup` 68 vs 90.4%, `cmd/hive` 17 vs 44.8%) and so could no longer catch a CLI test regression. Floors re-measured on 2026-09-17 and set ~2-3 points under the lower of the linux/darwin measurements. `cmd/hivectl` gained tests in a3f9842c and holds 100.0%, so its dead `UNTESTED_CMD_MAINS` no-test exemption — which could never match once `go test` stopped emitting a "[no test files]" line for it — is replaced by a real 97% floor.
+- The agent and governor settings dialogs can no longer hang on "Loading…" forever. The config fetch is bounded by a 12s timeout and reports the stall instead of spinning, and a superseded or dismissed load can no longer paint over the dialog that replaced it.
+
 ## 2026-09-17 (v4.50.2)
 
 ### Changed
