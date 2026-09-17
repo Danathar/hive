@@ -11,6 +11,17 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-17 (v4.41.0)
+
+### Added
+
+- Added dry-run fleet self-reporting for persistent ACMM shortfalls attributed to hive defects, including deterministic fingerprints, scrubbed evidence, dashboard previews, and opt-in upstream filing to hivecommons/hive.
+
+### Fixed
+
+- Settings modal scroll no longer leaks to the dashboard behind it. The lock is now applied to the root element as well as the body: `html { overflow-x: hidden }` makes the root the viewport's scroll container, which silently turned the existing `body.modal-open { overflow: hidden }` rule into a no-op.
+- Removed the dead `healthcheck_interval` and `restart_cooldown` health settings, which were parsed, validated, persisted and rendered in Settings but read by no runtime loop, so changing them had no effect (#7251). Existing configs keep loading: an explicitly set `healthcheck_interval` is migrated onto the watchdog's check interval, and both legacy keys are otherwise ignored rather than rejected. The Health tab now shows only Watchdog and Escalation, and the Model Lock toggle moved to the Budget tab.
+
 ## 2026-09-17 (v4.40.2)
 
 ### Fixed
