@@ -542,6 +542,15 @@ type Manager struct {
 	project                       ProjectContext
 	copilotAuthToken              string
 	copilotAuthTokenAuthoritative bool
+	// copilotAuthTokenSource names where copilotAuthToken came from — one of
+	// the CopilotTokenSource* constants, "" when no token is held. Never a
+	// secret: it is the ONE thing a "not licensed" verdict cannot be triaged
+	// without (#7302). GitHub's rejection is a statement about whichever
+	// credential hive presented; an owner reading "check the account's seat"
+	// after a successful dashboard login cannot tell whether the rejected
+	// credential was their login, a provisioned COPILOT_GITHUB_TOKEN, or a
+	// stale identity inherited from the shared CLI config.
+	copilotAuthTokenSource string
 	// copilotAuthTokenRejected records that the currently-held authoritative
 	// Copilot token has been observed being rejected upstream by GitHub's
 	// Copilot API ("not licensed to use Copilot" — #6500/#6767). Once set, the
@@ -729,11 +738,16 @@ func NewManager(agents map[string]config.AgentConfig, logger *slog.Logger, proje
 	// completions; write access is gated by --enable-all-github-mcp-tools flag.
 	copilotToken := os.Getenv("COPILOT_GITHUB_TOKEN")
 	copilotTokenAuthoritative := strings.TrimSpace(copilotToken) != ""
+	copilotTokenSource := CopilotTokenSourceEnv
 	if copilotToken == "" {
 		// Fall back to the token persisted by the dashboard's device-flow login.
+		copilotTokenSource = CopilotTokenSourceDurableFile
 		if data, err := os.ReadFile(CopilotUserTokenPath); err == nil {
 			copilotToken = strings.TrimSpace(string(data))
 		}
+	}
+	if strings.TrimSpace(copilotToken) == "" {
+		copilotTokenSource = ""
 	}
 	claudeToken := claude.ReadAccessToken(claude.CredentialsPath)
 
@@ -755,6 +769,7 @@ func NewManager(agents map[string]config.AgentConfig, logger *slog.Logger, proje
 		project:                       project,
 		copilotAuthToken:              copilotToken,
 		copilotAuthTokenAuthoritative: copilotTokenAuthoritative,
+		copilotAuthTokenSource:        copilotTokenSource,
 		claudeAuthToken:               claudeToken,
 		uidMap:                        uidMap,
 		kickLogDir:                    kickLogDir,

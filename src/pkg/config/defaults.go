@@ -20,8 +20,6 @@ const (
 	defaultPromoteThreshold       = 0.9
 	defaultSensingTTLSeconds      = 900
 	defaultSensingPullbackSeconds = 900
-	defaultHealthcheckIntervalS   = 300
-	defaultRestartCooldownS       = 60
 	defaultBudgetPeriodDays       = 7
 	defaultBudgetCriticalPct      = 90
 	defaultLogMaxSizeMB           = 50
@@ -245,12 +243,7 @@ func (c *Config) applyDefaults() {
 	if c.Governor.Sensing.PullbackSeconds == 0 {
 		c.Governor.Sensing.PullbackSeconds = defaultSensingPullbackSeconds
 	}
-	if c.Governor.Health.HealthcheckInterval == 0 {
-		c.Governor.Health.HealthcheckInterval = defaultHealthcheckIntervalS
-	}
-	if c.Governor.Health.RestartCooldown == 0 {
-		c.Governor.Health.RestartCooldown = defaultRestartCooldownS
-	}
+	c.migrateDeprecatedHealthSettings()
 	if c.Governor.Budget.PeriodDays == 0 {
 		c.Governor.Budget.PeriodDays = defaultBudgetPeriodDays
 	}

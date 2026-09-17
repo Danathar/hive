@@ -1155,6 +1155,7 @@ func StartHeartbeat(ctx context.Context, hubURL string, collect StatusCollector,
 	var onRestartSpoke RestartSpokeCallback
 	var onAgentRestartReset AgentRestartResetCallback
 	var freshCollect FreshStatusCollector
+	var onUpgradePolicy UpgradePolicyCallback
 	for _, cb := range callbacks {
 		switch fn := cb.(type) {
 		case UpgradeCallback:
@@ -1179,6 +1180,8 @@ func StartHeartbeat(ctx context.Context, hubURL string, collect StatusCollector,
 			onAgentRestartReset = fn
 		case FreshStatusCollector:
 			freshCollect = fn
+		case UpgradePolicyCallback:
+			onUpgradePolicy = fn
 		}
 	}
 
@@ -1224,6 +1227,11 @@ func StartHeartbeat(ctx context.Context, hubURL string, collect StatusCollector,
 		}
 		if resp.RestartSpoke && onRestartSpoke != nil {
 			onRestartSpoke()
+		}
+		// Descriptive only (#7262): the hub's upgrade posture for this spoke,
+		// rendered by the dashboard. nil means the hub does not manage us.
+		if resp.UpgradePolicy != nil && onUpgradePolicy != nil {
+			onUpgradePolicy(resp.UpgradePolicy)
 		}
 		if onAgentRestartReset != nil {
 			for _, name := range resp.ResetAgentRestarts {
@@ -2481,6 +2489,11 @@ type HeartbeatResponse struct {
 	// nil means "nothing to deliver". The hub sends it once (drained on delivery)
 	// rather than every beat, since it carries a secret key value.
 	PendingGateway *HeartbeatGatewayConfig `json:"pending_gateway,omitempty"`
+	// UpgradePolicy is the hub's upgrade posture for THIS spoke (#7262): who
+	// owns upgrades, on what schedule, toward which branch/channel head. Sent
+	// on every beat for any hive the hub has an upgrade opinion about; nil
+	// means "the hub does not manage this hive's upgrades".
+	UpgradePolicy *HeartbeatUpgradePolicy `json:"upgrade_policy,omitempty"`
 	// SigHiveID / SigSeq / SigSignedAt are authenticated by the detached
 	// hub->spoke heartbeat response signature. They bind the response to this
 	// hive and a monotonic sequence so signed responses cannot be replayed
@@ -2525,6 +2538,47 @@ type GitHubAppConfigCallback func(cfg *HeartbeatGitHubAppConfig)
 // its running project config. Used for heartbeat-only clusters where the hub
 // cannot push config over kubectl (mirrors AuthorizedUsersCallback).
 type ProjectConfigCallback func(cfg *HeartbeatProjectConfig)
+
+// HeartbeatUpgradePolicy is the hub's authoritative upgrade posture for one
+// spoke (#7262). Every field is descriptive: nothing here instructs the spoke
+// to change its image (UpgradeTo / SwitchToTag still do that). Wire-compatible
+// with pkg/hub.HeartbeatUpgradePolicy.
+type HeartbeatUpgradePolicy struct {
+	// HubManaged is true when the hub rolls this hive's Deployment itself.
+	HubManaged bool `json:"hub_managed"`
+	// SpokeManaged is true when the spoke self-upgrades on UpgradeTo
+	// instructions from the heartbeat. Mutually exclusive with HubManaged.
+	SpokeManaged bool `json:"spoke_managed"`
+	// Schedule is the hub-side cadence: "instant", "daily" or "weekly".
+	Schedule string `json:"schedule,omitempty"`
+	// Paused is the fleet-wide spoke-upgrade kill switch state.
+	Paused bool `json:"paused"`
+	// Branch is the git line the spoke reports running (its target line).
+	Branch string `json:"branch,omitempty"`
+	// Channel is the release channel the spoke's Deployment actually follows
+	// ("stable"/"candidate"/"edge"), "" for a branch tag or a pin.
+	Channel string `json:"channel,omitempty"`
+	// TargetSHA is the newest commit this spoke can actually land on. The
+	// spoke's "N behind" is measured against THIS.
+	TargetSHA string `json:"target_sha,omitempty"`
+	// TargetResolved is false only when the spoke tracks a channel the hub
+	// could not resolve to a commit; the spoke must then render "unknown".
+	TargetResolved bool `json:"target_resolved"`
+	// ArmedTarget is the SHA the hub currently has armed for this hive, "" when none.
+	ArmedTarget string `json:"armed_target,omitempty"`
+}
+
+// Schedule values carried by HeartbeatUpgradePolicy.Schedule. These mirror
+// pkg/hub's AutoUpgradeMode* constants; the spoke package cannot import pkg/hub.
+const (
+	AutoUpgradeModeInstant = "instant"
+	AutoUpgradeModeDaily   = "daily"
+	AutoUpgradeModeWeekly  = "weekly"
+)
+
+// UpgradePolicyCallback is called on every beat whose response carries an
+// UpgradePolicy. nil is never delivered.
+type UpgradePolicyCallback func(p *HeartbeatUpgradePolicy)
 
 // taskPushInterval is how often the spoke pushes task status to the hub. A var
 // (not a const) so tests can drive a single push quickly; production keeps the

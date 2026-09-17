@@ -15,7 +15,7 @@ func TestVersionProvenanceRendering(t *testing.T) {
 	}
 	html := indexHTML(t)
 	var source strings.Builder
-	for _, name := range []string{"escapeHtml", "versionDeliveryLabel", "versionTrackingLabel", "versionTrackingTooltip", "fetchGitVersion"} {
+	for _, name := range []string{"escapeHtml", "versionDeliveryLabel", "versionTrackingLabel", "versionTrackingTooltip", "upgradeTargetLabel", "fetchGitVersion"} {
 		if name == "fetchGitVersion" {
 			source.WriteString("async ")
 		}

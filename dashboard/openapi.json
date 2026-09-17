@@ -3530,7 +3530,7 @@
           "Agents"
         ],
         "summary": "Set an agent's reasoning effort",
-        "description": "Sets and persists the agent's reasoning effort for backends that expose one (codex: minimal|low|medium|high|xhigh, passed as -c model_reasoning_effort; agy: low|medium|high, passed as --effort), then restarts the agent's session so the change takes effect — the effort only exists on the launch command line. The path value \"default\" clears the field back to the backend's own default. Rejects a value the agent's effective backend does not accept, and any value for a backend with no effort control.",
+        "description": "Sets and persists the agent's reasoning effort for backends that expose one (codex: minimal|low|medium|high|xhigh, passed as -c model_reasoning_effort; agy: low|medium|high, passed as --effort), then restarts the agent's session so the change takes effect \u2014 the effort only exists on the launch command line. The path value \"default\" clears the field back to the backend's own default. Rejects a value the agent's effective backend does not accept, and any value for a backend with no effort control.",
         "parameters": [
           {
             "name": "agent",
@@ -6035,6 +6035,166 @@
           },
           "403": {
             "description": "Requires owner role"
+          }
+        }
+      }
+    },
+    "/api/watchdog/activity": {
+      "get": {
+        "tags": [
+          "Governor"
+        ],
+        "summary": "Watchdog activity readout",
+        "description": "The agent self-healing watchdog's audit trail (`watchdog-*` actions) over a trailing window of whole UTC days, aggregated for the Health tab: total and per-action counts, a zero-filled daily histogram, the current liveness verdict per probed agent, and \u2014 in observe mode \u2014 whether the window argues against promoting to heal. Read from the on-disk audit log (rotated backups included), falling back to the in-memory ring only when no file exists. Requires read-write role (same tier as GET /api/audit, its source).",
+        "parameters": [
+          {
+            "name": "days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 90,
+              "default": 30
+            },
+            "description": "Trailing window in calendar days ending today. Values above 90 (the audit log's retention) are clamped; non-positive or non-integer values are a 400."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Watchdog activity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "days": {
+                      "type": "integer",
+                      "description": "Window actually applied, after clamping"
+                    },
+                    "since": {
+                      "type": "string",
+                      "format": "date-time",
+                      "description": "UTC midnight opening the window"
+                    },
+                    "mode": {
+                      "type": "string",
+                      "enum": [
+                        "off",
+                        "observe",
+                        "heal"
+                      ],
+                      "description": "Watchdog authority in force (fleet-wide kill switch applied)"
+                    },
+                    "acting": {
+                      "type": "boolean",
+                      "description": "Whether the mode takes fleet-changing action; false means the counts are actions the watchdog WOULD have taken"
+                    },
+                    "total": {
+                      "type": "integer"
+                    },
+                    "taken": {
+                      "type": "integer",
+                      "description": "Actions performed"
+                    },
+                    "observed": {
+                      "type": "integer",
+                      "description": "Actions recorded with the -observed suffix (observe mode)"
+                    },
+                    "byAction": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "integer"
+                      },
+                      "description": "Counts keyed by audit action minus the watchdog- prefix: restart, crashloop-pause, giveup, healthy-reset, and their -observed twins"
+                    },
+                    "daily": {
+                      "type": "array",
+                      "description": "One bucket per UTC day in the window, oldest first, zero-filled",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "date": {
+                            "type": "string",
+                            "description": "YYYY-MM-DD (UTC)"
+                          },
+                          "count": {
+                            "type": "integer"
+                          },
+                          "byAction": {
+                            "type": "object",
+                            "additionalProperties": {
+                              "type": "integer"
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "agents": {
+                      "type": "array",
+                      "description": "Current watchdog liveness per probed, enabled agent (agents never swept are omitted)",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string"
+                          },
+                          "state": {
+                            "type": "string",
+                            "description": "Pane class (ready, shell-prompt, auth-required, stuck-overlay, no-output, no-session, unknown) or crash-loop when the watchdog paused the agent"
+                          },
+                          "since": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "message": {
+                            "type": "string"
+                          },
+                          "authenticated": {
+                            "type": "string",
+                            "description": "Authenticated condition status: True, False or Unknown"
+                          },
+                          "producing": {
+                            "type": "string",
+                            "description": "Producing condition status: True, False or Unknown"
+                          },
+                          "paused": {
+                            "type": "boolean"
+                          }
+                        }
+                      }
+                    },
+                    "lastAction": {
+                      "type": "string",
+                      "description": "Short name of the newest entry in the window"
+                    },
+                    "lastActionAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "promotion": {
+                      "type": "object",
+                      "description": "Observe \u2192 Heal hint; present only in observe mode",
+                      "properties": {
+                        "safe": {
+                          "type": "boolean",
+                          "description": "True when the window holds no crash-loop pause or give-up verdict, taken or observed"
+                        },
+                        "reason": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "days is not a positive integer"
+          },
+          "403": {
+            "description": "Requires read-write role"
           }
         }
       }
@@ -11311,7 +11471,7 @@
           "Contribute"
         ],
         "summary": "Fleet, work, and admission-policy snapshot",
-        "description": "Read-only snapshot for the Management & Operations tab: connected clankers, in-flight work items, the hub's configured admission policy, plus cooldown/in-flight/held issue counts. Public, GET only, no side effects.",
+        "description": "Read-only snapshot for the Management & Operations tab: connected clankers, in-flight work items, the hub's configured admission policy, plus cooldown/in-flight/held issue counts. Public, GET only, no side effects. `pane_tail` on a clanker (the agent's terminal while its task is in flight, #7317 item 3) is served only to owner/read-write viewers; `pane_tail_visible` says whether it was.",
         "responses": {
           "200": {
             "description": "Fleet snapshot",
@@ -11325,7 +11485,7 @@
                       "items": {
                         "type": "object"
                       },
-                      "description": "Connected FleetClanker entries"
+                      "description": "Connected FleetClanker entries. Each carries `last_failure` (the most recent task_failed this connection reported) and, while a task is in flight and the viewer is admitted, `pane_tail`."
                     },
                     "work": {
                       "type": "array",
@@ -11426,6 +11586,10 @@
                     },
                     "held_count": {
                       "type": "integer"
+                    },
+                    "pane_tail_visible": {
+                      "type": "boolean",
+                      "description": "Whether this viewer is admitted to each clanker's `pane_tail` (owner/read-write, or anyone on an open spoke). When false the field is stripped from every clanker."
                     }
                   }
                 }
@@ -11769,6 +11933,10 @@
                           "failed": {
                             "type": "integer"
                           },
+                          "abandoned": {
+                            "type": "integer",
+                            "description": "Runs that ended with no terminal report (relay hand-back or lost connection). Counted separately from `failed` so these rows, new in v4.46, do not move the failure rate the backend ratchet reads."
+                          },
                           "scenarios": {
                             "type": "object",
                             "description": "Map of scenario name -> count",
@@ -11788,6 +11956,181 @@
                           }
                         }
                       }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/contribute/runs": {
+      "get": {
+        "tags": [
+          "Contribute"
+        ],
+        "summary": "Per-run task history for one contributor",
+        "description": "The per-run records behind /api/contribute/run-stats' aggregates: outcome, failure kind, reason, duration and scenario for each task a contributor ran in the window. Answers \"why is this contributor struggling?\" from the dashboard, without shell access to the hub host. Public, GET only, no side effects \u2014 the username is already public on /api/contribute/activity and the reason is already served on /api/contribute/fleet's last_failure for a connected contributor; what this adds is durability, not audience. No tokens. `pane_tail` (the agent's terminal at the moment a failed or abandoned run stopped, #7317 item 3) is served only to owner/read-write viewers; for anyone else the field is stripped and `pane_tail_visible` is false.",
+        "parameters": [
+          {
+            "name": "username",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "GitHub login to filter on, matched case-insensitively. Omit for every contributor's runs."
+          },
+          {
+            "name": "days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 365,
+              "default": 7
+            },
+            "description": "Trailing window in days; 0 reads everything in the live log."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 100
+            },
+            "description": "Maximum records to return, newest first."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Per-run task history, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "username": {
+                      "type": "string"
+                    },
+                    "window_days": {
+                      "type": "integer"
+                    },
+                    "limit": {
+                      "type": "integer"
+                    },
+                    "returned": {
+                      "type": "integer"
+                    },
+                    "runs": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "ts": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "task_id": {
+                            "type": "string"
+                          },
+                          "task_gen": {
+                            "type": "integer"
+                          },
+                          "repo": {
+                            "type": "string"
+                          },
+                          "number": {
+                            "type": "integer"
+                          },
+                          "username": {
+                            "type": "string"
+                          },
+                          "backend": {
+                            "type": "string"
+                          },
+                          "provider": {
+                            "type": "string"
+                          },
+                          "model": {
+                            "type": "string"
+                          },
+                          "effort": {
+                            "type": "string"
+                          },
+                          "role": {
+                            "type": "string"
+                          },
+                          "outcome": {
+                            "type": "string",
+                            "enum": [
+                              "completed",
+                              "failed",
+                              "abandoned"
+                            ],
+                            "description": "Which terminal report arrived, or `abandoned` when none did."
+                          },
+                          "abandon_cause": {
+                            "type": "string",
+                            "enum": [
+                              "handback",
+                              "disconnect"
+                            ],
+                            "description": "Set only when outcome is `abandoned`. `handback`: the relay asked for new work while still holding the task. `disconnect`: the socket dropped with the task held and no live connection re-adopted it. Hub-observed, never client-reported."
+                          },
+                          "completion_signal": {
+                            "type": "string"
+                          },
+                          "verdict": {
+                            "type": "string"
+                          },
+                          "verdict_reason": {
+                            "type": "string"
+                          },
+                          "failure_kind": {
+                            "type": "string"
+                          },
+                          "reason": {
+                            "type": "string",
+                            "description": "The client-reported failure reason, or \u2014 for an abandonment \u2014 the hub's synthetic description of what it observed."
+                          },
+                          "permanent": {
+                            "type": "boolean"
+                          },
+                          "duration_s": {
+                            "type": "number",
+                            "description": "Assignment to terminal report, in seconds. Omitted when the task was adopted on the resume path and has no fresh assignment timestamp \u2014 absent means unknown, not zero."
+                          },
+                          "pr_url": {
+                            "type": "string"
+                          },
+                          "pr_verified": {
+                            "type": "boolean"
+                          },
+                          "scenario": {
+                            "type": "string"
+                          },
+                          "session": {
+                            "type": "string"
+                          },
+                          "pane_tail": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            },
+                            "description": "The last lines of the agent's terminal pane as the relay last reported them, captured when the record was written. Present only on `failed` and `abandoned` outcomes, bounded to 30 lines of 400 runes, token-redacted, and served only when `pane_tail_visible` is true."
+                          }
+                        }
+                      }
+                    },
+                    "pane_tail_visible": {
+                      "type": "boolean",
+                      "description": "Whether this viewer is admitted to `pane_tail` (owner/read-write, or anyone on an open spoke with no auth boundary). When false the field is stripped from every record so the page can say so instead of showing nothing."
                     }
                   }
                 }
@@ -15134,6 +15477,62 @@
         }
       }
     },
+    "/api/copilot-auth/verify": {
+      "post": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Verify the Copilot seat",
+        "description": "Re-runs seat verification against copilot_internal/user for the Copilot credential the hive currently holds, and returns the fresh verdict. A stored device-flow token proves only that GitHub minted one; it is not evidence the account can run inference. Separate from the status endpoint because it costs a network round trip while status is polled during login. Requires owner role.",
+        "responses": {
+          "200": {
+            "description": "Verification verdict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "seat": {
+                      "type": "object",
+                      "properties": {
+                        "state": {
+                          "type": "string",
+                          "description": "active: GitHub accepted the credential and the seat is live. no_seat: GitHub's explicit licence verdict. blocked: a 403 that is not a licence verdict, usually an org policy refusing the integration ID. rejected: a 401, meaning the login did not activate server-side. unreachable: network failure or 5xx, which says nothing about the account. unknown: no credential, or nothing verified yet.",
+                          "enum": [
+                            "unknown",
+                            "active",
+                            "no_seat",
+                            "blocked",
+                            "rejected",
+                            "unreachable"
+                          ]
+                        },
+                        "detail": {
+                          "type": "string",
+                          "description": "Operator-facing explanation including what to do next. Empty when state is unknown."
+                        },
+                        "credential": {
+                          "type": "string",
+                          "description": "Which credential was verified, so a verdict is never misread as being about an account the operator did not use.",
+                          "example": "the dashboard Copilot login (GitHub account @alice)"
+                        },
+                        "checked_at": {
+                          "type": "string",
+                          "format": "date-time"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Owner role required"
+          }
+        }
+      }
+    },
     "/api/gh-user-auth/logout": {
       "post": {
         "tags": [
@@ -18385,6 +18784,101 @@
           },
           "503": {
             "description": "Agent manager unavailable"
+          }
+        }
+      }
+    },
+    "/api/hive-advice": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Get weekly frozen Hive owner advice",
+        "description": "Returns the ranked, mode-aware owner advice epoch shared by the dashboard card and advisory digest. The top recommendations are frozen for seven days unless the governor mode changes.",
+        "responses": {
+          "200": {
+            "description": "hiveadvisor.Result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "epoch": {
+                      "type": "object",
+                      "properties": {
+                        "start": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "end": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "mode": {
+                          "type": "string"
+                        },
+                        "recommendations": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/components/schemas/HiveAdviceRecommendation"
+                          }
+                        }
+                      }
+                    },
+                    "recommendations": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/HiveAdviceRecommendation"
+                      }
+                    },
+                    "nextReviewInDays": {
+                      "type": "integer"
+                    },
+                    "frozen": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "HiveAdviceSignal": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        }
+      },
+      "HiveAdviceRecommendation": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "rationale": {
+            "type": "string"
+          },
+          "signals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HiveAdviceSignal"
+            }
+          },
+          "score": {
+            "type": "integer"
           }
         }
       }

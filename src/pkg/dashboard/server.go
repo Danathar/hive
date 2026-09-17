@@ -20,7 +20,9 @@ import (
 	"github.com/hivecommons/hive/pkg/config"
 	"github.com/hivecommons/hive/pkg/dashboard/collect"
 	"github.com/hivecommons/hive/pkg/dashboard/webstatic"
+	"github.com/hivecommons/hive/pkg/fleetreport"
 	"github.com/hivecommons/hive/pkg/github"
+	"github.com/hivecommons/hive/pkg/hiveadvisor"
 	hub "github.com/hivecommons/hive/pkg/hub/spoke"
 	"github.com/hivecommons/hive/pkg/planning"
 	"github.com/hivecommons/hive/pkg/tokens"
@@ -267,9 +269,12 @@ type Server struct {
 	cachedLatestHash    string
 	cachedLatestMessage string
 	cachedLatestAt      time.Time
-	cachedStableV4Hash  string
-	cachedStableV4At    time.Time
 	commitBehindCache   map[string]int
+	// hubUpgradePolicy is the hub's upgrade posture for this spoke as last
+	// delivered on the heartbeat (#7262); nil until the first beat carrying
+	// one, or forever on a spoke the hub does not manage. Guarded by versionMu.
+	hubUpgradePolicy   *hub.HeartbeatUpgradePolicy
+	hubUpgradePolicyAt time.Time
 
 	contributeHub *ContributeWSHub
 
@@ -296,6 +301,15 @@ type Server struct {
 	// backends (copilot/claude/gemini/goose/codex/agy), each with its own discovery
 	// source and static fallback. See cli_models.go.
 	cliModels *cliModelCache
+	// copilotLogin remembers which GitHub account the current Copilot token
+	// resolves to, so a rejected probe can name it without a /user round trip
+	// per 30 s re-probe. Zero value ready. See copilotTokenLogin.
+	copilotLogin copilotLoginCache
+	// copilotSeat remembers the most recent seat-verification verdict for the
+	// current Copilot credential, so the polled auth-status endpoint can report
+	// it without a network call per poll. Zero value ready. See
+	// copilot_seat_verify.go.
+	copilotSeat copilotSeatCache
 
 	ready   bool
 	readyAt time.Time
@@ -322,6 +336,11 @@ type Server struct {
 	hubBannerMu sync.RWMutex
 	hubBanner   *HubBannerState
 
+	hiveAdviceMu     sync.RWMutex
+	hiveAdviceEpoch  *hiveadvisor.Epoch
+	hiveAdviceLast   *hiveadvisor.Result
+	hiveAdviceLoaded bool
+
 	githubAppRecheckFn func() bool
 
 	// forgeAppInventoryFn supplies the Forge App tab's key inventory from
@@ -342,9 +361,17 @@ type StatusPayload struct {
 	// StatusInstance identifies the server process that produced the seq.
 	// Seqs restart at 1 when the spoke restarts; the frontend resets its
 	// guard counters when the instance changes instead of dropping forever.
-	StatusInstance string          `json:"statusInstance"`
-	HiveID         string          `json:"hiveId"`
-	Agents         []FrontendAgent `json:"agents"`
+	StatusInstance string `json:"statusInstance"`
+	HiveID         string `json:"hiveId"`
+	// HiveIDEditable reports whether the Hive ID may be changed from this
+	// dashboard, and HiveIDLockReason explains why not when it may not
+	// (#7247). Computed server-side for the same reason the release-channel
+	// selector is: whether a hive is hub-managed is not something the browser
+	// can determine, and a UI that guesses would either offer an edit that
+	// always 409s or hide one that is legitimately available.
+	HiveIDEditable   bool            `json:"hiveIdEditable"`
+	HiveIDLockReason string          `json:"hiveIdLockReason,omitempty"`
+	Agents           []FrontendAgent `json:"agents"`
 	// HiddenAgents is diagnostic-only (#6581): agent-manager runtime entries
 	// that were left out of Agents (the dashboard cards), each with the stable
 	// reason category it was omitted for. It exists so an operator whose
@@ -381,6 +408,8 @@ type StatusPayload struct {
 	// automatically — a human approves a level change via handlePackSetLevel.
 	// Omitted when it could not be computed (e.g. no config yet).
 	ACMMAdvice          *acmmadvisor.Recommendation `json:"acmmAdvice,omitempty"`
+	HiveAdvice          *hiveadvisor.Result         `json:"hiveAdvice,omitempty"`
+	FleetReport         *fleetreport.Result         `json:"fleetReport,omitempty"`
 	AdvisoryDigest      any                         `json:"advisoryDigest,omitempty"`
 	ContributorPool     *ContributorPoolStatus      `json:"contributorPool,omitempty"`
 	SystemResources     *SystemResources            `json:"systemResources,omitempty"`
@@ -1842,15 +1871,6 @@ func (s *Server) UpdateStatusIfFresh(status *StatusPayload, buildEpoch uint64) b
 
 	status.InferenceBackends = s.buildInferenceBackends()
 
-	// Attach the advisory ACMM level-up recommendation (#5225) from the SAME
-	// signal-collection path the /api/acmm-recommendation endpoint uses, so the
-	// endpoint and the status payload cannot report different advice. Pure
-	// computation over already-collected signals — no I/O on this hot path.
-	// ADVISORY ONLY: this must never auto-apply a level.
-	if advice := acmmadvisor.RecommendFromStatus(s.buildACMMStatusInputs()); advice.CurrentLevel > 0 {
-		status.ACMMAdvice = &advice
-	}
-
 	// Deep checks travel inside the status payload so every dashboard surface
 	// (header pill included) renders the same truth the heartbeat sends the
 	// hub. Judged against the payload in hand: it becomes s.status moments
@@ -1887,6 +1907,22 @@ func (s *Server) UpdateStatusIfFresh(status *StatusPayload, buildEpoch uint64) b
 			"buildEpoch", buildEpoch, "mutationEpoch", curEpoch)
 		return false
 	}
+
+	// Attach the advisory ACMM level-up recommendation (#5225) from the SAME
+	// signal-collection path the /api/acmm-recommendation endpoint uses, so the
+	// endpoint and the status payload cannot report different advice. Pure
+	// computation over already-collected signals — no I/O on this hot path.
+	// ADVISORY ONLY: this must never auto-apply a level.
+	if advice := acmmadvisor.RecommendFromStatus(s.buildACMMStatusInputsFromStatus(status)); advice.CurrentLevel > 0 {
+		status.ACMMAdvice = &advice
+		s.AttachHiveAdvice(status, time.Now().UTC())
+	}
+	version, commit := fleetReportBuildInfo()
+	dryRun := true
+	if s.deps != nil && s.deps.Config != nil {
+		dryRun = s.deps.Config.Governor.FleetReport.DryRun()
+	}
+	s.AttachFleetReport(status, version, commit, dryRun)
 	s.statusSeq++
 	status.StatusSeq = s.statusSeq
 	status.StatusInstance = strconv.FormatInt(s.startedAt.UnixNano(), 10)

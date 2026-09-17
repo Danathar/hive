@@ -948,6 +948,7 @@ func runEvalCycle(
 		ctx,
 		metricsCollector,
 	)
+	statusPublished := false
 	// Ingest any JSONL findings agents wrote and persist them as beads.
 	if advisoryStore != nil {
 		findings, err := advisoryStore.ReadNewFindings()
@@ -1112,6 +1113,11 @@ func runEvalCycle(
 		}
 		dashSrv.SetAdvisoryDigest(digest)
 		statusPayload.AdvisoryDigest = digest
+		statusPublished = dashSrv.UpdateStatusIfFresh(statusPayload, buildEpoch)
+		if !statusPublished {
+			return
+		}
+		hiveAdvice := statusPayload.HiveAdvice
 
 		// Post whenever there is something CURRENT to say: open findings,
 		// recently resolved ones, or an empty evaluation for a hive that already
@@ -1169,6 +1175,7 @@ func runEvalCycle(
 				ShowAll:     digestOpts.ShowAll,
 				Org:         org,
 				ShowEmpty:   digest.TotalCount == 0 && len(digest.RecentlyResolved) == 0,
+				Advice:      hiveAdvice,
 				PrimaryRepo: repoName,
 			})
 			if md != "" {
@@ -1352,7 +1359,11 @@ func runEvalCycle(
 		statusPayload.AdvisoryDigest = d
 	}
 
-	dashSrv.UpdateStatusIfFresh(statusPayload, buildEpoch)
+	if !statusPublished {
+		statusPublished = dashSrv.UpdateStatusIfFresh(statusPayload, buildEpoch)
+	}
+
+	publishFleetReports(ctx, logger, ghClient, dashSrv, statusPayload.FleetReport, cfg.Governor.FleetReport.DryRun())
 
 	if agentStats := dashboard.CollectAgentStats(statusPayload); len(agentStats) > 0 {
 		gov.AttachAgentStats(agentStats)
@@ -3619,12 +3630,6 @@ func applyConfigOverrides(cfg *config.Config, o *snapshot.ConfigOverrides) {
 			cfg.Notifications.Discord = &config.DiscordConfig{}
 		}
 		cfg.Notifications.Discord.Webhook = o.DiscordWebhook
-	}
-	if o.HealthcheckInterval != nil {
-		cfg.Governor.Health.HealthcheckInterval = *o.HealthcheckInterval
-	}
-	if o.RestartCooldown != nil {
-		cfg.Governor.Health.RestartCooldown = *o.RestartCooldown
 	}
 	if o.ModelLock != nil {
 		cfg.Governor.Health.ModelLock = *o.ModelLock

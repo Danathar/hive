@@ -50,7 +50,7 @@ configured to accept exactly this audience for hive agent workloads.
 gets a mint token keeps using its GitHub App token for GitHub operations;
 the mint token is an *additional* credential a WIF-aware external system
 (cloud provider, container registry) can accept
-(`main.go:1738-1750`, ADR-0007 "Consequences").
+(`main.go:2133-2146`, ADR-0007 "Consequences").
 
 ## Config shape
 
@@ -66,9 +66,9 @@ Fields (`MintConfig`, `pkg/config/config.go:218-230`):
 
 | YAML key | Go field | Required (when `enabled: true`) | Default | Notes |
 |---|---|---|---|---|
-| `enabled` | `Enabled` | — | `false` | Turns the service on. `buildAgentMinter` is only invoked when this is `true` (`main.go:1743`). |
-| `key_path` | `KeyPath` | **Yes** | — | PEM path of the RSA signing key. Startup fails with `mint.key_path is required when mint is enabled` if empty while `enabled: true` (`main.go:890-891`). |
-| `issuer` | `Issuer` | **Yes** | — | The `iss` claim, and the identity string WIF providers are configured to trust — typically the hive's public URL. Startup fails with `mint.issuer is required when mint is enabled` if empty (`main.go:893-894`). |
+| `enabled` | `Enabled` | — | `false` | Turns the service on. `buildAgentMinter` is only invoked when this is `true` (`main.go:2139`). |
+| `key_path` | `KeyPath` | **Yes** | — | PEM path of the RSA signing key. Startup fails with `mint.key_path is required when mint is enabled` if empty while `enabled: true` (`main.go:1202-1204`). |
+| `issuer` | `Issuer` | **Yes** | — | The `iss` claim, and the identity string WIF providers are configured to trust — typically the hive's public URL. Startup fails with `mint.issuer is required when mint is enabled` if empty (`main.go:1205-1207`). |
 | `max_ttl_seconds` | `MaxTTLSeconds` | No | `900` (15m, `mint.DefaultMaxTTL`) | Bounds a minted token's lifetime. **Clamped, never trusted verbatim**: any configured value is silently clamped into `[MinTTL 1m, HardCapTTL 1h]` (`mint.go:96-111,172-186`) — you cannot configure a token that outlives one hour no matter what you set here. |
 
 There is no field for scopes, entitlements, or a listener address in
@@ -79,7 +79,7 @@ below).
 
 `key_path` is loaded — or, if the file doesn't exist, generated and
 persisted — by `mint.LoadOrCreateKey` (`mint.go:277-353`, called from
-`main.go:896`):
+`main.go:1208`):
 
 - A missing key file causes a **fresh 2048-bit RSA key to be generated** and
   written as PKCS#8 PEM with **`0600` permissions**, atomically (temp file +

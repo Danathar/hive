@@ -267,6 +267,7 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	s.mux.HandleFunc("GET /api/acmm/evaluation", s.handleACMMEvaluation)
 	s.mux.HandleFunc("POST /api/acmm/issue", s.handleACMMCreateIssue)
 	s.mux.HandleFunc("GET /api/acmm-recommendation", s.handleACMMRecommendation)
+	s.mux.HandleFunc("GET /api/hive-advice", s.handleHiveAdvice)
 
 	s.mux.HandleFunc("GET /api/config/sidebar", s.handleSidebarGet)
 	s.mux.HandleFunc("PUT /api/config/sidebar", s.handleSidebarSet)
@@ -373,6 +374,11 @@ func (s *Server) RegisterAPI(deps *Dependencies) {
 	s.mux.HandleFunc("POST /api/beads/reset/{agent}", s.handleBeadsResetAgent)
 
 	s.mux.HandleFunc("GET /api/auth/token", s.handleAuthToken)
+
+	// Watchdog activity readout for the Health tab (#7254): the watchdog-*
+	// audit actions in a trailing window, bucketed per day, plus per-agent
+	// liveness — the data an Observe → Heal decision rests on.
+	s.mux.HandleFunc("GET /api/watchdog/activity", s.handleWatchdogActivity)
 }
 
 var (
@@ -734,8 +740,7 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 	cached := s.cachedLatestHash
 	cachedMsg := s.cachedLatestMessage
 	cacheAge := time.Since(s.cachedLatestAt)
-	stableV4 := s.cachedStableV4Hash
-	stableV4Age := time.Since(s.cachedStableV4At)
+	policy := s.hubUpgradePolicy
 	s.versionMu.RUnlock()
 
 	if cacheAge > dashboardVersionTipCacheTTL || cached == "" {
@@ -750,24 +755,17 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 			cachedMsg = msg
 		}
 	}
-	if upstreamBranch() == dashboardStableReleaseBranch {
-		stableV4 = cached
-	} else if stableV4Age > dashboardVersionTipCacheTTL || stableV4 == "" {
-		if latest, err := s.fetchRemoteHashForBranch(dashboardStableReleaseBranch); err == nil && latest != "" {
-			s.versionMu.Lock()
-			s.cachedStableV4Hash = latest
-			s.cachedStableV4At = time.Now()
-			s.versionMu.Unlock()
-			stableV4 = latest
-		}
-	}
+
+	// Upgrade target (#7262). Precedence: the hub's heartbeat policy — the
+	// commit this spoke can actually land on (its release channel's revision,
+	// or its branch head), which is exactly what the hub card measures against
+	// — else the tip of the branch this build came from. Never a hard-wired
+	// stable branch: a v5 spoke measured against v4 said "35 behind" while its
+	// real distance to anything it could reach was 28.
+	target := resolveUpgradeTarget(policy, upstreamBranch(), cached)
 
 	if cached != "" {
-		latestShort := cached
-		const shortHashLen = 7
-		if len(latestShort) > shortHashLen {
-			latestShort = latestShort[:shortHashLen]
-		}
+		latestShort := shortSHADashboard(cached)
 		// Only report "behind" if the container image exists on GHCR
 		containerReady := ghcrTagExistsCached(latestShort)
 		resp["latestHash"] = cached
@@ -777,31 +775,34 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 			resp["latestMessage"] = cachedMsg
 		}
 	}
-	if stableV4 != "" {
-		stableShort := shortSHADashboard(stableV4)
-		resp["stableV4Hash"] = stableV4
-		resp["stableV4Short"] = stableShort
+	resp["target"] = target
+	if target.SHA != "" {
+		// stableV4* are the legacy key names the top bar reads; they now carry
+		// the resolved target rather than the v4 tip. Kept so a newer hub UI
+		// and an older spoke keep rendering; the semantic lives in resp["target"].
+		resp["stableV4Hash"] = target.SHA
+		resp["stableV4Short"] = target.Short
 		// Distinguish "the tip has no image yet" (a known state: nothing to
 		// upgrade to, compare never attempted) from "the compare failed"
 		// (genuinely unknown). Without this the frontend renders a yellow
 		// "? behind" next to the green ✓ whenever the tip is unbuilt (#4804).
-		stableImageReady := ghcrTagExistsCached(stableShort)
-		resp["stableV4ImageReady"] = stableImageReady
-		if sameCommitDashboard(versionHash, stableV4) {
+		targetImageReady := ghcrTagExistsCached(target.Short)
+		resp["stableV4ImageReady"] = targetImageReady
+		if sameCommitDashboard(versionHash, target.SHA) {
 			resp["commitsBehind"] = 0
-		} else if stableImageReady {
-			if count, ok := s.commitsBehindStableTip(versionHash, stableV4); ok {
+		} else if targetImageReady {
+			if count, ok := s.commitsBehindStableTip(versionHash, target.SHA); ok {
 				resp["commitsBehind"] = count
 			}
 		}
 	}
 
-	// Auto-update status (#6962, #6963): consolidate everything the spoke knows
-	// locally — the enabled flag, the configured schedule, the target line, the
-	// current commit, how far behind it is, and the on-PVC upgrade marker — into
-	// one explicit status object with a hard "unknown/failed is never healthy"
-	// invariant. This is the findable section the reporter searched the governor
-	// Settings overlay for and could not find.
+	// Auto-update status (#6962, #6963, #7262): consolidate what the spoke
+	// knows — the hub's policy when it has one (who upgrades this hive, on what
+	// schedule, paused or not), else the spoke-local flag and schedule — with
+	// the target line, the current commit, how far behind it is, and the on-PVC
+	// upgrade marker, into one explicit status object with a hard
+	// "unknown/failed is never healthy" invariant.
 	enabled := false
 	period := ""
 	if s.deps != nil && s.deps.Config != nil {
@@ -812,10 +813,6 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 	if cb, ok := resp["commitsBehind"].(int); ok {
 		behindPtr = &cb
 	}
-	targetCommit := ""
-	if sv, ok := resp["stableV4Short"].(string); ok {
-		targetCommit = sv
-	}
 	var marker map[string]any
 	if m, ok := resp["upgradeMarker"].(map[string]any); ok {
 		marker = m
@@ -823,8 +820,10 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 	resp["autoUpdate"] = buildAutoUpdateStatus(autoUpdateInputs{
 		Enabled:       enabled,
 		Period:        period,
-		TargetBranch:  dashboardStableReleaseBranch,
-		TargetCommit:  targetCommit,
+		Policy:        policy,
+		TargetBranch:  target.Branch,
+		TargetChannel: target.Channel,
+		TargetCommit:  target.Short,
 		CurrentCommit: versionShort,
 		CommitsBehind: behindPtr,
 		Marker:        marker,
@@ -840,7 +839,7 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 	lastBeat, beatOK := hub.LastHeartbeatAttempt()
 	releaseStatus := buildSpokeReleaseStatus(
 		imageRef, "",
-		readUpgradeOutcome(), marker,
+		readUpgradeOutcome(), marker, versionHash,
 		lastBeat, beatOK, dashboardHeartbeatStaleAfter,
 	)
 	if s.releaseChannelSelectorAvailable(releaseStatus.Channel) {
@@ -865,7 +864,87 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 const dashboardHeartbeatStaleAfter = 6 * time.Minute
 
 const dashboardVersionTipCacheTTL = 5 * time.Minute
-const dashboardStableReleaseBranch = "v4"
+
+// upgradeTargetSource labels where /api/version's target came from (#7262).
+const (
+	// upgradeTargetSourceHub — the hub's heartbeat upgrade policy.
+	upgradeTargetSourceHub = "hub"
+	// upgradeTargetSourceBranch — the tip of the branch this build came from;
+	// the fallback for a spoke the hub does not manage (or before its first beat).
+	upgradeTargetSourceBranch = "branch"
+)
+
+// upgradeTarget is the resolved "what should this spoke be running" answer
+// every version surface (top bar, Hub tab, auto-update status) is measured
+// against, so they cannot disagree with each other or with the hub card.
+type upgradeTarget struct {
+	Source  string `json:"source"`
+	Branch  string `json:"branch,omitempty"`
+	Channel string `json:"channel,omitempty"`
+	SHA     string `json:"sha,omitempty"`
+	Short   string `json:"short,omitempty"`
+	// Resolved is false only when the hub said the spoke tracks a channel it
+	// could not resolve to a commit; the UI must show "unknown", not a tip.
+	Resolved bool `json:"resolved"`
+	// ManagedBy is "hub", "spoke" or "" (nobody upgrades this hive automatically).
+	ManagedBy string `json:"managedBy,omitempty"`
+	Paused    bool   `json:"paused,omitempty"`
+}
+
+// resolveUpgradeTarget picks the target from the hub policy when one has been
+// delivered, else from the upstream branch tip. Pure so tests pin the
+// precedence directly.
+func resolveUpgradeTarget(policy *hub.HeartbeatUpgradePolicy, branch, branchTip string) upgradeTarget {
+	if policy == nil {
+		return upgradeTarget{
+			Source:   upgradeTargetSourceBranch,
+			Branch:   branch,
+			SHA:      branchTip,
+			Short:    shortSHADashboard(branchTip),
+			Resolved: true,
+		}
+	}
+	t := upgradeTarget{
+		Source:   upgradeTargetSourceHub,
+		Branch:   policy.Branch,
+		Channel:  policy.Channel,
+		Resolved: policy.TargetResolved,
+		Paused:   policy.Paused,
+	}
+	if t.Branch == "" {
+		t.Branch = branch
+	}
+	switch {
+	case policy.HubManaged:
+		t.ManagedBy = upgradeTargetSourceHub
+	case policy.SpokeManaged:
+		t.ManagedBy = "spoke"
+	}
+	if policy.TargetResolved && policy.TargetSHA != "" {
+		t.SHA = policy.TargetSHA
+		t.Short = shortSHADashboard(policy.TargetSHA)
+	} else if policy.TargetResolved && policy.Channel == "" {
+		// Branch-tracking spoke whose hub has not verified an image yet: the
+		// branch tip is the same answer the hub would give.
+		t.SHA = branchTip
+		t.Short = shortSHADashboard(branchTip)
+	}
+	return t
+}
+
+// SetHubUpgradePolicy records the hub's upgrade posture for this spoke as
+// delivered on the heartbeat (#7262). Called from the heartbeat callback; the
+// next /api/version measures against it.
+func (s *Server) SetHubUpgradePolicy(p *hub.HeartbeatUpgradePolicy) {
+	if p == nil {
+		return
+	}
+	cp := *p
+	s.versionMu.Lock()
+	s.hubUpgradePolicy = &cp
+	s.hubUpgradePolicyAt = time.Now()
+	s.versionMu.Unlock()
+}
 
 // upgradeMarkerPath is where cmd/hive persists its self-upgrade attempt
 // bookkeeping (upgradeMarker in cmd/hive/main.go). Var, not const, so tests
@@ -1327,7 +1406,7 @@ func (s *Server) handleReleaseChannelSwitch(w http.ResponseWriter, r *http.Reque
 
 	setPendingReleaseChannel(channel)
 	s.auditFromRequest(r, "release_channel_switch", channel, current.Channel)
-	rs := buildSpokeReleaseStatus(selfDeploymentImageForDashboard(), "", readUpgradeOutcome(), readUpgradeMarker(), time.Time{}, false, dashboardHeartbeatStaleAfter)
+	rs := buildSpokeReleaseStatus(selfDeploymentImageForDashboard(), "", readUpgradeOutcome(), readUpgradeMarker(), versionHash, time.Time{}, false, dashboardHeartbeatStaleAfter)
 	rs.Channel.SelectorEnabled = true
 	rs.Channel.SelectorDetail = "Switch requested. The hub has recorded intent; the current channel remains the observed Deployment image until the next heartbeat/rollout lands."
 	if rs.Channel.Channel != channel {
@@ -6002,16 +6081,82 @@ func (s *Server) handleTimeSeries(w http.ResponseWriter, r *http.Request) {
 // hiveIDFilePath is the persistent file where the Hive ID is stored.
 const hiveIDFilePath = "/data/hive-id"
 
+// hiveIDPattern constrains a Hive ID to a DNS-label-safe token.
+//
+// The previous validator was displayNamePattern, which permits spaces and
+// uppercase (#7247). That was wrong on two counts: it contradicted the UI's
+// own documented "hive-adjective-noun" format, and the Hive ID is not a
+// display name — it is an infrastructure identifier that ends up in
+// Kubernetes namespaces (the "hive-hosted-" prefix in pkg/hubbackup), in
+// hosted spoke subdomains, and in the hub's registry keys. A value with a
+// space in it cannot be any of those things.
+//
+// Existing IDs are NOT re-validated: nothing validates HiveID at config load,
+// so this tightening applies only to a future edit and cannot strand a hive
+// that already carries a legacy value.
+var hiveIDPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+
+// hiveIDLockReason reports whether this hive's ID is owned by the hub and
+// therefore must not be edited locally, along with the operator-facing reason.
+//
+// On a hub-managed spoke the Hive ID is the hub's PRIMARY KEY for this hive.
+// Changing it locally does not rename the hive, it orphans it: the registry
+// entry and ownership records still point at the old ID, heartbeat signatures
+// and their replay guard are bound to it, SSO token verification checks it,
+// self-upgrade and branch-switch target it, alert acknowledgements reference
+// it, and quota is accounted against it. The spoke would go offline from the
+// hub's point of view while believing itself healthy.
+//
+// Detection mirrors the release-channel selector's rule: hub management is a
+// server-side determination, surfaced to the UI rather than guessed by it.
+// hiveIDLockedByHub is the pure form of the rule, so the status builder (a
+// free function over *config.Config) and the HTTP handlers share one
+// definition instead of drifting apart.
+func hiveIDLockedByHub(cfg *config.Config) (locked bool, reason string) {
+	if cfg == nil {
+		return false, ""
+	}
+	if cfg.Hub.Enabled && strings.TrimSpace(cfg.Hub.URL) != "" {
+		return true, hiveIDHubLockReason
+	}
+	return false, ""
+}
+
+// hiveIDHubLockReason is the single operator-facing explanation, shared by the
+// API error body and the disabled UI control so they cannot disagree.
+const hiveIDHubLockReason = "This hive is managed by the hub, which uses the Hive ID as its primary key for registration, heartbeat signing, SSO, upgrades, alerts, and quota. Renaming it here would orphan the hive rather than rename it. Change it from the hub."
+
+func (s *Server) hiveIDLockReason() (locked bool, reason string) {
+	if s.deps == nil {
+		return false, ""
+	}
+	return hiveIDLockedByHub(s.deps.Config)
+}
+
 func (s *Server) handleHiveIDGet(w http.ResponseWriter, r *http.Request) {
 	id := ""
 	if s.deps != nil && s.deps.Config != nil {
 		id = s.deps.Config.HiveID
 	}
-	jsonResponse(w, map[string]string{"id": id})
+	locked, reason := s.hiveIDLockReason()
+	jsonResponse(w, map[string]any{
+		"id":         id,
+		"editable":   !locked,
+		"lockReason": reason,
+	})
 }
 
 func (s *Server) handleHiveIDSet(w http.ResponseWriter, r *http.Request) {
 	if !requireOwnerRole(w, r) {
+		return
+	}
+
+	// Refuse before touching the body: on a hub-managed spoke there is no
+	// input that would make this safe. 409 Conflict, not 403 — the caller's
+	// credentials are fine; the request conflicts with the hive's managed
+	// state.
+	if locked, reason := s.hiveIDLockReason(); locked {
+		jsonError(w, reason, http.StatusConflict)
 		return
 	}
 
@@ -6028,8 +6173,8 @@ func (s *Server) handleHiveIDSet(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, fmt.Sprintf("id must be at most %d characters", maxHiveIDLen), http.StatusBadRequest)
 		return
 	}
-	if !displayNamePattern.MatchString(body.ID) {
-		jsonError(w, "id must contain only alphanumeric characters, spaces, hyphens, and underscores", http.StatusBadRequest)
+	if !hiveIDPattern.MatchString(body.ID) {
+		jsonError(w, "id must be lowercase alphanumeric and hyphens, starting and ending with alphanumeric (e.g. hive-bold-hawk)", http.StatusBadRequest)
 		return
 	}
 	body.ID = sanitizeString(body.ID)

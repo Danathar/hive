@@ -125,8 +125,8 @@ func TestSuperviseLocalLiteLLMSpawnsWithLoopbackArgsAndLogsErrorExit(t *testing.
 	line := strings.SplitN(strings.TrimSpace(string(args)), "\n", 2)[0]
 	for _, want := range []string{
 		"--host 127.0.0.1",
-		"--port " + strconv.Itoa(LocalProxyPort),
-		"--config " + LocalConfigPath,
+		"--port " + strconv.Itoa(LocalLiteLLMProxyPort),
+		"--config " + localLiteLLMConfigPath,
 	} {
 		if !strings.Contains(line, want) {
 			t.Errorf("litellm invoked without %q: %q", want, line)
@@ -140,13 +140,13 @@ func TestSuperviseLocalLiteLLMSpawnsWithLoopbackArgsAndLogsErrorExit(t *testing.
 // TestSuperviseLocalLiteLLMRestartsAfterCleanExit pins the supervision
 // promise itself: a proxy that exits cleanly is logged as such and respawned
 // after the backoff. Two recorded invocations prove the time.After arm of the
-// restart select ran; the deadline allows for the 5s RestartDelay.
+// restart select ran; the deadline allows for the 5s localLiteLLMRestartDelay.
 func TestSuperviseLocalLiteLLMRestartsAfterCleanExit(t *testing.T) {
 	argsFile := stubLitellm(t, 0)
 	logs, cancel, done := runSupervisor(t)
 	defer cancel()
 
-	waitForInvocations(t, argsFile, 2, RestartDelay+10*time.Second)
+	waitForInvocations(t, argsFile, 2, localLiteLLMRestartDelay+10*time.Second)
 	cancel()
 	awaitReturn(t, done)
 
