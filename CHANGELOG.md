@@ -11,6 +11,13 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-17 (v4.48.1)
+
+### Changed
+
+- The pinned advisory issue retry in `runEvalCycle` moved behind an injectable seam (`ensurePinnedAdvisoryIssue`), so the #4167 behaviour that keeps a transient boot failure from permanently wedging the advisory digest is now covered by tests instead of only reachable from a live process. ([#7232](https://github.com/hivecommons/hive/issues/7232))
+- The hub decision ring (`GET /api/contribute/decisions`) keeps the regression tests from the duplicate implementation that was closed rather than merged: newest-first ordering when a burst of entries shares one RFC3339 second, concurrent record/read under `-race`, and an exact lock on the response key set so a protocol field cannot reach this gated endpoint unreviewed. ([#7343](https://github.com/hivecommons/hive/issues/7343))
+
 ## 2026-09-17 (v4.48.0)
 
 ### Added
