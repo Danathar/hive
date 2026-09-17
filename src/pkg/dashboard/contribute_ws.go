@@ -667,6 +667,12 @@ type ContributeWSHub struct {
 	stopCh   chan struct{}
 	doneCh   chan struct{}
 	stopOnce sync.Once
+	// handlerWG counts in-flight HandleWS goroutines. A WebSocket handler
+	// hijacks its connection, so httptest.Server.Close does not wait for it,
+	// and the disconnect path writes the abandonment run record (#7317) to
+	// the contributors dir — tests wait on this before their TempDir is
+	// removed. Production shutdown does not block on it.
+	handlerWG sync.WaitGroup
 }
 
 // taskLease is the server-authoritative record of a task the hub issued to a
@@ -3652,6 +3658,8 @@ func (h *ContributeWSHub) ActiveConnections() []ContributorConnection {
 const maxWSConnections = 50
 
 func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
+	h.handlerWG.Add(1)
+	defer h.handlerWG.Done()
 	// SECURITY (audit F9, CWE-770): the cap must count sockets that are still
 	// authenticating, not just authenticated ones.
 	//
