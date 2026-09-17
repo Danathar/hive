@@ -11,6 +11,13 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-17 (v4.51.2)
+
+### Fixed
+
+- Dashboard: an expired session no longer surfaces as an opaque `Load failed`. The dashboard issues its own `/api` requests with `redirect: 'manual'`, so the hub auth gate's cross-origin 302 to the login host arrives as an observable `opaqueredirect` instead of a CORS rejection, and is turned into the `401 {"error":"session_expired","sign_in":"/"}` the gate should have sent — making every `res.status === 401` branch in the dashboard live again, including on hives provisioned before the `hive-api-xhr` Ingress (#7433).
+- A level-held agent PR with failing CI is repaired by the agent that opened it instead of sitting red and held until a human does the repair ([#7438](https://github.com/hivecommons/hive/issues/7438)). `writeMergeEligible` skipped every held PR before classifying it, so a held red PR was dropped from `ci-failing.json` and its author never got a FIX-BEFORE-NEW block for it (observed: sec-check's Danathar/zfs-kinoite-complex#188, held by the ACMM level gate at creation, red on its own new test, untouched afterwards). The hold is a merge checkpoint, not a repair checkpoint: red PRs are now classified before the hold check (a held PR can still never become merge-eligible), each `ci_failing` row carries `held: true` when it has a hold label, and the owning agent's FIX-BEFORE-NEW block lists it with `held for human review — fix CI, do not remove the hold`. Escalated (`needs-human`) rows stay excluded, outreach's held PRs are never routed back (the level-hold comment tells humans outreach PRs are always theirs to review), and the shared `${CI_FAILING}` queue — Go and legacy shell — counts held PRs but does not offer them to any other agent. The merge sweep, `hive-merge`, and hold removal are unchanged.
+
 ## 2026-09-17 (v4.51.1)
 
 ### Changed
