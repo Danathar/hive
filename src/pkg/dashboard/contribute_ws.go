@@ -519,8 +519,15 @@ type ContributeWSHub struct {
 	// upgrade path and from deferred cleanup, and must never contend with or
 	// re-enter h.mu.
 	pendingConns atomic.Int64
-	activityMu   sync.RWMutex
-	activity     []ActivityEntry
+	// handlers tracks live HandleWS invocations so a caller (in practice:
+	// tests) can wait for hijacked websocket handlers to fully unwind.
+	// httptest's Server.Close does not wait for hijacked connections, so a
+	// handler's deferred bookkeeping — the disconnect-abandonment task-run
+	// append, decision-ring writes — can land AFTER a test returns, racing
+	// t.TempDir() removal ("directory not empty") and any restored globals.
+	handlers   sync.WaitGroup
+	activityMu sync.RWMutex
+	activity   []ActivityEntry
 	// absorbedReconnects counts flaps collapsed by absorbReconnectFlapLocked
 	// (kubestellar/hive#5151), so a contributor bouncing stays countable after its
 	// feed rows stop being written. Guarded by activityMu alongside activity itself.
@@ -674,12 +681,6 @@ type ContributeWSHub struct {
 	stopCh   chan struct{}
 	doneCh   chan struct{}
 	stopOnce sync.Once
-	// handlerWG counts in-flight HandleWS goroutines. A WebSocket handler
-	// hijacks its connection, so httptest.Server.Close does not wait for it,
-	// and the disconnect path writes the abandonment run record (#7317) to
-	// the contributors dir — tests wait on this before their TempDir is
-	// removed. Production shutdown does not block on it.
-	handlerWG sync.WaitGroup
 }
 
 // taskLease is the server-authoritative record of a task the hub issued to a
@@ -3665,8 +3666,10 @@ func (h *ContributeWSHub) ActiveConnections() []ContributorConnection {
 const maxWSConnections = 50
 
 func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
-	h.handlerWG.Add(1)
-	defer h.handlerWG.Done()
+	// Counted from the first instruction so a drain (h.handlers.Wait) covers
+	// every deferred write this handler can make — see the field comment.
+	h.handlers.Add(1)
+	defer h.handlers.Done()
 	// SECURITY (audit F9, CWE-770): the cap must count sockets that are still
 	// authenticating, not just authenticated ones.
 	//

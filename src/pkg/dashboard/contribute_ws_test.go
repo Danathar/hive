@@ -26,31 +26,15 @@ func setupWSTest(t *testing.T) (*Server, *httptest.Server) {
 
 	s := NewServer(0, slog.Default())
 	s.registerContributeRoutes()
-	// Registered before Close so it runs AFTER it (LIFO): by then the test's
-	// deferred conn.Close/ts.Close have fired and the handler goroutines are
-	// unwinding through the disconnect path, which appends a run record under
-	// the TempDir this helper points HIVE_CONTRIBUTORS_DIR at.
-	t.Cleanup(func() { waitForWSHandlers(t, s.contributeHub) })
+	// Registered BEFORE the Close cleanup (cleanups run LIFO) so the order at
+	// teardown is: hub Close, then wait for every HandleWS to unwind, and only
+	// then the earlier cleanups — restored globals and TempDir removal. A
+	// hijacked handler's deferred task-run/decision writes otherwise race
+	// both ("TempDir RemoveAll cleanup: directory not empty").
+	t.Cleanup(func() { s.contributeHub.handlers.Wait() })
 	t.Cleanup(s.contributeHub.Close)
 	ts := httptest.NewServer(s.mux)
 	return s, ts
-}
-
-// waitForWSHandlers blocks until every in-flight HandleWS goroutine on h has
-// returned, so nothing races the TempDir cleanup. Bounded so a wedged handler
-// fails the test legibly instead of hanging the package.
-func waitForWSHandlers(t *testing.T, h *ContributeWSHub) {
-	t.Helper()
-	done := make(chan struct{})
-	go func() {
-		h.handlerWG.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Errorf("contribute WS handlers still running 5s after the test finished")
-	}
 }
 
 func wsURL(ts *httptest.Server) string {
