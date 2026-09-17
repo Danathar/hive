@@ -435,18 +435,9 @@ func SetGitBranch(branch string) {
 // tracks ("stable"/"candidate"/"edge"), or "" when it tracks a branch tag or
 // SHA pin. Display-only: the navbar badge shows "stable (v4)" instead of the
 // bare built-from branch. The upstream comparison logic is untouched — the
-// binary is still a build of versionBranch. SetDeploymentImageSource takes
-// precedence when installed, so runtime image changes cannot leave a stale
-// startup channel in the response. Call setters only before serving requests.
+// binary is still a build of versionBranch.
 func SetReleaseChannel(channel string) {
 	versionChannel = channel
-}
-
-// SetDeploymentImageSource installs the cached Deployment image lookup before
-// the server starts. Channel and tracking are derived from the same snapshot.
-// Invalid refs are omitted from the API and reported as unknown tracking.
-func SetDeploymentImageSource(source func() string) {
-	versionImageSource = source
 }
 
 func setPendingReleaseChannel(channel string) {
@@ -591,7 +582,7 @@ func (s *Server) refreshAsync() {
 	}
 }
 
-const maxDecodeBodyBytes = 1 << 20 // 1 MiB
+const maxDecodeBodyBytes = 1 << 20
 
 func decodeBody(r *http.Request, v interface{}) error {
 	defer closeHTTPBody(r.Body)
@@ -642,8 +633,6 @@ func sanitizeFilenameComponent(s string) string {
 		return '-'
 	}, s)
 }
-
-// --- Core status endpoints ---
 
 func (s *Server) handleRole(w http.ResponseWriter, r *http.Request) {
 	role := r.Header.Get("X-Hive-Role")
@@ -1094,6 +1083,7 @@ var (
 )
 
 const ghcrCacheTTL = 2 * time.Minute
+
 const ghcrCheckTimeout = 5 * time.Second
 
 var (
@@ -1910,8 +1900,6 @@ func (s *Server) handlePane(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// --- Agent control endpoints ---
-
 func (s *Server) handleKick(w http.ResponseWriter, r *http.Request) {
 	// Owner-only: the kick prompt is typed verbatim into the agent's CLI
 	// session, and agents execute shell commands with App-scoped credentials.
@@ -2634,7 +2622,15 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 	s.deps.Logger.Info("audit: agent restarted", "agent", name, "trigger", "dashboard-api")
 	s.auditFromRequest(r, "restart", "", name)
 	s.refreshAndPersist()
-	okResponse(w, map[string]string{"status": "restarted", "agent": name})
+	// A restart cancels the agent's pending kick (#7363). Tell the operator
+	// so: the old behaviour was to silently replay the interrupted prompt into
+	// the relaunched CLI, and "restarted" alone would leave them expecting
+	// exactly that.
+	resp := map[string]any{"ok": true, "status": "restarted", "agent": name}
+	if d, ok := s.deps.AgentMgr.KickDispatchState(name); ok && d.Phase == agent.KickPhaseFailed && strings.HasPrefix(d.Error, "cancelled:") {
+		resp["kickCancelled"] = true
+	}
+	jsonResponse(w, resp)
 }
 
 func (s *Server) handleResetRestarts(w http.ResponseWriter, r *http.Request) {
@@ -2658,17 +2654,10 @@ func (s *Server) handleResetRestarts(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, map[string]any{"ok": true, "status": "reset", "agent": name, "minStatusSeq": floor})
 }
 
-// --- Token access audit log ---
-
 const (
 	tokenAccessMaxEntries = 100
 )
 
-// tokenAccessLogPath is github.TokenAccessLogPath. The file is written ONLY
-// by the hive process (pkg/github's token-access ingester) and is hive-owned
-// 0600: the agents whose gh calls it records cannot append to, truncate, or
-// read it (#6287). The wrappers drop per-call events into a spool the hive
-// ingests, attributing each to the uid that owns the event file.
 var tokenAccessLogPath = "/var/run/hive-metrics/token-access.jsonl"
 
 func (s *Server) handleTokenAccess(w http.ResponseWriter, r *http.Request) {
@@ -2677,8 +2666,7 @@ func (s *Server) handleTokenAccess(w http.ResponseWriter, r *http.Request) {
 	// --body ...). Without a role gate any authenticated user — including
 	// read-only contributors — could enumerate the hive's full GitHub operation
 	// history. Gate at owner-role, consistent with handleConfigDownload and
-	// handleSelfUpgrade which protect equivalent operator-only data. The
-	// write side is protected too: see tokenAccessLogPath.
+	// handleSelfUpgrade which protect equivalent operator-only data.
 	if !requireOwnerRole(w, r) {
 		return
 	}
@@ -2711,8 +2699,6 @@ func (s *Server) handleTokenAccess(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonResponse(w, map[string]interface{}{"entries": entries, "skipped": skipped})
 }
-
-// --- Token endpoints ---
 
 func (s *Server) handleTokens(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Tokens == nil {
@@ -2781,8 +2767,6 @@ func (s *Server) handleBudgetIgnoreSet(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// --- GitHub endpoints ---
-
 func (s *Server) handleGHAuth(w http.ResponseWriter, r *http.Request) {
 	cfg := s.deps.Config.GitHub
 	authType := "token"
@@ -2821,12 +2805,15 @@ func (s *Server) handleGHUserAuthStatus(w http.ResponseWriter, r *http.Request) 
 		jsonResponse(w, map[string]interface{}{"logged_in": true, "username": hubUser, "role": r.Header.Get("X-Hive-Role")})
 		return
 	}
-	if s.directRouteAuthzEnabled() || s.hubProxied() {
+	if s.directRouteAuthzEnabled() || s.hubProxied() || s.authToken != "" {
 		// No valid session on a direct-route spoke → not logged in for this
 		// request, regardless of any persisted owner token on disk. Same on a
 		// hub-proxied spoke: nginx injects X-Hive-User for every signed-in
 		// visitor, so its absence means anonymous, and the persisted owner
 		// token must not stand in for them (see resolveViewerUsername).
+		// Same again behind a dashboard auth token (#7394): this endpoint is
+		// public, so an anonymous caller reaches it on a token-protected spoke
+		// and must read as logged-out, not as the owner.
 		jsonResponse(w, map[string]interface{}{"logged_in": false})
 		return
 	}
@@ -3381,8 +3368,6 @@ func (s *Server) prQueueRepoAllowed(repo string) bool {
 	return false
 }
 
-// --- Agent config endpoints ---
-
 func (s *Server) handleAgentConfigGet(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	agentCfg, ok := s.deps.Config.Agents[name]
@@ -3391,7 +3376,7 @@ func (s *Server) handleAgentConfigGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	proc, err := s.deps.AgentMgr.GetStatus(name)
+	proc, err := s.deps.AgentMgr.GetStatusFast(name)
 
 	cli := agentCfg.Backend
 	if err == nil && proc.BackendOverride != "" {
@@ -3493,6 +3478,7 @@ func (s *Server) handleAgentConfigGet(w http.ResponseWriter, r *http.Request) {
 			"restartStrategy":  restartStrategy,
 			"model":            model,
 			"clearOnKick":      agentCfg.ClearOnKick,
+			"onDemand":         agentCfg.OnDemand,
 			"emoji":            agentCfg.Emoji,
 			"color":            agentCfg.Color,
 			"sortOrder":        agentCfg.SortOrder,
@@ -3517,12 +3503,15 @@ func (s *Server) handleAgentConfigGet(w http.ResponseWriter, r *http.Request) {
 			"sandboxEffective": agentCfg.SandboxEnabled(s.deps.Config.AgentSandbox),
 			"replicas":         agentCfg.Replicas,
 		},
-		"cadences":       cadences,
-		"models":         models,
-		"pipeline":       pipeline,
-		"hooks":          hooks,
-		"restrictions":   restrictions,
-		"stats":          stats,
+		"cadences":     cadences,
+		"models":       models,
+		"pipeline":     pipeline,
+		"hooks":        hooks,
+		"restrictions": restrictions,
+		"stats":        stats,
+		// The Stats tab offers only sources that apply to THIS agent (#7411):
+		// an ADVISORY/on-demand agent is never offered the CI health strip.
+		"statSources":    map[string]any{"sources": statSourcesFor(&agentCfg), "styles": statStyles},
 		"prompt":         lastPrompt,
 		"promptTemplate": promptTemplate,
 		"channels":       agentCfg.Channels,
@@ -3953,21 +3942,7 @@ func (s *Server) substituteTemplateVars(template, agentName string) string {
 }
 
 func (s *Server) loadAgentStats(name string) []any {
-	statsFile := fmt.Sprintf("/data/agents/%s/stats.json", name)
-	data, err := os.ReadFile(statsFile)
-	if err == nil {
-		var wrapper struct {
-			Stats []any `json:"stats"`
-		}
-		if json.Unmarshal(data, &wrapper) == nil && len(wrapper.Stats) > 0 {
-			return wrapper.Stats
-		}
-		var stats []any
-		if json.Unmarshal(data, &stats) == nil && len(stats) > 0 {
-			return stats
-		}
-	}
-	return defaultStatsConfig(name)
+	return loadStatsConfig(name)
 }
 
 func (s *Server) handleAgentConfigGeneral(w http.ResponseWriter, r *http.Request) {
@@ -4001,6 +3976,15 @@ func (s *Server) handleAgentConfigGeneral(w http.ResponseWriter, r *http.Request
 	if v, ok := body["clearOnKick"]; ok {
 		if b, ok := v.(bool); ok {
 			agentCfg.ClearOnKick = b
+		}
+	}
+	// On-demand is a real per-agent field that had no control: it was only ever
+	// readable as a badge, so an operator could see "on demand" but not leave it
+	// (hivecommons/hive#7446). Turning it off is necessary but not sufficient —
+	// the agent also needs a cadence in the active mode before it is kicked.
+	if v, ok := body["onDemand"]; ok {
+		if b, ok := v.(bool); ok {
+			agentCfg.OnDemand = b
 		}
 	}
 	if v, ok := body["displayName"]; ok {
@@ -4095,8 +4079,23 @@ func (s *Server) handleAgentConfigGeneral(w http.ResponseWriter, r *http.Request
 		}
 	}
 	if v, ok := body["kickTemplate"]; ok {
-		if s, ok := v.(string); ok {
-			agentCfg.KickTemplate = sanitizeString(s)
+		if str, ok := v.(string); ok {
+			tpl := sanitizeString(str)
+			// Catch a dangling kick_template when it is SET, not never
+			// (hivecommons/hive#7390). The shape was already checked by
+			// validateAgentGeneralInput (bare .md name); a NEW name must also
+			// resolve somewhere the scheduler looks — otherwise the save
+			// succeeds, the kick silently falls back, and the prompt editor
+			// shows an empty box. An unchanged value is left alone so an
+			// already-dangling field cannot block an unrelated edit (display
+			// name, model) until it is fixed.
+			if tpl != "" && tpl != agentCfg.KickTemplate && s.deps.Scheduler != nil {
+				if _, exists := s.deps.Scheduler.TemplateExists(tpl); !exists {
+					jsonError(w, fmt.Sprintf("kick_template %q does not exist: it is not shipped in pkg/policies/defaults and no file of that name is in the policy directories. Save the prompt in the Prompt Template tab first (that creates %s), or pick a shipped template", tpl, filepath.Join(promptTemplateSaveDir, tpl)), http.StatusBadRequest)
+					return
+				}
+			}
+			agentCfg.KickTemplate = tpl
 		}
 	}
 	if v, ok := body["mode"]; ok {
@@ -4656,8 +4655,8 @@ func (s *Server) handleAgentConfigStats(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	statsFile := fmt.Sprintf("/data/agents/%s/stats.json", name)
-	_ = os.MkdirAll(fmt.Sprintf("/data/agents/%s", name), 0o755)
+	statsFile := agentStatsPath(name)
+	_ = os.MkdirAll(filepath.Dir(statsFile), 0o755)
 
 	data, err := json.Marshal(body)
 	if err == nil {
@@ -4806,18 +4805,38 @@ func (s *Server) handleAgentPrompt(w http.ResponseWriter, r *http.Request) {
 		templateName = name + ".md"
 	}
 
-	sourceFiles = append(sourceFiles, map[string]string{
+	// Only link to a repo path that exists (hivecommons/hive#7390). The
+	// editor used to render "src/pkg/policies/defaults/<kick_template>" for
+	// whatever name was configured, and the link 404'd for a dangling one —
+	// the operator's first clue that anything was wrong, and a misleading
+	// one (it read as "the file was removed", not "it never existed").
+	_, embeddedErr := policies.DefaultPolicies.ReadFile("defaults/" + templateName)
+	src := map[string]string{
 		"label": "Kick template",
 		"path":  "src/pkg/policies/defaults/" + templateName,
-		"url":   repoBaseURL + "src/pkg/policies/defaults/" + templateName,
 		"note":  "kick_template: " + templateName,
-	})
+	}
+	if embeddedErr == nil {
+		src["url"] = repoBaseURL + "src/pkg/policies/defaults/" + templateName
+	} else {
+		src["note"] = "kick_template: " + templateName + " — not shipped in pkg/policies/defaults (no repo link)"
+	}
+	sourceFiles = append(sourceFiles, src)
 
-	jsonResponse(w, map[string]interface{}{
+	resp := map[string]interface{}{
 		"agent":       name,
 		"prompt":      template,
 		"sourceFiles": sourceFiles,
-	})
+	}
+	// template: how the configured kick_template actually resolves, from the
+	// scheduler's own chain, so the editor can say "template not found:
+	// review.md — kicks fall back to <source>" instead of showing an empty
+	// box that looks like a lost file and, once typed into and saved,
+	// becomes a live override.
+	if s.deps.Scheduler != nil {
+		resp["template"] = s.deps.Scheduler.ResolveTemplate(name)
+	}
+	jsonResponse(w, resp)
 }
 
 // loadPromptTemplateRaw returns the raw template content without variable substitution.
@@ -4972,6 +4991,7 @@ func (s *Server) handleAgentPromptSave(w http.ResponseWriter, r *http.Request) {
 }
 
 const exportAPIVersion = "hive.kubestellar.io/v1"
+
 const exportKind = "AgentDefinition"
 
 func (s *Server) handleAgentExport(w http.ResponseWriter, r *http.Request) {
@@ -5167,7 +5187,22 @@ func valueOrDefault(v, dflt string) string {
 	return dflt
 }
 
-func (s *Server) handleStatSources(w http.ResponseWriter, r *http.Request) {
+// healthStatsApply reports whether the "health" stat source — the primary
+// repo's CI/coverage/release workflow checks — is meaningful for an agent.
+// Those checks describe the repository's pipelines, so they belong on the
+// agent that owns CI. An ADVISORY or on-demand agent runs no pipeline and
+// produces verdicts, not builds; offering it the strip is how a reviewer ends
+// up displaying "COVERAGE 0% vs goal 91%" for nothing (#7411).
+func healthStatsApply(agentCfg config.AgentConfig) bool {
+	if agentCfg.OnDemand {
+		return false
+	}
+	return !strings.EqualFold(agentCfg.Mode, "ADVISORY")
+}
+
+// statSourcesFor returns the stat sources the Stats tab may offer an agent.
+// agentCfg == nil means unscoped (every source).
+func statSourcesFor(agentCfg *config.AgentConfig) map[string]any {
 	sources := map[string]any{
 		"status": map[string]any{
 			"label":  "Repo Status",
@@ -5194,8 +5229,24 @@ func (s *Server) handleStatSources(w http.ResponseWriter, r *http.Request) {
 			"fields": []string{"input", "output", "cacheRead", "cacheCreate", "sessions", "messages"},
 		},
 	}
-	styles := []string{"number", "dot", "pct", "pct-bar", "spark"}
-	jsonResponse(w, map[string]any{"sources": sources, "styles": styles})
+	if agentCfg != nil && !healthStatsApply(*agentCfg) {
+		delete(sources, "health")
+	}
+	return sources
+}
+
+var statStyles = []string{"number", "dot", "pct", "pct-bar", "spark"}
+
+// handleStatSources answers the stat source catalogue. With ?agent=<name> the
+// catalogue is scoped to what makes sense for that agent (see healthStatsApply).
+func (s *Server) handleStatSources(w http.ResponseWriter, r *http.Request) {
+	var scope *config.AgentConfig
+	if name := r.URL.Query().Get("agent"); name != "" {
+		if agentCfg, ok := s.deps.Config.Agents[name]; ok {
+			scope = &agentCfg
+		}
+	}
+	jsonResponse(w, map[string]any{"sources": statSourcesFor(scope), "styles": statStyles})
 }
 
 func (s *Server) handleGitHubAppInstallClicked(w http.ResponseWriter, r *http.Request) {
@@ -5203,8 +5254,6 @@ func (s *Server) handleGitHubAppInstallClicked(w http.ResponseWriter, r *http.Re
 	s.deps.Logger.Info("github app install link clicked, flagging heartbeat")
 	okResponse(w, map[string]string{"status": "pending"})
 }
-
-// --- GitHub config endpoint ---
 
 type githubConfigUpdate struct {
 	AppID                 *int64
@@ -5560,8 +5609,6 @@ func (s *Server) requestHasGitHubSetupAdmin(r *http.Request) bool {
 	return s.authToken != "" && proof != "" && secureCompare(proof, s.authToken)
 }
 
-// --- Sidebar endpoints ---
-
 func (s *Server) handleSidebarGet(w http.ResponseWriter, r *http.Request) {
 	s.sidebarMu.RLock()
 	sb := s.sidebar
@@ -5642,9 +5689,27 @@ func (s *Server) handleBackends(w http.ResponseWriter, r *http.Request) {
 	cliBackendEntry := func(id, name string, r cliModelResult) map[string]interface{} {
 		entry := map[string]interface{}{
 			"id": id, "name": name, "models": r.models, "fallback": r.fallback,
+			// degraded: a LIVE list that is not the CLI's catalog (the HTTP
+			// probe after the installed SDK helper failed, #7384). Real ids,
+			// wrong inventory — the client labels it and auto-heal must sit
+			// it out exactly as it sits out a fallback.
+			"degraded": r.degraded,
 		}
 		if r.notice != nil {
 			entry["notice"] = r.notice
+		}
+		if r.failed() {
+			// discovery: WHY the list is not authoritative, in the words of
+			// the failure itself. This is the string an operator had to read
+			// off a server log by hand to tell "Could not find a
+			// @github/copilot platform package" from "Not authenticated"
+			// (#7384); now the dropdown carries it.
+			entry["discovery"] = map[string]interface{}{
+				"ok":       false,
+				"error":    r.discoveryErr,
+				"fallback": r.fallback,
+				"degraded": r.degraded,
+			}
 		}
 		return entry
 	}
@@ -5945,11 +6010,8 @@ func (s *Server) queryInferenceModelsDetailed(backend string) ([]string, bool) {
 
 const inferenceModelQueryTimeout = 5 * time.Second
 
-// fetchModelsFromEndpointsDetailed queries /v1/models on each endpoint and
-// returns a deduplicated, combined list of all model IDs found. apiKey is
-// optional (litellm requires bearer auth; vllm/llm-d do not).
-//
-// The second result reports whether EVERY endpoint answered. A PARTIAL sweep — one gateway of several timing out or answering
+// fetchModelsFromEndpointsDetailed additionally reports whether EVERY endpoint
+// answered. A PARTIAL sweep — one gateway of several timing out or answering
 // 403 while its siblings reply — still returns a non-empty list, and a caller
 // that diffs model sets must not read the survivors as "the unreachable
 // endpoint's models were removed" (#4438: a partial sweep wallpapered the
@@ -6136,8 +6198,6 @@ func (s *Server) handleTimeSeries(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// --- Hive ID endpoints ---
-
 // hiveIDFilePath is the persistent file where the Hive ID is stored.
 const hiveIDFilePath = "/data/hive-id"
 
@@ -6256,8 +6316,6 @@ func (s *Server) handleHiveIDSet(w http.ResponseWriter, r *http.Request) {
 	okResponse(w, map[string]string{"status": "updated", "id": body.ID})
 }
 
-// --- Chat endpoint ---
-
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Query   string `json:"query"`
@@ -6273,8 +6331,6 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		"status": "stub",
 	})
 }
-
-// --- Nous endpoints ---
 
 func (s *Server) handleNousStatus(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Nous == nil {
@@ -6807,4 +6863,11 @@ func (s *Server) handleBeadsCreate(w http.ResponseWriter, r *http.Request) {
 	s.auditFromRequest(r, "bead_create", auditDetail("title", body.Title), agentName)
 	w.WriteHeader(http.StatusCreated)
 	jsonResponse(w, b)
+}
+
+// SetDeploymentImageSource installs the cached Deployment image lookup before
+// the server starts. Channel and tracking are derived from the same snapshot.
+// Invalid refs are omitted from the API and reported as unknown tracking.
+func SetDeploymentImageSource(source func() string) {
+	versionImageSource = source
 }

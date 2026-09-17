@@ -1872,7 +1872,7 @@
           "Agents"
         ],
         "summary": "Agent prompt template",
-        "description": "Returns the CLAUDE.md prompt file for the given agent.",
+        "description": "Returns the agent's kick prompt template (`prompt`, variables substituted unless `?raw=1`), the `sourceFiles` it came from (a repo `url` is present only when pkg/policies/defaults actually ships the file), and `template`: the scheduler's resolution of the configured kick_template — `{kickTemplate, resolved, source, fallback, pathsTried, embeddedDefaultExists}` — so a dangling kick_template is reported with the fallback the kicks actually use rather than rendered as an empty editor (#7390).",
         "parameters": [
           {
             "name": "name",
@@ -2213,7 +2213,7 @@
           "System"
         ],
         "summary": "Available CLI backends and models",
-        "description": "Returns the list of available CLI backends (claude, aider, codex, etc.) and their supported models.",
+        "description": "Returns the list of available CLI backends (claude, aider, codex, etc.) and their supported models. Each CLI backend entry carries `fallback` (the static list is being served because discovery returned nothing), `degraded` (the list came from a live probe that is NOT the catalog the CLI uses — the raw-HTTP Copilot probe after the installed SDK helper failed), an optional `notice` (an entitlement verdict from upstream), and, whenever discovery failed or degraded, `discovery: {ok: false, error, fallback, degraded}` with the token-free failure text so the dropdown can render an explicit error state (#7384). Neither a fallback nor a degraded list is authoritative: clients must not treat a model's absence from one as evidence it is unavailable. The same failures and their recovery are recorded in the audit log as `model_discovery_failed` / `model_discovery_recovered`, once per transition.",
         "responses": {
           "200": {
             "description": "Backends config",
@@ -3711,7 +3711,7 @@
           "Agents"
         ],
         "summary": "Restart an agent",
-        "description": "Restarts the agent's session. Restart operations are serialized per-server to prevent concurrent pause/resume/restart cycles from interfering through shared tmux/config state.",
+        "description": "Restarts the agent's session. Restart operations are serialized per-server to prevent concurrent pause/resume/restart cycles from interfering through shared tmux/config state. A restart also cancels any kick still being delivered to the agent (the queued prompt is not replayed into the relaunched session), and when it interrupts a turn the agent was actively producing, new kicks are refused for a short hold so the restart cannot be followed within seconds by a kick that gets restarted in its turn (#7363).",
         "parameters": [
           {
             "name": "agent",
@@ -3737,6 +3737,10 @@
                     },
                     "agent": {
                       "type": "string"
+                    },
+                    "kickCancelled": {
+                      "type": "boolean",
+                      "description": "Present and true when the restart cancelled a kick that was still being delivered to the agent; the prompt was not replayed into the relaunched session."
                     }
                   }
                 }

@@ -9,65 +9,6 @@ import (
 	gh "github.com/google/go-github/v72/github"
 )
 
-// Rejected-finding re-file gate (#6463).
-//
-// A scanner running in issues-only mode files an issue per finding, and the
-// policy correctly forbids it from listing issues — so the moment a maintainer
-// closes one of those issues as not-planned, the rejection leaves the agent's
-// field of view entirely. On the next kick the same finding is rediscovered,
-// reworded, and filed again. Observed live on a downstream repo: one false
-// positive filed five times in four days, each closed with a rebuttal, each
-// re-filed within ~24h.
-//
-// The existing exact-title dedupe in CreateIssue cannot catch this: every one
-// of those five filings was worded differently, and findingEvidenceHash
-// (pkg/advisory) is deliberately verbatim-only. What DID stay stable across
-// all five was the set of files the finding pointed at — the line numbers
-// drifted with unrelated commits, the prose was rephrased every time, but the
-// file paths were the finding's actual subject and the producer could not
-// rephrase those without changing what it was reporting.
-//
-// So the gate keys on exactly that: before creating an issue, CreateIssue
-// looks for a recently closed issue that
-//
-//   - was filed by this hive's own App bot (an agent filing, by construction —
-//     every agent create flows through this same chokepoint), and
-//   - was closed as "not_planned" or "duplicate" — a maintainer's explicit
-//     rejection, never "completed" (a completed close means fixed, and a
-//     re-report after a fix may be a genuine regression), and
-//   - references exactly the same set of files as the pending request.
-//
-// When one exists, the request is refused and the response names the closed
-// issue, so the agent (and its transcript) sees the maintainer's rebuttal
-// instead of silently re-litigating it. GitHub's own closed issue IS the
-// rejection tombstone — there is deliberately no new persistent store, the
-// same posture advisory_suppress.go took for digest suppression: the baseline
-// is re-read from the forge, so it survives restarts and is visible to the
-// humans it protects.
-//
-// The gate fails toward FILING, in every direction it can:
-//
-//   - lookup error → file (same posture as the open-title dedupe lookup, and
-//     as advisory's ResolveRef: suppression only ever on positive evidence);
-//   - either file set empty → file (nothing to key on);
-//   - file sets differ at all → file (exact equality, not overlap — a genuine
-//     new defect in an already-argued-about file names a different set the
-//     moment it involves any other file);
-//   - no App-bot identity on this client → file (a token-authenticated hive
-//     cannot distinguish its own filings from a human's, and suppressing
-//     against a human-authored issue is not this gate's mandate);
-//   - rejection older than issueRejectionWindow → file (a maintainer's "no"
-//     from months ago should not silence a world that may have changed).
-//
-// The first cut of that keying was too literal and the same false positive got
-// through a sixth time (#6674): "the set of files the finding pointed at" was
-// approximated by every dotted token in the text, so the verification command
-// the run happened to use ("ast.parse" in five filings, "py_compile.compile"
-// in the sixth), a version string ("3.x"), and a bare basename mentioned in
-// one extra sentence all counted as files — and under exact equality any one
-// of them is enough to miss. looksLikeFileRef and foldBareBasenames below
-// narrow the set back down to what the producer cannot reword: the paths.
-
 // issueRejectionWindow bounds how long a not-planned closure suppresses
 // re-filing. Mirrors advisory's refClosedWindow reasoning: the observed
 // re-file loop cycles in ~24h, so 30 days is deep coverage for the failure

@@ -1,30 +1,5 @@
 package dashboard
 
-// Storage for the IBM bobshell ("bob") API key VALUE entered from the spoke
-// dashboard's governor Bob tab. The key is hive-wide, not per-agent:
-// governor.bob.api_key_file is a single hive-scoped setting resolving to one
-// file, so every bob agent shares it. bobshell cannot complete its browser SSO
-// flow inside a pod (the callback is http://localhost:35227/bob-callback,
-// which resolves to the pod, not the operator's machine), and the 1.0.6
-// bundle exposes no device-code flow — the API key is the only headless
-// credential. See config.BobConfig.
-//
-// hive.yaml only ever records a file PATH (governor.bob.api_key_file); the
-// key value itself is written to a 0600 file on the PVC
-// (config.WritableBobAPIKeyFile = /data/secrets/bob_api_key), which
-// BobConfig.ResolveAPIKey already consults as its third lookup. A durable
-// copy is additionally patched into the hive-secrets Kubernetes Secret when
-// the pod has the hive-secrets-writer Role; on hives that whole-volume-mount
-// that Secret it surfaces at /secrets/bob_api_key, which ResolveAPIKey
-// consults AHEAD of the PVC file.
-//
-// This deliberately reuses the LiteLLM key-store machinery
-// (patchKeyIntoHiveSecrets, actionableWriteError, errNotInCluster) rather
-// than inventing a parallel mechanism.
-//
-// The key value must never be logged, echoed in API responses, or written to
-// hive.yaml.
-
 import (
 	"errors"
 	"fmt"

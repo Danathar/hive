@@ -1,27 +1,5 @@
 package dashboard
 
-// Unified cost ($) tracking endpoint for the dashboard.
-//
-// GET /api/cost returns a single JSON document combining two cost sources:
-//
-//   - ESTIMATED cost: per-model / per-agent dollar estimates computed from
-//     hive's existing token counts × a static list-price table
-//     (pkg/tokens/pricing.go). This is the fallback for backends that do not
-//     report a real billed figure — Claude, Copilot, Codex, and self-hosted
-//     vLLM. It is always tagged source:"estimated" (or "unpriced" for models
-//     with no price-table entry) so the UI never presents it as actual billing.
-//
-//   - NATIVE cost: real spend reported by a metered backend. OpenRouter
-//     exposes cumulative usage + remaining credit via GET /api/v1/key; a
-//     LiteLLM proxy exposes accumulated spend via GET /key/info. Each metered
-//     gateway is probed with its already-resolved key; on any error the
-//     gateway simply contributes no native figure (the estimate still stands)
-//     and never crashes the endpoint. Native figures are tagged
-//     source:"native".
-//
-// SECRETS: gateway keys are resolved through the existing
-// GatewayConfig.ResolveAPIKey() (env/file); they are never logged or returned.
-
 import (
 	"context"
 	"crypto/tls"

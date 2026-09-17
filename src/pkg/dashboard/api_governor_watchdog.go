@@ -9,12 +9,6 @@ import (
 	"github.com/hivecommons/hive/pkg/watchdog"
 )
 
-// This file is the config surface for the agent self-healing watchdog
-// (RFC #4665). It follows the api_governor_features.go pattern: the payload
-// reports the RESOLVED settings rather than the raw YAML, so a hive that never
-// wrote a `governor.watchdog` block still shows the values actually in force
-// instead of a screen full of blanks.
-
 // watchdogSettingBounds keep an operator from typing a value that defeats the
 // feature. Named rather than inline so the handler and its tests agree, and so
 // the reason for each bound is written down once.

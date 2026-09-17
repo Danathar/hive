@@ -5,28 +5,6 @@ import (
 	"strings"
 )
 
-// Work-tracker guidance for non-GitHub work sources.
-//
-// Every shipped policy template is written against GitHub Issues: `gh issue
-// create`, `Fixes #N`, the `hold` label. When the hive's work source is Linear
-// the items in ${ISSUE_LIST} read `owner/repo!TEAM-123` and none of those
-// GitHub recipes apply to the tracker half of the job — only to the PR half,
-// which still lives on GitHub. Rather than fork 36 templates into Linear
-// variants, the scheduler renders ONE tracker section from the existing
-// work_source.linear config (teams → repos, hold labels, states) and injects
-// it at the same post-resolution seam as the held-PR preflight, so config
-// templates, repo-sourced prompts, embedded defaults, and the hardcoded
-// fallbacks all carry it and a customized policy cannot omit it. Templates
-// that want to place it explicitly use ${WORK_TRACKER}; the seam then sees the
-// header already present and appends nothing.
-//
-// The section deliberately does NOT invent a hive-side lifecycle for Linear
-// issues: Linear's own GitHub integration links a PR whose branch name or
-// body cites the identifier, moves the issue to In Progress when the PR
-// opens, and to Done on merge (closing magic words). That is the parity of
-// GitHub's `Fixes #N` auto-close, and agents are told to lean on it rather
-// than mutate issue state by hand.
-
 // workTrackerHeader is the marker the seam checks for before appending.
 const workTrackerHeader = "## Work Tracker: Linear"
 

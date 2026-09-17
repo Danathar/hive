@@ -1,11 +1,3 @@
-// ClankeR — the contributor relay. This file is the hive-side half: the
-// WebSocket endpoint that authenticates contributor agents, dispatches tasks
-// (issue fixes, reviews, docs) to whichever machine is connected, and keeps
-// GitHub tokens fresh for the duration of a task. The contributor-side half
-// lives in bin/contributor-relay.js.
-//
-// Names on the wire (message types, JSON fields, the /contribute route) are
-// deliberately unchanged: ClankeR is the presentation name, not the protocol.
 package dashboard
 
 import (
@@ -1326,18 +1318,12 @@ func NewContributeWSHub(logger *slog.Logger, server *Server) *ContributeWSHub {
 	return hub
 }
 
-func contributorStatePath(contributorsDir, currentPath, name string) string {
-	defaultPath := filepath.Join(defaultContributorsDir, name)
-	if currentPath != "" && currentPath != defaultPath {
-		return currentPath
-	}
-	return filepath.Join(contributorsDir, name)
-}
-
 var activityFilePath = "/data/contributors/activity.json"
 
 var asyncActivitySave = true
+
 var activityPersistenceEnabled = true
+
 var taskLedgerPersistenceEnabled = true
 
 func (h *ContributeWSHub) loadActivity() {
@@ -1615,7 +1601,6 @@ var noPRStreaksFile = "/data/contributors/no-pr-streaks.json"
 // (#5681). It sits beside the other contributor ledgers, but is written 0600: it is
 // the C4 authorization record a resume is matched against, not a report.
 var taskLeasesFile = "/data/contributors/task-leases.json"
-var turnEnvelopeDirPath = "/data/contributors/turn-envelopes"
 
 // noPRStreakRecord is the in-memory and on-disk shape of one no-PR completion
 // streak (#3980). LastAt is the most recent no-PR completion; the streak is
@@ -2814,27 +2799,6 @@ func (h *ContributeWSHub) recentFailureCountKey(key string) int {
 	defer h.completedMu.Unlock()
 	return h.consecutiveFailures[key]
 }
-
-// The operator YANK (the repurposed manual requeue, kubestellar/hive#2568 + follow-up)
-// is built from the SAME release+cooldown machinery below, split into composable pieces
-// so the release can NOT reintroduce the duplicate-assignment race #2492/#2557 closed:
-//
-//  1. releaseHeldTasks — clear currentTask (dropping the issue from selectTask's
-//     activeIssues guard), drop any pending credential, and bump the assignment
-//     generation (#2568, the Gate) so a stale worker's later completion is fenced out.
-//  2. bookAndRevokeReleased — book the SAME short non-permanent failure cooldown via
-//     recordTaskFailure (so the released issue is not instantly re-admissible to a
-//     stale worker) and push the EXISTING task_revoke message so the relay stops
-//     cleanly and re-asks for work.
-//  3. RequeueContributorTask — the public entry point. It runs (1)+(2) and then
-//     IMMEDIATELY reassigns each released clanker its next-priority item via selectTask
-//     (the yank behaviour), self-excluding the just-released issue from that clanker so
-//     it moves to different work. When nothing else is admissible the clanker is simply
-//     released + idle (the old requeue-only outcome, now the fallback).
-//
-// None of this mints or rotates a token or changes trust. Synthetic pr-review tasks
-// carry Number == 0 and are released without booking an issue-key cooldown, exactly
-// like the disconnect path. A blank operator reason falls back to a default label.
 
 // releaseTarget pairs a connection with the task it was just released from. It is the
 // shared unit releaseHeldTasks produces and bookAndRevokeReleased / the reassignment
@@ -5239,35 +5203,6 @@ func (h *ContributeWSHub) requireExplicitAccept() bool {
 	return h.server.deps.Config.Hub.IsContributeRequireExplicitAccept()
 }
 
-// contributorSupportsQuotaPreflight reports whether the connected relay
-// advertised the quota_preflight_v1 capability (kubestellar/hive#6954). It gates
-// the auto-accept credential hold: a relay that advertises it will answer an
-// offered task with task_accepted or a local_capacity_guard task_declined BEFORE
-// the scoped credential is delivered (#6833), so the hub withholds and waits; a
-// relay that does not advertise it cannot preflight, so the hub delivers the
-// credential on the auto-accept path exactly as it did before #6833.
-//
-// This is TRUE capability negotiation, replacing the prior proxy on
-// RelayProtocolVersion. That proxy withheld the credential from every relay that
-// declared ANY protocol version — #6931 never bumped RELAY_PROTOCOL_VERSION, so
-// every already-deployed relay tripped it — and only kept working by the
-// accident that the in-tree relay has always sent task_accepted unconditionally.
-// Gating on the advertised token instead makes the contract explicit: nothing is
-// withheld unless the relay has stated it will answer.
-//
-// Fail closed on the negotiated side, backward-compatible on the legacy side: an
-// absent/empty capability list is read as "no preflight" and takes the pre-#6833
-// immediate-delivery path, which is the deliberate compatibility choice #6833's
-// "mixed-version hub/relay behaviour remains backward compatible" criterion
-// requires — an old relay must not be stranded waiting for a credential it will
-// never earn because it does not know how to accept or decline.
-func contributorSupportsQuotaPreflight(c *ContributorConnection) bool {
-	if c == nil || c.capabilities == nil {
-		return false
-	}
-	return c.capabilities.DeclaresCapability(capQuotaPreflight)
-}
-
 // deliverTaskCredential ships the scoped credential the hub minted for the
 // connection's current task but deliberately withheld from task_assign (#2537).
 // It is the single post-acceptance delivery point: both the auto-accept path (in
@@ -5962,23 +5897,6 @@ func isReleaseLine(tag string) bool {
 	return true
 }
 
-func taskComplexityFromLabels(labels []string) string {
-	for _, raw := range labels {
-		l := strings.ToLower(strings.TrimSpace(raw))
-		switch l {
-		case "complexity/simple", "simple":
-			return "simple"
-		case "complexity/medium", "medium":
-			return "medium"
-		case "complexity/complex", "complex":
-			return "complex"
-		case "complexity/unknown", "unknown":
-			return "unknown"
-		}
-	}
-	return "unknown"
-}
-
 // hiveOwnRepoName is the repository this hive's own source lives in, and
 // hiveOwnRepoOwners are the orgs it has lived under. Both owners are accepted
 // because the repo moved orgs: a hive configured before the transfer still
@@ -6278,20 +6196,6 @@ func promptInvocationMeta(c *ContributorConnection) ghpkg.InvocationMeta {
 		Effort:  c.reasoningEffort,
 	}
 	return meta
-}
-
-func capabilityRoutingInputs(c *ContributorConnection) (*ContributorCapabilities, string) {
-	if c == nil {
-		return nil, ""
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	var caps *ContributorCapabilities
-	if c.capabilities != nil {
-		cp := *c.capabilities
-		caps = &cp
-	}
-	return caps, c.cliBackend
 }
 
 // canonicalRepoKey maps an arbitrary, possibly client-supplied repo string to the
@@ -7210,25 +7114,6 @@ func writeProtocolPing(conn *websocket.Conn) error {
 	)
 }
 
-func websocketCloseErrorDetails(err error) (code int, reason, source string) {
-	var closeErr *websocket.CloseError
-	if errors.As(err, &closeErr) {
-		source = "close-frame"
-		if closeErr.Code == websocket.CloseAbnormalClosure {
-			source = "abnormal-no-close-frame"
-		}
-		return closeErr.Code, closeErr.Text, source
-	}
-	return 0, "", "read-error"
-}
-
-func contributorUsername(c *ContributorConnection) string {
-	if c == nil || c.profile == nil {
-		return ""
-	}
-	return c.profile.GitHubUsername
-}
-
 // closeWithReason closes a contributor socket after telling the client WHY.
 //
 // THE DEFECT (kubestellar/hive#5090): every close on this path was a bare
@@ -7379,4 +7264,93 @@ func (s *Server) Close() {
 		return
 	}
 	s.CloseContributeHub()
+}
+
+func contributorStatePath(contributorsDir, currentPath, name string) string {
+	defaultPath := filepath.Join(defaultContributorsDir, name)
+	if currentPath != "" && currentPath != defaultPath {
+		return currentPath
+	}
+	return filepath.Join(contributorsDir, name)
+}
+
+var turnEnvelopeDirPath = "/data/contributors/turn-envelopes"
+
+// contributorSupportsQuotaPreflight reports whether the connected relay
+// advertised the quota_preflight_v1 capability (kubestellar/hive#6954). It gates
+// the auto-accept credential hold: a relay that advertises it will answer an
+// offered task with task_accepted or a local_capacity_guard task_declined BEFORE
+// the scoped credential is delivered (#6833), so the hub withholds and waits; a
+// relay that does not advertise it cannot preflight, so the hub delivers the
+// credential on the auto-accept path exactly as it did before #6833.
+//
+// This is TRUE capability negotiation, replacing the prior proxy on
+// RelayProtocolVersion. That proxy withheld the credential from every relay that
+// declared ANY protocol version — #6931 never bumped RELAY_PROTOCOL_VERSION, so
+// every already-deployed relay tripped it — and only kept working by the
+// accident that the in-tree relay has always sent task_accepted unconditionally.
+// Gating on the advertised token instead makes the contract explicit: nothing is
+// withheld unless the relay has stated it will answer.
+//
+// Fail closed on the negotiated side, backward-compatible on the legacy side: an
+// absent/empty capability list is read as "no preflight" and takes the pre-#6833
+// immediate-delivery path, which is the deliberate compatibility choice #6833's
+// "mixed-version hub/relay behaviour remains backward compatible" criterion
+// requires — an old relay must not be stranded waiting for a credential it will
+// never earn because it does not know how to accept or decline.
+func contributorSupportsQuotaPreflight(c *ContributorConnection) bool {
+	if c == nil || c.capabilities == nil {
+		return false
+	}
+	return c.capabilities.DeclaresCapability(capQuotaPreflight)
+}
+
+func taskComplexityFromLabels(labels []string) string {
+	for _, raw := range labels {
+		l := strings.ToLower(strings.TrimSpace(raw))
+		switch l {
+		case "complexity/simple", "simple":
+			return "simple"
+		case "complexity/medium", "medium":
+			return "medium"
+		case "complexity/complex", "complex":
+			return "complex"
+		case "complexity/unknown", "unknown":
+			return "unknown"
+		}
+	}
+	return "unknown"
+}
+
+func capabilityRoutingInputs(c *ContributorConnection) (*ContributorCapabilities, string) {
+	if c == nil {
+		return nil, ""
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var caps *ContributorCapabilities
+	if c.capabilities != nil {
+		cp := *c.capabilities
+		caps = &cp
+	}
+	return caps, c.cliBackend
+}
+
+func websocketCloseErrorDetails(err error) (code int, reason, source string) {
+	var closeErr *websocket.CloseError
+	if errors.As(err, &closeErr) {
+		source = "close-frame"
+		if closeErr.Code == websocket.CloseAbnormalClosure {
+			source = "abnormal-no-close-frame"
+		}
+		return closeErr.Code, closeErr.Text, source
+	}
+	return 0, "", "read-error"
+}
+
+func contributorUsername(c *ContributorConnection) string {
+	if c == nil || c.profile == nil {
+		return ""
+	}
+	return c.profile.GitHubUsername
 }

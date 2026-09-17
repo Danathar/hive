@@ -1707,6 +1707,11 @@ func main() {
 	// one (#3498). Explicit thresholds are unaffected.
 	gov.SetRepoCount(cfg.Project.RepoCount())
 	sched = scheduler.New(cfg, logger)
+	// A kick_template that resolves nowhere used to fail silently: the kick
+	// fell through to the pack/convention template with no log line, and the
+	// dashboard prompt editor showed an empty box (hivecommons/hive#7390).
+	// Say so once, at boot, per agent.
+	sched.WarnDanglingKickTemplates()
 
 	// Wire the GitHub prompt-source resolver so agents may source their kick
 	// prompt from a repo (agent.prompt_source). Fetching reuses the hive's App
@@ -2000,6 +2005,13 @@ func main() {
 	archiveOnShutdown := func() { agentMgr.ArchiveAllKickLogs("shutdown") }
 	preShutdownHooks.add("archive-kick-logs", archiveOnShutdown)
 	agentMgr.SetSandboxConfig(cfg.AgentSandbox)
+	// #7421: the governor records a kick when it is dispatched; the manager
+	// tells it afterwards how the turn ENDED, so a kick that produced a
+	// clarifying question or a policy stand-down is not counted like one that
+	// produced work (and a question earns an early re-kick).
+	agentMgr.SetKickOutcomeObserver(func(agentName string, outcome agent.KickOutcome) {
+		gov.RecordKickOutcome(agentName, outcome.Kind, outcome.Reason, outcome.KickAt, outcome.At)
+	})
 
 	// Say out loud when the sandbox opt-in is configured but inert. The gate is
 	// two-part (global agent_sandbox.enabled AND a per-agent sandbox.enabled),
@@ -2341,7 +2353,7 @@ func main() {
 		if len(saved.KickHistory) > 0 {
 			records := make([]governor.KickRecord, len(saved.KickHistory))
 			for i, ke := range saved.KickHistory {
-				records[i] = governor.KickRecord{Timestamp: ke.Timestamp, Agent: ke.Agent}
+				records[i] = governor.KickRecord{Timestamp: ke.Timestamp, Agent: ke.Agent, Outcome: ke.Outcome, OutcomeReason: ke.OutcomeReason}
 			}
 			gov.SeedKickHistory(records)
 			logger.Info("kick history restored", "entries", len(records))
@@ -6048,6 +6060,12 @@ func runEvalCycle(
 	}
 
 	ghClient.EnrichCIStatus(ctx, actionable.PRs.Items)
+	// Held PRs need CI status too, or a red held PR can never be repaired:
+	// the hold label kept it out of PRs.Items, so nothing ever learned it was
+	// red and no agent was ever told to fix it (hivecommons/hive#7438). This
+	// enriches the held list ONLY for the repair path — held PRs still never
+	// reach the merge sweep, escalation or the queue counts.
+	ghClient.EnrichCIStatus(ctx, actionable.PRs.Held)
 
 	// Fold this pass's CI state into the fix-loop staleness clock BEFORE any
 	// consumer reads it, so the claim-suppression guard (#3), the merge watcher
@@ -7282,7 +7300,7 @@ func persistStateWithPaths(agentMgr *agent.Manager, gov *governor.Governor, cfg 
 	govKickHistory := gov.KickHistory()
 	kickEntries := make([]snapshot.GovKickEntry, len(govKickHistory))
 	for i, kr := range govKickHistory {
-		kickEntries[i] = snapshot.GovKickEntry{Timestamp: kr.Timestamp, Agent: kr.Agent}
+		kickEntries[i] = snapshot.GovKickEntry{Timestamp: kr.Timestamp, Agent: kr.Agent, Outcome: kr.Outcome, OutcomeReason: kr.OutcomeReason}
 	}
 
 	state := &snapshot.PersistedState{
@@ -8664,6 +8682,23 @@ func writeMergeEligible(actionable *github.ActionableResult, hold github.HoldRes
 		// sorted by repo NAME first and could starve an old escalated PR in a
 		// late-alphabet repo behind newer ones, on every kick, forever.
 		CreatedAt time.Time `json:"created_at"`
+		// HeadRef / HeadRepo / FromFork say where the red branch actually
+		// lives (hivecommons/hive#7386). The hive's App token pushes only to
+		// the base repository, so a fork PR is comment-only for every agent:
+		// ReachableAction spells that out ("push" | "comment-only") so no
+		// kick consumer has to discover it with a failed push — the failure
+		// mode that burned a scanner session and left a stray branch on the
+		// base repo under the fork's head-ref name.
+		HeadRef         string `json:"head_ref,omitempty"`
+		HeadRepo        string `json:"head_repo,omitempty"`
+		FromFork        bool   `json:"from_fork,omitempty"`
+		ReachableAction string `json:"reachable_action"`
+		// Held marks a PR carrying a hold label (the ACMM level gate's, or a
+		// human's). The hold is a MERGE checkpoint, not a repair checkpoint
+		// (hivecommons/hive#7438): a held red PR is still its author's to fix,
+		// so it is listed here with the flag rather than dropped — the owning
+		// agent's fix-before-new block says "fix CI, do not remove the hold".
+		Held bool `json:"held,omitempty"`
 	}
 
 	prAgents := auditPRAgents(org, time.Now().Add(-auditPRAttributionWindow), "")
@@ -8681,14 +8716,37 @@ func writeMergeEligible(actionable *github.ActionableResult, hold github.HoldRes
 			reviewLoaded = true
 		}
 	}
+	// Two populations, one classifier (hivecommons/hive#7438). PRs.Items are
+	// the merge candidates. PRs.Held are PRs the hold gate removed from Items
+	// — they can never become merge-eligible, but a RED one still has to reach
+	// its authoring agent, otherwise it deadlocks: it stays red, so it stays
+	// held, so nothing ever repairs it.
+	type prCandidate struct {
+		pr   github.PullRequest
+		held bool
+	}
+	candidates := make([]prCandidate, 0, len(actionable.PRs.Items)+len(actionable.PRs.Held))
 	for _, pr := range actionable.PRs.Items {
+		candidates = append(candidates, prCandidate{pr: pr})
+	}
+	for _, pr := range actionable.PRs.Held {
+		candidates = append(candidates, prCandidate{pr: pr, held: true})
+	}
+
+	seen := make(map[string]bool, len(candidates))
+	for _, cand := range candidates {
+		pr := cand.pr
 		if pr.Draft {
 			continue
 		}
 		key := fmt.Sprintf("%s/%d", pr.Repo, pr.Number)
-		if holdSet[key] {
+		if seen[key] {
 			continue
 		}
+		seen[key] = true
+		// The hold can arrive either as membership in PRs.Held or as a row in
+		// the hold snapshot; both mean the same thing here.
+		held := cand.held || holdSet[key]
 		fullRepo := fullRepoName(pr.Repo, org)
 		// intent.Verdict.BlocksMerge is the one shared refusal predicate; the
 		// App self-merge sweep gates on the same function (#6258).
@@ -8719,20 +8777,35 @@ func writeMergeEligible(actionable *github.ActionableResult, hold github.HoldRes
 				pr.Mergeable == github.MergeableYes
 			if !onlyOptionalRed {
 				failing = append(failing, failingPR{
-					Number:        pr.Number,
-					Repo:          fullRepo,
-					Title:         pr.Title,
-					Author:        pr.Author,
-					HeadSHA:       pr.HeadSHA,
-					FailingChecks: pr.FailingChecks,
-					Excerpt:       pr.CIFailureExcerpt,
-					Escalated:     escalatedPRs[escalation.Key(fullRepo, pr.Number)],
-					Agent:         prAgents[fmt.Sprintf("%s#%d", fullRepo, pr.Number)],
-					Labels:        pr.Labels,
-					CreatedAt:     pr.CreatedAt,
+					Number:          pr.Number,
+					Repo:            fullRepo,
+					Title:           pr.Title,
+					Author:          pr.Author,
+					HeadSHA:         pr.HeadSHA,
+					FailingChecks:   pr.FailingChecks,
+					Excerpt:         pr.CIFailureExcerpt,
+					Escalated:       escalatedPRs[escalation.Key(fullRepo, pr.Number)],
+					Agent:           prAgents[fmt.Sprintf("%s#%d", fullRepo, pr.Number)],
+					Labels:          pr.Labels,
+					CreatedAt:       pr.CreatedAt,
+					HeadRef:         pr.HeadRef,
+					HeadRepo:        pr.HeadRepo,
+					FromFork:        pr.FromFork,
+					ReachableAction: github.ReachableAction(pr),
+					Held:            held,
 				})
 				continue
 			}
+		}
+
+		// The hold check sits AFTER the red classification on purpose
+		// (hivecommons/hive#7438): a held PR must never become merge-eligible,
+		// but a held RED PR is still its author's to repair. When this skip ran
+		// first, a level-held agent PR with a failing check vanished from
+		// ci-failing.json, its author never got a fix-before-new block for it,
+		// and it sat red and held until a human did the agent's repair.
+		if held {
+			continue
 		}
 
 		// A PR whose CI is still "pending" is nonetheless merge-eligible when

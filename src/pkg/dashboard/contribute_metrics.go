@@ -12,28 +12,6 @@ import (
 	"time"
 )
 
-// Persistent hourly time-series feeding the Operations-tab and Leaderboard
-// sparklines (#persistent-history). Four series are kept, each a ring of the
-// most-recent hourly buckets on the spoke PVC so the trend survives restarts and
-// rolling upgrades instead of resetting to a flat line on every deploy:
-//   - queue_depth   : length of the admitted ready-work queue, SAMPLED hourly
-//   - tasks_done    : task completions counted in each hour (delta of cumulative)
-//   - fleet_size    : number of connected clankers, SAMPLED hourly
-//   - per_user_done : per-contributor (github_username) completions per hour
-//
-// Every series shares ONE timeline: index i of per_user_done[u] is the same hour
-// as index i of tasks_done, because a rollup appends exactly one bucket to every
-// series — including a zero to each per-user ring for an hour that contributor
-// finished nothing. That alignment is what lets a client read "the last 24
-// hours" as the last 24 buckets, and what makes the per-user sparklines line up
-// with the shared ones instead of stretching a handful of active hours across a
-// strip labelled "last 7 days" (#6543).
-//
-// The store owns ONLY the counting + persistence. Sampling reads live values
-// from the contribute hub; the deltas come from the cumulative per-contributor
-// TasksCompleted counters that already persist per user, so a restart mid-hour
-// cannot double-count (a bucket is the difference between two cumulative reads).
-
 const (
 	// metricsRetentionBuckets is how many hourly buckets each series keeps: 168
 	// hours == 7 days. Old buckets fall off the front of the ring. Seven days is

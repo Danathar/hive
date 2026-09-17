@@ -1,22 +1,5 @@
 package dashboard
 
-// The review_rejected emitter (#6259).
-//
-// pkg/hooks/review_rejected.go shipped the transition, its typed payload, the
-// notification rendering, and the model-knob deep link, but no production
-// path ever called the emitter: an operator who configured a review_rejected
-// hook got a validated, registered rule that could never fire. This file is
-// the missing call site.
-//
-// The surface is the approval desk (RFC #4000). It is the one place a human
-// explicitly rejects an agent's queued output through hive itself, with an
-// actor (the resolving owner), a stated rationale, the requesting agent, and
-// the target repo/PR all durably journaled by toolapprove.Inbox.Resolve. A
-// denial there is the "send the work back" verdict the hook exists for, and
-// the emission is post-commit: it fires only after Resolve has journaled the
-// denial, never on a replayed or failed resolve, so one rejection is exactly
-// one transition.
-
 import (
 	"context"
 	"net/http"

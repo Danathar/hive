@@ -1,18 +1,5 @@
 package dashboard
 
-// Gateways CRUD for the dashboard's "Model Gateways" config tab. A hive may
-// configure several named, OpenAI-compatible model gateways at once
-// (OpenRouter, a LiteLLM proxy, vLLM, llm-d, or a custom endpoint); each agent
-// routes through one by naming it as its backend. This file generalizes the
-// single-gateway LiteLLM handlers (handleGovernorLiteLLM et al.) into list /
-// upsert / delete / test over Governor.Gateways, while the legacy LiteLLM
-// routes keep working (a legacy-only hive surfaces its synthesized "litellm"
-// gateway via ResolvedGateways()).
-//
-// SECRETS: a key VALUE typed in the UI is written to an owner-only file on the
-// PVC (like the LiteLLM key path) and only the FILE PATH is stored in
-// hive.yaml — the key value never enters hive.yaml, logs, or API responses.
-
 import (
 	"context"
 	"errors"
@@ -32,75 +19,6 @@ import (
 // save-time/discover /v1/models probe, so a slow IAM endpoint cannot stall the
 // dashboard request. Independent of the probe's own HTTP timeout.
 const watsonxProbeMintTimeout = 10 * time.Second
-
-// watsonxEndpointForRegion builds the watsonx model-gateway base URL for a
-// region slug, falling back to the default region when blank. Mirrors how the
-// UI preset fills the endpoint.
-//
-// The template itself now lives in pkg/watsonx so the AGENT LAUNCH path can
-// resolve the same endpoint for an agent whose backend is "watsonx"; this is a
-// thin delegate kept for call-site readability inside the dashboard, reached
-// through the WatsonxGateway interface (#5565 slice 3). An unwired gateway
-// yields "" — the same "no endpoint" the caller already handles.
-func (s *Server) watsonxEndpointForRegion(region string) string {
-	if s.deps == nil || s.deps.Watsonx == nil {
-		return ""
-	}
-	return s.deps.Watsonx.EndpointForRegion(region)
-}
-
-// watsonxGraniteFallback returns the static Granite list (empty when no
-// watsonx gateway is wired).
-func (s *Server) watsonxGraniteFallback() []string {
-	if wx := s.watsonx(); wx != nil {
-		return wx.GraniteFallbackModels()
-	}
-	return nil
-}
-
-// gatewayProbeAuth resolves the bearer + extra request headers a /v1/models
-// probe (or model discovery) should present for a gateway. For every kind
-// except watsonx this is just the resolved key as the Bearer and no extra
-// headers — identical to the prior behavior. For watsonx it mints (and caches)
-// an IAM token from the resolved IBM Cloud API key and adds the X-IBM-Project-ID
-// header; a mint failure is returned so the probe surfaces a real error instead
-// of silently sending the raw key. Never logs the key or token.
-func (s *Server) gatewayProbeAuth(kind, key, projectID string) (bearer string, headers map[string]string, err error) {
-	if kind != config.GatewayKindWatsonx {
-		return key, nil, nil
-	}
-	wx := s.watsonx()
-	if wx == nil {
-		return "", nil, errWatsonxUnavailable
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), watsonxProbeMintTimeout)
-	defer cancel()
-	token, err := wx.MintToken(ctx, key)
-	if err != nil {
-		return "", nil, err
-	}
-	headers = map[string]string{}
-	if projectID != "" {
-		headers[wx.ProjectIDHeader()] = projectID
-	}
-	return token, headers, nil
-}
-
-// watsonx returns the wired provider gateway, or nil (bare test servers).
-func (s *Server) watsonx() WatsonxGateway {
-	if s.deps == nil {
-		return nil
-	}
-	return s.deps.Watsonx
-}
-
-// errWatsonxUnavailable is the probe failure when no watsonx gateway is wired
-// (never a production shape — cmd/hive always wires one).
-var errWatsonxUnavailable = &watsonxUnavailableError{}
-
-type watsonxUnavailableError struct{}
-
-func (*watsonxUnavailableError) Error() string { return "watsonx gateway unavailable" }
 
 const (
 	// gatewaySecretFileMode / gatewaySecretDirMode keep gateway key files
@@ -846,3 +764,72 @@ func (s *Server) legacyLiteLLMSectionMatches(gw config.GatewayConfig) bool {
 	}
 	return strings.EqualFold(legacy, strings.TrimRight(strings.TrimSpace(gw.Endpoint), "/"))
 }
+
+// watsonxEndpointForRegion builds the watsonx model-gateway base URL for a
+// region slug, falling back to the default region when blank. Mirrors how the
+// UI preset fills the endpoint.
+//
+// The template itself now lives in pkg/watsonx so the AGENT LAUNCH path can
+// resolve the same endpoint for an agent whose backend is "watsonx"; this is a
+// thin delegate kept for call-site readability inside the dashboard, reached
+// through the WatsonxGateway interface (#5565 slice 3). An unwired gateway
+// yields "" — the same "no endpoint" the caller already handles.
+func (s *Server) watsonxEndpointForRegion(region string) string {
+	if s.deps == nil || s.deps.Watsonx == nil {
+		return ""
+	}
+	return s.deps.Watsonx.EndpointForRegion(region)
+}
+
+// watsonxGraniteFallback returns the static Granite list (empty when no
+// watsonx gateway is wired).
+func (s *Server) watsonxGraniteFallback() []string {
+	if wx := s.watsonx(); wx != nil {
+		return wx.GraniteFallbackModels()
+	}
+	return nil
+}
+
+// gatewayProbeAuth resolves the bearer + extra request headers a /v1/models
+// probe (or model discovery) should present for a gateway. For every kind
+// except watsonx this is just the resolved key as the Bearer and no extra
+// headers — identical to the prior behavior. For watsonx it mints (and caches)
+// an IAM token from the resolved IBM Cloud API key and adds the X-IBM-Project-ID
+// header; a mint failure is returned so the probe surfaces a real error instead
+// of silently sending the raw key. Never logs the key or token.
+func (s *Server) gatewayProbeAuth(kind, key, projectID string) (bearer string, headers map[string]string, err error) {
+	if kind != config.GatewayKindWatsonx {
+		return key, nil, nil
+	}
+	wx := s.watsonx()
+	if wx == nil {
+		return "", nil, errWatsonxUnavailable
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), watsonxProbeMintTimeout)
+	defer cancel()
+	token, err := wx.MintToken(ctx, key)
+	if err != nil {
+		return "", nil, err
+	}
+	headers = map[string]string{}
+	if projectID != "" {
+		headers[wx.ProjectIDHeader()] = projectID
+	}
+	return token, headers, nil
+}
+
+// watsonx returns the wired provider gateway, or nil (bare test servers).
+func (s *Server) watsonx() WatsonxGateway {
+	if s.deps == nil {
+		return nil
+	}
+	return s.deps.Watsonx
+}
+
+// errWatsonxUnavailable is the probe failure when no watsonx gateway is wired
+// (never a production shape — cmd/hive always wires one).
+var errWatsonxUnavailable = &watsonxUnavailableError{}
+
+type watsonxUnavailableError struct{}
+
+func (*watsonxUnavailableError) Error() string { return "watsonx gateway unavailable" }

@@ -1,22 +1,5 @@
 package dashboard
 
-// Linear agent integration wiring (RFC #4492, Part 2).
-//
-// This file connects pkg/linearagent to the spoke dashboard's HTTP surface:
-//
-//   - POST /api/linear/agent/install    (owner)  → returns the actor=app
-//     authorize URL with a single-use state
-//   - GET  /linear/callback             (PUBLIC) → OAuth return; the state
-//     token is the credential, verified single-use server-side (same posture
-//     as /openrouter/callback)
-//   - POST /api/linear/webhook          (PUBLIC) → AgentSessionEvent receiver;
-//     the HMAC signature is the credential, verified fail-closed
-//   - GET  /api/linear/agent/status     (owner)  → install state + sessions
-//   - POST /api/linear/agent/disconnect (owner)  → forget the install
-//
-// It also installs the agent-manager kick observer that maps run completion
-// back onto Linear sessions (component D).
-
 import (
 	"context"
 	"fmt"
@@ -78,19 +61,6 @@ func (s *Server) linearAgent() LinearAgentGateway {
 		s.linearAgentSvc = svc
 	})
 	return s.linearAgentSvc
-}
-
-// linearAgentKick is the responder's kick port: send the message to the named
-// agent and record the kick with the governor.
-func (s *Server) linearAgentKick(agentName, message string) error {
-	if s.deps == nil || s.deps.AgentMgr == nil {
-		return errNoAgentManager
-	}
-	err := s.deps.AgentMgr.SendKick(agentName, message)
-	if err == nil && s.deps.Governor != nil {
-		s.deps.Governor.RecordKick(agentName)
-	}
-	return err
 }
 
 // errNoAgentManager is the kick failure when the server has no agent manager
@@ -399,4 +369,17 @@ func (s *Server) handleLinearAgentDisconnect(w http.ResponseWriter, r *http.Requ
 // status flag the UI reads.
 func (s *Server) redirectLinearAgent(w http.ResponseWriter, r *http.Request, flag string) {
 	http.Redirect(w, r, "/"+flag, http.StatusFound)
+}
+
+// linearAgentKick is the responder's kick port: send the message to the named
+// agent and record the kick with the governor.
+func (s *Server) linearAgentKick(agentName, message string) error {
+	if s.deps == nil || s.deps.AgentMgr == nil {
+		return errNoAgentManager
+	}
+	err := s.deps.AgentMgr.SendKick(agentName, message)
+	if err == nil && s.deps.Governor != nil {
+		s.deps.Governor.RecordKick(agentName)
+	}
+	return err
 }

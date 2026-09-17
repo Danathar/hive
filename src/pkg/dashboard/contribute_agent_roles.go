@@ -2,8 +2,9 @@ package dashboard
 
 import (
 	"fmt"
-	"github.com/hivecommons/hive/pkg/worksource"
 	"strings"
+
+	"github.com/hivecommons/hive/pkg/worksource"
 )
 
 var roleClaimMinTier = map[string]string{

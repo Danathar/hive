@@ -1,26 +1,5 @@
 package dashboard
 
-// Durable per-run contributor task telemetry (the DECLARE half only).
-//
-// Every accepted task_complete / task_failed already carries a small closed
-// vocabulary — completion_signal (#5376), the task-failure kind (#2547), the
-// no_work_needed verdict (#3987) — but until now none of it survived anywhere
-// an operator could aggregate: the slog line rotates away, activity.json is
-// capped at maxActivityEntries and drops reason/kind entirely, and nothing
-// records how long a run took. So "which backend completes on its verdict vs
-// the chrome-idle fallback" and "which backends fail on their environment" —
-// the exact questions the backend smoke (bin/test_backend_smoke.sh) asks
-// synthetically — were unanswerable for real fleet traffic.
-//
-// This file appends one JSONL record per terminal task report to
-// /data/contributors/task_runs.jsonl and derives a predefined `scenario` from
-// the already-normalized fields, so the record set can be ratcheted over time
-// (watch idle_complete and env_failure trend down per backend).
-//
-// DECLARE, never ROUTE: nothing here influences cooldowns, trust, routing, or
-// offers — the same boundary contribute_protocol.go draws for the failure
-// kind. Writes are best-effort; a telemetry failure never fails a task.
-
 import (
 	"encoding/json"
 	"net/http"
@@ -32,8 +11,6 @@ import (
 	"sync"
 	"time"
 )
-
-const taskRunLogFileName = "task_runs.jsonl"
 
 // taskRunLogPath is where terminal task reports are appended when no hub/server
 // override is available. A var (not const) so tests point it at a scratch file.
@@ -392,13 +369,6 @@ func readTaskRunStats(path string, window time.Duration) ([]taskRunBackendStats,
 	return out, total, nil
 }
 
-func (h *ContributeWSHub) taskRunLogPath() string {
-	if h != nil && h.taskRunLogFile != "" {
-		return h.taskRunLogFile
-	}
-	return taskRunLogPath
-}
-
 // handleContributeRunStats serves GET /api/contribute/run-stats: per-backend
 // scenario counts, completion-signal compliance, and duration percentiles over
 // a trailing window (?days=N, default 7, 0 = everything in the live log).
@@ -550,4 +520,13 @@ func (s *Server) handleContributeRuns(w http.ResponseWriter, r *http.Request) {
 		"runs":              runs,
 		"pane_tail_visible": paneVisible,
 	})
+}
+
+const taskRunLogFileName = "task_runs.jsonl"
+
+func (h *ContributeWSHub) taskRunLogPath() string {
+	if h != nil && h.taskRunLogFile != "" {
+		return h.taskRunLogFile
+	}
+	return taskRunLogPath
 }

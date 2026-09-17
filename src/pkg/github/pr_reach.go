@@ -9,18 +9,6 @@ import (
 	gh "github.com/google/go-github/v72/github"
 )
 
-// ============================================================================
-// PR facts for reach telemetry (#3994, phase 2b of #3973)
-// ============================================================================
-//
-// The /api/reach join needs three GitHub facts per PR: the merge commit SHA,
-// the merge time, and the changed-file list (input to the D3 PR→component
-// mapping). All three are IMMUTABLE once a PR is merged, so they are cached
-// permanently in bounded maps — the same drop-on-overflow discipline as
-// pkg/hub's commitOrderCache, and the mutex+map+cachedAt shape of
-// app_discovery.go. The recent-merged-PRs listing is the one answer that
-// changes over time, so it alone carries a TTL.
-
 // MergedPR is the merged-PR fact set the reach join consumes.
 type MergedPR struct {
 	Number         int
@@ -170,7 +158,7 @@ func (c *Client) ListMergedPRFiles(ctx context.Context, owner, repo string, numb
 
 // RecentMergedPRs lists up to limit PRs merged into base, newest merge first,
 // cached for RecentMergedPRsTTL. It walks closed PRs sorted by update
-// recency and keeps only real
+// recency (the fetchMergedPRs pattern in pkg/knowledge) and keeps only real
 // merges into the requested base branch.
 func (c *Client) RecentMergedPRs(ctx context.Context, owner, repo, base string, limit int) ([]MergedPR, error) {
 	if c == nil {

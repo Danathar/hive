@@ -8,35 +8,6 @@ import (
 	"github.com/hivecommons/hive/pkg/worksource"
 )
 
-// ── #4247: shared convergence admission for internal agent kicks ──────────────
-//
-// Contributor offerability and assignment already withhold a dependency-blocked
-// or unknown candidate (#3857/#3904), but scheduled and cached manual internal-
-// agent kicks render the raw enumerated issue set. This file provides the ONE
-// read-only admitted-issue projection the eval-cycle dispatch boundary consumes,
-// built from the SAME observer (observeCandidateDependencies) and the SAME pure
-// evaluator (convergence.Evaluate) the contributor paths use — one normalized
-// observation/evaluator contract, never a reimplementation in scheduler code.
-//
-// Rollout (maintainer requirement, precedes #4263): callers gate on the
-// convergence feature toggle. With mode "off" (default) this projection is
-// never invoked — the kick path is entirely inert and unchanged. With mode
-// "shadow" the caller computes the projection and LOGS what would have been
-// withheld, but always dispatches the raw population — observed, never
-// enforced. Enforcement is a later, explicit increment.
-//
-// Deliberate scope, per the #4247 contract:
-//   - CONVERGENCE admission only. The open-PR claim ledger is not consulted
-//     here: internal kicks already have their own claim policy
-//     (applyDuplicatePRGuard honours hive-authored claims only, #3792), and
-//     re-applying the contributor-side any-claim rule would silently change it.
-//   - Nothing is cached across passes; every call builds a fresh sweep from
-//     current authoritative bead state, so the judgment is level-triggered and
-//     reconstructs identically after a restart.
-//   - The raw actionable population remains authoritative for governor queue
-//     counts/mode/cadence, dashboard status, PR/review dispatch, escalation,
-//     and merge eligibility — this projection covers the ISSUE list only.
-
 // ConvergenceKickFinding is one issue the shared convergence admission would
 // withhold from internal agent kicks, with the exact Decision that judged it.
 type ConvergenceKickFinding struct {

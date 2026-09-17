@@ -92,16 +92,6 @@ func (s *Server) handleAutoMergePut(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, autoMergeSectionResponse(cfg))
 }
 
-func syncAutoMergePolicyToGitHubClient(cfg *config.Config, ghClient *ghpkg.Client) {
-	if cfg == nil || ghClient == nil {
-		return
-	}
-	set, _ := cfg.AutoMerge.RequiredCheckSet()
-	ghClient.SetRequiredChecks(set)
-	ghClient.SetMergeRequestAllowUnprotectedBaseRepos(cfg.AutoMerge.AllowUnprotectedBaseSet())
-	ghClient.SetMergeRequestNoCIAllowedRepos(cfg.AutoMerge.NoCIOKSet())
-}
-
 // autoMergeSectionResponse renders AutoMergeConfig for the dashboard. The
 // self_authored tri-state resolves to its effective default (nil = enabled)
 // while selfAuthoredSet lets the UI distinguish an explicit choice from the
@@ -132,6 +122,16 @@ func autoMergeSectionResponse(cfg *config.Config) map[string]interface{} {
 		"allow_unprotected_base": allowUnprotected,
 		"no_ci_ok":               noCIOK,
 	}
+}
+
+func syncAutoMergePolicyToGitHubClient(cfg *config.Config, ghClient *ghpkg.Client) {
+	if cfg == nil || ghClient == nil {
+		return
+	}
+	set, _ := cfg.AutoMerge.RequiredCheckSet()
+	ghClient.SetRequiredChecks(set)
+	ghClient.SetMergeRequestAllowUnprotectedBaseRepos(cfg.AutoMerge.AllowUnprotectedBaseSet())
+	ghClient.SetMergeRequestNoCIAllowedRepos(cfg.AutoMerge.NoCIOKSet())
 }
 
 func normalizeAutoMergeRepoList(repos []string) []string {

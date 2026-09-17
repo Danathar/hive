@@ -16,20 +16,6 @@ import (
 	gh "github.com/google/go-github/v72/github"
 )
 
-// Duplicate-PR guard.
-//
-// Background: a restart storm (pod relaunching the agent from scratch every
-// few minutes) made a quality agent open nine near-identical PRs overnight
-// against the same issue. Each fresh start had no memory of the PR it had
-// just filed, saw the same open issue, and filed another.
-//
-// Agents open PRs by running `gh` inside their own shell, so the hive never
-// observes the call and cannot intercept it. A prompt instruction ("check
-// before opening a PR") is advisory and is exactly what already failed. The
-// fix therefore removes the work from the offer: any issue already claimed by
-// an open PR authored by this hive is filtered out of the actionable set
-// before kick messages are built.
-
 const (
 	// claimLedgerTTL bounds how long a cached claim survives without being
 	// re-confirmed by a live API call. It is deliberately much longer than a

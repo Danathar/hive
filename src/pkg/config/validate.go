@@ -89,6 +89,9 @@ func (c *Config) Validate() error {
 		if !ValidateCadenceScope(agent.CadenceScope) {
 			return fmt.Errorf("agent %s: invalid cadence_scope %q (must be aggregate or per_repo)", name, agent.CadenceScope)
 		}
+		if err := ValidateKickTemplateName(agent.KickTemplate); err != nil {
+			return fmt.Errorf("agent %s: %w", agentSourceLabel(name, agent.sourceFile), err)
+		}
 		if err := validateChannels(name, agent.Channels); err != nil {
 			return err
 		}

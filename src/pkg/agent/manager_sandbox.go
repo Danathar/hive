@@ -1,5 +1,3 @@
-// Sandboxed kick execution: sandbox wiring setters, per-agent sandbox
-// gating, the sandbox kick runner, and sandbox audit emission.
 package agent
 
 import (

@@ -1,6 +1,8 @@
 package dashboard
 
-import "net/http"
+import (
+	"net/http"
+)
 
 // handleProvidersHeadroom serves GET /api/providers/headroom: the last known
 // per-provider headroom snapshot from the rotation manager (RFC #3958).

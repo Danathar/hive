@@ -195,11 +195,6 @@ func (s *Server) resolveActionableIssue(repo string, number int, url string) (gi
 	return github.Issue{}, false
 }
 
-// Plan-review dashboard endpoints (Phase 2 planning intelligence). They mirror
-// the /api/inception/* shape: thin HTTP handlers that delegate all logic to
-// pkg/planning. Beads live in per-agent stores, so each handler locates the
-// store that actually holds the target epic (findEpicStore) before acting.
-
 // findEpicStore returns the bead store that contains an epic bead with epicID,
 // or (nil, "") if no store holds it. Planning children live in the same store
 // as their epic (Decompose creates them there), so the located store is where

@@ -9,21 +9,6 @@ import (
 	"github.com/hivecommons/hive/pkg/config"
 )
 
-// Per-repo agent pause (#6203).
-//
-// An operator could already stop one AGENT everywhere, or stop EVERYTHING with
-// the fleet breaker. There was no way to say "quiet this one repo, leave the
-// rest of the hive running" — so a release freeze, an incident, or a repo whose
-// CI is red for an unrelated reason cost the whole fleet, or cost the repo its
-// place in project.repos.
-//
-// These two handlers are the dashboard half of that. The enforcement half is
-// deliberately elsewhere and deterministic: the MITM proxy refuses agent writes
-// to a paused repo, the hive-open-pr / hive-merge relays refuse to fulfil one,
-// and work enumeration produces nothing for it. Nothing here relies on an agent
-// reading a prompt and choosing to comply — a prompt-only pause has already
-// been observed to fail when an agent's model changes.
-
 // repoPauseRequest is the body of POST /api/repos/pause and /api/repos/resume.
 //
 // The repo travels in the BODY rather than a path segment because a repos entry

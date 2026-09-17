@@ -13,17 +13,6 @@ import (
 	"github.com/hivecommons/hive/pkg/watchdog"
 )
 
-// This file backs the Health tab's "Watchdog activity" strip (#7254).
-//
-// Settings → Health → Agent Watchdog tells the operator to review the
-// `watchdog-*-observed` audit entries and then switch to Heal — RFC #4665
-// makes that promotion a data-driven decision — but until this endpoint the
-// data lived only in /data/audit.jsonl behind a manual search. A hive that sat
-// 6 h in Observe with 0 would-have-acted events out of 28,775 audit entries
-// showed nothing on the page that said so. GET /api/watchdog/activity turns
-// the audit trail into the number, the 30-day histogram, and the per-agent
-// liveness the decision actually needs.
-
 const (
 	// watchdogActivityDefaultDays is the trailing window when ?days is absent.
 	watchdogActivityDefaultDays = 30

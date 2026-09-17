@@ -1,29 +1,5 @@
 package dashboard
 
-// Storage for API key VALUES entered in the dashboard (currently the
-// LiteLLM gateway key). hive.yaml only ever stores a file PATH
-// (api_key_file); the key value itself is written to:
-//
-//  1. A 0600 file on the PVC (/data/secrets/litellm_api_key) — the
-//     authoritative store hive.yaml points at. It takes effect instantly
-//     and works on every hive (hosted k8s, Docker, LXC).
-//  2. Best-effort, the hive's own hive-secrets Kubernetes Secret, patched
-//     via the in-cluster API (requires the hive-secrets-writer Role from
-//     the provisioning template). This keeps a durable copy outside the
-//     PVC; on hives whose deployment whole-volume-mounts the Secret it
-//     also surfaces at /secrets/litellm_api_key, which ResolveAPIKey
-//     consults ahead of the PVC file.
-//
-// The PVC file — not the Secret mount — is what api_key_file records,
-// because the Secret path cannot be assumed readable: hives provisioned
-// from older templates mount hive-secrets with an items filter that
-// excludes litellm_api_key (or do not mount /secrets at all), and even on
-// current-template hives the kubelet takes ~2 minutes to project a
-// patched Secret into the mount. The PVC file has neither problem.
-//
-// The key value must never be logged, echoed in API responses, or
-// written to hive.yaml.
-
 import (
 	"bytes"
 	"context"

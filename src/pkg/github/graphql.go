@@ -5,8 +5,26 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 )
+
+// graphQLEndpoint maps a REST base URL to its GraphQL endpoint:
+// https://api.github.com/ → https://api.github.com/graphql;
+// https://ghe.example/api/v3/ → https://ghe.example/api/graphql;
+// anything else (a test server) → <base>graphql.
+func graphQLEndpoint(base *url.URL) string {
+	if base == nil {
+		return "https://api.github.com/graphql"
+	}
+	if strings.EqualFold(base.Host, "api.github.com") {
+		return base.Scheme + "://" + base.Host + "/graphql"
+	}
+	if strings.HasSuffix(strings.TrimSuffix(base.Path, "/"), "/api/v3") {
+		return base.Scheme + "://" + base.Host + "/api/graphql"
+	}
+	return strings.TrimSuffix(base.String(), "/") + "/graphql"
+}
 
 // graphQLError is one entry of a GraphQL response's "errors" array.
 type graphQLError struct {

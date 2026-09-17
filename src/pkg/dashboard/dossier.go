@@ -1,24 +1,5 @@
 package dashboard
 
-// Contributor dossier (v1) — self-service identity fields for the Leaderboard
-// "Me" card (archetype / specializations / testimony / equipped title / Credly
-// link / emblem seed) plus the HERALDRY endpoint that mirrors a contributor's
-// OWN public Credly badges onto their dossier.
-//
-// Design rules (see the dossier spec):
-//   - Every field is OPTIONAL and self-service; setting none is a first-class
-//     state. There is no completion %, no nag, no decay.
-//   - Identity for writes is resolved server-side (resolveContributeCaller),
-//     exactly like the label-interests endpoint — a contributor can only ever
-//     edit THEIR OWN dossier, and the identity is never taken from the body.
-//   - All stored values are aggressively sanitised/bounded so a hostile payload
-//     cannot bloat a profile file or smuggle markup (testimony is plain text,
-//     HTML-escaped again on render).
-//   - Heraldry involves NO secrets: Credly exposes every public profile as
-//     JSON at credly.com/users/{vanity}/badges.json. The hub fetches it
-//     server-side with a short timeout and a 6h in-memory cache; a private or
-//     missing profile simply yields an empty, unlinked response.
-
 import (
 	"encoding/json"
 	"fmt"
@@ -174,8 +155,6 @@ func (s *Server) handleContributeDossier(w http.ResponseWriter, r *http.Request)
 	s.logger.Info("contributor dossier updated", "username", username)
 	jsonResponse(w, dossierFieldsResponse(profile))
 }
-
-// ── Heraldry: the contributor's own public Credly badges ────────────────────
 
 // HeraldryBadge is one trimmed public Credly badge — only the fields the
 // dossier renders. No tokens, no emails: everything here is already public on
@@ -434,16 +413,6 @@ func heraldryFor(credlyName string) ([]HeraldryBadge, bool) {
 	}
 	return []HeraldryBadge{}, false
 }
-
-// ── GitHub public enrichment: service years + renown (followers) ────────────
-//
-// The dossier's Deeds grid shows two public GitHub facts — account age
-// ("github service" years) and follower count ("renown"). Both come from the
-// public, unauthenticated https://api.github.com/users/{username} endpoint,
-// fetched server-side with the SAME polite posture as heraldry: short timeout,
-// explicit User-Agent, and a 6h in-memory cache (failures are cached too, so a
-// missing account cannot trigger a fetch per page view). On any failure the
-// fields are simply omitted from the profile response — never fabricated.
 
 const (
 	githubUserCacheTTL     = 6 * time.Hour

@@ -664,14 +664,6 @@ func linearTeamsResponse(teams []config.LinearTeamSourceConfig) []map[string]int
 	return out
 }
 
-// linearStoredViewerID returns the Dependencies install probe, or nil.
-func (s *Server) linearStoredViewerID() func() (string, string) {
-	if s.deps == nil {
-		return nil
-	}
-	return s.deps.LinearStoredViewerID
-}
-
 // validateLinearWorkSourcePatch checks the Linear fields of a work-source PUT
 // before anything is mutated. It mirrors the rules the work-source factory
 // and the session responder enforce at runtime, so the dashboard refuses to
@@ -719,4 +711,12 @@ func validateLinearWorkSourcePatch(cfg *config.Config, sessionAgent *string, ass
 		}
 	}
 	return ""
+}
+
+// linearStoredViewerID returns the Dependencies install probe, or nil.
+func (s *Server) linearStoredViewerID() func() (string, string) {
+	if s.deps == nil {
+		return nil
+	}
+	return s.deps.LinearStoredViewerID
 }

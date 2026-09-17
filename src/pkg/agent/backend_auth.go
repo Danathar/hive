@@ -1,12 +1,3 @@
-// Package agent: backend_auth.go tracks each agent's backend-auth canary
-// state (#6558). #6500 showed a hosted hive whose every agent was dead on
-// "You are not licensed to use Copilot" for hours before a human happened to
-// open a Terminal and read it — there was no per-agent signal exposed to the
-// dashboard or the hub that said "this agent's backend auth is broken" versus
-// any other reason a kick might be quiet. This file derives that signal from
-// the SAME classifyProviderError verdict the inference-kick watchdog already
-// computes (pane_classify.go), so there is exactly one place that decides
-// what an agent pane's error text means.
 package agent
 
 import (

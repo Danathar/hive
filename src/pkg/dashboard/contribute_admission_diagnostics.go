@@ -10,29 +10,6 @@ import (
 	"github.com/hivecommons/hive/pkg/worksource"
 )
 
-// ── #4246: blocked / unknown / partial admission diagnostics ──────────────────
-//
-// Operators could see WHICH work was offerable (ReadyQueue) but not WHY a
-// candidate was excluded: the rejected convergence.Decision was computed on the
-// queue's own sweep and then discarded. This file retains it — the SAME
-// Decision from the SAME captured sweep, never a re-evaluation — and surfaces
-// it additively on GET /api/contribute/queue and the SSE hello frame.
-//
-// Everything here is gated by the convergence feature toggle
-// (config.ConvergenceMode, kubestellar/hive#3845 rollout): with mode "off"
-// (the default) no diagnostics are collected or emitted and both payloads are
-// byte-for-byte what they were; with mode "shadow" the withheld collection and
-// coverage snapshot appear as read-only diagnostics. Nothing is EVER enforced
-// by this surface in either mode — a withheld row is a candidate the existing
-// #3857/#3904 admission already excluded; the diagnostics only stop discarding
-// the explanation.
-//
-// Deliberate non-facts: no condition the evaluator did not compute is emitted
-// (no Converged, no HumanDecisionRequired, no quiescence, no generic
-// Degraded), decisions are never cached across passes, and nothing is
-// persisted — every request/hydration recomputes from current authoritative
-// in-memory bead state through the queue's own sweep.
-
 // AdmissionWithheldItem is one candidate the contributor-neutral convergence
 // admission withheld from the offerable queue, with the exact facts the
 // evaluator computed on the queue's captured sweep: the stable reason, the

@@ -14,26 +14,6 @@ import (
 	gh "github.com/google/go-github/v72/github"
 )
 
-// This file is the invocation-attribution trail for artifacts the hive itself
-// creates on GitHub: agent PRs opened by the PR-request watcher and issues the
-// hive creates (advisory issue, dashboard ACMM-gap issues). It exists because
-// an operator looking at an agent-authored PR previously had no way to answer
-// "which backend/model produced this?" — the App-bot author is deterministic
-// by design, so the invocation metadata must be recorded separately.
-//
-// Two layers, fed from the same launch-time metadata:
-//
-//  1. A VISIBLE one-line trailer appended to the artifact body at creation
-//     time, gated by governor.attribution_trailer (default ON).
-//  2. An AUDIT entry recorded for every such creation through the hooked
-//     audit sink (the dashboard's audit.jsonl + ring buffer), written
-//     regardless of the trailer toggle.
-//
-// Scope: only creations the hive MEDIATES are stamped. An issue an agent opens
-// directly through its own CLI never passes through this code and is not
-// covered — that limitation is intentional (the hive records what IT invoked,
-// it does not rewrite artifacts it did not create).
-
 // AttributionTrailerPrefix opens the visible trailer line. Neutral wording,
 // stable and greppable — also the marker AppendTrailer uses to avoid stacking
 // a second trailer onto a retried request.

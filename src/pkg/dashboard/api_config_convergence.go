@@ -9,22 +9,6 @@ import (
 	"github.com/hivecommons/hive/pkg/config"
 )
 
-// ── #4263: owner-gated runtime control for the convergence rollout mode ────────
-//
-// One top-level `convergence` settings block, following the auto_merge/review
-// top-level precedents: OWNER-ONLY read and update (requireOwnerRole, which
-// only trusts the server-verified live-role marker — a client-supplied role
-// header is never enough), validate BEFORE mutating anything, mutate the live
-// config, persist through saveConfig (which skips the next watcher reload so
-// an older file snapshot cannot immediately overwrite the update), and audit.
-//
-// The change is live: the eval-cycle seam re-captures the effective mode at
-// the start of every pass (CaptureConvergenceMode), so no rebuild or restart
-// is needed, and a pass already in flight finishes under its captured pair.
-// External YAML edits flow through the existing config watcher and the same
-// capture point; HIVE_CONVERGENCE_MODE remains the process-level override and
-// is surfaced (not hidden) by the GET below.
-
 // handleConvergenceConfigGet returns the convergence rollout block plus the
 // resolved effective mode and its captured generation.
 func (s *Server) handleConvergenceConfigGet(w http.ResponseWriter, r *http.Request) {

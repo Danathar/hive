@@ -235,7 +235,9 @@ func (s *Server) handleAgentDelete(w http.ResponseWriter, r *http.Request) {
 // so the whole-agent import and the "keep linked" re-apply path parse and map
 // identically.
 type agentDefinition = defsrc.AgentDefinition
+
 type agentDefinitionMeta = defsrc.AgentDefinitionMeta
+
 type agentDefinitionSpec = defsrc.AgentDefinitionSpec
 
 const (

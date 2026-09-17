@@ -47,7 +47,7 @@ const gheAPIPathSuffix = "/api/v3"
 // maxForgeHostLen bounds an operator-supplied host label. Real hostnames are
 // far shorter; this exists so a pasted blob can never reach the registry, the
 // meta.json on the PVC, or a log line.
-const maxForgeHostLen = 253 // RFC 1035 maximum length of a DNS name
+const maxForgeHostLen = 253
 
 // ForgeTarget is a validated forge destination: the kind, its bare host label,
 // and the derived web/API URLs the spoke needs. It is produced only by

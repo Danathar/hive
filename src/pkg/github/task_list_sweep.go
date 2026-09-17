@@ -172,40 +172,6 @@ type taskListItem struct {
 	Text    string
 }
 
-// isHiveFiledIssue reports whether issue was filed by the hive itself.
-// Fail-CLOSED: only returns true when hive authorship is affirmatively
-// provable — ambiguity keeps the issue open.
-//
-// Two independent positive signals, either sufficient:
-//
-//  1. Body carries AttributionTrailerPrefix ("— hive:"). Every hive-mediated
-//     create is stamped by AppendTrailer with that greppable marker
-//     (attribution.go:40, and see the comment at pr_request_claims.go
-//     confirming "Every hive-mediated create is stamped by AppendTrailer with
-//     that greppable marker").
-//  2. User.Type is "Bot" (case-insensitive) AND the login matches this Hive
-//     App's configured bot login. App-installation-token-authored issues carry
-//     User.Type == "Bot", but other GitHub Apps can also file issues in the
-//     same repo; those are not ours to close.
-//
-// Do NOT reuse isHumanFiledBugReport as an inverse test: it is fail-OPEN on
-// ambiguity (its own doc says "an agent's bug finding stays closeable, and a
-// maintainer's bug is protected"), and it returns false immediately for any
-// issue lacking a bug-family label, so a human-filed issue with no `bug` label
-// would slip past — the exact outcome this sweep must never produce.
-func (c *Client) isHiveFiledIssue(issue *gh.Issue) bool {
-	if issue == nil {
-		return false
-	}
-	if strings.Contains(issue.GetBody(), AttributionTrailerPrefix) {
-		return true
-	}
-	if issue.User != nil && strings.EqualFold(issue.User.GetType(), "Bot") && strings.TrimSpace(c.appBotLogin) != "" && strings.EqualFold(safeGetLogin(issue.User), c.appBotLogin) {
-		return true
-	}
-	return false
-}
-
 // issueLabelNames extracts the *gh.Label slice's names as strings so the
 // canonical Client.isExempt (which takes []string) can be reused unchanged.
 func issueLabelNames(labels []*gh.Label) []string {
@@ -569,21 +535,36 @@ func (c *Client) ensureSweepComment(ctx context.Context, owner, repo string, num
 	return nil
 }
 
-// isGitHubStatus reports whether err is a GitHub API error with the given HTTP
-// status. Kept as a package-local shim for task-list sweep tests and older v5
-// callers; production paths use githubStatusError directly.
-func isGitHubStatus(err error, status int) bool {
-	return githubStatusError(err, status)
-}
-
-func (c *Client) warn(msg string, args ...any) {
-	if c != nil && c.logger != nil {
-		c.logger.Warn(msg, args...)
+// isHiveFiledIssue reports whether issue was filed by the hive itself.
+// Fail-CLOSED: only returns true when hive authorship is affirmatively
+// provable — ambiguity keeps the issue open.
+//
+// Two independent positive signals, either sufficient:
+//
+//  1. Body carries AttributionTrailerPrefix ("— hive:"). Every hive-mediated
+//     create is stamped by AppendTrailer with that greppable marker
+//     (attribution.go:40, and see the comment at pr_request_claims.go
+//     confirming "Every hive-mediated create is stamped by AppendTrailer with
+//     that greppable marker").
+//  2. User.Type is "Bot" (case-insensitive) AND the login matches this Hive
+//     App's configured bot login. App-installation-token-authored issues carry
+//     User.Type == "Bot", but other GitHub Apps can also file issues in the
+//     same repo; those are not ours to close.
+//
+// Do NOT reuse isHumanFiledBugReport as an inverse test: it is fail-OPEN on
+// ambiguity (its own doc says "an agent's bug finding stays closeable, and a
+// maintainer's bug is protected"), and it returns false immediately for any
+// issue lacking a bug-family label, so a human-filed issue with no `bug` label
+// would slip past — the exact outcome this sweep must never produce.
+func (c *Client) isHiveFiledIssue(issue *gh.Issue) bool {
+	if issue == nil {
+		return false
 	}
-}
-
-func (c *Client) info(msg string, args ...any) {
-	if c != nil && c.logger != nil {
-		c.logger.Info(msg, args...)
+	if strings.Contains(issue.GetBody(), AttributionTrailerPrefix) {
+		return true
 	}
+	if issue.User != nil && strings.EqualFold(issue.User.GetType(), "Bot") && strings.TrimSpace(c.appBotLogin) != "" && strings.EqualFold(safeGetLogin(issue.User), c.appBotLogin) {
+		return true
+	}
+	return false
 }

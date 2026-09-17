@@ -10,16 +10,6 @@ import (
 	gh "github.com/google/go-github/v72/github"
 )
 
-// PR→issue linking (#2612 part c). A LIVE, best-effort projection: for a given
-// "owner/repo#number" issue, does a pull request that references it (via a
-// Fixes/Closes/Resolves keyword, or any body/title mention) currently exist, and
-// is it open or already merged? There is NO new persistent store — this is
-// derived on demand from the GitHub data the hive is already authenticated for
-// (Server.deps.GHClient), cached only in-memory with a short TTL so the
-// triage/queue views stay cheap and never hammer the Search API. Every failure
-// degrades to "no linked PR" (nil): a slow or failing GitHub call must never
-// break a page or a panel.
-
 const (
 	// prLinkCacheTTL is how long a resolved (or resolved-empty) PR-link result is
 	// trusted before a re-lookup. Short enough that a freshly opened/merged PR

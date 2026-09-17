@@ -1,31 +1,3 @@
-// Contributor-protocol versioning, capability advertisement, and the
-// surface/schema identifier — the ADDITIVE, backward-compatible contributor
-// handshake extensions from kubestellar/hive#2547 (capability DECLARE half) and
-// kubestellar/hive#2567 (protocol version + server capability set + surface
-// identifier).
-//
-// Design contract — forward/backward compatibility (#2567):
-//
-//   - Every field added by these two issues is OPTIONAL and additive. A client
-//     that omits the new auth_response capability fields authenticates and runs
-//     EXACTLY as before — nothing here gates admission, model acceptance, or
-//     task selection. A client that ignores the new auth_ok fields (an existing
-//     unversioned relay) behaves exactly as today.
-//
-//   - UNKNOWN MESSAGE TYPES ARE IGNORED. The hub read loop (contribute_ws.go)
-//     already drops a message whose "type" it does not recognise via the
-//     switch's implicit default, and the relay's handleMessage does the same.
-//     This is the forward-compatibility rule: a newer peer may introduce a new
-//     message type, and an older peer silently ignores it rather than erroring.
-//     The protocol version + capability set below let a NEWER client degrade
-//     INTENTIONALLY — it can learn from auth_ok what the deployed server
-//     supports (e.g. token_refresh, task_unavailable reasons, prompt preview)
-//     instead of probing and reacting to silence.
-//
-//   - Client capabilities are self-reported. The hub may use an explicit
-//     "cannot fit" declaration to avoid wasting an assignment on a matching
-//     task requirement, but it must never treat the declaration as a trust or
-//     security signal. Unknown/absent still means unknown, not incapable.
 package dashboard
 
 import (
@@ -186,99 +158,6 @@ type ContributorCapabilities struct {
 	PiInvocation     string `json:"pi_invocation,omitempty"`
 }
 
-// ContributorTaskRequirements is the hub-derived task-side vocabulary used for
-// the ROUTE half of #2547. It is intentionally tiny and label-derived: operators
-// can add labels without changing issue bodies, and old relays remain compatible
-// because an undeclared client is treated as unknown rather than incapable.
-type ContributorTaskRequirements struct {
-	ContainerRuntime string `json:"container_runtime,omitempty"`
-	OS               string `json:"os,omitempty"`
-	Arch             string `json:"arch,omitempty"`
-	CLIBackend       string `json:"cli_backend,omitempty"`
-	CredentialType   string `json:"credential_type,omitempty"`
-}
-
-// IsZero reports whether a task has no explicit capability requirements.
-func (r ContributorTaskRequirements) IsZero() bool {
-	return r.ContainerRuntime == "" && r.OS == "" && r.Arch == "" &&
-		r.CLIBackend == "" && r.CredentialType == ""
-}
-
-// TaskRequirementsFromLabels derives hard routing requirements from issue
-// labels. The vocabulary is deliberately explicit: labels outside these forms
-// remain ordinary triage labels and do not affect assignment.
-func TaskRequirementsFromLabels(labels []string) ContributorTaskRequirements {
-	var out ContributorTaskRequirements
-	for _, raw := range labels {
-		l := strings.ToLower(strings.TrimSpace(raw))
-		switch {
-		case l == "needs-container" || l == "requires-container":
-			if out.ContainerRuntime == "" {
-				out.ContainerRuntime = "container"
-			}
-		case l == "needs-docker" || l == "requires-docker" || l == "runtime/docker":
-			out.ContainerRuntime = "docker"
-		case l == "needs-podman" || l == "requires-podman" || l == "runtime/podman":
-			out.ContainerRuntime = "podman"
-		case strings.HasPrefix(l, "os/"):
-			out.OS = strings.TrimSpace(strings.TrimPrefix(l, "os/"))
-		case strings.HasPrefix(l, "arch/"):
-			out.Arch = strings.TrimSpace(strings.TrimPrefix(l, "arch/"))
-		case strings.HasPrefix(l, "backend/"):
-			out.CLIBackend = strings.TrimSpace(strings.TrimPrefix(l, "backend/"))
-		case strings.HasPrefix(l, "credential/"):
-			out.CredentialType = strings.TrimSpace(strings.TrimPrefix(l, "credential/"))
-		}
-	}
-	return out
-}
-
-// ContributorCanRunTask reports whether a self-declared client fits the task's
-// requirements. Unknown always fits for backward compatibility; only an explicit
-// contradictory declaration excludes the client.
-func ContributorCanRunTask(caps *ContributorCapabilities, cliBackend string, req ContributorTaskRequirements) bool {
-	if req.IsZero() || caps == nil || caps.IsZero() {
-		return true
-	}
-	if req.ContainerRuntime != "" {
-		have := strings.ToLower(strings.TrimSpace(caps.ContainerRuntime))
-		want := strings.ToLower(req.ContainerRuntime)
-		if want == "container" {
-			if have == "none" {
-				return false
-			}
-		} else if have != "" && have != want {
-			return false
-		}
-	}
-	if !capabilityFieldFits(caps.OS, req.OS) {
-		return false
-	}
-	if !capabilityFieldFits(caps.Arch, req.Arch) {
-		return false
-	}
-	if !capabilityFieldFits(caps.CredentialType, req.CredentialType) {
-		return false
-	}
-	if req.CLIBackend != "" {
-		have := strings.ToLower(strings.TrimSpace(cliBackend))
-		want := strings.ToLower(req.CLIBackend)
-		if have != "" && have != want {
-			return false
-		}
-	}
-	return true
-}
-
-func capabilityFieldFits(have, want string) bool {
-	want = strings.ToLower(strings.TrimSpace(want))
-	if want == "" {
-		return true
-	}
-	have = strings.ToLower(strings.TrimSpace(have))
-	return have == "" || have == want
-}
-
 // IsZero reports whether the client declared no capabilities at all, so the hub
 // can store nil (indistinguishable from an unversioned client) rather than an
 // empty struct.
@@ -287,25 +166,6 @@ func (c ContributorCapabilities) IsZero() bool {
 		c.AgentCLIVersion == "" && c.RelayProtocolVersion == "" && c.CredentialType == "" &&
 		len(c.RelayCapabilities) == 0 &&
 		c.PiBinary == "" && c.PiConfiguration == "" && c.PiAuthentication == "" && c.PiInvocation == ""
-}
-
-// DeclaresCapability reports whether the relay advertised the named negotiated
-// capability token (kubestellar/hive#6954). It is the hub-side read of
-// RelayCapabilities and the reason the field exists: the hub gates on the
-// ADVERTISED set, never on a protocol-version proxy. Matching is exact against a
-// sanitized token, so trailing whitespace or control characters a client padded
-// in cannot make a capability appear or disappear.
-func (c ContributorCapabilities) DeclaresCapability(token string) bool {
-	want := sanitizeCapabilityField(token)
-	if want == "" {
-		return false
-	}
-	for _, have := range c.RelayCapabilities {
-		if sanitizeCapabilityField(have) == want {
-			return true
-		}
-	}
-	return false
 }
 
 // capabilityFieldMaxLen bounds each declared capability field the hub is willing
@@ -345,41 +205,6 @@ func (c ContributorCapabilities) Sanitized() ContributorCapabilities {
 		PiAuthentication:     sanitizeCapabilityField(c.PiAuthentication),
 		PiInvocation:         sanitizeCapabilityField(c.PiInvocation),
 	}
-}
-
-// capabilityListMaxLen bounds how many relay-declared capability tokens the hub
-// will store (kubestellar/hive#6954). The negotiated set is small and stable —
-// a handful of tokens — so 32 is far more than any honest relay sends while
-// still capping a client that pads the list to bloat every fleet poll.
-const capabilityListMaxLen = 32
-
-// sanitizeCapabilityTokens bounds and cleans a relay-declared capability list
-// (kubestellar/hive#6954). Each token is run through sanitizeCapabilityField so
-// the same control-character/length hygiene the other declared fields get
-// applies here, empties (a token that sanitizes to nothing) are dropped so a
-// whitespace entry cannot masquerade as a capability, and the list is capped at
-// capabilityListMaxLen. Like Sanitized() this is hygiene, not validation: no
-// token is checked against a vocabulary and a nonsense token is still stored, it
-// simply cannot match a real capability on the exact compare in DeclaresCapability.
-func sanitizeCapabilityTokens(in []string) []string {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(in))
-	for _, raw := range in {
-		tok := sanitizeCapabilityField(raw)
-		if tok == "" {
-			continue
-		}
-		out = append(out, tok)
-		if len(out) >= capabilityListMaxLen {
-			break
-		}
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
 }
 
 // sanitizeCapabilityField makes one declared value printable and bounded.
@@ -511,4 +336,151 @@ func truncateFailureReason(s string) string {
 		return s
 	}
 	return string(r[:maxFailureReasonLen]) + "… (truncated)"
+}
+
+// ContributorTaskRequirements is the hub-derived task-side vocabulary used for
+// the ROUTE half of #2547. It is intentionally tiny and label-derived: operators
+// can add labels without changing issue bodies, and old relays remain compatible
+// because an undeclared client is treated as unknown rather than incapable.
+type ContributorTaskRequirements struct {
+	ContainerRuntime string `json:"container_runtime,omitempty"`
+	OS               string `json:"os,omitempty"`
+	Arch             string `json:"arch,omitempty"`
+	CLIBackend       string `json:"cli_backend,omitempty"`
+	CredentialType   string `json:"credential_type,omitempty"`
+}
+
+// IsZero reports whether a task has no explicit capability requirements.
+func (r ContributorTaskRequirements) IsZero() bool {
+	return r.ContainerRuntime == "" && r.OS == "" && r.Arch == "" &&
+		r.CLIBackend == "" && r.CredentialType == ""
+}
+
+// TaskRequirementsFromLabels derives hard routing requirements from issue
+// labels. The vocabulary is deliberately explicit: labels outside these forms
+// remain ordinary triage labels and do not affect assignment.
+func TaskRequirementsFromLabels(labels []string) ContributorTaskRequirements {
+	var out ContributorTaskRequirements
+	for _, raw := range labels {
+		l := strings.ToLower(strings.TrimSpace(raw))
+		switch {
+		case l == "needs-container" || l == "requires-container":
+			if out.ContainerRuntime == "" {
+				out.ContainerRuntime = "container"
+			}
+		case l == "needs-docker" || l == "requires-docker" || l == "runtime/docker":
+			out.ContainerRuntime = "docker"
+		case l == "needs-podman" || l == "requires-podman" || l == "runtime/podman":
+			out.ContainerRuntime = "podman"
+		case strings.HasPrefix(l, "os/"):
+			out.OS = strings.TrimSpace(strings.TrimPrefix(l, "os/"))
+		case strings.HasPrefix(l, "arch/"):
+			out.Arch = strings.TrimSpace(strings.TrimPrefix(l, "arch/"))
+		case strings.HasPrefix(l, "backend/"):
+			out.CLIBackend = strings.TrimSpace(strings.TrimPrefix(l, "backend/"))
+		case strings.HasPrefix(l, "credential/"):
+			out.CredentialType = strings.TrimSpace(strings.TrimPrefix(l, "credential/"))
+		}
+	}
+	return out
+}
+
+// ContributorCanRunTask reports whether a self-declared client fits the task's
+// requirements. Unknown always fits for backward compatibility; only an explicit
+// contradictory declaration excludes the client.
+func ContributorCanRunTask(caps *ContributorCapabilities, cliBackend string, req ContributorTaskRequirements) bool {
+	if req.IsZero() || caps == nil || caps.IsZero() {
+		return true
+	}
+	if req.ContainerRuntime != "" {
+		have := strings.ToLower(strings.TrimSpace(caps.ContainerRuntime))
+		want := strings.ToLower(req.ContainerRuntime)
+		if want == "container" {
+			if have == "none" {
+				return false
+			}
+		} else if have != "" && have != want {
+			return false
+		}
+	}
+	if !capabilityFieldFits(caps.OS, req.OS) {
+		return false
+	}
+	if !capabilityFieldFits(caps.Arch, req.Arch) {
+		return false
+	}
+	if !capabilityFieldFits(caps.CredentialType, req.CredentialType) {
+		return false
+	}
+	if req.CLIBackend != "" {
+		have := strings.ToLower(strings.TrimSpace(cliBackend))
+		want := strings.ToLower(req.CLIBackend)
+		if have != "" && have != want {
+			return false
+		}
+	}
+	return true
+}
+
+func capabilityFieldFits(have, want string) bool {
+	want = strings.ToLower(strings.TrimSpace(want))
+	if want == "" {
+		return true
+	}
+	have = strings.ToLower(strings.TrimSpace(have))
+	return have == "" || have == want
+}
+
+// DeclaresCapability reports whether the relay advertised the named negotiated
+// capability token (kubestellar/hive#6954). It is the hub-side read of
+// RelayCapabilities and the reason the field exists: the hub gates on the
+// ADVERTISED set, never on a protocol-version proxy. Matching is exact against a
+// sanitized token, so trailing whitespace or control characters a client padded
+// in cannot make a capability appear or disappear.
+func (c ContributorCapabilities) DeclaresCapability(token string) bool {
+	want := sanitizeCapabilityField(token)
+	if want == "" {
+		return false
+	}
+	for _, have := range c.RelayCapabilities {
+		if sanitizeCapabilityField(have) == want {
+			return true
+		}
+	}
+	return false
+}
+
+// capabilityListMaxLen bounds how many relay-declared capability tokens the hub
+// will store (kubestellar/hive#6954). The negotiated set is small and stable —
+// a handful of tokens — so 32 is far more than any honest relay sends while
+// still capping a client that pads the list to bloat every fleet poll.
+const capabilityListMaxLen = 32
+
+// sanitizeCapabilityTokens bounds and cleans a relay-declared capability list
+// (kubestellar/hive#6954). Each token is run through sanitizeCapabilityField so
+// the same control-character/length hygiene the other declared fields get
+// applies here, empties (a token that sanitizes to nothing) are dropped so a
+// whitespace entry cannot masquerade as a capability, and the list is capped at
+// capabilityListMaxLen. Like Sanitized() this is hygiene, not validation: no
+// token is checked against a vocabulary and a nonsense token is still stored, it
+// simply cannot match a real capability on the exact compare in DeclaresCapability.
+func sanitizeCapabilityTokens(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(in))
+	for _, raw := range in {
+		tok := sanitizeCapabilityField(raw)
+		if tok == "" {
+			continue
+		}
+		out = append(out, tok)
+		if len(out) >= capabilityListMaxLen {
+			break
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }

@@ -1,20 +1,5 @@
 package dashboard
 
-// Central per-user "Me" profile.
-//
-// This endpoint lives on the HUB and returns a single contributor's CENTRAL,
-// cross-hive profile. The stats are aggregated from central hub data — the
-// contributor profile store (listContributorProfiles / loadContributorProfile),
-// the ranked leaderboard (LeaderboardForHub, the SAME ordering the public
-// leaderboard uses), and the federation registry (loadFederationRegistry) — so
-// the "Me" card the Leaderboard tab renders never computes anything per-spoke.
-//
-// It is deliberately READ-ONLY and exposed under the /api/leaderboard/* prefix,
-// which isPublicPath already treats as public (server.go). It returns only data
-// that is ALREADY visible on the public leaderboard (identity, trust tier,
-// task counts, rank) plus the user's hive relationships derived from the public
-// federation registry — no tokens, no rate limits, nothing private.
-
 import (
 	"net/http"
 	"strconv"

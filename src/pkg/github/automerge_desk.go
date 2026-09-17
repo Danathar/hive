@@ -1,29 +1,5 @@
 package github
 
-// Approval-desk hook for the self-authored auto-merge sweep — the ONE real
-// producer wired in the RFC #4000 vertical slice.
-//
-// Why this producer: the self-merge gate is the cheapest honest one to migrate.
-// It is already the exact shape the desk generalizes — (requested action, ACMM
-// level, identity) → verdict — it is the gate whose history the RFC cites (the
-// sweep originally had NO ACMM check, which is how an L4 hive wrongly
-// self-merged its own PR), and it needs no new call site: the sweep already
-// computes everything the desk's Request wants (repo, number, author, and a
-// real ChecksGreen from commitGreen).
-//
-// DEFAULT OFF. The hook is nil unless a caller installs one via
-// SetApprovalDesk, and a nil hook means trySweepSelfAuthoredPR behaves exactly
-// as it does today. This is the "live behavior is unchanged until enabled"
-// requirement: shipping this file changes nothing about any running hive.
-//
-// When the desk IS enabled, the sweep's own ACMM gate stays in place upstream
-// (StartSelfAuthoredAutoMergeSweep still refuses to start below the floor), so
-// the desk is strictly an ADDITIONAL, inspectable consultation on top — it can
-// withhold a merge the legacy gate would have allowed, and it can route one
-// into the operator inbox, but it can never permit a merge the legacy gate
-// refused. That asymmetry is what makes enabling the flag safe to try on a
-// live hive.
-
 import (
 	"context"
 

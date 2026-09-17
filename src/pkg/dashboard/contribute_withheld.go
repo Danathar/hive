@@ -10,27 +10,6 @@ import (
 	"github.com/hivecommons/hive/pkg/worksource"
 )
 
-// ── #6902: explain every admission refusal, not only the convergence ones ─────
-//
-// An operator looking at an open `help wanted` issue on GitHub can reasonably
-// ask "why isn't this in the Contributor Queue?". Before this file the answer
-// existed and was thrown away: admissionQueueSnapshot's exclusion ladder is a
-// column of bare `continue`s, so the only thing the operator saw was an absent
-// row.
-//
-// #4246 already established the pattern — retain the decision the queue's OWN
-// sweep computed, bounded by the same limit, never cached, never enforced — but
-// it retained only convergence refusals (dependency_blocked / dependency_unknown
-// / degraded observation) and only under the convergence rollout toggle. This
-// file generalises the vocabulary to every gate on the ladder and decouples it
-// from that toggle, because the gates it now explains are enforced with the
-// toggle off.
-//
-// The hard rule this file exists to keep: a withheld row is an EXPLANATION of a
-// refusal the live path already made, produced by the same pass that made it.
-// Nothing here re-evaluates admission, and nothing here can admit anything —
-// the withheld list is write-only from the ladder's point of view.
-
 // withheldScope selects WHICH refusals a snapshot retains. One sweep always
 // computes the same decisions; the scope decides how much of the explanation
 // survives into the snapshot, so the two surfaces cannot drift apart by

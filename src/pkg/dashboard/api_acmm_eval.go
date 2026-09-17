@@ -11,7 +11,6 @@ import (
 	"time"
 
 	gh "github.com/google/go-github/v72/github"
-
 	"github.com/hivecommons/hive/pkg/config"
 	"github.com/hivecommons/hive/pkg/github"
 	"github.com/hivecommons/hive/pkg/worksource"
@@ -24,11 +23,17 @@ const acmmEvalTTL = time.Hour
 // younger than this, so holding the Re-evaluate button down cannot spend the
 // GitHub API budget (a full refresh is up to ~29 GetContents calls per repo).
 const acmmRefreshDebounce = time.Minute
+
 const acmmLevelThreshold = 0.70
+
 const acmmEvalTimeout = 30 * time.Second
+
 const acmmPerRepoTimeout = 20 * time.Second
+
 const acmmIssueLabelName = "acmm"
+
 const acmmIssueLabelColor = "0075ca"
+
 const acmmIssueLabelDesc = "ACMM criterion gap identified by hive evaluation"
 
 // ACMMEvaluation is the combined codebase + operational ACMM evaluation result.

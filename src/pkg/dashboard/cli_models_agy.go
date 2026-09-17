@@ -13,19 +13,6 @@ import (
 	"time"
 )
 
-// Live model discovery for Google's Antigravity CLI.
-//
-// `agy models` is the CLI's own account-aware model inventory. It prints one
-// tab-delimited `<id>\t<display name>` record per model, after a progress line.
-// Running the vendor command is preferable to copying a catalog indefinitely:
-// availability is tied to the signed-in Google account and changes between CLI
-// releases. Hive never reads or forwards Antigravity's OAuth material; the
-// subprocess resolves it exactly as an agent does from HOME/.gemini.
-//
-// The main hive image installs agy, but a developer build may not. Missing
-// binary, signed-out state, timeout, malformed output, or an empty inventory
-// all degrade to agyStaticModels with fallback=true through queryCLIModels.
-
 const (
 	agyBackendID          = "agy"
 	agyBinaryName         = "agy"

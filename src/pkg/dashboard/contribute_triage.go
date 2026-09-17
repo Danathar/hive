@@ -8,18 +8,6 @@ import (
 	"strconv"
 )
 
-// Warp-style triage-level view (#2612 part b). A read-only, LIVE-DERIVED grouping
-// of the hive's contribute issues into a lifecycle ladder — Triaging → Ready to
-// implement → Implementing → Reviewing → Closed — computed on each request from
-// the SAME live signals the Operations tab already shows (the raw candidate pool,
-// ready-work queue, and fleet snapshot's in-flight work) plus the part-(c)
-// PR→issue link. There is
-// NO persistent per-issue lifecycle store: a persisted lifecycle is a possible
-// future enhancement but is deliberately out of scope here (issues are transient,
-// sourced live from GitHub). The whole projection is recomputed per request and
-// stays cheap because the PR-link lookups it depends on are themselves cached
-// (prLinkResolver, short TTL) and degrade to "no linked PR" on any GitHub error.
-
 // Triage ladder levels. Ordered constants (the slice below fixes render order).
 const (
 	triageTriaging     = "triaging"     // open, unclaimed, no linked PR — awaiting triage

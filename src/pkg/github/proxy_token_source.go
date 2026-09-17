@@ -1,6 +1,8 @@
 package github
 
-import "sync"
+import (
+	"sync"
+)
 
 // This file is the hub-side half of proxy-side GitHub credential injection
 // (#1861). When config.ProxyInjectGHAuth() is on, WriteAgentToken diverts the

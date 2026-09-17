@@ -456,17 +456,3 @@ func (c *Client) replyToReviewThread(ctx context.Context, threadID, body string)
 }`
 	return c.graphQL(ctx, q, map[string]any{"id": threadID, "body": body}, nil)
 }
-
-// refreshRateLimitCache re-primes go-github's rate-limit cache after a
-// pre-emptive rate-limit refusal so the next pass is not refused on stale
-// state. Mirrors the automerge engine's helper of the same name.
-func (c *Client) refreshRateLimitCache(ctx context.Context) {
-	if c == nil || c.client == nil {
-		return
-	}
-	if _, _, err := c.client.RateLimit.Get(ctx); err != nil {
-		c.warn("could not refresh rate-limit cache", "error", err)
-		return
-	}
-	c.info("refreshed rate-limit cache after a pre-emptive rate-limit refusal")
-}

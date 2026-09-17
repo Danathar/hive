@@ -9,16 +9,6 @@ import (
 	"github.com/hivecommons/hive/pkg/spokebackup"
 )
 
-// Self-service spoke backup.
-//
-// GET  /api/backup/status   — whether backup is available (owner-only)
-// POST /api/backup          — build and stream an encrypted archive (owner-only)
-//
-// The download is a POST rather than a GET on purpose. A GET would be
-// reachable by a plain <a href> or an <img> on another site, and this response
-// body contains GitHub App private keys; keeping it non-idempotent and
-// fetch-only keeps it off the cross-origin-navigation path.
-
 // backupBuildTimeout bounds a single backup request so a wedged filesystem
 // read cannot hold a dashboard connection open indefinitely.
 const backupBuildTimeout = spokebackup.BuildTimeout
@@ -27,10 +17,6 @@ const backupBuildTimeout = spokebackup.BuildTimeout
 // setting, returned to the UI so an owner who cannot reach deployment env
 // still learns where to configure it.
 const backupKeyConfigPath = "governor:Security"
-
-// Owner checks below mirror handleConfigDownload and handleSelfUpgrade: an
-// empty role means no per-user identity is in play (an open/dev spoke), which
-// those handlers already treat as owner.
 
 // handleBackupStatus reports whether a self-service backup can run, so the UI
 // can show the menu entry in a disabled state with a real reason instead of

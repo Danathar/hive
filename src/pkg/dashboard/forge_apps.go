@@ -8,11 +8,6 @@ import (
 	"github.com/hivecommons/hive/pkg/config"
 )
 
-// This file backs the spoke dashboard's "Forge App" tab: a read-only inventory
-// of every forge App credential the spoke holds, plus the single editable
-// active config. It NEVER returns or logs private key material — paths and
-// fingerprints only.
-
 // ForgeAppKey is one per-app-id private key held on the spoke's PVC
 // (/data/gh-app-key-<appid>.pem). Fingerprint and path only — the key material
 // itself must never leave the pod.

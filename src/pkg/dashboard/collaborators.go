@@ -1,23 +1,5 @@
 package dashboard
 
-// Contributor collaborators — the people you have worked alongside.
-//
-// The dossier's Collaborators zone used to be a hardcoded empty state with no
-// data source behind it; it could never fill. This file gives it a real one.
-//
-// Design rules (they mirror the rest of the dossier):
-//   - APPEND-ONLY. A collaboration, once recorded, is never removed and never
-//     decays. Stepping away costs you nothing, exactly like the Golden Path.
-//   - SYMMETRIC. Meeting is mutual: every record is written to BOTH profiles, so
-//     neither party's dossier disagrees with the other's.
-//   - HONEST. A record is only ever written from an event that actually
-//     happened: an invite that was redeemed, an issue two people both worked, or
-//     a session where both were genuinely on operation. Nothing is inferred from
-//     mere co-membership of the hive.
-//   - BOUNDED. The list is capped so a busy hive cannot grow a profile file
-//     without limit; the earliest-met are kept, because the first people you
-//     worked with are the ones worth remembering.
-
 import (
 	"sort"
 	"strings"

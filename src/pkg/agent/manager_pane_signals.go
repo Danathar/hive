@@ -1,6 +1,3 @@
-// Pane-content classification: CLI markers, blocking/login/quota/
-// transient-error/network-error prompt detection, input-prompt and
-// CLI-ready predicates, and pane output filtering/deduplication.
 package agent
 
 // copilotModelFailureMarker is the Copilot CLI's equivalent of Claude Code's

@@ -10,29 +10,6 @@ import (
 	gh "github.com/google/go-github/v72/github"
 )
 
-// Repository coverage for a GitHub App installation (#4360).
-//
-// A hive can be pointed at a repo its App installation does not cover, and
-// nothing says so. The failure surfaces later and lazily, as an agent action
-// failing, and it is reported as something else entirely — the live case that
-// prompted this reported "the App private key has not reached this spoke",
-// which was false: the key had arrived, and re-uploading it could never help.
-//
-// The distinction from AppStateWriteForbidden matters. That state is the same
-// underlying problem INFERRED from a 403 on a real write, after the fact and
-// only for the one repo something happened to touch. This is the same problem
-// established DIRECTLY, before anything is attempted, for every configured
-// repo at once:
-//
-//	covered    := GET /installation/repositories
-//	configured := project.repos
-//	missing    := configured - covered
-//
-// No error-code inference, and no guessing between "not covered", "renamed",
-// and "does not exist" — GitHub answers 404 for all three when an installation
-// cannot see a repo, which is exactly why the 403/404 path cannot tell them
-// apart and this one can.
-
 // coveragePageSize is the maximum GitHub allows per page.
 const coveragePageSize = 100
 

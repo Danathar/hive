@@ -5,59 +5,6 @@ import (
 	"time"
 )
 
-// Rate-limit readings are clamped to be monotone WITHIN a window
-// (kubestellar/hive#5733).
-//
-// THE BUG. `/api/status` → .ghRateLimits.core.remaining intermittently reported
-// the full limit while most of the GitHub App installation's budget was spent —
-// and it moved BACKWARDS, reporting more headroom than a minute earlier. Paired
-// samples, one per minute, same installation: hive's value against a direct
-// GET /rate_limit with a token minted from the same App key in the same pod.
-//
-//	20:56  hive 6941   actual 6815
-//	20:57  hive 7100   actual 6741   <- UP, while real usage climbed
-//	21:02  hive 7100   actual 6286   <- pinned at the limit for six minutes
-//
-// Peak divergence was 814 requests: the card claimed 100% headroom at ~89%
-// actual. An operator reads that card to decide whether there is room to run
-// agents harder, so a false-full reading throttles or scales the wrong thing —
-// which is exactly what happened to the reporter.
-//
-// THE MECHANISM. An installation access token reports a fresh, EMPTY bucket
-// transiently right after minting, even though the budget is genuinely shared
-// across every token for that installation. Demonstrated directly, seconds
-// apart on one installation:
-//
-//	token A initial: {"used":90,  "remaining":7010, "reset":1788385930}
-//	  ... 20 requests issued with token A ...
-//	token A after:   {"used":0,   "remaining":7100, "reset":1788386085}
-//	token B (fresh): {"used":160, "remaining":6940, "reset":1788385930}
-//
-// Token B proves the bucket IS shared — it sees A's 20 requests. Token A's own
-// read is what goes empty. So whenever the client behind RateLimits() has
-// recently re-minted, the dashboard latched that empty reading.
-//
-// WHY "RESET ADVANCED ⇒ NEW WINDOW" IS NOT ENOUGH. That is the obvious way to
-// write this clamp, and the trace above defeats it: the bogus reading carries a
-// LATER reset (1788386085 vs 1788385930), because a fresh bucket reports its
-// own fresh window. A clamp keyed on the reset value alone would read every
-// re-mint as a rollover and accept exactly the readings it exists to reject —
-// and the reporter measured that adrift reset directly ("at 20:57 the card's
-// reset was 8.5 minutes adrift of B's").
-//
-// So a window is anchored on WALL-CLOCK EXPIRY instead: a new window is only
-// believed once the previous window's reset has actually passed. Before then, a
-// reading carrying a different reset is a re-minted token describing its own
-// bucket, and is discarded.
-//
-// FAILURE DIRECTION. Every branch here fails toward reporting LESS headroom
-// than may really be available: a clamped value is the lowest seen this window,
-// and a rejected reading leaves the previous one standing. That is deliberate.
-// Under-reporting headroom costs some throughput; over-reporting it is what
-// produced this issue. A clock running behind GitHub's can hold a window past
-// its true rollover, which costs at most one window of stale-low display and
-// self-corrects.
-
 // rateLimitWindow is the last ACCEPTED observation for one bucket.
 type rateLimitWindow struct {
 	limit int

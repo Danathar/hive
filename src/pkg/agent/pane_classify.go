@@ -1,9 +1,3 @@
-// Package agent: pane_classify.go holds the pure pane-content classifiers —
-// stateless string analysis over captured tmux pane text. Everything here is
-// Manager-free and table-testable without tmux: login/auth prompts, fatal vs
-// transient network/API errors, provider error classification and backoff
-// pacing, CLI readiness, quota exhaustion, and API-key rejection signals.
-// Extracted verbatim from manager.go (no behavior change).
 package agent
 
 import (
@@ -385,27 +379,6 @@ func paneShowsBobAPIKeyRejected(lines []string) bool {
 	return false
 }
 
-// paneShowsLoginPrompt returns true if any line in the pane output matches a
-// known login/authentication prompt pattern.
-//
-// #4400: a line that ALSO carries an upstream authorization failure is skipped,
-// because Claude Code prefixes EVERY API error with its login hint. A hive
-// whose gateway refused the configured model rendered
-//
-//	● Please run /login · API Error: 403 {"...":"team not allowed to access
-//	  model. This team can only access models=[... 'aws/claude-sonnet-4-6' ...]"}
-//
-// on an agent that was fully logged in. That matched "Please run /login", so
-// the agent was badged as needing login AND auto-restarted by the poller's
-// `showsLogin && configHasTokens()` branch — restarting into the same 403 every
-// time, which is what the reporter saw as the agent "keeps crashing". The
-// operator was pointed at the one action that could not help, while the real
-// cause — a model id the gateway does not entitle — was sitting in the same
-// line.
-//
-// This is the same shape as lineHasLoginDirective's existing guard: that one
-// exists so "POST /login returns 302" is not read as a login screen. Claude
-// Code's error decoration is the same class of false positive.
 func paneShowsLoginPrompt(lines []string) bool {
 	for _, line := range lines {
 		// An upstream authorization failure is not a login prompt, whatever
