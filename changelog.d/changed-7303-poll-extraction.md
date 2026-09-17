@@ -1,1 +1,0 @@
-- Extracted the output-polling domain (per-agent tmux output poller, trust-prompt watcher, output signal logging, thrash/kick-refusal detection, pane-diff helpers) from `pkg/agent/manager.go` into `manager_poll.go` (#7303).
