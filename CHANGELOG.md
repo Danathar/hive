@@ -11,6 +11,16 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-17 (v4.45.1)
+
+### Changed
+
+- The self-hosted CI runner image that bakes in the cgo toolchain (#7206) is now built and pushed by CI instead of from an operator's laptop ([#7289](https://github.com/hivecommons/hive/issues/7289)). `#7206` merged the Dockerfile on 2026-09-16; a day later `ghcr.io/hivecommons/hive-ci-runner` still did not exist and race shards kept dying at **Prepare cgo toolchain**, because publishing needed someone with `docker` and GHCR write. The new **CI Runner Image** workflow (`.github/workflows/ci-runner-image.yml`) builds `src/deploy/ci-runners/Dockerfile` on a GitHub-hosted runner — deliberately off the cluster whose egress is the problem — and pushes an immutable `<runner version>-<suffix>` tag with the job's own `GITHUB_TOKEN`, refusing to overwrite an existing tag; the job summary hands the operator the digest and the exact `kubectl patch` to roll the runners. It also runs build-only on any PR touching the Dockerfile, so a change that would ship a network-dependent image fails there. The only remaining operator step is the cluster patch (`src/deploy/ci-runners/README.md`).
+
+### Fixed
+
+- The "(Copilot seat not licensed)" model-picker notice, the `/api/config/backends` wire object and the `copilot model discovery rejected by upstream` log line now name **which** credential GitHub rejected — its source (dashboard Copilot login, `COPILOT_GITHUB_TOKEN`, durable token file, or the shared Copilot CLI config) and, when GitHub answers `/user`, the GitHub account behind it — so the next occurrence can be triaged from a screenshot alone instead of reading as a false claim about the owner's own seat (#7302).
+
 ## 2026-09-17 (v4.45.0)
 
 ### Added
