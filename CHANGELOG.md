@@ -11,6 +11,22 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-17 (v4.48.0)
+
+### Added
+
+- An operator can now see the hub's **own decisions** about a struggling contributor from the dashboard, without shell access to the hub host ([#7330](https://github.com/hivecommons/hive/issues/7330), item 4 of [#7317](https://github.com/hivecommons/hive/issues/7317)). `GET /api/contribute/decisions?username=<u>` serves the refusals, generation fences, ignored reports, rejected resumes and lease expiries the hub makes about one contributor — until now these existed only as log lines on the hub's stdout, so a contributor whose reports were being silently dropped looked exactly like one whose relay never sent any. That is the gap the motivating session turned on: 11 tasks picked up, none completed, 10 handed back with no failure anywhere, and no way to tell from the page whether the relay's `task_failed` messages never arrived or the `#2568` generation fence rejected them. Owner/read-write only, and it returns 403 rather than a stripped list, because these carry the hub's internal protocol state (generation numbers, lease identity, configured rate-limit thresholds) rather than the bounded reason text the fleet view already serves anonymously. The ring is in memory only and bounded — 200 entries per login, 200 logins, oldest evicted — and the response reports `since` and `in_memory_only` so an empty list after a restart reads as "nothing since boot" rather than "nothing happened".
+
+### Changed
+
+- A conflicting v4 -> v5 top-up now reports which files conflict, how many hunks each has and how many conflicted lines, in the job summary, instead of failing with a bare "conflicts and needs a human". ([#7337](https://github.com/hivecommons/hive/issues/7337))
+
+### Fixed
+
+- The public `GET /api/contribute/runs` endpoint no longer serves relay-supplied `reason` and `verdict_reason` text unredacted: both are now token-redacted and length-bounded when the task-run record is written, matching the boundary the live fleet view already applied. Previously a credential printed into a relay error string was persisted to `task_runs.jsonl` and served anonymously for up to a year. ([#7334](https://github.com/hivecommons/hive/issues/7334))
+- The issue-closure hint and `/reopen` bot comments no longer tell reporters that a merge-closed fix "did not resolve the problem". Both now say the fix only takes effect once it ships in a tagged release and the deployment updates, and ask the reporter to check their running version first. ([#7335](https://github.com/hivecommons/hive/issues/7335))
+- `Cache Prune` now reclaims superseded buildkit cache blobs, oldest-first, until Actions cache usage is under a target (default 8192 MB), never touching a blob younger than 3 days. Previously it only reclaimed caches on deleted branches, which could not stop the LRU eviction that kept deleting the offline `gcc`/`libc6-dev` package cache and forcing `-race` shards back onto the Ubuntu mirrors. ([#7336](https://github.com/hivecommons/hive/issues/7336))
+
 ## 2026-09-17 (v4.47.1)
 
 ### Changed

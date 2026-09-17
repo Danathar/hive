@@ -1,1 +1,0 @@
-- A conflicting v4 -> v5 top-up now reports which files conflict, how many hunks each has and how many conflicted lines, in the job summary, instead of failing with a bare "conflicts and needs a human". ([#7337](https://github.com/hivecommons/hive/issues/7337))
