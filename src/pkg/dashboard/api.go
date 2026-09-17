@@ -2757,9 +2757,12 @@ func (s *Server) handleGHUserAuthStatus(w http.ResponseWriter, r *http.Request) 
 		jsonResponse(w, map[string]interface{}{"logged_in": true, "username": hubUser, "role": r.Header.Get("X-Hive-Role")})
 		return
 	}
-	if s.directRouteAuthzEnabled() {
+	if s.directRouteAuthzEnabled() || s.hubProxied() {
 		// No valid session on a direct-route spoke → not logged in for this
-		// request, regardless of any persisted owner token on disk.
+		// request, regardless of any persisted owner token on disk. Same on a
+		// hub-proxied spoke: nginx injects X-Hive-User for every signed-in
+		// visitor, so its absence means anonymous, and the persisted owner
+		// token must not stand in for them (see resolveViewerUsername).
 		jsonResponse(w, map[string]interface{}{"logged_in": false})
 		return
 	}

@@ -7130,6 +7130,16 @@ func (s *Server) handleContributeRegister(w http.ResponseWriter, r *http.Request
 // then the persisted owner token (single-owner spokes). Returns "" if the caller
 // is anonymous. This is the SERVER-SIDE identity — it is not client-supplied, so
 // the trust gate below cannot be spoofed by a request body.
+//
+// The owner-token fallback is ONLY for a single-owner spoke, where the one
+// person who can reach the dashboard is the person who logged in. It must not
+// run on a hub-proxied spoke: there the hub's nginx injects X-Hive-User for
+// every signed-in visitor, so a request WITHOUT that header is an anonymous
+// one — and /api/contribute* is public, so anonymous requests do arrive.
+// Falling through handed every such visitor the hub owner's identity, and the
+// Operations "Your contribution" panel then showed the owner's totals (300
+// worked / 3066 failed on the projectbluefin hive) to anyone who opened the
+// page signed out. Same rule handleAuthToken already applies.
 func (s *Server) resolveViewerUsername(r *http.Request) string {
 	if sess := s.sessionFromRequest(r); sess != nil {
 		return sess.Username
@@ -7137,7 +7147,7 @@ func (s *Server) resolveViewerUsername(r *http.Request) string {
 	if hubUser := r.Header.Get("X-Hive-User"); hubUser != "" {
 		return hubUser
 	}
-	if s.directRouteAuthzEnabled() {
+	if s.directRouteAuthzEnabled() || s.hubProxied() {
 		return ""
 	}
 	tokenData, err := os.ReadFile(userTokenPath)
