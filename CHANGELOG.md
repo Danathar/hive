@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-17 (v4.52.1)
+
+### Changed
+
+- Extract the launch-command/caveman-installer domain from `pkg/agent/manager.go` into `manager_launch.go` (#7303 god-file split; no behavior change).
+
 ## 2026-09-17 (v4.52.0)
 
 ### Added
