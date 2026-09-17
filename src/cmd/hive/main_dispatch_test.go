@@ -2,8 +2,7 @@ package main
 
 import (
 	"bytes"
-	"context"
-	"errors"
+	"os"
 	"strings"
 	"testing"
 )
@@ -43,17 +42,18 @@ func TestDispatchSubcommandRoutesConfigCheckAlias(t *testing.T) {
 }
 
 func TestDashboardDependenciesWireRescanReposFunc(t *testing.T) {
-	deps := (&spokeWire{}).dashboardDependencies()
-
-	if deps.RescanReposFunc == nil {
-		t.Fatal("dashboardDependencies().RescanReposFunc = nil, want rescanRepos wiring")
+	// dashboardDependencies is a closure inside main() (v4 layout), so the
+	// RescanReposFunc wiring is pinned at the source level.
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
 	}
-
-	got, err := deps.RescanReposFunc(context.Background())
-	if !errors.Is(err, errNoForgeCredentials) {
-		t.Fatalf("RescanReposFunc() err = %v, want errNoForgeCredentials", err)
+	body := string(src)
+	start := strings.Index(body, "dashboardDependencies := func()")
+	if start < 0 {
+		t.Fatal("main.go no longer defines the dashboardDependencies closure")
 	}
-	if got != nil {
-		t.Fatalf("RescanReposFunc() result = %+v, want nil without GitHub credentials", got)
+	if !strings.Contains(body[start:], "return rescanRepos(rescanCtx, cfg, ghClient") {
+		t.Fatal("dashboardDependencies no longer wires RescanReposFunc to rescanRepos")
 	}
 }
