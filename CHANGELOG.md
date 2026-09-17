@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-17 (v4.39.5)
+
+### Fixed
+
+- Hive now normalizes agent-authored PR titles that start with a lane prefix, moving `[lane]` to the end when the rest of the title is already a Conventional Commits header so target repositories with anchored PR-title checks accept the PR while still preserving the agent record.
+
 ## 2026-09-16 (v4.39.4)
 
 ### Fixed
