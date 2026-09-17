@@ -1495,7 +1495,22 @@ type GovernorConfig struct {
 	// (#4294) — the gateway declining to spend more money, as distinct from the
 	// hive's own token Budget above. See ProviderBudgetConfig.
 	ProviderBudget ProviderBudgetConfig `yaml:"provider_budget,omitempty" json:"provider_budget,omitempty"`
+
+	// FleetReport controls spoke self-reporting to hivecommons/hive. The default
+	// is dry-run: operators must explicitly set file_upstream=true before any
+	// report leaves the hive.
+	FleetReport FleetReportConfig `yaml:"fleet_report,omitempty" json:"fleet_report,omitempty"`
 }
+
+// FleetReportConfig controls upstream fleet self-reporting.
+type FleetReportConfig struct {
+	// FileUpstream is the explicit opt-in to create/comment on hivecommons/hive.
+	// The zero value is dry-run, which still surfaces the would-file reports on
+	// the dashboard for operator review.
+	FileUpstream bool `yaml:"file_upstream,omitempty" json:"file_upstream,omitempty"`
+}
+
+func (f FleetReportConfig) DryRun() bool { return !f.FileUpstream }
 
 // ProviderBudgetConfig tunes how long the hive keeps agent kicks suspended
 // after the inference provider refuses on a spending limit (#4294).
