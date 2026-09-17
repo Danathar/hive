@@ -144,6 +144,51 @@ type TaskRunRecord struct {
 	// github.InvocationMeta.Session, so a PR trailer can one day join back to
 	// this record without a format change.
 	Session string `json:"session,omitempty"`
+	// PaneTail is the last few lines of the agent's terminal pane as the relay
+	// last reported them, captured at the moment this record was written
+	// (#7317 item 3). It is set only for "failed" and "abandoned" outcomes —
+	// the runs an operator has to diagnose — so a completed run (whose evidence
+	// is its PR) costs the log nothing extra.
+	//
+	// Bounded and token-redacted at write time by boundPaneTail: pane text is
+	// whatever the agent printed, so it can carry a credential it happened to
+	// echo, and the relay is under no obligation about its length. It is the
+	// only field on this record that is withheld from an anonymous reader —
+	// handleContributeRuns strips it unless the viewer is owner/read-write
+	// (paneTailViewer), which is the gate #7317 asked for.
+	PaneTail []string `json:"pane_tail,omitempty"`
+}
+
+// Bounds on a stored pane tail. The relay sends TMUX_TAIL_LINES (15) lines per
+// report; the line cap is above that so a future relay that sends more is not
+// silently clipped to today's number, and the per-line cap keeps a runaway
+// single line (a minified blob, a progress bar redrawn without newlines) from
+// dominating the 10 MB log the file rotates on.
+const (
+	maxPaneTailLines    = 30
+	maxPaneTailLineRune = 400
+)
+
+// boundPaneTail returns a stored copy of a relay-reported pane tail: the LAST
+// maxPaneTailLines lines (the end of the pane is where the failure is), each
+// token-redacted and truncated to maxPaneTailLineRune runes. Nil in, nil out,
+// so the JSON field is omitted rather than written as an empty array.
+func boundPaneTail(lines []string) []string {
+	if len(lines) == 0 {
+		return nil
+	}
+	if len(lines) > maxPaneTailLines {
+		lines = lines[len(lines)-maxPaneTailLines:]
+	}
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = redactTokens(line)
+		if r := []rune(line); len(r) > maxPaneTailLineRune {
+			line = string(r[:maxPaneTailLineRune]) + "… (truncated)"
+		}
+		out = append(out, line)
+	}
+	return out
 }
 
 // deriveScenario maps a run's normalized fields onto the closed scenario
@@ -418,8 +463,9 @@ func readTaskRunsForUser(path, username string, window time.Duration, limit int)
 // /api/contribute/activity and the leaderboard, and `reason` is already served
 // as-is on /api/contribute/fleet's last_failure for a CONNECTED contributor.
 // What changes here is durability, not audience — the same text, still readable
-// after the socket drops. No token, no pane output (that is #7317 item 3, which
-// wants a gate), no field that is not already on one of those two endpoints.
+// after the socket drops. No token, no field that is not already on one of
+// those two endpoints — with one gated exception: pane_tail (#7317 item 3) is
+// served only to an owner/read-write viewer, see below.
 func (s *Server) handleContributeRuns(w http.ResponseWriter, r *http.Request) {
 	username := strings.TrimSpace(r.URL.Query().Get("username"))
 	days := 7
@@ -439,11 +485,23 @@ func (s *Server) handleContributeRuns(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "task-run log unreadable", http.StatusInternalServerError)
 		return
 	}
+	// #7317 item 3: pane output is the one field on a record that an anonymous
+	// reader does not get. Stripped here, at the boundary, rather than never
+	// written — the record is the durable copy, and the operator it exists for
+	// is exactly the owner/read-write viewer paneTailViewer admits. The flag
+	// lets the page say "sign in to see pane output" instead of showing nothing.
+	paneVisible := s.paneTailViewer(r)
+	if !paneVisible {
+		for i := range runs {
+			runs[i].PaneTail = nil
+		}
+	}
 	jsonResponse(w, map[string]any{
-		"username":    username,
-		"window_days": days,
-		"limit":       limit,
-		"returned":    len(runs),
-		"runs":        runs,
+		"username":          username,
+		"window_days":       days,
+		"limit":             limit,
+		"returned":          len(runs),
+		"runs":              runs,
+		"pane_tail_visible": paneVisible,
 	})
 }

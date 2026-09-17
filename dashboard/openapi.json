@@ -5758,7 +5758,7 @@
           "Governor"
         ],
         "summary": "Watchdog activity readout",
-        "description": "The agent self-healing watchdog's audit trail (`watchdog-*` actions) over a trailing window of whole UTC days, aggregated for the Health tab: total and per-action counts, a zero-filled daily histogram, the current liveness verdict per probed agent, and — in observe mode — whether the window argues against promoting to heal. Read from the on-disk audit log (rotated backups included), falling back to the in-memory ring only when no file exists. Requires read-write role (same tier as GET /api/audit, its source).",
+        "description": "The agent self-healing watchdog's audit trail (`watchdog-*` actions) over a trailing window of whole UTC days, aggregated for the Health tab: total and per-action counts, a zero-filled daily histogram, the current liveness verdict per probed agent, and \u2014 in observe mode \u2014 whether the window argues against promoting to heal. Read from the on-disk audit log (rotated backups included), falling back to the in-memory ring only when no file exists. Requires read-write role (same tier as GET /api/audit, its source).",
         "parameters": [
           {
             "name": "days",
@@ -5887,7 +5887,7 @@
                     },
                     "promotion": {
                       "type": "object",
-                      "description": "Observe → Heal hint; present only in observe mode",
+                      "description": "Observe \u2192 Heal hint; present only in observe mode",
                       "properties": {
                         "safe": {
                           "type": "boolean",
@@ -11164,7 +11164,7 @@
           "Contribute"
         ],
         "summary": "Fleet, work, and admission-policy snapshot",
-        "description": "Read-only snapshot for the Management & Operations tab: connected clankers, in-flight work items, the hub's configured admission policy, plus cooldown/in-flight/held issue counts. Public, GET only, no side effects.",
+        "description": "Read-only snapshot for the Management & Operations tab: connected clankers, in-flight work items, the hub's configured admission policy, plus cooldown/in-flight/held issue counts. Public, GET only, no side effects. `pane_tail` on a clanker (the agent's terminal while its task is in flight, #7317 item 3) is served only to owner/read-write viewers; `pane_tail_visible` says whether it was.",
         "responses": {
           "200": {
             "description": "Fleet snapshot",
@@ -11178,7 +11178,7 @@
                       "items": {
                         "type": "object"
                       },
-                      "description": "Connected FleetClanker entries"
+                      "description": "Connected FleetClanker entries. Each carries `last_failure` (the most recent task_failed this connection reported) and, while a task is in flight and the viewer is admitted, `pane_tail`."
                     },
                     "work": {
                       "type": "array",
@@ -11279,6 +11279,10 @@
                     },
                     "held_count": {
                       "type": "integer"
+                    },
+                    "pane_tail_visible": {
+                      "type": "boolean",
+                      "description": "Whether this viewer is admitted to each clanker's `pane_tail` (owner/read-write, or anyone on an open spoke). When false the field is stripped from every clanker."
                     }
                   }
                 }
@@ -11660,7 +11664,7 @@
           "Contribute"
         ],
         "summary": "Per-run task history for one contributor",
-        "description": "The per-run records behind /api/contribute/run-stats' aggregates: outcome, failure kind, reason, duration and scenario for each task a contributor ran in the window. Answers \"why is this contributor struggling?\" from the dashboard, without shell access to the hub host. Public, GET only, no side effects \u2014 the username is already public on /api/contribute/activity and the reason is already served on /api/contribute/fleet's last_failure for a connected contributor; what this adds is durability, not audience. No tokens and no pane output.",
+        "description": "The per-run records behind /api/contribute/run-stats' aggregates: outcome, failure kind, reason, duration and scenario for each task a contributor ran in the window. Answers \"why is this contributor struggling?\" from the dashboard, without shell access to the hub host. Public, GET only, no side effects \u2014 the username is already public on /api/contribute/activity and the reason is already served on /api/contribute/fleet's last_failure for a connected contributor; what this adds is durability, not audience. No tokens. `pane_tail` (the agent's terminal at the moment a failed or abandoned run stopped, #7317 item 3) is served only to owner/read-write viewers; for anyone else the field is stripped and `pane_tail_visible` is false.",
         "parameters": [
           {
             "name": "username",
@@ -11806,9 +11810,20 @@
                           },
                           "session": {
                             "type": "string"
+                          },
+                          "pane_tail": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            },
+                            "description": "The last lines of the agent's terminal pane as the relay last reported them, captured when the record was written. Present only on `failed` and `abandoned` outcomes, bounded to 30 lines of 400 runes, token-redacted, and served only when `pane_tail_visible` is true."
                           }
                         }
                       }
+                    },
+                    "pane_tail_visible": {
+                      "type": "boolean",
+                      "description": "Whether this viewer is admitted to `pane_tail` (owner/read-write, or anyone on an open spoke with no auth boundary). When false the field is stripped from every record so the page can say so instead of showing nothing."
                     }
                   }
                 }

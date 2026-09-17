@@ -2589,6 +2589,15 @@ func (h *ContributeWSHub) appendAbandonedRun(c *ContributorConnection, task *WST
 	if !assignedAt.IsZero() {
 		rec.DurationS = time.Since(assignedAt).Seconds()
 	}
+	// #7317 item 3: the last pane the relay reported before it gave the task
+	// back or dropped off — for a stall this is the frozen screen itself, the
+	// thing the operator most wants to see. Unlike the fields above, tmuxOutput
+	// IS written under contributor.mu (by the task_progress handler), so the
+	// copy takes the lock; both callers have released it by the time they get
+	// here.
+	c.mu.Lock()
+	rec.PaneTail = boundPaneTail(c.tmuxOutput)
+	c.mu.Unlock()
 	h.appendTaskRun(rec)
 }
 
@@ -3292,6 +3301,15 @@ type FleetClanker struct {
 	// gates, or adjusts a work item's failure cooldown on it. Nil until this
 	// connection has failed a task.
 	LastFailure *ContributorFailure `json:"last_failure,omitempty"`
+	// PaneTail is the last few lines of the agent's terminal pane as the relay
+	// most recently reported them in a task_progress (#7317 item 3) — what the
+	// agent is showing RIGHT NOW, for the operator asking "why has this clanker
+	// been silent for twenty minutes". Set only while CurrentTask is in flight
+	// (idle, the last pane is stale) and bounded/redacted by boundPaneTail like
+	// the stored copy on a TaskRunRecord. handleContributeFleet strips it for
+	// any viewer paneTailViewer does not admit. Diagnostic only: nothing routes
+	// on it.
+	PaneTail []string `json:"pane_tail,omitempty"`
 	// LabelInterests (#2677) mirrors the contributor's own OPT-IN label-affinity
 	// list (#2637, ContributorProfile.LabelInterests) so an operator can see
 	// fleet-wide who prefers what without cross-referencing each profile
@@ -3427,6 +3445,10 @@ func (h *ContributeWSHub) FleetSnapshot() FleetSnapshot {
 			if len(c.currentLabels) > 0 {
 				taskLabels = append([]string(nil), c.currentLabels...)
 			}
+			// #7317 item 3: and the pane the agent is showing for it. A bounded,
+			// redacted copy — never the live slice — for the same aliasing reason
+			// as every other field on this snapshot.
+			fc.PaneTail = boundPaneTail(c.tmuxOutput)
 		}
 		// #2546: when the clanker is NOT actively working, expose why it is idle so
 		// the operator sees "idle: no_matching_work" etc. Suppressed while a task is
@@ -4652,6 +4674,11 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 						FailureKind: failureKind,
 						Reason:      msg.Reason,
 						Permanent:   msg.Permanent,
+						// #7317 item 3: the pane at the moment of failure. The relay
+						// captures it BEFORE stopping the agent precisely so this
+						// report carries the evidence (see failCurrentTask); until now
+						// the hub read it and kept nothing.
+						PaneTail: boundPaneTail(msg.TmuxOutput),
 					}
 					if failedTask != nil {
 						runRec.Repo = failedTask.Repo
