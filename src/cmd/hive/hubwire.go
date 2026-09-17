@@ -57,6 +57,12 @@ func (w *spokeWire) wireHubHeartbeat() {
 			hub.UpgradeCallback(w.handleHubUpgrade),
 			hub.GitHubAppConfigCallback(w.handleHubGitHubAppConfig),
 			hub.HubBannerCallback(w.handleHubBanner),
+			hub.UpgradePolicyCallback(func(p *hub.HeartbeatUpgradePolicy) {
+				// Descriptive only (#7262): the hub's upgrade posture for this
+				// spoke, so the dashboard measures "behind" against the commit
+				// the hub will actually roll us to and renders the hub's schedule.
+				w.dashSrv.SetHubUpgradePolicy(p)
+			}),
 			hub.VisibilityCallback(w.handleHubVisibility),
 			hub.SwitchBranchCallback(w.handleHubSwitchBranch),
 			hub.AuthorizedUsersCallback(w.handleHubAuthorizedUsers),

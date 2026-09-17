@@ -1,14 +1,18 @@
-// Package apphealth classifies a hive's GitHub App credential state.
+// Package apphealth diagnoses and classifies the health of the hive's GitHub
+// App credentials: whether the installation authenticates, belongs to the
+// expected account, holds the permissions the hive relies on, and actually
+// covers the repositories the hive is configured to work on.
 //
-// Extracted verbatim from package main (#7238). These are the verdicts behind
-// the GitHub App banner, and they were unreachable from outside cmd/hive even
-// though nothing about them is specific to the binary: every test had to live
-// in package main against shared mutable globals.
+// It was extracted from package main (#7238), where it sat in a 4,789-line
+// grab-bag alongside five unrelated concerns and could only be tested from
+// inside cmd/hive.
 //
-// The one coupling that had to be broken is the private-key paths, which the
-// original read from the package-level appKeys. They are now Checker fields,
-// which is also what makes a missing key detectable without an API round-trip
-// in a test.
+// The extraction made one deliberate design change: the App key paths are now
+// PARAMETERS (KeyPaths) rather than mutable package-level variables. In
+// package main they were vars specifically so tests could repoint them at a
+// temp dir -- exactly the "tests monkey-patch shared mutable globals" coupling
+// #7238 objects to. Passing them in preserves that flexibility without the
+// global, and makes the dependency visible in every signature that has it.
 package apphealth
 
 import (
@@ -16,50 +20,66 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/hivecommons/hive/pkg/config"
 	"github.com/hivecommons/hive/pkg/github"
 )
 
-// Checker carries the per-hive inputs the App-credential verdicts need.
-// The zero value is usable: it probes with the package defaults and detects a
-// missing key only from the API's answer rather than from the filesystem.
-type Checker struct {
-	// KeyPaths are the candidate private-key paths, tried in order. Supplying
-	// them lets a MISSING key be detected with no API round-trip at all.
-	KeyPaths []string
-	// BannerAttempts overrides how many times ClassifyFailure probes before
-	// accepting an unclassifiable verdict. Zero means defaultBannerAttempts.
-	BannerAttempts int
-	// RetryDelay overrides the spacing between those attempts. Zero means
-	// defaultBannerRetryDelay.
-	RetryDelay time.Duration
+// KeyPaths locates the two places a spoke's GitHub App private key can live.
+// Both are consulted, in the order pkg/github defines.
+type KeyPaths struct {
+	// Spoke is the PVC path a hub-delivered key lands at, which takes effect
+	// over the provisioned mount.
+	Spoke string
+	// Provisioned is the read-only Kubernetes Secret mount written at
+	// provisioning time.
+	Provisioned string
 }
 
-func (c Checker) attempts() int {
-	if c.BannerAttempts > 0 {
-		return c.BannerAttempts
+// Heal self-heals a hive whose github.installation_id
+// points at the WRONG account — the failure mode Diagnose
+// already detects and reports ("installation N belongs to 'X', not 'Y'"). It
+// asks pkg/github to rediscover the installation covering cfg.Project.Org via
+// the App JWT and, only on an unambiguous match, adopts it in place and
+// persists it so the fix survives a pod restart.
+//
+// Every failure path is soft and silent-ish: a hive with no App key is not
+// App-authenticated (skip), an API error or an ambiguous/absent discovery
+// result leaves installation_id exactly as configured so the existing
+// "check github.installation_id" banner still stands. It never returns an
+// error to the caller and never blocks startup or a heartbeat.
+//
+// Rediscovery is rate-limited by pkg/github's discovery cache
+// (github.InstallationDiscoveryTTL), so calling this from the self-heal tick
+// is cheap even when the App is genuinely not installed on the org.
+func Heal(ctx context.Context, appAuth *github.AppAuth, cfg *config.Config, logger *slog.Logger) {
+	if appAuth == nil || !appAuth.HasKey() || cfg == nil {
+		return
 	}
-	return defaultBannerAttempts
-}
-
-func (c Checker) retryDelay() time.Duration {
-	if c.RetryDelay > 0 {
-		return c.RetryDelay
+	org := cfg.Project.Org
+	if org == "" {
+		return
 	}
-	return defaultBannerRetryDelay
+	newID, err := appAuth.RediscoverAndAdopt(ctx, org, logger)
+	if err != nil {
+		logger.Debug("github app installation rediscovery did not adopt a new id",
+			"org", org, "error", err)
+		return
+	}
+	if newID == 0 {
+		return // already correct, or nothing safe to adopt
+	}
+	cfg.GitHub.InstallationID = newID
+	if err := cfg.Save(); err != nil {
+		logger.Error("adopted rediscovered installation_id but failed to persist it — "+
+			"it will revert on the next pod restart",
+			"installation_id", newID, "error", err)
+		return
+	}
+	logger.Info("persisted rediscovered github app installation_id",
+		"installation_id", newID, "org", org)
 }
 
-// defaultBannerAttempts is how many times Checker.ClassifyFailure probes
-// before accepting an unclassifiable (AppStateUnknown) verdict. A cold start
-// races the cluster's DNS/egress-proxy readiness, so the FIRST App call a pod
-// makes is the one most likely to fail for reasons that have nothing to do
-// with the App. One retry converts that transient into a correct verdict.
-const defaultBannerAttempts = 2
-
-// defaultBannerRetryDelay spaces those attempts. Short enough not to stall
-// boot, long enough for an egress proxy or DNS cache to come up.
-const defaultBannerRetryDelay = 3 * time.Second
-
-// Checker.DiagnoseMessage classifies this hive's GitHub App credential state and
+// Diagnose classifies this hive's GitHub App credential state and
 // returns both the machine-readable state and banner-ready copy.
 //
 // It supersedes a substring match on the formatted error ("403"/"401"), which
@@ -76,23 +96,34 @@ const defaultBannerRetryDelay = 3 * time.Second
 //
 // Returns ("", AppStateOK) when App auth is healthy, and ("", state) for a nil
 // appAuth (a token-authenticated hive has nothing to check).
-func (c Checker) DiagnoseMessage(ctx context.Context, appAuth *github.AppAuth, expectedOwner string) (string, github.AppAuthState) {
-	d := c.Diagnose(ctx, appAuth, expectedOwner)
+func Diagnose(ctx context.Context, appAuth *github.AppAuth, expectedOwner string, keys KeyPaths) (string, github.AppAuthState) {
+	d := DiagnoseFull(ctx, appAuth, expectedOwner, keys)
 	return d.Message(), d.State
 }
 
-// Checker.Diagnose is Checker.DiagnoseMessage without the lossy projection to
+// DiagnoseFull is Diagnose without the lossy projection to
 // (message, state). Callers that only need the banner should keep using the
 // wrapper above; this exists for the one caller that also reports the granted
 // Actions and Commit-statuses permissions (#4030), which the projection drops.
-func (c Checker) Diagnose(ctx context.Context, appAuth *github.AppAuth, expectedOwner string) github.AppAuthDiagnosis {
+func DiagnoseFull(ctx context.Context, appAuth *github.AppAuth, expectedOwner string, keys KeyPaths) github.AppAuthDiagnosis {
 	if appAuth == nil {
 		return github.AppAuthDiagnosis{State: github.AppStateOK, ExpectedAccount: expectedOwner}
 	}
-	return appAuth.DiagnoseAppAuth(ctx, expectedOwner, c.KeyPaths...)
+	return appAuth.DiagnoseAppAuth(ctx, expectedOwner, keys.Spoke, keys.Provisioned)
 }
 
-// Checker.ClassifyFailure is the SINGLE decision point for "should the GitHub
+// bannerAttempts is how many times ClassifyFailure probes
+// before accepting an unclassifiable (AppStateUnknown) verdict. A cold start
+// races the cluster's DNS/egress-proxy readiness, so the FIRST App call a pod
+// makes is the one most likely to fail for reasons that have nothing to do
+// with the App. One retry converts that transient into a correct verdict.
+const bannerAttempts = 2
+
+// bannerRetryDelay spaces those attempts. Short enough not to stall
+// boot, long enough for an egress proxy or DNS cache to come up.
+const bannerRetryDelay = 3 * time.Second
+
+// ClassifyFailure is the SINGLE decision point for "should the GitHub
 // App banner be raised?" — used by the boot path, the advisory-digest path and
 // the manual Re-check button alike, so those three can never again disagree
 // about the same hive.
@@ -101,7 +132,7 @@ func (c Checker) Diagnose(ctx context.Context, appAuth *github.AppAuth, expected
 // on a substring match for "403"/"401" in a formatted error string (the exact
 // pattern #2224 replaced), set githubAppRequired=true UNCONDITIONALLY, and
 // then classify — never lowering the flag again when classification came back
-// healthy or inconclusive. Re-check ran the very same Checker.DiagnoseMessage probe
+// healthy or inconclusive. Re-check ran the very same Diagnose probe
 // but treated an empty diagnosis as success and cleared the banner. Same
 // evidence, opposite conclusion: the banner appeared on every cold start whose
 // first advisory-issue call blipped, and vanished the moment the user clicked
@@ -118,22 +149,21 @@ func (c Checker) Diagnose(ctx context.Context, appAuth *github.AppAuth, expected
 //
 // Returns raise=false with an empty message when the App is fine or when we
 // simply cannot tell.
-func (c Checker) ClassifyFailure(ctx context.Context, appAuth *github.AppAuth, expectedOwner string, logger *slog.Logger) (raise bool, msg string, state github.AppAuthState) {
+func ClassifyFailure(ctx context.Context, appAuth *github.AppAuth, expectedOwner string, keys KeyPaths, logger *slog.Logger) (raise bool, msg string, state github.AppAuthState) {
 	var d github.AppAuthDiagnosis
-	attempts, delay := c.attempts(), c.retryDelay()
-	for attempt := 1; attempt <= attempts; attempt++ {
-		d = c.Diagnose(ctx, appAuth, expectedOwner)
+	for attempt := 1; attempt <= bannerAttempts; attempt++ {
+		d = DiagnoseFull(ctx, appAuth, expectedOwner, keys)
 		msg, state = d.Message(), d.State
 		if state != github.AppStateUnknown {
 			break
 		}
-		if attempt < attempts {
+		if attempt < bannerAttempts {
 			logger.Debug("github app classification inconclusive — retrying before accepting a verdict",
 				"attempt", attempt, "owner", expectedOwner)
 			select {
 			case <-ctx.Done():
 				return false, "", github.AppStateUnknown
-			case <-time.After(delay):
+			case <-time.After(bannerRetryDelay):
 			}
 		}
 	}
@@ -187,9 +217,9 @@ func (c Checker) ClassifyFailure(ctx context.Context, appAuth *github.AppAuth, e
 	return true, msg, state
 }
 
-// Checker.ClassifyWriteForbidden (#2353) is the verdict for a REAL write that
+// ClassifyWriteForbidden (#2353) is the verdict for a REAL write that
 // returned 403 "Resource not accessible by integration". Authentication-only
-// health checks (Checker.ClassifyFailure / Checker.DiagnoseMessage) inspect the
+// health checks (ClassifyFailure / Diagnose) inspect the
 // installation's granted PERMISSIONS but never whether the target repo is in
 // the installation's `selected` repositories — so they return AppStateOK for a
 // repo the App cannot write, and the write failure stayed invisible to health
@@ -198,10 +228,10 @@ func (c Checker) ClassifyFailure(ctx context.Context, appAuth *github.AppAuth, e
 //
 // The rule here keeps attribution honest:
 //
-//   - If Checker.DiagnoseMessage finds a genuine, classifiable App-auth problem
+//   - If Diagnose finds a genuine, classifiable App-auth problem
 //     (wrong installation, missing key, insufficient PERMISSION, etc.), report
 //     THAT — it is the real cause and its copy is already accurate.
-//   - If Checker.DiagnoseMessage reports the installation is healthy (AppStateOK:
+//   - If Diagnose reports the installation is healthy (AppStateOK:
 //     right owner, issues:write granted) OR could not reach a verdict
 //     (AppStateUnknown), the write 403 is still real and must NOT be silently
 //     healthy. Report AppStateWriteForbidden with copy that names the repo and
@@ -210,9 +240,9 @@ func (c Checker) ClassifyFailure(ctx context.Context, appAuth *github.AppAuth, e
 //
 // It always raises: a write that returned 403 is a genuine, standing failure to
 // surface, distinct from the transient/unknown probe failures
-// Checker.ClassifyFailure guards against.
-func (c Checker) ClassifyWriteForbidden(ctx context.Context, appAuth *github.AppAuth, expectedOwner, repo string) (msg string, state github.AppAuthState) {
-	diagMsg, diagState := c.DiagnoseMessage(ctx, appAuth, expectedOwner)
+// ClassifyFailure guards against.
+func ClassifyWriteForbidden(ctx context.Context, appAuth *github.AppAuth, expectedOwner, repo string, keys KeyPaths) (msg string, state github.AppAuthState) {
+	diagMsg, diagState := Diagnose(ctx, appAuth, expectedOwner, keys)
 	if diagState != github.AppStateOK && diagState != github.AppStateUnknown {
 		// A real, classifiable App-auth problem — its message is the accurate
 		// one (e.g. wrong-installation, key-missing, or a genuine permission
@@ -234,9 +264,9 @@ func (c Checker) ClassifyWriteForbidden(ctx context.Context, appAuth *github.App
 // other classifiers cannot: does this installation actually COVER the repos
 // this hive is configured to work on?
 //
-// Everything else here reasons from a failed call. Checker.DiagnoseMessage inspects
+// Everything else here reasons from a failed call. Diagnose inspects
 // installation-level PERMISSIONS and never repo scope, and
-// Checker.ClassifyWriteForbidden infers scope from a 403 after a write has
+// ClassifyWriteForbidden infers scope from a 403 after a write has
 // already failed. Neither can see the case that prompted this: a hive pointed
 // at a second repo in the right org, on the right installation, simply not
 // ticked in the App's selected repos. GitHub answers 404 for that — the same

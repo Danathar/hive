@@ -8,7 +8,9 @@ import (
 )
 
 func TestDashboardInternalImportCountRatchet(t *testing.T) {
-	const maxDashboardInternalImports = 34
+	// 36 = the v5 baseline of 34 plus pkg/fleetreport and pkg/hiveadvisor,
+	// which the v4 fleet self-report and hive-owner-advice features import.
+	const maxDashboardInternalImports = 36
 
 	entries, err := os.ReadDir(".")
 	if err != nil {

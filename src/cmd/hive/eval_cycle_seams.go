@@ -2,12 +2,16 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sort"
 	"strings"
+	"time"
 
+	"github.com/hivecommons/hive/pkg/advisory"
 	"github.com/hivecommons/hive/pkg/config"
 	"github.com/hivecommons/hive/pkg/github"
+	"github.com/hivecommons/hive/pkg/ioscan"
 	"github.com/hivecommons/hive/pkg/scheduler"
 	"github.com/hivecommons/hive/pkg/worksource"
 )
@@ -274,4 +278,199 @@ func classifyAdvisoryPostError(err error) advisoryPostFailure {
 		return advisoryPostRateLimited
 	}
 	return advisoryPostAuthProbe
+}
+
+// providerBudgetAlert is what the eval cycle should do about the provider
+// spend latch this cycle (#4294). Extracted from runEvalCycle so the wording
+// and the dedup decisions are testable without a dashboard server, an agent
+// manager or the package-level latch (#7232).
+//
+// The operator only ever learns about a clipped provider through this banner,
+// so the exact text is load-bearing: it has to say whether kicks are suspended
+// or probing, and it has to distinguish "one refused call" from "refused all
+// day" — which is the field failure #4294 was filed for.
+type providerBudgetAlert struct {
+	// Message is the banner to raise; empty means raise nothing.
+	Message string
+	// Clear means remove any existing banner.
+	Clear bool
+	// Cause replaces the caller's providerBudgetCause when non-empty. The
+	// latched banner text is reused downstream as the cause string.
+	Cause string
+}
+
+// decideProviderBudgetAlert chooses the provider-spend banner for this cycle.
+//
+// quotaReason is a func, not a string, on purpose: the original code only
+// consulted the agent manager on the NOT-latched branch, and collecting agent
+// statuses every cycle while the provider is clipped would be work the old
+// code never did. Passing a thunk keeps that laziness exactly.
+func decideProviderBudgetAlert(latched, suppress bool, cause string, since time.Time, rebuffs int, quotaReason func() string) providerBudgetAlert {
+	if latched {
+		state := "agent kicks suspended"
+		if !suppress {
+			state = "probing with a single agent kick to test whether the provider window has reset"
+		}
+		msg := fmt.Sprintf("provider spending limit reached — %s: %s", state, cause)
+		if rebuffs > 1 {
+			msg = fmt.Sprintf("provider spending limit reached (%d refused calls since %s) — %s: %s",
+				rebuffs, since.Format(time.RFC1123), state, cause)
+		}
+		return providerBudgetAlert{Message: msg, Cause: msg}
+	}
+	if reason := quotaReason(); reason != "" {
+		return providerBudgetAlert{Message: "provider quota exhausted — " + reason}
+	}
+	return providerBudgetAlert{Clear: true}
+}
+
+// ── Kick dispatch (#7232) ───────────────────────────────────────────────────
+
+// kickDispatchDeps carries the effects the kick-dispatch loop performs, so the
+// loop's DECISIONS can be exercised without a tmux session, a governor, a
+// dashboard, or a live tracing exporter.
+//
+// The header comment above says effects stay at the call site. Dispatch is the
+// one place that could not follow that rule: its decisions are not separable
+// from its effects, because each decision is defined BY an effect it must or
+// must not perform -- "withhold this kick" means SendKick is not called,
+// "release the probe" means the stamp is written exactly once. A pure function
+// returning a plan would not have pinned the thing that actually matters here,
+// which is the ordering and the skip paths.
+//
+// Every field is required; dispatchAgentKicks does not nil-check them, because
+// a silently-skipped effect is precisely the failure this seam exists to
+// prevent. The production wiring in runEvalCycle supplies all of them.
+type kickDispatchDeps struct {
+	// backoffRemaining reports a per-agent provider-error backoff.
+	backoffRemaining func(agent string) (time.Duration, string, string, bool)
+	// sendKick delivers the kick. A non-nil error means nothing was sent.
+	sendKick func(agent, message string) error
+	// startKickSpan opens the agent.kick tracing span and returns its closer;
+	// the closer takes the SendKick error (nil on success) so a failed kick is
+	// recorded on the span before it ends.
+	startKickSpan func(agent string) func(err error)
+	// onReviewDelivered records a delivered review kick and persists the
+	// dispatch state. Split from onDelivered because the original code runs it
+	// BEFORE the span closes and before the probe stamp, and this extraction
+	// preserves effect ORDER exactly rather than merely preserving the set of
+	// effects.
+	onReviewDelivered func(msg scheduler.KickMessage)
+	// onDelivered runs last, for the effects that must NOT happen when a kick
+	// was withheld or failed: governor repo accounting, audit log, lifecycle
+	// timeline, token snapshot.
+	onDelivered func(msg scheduler.KickMessage)
+	// markProbeReleased stamps the provider-budget probe. Called at most once
+	// per dispatch, and only after a kick actually goes out.
+	markProbeReleased func(at time.Time)
+	// now supplies the probe stamp's timestamp.
+	now func() time.Time
+}
+
+// dispatchAgentKicks sends this cycle's kick messages, applying the two skip
+// rules and the single-probe rule.
+//
+// It returns the agents whose kicks were actually delivered, in order, which
+// is what lets a caller (and a test) distinguish "withheld" from "failed" from
+// "sent" without reaching into the effects.
+//
+// The rules, all of which are load-bearing and individually guarded:
+//
+//   - An agent inside a provider-error backoff is skipped entirely. No span is
+//     opened for it, because a withheld kick is not an attempted kick.
+//   - A kick whose send FAILS performs none of the delivered-effects. Recording
+//     an audit entry or a timeline kick for a kick that never landed would make
+//     the dashboard assert something that did not happen.
+//   - The probe stamp is written at most ONCE, after the first kick that
+//     actually goes out. Stamping on a withheld or failed kick would re-arm
+//     suppression without having learned anything about the provider, which is
+//     the entire point of releasing a probe.
+func dispatchAgentKicks(msgs []scheduler.KickMessage, releaseProbe bool, deps kickDispatchDeps, logger *slog.Logger) []string {
+	var delivered []string
+	for _, msg := range msgs {
+		if remaining, class, line, ok := deps.backoffRemaining(msg.Agent); ok {
+			logger.Warn("provider inference error: withholding agent kick during backoff",
+				"agent", msg.Agent,
+				"class", class,
+				"retry_in", remaining.Round(time.Second),
+				"error", line)
+			continue
+		}
+		endSpan := deps.startKickSpan(msg.Agent)
+		logger.Info("audit: governor kicking agent", "agent", msg.Agent, "trigger", "governor-eval")
+		if err := deps.sendKick(msg.Agent, msg.Message); err != nil {
+			endSpan(err)
+			logger.Warn("failed to send kick", "agent", msg.Agent, "error", err)
+			continue
+		}
+		deps.onReviewDelivered(msg)
+		endSpan(nil)
+		if releaseProbe {
+			deps.markProbeReleased(deps.now())
+			releaseProbe = false
+		}
+		deps.onDelivered(msg)
+		delivered = append(delivered, msg.Agent)
+	}
+	return delivered
+}
+
+// advisoryIngestDeps are the side effects of recording an ioscan canary leak
+// found in a newly ingested advisory finding. Decisions (whether a finding is
+// scanned, whether a leak blocks it) live in gateAdvisoryFindings; the effects
+// stay at the call site in runEvalCycle, same split as kickDispatchDeps.
+type advisoryIngestDeps struct {
+	// scanCanary runs the canary scan over one finding's report text. nil when
+	// ioscan or its canaries are disabled: nothing is scanned, nothing blocked.
+	scanCanary func(agent, reportText, source string) (ioscan.CanaryLeak, bool)
+	// failClosed is cfg.Ioscan.FailClosed(): a leaking finding is withheld from
+	// persistence instead of merely being recorded.
+	failClosed bool
+	// auditLog records the leak in the dashboard audit trail.
+	auditLog func(actor, action, detail, agent string)
+	// recordLeakBead persists the critical canary-leak bead for the agent.
+	recordLeakBead func(leak ioscan.CanaryLeak)
+}
+
+// gateAdvisoryFindings is runEvalCycle's ioscan canary gate over one cycle's
+// newly read advisory findings, extracted verbatim behind a seam (#7232).
+//
+// The rules, each previously unreachable without a live dashboard and bead
+// stores:
+//
+//   - With canaries disabled (scanCanary == nil) every finding passes through
+//     unscanned; the gate never blocks on configuration alone.
+//   - A leak is ALWAYS recorded — audit entry plus critical bead — whether or
+//     not it blocks. Fail-open still leaves evidence.
+//   - Only failClosed turns a leak into a withheld finding. The scan text is
+//     the finding's title, detail, file, type and severity joined by newlines,
+//     so a canary smuggled into any of those fields is caught.
+func gateAdvisoryFindings(findings []advisory.Finding, deps advisoryIngestDeps, logger *slog.Logger) []advisory.Finding {
+	safeFindings := make([]advisory.Finding, 0, len(findings))
+	for _, f := range findings {
+		logger.Info("advisory finding ingested",
+			"agent", f.Agent,
+			"severity", f.Severity,
+			"type", f.Type,
+			"title", f.Title,
+			"file", f.File,
+			"line", f.Line,
+		)
+		blockFinding := false
+		if deps.scanCanary != nil {
+			reportText := strings.Join([]string{f.Title, f.Detail, f.File, f.Type, f.Severity}, "\n")
+			if leak, ok := deps.scanCanary(f.Agent, reportText, "advisory-finding"); ok {
+				detail := fmt.Sprintf("rule=%s, agent=%s, source=%s", ioscan.CanaryLeakRule, leak.Agent, leak.Source)
+				deps.auditLog(leak.Agent, "ioscan_canary_leak", detail, leak.Agent)
+				deps.recordLeakBead(leak)
+				blockFinding = deps.failClosed
+			}
+		}
+		if blockFinding {
+			logger.Warn("ioscan fail-closed blocked advisory finding with canary leak", "agent", f.Agent)
+			continue
+		}
+		safeFindings = append(safeFindings, f)
+	}
+	return safeFindings
 }

@@ -374,6 +374,7 @@ type HeartbeatResponse struct {
 	AuthorizedUserNames map[string]string         `json:"authorized_user_names,omitempty"`
 	ProjectConfig       *HeartbeatProjectConfig   `json:"project_config,omitempty"`
 	PendingGateway      *HeartbeatGatewayConfig   `json:"pending_gateway,omitempty"`
+	UpgradePolicy       *HeartbeatUpgradePolicy   `json:"upgrade_policy,omitempty"`
 	SigHiveID           string                    `json:"sig_hive_id,omitempty"`
 	SigSeq              int64                     `json:"sig_seq,omitempty"`
 	SigSignedAt         int64                     `json:"sig_ts,omitempty"`
@@ -383,6 +384,45 @@ type HubBanner struct {
 	ID      string `json:"id"`
 	Message string `json:"message"`
 	Color   string `json:"color"`
+}
+
+// HeartbeatUpgradePolicy is the hub's authoritative upgrade posture for one
+// spoke (#7262). Every field is descriptive: nothing here instructs the spoke
+// to change its image (UpgradeTo / SwitchToTag still do that). It exists so the
+// spoke's Settings → Hub tab and top-bar "behind" readout render what the hub
+// actually intends instead of local guesses.
+type HeartbeatUpgradePolicy struct {
+	// HubManaged is true when the hub rolls this hive's Deployment itself
+	// (SaaS record with auto_upgrade on) — the spoke's own hub.auto_upgrade
+	// flag is irrelevant and must not be rendered as the policy.
+	HubManaged bool `json:"hub_managed"`
+	// SpokeManaged is true when the spoke self-upgrades on UpgradeTo
+	// instructions from the heartbeat (spoke config auto_upgrade with no
+	// overriding SaaS record). Mutually exclusive with HubManaged.
+	SpokeManaged bool `json:"spoke_managed"`
+	// Schedule is the hub-side cadence: "instant", "daily" or "weekly". An
+	// empty stored mode is the historical instant behaviour and is reported
+	// as such rather than as unknown.
+	Schedule string `json:"schedule,omitempty"`
+	// Paused is the fleet-wide spoke-upgrade kill switch state.
+	Paused bool `json:"paused"`
+	// Branch is the git line the spoke reports running (its target line).
+	Branch string `json:"branch,omitempty"`
+	// Channel is the release channel the spoke's Deployment actually follows
+	// ("stable"/"candidate"/"edge"), "" for a branch tag or a pin.
+	Channel string `json:"channel,omitempty"`
+	// TargetSHA is the newest commit this spoke can actually land on — the
+	// channel's current revision for a channel spoke, the branch head
+	// otherwise. The spoke's "N behind" is measured against THIS, so every
+	// surface (hub card, spoke top bar, Hub tab) agrees by construction.
+	TargetSHA string `json:"target_sha,omitempty"`
+	// TargetResolved is false only when the spoke tracks a channel the hub
+	// could not resolve to a commit; the spoke must then render "unknown"
+	// rather than fall back to a branch tip.
+	TargetResolved bool `json:"target_resolved"`
+	// ArmedTarget is the SHA the hub currently has armed for this hive (a
+	// pending or in-flight upgrade), "" when none.
+	ArmedTarget string `json:"armed_target,omitempty"`
 }
 
 type TaskStatusPayload struct {

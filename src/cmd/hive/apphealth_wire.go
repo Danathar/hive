@@ -13,17 +13,19 @@ import (
 // thing they add is the private-key paths, which the extracted code takes as
 // a field instead of reading the package-level appKeys global.
 
-// appHealthChecker builds a Checker from this process's App key locations.
-func appHealthChecker() apphealth.Checker {
-	return apphealth.Checker{KeyPaths: []string{appKeys.DataKeyPath, appKeys.ProvisionedKeyPath}}
+// appKeyPaths snapshots the two App key path locations for a pkg/apphealth
+// call. Read at call time on purpose: tests repoint these, and capturing them
+// once would silently ignore that.
+func appKeyPaths() apphealth.KeyPaths {
+	return apphealth.KeyPaths{Spoke: appKeys.DataKeyPath, Provisioned: appKeys.ProvisionedKeyPath}
 }
 
 func classifyGitHubAppFailure(ctx context.Context, appAuth *github.AppAuth, expectedOwner string, logger *slog.Logger) (bool, string, github.AppAuthState) {
-	return appHealthChecker().ClassifyFailure(ctx, appAuth, expectedOwner, logger)
+	return apphealth.ClassifyFailure(ctx, appAuth, expectedOwner, appKeyPaths(), logger)
 }
 
 func classifyGitHubAppWriteForbidden(ctx context.Context, appAuth *github.AppAuth, expectedOwner, repo string) (string, github.AppAuthState) {
-	return appHealthChecker().ClassifyWriteForbidden(ctx, appAuth, expectedOwner, repo)
+	return apphealth.ClassifyWriteForbidden(ctx, appAuth, expectedOwner, repo, appKeyPaths())
 }
 
 func classifyGitHubAppRepoCoverage(ctx context.Context, appAuth *github.AppAuth, org string, repos []string, logger *slog.Logger) (bool, string, github.AppAuthState) {

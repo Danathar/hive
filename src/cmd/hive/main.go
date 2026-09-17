@@ -62,6 +62,7 @@ func main() {
 		gitShort = gitShort[:7]
 	}
 	dashboard.SetGitVersion(gitHash, gitShort)
+	dashboard.SetFleetReportBuildInfo(reportedVersion(), gitShort)
 	dashboard.SetGitBranch(gitBranch)
 	// Resolve channel and tracking together from the cached Deployment image.
 	// No authoritative image outside a cluster means tracking stays unknown.

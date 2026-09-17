@@ -1,10 +1,13 @@
-// Package inference resolves how an agent reaches a model: which endpoint and
-// model an inference route should target, which gateway backs a given backend,
-// and what credentials that gateway expects. It also supervises the optional
-// bundled litellm proxy.
+// Package inference resolves where an agent's inference calls go and how they
+// authenticate: the LiteLLM endpoint/model route, the watsonx model gateway,
+// the bearer token and extra headers a gateway expects, and the supervision of
+// the optional bundled local LiteLLM proxy.
 //
-// This logic was extracted from cmd/hive's package main (#7238) so it is
-// testable and reusable outside the hive binary.
+// Extracted from cmd/hive's package main (#7238 stage 3). These are pure
+// resolvers over *config.Config plus one supervisor loop; none of them needs
+// anything from package main, and keeping them there meant the route
+// resolution that decides whether every agent call 502s could only be tested
+// from inside the binary.
 package inference
 
 import (
@@ -20,36 +23,28 @@ import (
 	"github.com/hivecommons/hive/pkg/watsonx"
 )
 
-const (
-	// LocalProxyPort is the loopback port the bundled litellm proxy
-	// listens on when governor.litellm.local_proxy is enabled. Distinct from
-	// proxy.InferenceTranslatePort (18444): agents always talk to the Go
-	// translator, which forwards to this local litellm instance.
-	LocalProxyPort = 18445
-	// LocalConfigPath is the user-provided litellm proxy config
-	// (model list, upstream keys) on the /data volume.
-	LocalConfigPath = "/data/litellm/config.yaml"
-	// RestartDelay is the pause before restarting a crashed local
-	// litellm proxy, to avoid a tight crash loop.
-	RestartDelay = 5 * time.Second
-)
-
-// LocalProxyURL is the endpoint the Go inference translator forwards
-// to when the local litellm proxy fallback is enabled.
-func LocalProxyURL() string {
-	return fmt.Sprintf("http://127.0.0.1:%d", LocalProxyPort)
-}
-
 // ResolveLiteLLMRoute resolves the endpoint and model an agent's
-// inference route should target.
+// inference route should use for the built-in "litellm" backend. It is the
+// whole route-install decision tree for that backend, lifted out of main() so
+// it can be unit-tested (#5460); main() calls it and keeps ownership of key,
+// CA bundle and logging.
 //
-// The local proxy overrides the configured endpoint when enabled. When no
-// litellm endpoint resolves at all, the named gateway for the agent's backend
-// is consulted: configuring inference purely through the Model Gateways tab
-// leaves the legacy block empty, and the key and CA bundle already resolve
-// from that gateway, so the endpoint must too — or NO route is installed and
-// every agent call dies "502 no inference route" while the Gateways tab Test
-// button happily passes (ains-validation/pocketmini, 2026-08-31 — #5393).
+// requestedModel is the model the agent asked for ("" when it named none). The
+// returned model is that request when non-empty, otherwise the default
+// inherited from whichever source supplied the endpoint.
+//
+// Resolution order — each step matches the behavior shipped in 231ca4b:
+//
+//  1. local_proxy: the Go translator forwards to the bundled litellm proxy on
+//     loopback, overriding any configured remote endpoint.
+//  2. the legacy governor.litellm block (HIVE_LITELLM_ENDPOINT or yaml), whose
+//     default_model supplies the model.
+//  3. the EXPLICIT gateway named by this backend. A hive configured only
+//     through the Model Gateways tab leaves the legacy block empty; the key
+//     and CA bundle already resolve from that gateway, so the endpoint must
+//     too, or NO route is installed and every agent call dies "502 no
+//     inference route" while the Gateways tab Test button happily passes
+//     (ains-validation/pocketmini, 2026-08-31 — #5393).
 //
 // ok is false when no source yields an endpoint: the caller must warn and
 // install NO route. It never invents an endpoint, and never returns a route
@@ -60,7 +55,7 @@ func ResolveLiteLLMRoute(cfg *config.Config, backend, requestedModel string) (en
 	model = requestedModel
 	endpoint = lc.ResolveEndpoint()
 	if lc.LocalProxy {
-		endpoint = LocalProxyURL()
+		endpoint = LocalLiteLLMProxyURL()
 	}
 	if endpoint == "" {
 		if gw := cfg.Governor.ResolveGateway(backend); gw != nil && gw.Endpoint != "" {
@@ -135,6 +130,26 @@ func ResolveGatewayAuth(gw *config.GatewayConfig, agentName, backend string, log
 	return apiKey, extraHeaders
 }
 
+const (
+	// LocalLiteLLMProxyPort is the loopback port the bundled litellm proxy
+	// listens on when governor.litellm.local_proxy is enabled. Distinct from
+	// proxy.InferenceTranslatePort (18444): agents always talk to the Go
+	// translator, which forwards to this local litellm instance.
+	LocalLiteLLMProxyPort = 18445
+	// localLiteLLMConfigPath is the user-provided litellm proxy config
+	// (model list, upstream keys) on the /data volume.
+	localLiteLLMConfigPath = "/data/litellm/config.yaml"
+	// localLiteLLMRestartDelay is the pause before restarting a crashed local
+	// litellm proxy, to avoid a tight crash loop.
+	localLiteLLMRestartDelay = 5 * time.Second
+)
+
+// LocalLiteLLMProxyURL is the endpoint the Go inference translator forwards
+// to when the local litellm proxy fallback is enabled.
+func LocalLiteLLMProxyURL() string {
+	return fmt.Sprintf("http://127.0.0.1:%d", LocalLiteLLMProxyPort)
+}
+
 // SuperviseLocalLiteLLM runs the bundled litellm binary as a local
 // Anthropic-compat translator fallback (governor.litellm.local_proxy: true),
 // restarting it on exit like StartInferenceTranslator's supervision.
@@ -150,10 +165,10 @@ func SuperviseLocalLiteLLM(ctx context.Context, logger *slog.Logger) {
 		}
 		cmd := exec.CommandContext(ctx, "litellm",
 			"--host", "127.0.0.1",
-			"--port", strconv.Itoa(LocalProxyPort),
-			"--config", LocalConfigPath)
+			"--port", strconv.Itoa(LocalLiteLLMProxyPort),
+			"--config", localLiteLLMConfigPath)
 		logger.Info("starting local litellm proxy",
-			"port", LocalProxyPort, "config", LocalConfigPath)
+			"port", LocalLiteLLMProxyPort, "config", localLiteLLMConfigPath)
 		if err := cmd.Run(); err != nil {
 			logger.Warn("local litellm proxy exited", "error", err)
 		} else {
@@ -162,24 +177,7 @@ func SuperviseLocalLiteLLM(ctx context.Context, logger *slog.Logger) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(RestartDelay):
+		case <-time.After(localLiteLLMRestartDelay):
 		}
 	}
-}
-
-// ParseEndpointList splits a comma-separated list of URLs into a slice.
-// A single URL is returned as a one-element slice.
-func ParseEndpointList(raw string) []string {
-	parts := strings.Split(raw, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			out = append(out, p)
-		}
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
 }

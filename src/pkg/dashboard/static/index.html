@@ -1840,6 +1840,11 @@
     .config-tab.active { color: var(--amber); border-bottom-color: var(--amber); }
     .config-body {
       flex: 1; overflow-y: auto; padding: 20px;
+      /* min-height:0 lets this flex child actually shrink, so it stays the
+         scroll container even on short tabs (#7250) — a flex item's default
+         min-height:auto would size it to its content and leave nothing to
+         scroll, handing the wheel straight to the page behind. */
+      min-height: 0;
       scrollbar-width: thin; scrollbar-color: var(--border) transparent;
       /* Scroll chaining containment (#2766): reaching the top/bottom of the
          modal body must not hand the wheel to the dashboard behind it. */
@@ -2547,7 +2552,15 @@
        DOM untouched, z-indexes retained at each pattern's rule (they
        encode stacking intent). The acmm JS-built overlay keeps its inline
        styles until the Phase 4 template sweep. */
-    body.modal-open { overflow: hidden; }
+    /* Scroll lock (#7250): the lock MUST be applied to the root element, not
+       just the body element. `html { overflow-x: hidden }` above makes the
+       root the viewport's scroll container, and the body's overflow only
+       propagates to the viewport while the root's overflow is `visible` — so a
+       body-only rule clips nothing and the dashboard keeps scrolling behind
+       the modal. This is why the #2766 and #4805 containment fixes did not
+       hold on tabs whose content fits the panel: with nothing to scroll in
+       .config-body, the wheel event chains straight to an unlocked root. */
+    html.modal-open, body.modal-open { overflow: hidden; }
     .gh-auth-overlay, .cred-dialog-overlay, .config-overlay, .hive-dialog-overlay, .nous-config-overlay, .acmm-dialog-overlay {
       position: fixed; inset: 0;
       background: rgba(0, 0, 0, 0.55);
@@ -3417,6 +3430,21 @@
     </div>
   </div>
 
+
+  <div id="hive-advice-section" style="margin-top: 16px; margin-bottom: 24px; display: none;">
+    <h2 style="margin-bottom: 8px;" class="section-label section-header-toggle" data-action="toggleSection" data-arg0="hive-advice-section"><span class="section-chevron">▼</span> 🧭 Hive Advice <span style="font-size:0.6em;font-weight:600;vertical-align:middle;padding:2px 7px;border-radius:10px;margin-left:6px;background:color-mix(in srgb, var(--muted) 18%, transparent);color:var(--muted)">weekly</span></h2>
+    <div class="section-body">
+      <div id="hive-advice-card" style="background:var(--card-bg);border:1px solid var(--border);border-radius:8px;padding:16px"></div>
+    </div>
+  </div>
+
+  <div id="fleet-report-section" style="margin-top: 16px; margin-bottom: 24px; display: none;">
+    <h2 style="margin-bottom: 8px;" class="section-label section-header-toggle" data-action="toggleSection" data-arg0="fleet-report-section"><span class="section-chevron">▼</span> 📡 Fleet Report Preview <span style="font-size:0.6em;font-weight:600;vertical-align:middle;padding:2px 7px;border-radius:10px;margin-left:6px;background:color-mix(in srgb, var(--muted) 18%, transparent);color:var(--muted)">dry-run</span></h2>
+    <div class="section-body">
+      <div id="fleet-report-card" style="background:var(--card-bg);border:1px solid var(--border);border-radius:8px;padding:16px"></div>
+    </div>
+  </div>
+
   <div id="acmm-reco-section" style="margin-top: 16px; margin-bottom: 24px; display: none;">
     <h2 style="margin-bottom: 8px;" class="section-label section-header-toggle" data-action="toggleSection" data-arg0="acmm-reco-section"><span class="section-chevron">▼</span> ⬆️ Ready to level up? <span style="font-size:0.6em;font-weight:600;vertical-align:middle;padding:2px 7px;border-radius:10px;margin-left:6px;background:color-mix(in srgb, var(--muted) 18%, transparent);color:var(--muted)">advisory</span></h2>
     <div class="section-body">
@@ -4135,7 +4163,15 @@
         }
         return false;
       }
-      function sync() { document.body.classList.toggle('modal-open', anyOverlayOpen()); }
+      // Toggle on BOTH the root and the body element (#7250):
+      // `html { overflow-x: hidden }` makes the root the viewport scroll
+      // container, so locking the body alone is a no-op and the page scrolls
+      // behind the modal.
+      function sync() {
+        var open = anyOverlayOpen();
+        document.documentElement.classList.toggle('modal-open', open);
+        document.body.classList.toggle('modal-open', open);
+      }
       // Overlays created after startup (kbShowModal's #kb-modal-overlay, the
       // acmm dialog) are appended once and then toggled via style.display, so
       // they need their own attribute observers too — otherwise closing one
@@ -10259,6 +10295,76 @@ function burnAreaChart() {
       applySectionCollapse('platform-section');
     }
 
+
+    function renderHiveAdvice(dto) {
+      const section = document.getElementById('hive-advice-section');
+      const card = document.getElementById('hive-advice-card');
+      if (!section || !card) return;
+      dto = dto || {};
+      const recs = Array.isArray(dto.recommendations) ? dto.recommendations : [];
+      if (recs.length === 0) { section.style.display = 'none'; return; }
+      const epoch = dto.epoch || {};
+      const days = Number.isFinite(Number(dto.nextReviewInDays)) ? Number(dto.nextReviewInDays) : 0;
+      const mode = escapeHtml(epoch.mode || 'IDLE');
+      const until = epoch.end ? new Date(epoch.end).toLocaleDateString() : '';
+      const review = `Frozen for ${mode}; next review in ${days} day${days === 1 ? '' : 's'}${until ? ' (' + escapeHtml(until) + ')' : ''}.`;
+      const items = recs.map((r, i) => {
+        r = r || {};
+        const sigs = Array.isArray(r.signals) ? r.signals : [];
+        const sigHtml = sigs.length ? `<div class="crit-cmp">signals: ${sigs.map((s) => `${escapeHtml(s.name || '')}=${escapeHtml(s.value || '')}`).join(', ')}</div>` : '';
+        return `<li class="reco-crit met">
+          <span class="mark">${i + 1}</span>
+          <div class="crit-body"><div class="crit-name">${escapeHtml(r.title || r.id || 'Recommendation')}</div>
+          <div class="crit-detail">${escapeHtml(r.rationale || '')}</div>${sigHtml}</div>
+        </li>`;
+      }).join('');
+      section.style.display = '';
+      card.innerHTML = `<div class="reco-level-flow"><span class="reco-badge raise">owner advice</span><span class="reco-rationale" style="margin-top:0">${review}</span></div><ul class="reco-checklist">${items}</ul>`;
+      applySectionCollapse('hive-advice-section');
+    }
+
+
+
+    function renderFleetReport(dto) {
+      const section = document.getElementById('fleet-report-section');
+      const card = document.getElementById('fleet-report-card');
+      if (!section || !card) return;
+      dto = dto || {};
+      const reports = Array.isArray(dto.reports) ? dto.reports : [];
+      const recoveries = Array.isArray(dto.recoveries) ? dto.recoveries : [];
+      if (reports.length === 0 && recoveries.length === 0) { section.style.display = 'none'; return; }
+      const dryRun = dto.dry_run !== false;
+      const mk = (r, i, recovered) => {
+        r = r || {};
+        const evidence = Array.isArray(r.evidence) ? r.evidence : [];
+        const ev = evidence[0] || {};
+        const trigger = r.trigger || (r.criterion ? 'acmm-shortfall' : 'hive-code-defect');
+        const subject = r.criterion || trigger;
+        const title = recovered ? 'Recovered: ' : '';
+        const periodic = ev.periodicity ? `; periodic ${escapeHtml(ev.periodicity || '')}` : '';
+        return `<li class="reco-crit ${recovered ? 'met' : 'unmet'}">
+          <span class="mark">${recovered ? '✓' : i + 1}</span>
+          <div class="crit-body"><div class="crit-name">${title}${escapeHtml(subject)}</div>
+          <div class="crit-detail">${escapeHtml(ev.severity || 'medium')} ${escapeHtml(ev.component || 'hive')} / ${escapeHtml(ev.error_class || 'unknown')}; count ${escapeHtml(String(ev.count || 0))} in ${escapeHtml(ev.window || 'n/a')}${periodic}</div>
+          <div class="crit-cmp">trigger: ${escapeHtml(trigger)}; fingerprint: ${escapeHtml(r.fingerprint || '')}; instance: ${escapeHtml(r.instance_id || '')}</div></div>
+        </li>`;
+      };
+      const reportHtml = reports.map((r, i) => mk(r, i, false)).join('');
+      const recoveryHtml = recoveries.map((r, i) => mk(r, i, true)).join('');
+      section.style.display = '';
+      card.innerHTML = `<div class="reco-level-flow"><span class="reco-badge ${dryRun ? 'stay' : 'raise'}">${dryRun ? 'dry-run preview' : 'filing enabled'}</span><span class="reco-rationale" style="margin-top:0">Persistent ACMM shortfalls and hive-code defect symptoms. Reports contain shape-only scrubbed evidence.</span></div><ul class="reco-checklist">${reportHtml}${recoveryHtml}</ul>`;
+      applySectionCollapse('fleet-report-section');
+    }
+
+    async function fetchHiveAdvice() {
+      try {
+        const r = await fetch('/api/hive-advice');
+        if (!r.ok) return;
+        const dto = await r.json();
+        renderHiveAdvice(dto);
+      } catch (e) { /* transient — leave last render in place */ }
+    }
+
     function renderACMMReco(rec) {
       const section = document.getElementById('acmm-reco-section');
       const card = document.getElementById('acmm-reco-card');
@@ -10576,7 +10682,7 @@ function burnAreaChart() {
 
     // Prime both panels and poll them on a modest independent interval. Do not
     // block initial paint: these run after the main poll is already wired.
-    function v4RefreshPanels() { fetchACMMReco(); fetchLifecycle(); fetchApprovals(); }
+    function v4RefreshPanels() { fetchHiveAdvice(); fetchACMMReco(); fetchLifecycle(); fetchApprovals(); }
     v4RefreshPanels();
     setInterval(v4RefreshPanels, V4_PANELS_POLL_MS);
 
@@ -14197,13 +14303,15 @@ function burnAreaChart() {
       }
       updateContributorBadge(data.contributorPool || null);
       renderPlatform(data.platform || null);
+      renderHiveAdvice(data.hiveAdvice || null);
+      renderFleetReport(data.fleetReport || null);
       renderSystemGauges(data.systemResources || null);
       ocUpdateSidebarAgents();
       renderDebugSection();
       // Restore persisted collapsed state for all collapsible sections
       const COLLAPSIBLE_SECTION_IDS = [
         'advisory-section', 'repos-section', 'beads-section', 'acmm-eval-section',
-        'platform-section', 'audit-section', 'nous-section', 'inception-section',
+        'platform-section', 'fleet-report-section', 'audit-section', 'nous-section', 'inception-section',
         'knowledge-section', 'contributors-section', 'debug-section', 'logs-section',
         'agents-section', 'faq-section'
       ];
@@ -17170,6 +17278,19 @@ function burnAreaChart() {
       return details.join('\n');
     }
 
+    // Label for the commit the "N behind" readout is measured against (#7262):
+    // the hub-reported target (this spoke's release channel or branch head)
+    // when the hub delivered one, else the tip of this build's own branch.
+    // Never a hard-wired "Stable v4 tip" — a v5 spoke is not behind v4.
+    function upgradeTargetLabel(v) {
+      var t = v && v.target;
+      if (!t) return 'Upstream tip';
+      var branch = t.branch || 'upstream';
+      if (t.channel) return 'Hub target (' + branch + ' via :' + t.channel + ')';
+      if (t.source === 'hub') return 'Hub target (' + branch + ' tip)';
+      return branch + ' tip';
+    }
+
     async function fetchGitVersion() {
       try {
         const res = await fetch('/api/version');
@@ -17209,7 +17330,7 @@ function burnAreaChart() {
           html += ` <span class="git-behind" title="${escapeHtml(umTitle)}">⟳ auto-update retrying ${escapeHtml(String(um.attempts))}/${escapeHtml(String(um.maxAttempts))}</span>`;
         }
         const commitsBehindText = v.commitsBehind != null && v.commitsBehind > 0
-          ? ` <span class="git-behind" title="Current: ${escapeHtml(v.short || '?')} → Stable v4 tip: ${escapeHtml(v.stableV4Short || '?')}">${escapeHtml(String(v.commitsBehind))} behind</span>`
+          ? ` <span class="git-behind" title="Current: ${escapeHtml(v.short || '?')} → ${escapeHtml(upgradeTargetLabel(v))}: ${escapeHtml(v.stableV4Short || '?')}">${escapeHtml(String(v.commitsBehind))} behind</span>`
           : (v.commitsBehind == null && v.stableV4Hash && String(v.short || '').toLowerCase() !== String(v.stableV4Short || '').toLowerCase()
             // commitsBehind is null for two unrelated reasons (#4804). If the
             // stable tip has no published image, that is a KNOWN state — there
@@ -17218,8 +17339,8 @@ function burnAreaChart() {
             // contradicts the ✓. Only a genuine compare failure keeps the "?".
             // Strict === false so older servers without the field keep "?".
             ? (v.stableV4ImageReady === false
-              ? ` <span style="color:var(--muted)" title="Stable v4 tip ${escapeHtml(v.stableV4Short || '?')} has no published image yet — nothing to upgrade to">tip not built yet</span>`
-              : ` <span class="git-behind" title="Could not compare this commit with stable v4 tip ${escapeHtml(v.stableV4Short || '?')}">? behind</span>`)
+              ? ` <span style="color:var(--muted)" title="${escapeHtml(upgradeTargetLabel(v))} ${escapeHtml(v.stableV4Short || '?')} has no published image yet — nothing to upgrade to">tip not built yet</span>`
+              : ` <span class="git-behind" title="Could not compare this commit with ${escapeHtml(upgradeTargetLabel(v))} ${escapeHtml(v.stableV4Short || '?')}">? behind</span>`)
             : '');
         if (_upgradeInProgress && v.hash !== _upgradeTargetHash) {
           html += ` <span class="git-behind" title="Upgrading to ${escapeHtml(v.latestShort || '?')}">⬆ upgrading</span>`;
@@ -18140,7 +18261,7 @@ function burnAreaChart() {
         if (tabId === 'Hub') { fetchQueueCount(); fetchAutoUpdateStatus(); }
         // The escalation breaker lives at the top level of hive.yaml, so the
         // Health tab loads it from its own endpoint.
-        if (tabId === 'Health') loadEscalationConfig();
+        if (tabId === 'Health') { loadEscalationConfig(); loadWatchdogActivity(); }
         // Opening the Model Gateways tab loads the live gateway list and
         // renders the manager into its container.
         if (tabId === 'Model Gateways') {
@@ -18289,7 +18410,7 @@ function burnAreaChart() {
         case 'Thresholds': return renderGovThresholds(d);
         case 'Labels': return renderGovLabels(d.labels || [], d.holdLabels || [], d.requireLabels || []);
         case 'Repos': return renderGovRepos(d.repos || []);
-        case 'Budget': return renderGovBudget(d.budget || {});
+        case 'Budget': return renderGovBudget(d.budget || {}, d.health || {});
         case 'Notifications': return renderGovNotifications(d.notifications || {});
         case 'Health': return renderGovHealth(d.health || {});
         case 'Sensing': return renderGovSensing(d.sensing || {});
@@ -19822,13 +19943,13 @@ function burnAreaChart() {
 
         <hr style="border-color:var(--border);margin:16px 0">
         <h4 style="font-size:0.8rem;color:var(--muted);margin:0 0 8px">Auto-update</h4>
-        <div class="config-toggle">
-          <div class="config-toggle-switch ${hub.auto_upgrade ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="hub" data-key="auto_upgrade"></div>
-          <span class="config-toggle-label">Automatic Updates <span class="config-info">i<span class="config-tooltip">When on, the hub rolls this hive forward to new versions automatically on the configured schedule. When off, upgrades are applied manually from the version badge at the top of the dashboard.</span></span></span>
+        <div class="config-toggle" id="hub-autoupdate-toggle-row">
+          <div class="config-toggle-switch ${hub.auto_upgrade ? 'on' : ''}" id="hub-autoupdate-toggle" data-action="toggleConfigSwitch" data-section="hub" data-key="auto_upgrade"></div>
+          <span class="config-toggle-label">Automatic Updates <span id="hub-autoupdate-managed-by"></span><span class="config-info">i<span class="config-tooltip" id="hub-autoupdate-toggle-tip">When on, this hive is rolled forward to new versions automatically on the configured schedule. When off, upgrades are applied manually from the version badge at the top of the dashboard. On a hub-managed hive the hub owns this setting and the switch is read-only.</span></span></span>
         </div>
         <div class="config-field">
-          <label>Update schedule <span class="config-info">i<span class="config-tooltip">The cadence the hub applies to this hive's auto-updates. Managed hub-side; shown here read-only. "Unknown" means this spoke has not been told its schedule.</span></span></label>
-          <div style="font-size:0.78rem;color:var(--text)">${esc(autoUpdatePeriodLabel(hub.auto_upgrade_mode))}</div>
+          <label>Update schedule <span class="config-info">i<span class="config-tooltip">The cadence applied to this hive's auto-updates, as reported by the hub on every heartbeat. "Unknown" means the hub has not yet told this spoke its schedule.</span></span></label>
+          <div style="font-size:0.78rem;color:var(--text)" id="hub-autoupdate-schedule">${esc(autoUpdatePeriodLabel(hub.auto_upgrade_mode))}</div>
         </div>
         <div id="hub-autoupdate-status" style="margin-top:6px;font-size:0.78rem;color:var(--muted)">Loading auto-update status…</div>
 
@@ -19965,7 +20086,36 @@ function burnAreaChart() {
         case 'instant': return 'Instant — as soon as a new version is available';
         case 'daily': return 'Daily';
         case 'weekly': return 'Weekly';
-        default: return 'Unknown — managed by the hub';
+        default: return 'Unknown — not yet reported by the hub';
+      }
+    }
+
+    // Reflect the hub's upgrade policy (#7262) onto the Hub tab controls. The
+    // spoke-local hub.auto_upgrade toggle is only the policy when the hub says
+    // the spoke manages its own upgrades (or nobody does); on a hub-managed
+    // hive the hub owns it, so lock the switch and label who owns it.
+    function applyAutoUpdatePolicyToHubTab(au) {
+      var sw = document.getElementById('hub-autoupdate-toggle');
+      var who = document.getElementById('hub-autoupdate-managed-by');
+      var sched = document.getElementById('hub-autoupdate-schedule');
+      if (!au || au.policySource !== 'hub') return;
+      if (sw) {
+        sw.classList.toggle('on', !!au.enabled);
+        var hubOwned = au.managedBy === 'hub';
+        sw.style.pointerEvents = hubOwned ? 'none' : '';
+        sw.style.opacity = hubOwned ? '0.55' : '';
+        sw.title = hubOwned ? 'Managed by the hub — change it from the hub dashboard' : '';
+      }
+      if (who) {
+        var label = au.managedBy === 'hub' ? 'managed by the hub'
+          : au.managedBy === 'spoke' ? 'self-managed on hub instruction'
+          : 'not managed';
+        if (au.paused) label += ', paused fleet-wide';
+        who.textContent = '(' + label + ') ';
+        who.style.color = 'var(--muted)';
+      }
+      if (sched) {
+        sched.textContent = autoUpdatePeriodLabel(au.period) + (au.paused ? ' — paused fleet-wide by a hub admin' : '');
       }
     }
 
@@ -19987,15 +20137,24 @@ function burnAreaChart() {
         switch (au.state) {
           case 'up_to_date': color = 'var(--green)'; icon = '✓'; break;
           case 'disabled': color = 'var(--muted)'; icon = '⊘'; break;
+          case 'paused': color = 'var(--muted)'; icon = '⏸'; break;
           case 'behind': color = 'var(--yellow, #d4a017)'; icon = '⬆'; break;
           case 'retrying': color = 'var(--yellow, #d4a017)'; icon = '⟳'; break;
           case 'failed': color = 'var(--red)'; icon = '⚠'; break;
           case 'unknown': default: color = 'var(--yellow, #d4a017)'; icon = '❔'; break;
         }
+        applyAutoUpdatePolicyToHubTab(au);
         var html = '<div style="color:' + color + ';font-weight:600">' + icon + ' ' + escapeHtml(au.detail || au.state || 'unknown') + '</div>';
         var rows = '';
         if (au.currentCommit) rows += '<div>Current commit: <code>' + escapeHtml(au.currentCommit) + '</code></div>';
-        if (au.targetBranch) rows += '<div>Target line: <code>' + escapeHtml(au.targetBranch) + (au.targetCommit ? '</code> (tip <code>' + escapeHtml(au.targetCommit) + '</code>)' : '</code>') + '</div>';
+        if (au.targetBranch || au.targetChannel) {
+          var line = au.targetBranch ? '<code>' + escapeHtml(au.targetBranch) + '</code>' : '';
+          if (au.targetChannel) line += (line ? ' via ' : '') + '<code>:' + escapeHtml(au.targetChannel) + '</code> channel';
+          var tipWord = au.targetChannel ? 'channel at' : 'tip';
+          rows += '<div>Target line: ' + line + (au.targetCommit ? ' (' + tipWord + ' <code>' + escapeHtml(au.targetCommit) + '</code>)' : '') + '</div>';
+        }
+        if (au.policySource === 'hub') rows += '<div>Policy source: the hub (heartbeat)</div>';
+        else rows += '<div>Policy source: this spoke\'s local config (the hub has not reported a policy)</div>';
         if (au.commitsBehind != null) rows += '<div>Commits behind: ' + escapeHtml(String(au.commitsBehind)) + '</div>';
         if (au.lastAttemptAt) rows += '<div>Last attempt: ' + escapeHtml(au.lastAttemptAt) + '</div>';
         if (au.lastError) rows += '<div style="color:var(--red)">Last error: ' + escapeHtml(au.lastError) + '</div>';
@@ -21435,6 +21594,12 @@ function burnAreaChart() {
     // ── Governor Tab Renderers ──
     function renderGovGeneral() {
       const currentId = (window._lastStatus || {}).hiveId || '';
+      // Hive ID edit lock (#7247). The server decides; the browser cannot tell
+      // whether this hive is hub-managed. Default to LOCKED when the field is
+      // absent so an older spoke that predates this flag fails safe (offering
+      // an edit that always 409s is worse than hiding an available one).
+      const hiveIdEditable = (window._lastStatus || {}).hiveIdEditable !== false;
+      const hiveIdLockReason = (window._lastStatus || {}).hiveIdLockReason || '';
       const currentACMMLevel = (window._lastStatus || {}).acmmLevel || 0;
       const attrib = (_configState.data || {}).attribution || {};
       const genAdv = (_configState.data || {}).general_advanced || {};
@@ -21459,10 +21624,10 @@ function burnAreaChart() {
         <div class="config-field">
           <label>Hive ID <span class="config-info">i<span class="config-tooltip">Unique identifier for this hive instance. Stamped into beads and available as \${HIVE_ID} in agent CLAUDE.md templates. Persists across container restarts.</span></span></label>
           <div style="display:flex;gap:8px;align-items:center">
-            <input type="text" id="cfg-hive-id" value="${esc(currentId)}" placeholder="hive-xxxxxxxx" style="flex:1" data-input-action="markDirty" data-arg0="general" data-arg1="hiveId" data-arg-types="s,s,v">
-            <button data-action="saveHiveId" style="font-size:0.75rem;padding:6px 14px;background:var(--green);color:var(--bg);border:none;border-radius:6px;cursor:pointer;font-weight:600">Save</button>
+            <input type="text" id="cfg-hive-id" value="${esc(currentId)}" placeholder="hive-xxxxxxxx" style="flex:1" ${hiveIdEditable ? '' : 'readonly disabled'} data-input-action="markDirty" data-arg0="general" data-arg1="hiveId" data-arg-types="s,s,v">
+            ${hiveIdEditable ? '<button data-action="saveHiveId" style="font-size:0.75rem;padding:6px 14px;background:var(--green);color:var(--bg);border:none;border-radius:6px;cursor:pointer;font-weight:600">Save</button>' : '<span style="font-size:0.7rem;color:var(--muted);white-space:nowrap">&#128274; Hub-managed</span>'}
           </div>
-          <span style="font-size:0.65rem;color:var(--muted);margin-top:4px;display:block">Format: hive-adjective-noun (e.g. hive-bold-hawk). Changes take effect immediately.</span>
+          <span style="font-size:0.65rem;color:var(--muted);margin-top:4px;display:block">${hiveIdEditable ? 'Format: hive-adjective-noun (e.g. hive-bold-hawk). Lowercase letters, digits and hyphens only. Changes take effect immediately.' : esc(hiveIdLockReason)}</span>
         </div>
         <div class="config-field">
           <label>Maturity Level <span class="config-info">i<span class="config-tooltip">ACMM (AI-native Continuous Maturity Model) level — controls which agents run and how autonomous they are, from advisory-only (L1) to fully autonomous (L6).</span></span></label>
@@ -21618,6 +21783,14 @@ function burnAreaChart() {
     async function saveHiveId() {
       const input = document.getElementById('cfg-hive-id');
       if (!input) return;
+      // Second line of defence (#7247): the control is not rendered when the
+      // ID is hub-managed, but a stale DOM or a console call could still reach
+      // here. The server refuses with 409 regardless; this just gives the
+      // operator the reason instead of a generic failure toast.
+      if ((window._lastStatus || {}).hiveIdEditable === false) {
+        showToast((window._lastStatus || {}).hiveIdLockReason || 'Hive ID is managed by the hub', 'error');
+        return;
+      }
       const newId = input.value.trim();
       if (!newId) { showToast('Hive ID cannot be empty', 'error'); return; }
       try {
@@ -21699,14 +21872,14 @@ function burnAreaChart() {
       const sPct = (s / THRESH_BAR_MAX) * 100;
       return `
         <div class="config-field" style="margin-bottom:20px">
-          <label title="Whether governor mode is computed from the aggregate hive queue or each repo's own actionable queue.">Cadence mode scope <span class="config-info">i<span class="config-tooltip">Aggregate preserves the current one-mode behavior. Per repo computes each successfully scanned repo's mode from its own actionable queue; hive-wide agents continue using the aggregate mode.</span></span></label>
+          <label>Cadence mode scope <span class="config-info">i<span class="config-tooltip">Aggregate preserves the current one-mode behavior. Per repo computes each successfully scanned repo's mode from its own actionable queue; hive-wide agents continue using the aggregate mode.</span></span></label>
           <select id="cfg-cadence-scope" data-change-action="markDirty" data-arg0="cadence-scope" data-arg1="cadenceScope" data-arg-types="s,s,v">
             ${[['aggregate', 'Aggregate (default)'], ['per_repo', 'Per repo']]
               .map(([v, label]) => `<option value="${v}" ${activeScope === v ? 'selected' : ''}>${label}</option>`).join('')}
           </select>
         </div>
         <div class="config-field" style="margin-bottom:20px">
-          <label title="How issue/PR thresholds scale as repo count grows. Square-root is recommended for large hives.">Multi-repo threshold scaling <span class="config-info">i<span class="config-tooltip">How issue/PR thresholds scale as repo count grows. Square-root is recommended for large hives.</span></span></label>
+          <label>Multi-repo threshold scaling <span class="config-info">i<span class="config-tooltip">How issue/PR thresholds scale as repo count grows. Square-root is recommended for large hives.</span></span></label>
           <select id="cfg-threshold-scaling" data-change-action="markDirty" data-arg0="threshold-scaling" data-arg1="thresholdScaling" data-arg-types="s,s,v" ${activeScope === 'per_repo' ? 'disabled style="opacity:0.6"' : ''}>
             ${[['linear', 'Linear'], ['sqrt', 'Square-root (default)'], ['none', 'None']]
               .map(([v, label]) => `<option value="${v}" ${activeScaling === v ? 'selected' : ''}>${label}</option>`).join('')}
@@ -21983,8 +22156,9 @@ function burnAreaChart() {
       renderConfigTab('Repos');
     }
 
-    function renderGovBudget(b) {
+    function renderGovBudget(b, h) {
       loadBudgetExemptions();
+      h = h || {};
       return `
         <div class="config-field-row">
           <div class="config-field"><label>Total Tokens <span class="config-info">i<span class="config-tooltip">Maximum token budget for the period. When usage approaches this limit, the governor will downgrade models or skip low-priority kicks. Set to 0 to disable budget tracking.</span></span></label><input type="number" value="${b.totalTokens || 0}" data-change-action="gh43"></div>
@@ -21997,6 +22171,10 @@ function burnAreaChart() {
         <div class="config-field" style="margin-top:14px">
           <label>Per-Agent Exemptions <span class="config-info">i<span class="config-tooltip">Exempt agents keep getting kicked even while an exhausted budget suppresses everyone else. Toggles apply immediately (no Save needed). The governor panel's global "ignore budget" checkbox bypasses enforcement for ALL agents; these exemptions are per-agent.</span></span></label>
           <div id="budget-exempt-list"><div style="color:var(--muted);font-size:0.75rem;padding:4px 0">Loading exemptions...</div></div>
+        </div>
+        <div class="config-toggle" style="margin-top:14px">
+          <div class="config-toggle-switch ${h.modelLock ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="health" data-key="modelLock"></div>
+          <span class="config-toggle-label">Model Lock <span class="config-info">i<span class="config-tooltip">When enabled, the governor will not automatically change any agent's model (e.g. downgrading from Opus to Sonnet during budget pressure). Agents keep their configured model regardless of budget status. Does NOT prevent manual model changes or agent kicks.</span></span></span>
         </div>`;
     }
 
@@ -22194,18 +22372,20 @@ function burnAreaChart() {
       renderConfigTab('Stats');
     }
 
+    // Health tab (#7251). "Healthcheck Interval" and "Restart Cooldown" used to
+    // head this tab; both were DEAD -- fully plumbed through config, validation
+    // and persistence, but read by no runtime loop. An operator lowering the
+    // interval to 60s got no change, while the cadence that actually governs
+    // liveness sweeps sat further down the same tab under Agent Watchdog.
+    // They are gone, and the watchdog -- the system that really runs -- now
+    // leads the tab, with the escalation breaker after it.
+    //
+    // Model Lock moved to the Budget tab: it disables budget-pressure model
+    // downgrades, which is a budget behaviour, not a health one.
     function renderGovHealth(h) {
       return `
-        <div class="config-field-row">
-          <div class="config-field"><label>Healthcheck Interval (sec) <span class="config-info">i<span class="config-tooltip">How often the governor checks each agent's tmux session for liveness (responding to prompts, no crash indicators). Default is 300 seconds (5 minutes).</span></span></label><input type="number" value="${h.healthcheckInterval || 300}" data-change-action="gh46"></div>
-          <div class="config-field"><label>Restart Cooldown (sec) <span class="config-info">i<span class="config-tooltip">Minimum time between restart attempts for the same agent. Prevents restart loops when an agent keeps crashing. Default is 60 seconds.</span></span></label><input type="number" value="${h.restartCooldown || 60}" data-change-action="gh47"></div>
-        </div>
-        <div class="config-toggle">
-          <div class="config-toggle-switch ${h.modelLock ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="health" data-key="modelLock"></div>
-          <span class="config-toggle-label">Model Lock <span class="config-info">i<span class="config-tooltip">When enabled, the governor will not automatically change any agent's model (e.g. downgrading from Opus to Sonnet during budget pressure). Agents keep their configured model regardless of budget status. Does NOT prevent manual model changes or agent kicks.</span></span></span>
-        </div>
-        ${renderEscalationSection(_configState.data.escalation)}
-        ${renderWatchdogSection(h.watchdog)}`;
+        ${renderWatchdogSection(h.watchdog)}
+        ${renderEscalationSection(_configState.data.escalation)}`;
     }
 
     // Watchdog section on the Health tab (RFC #4665). It lives beside the
@@ -22256,10 +22436,12 @@ function burnAreaChart() {
           Observes each agent's actual terminal rather than its configured state, and can restart agents that are running but dead.
         </p>
         ${pausedBanner}${healBanner}${observeBanner}
+        ${renderWatchdogActivityShell()}
         <div class="config-field-row">
           <div class="config-field">
             <label>Mode <span class="config-info">i<span class="config-tooltip">How much authority the watchdog has over your agents. Start in Observe, read the Audit Log, then move to Heal.</span></span></label>
             <select data-change-action="markDirty" data-arg0="health" data-arg1="watchdogMode" data-arg-types="s,s,s">${opts}</select>
+            <div id="watchdog-promotion-hint" style="font-size:0.7rem;margin-top:4px;min-height:1em"></div>
           </div>
           <div class="config-field">
             <label>Probe interval (sec) <span class="config-info">i<span class="config-tooltip">Minimum seconds between watchdog sweeps. Each sweep captures one terminal per agent, so this is the main throttle on its cost.</span></span></label>
@@ -22281,6 +22463,215 @@ function burnAreaChart() {
           Restart backoff ladder: <code style="font-family:var(--font-mono)">${ladder}</code>
           <span style="opacity:0.8">— fixed progression; the last step is the cap.</span>
         </div>`;
+    }
+
+    // ── Watchdog activity strip (#7254) ──────────────────────────────────────
+    // "Review the watchdog-*-observed entries in the Audit Log, then switch to
+    // Heal" is only a data-driven decision if the data is on the page. The
+    // strip under the mode banner shows how many actions the watchdog took
+    // (heal) or WOULD have taken (observe) in the trailing 30 days, a daily
+    // histogram of them, the current liveness verdict per probed agent, and —
+    // in observe — whether anything in the window argues against promotion.
+    //
+    // It is filled in place (loadConvergenceSoak pattern) rather than by
+    // re-rendering the tab, so a fetch landing after the operator has touched
+    // the mode select never repaints their unsaved edit away.
+    let _watchdogActivity = null;      // last GET /api/watchdog/activity body
+    let _watchdogActivityAt = 0;       // epoch ms of that fetch; 0 = never / invalidated
+    let _watchdogActivityErr = '';     // last fetch failure, '' when fine
+    let _watchdogActivityLoading = false;
+    const WATCHDOG_ACTIVITY_DAYS = 30;
+    const WATCHDOG_ACTIVITY_TTL_MS = 60000;
+
+    // Element ids the shell renders and fillWatchdogActivity targets. Named
+    // once so the static-HTML guard and the fill code cannot drift apart.
+    const WATCHDOG_ACTIVITY_IDS = {
+      strip: 'watchdog-activity',
+      count: 'watchdog-activity-count',
+      spark: 'watchdog-activity-spark',
+      actions: 'watchdog-activity-actions',
+      liveness: 'watchdog-liveness',
+      hint: 'watchdog-promotion-hint',
+    };
+
+    function invalidateWatchdogActivity() { _watchdogActivityAt = 0; }
+
+    // renderWatchdogActivityShell is the synchronous placeholder: the strip's
+    // frame with its element ids, awaiting the fetch. The mode is NOT read from
+    // config here — the readout reports the mode actually in force (kill
+    // switch applied), which is the one the headline must describe.
+    function renderWatchdogActivityShell() {
+      const I = WATCHDOG_ACTIVITY_IDS;
+      return `
+        <div id="${I.strip}" style="border:1px solid var(--line);border-radius:6px;padding:10px 12px;margin-bottom:12px">
+          <div style="display:flex;align-items:baseline;justify-content:space-between;gap:8px;flex-wrap:wrap">
+            <div style="font-size:0.72rem;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;color:var(--muted)">Watchdog activity · last ${WATCHDOG_ACTIVITY_DAYS} d</div>
+            <div id="${I.spark}"></div>
+          </div>
+          <div id="${I.count}" style="font-size:0.85rem;margin-top:4px;color:var(--muted)">Loading…</div>
+          <div id="${I.actions}" style="font-size:0.7rem;margin-top:4px"></div>
+          <div id="${I.liveness}" style="margin-top:8px"></div>
+        </div>`;
+    }
+
+    // loadWatchdogActivity fetches the readout when the Health tab opens and
+    // fills the strip once it lands. Cached for a minute: every re-render of
+    // the tab calls this, and the strip is a file scan server-side.
+    async function loadWatchdogActivity() {
+      const fresh = _watchdogActivityAt && Date.now() - _watchdogActivityAt < WATCHDOG_ACTIVITY_TTL_MS;
+      if (fresh) { fillWatchdogActivity(); return; }
+      if (_watchdogActivityLoading) return;
+      _watchdogActivityLoading = true;
+      try {
+        const res = await fetch(`/api/watchdog/activity?days=${WATCHDOG_ACTIVITY_DAYS}`);
+        if (!res.ok) throw new Error(res.status === 403 ? 'read-write access is required to see watchdog activity' : `HTTP ${res.status}`);
+        _watchdogActivity = await res.json();
+        _watchdogActivityErr = '';
+      } catch (err) {
+        _watchdogActivity = null;
+        _watchdogActivityErr = err && err.message ? err.message : String(err);
+      } finally {
+        _watchdogActivityAt = Date.now();
+        _watchdogActivityLoading = false;
+      }
+      fillWatchdogActivity();
+    }
+
+    // Audit action short names (the `watchdog-` prefix stripped), as the API
+    // keys byAction. Base names carry severity; the `-observed` twin of each
+    // is the same decision, not taken.
+    const WATCHDOG_ACTION_LABELS = {
+      'restart': 'restart',
+      'crashloop-pause': 'crash-loop pause',
+      'giveup': 'give-up',
+      'healthy-reset': 'healthy reset',
+    };
+    function watchdogActionBase(key) { return String(key).replace(/-observed$/, ''); }
+    function watchdogActionObserved(key) { return /-observed$/.test(String(key)); }
+    function watchdogActionSevere(key) {
+      const b = watchdogActionBase(key);
+      return b === 'crashloop-pause' || b === 'giveup';
+    }
+    // Colour by severity (#7254): observed = muted, restart = amber,
+    // pause/give-up = red. A pause the watchdog only WOULD have taken is still
+    // red — it is the verdict that decides promotion, taken or not.
+    function watchdogActionColor(key) {
+      if (watchdogActionSevere(key)) return 'var(--red)';
+      if (watchdogActionObserved(key)) return 'var(--muted)';
+      if (watchdogActionBase(key) === 'restart') return 'var(--yellow)';
+      return 'var(--muted)';
+    }
+    // The strip's overall colour is its worst action's colour.
+    function watchdogActivityColor(a) {
+      const keys = Object.keys(a.byAction || {}).filter(k => (a.byAction[k] || 0) > 0);
+      if (keys.some(watchdogActionSevere)) return 'var(--red)';
+      if (keys.some(k => !watchdogActionObserved(k) && watchdogActionBase(k) === 'restart')) return 'var(--yellow)';
+      return 'var(--muted)';
+    }
+
+    // watchdogActivitySparkSvg draws the daily histogram through the existing
+    // axis sparkline (fact/cost pattern) so it reads like every other 30-day
+    // trend on the dashboard. axisSparkSvg is used rather than sparkSvg
+    // because sparkSvg carries the last non-zero value forward through zero
+    // days — right for a gauge, wrong for a count of events where a zero day
+    // IS the news.
+    function watchdogActivitySparkSvg(a) {
+      const daily = Array.isArray(a.daily) ? a.daily : [];
+      if (daily.length < 2) return '';
+      const color = watchdogActivityColor(a);
+      const verb = a.acting ? 'taken' : 'would have been taken';
+      return axisSparkSvg(daily, d => d.count || 0, d => Date.parse(d.date + 'T00:00:00Z'), fmtSparkVal, color,
+        `Watchdog actions per day (last ${a.days} d) — actions ${verb}; vertical axis: actions/day, horizontal axis: date`);
+    }
+
+    // watchdogLivenessTable renders the per-agent verdict: the pane class the
+    // reconciler last saw (or crash-loop when it paused the agent), how long
+    // the agent has been in it, and the two other condition axes.
+    function watchdogLivenessTable(agents) {
+      if (!Array.isArray(agents) || !agents.length) {
+        return `<div style="font-size:0.7rem;color:var(--muted)">No agent has been probed yet — liveness appears after the watchdog's first sweep.</div>`;
+      }
+      const stateColor = s =>
+        s === 'ready' ? 'var(--ok, var(--green))'
+        : s === 'crash-loop' ? 'var(--red)'
+        : (s === 'shell-prompt' || s === 'stuck-overlay' || s === 'no-output' || s === 'no-session') ? 'var(--yellow)'
+        : 'var(--muted)';
+      const axis = (label, v) => v
+        ? `<span title="${esc(label)}: ${esc(v)}" style="color:${v === 'True' ? 'var(--ok, var(--green))' : v === 'False' ? 'var(--danger, var(--red))' : 'var(--muted)'};margin-left:6px">${v === 'True' ? '✓' : v === 'False' ? '✕' : '?'} ${esc(label)}</span>`
+        : '';
+      const rows = agents.map(ag => {
+        const since = ag.since ? relativeAge(ag.since) : '';
+        const sinceCell = since ? `<span style="color:var(--muted)" title="${esc(ag.since)}">for ${esc(since.replace(/ ago$/, ''))}</span>` : '';
+        const paused = ag.paused && ag.state !== 'crash-loop' ? `<span style="color:var(--muted);margin-left:6px">(paused)</span>` : '';
+        return `<div style="display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;padding:2px 0" title="${esc(ag.message || '')}">
+            <span style="min-width:90px;font-weight:600">${esc(ag.name)}</span>
+            <span style="color:${stateColor(ag.state)};font-family:var(--font-mono)">${esc(ag.state || 'unknown')}</span>
+            ${sinceCell}${paused}
+            <span>${axis('auth', ag.authenticated)}${axis('producing', ag.producing)}</span>
+          </div>`;
+      }).join('');
+      return `<div style="font-size:0.72rem;color:var(--muted);margin-bottom:2px">Per-agent liveness (current watchdog verdict)</div><div style="font-size:0.72rem">${rows}</div>`;
+    }
+
+    // watchdogPromotionHintHTML is the Observe → Heal verdict beside the mode
+    // select. In observe: "Safe to promote" or the reason it is not. In heal:
+    // when the watchdog last acted, so a healing hive that has done nothing for
+    // weeks is visibly quiet rather than silently trusted.
+    function watchdogPromotionHintHTML(a) {
+      if (a.mode === 'observe' && a.promotion) {
+        const ok = !!a.promotion.safe;
+        return `<span style="color:${ok ? 'var(--ok, var(--green))' : 'var(--yellow)'};font-weight:600">${ok ? 'Safe to promote to Heal' : 'Not yet safe to promote'}</span>
+          <span style="color:var(--muted)"> — ${esc(a.promotion.reason || '')}</span>`;
+      }
+      if (a.mode === 'heal') {
+        return a.lastActionAt
+          ? `<span style="color:var(--muted)">Last action: <span title="${esc(a.lastActionAt)}">${esc(WATCHDOG_ACTION_LABELS[a.lastAction] || a.lastAction || 'action')} ${esc(relativeAge(a.lastActionAt))}</span></span>`
+          : `<span style="color:var(--muted)">No action taken in ${a.days} d.</span>`;
+      }
+      return '';
+    }
+
+    // fillWatchdogActivity paints the fetched readout into the shell. A
+    // failed fetch says so in the strip; it never leaves "Loading…" standing.
+    function fillWatchdogActivity() {
+      const I = WATCHDOG_ACTIVITY_IDS;
+      const strip = document.getElementById(I.strip);
+      if (!strip) return;
+      const count = document.getElementById(I.count);
+      const spark = document.getElementById(I.spark);
+      const actions = document.getElementById(I.actions);
+      const liveness = document.getElementById(I.liveness);
+      const hint = document.getElementById(I.hint);
+      const a = _watchdogActivity;
+      if (!a) {
+        if (count) count.innerHTML = `<span style="color:var(--muted)">Watchdog activity unavailable${_watchdogActivityErr ? ' — ' + esc(_watchdogActivityErr) : ''}.</span>`;
+        if (spark) spark.innerHTML = '';
+        if (actions) actions.innerHTML = '';
+        if (liveness) liveness.innerHTML = '';
+        if (hint) hint.innerHTML = '';
+        return;
+      }
+      const total = a.total || 0;
+      const color = total ? watchdogActivityColor(a) : 'var(--text)';
+      const headline = a.mode === 'off'
+        ? `Watchdog is off — nothing is being observed.`
+        : a.acting
+          ? `<strong style="color:${color};font-size:1.1rem">${total}</strong> action${total === 1 ? '' : 's'} taken by the watchdog in ${a.days} d`
+          : `<strong style="color:${color};font-size:1.1rem">${total}</strong> action${total === 1 ? '' : 's'} the watchdog WOULD have taken in ${a.days} d`;
+      if (count) count.innerHTML = `<span style="color:var(--text)">${headline}</span>`;
+      if (spark) spark.innerHTML = watchdogActivitySparkSvg(a);
+      if (actions) {
+        const keys = Object.keys(a.byAction || {}).filter(k => (a.byAction[k] || 0) > 0)
+          .sort((x, y) => (watchdogActionSevere(y) - watchdogActionSevere(x)) || (a.byAction[y] - a.byAction[x]));
+        actions.innerHTML = keys.length
+          ? keys.map(k => {
+              const label = (WATCHDOG_ACTION_LABELS[watchdogActionBase(k)] || watchdogActionBase(k)) + (watchdogActionObserved(k) ? ' (observed)' : '');
+              return `<span style="color:${watchdogActionColor(k)};margin-right:10px;white-space:nowrap" title="audit action watchdog-${esc(k)}">${a.byAction[k]} ${esc(label)}</span>`;
+            }).join('')
+          : `<span style="color:var(--muted)">No <code>watchdog-*</code> entries in the Audit Log for this window.</span>`;
+      }
+      if (liveness) liveness.innerHTML = watchdogLivenessTable(a.agents);
+      if (hint) hint.innerHTML = watchdogPromotionHintHTML(a);
     }
 
     // Escalation breaker section on the Health tab. The config lives at the
@@ -22828,22 +23219,22 @@ function burnAreaChart() {
           <details style="margin:10px 0 0" open><summary style="cursor:pointer;color:var(--muted);font-size:0.78rem;font-weight:600">Advanced OpenTelemetry</summary>
             <div class="config-field"><label>Endpoint <span class="config-info">i<span class="config-tooltip">Collector endpoint (e.g. https://otel-collector:4318). Leave empty to fall back to the standard OTEL_EXPORTER_OTLP_ENDPOINT env var.</span></span></label><input type="text" value="${esc(f.tracingEndpoint || '')}" placeholder="https://otel-collector:4318" data-change-action="markDirty" data-arg0="features" data-arg1="tracingEndpoint" data-arg-types="s,s,w"></div>
             <div class="config-field-row">
-              <div class="config-field"><label>Service name</label><input type="text" value="${esc(f.otelServiceName || '')}" placeholder="hive" data-change-action="markDirty" data-arg0="features" data-arg1="otelServiceName" data-arg-types="s,s,w"></div>
-              <div class="config-field"><label>Sample ratio</label><input type="number" min="0" max="1" step="0.01" value="${f.tracingSampleRatio || 0}" data-change-action="gh57"><span style="font-size:0.65rem;color:var(--muted)">0 means sample all.</span></div>
+              <div class="config-field"><label>Service name <span class="config-info">i<span class="config-tooltip">The service.name resource attribute stamped on every exported span. Set it to something that identifies this hive so you can tell it apart from other hives in a shared collector. Defaults to &quot;hive&quot; when empty.</span></span></label><input type="text" value="${esc(f.otelServiceName || '')}" placeholder="hive" data-change-action="markDirty" data-arg0="features" data-arg1="otelServiceName" data-arg-types="s,s,w"></div>
+              <div class="config-field"><label>Sample ratio <span class="config-info">i<span class="config-tooltip">Head-based sampling ratio between 0 and 1 — the fraction of traces exported. The default 0 is special-cased to mean sample everything, not nothing, so leaving it alone exports all traces.</span></span></label><input type="number" min="0" max="1" step="0.01" value="${f.tracingSampleRatio || 0}" data-change-action="gh57"><span style="font-size:0.65rem;color:var(--muted)">0 means sample all.</span></div>
             </div>
-            <div class="config-toggle"><div class="config-toggle-switch ${f.otelInsecure ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="features" data-key="otelInsecure"></div><span class="config-toggle-label">Allow insecure OTLP transport</span></div>
-            <div class="config-field"><label>Headers <span style="font-weight:400;color:var(--muted)">(write-only, one key=value per line)</span></label><textarea rows="3" style="width:100%;resize:vertical;font-family:var(--font-mono);font-size:0.74rem" placeholder="authorization=\${OTEL_EXPORTER_TOKEN}" data-change-action="parseOtelHeaders" data-arg-types="v"></textarea><div style="font-size:0.68rem;color:var(--muted);margin-top:4px">${f.otelHasHeaders ? 'Headers are configured; values are never echoed back.' : 'No headers configured.'} <button type="button" data-action="gh58" style="margin-left:8px;font-size:0.68rem;padding:2px 8px;border:1px solid var(--border);background:var(--bg);color:var(--muted);border-radius:4px;cursor:pointer">Clear saved headers</button></div></div>
+            <div class="config-toggle"><div class="config-toggle-switch ${f.otelInsecure ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="features" data-key="otelInsecure"></div><span class="config-toggle-label">Allow insecure OTLP transport <span class="config-info">i<span class="config-tooltip">Permits plain HTTP to the collector instead of TLS. Only appropriate for a collector reached over a trusted network, such as one in the same cluster; on any other path the spans travel unencrypted.</span></span></span></div>
+            <div class="config-field"><label>Headers <span style="font-weight:400;color:var(--muted)">(write-only, one key=value per line)</span> <span class="config-info">i<span class="config-tooltip">Extra HTTP headers sent with every OTLP export, typically an authorization header for a hosted collector. Write-only: values are stored but never echoed back to this form, so the box reads empty even when headers are set. \${VAR} references are expanded from the hive environment.</span></span></label><textarea rows="3" style="width:100%;resize:vertical;font-family:var(--font-mono);font-size:0.74rem" placeholder="authorization=\${OTEL_EXPORTER_TOKEN}" data-change-action="parseOtelHeaders" data-arg-types="v"></textarea><div style="font-size:0.68rem;color:var(--muted);margin-top:4px">${f.otelHasHeaders ? 'Headers are configured; values are never echoed back.' : 'No headers configured.'} <button type="button" data-action="gh58" style="margin-left:8px;font-size:0.68rem;padding:2px 8px;border:1px solid var(--border);background:var(--bg);color:var(--muted);border-radius:4px;cursor:pointer">Clear saved headers</button></div></div>
           </details>
         </div>
 
         <div style="margin:18px 0;padding-top:14px;border-top:1px solid var(--border)">
-          <div style="font-size:0.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Quality loops</div>
+          <div style="font-size:0.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Quality loops <span class="config-info">i<span class="config-tooltip">Post-completion feedback lanes that inspect finished work and file advisory findings back into the hive. Off by default, and an absent configuration block is zero behaviour change.</span></span></div>
           <div class="config-toggle">
             <div class="config-toggle-switch ${f.retroEnabled ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="features" data-key="retroEnabled"></div>
-            <span class="config-toggle-label">Retro loop enabled</span>
+            <span class="config-toggle-label">Retro loop enabled <span class="config-info">i<span class="config-tooltip">Periodically scans done/closed beads that have a closed or merged PR, reconstructs a compact trajectory from local ledgers, and files rule-based findings as advisory beads. Deterministic: no model is called, and no tokens are spent, unless an Analysis model is set below. Its pacing knobs (scan interval, max fix attempts, max kicks, long-stall days, recent-closed window) are yaml-only and have no control here.</span></span></span>
           </div>
           <details style="margin:10px 0 0"><summary style="cursor:pointer;color:var(--muted);font-size:0.78rem;font-weight:600">Advanced retro</summary>
-            <div class="config-field"><label>Analysis model</label>${featureModelInput('retroAnalysisModel', f.retroAnalysisModel || '', 'leave empty for deterministic only')}</div>
+            <div class="config-field"><label>Analysis model <span class="config-info">i<span class="config-tooltip">Optional. When set, the retro lane additionally runs a model pass over each reconstructed trajectory using this model. This is the only part of the retro loop that spends tokens — leave it empty for rule-based findings only.</span></span></label>${featureModelInput('retroAnalysisModel', f.retroAnalysisModel || '', 'leave empty for deterministic only')}</div>
           </details>
         </div>
 
@@ -22887,11 +23278,11 @@ function burnAreaChart() {
           <div style="font-size:0.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Review Gate <span class="config-info">i<span class="config-tooltip">The review swarm gate runs designated reviewer agents on each PR and blocks merge until they approve. Used at ACMM L4+.</span></span></div>
           <div class="config-toggle">
             <div class="config-toggle-switch ${rv.require_approval ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="review" data-key="require_approval"></div>
-            <span class="config-toggle-label">Require review-swarm approval before merge</span>
+            <span class="config-toggle-label">Require review-swarm approval before merge <span class="config-info">i<span class="config-tooltip">When on, a PR is not merge-eligible until the reviewer agents record an aggregate approval. Off by default, which preserves the existing behaviour of not consulting review verdicts at all. Typically used at ACMM L4 and above.</span></span></span>
           </div>
           <div class="config-toggle" style="margin-top:10px">
             <div class="config-toggle-switch ${rv.fan_out ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="review" data-key="fan_out"></div>
-            <span class="config-toggle-label">Fan out to multiple reviewers in parallel</span>
+            <span class="config-toggle-label">Fan out to multiple reviewers in parallel <span class="config-info">i<span class="config-tooltip">Runs the configured reviewer agents concurrently instead of one after another, bounded by Max parallel reviews. Faster on PRs with several reviewers, at the cost of more agents running at once.</span></span></span>
           </div>
           <div class="config-field" style="margin-top:10px">
             <label>Max parallel reviews <span class="config-info">i<span class="config-tooltip">Caps how many reviewer agents run concurrently when fan-out is on. 0 or empty uses the default.</span></span></label>
@@ -22908,9 +23299,9 @@ function burnAreaChart() {
         </div>
 
         <div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--border)">
-          <div style="font-size:0.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Convergence Rollout <span class="config-info">i<span class="config-tooltip">Runtime rollout mode for convergence-driven admission of internal agent kicks (#3845/#4263). Off (default): no change from baseline. Shadow: decisions are computed and recorded but never enforced. Enforce: blocked/unknown work is withheld from internal scheduled/cached kicks. Live — no restart needed.</span></span></div>
+          <div style="font-size:0.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Convergence Rollout <span class="config-info">i<span class="config-tooltip">Convergence checks whether work Hive is about to kick is actually admissible right now &mdash; blocker still open, dependency unmerged, evidence stale &mdash; so agents stop burning tokens rediscovering &quot;not ready yet&quot;. It gates candidates only; it never plans or schedules.</span></span></div>
           <div class="config-field">
-            <label>Mode <span class="config-info">i<span class="config-tooltip">Default is off — existing behavior is unchanged until you opt in. Shadow and enforce consume the same decision, so you can soak-compare a fixed commit under each treatment.</span></span></label>
+            <label>Mode <span class="config-info">i<span class="config-tooltip">Shadow (default) evaluates every internal kick decision and records what it WOULD have withheld, without enforcing anything &mdash; dispatch is identical to off, and it costs no tokens and no extra GitHub calls. Enforce withholds blocked/unknown work from internal scheduled/cached kicks. Off is the rollback control arm, and the one posture that records no evidence. Workflow: leave it in shadow, load the soak summary, and if the would-withhold cases look genuine, switch to enforce. Live &mdash; no restart needed.</span></span></label>
             <select data-change-action="markDirty" data-arg0="convergence" data-arg1="mode" data-arg-types="s,s,v">
               ${(Array.isArray(cv.modes) ? cv.modes : ['off','shadow','enforce']).map(m => `<option value="${esc(m)}" ${cv.mode === m ? 'selected' : ''}>${esc(m)}</option>`).join('')}
             </select>
@@ -22981,6 +23372,32 @@ function burnAreaChart() {
     // renderGovProjectObservability configures the MANAGED PROJECT targets for
     // telemetry/operations. It never accepts raw endpoints or credentials:
     // only environment-variable names and secret-name/key references.
+    // operabilityAgentStatusRow renders one read-only status line for an
+    // operability agent. This tab deliberately cannot change any of it
+    // (#7261): enablement is owned by the agent card and cadences by
+    // Agents -> Cadences, and the enable toggles that used to live here were a
+    // third switch that silently rewrote every mode's cadence on write and
+    // reported an unrelated fact on read.
+    function operabilityAgentStatusRow(name, status) {
+      status = status || {};
+      const cadences = status.cadences || {};
+      const modes = Object.keys(cadences).sort();
+      let detail;
+      if (!status.configured) {
+        detail = 'not configured on this hive';
+      } else if (!status.enabled) {
+        detail = 'disabled on its agent card';
+      } else if (modes.length === 0) {
+        detail = 'enabled &middot; no cadence in any mode, so it never runs on a schedule';
+      } else {
+        detail = 'enabled &middot; ' + modes.map(m => `${esc(m)} ${esc(cadences[m])}`).join(' / ');
+      }
+      return `<div class="config-field" style="margin-bottom:8px">
+        <label>${esc(name)} agent</label>
+        <div style="font-size:0.72rem;color:var(--muted)">${detail} &mdash; edit in <b>Agents &rarr; Cadences</b>.</div>
+      </div>`;
+    }
+
     function renderGovProjectObservability(p) {
       p = p || {};
       const familyKeys = ['open_source', 'kube_native', 'commercial'];
@@ -23015,9 +23432,9 @@ function burnAreaChart() {
       return `
         <p style="font-size:0.75rem;color:var(--muted);margin-bottom:14px">Targets for the managed project's telemetry and operations agents. Hive's own OTLP export remains in <b>Features</b>.</p>
         ${hasDetectedTargets ? '<div style="font-size:0.72rem;color:var(--muted);background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:14px">Telemetry findings supplied detected platform suggestions. Review the selections below; Save explicitly confirms and persists them.</div>' : ''}
-        <div style="font-size:0.72rem;color:var(--muted);background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:14px">Select backends, then explicitly enable either agent. Enabling replaces its all-mode paused cadence with a conservative 24h cadence; tune individual modes later from the agent's Cadences tab.</div>
-        <div class="config-toggle"><div class="config-toggle-switch ${p.telemetry_enabled ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="project-observability" data-key="telemetry_enabled"></div><span class="config-toggle-label">Enable telemetry agent</span></div>
-        <div class="config-toggle" style="margin-top:8px"><div class="config-toggle-switch ${p.operations_enabled ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="project-observability" data-key="operations_enabled"></div><span class="config-toggle-label">Enable operations agent</span></div>
+        <div style="font-size:0.72rem;color:var(--muted);background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:14px">Select which observability backends the telemetry and operations agents should target in managed repositories. Whether those agents run at all is not set here: enablement lives on the agent card and per-mode schedules live in Agents → Cadences. Their current state is shown below, read-only.</div>
+        ${operabilityAgentStatusRow('telemetry', p.telemetry_status)}
+        ${operabilityAgentStatusRow('operations', p.operations_status)}
         <div style="margin:18px 0;padding-top:14px;border-top:1px solid var(--border)"><div style="font-size:0.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Target platforms</div><div class="config-field-row">${family('open_source','Open source')}${family('kube_native','Kube-native')}</div>${family('commercial','Commercial')}</div>
         <div style="margin:18px 0;padding-top:14px;border-top:1px solid var(--border)"><div style="font-size:0.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Safe references</div><p style="font-size:0.72rem;color:var(--muted)">Names only. Literal URLs, tokens, and API keys are rejected server-side.</p>${refRows || '<p style="font-size:0.72rem;color:var(--muted)">Select a platform to configure its references.</p>'}</div>`;
     }
@@ -23332,7 +23749,9 @@ function burnAreaChart() {
         const data = await res.json();
         const entries = Array.isArray(data.entries) ? data.entries : [];
         if (!entries.length) {
-          out.textContent = 'No soak telemetry recorded yet — set mode to shadow or enforce and let eval cycles run.';
+          out.textContent = data.mode === 'off'
+            ? 'No soak telemetry: mode is off, which records no evidence by design. Switch to shadow to start collecting it.'
+            : 'No soak telemetry recorded yet — it accumulates one row per eval cycle, so give it a few cycles.';
           return;
         }
         const groups = {};
@@ -23344,9 +23763,27 @@ function burnAreaChart() {
           g.unknown += e.unknown || 0; g.differ += e.would_differ ? 1 : 0;
           g.latency += e.decision_latency_ms || 0;
         }
-        out.innerHTML = Object.entries(groups).map(([k, g]) =>
+        const rows = Object.entries(groups).map(([k, g]) =>
           `<div><strong>${esc(k)}</strong>: ${g.passes} passes, ${g.admitted} admitted, ${g.blocked} blocked, ${g.unknown} unknown, ${g.differ} would-differ, avg latency ${(g.latency / g.passes).toFixed(1)}ms</div>`
-        ).join('');
+        );
+        // Promotion hint (#7260). The whole point of shadow is to answer one
+        // question -- "would enforcing have changed anything?" -- so answer it
+        // directly instead of leaving the operator to infer it from counts.
+        // Only offered for a FULL ring: a handful of clean passes is not
+        // evidence, and this must never talk someone into enforce early.
+        const totalPasses = entries.length;
+        const totalDiffer = entries.reduce((n, e) => n + (e.would_differ ? 1 : 0), 0);
+        const maxEntries = data.max_entries || 0;
+        if (data.mode === 'shadow') {
+          if (totalDiffer > 0) {
+            rows.push(`<div style="margin-top:4px">Enforcement would have differed on <strong>${totalDiffer}</strong> of ${totalPasses} passes. Review the withheld candidates in the log before switching to enforce.</div>`);
+          } else if (maxEntries > 0 && totalPasses >= maxEntries) {
+            rows.push('<div style="margin-top:4px;color:var(--green)">Safe to enforce: a full soak ring with no pass where enforcement would have differed.</div>');
+          } else {
+            rows.push(`<div style="margin-top:4px">No pass would have differed so far (${totalPasses} of ${maxEntries || '?'} rows). Let the ring fill before promoting to enforce.</div>`);
+          }
+        }
+        out.innerHTML = rows.join('');
       } catch (err) {
         out.textContent = `Failed to load soak telemetry: ${err.message}`;
       }
@@ -23924,6 +24361,10 @@ function burnAreaChart() {
               body: JSON.stringify(watchdog)
             });
             if (!wdRes.ok) throw new Error(await saveErrorMessage(wdRes));
+            // The activity strip's headline ("would have taken" vs "taken")
+            // and promotion hint depend on the mode just saved; drop the
+            // cached readout so the next Health render fetches it afresh.
+            invalidateWatchdogActivity();
             if (Object.keys(health).length > 0) {
               const hRes = await fetch(`${base}/health`, {
                 method: 'PUT',
@@ -24780,11 +25221,74 @@ function burnAreaChart() {
           return;
         }
         if (data.logged_in && !data.pending) {
-          if (statusEl) { statusEl.textContent = '✓ Logged in!'; statusEl.style.color = 'var(--green)'; }
-          showToast('GitHub Copilot authenticated', 'success');
-          setTimeout(function() { cancelCopilotLogin(); }, 1500);
+          showCopilotSeatVerdict(statusEl, data.seat);
         }
       } catch (e) { /* keep polling */ }
+    }
+
+    // A stored token is not an entitlement: activation can fail server-side and
+    // org policy can refuse the integration, both of which leave a token behind
+    // that looks like a working login (issue 7309). The dialog therefore reports
+    // the verified seat verdict, not the mere presence of a token.
+    function showCopilotSeatVerdict(statusEl, seat) {
+      var state = (seat && seat.state) || 'unknown';
+      if (state === 'active') {
+        if (statusEl) { statusEl.textContent = 'Logged in — Copilot seat verified'; statusEl.style.color = 'var(--green)'; }
+        showToast('GitHub Copilot authenticated and seat verified', 'success');
+        setTimeout(function() { cancelCopilotLogin(); }, 1500);
+        return;
+      }
+      if (state === 'unknown') {
+        if (statusEl) { statusEl.textContent = 'Logged in — seat not yet verified'; statusEl.style.color = 'var(--muted)'; }
+        showToast('GitHub Copilot authenticated', 'success');
+        setTimeout(function() { cancelCopilotLogin(); }, 1500);
+        return;
+      }
+      // Verified failure: keep the dialog open with the actionable detail.
+      // Closing here is what previously sent adopters away believing the
+      // backend worked.
+      var warn = (state === 'unreachable') ? 'var(--muted)' : 'var(--red)';
+      if (statusEl) {
+        statusEl.innerHTML = '<strong>Login saved, but this account cannot run inference yet.</strong>' +
+          '<div style="margin-top:8px;text-align:left;line-height:1.45">' + esc(seat.detail || '') + '</div>' +
+          (seat.credential ? '<div style="margin-top:8px;text-align:left;color:var(--muted)">Verified: ' +
+            esc(seat.credential) + '</div>' : '') +
+          '<button data-action="recheckCopilotSeat" style="margin-top:10px;background:var(--green);color:var(--bg);' +
+            'border:none;padding:6px 16px;border-radius:6px;font-weight:600;cursor:pointer">Re-verify</button>';
+        statusEl.style.color = warn;
+      }
+      cancelCopilotLogin(true);
+    }
+
+    // Re-verify from the login dialog, repainting it in place so an adopter who
+    // has just activated a seat or had a policy lifted sees the new verdict
+    // without restarting the device flow.
+    async function recheckCopilotSeat() {
+      var statusEl = document.getElementById('copilot-auth-status');
+      if (statusEl) { statusEl.textContent = 'Verifying…'; statusEl.style.color = 'var(--muted)'; }
+      var seat = await verifyCopilotSeat();
+      if (seat) showCopilotSeatVerdict(document.getElementById('copilot-auth-status'), seat);
+    }
+
+    // Re-run verification on demand; used by the "Verify login" affordance so an
+    // adopter can self-check after fixing a seat or an org policy, without
+    // logging out and back in.
+    async function verifyCopilotSeat() {
+      try {
+        var resp = await fetch('/api/copilot-auth/verify', { method: 'POST' });
+        var data = await resp.json();
+        var seat = data.seat || {};
+        if (seat.state === 'active') {
+          showToast('Copilot seat verified — inference is available', 'success');
+        } else if (seat.state === 'unknown') {
+          showToast('No Copilot credential to verify — log in first', 'info');
+        } else {
+          showToast(seat.detail || 'Copilot seat could not be verified', 'error');
+        }
+        return seat;
+      } catch (e) {
+        showToast('Copilot verification failed: ' + e.message, 'error');
+      }
     }
 
     function cancelCopilotLogin(keepOverlay) {
@@ -25865,8 +26369,6 @@ function burnAreaChart() {
       gh43: function (event, A) { markDirty('budget','totalTokens',Number(this.value)); },
       gh44: function (event, A) { markDirty('budget','periodDays',Number(this.value)); },
       gh45: function (event, A) { markDirty('budget','criticalPct',Number(this.value)); },
-      gh46: function (event, A) { markDirty('health','healthcheckInterval',Number(this.value)); },
-      gh47: function (event, A) { markDirty('health','restartCooldown',Number(this.value)); },
       gh48: function (event, A) { markDirty('sensing','ttlSeconds',Number(this.value)); },
       gh49: function (event, A) { markDirty('sensing','pullbackSeconds',Number(this.value)); },
       gh50: function (event, A) { markDirty('logging','maxSizeMB',Number(this.value)); },

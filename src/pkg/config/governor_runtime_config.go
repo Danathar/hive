@@ -107,10 +107,34 @@ func stringSlicesEqual(a, b []string) bool {
 	return true
 }
 
+// HealthConfig holds the governor's health-related settings.
+//
+// It used to carry HealthcheckInterval and RestartCooldown as well. Both were
+// DEAD (#7251): parsed, defaulted, validated, persisted and rendered in
+// Settings, but never read by any runtime loop. An operator lowering
+// "Healthcheck Interval" to 60s expecting faster detection got no change at
+// all, while the cadence that actually governs liveness sweeps lived further
+// down the same tab under "Agent Watchdog". Restart cooldowns likewise come
+// from hard-coded constants in pkg/agent (tokenRestartCooldownSec,
+// tlsErrorRestartCooldownSec) and the watchdog's own backoff ladder.
+//
+// They are removed rather than wired up: the watchdog (RFC #4665) is the real
+// liveness system, and a second, half-implemented one beside it is worse than
+// none. DeprecatedHealthcheckInterval survives only to carry an operator's
+// explicit value forward into the watchdog probe interval — see
+// migrateDeprecatedHealthSettings.
 type HealthConfig struct {
-	HealthcheckInterval int  `yaml:"healthcheck_interval"`
-	RestartCooldown     int  `yaml:"restart_cooldown"`
-	ModelLock           bool `yaml:"model_lock"`
+	// DeprecatedHealthcheckInterval is read ONLY to migrate an explicitly
+	// configured value into governor.watchdog.probe_interval_s. It is cleared
+	// once migrated, so it does not survive a config re-save.
+	//
+	// Deprecated: set governor.watchdog.probe_interval_s instead.
+	DeprecatedHealthcheckInterval int `yaml:"healthcheck_interval,omitempty"`
+	// ModelLock stops the governor from automatically changing an agent's
+	// model under budget pressure. This is a BUDGET behaviour, not a health
+	// one, and the Settings UI now presents it on the Budget tab beside the
+	// downgrade it disables; the config key is unchanged.
+	ModelLock bool `yaml:"model_lock"`
 }
 
 type BudgetConfig struct {

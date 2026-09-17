@@ -11,6 +11,168 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-17 (v4.47.0)
+
+### Added
+
+- The v4 → v5 forward-merge is now a mechanical cadence rather than an ad-hoc chore ([#7297](https://github.com/hivecommons/hive/issues/7297)). `.github/workflows/v5-topup.yml` runs after every v4 release tag (plus a daily safety net), rebuilds `sync/v4-to-v5` from v5's tip, forward-merges v4 with a DCO sign-off and opens a PR against v5. A conflicting top-up fails the run and pushes nothing, because a forward-merge that resolves itself wrongly is worse than one that waits ([#7199](https://github.com/hivecommons/hive/issues/7199)).
+- Copilot device-flow login now verifies the seat before reporting success, so a saved token that cannot actually run inference no longer presents as a working login ([#7309](https://github.com/hivecommons/hive/issues/7309)). `GET /api/copilot-auth/status` gained a `seat` verdict and a new `POST /api/copilot-auth/verify` re-checks on demand; the three failure modes behind [#7302](https://github.com/hivecommons/hive/issues/7302) — activation that never completed (`rejected`), an org policy refusing the integration ID (`blocked`), and a genuinely unlicensed account (`no_seat`) — are now distinct on-screen states, each naming which credential was verified. `docs/inference-backends.md` gained a "Verifying your Copilot login" section with the discriminators and self-checks.
+- The contribute Operations tab now shows an operator *why* a contributor is struggling, not just that it is ([#7317](https://github.com/hivecommons/hive/issues/7317) item 3). Each connected clanker's row draws its most recent reported failure (kind, reason, task, when) — a field that has travelled on the fleet snapshot since #2547 and was never rendered — and, while a task is in flight, a collapsible **agent pane** showing the terminal the relay last reported, so a twenty-minute silence can be read off the screen it is happening on. A new **Contributor run history** card looks up `GET /api/contribute/runs` by GitHub login, which is what makes this work for a contributor that has already disconnected: the fleet row is gone by then, but the run log is not. Failed and abandoned run records now also store the pane at the moment the run stopped (`pane_tail`, last 30 lines, token-redacted), and the card shows it under each such run. Pane output is more sensitive than the bounded reason string those endpoints already serve, so it is gated: `/api/contribute/fleet` and `/api/contribute/runs` strip `pane_tail` unless the viewer is owner or read-write (or the spoke has no auth boundary at all), and report `pane_tail_visible` so the page can say so. Reasons stay public, as before. No routing, cooldown, trust, or relay-protocol change.
+
+## 2026-09-17 (v4.46.0)
+
+### Added
+
+- Operators can now troubleshoot a struggling contributor from the dashboard's API without shell access to the hub ([#7317](https://github.com/hivecommons/hive/issues/7317)). Two gaps closed. `GET /api/contribute/runs?username=<u>&days=N&limit=N` serves the per-run records behind `/api/contribute/run-stats`' aggregates — outcome, failure kind, **reason**, duration and scenario per task — which until now were written to `/data/contributors/task_runs.jsonl` and readable only by opening that file on the hub host. And tasks that ended without a terminal report now produce a record at all: a relay asking for new work while still holding a task, or a socket dropping with one held, previously left nothing durable, so a contributor that handed eleven tasks back in two hours showed a single row and one failure in the stats. Those rows carry `outcome: "abandoned"`, a hub-observed `abandon_cause` (`handback`/`disconnect`), a synthetic reason, and the elapsed duration — the number that identifies which relay timeout fired. `run-stats` counts them in a new `abandoned` bucket rather than folding them into `failed`, and keeps them out of the duration percentiles, so neither number the backend ratchet reads moves because these rows started existing.
+
+## 2026-09-17 (v4.45.1)
+
+### Changed
+
+- The self-hosted CI runner image that bakes in the cgo toolchain (#7206) is now built and pushed by CI instead of from an operator's laptop ([#7289](https://github.com/hivecommons/hive/issues/7289)). `#7206` merged the Dockerfile on 2026-09-16; a day later `ghcr.io/hivecommons/hive-ci-runner` still did not exist and race shards kept dying at **Prepare cgo toolchain**, because publishing needed someone with `docker` and GHCR write. The new **CI Runner Image** workflow (`.github/workflows/ci-runner-image.yml`) builds `src/deploy/ci-runners/Dockerfile` on a GitHub-hosted runner — deliberately off the cluster whose egress is the problem — and pushes an immutable `<runner version>-<suffix>` tag with the job's own `GITHUB_TOKEN`, refusing to overwrite an existing tag; the job summary hands the operator the digest and the exact `kubectl patch` to roll the runners. It also runs build-only on any PR touching the Dockerfile, so a change that would ship a network-dependent image fails there. The only remaining operator step is the cluster patch (`src/deploy/ci-runners/README.md`).
+
+### Fixed
+
+- The "(Copilot seat not licensed)" model-picker notice, the `/api/config/backends` wire object and the `copilot model discovery rejected by upstream` log line now name **which** credential GitHub rejected — its source (dashboard Copilot login, `COPILOT_GITHUB_TOKEN`, durable token file, or the shared Copilot CLI config) and, when GitHub answers `/user`, the GitHub account behind it — so the next occurrence can be triaged from a screenshot alone instead of reading as a false claim about the owner's own seat (#7302).
+
+## 2026-09-17 (v4.45.0)
+
+### Added
+
+- The Health tab's Agent Watchdog section now shows a **Watchdog activity** strip directly under the mode banner, so promoting the watchdog from Observe to Heal is a decision made on data that is on the page rather than behind a manual search of `/data/audit.jsonl` ([#7254](https://github.com/hivecommons/hive/issues/7254)). The strip reports every `watchdog-*` audit action in the trailing 30 days — "N actions the watchdog WOULD have taken" in Observe, "N actions taken" in Heal, broken down by restart / crash-loop pause / give-up / healthy reset and their `-observed` twins — with a per-day histogram coloured by severity (observed muted, taken restart amber, pause or give-up red), the reconciler's current liveness verdict for every agent it has probed (`ready`, `stuck-overlay`, `shell-prompt`, `no-output`, `no-session`, `auth-required`, or `crash-loop` once it has paused the agent) with time in state, and a promotion hint beside the mode select: **Safe to promote to Heal** when the window holds no pause or give-up verdict, otherwise how many to investigate first; in Heal, when the watchdog last acted. A hive that has sat in Observe with nothing to act on now shows **0**, which is an answer rather than an absence. Backed by the new `GET /api/watchdog/activity?days=30` (read-write role, the same tier as the Audit Log it is derived from), which scans the on-disk audit log including rotated backups so the window survives pod restarts and the 500-entry in-memory ring.
+
+## 2026-09-17 (v4.44.4)
+
+### Changed
+
+- Moved the provider-budget and no-cadence dashboard alert policy out of `cmd/hive` into a new `pkg/spokealerts` package, continuing the staged breakup of the `cmd/hive` god file (#7238 stage 4). Behaviour is unchanged.
+
+## 2026-09-17 (v4.44.3)
+
+### Changed
+
+- Moved inference route and gateway resolution out of `cmd/hive`'s `main.go`
+  into a new `pkg/inference`
+  ([#7238](https://github.com/hivecommons/hive/issues/7238) stage 3): the
+  LiteLLM endpoint/model route, watsonx gateway selection, per-gateway bearer
+  and header resolution, and supervision of the optional bundled local LiteLLM
+  proxy. Behaviour is unchanged. The bundled proxy's loopback port is now
+  covered by a test asserting it cannot collide with the inference translator's
+  port — previously only a comment said so, in a file that no longer sits
+  beside either constant.
+
+## 2026-09-17 (v4.44.2)
+
+### Changed
+
+- Moved the advisory digest posting policy out of `cmd/hive`'s `main.go` into
+  `pkg/advisory`, which already owned `Digest`
+  ([#7238](https://github.com/hivecommons/hive/issues/7238) stage 2). Behaviour
+  is unchanged. The update-interval throttle that bounds the GitHub round-trip
+  (`governor.advisory.update_interval_s`) is now an encapsulated `PostGate`
+  value instead of a package-level struct that tests reached into and reset
+  field-by-field, removing a cross-test ordering hazard, and the digest
+  build/post predicates take an explicit boolean rather than a `*github.Client`
+  they only ever nil-checked.
+
+## 2026-09-17 (v4.44.1)
+
+### Changed
+
+- Moved the GitHub App credential diagnosis and classification logic out of
+  `cmd/hive`'s 10,000-line `main.go` into a new `pkg/apphealth` package
+  ([#7238](https://github.com/hivecommons/hive/issues/7238)). Behaviour is
+  unchanged — the six functions that decide whether an App installation
+  authenticates, belongs to the right account, holds the permissions the hive
+  relies on and actually covers the configured repositories keep their exact
+  verdicts, and `cmd/hive` keeps its call sites via thin wrappers. What changes
+  is testability: the two spoke App key paths are now an explicit `KeyPaths`
+  argument instead of package-level variables that tests reassigned and
+  restored, so the ~600 lines of verdict tests that had to live inside
+  `package main` now run as an ordinary package with no shared mutable state.
+
+## 2026-09-17 (v4.44.0)
+
+### Added
+
+- Documented fleet self-reporting (#7280). `governor.fleet_report` can file issues on `hivecommons/hive` from an operator's hive once opted in, but had no doc page at all, so the privacy-relevant questions — what leaves the hive, what never does, and how to preview it before opting in — had no answer outside the source. `src/docs/fleet-report.md` covers the `file_upstream` opt-in and its dry-run default, both triggers and the thresholds that gate them, the exact field list, the truncated-digest anonymisation of the hive ID, fingerprint dedup via comment + reaction, and recovery behaviour.
+
+### Changed
+
+- Extracted `runEvalCycle`'s kick-dispatch loop behind an injectable seam (#7232). The two skip rules (provider-error backoff, failed send) and the single-probe rule were previously unreachable without a tmux session, a live governor, and a dashboard, so none of them had a test; they are now covered directly, including the effect ORDER the extraction had to preserve. No behaviour change.
+- Convergence rollout now defaults to `shadow` instead of `off` (#7260). Shadow is dispatch-identical to off — no kick is withheld and no queue row changes — but it records what enforcement *would* have done, so the soak evidence the documented promote-to-enforce path depends on actually accumulates instead of staying empty on every hive whose owner never opted in. `off` remains fully selectable as the rollback and as the control arm for fixed-commit A/B comparison, and an explicitly configured mode is never migrated. A non-empty but unrecognised mode still fails safe to `off`. The Features tab now explains what convergence does, and its soak summary says outright whether enforcement would have differed.
+- Marked `pkg/convergence/{mutation,outcome,proof}` as staged-and-unwired (#7281). These 2,580 lines compile and are maintained but are reachable from no binary, and unlike `pkg/turn` they carried no marker saying so, leaving readers unable to tell staged work from abandoned work. Each now has a package doc stating it, and a new guard enforces the claim in both directions: an unwired convergence package must be marked, and a marked one must still be unwired — so wiring one up forces the doc to be corrected in the same change instead of leaving a comment that lies.
+
+### Fixed
+
+- **Spoke dashboards now measure "N behind" against the commit the hub will actually roll them to, and show the hub's real upgrade policy** ([#7262](https://github.com/hivecommons/hive/issues/7262)). The hub previously never told a spoke who upgrades it, on what schedule, or toward which commit — so a hub-managed v5 spoke on the `:edge` channel rendered "35 behind" (its distance to a hard-wired v4 tip; the real distance to anything it could reach was 28), "Automatic updates are turned off for this hive" (its own unused local flag), "Update schedule: Unknown — managed by the hub", and a "Last upgrade SUCCEEDED — running the target image" line that stayed up after a floating-tag pull had moved the pod. The heartbeat response now carries an `upgrade_policy` (hub-managed vs spoke-managed, instant/daily/weekly schedule, fleet-wide pause, tracked branch/channel and the resolved reachable target SHA — the same inputs the hub's own `UpgradeTo` decision uses). The spoke's `/api/version`, top-bar badge and Settings → Hub tab use it: "behind" is the distance to the hub's target (never a hard-coded stable branch; unmanaged spokes fall back to their own branch tip), the Automatic Updates switch is locked and labelled "managed by the hub" when the hub owns it, the schedule shows the hub's cadence (with a fleet-wide "paused" state), and a recorded spoke-side success now says "has since moved to Y" when the running commit differs. Older hubs send no policy and the spoke keeps its local view, with `policySource: "local"` saying so.
+- Fleet self-reporting no longer mistakes healthy scheduled cycling for an agent crash loop. The detector thresholded on each agent's cumulative restart counter, which every cadence kick increments, so a spoke running normally reported all six of its agents as high-severity crash loops; crash evidence now requires an actual crash state, and a cumulative count no longer claims a 24-hour observation window it was never measured over.
+- Hive-code defect fingerprints now include the agent, so reports from different lanes no longer collapse onto one issue. Every agent shares the `agent-runtime` component, so per-agent reports previously produced one issue plus a comment per agent per cycle instead of one issue per problem.
+- Fleet self-report recovery comments no longer render an empty criterion reference. A hive-code defect carries no ACMM criterion, so its recovery comment read "no longer observes the ACMM shortfall/evidence for ``"; recovery text now names the ACMM criterion only when there is one, and names the defect otherwise.
+
+## 2026-09-17 (v4.43.1)
+
+### Fixed
+
+- Fixed a flaky `TestGridGolden` that could fail any PR's `test (rest 1/3)` shard regardless of what the PR changed (#7264). The golden was compared against bubbletea's raw output stream, whose length depends on scheduling: a queued `WindowSizeMsg` triggers an unconditional full repaint, so a loaded CI runner could capture the same frame twice. The assertion is now frame-based — superseded repaints are discarded and only the final frame is compared — so the result no longer depends on whether the quit key wins that race.
+
+## 2026-09-17 (v4.43.0)
+
+### Added
+
+- Fleet self-reporting now also previews and optionally files hive-code defect reports when calibrated hive-owned runtime symptoms appear even without an ACMM shortfall.
+
+## 2026-09-17 (v4.42.0)
+
+### Added
+
+- Every labelled control on Settings → Features now carries an (i) tooltip, including the previously unexplained Quality Loops section and its Retro loop toggle, where the help text spells out that the loop is deterministic and spends no tokens until an Analysis model is set (#7256). A new coverage guard fails the build if a control is added to that tab without help text.
+
+### Changed
+
+- Removed the "Enable telemetry agent" / "Enable operations agent" toggles from Settings → Project Observability (#7261). They were a third, conflicting way to turn an agent on: writing one rewrote that agent's cadence in every governor mode, destroying per-mode tuning owned by the Cadences tab, while reading it back reported whether any mode was unpaused — a fact unrelated to the agent's own enabled flag, so the agent card and this tab could disagree. The tab now shows a read-only status line per agent and can no longer write cadences at all.
+
+## 2026-09-17 (v4.41.0)
+
+### Added
+
+- Added dry-run fleet self-reporting for persistent ACMM shortfalls attributed to hive defects, including deterministic fingerprints, scrubbed evidence, dashboard previews, and opt-in upstream filing to hivecommons/hive.
+
+### Fixed
+
+- Settings modal scroll no longer leaks to the dashboard behind it. The lock is now applied to the root element as well as the body: `html { overflow-x: hidden }` makes the root the viewport's scroll container, which silently turned the existing `body.modal-open { overflow: hidden }` rule into a no-op.
+- Removed the dead `healthcheck_interval` and `restart_cooldown` health settings, which were parsed, validated, persisted and rendered in Settings but read by no runtime loop, so changing them had no effect (#7251). Existing configs keep loading: an explicitly set `healthcheck_interval` is migrated onto the watchdog's check interval, and both legacy keys are otherwise ignored rather than rejected. The Health tab now shows only Watchdog and Escalation, and the Model Lock toggle moved to the Budget tab.
+
+## 2026-09-17 (v4.40.2)
+
+### Fixed
+
+- The Hive ID is now read-only on hub-managed spokes. The hub uses it as its primary key, so editing it locally orphaned the hive rather than renaming it; the API refuses with 409 Conflict and the Settings field renders locked with an explanation. The ID validator was also tightened to a DNS-label-safe format, matching the UI's documented `hive-adjective-noun` hint.
+
+## 2026-09-17 (v4.40.1)
+
+### Fixed
+
+- Two Settings labels ("Cadence mode scope" and "Multi-repo threshold scaling") no longer show two overlapping tooltips on hover. They carried both a native `title=` attribute and a nested custom `.config-tooltip`; the redundant `title=` is removed and a guard test now rejects the combination anywhere in the dashboard.
+
+## 2026-09-17 (v4.40.0)
+
+### Added
+
+- The dashboard and pinned advisory digest now share a weekly-frozen Hive Advice section that ranks the top owner actions by governor mode, so quiet hives get throughput-building suggestions while surge hives get inflow-reduction guidance.
+
+## 2026-09-17 (v4.39.6)
+
+### Fixed
+
+- The provider-spend banner decision is now a pure function, so the wording an operator sees when the inference gateway refuses on a money limit is covered by tests. No behavior change. (#7232)
+
+## 2026-09-17 (v4.39.5)
+
+### Fixed
+
+- Hive now normalizes agent-authored PR titles that start with a lane prefix, moving `[lane]` to the end when the rest of the title is already a Conventional Commits header so target repositories with anchored PR-title checks accept the PR while still preserving the agent record.
+
 ## 2026-09-16 (v4.39.4)
 
 ### Fixed

@@ -468,6 +468,16 @@ func (s *Server) registerContributeRoutes() {
 	s.mux.HandleFunc("POST /api/hives/{id}/heartbeat", s.handleHivesHeartbeat)
 	s.mux.HandleFunc("DELETE /api/hives/{id}", s.handleHivesDelete)
 	s.mux.HandleFunc("POST /api/hives/onboard", s.handleHivesOnboard)
+
+	// Read-only PER-RUN task history for one contributor (#7317): the records
+	// behind /api/contribute/run-stats' aggregates — outcome, failure kind,
+	// reason, duration, scenario, per task. Registered at the tail of this
+	// function on purpose: src/docs/api-reference.md cites every route by
+	// file:line, so inserting one mid-list rewrites the citation of every route
+	// below it and check-api-reference-citations.sh goes red for a change that
+	// touched none of them. Public like the other /api/contribute* reads — see
+	// handleContributeRuns for why that posture is inherited rather than chosen.
+	s.mux.HandleFunc("GET /api/contribute/runs", s.handleContributeRuns)
 }
 
 func randomHex(n int) string {
@@ -1122,6 +1132,40 @@ code{background:var(--cc-bg);padding:2px 8px;border-radius:4px;font-size:.9rem}
 .clanker-main{min-width:0}
 .clanker-user{font-size:.88rem;color:var(--cc-text);font-weight:500}
 .clanker-sub{font-size:.74rem;color:var(--cc-muted);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere;word-break:break-word}
+/* #7317 item 3: per-clanker diagnostics. The last failure reads in the same
+   mono sub-line voice as the rest of the row, tinted so a run of them stands
+   out; the pane is a collapsed <details> so a healthy fleet costs no height.
+   The pane <pre> scrolls inside its own box — the row must never widen the
+   page (see the .ops-shell overflow rule). */
+.clanker-fail{color:var(--cc-amber)}
+.clanker-fail b{color:var(--cc-text-2);font-weight:600}
+.clanker-pane{margin-top:6px;font-size:.72rem}
+.clanker-pane>summary{cursor:pointer;color:var(--cc-muted-2);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;user-select:none;list-style:none}
+.clanker-pane>summary::before{content:"\25B8";display:inline-block;width:1em;color:var(--cc-muted)}
+.clanker-pane[open]>summary::before{content:"\25BE"}
+.clanker-pane>summary::-webkit-details-marker{display:none}
+.clanker-pane pre{margin:6px 0 0;padding:8px 10px;background:var(--cc-bg);border:1px solid var(--cc-border-2);border-radius:6px;max-height:220px;overflow:auto;font-size:.7rem;line-height:1.45;color:var(--cc-text-2);white-space:pre;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.clanker-link{background:none;border:0;padding:0;color:var(--cc-accent);font:inherit;font-size:.72rem;cursor:pointer;text-decoration:underline;text-underline-offset:2px}
+.clanker-link:hover{color:var(--cc-text)}
+/* Contributor run history card (#7317 items 1+3 rendered). A lookup by login
+   so it answers for a contributor that has already disconnected — the fleet
+   row is gone by then, but the run log is not. */
+.runs-lookup{display:flex;gap:8px;padding:12px 20px;border-bottom:1px solid var(--cc-border-2);flex-wrap:wrap;align-items:center}
+.runs-lookup input{flex:1 1 180px;min-width:0;background:var(--cc-bg);border:1px solid var(--cc-border);color:var(--cc-text);border-radius:6px;padding:6px 10px;font-size:.8rem;font-family:inherit}
+.runs-lookup input:focus{outline:none;border-color:var(--cc-accent)}
+.runs-list{max-height:520px;overflow-y:auto}
+.run-item{padding:12px 20px;border-bottom:1px solid var(--cc-border-2)}
+.run-head{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;font-size:.8rem}
+.run-outcome{font-size:.68rem;font-weight:600;padding:1px 7px;border-radius:999px;border:1px solid var(--cc-border);color:var(--cc-muted);text-transform:uppercase;letter-spacing:.03em}
+.run-outcome.completed{color:var(--cc-green);border-color:var(--cc-green)}
+.run-outcome.failed{color:var(--cc-red);border-color:var(--cc-red)}
+.run-outcome.abandoned{color:var(--cc-amber);border-color:var(--cc-amber)}
+.run-task{color:var(--cc-text);font-weight:600;overflow-wrap:anywhere}
+.run-task a{color:inherit;text-decoration:none}
+.run-task a:hover{text-decoration:underline}
+.run-meta{margin-left:auto;color:var(--cc-muted);font-size:.72rem;white-space:nowrap}
+.run-reason{margin-top:4px;font-size:.74rem;color:var(--cc-text-2);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}
+.run-pane-note{padding:10px 20px;font-size:.74rem;color:var(--cc-muted-2);border-bottom:1px solid var(--cc-border-2)}
 /* Row is align-items:start (grid), so nudge the small dot down to sit level with
    the username's first line instead of the very top of the row. */
 .clanker-dot{width:8px;height:8px;border-radius:50%%;background:var(--cc-green);flex-shrink:0;margin-top:7px}
@@ -2752,6 +2796,21 @@ Contributors subscribe to labels (e.g. <code>nvidia</code>) so matching issues a
 <button class="ops-scope" data-scope="mine" title="Only the work running under your GitHub account">Mine</button>
 </div>
 <div class="work-list" id="work-list"><div class="ops-empty">Loading work&hellip;</div></div>
+</div>
+<!-- Contributor run history (#7317). The per-run records behind run-stats,
+     looked up BY LOGIN rather than hung off a fleet row, because the operator
+     who needs this is usually looking at a contributor that has already
+     dropped off: the fleet row is gone, the activity rail has scrolled, and
+     the run log is the only thing left that says why. The "history" link on a
+     fleet row just fills this box. Reasons are public; pane output is served
+     only to owner/read-write viewers (the server strips it, this only says so). -->
+<div class="ops-card" id="runs-card" style="margin-top:20px">
+<div class="ops-card-head"><h3>Contributor run history</h3><span class="ops-card-count" id="runs-count"></span></div>
+<form class="runs-lookup" id="runs-lookup" autocomplete="off">
+<input type="text" id="runs-user" name="username" placeholder="GitHub login, e.g. from the log rail" aria-label="Contributor GitHub login" spellcheck="false">
+<button type="submit" class="admin-act" id="runs-go">Look up</button>
+</form>
+<div class="runs-list" id="runs-list"><div class="ops-empty">Enter a contributor&rsquo;s login to see their recent runs: outcome, duration, the failure reason, and &mdash; for owners &mdash; what was on the agent&rsquo;s terminal when it stopped.</div></div>
 </div>
 <div class="ops-card card-accent" style="margin-top:20px">
 <div class="ops-card-head"><span class="feed-dot"></span><h3>Ready-work queue</h3><span class="ops-card-count" id="queue-count"></span><!-- Resume-all (#queue-hold): bulk-clears the operator hold set. Hidden by default;
@@ -4993,6 +5052,17 @@ function renderClankers(list){
     // gets a fleet-wide view of who prefers what without cross-referencing each
     // profile separately (the data already travels in this same fleet snapshot).
     var interestsLine=clankerInterestsLine(c.label_interests);
+    // #7317 item 3: the most recent failure this connection reported, in the
+    // operator's terms (kind, reason, when, which task) — it has travelled on
+    // this snapshot since #2547 and was never drawn. Plus a link that fills the
+    // run-history lookup below with this login, which is where the record of
+    // EVERY run (not just the last failure) lives.
+    var failLine=clankerFailureLine(c.last_failure);
+    var histLink=c.github_username?('<div class="clanker-sub"><button type="button" class="clanker-link" data-role="runs" data-user="'+esc(c.github_username)+'">run history &rarr;</button></div>'):'';
+    // The agent's terminal, as the relay last reported it, while a task is in
+    // flight. Server-gated: the field is absent for a viewer the hub does not
+    // admit, and then nothing renders — no "sign in" nag on every row.
+    var paneBlock=clankerPaneBlock(c.pane_tail,key);
     // #2534: owner/read-write get per-contributor admin actions wired to the
     // EXISTING endpoints — set trust tier / promote (PUT /api/contributors/{id}/trust),
     // revoke (POST .../revoke), remove (DELETE .../{id}). Hidden for read viewers.
@@ -5040,10 +5110,44 @@ function renderClankers(list){
     var rowTitle=c.role_mismatch?(' title="'+esc(c.role_mismatch)+'"'):'';
     return '<div class="'+rowCls+'" data-clanker="'+esc(key)+'"'+rowTitle+'><span class="clanker-dot'+(c.stale?' stale':'')+'"></span>'+av+
       '<div class="clanker-main"><div class="clanker-user">'+esc(user)+statusPill+tierPill+'</div>'+
-      '<div class="clanker-sub">'+(sub||'&mdash;')+'</div>'+task+capsLine+protoLine+interestsLine+'</div>'+
+      '<div class="clanker-sub">'+(sub||'&mdash;')+'</div>'+task+failLine+capsLine+protoLine+interestsLine+paneBlock+histLink+'</div>'+
       (actions||('<span class="feed-time">'+esc(rel(c.connected_at))+'</span>'))+'</div>';
   }).join('');
 }
+// #7317 item 3 helpers. Both return '' when there is nothing to show so a
+// healthy row is byte-for-byte what it was before.
+function clankerFailureLine(f){
+  if(!f||!f.reason)return '';
+  var where=f.repo?(esc(f.repo)+(f.number?'#'+esc(f.number):'')):'';
+  var kind=(f.kind&&f.kind!=='unspecified')?('<b>'+esc(f.kind)+'</b> '):'';
+  var when=f.at?(' &middot; '+esc(rel(f.at))):'';
+  return '<div class="clanker-sub clanker-fail" title="'+esc(f.reason)+'">last failure: '+kind+esc(f.reason)+(where?(' &middot; '+where):'')+when+(f.permanent?' &middot; permanent':'')+'</div>';
+}
+// Open/closed state of each row's pane <details>, keyed by clanker, so the
+// 4-second fleet re-render does not slam a pane shut while the operator is
+// reading it. Toggle events do not bubble; the listener below uses capture.
+var ccOpenPanes={};
+function clankerPaneBlock(lines,key){
+  if(!lines||!lines.length)return '';
+  var open=key&&ccOpenPanes[key]?' open':'';
+  return '<details class="clanker-pane" data-pane="'+esc(key)+'"'+open+'><summary>agent pane &middot; '+lines.length+' line'+(lines.length===1?'':'s')+'</summary><pre>'+esc(lines.join('\n'))+'</pre></details>';
+}
+onEl('clanker-list','toggle',function(e){
+  var d=e.target;if(!d||!d.classList||!d.classList.contains('clanker-pane'))return;
+  var k=d.getAttribute('data-pane');if(!k)return;
+  if(d.open)ccOpenPanes[k]=true;else delete ccOpenPanes[k];
+},true);
+// The "run history" link is for every viewer, not just admins — the endpoint
+// it drives is the same public read as the activity rail. Registered
+// separately from the admin click handler below, which returns early for a
+// non-admin viewer.
+onEl('clanker-list','click',function(e){
+  var b=e.target;
+  if(!b||b.tagName!=='BUTTON'||b.getAttribute('data-role')!=='runs')return;
+  ccLookupRuns(b.getAttribute('data-user'));
+  var card=document.getElementById('runs-card');
+  if(card&&card.scrollIntoView)card.scrollIntoView({behavior:'smooth',block:'start'});
+});
 // ccUpdateArmy summarises the fleet into working/reviewing/idle counts. Army framing
 // derived entirely from the live fleet snapshot — no fabricated numbers.
 function ccUpdateArmy(list){
@@ -5236,6 +5340,70 @@ function renderPolicy(p){
 // prevent the others from hydrating (regression #2574 left all three stuck when a
 // single render threw). Errors are logged, never silently swallowed.
 function safeRender(name,fn){try{fn();}catch(e){console.error('opsPoll render failed: '+name,e);}}
+// ── Contributor run history (#7317) ───────────────────────────────────────
+// Renders GET /api/contribute/runs?username=<u> for one login. Deliberately not
+// on the opsPoll cadence: it is a lookup the operator asks for, and a stale
+// answer is re-fetched with one click. ccRunsUser remembers the last lookup so
+// the fleet-row link and the form share one path.
+var ccRunsUser='';
+function ccFmtDuration(sec){
+  if(typeof sec!=='number'||!(sec>0))return '';
+  if(sec<60)return Math.round(sec)+'s';
+  var m=Math.round(sec/60);if(m<60)return m+'m';
+  var h=Math.floor(m/60);return h+'h '+(m%%60)+'m';
+}
+function ccScenarioLabel(sc){
+  var map={verdict_complete:'completed on its own verdict',idle_complete:'completed via idle fallback',headless_complete:'completed (headless)',
+    env_failure:'environment failure',task_failure:'failed on the work',unspecified_failure:'failed (unspecified)',
+    abandoned_handback:'handed back (relay asked for new work)',abandoned_disconnect:'handed back (connection lost)',abandoned_other:'handed back'};
+  return map[sc]||(sc||'').replace(/_/g,' ');
+}
+function ccRenderRuns(user,data){
+  var el=document.getElementById('runs-list'),cnt=document.getElementById('runs-count');
+  if(!el)return;
+  var runs=(data&&data.runs)||[];
+  if(cnt)cnt.textContent=runs.length?(runs.length+' run'+(runs.length===1?'':'s')+' \u00b7 '+(data.window_days||7)+'d'):'';
+  if(!runs.length){el.innerHTML='<div class="ops-empty">No runs recorded for <b>'+esc(user)+'</b> in the last '+esc(data&&data.window_days||7)+' days.</div>';return;}
+  var html='';
+  // Only say the pane is withheld when there is something it would have shown
+  // — a list of clean completions has no pane to miss.
+  var diagnosable=runs.some(function(r){return r.outcome==='failed'||r.outcome==='abandoned';});
+  if(diagnosable&&data&&data.pane_tail_visible===false){
+    html+='<div class="run-pane-note">Terminal output at the moment each run stopped is shown to this hive&rsquo;s owner and read-write viewers only.</div>';
+  }
+  html+=runs.map(function(r,i){
+    var oc=r.outcome||'';
+    var taskTxt=r.repo?(esc(r.repo)+(r.number?'#'+esc(r.number):'')):esc(r.task_id||'');
+    var taskURL=ccIssueURL(r);
+    var taskHtml=taskURL?('<a href="'+esc(taskURL)+'" target="_blank" rel="noopener noreferrer">'+taskTxt+'</a>'):taskTxt;
+    var bits=[];
+    if(r.duration_s)bits.push(ccFmtDuration(r.duration_s));
+    if(r.model)bits.push(esc(r.model));else if(r.backend)bits.push(esc(r.backend));
+    if(r.ts)bits.push(esc(rel(r.ts)));
+    var reason=r.reason||r.verdict_reason||'';
+    var kind=r.failure_kind&&r.failure_kind!=='unspecified'?('<b>'+esc(r.failure_kind)+'</b> &middot; '):'';
+    var pr=r.pr_url?('<div class="run-reason"><a href="'+esc(r.pr_url)+'" target="_blank" rel="noopener noreferrer">'+esc(r.pr_url)+'</a></div>'):'';
+    var pane=(r.pane_tail&&r.pane_tail.length)?('<details class="clanker-pane"><summary>terminal when it stopped &middot; '+r.pane_tail.length+' line'+(r.pane_tail.length===1?'':'s')+'</summary><pre>'+esc(r.pane_tail.join('\n'))+'</pre></details>'):'';
+    return '<div class="run-item"><div class="run-head"><span class="run-outcome '+esc(oc)+'">'+esc(oc)+'</span><span class="run-task">'+taskHtml+'</span><span class="run-meta">'+bits.join(' &middot; ')+'</span></div>'+
+      '<div class="run-reason" title="'+esc(ccScenarioLabel(r.scenario))+'">'+kind+(reason?esc(reason):esc(ccScenarioLabel(r.scenario)))+'</div>'+pr+pane+'</div>';
+  }).join('');
+  el.innerHTML=html;
+}
+function ccLookupRuns(user){
+  user=(user||'').trim().replace(/^@/,'');
+  var input=document.getElementById('runs-user');
+  if(input&&input.value!==user)input.value=user;
+  var el=document.getElementById('runs-list');
+  if(!user){if(el)el.innerHTML='<div class="ops-empty">Enter a contributor&rsquo;s GitHub login.</div>';return;}
+  ccRunsUser=user;
+  if(el)el.innerHTML='<div class="ops-empty">Loading runs for '+esc(user)+'&hellip;</div>';
+  fetch('/api/contribute/runs?username='+encodeURIComponent(user)+'&days=7&limit=50')
+    .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();})
+    .then(function(d){if(ccRunsUser!==user)return;ccRenderRuns(user,d);})
+    .catch(function(err){if(el)el.innerHTML='<div class="ops-empty">Could not load runs for '+esc(user)+' ('+esc(err.message)+').</div>';});
+}
+onEl('runs-lookup','submit',function(e){e.preventDefault();var i=document.getElementById('runs-user');ccLookupRuns(i?i.value:'');});
+
 async function opsPoll(){
   try{
     var res=await fetch('/api/contribute/fleet');
@@ -7327,13 +7495,25 @@ func (s *Server) handleContributeFleet(w http.ResponseWriter, r *http.Request) {
 		cooldownCount, inFlightCount = s.contributeHub.CooldownCounts()
 		heldCount = s.contributeHub.HeldCount()
 	}
+	// #7317 item 3: the live pane tail is gated exactly like the stored one on
+	// /api/contribute/runs — see paneTailViewer. The snapshot builds it for
+	// every viewer (it is a bounded copy, cheap) and this boundary decides who
+	// gets it, so the same rule applies whether the contributor is still
+	// connected or long gone.
+	paneVisible := s.paneTailViewer(r)
+	if !paneVisible {
+		for i := range snap.Clankers {
+			snap.Clankers[i].PaneTail = nil
+		}
+	}
 	jsonResponse(w, map[string]any{
-		"clankers":        snap.Clankers,
-		"work":            snap.Work,
-		"policy":          s.buildContributeAdmissionPolicy(),
-		"cooldown_count":  cooldownCount,
-		"in_flight_count": inFlightCount,
-		"held_count":      heldCount,
+		"clankers":          snap.Clankers,
+		"work":              snap.Work,
+		"policy":            s.buildContributeAdmissionPolicy(),
+		"cooldown_count":    cooldownCount,
+		"in_flight_count":   inFlightCount,
+		"held_count":        heldCount,
+		"pane_tail_visible": paneVisible,
 	})
 }
 
@@ -7856,6 +8036,31 @@ func (s *Server) requireContributorWrite(w http.ResponseWriter, r *http.Request)
 		return false
 	}
 	return true
+}
+
+// paneTailViewer reports whether this request may see agent pane output —
+// the pane_tail on a fleet row or a task-run record (#7317 item 3).
+//
+// Pane text is what the agent printed: more sensitive than the bounded reason
+// string the same endpoints already serve anonymously, since it can carry
+// repository paths, partial secrets the redactor did not recognize, or a
+// half-typed credential prompt. So it follows the same line the per-clanker
+// controls draw: owner and read-write see it, everyone else does not.
+//
+// The empty-role case mirrors requestRoleAllowsOwner, not requireContributorWrite:
+// on a spoke with any auth boundary an absent X-Hive-Role is an anonymous caller
+// and gets nothing, while on a genuinely open spoke (no token, no allowlist) the
+// whole dashboard is already anonymous and hiding one field from its only
+// operator would be theatre. Read-only decision, no side effects.
+func (s *Server) paneTailViewer(r *http.Request) bool {
+	role := r.Header.Get("X-Hive-Role")
+	if role == config.RoleOwner || role == config.RoleReadWrite {
+		return true
+	}
+	if role == "" {
+		return s.authToken == "" && !s.directRouteAuthzEnabled()
+	}
+	return false
 }
 
 func (s *Server) handleContributorsList(w http.ResponseWriter, r *http.Request) {

@@ -36,10 +36,14 @@ func shouldPostAdvisoryDigest(digest *advisory.Digest, ghClient *github.Client, 
 	return advisory.ShouldPostDigest(digest, ghClient != nil, hasPinnedIssue)
 }
 
+// advisoryPostGate is process-wide because the eval-cycle ticker is not the
+// only poster: startup and restart paths post too.
+var advisoryPostGate = advisory.NewPostGate()
+
 func advisoryPostDue(advCfg config.AdvisoryConfig, repo string, now time.Time, logger *slog.Logger) bool {
-	return advisory.PostDue(advCfg, repo, now, logger)
+	return advisoryPostGate.Due(advCfg, repo, now, logger)
 }
 
 func recordAdvisoryPostSuccess(repo string, now time.Time) {
-	advisory.RecordPostSuccess(repo, now)
+	advisoryPostGate.RecordSuccess(repo, now)
 }
