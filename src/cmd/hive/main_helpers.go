@@ -1360,7 +1360,7 @@ func runEvalCycle(
 	}
 
 	if !statusPublished {
-		statusPublished = dashSrv.UpdateStatusIfFresh(statusPayload, buildEpoch)
+		dashSrv.UpdateStatusIfFresh(statusPayload, buildEpoch)
 	}
 
 	publishFleetReports(ctx, logger, ghClient, dashSrv, statusPayload.FleetReport, cfg.Governor.FleetReport.DryRun())
