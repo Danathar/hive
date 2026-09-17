@@ -11,6 +11,17 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-17 (v4.52.2)
+
+### Changed
+
+- Split `pkg/dashboard/api_contribute.go` god file: move the contributor profile store/invite tokens, contributor-management handlers, federation registry, and leaderboard verbatim into `contribute_profiles.go`, `contribute_admin.go`, `contribute_federation.go`, and `contribute_leaderboard.go` (#7435 god-file split; no behavior change).
+
+### Fixed
+
+- Dashboard: the Getting Started "Trajectory Review" deep link now opens the tab it names. Its `actionArg` was written as the single-quoted string `'${TRAJECTORY_CONFIG_TAB}'`, which does not interpolate, so `openConfigDialog()` could not match it against `GOVERNOR_CONFIG_TABS` and silently fell back to the remembered tab or `GOVERNOR_CONFIG_TABS[0]`. The link now references the constant. Trajectory Review itself moved from Settings → General to Settings → Features, where the other default-off, opt-in capability lanes live, and `TRAJECTORY_CONFIG_TAB` is `'Features'` to match. A new test asserts that every Getting Started deep link routed to `welcomeShowConfigTab` resolves to a real member of `GOVERNOR_CONFIG_TABS`, so a mis-quoted or stale tab name fails CI instead of quietly opening the wrong tab. (#7452)
+- Kick issue/PR lists are now allocated fairly across repos instead of being cut at a flat prefix, so no repo can be shut out by its position in the order. On a 16-repo project with 423 open PRs and a cap of 50, fourteen repos previously contributed nothing to any kick, which caused agents to duplicate work they could not see. Unused slots from small repos are redistributed to repos that still have work. `governor.kick_limits.max_issues`/`max_prs` now accept `0` to mean unlimited; an absent key still uses the default.
+
 ## 2026-09-17 (v4.52.1)
 
 ### Changed
