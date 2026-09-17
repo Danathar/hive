@@ -15,23 +15,6 @@ import (
 	"github.com/hivecommons/hive/pkg/worksource"
 )
 
-// ── Operations command center: live SSE broadcast + ready-work queue ──────────
-//
-// This file is PURELY ADDITIVE and READ-ONLY. It exposes the events the hub
-// ALREADY records (ActivityEntry — join/leave/pick-up/complete/fail/promote) as a
-// Server-Sent-Events stream, plus a read-only snapshot of the ready-work QUEUE
-// derived from the SAME ActionableIssues set selectTask offers from. Nothing here
-// changes the contributor WS protocol, assignment, credentials, or any control
-// behaviour: it is a fan-out of information the dashboard could already poll, made
-// live so the Operations tab can render an SRE "command center" (a live queue, a
-// travel animation when work is picked up, a dev-log narration, and army framing).
-//
-// The stream lives under the /api/contribute* path prefix, so isPublicPath
-// (server.go) already makes it PUBLIC — the whole clanker page is viewable with no
-// auth, and this stream is read-only info, so anonymous viewers may subscribe. The
-// gated MUTATION endpoints (trust/revoke/delete) are untouched and still enforced
-// by requireContributorWrite.
-
 // sseReplayCap is how many recent ActivityEntry events a freshly-connected SSE
 // subscriber is replayed so its page is not blank on load. It is bounded by the
 // hub's own maxActivityEntries ring buffer (50); we cap the replay a little lower
@@ -793,21 +776,6 @@ func sortReadyQueue(items []ReadyQueueItem) {
 		return items[i].Number < items[j].Number
 	})
 }
-
-// ── Label-affinity: contributor-declared label interests (#2637) ───────────────
-//
-// A contributor opts in to a set of label names they can help with (e.g. an
-// NVIDIA-machine owner subscribes to "nvidia"). The Operations ready-work queue
-// then, FOR THAT VIEWER ONLY, tags matching issues and floats them to the front.
-// This is a SOFT signal — a personalised VIEW over the same admissible set — never
-// a filter: nothing is removed, so a contributor with no interests, or an issue
-// with no labels, is never starved. The shared/anonymous queue is untouched.
-//
-// Matching rule (chosen for predictability): an issue matches when at least one of
-// its GitHub labels equals — case-insensitively, after trimming surrounding
-// whitespace — a label the viewer declared. Exact NAME match, not substring, so a
-// "gpu" interest does not silently sweep in "gpu-docs" and the contributor gets
-// exactly the labels they asked for.
 
 // normalizeLabelInterest lower-cases and trims one label string so interest
 // matching is case-insensitive and whitespace-insensitive. Empty after trimming

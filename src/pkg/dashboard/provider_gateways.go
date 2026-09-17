@@ -1,18 +1,5 @@
 package dashboard
 
-// Consumer-defined provider-gateway interfaces (kubestellar/hive#5565,
-// slice 3).
-//
-// Each interface names exactly the surface the dashboard's handlers actually
-// call on an LLM-provider package — nothing more — so pkg/dashboard no longer
-// imports pkg/openrouter, pkg/watsonx, or pkg/linearagent. The concrete
-// adapters are one-line delegations constructed in cmd/hive and handed in via
-// Dependencies, extending the injection style Dependencies already uses
-// (concrete pointers + func-typed fields) with narrow interfaces.
-//
-// Every cross-boundary type is either a primitive or a small mirror struct
-// declared here, so no provider type ever appears in a dashboard signature.
-
 import (
 	"context"
 	"net/http"

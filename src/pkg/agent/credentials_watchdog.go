@@ -1,7 +1,3 @@
-// Package agent: credential watchdog — periodic verification that each in-use
-// CLI backend's durable credential file (Copilot device-flow token, Claude
-// OAuth credentials) is present and usable. Pure move from manager.go
-// (refs #7303); no behavior change.
 package agent
 
 import (

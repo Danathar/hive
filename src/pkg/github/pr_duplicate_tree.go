@@ -9,29 +9,6 @@ import (
 	gh "github.com/google/go-github/v72/github"
 )
 
-// Content-identity duplicate guard (kubestellar/hive#5111).
-//
-// CreatePR has always been idempotent for the SAME head branch: re-requesting a
-// PR for a branch that already has one returns the existing PR instead of
-// opening a second. That covers a retried request; it cannot see the incident
-// class this file exists for — an agent copying one change forward onto a NEW
-// branch and filing it again. tuna-os/tromso collected five such PRs (#170,
-// #212, #225, #241, #244) sharing the same blobs, two of them (#241, #212)
-// carrying an identical tree, so `git diff` between their tips was empty.
-//
-// The discriminator is the commit's TREE SHA. Two commits with the same tree
-// have byte-identical content, so two open PRs on the same base whose head
-// commits share a tree propose exactly the same change — whatever their branch
-// names, commit messages, or authorship. That is an equality test, not a
-// heuristic: it cannot fire on two changes that merely look alike, which is why
-// it is safe to act on automatically. The near-duplicate class in the same
-// issue (same topic, different bytes) is deliberately NOT addressed here; it
-// has no exact test and belongs in policy text, not in a gate that silently
-// swallows work.
-//
-// Comparing only against PRs with the SAME base matters. An identical tree on a
-// different base is a different diff, so it is not a duplicate.
-
 // maxDuplicateTreeCandidates bounds how many open PRs one guard pass inspects.
 // Each uncached candidate costs a commit lookup, and PR creation must not turn
 // into an unbounded fan-out on a repository with hundreds of open PRs — the

@@ -1,5 +1,3 @@
-// Runtime UID-isolation markers: publishing the per-runtime marker and
-// gating agent launches on isolation readiness.
 package agent
 
 import (

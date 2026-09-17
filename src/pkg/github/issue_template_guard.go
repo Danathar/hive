@@ -8,45 +8,6 @@ import (
 	"github.com/hivecommons/hive/pkg/issueshape"
 )
 
-// Unfilled-template gate (#7153).
-//
-// repo_ref_validate.go catches an agent that copies a policy prompt's `--repo
-// "<org>/<target-repo>"` verbatim, because a repo name has a tiny legal
-// charset and a placeholder is therefore cheap to reject with certainty. The
-// same copy-the-template-literally failure happens one field over, in the
-// issue's own title and body, where there is no charset to lean on.
-//
-// Observed live as hivecommons/hive#7153, filed by the guide agent:
-//
-//	title: [guide] <specific description of the documentation gap>
-//	body:  ## Documentation Gap\n\n<what is missing or incorrect>\n\n## Recommendation\n\n<what should be added>
-//
-// Two independent defects in one filing, which is why this guard checks for
-// both:
-//
-//  1. The `<...>` spans were never substituted. The agent emitted its prompt's
-//     skeleton instead of its findings, so the issue describes nothing — it
-//     cannot be triaged, reproduced, or fixed, and no PR can be written
-//     against it. Unlike a bad repo ref this one SUCCEEDS at the API, so
-//     nothing pushes back: it becomes a real issue that a human has to read,
-//     understand is empty, and close by hand.
-//
-//  2. Those `\n` are literal backslash-n, not newlines. The body went through
-//     a layer that did not interpret escapes (a single-quoted shell string is
-//     the usual culprit), so even the headings render as one unbroken line.
-//
-// Both are structural defects in the request itself, knowable without asking
-// GitHub anything, so this gate FAILS CLOSED — it refuses the create, exactly
-// as validateRepoRef does. That is the opposite posture from the dedupe and
-// rejected-twin gates in CreateIssue, and deliberately so: those two infer
-// something about the world from a lookup that might have failed for unrelated
-// reasons, so they file on doubt. This one is a statement about the bytes in
-// hand. Failing open here just means the garbage issue gets created and a
-// maintainer does the cleanup, which is the bug being fixed.
-//
-// The error text names the offending span, because the fix belongs in an
-// agent's output and the agent gets the error back on its next kick.
-
 // htmlTagNames are the element names that may legitimately open a `<...>` span
 // in an issue body. Only those that can plausibly appear bare and multi-word
 // need listing; anything carrying attributes is already excluded by the

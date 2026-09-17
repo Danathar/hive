@@ -148,39 +148,6 @@ var (
 	releaseLineLagFn func() *FrontendReleaseLineLag
 )
 
-// SetReleaseLineLagProvider registers a function reporting how far the edge
-// release line (v5) sits behind the stable default branch (v4), for the
-// dashboard's release-line drift surface (#6960). Wired to hub.ReleaseLineLagStatus
-// at boot; nil in tests and on processes without the SHA poller, where the
-// surface renders "unknown".
-func SetReleaseLineLagProvider(fn func() *FrontendReleaseLineLag) {
-	releaseLineLagMu.Lock()
-	defer releaseLineLagMu.Unlock()
-	releaseLineLagFn = fn
-}
-
-func getReleaseLineLagFn() func() *FrontendReleaseLineLag {
-	releaseLineLagMu.RLock()
-	defer releaseLineLagMu.RUnlock()
-	return releaseLineLagFn
-}
-
-// buildReleaseLineLag renders the release-line drift surface from the wired
-// provider. With no provider registered the lag is UNKNOWN — never a healthy
-// zero — so a process that cannot measure the drift says so rather than
-// silently claiming the lines are in sync (the #6960 failure mode).
-func buildReleaseLineLag() *FrontendReleaseLineLag {
-	fn := getReleaseLineLagFn()
-	if fn == nil {
-		return &FrontendReleaseLineLag{
-			EdgeBranch:   releaseLineEdgeBranch,
-			StableBranch: releaseLineStableBranch,
-			Known:        false,
-		}
-	}
-	return fn()
-}
-
 // SetEntitledModelsProvider registers a function that reports the per-key
 // entitled model set the proxy has learned for a LiteLLM endpoint (from a
 // key-info probe or a "team not allowed" 403). The dashboard uses it to narrow
@@ -758,8 +725,13 @@ func buildAgentsWithHidden(statuses map[string]*agent.AgentProcess, cfg *config.
 			model = proc.ModelOverride
 		}
 
+		// busy: "working" used to mean nothing more than "the process is
+		// running" — an agent parked at its idle prompt after a fruitless kick
+		// read exactly like one mid-task (#7421). A kicked turn the manager has
+		// seen END is idle, whatever the process state says; liveness is not
+		// evidence of work.
 		busy := "idle"
-		if proc.State == agent.StateRunning {
+		if proc.State == agent.StateRunning && !proc.KickOutcome.Settled(proc.LastKick) {
 			busy = "working"
 		}
 
@@ -894,6 +866,19 @@ func buildAgentsWithHidden(statuses map[string]*agent.AgentProcess, cfg *config.
 			TransientNudges: proc.TransientNudges,
 			Conditions:      proc.WatchdogConditions,
 			WatchdogMode:    watchdogMode,
+		}
+		// #7421: how the last kicked turn ended, so the card can say "asked
+		// the operator what to do" or "stood down" instead of implying work.
+		if proc.KickOutcome.Settled(proc.LastKick) {
+			a.KickOutcome = proc.KickOutcome.Kind
+			a.KickOutcomeReason = proc.KickOutcome.Reason
+			if proc.KickOutcome.Kind == agent.KickOutcomeStandDown {
+				a.StructuredStatus = "BLOCKED"
+				a.StatusEvidence = "blocked: policy stand-down"
+				if r := strings.TrimSpace(proc.KickOutcome.Reason); r != "" {
+					a.StatusEvidence += ": " + r
+				}
+			}
 		}
 		if status := proc.BackendAuth.Status; status != "" && status != agent.BackendAuthOK {
 			a.BackendAuthStatus = status
@@ -1061,22 +1046,106 @@ func buildMissingRuntimeAgent(name string, agentCfg config.AgentConfig, cfg *con
 	}
 }
 
-// loadStatsConfig reads the per-agent stats configuration from /data/agents/{name}/stats.json.
-// Falls back to config StatsDisplay, then built-in defaults when the file is missing or empty.
-func loadStatsConfig(name string) []any {
-	statsFile := fmt.Sprintf("/data/agents/%s/stats.json", name)
+// agentStatsDataDir is where per-agent stats.json files live. A variable so
+// tests can point the readers at a temp dir.
+var agentStatsDataDir = "/data/agents"
+
+func agentStatsPath(name string) string {
+	return fmt.Sprintf("%s/%s/stats.json", agentStatsDataDir, name)
+}
+
+// ciMaintainerStatsAgent is the one agent whose stat strip is the primary
+// repo's CI/coverage/release health. That strip is a description of the
+// repository's workflows, not of the agent, so it only means something on the
+// agent that owns them.
+const ciMaintainerStatsAgent = "ci-maintainer"
+
+// statKeys returns the ordered key list of a stats config.
+func statKeys(stats []any) []string {
+	keys := make([]string, 0, len(stats))
+	for _, raw := range stats {
+		m, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		k, _ := m["key"].(string)
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// isClonedCIMaintainerStrip reports whether a stats config stored for `name`
+// is ci-maintainer's CI/coverage strip verbatim — the same keys in the same
+// order — on an agent that is not ci-maintainer.
+//
+// Why this exists: the image used to seed /data/agents/reviewer/stats.json
+// with a byte-copy of ci-maintainer's set (a retired seed, copied by
+// `cp -rn` on every boot until the file existed). Any spoke that later
+// created an agent named "reviewer" — an ADVISORY, on-demand agent that owns
+// no repository — inherited the strip and rendered "COVERAGE 0% current,
+// goal: 91%" plus thirteen workflow dots for pipelines it does not have
+// (#7411). The seed is gone, but the copies it already made persist on
+// existing spokes; this predicate lets the readers recognise and drop them.
+func isClonedCIMaintainerStrip(name string, stats []any) bool {
+	if name == ciMaintainerStatsAgent {
+		return false
+	}
+	want := statKeys(defaultStatsConfig(ciMaintainerStatsAgent))
+	got := statKeys(stats)
+	if len(got) != len(want) || len(got) == 0 {
+		return false
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// clonedStatsPruned guards the once-per-agent log line for a pruned clone.
+var clonedStatsPruned sync.Map
+
+// readAgentStatsFile reads /data/agents/{name}/stats.json, accepting either the
+// {"stats":[...]} wrapper the API writes or a bare array (the seed shape).
+// Returns ok=false when the file is missing, unparseable, or empty — callers
+// then fall back to config/defaults.
+//
+// A file that is ci-maintainer's strip cloned onto another agent is treated as
+// absent AND removed, so the fabricated coverage/CI numbers stop rendering on
+// the next status build instead of persisting until an operator finds the
+// Stats tab (#7411, fix 4). Removal is logged once per agent.
+func readAgentStatsFile(name string) ([]any, bool) {
+	statsFile := agentStatsPath(name)
 	data, err := os.ReadFile(statsFile)
-	if err == nil {
-		var wrapper struct {
-			Stats []any `json:"stats"`
+	if err != nil {
+		return nil, false
+	}
+	var stats []any
+	var wrapper struct {
+		Stats []any `json:"stats"`
+	}
+	if json.Unmarshal(data, &wrapper) == nil && len(wrapper.Stats) > 0 {
+		stats = wrapper.Stats
+	} else if json.Unmarshal(data, &stats) != nil || len(stats) == 0 {
+		return nil, false
+	}
+	if isClonedCIMaintainerStrip(name, stats) {
+		if err := os.Remove(statsFile); err != nil && !os.IsNotExist(err) {
+			slog.Warn("could not remove cloned ci-maintainer stats", "agent", name, "path", statsFile, "error", err)
+		} else if _, seen := clonedStatsPruned.LoadOrStore(name, true); !seen {
+			slog.Warn("removed stats.json that cloned ci-maintainer's CI/coverage strip onto another agent (#7411)", "agent", name, "path", statsFile)
 		}
-		if json.Unmarshal(data, &wrapper) == nil && len(wrapper.Stats) > 0 {
-			return wrapper.Stats
-		}
-		var stats []any
-		if json.Unmarshal(data, &stats) == nil && len(stats) > 0 {
-			return stats
-		}
+		return nil, false
+	}
+	return stats, true
+}
+
+// loadStatsConfig reads the per-agent stats configuration from /data/agents/{name}/stats.json.
+// Falls back to built-in defaults when the file is missing or empty.
+func loadStatsConfig(name string) []any {
+	if stats, ok := readAgentStatsFile(name); ok {
+		return stats
 	}
 	return defaultStatsConfig(name)
 }
@@ -1129,6 +1198,34 @@ func resolveStatsSources(stats []any, cfg *config.Config) []any {
 		}
 	}
 	return stats
+}
+
+// LoadStatsConfigWithCfg reads stats from disk, then falls back to config StatsDisplay field.
+func LoadStatsConfigWithCfg(name string, cfg *config.Config) []any {
+	if stats, ok := readAgentStatsFile(name); ok {
+		return stats
+	}
+	if agentCfg, ok := cfg.Agents[name]; ok && len(agentCfg.StatsDisplay) > 0 {
+		result := make([]any, 0, len(agentCfg.StatsDisplay))
+		for _, s := range agentCfg.StatsDisplay {
+			entry := map[string]any{
+				"key": s.Key, "label": s.Label,
+				"source": s.Source, "field": s.Field, "style": s.Style,
+			}
+			if s.TrendField != "" {
+				entry["trendField"] = s.TrendField
+			}
+			if s.Target > 0 {
+				entry["target"] = s.Target
+			}
+			if s.Desc != "" {
+				entry["desc"] = s.Desc
+			}
+			result = append(result, entry)
+		}
+		return result
+	}
+	return defaultStatsConfig(name)
 }
 
 func defaultStatsConfig(name string) []any {
@@ -2278,7 +2375,9 @@ func roundTo(f float64, decimals int) float64 {
 }
 
 var statusTokenRedactor = regexp.MustCompile(`(ghp_|gho_|ghs_|ghu_|ghr_|github_pat_)[A-Za-z0-9_]{10,}`)
+
 var deviceCodeRedactor = regexp.MustCompile(`(?i)(one-time code:\s*)[A-Z0-9]{4}-[A-Z0-9]{4}`)
+
 var deviceCodeLineRedactor = regexp.MustCompile(`(?m)^.*(?:login/device|Waiting for authorization|one-time code:|Press any key to copy).*$`)
 
 // apiKeyRedactor matches sk-prefixed API keys: real Anthropic keys (sk-ant-…),
@@ -2316,4 +2415,37 @@ func redactTokens(s string) string {
 	s = deviceCodeRedactor.ReplaceAllString(s, "${1}****-****")
 	s = deviceCodeLineRedactor.ReplaceAllString(s, "[auth flow redacted]")
 	return s
+}
+
+// SetReleaseLineLagProvider registers a function reporting how far the edge
+// release line (v5) sits behind the stable default branch (v4), for the
+// dashboard's release-line drift surface (#6960). Wired to hub.ReleaseLineLagStatus
+// at boot; nil in tests and on processes without the SHA poller, where the
+// surface renders "unknown".
+func SetReleaseLineLagProvider(fn func() *FrontendReleaseLineLag) {
+	releaseLineLagMu.Lock()
+	defer releaseLineLagMu.Unlock()
+	releaseLineLagFn = fn
+}
+
+func getReleaseLineLagFn() func() *FrontendReleaseLineLag {
+	releaseLineLagMu.RLock()
+	defer releaseLineLagMu.RUnlock()
+	return releaseLineLagFn
+}
+
+// buildReleaseLineLag renders the release-line drift surface from the wired
+// provider. With no provider registered the lag is UNKNOWN — never a healthy
+// zero — so a process that cannot measure the drift says so rather than
+// silently claiming the lines are in sync (the #6960 failure mode).
+func buildReleaseLineLag() *FrontendReleaseLineLag {
+	fn := getReleaseLineLagFn()
+	if fn == nil {
+		return &FrontendReleaseLineLag{
+			EdgeBranch:   releaseLineEdgeBranch,
+			StableBranch: releaseLineStableBranch,
+			Known:        false,
+		}
+	}
+	return fn()
 }

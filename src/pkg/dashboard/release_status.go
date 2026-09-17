@@ -10,24 +10,6 @@ import (
 	"github.com/hivecommons/hive/pkg/hub/spoke"
 )
 
-// Spoke release visibility surface (#7092).
-//
-// A hosted-spoke operator reported that the dashboard still shows nothing about
-// (a) the release channel the spoke follows and (b) when the last upgrade was
-// attempted and whether it SUCCEEDED — "absence of an error message is not
-// enough". This file builds the two explicit, honest status objects the
-// dashboard renders for that.
-//
-// Two hard invariants carried here:
-//   - "never attempted" and "attempted and succeeded" are DIFFERENT states, and
-//     both differ from "attempted and failed". A blank panel must never be able
-//     to masquerade as success — that is the exact complaint in #7092.
-//   - an unresolved release channel renders as an explicit "unknown / not a
-//     release channel" (plus the image tag actually observed), never a
-//     fabricated default like "stable".
-
-// --- Release channel --------------------------------------------------------
-
 // ReleaseChannelStatus is the JSON contract for "what channel does this spoke
 // follow". Resolved is the honesty flag: when false the frontend must show the
 // unknown state and the observed ImageTag, not a default.
@@ -69,8 +51,6 @@ func buildReleaseChannelStatus(imageRef, trackedChannel string) ReleaseChannelSt
 	}
 	return st
 }
-
-// --- Last upgrade attempt ---------------------------------------------------
 
 // The three (plus one) mutually exclusive outcome states. Named constants keep
 // the Go classifier and the frontend switch in step.
@@ -233,8 +213,6 @@ func buildUpgradeAttemptStatus(outcome *upgradeOutcome, marker map[string]any, r
 		Detail: "No upgrade has been attempted on this hive yet. This is not the same as 'up to date': nothing has tried to move it.",
 	}
 }
-
-// --- Combined surface -------------------------------------------------------
 
 // SpokeReleaseStatus is the single object the dashboard fetches to answer #7092:
 // which channel the spoke follows, and what happened on the last upgrade

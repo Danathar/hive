@@ -1,19 +1,5 @@
 package dashboard
 
-// Storage for the self-service backup encryption key entered from the spoke
-// dashboard's governor Security tab (#4129).
-//
-// Before this, the key could only come from HIVE_BACKUP_KEY on the deployment.
-// A hosted spoke owner has no deployment-env access, so "Back up this hive"
-// was permanently refused for exactly the users who cannot rebuild a lost hive
-// by hand. The key is now settable through governor config: the VALUE is
-// written to a 0600 PVC file and hive.yaml records only the resulting PATH
-// (governor.backup.key_file), mirroring the bob/LiteLLM key stores.
-//
-// The key value must never be logged, echoed in an API response, or written
-// to hive.yaml. Fail-closed is preserved end to end: clearing the key makes
-// the backup endpoint refuse again.
-
 import (
 	"encoding/hex"
 	"fmt"

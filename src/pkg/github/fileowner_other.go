@@ -2,7 +2,9 @@
 
 package github
 
-import "io/fs"
+import (
+	"io/fs"
+)
 
 // fileOwnerUID has no meaningful value off unix (dev/Windows builds); return -1
 // so the authorizer treats ownership as unverifiable. The production target is

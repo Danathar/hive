@@ -1,20 +1,5 @@
 package dashboard
 
-// GET /api/config/provenance — "which layer set this field, and can I edit it?"
-//
-// Before this endpoint, that question was answerable only by reading pod boot
-// logs for a single entrypoint line. The cost was concrete: a GitHub
-// Enterprise hive was repaired on the FOURTH attempt, after patching the hub's
-// meta.json, then clusters.json, then the spoke's ConfigMap — three layers
-// INERT for github.app_id — before patching the dashboard overlay, the layer
-// that actually wins.
-//
-// The response answers, per field: which layer won, where to write to change
-// it, and whether that layer is writable AT ALL. The ConfigMap seed's answer
-// is "nobody" — nothing in the system can write it (the hub holds only a
-// read-only get; the spoke's RBAC omits configmaps), which is why editing it
-// and restarting appears to do nothing.
-
 import (
 	"encoding/json"
 	"net/http"

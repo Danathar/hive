@@ -1,9 +1,5 @@
 package dashboard
 
-// The /api/repo-activity handler. The ActivityCollector it serves from moved
-// to pkg/dashboard/collect (kubestellar/hive#5565 slice 2); the HTTP surface
-// stays here with the rest of the dashboard's handlers.
-
 import (
 	"net/http"
 

@@ -10,36 +10,6 @@ import (
 	gh "github.com/google/go-github/v72/github"
 )
 
-// Diagnosing a missing head ref (#5343).
-//
-// THE PROBLEM THIS SOLVES. Every gate on the PR-open path starts by comparing
-// base...head. When the agent's branch was never pushed, GitHub answers 404 and
-// the request failed with a message shaped like:
-//
-//	validating PR content metadata in o/r diff main...fix/x: GET .../compare/...: 404 Not Found
-//
-// which an operator reasonably reads as "the branch doesn't exist on the remote
-// repository" — and then goes to investigate branch creation. That is the wrong
-// place. The branch is missing because the PUSH failed, and on the hive the
-// overwhelmingly likely reason a push failed is that the agent could not
-// authenticate: the git credential helper was unreachable from the agent's UID
-// (the #5343 defect), or the per-agent scoped token was absent or unreadable.
-//
-// Reported live on a hosted GHE spoke: the quality agent committed a branch,
-// could not push it, and the only surface anyone saw was the downstream
-// "missing branch" error. The work was done and then lost.
-//
-// WHAT THIS ADDS. A missing head ref is confirmed against the refs API and then
-// reported as what it is — an unpushed branch — together with the credential
-// causes that actually produce it. The repository is probed too, so a 404 that
-// really means "no such repo" (or "the App installation cannot see it") is not
-// mislabelled as a push failure.
-//
-// This deliberately does NOT try to read the agent's git state or test the
-// credential helper: the watcher runs in the hive process, not in the agent's
-// UID, so any such check would be answering a different question than the one
-// that failed. It names the causes an operator should check, in order.
-
 // errMissingHead reports that the PR request named a head ref that does not
 // exist on the remote. It stays an ordinary (retryable) error rather than a
 // policy rejection: the agent pushing its branch makes the same request valid,

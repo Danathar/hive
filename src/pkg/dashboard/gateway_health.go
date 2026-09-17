@@ -8,8 +8,6 @@ import (
 	"github.com/hivecommons/hive/pkg/inferencehealth"
 )
 
-type serverGatewayHealthStore = inferencehealth.Store
-
 var (
 	gatewayHealthMu sync.RWMutex
 	gatewayHealthFn func() []inferencehealth.GatewayStatus
@@ -77,3 +75,5 @@ func gatewayStatusAfter(a, b inferencehealth.GatewayStatus) bool {
 	}
 	return at.After(bt)
 }
+
+type serverGatewayHealthStore = inferencehealth.Store

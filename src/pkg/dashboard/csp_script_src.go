@@ -1,11 +1,5 @@
 package dashboard
 
-// csp_base_script_src.go — the dashboard-side half of the CSP script-src
-// machinery. The pure hash/extraction helpers live in pkg/dashboard/webstatic
-// (extracted under #5565); this file keeps only the startup composition that
-// depends on dashboard-owned bytes: the embedded SPA (staticFS) and the
-// device-flow login page const.
-
 import (
 	"io/fs"
 	"sync"
@@ -21,6 +15,12 @@ var (
 	brandedIndex   []byte
 )
 
+// baseScriptSrcElem returns the startup-computed script-src-elem source list
+// covering the two documents whose bytes are fixed for the life of the
+// process: the embedded SPA (static/index.html, served verbatim by both
+// static_index.go and the plain file server) and the device-flow login page
+// (a const, served to any unauthenticated browser path). Computed once, like
+// the #3863 gzip/ETag precomputation it must stay compatible with.
 // setBrandedIndex records the index document AS SERVED, so CSP hashes are
 // computed over the same bytes the browser receives.
 //

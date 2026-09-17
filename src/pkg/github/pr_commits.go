@@ -1,9 +1,5 @@
 package github
 
-// PR commit enumeration for the hold guard (#5589). The guard snapshots a
-// hold-gated PR's commit SHA + author sets so a branch that moves while held
-// can name exactly which commits and authors were never reviewed.
-
 import (
 	"context"
 	"fmt"

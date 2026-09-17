@@ -34,6 +34,44 @@ func refFromIssueMap(repoFull string, issue map[string]any) worksource.Ref {
 	}
 }
 
+func dependenciesFromIssueMap(issue map[string]any) []ghpkg.IssueDependency {
+	raw, _ := issue["depends_on"].([]any)
+	deps := make([]ghpkg.IssueDependency, 0, len(raw))
+	for _, item := range raw {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		key := stringFromAny(m["key"])
+		resolved, _ := m["resolved"].(bool)
+		deps = append(deps, ghpkg.IssueDependency{Key: key, Resolved: resolved})
+	}
+	return deps
+}
+
+// intFromAny reads an integer that survived a JSON round-trip. encoding/json
+// decodes every number into float64 when the target is `any`, but the value can
+// still arrive as a real int when the payload was never marshalled (tests, and
+// the in-process status builder), so both are accepted.
+func intFromAny(v any) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case int64:
+		return int(n)
+	}
+	return 0
+}
+
+// stringFromAny reads a string field, yielding "" for a missing or
+// wrongly-typed value rather than panicking on the type assertion.
+func stringFromAny(v any) string {
+	s, _ := v.(string)
+	return s
+}
+
 // forEachActionableIssue converts each entry of one repo's ActionableIssues
 // (`[]any` holding ghpkg.Issue structs or maps that survived a JSON
 // round-trip through the status payload) into a map and invokes fn with its
@@ -75,42 +113,4 @@ func forEachActionableIssue(logger *slog.Logger, logTag string, repoFull string,
 		}
 		fn(issue, ref)
 	}
-}
-
-func dependenciesFromIssueMap(issue map[string]any) []ghpkg.IssueDependency {
-	raw, _ := issue["depends_on"].([]any)
-	deps := make([]ghpkg.IssueDependency, 0, len(raw))
-	for _, item := range raw {
-		m, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		key := stringFromAny(m["key"])
-		resolved, _ := m["resolved"].(bool)
-		deps = append(deps, ghpkg.IssueDependency{Key: key, Resolved: resolved})
-	}
-	return deps
-}
-
-// intFromAny reads an integer that survived a JSON round-trip. encoding/json
-// decodes every number into float64 when the target is `any`, but the value can
-// still arrive as a real int when the payload was never marshalled (tests, and
-// the in-process status builder), so both are accepted.
-func intFromAny(v any) int {
-	switch n := v.(type) {
-	case float64:
-		return int(n)
-	case int:
-		return n
-	case int64:
-		return int(n)
-	}
-	return 0
-}
-
-// stringFromAny reads a string field, yielding "" for a missing or
-// wrongly-typed value rather than panicking on the type assertion.
-func stringFromAny(v any) string {
-	s, _ := v.(string)
-	return s
 }

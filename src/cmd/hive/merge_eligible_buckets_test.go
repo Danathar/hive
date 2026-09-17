@@ -33,15 +33,23 @@ type eligibleEntry struct {
 }
 
 type failingEntry struct {
-	Number        int      `json:"number"`
-	Repo          string   `json:"repo"`
-	HeadSHA       string   `json:"head_sha"`
-	FailingChecks []string `json:"failing_checks"`
-	Excerpt       string   `json:"excerpt"`
-	Escalated     bool     `json:"escalated"`
+	Number          int      `json:"number"`
+	Repo            string   `json:"repo"`
+	HeadSHA         string   `json:"head_sha"`
+	FailingChecks   []string `json:"failing_checks"`
+	Excerpt         string   `json:"excerpt"`
+	Escalated       bool     `json:"escalated"`
+	HeadRef         string   `json:"head_ref"`
+	HeadRepo        string   `json:"head_repo"`
+	FromFork        bool     `json:"from_fork"`
+	ReachableAction string   `json:"reachable_action"`
+	Held            bool     `json:"held"`
 }
 
 type mergeEligibleInputs struct {
+	// heldPRs is the PRs.Held population: PRs the hold gate removed from
+	// Items, which must still be classified as red work (hivecommons/hive#7438).
+	heldPRs        []github.PullRequest
 	hold           github.HoldResult
 	org            string
 	escalated      map[string]bool
@@ -63,7 +71,7 @@ func runWriteMergeEligible(t *testing.T, prs []github.PullRequest, in mergeEligi
 		ciFailingPath = origFail
 	})
 
-	actionable := &github.ActionableResult{PRs: github.PRResult{Items: prs}}
+	actionable := &github.ActionableResult{PRs: github.PRResult{Items: prs, Held: in.heldPRs}}
 	writeMergeEligible(actionable, in.hold, in.org, in.escalated, false, nil, in.requireReview, in.requiredChecks,
 		nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
@@ -138,10 +146,24 @@ func TestWriteMergeEligible_BucketDecisions(t *testing.T) {
 			want: bucketNeither,
 		},
 		{
-			name: "held PR is never listed anywhere",
+			name: "held green PR is never listed anywhere",
 			pr:   github.PullRequest{Repo: "hivecommons/hive", Number: 3, CIStatus: "success", Mergeable: github.MergeableYes},
 			in:   mergeEligibleInputs{hold: github.HoldResult{Items: []github.HoldItem{{Repo: "hivecommons/hive", Number: 3}}}},
 			want: bucketNeither,
+		},
+		{
+			name:     "held RED PR is ci_failing — the hold is a merge checkpoint, not a repair checkpoint",
+			pr:       github.PullRequest{Repo: "hivecommons/hive", Number: 33, CIStatus: "failure", Mergeable: github.MergeableYes, FailingChecks: []string{"Python Unit Tests"}},
+			in:       mergeEligibleInputs{hold: github.HoldResult{Items: []github.HoldItem{{Repo: "hivecommons/hive", Number: 33}}}},
+			want:     bucketFailing,
+			guarding: "hivecommons/hive#7438: sec-check's level-held #188 sat red and held, invisible to its author, until a human repaired it",
+		},
+		{
+			name:     "held PR red only on optional checks is still never eligible",
+			pr:       github.PullRequest{Repo: "hivecommons/hive", Number: 34, CIStatus: "failure", Mergeable: github.MergeableYes, FailingChecks: []string{"playwright"}},
+			in:       mergeEligibleInputs{requiredChecks: required, hold: github.HoldResult{Items: []github.HoldItem{{Repo: "hivecommons/hive", Number: 34}}}},
+			want:     bucketNeither,
+			guarding: "the moved hold check must still sit in front of the merge-eligible path",
 		},
 		{
 			name:     "red with no required-check set fails closed into ci_failing",
@@ -215,6 +237,35 @@ func TestWriteMergeEligible_BucketDecisions(t *testing.T) {
 				t.Fatalf("PR #%d landed in %s, want %s (%s)", tc.pr.Number, got, tc.want, tc.guarding)
 			}
 		})
+	}
+}
+
+// hivecommons/hive#7438 acceptance: a non-draft red PR carrying a hold lands
+// in ci_failing with held:true and never in eligible, so its author's
+// fix-before-new block can list it with the do-not-remove-the-hold note.
+func TestWriteMergeEligible_HeldRedPRIsFailingWithHeldFlag(t *testing.T) {
+	held := github.PullRequest{Repo: "hive", Number: 188, CIStatus: "failure", Mergeable: github.MergeableYes, FailingChecks: []string{"Python Unit Tests"}}
+	free := github.PullRequest{Repo: "hive", Number: 190, CIStatus: "failure", Mergeable: github.MergeableYes, FailingChecks: []string{"lint"}}
+	in := mergeEligibleInputs{org: "hivecommons", hold: github.HoldResult{Items: []github.HoldItem{{Repo: "hive", Number: 188}}}}
+	eligible, failing := runWriteMergeEligible(t, []github.PullRequest{held, free}, in)
+	if len(eligible) != 0 {
+		t.Fatalf("a held PR became merge-eligible: %+v", eligible)
+	}
+	if len(failing) != 2 {
+		t.Fatalf("ci_failing = %+v, want both red PRs (held #188 and unheld #190)", failing)
+	}
+	byNumber := map[int]failingEntry{}
+	for _, f := range failing {
+		byNumber[f.Number] = f
+	}
+	if !byNumber[188].Held {
+		t.Errorf("#188 is in ci_failing without held:true: %+v", byNumber[188])
+	}
+	if byNumber[190].Held {
+		t.Errorf("#190 carries held:true but has no hold: %+v", byNumber[190])
+	}
+	if byNumber[188].FailingChecks == nil || byNumber[188].FailingChecks[0] != "Python Unit Tests" {
+		t.Errorf("held entry lost its CI evidence: %+v", byNumber[188])
 	}
 }
 
@@ -361,5 +412,32 @@ func TestWriteMergeEligible_EmptyInputStillRewritesBothFiles(t *testing.T) {
 		if _, ok := got["generated_at"]; !ok {
 			t.Errorf("%s has no generated_at: %v", filepath.Base(p), got)
 		}
+	}
+}
+
+// The failing bucket says where each red branch lives and what the agent can
+// do about it (hivecommons/hive#7386): a fork PR is comment-only, a same-repo
+// PR is push-repairable, and the fields are on the wire so kick builders and
+// agents never have to discover it with a failed push.
+func TestWriteMergeEligible_FailingEntryCarriesForkOrigin(t *testing.T) {
+	prs := []github.PullRequest{
+		{Repo: "testsuite", Number: 839, CIStatus: "failure", Mergeable: github.MergeableYes, HeadSHA: "f1",
+			FailingChecks: []string{"build"}, HeadRef: "sec-check-dashboard", HeadRepo: "alice/testsuite", FromFork: true},
+		{Repo: "testsuite", Number: 840, CIStatus: "failure", Mergeable: github.MergeableYes, HeadSHA: "f2",
+			FailingChecks: []string{"build"}, HeadRef: "hive/fix-840", HeadRepo: "projectbluefin/testsuite"},
+	}
+	_, failing := runWriteMergeEligible(t, prs, mergeEligibleInputs{org: "projectbluefin"})
+	if len(failing) != 2 {
+		t.Fatalf("failing = %+v, want both PRs", failing)
+	}
+	byNum := map[int]failingEntry{}
+	for _, f := range failing {
+		byNum[f.Number] = f
+	}
+	if f := byNum[839]; !f.FromFork || f.HeadRepo != "alice/testsuite" || f.HeadRef != "sec-check-dashboard" || f.ReachableAction != github.ReachableActionCommentOnly {
+		t.Errorf("fork PR entry = %+v, want from_fork with head origin and reachable_action=comment-only", f)
+	}
+	if f := byNum[840]; f.FromFork || f.HeadRepo != "projectbluefin/testsuite" || f.ReachableAction != github.ReachableActionPush {
+		t.Errorf("same-repo PR entry = %+v, want reachable_action=push", f)
 	}
 }

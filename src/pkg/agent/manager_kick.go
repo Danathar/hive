@@ -1,8 +1,3 @@
-// Kick delivery: SendKick and the locked delivery path, startup kicks,
-// explain-mode kick suffixes, inference kick stall/nudge handling, and
-// kick history seeding.
-//
-// Extracted from manager.go as part of the #7303 god-file split.
 package agent
 
 import (
@@ -137,6 +132,9 @@ func (m *Manager) SendKick(name string, message string) error {
 		return fmt.Errorf("agent %s blocked: inference (%s): %s; next provider probe in %v",
 			name, agent.ProviderErrorClass, agent.ProviderErrorLine, remaining.Round(time.Second))
 	}
+	if err := m.restartKickHoldErrLocked(agent, time.Now()); err != nil {
+		return err
+	}
 
 	if !m.tmuxSessionExistsForAgent(agent) {
 		return fmt.Errorf("tmux session %s not found", agent.tmuxSession)
@@ -152,7 +150,7 @@ func (m *Manager) SendKick(name string, message string) error {
 		m.logger.Warn("agent CLI crashed or stuck on consent screen, restarting before kick",
 			"name", name, "consent_screen", paneShowsConsentScreen(pane))
 		m.mu.Unlock()
-		if err := m.Restart(context.Background(), name); err != nil {
+		if err := m.restartForKick(context.Background(), name); err != nil {
 			m.mu.Lock()
 			return fmt.Errorf("failed to restart crashed agent %s: %w", name, err)
 		}
@@ -167,18 +165,39 @@ func (m *Manager) SendKick(name string, message string) error {
 		}
 	}
 
+	// Pin the delivery to the current session (#7363) — see deliverKickAsync
+	// for the full rationale. Captured after this kick's own recovery restart
+	// so that restart does not cancel the kick it was made for.
+	epoch := agent.kickEpoch
+
 	// Wait for the input prompt (❯) before sending — the CLI may be
 	// showing a trust prompt or still initializing even though
 	// tmuxPaneHasCLI matched a broad marker like "Copilot".
 	m.mu.Unlock()
-	if !m.waitForInputPromptForAgent(agent) {
+	if !m.waitForInputPromptForAgentUnless(agent, m.kickEpochChangedFn(agent, epoch)) {
 		m.mu.Lock()
+		if agent.kickEpoch != epoch {
+			return fmt.Errorf("%w: agent %s restarted while the kick was waiting for its input prompt", errKickCancelledByRestart, name)
+		}
 		return fmt.Errorf("agent %s CLI did not reach input prompt", name)
 	}
 	m.mu.Lock()
 	agent, ok = m.agents[name]
 	if !ok {
 		return fmt.Errorf("agent %s disappeared while waiting for input prompt", name)
+	}
+	if agent.kickEpoch != epoch {
+		return fmt.Errorf("%w: agent %s restarted while the kick was waiting for its input prompt", errKickCancelledByRestart, name)
+	}
+	if agent.State != StateRunning {
+		return fmt.Errorf("agent %s cannot be kicked: %s", name, notRunningReason(agent))
+	}
+	if remaining := m.providerErrorBackoffRemainingLocked(agent, time.Now()); remaining > 0 {
+		return fmt.Errorf("agent %s blocked: inference (%s): %s; next provider probe in %v",
+			name, agent.ProviderErrorClass, agent.ProviderErrorLine, remaining.Round(time.Second))
+	}
+	if err := m.restartKickHoldErrLocked(agent, time.Now()); err != nil {
+		return err
 	}
 
 	m.deliverKickLocked(agent, message, "send-kick")
@@ -556,13 +575,6 @@ const (
 	cliActiveCounterMarker = "s · ↓"
 )
 
-const (
-	providerErrorBackoffBaseDefault = 2 * time.Minute
-	providerErrorBackoffMaxDefault  = 30 * time.Minute
-	ProviderErrorBackoffBaseEnv     = "HIVE_PROVIDER_ERROR_BACKOFF_BASE"
-	ProviderErrorBackoffMaxEnv      = "HIVE_PROVIDER_ERROR_BACKOFF_MAX"
-)
-
 // toolSummaryRe matches Claude Code's collapsed tool-activity summary lines,
 // rendered only when tools actually executed (verified against Claude Code
 // v2.1.204): "Running 1 shell command…" while a Bash call is in flight, and
@@ -645,6 +657,11 @@ func stripExplainLines(pane string) string {
 // legacy "esc to interrupt" footer hint or the live spinner counter is
 // visible. The idle input prompt "❯" alone proves nothing on v2.1.204 —
 // the input box stays rendered while a response streams.
+//
+// OMP renders neither marker (verified live, omp 18.1.16/18.1.17): a tool
+// call shows "⏺ Running… (esc to cancel)" and plain generation shows a
+// spinner glyph plus "Working…", so an in-flight OMP turn read as idle
+// without these two additions.
 func paneShowsActiveWork(pane string) bool {
 	return strings.Contains(pane, cliWorkingMarker) ||
 		strings.Contains(pane, cliActiveCounterMarker) ||
@@ -778,8 +795,14 @@ func (m *Manager) nudgeIfKickStalled(name, pane string) {
 	}
 
 	// The pane moved since the kick — the CLI consumed it and the response
-	// completed (idle prompt, no active-work indicator). Check whether any
-	// tools ran since the kick before declaring the response prose-only.
+	// completed (idle prompt, no active-work indicator). That is the end of
+	// the kicked turn: classify how it ended (#7421) before deciding whether
+	// it needs an action nudge.
+	if sinceKick >= kickOutcomeGrace {
+		m.settleKickOutcomeLocked(agent, pane, now)
+	}
+	// Check whether any tools ran since the kick before declaring the
+	// response prose-only.
 	if agent.actionNudgeSent || sinceKick < inferenceActionNudgeGrace {
 		m.mu.Unlock()
 		return
@@ -967,6 +990,13 @@ func (m *Manager) SeedKickHistory(name string, records []KickRecord) {
 		copy(agent.KickHistory, records)
 	}
 }
+
+const (
+	providerErrorBackoffBaseDefault = 2 * time.Minute
+	providerErrorBackoffMaxDefault  = 30 * time.Minute
+	ProviderErrorBackoffBaseEnv     = "HIVE_PROVIDER_ERROR_BACKOFF_BASE"
+	ProviderErrorBackoffMaxEnv      = "HIVE_PROVIDER_ERROR_BACKOFF_MAX"
+)
 
 // MarkStartupLaunchQueued tells SendKick that the named agents are still in the
 // boot stagger. A governor/manual kick that arrives before the agent reaches its

@@ -1,42 +1,5 @@
 package dashboard
 
-// Contributor-side failure-streak detection (kubestellar/hive#6450).
-//
-// When a contributor relay's agent backend dies at startup (e.g. a container
-// launched without its CLI credential, so every headless run exits within
-// seconds), the relay keeps claiming assignments and failing them. Each
-// failure books a per-ISSUE cooldown/quarantine (#2435) and degrades the
-// contributor's standing — but before this file nothing on the contributor
-// side surfaced that this was happening or why. The contributor experience
-// was "my hive statistics get worse the more I use the tool".
-//
-// The heuristic here is the one #6450 proposes: N consecutive sub-minute
-// failures from one identity is a dying runtime, not N distinct hard work
-// items. Once the streak reaches the threshold, selectTask refuses the next
-// claim for a short window with an explicit, machine-readable
-// task_unavailable reason (contributor_failure_streak) and a human-readable
-// message naming the streak and the pause expiry — telling the contributor at
-// claim time prevents the next N failures instead of booking them.
-//
-// Deliberate boundaries:
-//   - The signal is HUB-measured (assignment-to-task_failed wall clock), never
-//     the client-declared failure_kind — routing on a self-reported value is
-//     the ROUTE half of #2547 and stays undecided. A relay cannot fake its way
-//     INTO or OUT of the streak with a declared kind.
-//   - A failure with no measurable duration (the task was adopted on reconnect
-//     without a fresh assignment) is NOT counted: better to miss a streak than
-//     to invent one from a clock we never started.
-//   - A failure slower than the fast-failure bound RESETS the streak: the
-//     runtime demonstrably ran for a while, so the "dying at startup" theory is
-//     void and the per-issue cooldowns are the right tool again.
-//   - The pause is per-identity and expires on its own. After expiry the
-//     contributor gets one probe assignment; if it also dies sub-minute the
-//     streak (still above threshold) books the next pause immediately, so a
-//     still-broken runtime costs one issue-cooldown per window instead of a
-//     continuous stream.
-//   - In-memory only. A hub restart forgets streaks; the per-issue failure
-//     ledger (#2435) remains the durable protection.
-
 import (
 	"fmt"
 	"time"

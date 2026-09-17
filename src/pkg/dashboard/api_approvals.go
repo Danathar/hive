@@ -1,24 +1,5 @@
 package dashboard
 
-// Operator approval desk API (RFC #4000).
-//
-//	GET  /api/approvals            — list pending operator-lane approvals
-//	POST /api/approvals/resolve    — resolve ONE approval
-//	POST /api/approvals/bulk       — resolve MANY, as N individual resolutions
-//
-// All three are owner-gated with requireOwnerRole, which additionally demands
-// the server-verified marker header — the same bar the token-access, backup,
-// and governor-security endpoints enforce. Approving a pending tool call is at
-// least as privileged as those: a granted verdict lets an agent take an action
-// the hive's ACMM level otherwise reserved for a human.
-//
-// The bulk path is deliberately NOT a parallel implementation. It calls
-// Inbox.ResolveMany, which calls Inbox.Resolve once per item — the same
-// function the single-item handler calls — and returns a per-item result list.
-// This mirrors runBulkAction/applyBulkAction in pkg/hub/saas_bulk.go, and it is
-// the shape RFC #4000 requires: "a bulk approve is N individual evaluations
-// through the same decision function every agent request goes through".
-
 import (
 	"encoding/json"
 	"fmt"

@@ -11,40 +11,6 @@ import (
 	"github.com/hivecommons/hive/pkg/planning"
 )
 
-// ── Dependency observation for contributor-neutral admission (#3845) ──────────
-//
-// This is the FIRST observer feeding pkg/convergence: it reads the bead ledger —
-// Hive's existing durable, dependency-bearing work record (ADR 0004) — and
-// reports, per live GitHub candidate, whether that candidate's declared
-// dependencies are satisfied. Nothing here decides admission; it only observes.
-// pkg/convergence.Evaluate makes the judgment, and
-// evaluateContributorNeutralAdmission applies it to BOTH live projections
-// (ReadyQueue offerability and selectTask assignment) so they cannot drift.
-//
-// Deliberate non-goals, per the design contract:
-//
-//   - It creates NOTHING. Admission consumes authoritative state; it never mints
-//     a shadow bead merely to have something to query. A candidate with no bead
-//     is observed as "no record", not conjured into one.
-//   - It is not a second scheduler. A blocked candidate is simply absent from
-//     the admitted set; ordering, routing, and dispatch are untouched.
-//   - It caches nothing across evaluations. Every ReadyQueue / selectTask sweep
-//     re-reads the ledger, which is what makes admission LEVEL-TRIGGERED: when a
-//     dependency becomes satisfied the dependent becomes offerable on the next
-//     sweep with no restart, and when it becomes unsatisfied again the dependent
-//     leaves the ready set just as promptly. Events are hints; current state is
-//     the truth.
-//
-// Freshness horizon. The bead ledger is durable local state, so a restart
-// reconstructs exactly the same admission decisions from the same files with no
-// replay. Beads written by AGENT processes (the `bd` CLI persists straight to
-// disk) reach the hub's in-memory stores through the bounded authoritative
-// refresh the governor already performs — the per-eval-cycle Store.Reload() in
-// cmd/hive/main.go — so a dependency closed by an agent gates admission within
-// one eval cycle. This observer deliberately does NOT add its own disk read to
-// the assignment path: that would race the governor's refresh and put I/O in
-// front of every candidate for no freshness that the next cycle would not give.
-
 // beadDependencyIndex is a per-sweep snapshot of the bead ledger, built once and
 // reused for every candidate in that sweep.
 //

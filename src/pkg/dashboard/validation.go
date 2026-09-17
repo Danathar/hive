@@ -9,8 +9,6 @@ import (
 	"github.com/hivecommons/hive/pkg/config"
 )
 
-// ---------- validation constants ----------
-
 const (
 	// maxDisplayNameLen is the maximum length for agent display names.
 	maxDisplayNameLen = 64
@@ -46,8 +44,6 @@ const (
 	// requiredLoggingDirPrefix is the required prefix for logging directories.
 	requiredLoggingDirPrefix = "/data/"
 )
-
-// ---------- regex patterns ----------
 
 var (
 	// colorPattern matches valid 3-digit or 6-digit hex color codes.
@@ -93,27 +89,6 @@ var validRestartStrategies = map[string]bool{
 func containsHTMLTags(s string) bool {
 	return htmlTagPattern.MatchString(s)
 }
-
-// agentRepoRefPattern matches a repos-scope entry: a bare repository name, or
-// an explicit "owner/name" cross-org reference. Deliberately the same shape
-// project.repos accepts, so an operator can copy an entry across verbatim.
-var agentRepoRefPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)?$`)
-
-// validateAgentRepoRef rejects a scope entry that cannot name a repository —
-// a URL, a path, an owner/name/extra triple. Catching it here means the
-// operator sees it on the request that caused it rather than as an agent that
-// silently has nowhere to work.
-func validateAgentRepoRef(s string) error {
-	if len(s) > 200 {
-		return fmt.Errorf("repos entry %q is too long", s)
-	}
-	if !agentRepoRefPattern.MatchString(s) {
-		return fmt.Errorf("repos entry %q must be a repository name (\"console\") or an owner/name reference (\"laredo/cuga-agent\")", s)
-	}
-	return nil
-}
-
-// ---------- agent config validation ----------
 
 // validateAgentGeneralInput validates all fields in an agent general config
 // update request. Returns nil if all fields are valid, or an error describing
@@ -270,8 +245,6 @@ func validateLaunchCmd(s string) error {
 	return nil
 }
 
-// ---------- governor config validation ----------
-
 // validateGovernorThresholds validates that threshold values are non-negative
 // and that quiet <= busy <= surge ordering is maintained when all three are present.
 func validateGovernorThresholds(body map[string]int) error {
@@ -396,12 +369,29 @@ func validateGovernorLabels(labels []string) error {
 	return nil
 }
 
-// ---------- helpers ----------
-
 func knownRolesList() string {
 	roles := make([]string, 0, len(knownRoles))
 	for r := range knownRoles {
 		roles = append(roles, r)
 	}
 	return strings.Join(roles, ", ")
+}
+
+// agentRepoRefPattern matches a repos-scope entry: a bare repository name, or
+// an explicit "owner/name" cross-org reference. Deliberately the same shape
+// project.repos accepts, so an operator can copy an entry across verbatim.
+var agentRepoRefPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)?$`)
+
+// validateAgentRepoRef rejects a scope entry that cannot name a repository —
+// a URL, a path, an owner/name/extra triple. Catching it here means the
+// operator sees it on the request that caused it rather than as an agent that
+// silently has nowhere to work.
+func validateAgentRepoRef(s string) error {
+	if len(s) > 200 {
+		return fmt.Errorf("repos entry %q is too long", s)
+	}
+	if !agentRepoRefPattern.MatchString(s) {
+		return fmt.Errorf("repos entry %q must be a repository name (\"console\") or an owner/name reference (\"laredo/cuga-agent\")", s)
+	}
+	return nil
 }

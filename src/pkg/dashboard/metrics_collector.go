@@ -226,33 +226,6 @@ func (mc *MetricsCollector) collectOutreach(ctx context.Context) map[string]any 
 	return result
 }
 
-// coverageBadgeRepoScheme is the badge-URL prefix that reads the badge from
-// the hive's OWN primary repo through the GitHub App client instead of an
-// anonymous HTTP GET: "repo://<ref>/<path>", e.g. "repo://badges/coverage.svg"
-// for octocov's default layout. This is the only form that works for a
-// private repo — the App has contents access, an unauthenticated fetch of a
-// raw.githubusercontent.com URL there is a 404.
-const coverageBadgeRepoScheme = "repo://"
-
-// coveragePercentPattern finds the first percentage in badge TEXT. It is
-// applied to a shields-style JSON "message" ("85%", "85.3%"), or to the text
-// content of any other body once markup is stripped — which is what makes an
-// SVG badge (octocov, shields.io) usable directly: the rendered number sits
-// in a <text> element. Fractions are truncated because the dashboard renders
-// whole percentages.
-var coveragePercentPattern = regexp.MustCompile(`(\d{1,3})(?:\.\d+)?\s*%`)
-
-// markupTagPattern strips tags (and with them every attribute) from an SVG
-// or HTML badge before the percentage scan. Scanning the raw markup read the
-// wrong number: a shields-style badge opens with
-// <linearGradient x2="0" y2="100%"> — the gradient's extent, not the
-// coverage — so a repo at 98.5% reported 100. Only text nodes carry the
-// rendered figure.
-var markupTagPattern = regexp.MustCompile(`<[^>]*>`)
-
-// coverageTarget is the pct-bar target the ci-maintainer card renders against.
-const coverageTarget = 91
-
 // collectCoverage reads the primary repo's test-coverage percentage for the
 // ci-maintainer card (and the ACMM advisor's coverage floors). The source is
 // badgeURL, which is HIVE_COVERAGE_BADGE_URL: either an http(s) URL to a
@@ -277,74 +250,6 @@ func (mc *MetricsCollector) collectCoverage(ctx context.Context) map[string]any 
 		result["coverage"] = pct
 	}
 	return result
-}
-
-// fetchCoverageBadge returns the raw badge body for badgeURL, dispatching on
-// the scheme: repo:// goes through the GitHub client, anything else is a
-// plain HTTP GET (the original behaviour, kept for public gists and badge
-// services).
-func (mc *MetricsCollector) fetchCoverageBadge(ctx context.Context) (string, bool) {
-	if strings.HasPrefix(mc.badgeURL, coverageBadgeRepoScheme) {
-		ref, path, ok := strings.Cut(strings.TrimPrefix(mc.badgeURL, coverageBadgeRepoScheme), "/")
-		if !ok || ref == "" || path == "" {
-			mc.logger.Warn("coverage badge: repo:// form must be repo://<ref>/<path>", "badge_url", mc.badgeURL)
-			return "", false
-		}
-		if mc.ghClient == nil || mc.org == "" || mc.repo == "" {
-			// No App client (or no primary repo) — nothing to read it with.
-			return "", false
-		}
-		content, err := mc.ghClient.GetFileContentRef(ctx, mc.org, mc.repo, path, ref)
-		if err != nil {
-			mc.logger.Warn("coverage badge: could not read from primary repo",
-				"repo", mc.org+"/"+mc.repo, "ref", ref, "path", path, "error", err)
-			return "", false
-		}
-		return content, true
-	}
-
-	client := &http.Client{Timeout: httpTimeout}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, mc.badgeURL, nil)
-	if err != nil {
-		return "", false
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", false
-	}
-	defer closeHTTPBody(resp.Body)
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", false
-	}
-	return string(body), true
-}
-
-// parseCoverageBadge extracts a whole-number percentage from a badge body.
-// A shields-style JSON badge is read from its "message" field; any other
-// body (an SVG badge, plain text) has its markup stripped and its text
-// scanned for the first percentage.
-func parseCoverageBadge(body string) (int, bool) {
-	var badge struct {
-		Message string `json:"message"`
-	}
-	if json.Unmarshal([]byte(body), &badge) == nil && badge.Message != "" {
-		return coveragePercent(badge.Message)
-	}
-	return coveragePercent(markupTagPattern.ReplaceAllString(body, " "))
-}
-
-func coveragePercent(text string) (int, bool) {
-	m := coveragePercentPattern.FindStringSubmatch(text)
-	if m == nil {
-		return 0, false
-	}
-	var val int
-	if _, err := fmt.Sscanf(m[1], "%d", &val); err != nil || val > 100 {
-		return 0, false
-	}
-	return val, true
 }
 
 func (mc *MetricsCollector) collectArchitect() map[string]any {
@@ -504,4 +409,99 @@ func (mc *MetricsCollector) savePRIssueCountsToDisk(result *ghpkg.PRIssueCounts)
 	if os.WriteFile(tmpPath, data, 0o644) == nil {
 		_ = os.Rename(tmpPath, prIssueCountsCacheFile)
 	}
+}
+
+// coverageBadgeRepoScheme is the badge-URL prefix that reads the badge from
+// the hive's OWN primary repo through the GitHub App client instead of an
+// anonymous HTTP GET: "repo://<ref>/<path>", e.g. "repo://badges/coverage.svg"
+// for octocov's default layout. This is the only form that works for a
+// private repo — the App has contents access, an unauthenticated fetch of a
+// raw.githubusercontent.com URL there is a 404.
+const coverageBadgeRepoScheme = "repo://"
+
+// coveragePercentPattern finds the first percentage in badge TEXT. It is
+// applied to a shields-style JSON "message" ("85%", "85.3%"), or to the text
+// content of any other body once markup is stripped — which is what makes an
+// SVG badge (octocov, shields.io) usable directly: the rendered number sits
+// in a <text> element. Fractions are truncated because the dashboard renders
+// whole percentages.
+var coveragePercentPattern = regexp.MustCompile(`(\d{1,3})(?:\.\d+)?\s*%`)
+
+// markupTagPattern strips tags (and with them every attribute) from an SVG
+// or HTML badge before the percentage scan. Scanning the raw markup read the
+// wrong number: a shields-style badge opens with
+// <linearGradient x2="0" y2="100%"> — the gradient's extent, not the
+// coverage — so a repo at 98.5% reported 100. Only text nodes carry the
+// rendered figure.
+var markupTagPattern = regexp.MustCompile(`<[^>]*>`)
+
+// coverageTarget is the pct-bar target the ci-maintainer card renders against.
+const coverageTarget = 91
+
+// fetchCoverageBadge returns the raw badge body for badgeURL, dispatching on
+// the scheme: repo:// goes through the GitHub client, anything else is a
+// plain HTTP GET (the original behaviour, kept for public gists and badge
+// services).
+func (mc *MetricsCollector) fetchCoverageBadge(ctx context.Context) (string, bool) {
+	if strings.HasPrefix(mc.badgeURL, coverageBadgeRepoScheme) {
+		ref, path, ok := strings.Cut(strings.TrimPrefix(mc.badgeURL, coverageBadgeRepoScheme), "/")
+		if !ok || ref == "" || path == "" {
+			mc.logger.Warn("coverage badge: repo:// form must be repo://<ref>/<path>", "badge_url", mc.badgeURL)
+			return "", false
+		}
+		if mc.ghClient == nil || mc.org == "" || mc.repo == "" {
+			// No App client (or no primary repo) — nothing to read it with.
+			return "", false
+		}
+		content, err := mc.ghClient.GetFileContentRef(ctx, mc.org, mc.repo, path, ref)
+		if err != nil {
+			mc.logger.Warn("coverage badge: could not read from primary repo",
+				"repo", mc.org+"/"+mc.repo, "ref", ref, "path", path, "error", err)
+			return "", false
+		}
+		return content, true
+	}
+
+	client := &http.Client{Timeout: httpTimeout}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, mc.badgeURL, nil)
+	if err != nil {
+		return "", false
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", false
+	}
+	defer closeHTTPBody(resp.Body)
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", false
+	}
+	return string(body), true
+}
+
+// parseCoverageBadge extracts a whole-number percentage from a badge body.
+// A shields-style JSON badge is read from its "message" field; any other
+// body (an SVG badge, plain text) has its markup stripped and its text
+// scanned for the first percentage.
+func parseCoverageBadge(body string) (int, bool) {
+	var badge struct {
+		Message string `json:"message"`
+	}
+	if json.Unmarshal([]byte(body), &badge) == nil && badge.Message != "" {
+		return coveragePercent(badge.Message)
+	}
+	return coveragePercent(markupTagPattern.ReplaceAllString(body, " "))
+}
+
+func coveragePercent(text string) (int, bool) {
+	m := coveragePercentPattern.FindStringSubmatch(text)
+	if m == nil {
+		return 0, false
+	}
+	var val int
+	if _, err := fmt.Sscanf(m[1], "%d", &val); err != nil || val > 100 {
+		return 0, false
+	}
+	return val, true
 }

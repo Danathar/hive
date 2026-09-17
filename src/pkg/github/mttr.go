@@ -12,14 +12,14 @@ import (
 
 // MTTRResult contains issue-to-merge time statistics.
 type MTTRResult struct {
-	AvgMinutes     int            `json:"avg_minutes"`
-	MedianMinutes  int            `json:"median_minutes"`
-	P90Minutes     int            `json:"p90_minutes"`
-	Count          int            `json:"count"`
-	FastestMinutes int            `json:"fastest_minutes"`
-	SlowestMinutes int            `json:"slowest_minutes"`
-	UpdatedAt      string         `json:"updated_at"`
-	History        []MTTRBucket   `json:"history"`
+	AvgMinutes     int          `json:"avg_minutes"`
+	MedianMinutes  int          `json:"median_minutes"`
+	P90Minutes     int          `json:"p90_minutes"`
+	Count          int          `json:"count"`
+	FastestMinutes int          `json:"fastest_minutes"`
+	SlowestMinutes int          `json:"slowest_minutes"`
+	UpdatedAt      string       `json:"updated_at"`
+	History        []MTTRBucket `json:"history"`
 }
 
 // MTTRBucket is a time-bucketed MTTR data point for sparkline rendering.

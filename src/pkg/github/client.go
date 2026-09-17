@@ -224,31 +224,6 @@ type Client struct {
 	mutation     effects.Boundary
 }
 
-// SetMutationBoundary installs the convergence mutation boundary around
-// external GitHub write effects. nil restores the legacy passthrough path.
-func (c *Client) SetMutationBoundary(boundary effects.Boundary) {
-	if c == nil {
-		return
-	}
-	c.mutationMu.Lock()
-	defer c.mutationMu.Unlock()
-	c.mutation = boundary
-}
-
-func (c *Client) mutationBoundary() effects.Boundary {
-	if c == nil {
-		return nil
-	}
-
-	c.mutationMu.RLock()
-	defer c.mutationMu.RUnlock()
-	return c.mutation
-}
-
-// MutationBoundary returns the installed external-effect boundary for packages
-// such as automerge that operate through a narrow transport interface.
-func (c *Client) MutationBoundary() effects.Boundary { return c.mutationBoundary() }
-
 func (c *Client) SetCanaryScanner(enabled, failClosed bool, reg *ioscan.CanaryRegistry, onLeak func(ioscan.CanaryLeak)) {
 	if c == nil {
 		return
@@ -265,44 +240,6 @@ func (c *Client) GoGitHub() *gh.Client {
 		return nil
 	}
 	return c.client
-}
-
-// Repositories returns the configured repository list.
-func (c *Client) Repositories() []string {
-	return c.getRepos()
-}
-
-// SplitRepo resolves a repository name into owner and repo components.
-func (c *Client) SplitRepo(repo string) (owner, repoName string) {
-	if c == nil {
-		return "", repo
-	}
-	return c.splitRepo(repo)
-}
-
-// AppBotLogin returns the configured GitHub App bot login.
-func (c *Client) AppBotLogin() string {
-	if c == nil {
-		return ""
-	}
-	return c.appBotLogin
-}
-
-// IsExemptLabels reports whether labels include a configured merge-exempt label.
-func (c *Client) IsExemptLabels(labels []string) bool {
-	return c.isExempt(labels)
-}
-
-// RecordPRMergedAudit records the standard PR-merged audit event.
-func (c *Client) RecordPRMergedAudit(repo string, number int, method, sha string) {
-	if c == nil {
-		return
-	}
-	c.recordCreationAudit(AuditActionPRMerged, InvocationMeta{Agent: AttributionAgentGovernor},
-		"repo", repo,
-		"number", strconv.Itoa(number),
-		"method", method,
-		"sha", sha)
 }
 
 // AppAuth returns the GitHub App auth backing this client, or nil when the
@@ -404,7 +341,6 @@ type PullRequest struct {
 	Author      string    `json:"author"`
 	AppAuthored bool      `json:"app_authored,omitempty"`
 	Labels      []string  `json:"labels"`
-	HeadRef     string    `json:"head_ref,omitempty"`
 	Draft       bool      `json:"draft"`
 	CreatedAt   time.Time `json:"created_at"`
 	URL         string    `json:"url"`
@@ -418,6 +354,18 @@ type PullRequest struct {
 	MergeableState string    `json:"mergeable_state,omitempty"`
 	CIStatus       string    `json:"ci_status"`
 	HeadSHA        string    `json:"head_sha,omitempty"`
+	// HeadRef is the PR's head branch name; HeadRepo is the "owner/name" the
+	// head branch lives in. FromFork is true when HeadRepo differs from the
+	// PR's base repository (GitHub's isCrossRepository) — or when the head
+	// repository no longer exists, which is equally unpushable. The hive's
+	// App token can push only to the base repository, so a fork PR can be
+	// reviewed and commented on but never repaired by pushing: listing it in
+	// a push-repair queue without saying so cost a scanner a whole session
+	// and produced a stray branch on the base repo, pushed under the fork's
+	// head-ref name (hivecommons/hive#7386).
+	HeadRef  string `json:"head_ref,omitempty"`
+	HeadRepo string `json:"head_repo,omitempty"`
+	FromFork bool   `json:"from_fork,omitempty"`
 	// FailingChecks names the completed check runs whose conclusion was
 	// failure/action_required. CIFailureExcerpt carries the raw error lines
 	// pulled from those runs' annotations — the evidence a fix agent (or an
@@ -489,7 +437,6 @@ func mergeableFromState(state string, mergeable *bool) Mergeable {
 	case "dirty", "blocked", "behind", "draft":
 		return MergeableNo
 	}
-
 	// "unknown" (or an unrecognised state): GitHub is still computing.
 	// Fall back to the raw bool only when it was actually present.
 	if mergeable != nil {
@@ -516,39 +463,6 @@ type RepoCounts struct {
 	PRs    int `json:"prs"`
 }
 
-// RepoWorkBreakdown explains the raw open issue and PR totals for one
-// repository. Enumeration assigns every raw item to exactly one primary
-// bucket at the same choice point that determines whether it is actionable.
-type RepoWorkBreakdown struct {
-	Issues RepoIssueBreakdown `json:"issues"`
-	PRs    RepoPRBreakdown    `json:"prs"`
-}
-
-type RepoIssueBreakdown struct {
-	Actionable          int `json:"actionable"`
-	Hold                int `json:"hold"`
-	HiveAdvisory        int `json:"hive_advisory"`
-	DependencyDashboard int `json:"dependency_dashboard"`
-	Filtered            int `json:"filtered"`
-	Other               int `json:"other"`
-}
-
-func (b RepoIssueBreakdown) Total() int {
-	return b.Actionable + b.Hold + b.HiveAdvisory + b.DependencyDashboard + b.Filtered + b.Other
-}
-
-type RepoPRBreakdown struct {
-	Actionable int `json:"actionable"`
-	Hold       int `json:"hold"`
-	Draft      int `json:"draft"`
-	Filtered   int `json:"filtered"`
-	Other      int `json:"other"`
-}
-
-func (b RepoPRBreakdown) Total() int {
-	return b.Actionable + b.Hold + b.Draft + b.Filtered + b.Other
-}
-
 type IssueResult struct {
 	Count         int     `json:"count"`
 	Items         []Issue `json:"items"`
@@ -566,120 +480,6 @@ func IssueResultFromItems(items []Issue) IssueResult {
 	return result
 }
 
-const actionablePriorityLabelsEnv = "HIVE_ACTIONABLE_PRIORITY_LABELS"
-
-var defaultActionablePriorityLabels = []string{
-	"triage/accepted",
-	"ai-fix-requested",
-	HumanAckLabel,
-	"kind/bug",
-	"bug",
-	"priority/critical-urgent",
-	"priority/important-soon",
-	"help wanted",
-	"good first issue",
-}
-
-// ActionablePriorityLabels returns the labels that boost human-filed work to
-// the very front of kick issue lists. Operators can replace the defaults with a
-// comma-separated HIVE_ACTIONABLE_PRIORITY_LABELS value.
-func ActionablePriorityLabels() []string {
-	raw := strings.TrimSpace(os.Getenv(actionablePriorityLabelsEnv))
-	if raw == "" {
-		return append([]string(nil), defaultActionablePriorityLabels...)
-	}
-	parts := strings.Split(raw, ",")
-	labels := make([]string, 0, len(parts))
-	for _, part := range parts {
-		if label := strings.TrimSpace(part); label != "" {
-			labels = append(labels, label)
-		}
-	}
-	if len(labels) == 0 {
-		return append([]string(nil), defaultActionablePriorityLabels...)
-	}
-	return labels
-}
-
-// RankActionableIssues orders the actionable issue snapshot for kick
-// presentation only: human-filed work first, hive-filed work with cheap human
-// acknowledgement next, and the remaining hive-filed backlog last. Counts are
-// unchanged; oldest-first order is preserved within each tier.
-func RankActionableIssues(issues []Issue) {
-	priorityLabels := makeLabelSet(ActionablePriorityLabels())
-	sort.SliceStable(issues, func(i, j int) bool {
-		leftTier := actionableIssueRankTier(issues[i], priorityLabels)
-		rightTier := actionableIssueRankTier(issues[j], priorityLabels)
-		if leftTier != rightTier {
-			return leftTier < rightTier
-		}
-		return issues[i].AgeMinutes > issues[j].AgeMinutes
-	})
-}
-
-func makeLabelSet(labels []string) map[string]struct{} {
-	set := make(map[string]struct{}, len(labels))
-	for _, label := range labels {
-		if normalized := strings.ToLower(strings.TrimSpace(label)); normalized != "" {
-			set[normalized] = struct{}{}
-		}
-	}
-	return set
-}
-
-func actionableIssueRankTier(issue Issue, priorityLabels map[string]struct{}) int {
-	if issue.AuthorIsHuman {
-		if issueHasAnyLabel(issue.Labels, priorityLabels) {
-			return 0
-		}
-		return 1
-	}
-	if issueHasCheapHumanAcknowledgement(issue) {
-		return 2
-	}
-	return 3
-}
-
-func issueHasAnyLabel(labels []string, want map[string]struct{}) bool {
-	for _, label := range labels {
-		if _, ok := want[strings.ToLower(strings.TrimSpace(label))]; ok {
-			return true
-		}
-	}
-	return false
-}
-
-func issueHasCheapHumanAcknowledgement(issue Issue) bool {
-	if issue.HumanAcknowledged {
-		return true
-	}
-	if issueHasAnyLabel(issue.Labels, map[string]struct{}{HumanAckLabel: {}}) {
-		return true
-	}
-	for _, assignee := range issue.Assignees {
-		login := strings.TrimSpace(assignee)
-		if login == "" || strings.HasSuffix(login, "[bot]") || strings.EqualFold(login, issue.Author) {
-			continue
-		}
-		return true
-	}
-	return false
-}
-
-func (c *Client) issueHasCheapHumanAcknowledgement(issue *gh.Issue) bool {
-	for _, label := range issue.Labels {
-		if strings.EqualFold(label.GetName(), HumanAckLabel) {
-			return true
-		}
-	}
-	for _, assignee := range issue.Assignees {
-		if c.isHumanAuthor(assignee) {
-			return true
-		}
-	}
-	return false
-}
-
 type PRResult struct {
 	Count int           `json:"count"`
 	Items []PullRequest `json:"items"`
@@ -692,6 +492,18 @@ type PRResult struct {
 	// EVERY draft before the agent ever sees it, so that instruction had
 	// nothing to act on. See kubestellar/hive#3963.
 	StaleDrafts []PullRequest `json:"stale_drafts,omitempty"`
+	// Held carries the FULL PullRequest for every non-draft PR that fetchPRs
+	// moved into HoldResult.Items. HoldItem has no CIStatus, head SHA or
+	// failing-check names, so a held PR used to be invisible to every red-PR
+	// consumer: the hold label removed it from Items before CI was ever
+	// enriched, and a red held PR could therefore never be repaired — it
+	// stayed red, so it stayed held (hivecommons/hive#7438).
+	//
+	// This is a SEPARATE list on purpose. Held PRs must not re-enter Items:
+	// the merge sweep, escalation, duplicate-PR guard and the queue counts all
+	// read Items, and the hold is exactly the gate that must keep them out.
+	// Only the CI-repair path reads Held.
+	Held []PullRequest `json:"held,omitempty"`
 }
 
 type HoldResult struct {
@@ -729,6 +541,7 @@ type IssueCluster struct {
 }
 
 var HoldLabels = []string{"hold", "on-hold", "hold/review"}
+
 var PermanentExemptLabels = []string{"do-not-merge"}
 
 // AutoMergeQueuedLabel is the fallback label a merger/owner queue action
@@ -811,92 +624,12 @@ func (c *Client) SetRepos(repos []string) {
 	c.repos = repos
 }
 
-// MergeableFromState converts GitHub's mergeable_state/raw mergeable fields to a tri-state.
-func MergeableFromState(state string, mergeable *bool) Mergeable {
-	return mergeableFromState(state, mergeable)
-}
-
 func (c *Client) getRepos() []string {
 	c.reposMu.RLock()
 	defer c.reposMu.RUnlock()
 	result := make([]string, len(c.repos))
 	copy(result, c.repos)
 	return result
-}
-
-// SetRepoPausedFunc installs the operator's per-repo pause predicate (#6203).
-// The hive passes config's IsRepoPaused, so a pause taken in the dashboard is
-// in force on the very next sweep with nothing to re-wire; passing nil clears
-// it.
-func (c *Client) SetRepoPausedFunc(fn func(repo string) bool) {
-	if c == nil {
-		return
-	}
-	c.reposMu.Lock()
-	defer c.reposMu.Unlock()
-	c.repoPaused = fn
-}
-
-// RepoIsPaused reports whether repo is under an operator pause (#6203). repo
-// may be bare or "owner/repo" — the configured predicate normalizes both.
-//
-// The hive-mediated PR, merge, issue and review relays MUST check this
-// themselves: they fulfil agent requests with the hive's credentials, without
-// traversing the agent proxy. Proxy-only enforcement would leave agents able
-// to open and merge PRs, file issues, comment, claim issues and submit reviews
-// on a paused repo.
-func (c *Client) RepoIsPaused(repo string) bool {
-	if c == nil {
-		return false
-	}
-	c.reposMu.RLock()
-	paused := c.repoPaused
-	c.reposMu.RUnlock()
-	return paused != nil && paused(repo)
-}
-
-// RepoPausedReason is the operator-facing explanation written into a relay
-// request's result file when the target repo is paused.
-func RepoPausedReason(repo string) string {
-	return "repository " + repo + " is paused by the operator — the hive is deliberately quiet on it. Resume the repo to allow agent writes again."
-}
-
-// activeRepos is getRepos() minus the operator-paused repos: the set this
-// client may act on.
-//
-// It is deliberately NOT folded into getRepos(). getRepos() also answers
-// "which repos does this hive have" for things that are not work — primaryRepo()
-// reads repos[0], and filtering there would silently re-point the hive's
-// primary repo at a different repository the moment an operator paused the
-// first one. Work scope and identity are different questions; only the former
-// is narrowed by a pause.
-func (c *Client) activeRepos() []string {
-	if c == nil {
-		return nil
-	}
-	repos := c.getRepos()
-	c.reposMu.RLock()
-	paused := c.repoPaused
-	c.reposMu.RUnlock()
-	if paused == nil {
-		return repos
-	}
-	out := make([]string, 0, len(repos))
-	for _, repo := range repos {
-		if paused(repo) {
-			continue
-		}
-		out = append(out, repo)
-	}
-	return out
-}
-
-// ActiveRepositories is Repositories() minus the repos under an operator pause
-// (#6203). It satisfies the automerge sweep's optional pause-aware transport
-// capability; Repositories() stays unfiltered because it is the configured
-// list, not the actionable one.
-func (c *Client) ActiveRepositories() []string {
-	return c.activeRepos()
 }
 
 func (c *Client) EnumerateActionable(ctx context.Context) (*ActionableResult, error) {
@@ -911,6 +644,7 @@ func (c *Client) EnumerateActionable(ctx context.Context) (*ActionableResult, er
 	var allIssues []Issue
 	var allPRs []PullRequest
 	var holdItems []HoldItem
+	var allHeldPRs []PullRequest
 	var allStaleDrafts []PullRequest
 	totalByRepo := make(map[string]RepoCounts)
 	workBreakdownByRepo := make(map[string]RepoWorkBreakdown)
@@ -933,7 +667,7 @@ func (c *Client) EnumerateActionable(ctx context.Context) (*ActionableResult, er
 		allIssues = append(allIssues, issues...)
 		holdItems = append(holdItems, held...)
 
-		prs, heldPRs, staleDrafts, prTotal, prBreakdown, err := c.fetchPRs(ctx, repo)
+		prs, heldItems, heldPRs, staleDrafts, prTotal, prBreakdown, err := c.fetchPRs(ctx, repo)
 		if err != nil {
 			// Issues for this repo were already collected; a PR-only failure
 			// is partial and must not count toward the all-repos-failed guard,
@@ -942,7 +676,8 @@ func (c *Client) EnumerateActionable(ctx context.Context) (*ActionableResult, er
 			continue
 		}
 		allPRs = append(allPRs, prs...)
-		holdItems = append(holdItems, heldPRs...)
+		holdItems = append(holdItems, heldItems...)
+		allHeldPRs = append(allHeldPRs, heldPRs...)
 		allStaleDrafts = append(allStaleDrafts, staleDrafts...)
 
 		totalByRepo[repo] = RepoCounts{Issues: issueTotal, PRs: prTotal}
@@ -963,6 +698,7 @@ func (c *Client) EnumerateActionable(ctx context.Context) (*ActionableResult, er
 	// presentational — this is the order last-actionable.json and the
 	// dashboard show, not a signal any agent or the governor acts on.
 	SortPullRequestsForReview(allPRs)
+	SortPullRequestsForReview(allHeldPRs)
 	SortHoldItemsForReview(holdItems)
 
 	holdIssueCount := 0
@@ -980,6 +716,7 @@ func (c *Client) EnumerateActionable(ctx context.Context) (*ActionableResult, er
 		Count:       len(allPRs),
 		Items:       allPRs,
 		StaleDrafts: allStaleDrafts,
+		Held:        allHeldPRs,
 	}
 	result.Hold = HoldResult{
 		Issues: holdIssueCount,
@@ -1117,7 +854,15 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time) (a
 // this way — a human's stale draft is their call, not ours to nag about.
 const staleDraftAfter = 48 * time.Hour
 
-func (c *Client) fetchPRs(ctx context.Context, repo string) (actionable []PullRequest, held []HoldItem, staleDrafts []PullRequest, totalPRs int, breakdown RepoPRBreakdown, err error) {
+// prHeadSHA reads a PR's head commit, tolerating a nil head.
+func prHeadSHA(pr *gh.PullRequest) string {
+	if pr.GetHead() == nil {
+		return ""
+	}
+	return pr.GetHead().GetSHA()
+}
+
+func (c *Client) fetchPRs(ctx context.Context, repo string) (actionable []PullRequest, held []HoldItem, heldPRs []PullRequest, staleDrafts []PullRequest, totalPRs int, breakdown RepoPRBreakdown, err error) {
 	now := time.Now()
 	owner, repoName := c.splitRepo(repo)
 	opts := &gh.PullRequestListOptions{
@@ -1129,7 +874,7 @@ func (c *Client) fetchPRs(ctx context.Context, repo string) (actionable []PullRe
 	for {
 		prs, resp, err := c.client.PullRequests.List(ctx, owner, repoName, opts)
 		if err != nil {
-			return nil, nil, nil, 0, RepoPRBreakdown{}, fmt.Errorf("listing PRs for %s/%s: %w", owner, repoName, err)
+			return nil, nil, nil, nil, 0, RepoPRBreakdown{}, fmt.Errorf("listing PRs for %s/%s: %w", owner, repoName, err)
 		}
 		allPRs = append(allPRs, prs...)
 		if resp.NextPage == 0 {
@@ -1153,11 +898,31 @@ func (c *Client) fetchPRs(ctx context.Context, repo string) (actionable []PullRe
 				Repo:        repo,
 				Title:       pr.GetTitle(),
 				Type:        "pr",
+				CreatedAt:   pr.GetCreatedAt().Time,
 				HeadSHA:     heldHeadSHA,
 				Author:      safeGetLogin(pr.GetUser()),
-				CreatedAt:   pr.GetCreatedAt().Time,
 				ReviewClass: ClassifyReviewClass(pr.GetTitle(), labels),
 			})
+			// Also keep the full PR so the CI-repair path can see whether a
+			// held PR is red (hivecommons/hive#7438). Drafts stay out, exactly
+			// as they do for the actionable list. This slice never feeds the
+			// merge sweep — the hold gate is untouched.
+			if !pr.GetDraft() {
+				headRef, headRepo, fromFork := prHeadOrigin(pr)
+				heldPRs = append(heldPRs, PullRequest{
+					Repo:      repo,
+					Number:    pr.GetNumber(),
+					Title:     pr.GetTitle(),
+					Author:    safeGetLogin(pr.GetUser()),
+					Labels:    labels,
+					CreatedAt: pr.GetCreatedAt().Time,
+					URL:       pr.GetHTMLURL(),
+					HeadSHA:   prHeadSHA(pr),
+					HeadRef:   headRef,
+					HeadRepo:  headRepo,
+					FromFork:  fromFork,
+				})
+			}
 			continue
 		}
 
@@ -1185,18 +950,17 @@ func (c *Client) fetchPRs(ctx context.Context, repo string) (actionable []PullRe
 		}
 
 		headSHA := ""
-		headRef := ""
 		if pr.GetHead() != nil {
 			headSHA = pr.GetHead().GetSHA()
-			headRef = pr.GetHead().GetRef()
 		}
+		headRef, headRepo, fromFork := prHeadOrigin(pr)
 		baseSHA := ""
 		if pr.GetBase() != nil {
 			baseSHA = pr.GetBase().GetSHA()
 		}
-
 		breakdown.Actionable++
 		author := safeGetLogin(pr.GetUser())
+
 		actionable = append(actionable, PullRequest{
 			Repo:        repo,
 			Number:      pr.GetNumber(),
@@ -1204,7 +968,6 @@ func (c *Client) fetchPRs(ctx context.Context, repo string) (actionable []PullRe
 			Author:      author,
 			AppAuthored: strings.EqualFold(author, c.appBotLogin) && c.appBotLogin != "",
 			Labels:      labels,
-			HeadRef:     headRef,
 			Draft:       pr.GetDraft(),
 			CreatedAt:   pr.GetCreatedAt().Time,
 			URL:         pr.GetHTMLURL(),
@@ -1216,13 +979,16 @@ func (c *Client) fetchPRs(ctx context.Context, repo string) (actionable []PullRe
 			MergeableState: pr.GetMergeableState(),
 			HeadSHA:        headSHA,
 			BaseSHA:        baseSHA,
+			HeadRef:        headRef,
+			HeadRepo:       headRepo,
+			FromFork:       fromFork,
 		})
 	}
 
 	if unclassified := totalPRs - breakdown.Total(); unclassified > 0 {
 		breakdown.Other += unclassified
 	}
-	return actionable, held, staleDrafts, totalPRs, breakdown, nil
+	return actionable, held, heldPRs, staleDrafts, totalPRs, breakdown, nil
 }
 
 // EnrichCIStatus fetches check-run results for each PR's HEAD commit
@@ -1364,11 +1130,6 @@ func isIgnorableCICheck(name string) bool {
 	return chromiumShardCheckRE.MatchString(name)
 }
 
-// IsIgnorableCICheck reports whether a non-required CI context is ignored by fallback gating.
-func IsIgnorableCICheck(name string) bool {
-	return isIgnorableCICheck(name)
-}
-
 // Bounds for fetchFailureExcerpt: annotations are fetched for at most
 // excerptMaxRuns failing check runs, keeping at most excerptMaxLines lines and
 // excerptMaxChars characters total. Enough to carry a stack of real errors
@@ -1385,12 +1146,6 @@ const (
 // see from a bare "CI failed" status. Works on GitHub and GHE through the
 // client's configured API base; on errors it degrades to "" — the excerpt is
 // an enrichment, never a gate.
-
-// IsMetaCheck reports whether a CI context is metadata-only for merge gating.
-func IsMetaCheck(name string) bool {
-	return isMetaCheck(name)
-}
-
 func (c *Client) fetchFailureExcerpt(ctx context.Context, owner, repo string, runIDs []int64, runNames []string) string {
 	var lines []string
 	total := 0
@@ -1592,11 +1347,6 @@ func extractPRLabels(labels []*gh.Label) []string {
 	return extractLabels(labels)
 }
 
-// ExtractPRLabels returns the names from a pull request label list.
-func ExtractPRLabels(labels []*gh.Label) []string {
-	return extractPRLabels(labels)
-}
-
 func extractAssignees(users []*gh.User) []string {
 	var result []string
 	for _, u := range users {
@@ -1607,17 +1357,64 @@ func extractAssignees(users []*gh.User) []string {
 	return result
 }
 
+// Reachable actions for a PR in a kick work list (hivecommons/hive#7386):
+// what an agent holding the hive's App token can actually do to it.
+const (
+	// ReachableActionPush: the head branch is in the base repository, so the
+	// agent can check it out, commit, and push a repair.
+	ReachableActionPush = "push"
+	// ReachableActionCommentOnly: the head branch lives in a fork (or a
+	// deleted repository). The agent can review and comment; it cannot push,
+	// and must never push to a branch of the base repo named after the
+	// fork's head ref.
+	ReachableActionCommentOnly = "comment-only"
+)
+
+// ReachableAction classifies a PR for the repair queue: push-repairable, or
+// comment-only because its head is not in the base repository.
+func ReachableAction(pr PullRequest) string {
+	if pr.FromFork {
+		return ReachableActionCommentOnly
+	}
+	return ReachableActionPush
+}
+
+// prHeadOrigin reports where a PR's head branch lives: its ref name, the
+// "owner/name" repository holding it, and whether that is a different
+// repository from the PR's base (a fork PR, GitHub's isCrossRepository). A
+// head whose repository is gone — the fork was deleted after the PR was
+// opened — reports fromFork=true with an empty HeadRepo: there is nothing to
+// push to either way (hivecommons/hive#7386). Comparison is case-insensitive
+// because GitHub repository names are.
+func prHeadOrigin(pr *gh.PullRequest) (headRef, headRepo string, fromFork bool) {
+	if pr == nil || pr.GetHead() == nil {
+		return "", "", false
+	}
+	head := pr.GetHead()
+	headRef = head.GetRef()
+	if head.GetRepo() == nil {
+		return headRef, "", true
+	}
+	headRepo = head.GetRepo().GetFullName()
+	baseRepo := ""
+	if pr.GetBase() != nil && pr.GetBase().GetRepo() != nil {
+		baseRepo = pr.GetBase().GetRepo().GetFullName()
+	}
+	if baseRepo == "" || headRepo == "" {
+		// Cannot compare: an abbreviated payload. Do not guess "fork" — that
+		// would hide every PR from the repair queue — but do not claim
+		// same-repo either when the head is unknown.
+		return headRef, headRepo, headRepo == ""
+	}
+	return headRef, headRepo, !strings.EqualFold(headRepo, baseRepo)
+}
+
 func safeGetLogin(u *gh.User) string {
 	if u == nil {
 		return ""
 	}
 
 	return u.GetLogin()
-}
-
-// SafeGetLogin returns a GitHub user's login, or an empty string for nil.
-func SafeGetLogin(u *gh.User) string {
-	return safeGetLogin(u)
 }
 
 func HasHoldLabel(labels []string) bool {
@@ -2166,4 +1963,314 @@ func isInternalAuthor(author string, internalAuthors []string) bool {
 		}
 	}
 	return false
+}
+
+// SetMutationBoundary installs the convergence mutation boundary around
+// external GitHub write effects. nil restores the legacy passthrough path.
+func (c *Client) SetMutationBoundary(boundary effects.Boundary) {
+	if c == nil {
+		return
+	}
+	c.mutationMu.Lock()
+	defer c.mutationMu.Unlock()
+	c.mutation = boundary
+}
+
+func (c *Client) mutationBoundary() effects.Boundary {
+	if c == nil {
+		return nil
+	}
+
+	c.mutationMu.RLock()
+	defer c.mutationMu.RUnlock()
+	return c.mutation
+}
+
+// MutationBoundary returns the installed external-effect boundary for packages
+// such as automerge that operate through a narrow transport interface.
+func (c *Client) MutationBoundary() effects.Boundary { return c.mutationBoundary() }
+
+// Repositories returns the configured repository list.
+func (c *Client) Repositories() []string {
+	return c.getRepos()
+}
+
+// SplitRepo resolves a repository name into owner and repo components.
+func (c *Client) SplitRepo(repo string) (owner, repoName string) {
+	if c == nil {
+		return "", repo
+	}
+	return c.splitRepo(repo)
+}
+
+// AppBotLogin returns the configured GitHub App bot login.
+func (c *Client) AppBotLogin() string {
+	if c == nil {
+		return ""
+	}
+	return c.appBotLogin
+}
+
+// IsExemptLabels reports whether labels include a configured merge-exempt label.
+func (c *Client) IsExemptLabels(labels []string) bool {
+	return c.isExempt(labels)
+}
+
+// RecordPRMergedAudit records the standard PR-merged audit event.
+func (c *Client) RecordPRMergedAudit(repo string, number int, method, sha string) {
+	if c == nil {
+		return
+	}
+	c.recordCreationAudit(AuditActionPRMerged, InvocationMeta{Agent: AttributionAgentGovernor},
+		"repo", repo,
+		"number", strconv.Itoa(number),
+		"method", method,
+		"sha", sha)
+}
+
+// RepoWorkBreakdown explains the raw open issue and PR totals for one
+// repository. Enumeration assigns every raw item to exactly one primary
+// bucket at the same choice point that determines whether it is actionable.
+type RepoWorkBreakdown struct {
+	Issues RepoIssueBreakdown `json:"issues"`
+	PRs    RepoPRBreakdown    `json:"prs"`
+}
+
+type RepoIssueBreakdown struct {
+	Actionable          int `json:"actionable"`
+	Hold                int `json:"hold"`
+	HiveAdvisory        int `json:"hive_advisory"`
+	DependencyDashboard int `json:"dependency_dashboard"`
+	Filtered            int `json:"filtered"`
+	Other               int `json:"other"`
+}
+
+func (b RepoIssueBreakdown) Total() int {
+	return b.Actionable + b.Hold + b.HiveAdvisory + b.DependencyDashboard + b.Filtered + b.Other
+}
+
+type RepoPRBreakdown struct {
+	Actionable int `json:"actionable"`
+	Hold       int `json:"hold"`
+	Draft      int `json:"draft"`
+	Filtered   int `json:"filtered"`
+	Other      int `json:"other"`
+}
+
+func (b RepoPRBreakdown) Total() int {
+	return b.Actionable + b.Hold + b.Draft + b.Filtered + b.Other
+}
+
+const actionablePriorityLabelsEnv = "HIVE_ACTIONABLE_PRIORITY_LABELS"
+
+var defaultActionablePriorityLabels = []string{
+	"triage/accepted",
+	"ai-fix-requested",
+	HumanAckLabel,
+	"kind/bug",
+	"bug",
+	"priority/critical-urgent",
+	"priority/important-soon",
+	"help wanted",
+	"good first issue",
+}
+
+// ActionablePriorityLabels returns the labels that boost human-filed work to
+// the very front of kick issue lists. Operators can replace the defaults with a
+// comma-separated HIVE_ACTIONABLE_PRIORITY_LABELS value.
+func ActionablePriorityLabels() []string {
+	raw := strings.TrimSpace(os.Getenv(actionablePriorityLabelsEnv))
+	if raw == "" {
+		return append([]string(nil), defaultActionablePriorityLabels...)
+	}
+	parts := strings.Split(raw, ",")
+	labels := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if label := strings.TrimSpace(part); label != "" {
+			labels = append(labels, label)
+		}
+	}
+	if len(labels) == 0 {
+		return append([]string(nil), defaultActionablePriorityLabels...)
+	}
+	return labels
+}
+
+// RankActionableIssues orders the actionable issue snapshot for kick
+// presentation only: human-filed work first, hive-filed work with cheap human
+// acknowledgement next, and the remaining hive-filed backlog last. Counts are
+// unchanged; oldest-first order is preserved within each tier.
+func RankActionableIssues(issues []Issue) {
+	priorityLabels := makeLabelSet(ActionablePriorityLabels())
+	sort.SliceStable(issues, func(i, j int) bool {
+		leftTier := actionableIssueRankTier(issues[i], priorityLabels)
+		rightTier := actionableIssueRankTier(issues[j], priorityLabels)
+		if leftTier != rightTier {
+			return leftTier < rightTier
+		}
+		return issues[i].AgeMinutes > issues[j].AgeMinutes
+	})
+}
+
+func makeLabelSet(labels []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(labels))
+	for _, label := range labels {
+		if normalized := strings.ToLower(strings.TrimSpace(label)); normalized != "" {
+			set[normalized] = struct{}{}
+		}
+	}
+	return set
+}
+
+func actionableIssueRankTier(issue Issue, priorityLabels map[string]struct{}) int {
+	if issue.AuthorIsHuman {
+		if issueHasAnyLabel(issue.Labels, priorityLabels) {
+			return 0
+		}
+		return 1
+	}
+	if issueHasCheapHumanAcknowledgement(issue) {
+		return 2
+	}
+	return 3
+}
+
+func issueHasAnyLabel(labels []string, want map[string]struct{}) bool {
+	for _, label := range labels {
+		if _, ok := want[strings.ToLower(strings.TrimSpace(label))]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func issueHasCheapHumanAcknowledgement(issue Issue) bool {
+	if issue.HumanAcknowledged {
+		return true
+	}
+	if issueHasAnyLabel(issue.Labels, map[string]struct{}{HumanAckLabel: {}}) {
+		return true
+	}
+	for _, assignee := range issue.Assignees {
+		login := strings.TrimSpace(assignee)
+		if login == "" || strings.HasSuffix(login, "[bot]") || strings.EqualFold(login, issue.Author) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func (c *Client) issueHasCheapHumanAcknowledgement(issue *gh.Issue) bool {
+	for _, label := range issue.Labels {
+		if strings.EqualFold(label.GetName(), HumanAckLabel) {
+			return true
+		}
+	}
+	for _, assignee := range issue.Assignees {
+		if c.isHumanAuthor(assignee) {
+			return true
+		}
+	}
+	return false
+}
+
+// MergeableFromState converts GitHub's mergeable_state/raw mergeable fields to a tri-state.
+func MergeableFromState(state string, mergeable *bool) Mergeable {
+	return mergeableFromState(state, mergeable)
+}
+
+// SetRepoPausedFunc installs the operator's per-repo pause predicate (#6203).
+// The hive passes config's IsRepoPaused, so a pause taken in the dashboard is
+// in force on the very next sweep with nothing to re-wire; passing nil clears
+// it.
+func (c *Client) SetRepoPausedFunc(fn func(repo string) bool) {
+	if c == nil {
+		return
+	}
+	c.reposMu.Lock()
+	defer c.reposMu.Unlock()
+	c.repoPaused = fn
+}
+
+// RepoIsPaused reports whether repo is under an operator pause (#6203). repo
+// may be bare or "owner/repo" — the configured predicate normalizes both.
+//
+// The hive-mediated PR, merge, issue and review relays MUST check this
+// themselves: they fulfil agent requests with the hive's credentials, without
+// traversing the agent proxy. Proxy-only enforcement would leave agents able
+// to open and merge PRs, file issues, comment, claim issues and submit reviews
+// on a paused repo.
+func (c *Client) RepoIsPaused(repo string) bool {
+	if c == nil {
+		return false
+	}
+	c.reposMu.RLock()
+	paused := c.repoPaused
+	c.reposMu.RUnlock()
+	return paused != nil && paused(repo)
+}
+
+// RepoPausedReason is the operator-facing explanation written into a relay
+// request's result file when the target repo is paused.
+func RepoPausedReason(repo string) string {
+	return "repository " + repo + " is paused by the operator — the hive is deliberately quiet on it. Resume the repo to allow agent writes again."
+}
+
+// activeRepos is getRepos() minus the operator-paused repos: the set this
+// client may act on.
+//
+// It is deliberately NOT folded into getRepos(). getRepos() also answers
+// "which repos does this hive have" for things that are not work — primaryRepo()
+// reads repos[0], and filtering there would silently re-point the hive's
+// primary repo at a different repository the moment an operator paused the
+// first one. Work scope and identity are different questions; only the former
+// is narrowed by a pause.
+func (c *Client) activeRepos() []string {
+	if c == nil {
+		return nil
+	}
+	repos := c.getRepos()
+	c.reposMu.RLock()
+	paused := c.repoPaused
+	c.reposMu.RUnlock()
+	if paused == nil {
+		return repos
+	}
+	out := make([]string, 0, len(repos))
+	for _, repo := range repos {
+		if paused(repo) {
+			continue
+		}
+		out = append(out, repo)
+	}
+	return out
+}
+
+// ActiveRepositories is Repositories() minus the repos under an operator pause
+// (#6203). It satisfies the automerge sweep's optional pause-aware transport
+// capability; Repositories() stays unfiltered because it is the configured
+// list, not the actionable one.
+func (c *Client) ActiveRepositories() []string {
+	return c.activeRepos()
+}
+
+// IsIgnorableCICheck reports whether a non-required CI context is ignored by fallback gating.
+func IsIgnorableCICheck(name string) bool {
+	return isIgnorableCICheck(name)
+}
+
+// IsMetaCheck reports whether a CI context is metadata-only for merge gating.
+func IsMetaCheck(name string) bool {
+	return isMetaCheck(name)
+}
+
+// ExtractPRLabels returns the names from a pull request label list.
+func ExtractPRLabels(labels []*gh.Label) []string {
+	return extractPRLabels(labels)
+}
+
+// SafeGetLogin returns a GitHub user's login, or an empty string for nil.
+func SafeGetLogin(u *gh.User) string {
+	return safeGetLogin(u)
 }

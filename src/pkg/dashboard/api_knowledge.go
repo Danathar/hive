@@ -1,8 +1,3 @@
-// Knowledge/vaults/documents endpoints: knowledge CRUD/search/graph/export,
-// bead-synth toggle, vaults and git-sources connect/list/disconnect,
-// document import/reimport/list/get/delete, and Obsidian sync. Split out of
-// api.go's `// --- Knowledge endpoints ---` section per #6570 (slice 1/5),
-// mirroring the manager.go split precedent (#6468).
 package dashboard
 
 import (
@@ -19,8 +14,6 @@ import (
 	"github.com/hivecommons/hive/pkg/config"
 	"github.com/hivecommons/hive/pkg/knowledge"
 )
-
-// --- Knowledge endpoints ---
 
 func (s *Server) handleKnowledgeToggle(w http.ResponseWriter, r *http.Request) {
 	if !requireOwnerRole(w, r) {
@@ -718,8 +711,6 @@ func (s *Server) handleKnowledgeSubsRemove(w http.ResponseWriter, r *http.Reques
 	jsonResponse(w, map[string]interface{}{"ok": true, "removed": req.URL})
 }
 
-// --- Vault endpoints ---
-
 func (s *Server) handleVaultsList(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Knowledge == nil {
 		jsonResponse(w, []interface{}{})
@@ -880,8 +871,6 @@ func (s *Server) handleVaultFacts(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, facts)
 }
 
-// --- Git source endpoints ---
-
 func (s *Server) handleGitSourcesList(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Knowledge == nil {
 		jsonResponse(w, []interface{}{})
@@ -1018,8 +1007,6 @@ func (s *Server) handleGitSourcesDisconnect(w http.ResponseWriter, r *http.Reque
 	jsonResponse(w, map[string]interface{}{"ok": true, "removed": req.URL})
 }
 
-// --- Obsidian sync endpoint ---
-
 func (s *Server) ensureKnowledge() bool {
 	if s.deps == nil {
 		return false
@@ -1085,8 +1072,6 @@ func (s *Server) handleObsidianSync(w http.ResponseWriter, r *http.Request) {
 		"fact":   result.Fact,
 	})
 }
-
-// --- Document source endpoints ---
 
 func (s *Server) handleDocumentsList(w http.ResponseWriter, r *http.Request) {
 	if !s.ensureKnowledge() {

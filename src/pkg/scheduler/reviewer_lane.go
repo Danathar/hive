@@ -1,21 +1,3 @@
-// Reviewer lane (#5480): an explicitly-configured agent role with the
-// authority to adjudicate ESCALATED (needs-human) hive-authored PRs.
-//
-// Escalation is a one-way door to a human queue with no assigned worker: when
-// a PR exhausts its fix budget it gets `needs-human` and every automated path
-// stands down — by design. Nothing owned that queue (kubestellar/console,
-// 2026-09-01: nine escalated PRs sat invisible for a week until an ad-hoc
-// operator-authorized review fleet cleared all nine in ~1 hour, every fix
-// mechanical from CI evidence). The reviewer lane is that missing worker:
-// off by default (an operator must add an agent with `role: reviewer`),
-// hard-gated to ACMM level >= reviewerLaneMinACMMLevel, and bounded to
-// reviewerMaxPRsPerKick adjudications per kick.
-//
-// This is distinct from the pack-defined on-demand "reviewer" agent
-// (reviewer-advisory.md), which is PR-triggered pre-merge verdict voting on
-// HEALTHY PRs in ADVISORY mode. The lane here is cadence-kicked, targets only
-// escalated red PRs, and requires push capability — an operator enables it by
-// adding a cadence agent (any name) with `role: reviewer`.
 package scheduler
 
 import (

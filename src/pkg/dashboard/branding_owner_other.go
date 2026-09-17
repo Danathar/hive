@@ -2,7 +2,9 @@
 
 package dashboard
 
-import "io/fs"
+import (
+	"io/fs"
+)
 
 // brandingFileOwnerUID has no meaningful value off unix (dev/Windows builds);
 // return -1 so the branding guard treats ownership as unverifiable and falls

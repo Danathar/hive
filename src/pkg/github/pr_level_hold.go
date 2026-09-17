@@ -124,18 +124,6 @@ func (c *Client) releaseLevelHoldIfEligible(ctx context.Context, owner, repo str
 	return true, "level-hold-released", nil
 }
 
-func (c *Client) ReleaseLevelHoldIfEligible(ctx context.Context, owner, repo string, pr *gh.PullRequest) (bool, string, error) {
-	return c.releaseLevelHoldIfEligible(ctx, owner, repo, pr)
-}
-
-func githubStatusError(err error, status int) bool {
-	var ghErr *gh.ErrorResponse
-	if errors.As(err, &ghErr) && ghErr.Response != nil {
-		return ghErr.Response.StatusCode == status
-	}
-	return false
-}
-
 func (c *Client) isTrustedLevelHoldNoticeAuthor(comment *gh.IssueComment) bool {
 	if c == nil || comment == nil || strings.TrimSpace(c.appBotLogin) == "" {
 		return false
@@ -209,4 +197,16 @@ func (c *Client) listIssueComments(ctx context.Context, owner, repo string, numb
 		}
 		opts.Page = resp.NextPage
 	}
+}
+
+func (c *Client) ReleaseLevelHoldIfEligible(ctx context.Context, owner, repo string, pr *gh.PullRequest) (bool, string, error) {
+	return c.releaseLevelHoldIfEligible(ctx, owner, repo, pr)
+}
+
+func githubStatusError(err error, status int) bool {
+	var ghErr *gh.ErrorResponse
+	if errors.As(err, &ghErr) && ghErr.Response != nil {
+		return ghErr.Response.StatusCode == status
+	}
+	return false
 }

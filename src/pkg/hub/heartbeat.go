@@ -157,6 +157,10 @@ type LeaderboardEntry struct {
 	HiveName       string `json:"hive_name,omitempty"`
 }
 
+// HeartbeatClusterHealthReport contains cluster node and GPU metrics
+// collected by the spoke in-cluster and sent to the hub via heartbeat.
+// This allows the hub to display health data for firewalled clusters
+// that it cannot query directly via kubectl.
 type HeartbeatClusterHealthReport struct {
 	Nodes       []HeartbeatNodeMetric   `json:"nodes"`
 	Summary     HeartbeatClusterSummary `json:"summary"`
@@ -198,6 +202,7 @@ type HeartbeatClusterSummary struct {
 	HiveCapacityRemaining *int `json:"hive_capacity_remaining,omitempty"`
 }
 
+// HeartbeatGPUSummary reports aggregate GPU counts collected on the spoke.
 type HeartbeatGPUSummary struct {
 	Total     int      `json:"total"`
 	Allocated int      `json:"allocated"`
@@ -317,6 +322,9 @@ const (
 	RouteExistenceUnknown                    = "unknown"
 )
 
+// PublicURLSelfCheck reports the spoke's own view of whether its dashboard
+// listener is serving locally. CheckedAt is RFC3339 UTC. HTTPStatus is set only
+// when an HTTP response arrived; Error is a terse operator-safe cause on fail.
 type PublicURLSelfCheck struct {
 	Status     string `json:"status"`
 	CheckedAt  string `json:"checked_at,omitempty"`
@@ -324,6 +332,10 @@ type PublicURLSelfCheck struct {
 	HTTPStatus int    `json:"http_status,omitempty"`
 }
 
+// RouteExistenceCheck reports whether the spoke can confirm that its namespace
+// contains an Ingress or OpenShift Route for the advertised dashboard host.
+// Unknown is deliberately non-fatal: missing RBAC, local development, or an API
+// transport error must never page as a missing route.
 type RouteExistenceCheck struct {
 	Status    string `json:"status"`
 	CheckedAt string `json:"checked_at,omitempty"`
@@ -332,8 +344,6 @@ type RouteExistenceCheck struct {
 	Error     string `json:"error,omitempty"`
 }
 
-// dashboardHost extracts the lowercase hostname from a dashboard URL, or ""
-// when the URL is unparsable or hostless.
 func dashboardHost(rawURL string) string {
 	u, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil || u.Host == "" {
@@ -341,10 +351,6 @@ func dashboardHost(rawURL string) string {
 	}
 	return strings.ToLower(u.Hostname())
 }
-
-// serviceAccountDir is the projected service-account volume the control plane
-// reads its own token from (see readSAToken).
-var serviceAccountDir = "/var/run/secrets/kubernetes.io/serviceaccount"
 
 type HeartbeatGitHubAppConfig struct {
 	AppID             int64             `json:"app_id"`
@@ -406,6 +412,7 @@ type HeartbeatResponse struct {
 	SigVersion          int                       `json:"sig_v,omitempty"`
 }
 
+// HubBanner is a message from the hub admin displayed on spoke dashboards.
 type HubBanner struct {
 	ID      string `json:"id"`
 	Message string `json:"message"`
@@ -456,3 +463,7 @@ type TaskStatusPayload struct {
 	Leaderboard  []LeaderboardEntry `json:"leaderboard"`
 	Contributors ContributorSummary `json:"contributors"`
 }
+
+// serviceAccountDir is the projected service-account volume the control plane
+// reads its own token from (see readSAToken).
+var serviceAccountDir = "/var/run/secrets/kubernetes.io/serviceaccount"

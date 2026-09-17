@@ -8,41 +8,6 @@ import (
 	"time"
 )
 
-// Advisory-digest repeat suppression (#5507).
-//
-// The digest write path already had a skip-if-unchanged guard (#4818) keyed on
-// a sha256 of the FINAL comment body. That guard never fired in practice,
-// because FormatDigestMarkdown stamps d.GeneratedAt into the body in two
-// places — the "## 🐝 Advisory Digest — 2026-08-31 04:00 UTC" header and the
-// "evaluated <RFC3339>" clause of the zero-finding line. Every cycle therefore
-// produced a unique body hash, so every cycle wrote. On a spoke where all
-// agents were login-blocked and no finding ever changed, that turned into ~250
-// comments on ibm/alchemy-logging#686, the vast majority reading "0 findings".
-//
-// Two guards close it, both computed from the MATERIAL content of a digest —
-// the findings, counts and prose — with every timestamp and formatting-churn
-// artifact removed:
-//
-//  1. identical: the material fingerprint of the digest about to be posted
-//     matches the material fingerprint of the digest already on the target.
-//  2. zero_finding_cap: both the pending and the posted digest report zero
-//     findings, and the posted one is younger than
-//     zeroFindingDigestMinInterval. A zero-finding digest carries no news, so
-//     one per target per 48h is plenty even when its wording drifts.
-//
-// Guard 2 applies ONLY when BOTH digests are zero-finding. A digest that goes
-// 0 findings → 3 findings is material news and posts immediately, inside the
-// window or not.
-//
-// State: there is deliberately no new persistent store. The comparison baseline
-// is the digest comment ALREADY ON THE TARGET, which the post path fetches
-// anyway (findDigestComment). That makes both guards inherently restart-safe:
-// a governor that restarts re-reads the same comment and reaches the same
-// decision. The observed failure was on login-blocked spokes, which restart
-// often, so in-memory-only state would have forgotten and resumed spamming —
-// exactly the bug. The pre-existing in-memory #4818 hash guard is retained on
-// top as a cheap fast path; it is an optimization, not the correctness gate.
-
 const (
 	// zeroFindingDigestMinInterval is the minimum time between two
 	// zero-finding advisory digests on the SAME target. A digest reporting no

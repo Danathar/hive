@@ -8,25 +8,6 @@ import (
 	"time"
 )
 
-// Post-login Copilot seat verification (#7309).
-//
-// Saving a device-flow token proves only that GitHub minted one. It does NOT
-// prove the account can run inference, and the three root causes seen on #7302
-// all produced a saved token plus a silently broken backend:
-//
-//  1. the device-flow activation failed server-side, so the token is not
-//     actually good for Copilot (401),
-//  2. org policy blocks the CLI's integration ID even though the seat is
-//     valid (403 that is not a licence verdict),
-//  3. the catalog probe rode a DIFFERENT credential than the one just logged
-//     in with, so the seat being checked was never the seat in question.
-//
-// All three previously surfaced identically, as a per-model "(Copilot seat not
-// licensed)" suffix with no indication of which credential was probed or
-// whether the login had activated. Verifying once at login and reporting the
-// verdict — with the credential named — turns them into three distinct states
-// an adopter can self-diagnose from the screen.
-
 // Copilot seat verification states. These are API values: the dashboard
 // switches on them, so they are part of /api/copilot-auth/status's contract.
 const (

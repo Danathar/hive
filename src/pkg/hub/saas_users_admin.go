@@ -1,8 +1,3 @@
-// SaaS user registry persistence (load/save/list under
-// /data/saas/users) and the hub-admin user management surface,
-// including admin impersonation start/exit/status.
-//
-// Extracted from saas.go as part of the #7278 god-file split.
 package hub
 
 import (

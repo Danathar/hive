@@ -7,24 +7,6 @@ import (
 	"github.com/hivecommons/hive/pkg/github"
 )
 
-// In-flight work filter.
-//
-// A work item can reach an agent by two roads: a work-source delegation that
-// opens a session (Linear agent sessions today — the responder kicks the
-// session agent immediately) and the governor's periodic sweep, which
-// enumerates the same item into the backlog. Kicks do not interrupt a running
-// agent (SendKick waits for the input prompt), so the danger is not a clobbered
-// run but a RE-hand: the governor kicks the item again right after the
-// session's run ends, and the agent does the work twice — or a second agent in
-// the same lane picks it up in parallel.
-//
-// The scheduler therefore consults an injected in-flight lookup before it
-// renders a kick. Held items are dropped from ${ISSUE_LIST} and from the
-// kick's IssueRefs, and named in an "In flight" note so the agent knows why
-// its list is shorter and does not go hunting for them. The lookup is a
-// function so pkg/scheduler stays free of pkg/linearagent; main.go wires it
-// to the Linear session tracker.
-
 // InflightLookup reports whether a work item is currently held by an active
 // session, and by whom. holder is a short human-readable owner ("agent
 // quality via Linear session sess-1").

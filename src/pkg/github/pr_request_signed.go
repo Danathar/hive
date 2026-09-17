@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -17,44 +16,6 @@ import (
 
 	gh "github.com/google/go-github/v72/github"
 )
-
-// Signed commits for agent PRs (github.app_signed_commits).
-//
-// Agents commit with plain git in their pane and push over the credential
-// helper. Those commits cannot be signed: a GitHub App has no account to hold
-// a GPG or SSH key, and the agent pane has no key of its own. A base branch
-// with a `required_signatures` ruleset therefore blocks every agent PR from
-// merging no matter who approves it — observed on a hive whose eight open,
-// approved, green PRs all sat at mergeable_state "blocked".
-//
-// GitHub does sign commits it creates itself: commits authored through the
-// createCommitOnBranch GraphQL mutation "are automatically GPG signed and are
-// marked as verified", and "GitHub Apps can use the mutation to author commits
-// directly" (GitHub changelog, 2021-09-13). So the PR-request watcher — the one
-// server-side choke point every agent PR already passes through, holding the
-// App installation token — re-authors the head branch through that mutation
-// before it opens the PR:
-//
-//  1. compare base...head: the changed files and the agents' commits;
-//  2. create a scratch ref at the merge base, one createCommitOnBranch on it
-//     with every addition/deletion and the agents' original messages (DCO
-//     trailers included) as the message;
-//  3. force-update head to the new commit and delete the scratch ref.
-//
-// The result is one commit, signed by GitHub, authored by "<slug>[bot]", whose
-// tree is byte-for-byte the tree the agent pushed — so every gate that ran
-// before this step (claims, content metadata, outreach) judged exactly what
-// lands, and the duplicate-tree guard in CreatePR still recognises it.
-//
-// WHAT IT REFUSES, and falls back on. The mutation expresses file contents
-// only: no modes, so an executable bit, a symlink, or a submodule pointer in
-// the change cannot be reproduced; and a request is one HTTP body, so a very
-// large change cannot ride in it. Those, a head that moved between compare and
-// update (the agent pushed again), and any API failure all skip the rewrite —
-// the head branch is left exactly as the agent pushed it (the scratch ref is
-// the only thing touched until the final update), the PR opens on the agent's
-// own commits, and the reason lands in the result file and the log. The PR is
-// never blocked by this step.
 
 // signedCommitResult reports what reauthorBranchSigned did.
 type signedCommitResult struct {
@@ -465,21 +426,4 @@ func (c *Client) createCommitOnBranch(ctx context.Context, nameWithOwner, branch
 		return "", errors.New("graphql: createCommitOnBranch returned no commit oid")
 	}
 	return parsed.Data.CreateCommitOnBranch.Commit.OID, nil
-}
-
-// graphQLEndpoint maps a REST base URL to its GraphQL endpoint:
-// https://api.github.com/ → https://api.github.com/graphql;
-// https://ghe.example/api/v3/ → https://ghe.example/api/graphql;
-// anything else (a test server) → <base>graphql.
-func graphQLEndpoint(base *url.URL) string {
-	if base == nil {
-		return "https://api.github.com/graphql"
-	}
-	if strings.EqualFold(base.Host, "api.github.com") {
-		return base.Scheme + "://" + base.Host + "/graphql"
-	}
-	if strings.HasSuffix(strings.TrimSuffix(base.Path, "/"), "/api/v3") {
-		return base.Scheme + "://" + base.Host + "/api/graphql"
-	}
-	return strings.TrimSuffix(base.String(), "/") + "/graphql"
 }

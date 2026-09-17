@@ -1,8 +1,3 @@
-// Governor configuration endpoints: sensing, thresholds/scaling, labels,
-// budget, notifications, health, logging, attribution, hub/contribute config,
-// LiteLLM probing/configuration, Bob key handling, agent/repo management, and
-// repo access checks. Split out of api.go's `// --- Governor config endpoints ---`
-// section per #6570 (slice 2/5), stacking on slice 1 (#6579).
 package dashboard
 
 import (
@@ -24,8 +19,6 @@ import (
 	"github.com/hivecommons/hive/pkg/config"
 	"github.com/hivecommons/hive/pkg/github"
 )
-
-// --- Governor config endpoints ---
 
 func (s *Server) handleGovernorConfigGet(w http.ResponseWriter, r *http.Request) {
 	cfg := s.deps.Config
@@ -121,6 +114,12 @@ func (s *Server) handleGovernorConfigGet(w http.ResponseWriter, r *http.Request)
 		"selfAuthorizationHold":          cfg.GitHub.SelfAuthorizationHoldEnabled(),
 		"repoSelfAuthorizationHold":      repoSelfAuthorizationHold,
 		"selfAuthorizationHoldEnvLocked": cfg.GitHub.SelfAuthorizationHoldEnvOverrideSet(),
+		// Kick-list caps, rendered on the Repos tab. The EFFECTIVE values are
+		// sent (defaults and ceiling already resolved) so the fields always
+		// show the number actually in force rather than an empty box when the
+		// operator has never set one (hivecommons/hive#7368).
+		"maxIssuesPerKick": cfg.Governor.KickLimits.IssuesPerKick(),
+		"maxPRsPerKick":    cfg.Governor.KickLimits.PRsPerKick(),
 		"budget": map[string]interface{}{
 			"totalTokens": cfg.Governor.Budget.TotalTokens,
 			"periodDays":  cfg.Governor.Budget.PeriodDays,
@@ -1764,6 +1763,21 @@ func agentDeletionResponse(status, name string, packLevels []int) map[string]any
 	return resp
 }
 
+// validateKickListCap bounds an operator-supplied kick-list cap. Zero is
+// accepted and means "unset — use the default"; it deliberately does NOT mean
+// unlimited, because an uncapped list is exactly the bug these settings exist
+// to prevent (hivecommons/hive#7368).
+func validateKickListCap(v int, label string) error {
+	if v == 0 {
+		return nil
+	}
+	if v < config.MinKickListCap || v > config.MaxKickListCap {
+		return fmt.Errorf("%s must be between %d and %d (or 0 to use the default)",
+			label, config.MinKickListCap, config.MaxKickListCap)
+	}
+	return nil
+}
+
 func (s *Server) handleGovernorRepos(w http.ResponseWriter, r *http.Request) {
 	if !requireOwnerRole(w, r) {
 		return
@@ -1774,15 +1788,39 @@ func (s *Server) handleGovernorRepos(w http.ResponseWriter, r *http.Request) {
 		PrimaryRepo               *string          `json:"primaryRepo,omitempty"`
 		SelfAuthorizationHold     *bool            `json:"selfAuthorizationHold,omitempty"`
 		RepoSelfAuthorizationHold map[string]*bool `json:"repoSelfAuthorizationHold,omitempty"`
+		// Kick-list caps. POINTER-typed so an absent key means "unchanged":
+		// the Repos tab sends only the fields the operator actually touched,
+		// and editing a repo must not reset the caps (or vice versa).
+		MaxIssuesPerKick *int `json:"maxIssuesPerKick,omitempty"`
+		MaxPRsPerKick    *int `json:"maxPRsPerKick,omitempty"`
 	}
 	if err := decodeBody(r, &body); err != nil {
 		jsonError(w, "invalid body", http.StatusBadRequest)
 		return
 	}
 
-	if len(body.Repos) == 0 && body.PrimaryRepo == nil && body.SelfAuthorizationHold == nil && body.RepoSelfAuthorizationHold == nil {
+	// A cap-only save carries no repos and no primary, which is legitimate, so
+	// the "nothing supplied" guard must only fire when the request would change
+	// nothing at all.
+	capsOnly := body.MaxIssuesPerKick != nil || body.MaxPRsPerKick != nil
+	if len(body.Repos) == 0 && body.PrimaryRepo == nil && body.SelfAuthorizationHold == nil && body.RepoSelfAuthorizationHold == nil && !capsOnly {
 		jsonError(w, "at least one repo is required", http.StatusBadRequest)
 		return
+	}
+
+	// Validated BEFORE any mutation so a rejected cap cannot leave a
+	// half-applied config behind.
+	if body.MaxIssuesPerKick != nil {
+		if err := validateKickListCap(*body.MaxIssuesPerKick, "max issues per kick"); err != nil {
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	if body.MaxPRsPerKick != nil {
+		if err := validateKickListCap(*body.MaxPRsPerKick, "max PRs per kick"); err != nil {
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 	org := s.deps.Config.Project.Org
 
@@ -1943,6 +1981,15 @@ func (s *Server) handleGovernorRepos(w http.ResponseWriter, r *http.Request) {
 	}
 	s.deps.Config.PruneRepoPoliciesToWatched()
 
+	// Applied after the repo guards (which roll back on failure) so a rejected
+	// repo change cannot persist a cap edit that arrived in the same request.
+	if body.MaxIssuesPerKick != nil {
+		s.deps.Config.Governor.KickLimits.MaxIssues = *body.MaxIssuesPerKick
+	}
+	if body.MaxPRsPerKick != nil {
+		s.deps.Config.Governor.KickLimits.MaxPRs = *body.MaxPRsPerKick
+	}
+
 	if err := s.saveConfig(); err != nil {
 		s.logger.Error("failed to persist config", "error", err)
 	}
@@ -1953,13 +2000,6 @@ func (s *Server) handleGovernorRepos(w http.ResponseWriter, r *http.Request) {
 	s.refreshAndPersist()
 	okResponse(w, map[string]string{"status": "updated"})
 }
-
-// hiveForgeHost returns the bare GitHub hostname this hive's repos and App live
-// on ("github.com" or a GHE hostname like "github.ibm.com"). It is the single
-// source of truth the single-host-per-spoke guard compares each submitted repo
-// against, and mirrors config.GitHubConfig.HostLabel() (the same value the
-// dashboard reads as github_base_url's host). Falls back to public github.com
-// when no config is loaded (tests/early boot).
 
 type parsedGovernorRepoRef struct {
 	Owner string

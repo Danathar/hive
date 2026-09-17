@@ -1,6 +1,8 @@
 package dashboard
 
-import "io"
+import (
+	"io"
+)
 
 // closeHTTPBody closes an HTTP request or response body after the caller has
 // already handled the operation that matters. Close errors on these bodies do

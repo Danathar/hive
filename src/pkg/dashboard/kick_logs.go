@@ -1,17 +1,5 @@
 package dashboard
 
-// Kick-history endpoints (#4296, #4295): durable per-kick agent run logs.
-//
-// The existing /api/agents/{name}/log endpoint serves the LIVE tmux
-// scrollback of the agent's current session only — a restart or a hive
-// upgrade destroys every previous run's log. pkg/agent archives each kick's
-// scrollback to a durable file under /data (see agent/kick_logs.go); these
-// handlers list and serve those archives so an operator can read the log of
-// a run several kicks ago.
-//
-// All three are read-only GETs, so any authenticated role may call them —
-// the same rule as handleAgentFullLog and the /terminal proxy.
-
 import (
 	"encoding/json"
 	"fmt"

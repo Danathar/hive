@@ -9,17 +9,6 @@ import (
 	"github.com/hivecommons/hive/pkg/config"
 )
 
-// ── Opportunistic Work (#2592) ────────────────────────────────────────────────
-// A light, CHILL discovery list for the Operations tab: a small set of admissible
-// issues NOT already at the front of the ready queue, surfaced by a deliberately
-// simple "heat" proxy so an operator can spot fresh, interesting work and pin it
-// into the queue. Per the issue's explicit guidance ("Don't overdo the discovery
-// — we want a nice chill experience") this is NOT a recommender: no crawler, no
-// external heat API, no extra GitHub calls. It reuses the SAME ActionableIssues
-// candidate set + admission exclusions the ready queue already computes, and ranks
-// them with data the hub already holds on each issue (recency + a small label
-// bump). Read-only; it assigns nothing and pins nothing on its own.
-
 // opportunisticDefaultLimit caps how many opportunistic candidates we surface.
 // Kept small on purpose — the issue asks for a "nice chill experience", a short
 // curated list, not a wall of recommendations.

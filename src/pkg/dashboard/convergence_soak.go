@@ -5,20 +5,6 @@ import (
 	"sync"
 )
 
-// ── #4263: fixed-commit soak telemetry ─────────────────────────────────────────
-//
-// The maintainer's comparison requirement: an owner must be able to hold the
-// Hive commit, models, prompts/policies, and workload constant while changing
-// ONLY the convergence rollout mode, and later compare what each treatment
-// did. That comparison needs durable per-eval-cycle facts attributed to the
-// running commit and the captured (mode, generation) pair — which is exactly
-// one bounded row per enrolled pass, never an unbounded subject-timeseries
-// store (subject-level snapshots stay ephemeral in the #4246 diagnostics).
-//
-// Pattern: budget-window-history.json (#4298) — a small leaf-locked ring,
-// seeded on startup, snapshotted newest-first, persisted atomically by the
-// main persist loop on the same cadence as the other series.
-
 // convergenceSoakMaxEntries caps the ring. At the default 60s eval cadence,
 // 2880 entries is two days of continuous soak per treatment leg — enough to
 // compare off/shadow/enforce runs back to back — while staying a few hundred
@@ -154,15 +140,6 @@ func (s *Server) SeedConvergenceSoak(entries []ConvergenceSoakEntry) {
 	s.convergenceSoak().seed(entries)
 }
 
-// SetMutationStats wires the live mutation-boundary counters into convergence
-// status responses. Nil leaves the response at its zero/default shape.
-func (s *Server) SetMutationStats(stats func() interface{}) {
-	if s == nil {
-		return
-	}
-	s.mutationStats = stats
-}
-
 // handleConvergenceSoak serves GET /api/convergence/soak — the longitudinal
 // read/export path. OWNER-ONLY, matching the settings surface that controls
 // the mode: the soak comparison is an operator concern and the rows carry
@@ -185,4 +162,13 @@ func (s *Server) handleConvergenceSoak(w http.ResponseWriter, r *http.Request) {
 		"mutation":      mutationStats,
 		"entries":       s.ConvergenceSoakHistory(),
 	})
+}
+
+// SetMutationStats wires the live mutation-boundary counters into convergence
+// status responses. Nil leaves the response at its zero/default shape.
+func (s *Server) SetMutationStats(stats func() interface{}) {
+	if s == nil {
+		return
+	}
+	s.mutationStats = stats
 }

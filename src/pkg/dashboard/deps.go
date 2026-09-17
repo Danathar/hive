@@ -18,15 +18,10 @@ import (
 	"github.com/hivecommons/hive/pkg/hooks"
 	"github.com/hivecommons/hive/pkg/knowledge"
 	"github.com/hivecommons/hive/pkg/rotation"
+	"github.com/hivecommons/hive/pkg/scheduler"
 	"github.com/hivecommons/hive/pkg/tokens"
 	"github.com/hivecommons/hive/pkg/toolapprove"
 )
-
-type SchedulerControl interface {
-	BuildAgentMessage(agentName string, issues []ghpkg.Issue, actionable *ghpkg.ActionableResult) string
-	BuildAgentMessageFromLastActionable(agentName string) string
-	GetLastActionable() *ghpkg.ActionableResult
-}
 
 type Dependencies struct {
 	Config    *config.Config
@@ -89,9 +84,9 @@ type Dependencies struct {
 	// the REPOSITORIES "Rescan" button, which must be safe to press at any
 	// time. Nil (the shape most tests construct) makes POST /api/repos/rescan
 	// answer 503 rather than pretending to have scanned.
-	RescanReposFunc func(ctx context.Context) (*ghpkg.ActionableResult, error)
-	AdvisoryResetFunc     func(newPrimaryRepo string)
-	ReinitGitHubFunc      func(appID, installationID int64, keyFile string) error
+	RescanReposFunc   func(ctx context.Context) (*ghpkg.ActionableResult, error)
+	AdvisoryResetFunc func(newPrimaryRepo string)
+	ReinitGitHubFunc  func(appID, installationID int64, keyFile string) error
 	// ResolveAppKeyFileFunc resolves which App private key the process would
 	// actually sign with, given the configured key_file and app_id — the SAME
 	// resolution the boot and heartbeat-apply paths use (config value, then
@@ -234,4 +229,14 @@ func (ns *NousState) refreshStatus() {
 	ns.Status["snapshotTarget"] = NousBaselineTarget
 	ns.Status["phase"] = ns.Phase
 	ns.Status["principleCount"] = len(ns.Principles)
+}
+
+type SchedulerControl interface {
+	BuildAgentMessage(agentName string, issues []ghpkg.Issue, actionable *ghpkg.ActionableResult) string
+	BuildAgentMessageFromLastActionable(agentName string) string
+	GetLastActionable() *ghpkg.ActionableResult
+	// ResolveTemplate / TemplateExists report kick_template provenance for
+	// the prompt editor and the general-settings guard (#7390).
+	ResolveTemplate(agentName string) scheduler.TemplateResolution
+	TemplateExists(templateName string) (source string, ok bool)
 }

@@ -9,24 +9,6 @@ import (
 	"time"
 )
 
-// ── Why this file exists ────────────────────────────────────────────────────
-//
-// A classic PAT with too few scopes does not fail at boot. It fails much later
-// and far from the cause: the scanner reports "no actionable work" because a
-// search 403'd, or an agent's PR creation dies inside gh-wrapper with a generic
-// "403 Resource not accessible". Nothing in that chain names the missing scope,
-// so an operator has to reverse-engineer which capability was denied from a
-// symptom that looks like an empty backlog.
-//
-// GitHub hands us the answer for free. Every authenticated REST response
-// carries X-OAuth-Scopes (the scopes the token was granted) and
-// X-Accepted-OAuth-Scopes (what the endpoint wanted). One cheap authenticated
-// call at boot turns a silent, delayed, mis-attributed failure into a specific
-// startup line naming the scope AND the capability it costs.
-//
-// This check is a DIAGNOSTIC and must never become a failure mode of its own:
-// it fails soft in every direction (see CheckTokenScopes).
-
 const (
 	// scopeCheckTimeout bounds the single boot-time probe. Startup must not be
 	// held hostage by a slow or blackholed api.github.com — under forced proxy

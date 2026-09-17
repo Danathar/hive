@@ -1,37 +1,5 @@
 package dashboard
 
-// The hub's OWN decisions about one contributor, kept where an operator can read
-// them (#7330 — item 4 of #7317).
-//
-// After #7322 a struggling contributor's RUNS are readable from the dashboard:
-// what the relay reported, why, and how long it took. What stays invisible is
-// the other half of the conversation — the moments the hub REFUSED, IGNORED or
-// FENCED something the relay sent. Those are slog lines on the hub's stdout and
-// nowhere else, so from the page a contributor whose reports are being silently
-// dropped looks exactly like one whose relay never sent any.
-//
-// The motivating session (hosted-projectbluefin-knuckle-gjvq, 2026-09-17): a
-// litellm contributor picked up 11 tasks in ~2h, completed none, and ended 10 of
-// them as "released: gave the task back" with no `failed` in sight — even though
-// the relay's pane-stall and CLI-ready timeouts both call failCurrentTask(),
-// which sends task_failed BEFORE ready. Either those task_failed messages never
-// arrived, or the hub's #2568 generation fence rejected them (the relay's
-// up-front rejection paths send task_failed with no task_gen, and the fence
-// drops a 0 generation once the connection has sent a non-zero one). The hub
-// knows which; the operator could not.
-//
-// DECLARE, never ROUTE — the same boundary task_run_log.go draws. Nothing here
-// is read on a decision path: recording is a bounded append under its own mutex,
-// and no routing, cooldown, trust or offer consults the ring. A recording
-// failure is impossible by construction (no I/O), but a recording is also never
-// load-bearing: every call site keeps the slog line it already had, because the
-// ring is in memory only and a hub restart empties it.
-//
-// IN MEMORY ONLY, and the endpoint says so. `since` on the response is the hub's
-// start time, so an empty list after a restart reads as "nothing since boot"
-// rather than "nothing happened". Persisting is a follow-up if the ring earns
-// it; the issue deliberately did not ask for it up front.
-
 import (
 	"net/http"
 	"strconv"

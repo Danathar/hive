@@ -1,20 +1,5 @@
 package github
 
-// Per-repo custom agents (#6204): the client-side half.
-//
-// The MITM proxy refuses an out-of-scope agent write, but three write paths do
-// not traverse it. `hive-open-pr`, `hive-merge` and `hive-open-issue` are relays:
-// the agent drops a request file, the HIVE performs the GitHub call, and the
-// hive's own traffic is exempt from the forced-egress redirect by design. For
-// PR creation and merge that is not incidental — the proxy HARD-DENIES direct
-// POST /pulls and PUT /pulls/{n}/merge for every agent mode precisely so those
-// operations route through here.
-//
-// So a scope enforced only at the proxy would have left a specialist able to
-// open PRs, merge them, and file issues on repositories it was never defined
-// for — the exact activity the scope exists to prevent. Each relay asks the same
-// predicate before it acts.
-
 // SetAgentRepoScopeFunc installs the per-repo agent-scope predicate (#6204).
 // The hive passes config's AgentServesRepo, so a scope edited in the dashboard
 // is in force on the very next relay request with nothing to re-wire; passing

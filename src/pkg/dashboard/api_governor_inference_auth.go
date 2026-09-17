@@ -1,12 +1,5 @@
 package dashboard
 
-// Inference-auth settings (governor.vllm / governor.llm-d) for the Model
-// Gateways config tab (#4217). LiteLLM auth is already exposed there; this
-// closes the asymmetry for the self-hosted backends. Only key REFERENCES are
-// accepted and returned — a header NAME, an env var NAME, a file PATH, and an
-// optional endpoint override. The key VALUE never enters hive.yaml, logs, or
-// API responses.
-
 import (
 	"net/http"
 	"strings"

@@ -216,6 +216,23 @@ func (s *Scheduler) loadPromptTemplate(agentName string) string {
 // loadNamedTemplate loads a kick template by explicit filename (from config kick_template field).
 // It checks on-disk paths first, then falls back to embedded default policies.
 func (s *Scheduler) loadNamedTemplate(templateName string) string {
+	content, _, _ := s.resolveNamedTemplate(templateName)
+	return content
+}
+
+// TemplateSourceEmbedded is the source label for a template served from the
+// compiled-in defaults (pkg/policies/defaults); every other source is the
+// file path that served it.
+const TemplateSourceEmbedded = "embedded default"
+
+// resolveNamedTemplate is loadNamedTemplate with provenance: the content, the
+// source that served it ("" when nothing did), and every location that was
+// tried. The provenance is what lets a dangling kick_template be REPORTED
+// rather than silently skipped (hivecommons/hive#7390): the success path
+// always logged "using config kick_template", the miss path logged nothing,
+// and an operator saw a blank prompt editor with a 404 repo link and no way
+// to tell a lost template from one that never existed.
+func (s *Scheduler) resolveNamedTemplate(templateName string) (content, source string, tried []string) {
 	paths := []string{
 		// User-saved override from the dashboard prompt editor wins over the
 		// git-cloned examples copy and embedded defaults (#3239). handleAgentPromptSave
@@ -233,13 +250,129 @@ func (s *Scheduler) loadNamedTemplate(templateName string) string {
 	}
 	for _, p := range paths {
 		if data, err := os.ReadFile(p); err == nil {
-			return string(data)
+			return string(data), p, paths
 		}
 	}
+	tried = append(paths, "pkg/policies/defaults/"+templateName+" ("+TemplateSourceEmbedded+")")
 	if data, err := policies.DefaultPolicies.ReadFile("defaults/" + templateName); err == nil {
-		return string(data)
+		return string(data), TemplateSourceEmbedded, tried
 	}
-	return ""
+	return "", "", tried
+}
+
+// TemplateResolution describes how an agent's kick prompt template resolves,
+// for the dashboard prompt editor (hivecommons/hive#7390). It answers the
+// questions a blank editor cannot: is a kick_template configured, was it
+// found, where, and — when it was not — what the scheduler will use instead.
+type TemplateResolution struct {
+	// Agent is the base agent name the resolution was computed for.
+	Agent string `json:"agent"`
+	// KickTemplate is the configured kick_template name ("" when unset).
+	KickTemplate string `json:"kickTemplate,omitempty"`
+	// Resolved is true when the configured kick_template was found.
+	Resolved bool `json:"resolved"`
+	// Source is what served the configured template: a file path, or
+	// TemplateSourceEmbedded. Empty when unresolved or unset.
+	Source string `json:"source,omitempty"`
+	// PathsTried lists every location consulted for the configured template,
+	// in order, so an operator can see exactly where a missing file was
+	// expected. Empty when no kick_template is configured.
+	PathsTried []string `json:"pathsTried,omitempty"`
+	// Fallback names what a kick will actually use when the configured
+	// template is missing (or none is configured): the ACMM pack template,
+	// the <agent>.md convention template, or the hardcoded kick.
+	Fallback string `json:"fallback"`
+	// EmbeddedDefaultExists reports whether pkg/policies/defaults ships a
+	// file of the kick_template's name — i.e. whether a repo link to it would
+	// resolve. The editor must not render a link to a path that 404s.
+	EmbeddedDefaultExists bool `json:"embeddedDefaultExists"`
+}
+
+// ResolveTemplate reports how agentName's kick prompt resolves, without
+// building a kick. It mirrors BuildAgentMessage's chain (prompt_source is
+// excluded: it is resolved live at kick time and has its own status) so the
+// prompt editor can show the truth the scheduler would act on.
+func (s *Scheduler) ResolveTemplate(agentName string) TemplateResolution {
+	res := TemplateResolution{Agent: agentName}
+	if s == nil || s.cfg == nil {
+		return res
+	}
+	baseName := s.cfg.BaseAgentName(agentName)
+	res.Agent = baseName
+	if agentCfg, ok := s.cfg.Agents[baseName]; ok && agentCfg.KickTemplate != "" {
+		res.KickTemplate = agentCfg.KickTemplate
+		content, source, tried := s.resolveNamedTemplate(agentCfg.KickTemplate)
+		res.PathsTried = tried
+		res.Resolved = content != ""
+		res.Source = source
+		_, err := policies.DefaultPolicies.ReadFile("defaults/" + agentCfg.KickTemplate)
+		res.EmbeddedDefaultExists = err == nil
+	}
+	res.Fallback = s.describeTemplateFallback(baseName)
+	return res
+}
+
+// TemplateExists reports whether a kick_template NAME resolves anywhere the
+// scheduler looks (user override dir, cloned examples, configured local dir,
+// embedded defaults) and what served it. The dashboard's config write path
+// uses it to refuse a newly set dangling name (hivecommons/hive#7390).
+func (s *Scheduler) TemplateExists(templateName string) (source string, ok bool) {
+	if s == nil || s.cfg == nil || strings.TrimSpace(templateName) == "" {
+		return "", false
+	}
+	content, source, _ := s.resolveNamedTemplate(templateName)
+	return source, content != ""
+}
+
+// WarnDanglingKickTemplates checks every enabled agent's configured
+// kick_template at startup and logs a WARN for each one that resolves nowhere,
+// naming the fallback the kicks will use and the paths tried. Returns the
+// offending agents (name → template) so callers and tests can act on the
+// list. The per-kick warning in BuildAgentMessage covers the steady state;
+// this catches the misconfiguration once, at load, where an operator reading
+// the boot log will see it (hivecommons/hive#7390 item 3).
+func (s *Scheduler) WarnDanglingKickTemplates() map[string]string {
+	if s == nil || s.cfg == nil {
+		return nil
+	}
+	dangling := map[string]string{}
+	for name, agentCfg := range s.cfg.Agents {
+		if agentCfg.KickTemplate == "" {
+			continue
+		}
+		res := s.ResolveTemplate(name)
+		if res.Resolved {
+			continue
+		}
+		dangling[name] = agentCfg.KickTemplate
+		if s.logger != nil {
+			s.logger.Warn("config: kick_template does not resolve; kicks will use the fallback until the file exists or the field is cleared",
+				"agent", name, "template", agentCfg.KickTemplate,
+				"fallback", res.Fallback, "paths_tried", strings.Join(res.PathsTried, ", "))
+		}
+	}
+	return dangling
+}
+
+// describeTemplateFallback names the template BuildAgentMessage would use for
+// baseName when no configured kick_template resolves — the same chain, in the
+// same order, described rather than executed.
+func (s *Scheduler) describeTemplateFallback(baseName string) string {
+	if s.cfg.ACMMLevel != nil && *s.cfg.ACMMLevel > 0 {
+		if pack, err := config.ACMMPackByLevel(*s.cfg.ACMMLevel); err == nil {
+			for _, pa := range pack.Agents {
+				if pa.Name == baseName && pa.KickTemplate != "" {
+					if content, _, _ := s.resolveNamedTemplate(pa.KickTemplate); content != "" {
+						return fmt.Sprintf("ACMM level %d pack template %s", *s.cfg.ACMMLevel, pa.KickTemplate)
+					}
+				}
+			}
+		}
+	}
+	if template := s.loadPromptTemplate(baseName); template != "" {
+		return "convention template " + baseName + ".md"
+	}
+	return "hardcoded kick for " + baseName
 }
 
 // substituteTemplateWithPolicy replaces ${VAR} placeholders in a prompt
@@ -248,170 +381,9 @@ func (s *Scheduler) substituteTemplateWithPolicy(template string, actionable *gi
 	return s.substituteTemplateWithVars(template, actionable, agentName, issues, nil)
 }
 
-// substituteTemplateWithVars is substituteTemplateWithPolicy plus caller-supplied
-// ${VAR}s, for a template whose values only one call site can compute.
-//
-// The reviewer lane (#5617 item 2) is the first such caller: its work list is
-// read from ci-failing.json and then GATED on — buildReviewerMessage refuses to
-// send a contract at all when that list is empty — so the list the template
-// renders must be the same one the gate saw. Recomputing it inside the
-// substitution would reopen the window where a rewrite between the two reads
-// renders a full adjudication contract over an empty list.
-//
-// The built-ins still WIN on a name collision, so an extra var can never shadow
-// ${GH_AUTH} or ${AGENT_NAME}.
-func (s *Scheduler) substituteTemplateWithVars(template string, actionable *github.ActionableResult, agentName string, issues []github.Issue, extra map[string]func() string) (string, bool) {
-	baseName := s.cfg.BaseAgentName(agentName)
-	if actionable == nil {
-		actionable = &github.ActionableResult{}
-	}
-	now := time.Now().Local()
-
-	// Per-repo agent scope (#6204): everything below describes ONE agent's
-	// world, so narrow that world to the repos this agent serves before any of
-	// it is computed. Cadence stays hive-wide — a scoped agent still wakes on
-	// its schedule — but it wakes to its own repos' work instead of a backlog
-	// it has to read through and discard. That task filtering is the cheap half
-	// of the cost problem: an agent shown a schema-migration issue in a repo
-	// with no database will look at it.
-	//
-	// A nil scope (every agent on every hive that does not use the feature)
-	// skips all of this, and the values below are byte-identical to before.
-	if s.cfg.AgentRepoScope(agentName) != nil {
-		keep := func(repo string) bool { return s.cfg.AgentServesRepo(agentName, repo) }
-		actionable = github.FilterActionableForRepos(actionable, keep)
-		issues = filterIssuesForRepos(issues, keep)
-	}
-
-	var agentIssuesForList []github.Issue
-	if baseName == "scanner" {
-		agentIssuesForList = issues
-	} else {
-		agentIssuesForList = filterByLane(issues, baseName)
-	}
-	agentIssuesForList, heldInflight := s.splitInflight(agentIssuesForList)
-	issueList, issueFailClosed := s.formatIssueListWithPolicy(agentIssuesForList)
-	prList, prFailClosed := s.formatPRListWithPolicyForAgent(actionable, baseName)
-	if issueFailClosed || prFailClosed {
-		s.logger.Warn("ioscan fail-closed blocked kick", "agent", agentName)
-		return "", true
-	}
-
-	// Both narrowings apply (#6203/#6204). ${PROJECT_REPOS_LIST} is what a
-	// template tells an agent to work through: a repo it does not serve is not
-	// its work, and a paused repo is not work at all. ${PROJECT_PRIMARY_REPO}
-	// is the repo its examples target, so a specialist scoped away from the
-	// hive primary must not be handed the hive primary in either.
-	agentActiveRepos, _ := s.activeReposForAgent(agentName)
-	reposList := strings.Join(agentActiveRepos, ", ")
-	primaryRepo := s.cfg.PrimaryRepoForAgent(agentName)
-	fullPrimaryRepo := config.QualifyRepo(s.cfg.Project.Org, primaryRepo)
-
-	agentList, agentRoles := s.buildAgentListAndRoles()
-
-	displayName := agentName
-	if ac, ok := s.cfg.Agents[agentName]; ok && ac.DisplayName != "" {
-		displayName = ac.DisplayName
-	}
-
-	agentIssues := filterByLane(issues, baseName)
-	if len(agentIssues) == 0 && actionable != nil && len(actionable.Issues.Items) > 0 {
-		agentIssues = actionable.Issues.Items
-	}
-	knowledgeSection := s.primeKnowledge(agentIssues)
-
-	repoRoot := s.agentsRepoRoot(primaryRepo)
-
-	// Additive: prepend the repo's AGENTS.md instructions + requested skills to
-	// the injected knowledge, when a local checkout root is available. This is a
-	// guarded, single call point — it returns "" (and never errors) when no
-	// AGENTS.md exists, so it is a no-op for repos that don't use the convention.
-	//
-	// The root is resolved for the PRIMARY repo, which is the repo this kick's
-	// instructions are about — the same repo ${PROJECT_PRIMARY_REPO} names here
-	// and HIVE_REPO names in the agent's environment. A multi-repo hive gets the
-	// primary repo's AGENTS.md, never a different repo's: resolution is keyed by
-	// repo name, so it cannot silently pick the wrong one.
-	//
-	// TODO(agentsmd): once file-level targeting exists, prefer
-	// agentsmd.ParseNearest for closest-wins nested AGENTS.md. That still has no
-	// caller — nothing on the kick path knows which FILE an agent will touch —
-	// so it stays deferred, unlike the checkout root, which is now threaded.
-	if agentsSection := s.primeAgentsMd(repoRoot); agentsSection != "" {
-		knowledgeSection = agentsSection + "\n" + knowledgeSection
-	}
-
-	// Agent-declared skills prefer the hive-host-local registry, then fall back
-	// to definitions in the primary repo's AGENTS.md or adjacent skills/
-	// directory. The registry remains independently useful without a checkout;
-	// the fallback activates only when agentsRepoRoot found one above.
-	if skillsSection := s.primeSkills(agentName, repoRoot); skillsSection != "" {
-		knowledgeSection = skillsSection + "\n" + knowledgeSection
-	}
-
-	inceptionIdea, inceptionPhase, inceptionMode, inceptionAnswers, inceptionSlug, inceptionRepoURL := s.inceptionVars()
-
-	// The merge-eligible and CI-failing lists are read from hive-wide metrics
-	// files, so they need the same narrowing: a scoped agent asked to fix red CI
-	// must not be handed a red PR on a repo it cannot push to (#6204).
-	repoInScope := func(repo string) bool { return s.cfg.AgentServesRepo(agentName, repo) }
-	mergeEligibleList := s.buildMergeEligibleListFor(repoInScope)
-	ciFailingList := s.buildCIFailingListFor(repoInScope)
-
-	// The built-in per-kick variables. Each value is already computed above, so
-	// the thunks just return it — but wrapping them as resolve.RuntimeContext
-	// producers routes this through the same pluggable engine as config
-	// substitution, letting operators add their own ${VAR}s (via the config
-	// `variables:` block) while these built-ins always win. With no operator
-	// variables configured, Expand reproduces the previous strings.NewReplacer
-	// output exactly (unknown ${VAR} left literal; no env fallback in template
-	// scope).
-	lit := func(v string) func() string { return func() string { return v } }
-	rt := &resolve.RuntimeContext{Vars: map[string]func() string{
-		"AGENT_NAME":            lit(agentName),
-		"AGENT_DISPLAY_NAME":    lit(displayName),
-		"TIMESTAMP":             lit(now.Format("1/2 3:04 PM MST")),
-		"QUEUE_ISSUES":          lit(fmt.Sprintf("%d", actionable.Issues.Count)),
-		"QUEUE_PRS":             lit(fmt.Sprintf("%d", actionable.PRs.Count)),
-		"QUEUE_HOLD":            lit(fmt.Sprintf("%d", actionable.Hold.Total)),
-		"SLA_VIOLATIONS":        lit(fmt.Sprintf("%d", actionable.Issues.SLAViolations)),
-		"ISSUE_LIST":            lit(issueList),
-		"PR_LIST":               lit(prList),
-		"AUTHORIZED_REPOS":      lit(s.buildReposSectionFor(agentName)),
-		"GH_AUTH":               lit(s.ghAuthInstructions()),
-		"WORK_TRACKER":          lit(s.workTrackerSection()),
-		"IN_FLIGHT":             lit(inflightNote(heldInflight)),
-		"PROJECT_ORG":           lit(s.cfg.Project.Org),
-		"PROJECT_NAME":          lit(s.cfg.Project.Name),
-		"PROJECT_PRIMARY_REPO":  lit(fullPrimaryRepo),
-		"PROJECT_AI_AUTHOR":     lit(s.cfg.EffectiveAIAuthor()),
-		"PROJECT_REPOS_LIST":    lit(reposList),
-		"PROJECT_HOMEBREW_REPO": lit(fmt.Sprintf("%s/homebrew-tap", s.cfg.Project.Org)),
-		"PROJECT_OBSERVABILITY": lit(s.cfg.Governor.ProjectObservability.PromptSection()),
-		"HIVE_REPO":             lit(fmt.Sprintf("%s/hive", s.cfg.Project.Org)),
-		"HIVE_ID":               lit(s.cfg.HiveID),
-		"AGENT_LIST":            lit(agentList),
-		"AGENT_ROLES":           lit(agentRoles),
-		"ENABLED_AGENTS":        lit(agentList),
-		"KNOWLEDGE":             lit(knowledgeSection),
-		"INCEPTION_IDEA":        lit(inceptionIdea),
-		"INCEPTION_PHASE":       lit(inceptionPhase),
-		"INCEPTION_MODE":        lit(inceptionMode),
-		"INCEPTION_ANSWERS":     lit(inceptionAnswers),
-		"INCEPTION_SLUG":        lit(inceptionSlug),
-		"INCEPTION_REPO_URL":    lit(inceptionRepoURL),
-		"MERGE_ELIGIBLE":        lit(mergeEligibleList),
-		"CI_FAILING":            lit(ciFailingList),
-	}}
-	// Caller-supplied vars lose a name clash: one already claimed by a built-in
-	// above is left alone, so no call site can redefine ${GH_AUTH}.
-	for name, fn := range extra {
-		if _, taken := rt.Vars[name]; taken {
-			continue
-		}
-		rt.Vars[name] = fn
-	}
-	return s.registry().Expand(context.Background(), template, resolve.ScopeTemplate, rt), false
+func (s *Scheduler) formatIssueList(issues []github.Issue) string {
+	out, _ := s.formatIssueListWithPolicy(issues)
+	return out
 }
 
 // issueFilterNotice renders the operator's project.issue_filter as prompt text,
@@ -433,11 +405,6 @@ func (s *Scheduler) issueFilterNotice() string {
 		strings.Join(f.RequireLabels, ", ")))
 	b.WriteString("  ⛔ Do NOT pick up, plan, or open PRs for issues outside this list, even if you find them by listing the repo yourself.\n")
 	return b.String()
-}
-
-func (s *Scheduler) formatIssueList(issues []github.Issue) string {
-	out, _ := s.formatIssueListWithPolicy(issues)
-	return out
 }
 
 func (s *Scheduler) formatIssueListWithPolicy(issues []github.Issue) (string, bool) {
@@ -490,18 +457,6 @@ func (s *Scheduler) formatIssueListWithPolicy(issues []github.Issue) (string, bo
 	return b.String(), failClosed
 }
 
-const issuePriorityNote = "Issue priority: human-filed and priority-labelled issues are listed first; work them before hive-filed.\n"
-
-func issuePriorityMarker(issue github.Issue) string {
-	if issue.AuthorIsHuman {
-		return "[human]"
-	}
-	if issue.HumanAcknowledged {
-		return "[hive-filed+ack]"
-	}
-	return "[hive-filed]"
-}
-
 func (s *Scheduler) formatPRList(actionable *github.ActionableResult) string {
 	out, _ := s.formatPRListWithPolicy(actionable)
 	return out
@@ -511,100 +466,18 @@ func (s *Scheduler) formatPRListWithPolicy(actionable *github.ActionableResult) 
 	return s.formatPRListWithPolicyForAgent(actionable, "")
 }
 
-func (s *Scheduler) formatPRListWithPolicyForAgent(actionable *github.ActionableResult, agentName string) (string, bool) {
-	if len(actionable.PRs.Items) == 0 {
-		return "(none)", false
+// forkAnnotation is the inline marker every PR list carries for a PR whose
+// head lives in a fork (hivecommons/hive#7386): the agent learns "comment
+// only" from the work list, not from a failed push. Empty for same-repo PRs.
+func forkAnnotation(pr github.PullRequest) string {
+	if !pr.FromFork {
+		return ""
 	}
-	var b strings.Builder
-	failClosed := false
-	limit := s.prCap()
-	for i, pr := range actionable.PRs.Items {
-		if i >= limit {
-			b.WriteString(prListOverflowLine(len(actionable.PRs.Items)-i, limit))
-			break
-		}
-		// The PR title and author login are untrusted external text about to be
-		// injected into an agent kick (F11). PR titles in particular drive
-		// classification routing, and an attacker controls both the title and their
-		// own fork/login. Gate both through ioscan: a blocked value is redacted
-		// rather than injected raw. Disabled → strict no-op. Default is now ON.
-		title, titleVerdict := s.enforceIssueTextVerdict(pr.Title)
-		failClosed = failClosed || (s.ioscanFailClosed() && titleVerdict.HasCriticalInjection())
-		const maxPRTitleRunes = 70
-		if runes := []rune(title); len(runes) > maxPRTitleRunes {
-			title = string(runes[:maxPRTitleRunes])
-		}
-		author, authorVerdict := s.enforceIssueTextVerdict(pr.Author)
-		failClosed = failClosed || (s.ioscanFailClosed() && authorVerdict.HasCriticalInjection())
-		annotation, annotationVerdict := s.enforceIssueTextVerdict(prKickAnnotation(pr, agentName))
-		failClosed = failClosed || (s.ioscanFailClosed() && annotationVerdict.HasCriticalInjection())
-		b.WriteString(fmt.Sprintf("  %s#%d by @%s %s %s\n", pr.Repo, pr.Number, author, annotation, title))
+	head := pr.HeadRepo
+	if head == "" {
+		head = "fork deleted"
 	}
-	return b.String(), failClosed
-}
-
-func prKickAnnotation(pr github.PullRequest, agentName string) string {
-	lane := prOwningLane(pr)
-	mergeableState := strings.TrimSpace(pr.MergeableState)
-	if mergeableState == "" && prHasLabel(pr.Labels, "needs-rebase") {
-		mergeableState = "needs-rebase"
-	}
-	if mergeableState == "" {
-		switch pr.Mergeable {
-		case github.MergeableYes:
-			mergeableState = "mergeable"
-		case github.MergeableNo:
-			mergeableState = "not-mergeable"
-		default:
-			mergeableState = "unknown"
-		}
-	}
-	parts := []string{"mergeable_state=" + mergeableState}
-	if lane != "" {
-		parts = append(parts, "lane="+lane)
-	} else {
-		parts = append(parts, "lane=unknown")
-	}
-	annotation := "[" + strings.Join(parts, ", ") + "]"
-	if prIsAppAuthored(pr) && prHasConflictSignal(pr, mergeableState) && lane != "" && strings.EqualFold(lane, agentName) {
-		annotation += " [CONFLICT, yours]"
-	}
-	return annotation
-}
-
-func prOwningLane(pr github.PullRequest) string {
-	for _, label := range pr.Labels {
-		if lane, ok := strings.CutPrefix(strings.TrimSpace(label), "agent/"); ok && lane != "" {
-			return lane
-		}
-	}
-	if head := strings.TrimSpace(pr.HeadRef); head != "" {
-		if lane, _, ok := strings.Cut(head, "/"); ok && lane != "" {
-			return lane
-		}
-	}
-	return ""
-}
-
-func prHasLabel(labels []string, want string) bool {
-	for _, label := range labels {
-		if strings.EqualFold(strings.TrimSpace(label), want) {
-			return true
-		}
-	}
-	return false
-}
-
-func prHasConflictSignal(pr github.PullRequest, mergeableState string) bool {
-	if prHasLabel(pr.Labels, "needs-rebase") {
-		return true
-	}
-	return strings.EqualFold(mergeableState, "dirty") || strings.EqualFold(mergeableState, "conflicting")
-}
-
-func prIsAppAuthored(pr github.PullRequest) bool {
-	author := strings.TrimSpace(pr.Author)
-	return pr.AppAuthored || strings.HasPrefix(strings.ToLower(author), "app/")
+	return " [fork: " + head + " — comment only, cannot push]"
 }
 
 // buildAgentListAndRoles returns a comma-separated agent list and a formatted
@@ -817,121 +690,8 @@ func (s *Scheduler) BuildAgentMessageFromLastActionable(agentName string) string
 	return s.BuildAgentMessage(agentName, classified, actionable)
 }
 
-// filterIssuesForRepos keeps only the issues in repos the predicate accepts.
-func filterIssuesForRepos(issues []github.Issue, keep func(repo string) bool) []github.Issue {
-	if keep == nil {
-		return issues
-	}
-	out := make([]github.Issue, 0, len(issues))
-	for _, issue := range issues {
-		if keep(issue.Repo) {
-			out = append(out, issue)
-		}
-	}
-	return out
-}
-
 // buildReposSection is buildReposSectionFor with no agent: the hive-wide list.
 func (s *Scheduler) buildReposSection() string { return s.buildReposSectionFor("") }
-
-// buildReposSectionFor renders the AUTHORIZED REPOS block for one agent.
-//
-// For an unscoped agent — every agent on a hive that does not use per-repo
-// custom agents (#6204) — this is the hive's repo list, unchanged. For a scoped
-// agent it is that agent's repos, and the section says out loud that the hive
-// watches more: an agent that has filed issues in a repo for weeks and suddenly
-// does not see it would otherwise read the shorter list as scope loss and file
-// a finding about it.
-// activeReposForAgent splits the repos the named agent serves (#6204) into the
-// ones it may act on this session and the ones the operator has paused (#6203).
-// The two narrowings compose rather than override: a scope says which repos an
-// agent is FOR, a pause says which repos are open for work at all, and what
-// reaches a kick is the intersection.
-func (s *Scheduler) activeReposForAgent(agentName string) (active, paused []string) {
-	repos := s.cfg.ReposForAgent(agentName)
-	active = make([]string, 0, len(repos))
-	for _, repo := range repos {
-		if s.cfg.IsRepoPaused(repo) {
-			paused = append(paused, repo)
-			continue
-		}
-		active = append(active, repo)
-	}
-	return active, paused
-}
-
-func (s *Scheduler) buildReposSectionFor(agentName string) string {
-	var b strings.Builder
-	host := s.cfg.GitHub.ResolvedBaseURL() // always a full URL; github.com or the GHE instance
-	org := s.cfg.Project.Org
-	scoped := s.cfg.AgentRepoScope(agentName) != nil
-	active, paused := s.activeReposForAgent(agentName)
-	agentRepos := s.cfg.ReposForAgent(agentName)
-	b.WriteString(fmt.Sprintf("AUTHORIZED REPOS (all on %s — you may ONLY interact with these):\n", host))
-	for _, repo := range active {
-		full := config.QualifyRepo(org, repo)
-		// Print the fully-qualified URL so the host is unambiguous in the prompt —
-		// a github.ibm.com repo must never be mistaken for a github.com one.
-		b.WriteString(fmt.Sprintf("  %s/%s\n", strings.TrimRight(host, "/"), full))
-	}
-	if len(active) == 0 {
-		if scoped {
-			b.WriteString("  (none — this agent is scoped to repos this hive does not watch, or every repo it serves is currently paused; tell the operator)\n")
-		} else {
-			b.WriteString("  (none — every repo this hive watches is currently paused)\n")
-		}
-	}
-	if scoped {
-		b.WriteString(fmt.Sprintf("🎯 THIS AGENT IS REPO-SCOPED: the hive manages %d repo(s); you are defined for the %d listed above and only those. Other repos in this hive belong to other agents — writes to them are refused deterministically by the proxy and by the hive-open-pr/hive-merge/hive-open-issue relays, so retrying cannot succeed. This is how the operator composed the roster, NOT scope loss and NOT an outage: do not work them, do not route around it, and do not file an issue about it.\n",
-			len(s.cfg.Project.Repos), len(agentRepos)))
-	}
-	if len(paused) > 0 {
-		pausedFull := make([]string, 0, len(paused))
-		for _, repo := range paused {
-			pausedFull = append(pausedFull, config.QualifyRepo(org, repo))
-		}
-		b.WriteString(fmt.Sprintf("⏸️ PAUSED BY THE OPERATOR (watched, but OUT OF SCOPE this session): %s\n", strings.Join(pausedFull, ", ")))
-		b.WriteString("   The hive is deliberately quiet on those repos — a release freeze, an incident, a repo declared but not yet onboarded. Writes to them are refused deterministically by the proxy and by the hive-open-pr/hive-merge relays, so retrying cannot succeed. This is an operator decision, NOT an outage and NOT scope loss: do not work them, do not route around it, and do not file an issue about it.\n")
-	}
-	b.WriteString("⛔ NEVER access, search, list, file issues in, or open PRs on repos not listed above.\n")
-	b.WriteString(fmt.Sprintf("⛔ Every repo above is on %s. This hive is single-host — never touch a repo on a different GitHub host.\n", host))
-	// SCOPE vs PROVISIONING (#4464). This list is what `include_repos: true`
-	// puts in a kick, and agents have read it as a promise that the repos are
-	// on disk: a guide agent found its workspace directory empty, concluded
-	// "no git worktree has been provisioned despite include_repos=true", and
-	// filed it as an infrastructure blocker that then sat in the operator's
-	// advisory digest. There is no such provisioning step — nothing in the
-	// hive materialises a per-agent worktree from this list — so the kick has
-	// to say so, in the same section that produces the impression. Getting a
-	// checkout is an ordinary thing an agent does for itself, not a fault.
-	b.WriteString(fmt.Sprintf("ℹ️ This list is an AUTHORIZATION SCOPE, not a checkout: it does not put any repo on disk, and nothing provisions a per-agent git worktree from it. If you need files rather than the GitHub API and have no checkout, clone one yourself: git clone %s/<org>/<repo> /tmp/<repo>. An absent checkout is a normal state to handle, NOT an infrastructure fault — do not file a finding about a missing worktree or unprovisioned repo workspace.\n", strings.TrimRight(host, "/")))
-	// Multi-repo projects: the agent workdir is never a checkout of anything
-	// but the PRIMARY repo, and the shipped templates' examples say --repo
-	// "$HIVE_REPO" (primary). Without an explicit rotation instruction agents lock onto
-	// the primary repo forever and the other project repos are never
-	// touched (root-caused on a live 3-repo hive: sec-check scanned only
-	// the primary across every session). The kick is the one place every
-	// agent/template combination sees, so the instruction lives here.
-	if len(active) > 1 {
-		// Rotate over the repos this agent both serves and may act on, and never
-		// name one it cannot write to as the fallback: telling an agent "all of
-		// them are in scope, not just the primary" while pointing it at a repo
-		// that is paused or outside its scope is a contradiction it will try to
-		// resolve by writing there (#6203/#6204).
-		primary := s.cfg.PrimaryRepoForAgent(agentName)
-		if primary == "" || s.cfg.IsRepoPaused(primary) {
-			primary = active[0]
-		}
-		b.WriteString(fmt.Sprintf(`🔁 MULTI-REPO COVERAGE — REQUIRED: this project has %d authorized repos; ALL of them are in scope, not just the primary (%s).
-Your workdir is, at most, a checkout of the primary repo — never of the others. Each session, pick the authorized repo you have LEAST RECENTLY covered (check your beads and the [<your-role>] issues you previously filed in each repo) and work THAT repo this session:
-  - If it is not your workdir repo, clone it first: git clone %s/<org>/<repo> /tmp/<repo> && cd /tmp/<repo>
-  - Pass the chosen repo EXPLICITLY to every gh command: --repo "<org>/<repo>" (do not rely on $HIVE_REPO, which always names the primary repo).
-  - $HIVE_REPOS lists every authorized repo, comma-separated.
-⛔ Do NOT default to the primary repo every session — repos you never visit accumulate unseen problems.
-`, len(active), config.QualifyRepo(org, primary), strings.TrimRight(host, "/")))
-	}
-	return b.String()
-}
 
 // maxIssuesPerKick / maxPRsPerKick are the DEFAULT list caps; the live values
 // come from governor.kick_limits via issueCap/prCap (hivecommons/hive#7368).
@@ -1044,14 +804,23 @@ func (s *Scheduler) BuildAgentMessage(agentName string, issues []github.Issue, a
 
 	// 1. Config-driven: use kick_template field if set
 	if agentCfg, ok := s.cfg.Agents[baseName]; ok && agentCfg.KickTemplate != "" {
-		if template := s.loadNamedTemplate(agentCfg.KickTemplate); template != "" {
-			s.logger.Info("using config kick_template", "agent", agentName, "template", agentCfg.KickTemplate)
+		template, source, tried := s.resolveNamedTemplate(agentCfg.KickTemplate)
+		if template != "" {
+			s.logger.Info("using config kick_template", "agent", agentName, "template", agentCfg.KickTemplate, "source", source)
 			body, failClosed := s.substituteTemplateWithPolicy(template, actionable, agentName, issues)
 			if failClosed {
 				return ""
 			}
 			return fmt.Sprintf("[agent:%s]\n\n%s", agentName, body)
 		}
+		// The configured template does not exist anywhere. Say so — with the
+		// same weight the success path gets — naming what the kick falls back
+		// to. Silence here is what let a dangling kick_template look like a
+		// working one for the life of a spoke (hivecommons/hive#7390).
+		s.logger.Warn("config kick_template not found; falling back",
+			"agent", agentName, "template", agentCfg.KickTemplate,
+			"fallback", s.describeTemplateFallback(baseName),
+			"paths_tried", strings.Join(tried, ", "))
 	}
 
 	// 2. ACMM pack default: if acmm_level is set, use the pack's template for this agent
@@ -1145,8 +914,9 @@ Before choosing work:
    and, when needed, ` + "`gh pr diff <number> --repo <repo>`" + `. The supplied list is the
    authoritative open-PR snapshot; do not run ` + "`gh pr list`" + ` to rebuild it.
 3. If another PR already covers any intended ground, choose a disjoint cluster
-   or stand down. If the snapshot says additional PRs were omitted, stand down:
-   unseen occupied ground cannot be proven disjoint. Do not write a second
+   or stand down. If the snapshot flags a repo as having omitted PRs, stand
+   down for that repo: unseen occupied ground cannot be proven disjoint. Repos
+   the snapshot lists in full remain workable. Do not write a second
    implementation and do not remove hold.
 4. Cut any new branch from a fresh ` + "`origin/<base>`" + `, not from a local worktree
    or another agent's branch. If a hold-gated PR's head moves while held, the
@@ -1303,9 +1073,22 @@ func (s *Scheduler) addRedPRFixFirst(agentName string, message string) string {
 	return section + message
 }
 
+// heldRedPRNote is appended to a held PR's entry in the fix-before-new
+// block: the hold is a merge checkpoint, not a repair checkpoint
+// (hivecommons/hive#7438), and the agent's own policy says never to touch a
+// held item — this line is the explicit, narrow exception.
+const heldRedPRNote = "held for human review — fix CI, do not remove the hold"
+
+// heldRedPRExemptAgent is the one agent whose held PRs are NOT routed back
+// for repair: the level-hold comment tells humans that outreach PRs are
+// always held for their review, so an outreach PR must not be edited after a
+// human may have started reading it.
+const heldRedPRExemptAgent = "outreach"
+
 // formatRedPRFixData renders the fix-before-new section for one agent from
 // raw ci-failing.json bytes. Empty result means the agent has no open,
-// non-escalated red PRs.
+// non-escalated red PRs. A held red PR (hivecommons/hive#7438) is listed like
+// any other — with heldRedPRNote — except for outreach's.
 func formatRedPRFixData(data []byte, agent string) string {
 	type ciFailingRow struct {
 		Number        int      `json:"number"`
@@ -1315,6 +1098,9 @@ func formatRedPRFixData(data []byte, agent string) string {
 		FailingChecks []string `json:"failing_checks"`
 		Excerpt       string   `json:"excerpt"`
 		Escalated     bool     `json:"escalated"`
+		FromFork      bool     `json:"from_fork"`
+		HeadRepo      string   `json:"head_repo"`
+		Held          bool     `json:"held"`
 	}
 	var payload struct {
 		Items []ciFailingRow `json:"ci_failing"`
@@ -1323,9 +1109,19 @@ func formatRedPRFixData(data []byte, agent string) string {
 		return ""
 	}
 	var mine []ciFailingRow
+	forks := 0
 	for _, pr := range payload.Items {
 		if pr.Escalated {
 			continue // needs-human: hands off for agents
+		}
+		if pr.FromFork {
+			// A fork PR can never be "yours": the hive pushes only to the base
+			// repository, so it did not open this PR and cannot repair it.
+			// Unattributed rows default to scanner below, which is exactly how
+			// 66 contributor PRs from forks became one scanner's FIX-BEFORE-NEW
+			// gate on the projectbluefin spoke (hivecommons/hive#7386).
+			forks++
+			continue
 		}
 		owner := pr.Agent
 		if owner == "" {
@@ -1333,6 +1129,9 @@ func formatRedPRFixData(data []byte, agent string) string {
 		}
 		if owner != agent {
 			continue
+		}
+		if pr.Held && owner == heldRedPRExemptAgent {
+			continue // a human may already be reading it; leave it alone
 		}
 		mine = append(mine, pr)
 	}
@@ -1342,6 +1141,9 @@ func formatRedPRFixData(data []byte, agent string) string {
 
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("\n## 🔴 FIX-BEFORE-NEW — your open PRs with failing CI (%d)\n\n", len(mine)))
+	if forks > 0 {
+		b.WriteString(fmt.Sprintf("(%d red PR(s) from forks are NOT listed here: you cannot push to a fork — they appear under CI_FAILING as comment-only.)\n", forks))
+	}
 	b.WriteString("These PRs are YOURS and they are red. Repairing them comes BEFORE claiming\n")
 	b.WriteString("new issues or opening ANY new PR. For each one:\n")
 	b.WriteString("  gh pr checkout <number> → fix using the evidence below → commit -s → git push\n")
@@ -1353,6 +1155,9 @@ func formatRedPRFixData(data []byte, agent string) string {
 			break
 		}
 		b.WriteString(fmt.Sprintf("  #%d %s — %s\n", pr.Number, pr.Repo, pr.Title))
+		if pr.Held {
+			b.WriteString("    " + heldRedPRNote + "\n")
+		}
 		if len(pr.FailingChecks) > 0 {
 			b.WriteString(fmt.Sprintf("    failing: %s\n", strings.Join(pr.FailingChecks, ", ")))
 		}
@@ -1490,34 +1295,63 @@ func formatReviewThreadFixData(data []byte, agent string, resolveAfterFix bool) 
 	return b.String()
 }
 
+// maxHeldPRsPerRepoPerKick bounds the held-PR snapshot per repository instead
+// of across the whole kick.
+//
+// Disjointness is only ever evaluated against PRs in the repo the agent is
+// about to touch, so a repo-scoped cap preserves the fail-closed guarantee
+// exactly — the agent still refuses to act wherever the snapshot is
+// incomplete — while preventing one crowded repo from blanking the snapshot
+// for every other repo in the sweep.
+//
+// The previous global cap reused maxIssuesPerKick, which coupled two unrelated
+// limits and made the stand-down fire on render-cap overflow rather than on
+// real contention: a spoke tracking 16 repos stood down across all of them
+// because a single repo pushed the combined list one item past 100, and could
+// then never open the PRs that would drain the backlog causing the overflow.
+const maxHeldPRsPerRepoPerKick = 100
+
 func (s *Scheduler) formatHeldPRClaimsWithPolicy(actionable *github.ActionableResult) (string, bool) {
 	if actionable == nil {
 		return "  (none)", false
 	}
 	var b strings.Builder
 	shown := 0
-	omitted := 0
 	failClosed := false
+
+	repoOrder := make([]string, 0, 8)
+	byRepo := make(map[string][]github.HoldItem)
 	for _, item := range actionable.Hold.Items {
 		if item.Type != "pr" {
 			continue
 		}
-		if shown >= s.issueCap() {
-			omitted++
-			continue
+		if _, seen := byRepo[item.Repo]; !seen {
+			repoOrder = append(repoOrder, item.Repo)
 		}
-		title, verdict := s.enforceIssueTextVerdict(item.Title)
-		failClosed = failClosed || (s.ioscanFailClosed() && verdict.HasCriticalInjection())
-		const maxHeldPRTitleRunes = 70
-		if runes := []rune(title); len(runes) > maxHeldPRTitleRunes {
-			title = string(runes[:maxHeldPRTitleRunes])
+		byRepo[item.Repo] = append(byRepo[item.Repo], item)
+	}
+
+	for _, repo := range repoOrder {
+		items := byRepo[repo]
+		limit := len(items)
+		if limit > maxHeldPRsPerRepoPerKick {
+			limit = maxHeldPRsPerRepoPerKick
 		}
-		b.WriteString(fmt.Sprintf("  %s#%d %s\n", item.Repo, item.Number, title))
-		shown++
+		for _, item := range items[:limit] {
+			title, verdict := s.enforceIssueTextVerdict(item.Title)
+			failClosed = failClosed || (s.ioscanFailClosed() && verdict.HasCriticalInjection())
+			const maxHeldPRTitleRunes = 70
+			if runes := []rune(title); len(runes) > maxHeldPRTitleRunes {
+				title = string(runes[:maxHeldPRTitleRunes])
+			}
+			b.WriteString(fmt.Sprintf("  %s#%d %s\n", item.Repo, item.Number, title))
+			shown++
+		}
+		if omitted := len(items) - limit; omitted > 0 {
+			b.WriteString(fmt.Sprintf("  ... %d additional open held PRs omitted in %s; STAND DOWN for %s this kick\n", omitted, repo, repo))
+		}
 	}
-	if omitted > 0 {
-		b.WriteString(fmt.Sprintf("  ... %d additional open held PRs omitted; STAND DOWN this kick\n", omitted))
-	}
+
 	if shown == 0 {
 		return "  (none)", failClosed
 	}
@@ -1576,7 +1410,7 @@ func (s *Scheduler) buildScannerMessage(issues []github.Issue, actionable *githu
 			title = string(runes[:maxPRTitleRunes])
 		}
 		annotation, _ := s.enforceIssueTextVerdict(prKickAnnotation(pr, "scanner"))
-		b.WriteString(fmt.Sprintf("  %s#%d by @%s %s %s\n", pr.Repo, pr.Number, pr.Author, annotation, title))
+		b.WriteString(fmt.Sprintf("  %s#%d by @%s%s %s %s\n", pr.Repo, pr.Number, pr.Author, forkAnnotation(pr), annotation, title))
 	}
 
 	if actionable.Issues.SLAViolations > 0 {
@@ -1657,102 +1491,27 @@ func (s *Scheduler) buildSupervisorMessage(actionable *github.ActionableResult) 
 }
 
 var mergeEligiblePath = "/var/run/hive-metrics/merge-eligible.json"
-var ciFailingPath = "/var/run/hive-metrics/ci-failing.json"
 
-// buildMergeEligibleListFor renders the merge-eligible section of a kick,
-// narrowed to the repos the predicate accepts (#6204). A nil predicate keeps
-// everything, which is what an unscoped agent gets.
-func (s *Scheduler) buildMergeEligibleListFor(keep func(repo string) bool) string {
-	data, err := os.ReadFile(mergeEligiblePath)
-	if err != nil {
-		return "(none)\n"
-	}
-	return formatMergeEligibleDataFor(data, keep, s.prCap())
-}
+var ciFailingPath = "/var/run/hive-metrics/ci-failing.json"
 
 func formatMergeEligibleData(data []byte, limit int) string {
 	return formatMergeEligibleDataFor(data, nil, limit)
 }
 
-// formatMergeEligibleDataFor narrows to the repos keep accepts (#6204, nil =
-// all) and caps the rendered list at limit (governor.kick_limits.max_prs,
-// hivecommons/hive#7368; 0 = uncapped).
-func formatMergeEligibleDataFor(data []byte, keep func(repo string) bool, limit int) string {
-	var payload struct {
-		Items []struct {
-			Number int    `json:"number"`
-			Repo   string `json:"repo"`
-			Title  string `json:"title"`
-			Queued bool   `json:"queued"`
-		} `json:"merge_eligible"`
+// heldMarker annotates a red PR that is under hold. Held PRs entered this list
+// with hivecommons/hive#7438 so they can be repaired; the marker is what keeps
+// an agent from reading their presence as permission to merge or unhold them.
+func heldMarker(held bool) string {
+	if !held {
+		return ""
 	}
-	if json.Unmarshal(data, &payload) != nil || len(payload.Items) == 0 {
-		return "(none)\n"
-	}
-	var b strings.Builder
-	shown := 0
-	for i, pr := range payload.Items {
-		if keep != nil && !keep(pr.Repo) {
-			continue
-		}
-		if limit > 0 && shown >= limit {
-			b.WriteString(prListOverflowLine(len(payload.Items)-i, limit))
-			break
-		}
-		shown++
-		queued := ""
-		if pr.Queued {
-			queued = " [queued for auto-merge]"
-		}
-		b.WriteString(fmt.Sprintf("  #%d %s%s — %s\n", pr.Number, pr.Repo, queued, pr.Title))
-	}
-	if b.Len() == 0 {
-		return "(none)\n"
-	}
-	return b.String()
+	return " [" + heldRedPRNote + "]"
 }
 
 // buildCIFailingListFor renders the CI-failing list narrowed to the repos the
 // predicate accepts (#6204). A nil predicate keeps everything.
 func (s *Scheduler) buildCIFailingList() string {
 	return s.buildCIFailingListFor(nil)
-}
-
-func (s *Scheduler) buildCIFailingListFor(keep func(repo string) bool) string {
-	data, err := os.ReadFile(ciFailingPath)
-	if err != nil {
-		return "(none)\n"
-	}
-	var payload struct {
-		Items []struct {
-			Number  int    `json:"number"`
-			Repo    string `json:"repo"`
-			Title   string `json:"title"`
-			Author  string `json:"author"`
-			HeadSHA string `json:"head_sha"`
-		} `json:"ci_failing"`
-	}
-	if json.Unmarshal(data, &payload) != nil || len(payload.Items) == 0 {
-		return "(none)\n"
-	}
-	var b strings.Builder
-	limit := s.prCap()
-	shown := 0
-	for i, pr := range payload.Items {
-		if keep != nil && !keep(pr.Repo) {
-			continue
-		}
-		if shown >= limit {
-			b.WriteString(prListOverflowLine(len(payload.Items)-i, limit))
-			break
-		}
-		shown++
-		b.WriteString(fmt.Sprintf("  #%d %s by @%s (sha:%s) — %s\n", pr.Number, pr.Repo, pr.Author, pr.HeadSHA, pr.Title))
-	}
-	if b.Len() == 0 {
-		return "(none)\n"
-	}
-	return b.String()
 }
 
 // ghAuthInstructions tells the agent how to authenticate each tool class.
@@ -2412,4 +2171,543 @@ func (s *Scheduler) inceptionVars() (idea, phase, mode, answers, slug, repoURL s
 		idea = state.RepoURL
 	}
 	return
+}
+
+// substituteTemplateWithVars is substituteTemplateWithPolicy plus caller-supplied
+// ${VAR}s, for a template whose values only one call site can compute.
+//
+// The reviewer lane (#5617 item 2) is the first such caller: its work list is
+// read from ci-failing.json and then GATED on — buildReviewerMessage refuses to
+// send a contract at all when that list is empty — so the list the template
+// renders must be the same one the gate saw. Recomputing it inside the
+// substitution would reopen the window where a rewrite between the two reads
+// renders a full adjudication contract over an empty list.
+//
+// The built-ins still WIN on a name collision, so an extra var can never shadow
+// ${GH_AUTH} or ${AGENT_NAME}.
+func (s *Scheduler) substituteTemplateWithVars(template string, actionable *github.ActionableResult, agentName string, issues []github.Issue, extra map[string]func() string) (string, bool) {
+	baseName := s.cfg.BaseAgentName(agentName)
+	if actionable == nil {
+		actionable = &github.ActionableResult{}
+	}
+	now := time.Now().Local()
+
+	// Per-repo agent scope (#6204): everything below describes ONE agent's
+	// world, so narrow that world to the repos this agent serves before any of
+	// it is computed. Cadence stays hive-wide — a scoped agent still wakes on
+	// its schedule — but it wakes to its own repos' work instead of a backlog
+	// it has to read through and discard. That task filtering is the cheap half
+	// of the cost problem: an agent shown a schema-migration issue in a repo
+	// with no database will look at it.
+	//
+	// A nil scope (every agent on every hive that does not use the feature)
+	// skips all of this, and the values below are byte-identical to before.
+	if s.cfg.AgentRepoScope(agentName) != nil {
+		keep := func(repo string) bool { return s.cfg.AgentServesRepo(agentName, repo) }
+		actionable = github.FilterActionableForRepos(actionable, keep)
+		issues = filterIssuesForRepos(issues, keep)
+	}
+
+	var agentIssuesForList []github.Issue
+	if baseName == "scanner" {
+		agentIssuesForList = issues
+	} else {
+		agentIssuesForList = filterByLane(issues, baseName)
+	}
+	agentIssuesForList, heldInflight := s.splitInflight(agentIssuesForList)
+	issueList, issueFailClosed := s.formatIssueListWithPolicy(agentIssuesForList)
+	prList, prFailClosed := s.formatPRListWithPolicyForAgent(actionable, baseName)
+	if issueFailClosed || prFailClosed {
+		s.logger.Warn("ioscan fail-closed blocked kick", "agent", agentName)
+		return "", true
+	}
+
+	// Both narrowings apply (#6203/#6204). ${PROJECT_REPOS_LIST} is what a
+	// template tells an agent to work through: a repo it does not serve is not
+	// its work, and a paused repo is not work at all. ${PROJECT_PRIMARY_REPO}
+	// is the repo its examples target, so a specialist scoped away from the
+	// hive primary must not be handed the hive primary in either.
+	agentActiveRepos, _ := s.activeReposForAgent(agentName)
+	reposList := strings.Join(agentActiveRepos, ", ")
+	primaryRepo := s.cfg.PrimaryRepoForAgent(agentName)
+	fullPrimaryRepo := config.QualifyRepo(s.cfg.Project.Org, primaryRepo)
+
+	agentList, agentRoles := s.buildAgentListAndRoles()
+
+	displayName := agentName
+	if ac, ok := s.cfg.Agents[agentName]; ok && ac.DisplayName != "" {
+		displayName = ac.DisplayName
+	}
+
+	agentIssues := filterByLane(issues, baseName)
+	if len(agentIssues) == 0 && actionable != nil && len(actionable.Issues.Items) > 0 {
+		agentIssues = actionable.Issues.Items
+	}
+	knowledgeSection := s.primeKnowledge(agentIssues)
+
+	repoRoot := s.agentsRepoRoot(primaryRepo)
+
+	// Additive: prepend the repo's AGENTS.md instructions + requested skills to
+	// the injected knowledge, when a local checkout root is available. This is a
+	// guarded, single call point — it returns "" (and never errors) when no
+	// AGENTS.md exists, so it is a no-op for repos that don't use the convention.
+	//
+	// The root is resolved for the PRIMARY repo, which is the repo this kick's
+	// instructions are about — the same repo ${PROJECT_PRIMARY_REPO} names here
+	// and HIVE_REPO names in the agent's environment. A multi-repo hive gets the
+	// primary repo's AGENTS.md, never a different repo's: resolution is keyed by
+	// repo name, so it cannot silently pick the wrong one.
+	//
+	// TODO(agentsmd): once file-level targeting exists, prefer
+	// agentsmd.ParseNearest for closest-wins nested AGENTS.md. That still has no
+	// caller — nothing on the kick path knows which FILE an agent will touch —
+	// so it stays deferred, unlike the checkout root, which is now threaded.
+	if agentsSection := s.primeAgentsMd(repoRoot); agentsSection != "" {
+		knowledgeSection = agentsSection + "\n" + knowledgeSection
+	}
+
+	// Agent-declared skills prefer the hive-host-local registry, then fall back
+	// to definitions in the primary repo's AGENTS.md or adjacent skills/
+	// directory. The registry remains independently useful without a checkout;
+	// the fallback activates only when agentsRepoRoot found one above.
+	if skillsSection := s.primeSkills(agentName, repoRoot); skillsSection != "" {
+		knowledgeSection = skillsSection + "\n" + knowledgeSection
+	}
+
+	inceptionIdea, inceptionPhase, inceptionMode, inceptionAnswers, inceptionSlug, inceptionRepoURL := s.inceptionVars()
+
+	// The merge-eligible and CI-failing lists are read from hive-wide metrics
+	// files, so they need the same narrowing: a scoped agent asked to fix red CI
+	// must not be handed a red PR on a repo it cannot push to (#6204).
+	repoInScope := func(repo string) bool { return s.cfg.AgentServesRepo(agentName, repo) }
+	mergeEligibleList := s.buildMergeEligibleListFor(repoInScope)
+	ciFailingList := s.buildCIFailingListFor(repoInScope)
+
+	// The built-in per-kick variables. Each value is already computed above, so
+	// the thunks just return it — but wrapping them as resolve.RuntimeContext
+	// producers routes this through the same pluggable engine as config
+	// substitution, letting operators add their own ${VAR}s (via the config
+	// `variables:` block) while these built-ins always win. With no operator
+	// variables configured, Expand reproduces the previous strings.NewReplacer
+	// output exactly (unknown ${VAR} left literal; no env fallback in template
+	// scope).
+	lit := func(v string) func() string { return func() string { return v } }
+	rt := &resolve.RuntimeContext{Vars: map[string]func() string{
+		"AGENT_NAME":            lit(agentName),
+		"AGENT_DISPLAY_NAME":    lit(displayName),
+		"TIMESTAMP":             lit(now.Format("1/2 3:04 PM MST")),
+		"QUEUE_ISSUES":          lit(fmt.Sprintf("%d", actionable.Issues.Count)),
+		"QUEUE_PRS":             lit(fmt.Sprintf("%d", actionable.PRs.Count)),
+		"QUEUE_HOLD":            lit(fmt.Sprintf("%d", actionable.Hold.Total)),
+		"SLA_VIOLATIONS":        lit(fmt.Sprintf("%d", actionable.Issues.SLAViolations)),
+		"ISSUE_LIST":            lit(issueList),
+		"PR_LIST":               lit(prList),
+		"AUTHORIZED_REPOS":      lit(s.buildReposSectionFor(agentName)),
+		"GH_AUTH":               lit(s.ghAuthInstructions()),
+		"WORK_TRACKER":          lit(s.workTrackerSection()),
+		"IN_FLIGHT":             lit(inflightNote(heldInflight)),
+		"PROJECT_ORG":           lit(s.cfg.Project.Org),
+		"PROJECT_NAME":          lit(s.cfg.Project.Name),
+		"PROJECT_PRIMARY_REPO":  lit(fullPrimaryRepo),
+		"PROJECT_AI_AUTHOR":     lit(s.cfg.EffectiveAIAuthor()),
+		"PROJECT_REPOS_LIST":    lit(reposList),
+		"PROJECT_HOMEBREW_REPO": lit(fmt.Sprintf("%s/homebrew-tap", s.cfg.Project.Org)),
+		"PROJECT_OBSERVABILITY": lit(s.cfg.Governor.ProjectObservability.PromptSection()),
+		"HIVE_REPO":             lit(fmt.Sprintf("%s/hive", s.cfg.Project.Org)),
+		"HIVE_ID":               lit(s.cfg.HiveID),
+		"AGENT_LIST":            lit(agentList),
+		"AGENT_ROLES":           lit(agentRoles),
+		"ENABLED_AGENTS":        lit(agentList),
+		"KNOWLEDGE":             lit(knowledgeSection),
+		"INCEPTION_IDEA":        lit(inceptionIdea),
+		"INCEPTION_PHASE":       lit(inceptionPhase),
+		"INCEPTION_MODE":        lit(inceptionMode),
+		"INCEPTION_ANSWERS":     lit(inceptionAnswers),
+		"INCEPTION_SLUG":        lit(inceptionSlug),
+		"INCEPTION_REPO_URL":    lit(inceptionRepoURL),
+		"MERGE_ELIGIBLE":        lit(mergeEligibleList),
+		"CI_FAILING":            lit(ciFailingList),
+	}}
+	// Caller-supplied vars lose a name clash: one already claimed by a built-in
+	// above is left alone, so no call site can redefine ${GH_AUTH}.
+	for name, fn := range extra {
+		if _, taken := rt.Vars[name]; taken {
+			continue
+		}
+		rt.Vars[name] = fn
+	}
+	return s.registry().Expand(context.Background(), template, resolve.ScopeTemplate, rt), false
+}
+
+const issuePriorityNote = "Issue priority: human-filed and priority-labelled issues are listed first; work them before hive-filed.\n"
+
+func issuePriorityMarker(issue github.Issue) string {
+	if issue.AuthorIsHuman {
+		return "[human]"
+	}
+	if issue.HumanAcknowledged {
+		return "[hive-filed+ack]"
+	}
+	return "[hive-filed]"
+}
+
+func (s *Scheduler) formatPRListWithPolicyForAgent(actionable *github.ActionableResult, agentName string) (string, bool) {
+	if len(actionable.PRs.Items) == 0 {
+		return "(none)", false
+	}
+	var b strings.Builder
+	failClosed := false
+	limit := s.prCap()
+	for i, pr := range actionable.PRs.Items {
+		if i >= limit {
+			b.WriteString(prListOverflowLine(len(actionable.PRs.Items)-i, limit))
+			break
+		}
+		// The PR title and author login are untrusted external text about to be
+		// injected into an agent kick (F11). PR titles in particular drive
+		// classification routing, and an attacker controls both the title and their
+		// own fork/login. Gate both through ioscan: a blocked value is redacted
+		// rather than injected raw. Disabled → strict no-op. Default is now ON.
+		title, titleVerdict := s.enforceIssueTextVerdict(pr.Title)
+		failClosed = failClosed || (s.ioscanFailClosed() && titleVerdict.HasCriticalInjection())
+		const maxPRTitleRunes = 70
+		if runes := []rune(title); len(runes) > maxPRTitleRunes {
+			title = string(runes[:maxPRTitleRunes])
+		}
+		author, authorVerdict := s.enforceIssueTextVerdict(pr.Author)
+		failClosed = failClosed || (s.ioscanFailClosed() && authorVerdict.HasCriticalInjection())
+		annotation, annotationVerdict := s.enforceIssueTextVerdict(prKickAnnotation(pr, agentName))
+		failClosed = failClosed || (s.ioscanFailClosed() && annotationVerdict.HasCriticalInjection())
+		b.WriteString(fmt.Sprintf("  %s#%d by @%s%s %s %s\n", pr.Repo, pr.Number, author, forkAnnotation(pr), annotation, title))
+	}
+	return b.String(), failClosed
+}
+
+func prKickAnnotation(pr github.PullRequest, agentName string) string {
+	lane := prOwningLane(pr)
+	mergeableState := strings.TrimSpace(pr.MergeableState)
+	if mergeableState == "" && prHasLabel(pr.Labels, "needs-rebase") {
+		mergeableState = "needs-rebase"
+	}
+	if mergeableState == "" {
+		switch pr.Mergeable {
+		case github.MergeableYes:
+			mergeableState = "mergeable"
+		case github.MergeableNo:
+			mergeableState = "not-mergeable"
+		default:
+			mergeableState = "unknown"
+		}
+	}
+	parts := []string{"mergeable_state=" + mergeableState}
+	if lane != "" {
+		parts = append(parts, "lane="+lane)
+	} else {
+		parts = append(parts, "lane=unknown")
+	}
+	annotation := "[" + strings.Join(parts, ", ") + "]"
+	if prIsAppAuthored(pr) && prHasConflictSignal(pr, mergeableState) && lane != "" && strings.EqualFold(lane, agentName) {
+		annotation += " [CONFLICT, yours]"
+	}
+	return annotation
+}
+
+func prOwningLane(pr github.PullRequest) string {
+	for _, label := range pr.Labels {
+		if lane, ok := strings.CutPrefix(strings.TrimSpace(label), "agent/"); ok && lane != "" {
+			return lane
+		}
+	}
+	if head := strings.TrimSpace(pr.HeadRef); head != "" {
+		if lane, _, ok := strings.Cut(head, "/"); ok && lane != "" {
+			return lane
+		}
+	}
+	return ""
+}
+
+func prHasLabel(labels []string, want string) bool {
+	for _, label := range labels {
+		if strings.EqualFold(strings.TrimSpace(label), want) {
+			return true
+		}
+	}
+	return false
+}
+
+func prHasConflictSignal(pr github.PullRequest, mergeableState string) bool {
+	if prHasLabel(pr.Labels, "needs-rebase") {
+		return true
+	}
+	return strings.EqualFold(mergeableState, "dirty") || strings.EqualFold(mergeableState, "conflicting")
+}
+
+func prIsAppAuthored(pr github.PullRequest) bool {
+	author := strings.TrimSpace(pr.Author)
+	return pr.AppAuthored || strings.HasPrefix(strings.ToLower(author), "app/")
+}
+
+// filterIssuesForRepos keeps only the issues in repos the predicate accepts.
+func filterIssuesForRepos(issues []github.Issue, keep func(repo string) bool) []github.Issue {
+	if keep == nil {
+		return issues
+	}
+	out := make([]github.Issue, 0, len(issues))
+	for _, issue := range issues {
+		if keep(issue.Repo) {
+			out = append(out, issue)
+		}
+	}
+	return out
+}
+
+// buildReposSectionFor renders the AUTHORIZED REPOS block for one agent.
+//
+// For an unscoped agent — every agent on a hive that does not use per-repo
+// custom agents (#6204) — this is the hive's repo list, unchanged. For a scoped
+// agent it is that agent's repos, and the section says out loud that the hive
+// watches more: an agent that has filed issues in a repo for weeks and suddenly
+// does not see it would otherwise read the shorter list as scope loss and file
+// a finding about it.
+// activeReposForAgent splits the repos the named agent serves (#6204) into the
+// ones it may act on this session and the ones the operator has paused (#6203).
+// The two narrowings compose rather than override: a scope says which repos an
+// agent is FOR, a pause says which repos are open for work at all, and what
+// reaches a kick is the intersection.
+func (s *Scheduler) activeReposForAgent(agentName string) (active, paused []string) {
+	repos := s.cfg.ReposForAgent(agentName)
+	active = make([]string, 0, len(repos))
+	for _, repo := range repos {
+		if s.cfg.IsRepoPaused(repo) {
+			paused = append(paused, repo)
+			continue
+		}
+		active = append(active, repo)
+	}
+	return active, paused
+}
+
+func (s *Scheduler) buildReposSectionFor(agentName string) string {
+	var b strings.Builder
+	host := s.cfg.GitHub.ResolvedBaseURL() // always a full URL; github.com or the GHE instance
+	org := s.cfg.Project.Org
+	scoped := s.cfg.AgentRepoScope(agentName) != nil
+	active, paused := s.activeReposForAgent(agentName)
+	agentRepos := s.cfg.ReposForAgent(agentName)
+	b.WriteString(fmt.Sprintf("AUTHORIZED REPOS (all on %s — you may ONLY interact with these):\n", host))
+	for _, repo := range active {
+		full := config.QualifyRepo(org, repo)
+		// Print the fully-qualified URL so the host is unambiguous in the prompt —
+		// a github.ibm.com repo must never be mistaken for a github.com one.
+		b.WriteString(fmt.Sprintf("  %s/%s\n", strings.TrimRight(host, "/"), full))
+	}
+	if len(active) == 0 {
+		if scoped {
+			b.WriteString("  (none — this agent is scoped to repos this hive does not watch, or every repo it serves is currently paused; tell the operator)\n")
+		} else {
+			b.WriteString("  (none — every repo this hive watches is currently paused)\n")
+		}
+	}
+	if scoped {
+		b.WriteString(fmt.Sprintf("🎯 THIS AGENT IS REPO-SCOPED: the hive manages %d repo(s); you are defined for the %d listed above and only those. Other repos in this hive belong to other agents — writes to them are refused deterministically by the proxy and by the hive-open-pr/hive-merge/hive-open-issue relays, so retrying cannot succeed. This is how the operator composed the roster, NOT scope loss and NOT an outage: do not work them, do not route around it, and do not file an issue about it.\n",
+			len(s.cfg.Project.Repos), len(agentRepos)))
+	}
+	if len(paused) > 0 {
+		pausedFull := make([]string, 0, len(paused))
+		for _, repo := range paused {
+			pausedFull = append(pausedFull, config.QualifyRepo(org, repo))
+		}
+		b.WriteString(fmt.Sprintf("⏸️ PAUSED BY THE OPERATOR (watched, but OUT OF SCOPE this session): %s\n", strings.Join(pausedFull, ", ")))
+		b.WriteString("   The hive is deliberately quiet on those repos — a release freeze, an incident, a repo declared but not yet onboarded. Writes to them are refused deterministically by the proxy and by the hive-open-pr/hive-merge relays, so retrying cannot succeed. This is an operator decision, NOT an outage and NOT scope loss: do not work them, do not route around it, and do not file an issue about it.\n")
+	}
+	b.WriteString("⛔ NEVER access, search, list, file issues in, or open PRs on repos not listed above.\n")
+	b.WriteString(fmt.Sprintf("⛔ Every repo above is on %s. This hive is single-host — never touch a repo on a different GitHub host.\n", host))
+	// SCOPE vs PROVISIONING (#4464). This list is what `include_repos: true`
+	// puts in a kick, and agents have read it as a promise that the repos are
+	// on disk: a guide agent found its workspace directory empty, concluded
+	// "no git worktree has been provisioned despite include_repos=true", and
+	// filed it as an infrastructure blocker that then sat in the operator's
+	// advisory digest. There is no such provisioning step — nothing in the
+	// hive materialises a per-agent worktree from this list — so the kick has
+	// to say so, in the same section that produces the impression. Getting a
+	// checkout is an ordinary thing an agent does for itself, not a fault.
+	b.WriteString(fmt.Sprintf("ℹ️ This list is an AUTHORIZATION SCOPE, not a checkout: it does not put any repo on disk, and nothing provisions a per-agent git worktree from it. If you need files rather than the GitHub API and have no checkout, clone one yourself: git clone %s/<org>/<repo> /tmp/<repo>. An absent checkout is a normal state to handle, NOT an infrastructure fault — do not file a finding about a missing worktree or unprovisioned repo workspace.\n", strings.TrimRight(host, "/")))
+	// Multi-repo projects: the agent workdir is never a checkout of anything
+	// but the PRIMARY repo, and the shipped templates' examples say --repo
+	// "$HIVE_REPO" (primary). Without an explicit rotation instruction agents lock onto
+	// the primary repo forever and the other project repos are never
+	// touched (root-caused on a live 3-repo hive: sec-check scanned only
+	// the primary across every session). The kick is the one place every
+	// agent/template combination sees, so the instruction lives here.
+	if len(active) > 1 {
+		// Rotate over the repos this agent both serves and may act on, and never
+		// name one it cannot write to as the fallback: telling an agent "all of
+		// them are in scope, not just the primary" while pointing it at a repo
+		// that is paused or outside its scope is a contradiction it will try to
+		// resolve by writing there (#6203/#6204).
+		primary := s.cfg.PrimaryRepoForAgent(agentName)
+		if primary == "" || s.cfg.IsRepoPaused(primary) {
+			primary = active[0]
+		}
+		b.WriteString(fmt.Sprintf(`🔁 MULTI-REPO COVERAGE — REQUIRED: this project has %d authorized repos; ALL of them are in scope, not just the primary (%s).
+Your workdir is, at most, a checkout of the primary repo — never of the others. Each session, pick the authorized repo you have LEAST RECENTLY covered (check your beads and the [<your-role>] issues you previously filed in each repo) and work THAT repo this session:
+  - If it is not your workdir repo, clone it first: git clone %s/<org>/<repo> /tmp/<repo> && cd /tmp/<repo>
+  - Pass the chosen repo EXPLICITLY to every gh command: --repo "<org>/<repo>" (do not rely on $HIVE_REPO, which always names the primary repo).
+  - $HIVE_REPOS lists every authorized repo, comma-separated.
+⛔ Do NOT default to the primary repo every session — repos you never visit accumulate unseen problems.
+`, len(active), config.QualifyRepo(org, primary), strings.TrimRight(host, "/")))
+	}
+	return b.String()
+}
+
+// buildMergeEligibleListFor renders the merge-eligible section of a kick,
+// narrowed to the repos the predicate accepts (#6204). A nil predicate keeps
+// everything, which is what an unscoped agent gets.
+func (s *Scheduler) buildMergeEligibleListFor(keep func(repo string) bool) string {
+	data, err := os.ReadFile(mergeEligiblePath)
+	if err != nil {
+		return "(none)\n"
+	}
+	return formatMergeEligibleDataFor(data, keep, s.prCap())
+}
+
+// formatMergeEligibleDataFor narrows to the repos keep accepts (#6204, nil =
+// all) and caps the rendered list at limit (governor.kick_limits.max_prs,
+// hivecommons/hive#7368; 0 = uncapped).
+func formatMergeEligibleDataFor(data []byte, keep func(repo string) bool, limit int) string {
+	var payload struct {
+		Items []struct {
+			Number int    `json:"number"`
+			Repo   string `json:"repo"`
+			Title  string `json:"title"`
+			Queued bool   `json:"queued"`
+		} `json:"merge_eligible"`
+	}
+	if json.Unmarshal(data, &payload) != nil || len(payload.Items) == 0 {
+		return "(none)\n"
+	}
+	var b strings.Builder
+	shown := 0
+	for i, pr := range payload.Items {
+		if keep != nil && !keep(pr.Repo) {
+			continue
+		}
+		if limit > 0 && shown >= limit {
+			b.WriteString(prListOverflowLine(len(payload.Items)-i, limit))
+			break
+		}
+		shown++
+		queued := ""
+		if pr.Queued {
+			queued = " [queued for auto-merge]"
+		}
+		b.WriteString(fmt.Sprintf("  #%d %s%s — %s\n", pr.Number, pr.Repo, queued, pr.Title))
+	}
+	if b.Len() == 0 {
+		return "(none)\n"
+	}
+	return b.String()
+}
+
+func (s *Scheduler) buildCIFailingListFor(keep func(repo string) bool) string {
+	data, err := os.ReadFile(ciFailingPath)
+	if err != nil {
+		return "(none)\n"
+	}
+	type ciFailingRow struct {
+		Number   int    `json:"number"`
+		Repo     string `json:"repo"`
+		Title    string `json:"title"`
+		Author   string `json:"author"`
+		HeadSHA  string `json:"head_sha"`
+		HeadRef  string `json:"head_ref"`
+		HeadRepo string `json:"head_repo"`
+		FromFork bool   `json:"from_fork"`
+		Held     bool   `json:"held"`
+	}
+	var payload struct {
+		Items []ciFailingRow `json:"ci_failing"`
+	}
+	if json.Unmarshal(data, &payload) != nil || len(payload.Items) == 0 {
+		return "(none)\n"
+	}
+	if keep != nil {
+		kept := payload.Items[:0]
+		for _, pr := range payload.Items {
+			if keep(pr.Repo) {
+				kept = append(kept, pr)
+			}
+		}
+		payload.Items = kept
+		if len(payload.Items) == 0 {
+			return "(none)\n"
+		}
+	}
+	// Held red PRs ride ci-failing.json since hivecommons/hive#7438 so their
+	// AUTHOR can repair them, but they are not this shared queue's business:
+	// every policy says never touch a held item, and only the owning agent's
+	// fix-before-new block carries the narrow exception. Keep them out here
+	// so a repair agent does not push to a PR a human is reviewing.
+	held := 0
+	kept := payload.Items[:0]
+	for _, pr := range payload.Items {
+		if pr.Held {
+			held++
+			continue
+		}
+		kept = append(kept, pr)
+	}
+	payload.Items = kept
+	// Two queues, not one (hivecommons/hive#7386): a red PR whose head lives
+	// in a fork is comment-only for every agent — the App token pushes to the
+	// base repository and nowhere else. Rendering the two together as one
+	// "repair queue" sent a scanner through 107 PRs of which 66 were forks;
+	// it found out by pushing, and the push landed a stray branch on the base
+	// repo under the fork's head-ref name. The split keeps the push queue
+	// honest about its size and takes the discovery cost off the agent.
+	var pushable, forks []ciFailingRow
+	for _, pr := range payload.Items {
+		if pr.FromFork {
+			forks = append(forks, pr)
+		} else {
+			pushable = append(pushable, pr)
+		}
+	}
+	var b strings.Builder
+	limit := s.prCap()
+	if len(pushable) == 0 {
+		b.WriteString("  (none you can push to)\n")
+	}
+	if held > 0 {
+		b.WriteString(fmt.Sprintf("  (%d held red PR(s) are not listed: a held PR is repaired only by the agent that opened it, via its own FIX-BEFORE-NEW block)\n", held))
+	}
+	for i, pr := range pushable {
+		if i >= limit {
+			b.WriteString(prListOverflowLine(len(pushable)-i, limit))
+			break
+		}
+		b.WriteString(fmt.Sprintf("  #%d %s by @%s (sha:%s)%s — %s\n", pr.Number, pr.Repo, pr.Author, pr.HeadSHA, heldMarker(pr.Held), pr.Title))
+	}
+	if len(forks) > 0 {
+		b.WriteString(fmt.Sprintf("FORK PRs (%d — review/comment only, you CANNOT push to these):\n", len(forks)))
+		b.WriteString("  Their head branch lives in the contributor's fork, not in this repo. Do NOT\n")
+		b.WriteString("  `gh pr checkout` + push, and NEVER `git push origin HEAD:<head_ref>` — that creates\n")
+		b.WriteString("  a stray branch on the base repo under a name you do not own. Leave a review\n")
+		b.WriteString("  comment with the fix, or skip.\n")
+		for i, pr := range forks {
+			if i >= limit {
+				b.WriteString(prListOverflowLine(len(forks)-i, limit))
+				break
+			}
+			head := pr.HeadRepo
+			if head == "" {
+				head = "(fork deleted)"
+			}
+			if pr.HeadRef != "" {
+				head += ":" + pr.HeadRef
+			}
+			b.WriteString(fmt.Sprintf("  #%d %s by @%s [fork: %s — comment only]%s — %s\n", pr.Number, pr.Repo, pr.Author, head, heldMarker(pr.Held), pr.Title))
+		}
+	}
+	return b.String()
 }

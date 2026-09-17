@@ -1,33 +1,5 @@
 package dashboard
 
-// Live validation ("Test key") for the IBM bobshell ("bob") API key stored by
-// bob_key_store.go. bob authenticates with an API key only (its browser SSO
-// cannot complete inside a pod — see bob_key_store.go), and until now the
-// dashboard had no way to tell a working key from a bad one: owners saved a
-// key and found out from bob agents crash-looping at the auth prompt.
-//
-// The probe is the cheapest authenticated call the bob backend supports —
-// GET /inference/v1/model/info — verified live against the production
-// backend. There is no pre-existing hive-side bob HTTP client to reuse; the
-// wire conventions below were confirmed with a real multi-key test:
-//
-//   - base URL https://api.us-east.bob.ibm.com
-//   - opaque keys (bob_prod_…) authenticate as `Authorization: Apikey <key>`.
-//     bobshell itself first sends Bearer, fails to parse the key as a JWT,
-//     and flips to Apikey — the probe goes straight to the scheme that
-//     matches the key's shape (Bearer only for JWT-shaped keys).
-//   - a 401 "Token verification failed: invalid jwt string" means the key
-//     reached the backend in a form it tried to parse as a JWT (wrong scheme
-//     or a dirty/truncated value) — the key itself may be fine.
-//   - a 402 insufficient_quota_or_plan_expired means the credential is valid
-//     but has no inference entitlement (wrong key kind/scope).
-//   - an HTML 403 is the CDN/edge blocking the request — not a key verdict.
-//
-// SECURITY: a key under test is never persisted, never logged, and never
-// echoed back. Every error string that could embed the key (transport errors,
-// backend error bodies) passes through redactSecret before leaving the
-// process.
-
 import (
 	"errors"
 	"fmt"

@@ -7,17 +7,6 @@ import (
 	spoke "github.com/hivecommons/hive/pkg/hub/spoke"
 )
 
-// Auto-update status surface (#6962, #6963).
-//
-// #6962 asked for a FINDABLE place in the dashboard that shows the configured
-// auto-update policy AND its current status. #6963 is the companion bug: a hive
-// sat four days on an old commit while "configured for daily autoupdate", and
-// nothing on the dashboard said whether auto-update was healthy, stuck, or
-// merely unknown — and, critically, WHY. This builds a single explicit status
-// object the dashboard renders, with one hard invariant carried by the Healthy
-// field: an unknown or failed state is NEVER reported as healthy. Reporting
-// unknown as healthy is exactly the bug #6963 describes.
-
 // autoUpdateState enumerates the mutually exclusive states the dashboard can
 // render. Named constants (no magic strings) keep the Go classifier and the
 // frontend switch in step.
@@ -60,12 +49,6 @@ const (
 // than guess, an absent mode degrades to an explicit "unknown" — the same
 // tolerate-older-spokes contract the rest of this surface follows.
 const autoUpdatePeriodUnknown = "unknown"
-
-const (
-	autoUpdatePeriodInstant = "instant"
-	autoUpdatePeriodDaily   = "daily"
-	autoUpdatePeriodWeekly  = "weekly"
-)
 
 // AutoUpdateStatus is the JSON contract the dashboard renders for the
 // findable auto-update section. Every field is additive; older spokes that do
@@ -279,3 +262,9 @@ func orUnknownSHA(sha string) string {
 	}
 	return sha
 }
+
+const (
+	autoUpdatePeriodInstant = "instant"
+	autoUpdatePeriodDaily   = "daily"
+	autoUpdatePeriodWeekly  = "weekly"
+)

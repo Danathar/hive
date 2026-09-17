@@ -1,10 +1,5 @@
 package dashboard
 
-// Per-budget-window history (kubestellar/hive#4298) — the Server-side wiring.
-// The tracker itself (collect.BudgetWindowTracker) moved to
-// pkg/dashboard/collect in kubestellar/hive#5565 slice 2; this file keeps the
-// Server accessors that fold status readings into it and serve its history.
-
 import (
 	"time"
 

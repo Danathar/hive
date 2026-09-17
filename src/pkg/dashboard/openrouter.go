@@ -1,30 +1,5 @@
 package dashboard
 
-// OpenRouter "scan-to-fund" flow (spoke side).
-//
-// A sponsor funds THIS hive by scanning a QR (or clicking a link) that starts an
-// OpenRouter OAuth PKCE flow. On return, the hive exchanges the code for a
-// user-controlled, scoped OpenRouter API key and stores it as a model gateway
-// named "openrouter" — reusing the EXISTING per-gateway secret-file store
-// (storeGatewayAPIKey): the key VALUE is written to an owner-only file on the
-// PVC and only the PATH is recorded in hive.yaml. The key is never logged,
-// echoed, or inlined.
-//
-// The shared PKCE crypto, URL builders, key-exchange/credit HTTP calls, QR PNG
-// encoder, and the single-use TTL state store all live in pkg/openrouter,
-// reached through the consumer-defined OpenRouterGateway interface on
-// Dependencies (#5565 slice 3); this file wires them to the spoke's HTTP
-// routes and to the gateway config.
-//
-// SECURITY:
-//   - PKCE S256; the code_verifier NEVER leaves the server.
-//   - state is single-use + short-lived; the callback binds to the stored hive.
-//   - callback_url is built server-side from an allowlisted own-origin
-//     (dashboard.public_url, else hub.dashboard_url, else the request host —
-//     see oauthPublicOrigin) — never accepted from the client.
-//   - /openrouter/callback is a PUBLIC path (the returning browser has no
-//     session yet); the state token is the credential and is verified server-side.
-
 import (
 	"fmt"
 	"net/http"
@@ -50,15 +25,6 @@ const (
 	// openRouterErrorFlag is appended when the flow fails, so the UI can show why.
 	openRouterErrorFlag = "?openrouter=error"
 )
-
-// openRouter returns the wired provider gateway, or nil when Dependencies
-// does not carry one (bare test servers — the funding routes then answer 503).
-func (s *Server) openRouter() OpenRouterGateway {
-	if s.deps == nil {
-		return nil
-	}
-	return s.deps.OpenRouter
-}
 
 // openRouterState returns the lazily-initialized single-use PKCE state store,
 // created once per Server with the production TTL. Nil when no provider
@@ -373,4 +339,13 @@ func (s *Server) ConfiguredGatewayNames() []string {
 		}
 	}
 	return out
+}
+
+// openRouter returns the wired provider gateway, or nil when Dependencies
+// does not carry one (bare test servers — the funding routes then answer 503).
+func (s *Server) openRouter() OpenRouterGateway {
+	if s.deps == nil {
+		return nil
+	}
+	return s.deps.OpenRouter
 }

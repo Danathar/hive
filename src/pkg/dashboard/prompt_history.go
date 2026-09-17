@@ -17,27 +17,6 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
-// Agent prompt (kick) history.
-//
-// Before this store existed, the fully-expanded prompt text sent to an agent
-// was retained in exactly two places, neither of which could answer "what was
-// my agent asked to do, and when?":
-//
-//   - agent.AgentProcess.LastKickMessage — the MOST RECENT kick only, in
-//     memory, replaced on every subsequent kick and lost on restart. This is
-//     what the dashboard's "Last Prompt" tab renders.
-//   - agent.KickRecord.Snippet — persisted across restarts via the snapshot,
-//     but truncated to 120 characters (200 for startup bootstraps), which is
-//     far too short to diagnose why an agent behaved the way it did.
-//
-// The structured audit log (audit.go) records that a kick HAPPENED
-// (action=agent_start / kick, detail=trigger=governor-eval) but never the
-// prompt text. This file adds the missing durable, full-text store.
-//
-// Storage shape deliberately mirrors audit.go: newline-delimited JSON on the
-// spoke's /data PVC, rotated and gzipped by lumberjack, with an in-memory ring
-// serving reads so the hot path never touches the disk.
-
 const (
 	// promptHistoryPath is the JSONL file on the spoke's PVC. Rotated backups
 	// land alongside it as promptHistory-<timestamp>.jsonl.gz, matching the

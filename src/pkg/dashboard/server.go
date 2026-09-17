@@ -37,9 +37,12 @@ func secureCompare(a, b string) bool {
 }
 
 const agentSkipAfterFullBroadcastS = 5 * time.Second
+
 const maxSSEClients = 100
+
 const sessionCookieName = "hive_session"
-const sessionCookieMaxAge = 30 * 24 * 60 * 60 // 30 days
+
+const sessionCookieMaxAge = 30 * 24 * 60 * 60
 
 // terminalAssertionCookieName carries the short-lived, HMAC-signed
 // {user,hive,role,exp} assertion the Node proxy verifies as the PRIMARY per-hive
@@ -47,6 +50,7 @@ const sessionCookieMaxAge = 30 * 24 * 60 * 60 // 30 days
 // domain-widened to .hive.kubestellar.io (unlike the hub-wide hive_hub_user
 // cookie), so the browser only ever sends it to THIS hive's own terminal path.
 const terminalAssertionCookieName = "hive_terminal_assertion"
+
 const terminalHandoffCodeParam = "code"
 
 // proxyAuthHeader is the proof-of-proxy header the hub's auth-check injects
@@ -443,29 +447,6 @@ type StatusPayload struct {
 	ReleaseLineLag *FrontendReleaseLineLag `json:"releaseLineLag,omitempty"`
 }
 
-// Release-line branch names for the drift surface (#6960), duplicated here so
-// the dashboard's nil-provider fallback can name the lines without importing
-// the hub package's unexported branch constants.
-const (
-	releaseLineEdgeBranch   = "v5"
-	releaseLineStableBranch = "v4"
-)
-
-// FrontendReleaseLineLag reports how far the edge release line (v5) sits behind
-// the stable default branch (v4) for the dashboard drift surface (#6960).
-// Known=false means the lag could not be measured (tips unresolved or the
-// compare failed) and MUST render as "unknown" — never a healthy zero.
-type FrontendReleaseLineLag struct {
-	EdgeBranch   string `json:"edgeBranch"`
-	StableBranch string `json:"stableBranch"`
-	EdgeSHA      string `json:"edgeSHA,omitempty"`
-	StableSHA    string `json:"stableSHA,omitempty"`
-	BehindBy     int    `json:"behindBy"`
-	Known        bool   `json:"known"`
-	Threshold    int    `json:"threshold"`
-	Exceeded     bool   `json:"exceeded"`
-}
-
 // FrontendSecurity summarizes the effective operator security posture for compact dashboard display.
 type FrontendSecurity struct {
 	IntentEnforced        bool   `json:"intentEnforced"`
@@ -613,6 +594,12 @@ type FrontendAgent struct {
 	StallNudges      int    `json:"stallNudges,omitempty"`
 	ActionNudges     int    `json:"actionNudges,omitempty"`
 	TransientNudges  int    `json:"transientNudges,omitempty"`
+	// KickOutcome is how the last kicked turn ENDED (#7421): "question" (asked
+	// the operator what to do — a defect), "stand-down" (policy refusal —
+	// blocked), "no-op" (reported nothing produced) or "ended". Empty while
+	// the turn is still running. KickOutcomeReason is the deciding pane line.
+	KickOutcome       string `json:"kickOutcome,omitempty"`
+	KickOutcomeReason string `json:"kickOutcomeReason,omitempty"`
 	// BackendAuth* surfaces this agent's backend-auth canary (#6558): derived
 	// from the same classifyProviderError verdict as StructuredStatus's
 	// "blocked: inference" evidence, so the dashboard can render an explicit
@@ -1149,13 +1136,13 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		// SECURITY (#3315 → #3848 part 1, #3907): script-src is scoped into its
 		// element and attribute halves, the same decomposition ADR-0015 applied
 		// to style-src, because the same asymmetry decides it — see ADR-0016 and
-		// pkg/dashboard/webstatic/csp_script_src.go for the full rationale:
+		// csp_script_src.go for the full rationale:
 		//
 		//   script-src-elem 'self' 'sha256-…'  — inline <script> ELEMENTS.
 		//     CLOSED. Every inline script this server sends is hash-allowlisted:
 		//     the embedded SPA and the device-flow login page at startup
 		//     (baseScriptSrcElem), the per-response documents (/contribute,
-		//     /snapshot) by webstatic.ApplyDocumentScriptSrcElem over the exact bytes
+		//     /snapshot) by applyDocumentScriptSrcElem over the exact bytes
 		//     served. No 'unsafe-inline': an injected inline <script> cannot
 		//     match a hash and does not execute in any CSP3 browser. Hashes, not
 		//     nonces, so the #3863 startup-pre-gzip + strong-ETag design for the
@@ -3562,4 +3549,27 @@ func (s *Server) healthSummaryFor(status *StatusPayload, ready bool) map[string]
 		"warns":  warns,
 		"checks": checks,
 	}
+}
+
+// Release-line branch names for the drift surface (#6960), duplicated here so
+// the dashboard's nil-provider fallback can name the lines without importing
+// the hub package's unexported branch constants.
+const (
+	releaseLineEdgeBranch   = "v5"
+	releaseLineStableBranch = "v4"
+)
+
+// FrontendReleaseLineLag reports how far the edge release line (v5) sits behind
+// the stable default branch (v4) for the dashboard drift surface (#6960).
+// Known=false means the lag could not be measured (tips unresolved or the
+// compare failed) and MUST render as "unknown" — never a healthy zero.
+type FrontendReleaseLineLag struct {
+	EdgeBranch   string `json:"edgeBranch"`
+	StableBranch string `json:"stableBranch"`
+	EdgeSHA      string `json:"edgeSHA,omitempty"`
+	StableSHA    string `json:"stableSHA,omitempty"`
+	BehindBy     int    `json:"behindBy"`
+	Known        bool   `json:"known"`
+	Threshold    int    `json:"threshold"`
+	Exceeded     bool   `json:"exceeded"`
 }

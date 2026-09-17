@@ -7,11 +7,6 @@ import (
 	"github.com/hivecommons/hive/pkg/config"
 )
 
-// Next-kick ETA (#5594). The agent card's one-line state summary answers "how
-// long until this agent does something". computeNextKickFromCadence returns a
-// wall-clock stamp and leaves the subtraction to the reader; this is the same
-// instant expressed as a wait.
-
 // computeNextKickETA is empty exactly when computeNextKickFromCadence is empty,
 // so the card can never show an ETA beside a schedule its own fields row calls
 // "paused".

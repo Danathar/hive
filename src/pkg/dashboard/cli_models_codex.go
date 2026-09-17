@@ -12,29 +12,6 @@ import (
 	"time"
 )
 
-// Live model discovery for the OpenAI Codex CLI.
-//
-// `codex app-server` speaks a newline-delimited JSON-RPC-style protocol over
-// stdio (the "v2 app-server protocol", documented in openai/codex
-// codex-rs/app-server/README.md) and exposes a `model/list` request. The
-// returned catalog is BAKED INTO the installed CLI binary — it is
-// per-CLI-VERSION, not per-account: the per-account `remote_models` fetch was
-// a feature flag that has been removed upstream, and the probe works with a
-// completely empty, unauthenticated CODEX_HOME (verified live against codex
-// 0.146.0; round-trip ~0.5s).
-//
-// CODEX_HOME rule: the app-server WRITES into CODEX_HOME (sqlite, lock files,
-// installation_id) and requires ownership of it, so the probe always runs
-// with CODEX_HOME overridden to a throwaway temp dir the dashboard owns —
-// NEVER an agent's own `.codex-<id>` home, whose locks/state must not be
-// touched by a probe.
-//
-// Failure semantics mirror the copilot SDK probe: any failure (binary
-// missing, spawn error, handshake timeout, parse error, empty data) yields an
-// empty result so queryCLIModels serves the static list with fallback=true.
-// On hosted spokes the main image does not install codex at all, so the probe
-// degrades instantly to the fallback there — expected and fine.
-
 const (
 	// codexBinaryName is the Codex CLI binary probed on PATH. When absent the
 	// probe is skipped instantly and the static fallback is served.

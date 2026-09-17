@@ -623,9 +623,13 @@ func TestWriteMergeEligibleExcludesHoldDriftPRs(t *testing.T) {
 		t.Fatalf("merge_eligible = %+v, want only the clean PR 9", eligible.MergeEligible)
 	}
 
+	// Since hivecommons/hive#7438 a held (or drifted) RED PR still rides
+	// ci-failing.json flagged held=true so its AUTHOR can repair it; the
+	// shared repair queue drops held rows before rendering.
 	var failing struct {
 		CIFailing []struct {
-			Number int `json:"number"`
+			Number int  `json:"number"`
+			Held   bool `json:"held"`
 		} `json:"ci_failing"`
 	}
 	raw, err = os.ReadFile(ciFailingPath)
@@ -635,7 +639,7 @@ func TestWriteMergeEligibleExcludesHoldDriftPRs(t *testing.T) {
 	if err := json.Unmarshal(raw, &failing); err != nil {
 		t.Fatal(err)
 	}
-	if len(failing.CIFailing) != 0 {
-		t.Fatalf("ci_failing = %+v, want drifted red PR kept away from fix agents", failing.CIFailing)
+	if len(failing.CIFailing) != 1 || failing.CIFailing[0].Number != 8 || !failing.CIFailing[0].Held {
+		t.Fatalf("ci_failing = %+v, want only drifted red PR 8 flagged held", failing.CIFailing)
 	}
 }
