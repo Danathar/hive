@@ -11,6 +11,21 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-17 (v4.50.0)
+
+### Added
+
+- Hive-authored PRs no longer sit open behind an external review bot's inline threads ([#7360](https://github.com/hivecommons/hive/issues/7360)). When Copilot code review, `chatgpt-codex-connector[bot]`, CodeRabbit or any other bot named under a new `classification.review_bots.logins` list (in `hive-project.yaml`, or the same key in `hive.yaml`) leaves review threads on a PR the hive opened, the governor now writes every unresolved, non-outdated bot thread to `/var/run/hive-metrics/review-threads.json` — attributed to the agent whose relay request opened the PR, exactly like `ci-failing.json` — and that agent's next kick carries a "FIX-BEFORE-NEW" block with each thread's path, line and finding: check out the branch, address it, push, reply in-thread with one line via `hive-review --comment --thread <id>`, then `hive-review --resolve-thread <id>` (skipped when `resolve_after_fix: false`). The review-request watcher gained the matching `resolve_thread` event and in-thread `comment` replies, both executed with the App token and audited as `agent_pr_reviewed`; before acting it re-fetches the thread and refuses — quarantining the request as `.denied` — when the thread's first comment is not from a configured bot, when it is already resolved, when it belongs to a different PR than the request names, or when the hive has already replied `max_attempts_per_thread` times (default 1). A human's thread is therefore never listed, never replied to and never resolved by this path, and a hive with no `review_bots.logins` configured writes an empty report and denies every thread request. `copilot_check` / `copilot-comment-checker.sh` (merged PRs) are untouched.
+
+### Changed
+
+- Extracted the authentication and session domain (require-auth wrappers, spoke upgrade proof verification, CSRF and origin checks, session cookie domains, identity resolution, GitHub token validation, spoke proxy auth, and the whoami/auth-check endpoints — 30 functions plus their types and constants) from `pkg/hub/saas.go` into a new `pkg/hub/saas_auth.go`, the next stage of the #7278 god-file split. Pure code motion: no behavior change.
+- Extracted the kick-delivery domain (SendKick, the locked delivery path, explain-mode kick suffixes, inference kick stall/nudge handling, and kick history seeding — 22 functions plus their constants) from `pkg/agent/manager.go` into a new `pkg/agent/manager_kick.go`, the next stage of the #7303 god-file split. Pure code motion: no behavior change.
+
+### Fixed
+
+- The dashboard's Copilot model list now matches the CLI again. The SDK discovery probe pinned the CLI to `index.js`, a file `@github/copilot` has never shipped, so it failed every cycle and discovery fell back to the legacy chat-completions catalog. The entry is now read from the package's own manifest, and an installed-but-failing probe is logged at WARN instead of INFO. ([#7365](https://github.com/hivecommons/hive/issues/7365))
+
 ## 2026-09-17 (v4.49.2)
 
 ### Fixed
