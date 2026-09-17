@@ -11,6 +11,14 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-17 (v4.47.0)
+
+### Added
+
+- The v4 → v5 forward-merge is now a mechanical cadence rather than an ad-hoc chore ([#7297](https://github.com/hivecommons/hive/issues/7297)). `.github/workflows/v5-topup.yml` runs after every v4 release tag (plus a daily safety net), rebuilds `sync/v4-to-v5` from v5's tip, forward-merges v4 with a DCO sign-off and opens a PR against v5. A conflicting top-up fails the run and pushes nothing, because a forward-merge that resolves itself wrongly is worse than one that waits ([#7199](https://github.com/hivecommons/hive/issues/7199)).
+- Copilot device-flow login now verifies the seat before reporting success, so a saved token that cannot actually run inference no longer presents as a working login ([#7309](https://github.com/hivecommons/hive/issues/7309)). `GET /api/copilot-auth/status` gained a `seat` verdict and a new `POST /api/copilot-auth/verify` re-checks on demand; the three failure modes behind [#7302](https://github.com/hivecommons/hive/issues/7302) — activation that never completed (`rejected`), an org policy refusing the integration ID (`blocked`), and a genuinely unlicensed account (`no_seat`) — are now distinct on-screen states, each naming which credential was verified. `docs/inference-backends.md` gained a "Verifying your Copilot login" section with the discriminators and self-checks.
+- The contribute Operations tab now shows an operator *why* a contributor is struggling, not just that it is ([#7317](https://github.com/hivecommons/hive/issues/7317) item 3). Each connected clanker's row draws its most recent reported failure (kind, reason, task, when) — a field that has travelled on the fleet snapshot since #2547 and was never rendered — and, while a task is in flight, a collapsible **agent pane** showing the terminal the relay last reported, so a twenty-minute silence can be read off the screen it is happening on. A new **Contributor run history** card looks up `GET /api/contribute/runs` by GitHub login, which is what makes this work for a contributor that has already disconnected: the fleet row is gone by then, but the run log is not. Failed and abandoned run records now also store the pane at the moment the run stopped (`pane_tail`, last 30 lines, token-redacted), and the card shows it under each such run. Pane output is more sensitive than the bounded reason string those endpoints already serve, so it is gated: `/api/contribute/fleet` and `/api/contribute/runs` strip `pane_tail` unless the viewer is owner or read-write (or the spoke has no auth boundary at all), and report `pane_tail_visible` so the page can say so. Reasons stay public, as before. No routing, cooldown, trust, or relay-protocol change.
+
 ## 2026-09-17 (v4.46.0)
 
 ### Added
