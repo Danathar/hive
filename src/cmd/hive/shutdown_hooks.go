@@ -1,6 +1,8 @@
 package main
 
-import "sync"
+import (
+	"sync"
+)
 
 // shutdownHooks is the ordered set of functions the signal handler runs before
 // the root context is canceled — while every WebSocket, tmux server and PVC

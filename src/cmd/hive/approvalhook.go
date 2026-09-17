@@ -1,24 +1,5 @@
 package main
 
-// Adapter joining #4001's `enqueue-approval` hook action to #4000's operator
-// inbox.
-//
-// #4001 shipped `hooks.ApprovalQueue` as a deliberately narrow interface with a
-// nil sink, so that an `enqueue-approval` hook reported a loud unwired-sink
-// error rather than silently dropping an approval. This is the adapter that
-// interface anticipated: it maps a `hooks.ApprovalRequest` onto a
-// `toolapprove.Request` plus a pending verdict, so a hook-produced approval
-// lands in the SAME durable inbox, is rendered by the SAME Approvals panel, and
-// is resolved through the SAME idempotent path as one produced by the sweep.
-//
-// Deliberately NOT re-deciding here: a hook firing `enqueue-approval` has
-// already expressed the operator's intent that this transition needs a human,
-// so the adapter enqueues directly at `operator-approve` rather than running
-// the request back through the desk. Sending it through `Desk.Resolve` would
-// let an auto-approve rule silently discard an approval the operator explicitly
-// asked for — and `Inbox.Enqueue` refuses anything that is not
-// `operator-approve` anyway, so re-deciding could only ever drop the request.
-
 import (
 	"context"
 	"errors"

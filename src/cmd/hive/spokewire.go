@@ -6,25 +6,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	// automaxprocs sets GOMAXPROCS to match the container's CPU quota (Linux
-	// CFS) at init. Without it the Go runtime sizes its P count to the whole
-	// NODE's core count, so on a many-core IKS worker a pod limited to a few
-	// CPUs spawns far more runnable Ps than its CFS quota can service; when the
-	// quota is exhausted mid-period EVERY goroutine — including the netpoller
-	// that answers the :3002 liveness probe and the heartbeat loop — is
-	// throttled until the next CFS period, which stacks on top of the NFS
-	// stalls to push probe latency past the kubelet timeout. Matching GOMAXPROCS
-	// to the quota removes that self-inflicted throttling.
-	//
-	// This is called explicitly rather than via the package's blank import
-	// because that import's init writes a line to the default logger (stderr)
-	// unconditionally. `hive` re-execs itself as a Git transport shim, and the
-	// setup path captures a child's stdout and stderr into a single buffer to
-	// parse (e.g. `symbolic-ref --short origin/HEAD`), so an init-time banner
-	// is indistinguishable from Git's answer and corrupts the parsed branch
-	// name. Setting it with a no-op logger keeps the GOMAXPROCS behaviour and
-	// drops the banner.
-
 	"github.com/hivecommons/hive/pkg/advisory"
 	"github.com/hivecommons/hive/pkg/agent"
 	"github.com/hivecommons/hive/pkg/beads"

@@ -1,13 +1,5 @@
 package main
 
-// lifecyclewire.go wires the lifecycle-timeline producers that were missing
-// since the panel shipped (#5656): pr_opened, merged and blocked. Enumerated
-// and kicked are recorded by the governor eval loop (main.go:
-// recordEnumeratedIssues / recordKick) and classified by the scheduler's
-// classifier pass (pkg/scheduler.SetLifecycleRecorder). Everything here rides
-// EXISTING paths — the attribution audit sink, the PR-opened hook and the
-// escalation sweep — no new polling, no new goroutines.
-
 import (
 	"context"
 	"strconv"

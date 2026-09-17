@@ -17,20 +17,6 @@ import (
 	"github.com/hivecommons/hive/pkg/notify"
 )
 
-// Boot wiring for hub mode, extracted from runHub so it can be tested (#7224).
-//
-// runHub was 0% covered and unreachable from any test: it started
-// network-probing background pollers on context.Background(), bound a port,
-// and called os.Exit on a serve failure. None of those can happen in a unit
-// test, so the wiring ABOVE them — port parsing, hook dispatch, the
-// token-gated /api/reach source, the reach reporter, graceful shutdown — went
-// unverified even though it is ordinary, reviewable logic that boots the hub.
-//
-// The three process-level effects move behind hubDeps. runHub stays a thin
-// production wrapper, matching the seam this repo already uses for
-// StartPermissionsWatcher -> runPermissionsWatcher (pkg/agent) and
-// watchHubRollout -> watchHubRolloutWithInterval (pkg/hub, #7220).
-
 // hubDeps are the process-level effects hub mode performs. Injected so the
 // boot wiring can be exercised without starting pollers, binding a port, or
 // terminating the test process.

@@ -1,16 +1,5 @@
 package main
 
-// Approval-desk startup wiring (RFC #4000).
-//
-// Mirrors celwire.go: one construction helper called during startup, fail-closed
-// on malformed rules, and a total no-op when the feature block is absent.
-//
-// The desk is DEFAULT OFF (`tool_approval.enabled: false`). With it off this
-// file returns nil for both the desk and the inbox, no hook is installed on the
-// GitHub client, and the dashboard's Approvals panel reports "not enabled". A
-// hive that upgrades onto this build and changes no config behaves exactly as
-// it did before.
-
 import (
 	"context"
 	"errors"
