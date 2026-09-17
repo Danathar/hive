@@ -1,1 +1,0 @@
-- The provider-spend banner decision is now a pure function, so the wording an operator sees when the inference gateway refuses on a money limit is covered by tests. No behavior change. (#7232)

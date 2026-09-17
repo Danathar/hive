@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-17 (v4.39.6)
+
+### Fixed
+
+- The provider-spend banner decision is now a pure function, so the wording an operator sees when the inference gateway refuses on a money limit is covered by tests. No behavior change. (#7232)
+
 ## 2026-09-17 (v4.39.5)
 
 ### Fixed
