@@ -95,6 +95,27 @@ func BuildPerspectivePrompt(p Perspective, pr PullRequest) string {
 // relay gates those separately, and the whole point here is to inform a human
 // rather than to gate them.
 func BuildPerspectivePromptOpts(p Perspective, pr PullRequest, postComments bool) string {
+	return BuildPerspectivePromptWith(p, pr, PromptOptions{PostComments: postComments})
+}
+
+// PromptOptions carries the publish-side switches. It is a struct rather than
+// more boolean parameters because these are independent policy choices that
+// only ever travel together.
+type PromptOptions struct {
+	// PostComments tells the reviewer to publish its verdict on the PR.
+	PostComments bool
+	// AcknowledgeNoFindings makes a clean review visible. By default a
+	// reviewer with nothing useful to say stays silent, which keeps the PR
+	// uncluttered but is indistinguishable from a reviewer that never ran —
+	// so on a hive whose review coverage is the thing being demonstrated,
+	// silence reads as absence. This turns "nothing to report" into one short
+	// line of evidence, deliberately capped at that.
+	AcknowledgeNoFindings bool
+}
+
+// BuildPerspectivePromptWith is BuildPerspectivePromptOpts with the full set
+// of publish-side options.
+func BuildPerspectivePromptWith(p Perspective, pr PullRequest, opts PromptOptions) string {
 	focus := map[Perspective]string{
 		PerspectiveCorrectness:     "correctness, regressions, edge cases, data races, and test adequacy",
 		PerspectiveSecurity:        "exploitable vulnerabilities, unsafe permissions, injection, secrets, and trust-boundary regressions",
@@ -121,21 +142,45 @@ func BuildPerspectivePromptOpts(p Perspective, pr PullRequest, postComments bool
 	if pr.Author != "" {
 		fmt.Fprintf(&b, "Author: @%s\n", strings.TrimPrefix(pr.Author, "@"))
 	}
-	fmt.Fprintf(&b, "Focus ONLY on %s. Do not duplicate other perspectives unless the issue is severe.\n", focus)
+	fmt.Fprintf(&b, "Focus ONLY on %s. Do not duplicate other perspectives unless the issue is severe.\n\n", focus)
+	b.WriteString(buildReadInstruction(pr))
 	b.WriteString(groundingSection(pr))
 	b.WriteString("\nReturn exactly one JSON object: the standard outputschema AgentReport fields plus perspective, verdict, repo, number, and head_sha.\n")
 	b.WriteString("Required AgentReport fields: lane, kind, findings, prs_opened, beads_filed, summary. Set kind to \"review\" and lane to \"review-swarm\". Use [] for empty arrays.\n")
 	b.WriteString("Allowed verdicts: approve, changes_requested, requires_human, reject. Finding severities: info, low, medium, high, critical.\n")
 	b.WriteString("Use approve only when this perspective finds no blocker. Use changes_requested for agent-fixable issues. Use requires_human for ambiguous/high-risk judgment. Use reject for fundamentally unsuitable or harmful PRs.\n")
-	if postComments {
-		b.WriteString(buildPublishInstruction(pr))
+	if opts.PostComments {
+		b.WriteString(buildPublishInstruction(pr, opts.AcknowledgeNoFindings))
 	}
+	return b.String()
+}
+
+// buildReadInstruction is the read half of the kick. The prompt has always
+// demanded file:line citations, but never said how to obtain the diff — so
+// whether the reviewer actually read the change was left to chance, and an
+// agent that skipped it could still produce confident, ungrounded prose. That
+// is the single worst thing this hive can put in front of a maintainer: a
+// review that costs them time to refute. Name the commands, pin them to the
+// dispatched head, and make "I could not read it" an explicit, honest outcome
+// rather than a reason to guess.
+func buildReadInstruction(pr PullRequest) string {
+	var b strings.Builder
+	b.WriteString("READ THE PR BEFORE YOU JUDGE IT.\n")
+	fmt.Fprintf(&b, "  gh pr view %d --repo %s --json title,body,author,files,baseRefName\n", pr.Number, pr.Repo)
+	fmt.Fprintf(&b, "  gh pr diff %d --repo %s\n", pr.Number, pr.Repo)
+	b.WriteString("The body states what the author INTENDED; the diff is what they actually did. You need both — most of the findings worth reporting live in the gap between them.\n")
+	b.WriteString("Reading is read-only and unrestricted: use gh freely here.\n")
+	b.WriteString("Judge the diff, not the surrounding code. Pre-existing problems this PR does not touch are out of scope; raising them reads as an obstacle, not a review.\n")
+	if pr.HeadSHA != "" {
+		fmt.Fprintf(&b, "Your citations must come from that diff at head %s. If the PR has moved on since, review the current head and say which revision you read.\n", pr.HeadSHA)
+	}
+	b.WriteString("If you cannot read the diff — fetch failed, or it is too large — return verdict requires_human and say so. Never infer the contents of a diff you did not read: an invented file:line is worse than no review at all.\n\n")
 	return b.String()
 }
 
 // buildPublishInstruction is the publish half of the kick: how to say what you
 // found, and — more importantly — when to say nothing.
-func buildPublishInstruction(pr PullRequest) string {
+func buildPublishInstruction(pr PullRequest, acknowledgeNoFindings bool) string {
 	var b strings.Builder
 	b.WriteString("\nPUBLISH YOUR VERDICT.\n")
 	b.WriteString("After you produce the JSON, post your findings as a PR comment so a human sees them:\n")
@@ -143,7 +188,14 @@ func buildPublishInstruction(pr PullRequest) string {
 	b.WriteString("Use hive-review, never `gh pr review` — it is submitted with the App token and recorded on the audit trail.\n")
 	b.WriteString("Only --comment. Do NOT approve, request changes, merge, close, or label; a human decides those.\n")
 	b.WriteString("Every claim in the comment must cite file:line you actually read. A finding you cannot point at is a false positive, and it now costs a contributor their time to refute.\n")
-	b.WriteString("Say nothing rather than pad. Do NOT post a comment that is only nits, only praise, or a restatement of the diff. If this perspective found nothing a human needs, skip the comment entirely and just return the JSON.\n")
+	b.WriteString("Say nothing rather than pad. Do NOT post a comment that is only nits, only praise, or a restatement of the diff.\n")
+	if acknowledgeNoFindings {
+		b.WriteString("If this perspective found nothing a human needs, still post exactly one short line so the review is on the record:\n")
+		b.WriteString("  **Reviewed** — no findings from this perspective.\n")
+		b.WriteString("That line is the WHOLE comment. Do not append praise, a summary of the diff, a list of what you checked, or nits you just talked yourself out of; padding it is what makes an acknowledgement into noise.\n")
+	} else {
+		b.WriteString("If this perspective found nothing a human needs, skip the comment entirely and just return the JSON.\n")
+	}
 	b.WriteString("If the PR body claims behavior the diff does not implement, say so with file:line — that gap is one of the most useful things you can report.\n")
 	b.WriteString("Be brief and specific. One comment, at most a few findings, worst first.\n")
 	b.WriteString(buildRoutingInstruction(pr))

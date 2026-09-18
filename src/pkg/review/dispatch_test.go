@@ -166,8 +166,12 @@ func TestDispatchSpendsSlotsDepthFirstByDefault(t *testing.T) {
 
 // TestMaxPerspectivesPerPRSpreadsAcrossPRs is the point of the cap: the same
 // budget, spent breadth-first, reviews every PR in the queue once instead of
-// one PR three times. No coverage is lost — the perspectives skipped here are
-// still missing next cycle and get dispatched then.
+// one PR three times.
+//
+// Coverage is traded away on purpose. Each perspective is a separate review
+// comment, so letting the skipped ones through on later cycles produces the
+// same pile of comments on one PR, merely spread over an hour. A hive that
+// wants every perspective leaves the cap unset, which is the default.
 func TestMaxPerspectivesPerPRSpreadsAcrossPRs(t *testing.T) {
 	prs := []PullRequest{dispatchPRNum(1, "sha1"), dispatchPRNum(2, "sha2"), dispatchPRNum(3, "sha3")}
 	plan := PlanDispatch(prs, Artifact{}, DispatchState{}, DispatchOptions{
@@ -212,5 +216,65 @@ func TestMaxPerspectivesPerPRNeverExceedsSlotBudget(t *testing.T) {
 
 	if len(plan.ReviewKicks) != 2 {
 		t.Fatalf("got %d kicks, want 2 (the slot budget, not the per-PR cap)", len(plan.ReviewKicks))
+	}
+}
+
+func humanPR(sha string) PullRequest {
+	pr := dispatchPR(sha)
+	pr.Author = "clubanderson"
+	return pr
+}
+
+// TestDispatchSkipsHumanPRsByDefault pins the default: the review swarm looks
+// only at the hive's own output, which is the work the hive is answerable for.
+func TestDispatchSkipsHumanPRsByDefault(t *testing.T) {
+	plan := PlanDispatch([]PullRequest{humanPR("sha1")}, Artifact{}, DispatchState{}, DispatchOptions{
+		RequireApproval: true,
+		FanOut:          true,
+		ProjectOrg:      "acme",
+		AIAuthor:        "hive-bot[bot]",
+		Agents:          []AgentCapability{reviewer("r1")},
+	})
+
+	if len(plan.ReviewKicks) != 0 {
+		t.Fatalf("human-authored PR was dispatched by default: %+v", plan.ReviewKicks)
+	}
+}
+
+// TestAllAuthorsReviewsHumanPRs is the opt-in: where the queue itself is the
+// problem, a contributor's PR waiting on a review is no less stuck than an
+// agent's.
+func TestAllAuthorsReviewsHumanPRs(t *testing.T) {
+	plan := PlanDispatch([]PullRequest{humanPR("sha1")}, Artifact{}, DispatchState{}, DispatchOptions{
+		RequireApproval: true,
+		FanOut:          true,
+		AllAuthors:      true,
+		ProjectOrg:      "acme",
+		AIAuthor:        "hive-bot[bot]",
+		Agents:          []AgentCapability{reviewer("r1")},
+	})
+
+	if len(plan.ReviewKicks) != 1 {
+		t.Fatalf("got %d kicks for a human-authored PR with AllAuthors, want 1", len(plan.ReviewKicks))
+	}
+	if plan.ReviewKicks[0].Number != 7 {
+		t.Fatalf("dispatched the wrong PR: %+v", plan.ReviewKicks[0])
+	}
+}
+
+// TestAllAuthorsStillReviewsAgentPRs guards the obvious regression: lifting the
+// restriction must widen the set, not replace it.
+func TestAllAuthorsStillReviewsAgentPRs(t *testing.T) {
+	plan := PlanDispatch([]PullRequest{dispatchPR("sha1")}, Artifact{}, DispatchState{}, DispatchOptions{
+		RequireApproval: true,
+		FanOut:          true,
+		AllAuthors:      true,
+		ProjectOrg:      "acme",
+		AIAuthor:        "hive-bot[bot]",
+		Agents:          []AgentCapability{reviewer("r1")},
+	})
+
+	if len(plan.ReviewKicks) != 1 {
+		t.Fatalf("agent-authored PR stopped being reviewed under AllAuthors: %+v", plan.ReviewKicks)
 	}
 }

@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -191,8 +192,15 @@ func (c *Client) handleOneReviewRequest(ctx context.Context, path string, nowFn 
 	if !c.reviewRetries.allows(path, nowFn()) {
 		return
 	}
-	data, err := os.ReadFile(path)
+	data, _, err := readUntrustedFile(path, requestMaxBytes)
 	if err != nil {
+		if errors.Is(err, errDropBoxFileRejected) {
+			// A FIFO, symlink, or oversize drop can never become a valid
+			// request; move it aside so it stops being scanned every tick.
+			_ = os.Rename(path, path+".rejected")
+			c.logger.Warn("review-request watcher: REJECTED (unsafe file)",
+				slog.String("path", path), slog.String("reason", err.Error()))
+		}
 		return // vanished between ReadDir and here
 	}
 	var req ReviewRequest
@@ -279,6 +287,7 @@ func (c *Client) handleOneReviewRequest(ctx context.Context, path string, nowFn 
 	// straight to GitHub, the same exfiltration shape as an issue or comment,
 	// so it must honor the same fail-closed contract and flow through the same
 	// error/retry handling as a real CreateReview failure below.
+	var created *gh.PullRequestReview
 	if leak, ok := c.scanCanaryText(req.Body, "hive-review:"+req.Repo); ok && c.canaryFailClosed {
 		err = fmt.Errorf("ioscan canary leak detected: agent=%s source=%s", leak.Agent, leak.Source)
 	} else {
@@ -289,7 +298,8 @@ func (c *Client) handleOneReviewRequest(ctx context.Context, path string, nowFn 
 			Actor:  req.Agent,
 			Inputs: map[string]string{"event": apiEvent, "body": effects.StableDigest(body)},
 		}, func(ctx context.Context) (effects.Result, error) {
-			_, _, apiErr := c.client.PullRequests.CreateReview(ctx, owner, repoName, req.Number, reviewReq)
+			var apiErr error
+			created, _, apiErr = c.client.PullRequests.CreateReview(ctx, owner, repoName, req.Number, reviewReq)
 			return effects.Result{Provenance: owner + "/" + repoName + "#" + strconv.Itoa(req.Number)}, apiErr
 		})
 	}
@@ -315,6 +325,23 @@ func (c *Client) handleOneReviewRequest(ctx context.Context, path string, nowFn 
 	resp.OK = true
 	resp.Number = req.Number
 	resp.State = state
+
+	// Record where the review landed so the queue views can link to it. A
+	// failure here is logged and swallowed: the review is already posted, and
+	// losing its address must never turn a successful review into a retry
+	// that posts it a second time.
+	if created != nil {
+		if err := RecordReviewLink("", req.Repo, req.Number, ReviewLink{
+			URL:     created.GetHTMLURL(),
+			State:   state,
+			HeadSHA: reviewReq.GetCommitID(),
+			At:      nowFn().UTC(),
+		}); err != nil {
+			c.logger.Warn("review-request watcher: could not record review link",
+				slog.String("repo", req.Repo), slog.Int("number", req.Number),
+				slog.String("error", err.Error()))
+		}
+	}
 
 	c.recordCreationAudit(AuditActionPRReviewed, meta,
 		"repo", req.Repo,

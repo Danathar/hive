@@ -12,7 +12,7 @@ operator must get right for the trust boundary to hold.**
 
 **Disabled by default.** An absent `mint:` block, or `enabled: false`, is
 byte-identical to a hive with no mint — the config comment says so
-explicitly (`pkg/config/config.go:213-217`), and this document exists
+explicitly (`pkg/config/config.go:222-226`), and this document exists
 because the feature had zero operator docs before this page.
 
 ## What it issues, and to whom
@@ -50,7 +50,7 @@ configured to accept exactly this audience for hive agent workloads.
 gets a mint token keeps using its GitHub App token for GitHub operations;
 the mint token is an *additional* credential a WIF-aware external system
 (cloud provider, container registry) can accept
-(`main.go:2133-2146`, ADR-0007 "Consequences").
+(`main.go:2152-2164`, ADR-0007 "Consequences").
 
 ## Config shape
 
@@ -62,13 +62,13 @@ mint:
   max_ttl_seconds: 900                # optional — default 900 (15m), hard-capped at 3600 (1h)
 ```
 
-Fields (`MintConfig`, `pkg/config/config.go:218-230`):
+Fields (`MintConfig`, `pkg/config/config.go:227-239`):
 
 | YAML key | Go field | Required (when `enabled: true`) | Default | Notes |
 |---|---|---|---|---|
-| `enabled` | `Enabled` | — | `false` | Turns the service on. `buildAgentMinter` is only invoked when this is `true` (`main.go:2139`). |
-| `key_path` | `KeyPath` | **Yes** | — | PEM path of the RSA signing key. Startup fails with `mint.key_path is required when mint is enabled` if empty while `enabled: true` (`main.go:1202-1204`). |
-| `issuer` | `Issuer` | **Yes** | — | The `iss` claim, and the identity string WIF providers are configured to trust — typically the hive's public URL. Startup fails with `mint.issuer is required when mint is enabled` if empty (`main.go:1205-1207`). |
+| `enabled` | `Enabled` | — | `false` | Turns the service on. `buildAgentMinter` is only invoked when this is `true` (`main.go:2157-2158`). |
+| `key_path` | `KeyPath` | **Yes** | — | PEM path of the RSA signing key. Startup fails with `mint.key_path is required when mint is enabled` if empty while `enabled: true` (`main.go:855-857`). |
+| `issuer` | `Issuer` | **Yes** | — | The `iss` claim, and the identity string WIF providers are configured to trust — typically the hive's public URL. Startup fails with `mint.issuer is required when mint is enabled` if empty (`main.go:858-860`). |
 | `max_ttl_seconds` | `MaxTTLSeconds` | No | `900` (15m, `mint.DefaultMaxTTL`) | Bounds a minted token's lifetime. **Clamped, never trusted verbatim**: any configured value is silently clamped into `[MinTTL 1m, HardCapTTL 1h]` (`mint.go:96-111,172-186`) — you cannot configure a token that outlives one hour no matter what you set here. |
 
 There is no field for scopes, entitlements, or a listener address in
