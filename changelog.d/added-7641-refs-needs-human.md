@@ -1,1 +1,0 @@
-- Extend the task-list sweep to annotate non-task-list Refs issues with PR remainders and mark human-only remainders needs-human.
