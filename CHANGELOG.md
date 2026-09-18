@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-18 (v4.60.0)
+
+### Added
+
+- Added a "🐝 Hive recommendations" issue that answers "what should I merge next?" for a human working a deep PR queue by hand. One issue per repository, rewritten in place on the review cadence, sorting every open PR into ready-to-merge, needs-a-rebase, failing-CI, waiting-on-a-human and stale-draft — each with a GitHub query link and a copy-pasteable `gh` block. Built for repositories that do not want the hive merging anything: the hive does the reading, a person keeps the decision. Off by default (`review.recommendations.enabled`).
+
 ## 2026-09-18 (v4.59.0)
 
 ### Added
