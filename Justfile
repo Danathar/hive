@@ -13,7 +13,13 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
 hive_image := env("HIVE_CONTRIBUTOR_IMAGE", "ghcr.io/hivecommons/hive-contributor:latest")
+# The hosted hub moved to hive.hivecommons.dev on 2026-09-04; the old
+# hive.kubestellar.io host answers every path with a 301 to the new one, which
+# a WebSocket handshake does not follow and `curl -sf` (no -L) reports as
+# unreachable (#7624). The legacy value is still recognised below as "not
+# set" so a stale export gets the hive lookup instead of a dead connection.
 hive_hub := env("HIVE_HUB", "wss://hive.hivecommons.dev/contribute")
+legacy_hive_hub := "wss://hive.kubestellar.io/contribute"
 config_dir := env("HOME") + "/.config/hive"
 # Container runtime for containerized mode. Empty = auto-detect (docker, then
 # podman — Docker wins on discovery order, not isolation posture; see the
@@ -281,7 +287,7 @@ backend-smoke backends="claude codex":
 contribute-setup backend="claude": check-version (contribute-check-backend backend)
     #!/usr/bin/env bash
     set -euo pipefail
-    if [[ "{{hive_hub}}" == "wss://hive.hivecommons.dev/contribute" ]]; then
+    if [[ "{{hive_hub}}" == "wss://hive.hivecommons.dev/contribute" || "{{hive_hub}}" == "{{legacy_hive_hub}}" ]]; then
       echo "HIVE_HUB not set — looking up your hives..."
       echo ""
       _TOKEN=$(gh auth token 2>/dev/null || echo "")

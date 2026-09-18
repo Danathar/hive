@@ -369,7 +369,7 @@ With two or more providers configured, `/login` renders a provider picker; with 
 
 | Variable | Required | Default | Purpose |
 |---|---:|---|---|
-| `HIVE_HUB` | Required after registration for contributor relay; `just` can discover/set it | legacy defaults may still mention `wss://hive.kubestellar.io`; use `wss://hive.hivecommons.dev/contribute` for the hosted hub | Contributor WebSocket hub URL. Comma-separated values are supported with matching `HIVE_REGISTRATION_TOKEN` entries. |
+| `HIVE_HUB` | Required after registration for contributor relay; `just` can discover/set it | `wss://hive.hivecommons.dev/contribute` (the `Justfile` default; the legacy `wss://hive.kubestellar.io/contribute` value is treated as unset and triggers the hive lookup) | Contributor WebSocket hub URL. Comma-separated values are supported with matching `HIVE_REGISTRATION_TOKEN` entries. |
 | `HIVE_REGISTRATION_TOKEN` | Yes for contributor relay | none | Contributor registration token. Comma-separated values match `HIVE_HUB` by position. |
 | `AGENT_BACKEND` | No | `claude` | Contributor/agent CLI backend selector. |
 | `AGENT_MODEL` | No | backend default, or `GOOSE_MODEL` for Goose fallback | Contributor/agent model override. |
