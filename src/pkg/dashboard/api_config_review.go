@@ -29,8 +29,12 @@ func (s *Server) handleReviewConfigPut(w http.ResponseWriter, r *http.Request) {
 		RequireApproval    *bool     `json:"require_approval"`
 		FanOut             *bool     `json:"fan_out"`
 		MaxParallelReviews *int      `json:"max_parallel_reviews"`
+		MaxPerspectives    *int      `json:"max_perspectives_per_pr"`
 		ReviewerAgents     *[]string `json:"reviewer_agents"`
 		FixerAgent         *string   `json:"fixer_agent"`
+		AllAuthors         *bool     `json:"all_authors"`
+		AcknowledgeNoFind  *bool     `json:"acknowledge_no_findings"`
+		HumanDecisionLabel *string   `json:"human_decision_label"`
 	}
 	if err := decodeBody(r, &body); err != nil {
 		jsonError(w, "invalid body", http.StatusBadRequest)
@@ -39,6 +43,11 @@ func (s *Server) handleReviewConfigPut(w http.ResponseWriter, r *http.Request) {
 
 	if body.MaxParallelReviews != nil && *body.MaxParallelReviews < 0 {
 		jsonError(w, "max_parallel_reviews must be >= 0", http.StatusBadRequest)
+		return
+	}
+
+	if body.MaxPerspectives != nil && *body.MaxPerspectives < 0 {
+		jsonError(w, "max_perspectives_per_pr must be >= 0", http.StatusBadRequest)
 		return
 	}
 
@@ -52,6 +61,9 @@ func (s *Server) handleReviewConfigPut(w http.ResponseWriter, r *http.Request) {
 	if body.MaxParallelReviews != nil {
 		cfg.Review.MaxParallelReviews = *body.MaxParallelReviews
 	}
+	if body.MaxPerspectives != nil {
+		cfg.Review.MaxPerspectivesPerPR = *body.MaxPerspectives
+	}
 	if body.ReviewerAgents != nil {
 		agents := make([]string, 0, len(*body.ReviewerAgents))
 		for _, a := range *body.ReviewerAgents {
@@ -63,6 +75,20 @@ func (s *Server) handleReviewConfigPut(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.FixerAgent != nil {
 		cfg.Review.FixerAgent = strings.TrimSpace(*body.FixerAgent)
+	}
+	if body.AllAuthors != nil {
+		cfg.Review.AllAuthors = *body.AllAuthors
+	}
+	if body.AcknowledgeNoFind != nil {
+		cfg.Review.AcknowledgeNoFindings = *body.AcknowledgeNoFind
+	}
+	// Deliberately not validated against the repos' label sets: the hive
+	// governs many repos and a label present in one may be absent in another,
+	// so rejecting the name here would block a setting that is correct
+	// elsewhere. An unusable name degrades to "no label applied" at review
+	// time, where the review marker still carries the signal.
+	if body.HumanDecisionLabel != nil {
+		cfg.Review.HumanDecisionLabel = strings.TrimSpace(*body.HumanDecisionLabel)
 	}
 
 	if err := s.saveConfig(); err != nil {

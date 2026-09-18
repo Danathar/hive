@@ -6301,6 +6301,37 @@ type ReviewConfig struct {
 	// perspective out at once stays the default, so this only changes a hive
 	// that opts in because its queue is too deep to review in depth.
 	MaxPerspectivesPerPR int `yaml:"max_perspectives_per_pr,omitempty" json:"max_perspectives_per_pr,omitempty"`
+	// AllAuthors makes every open PR eligible for review regardless of who
+	// opened it. By default the review swarm looks only at agent-authored
+	// PRs — the work the hive is answerable for. On a repo whose queue is the
+	// problem that restriction is backwards: a contributor's PR waiting on a
+	// reviewer is no less stuck than an agent's, and it is the one with a
+	// person waiting on the other end.
+	AllAuthors bool `yaml:"all_authors,omitempty" json:"all_authors,omitempty"`
+	// AcknowledgeNoFindings makes a clean review leave a one-line record
+	// instead of nothing. Silence keeps a PR uncluttered but is
+	// indistinguishable from a reviewer that never ran, so where review
+	// coverage itself is the thing being demonstrated, a reviewed-and-clean
+	// PR should say so. Requires PostComments.
+	AcknowledgeNoFindings bool `yaml:"acknowledge_no_findings,omitempty" json:"acknowledge_no_findings,omitempty"`
+	// HumanDecisionLabel names an EXISTING repo label to apply when the review
+	// swarm holds a PR for a human. The review comment's in-body marker is
+	// always the primary signal and never depends on this: a label makes the
+	// holds filterable from the PR list, which a comment buried in a thread
+	// cannot do, but a queue is triaged by people reading comments.
+	//
+	// The label is never created. A hive reviews other people's repos, so
+	// inventing a label there would edit someone else's taxonomy uninvited.
+	// If the name is empty, misspelled, or absent from the repo, labeling is
+	// skipped and the marker still lands — a typo must degrade to today's
+	// behaviour, never suppress a review.
+	//
+	// There is deliberately NO default and no built-in name. Label taxonomies
+	// are per-project: the name that means "a person must decide" in one org
+	// does not exist in another, so shipping a default would be a name that
+	// resolves nowhere for most hives while looking configured. Each hive
+	// names a label its own governed repos already maintain.
+	HumanDecisionLabel string `yaml:"human_decision_label,omitempty" json:"human_decision_label,omitempty"`
 }
 
 // DuplicateSweepConfig gates the cross-PR duplicate sweep
