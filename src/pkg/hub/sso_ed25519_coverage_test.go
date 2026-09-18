@@ -6,8 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/hivecommons/hive/pkg/hub/spoke"
 	"time"
+
+	"github.com/hivecommons/hive/pkg/hub/spoke"
 )
 
 func TestEd25519SSOKeysAndToken(t *testing.T) {

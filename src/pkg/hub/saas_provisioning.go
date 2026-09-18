@@ -1,8 +1,3 @@
-// Hive provisioning: provision request persistence and handlers,
-// placeholder pool selection, spoke project config adoption, and
-// hive assignment.
-//
-// Extracted from saas.go as part of the #7278 god-file split.
 package hub
 
 import (

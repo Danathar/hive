@@ -279,6 +279,11 @@ type Server struct {
 	// one, or forever on a spoke the hub does not manage. Guarded by versionMu.
 	hubUpgradePolicy   *spoke.HeartbeatUpgradePolicy
 	hubUpgradePolicyAt time.Time
+	// hubPushedDashboardURL is the vanity dashboard URL the hub last delivered
+	// on a heartbeat (#7451). Non-empty means the hub owns hub.dashboard_url:
+	// an operator edit would be reverted by the next push, and until then a
+	// wrong value feeds the OAuth callback origin. Guarded by versionMu.
+	hubPushedDashboardURL string
 
 	contributeHub *ContributeWSHub
 
@@ -633,6 +638,16 @@ type FrontendAgent struct {
 	// NOT omitempty: false is the meaningful value here, and omitempty would
 	// erase exactly the case this exists to report.
 	Enabled bool `json:"enabled"`
+
+	// UnscheduledInMode: some governor mode names this agent, but the
+	// current one does not (nor idle, which every mode inherits), so the
+	// governor will not kick it until the mode changes — the surge-only
+	// reviewer of #7474. Disjoint from OffByCadence (an explicit pause/off
+	// entry) and NoCadence (no entry in any mode). CadenceModes lists the
+	// modes that DO schedule it, threshold order, so the card can say "only
+	// in surge".
+	UnscheduledInMode bool     `json:"unscheduledInMode"`
+	CadenceModes      []string `json:"cadenceModes,omitempty"`
 }
 
 // FrontendConfiguredAgent is the secret-free config inventory used by the

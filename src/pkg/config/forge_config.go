@@ -1,5 +1,3 @@
-// Forge identity and connection configuration: GitHubConfig (App/OAuth/GHE
-// resolution), GitLabConfig, GiteaConfig, and the known-forge identity table.
 package config
 
 // AppSignedCommitsEnabled reports whether the PR-request watcher re-authors

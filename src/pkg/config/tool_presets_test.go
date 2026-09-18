@@ -12,12 +12,12 @@ func TestToolPresetsAdvisoryDeniesAllWrites(t *testing.T) {
 		t.Fatal("advisory preset missing from ToolPresets")
 	}
 	required := map[string]bool{
-		"mcp__github__create_pull_request":             false,
+		"mcp__github__create_pull_request":              false,
 		"mcp__github__create_pull_request_with_copilot": false,
-		"mcp__github__create_issue":                    false,
-		"mcp__github__update_issue":                    false,
-		"mcp__github__add_issue_comment":               false,
-		"mcp__github__merge_pull_request":              false,
+		"mcp__github__create_issue":                     false,
+		"mcp__github__update_issue":                     false,
+		"mcp__github__add_issue_comment":                false,
+		"mcp__github__merge_pull_request":               false,
 	}
 	for _, r := range rules {
 		if r.Action != "deny" {
@@ -40,9 +40,9 @@ func TestToolPresetsIssuesOnlyDeniesOnlyPRAndMerge(t *testing.T) {
 		t.Fatal("issues-only preset missing from ToolPresets")
 	}
 	required := map[string]bool{
-		"mcp__github__create_pull_request":             false,
+		"mcp__github__create_pull_request":              false,
 		"mcp__github__create_pull_request_with_copilot": false,
-		"mcp__github__merge_pull_request":              false,
+		"mcp__github__merge_pull_request":               false,
 	}
 	for _, r := range rules {
 		if r.Action != "deny" {

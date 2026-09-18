@@ -182,7 +182,7 @@ func TestPausePersist_TwoUnsynchronizedSavers(t *testing.T) {
 			wg.Add(1)
 			go func(n string) {
 				defer wg.Done()
-				pathA(n)                     // Path A: this pause
+				pathA(n)                        // Path A: this pause
 				pathB(cloneBoolMap(fullPaused)) // Path B: async full persist
 			}(name)
 		}

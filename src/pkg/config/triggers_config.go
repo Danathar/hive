@@ -1,6 +1,3 @@
-// Declarative automation rules: CEL-based agent triggers (TriggerRule),
-// state-transition hooks (HookRule, RFC #4001), and the tool-approval desk
-// configuration (ToolApprovalConfig/ToolApprovalRule, RFC #4000).
 package config
 
 // ToolApprovalConfig configures the approval desk (RFC #4000).

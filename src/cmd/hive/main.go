@@ -67,6 +67,7 @@ import (
 	"github.com/hivecommons/hive/pkg/scheduler"
 	"github.com/hivecommons/hive/pkg/sessionprune"
 	"github.com/hivecommons/hive/pkg/snapshot"
+	"github.com/hivecommons/hive/pkg/spokealerts"
 	"github.com/hivecommons/hive/pkg/timeline"
 	"github.com/hivecommons/hive/pkg/tokens"
 	"github.com/hivecommons/hive/pkg/toolapprove"
@@ -2198,7 +2199,7 @@ func main() {
 		// records it on the audit/activity trail, gated by the same
 		// forge-resistance + push-capability (CanPush) check as opening a PR —
 		// reviewing is a PR-write, so AuthorizePROpen is the correct gate.
-		ghClient.StartReviewRequestWatcher(ctx, agentMgr.AuthorizePROpen, nil)
+		ghClient.StartReviewRequestWatcher(ctx, agentMgr.AuthorizeReviewRequest, nil)
 		// Merge relay: agents request merges by dropping a file (hive-merge)
 		// instead of calling the GitHub MCP merge_pull_request tool, whose GraphQL
 		// mutation GitHub rejects for App tokens ("Resource not accessible by
@@ -5068,6 +5069,10 @@ func main() {
 				// working config: with no org there is nothing to reconcile except the
 				// URL, so adopt it, persist, and return without touching the project.
 				if pc.Org == "" {
+					// Whether or not it differs, a pushed URL is the hub saying it
+					// owns this value; the dashboard renders the field read-only
+					// from here on (#7451).
+					dashSrv.SetHubPushedDashboardURL(pc.DashboardURL)
 					if pc.DashboardURL != "" && cfg.Hub.DashboardURL != pc.DashboardURL {
 						logger.Info("adopting vanity dashboard URL from hub heartbeat (url-only push)",
 							"was", cfg.Hub.DashboardURL, "now", pc.DashboardURL)
@@ -5097,6 +5102,7 @@ func main() {
 				// host). Track it in the already-reconciled check so a URL-only change
 				// still gets applied and persisted.
 				vanityMatched := pc.DashboardURL == "" || cfg.Hub.DashboardURL == pc.DashboardURL
+				dashSrv.SetHubPushedDashboardURL(pc.DashboardURL) // #7451: hub-owned from here on
 				authorMatched := pc.AIAuthor == "" || cfg.Project.AIAuthor == pc.AIAuthor
 				apiURLMatched := pc.GitHubAPIURL == "" || cfg.GitHub.APIURL == pc.GitHubAPIURL
 				// Issue filter: nil means "the hub is not speaking to this field"
@@ -5628,6 +5634,10 @@ func applyNoCadenceAlert(gov *governor.Governor, dashSrv *dashboard.Server) {
 		return
 	}
 	dashSrv.AddSystemAlert(noCadenceAlertID, "warning", noCadenceAlertMessage(agents))
+}
+
+func applyModeUnscheduledAlert(gov *governor.Governor, dashSrv *dashboard.Server) {
+	spokealerts.ApplyModeUnscheduled(gov, dashSrv)
 }
 
 // agentKicker adapts *agent.Manager to planning.Kicker for the Phase 3
@@ -6169,6 +6179,15 @@ func runEvalCycle(
 		actionable.Issues.SLAViolations,
 		governor.RepoDepthsFromActionable(actionable),
 	)
+
+	// The weaker sibling of the banner above (#7474): an agent SOME mode
+	// schedules but the mode the fleet is now in does not — a reviewer with a
+	// cadence only in surge goes silent the moment its own work drives the
+	// backlog below the surge threshold, and every other signal calls it
+	// healthy. Applied after Evaluate so it reads the mode this tick settled
+	// on; self-clears when the mode changes back or the operator fills the
+	// gap.
+	applyModeUnscheduledAlert(gov, dashSrv)
 
 	// Crash-restarted agents may get a "resume" kick ahead of their cadence
 	// slot so work interrupted mid-task resumes promptly — but ONLY through
@@ -9066,6 +9085,7 @@ func planReviewDispatch(cfg *config.Config, actionable *github.ActionableResult,
 		MaxParallelReviews: cfg.Review.EffectiveMaxParallelReviews(),
 		ReviewerAgents:     cfg.Review.ReviewerAgents,
 		FixerAgent:         cfg.Review.FixerAgent,
+		PostComments:       cfg.Review.PostComments,
 		ProjectOrg:         cfg.Project.Org,
 		AIAuthor:           cfg.EffectiveAIAuthor(),
 		Agents:             agents,
