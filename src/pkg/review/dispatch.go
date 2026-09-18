@@ -16,11 +16,35 @@ import (
 const (
 	DefaultMaxParallelReviews = 5
 	ReviewDispatchStateFile   = "review-dispatch-state.json"
-	DefaultFixerAgent         = "scanner"
-	reviewRoleToken           = "review"
+	// DefaultDispatchStateDir is the durable data dir. It matches the path the
+	// knowledge engine and the dashboard config overlay already persist to,
+	// which on a hosted spoke is the PersistentVolumeClaim.
+	DefaultDispatchStateDir = "/data"
+	DefaultFixerAgent       = "scanner"
+	reviewRoleToken         = "review"
 )
 
-var ReviewDispatchStatePath = filepath.Join(outputschema.AgentReportDir, ReviewDispatchStateFile)
+// ReviewDispatchStatePath is where the review swarm records which
+// (repo, number, headSHA, perspective) tuples it has already dispatched. It is
+// NOT a cache: it is the reviewer's only memory of what it has already looked
+// at. PlanDispatch keeps no cursor — it re-walks the actionable PR list from
+// the top every cycle and relies on this file to skip the PRs it already
+// dispatched, so the parallel budget lands on the NEXT PRs in the queue.
+//
+// It therefore lives on the durable data dir, not under AgentReportDir
+// (/var/run/hive-metrics), which is scratch space for regenerable per-cycle
+// artifacts — actionable.json, tokens.json, github-cache.json — on the
+// container's ephemeral writable layer. Storing dispatch state there meant
+// every pod restart wiped the reviewer's memory: it re-walked the queue from
+// the top, re-reviewed the same first PRs, and never advanced to the rest of
+// the queue. Once reviewers publish comments, that also re-posts on those same
+// PRs. A var (not const) so tests can point it at a temp dir.
+var ReviewDispatchStatePath = filepath.Join(DefaultDispatchStateDir, ReviewDispatchStateFile)
+
+// LegacyReviewDispatchStatePath is the pre-migration location. LoadDispatchState
+// falls back to it so a hive upgrading in place keeps the state it already has
+// instead of restarting its sweep of the queue from the top.
+var LegacyReviewDispatchStatePath = filepath.Join(outputschema.AgentReportDir, ReviewDispatchStateFile)
 
 type AgentCapability struct {
 	Name           string
@@ -38,7 +62,10 @@ type DispatchOptions struct {
 	RequireApproval    bool
 	FanOut             bool
 	MaxParallelReviews int
-	// MaxPerspectivesPerPR caps perspectives dispatched to one PR per cycle.
+	// MaxPerspectivesPerPR caps how many perspectives one PR receives for a
+	// given head SHA, across cycles rather than within a single one. Each
+	// perspective is a separate review comment, so this is the control over
+	// how much review traffic a single pull request attracts.
 	// Zero means DefaultMaxPerspectivesPerPR.
 	MaxPerspectivesPerPR int
 	ReviewerAgents       []string
@@ -48,8 +75,14 @@ type DispatchOptions struct {
 	// PostComments carries config.ReviewConfig.PostComments into the prompt
 	// builder, so reviewers are told to publish their verdict on the PR.
 	PostComments bool
-	Agents       []AgentCapability
-	Now          time.Time
+	// AllAuthors lifts the agent-authored restriction so every open PR is
+	// eligible for review, whoever opened it.
+	AllAuthors bool
+	// AcknowledgeNoFindings carries config.ReviewConfig.AcknowledgeNoFindings
+	// into the prompt builder, so a clean review still leaves a record.
+	AcknowledgeNoFindings bool
+	Agents                []AgentCapability
+	Now                   time.Time
 }
 
 type DispatchState struct {
@@ -104,12 +137,27 @@ type DispatchPlan struct {
 }
 
 func LoadDispatchState(path string) (DispatchState, error) {
-	if path == "" {
+	explicit := path != ""
+	if !explicit {
 		path = ReviewDispatchStatePath
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return DispatchState{}, err
+		// One-time migration: a hive that ran before the state moved to the
+		// durable dir still has its dispatch record at the legacy scratch
+		// path. Read it so the upgrade does not look like amnesia and re-walk
+		// the queue from the top. The next WriteDispatchState lands on the
+		// durable path, so this fallback stops firing on its own. Only for the
+		// default path — an explicit path means a caller (or a test) asked for
+		// exactly that file.
+		if explicit || !os.IsNotExist(err) || LegacyReviewDispatchStatePath == path {
+			return DispatchState{}, err
+		}
+		legacy, legacyErr := os.ReadFile(LegacyReviewDispatchStatePath)
+		if legacyErr != nil {
+			return DispatchState{}, err
+		}
+		data = legacy
 	}
 	var state DispatchState
 	if err := json.Unmarshal(data, &state); err != nil {
@@ -155,7 +203,14 @@ func PlanDispatch(prs []PullRequest, artifact Artifact, state DispatchState, opt
 	availableSlots := maxParallel
 	for _, pr := range prs {
 		pr.Repo = fullRepoName(pr.Repo, opts.ProjectOrg)
-		if pr.Number <= 0 || pr.Repo == "" || !isAgentAuthored(pr.Author, opts.AIAuthor) {
+		if pr.Number <= 0 || pr.Repo == "" {
+			continue
+		}
+		// Review is normally limited to the hive's own output, because that is
+		// the work the hive is answerable for. AllAuthors lifts that: on a repo
+		// where the queue is the problem, a human's PR waiting on a reviewer is
+		// no less stuck than an agent's.
+		if !opts.AllAuthors && !isAgentAuthored(pr.Author, opts.AIAuthor) {
 			continue
 		}
 		if agg, ok := artifact.AggregateFor(pr.Repo, pr.Number, pr.HeadSHA); ok {
@@ -179,8 +234,25 @@ func PlanDispatch(prs []PullRequest, artifact Artifact, state DispatchState, opt
 		// Breadth before depth: the parallel budget is spent in PR order, so
 		// an uncapped first PR would take every slot for its own perspectives
 		// and leave the rest of the queue unreviewed this cycle.
-		if perPR := opts.effectiveMaxPerspectivesPerPR(); perPR > 0 && limit > perPR {
-			limit = perPR
+		//
+		// The cap is also a lifetime budget per head SHA, not merely a
+		// per-cycle one. Perspectives a PR has already been given persist in
+		// state.Pending, so without counting them a capped hive still works
+		// through every perspective one cycle at a time and posts a separate
+		// review comment for each. From a maintainer's side that is the same
+		// pile of comments, just spread out. Counting what a head SHA has
+		// already received is what makes "max perspectives per PR" mean what
+		// it says. A force-push clears the pending entries, so genuinely new
+		// code earns a fresh budget.
+		if perPR := opts.effectiveMaxPerspectivesPerPR(); perPR > 0 {
+			covered := len(DefaultPerspectives) - len(missing)
+			remaining := perPR - covered
+			if remaining <= 0 {
+				continue
+			}
+			if limit > remaining {
+				limit = remaining
+			}
 		}
 		if len(reviewers) == 1 && limit > 1 {
 			limit = 1
@@ -191,7 +263,10 @@ func PlanDispatch(prs []PullRequest, artifact Artifact, state DispatchState, opt
 		for i := 0; i < limit; i++ {
 			agent := reviewers[i%len(reviewers)].Name
 			perspective := missing[i]
-			msg := BuildPerspectivePromptOpts(perspective, pr, opts.PostComments)
+			msg := BuildPerspectivePromptWith(perspective, pr, PromptOptions{
+				PostComments:          opts.PostComments,
+				AcknowledgeNoFindings: opts.AcknowledgeNoFindings,
+			})
 			plan.ReviewKicks = append(plan.ReviewKicks, DispatchKick{Agent: agent, Message: msg, PRRef: fmt.Sprintf("%s#%d", pr.Repo, pr.Number), Kind: "review", Repo: pr.Repo, Number: pr.Number, HeadSHA: pr.HeadSHA, Perspective: perspective})
 			plan.State.Pending = append(plan.State.Pending, PendingReview{Repo: pr.Repo, Number: pr.Number, HeadSHA: pr.HeadSHA, Perspective: perspective, Agent: agent, Dispatched: now})
 			availableSlots--

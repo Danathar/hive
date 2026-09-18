@@ -11,6 +11,107 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-18 (v4.61.2)
+
+### Changed
+
+- The Features tab's Review Gate section is grouped instead of listed. It had grown to eleven controls spanning three unrelated concerns — the merge gate, the reviewers themselves, and the recommendations digest — presented as one undifferentiated list, so nothing indicated which setting affected which behaviour. The reviewer settings now read as a single unit under quiet `Merge gate` and `Reviewers` sub-headings that group by whitespace rather than by drawing more rules, and the recommendations controls move out to their own `Merge Recommendations` section, since opening an issue about what is already mergeable is not part of the gate that decides whether a PR may merge at all. The horizontal rule keeps meaning "a different feature starts here", which is what makes it readable.
+
+## 2026-09-18 (v4.61.1)
+
+### Fixed
+
+- A fatal-network pattern found in an agent's scrollback no longer restarts an agent that is still producing output. The detector matches scrollback, so a hit can be an error the agent already recovered from and worked past; its premise is that the agent is "visually ready but actually dead", and a pane that changed moments ago refutes that premise. Restarting such an agent destroys the turn in flight rather than recovering anything. Observed on a production spoke, where a reviewer emitted a generic `fetch failed` from one failed proxied call mid-turn, kept working, and was killed while streaming 22KB of output — it restarted 52 times and published no review for over seven hours, because every restart landed mid-turn and the next turn met the same line still sitting in scrollback. An agent that dies at startup renders nothing, so its pane stays static and the restart still fires.
+
+## 2026-09-18 (v4.61.0)
+
+### Added
+
+- Added a Features → Review Gate control for the "what to merge next" recommendations issue, so it can be turned on, scoped to specific repositories, and given an opening threshold from the dashboard instead of only from `hive.yaml`.
+- Added a "reviewed" pill to the PR listings on the dashboard repo cards, linking straight to the review the hive posted. Reviews are recorded in a durable ledger as they are submitted, so the pill costs no extra GitHub calls, and a repeat count is shown when the hive has reviewed the same PR more than once.
+
+### Fixed
+
+- An abandoned run row on the Operations tab no longer shows the previous task's terminal as "terminal when it stopped" ([#7605](https://github.com/hivecommons/hive/issues/7605)). The hub kept only the relay's latest pane snapshot, with no record of which task it was reported for, so a socket that dropped seconds into a fresh assignment — before any progress frame — attached the previous task's clean `HIVE_VERDICT: complete` screen to the new task's `abandoned … 2s` row, pointing an operator at a dropped completion when the real event was a flapped socket. The snapshot is now tagged with the task the relay named, and both the abandoned row and the live fleet card carry a pane only when it was reported for that task; a row with no pane of its own carries none.
+
+### Security
+
+- The `reviewer` GitHub App token tier is narrowed from `pull_requests: write` back to `pull_requests: read`. A reviewer posts its verdict through the review-request relay (`review_request_watcher.go`), where the governor submits the review with the App token — the same governor-performs-the-write pattern the issue, PR and merge request watchers already follow. That route authors the review as the App bot, records it on the audit/activity trail so it counts toward activity and SLA accounting, and runs the body through the fail-closed canary scan; a direct agent-token `gh pr review` did none of those. The `reviewer` tier itself is kept, as is `agentmode.TokenTierForRole` — only the permission level changes. ([#7487](https://github.com/hivecommons/hive/issues/7487))
+- The recommendations digest no longer adopts an issue it did not author (#7598). Its title is a public constant in repositories where anyone can open issues, and the shared title lookup would adopt any match — even a fuzzy one — handing a squatter permanent author edit rights over a body full of copy-paste `gh pr merge` commands the footer tells the maintainer to trust, and risking the hive overwriting a maintainer's own similarly-titled issue. The lookup now mirrors the advisory-digest authorship gate: exact title only, App clients adopt only their own bot's issue (with a marker-verified bot fallback for slug mismatches), and anything else is skipped with a warning while the hive posts its own issue instead.
+
+## 2026-09-18 (v4.60.0)
+
+### Added
+
+- Added a "🐝 Hive recommendations" issue that answers "what should I merge next?" for a human working a deep PR queue by hand. One issue per repository, rewritten in place on the review cadence, sorting every open PR into ready-to-merge, needs-a-rebase, failing-CI, waiting-on-a-human and stale-draft — each with a GitHub query link and a copy-pasteable `gh` block. Built for repositories that do not want the hive merging anything: the hive does the reading, a person keeps the decision. Off by default (`review.recommendations.enabled`).
+
+## 2026-09-18 (v4.59.0)
+
+### Added
+
+- Add the escalation-surfaces design record (email + push, v6 Track 6) and index the design docs for Slack and escalation surfaces.
+
+## 2026-09-18 (v4.58.2)
+
+### Fixed
+
+- Hardened every hive-side drop-box reader (pr/issue/merge/review request queues and the token-access audit spool) against FIFO block and symlink follow: open with O_NOFOLLOW, verify a regular file, and read through a size-capped reader.
+
+## 2026-09-18 (v4.58.1)
+
+### Changed
+
+- CI now gates PRs targeting the v6 line: v2 CI, v2 Tests, the changelog fragment guard, the testutil guard, and Go security analysis run on v6 pushes and pull requests (#7563 Track 7).
+
+## 2026-09-18 (v4.58.0)
+
+### Added
+
+- Added the Slack integration design (`src/docs/design/slack-integration.md`): Socket Mode transport as the second backend on the v6 chat spine, mrkdwn translation, fail-closed allowlist, and the shared guard invariant (#7563 Track 3).
+- Added the v5 → v6 top-up workflow (`.github/workflows/v6-topup.yml`): forward-merges v5 into v6 on every v5 push plus a daily safety net, with the same conflict-inventory-and-stop policy as the v4 → v5 top-up (#7563 Track 7).
+
+### Changed
+
+- `runEvalCycle` advisory digest pinning and posting now live behind two testable seams (`pinDigestSnapshot`, `publishAdvisoryDigest` in `cmd/hive/eval_cycle_advisory_seams.go`) with the GitHub/dashboard effects injected; `runEvalCycle` shrinks 902 → 785 lines and `cmd/hive` coverage rises 54.7% → 56.2% (refs #7232).
+- Boot-time decisions in `main()` — default config path, HIVE_CONFIG disagreement, short-SHA canonicalization, hub target from `HIVE_HUB_URL`/`HIVE_CLUSTER_ID`, the ACMM pack plan (config vs persisted vs `HIVE_LEVEL`, merge vs re-apply), the self-upgrade marker verdict, coverage badge URL, metrics primary repo, fleet-stats author identity (ai_author vs bot-token login), and the policies checkout/policy directories — now live in `cmd/hive/boot_seams.go` as pure, fully tested helpers; `main()` keeps only the effects (refs #7232).
+- The `runEvalCycle` test harness now drives the advisory digest end to end (bead store → pinned issue → rendered digest → App comment POST → healed App-permission finding, cleared App banner); `runEvalCycle` coverage 32.9% → 49.0%, `cmd/hive` 54.7% → 55.9% (refs #7232).
+- The review perspective cap is now a budget per pull request head commit rather than per dispatch cycle, so setting it actually limits how many review comments one pull request receives. Leaving it unset keeps every perspective, which remains the default.
+- ROADMAP.md / docs roadmap: the v6 line is **open** — branch `v6` cut from v5 on 2026-09-18, themed dashboard-optional operation (chat spine, Slack/Discord/Teams/Matrix/Telegram, GitHub @-mention triggers, email + push/on-call escalation), tracked by epic #7563; v6 implementation PRs target the `v6` branch only and every new surface reuses the dashboard's role/capability/ioscan guards
+
+### Fixed
+
+- Review verdicts now persist on durable storage and merge across refreshes, so a restart no longer makes the hive forget what it already reviewed and post duplicate comments on the same pull requests.
+
+## 2026-09-18 (v4.57.1)
+
+### Changed
+
+- `runEvalCycle` now has an end-to-end test harness (`cmd/hive/eval_cycle_run_7232_test.go`) that drives a full cycle against a fake GitHub API with the real governor, scheduler, agent manager and dashboard server; function coverage rises from 1.7% to 32.9% and `cmd/hive` from 52.3% to 54.7% (refs #7232).
+
+### Fixed
+
+- Fixed the review swarm forgetting which PRs it had already reviewed on every restart. The dispatch state — the reviewer's only record of what it has looked at — was written under `/var/run/hive-metrics`, scratch space for regenerable per-cycle artifacts on the container's ephemeral writable layer. Since `PlanDispatch` keeps no cursor and re-walks the actionable PR list from the top each cycle, losing that file made the reviewer re-review the same first PRs indefinitely and never advance through the queue (and, once reviewers publish, re-comment on them). It now lives on the durable data dir, with a one-time fallback to the old location so an upgrading hive keeps the state it already has.
+- Fixed reviews being written without the reviewer having necessarily read the change. The perspective prompt demanded `file:line` citations but never said how to obtain the diff, so an agent that skipped it could still produce confident, ungrounded prose. The kick now names `gh pr view` (intent) and `gh pr diff` (what was actually done), pins citations to the dispatched head SHA, scopes the review to the diff rather than the surrounding code, and makes an unreadable diff an explicit `requires_human` instead of a guess.
+
+## 2026-09-18 (v4.57.0)
+
+### Added
+
+- Review swarm can now mark PRs it holds for a human with an existing repo label (`review.human_decision_label`, e.g. `3-human-queue`), making the human queue filterable from the PR list. The label is never created and never required: if it is unset, misspelled, or absent from the repo, labeling is skipped and the review comment's in-body marker still carries the signal.
+- Added a **Max perspectives per PR** control to Settings → Features → Review Gate, so the per-PR perspective cap can be set from the dashboard instead of only in YAML. Without it the cap shipped unreachable: parallel review slots are spent in PR order, so the first PR in a deep queue absorbs every slot and adding reviewers buys more opinions on one PR instead of coverage across many. 0 or empty keeps the existing no-cap default.
+
+### Changed
+
+- `ContributeWSHub.HandleWS` in `pkg/dashboard/contribute_ws.go` was a single 1,154-line function covering admission, the auth handshake, task dispatch, lease renewal, completion/failure settlement, and disconnect teardown. It is now a 124-line read loop over a per-socket `wsSession` whose named phase methods (`handleAuthResponse`, `handleReady`, `handleTaskAccepted`, `handleTaskProgress`, `handleTaskComplete`, `handleTaskFailed`, `releaseOnDisconnect`) hold the bodies verbatim, so each phase can be read, tested, and changed on its own. No protocol or behaviour change; every existing dashboard test passes unchanged (#7546, follow-up to #7491).
+- CI: cap the O(n³) dedup reference oracle at 128 lines under `-short` — the full 500-line differential took 166s under `-race` and single-handedly set the agent test lane's wall clock (1.75s now; full-size oracle still runs unshortened, and the optimized path stays covered at full size in every mode)
+
+## 2026-09-18 (v4.56.0)
+
+### Added
+
+- The governor PLANNING tile is now clickable and opens the plan view it always pointed at: a list of every plan (drafts awaiting review first, backed by the new `GET /api/plans`) and a per-plan review modal with approve / reject / retag / remove controls — so plans can finally be approved from the dashboard instead of raw API calls (#7537).
+- Added two review-swarm settings, both on the Features tab's Review Gate section. `review.all_authors` makes every open PR eligible for review regardless of who opened it, instead of only agent-authored ones — for repos where the PR queue itself is the problem and a contributor's PR is no less stuck than an agent's. `review.acknowledge_no_findings` makes a clean review leave one short line saying it reviewed and found nothing, so review coverage is visible on the PR rather than being indistinguishable from a reviewer that never ran. Both default off.
+
 ## 2026-09-18 (v4.55.1)
 
 ### Changed

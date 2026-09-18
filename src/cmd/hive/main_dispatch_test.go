@@ -42,18 +42,19 @@ func TestDispatchSubcommandRoutesConfigCheckAlias(t *testing.T) {
 }
 
 func TestDashboardDependenciesWireRescanReposFunc(t *testing.T) {
-	// dashboardDependencies is a closure inside main() (v4 layout), so the
+	// dashboardDependencies is a closure built in bootConfig and consumed by
+	// bootDashboardAPI (#7571 boot phases), so the
 	// RescanReposFunc wiring is pinned at the source level.
 	src, err := os.ReadFile("main.go")
 	if err != nil {
 		t.Fatalf("read main.go: %v", err)
 	}
 	body := string(src)
-	start := strings.Index(body, "dashboardDependencies := func()")
+	start := strings.Index(body, "b.dashboardDependencies = func()")
 	if start < 0 {
 		t.Fatal("main.go no longer defines the dashboardDependencies closure")
 	}
-	if !strings.Contains(body[start:], "return rescanRepos(rescanCtx, cfg, ghClient") {
+	if !strings.Contains(body[start:], "return rescanRepos(rescanCtx, b.cfg, b.ghClient") {
 		t.Fatal("dashboardDependencies no longer wires RescanReposFunc to rescanRepos")
 	}
 }

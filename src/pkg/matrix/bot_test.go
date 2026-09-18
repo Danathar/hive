@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -276,16 +277,16 @@ func TestSplitMatrixMessagePreservesRunes(t *testing.T) {
 }
 
 func TestBotWrappersAndStart(t *testing.T) {
-	var sent, topics int
+	var sent, topics atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == matrixAPIPath+"/account/whoami":
 			_, _ = w.Write([]byte(`{"user_id":"@bot:example"}`))
 		case strings.Contains(r.URL.Path, "/send/m.room.message/"):
-			sent++
+			sent.Add(1)
 			_, _ = w.Write([]byte(`{}`))
 		case strings.Contains(r.URL.Path, "/state/m.room.topic"):
-			topics++
+			topics.Add(1)
 			_, _ = w.Write([]byte(`{}`))
 		case r.URL.Path == matrixAPIPath+"/sync":
 			_, _ = w.Write([]byte(`{"next_batch":"s0"}`))
@@ -327,8 +328,8 @@ func TestBotWrappersAndStart(t *testing.T) {
 	}
 	cancel()
 	bot.Listen(ctx, func(chat.Message) {})
-	if sent == 0 || topics != 1 {
-		t.Fatalf("sent = %d topics = %d", sent, topics)
+	if sent.Load() == 0 || topics.Load() != 1 {
+		t.Fatalf("sent = %d topics = %d", sent.Load(), topics.Load())
 	}
 }
 
