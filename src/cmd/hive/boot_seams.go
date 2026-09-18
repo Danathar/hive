@@ -185,10 +185,7 @@ func judgeUpgradeMarker(m upgradeMarker, runningSHA string) upgradeMarkerVerdict
 // coverageBadgeURLEnv overrides the coverage badge the dashboard renders.
 const coverageBadgeURLEnv = "HIVE_COVERAGE_BADGE_URL"
 
-// defaultCoverageBadgeURL is the flagship project's own badge. It is the
-// default ONLY for that project (same gate collectOutreach uses for
-// adopters/ACMM); every other hive sets HIVE_COVERAGE_BADGE_URL or honestly
-// shows 0 — before this gate they all showed hivecommons/hive's number.
+// defaultCoverageBadgeURL is the fleet-wide badge used when the env is unset.
 const defaultCoverageBadgeURL = "https://gist.githubusercontent.com/clubanderson/b9a9ae8469f1897a22d5a40629bc1e82/raw/coverage-badge.json"
 
 func resolveCoverageBadgeURL(env, org string) string {
