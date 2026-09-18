@@ -8,7 +8,7 @@
   <meta property="og:description" content="Manage your AI agent hives. View local and hosted hive instances, monitor status, upgrade, and control access.">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Hive Hub">
-  <!-- GA4 --><script async src="https://www.googletagmanager.com/gtag/js?id=G-4707R797K3"></script><script>window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments)  }gtag("js",new Date());gtag("config","G-4707R797K3");</script>
+  <!-- GA4 --><script async src="https://www.googletagmanager.com/gtag/js?id=G-4707R797K3"></script><script>window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments)}gtag("js",new Date());gtag("config","G-4707R797K3");</script>
   <title>My Hives — Hive Hub</title>
   <style>
     :root {
@@ -1453,6 +1453,8 @@
        install or reconfigure. */
     var GH_APP_STATE_KEY_MISSING = 'key-missing';
     var GH_APP_STATE_KEY_INVALID = 'key-invalid';
+    var GH_APP_STATE_REPO_NOT_COVERED = 'repo-not-covered';
+    var GH_APP_STATE_REPO_MOVED = 'repo-moved';
     var GH_APP_OPERATOR_STATES = {};
     GH_APP_OPERATOR_STATES[GH_APP_STATE_KEY_MISSING] = true;
     GH_APP_OPERATOR_STATES[GH_APP_STATE_KEY_INVALID] = true;
@@ -1470,6 +1472,8 @@
       var s = String(state || '').trim();
       if (s === 'wrong-installation') return 'wrong installation (installation_id points at another account)';
       if (s === 'write-forbidden') return 'write forbidden (repo not in the App installation)';
+      if (s === GH_APP_STATE_REPO_NOT_COVERED) return 'repo not covered (repo not ticked in the App installation)';
+      if (s === GH_APP_STATE_REPO_MOVED) return 'repo moved (hive config still points at the old account)';
       if (s === 'no-app-assigned') return 'no App assigned yet';
       return 'permissions insufficient';
     }
@@ -1761,6 +1765,7 @@
        apart on a typo'd string literal. */
     var HIVE_FILTER_APP_MISSING = 'app-missing';
     var HIVE_FILTER_NO_TOKENS = 'no-tokens';
+    var HIVE_FILTER_RESTART_STORMS = 'restart-storms';
     var HIVE_FILTER_DEGRADED = 'degraded';
     var HIVE_FILTER_OK = 'ok';
 
@@ -1780,6 +1785,7 @@
       h = h || {};
       var hp = h.health || {};
       var st = hp.status || 'unknown';
+      var tokenReason = tokenHealthReason(h);
       /* githubAppRequired means the spoke wants the App but it is not usable:
          with a perm issue it is installed-but-insufficient, without one it is
          not installed at all. healthBadge() forces "degraded" in both cases —
@@ -1787,16 +1793,43 @@
          pool's designed state (mirrored here so dot and chip never disagree). */
       var appMissing = !isPlaceholderHive(h) && !!h.githubAppRequired && !h.githubAppPermIssue;
       var repoTargetBad = !isPlaceholderHive(h) && !!h.repoTargetMisconfigured;
-      var degraded = repoTargetBad || (!isPlaceholderHive(h) && !!h.githubAppRequired) || st === 'degraded' || st === 'critical';
+      var restartStorms = !!((h.fleetRollup || {}).restartStorms);
+      var degraded = restartStorms || repoTargetBad || (!isPlaceholderHive(h) && !!h.githubAppRequired) || st === 'degraded' || st === 'critical';
       /* An offline hive has no live reading at all, so it is not "OK" even if
          its last stored health snapshot said ok. */
       var ok = !degraded && st === 'ok' && !!h.online;
       return {
         appMissing: appMissing,
         noTokens: (Number(h.totalTokens24h) || 0) <= NO_TOKENS_THRESHOLD,
+        restartStorms: restartStorms,
+        noTokensReason: tokenReason,
         degraded: degraded,
         ok: ok
       };
+    }
+
+    function tokenHealthReason(h) {
+      var checks = (((h || {}).health || {}).checks || []);
+      for (var i = 0; i < checks.length; i++) {
+        var ck = checks[i] || {};
+        if (ck.name === 'tokens' && ck.detail) return String(ck.detail);
+      }
+      return '';
+    }
+
+    function tokenUsageTitle(h) {
+      var reason = tokenHealthReason(h);
+      if ((Number((h || {}).totalTokens24h) || 0) <= NO_TOKENS_THRESHOLD && reason) {
+        return 'No tokens used: ' + reason;
+      }
+      return 'Cumulative tokens consumed, as of the last heartbeat';
+    }
+
+    function hiveStartedTime(h) {
+      var raw = h && h.startedAt;
+      if (typeof raw !== 'string' || !raw) return null;
+      var t = Date.parse(raw);
+      return isNaN(t) || t <= 0 ? null : t;
     }
 
     // uptimeCell renders process uptime for the Uptime column.
@@ -1814,8 +1847,10 @@
       var SETTLING_SECS = 3600;        // 1 hour
       var SHOW_SECONDS_BELOW = 90;     // finer granularity while very fresh
       var HOUR_SECS = 3600, DAY_SECS = 86400;
-      var secs = hiveStartedTime(h);
-      if (secs === null) return '<span style="color:var(--muted)">—</span>';
+      var startedMs = hiveStartedTime(h);
+      if (startedMs === null) return '<span style="color:var(--muted)">—</span>';
+      var secs = (Date.now() - startedMs) / 1000;
+      if (!isFinite(secs) || secs < 0) return '<span style="color:var(--muted)">—</span>';
       var label;
       if (secs < SHOW_SECONDS_BELOW) label = Math.round(secs) + 's';
       else if (secs < HOUR_SECS) label = Math.round(secs / 60) + 'm';
@@ -1827,14 +1862,6 @@
         ? 'Restarted recently — a short value that keeps resetting means the pod is restarting'
         : 'Process uptime since the last restart';
       return '<span title="' + esc(title) + '" style="font-size:0.72rem;color:' + c + ';cursor:help">' + esc(label) + '</span>';
-    }
-    function hiveStartedTime(h) {
-      if (!h || !h.startedAt) return null;
-      var started = new Date(h.startedAt).getTime();
-      if (!isFinite(started) || started < Date.parse('2000-01-01T00:00:00Z')) return null;
-      var secs = (Date.now() - started) / 1000;
-      if (!isFinite(secs) || secs < 0) return null;
-      return secs;
     }
     /* ---- Assignment / claim-pending counter --------------------------------
        When a placeholder is ASSIGNED but its spoke has never reported the
@@ -2089,6 +2116,31 @@
         'color:#f85149;background:rgba(248,81,73,0.12);border:1px solid rgba(248,81,73,0.35)">' +
         'inference auth</span>';
     }
+
+    function restartStormSummary(h) {
+      var agents = (h && h.agentVerdicts) || [];
+      var bad = agents.filter(function(a) { return a && a.restartProblem; });
+      if (!bad.length) return '';
+      var first = bad[0];
+      var title = bad.map(function(a) { return a.restartProblem; }).join('\n');
+      var count = ((first.restarts || {}).last_24h) || 0;
+      var label = 'agent restarts: ' + first.name + ' ×' + count + '/24h';
+      if (bad.length > 1) label = bad.length + ' restart storms';
+      var reset = roleAtLeast(h.role, 'owner')
+        ? ' <button type="button" class="reset-agent-restarts" data-hive-id="' + escAttr(h.id) + '" data-agent-name="' + escAttr(first.name) + '" style="margin-left:4px;padding:0 5px;border-radius:9999px;border:1px solid rgba(248,81,73,0.45);background:transparent;color:#f85149;font-size:0.6rem;cursor:pointer">reset</button>'
+        : '';
+      return '<span title="' + esc(title) + '" style="display:inline-block;margin-left:6px;padding:0 6px;' +
+        'border-radius:9999px;font-size:0.62rem;font-weight:600;line-height:1.5;cursor:help;white-space:nowrap;' +
+        'color:#f85149;background:rgba(248,81,73,0.12);border:1px solid rgba(248,81,73,0.35)">' +
+        esc(label) + reset + '</span>';
+    }
+    document.addEventListener('click', function(e) {
+      var btn = e.target && e.target.closest && e.target.closest('.reset-agent-restarts');
+      if (!btn) return;
+      e.preventDefault();
+      e.stopPropagation();
+      resetAgentRestarts(btn.getAttribute('data-hive-id') || '', btn.getAttribute('data-agent-name') || '');
+    });
 
     /* ---- ClankeR, the contributor relay (hover panel) ------------------
        The relay is a first-class SUBSTITUTE for assigning a method/model:
@@ -2435,8 +2487,10 @@
       'upgrading':       'Upgrading',
       'acmm-unset':      'ACMM level unset',
       'no-agents':       'No agents running',
+      'agent-restart-storm': 'Agent restart storms',
       'duplicate-spoke': 'Duplicate spoke instances',
-      'status-flipping': 'Status flipping'
+      'status-flipping': 'Status flipping',
+      'version-absent':  'Heartbeat without a version'
     };
 
     function driftKindLabel(kind) { return DRIFT_KIND_LABELS[kind] || kind || 'Unknown'; }
@@ -2546,8 +2600,8 @@
       var base = '';
       if (h.dashboardUrl && !h.dashboardUrl.includes('localhost')) {
         base = esc(h.dashboardUrl);
-      } else if (isHosted) {
-        base = _hubSpokeDomain ? 'https://' + esc(h.id) + '.' + esc(_hubSpokeDomain) : '';
+      } else if (isHosted && _hubSpokeDomain) {
+        base = 'https://' + esc(h.id) + '.' + esc(_hubSpokeDomain);
       }
       if (!base) return '';
       return '<a href="' + base + '/api/docs" target="_blank" style="padding:3px 10px;background:rgba(88,166,255,0.15);color:#58a6ff;border:1px solid rgba(88,166,255,0.3);border-radius:4px;font-size:0.7rem;text-decoration:none;white-space:nowrap">API ↗</a>';
@@ -2704,7 +2758,6 @@
     var _currentUser = '';
     var _latestSHA = '';
     var _stableV4SHA = '';
-    var _hubSpokeDomain = '';
     /* Name of the branch _stableV4SHA is the tip of; the server's
        stable_v4_sha is that branch's HEAD, not the :stable channel. */
     var STABLE_BRANCH_LABEL = 'v4';
@@ -2714,6 +2767,7 @@
     /* branch -> unix-millis when the currently-building image started building,
        from the hub (getImageBuildStartTimes). Drives the elapsed build timer. */
     var _latestBuildStarted = {};
+    var _latestBuildURLs = {};
 
     /* Format elapsed build time from an epoch-ms start as "Mm Ss" (or "Ss" under
        a minute). Clamps negatives (clock skew) to 0. */
@@ -2745,6 +2799,12 @@
        the UI must render that honestly rather than guessing a branch. */
     var _releaseChannels = [];
     var _channelTargets = [];
+    /* Parent domain for hosted-tenant URLs, from the server (hub_spoke_domain).
+       Empty until the first payload lands, and the link builders below treat
+       empty as "cannot build a URL" rather than falling back to a literal:
+       a wrong host here is not a cosmetic defect, it sends a tenant to a name
+       the fleet wildcard does not cover and the browser refuses the TLS. */
+    var _hubSpokeDomain = '';
     /* Width of the channel-name pill in the "channel -> image" block. Fixed so
        the three arrows line up in a column; sized for the longest channel name
        ("candidate") at 0.6rem. */
@@ -2830,7 +2890,8 @@
        until the poll landed.
        v5: rows carry the fleet-divergence view (fleetRollup + agentVerdicts:
        expected/actual/able per agent); a v4 cache would omit the new per-agent
-       drill-down until the first poll landed. */
+       drill-down until the first poll landed.
+       v6: agent verdicts carry restart-storm telemetry and reset markers. */
     var HIVES_CACHE_VERSION = 6;
     /* 10 minutes: long enough to cover a reload or a tab restore, short enough
        that a cached fleet is never wildly out of date before the poll lands. */
@@ -2839,6 +2900,7 @@
        paint are stored, but a huge fleet could still overflow the ~5 MB quota
        and make every write fail. */
     var HIVES_CACHE_MAX_ROWS = 200;
+    var _expandedPendingRows = new Set();
 
     function readHivesCache() {
       try {
@@ -2910,6 +2972,7 @@
     var HIVE_FILTER_CHIPS = [
       {key: HIVE_FILTER_APP_MISSING, label: 'GitHub App not installed', color: '#f85149'},
       {key: HIVE_FILTER_NO_TOKENS, label: 'No tokens used', color: '#6b7280'},
+      {key: HIVE_FILTER_RESTART_STORMS, label: 'Restart storms', color: '#f85149'},
       {key: HIVE_FILTER_DEGRADED, label: 'Degraded', color: '#f85149'},
       {key: HIVE_FILTER_OK, label: 'OK', color: '#3fb950'}
     ];
@@ -3565,8 +3628,6 @@
     }
 
     /* onSavedViewPick handles the picker's change event: '' means "no view". */
-    var _expandedPendingRows = new Set();
-
     function onSavedViewPick(name) {
       if (!name) { _dashActiveView = ''; renderHives(_allDashHives, true); return; }
       applySavedView(name);
@@ -3644,6 +3705,7 @@
       var byKey = {};
       byKey[HIVE_FILTER_APP_MISSING] = f.appMissing;
       byKey[HIVE_FILTER_NO_TOKENS] = f.noTokens;
+      byKey[HIVE_FILTER_RESTART_STORMS] = f.restartStorms;
       byKey[HIVE_FILTER_DEGRADED] = f.degraded;
       byKey[HIVE_FILTER_OK] = f.ok;
       for (var i = 0; i < active.length; i++) {
@@ -3933,7 +3995,6 @@
         ['online', 'Online', '', true],
         ['offline', 'Offline', 'warn', true],
         ['pool_available', 'Pool', '', false],
-        ['assigned_unclaimed', 'Unclaimed', 'warn', false],
         ['provisioning', 'Provisioning', '', false],
         ['upgrading', 'Upgrading', '', false],
         ['upgrade_failed', 'Upgrade failed', 'bad', false],
@@ -4482,12 +4543,14 @@
       var counts = {};
       counts[HIVE_FILTER_APP_MISSING] = 0;
       counts[HIVE_FILTER_NO_TOKENS] = 0;
+      counts[HIVE_FILTER_RESTART_STORMS] = 0;
       counts[HIVE_FILTER_DEGRADED] = 0;
       counts[HIVE_FILTER_OK] = 0;
       (assignedNoPlaceholders || []).forEach(function(h) {
         var f = hiveStatusFlags(h);
         if (f.appMissing) counts[HIVE_FILTER_APP_MISSING]++;
         if (f.noTokens) counts[HIVE_FILTER_NO_TOKENS]++;
+        if (f.restartStorms) counts[HIVE_FILTER_RESTART_STORMS]++;
         if (f.degraded) counts[HIVE_FILTER_DEGRADED]++;
         if (f.ok) counts[HIVE_FILTER_OK]++;
       });
@@ -5019,6 +5082,14 @@
           if (rb2 === null) return -1;
           return _dashSortAsc ? ra - rb2 : rb2 - ra;
         }
+        if (key === 'startedAt') {
+          var sa = hiveStartedTime(a);
+          var sb = hiveStartedTime(b);
+          if (sa === null && sb === null) return 0;
+          if (sa === null) return 1;
+          if (sb === null) return -1;
+          return _dashSortAsc ? sa - sb : sb - sa;
+        }
         if (key === 'quadrant' || key.indexOf('quadrant') === 0) {
           /* Quadrant sorts rank by composite or by one axis. A hive with no
              quadrant — unscored, or one the viewer may not see — sorts LAST in
@@ -5549,7 +5620,6 @@
         var data = await resp.json();
         _userQuota = data.saas_quota || 0;
         _userUsed = data.saas_used || 0;
-        if (data.hub_spoke_domain) _hubSpokeDomain = data.hub_spoke_domain;
         _allDashHives = data.hives || [];
         _hiveRegistry = data.hives || [];
         /* The fleet reference polygon behind every kite. Captured here rather
@@ -5573,9 +5643,11 @@
         if (data.tracked_branches) _trackedBranchesList = data.tracked_branches;
         if (data.release_channels) _releaseChannels = data.release_channels;
         if (data.channel_targets) _channelTargets = data.channel_targets;
+        if (data.hub_spoke_domain) _hubSpokeDomain = data.hub_spoke_domain;
         if (data.latest_sha_messages) _latestSHAMessages = data.latest_sha_messages;
         if (data.latest_sha_image_status) _latestImageStatus = data.latest_sha_image_status;
         _latestBuildStarted = data.latest_sha_build_started || {};
+        _latestBuildURLs = data.latest_sha_build_url || {};
         if (data.commit_messages) _commitMessages = data.commit_messages;
         if (data.hub_auto_upgrade !== undefined) _hubAutoUpgrade = data.hub_auto_upgrade;
         if (data.upgrade_pause) _upgradePause = data.upgrade_pause;
@@ -5600,7 +5672,15 @@
                   : '';
                 brStatusHTML = '<span style="display:inline-block;flex:none;width:10px;height:10px;border:2px solid rgba(255,255,255,0.2);border-top-color:var(--accent);border-radius:50%;animation:spin 1s linear infinite" title="Container image for this commit is still building"></span><span style="font-size:0.65rem;color:var(--muted);opacity:0.7;white-space:nowrap">building image…</span>' + _timerHTML;
               } else if (brStatus === 'failed') {
-                brStatusHTML = '<span style="color:var(--red);font-size:0.7rem;cursor:help" title="Image build failed for this commit — upgrades keep using the previous image">✗</span>';
+                var _bURL = _latestBuildURLs[br] || '';
+                var _failText = '<span style="color:var(--red);font-size:0.65rem;white-space:nowrap">build failed</span>';
+                if (_bURL) _failText = '<a href="' + escAttr(_bURL) + '" target="_blank" rel="noopener" style="color:var(--red);font-size:0.65rem;white-space:nowrap;text-decoration:none" title="Open failed Docker workflow run">build failed</a>';
+                brStatusHTML = '<span style="color:var(--red);font-size:0.7rem;cursor:help" title="Image build failed for this commit — upgrades keep using the previous image">✗</span>' + _failText;
+              } else if (brStatus === 'stale') {
+                var _staleURL = _latestBuildURLs[br] || '';
+                var _staleText = '<span style="color:var(--orange,#f59e0b);font-size:0.65rem;white-space:nowrap">build stale/unknown</span>';
+                if (_staleURL) _staleText = '<a href="' + escAttr(_staleURL) + '" target="_blank" rel="noopener" style="color:var(--orange,#f59e0b);font-size:0.65rem;white-space:nowrap;text-decoration:none" title="Open Docker workflow run">build stale/unknown</a>';
+                brStatusHTML = '<span style="color:var(--orange,#f59e0b);font-size:0.7rem;cursor:help" title="Image is still unavailable after the configured build window">!</span>' + _staleText;
               }
               lines += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:2px"><span style="display:inline-block;padding:1px 6px;border-radius:9999px;font-size:0.6rem;background:rgba(59,130,246,0.15);color:#60a5fa;border:1px solid rgba(59,130,246,0.3)">' + esc(br) + '</span><span style="font-family:monospace;color:var(--muted)">' + esc(_latestSHAs[br]) + '</span>' + (brMsg ? '<span style="font-size:0.7rem;color:var(--muted);opacity:0.7">: ' + esc(brMsg) + '</span>' : '') + brStatusHTML +
                 /* Per-line pulls mini chart: a .line-pulls span each
@@ -5643,7 +5723,37 @@
             } else {
               ctTarget = '<span style="color:var(--muted);opacity:0.7;font-size:0.7rem" title="Channel tag could not be resolved on GHCR">unknown</span>';
             }
-            chLines += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:2px"><span style="display:inline-block;min-width:' + CHANNEL_NAME_MIN_W_PX + 'px;padding:1px 6px;border-radius:9999px;font-size:0.6rem;background:rgba(34,197,94,0.15);color:#4ade80;border:1px solid rgba(34,197,94,0.3);text-align:center" title="Release channel — a moving tag that follows whichever build is currently promoted to this track">' + esc(ct.channel) + '</span><span style="color:var(--muted);opacity:0.6;font-size:0.7rem">-&gt;</span>' + ctTarget + '</div>';
+            /* Distance to the channel one stage upstream in the promotion
+               order (server-computed; see channel_distance.go). Absent whenever
+               it could not be resolved, so a row never implies the tracks are
+               level when we simply do not know. Diverged shows BOTH counts —
+               collapsing them into one direction would misreport the branch
+               pairs these channels actually track. */
+            var ctDist = '';
+            if (ct.compare_to && ct.compare_status) {
+              var dBits = [];
+              if (ct.behind) dBits.push('<span style="color:#fbbf24">&darr;' + ct.behind + '</span>');
+              if (ct.ahead) dBits.push('<span style="color:#60a5fa">&uarr;' + ct.ahead + '</span>');
+              var dTitle;
+              if (ct.compare_status === 'identical') {
+                dTitle = 'Same commit as ' + ct.compare_to;
+              } else if (ct.compare_status === 'diverged') {
+                dTitle = 'Diverged from ' + ct.compare_to + ': ' + ct.behind +
+                  ' commit(s) on ' + ct.compare_to + ' not here, ' + ct.ahead + ' here not on ' + ct.compare_to;
+              } else {
+                dTitle = (ct.behind ? ct.behind + ' commit(s) behind ' : '') +
+                  (ct.ahead ? ct.ahead + ' commit(s) ahead of ' : '') + ct.compare_to;
+              }
+              if (!dBits.length) {
+                /* identical, or a status with no counts: say so in words
+                   rather than rendering an empty pair of arrows. */
+                ctDist = '<span style="font-size:0.6rem;color:var(--muted);opacity:0.7" title="' + escAttr(dTitle) + '">in sync with ' + esc(ct.compare_to) + '</span>';
+              } else {
+                ctDist = '<span style="font-size:0.6rem;font-family:monospace;display:inline-flex;gap:4px" title="' + escAttr(dTitle) + '">' + dBits.join('') +
+                  '<span style="color:var(--muted);opacity:0.6;font-family:inherit">vs ' + esc(ct.compare_to) + '</span></span>';
+              }
+            }
+            chLines += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:2px"><span style="display:inline-block;min-width:' + CHANNEL_NAME_MIN_W_PX + 'px;padding:1px 6px;border-radius:9999px;font-size:0.6rem;background:rgba(34,197,94,0.15);color:#4ade80;border:1px solid rgba(34,197,94,0.3);text-align:center" title="Release channel — a moving tag that follows whichever build is currently promoted to this track">' + esc(ct.channel) + '</span><span style="color:var(--muted);opacity:0.6;font-size:0.7rem">-&gt;</span>' + ctTarget + ctDist + '</div>';
           }
           if (chLines) {
             chLines = '<div style="font-size:0.7rem;color:var(--muted);margin-bottom:2px">Release channels:</div>' + chLines +
@@ -6594,11 +6704,6 @@
            the heartbeat is the only channel, and a restart sheds the stale
            instance while costing the healthy one a single rolling restart. */
         if (_isAdmin && isHosted) menuItems.push('<div onclick="restartHiveSpoke(\'' + esc(h.id) + '\',\'' + esc(h.name || h.id) + '\')" style="' + mi + '">Restart Spoke</div>');
-        /* Digest pin (#6290): the sanctioned rollback. Owner-only and
-           hosted-only, matching the endpoint's own guard. One of the two
-           items shows depending on the run-state, never both. */
-        if (isHosted && h.role === 'owner' && !h.digestPin) menuItems.push('<div onclick="pinHiveDigest(\'' + esc(h.id) + '\',\'' + esc(h.name || h.id) + '\')" style="' + mi + '" title="Hold this hive at one immutable image digest (rollback). Channel tracking and auto-upgrade stop until it is unpinned.">Pin to digest\u2026</div>');
-        if (isHosted && h.role === 'owner' && h.digestPin) menuItems.push('<div onclick="unpinHiveDigest(\'' + esc(h.id) + '\',\'' + esc(h.name || h.id) + '\')" style="' + mi + ';color:#d29922">Unpin digest</div>');
         if (isLocal && h.role === 'owner') menuItems.push('<div onclick="removeLocalHive(\'' + esc(h.id) + '\')" style="' + mi + '">Remove</div>');
         if (isHosted && h.role === 'owner') menuItems.push('<div style="border-top:1px solid #30363d;margin:4px 0"></div><div onclick="deleteHive(\'' + esc(h.id) + '\')" style="' + mi + ';color:#f85149">Delete</div>');
         var sha = h.gitHash || '';
@@ -6643,12 +6748,8 @@
              below the branches, because picking a channel is a different KIND
              of choice (track a promotion policy vs. track a git branch) and
              mixing them into one flat list hides that. */
-          /* A digest-pinned hive has no picker: the switch endpoint refuses
-             with 409 while the pin holds, and offering the menu would invite
-             the exact click it refuses. The PINNED pill beside the version
-             carries the provenance and the unpin action instead. */
           var canSwitchBranch = isHosted && h.role === 'owner' &&
-            (_trackedBranches.length > 1 || _releaseChannels.length > 0) && !h.upgrading && !h.digestPin;
+            (_trackedBranches.length > 1 || _releaseChannels.length > 0) && !h.upgrading;
           var branchOptions = '';
           if (canSwitchBranch) {
             for (var bi = 0; bi < _trackedBranches.length; bi++) {
@@ -6697,30 +6798,6 @@
           var branch = canSwitchBranch
             ? '<span id="branch-pill-' + esc(h.id) + '" style="display:inline-block;position:relative;padding:1px 6px;border-radius:9999px;font-size:0.6rem;background:rgba(59,130,246,0.15);color:#60a5fa;border:1px solid rgba(59,130,246,0.3);cursor:pointer" onclick="toggleBranchMenu(\'' + esc(h.id) + '\')" title="Click to switch branch">' + esc(versionLabel(versionSel)) + ' ▾<div id="branch-menu-' + esc(h.id) + '" style="display:none;position:absolute;top:100%;left:0;margin-top:4px;background:#1c2128;border:1px solid #30363d;border-radius:6px;padding:4px 0;z-index:1000;min-width:60px;box-shadow:0 4px 12px rgba(0,0,0,0.4)">' + branchOptions + '</div></span>'
             : '<span style="display:inline-block;padding:1px 6px;border-radius:9999px;font-size:0.6rem;background:rgba(59,130,246,0.15);color:#60a5fa;border:1px solid rgba(59,130,246,0.3)">' + esc(versionLabel(versionSel)) + '</span>';
-          /* PINNED pill (#6290), the image-side twin of the repo PAUSED pill:
-             a run-state with provenance, rendered from the hub-owned record
-             (SaaSHive.DigestPin) so it survives heartbeats and hub restarts.
-             The hover carries who/when/why and the full digest; the label
-             prefers the short SHA the operator pinned by. "landed" compares
-             the spoke's REPORTED image against the pin, because the pill must
-             not claim a rollback the pod has not yet pulled. Owners click it
-             to lift the pin; everyone else just reads it. */
-          if (h.digestPin && h.digestPin.digest) {
-            var dp = h.digestPin;
-            var pinLabel = dp.source_sha ? dp.source_sha : dp.digest.replace(/^sha256:/, '').slice(0, 12);
-            var reportedDigest = (h.imageRef || '').indexOf('@') >= 0 ? (h.imageRef || '').split('@').pop() : '';
-            var pinLanded = reportedDigest === dp.digest;
-            var pinTitle = 'Pinned to ' + dp.digest + (dp.by ? ' by ' + dp.by : '') + (dp.at ? ' at ' + dp.at : '') +
-              (dp.reason ? '\n' + dp.reason : '') +
-              (pinLanded ? '\nThe spoke reports running this digest.' : '\nWaiting for the spoke to report this digest.') +
-              '\nChannel tracking and auto-upgrade are held until the pin is lifted.' +
-              (h.role === 'owner' ? '\nClick to unpin.' : '');
-            var pinStyle = 'display:inline-block;margin-left:4px;padding:1px 6px;border-radius:9999px;font-size:0.6rem;font-weight:600;letter-spacing:0.04em;white-space:nowrap;background:rgba(210,153,34,0.16);color:var(--yellow);border:1px solid rgba(210,153,34,0.45)' +
-              (h.role === 'owner' ? ';cursor:pointer' : '');
-            branch += '<span style="' + pinStyle + '" title="' + escAttr(pinTitle) + '"' +
-              (h.role === 'owner' ? ' onclick="event.stopPropagation();unpinHiveDigest(\'' + esc(h.id) + '\',\'' + esc(h.name || h.id) + '\')"' : '') +
-              '>PINNED ' + esc(pinLabel) + (pinLanded ? '' : ' \u23F3') + '</span>';
-          }
           var latestUnknown = !branchLatest;
           var isCurrent = branchLatest && sameShaJS(sha, branchLatest);
           /* Branch switch in flight: the hive still reports the OLD branch
@@ -7027,7 +7104,7 @@
         return '<tr id="' + escAttr(hiveRowDomId(h.id)) + '"' + ((i % 2 === 1) ? ' class="hive-row-alt"' : '') + '>' +
           bulkCheckboxCell(h, section || 'all') +
           '<td class="hive-menu-cell" style="position:relative;width:30px;text-align:center;overflow:visible">' + ('<span style="cursor:pointer;font-size:1.1rem;color:var(--muted);user-select:none">⋮</span>' + pendingBadge + '<div class="hive-menu-dropdown" style="display:none;position:absolute;left:0;bottom:auto;background:#1c2128;border:1px solid #30363d;border-radius:8px;min-width:160px;padding:4px 0;z-index:1000;box-shadow:0 8px 24px rgba(0,0,0,0.5)">' + menuItems.join('') + '</div>') + '</td>' +
-          '<td style="text-align:left;line-height:1.4">' + (function() { var isHostedRow = h.hiveType === 'hosted' || (h.id && (h.id.startsWith('hosted-') || h.id.startsWith('saas-'))); var dh = isHostedRow && h.id ? ('/api/saas/hives/' + encodeURIComponent(h.id) + '/open') : (rb ? esc(rb) : ''); /* Label derived from the PROJECT (org + primary repo), not by splitting h.name — see hiveLabel. */ var label = hiveLabel(h); var orgName = label.line1; var repoName = label.line2; /* rp is the repo path shown in the GitHub-icon tooltip; use the same doubling-safe path the label shows (repoDisplayLine / hiveLabel), never org + '/' + primaryRepo which doubles the owner on a github.io/GHE hive whose primaryRepo is already 'owner/repo'. */ var rp = repoName || ''; /* The icon href must resolve to a real GitHub path. When primaryRepo already carries 'owner/repo', that pair IS the owner/repo the URL needs (not org, which may be a mis-parsed host); otherwise fall back to org + primaryRepo. */ var hasRepoPath = h.primaryRepo && h.primaryRepo.indexOf('/') !== -1; var rpOwner = hasRepoPath ? h.primaryRepo.split('/')[0] : h.org; var rpName = hasRepoPath ? h.primaryRepo.split('/').slice(1).join('/') : h.primaryRepo; var rpHref = ghRepoURL(hiveForgeHost(h), rpOwner, rpName); var ghIcon = (rp && rpHref) ? '<a href="' + rpHref + '" target="_blank" style="opacity:0.5;vertical-align:middle" title="' + esc(rp) + '"><svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:middle"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg></a>' : (rp ? '<span style="opacity:0.5;vertical-align:middle" title="' + esc(rp) + '"><svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:middle"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg></span>' : ''); /* vanityDisplay is the friendly host shown in the status bar on hover. rb is resolvedBase(h), which the hub has already overlaid with the claimed vanity_url; it is only a DISPLAY url here, never the click target — see ssoDisplayLink. Empty for a row with no vanity host, which falls back to today's /open href. Only meaningful on hosted rows: a non-hosted row's dh IS rb already. */ var vanityDisplay = isHostedRow && rb ? rb : ''; var link = function(text, bold) { if (dh) { return ssoDisplayLink(dh, vanityDisplay, text, bold ? 'hive-name-link' : 'hive-sub-link'); } var s = bold ? 'font-weight:700;color:inherit' : 'color:#6b7280;font-weight:400'; return '<span style="' + s + '">' + esc(text) + '</span>'; }; /* repoLink wraps the second line (the org/repo) in a link to the ACTUAL FORGE REPO (github.com / GHE host), NOT the spoke dashboard: the top line already opens the dashboard, so the repo path should take an operator to the code. rpHref is the same doubling-safe forge URL the GitHub icon uses (ghRepoURL(hiveForgeHost(h), rpOwner, rpName)); when it is empty (BYO/mis-parsed host) fall back to plain non-link text, never to the dashboard. */ var repoLink = function(text) { if (rpHref) { return '<a href="' + rpHref + '" target="_blank" rel="noopener" class="hive-sub-link" title="Open repository on ' + escAttr((hiveForgeHost(h) || 'github.com')) + '">' + esc(text) + '</a>'; } return '<span style="color:#6b7280;font-weight:400">' + esc(text) + '</span>'; }; var line1 = dot + ' ' + link(orgName, true) + heartbeatHeart(h) + nameEditAffordance(h); var fcPill = h.online ? failingCheckSummary(h) : ''; /* Advisory-staleness pill sits right beside the failing-check pill: both are "something is quietly wrong with this working hive" signals, and advisoryStaleSummary already self-suppresses (empty string) unless the hub flagged the digest stale, so unaffected rows are pixel-identical. */ var advPill = h.online ? advisoryStaleSummary(h) : ''; /* Advisory finding-count pill rides beside the staleness pill and carries the "(top N)" marker when the spoke capped its digest. */ var advCountPill = h.online ? advisoryFindingsSummary(h) : ''; /* Dead-link pill is deliberately NOT gated on h.online: the entire point is a hive that IS online and heartbeating while its public URL is broken, so gating it the way the other pills are gated would hide exactly the case it exists to surface. */ var dlPill = deadLinkSummary(h); var privatePill = privateURLSummary(h); /* Inference-auth pill: like the dead-link pill it is NOT gated on h.online, because the hive being online while every inference call 401s is exactly the case it surfaces. */ var iaPill = inferenceAuthSummary(h); /* Inline access faces sit on the name cell's second line, immediately after this row's own role badge: the badge already answers "what am I on this hive", so the co-members read as the natural continuation of the same thought, in the one cell that is left-aligned and has room to grow. It also keeps them out of the 16 dense metric columns, none of which is about people. Empty string when the viewer is the only member, so those rows are pixel-identical to today. */ var accessFaces = hiveAccessAvatars(h); /* Keyed off repoName, not orgName: line 1 now always carries SOME identity, so the presence of a second line is decided purely by whether there is a repo to put on it. Without a repo the row still shows the GitHub icon, role badge, faces and failing-check pill on the compact variant. */ var line2 = repoName ? '<div style="padding-left:18px;font-size:0.8rem">' + repoLink(repoName) + ' ' + ghIcon + ' ' + roleBadge(h.role) + accessFaces + fcPill + advPill + advCountPill + dlPill + privatePill + iaPill + '</div>' : '<div style="padding-left:18px">' + ghIcon + ' ' + roleBadge(h.role) + accessFaces + fcPill + advPill + advCountPill + dlPill + privatePill + iaPill + '</div>'; var line3 = pendingPill ? '<div style="margin-top:4px;padding-left:18px">' + pendingPill + '</div>' : ''; return line1 + line2 + line3; })() + '</td>' +
+          '<td style="text-align:left;line-height:1.4">' + (function() { var isHostedRow = h.hiveType === 'hosted' || (h.id && (h.id.startsWith('hosted-') || h.id.startsWith('saas-'))); var dh = isHostedRow && h.id ? ('/api/saas/hives/' + encodeURIComponent(h.id) + '/open') : (rb ? esc(rb) : ''); /* Label derived from the PROJECT (org + primary repo), not by splitting h.name — see hiveLabel. */ var label = hiveLabel(h); var orgName = label.line1; var repoName = label.line2; /* rp is the repo path shown in the GitHub-icon tooltip; use the same doubling-safe path the label shows (repoDisplayLine / hiveLabel), never org + '/' + primaryRepo which doubles the owner on a github.io/GHE hive whose primaryRepo is already 'owner/repo'. */ var rp = repoName || ''; /* The icon href must resolve to a real GitHub path. When primaryRepo already carries 'owner/repo', that pair IS the owner/repo the URL needs (not org, which may be a mis-parsed host); otherwise fall back to org + primaryRepo. */ var hasRepoPath = h.primaryRepo && h.primaryRepo.indexOf('/') !== -1; var rpOwner = hasRepoPath ? h.primaryRepo.split('/')[0] : h.org; var rpName = hasRepoPath ? h.primaryRepo.split('/').slice(1).join('/') : h.primaryRepo; var rpHref = ghRepoURL(hiveForgeHost(h), rpOwner, rpName); var ghIcon = (rp && rpHref) ? '<a href="' + rpHref + '" target="_blank" style="opacity:0.5;vertical-align:middle" title="' + esc(rp) + '"><svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:middle"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg></a>' : (rp ? '<span style="opacity:0.5;vertical-align:middle" title="' + esc(rp) + '"><svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:middle"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg></span>' : ''); /* vanityDisplay is the friendly host shown in the status bar on hover. rb is resolvedBase(h), which the hub has already overlaid with the claimed vanity_url; it is only a DISPLAY url here, never the click target — see ssoDisplayLink. Empty for a row with no vanity host, which falls back to today's /open href. Only meaningful on hosted rows: a non-hosted row's dh IS rb already. */ var vanityDisplay = isHostedRow && rb ? rb : ''; var link = function(text, bold) { if (dh) { return ssoDisplayLink(dh, vanityDisplay, text, bold ? 'hive-name-link' : 'hive-sub-link'); } var s = bold ? 'font-weight:700;color:inherit' : 'color:#6b7280;font-weight:400'; return '<span style="' + s + '">' + esc(text) + '</span>'; }; /* repoLink wraps the second line (the org/repo) in a link to the ACTUAL FORGE REPO (github.com / GHE host), NOT the spoke dashboard: the top line already opens the dashboard, so the repo path should take an operator to the code. rpHref is the same doubling-safe forge URL the GitHub icon uses (ghRepoURL(hiveForgeHost(h), rpOwner, rpName)); when it is empty (BYO/mis-parsed host) fall back to plain non-link text, never to the dashboard. */ var repoLink = function(text) { if (rpHref) { return '<a href="' + rpHref + '" target="_blank" rel="noopener" class="hive-sub-link" title="Open repository on ' + escAttr((hiveForgeHost(h) || 'github.com')) + '">' + esc(text) + '</a>'; } return '<span style="color:#6b7280;font-weight:400">' + esc(text) + '</span>'; }; var line1 = dot + ' ' + link(orgName, true) + heartbeatHeart(h) + nameEditAffordance(h); var fcPill = h.online ? failingCheckSummary(h) : ''; /* Advisory-staleness pill sits right beside the failing-check pill: both are "something is quietly wrong with this working hive" signals, and advisoryStaleSummary already self-suppresses (empty string) unless the hub flagged the digest stale, so unaffected rows are pixel-identical. */ var advPill = h.online ? advisoryStaleSummary(h) : ''; /* Advisory finding-count pill rides beside the staleness pill and carries the "(top N)" marker when the spoke capped its digest. */ var advCountPill = h.online ? advisoryFindingsSummary(h) : ''; /* Dead-link pill is deliberately NOT gated on h.online: the entire point is a hive that IS online and heartbeating while its public URL is broken, so gating it the way the other pills are gated would hide exactly the case it exists to surface. */ var dlPill = deadLinkSummary(h); var privatePill = privateURLSummary(h); /* Inference-auth pill: like the dead-link pill it is NOT gated on h.online, because the hive being online while every inference call 401s is exactly the case it surfaces. */ var iaPill = inferenceAuthSummary(h); var rsPill = restartStormSummary(h); /* Inline access faces sit on the name cell's second line, immediately after this row's own role badge: the badge already answers "what am I on this hive", so the co-members read as the natural continuation of the same thought, in the one cell that is left-aligned and has room to grow. It also keeps them out of the 16 dense metric columns, none of which is about people. Empty string when the viewer is the only member, so those rows are pixel-identical to today. */ var accessFaces = hiveAccessAvatars(h); /* Keyed off repoName, not orgName: line 1 now always carries SOME identity, so the presence of a second line is decided purely by whether there is a repo to put on it. Without a repo the row still shows the GitHub icon, role badge, faces and failing-check pill on the compact variant. */ var line2 = repoName ? '<div style="padding-left:18px;font-size:0.8rem">' + repoLink(repoName) + ' ' + ghIcon + ' ' + roleBadge(h.role) + accessFaces + fcPill + advPill + advCountPill + dlPill + privatePill + iaPill + rsPill + '</div>' : '<div style="padding-left:18px">' + ghIcon + ' ' + roleBadge(h.role) + accessFaces + fcPill + advPill + advCountPill + dlPill + privatePill + iaPill + rsPill + '</div>'; var line3 = pendingPill ? '<div style="margin-top:4px;padding-left:18px">' + pendingPill + '</div>' : ''; return line1 + line2 + line3; })() + '</td>' +
           '<td>' + locationCell + '</td>' +
           '<td style="white-space:nowrap">' + uptimeCell(h) + '</td>' +
           /* No white-space:nowrap on the cell itself: the stacked lines each
@@ -7066,7 +7143,7 @@
             '</div>' +
           '</td>' +
           '<td title="' + esc((h.agents || []).map(function(a){ var label = a.name + ' (' + a.state + ')'; if (a.mode === 'on_demand') label += ' — on demand'; if (a.paused) label += ' — ' + agentPauseProvenance(a); return label; }).join('\n')) + '" style="cursor:' + ((h.agentCount || 0) > 0 ? 'help' : 'default') + '">' + (h.agentCount || 0) + '</td>' +
-          '<td title="Cumulative tokens consumed, as of the last heartbeat" style="white-space:nowrap;cursor:help">' + fmtTokens(h.totalTokens24h || 0) + '</td>' +
+          '<td title="' + escAttr(tokenUsageTitle(h)) + '" style="white-space:nowrap;cursor:help">' + fmtTokens(h.totalTokens24h || 0) + '</td>' +
           '<td>' + modeCell + '</td>' +
           /* ACTIVITY: Issues, PRs and Contributors — three mini-stats that were
              three columns — stacked densely into ONE cell. Every number and both
@@ -7376,46 +7453,6 @@
         if (!resp.ok) { hiveToast(data.error || 'Failed', 'error'); loadHives(); return; }
         hiveToast(id + ' auto-upgrade ' + (enabled ? 'enabled' : 'disabled'), 'success');
       } catch(e) { hiveToast('Error: ' + e.message, 'error'); loadHives(); }
-    }
-
-    /* Digest pin / unpin (#6290). The prompt takes either a short git SHA
-       (the value the Version column shows) or a full sha256 digest; the hub
-       resolves a SHA to the manifest digest itself. The reason is recorded
-       on the pin and the timeline so a PINNED pill days later explains
-       itself. */
-    async function pinHiveDigest(id, name) {
-      /* hivePrompt resolves to the trimmed value, or null on cancel/Escape. */
-      var target = await hivePrompt('Pin ' + name + ' to which build? Enter a short git SHA (e.g. abc1234) or a sha256: digest. Channel tracking and auto-upgrade stop until the pin is lifted.', '', {ok: 'Next'});
-      if (target === null) return;
-      if (!target) { hiveToast('A SHA or digest is required', 'error'); return; }
-      var reason = await hivePrompt('Reason for pinning ' + name + ' (recorded on the hive)', 'rollback', {ok: 'Pin'});
-      if (reason === null) return;
-      var body = target.indexOf('sha256:') === 0 || target.length === 64 ? {digest: target, reason: reason.trim()} : {sha: target, reason: reason.trim()};
-      try {
-        var resp = await fetch('/api/saas/hives/' + encodeURIComponent(id) + '/pin-digest', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify(body)
-        });
-        var data = await resp.json();
-        if (!resp.ok) { hiveToast(data.error || 'Pin failed', 'error'); return; }
-        hiveToast(name + ' pinned to ' + (data.pin && data.pin.digest ? data.pin.digest.slice(0, 19) : target), 'success');
-        loadHives();
-      } catch(e) { hiveToast('Error: ' + e.message, 'error'); }
-    }
-    async function unpinHiveDigest(id, name) {
-      if (!await hiveConfirm('Unpin ' + name + '? The hive returns to its channel or branch tag and resumes upgrades.')) return;
-      try {
-        var resp = await fetch('/api/saas/hives/' + encodeURIComponent(id) + '/unpin-digest', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({})
-        });
-        var data = await resp.json();
-        if (!resp.ok) { hiveToast(data.error || 'Unpin failed', 'error'); return; }
-        hiveToast(name + ' unpinned' + (data.restore_tag ? ', returning to ' + data.restore_tag : ''), 'success');
-        loadHives();
-      } catch(e) { hiveToast('Error: ' + e.message, 'error'); }
     }
 
     var _hubUpgrading = false;
@@ -7860,6 +7897,20 @@
         await hiveNotify('Forge App reset armed',
           'Hive: ' + hiveName + '\n' +
           'The spoke clears its installation on the next heartbeat (about 30 seconds), then shows the install prompt.');
+        if (typeof loadHives === 'function') loadHives();
+      } catch (e) {
+        await hiveNotify('Reset failed', String(e));
+      }
+    }
+
+    async function resetAgentRestarts(hiveId, agentName) {
+      var ok = await hiveConfirm('Reset restart counter for agent "' + agentName + '"?\n\nThe fleet page will count restarts from this point so you can tell whether the problem recurs.');
+      if (!ok) return;
+      try {
+        var resp = await fetch('/api/saas/hives/' + encodeURIComponent(hiveId) + '/agents/' + encodeURIComponent(agentName) + '/restarts/reset', {method: 'POST'});
+        var data = await resp.json().catch(function() { return {}; });
+        if (!resp.ok) { await hiveNotify('Reset failed', String(data.error || resp.status)); return; }
+        await hiveNotify('Restart counter reset', 'Agent: ' + agentName + '\nCounting restarts from now.');
         if (typeof loadHives === 'function') loadHives();
       } catch (e) {
         await hiveNotify('Reset failed', String(e));
@@ -8630,7 +8681,6 @@
       } catch(e) { hiveToast('Error: ' + e.message, 'error'); btn.disabled = false; btn.textContent = 'Deny'; }
     }
 
-
     // --- Cluster Health Panel ---
     var CLUSTER_HEALTH_POLL_MS = 30000;
     var CLUSTER_CPU_WARN_PCT = 60;
@@ -8967,6 +9017,44 @@
                 sp.total + ' stuck pod' + (sp.total === 1 ? '' : 's') +
                 ' in ' + sp.namespaces_affected + ' ns</span>';
             }
+            // Wildcard certificate health (#5977). ABSENT means either this
+            // cluster does not serve spokes from a wildcard or the hub could not
+            // look, and nothing is claimed either way. A present "ok" is
+            // deliberately silent, like the stuck-pod line above: a healthy fleet
+            // stays quiet. Only a finding renders — and every finding here is
+            // fleet-wide, because on an opted-in cluster this one certificate is
+            // what every hosted dashboard is served with.
+            var wildcardLine = '';
+            if (c.wildcard_tls && c.wildcard_tls.status && c.wildcard_tls.status !== 'ok') {
+              var wt = c.wildcard_tls;
+              var wtLabel;
+              if (wt.status === 'expiring') {
+                // days_remaining is always set alongside an 'expiring' status,
+                // but the label must not depend on that: falling through to the
+                // catch-all would report an expiring certificate as unreadable.
+                wtLabel = wt.days_remaining != null
+                  ? 'wildcard cert expires in ' + wt.days_remaining + 'd'
+                  : 'wildcard cert expiring soon';
+              } else if (wt.status === 'expired') {
+                wtLabel = 'wildcard cert EXPIRED';
+              } else if (wt.status === 'missing') {
+                wtLabel = 'wildcard cert MISSING';
+              } else if (wt.status === 'domain_mismatch') {
+                wtLabel = 'wildcard cert does not cover this domain';
+              } else if (wt.status === 'not_served') {
+                wtLabel = 'wildcard cert is not the ingress default';
+              } else {
+                wtLabel = 'wildcard cert unreadable';
+              }
+              var wtTitle = (wt.detail || '') +
+                ' Secret: ' + (wt.secret || '?') + '.' +
+                (wt.not_after ? ' Expires ' + wt.not_after + '.' : '') +
+                (wt.issuer ? ' Issuer: ' + wt.issuer + '.' : '') +
+                ((wt.dns_names || []).length ? ' SANs: ' + (wt.dns_names || []).join(', ') + '.' : '') +
+                ' Every wildcard-covered spoke on this cluster is served by this one certificate.';
+              wildcardLine = ' · <span style="color:var(--red)" title="' + esc(wtTitle) + '">' +
+                esc(wtLabel) + '</span>';
+            }
             var errorLine = c.error ? '<div style="margin:8px 0;padding:6px 10px;background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:6px;font-size:0.75rem;color:var(--red)">' + esc(c.error) + '</div>' : '';
             var headerHtml = '<div style="display:flex;align-items:center;gap:8px;margin:16px 0 8px">' +
               clusterBadge(c.id, c.name) +
@@ -8976,7 +9064,7 @@
               '<span style="color:' + cCpuColor + '">' + (cs.total_cpu_percent || 0) + '% cpu</span> · ' +
               '<span style="color:' + cMemColor + '">' + (cs.total_mem_percent || 0) + '% mem</span> · ' +
               cDiskSegment +
-              (c.hive_count || 0) + ' hives' + capacityLine + gpuLine + stuckLine +
+              (c.hive_count || 0) + ' hives' + capacityLine + gpuLine + stuckLine + wildcardLine +
               '</span></div>';
             var nodesHtml = (c.nodes || []).length > 0
               ? '<div style="display:grid;grid-template-columns:repeat(2,1fr);gap:12px">' + (c.nodes || []).map(renderNodeCard).join('') + '</div>'
@@ -10702,7 +10790,7 @@
             // spokes (the heartbeat-only cluster etc.) link to their real route, not a dead
             // <id>.hive.kubestellar.io host. Fall back to the hub-reachable-cluster pattern.
             var linkBase = (regEntry && regEntry.dashboardUrl && !regEntry.dashboardUrl.includes('localhost'))
-              ? regEntry.dashboardUrl : (isHosted && _hubSpokeDomain ? 'https://' + esc(hid) + '.' + esc(_hubSpokeDomain) : '');
+              ? regEntry.dashboardUrl : ((isHosted && _hubSpokeDomain) ? 'https://' + esc(hid) + '.' + esc(_hubSpokeDomain) : '');
             var linkLabel = linkBase.replace(/^https?:\/\//, '');
             var link = linkBase ? '<a href="' + esc(linkBase) + '" target="_blank" class="dash-link">' + esc(linkLabel) + '</a>' : '<span style="color:var(--muted)">local</span>';
             var typeBadge = isHosted ? '<span style="color:#60a5fa">hosted</span>' : '<span style="color:#9ca3af">local</span>';
@@ -10899,7 +10987,6 @@
       if (!btn) return;
       openTimelineModal(btn.getAttribute('data-hive-id') || '', btn.getAttribute('data-hive-name') || '');
     });
-
 
     var ASSIGN_DEFAULT_ACMM = 2;
     /* openAssignModal claims one placeholder for a real project.
@@ -11635,7 +11722,6 @@
     </div>
   </div>
 
-
   <script>
     var _accessHiveId = '';
     // Last-loaded access list for the open manage-access modal; lets
@@ -11662,9 +11748,7 @@
       github_app_changed:{ label: 'GitHub App', color: '#f59e0b' },
       access:            { label: 'Access',     color: '#60a5fa' },
       ownership:         { label: 'Ownership',  color: '#60a5fa' },
-      admin:             { label: 'Admin',      color: '#8b949e' },
-      digest_pinned:     { label: 'Pinned',     color: '#d29922' },
-      digest_unpinned:   { label: 'Unpinned',   color: '#3fb950' }
+      admin:             { label: 'Admin',      color: '#8b949e' }
     };
 
     /* Relative time, coarse on purpose: "what happened to this hive" is

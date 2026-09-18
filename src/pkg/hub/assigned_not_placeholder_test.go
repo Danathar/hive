@@ -2,6 +2,7 @@ package hub
 
 import (
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 )
@@ -102,7 +103,11 @@ func TestIsAvailableRegistryEntry_LockstepWithPlaceholderEntry(t *testing.T) {
 // that keeps it in lockstep with the Go predicates: statusAvailable wins before
 // assigned/assignedUnclaimed can short-circuit the prefix fallback.
 func TestEmbeddedPlaceholderHiveAvailableWins(t *testing.T) {
-	bodyStart := strings.Index(dashboardHTML, "function isPlaceholderHive(h) {")
+	src, err := os.ReadFile("assets/dashboard.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bodyStart := strings.Index(string(src), "function isPlaceholderHive(h) {")
 	if bodyStart < 0 {
 		t.Fatal("isPlaceholderHive not found")
 	}
