@@ -11,6 +11,17 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-18 (v4.57.1)
+
+### Changed
+
+- `runEvalCycle` now has an end-to-end test harness (`cmd/hive/eval_cycle_run_7232_test.go`) that drives a full cycle against a fake GitHub API with the real governor, scheduler, agent manager and dashboard server; function coverage rises from 1.7% to 32.9% and `cmd/hive` from 52.3% to 54.7% (refs #7232).
+
+### Fixed
+
+- Fixed the review swarm forgetting which PRs it had already reviewed on every restart. The dispatch state — the reviewer's only record of what it has looked at — was written under `/var/run/hive-metrics`, scratch space for regenerable per-cycle artifacts on the container's ephemeral writable layer. Since `PlanDispatch` keeps no cursor and re-walks the actionable PR list from the top each cycle, losing that file made the reviewer re-review the same first PRs indefinitely and never advance through the queue (and, once reviewers publish, re-comment on them). It now lives on the durable data dir, with a one-time fallback to the old location so an upgrading hive keeps the state it already has.
+- Fixed reviews being written without the reviewer having necessarily read the change. The perspective prompt demanded `file:line` citations but never said how to obtain the diff, so an agent that skipped it could still produce confident, ungrounded prose. The kick now names `gh pr view` (intent) and `gh pr diff` (what was actually done), pins citations to the dispatched head SHA, scopes the review to the diff rather than the surrounding code, and makes an unreadable diff an explicit `requires_human` instead of a guess.
+
 ## 2026-09-18 (v4.57.0)
 
 ### Added
