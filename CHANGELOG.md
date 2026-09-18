@@ -11,6 +11,22 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-18 (v4.61.0)
+
+### Added
+
+- Added a Features → Review Gate control for the "what to merge next" recommendations issue, so it can be turned on, scoped to specific repositories, and given an opening threshold from the dashboard instead of only from `hive.yaml`.
+- Added a "reviewed" pill to the PR listings on the dashboard repo cards, linking straight to the review the hive posted. Reviews are recorded in a durable ledger as they are submitted, so the pill costs no extra GitHub calls, and a repeat count is shown when the hive has reviewed the same PR more than once.
+
+### Fixed
+
+- An abandoned run row on the Operations tab no longer shows the previous task's terminal as "terminal when it stopped" ([#7605](https://github.com/hivecommons/hive/issues/7605)). The hub kept only the relay's latest pane snapshot, with no record of which task it was reported for, so a socket that dropped seconds into a fresh assignment — before any progress frame — attached the previous task's clean `HIVE_VERDICT: complete` screen to the new task's `abandoned … 2s` row, pointing an operator at a dropped completion when the real event was a flapped socket. The snapshot is now tagged with the task the relay named, and both the abandoned row and the live fleet card carry a pane only when it was reported for that task; a row with no pane of its own carries none.
+
+### Security
+
+- The `reviewer` GitHub App token tier is narrowed from `pull_requests: write` back to `pull_requests: read`. A reviewer posts its verdict through the review-request relay (`review_request_watcher.go`), where the governor submits the review with the App token — the same governor-performs-the-write pattern the issue, PR and merge request watchers already follow. That route authors the review as the App bot, records it on the audit/activity trail so it counts toward activity and SLA accounting, and runs the body through the fail-closed canary scan; a direct agent-token `gh pr review` did none of those. The `reviewer` tier itself is kept, as is `agentmode.TokenTierForRole` — only the permission level changes. ([#7487](https://github.com/hivecommons/hive/issues/7487))
+- The recommendations digest no longer adopts an issue it did not author (#7598). Its title is a public constant in repositories where anyone can open issues, and the shared title lookup would adopt any match — even a fuzzy one — handing a squatter permanent author edit rights over a body full of copy-paste `gh pr merge` commands the footer tells the maintainer to trust, and risking the hive overwriting a maintainer's own similarly-titled issue. The lookup now mirrors the advisory-digest authorship gate: exact title only, App clients adopt only their own bot's issue (with a marker-verified bot fallback for slug mismatches), and anything else is skipped with a warning while the hive posts its own issue instead.
+
 ## 2026-09-18 (v4.60.0)
 
 ### Added
