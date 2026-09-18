@@ -11,6 +11,40 @@ import (
 	"time"
 )
 
+// Token-access audit trail (#6287).
+//
+// THE DEFECT: GET /api/token-access is an operator-only security audit trail
+// ("every gh CLI command an agent issued", gated at owner role, CWE-284) and
+// it was fed by the audited parties writing straight into the log file.
+// bin/gh-wrapper.sh and bin/git-credential-hive.sh run AS the agent UID and
+// used to `>>` the JSONL file directly, which only works when the file is
+// writable by every agent (v4 pre-created it dev:node 0664, and every agent's
+// primary group is node). Append is indistinguishable from write at the file
+// permission level, so any prompt-injected agent could truncate the trail of
+// its own token use, rewrite lines to attribute its activity to a peer, or
+// forge entries wholesale. An audit log the audited party can edit is not an
+// audit log.
+//
+// THE FIX: the same drop-box relay every other agent->hive write already uses
+// (pr-requests, issue-requests, merge-requests). The wrappers write one JSON
+// event per gh call / credential lookup into TokenAccessSpoolDir, a directory
+// agents can create files in but cannot list, and only the file's owner (or
+// the hive, which owns the directory) can unlink. The hive process ingests
+// those events into TokenAccessLogPath, which is owned by the hive UID with
+// mode 0600: no agent can open it for writing, truncating, or appending, and
+// no agent can read the fleet-wide history either (the endpoint is owner-only
+// for exactly that reason). While ingesting, the hive replaces the event's
+// self-reported "uid" with the spool file's OWNING uid, the same trust anchor
+// the PR-request watcher uses: an agent can only ever speak for itself, so an
+// entry forged in a peer's name lands attributed to the forger, with the
+// claimed uid preserved alongside as evidence.
+//
+// What this does NOT close: an agent can still delete its OWN event during
+// the poll window before the hive picks it up (a hive-side unix socket with
+// SO_PEERCRED would close that too, and is the natural next step), and it can
+// still flood the log with real gh calls. Neither lets it alter a line that
+// has already been ingested, which is the invariant the tests assert.
+
 // TokenAccessSpoolDir is where the per-agent wrappers drop token-access
 // events. Mirrors PRRequestDir. Changing it requires changing the constant in
 // bin/gh-wrapper.sh and bin/git-credential-hive.sh, which deliberately carry
