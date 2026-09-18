@@ -6254,6 +6254,7 @@ func runEvalCycle(
 
 	sched.SetLastActionable(kickActionable)
 	reviewPlan := planReviewDispatch(cfg, actionable, agentMgr, logger)
+	applyHumanDecisionLabels(ctx, cfg, ghClient, actionable, reviewPlan, logger)
 	messages := sched.BuildKickMessages(kickActionable, agentsDue)
 	reviewKickByMessage := map[string]review.DispatchKick{}
 	for _, k := range append(reviewPlan.ReviewKicks, reviewPlan.FixKicks...) {
@@ -8006,6 +8007,48 @@ func auditPRAgents(org string, since time.Time, auditPath string) map[string]str
 	return out
 }
 
+// applyHumanDecisionLabels mirrors the review swarm's "a human must decide"
+// holds onto the operator's existing triage label, so they can be filtered
+// from the PR list instead of being found by opening threads.
+//
+// This is strictly additive to the marker the reviewer writes into the review
+// body. Every failure path here — no label configured, label absent from the
+// repo, API refusal — is logged and skipped, because a mislabelled hold is a
+// smaller problem than a hold that never got reported.
+func applyHumanDecisionLabels(ctx context.Context, cfg *config.Config, ghClient *github.Client, actionable *github.ActionableResult, plan review.DispatchPlan, logger *slog.Logger) {
+	if cfg == nil || ghClient == nil {
+		return
+	}
+	label := strings.TrimSpace(cfg.Review.HumanDecisionLabel)
+	if label == "" || len(plan.State.Human) == 0 {
+		return
+	}
+	// Holds persist across cycles, so re-deriving them every pass would re-ask
+	// GitHub to apply a label the PR already carries. The enumeration already
+	// fetched each PR's labels, so skipping the settled ones costs nothing.
+	labeled := map[string]bool{}
+	if actionable != nil {
+		for _, pr := range actionable.PRs.Items {
+			for _, have := range pr.Labels {
+				if strings.EqualFold(strings.TrimSpace(have), label) {
+					labeled[fmt.Sprintf("%s#%d", pr.Repo, pr.Number)] = true
+				}
+			}
+		}
+	}
+	for _, hold := range plan.State.Human {
+		if labeled[fmt.Sprintf("%s#%d", hold.Repo, hold.Number)] {
+			continue
+		}
+		if err := ghClient.ApplyHumanDecisionLabel(ctx, hold.Repo, hold.Number, label); err != nil {
+			logger.Warn("human decision label not applied; review marker still stands",
+				"repo", hold.Repo, "pr", hold.Number, "label", label, "error", err)
+			continue
+		}
+		logger.Info("human decision label applied", "repo", hold.Repo, "pr", hold.Number, "label", label, "reason", hold.Reason)
+	}
+}
+
 func planReviewDispatch(cfg *config.Config, actionable *github.ActionableResult, agentMgr *agent.Manager, logger *slog.Logger) review.DispatchPlan {
 	if cfg == nil || actionable == nil || !cfg.Review.RequireApproval || !cfg.Review.FanOut {
 		return review.DispatchPlan{}
@@ -8051,16 +8094,18 @@ func planReviewDispatch(cfg *config.Config, actionable *github.ActionableResult,
 		})
 	}
 	plan := review.PlanDispatch(prs, artifact, state, review.DispatchOptions{
-		RequireApproval:      cfg.Review.RequireApproval,
-		FanOut:               cfg.Review.FanOut,
-		MaxParallelReviews:   cfg.Review.EffectiveMaxParallelReviews(),
-		MaxPerspectivesPerPR: cfg.Review.MaxPerspectivesPerPR,
-		ReviewerAgents:       cfg.Review.ReviewerAgents,
-		FixerAgent:           cfg.Review.FixerAgent,
-		PostComments:         cfg.Review.PostComments,
-		ProjectOrg:           cfg.Project.Org,
-		AIAuthor:             cfg.EffectiveAIAuthor(),
-		Agents:               agents,
+		RequireApproval:       cfg.Review.RequireApproval,
+		FanOut:                cfg.Review.FanOut,
+		MaxParallelReviews:    cfg.Review.EffectiveMaxParallelReviews(),
+		MaxPerspectivesPerPR:  cfg.Review.MaxPerspectivesPerPR,
+		ReviewerAgents:        cfg.Review.ReviewerAgents,
+		FixerAgent:            cfg.Review.FixerAgent,
+		PostComments:          cfg.Review.PostComments,
+		AllAuthors:            cfg.Review.AllAuthors,
+		AcknowledgeNoFindings: cfg.Review.AcknowledgeNoFindings,
+		ProjectOrg:            cfg.Project.Org,
+		AIAuthor:              cfg.EffectiveAIAuthor(),
+		Agents:                agents,
 	})
 	if len(plan.ReviewKicks)+len(plan.FixKicks) > 0 {
 		logger.Info("review swarm dispatch planned", "review_kicks", len(plan.ReviewKicks), "fix_kicks", len(plan.FixKicks))
