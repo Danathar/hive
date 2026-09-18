@@ -560,7 +560,7 @@ func (c *Client) isHiveFiledIssue(issue *gh.Issue) bool {
 	if issue == nil {
 		return false
 	}
-	if strings.Contains(issue.GetBody(), AttributionTrailerPrefix) {
+	if HasAttributionTrailer(issue.GetBody()) {
 		return true
 	}
 	if issue.User != nil && strings.EqualFold(issue.User.GetType(), "Bot") && strings.TrimSpace(c.appBotLogin) != "" && strings.EqualFold(safeGetLogin(issue.User), c.appBotLogin) {

@@ -61,7 +61,7 @@ type boot struct {
 
 	// bootConfig
 	startTime                     time.Time
-	configPath                    *string
+	configPath                    string
 	logger                        *slog.Logger
 	cfg                           *config.Config
 	ctx                           context.Context

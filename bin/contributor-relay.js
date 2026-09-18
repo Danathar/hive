@@ -68,7 +68,7 @@ const {
 // Cross-process quota-pool store + scoped override channel (hivecommons/hive#6953).
 const quotaPoolStore = require('./lib/quota-pool-store.js');
 
-const rawHub = process.env.HIVE_HUB || 'wss://hive.kubestellar.io:3001/contribute';
+const rawHub = process.env.HIVE_HUB || 'wss://hive.hivecommons.dev/contribute';
 // Multi-hub (hivecommons/hive#multi-hive): HIVE_HUB and HIVE_REGISTRATION_TOKEN
 // may each be a comma-separated list, one token per hub in the same order, so
 // one relay/CLI session can hold work from more than one hive without running
