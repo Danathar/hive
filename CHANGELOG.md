@@ -11,6 +11,18 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-18 (v4.61.2)
+
+### Changed
+
+- The Features tab's Review Gate section is grouped instead of listed. It had grown to eleven controls spanning three unrelated concerns — the merge gate, the reviewers themselves, and the recommendations digest — presented as one undifferentiated list, so nothing indicated which setting affected which behaviour. The reviewer settings now read as a single unit under quiet `Merge gate` and `Reviewers` sub-headings that group by whitespace rather than by drawing more rules, and the recommendations controls move out to their own `Merge Recommendations` section, since opening an issue about what is already mergeable is not part of the gate that decides whether a PR may merge at all. The horizontal rule keeps meaning "a different feature starts here", which is what makes it readable.
+
+## 2026-09-18 (v4.61.1)
+
+### Fixed
+
+- A fatal-network pattern found in an agent's scrollback no longer restarts an agent that is still producing output. The detector matches scrollback, so a hit can be an error the agent already recovered from and worked past; its premise is that the agent is "visually ready but actually dead", and a pane that changed moments ago refutes that premise. Restarting such an agent destroys the turn in flight rather than recovering anything. Observed on a production spoke, where a reviewer emitted a generic `fetch failed` from one failed proxied call mid-turn, kept working, and was killed while streaming 22KB of output — it restarted 52 times and published no review for over seven hours, because every restart landed mid-turn and the next turn met the same line still sitting in scrollback. An agent that dies at startup renders nothing, so its pane stays static and the restart still fires.
+
 ## 2026-09-18 (v4.61.0)
 
 ### Added
