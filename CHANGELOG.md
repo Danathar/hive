@@ -11,6 +11,18 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-18 (v4.63.0)
+
+### Added
+
+- Extend the task-list sweep to annotate non-task-list Refs issues with PR remainders and mark human-only remainders needs-human.
+
+### Fixed
+
+- The contributor `Justfile` and the dashboard's "Hub Enabled" tooltip now point at the canonical hosted hub, `hive.hivecommons.dev`, instead of the legacy `hive.kubestellar.io` ([#7624](https://github.com/hivecommons/hive/issues/7624)). The old host has answered every path with a 301 since the hub moved on 2026-09-04, which a WebSocket handshake does not follow and `curl -sf` reports as unreachable — so `just contribute-setup` with no `HIVE_HUB` set could not list hives, and the default `HIVE_HUB` could never connect. The default is now `wss://hive.hivecommons.dev/contribute`, the registry and my-hives lookups and the hosted-spoke hostnames use the new domain, and an exported `HIVE_HUB` still carrying the old default is treated as unset so it gets the hive lookup rather than a dead connection.
+- Reviewer verdicts are now delivered to the routing chain. The reviewer's structured verdict had no transport: nothing wrote the `review-report-*.json` files the collector reads, and agents could not write them anyway because `/var/run/hive-metrics` is owned by the hive. Verdicts were printed to a terminal and discarded, leaving `review-verdicts.json` empty, review requests unresolved, and no pull request ever routed to a human — on one spoke, across 117 posted reviews. `hive-review` now takes `--verdict-file`, and `--record-verdict` records a judgement with no comment so a clean review still counts as reviewed instead of being dispatched again from scratch. The relay validates each verdict and checks it names the pull request that was actually reviewed before writing it server-side.
+- Stop the reviewer policy from telling the agent its structured verdict is obsolete. The kick requires a JSON verdict in the same context, and the verdict is what feeds the fix dispatch and the `requires_human` holds that become a triage label — so the claim suppressed the artifact the whole routing chain runs on.
+
 ## 2026-09-18 (v4.62.0)
 
 ### Added
