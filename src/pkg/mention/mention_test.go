@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,6 +25,25 @@ type fakeGH struct {
 	listed        bool
 }
 
+type blockingGH struct {
+	fakeGH
+	mu      sync.Mutex
+	count   int
+	started chan struct{}
+	release chan struct{}
+}
+
+func (f *blockingGH) ListMentionComments(ctx context.Context, repo string, since time.Time) ([]Event, error) {
+	f.mu.Lock()
+	f.count++
+	if f.count == 1 {
+		close(f.started)
+	}
+	f.mu.Unlock()
+	<-f.release
+	return nil, nil
+}
+
 func (f *fakeGH) AppBotLogin() string { return f.app }
 func (f *fakeGH) ListMentionComments(ctx context.Context, repo string, since time.Time) ([]Event, error) {
 	f.listed = true
@@ -32,11 +52,11 @@ func (f *fakeGH) ListMentionComments(ctx context.Context, repo string, since tim
 	}
 	return f.events, nil
 }
-func (f *fakeGH) CreateMentionAck(ctx context.Context, repo string, commentID int64, reaction string) error {
+func (f *fakeGH) CreateMentionAck(ctx context.Context, ev Event, reaction string) error {
 	if f.ackErr != nil {
 		return f.ackErr
 	}
-	f.ack = commentID
+	f.ack = ev.CommentID
 	return nil
 }
 func (f *fakeGH) CountAppAuthoredComments(ctx context.Context, repo string, number int) (int, error) {
@@ -239,6 +259,94 @@ func TestPollerUsesDynamicGitHubGetter(t *testing.T) {
 	p.Poll(context.Background())
 	if oldGH.listed || !newGH.listed {
 		t.Fatalf("poller did not use dynamic getter: old listed=%v new listed=%v", oldGH.listed, newGH.listed)
+	}
+}
+
+func TestPollerCoalescesConcurrentRepoPolls(t *testing.T) {
+	gh := &blockingGH{
+		fakeGH:  fakeGH{app: "hive[bot]"},
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	p := NewPoller(gh, func() []string { return []string{"org/repo"} }, nil, NewHandler(Options{}), time.Minute, nil)
+	done := make(chan struct{})
+	go func() {
+		p.PollRepo(context.Background(), "org/repo")
+		close(done)
+	}()
+	select {
+	case <-gh.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first poll did not start")
+	}
+	p.PollRepo(context.Background(), "org/repo")
+	close(gh.release)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first poll did not finish")
+	}
+	gh.mu.Lock()
+	count := gh.count
+	gh.mu.Unlock()
+	if count != 2 {
+		t.Fatalf("ListMentionComments calls = %d, want original plus one coalesced follow-up", count)
+	}
+}
+
+func TestPollerRejectsUnconfiguredRepoWithoutStateGrowth(t *testing.T) {
+	store, _ := NewStore("")
+	gh := &fakeGH{app: "hive[bot]"}
+	var audit, kick []string
+	h := baseHandler(t, gh, &audit, &kick)
+	p := NewPoller(gh, func() []string { return []string{"org/repo"} }, store, h, time.Minute, nil)
+	p.PollRepo(context.Background(), "org/other")
+	if gh.listed {
+		t.Fatal("unconfigured repo called GitHub")
+	}
+	if !store.Watermark("org/other").IsZero() {
+		t.Fatal("unconfigured repo created a watermark")
+	}
+	if len(p.inFlight) != 0 || len(p.pending) != 0 {
+		t.Fatalf("unconfigured repo grew poll state: inFlight=%+v pending=%+v", p.inFlight, p.pending)
+	}
+}
+
+func TestPollerUsesConfiguredRepoCasingForDirectPoll(t *testing.T) {
+	store, _ := NewStore("")
+	gh := &fakeGH{app: "hive[bot]"}
+	var audit, kick []string
+	h := baseHandler(t, gh, &audit, &kick)
+	p := NewPoller(gh, func() []string { return []string{"Org/Repo"} }, store, h, time.Minute, nil)
+	p.PollRepo(context.Background(), "org/repo")
+	if !gh.listed {
+		t.Fatal("configured repo did not call GitHub")
+	}
+	if store.Watermark("Org/Repo").IsZero() {
+		t.Fatal("configured repo casing did not receive watermark")
+	}
+	if !store.Watermark("org/repo").IsZero() {
+		t.Fatal("payload repo casing created a separate watermark")
+	}
+}
+
+func TestPollerConfiguredRepoEdges(t *testing.T) {
+	if repo, ok := (*Poller)(nil).configuredRepo("org/repo"); ok || repo != "" {
+		t.Fatalf("nil poller configuredRepo = %q/%v", repo, ok)
+	}
+	p := &Poller{}
+	if repo, ok := p.configuredRepo("org/repo"); ok || repo != "" {
+		t.Fatalf("nil repos configuredRepo = %q/%v", repo, ok)
+	}
+	p.repos = func() []string { return []string{"", " Org/Repo "} }
+	if repo, ok := p.configuredRepo(" "); ok || repo != "" {
+		t.Fatalf("blank repo configuredRepo = %q/%v", repo, ok)
+	}
+	if repo, ok := p.configuredRepo("org/repo"); !ok || repo != "Org/Repo" {
+		t.Fatalf("trimmed case-insensitive configuredRepo = %q/%v", repo, ok)
+	}
+	if repo, ok := p.configuredRepo("org/other"); ok || repo != "" {
+		t.Fatalf("unmatched configuredRepo = %q/%v", repo, ok)
 	}
 }
 

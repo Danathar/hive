@@ -55,6 +55,7 @@ import (
 	"github.com/hivecommons/hive/pkg/matrix"
 	"github.com/hivecommons/hive/pkg/mention"
 	"github.com/hivecommons/hive/pkg/mint"
+	"github.com/hivecommons/hive/pkg/msteams"
 	"github.com/hivecommons/hive/pkg/notify"
 	"github.com/hivecommons/hive/pkg/planning"
 	"github.com/hivecommons/hive/pkg/policies"
@@ -1190,6 +1191,7 @@ func (b *boot) bootConfig() bool {
 			OpenRouter:           openRouterGateway{},
 			NewLinearAgent:       newLinearAgentGateway(b.logger),
 			LinearStoredViewerID: linearStoredViewerID,
+			MentionWebhook:       b.mentionWebhook,
 			Governor:             b.gov,
 			GHClient:             b.ghClient,
 			GHAppAuth:            b.appAuth,
@@ -2512,6 +2514,18 @@ func (b *boot) bootDashboard() {
 				return b.ghClient.ActiveRepositories()
 			}, store, handler, b.cfg.GitHub.Mentions.PollIntervalEffective(), b.logger)
 			poller.SetGitHubGetter(func() mention.GitHub { return b.ghClient })
+			if b.cfg.GitHub.Mentions.WebhookEnabled {
+				receiver := mention.NewWebhookReceiver(func() string {
+					return b.cfg.GitHub.Mentions.WebhookSecretEffective()
+				}, poller, b.cfg.GitHub.Mentions.WebhookMinGapEffective(), b.logger)
+				receiver.SetReposFunc(func() []string {
+					if b.ghClient == nil {
+						return nil
+					}
+					return b.ghClient.ActiveRepositories()
+				})
+				b.mentionWebhook = receiver
+			}
 			go poller.Run(b.ctx)
 			responder := mention.NewResponder(store, func() mention.GitHub { return b.ghClient }, mentionAgents, b.cfg.Classification.ReviewBots, b.logger)
 			b.agentMgr.SetKickObserver(responder.HandleAgentEvent)
@@ -4141,6 +4155,30 @@ func (b *boot) bootLaunch() {
 			b.logger.Warn("matrix bot failed to start", "error", err)
 		} else {
 			b.logger.Info("matrix bot started", "room", b.cfg.Notifications.Matrix.RoomID)
+		}
+	}
+
+	if b.cfg.Notifications.MSTeams != nil && b.cfg.Notifications.MSTeams.Enabled {
+		teamsBot := msteams.NewBot(msteams.Config{
+			TenantID:       b.cfg.Notifications.MSTeams.TenantID,
+			ClientID:       b.cfg.Notifications.MSTeams.ClientID,
+			ClientSecret:   b.cfg.Notifications.MSTeams.ClientSecret,
+			TeamID:         b.cfg.Notifications.MSTeams.TeamID,
+			ChannelID:      b.cfg.Notifications.MSTeams.ChannelID,
+			WebhookURL:     b.cfg.Notifications.MSTeams.WebhookURL,
+			DashboardURL:   fmt.Sprintf("http://localhost:%d", b.cfg.Dashboard.Port),
+			DashboardToken: os.Getenv("HIVE_DASHBOARD_TOKEN"),
+			AllowedUsers:   b.cfg.Notifications.MSTeams.AllowedUsers,
+		}, b.logger)
+		var agentNameList []string
+		for name := range b.cfg.EnabledAgents() {
+			agentNameList = append(agentNameList, name)
+		}
+		teamsBot.SetAgentNames(agentNameList)
+		if err := teamsBot.Start(b.ctx); err != nil {
+			b.logger.Warn("msteams bot failed to start", "error", err)
+		} else {
+			b.logger.Info("msteams bot started", "team", b.cfg.Notifications.MSTeams.TeamID, "channel", b.cfg.Notifications.MSTeams.ChannelID)
 		}
 	}
 
@@ -8454,11 +8492,13 @@ func initAgentConfigDrivenSystems(cfg *config.Config) {
 	slack.SetAgentIdentities(discordIdentities)
 	matrix.SetAgentIdentities(discordIdentities)
 	telegram.SetAgentIdentities(discordIdentities)
+	msteams.SetAgentIdentities(discordIdentities)
 	if len(discordAliases) > 0 {
 		discord.SetAgentAliases(discordAliases)
 		slack.SetAgentAliases(discordAliases)
 		matrix.SetAgentAliases(discordAliases)
 		telegram.SetAgentAliases(discordAliases)
+		msteams.SetAgentAliases(discordAliases)
 	}
 }
 

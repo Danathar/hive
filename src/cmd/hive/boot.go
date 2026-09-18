@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"sync/atomic"
 	"time"
 
@@ -95,6 +96,7 @@ type boot struct {
 	rotationMgr                   *rotation.Manager
 	wd                            *watchdog.Reconciler
 	onDemandFromPack              map[string]bool
+	mentionWebhook                http.Handler
 	refreshDashboard              func()
 	mutationBoundary              effects.Boundary
 	heartbeatFleetStats           func() (*int, *int, *int, string)
