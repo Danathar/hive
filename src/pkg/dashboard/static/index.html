@@ -1315,7 +1315,13 @@
     .repo-issue-plan:disabled { opacity: 0.5; cursor: default; }
     .repo-pr-pill { --pill-c: var(--purple); text-decoration: none; max-width: 100%; transition: background 0.15s; }
     .repo-pr-pill:hover { background: color-mix(in srgb, var(--pill-c) 24%, transparent); text-decoration: none; }
+    /* Three pill states (#7478). Green = the governor's merge-eligible
+       verdict: the sweep would merge this now. Amber = GitHub says
+       mergeable but the sweep still wants something (a red check with no
+       required-check set, a hold, a review, an intent verdict) — the honest
+       colour for GitHub's "unstable". No tint for dirty/blocked/unknown. */
     .repo-pr-pill.mergeable { --pill-c: var(--green); }
+    .repo-pr-pill.merge-outstanding { --pill-c: var(--yellow); }
     .repo-pr-pill .pill-num { font-weight: 700; white-space: nowrap; }
     .repo-pr-pill .pill-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .repo-pr-pill .pill-merge-icon { font-size: 0.6rem; margin-left: 1px; }
@@ -4786,7 +4792,7 @@
       const _ocSparkCounts = {
         actionable: govActionable,
         openPrs: govPrs,
-        mergeable: (window._lastStatus?.repos || []).reduce((n, r) => n + (r.openPrs || []).filter(p => p.mergeable).length, 0),
+        mergeable: (window._lastStatus?.repos || []).reduce((n, r) => n + (r.openPrs || []).filter(prMergeable).length, 0),
       };
 
       detail.innerHTML = `
@@ -6149,7 +6155,7 @@
         const repos = (window._lastStatus || {}).repos || [];
         if (field === 'actionableCount') return repos.reduce((n, r) => n + (r.actionableIssues || []).length, 0);
         if (field === 'openPrCount') return repos.reduce((n, r) => n + (r.openPrs || []).length, 0);
-        if (field === 'mergeableCount') return repos.reduce((n, r) => n + (r.openPrs || []).filter(p => p.mergeable).length, 0);
+        if (field === 'mergeableCount') return repos.reduce((n, r) => n + (r.openPrs || []).filter(prMergeable).length, 0);
         return 0;
       }
       return undefined;
@@ -8127,6 +8133,62 @@
       return (rank[role] || 0) >= (rank[tier] || 0);
     }
 
+    // `mergeable` on an open PR is the tri-state string the Go side has sent
+    // since #2365 — "yes", "no", or "" for not-yet-known — NOT a bool. A
+    // truthiness test on the raw field reads "no" as eligible, which is
+    // how ~90% of the pills on a hosted hive wore the green ✓ while GitHub
+    // reported them DIRTY or BLOCKED (#7471). Every reader of the field goes
+    // through here so the comparison cannot drift back to truthiness.
+    function prMergeable(p) {
+      return !!p && p.mergeable === 'yes';
+    }
+
+    // The pill's colour state (#7478). Green may mean one thing only: the
+    // governor's merge-eligible classifier — the same rule that writes
+    // merge-eligible.json for the sweep — put this PR in the eligible
+    // bucket, so the sweep would merge it now. GitHub's own verdict is
+    // looser: mergeable_state "unstable" is "no conflicts, nothing REQUIRED
+    // red", which on a repo without branch protection includes red CI and no
+    // review, and the sweep will not touch those. So:
+    //   'eligible'    → green ✓   the sweep would merge this now
+    //   'outstanding' → amber ◐   GitHub says mergeable; the sweep still
+    //                             wants something (reason in the tooltip)
+    //   ''            → no tint   dirty / blocked / draft / unknown
+    // A payload without merge_verdict (an older governor, a replayed
+    // snapshot) falls back to GitHub's flag — and lands on AMBER, never
+    // green, because "the sweep would merge this" is exactly what such a PR
+    // has not been shown to satisfy.
+    function prMergeState(p) {
+      const v = p && p.merge_verdict ? p.merge_verdict : null;
+      if (v && typeof v.state === 'string') {
+        if (v.state === 'eligible') return 'eligible';
+        if (v.state === 'outstanding') return 'outstanding';
+        return '';
+      }
+      return prMergeable(p) ? 'outstanding' : '';
+    }
+
+    // The tooltip fragment describing mergeability: the verdict's own reason
+    // when the governor supplied one, else GitHub's raw mergeable_state. An
+    // unknown verdict says so instead of saying nothing, and "no" names the
+    // state (dirty, blocked, ...) that refused it.
+    function prMergeNote(p) {
+      const v = p && p.merge_verdict ? p.merge_verdict : null;
+      const state = p && p.mergeable_state ? String(p.mergeable_state) : '';
+      const reason = v && v.reason ? String(v.reason) : '';
+      switch (prMergeState(p)) {
+        case 'eligible':
+          return ' (merge eligible: ' + (reason || 'the sweep would merge this now') + ')';
+        case 'outstanding':
+          if (reason) return ' (mergeable on GitHub, not yet eligible: ' + reason + ')';
+          if (state === 'unstable') return ' (mergeable on GitHub, sweep verdict not available — GitHub state: unstable; non-required checks may be red)';
+          return ' (mergeable on GitHub, sweep verdict not available' + (state ? ' — GitHub state: ' + state : '') + ')';
+      }
+      if (reason) return ' (' + reason + ')';
+      if (p && p.mergeable === 'no') return ' (not mergeable' + (state ? ' — GitHub state: ' + state : '') + ')';
+      return ' (mergeability not yet known)';
+    }
+
     async function queuePRAutoMerge(owner, repo, number, btn) {
       if (btn && btn.dataset.busy === '1') return;
       if (btn) { btn.dataset.busy = '1'; btn.textContent = 'Queueing…'; }
@@ -8264,8 +8326,12 @@
         }).join('');
         const prPills = (r.openPrs || []).map(p => {
           const title = p.title && p.title.length > MAX_PILL_TITLE_LEN ? p.title.slice(0, MAX_PILL_TITLE_LEN) + '…' : (p.title || '');
-          const mergeIcon = p.mergeable ? '<span class="pill-merge-icon">✓</span>' : '';
-          const mergeClass = p.mergeable ? ' mergeable' : '';
+          // Green ✓ only on the sweep's own verdict; amber ◐ for mergeable
+          // on GitHub but not yet eligible; nothing otherwise (#7478).
+          const mergeState = prMergeState(p);
+          const mergeIcon = mergeState === 'eligible' ? '<span class="pill-merge-icon">✓</span>'
+            : mergeState === 'outstanding' ? '<span class="pill-merge-icon">◐</span>' : '';
+          const mergeClass = mergeState === 'eligible' ? ' mergeable' : mergeState === 'outstanding' ? ' merge-outstanding' : '';
           const prAge = pillAge(p.created_at);
           const labels = (p.labels || []).map(l => String(l));
           const queued = labels.includes(window._hiveAutoMergeLabel || 'lgtm');
@@ -8280,7 +8346,7 @@
           // derived server-side from the title prefix and lane label only.
           const reviewClass = p.review_class ? String(p.review_class) : '';
           const classBadge = reviewClass ? `<span class="pill-class ${esc(reviewClass)}">${esc(reviewClass === 'refactor-docs' ? 'refactor' : reviewClass)}</span>` : '';
-          const prTip = (p.title || '') + (p.author ? ' — @' + p.author : '') + (prAge ? ' (' + prAge + ')' : '') + (reviewClass ? ' [review class: ' + reviewClass + ']' : '') + (p.mergeable ? ' (merge eligible)' : '') + (queued ? ' (queued for auto-merge)' : '') + (needsHuman ? ' (needs human review)' : '');
+          const prTip = (p.title || '') + (p.author ? ' — @' + p.author : '') + (prAge ? ' (' + prAge + ')' : '') + (reviewClass ? ' [review class: ' + reviewClass + ']' : '') + prMergeNote(p) + (queued ? ' (queued for auto-merge)' : '') + (needsHuman ? ' (needs human review)' : '');
           const canQueue = dashboardRoleAtLeast(window._hiveRole || 'read', 'merger') && (window._hiveUser || dashboardRoleAtLeast(window._hiveRole || 'read', 'owner')) && !(p.author && window._hiveUser && p.author.toLowerCase() === window._hiveUser.toLowerCase());
           const parts = (r.full || r.name || '').split('/');
           const owner = parts.length > 1 ? parts[0] : '';
@@ -8291,12 +8357,23 @@
           // for auto-merge would contradict the escalation. Removing the
           // needs-human label on GitHub returns the PR to the automated lane
           // and brings the queue action back on the next refresh.
+          //
+          // A PR GitHub reports as not mergeable (conflicts, a required
+          // review or check missing) keeps the button but disabled, with the
+          // state as the reason: a live "Queue auto-merge" beside a DIRTY PR
+          // read as "this is ready to go" (#7471), and the sweep would only
+          // refuse it later as not-mergeable anyway. An unknown verdict still
+          // offers the action — "" means not fetched yet, never "no".
+          const notMergeable = p.mergeable === 'no';
+          const notMergeableTip = 'Not mergeable on GitHub' + (p.mergeable_state ? ' (' + String(p.mergeable_state) + ')' : '') + ' — resolve that before queueing for auto-merge';
           const queueBtn = needsHuman
             ? '<span class="repo-pr-pill needs-human pill-needs-human-badge" title="Automated fix attempts exhausted — a human must review this PR. Remove the needs-human label after addressing the root cause to return it to the automated fix lane.">⚠ needs human</span>'
             : (canQueue
                 ? (queued
                     ? '<span class="repo-pr-pill mergeable" title="Already queued for Hive auto-merge on green CI">Queued</span>'
-                    : `<button class="repo-pr-pill" style="cursor:pointer" data-action="queuePRAutoMerge" data-arg0="${esc(owner)}" data-arg1="${esc(repoName)}" data-arg2="${p.number}" data-arg-types="s,s,j,t" data-stop="1" data-prevent="1">Queue auto-merge</button>`)
+                    : (notMergeable
+                        ? `<button class="repo-pr-pill" disabled title="${esc(notMergeableTip)}">Queue auto-merge</button>`
+                        : `<button class="repo-pr-pill" style="cursor:pointer" data-action="queuePRAutoMerge" data-arg0="${esc(owner)}" data-arg1="${esc(repoName)}" data-arg2="${p.number}" data-arg-types="s,s,j,t" data-stop="1" data-prevent="1">Queue auto-merge</button>`))
                 : '');
           // needs-human wins the pill tint over mergeable green: a PR can be
           // technically mergeable AND escalated, and the escalation is what
