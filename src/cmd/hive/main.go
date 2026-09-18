@@ -48,7 +48,6 @@ import (
 	"github.com/hivecommons/hive/pkg/hub"
 	spoke "github.com/hivecommons/hive/pkg/hub/spoke"
 	"github.com/hivecommons/hive/pkg/inference"
-	"github.com/hivecommons/hive/pkg/intent"
 	"github.com/hivecommons/hive/pkg/ioscan"
 	"github.com/hivecommons/hive/pkg/knowledge"
 	"github.com/hivecommons/hive/pkg/loginscan"
@@ -131,8 +130,6 @@ func reportedVersion() string {
 	return normalizeVersion(version)
 }
 
-// publishFleetReports writes the fleet self-report results computed for the
-// status payload upstream, unless the feature is in dry-run (the default).
 func publishFleetReports(ctx context.Context, logger *slog.Logger, ghClient *github.Client, dashSrv *dashboard.Server, res *fleetreport.Result, dryRun bool) {
 	if res == nil || dryRun || ghClient == nil || dashSrv == nil {
 		return
@@ -495,59 +492,6 @@ func nextInstallationID(current int64, ghCfg *spoke.HeartbeatGitHubAppConfig) (n
 		return ghCfg.InstallationID, false
 	}
 	return current, false
-}
-
-// deliveredKeyPath is where a hub-delivered private key for appID is stored.
-//
-// The filename NAMES the App, so a key can only ever be found under the App it
-// was delivered for. The generic /data/gh-app-key.pem carries no such evidence:
-// a key written there for one App silently becomes "the key" for whatever
-// app_id the config later claims, which is how all 33 heartbeat-only-cluster spokes ended up
-// signing as the public App with the GHE key and getting
-// 404 Integration not found.
-//
-// Falls back to the generic path only when the delivery names no App, so a key
-// is never dropped on the floor.
-func deliveredKeyPath(appID int64) string {
-	if p := appKeys.PerAppIDKeyPath(appID); p != "" {
-		return p
-	}
-	return appKeys.DataKeyPath
-}
-
-// describeAppKeyFailure turns a bare wrapped os error from github.NewAppAuth
-// into a message an operator can act on without reading the source: it names
-// the path actually tried, the full resolution order that produced it, and the
-// underlying cause.
-//
-// The generic "reading app key /secrets/gh-app-key.pem: no such file" that this
-// replaces gave no hint that key_file, $GH_APP_KEY_FILE, the PVC path and the
-// provisioning mount are all consulted in a fixed order — so the usual response
-// was to put the key in the wrong one of the four.
-func describeAppKeyFailure(configured, envOverride, resolved string, err error) string {
-	order := []string{
-		fmt.Sprintf("$GH_APP_KEY_FILE=%s", describeKeySource(envOverride)),
-		fmt.Sprintf("github.key_file=%s", describeKeySource(configured)),
-		fmt.Sprintf("per-app-id PVC key %s/gh-app-key-<app_id>.pem", appKeys.DataDir),
-		fmt.Sprintf("per-app-id provisioning key %s/gh-app-key-<app_id>.pem", appKeys.ProvisionedDir),
-		fmt.Sprintf("PVC fallback %s", appKeys.DataKeyPath),
-		fmt.Sprintf("provisioning mount %s", appKeys.ProvisionedKeyPath),
-	}
-	return fmt.Sprintf(
-		"GitHub App private key could not be loaded from %q: %v. "+
-			"Resolution order (first non-empty wins): %s. "+
-			"Write a PEM-encoded RSA private key to that path, or point github.key_file at one.",
-		resolved, err, strings.Join(order, " → "),
-	)
-}
-
-// describeKeySource renders an unset key-file source as "(unset)" so the
-// resolution order in describeAppKeyFailure reads unambiguously.
-func describeKeySource(v string) string {
-	if strings.TrimSpace(v) == "" {
-		return "(unset)"
-	}
-	return v
 }
 
 var githubAppTokenCachePath = github.TokenCachePath
@@ -5526,19 +5470,6 @@ func main() {
 
 }
 
-// Dashboard system-alert IDs for the budget thresholds.
-const (
-	budgetWarnAlertID      = "budget-warn"
-	budgetExhaustedAlertID = "budget-exhausted"
-	// noCadenceAlertID is the never-kicked cause+fix banner (#5577): enabled
-	// agents with no cadence in any mode and no kick ever.
-	noCadenceAlertID = "agent-no-cadence"
-	// providerBudgetAlertID is the PROVIDER spend rebuff (#4294), kept distinct
-	// from the two token-budget alerts above so an operator can tell "we used
-	// our token allowance" from "the gateway will not spend more money".
-	providerBudgetAlertID = "provider-budget-exceeded"
-)
-
 // buildRepoActivityWire maps the dashboard activity collector's per-repo
 // snapshot into the plain hub wire structs the heartbeat carries. Kept here (in
 // the one package that imports both hub and dashboard) so pkg/hub never has to
@@ -5721,13 +5652,6 @@ func (s labelPlanSink) QueuedPlan(epic *beads.Bead, paused bool) {
 	s.logger.Warn("plan-from-label: architect unavailable, plan queued", "epic", epic.ID, "ref", epic.ExternalRef)
 }
 
-// appKeyPaths snapshots the two App key path locations for a pkg/apphealth
-// call. Read at call time on purpose: tests repoint these, and capturing them
-// once would silently ignore that.
-func appKeyPaths() apphealth.KeyPaths {
-	return apphealth.KeyPaths{Spoke: appKeys.DataKeyPath, Provisioned: appKeys.ProvisionedKeyPath}
-}
-
 // healGitHubAppInstallation self-heals a hive whose github.installation_id
 // points at the WRONG account — the failure mode diagnoseGitHubApp
 // already detects and reports ("installation N belongs to 'X', not 'Y'"). It
@@ -5902,6 +5826,10 @@ func isGitHubRateLimitText(err error) bool {
 	return err != nil && strings.Contains(strings.ToLower(err.Error()), githubRateLimitErrText)
 }
 
+// The GitHub App credential classifiers moved to pkg/apphealth (#7238). These
+// wrappers exist so call sites keep their current shape and so the App key
+// paths -- vars that tests repoint at a temp dir -- are read HERE, at call
+// time, rather than captured once at init.
 func classifyGitHubAppFailure(ctx context.Context, appAuth *github.AppAuth, expectedOwner string, logger *slog.Logger) (bool, string, github.AppAuthState) {
 	return apphealth.ClassifyFailure(ctx, appAuth, expectedOwner, appKeyPaths(), logger)
 }
@@ -5914,8 +5842,9 @@ func classifyGitHubAppRepoCoverage(ctx context.Context, appAuth *github.AppAuth,
 	return apphealth.ClassifyRepoCoverage(ctx, appAuth, org, repos, logger)
 }
 
-// advisoryPostGate is process-wide because the eval-cycle ticker is not the
-// only poster: startup and restart paths post too.
+// The advisory digest posting policy moved to pkg/advisory (#7238 stage 2).
+// These wrappers keep the existing call sites unchanged; advisoryPostGate is
+// now an owned instance rather than a package-level struct tests reset.
 var advisoryPostGate = advisory.NewPostGate()
 
 func primaryAdvisoryRepo(cfg *config.Config) string {
@@ -6901,14 +6830,6 @@ func runEvalCycle(
 	}
 }
 
-// loginSightings is the login detector's process-scoped state. The governor
-// cycle is a function rather than an object, so the consecutive-sighting counts
-// have to outlive a single call; tests build their own tracker and pass it
-// explicitly.
-//
-// The detector itself lives in pkg/loginscan (#7238 stage 4).
-var loginSightings = loginscan.NewSightingTracker()
-
 func convertKnowledgeLayers(cfgLayers []config.KnowledgeLayer) []knowledge.LayerConfig {
 	layers := make([]knowledge.LayerConfig, len(cfgLayers))
 	for i, l := range cfgLayers {
@@ -6939,180 +6860,7 @@ func curatorConfigFromHive(c config.KnowledgeCurator) knowledge.CuratorConfig {
 }
 
 // hiveIDFilePath is the persistent file where the Hive ID is stored across restarts.
-// It is a var, not a const, so tests can repoint it at a temp dir and exercise
-// loadOrGenerateHiveID's disk-read and generate-and-persist branches hermetically
-// (#7148). v4 carries the same seam in cmd/hive/main.go; v5 keeps the symbol here
-// after the main.go split, so the change lands in this file instead.
 var hiveIDFilePath = "/data/hive-id"
-
-// loadOrGenerateHiveID reads the Hive ID from disk, or generates and persists a new one.
-const (
-	// selfUpgradeMaxAttempts bounds how many times a spoke retries an upgrade
-	// that keeps leaving the image unchanged. Bounded rather than unlimited so a
-	// genuinely broken hive (e.g. missing RBAC) stops thrashing its pod, and
-	// bounded rather than "never again" so a transient failure still converges.
-	selfUpgradeMaxAttempts = 5
-	// selfUpgradeBaseBackoff is the delay before retry #2; it doubles per
-	// attempt up to selfUpgradeMaxBackoff.
-	selfUpgradeBaseBackoff = 2 * time.Minute
-	// selfUpgradeMaxBackoff caps the exponential backoff between retries.
-	selfUpgradeMaxBackoff = 30 * time.Minute
-	// selfUpgradeFailureExitCode marks a process exit caused by a FAILED
-	// self-upgrade. Distinct from 0 so the failure is visible in the container's
-	// termination state instead of looking like a clean shutdown.
-	selfUpgradeFailureExitCode = 17
-)
-
-// upgradeMarker is the on-PVC record at /data/upgrade-requested. It survives
-// pod restarts (that is the whole point: the process exits as part of an
-// upgrade), so it is the only place attempt bookkeeping can live.
-type upgradeMarker struct {
-	TargetSHA   string    `json:"target_sha"`
-	CurrentSHA  string    `json:"current_sha"`
-	RequestedAt time.Time `json:"requested_at"`
-	Attempts    int       `json:"attempts"`
-	LastError   string    `json:"last_error,omitempty"`
-}
-
-// parseUpgradeMarker decodes a marker, tolerating the legacy format that had no
-// attempts/last_error fields. A legacy marker counts as one prior attempt so an
-// already-wedged hive gets retries under the new budget instead of being
-// treated as fresh.
-func parseUpgradeMarker(data []byte) upgradeMarker {
-	var m upgradeMarker
-	if err := json.Unmarshal(data, &m); err != nil {
-		return upgradeMarker{}
-	}
-	if m.Attempts < 1 {
-		m.Attempts = 1
-	}
-	return m
-}
-
-// sameUpgradeTarget reports whether two target SHAs refer to the same commit,
-// tolerating short/full SHA length mismatch the way the hub's sameCommit does.
-// A DIFFERENT target must reset the attempt budget, so this comparison is what
-// keeps the latch from outliving the upgrade it was created for.
-func sameUpgradeTarget(a, b string) bool {
-	if a == "" || b == "" {
-		return false
-	}
-	n := len(a)
-	if len(b) < n {
-		n = len(b)
-	}
-	return strings.EqualFold(a[:n], b[:n])
-}
-
-func writeUpgradeMarker(path string, m upgradeMarker, logger *slog.Logger) {
-	data, err := json.Marshal(m)
-	if err != nil {
-		logger.Warn("failed to encode upgrade marker", "error", err)
-		return
-	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		logger.Warn("failed to write upgrade marker", "path", path, "error", err)
-	}
-}
-
-// upgradeMarkerPath and lastUpgradeOutcomePath are the two on-PVC records the
-// spoke keeps for auto-upgrade visibility (#7092). The marker at
-// upgradeMarkerPath is present ONLY while an instructed upgrade has not landed
-// (in flight or terminally failed) and is cleared the moment the new image
-// boots — so it can NEVER represent a success. lastUpgradeOutcomePath is the
-// durable companion that records the last upgrade that actually LANDED, so the
-// dashboard can tell "attempted and succeeded" apart from "never attempted"
-// instead of letting a blank panel masquerade as success.
-const (
-	upgradeMarkerPath      = "/data/upgrade-requested"
-	lastUpgradeOutcomePath = "/data/last-upgrade-outcome"
-)
-
-// upgradeOutcome is the durable "last upgrade LANDED" record. Written on the
-// boot that completes an upgrade (reconcileUpgradeOutcomeAtBoot), it survives —
-// unlike upgradeMarker, which is removed the moment the target image boots.
-type upgradeOutcome struct {
-	TargetSHA   string    `json:"target_sha"`
-	CurrentSHA  string    `json:"current_sha"`
-	RequestedAt time.Time `json:"requested_at"`
-	CompletedAt time.Time `json:"completed_at"`
-}
-
-func writeUpgradeOutcome(path string, o upgradeOutcome, logger *slog.Logger) {
-	data, err := json.Marshal(o)
-	if err != nil {
-		logger.Warn("failed to encode upgrade outcome", "error", err)
-		return
-	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		logger.Warn("failed to write upgrade outcome", "path", path, "error", err)
-	}
-}
-
-// reconcileUpgradeOutcomeAtBoot records a SUCCESSFUL self-upgrade. An in-flight
-// marker whose target equals the now-running commit means the instructed
-// upgrade LANDED: the pod booted on the target image. That success would
-// otherwise vanish — the next upgrade instruction silently discards the stale
-// marker, so a hive that updated cleanly looks identical to one that never
-// tried. This persists the success durably and clears the in-flight marker so
-// it stops reading as "not landed". A marker whose target does NOT match the
-// running commit is still in flight or failed and is left untouched for that
-// surface. Called once at startup, before the heartbeat loop and dashboard come
-// up, so the dashboard always sees the reconciled state.
-func reconcileUpgradeOutcomeAtBoot(markerPath, outcomePath, runningSHA string, logger *slog.Logger) {
-	data, err := os.ReadFile(markerPath)
-	if err != nil {
-		return
-	}
-	m := parseUpgradeMarker(data)
-	if m.TargetSHA == "" || runningSHA == "" || !sameUpgradeTarget(m.TargetSHA, runningSHA) {
-		return
-	}
-	writeUpgradeOutcome(outcomePath, upgradeOutcome{
-		TargetSHA:   m.TargetSHA,
-		CurrentSHA:  m.CurrentSHA,
-		RequestedAt: m.RequestedAt,
-		CompletedAt: time.Now().UTC(),
-	}, logger)
-	if err := os.Remove(markerPath); err != nil && !os.IsNotExist(err) {
-		logger.Warn("failed to clear landed upgrade marker", "path", markerPath, "error", err)
-	}
-	logger.Info("self-upgrade landed: recorded successful upgrade outcome",
-		"target", m.TargetSHA, "current", runningSHA)
-}
-
-// recordUpgradeError annotates the existing marker with the cause of the failed
-// attempt so the NEXT boot can log why the previous one did not land — without
-// it the reason dies with the process and the failure is invisible.
-// upgradeFailureSummary renders what the hub shows an operator. An empty
-// LastError must never render as a dangling "attempts: " - a colon promising a
-// reason and delivering none is worse than saying the reason was not captured,
-// because it reads as truncation and sends the reader looking for the rest.
-func upgradeFailureSummary(attempts int, lastError string) string {
-	if strings.TrimSpace(lastError) == "" {
-		return fmt.Sprintf("self-upgrade failed after %d attempts (no error recorded; the image never changed - check that the deployment tracks a tag carrying the target SHA)", attempts)
-	}
-	return fmt.Sprintf("self-upgrade failed after %d attempts: %s", attempts, lastError)
-}
-
-func recordUpgradeError(path string, upgradeErr error, logger *slog.Logger) {
-	if upgradeErr == nil {
-		return
-	}
-	var m upgradeMarker
-	data, err := os.ReadFile(path)
-	switch {
-	case os.IsNotExist(err):
-		return
-	case err != nil:
-		logger.Warn("upgrade marker unreadable; recording the error against a fresh marker",
-			"path", path, "error", err)
-	default:
-		m = parseUpgradeMarker(data)
-	}
-	m.LastError = upgradeErr.Error()
-	writeUpgradeMarker(path, m, logger)
-}
 
 func loadOrGenerateHiveID(logger *slog.Logger) string {
 	if envID := os.Getenv("HIVE_ID"); envID != "" {
@@ -7800,28 +7548,6 @@ const taskListSweepInterval = 15 * time.Minute
 // chance of editing a suggestion under a reader's cursor.
 const duplicateSweepInterval = time.Hour
 
-// trustedMergerFunc resolves a GitHub login against the hive's authorized-users
-// allowlist and reports whether it holds at least config.RoleMerger — the same
-// bar requireMergerOrOwnerRole enforces on the dashboard queue endpoint (audit
-// F3).
-//
-// Fails CLOSED: a nil config or a login absent from the allowlist is NOT
-// trusted, so an unclassifiable actor can never merge. cfg is read on every
-// call so a config reload that grants or revokes the merger tier takes effect
-// without a restart.
-func trustedMergerFunc(cfg *config.Config) automerge.MergerAuthorizer {
-	return func(login string) bool {
-		if cfg == nil || strings.TrimSpace(login) == "" {
-			return false
-		}
-		role, ok := cfg.Dashboard.AuthorizedRole(login)
-		if !ok {
-			return false
-		}
-		return config.RoleAtLeast(role, config.RoleMerger)
-	}
-}
-
 // runAutoMergeSweepIfDue drains the label-queued auto-merge queue (the human
 // "Approved ... for Hive auto-merge" path) at most once per
 // autoMergeSweepInterval. All merge-eligibility decisions — queue-approval
@@ -8052,140 +7778,12 @@ func runDuplicateSweepIfDue(ctx context.Context, cfg *config.Config, ghClient *g
 			"commented": strconv.Itoa(result.Commented),
 		},
 	})
-} // mergeEligiblePath is a var (not a const) only so tests can point
-// mergeTargetEligible at a temp file; production never reassigns it.
-var mergeEligiblePath = "/var/run/hive-metrics/merge-eligible.json"
+}
 
 var (
 	ciFailingPath      = "/var/run/hive-metrics/ci-failing.json"
 	intentVerdictsPath = "/var/run/hive-metrics/intent-verdicts.json"
 )
-
-// acmmHoldGatedMinLevel / acmmHoldGatedMaxLevel bracket the ACMM levels whose
-// merge policy is "hold-gated" — every agent-opened PR gets a "hold" label and
-// no agent merges (see src/pkg/config/packs/level-{3,4,5}.yaml). L1/L2 are
-// "manual" (agents open no PRs) and L6 is "auto-merge on green CI, no hold
-// label", so both fall outside this range. Used by the F6 hold-label decider.
-const (
-	acmmHoldGatedMinLevel = 3
-	acmmHoldGatedMaxLevel = 5
-)
-
-// shouldHoldAgentPR keeps public outreach claims human-reviewed even at L6,
-// where ordinary agent PRs may auto-merge. The general ACMM hold gate remains
-// unchanged for all roles at L3-L5.
-func shouldHoldAgentPR(agentName string, level int) bool {
-	if strings.EqualFold(strings.TrimSpace(agentName), "outreach") {
-		return true
-	}
-	return level >= acmmHoldGatedMinLevel && level <= acmmHoldGatedMaxLevel
-}
-
-// mergeableJSONUnknown is the explicit wire value for "mergeability was never
-// determined". It is spelled out rather than left as "" so a consumer reading
-// merge-eligible.json cannot mistake an unpopulated field for a definitive
-// "no" — the failure mode that made every PR read as unmergeable.
-const mergeableJSONUnknown = "unknown"
-
-// mergeTargetEligible reports whether (repo, number) currently appears in the
-// governor's merge-eligible.json AT the expected head SHA. It reads the file
-// FRESH on every call (never caches) because eligibility is recomputed each
-// governor cycle — a stale cache could authorize a PR that has since fallen out
-// of the list. On any read/parse error it returns false (FAIL CLOSED): if we
-// cannot prove the target is eligible, we must not authorize the merge.
-//
-// M4 (CWE-367, TOCTOU): the governor records the head SHA it observed when it
-// deemed the PR eligible (eligiblePR.HeadSHA). A branch can move between that
-// review and the merge relay firing, so matching (repo, number) alone would let
-// a moved head merge at a commit the governor never vetted. We therefore also
-// require the entry's stored head_sha to equal expectSHA. A mismatch — or a
-// stored SHA that is empty (governor could not observe it) — fails closed; the
-// relay's SHA pin then fails the merge cleanly if a stale request slips through.
-//
-// merge-eligible.json stores repos as "owner/repo"; a MergeRequest.Repo may be
-// bare ("repo") or fully qualified ("owner/repo"). We match on the bare repo
-// name (the segment after the last "/") plus the number, so both request forms
-// resolve to the same eligible entry without depending on the org prefix.
-func mergeTargetEligible(repo string, number int, expectSHA string) bool {
-	data, err := os.ReadFile(mergeEligiblePath)
-	if err != nil {
-		return false // fail closed: no list ⇒ nothing is eligible
-	}
-	var payload struct {
-		Items []struct {
-			Number  int    `json:"number"`
-			Repo    string `json:"repo"`
-			HeadSHA string `json:"head_sha"`
-		} `json:"merge_eligible"`
-	}
-	if err := json.Unmarshal(data, &payload); err != nil {
-		return false // fail closed: unparseable list ⇒ deny
-	}
-	want := bareRepoName(repo)
-	wantSHA := strings.TrimSpace(expectSHA)
-	for _, it := range payload.Items {
-		if it.Number == number && bareRepoName(it.Repo) == want {
-			// M4: bind authorization to the governor-observed head. An empty
-			// stored SHA cannot be proven to match, so it fails closed rather
-			// than authorizing an unpinned head.
-			return strings.TrimSpace(it.HeadSHA) != "" && strings.TrimSpace(it.HeadSHA) == wantSHA
-		}
-	}
-	return false
-}
-
-// bareRepoName returns the repo segment after the last "/", so "owner/repo" and
-// "repo" compare equal. Used to match a MergeRequest.Repo against the
-// "owner/repo" entries in merge-eligible.json regardless of prefix.
-func bareRepoName(repo string) string {
-	if i := strings.LastIndex(repo, "/"); i >= 0 {
-		return repo[i+1:]
-	}
-	return repo
-}
-
-// bindMergeAuthz wraps the manager's agent/UID/CanMerge authorizer with the
-// F4 target-binding checks (CWE-863). The inner authz owns the "may this agent
-// merge at all" decision; this wrapper owns "is THIS specific target one the
-// governor deemed eligible, at a pinned SHA". Both must pass before MergePR is
-// reached. Ordering: run the agent/UID/CanMerge check first (cheapest, and it
-// gives the clearest denial reason), then the SHA + eligible-list binding.
-func bindMergeAuthz(inner func(agent string, fileUID int) error) github.MergeRequestAuthorizer {
-	return func(agent string, fileUID int, repo string, number int, expectSHA string) error {
-		if err := inner(agent, fileUID); err != nil {
-			return err
-		}
-		// (a) Require a pinned head SHA. An empty expectSHA means "merge whatever
-		// HEAD is now", which is the TOCTOU hole: a PR that was eligible when the
-		// governor last looked could have had a malicious commit pushed since.
-		// MergePR passes expectSHA as the required head SHA, so a moved head fails
-		// cleanly — but only if we insist it is set.
-		if strings.TrimSpace(expectSHA) == "" {
-			return fmt.Errorf("merge target %s#%d has no expected head SHA — refusing to merge an unpinned head (TOCTOU guard)", repo, number)
-		}
-		// (b) Require the target to be in the governor's current merge-eligible
-		// list AT the expected head SHA. This binds authorization to a PR the
-		// hive actually deemed landable this cycle, at the exact commit it
-		// reviewed, so an injected agent cannot request landing an arbitrary
-		// reachable PR (e.g. its own) whose required checks happen to pass, nor
-		// land an eligible PR at a head that moved after review (M4, CWE-367).
-		// Read fresh + fail closed (see mergeTargetEligible).
-		if !mergeTargetEligible(repo, number, expectSHA) {
-			return fmt.Errorf("merge target %s#%d is not in the current merge-eligible list at head %s — only governor-approved PRs may be landed via the merge relay, and only at the reviewed head SHA", repo, number, expectSHA)
-		}
-		return nil
-	}
-}
-
-// mergeableJSON renders a tri-state mergeability verdict for the
-// merge-eligible.json marker, mapping the unknown zero value to an explicit
-// "unknown" rather than an empty string.
-func mergeableJSON(m github.Mergeable) string {
-	if m == github.MergeableUnknown {
-		return mergeableJSONUnknown
-	}
-	return string(m)
-}
 
 // claimLedger holds the duplicate-PR guard's persisted issue→PR claim mapping
 // across eval cycles. It is loaded lazily on first use (and retried on a load
@@ -8288,306 +7886,6 @@ func claimingPRRedStale(cfg *config.Config, actionable *github.ActionableResult)
 			return false // not enumerated, or healthy → keep suppressing
 		}
 		return store.StaleRed(st.repo, prNumber, st.headSHA)
-	}
-}
-
-func writeIntentVerdicts(
-	ctx context.Context,
-	cfg *config.Config,
-	ghClient *github.Client,
-	actionable *github.ActionableResult,
-	beadStores map[string]*beads.Store,
-	logger *slog.Logger,
-) map[string]intent.Verdict {
-	verdicts := make(map[string]intent.Verdict)
-	if cfg == nil || actionable == nil {
-		return verdicts
-	}
-	_ = os.MkdirAll("/var/run/hive-metrics", 0o755)
-	aiAuthor := strings.TrimSpace(cfg.EffectiveAIAuthor())
-	intentCfg := intentConfigFromCfg(cfg)
-	var alignmentReviewer *intent.AlignmentReviewer
-	if strings.TrimSpace(cfg.Intent.AlignmentModel) != "" {
-		endpoint, apiKey, _ := cfg.Governor.ResolveReviewer()
-		var err error
-		alignmentReviewer, err = intent.NewAlignmentReviewer(intent.AlignmentReviewerConfig{
-			Endpoint: endpoint,
-			APIKey:   apiKey,
-			Model:    cfg.Intent.AlignmentModel,
-		})
-		if err != nil {
-			logger.Warn("intent alignment reviewer disabled", "error", err)
-		}
-	}
-	type verdictRecord struct {
-		Repo       string         `json:"repo"`
-		Number     int            `json:"number"`
-		Title      string         `json:"title"`
-		Author     string         `json:"author"`
-		Enforced   bool           `json:"enforced"`
-		Verdict    intent.Verdict `json:"verdict"`
-		Classify   string         `json:"classification_reason"`
-		FetchError string         `json:"fetch_error,omitempty"`
-	}
-	records := make([]verdictRecord, 0, len(actionable.PRs.Items))
-	for _, pr := range actionable.PRs.Items {
-		fullRepo := fullRepoName(pr.Repo, cfg.Project.Org)
-		key := fmt.Sprintf("%s/%d", fullRepo, pr.Number)
-		agentPR := aiAuthor != "" && strings.EqualFold(pr.Author, aiAuthor)
-		record := verdictRecord{
-			Repo:     fullRepo,
-			Number:   pr.Number,
-			Title:    pr.Title,
-			Author:   pr.Author,
-			Enforced: cfg.Intent.Enforce,
-		}
-		if !agentPR {
-			class := intent.Classify(intent.PR{Title: pr.Title, Labels: pr.Labels, Author: pr.Author, AgentAuthor: false}, intentCfg)
-			verdict := intent.Evaluate(class, intent.Evidence{})
-			verdicts[key] = verdict
-			record.Verdict = verdict
-			record.Classify = class.Reason
-			records = append(records, record)
-			continue
-		}
-		body, files, approved, err := fetchIntentPREvidence(ctx, ghClient, fullRepo, pr.Number)
-		if err != nil {
-			verdict := intent.Verdict{
-				Tier:       intent.Tier1,
-				Authorized: false,
-				Reason:     "intent evidence unavailable: " + err.Error(),
-				AgentPR:    true,
-			}
-			verdicts[key] = verdict
-			record.Verdict = verdict
-			record.FetchError = err.Error()
-			records = append(records, record)
-			logger.Warn("intent verification evidence fetch failed", "repo", fullRepo, "number", pr.Number, "error", err)
-			continue
-		}
-		class := intent.Classify(intent.PR{
-			Title:       pr.Title,
-			Body:        body,
-			Labels:      pr.Labels,
-			Files:       files,
-			Author:      pr.Author,
-			AgentAuthor: true,
-		}, intentCfg)
-		evidence := intent.BuildEvidenceForRepo(body, fullRepo, beadStores, approved)
-		verdict := intent.Evaluate(class, evidence)
-		issueTexts, issueErr := fetchIntentIssueTexts(ctx, ghClient, fullRepo, body)
-		if issueErr != nil {
-			logger.Warn("intent alignment issue evidence fetch failed", "repo", fullRepo, "number", pr.Number, "error", issueErr)
-		}
-		refs := intent.LinkedIssueRefs(body, fullRepo)
-		alignCtx := intent.BuildAlignmentContext(intent.PR{
-			Title:       pr.Title,
-			Body:        body,
-			Labels:      pr.Labels,
-			Files:       files,
-			Author:      pr.Author,
-			AgentAuthor: true,
-		}, issueTexts, beadStores, refs)
-		alignment := intent.EvaluateAlignment(alignCtx, class.Tier, intentCfg)
-		if alignmentReviewer != nil {
-			modelVerdict, err := alignmentReviewer.Review(ctx, alignCtx)
-			if err != nil {
-				logger.Warn("intent alignment model review failed open", "repo", fullRepo, "number", pr.Number, "error", err)
-				alignment = intent.MergeAlignment(alignment, nil, err)
-			} else {
-				alignment = intent.MergeAlignment(alignment, &modelVerdict, nil)
-			}
-		}
-		verdict.Alignment = &alignment
-		verdicts[key] = verdict
-		record.Verdict = verdict
-		record.Classify = class.Reason
-		records = append(records, record)
-		if !verdict.Authorized {
-			logger.Info("intent authorization denied", "repo", fullRepo, "number", pr.Number, "tier", verdict.Tier, "reason", verdict.Reason, "enforce", cfg.Intent.Enforce)
-		}
-		if alignment.Misaligned() {
-			logger.Info("intent alignment denied", "repo", fullRepo, "number", pr.Number, "reason", alignment.Rationale, "enforce", cfg.Intent.Enforce)
-			recordIntentAlignmentAdvisory(beadStores, fullRepo, pr.Number, alignment, logger)
-		}
-	}
-	payload := map[string]any{
-		"generated_at": time.Now().UTC().Format(time.RFC3339),
-		"enforced":     cfg.Intent.Enforce,
-		"verdicts":     records,
-	}
-	if data, err := json.Marshal(payload); err == nil {
-		atomicWrite(intentVerdictsPath, data)
-	} else {
-		logger.Warn("failed to marshal intent verdicts", "error", err)
-	}
-	return verdicts
-}
-
-func fetchIntentPREvidence(ctx context.Context, ghClient *github.Client, repo string, number int) (string, []intent.ChangedFile, bool, error) {
-	if ghClient == nil || ghClient.GoGitHub() == nil {
-		return "", nil, false, github.ErrNoGitHubClient
-	}
-	owner, repoName, ok := strings.Cut(repo, "/")
-	if !ok || owner == "" || repoName == "" {
-		return "", nil, false, fmt.Errorf("invalid repo %q", repo)
-	}
-	client := ghClient.GoGitHub()
-	pr, _, err := client.PullRequests.Get(ctx, owner, repoName, number)
-	if err != nil {
-		return "", nil, false, fmt.Errorf("getting PR: %w", err)
-	}
-	files, err := automerge.ListChangedFiles(ctx, client, owner, repoName, pr)
-	if err != nil {
-		return "", nil, false, err
-	}
-	approved, err := hasMaintainerApproval(ctx, client, owner, repoName, number)
-	if err != nil {
-		return "", nil, false, err
-	}
-	return pr.GetBody(), files, approved, nil
-}
-
-func fetchIntentIssueTexts(ctx context.Context, ghClient *github.Client, defaultRepo, body string) ([]intent.TextEvidence, error) {
-	if ghClient == nil || ghClient.GoGitHub() == nil {
-		return nil, github.ErrNoGitHubClient
-	}
-	client := ghClient.GoGitHub()
-	refs := intent.LinkedIssueRefs(body, defaultRepo)
-	out := make([]intent.TextEvidence, 0, len(refs))
-	for _, ref := range refs {
-		repo := ref.Repo
-		if repo == "" {
-			repo = defaultRepo
-		}
-		owner, repoName, ok := strings.Cut(repo, "/")
-		if !ok || owner == "" || repoName == "" {
-			continue
-		}
-		issue, _, err := client.Issues.Get(ctx, owner, repoName, ref.Number)
-		if err != nil {
-			return out, fmt.Errorf("getting linked issue %s#%d: %w", repo, ref.Number, err)
-		}
-		out = append(out, intent.TextEvidence{
-			Source: fmt.Sprintf("issue %s#%d", repo, ref.Number),
-			Title:  issue.GetTitle(),
-			Body:   issue.GetBody(),
-		})
-	}
-	return out, nil
-}
-
-func recordIntentAlignmentAdvisory(stores map[string]*beads.Store, repo string, number int, alignment intent.AlignmentVerdict, logger *slog.Logger) {
-	store := stores["intent"]
-	if store == nil {
-		store = stores["quality"]
-	}
-	if store == nil {
-		for _, candidate := range stores {
-			if candidate != nil {
-				store = candidate
-				break
-			}
-		}
-	}
-	if store == nil {
-		return
-	}
-	title := fmt.Sprintf("Intent alignment drift in %s#%d", repo, number)
-	// "<owner>/<repo>#<n>", NOT "gh-<owner>/<repo>#<n>". The old form fused the
-	// source prefix into the org when the digest built its URL, so every one of
-	// these rendered a link to a github.com/gh-<owner> that does not exist
-	// (#6080). The renderer strips the prefix defensively for beads already
-	// written this way; this stops writing new ones.
-	ref := fmt.Sprintf("%s#%d", repo, number)
-	// Beads created before that change carry the prefixed form. Matching both
-	// keeps this idempotent across the change: without it the first run after
-	// upgrading would fail to recognise the existing bead and open a duplicate.
-	legacyRef := "gh-" + ref
-	for _, b := range store.List(beads.ListFilter{}) {
-		if b.Type == beads.TypeAdvisory && b.Title == title &&
-			(b.ExternalRef == ref || b.ExternalRef == legacyRef) &&
-			b.Status != beads.StatusClosed && b.Status != beads.StatusDone {
-			return
-		}
-	}
-	b, err := store.Create(title, beads.TypeAdvisory, beads.PriorityHigh, "intent", ref)
-	if err != nil {
-		logger.Warn("failed to record intent alignment advisory", "repo", repo, "number", number, "error", err)
-		return
-	}
-	_ = store.Update(b.ID, func(bead *beads.Bead) {
-		bead.Notes = alignmentSummary(alignment)
-	})
-}
-
-func alignmentSummary(alignment intent.AlignmentVerdict) string {
-	var parts []string
-	if alignment.Rationale != "" {
-		parts = append(parts, alignment.Rationale)
-	}
-	for _, f := range alignment.DeterministicFindings {
-		if f.Status == intent.AlignmentStatusMisaligned {
-			parts = append(parts, f.Code+": "+f.Reason+" ("+strings.Join(f.Files, ", ")+")")
-		}
-	}
-	if alignment.Model != nil && alignment.Model.Status == intent.AlignmentStatusMisaligned {
-		parts = append(parts, "model: "+alignment.Model.Rationale)
-	}
-	if len(parts) == 0 {
-		return "intent alignment check reported misalignment"
-	}
-	return strings.Join(parts, "\n")
-}
-
-func hasMaintainerApproval(ctx context.Context, client *gh.Client, owner, repo string, number int) (bool, error) {
-	opts := &gh.ListOptions{PerPage: 100}
-	latest := make(map[string]string)
-	maintainer := make(map[string]bool)
-	for {
-		reviews, resp, err := client.PullRequests.ListReviews(ctx, owner, repo, number, opts)
-		if err != nil {
-			return false, fmt.Errorf("listing PR reviews: %w", err)
-		}
-		for _, review := range reviews {
-			login := review.GetUser().GetLogin()
-			if login == "" {
-				continue
-			}
-			if maintainerAssociation(review.GetAuthorAssociation()) {
-				switch review.GetState() {
-				case "APPROVED", "CHANGES_REQUESTED", "DISMISSED":
-					latest[login] = review.GetState()
-				}
-				maintainer[login] = true
-			}
-		}
-		if resp == nil || resp.NextPage == 0 {
-			break
-		}
-		opts.Page = resp.NextPage
-	}
-	approved := false
-	for login, state := range latest {
-		if !maintainer[login] {
-			continue
-		}
-		switch state {
-		case "CHANGES_REQUESTED":
-			return false, nil
-		case "APPROVED":
-			approved = true
-		}
-	}
-	return approved, nil
-}
-
-func maintainerAssociation(association string) bool {
-	switch strings.ToUpper(strings.TrimSpace(association)) {
-	case "OWNER", "MEMBER", "COLLABORATOR":
-		return true
-	default:
-		return false
 	}
 }
 
@@ -8708,409 +8006,6 @@ func auditPRAgents(org string, since time.Time, auditPath string) map[string]str
 	return out
 }
 
-// anyRequiredCheckFailing reports whether any of a PR's failing check names
-// is in the operator-declared required set.
-func anyRequiredCheckFailing(failing []string, required map[string]bool) bool {
-	for _, name := range failing {
-		if required[name] {
-			return true
-		}
-	}
-	return false
-}
-
-// mergeBucket is where the merge-eligible classifier files a PR: the
-// merge-eligible.json list, the ci-failing.json list, or neither.
-type mergeBucket int
-
-const (
-	mergeBucketSkip mergeBucket = iota
-	mergeBucketFailing
-	mergeBucketEligible
-)
-
-// mergeGates bundles the per-tick inputs the classifier applies beyond the
-// PR itself: the intent and review artifacts and the operator's
-// required-check set.
-type mergeGates struct {
-	enforceIntent         bool
-	intentVerdicts        map[string]intent.Verdict
-	requireReviewApproval bool
-	reviewArtifact        review.Artifact
-	reviewLoaded          bool
-	requiredChecks        map[string]bool
-}
-
-// classifyMergeEligibility is THE merge-eligibility rule: the one place that
-// decides whether a PR goes to merge-eligible.json (the sweep would merge it
-// now), ci-failing.json (its author has CI to fix), or neither. It returns
-// the bucket and, for the dashboard, the same decision as a MergeVerdict with
-// the reason spelled out (hivecommons/hive#7478): the pill is painted from
-// this verdict, so green on the card means exactly what the sweep means by
-// eligible, and never the looser "GitHub says mergeable".
-//
-// intentReason is non-empty only when the intent gate excluded the PR; the
-// caller logs it (the log line carries the verdict tier, which this function
-// does not need).
-func classifyMergeEligibility(pr github.PullRequest, held bool, fullRepo string, g mergeGates) (bucket mergeBucket, verdict github.MergeVerdict, intentReason string) {
-	// blockedOrOutstanding is the verdict for a PR the sweep will not take
-	// for a reason of its own: the state still depends on what GitHub says,
-	// because a conflicting PR is blocked whatever else is outstanding, and
-	// one whose mergeability was never fetched is unknown, not amber.
-	blockedOrOutstanding := func(reason string) github.MergeVerdict {
-		switch pr.Mergeable {
-		case github.MergeableNo:
-			return github.MergeVerdict{State: github.MergeVerdictBlocked, Reason: notMergeableReason(pr)}
-		case github.MergeableUnknown:
-			return github.MergeVerdict{State: github.MergeVerdictUnknown, Reason: "mergeability not yet known; " + reason}
-		}
-		return github.MergeVerdict{State: github.MergeVerdictOutstanding, Reason: reason}
-	}
-
-	if pr.Draft {
-		return mergeBucketSkip, github.MergeVerdict{State: github.MergeVerdictBlocked, Reason: "draft"}, ""
-	}
-	// intent.Verdict.BlocksMerge is the one shared refusal predicate; the
-	// App self-merge sweep gates on the same function (#6258).
-	if v, ok := g.intentVerdicts[fmt.Sprintf("%s/%d", fullRepo, pr.Number)]; ok && v.BlocksMerge(g.enforceIntent) {
-		reason := v.Reason
-		if v.Authorized && v.Alignment != nil && v.Alignment.Misaligned() {
-			reason = intent.ReasonAlignmentMisaligned + ": " + v.Alignment.Rationale
-		}
-		return mergeBucketSkip, blockedOrOutstanding("intent verification: " + reason), reason
-	}
-
-	if pr.CIStatus == "failure" {
-		// A PR red ONLY on non-required checks (perma-red Playwright
-		// shards, coverage) that GitHub itself reports mergeable is NOT a
-		// failing PR — it is merge-eligible, mirroring the
-		// pending-but-mergeable rule below. Without this, every dependabot
-		// PR on a repo with permanently-red optional checks classified as
-		// "failure", landed in ci-failing.json where no sweep or agent
-		// would ever merge it, and accumulated indefinitely (observed on
-		// kubestellar/console 2026-08-28: 16 dependabot PRs, oldest 11
-		// days). Gated on an operator-declared required-check set: with no
-		// set configured we cannot distinguish required from optional and
-		// keep the old fail-closed behavior. The merge step re-enforces
-		// branch protection, so this cannot merge anything GitHub blocks.
-		onlyOptionalRed := len(g.requiredChecks) > 0 &&
-			!anyRequiredCheckFailing(pr.FailingChecks, g.requiredChecks) &&
-			pr.Mergeable == github.MergeableYes
-		if !onlyOptionalRed {
-			reason := "CI failing"
-			if len(pr.FailingChecks) > 0 {
-				reason += ": " + strings.Join(pr.FailingChecks, ", ")
-			}
-			if len(g.requiredChecks) == 0 && pr.Mergeable == github.MergeableYes {
-				// GitHub calls it mergeable (unstable): nothing REQUIRED is
-				// red. The sweep still refuses it because, with no
-				// required-check set declared, it cannot tell optional from
-				// required. Say so — this is the shape #7478 was filed on.
-				reason += " (GitHub reports it mergeable; declare auto_merge.required_checks for the sweep to treat non-required checks as optional)"
-			}
-			return mergeBucketFailing, blockedOrOutstanding(reason), ""
-		}
-	}
-
-	// The hold check sits AFTER the red classification on purpose
-	// (hivecommons/hive#7438): a held PR must never become merge-eligible,
-	// but a held RED PR is still its author's to repair. When this skip ran
-	// first, a level-held agent PR with a failing check vanished from
-	// ci-failing.json, its author never got a fix-before-new block for it,
-	// and it sat red and held until a human did the agent's repair.
-	if held {
-		return mergeBucketSkip, blockedOrOutstanding("held: a hold label keeps it out of the sweep"), ""
-	}
-
-	// A PR whose CI is still "pending" is nonetheless merge-eligible when
-	// GitHub itself reports it as mergeable (mergeStateStatus=unstable):
-	// that state means every REQUIRED check has passed and only
-	// non-required checks remain outstanding. Those non-required checks —
-	// a cancelled Mobile Browser Tests, a still-running coverage-report,
-	// perpetually-pending tide — can never complete on their own, so
-	// waiting for CIStatus=="success" (all checks done) leaves cleanly
-	// mergeable PRs frozen out of the sweep indefinitely (observed
-	// 2026-08-04: three green console PRs stuck for hours). The merge step
-	// re-enforces branch protection, so trusting the mergeable verdict here
-	// cannot merge anything GitHub would actually block.
-	if pr.CIStatus == "pending" && pr.Mergeable != github.MergeableYes {
-		// Genuinely not ready: a required check is still running (or
-		// mergeability is unknown/no). Leave it out of both buckets, as
-		// before — it neither merges nor gets a fix dispatched.
-		return mergeBucketSkip, blockedOrOutstanding("CI pending"), ""
-	}
-
-	if pr.Mergeable == github.MergeableNo {
-		// A conflicting PR cannot merge no matter how green its checks
-		// are. Listing it as merge-eligible left the eligible count stuck
-		// at N forever while nothing could actually merge (console
-		// #23002/#23003, 2026-08-31: the only two build-gate-green PRs
-		// were DIRTY go.mod dependabot bumps). Conflicts are the
-		// rebase/needs-human path's job, not the sweep's — keep them out
-		// of the eligible bucket.
-		return mergeBucketSkip, github.MergeVerdict{State: github.MergeVerdictBlocked, Reason: notMergeableReason(pr)}, ""
-	}
-
-	if g.requireReviewApproval {
-		if !g.reviewLoaded {
-			return mergeBucketSkip, blockedOrOutstanding("review approval required, but review-verdicts.json is unavailable"), ""
-		}
-		if !g.reviewArtifact.HasAggregateApproval(fullRepo, pr.Number, pr.HeadSHA) {
-			return mergeBucketSkip, blockedOrOutstanding("awaiting review approval"), ""
-		}
-	}
-
-	// Eligible. The reason names what GitHub still shows outstanding that
-	// the sweep chooses to ignore, so a green pill beside a red optional
-	// check does not read as "all green".
-	reason := "the sweep would merge this now"
-	switch {
-	case pr.CIStatus == "failure":
-		reason += " — only non-required checks are red (" + strings.Join(pr.FailingChecks, ", ") + ")"
-	case pr.CIStatus == "pending":
-		reason += " — non-required checks still pending (GitHub: " + pr.MergeableState + ")"
-	case pr.MergeableState == "unstable":
-		reason += " — non-required checks outstanding (GitHub: unstable)"
-	case pr.Mergeable == github.MergeableUnknown:
-		reason += " — mergeability not yet fetched; the sweep re-checks it at merge time"
-	}
-	return mergeBucketEligible, github.MergeVerdict{State: github.MergeVerdictEligible, Reason: reason}, ""
-}
-
-// notMergeableReason names GitHub's own state (dirty, blocked, behind, ...)
-// for a PR it reports as not mergeable; the state is what the operator has
-// to resolve.
-func notMergeableReason(pr github.PullRequest) string {
-	if pr.MergeableState != "" {
-		return "not mergeable on GitHub (" + pr.MergeableState + ")"
-	}
-	return "not mergeable on GitHub"
-}
-
-func writeMergeEligible(actionable *github.ActionableResult, hold github.HoldResult, org string, escalatedPRs map[string]bool, enforceIntent bool, intentVerdicts map[string]intent.Verdict, requireReviewApproval bool, requiredChecks map[string]bool, holdDriftPRs map[string]bool, logger *slog.Logger) map[string]github.MergeVerdict {
-	// holdDriftPRs ("repo/number", same keying as holdSet) are PRs whose hold
-	// just lifted on a branch that MOVED while hold-gated (#5589). They are
-	// treated exactly like held PRs — invisible to both the eligible and the
-	// ci-failing buckets — because neither the merge sweep nor a fix agent
-	// should touch a branch whose unreviewed drift is awaiting a human.
-	verdicts := make(map[string]github.MergeVerdict)
-	holdSet := make(map[string]bool)
-	for _, h := range hold.Items {
-		key := fmt.Sprintf("%s/%d", h.Repo, h.Number)
-		holdSet[key] = true
-	}
-	for key := range holdDriftPRs {
-		holdSet[key] = true
-	}
-	for key := range holdDriftPRs {
-		holdSet[key] = true
-	}
-
-	type eligiblePR struct {
-		Number int      `json:"number"`
-		Repo   string   `json:"repo"`
-		Title  string   `json:"title"`
-		Author string   `json:"author"`
-		Labels []string `json:"labels,omitempty"`
-		// CreatedAt is the PR's forge creation time — the reviewer lane's
-		// ordering key (#5617 item 4); see failingPR.CreatedAt.
-		CreatedAt time.Time `json:"created_at"`
-		// Mergeable is a tri-state string ("yes"/"no"/"unknown"), not a bool.
-		// A bool here defaulted to false for every PR, because the value was
-		// read from a list endpoint that never returns it.
-		Mergeable string `json:"mergeable"`
-		DCO       string `json:"dco"`
-		// HeadSHA is the governor-observed head commit at the moment eligibility
-		// was decided. mergeTargetEligible compares the relay's expected SHA
-		// against this value (M4, CWE-367): a branch that moved after review
-		// no longer matches and fails closed.
-		HeadSHA string `json:"head_sha,omitempty"`
-	}
-
-	type failingPR struct {
-		Number  int    `json:"number"`
-		Repo    string `json:"repo"`
-		Title   string `json:"title"`
-		Author  string `json:"author"`
-		HeadSHA string `json:"head_sha,omitempty"`
-		// FailingChecks + Excerpt carry the raw CI evidence into the kick
-		// work list so fix agents see the actual error, not just "red".
-		FailingChecks []string `json:"failing_checks,omitempty"`
-		Excerpt       string   `json:"excerpt,omitempty"`
-		// Escalated marks PRs past the fix-loop breaker threshold: kick
-		// builders list them separately and agents must NOT dispatch more
-		// fix work for them.
-		Escalated bool `json:"escalated,omitempty"`
-		// Agent is the hive agent whose relay request opened this PR (from the
-		// audit trail's agent_pr_created entries). The scheduler's
-		// fix-before-new section routes each red PR back to its author; empty
-		// means unattributed (kick builders default it to scanner).
-		Agent string `json:"agent,omitempty"`
-		// Labels carries the PR's current labels into the kick builders. The
-		// reviewer lane (#5480) reads them to exclude PRs already carrying
-		// reviewer-passed — a PR that re-escalates after a reviewer pass
-		// belongs to a true human, never to another automated pass.
-		Labels []string `json:"labels,omitempty"`
-		// CreatedAt is the PR's forge creation time — the reviewer lane's
-		// ordering key (#5617 item 4). Its work list is capped at a few PRs
-		// per kick and documented "oldest first", but until this field the
-		// rows carried no age signal at all and were ordered by (repo name, PR
-		// number). Numbers are monotonic only WITHIN a repo, so that proxy
-		// sorted by repo NAME first and could starve an old escalated PR in a
-		// late-alphabet repo behind newer ones, on every kick, forever.
-		CreatedAt time.Time `json:"created_at"`
-		// HeadRef / HeadRepo / FromFork say where the red branch actually
-		// lives (hivecommons/hive#7386). The hive's App token pushes only to
-		// the base repository, so a fork PR is comment-only for every agent:
-		// ReachableAction spells that out ("push" | "comment-only") so no
-		// kick consumer has to discover it with a failed push — the failure
-		// mode that burned a scanner session and left a stray branch on the
-		// base repo under the fork's head-ref name.
-		HeadRef         string `json:"head_ref,omitempty"`
-		HeadRepo        string `json:"head_repo,omitempty"`
-		FromFork        bool   `json:"from_fork,omitempty"`
-		ReachableAction string `json:"reachable_action"`
-		// Held marks a PR carrying a hold label (the ACMM level gate's, or a
-		// human's). The hold is a MERGE checkpoint, not a repair checkpoint
-		// (hivecommons/hive#7438): a held red PR is still its author's to fix,
-		// so it is listed here with the flag rather than dropped — the owning
-		// agent's fix-before-new block says "fix CI, do not remove the hold".
-		Held bool `json:"held,omitempty"`
-	}
-
-	prAgents := auditPRAgents(org, time.Now().Add(-auditPRAttributionWindow), "")
-
-	var eligible []eligiblePR
-	var failing []failingPR
-	var reviewArtifact review.Artifact
-	reviewLoaded := false
-	if requireReviewApproval {
-		var err error
-		reviewArtifact, err = review.LoadArtifact("")
-		if err != nil {
-			logger.Warn("review approval required but review-verdicts.json is unavailable; merge eligibility will fail closed", "error", err)
-		} else {
-			reviewLoaded = true
-		}
-	}
-	// Two populations, one classifier (hivecommons/hive#7438). PRs.Items are
-	// the merge candidates. PRs.Held are PRs the hold gate removed from Items
-	// — they can never become merge-eligible, but a RED one still has to reach
-	// its authoring agent, otherwise it deadlocks: it stays red, so it stays
-	// held, so nothing ever repairs it.
-	type prCandidate struct {
-		pr   github.PullRequest
-		held bool
-	}
-	candidates := make([]prCandidate, 0, len(actionable.PRs.Items)+len(actionable.PRs.Held))
-	for _, pr := range actionable.PRs.Items {
-		candidates = append(candidates, prCandidate{pr: pr})
-	}
-	for _, pr := range actionable.PRs.Held {
-		candidates = append(candidates, prCandidate{pr: pr, held: true})
-	}
-
-	gates := mergeGates{
-		enforceIntent:         enforceIntent,
-		intentVerdicts:        intentVerdicts,
-		requireReviewApproval: requireReviewApproval,
-		reviewArtifact:        reviewArtifact,
-		reviewLoaded:          reviewLoaded,
-		requiredChecks:        requiredChecks,
-	}
-	seen := make(map[string]bool, len(candidates))
-	for _, cand := range candidates {
-		pr := cand.pr
-		key := fmt.Sprintf("%s/%d", pr.Repo, pr.Number)
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		// The hold can arrive either as membership in PRs.Held or as a row in
-		// the hold snapshot; both mean the same thing here.
-		held := cand.held || holdSet[key]
-		fullRepo := fullRepoName(pr.Repo, org)
-
-		bucket, verdict, intentReason := classifyMergeEligibility(pr, held, fullRepo, gates)
-		verdicts[github.MergeVerdictKey(pr)] = verdict
-		if intentReason != "" {
-			iv := intentVerdicts[fmt.Sprintf("%s/%d", fullRepo, pr.Number)]
-			logger.Info("excluding PR from merge-eligible due to intent verification", "repo", fullRepo, "number", pr.Number, "tier", iv.Tier, "reason", intentReason)
-		}
-		switch bucket {
-		case mergeBucketSkip:
-			continue
-		case mergeBucketFailing:
-			failing = append(failing, failingPR{
-				Number:          pr.Number,
-				Repo:            fullRepo,
-				Title:           pr.Title,
-				Author:          pr.Author,
-				HeadSHA:         pr.HeadSHA,
-				FailingChecks:   pr.FailingChecks,
-				Excerpt:         pr.CIFailureExcerpt,
-				Escalated:       escalatedPRs[escalation.Key(fullRepo, pr.Number)],
-				Agent:           prAgents[fmt.Sprintf("%s#%d", fullRepo, pr.Number)],
-				Labels:          pr.Labels,
-				CreatedAt:       pr.CreatedAt,
-				HeadRef:         pr.HeadRef,
-				HeadRepo:        pr.HeadRepo,
-				FromFork:        pr.FromFork,
-				ReachableAction: github.ReachableAction(pr),
-				Held:            held,
-			})
-			continue
-		}
-
-		dco := "unknown"
-		for _, l := range pr.Labels {
-			switch l {
-			case "dco-signoff: yes":
-				dco = "yes"
-			case "dco-signoff: no":
-				dco = "no"
-			}
-		}
-		eligible = append(eligible, eligiblePR{
-			Number:    pr.Number,
-			Repo:      fullRepo,
-			Title:     pr.Title,
-			Author:    pr.Author,
-			Labels:    pr.Labels,
-			CreatedAt: pr.CreatedAt,
-			Mergeable: mergeableJSON(pr.Mergeable),
-			DCO:       dco,
-			HeadSHA:   pr.HeadSHA,
-		})
-	}
-
-	_ = os.MkdirAll("/var/run/hive-metrics", 0o755)
-
-	payload := map[string]any{
-		"generated_at":   time.Now().UTC().Format(time.RFC3339),
-		"merge_eligible": eligible,
-	}
-	data, err := json.Marshal(payload)
-	if err != nil {
-		logger.Warn("failed to marshal merge-eligible", "error", err)
-		return verdicts
-	}
-	atomicWrite(mergeEligiblePath, data)
-	logger.Info("merge-eligible.json updated", "eligible", len(eligible), "ci_failing", len(failing), "total_prs", len(actionable.PRs.Items))
-
-	failPayload := map[string]any{
-		"generated_at": time.Now().UTC().Format(time.RFC3339),
-		"ci_failing":   failing,
-	}
-	failData, err := json.Marshal(failPayload)
-	if err != nil {
-		logger.Warn("failed to marshal ci-failing", "error", err)
-		return verdicts
-	}
-	atomicWrite(ciFailingPath, failData)
-	return verdicts
-}
-
 func planReviewDispatch(cfg *config.Config, actionable *github.ActionableResult, agentMgr *agent.Manager, logger *slog.Logger) review.DispatchPlan {
 	if cfg == nil || actionable == nil || !cfg.Review.RequireApproval || !cfg.Review.FanOut {
 		return review.DispatchPlan{}
@@ -9156,15 +8051,16 @@ func planReviewDispatch(cfg *config.Config, actionable *github.ActionableResult,
 		})
 	}
 	plan := review.PlanDispatch(prs, artifact, state, review.DispatchOptions{
-		RequireApproval:    cfg.Review.RequireApproval,
-		FanOut:             cfg.Review.FanOut,
-		MaxParallelReviews: cfg.Review.EffectiveMaxParallelReviews(),
-		ReviewerAgents:     cfg.Review.ReviewerAgents,
-		FixerAgent:         cfg.Review.FixerAgent,
-		PostComments:       cfg.Review.PostComments,
-		ProjectOrg:         cfg.Project.Org,
-		AIAuthor:           cfg.EffectiveAIAuthor(),
-		Agents:             agents,
+		RequireApproval:      cfg.Review.RequireApproval,
+		FanOut:               cfg.Review.FanOut,
+		MaxParallelReviews:   cfg.Review.EffectiveMaxParallelReviews(),
+		MaxPerspectivesPerPR: cfg.Review.MaxPerspectivesPerPR,
+		ReviewerAgents:       cfg.Review.ReviewerAgents,
+		FixerAgent:           cfg.Review.FixerAgent,
+		PostComments:         cfg.Review.PostComments,
+		ProjectOrg:           cfg.Project.Org,
+		AIAuthor:             cfg.EffectiveAIAuthor(),
+		Agents:               agents,
 	})
 	if len(plan.ReviewKicks)+len(plan.FixKicks) > 0 {
 		logger.Info("review swarm dispatch planned", "review_kicks", len(plan.ReviewKicks), "fix_kicks", len(plan.FixKicks))
@@ -9195,19 +8091,6 @@ func persistReviewDispatchState(plan review.DispatchPlan, delivered []review.Dis
 	if err := review.WriteDispatchState("", state); err != nil {
 		logger.Warn("failed to persist review dispatch state", "error", err)
 	}
-}
-
-// normalizedAutoMergeLabel resolves the configured queue label, falling back
-// to the shared default when the value is blank. Client.SetAutoMergeLabel
-// ignores blank input (keeping whatever was set before) and
-// Client.AutoMergeLabel falls back on read, but the cmd layer normalizes
-// eagerly too so a partially-populated config can never propagate an unnamed
-// label to a fresh client.
-func normalizedAutoMergeLabel(label string) string {
-	if label = strings.TrimSpace(label); label != "" {
-		return label
-	}
-	return github.AutoMergeQueuedLabel
 }
 
 func atomicWrite(path string, data []byte) {
@@ -9562,6 +8445,19 @@ func parseEndpointList(raw string) []string {
 	}
 	return out
 }
+
+// Dashboard system-alert IDs for the budget thresholds.
+const (
+	budgetWarnAlertID      = "budget-warn"
+	budgetExhaustedAlertID = "budget-exhausted"
+	// noCadenceAlertID is the never-kicked cause+fix banner (#5577): enabled
+	// agents with no cadence in any mode and no kick ever.
+	noCadenceAlertID = "agent-no-cadence"
+	// providerBudgetAlertID is the PROVIDER spend rebuff (#4294), kept distinct
+	// from the two token-budget alerts above so an operator can tell "we used
+	// our token allowance" from "the gateway will not spend more money".
+	providerBudgetAlertID = "provider-budget-exceeded"
+)
 
 func dispatchSubcommand(args []string, stdout, stderr io.Writer) (bool, int) {
 	if len(args) == 0 {
