@@ -11,6 +11,25 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-18 (v4.58.0)
+
+### Added
+
+- Added the Slack integration design (`src/docs/design/slack-integration.md`): Socket Mode transport as the second backend on the v6 chat spine, mrkdwn translation, fail-closed allowlist, and the shared guard invariant (#7563 Track 3).
+- Added the v5 → v6 top-up workflow (`.github/workflows/v6-topup.yml`): forward-merges v5 into v6 on every v5 push plus a daily safety net, with the same conflict-inventory-and-stop policy as the v4 → v5 top-up (#7563 Track 7).
+
+### Changed
+
+- `runEvalCycle` advisory digest pinning and posting now live behind two testable seams (`pinDigestSnapshot`, `publishAdvisoryDigest` in `cmd/hive/eval_cycle_advisory_seams.go`) with the GitHub/dashboard effects injected; `runEvalCycle` shrinks 902 → 785 lines and `cmd/hive` coverage rises 54.7% → 56.2% (refs #7232).
+- Boot-time decisions in `main()` — default config path, HIVE_CONFIG disagreement, short-SHA canonicalization, hub target from `HIVE_HUB_URL`/`HIVE_CLUSTER_ID`, the ACMM pack plan (config vs persisted vs `HIVE_LEVEL`, merge vs re-apply), the self-upgrade marker verdict, coverage badge URL, metrics primary repo, fleet-stats author identity (ai_author vs bot-token login), and the policies checkout/policy directories — now live in `cmd/hive/boot_seams.go` as pure, fully tested helpers; `main()` keeps only the effects (refs #7232).
+- The `runEvalCycle` test harness now drives the advisory digest end to end (bead store → pinned issue → rendered digest → App comment POST → healed App-permission finding, cleared App banner); `runEvalCycle` coverage 32.9% → 49.0%, `cmd/hive` 54.7% → 55.9% (refs #7232).
+- The review perspective cap is now a budget per pull request head commit rather than per dispatch cycle, so setting it actually limits how many review comments one pull request receives. Leaving it unset keeps every perspective, which remains the default.
+- ROADMAP.md / docs roadmap: the v6 line is **open** — branch `v6` cut from v5 on 2026-09-18, themed dashboard-optional operation (chat spine, Slack/Discord/Teams/Matrix/Telegram, GitHub @-mention triggers, email + push/on-call escalation), tracked by epic #7563; v6 implementation PRs target the `v6` branch only and every new surface reuses the dashboard's role/capability/ioscan guards
+
+### Fixed
+
+- Review verdicts now persist on durable storage and merge across refreshes, so a restart no longer makes the hive forget what it already reviewed and post duplicate comments on the same pull requests.
+
 ## 2026-09-18 (v4.57.1)
 
 ### Changed
