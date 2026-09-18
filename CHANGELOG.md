@@ -11,6 +11,13 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-18 (v4.56.0)
+
+### Added
+
+- The governor PLANNING tile is now clickable and opens the plan view it always pointed at: a list of every plan (drafts awaiting review first, backed by the new `GET /api/plans`) and a per-plan review modal with approve / reject / retag / remove controls — so plans can finally be approved from the dashboard instead of raw API calls (#7537).
+- Added two review-swarm settings, both on the Features tab's Review Gate section. `review.all_authors` makes every open PR eligible for review regardless of who opened it, instead of only agent-authored ones — for repos where the PR queue itself is the problem and a contributor's PR is no less stuck than an agent's. `review.acknowledge_no_findings` makes a clean review leave one short line saying it reviewed and found nothing, so review coverage is visible on the PR rather than being indistinguishable from a reviewer that never ran. Both default off.
+
 ## 2026-09-18 (v4.55.1)
 
 ### Changed
