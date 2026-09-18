@@ -1,1 +1,0 @@
-- Added a Features → Review Gate control for the "what to merge next" recommendations issue, so it can be turned on, scoped to specific repositories, and given an opening threshold from the dashboard instead of only from `hive.yaml`.
