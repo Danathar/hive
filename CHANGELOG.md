@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-18 (v4.58.2)
+
+### Fixed
+
+- Hardened every hive-side drop-box reader (pr/issue/merge/review request queues and the token-access audit spool) against FIFO block and symlink follow: open with O_NOFOLLOW, verify a regular file, and read through a size-capped reader.
+
 ## 2026-09-18 (v4.58.1)
 
 ### Changed
