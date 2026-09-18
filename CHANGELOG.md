@@ -11,6 +11,18 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-18 (v4.57.0)
+
+### Added
+
+- Review swarm can now mark PRs it holds for a human with an existing repo label (`review.human_decision_label`, e.g. `3-human-queue`), making the human queue filterable from the PR list. The label is never created and never required: if it is unset, misspelled, or absent from the repo, labeling is skipped and the review comment's in-body marker still carries the signal.
+- Added a **Max perspectives per PR** control to Settings → Features → Review Gate, so the per-PR perspective cap can be set from the dashboard instead of only in YAML. Without it the cap shipped unreachable: parallel review slots are spent in PR order, so the first PR in a deep queue absorbs every slot and adding reviewers buys more opinions on one PR instead of coverage across many. 0 or empty keeps the existing no-cap default.
+
+### Changed
+
+- `ContributeWSHub.HandleWS` in `pkg/dashboard/contribute_ws.go` was a single 1,154-line function covering admission, the auth handshake, task dispatch, lease renewal, completion/failure settlement, and disconnect teardown. It is now a 124-line read loop over a per-socket `wsSession` whose named phase methods (`handleAuthResponse`, `handleReady`, `handleTaskAccepted`, `handleTaskProgress`, `handleTaskComplete`, `handleTaskFailed`, `releaseOnDisconnect`) hold the bodies verbatim, so each phase can be read, tested, and changed on its own. No protocol or behaviour change; every existing dashboard test passes unchanged (#7546, follow-up to #7491).
+- CI: cap the O(n³) dedup reference oracle at 128 lines under `-short` — the full 500-line differential took 166s under `-race` and single-handedly set the agent test lane's wall clock (1.75s now; full-size oracle still runs unshortened, and the optimized path stays covered at full size in every mode)
+
 ## 2026-09-18 (v4.56.0)
 
 ### Added
