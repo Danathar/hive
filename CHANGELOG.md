@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-18 (v4.61.2)
+
+### Changed
+
+- The Features tab's Review Gate section is grouped instead of listed. It had grown to eleven controls spanning three unrelated concerns — the merge gate, the reviewers themselves, and the recommendations digest — presented as one undifferentiated list, so nothing indicated which setting affected which behaviour. The reviewer settings now read as a single unit under quiet `Merge gate` and `Reviewers` sub-headings that group by whitespace rather than by drawing more rules, and the recommendations controls move out to their own `Merge Recommendations` section, since opening an issue about what is already mergeable is not part of the gate that decides whether a PR may merge at all. The horizontal rule keeps meaning "a different feature starts here", which is what makes it readable.
+
 ## 2026-09-18 (v4.61.1)
 
 ### Fixed
