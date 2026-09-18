@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-18 (v4.59.0)
+
+### Added
+
+- Add the escalation-surfaces design record (email + push, v6 Track 6) and index the design docs for Slack and escalation surfaces.
+
 ## 2026-09-18 (v4.58.2)
 
 ### Fixed
