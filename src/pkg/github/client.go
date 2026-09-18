@@ -785,7 +785,7 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time) (a
 			continue
 		}
 
-		if c.isExempt(labels) {
+		if c.isExempt(labels) || hasIssueNeedsHumanLabel(labels) {
 			continue
 		}
 
