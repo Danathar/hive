@@ -84,7 +84,7 @@ by the runtime type `GitSourceConfig`, `pkg/knowledge/gitsource.go:33-39`):
 | `url` | Yes | — | Git remote URL. **`https://` only** — see Auth below. |
 | `branch` | No | `main` (`gitsource.go:66-68`) | Branch to shallow-clone (`--depth 1 --branch <branch>`). |
 | `subpath` | No | — (whole repo) | When set, only this subdirectory is checked out (git sparse-checkout, `gitsource.go:199-219,232-248`) and indexed. |
-| `layer` | No | `project` when set via the API (`api.go:8115-8117`); **required, no code default, when set via `hive.yaml`** | One of `personal`, `project`, `org`, `community` — see Layer semantics below. |
+| `layer` | No | `project` when set via the API (`api_knowledge.go:937-939`); **required, no code default, when set via `hive.yaml`** | One of `personal`, `project`, `org`, `community` — see Layer semantics below. |
 
 ### What "indexed" means
 
@@ -162,14 +162,14 @@ and are the *same* underlying list as `knowledge.git_sources` in
 
 - `POST` connects a source immediately and, if it isn't already present
   (matched by `url`+`subpath`), appends it to `Config.Knowledge.GitSources`
-  and persists the config (`api.go:8131-8149`). A `POST` for a source that
+  and persists the config (`api_knowledge.go:954-971`). A `POST` for a source that
   is only in `hive.yaml` but not yet connected in the running process (e.g.
   right after editing the file without restarting) will add a duplicate
   config entry once reconnected, since the dedup check is by URL+subpath
   against what's already in `Config`, not against what main.go loaded at
   boot.
 - `DELETE` disconnects the live source and removes matching entries from
-  `Config.Knowledge.GitSources`, then persists (`api.go:8155-8192`).
+  `Config.Knowledge.GitSources`, then persists (`api_knowledge.go:1005-1015`).
 - Editing `git_sources:` directly in `hive.yaml` takes effect on the next
   process restart (main.go's startup loop at `cmd/hive/main.go:2303-2347`);
   it does not hot-reload while the process is running. Use the API for a

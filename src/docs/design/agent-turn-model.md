@@ -75,7 +75,7 @@ Nothing in the kick path ever spawns a process. `deliverKickLocked`
   (`src/pkg/agent/manager_kick.go:241`),
 - types the prompt literally, chunked, via
   `tmuxSendLiteralForAgent` (`src/pkg/agent/manager_kick.go:269`, implementation at
-  `src/pkg/agent/manager.go:4872` → `tmux send-keys -l`),
+  `src/pkg/agent/manager_tmux.go:499` → `tmux send-keys -l`),
 - submits with `tmuxSendEntersForAgent` (`src/pkg/agent/manager_kick.go:283`).
 
 The prompt reaches the model the same way a human's keyboard would. There is no
@@ -106,7 +106,7 @@ a retried click cannot type the prompt twice. The governor's tick still calls
 
 **The pane poller.** `pollTmuxOutputForAgent`
 (`src/pkg/agent/manager_poll.go:16`) runs a `3 * time.Second` ticker
-(`src/pkg/agent/manager.go:2693`) for the agent's whole lifetime, diffing
+(`src/pkg/agent/manager_poll.go:17`) for the agent's whole lifetime, diffing
 captured pane content to maintain `agent.LastPaneChange`
 (`src/pkg/agent/manager_poll.go:93`) — hive's only evidence that a running,
 authenticated CLI is actually doing something.
@@ -159,7 +159,7 @@ CLI subprocess.
 | Token-usage summary | `/data/metrics/token-summary.json` | `src/pkg/tokens/collector.go:194`, `:121` |
 | Structured audit trail | `/data/audit.jsonl`, reloaded into a ring at boot | `src/pkg/dashboard/audit.go:22`, `loadFromDisk` `:88` |
 | Agent-name → UID allocation | `/var/run/hive/uid-map.json` | `UIDMapPath` `src/pkg/agent/uidmap.go:17`; load `src/pkg/agent/manager.go:1757` |
-| Backend CLI's own session/credential files | the CLI's own `HOME` / `CODEX_HOME`, rooted at `/data/home` | per-agent `CODEX_HOME` `src/pkg/agent/manager.go:6023`, helper `:7534`; per-agent HOME `src/pkg/agent/interactive_home.go:57`; shared `.claude` bridged by symlink `interactive_home.go:74` |
+| Backend CLI's own session/credential files | the CLI's own `HOME` / `CODEX_HOME`, rooted at `/data/home` | per-agent `CODEX_HOME` `src/pkg/agent/manager_env.go:400`, helper `src/pkg/agent/manager_homes.go:56`; per-agent HOME `src/pkg/agent/interactive_home.go:57`; shared `.claude` bridged by symlink `interactive_home.go:74` |
 
 Two caveats on that table:
 
@@ -195,8 +195,8 @@ written anywhere.
 | Transient-API-error nudge cooldown | `lastTransientNudge`, `transientNudgesThisKick` | `src/pkg/agent/manager.go:323-324` |
 | Un-archived-scrollback flag | `kickLogPending` (guarded by `m.mu`) | `src/pkg/agent/manager.go:342` |
 | Sandbox / bob-key latches, last launch banner | `sandboxResumeAfterCancel`, `awaitingBobKey`, `lastLaunchFailureBanner` | `src/pkg/agent/manager.go:359`, `:335`, `:344` |
-| Poller goroutines themselves | `go m.pollTmuxOutputForAgent(agent, agentCtx)` and siblings, tied to a per-launch context | `src/pkg/agent/manager.go:2412`, `:2290`, `:2296` |
-| Blocked-action thrash windows | `Manager.thrash map[string]*thrashState` under its own `thrashMu` — deliberately *not* `m.mu`, to avoid re-entrancy from the output-capture goroutines | `src/pkg/agent/manager.go:459-463`; `thrashState` `:3143`; trip logic `recordBlockedAndCheck` `:3148` |
+| Poller goroutines themselves | `go m.pollTmuxOutputForAgent(agent, agentCtx)` and siblings, tied to a per-launch context | `src/pkg/agent/manager_launch.go:276`, `:376`, `:279` |
+| Blocked-action thrash windows | `Manager.thrash map[string]*thrashState` under its own `thrashMu` — deliberately *not* `m.mu`, to avoid re-entrancy from the output-capture goroutines | `src/pkg/agent/manager.go:459-463`; `thrashState` `src/pkg/agent/manager_thrash.go:35`; trip logic `recordBlockedAndCheck` `src/pkg/agent/manager_thrash.go:81` |
 
 Note the asymmetry: several counters that exist precisely to *stop a runaway
 loop* (`tokenRestartAttempts`, `transientNudgesThisKick`, `stallNudgeSent`) are
@@ -224,29 +224,29 @@ if !agent.forceRelaunch && m.tmuxPaneHasCLIForAgent(agent) {
     return nil
 }
 ```
-(`src/pkg/agent/manager.go:2395-2424`)
+(`src/pkg/agent/manager_launch.go:259-289`)
 
 Three things about this are worth stating precisely:
 
 - **It is one of two reattach points, and both are early returns rather than a
   recovery routine.** The other is `ensureTmuxSession`
-  (`src/pkg/agent/manager.go:2267`), whose first act is
+  (`src/pkg/agent/manager_tmux.go:249`), whose first act is
   `if m.tmuxSessionExistsForAgent(agent) { return nil }`
-  (`src/pkg/agent/manager.go:1909-1911`) — a surviving session is reused, not
+  (`src/pkg/agent/manager_tmux.go:250-252`) — a surviving session is reused, not
   recreated. Boot reaches both: `main` unconditionally calls
   `agentMgr.Start(ctx, name)` for every enabled agent
   (`src/cmd/hive/main.go:3673`) and the reuse-vs-relaunch decision is taken
   inside. There is no `Adopt`, `Reattach`, or `RecoverAgents` function;
   searching for one finds only `RestoreBreaker`
-  (`src/pkg/agent/manager.go:6367`), which restores control metadata and is
+  (`src/pkg/agent/manager_pause.go:384`), which restores control metadata and is
   explicitly documented as *not* touching agent state: "a boot restore must
   never change agent state, only reattach the breaker"
-  (`src/pkg/agent/manager.go:6364`).
+  (`src/pkg/agent/manager_pause.go:381-383`).
 
   Because reattachment is emergent from two independent early returns rather
   than an explicit path, nothing in the codebase names it, tests it end to end,
   or reports whether it happened. The only trace is a log line
-  (`src/pkg/agent/manager.go:2396`).
+  (`src/pkg/agent/manager_launch.go:260`).
 - **The adoption test is a screen-scrape.** `tmuxPaneHasCLIForAgent`
   (`src/pkg/agent/manager_tmux.go:397`) is one line: `paneHasCLIMarker(
   m.captureVisiblePaneForAgent(agent))`. Hive decides whether an agent's
@@ -280,11 +280,11 @@ apply.
 4. `tmux kill-session` (`src/pkg/agent/manager_restart.go:760`).
 
 The replacement CLI starts with **no prompt at all** in the default case.
-`buildBootstrapPrompt` (`src/pkg/agent/manager.go:2241`) unconditionally returns `""`
-(`src/pkg/agent/manager.go:2249`), with the reasoning recorded inline: the
+`buildBootstrapPrompt` (`src/pkg/agent/manager_env.go:17`) unconditionally returns `""`
+(`src/pkg/agent/manager_env.go:25`), with the reasoning recorded inline: the
 governor's first eval cycle kicks all due agents with fully substituted
 templates, whereas sending a boot prompt here leaked unsubstituted `${ISSUE_LIST}`
-placeholders to the agent (`src/pkg/agent/manager.go:2242-2247`).
+placeholders to the agent (`src/pkg/agent/manager_env.go:18-23`).
 
 So a restarted agent sits idle at its input prompt until the shared governor
 ticker (§1.4) next finds it due. Only the explicit override paths supply text
@@ -349,12 +349,12 @@ RFC.
 
 Every supported backend is an opaque interactive subprocess. Hive composes a
 command line as a string (`src/pkg/agent/manager_launch.go:861`,
-`src/pkg/agent/manager.go:1826`, `:1849`),
+`src/pkg/agent/manager_launch.go:865`, `:888`),
 types it into a shell, and from then on interacts only through keystrokes in and
 rendered characters out.
 
 Hive sets `HOME` and a per-agent `CODEX_HOME`
-(`src/pkg/agent/manager.go:6023`, helper at `src/pkg/agent/manager.go:4542`) so
+(`src/pkg/agent/manager_env.go:400`, helper at `src/pkg/agent/manager_homes.go:56`) so
 that each agent's CLI writes its session files somewhere hive controls the
 *location* of. That is location control, not format control: nothing in
 `src/pkg/agent/` parses, writes, or migrates a backend session file.
@@ -558,8 +558,8 @@ Things this spike did not establish, and what would settle each.
    *Since answered: dead code.* The function used to assemble a candidate
    policy-file list and then discard it by returning `""`; the path
    construction has since been deleted, and the function is now an explained
-   `return ""` stub (`src/pkg/agent/manager.go:2241-2249`, `return ""` at
-   `:2519`), with the removal recorded in its comment.
+   `return ""` stub (`src/pkg/agent/manager_env.go:17-25`, `return ""` at
+   `src/pkg/agent/manager_env.go:25`), with the removal recorded in its comment.
 5. **Are there non-tmux agent execution paths with different properties?**
    `src/pkg/agent/sandbox_executor.go` runs a different shape of execution
    (`src/pkg/agent/sandbox_executor.go:353` composes its own command line) and
