@@ -47,14 +47,14 @@ func TestIdentityOfFallsBackToUsername(t *testing.T) {
 
 func TestSanitizeSessionLabel(t *testing.T) {
 	cases := map[string]string{
-		"":                              "",
-		"claude":                        "claude",
-		"pi-codex":                      "pi-codex",
-		"Agy_1.2":                       "Agy_1.2",
-		"bad/label":                     "badlabel",       // path chars stripped
-		"a b\tc":                        "abc",            // whitespace stripped
-		"../../etc":                     "....etc",        // no traversal survives as separators
-		"drop#tables":                   "droptables",     // '#' (our separator) stripped
+		"":            "",
+		"claude":      "claude",
+		"pi-codex":    "pi-codex",
+		"Agy_1.2":     "Agy_1.2",
+		"bad/label":   "badlabel",   // path chars stripped
+		"a b\tc":      "abc",        // whitespace stripped
+		"../../etc":   "....etc",    // no traversal survives as separators
+		"drop#tables": "droptables", // '#' (our separator) stripped
 		"0123456789012345678901234567890123456789": "01234567890123456789012345678901", // capped at 32
 	}
 	for in, want := range cases {

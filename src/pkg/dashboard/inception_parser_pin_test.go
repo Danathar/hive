@@ -208,12 +208,12 @@ func TestPin_ParseQuestionFromBdCreate(t *testing.T) {
 
 func TestPin_IsTemplatePlaceholder(t *testing.T) {
 	cases := map[string]bool{
-		"<fact title>":         true,
-		"<question title>":     true,
-		"<anything angled>":    true,
-		"your question here":   true,
+		"<fact title>":          true,
+		"<question title>":      true,
+		"<anything angled>":     true,
+		"your question here":    true,
 		"What database to use?": false,
-		"Primary users":        false,
+		"Primary users":         false,
 	}
 	for in, want := range cases {
 		if got := isTemplatePlaceholder(in); got != want {

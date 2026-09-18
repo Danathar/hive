@@ -97,9 +97,12 @@ type nonFlusherWriter struct {
 	body   []byte
 }
 
-func (w *nonFlusherWriter) Header() http.Header         { return w.header }
-func (w *nonFlusherWriter) Write(b []byte) (int, error) { w.body = append(w.body, b...); return len(b), nil }
-func (w *nonFlusherWriter) WriteHeader(code int)        { w.code = code }
+func (w *nonFlusherWriter) Header() http.Header { return w.header }
+func (w *nonFlusherWriter) Write(b []byte) (int, error) {
+	w.body = append(w.body, b...)
+	return len(b), nil
+}
+func (w *nonFlusherWriter) WriteHeader(code int) { w.code = code }
 
 // TestHandleContributeEventsNoFlusher asserts that when the ResponseWriter does not
 // implement http.Flusher, the handler returns 500 Internal Server Error.

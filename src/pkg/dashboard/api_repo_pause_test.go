@@ -2,11 +2,12 @@ package dashboard
 
 import (
 	"encoding/json"
-	"github.com/hivecommons/hive/pkg/governor"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/hivecommons/hive/pkg/governor"
 
 	"github.com/hivecommons/hive/pkg/config"
 )
