@@ -11,6 +11,72 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-18 (v4.60.0)
+
+### Added
+
+- Added a "🐝 Hive recommendations" issue that answers "what should I merge next?" for a human working a deep PR queue by hand. One issue per repository, rewritten in place on the review cadence, sorting every open PR into ready-to-merge, needs-a-rebase, failing-CI, waiting-on-a-human and stale-draft — each with a GitHub query link and a copy-pasteable `gh` block. Built for repositories that do not want the hive merging anything: the hive does the reading, a person keeps the decision. Off by default (`review.recommendations.enabled`).
+
+## 2026-09-18 (v4.59.0)
+
+### Added
+
+- Add the escalation-surfaces design record (email + push, v6 Track 6) and index the design docs for Slack and escalation surfaces.
+
+## 2026-09-18 (v4.58.2)
+
+### Fixed
+
+- Hardened every hive-side drop-box reader (pr/issue/merge/review request queues and the token-access audit spool) against FIFO block and symlink follow: open with O_NOFOLLOW, verify a regular file, and read through a size-capped reader.
+
+## 2026-09-18 (v4.58.1)
+
+### Changed
+
+- CI now gates PRs targeting the v6 line: v2 CI, v2 Tests, the changelog fragment guard, the testutil guard, and Go security analysis run on v6 pushes and pull requests (#7563 Track 7).
+
+## 2026-09-18 (v4.58.0)
+
+### Added
+
+- Added the Slack integration design (`src/docs/design/slack-integration.md`): Socket Mode transport as the second backend on the v6 chat spine, mrkdwn translation, fail-closed allowlist, and the shared guard invariant (#7563 Track 3).
+- Added the v5 → v6 top-up workflow (`.github/workflows/v6-topup.yml`): forward-merges v5 into v6 on every v5 push plus a daily safety net, with the same conflict-inventory-and-stop policy as the v4 → v5 top-up (#7563 Track 7).
+
+### Changed
+
+- `runEvalCycle` advisory digest pinning and posting now live behind two testable seams (`pinDigestSnapshot`, `publishAdvisoryDigest` in `cmd/hive/eval_cycle_advisory_seams.go`) with the GitHub/dashboard effects injected; `runEvalCycle` shrinks 902 → 785 lines and `cmd/hive` coverage rises 54.7% → 56.2% (refs #7232).
+- Boot-time decisions in `main()` — default config path, HIVE_CONFIG disagreement, short-SHA canonicalization, hub target from `HIVE_HUB_URL`/`HIVE_CLUSTER_ID`, the ACMM pack plan (config vs persisted vs `HIVE_LEVEL`, merge vs re-apply), the self-upgrade marker verdict, coverage badge URL, metrics primary repo, fleet-stats author identity (ai_author vs bot-token login), and the policies checkout/policy directories — now live in `cmd/hive/boot_seams.go` as pure, fully tested helpers; `main()` keeps only the effects (refs #7232).
+- The `runEvalCycle` test harness now drives the advisory digest end to end (bead store → pinned issue → rendered digest → App comment POST → healed App-permission finding, cleared App banner); `runEvalCycle` coverage 32.9% → 49.0%, `cmd/hive` 54.7% → 55.9% (refs #7232).
+- The review perspective cap is now a budget per pull request head commit rather than per dispatch cycle, so setting it actually limits how many review comments one pull request receives. Leaving it unset keeps every perspective, which remains the default.
+- ROADMAP.md / docs roadmap: the v6 line is **open** — branch `v6` cut from v5 on 2026-09-18, themed dashboard-optional operation (chat spine, Slack/Discord/Teams/Matrix/Telegram, GitHub @-mention triggers, email + push/on-call escalation), tracked by epic #7563; v6 implementation PRs target the `v6` branch only and every new surface reuses the dashboard's role/capability/ioscan guards
+
+### Fixed
+
+- Review verdicts now persist on durable storage and merge across refreshes, so a restart no longer makes the hive forget what it already reviewed and post duplicate comments on the same pull requests.
+
+## 2026-09-18 (v4.57.1)
+
+### Changed
+
+- `runEvalCycle` now has an end-to-end test harness (`cmd/hive/eval_cycle_run_7232_test.go`) that drives a full cycle against a fake GitHub API with the real governor, scheduler, agent manager and dashboard server; function coverage rises from 1.7% to 32.9% and `cmd/hive` from 52.3% to 54.7% (refs #7232).
+
+### Fixed
+
+- Fixed the review swarm forgetting which PRs it had already reviewed on every restart. The dispatch state — the reviewer's only record of what it has looked at — was written under `/var/run/hive-metrics`, scratch space for regenerable per-cycle artifacts on the container's ephemeral writable layer. Since `PlanDispatch` keeps no cursor and re-walks the actionable PR list from the top each cycle, losing that file made the reviewer re-review the same first PRs indefinitely and never advance through the queue (and, once reviewers publish, re-comment on them). It now lives on the durable data dir, with a one-time fallback to the old location so an upgrading hive keeps the state it already has.
+- Fixed reviews being written without the reviewer having necessarily read the change. The perspective prompt demanded `file:line` citations but never said how to obtain the diff, so an agent that skipped it could still produce confident, ungrounded prose. The kick now names `gh pr view` (intent) and `gh pr diff` (what was actually done), pins citations to the dispatched head SHA, scopes the review to the diff rather than the surrounding code, and makes an unreadable diff an explicit `requires_human` instead of a guess.
+
+## 2026-09-18 (v4.57.0)
+
+### Added
+
+- Review swarm can now mark PRs it holds for a human with an existing repo label (`review.human_decision_label`, e.g. `3-human-queue`), making the human queue filterable from the PR list. The label is never created and never required: if it is unset, misspelled, or absent from the repo, labeling is skipped and the review comment's in-body marker still carries the signal.
+- Added a **Max perspectives per PR** control to Settings → Features → Review Gate, so the per-PR perspective cap can be set from the dashboard instead of only in YAML. Without it the cap shipped unreachable: parallel review slots are spent in PR order, so the first PR in a deep queue absorbs every slot and adding reviewers buys more opinions on one PR instead of coverage across many. 0 or empty keeps the existing no-cap default.
+
+### Changed
+
+- `ContributeWSHub.HandleWS` in `pkg/dashboard/contribute_ws.go` was a single 1,154-line function covering admission, the auth handshake, task dispatch, lease renewal, completion/failure settlement, and disconnect teardown. It is now a 124-line read loop over a per-socket `wsSession` whose named phase methods (`handleAuthResponse`, `handleReady`, `handleTaskAccepted`, `handleTaskProgress`, `handleTaskComplete`, `handleTaskFailed`, `releaseOnDisconnect`) hold the bodies verbatim, so each phase can be read, tested, and changed on its own. No protocol or behaviour change; every existing dashboard test passes unchanged (#7546, follow-up to #7491).
+- CI: cap the O(n³) dedup reference oracle at 128 lines under `-short` — the full 500-line differential took 166s under `-race` and single-handedly set the agent test lane's wall clock (1.75s now; full-size oracle still runs unshortened, and the optimized path stays covered at full size in every mode)
+
 ## 2026-09-18 (v4.56.0)
 
 ### Added
