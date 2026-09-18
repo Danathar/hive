@@ -5667,6 +5667,7 @@ func applyBudgetAlerts(gov *governor.Governor, trans governor.BudgetTransitions,
 			budget.CurrentSpend, budget.WeeklyLimit, windowEnd.Format(time.RFC1123))
 		dashSrv.AddSystemAlert(budgetExhaustedAlertID, "error", msg)
 		notifier.Send("Budget exhausted", msg, notify.PriorityHigh)
+		emitBudgetExhaustedEscalation(msg)
 	}
 }
 
