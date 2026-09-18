@@ -572,6 +572,10 @@ func TestCreateIssue_ValidationAndDegradedPaths(t *testing.T) {
 }
 
 func TestCreateIssue_DedupeRetryableFailureFailsClosed(t *testing.T) {
+	// This test answers a real client with a rate-limit refusal, which arms
+	// the process-wide slow-start pacing ledger (#7439); clear it so later
+	// tests in the binary are not spaced ~2s per request.
+	t.Cleanup(ResetRateLimitPacingForTest)
 	created := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -597,6 +601,10 @@ func TestCreateIssue_DedupeRetryableFailureFailsClosed(t *testing.T) {
 }
 
 func TestCreateIssue_DedupeTooManyRequestsFailsClosed(t *testing.T) {
+	// This test answers a real client with a rate-limit refusal, which arms
+	// the process-wide slow-start pacing ledger (#7439); clear it so later
+	// tests in the binary are not spaced ~2s per request.
+	t.Cleanup(ResetRateLimitPacingForTest)
 	created := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -622,6 +630,10 @@ func TestCreateIssue_DedupeTooManyRequestsFailsClosed(t *testing.T) {
 }
 
 func TestCreateIssue_LabelEnsureRetryableFailureFailsClosed(t *testing.T) {
+	// This test answers a real client with a rate-limit refusal, which arms
+	// the process-wide slow-start pacing ledger (#7439); clear it so later
+	// tests in the binary are not spaced ~2s per request.
+	t.Cleanup(ResetRateLimitPacingForTest)
 	created := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -739,6 +751,10 @@ func TestCreateIssue_LabelEnsureTerminalFailureCreatesWithoutLabel(t *testing.T)
 }
 
 func TestIssueRequestWatcher_RateLimitBackoffUsesReset(t *testing.T) {
+	// This test answers a real client with a rate-limit refusal, which arms
+	// the process-wide slow-start pacing ledger (#7439); clear it so later
+	// tests in the binary are not spaced ~2s per request.
+	t.Cleanup(ResetRateLimitPacingForTest)
 	created := 0
 	reset := time.Now().Add(2 * time.Minute).Truncate(time.Second)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

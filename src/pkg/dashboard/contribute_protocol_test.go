@@ -528,7 +528,7 @@ func selectionFuncBody(t *testing.T, src, name string) string {
 	t.Helper()
 	i := strings.Index(src, "func (h *ContributeWSHub) "+name+"(")
 	if i < 0 {
-		t.Fatalf("%s not found in contribute_ws.go — it was renamed or removed; update this test deliberately, do not delete the case", name)
+		t.Fatalf("%s not found in the selection sources — it was renamed or removed; update this test deliberately, do not delete the case", name)
 	}
 	j := strings.Index(src[i:], "\n}\n")
 	if j < 0 {
@@ -637,6 +637,25 @@ func TestSelectTask_UndeclaredCapabilitiesStillReceiveRequiredWork(t *testing.T)
 	}
 }
 
+// selectionSources returns the concatenated source of every file that now holds
+// a selection entry point. selectTask moved to contribute_select.go in the
+// #7491 god-file split while RequeueContributorTask stayed in contribute_ws.go,
+// so the source-level no-routing scans must read both files or they would stop
+// finding their subject (selectionFuncBody fatals in that case, deliberately).
+func selectionSources(t *testing.T) string {
+	t.Helper()
+	var b strings.Builder
+	for _, name := range []string{"contribute_ws.go", "contribute_select.go"} {
+		raw, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		b.Write(raw)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
 // TestSelectionPathsUseDeclaredCapabilitiesOnlyThroughRouteHelper is the
 // source-level guard: selection may consult declarations only through the
 // explicit #2547 fit helper, not through ad-hoc field reads.
@@ -655,7 +674,7 @@ func TestSelectionPathsUseDeclaredCapabilitiesOnlyThroughRouteHelper(t *testing.
 	}
 
 	for _, name := range []string{"selectTask", "RequeueContributorTask"} {
-		body := selectionFuncBody(t, src, name)
+		body := selectionFuncBody(t, selectionSources(t), name)
 		// Positive control (b): the extraction really captured the selection body.
 		if name == "selectTask" && !strings.Contains(body, "candidates") {
 			t.Fatal("extracted selectTask body has no candidate collection — extraction is wrong; fix the test")
