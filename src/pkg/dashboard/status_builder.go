@@ -1290,6 +1290,70 @@ func CollectRepoSnapshots(payload *StatusPayload) map[string]governor.RepoSnapsh
 	return result
 }
 
+// openPRIsMergeable reports whether one entry of FrontendRepo.OpenPrs carries
+// the tri-state verdict github.MergeableYes.
+//
+// OpenPrs is []any: buildRepos fills it with github.PullRequest values, and a
+// payload that has been through JSON (tests, replayed snapshots) carries
+// map[string]any with the verdict serialised as the string "yes"/"no"/"".
+// Both shapes are read here. The verdict has been a string since #2365, so a
+// bool comparison never matched and the "Mergeable" sparkline sat at zero
+// (#7471); "" (unknown) and "no" both count as not mergeable.
+func openPRIsMergeable(pr any) bool {
+	switch p := pr.(type) {
+	case FrontendPR:
+		return p.Mergeable == github.MergeableYes
+	case *FrontendPR:
+		return p != nil && p.Mergeable == github.MergeableYes
+	case github.PullRequest:
+		return p.Mergeable == github.MergeableYes
+	case *github.PullRequest:
+		return p != nil && p.Mergeable == github.MergeableYes
+	case map[string]any:
+		s, _ := p["mergeable"].(string)
+		return s == string(github.MergeableYes)
+	}
+	return false
+}
+
+// FrontendPR is one entry of FrontendRepo.OpenPrs: the enumerated PR as the
+// forge returned it, plus the governor's merge-eligibility verdict for it
+// (hivecommons/hive#7478). The embedding keeps every PullRequest field on the
+// wire under its own name; merge_verdict rides beside them and is absent
+// until AttachMergeVerdicts has run for this snapshot, so a consumer can tell
+// "not classified" from any verdict.
+type FrontendPR struct {
+	github.PullRequest
+	MergeVerdict *github.MergeVerdict `json:"merge_verdict,omitempty"`
+}
+
+// AttachMergeVerdicts stamps the governor's per-PR merge verdicts onto the
+// snapshot's open PRs, keyed the way writeMergeEligible recorded them
+// (github.MergeVerdictKey). The classifier runs earlier in the same eval
+// tick than the snapshot is built, so every PR in the snapshot has a
+// verdict; one that does not (a PR enumerated by a path the classifier did
+// not see) is left without, and the pill then falls back to GitHub's
+// mergeable verdict, painted amber — never green — because "the sweep would
+// merge this" is exactly what such a PR has not been shown to satisfy.
+func AttachMergeVerdicts(payload *StatusPayload, verdicts map[string]github.MergeVerdict) {
+	if payload == nil || len(verdicts) == 0 {
+		return
+	}
+	for ri := range payload.Repos {
+		for pi, entry := range payload.Repos[ri].OpenPrs {
+			fp, ok := entry.(FrontendPR)
+			if !ok {
+				continue
+			}
+			if v, ok := verdicts[github.MergeVerdictKey(fp.PullRequest)]; ok {
+				v := v
+				fp.MergeVerdict = &v
+				payload.Repos[ri].OpenPrs[pi] = fp
+			}
+		}
+	}
+}
+
 func CollectAgentStats(payload *StatusPayload) map[string]map[string]any {
 	result := make(map[string]map[string]any)
 	for _, a := range payload.Agents {
@@ -1329,10 +1393,8 @@ func CollectAgentStats(payload *StatusPayload) map[string]map[string]any {
 					total := 0
 					for _, r := range payload.Repos {
 						for _, pr := range r.OpenPrs {
-							if m, ok := pr.(map[string]any); ok {
-								if mb, ok := m["mergeable"].(bool); ok && mb {
-									total++
-								}
+							if openPRIsMergeable(pr) {
+								total++
 							}
 						}
 					}
@@ -1611,7 +1673,7 @@ func buildRepos(cfg *config.Config, actionable *github.ActionableResult, govStat
 			issuesByRepo[issue.Repo] = append(issuesByRepo[issue.Repo], issue)
 		}
 		for _, pr := range actionable.PRs.Items {
-			prsByRepo[pr.Repo] = append(prsByRepo[pr.Repo], pr)
+			prsByRepo[pr.Repo] = append(prsByRepo[pr.Repo], FrontendPR{PullRequest: pr})
 		}
 	}
 

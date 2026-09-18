@@ -11,6 +11,21 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-17 (v4.53.0)
+
+### Added
+
+- Reviewer agents now mint a `reviewer`-tier token with `pull_requests: write`, so an ADVISORY reviewer can post the verdict it computes as a PR review instead of writing it to a merge-eligibility file that nobody reads on a spoke that does not auto-merge. The tier deliberately requests no `issues` permission (GitHub cannot separate commenting on an issue from creating one) and no `contents: write`, so merging and pushing stay impossible. ([#7469](https://github.com/hivecommons/hive/issues/7469))
+
+### Changed
+
+- Extracted the hive provisioning domain (provision request persistence and handlers, placeholder pool selection, spoke project config adoption, hive assignment) from `pkg/hub/saas.go` into `saas_provisioning.go` (#7278).
+- Extracted the output-polling domain (per-agent tmux output poller, trust-prompt watcher, output signal logging, thrash/kick-refusal detection, pane-diff helpers) from `pkg/agent/manager.go` into `manager_poll.go` (#7303).
+
+### Fixed
+
+- Toggling an agent's on-demand switch in the settings dialog now moves the agent process, not just the config. Clearing on-demand starts the agent — previously it stayed down with no pane and no tmux session until the pod was restarted, because it had been skipped at launch for being on-demand and `ReconcileAgents` only reports newly added agents. Setting on-demand now stops the agent, instead of leaving a live CLI running that the governor would never kick again. ([#7446](https://github.com/hivecommons/hive/issues/7446))
+
 ## 2026-09-17 (v4.52.2)
 
 ### Changed
