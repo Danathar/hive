@@ -3,8 +3,9 @@ package hub
 import (
 	"testing"
 
-	"github.com/hivecommons/hive/pkg/hub/spoke"
 	"time"
+
+	"github.com/hivecommons/hive/pkg/hub/spoke"
 
 	"github.com/hivecommons/hive/pkg/keyderive"
 	"github.com/hivecommons/hive/pkg/terminalassert"

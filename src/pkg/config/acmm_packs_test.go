@@ -118,3 +118,58 @@ func TestACMMPacksAreSorted(t *testing.T) {
 		}
 	}
 }
+
+func TestACMMPackAgentNames(t *testing.T) {
+	p, err := ACMMPackByLevel(5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := p.AgentNames()
+	if len(names) != len(p.Agents) {
+		t.Fatalf("AgentNames() returned %d names for %d agents", len(names), len(p.Agents))
+	}
+	for i, a := range p.Agents {
+		if names[i] != a.Name {
+			t.Errorf("AgentNames()[%d] = %q, want %q (pack order)", i, names[i], a.Name)
+		}
+	}
+}
+
+// ACMMPackManagedAgentNames is the set a pack apply may re-derive `mode` for
+// (#7503): every roster member at every level, once each, sorted — and
+// nothing that no pack lists.
+func TestACMMPackManagedAgentNames(t *testing.T) {
+	names := ACMMPackManagedAgentNames()
+	seen := make(map[string]bool, len(names))
+	for i, n := range names {
+		if seen[n] {
+			t.Errorf("duplicate name %q", n)
+		}
+		seen[n] = true
+		if i > 0 && names[i-1] > n {
+			t.Errorf("not sorted: %q before %q", names[i-1], n)
+		}
+	}
+	for _, p := range ACMMPacks() {
+		for _, a := range p.Agents {
+			if !seen[a.Name] {
+				t.Errorf("L%d agent %q missing from the managed set", p.Level, a.Name)
+			}
+		}
+	}
+	// The union must not grow beyond what the packs define: an agent listed
+	// here is one whose operator-set mode a pack apply is allowed to discard.
+	// (v5 ships `reviewer` in the L5/L6 packs, so check the reverse
+	// containment generically rather than by a fixed name.)
+	inPack := make(map[string]bool)
+	for _, p := range ACMMPacks() {
+		for _, a := range p.Agents {
+			inPack[a.Name] = true
+		}
+	}
+	for n := range seen {
+		if !inPack[n] {
+			t.Errorf("%q is in no pack yet appears in the managed set", n)
+		}
+	}
+}

@@ -1,5 +1,3 @@
-// Review-pipeline configuration: escalation, reviewer parallelism, and the
-// auto-merge gate (required checks, self-authored ACMM gating).
 package config
 
 import (

@@ -123,6 +123,8 @@ type Config struct {
 	SourcePath string `yaml:"-" json:"-"`
 }
 
+// DefaultOTelServiceName is the OTLP resource service.name used when the
+// operator does not set otel.service_name.
 const DefaultOTelServiceName = "hive"
 
 // OTelConfig configures OpenTelemetry trace export. It is additive and OFF by
@@ -223,6 +225,11 @@ type HookRule struct {
 	RateLimitPerMinute int `yaml:"rate_limit_per_minute,omitempty" json:"rate_limit_per_minute,omitempty"`
 }
 
+// MintConfig configures the OIDC token mint service (pkg/mint). It is additive
+// and DISABLED by default: an absent `mint:` block, or Enabled=false, leaves
+// existing behavior byte-identical. When enabled, the mint issues short-lived
+// scoped JWTs (a Workload Identity Federation broker) that downstream cloud/
+// registry WIF providers can trust via Issuer + JWKS.
 type MintConfig struct {
 	// Enabled turns the mint service on. Default false (deny).
 	Enabled bool `yaml:"enabled,omitempty"`
@@ -673,6 +680,7 @@ type PoliciesConfig struct {
 	LocalDir     string        `yaml:"local_dir"`
 }
 
+// StatsDisplayEntry defines a single metric to show in the agent's sidebar/detail view.
 type StatsDisplayEntry struct {
 	Key        string `yaml:"key" json:"key"`
 	Label      string `yaml:"label" json:"label"`
@@ -4355,6 +4363,8 @@ type DataConfig struct {
 	SessionRetentionDays *int `yaml:"session_retention_days,omitempty"`
 }
 
+// Load reads hive.yaml, then applies config.env overrides if present.
+// Precedence: hive.yaml < config.env < explicit env vars (via ${} interpolation).
 func Load(path string) (*Config, error) {
 	return LoadWithOverrides(path, "")
 }
@@ -4502,6 +4512,27 @@ func LoadWithDashboardOverlay(path string) (*Config, error) {
 		return cfg, nil
 	}
 	// Overlay agents win — they carry the reconciled pack-behavior fields.
+	//
+	// `converse` is not one of those fields, and a dashboard entry that is
+	// SILENT on it must not revoke it (#7503). Converse is a pointer precisely
+	// so "unset" and "explicitly false" stay distinguishable across this
+	// overlay; no pack seeds it, and the dashboard API writes it to BOTH this
+	// overlay and the per-agent file, so an explicit value here is always a
+	// real decision. A nil here means the dashboard never had an opinion —
+	// yet MergeAgentOverrides replaces the whole entry, so the per-agent
+	// file's `converse: true` (the documented layer for agent fields, and the
+	// one that outranks this overlay) was dropped on every boot and reload.
+	// Carry the lower layer's value forward when, and only when, the overlay
+	// says nothing; an explicit false still wins.
+	for name, oa := range overlay.Agents {
+		if oa.Converse != nil {
+			continue
+		}
+		if base, ok := cfg.Agents[name]; ok && base.Converse != nil {
+			oa.Converse = base.Converse
+			overlay.Agents[name] = oa
+		}
+	}
 	agents := cfg.RejectInvalidAgentOverlays(overlay.Agents)
 	cfg.MergeAgentOverrides(agents)
 	for name := range agents {
@@ -4556,6 +4587,7 @@ func adoptOperatorCadenceOverrides(cfg *Config, overlay *Config) {
 	}
 }
 
+// findConfigEnv returns the path to a config.env file, or "" if none found.
 func findConfigEnv(yamlPath string) string {
 	candidates := []string{
 		strings.TrimSuffix(yamlPath, "hive.yaml") + "config.env",
@@ -5419,6 +5451,15 @@ func (g GovernorConfig) ValidateLaunchCmdBackend(backend, launchCmd string) erro
 	return nil
 }
 
+// agentSourceLabel renders an agent's name for a validation error, naming the
+// per-agent overlay file it came from when there is one (#6024).
+//
+// "agent supervisor" alone is ambiguous: hive.yaml, the ConfigMap seed, the
+// dashboard overlay and /data/agent-configs/<name>.yaml all land in the same
+// agent map, so an operator reading the crash message has no way to know which
+// file to edit - and the overlay directory is the one they are least likely to
+// look in. "agent supervisor (from /data/agent-configs/supervisor.yaml)" turns
+// an 8-hour hunt into a single edit.
 func agentSourceLabel(name, sourceFile string) string {
 	if sourceFile == "" {
 		return name
@@ -5426,6 +5467,8 @@ func agentSourceLabel(name, sourceFile string) string {
 	return fmt.Sprintf("%s (from %s)", name, sourceFile)
 }
 
+// isGatewayName reports whether backend names a configured model gateway,
+// matched case-insensitively to mirror ResolveGateway.
 func (g GovernorConfig) isGatewayName(backend string) bool {
 	for _, gw := range g.ResolvedGateways() {
 		if gw.Name != "" && strings.EqualFold(gw.Name, backend) {
@@ -5602,6 +5645,9 @@ func (c *Config) ExpandAgentReplicas() error {
 	return nil
 }
 
+// MarshalYAML persists only declared agents. Runtime-derived replicas are
+// re-created by ExpandAgentReplicas on the next load so they never collide with
+// their base agent's replicas setting after a save.
 func (c Config) MarshalYAML() (interface{}, error) {
 	type plain Config
 	out := plain(c)
@@ -5878,6 +5924,10 @@ const RuntimeConfigFileLegacy = "/data/hive.yaml.bak"
 // never changes at runtime in production.
 var DashboardOverlayFile = "/data/hive.yaml.dashboard"
 
+// saTokenFile is the Kubernetes serviceaccount token path IsKubernetesPod
+// probes. It is a var (not a const) only so tests can point it at a
+// non-existent path and stay hermetic on hosts that really are pods;
+// production always uses the fixed in-cluster path.
 var saTokenFile = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 
 // SetSATokenFileForTest points IsKubernetesPod's serviceaccount-token probe
@@ -5901,6 +5951,28 @@ func IsKubernetesPod() bool {
 	return err == nil
 }
 
+// saveDashboardOverlay writes the secret-free PVC overlay in Kubernetes
+// mode. Failures are logged, never fatal — but they ARE returned (#3961):
+// when the primary config path is unwritable (read-only ConfigMap mount)
+// the overlay and the runtime config are the only layers that survive a pod
+// restart, so saveLocked needs to know whether this write landed before it
+// can report the save as durable. Outside Kubernetes it returns nil (the
+// overlay is not part of the boot path there).
+//
+// The write MUST be atomic (temp file + rename), unlike saveLocked()'s
+// inode-preserving write to the bind-mounted primary config. DashboardOverlayFile
+// lives on the PVC (not a bind mount), so rename is safe here, and it is the
+// only way to avoid a truncated/partial overlay if the pod is killed mid-write
+// (a redeploy sends SIGTERM/SIGKILL at an arbitrary instant). A truncate-in-place
+// write (os.WriteFile) can leave the file cut off partway through — GitHubConfig
+// marshals AFTER Agents/Project in the Config struct field order (see the
+// struct tags above), so a truncated overlay can silently keep valid
+// project/agents blocks while losing app_id/installation_id/key_file entirely.
+// The entrypoint's merge script only sanity-checks project.org and agents
+// before trusting the overlay wholesale, so that truncated-but-plausible file
+// would pass the guard and revert a dashboard-installed GitHub App to the
+// placeholder ConfigMap seed on the next restart — exactly the durability bug
+// this atomic write prevents.
 func (c *Config) saveDashboardOverlay() error {
 	if !IsKubernetesPod() {
 		// Docker/LXC mode: RuntimeConfigFile is already the boot-time
@@ -6205,6 +6277,13 @@ type ReviewConfig struct {
 	MaxParallelReviews int      `yaml:"max_parallel_reviews,omitempty" json:"max_parallel_reviews,omitempty"`
 	ReviewerAgents     []string `yaml:"reviewer_agents,omitempty" json:"reviewer_agents,omitempty"`
 	FixerAgent         string   `yaml:"fixer_agent,omitempty" json:"fixer_agent,omitempty"`
+	// PostComments tells review-swarm reviewers to publish their verdict as a
+	// PR comment via the `hive-review` relay, in addition to returning the
+	// JSON aggregate. Opt-in: the zero value keeps the verdict internal, which
+	// is the only safe default because on a hive WITHOUT auto-merge the
+	// aggregate has no consumer and the reviewer is silent by construction.
+	// Turning this on is what makes a review reach the human who has to decide.
+	PostComments bool `yaml:"post_comments,omitempty" json:"post_comments,omitempty"`
 }
 
 // AutoMergeConfig gates the App-self-merge sweep (SweepSelfAuthoredAutoMerges).

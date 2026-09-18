@@ -37,7 +37,7 @@ func TestExpandEnvVars_ByteIdenticalToLegacy(t *testing.T) {
 		"${MISSING_VAR} stays literal",
 		"empty=[${EMPTY_VAR}]",
 		"a ${HIVE_GITHUB_TOKEN} b ${MISSING_VAR} c ${EMPTY_VAR} d",
-		"nested-ish ${${HIVE_GITHUB_TOKEN}}",  // regex is non-recursive; must match legacy
+		"nested-ish ${${HIVE_GITHUB_TOKEN}}",        // regex is non-recursive; must match legacy
 		"kick uses ${ISSUE_LIST} and ${AGENT_NAME}", // template vars unset at config time -> literal
 		"$notavar ${} ${ x }",                       // odd shapes
 	}

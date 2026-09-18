@@ -1,6 +1,3 @@
-// Agent definition: AgentConfig and its methods, the per-agent and global
-// sandbox settings, channels, tools and connections, field-ownership markers,
-// and replica naming/expansion plus agent lookup helpers on Config.
 package config
 
 import (

@@ -58,9 +58,9 @@ func TestValidateLaunchCmdBackend_RejectsContradiction(t *testing.T) {
 func TestValidateLaunchCmdBackend_AcceptsAgreementAndNoOpinion(t *testing.T) {
 	var g GovernorConfig
 	cases := []struct{ backend, cmd string }{
-		{"copilot", ""},                        // no custom launch_cmd
-		{"", "bob --model auto"},               // hive-default backend
-		{"bob", "bob --model auto"},            // agreement
+		{"copilot", ""},             // no custom launch_cmd
+		{"", "bob --model auto"},    // hive-default backend
+		{"bob", "bob --model auto"}, // agreement
 		{"copilot", "/usr/bin/copilot --allow-all --model x"},
 		{"copilot", "agent-launch.sh --backend copilot --model x"},
 		{"copilot", "./my-wrapper.sh --anything"}, // unknown wrapper: no opinion

@@ -195,9 +195,9 @@ func TestAgentConfig_IsReplica(t *testing.T) {
 
 func TestAgentConfig_BaseName(t *testing.T) {
 	tests := []struct {
-		name      string
-		agent     AgentConfig
-		wantBase  string
+		name     string
+		agent    AgentConfig
+		wantBase string
 	}{
 		{"replica returns ReplicaOf", AgentConfig{ReplicaOf: "scanner", name: "scanner-2", ID: "s2"}, "scanner"},
 		{"non-replica returns name", AgentConfig{name: "quality", ID: "q"}, "quality"},

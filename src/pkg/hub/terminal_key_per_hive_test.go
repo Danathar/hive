@@ -3,8 +3,9 @@ package hub
 import (
 	"testing"
 
-	"github.com/hivecommons/hive/pkg/hub/spoke"
 	"time"
+
+	"github.com/hivecommons/hive/pkg/hub/spoke"
 )
 
 // N3 (CWE-862): the terminal signing key must be PER-HIVE.

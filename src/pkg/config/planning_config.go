@@ -1,5 +1,3 @@
-// Work-shaping concern blocks: ioscan (untrusted-input scanning), planning,
-// quality, retro, classifier, intent, trajectory, and replan configuration.
 package config
 
 // FormalQualityMinACMMLevel is the first maturity level at which the quality
