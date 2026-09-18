@@ -11,6 +11,17 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-18 (v4.62.0)
+
+### Added
+
+- Ship the reviewer's queue-reduction policy template as an embedded default (`reviewer-queue.md`). It previously existed only on an individual hive's data volume, so a `kick_template: reviewer-queue.md` resolved nowhere on any other deployment and the reviewer silently fell back to a stale template that forbade the PR comments its own kick instructed it to post.
+
+### Fixed
+
+- The review-thread reconciler now follows up on review-bot threads on PRs a hive agent opened on a *person's* credentials — a contributor relay, or an operator running agents under their own GitHub auth ([#7638](https://github.com/hivecommons/hive/issues/7638)). It previously kept a PR only when its author was the App bot or `project.ai_author`, so every relay-run PR (GitHub shows the person as author) was dropped before its threads were fetched; since Codex skips bot-authored PRs, the only PRs getting Codex threads were the ones the hive could not answer. A PR now qualifies when its author is a hive login **or** its body carries the `— hive:` attribution trailer — the same rule the task-list sweep uses for issues — computed from the PR list payload at no extra API cost (`PullRequest.HiveAttributed`). Such PRs have no App-bot audit entry, so they route to the scanner like any other unattributed PR. The watcher-side guard is unchanged: it keys on who opened the *thread*, never who opened the PR, so a human's thread on a relay PR is still never replied to or resolved. `src/docs/review-bot-threads.md` gained a "Which PRs qualify" section covering this case and the accepted trailer-spoofing risk.
+- Fix the PR review pill never appearing on repo cards. The review-links ledger is keyed by the full `owner/repo` the review relay recorded, but each PR in the status snapshot carries only the bare repository name, so every lookup missed and no reviewed PR was ever marked — on one hive, 194 open PRs and a populated ledger produced zero pills.
+
 ## 2026-09-18 (v4.61.3)
 
 ### Fixed
