@@ -1,1 +1,0 @@
-- The review perspective cap is now a budget per pull request head commit rather than per dispatch cycle, so setting it actually limits how many review comments one pull request receives. Leaving it unset keeps every perspective, which remains the default.
