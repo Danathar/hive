@@ -420,14 +420,14 @@ initiate a connection to a spoke.**
 Step 1 is the only one needing a spoke image roll, and it needs **no hub
 action at all** — which is precisely why it works for pull-only clusters. The
 spoke's image is updated by its existing self-upgrade path
-(`HeartbeatResponse.SwitchToTag`, `src/pkg/hub/heartbeat.go:2049-2053` (field at `:1698`)), whose doc comment
+(`HeartbeatResponse.SwitchToTag`, `src/pkg/hub/spoke/heartbeat.go:2133-2137` (field at `:1698`)), whose doc comment
 records that this exists for exactly this reason: "Used for branch switches on
 clusters the hub can't reach over kubectl — the spoke has in-cluster RBAC
 (hive-self-upgrade role) to patch its own deployment." The delivery mechanism
 for the fix is one the pull-only boundary already accommodates.
 
 Step 4's carrier has direct precedent. `HeartbeatResponse.PendingGateway`
-(`src/pkg/hub/heartbeat.go:2083-2088`) is a **secret** delivered on the heartbeat response,
+(`src/pkg/hub/spoke/heartbeat.go:2167-2172`) is a **secret** delivered on the heartbeat response,
 queued hub-side (`src/pkg/hub/openrouter.go:213`), drained on delivery, and its doc
 comment states its purpose: "the delivery channel for firewalled/heartbeat-only
 spokes (on a heartbeat-only cluster) the hub cannot POST to directly ... The hub sends it once
