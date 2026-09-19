@@ -1,1 +1,0 @@
-- Detect omp 18.2 working panes from activity rows and spinner elapsed timers instead of only the brief Working/Running labels.

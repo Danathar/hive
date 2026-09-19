@@ -11,6 +11,17 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-19 (v4.66.3)
+
+### Fixed
+
+- Relay task completion now advertises ready only once when the relaunched CLI is immediately ready (#7732).
+- Ensure omp live TUI processes are terminated before relaunching so new tasks start in fresh sessions.
+- Detect omp 18.2 working panes from activity rows and spinner elapsed timers instead of only the brief Working/Running labels.
+- Relay headless output capture now streams and truncates via HIVE_RELAY_MAX_OUTPUT_BYTES (default 16 MiB) instead of crashing on a hard-coded 1 MiB execFile buffer (#7739).
+- A combined review kick that never reaches the reviewer now releases every perspective it covered, instead of leaving all but the first stuck "pending" for a review that never happened; the all-clean comment names the perspectives rather than counting them.
+- The reviewer revisit switches (`review.revise_repos`, `review.revise_verdicts_before`) are now writable through `PUT /api/config/review`; a malformed cutoff is refused, and the running GitHub client picks the change up immediately instead of at the next restart.
+
 ## 2026-09-19 (v4.66.2)
 
 ### Changed

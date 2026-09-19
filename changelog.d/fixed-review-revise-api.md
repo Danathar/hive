@@ -1,1 +1,0 @@
-- The reviewer revisit switches (`review.revise_repos`, `review.revise_verdicts_before`) are now writable through `PUT /api/config/review`; a malformed cutoff is refused, and the running GitHub client picks the change up immediately instead of at the next restart.
