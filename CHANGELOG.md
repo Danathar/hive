@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-19 (v4.66.1)
+
+### Fixed
+
+- Show hive review-link pills on repository cards immediately after startup and manual repo refreshes, not only after a full governor evaluation cycle.
+
 ## 2026-09-19 (v4.66.0)
 
 ### Added
