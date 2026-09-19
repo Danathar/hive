@@ -21,6 +21,7 @@ import (
 	"github.com/hivecommons/hive/pkg/effects"
 	"github.com/hivecommons/hive/pkg/ioscan"
 	"github.com/hivecommons/hive/pkg/logscrub"
+	"github.com/hivecommons/hive/pkg/review"
 )
 
 // ErrNoGitHubClient is returned by *Client methods invoked on a nil receiver.
@@ -95,6 +96,7 @@ type Client struct {
 	// during startup wiring; see automerge_desk.go.
 	approvalDesk ApprovalDeskHook
 	reviseRepos  []string
+	perspectives review.PerspectiveSet
 	// prAuthz gates PR-open requests from the request-file watcher against the
 	// per-agent ACMM write-policy + forge-resistance. nil fails closed. Set by
 	// StartPRRequestWatcher.
@@ -276,6 +278,21 @@ func (c *Client) SetReviseRepos(repos []string) {
 		}
 	}
 	c.reviseRepos = cleaned
+}
+
+// SetPerspectives tells the relay which review perspectives this hive defines,
+// so a verdict claiming anything else is refused.
+//
+// The relay is where an agent-supplied verdict crosses into hive state, so it
+// must judge names against what this hive actually reviews with rather than a
+// compiled-in list — otherwise a hive that adds its own perspective would have
+// every verdict for it rejected as unknown, and a hive that removed one would
+// still accept verdicts nothing asked for.
+func (c *Client) SetPerspectives(set review.PerspectiveSet) {
+	if c == nil {
+		return
+	}
+	c.perspectives = set
 }
 
 type Issue struct {
