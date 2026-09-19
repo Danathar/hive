@@ -11,6 +11,23 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-19 (v4.65.0)
+
+### Added
+
+- Add a CI docs citation check that verifies repo-local `src/docs/` file:line references stay in range.
+- Reviewer: on allowlisted repos the reviewer can now revisit a pull request it already judged and **correct its own advisory review in place** rather than posting a second one. Previously a verdict recorded against a head SHA froze that PR forever, so the ~93 "no findings" reviews produced while the reviewer was told not to read the surrounding tree could never be amended. Editing sends no new notification, only the hive's own `COMMENTED` review is ever touched, and an unchanged body is not rewritten at all. Opt in per hive with `review.revise_repos` and `review.revise_verdicts_before`; both are empty by default, so nothing changes for anyone who does not ask for it.
+
+### Fixed
+
+- Bind structured review verdict recording to dispatched reviewer assignments and reject PR author self-approval.
+- v5/v6 top-up workflows install the gh CLI on ARC runners before opening the top-up PR, so clean forward-merges auto-open their sync PR instead of dying with `gh: command not found` (#7659).
+- `just contribute-hive omp` (container mode, the default) now starts omp signed in the way local mode does, and the contributor relay no longer types a task into omp's setup wizard ([#7678](https://github.com/hivecommons/hive/issues/7678)). Before, nothing copied omp's state into the container — the CLI-staging step had cases for `~/.claude`, `~/.copilot`, `~/.config/goose`, `~/.codex` and `~/.pi` but not `~/.omp` — so the container's omp came up as a fresh install on its first-run wizard, and the relay's readiness check, which looked for a login request in the pane's last 3 lines only, saw the wizard's status footer instead, reported the CLI ready, and sent the hub's task prompt into the "Paste the authorization code" field. Container mode now stages the host's omp sign-in: `bin/omp-backend.js` copies an allowlist of `~/.omp/agent` (`config.yml` and the `agent.db` SQLite store that holds omp's credentials — there is no `auth.json` — never the host's transcripts, natives, daemon state or logs) into the ephemeral staging directory and keeps only the selected provider's credential rows (`AGENT_MODEL=provider/model`, otherwise the providers named by `config.yml`'s `modelRoles`), the same least-privilege rule `pi` already follows. The omp readiness check reads the wizard's own phrases ("Setup step N of N", "Signing in to …", "Browser login:", "Paste the authorization code") across the full 15-line window, and `login` as one word at the pane's edge, as `needs-login`, so the relay waits with its sign-in banner instead of accepting tasks. `just contribute-setup omp` now says which providers are signed in on the host and which the container will receive, so a missing sign-in is caught before the container starts.
+- omp container staging now narrows the staged credential store physically as well as logically: `secure_delete`, WAL checkpoint into the main file (no sidecar shipped) and `VACUUM`, then refuses to stage if any free page, sidecar, or byte of a deleted credential survives (#7682).
+- Gateway proxy injects the owner-equivalent X-Hive-Internal header only for bearer-verified requests (any method); anonymous reads are forwarded with no trust material and fail closed at the Go API, closing the anonymous owner-level read of raw hive.yaml on token-secured spokes (#7695).
+- The reviewer is no longer told to judge a PR from the diff alone. The per-PR kick said "Judge the diff, not the surrounding code", contradicting the policy's own measurement that reading the repository alongside the diff finds 67% of known defects at 1.4 false positives per PR against 17% at 3.6 for the diff alone. The kick now names the commands for opening touched files and their callers at the dispatched head, and separates what the reviewer may read from the narrower scope of what it may report.
+- Reviewer verdicts carrying extra keys are no longer discarded. The verdict is written by a model that routinely adds descriptive fields such as `detail` or `message` alongside the schema, and strict decoding rejected the whole report over one unread key — losing a completed review after its comment had already been posted. Unknown fields are now ignored; every field the hive routes on is still validated.
+
 ## 2026-09-19 (v4.64.2)
 
 ### Fixed
