@@ -2113,6 +2113,7 @@ func (b *boot) bootAgentsWith(deps bootAgentsDeps) {
 		b.ghClient.SetHiveIdentity(hiveIdentity(b.cfg))
 		b.ghClient.SetSelfAuthorizationHoldEnabled(func(repo string) bool { return b.cfg.SelfAuthorizationHoldEnabledForRepo(repo) })
 		b.ghClient.SetReviseRepos(b.cfg.Review.ReviseRepos)
+		b.ghClient.SetPerspectives(reviewPerspectiveSet(b.cfg, b.logger))
 		// github.app_signed_commits: re-author each agent branch through
 		// createCommitOnBranch before the PR opens, so its commit is
 		// GitHub-signed and authored by the App bot. Read through a func so a
@@ -7963,6 +7964,27 @@ func applyHumanDecisionLabels(ctx context.Context, cfg *config.Config, ghClient 
 // silently becomes the current time would re-open every verdict in the
 // artifact at once — the opposite of the narrow, deliberate correction this
 // setting exists for.
+// reviewPerspectiveSet resolves the hive's configured review perspectives.
+//
+// A bad configuration falls back to the built-in set and says so, rather than
+// disabling review. Silently reviewing nothing would look identical to a healthy
+// hive with an empty queue; reviewing with the defaults while logging the error
+// keeps coverage up and makes the mistake findable.
+func reviewPerspectiveSet(cfg *config.Config, logger *slog.Logger) review.PerspectiveSet {
+	if cfg == nil {
+		return review.PerspectiveSet{}
+	}
+	set, err := review.NewPerspectiveSet(cfg.Review.Perspectives, cfg.Review.PerspectivePrompts)
+	if err != nil {
+		if logger != nil {
+			logger.Warn("review.perspectives is invalid; reviewing with the built-in set until it is fixed",
+				"error", err)
+		}
+		return review.PerspectiveSet{}
+	}
+	return set
+}
+
 func parseReviseCutoff(raw string, logger *slog.Logger) time.Time {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -8031,6 +8053,8 @@ func planReviewDispatch(cfg *config.Config, actionable *github.ActionableResult,
 		FanOut:                cfg.Review.FanOut,
 		MaxParallelReviews:    cfg.Review.EffectiveMaxParallelReviews(),
 		MaxPerspectivesPerPR:  cfg.Review.MaxPerspectivesPerPR,
+		Perspectives:          reviewPerspectiveSet(cfg, logger),
+		CombinedPerspectives:  cfg.Review.CombinedPerspectives,
 		ReviewerAgents:        cfg.Review.ReviewerAgents,
 		FixerAgent:            cfg.Review.FixerAgent,
 		PostComments:          cfg.Review.PostComments,
@@ -8057,6 +8081,7 @@ func refreshReviewVerdicts(cfg *config.Config, logger *slog.Logger) {
 		// this the cap makes approve unreachable and every PR aggregates to
 		// requires_human.
 		MaxPerspectivesPerPR: cfg.Review.MaxPerspectivesPerPR,
+		Perspectives:         reviewPerspectiveSet(cfg, logger),
 	}, time.Now().UTC())
 	if err != nil {
 		if !os.IsNotExist(err) {
