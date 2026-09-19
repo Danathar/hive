@@ -11,6 +11,64 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-19 (v4.64.2)
+
+### Fixed
+
+- Sanitize YAML frontmatter values in vault fact writers so newline-bearing titles/tags/sources cannot forge frontmatter keys or truncate the block (frontmatter injection, #7688).
+
+## 2026-09-19 (v4.64.1)
+
+### Changed
+
+- `src/hive.yaml.example` now documents the previously-invisible `knowledge:` sub-sections — `vaults`, `documents`, and `bead_synthesizer` (with its `retention_policy`) — as commented/annotated examples, alongside new operator docs in `knowledge-curator.md` ([#7685](https://github.com/hivecommons/hive/issues/7685)). The bead synthesizer runs hourly **by default**, even with `knowledge.enabled: false`; the example now shows its knobs, its defaults (`/data/vaults/bead-synth-wiki`, retention 5000/7d/30d), and the `enabled: false` opt-out. No behavior change — example and docs only.
+
+## 2026-09-18 (v4.64.0)
+
+### Added
+
+- A hive owner can now say, once, how the issues and PRs their agents file should read: `project.writing_guide` in `hive.yaml` is a free-text block that every default policy filing an issue or PR renders as `${WRITING_GUIDE}`, immediately before the body template the agent is told to fill in ([#7667](https://github.com/hivecommons/hive/issues/7667)). That position is the point — a style rule in a repo's `AGENTS.md` reaches the agent as background knowledge and loses to the policy's own `--body "## Finding …"` template, which is why adding one changed the contributor relay's PRs and left the resident agents' PRs exactly as they were; the only other way to reach the template was the prompt editor, which saves a full copy of the policy that then shadows every upstream update to it. The setting is empty by default and renders nothing, so hives that never set it get byte-identical prompts. The rendered section names the owner as its source, scopes it to every issue and PR body in the session, and bounds it to how the body reads rather than what the policy requires it to contain, so a guide that asks for evidence under a fold does not contradict a policy that demands the evidence. The agent's Prompt Template tab renders the guide where the kick will place it, and a test over the embedded defaults fails any new filing template that omits the variable.
+
+### Fixed
+
+- `just contribute-hive omp` (container mode, the default) no longer dies at startup with `ERROR: omp CLI not found.` right after `just contribute-setup omp` reported OMP ready ([#7661](https://github.com/hivecommons/hive/issues/7661)). The contributor image never shipped `omp`: setup was probing the host's copy, which the container does not see, and the startup failure then printed a "Common causes" list (expired `GH_TOKEN`, unreadable mounts, missing registration token) that was wrong on every line, so the failure read as an auth problem. `src/Dockerfile.contributor` now installs OMP the way it installs Goose and agy — a pinned release (`OMP_VERSION=18.2.6`) downloaded from GitHub Releases and verified with `sha256sum -c` against per-arch digests before install, never via the mutable `curl … | sh` installer. When an image still lacks a backend's CLI, the entrypoint says `<backend> is not in the contributor image` and prints the command that does run it from the host (`HIVE_OMP_DANGEROUSLY_RUN_UNCONFINED=1 just contribute-hive omp local`), the Justfile's startup-failure report names that cause instead of the auth list, and the setup preflight now says it is checking the host CLI, which container mode does not run.
+- The contributor relay no longer hands a finished task back as an environment failure when the agent's `HIVE_VERDICT: complete` line is buried under the CLI's own post-turn chrome ([#7662](https://github.com/hivecommons/hive/issues/7662)). Observed live on `just contribute-hive omp local`: the agent printed the sentinel and opened a PR, but OMP renders its Advisor notes, a clipboard toast and the input box under the agent's last line, so the verdict was 17 rows up — outside the 15-row tail the relay scanned for it — and the chrome-idle fallback never accrued because that chrome repaints every check; thirty minutes later the progress lease reported `no observed progress for 30min` and the hub re-offered the issue with the PR uncredited. The relay now scans the same 400-row window for the verdict that it already used for the PR URL (the dispatch-time baseline that keeps a previous task's verdict from completing the next one reads the same window), logs which rows changed when the idle-grace counter restarts (so a repainting meter is one look to tell from real work), and — before failing a task on lease expiry — checks the pane once more: a fresh verdict completes it on the verdict, a PR verified as opened by this contributor for this task completes it with `pr_url` set so the hub links and credits it, and a PR that could not be attributed is named in the failure reason instead of dropped.
+
+## 2026-09-18 (v4.63.1)
+
+### Fixed
+
+- A hive that caps review perspectives can reach `approve` again. Unanimity was judged against every perspective in the default set, but `max_perspectives_per_pr` limits how many a PR is ever given, and a perspective that is never dispatched can never approve. At a cap of 1 this made `approve` unreachable: every reviewed PR aggregated to `requires_human` with the reason "review perspectives did not unanimously approve", `merge_eligible` was never true, and a hive running `require_approval` could never clear anything. Unanimity is now judged against what the PR was eligible to receive; uncapped hives still require the full set.
+
+## 2026-09-18 (v4.63.0)
+
+### Added
+
+- Extend the task-list sweep to annotate non-task-list Refs issues with PR remainders and mark human-only remainders needs-human.
+
+### Fixed
+
+- The contributor `Justfile` and the dashboard's "Hub Enabled" tooltip now point at the canonical hosted hub, `hive.hivecommons.dev`, instead of the legacy `hive.kubestellar.io` ([#7624](https://github.com/hivecommons/hive/issues/7624)). The old host has answered every path with a 301 since the hub moved on 2026-09-04, which a WebSocket handshake does not follow and `curl -sf` reports as unreachable — so `just contribute-setup` with no `HIVE_HUB` set could not list hives, and the default `HIVE_HUB` could never connect. The default is now `wss://hive.hivecommons.dev/contribute`, the registry and my-hives lookups and the hosted-spoke hostnames use the new domain, and an exported `HIVE_HUB` still carrying the old default is treated as unset so it gets the hive lookup rather than a dead connection.
+- Reviewer verdicts are now delivered to the routing chain. The reviewer's structured verdict had no transport: nothing wrote the `review-report-*.json` files the collector reads, and agents could not write them anyway because `/var/run/hive-metrics` is owned by the hive. Verdicts were printed to a terminal and discarded, leaving `review-verdicts.json` empty, review requests unresolved, and no pull request ever routed to a human — on one spoke, across 117 posted reviews. `hive-review` now takes `--verdict-file`, and `--record-verdict` records a judgement with no comment so a clean review still counts as reviewed instead of being dispatched again from scratch. The relay validates each verdict and checks it names the pull request that was actually reviewed before writing it server-side.
+- Stop the reviewer policy from telling the agent its structured verdict is obsolete. The kick requires a JSON verdict in the same context, and the verdict is what feeds the fix dispatch and the `requires_human` holds that become a triage label — so the claim suppressed the artifact the whole routing chain runs on.
+
+## 2026-09-18 (v4.62.0)
+
+### Added
+
+- Ship the reviewer's queue-reduction policy template as an embedded default (`reviewer-queue.md`). It previously existed only on an individual hive's data volume, so a `kick_template: reviewer-queue.md` resolved nowhere on any other deployment and the reviewer silently fell back to a stale template that forbade the PR comments its own kick instructed it to post.
+
+### Fixed
+
+- The review-thread reconciler now follows up on review-bot threads on PRs a hive agent opened on a *person's* credentials — a contributor relay, or an operator running agents under their own GitHub auth ([#7638](https://github.com/hivecommons/hive/issues/7638)). It previously kept a PR only when its author was the App bot or `project.ai_author`, so every relay-run PR (GitHub shows the person as author) was dropped before its threads were fetched; since Codex skips bot-authored PRs, the only PRs getting Codex threads were the ones the hive could not answer. A PR now qualifies when its author is a hive login **or** its body carries the `— hive:` attribution trailer — the same rule the task-list sweep uses for issues — computed from the PR list payload at no extra API cost (`PullRequest.HiveAttributed`). Such PRs have no App-bot audit entry, so they route to the scanner like any other unattributed PR. The watcher-side guard is unchanged: it keys on who opened the *thread*, never who opened the PR, so a human's thread on a relay PR is still never replied to or resolved. `src/docs/review-bot-threads.md` gained a "Which PRs qualify" section covering this case and the accepted trailer-spoofing risk.
+- Fix the PR review pill never appearing on repo cards. The review-links ledger is keyed by the full `owner/repo` the review relay recorded, but each PR in the status snapshot carries only the bare repository name, so every lookup missed and no reviewed PR was ever marked — on one hive, 194 open PRs and a populated ledger produced zero pills.
+
+## 2026-09-18 (v4.61.3)
+
+### Fixed
+
+- Repointed the contributor-facing connection defaults from the retired `hive.kubestellar.io` host to `hive.hivecommons.dev` ([#7624](https://github.com/hivecommons/hive/issues/7624)). These were the last ones that could still strand a contributor, and they failed silently for the same reason the earlier pass missed them: the legacy apex answers on 443, so a human clicking the link sees a working site and assumes the address is fine. Machines do not get that courtesy. `config/contributor.env.example` and `bin/contributor-relay.js` both defaulted `HIVE_HUB` to `wss://hive.kubestellar.io:3001/contribute`, and port 3001 now refuses connections outright — `wss://` does not follow the 301 that rescues browser traffic, so every contributor who never overrode the default was dialling a dead endpoint. The Justfile was worse: `just contribute-hive` assembled hosted-spoke URLs as `wss://<id>.hive.kubestellar.io/contribute`, and those subdomains sit outside the current wildcard certificate, so the connection dies at the TLS handshake and the hive is reported offline rather than misaddressed. Its registry and `my-hives` lookups also used plain `curl` against the redirecting apex. The dashboard's self-hosting instructions told operators to `curl -X POST` a register endpoint on the legacy host, which without `-L` stops at the 301 and silently does nothing. Deliberately unchanged: the proxy's `DEFAULT_HOSTED_SUFFIXES`, which must keep matching both apexes or the terminal auth gate regresses; the `hive.kubestellar.io/v1` agent-definition `apiVersion`, which is an identifier rather than an address; the cutover fixture in `bin/test_dibs_cutover_verify.sh`, which needs a genuinely different registrable domain to assert the cross-domain block; and the README and UPGRADE passages that describe the redirect itself.
+
 ## 2026-09-18 (v4.61.2)
 
 ### Changed

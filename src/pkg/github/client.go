@@ -344,6 +344,15 @@ type PullRequest struct {
 	Draft       bool      `json:"draft"`
 	CreatedAt   time.Time `json:"created_at"`
 	URL         string    `json:"url"`
+	// HiveAttributed is true when the PR body carries the `— hive:`
+	// attribution trailer (HasAttributionTrailer). It is how a PR a hive agent
+	// opened on a PERSON's credentials — a contributor relay, or an operator
+	// running agents under their own GitHub auth — is recognised as
+	// hive-mediated even though GitHub shows the person as its author. The
+	// review-thread reconciler keys on it alongside the author login
+	// (hivecommons/hive#7638). Derived from the list payload at enumeration
+	// time; the body itself is not kept, so the queue snapshot stays small.
+	HiveAttributed bool `json:"hive_attributed,omitempty"`
 	// Mergeable is a tri-state: MergeableYes, MergeableNo, or MergeableUnknown.
 	// It is intentionally NOT a bool: a bool zero-values to false, which is
 	// indistinguishable from "GitHub says this PR cannot be merged" and would
@@ -829,7 +838,7 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time) (a
 			continue
 		}
 
-		if c.isExempt(labels) {
+		if c.isExempt(labels) || hasIssueNeedsHumanLabel(labels) {
 			breakdown.Filtered++
 			continue
 		}
@@ -950,18 +959,19 @@ func (c *Client) fetchPRs(ctx context.Context, repo string) (actionable []PullRe
 			if !pr.GetDraft() {
 				headRef, headRepo, fromFork := prHeadOrigin(pr)
 				heldPRs = append(heldPRs, PullRequest{
-					Repo:      repo,
-					Number:    pr.GetNumber(),
-					Title:     pr.GetTitle(),
-					Author:    safeGetLogin(pr.GetUser()),
-					Labels:    labels,
-					CreatedAt: pr.GetCreatedAt().Time,
-					URL:       pr.GetHTMLURL(),
-					HeadSHA:   prHeadSHA(pr),
-					HeadRef:   headRef,
-					HeadRepo:  headRepo,
-					FromFork:  fromFork,
-					BaseRef:   prBaseRef(pr),
+					Repo:           repo,
+					Number:         pr.GetNumber(),
+					Title:          pr.GetTitle(),
+					Author:         safeGetLogin(pr.GetUser()),
+					Labels:         labels,
+					CreatedAt:      pr.GetCreatedAt().Time,
+					URL:            pr.GetHTMLURL(),
+					HiveAttributed: HasAttributionTrailer(pr.GetBody()),
+					HeadSHA:        prHeadSHA(pr),
+					HeadRef:        headRef,
+					HeadRepo:       headRepo,
+					FromFork:       fromFork,
+					BaseRef:        prBaseRef(pr),
 				})
 			}
 			continue
@@ -1012,6 +1022,9 @@ func (c *Client) fetchPRs(ctx context.Context, repo string) (actionable []PullRe
 			Draft:       pr.GetDraft(),
 			CreatedAt:   pr.GetCreatedAt().Time,
 			URL:         pr.GetHTMLURL(),
+			// The list payload carries the body, so the hive-mediated test
+			// costs no extra call (hivecommons/hive#7638).
+			HiveAttributed: HasAttributionTrailer(pr.GetBody()),
 			// Mergeable is deliberately NOT set here. The PullRequests.List
 			// endpoint never populates "mergeable" — GitHub computes it
 			// per-PR and returns it only from the single-PR GET. Reading it

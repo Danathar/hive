@@ -50,6 +50,9 @@ type wirePR struct {
 	CreatedAt string      `json:"created_at"`
 	HTMLURL   string      `json:"html_url"`
 	Mergeable *bool       `json:"mergeable"`
+	// Body is the PR description; the `— hive:` attribution trailer, when
+	// present, lives at its end (#7638).
+	Body string `json:"body,omitempty"`
 	// Head / Base carry the branch origin (#7386); nil = absent from the
 	// payload, as older fixtures leave them.
 	Head *wireBranch `json:"head,omitempty"`
@@ -145,6 +148,7 @@ func TestEnumerateActionable_BasicCounts(t *testing.T) {
 		{Number: 2, Title: "bug two", User: wireUser{"bob"}, Labels: []wireLabel{{Name: "enhancement"}}, CreatedAt: hoursAgo(1)},
 		{Number: 3, Title: "held issue", User: wireUser{"carol"}, Labels: []wireLabel{{Name: "hold"}}, CreatedAt: hoursAgo(1)},
 		{Number: 4, Title: "exempt issue", User: wireUser{"dave"}, Labels: []wireLabel{{Name: "LFX mentorship"}}, CreatedAt: hoursAgo(1)},
+		{Number: 6, Title: "needs human issue", User: wireUser{"fran"}, Labels: []wireLabel{{Name: issueNeedsHumanLabel}}, CreatedAt: hoursAgo(1)},
 		// This entry has pull_request set so it should be skipped by fetchIssues.
 		// Must have a valid CreatedAt or go-github fails to parse the whole response.
 		{Number: 5, Title: "a PR returned in issues", User: wireUser{"eve"}, CreatedAt: hoursAgo(1), PullRequest: &struct{}{}},
@@ -166,7 +170,7 @@ func TestEnumerateActionable_BasicCounts(t *testing.T) {
 		t.Fatalf("EnumerateActionable: %v", err)
 	}
 
-	// 2 actionable issues (1 held, 1 exempt, 1 PR-in-issues skipped)
+	// 2 actionable issues (1 held, 1 exempt, 1 needs-human, 1 PR-in-issues skipped)
 	if result.Issues.Count != 2 {
 		t.Errorf("Issues.Count = %d, want 2", result.Issues.Count)
 	}

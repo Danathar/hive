@@ -598,16 +598,16 @@ agents:
       ref: main              # optional; branch/tag/SHA — omit for the default branch
 ```
 
-`definition_source` is `DefinitionSourceConfig` (`src/pkg/config/config.go:518`), a field on `AgentConfig` (`config.go:992`). `owner`, `repo`, and `path` are required for the source to be considered set (`IsSet()`, `config.go:544`); `ref` is optional and falls back to the repo's default branch. `url` is a fifth, informational-only field the dashboard import UI uses to round-trip the pasted `github.com` blob URL — it plays no part in fetching.
+`definition_source` is `DefinitionSourceConfig` (`src/pkg/config/config.go:518`), a field on `AgentConfig` (`config.go:935`). `owner`, `repo`, and `path` are required for the source to be considered set (`IsSet()`, `config.go:544`); `ref` is optional and falls back to the repo's default branch. `url` is a fifth, informational-only field the dashboard import UI uses to round-trip the pasted `github.com` blob URL — it plays no part in fetching.
 
 ### What it does
 
 On startup and on every config reload, `defsrc.ApplyToConfig` (`src/pkg/defsrc/defsrc.go:416`) walks every agent that has `definition_source` set, fetches the file's content from GitHub, and merges the parsed `AgentDefinition`'s operator-safe fields over the agent's baked config in place. It is wired at two call sites in `src/cmd/hive/main.go`:
 
-- **Startup**, line 1294 — applied once before the first kick, so a repo edit made while the hive was down is already reflected.
-- **Config reload**, line 3009 — re-applied on every reload, before `initAgentConfigDrivenSystems`, so downstream systems see the merged config.
+- **Startup**, line 1363 — applied once before the first kick, so a repo edit made while the hive was down is already reflected.
+- **Config reload**, line 3299 — re-applied on every reload, before `initAgentConfigDrivenSystems`, so downstream systems see the merged config.
 
-Both call sites build the same `defsrc.Resolver` (`main.go:1655`), gated by `func(slug string) bool { return cfg.GitHubDefinitionAllowed(slug) }` (`main.go:1657`).
+Both call sites build the same `defsrc.Resolver` (`main.go:1356`), gated by `func(slug string) bool { return cfg.GitHubDefinitionAllowed(slug) }` (`main.go:1358`).
 
 ### What fields the live definition can change
 
@@ -645,7 +645,7 @@ Two merge rules to know before you rely on this:
 
 ### The trust boundary: allowlisted repos are seed-only
 
-`definition_source` is gated by `Config.GitHubDefinitionAllowed(slug)` (`config.go:4166`), which simply delegates to `Config.GitHubPromptAllowed(slug)` (`config.go:4146`) — the **same** seed-only gate used by `prompt_source`. Fetching requires both:
+`definition_source` is gated by `Config.GitHubDefinitionAllowed(slug)` (`config.go:4731`), which simply delegates to `Config.GitHubPromptAllowed(slug)` (`config.go:4711`) — the **same** seed-only gate used by `prompt_source`. Fetching requires both:
 
 ```yaml
 variables:
@@ -655,7 +655,7 @@ variables:
       - my-org/agent-definitions           # exact "owner/repo" slugs only
 ```
 
-This is the property operators most need to understand before enabling the feature: **`variables.security` is honored only from the trusted config seed.** `LoadWithDashboardOverlay` never merges the dashboard overlay's `Variables` block (`config.go:401-403`, `config.go:4161-4165`), so:
+This is the property operators most need to understand before enabling the feature: **`variables.security` is honored only from the trusted config seed.** `LoadWithDashboardOverlay` never merges the dashboard overlay's `Variables` block (`config.go:4412`, `config.go:4483-4485`), so:
 
 - A dashboard save cannot turn `allow_github_prompt` on if the seed has it off.
 - A dashboard save cannot add a repo slug to `github_prompt_allowlist`.
@@ -707,6 +707,24 @@ So the worst an override can do is change the *wording* of a kick that was alrea
 Do not confuse it with `reviewer-advisory.md`, which belongs to the pack-defined on-demand reviewer: that agent votes on *healthy* PRs pre-merge in advisory mode and never touches the needs-human queue.
 
 Portable agents bundle everything — config plus a `promptTemplate` — in a single `AgentDefinition` YAML you can import from a URL in the dashboard. The reference schema is [`../AGENT-DEFINITION.md`](../AGENT-DEFINITION.md), and a worked example lives at [`../examples/agents/customized-agent.yaml`](../examples/agents/customized-agent.yaml).
+
+### Writing guide: how issues and PRs should read (`project.writing_guide`)
+
+Every default template that files an issue or PR carries the variable `${WRITING_GUIDE}` immediately before the body template it tells the agent to fill in (`--body "## Finding …"`, `--body "## Test Improvement …"`). It expands to the text of `project.writing_guide`, wrapped in a short header that says who set it and that it governs how the body *reads*, not what the policy requires it to contain. It is **empty by default**, and an empty guide renders nothing — a hive that never sets it gets byte-identical prompts.
+
+```yaml
+project:
+  writing_guide: |
+    A person who was not in your head will read this. Write for them.
+    Open with two or three short sentences: what changed, why, and what
+    to look at. Short sentences. One idea per bullet. Use the project's
+    own words. Put evidence under a <details> block and keep it to about
+    300 words outside that block.
+```
+
+Why a setting and not `AGENTS.md` ([#7667](https://github.com/hivecommons/hive/issues/7667)): a style rule in a repo's `AGENTS.md` reaches the agent as background knowledge, lower in the prompt than the policy's own body template, and when the two disagree the agent follows the template. The variable puts the owner's rule *next to* the template, which is the only position that changed anything when tried. The alternative — editing each template in the prompt editor — saves a full copy of that policy to `/data/policies/` that then shadows every upstream update to it, per agent, for a style preference.
+
+Where you will see it: the agent's Prompt Template tab renders the guide where the kick will place it, so you can confirm the setting took. Templates whose prompts are built in Go rather than from a policy file (the review swarm, the contributor relay's task prompt) do not carry the variable yet. Review comments (`reviewer-queue.md`) are deliberately outside it: the guide is about issue and PR bodies.
 
 ## Label policy: which issues agents may work
 

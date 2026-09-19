@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"io/fs"
@@ -13,7 +12,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -21,7 +19,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	gh "github.com/google/go-github/v72/github"
@@ -42,7 +39,6 @@ import (
 	"github.com/hivecommons/hive/pkg/forge"
 	"github.com/hivecommons/hive/pkg/github"
 	"github.com/hivecommons/hive/pkg/github/automerge"
-	"github.com/hivecommons/hive/pkg/github/requestwatch"
 	"github.com/hivecommons/hive/pkg/governor"
 	"github.com/hivecommons/hive/pkg/hooks"
 	"github.com/hivecommons/hive/pkg/hub"
@@ -59,7 +55,6 @@ import (
 	"github.com/hivecommons/hive/pkg/notify"
 	"github.com/hivecommons/hive/pkg/planning"
 	"github.com/hivecommons/hive/pkg/policies"
-	"github.com/hivecommons/hive/pkg/proclock"
 	"github.com/hivecommons/hive/pkg/promptsrc"
 	"github.com/hivecommons/hive/pkg/proxy"
 	"github.com/hivecommons/hive/pkg/pushbroker"
@@ -902,7 +897,12 @@ func main() {
 // singleton, config load, logger, tracing and the signal handler. It
 // returns false when main() should return without booting (the --version
 // fast path and HIVE_MODE=hub); the fatal paths os.Exit as before.
-func (b *boot) bootConfig() bool {
+func (b *boot) bootConfig() bool { return b.bootConfigWith(defaultBootConfigDeps()) }
+
+// bootConfigWith is bootConfig with its process-level effects injected; see
+// bootConfigDeps for what each seam stands in for.
+func (b *boot) bootConfigWith(deps bootConfigDeps) bool {
+	args := deps.args
 	var err error
 	// Startup order is intentionally linear and dependency-ordered:
 	//  1. version/config/logging/process singleton
@@ -918,17 +918,17 @@ func (b *boot) bootConfig() bool {
 	// standard flag set would reject it ("flag provided but not defined").
 	// dd's full CLI dispatcher handles this via a version subcommand; this is
 	// the minimal equivalent for the v4 line.
-	if handled, code := dispatchSubcommand(os.Args[1:], os.Stdout, os.Stderr); handled {
+	if handled, code := dispatchSubcommand(args[1:], deps.stdout, deps.stderr); handled {
 		if code == 0 {
 			// Success returns rather than os.Exit(0) so main() unwinds the
 			// (still empty) cleanup stack and the path stays testable.
 			return false
 		}
-		os.Exit(code)
+		deps.exit(code)
+		return false
 	}
 	b.startTime = time.Now()
-	b.configPath = flag.String("config", resolveDefaultConfigPath(os.Getenv(hiveConfigEnv)), "path to hive.yaml config file")
-	flag.Parse()
+	b.configPath = deps.parseFlags(resolveDefaultConfigPath(deps.getenv(hiveConfigEnv)))
 	// Canonicalize gitShort to the standard 7-char short SHA the hub stores and
 	// compares against. The Dockerfile builds it with `--short=7`, but git can
 	// still return more chars when 7 isn't unique; trim so what we report to the
@@ -939,9 +939,9 @@ func (b *boot) bootConfig() bool {
 	dashboard.SetGitBranch(gitBranch)
 	// Resolve channel and tracking together from the cached Deployment image.
 	// No authoritative image outside a cluster means tracking stays unknown.
-	dashboard.SetDeploymentImageSource(hub.SelfDeploymentImage)
+	dashboard.SetDeploymentImageSource(deps.selfImage)
 
-	b.logger = slog.New(logscrub.NewHandler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	b.logger = slog.New(logscrub.NewHandler(slog.NewJSONHandler(deps.stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	slog.SetDefault(b.logger)
 
 	// Process singleton: refuse to become a second hive process in this
@@ -949,21 +949,22 @@ func (b *boot) bootConfig() bool {
 	// alternate registry state every beat, and are invisible to both the
 	// in-process StartHeartbeat guard and the hub's duplicate-spoke detector.
 	// The flock releases on process death, so this never blocks a restart.
-	if os.Getenv(singletonLockEnv) != singletonLockDisable {
+	if deps.getenv(singletonLockEnv) != singletonLockDisable {
 		lockPath := singletonLockPath()
-		procLock, lockErr := proclock.Acquire(lockPath)
+		releaseLock, lockErr := deps.acquireLock(lockPath)
 		if lockErr != nil {
 			b.logger.Error("another hive process is already running in this container — refusing to start a duplicate (#2453, #2496)",
 				"lock", lockPath,
 				"pid", os.Getpid(),
 				"error", lockErr.Error(),
 			)
-			os.Exit(duplicateProcessExitCode)
+			deps.exit(duplicateProcessExitCode)
+			return false
 		}
 		// Held for the process lifetime; the kernel releases it on exit. Kept
 		// referenced so the *os.File is never garbage-collected (a collected
 		// file closes its descriptor, which would silently drop the flock).
-		b.cleanup.push(func() { procLock.Release() })
+		b.cleanup.push(releaseLock)
 	}
 
 	// Auto-update visibility (#7092): before anything reads the upgrade marker,
@@ -972,19 +973,18 @@ func (b *boot) bootConfig() bool {
 	// record that success durably and clear the marker, so the dashboard can
 	// show "attempted and succeeded" instead of silently losing the success the
 	// moment the new image boots.
-	reconcileUpgradeOutcomeAtBoot(upgradeMarkerPath, lastUpgradeOutcomePath, gitShort, b.logger)
+	deps.reconcileUpgradeOutcome(gitShort, b.logger)
 
 	// Clear stale upgrade marker if the current SHA differs from the marker's
 	// current_sha — this means the upgrade succeeded and the marker is from a
 	// previous version.
-	const upgradeMarkerStartupPath = "/data/upgrade-requested"
-	if markerData, err := os.ReadFile(upgradeMarkerStartupPath); err == nil {
+	if markerData, err := deps.readUpgradeMarker(); err == nil {
 		m := parseUpgradeMarker(markerData)
 		if judgeUpgradeMarker(m, gitShort) == upgradeLanded {
 			// We booted on a different SHA than the one that requested the
 			// upgrade: it landed. Drop the marker so the attempt budget resets.
-			if err := os.Remove(upgradeMarkerStartupPath); err != nil && !os.IsNotExist(err) {
-				b.logger.Warn("failed to clear stale upgrade marker", "path", upgradeMarkerStartupPath, "error", err)
+			if err := deps.clearUpgradeMarker(); err != nil && !os.IsNotExist(err) {
+				b.logger.Warn("failed to clear stale upgrade marker", "path", upgradeMarkerPath, "error", err)
 			}
 			b.logger.Info("upgrade landed, cleared marker",
 				"current", gitShort, "previous", m.CurrentSHA, "target", m.TargetSHA)
@@ -1001,8 +1001,8 @@ func (b *boot) bootConfig() bool {
 		}
 	}
 
-	if os.Getenv("HIVE_MODE") == "hub" {
-		runHub(b.logger, *b.configPath)
+	if deps.getenv("HIVE_MODE") == "hub" {
+		deps.runHub(b.logger, b.configPath)
 		return false
 	}
 
@@ -1383,20 +1383,19 @@ func (b *boot) bootConfig() bool {
 	// (#2439). Same return signature as Load; falls back to the seed when no
 	// overlay exists or the pod is not in Kubernetes.
 
-	b.cfg, err = config.LoadWithDashboardOverlay(*b.configPath)
+	b.cfg, err = deps.loadConfig(b.configPath)
 	if err != nil {
 		b.logger.Error("failed to load config", "error", err)
-		os.Exit(1)
+		deps.exit(1)
+		return false
 	}
 
 	// Reconfigure logger with rolling file output
-	b.logger = setupLogger(b.cfg.Governor.Logging.Dir, b.cfg.Governor.Logging.MaxSizeMB,
-		b.cfg.Governor.Logging.MaxAgeDays, b.cfg.Governor.Logging.MaxBackups,
-		b.cfg.Governor.Logging.Compress, b.cfg.Governor.Logging.Level)
+	b.logger = deps.fileLogger(b.cfg)
 	slog.SetDefault(b.logger)
 
 	// Load or generate a unique Hive ID for this instance
-	b.cfg.HiveID = loadOrGenerateHiveID(b.logger)
+	b.cfg.HiveID = deps.hiveID(b.logger)
 	_ = os.Setenv("HIVE_ID", b.cfg.HiveID) // valid key/value; Setenv cannot fail on Unix
 
 	// Observability (#2439): report the removed-agents tombstone LoadWithDashboardOverlay
@@ -1420,7 +1419,7 @@ func (b *boot) bootConfig() bool {
 	// location when HIVE_CONFIG happened to live under /data — a literal grep
 	// for "hive.yaml.bak" could not find it either.
 	for _, runtimePath := range []string{config.RuntimeConfigFile, config.RuntimeConfigFileLegacy} {
-		if _, statErr := os.Stat(runtimePath); statErr == nil {
+		if _, statErr := deps.stat(runtimePath); statErr == nil {
 			b.logger.Info("persisted runtime config present — restored over the seed on pod restart; fixes must land in the live config so the next save refreshes it",
 				"path", runtimePath,
 				"github_installation_id", b.cfg.GitHub.InstallationID,
@@ -1452,10 +1451,10 @@ func (b *boot) bootConfig() bool {
 	// vantage point: /api/config/provenance reads HIVE_CONFIG directly, so it
 	// reports the file the entrypoint chose while the process runs on the one
 	// it did not, and the two disagree with no way to tell from the outside.
-	if envCfg := os.Getenv(hiveConfigEnv); configPathDisagrees(envCfg, *b.configPath) {
+	if envCfg := deps.getenv(hiveConfigEnv); configPathDisagrees(envCfg, b.configPath) {
 		b.logger.Warn("config path disagreement: HIVE_CONFIG names a different file than the one loaded — an explicit -config (the image CMD) outranked the entrypoint's redirect; persisted state in HIVE_CONFIG may be overwritten by the next save",
 			"hive_config_env", envCfg,
-			"loaded_config", *b.configPath,
+			"loaded_config", b.configPath,
 		)
 	}
 
@@ -1527,7 +1526,7 @@ func (b *boot) bootConfig() bool {
 	// (or otel.enabled=false) this installs a no-op provider with zero export
 	// overhead. Never fatal — a tracing setup error must not stop hive.
 	otelCfg := b.cfg.EffectiveOTel()
-	traceShutdown, traceErr := tracing.Init(b.ctx, tracing.Config{
+	traceShutdown, traceErr := deps.initTracing(b.ctx, tracing.Config{
 		Enabled:     otelCfg.Enabled,
 		Endpoint:    otelCfg.Endpoint,
 		Headers:     otelCfg.Headers,
@@ -1542,7 +1541,7 @@ func (b *boot) bootConfig() bool {
 		// read at startup; "" outside a cluster). Spans attribute to the code
 		// that actually runs, not to the merge/publish event (#3816).
 		Commit: gitShort,
-		Image:  hub.SelfDeploymentImage(),
+		Image:  deps.selfImage(),
 	})
 	if traceErr != nil {
 		b.logger.Warn("tracing init failed; continuing without tracing", "error", traceErr)
@@ -1555,7 +1554,7 @@ func (b *boot) bootConfig() bool {
 	// this runs unconditionally and a load failure only costs history, never
 	// counting. Counters persisted by a DIFFERENT commit are dropped inside
 	// LoadReachState: a new binary starts fresh keys naturally.
-	if err := tracing.LoadReachState(reachStatePath, gitShort, b.logger); err != nil {
+	if err := deps.loadReachState(gitShort, b.logger); err != nil {
 		b.logger.Warn("reach state load failed; starting with fresh counters", "error", err)
 	}
 	b.cleanup.push(func() {
@@ -1567,7 +1566,7 @@ func (b *boot) bootConfig() bool {
 	})
 
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	deps.notifySignals(sigCh)
 	// preShutdownHooks run in the signal handler before the context is canceled,
 	// in registration order, while every connection and tmux server is still
 	// live. Registrations happen later in startup, once the subsystems they
@@ -1930,7 +1929,14 @@ func (b *boot) bootAdvisory() bool {
 // bootAgents constructs the agent manager and everything that hangs off it
 // before any agent launches: shutdown archive hook, resolvers, token and
 // credential loops, the agent-facing GitHub request relays, and mint.
-func (b *boot) bootAgents() {
+func (b *boot) bootAgents() { b.bootAgentsWith(defaultBootAgentsDeps()) }
+
+// bootAgentsWith is bootAgents with its long-lived effects injected; see
+// bootAgentsDeps. The request relays are armed AFTER every setter on the
+// client (identity, hold/signed-commit policy, re-engage hook, merger
+// authorizer, required checks, merge policy) so no watcher goroutine can
+// observe a half-configured client.
+func (b *boot) bootAgentsWith(deps bootAgentsDeps) {
 	var err error
 	if b.cfg.GitHub.IsGHE() {
 		b.projectCtx.GHHost = b.cfg.GitHub.HostLabel()
@@ -2021,20 +2027,18 @@ func (b *boot) bootAgents() {
 	// appAuth != nil at boot meant those hives never refreshed per-agent token
 	// caches: agent sessions outlived their scoped token, gh 401'd and printed
 	// "gh auth login", and the login-detector auto-paused the agent (#4072).
-	go b.agentMgr.StartAgentTokenRefresh(b.ctx)
+	deps.startAgentLoops(b.ctx, b.agentMgr)
 	// Start the credential watchdog UNCONDITIONALLY. It self-gates per backend
 	// on the presence of an agent using that backend each tick, so it is a
 	// no-op on gateway/inference-only hives. On Copilot/Claude hives it turns a
 	// missing or expired durable credential — the "stuck at login after an
 	// upgrade roll" outage — into an immediate Audit Log signal instead of a
 	// silent multi-hour stall.
-	go b.agentMgr.StartCredentialWatchdog(b.ctx)
 	// Keep the Copilot CLI's config.json copilotTokens populated from the
 	// durable user token, so agents never sit stuck at "Please use /login"
 	// while a valid token exists (CLI 1.0.78 does not re-populate the emptied
 	// store from the injected env token on its own). Self-gates on a copilot
 	// backend and only writes when the store is empty; never runs a login.
-	go b.agentMgr.StartCopilotSessionRefresh(b.ctx)
 	if b.ghClient != nil {
 		b.agentMgr.SetSandboxPRClient(b.ghClient)
 		b.agentMgr.SetSandboxMutationBoundary(b.mutationBoundary)
@@ -2062,13 +2066,13 @@ func (b *boot) bootAgents() {
 	// queueing it. App setup routinely completes after boot (operator saves the
 	// installation ID, /gh-setup persists it, auto-discovery finds it later), so
 	// this gap silently disarms agent writes on a hive that looks healthy.
-	github.PrepareRequestDirs(b.logger)
+	deps.prepareRequestDirs(b.logger)
 	// Token-access audit ingest (#6287): the per-UID wrappers record every gh
 	// call and credential lookup as an event file, and this loop folds them
 	// into the hive-owned 0600 audit log that GET /api/token-access serves.
 	// Unconditional, like the request dirs: agents touch tokens whether or
 	// not the App is usable, and the trail must never depend on App state.
-	github.StartTokenAccessAuditWatcher(b.ctx, b.logger)
+	deps.startTokenAccessAudit(b.ctx, b.logger)
 
 	// Local alias keeps the gate textually identical to v4, which
 	// pkg/github/request_dirs_test.go pins by regexp.
@@ -2130,24 +2134,6 @@ func (b *boot) bootAgents() {
 		// GitHub-signed and authored by the App bot. Read through a func so a
 		// config reload takes effect on the next request.
 		b.ghClient.SetSignedCommits(func() bool { return b.cfg.GitHub.AppSignedCommitsEnabled() })
-		startRequestWatchers(b.ctx, requestwatch.New(b.ghClient, b.agentMgr.AuthorizePROpen, b.agentMgr.AuthorizeIssueOpen, holdLabel, nil), b.logger)
-		// Review relay: agents request PR reviews by dropping a file (hive-review)
-		// instead of running `gh pr review` in their own shell, which the hive
-		// never observes. The watcher submits the review with the App token and
-		// records it on the audit/activity trail, gated by the same
-		// forge-resistance + push-capability (CanPush) check as opening a PR —
-		// reviewing is a PR-write, so AuthorizePROpen is the correct gate.
-		b.ghClient.StartReviewRequestWatcher(b.ctx, b.agentMgr.AuthorizeReviewRequest, nil)
-		// Merge relay: agents request merges by dropping a file (hive-merge)
-		// instead of calling the GitHub MCP merge_pull_request tool, whose GraphQL
-		// mutation GitHub rejects for App tokens ("Resource not accessible by
-		// integration"). The hive merges over REST with the App token, gated by
-		// the same forge-resistance + a CanMerge ACMM check.
-		// bindMergeAuthz layers the F4 target-binding (CWE-863) on top of the
-		// manager's agent/UID/CanMerge check: the merge must name a pinned head
-		// SHA (no unpinned "merge whatever HEAD is now") AND the (repo, number)
-		// must appear in the governor's current merge-eligible list — so an
-		// injected agent cannot land an arbitrary reachable PR of its choosing.
 		// Fix #2: on a terminal merge failure caused by a failing REQUIRED check,
 		// re-engage the fix loop instead of abandoning the PR. The hook records a
 		// re-engagement under the escalation store's per-red-SHA cap (shared with
@@ -2156,7 +2142,6 @@ func (b *boot) bootAgents() {
 		// surfaced into CI_FAILING by writeMergeEligible each eval tick; the hook
 		// is the loop-safety authority that decides when to STOP nudging.
 		b.ghClient.SetMergeReEngageHook(mergeReEngageHook(b.cfg))
-		b.ghClient.StartMergeRequestWatcher(b.ctx, bindMergeAuthz(b.agentMgr.AuthorizeMerge), nil)
 
 		// SECURITY (audit F3): re-verify the merger tier inside the sweep. The
 		// dashboard's queue endpoint gates on requireMergerOrOwnerRole, but the
@@ -2182,6 +2167,38 @@ func (b *boot) bootAgents() {
 			autoMergeOpts.RequiredChecks = set
 		}
 
+		// Issue relay: agents request issue creation and comments by dropping a
+		// file (hive-open-issue via the gh wrapper) instead of calling GitHub
+		// from their own shell. The agent-side call used to ride the agent's
+		// shell tool — one GHE secondary-rate-limit stall or mangled multiline
+		// command and the finding was silently lost (root-caused live
+		// 2026-08-21: sec-check's creates timed out and survived only as
+		// beads). The watcher executes server-side with the App token, retries
+		// with backoff, dedupes by exact open-issue title, and enforces the
+		// same forge-resistance + CanCreateIssues mode gate the wrapper does.
+		// Review relay: agents request PR reviews by dropping a file (hive-review)
+		// instead of running `gh pr review` in their own shell, which the hive
+		// never observes. The watcher submits the review with the App token and
+		// records it on the audit/activity trail, gated by the same
+		// forge-resistance + push-capability (CanPush) check as opening a PR —
+		// reviewing is a PR-write, so AuthorizePROpen is the correct gate.
+		// Merge relay: agents request merges by dropping a file (hive-merge)
+		// instead of calling the GitHub MCP merge_pull_request tool, whose GraphQL
+		// mutation GitHub rejects for App tokens ("Resource not accessible by
+		// integration"). The hive merges over REST with the App token, gated by
+		// the same forge-resistance + a CanMerge ACMM check.
+		// bindMergeAuthz layers the F4 target-binding (CWE-863) on top of the
+		// manager's agent/UID/CanMerge check: the merge must name a pinned head
+		// SHA (no unpinned "merge whatever HEAD is now") AND the (repo, number)
+		// must appear in the governor's current merge-eligible list — so an
+		// injected agent cannot land an arbitrary reachable PR of its choosing.
+		// Fix #2: on a terminal merge failure caused by a failing REQUIRED check,
+		// re-engage the fix loop instead of abandoning the PR. The hook records a
+		// re-engagement under the escalation store's per-red-SHA cap (shared with
+		// the reaper so a PR is never double-dispatched beyond its budget) and
+		// returns whether the cap still allowed a dispatch. The PR is already
+		// surfaced into CI_FAILING by writeMergeEligible each eval tick; the hook
+		// is the loop-safety authority that decides when to STOP nudging.
 		// Self-authored auto-merge: the App merges its OWN open, CI-green PRs
 		// directly over the REST API, without a human "Approved ... for Hive
 		// auto-merge" queue review and without waiting on tide. Prow forbids
@@ -2215,7 +2232,15 @@ func (b *boot) bootAgents() {
 		// config, same bead evidence, same BlocksMerge predicate) and asks
 		// intent.EvaluateForAppSelfMerge before every self-merge.
 		autoMergeOpts.IntentGate = selfMergeIntentGate(b.cfg, b.beadStores)
-		automerge.StartSelfAuthoredAutoMergeSweep(b.ctx, b.ghClient, b.cfg.AutoMerge.MaxMerges, b.cfg.AutoMerge.SelfAuthoredAutoMergeAllowed(b.cfg.ACMMLevel), b.cfg.ACMMLevel, autoMergeOpts)
+		deps.startRequestRelays(b.ctx, b.ghClient, requestRelays{
+			prOpen:    b.agentMgr.AuthorizePROpen,
+			holdLabel: holdLabel,
+			issueOpen: b.agentMgr.AuthorizeIssueOpen,
+			review:    b.agentMgr.AuthorizeReviewRequest,
+			merge:     bindMergeAuthz(b.agentMgr.AuthorizeMerge),
+			logger:    b.logger,
+		})
+		deps.startSelfAuthoredSweep(b.ctx, b.ghClient, b.cfg.AutoMerge.MaxMerges, b.cfg.AutoMerge.SelfAuthoredAutoMergeAllowed(b.cfg.ACMMLevel), b.cfg.ACMMLevel, autoMergeOpts)
 	}
 
 	// Opt-in mint credential: when mint.enabled, build a Minter from the config
@@ -2224,7 +2249,7 @@ func (b *boot) bootAgents() {
 	// Default off — an absent/disabled `mint:` block leaves the credential path
 	// byte-identical. Fail-safe: a mint setup error is logged, never fatal.
 	if b.cfg.Mint.Enabled {
-		if b.agentMinter, err = buildAgentMinter(b.cfg, b.logger); err != nil {
+		if b.agentMinter, err = deps.buildMinter(b.cfg, b.logger); err != nil {
 			b.logger.Warn("mint enabled but minter setup failed; agents keep App token only", "error", err)
 		} else {
 			b.agentMgr.SetAgentMint(b.agentMinter)
@@ -2232,7 +2257,7 @@ func (b *boot) bootAgents() {
 		}
 	}
 
-	go agent.StartPermissionsWatcher(b.logger)
+	deps.startPermissionsWatcher(b.logger)
 }
 
 // bootState loads the persisted state snapshot and replays it into the
@@ -3535,7 +3560,7 @@ func (b *boot) bootPolicies() {
 func (b *boot) bootWatchers() {
 
 	// Watch hive.yaml for external changes and reload config when modified
-	b.configWatcher = config.NewWatcher(*b.configPath, func(newCfg *config.Config) {
+	b.configWatcher = config.NewWatcher(b.configPath, func(newCfg *config.Config) {
 		// Preserve runtime-only fields that are not in the YAML
 		newCfg.HiveID = b.cfg.HiveID
 
@@ -8212,7 +8237,12 @@ func refreshReviewVerdicts(cfg *config.Config, logger *slog.Logger) {
 	if cfg == nil || !cfg.Review.RequireApproval {
 		return
 	}
-	artifact, err := review.CollectAndMerge("", "", review.AggregateOptions{}, time.Now().UTC())
+	artifact, err := review.CollectAndMerge("", "", review.AggregateOptions{
+		// Unanimity is judged against what a PR was eligible to receive. Without
+		// this the cap makes approve unreachable and every PR aggregates to
+		// requires_human.
+		MaxPerspectivesPerPR: cfg.Review.MaxPerspectivesPerPR,
+	}, time.Now().UTC())
 	if err != nil {
 		if !os.IsNotExist(err) {
 			logger.Warn("failed to refresh review verdicts", "error", err)
