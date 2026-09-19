@@ -3425,7 +3425,11 @@ func (b *boot) bootWatchersWith(deps bootWatchersDeps) {
 
 // bootProxy installs the canary scanner, then builds and starts the egress
 // proxy and inference translator with their per-agent route callbacks.
-func (b *boot) bootProxy() {
+func (b *boot) bootProxy() { b.bootProxyWith(defaultBootProxyDeps()) }
+
+// bootProxyWith is bootProxy with its long-lived effects injected; see
+// bootProxyDeps.
+func (b *boot) bootProxyWith(deps bootProxyDeps) {
 	ctx, cfg, logger, agentMgr, dashSrv := b.ctx, b.cfg, b.logger, b.agentMgr, b.dashSrv
 	beadStores, tokenCollector, linearCredentialResolver := b.beadStores, b.tokenCollector, b.linearCredentialResolver
 	canaryLeakHandler := func(leak ioscan.CanaryLeak) {
@@ -3442,7 +3446,7 @@ func (b *boot) bootProxy() {
 		b.ghClient.SetCanaryScanner(cfg.Ioscan.IsEnabled() && cfg.Ioscan.CanariesEnabled(), cfg.Ioscan.FailClosedAtLevel(cfg.ACMMLevelOrZero()), ioscan.DefaultCanaries, canaryLeakHandler)
 	}
 
-	githubProxy, err := proxy.NewGitHubProxy(logger, cfg.Project.Org, cfg.Project.Repos)
+	githubProxy, err := deps.newGitHubProxy(logger, cfg.Project.Org, cfg.Project.Repos)
 	if err != nil {
 		logger.Error("failed to create github proxy", "error", err)
 	} else {
@@ -3517,7 +3521,7 @@ func (b *boot) bootProxy() {
 		// after the manager is constructed — see the comment there (#3961): it
 		// must be live before the persisted-state replay re-applies saved
 		// backend overrides, which happens well before this point.
-		agentMgr.SetInferenceCallbacks(
+		deps.installInferenceCallbacks(agentMgr,
 			func(agentName, backend, model string) {
 				// Named model gateway (OpenRouter, a second LiteLLM, etc.): resolve
 				// endpoint/key/model from the gateway and route through it. Built-in
@@ -3540,7 +3544,7 @@ func (b *boot) bootProxy() {
 					// project id sent as X-IBM-Project-ID. Mint (cached) and set
 					// both here; every other kind sends the resolved key verbatim.
 					apiKey, extraHeaders := resolveGatewayAuth(gw, agentName, backend, logger)
-					githubProxy.SetInferenceRoute(agentName, &proxy.InferenceRoute{
+					deps.setInferenceRoute(githubProxy, agentName, &proxy.InferenceRoute{
 						Backend:      backend,
 						Endpoint:     endpoint,
 						Model:        model,
@@ -3592,7 +3596,7 @@ func (b *boot) bootProxy() {
 							caBundle = gw.CABundle
 						}
 					}
-					githubProxy.SetInferenceRoute(agentName, &proxy.InferenceRoute{
+					deps.setInferenceRoute(githubProxy, agentName, &proxy.InferenceRoute{
 						Backend:  backend,
 						Endpoint: endpoint,
 						Model:    model,
@@ -3626,7 +3630,7 @@ func (b *boot) bootProxy() {
 						model = gw.DefaultModel
 					}
 					apiKey, extraHeaders := resolveGatewayAuth(gw, agentName, backend, logger)
-					githubProxy.SetInferenceRoute(agentName, &proxy.InferenceRoute{
+					deps.setInferenceRoute(githubProxy, agentName, &proxy.InferenceRoute{
 						Backend:      backend,
 						Endpoint:     endpoint,
 						Model:        model,
@@ -3645,7 +3649,7 @@ func (b *boot) bootProxy() {
 				if len(endpoints) == 0 {
 					logger.Warn("inference backend selected but no endpoint configured",
 						"agent", agentName, "model", model, "backend", backend)
-					githubProxy.ClearInferenceRoute(agentName)
+					deps.clearInferenceRoute(githubProxy, agentName)
 					return
 				}
 				endpoint := proxy.FindEndpointForModel(endpoints, model, "", "")
@@ -3654,29 +3658,20 @@ func (b *boot) bootProxy() {
 						"agent", agentName, "model", model, "backend", backend)
 					endpoint = endpoints[0]
 				}
-				githubProxy.SetInferenceRoute(agentName, &proxy.InferenceRoute{
+				deps.setInferenceRoute(githubProxy, agentName, &proxy.InferenceRoute{
 					Backend:  backend,
 					Endpoint: endpoint,
 					Model:    model,
 				})
 			},
 			func(agentName string) {
-				githubProxy.ClearInferenceRoute(agentName)
+				deps.clearInferenceRoute(githubProxy, agentName)
 			},
 		)
 
-		go func() {
-			if err := githubProxy.Start(); err != nil {
-				logger.Error("github proxy failed", "error", err)
-			}
-		}()
-		go func() {
-			if err := githubProxy.StartInferenceTranslator(); err != nil {
-				logger.Error("inference translation server failed", "error", err)
-			}
-		}()
+		deps.startProxy(githubProxy, logger)
 		if cfg.Governor.LiteLLM.LocalProxy {
-			go superviseLocalLiteLLM(ctx, logger)
+			deps.startLocalLiteLLM(ctx, logger)
 		}
 		logger.Info("github proxy started", "addr", githubProxy.ListenAddr())
 	}
