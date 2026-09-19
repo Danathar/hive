@@ -13,7 +13,13 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
 hive_image := env("HIVE_CONTRIBUTOR_IMAGE", "ghcr.io/hivecommons/hive-contributor:latest")
+# The hosted hub moved to hive.hivecommons.dev on 2026-09-04; the old
+# hive.kubestellar.io host answers every path with a 301 to the new one, which
+# a WebSocket handshake does not follow and `curl -sf` (no -L) reports as
+# unreachable (#7624). The legacy value is still recognised below as "not
+# set" so a stale export gets the hive lookup instead of a dead connection.
 hive_hub := env("HIVE_HUB", "wss://hive.hivecommons.dev/contribute")
+legacy_hive_hub := "wss://hive.kubestellar.io/contribute"
 config_dir := env("HOME") + "/.config/hive"
 # Container runtime for containerized mode. Empty = auto-detect (docker, then
 # podman — Docker wins on discovery order, not isolation posture; see the
@@ -56,6 +62,12 @@ contribute-check-backend backend="claude":
     #!/usr/bin/env bash
     set -euo pipefail
     echo "── Preflight: {{backend}} CLI ──"
+    # Say which CLI this probes. It is the HOST's copy, which is what local
+    # mode runs and what container mode stages a sign-in from — but container
+    # mode (the default) executes the copy baked into the contributor image,
+    # so a passing host probe does not prove the image ships the CLI (#7661:
+    # setup said omp was ready, the container said `omp CLI not found`).
+    echo "(host CLI — used by 'just contribute-hive {{backend}} local'; container mode runs the copy inside the image)"
     case "{{backend}}" in
       claude)
         if ! command -v claude &>/dev/null; then
@@ -281,7 +293,7 @@ backend-smoke backends="claude codex":
 contribute-setup backend="claude": check-version (contribute-check-backend backend)
     #!/usr/bin/env bash
     set -euo pipefail
-    if [[ "{{hive_hub}}" == "wss://hive.hivecommons.dev/contribute" ]]; then
+    if [[ "{{hive_hub}}" == "wss://hive.hivecommons.dev/contribute" || "{{hive_hub}}" == "{{legacy_hive_hub}}" ]]; then
       echo "HIVE_HUB not set — looking up your hives..."
       echo ""
       _TOKEN=$(gh auth token 2>/dev/null || echo "")
@@ -1642,13 +1654,43 @@ contribute-hive backend="" mode="docker": check-version
         report_container_termination "$CONTAINER_EXIT"
         echo ""
         echo "── Container logs ──"
-        "$RUNTIME" logs "${CONTAINER_NAME}" 2>&1 || echo "(no logs captured)"
+        CONTAINER_LOGS="$("$RUNTIME" logs "${CONTAINER_NAME}" 2>&1 || echo "(no logs captured)")"
+        echo "${CONTAINER_LOGS}"
         echo "────────────────────"
         echo ""
-        echo "Common causes:"
-        echo "  * GH_TOKEN empty/expired  — re-run: just contribute-setup {{backend}}"
-        echo "  * config mounts unreadable (rootless podman UID mapping)"
-        echo "  * missing HIVE_REGISTRATION_TOKEN"
+        # Name the cause the logs already prove rather than guessing at auth.
+        # The entrypoint's `<backend> CLI not found.` means the IMAGE does not
+        # ship that CLI (#7661: omp, before src/Dockerfile.contributor carried
+        # it). The host copy that `just contribute-setup <backend>` probed is
+        # not mounted into the container, so "re-run contribute-setup" is the
+        # wrong advice — it passes again and changes nothing. The remedy is a
+        # newer image, or local mode, which is what does use the host CLI.
+        # Matched on the shared "CLI not found." line so an OLDER image whose
+        # entrypoint predates the fuller message still gets the right cause.
+        if [[ "${CONTAINER_LOGS}" == *"ERROR: ${BACKEND} CLI not found."* ]]; then
+          echo "Cause: the image ({{hive_image}}) does not ship the ${BACKEND} CLI, so"
+          echo "  container mode cannot run it. The ${BACKEND} on this host — the one"
+          echo "  'just contribute-setup ${BACKEND}' checked — is not visible inside the container."
+          echo "  * use an image that ships it: each run pulls {{hive_image}} unless HIVE_SKIP_PULL=true,"
+          echo "    so re-run once a build carrying ${BACKEND} has been published"
+          # shellcheck source=config/backends.conf disable=SC1091
+          source "$(pwd)/config/backends.conf" 2>/dev/null || true
+          _UNCONFINED_VAR=""
+          if declare -F unconfined_local_backend_env_var >/dev/null 2>&1; then
+            _UNCONFINED_VAR="$(unconfined_local_backend_env_var "${BACKEND}")"
+          fi
+          if [[ -n "${_UNCONFINED_VAR}" ]]; then
+            echo "  * or use the host CLI, with no sandbox (see docs/backend-setup.md):"
+            echo "      ${_UNCONFINED_VAR}=1 just contribute-hive ${BACKEND} local"
+          else
+            echo "  * or use the host CLI: just contribute-hive ${BACKEND} local"
+          fi
+        else
+          echo "Common causes:"
+          echo "  * GH_TOKEN empty/expired  — re-run: just contribute-setup {{backend}}"
+          echo "  * config mounts unreadable (rootless podman UID mapping)"
+          echo "  * missing HIVE_REGISTRATION_TOKEN"
+        fi
         echo ""
         echo "Re-run with HIVE_KEEP_CONTAINER=true to keep the container for inspection."
         if [[ "${HIVE_KEEP_CONTAINER:-}" == "true" ]]; then
