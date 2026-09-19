@@ -1,1 +1,0 @@
-- Add a CI docs citation check that verifies repo-local `src/docs/` file:line references stay in range.
