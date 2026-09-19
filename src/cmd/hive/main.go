@@ -1425,6 +1425,13 @@ func (b *boot) wireBootClosures() {
 			ReInitFunc: func() {
 				initAgentConfigDrivenSystems(b.cfg)
 			},
+			ReviewConfigApplied: func(rc config.ReviewConfig) {
+				if b.ghClient == nil {
+					return
+				}
+				b.ghClient.SetReviseRepos(rc.ReviseRepos)
+				b.ghClient.SetPerspectives(reviewPerspectiveSet(b.cfg, b.logger))
+			},
 			EnumerateFunc: func() {
 				runEvalCycle(b.ctx, b.cfg, b.ghClient, b.gov, b.sched, b.agentMgr, b.dashSrv, b.notifier, b.beadStores, b.tokenCollector, b.metricsCollector, b.nousState, &b.lastActionable, b.advisoryStore, b.advisoryIssues, nil, b.approvalDesk, b.logger)
 			},
