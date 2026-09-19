@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-19 (v4.66.2)
+
+### Changed
+
+- Use compact emoji-only action markers in repository issue and PR pills.
+
 ## 2026-09-19 (v4.66.1)
 
 ### Fixed

@@ -1,1 +1,0 @@
-- Use compact emoji-only action markers in repository issue and PR pills.
