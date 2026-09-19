@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-19 (v4.66.4)
+
+### Fixed
+
+- The reviewer revisit lane (`revise_repos` / `revise_verdicts_before`) now actually dispatches: a settled PR always carries pending entries for its head, which made every perspective look covered and silently suppressed the revisit. They are cleared once per revisit, with an in-flight guard against re-kicking each cycle.
+
 ## 2026-09-19 (v4.66.3)
 
 ### Fixed
