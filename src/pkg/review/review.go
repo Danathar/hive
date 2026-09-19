@@ -94,6 +94,11 @@ type AggregateOptions struct {
 	HumanThreshold outputschema.Severity
 	FixAttempts    int
 	MaxFixAttempts int
+	// MaxPerspectivesPerPR mirrors DispatchOptions.MaxPerspectivesPerPR. A
+	// perspective the dispatcher never hands out cannot approve, so unanimity
+	// must be judged against what the PR was eligible to receive. Zero means
+	// "no cap": every perspective in DefaultPerspectives is required.
+	MaxPerspectivesPerPR int
 }
 
 type Aggregate struct {
@@ -132,7 +137,11 @@ func ValidateReport(raw []byte) (*PerspectiveReport, error) {
 		return nil, fmt.Errorf("review report must be a non-empty JSON object")
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
+	// Unknown fields are ignored rather than rejected. The report is written by a
+	// model that routinely adds descriptive keys ("detail", "message") alongside
+	// the schema; refusing the whole object over one extra key discards a review
+	// that is otherwise complete and correct. Every field the hive routes on is
+	// validated explicitly below, so an unrecognised key cannot change a verdict.
 	var report PerspectiveReport
 	if err := dec.Decode(&report); err != nil {
 		return nil, fmt.Errorf("decode review report: %w", err)
@@ -222,7 +231,7 @@ func AggregateReports(reports []PerspectiveReport, opts AggregateOptions) Aggreg
 		agg.FixCycle = true
 		return agg
 	}
-	if len(seenVerdicts) == 1 && seenVerdicts[VerdictApprove] && hasAllDefaultPerspectives(agg.Perspectives) {
+	if len(seenVerdicts) == 1 && seenVerdicts[VerdictApprove] && hasAllRequiredPerspectives(agg.Perspectives, opts.MaxPerspectivesPerPR) {
 		agg.Verdict = VerdictApprove
 		agg.MergeEligible = true
 		return agg
@@ -433,12 +442,28 @@ func severityRank(s outputschema.Severity) int {
 	}
 }
 
-func hasAllDefaultPerspectives(got map[Perspective]Verdict) bool {
-	if len(got) != len(DefaultPerspectives) {
+// hasAllRequiredPerspectives decides whether enough perspectives approved to
+// call the review unanimous.
+//
+// The bar was every perspective in DefaultPerspectives. That was right while
+// every PR received all five, but max_perspectives_per_pr caps how many a PR is
+// ever given — and a perspective that is never dispatched can never approve. At
+// a cap of 1, "unanimous" became unreachable: every PR aggregated to
+// requires_human with the reason "review perspectives did not unanimously
+// approve", approve and merge_eligible could not occur, and a hive running
+// require_approval could never clear anything.
+//
+// The bar is therefore what the PR was eligible to receive, not the full set.
+func hasAllRequiredPerspectives(got map[Perspective]Verdict, maxPerPR int) bool {
+	required := len(DefaultPerspectives)
+	if maxPerPR > 0 && maxPerPR < required {
+		required = maxPerPR
+	}
+	if len(got) < required {
 		return false
 	}
-	for _, p := range DefaultPerspectives {
-		if got[p] != VerdictApprove {
+	for _, v := range got {
+		if v != VerdictApprove {
 			return false
 		}
 	}

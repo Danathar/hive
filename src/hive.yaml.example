@@ -53,6 +53,17 @@ project:
 #   repo_policies:
 #     - repo: console
 #       self_authorization_hold: false
+  # Optional: how the issues and PRs your agents file should read. Rendered as
+  # ${WRITING_GUIDE} in every default policy that files an issue or PR, right
+  # before the body template the agent fills in — next to the template, which
+  # is where a style rule has to sit to be followed (a rule in AGENTS.md
+  # arrives as background and loses to the template). Empty (the default)
+  # renders nothing. See src/docs/agent-configuration.md.
+  # writing_guide: |
+  #   A person who was not in your head will read this. Write for them.
+  #   Open with two or three short sentences: what changed, why, and what
+  #   to look at. Short sentences. One idea per bullet. Put evidence under a
+  #   <details> block and keep it to about 300 words outside that block.
 
 ioscan:
   enabled: true                           # default: true; scans untrusted text before agent kicks
@@ -653,6 +664,34 @@ knowledge:
     #   url: https://github.com/your-org/knowledge-base
     #   subpath: patterns
     #   layer: org
+  vaults:                                    # Local Obsidian vaults auto-connected at boot
+    # - name: team-notes                     # Display name (also the vault name in the API)
+    #   path: /data/vaults/team-notes        # git-inited and seeded on first boot
+    #   auto_index: true                     # Parsed but unactioned — indexing always
+    #                                        # happens on connect regardless of this value
+    #   git_sync: true                       # Pull + reindex every 60s (Obsidian Git)
+  documents:                                 # PDFs/URLs/files imported as knowledge at boot
+    # - name: style-guide
+    #   url: https://example.com/style-guide.pdf   # Or file_path: /data/docs/guide.pdf
+    #   layer: project                       # personal, project, org, or community
+  bead_synthesizer:                          # Bead→wiki synthesis. ON BY DEFAULT — runs
+                                             # hourly even when knowledge.enabled is false.
+    # enabled: false                         # The only way to turn it off
+    schedule: hourly                         # hourly (default) or daily; anything else
+                                             # falls back to hourly
+    min_confidence: 0.0                      # Drop classified facts below this confidence
+                                             # (heuristic classifier emits 0.5–0.8)
+    target_layer: personal                   # Layer facts are primed at (default: personal)
+    max_facts_per_cycle: 0                   # 0 = unlimited
+    vault_path: /data/vaults/bead-synth-wiki # Auto-created and auto-connected
+    retention_policy:                        # Bead lifecycle management (always active)
+      max_beads: 5000                        # Archive down to 80% of this when exceeded
+      archive_after_synth_days: 7            # Archive synthesized beads after N days
+      high_priority_retain_days: 30          # P0/P1 beads kept at least this long
+      preserve_with_deps: true               # Never archive beads with open dependents.
+                                             # Defaults to true when retention_policy is
+                                             # ABSENT, but false when the block is present
+                                             # without this key — set it explicitly.
   primer:
     max_facts: 25                            # Max facts injected per agent kick
     priority:                                # Fact types, highest priority first
