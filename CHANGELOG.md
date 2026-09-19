@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-19 (v4.64.2)
+
+### Fixed
+
+- Sanitize YAML frontmatter values in vault fact writers so newline-bearing titles/tags/sources cannot forge frontmatter keys or truncate the block (frontmatter injection, #7688).
+
 ## 2026-09-19 (v4.64.1)
 
 ### Changed

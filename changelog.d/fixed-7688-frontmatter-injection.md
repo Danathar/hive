@@ -1,1 +1,0 @@
-- Sanitize YAML frontmatter values in vault fact writers so newline-bearing titles/tags/sources cannot forge frontmatter keys or truncate the block (frontmatter injection, #7688).
