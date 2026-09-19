@@ -6,13 +6,14 @@ import (
 )
 
 type PullRequest struct {
-	Repo    string
-	Number  int
-	Title   string
-	Author  string
-	HeadSHA string
-	URL     string
-	Lane    string
+	Repo        string
+	Number      int
+	Title       string
+	Author      string
+	HeadSHA     string
+	URL         string
+	Lane        string
+	AuthorAgent string
 	// MergeBase is the commit the reviewer should ground its reading in. When
 	// set, the prompt instructs the reviewer to read the repository at this
 	// commit rather than reasoning from the diff alone — see groundingSection
@@ -111,6 +112,12 @@ type PromptOptions struct {
 	// silence reads as absence. This turns "nothing to report" into one short
 	// line of evidence, deliberately capped at that.
 	AcknowledgeNoFindings bool
+	// Revise tells the reviewer it is re-examining a PR it has already
+	// reviewed, and that its existing review must be corrected in place
+	// rather than joined by a second one. Editing notifies nobody; posting
+	// again notifies every subscriber, which is too high a price for the hive
+	// correcting its own mistake.
+	Revise bool
 }
 
 // BuildPerspectivePromptWith is BuildPerspectivePromptOpts with the full set
@@ -150,7 +157,7 @@ func BuildPerspectivePromptWith(p Perspective, pr PullRequest, opts PromptOption
 	b.WriteString("Allowed verdicts: approve, changes_requested, requires_human, reject. Finding severities: info, low, medium, high, critical.\n")
 	b.WriteString("Use approve only when this perspective finds no blocker. Use changes_requested for agent-fixable issues. Use requires_human for ambiguous/high-risk judgment. Use reject for fundamentally unsuitable or harmful PRs.\n")
 	if opts.PostComments {
-		b.WriteString(buildPublishInstruction(pr, opts.AcknowledgeNoFindings))
+		b.WriteString(buildPublishInstruction(pr, opts.AcknowledgeNoFindings, opts.Revise))
 	}
 	return b.String()
 }
@@ -170,9 +177,17 @@ func buildReadInstruction(pr PullRequest) string {
 	fmt.Fprintf(&b, "  gh pr diff %d --repo %s\n", pr.Number, pr.Repo)
 	b.WriteString("The body states what the author INTENDED; the diff is what they actually did. You need both — most of the findings worth reporting live in the gap between them.\n")
 	b.WriteString("Reading is read-only and unrestricted: use gh freely here.\n")
-	b.WriteString("Judge the diff, not the surrounding code. Pre-existing problems this PR does not touch are out of scope; raising them reads as an obstacle, not a review.\n")
+	b.WriteString("THE DIFF ALONE IS NOT ENOUGH. Open the files it touches, and the callers of what it changes:\n")
 	if pr.HeadSHA != "" {
-		fmt.Fprintf(&b, "Your citations must come from that diff at head %s. If the PR has moved on since, review the current head and say which revision you read.\n", pr.HeadSHA)
+		fmt.Fprintf(&b, "  gh api repos/%s/contents/<path>?ref=%s --jq .content | base64 -d\n", pr.Repo, pr.HeadSHA)
+	} else {
+		fmt.Fprintf(&b, "  gh api repos/%s/contents/<path> --jq .content | base64 -d\n", pr.Repo)
+	}
+	fmt.Fprintf(&b, "  gh search code --repo %s '<changed symbol>'   # who calls it\n", pr.Repo)
+	b.WriteString("This was measured, not assumed: a reviewer reading the diff plus the surrounding tree found 67% of known defects at 1.4 false positives per PR, against 17% at 3.6 for the diff alone. Reading the tree is four times more effective AND quieter. A guard, early return, or caller you cannot see is the usual reason a real defect reads as fine.\n")
+	b.WriteString("Read widely; report narrowly. Only defects this diff introduces or exposes are in scope — pre-existing problems it does not touch stay out, however tempting. Reading the surrounding code tells you whether the change is safe; it is not an invitation to review the file.\n")
+	if pr.HeadSHA != "" {
+		fmt.Fprintf(&b, "Every citation must be code you actually read at head %s — in the diff or in the files around it. If the PR has moved on since, review the current head and say which revision you read.\n", pr.HeadSHA)
 	}
 	b.WriteString("If you cannot read the diff — fetch failed, or it is too large — return verdict requires_human and say so. Never infer the contents of a diff you did not read: an invented file:line is worse than no review at all.\n\n")
 	return b.String()
@@ -180,12 +195,21 @@ func buildReadInstruction(pr PullRequest) string {
 
 // buildPublishInstruction is the publish half of the kick: how to say what you
 // found, and — more importantly — when to say nothing.
-func buildPublishInstruction(pr PullRequest, acknowledgeNoFindings bool) string {
+func buildPublishInstruction(pr PullRequest, acknowledgeNoFindings bool, revise bool) string {
 	var b strings.Builder
 	b.WriteString("\nPUBLISH YOUR VERDICT.\n")
 	b.WriteString("You produce TWO artifacts and both must be delivered: the comment a human reads, and the JSON verdict the hive routes on.\n")
-	b.WriteString("Write the JSON to a file, then post the comment and hand over the verdict in the same call:\n")
-	fmt.Fprintf(&b, "  hive-review %d --repo %s --comment --body-file <comment> --verdict-file <verdict>\n", pr.Number, pr.Repo)
+	if revise {
+		b.WriteString("YOU HAVE REVIEWED THIS PR BEFORE. You are re-examining it because the reviewer was at fault, not the PR — an earlier review of yours was produced without reading the surrounding code, so its conclusion is not trustworthy.\n")
+		b.WriteString("Correct your existing review in place. Do NOT add a second one:\n")
+		fmt.Fprintf(&b, "  hive-review %d --repo %s --comment --body-file <comment> --verdict-file <verdict> --revise\n", pr.Number, pr.Repo)
+		b.WriteString("--revise edits the review already on the PR, which notifies nobody. Posting again notifies every subscriber to say the hive changed its mind, and that cost lands on people who did nothing wrong.\n")
+		b.WriteString("Write the comment you should have written the first time, not a diff against it. A maintainer rereading it must see one coherent review, with no reference to a previous version they may never have read.\n")
+		b.WriteString("Reaching the same conclusion is a perfectly good outcome — say so plainly and the revision is skipped as unchanged. Do not manufacture a finding to justify the second look.\n")
+	} else {
+		b.WriteString("Write the JSON to a file, then post the comment and hand over the verdict in the same call:\n")
+		fmt.Fprintf(&b, "  hive-review %d --repo %s --comment --body-file <comment> --verdict-file <verdict>\n", pr.Number, pr.Repo)
+	}
 	b.WriteString("Printing the JSON to your terminal does not deliver it, and you cannot write it into the metrics dir yourself — the relay is the only path. Omit --verdict-file and your judgement is lost: nothing is routed, nothing is escalated, and this PR is dispatched to you again from scratch.\n")
 	b.WriteString("Use hive-review, never `gh pr review` — it is submitted with the App token and recorded on the audit trail.\n")
 	b.WriteString("Only --comment. Do NOT approve, request changes, merge, close, or label; a human decides those.\n")

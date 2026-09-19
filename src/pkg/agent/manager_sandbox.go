@@ -284,3 +284,9 @@ func (m *Manager) SetSandboxMutationBoundary(boundary effects.Boundary) {
 	defer m.mu.Unlock()
 	m.sandboxMutation = boundary
 }
+
+// SandboxAuditForTest fires the sandbox audit callback exactly as a sandbox
+// outcome would, so the callback's wiring can be asserted from cmd/hive.
+func (m *Manager) SandboxAuditForTest(agent, action, detail string) {
+	m.auditSandbox(agent, action, detail)
+}
