@@ -11,6 +11,13 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-19 (v4.66.0)
+
+### Added
+
+- v4 feature-freeze mechanics are wired behind the repository variable `V4_FEATURE_FREEZE`: a `v4 Freeze Gate` check fails and escalates `needs-human` any post-freeze v4 PR not labelled `security`/`agent/security`/`priority/critical-urgent`/`v4-freeze-exempt`, and `v5-topup` skips its batch forward-merge while frozen; the runbook gains the cherry-pick procedure and leaves draft status (#7693).
+- Reviewer: every review perspective can now run against every PR in **one agent session that leaves one comment**, with findings grouped under the perspective they belong to (`review.combined_perspectives`). Previously breadth and quiet were in direct conflict — five perspectives meant five comments per PR, and capping that with `max_perspectives_per_pr: 1` meant nothing was ever reviewed for anything but correctness. The perspective set and each perspective's focus text are now per-hive settings (`review.perspectives`, `review.perspective_prompts`, editable under Governor → Features → Review Gate), and a hive may define its own perspectives. Verdicts are validated against the hive's own set; a combined review hands its verdicts over as a JSON array. All new settings are off/empty by default.
+
 ## 2026-09-19 (v4.65.0)
 
 ### Added
