@@ -961,31 +961,7 @@ func init() {
 	_, _ = maxprocs.Set(maxprocs.Logger(func(string, ...interface{}) {}))
 }
 
-func main() {
-	b := &boot{}
-	defer b.cleanup.run()
-	if !b.bootConfig() {
-		return
-	}
-	b.bootGitHub()
-	b.bootGovernor()
-	b.bootAdvisory()
-	b.bootAgents()
-	b.bootState()
-	b.bootDashboard()
-	b.bootStores()
-	b.bootCollectors()
-	b.bootKnowledge()
-	b.bootSupervision()
-	b.bootDashboardAPI()
-	b.bootPolicies()
-	b.bootWatchers()
-	b.bootProxy()
-	b.bootLaunch()
-	b.bootHeartbeat()
-	b.bootLanes()
-	b.runLoop()
-}
+func main() { runBoot(&boot{}, defaultBootSequence()) }
 
 // bootConfig handles the CLI fast paths, flag parsing, the process
 // singleton, config load, logger, tracing and the signal handler. It
@@ -1280,9 +1256,13 @@ func (b *boot) bootConfigWith(deps bootConfigDeps) bool {
 // and b.appAuth are set here and REASSIGNED later by three closures (the
 // dashboard's ReinitGitHubFunc, the config watcher, and the heartbeat's
 // app-config callback), which is why every reader goes through b.
-func (b *boot) bootGitHub() {
+func (b *boot) bootGitHub() { b.bootGitHubWith(defaultBootGitHubDeps()) }
+
+// bootGitHubWith is bootGitHub with credential resolution injected; see
+// bootGitHubDeps.
+func (b *boot) bootGitHubWith(deps bootGitHubDeps) {
 	ctx, cfg, logger := b.ctx, b.cfg, b.logger
-	ghAuth := initGitHubAuth(ctx, cfg, logger)
+	ghAuth := deps.initGitHubAuth(ctx, cfg, logger)
 	b.ghClient, b.appAuth = ghAuth.Client, ghAuth.AppAuth
 	// appAuthFailure, when non-empty, is the operator-facing reason GitHub auth
 	// is unavailable. It is surfaced through the existing
@@ -1464,7 +1444,11 @@ func (b *boot) bootGovernor() {
 // bootAdvisory builds the notifier, infers the ACMM level, seeds the
 // GitHub App banner state, finds or creates the pinned advisory issue and
 // writes the embedded brainstorm policy to the policy dir.
-func (b *boot) bootAdvisory() {
+func (b *boot) bootAdvisory() { b.bootAdvisoryWith(defaultBootAdvisoryDeps()) }
+
+// bootAdvisoryWith is bootAdvisory with its GitHub calls injected; see
+// bootAdvisoryDeps.
+func (b *boot) bootAdvisoryWith(deps bootAdvisoryDeps) {
 	ctx, cfg, logger, appAuthFailure, appAuthState := b.ctx, b.cfg, b.logger, b.appAuthFailure, b.appAuthState
 	notifier := notify.New(cfg.Notifications, logger)
 	notifier.SetHiveID(cfg.HiveID)
@@ -1513,7 +1497,7 @@ func (b *boot) bootAdvisory() {
 			primaryRepo = cfg.Project.Repos[0]
 		}
 		if primaryRepo != "" {
-			num, err := b.ghClient.EnsureAdvisoryIssue(ctx, primaryRepo)
+			num, err := deps.ensureAdvisoryIssue(ctx, b.ghClient, primaryRepo)
 			if err != nil {
 				logger.Error("failed to ensure advisory issue", "repo", primaryRepo, "error", err)
 				// GitHub returns 403 for rate limiting too — a transient
@@ -1530,7 +1514,7 @@ func (b *boot) bootAdvisory() {
 					// vanished on the first Re-check with nothing fixed.
 					// classifyGitHubAppFailure is the same verdict Re-check
 					// uses, and it declines to raise on AppStateUnknown.
-					raise, diag, state := classifyGitHubAppFailure(ctx, b.ghClient.AppAuth(), cfg.Project.Org, logger)
+					raise, diag, state := deps.classifyAppFailure(ctx, b.ghClient.AppAuth(), cfg.Project.Org, logger)
 					if raise {
 						githubAppRequired = true
 						githubAppDiag, githubAppState = diag, state
@@ -1884,9 +1868,13 @@ func (b *boot) bootAgentsWith(deps bootAgentsDeps) {
 
 // bootState loads the persisted state snapshot and replays it into the
 // agent manager, governor and config, migrating legacy config overrides.
-func (b *boot) bootState() {
+func (b *boot) bootState() { b.bootStateWith(defaultBootStateDeps()) }
+
+// bootStateWith is bootState with its disk reads/writes injected; see
+// bootStateDeps.
+func (b *boot) bootStateWith(deps bootStateDeps) {
 	cfg, logger, gov, agentMgr := b.cfg, b.logger, b.gov, b.agentMgr
-	saved, stateErr := snapshot.LoadState(hiveStatePath, logger)
+	saved, stateErr := deps.loadState(logger)
 	if stateErr != nil {
 		logger.Warn("failed to load persisted state", "error", stateErr)
 	} else if saved != nil {
@@ -1966,13 +1954,13 @@ func (b *boot) bootState() {
 				"repos", cfg.Project.Repos)
 
 			// Write merged config to hive.yaml so overrides become the base config
-			if err := cfg.Save(); err != nil {
+			if err := deps.saveConfig(cfg); err != nil {
 				logger.Error("failed to save migrated config", "error", err)
 			}
 
 			// Strip config_overrides from state and re-save
 			saved.ConfigOverrides = nil
-			if err := snapshot.SaveState(hiveStatePath, saved, logger); err != nil {
+			if err := deps.saveState(saved, logger); err != nil {
 				logger.Error("failed to re-save state after migration", "error", err)
 			}
 		}
@@ -1990,10 +1978,14 @@ func (b *boot) bootState() {
 // history bootGovernor loaded. The advisory sinks it installs read
 // b.beadStores, which bootStores fills next — before that they see a nil
 // map, exactly as the captured local did.
-func (b *boot) bootDashboard() {
+func (b *boot) bootDashboard() { b.bootDashboardWith(defaultBootDashboardDeps()) }
+
+// bootDashboardWith is bootDashboard with the server constructor and PVC
+// persistence enables injected; see bootDashboardDeps.
+func (b *boot) bootDashboardWith(deps bootDashboardDeps) {
 	cfg, logger, sched, agentMgr, pendingTokenSeed := b.cfg, b.logger, b.sched, b.agentMgr, b.pendingTokenSeed
 	pendingFactSeed, pendingCostSeed, pendingBudgetWindowSeed, pendingConvergenceSoakSeed, pendingTrendSeed := b.pendingFactSeed, b.pendingCostSeed, b.pendingBudgetWindowSeed, b.pendingConvergenceSoakSeed, b.pendingTrendSeed
-	dashSrv := dashboard.NewServerWithAuth(cfg.Dashboard.Port, cfg.Dashboard.AuthToken, logger)
+	dashSrv := deps.newServer(cfg.Dashboard.Port, cfg.Dashboard.AuthToken, logger)
 	b.cleanup.push(func() { dashSrv.CloseContributeHub() })
 	// SIGTERM (pod roll, hive self-upgrade) kills the process and every
 	// contributor WebSocket with it, and until #5390 it did so without a word:
@@ -2082,12 +2074,12 @@ func (b *boot) bootDashboard() {
 	// there is wiped on every pod roll. That was the "re-login on every visit"
 	// bug on direct-route spokes. /data is the CephFS PVC (same place cost/fact
 	// history persist).
-	dashSrv.EnableSessionPersistence("/data/dashboard-sessions.json")
+	deps.enableSessionPersistence(dashSrv, dashboardSessionsPath)
 
 	// Lifecycle timeline journeys persist on the PVC too (#5656): the ring is
 	// the panel's only memory of merged/blocked outcomes, so a pod roll must
 	// not zero the fleet counters. Enabled before any producer records.
-	dashSrv.EnableLifecyclePersistence("/data/lifecycle-timeline.json")
+	deps.enableLifecyclePersistence(dashSrv, lifecycleTimelinePath)
 
 	// The scheduler's classifier pass records KindClassified journeys the
 	// moment lane routing decides an issue's lane — same store, no extra work.
@@ -2215,7 +2207,11 @@ func (b *boot) bootStores() {
 // bootCollectors starts the token, metrics, fleet-stats, activity and
 // repo-cost collectors, defines refreshDashboard, and restores the cached
 // actionable result into b.lastActionable.
-func (b *boot) bootCollectors() {
+func (b *boot) bootCollectors() { b.bootCollectorsWith(defaultBootCollectorsDeps()) }
+
+// bootCollectorsWith is bootCollectors with its goroutines, PVC persistence,
+// and GitHub lookups injected; see bootCollectorsDeps.
+func (b *boot) bootCollectorsWith(deps bootCollectorsDeps) {
 	ctx, cfg, logger, gov, agentMgr := b.ctx, b.cfg, b.logger, b.gov, b.agentMgr
 	dashSrv, beadStores := b.dashSrv, b.beadStores
 	initAgentConfigDrivenSystems(cfg)
@@ -2225,13 +2221,13 @@ func (b *boot) bootCollectors() {
 	tokenCollector.SetCopilotSessionsDir(cfg.Data.CopilotSessionsDir)
 	tokenCollector.SetBobSessionsDir(cfg.Data.BobSessionsDir)
 	tokenStop := make(chan struct{})
-	go tokenCollector.Start(tokenStop)
+	deps.startTokenCollector(tokenCollector, tokenStop)
 	b.cleanup.push(func() { close(tokenStop) })
 
 	badgeURL := resolveCoverageBadgeURL(os.Getenv(coverageBadgeURLEnv))
 	primaryRepo := metricsPrimaryRepo(cfg.Project)
 	metricsCollector := dashboard.NewMetricsCollector(b.ghClient, cfg.Project.Org, primaryRepo, badgeURL, cfg.Project.AIAuthor, cfg.Project.Name, logger)
-	go metricsCollector.Start(ctx)
+	deps.startCollector(ctx, "metrics", metricsCollector)
 
 	// Fleet-stats collector: computes this hive's AI-author contribution counts
 	// (merged/rejected PRs, CVE-referencing PRs) across its org on a slow timer
@@ -2254,13 +2250,7 @@ func (b *boot) bootCollectors() {
 	// have github.token empty, so there was no token to identify. The result
 	// was a fleet where essentially no spoke ever attempted a collect.
 	fleetID := resolveFleetStatsIdentity(cfg.EffectiveAIAuthor(), cfg.GitHub.Token, os.Getenv("HIVE_GITHUB_TOKEN"),
-		func(token string) (string, error) {
-			botUser, err := github.ValidateToken(token, cfg.GitHub.ResolvedAPIURL())
-			if err != nil {
-				return "", err
-			}
-			return botUser.Login, nil
-		})
+		func(token string) (string, error) { return deps.lookupTokenLogin(token, cfg.GitHub.ResolvedAPIURL()) })
 	fleetStatsAuthor := fleetID.author
 	if fleetID.fromToken {
 		logger.Info("fleet stats: ai_author unset, using bot token identity",
@@ -2282,8 +2272,8 @@ func (b *boot) bootCollectors() {
 	// of nil. Without this, a fleet-wide upgrade clears every spoke's in-memory
 	// counts and the public landing-page total collapses until all spokes
 	// re-collect (#2329, building on the hub-side #2328 defensive aging fix).
-	fleetStatsCollector.EnablePersistence("/data/fleet-stats.json")
-	go fleetStatsCollector.Start(ctx)
+	deps.enablePersistence("fleet-stats", fleetStatsCollector, fleetStatsPersistPath)
+	deps.startCollector(ctx, "fleet-stats", fleetStatsCollector)
 
 	// Per-repo output-activity collector: reads the local audit log (no GitHub
 	// calls) and summarizes issues/PRs/comments/merges/claims/reviews per repo
@@ -2292,8 +2282,8 @@ func (b *boot) bootCollectors() {
 	// PVC so a restart resumes the last summary; the collector loop reads
 	// /data/audit.jsonl every few minutes.
 	activityCollector := dashboard.NewActivityCollector(dashSrv.GetAudit(), "", logger)
-	activityCollector.EnablePersistence("/data/activity.json")
-	go activityCollector.Start(ctx)
+	deps.enablePersistence("activity", activityCollector, activityPersistPath)
+	deps.startCollector(ctx, "activity", activityCollector)
 
 	// Per-repo cost collector: joins the same audited output events against
 	// the token collector's per-message usage timeline, on the same ticker
@@ -2303,8 +2293,8 @@ func (b *boot) bootCollectors() {
 	// every 60s dashboard poll, per open browser tab, instead of once per
 	// collection interval.
 	repoCostCollector := dashboard.NewRepoCostCollector(dashSrv.GetAudit(), tokenCollector, "", logger)
-	repoCostCollector.EnablePersistence("/data/repo-cost.json")
-	go repoCostCollector.Start(ctx)
+	deps.enablePersistence("repo-cost", repoCostCollector, repoCostPersistPath)
+	deps.startCollector(ctx, "repo-cost", repoCostCollector)
 
 	// Persistent hourly metrics behind the Operations + Leaderboard sparklines
 	// (queue depth, tasks/hour, fleet size, per-contributor completions). The
@@ -2312,7 +2302,7 @@ func (b *boot) bootCollectors() {
 	// rollup goroutine samples + buckets hourly, so a rolling upgrade resumes the
 	// trend instead of flattening it. Bound to ctx so it shuts down cleanly with
 	// the rest of the background loops (no goroutine leak). See contribute_metrics.go.
-	dashSrv.StartContributeMetrics(ctx)
+	deps.startContributeMetrics(ctx, dashSrv)
 
 	refreshDashboard := func() {
 		// Capture the mutation epoch BEFORE reading any state: if a mutation
@@ -2342,7 +2332,7 @@ func (b *boot) bootCollectors() {
 		dashSrv.UpdateStatusIfFresh(payload, buildEpoch)
 	}
 
-	if data, err := os.ReadFile(lastActionablePath); err == nil {
+	if data, err := deps.readLastActionable(); err == nil {
 		var cached github.ActionableResult
 		if err := json.Unmarshal(data, &cached); err == nil {
 			b.lastActionable.Store(&cached)
@@ -2359,7 +2349,11 @@ func (b *boot) bootCollectors() {
 // bootKnowledge builds the knowledge API, connects vaults, git and document
 // sources, starts the bead synthesizer, promotion scheduler and graph store,
 // loads nous state, and resumes or parks the brainstorm inception.
-func (b *boot) bootKnowledge() {
+func (b *boot) bootKnowledge() { b.bootKnowledgeWith(defaultBootKnowledgeDeps()) }
+
+// bootKnowledgeWith is bootKnowledge with its disk and goroutine effects
+// injected; see bootKnowledgeDeps.
+func (b *boot) bootKnowledgeWith(deps bootKnowledgeDeps) {
 	ctx, cfg, logger, sched, agentMgr := b.ctx, b.cfg, b.logger, b.sched, b.agentMgr
 	dashSrv, beadStores := b.dashSrv, b.beadStores
 	var knowledgeAPI *knowledge.KnowledgeAPI
@@ -2378,13 +2372,12 @@ func (b *boot) bootKnowledge() {
 
 	// Auto-connect configured vaults and start git-sync for Obsidian Git integration
 	gitSyncer := knowledge.NewGitSyncer(logger)
-	const seedDataDir = "/opt/hive/seed-data/wiki"
 	for _, vc := range cfg.Knowledge.Vaults {
-		if err := knowledge.InitVaultRepo(vc.Path, logger); err != nil {
+		if err := deps.initVaultRepo(vc.Path, logger); err != nil {
 			logger.Warn("failed to init vault directory", "name", vc.Name, "path", vc.Path, "error", err)
 			continue
 		}
-		if err := knowledge.SeedVaultContent(vc.Path, seedDataDir, logger); err != nil {
+		if err := deps.seedVaultContent(vc.Path, logger); err != nil {
 			logger.Warn("failed to seed vault content", "name", vc.Name, "error", err)
 		}
 		if knowledgeAPI != nil {
@@ -2494,7 +2487,7 @@ func (b *boot) bootKnowledge() {
 		}
 	}
 
-	go gitSyncer.Start(ctx)
+	deps.startGitSyncer(ctx, gitSyncer)
 
 	// Auto-enable knowledge API when not explicitly configured.
 	// Both bead-synth-wiki and inception require it.
@@ -2510,7 +2503,7 @@ func (b *boot) bootKnowledge() {
 	if len(beadStores) > 0 {
 		synthVaultPath := cfg.Knowledge.BeadSynthesizer.VaultPath
 		if synthVaultPath == "" {
-			synthVaultPath = "/data/vaults/bead-synth-wiki"
+			synthVaultPath = beadSynthVaultDefaultPath
 		}
 		if err := os.MkdirAll(synthVaultPath, 0o755); err != nil {
 			logger.Warn("failed to create bead-synth vault dir", "path", synthVaultPath, "error", err)
@@ -2570,7 +2563,7 @@ func (b *boot) bootKnowledge() {
 		}
 
 		if cfg.Knowledge.BeadSynthesizer.IsEnabled() && knowledgeAPI != nil {
-			beadSynth.StartBackground(ctx)
+			deps.startBeadSynth(ctx, beadSynth)
 			logger.Info("bead-to-wiki synthesizer started",
 				"schedule", cfg.Knowledge.BeadSynthesizer.Schedule,
 				"target_layer", cfg.Knowledge.BeadSynthesizer.TargetLayer,
@@ -2593,7 +2586,7 @@ func (b *boot) bootKnowledge() {
 			curatorConfigFromHive(cfg.Knowledge.Curator),
 			logger,
 		)
-		promotionScheduler.StartBackground(ctx)
+		deps.startPromotion(ctx, promotionScheduler)
 	} else if cfg.Knowledge.Curator.Schedule != "" {
 		logger.Info("knowledge.curator.schedule is set but scheduled promotion is disabled",
 			"schedule", cfg.Knowledge.Curator.Schedule,
@@ -2605,14 +2598,12 @@ func (b *boot) bootKnowledge() {
 	// a SQLite file lock that blocks if the old pod still holds it. Deferring
 	// this lets the HTTP server start so the readiness probe passes, which
 	// tells Kubernetes to terminate the old pod and release the lock.
-	const graphStorePath = "/data/graph/knowledge.db"
-	go func() {
-		graphStore, graphErr := knowledge.NewGraphStore(graphStorePath, logger)
+	deps.openGraphStoreAsync(logger, func(graphStore *knowledge.GraphStore, graphErr error) {
 		if graphErr != nil {
-			logger.Warn("failed to open knowledge graph store", "path", graphStorePath, "error", graphErr)
+			logger.Warn("failed to open knowledge graph store", "path", knowledgeGraphStorePath, "error", graphErr)
 			return
 		}
-		logger.Info("knowledge graph store opened", "path", graphStorePath)
+		logger.Info("knowledge graph store opened", "path", knowledgeGraphStorePath)
 		if primer := sched.GetPrimer(); primer != nil {
 			primer.SetGraphStore(graphStore)
 		}
@@ -2634,20 +2625,15 @@ func (b *boot) bootKnowledge() {
 				}
 			}
 		}
-	}()
+	})
 
-	go dashboard.StartWorkspaceCleanup(ctx, logger, dashSrv.GetAudit())
+	deps.startWorkspaceCleanup(ctx, logger, dashSrv.GetAudit())
 
-	if err := os.MkdirAll(nousSnapshotDir, 0o755); err != nil {
-		logger.Warn("failed to create nous snapshot dir", "path", nousSnapshotDir, "error", err)
-	}
-	if err := os.MkdirAll(nousGovernorDir, 0o755); err != nil {
-		logger.Warn("failed to create nous governor dir", "path", nousGovernorDir, "error", err)
-	}
-	nousState := loadNousState(logger)
+	deps.ensureNousDirs(logger)
+	nousState := deps.loadNousState(logger)
 	nousState.SnapshotDir = nousSnapshotDir
 
-	inceptionEngine := knowledge.NewInceptionEngine("/data", knowledgeAPI, logger)
+	inceptionEngine := deps.newInceptionEngine(knowledgeAPI, logger)
 	sched.SetInception(inceptionEngine)
 
 	// Brainstorm is on-demand only. Only restart with bootstrap during
@@ -2661,7 +2647,7 @@ func (b *boot) bootKnowledge() {
 		state.Phase != knowledge.PhaseScaffold {
 		if time.Since(state.StartedAt) < staleInceptionThreshold {
 			msg := sched.BuildAgentMessage("brainstorm", nil, nil)
-			if err := agentMgr.RestartWithBootstrap(ctx, "brainstorm", msg); err != nil {
+			if err := deps.restartBrainstorm(ctx, agentMgr, msg); err != nil {
 				logger.Warn("failed to resume brainstorm for active inception", "error", err)
 			} else {
 				logger.Info("brainstorm resumed for active inception", "phase", state.Phase)
@@ -3131,7 +3117,11 @@ func (b *boot) bootDashboardAPIWith(deps bootDashboardAPIDeps) {
 
 // bootPolicies applies the ACMM pack planACMMBoot chose and starts the
 // policies repo watcher.
-func (b *boot) bootPolicies() {
+func (b *boot) bootPolicies() { b.bootPoliciesWith(defaultBootPoliciesDeps()) }
+
+// bootPoliciesWith is bootPolicies with the pack apply and policy watcher
+// injected; see bootPoliciesDeps.
+func (b *boot) bootPoliciesWith(deps bootPoliciesDeps) {
 	ctx, cfg, logger, saved, dashSrv := b.ctx, b.cfg, b.logger, b.saved, b.dashSrv
 	// The ACMM pack decision (config vs persisted vs HIVE_LEVEL, and whether
 	// this is a merge or a re-apply) lives in planACMMBoot (#7232); only the
@@ -3150,7 +3140,7 @@ func (b *boot) bootPolicies() {
 		} else {
 			logger.Info("audit: "+acmmPlan.action, "level", acmmPlan.level, "saved_level", saved.ACMMLevel, "trigger", "startup")
 		}
-		result, err := dashSrv.ApplyPack(acmmPlan.level)
+		result, err := deps.applyPack(dashSrv, acmmPlan.level)
 		switch {
 		case err != nil && saved == nil:
 			logger.Error("failed to auto-apply ACMM pack", "level", acmmPlan.level, "error", err)
@@ -3180,15 +3170,7 @@ func (b *boot) bootPolicies() {
 
 	if cfg.Policies.Repo != "" {
 		localDir := policiesLocalDir(cfg.Policies)
-		watcher := policies.NewWatcher(
-			cfg.Policies.Repo,
-			cfg.Policies.Branch,
-			cfg.Policies.Path,
-			localDir,
-			cfg.Policies.PollInterval,
-			logger,
-		)
-		if err := watcher.Start(ctx); err != nil {
+		if err := deps.startPolicyWatcher(ctx, cfg.Policies.Repo, cfg.Policies.Branch, cfg.Policies.Path, localDir, cfg.Policies.PollInterval, logger); err != nil {
 			logger.Warn("policy watcher failed to start", "error", err)
 		}
 	}
@@ -3680,35 +3662,38 @@ func (b *boot) bootProxyWith(deps bootProxyDeps) {
 // bootLaunch starts the dashboard listener and Discord bot, writes the
 // hive_restart audit marker, marks the pod Ready, and launches the
 // persistent agents in the background.
-func (b *boot) bootLaunch() {
+func (b *boot) bootLaunch() { b.bootLaunchWith(defaultBootLaunchDeps()) }
+
+// bootLaunchWith is bootLaunch with its goroutines, Discord bot, stagger
+// wait, and agent starts injected; see bootLaunchDeps.
+func (b *boot) bootLaunchWith(deps bootLaunchDeps) {
 	ctx, cfg, logger, agentMgr, dashSrv := b.ctx, b.cfg, b.logger, b.agentMgr, b.dashSrv
-	go func() {
-		if err := dashSrv.Start(); err != nil {
+	deps.spawn("dashboard-serve", func() {
+		if err := deps.serve(dashSrv); err != nil {
 			logger.Error("dashboard server failed", "error", err)
 		}
-	}()
+	})
 
 	if cfg.Notifications.Discord != nil && cfg.Notifications.Discord.BotToken != "" && cfg.Notifications.Discord.ChannelID != "" {
-		discordBot := discord.NewBot(discord.Config{
+		var agentNameList []string
+		for name := range cfg.EnabledAgents() {
+			agentNameList = append(agentNameList, name)
+		}
+		err := deps.startDiscordBot(ctx, discord.Config{
 			Token:          cfg.Notifications.Discord.BotToken,
 			ChannelID:      cfg.Notifications.Discord.ChannelID,
 			DashboardURL:   fmt.Sprintf("http://localhost:%d", cfg.Dashboard.Port),
 			DashboardToken: os.Getenv("HIVE_DASHBOARD_TOKEN"),
 			AllowedUsers:   cfg.Notifications.Discord.AllowedUsers,
-		}, logger)
-		var agentNameList []string
-		for name := range cfg.EnabledAgents() {
-			agentNameList = append(agentNameList, name)
-		}
-		discordBot.SetAgentNames(agentNameList)
-		if err := discordBot.Start(ctx); err != nil {
+		}, agentNameList, logger)
+		if err != nil {
 			logger.Warn("discord bot failed to start", "error", err)
 		} else {
 			logger.Info("discord bot started", "channel", cfg.Notifications.Discord.ChannelID)
 		}
 	}
 
-	onDemandFromPack := config.OnDemandAgentsFromPacks()
+	onDemandFromPack := deps.onDemandFromPack()
 	if len(onDemandFromPack) > 0 {
 		logger.Info("on-demand agents from pack definitions", "agents", onDemandFromPack)
 	}
@@ -3726,7 +3711,7 @@ func (b *boot) bootLaunch() {
 
 	// Mark the dashboard READY as soon as the HTTP server can serve requests —
 	// which is NOW: config is loaded, GitHub client/App auth are wired, the
-	// dashboard deps are set, and the listener (go dashSrv.Start() above) is up.
+	// dashboard deps are set, and the listener (dashboard-serve above) is up.
 	// None of /api/*, /sso, /open, /api/livez or /api/health depend on the agent
 	// fleet being up; the frontend already handles agents appearing over time.
 	//
@@ -3744,8 +3729,7 @@ func (b *boot) bootLaunch() {
 	// staggered start no longer gates pod readiness. The loop honors ctx: on
 	// shutdown the ctx-aware stagger returns immediately instead of leaking a
 	// goroutine parked in a bare time.Sleep.
-	go func() {
-		const agentLaunchDelaySec = 15
+	deps.spawn("agent-launch", func() {
 		agentIndex := 0
 		for name, ac := range cfg.EnabledAgents() {
 			isOnDemand := ac.OnDemand || onDemandFromPack[name]
@@ -3754,10 +3738,8 @@ func (b *boot) bootLaunch() {
 				continue
 			}
 			if agentIndex > 0 {
-				logger.Info("staggering agent launch", "name", name, "delay_sec", agentLaunchDelaySec)
-				select {
-				case <-time.After(time.Duration(agentLaunchDelaySec) * time.Second):
-				case <-ctx.Done():
+				logger.Info("staggering agent launch", "name", name, "delay_sec", int(agentLaunchStagger/time.Second))
+				if !deps.waitStagger(ctx) {
 					logger.Info("aborting staggered agent launch: shutting down")
 					return
 				}
@@ -3769,7 +3751,7 @@ func (b *boot) bootLaunch() {
 				return
 			}
 			logger.Info("audit: starting agent", "name", name, "trigger", "startup")
-			if err := agentMgr.Start(ctx, name); err != nil {
+			if err := deps.startAgent(ctx, agentMgr, name); err != nil {
 				logger.Warn("failed to start agent", "name", name, "error", err)
 			} else {
 				// Surface whether a persisted operator pause was honored on this
@@ -3782,7 +3764,7 @@ func (b *boot) bootLaunch() {
 			}
 			agentIndex++
 		}
-	}()
+	})
 
 	b.onDemandFromPack = onDemandFromPack
 }
@@ -5096,23 +5078,25 @@ func (b *boot) bootLanes() {
 // blocks on the governor ticker until the context is canceled. Its ticker
 // defers are real defers: it is the last call in main(), so they fire at
 // the same moment they always did.
-func (b *boot) runLoop() {
+func (b *boot) runLoop() { b.runLoopWith(defaultRunLoopDeps()) }
+
+// runLoopWith is runLoop with its timers and per-tick IO injected; see
+// runLoopDeps.
+func (b *boot) runLoopWith(deps runLoopDeps) {
 	ctx, cfg, logger, gov, sched := b.ctx, b.cfg, b.logger, b.gov, b.sched
-	notifier, advisoryIssues, advisoryStore, agentMgr, dashSrv := b.notifier, b.advisoryIssues, b.advisoryStore, b.agentMgr, b.dashSrv
-	beadStores, tokenCollector, metricsCollector, nousState, inceptionEngine := b.beadStores, b.tokenCollector, b.metricsCollector, b.nousState, b.inceptionEngine
-	rotationMgr, wd, trajLane, replanLane, retroLane := b.rotationMgr, b.wd, b.trajLane, b.replanLane, b.retroLane
+	agentMgr, dashSrv, inceptionEngine := b.agentMgr, b.dashSrv, b.inceptionEngine
+	wd, trajLane, replanLane, retroLane := b.wd, b.trajLane, b.replanLane, b.retroLane
 	logger.Info("entering governor loop", "interval_seconds", cfg.Governor.EvalIntervalS)
 	lastEvalInterval := cfg.Governor.EvalIntervalS
-	ticker := time.NewTicker(time.Duration(cfg.Governor.EvalIntervalS) * time.Second)
+	ticker := deps.newTicker(time.Duration(cfg.Governor.EvalIntervalS) * time.Second)
 	defer ticker.Stop()
-	var lastAutoMergeSweep time.Time
-	var lastTaskListSweep time.Time
-	var lastDuplicateSweep time.Time
+	var sweeps sweepClock
 
-	var agentTicker *time.Ticker
+	var agentTickCh <-chan time.Time
 	if cfg.Dashboard.AgentPollIntervalS > 0 {
-		agentTicker = time.NewTicker(time.Duration(cfg.Dashboard.AgentPollIntervalS) * time.Second)
+		agentTicker := deps.newTicker(time.Duration(cfg.Dashboard.AgentPollIntervalS) * time.Second)
 		defer agentTicker.Stop()
+		agentTickCh = agentTicker.Chan()
 		logger.Info("fast agent status enabled", "interval_seconds", cfg.Dashboard.AgentPollIntervalS)
 	}
 
@@ -5120,13 +5104,10 @@ func (b *boot) runLoop() {
 	// launch and the heartbeat/trajectory/ticker setup. It has been moved to
 	// immediately after the HTTP listener starts (before the agent-launch loop),
 	// so the pod becomes Ready in seconds instead of minutes. See the MarkReady
-	// call and comment above the agent-launch goroutine.
+	// call and comment in bootLaunch.
 
-	const cliStartupDelay = 10 * time.Second
 	logger.Info("waiting for CLI startup before first eval", "delay", cliStartupDelay)
-	select {
-	case <-time.After(cliStartupDelay):
-	case <-ctx.Done():
+	if !deps.waitCLIStartup(ctx) {
 		return
 	}
 
@@ -5144,31 +5125,22 @@ func (b *boot) runLoop() {
 	// interval. A hive with no persisted state (fresh install) has no LastKick
 	// entries, and every cadenced agent is still kicked here, unchanged.
 	logger.Info("startup honors persisted cadence state — first eval kicks only agents whose cadence has elapsed")
-	runEvalCycle(ctx, cfg, b.ghClient, gov, sched, agentMgr, dashSrv, notifier, beadStores, tokenCollector, metricsCollector, nousState, &b.lastActionable, advisoryStore, advisoryIssues, nil, logger)
-	runRotationCheck(ctx, cfg, rotationMgr, gov, agentMgr, logger)
+	deps.runEval(b, nil)
+	deps.runRotation(b)
 	if wd != nil {
 		wd.Tick(ctx)
 	}
-	runAutoMergeSweepIfDue(ctx, b.ghClient, dashSrv, &lastAutoMergeSweep, logger)
-	runTaskListSweepIfDue(ctx, b.ghClient, dashSrv, &lastTaskListSweep, logger)
-	runDuplicateSweepIfDue(ctx, cfg, b.ghClient, dashSrv, &lastDuplicateSweep, logger)
-	persistState(agentMgr, gov, cfg, hiveStatePath, logger, dashSrv, wd)
-
-	agentTickCh := func() <-chan time.Time {
-		if agentTicker != nil {
-			return agentTicker.C
-		}
-		return nil
-	}()
+	deps.runSweeps(b, &sweeps)
+	deps.persist(b)
 
 	for {
 		select {
 		case <-ctx.Done():
 			logger.Info("shutting down, persisting state")
-			persistState(agentMgr, gov, cfg, hiveStatePath, logger, dashSrv, wd)
+			deps.persist(b)
 			return
-		case <-ticker.C:
-			restarted := agentMgr.CheckAndRestartCrashedAgents(ctx)
+		case <-ticker.Chan():
+			restarted := deps.restartCrashed(ctx, agentMgr)
 			for _, name := range restarted {
 				dashSrv.AuditLog("system", "restart", "trigger=crash-recovery", name)
 			}
@@ -5225,11 +5197,9 @@ func (b *boot) runLoop() {
 					restarted = append(restarted, name)
 				}
 			}
-			runEvalCycle(ctx, cfg, b.ghClient, gov, sched, agentMgr, dashSrv, notifier, beadStores, tokenCollector, metricsCollector, nousState, &b.lastActionable, advisoryStore, advisoryIssues, restarted, logger)
-			runRotationCheck(ctx, cfg, rotationMgr, gov, agentMgr, logger)
-			runAutoMergeSweepIfDue(ctx, b.ghClient, dashSrv, &lastAutoMergeSweep, logger)
-			runTaskListSweepIfDue(ctx, b.ghClient, dashSrv, &lastTaskListSweep, logger)
-			runDuplicateSweepIfDue(ctx, cfg, b.ghClient, dashSrv, &lastDuplicateSweep, logger)
+			deps.runEval(b, restarted)
+			deps.runRotation(b)
+			deps.runSweeps(b, &sweeps)
 			// Trajectory review runs after the eval cycle (so kicks/intents are
 			// current) on its own cadence, gated by Due().
 			if trajLane != nil && trajLane.Due(time.Now()) {
@@ -5248,7 +5218,7 @@ func (b *boot) runLoop() {
 					logger.Info("retro lane filed advisory beads", "findings", n)
 				}
 			}
-			persistState(agentMgr, gov, cfg, hiveStatePath, logger, dashSrv, wd)
+			deps.persist(b)
 			if cfg.Governor.EvalIntervalS != lastEvalInterval && cfg.Governor.EvalIntervalS > 0 {
 				logger.Info("eval interval changed, resetting ticker",
 					"from", lastEvalInterval, "to", cfg.Governor.EvalIntervalS)
