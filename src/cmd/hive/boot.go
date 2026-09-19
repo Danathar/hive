@@ -18,7 +18,6 @@ import (
 	"github.com/hivecommons/hive/pkg/governor"
 	"github.com/hivecommons/hive/pkg/hub/spoke"
 	"github.com/hivecommons/hive/pkg/knowledge"
-	"github.com/hivecommons/hive/pkg/mint"
 	"github.com/hivecommons/hive/pkg/notify"
 	"github.com/hivecommons/hive/pkg/planning"
 	"github.com/hivecommons/hive/pkg/promptsrc"
@@ -136,7 +135,7 @@ type boot struct {
 	mutationStats     *effects.Recorder
 
 	// bootAgents
-	agentMinter *mint.AgentMinter
+	agentMinter agent.AgentMintIssuer
 
 	// bootState
 	saved *snapshot.PersistedState

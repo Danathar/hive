@@ -76,7 +76,7 @@ func newLevelHoldClient(t *testing.T, s *levelHoldServer) *Client {
 	return c
 }
 
-func heldPR() *gh.PullRequest {
+func heldPRFixture() *gh.PullRequest {
 	return &gh.PullRequest{Number: gh.Ptr(11), Title: gh.Ptr("fix"), Body: gh.Ptr("safe change"), Labels: []*gh.Label{{Name: gh.Ptr("hold")}}}
 }
 
@@ -85,7 +85,7 @@ func TestReleaseLevelHoldAfterPromotion(t *testing.T) {
 	c := newLevelHoldClient(t, s)
 	c.prHoldLabel = func(agent string) bool { return false }
 
-	released, reason, err := c.releaseLevelHoldIfEligible(context.Background(), "acme", "widget", heldPR())
+	released, reason, err := c.releaseLevelHoldIfEligible(context.Background(), "acme", "widget", heldPRFixture())
 	if err != nil || !released || reason != "level-hold-released" {
 		t.Fatalf("releaseLevelHoldIfEligible = (%v,%q,%v), want release", released, reason, err)
 	}
@@ -108,7 +108,7 @@ func TestReleaseLevelHoldDoesNotReleaseUnknownOrForgedHold(t *testing.T) {
 			s := &levelHoldServer{comments: tc.comments, commentAuthor: tc.commentAuthor}
 			c := newLevelHoldClient(t, s)
 			c.prHoldLabel = func(agent string) bool { return false }
-			released, reason, err := c.releaseLevelHoldIfEligible(context.Background(), "acme", "widget", heldPR())
+			released, reason, err := c.releaseLevelHoldIfEligible(context.Background(), "acme", "widget", heldPRFixture())
 			if err != nil || released || reason != tc.wantReason || s.removes != 0 {
 				t.Fatalf("release=(%v,%q,%v) removes=%d", released, reason, err, s.removes)
 			}
@@ -130,7 +130,7 @@ func TestReleaseLevelHoldRespectsPolicyAndHumanRelabel(t *testing.T) {
 			s := &levelHoldServer{comments: []string{levelHoldNotice("quality")}, labelAuthor: tc.labelAuthor}
 			c := newLevelHoldClient(t, s)
 			c.prHoldLabel = func(agent string) bool { return tc.policyHolds }
-			released, reason, err := c.releaseLevelHoldIfEligible(context.Background(), "acme", "widget", heldPR())
+			released, reason, err := c.releaseLevelHoldIfEligible(context.Background(), "acme", "widget", heldPRFixture())
 			if err != nil || released || reason != tc.wantReason || s.removes != 0 {
 				t.Fatalf("release=(%v,%q,%v) removes=%d", released, reason, err, s.removes)
 			}

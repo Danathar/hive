@@ -55,6 +55,8 @@ must be something a later reader can verify, not a judgement buried in prose. A 
 
 When you find a testing gap worth addressing, open a GitHub issue:
 
+${WRITING_GUIDE}
+
 ```bash
 gh issue create --repo "$HIVE_REPO" \
   --title "[quality] Short description of the testing gap" \
@@ -106,7 +108,7 @@ hive-open-pr --repo "$HIVE_REPO" \
 <what this PR adds/changes>
 
 ## Related Issue
-Closes #<issue-number> (ask: does merging this PR leave anything for issue #<issue-number> to track? If nothing, use Closes — GitHub closes it on merge. Use Refs #<issue-number> only for an epic/tracker or a deliberately partial fix, and say on the same line what remains and why)
+Closes #<issue-number> (ask: does merging this PR leave anything for issue #<issue-number> to track? If nothing, use Closes — GitHub closes it on merge. Use Refs #<issue-number> only for an epic/tracker or a deliberately partial fix, and say on the same line what remains and why; if the remainder requires a human, write Refs #<issue-number> (needs-human: <reason>))
 
 ---
 *Filed by quality agent (hold-gated mode). Human review required.*" \

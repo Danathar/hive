@@ -126,6 +126,7 @@ type sweepObservations struct {
 	commentsPosted map[int][]string // issue number → bodies posted (each element = one CreateComment call)
 	commentsEdited map[int64][]string
 	comments       map[int][]sweepMockComment // issue number → current in-mock comment list
+	labelsAdded    map[int][]string
 	nextCommentID  int64
 }
 
@@ -139,6 +140,7 @@ func newSweepObservations() *sweepObservations {
 		commentsPosted: map[int][]string{},
 		commentsEdited: map[int64][]string{},
 		comments:       map[int][]sweepMockComment{},
+		labelsAdded:    map[int][]string{},
 		nextCommentID:  1_000_000,
 	}
 }
@@ -272,6 +274,16 @@ func taskListSweepServer(t *testing.T, org, repo string, issues []taskListSweepF
 		parts := strings.SplitN(rest, "/", 2)
 		var n int
 		fmt.Sscanf(parts[0], "%d", &n)
+
+		if len(parts) == 2 && parts[1] == "labels" && r.Method == "POST" {
+			var labels []string
+			_ = json.NewDecoder(r.Body).Decode(&labels)
+			obs.mu.Lock()
+			obs.labelsAdded[n] = append(obs.labelsAdded[n], labels...)
+			obs.mu.Unlock()
+			_ = json.NewEncoder(w).Encode([]map[string]any{})
+			return
+		}
 
 		if len(parts) == 2 && parts[1] == "comments" {
 			switch r.Method {
@@ -711,6 +723,176 @@ func TestIsHiveFiledIssue(t *testing.T) {
 				t.Errorf("isHiveFiledIssue(body=%q, login=%q, appBot=%q, type=%q) = %v; want %v", tc.body, tc.login, tc.appBot, tc.authorType, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestSweepNonTaskListRefsCommentsAndLabelsNeedsHuman(t *testing.T) {
+	org, repo := "hivecommons", "hive"
+	fixtures := []taskListSweepFixture{
+		{Number: 830, Body: "Prose finding with no boxes." + hiveTrailer, AuthorLogin: "hive-app[bot]"},
+		{Number: 831, Body: "Another prose finding." + hiveTrailer, AuthorLogin: "hive-app[bot]"},
+	}
+	merged := []taskListMergedPR{
+		{Number: 930, Title: "land staged work", Body: "## Fix\n\nRefs #830 — docs follow-up remains for a later agent phase"},
+		{Number: 931, Title: "land reachable work", Body: "## Fix\n\nRefs #831 (needs-human: denied file requires maintainer edit)\n\n## What this deliberately leaves undone\n\n- Change `.github/settings.yml`; this needs a human with repo settings access."},
+	}
+	server, obs := taskListSweepServer(t, org, repo, fixtures, merged)
+	defer server.Close()
+	c := newTestClient(t, server, org, []string{repo})
+
+	if _, err := c.SweepCompletedTaskListIssues(context.Background(), TaskListSweepOptions{}); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+
+	for _, n := range []int{830, 831} {
+		bodies := obs.commentsPosted[n]
+		if len(bodies) != 1 {
+			t.Fatalf("commentsPosted[%d] = %d; want 1", n, len(bodies))
+		}
+		body := bodies[0]
+		if !strings.Contains(body, taskListSweepMarker) || !strings.Contains(body, "Remainder from the PR body") {
+			t.Errorf("comment for #%d missing marker/remainder: %q", n, body)
+		}
+	}
+	if labels := obs.labelsAdded[830]; len(labels) != 0 {
+		t.Errorf("labelsAdded[830] = %v; staged work must not get needs-human", labels)
+	}
+	if labels := obs.labelsAdded[831]; len(labels) != 1 || labels[0] != issueNeedsHumanLabel {
+		t.Fatalf("labelsAdded[831] = %v; want [%s]", labels, issueNeedsHumanLabel)
+	}
+	if body := obs.commentsPosted[831][0]; !strings.Contains(body, "`.github/settings.yml`") || !strings.Contains(body, "needs human") {
+		t.Errorf("needs-human comment did not carry the PR remainder section: %q", body)
+	}
+	if len(obs.closed) != 0 {
+		t.Fatalf("closed = %v; non-task-list Refs issues must stay open", obs.closed)
+	}
+}
+
+func TestSweepNonTaskListRefsCommentIsIdempotent(t *testing.T) {
+	org, repo := "hivecommons", "hive"
+	fixtures := []taskListSweepFixture{
+		{Number: 840, Body: "Prose finding." + hiveTrailer, AuthorLogin: "hive-app[bot]"},
+	}
+	merged := []taskListMergedPR{{Number: 940, Title: "land slice", Body: "Refs #840 — one follow-up remains"}}
+	server, obs := taskListSweepServer(t, org, repo, fixtures, merged)
+	defer server.Close()
+	c := newTestClient(t, server, org, []string{repo})
+
+	if _, err := c.SweepCompletedTaskListIssues(context.Background(), TaskListSweepOptions{}); err != nil {
+		t.Fatalf("sweep 1: %v", err)
+	}
+	if _, err := c.SweepCompletedTaskListIssues(context.Background(), TaskListSweepOptions{}); err != nil {
+		t.Fatalf("sweep 2: %v", err)
+	}
+	if got := obs.totalCreates(); got != 1 {
+		t.Errorf("total creates = %d; want 1", got)
+	}
+	if got := obs.totalEdits(); got != 0 {
+		t.Errorf("total edits = %d; want 0", got)
+	}
+}
+
+func TestSweepNonTaskListRefsKeepsOlderRemainderWhenWindowShrinks(t *testing.T) {
+	org, repo := "hivecommons", "hive"
+	fixtures := []taskListSweepFixture{
+		{Number: 850, Body: "Prose finding." + hiveTrailer, AuthorLogin: "hive-app[bot]"},
+	}
+	merged := []taskListMergedPR{
+		{Number: 950, Title: "land first slice", Body: "Refs #850 — first remainder"},
+		{Number: 951, Title: "land second slice", Body: "Refs #850 — second remainder"},
+	}
+	server, obs := taskListSweepServer(t, org, repo, fixtures, merged)
+	defer server.Close()
+	c := newTestClient(t, server, org, []string{repo})
+
+	if _, err := c.SweepCompletedTaskListIssues(context.Background(), TaskListSweepOptions{}); err != nil {
+		t.Fatalf("sweep 1: %v", err)
+	}
+	firstBody := obs.commentsPosted[850][0]
+	if !strings.Contains(firstBody, "#950") || !strings.Contains(firstBody, "#951") {
+		t.Fatalf("first comment = %q; want both PRs", firstBody)
+	}
+
+	server.Close()
+	server2, obs2 := taskListSweepServer(t, org, repo, fixtures, []taskListMergedPR{{Number: 951, Title: "land second slice updated", Body: "Refs #850 — updated second remainder"}, {Number: 952, Title: "land third slice", Body: "Refs #850 — third remainder\n\n## What remains\n\n- #850 update the third protected file; this needs a human with admin access."}})
+	defer server2.Close()
+	obs2.comments[850] = []sweepMockComment{{ID: 1_000_600, Body: firstBody}}
+	c2 := newTestClient(t, server2, org, []string{repo})
+	if _, err := c2.SweepCompletedTaskListIssues(context.Background(), TaskListSweepOptions{}); err != nil {
+		t.Fatalf("sweep 2: %v", err)
+	}
+	if got := obs2.totalEdits(); got != 1 {
+		t.Fatalf("total edits = %d; want 1 to add new PR while preserving aged-out PR", got)
+	}
+	updated := obs2.comments[850][0].Body
+	for _, want := range []string{"#950", "#951", "#952", "updated second remainder", "third protected file"} {
+		if !strings.Contains(updated, want) {
+			t.Fatalf("updated comment = %q; missing %s", updated, want)
+		}
+	}
+	if strings.Contains(updated, "second remainder") && !strings.Contains(updated, "updated second remainder") {
+		t.Fatalf("updated comment = %q; still-current PR #951 block was not refreshed", updated)
+	}
+}
+
+func TestRefsRemainderMetadataNeedsHumanSignals(t *testing.T) {
+	meta := refsRemainderMetadata("Refs #12 (needs-human: maintainer must change protected file)", "o/r")
+	got := meta[claimKey("o/r", 12)]
+	if !got.Reference || !got.NeedsHuman || got.Remainder != "maintainer must change protected file" {
+		t.Fatalf("explicit marker meta = %+v", got)
+	}
+
+	meta = refsRemainderMetadata("Refs #13 — phase two remains\n\n## What remains\n\nA follow-up agent can update docs.", "o/r")
+	got = meta[claimKey("o/r", 13)]
+	if !got.Reference || got.NeedsHuman || !strings.Contains(got.Remainder, "follow-up agent") {
+		t.Fatalf("agent-doable section meta = %+v", got)
+	}
+
+	meta = refsRemainderMetadata("Refs #14 — protected file remains\n\n## What this deliberately leaves undone\n\nThese edits must be applied by hand as one atomic diff for a human because the file is denied.", "o/r")
+	got = meta[claimKey("o/r", 14)]
+	if !got.Reference || !got.NeedsHuman {
+		t.Fatalf("precise prose fallback meta = %+v", got)
+	}
+
+	meta = refsRemainderMetadata("Refs #15 — docs remain\n\n## What remains\n\nThis does not need a human; another agent can update the docs.", "o/r")
+	got = meta[claimKey("o/r", 15)]
+	if !got.Reference || got.NeedsHuman {
+		t.Fatalf("negated human prose meta = %+v", got)
+	}
+
+	meta = refsRemainderMetadata("Refs #10 (needs-human: protected settings require a maintainer)\nRefs #11 — agent-doable docs remain\n\n## What remains\n\n- #10 update protected settings; this requires a human with admin access.\n- #11 regenerate docs; an agent can do this.", "o/r")
+	if got := meta[claimKey("o/r", 10)]; !got.Reference || !got.NeedsHuman {
+		t.Fatalf("marked ref meta = %+v; want needs-human", got)
+	}
+	if got := meta[claimKey("o/r", 11)]; !strings.Contains(got.Remainder, "#11 regenerate docs") || strings.Contains(got.Remainder, "#10 update protected") {
+		t.Fatalf("unmarked ref remainder = %q; want only its scoped bullet", got.Remainder)
+	}
+
+	meta = refsRemainderMetadata("Fixes #20\nRefs #21 — docs remain\n\n## What remains\n\n- #20 protected settings still require a human.\n- #21 docs are agent-doable.", "o/r")
+	got = meta[claimKey("o/r", 21)]
+	if !got.Reference || got.NeedsHuman || strings.Contains(got.Remainder, "#20 protected") || !strings.Contains(got.Remainder, "#21 docs") {
+		t.Fatalf("single Refs with scoped bullets meta = %+v; must not inherit another issue's human-only bullet", got)
+	}
+
+	meta = refsRemainderMetadata("Refs #17 — protected file remains\n\n## What remains\n\n- #17 update protected settings:\n  this needs a human with admin access.", "o/r")
+	got = meta[claimKey("o/r", 17)]
+	if !got.Reference || !got.NeedsHuman || !strings.Contains(got.Remainder, "admin access") {
+		t.Fatalf("scoped multi-line bullet meta = %+v; want continuation-line needs-human signal", got)
+	}
+
+	for _, tc := range []struct {
+		text           string
+		wantNeedsHuman bool
+	}{
+		{"## What remains\n\nscreenshots were last generated by a human designer; an agent should regenerate them", false},
+		{"## What remains\n\nan agent cannot do this; it needs a human with admin access", true},
+		{"## What remains\n\nrepository settings are not editable by agents, so this needs a human with admin access", true},
+	} {
+		meta = refsRemainderMetadata("Refs #16 — remainder described below\n\n"+tc.text, "o/r")
+		got := meta[claimKey("o/r", 16)]
+		if got.NeedsHuman != tc.wantNeedsHuman {
+			t.Fatalf("human prose meta for %q = %+v; want needs-human %v", tc.text, got, tc.wantNeedsHuman)
+		}
 	}
 }
 

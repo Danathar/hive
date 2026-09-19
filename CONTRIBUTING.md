@@ -32,9 +32,19 @@ Thank you for helping improve KubeStellar Hive. This guide is for contributing c
 
 ## Branches
 
-Use `v4` as the base branch for Hive work and PRs unless a maintainer asks otherwise. The `main` branch is not the active target for changes.
+Hive develops on parallel release lines (see [ROADMAP.md](ROADMAP.md) for the
+authoritative line policy). Pick your base branch by the kind of change:
 
-Before starting work:
+| Base branch | Use it for |
+| --- | --- |
+| `v4` (default) | Bug fixes, security fixes, dependency updates, docs, and operability improvements on the supported stable line. Note the accepted [feature-freeze policy](ROADMAP.md#v4--stable-line) ([#6346](https://github.com/hivecommons/hive/issues/6346)): after the freeze (when the v5 GA bar's Release-train rows are green, or 2026-10-15, whichever comes first), `v4` accepts security and critical fixes only. |
+| `v5` | Structural or protocol-level changes, gated by public `[v5 RFC]` issues per [ROADMAP.md](ROADMAP.md#v5--next-generation). |
+| `v6` | Dashboard-optional-operation work under the [#7563 epic](https://github.com/hivecommons/hive/issues/7563) only — such PRs are out of scope on `v4` and `v5` (see [ROADMAP.md](ROADMAP.md#v6--dashboard-optional-operation-line-open)). |
+
+The `main` branch is not the active target for changes. When in doubt, or if a
+maintainer asks for a different base, follow the maintainer's guidance.
+
+Before starting work (substitute your chosen base branch for `v4`):
 
 ```bash
 git fetch origin
@@ -84,6 +94,27 @@ See [src/docs/contributor-relay.md](src/docs/contributor-relay.md) for the end-t
 - Keep configuration values configurable instead of hard-coding environment-specific paths, tokens, or endpoints.
 - Do not commit secrets, generated credentials, or local runtime state.
 - For documentation changes, verify every command, path, and branch name you mention.
+
+### `file:line` citations in docs
+
+The docs under `src/docs/` cite source locations in `path/to/file.go:NNN`
+form (about 360 such cites at the time of writing). They pin claims to real
+code, which makes them valuable — and fragile: any refactor that moves lines
+in a cited file silently breaks them. Three remap waves (PRs #7495, #7669,
+#7680) have each had to re-verify dozens of cites after large refactors.
+
+When you touch cited code or the docs that cite it:
+
+- **Refactoring a file cited by docs?** Grep for cites into it before you
+  open the PR — `grep -rn "yourfile.go:" src/docs/` — and remap any that your
+  change moves. A cite remap belongs in the same PR as the refactor, not in a
+  later cleanup wave.
+- **Writing a new cite?** Point at the symbol's declaration line, and prefer
+  citing a symbol name alongside the line (e.g. `` `ConnectVault`,
+  `pkg/knowledge/api.go:588` ``) so a future remap can re-locate it by name
+  when the line number drifts.
+- **Ranges** (`file.go:588-606`) are fine for a block; keep them tight so
+  drift is detectable.
 
 ## Test policy
 

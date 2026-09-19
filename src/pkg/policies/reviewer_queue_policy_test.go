@@ -35,6 +35,49 @@ func TestReviewerQueuePolicyShips(t *testing.T) {
 		t.Error("reviewer-queue.md must name the COMMENT event as its product")
 	}
 
+	// The kick built by pkg/review/prompts.go demands a structured JSON
+	// verdict ("Return exactly one JSON object ... Allowed verdicts: approve,
+	// changes_requested, requires_human, reject") in the same context as this
+	// policy. A policy that describes the verdict as superseded suppresses the
+	// artifact the routing chain runs on: verdicts feed review.Collect into
+	// review-verdicts.json, which drives the aggregate, the fix dispatch, and
+	// finally the requires_human holds that applyHumanDecisionLabels turns
+	// into a triage label. With the verdict dropped, that chain is starved
+	// from its head and no pull request is ever routed to a human.
+	for _, want := range []string{
+		"requires_human",
+		"changes_requested",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("reviewer-queue.md must name the %q verdict the kick requires", want)
+		}
+	}
+	for _, banned := range []string{
+		"Your verdict was computed and discarded",
+		"nothing ever read it",
+	} {
+		if strings.Contains(body, banned) {
+			t.Errorf("reviewer-queue.md tells the agent its verdict is pointless (%q) while the kick requires one", banned)
+		}
+	}
+
+	// Naming the verdict is not enough — the policy must say how to DELIVER it.
+	// The original text said the verdict was "returned in your kick output",
+	// which is nowhere: the agent cannot write the hive's metrics dir, so a
+	// verdict that is merely printed is discarded. Measured on a live spoke:
+	// 117 reviews posted, review-verdicts.json still empty, zero PRs routed.
+	for _, want := range []string{
+		"--verdict-file",
+		"--record-verdict",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("reviewer-queue.md never tells the agent to deliver its verdict with %q; printing it delivers nothing", want)
+		}
+	}
+	if strings.Contains(body, "returned in your kick output") {
+		t.Error("reviewer-queue.md still claims the verdict is delivered by returning it in kick output; it is not read from there")
+	}
+
 	// It must not re-acquire the contradictions of the advisory copy.
 	for _, banned := range []string{
 		"no GitHub write access",

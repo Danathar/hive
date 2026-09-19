@@ -66,7 +66,7 @@ Fields (`MintConfig`, `pkg/config/config.go:227-239`):
 
 | YAML key | Go field | Required (when `enabled: true`) | Default | Notes |
 |---|---|---|---|---|
-| `enabled` | `Enabled` | — | `false` | Turns the service on. `buildAgentMinter` is only invoked when this is `true` (`main.go:2157-2158`). |
+| `enabled` | `Enabled` | — | `false` | Turns the service on. `buildAgentMinter` is only invoked when this is `true` (`main.go:1870-1871`). |
 | `key_path` | `KeyPath` | **Yes** | — | PEM path of the RSA signing key. Startup fails with `mint.key_path is required when mint is enabled` if empty while `enabled: true` (`main.go:855-857`). |
 | `issuer` | `Issuer` | **Yes** | — | The `iss` claim, and the identity string WIF providers are configured to trust — typically the hive's public URL. Startup fails with `mint.issuer is required when mint is enabled` if empty (`main.go:858-860`). |
 | `max_ttl_seconds` | `MaxTTLSeconds` | No | `900` (15m, `mint.DefaultMaxTTL`) | Bounds a minted token's lifetime. **Clamped, never trusted verbatim**: any configured value is silently clamped into `[MinTTL 1m, HardCapTTL 1h]` (`mint.go:96-111,172-186`) — you cannot configure a token that outlives one hour no matter what you set here. |
@@ -110,16 +110,25 @@ too — treat it as effectively immutable once anything trusts it.
 
 ## The JWKS endpoint — and what is NOT wired
 
-ADR-0007 and the mint package describe a `.well-known/jwks.json` document
-that downstream WIF providers use to verify tokens (`Minter.JWKS`,
-`mint.go`). **As of this branch, nothing in the hive process serves that
-document and no HTTP mint server is compiled in.** Today, `mint.enabled: true`
-only wires the in-process `AgentMinter` that stamps agent-scoped tokens — it
-does **not** stand up an HTTP `/mint` endpoint or a public JWKS endpoint. If
-your use case needs an external WIF broker to independently verify
-hive-minted tokens over HTTP, that transport does not exist yet in this
-codebase; enabling `mint:` today only benefits in-process consumers of
-`AgentMinter`.
+ADR-0007 and the mint package describe a `.well-known/jwks.json` endpoint
+that downstream WIF providers fetch to verify tokens (`Minter.JWKS`,
+`mint.go:237-254`). **As of this branch, nothing in the hive process serves
+that endpoint.** `pkg/mint/README.md` states this explicitly:
+
+> `Server.Handler()` returns a handler; it does not listen. Nothing in this
+> repo currently serves it — the mint is used in-process through
+> `AgentMinter`. Whoever wires a listener owns the short-term hardening the
+> finding asks for: bind it to localhost or a pod-internal interface, and do
+> not expose `/mint` beyond the pod network.
+
+Confirmed by search: no route registers `jwks` or `well-known` anywhere
+under `pkg/dashboard/` or `cmd/hive/`. Today, `mint.enabled: true` only
+wires the in-process `AgentMinter` that stamps agent-scoped tokens
+(`main.go:1870-1877`) — it does **not** stand up an HTTP `/mint` endpoint or
+a public JWKS endpoint. If your use case needs an *external* WIF broker
+(GCP/AWS/Azure/registry) to independently verify hive-minted tokens over
+HTTP, that transport does not exist yet in this codebase; enabling `mint:`
+today only benefits in-process consumers of `AgentMinter`.
 
 ## Trust boundary — read this before enabling
 
@@ -168,7 +177,7 @@ An owner can toggle `mint.enabled` and `mint.issuer` from the Governor
 config dialog (`POST` handled by `handleGovernorFeatures`,
 `api_governor_features.go:136-139`) — but **not** `key_path`, by design; the
 signing key never appears in any dashboard payload. Status reporting
-(`status_builder.go:438-447`) exposes only `enabled`, `issuer`, and a
+(`status_builder.go:505-514`) exposes only `enabled`, `issuer`, and a
 boolean `keyPresent` (whether the file at `key_path` currently exists) —
 never the key material or the path itself in a form that leaks key location
 semantics beyond presence.

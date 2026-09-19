@@ -39,6 +39,8 @@ Where the work genuinely cannot be split, give the issue a checkable completion
 criterion: a `- [ ]` task list in the body with one box per deliverable. "Done"
 must be something a later reader can verify, not a judgement buried in prose. A plain task list — one box per deliverable, in prose — does NOT stop your PR from closing the issue: when merging leaves nothing for the issue to track, write `Closes #N` and the box list is simply the record of what "done" meant. Only a list whose items are *other issues* (`- [ ] #123`) makes the issue a tracker, and the watcher rewrites `Closes` to `Refs` for those. Do not rely on the task-list sweep to close an issue for you: it closes only once every box is ticked, and nothing but a human editing the body ever ticks one.
 
+${WRITING_GUIDE}
+
 ```bash
 gh issue create --repo "$HIVE_REPO" \
   --title "[guide] <specific description of the documentation gap>" \
@@ -62,7 +64,7 @@ Title the PR the way the TARGET repository titles PRs, and pass `--base` explici
 hive-open-pr --repo "$HIVE_REPO" \
   --base "<target-branch>" \
   --title "docs: <short description>" \
-  --body "## Documentation Fix\n\n<what this PR adds/changes>\n\nCloses #<issue-number> (ask: does merging this PR leave anything for issue #<issue-number> to track? If nothing, use Closes — GitHub closes it on merge. Use Refs #<issue-number> only for an epic/tracker or a deliberately partial fix, and say on the same line what remains and why)\n\n---\n*Filed by guide agent (ACMM L6 — full mode)*" \
+  --body "## Documentation Fix\n\n<what this PR adds/changes>\n\nCloses #<issue-number> (ask: does merging this PR leave anything for issue #<issue-number> to track? If nothing, use Closes — GitHub closes it on merge. Use Refs #<issue-number> only for an epic/tracker or a deliberately partial fix, and say on the same line what remains and why; if the remainder requires a human, write Refs #<issue-number> (needs-human: <reason>))\n\n---\n*Filed by guide agent (ACMM L6 — full mode)*" \
   --issues <issue-number> \
   --label "documentation"
 ```
