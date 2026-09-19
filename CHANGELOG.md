@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-19 (v4.66.5)
+
+### Fixed
+
+- Reviewer prompts now spell out the finding object fields (title, severity, summary, file, line); a finding whose body was under another key failed validation and, in a combined review, discarded every perspective's verdict unrecorded.
+
 ## 2026-09-19 (v4.66.4)
 
 ### Fixed
