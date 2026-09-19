@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-19 (v4.64.1)
+
+### Changed
+
+- `src/hive.yaml.example` now documents the previously-invisible `knowledge:` sub-sections — `vaults`, `documents`, and `bead_synthesizer` (with its `retention_policy`) — as commented/annotated examples, alongside new operator docs in `knowledge-curator.md` ([#7685](https://github.com/hivecommons/hive/issues/7685)). The bead synthesizer runs hourly **by default**, even with `knowledge.enabled: false`; the example now shows its knobs, its defaults (`/data/vaults/bead-synth-wiki`, retention 5000/7d/30d), and the `enabled: false` opt-out. No behavior change — example and docs only.
+
 ## 2026-09-18 (v4.64.0)
 
 ### Added
