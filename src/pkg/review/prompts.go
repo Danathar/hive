@@ -6,13 +6,14 @@ import (
 )
 
 type PullRequest struct {
-	Repo    string
-	Number  int
-	Title   string
-	Author  string
-	HeadSHA string
-	URL     string
-	Lane    string
+	Repo        string
+	Number      int
+	Title       string
+	Author      string
+	HeadSHA     string
+	URL         string
+	Lane        string
+	AuthorAgent string
 	// MergeBase is the commit the reviewer should ground its reading in. When
 	// set, the prompt instructs the reviewer to read the repository at this
 	// commit rather than reasoning from the diff alone — see groundingSection
@@ -111,21 +112,21 @@ type PromptOptions struct {
 	// silence reads as absence. This turns "nothing to report" into one short
 	// line of evidence, deliberately capped at that.
 	AcknowledgeNoFindings bool
+	// Revise tells the reviewer it is re-examining a PR it has already
+	// reviewed, and that its existing review must be corrected in place
+	// rather than joined by a second one. Editing notifies nobody; posting
+	// again notifies every subscriber, which is too high a price for the hive
+	// correcting its own mistake.
+	// Perspectives is the set this hive reviews with, and supplies the focus
+	// text for each. The zero value means the built-in defaults.
+	Perspectives PerspectiveSet
+	Revise       bool
 }
 
 // BuildPerspectivePromptWith is BuildPerspectivePromptOpts with the full set
 // of publish-side options.
 func BuildPerspectivePromptWith(p Perspective, pr PullRequest, opts PromptOptions) string {
-	focus := map[Perspective]string{
-		PerspectiveCorrectness:     "correctness, regressions, edge cases, data races, and test adequacy",
-		PerspectiveSecurity:        "exploitable vulnerabilities, unsafe permissions, injection, secrets, and trust-boundary regressions",
-		PerspectiveIntentAlignment: "whether the diff solves the linked issue without unrelated scope creep",
-		PerspectiveStyle:           "maintainability, conventions, readability, and repository idioms",
-		PerspectiveDocsCurrency:    "documentation, examples, generated docs, and operator-facing text that must change with behavior",
-	}[p]
-	if focus == "" {
-		focus = "the named review perspective"
-	}
+	focus := opts.Perspectives.Focus(p)
 	var b strings.Builder
 	fmt.Fprintf(&b, "[review-perspective:%s]\n", p)
 	fmt.Fprintf(&b, "Review PR %s#%d", pr.Repo, pr.Number)
@@ -150,7 +151,7 @@ func BuildPerspectivePromptWith(p Perspective, pr PullRequest, opts PromptOption
 	b.WriteString("Allowed verdicts: approve, changes_requested, requires_human, reject. Finding severities: info, low, medium, high, critical.\n")
 	b.WriteString("Use approve only when this perspective finds no blocker. Use changes_requested for agent-fixable issues. Use requires_human for ambiguous/high-risk judgment. Use reject for fundamentally unsuitable or harmful PRs.\n")
 	if opts.PostComments {
-		b.WriteString(buildPublishInstruction(pr, opts.AcknowledgeNoFindings))
+		b.WriteString(buildPublishInstruction(pr, opts.AcknowledgeNoFindings, opts.Revise))
 	}
 	return b.String()
 }
@@ -170,9 +171,17 @@ func buildReadInstruction(pr PullRequest) string {
 	fmt.Fprintf(&b, "  gh pr diff %d --repo %s\n", pr.Number, pr.Repo)
 	b.WriteString("The body states what the author INTENDED; the diff is what they actually did. You need both — most of the findings worth reporting live in the gap between them.\n")
 	b.WriteString("Reading is read-only and unrestricted: use gh freely here.\n")
-	b.WriteString("Judge the diff, not the surrounding code. Pre-existing problems this PR does not touch are out of scope; raising them reads as an obstacle, not a review.\n")
+	b.WriteString("THE DIFF ALONE IS NOT ENOUGH. Open the files it touches, and the callers of what it changes:\n")
 	if pr.HeadSHA != "" {
-		fmt.Fprintf(&b, "Your citations must come from that diff at head %s. If the PR has moved on since, review the current head and say which revision you read.\n", pr.HeadSHA)
+		fmt.Fprintf(&b, "  gh api repos/%s/contents/<path>?ref=%s --jq .content | base64 -d\n", pr.Repo, pr.HeadSHA)
+	} else {
+		fmt.Fprintf(&b, "  gh api repos/%s/contents/<path> --jq .content | base64 -d\n", pr.Repo)
+	}
+	fmt.Fprintf(&b, "  gh search code --repo %s '<changed symbol>'   # who calls it\n", pr.Repo)
+	b.WriteString("This was measured, not assumed: a reviewer reading the diff plus the surrounding tree found 67% of known defects at 1.4 false positives per PR, against 17% at 3.6 for the diff alone. Reading the tree is four times more effective AND quieter. A guard, early return, or caller you cannot see is the usual reason a real defect reads as fine.\n")
+	b.WriteString("Read widely; report narrowly. Only defects this diff introduces or exposes are in scope — pre-existing problems it does not touch stay out, however tempting. Reading the surrounding code tells you whether the change is safe; it is not an invitation to review the file.\n")
+	if pr.HeadSHA != "" {
+		fmt.Fprintf(&b, "Every citation must be code you actually read at head %s — in the diff or in the files around it. If the PR has moved on since, review the current head and say which revision you read.\n", pr.HeadSHA)
 	}
 	b.WriteString("If you cannot read the diff — fetch failed, or it is too large — return verdict requires_human and say so. Never infer the contents of a diff you did not read: an invented file:line is worse than no review at all.\n\n")
 	return b.String()
@@ -180,12 +189,21 @@ func buildReadInstruction(pr PullRequest) string {
 
 // buildPublishInstruction is the publish half of the kick: how to say what you
 // found, and — more importantly — when to say nothing.
-func buildPublishInstruction(pr PullRequest, acknowledgeNoFindings bool) string {
+func buildPublishInstruction(pr PullRequest, acknowledgeNoFindings bool, revise bool) string {
 	var b strings.Builder
 	b.WriteString("\nPUBLISH YOUR VERDICT.\n")
 	b.WriteString("You produce TWO artifacts and both must be delivered: the comment a human reads, and the JSON verdict the hive routes on.\n")
-	b.WriteString("Write the JSON to a file, then post the comment and hand over the verdict in the same call:\n")
-	fmt.Fprintf(&b, "  hive-review %d --repo %s --comment --body-file <comment> --verdict-file <verdict>\n", pr.Number, pr.Repo)
+	if revise {
+		b.WriteString("YOU HAVE REVIEWED THIS PR BEFORE. You are re-examining it because the reviewer was at fault, not the PR — an earlier review of yours was produced without reading the surrounding code, so its conclusion is not trustworthy.\n")
+		b.WriteString("Correct your existing review in place. Do NOT add a second one:\n")
+		fmt.Fprintf(&b, "  hive-review %d --repo %s --comment --body-file <comment> --verdict-file <verdict> --revise\n", pr.Number, pr.Repo)
+		b.WriteString("--revise edits the review already on the PR, which notifies nobody. Posting again notifies every subscriber to say the hive changed its mind, and that cost lands on people who did nothing wrong.\n")
+		b.WriteString("Write the comment you should have written the first time, not a diff against it. A maintainer rereading it must see one coherent review, with no reference to a previous version they may never have read.\n")
+		b.WriteString("Reaching the same conclusion is a perfectly good outcome — say so plainly and the revision is skipped as unchanged. Do not manufacture a finding to justify the second look.\n")
+	} else {
+		b.WriteString("Write the JSON to a file, then post the comment and hand over the verdict in the same call:\n")
+		fmt.Fprintf(&b, "  hive-review %d --repo %s --comment --body-file <comment> --verdict-file <verdict>\n", pr.Number, pr.Repo)
+	}
 	b.WriteString("Printing the JSON to your terminal does not deliver it, and you cannot write it into the metrics dir yourself — the relay is the only path. Omit --verdict-file and your judgement is lost: nothing is routed, nothing is escalated, and this PR is dispatched to you again from scratch.\n")
 	b.WriteString("Use hive-review, never `gh pr review` — it is submitted with the App token and recorded on the audit trail.\n")
 	b.WriteString("Only --comment. Do NOT approve, request changes, merge, close, or label; a human decides those.\n")
@@ -241,4 +259,97 @@ func mentionableAuthor(author string) string {
 		return ""
 	}
 	return a
+}
+
+// BuildCombinedPrompt is the kick for reviewing a PR from every perspective in
+// one session, and it exists to break a false trade-off.
+//
+// One perspective per kick meant the only way to get security, scope, style and
+// docs coverage was five kicks, and five kicks meant five review comments on
+// one PR. That cost is what max_perspectives_per_pr was introduced to cap
+// (#7562), and capping it at 1 is why nothing on this fleet has ever been
+// reviewed for anything but correctness. Both settings were right given the
+// choice available; the choice was the problem.
+//
+// One session covering all five produces one comment, so breadth stops costing
+// the maintainer anything. It is also cheaper on the reviewer: reading the diff
+// and the surrounding tree is the expensive part of a review and it is done
+// once here instead of five times.
+//
+// The verdicts stay separate. Downstream routing is per-perspective -- the
+// aggregate blocks if ANY perspective withholds approval -- so collapsing five
+// judgments into one would quietly weaken the merge gate. One comment, five
+// verdicts.
+func BuildCombinedPrompt(pr PullRequest, perspectives []Perspective, opts PromptOptions) string {
+	if len(perspectives) == 0 {
+		perspectives = opts.Perspectives.List()
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "[review-perspective:%s]\n", strings.Join(perspectiveNames(perspectives), ","))
+	fmt.Fprintf(&b, "Review PR %s#%d", pr.Repo, pr.Number)
+	if pr.Title != "" {
+		fmt.Fprintf(&b, " — %s", pr.Title)
+	}
+	b.WriteString(".\n")
+	if pr.URL != "" {
+		fmt.Fprintf(&b, "URL: %s\n", pr.URL)
+	}
+	if pr.HeadSHA != "" {
+		fmt.Fprintf(&b, "Head SHA: %s\n", pr.HeadSHA)
+	}
+	if pr.Author != "" {
+		fmt.Fprintf(&b, "Author: @%s\n", strings.TrimPrefix(pr.Author, "@"))
+	}
+	fmt.Fprintf(&b, "\nJudge this PR from ALL %d perspectives below, in one pass. Read the PR once; apply every perspective to what you read.\n", len(perspectives))
+	for _, p := range perspectives {
+		fmt.Fprintf(&b, "  - %s — %s\n", p, opts.Perspectives.Focus(p))
+	}
+	b.WriteString("These are distinct questions, not one question asked several ways. A change can be correct and still leak a secret, or secure and still not do what its issue asked. Ask each one separately and answer it on its own evidence.\n")
+	b.WriteString("Report each finding under exactly one perspective — whichever it most belongs to. Do not restate one finding under several to look thorough; that is the padding failure mode, multiplied.\n\n")
+	b.WriteString(buildReadInstruction(pr))
+	b.WriteString("Return exactly one JSON ARRAY containing one object per perspective — all ")
+	fmt.Fprintf(&b, "%d of them, even the ones that found nothing.\n", len(perspectives))
+	b.WriteString("Each object: the standard outputschema AgentReport fields plus perspective, verdict, repo, number, and head_sha.\n")
+	b.WriteString("Required AgentReport fields: lane, kind, findings, prs_opened, beads_filed, summary. Set kind to \"review\" and lane to \"review-swarm\". Use [] for empty arrays.\n")
+	fmt.Fprintf(&b, "Every object must carry the same repo (%s) and number (%d). Allowed perspective values: %s.\n", pr.Repo, pr.Number, joinPerspectives(perspectives))
+	b.WriteString("Allowed verdicts: approve, changes_requested, requires_human, reject. Finding severities: info, low, medium, high, critical.\n")
+	b.WriteString("Give each perspective its OWN verdict. Use approve only when THAT perspective finds no blocker. Use changes_requested for agent-fixable issues. Use requires_human for ambiguous/high-risk judgment. Use reject for fundamentally unsuitable or harmful PRs.\n")
+	b.WriteString("A perspective you could not meaningfully assess is requires_human, not approve. Approving a perspective you did not actually consider is the one failure mode that makes this whole review worthless, because it is indistinguishable from having considered it.\n")
+	if opts.PostComments {
+		b.WriteString(buildCombinedPublishInstruction(pr, perspectives, opts))
+	}
+	return b.String()
+}
+
+// buildCombinedPublishInstruction is the publish half for a combined review.
+// One comment carries every perspective, so the structure of that comment is
+// what keeps five judgments legible to someone triaging a queue.
+func buildCombinedPublishInstruction(pr PullRequest, perspectives []Perspective, opts PromptOptions) string {
+	var b strings.Builder
+	b.WriteString(buildPublishInstruction(pr, opts.AcknowledgeNoFindings, opts.Revise))
+	b.WriteString("\nONE COMMENT, EVERY PERSPECTIVE.\n")
+	fmt.Fprintf(&b, "You were kicked once for all %d perspectives and you post exactly ONE comment for all %d. Do not call hive-review once per perspective — that is the pile of comments this exists to avoid.\n", len(perspectives), len(perspectives))
+	b.WriteString("Structure it so a maintainer can find the part they care about. Use a short `**<perspective>**` heading per perspective that HAS a finding, worst severity first.\n")
+	b.WriteString("Perspectives that found nothing do NOT each get a line in the comment. Name them together on one closing line:\n")
+	b.WriteString("  _No findings from: <comma-separated perspectives>._\n")
+	b.WriteString("Five separate \"nothing to report\" paragraphs is the same noise as five separate comments, just collected into one place.\n")
+	if opts.AcknowledgeNoFindings {
+		b.WriteString("If NO perspective found anything, the whole comment is exactly one line:\n")
+		// Named, not counted: "no findings from any of the 1 perspectives" is
+		// what a single-perspective combined kick produced, and a count says
+		// nothing a reader can check against the review anyway.
+		fmt.Fprintf(&b, "  **Reviewed** — no findings from %s.\n", strings.Join(perspectiveNames(perspectives), ", "))
+		b.WriteString("That line is the WHOLE comment. Do not list what you checked or append a summary of the diff.\n")
+	}
+	b.WriteString("The verdict file still carries all ")
+	fmt.Fprintf(&b, "%d verdicts as a JSON array, including the clean ones — a perspective missing from the array reads downstream as never reviewed, and the PR comes back to you from scratch.\n", len(perspectives))
+	return b.String()
+}
+
+func perspectiveNames(ps []Perspective) []string {
+	out := make([]string, 0, len(ps))
+	for _, p := range ps {
+		out = append(out, string(p))
+	}
+	return out
 }

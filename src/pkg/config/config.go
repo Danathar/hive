@@ -6565,6 +6565,39 @@ type ReviewConfig struct {
 	// not. Zero means no cap, which stays the default, so this only changes
 	// a hive that opts in because its queue is too deep to review in depth.
 	MaxPerspectivesPerPR int `yaml:"max_perspectives_per_pr,omitempty" json:"max_perspectives_per_pr,omitempty"`
+	// Perspectives selects which review perspectives run against each PR, in
+	// dispatch order. Empty means the built-in set.
+	//
+	// It is a per-hive editorial choice, not a behavioural invariant: a fleet
+	// governing infrastructure repos wants security on every PR, a docs fleet
+	// wants docs-currency and little else. It may also name a perspective this
+	// hive invented, which is defined by giving it focus text in
+	// PerspectivePrompts. A name that is neither built in nor described there
+	// fails config load rather than being dropped — a typo'd "sekurity" that
+	// silently disappeared would read as enabled everywhere it is displayed
+	// while nothing reviewed it.
+	Perspectives []string `yaml:"perspectives,omitempty" json:"perspectives,omitempty"`
+	// PerspectivePrompts is what each perspective is told to look for, keyed by
+	// perspective name. It overrides the built-in focus line and is how a
+	// hive-defined perspective is described at all.
+	//
+	// This is the editorial half of the setting above. A repo with its own
+	// conventions wants the style perspective told what those conventions ARE
+	// rather than left to infer them from the tree; a hive can only get that
+	// by writing it down. An entry that is blank means "use the built-in".
+	PerspectivePrompts map[string]string `yaml:"perspective_prompts,omitempty" json:"perspective_prompts,omitempty"`
+	// CombinedPerspectives reviews every perspective in ONE agent session that
+	// leaves ONE comment, instead of one session and one comment per
+	// perspective.
+	//
+	// Breadth and quiet used to be in direct conflict: covering five
+	// perspectives meant five comments on one PR, and MaxPerspectivesPerPR
+	// bought quiet by never running four of the five. Combining them removes
+	// the trade — one comment however many perspectives are covered, and the
+	// expensive part of a review (reading the diff and the surrounding tree)
+	// is done once instead of five times. The verdicts stay separate, so any
+	// single perspective can still withhold approval.
+	CombinedPerspectives bool `yaml:"combined_perspectives,omitempty" json:"combined_perspectives,omitempty"`
 	// AllAuthors makes every open PR eligible for review regardless of who
 	// opened it. By default the review swarm looks only at agent-authored
 	// PRs — the work the hive is answerable for. On a repo whose queue is the
@@ -6578,6 +6611,28 @@ type ReviewConfig struct {
 	// coverage itself is the thing being demonstrated, a reviewed-and-clean
 	// PR should say so. Requires PostComments.
 	AcknowledgeNoFindings bool `yaml:"acknowledge_no_findings,omitempty" json:"acknowledge_no_findings,omitempty"`
+	// ReviseRepos allowlists repos where the reviewer revises its own previous
+	// review in place instead of posting a second one. Editing a review does
+	// not notify anyone, so correcting a verdict the hive got wrong costs the
+	// maintainers nothing; posting again costs every subscriber a
+	// notification. Empty means no repo may be revised, which is the right
+	// default: silently rewriting what a maintainer already read is a power
+	// worth granting deliberately, per repo.
+	ReviseRepos []string `yaml:"revise_repos,omitempty" json:"revise_repos,omitempty"`
+	// ReviseVerdictsBefore (RFC3339) re-opens PRs whose verdict was recorded
+	// before this instant, even though their head SHA has not moved. It exists
+	// for the case where the reviewer itself was wrong rather than the PR:
+	// dispatch normally skips any PR that already has a verdict for its head
+	// SHA, which is correct while the reviewer is trustworthy and a trap once
+	// a reviewer-side defect is found. Without it, verdicts produced by a
+	// known-broken reviewer stay frozen until someone happens to push a
+	// commit.
+	//
+	// The cutoff is self-limiting: a re-review records a fresh timestamp that
+	// is necessarily after it, so each PR is revisited at most once per bump.
+	// Only repos in ReviseRepos are eligible, so this cannot re-post anywhere
+	// the hive has not been granted the quieter in-place path.
+	ReviseVerdictsBefore string `yaml:"revise_verdicts_before,omitempty" json:"revise_verdicts_before,omitempty"`
 	// HumanDecisionLabel names an EXISTING repo label to apply when the review
 	// swarm holds a PR for a human. The review comment's in-body marker is
 	// always the primary signal and never depends on this: a label makes the

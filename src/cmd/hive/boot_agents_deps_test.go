@@ -65,12 +65,14 @@ func newBootAgentsBoot(t *testing.T, f *bootAgentsFake, cfg *config.Config) *boo
 	logger := slog.New(slog.NewTextHandler(&f.log, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	return &boot{
+	b := &boot{
 		ctx:    ctx,
 		cfg:    cfg,
 		logger: logger,
 		gov:    governor.New(cfg.Governor, cfg.EnabledAgents(), logger),
 	}
+	b.wireBootClosures()
+	return b
 }
 
 func bootAgentsConfig() *config.Config {

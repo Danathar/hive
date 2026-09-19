@@ -57,7 +57,7 @@ move procedures in the other guides should regenerate:
 ## How the hub sees heartbeat and `dashboard_url`
 
 - The spoke sends a heartbeat payload including `dashboard_url` (JSON field
-  `dashboard_url`, `src/pkg/hub/heartbeat.go:736`,
+  `dashboard_url`, `src/pkg/hub/spoke/heartbeat.go:744`,
   `DashboardURL string json:"dashboard_url"`).
 - The hub's heartbeat handler validates it (`src/pkg/hub/server.go:1749`,
   must start with `http://` or `https://`) and writes it straight into the
@@ -69,14 +69,14 @@ move procedures in the other guides should regenerate:
   `cross-cluster-migration.md` documents for the hub-hosted case, generalized
   here to any runtime).
 - If a spoke has no `hub.dashboard_url` configured, it falls back to reading
-  its own Ingress/Route (`SpokeServedHost`, `src/pkg/hub/heartbeat.go:1906`)
+  its own Ingress/Route (`SpokeServedHost`, `src/pkg/hub/spoke/heartbeat.go:1990`)
   — which is why the in-namespace `hive-dashboard-route-reader` RBAC
   (`src/deploy/k8s/dashboard-route-rbac.yaml` on the self-hosted manifest;
   the hub-hosted equivalent is `hive-route-reader`,
   `cross-cluster-migration.md`) matters on every runtime that self-discovers
   its host this way.
 - The "My Hives → Dashboard" button and any hub UI showing where to reach the
-  hive read `registry.Hives[i].DashboardURL` (`src/pkg/hub/saas_hives_api.go:1291,7279-7280,10204`)
+  hive read `registry.Hives[i].DashboardURL` (`src/pkg/hub/saas_hives_api.go:1291,1693-1694,1814`)
   — i.e. exactly the value the last heartbeat wrote, never a value you set by
   hand anywhere else.
 

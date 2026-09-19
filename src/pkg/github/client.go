@@ -21,6 +21,7 @@ import (
 	"github.com/hivecommons/hive/pkg/effects"
 	"github.com/hivecommons/hive/pkg/ioscan"
 	"github.com/hivecommons/hive/pkg/logscrub"
+	"github.com/hivecommons/hive/pkg/review"
 )
 
 // ErrNoGitHubClient is returned by *Client methods invoked on a nil receiver.
@@ -94,6 +95,8 @@ type Client struct {
 	// behaves exactly as it did before the desk existed. Set by SetApprovalDesk
 	// during startup wiring; see automerge_desk.go.
 	approvalDesk ApprovalDeskHook
+	reviseRepos  []string
+	perspectives review.PerspectiveSet
 	// prAuthz gates PR-open requests from the request-file watcher against the
 	// per-agent ACMM write-policy + forge-resistance. nil fails closed. Set by
 	// StartPRRequestWatcher.
@@ -258,6 +261,38 @@ func (c *Client) SetAppBotLogin(login string) {
 		return
 	}
 	c.appBotLogin = strings.TrimSpace(login)
+}
+
+// SetReviseRepos allowlists the repos where the reviewer may revise its own
+// previous review in place rather than posting a second one. Empty disables
+// revision everywhere, which is the default: rewriting text a maintainer has
+// already read is granted per repo, never assumed.
+func (c *Client) SetReviseRepos(repos []string) {
+	if c == nil {
+		return
+	}
+	cleaned := make([]string, 0, len(repos))
+	for _, r := range repos {
+		if trimmed := strings.TrimSpace(r); trimmed != "" {
+			cleaned = append(cleaned, trimmed)
+		}
+	}
+	c.reviseRepos = cleaned
+}
+
+// SetPerspectives tells the relay which review perspectives this hive defines,
+// so a verdict claiming anything else is refused.
+//
+// The relay is where an agent-supplied verdict crosses into hive state, so it
+// must judge names against what this hive actually reviews with rather than a
+// compiled-in list — otherwise a hive that adds its own perspective would have
+// every verdict for it rejected as unknown, and a hive that removed one would
+// still accept verdicts nothing asked for.
+func (c *Client) SetPerspectives(set review.PerspectiveSet) {
+	if c == nil {
+		return
+	}
+	c.perspectives = set
 }
 
 type Issue struct {

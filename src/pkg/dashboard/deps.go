@@ -77,6 +77,11 @@ type Dependencies struct {
 	SkipReloadFunc        func()
 	ReInitFunc            func()
 	EnumerateFunc         func()
+	// ReviewConfigApplied is called after PUT /api/config/review has mutated
+	// Config.Review, so the owner of any component that caches review
+	// settings at boot (the GitHub client's revise allowlist and perspective
+	// set) can push the new values into it. Nil means nothing caches.
+	ReviewConfigApplied func(config.ReviewConfig)
 	// RescanReposFunc re-enumerates every watched repository's open issues
 	// and pull requests against the forge, enriches PR CI status, applies the
 	// duplicate-PR claim guard and republishes the dashboard status snapshot
