@@ -26,7 +26,7 @@
 'use strict';
 
 const WebSocket = require('ws');
-const { execSync, execFile, execFileSync } = require('child_process');
+const { execSync, execFileSync, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const {
@@ -201,10 +201,22 @@ const TRANSIENT_API_ERROR_NUDGE_COOLDOWN_MS = 90000;
 const AUTONOMY_NUDGE_MESSAGE =
   'no human is available to answer, so proceed autonomously with your best judgment';
 
+const BYTES_PER_MIB = 1024 * 1024;
+const DEFAULT_HEADLESS_MAX_OUTPUT_MIB = 16;
+const DEFAULT_HEADLESS_MAX_OUTPUT_BYTES = DEFAULT_HEADLESS_MAX_OUTPUT_MIB * BYTES_PER_MIB;
+const HEADLESS_MAX_OUTPUT_ENV = 'HIVE_RELAY_MAX_OUTPUT_BYTES';
+
+function parsePositiveIntegerEnv(name, fallback) {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 // Cap on captured child output kept in memory / sent to the hub, so a chatty
 // CLI cannot grow the buffer without bound. The tail is what matters for an
 // audit trail, mirroring TMUX_TAIL_LINES on the interactive path.
-const HEADLESS_MAX_OUTPUT_BYTES = 1048576; // 1 MiB
+const HEADLESS_MAX_OUTPUT_BYTES = parsePositiveIntegerEnv(HEADLESS_MAX_OUTPUT_ENV, DEFAULT_HEADLESS_MAX_OUTPUT_BYTES);
 
 const TMUX_TAIL_LINES = 15;
 const NEEDS_LOGIN_CONFIRM_TICKS = 3;
@@ -223,6 +235,12 @@ const PROGRESS_REPORT_INTERVAL_MS = RELAY_TEST_TIMING ? 100 : 120000;
 const MAX_RECONNECT_DELAY_MS = 60000;
 const BASE_RECONNECT_DELAY_MS = 1000;
 const TOKEN_REFRESH_MARGIN_MS = 300000;
+const TMUX_COMMAND_TIMEOUT_MS = Number(process.env.HIVE_TMUX_COMMAND_TIMEOUT_MS) || 15000;
+const LIVE_CLI_FIRST_INTERRUPT_DELAY_MS = Number(process.env.HIVE_LIVE_CLI_FIRST_INTERRUPT_DELAY_MS) || 1000;
+const LIVE_CLI_SECOND_INTERRUPT_DELAY_MS = Number(process.env.HIVE_LIVE_CLI_SECOND_INTERRUPT_DELAY_MS) || 2000;
+const LIVE_CLI_SHELL_WAIT_TIMEOUT_MS = Number(process.env.HIVE_LIVE_CLI_SHELL_WAIT_TIMEOUT_MS) || 5000;
+const LIVE_CLI_SHELL_WAIT_POLL_MS = Number(process.env.HIVE_LIVE_CLI_SHELL_WAIT_POLL_MS) || 250;
+const LIVE_CLI_RESPAWN_SETTLE_MS = Number(process.env.HIVE_LIVE_CLI_RESPAWN_SETTLE_MS) || 500;
 // MAX_TASK_DURATION_MS is a PROGRESS lease, not a wall-clock budget
 // (kubestellar/hive#5321). It bounds how long a task may go without the relay
 // observing forward progress; every tick that sees new pane output re-arms it
@@ -1934,6 +1952,25 @@ let headlessChild = null;
 // (exit 0) or task_failed (non-zero / spawn error / timeout) over the existing
 // WebSocket channel — then announces `ready` for the next task. This is the
 // headless analogue of the interactive progressTick() completion path.
+function createBoundedOutputCapture(maxBytes) {
+  let buffer = Buffer.alloc(0);
+  let truncated = false;
+  return {
+    append(chunk) {
+      if (!chunk || maxBytes <= 0) return;
+      const next = Buffer.concat([buffer, Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk))]);
+      if (next.length > maxBytes) {
+        truncated = true;
+        buffer = next.subarray(next.length - maxBytes);
+      } else {
+        buffer = next;
+      }
+    },
+    text() { return buffer.toString('utf8'); },
+    truncated() { return truncated; },
+  };
+}
+
 function runHeadlessTask(task) {
   const prompt = task.prompt || `Work on ${task.kind} ${task.repo}#${task.number}: ${task.title}`;
   if (!headlessSupportsBackend()) {
@@ -1965,15 +2002,37 @@ function runHeadlessTask(task) {
   let settled = false;
   const finish = (fn) => { if (settled) return; settled = true; fn(); };
 
-  headlessChild = execFile(bin, args, {
-    timeout: HEADLESS_TASK_TIMEOUT_MS,
-    maxBuffer: HEADLESS_MAX_OUTPUT_BYTES,
-    killSignal: 'SIGKILL',
+  const output = createBoundedOutputCapture(HEADLESS_MAX_OUTPUT_BYTES);
+  let timedOut = false;
+  let spawnError = null;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    if (headlessChild && !headlessChild.killed) headlessChild.kill('SIGKILL');
+  }, HEADLESS_TASK_TIMEOUT_MS);
+  if (timeout.unref) timeout.unref();
+
+  headlessChild = spawn(bin, args, {
+    stdio: ['pipe', 'pipe', 'pipe'],
     cwd: TASK_WORKSPACE_DIR,
-  }, (err, stdout, stderr) => {
+  });
+  if (headlessChild.stdout) headlessChild.stdout.on('data', chunk => output.append(chunk));
+  if (headlessChild.stderr) headlessChild.stderr.on('data', chunk => output.append(chunk));
+  headlessChild.on('error', err => { spawnError = err; });
+  // codex exec prints "Reading additional input from stdin..." and then blocks
+  // on stdin-EOF even with the prompt already passed as an argv element; with
+  // execFile's default piped stdio nothing ever closes that pipe, so a
+  // headless codex task produced zero output and hung until the timeout
+  // killed it (found live by bin/test_backend_smoke.sh). Close stdin for
+  // every backend — a one-shot child has no interactive input coming.
+  if (headlessChild.stdin) headlessChild.stdin.end();
+  headlessChild.on('close', (code, signal) => {
+    clearTimeout(timeout);
     headlessChild = null;
     // Tokens can appear in agent output; redact before the tail leaves the host.
-    const outLines = redactTokens(String(stdout || '') + String(stderr || '')).split('\n');
+    const outText = output.truncated()
+      ? `[relay: captured output truncated to the last ${HEADLESS_MAX_OUTPUT_BYTES} bytes]\n${output.text()}`
+      : output.text();
+    const outLines = redactTokens(outText).split('\n');
     const outTail = outLines.slice(-TMUX_TAIL_LINES);
     // #6667: headless has no TUI chrome, but a build log easily pushes a PR URL
     // past fifteen lines, so scan the same deep window the interactive path does.
@@ -1985,20 +2044,21 @@ function runHeadlessTask(task) {
       writeHeadlessStatus(HEADLESS_STATE_WAITING, { revoked_task_id: task.task_id });
       return;
     }
-    if (err) {
+    const wasTimedOut = timedOut || signal === 'SIGKILL';
+    const failed = spawnError || wasTimedOut || code !== 0 || signal;
+    if (failed) {
       // A non-zero exit, a spawn failure (ENOENT), or the timeout kill all land
       // here. err.killed && err.signal signals the timeout; report a real
       // failure either way so the hub can reassign — never a silent hang.
-      const timedOut = err.killed === true;
       // Preserve one bounded, token-redacted diagnostic line. In particular,
       // Codex automatic-review denial/timeout is an expected terminal outcome
       // for an unattended run and must reach Hive as an actionable failure,
       // rather than being flattened to an opaque exit code.
       const diagnostic = outTail.map(line => line.trim()).filter(Boolean).slice(-1)[0];
       const diagnosticSuffix = diagnostic ? `: ${diagnostic.slice(0, 500)}` : '';
-      const reason = timedOut
+      const reason = wasTimedOut
         ? `headless task exceeded ${HEADLESS_TASK_TIMEOUT_MS / 60000}min and was killed`
-        : `headless CLI exited with error: ${err.code !== undefined ? `code ${err.code}` : err.message}${diagnosticSuffix}`;
+        : `headless CLI exited with error: ${code !== null && code !== undefined ? `code ${code}` : (spawnError ? spawnError.message : `signal ${signal}`)}${diagnosticSuffix}`;
       finish(() => {
         setPiInvocationState('failed');
         console.error(`Headless task ${task.task_id} failed: ${reason}`);
@@ -2041,13 +2101,6 @@ function runHeadlessTask(task) {
       send({ type: 'ready', seq: nextSeq() });
     });
   });
-  // codex exec prints "Reading additional input from stdin..." and then blocks
-  // on stdin-EOF even with the prompt already passed as an argv element; with
-  // execFile's default piped stdio nothing ever closes that pipe, so a
-  // headless codex task produced zero output and hung until the timeout
-  // killed it (found live by bin/test_backend_smoke.sh). Close stdin for
-  // every backend — a one-shot child has no interactive input coming.
-  if (headlessChild && headlessChild.stdin) headlessChild.stdin.end();
 }
 
 // A tmux pane can be left in bash's PS2 continuation state ("> ") when task
@@ -2075,44 +2128,32 @@ function recoverWedgedShell() {
 // C-c, with the same delays the memory-cleanup restart path has used since
 // #2596, is what actually exits the CLI.
 //
-// #6776: two C-cs is what claude/codex/agy honour, and no more. The pi CLI
-// is neither, and does NOT terminate on C-c: after this sequence the pi
-// process is still the pane's foreground program, and the subsequent
-// `relaunchCLI()` types its launch command at a still-running pi as if it
-// were a chat prompt — which pi accepts as more conversation. Every task
-// then runs in the same pi session with the previous task's context and the
-// previous task's scoped token still in scope, until pi compacts.
-//
-// The fix for pi is a definitive one: after the best-effort C-c, force the
-// pane's foreground process to be killed by `tmux respawn-pane -k`, which
-// terminates the current pane process and re-executes the pane's default
-// shell. That guarantees the pi instance is gone before `relaunchCLI()`
-// types its launch command, and guarantees each task starts a fresh pi
-// context, which is what the issue asked for ("Consider starting each task
-// in a fresh pi context so prior-task history and the scoped token cannot
-// leak into the next task."). The paneReadinessWait contract does the rest.
-//
-// Kept behind a BACKEND check on purpose: claude, codex and agy exit cleanly
-// on the second C-c, and respawn-pane on them would throw away a perfectly
-// good long-lived CLI on every task boundary — the exact churn the two-C-c
-// path was written to avoid.
+// #6776/#7733: pi and omp do NOT reliably terminate on C-c. After this
+// sequence their process can still be the pane's foreground program, and
+// `relaunchCLI()` would type its launch command into the live TUI as a chat
+// prompt. Verify the pane has fallen back to a shell; if not, force the
+// foreground process down with `tmux respawn-pane -k` before relaunching.
+// Backends that exit cleanly still avoid respawn-pane because the shell check
+// succeeds first.
 //
 // Best-effort by design: if tmux is unreachable the caller is already on a
 // failure path, and a relaunch that lands badly is recovered by the
 // armCLIReadyWait() contract rather than by anything here.
 function quitLiveCLI() {
   try {
-    execSync(`tmux send-keys -t ${TMUX_SESSION} C-c`, { timeout: 15000 });
-    sleepMs(1000);
-    execSync(`tmux send-keys -t ${TMUX_SESSION} C-c`, { timeout: 15000 });
-    sleepMs(2000);
-    if (BACKEND === 'pi') {
-      // pi does not exit on C-c (#6776). respawn-pane -k kills the pane's
-      // current foreground program and re-executes the pane's default shell,
-      // so the pi process is gone for certain and the relaunch below lands
-      // in a bare shell — the state the relaunch path assumes.
-      execSync(`tmux respawn-pane -k -t ${TMUX_SESSION}`, { timeout: 15000 });
-      sleepMs(500);
+    execSync(`tmux send-keys -t ${TMUX_SESSION} C-c`, { timeout: TMUX_COMMAND_TIMEOUT_MS });
+    sleepMs(LIVE_CLI_FIRST_INTERRUPT_DELAY_MS);
+    execSync(`tmux send-keys -t ${TMUX_SESSION} C-c`, { timeout: TMUX_COMMAND_TIMEOUT_MS });
+    sleepMs(LIVE_CLI_SECOND_INTERRUPT_DELAY_MS);
+
+    // A backend that absorbed both interrupts is still the pane foreground
+    // program. Relaunching now would type the shell launch line into the live
+    // TUI as a prompt (#7733). Wait for the pane to become a shell, then
+    // escalate to tmux respawn-pane -k if it does not.
+    if (!waitForPaneShell(LIVE_CLI_SHELL_WAIT_TIMEOUT_MS)) {
+      execSync(`tmux respawn-pane -k -t ${TMUX_SESSION}`, { timeout: TMUX_COMMAND_TIMEOUT_MS });
+      sleepMs(LIVE_CLI_RESPAWN_SETTLE_MS);
+      waitForPaneShell(LIVE_CLI_SHELL_WAIT_TIMEOUT_MS);
     }
   } catch (_) {}
 }
@@ -2138,11 +2179,24 @@ function paneForegroundCommand() {
   try {
     return execSync(
       `tmux display-message -p -t ${TMUX_SESSION} '#{pane_current_command}' 2>/dev/null`,
-      { encoding: 'utf8', timeout: 15000 }
+      { encoding: 'utf8', timeout: TMUX_COMMAND_TIMEOUT_MS }
     ).toString().trim();
   } catch (_) {
     return '';
   }
+}
+
+function paneCommandIsShell(command) {
+  return !!command && PANE_SHELL_COMMANDS.has(command);
+}
+
+function waitForPaneShell(timeoutMs) {
+  const attempts = Math.max(1, Math.ceil(timeoutMs / LIVE_CLI_SHELL_WAIT_POLL_MS));
+  for (let i = 0; i < attempts; i++) {
+    if (paneCommandIsShell(paneForegroundCommand())) return true;
+    if (i < attempts - 1) sleepMs(LIVE_CLI_SHELL_WAIT_POLL_MS);
+  }
+  return false;
 }
 
 // cliProcessLooksGone reports whether the agent CLI has left the pane.
@@ -2177,7 +2231,7 @@ function paneForegroundCommand() {
 // gone would re-introduce exactly the blindness this replaces.
 function probeCLIPresence() {
   const fg = paneForegroundCommand();
-  const isShell = !!fg && PANE_SHELL_COMMANDS.has(fg);
+  const isShell = paneCommandIsShell(fg);
   if (!isShell) {
     consecutiveShellReadings = 0;
   } else {
@@ -2196,7 +2250,7 @@ function cliProcessLooksGone() {
 // waiting a tick when we are wrong is nil.
 function paneIsRunningShell() {
   const fg = paneForegroundCommand();
-  return !!fg && PANE_SHELL_COMMANDS.has(fg);
+  return paneCommandIsShell(fg);
 }
 
 function capturePaneText() {
@@ -2404,6 +2458,7 @@ let pendingTask = null;
 let cliReadyFailed = false;
 // Set only by an interactive revoke. The next ready is delayed until a fresh CLI is confirmed.
 let readyAfterInteractiveRevoke = false;
+let readyAdvertisedForIdleTaskSlot = false;
 
 // False until the CURRENT task's prompt actually reached the pane
 // (kubestellar/hive#5650). tmuxSendKeys() queues rather than types whenever the
@@ -2474,7 +2529,8 @@ function armCLIReadyWait() {
     // startup path is already advertised by the auth_ok handler.
     if (hadFailed) {
       send({ type: 'ready', seq: nextSeq() });
-    } else if (!currentTask && currentTaskHub().authenticated) {
+    } else if (!currentTask && currentTaskHub().authenticated && !readyAdvertisedForIdleTaskSlot) {
+      readyAdvertisedForIdleTaskSlot = true;
       send({ type: 'ready', seq: nextSeq() });
     }
     flushPendingTask();
@@ -4106,6 +4162,7 @@ function failCurrentTask(reason, opts) {
   // claiming to be free. Advertising 'ready' here would just pull in another
   // task the CLI still cannot run. The caller re-advertises on recovery.
   if (!(opts && opts.skipReady)) {
+    readyAdvertisedForIdleTaskSlot = true;
     send({ type: 'ready', seq: nextSeq() });
   }
 }
@@ -5152,6 +5209,7 @@ function handleMessage(data, hub) {
         });
         break;
       }
+      readyAdvertisedForIdleTaskSlot = false;
       const quotaDecision = evaluateContributorQuota(msg);
       if (!quotaDecision.admit) {
         logContributorQuotaDecision(msg, quotaDecision);
@@ -5554,6 +5612,7 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     flushPendingTask,
     relaunchCLI,
     failCurrentTask,
+    finishCurrentTask,
     startProgressReporting,
     progressTick,
     // Local-only (synthetic pr-review) task surface — kubestellar/hive#5715.
@@ -5678,6 +5737,9 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     MAX_TASK_DURATION_MS,
     ABSOLUTE_TASK_DEADLINE_MS,
     HEADLESS_TASK_TIMEOUT_MS,
+    DEFAULT_HEADLESS_MAX_OUTPUT_BYTES,
+    HEADLESS_MAX_OUTPUT_BYTES,
+    HEADLESS_MAX_OUTPUT_ENV,
     armTaskProgressLease,
     onTaskProgressLeaseExpired,
     getTaskTimeoutHandle: () => taskTimeoutHandle,

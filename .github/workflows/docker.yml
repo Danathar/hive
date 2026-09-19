@@ -124,7 +124,7 @@ jobs:
           # only publishes the branch-scoped v5-latest/<sha> tags — see the
           # release_channels note below for why v5 does NOT also get
           # stable/candidate/edge.
-          LONG_LIVED: "v2 v4 v5 mk dd"
+          LONG_LIVED: "v2 v4 v5 mk dd v6"
           REF_NAME: ${{ github.ref_name }}
           EVENT: ${{ github.event_name }}
           TARGET_SHA: ${{ inputs.release_sha || github.sha }}
