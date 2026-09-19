@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-19 (v4.67.0)
+
+### Added
+
+- An omp contributor whose `--advisor` posts review notes under the agent's `HIVE_VERDICT` line no longer has those notes discarded unread: when `⟦concern⟧` notes land after the verdict, the relay asks the agent once to address them and re-print the verdict, then finalizes on the second one. One follow-up per task, concerns only, no change to the progress lease or deadline; the task prompt now says a second verdict may be asked for ([#7759](https://github.com/hivecommons/hive/issues/7759)).
+
 ## 2026-09-19 (v4.66.5)
 
 ### Fixed
