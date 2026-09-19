@@ -154,7 +154,7 @@ CLI subprocess.
 | Watchdog failure count, crash-loop latch, backoff deadline, healthy-since, conditions | same file, `snapshot.PersistedState.Watchdog` | `src/pkg/snapshot/state.go:41`; `watchdog.PersistedAgent` `src/pkg/watchdog/reconciler.go:205` |
 | Fleet-breaker engagement + held set | same file, `BreakerState` | `src/pkg/snapshot/state.go:49` |
 | Governor budget/spend/eval history, cadence overrides, ACMM level | same file | `src/pkg/snapshot/state.go:16-42` |
-| **Full text of every delivered prompt** | `/data/prompt-history.jsonl` (lumberjack-rotated JSONL) | `src/pkg/dashboard/prompt_history.go:45`; writer `Server.RecordPrompt` `src/pkg/dashboard/prompt_history.go:374`, wired at `src/cmd/hive/main.go:3252` |
+| **Full text of every delivered prompt** | `/data/prompt-history.jsonl` (lumberjack-rotated JSONL) | `src/pkg/dashboard/prompt_history.go:45`; writer `Server.RecordPrompt` `src/pkg/dashboard/prompt_history.go:353`, wired at `src/cmd/hive/main.go:3252` |
 | **Rendered terminal scrollback, per kick** | `/data/logs/kicks/<agent>/<ts>-<reason>.log` | `src/pkg/agent/kick_logs.go:43` (`defaultKickLogDir`); writer `archiveKickLogLocked` `src/pkg/agent/kick_logs.go:180` |
 | Token-usage summary | `/data/token-summary.json` | `src/pkg/tokens/collector.go:194`, `:112-116` |
 | Structured audit trail | `/data/audit.jsonl`, reloaded into a ring at boot | `src/pkg/dashboard/audit.go:22`, `loadFromDisk` `:94` |
@@ -167,7 +167,7 @@ Two caveats on that table:
   conventionally ephemeral, so whether it survives a pod restart depends on the
   deployment's volume configuration rather than on the code. The load path
   treats absence as a recoverable fallback
-  (`src/pkg/agent/manager.go:1757-1761`), so this is a durability *asymmetry* rather than
+  (`src/pkg/agent/manager.go:1535-1539`), so this is a durability *asymmetry* rather than
   a known failure — noted here because it is the only place the otherwise
   consistent "durable means `/data`" rule does not hold.
 - The last row is the important one for the RFC and is discussed in §5.
@@ -386,7 +386,7 @@ It is easy to mistake either for one; neither is.
   asked to do?" (`src/pkg/dashboard/prompt_history.go:22-35`). No model
   response, tool call, or tool result is recorded.
 - `/data/logs/kicks/…` holds **rendered terminal text**, captured with
-  `tmux capture-pane -p -J` (`src/pkg/agent/terminal.go:123-127`). It is a
+  `tmux capture-pane -p -J` (`src/pkg/agent/terminal.go:107-109`). It is a
   human debugging artifact, retained to 10 files / 64 MiB per agent
   (`src/pkg/agent/kick_logs.go:51`, `:60`). It contains ANSI-rendered,
   width-wrapped, spinner-animated output with no message boundaries and no

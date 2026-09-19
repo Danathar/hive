@@ -59,7 +59,7 @@ agent detector, not the deleted enhanced detector. On `v4`, `AgentFromTmuxEnv`
 parses Claude project paths containing `-data-agents-<name>`
 (`src/pkg/tokens/claude_scanner.go:396`), and `HiveAgentDetector` tries that
 path-based detector before falling back to message keywords
-(`src/pkg/tokens/claude_scanner.go:422`). ccusage session JSON includes a
+(`src/pkg/tokens/claude_scanner.go:305`). ccusage session JSON includes a
 project path, so the ccusage implementation should feed that path into the same
 Hive attribution function.
 

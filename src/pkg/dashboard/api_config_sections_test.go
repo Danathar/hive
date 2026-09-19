@@ -3,8 +3,10 @@ package dashboard
 import (
 	"bytes"
 	"encoding/json"
+	"github.com/hivecommons/hive/pkg/config"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -350,5 +352,105 @@ func TestReviewConfigPut_RejectsNonOwner(t *testing.T) {
 	}
 	if s.deps.Config.Review.RequireApproval {
 		t.Fatal("refused write still flipped require_approval")
+	}
+}
+
+// The perspective set is validated by the same resolver the hive loads it
+// with, so what the dialog accepts is exactly what will run. A typo must be a
+// 400 with the offending name, not a silently dropped perspective.
+func TestReviewConfigPut_Perspectives(t *testing.T) {
+	s := covApiServer(t)
+
+	rec := doPut(s, "/api/config/review", map[string]any{"perspectives": []string{"correctness", "sekurity"}})
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "sekurity") {
+		t.Fatalf("typo: expected 400 naming it, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if len(s.deps.Config.Review.Perspectives) != 0 {
+		t.Fatalf("rejected write mutated config: %v", s.deps.Config.Review.Perspectives)
+	}
+
+	// A hive-defined perspective is only valid alongside its prompt.
+	if rec := doPut(s, "/api/config/review", map[string]any{"perspectives": []string{"api-compat"}}); rec.Code != http.StatusBadRequest {
+		t.Fatalf("custom without prompt: expected 400, got %d", rec.Code)
+	}
+	rec = doPut(s, "/api/config/review", map[string]any{
+		"perspectives":          []string{" Security ", "api-compat"},
+		"perspective_prompts":   map[string]string{"api-compat": "public API breakage", "style": "  "},
+		"combined_perspectives": true,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("valid put: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	rv := s.deps.Config.Review
+	if len(rv.Perspectives) != 2 || rv.Perspectives[0] != "security" || rv.Perspectives[1] != "api-compat" {
+		t.Fatalf("perspectives = %v", rv.Perspectives)
+	}
+	if rv.PerspectivePrompts["api-compat"] != "public API breakage" {
+		t.Fatalf("prompts = %v", rv.PerspectivePrompts)
+	}
+	if _, ok := rv.PerspectivePrompts["style"]; ok {
+		t.Fatal("blank prompt stored instead of dropped")
+	}
+	if !rv.CombinedPerspectives {
+		t.Fatal("combined_perspectives not applied")
+	}
+
+	// Removing the prompt from under a selected custom perspective is refused:
+	// the pair must stay valid.
+	if rec := doPut(s, "/api/config/review", map[string]any{"perspective_prompts": map[string]string{}}); rec.Code != http.StatusBadRequest {
+		t.Fatalf("orphaning api-compat: expected 400, got %d", rec.Code)
+	}
+
+	// Absent keys leave everything untouched.
+	if rec := doPut(s, "/api/config/review", map[string]any{}); rec.Code != http.StatusOK {
+		t.Fatalf("empty put: %d", rec.Code)
+	}
+	if len(s.deps.Config.Review.Perspectives) != 2 || !s.deps.Config.Review.CombinedPerspectives {
+		t.Fatalf("empty put mutated config: %+v", s.deps.Config.Review)
+	}
+}
+
+// The revisit lane's two switches are writable through the API, a malformed
+// cutoff is refused before it reaches config, and the write is pushed into
+// whatever caches review settings at boot instead of waiting for a restart.
+func TestReviewConfigPut_Revise(t *testing.T) {
+	s := covApiServer(t)
+	var applied []config.ReviewConfig
+	s.deps.ReviewConfigApplied = func(rc config.ReviewConfig) { applied = append(applied, rc) }
+
+	rec := doPut(s, "/api/config/review", map[string]any{"revise_verdicts_before": "yesterday"})
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "RFC 3339") {
+		t.Fatalf("bad cutoff: expected 400 naming the format, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if s.deps.Config.Review.ReviseVerdictsBefore != "" || len(applied) != 0 {
+		t.Fatalf("rejected write leaked: cutoff=%q applied=%d", s.deps.Config.Review.ReviseVerdictsBefore, len(applied))
+	}
+
+	rec = doPut(s, "/api/config/review", map[string]any{
+		"revise_repos":           []string{" o/r ", "", "o/s"},
+		"revise_verdicts_before": "2026-09-19T14:00:00Z",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("valid put: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	rv := s.deps.Config.Review
+	if len(rv.ReviseRepos) != 2 || rv.ReviseRepos[0] != "o/r" || rv.ReviseRepos[1] != "o/s" {
+		t.Fatalf("revise_repos = %v", rv.ReviseRepos)
+	}
+	if rv.ReviseVerdictsBefore != "2026-09-19T14:00:00Z" {
+		t.Fatalf("cutoff = %q", rv.ReviseVerdictsBefore)
+	}
+	if len(applied) != 1 || len(applied[0].ReviseRepos) != 2 {
+		t.Fatalf("hook not called with the new config: %+v", applied)
+	}
+
+	// Empty cutoff clears the pilot; an omitted key leaves it alone.
+	doPut(s, "/api/config/review", map[string]any{"combined_perspectives": true})
+	if s.deps.Config.Review.ReviseVerdictsBefore == "" {
+		t.Fatal("omitted key cleared the cutoff")
+	}
+	doPut(s, "/api/config/review", map[string]any{"revise_verdicts_before": ""})
+	if s.deps.Config.Review.ReviseVerdictsBefore != "" {
+		t.Fatal("empty cutoff did not clear")
 	}
 }

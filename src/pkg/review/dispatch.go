@@ -16,6 +16,7 @@ import (
 const (
 	DefaultMaxParallelReviews = 5
 	ReviewDispatchStateFile   = "review-dispatch-state.json"
+	RecentDispatchTTL         = 24 * time.Hour
 	// DefaultDispatchStateDir is the durable data dir. It matches the path the
 	// knowledge engine and the dashboard config overlay already persist to,
 	// which on a hosted spoke is the PersistentVolumeClaim.
@@ -68,6 +69,22 @@ type DispatchOptions struct {
 	// how much review traffic a single pull request attracts.
 	// Zero means DefaultMaxPerspectivesPerPR.
 	MaxPerspectivesPerPR int
+	// Perspectives is the set this hive reviews with, including any it
+	// defines itself. The zero value means the built-in defaults.
+	Perspectives PerspectiveSet
+	// CombinedPerspectives dispatches ONE kick covering every perspective a PR
+	// still needs, instead of one kick per perspective.
+	//
+	// It exists because breadth and quiet were in direct conflict. One kick
+	// per perspective meant five agent sessions and five review comments on a
+	// single PR, and capping that (max_perspectives_per_pr, #7562) bought
+	// quiet by never reviewing four of the five perspectives at all. Reviewing
+	// all of them in one session costs one comment, and reads the diff and its
+	// surrounding tree once rather than five times.
+	//
+	// The verdicts stay separate: the reviewer emits one per perspective, and
+	// any single one of them can still withhold approval.
+	CombinedPerspectives bool
 	ReviewerAgents       []string
 	FixerAgent           string
 	ProjectOrg           string
@@ -81,13 +98,22 @@ type DispatchOptions struct {
 	// AcknowledgeNoFindings carries config.ReviewConfig.AcknowledgeNoFindings
 	// into the prompt builder, so a clean review still leaves a record.
 	AcknowledgeNoFindings bool
-	Agents                []AgentCapability
-	Now                   time.Time
+	// ReviseRepos allowlists repos whose existing verdicts may be revisited
+	// and whose reviews may be corrected in place. See
+	// config.ReviewConfig.ReviseRepos.
+	ReviseRepos []string
+	// ReviseVerdictsBefore re-opens verdicts recorded before this instant for
+	// a fresh review even though the PR's head SHA has not moved. Zero
+	// disables revisiting entirely.
+	ReviseVerdictsBefore time.Time
+	Agents               []AgentCapability
+	Now                  time.Time
 }
 
 type DispatchState struct {
 	GeneratedAt time.Time         `json:"generated_at"`
 	Pending     []PendingReview   `json:"pending_reviews,omitempty"`
+	Recent      []RecentReview    `json:"recent_reviews,omitempty"`
 	Fixes       []PendingFix      `json:"pending_fixes,omitempty"`
 	Human       []HumanReviewHold `json:"requires_human,omitempty"`
 }
@@ -98,7 +124,19 @@ type PendingReview struct {
 	HeadSHA     string      `json:"head_sha,omitempty"`
 	Perspective Perspective `json:"perspective"`
 	Agent       string      `json:"agent"`
+	AuthorAgent string      `json:"author_agent,omitempty"`
 	Dispatched  time.Time   `json:"dispatched_at"`
+}
+
+type RecentReview struct {
+	Repo        string      `json:"repo"`
+	Number      int         `json:"number"`
+	HeadSHA     string      `json:"head_sha,omitempty"`
+	Perspective Perspective `json:"perspective"`
+	Agent       string      `json:"agent"`
+	AuthorAgent string      `json:"author_agent,omitempty"`
+	Dispatched  time.Time   `json:"dispatched_at,omitempty"`
+	Confirmed   time.Time   `json:"confirmed_at"`
 }
 
 type PendingFix struct {
@@ -127,6 +165,12 @@ type DispatchKick struct {
 	Number      int
 	HeadSHA     string
 	Perspective Perspective
+	AuthorAgent string
+	// Perspectives is every perspective this kick covers. It is set only by
+	// combined dispatch; Perspective stays populated with the first of them so
+	// existing consumers (logging, metrics, kick dedup) keep working unchanged
+	// rather than silently seeing an empty perspective.
+	Perspectives []Perspective
 }
 
 type DispatchPlan struct {
@@ -213,21 +257,51 @@ func PlanDispatch(prs []PullRequest, artifact Artifact, state DispatchState, opt
 		if !opts.AllAuthors && !isAgentAuthored(pr.Author, opts.AIAuthor) {
 			continue
 		}
+		revisiting := false
 		if agg, ok := artifact.AggregateFor(pr.Repo, pr.Number, pr.HeadSHA); ok {
-			plan.State.Pending = removePendingForHead(plan.State.Pending, pr)
-			if agg.Verdict == VerdictRequiresHuman {
-				plan.addHuman(pr, humanReason(agg), now)
+			// A verdict normally settles a PR until its head moves. That is
+			// right while the reviewer is sound, and a trap once a
+			// reviewer-side defect is found: without this, verdicts produced
+			// by a known-broken reviewer stay frozen until someone happens to
+			// push a commit.
+			if !staleVerdictRevisitable(pr.Repo, agg, opts) {
+				plan.State.Pending = removePendingForHead(plan.State.Pending, pr)
+				if agg.Verdict == VerdictRequiresHuman {
+					plan.addHuman(pr, humanReason(agg), now)
+				}
+				if agg.Verdict == VerdictChangesRequested {
+					plan.dispatchFix(pr, agg, opts, now)
+				}
+				continue
 			}
-			if agg.Verdict == VerdictChangesRequested {
-				plan.dispatchFix(pr, agg, opts, now)
-			}
+			revisiting = true
+		}
+		prReviewers := reviewersForPR(reviewers, pr.AuthorAgent)
+		if len(prReviewers) == 0 || availableSlots <= 0 {
 			continue
 		}
-		if len(reviewers) == 0 || availableSlots <= 0 {
-			continue
-		}
-		missing := pendingMissingPerspectives(plan.State, pr)
+		missing := pendingMissingPerspectives(plan.State, pr, opts.Perspectives.List())
 		if len(missing) == 0 {
+			continue
+		}
+		// One kick, every outstanding perspective, one comment. The per-PR cap
+		// is deliberately not applied here: it exists to bound how many review
+		// COMMENTS one PR collects, and a combined review produces exactly one
+		// however many perspectives it covers. Applying it anyway would drop
+		// perspectives to buy quiet that has already been bought.
+		if opts.CombinedPerspectives {
+			agent := prReviewers[0].Name
+			msg := BuildCombinedPrompt(pr, missing, PromptOptions{
+				PostComments:          opts.PostComments,
+				AcknowledgeNoFindings: opts.AcknowledgeNoFindings,
+				Revise:                revisiting,
+				Perspectives:          opts.Perspectives,
+			})
+			plan.ReviewKicks = append(plan.ReviewKicks, DispatchKick{Agent: agent, Message: msg, PRRef: fmt.Sprintf("%s#%d", pr.Repo, pr.Number), Kind: "review", Repo: pr.Repo, Number: pr.Number, HeadSHA: pr.HeadSHA, Perspective: missing[0], Perspectives: missing, AuthorAgent: pr.AuthorAgent})
+			for _, p := range missing {
+				plan.State.Pending = append(plan.State.Pending, PendingReview{Repo: pr.Repo, Number: pr.Number, HeadSHA: pr.HeadSHA, Perspective: p, Agent: agent, AuthorAgent: pr.AuthorAgent, Dispatched: now})
+			}
+			availableSlots--
 			continue
 		}
 		limit := len(missing)
@@ -245,7 +319,7 @@ func PlanDispatch(prs []PullRequest, artifact Artifact, state DispatchState, opt
 		// it says. A force-push clears the pending entries, so genuinely new
 		// code earns a fresh budget.
 		if perPR := opts.effectiveMaxPerspectivesPerPR(); perPR > 0 {
-			covered := len(DefaultPerspectives) - len(missing)
+			covered := opts.Perspectives.Len() - len(missing)
 			remaining := perPR - covered
 			if remaining <= 0 {
 				continue
@@ -254,25 +328,41 @@ func PlanDispatch(prs []PullRequest, artifact Artifact, state DispatchState, opt
 				limit = remaining
 			}
 		}
-		if len(reviewers) == 1 && limit > 1 {
+		if len(prReviewers) == 1 && limit > 1 {
 			limit = 1
 		}
 		if limit > availableSlots {
 			limit = availableSlots
 		}
 		for i := 0; i < limit; i++ {
-			agent := reviewers[i%len(reviewers)].Name
+			agent := prReviewers[i%len(prReviewers)].Name
 			perspective := missing[i]
 			msg := BuildPerspectivePromptWith(perspective, pr, PromptOptions{
 				PostComments:          opts.PostComments,
 				AcknowledgeNoFindings: opts.AcknowledgeNoFindings,
+				Revise:                revisiting,
+				Perspectives:          opts.Perspectives,
 			})
-			plan.ReviewKicks = append(plan.ReviewKicks, DispatchKick{Agent: agent, Message: msg, PRRef: fmt.Sprintf("%s#%d", pr.Repo, pr.Number), Kind: "review", Repo: pr.Repo, Number: pr.Number, HeadSHA: pr.HeadSHA, Perspective: perspective})
-			plan.State.Pending = append(plan.State.Pending, PendingReview{Repo: pr.Repo, Number: pr.Number, HeadSHA: pr.HeadSHA, Perspective: perspective, Agent: agent, Dispatched: now})
+			plan.ReviewKicks = append(plan.ReviewKicks, DispatchKick{Agent: agent, Message: msg, PRRef: fmt.Sprintf("%s#%d", pr.Repo, pr.Number), Kind: "review", Repo: pr.Repo, Number: pr.Number, HeadSHA: pr.HeadSHA, Perspective: perspective, AuthorAgent: pr.AuthorAgent})
+			plan.State.Pending = append(plan.State.Pending, PendingReview{Repo: pr.Repo, Number: pr.Number, HeadSHA: pr.HeadSHA, Perspective: perspective, Agent: agent, AuthorAgent: pr.AuthorAgent, Dispatched: now})
 			availableSlots--
 		}
 	}
 	return plan
+}
+
+func reviewersForPR(reviewers []AgentCapability, authorAgent string) []AgentCapability {
+	authorAgent = strings.TrimSpace(authorAgent)
+	if authorAgent == "" {
+		return reviewers
+	}
+	out := make([]AgentCapability, 0, len(reviewers))
+	for _, reviewer := range reviewers {
+		if reviewer.Name != authorAgent {
+			out = append(out, reviewer)
+		}
+	}
+	return out
 }
 
 func (p *DispatchPlan) dispatchFix(pr PullRequest, agg Aggregate, opts DispatchOptions, now time.Time) {
@@ -327,14 +417,40 @@ func selectFixerAgent(pr PullRequest, opts DispatchOptions) string {
 }
 
 func ConfirmDelivered(state DispatchState, planned, delivered []DispatchKick) DispatchState {
+	now := time.Now().UTC()
 	deliveredSet := map[string]bool{}
 	for _, k := range delivered {
 		deliveredSet[dispatchKickKey(k)] = true
+		if k.Kind == "review" {
+			// One recent entry per perspective the kick covered, not one for
+			// the kick. The verdict relay binds a late verdict to a recent
+			// entry by perspective, so a combined kick recorded under its
+			// first perspective alone would leave every other verdict in the
+			// array with nothing to bind to once its pending entry is gone.
+			for _, p := range kickPerspectives(k) {
+				state.Recent = upsertRecentReview(state.Recent, RecentReview{Repo: k.Repo, Number: k.Number, HeadSHA: k.HeadSHA, Perspective: p, Agent: k.Agent, AuthorAgent: k.AuthorAgent, Confirmed: now})
+			}
+		}
 	}
+	// Undelivered is keyed per PERSPECTIVE, because pending entries are. A
+	// combined kick wrote one pending entry for each perspective it covered;
+	// if it never reached the agent, every one of those must be released or
+	// the ones after the first stay "pending" for a review that never
+	// happened — never re-dispatched, never judged, and holding the PR's
+	// unanimity check open indefinitely.
 	undelivered := map[string]bool{}
 	for _, k := range planned {
-		if !deliveredSet[dispatchKickKey(k)] {
+		if deliveredSet[dispatchKickKey(k)] {
+			continue
+		}
+		if k.Kind != "review" {
 			undelivered[dispatchKickKey(k)] = true
+			continue
+		}
+		for _, p := range kickPerspectives(k) {
+			one := k
+			one.Perspective = p
+			undelivered[dispatchKickKey(one)] = true
 		}
 	}
 	var pending []PendingReview
@@ -353,7 +469,49 @@ func ConfirmDelivered(state DispatchState, planned, delivered []DispatchKick) Di
 		}
 	}
 	state.Fixes = fixes
+	state.Recent = pruneRecentReviews(state.Recent, now)
 	return state
+}
+
+// kickPerspectives is every perspective a kick covers: the combined list when
+// set, else the single Perspective. Never empty for a review kick.
+func kickPerspectives(k DispatchKick) []Perspective {
+	if len(k.Perspectives) > 0 {
+		return k.Perspectives
+	}
+	return []Perspective{k.Perspective}
+}
+
+func upsertRecentReview(items []RecentReview, item RecentReview) []RecentReview {
+	for i := range items {
+		if recentReviewSameDispatch(items[i], item) {
+			items[i] = item
+			return items
+		}
+	}
+	return append(items, item)
+}
+
+func pruneRecentReviews(items []RecentReview, now time.Time) []RecentReview {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	cutoff := now.Add(-RecentDispatchTTL)
+	out := items[:0]
+	for _, item := range items {
+		if item.Confirmed.IsZero() || !item.Confirmed.Before(cutoff) {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func recentReviewSameDispatch(a, b RecentReview) bool {
+	return strings.EqualFold(strings.TrimSpace(a.Repo), strings.TrimSpace(b.Repo)) &&
+		a.Number == b.Number &&
+		strings.TrimSpace(a.HeadSHA) == strings.TrimSpace(b.HeadSHA) &&
+		a.Perspective == b.Perspective &&
+		a.Agent == b.Agent
 }
 
 func BuildFixPrompt(pr PullRequest, agg Aggregate, attempt, maxAttempts int) string {
@@ -447,15 +605,18 @@ func hasReviewCapability(a AgentCapability) bool {
 	return false
 }
 
-func pendingMissingPerspectives(state DispatchState, pr PullRequest) []Perspective {
+func pendingMissingPerspectives(state DispatchState, pr PullRequest, perspectives []Perspective) []Perspective {
 	pending := map[Perspective]bool{}
 	for _, p := range state.Pending {
 		if samePRHead(p.Repo, p.Number, p.HeadSHA, pr.Repo, pr.Number, pr.HeadSHA) {
 			pending[p.Perspective] = true
 		}
 	}
+	if len(perspectives) == 0 {
+		perspectives = DefaultPerspectives
+	}
 	var missing []Perspective
-	for _, p := range DefaultPerspectives {
+	for _, p := range perspectives {
 		if !pending[p] {
 			missing = append(missing, p)
 		}
@@ -475,19 +636,32 @@ func removePendingForHead(pending []PendingReview, pr PullRequest) []PendingRevi
 
 func pruneState(state DispatchState, prs []PullRequest, org string) DispatchState {
 	openHeads := map[string]bool{}
+	authorAgents := map[string]string{}
 	openPRs := map[string]bool{}
 	for _, pr := range prs {
 		repo := fullRepoName(pr.Repo, org)
-		openHeads[reviewKey(repo, pr.Number, pr.HeadSHA)] = true
+		key := reviewKey(repo, pr.Number, pr.HeadSHA)
+		openHeads[key] = true
+		if strings.TrimSpace(pr.AuthorAgent) != "" {
+			authorAgents[key] = pr.AuthorAgent
+		}
 		openPRs[fmt.Sprintf("%s#%d", repo, pr.Number)] = true
 	}
 	var pending []PendingReview
 	for _, p := range state.Pending {
-		if openHeads[reviewKey(p.Repo, p.Number, p.HeadSHA)] {
+		key := reviewKey(p.Repo, p.Number, p.HeadSHA)
+		if openHeads[key] {
+			if strings.TrimSpace(p.AuthorAgent) == "" {
+				p.AuthorAgent = authorAgents[key]
+			}
+			if strings.TrimSpace(p.AuthorAgent) != "" && p.Agent == p.AuthorAgent {
+				continue
+			}
 			pending = append(pending, p)
 		}
 	}
 	state.Pending = pending
+	state.Recent = pruneRecentReviews(state.Recent, time.Now().UTC())
 	var fixes []PendingFix
 	for _, f := range state.Fixes {
 		if openPRs[fmt.Sprintf("%s#%d", f.Repo, f.Number)] {
@@ -561,4 +735,46 @@ func hasHuman(items []HumanReviewHold, item HumanReviewHold) bool {
 
 func dispatchKickKey(k DispatchKick) string {
 	return fmt.Sprintf("%s|%s|%s#%d@%s|%s", k.Kind, k.Agent, strings.TrimSpace(k.Repo), k.Number, strings.TrimSpace(k.HeadSHA), k.Perspective)
+}
+
+// staleVerdictRevisitable reports whether an existing verdict should be set
+// aside so the PR is reviewed again, despite its head SHA being unchanged.
+//
+// Both gates must pass. The repo must be allowlisted for revision, so a
+// revisit can only happen where the hive also holds the quieter in-place
+// correction path and cannot stack a second review on someone's PR. And the
+// verdict must predate the configured cutoff, which is what scopes the
+// correction to verdicts produced by the reviewer that was wrong.
+//
+// The cutoff is self-limiting: re-reviewing records a fresh timestamp that is
+// necessarily after it, so a PR is revisited at most once per bump rather than
+// entering a loop.
+func staleVerdictRevisitable(repo string, agg Aggregate, opts DispatchOptions) bool {
+	if opts.ReviseVerdictsBefore.IsZero() || len(opts.ReviseRepos) == 0 {
+		return false
+	}
+	if !reviseRepoAllowed(repo, opts.ReviseRepos) {
+		return false
+	}
+	if agg.RecordedAt.IsZero() {
+		// An undated verdict cannot be shown to predate the cutoff. Leave it
+		// alone rather than guess: re-reviewing on a guess is how a narrow
+		// correction turns into a sweep.
+		return false
+	}
+	return agg.RecordedAt.Before(opts.ReviseVerdictsBefore)
+}
+
+// reviseRepoAllowed reports whether a repo is in the revision allowlist.
+func reviseRepoAllowed(repo string, allowlist []string) bool {
+	want := strings.ToLower(strings.TrimSpace(repo))
+	if want == "" {
+		return false
+	}
+	for _, entry := range allowlist {
+		if strings.EqualFold(strings.TrimSpace(entry), want) {
+			return true
+		}
+	}
+	return false
 }
