@@ -1,1 +1,0 @@
-- Ensure omp live TUI processes are terminated before relaunching so new tasks start in fresh sessions.
