@@ -11,6 +11,16 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-20 (v4.68.10)
+
+### Fixed
+
+- Issue-request watcher: an issue whose body still carries a policy template's pick-one list verbatim (`Impact: high/medium/low`, `Severity: critical/high/medium/low`) is now rejected as malformed before it reaches GitHub, and the quality `holdgated`/`measured` templates use `<angle-bracket>` placeholders like the other policies so the existing placeholder guard catches an unfilled body. The quality agent had filed its template untouched as issue #7898. ([#7898](https://github.com/hivecommons/hive/issues/7898))
+
+### Security
+
+- Contribute hub: a `no_work_needed` verdict citing the reporting contributor's **own open PR** no longer records a "weak external" claim on the issue — the documented "by someone other than the reporter" rule is now enforced (case-insensitive author/reporter comparison), a merged PR still settles regardless of author, and the verdict-settle comments state the unverified-relevance residual and its TTL bound. ([#7890](https://github.com/hivecommons/hive/issues/7890))
+
 ## 2026-09-20 (v4.68.9)
 
 ### Changed
