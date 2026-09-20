@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-20 (v4.68.3)
+
+### Security
+
+- The Discord bot now ignores commands posted outside `DISCORD_CHANNEL_PRIMARY` / `DISCORD_CHANNEL_ALERTS`. Previously any guild member in any channel the bot could read was able to `!kick` agents with arbitrary prompts (prompt injection into agents holding the hive's GitHub App write credentials) or `!pause`/`!resume` the fleet — the README documented a private-channel boundary that the code never enforced (#7822).
+
 ## 2026-09-20 (v4.68.2)
 
 ### Fixed
