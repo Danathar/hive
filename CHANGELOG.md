@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-20 (v4.68.9)
+
+### Changed
+
+- Proxy: `handleTransparentTLS`'s agent attribution (socket-table UID → agent, hive-internal naming, unidentified fallbacks) is factored into `attributeTransparentConn` and tested directly, and the Copilot-sniff gate, non-inspected tunnel (ClientHello replayed verbatim) and tunnel failure paths are driven end to end over loopback with a `tunnelDial` test seam — no behaviour change. ([#7793](https://github.com/hivecommons/hive/issues/7793))
+
 ## 2026-09-20 (v4.68.8)
 
 ### Changed
