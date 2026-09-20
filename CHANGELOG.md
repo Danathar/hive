@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-20 (v4.68.1)
+
+### Fixed
+
+- Honour ⟦blocker⟧ advisor notes as post-verdict follow-up triggers in the contributor relay.
+
 ## 2026-09-20 (v4.68.0)
 
 ### Added
