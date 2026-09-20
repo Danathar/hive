@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-20 (v4.68.4)
+
+### Fixed
+
+- Docs link check now covers repo-root markdown (`CONTRIBUTING.md`, `README.md`, ...) via a new `--no-recurse` mode, and heading slugs keep GitHub's leading hyphen for emoji-led headings so `#-where-...` anchors are verified the way GitHub renders them (#7829, #7830).
+
 ## 2026-09-20 (v4.68.3)
 
 ### Security
