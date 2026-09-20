@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-20 (v4.68.6)
+
+### Fixed
+
+- Contributor relay: a `HIVE_VERDICT` on the pane is now acted on within ~5 s (`VERDICT_WATCH_INTERVAL_MS`) instead of at the next 120 s progress tick, and the task prompt requires every background shell the agent started to be stopped before the verdict — so a finished agent no longer keeps working for up to two minutes after being credited (#7841).
+
 ## 2026-09-20 (v4.68.5)
 
 ### Fixed
