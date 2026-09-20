@@ -222,6 +222,24 @@ const AUTONOMY_NUDGE_MESSAGE =
 const POST_VERDICT_REVIEW_MESSAGE =
   'Advisor notes were posted after your verdict. Address the concerns that apply to your change, skip nits and anything already handled, then print the HIVE_VERDICT line again on its own line.';
 const POST_VERDICT_REVIEW_ANCHOR = 'Advisor notes were posted after your verdict';
+// #7879: hard cap on review follow-ups per task. The first is earned by any
+// new ⟦blocker⟧/⟦concern⟧ under the verdict; the second ONLY by a ⟦blocker⟧
+// that was not on the pane at the previous verdict. Never a third.
+const POST_VERDICT_REVIEW_MAX_FOLLOWUPS = 2;
+// Heading under which notes that were still unaddressed when the task
+// finalized are recorded in the task_complete summary and the PR comment.
+const UNADDRESSED_ADVISOR_NOTES_HEADING = 'Advisor notes not addressed before completion';
+
+// #7862: a `HIVE_VERDICT: complete` with no PR behind it gets one follow-up
+// before it is finalized. Same once-per-task bound and same pending/answered
+// mechanics as the #7759 review follow-up above.
+const PR_CLAIM_FOLLOWUP_MESSAGE =
+  'Your verdict says complete, but no PR for this task exists. Open it now — branch, commit, push, gh pr create — and then print the HIVE_VERDICT line again on its own line; or, if there is nothing to ship, print HIVE_VERDICT: no_work_needed — <reason> instead.';
+const PR_CLAIM_FOLLOWUP_ANCHOR = 'Your verdict says complete, but no PR for this task exists';
+// The verdict's reason text claims a PR. Only such a claim triggers the
+// follow-up: a bare `complete` with no PR is booked evidence-less by the hub
+// (same issue), but it is not a contradiction the relay can put to the agent.
+const PR_CLAIM_PATTERN = /\bPRs?\b|pull[ -]request|\bopened\b/i;
 
 const BYTES_PER_MIB = 1024 * 1024;
 const DEFAULT_HEADLESS_MAX_OUTPUT_MIB = 16;
@@ -2707,12 +2725,84 @@ function renderBoxedBanner(lines) {
     .concat([`\u255a${rule}\u255d`]);
 }
 
+// ── The tmux session itself can disappear (hivecommons/hive#7863) ────────────
+//
+// capturePaneText() returns '' when `tmux capture-pane` fails for ANY reason,
+// and the readiness classifier reads '' as `starting`. So when the whole tmux
+// server was gone — an operator's attached client ended the pane's shell in
+// the ~1 s window between the CLI exiting and the relaunch being typed — the
+// relay saw a CLI that was forever "starting": it accepted a task, renewed its
+// lease every tick for the full CLI_READY_TIMEOUT_MS (10 min), then failed it
+// as `environment` and sat idle until a human restarted it. Nothing in the
+// relay asked whether the session existed, and nothing could recreate it.
+//
+// tmuxSessionMissing() asks. recreateTmuxSession() rebuilds the session the
+// entrypoint would have — same name, same geometry (bin/contributor-agent.sh),
+// same cwd the launch command cds into — so the normal launch/readiness path
+// can resume. Both are best-effort probes on the readiness poll, so a failure
+// here is reported and retried on the next poll rather than thrown.
+const TMUX_SESSION_GEOMETRY = '-x 200 -y 50';
+
+function tmuxSessionMissing() {
+  try {
+    execSync(`tmux has-session -t ${TMUX_SESSION} 2>/dev/null`, { timeout: TMUX_COMMAND_TIMEOUT_MS });
+    return false;
+  } catch (_) {
+    return true;
+  }
+}
+
+function recreateTmuxSession() {
+  const cwd = AGENT_CWD || process.cwd();
+  try {
+    execSync(`tmux new-session -d -s ${TMUX_SESSION} ${TMUX_SESSION_GEOMETRY}${cwd ? ` -c ${shellQuote(cwd)}` : ''}`,
+      { timeout: TMUX_COMMAND_TIMEOUT_MS });
+    return true;
+  } catch (e) {
+    console.error(`Could not recreate tmux session '${TMUX_SESSION}': ${e && e.message ? e.message : e}`);
+    return false;
+  }
+}
+
+// typeLaunchCommand types the CLI launch into the pane. Shared by relaunchCLI()
+// and the #7863 session-recreate path, which must NOT go through relaunchCLI():
+// that re-arms armCLIReadyWait(), and the recreate runs from inside the wait
+// that is already armed.
+function typeLaunchCommand() {
+  const launchCmd = buildLaunchCommand();
+  execSync(`tmux send-keys -t ${TMUX_SESSION} ${shellQuote(launchCommandWithCwd(launchCmd))} Enter`, { timeout: 15000 });
+  return launchCmd;
+}
+
 function waitForCLI() {
   let loginMessageShown = false;
   let needsLoginTicks = 0;
   return new Promise((resolve, reject) => {
     const start = Date.now();
     const check = () => {
+      // #7863: a missing SESSION is a hard condition, not `starting`. Handle it
+      // before classifying the (necessarily empty) capture.
+      if (tmuxSessionMissing()) {
+        console.error(`tmux session '${TMUX_SESSION}' no longer exists — the pane's shell was ended (an attached client closing it, or the server dying). The relay owns the session now: recreating it (#7863).`);
+        if (recreateTmuxSession()) {
+          try {
+            typeLaunchCommand();
+            console.error(`Recreated tmux session '${TMUX_SESSION}' and relaunched ${BACKEND}; waiting for it to become ready.`);
+          } catch (e) {
+            console.error(`Recreated tmux session '${TMUX_SESSION}' but could not type the ${BACKEND} launch: ${e && e.message ? e.message : e}`);
+          }
+        } else if (currentTask) {
+          // The task cannot be worked on this host right now; hand it back at
+          // once instead of holding its lease for CLI_READY_TIMEOUT_MS. The
+          // poll keeps going so a session an operator recreates by hand — or
+          // that the next poll manages to create — is picked up.
+          discardPendingTask('the tmux session is gone and could not be recreated');
+          failCurrentTask(`tmux session '${TMUX_SESSION}' is gone and could not be recreated`,
+            { skipReady: true, skipCLI: true, kind: 'environment' });
+        }
+        setTimeout(check, CLI_READY_POLL_MS);
+        return;
+      }
       const state = getCLIState();
       if (state === 'ready') {
         if (loginMessageShown) {
@@ -3143,7 +3233,10 @@ function tmuxSendKeys(text) {
     // tick.
     const deliveryBaselineLines = captureTmuxLines(PR_SCAN_LINES);
     resetTaskAgentActivity(deliveryBaselineLines);
-    const priorVerdict = detectCompletionVerdict(deliveryBaselineLines);
+    // The baseline is the NEWEST sentinel, whatever kind: #7861's preference
+    // must not apply here, or a previous task's trailing "complete" would sit
+    // above the baseline and complete the next task on its first tick.
+    const priorVerdict = detectHiveVerdict(deliveryBaselineLines, [HIVE_VERDICT_COMPLETE, HIVE_VERDICT_NO_WORK]);
     deliveredVerdictBaseline = priorVerdict ? priorVerdict.line : null;
     const MAX_SEND_RETRIES = 3;
     const RETRY_DELAY_MS = 10000;
@@ -3290,12 +3383,21 @@ function detectPRURLs(lines, repo) {
   if (!Array.isArray(lines) || lines.length === 0) return [];
   // Matches https://github.com/<owner>/<repo>/pull/<number>, capturing owner/repo.
   const PR_URL_RE = /https:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/pull\/\d+/g;
+  // #7862: agents cite their own PR by number on the verdict line ("complete
+  // — PR #198 delivers …") at least as often as by URL. With the task repo
+  // known, that IS a candidate — synthesized as the repo's URL and put
+  // through the same verification as a pasted one, so a `#N` that turns out
+  // to be someone else's PR is refuted like any other researched reference.
+  // Verdict lines only: a bare "#42" elsewhere in a transcript is usually an
+  // issue.
+  const PR_REF_RE = /\b(?:PR|pull[ -]request)\s*#(\d+)/gi;
   const onVerdictLine = [];
   const elsewhere = [];
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i];
     if (typeof line !== 'string') continue;
-    const bucket = isHiveVerdictLine(line) ? onVerdictLine : elsewhere;
+    const verdictLine = isHiveVerdictLine(line);
+    const bucket = verdictLine ? onVerdictLine : elsewhere;
     let m;
     PR_URL_RE.lastIndex = 0;
     while ((m = PR_URL_RE.exec(line)) !== null) {
@@ -3303,6 +3405,12 @@ function detectPRURLs(lines, repo) {
       // URL to either way; every URL is a candidate, as the old code allowed.
       if (repo && m[1] !== repo) continue;
       bucket.push(m[0]);
+    }
+    if (verdictLine && repo) {
+      PR_REF_RE.lastIndex = 0;
+      while ((m = PR_REF_RE.exec(line)) !== null) {
+        bucket.push(`https://github.com/${repo}/pull/${m[1]}`);
+      }
     }
   }
   const seen = new Set();
@@ -3577,8 +3685,24 @@ function isHiveVerdictLine(line) {
 // Returns null rather than throwing on junk input: every caller is on a
 // best-effort path reading a terminal capture that may be empty.
 function detectHiveVerdict(lines, wanted) {
-  if (!Array.isArray(lines) || lines.length === 0) return null;
-  if (!Array.isArray(wanted) || wanted.length === 0) return null;
+  const all = detectHiveVerdicts(lines, wanted);
+  return all.length > 0 ? withoutPaneIndex(all[0]) : null;
+}
+
+// withoutPaneIndex drops the pane index detectHiveVerdicts() carries; the
+// single-verdict shape callers compare and log is { verdict, reason, line }.
+function withoutPaneIndex(v) {
+  return { verdict: v.verdict, reason: v.reason, line: v.line };
+}
+
+// detectHiveVerdicts is detectHiveVerdict for EVERY sentinel on the pane,
+// newest-first, each carrying its pane index — so a caller can reason about
+// the pair an agent prints when it narrates a closing "complete" after its
+// real verdict (#7861).
+function detectHiveVerdicts(lines, wanted) {
+  if (!Array.isArray(lines) || lines.length === 0) return [];
+  if (!Array.isArray(wanted) || wanted.length === 0) return [];
+  const found = [];
   // The anchoring, chrome tolerance and token boundary are all in
   // hiveVerdictLineRe() above, shared with isHiveVerdictLine().
   const VERDICT_RE = hiveVerdictLineRe(wanted);
@@ -3604,9 +3728,9 @@ function detectHiveVerdict(lines, wanted) {
     // compares it against the line that was already on the pane when the task's
     // prompt was delivered, which is how a verdict gets attributed to a task at
     // all (#5650).
-    return { verdict: m[2].toLowerCase(), reason, line: lines[i] };
+    found.push({ verdict: m[2].toLowerCase(), reason, line: lines[i], index: i });
   }
-  return null;
+  return found;
 }
 
 // Best-effort scan for the no_work_needed sentinel. Unchanged in behaviour
@@ -3622,8 +3746,37 @@ function detectNoWorkVerdict(lines) {
 // is a completion too — it is the agent concluding the task with nothing to
 // ship — and requiring a second `complete` line after it would make a
 // compliant agent look non-compliant.
-function detectCompletionVerdict(lines) {
-  return detectHiveVerdict(lines, [HIVE_VERDICT_COMPLETE, HIVE_VERDICT_NO_WORK]);
+//
+// #7861: when the agent prints BOTH sentinels for the same task — a
+// no_work_needed with its real reason, then a narrated "complete" (the prompt
+// forbids it; Flash does it anyway) — the last-printed rule reported `complete`,
+// which with no PR behind it degrades to a bare `idle` in the hub's ledger,
+// while the informative verdict sat one line above. Prefer the no_work_needed
+// in that case: the prompt already defines it as the completion when nothing
+// shipped, and a PR-less `complete` carries strictly less. A `complete` WITH a
+// PR still wins — not here, but where the verdicts are acted on: a confirmed
+// PR suppresses no_work_needed (resolveTaskPR's suppressesVerdict), so this
+// preference can never demote a real shipment.
+//
+// `baselineLine` is the sentinel that was already on the pane when this task's
+// prompt was delivered (#5650). Only a no_work_needed printed AFTER it belongs
+// to this task; one at or above it is a previous task's and must not be
+// preferred — and when the newest line IS the baseline the caller discards it,
+// so the answer must stay the newest line, exactly as before.
+function detectCompletionVerdict(lines, baselineLine = deliveredVerdictBaseline) {
+  const all = detectHiveVerdicts(lines, [HIVE_VERDICT_COMPLETE, HIVE_VERDICT_NO_WORK]);
+  if (all.length === 0) return null;
+  const newest = withoutPaneIndex(all[0]);
+  if (newest.verdict !== HIVE_VERDICT_COMPLETE || newest.line === baselineLine) return newest;
+  const baselineAt = typeof baselineLine === 'string' ? lines.lastIndexOf(baselineLine) : -1;
+  for (let i = 1; i < all.length; i++) {
+    if (all[i].index <= baselineAt) break;
+    if (all[i].verdict === HIVE_VERDICT_NO_WORK) {
+      console.log(`Both HIVE_VERDICT lines are on the pane for this task — keeping no_work_needed over the complete printed after it; a PR this task opened still overrides it (#7861)`);
+      return withoutPaneIndex(all[i]);
+    }
+  }
+  return newest;
 }
 
 // ── Review output that lands after the verdict (hivecommons/hive#7759) ──────
@@ -3648,6 +3801,9 @@ const POST_VERDICT_REVIEW_MARKERS = Object.freeze({
   omp: Object.freeze({
     note: /\bAdvisor \d+ note\b/,
     concern: /⟦blocker⟧|\[blocker\]|⟦concern⟧|\[concern\]/,
+    // #7879: the strictly-stronger subset that alone can earn the SECOND
+    // follow-up.
+    blocker: /⟦blocker⟧|\[blocker\]/,
   }),
 });
 
@@ -3674,6 +3830,39 @@ function postVerdictConcerns(lines, verdictLine, markers) {
   return concerns;
 }
 
+// postVerdictNoteBlocks returns, for each review note BELOW the verdict line
+// that carries a ⟦blocker⟧/⟦concern⟧ marker, its text — the marker line plus
+// the indented continuation lines omp renders under it, with the gutter glyph
+// stripped and whitespace collapsed (hivecommons/hive#7879). Same "below the
+// verdict" rule as postVerdictConcerns; nits are skipped for the same reason
+// they never earn a turn. This is what gets RECORDED when a task finalizes
+// with notes still unaddressed: the information already exists on the pane
+// and used to die with the relaunch.
+function postVerdictNoteBlocks(lines, verdictLine, markers) {
+  if (!markers || !Array.isArray(lines) || typeof verdictLine !== 'string') return [];
+  const at = lines.lastIndexOf(verdictLine);
+  if (at < 0) return [];
+  const blocks = [];
+  let current = null;
+  const flush = () => {
+    if (current && current.flagged && current.text.length) {
+      blocks.push(current.text.join(' ').replace(/\s+/g, ' ').trim());
+    }
+    current = null;
+  };
+  for (let i = at + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (markers.note.test(line)) { flush(); current = { flagged: false, text: [] }; continue; }
+    if (!current) continue;
+    // A note's body is indented; the first flush-left line ends it.
+    if (!/^\s/.test(line) || line.trim() === '') { flush(); continue; }
+    if (markers.concern.test(line)) current.flagged = true;
+    current.text.push(line.replace(/^[\s▎│|]+/, '').trim());
+  }
+  flush();
+  return blocks;
+}
+
 // postVerdictReviewAnswered reports whether a verdict on the pane is the
 // SECOND one — printed after the relay's follow-up — rather than the first
 // verdict still sitting there while the agent works on the notes.
@@ -3685,10 +3874,20 @@ function postVerdictConcerns(lines, verdictLine, markers) {
 // produced more than PR_SCAN_LINES rows of work since, and any verdict still
 // in the window is by construction below it.
 function postVerdictReviewAnswered(lines) {
+  return followUpAnswered(lines, POST_VERDICT_REVIEW_ANCHOR);
+}
+
+// prClaimFollowUpAnswered is the #7862 twin: true once a HIVE_VERDICT line sits
+// below the pane's echo of PR_CLAIM_FOLLOWUP_MESSAGE.
+function prClaimFollowUpAnswered(lines) {
+  return followUpAnswered(lines, PR_CLAIM_FOLLOWUP_ANCHOR);
+}
+
+function followUpAnswered(lines, anchor) {
   if (!Array.isArray(lines)) return true;
   let echoAt = -1;
   for (let i = lines.length - 1; i >= 0; i--) {
-    if (lines[i].includes(POST_VERDICT_REVIEW_ANCHOR)) { echoAt = i; break; }
+    if (lines[i].includes(anchor)) { echoAt = i; break; }
   }
   if (echoAt < 0) return true;
   return detectCompletionVerdict(lines.slice(echoAt + 1)) !== null;
@@ -3886,11 +4085,10 @@ function launchCommandWithCwd(launchCmd) {
 }
 
 function relaunchCLI() {
-  const launchCmd = buildLaunchCommand();
   // The pane may be wedged in bash PS2 continuation; clear it or the relaunch
   // command is swallowed as more continuation text and never runs.
   recoverWedgedShell();
-  execSync(`tmux send-keys -t ${TMUX_SESSION} ${shellQuote(launchCommandWithCwd(launchCmd))} Enter`, { timeout: 15000 });
+  const launchCmd = typeLaunchCommand();
   // The CLI is NOT up yet. cliReady must stay false until the readiness
   // classifier positively confirms it, or a task prompt sent in the meantime
   // is typed as literal keystrokes into a bare shell (issue #2203, bug 2).
@@ -4262,12 +4460,21 @@ function resetAutonomyNudgeState() {
 // anywhere on the pane at the previous tick — the follow-up only fires for
 // notes that were not there then, so a note from mid-task can never re-open a
 // finished task.
+// #7879: the boolean latch became a counter — the second follow-up is
+// reserved for a NEW ⟦blocker⟧ and there is never a third
+// (POST_VERDICT_REVIEW_MAX_FOLLOWUPS). `postVerdictReviewRequested` reads as
+// "at least one sent", so every pending/answered check is unchanged.
+let postVerdictReviewCount = 0;
 let postVerdictReviewRequested = false;
 let lastTickConcernLines = new Set();
+// #7862: whether this task's one PR-less-complete follow-up has been spent.
+let prClaimFollowUpRequested = false;
 
 function resetPostVerdictReviewState() {
+  postVerdictReviewCount = 0;
   postVerdictReviewRequested = false;
   lastTickConcernLines = new Set();
+  prClaimFollowUpRequested = false;
 }
 
 function resetPaneStallClock() {
@@ -4717,8 +4924,36 @@ function failCurrentTask(reason, opts) {
 //                      launch chrome.
 //   prURL            — the PR resolveTaskPR() attributed to this task, or ''.
 //   noWork           — the no_work_needed verdict object, or null.
-function finishCurrentTask({ completionSignal, summary, tmuxLines, prURL, noWork }) {
+// postUnaddressedNotesComment leaves the advisor notes the agent did not get
+// to on the PR, as ONE comment, so the reviewer sees exactly what the advisor
+// saw (hivecommons/hive#7879). Authenticated with the task credential from
+// GH_TOKEN_CACHE when present (it is about to be dropped), else gh's ambient
+// auth. Best-effort and bounded: a gh that is missing, offline or refused
+// costs a log line, never the completion.
+function postUnaddressedNotesComment(prURL, notes) {
+  let token = null;
+  try { token = fs.readFileSync(GH_TOKEN_CACHE, 'utf8').trim() || null; } catch (_) {}
+  const body = `### ${UNADDRESSED_ADVISOR_NOTES_HEADING}\n\n` +
+    'The contributor\'s advisor posted these after the final verdict; the agent had no further turn to address them. Recorded here for the reviewer.\n\n' +
+    notes.map(n => `- ${n}`).join('\n') +
+    '\n\n<sub>— hive contributor relay (#7879)</sub>';
+  try {
+    execSync(`gh pr comment ${shellQuote(prURL)} --body ${shellQuote(body)} 2>/dev/null`, {
+      encoding: 'utf8',
+      timeout: 20000,
+      env: token ? { ...process.env, GH_TOKEN: token } : process.env,
+    });
+    console.log(`Posted ${notes.length} unaddressed advisor note(s) as a comment on ${prURL} (#7879)`);
+  } catch (e) {
+    console.error(`Could not post the unaddressed advisor notes to ${prURL}: ${(e && e.message) || 'unknown error'} — they are still in the task_complete summary`);
+  }
+}
+
+function finishCurrentTask({ completionSignal, summary, tmuxLines, prURL, noWork, unaddressedNotes = [] }) {
   if (!currentTask) return;
+  // #7879: the PR comment must go out BEFORE stopAgentForTaskExit drops the
+  // task credential below — it is posted with the same token the agent used.
+  if (prURL && unaddressedNotes.length) postUnaddressedNotesComment(prURL, unaddressedNotes);
   // Cause B (#5353). "Idle" here is a verdict read off the pane's rendering
   // chrome, and it is wrong often enough to have produced thirteen separate
   // issues. When it is wrong, the agent is still mid-turn — and reporting
@@ -5223,15 +5458,25 @@ function maybeRequestPostVerdictReview(paneScanLines, tmuxLines, verdict, previo
   if (!currentTask || !verdict) return false;
   const markers = POST_VERDICT_REVIEW_MARKERS[BACKEND];
   if (!markers) return false;
-  if (postVerdictReviewRequested) return false;
+  if (postVerdictReviewCount >= POST_VERDICT_REVIEW_MAX_FOLLOWUPS) return false;
 
-  const concerns = postVerdictConcerns(paneScanLines, verdict.line, markers)
+  let concerns = postVerdictConcerns(paneScanLines, verdict.line, markers)
     .filter(line => !previousConcerns.has(line));
+  // #7879: the second follow-up is bought only by a NEW ⟦blocker⟧. A concern
+  // or nit under the second verdict finalizes as before — a body-prose nit is
+  // not worth a turn — but a late blocker of the kind that turned utah#131 /
+  // testsuite#805 into real PRs gets one more, and never a third.
+  const secondRound = postVerdictReviewCount > 0;
+  if (secondRound) concerns = concerns.filter(line => markers.blocker && markers.blocker.test(line));
   if (concerns.length === 0) return false;
 
+  postVerdictReviewCount++;
   postVerdictReviewRequested = true;
-  console.log(`Task ${currentTask.task_id}: ${concerns.length} advisor concern(s) were posted under its HIVE_VERDICT line — ` +
-    `asking the agent once to address them and re-print the verdict (#7759): ${concerns.map(c => JSON.stringify(c.trim())).join(' ')}`);
+  console.log(secondRound
+    ? `Task ${currentTask.task_id}: a NEW advisor ⟦blocker⟧ was posted under its re-printed HIVE_VERDICT — ` +
+      `asking the agent a second and final time to address it and re-print the verdict (#7879): ${concerns.map(c => JSON.stringify(c.trim())).join(' ')}`
+    : `Task ${currentTask.task_id}: ${concerns.length} advisor concern(s) were posted under its HIVE_VERDICT line — ` +
+      `asking the agent once to address them and re-print the verdict (#7759): ${concerns.map(c => JSON.stringify(c.trim())).join(' ')}`);
   try {
     tmuxSendNudge(POST_VERDICT_REVIEW_MESSAGE);
   } catch (e) {
@@ -5244,7 +5489,68 @@ function maybeRequestPostVerdictReview(paneScanLines, tmuxLines, verdict, previo
     task_id: currentTask.task_id,
     task_gen: currentTask.task_gen,
     status: 'working',
-    summary: `Agent printed HIVE_VERDICT, then its advisor posted ${concerns.length} concern(s) under it; asked it once to address them and re-print the verdict`,
+    summary: secondRound
+      ? `Agent re-printed HIVE_VERDICT, then its advisor posted a new blocker under it; asked it a second and final time to address it and re-print the verdict`
+      : `Agent printed HIVE_VERDICT, then its advisor posted ${concerns.length} concern(s) under it; asked it once to address them and re-print the verdict`,
+    tmux_output: tmuxLines,
+    ...progressModelFields(),
+  });
+  return true;
+}
+
+// ── A `complete` with no PR behind it (hivecommons/hive#7862) ───────────────
+//
+// The prompt defines `HIVE_VERDICT: complete` as "the PR is open". Observed
+// live: a model printing `complete — PR opened` after thirty read-only tool
+// calls — no branch, no commit, no push, no PR. resolveTaskPR() correctly
+// found nothing, and the relay reported the completion anyway with the claim
+// passed through as prose; the verdict text and the PR scan were never
+// compared. The hub (which now books this shape as evidence-less) cannot fix
+// the missing PR; only the agent can, and it is still sitting at its prompt.
+//
+// So: when a `complete` verdict whose reason CLAIMS a PR (PR_CLAIM_PATTERN)
+// would finalize this tick and resolveTaskPR() attributes no PR to the task,
+// tell the agent once — open the PR now, or downgrade to no_work_needed — and
+// hold the finalization until it answers
+// with a second HIVE_VERDICT (or goes idle, via the same pending mechanics
+// as #7759). Whatever the second verdict says is final: a `complete` that
+// still has no PR is reported as-is and the hub books it evidence-less.
+//
+// Bounds, shared with maybeRequestPostVerdictReview: once per task, budget
+// spent before typing, lease and deadline untouched. It never fires for
+// no_work_needed (that verdict is a conclusion in itself), never for a
+// verdict with a PR, and never on an api-error pane (verdictCompletes is
+// already false there).
+//
+// `prFinding` is the tick's single resolveTaskPR() result, shared with the
+// finalization below it: the lookup has a per-tick gh budget and a log line
+// per candidate, and must not run twice for one verdict.
+function maybeRequestPRForClaimedComplete(tmuxLines, verdict, prFinding) {
+  if (!currentTask || !verdict) return false;
+  // Only an issue task's `complete` means "a PR is open". A review task
+  // ("complete — no PR comments to address") legitimately ends with no new PR.
+  if (currentTask.kind !== 'issue') return false;
+  if (verdict.verdict !== HIVE_VERDICT_COMPLETE) return false;
+  if (!PR_CLAIM_PATTERN.test(verdict.reason || '')) return false;
+  if (prClaimFollowUpRequested) return false;
+  if (prFinding && prFinding.url) return false;
+
+  prClaimFollowUpRequested = true;
+  console.warn(`Task ${currentTask.task_id}: HIVE_VERDICT: complete is on the pane${verdict.reason ? ` (${JSON.stringify(verdict.reason)})` : ''} but no PR for this task exists — ` +
+    `asking the agent once to open it or downgrade to no_work_needed (#7862)`);
+  try {
+    tmuxSendNudge(PR_CLAIM_FOLLOWUP_MESSAGE);
+  } catch (e) {
+    console.error('Failed to send the missing-PR follow-up; finalizing on the verdict as-is:', e.message);
+    return false;
+  }
+  send({
+    type: 'task_progress',
+    seq: nextSeq(),
+    task_id: currentTask.task_id,
+    task_gen: currentTask.task_gen,
+    status: 'working',
+    summary: 'Agent printed HIVE_VERDICT: complete but no PR for this task exists; asked it once to open the PR or downgrade to no_work_needed',
     tmux_output: tmuxLines,
     ...progressModelFields(),
   });
@@ -5443,8 +5749,9 @@ function progressTick() {
   const reviewMarkers = POST_VERDICT_REVIEW_MARKERS[BACKEND];
   const previousConcerns = lastTickConcernLines;
   lastTickConcernLines = new Set(reviewMarkers ? paneScanLines.filter(l => reviewMarkers.concern.test(l)) : []);
-  const secondVerdictPending = postVerdictReviewRequested && !!completionVerdict &&
-    !postVerdictReviewAnswered(paneScanLines);
+  const secondVerdictPending = !!completionVerdict && (
+    (postVerdictReviewRequested && !postVerdictReviewAnswered(paneScanLines)) ||
+    (prClaimFollowUpRequested && !prClaimFollowUpAnswered(paneScanLines)));
 
   // Chrome-idle grace (#5376). classifyTmuxPane() saying IDLE_COMPLETE is now
   // only a hint; it must repeat across CHROME_IDLE_GRACE_TICKS ticks before it
@@ -5541,8 +5848,28 @@ function progressTick() {
   if (verdictCompletes && maybeRequestPostVerdictReview(paneScanLines, tmuxLines, completionVerdict, previousConcerns)) {
     return;
   }
+  // Best-effort: the PR the agent opened, if one is attributable to this
+  // task from its recent output, so the hub can distinguish "shipped a PR"
+  // from "just went idle" and pick the right issue cooldown
+  // (kubestellar/hive#2393 item 7). Resolved ONCE here, ahead of both the
+  // #7862 follow-up and the finalization that share it. Empty when no PR is
+  // found — the hub then applies the short cooldown.
+  const finalizing = verdictCompletes || (paneState === PANE_STATE_IDLE_COMPLETE && chromeIdleGraceElapsed);
+  const prFinding = finalizing
+    ? resolveTaskPR(paneScanLines, {
+      repo: currentTask.repo,
+      taskId: currentTask.task_id,
+      taskStartedAt: taskAssignedAt,
+      contributorLogin: CONTRIBUTOR_LOGIN,
+    })
+    : null;
 
-  if (verdictCompletes || (paneState === PANE_STATE_IDLE_COMPLETE && chromeIdleGraceElapsed)) {
+  // #7862: and its one chance to back a `complete` with the PR it implies.
+  if (verdictCompletes && maybeRequestPRForClaimedComplete(tmuxLines, completionVerdict, prFinding)) {
+    return;
+  }
+
+  if (finalizing) {
     // How this task ended, recorded so the hub and the operator can tell the
     // trustworthy signal from the fallback — and so per-backend sentinel
     // non-compliance is measurable rather than guessed at.
@@ -5551,21 +5878,11 @@ function progressTick() {
       (verdictCompletes
         ? ` (HIVE_VERDICT: ${completionVerdict.verdict})`
         : (completionVerdict
-          ? ` (pane idle for ${chromeIdleTicks} consecutive checks; the agent's HIVE_VERDICT: ${completionVerdict.verdict} was followed by advisor notes it was asked to address, and it never re-printed the verdict — #7759)`
+          ? ` (pane idle for ${chromeIdleTicks} consecutive checks; the agent's HIVE_VERDICT: ${completionVerdict.verdict} was followed by a relay follow-up it was asked to answer, and it never re-printed the verdict — #7759/#7862)`
           : ` (pane idle for ${chromeIdleTicks} consecutive checks, no verdict emitted)`)));
     resetChromeIdleGrace();
     // Successful completion clears this work item's crash-retry budget.
     cliRestartCounts.delete(taskKey(currentTask));
-    // Best-effort: report the PR the agent opened, if one is visible in its
-    // recent output, so the hub can distinguish "shipped a PR" from "just went
-    // idle" and pick the right issue cooldown (kubestellar/hive#2393 item 7).
-    // Empty when no PR link is found — the hub then applies the short cooldown.
-    const prFinding = resolveTaskPR(paneScanLines, {
-      repo: currentTask.repo,
-      taskId: currentTask.task_id,
-      taskStartedAt: taskAssignedAt,
-      contributorLogin: CONTRIBUTOR_LOGIN,
-    });
     const prURL = prFinding.url;
     // #6717 item 4: make the weakest completion the loudest line in the log.
     // A chrome_idle completion with no verdict AND no PR is the exact shape of
@@ -5603,12 +5920,23 @@ function progressTick() {
     // is already true. tmuxLines was captured above, so the evidence the hub
     // receives is still the agent's own output and not launch chrome.
     //
-    const completionSummary = noWork
+    let completionSummary = noWork
       ? 'Agent returned to idle (reported no_work_needed)'
       : (verdictCompletes
         ? 'Agent reported the task complete (HIVE_VERDICT)'
         : `Agent returned to idle (no verdict emitted; pane idle for ${CHROME_IDLE_GRACE_TICKS} consecutive checks)`);
-    finishCurrentTask({ completionSignal, summary: completionSummary, tmuxLines, prURL, noWork });
+    // #7879: review notes under the verdict being finalized are, by
+    // construction, ones the agent will not get another turn for. Record
+    // them — in the summary the hub keeps, and on the PR if there is one —
+    // instead of letting them die with the relaunch. Zero extra turns.
+    const unaddressedNotes = verdictCompletes
+      ? postVerdictNoteBlocks(paneScanLines, completionVerdict.line, reviewMarkers)
+      : [];
+    if (unaddressedNotes.length) {
+      console.log(`Task ${currentTask.task_id}: ${unaddressedNotes.length} advisor note(s) under the final verdict were not addressed before completion — recording them (#7879)`);
+      completionSummary += `\n\n${UNADDRESSED_ADVISOR_NOTES_HEADING}:\n${unaddressedNotes.map(n => `- ${n}`).join('\n')}`;
+    }
+    finishCurrentTask({ completionSignal, summary: completionSummary, tmuxLines, prURL, noWork, unaddressedNotes });
   } else if (paneState === PANE_STATE_IDLE_COMPLETE) {
     // Idle chrome, no verdict, grace not yet elapsed (#5376). Report progress
     // and wait — this is the tick or two in which a momentary misread (a
@@ -6316,6 +6644,9 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     tmuxSendKeys,
     flushPendingTask,
     relaunchCLI,
+    armCLIReadyWait,
+    tmuxSessionMissing,
+    recreateTmuxSession,
     failCurrentTask,
     finishCurrentTask,
     startProgressReporting,
@@ -6417,6 +6748,14 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     maybeRequestPostVerdictReview,
     resetPostVerdictReviewState,
     getPostVerdictReviewRequested: () => postVerdictReviewRequested,
+    getPostVerdictReviewCount: () => postVerdictReviewCount,
+    postVerdictNoteBlocks,
+    POST_VERDICT_REVIEW_MAX_FOLLOWUPS,
+    UNADDRESSED_ADVISOR_NOTES_HEADING,
+    getPRClaimFollowUpRequested: () => prClaimFollowUpRequested,
+    PR_CLAIM_FOLLOWUP_MESSAGE,
+    PR_CLAIM_FOLLOWUP_ANCHOR,
+    PR_CLAIM_PATTERN,
     tmuxSessionHasAttachedClient,
     tmuxSessionHumanPresence,
     HUMAN_PRESENCE_IDLE_MS,
@@ -6440,6 +6779,7 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     HIVE_VERDICT_COMPLETE,
     HIVE_VERDICT_NO_WORK,
     detectHiveVerdict,
+    detectHiveVerdicts,
     detectCompletionVerdict,
     recordChromeIdleTick,
     resetChromeIdleGrace,

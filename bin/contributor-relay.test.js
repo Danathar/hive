@@ -34,7 +34,7 @@ const RELAY_PATH = path.join(__dirname, 'contributor-relay.js');
 // bash and no WebSocket are ever touched.
 // ---------------------------------------------------------------------------
 
-function loadRelay({ backend = 'copilot', backendBinary = null, backendPerm = '--allow-all', backendPermShell = null, model = '', reasoningEffort = '', cliStates = ['ready'], procAlive = true, mode = 'interactive', execFileResult = null, statusFile = null, paneText = null, env = null, cliVersion = null, attachedClients = false, attachedIdleMs = 0, clientActivityRaw = null, listClientsThrows = false, prMeta = null } = {}) {
+function loadRelay({ backend = 'copilot', backendBinary = null, backendPerm = '--allow-all', backendPermShell = null, model = '', reasoningEffort = '', cliStates = ['ready'], procAlive = true, mode = 'interactive', execFileResult = null, statusFile = null, paneText = null, env = null, cliVersion = null, attachedClients = false, attachedIdleMs = 0, clientActivityRaw = null, listClientsThrows = false, prMeta = null, sessionMissing = false, newSessionFails = false } = {}) {
   const commands = [];
   const sent = [];
   // Records every execFile (headless one-shot) invocation: { bin, args, opts }.
@@ -50,8 +50,26 @@ function loadRelay({ backend = 'copilot', backendBinary = null, backendPerm = '-
   // budget's behaviour on a throwing send is pinned rather than assumed.
   let failNextLiteralSend = false;
 
+  // #7863: models the tmux SERVER being gone. A boolean is flipped back to
+  // false by a successful `new-session`; a function is consulted fresh each
+  // time so a test can drive the transition itself.
+  let sessionGone = typeof sessionMissing === 'function' ? false : !!sessionMissing;
+  const tmuxSessionGone = () => (typeof sessionMissing === 'function' ? sessionMissing() : sessionGone);
+
   const fakeExecSync = (cmd) => {
     if (commands.length < MAX_RECORDED_COMMANDS) commands.push(cmd);
+    if (/\btmux has-session\b/.test(cmd)) {
+      if (tmuxSessionGone()) throw new Error('no server running on /tmp/tmux-1000/default');
+      return '';
+    }
+    if (/\btmux new-session\b/.test(cmd)) {
+      if (newSessionFails) throw new Error('tmux: cannot create session');
+      sessionGone = false;
+      return '';
+    }
+    if (tmuxSessionGone() && /\btmux (capture-pane|send-keys|display-message)\b/.test(cmd)) {
+      throw new Error('no server running on /tmp/tmux-1000/default');
+    }
     // Recorded BEFORE throwing: a test needs to see that the send was
     // ATTEMPTED, which is the difference between "spent the budget" and
     // "retried every tick".
@@ -6164,6 +6182,10 @@ test('#5121 the curated buckets keep first claim on their lines', () => {
       line);
     assert.strictEqual(relay.classifyTmuxPane(mk('● API Error: Connection lost mid-response. The response above may be incomplete.')),
       relay.PANE_STATE_TRANSIENT_API_ERROR, 'a known-retryable error stays in its bucket');
+    assert.strictEqual(relay.classifyTmuxPane(mk('● API Error: Connection closed mid-response. The response above may be incomplete.')),
+      relay.PANE_STATE_TRANSIENT_API_ERROR, 'Claude Code 2.1.x says "closed", not "lost" — still known-retryable (#7855)');
+    assert.strictEqual(relay.classifyTmuxPane(mk('● API Error: Response stalled mid-stream. The response above may be incomplete.')),
+      relay.PANE_STATE_TRANSIENT_API_ERROR, 'the Go list already knew "stalled mid-stream"; the two lists stay in step');
     assert.strictEqual(relay.classifyTmuxPane(mk('● API Error: 403 Forbidden')),
       relay.PANE_STATE_FATAL_API_ERROR, 'a known-fatal error stays in its bucket');
     assert.strictEqual(relay.classifyTmuxPane(mk('● Please run /login · API Error: 401 {"type":"error"}')),
@@ -7548,13 +7570,24 @@ test('#5376 the completion sentinel inherits the anti-false-positive guards, not
 test('#5376 the newest verdict wins, so a stale one cannot end a later turn', () => {
   const relay = loadRelay({});
   try {
+    // A complete revised UP to no_work_needed: the newest line wins, as always.
     const v = relay.detectCompletionVerdict([
+      'HIVE_VERDICT: complete — opened PR #2',
+      'actually, on reflection, #2 was already merged',
+      'HIVE_VERDICT: no_work_needed — nothing here',
+    ], null);
+    assert.strictEqual(v.verdict, 'no_work_needed');
+    assert.strictEqual(v.reason, 'nothing here');
+    // The other order — no_work_needed then complete — is #7861's case: the
+    // no_work_needed is kept at detection time, and whether a PR this task
+    // opened overrides it is decided where the verdict is acted on
+    // (resolveTaskPR's suppressesVerdict), not by which line is newer.
+    const pair = relay.detectCompletionVerdict([
       'HIVE_VERDICT: no_work_needed — nothing here',
       'actually, on reflection, there was work',
       'HIVE_VERDICT: complete — opened PR #2',
-    ]);
-    assert.strictEqual(v.verdict, 'complete');
-    assert.strictEqual(v.reason, 'opened PR #2');
+    ], null);
+    assert.strictEqual(pair.verdict, 'no_work_needed');
   } finally { teardown(relay); }
 });
 
@@ -8770,6 +8803,163 @@ test('#7759 an agent that addresses the notes but never re-prints the verdict co
     assert.strictEqual(completed[0].verdict, 'no_work_needed', 'the verdict the agent DID print is still reported');
     assert.strictEqual(relay.__sent.filter(m => m.type === 'task_failed').length, 0);
   } finally { console.log = log; console.warn = warn; teardown(relay); }
+});
+
+// ---------------------------------------------------------------------------
+// Notes that land after the FINAL verdict (hivecommons/hive#7879).
+//
+// #7759's bound worked as specified on projectbluefin/contribute#638 and still
+// lost a real (minor) finding: the advisor's note under the SECOND verdict —
+// the PR body misdescribed a validator rule — was never looked at, because the
+// latch was already spent, and nothing recorded it. Two additive layers:
+// record instead of drop (summary + one PR comment, zero extra turns), and a
+// second follow-up reserved for a NEW ⟦blocker⟧, hard cap two.
+// ---------------------------------------------------------------------------
+
+const OMP_638_VERDICT = 'HIVE_VERDICT: complete — PR #641 adds a renovate.json regression test.';
+const OMP_638_LATE_CONCERN = [
+  ' ⓘ Advisor 2 note',
+  '   ▎ ⟦concern⟧ PR body still says `gitAuthor` is rejected by the validator — false; only `username` is',
+  '   ▎ self-hosted-only. Prose only; the code is correct.',
+];
+const OMP_638_LATE_BLOCKER = [
+  ' ⓘ Advisor 2 note',
+  '   ▎ ⟦blocker⟧ The regression test asserts on the OLD schema path; it passes today only because the fixture',
+  '   ▎ is empty.',
+];
+const OMP_638_THIRD_BLOCKER = [
+  ' ⓘ Advisor 3 note',
+  '   ▎ ⟦blocker⟧ Still wrong: the fixture is now populated but the assertion path was not updated.',
+];
+
+function omp638Answered(relay, first, answerNotes, work = ' Fixed the JSONC handling; pushed to PR #641.') {
+  return ompPane(first, `> ${relay.POST_VERDICT_REVIEW_MESSAGE}`, work, OMP_638_VERDICT, answerNotes, OMP_UTAH14_TAIL);
+}
+
+test('#7879 a concern under the final verdict is recorded in the summary and posted to the PR, not dropped — and buys no turn', () => {
+  let pane = ompPane(' ⠋ Editing renovate.json', '╰─');
+  const relay = loadRelay({ backend: 'omp', paneText: () => pane, prMeta: new Error('gh: offline') });
+  const log = console.log; console.log = () => {};
+  const err = console.error; console.error = () => {};
+  try {
+    dispatchTask(relay, 'ct-7879-record', 638);
+    const first = [' Opened https://github.com/projectbluefin/contribute/pull/641', OMP_638_VERDICT, ...OMP_UTAH14_NOTES.slice(0, 4)];
+    pane = ompPane(first, OMP_UTAH14_TAIL);
+    relay.__crashTick();
+    assert.strictEqual(relay.getPostVerdictReviewCount(), 1, 'setup: the first concern earned the one follow-up');
+
+    // The agent answers; the advisor reviews THAT turn and posts a new
+    // concern under the second verdict — 100 s before finalization, live.
+    pane = omp638Answered(relay, first, OMP_638_LATE_CONCERN);
+    relay.__crashTick();
+    const completed = relay.__sent.filter(m => m.type === 'task_complete');
+    assert.strictEqual(completed.length, 1, 'a concern under the second verdict does not buy another turn (#7759 bound intact)');
+    assert.strictEqual(relay.getPostVerdictReviewCount(), 1);
+    assert.match(completed[0].pr_url, /\/pull\/641$/);
+    assert.ok(completed[0].summary.includes(relay.UNADDRESSED_ADVISOR_NOTES_HEADING),
+      `the summary carries the heading: ${JSON.stringify(completed[0].summary)}`);
+    assert.ok(/- ⟦concern⟧ PR body still says `gitAuthor` is rejected by the validator — false; only `username` is self-hosted-only\. Prose only; the code is correct\./.test(completed[0].summary),
+      `the note is recorded whole, continuation lines joined: ${JSON.stringify(completed[0].summary)}`);
+    const comments = relay.__commands.filter(c => /gh pr comment/.test(c));
+    assert.strictEqual(comments.length, 1, `exactly one PR comment is posted: ${JSON.stringify(comments)}`);
+    assert.ok(comments[0].includes(completed[0].pr_url), 'on the task\'s PR');
+    assert.ok(comments[0].includes(relay.UNADDRESSED_ADVISOR_NOTES_HEADING) && comments[0].includes('gitAuthor'), 'with the note text');
+  } finally { console.log = log; console.error = err; teardown(relay); }
+});
+
+test('#7879 a NEW blocker under the second verdict earns one more follow-up; a third never fires', () => {
+  let pane = ompPane(' ⠋ Editing tests/test_renovate.py', '╰─');
+  const relay = loadRelay({ backend: 'omp', paneText: () => pane, prMeta: new Error('gh: offline') });
+  const log = console.log; console.log = () => {};
+  const err = console.error; console.error = () => {};
+  try {
+    dispatchTask(relay, 'ct-7879-blocker', 638);
+    const first = [' Opened https://github.com/projectbluefin/contribute/pull/641', OMP_638_VERDICT, ...OMP_UTAH14_NOTES.slice(0, 4)];
+    pane = ompPane(first, OMP_UTAH14_TAIL);
+    relay.__crashTick();
+    assert.strictEqual(relay.getPostVerdictReviewCount(), 1);
+
+    // Second verdict, NEW blocker under it → second (final) follow-up.
+    const second = omp638Answered(relay, first, OMP_638_LATE_BLOCKER);
+    pane = second;
+    relay.__crashTick();
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 0, 'a new blocker holds the task open once more');
+    assert.strictEqual(relay.getPostVerdictReviewCount(), 2);
+    assert.strictEqual(relay.__tmuxSends().filter(c => c.includes(relay.POST_VERDICT_REVIEW_ANCHOR)).length, 2, 'two follow-ups typed');
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_progress' && /second and final time/.test(m.summary || '')).length, 1);
+
+    // The first blocker is still on the pane, above the second echo; the
+    // agent is working — nothing completes.
+    pane = ompPane(second, `> ${relay.POST_VERDICT_REVIEW_MESSAGE}`, ' ⠋ Editing tests/test_renovate.py', '╰─');
+    relay.__crashTick();
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 0, 'the second verdict above the second echo must not end the task mid-turn');
+
+    // Third verdict with yet another blocker: cap reached, the task finalizes,
+    // and the blocker is recorded rather than dropped.
+    pane = ompPane(second, `> ${relay.POST_VERDICT_REVIEW_MESSAGE}`, ' Updated the assertion path; pushed.', OMP_638_VERDICT, OMP_638_THIRD_BLOCKER, OMP_UTAH14_TAIL);
+    relay.__crashTick();
+    const completed = relay.__sent.filter(m => m.type === 'task_complete');
+    assert.strictEqual(completed.length, 1, 'the third verdict is final whatever sits under it');
+    assert.strictEqual(relay.getPostVerdictReviewCount(), 2, 'never a third follow-up');
+    assert.strictEqual(relay.__tmuxSends().filter(c => c.includes(relay.POST_VERDICT_REVIEW_ANCHOR)).length, 2);
+    assert.ok(completed[0].summary.includes('Still wrong: the fixture is now populated'), `the late blocker is recorded: ${JSON.stringify(completed[0].summary)}`);
+    assert.strictEqual(relay.__commands.filter(c => /gh pr comment/.test(c)).length, 1);
+  } finally { console.log = log; console.error = err; teardown(relay); }
+});
+
+test('#7879 a nit under the second verdict finalizes with nothing recorded; a note with no PR goes to the summary only', () => {
+  let pane = ompPane(' ⠋ Reviewing', '╰─');
+  const relay = loadRelay({ backend: 'omp', paneText: () => pane, prMeta: new Error('gh: offline') });
+  const log = console.log; console.log = () => {};
+  const err = console.error; console.error = () => {};
+  try {
+    dispatchTask(relay, 'ct-7879-nit', 638);
+    const first = [' Opened https://github.com/projectbluefin/contribute/pull/641', OMP_638_VERDICT, ...OMP_UTAH14_NOTES.slice(0, 4)];
+    pane = ompPane(first, OMP_UTAH14_TAIL);
+    relay.__crashTick();
+    pane = omp638Answered(relay, first, OMP_UTAH14_NITS_ONLY);
+    relay.__crashTick();
+    let completed = relay.__sent.filter(m => m.type === 'task_complete');
+    assert.strictEqual(completed.length, 1);
+    assert.ok(!completed[0].summary.includes(relay.UNADDRESSED_ADVISOR_NOTES_HEADING), 'nits are not worth recording');
+    assert.strictEqual(relay.__commands.filter(c => /gh pr comment/.test(c)).length, 0);
+
+    // No PR: a no_work_needed verdict with a concern already present at the
+    // previous tick (API-error pane) finalizes and records to the summary only.
+    const nwVerdict = 'HIVE_VERDICT: no_work_needed — already fixed upstream';
+    const before = relay.__commands.length;
+    dispatchTask(relay, 'ct-7879-nopr', 639);
+    pane = ompPane(nwVerdict, OMP_638_LATE_CONCERN, ' ⚠ API Error: 529 overloaded — retrying', OMP_UTAH14_TAIL);
+    const warn = console.warn; console.warn = () => {};
+    try { relay.__crashTick(); } finally { console.warn = warn; }
+    pane = ompPane(nwVerdict, OMP_638_LATE_CONCERN, OMP_UTAH14_TAIL);
+    relay.__crashTick();
+    completed = relay.__sent.filter(m => m.type === 'task_complete' && m.task_id === 'ct-7879-nopr');
+    assert.strictEqual(completed.length, 1);
+    assert.strictEqual(completed[0].verdict, 'no_work_needed');
+    assert.ok(completed[0].summary.includes('gitAuthor'), `recorded in the summary: ${JSON.stringify(completed[0].summary)}`);
+    assert.strictEqual(relay.__commands.slice(before).filter(c => /gh pr comment/.test(c)).length, 0, 'no PR, no comment');
+  } finally { console.log = log; console.error = err; teardown(relay); }
+});
+
+test('#7879 postVerdictNoteBlocks joins a note\'s continuation lines, skips nits, and ignores notes above the verdict', () => {
+  const relay = loadRelay({ backend: 'omp' });
+  try {
+    const m = relay.POST_VERDICT_REVIEW_MARKERS.omp;
+    const v = 'HIVE_VERDICT: complete';
+    const lines = [
+      ' ⓘ Advisor 1 note', '   ▎ ⟦blocker⟧ above the verdict — an earlier turn',
+      v,
+      ' ⓘ Advisor 1 note', '   ▎ ⟦concern⟧ first line', '   ▎ second line',
+      ' ⓘ Advisor 1 note', '   ▎ ⟦nit⟧ ignore me',
+      ' ⓘ Advisor 2 note', '   ▎ ⟦blocker⟧ alone',
+      'Advisor history copied to clipboard',
+    ];
+    assert.deepStrictEqual(relay.postVerdictNoteBlocks(lines, v, m), ['⟦concern⟧ first line second line', '⟦blocker⟧ alone']);
+    assert.deepStrictEqual(relay.postVerdictNoteBlocks(lines, 'not on pane', m), []);
+    assert.deepStrictEqual(relay.postVerdictNoteBlocks(lines, v, undefined), []);
+    assert.strictEqual(relay.POST_VERDICT_REVIEW_MAX_FOLLOWUPS, 2);
+  } finally { teardown(relay); }
 });
 
 test('#7759 postVerdictConcerns reads only bracketed concerns inside a note block below the verdict', () => {
@@ -11429,4 +11619,269 @@ test('#7841 the verdict watch waits out the task grace period without spending t
     assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 1,
       'a verdict first seen during the grace period must still take the fast path once the grace period ends');
   } finally { console.log = log; teardown(relay); }
+});
+
+// ── hivecommons/hive#7863: the tmux session itself disappears ────────────────
+//
+// capturePaneText() returns '' when tmux fails, and '' classifies as
+// `starting`, so a relay whose whole tmux server was gone spent the full
+// CLI_READY_TIMEOUT_MS (10 min) renewing the lease of a task it could never
+// run. These pin the two new behaviours: the session is recreated and the CLI
+// relaunched within a single readiness poll; and when it cannot be recreated
+// the current task is failed as `environment` on that same poll, not ten
+// minutes later.
+
+test('#7863 a vanished tmux session is recreated and the CLI relaunched within one readiness poll', () => {
+  const { relay } = captureStartupWithImmediateTimers({ sessionMissing: true, cliStates: ['starting'] }, 1);
+  try {
+    const cmds = relay.__commands;
+    const hasIdx = cmds.findIndex(c => /tmux has-session/.test(c));
+    const newIdx = cmds.findIndex(c => /tmux new-session -d -s /.test(c));
+    const launchIdx = cmds.findIndex((c, i) => i > newIdx && /tmux send-keys/.test(c) && /claude|bob|pi|codex|copilot|gemini|opencode/.test(c));
+    assert.ok(hasIdx >= 0, 'waitForCLI never asked tmux whether the session exists');
+    assert.ok(newIdx > hasIdx, `no new-session after has-session failed: ${JSON.stringify(cmds.slice(0, 12))}`);
+    assert.ok(/-x 200 -y 50/.test(cmds[newIdx]), `recreated session lacks the entrypoint geometry: ${cmds[newIdx]}`);
+    assert.ok(launchIdx > newIdx, `CLI launch was not typed into the recreated session: ${JSON.stringify(cmds.slice(newIdx, newIdx + 6))}`);
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_failed').length, 0,
+      'recreating the session must not fail a task');
+  } finally {
+    teardown(relay);
+  }
+});
+
+test('#7863 tmuxSessionMissing/recreateTmuxSession follow the fake tmux server', () => {
+  // Function form: the load-time readiness poll must not be allowed to
+  // repair the session before the assertions run.
+  let gone = false;
+  const relay = loadRelay({ sessionMissing: () => gone });
+  try {
+    assert.strictEqual(relay.tmuxSessionMissing(), false);
+    gone = true;
+    assert.strictEqual(relay.tmuxSessionMissing(), true);
+    assert.strictEqual(relay.recreateTmuxSession(), true, 'new-session should succeed against the fake tmux');
+    assert.ok(relay.__commands.some(c => /tmux new-session -d -s contributor -x 200 -y 50 -c /.test(c)),
+      `new-session lacks name/geometry/cwd: ${relay.__commands.filter(c => /new-session/.test(c))}`);
+    gone = false;
+    assert.strictEqual(relay.tmuxSessionMissing(), false);
+  } finally {
+    teardown(relay);
+  }
+});
+
+test('#7863 a session that cannot be recreated fails the current task as environment immediately', () => {
+  const relay = loadRelay({ sessionMissing: true, newSessionFails: true, cliStates: ['starting'] });
+  try {
+    // The load-time poll ran with no task assigned: it must not have failed
+    // anything, and it must have tried (and failed) to rebuild the session.
+    assert.ok(relay.__commands.some(c => /tmux new-session/.test(c)), 'relay never tried to recreate the session');
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_failed').length, 0);
+
+    assignTask(relay, 't-7863');
+    // Drive exactly one more readiness poll, synchronously.
+    const realSetTimeout = global.setTimeout;
+    let polls = 0;
+    global.setTimeout = (fn) => { if (polls++ === 0) fn(); return { unref() {} }; };
+    try {
+      relay.armCLIReadyWait();
+    } finally {
+      global.setTimeout = realSetTimeout;
+    }
+    const failed = relay.__sent.filter(m => m.type === 'task_failed');
+    assert.strictEqual(failed.length, 1, `expected one task_failed, got ${JSON.stringify(relay.__sent.map(m => m.type))}`);
+    assert.strictEqual(failed[0].task_id, 't-7863');
+    assert.strictEqual(failed[0].failure_kind, 'environment');
+    assert.match(failed[0].reason || failed[0].error || JSON.stringify(failed[0]), /tmux session .* could not be recreated/);
+    assert.strictEqual(relay.getCurrentTask && relay.getCurrentTask(), null, 'task must be released, not held for CLI_READY_TIMEOUT_MS');
+  } finally {
+    teardown(relay);
+  }
+});
+
+test('#7863 default harness (session present) never recreates the tmux session', () => {
+  const relay = loadRelay({ cliStates: ['ready'] });
+  try {
+    assert.ok(!relay.__commands.some(c => /tmux new-session/.test(c)), 'new-session issued although the session exists');
+  } finally {
+    teardown(relay);
+  }
+});
+
+// --- #7861: both HIVE_VERDICT lines on the pane ------------------------------
+
+test('#7861 a no_work_needed followed by a narrated PR-less complete keeps no_work_needed and its reason', () => {
+  const relay = loadRelay({});
+  try {
+    const v = relay.detectCompletionVerdict([
+      'some work',
+      ' HIVE_VERDICT: no_work_needed — The issue is explicitly blocked by a pending maintainer decision in issue #305.',
+      ' HIVE_VERDICT: complete — The problem is identified as blocked on a maintainer decision.',
+    ], null);
+    assert.strictEqual(v.verdict, 'no_work_needed');
+    assert.strictEqual(v.reason, 'The issue is explicitly blocked by a pending maintainer decision in issue #305.');
+
+    // Reverse order is the agent revising itself upward; the newest still wins.
+    const rev = relay.detectCompletionVerdict([
+      'HIVE_VERDICT: complete — shipped',
+      'HIVE_VERDICT: no_work_needed — actually nothing to do',
+    ], null);
+    assert.strictEqual(rev.verdict, 'no_work_needed');
+    // Two completes: newest, unchanged.
+    const two = relay.detectCompletionVerdict([
+      'HIVE_VERDICT: complete — first',
+      'HIVE_VERDICT: complete — second',
+    ], null);
+    assert.strictEqual(two.reason, 'second');
+  } finally { teardown(relay); }
+});
+
+test('#7861 a previous task\'s no_work_needed at or above the baseline is never preferred', () => {
+  const relay = loadRelay({});
+  try {
+    const prev = 'HIVE_VERDICT: no_work_needed — previous task, gated';
+    // Previous task printed no_work_needed; THIS task printed complete. The
+    // baseline is the previous sentinel, so the complete is this task's verdict.
+    const v = relay.detectCompletionVerdict([prev, 'work', 'HIVE_VERDICT: complete — shipped PR #9'], prev);
+    assert.strictEqual(v.verdict, 'complete');
+    assert.strictEqual(v.reason, 'shipped PR #9');
+
+    // Previous task printed BOTH (no_work then complete). The baseline is its
+    // newest line (the complete). On the next task's first tick the answer must
+    // be that baseline line — which the caller discards — not the older
+    // no_work_needed, or the new task would be completed off a stale verdict.
+    const prevComplete = 'HIVE_VERDICT: complete — narrated';
+    const stale = relay.detectCompletionVerdict([prev, prevComplete, 'new task working…'], prevComplete);
+    assert.strictEqual(stale.line, prevComplete);
+  } finally { teardown(relay); }
+});
+
+test('#7861 prompt delivery baselines the NEWEST sentinel even when both are on the pane', () => {
+  const relay = loadRelay({ backend: 'claude', paneText: [
+    'HIVE_VERDICT: no_work_needed — previous task',
+    'HIVE_VERDICT: complete — previous task narrated',
+    '❯ ',
+  ].join('\n') });
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-baseline');
+    assert.strictEqual(relay.getTaskPromptDelivered(), true, 'setup: the prompt must have been typed');
+    assert.strictEqual(relay.getDeliveredVerdictBaseline(), 'HIVE_VERDICT: complete — previous task narrated');
+    // …and that first tick must not complete the new task off either stale line.
+    relay.__crashTick();
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 0);
+  } finally { teardown(relay); }
+});
+
+test('#7861 end to end: the pair completes the task as no_work_needed with the informative reason', () => {
+  const PANE = [
+    ' HIVE_VERDICT: no_work_needed — The issue is explicitly blocked by a pending maintainer decision in issue #305.',
+    ' HIVE_VERDICT: complete — The problem is identified as blocked on a maintainer decision.',
+    '❯ ',
+  ].join('\n');
+  const relay = loadRelay({ backend: 'claude', paneText: PANE });
+  try {
+    dispatchTask(relay, 't-pair');
+    relay.__crashTick();
+    const completed = relay.__sent.filter(m => m.type === 'task_complete');
+    assert.strictEqual(completed.length, 1);
+    assert.strictEqual(completed[0].verdict, 'no_work_needed');
+    assert.strictEqual(completed[0].verdict_reason,
+      'The issue is explicitly blocked by a pending maintainer decision in issue #305.');
+  } finally { teardown(relay); }
+});
+
+// ── hivecommons/hive#7862: a `complete` that claims a PR nobody opened ───────
+//
+// Live: `HIVE_VERDICT: complete — PR opened` after thirty read-only tool calls;
+// resolveTaskPR() found nothing, and the completion went to the hub with the
+// claim as prose. The relay now puts the contradiction to the agent once —
+// same once-per-task, pending-until-answered mechanics as #7759 — and
+// finalizes on whatever the second verdict says.
+
+test('#7862 a complete that claims a PR with none attributable gets one follow-up, then finalizes on the reply', () => {
+  let pane = 'Working…';
+  const relay = loadRelay({ backend: 'copilot', paneText: () => pane, prMeta: new Error('gh: offline') });
+  const log = console.log; console.log = () => {};
+  try {
+    dispatchTask(relay, 'ct-7862-claim', 137);
+    const before = relay.__tmuxSends().length;
+    pane = `HIVE_VERDICT: complete — PR opened\n${IDLE_PANE}`;
+    relay.__crashTick();
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 0,
+      'a complete claiming a PR that does not exist must not finalize unchallenged');
+    const sends = relay.__tmuxSends().slice(before).filter(c => c.includes(relay.PR_CLAIM_FOLLOWUP_ANCHOR));
+    assert.strictEqual(sends.length, 1, `exactly one follow-up typed: ${JSON.stringify(relay.__tmuxSends().slice(before))}`);
+    assert.ok(relay.__sent.some(m => m.type === 'task_progress' && /no PR for this task exists/.test(m.summary || '')),
+      'the hub is told why the task is still open');
+    assert.strictEqual(relay.getPRClaimFollowUpRequested(), true);
+
+    // Still the first verdict above the echoed follow-up: agent mid-turn.
+    pane = `HIVE_VERDICT: complete — PR opened\n> ${relay.PR_CLAIM_FOLLOWUP_MESSAGE}\nWorking…`;
+    relay.__crashTick();
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 0,
+      'the first verdict above the echoed follow-up must not end the task mid-turn');
+    assert.strictEqual(relay.__tmuxSends().filter(c => c.includes(relay.PR_CLAIM_FOLLOWUP_ANCHOR)).length, 1, 'no second follow-up');
+
+    // The agent came clean: no_work_needed is a conclusion and is final.
+    pane = `HIVE_VERDICT: complete — PR opened\n> ${relay.PR_CLAIM_FOLLOWUP_MESSAGE}\nHIVE_VERDICT: no_work_needed — rollback already exists in main\n${IDLE_PANE}`;
+    relay.__crashTick();
+    const completed = relay.__sent.filter(m => m.type === 'task_complete');
+    assert.strictEqual(completed.length, 1, 'the second verdict completes the task');
+    assert.strictEqual(completed[0].completion_signal, 'verdict');
+    assert.strictEqual(completed[0].verdict, 'no_work_needed');
+    assert.ok(!completed[0].pr_url, 'no PR is reported');
+  } finally { console.log = log; teardown(relay); }
+});
+
+test('#7862 a second complete that still has no PR is reported as-is — one follow-up per task', () => {
+  let pane = 'Working…';
+  const relay = loadRelay({ backend: 'copilot', paneText: () => pane, prMeta: new Error('gh: offline') });
+  const log = console.log; console.log = () => {};
+  try {
+    dispatchTask(relay, 'ct-7862-stubborn', 138);
+    pane = `HIVE_VERDICT: complete — PR opened\n${IDLE_PANE}`;
+    relay.__crashTick();
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 0);
+    pane = `HIVE_VERDICT: complete — PR opened\n> ${relay.PR_CLAIM_FOLLOWUP_MESSAGE}\nHIVE_VERDICT: complete — PR opened\n${IDLE_PANE}`;
+    relay.__crashTick();
+    const completed = relay.__sent.filter(m => m.type === 'task_complete');
+    assert.strictEqual(completed.length, 1, 'the second verdict is final whatever it says');
+    assert.strictEqual(completed[0].completion_signal, 'verdict');
+    assert.ok(!completed[0].pr_url, 'still no PR: the hub books it evidence-less');
+    assert.strictEqual(relay.__tmuxSends().filter(c => c.includes(relay.PR_CLAIM_FOLLOWUP_ANCHOR)).length, 1);
+  } finally { console.log = log; teardown(relay); }
+});
+
+test('#7862 the follow-up does not fire when the PR exists, for a bare complete, for no_work_needed, or for a review task', () => {
+  const cases = [
+    { label: 'PR URL on the pane', pane: `Opened https://github.com/foo/bar/pull/205\nHIVE_VERDICT: complete — PR opened\n${IDLE_PANE}`, prMeta: new Error('gh: offline') },
+    { label: 'PR cited by number on the verdict line', pane: `HIVE_VERDICT: complete — PR #205 adds the rollback\n${IDLE_PANE}`, prMeta: new Error('gh: offline') },
+    { label: 'bare complete (hub books it evidence-less)', pane: `HIVE_VERDICT: complete\n${IDLE_PANE}`, prMeta: null },
+    { label: 'no_work_needed mentioning a PR', pane: `HIVE_VERDICT: no_work_needed — PR #12 already fixed this\n${IDLE_PANE}`, prMeta: null },
+  ];
+  for (const c of cases) {
+    const relay = loadRelay({ backend: 'copilot', paneText: c.pane, prMeta: c.prMeta });
+    const log = console.log; console.log = () => {};
+    try {
+      dispatchTask(relay, `ct-7862-${c.label.replace(/[^a-z0-9]+/gi, '-')}`, 139);
+      relay.__crashTick();
+      assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 1, `${c.label}: finalizes on the tick`);
+      assert.ok(!relay.__tmuxSends().some(s => s.includes(relay.PR_CLAIM_FOLLOWUP_ANCHOR)), `${c.label}: no follow-up typed`);
+    } finally { console.log = log; teardown(relay); }
+  }
+});
+
+test('#7862 detectPRURLs synthesizes a candidate from "PR #N" on the verdict line, for the task repo only', () => {
+  const relay = loadRelay({});
+  try {
+    assert.deepStrictEqual(relay.detectPRURLs(['HIVE_VERDICT: complete — PR #198 delivers it'], 'foo/bar'),
+      ['https://github.com/foo/bar/pull/198']);
+    assert.deepStrictEqual(relay.detectPRURLs(['HIVE_VERDICT: complete — see pull request #7'], 'foo/bar'),
+      ['https://github.com/foo/bar/pull/7']);
+    assert.deepStrictEqual(relay.detectPRURLs(['Looked at PR #198 for context'], 'foo/bar'), [],
+      'a PR number off the verdict line is research, not a claim');
+    assert.deepStrictEqual(relay.detectPRURLs(['HIVE_VERDICT: complete — PR #198'], undefined), [],
+      'no repo, nothing to synthesize against');
+    assert.deepStrictEqual(relay.detectPRURLs(['HIVE_VERDICT: complete — fixes #198'], 'foo/bar'), [],
+      'a bare #N is an issue reference');
+  } finally { teardown(relay); }
 });
