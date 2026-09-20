@@ -84,11 +84,19 @@ type ContributorConnection struct {
 	session         string
 	model           string
 	reasoningEffort string
-	role            string // empty = task-driven mode, "scanner"/"reviewer"/etc. = role mode
-	clientRole      string // relay-requested HIVE_AGENT_ROLE; owner assignment may override it
-	assignedRole    string // owner-selected role; "none" forces general work
-	connectedAt     time.Time
-	currentTask     *WSTaskAssign
+	// advisorModel / advisorEffort name the SECOND model that reviewed this
+	// contributor's work and the effort it ran at (hivecommons/hive#7760) —
+	// omp's --advisor today; any backend that grows a reviewer role can fill
+	// them. Advisory display metadata exactly like model/reasoningEffort:
+	// shown in fleet, run rows, the activity rail and the PR trailer, never
+	// routed or gated on. Empty for every single-model backend.
+	advisorModel  string
+	advisorEffort string
+	role          string // empty = task-driven mode, "scanner"/"reviewer"/etc. = role mode
+	clientRole    string // relay-requested HIVE_AGENT_ROLE; owner assignment may override it
+	assignedRole  string // owner-selected role; "none" forces general work
+	connectedAt   time.Time
+	currentTask   *WSTaskAssign
 	// currentTaskGen is the assignment GENERATION stamped on currentTask (kubestellar/
 	// hive#2568, the Gate). It is a monotonically increasing token minted per
 	// assignment (task_assign, and the task_progress RESUME path that adopts a task).
@@ -271,7 +279,13 @@ type WSMessage struct {
 	// exactly the previous single-session behavior. Sanitized/bounded before use.
 	Session         string `json:"session,omitempty"`
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
-	TaskID          string `json:"task_id,omitempty"`
+	// AdvisorModel / AdvisorReasoningEffort are the relay's report of a second,
+	// reviewing model (hivecommons/hive#7760): omp's --advisor. Additive and
+	// optional on auth_response and task_progress; a relay without an advisor
+	// omits both and an older hub ignores them. Display metadata only.
+	AdvisorModel           string `json:"advisor_model,omitempty"`
+	AdvisorReasoningEffort string `json:"advisor_reasoning_effort,omitempty"`
+	TaskID                 string `json:"task_id,omitempty"`
 	// TaskGen is the assignment GENERATION / lease token for this task (kubestellar/
 	// hive#2568, the Gate). The hub stamps it on task_assign; the relay echoes it back
 	// on task_progress / task_complete / task_failed. The hub rejects any completion or
@@ -485,7 +499,29 @@ type ActivityEntry struct {
 	CLI       string `json:"cli,omitempty"`
 	Model     string `json:"model,omitempty"`
 	Effort    string `json:"effort,omitempty"`
-	Task      string `json:"task,omitempty"`
+	// AdvisorModel / AdvisorEffort: the second model that reviewed the work
+	// (hivecommons/hive#7760), when the connection reported one.
+	AdvisorModel  string `json:"advisor_model,omitempty"`
+	AdvisorEffort string `json:"advisor_effort,omitempty"`
+	Task          string `json:"task,omitempty"`
+}
+
+// advisorInfo is the optional trailing argument to addActivity: the advisor
+// pair a connection reported (hivecommons/hive#7760). Passed as a value so the
+// many existing call sites that have no connection at hand stay unchanged.
+type advisorInfo struct {
+	Model  string
+	Effort string
+}
+
+// advisor returns the connection's advisor pair for addActivity. Reads the two
+// fields without contributor.mu, exactly as the call sites already read
+// c.model and c.reasoningEffort next to it.
+func (c *ContributorConnection) advisor() advisorInfo {
+	if c == nil {
+		return advisorInfo{}
+	}
+	return advisorInfo{Model: c.advisorModel, Effort: c.advisorEffort}
 }
 
 type ContributeWSHub struct {
@@ -849,7 +885,11 @@ func taskDescOf(task *WSTaskAssign) string {
 	return assignDesc(task.Kind, task.identityKey(), task.Title, task.TaskID)
 }
 
-func (h *ContributeWSHub) addActivity(username, action, role, cli, model, effort, task string) {
+func (h *ContributeWSHub) addActivity(username, action, role, cli, model, effort, task string, advisor ...advisorInfo) {
+	adv := advisorInfo{}
+	if len(advisor) > 0 {
+		adv = advisor[0]
+	}
 	h.activityMu.Lock()
 	if len(h.activity) > 0 && (action == "joined" || action == "left") {
 		last := h.activity[len(h.activity)-1]
@@ -886,14 +926,16 @@ func (h *ContributeWSHub) addActivity(username, action, role, cli, model, effort
 		h.absorbReconnectFlapLocked(username)
 	}
 	entry := ActivityEntry{
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		Username:  username,
-		Action:    action,
-		Role:      role,
-		CLI:       cli,
-		Model:     model,
-		Effort:    effort,
-		Task:      task,
+		Timestamp:     time.Now().UTC().Format(time.RFC3339),
+		Username:      username,
+		Action:        action,
+		Role:          role,
+		CLI:           cli,
+		Model:         model,
+		Effort:        effort,
+		AdvisorModel:  adv.Model,
+		AdvisorEffort: adv.Effort,
+		Task:          task,
 	}
 	h.activity = append(h.activity, entry)
 	if len(h.activity) > maxActivityEntries {
@@ -1135,10 +1177,12 @@ func (h *ContributeWSHub) reconcilePRAttribution(prURL string, contributor *Cont
 	defer cancel()
 	contributor.mu.Lock()
 	meta := ghpkg.InvocationMeta{
-		Agent:   contributor.role,
-		Backend: contributor.cliBackend,
-		Model:   ghpkg.RequestedModel(contributor.cliBackend, contributor.model),
-		Effort:  contributor.reasoningEffort,
+		Agent:         contributor.role,
+		Backend:       contributor.cliBackend,
+		Model:         ghpkg.RequestedModel(contributor.cliBackend, contributor.model),
+		Effort:        contributor.reasoningEffort,
+		AdvisorModel:  contributor.advisorModel,
+		AdvisorEffort: contributor.advisorEffort,
 	}
 	if contributor.capabilities != nil && contributor.capabilities.AgentCLIVersion != "" {
 		meta.Tool = contributor.cliBackend
@@ -1198,18 +1242,20 @@ func (h *ContributeWSHub) appendAbandonedRun(c *ContributorConnection, task *WST
 		provider, _, _ = strings.Cut(c.model, "/")
 	}
 	rec := TaskRunRecord{
-		TaskID:       task.TaskID,
-		Repo:         task.Repo,
-		Number:       task.Number,
-		Username:     c.profile.GitHubUsername,
-		Backend:      c.cliBackend,
-		Provider:     provider,
-		Model:        c.model,
-		Effort:       c.reasoningEffort,
-		Role:         c.role,
-		Outcome:      outcomeAbandoned,
-		AbandonCause: cause,
-		Reason:       abandonReason(cause),
+		TaskID:        task.TaskID,
+		Repo:          task.Repo,
+		Number:        task.Number,
+		Username:      c.profile.GitHubUsername,
+		Backend:       c.cliBackend,
+		Provider:      provider,
+		Model:         c.model,
+		Effort:        c.reasoningEffort,
+		AdvisorModel:  c.advisorModel,
+		AdvisorEffort: c.advisorEffort,
+		Role:          c.role,
+		Outcome:       outcomeAbandoned,
+		AbandonCause:  cause,
+		Reason:        abandonReason(cause),
 	}
 	// Zero when the task was adopted on the resume path without a fresh
 	// assignment (see taskAssignedAt's comment). Left unset rather than
@@ -1907,9 +1953,15 @@ func (s *wsSession) releaseOnDisconnect() {
 			// quarantineCooldownHours quarantine of an issue nobody had failed.
 			// The #2356 duplicate-PR guarantee lives entirely in the timestamp and
 			// is unaffected.
-			if abandonedTask.Number > 0 {
-				h.bookReleaseCooldown(abandonedTask.Repo, abandonedTask.Number)
-			}
+			//
+			// #7770: booked against the task's canonical identity rather than
+			// repo#number, so a Linear/Jira item — Number 0, identity in Key —
+			// gets the same reconnect-window hedge a GitHub issue does instead
+			// of none. For a GitHub issue the key IS "repo#number", byte for
+			// byte, so nothing changes there; a synthetic pr-review task has
+			// no identity and is skipped by the helper, which is what the old
+			// Number > 0 guard was for.
+			h.bookReleaseCooldownKey(abandonedTask.identityKey())
 			// #5097: make the abandonment VISIBLE. Until now this path recorded
 			// nothing an operator could see — the issue showed a "picked up" with
 			// no terminal event ever following it, which is indistinguishable in
@@ -1933,7 +1985,7 @@ func (s *wsSession) releaseOnDisconnect() {
 			h.appendAbandonedRun(s.contributor, abandonedTask, abandonCauseDisconnect, abandonedTaskAt)
 		}
 		h.logger.Info("[contribute-ws] disconnected", "id", s.connID, "username", s.contributor.profile.GitHubUsername)
-		h.addActivity(s.contributor.profile.GitHubUsername, "left", s.contributor.role, s.contributor.cliBackend, s.contributor.model, s.contributor.reasoningEffort, "")
+		h.addActivity(s.contributor.profile.GitHubUsername, "left", s.contributor.role, s.contributor.cliBackend, s.contributor.model, s.contributor.reasoningEffort, "", s.contributor.advisor())
 	}
 	_ = s.conn.Close()
 }
@@ -2002,6 +2054,20 @@ func (s *wsSession) handleAuthResponse(msg WSMessage) (stop bool) {
 	if msg.ReasoningEffort != "" {
 		profile.ReasoningEffort = msg.ReasoningEffort
 	}
+	// #7760: the advisor pair is client text. It is re-serialized into every
+	// fleet poll and lands in PR trailers, so it is HTML-stripped like every
+	// other stored contributor string AND bounded the way the declared
+	// capabilities are (sanitizeCapabilityField: control characters and
+	// newlines collapsed, 64 runes) — a newline here would otherwise start a
+	// new line inside the `— hive:` trailer. Unlike the primary it is NOT
+	// checked against the accepted-models list: it reviewed the work, it did
+	// not do it.
+	advisorModel := sanitizeCapabilityField(sanitizeString(msg.AdvisorModel))
+	advisorEffort := sanitizeCapabilityField(sanitizeString(msg.AdvisorReasoningEffort))
+	if advisorModel != "" {
+		profile.AdvisorModel = advisorModel
+		profile.AdvisorEffort = advisorEffort
+	}
 	if profile.AvatarURL == "" {
 		profile.AvatarURL = fmt.Sprintf("https://github.com/%s.png", profile.GitHubUsername)
 	}
@@ -2064,6 +2130,8 @@ func (s *wsSession) handleAuthResponse(msg WSMessage) (stop bool) {
 		session:         sanitizeSessionLabel(msg.Session),
 		model:           msg.Model,
 		reasoningEffort: msg.ReasoningEffort,
+		advisorModel:    advisorModel,
+		advisorEffort:   advisorEffort,
 		role:            requestedRole,
 		clientRole:      clientRole,
 		assignedRole:    assignedRole,
@@ -2126,7 +2194,7 @@ func (s *wsSession) handleAuthResponse(msg WSMessage) (stop bool) {
 		"cli", msg.CLIBackend,
 		"role", requestedRole,
 	)
-	h.addActivity(profile.GitHubUsername, "joined", requestedRole, msg.CLIBackend, msg.Model, msg.ReasoningEffort, "")
+	h.addActivity(profile.GitHubUsername, "joined", requestedRole, msg.CLIBackend, msg.Model, msg.ReasoningEffort, "", advisorInfo{Model: advisorModel, Effort: advisorEffort})
 
 	select {
 	case s.authDone <- s.contributor:
@@ -2229,11 +2297,13 @@ func (s *wsSession) handleReady(msg WSMessage) (stop bool) {
 	task := h.selectTask(s.contributor)
 	switch {
 	case task == nil:
-		// Defensive backstop only: after #2436 and #2546 every selectTask
-		// path returns an explicit message, so this should not be reached.
-		// Kept so an unforeseen nil still fails safe (no send) rather than
+		// Reached when the claim selectTask committed was released while its
+		// GitHub round-trips were still in flight — the socket dropped mid-mint
+		// and the disconnect path cleared it (#7775). There is nothing to send.
+		// Every other selectTask path returns an explicit message (#2436,
+		// #2546); an unforeseen nil still fails safe (no send) rather than
 		// panicking.
-		h.logger.Info("[contribute-ws] no tasks available",
+		h.logger.Info("[contribute-ws] no task to send",
 			"username", s.contributor.profile.GitHubUsername,
 		)
 	case task.Type == "task_unavailable":
@@ -2256,7 +2326,13 @@ func (s *wsSession) handleReady(msg WSMessage) (stop bool) {
 		)
 	default:
 		if err := s.contributor.send(*task); err != nil {
-			h.logger.Warn("[contribute-ws] failed to send task_assign", "error", err)
+			// #7775: the socket is already gone — typically closed by the
+			// heartbeat loop while this ready waited its turn. Undo the claim so
+			// the disconnect path finds nothing to release: no release cooldown
+			// on an issue the contributor never received, no lease left to
+			// expire, no rate-window slot spent on a task that never shipped.
+			h.logger.Warn("[contribute-ws] failed to send task_assign; releasing the undelivered claim", "error", err, "task", task.TaskID)
+			h.rollbackAssignment(s.contributor, task.TaskID)
 			return true
 		}
 		pickupKey := task.TaskKey
@@ -2267,7 +2343,7 @@ func (s *wsSession) handleReady(msg WSMessage) (stop bool) {
 		if task.Role != "" {
 			taskDesc = fmt.Sprintf("contributor ran %s task: %s", task.Role, taskDesc)
 		}
-		h.addActivity(s.contributor.profile.GitHubUsername, "picked up", s.contributor.role, s.contributor.cliBackend, s.contributor.model, s.contributor.reasoningEffort, taskDesc)
+		h.addActivity(s.contributor.profile.GitHubUsername, "picked up", s.contributor.role, s.contributor.cliBackend, s.contributor.model, s.contributor.reasoningEffort, taskDesc, s.contributor.advisor())
 		h.logger.Info("[contribute-ws] task assigned",
 			"username", s.contributor.profile.GitHubUsername,
 			"task", task.TaskID,
@@ -2424,14 +2500,37 @@ func (s *wsSession) handleTaskProgress(msg WSMessage) {
 			// fields: repo/number/tier are the server's, and the task keeps its
 			// ORIGINAL generation so it stays fenced against any older-generation
 			// straggler. lastLeaseRenew starts the wedged-task clock.
-			s.contributor.mu.Lock()
-			s.contributor.currentTask = &WSTaskAssign{
+			//
+			// The lease's canonical key comes along too (hivecommons/hive#7770).
+			// Every guard that stops two contributors working one item keys on
+			// identityKey() — the activeIssues scan in selectTask, the completion
+			// and failure cooldowns — and identityKey() falls back to "repo#number"
+			// only when Key is empty. For a Linear/Jira item Number is 0 and that
+			// fallback is "", so a rebuild that copied repo and number alone left
+			// a live connection working `acme/repo!ENG-123` with no identity at
+			// all: the item dropped out of the double-assignment guard the moment
+			// the old socket aged out, and finishing it booked a cooldown against
+			// "". GitHub items were untouched only because Number > 0 recovers
+			// their key. The lease has carried the key since #4245 (#5120); this
+			// is the one consumer that never read it. ExternalID is recovered from
+			// the same key so the task's display stays the native key rather than
+			// "#0"; SourceType is not in the lease and a client-declared value is
+			// not adopted here, exactly as repo and number are not.
+			rebuilt := &WSTaskAssign{
 				TaskID: lease.taskID,
 				Kind:   msg.Kind,
 				Repo:   lease.repo,
 				Number: lease.number,
+				Key:    lease.key,
 				Title:  msg.Title,
 			}
+			if lease.number == 0 {
+				if ref, ok := worksource.ParseKey(lease.key); ok {
+					rebuilt.ExternalID = ref.ExternalID
+				}
+			}
+			s.contributor.mu.Lock()
+			s.contributor.currentTask = rebuilt
 			s.contributor.currentTaskGen = lease.gen
 			s.contributor.lastLeaseRenew = time.Now()
 			s.contributor.tmuxOutput = msg.TmuxOutput
@@ -2452,10 +2551,11 @@ func (s *wsSession) handleTaskProgress(msg WSMessage) {
 			// than leave a live, in-flight issue stamped "recently released"
 			// in the failure ledger for the rest of the window. Narrow by
 			// construction: clearReleaseCooldown refuses to touch an issue
-			// that carries a real consecutive-failure count.
-			if lease.number > 0 {
-				h.clearReleaseCooldown(lease.repo, lease.number)
-			}
+			// that carries a real consecutive-failure count. Keyed on the
+			// task's identity (#7770), so the hedge booked for an external
+			// item on disconnect is the one withdrawn here; the key is "" for
+			// a synthetic task and the helper skips it.
+			h.clearReleaseCooldownKey(rebuilt.identityKey())
 
 			h.logger.Info("[contribute-ws] task resumed from server-issued lease",
 				"username", s.contributor.profile.GitHubUsername,
@@ -2509,6 +2609,16 @@ func (s *wsSession) handleTaskProgress(msg WSMessage) {
 			s.contributor.reasoningEffort = msg.ReasoningEffort
 			if s.contributor.profile != nil {
 				s.contributor.profile.ReasoningEffort = msg.ReasoningEffort
+			}
+		}
+		// #7760: the advisor pair refreshes on the same schedule and rule as
+		// the model above — the relay re-reads omp's own records every tick.
+		if adv := sanitizeCapabilityField(sanitizeString(msg.AdvisorModel)); adv != "" {
+			s.contributor.advisorModel = adv
+			s.contributor.advisorEffort = sanitizeCapabilityField(sanitizeString(msg.AdvisorReasoningEffort))
+			if s.contributor.profile != nil {
+				s.contributor.profile.AdvisorModel = s.contributor.advisorModel
+				s.contributor.profile.AdvisorEffort = s.contributor.advisorEffort
 			}
 		}
 		// SECURITY (v4, kept over v2 #3153): v4 deliberately has NO
@@ -2685,7 +2795,7 @@ func (s *wsSession) handleTaskComplete(msg WSMessage) {
 			if s.contributor.cliBackend == "pi" {
 				provider, _, _ = strings.Cut(s.contributor.model, "/")
 			}
-			h.addActivity(s.contributor.profile.GitHubUsername, "completed", s.contributor.role, s.contributor.cliBackend, s.contributor.model, s.contributor.reasoningEffort, completedDesc)
+			h.addActivity(s.contributor.profile.GitHubUsername, "completed", s.contributor.role, s.contributor.cliBackend, s.contributor.model, s.contributor.reasoningEffort, completedDesc, s.contributor.advisor())
 			h.logger.Info("[contribute-ws] task complete",
 				"username", s.contributor.profile.GitHubUsername,
 				"task", msg.TaskID,
@@ -2715,6 +2825,8 @@ func (s *wsSession) handleTaskComplete(msg WSMessage) {
 				Provider:         provider,
 				Model:            s.contributor.model,
 				Effort:           s.contributor.reasoningEffort,
+				AdvisorModel:     s.contributor.advisorModel,
+				AdvisorEffort:    s.contributor.advisorEffort,
 				Role:             s.contributor.role,
 				Outcome:          "completed",
 				CompletionSignal: normalizeCompletionSignal(msg.CompletionSignal),
@@ -2887,7 +2999,7 @@ func (s *wsSession) handleTaskFailed(msg WSMessage) {
 			if s.contributor.cliBackend == "pi" {
 				provider, _, _ = strings.Cut(s.contributor.model, "/")
 			}
-			h.addActivity(s.contributor.profile.GitHubUsername, "failed", s.contributor.role, s.contributor.cliBackend, s.contributor.model, s.contributor.reasoningEffort, failedDesc)
+			h.addActivity(s.contributor.profile.GitHubUsername, "failed", s.contributor.role, s.contributor.cliBackend, s.contributor.model, s.contributor.reasoningEffort, failedDesc, s.contributor.advisor())
 			h.logger.Info("[contribute-ws] task failed",
 				"username", s.contributor.profile.GitHubUsername,
 				"task", msg.TaskID,
@@ -2904,18 +3016,20 @@ func (s *wsSession) handleTaskFailed(msg WSMessage) {
 			// the same bounded, fleet-view-displayed text stored on
 			// lastFailure above; failure_kind is already normalized.
 			runRec := TaskRunRecord{
-				TaskID:      msg.TaskID,
-				TaskGen:     msg.TaskGen,
-				Username:    s.contributor.profile.GitHubUsername,
-				Backend:     s.contributor.cliBackend,
-				Provider:    provider,
-				Model:       s.contributor.model,
-				Effort:      s.contributor.reasoningEffort,
-				Role:        s.contributor.role,
-				Outcome:     "failed",
-				FailureKind: failureKind,
-				Reason:      msg.Reason,
-				Permanent:   msg.Permanent,
+				TaskID:        msg.TaskID,
+				TaskGen:       msg.TaskGen,
+				Username:      s.contributor.profile.GitHubUsername,
+				Backend:       s.contributor.cliBackend,
+				Provider:      provider,
+				Model:         s.contributor.model,
+				Effort:        s.contributor.reasoningEffort,
+				AdvisorModel:  s.contributor.advisorModel,
+				AdvisorEffort: s.contributor.advisorEffort,
+				Role:          s.contributor.role,
+				Outcome:       "failed",
+				FailureKind:   failureKind,
+				Reason:        msg.Reason,
+				Permanent:     msg.Permanent,
 				// #7317 item 3: the pane at the moment of failure. The relay
 				// captures it BEFORE stopping the agent precisely so this
 				// report carries the evidence (see failCurrentTask); until now
