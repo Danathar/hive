@@ -685,7 +685,7 @@ jobs:
           src/scripts/publish-image-tags.sh \
             ghcr.io/${{ github.repository_owner }}/hive-contributor /tmp/contrib-digests \
             '${{ github.ref_name }}' '${{ needs.gate.outputs.sha }}' '${{ github.run_number }}' \
-            v5 true edge
+            v5 false edge
 
       # Cross-org mirror — same mechanics, same missing-secret asymmetry, and
       # same "one credential per registry host" ordering constraint as the
@@ -726,7 +726,7 @@ jobs:
           BRANCH: ${{ github.ref_name }}
           GIT_SHA: ${{ needs.gate.outputs.sha }}
           # Lockstep with the publish-image-tags.sh args above.
-          INCLUDE_LATEST: "true"
+          INCLUDE_LATEST: "false"
           RELEASE_BRANCH: "v5"
           CHANNELS: "edge"
         run: |
@@ -876,7 +876,7 @@ jobs:
           src/scripts/publish-image-tags.sh \
             ghcr.io/${{ github.repository_owner }}/hive-hub /tmp/hub-digests \
             '${{ github.ref_name }}' '${{ needs.gate.outputs.sha }}' '${{ github.run_number }}' \
-            v5 true edge
+            v5 false edge
 
       # Cross-org mirror — same mechanics, same missing-secret asymmetry, and
       # same "one credential per registry host" ordering constraint as the
@@ -917,7 +917,7 @@ jobs:
           BRANCH: ${{ github.ref_name }}
           GIT_SHA: ${{ needs.gate.outputs.sha }}
           # Lockstep with the publish-image-tags.sh args above.
-          INCLUDE_LATEST: "true"
+          INCLUDE_LATEST: "false"
           RELEASE_BRANCH: "v5"
           CHANNELS: "edge"
         run: |

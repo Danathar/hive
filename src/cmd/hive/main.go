@@ -1422,6 +1422,11 @@ func (b *boot) wireBootClosures() {
 			IssueClaimed: func(repo string, number int) (github.IssueClaim, bool) {
 				return getClaimLedger(b.logger).Lookup(repo, number)
 			},
+			// #7871: and write access for the one verified fact a no_work_needed
+			// verdict produces — the PR/commit that already settled the issue.
+			RecordIssueClaim: func(c github.IssueClaim) error {
+				return getClaimLedger(b.logger).Record(c)
+			},
 			HookFire: func(ctx context.Context, p hooks.Payload) {
 				hookDispatcher().Fire(ctx, p)
 			},
