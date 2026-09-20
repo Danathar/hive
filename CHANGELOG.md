@@ -11,6 +11,16 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-20 (v4.68.5)
+
+### Fixed
+
+- `bin/hive-open-pr.sh`: on a python3-less host, a control character in the title/body/repo now aborts with exit 3 and no request file — previously the awk refusal only ended a command substitution, so the request was written with that field silently emptied (#7839).
+
+### Security
+
+- `just contribute-hive claude` (container mode) no longer copies the contributor's entire `~/.claude` into the agent container ([#7836](https://github.com/hivecommons/hive/issues/7836)). That directory is not just credentials: it holds every Claude Code transcript the contributor has ever had on the machine, the full prompt history, the paste cache, file history, plans, per-project memory and their private `CLAUDE.md` — 137 MB on the reporting host — and it was staged wholesale and mounted read-write at `/home/dev/.claude`, where an agent whose job is to run third-party repositories' test suites for real could read all of it. The recipe now stages an allowlist, file by file: `.credentials.json` (the OAuth token, the one file the container needs) and `settings.json` (the contributor's own Claude Code configuration). Claude Code recreates the rest on first run. The H6 boundary is unchanged — the container still writes to a throwaway copy that is deleted on exit — and the recipe now prints a `Staged:` line naming exactly what it copied, so the exposure is visible rather than silent.
+
 ## 2026-09-20 (v4.68.4)
 
 ### Fixed
