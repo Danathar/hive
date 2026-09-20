@@ -11,6 +11,39 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-20 (v4.68.9)
+
+### Changed
+
+- Proxy: `handleTransparentTLS`'s agent attribution (socket-table UID → agent, hive-internal naming, unidentified fallbacks) is factored into `attributeTransparentConn` and tested directly, and the Copilot-sniff gate, non-inspected tunnel (ClientHello replayed verbatim) and tunnel failure paths are driven end to end over loopback with a `tunnelDial` test seam — no behaviour change. ([#7793](https://github.com/hivecommons/hive/issues/7793))
+
+## 2026-09-20 (v4.68.8)
+
+### Changed
+
+- Docs: `contributor-relay.md` now states the contribute completion contract in one place — *a `complete` verdict is a claim; the ledger books what the evidence supports* — with a table of evidence classes (verified PR, verified `no_work_needed` citation, plain `no_work_needed`, evidence-less PR-less `complete`, legacy `unknown` signal) and what each books, tying #7858/#7861/#7862/#7871/#7879 to the rule they share. ([#7864](https://github.com/hivecommons/hive/issues/7864))
+
+### Fixed
+
+- A contributor socket that dies without a close frame (`1006`) and reconnects within a few seconds no longer books an `abandoned_disconnect` run row and a "released: connection lost" activity row for a task that resumed: the visible booking waits `HIVE_CONTRIBUTE_DISCONNECT_GRACE` (default 5s) and is withdrawn if a live connection re-adopts the task or the task finishes first. The short double-assign release cooldown is unchanged. (#7838)
+- The contribute hub now parses a `no_work_needed` verdict reason for the PR (`#N`, `owner/repo#N`, pull URL) or commit SHA the agent says already settled the issue, verifies it against GitHub (merged into the task repo before dispatch, on the default branch, or open by another author) and records it in the duplicate-PR claim ledger — so a fix that landed without referencing the issue suppresses it for the merged-claim window instead of being re-discovered by a fresh contributor every cooldown. Unverifiable citations record nothing. (#7871)
+- Contributor relay: advisor `⟦concern⟧`/`⟦blocker⟧` notes left under the final `HIVE_VERDICT` are no longer lost with the CLI — they are recorded under an "Advisor notes not addressed before completion" heading in the task summary and posted as a comment on the task's PR. A *new* `⟦blocker⟧` under the second verdict earns one more follow-up (cap 2); nothing earns a third. ([#7879](https://github.com/hivecommons/hive/issues/7879))
+
+## 2026-09-20 (v4.68.7)
+
+### Changed
+
+- Contribute prompt: the agent is told that opening the PR is finishing — do not wait for CI, checks, or review bots before printing `HIVE_VERDICT`; hive's PR review cycle owns post-PR follow-up (#7858).
+
+### Fixed
+
+- Relay and agent pane classifiers now recognise Claude Code 2.1.x's "API Error: Connection closed mid-response" as a known transient error (older builds said "lost"); the relay's list also gains "stalled mid-stream" to match the hub's. The outcome was already a retry via the #5121 unknown-error fallback; this makes the operator log say so. (#7855)
+- Contributor relay: when an agent prints `HIVE_VERDICT: no_work_needed` and then a narrated `HIVE_VERDICT: complete` for the same task, the relay now reports `no_work_needed` with its reason instead of a PR-less `complete` that the hub degraded to `idle`; a PR the task opened still overrides it (#7861).
+- A `HIVE_VERDICT: complete` with no PR behind it is no longer credited as a completion: the hub books it evidence-less (short non-escalating cooldown, no `TasksCompleted` credit) whenever the relay reports a `verdict` or `chrome_idle` signal, and the relay gives an issue task whose `complete` claims a PR that does not exist one follow-up — open it or downgrade to `no_work_needed` — before finalizing. A PR cited by number on the verdict line is now verified like a URL. (#7862)
+- Relay: a tmux session that disappears under the relay (an attached client ended the pane's shell while the CLI was relaunching) is now detected on the next readiness poll and recreated with the CLI relaunched into it; if it cannot be recreated the current task is failed as `environment` immediately instead of after the ten-minute readiness timeout. (#7863)
+- Contributor container: the interactive tmux pane now exports `COLORTERM=truecolor` (operator value honoured) and passes RGB through, so omp/claude/codex render the same palette in the container as on the host (#7866).
+- Contribute: a GitHub App token mint that fails with 422/404 for the chosen item's repository (renamed, deleted, or removed from the installation) now excludes that repo from selection for 10 min and selects again from the remaining candidates, instead of failing every selection for every contributor with `token_mint_failed`; when nothing else is admissible the reason is `repo_unmintable` and the log names the repo (#7869).
+
 ## 2026-09-20 (v4.68.6)
 
 ### Fixed
