@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-20 (v4.68.2)
+
+### Fixed
+
+- `bin/issue-classifier.sh` no longer dies under `set -euo pipefail` when `HIVE_PROJECT_YAML` is missing and there is no `examples/` directory beside the script (a deployed copy without the repo checkout); it falls through to the built-in defaults. Its contract suite now runs in CI (#7810).
+
 ## 2026-09-20 (v4.68.1)
 
 ### Fixed
