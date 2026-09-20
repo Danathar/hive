@@ -201,6 +201,28 @@ const TRANSIENT_API_ERROR_NUDGE_COOLDOWN_MS = 90000;
 const AUTONOMY_NUDGE_MESSAGE =
   'no human is available to answer, so proceed autonomously with your best judgment';
 
+// What the relay types when a backend's own reviewer posts notes UNDER the
+// agent's HIVE_VERDICT line (hivecommons/hive#7759). omp's `--advisor` runtime
+// reviews every turn passively and injects its notes after the turn ends, so
+// its review of the agent's FINAL turn lands on the pane after the sentinel —
+// and the sentinel being final (#5376, #7662, #7733) means the relay used to
+// kill the CLI with those notes unread. Two live tasks each ended under a stack
+// of ⟦concern⟧ notes; one was a real, cheap fix the agent would have made.
+//
+// The agent is asked ONCE per task to address them and re-print the verdict;
+// the second verdict is final whatever appears under it. See
+// maybeRequestPostVerdictReview for the bound and POST_VERDICT_REVIEW_MARKERS
+// for which backends and which notes qualify.
+//
+// The opening phrase doubles as the anchor postVerdictReviewAnswered() looks
+// for in the CLI's echo of this message, so that a verdict is only read as the
+// SECOND one when it sits below that echo. Keep it at the very start, short
+// enough to survive tmux wrapping at any sane pane width, and keep
+// POST_VERDICT_REVIEW_ANCHOR a verbatim prefix of it.
+const POST_VERDICT_REVIEW_MESSAGE =
+  'Advisor notes were posted after your verdict. Address the concerns that apply to your change, skip nits and anything already handled, then print the HIVE_VERDICT line again on its own line.';
+const POST_VERDICT_REVIEW_ANCHOR = 'Advisor notes were posted after your verdict';
+
 const BYTES_PER_MIB = 1024 * 1024;
 const DEFAULT_HEADLESS_MAX_OUTPUT_MIB = 16;
 const DEFAULT_HEADLESS_MAX_OUTPUT_BYTES = DEFAULT_HEADLESS_MAX_OUTPUT_MIB * BYTES_PER_MIB;
@@ -281,6 +303,16 @@ const ABSOLUTE_TASK_DEADLINE_MS = Number(process.env.HIVE_ABSOLUTE_TASK_DEADLINE
 // process instead, so a wedged CLI is killed and reported failed rather than
 // hanging the pod forever — and, per #5321, a long-but-live headless run is no
 // longer killed at 30 minutes either.
+//
+// This bound only holds if the HUB agrees (hivecommons/hive#7778). The hub's
+// own lease on the task is a progress lease: it is renewed by every
+// task_progress frame and reclaimed — the task revoked, the issue put in
+// failure cooldown — after 30 minutes without one. The interactive path feeds
+// it from progressTick(); the headless path used to send a single task_progress
+// when the child started and nothing more, so the hub took every headless task
+// back at 30 minutes regardless of this ceiling, and the revoke killed a live
+// child mid-run. runHeadlessTask() now reports progress on the same cadence as
+// the interactive path for as long as its child is alive (headlessProgressTick).
 const HEADLESS_TASK_TIMEOUT_MS = Number(process.env.HIVE_HEADLESS_TASK_TIMEOUT_MS) || ABSOLUTE_TASK_DEADLINE_MS;
 const NETWORK_ERROR_RETRY_DELAY_MS = 5000;
 // After the hub sends an explicit task_unavailable negative-ack (no admissible
@@ -1003,6 +1035,14 @@ const hubs = rawHubList.map((url, i) => ({
   // this hub, so a reconnect loop does not repeat the same advisory line.
   protocolDriftReported: false,
   serverCapabilities: [],
+  // #7732: true from the moment a `ready` is actually transmitted to this hub
+  // until the hub answers it (task_assign or task_unavailable), or the
+  // conversation it belonged to ends (socket close, re-auth). While it is
+  // set, this relay has ALREADY asked for work and must not ask again: the
+  // hub reads a second `ready` as "give back whatever you were just assigned"
+  // (#2545). Maintained in sendTo() and the answer handlers, never at a
+  // `ready` call site — see armCLIReadyWait for the one reader.
+  readyOutstanding: false,
 }));
 // Index into hubs[] of the hub we are currently soliciting work from (sent it
 // the last 'ready'), or that owns currentTask. Round-robins forward on an
@@ -1208,6 +1248,9 @@ function sendTo(hub, msg) {
   }
   if (hub && hub.ws && hub.ws.readyState === WebSocket.OPEN) {
     hub.ws.send(JSON.stringify(msg));
+    // #7732: recorded only for a frame that actually left, so a `ready`
+    // dropped on a closed socket does not look like an open question.
+    if (msg && msg.type === 'ready') hub.readyOutstanding = true;
   }
 }
 
@@ -1583,7 +1626,10 @@ function effectiveReasoningEffort() {
   if (BACKEND === 'agy') return modelFlagFor() ? agyEffort : '';
   // muse applies effort with or without a model, but only for values it takes.
   if (BACKEND === 'muse') return MUSE_EFFORTS.includes(REASONING_EFFORT) ? REASONING_EFFORT : '';
-  return REASONING_EFFORT || '';
+  // omp takes its effort from its own config (the `:level` suffix on the model
+  // selection), read by detectOmpSelection; the env var still wins when set,
+  // the same precedence effectiveModel() applies (#7760).
+  return REASONING_EFFORT || detectedEffort || '';
 }
 
 // --- Model auto-detection from the CLI's own session transcript (#4117) ----
@@ -1732,12 +1778,179 @@ function detectBobModel() {
   return '';
 }
 
-const MODEL_DETECTORS = { claude: detectClaudeModel, copilot: detectCopilotModel, bob: detectBobModel };
+// --- omp: primary model + effort, and the advisor's (hivecommons/hive#7760) ---
+//
+// omp chooses its models from its own config rather than from a flag, so an
+// omp contributor almost never exports AGENT_MODEL — the env var would be a
+// second, drift-prone copy — and showed up everywhere in hive as `omp` with
+// `model: null`. With `--advisor` two models did the work and hive named
+// neither. omp records everything needed locally and machine-readably:
+//
+//   ~/.omp/agent/config.yml        modelRoles: { default: <sel>, advisor: <sel> }
+//                                  advisor: { enabled: true }
+//   ~/.omp/agent/sessions/<slug>/<ts>_<id>.jsonl
+//                                  first record {"type":"model_change","model":
+//                                  "openai-codex/gpt-5.6-terra", ...} — the
+//                                  primary, in the shape the claude/copilot
+//                                  detectors read
+//   ~/.omp/agent/sessions/<slug>/<ts>_<id>/__advisor.jsonl
+//                                  the advisor's sidecar session; its assistant
+//                                  records carry {"provider": ..., "model": ...}
+//
+// A selection is spelled `provider/model[:effort]`; the suffix is omp's
+// thinking level. The primary comes from the newest session's model_change
+// (the model ACTUALLY running, so a mid-task /model switch is reflected) with
+// config.yml's modelRoles.default as the fallback; its effort comes from the
+// config spelling, since the session record carries none. The advisor comes
+// from config.yml's modelRoles.advisor when the advisor is enabled, or from a
+// __advisor.jsonl sidecar next to the newest session when one exists. Both are
+// reported as `provider/model` — provider travels inside the model, as for pi —
+// with the effort split off into its own field. Anything not found degrades
+// to '' and is omitted from the wire, so a bare omp with no advisor renders
+// exactly as a single-model backend does.
+const OMP_AGENT_DIR = process.env.HIVE_OMP_AGENT_DIR || process.env.PI_CODING_AGENT_DIR || path.join(MODEL_DETECT_HOME, '.omp', 'agent');
+// The thinking levels omp accepts as a `:suffix`; pi's plus the wider codex
+// and muse vocabularies. Only one of these is split off as the effort, so an
+// Ollama-style tag (`llama3:8b`) or a revision stays part of the model name.
+const OMP_EFFORT_LEVELS = ['off', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+
+// splitOmpSelection turns `provider/model[:effort]` into { model, effort },
+// keeping the provider inside model. Returns empty fields for junk.
+function splitOmpSelection(raw) {
+  if (typeof raw !== 'string') return { model: '', effort: '' };
+  let value = raw.trim().replace(/^["']|["']$/g, '');
+  if (!value || /\s/.test(value)) return { model: '', effort: '' };
+  let effort = '';
+  const colon = value.lastIndexOf(':');
+  if (colon > 0) {
+    const suffix = value.slice(colon + 1).toLowerCase();
+    if (OMP_EFFORT_LEVELS.includes(suffix)) {
+      effort = suffix;
+      value = value.slice(0, colon);
+    }
+  }
+  return { model: looksLikeModelName(value) ? value : '', effort };
+}
+
+// parseOmpConfig reads the two things this relay needs from omp's config.yml
+// with the same deliberately small YAML subset omp-backend.js uses: the scalar
+// values under `modelRoles:` and the `enabled:` flag under `advisor:`.
+// Anything else in the file is ignored; a missing file yields empty fields.
+function parseOmpConfig(configFile) {
+  const out = { defaultSelection: '', advisorSelection: '', advisorEnabled: null };
+  let text;
+  try { text = fs.readFileSync(configFile, 'utf8'); } catch (_) { return out; }
+  let section = '';
+  for (const rawLine of text.split('\n')) {
+    const line = rawLine.replace(/\s+#.*$/, '').replace(/\r$/, '');
+    if (line.trim() === '') continue;
+    if (!/^\s/.test(line)) {
+      section = /^modelRoles:\s*$/.test(line) ? 'modelRoles' : (/^advisor:\s*$/.test(line) ? 'advisor' : '');
+      continue;
+    }
+    const m = /^\s+([A-Za-z0-9_-]+):\s*(.+?)\s*$/.exec(line);
+    if (!m) continue;
+    const value = m[2].replace(/^["']|["']$/g, '');
+    if (section === 'modelRoles' && m[1] === 'default') out.defaultSelection = value;
+    else if (section === 'modelRoles' && m[1] === 'advisor') out.advisorSelection = value;
+    else if (section === 'advisor' && m[1] === 'enabled') out.advisorEnabled = /^(true|yes|on)$/i.test(value);
+  }
+  return out;
+}
+
+// ompSessionFiles lists the transcript files under ~/.omp/agent/sessions/*/,
+// newest-first candidates for newestByMtime. The advisor sidecar lives in a
+// directory named after its session (`<ts>_<id>/__advisor.jsonl`) and is
+// deliberately not a candidate here: it would otherwise win the mtime race and
+// report the advisor as the primary.
+function ompSessionFiles() {
+  const sessionsDir = path.join(OMP_AGENT_DIR, 'sessions');
+  const files = [];
+  for (const d of fs.readdirSync(sessionsDir, { withFileTypes: true })) {
+    if (!d.isDirectory()) continue;
+    const dir = path.join(sessionsDir, d.name);
+    for (const f of fs.readdirSync(dir)) {
+      if (f.endsWith('.jsonl') && !f.startsWith('__')) files.push(path.join(dir, f));
+    }
+  }
+  return files;
+}
+
+// detectOmpSelection returns { model, effort, advisorModel, advisorEffort },
+// each '' when not found. Never throws: every read is best-effort, and a
+// missing sessions directory simply means "not running yet", which the
+// config.yml fallback still answers.
+function detectOmpSelection() {
+  const config = parseOmpConfig(path.join(OMP_AGENT_DIR, 'config.yml'));
+  const configured = splitOmpSelection(config.defaultSelection);
+  const out = { model: configured.model, effort: configured.effort, advisorModel: '', advisorEffort: '' };
+
+  let newest = null;
+  try { newest = newestByMtime(ompSessionFiles()); } catch (_) {}
+  if (newest) {
+    // The model_change record is the session's FIRST line, so the newest
+    // record wins on a tail read only when the session switched models
+    // late; read the whole tail newest-first exactly like the other detectors.
+    try {
+      for (const obj of tailLinesReversed(newest)) {
+        if (obj && obj.type === 'model_change' && looksLikeModelName(obj.model)) {
+          const running = splitOmpSelection(obj.model);
+          if (running.model) {
+            out.model = running.model;
+            // A session record carries the model but not the level; keep the
+            // configured effort only when it was configured for this model.
+            out.effort = running.effort || (configured.model === running.model ? configured.effort : '');
+          }
+          break;
+        }
+      }
+    } catch (_) {}
+  }
+
+  const advisorFromConfig = splitOmpSelection(config.advisorSelection);
+  let sidecar = null;
+  if (newest) {
+    const candidate = path.join(newest.slice(0, -'.jsonl'.length), '__advisor.jsonl');
+    try { if (fs.statSync(candidate).isFile()) sidecar = candidate; } catch (_) {}
+  }
+  if (config.advisorEnabled !== false && (config.advisorEnabled === true || sidecar)) {
+    out.advisorModel = advisorFromConfig.model;
+    out.advisorEffort = advisorFromConfig.effort;
+    if (sidecar) {
+      try {
+        for (const obj of tailLinesReversed(sidecar)) {
+          if (obj && looksLikeModelName(obj.model)) {
+            const provider = typeof obj.provider === 'string' && obj.provider && !obj.model.includes('/') ? `${obj.provider}/` : '';
+            out.advisorModel = `${provider}${obj.model}`;
+            if (advisorFromConfig.model !== out.advisorModel) out.advisorEffort = '';
+            break;
+          }
+        }
+      } catch (_) {}
+    }
+  }
+  return out;
+}
+
+const MODEL_DETECTORS = { claude: detectClaudeModel, copilot: detectCopilotModel, bob: detectBobModel, omp: () => detectOmpSelection().model };
+
+// Backends whose transcript yields more than a model name: the effort in
+// effect and a second, reviewing model (#7760). Read on the same schedule as
+// MODEL_DETECTORS — at auth and on every progress tick — and reported through
+// effectiveReasoningEffort() / advisorFields() below.
+const SELECTION_DETECTORS = { omp: detectOmpSelection };
 
 // The last model detected from the transcript. Refreshed at auth and on every
 // progress tick, so a mid-session `/model` switch is reflected within one
 // PROGRESS_REPORT_INTERVAL_MS.
 let detectedModel = '';
+// The rest of a SELECTION_DETECTORS reading (#7760): the effort in effect when
+// the backend carries it in its own config rather than a flag, and the second
+// model that reviewed the work. All '' for backends without a selection
+// detector, which leaves every wire field exactly as before.
+let detectedEffort = '';
+let detectedAdvisorModel = '';
+let detectedAdvisorEffort = '';
 
 // detectRunningModel reads the transcript once and returns the model, or ''.
 // Never throws; never runs at all when AGENT_MODEL is set (explicit intent
@@ -1749,15 +1962,60 @@ function detectRunningModel() {
   try { return sanitizeDeclaredValue(detector() || ''); } catch (_) { return ''; }
 }
 
+// detectRunningSelection is detectRunningModel's richer sibling for the
+// backends in SELECTION_DETECTORS: one read of the transcript and config
+// yields the model, its effort and the advisor pair, each sanitized the same
+// way a detected model is. Null for every other backend, and on any error.
+function detectRunningSelection() {
+  const detector = SELECTION_DETECTORS[BACKEND];
+  if (!detector) return null;
+  try {
+    const sel = detector() || {};
+    return {
+      model: sanitizeDeclaredValue(sel.model || ''),
+      effort: sanitizeDeclaredValue(sel.effort || ''),
+      advisorModel: sanitizeDeclaredValue(sel.advisorModel || ''),
+      advisorEffort: sanitizeDeclaredValue(sel.advisorEffort || ''),
+    };
+  } catch (_) { return null; }
+}
+
 // refreshDetectedModel re-detects and returns the model currently in effect
-// under the fixed precedence (AGENT_MODEL → detected → '').
+// under the fixed precedence (AGENT_MODEL → detected → ''). For a backend with
+// a selection detector the same read also refreshes the detected effort and
+// the advisor pair (#7760), so a mid-task change to any of them reaches the
+// hub on the next progress tick along with the model.
 function refreshDetectedModel() {
-  const m = detectRunningModel();
+  const sel = detectRunningSelection();
+  // AGENT_MODEL wins over detection for the primary exactly as before; the
+  // advisor has no env var, so it is always what the CLI reports.
+  const m = sel ? (MODEL ? '' : sel.model) : detectRunningModel();
   if (m && m !== detectedModel) {
     detectedModel = m;
     console.log(`Detected running model from ${BACKEND} session transcript: ${m}`);
   }
+  if (sel) {
+    detectedEffort = sel.effort;
+    if (sel.advisorModel !== detectedAdvisorModel || sel.advisorEffort !== detectedAdvisorEffort) {
+      detectedAdvisorModel = sel.advisorModel;
+      detectedAdvisorEffort = sel.advisorEffort;
+      if (detectedAdvisorModel) {
+        console.log(`Detected ${BACKEND} advisor model: ${detectedAdvisorModel}${detectedAdvisorEffort ? ` (${detectedAdvisorEffort})` : ''}`);
+      }
+    }
+  }
   return effectiveModel();
+}
+
+// advisorFields returns the optional advisor pair (#7760) for the auth frame
+// and for progress reports: the second model that reviewed this work and the
+// effort it ran at. Omitted entirely when there is none — an older hub, or a
+// backend with no advisor, sees no new field.
+function advisorFields() {
+  const out = {};
+  if (detectedAdvisorModel) out.advisor_model = detectedAdvisorModel;
+  if (detectedAdvisorEffort) out.advisor_reasoning_effort = detectedAdvisorEffort;
+  return out;
 }
 
 // effectiveModel is the model counterpart of effectiveReasoningEffort(): the
@@ -1775,6 +2033,7 @@ function progressModelFields() {
   const effort = effectiveReasoningEffort();
   if (model) out.model = model;
   if (effort) out.reasoning_effort = effort;
+  Object.assign(out, advisorFields());
   return out;
 }
 
@@ -1971,6 +2230,28 @@ function createBoundedOutputCapture(maxBytes) {
   };
 }
 
+// headlessProgressFrame is the task_progress a headless run sends — once when
+// the child starts, and then on every progress tick while it is alive (#7778).
+// Nothing is scraped: a live child IS the progress signal in this mode, exactly
+// as the hub's lease model needs ("still reporting" means "still alive").
+function headlessProgressFrame(task) {
+  return { type: 'task_progress', seq: nextSeq(), task_id: task.task_id, task_gen: task.task_gen, kind: task.kind, repo: task.repo, number: task.number, title: task.title, status: 'working', ...effectiveSelectionFields() };
+}
+
+// headlessProgressTick is the headless analogue of progressTick(), armed on the
+// same progressInterval handle and on the same PROGRESS_REPORT_INTERVAL_MS
+// cadence so the hub's 30-minute progress lease is renewed for a headless task
+// the way it is for an interactive one (hivecommons/hive#7778). Every task-exit
+// path already clears progressInterval, so a tick can only run while the relay
+// believes the task is live; the guards below make it a no-op if the child has
+// gone or the assignment has changed hands, so a stale timer can never renew a
+// lease for work that is not happening.
+function headlessProgressTick(task) {
+  if (!currentTask || currentTask.task_id !== task.task_id || currentTask.task_gen !== task.task_gen) return;
+  if (!headlessChild || headlessChild.killed) return;
+  send(headlessProgressFrame(task));
+}
+
 function runHeadlessTask(task) {
   const prompt = task.prompt || `Work on ${task.kind} ${task.repo}#${task.number}: ${task.title}`;
   if (!headlessSupportsBackend()) {
@@ -1997,7 +2278,7 @@ function runHeadlessTask(task) {
   const { bin, args } = built;
   console.log(`Headless: running ${bin} (one-shot) for ${task.repo}#${task.number}`);
   writeHeadlessStatus(HEADLESS_STATE_WORKING, { task_id: task.task_id, task_gen: task.task_gen, repo: task.repo, number: task.number, result: 'working' });
-  send({ type: 'task_progress', seq: nextSeq(), task_id: task.task_id, task_gen: task.task_gen, kind: task.kind, repo: task.repo, number: task.number, title: task.title, status: 'working', ...effectiveSelectionFields() });
+  send(headlessProgressFrame(task));
 
   let settled = false;
   const finish = (fn) => { if (settled) return; settled = true; fn(); };
@@ -2025,8 +2306,20 @@ function runHeadlessTask(task) {
   // killed it (found live by bin/test_backend_smoke.sh). Close stdin for
   // every backend — a one-shot child has no interactive input coming.
   if (headlessChild.stdin) headlessChild.stdin.end();
+  // #7778: keep the hub's progress lease alive for as long as the child is.
+  // Without this the hub heard exactly one task_progress per headless task and
+  // reclaimed it at wsTaskTimeout (30 min), two hours or more before the
+  // ceiling above — killing a live run and cooling down its issue. Reuses the
+  // interactive path's handle so every task-exit path (completion, failure,
+  // revoke, shutdown) already stops it.
+  if (progressInterval) clearInterval(progressInterval);
+  progressInterval = setInterval(() => headlessProgressTick(task), PROGRESS_REPORT_INTERVAL_MS);
   headlessChild.on('close', (code, signal) => {
     clearTimeout(timeout);
+    // The child is gone: stop renewing the hub's lease for it (#7778). Cleared
+    // here rather than only in the exit paths below because the revoked-task
+    // return just under this must not leave a timer running either.
+    if (progressInterval) { clearInterval(progressInterval); progressInterval = null; }
     headlessChild = null;
     // Tokens can appear in agent output; redact before the tail leaves the host.
     const outText = output.truncated()
@@ -2452,13 +2745,20 @@ function waitForCLI() {
 
 let cliReady = false;
 let pendingTask = null;
+// The task_id the queued prompt belongs to (hivecommons/hive#7779), stamped
+// from currentTask when the prompt is queued. A queued prompt is only ever a
+// task's prompt, and it must die with that task: a revoke or failure that
+// lands while the CLI is still coming up used to leave the prompt in the queue,
+// and the readiness callback then typed it into the fresh CLI — the agent
+// started working an issue the hub had already taken back and possibly handed
+// to someone else, while currentTask said the relay held nothing. Every
+// task-exit path now discards the queue, and flushPendingTask() refuses to type
+// a prompt whose owner is not the task the relay currently holds.
+let pendingTaskId = null;
 // True once a CLI-readiness wait has timed out and we handed its task back.
 // Used so the eventual recovery re-advertises availability to the hub, which
 // we deliberately withheld at failure time (see armCLIReadyWait).
 let cliReadyFailed = false;
-// Set only by an interactive revoke. The next ready is delayed until a fresh CLI is confirmed.
-let readyAfterInteractiveRevoke = false;
-let readyAdvertisedForIdleTaskSlot = false;
 
 // False until the CURRENT task's prompt actually reached the pane
 // (kubestellar/hive#5650). tmuxSendKeys() queues rather than types whenever the
@@ -2515,22 +2815,55 @@ if (CONTRIBUTOR_MODE === MODE_HEADLESS) {
 // NOT re-advertise 'ready' until the CLI genuinely reaches its prompt.
 // Otherwise it would immediately accept another task it still cannot run and
 // churn one task per timeout window forever.
+//
+// On readiness the relay advertises AT MOST ONCE, and only when three things
+// hold: it is idle, the hub it would ask has authenticated it, and no earlier
+// `ready` to that hub is still awaiting an answer (hub.readyOutstanding,
+// #7732). The third guard is what makes this callback safe to arm from every
+// task-exit path. finishCurrentTask()/failCurrentTask() already send `ready`
+// themselves and THEN relaunch the CLI, which arms this; with a backend whose
+// pane reads ready on the very first waitForCLI() poll (omp sits at its prompt
+// after the two Ctrl-Cs), this callback ran before the hub could possibly have
+// answered and sent a second `ready` in the same event-loop turn. The hub
+// answered the first with an assignment and read the second as the relay
+// giving that assignment back (#2545): an abandoned_handback row, a cooldown
+// on the fresh task, and a third assignment the relay rejected because it was
+// already running the second. The interactive-revoke path had the same shape
+// from two sends inside this one callback.
+//
+// The cases this single condition replaces were all instances of it: the
+// startup path (#6655) where auth_ok withheld `ready` because the CLI was
+// still coming up; recovery after a readiness failure, where the task was
+// handed back with skipReady and nothing has asked since; and the revoke
+// path, whose task is gone and whose `ready` was deliberately deferred until
+// a fresh CLI was confirmed (#5042). In every one of them a `ready` is owed
+// exactly when no other path has sent one — and a `ready` while currentTask
+// is set (a hub that pushed work during the relaunch) would hand that work
+// back, so idleness is checked here rather than assumed from the path.
+// queuePendingTask parks a task prompt for flushPendingTask() to type once the
+// CLI is confirmed ready, remembering which task it belongs to (#7779).
+function queuePendingTask(text) {
+  pendingTask = text;
+  pendingTaskId = currentTask ? currentTask.task_id : null;
+}
+
+// discardPendingTask drops a queued prompt that must never be typed: the task
+// it was for has ended (revoked, failed, completed) or the CLI it was waiting
+// on never came up (#7779). Called from every task-exit path, and by
+// flushPendingTask() itself when the owner no longer matches.
+function discardPendingTask(why) {
+  if (pendingTask === null) return;
+  console.log(`Dropping the queued prompt for ${pendingTaskId || 'no task'} — ${why}`);
+  pendingTask = null;
+  pendingTaskId = null;
+}
+
 function armCLIReadyWait() {
-  const hadFailed = cliReadyFailed;
-  const becameReadyAfterRevoke = readyAfterInteractiveRevoke;
   waitForCLI().then(() => {
     cliReady = true;
     cliReadyFailed = false;
-    if (becameReadyAfterRevoke) {
-      readyAfterInteractiveRevoke = false;
-      send({ type: 'ready', seq: nextSeq() });
-    }
-    // Only re-advertise if we previously withdrew by failing a task; the normal
-    // startup path is already advertised by the auth_ok handler.
-    if (hadFailed) {
-      send({ type: 'ready', seq: nextSeq() });
-    } else if (!currentTask && currentTaskHub().authenticated && !readyAdvertisedForIdleTaskSlot) {
-      readyAdvertisedForIdleTaskSlot = true;
+    const hub = currentTaskHub();
+    if (!currentTask && hub.authenticated && !hub.readyOutstanding) {
       send({ type: 'ready', seq: nextSeq() });
     }
     flushPendingTask();
@@ -2540,7 +2873,7 @@ function armCLIReadyWait() {
     // Drop the queued prompt first: if the CLI later recovers, flushing a
     // prompt for a task the hub has already reassigned would have this
     // contributor silently working on someone else's issue.
-    pendingTask = null;
+    discardPendingTask('the CLI never became ready');
     if (currentTask) {
       // environment: the agent CLI never reached its prompt on this host.
       // skipCLI: this IS the relaunch path — armCLIReadyWait() re-arms itself
@@ -2713,12 +3046,12 @@ function tmuxSendKeys(text) {
   // typing; the per-backend readiness patterns already exist in getCLIState().
   if (!cliReady) {
     console.log('CLI not ready — queuing task prompt instead of typing into the pane');
-    pendingTask = text;
+    queuePendingTask(text);
     return;
   }
   if (paneIsRunningShell()) {
     console.log(`Pane is at a shell prompt, not ${BACKEND} — queuing task prompt instead of typing it into the shell`);
-    pendingTask = text;
+    queuePendingTask(text);
     {
       // The latch was STALE: the CLI exited without the relay noticing. Drop it
       // and bring the CLI back, or the queued prompt has nothing to flush into.
@@ -2776,7 +3109,7 @@ function tmuxSendKeys(text) {
       // Previously the restart set cliReady=false and then FELL THROUGH to the
       // send loop below, typing the prompt into a pane where the CLI had just
       // been Ctrl-C'd and had not come back — the exact sequence in #2203.
-      pendingTask = text;
+      queuePendingTask(text);
       cliReady = false;
       try {
         console.log(`CLI restarted: ${relaunchCLI()}`);
@@ -2916,21 +3249,66 @@ function captureTmuxLines(n) {
 // approximate audit trail beats none. It does not: pr_url is a value the hub
 // books cooldowns and credits work on, so an approximate one is a wrong one. A
 // PR in a different repository cannot be the PR for this task's issue.
-function detectPRURL(lines, repo) {
-  if (!Array.isArray(lines) || lines.length === 0) return '';
+//
+// ALL CANDIDATES, IN THE ORDER WORTH VERIFYING THEM (hivecommons/hive#7789).
+// This used to return the FIRST matching URL top-down and resolveTaskPR()
+// verified only that one — so when the agent had read an older PR before
+// opening its own (the task prompt tells it to check for prior PRs first), the
+// researched PR sat higher on the pane, was the one examined, was refuted, and
+// the relay stopped there: the PR the agent actually shipped, further down,
+// was never looked at and the task was booked with no PR at all. Observed
+// live on utah#131, which shipped utah#205 and was credited `verdict=idle`.
+// #7759 makes this shape routine: a no_work_needed verdict cites prior PRs by
+// construction, and the advisor can now turn it into a shipped PR in the same
+// pane.
+//
+// So this returns every distinct matching URL, ordered by how likely each is
+// to be the agent's OWN:
+//
+//   1. URLs on a HIVE_VERDICT: line, newest verdict first. The sentinel is
+//      the agent's deliberate statement of what it did, and a `complete`
+//      verdict that names a PR is naming the one it opened.
+//   2. Everything else, newest-printed first. The agent researches before it
+//      ships, so its own PR is printed after the ones it read about.
+//
+// resolveTaskPR() verifies them in this order and stops at the first that is
+// not refuted, so the order only decides which candidate wins when several
+// survive (gh offline: every one is UNKNOWN) and how many gh lookups a pane
+// full of researched PRs costs before the real one is reached.
+function detectPRURLs(lines, repo) {
+  if (!Array.isArray(lines) || lines.length === 0) return [];
   // Matches https://github.com/<owner>/<repo>/pull/<number>, capturing owner/repo.
   const PR_URL_RE = /https:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/pull\/\d+/g;
-  for (const line of lines) {
+  const onVerdictLine = [];
+  const elsewhere = [];
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (typeof line !== 'string') continue;
+    const bucket = isHiveVerdictLine(line) ? onVerdictLine : elsewhere;
     let m;
     PR_URL_RE.lastIndex = 0;
     while ((m = PR_URL_RE.exec(line)) !== null) {
-      if (repo && m[1] === repo) return m[0];
       // With no task repo to compare against there is nothing to attribute the
-      // URL to either way; take the first as the old code did.
-      if (!repo) return m[0];
+      // URL to either way; every URL is a candidate, as the old code allowed.
+      if (repo && m[1] !== repo) continue;
+      bucket.push(m[0]);
     }
   }
-  return '';
+  const seen = new Set();
+  const ordered = [];
+  for (const url of onVerdictLine.concat(elsewhere)) {
+    if (seen.has(url)) continue;
+    seen.add(url);
+    ordered.push(url);
+  }
+  return ordered;
+}
+
+// detectPRURL is the single best candidate — the head of detectPRURLs() — kept
+// for callers and tests that want one URL rather than the ranked list.
+function detectPRURL(lines, repo) {
+  const urls = detectPRURLs(lines, repo);
+  return urls.length > 0 ? urls[0] : '';
 }
 
 // ── Did THIS task open that PR? (kubestellar/hive#6662) ──────────────────────
@@ -3061,23 +3439,51 @@ function verifyTaskPR(url, opts) {
 // only a CONFIRMED PR suppresses the verdict. An UNKNOWN one is still reported
 // as a best-effort audit trail — dropping it on a transient gh failure would
 // start losing real PRs — but it no longer gets to silently overrule the agent.
+//
+// A refutation is a verdict on ONE candidate, not on the pane (#7789). The
+// agent is told to look for prior PRs before it works, so a researched PR
+// above its own is the normal shape of a pane that shipped something — and
+// stopping at the first refutation credited exactly those tasks with nothing.
+// Candidates come from detectPRURLs() already ranked (the verdict line's URL
+// first, then newest-printed first), each refuted one is logged as before,
+// and the walk continues until a candidate survives.
+//
+// PR_ATTRIBUTION_MAX_LOOKUPS bounds the gh calls. Each is a blocking, up to
+// 20-second execSync in the tick loop, and a pane that rendered `gh pr view`
+// for a dozen prior PRs must not spend minutes refuting them one by one. The
+// ranking puts the agent's own PR at the front, so the cap is a backstop, not
+// something a normal pane reaches.
+const PR_ATTRIBUTION_MAX_LOOKUPS = 8;
+
 function resolveTaskPR(lines, opts) {
   const o = opts || {};
-  const candidate = detectPRURL(lines, o.repo);
-  if (!candidate) return { url: '', evidence: null, suppressesVerdict: false };
-  const evidence = verifyTaskPR(candidate, o);
-  if (evidence.status === PR_ATTRIBUTION_REFUTED) {
-    console.log(`Ignoring PR ${candidate} for ${o.taskId || 'task'} — not this task's work (${evidence.reason}); ` +
-      `it was visible in the pane because the agent researched it (kubestellar/hive#6662)`);
-    return { url: '', evidence, suppressesVerdict: false };
+  const candidates = detectPRURLs(lines, o.repo);
+  if (candidates.length === 0) return { url: '', evidence: null, suppressesVerdict: false };
+  let evidence = null;
+  const budget = Math.min(candidates.length, PR_ATTRIBUTION_MAX_LOOKUPS);
+  for (let i = 0; i < budget; i++) {
+    const candidate = candidates[i];
+    evidence = verifyTaskPR(candidate, o);
+    if (evidence.status === PR_ATTRIBUTION_REFUTED) {
+      console.log(`Ignoring PR ${candidate} for ${o.taskId || 'task'} — not this task's work (${evidence.reason}); ` +
+        `it was visible in the pane because the agent researched it (kubestellar/hive#6662)`);
+      continue;
+    }
+    if (evidence.status === PR_ATTRIBUTION_UNKNOWN) {
+      console.log(`Detected PR for ${o.taskId || 'task'}: ${candidate} (UNVERIFIED — ${evidence.reason}; ` +
+        `reporting it, but not letting it override the agent's verdict)`);
+      return { url: candidate, evidence, suppressesVerdict: false };
+    }
+    console.log(`Detected PR for ${o.taskId || 'task'}: ${candidate}`);
+    return { url: candidate, evidence, suppressesVerdict: true };
   }
-  if (evidence.status === PR_ATTRIBUTION_UNKNOWN) {
-    console.log(`Detected PR for ${o.taskId || 'task'}: ${candidate} (UNVERIFIED — ${evidence.reason}; ` +
-      `reporting it, but not letting it override the agent's verdict)`);
-    return { url: candidate, evidence, suppressesVerdict: false };
+  if (candidates.length > budget) {
+    console.warn(`Stopped verifying PR candidates for ${o.taskId || 'task'} after ${budget} refutations; ` +
+      `${candidates.length - budget} more PR URL(s) on the pane were not checked (#7789)`);
   }
-  console.log(`Detected PR for ${o.taskId || 'task'}: ${candidate}`);
-  return { url: candidate, evidence, suppressesVerdict: true };
+  // Every candidate examined was refuted: the last refutation stands in for the
+  // pane, exactly as the single refutation did before.
+  return { url: '', evidence, suppressesVerdict: false };
 }
 
 // ── The HIVE_VERDICT: sentinel family (kubestellar/hive#3987, #5376) ─────────
@@ -3114,6 +3520,45 @@ function resolveTaskPR(lines, opts) {
 const HIVE_VERDICT_NO_WORK = 'no_work_needed';
 const HIVE_VERDICT_COMPLETE = 'complete';
 
+// hiveVerdictLineRe builds the one regex that recognises a sentinel line, for
+// any subset of the verdict tokens. Groups: 1 = optional Markdown emphasis
+// opener, 2 = the verdict token, 3 = the rest of the line (the reason).
+//
+// Anchored at line start: the task PROMPT quotes the marker mid-sentence
+// ("...the exact form 'HIVE_VERDICT: ...'"), and an anchored match keeps
+// that instruction echo from reading as the agent's own verdict. Codex
+// renders its completed assistant messages with a leading bullet (•,
+// U+2022) and Claude Code with a filled circle (●, U+25CF) — presentation
+// chrome rather than part of the verdict. Some backends also wrap the whole
+// line in Markdown emphasis (for example **HIVE_VERDICT: complete — done**),
+// which is likewise presentation rather than sentinel content. The claude
+// glyph was missing
+// until bin/test_backend_smoke.sh drove a REAL claude pane through the
+// relay: the agent printed the sentinel, this regex missed it, and every
+// interactive claude completion silently degraded to the chrome_idle
+// fallback the sentinel exists to replace.
+//
+// The verdict token is an alternation of exactly the wanted tokens with a \b
+// after it, so "no_work_neededX" and "completely rewrote the parser" are both
+// non-matches — a prose line that merely STARTS with a verdict word must not
+// become a verdict.
+function hiveVerdictLineRe(wanted) {
+  const alt = wanted.map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  return new RegExp(`^\\s*(?:[•●]\\s*)?([*_]{1,3})?\\s*HIVE_VERDICT:\\s*(${alt})\\b[\\s:—–-]*(.*)$`, 'i');
+}
+
+// isHiveVerdictLine says whether one pane line is a sentinel the agent
+// printed (either verdict), with the same anchoring and the same echo
+// exclusion detectHiveVerdict() applies. detectPRURLs() uses it to rank a PR
+// URL the agent named IN its verdict above one it merely printed (#7789).
+function isHiveVerdictLine(line) {
+  if (typeof line !== 'string') return false;
+  const m = hiveVerdictLineRe([HIVE_VERDICT_COMPLETE, HIVE_VERDICT_NO_WORK]).exec(line);
+  if (!m) return false;
+  // The prompt's own "<short reason>" placeholder, wrapped to a line start.
+  return !(m[3] || '').trim().startsWith('<');
+}
+
 // detectHiveVerdict scans `lines` newest-first for any of `wanted` (an array of
 // verdict tokens) and returns { verdict, reason } for the first — i.e. the
 // LAST-printed — match, or null.
@@ -3123,26 +3568,9 @@ const HIVE_VERDICT_COMPLETE = 'complete';
 function detectHiveVerdict(lines, wanted) {
   if (!Array.isArray(lines) || lines.length === 0) return null;
   if (!Array.isArray(wanted) || wanted.length === 0) return null;
-  // Anchored at line start: the task PROMPT quotes the marker mid-sentence
-  // ("...the exact form 'HIVE_VERDICT: ...'"), and an anchored match keeps
-  // that instruction echo from reading as the agent's own verdict. Codex
-  // renders its completed assistant messages with a leading bullet (•,
-  // U+2022) and Claude Code with a filled circle (●, U+25CF) — presentation
-  // chrome rather than part of the verdict. Some backends also wrap the whole
-  // line in Markdown emphasis (for example **HIVE_VERDICT: complete — done**),
-  // which is likewise presentation rather than sentinel content. The claude
-  // glyph was missing
-  // until bin/test_backend_smoke.sh drove a REAL claude pane through the
-  // relay: the agent printed the sentinel, this regex missed it, and every
-  // interactive claude completion silently degraded to the chrome_idle
-  // fallback the sentinel exists to replace.
-  //
-  // The verdict token is an alternation of exactly the wanted tokens with a \b
-  // after it, so "no_work_neededX" and "completely rewrote the parser" are both
-  // non-matches — a prose line that merely STARTS with a verdict word must not
-  // become a verdict.
-  const alt = wanted.map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
-  const VERDICT_RE = new RegExp(`^\\s*(?:[•●]\\s*)?([*_]{1,3})?\\s*HIVE_VERDICT:\\s*(${alt})\\b[\\s:—–-]*(.*)$`, 'i');
+  // The anchoring, chrome tolerance and token boundary are all in
+  // hiveVerdictLineRe() above, shared with isHiveVerdictLine().
+  const VERDICT_RE = hiveVerdictLineRe(wanted);
   // Scan newest-first so the agent's final conclusion wins over anything it
   // merely quoted or considered earlier in the transcript.
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -3185,6 +3613,73 @@ function detectNoWorkVerdict(lines) {
 // compliant agent look non-compliant.
 function detectCompletionVerdict(lines) {
   return detectHiveVerdict(lines, [HIVE_VERDICT_COMPLETE, HIVE_VERDICT_NO_WORK]);
+}
+
+// ── Review output that lands after the verdict (hivecommons/hive#7759) ──────
+//
+// Backends whose CLI posts REVIEW output after the agent's final line, keyed by
+// backend name. Only omp today: its `--advisor` runtime reviews each turn and
+// injects "Advisor N note" blocks under it, each note tagged ⟦concern⟧ or
+// ⟦nit⟧. The shape — a reviewer feature that writes below the agent's
+// statement — is likely to recur with other CLIs, so the hook is per-backend
+// data rather than an omp special case in the tick loop.
+//
+//   note     — the header line of one review block. Live captures render the
+//              leading glyph differently ("ⓘ Advisor 1 note" in #7759,
+//              "@ Advisor 1 note" in #7662), so only the words are matched.
+//   concern  — the marker that earns the agent one more turn. ⟦nit⟧ is
+//              deliberately NOT included: the advisor emits nits freely and
+//              they are cheap to ignore; concerns are the ones worth a turn
+//              (#7759 discussion). Both bracket spellings seen live are
+//              accepted.
+const POST_VERDICT_REVIEW_MARKERS = Object.freeze({
+  omp: Object.freeze({
+    note: /\bAdvisor \d+ note\b/,
+    concern: /⟦concern⟧|\[concern\]/,
+  }),
+});
+
+// postVerdictConcerns returns the concern lines that sit BELOW the agent's
+// verdict line on the pane — the review of its final turn — in pane order.
+//
+// "Below" is what makes a note post-verdict: the advisor writes in transcript
+// order, so anything above the verdict was posted about an earlier turn and is
+// not this task's closing review. A concern only counts when a note header
+// precedes it after the verdict, so a bare bracketed word in the agent's own
+// prose (or in a quoted diff) cannot pass as a review note. Returns [] when the
+// verdict line is not on the pane at all, since then there is no "below".
+function postVerdictConcerns(lines, verdictLine, markers) {
+  if (!markers || !Array.isArray(lines) || typeof verdictLine !== 'string') return [];
+  const at = lines.lastIndexOf(verdictLine);
+  if (at < 0) return [];
+  const concerns = [];
+  let inNote = false;
+  for (let i = at + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (markers.note.test(line)) { inNote = true; continue; }
+    if (inNote && markers.concern.test(line)) concerns.push(line);
+  }
+  return concerns;
+}
+
+// postVerdictReviewAnswered reports whether a verdict on the pane is the
+// SECOND one — printed after the relay's follow-up — rather than the first
+// verdict still sitting there while the agent works on the notes.
+//
+// The two verdict lines may be byte-identical (an agent that re-prints its
+// conclusion verbatim), so line equality cannot tell them apart. The CLI's
+// echo of the follow-up message can: a verdict below that echo was printed
+// after it. When the echo has scrolled out of the scan window the agent has
+// produced more than PR_SCAN_LINES rows of work since, and any verdict still
+// in the window is by construction below it.
+function postVerdictReviewAnswered(lines) {
+  if (!Array.isArray(lines)) return true;
+  let echoAt = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].includes(POST_VERDICT_REVIEW_ANCHOR)) { echoAt = i; break; }
+  }
+  if (echoAt < 0) return true;
+  return detectCompletionVerdict(lines.slice(echoAt + 1)) !== null;
 }
 
 // True while a bob CLI process is alive. bob exits at the end of every turn,
@@ -3445,10 +3940,7 @@ function dropTaskCredential() {
 // has no pane at all; there the in-flight one-shot child is killed instead,
 // matching what the revoke handler does.
 //
-// opts.reason names the exit in the relaunch log line, and opts.onRelaunchFailed
-// lets a caller with its own post-relaunch latch (the revoke handler's
-// readyAfterInteractiveRevoke) unwind it — the latch is only meaningful if a
-// relaunch actually happened.
+// opts.reason names the exit in the relaunch log line.
 //
 // opts.noRelaunch runs steps 1 and 2 but not step 3 — for the signal-shutdown
 // path (kubestellar/hive#5655), where the PROCESS is exiting: relaunching
@@ -3482,7 +3974,6 @@ function stopAgentForTaskExit(opts) {
     console.log(`Relaunching ${BACKEND} after ${reason}: ${relaunchCLI()}`);
   } catch (e) {
     cliReadyFailed = true;
-    if (opts && opts.onRelaunchFailed) opts.onRelaunchFailed();
     console.error(`Failed to stop and relaunch ${BACKEND} after ${reason}: ${e.message}`);
   }
 }
@@ -3752,6 +4243,21 @@ function resetAutonomyNudgeState() {
   autonomyNudgeSent = false;
 }
 
+// Post-verdict review state (hivecommons/hive#7759), scoped to the CURRENT
+// task. Budget of exactly one: an advisor that reviews every turn will always
+// have something new to say, so the second HIVE_VERDICT is final no matter
+// what appears under it. `lastTickConcernLines` is the set of concern lines
+// anywhere on the pane at the previous tick — the follow-up only fires for
+// notes that were not there then, so a note from mid-task can never re-open a
+// finished task.
+let postVerdictReviewRequested = false;
+let lastTickConcernLines = new Set();
+
+function resetPostVerdictReviewState() {
+  postVerdictReviewRequested = false;
+  lastTickConcernLines = new Set();
+}
+
 function resetPaneStallClock() {
   lastPaneFingerprint = null;
   lastPaneChangeAt = Date.now();
@@ -3824,8 +4330,20 @@ function paneStallConfirmed(tmuxLines) {
 
 function flushPendingTask() {
   if (!pendingTask) return;
+  // #7779: the queue is per-task. If the relay no longer holds the task this
+  // prompt was queued for — it was revoked or failed while the CLI was coming
+  // up, and a task-exit path missed the discard — typing it would put the agent
+  // to work on an issue nobody has a lease for. Drop it instead; the readiness
+  // callback that called us has already advertised `ready` if the relay is
+  // idle, so real work follows through the normal assignment path.
+  const owner = currentTask ? currentTask.task_id : null;
+  if (owner !== pendingTaskId) {
+    discardPendingTask(`the relay now holds ${owner || 'no task'}, not the task it was queued for`);
+    return;
+  }
   const t = pendingTask;
   pendingTask = null;
+  pendingTaskId = null;
   tmuxSendKeys(t);
 }
 
@@ -4152,6 +4670,9 @@ function failCurrentTask(reason, opts) {
     tmux_output: tmuxLines,
     ...effectiveSelectionFields(),
   });
+  // #7779: a prompt still queued for this task must not be typed into the
+  // relaunched CLI after the task has been handed back.
+  discardPendingTask('the task failed');
   currentTask = null;
   releaseQuotaPoolReservation();
   taskAssignedAt = 0;
@@ -4162,7 +4683,6 @@ function failCurrentTask(reason, opts) {
   // claiming to be free. Advertising 'ready' here would just pull in another
   // task the CLI still cannot run. The caller re-advertises on recovery.
   if (!(opts && opts.skipReady)) {
-    readyAdvertisedForIdleTaskSlot = true;
     send({ type: 'ready', seq: nextSeq() });
   }
 }
@@ -4226,6 +4746,10 @@ function finishCurrentTask({ completionSignal, summary, tmuxLines, prURL, noWork
   // pane is one it was READING, and counting it would let each cycle re-arm
   // the next off its own output — a review loop with no new work behind it.
   const completedWasReviewCycle = isLocalOnlyTask(currentTask);
+  // #7779: nothing queued for the task that just ended may outlive it. (A task
+  // completes only after its prompt was delivered, so this is normally empty;
+  // the review-cycle prompt queued below is for the NEXT task and is unaffected.)
+  discardPendingTask('the task completed');
   currentTask = null;
   releaseQuotaPoolReservation();
   taskAssignedAt = 0;
@@ -4296,6 +4820,10 @@ function startProgressReporting() {
   resetTransientNudgeState();
   // And the one-shot autonomy reminder (#5281), for the same reason.
   resetAutonomyNudgeState();
+  // And the one-shot post-verdict review follow-up (#7759): the previous
+  // task's spent budget, and the notes that were on its pane, say nothing
+  // about this one.
+  resetPostVerdictReviewState();
 
   armTaskProgressLease();
 
@@ -4608,6 +5136,62 @@ function maybeSendAutonomyNudge(tmuxLines) {
   return true;
 }
 
+// maybeRequestPostVerdictReview asks the agent, once per task, to address the
+// review notes its own CLI posted under the HIVE_VERDICT line and then to
+// print the verdict again (hivecommons/hive#7759). Returns true when the
+// follow-up went out and the tick must NOT finalize the task this time.
+//
+// The bound, stated once here because an advisor that reviews every turn
+// would otherwise never let a task end:
+//
+//   - One follow-up per task, ever. The second verdict is final whatever
+//     appears under it; there is no "notes arrived after the second verdict,
+//     go again". The budget is spent BEFORE typing, so a send that throws is
+//     not retried on the next tick — the task finalizes as it would have.
+//   - Only ⟦concern⟧ triggers it, never ⟦nit⟧ (see POST_VERDICT_REVIEW_MARKERS).
+//   - Only notes BELOW the verdict, and only ones that were not on the pane
+//     at the previous tick. Nothing new since the verdict means the task
+//     finalizes on this very tick, exactly as before this existed.
+//   - The progress lease and the absolute deadline are untouched. The
+//     follow-up neither extends nor resets either; if the agent burns the
+//     remaining budget on the concern, the lease/stall paths book it exactly
+//     as today — and lease expiry, which reads the pane itself (#7662),
+//     completes on whichever verdict it finds.
+//
+// Backends without a POST_VERDICT_REVIEW_MARKERS entry never reach the send:
+// for them a verdict finalizes on the tick it is read, unchanged.
+function maybeRequestPostVerdictReview(paneScanLines, tmuxLines, verdict, previousConcerns) {
+  if (!currentTask || !verdict) return false;
+  const markers = POST_VERDICT_REVIEW_MARKERS[BACKEND];
+  if (!markers) return false;
+  if (postVerdictReviewRequested) return false;
+
+  const concerns = postVerdictConcerns(paneScanLines, verdict.line, markers)
+    .filter(line => !previousConcerns.has(line));
+  if (concerns.length === 0) return false;
+
+  postVerdictReviewRequested = true;
+  console.log(`Task ${currentTask.task_id}: ${concerns.length} advisor concern(s) were posted under its HIVE_VERDICT line — ` +
+    `asking the agent once to address them and re-print the verdict (#7759): ${concerns.map(c => JSON.stringify(c.trim())).join(' ')}`);
+  try {
+    tmuxSendNudge(POST_VERDICT_REVIEW_MESSAGE);
+  } catch (e) {
+    console.error('Failed to send the post-verdict review follow-up; finalizing on the verdict as-is:', e.message);
+    return false;
+  }
+  send({
+    type: 'task_progress',
+    seq: nextSeq(),
+    task_id: currentTask.task_id,
+    task_gen: currentTask.task_gen,
+    status: 'working',
+    summary: `Agent printed HIVE_VERDICT, then its advisor posted ${concerns.length} concern(s) under it; asked it once to address them and re-print the verdict`,
+    tmux_output: tmuxLines,
+    ...progressModelFields(),
+  });
+  return true;
+}
+
 function progressTick() {
   lastProgressTick = Date.now();
   if (!currentTask) return;
@@ -4782,6 +5366,27 @@ function progressTick() {
     ? (taskAgentActivityObserved = true)
     : recordTaskAgentActivity(paneScanLines);
 
+  // #7759: the review notes a backend posts UNDER the verdict. Two things are
+  // read here, every tick, whichever branch below returns:
+  //
+  //   - the concern lines on the pane right now, snapshotted so the NEXT tick
+  //     can tell a note that just appeared from one that was already there
+  //     (the previous snapshot is what the trigger below is filtered against);
+  //   - whether a follow-up is outstanding and the agent has not yet answered
+  //     it. While that is so, the verdict on the pane is the FIRST one — the
+  //     agent is mid-turn on the notes — and finalizing on it would kill that
+  //     turn. It is treated like a pane with no verdict yet: WORKING reports
+  //     progress, and idle chrome accrues toward the chrome-idle completion,
+  //     so an agent that addresses the notes but never re-prints the sentinel
+  //     still ends through the same fallback as one that never printed it —
+  //     with the first verdict's no_work_needed, if that is what it said,
+  //     still carried to the hub.
+  const reviewMarkers = POST_VERDICT_REVIEW_MARKERS[BACKEND];
+  const previousConcerns = lastTickConcernLines;
+  lastTickConcernLines = new Set(reviewMarkers ? paneScanLines.filter(l => reviewMarkers.concern.test(l)) : []);
+  const secondVerdictPending = postVerdictReviewRequested && !!completionVerdict &&
+    !postVerdictReviewAnswered(paneScanLines);
+
   // Chrome-idle grace (#5376). classifyTmuxPane() saying IDLE_COMPLETE is now
   // only a hint; it must repeat across CHROME_IDLE_GRACE_TICKS ticks before it
   // may end a task on its own. A verdict short-circuits the wait entirely.
@@ -4791,7 +5396,7 @@ function progressTick() {
   // tick whose bytes differ from the previous credited one — a pane still
   // producing output cannot pretend to be idle just because classifyPane()
   // misread a busy frame (pi's progress percentages were the observed case).
-  const idleWithoutVerdict = paneState === PANE_STATE_IDLE_COMPLETE && !completionVerdict;
+  const idleWithoutVerdict = paneState === PANE_STATE_IDLE_COMPLETE && (!completionVerdict || secondVerdictPending);
   const chromeIdleGraceElapsed = recordChromeIdleTick(idleWithoutVerdict, paneFingerprint(tmuxLines));
 
   // ── The chrome-idle veto (#6717) ──────────────────────────────────────────
@@ -4861,11 +5466,20 @@ function progressTick() {
   const apiErrorState = paneState === PANE_STATE_TRANSIENT_API_ERROR ||
     paneState === PANE_STATE_UNKNOWN_API_ERROR ||
     paneState === PANE_STATE_FATAL_API_ERROR;
-  const verdictCompletes = !!completionVerdict && !apiErrorState;
+  const verdictCompletes = !!completionVerdict && !apiErrorState && !secondVerdictPending;
 
   if (paneState === PANE_STATE_IDLE_COMPLETE && chromeIdleGraceElapsed && !verdictCompletes && !hasTaskAgentActivity) {
     resetChromeIdleGrace();
     failCurrentTask(`pane went idle before ${BACKEND} produced any task output; prompt may not have been submitted`, { kind: 'environment' });
+    return;
+  }
+
+  // #7759: before a verdict ends the task, give the agent its one chance at
+  // the review its CLI posted underneath it. Only a verdict that would
+  // complete right now is eligible — the api-error exclusions above and the
+  // stale-baseline suppression already applied — so this can never re-open a
+  // task the relay would not otherwise have finalized on this tick.
+  if (verdictCompletes && maybeRequestPostVerdictReview(paneScanLines, tmuxLines, completionVerdict, previousConcerns)) {
     return;
   }
 
@@ -4875,7 +5489,11 @@ function progressTick() {
     // non-compliance is measurable rather than guessed at.
     const completionSignal = verdictCompletes ? 'verdict' : 'chrome_idle';
     console.log(`Task ${currentTask.task_id} completed — signal=${completionSignal}` +
-      (verdictCompletes ? ` (HIVE_VERDICT: ${completionVerdict.verdict})` : ` (pane idle for ${chromeIdleTicks} consecutive checks, no verdict emitted)`));
+      (verdictCompletes
+        ? ` (HIVE_VERDICT: ${completionVerdict.verdict})`
+        : (completionVerdict
+          ? ` (pane idle for ${chromeIdleTicks} consecutive checks; the agent's HIVE_VERDICT: ${completionVerdict.verdict} was followed by advisor notes it was asked to address, and it never re-printed the verdict — #7759)`
+          : ` (pane idle for ${chromeIdleTicks} consecutive checks, no verdict emitted)`)));
     resetChromeIdleGrace();
     // Successful completion clears this work item's crash-retry budget.
     cliRestartCounts.delete(taskKey(currentTask));
@@ -5069,6 +5687,9 @@ function handleMessage(data, hub) {
         // no known transcript format).
         model: refreshDetectedModel(),
         reasoning_effort: effectiveReasoningEffort() || undefined,
+        // #7760: the second model that reviews this contributor's work, when
+        // its CLI runs one. Optional and additive; an older hub ignores it.
+        ...advisorFields(),
         role: AGENT_ROLE,
         // Multi-session-per-account: additive, optional. An older hub ignores
         // this unknown field and treats the relay as a single session.
@@ -5106,6 +5727,9 @@ function handleMessage(data, hub) {
       hub.connectionId = msg.connection_id || '';
       hub.serverCapabilities = Array.isArray(msg.server_capabilities) ? msg.server_capabilities.slice() : [];
       hub.reconnectDelay = BASE_RECONNECT_DELAY_MS;
+      // #7732: a fresh session. Whatever this hub was asked before it
+      // re-authenticated is not a question it is still going to answer.
+      hub.readyOutstanding = false;
       // Scoped to the hub this task would have been re-asserted TO, so a
       // second, non-active hub authenticating mid-review stays as silent as it
       // was before — it was never going to resume anything either way.
@@ -5171,6 +5795,9 @@ function handleMessage(data, hub) {
       break;
 
     case 'task_assign':
+      // #7732: an assignment answers the `ready` it was sent for, whatever
+      // this relay does with it below.
+      hub.readyOutstanding = false;
       if (!currentTask && hub !== hubs[activeHubIndex]) {
         console.log(`Rejecting task ${msg.repo}#${msg.number} from ${hub.url} — hub is not the active polling slot`);
         sendTo(hub, { type: 'task_failed', seq: nextSeq(), task_id: msg.task_id, reason: 'Hub is not the active polling slot' });
@@ -5209,7 +5836,6 @@ function handleMessage(data, hub) {
         });
         break;
       }
-      readyAdvertisedForIdleTaskSlot = false;
       const quotaDecision = evaluateContributorQuota(msg);
       if (!quotaDecision.admit) {
         logContributorQuotaDecision(msg, quotaDecision);
@@ -5264,8 +5890,20 @@ function handleMessage(data, hub) {
       // so a task-scoped GitHub token never sits world-readable under /tmp
       // (kubestellar/hive#5065).
       const { github_token: _omittedToken, ...taskFileRecord } = msg;
-      fs.writeFileSync(TASK_FILE, JSON.stringify(taskFileRecord, null, 2), { mode: 0o600 });
-      try { fs.chmodSync(TASK_FILE, 0o600); } catch (_) { /* content is already token-free */ }
+      // A failed write must never throw out of handleMessage
+      // (hivecommons/hive#7777): this runs before task_accepted is sent, so an
+      // unwritable path — a full /tmp, a stale file owned by another uid on a
+      // shared host, a bad HIVE_TASK_FILE — crashed the relay on every
+      // assignment: a crash loop, not a degraded mode, with currentTask already
+      // set and the token already written but no task_accepted ever sent. The
+      // file is observability state no task depends on, so log loudly and carry
+      // on, exactly as injectGhToken above does for the token cache.
+      try {
+        fs.writeFileSync(TASK_FILE, JSON.stringify(taskFileRecord, null, 2), { mode: 0o600 });
+        try { fs.chmodSync(TASK_FILE, 0o600); } catch (_) { /* content is already token-free */ }
+      } catch (e) {
+        console.error(`Failed to write task file ${TASK_FILE}: ${e.message} — continuing without it`);
+      }
       send({ type: 'task_accepted', seq: nextSeq(), task_id: msg.task_id, task_gen: msg.task_gen });
       if (CONTRIBUTOR_MODE === MODE_HEADLESS) {
         // Non-interactive path (kubestellar/hive#2538): drive a one-shot CLI
@@ -5346,6 +5984,12 @@ function handleMessage(data, hub) {
         break;
       }
       console.log(`Task revoked: ${msg.task_id} — ${msg.reason}`);
+      // #7779: if this task's prompt was still queued (assigned while the CLI
+      // was relaunching), drop it now. stopAgentForTaskExit() below relaunches
+      // the CLI, and its readiness callback would otherwise flush the revoked
+      // task's prompt into the fresh CLI — an agent working an issue the hub
+      // has taken back, with the relay believing it holds nothing.
+      discardPendingTask('the task was revoked');
       currentTask = null;
       releaseQuotaPoolReservation();
       taskAssignedAt = 0;
@@ -5364,22 +6008,20 @@ function handleMessage(data, hub) {
       // Pi turn but leaves the CLI alive; relaunchCLI gates ready on a clean
       // prompt; and in headless mode the in-flight one-shot child is killed
       // instead, so the revoked task's process does not keep running.
-      if (CONTRIBUTOR_MODE !== MODE_HEADLESS) {
-        // Set before the stop: the relaunch's readiness callback consumes this
-        // latch to re-advertise availability, and it is only meaningful if a
-        // relaunch actually happened — hence the unwind on failure.
-        readyAfterInteractiveRevoke = true;
-      }
-      stopAgentForTaskExit({
-        reason: 'task revoke',
-        onRelaunchFailed: () => { readyAfterInteractiveRevoke = false; },
-      });
+      //
+      // Interactive mode sends no `ready` here (#5042): the relaunch's
+      // readiness callback advertises once — and only once (#7732) — when the
+      // fresh CLI is confirmed at its prompt with the relay still idle.
+      stopAgentForTaskExit({ reason: 'task revoke' });
       // Stay with the hub that just revoked — it's clearly alive and reachable.
       activeHubIndex = hubs.indexOf(hub);
       if (CONTRIBUTOR_MODE === MODE_HEADLESS) sendTo(hub, { type: 'ready', seq: nextSeq() });
       break;
 
     case 'task_unavailable':
+      // #7732: the hub's explicit "nothing for you" answers the outstanding
+      // `ready`; the retry below asks again.
+      hub.readyOutstanding = false;
       if (hub !== hubs[activeHubIndex]) {
         console.log(`Ignoring task_unavailable from inactive hub ${hub.url}`);
         break;
@@ -5538,6 +6180,9 @@ function connectHub(hub) {
     console.log(`Connection to ${hub.url} closed (${describeWsClose(code, reason)}). ` +
       `${wsCloseCorrelation(hub)}. Reconnecting in ${hub.reconnectDelay}ms...`);
     if (hub.heartbeatInterval) { clearInterval(hub.heartbeatInterval); hub.heartbeatInterval = null; }
+    // #7732: a `ready` in flight on this socket died with it; the auth_ok of
+    // the reconnect asks afresh.
+    hub.readyOutstanding = false;
     hub.reconnectTimer = setTimeout(() => connectHub(hub), hub.reconnectDelay);
     hub.reconnectDelay = Math.min(hub.reconnectDelay * 2, MAX_RECONNECT_DELAY_MS);
   });
@@ -5703,6 +6348,15 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     maybeSendAutonomyNudge,
     resetAutonomyNudgeState,
     AUTONOMY_NUDGE_MESSAGE,
+    // Post-verdict review follow-up (hivecommons/hive#7759).
+    POST_VERDICT_REVIEW_MESSAGE,
+    POST_VERDICT_REVIEW_ANCHOR,
+    POST_VERDICT_REVIEW_MARKERS,
+    postVerdictConcerns,
+    postVerdictReviewAnswered,
+    maybeRequestPostVerdictReview,
+    resetPostVerdictReviewState,
+    getPostVerdictReviewRequested: () => postVerdictReviewRequested,
     tmuxSessionHasAttachedClient,
     tmuxSessionHumanPresence,
     HUMAN_PRESENCE_IDLE_MS,
@@ -5772,6 +6426,15 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     refreshDetectedModel,
     effectiveModel,
     progressModelFields,
+    // omp primary + advisor selection (hivecommons/hive#7760).
+    detectOmpSelection,
+    splitOmpSelection,
+    parseOmpConfig,
+    advisorFields,
+    SELECTION_DETECTORS,
+    OMP_EFFORT_LEVELS,
+    getDetectedEffort: () => detectedEffort,
+    getDetectedAdvisor: () => ({ model: detectedAdvisorModel, effort: detectedAdvisorEffort }),
     effectiveProvider,
     effectiveSelectionFields,
     PI_SELECTION,
@@ -5782,7 +6445,11 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     setCliReadyFailed: (v) => { cliReadyFailed = v; },
     getCliReadyFailed: () => cliReadyFailed,
     getPendingTask: () => pendingTask,
-    setPendingTask: (v) => { pendingTask = v; },
+    // Stamps the owner from currentTask exactly as queuePendingTask does
+    // (#7779), so a test that re-queues a prompt sees it flush for the task it
+    // was set up under.
+    setPendingTask: (v) => { pendingTask = v; pendingTaskId = (v !== null && currentTask) ? currentTask.task_id : null; },
+    getPendingTaskId: () => pendingTaskId,
     // Per-task prompt-delivery surface (kubestellar/hive#5650).
     getTaskPromptDelivered: () => taskPromptDelivered,
     setTaskPromptDelivered: (v) => { taskPromptDelivered = v; },
@@ -5835,6 +6502,9 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     buildHeadlessArgv,
     runHeadlessTask,
     getHeadlessChild: () => headlessChild,
+    // #7778: the headless lease-renewal tick and whether its timer is armed.
+    headlessProgressTick,
+    getProgressIntervalArmed: () => progressInterval !== null,
     // Attach-hint surface (kubestellar/hive#5145): the exact command the
     // needs-authentication banner tells a human to paste.
     ATTACH_COMMAND,
@@ -5848,6 +6518,9 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     captureTmuxLines,
     detectNoWorkVerdict,
     detectPRURL,
+    // Every PR URL on the pane, ranked for verification (hivecommons/hive#7789).
+    detectPRURLs,
+    isHiveVerdictLine,
     // PR attribution (kubestellar/hive#6662). prAttributionEvidence is the pure
     // rule set and is where the interesting cases live; resolveTaskPR is the
     // wiring, exercised through a stubbed gh.
@@ -5858,6 +6531,7 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     PR_ATTRIBUTION_REFUTED,
     PR_ATTRIBUTION_UNKNOWN,
     PR_ATTRIBUTION_CLOCK_SKEW_MS,
+    PR_ATTRIBUTION_MAX_LOOKUPS,
     CONTRIBUTOR_LOGIN,
     TMUX_TAIL_LINES,
     PR_SCAN_LINES,

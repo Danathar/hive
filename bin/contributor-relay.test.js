@@ -123,11 +123,16 @@ function loadRelay({ backend = 'copilot', backendBinary = null, backendPerm = '-
     // saw in the pane is actually THIS task's work. `prMeta` is the answer:
     //   - an object  → serialized as gh's JSON (the interesting cases)
     //   - an Error   → thrown, modelling gh missing/offline/rate-limited
+    //   - a function → called with the URL being asked about and treated as
+    //                  one of the above; #7789 verifies several candidates
+    //                  from one pane, each with its own metadata
     //   - unset      → '' falls through, which is what a JSON.parse failure and
     //                  therefore the UNVERIFIED path looks like.
     if (/gh pr view/.test(cmd)) {
-      if (prMeta instanceof Error) throw prMeta;
-      if (prMeta) return JSON.stringify(prMeta);
+      const asked = /gh pr view '([^']*)'/.exec(cmd);
+      const answer = typeof prMeta === 'function' ? prMeta(asked ? asked[1] : '') : prMeta;
+      if (answer instanceof Error) throw answer;
+      if (answer) return JSON.stringify(answer);
       return '';
     }
     return '';
@@ -1575,6 +1580,109 @@ test('Pi revoke kills the child and rejects a raced stale completion', () => {
 });
 
 // ---------------------------------------------------------------------------
+// hivecommons/hive#7778 — a headless task must keep renewing the hub's progress
+// lease while its child is alive.
+//
+// The hub reclaims any task not renewed by a task_progress within wsTaskTimeout
+// (30 min): revoke, failure cooldown on the issue. The interactive path renews
+// it from progressTick(); the headless path sent ONE task_progress at child start
+// and then nothing, so every headless task over 30 minutes was killed mid-run —
+// two hours or more inside the relay's own HEADLESS_TASK_TIMEOUT_MS ceiling.
+// ---------------------------------------------------------------------------
+
+function headlessProgressFrames(relay, taskId) {
+  return relay.__sent.filter(m => m.type === 'task_progress' && m.task_id === taskId);
+}
+
+test('#7778 a headless task arms the progress timer and renews the hub lease while its child runs', () => {
+  const relay = loadRelay({ backend: 'codex', mode: 'headless', execFileResult: { defer: true } });
+  const log = console.log; console.log = () => {};
+  try {
+    const task = { task_id: 'hl-7778-long', task_gen: 7, kind: 'issue', repo: 'x/y', number: 4, title: 'a long build' };
+    relay.setCurrentTask(task);
+    relay.runHeadlessTask(task);
+    assert.strictEqual(headlessProgressFrames(relay, task.task_id).length, 1, 'setup: one progress report at child start');
+    assert.strictEqual(relay.getProgressIntervalArmed(), true,
+      '#7778: no progress timer is armed for the headless task — the hub hears nothing more until the child exits');
+
+    // The ticks the timer fires over the next hours, with the child still alive.
+    relay.headlessProgressTick(task);
+    relay.headlessProgressTick(task);
+    const frames = headlessProgressFrames(relay, task.task_id);
+    assert.strictEqual(frames.length, 3, '#7778: each tick must renew the hub lease with a task_progress');
+    for (const f of frames) {
+      assert.strictEqual(f.status, 'working');
+      assert.strictEqual(f.task_gen, 7, 'the renewal must carry the assignment generation the hub fences on');
+      assert.strictEqual(f.repo, 'x/y');
+      assert.strictEqual(f.number, 4);
+    }
+    assert.ok(!relay.__sent.some(m => m.type === 'task_complete' || m.type === 'task_failed'),
+      'renewing the lease must not judge the task');
+    assert.strictEqual(relay.getHeadlessChild().killed, false, 'the live child is left alone');
+  } finally { console.log = log; teardown(relay); }
+});
+
+test('#7778 the headless progress timer stops when the child exits, and completion is reported once', () => {
+  const relay = loadRelay({ backend: 'codex', mode: 'headless', execFileResult: { defer: true } });
+  const log = console.log; console.log = () => {};
+  try {
+    const task = { task_id: 'hl-7778-done', task_gen: 8, kind: 'issue', repo: 'x/y', number: 5, title: 'finishes' };
+    relay.setCurrentTask(task);
+    relay.runHeadlessTask(task);
+    relay.headlessProgressTick(task);
+    relay.__completeDeferredExecFile(null, 'HIVE_VERDICT: complete — done', '');
+    assert.strictEqual(relay.getProgressIntervalArmed(), false,
+      'the progress timer must die with the child, or it renews a lease for work that is over');
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 1);
+    // A tick that races the exit is a no-op: the child is gone and the task released.
+    const before = relay.__sent.length;
+    relay.headlessProgressTick(task);
+    assert.strictEqual(relay.__sent.length, before, 'no progress may be reported for a task that has completed');
+  } finally { console.log = log; teardown(relay); }
+});
+
+test('#7778 a revoke stops the headless progress timer and a stale tick renews nothing', () => {
+  const relay = loadRelay({ backend: 'codex', mode: 'headless', execFileResult: { defer: true } });
+  const log = console.log; console.log = () => {};
+  try {
+    const task = { task_id: 'hl-7778-revoked', task_gen: 9, kind: 'issue', repo: 'x/y', number: 6, title: 'revoked' };
+    relay.setCurrentTask(task);
+    relay.runHeadlessTask(task);
+    assert.strictEqual(relay.getProgressIntervalArmed(), true, 'setup: timer armed');
+    relay.handleMessage(JSON.stringify({ type: 'task_revoke', task_id: task.task_id, reason: 'operator stop' }));
+    assert.strictEqual(relay.getProgressIntervalArmed(), false, 'the revoke must stop the lease renewals');
+    const before = relay.__sent.length;
+    relay.headlessProgressTick(task);
+    assert.strictEqual(relay.__sent.length, before,
+      'a tick for a revoked task must not tell the hub the work is still in progress');
+  } finally { console.log = log; teardown(relay); }
+});
+
+test('#7778 a headless task that exceeds its own ceiling is still killed and failed', () => {
+  // The renewals keep the HUB from reclaiming a live task early; they must not
+  // turn the relay's own 4-hour bound into "runs forever". The ceiling is a
+  // setTimeout armed in runHeadlessTask; here its kill is what the fake child
+  // observes, and the exit it produces must still be booked as the timeout.
+  const relay = loadRelay({ backend: 'codex', mode: 'headless', execFileResult: { defer: true } });
+  const log = console.log; console.log = () => {};
+  const err = console.error; console.error = () => {};
+  try {
+    const task = { task_id: 'hl-7778-ceiling', task_gen: 10, kind: 'issue', repo: 'x/y', number: 7, title: 'wedged' };
+    relay.setCurrentTask(task);
+    relay.runHeadlessTask(task);
+    relay.headlessProgressTick(task);
+    // What the HEADLESS_TASK_TIMEOUT_MS timer does when it fires.
+    const child = relay.getHeadlessChild();
+    child.kill('SIGKILL');
+    relay.__completeDeferredExecFile(Object.assign(new Error('killed'), { code: null, signal: 'SIGKILL' }), '', '');
+    const failed = relay.__sent.find(m => m.type === 'task_failed' && m.task_id === task.task_id);
+    assert.ok(failed, 'a killed child must still be reported failed');
+    assert.strictEqual(relay.getProgressIntervalArmed(), false, 'and its renewals must stop');
+    assert.strictEqual(relay.getCurrentTask(), null);
+  } finally { console.log = log; console.error = err; teardown(relay); }
+});
+
+// ---------------------------------------------------------------------------
 // Bug 2 — a task prompt must never be typed into a pane that is not confirmed
 // ready, or the literal keystrokes land on bash and wedge it in PS2.
 // ---------------------------------------------------------------------------
@@ -2718,12 +2826,23 @@ test('token_refresh, task_revoke, and blocked progress only affect the hub that 
   try {
     const { hubs, sentA, sentB } = attachHubSinks(relay);
 
+    // #5650: the prompt must have been TYPED, not queued, or progressTick()
+    // refuses to judge the pane at all; and #5281: an unattended question gets
+    // one autonomy reminder before the SECOND tick reports it as blocked. This
+    // test predates both gates and was failing on them unobserved — the runner
+    // never awaited an async test, so its rejection was pre-empted by
+    // process.exit() (#7732).
+    relay.setCliReady(true);
+    // A revoke only ever arrives over a session that authenticated us, and the
+    // post-revoke `ready` is owed to that hub (#7732).
+    hubs[0].authenticated = true;
     relay.handleMessage(JSON.stringify({ type: 'task_assign', task_id: 't1', kind: 'issue', repo: 'foo/bar', number: 1, title: 'x' }), hubs[0]);
     const tokenPath = path.join(relay.__tmpDir, 'gh-token.cache');
 
     relay.handleMessage(JSON.stringify({ type: 'token_refresh', github_token: 'hub-b-token' }), hubs[1]);
     assert.strictEqual(fs.existsSync(tokenPath), false, 'non-owning hub must not overwrite the active task token');
 
+    relay.__crashTick();
     relay.__crashTick();
     assert.ok(sentA.some(m => m.type === 'task_progress' && m.status === 'blocked_on_human'),
       'blocked_on_human progress must go to the owning hub');
@@ -2736,6 +2855,7 @@ test('token_refresh, task_revoke, and blocked progress only affect the hub that 
     relay.handleMessage(JSON.stringify({ type: 'token_refresh', github_token: 'hub-a-token' }), hubs[0]);
     assert.strictEqual(fs.readFileSync(tokenPath, 'utf8'), 'hub-a-token');
 
+    const beforeRevoke = sentA.length;
     relay.handleMessage(JSON.stringify({ type: 'task_revoke', task_id: 't1', reason: 'owner revoke' }), hubs[0]);
     await Promise.resolve();
     await Promise.resolve();
@@ -2743,7 +2863,8 @@ test('token_refresh, task_revoke, and blocked progress only affect the hub that 
     assert.ok(revokeInterrupts.length >= 2, 'interactive revoke must double-interrupt the configured tmux pane before ready');
     assert.strictEqual(fs.existsSync(tokenPath), false, 'revoking a task must clear its task-scoped GitHub token cache');
     assert.strictEqual(relay.getCurrentTask(), null);
-    assert.ok(sentA.some(m => m.type === 'ready'), 'owning hub is asked for work after its revoke');
+    assert.strictEqual(sentA.slice(beforeRevoke).filter(m => m.type === 'ready').length, 1,
+      'owning hub is asked for work exactly once after its revoke (#7732)');
     assert.strictEqual(sentB.filter(m => m.type === 'ready').length, 0);
   } finally { teardown(relay); }
 });
@@ -3722,6 +3843,9 @@ test('token_refresh and task_revoke only affect the hub that owns the active tas
     const sentA = [], sentB = [];
     hubs[0].ws = { readyState: 1, send: p => sentA.push(JSON.parse(p)) };
     hubs[1].ws = { readyState: 1, send: p => sentB.push(JSON.parse(p)) };
+    // A revoke only ever arrives over a session that authenticated us, and the
+    // post-revoke `ready` is owed to that hub (#7732).
+    hubs[0].authenticated = true;
 
     relay.handleMessage(JSON.stringify({ type: 'task_assign', task_id: 't1', kind: 'issue', repo: 'foo/bar', number: 1, title: 'x' }), hubs[0]);
     const tokenPath = path.join(relay.__tmpDir, 'gh-token.cache');
@@ -3735,6 +3859,7 @@ test('token_refresh and task_revoke only affect the hub that owns the active tas
     relay.handleMessage(JSON.stringify({ type: 'token_refresh', github_token: 'hub-a-token' }), hubs[0]);
     assert.strictEqual(fs.readFileSync(tokenPath, 'utf8'), 'hub-a-token');
 
+    const beforeRevoke = sentA.length;
     relay.handleMessage(JSON.stringify({ type: 'task_revoke', task_id: 't1', reason: 'owner revoke' }), hubs[0]);
     await Promise.resolve();
     await Promise.resolve();
@@ -3742,7 +3867,8 @@ test('token_refresh and task_revoke only affect the hub that owns the active tas
     assert.ok(revokeInterrupts.length >= 2, 'interactive revoke must double-interrupt the configured tmux pane before ready');
     assert.strictEqual(fs.existsSync(tokenPath), false, 'revoking a task must clear its task-scoped GitHub token cache');
     assert.strictEqual(relay.getCurrentTask(), null);
-    assert.ok(sentA.some(m => m.type === 'ready'), 'owning hub is asked for work after its revoke');
+    assert.strictEqual(sentA.slice(beforeRevoke).filter(m => m.type === 'ready').length, 1,
+      'owning hub is asked for work exactly once after its revoke (#7732)');
     assert.strictEqual(sentB.filter(m => m.type === 'ready').length, 0);
   } finally { teardown(relay); }
 });
@@ -4135,6 +4261,49 @@ test('task_assign with an unwritable token cache path does not crash the relay',
   }
 });
 
+test('#7777 task_assign with an unwritable task file path does not crash the relay', () => {
+  // Same shape as the token-cache case above: the parent "directory" is a
+  // regular file, so writeFileSync fails no matter what uid the test runs as.
+  // Before the fix the write was the one unguarded call in the task_assign
+  // handler: the exception left handleMessage, there is no uncaughtException
+  // handler, and the relay died on every assignment — a crash loop on a full
+  // /tmp or a stale file owned by another user — with currentTask already set
+  // and the token written but task_accepted never sent.
+  const scratchRoot = path.join(__dirname, '..', '.relay-test-tmp');
+  fs.mkdirSync(scratchRoot, { recursive: true });
+  const tmp = fs.mkdtempSync(path.join(scratchRoot, 'relay-badtaskfile-'));
+  const fileAsDir = path.join(tmp, 'blocker');
+  fs.writeFileSync(fileAsDir, 'not a directory');
+  const relay = loadRelay({ env: { HIVE_TASK_FILE: path.join(fileAsDir, 'contributor-task.json') } });
+  const errors = [];
+  const origError = console.error;
+  console.error = (...args) => { errors.push(args.join(' ')); };
+  try {
+    relay.setCliReady(true);
+    assert.doesNotThrow(() => relay.handleMessage(JSON.stringify({
+      type: 'task_assign',
+      task_id: 'taskfile-1',
+      task_gen: 3,
+      kind: 'issue',
+      repo: 'foo/bar',
+      number: 7777,
+      title: 'task file write failure must degrade',
+      prompt: 'do the thing',
+      github_token: 'scoped-task-token',
+    })), 'an unwritable task file must not throw out of handleMessage');
+    const accepted = relay.__sent.find(m => m.type === 'task_accepted');
+    assert.ok(accepted,
+      'task_assign must survive an unwritable task file and still accept the task');
+    assert.strictEqual(accepted.task_id, 'taskfile-1');
+    assert.ok(errors.some(e => e.includes('Failed to write task file') && e.includes('continuing without it')),
+      `the failure must be logged loudly, got: ${JSON.stringify(errors)}`);
+  } finally {
+    console.error = origError;
+    teardown(relay);
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) {}
+  }
+});
+
 // ---------------------------------------------------------------------------
 // #4117 — auto-detect the running model from the CLI's own session transcript
 // when AGENT_MODEL is unset. Precedence: AGENT_MODEL → detected → ''.
@@ -4230,6 +4399,207 @@ test('#4117: synthetic placeholder turns are skipped in favor of the last real m
     teardown(relay);
     fs.rmSync(fx.root, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// hivecommons/hive#7760 — omp: primary model + effort, and the advisor's.
+//
+// omp picks its models from its own config, so contributors never export
+// AGENT_MODEL and showed up as `omp` with `model: null`; with --advisor two
+// models did the work and hive named neither. The detector reads omp's own
+// records: config.yml (modelRoles + advisor.enabled), the newest session's
+// model_change record, and the advisor's __advisor.jsonl sidecar.
+// ---------------------------------------------------------------------------
+
+// Builds an omp agent dir: config.yml plus, optionally, one session transcript
+// and its advisor sidecar. Returns the dir and the paths a test may append to.
+function makeOmpFixture({ config, session, advisor } = {}) {
+  const scratchRoot = path.join(__dirname, '..', '.relay-test-tmp');
+  fs.mkdirSync(scratchRoot, { recursive: true });
+  const root = fs.mkdtempSync(path.join(scratchRoot, 'omp-detect-'));
+  const agentDir = path.join(root, 'agent');
+  fs.mkdirSync(agentDir, { recursive: true });
+  if (config !== undefined) fs.writeFileSync(path.join(agentDir, 'config.yml'), config);
+  const out = { root, agentDir, sessionFile: null, advisorFile: null };
+  if (session) {
+    const sessDir = path.join(agentDir, 'sessions', '--home-dev-work--');
+    fs.mkdirSync(sessDir, { recursive: true });
+    out.sessionFile = path.join(sessDir, '2026-09-19T14-00-00_abc123.jsonl');
+    fs.writeFileSync(out.sessionFile, session.map(t => JSON.stringify(t)).join('\n') + '\n');
+    if (advisor) {
+      const sidecarDir = path.join(sessDir, '2026-09-19T14-00-00_abc123');
+      fs.mkdirSync(sidecarDir, { recursive: true });
+      out.advisorFile = path.join(sidecarDir, '__advisor.jsonl');
+      fs.writeFileSync(out.advisorFile, advisor.map(t => JSON.stringify(t)).join('\n') + '\n');
+    }
+  }
+  return out;
+}
+
+const OMP_CONFIG_WITH_ADVISOR = [
+  'modelRoles:',
+  '  default: openai-codex/gpt-5.6-terra:medium',
+  '  advisor: anthropic/claude-opus-5:high',
+  'advisor:',
+  '  enabled: true',
+  'theme: dark',
+  '',
+].join('\n');
+
+const OMP_MODEL_CHANGE = { type: 'model_change', model: 'openai-codex/gpt-5.6-terra', timestamp: '2026-09-19T14:00:00Z' };
+const OMP_ADVISOR_TURN = { type: 'message', role: 'assistant', provider: 'anthropic', model: 'claude-opus-5', content: 'note' };
+
+test('#7760: splitOmpSelection separates the thinking level from provider/model and keeps tags', () => {
+  const relay = loadRelay({ backend: 'omp' });
+  try {
+    assert.deepStrictEqual(relay.splitOmpSelection('openai-codex/gpt-5.6-terra:medium'), { model: 'openai-codex/gpt-5.6-terra', effort: 'medium' });
+    assert.deepStrictEqual(relay.splitOmpSelection('anthropic/claude-opus-5'), { model: 'anthropic/claude-opus-5', effort: '' });
+    assert.deepStrictEqual(relay.splitOmpSelection('ollama/llama3:8b'), { model: 'ollama/llama3:8b', effort: '' },
+      'an Ollama tag is part of the model name, not an effort');
+    assert.deepStrictEqual(relay.splitOmpSelection('"openai-codex/gpt-5.6:max"'), { model: 'openai-codex/gpt-5.6', effort: 'max' });
+    assert.deepStrictEqual(relay.splitOmpSelection(''), { model: '', effort: '' });
+    assert.deepStrictEqual(relay.splitOmpSelection('<synthetic>'), { model: '', effort: '' });
+  } finally { teardown(relay); }
+});
+
+test('#7760: parseOmpConfig reads modelRoles and advisor.enabled, ignoring the rest', () => {
+  const fx = makeOmpFixture({ config: OMP_CONFIG_WITH_ADVISOR });
+  const relay = loadRelay({ backend: 'omp' });
+  try {
+    assert.deepStrictEqual(relay.parseOmpConfig(path.join(fx.agentDir, 'config.yml')), {
+      defaultSelection: 'openai-codex/gpt-5.6-terra:medium',
+      advisorSelection: 'anthropic/claude-opus-5:high',
+      advisorEnabled: true,
+    });
+    assert.deepStrictEqual(relay.parseOmpConfig(path.join(fx.agentDir, 'missing.yml')),
+      { defaultSelection: '', advisorSelection: '', advisorEnabled: null }, 'a missing file yields empty fields, not a throw');
+  } finally { teardown(relay); fs.rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test('#7760: omp primary and advisor are detected from config.yml and the session records', () => {
+  const fx = makeOmpFixture({ config: OMP_CONFIG_WITH_ADVISOR, session: [OMP_MODEL_CHANGE], advisor: [OMP_ADVISOR_TURN] });
+  const relay = loadRelay({ backend: 'omp', model: '', reasoningEffort: '', env: { HIVE_OMP_AGENT_DIR: fx.agentDir } });
+  try {
+    assert.deepStrictEqual(relay.detectOmpSelection(), {
+      model: 'openai-codex/gpt-5.6-terra', effort: 'medium',
+      advisorModel: 'anthropic/claude-opus-5', advisorEffort: 'high',
+    });
+    assert.strictEqual(relay.refreshDetectedModel(), 'openai-codex/gpt-5.6-terra');
+    assert.strictEqual(relay.effectiveReasoningEffort(), 'medium', 'the :level suffix is the effort, from the config spelling');
+    assert.deepStrictEqual(relay.advisorFields(), { advisor_model: 'anthropic/claude-opus-5', advisor_reasoning_effort: 'high' });
+  } finally { teardown(relay); fs.rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test('#7760: auth_response carries model, effort and the advisor pair for omp', () => {
+  const fx = makeOmpFixture({ config: OMP_CONFIG_WITH_ADVISOR, session: [OMP_MODEL_CHANGE], advisor: [OMP_ADVISOR_TURN] });
+  const relay = loadRelay({ backend: 'omp', model: '', reasoningEffort: '', env: { HIVE_OMP_AGENT_DIR: fx.agentDir } });
+  try {
+    relay.handleMessage(JSON.stringify({ type: 'auth_challenge' }));
+    const auth = relay.__sent.find(m => m.type === 'auth_response');
+    assert.strictEqual(auth.model, 'openai-codex/gpt-5.6-terra');
+    assert.strictEqual(auth.reasoning_effort, 'medium');
+    assert.strictEqual(auth.advisor_model, 'anthropic/claude-opus-5');
+    assert.strictEqual(auth.advisor_reasoning_effort, 'high');
+  } finally { teardown(relay); fs.rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test('#7760: a bare omp with no advisor and no session reports config default and nothing else', () => {
+  const fx = makeOmpFixture({ config: 'modelRoles:\n  default: openai-codex/gpt-5.6-terra:medium\n' });
+  const relay = loadRelay({ backend: 'omp', model: '', reasoningEffort: '', env: { HIVE_OMP_AGENT_DIR: fx.agentDir } });
+  try {
+    relay.handleMessage(JSON.stringify({ type: 'auth_challenge' }));
+    const auth = relay.__sent.find(m => m.type === 'auth_response');
+    assert.strictEqual(auth.model, 'openai-codex/gpt-5.6-terra', 'config.yml is the fallback when no session exists yet');
+    assert.strictEqual(auth.reasoning_effort, 'medium');
+    assert.strictEqual(auth.advisor_model, undefined, 'no advisor configured: the field is omitted, not empty');
+    assert.strictEqual(auth.advisor_reasoning_effort, undefined);
+    assert.deepStrictEqual(relay.advisorFields(), {});
+  } finally { teardown(relay); fs.rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test('#7760: an omp with nothing readable degrades to exactly today\'s empty report', () => {
+  const fx = makeOmpFixture({});
+  const relay = loadRelay({ backend: 'omp', model: '', reasoningEffort: '', env: { HIVE_OMP_AGENT_DIR: fx.agentDir } });
+  try {
+    relay.handleMessage(JSON.stringify({ type: 'auth_challenge' }));
+    const auth = relay.__sent.find(m => m.type === 'auth_response');
+    assert.strictEqual(auth.model, '');
+    assert.strictEqual(auth.reasoning_effort, undefined);
+    assert.strictEqual(auth.advisor_model, undefined);
+  } finally { teardown(relay); fs.rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test('#7760: the advisor is read from the sidecar when config.yml does not declare it', () => {
+  const fx = makeOmpFixture({
+    config: 'modelRoles:\n  default: openai-codex/gpt-5.6-terra:medium\n',
+    session: [OMP_MODEL_CHANGE],
+    advisor: [OMP_ADVISOR_TURN],
+  });
+  const relay = loadRelay({ backend: 'omp', model: '', reasoningEffort: '', env: { HIVE_OMP_AGENT_DIR: fx.agentDir } });
+  try {
+    const sel = relay.detectOmpSelection();
+    assert.strictEqual(sel.advisorModel, 'anthropic/claude-opus-5', 'the sidecar names provider and model separately; they are joined as provider/model');
+    assert.strictEqual(sel.advisorEffort, '', 'the sidecar records no level, and none was configured');
+  } finally { teardown(relay); fs.rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test('#7760: an advisor configured but disabled is not reported, and the sidecar never becomes the primary', () => {
+  const fx = makeOmpFixture({
+    config: OMP_CONFIG_WITH_ADVISOR.replace('enabled: true', 'enabled: false'),
+    session: [OMP_MODEL_CHANGE],
+    advisor: [OMP_ADVISOR_TURN],
+  });
+  const relay = loadRelay({ backend: 'omp', model: '', reasoningEffort: '', env: { HIVE_OMP_AGENT_DIR: fx.agentDir } });
+  try {
+    // The sidecar is newer than the session file, which is exactly the mtime
+    // race that would misreport the advisor as the primary if it were a
+    // candidate.
+    const later = new Date(Date.now() + 5000);
+    fs.utimesSync(fx.advisorFile, later, later);
+    const sel = relay.detectOmpSelection();
+    assert.strictEqual(sel.model, 'openai-codex/gpt-5.6-terra', 'the primary comes from the session, not the newer sidecar');
+    assert.strictEqual(sel.advisorModel, '', 'advisor.enabled: false means no advisor reviewed this work');
+  } finally { teardown(relay); fs.rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test('#7760: AGENT_MODEL and AGENT_REASONING_EFFORT still win over what omp records', () => {
+  const fx = makeOmpFixture({ config: OMP_CONFIG_WITH_ADVISOR, session: [OMP_MODEL_CHANGE], advisor: [OMP_ADVISOR_TURN] });
+  const relay = loadRelay({ backend: 'omp', model: 'my/explicit-model', reasoningEffort: 'low', env: { HIVE_OMP_AGENT_DIR: fx.agentDir } });
+  try {
+    assert.strictEqual(relay.refreshDetectedModel(), 'my/explicit-model');
+    assert.strictEqual(relay.effectiveReasoningEffort(), 'low');
+    assert.deepStrictEqual(relay.advisorFields(), { advisor_model: 'anthropic/claude-opus-5', advisor_reasoning_effort: 'high' },
+      'the advisor has no env var, so it is always what the CLI reports');
+  } finally { teardown(relay); fs.rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test('#7760: a mid-task /model switch in omp reaches task_progress, with the advisor pair alongside', () => {
+  const fx = makeOmpFixture({ config: OMP_CONFIG_WITH_ADVISOR, session: [OMP_MODEL_CHANGE], advisor: [OMP_ADVISOR_TURN] });
+  const relay = loadRelay({ backend: 'omp', model: '', reasoningEffort: '', cliStates: ['working'], env: { HIVE_OMP_AGENT_DIR: fx.agentDir } });
+  try {
+    assert.strictEqual(relay.refreshDetectedModel(), 'openai-codex/gpt-5.6-terra');
+    fs.appendFileSync(fx.sessionFile, JSON.stringify({ type: 'model_change', model: 'anthropic/claude-sonnet-5:high' }) + '\n');
+    relay.setCurrentTask({ task_id: 'mt-omp', task_gen: 3, kind: 'issue', repo: 'foo/bar', number: 1, title: 'x' });
+    relay.__stallTick();
+    const prog = relay.__sent.filter(m => m.type === 'task_progress').pop();
+    assert.ok(prog, 'the tick must send a task_progress');
+    assert.strictEqual(prog.model, 'anthropic/claude-sonnet-5', 'the switched model, provider included');
+    assert.strictEqual(prog.reasoning_effort, 'high', 'a level spelled on the switch is the effort now in effect');
+    assert.strictEqual(prog.advisor_model, 'anthropic/claude-opus-5');
+    assert.strictEqual(prog.advisor_reasoning_effort, 'high');
+  } finally { teardown(relay); fs.rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test('#7760: a backend without a selection detector reports no advisor fields', () => {
+  const fx = makeClaudeFixture([assistantTurn('claude-opus-5-20260101')]);
+  const relay = loadRelay({ backend: 'claude', model: '', env: { HIVE_CLAUDE_PROJECTS_DIR: fx.projectsDir } });
+  try {
+    relay.handleMessage(JSON.stringify({ type: 'auth_challenge' }));
+    const auth = relay.__sent.find(m => m.type === 'auth_response');
+    assert.strictEqual(auth.model, 'claude-opus-5-20260101');
+    assert.strictEqual(auth.advisor_model, undefined);
+    assert.strictEqual(relay.SELECTION_DETECTORS.claude, undefined);
+  } finally { teardown(relay); fs.rmSync(fx.root, { recursive: true, force: true }); }
 });
 
 test('#4117: copilot model is detected from the newest events.jsonl', () => {
@@ -4779,10 +5149,13 @@ test('#4267 detectPRURL prefers the task repo; #6662 there is no cross-repo fall
     // for this task's issue. An approximate value there is a wrong one.
     assert.strictEqual(relay.detectPRURL(lines, 'nomatch/repo'), '',
       'a PR in another repo must never be attributed to this task');
-    // With no task repo supplied there is nothing to attribute against, so the
-    // first match stands — unchanged.
+    // With no task repo supplied there is nothing to attribute against, so
+    // every URL is a candidate — and #7789 ranks the newest-printed first, so
+    // the head is now the LAST match rather than the first.
     assert.strictEqual(relay.detectPRURL(lines, ''),
-      'https://github.com/other/repo/pull/7');
+      'https://github.com/hivecommons/hive/pull/4267');
+    assert.deepStrictEqual(relay.detectPRURLs(lines, ''),
+      ['https://github.com/hivecommons/hive/pull/4267', 'https://github.com/other/repo/pull/7']);
     assert.strictEqual(relay.detectPRURL(['no urls here'], 'hivecommons/hive'), '');
     assert.strictEqual(relay.detectPRURL([], 'hivecommons/hive'), '');
     assert.strictEqual(relay.detectPRURL(null, 'hivecommons/hive'), '');
@@ -6288,6 +6661,252 @@ test('#5353 a reported completion stops the agent and drops its token', () => {
   } finally { teardown(relay); }
 });
 
+// ---------------------------------------------------------------------------
+// hivecommons/hive#7732 — a task exit must advertise `ready` exactly once.
+//
+// finishCurrentTask()/failCurrentTask() send `ready` themselves, AND the
+// relaunch they trigger arms armCLIReadyWait(), whose resolve handler also
+// sends `ready` when the relay is idle and authenticated. With a backend whose
+// pane reads ready on the very first (synchronous) waitForCLI() check — omp
+// after two Ctrl-Cs sits at its prompt — the second frame follows the first
+// within the same event-loop turn. The hub answers the first with a new
+// assignment and reads the second as "relay asked for work while still
+// holding it" (#2545): it books the fresh task as abandoned_handback and
+// assigns a third, which the relay rejects. Hub and relay then disagree about
+// what the contributor is working on.
+//
+// The harness's default pane already reads ready on every capture, so the
+// first check inside waitForCLI() resolves synchronously — exactly the omp
+// shape — and the resolve handler runs as a microtask the test yields to.
+// ---------------------------------------------------------------------------
+
+function drainMicrotasks() {
+  // The resolve handler is a .then on an already-settled promise: two turns
+  // of the microtask queue is enough for it and anything it chains.
+  return Promise.resolve().then(() => Promise.resolve());
+}
+
+test('#7732 completing a task advertises ready exactly once when the relaunched CLI is ready immediately', async () => {
+  const relay = loadRelay({ backend: 'copilot', paneText: `HIVE_VERDICT: complete — shipped it\n${IDLE_PANE}` });
+  const log = console.log; console.log = () => {};
+  try {
+    // Settle the module-load readiness callback first: the relay is up, its
+    // CLI confirmed, before the hub authenticates it — the steady state
+    // every task exit below starts from.
+    await drainMicrotasks();
+    relay.handleMessage(JSON.stringify({ type: 'auth_ok', contributor_id: 'c1', trust_tier: 'trusted' }));
+    dispatchTask(relay, 'ct-7732-complete');
+    relay.__sent.length = 0;
+    relay.__stallTick();
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 1, 'setup: the task completed');
+    await drainMicrotasks();
+    const readies = relay.__sent.filter(m => m.type === 'ready');
+    assert.strictEqual(readies.length, 1,
+      `one completion must ask for work once — a second ready makes the hub hand back the task it just assigned: ${JSON.stringify(relay.__sent.map(m => m.type))}`);
+    assert.strictEqual(relay.getCliReady(), true, 'the relaunched CLI was confirmed ready');
+  } finally { console.log = log; teardown(relay); }
+});
+
+test('#7732 an ordinary task failure advertises ready exactly once when the relaunched CLI is ready immediately', async () => {
+  const relay = loadRelay({ backend: 'copilot' });
+  const log = console.log; console.log = () => {};
+  const err = console.error; console.error = () => {};
+  try {
+    await drainMicrotasks();
+    relay.handleMessage(JSON.stringify({ type: 'auth_ok', contributor_id: 'c1', trust_tier: 'trusted' }));
+    dispatchTask(relay, 'ct-7732-failed');
+    relay.__sent.length = 0;
+    relay.failCurrentTask('some ordinary failure');
+    await drainMicrotasks();
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'ready').length, 1,
+      `a failure hands the task back and asks for work ONCE: ${JSON.stringify(relay.__sent.map(m => m.type))}`);
+  } finally { console.log = log; console.error = err; teardown(relay); }
+});
+
+test('#7732 an interactive revoke advertises ready exactly once', async () => {
+  const relay = loadRelay({ backend: 'copilot' });
+  const log = console.log; console.log = () => {};
+  try {
+    // Settle the module-load readiness callback first: the relay is up, its
+    // CLI confirmed, before the hub authenticates it — the steady state
+    // every task exit below starts from.
+    await drainMicrotasks();
+    relay.handleMessage(JSON.stringify({ type: 'auth_ok', contributor_id: 'c1', trust_tier: 'trusted' }));
+    dispatchTask(relay, 'ct-7732-revoked');
+    relay.__sent.length = 0;
+    relay.handleMessage(JSON.stringify({ type: 'task_revoke', task_id: 'ct-7732-revoked', reason: 'lease expired' }));
+    await drainMicrotasks();
+    assert.strictEqual(relay.getCurrentTask(), null);
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'ready').length, 1,
+      `a revoke asks for work ONCE once the fresh CLI is confirmed: ${JSON.stringify(relay.__sent.map(m => m.type))}`);
+  } finally { console.log = log; teardown(relay); }
+});
+
+test('#7732 the hub answering ready re-opens the readiness callback\'s own advertisement', async () => {
+  // The dedupe must not turn into a mute relay: once the hub has ANSWERED the
+  // outstanding ready (an assignment, or "nothing for you"), a later CLI
+  // readiness with the relay idle must advertise again — the #6655 startup
+  // shape, where auth_ok withheld ready because the CLI was still coming up.
+  const relay = loadRelay({ backend: 'copilot' });
+  const log = console.log; console.log = () => {};
+  try {
+    // Settle the module-load readiness callback first: the relay is up, its
+    // CLI confirmed, before the hub authenticates it — the steady state
+    // every task exit below starts from.
+    await drainMicrotasks();
+    relay.handleMessage(JSON.stringify({ type: 'auth_ok', contributor_id: 'c1', trust_tier: 'trusted' }));
+    dispatchTask(relay, 'ct-7732-first');
+    relay.__sent.length = 0;
+    relay.failCurrentTask('first task over');
+    await drainMicrotasks();
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'ready').length, 1, 'setup: one ready outstanding');
+
+    // The hub says there is nothing right now: that ready is answered.
+    relay.handleMessage(JSON.stringify({ type: 'task_unavailable', reason: 'no_work' }));
+    relay.__sent.length = 0;
+    // The CLI is relaunched for an unrelated reason while idle (a stale-latch
+    // recovery, an operator restart) and comes up ready.
+    relay.setCliReady(false);
+    relay.relaunchCLI();
+    await drainMicrotasks();
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'ready').length, 1,
+      `an idle, authenticated relay whose CLI just came up must still ask for work: ${JSON.stringify(relay.__sent.map(m => m.type))}`);
+
+    // And an assignment answers it too: the next idle readiness advertises.
+    assignTask(relay, 'ct-7732-second');
+    relay.__sent.length = 0;
+    relay.failCurrentTask('second task over');
+    await drainMicrotasks();
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'ready').length, 1,
+      `the second exit asks once as well: ${JSON.stringify(relay.__sent.map(m => m.type))}`);
+  } finally { console.log = log; teardown(relay); }
+});
+
+// #7779: a prompt queued because the CLI was still coming up must die with the
+// task it was for. The queue used to have two lifecycle hooks only — "CLI
+// failed, drop it" and "CLI ready, type it" — so a revoke or failure that landed
+// while the CLI was relaunching left the prompt queued, and the readiness
+// callback then typed it into the fresh CLI: an agent working an issue the hub
+// had taken back, with currentTask saying the relay held nothing.
+//
+// The harness's readiness wait resolves on the first poll (cliStates: ['ready']),
+// so `await drainMicrotasks()` after a relaunch IS "the CLI came up and the
+// readiness callback ran" — the exact moment the revoked prompt used to be typed.
+function literalPromptSends(relay, prompt) {
+  return relay.__tmuxSends().filter(c => / -l /.test(c) && c.includes(prompt));
+}
+
+test('#7779 a prompt queued before a task_revoke is dropped, not typed into the relaunched CLI', async () => {
+  const relay = loadRelay({ backend: 'copilot' });
+  const log = console.log; console.log = () => {};
+  try {
+    await drainMicrotasks();
+    relay.handleMessage(JSON.stringify({ type: 'auth_ok', contributor_id: 'c1', trust_tier: 'trusted' }));
+    // The CLI is relaunching when the assignment lands, so the prompt is queued.
+    relay.setCliReady(false);
+    assignTask(relay, 'ct-7779-revoked');
+    assert.strictEqual(relay.getPendingTask(), 'do the thing', 'setup: the prompt must be queued, not typed');
+    assert.strictEqual(relay.getPendingTaskId(), 'ct-7779-revoked', 'the queue must remember which task the prompt is for');
+
+    // Before the CLI is ready, the hub takes the task back.
+    relay.__sent.length = 0;
+    relay.handleMessage(JSON.stringify({ type: 'task_revoke', task_id: 'ct-7779-revoked', reason: 'operator yank' }));
+    assert.strictEqual(relay.getCurrentTask(), null);
+    assert.strictEqual(relay.getPendingTask(), null,
+      '#7779: the revoked task\'s prompt is still queued and will be typed when the CLI comes up');
+
+    // The relaunched CLI reaches its prompt; the readiness callback flushes.
+    await drainMicrotasks();
+    assert.strictEqual(relay.getCliReady(), true, 'setup: the fresh CLI is confirmed ready');
+    assert.deepStrictEqual(literalPromptSends(relay, 'do the thing'), [],
+      '#7779: the revoked task\'s prompt was typed into the agent with no task held');
+    assert.strictEqual(relay.getCurrentTask(), null, 'the relay holds nothing, and the agent must be doing nothing');
+    // The relay is idle and owes the hub exactly one `ready` (#7732 unchanged).
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'ready').length, 1,
+      `a revoke asks for work once: ${JSON.stringify(relay.__sent.map(m => m.type))}`);
+  } finally { console.log = log; teardown(relay); }
+});
+
+test('#7779 a prompt queued before failCurrentTask is dropped, not typed into the relaunched CLI', async () => {
+  const relay = loadRelay({ backend: 'copilot' });
+  const log = console.log; console.log = () => {};
+  const err = console.error; console.error = () => {};
+  try {
+    await drainMicrotasks();
+    relay.handleMessage(JSON.stringify({ type: 'auth_ok', contributor_id: 'c1', trust_tier: 'trusted' }));
+    relay.setCliReady(false);
+    assignTask(relay, 'ct-7779-failed');
+    assert.strictEqual(relay.getPendingTask(), 'do the thing', 'setup: the prompt must be queued, not typed');
+
+    // An ordinary failure lands while the CLI is still coming up (the max-duration
+    // lease, a hub-side rejection surfaced as a failure, ...).
+    relay.failCurrentTask('gave up before the CLI came up');
+    assert.strictEqual(relay.getCurrentTask(), null);
+    assert.strictEqual(relay.getPendingTask(), null,
+      '#7779: the failed task\'s prompt is still queued and will be typed when the CLI comes up');
+
+    await drainMicrotasks();
+    assert.deepStrictEqual(literalPromptSends(relay, 'do the thing'), [],
+      '#7779: the failed task\'s prompt was typed into the agent with no task held');
+  } finally { console.log = log; console.error = err; teardown(relay); }
+});
+
+test('#7779 flushPendingTask refuses a prompt whose task the relay no longer holds', () => {
+  // The backstop behind the explicit discards: even if some future task-exit
+  // path forgets the queue, a prompt queued for one task is never typed while
+  // the relay holds a different task, or none.
+  const relay = loadRelay({ backend: 'copilot' });
+  const log = console.log; console.log = () => {};
+  try {
+    relay.setCliReady(false);
+    relay.setCurrentTask({ task_id: 'ct-7779-old', kind: 'issue', repo: 'foo/bar', number: 1, title: 'old' });
+    relay.setPendingTask('the old task prompt');
+    assert.strictEqual(relay.getPendingTaskId(), 'ct-7779-old');
+
+    // The task changes hands underneath the queue without going through a
+    // task-exit path.
+    relay.setCurrentTask(null);
+    relay.setCliReady(true);
+    const before = relay.__tmuxSends().length;
+    relay.flushPendingTask();
+    assert.strictEqual(relay.getPendingTask(), null, 'the orphaned prompt must be dropped, not kept for later');
+    assert.deepStrictEqual(relay.__tmuxSends().slice(before).filter(c => / -l /.test(c)), [],
+      '#7779: a prompt for a task the relay does not hold was typed');
+
+    // And the same when the relay holds a DIFFERENT task: the other task's
+    // prompt is not typed on top of the one already running.
+    relay.setCliReady(false);
+    relay.setCurrentTask({ task_id: 'ct-7779-old', kind: 'issue', repo: 'foo/bar', number: 1, title: 'old' });
+    relay.setPendingTask('the old task prompt');
+    relay.setCurrentTask({ task_id: 'ct-7779-new', kind: 'issue', repo: 'foo/bar', number: 2, title: 'new' });
+    relay.setCliReady(true);
+    const before2 = relay.__tmuxSends().length;
+    relay.flushPendingTask();
+    assert.strictEqual(relay.getPendingTask(), null);
+    assert.deepStrictEqual(relay.__tmuxSends().slice(before2).filter(c => / -l /.test(c)), [],
+      '#7779: a prompt queued for one task was typed while another task was held');
+  } finally { console.log = log; teardown(relay); }
+});
+
+test('#7779 the queue still flushes for the task it was queued for', async () => {
+  // The guard must not eat legitimate deliveries: a prompt queued during a
+  // relaunch is typed once the CLI is up, as long as the task is still ours.
+  const relay = loadRelay({ backend: 'copilot' });
+  const log = console.log; console.log = () => {};
+  try {
+    await drainMicrotasks();
+    relay.setCliReady(false);
+    assignTask(relay, 'ct-7779-kept');
+    assert.strictEqual(relay.getPendingTask(), 'do the thing', 'setup: queued');
+    relay.relaunchCLI();
+    await drainMicrotasks();
+    assert.strictEqual(relay.getPendingTask(), null, 'the queue is drained on delivery');
+    assert.ok(literalPromptSends(relay, 'do the thing').length > 0,
+      'the still-held task\'s prompt must be typed once the CLI is ready');
+    assert.strictEqual(relay.getTaskPromptDelivered(), true);
+  } finally { console.log = log; teardown(relay); }
+});
+
 test('#6667 a PR scrolled out of the 15-line payload window is still reported', () => {
   // The inverse of #6662. detectPRURL used to be handed the same fifteen lines
   // the relay sends upstream as tmux_output, and in a real TUI roughly ten of
@@ -7729,16 +8348,36 @@ test('#7662 a verdict buried under a backend\'s post-turn chrome still completes
   // The exact capture from the issue. On the pre-fix relay the sentinel is
   // outside the 15-row window on the very first tick, the pane is read as idle
   // chrome with "no HIVE_VERDICT yet", and nothing ends the task.
-  const relay = loadRelay({ backend: 'omp', paneText: OMP_FINISHED_PANE, prMeta: new Error('gh: offline') });
+  //
+  // #7759: the chrome under this verdict is two advisor ⟦concern⟧ notes, so
+  // reading the sentinel now earns the agent one follow-up turn before the
+  // task ends. The first tick therefore proves the verdict was READ by the
+  // follow-up it provokes — the pre-fix relay saw no verdict and sent nothing
+  // — and the second tick, with the agent's re-printed verdict below the
+  // relay's echoed request, is the completion this test has always asserted.
+  let pane = OMP_FINISHED_PANE;
+  const relay = loadRelay({ backend: 'omp', paneText: () => pane, prMeta: new Error('gh: offline') });
   const log = console.log; console.log = () => {};
   try {
     dispatchTask(relay, 'ct-omp-buried-verdict', 294);
     assert.ok(OMP_FINISHED_PANE.split('\n').slice(-relay.TMUX_TAIL_LINES).every(l => !/HIVE_VERDICT/.test(l)),
       'setup: the sentinel must sit OUTSIDE the display tail for this test to mean anything');
     relay.__crashTick();
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 0,
+      'two concerns sit under the verdict, so the first tick asks the agent to address them rather than finalizing (#7759)');
+    assert.ok(relay.__tmuxSends().some(c => c.includes(relay.POST_VERDICT_REVIEW_ANCHOR)),
+      'the agent printed HIVE_VERDICT: complete; the relay must read it however much chrome the CLI drew under it — here by asking for the advisor follow-up');
+    pane = [
+      OMP_FINISHED_PANE,
+      `> ${relay.POST_VERDICT_REVIEW_MESSAGE}`,
+      ' Set compression-level: 0 on the upload step and pushed the fix to PR #295.',
+      'HIVE_VERDICT: complete — PR #295 open against main with README path filters fixed',
+      ...OMP_POST_TURN_CHROME,
+    ].join('\n');
+    relay.__crashTick();
     const completed = relay.__sent.filter(m => m.type === 'task_complete');
     assert.strictEqual(completed.length, 1,
-      'the agent printed HIVE_VERDICT: complete; the relay must read it however much chrome the CLI drew under it');
+      'the re-printed verdict, below the echoed follow-up, completes the task');
     assert.strictEqual(completed[0].completion_signal, 'verdict',
       'this is the agent\'s own statement, not a chrome inference');
     assert.strictEqual(completed[0].pr_url, 'https://github.com/foo/bar/pull/295',
@@ -7911,6 +8550,230 @@ test('#7662 lease expiry with a PR another author opened still fails as before',
     assert.strictEqual(failures[0].failure_kind, 'environment');
     assert.ok(!failures[0].reason.includes('pull/12'), 'a refuted PR is not offered to the operator as this task\'s');
   } finally { console.log = log; teardown(relay); }
+});
+
+// ---------------------------------------------------------------------------
+// Advisor notes that land after the verdict (hivecommons/hive#7759).
+//
+// omp's --advisor reviews every turn passively and injects its notes after the
+// turn ends, so its review of the agent's FINAL turn lands under HIVE_VERDICT.
+// The sentinel being final (#5376, #7662, #7733) meant the relay killed the CLI
+// with those notes unread. The relay now asks the agent ONCE per task to
+// address the ⟦concern⟧ notes and re-print the verdict; the second verdict is
+// final whatever appears under it.
+//
+// The capture from the issue, as tmux renders it (#7759 shows the glyph forms
+// "ⓘ Advisor 1 note" / "▎ ⟦concern⟧"; the #7662 capture rendered the same
+// notes as "@ Advisor 1 note" / "[concern]" — both are accepted).
+// ---------------------------------------------------------------------------
+
+const OMP_UTAH14_VERDICT = 'HIVE_VERDICT: complete — PR #198 delivers gated production ISO artifact retention against main.';
+const OMP_UTAH14_NOTES = [
+  ' ⓘ Advisor 1 note',
+  '   ▎ ⟦concern⟧ Base branch: repo has no CONTRIBUTING/PR template, but .github/workflows contains',
+  '   ▎ promote-testing-to-main.yml and sync-main-to-testing.yml — a promotion model where `testing` is the',
+  '   ▎ integration branch and `main` is released. Branch from upstream/testing and open the PR against `testing`, …',
+  ' ⓘ Advisor 1 note',
+  '   ▎ ⟦concern⟧ Working tree is dirty from a prior task (M docs/skills/kernel-cache.md,',
+  '   ▎ scripts/verify-rpm-contract.py, tests/test_verify_rpm_contract.py) … can leak into your commit …',
+  ' ⓘ Advisor 1 note',
+  '   ▎ ⟦nit⟧ Set `compression-level: 0` on the Retain production ISO upload — upload-artifact zips at level 6 by',
+  '   ▎ default, and an ISO that is already a zstd squashfs will burn many minutes of CPU per flavor for near-zero',
+  '   ▎ size gain.',
+];
+const OMP_UTAH14_NITS_ONLY = OMP_UTAH14_NOTES.slice(7);
+const OMP_UTAH14_TAIL = OMP_POST_TURN_CHROME.slice(OMP_POST_TURN_CHROME.indexOf('Advisor history copied to clipboard'));
+
+function ompPane(...blocks) {
+  return blocks.flat().join('\n');
+}
+
+// The second verdict, as omp renders the turn the follow-up provokes: the
+// relay's message echoed as a user turn, the agent's work, the re-printed
+// sentinel, and — because the advisor reviews THAT turn too — more notes.
+function ompAnsweredPane(relay, first, answerNotes) {
+  return ompPane(
+    first,
+    `> ${relay.POST_VERDICT_REVIEW_MESSAGE}`,
+    ' Set compression-level: 0 on the Retain production ISO upload; pushed to PR #198.',
+    OMP_UTAH14_VERDICT,
+    answerNotes,
+    OMP_UTAH14_TAIL,
+  );
+}
+
+test('#7759 concerns posted under the verdict earn the agent one follow-up before the task ends', () => {
+  // The pane at dispatch is the agent mid-task; the verdict and the notes
+  // under it arrive before the first judged tick, as they did live.
+  let pane = ompPane(' ⠋ Editing .github/workflows/build.yml', '╰─');
+  const relay = loadRelay({ backend: 'omp', paneText: () => pane, prMeta: new Error('gh: offline') });
+  const log = console.log; console.log = () => {};
+  try {
+    dispatchTask(relay, 'ct-7759-followup', 14);
+    const before = relay.__tmuxSends().length;
+    pane = ompPane(' Opened https://github.com/foo/bar/pull/198', OMP_UTAH14_VERDICT, OMP_UTAH14_NOTES, OMP_UTAH14_TAIL);
+    relay.__crashTick();
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 0,
+      'the verdict must not finalize while two concerns sit unread under it');
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_failed').length, 0);
+    const sends = relay.__tmuxSends().slice(before).filter(c => c.includes(relay.POST_VERDICT_REVIEW_ANCHOR));
+    assert.strictEqual(sends.length, 1, `exactly one follow-up is typed: ${JSON.stringify(relay.__tmuxSends().slice(before))}`);
+    const progress = relay.__sent.filter(m => m.type === 'task_progress' && /advisor posted 2 concern/.test(m.summary || ''));
+    assert.strictEqual(progress.length, 1, 'the hub is told why the task is still open, with the concern count');
+    assert.strictEqual(relay.getPostVerdictReviewRequested(), true);
+
+    // Next tick: the agent is still working on the notes. The first verdict
+    // is still on the pane, above the echoed request — it must not complete.
+    pane = ompPane(' Opened https://github.com/foo/bar/pull/198', OMP_UTAH14_VERDICT, OMP_UTAH14_NOTES,
+      `> ${relay.POST_VERDICT_REVIEW_MESSAGE}`, ' ⠋ Editing .github/workflows/build.yml', '╰─');
+    relay.__crashTick();
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 0,
+      'the FIRST verdict, still on the pane above the echoed follow-up, must not end the task mid-turn');
+    assert.strictEqual(relay.__tmuxSends().filter(c => c.includes(relay.POST_VERDICT_REVIEW_ANCHOR)).length, 1,
+      'and no second follow-up is typed');
+
+    // The agent addressed the notes and re-printed the verdict — and the
+    // advisor reviewed that turn too. The second verdict is final.
+    pane = ompAnsweredPane(relay, [' Opened https://github.com/foo/bar/pull/198', OMP_UTAH14_VERDICT, OMP_UTAH14_NOTES], OMP_UTAH14_NOTES.slice(0, 4));
+    relay.__crashTick();
+    const completed = relay.__sent.filter(m => m.type === 'task_complete');
+    assert.strictEqual(completed.length, 1, 'the re-printed verdict completes the task');
+    assert.strictEqual(completed[0].completion_signal, 'verdict');
+    assert.strictEqual(completed[0].pr_url, 'https://github.com/foo/bar/pull/198');
+    assert.strictEqual(relay.__tmuxSends().filter(c => c.includes(relay.POST_VERDICT_REVIEW_ANCHOR)).length, 1,
+      'a fresh concern under the SECOND verdict does not buy another turn — one follow-up per task, ever');
+  } finally { console.log = log; teardown(relay); }
+});
+
+test('#7759 a verdict with only nits, or nothing, under it finalizes on the tick it is read', () => {
+  for (const [label, notes] of [['nits only', OMP_UTAH14_NITS_ONLY], ['no notes', []]]) {
+    const relay = loadRelay({ backend: 'omp', paneText: ompPane(OMP_UTAH14_VERDICT, notes, OMP_UTAH14_TAIL), prMeta: new Error('gh: offline') });
+    const log = console.log; console.log = () => {};
+    try {
+      dispatchTask(relay, `ct-7759-${label.replace(/ /g, '-')}`, 14);
+      relay.__crashTick();
+      assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 1,
+        `${label}: nothing worth a turn was posted, so the verdict is final on this tick`);
+      assert.ok(!relay.__tmuxSends().some(c => c.includes(relay.POST_VERDICT_REVIEW_ANCHOR)),
+        `${label}: no follow-up is typed`);
+    } finally { console.log = log; teardown(relay); }
+  }
+});
+
+test('#7759 concerns ABOVE the verdict are an earlier turn\'s review and do not re-open the task', () => {
+  // Transcript order is the evidence: the advisor writes under the turn it
+  // reviewed, so a note above the sentinel was posted before it.
+  const relay = loadRelay({ backend: 'omp', paneText: ompPane(OMP_UTAH14_NOTES, ' Fixed those.', OMP_UTAH14_VERDICT, OMP_UTAH14_TAIL), prMeta: new Error('gh: offline') });
+  const log = console.log; console.log = () => {};
+  try {
+    dispatchTask(relay, 'ct-7759-above', 14);
+    relay.__crashTick();
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 1);
+    assert.ok(!relay.__tmuxSends().some(c => c.includes(relay.POST_VERDICT_REVIEW_ANCHOR)));
+  } finally { console.log = log; teardown(relay); }
+});
+
+test('#7759 only a backend that posts review output after the verdict gets the follow-up', () => {
+  // The same text under a claude verdict is the agent's own output; nothing
+  // reviewed it, and a verdict on claude is final on the tick it is read.
+  const pane = ompPane('HIVE_VERDICT: complete — done', OMP_UTAH14_NOTES, '/ commands for help');
+  const relay = loadRelay({ backend: 'claude', paneText: pane, prMeta: new Error('gh: offline') });
+  const log = console.log; console.log = () => {};
+  try {
+    dispatchTask(relay, 'ct-7759-claude', 14);
+    relay.__crashTick();
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 1);
+    assert.ok(!relay.__tmuxSends().some(c => c.includes(relay.POST_VERDICT_REVIEW_ANCHOR)));
+    assert.strictEqual(relay.POST_VERDICT_REVIEW_MARKERS.claude, undefined, 'claude declares no post-verdict review markers');
+  } finally { console.log = log; teardown(relay); }
+});
+
+test('#7759 a concern already on the pane at the previous tick is not new and does not trigger', () => {
+  // The verdict is first read while the pane shows an API error, which
+  // excludes it from completing (#5094/#5121); the concerns under it are
+  // snapshotted on that tick. When the error clears, the same concerns are
+  // not news — nothing new since the verdict means finalize immediately.
+  let pane = ompPane(OMP_UTAH14_VERDICT, OMP_UTAH14_NOTES, ' ⚠ API Error: 529 overloaded — retrying', OMP_UTAH14_TAIL);
+  const relay = loadRelay({ backend: 'omp', paneText: () => pane, prMeta: new Error('gh: offline') });
+  const log = console.log; console.log = () => {};
+  const warn = console.warn; console.warn = () => {};
+  try {
+    dispatchTask(relay, 'ct-7759-stale-notes', 14);
+    relay.__crashTick();
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 0, 'setup: an API-error pane does not complete');
+    assert.ok(!relay.__tmuxSends().some(c => c.includes(relay.POST_VERDICT_REVIEW_ANCHOR)), 'setup: and does not ask for the follow-up');
+    pane = ompPane(OMP_UTAH14_VERDICT, OMP_UTAH14_NOTES, OMP_UTAH14_TAIL);
+    relay.__crashTick();
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 1,
+      'the concerns were already there at the previous tick, so the verdict is final');
+    assert.ok(!relay.__tmuxSends().some(c => c.includes(relay.POST_VERDICT_REVIEW_ANCHOR)));
+  } finally { console.log = log; console.warn = warn; teardown(relay); }
+});
+
+test('#7759 a follow-up the pane refuses is not retried; the verdict finalizes as it would have', () => {
+  const relay = loadRelay({ backend: 'omp', paneText: ompPane(OMP_UTAH14_VERDICT, OMP_UTAH14_NOTES, OMP_UTAH14_TAIL), prMeta: new Error('gh: offline') });
+  const log = console.log; console.log = () => {};
+  const err = console.error; console.error = () => {};
+  try {
+    dispatchTask(relay, 'ct-7759-send-fails', 14);
+    relay.__failNextNudge();
+    relay.__crashTick();
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 1,
+      'a send that throws costs the agent its one turn, not the task its completion');
+    assert.strictEqual(relay.getPostVerdictReviewRequested(), true, 'the budget is spent before typing, so the next tick cannot retry');
+  } finally { console.log = log; console.error = err; teardown(relay); }
+});
+
+test('#7759 an agent that addresses the notes but never re-prints the verdict completes on chrome idle, first verdict carried', () => {
+  // The fallback the sentinel exists to replace, reached the same way as for
+  // an agent that never printed one — and the first verdict's no_work_needed
+  // still reaches the hub, since that IS what the agent concluded.
+  const firstVerdict = 'HIVE_VERDICT: no_work_needed — the issue is already fixed on main';
+  let pane = ompPane(' ⠋ Reading the issue', '╰─');
+  const relay = loadRelay({ backend: 'omp', paneText: () => pane, prMeta: new Error('gh: offline') });
+  const log = console.log; console.log = () => {};
+  const warn = console.warn; console.warn = () => {};
+  try {
+    dispatchTask(relay, 'ct-7759-no-second-verdict', 18);
+    pane = ompPane(firstVerdict, OMP_UTAH14_NOTES, OMP_UTAH14_TAIL);
+    relay.__crashTick();
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 0, 'setup: the follow-up went out');
+    pane = ompPane(firstVerdict, OMP_UTAH14_NOTES, `> ${relay.POST_VERDICT_REVIEW_MESSAGE}`,
+      ' Both concerns are moot: the tree is clean and main is the right base.', OMP_UTAH14_TAIL);
+    graceTicks(relay, () => relay.__crashTick());
+    const completed = relay.__sent.filter(m => m.type === 'task_complete');
+    assert.strictEqual(completed.length, 1, 'idle chrome after the follow-up completes the task through the ordinary grace');
+    assert.strictEqual(completed[0].completion_signal, 'chrome_idle', 'honestly recorded: the second verdict never came');
+    assert.strictEqual(completed[0].verdict, 'no_work_needed', 'the verdict the agent DID print is still reported');
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_failed').length, 0);
+  } finally { console.log = log; console.warn = warn; teardown(relay); }
+});
+
+test('#7759 postVerdictConcerns reads only bracketed concerns inside a note block below the verdict', () => {
+  const relay = loadRelay({ backend: 'omp' });
+  try {
+    const m = relay.POST_VERDICT_REVIEW_MARKERS.omp;
+    const v = 'HIVE_VERDICT: complete — x';
+    assert.deepStrictEqual(relay.postVerdictConcerns([v, ' ⓘ Advisor 1 note', '   ▎ ⟦concern⟧ a', ' @ Advisor 2 note', '  [concern] b', '  [nit] c'], v, m),
+      ['   ▎ ⟦concern⟧ a', '  [concern] b'], 'both live spellings count; nits do not');
+    assert.deepStrictEqual(relay.postVerdictConcerns([v, '  the diff mentions [concern] in prose'], v, m), [],
+      'a bracketed word outside a note block is not a review note');
+    assert.deepStrictEqual(relay.postVerdictConcerns([' ⓘ Advisor 1 note', '   ▎ ⟦concern⟧ earlier', v], v, m), [],
+      'a note above the verdict is not below it');
+    assert.deepStrictEqual(relay.postVerdictConcerns(['   ▎ ⟦concern⟧ a'], v, m), [], 'no verdict line, no "below"');
+    // The last occurrence of the verdict line is the one that counts: the
+    // #5650 baseline may leave an identical previous-task line higher up.
+    assert.deepStrictEqual(relay.postVerdictConcerns([v, ' ⓘ Advisor 1 note', '   ▎ ⟦concern⟧ old', ' new work', v, ' ⓘ Advisor 1 note', '   ▎ ⟦concern⟧ new'], v, m),
+      ['   ▎ ⟦concern⟧ new']);
+    // The echo test: a verdict counts as the second one only below the echo.
+    const echo = `> ${relay.POST_VERDICT_REVIEW_MESSAGE}`;
+    assert.strictEqual(relay.postVerdictReviewAnswered([v, echo, ' working']), false);
+    assert.strictEqual(relay.postVerdictReviewAnswered([v, echo, ' done', v]), true);
+    assert.strictEqual(relay.postVerdictReviewAnswered([' done', v]), true, 'echo scrolled out of the window: any verdict is below it');
+    assert.ok(relay.POST_VERDICT_REVIEW_MESSAGE.startsWith(relay.POST_VERDICT_REVIEW_ANCHOR), 'the anchor is a verbatim prefix of the message');
+    assert.ok(!/\n/.test(relay.POST_VERDICT_REVIEW_MESSAGE), 'typed as one line');
+    assert.ok(!/HIVE_VERDICT:/.test(relay.POST_VERDICT_REVIEW_MESSAGE), 'the echoed request must not itself read as a verdict');
+  } finally { teardown(relay); }
 });
 
 // ---------------------------------------------------------------------------
@@ -8637,6 +9500,206 @@ test('#6662 resolveTaskPR reports the three-way split it promises', () => {
     assert.strictEqual(none.suppressesVerdict, false);
     assert.strictEqual(none.evidence, null);
   } finally { console.log = log; teardown(relay); }
+});
+
+// ---------------------------------------------------------------------------
+// hivecommons/hive#7789 — a researched PR above the agent's own must not cost
+// the agent its credit.
+//
+// #6662 made resolveTaskPR() refute a PR the agent merely read about. It
+// verified only the FIRST URL on the pane and stopped at that refutation, so
+// an agent that looked at an older PR before opening its own — which the task
+// prompt tells it to do — got no PR credit at all. Observed live: utah#131
+// shipped utah#205; the relay examined utah#133 (researched, created the day
+// before), refuted it, and booked `verdict=idle`, `pr_url` empty.
+//
+// The pane below is the shape from the issue: a no_work_needed verdict citing
+// the prior PR, the #7759 advisor blocker, the retraction, and the second
+// verdict carrying the real PR.
+// ---------------------------------------------------------------------------
+
+const UTAH131_RESEARCHED = 'https://github.com/foo/bar/pull/133';
+const UTAH131_SHIPPED = 'https://github.com/foo/bar/pull/205';
+// The real timestamps from the report: #133 predates the task by a day; #205
+// is opened by this contributor while the task runs.
+const UTAH131_META = (taskStartedAt) => ({
+  [UTAH131_RESEARCHED]: {
+    url: UTAH131_RESEARCHED, author: { login: 'someone-else' },
+    createdAt: '2026-09-18T17:34:25Z', mergedAt: null, state: 'OPEN',
+  },
+  [UTAH131_SHIPPED]: {
+    url: UTAH131_SHIPPED, author: { login: 'Danathar' },
+    createdAt: new Date(taskStartedAt + 20 * 60 * 1000).toISOString(), mergedAt: null, state: 'OPEN',
+  },
+});
+const UTAH131_PANE = [
+  '● Bash(gh pr view 133 --repo foo/bar)',
+  '  #133  OPEN  fix(build): reusable-build correction',
+  `  ${UTAH131_RESEARCHED}`,
+  'HIVE_VERDICT: no_work_needed — the required reusable-build fix is blocked in projectbluefin/actions (read-only access), and Utah PR #133 already contains the Utah-side correction.',
+  ' ⓘ Advisor 1 note',
+  '   ▎ ⟦blocker⟧ #133 is a different change; the Utah-side fix is not in it. Ship it.',
+  'Advisor notes were posted after your verdict. Address the concerns that apply to your change, skip nits and anything already handled, then print the HIVE_VERDICT line again on its own line.',
+  '● Retracting: the advisor is right, #133 does not carry the correction.',
+  `● Bash(gh pr create --base main …)`,
+  `  ${UTAH131_SHIPPED}`,
+  `HIVE_VERDICT: complete — opened ${UTAH131_SHIPPED} against main, ready for review.`,
+  '✻ Cogitating… (esc to interrupt)',
+].join('\n');
+
+test('#7789 the PR the agent shipped is credited even when a researched PR sits above it', () => {
+  // End to end through the completion path. On the pre-fix relay this
+  // completes with pr_url '' — the #133 refutation is the only PR decision
+  // made, and #205 is never looked at.
+  // __crashTick() backdates the assignment by the startup grace period; the
+  // shipped PR's createdAt (taskStartedAt + 20min) must land after that.
+  const asked = [];
+  const relay = loadRelay({
+    backend: 'claude',
+    paneText: UTAH131_PANE,
+    env: { HIVE_CONTRIBUTOR_USERNAME: 'Danathar' },
+    prMeta: (url) => { asked.push(url); return UTAH131_META(Date.now())[url] || new Error(`unexpected lookup ${url}`); },
+  });
+  const logged = [];
+  const log = console.log; console.log = (...a) => { logged.push(a.join(' ')); };
+  try {
+    dispatchTask(relay, 'ct-foo/bar-131', 131);
+    relay.__crashTick();
+    const completed = relay.__sent.filter(m => m.type === 'task_complete');
+    assert.strictEqual(completed.length, 1);
+    assert.strictEqual(completed[0].pr_url, UTAH131_SHIPPED,
+      'the PR this task opened must be credited, whatever the agent read before opening it');
+    assert.strictEqual(completed[0].verdict, undefined,
+      'the retracted no_work_needed must not be reported: the task shipped');
+    assert.ok(logged.some(l => l.includes(`Detected PR for ct-foo/bar-131: ${UTAH131_SHIPPED}`)),
+      `the detection line must name the shipped PR; got:\n${logged.join('\n')}`);
+    // The shipped PR is named on the verdict line, so it is the first thing
+    // verified — the researched PR is not even looked up on this pane.
+    assert.deepStrictEqual(asked, [UTAH131_SHIPPED],
+      'the URL on the HIVE_VERDICT line is the agent\'s own claim and must be verified first');
+  } finally { console.log = log; teardown(relay); }
+});
+
+test('#7789 resolveTaskPR walks past a refuted candidate to the one that survives', () => {
+  // The mechanism on its own, with the ranking working AGAINST the agent: no
+  // verdict line names a URL and the researched PR was printed last, so it is
+  // verified first, refuted, and the walk must continue.
+  const taskStartedAt = Date.now() - 60 * 60 * 1000;
+  const asked = [];
+  const relay = loadRelay({
+    prMeta: (url) => { asked.push(url); return UTAH131_META(taskStartedAt)[url] || new Error(`unexpected lookup ${url}`); },
+  });
+  const logged = [];
+  const log = console.log; console.log = (...a) => { logged.push(a.join(' ')); };
+  try {
+    const lines = [
+      `Opened ${UTAH131_SHIPPED}`,
+      `This supersedes ${UTAH131_RESEARCHED}, which does not carry the fix.`,
+    ];
+    const found = relay.resolveTaskPR(lines, { repo: 'foo/bar', taskId: 't-walk', taskStartedAt, contributorLogin: 'Danathar' });
+    assert.deepStrictEqual(asked, [UTAH131_RESEARCHED, UTAH131_SHIPPED],
+      'newest-printed first; the refutation must not end the walk');
+    assert.strictEqual(found.url, UTAH131_SHIPPED);
+    assert.strictEqual(found.suppressesVerdict, true, 'a CONFIRMED PR still outranks the verdict');
+    assert.strictEqual(found.evidence.status, relay.PR_ATTRIBUTION_CONFIRMED);
+    // Each refutation is still logged as before, so the audit trail explains
+    // why a PR that was on the pane is not the one reported.
+    assert.ok(logged.some(l => l.includes(`Ignoring PR ${UTAH131_RESEARCHED} for t-walk`)),
+      `the refuted candidate must still be logged; got:\n${logged.join('\n')}`);
+  } finally { console.log = log; teardown(relay); }
+});
+
+test('#7789 detectPRURLs ranks the verdict line first, then newest-printed, and deduplicates', () => {
+  const relay = loadRelay({});
+  try {
+    const lines = [
+      'saw https://github.com/foo/bar/pull/1 and https://github.com/foo/bar/pull/2',
+      'HIVE_VERDICT: no_work_needed — https://github.com/foo/bar/pull/2 covers it',
+      'retracting; opened https://github.com/foo/bar/pull/3',
+      'HIVE_VERDICT: complete — https://github.com/foo/bar/pull/3 open, supersedes https://github.com/foo/bar/pull/1',
+      '   ▎ ⟦nit⟧ compare with https://github.com/foo/bar/pull/4',
+      'https://github.com/other/repo/pull/5 is not in this repo',
+    ];
+    assert.deepStrictEqual(relay.detectPRURLs(lines, 'foo/bar'), [
+      // Newest verdict line first, left to right within it...
+      'https://github.com/foo/bar/pull/3',
+      'https://github.com/foo/bar/pull/1',
+      // ...then the earlier verdict line...
+      'https://github.com/foo/bar/pull/2',
+      // ...then everything else newest-printed first, already-seen URLs dropped.
+      'https://github.com/foo/bar/pull/4',
+    ]);
+    // The prompt's own instruction echo is not a verdict line, so a URL that
+    // happens to sit on it gets no priority.
+    const echo = [
+      'opened https://github.com/foo/bar/pull/8',
+      "HIVE_VERDICT: complete — <short reason> as in https://github.com/foo/bar/pull/7",
+    ];
+    assert.deepStrictEqual(relay.detectPRURLs(echo, 'foo/bar'),
+      ['https://github.com/foo/bar/pull/7', 'https://github.com/foo/bar/pull/8']);
+    assert.strictEqual(relay.isHiveVerdictLine(echo[1]), false);
+    assert.strictEqual(relay.isHiveVerdictLine('● **HIVE_VERDICT: complete — done**'), true);
+    assert.strictEqual(relay.isHiveVerdictLine('the exact form HIVE_VERDICT: complete'), false, 'must stay anchored');
+    // Junk in, nothing out.
+    assert.deepStrictEqual(relay.detectPRURLs(null, 'foo/bar'), []);
+    assert.deepStrictEqual(relay.detectPRURLs([], 'foo/bar'), []);
+    assert.deepStrictEqual(relay.detectPRURLs([undefined, 42, 'https://github.com/foo/bar/issues/9'], 'foo/bar'), []);
+  } finally { teardown(relay); }
+});
+
+test('#7789 an offline gh still costs one lookup, and the top-ranked candidate is what is reported', () => {
+  // UNKNOWN ends the walk: if gh could not answer for one candidate it cannot
+  // answer for the next, and each attempt is a blocking execSync. The
+  // candidate reported is the agent's own claim — the verdict line's URL — not
+  // whichever happened to be printed first.
+  const asked = [];
+  const relay = loadRelay({ prMeta: (url) => { asked.push(url); return new Error('gh: offline'); } });
+  const log = console.log; console.log = () => {};
+  try {
+    const found = relay.resolveTaskPR(UTAH131_PANE.split('\n'), { repo: 'foo/bar', taskStartedAt: Date.now() - 60000 });
+    assert.deepStrictEqual(asked, [UTAH131_SHIPPED]);
+    assert.strictEqual(found.url, UTAH131_SHIPPED);
+    assert.strictEqual(found.suppressesVerdict, false, 'an unverified scrape must not outrank the sentinel');
+  } finally { console.log = log; teardown(relay); }
+});
+
+test('#7789 the candidate walk is bounded, and every candidate refuted reports no PR', () => {
+  const cap = 8; // PR_ATTRIBUTION_MAX_LOOKUPS
+  const relay = loadRelay({
+    prMeta: () => ({ author: { login: 'someone-else' }, createdAt: '2026-01-01T00:00:00Z', mergedAt: '2026-01-02T00:00:00Z', state: 'MERGED' }),
+  });
+  assert.ok(Number.isInteger(relay.PR_ATTRIBUTION_MAX_LOOKUPS) && relay.PR_ATTRIBUTION_MAX_LOOKUPS >= 2
+    && relay.PR_ATTRIBUTION_MAX_LOOKUPS <= 20,
+    `the lookup cap must be a small finite integer, got ${relay.PR_ATTRIBUTION_MAX_LOOKUPS}`);
+  assert.strictEqual(relay.PR_ATTRIBUTION_MAX_LOOKUPS, cap);
+  const lookups = [];
+  const warned = [];
+  const log = console.log; console.log = () => {};
+  const warn = console.warn; console.warn = (...a) => { warned.push(a.join(' ')); };
+  try {
+    // `gh pr list`-style research: many distinct prior PRs, all somebody else's.
+    const lines = Array.from({ length: cap + 3 }, (_, i) => `  https://github.com/foo/bar/pull/${100 + i}  MERGED  older work`);
+    const r = loadRelay({ prMeta: (url) => { lookups.push(url); return { author: { login: 'someone-else' }, createdAt: '2026-01-01T00:00:00Z', mergedAt: '2026-01-02T00:00:00Z', state: 'MERGED' }; } });
+    try {
+      const found = r.resolveTaskPR(lines, { repo: 'foo/bar', taskId: 't-cap', taskStartedAt: Date.now() - 60000, contributorLogin: 'me' });
+      assert.strictEqual(lookups.length, cap, 'the walk must stop at the cap');
+      assert.strictEqual(found.url, '', 'nothing survived: no PR is credited');
+      assert.strictEqual(found.suppressesVerdict, false);
+      assert.strictEqual(found.evidence.status, r.PR_ATTRIBUTION_REFUTED, 'the last refutation stands in for the pane');
+      assert.ok(warned.some(w => w.includes('after 8 refutations') && w.includes('3 more PR URL(s)')),
+        `the operator must be told candidates went unchecked; got:\n${warned.join('\n')}`);
+    } finally { teardown(r); }
+    // Below the cap, every candidate is tried and the result is the same
+    // refutation the single-candidate path always produced.
+    lookups.length = 0; warned.length = 0;
+    const r2 = loadRelay({ prMeta: (url) => { lookups.push(url); return { author: { login: 'someone-else' }, createdAt: '2026-01-01T00:00:00Z', mergedAt: null, state: 'OPEN' }; } });
+    try {
+      const found = r2.resolveTaskPR(lines.slice(0, 3), { repo: 'foo/bar', taskStartedAt: Date.now() - 60000, contributorLogin: 'me' });
+      assert.strictEqual(lookups.length, 3);
+      assert.strictEqual(found.url, '');
+      assert.strictEqual(warned.length, 0, 'no warning when every candidate was checked');
+    } finally { teardown(r2); }
+  } finally { console.log = log; console.warn = warn; teardown(relay); }
 });
 
 // kubestellar/hive#6664 — the review cycle must review the contributor's PRs,
@@ -10235,17 +11298,25 @@ test('#6987 a guarded relay re-advertises once the awaited reading lands over a 
   fs.rmSync(base, { recursive: true, force: true });
 });
 
-for (const [name, fn] of only ? tests.filter(([n]) => n.includes(only)) : tests) {
-  try {
-    fn();
-    console.log(`ok   ${name}`);
-  } catch (e) {
-    failed++;
-    console.error(`FAIL ${name}`);
-    console.error(`     ${e.message}`);
+// Each test is awaited (#7732). The runner used to call fn() and fall straight
+// through to process.exit(), which fires before any microtask runs — so an
+// async test's assertions past its first `await` were dead code, and a
+// failure before it was an unhandled rejection the exit pre-empted. The
+// readiness callback under test for #7732 (armCLIReadyWait's .then) IS a
+// microtask, so it can only be observed by a test that yields to it.
+(async () => {
+  for (const [name, fn] of only ? tests.filter(([n]) => n.includes(only)) : tests) {
+    try {
+      await fn();
+      console.log(`ok   ${name}`);
+    } catch (e) {
+      failed++;
+      console.error(`FAIL ${name}`);
+      console.error(`     ${e.message}`);
+    }
   }
-}
-console.log(`\n${tests.length - failed}/${tests.length} passed`);
-// waitForCLI() schedules polling timers that would otherwise keep the event
-// loop alive well past the last assertion; exit explicitly.
-process.exit(failed ? 1 : 0);
+  console.log(`\n${tests.length - failed}/${tests.length} passed`);
+  // waitForCLI() schedules polling timers that would otherwise keep the event
+  // loop alive well past the last assertion; exit explicitly.
+  process.exit(failed ? 1 : 0);
+})();

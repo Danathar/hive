@@ -11,6 +11,18 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-19 (v4.67.1)
+
+### Fixed
+
+- The contributor relay now tracks, per hub connection, whether a `ready` it sent is still awaiting the hub's answer, and the CLI-readiness callback asks for work only when none is. This replaces v4.66.3's single-shot latch for the same problem ([#7732](https://github.com/hivecommons/hive/issues/7732)): that latch covered a task completing but not an interactive revoke, which still asked twice and made the hub hand back the task it had just assigned, book it as `abandoned_handback`, and assign a third that the relay then rejected.
+
+## 2026-09-19 (v4.67.0)
+
+### Added
+
+- An omp contributor whose `--advisor` posts review notes under the agent's `HIVE_VERDICT` line no longer has those notes discarded unread: when `⟦concern⟧` notes land after the verdict, the relay asks the agent once to address them and re-print the verdict, then finalizes on the second one. One follow-up per task, concerns only, no change to the progress lease or deadline; the task prompt now says a second verdict may be asked for ([#7759](https://github.com/hivecommons/hive/issues/7759)).
+
 ## 2026-09-19 (v4.66.5)
 
 ### Fixed
