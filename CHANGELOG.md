@@ -11,6 +11,16 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-21 (v4.71.0)
+
+### Added
+
+- Repository cards on the dashboard can now be resized one at a time (#8000). Every card used to be exactly as wide as every other one, so on a hive watching several busy repos a pill column read `#192 Pa…`, `FIX #1109 fix…` and the only way to learn what any of them was was to hover them one by one. Each card now has a `col-resize` handle on its right edge: drag it to widen the repo you are triaging and narrow the quiet ones to make room, double-click it to reset that card, or focus it and nudge with ← / → (Shift for a bigger step, Esc to reset). A widened card also stops cutting pill titles at 50 characters — the character budget grows with the card, so past a certain width the titles are complete and the hover is unnecessary. Widths are stored per repo in the browser, keyed by hive, so the layout survives a reload and the governor's repaint; a "Reset layout" button beside Rescan clears them all.
+
+### Fixed
+
+- Fixed a merged fix's claim expiring after 72h on a clock, which re-offered the still-open issue every three days for another "already fixed, please close" cycle (#8003). Settled claims — a strong claim from a merged PR, or a verified `no_work_needed` verdict — are now carried across scans for 30 days from the merge, and after 7 days the contribute queue withholds the issue under a new `merged_claim_stale` reason that asks a maintainer to close it or say what remains.
+
 ## 2026-09-21 (v4.70.4)
 
 ### Fixed
