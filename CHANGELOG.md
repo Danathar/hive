@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-21 (v5.1.0)
+
+### Added
+
+- `hivectl hives use` now switches a running contributor relay to the newly active hive without a restart by signaling the relay to reload its generated `contributor.env`; the relay records non-secret hub last-seen timestamps for `hives list` and lets any in-flight task finish on its original hive before soliciting from the new one (#8126).
+
 ## 2026-09-21 (v5.0.0)
 
 ### Added
