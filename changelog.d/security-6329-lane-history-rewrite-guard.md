@@ -1,1 +1,0 @@
-- Agent push brokering now rejects non-fast-forward branch updates and lane sign-offs on commits authored by someone else ([#6329](https://github.com/hivecommons/hive/issues/6329)).

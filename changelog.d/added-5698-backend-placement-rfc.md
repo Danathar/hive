@@ -1,1 +1,0 @@
-- Added RFC #5698 documenting backend capacity readings, model inventory, pacing, operator policy, and opt-in placement for backend/model selection.

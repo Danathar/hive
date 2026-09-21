@@ -1,1 +1,0 @@
-- Contributor agents now authenticate knowledge-export downloads with their registration token before receiving `agent.md` ([#2438](https://github.com/hivecommons/hive/issues/2438)), closing the unauthenticated export path so hosted spokes can deliver live Hive instructions without exposing them to anonymous callers.
