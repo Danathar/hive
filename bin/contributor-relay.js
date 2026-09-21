@@ -224,9 +224,90 @@ const AUTONOMY_NUDGE_MESSAGE =
 // SECOND one when it sits below that echo. Keep it at the very start, short
 // enough to survive tmux wrapping at any sane pane width, and keep
 // POST_VERDICT_REVIEW_ANCHOR a verbatim prefix of it.
+//
+// What actually gets typed is buildPostVerdictReviewMessage() below, which
+// quotes the notes in question (#7935); this constant is the wording it falls
+// back to when there is nothing quotable.
 const POST_VERDICT_REVIEW_MESSAGE =
   'Advisor notes were posted after your verdict. Address the concerns that apply to your change, skip nits and anything already handled, then print the HIVE_VERDICT line again on its own line.';
 const POST_VERDICT_REVIEW_ANCHOR = 'Advisor notes were posted after your verdict';
+// The instruction half of the message, reused verbatim by the quoting form
+// below so the two spellings cannot drift.
+const POST_VERDICT_REVIEW_INSTRUCTION =
+  'Address the ones that apply to your change, skip nits and anything already handled, then print the HIVE_VERDICT line again on its own line.';
+
+// #7935: the message above names the EVENT ("notes were posted") but not the
+// NOTES. That is unambiguous only when the pane holds exactly the notes the
+// relay means. It usually does not: an advisor that reviews every turn has
+// already posted 1–3 mid-turn notes the agent read and acted on, so "advisor
+// notes were posted after your verdict" reads perfectly well as "the ones you
+// already handled". Observed on projectbluefin/utah#24: the agent matched the
+// nudge to two mid-turn ⟦blocker⟧s it had resolved, searched the hub and the
+// PR for anything newer, found nothing, and re-printed the verdict — and the
+// wrong-file citation the advisor had actually flagged shipped in utah#225.
+// The relay has the notes in hand when it types the nudge (it already logs
+// them), so it quotes them.
+//
+// Quoted as ONE line, joined with ` | `: the nudge path types a literal
+// keystroke burst (tmuxSendNudge) with no bracketed-paste settle behind it, so
+// an embedded newline risks submitting the first line on its own and typing
+// the rest into a working agent. A single line has no such failure mode.
+const POST_VERDICT_NOTE_JOINER = ' | ';
+// Per-note and per-message bounds. A note block is the advisor's own prose and
+// can run long; the point of quoting is to identify WHICH note, and the full
+// text is on the pane right above the nudge either way.
+const POST_VERDICT_NOTE_MAX_CHARS = 400;
+const POST_VERDICT_NOTES_MAX_QUOTED = 4;
+
+// sanitizePostVerdictNote makes one advisor note safe to type back into the
+// pane: one line, no control characters, and — the load-bearing part — no
+// live `HIVE_VERDICT:` sentinel.
+//
+// The CLI echoes what it is typed, and a long echo WRAPS, so any fragment of
+// the nudge can land at the start of a pane row. hiveVerdictLineRe() anchors
+// at line start, so an advisor note quoting the agent's own
+// `HIVE_VERDICT: complete` line would be read back by detectHiveVerdict() as
+// the SECOND verdict the follow-up is waiting for and finalize the task on the
+// spot — the follow-up answering itself. Dropping the colon defuses it (the
+// regex requires `HIVE_VERDICT:`) and still reads as prose. The existing
+// "the echoed request must not itself read as a verdict" pin on the static
+// message is the same rule; this is it applied to text the relay did not write.
+function sanitizePostVerdictNote(text) {
+  return String(text == null ? '' : text)
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/HIVE_VERDICT\s*:/gi, 'HIVE_VERDICT')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function truncatePostVerdictNote(text) {
+  return text.length > POST_VERDICT_NOTE_MAX_CHARS
+    ? `${text.slice(0, POST_VERDICT_NOTE_MAX_CHARS - 1).trimEnd()}…`
+    : text;
+}
+
+// buildPostVerdictReviewMessage renders the follow-up with the notes that
+// earned it quoted inline. Falls back to the bare POST_VERDICT_REVIEW_MESSAGE
+// when there is nothing quotable, so a pane shape the block parser cannot read
+// degrades to exactly the pre-#7935 behaviour rather than to a truncated
+// sentence. POST_VERDICT_REVIEW_ANCHOR stays a verbatim prefix either way,
+// which is what keeps postVerdictReviewAnswered() and
+// paneHoldsUnsubmittedPrompt() unchanged.
+function buildPostVerdictReviewMessage(notes) {
+  const quotable = (Array.isArray(notes) ? notes : [])
+    .map(n => truncatePostVerdictNote(sanitizePostVerdictNote(n)))
+    .filter(Boolean);
+  if (quotable.length === 0) return POST_VERDICT_REVIEW_MESSAGE;
+  const shown = quotable.slice(0, POST_VERDICT_NOTES_MAX_QUOTED);
+  const omitted = quotable.length - shown.length;
+  const quoted = shown.map((n, i) => `(${i + 1}) "${n}"`).join(POST_VERDICT_NOTE_JOINER);
+  const more = omitted > 0
+    ? ` (and ${omitted} more note${omitted === 1 ? '' : 's'} below your verdict on the pane)`
+    : '';
+  return `${POST_VERDICT_REVIEW_ANCHOR} — these ones, not any note you already handled earlier in this turn: ` +
+    `${quoted}${more}. ${POST_VERDICT_REVIEW_INSTRUCTION}`;
+}
 // #7879: hard cap on review follow-ups per task. The first is earned by any
 // new ⟦blocker⟧/⟦concern⟧ under the verdict; the second ONLY by a ⟦blocker⟧
 // that was not on the pane at the previous verdict. Never a third.
@@ -262,6 +343,53 @@ function parsePositiveIntegerEnv(name, fallback) {
 // CLI cannot grow the buffer without bound. The tail is what matters for an
 // audit trail, mirroring TMUX_TAIL_LINES on the interactive path.
 const HEADLESS_MAX_OUTPUT_BYTES = parsePositiveIntegerEnv(HEADLESS_MAX_OUTPUT_ENV, DEFAULT_HEADLESS_MAX_OUTPUT_BYTES);
+
+// #7932: the hub reads a contributor frame under a hard cap — wsMaxMessageSize
+// in src/pkg/dashboard/contribute_ws.go, 64 KiB — installed with
+// conn.SetReadLimit. gorilla/websocket does not truncate an oversized message:
+// it closes the connection with 1009 "message too big" and the frame is LOST.
+// For a task_complete that is a reconnect loop rather than a dropped log line —
+// the completion never lands, the hub's lease outlives the close, the same task
+// is handed back, and the agent redoes work it already shipped (four times over
+// against projectbluefin/utah#24 on the live Bluefin hub, one of the runs having
+// opened a real PR).
+//
+// It is a headless-mode failure in practice. The interactive path's tmux_output
+// is fifteen terminal ROWS, which cannot be large. A JSON-streaming backend such
+// as pi (`--mode json`) emits one whole tool_execution_end event — embedded diff
+// and all — per LINE, so the same fifteen lines is routinely hundreds of KiB.
+// The bound therefore belongs on BYTES, at the point every frame passes through
+// (sendTo), not on a line count at each call site that happens to build a tail.
+const DEFAULT_HUB_MAX_FRAME_BYTES = 64 * 1024;
+// Headroom kept under the hub's ceiling. The read limit measures the decoded
+// payload, which is exactly the JSON we serialize, so the arithmetic is not in
+// question — but a hub deployed with a slightly different bound, or a proxy that
+// counts a frame's overhead against it, must not put us back on the wrong side
+// of a hard close. What the slack costs is audit tail; what it buys is that a
+// completion always lands.
+const WS_FRAME_HEADROOM_BYTES = 4 * 1024;
+// Floor for a hub-advertised limit, so a hub advertising something smaller than
+// the headroom cannot leave the relay with a zero or negative budget.
+const MIN_WS_FRAME_BYTES = 4 * 1024;
+// Budget for a hub that does not advertise its limit (every hub released before
+// #7932). 64 KiB has been the hub's value for the life of the protocol.
+const WS_FRAME_BYTES = DEFAULT_HUB_MAX_FRAME_BYTES - WS_FRAME_HEADROOM_BYTES;
+// How much captured output any single frame carries. Far below the frame budget
+// on purpose: tmux_output is an audit TAIL — the last thing the agent printed,
+// read by a human on the ops surface — not a transcript. 8 KiB is several
+// screens of ordinary CLI output and still leaves the frame budget almost
+// entirely to the fields that carry meaning (pr_url, verdict, summary).
+const OUTPUT_TAIL_MAX_BYTES = 8 * 1024;
+const OUTPUT_TAIL_TRUNCATED_MARKER = '[relay: output tail truncated to fit the hub frame limit]';
+const TEXT_TRUNCATED_SUFFIX = ' […truncated]';
+// Frame fields that are pure payload: truncating one changes how much of the
+// story the frame tells, never what the frame MEANS. An allowlist, not a
+// denylist — type, task_id, task_gen, result, verdict, pr_url and every other
+// protocol field must survive a clamp intact, and a field nobody has thought
+// about yet is protocol until someone says otherwise. Ordered most-expendable
+// first: the tail before the human-readable summary, the summary before the
+// reason a task failed.
+const FRAME_TRUNCATABLE_FIELDS = ['tmux_output', 'prompt', 'summary', 'title', 'reason', 'verdict_reason'];
 
 const TMUX_TAIL_LINES = 15;
 const NEEDS_LOGIN_CONFIRM_TICKS = 3;
@@ -1086,6 +1214,10 @@ const hubs = rawHubList.map((url, i) => ({
   // (#2545). Maintained in sendTo() and the answer handlers, never at a
   // `ready` call site — see armCLIReadyWait for the one reader.
   readyOutstanding: false,
+  // #7932: the largest frame this hub will read, less headroom. Replaced on
+  // auth_ok by whatever the hub advertises; the default is the 64 KiB every
+  // hub released before that advertisement enforces silently.
+  maxFrameBytes: WS_FRAME_BYTES,
 }));
 // Index into hubs[] of the hub we are currently soliciting work from (sent it
 // the last 'ready'), or that owns currentTask. Round-robins forward on an
@@ -1262,6 +1394,136 @@ function releaseQuotaHold(why) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// #7932 — frame-size clamping. Everything below is pure: it takes a frame and
+// a byte budget and returns a frame that fits, leaving the frame untouched
+// (same object identity) when it already did.
+// ---------------------------------------------------------------------------
+
+function utf8Bytes(text) {
+  return Buffer.byteLength(String(text), 'utf8');
+}
+
+function frameByteLength(msg) {
+  return utf8Bytes(JSON.stringify(msg));
+}
+
+// hubFrameBytes is the budget for one frame to THIS hub: what it advertised on
+// auth_ok, less the headroom, or the long-standing 64 KiB default for a hub
+// that advertises nothing.
+function hubFrameBytes(hub) {
+  return (hub && hub.maxFrameBytes) || WS_FRAME_BYTES;
+}
+
+// truncateTextTail keeps the LAST maxBytes of a string. A split multi-byte
+// character decodes to U+FFFD, exactly as it does in createBoundedOutputCapture
+// — the tail is for a human to read, not to parse.
+function truncateTextTail(text, maxBytes) {
+  const buf = Buffer.from(String(text), 'utf8');
+  if (buf.length <= maxBytes) return buf.toString('utf8');
+  if (maxBytes <= 0) return '';
+  return buf.subarray(buf.length - maxBytes).toString('utf8');
+}
+
+// truncateTextHead keeps the FIRST maxBytes of a string, marking the cut. Used
+// for summaries and failure reasons, where the opening words are the ones that
+// say what happened; the tail-keeping form above is for captured output, where
+// the last thing printed is the interesting one.
+function truncateTextHead(text, maxBytes) {
+  const buf = Buffer.from(String(text), 'utf8');
+  if (buf.length <= maxBytes) return String(text);
+  const room = maxBytes - utf8Bytes(TEXT_TRUNCATED_SUFFIX);
+  if (room <= 0) return '';
+  return buf.subarray(0, room).toString('utf8') + TEXT_TRUNCATED_SUFFIX;
+}
+
+function tailArrayBytes(lines) {
+  // +1 per line for the newline a reader will put back between them.
+  return lines.reduce((total, line) => total + utf8Bytes(line) + 1, 0);
+}
+
+// truncateTailLines bounds an output-tail array to maxBytes, keeping the LAST
+// lines and marking the cut. Returns the input array itself when it already
+// fits, so a frame that never needed clamping is byte-identical to the one the
+// relay sent before this existed.
+function truncateTailLines(lines, maxBytes) {
+  if (!Array.isArray(lines)) return lines;
+  if (tailArrayBytes(lines) <= maxBytes) return lines;
+  const budget = maxBytes - utf8Bytes(OUTPUT_TAIL_TRUNCATED_MARKER) - 1;
+  if (budget <= 0) return [];
+  const kept = [];
+  let used = 0;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = String(lines[i]);
+    const cost = utf8Bytes(line) + 1;
+    if (used + cost > budget) {
+      // A SINGLE line can be larger than the whole budget — that is the pi
+      // case this fix exists for, one tool_execution_end event with a diff
+      // inside it. Keep that line's tail rather than reporting nothing at all.
+      if (!kept.length) {
+        const room = budget - used;
+        if (room > 0) kept.unshift(truncateTextTail(line, room));
+      }
+      break;
+    }
+    kept.unshift(line);
+    used += cost;
+  }
+  return [OUTPUT_TAIL_TRUNCATED_MARKER].concat(kept);
+}
+
+// frameFieldBytes is the serialized size of one field's value.
+function frameFieldBytes(msg, field) {
+  return Buffer.byteLength(JSON.stringify(msg[field]), 'utf8');
+}
+
+function truncateFrameField(value, maxBytes) {
+  return Array.isArray(value)
+    ? truncateTailLines(value, Math.max(maxBytes, 0))
+    : truncateTextHead(value, Math.max(maxBytes, 0));
+}
+
+// clampFrame returns a frame that fits maxFrameBytes, shrinking only the
+// payload fields in FRAME_TRUNCATABLE_FIELDS. Two separate bounds, because they
+// answer different questions: tmux_output is held to OUTPUT_TAIL_MAX_BYTES on
+// EVERY frame (how much audit tail is worth sending), and the whole frame is
+// held to maxFrameBytes (what the hub will accept at all).
+function clampFrame(msg, maxFrameBytes) {
+  if (!msg || typeof msg !== 'object') return msg;
+  let clamped = msg;
+  if (Array.isArray(msg.tmux_output)) {
+    const bounded = truncateTailLines(msg.tmux_output, OUTPUT_TAIL_MAX_BYTES);
+    if (bounded !== msg.tmux_output) clamped = { ...clamped, tmux_output: bounded };
+  }
+  if (frameByteLength(clamped) <= maxFrameBytes) return clamped;
+  // Largest field first. In allowlist order a small tail and a normal summary
+  // were emptied to make room for a huge later field (`room` went negative
+  // with that field still inside `rest`), and the frame STILL did not fit
+  // until the loop reached the culprit. Shrinking the biggest field first
+  // fits the frame in one step and leaves the fields that already fit alone.
+  const bySize = FRAME_TRUNCATABLE_FIELDS
+    .filter((field) => clamped[field] !== undefined && clamped[field] !== null)
+    .sort((a, b) => frameFieldBytes(clamped, b) - frameFieldBytes(clamped, a));
+  for (const field of bySize) {
+    const value = clamped[field];
+    const rest = { ...clamped };
+    delete rest[field];
+    // What is left once the rest of the frame and this field's own JSON wrapper
+    // (`,"<field>":""`) are paid for. Measured against the SERIALIZED frame
+    // afterwards rather than trusted: JSON escaping expands a byte of raw
+    // output into as many as six, so the first estimate can still be over.
+    let room = maxFrameBytes - frameByteLength(rest) - field.length - 8;
+    for (let attempt = 0; attempt < 8; attempt++) {
+      clamped = { ...clamped, [field]: truncateFrameField(value, room) };
+      if (frameByteLength(clamped) <= maxFrameBytes) break;
+      if (room <= 0) break;
+      room = Math.floor(room / 2);
+    }
+    if (frameByteLength(clamped) <= maxFrameBytes) return clamped;
+  }
+  return clamped;
+}
+
 function sendTo(hub, msg) {
   // #5715: a local-only task (the synthetic pr-review cycle) has no
   // server-issued lease, so an ownership frame naming it can only ever be
@@ -1292,7 +1554,25 @@ function sendTo(hub, msg) {
     }
   }
   if (hub && hub.ws && hub.ws.readyState === WebSocket.OPEN) {
-    hub.ws.send(JSON.stringify(msg));
+    // #7932: a frame the hub cannot read is a frame that never arrives — it is
+    // answered with a 1009 close, not an error the relay can see. Bound it HERE,
+    // at the one point every frame passes through, rather than at each call site
+    // that builds a tail: the oversized frame was built by a call site that had
+    // no idea a limit existed, and a guard per call site is the shape that lets
+    // the next one reintroduce it.
+    const budget = hubFrameBytes(hub);
+    const framed = clampFrame(msg, budget);
+    const payload = JSON.stringify(framed);
+    if (framed !== msg) {
+      console.warn(`Trimmed the ${msg.type} frame for ${hub.url || 'the hub'} to ${utf8Bytes(payload)} bytes (limit ${budget}) — the captured output it carries is shortened, the task result is not`);
+    }
+    if (utf8Bytes(payload) > budget) {
+      // Unreachable while the protocol fields themselves are small, which is
+      // every frame this relay builds. Say so loudly rather than let the hub
+      // answer it with a close nobody can attribute.
+      console.error(`Frame ${msg.type} is still ${utf8Bytes(payload)} bytes after trimming (limit ${budget}) — the hub may close the connection with code 1009`);
+    }
+    hub.ws.send(payload);
     // #7732: recorded only for a frame that actually left, so a `ready`
     // dropped on a closed socket does not look like an open question.
     if (msg && msg.type === 'ready') hub.readyOutstanding = true;
@@ -1921,14 +2201,83 @@ function ompSessionFiles() {
   return files;
 }
 
-// detectOmpSelection returns { model, effort, advisorModel, advisorEffort },
-// each '' when not found. Never throws: every read is best-effort, and a
-// missing sessions directory simply means "not running yet", which the
-// config.yml fallback still answers.
+// ompProviderCredentialState reads the credential store omp runs against —
+// in container mode the staged copy (#7678), locally the host's own — and
+// says whether `provider` has a credential omp will use (hivecommons/hive
+// #7922). omp reads only rows whose disabled_cause IS NULL: a row it disabled
+// after a failed refresh ("oauth refresh failed: … invalid_grant …", the
+// mark a revoked single-use refresh token leaves) is invisible to it, and
+// omp then quietly resolves some other provider's model — the host's ollama
+// entries, in the incident — while the config still names the original.
+//   usable    at least one row for the provider that omp will read
+//   disabled  the provider has rows and omp has disabled every one of them
+//   absent    no row at all (an API key in the environment may still serve)
+//   unknown   no node:sqlite, no store, an old schema, or a read error
+// Only `disabled` is definitive evidence that the configured model cannot
+// run, and it is the only state anything acts on.
+function ompProviderCredentialState(provider) {
+  const unknown = { state: 'unknown', cause: '' };
+  let sqlite;
+  try { sqlite = require('node:sqlite'); } catch (_) { return unknown; }
+  const dbFile = path.join(OMP_AGENT_DIR, 'agent.db');
+  if (!fs.existsSync(dbFile)) return unknown;
+  let rows;
+  try {
+    const db = new sqlite.DatabaseSync(dbFile, { readOnly: true });
+    try {
+      const columns = db.prepare('PRAGMA table_info(auth_credentials)').all().map((c) => String(c.name));
+      if (!columns.includes('disabled_cause')) return unknown;
+      rows = db.prepare('SELECT disabled_cause FROM auth_credentials WHERE lower(provider) = ?').all(provider.toLowerCase());
+    } finally { db.close(); }
+  } catch (_) { return unknown; }
+  if (rows.length === 0) return { state: 'absent', cause: '' };
+  if (rows.some((r) => r.disabled_cause === null || r.disabled_cause === undefined)) return { state: 'usable', cause: '' };
+  // The cause is printed to the relay log, which the host tails: in container
+  // mode the store is the container's writable copy, so strip control
+  // characters (terminal escapes included) and cap it, as for any declared
+  // value — just with room for the provider's whole error message.
+  // eslint-disable-next-line no-control-regex
+  const cause = Array.from(String(rows[0].disabled_cause).replace(/[\x00-\x1f\x7f-\x9f]/g, ' ').replace(/\s+/g, ' ').trim());
+  return { state: 'disabled', cause: cause.length > 400 ? `${cause.slice(0, 400).join('')}…` : cause.join('') };
+}
+
+// ompConfiguredProviderBlocked returns { provider, model, cause } when the
+// model omp is configured to run — `selection` if given, else AGENT_MODEL
+// when it names a provider, else config.yml's modelRoles.default — belongs
+// to a provider whose stored credential omp has disabled (#7922), and null
+// otherwise. This is the check that keeps the relay from advertising `ready`
+// (and the configured model) for an omp that will actually answer with
+// whatever it fell back to.
+function ompConfiguredProviderBlocked(selection) {
+  if (selection === undefined) {
+    const fromEnv = splitOmpSelection(MODEL).model;
+    selection = fromEnv.includes('/') ? fromEnv : splitOmpSelection(parseOmpConfig(path.join(OMP_AGENT_DIR, 'config.yml')).defaultSelection).model;
+  }
+  const slash = typeof selection === 'string' ? selection.indexOf('/') : -1;
+  if (slash <= 0) return null;
+  const provider = selection.slice(0, slash);
+  const cred = ompProviderCredentialState(provider);
+  if (cred.state !== 'disabled') return null;
+  return { provider, model: selection, cause: cred.cause };
+}
+
+// detectOmpSelection returns { model, effort, advisorModel, advisorEffort,
+// source }, each '' when not found. `source` says where the primary came
+// from: 'transcript' (a session's model_change record — what omp actually
+// resolved), 'config' (config.yml's default, which is only what omp WILL
+// resolve if that provider's credential works), or ''. Never throws: every
+// read is best-effort, and a missing sessions directory simply means "not
+// running yet", which the config.yml fallback still answers.
+//
+// A configured model whose provider credential omp has disabled (#7922) is
+// NOT reported: omp writes no session until its first turn, so before then
+// the config was the only source, and the hub was told `claude-sonnet-5`
+// for a container whose omp had silently fallen back to a local 30B model.
+// Better no model than a confidently wrong one, as for looksLikeModelName.
 function detectOmpSelection() {
   const config = parseOmpConfig(path.join(OMP_AGENT_DIR, 'config.yml'));
   const configured = splitOmpSelection(config.defaultSelection);
-  const out = { model: configured.model, effort: configured.effort, advisorModel: '', advisorEffort: '' };
+  const out = { model: configured.model, effort: configured.effort, advisorModel: '', advisorEffort: '', source: configured.model ? 'config' : '' };
 
   let newest = null;
   try { newest = newestByMtime(ompSessionFiles()); } catch (_) {}
@@ -1942,6 +2291,7 @@ function detectOmpSelection() {
           const running = splitOmpSelection(obj.model);
           if (running.model) {
             out.model = running.model;
+            out.source = 'transcript';
             // A session record carries the model but not the level; keep the
             // configured effort only when it was configured for this model.
             out.effort = running.effort || (configured.model === running.model ? configured.effort : '');
@@ -1950,6 +2300,11 @@ function detectOmpSelection() {
         }
       }
     } catch (_) {}
+  }
+  if (out.source === 'config' && ompConfiguredProviderBlocked(out.model)) {
+    out.model = '';
+    out.effort = '';
+    out.source = '';
   }
 
   const advisorFromConfig = splitOmpSelection(config.advisorSelection);
@@ -2021,6 +2376,7 @@ function detectRunningSelection() {
       effort: sanitizeDeclaredValue(sel.effort || ''),
       advisorModel: sanitizeDeclaredValue(sel.advisorModel || ''),
       advisorEffort: sanitizeDeclaredValue(sel.advisorEffort || ''),
+      source: sel.source === 'transcript' || sel.source === 'config' ? sel.source : '',
     };
   } catch (_) { return null; }
 }
@@ -2037,7 +2393,12 @@ function refreshDetectedModel() {
   const m = sel ? (MODEL ? '' : sel.model) : detectRunningModel();
   if (m && m !== detectedModel) {
     detectedModel = m;
-    console.log(`Detected running model from ${BACKEND} session transcript: ${m}`);
+    // Say where the value came from (#7922): a config.yml default is what omp
+    // is SET to run, not evidence of what it resolved — the transcript is.
+    const from = sel && sel.source === 'config'
+      ? `${BACKEND} config.yml (no session transcript yet)`
+      : `${BACKEND} session transcript`;
+    console.log(`Detected running model from ${from}: ${m}`);
   }
   if (sel) {
     detectedEffort = sel.effort;
@@ -2318,6 +2679,53 @@ function resolveTaskPrompt(task) {
   return prompt.replace(WORKSPACE_DIR_VARIABLE, TASK_WORKSPACE_DIR);
 }
 
+// installRepoToolchain runs bin/repo-toolchain.sh against the task's checkout
+// — when one already exists under $HIVE_WORKSPACE_DIR — and calls `then` once
+// it has finished, so a repository's declared `.hive/tools` pip requirements
+// are in the container BEFORE the prompt is typed (hivecommons/hive#7925).
+// The first task on a repo has no checkout yet (the agent clones it), so that
+// task runs without the extras and every later one gets them; the script
+// itself never fails a task, and neither does anything here: a missing
+// script, a spawn error or the time box all fall through to `then`.
+const REPO_TOOLCHAIN_SCRIPT = path.join(__dirname, 'repo-toolchain.sh');
+const REPO_TOOLCHAIN_MANIFEST = path.join('.hive', 'tools');
+const REPO_TOOLCHAIN_TIMEOUT_MS = Number(process.env.HIVE_REPO_TOOLCHAIN_TIMEOUT_MS || 180000);
+
+function installRepoToolchain(task, then) {
+  const dir = taskCheckoutDir(task && task.repo);
+  if (!dir || !fs.existsSync(path.join(dir, REPO_TOOLCHAIN_MANIFEST))) { then(); return; }
+  let done = false;
+  const finish = () => { if (done) return; done = true; then(); };
+  console.log(`Installing ${task.repo}'s declared toolchain (${REPO_TOOLCHAIN_MANIFEST}) into the container before the task prompt (#7925)`);
+  let child;
+  try {
+    child = spawn('bash', [REPO_TOOLCHAIN_SCRIPT, dir], { stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (e) {
+    console.error(`repo-toolchain could not start: ${e.message} — continuing without the declared tools`);
+    finish();
+    return;
+  }
+  let output = '';
+  child.stdout.on('data', (d) => { output += d.toString(); });
+  child.stderr.on('data', (d) => { output += d.toString(); });
+  const timer = setTimeout(() => {
+    console.error(`repo-toolchain did not finish within ${REPO_TOOLCHAIN_TIMEOUT_MS} ms — continuing without the declared tools`);
+    try { child.kill('SIGKILL'); } catch (_) { /* already gone */ }
+    finish();
+  }, REPO_TOOLCHAIN_TIMEOUT_MS);
+  child.on('error', (e) => {
+    clearTimeout(timer);
+    console.error(`repo-toolchain failed to run: ${e.message} — continuing without the declared tools`);
+    finish();
+  });
+  child.on('close', (code) => {
+    clearTimeout(timer);
+    for (const line of output.split('\n')) if (line.trim()) console.log(`  ${line.trimEnd()}`);
+    if (code !== 0) console.error(`repo-toolchain exited ${code} — continuing without the declared tools`);
+    finish();
+  });
+}
+
 function runHeadlessTask(task) {
   const prompt = resolveTaskPrompt(task);
   if (!headlessSupportsBackend()) {
@@ -2444,14 +2852,17 @@ function runHeadlessTask(task) {
       // the claim with "shipped" anyway). #6662: only a PR THIS TASK OPENED
       // does; see resolveTaskPR.
       const noWork = prFinding.suppressesVerdict ? null : detectNoWorkVerdict(outTail);
-      if (noWork) console.log(`Detected no_work_needed verdict for ${task.task_id}: ${noWork.reason || '(no reason)'}`);
+      if (noWork) console.log(`Detected ${noWork.verdict} verdict for ${task.task_id}: ${noWork.reason || '(no reason)'}`);
       writeHeadlessStatus(HEADLESS_STATE_DONE, { task_id: task.task_id, task_gen: task.task_gen, result: 'completed', pr_url: prURL });
+      // #7924: the label goes on with the task credential, so it must be
+      // applied BEFORE stopAgentForTaskExit drops it below.
+      if (noWork && noWork.verdict === HIVE_VERDICT_BLOCKED) markIssueBlocked(task, noWork.reason);
       // #5353: the one-shot child has already exited (this callback is its
       // exit), so there is no process to stop — but the task-scoped token it
       // was given stays valid for the rest of wsTokenTTL. Drop it with the
       // task, so a credential never outlives the assignment it belongs to.
       stopAgentForTaskExit();
-      send({ type: 'task_complete', seq: nextSeq(), task_id: task.task_id, task_gen: task.task_gen, result: 'completed', summary: 'Headless one-shot invocation exited 0', tmux_output: outTail, pr_url: prURL, verdict: noWork ? noWork.verdict : undefined, verdict_reason: noWork ? noWork.reason : undefined, ...effectiveSelectionFields() });
+      send({ type: 'task_complete', seq: nextSeq(), task_id: task.task_id, task_gen: task.task_gen, result: 'completed', summary: 'Headless one-shot invocation exited 0', tmux_output: outTail, pr_url: prURL, ...verdictWireFields(noWork), ...effectiveSelectionFields() });
       currentTask = null;
       releaseQuotaPoolReservation();
       taskAssignedAt = 0;
@@ -2634,10 +3045,33 @@ function blockingPromptKey(text) {
 // getCLIState captures the pane and hands it to the pure readiness classifier
 // (classifyReadiness in bin/lib/pane-classifier.js). Kept as the one place
 // that couples the CAPTURE (tmux) to the CLASSIFICATION (pure).
+// The last disabled-credential cause the omp gate below logged, so a poll
+// that finds the same one every CLI_READY_POLL_MS says it once.
+let ompBlockedCauseLogged = '';
+
 function getCLIState() {
   try {
     const text = capturePaneText();
-    return classifyReadiness(text, BACKEND);
+    const state = classifyReadiness(text, BACKEND);
+    // #7922: an omp whose configured provider credential is DISABLED draws
+    // exactly the chrome a ready one does — it has already, silently, picked
+    // some other provider's model (the incident: `qwen3-coder:30b` in the
+    // footer, `claude-sonnet-5` reported to the hub). The pane cannot tell
+    // the two apart; the credential store can. Withhold `ready`, as for a
+    // login prompt: the remedy is the same sign-in, on the host in
+    // container mode, and the login banner names it.
+    if (state === 'ready' && BACKEND === 'omp') {
+      const blocked = ompConfiguredProviderBlocked();
+      if (blocked) {
+        if (ompBlockedCauseLogged !== blocked.cause) {
+          ompBlockedCauseLogged = blocked.cause;
+          console.log(`omp is configured for ${blocked.model}, but the stored ${blocked.provider} credential is disabled: ${blocked.cause}`);
+          console.log(`omp would run some other provider's model in its place without saying so, so this relay is not advertising ready. Sign in to ${blocked.provider} again where omp's credential store lives (on the host, for container mode: run omp, then /login) and restart.`);
+        }
+        return 'needs-login';
+      }
+    }
+    return state;
   } catch (_) {
     return 'starting';
   }
@@ -3273,7 +3707,7 @@ function tmuxSendKeys(text) {
     // The baseline is the NEWEST sentinel, whatever kind: #7861's preference
     // must not apply here, or a previous task's trailing "complete" would sit
     // above the baseline and complete the next task on its first tick.
-    const priorVerdict = detectHiveVerdict(deliveryBaselineLines, [HIVE_VERDICT_COMPLETE, HIVE_VERDICT_NO_WORK]);
+    const priorVerdict = detectHiveVerdict(deliveryBaselineLines, HIVE_VERDICT_TOKENS);
     deliveredVerdictBaseline = priorVerdict ? priorVerdict.line : null;
     const MAX_SEND_RETRIES = 3;
     const RETRY_DELAY_MS = 10000;
@@ -3649,7 +4083,7 @@ function resolveTaskPR(lines, opts) {
 //
 //   HIVE_VERDICT: <verdict> — <short reason>
 //
-// Two verdicts are defined:
+// Three verdicts are defined:
 //
 //   no_work_needed  (#3987) — the agent affirmatively determined there is
 //     NOTHING shippable (the remainder is gated on an unanswered maintainer
@@ -3657,6 +4091,20 @@ function resolveTaskPR(lines, opts) {
 //     verdict/verdict_reason so the hub parks the issue for the long
 //     offer-suppression window instead of re-offering it every short-cooldown
 //     period forever (the #2547 shape that escalation only bounded).
+//
+//   blocked         (hivecommons/hive#7924) — no_work_needed's sibling for
+//     the case where nothing in THIS repo can change until something outside
+//     it lands: another repo's release or build, a dependency that has not
+//     published, an external service. utah#100 reached exactly that verdict
+//     (the packages had recipes but no factory image carried them yet) and,
+//     booked as a plain no_work_needed, the hub re-ran the same ten minutes
+//     of research on the 4h backoff and threw the finding away. Reported as
+//     verdict 'blocked'; the hub holds the issue for the full with-PR
+//     cooldown, and when the task credential can write issues the relay
+//     applies the repo's `blocked` label (markIssueBlocked below) so the
+//     hub's existing admission gate withholds it until a human clears the
+//     label. `no_work_needed — blocked: <reason>` is accepted as the same
+//     verdict, for an agent that reaches for the older sentinel first.
 //
 //   complete        (#5376) — the agent is DONE with the task, whatever it
 //     shipped. This is the completion signal the interactive relay lacked:
@@ -3667,14 +4115,47 @@ function resolveTaskPR(lines, opts) {
 //     chrome. Chrome is a vendor's cosmetic output; this line is the agent's
 //     own statement. Only the second is a contract.
 //
-// Both are parsed by ONE anchored, echo-guarded scanner below, deliberately:
-// the anti-false-positive handling is the hard-won part and there must not be
-// a second copy of it to drift.
+// All three are parsed by ONE anchored, echo-guarded scanner below,
+// deliberately: the anti-false-positive handling is the hard-won part and
+// there must not be a second copy of it to drift.
 //
 // The marker spelling must stay in sync with buildTaskPrompt in
-// src/pkg/dashboard/contribute_ws.go.
+// src/pkg/dashboard/contribute_task_prompt.go.
 const HIVE_VERDICT_NO_WORK = 'no_work_needed';
 const HIVE_VERDICT_COMPLETE = 'complete';
+const HIVE_VERDICT_BLOCKED = 'blocked';
+// Every sentinel the scanner recognises, for the callers that want "any
+// verdict at all" (completion, the #5650 delivery baseline, PR-URL ranking).
+const HIVE_VERDICT_TOKENS = [HIVE_VERDICT_COMPLETE, HIVE_VERDICT_NO_WORK, HIVE_VERDICT_BLOCKED];
+// The `no_work_needed — blocked: <reason>` spelling (#7924): the older
+// sentinel with the blocked marker as the reason's first word. Read as the
+// blocked verdict, with the marker stripped from the reason.
+const NO_WORK_BLOCKED_REASON_RE = /^blocked\s*[:—–-]\s*/i;
+
+// isNoWorkVerdict says whether a verdict object is one of the "nothing to
+// ship" family — no_work_needed or blocked — which the hub books the same way
+// (task_complete verdict/verdict_reason) and a confirmed PR overrides the same
+// way (resolveTaskPR's suppressesVerdict).
+function isNoWorkVerdict(v) {
+  return !!v && (v.verdict === HIVE_VERDICT_NO_WORK || v.verdict === HIVE_VERDICT_BLOCKED);
+}
+
+// verdictWireFields renders a "nothing to ship" verdict (or null) as the
+// task_complete fields the hub reads. A blocked verdict goes on the wire as
+// `verdict: no_work_needed` plus `verdict_blocked: true` — the marker, not a
+// new token — so a hub that predates #7924 sees exactly the no_work_needed it
+// already books (long offer-suppression), instead of an unknown verdict it
+// would normalize to a bare idle and re-offer on the short cooldown. A hub
+// that knows the marker books it as blocked (normalizeCompletionVerdict in
+// src/pkg/dashboard/contribute_ledgers.go).
+function verdictWireFields(noWork) {
+  if (!isNoWorkVerdict(noWork)) return {};
+  return {
+    verdict: HIVE_VERDICT_NO_WORK,
+    verdict_reason: noWork.reason,
+    verdict_blocked: noWork.verdict === HIVE_VERDICT_BLOCKED ? true : undefined,
+  };
+}
 
 // hiveVerdictLineRe builds the one regex that recognises a sentinel line, for
 // any subset of the verdict tokens. Groups: 1 = optional Markdown emphasis
@@ -3704,12 +4185,12 @@ function hiveVerdictLineRe(wanted) {
 }
 
 // isHiveVerdictLine says whether one pane line is a sentinel the agent
-// printed (either verdict), with the same anchoring and the same echo
+// printed (any verdict), with the same anchoring and the same echo
 // exclusion detectHiveVerdict() applies. detectPRURLs() uses it to rank a PR
 // URL the agent named IN its verdict above one it merely printed (#7789).
 function isHiveVerdictLine(line) {
   if (typeof line !== 'string') return false;
-  const m = hiveVerdictLineRe([HIVE_VERDICT_COMPLETE, HIVE_VERDICT_NO_WORK]).exec(line);
+  const m = hiveVerdictLineRe(HIVE_VERDICT_TOKENS).exec(line);
   if (!m) return false;
   // The prompt's own "<short reason>" placeholder, wrapped to a line start.
   return !(m[3] || '').trim().startsWith('<');
@@ -3761,20 +4242,30 @@ function detectHiveVerdicts(lines, wanted) {
     // visual line start; its giveaway is the literal "<short reason>"
     // placeholder. Never treat that echo as a real verdict.
     if (reason.startsWith('<')) continue;
+    let verdict = m[2].toLowerCase();
+    // #7924: `no_work_needed — blocked: <reason>` is the blocked verdict in
+    // the older sentinel's clothing. Promote it whenever the caller would
+    // have accepted a no_work_needed at all: the two are booked as one
+    // family (isNoWorkVerdict), so no caller that wants one rejects the other.
+    if (verdict === HIVE_VERDICT_NO_WORK && NO_WORK_BLOCKED_REASON_RE.test(reason)) {
+      verdict = HIVE_VERDICT_BLOCKED;
+      reason = reason.replace(NO_WORK_BLOCKED_REASON_RE, '').trim();
+    }
     // `line` is the RAW pane line this verdict was read from. progressTick()
     // compares it against the line that was already on the pane when the task's
     // prompt was delivered, which is how a verdict gets attributed to a task at
     // all (#5650).
-    found.push({ verdict: m[2].toLowerCase(), reason, line: lines[i], index: i });
+    found.push({ verdict, reason, line: lines[i], index: i });
   }
   return found;
 }
 
-// Best-effort scan for the no_work_needed sentinel. Unchanged in behaviour
-// from #3987/#4265; it now shares the scanner above. Returns null when no
-// marker is found — the hub then treats the completion exactly as an idle one.
+// Best-effort scan for the "nothing to ship" sentinels — no_work_needed, and
+// since #7924 its blocked sibling. Unchanged in behaviour from #3987/#4265
+// for the first; it shares the scanner above. Returns null when no marker is
+// found — the hub then treats the completion exactly as an idle one.
 function detectNoWorkVerdict(lines) {
-  return detectHiveVerdict(lines, [HIVE_VERDICT_NO_WORK]);
+  return detectHiveVerdict(lines, [HIVE_VERDICT_NO_WORK, HIVE_VERDICT_BLOCKED]);
 }
 
 // detectCompletionVerdict reports whether the agent SAID it finished (#5376).
@@ -3801,15 +4292,15 @@ function detectNoWorkVerdict(lines) {
 // preferred — and when the newest line IS the baseline the caller discards it,
 // so the answer must stay the newest line, exactly as before.
 function detectCompletionVerdict(lines, baselineLine = deliveredVerdictBaseline) {
-  const all = detectHiveVerdicts(lines, [HIVE_VERDICT_COMPLETE, HIVE_VERDICT_NO_WORK]);
+  const all = detectHiveVerdicts(lines, HIVE_VERDICT_TOKENS);
   if (all.length === 0) return null;
   const newest = withoutPaneIndex(all[0]);
   if (newest.verdict !== HIVE_VERDICT_COMPLETE || newest.line === baselineLine) return newest;
   const baselineAt = typeof baselineLine === 'string' ? lines.lastIndexOf(baselineLine) : -1;
   for (let i = 1; i < all.length; i++) {
     if (all[i].index <= baselineAt) break;
-    if (all[i].verdict === HIVE_VERDICT_NO_WORK) {
-      console.log(`Both HIVE_VERDICT lines are on the pane for this task — keeping no_work_needed over the complete printed after it; a PR this task opened still overrides it (#7861)`);
+    if (isNoWorkVerdict(all[i])) {
+      console.log(`Both HIVE_VERDICT lines are on the pane for this task — keeping ${all[i].verdict} over the complete printed after it; a PR this task opened still overrides it (#7861)`);
       return withoutPaneIndex(all[i]);
     }
   }
@@ -3876,6 +4367,20 @@ function postVerdictConcerns(lines, verdictLine, markers) {
 // with notes still unaddressed: the information already exists on the pane
 // and used to die with the relaunch.
 function postVerdictNoteBlocks(lines, verdictLine, markers) {
+  return postVerdictNoteBlockEntries(lines, verdictLine, markers).map(e => e.text);
+}
+
+// postVerdictNoteBlockEntries is postVerdictNoteBlocks with the raw marker
+// lines each block was flagged by kept alongside its text:
+// `{ text, markerLines }`, in pane order.
+//
+// #7935: the follow-up quotes the notes that earned it, and the notes that
+// earned it are chosen by postVerdictConcerns() — which yields raw marker
+// LINES, filtered against the previous tick's snapshot and (on the second
+// round) down to ⟦blocker⟧s. Keeping the marker lines is what lets the caller
+// intersect the two views and quote exactly the notes it is asking about,
+// rather than every flagged block below the verdict.
+function postVerdictNoteBlockEntries(lines, verdictLine, markers) {
   if (!markers || !Array.isArray(lines) || typeof verdictLine !== 'string') return [];
   const at = lines.lastIndexOf(verdictLine);
   if (at < 0) return [];
@@ -3883,21 +4388,45 @@ function postVerdictNoteBlocks(lines, verdictLine, markers) {
   let current = null;
   const flush = () => {
     if (current && current.flagged && current.text.length) {
-      blocks.push(current.text.join(' ').replace(/\s+/g, ' ').trim());
+      blocks.push({
+        text: current.text.join(' ').replace(/\s+/g, ' ').trim(),
+        markerLines: current.markerLines,
+      });
     }
     current = null;
   };
   for (let i = at + 1; i < lines.length; i++) {
     const line = lines[i];
-    if (markers.note.test(line)) { flush(); current = { flagged: false, text: [] }; continue; }
+    if (markers.note.test(line)) { flush(); current = { flagged: false, text: [], markerLines: [] }; continue; }
     if (!current) continue;
     // A note's body is indented; the first flush-left line ends it.
     if (!/^\s/.test(line) || line.trim() === '') { flush(); continue; }
-    if (markers.concern.test(line)) current.flagged = true;
+    if (markers.concern.test(line)) { current.flagged = true; current.markerLines.push(line); }
     current.text.push(line.replace(/^[\s▎│|]+/, '').trim());
   }
   flush();
   return blocks;
+}
+
+// postVerdictQuotableNotes picks the note text the follow-up should quote for
+// a given set of triggering concern lines (#7935).
+//
+// A concern line and a note block are two readings of the same pane region and
+// they can disagree: postVerdictConcerns() accepts a marker line anywhere
+// under a note header, while a block needs indented body lines. When the
+// intersection is empty — an advisor rendering the relay has not seen — fall
+// back to the concern lines themselves, which are always at least the marker
+// and its first sentence. Quoting something beats quoting nothing; that is the
+// whole point of #7935.
+function postVerdictQuotableNotes(lines, verdictLine, markers, concernLines) {
+  const wanted = new Set(Array.isArray(concernLines) ? concernLines : []);
+  if (wanted.size === 0) return [];
+  const matched = postVerdictNoteBlockEntries(lines, verdictLine, markers)
+    .filter(e => e.markerLines.some(l => wanted.has(l)))
+    .map(e => e.text)
+    .filter(Boolean);
+  if (matched.length) return matched;
+  return Array.from(wanted).map(l => l.replace(/^[\s▎│|]+/, '').trim()).filter(Boolean);
 }
 
 // postVerdictReviewAnswered reports whether a verdict on the pane is the
@@ -5123,11 +5652,77 @@ function postUnaddressedNotesComment(prURL, notes) {
   }
 }
 
+// BLOCKED_WORKFLOW_LABEL is the hub's canonical "waiting on something outside
+// this repo" overlay: an issue carrying it is withheld from every offer
+// surface until a human removes it (blockedWorkflowLabel in
+// src/pkg/dashboard/contribute_admission.go). Keep the two spellings in sync.
+const BLOCKED_WORKFLOW_LABEL = 'blocked';
+
+// hubGrantsIssuesWrite reports whether the credential this hub mints for the
+// task can write to issues — the hub says so on auth_ok (`permissions`, per
+// trust tier). Without it the label call would only fail with a 403, so the
+// relay does not try and the hub's cooldown is the whole hold.
+function hubGrantsIssuesWrite(hub) {
+  return !!hub && Array.isArray(hub.permissions) && hub.permissions.includes('issues:write');
+}
+
+// markIssueBlocked closes the loop on a `blocked` verdict (hivecommons/hive
+// #7924): it applies BLOCKED_WORKFLOW_LABEL to the task's issue with the task
+// credential, so the hub's existing admission gate takes over from the
+// verdict's cooldown and the finding survives on GitHub for a human, the
+// scanner, or another spoke — instead of living only in this hub's ledger.
+// The agent is asked by the task prompt to leave the reason as a comment in
+// its own attribution style; this is the half that needs no model.
+//
+// Lifting the label stays human: the relay never removes it.
+//
+// Only a GitHub-backed issue task qualifies (a Linear/Jira item has no GitHub
+// issue to label; a review cycle has no issue at all), and only when the hub
+// granted issues:write. Best-effort and bounded like postUnaddressedNotesComment:
+// a gh that is missing, offline or refused costs a log line, never the
+// completion. gh refuses to add a label the repository does not define, so a
+// first failure creates the label and retries exactly once.
+function markIssueBlocked(task, reason) {
+  if (!task || task.kind !== 'issue' || !task.repo || !(task.number > 0) || task.external_id) return;
+  const hub = task._hub || hubs[activeHubIndex];
+  if (!hubGrantsIssuesWrite(hub)) {
+    console.log(`Task ${task.task_id}: blocked verdict on ${task.repo}#${task.number}, but the task credential does not carry issues:write — leaving the '${BLOCKED_WORKFLOW_LABEL}' label to a human; the hub's cooldown holds the issue (#7924)`);
+    return;
+  }
+  let token = null;
+  try { token = fs.readFileSync(GH_TOKEN_CACHE, 'utf8').trim() || null; } catch (_) {}
+  const env = token ? { ...process.env, GH_TOKEN: token } : process.env;
+  const issueURL = `https://github.com/${task.repo}/issues/${task.number}`;
+  const addLabel = () => execSync(
+    `gh issue edit ${shellQuote(issueURL)} --add-label ${shellQuote(BLOCKED_WORKFLOW_LABEL)} 2>&1`,
+    { encoding: 'utf8', timeout: 20000, env });
+  const describe = e => ((e && (e.stdout || e.message)) || 'unknown error').toString().trim();
+  try {
+    addLabel();
+  } catch (first) {
+    try {
+      execSync(
+        `gh label create ${shellQuote(BLOCKED_WORKFLOW_LABEL)} --repo ${shellQuote(task.repo)} ` +
+        `--description ${shellQuote('Waiting on something outside this repository; not contributor work until a human clears the label')} ` +
+        '--color d93f0b 2>&1',
+        { encoding: 'utf8', timeout: 20000, env });
+      addLabel();
+    } catch (second) {
+      console.error(`Could not apply the '${BLOCKED_WORKFLOW_LABEL}' label to ${task.repo}#${task.number}: ${describe(first)}; after creating the label: ${describe(second)} — the hub's cooldown still holds the issue (#7924)`);
+      return;
+    }
+  }
+  console.log(`Applied the '${BLOCKED_WORKFLOW_LABEL}' label to ${task.repo}#${task.number} (#7924): ${reason || '(no reason given)'} — a human lifts it when the dependency clears`);
+}
+
 function finishCurrentTask({ completionSignal, summary, tmuxLines, prURL, noWork, unaddressedNotes = [] }) {
   if (!currentTask) return;
   // #7879: the PR comment must go out BEFORE stopAgentForTaskExit drops the
   // task credential below — it is posted with the same token the agent used.
   if (prURL && unaddressedNotes.length) postUnaddressedNotesComment(prURL, unaddressedNotes);
+  // #7924: same ordering for the blocked label — it is applied with the task
+  // credential, which is about to be dropped.
+  if (noWork && noWork.verdict === HIVE_VERDICT_BLOCKED) markIssueBlocked(currentTask, noWork.reason);
   // Cause B (#5353). "Idle" here is a verdict read off the pane's rendering
   // chrome, and it is wrong often enough to have produced thirteen separate
   // issues. When it is wrong, the agent is still mid-turn — and reporting
@@ -5148,7 +5743,7 @@ function finishCurrentTask({ completionSignal, summary, tmuxLines, prURL, noWork
   // launches in flight. Its credential is still dropped.
   const bobAlreadyExited = BACKEND === 'bob' && !bobIsRunning();
   stopAgentForTaskExit({ skipCLI: bobAlreadyExited });
-  send({ type: 'task_complete', seq: nextSeq(), task_id: currentTask.task_id, task_gen: currentTask.task_gen, result: 'completed', summary, tmux_output: tmuxLines, pr_url: prURL, completion_signal: completionSignal, verdict: noWork ? noWork.verdict : undefined, verdict_reason: noWork ? noWork.reason : undefined });
+  send({ type: 'task_complete', seq: nextSeq(), task_id: currentTask.task_id, task_gen: currentTask.task_gen, result: 'completed', summary, tmux_output: tmuxLines, pr_url: prURL, completion_signal: completionSignal, ...verdictWireFields(noWork) });
   // bob exits after each turn, so the pane is now a bare shell. Bring it
   // back up before the next task, or the prompt would be typed into bash
   // ("-bash: <prompt>: command not found") and silently lost.
@@ -5418,7 +6013,7 @@ function onTaskProgressLeaseExpired() {
     console.warn(`Task ${currentTask.task_id}: no pane change for ${MAX_TASK_DURATION_MS / 60000}min, but ${evidence} — the agent finished and the tick loop never credited it. Completing it instead of handing it back as an environment failure (#7662).`);
     resetChromeIdleGrace();
     cliRestartCounts.delete(taskKey(currentTask));
-    const noWork = !completionVerdict || prFinding.suppressesVerdict || completionVerdict.verdict !== HIVE_VERDICT_NO_WORK
+    const noWork = !completionVerdict || prFinding.suppressesVerdict || !isNoWorkVerdict(completionVerdict)
       ? null
       : completionVerdict;
     finishCurrentTask({
@@ -5650,6 +6245,14 @@ function maybeRequestPostVerdictReview(paneScanLines, tmuxLines, verdict, previo
   if (secondRound) concerns = concerns.filter(line => markers.blocker && markers.blocker.test(line));
   if (concerns.length === 0) return false;
 
+  // #7935: the notes the relay is asking about go INTO the message, so the
+  // agent cannot match "advisor notes were posted" to notes it already
+  // handled earlier in the turn. Both rounds get them; the second round's
+  // `concerns` are already narrowed to the new ⟦blocker⟧s, so quoting them is
+  // the same operation.
+  const quotedNotes = postVerdictQuotableNotes(paneScanLines, verdict.line, markers, concerns);
+  const message = buildPostVerdictReviewMessage(quotedNotes);
+
   postVerdictReviewCount++;
   postVerdictReviewRequested = true;
   console.log(secondRound
@@ -5658,7 +6261,7 @@ function maybeRequestPostVerdictReview(paneScanLines, tmuxLines, verdict, previo
     : `Task ${currentTask.task_id}: ${concerns.length} advisor concern(s) were posted under its HIVE_VERDICT line — ` +
       `asking the agent once to address them and re-print the verdict (#7759): ${concerns.map(c => JSON.stringify(c.trim())).join(' ')}`);
   try {
-    tmuxSendNudge(POST_VERDICT_REVIEW_MESSAGE);
+    tmuxSendNudge(message);
   } catch (e) {
     console.error('Failed to send the post-verdict review follow-up; finalizing on the verdict as-is:', e.message);
     return false;
@@ -6102,10 +6705,10 @@ function progressTick() {
     // contradicts "nothing shippable"; a PR a maintainer merged last month
     // corroborates it, and is in the pane precisely because the agent had to
     // cite it to justify the verdict. resolveTaskPR() draws that line.
-    const noWork = prFinding.suppressesVerdict || !completionVerdict || completionVerdict.verdict !== HIVE_VERDICT_NO_WORK
+    const noWork = prFinding.suppressesVerdict || !completionVerdict || !isNoWorkVerdict(completionVerdict)
       ? null
       : completionVerdict;
-    if (noWork) console.log(`Detected no_work_needed verdict for ${currentTask.task_id}: ${noWork.reason || '(no reason)'}`);
+    if (noWork) console.log(`Detected ${noWork.verdict} verdict for ${currentTask.task_id}: ${noWork.reason || '(no reason)'}`);
     // Cause B (#5353). "Idle" here is a verdict read off the pane's rendering
     // chrome, and it is wrong often enough to have produced thirteen separate
     // issues. When it is wrong, the agent is still mid-turn — and reporting
@@ -6120,7 +6723,7 @@ function progressTick() {
     // receives is still the agent's own output and not launch chrome.
     //
     let completionSummary = noWork
-      ? 'Agent returned to idle (reported no_work_needed)'
+      ? `Agent returned to idle (reported ${noWork.verdict})`
       : (verdictCompletes
         ? 'Agent reported the task complete (HIVE_VERDICT)'
         : `Agent returned to idle (no verdict emitted; pane idle for ${CHROME_IDLE_GRACE_TICKS} consecutive checks)`);
@@ -6296,6 +6899,14 @@ function handleMessage(data, hub) {
       if (msg.protocol_version || (msg.server_capabilities && msg.server_capabilities.length)) {
         console.log(`Hub protocol ${msg.protocol_version || 'unversioned'}; capabilities: ${(msg.server_capabilities || []).join(', ') || 'none'}`);
       }
+      // #7932: the one server bound the relay cannot discover by behaving well
+      // — exceeding it is answered with a connection close, not a reply. Take
+      // the hub at its word when it states the limit, so a hub that raises its
+      // ceiling raises the relay's with it and the two halves cannot drift.
+      // A hub that says nothing keeps the 64 KiB default that has always held.
+      hub.maxFrameBytes = Number.isFinite(msg.max_message_bytes) && msg.max_message_bytes > 0
+        ? Math.max(msg.max_message_bytes - WS_FRAME_HEADROOM_BYTES, MIN_WS_FRAME_BYTES)
+        : WS_FRAME_BYTES;
       // #2547 (peer-compatibility): both sides have STATED a version since #2567,
       // but neither COMPARED them, so "an old relay against a new hub" was still
       // only detectable by watching it misbehave. Say it once, plainly, on the
@@ -6312,6 +6923,10 @@ function handleMessage(data, hub) {
       hub.authFailed = false;
       hub.connectionId = msg.connection_id || '';
       hub.serverCapabilities = Array.isArray(msg.server_capabilities) ? msg.server_capabilities.slice() : [];
+      // #7924: the permission set the hub mints task credentials with, per
+      // trust tier. Read by markIssueBlocked to decide whether a label call
+      // can succeed at all. An older hub sends none → no label attempts.
+      hub.permissions = Array.isArray(msg.permissions) ? msg.permissions.slice() : [];
       hub.reconnectDelay = BASE_RECONNECT_DELAY_MS;
       // #7732: a fresh session. Whatever this hub was asked before it
       // re-authenticated is not a question it is still going to answer.
@@ -6491,18 +7106,27 @@ function handleMessage(data, hub) {
         console.error(`Failed to write task file ${TASK_FILE}: ${e.message} — continuing without it`);
       }
       send({ type: 'task_accepted', seq: nextSeq(), task_id: msg.task_id, task_gen: msg.task_gen });
-      if (CONTRIBUTOR_MODE === MODE_HEADLESS) {
-        // Non-interactive path (kubestellar/hive#2538): drive a one-shot CLI
-        // invocation and report completion/failure from its exit status — no
-        // tmux, no pane scraping, no watchdog waiting on an invisible prompt.
-        runHeadlessTask(msg);
-      } else {
-        const taskPrompt = resolveTaskPrompt(msg);
-        // tmuxSendKeys() itself queues when the CLI is not confirmed ready, so
-        // there is a single gate rather than two that can disagree.
-        tmuxSendKeys(taskPrompt);
-        startProgressReporting();
-      }
+      // #7925: the repository's declared tools go in before the prompt does.
+      // The task stays current while this runs; a revoke that lands meanwhile
+      // clears currentTask and the dispatch below is dropped.
+      installRepoToolchain(msg, () => {
+        if (!currentTask || currentTask.task_id !== msg.task_id || currentTask.task_gen !== msg.task_gen) {
+          console.log(`Task ${msg.task_id} is no longer current after the toolchain step; not dispatching it`);
+          return;
+        }
+        if (CONTRIBUTOR_MODE === MODE_HEADLESS) {
+          // Non-interactive path (kubestellar/hive#2538): drive a one-shot CLI
+          // invocation and report completion/failure from its exit status — no
+          // tmux, no pane scraping, no watchdog waiting on an invisible prompt.
+          runHeadlessTask(msg);
+        } else {
+          const taskPrompt = resolveTaskPrompt(msg);
+          // tmuxSendKeys() itself queues when the CLI is not confirmed ready, so
+          // there is a single gate rather than two that can disagree.
+          tmuxSendKeys(taskPrompt);
+          startProgressReporting();
+        }
+      });
       break;
 
     case 'token_refresh':
@@ -6946,7 +7570,15 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     // Post-verdict review follow-up (hivecommons/hive#7759).
     POST_VERDICT_REVIEW_MESSAGE,
     POST_VERDICT_REVIEW_ANCHOR,
+    POST_VERDICT_REVIEW_INSTRUCTION,
     POST_VERDICT_REVIEW_MARKERS,
+    // The notes the follow-up quotes (hivecommons/hive#7935).
+    buildPostVerdictReviewMessage,
+    sanitizePostVerdictNote,
+    postVerdictNoteBlockEntries,
+    postVerdictQuotableNotes,
+    POST_VERDICT_NOTE_MAX_CHARS,
+    POST_VERDICT_NOTES_MAX_QUOTED,
     postVerdictConcerns,
     postVerdictReviewAnswered,
     maybeRequestPostVerdictReview,
@@ -6985,6 +7617,11 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     CHROME_IDLE_GRACE_TICKS,
     HIVE_VERDICT_COMPLETE,
     HIVE_VERDICT_NO_WORK,
+    HIVE_VERDICT_BLOCKED,
+    HIVE_VERDICT_TOKENS,
+    BLOCKED_WORKFLOW_LABEL,
+    isNoWorkVerdict,
+    markIssueBlocked,
     detectHiveVerdict,
     detectHiveVerdicts,
     detectCompletionVerdict,
@@ -7001,6 +7638,21 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     DEFAULT_HEADLESS_MAX_OUTPUT_BYTES,
     HEADLESS_MAX_OUTPUT_BYTES,
     HEADLESS_MAX_OUTPUT_ENV,
+    // Frame-size clamping (hivecommons/hive#7932).
+    DEFAULT_HUB_MAX_FRAME_BYTES,
+    WS_FRAME_HEADROOM_BYTES,
+    WS_FRAME_BYTES,
+    MIN_WS_FRAME_BYTES,
+    OUTPUT_TAIL_MAX_BYTES,
+    OUTPUT_TAIL_TRUNCATED_MARKER,
+    TEXT_TRUNCATED_SUFFIX,
+    FRAME_TRUNCATABLE_FIELDS,
+    clampFrame,
+    truncateTailLines,
+    truncateTextHead,
+    truncateTextTail,
+    hubFrameBytes,
+    frameByteLength,
     armTaskProgressLease,
     onTaskProgressLeaseExpired,
     getTaskTimeoutHandle: () => taskTimeoutHandle,
@@ -7040,6 +7692,9 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     detectOmpSelection,
     splitOmpSelection,
     parseOmpConfig,
+    // #7922: the omp credential-store gate behind getCLIState().
+    ompProviderCredentialState,
+    ompConfiguredProviderBlocked,
     advisorFields,
     SELECTION_DETECTORS,
     OMP_EFFORT_LEVELS,

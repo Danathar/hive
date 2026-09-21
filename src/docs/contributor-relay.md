@@ -346,7 +346,7 @@ This hive accepts the following models:
 Set your model: export AGENT_MODEL=<model>
 ```
 
-When `AGENT_MODEL` is unset, the relay reports the model the CLI is actually running where the CLI records one locally — claude, copilot and bob from their session transcripts ([#4117](https://github.com/hivecommons/hive/issues/4117)), and omp from its own config and session records ([#7760](https://github.com/hivecommons/hive/issues/7760)). omp chooses its models in `~/.omp/agent/config.yml` rather than from a flag, so an omp contributor rarely sets `AGENT_MODEL` at all; the relay reads `modelRoles.default` (and the newest session's `model_change` record, so a mid-task `/model` switch is reflected on the next progress tick), splits the `:level` suffix off into the reasoning effort, and reports the primary as `provider/model`. When omp's `--advisor` is on — `advisor.enabled: true`, or an `__advisor.jsonl` sidecar beside the session — the advisor's `modelRoles.advisor` selection is reported too, as `advisor_model` / `advisor_reasoning_effort`, so a contributor whose work is done by one model and reviewed by another shows both: `openai-codex/gpt-5.6-terra (medium) + advisor anthropic/claude-opus-5 (high)` in the fleet view, the activity rail, the run rows, and the `— hive:` trailer on the PRs it opens (`… model=openai-codex/gpt-5.6-terra effort=medium advisor=anthropic/claude-opus-5 advisor_effort=high`). `AGENT_MODEL` / `AGENT_REASONING_EFFORT` still win for the primary when set; the advisor has no env var and is always what omp records. A bare omp with no advisor, or any other single-model backend, reports exactly what it did before — the advisor fields are omitted, not empty.
+When `AGENT_MODEL` is unset, the relay reports the model the CLI is actually running where the CLI records one locally — claude, copilot and bob from their session transcripts ([#4117](https://github.com/hivecommons/hive/issues/4117)), and omp from its own config and session records ([#7760](https://github.com/hivecommons/hive/issues/7760)). omp chooses its models in `~/.omp/agent/config.yml` rather than from a flag, so an omp contributor rarely sets `AGENT_MODEL` at all; the relay reads `modelRoles.default` (and the newest session's `model_change` record, so a mid-task `/model` switch is reflected on the next progress tick), splits the `:level` suffix off into the reasoning effort, and reports the primary as `provider/model`. When omp's `--advisor` is on — `advisor.enabled: true`, or an `__advisor.jsonl` sidecar beside the session — the advisor's `modelRoles.advisor` selection is reported too, as `advisor_model` / `advisor_reasoning_effort`, so a contributor whose work is done by one model and reviewed by another shows both: `openai-codex/gpt-5.6-terra (medium) + advisor anthropic/claude-opus-5 (high)` in the fleet view, the activity rail, the run rows, and the `— hive:` trailer on the PRs it opens (`… model=openai-codex/gpt-5.6-terra effort=medium advisor=anthropic/claude-opus-5 advisor_effort=high`). `AGENT_MODEL` / `AGENT_REASONING_EFFORT` still win for the primary when set; the advisor has no env var and is always what omp records. A bare omp with no advisor, or any other single-model backend, reports exactly what it did before — the advisor fields are omitted, not empty. One caveat ([#7922](https://github.com/hivecommons/hive/issues/7922)): omp writes no session until its first turn, so until then `modelRoles.default` is the only source, and it says what omp is *set* to run, not what it resolved — an omp whose stored credential for that provider has been disabled (a revoked OAuth refresh token) quietly resolves some other provider's model instead. The relay therefore checks the credential store omp runs against: when the configured provider's credential is disabled, no model is reported and the relay withholds `ready` (logging the cause omp recorded and the fix — sign in again on the host and restart) rather than advertise `claude-sonnet-5` for a container that would work tasks on a local fallback model. A mid-task `Error: No API key found for <provider>. Use /login …` in the pane is classified as blocked on a human, the same as claude's `Please run /login`.
 
 ## What happens on a task
 
@@ -667,6 +667,7 @@ Evidence, strongest first, and what each buys:
 | A PR URL for the task's repo that GitHub confirms exists and is not refuted (`resolveTaskPR()` → hub `verifyReportedPRDetail`) | relay + hub | Full completion: `TasksCompleted++`, `TasksWithPR++`, with-PR cooldown. The only evidence that is not self-reported. |
 | A `no_work_needed` verdict whose reason cites a settling PR or commit that GitHub confirms ([#7871](https://github.com/hivecommons/hive/issues/7871)) | hub, async after booking | `no_work_needed` completion plus a **verified** claim-ledger entry on the issue — the citation becomes a real claim, not prose. |
 | A `no_work_needed` verdict with no verifiable citation ([#3987](https://github.com/hivecommons/hive/issues/3987)) | hub | `no_work_needed` completion; offer-pool suppression until newer activity or the window ends. Nothing is closed or labelled. |
+| A `blocked` verdict — nothing in the repo can move until something outside it lands ([#7924](https://github.com/hivecommons/hive/issues/7924)) | hub + relay | `blocked` completion: the **full with-PR cooldown** at once (not the 4h ladder), a marked ledger row carrying the reason, no settle attempt from it. The relay, with the task credential, applies the repo's `blocked` label so the admission gate holds the issue until a human clears it. |
 | A PR-less `complete` from a relay that said how it decided (`completion_signal` = `verdict` or `chrome_idle`; [#6723](https://github.com/hivecommons/hive/issues/6723), [#7862](https://github.com/hivecommons/hive/issues/7862)) | hub `isEvidenceLessCompletion` | **Evidence-less**: the flat `completedNoPRCooldownHours` cooldown only, no escalation, no `TasksCompleted++`. |
 | A PR-less `complete` with `completion_signal` = `unknown` (a relay predating [#5376](https://github.com/hivecommons/hive/issues/5376), or the headless path) | hub | Booked as a completion — the deliberate compatibility exception: the hub changes behaviour only for a relay that has told it how the task ended. Upgrading the relay closes it. |
 
@@ -680,6 +681,18 @@ Two changes, one on each side:
 
 - **Relay.** When an issue task's `complete` verdict *claims* a PR (`PR`, `pull request`, `opened`) and `resolveTaskPR()` attributes none to the task, the relay types one follow-up — *open it now, or print `HIVE_VERDICT: no_work_needed — <reason>`* — and holds the finalization until a second `HIVE_VERDICT` appears (or the pane goes idle), exactly as the #7759 review follow-up does. One per task; the second verdict is final whatever it says. A PR cited only by number on the verdict line (`complete — PR #198 delivers …`) is synthesized as `https://github.com/<task repo>/pull/198` and verified like a pasted URL, so a real PR referenced that way never triggers the follow-up. Review tasks (`complete — no PR comments to address`) are exempt: their `complete` never implies a new PR.
 - **Hub.** `isEvidenceLessCompletion` now returns true for any PR-less completion that is not `no_work_needed` and whose `completion_signal` is `verdict` **or** `chrome_idle` — i.e. from any relay that has said how it decided the task was over. Such a completion books only the flat short cooldown, never escalates, and no longer increments the contributor's `TasksCompleted`. The `unknown` signal (relays predating #5376, the headless path) keeps its pre-#7862 behaviour.
+
+### A `blocked` verdict is held for the full cooldown and marked on the issue
+
+`no_work_needed` covers two different situations, and the hub used to treat them the same. "Already covered by merged work" or "waiting on a maintainer's answer" is settled by activity *on the issue* — the merged PR is a claim, the maintainer's reply bumps `updated_at` and voids the verdict. But an issue can also be correct and unmovable because of something *outside its repository*: projectbluefin/utah#100 ("nautilus missing from image") reached, after ten minutes of research, "the packages now have recipes on utah-packages `main`, but no factory build has published an image with them since" ([#7924](https://github.com/hivecommons/hive/issues/7924)). Nothing on the issue will change until another repo's build lands; when it does, the fix is a one-line pin bump. Booked as an ordinary `no_work_needed`, that finding bought the issue the 4h no-PR rung, and every retry re-ran the same ten minutes to re-discover "still no factory build" — the hub learned nothing from the reason string it was handed. The hub already had the right primitive — an issue carrying the `blocked` label is withheld as "not contributor work until its dependency is cleared" (`workflow_blocked` above) — but nothing connected the agent's finding to the label.
+
+The agent can now say it explicitly, the same way it says `no_work_needed`:
+
+- **Sentinel.** `HIVE_VERDICT: blocked — <what it is waiting on>`, parsed by the same anchored, echo-guarded scanner as the other two (`HIVE_VERDICT_TOKENS` in `bin/contributor-relay.js`). The older spelling `HIVE_VERDICT: no_work_needed — blocked: <reason>` is read as the same verdict with the marker stripped; a reason that merely *mentions* being blocked mid-sentence is still `no_work_needed`, verbatim. The #7861 preference applies: a `blocked` followed by a narrated PR-less `complete` keeps `blocked`, and a PR this task opened still overrides it.
+- **Wire.** The relay sends `verdict: "no_work_needed"` plus `verdict_blocked: true` — the marker, not a new token — so a hub older than #7924 sees exactly the `no_work_needed` it already books (long offer-suppression) instead of an unknown verdict it would normalize to a bare `idle` and re-offer on the short cooldown. A hub that knows the marker (it advertises `blocked_verdict` in `server_capabilities`) normalizes the pair to `blocked`; `verdict: "blocked"` outright is accepted too.
+- **Hub.** A `blocked` completion books the **full with-PR cooldown** from the first completion — one wasted cycle per cooldown period at worst — rather than the 4h→8h→… ladder, and records the ledger row with `blocked: true` and the reason, so an operator can see what the issue is waiting on. It is affirmative evidence like `no_work_needed` (never evidence-less; `TasksCompleted++`, no PR credit), and its reason is deliberately **not** fed to the #7871 settle path: it names what the issue is waiting on, not what settled it, and a merged PR in *another* repo must not be recorded as a claim on this one.
+- **Relay: the label.** When the hub's `auth_ok` `permissions` include `issues:write` (every tier from `newcomer` up) and the task is a GitHub issue, the relay runs `gh issue edit <issue> --add-label blocked` with the task credential *before* dropping it at task exit — the same ordering as the #7879 PR comment. If the repository does not define the label, the relay creates it once and retries once; any further failure costs a log line, never the completion. Without `issues:write` (an `advisor`-tier credential, an older hub that sends no `permissions`), the cooldown above is the whole hold. **Lifting the label stays human**: the relay never removes it, so the admission gate holds the issue past the cooldown until someone who knows the dependency has cleared says so.
+- **Prompt: the comment.** The assignment prompt now asks the agent, before printing either `no_work_needed` or `blocked`, to leave one comment on the issue naming exactly what covers or blocks it — the open or merged PR, the commit, or the external dependency — signed with the same `— hive: …` attribution line as a PR body. That comment is what puts the finding on GitHub rather than only in this hub's ledger: it creates the PR→issue cross-reference nobody had made (fsdk-containers#299 was correctly `no_work_needed` for open PR #289 with no text ref, no sidebar link and an empty cross-reference timeline, so the merge could not close it and the next cycle had to re-verify), and it tells a human why the `blocked` label appeared. The prompt also fixes a boundary: the agent must never edit someone else's PR body to add `Fixes #N` — if that PR's merge should close the issue, it says so in a comment on the PR, noting that only a maintainer editing the body makes the merge close it.
 
 ### A prompt that was typed is not a prompt that was submitted
 
@@ -703,7 +716,13 @@ Finally, a `chrome_idle` completion carrying **neither** a verdict **nor** a PR 
 
 omp's `--advisor` runtime reviews every turn passively and injects its notes after the turn ends, so its review of the agent's *final* turn is drawn on the pane **under** `HIVE_VERDICT`. The sentinel being final — which [#5376](https://github.com/hivecommons/hive/issues/5376), [#7662](https://github.com/hivecommons/hive/issues/7662) and [#7733](https://github.com/hivecommons/hive/issues/7733) established, and which is what makes omp bookable at all — meant the relay finalized on the line and killed the CLI with every note on the closing turn unread. Two live tasks on 2026-09-19 each ended under a stack of `⟦concern⟧`/`⟦nit⟧` notes; one was a real, cheap fix the agent would have made if it had seen it ([#7759](https://github.com/hivecommons/hive/issues/7759)).
 
-The relay now gives the agent **one** more turn, and only when a backend declares that its CLI posts review output after the agent's last line (`POST_VERDICT_REVIEW_MARKERS` in `bin/contributor-relay.js`; omp today, keyed by backend so the next CLI with a reviewer feature is a table entry rather than a tick-loop special case). When a verdict that would otherwise complete the task is read with `⟦concern⟧` notes below it that were not on the pane at the previous tick, the relay types one follow-up — *"Advisor notes were posted after your verdict. Address the concerns that apply to your change, skip nits and anything already handled, then print the HIVE_VERDICT line again on its own line."* — reports `working` to the hub with the concern count, and resumes the normal verdict wait. The task prompt tells the agent this may happen, so the second `HIVE_VERDICT` is expected behaviour rather than a breach of "print it exactly once".
+The relay now gives the agent **one** more turn, and only when a backend declares that its CLI posts review output after the agent's last line (`POST_VERDICT_REVIEW_MARKERS` in `bin/contributor-relay.js`; omp today, keyed by backend so the next CLI with a reviewer feature is a table entry rather than a tick-loop special case). When a verdict that would otherwise complete the task is read with `⟦concern⟧` notes below it that were not on the pane at the previous tick, the relay types one follow-up — *"Advisor notes were posted after your verdict — these ones, not any note you already handled earlier in this turn: (1) "…" | (2) "…". Address the ones that apply to your change, skip nits and anything already handled, then print the HIVE_VERDICT line again on its own line."* — reports `working` to the hub with the concern count, and resumes the normal verdict wait. The task prompt tells the agent this may happen, so the second `HIVE_VERDICT` is expected behaviour rather than a breach of "print it exactly once".
+
+**The follow-up quotes the notes, not just the event** ([#7935](https://github.com/hivecommons/hive/issues/7935)). It originally named only the event — *"Advisor notes were posted after your verdict."* — which is unambiguous only when the pane holds exactly the notes the relay means. It usually does not: an advisor that reviews every turn has already posted one to three mid-turn notes the agent read and acted on, so the sentence reads just as well as *"the ones you already handled"*. On projectbluefin/utah#24 the agent made exactly that reading — it matched the nudge to two mid-turn `⟦blocker⟧`s it had resolved, searched the hub and the PR for anything newer, found nothing, and re-printed the verdict — and the wrong file citation the advisor had actually flagged shipped in utah#225, with the one turn #7759 grants spent searching the wrong places. The relay has the note text in hand when it types the nudge (`postVerdictQuotableNotes()` intersects the `postVerdictConcerns()` lines that earned the turn with the `⟦▎⟧`-joined blocks `postVerdictNoteBlockEntries()` parses), so it quotes them. Three constraints shape the rendering:
+
+- **One line, joined with ` | `.** The nudge path (`tmuxSendNudge`) types a literal keystroke burst with none of the bracketed-paste settle the task-prompt path has, so an embedded newline risks submitting the first line alone and typing the rest into a working agent.
+- **`POST_VERDICT_REVIEW_ANCHOR` stays a verbatim prefix**, so `postVerdictReviewAnswered()`'s echo matching and `paneHoldsUnsubmittedPrompt()` are unchanged. With nothing quotable the message degrades to the original event-only wording rather than to a truncated sentence.
+- **Quoted text is sanitized.** A long echo wraps, so any fragment of the nudge can land at the start of a pane row, and `hiveVerdictLineRe()` anchors there — a note quoting the agent's own `HIVE_VERDICT: complete` line would be read back as the second verdict the follow-up is waiting for. The colon is dropped from any sentinel in quoted text, control characters collapse to spaces, each note is capped at 400 characters and at most four are quoted (the rest are counted, not silently dropped). The second, blocker-only round quotes its blockers the same way.
 
 The bound is explicit, because an advisor that reviews every turn will always have something new to say:
 
@@ -809,6 +828,17 @@ the task is not booked idle-complete mid-turn. A retry loop that never resolves
 is still bounded by the pane-stall detector and the absolute duration ceiling
 above; genuine idle completion — the same chrome with no retry line — is
 detected exactly as before.
+
+### A frame the hub cannot read is a task that gets done twice
+
+[#7932](https://github.com/hivecommons/hive/issues/7932). The hub reads contributor frames under a hard 64 KiB limit — `wsMaxMessageSize`, installed with `conn.SetReadLimit` (`pkg/dashboard/contribute_ws.go`). gorilla/websocket does not truncate an oversized message: it closes the connection with `1009 message too big` and the frame is **lost**. For a `task_complete` that is not a dropped log line, it is a reconnect loop — the completion never lands, the hub's lease outlives the close, the same task is handed back, and the agent redoes work it already shipped. Observed live on the Bluefin spoke: four `(exit 0)` completions against the same two issues, one of which had already opened a real PR, each followed by `closed (code=1009 message too big). Reconnecting in 1000ms…`.
+
+It is a headless-mode failure in practice. The interactive path sends `TMUX_TAIL_LINES` of *terminal rows*, which cannot be large. A JSON-streaming backend such as pi (`--mode json`) puts a whole `tool_execution_end` event — embedded diff and all — on one **line**, so the same fifteen lines is routinely hundreds of KiB. The bound therefore belongs on bytes, not on a line count:
+
+- **The relay trims at the choke point.** `sendTo()` — the one function every frame passes through — clamps each frame before it is written. `tmux_output` is held to `OUTPUT_TAIL_MAX_BYTES` (8 KiB) on every frame, because it is an audit *tail* for a human to read, not a transcript; the whole serialized frame is then held to the hub's budget, shrinking only the payload fields (`tmux_output`, `prompt`, `summary`, `title`, `reason`, `verdict_reason`) and never the protocol ones. `task_id`, `task_gen`, `result`, `pr_url` and `verdict` survive a clamp intact: a trimmed frame says less, never something different. A trim is logged, and a truncated tail carries a visible marker line rather than being silently shortened.
+- **A single line can be larger than the whole budget**, which is exactly the pi case, so the trim keeps that line's tail rather than dropping the only line there is.
+- **The hub states its limit instead of enforcing it silently.** `auth_ok` now carries `max_message_bytes`, and the relay clamps to whatever the hub advertises (less a small headroom), falling back to 64 KiB for any hub that says nothing — which is every hub released before this. Raise the two together: a hub that raises its ceiling now carries its relays up with it, and the number cannot drift between the halves.
+- **Tripping the limit is logged on the hub too.** `ErrReadLimit` is not a `*CloseError`, so `IsUnexpectedCloseError` never matched it and the hub used to drop the connection with nothing in its log while the relay logged the 1009 at the other end of the same socket. It now names the bound that was exceeded.
 
 ### Provider quota parks the relay instead of burning a task per window
 
@@ -1172,6 +1202,79 @@ from an uncaught exception, so the credential cannot outlive the process short
 of SIGKILL. The hub is not messaged on shutdown; the socket drop already books
 the release through the disconnect cooldown path
 ([#5097](https://github.com/hivecommons/hive/issues/5097)).
+
+## What the contributor image can run
+
+The image carries a deliberately small **repository-check baseline** on top of
+the relay's own dependencies, so a container-mode agent can run the checked-out
+repository's real checks rather than a substitute for them
+([#7925](https://github.com/hivecommons/hive/issues/7925)):
+
+| Area | Shipped |
+| --- | --- |
+| Languages / runtimes | `python3`, `go`, `node`/`npm` |
+| Python | `pip`, `pytest`, `pyyaml`, `jsonschema`, `requests`, `venv` |
+| Build / task runners | `make`, `just` |
+| Shell and data | `shellcheck`, `jq`, `yq` (the Go mikefarah/yq v4, not Debian's Python `yq`) |
+| VCS and platform | `git`, `gh`, `curl`, `tmux`, `bubblewrap` |
+
+Before this baseline existed, an agent could *edit* a Python-, Make- or
+`just`-driven repository in container mode but could not run its test suite,
+its `just check`, or its `make ci`. The reason that is a correctness problem
+and not only a convenience one is substitution: on one task, pytest-style tests
+were run under `python3 -m unittest`, reported `Ran 0 tests ... OK`, and were
+about to be cited as a passing run — the kind of false verification claim this
+repository's reviewers police. Deferring to CI is a fine answer when a check
+cannot run locally; reaching for a proxy that looks green is not.
+
+**Python packages install into a virtualenv, not the system Python.** Debian
+marks its system Python externally-managed (PEP 668) and the container runs as
+the unprivileged `dev` user, so a bare `pip install` would fail twice over. The
+image therefore ships `/opt/hive/pyenv` — created with `--system-site-packages`
+so the distribution-packaged `yaml`/`jsonschema`/`requests`/`pytest` remain
+importable through it, owned by `dev`, and first on `PATH` with `VIRTUAL_ENV`
+set to match. `pip install <anything>` and `python3 -m pytest` therefore work
+inside a task with no privilege and no flags, and nothing outside the venv is
+modified. Prefer `python3 -m pytest` over bare `pytest` when a repository needs
+a plugin you just installed; the `pytest` on `PATH` is a shim onto exactly that
+command, so the two agree.
+
+**Container tooling is deliberately absent.** `podman`, `skopeo`, `buildah`,
+`crane` and `oras` are not in the image and are not planned for it: they need
+privileges the contributor container should not hold. A task that genuinely
+needs to build or inspect an OCI image is a task for local mode or a derived
+image, not for the stock contributor container.
+
+**Beyond the baseline, the repository declares what it needs** in a small
+manifest, `<checkout>/.hive/tools` — one directive per line, `#` comments
+([#7925](https://github.com/hivecommons/hive/issues/7925), second half):
+
+```
+pip ruff==0.6.9
+pip "pytest-cov>=5,<6"
+apt libfoo-dev        # recorded in the relay log, not installed
+```
+
+When a task is assigned and its checkout already exists under
+`$HIVE_WORKSPACE_DIR/<owner>/<repo>`, the relay runs `bin/repo-toolchain.sh`
+against it **before typing the prompt** and installs the `pip` lines into the
+venv above in one `python3 -m pip install -- …` call. The first task on a repo
+has no checkout yet (the agent clones it), so that task runs on the baseline
+alone and every later one gets the extras; the step is time-boxed
+(`HIVE_REPO_TOOLCHAIN_TIMEOUT_MS`, default 180 s) and never fails a task — a
+container without egress logs pip's failure and the task proceeds.
+
+The manifest is content from the repository under work, so nothing in it is
+executed: only `pip <requirement>` is acted on, each requirement must be a bare
+PEP 508 `name[extras][version-spec]` (URLs, paths, `-r`, `--index-url`, `-e`
+and anything pip would read as an option are rejected and named), at most 32
+of them, and `--` ends pip's option parsing. `apt` lines are recorded and
+skipped — the container runs unprivileged by design and has no sudo — so the
+log says what the image is missing rather than the task silently lacking it.
+`.devcontainer/devcontainer.json`'s `postCreateCommand` is deliberately not
+honoured: it is an arbitrary shell command from the checkout. For anything
+apt-shaped, a derived image with an entrypoint hook remains the supported way
+to add tools — see below.
 
 ## Extending the contributor image (downstream hooks)
 

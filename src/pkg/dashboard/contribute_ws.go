@@ -47,7 +47,15 @@ const (
 	// human-steered session never silently loses push access. See #2393 item 2.
 	wsTokenRefreshPeriod = 50 * time.Minute
 	wsAuthTimeout        = 30 * time.Second
-	wsMaxMessageSize     = 64 * 1024
+	// wsMaxMessageSize is the largest frame the hub will read from a relay,
+	// installed with conn.SetReadLimit below. It is a HARD bound: gorilla does
+	// not truncate an oversized message, it closes the connection with 1009
+	// "message too big" and the frame is lost — which, for a task_complete, is a
+	// completed task the hub never hears about and hands out again
+	// (hivecommons/hive#7932). Advertised to relays on auth_ok as
+	// max_message_bytes so the sending side can trim to it rather than discover
+	// it by being disconnected; raise the two together, never one alone.
+	wsMaxMessageSize = 64 * 1024
 	// repoPermissionTimeout bounds the user-specific permission lookup performed
 	// before rendering an assignment prompt. A slow GitHub API must not hold the
 	// contributor's ready request indefinitely; lookup failure safely falls back
@@ -357,14 +365,22 @@ type WSMessage struct {
 	ServerCapabilities []string `json:"server_capabilities,omitempty"`
 	// ConnectionID is the hub's per-socket id, advertised on auth_ok so relay
 	// close logs can be correlated with hub disconnect/cleanup logs for #5090.
-	ConnectionID   string   `json:"connection_id,omitempty"`
-	Role           string   `json:"role,omitempty"`
-	ContribLabels  []string `json:"contributor_labels,omitempty"`
-	Status         string   `json:"status,omitempty"`
-	Result         string   `json:"result,omitempty"`
-	Summary        string   `json:"summary,omitempty"`
-	TmuxOutput     []string `json:"tmux_output,omitempty"`
-	AcceptedModels []string `json:"accepted_models,omitempty"`
+	ConnectionID string `json:"connection_id,omitempty"`
+	// MaxMessageBytes is the hub's WebSocket read limit (wsMaxMessageSize),
+	// advertised on auth_ok (hivecommons/hive#7932). It is the one server bound a
+	// relay cannot discover by behaving well: exceeding it is answered with a
+	// 1009 close, not a reply, and the frame that tripped it is gone. Stating it
+	// lets a relay trim an oversized audit tail to fit instead of losing a whole
+	// task_complete — and lets a hub that raises the ceiling carry its relays up
+	// with it. Additive; a relay that ignores it keeps whatever default it ships.
+	MaxMessageBytes int      `json:"max_message_bytes,omitempty"`
+	Role            string   `json:"role,omitempty"`
+	ContribLabels   []string `json:"contributor_labels,omitempty"`
+	Status          string   `json:"status,omitempty"`
+	Result          string   `json:"result,omitempty"`
+	Summary         string   `json:"summary,omitempty"`
+	TmuxOutput      []string `json:"tmux_output,omitempty"`
+	AcceptedModels  []string `json:"accepted_models,omitempty"`
 	// PRURL is the pull request the agent opened for this task, reported on
 	// task_complete. It is best-effort: the relay fills it when it can spot a
 	// PR link in the agent's output, and it is empty when the agent went idle
@@ -391,7 +407,19 @@ type WSMessage struct {
 	// never closes or labels anything on GitHub, and never touches the hive
 	// agent pipeline's selection. A verified PR overrides any claimed value
 	// (normalizeCompletionVerdict).
+	//
+	// "blocked" (hivecommons/hive#7924) is also accepted: no_work_needed's
+	// sibling for an issue nothing in its repo can move until something
+	// outside it lands. The relay spells it as no_work_needed plus
+	// VerdictBlocked below, so an older hub keeps its existing behaviour.
 	Verdict string `json:"verdict,omitempty"`
+	// VerdictBlocked marks a no_work_needed verdict as blocked (#7924): the
+	// reason names an external dependency the issue is waiting on, not a
+	// settlement. The hub books it for the full with-PR cooldown instead of
+	// the escalating no-PR ladder and records the marker on the ledger row.
+	// Any GitHub label for it is the RELAY's doing, with the task credential;
+	// the hub itself still labels nothing.
+	VerdictBlocked bool `json:"verdict_blocked,omitempty"`
 	// VerdictReason optionally carries a machine-readable reason for a
 	// no_work_needed verdict ("maintainer_gated", "already_covered", or free
 	// text the relay scraped from the agent's output). Audit-only: it is
@@ -1806,6 +1834,18 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 	for {
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
+			// #7932: an oversized client frame arrives here as ErrReadLimit, and
+			// gorilla has already sent the peer a 1009 close. It is not a
+			// *CloseError, so IsUnexpectedCloseError below does not match it and
+			// the hub used to drop the connection with NOTHING in its log while
+			// the relay logged "code=1009 message too big" and reconnected into
+			// the same loop. Name the bound here so both halves of that story can
+			// be read side by side.
+			if errors.Is(err, websocket.ErrReadLimit) {
+				h.logger.Warn("[contribute-ws] contributor frame exceeded the read limit; connection closed",
+					"id", connID, "limit_bytes", wsMaxMessageSize)
+				return
+			}
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
 				code, reason, source := websocketCloseErrorDetails(err)
 				h.logger.Warn("[contribute-ws] read error",
@@ -2307,6 +2347,8 @@ func (s *wsSession) handleAuthResponse(msg WSMessage) (stop bool) {
 		ProtocolVersion:    contributorProtocolVersion,
 		ServerCapabilities: serverCapabilities(),
 		ConnectionID:       s.connID,
+		// #7932: state the read limit rather than enforcing it silently.
+		MaxMessageBytes: wsMaxMessageSize,
 	}); err != nil {
 		h.logger.Warn("[contribute-ws] failed to send auth_ok", "username", profile.GitHubUsername, "error", err)
 		return true
@@ -2896,10 +2938,11 @@ func (s *wsSession) handleTaskComplete(msg WSMessage) {
 				}
 			}
 			// #3987: normalize the completion's verdict. A verified PR always
-			// wins (shipped); with none, only an explicit no_work_needed is
-			// honoured and everything else — including the absent field every
-			// pre-#3987 relay sends — is idle, i.e. today's exact semantics.
-			verdict := normalizeCompletionVerdict(msg.Verdict, verifiedPR)
+			// wins (shipped); with none, only an explicit no_work_needed (or
+			// its blocked sibling, #7924) is honoured and everything else —
+			// including the absent field every pre-#3987 relay sends — is
+			// idle, i.e. today's exact semantics.
+			verdict := normalizeCompletionVerdict(msg.Verdict, msg.VerdictBlocked, verifiedPR)
 			if completedTask != nil {
 				// #2393 item 7 + #2565: the full week-long cooldown is applied
 				// only for a VERIFIED PR; an unverified or no-PR completion gets
@@ -2917,7 +2960,11 @@ func (s *wsSession) handleTaskComplete(msg WSMessage) {
 				// suppressed for the merged-claim window rather than one
 				// cooldown. Off the read loop like reconcilePRAttribution:
 				// several GitHub round trips must not stall this
-				// contributor's pongs.
+				// contributor's pongs. A blocked verdict (#7924) is
+				// deliberately NOT settled from: its reason names what the
+				// issue is WAITING ON — typically a PR or build in another
+				// repo — not what settled it, and recording that as a
+				// settlement would be the wrong fact in the claim ledger.
 				if verdict == completionVerdictNoWorkNeeded {
 					go h.settleIssueFromVerdict(completedTask.Repo, completedTask.Number,
 						strings.TrimSpace(msg.VerdictReason), taskAssignedAt,
