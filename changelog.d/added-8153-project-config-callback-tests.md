@@ -1,1 +1,0 @@
-- Add unit tests for the spoke `ProjectConfigCallback` (project-claim reconciliation over heartbeat) covering vanity-URL-only pushes, misconfigured repo-target refusal, idempotent echo, author/filter preservation, and wrong-forge `api_url` refusal (#8153).
