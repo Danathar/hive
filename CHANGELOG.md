@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-21 (v4.72.0)
+
+### Added
+
+- Dashboard shows epic↔issue linkage for plans (#8011): an issue pill that already has a plan shows a state chip (queued / stuck / N to review / d of N done / complete) that opens the plan review instead of a bare Plan button; the review lists each task's claimant and PR; the PLANNING tile tooltip and Plans modal name which plans are waiting on a human; and an opt-in `planning.mirror_to_issue` posts the approved plan as a checklist comment on the source issue with a `#plan=<epic>` deep link back.
+
 ## 2026-09-21 (v4.71.1)
 
 ### Fixed
