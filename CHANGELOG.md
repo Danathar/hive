@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-21 (v4.70.1)
+
+### Fixed
+
+- v5/v6 Top-up workflows push with the `TOPUP_PUSH_TOKEN` repo secret (fine-grained PAT with Contents + Workflows write) when it is set, so forward-merges that touch `.github/workflows/**` (dependabot action-pin bumps) no longer fail at the push; without the secret the job now stops before pushing with an actionable error naming the files and the manual sync recipe (#7959).
+
 ## 2026-09-21 (v4.70.0)
 
 ### Added
