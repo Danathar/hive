@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -182,6 +183,55 @@ func withheldCases() []withheldCase {
 				}
 				if item.ClaimAuthor != "claimer" {
 					t.Errorf("claim_author = %q, want claimer", item.ClaimAuthor)
+				}
+			},
+		},
+		{
+			// #8003: chairlift#55 — fixed by merged #133 four days ago, still
+			// open, re-offered every 72h. Withheld under its own reason that
+			// asks the maintainer to close it, not as "an open PR claims it".
+			name:   "merged claim stale — maintainer must close",
+			reason: contributorAdmissionReasonMergedClaimStale,
+			arrange: func(t *testing.T, hub *ContributeWSHub, s *Server) {
+				mergedAt := time.Now().Add(-(ghpkg.SettledClaimStaleAfter + 24*time.Hour))
+				s.deps.IssueClaimed = func(repo string, number int) (ghpkg.IssueClaim, bool) {
+					if number == 601 {
+						return ghpkg.IssueClaim{
+							PRNumber: 133,
+							PRURL:    "https://github.com/projectbluefin/dakota/pull/133",
+							PRAuthor: "mendezr",
+							MergedPR: true, MergedAt: mergedAt,
+							ObservedAt: mergedAt, FirstObservedAt: mergedAt,
+						}, true
+					}
+					return ghpkg.IssueClaim{}, false
+				}
+			},
+			evidence: func(t *testing.T, item AdmissionWithheldItem) {
+				if item.ClaimURL != "https://github.com/projectbluefin/dakota/pull/133" {
+					t.Errorf("claim_url = %q, want the merged PR's URL", item.ClaimURL)
+				}
+				if !strings.Contains(item.Detail, "merged PR #133") || !strings.Contains(item.Detail, "days ago") ||
+					!strings.Contains(item.Detail, "close it or say what remains") {
+					t.Errorf("detail = %q, want the question put to the maintainer", item.Detail)
+				}
+			},
+		},
+		{
+			name:   "issue churn needs maintainer triage",
+			reason: contributorAdmissionReasonIssueChurn,
+			arrange: func(t *testing.T, hub *ContributeWSHub, s *Server) {
+				s.deps.IssueChurn = churnedIssue(601)
+			},
+			evidence: func(t *testing.T, item AdmissionWithheldItem) {
+				if item.ChurnMerged != 2 || item.ChurnClosed != 2 {
+					t.Errorf("churn = %d merged / %d closed, want 2 / 2", item.ChurnMerged, item.ChurnClosed)
+				}
+				if len(item.ChurnPRs) != 4 {
+					t.Errorf("churn_prs = %v, want the four PRs a maintainer has to look at", item.ChurnPRs)
+				}
+				if !strings.Contains(item.Detail, "2 merged and 2 closed") {
+					t.Errorf("detail = %q, want the counts — they ARE the question being asked of the maintainer", item.Detail)
 				}
 			},
 		},
@@ -460,6 +510,8 @@ func TestWithheld_EveryReasonHasALabel(t *testing.T) {
 		withheldReasonInFlight,
 		withheldReasonContributorFilter,
 		withheldReasonAssignedToOther,
+		contributorAdmissionReasonIssueChurn,
+		contributorAdmissionReasonMergedClaimStale,
 	}
 	for _, reason := range reasons {
 		if label, ok := withheldReasonLabels[reason]; !ok || label == "" {
