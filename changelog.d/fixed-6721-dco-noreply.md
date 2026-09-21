@@ -1,1 +1,0 @@
-- The post-merge DCO checker now accepts GitHub noreply sign-offs only when GitHub identifies the commit author as that same account, matching the pre-merge DCO app while preserving mismatch failures.

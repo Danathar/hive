@@ -1,1 +1,0 @@
-- Split `pkg/config/config.go` into topical load, env, defaults, validation, persistence, Kubernetes, and core type files without changing behavior.

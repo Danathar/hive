@@ -1,1 +1,0 @@
-- Restored the v5 `hive validate` pre-flight command and dashboard repository Rescan wiring so both shipped features are reachable again ([#6352](https://github.com/hivecommons/hive/issues/6352)).

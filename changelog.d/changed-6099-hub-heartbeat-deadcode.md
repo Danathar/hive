@@ -1,1 +1,0 @@
-- Removed the dead spoke-push heartbeat client duplicate from pkg/hub (StartHeartbeat, SendUpgradingHeartbeat, ReportUpgradeFailure, StartTaskStatusPush and helpers); the live client is pkg/hub/spoke since the spoke/hub split.
