@@ -11,6 +11,16 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-21 (v4.73.1)
+
+### Changed
+
+- ⚠ planning labels now default to `hive-plan`/`hive-design` with `design-approved` approval, add the design gate before breakdown for labeled epics, and keep the L5 plan-review gate on (`plan_auto_approve: false`). (#7993)
+
+### Fixed
+
+- Carry `converse` through the ACMM pack loader and `ApplyPack`. The L5/L6 packs declare `converse: true` on `reviewer` (#8023) but `PackAgent` had no such field, so the value was silently dropped and a pack-created reviewer could not post reviews. Packs now seed `converse` only where the agent has no value yet; an explicit operator `converse: false` is never re-granted.
+
 ## 2026-09-21 (v4.73.0)
 
 ### Added
