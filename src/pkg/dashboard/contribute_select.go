@@ -571,10 +571,12 @@ func (h *ContributeWSHub) selectTaskPass(c *ContributorConnection, skippedUnmint
 		h.logger.Warn("[contribute-ws] refusing task: contributor failure streak",
 			"username", identityOf(c),
 			"consecutive_fast_failures", streak.Count,
+			"consecutive_stall_failures", streak.StallCount,
 			"paused_until", until.UTC().Format(time.RFC3339))
 		h.recordDecision(decisionUsername(c), decisionRefused, "", "", 0,
 			"contributor failure streak: "+strconv.Itoa(streak.Count)+
-				" consecutive fast failures, paused until "+until.UTC().Format(time.RFC3339))
+				" consecutive fast failures, "+strconv.Itoa(streak.StallCount)+
+				" consecutive stall failures, paused until "+until.UTC().Format(time.RFC3339))
 		msg := h.taskUnavailable(taskUnavailableFailureStreak)
 		msg.Message = contributorFailureStreakMessage(streak, until)
 		return msg
@@ -778,6 +780,25 @@ func (h *ContributeWSHub) selectTaskPass(c *ContributorConnection, skippedUnmint
 						"pr_url", decision.claim.PRURL, "pr_author", decision.claim.PRAuthor,
 						"merged", decision.claim.MergedPR,
 						"source", decision.claim.Source, "source_reporter", decision.claim.SourceReporter)
+				case contributorAdmissionReasonMergedClaimStale:
+					// #8003: the fix landed days ago and the issue is still
+					// open. Logged as the question it is, so the Operations
+					// feed reads "close it" rather than "claimed by a PR".
+					h.logger.Info("[contribute-ws] skip: merged claim is stale — issue needs a maintainer to close it",
+						"repo", repo.Full, "number", number,
+						"pr_url", decision.claim.PRURL, "pr_author", decision.claim.PRAuthor,
+						"settled_at", decision.claim.SettledAt(),
+						"source", decision.claim.Source, "source_reporter", decision.claim.SourceReporter)
+				case contributorAdmissionReasonIssueChurn:
+					// #7995: not "somebody is on it" but "this issue has
+					// already eaten several PRs and nobody can say what is
+					// left". Logged with the counts so the reason is legible
+					// without opening the Withheld panel.
+					h.logger.Info("[contribute-ws] skip: issue churn needs maintainer triage",
+						"repo", repo.Full, "number", number,
+						"merged_prs", len(decision.churn.Merged),
+						"closed_prs", len(decision.churn.ClosedUnmerged),
+						"prs", strings.Join(decision.churn.PRNumbers(), ","))
 				case contributorAdmissionReasonWorkflowBlocked:
 					h.logger.Info("[contribute-ws] skip: issue is blocked by workflow state",
 						"repo", repo.Full, "number", number)

@@ -11,6 +11,31 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-21 (v4.71.1)
+
+### Fixed
+
+- Plan mode now finishes: "Plan this issue" and the `plan`/`epic` label minted an epic and kicked the architect, but nothing ever turned its reply into child tasks — every plan sat "queued for architect" forever and the label trigger re-kicked the architect every eval cycle. The architect's prompt now names the epic and issue URL and tells it to hand the task list back with `bd decompose <epic> --plan <file>`; the label trigger kicks at most once per 30 minutes and, after 3 kicks with no plan, marks the epic **⚠ stuck** on the PLANNING tile and in the plan list instead of kicking again. Clicking Plan on the issue resets the budget and retries (#8010).
+
+## 2026-09-21 (v4.71.0)
+
+### Added
+
+- Repository cards on the dashboard can now be resized one at a time (#8000). Every card used to be exactly as wide as every other one, so on a hive watching several busy repos a pill column read `#192 Pa…`, `FIX #1109 fix…` and the only way to learn what any of them was was to hover them one by one. Each card now has a `col-resize` handle on its right edge: drag it to widen the repo you are triaging and narrow the quiet ones to make room, double-click it to reset that card, or focus it and nudge with ← / → (Shift for a bigger step, Esc to reset). A widened card also stops cutting pill titles at 50 characters — the character budget grows with the card, so past a certain width the titles are complete and the hover is unnecessary. Widths are stored per repo in the browser, keyed by hive, so the layout survives a reload and the governor's repaint; a "Reset layout" button beside Rescan clears them all.
+
+### Fixed
+
+- Fixed a merged fix's claim expiring after 72h on a clock, which re-offered the still-open issue every three days for another "already fixed, please close" cycle (#8003). Settled claims — a strong claim from a merged PR, or a verified `no_work_needed` verdict — are now carried across scans for 30 days from the merge, and after 7 days the contribute queue withholds the issue under a new `merged_claim_stale` reason that asks a maintainer to close it or say what remains.
+
+## 2026-09-21 (v4.70.4)
+
+### Fixed
+
+- A closing keyword written as prose is now a closing claim. The claim parser required GitHub's own trailer shape (`Fixes #12`, `Fixes: #12`), so a merged pull request whose body read "Resolves architect issue #1232 (first incremental step)" produced no claim at all — and the issue went back into the offer pool after every merge. The closing tier now accepts the same bounded 40-character prose gap the non-closing `Refs #N` tier already did, so such a PR makes a strong claim and suppresses its issue instead of releasing it for re-verification every cycle. The gap must start with whitespace, which keeps a Conventional Commits `fix:` / `fix(scope):` title prefix from claiming the first issue number it sees; the closing tier stays single-issue, matching GitHub ([#7995](https://github.com/hivecommons/hive/issues/7995)).
+- Issues that keep consuming pull requests are withheld for maintainer triage instead of being offered again. The claim ledger now keeps a cumulative churn history — which pull requests have been observed against each issue and how each one ended — built from the two PR listings the claim scan already pages through, so closed-without-merge PRs (previously invisible everywhere) are counted. At 2 merged or 2 closed-unmerged pull requests on one issue, the contribute queue stops offering it and records reason `issue_churn` on the operator-visible Withheld surface with the counts and PR numbers. The guard never closes, comments on, or relabels anything; records age out 14 days after a PR was last seen, and a maintainer can clear it immediately with the `hive: churn-triaged` label ([#7995](https://github.com/hivecommons/hive/issues/7995)).
+- Tracker detection now recognises the `epic` / `tracker` / `tracking` labels (including prefixed spellings such as `kind/epic`) and a case-insensitive `[Epic]` / `[Tracker]` title prefix, matching what the PR-request gate already honoured. A tracking issue is incremental by construction — its children carry the work — so it re-offered after every child merged until a human closed it ([#7995](https://github.com/hivecommons/hive/issues/7995)).
+- Fixed a contributor whose CLI login had expired reporting ready all night and failing every task on the 30-minute watchdog (#7996). The relay now treats an unattended "Please run /login" pane as a login hold: it hands the task back at once as an `environment` failure naming the login, withholds `ready`, declines pushed assignments, leaves the pane untouched for whoever attaches, and re-advertises once the pane shows a signed-in CLI. The hub's contributor failure-streak gate gains a stall streak — three consecutive watchdog-length failures pause the identity's claims with a message pointing at `/login`.
+
 ## 2026-09-21 (v4.70.3)
 
 ### Changed
