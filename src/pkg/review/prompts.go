@@ -59,6 +59,15 @@ const (
 //
 // Caveat, recorded because it bounds how much authority a verdict should carry:
 // n=6, one run per cell. Directional, not definitive.
+//
+// The masked-text line is not from the experiment; it is from
+// hivecommons/hive#8067, where a reviewer read `Authorization: ******` in
+// place of `Authorization: Bearer %s` and reported the missing `%s` as the
+// defect. Reading the tree does not help when a scrubber has already rewritten
+// what the tree says, so the reviewer has to recognize a mask on sight. The
+// relay refuses to publish a review whose evidence is masked text
+// (pkg/github.redactedQuoteRefusal); this line is what keeps the reviewer from
+// writing one in the first place.
 func groundingSection(pr PullRequest) string {
 	var b strings.Builder
 	b.WriteString("\nGROUNDING — read the code, do not infer it.\n")
@@ -72,6 +81,7 @@ func groundingSection(pr PullRequest) string {
 	b.WriteString("- Before asserting a defect, check the surrounding code for the guard, early return, or caller that would already prevent it.\n")
 	b.WriteString("- Prefer one verified finding over three plausible ones. Measured: reviewers that read the tree found 4x more real defects AND made 61% fewer false claims.\n")
 	b.WriteString("- If you cannot verify a concern, either state it as an explicit open question or leave it out. Do not assert it as a defect.\n")
+	b.WriteString("- MASKED TEXT IS NOT THE CODE. If a line you are reading has a credential-shaped literal replaced by [REDACTED], <redacted>, or a run of asterisks, a secret scrubber put it there — the file does not say that. Re-read the line from the repository before you quote it, and never report the mask itself as a defect.\n")
 	fmt.Fprintf(&b, "- Budget: up to %d investigation tool calls for this perspective.\n", GroundingToolCallBudget)
 	return b.String()
 }
@@ -167,6 +177,7 @@ func BuildPerspectivePromptWith(p Perspective, pr PullRequest, opts PromptOption
 func buildReadInstruction(pr PullRequest) string {
 	var b strings.Builder
 	b.WriteString("READ THE PR BEFORE YOU JUDGE IT.\n")
+	b.WriteString("Text of the form `<redacted:…>` marks a place where a secret-shaped literal was masked before you saw it. It is not what the file contains. Never report the masked span as a defect, quote it as code, or reason about its content; if a finding depends on it, say the span was masked and ask a human to check the original.\n")
 	fmt.Fprintf(&b, "  gh pr view %d --repo %s --json title,body,author,files,baseRefName\n", pr.Number, pr.Repo)
 	fmt.Fprintf(&b, "  gh pr diff %d --repo %s\n", pr.Number, pr.Repo)
 	b.WriteString("The body states what the author INTENDED; the diff is what they actually did. You need both — most of the findings worth reporting live in the gap between them.\n")
