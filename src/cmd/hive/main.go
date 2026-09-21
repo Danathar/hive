@@ -1434,6 +1434,13 @@ func (b *boot) wireBootClosures() {
 			RecordIssueClaim: func(c github.IssueClaim) error {
 				return getClaimLedger(b.logger).Record(c)
 			},
+			// #7995: and read access to the same ledger's churn history, so an
+			// issue that has already absorbed several merged or abandoned PRs
+			// without settling is withheld for a maintainer rather than offered
+			// for another round of the same.
+			IssueChurn: func(repo string, number int) (github.IssueChurn, bool) {
+				return getClaimLedger(b.logger).Churn(repo, number)
+			},
 			HookFire: func(ctx context.Context, p hooks.Payload) {
 				hookDispatcher().Fire(ctx, p)
 			},
@@ -5841,6 +5848,14 @@ func (s labelPlanSink) KickedPlan(epic *beads.Bead) {
 		s.dashSrv.AuditLog("planning", "plan_from_label", "epic="+epic.ID+" ref="+epic.ExternalRef, planning.ArchitectAgentName)
 	}
 	s.logger.Info("audit: plan requested from labeled issue", "epic", epic.ID, "ref", epic.ExternalRef)
+}
+
+func (s labelPlanSink) FailedPlan(epic *beads.Bead) {
+	if s.dashSrv != nil {
+		s.dashSrv.AuditLog("planning", "plan_decompose_failed", "epic="+epic.ID+" ref="+epic.ExternalRef+" attempts="+strconv.Itoa(planning.DecomposeMaxAttempts), planning.ArchitectAgentName)
+	}
+	s.logger.Warn("plan-from-label: architect produced no plan after max attempts — epic marked stuck; re-request it from the dashboard",
+		"epic", epic.ID, "ref", epic.ExternalRef, "attempts", planning.DecomposeMaxAttempts)
 }
 
 func (s labelPlanSink) QueuedPlan(epic *beads.Bead, paused bool) {
