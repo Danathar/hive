@@ -1,1 +1,0 @@
-- Require owner/operator authorization for legacy Node dashboard Nous mutation endpoints (#8103).

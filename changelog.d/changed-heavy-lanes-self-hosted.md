@@ -1,1 +1,0 @@
-- The v2 CI workflow now runs on the project's self-hosted runner fleet for trusted events, with fork pull requests still routed to hosted ubuntu-latest runners via a same-repo guard.

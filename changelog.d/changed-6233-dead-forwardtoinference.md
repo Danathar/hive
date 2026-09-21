@@ -1,1 +1,0 @@
-- Removed the dead Anthropic-to-OpenAI forwarder from pkg/proxy (forwardToInference, openAIChatCompletionsURL, flushResponseWriter); the live inference path already handles translation and streaming.
