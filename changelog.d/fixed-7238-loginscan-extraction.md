@@ -1,1 +1,0 @@
-- The login-required detector (pane matching, the credential and consecutive-sighting gates, and the pause/notify loop) moved from `package main` into a new `pkg/loginscan`, so it is testable and reusable outside the `hive` binary. No behavior change. (#7238)

@@ -1,1 +1,0 @@
-- BYO-agent specs are now wired into v5: agents can set `agent_spec` to load an ADR-0012 spec at launch, and `hivectl agent specs list|search` exposes the skill registry discovery surface ([#5910](https://github.com/hivecommons/hive/issues/5910)).

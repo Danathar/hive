@@ -1,1 +1,0 @@
-- Contributor relays now have a contributor-owned quota-headroom guard that evaluates normalized capacity windows before accepting work, with documented reserve environment variables and a launch-time `off` opt-out ([#6833](https://github.com/hivecommons/hive/issues/6833)).

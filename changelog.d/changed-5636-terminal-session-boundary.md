@@ -1,1 +1,0 @@
-- Extracted the agent manager terminal/tmux seams behind a nil-safe TerminalSession boundary while preserving the existing tmux behavior.
