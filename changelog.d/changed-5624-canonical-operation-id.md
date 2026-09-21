@@ -1,1 +1,0 @@
-- Operation idempotency keys now use `pkg/convergence/mutation` as the canonical derivation point, leaving `pkg/turn`'s duplicate journal as a deprecated compatibility wrapper while the unwired turn prototype migrates.

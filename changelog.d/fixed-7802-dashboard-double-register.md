@@ -1,1 +1,0 @@
-- v5 boot registered the dashboard API twice (injected `registerAPI` plus a direct `RegisterAPI` call), so `http.ServeMux` panicked at startup before the dashboard was ready; the duplicate call is removed (#7802).
