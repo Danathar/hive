@@ -1,1 +1,0 @@
-- Agent push brokering now rejects empty outgoing commits so CI retriggers cannot reset reviewed PR branches ([#6300](https://github.com/hivecommons/hive/issues/6300)).

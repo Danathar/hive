@@ -1,1 +1,0 @@
-- Added the accepted RFC #4002 re-entrant conversation-as-state design and restored its phased roadmap, closing the v5 spike while deferring production rollout to v6 follow-ups.

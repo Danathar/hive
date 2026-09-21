@@ -1,1 +1,0 @@
-- Wait for delayed agent tmux sockets before attaching dashboard terminals, preventing ttyd reconnect storms during boot.

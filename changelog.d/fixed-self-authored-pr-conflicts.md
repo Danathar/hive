@@ -1,1 +1,0 @@
-- Fix hive-owned conflicted PRs being deferred forever by annotating kick lists and updating self-authored behind branches during automerge sweeps.
