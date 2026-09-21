@@ -221,6 +221,28 @@ func DecomposeFailed(epic *beads.Bead) bool {
 	return epic != nil && epic.Meta(MetaDecomposeFailed) == "true"
 }
 
+// DecomposeStuckAfter is how long a pending epic may sit after its last
+// architect kick before the dashboard calls it stuck even without the
+// explicit failure marker. The marker only lands on the label path (which
+// re-kicks and counts); a button-kicked epic is kicked once and then waits,
+// so age is the only signal that its architect never answered. 12h is three
+// missed architect cycles at ACMM L5 (credit: Danathar, hivecommons/hive#8013).
+const DecomposeStuckAfter = 12 * time.Hour
+
+// DecomposeStuck is the display-side "this needs a human" test: the epic
+// either exhausted its attempt budget (DecomposeFailed) or has been pending
+// for DecomposeStuckAfter since it was last kicked with nothing to show.
+func DecomposeStuck(epic *beads.Bead) bool {
+	if epic == nil || !DecomposePending(epic) {
+		return false
+	}
+	if DecomposeFailed(epic) {
+		return true
+	}
+	at := DecomposeKickedAt(epic)
+	return !at.IsZero() && decomposeNow().Sub(at) >= DecomposeStuckAfter
+}
+
 // DecomposeAttempts returns how many times the architect has been kicked for
 // this epic since it was minted (or last reset).
 func DecomposeAttempts(epic *beads.Bead) int {
@@ -314,17 +336,11 @@ func RequestDecomposeThrottled(store *beads.Store, kicker DecomposeKicker, epic 
 	return state
 }
 
-// HasPlanLabel reports whether any of the issue's labels is a "plan" trigger
-// label (Part B). It matches the maintainer labels `plan` and `epic`
-// case-insensitively. A nil/empty label set returns false.
+// HasPlanLabel reports whether any of the issue's labels is a plan trigger
+// label using the default RFC #7993 vocabulary. A nil/empty label set returns
+// false. Use HasPlanLabelIn when applying operator configuration.
 func HasPlanLabel(issue github.Issue) bool {
-	for _, l := range issue.Labels {
-		switch strings.ToLower(strings.TrimSpace(l)) {
-		case "plan", "epic":
-			return true
-		}
-	}
-	return false
+	return HasPlanLabelIn(issue, DefaultDesignConfig())
 }
 
 // ArchitectAgentName is the agent that decomposes epics. It is the general
@@ -425,6 +441,8 @@ type LabelPlanResult struct {
 	// Minted is the number of NEW epics created this pass (idempotent — an issue
 	// already turned into an epic is not counted again).
 	Minted int
+	// Design summarizes Gate 1 actions taken before decomposition.
+	Design DesignPlanResult
 	// Kicked is the number of pending epics handed to an available architect.
 	Kicked int
 	// QueuedPaused is the number left queued because the architect is paused.
@@ -441,6 +459,7 @@ type LabelPlanResult struct {
 // callers implement it; either method may be a no-op. It keeps this function
 // free of the dashboard/logging types so it is unit-testable in pkg/planning.
 type LabelPlanSink interface {
+	DesignSink
 	// KickedPlan is called when a labeled issue's epic was handed to the architect.
 	KickedPlan(epic *beads.Bead)
 	// QueuedPlan is called when the plan is queued (architect paused or absent);
@@ -452,44 +471,51 @@ type LabelPlanSink interface {
 	FailedPlan(epic *beads.Bead)
 }
 
-// PlanIssuesFromLabels is the Phase 4 Part B core: for each issue carrying a
-// plan/epic label, mint an epic (idempotent) and, while it is still pending, hand
-// it to the architect via RequestDecompose — RESPECTING the architect's pause
-// (paused → queued, never force-unpaused). It is a pure, synchronous function
-// over the injected store/kicker/sink, so cmd/hive is a thin adapter and the
-// whole decision path is unit-tested here. mintErr (nil-safe) is called on a mint
-// failure so the caller can log it.
-//
-// acmmLevel gates the whole pass: below PlanningMinACMMLevel the architect has no
-// cadence, so minting epics would strand them in decompose_pending. In that case
-// this is a no-op returning the zero result — no epics are minted.
+// PlanIssuesFromLabels is the Phase 4 Part B core using the default RFC #7993
+// label vocabulary. See PlanIssuesFromLabelsWithConfig for the configured form.
 func PlanIssuesFromLabels(store *beads.Store, kicker DecomposeKicker, issues []github.Issue, sink LabelPlanSink, mintErr func(ref string, err error), acmmLevel int) LabelPlanResult {
+	return PlanIssuesFromLabelsWithConfig(store, kicker, issues, DefaultDesignConfig(), sink, mintErr, acmmLevel)
+}
+
+// PlanIssuesFromLabelsWithConfig is the configured label loop: for every issue
+// that carries a plan label, a design label, or already has an epic minted from
+// it, advance Gate 1 (design) first and only then request decomposition. The
+// ACMM gate remains outside label semantics: below L5, the architect has no
+// cadence, so this is a no-op.
+func PlanIssuesFromLabelsWithConfig(store *beads.Store, kicker DecomposeKicker, issues []github.Issue, cfg DesignConfig, sink LabelPlanSink, mintErr func(ref string, err error), acmmLevel int) LabelPlanResult {
 	var res LabelPlanResult
 	if store == nil {
 		return res
 	}
-	// Gate: the architect that decomposes these epics is not scheduled below L5.
-	// Minting here would create epics nothing ever decomposes, so skip entirely.
+	// Gate: the architect that decomposes/designs these epics is not scheduled
+	// below L5. Minting here would create epics nothing ever progresses.
 	if !PlanningAllowedAtLevel(acmmLevel) {
 		return res
 	}
+	inFlight := countDesignsInFlight(store)
 	for _, issue := range issues {
-		if !HasPlanLabel(issue) {
+		ref := IssueRef(issue)
+		existing := store.FindByExternalRef(ref)
+		if !HasPlanLabelIn(issue, cfg) && !HasDesignLabel(issue, cfg) && existing == nil {
 			continue
 		}
-		existing := store.FindByExternalRef(IssueRef(issue))
-		// The github.Issue carries no body; the epic plans against title +
-		// labels, and BuildPrompt sends the issue URL so the architect reads the
-		// body itself (hivecommons/hive#8010).
+		// The github.Issue carries no body; the epic plans against title + labels,
+		// and BuildPrompt/BuildDesignPrompt send the issue URL so the architect
+		// reads the body itself (hivecommons/hive#8010).
 		epic, err := EpicFromIssue(store, issue, "")
 		if err != nil {
 			if mintErr != nil {
-				mintErr(IssueRef(issue), err)
+				mintErr(ref, err)
 			}
 			continue
 		}
 		if existing == nil {
 			res.Minted++
+		}
+		// Gate 1: design-labeled epics (and epics already in the design state) do
+		// not decompose until the approval label is observed.
+		if stepDesign(store, kicker, issue, epic, cfg, sink, &res.Design, &inFlight) {
+			continue
 		}
 		// Only hand off while still pending (not yet decomposed by the architect).
 		if !DecomposePending(epic) {

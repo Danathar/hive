@@ -266,11 +266,11 @@ func PlanDispatch(prs []PullRequest, artifact Artifact, state DispatchState, opt
 			// push a commit.
 			if !staleVerdictRevisitable(pr.Repo, agg, opts) {
 				plan.State.Pending = removePendingForHead(plan.State.Pending, pr)
-				if agg.Verdict == VerdictRequiresHuman {
-					plan.addHuman(pr, humanReason(agg), now)
-				}
-				if agg.Verdict == VerdictChangesRequested {
+				switch agg.Verdict {
+				case VerdictChangesRequested:
 					plan.dispatchFix(pr, agg, opts, now)
+				case VerdictRequiresHuman:
+					plan.holdForHuman(pr, agg, now)
 				}
 				continue
 			}
@@ -375,6 +375,23 @@ func reviewersForPR(reviewers []AgentCapability, authorAgent string) []AgentCapa
 		}
 	}
 	return out
+}
+
+// holdForHuman records a settled requires_human verdict as a human hold so the
+// operator's triage label is applied to the PR, not just written into the
+// review body. Before this, only fixer-side exhaustion produced a hold, so the
+// most common "a human must decide" outcome — the reviewer saying so — never
+// reached the label at all.
+//
+// An aggregate with no perspectives means no report was ever collected; that
+// is an unreviewed PR, not one awaiting a decision, and must not be labelled.
+func (p *DispatchPlan) holdForHuman(pr PullRequest, agg Aggregate, now time.Time) {
+	if len(agg.Perspectives) == 0 {
+		return
+	}
+	// Route through addHuman so a fresh hold also reaches NewHuman and the
+	// v6 escalation fan-out sees it, not only the label pass.
+	p.addHuman(pr, humanReason(agg), now)
 }
 
 func (p *DispatchPlan) dispatchFix(pr PullRequest, agg Aggregate, opts DispatchOptions, now time.Time) {
