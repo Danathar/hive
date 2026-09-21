@@ -521,7 +521,7 @@ You don't have to design a roster. Hive ships six **ACMM packs** (`level-1.yaml`
 
 Applying a level **reconciles the whole roster**, not just the diff: missing agents are created (as overlay files in `/data/agent-configs/`), existing agents are merged — pack values fill blanks, but your explicit `backend:`, `model:`, and `enabled: false` always win — and the level's `kick_template` and `mode` are updated so the agent's *policy* matches the level. A failed agent doesn't abort the rest; the level is only recorded as cleanly applied when every agent reconciled.
 
-The L5 roster is the canonical worked example — eleven agents, eight on the governor timer, two opt-in agents paused in every governor mode, plus one on demand:
+The L5 roster is the canonical worked example — twelve agents, nine on the governor timer, two opt-in agents paused in every governor mode, plus one on demand:
 
 | Agent | | Mode | Cadence (all governor modes) |
 |---|---|---|---|
@@ -531,6 +531,7 @@ The L5 roster is the canonical worked example — eleven agents, eight on the go
 | quality 🧪 | test coverage | ISSUES_AND_PRS | 2h |
 | guide 🧭 | documentation | ISSUES_AND_PRS | 4h |
 | sec-check 🛡 | CVEs, vulnerabilities | ISSUES_AND_PRS | 4h |
+| reviewer 🔬 | repo-grounded PR review; routes to a human, never merges | ADVISORY | 30m |
 | architect 🏗 | RFCs, refactors | ISSUES_AND_PRS | 4h |
 | strategist 🧠 | cross-agent coordination | ISSUES_AND_PRS | 4h |
 | telemetry 📡 | managed-project instrumentation | ISSUES_AND_PRS | paused |
@@ -704,7 +705,7 @@ One agent reaches its template by **role** rather than by `kick_template`: an ag
 
 So the worst an override can do is change the *wording* of a kick that was already going to be sent. The template-specific variables are `${REVIEWER_WORK_LIST}`, `${REVIEWER_MAX_PRS}`, `${REVIEWER_PASSED_LABEL}`, `${REVIEWER_RECOMMEND_CLOSE_LABEL}` and `${REVIEWER_CLOSE_AUTHORITY}`, alongside the usual built-ins.
 
-Do not confuse it with `reviewer-advisory.md`, which belongs to the pack-defined on-demand reviewer: that agent votes on *healthy* PRs pre-merge in advisory mode and never touches the needs-human queue.
+Do not confuse it with `reviewer-queue.md`, which belongs to the pack-defined `reviewer` agent in the L5/L6 packs: that agent wakes on a 30-minute cadence, works the open PR queue in advisory mode and routes `requires_human` / `reject` verdicts to a maintainer via the triage label itself.
 
 Portable agents bundle everything — config plus a `promptTemplate` — in a single `AgentDefinition` YAML you can import from a URL in the dashboard. The reference schema is [`../AGENT-DEFINITION.md`](../AGENT-DEFINITION.md), and a worked example lives at [`../examples/agents/customized-agent.yaml`](../examples/agents/customized-agent.yaml).
 

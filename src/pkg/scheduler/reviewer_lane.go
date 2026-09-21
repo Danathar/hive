@@ -57,10 +57,10 @@ const (
 
 	// reviewerLaneTemplate is the shipped kick template for the reviewer LANE
 	// (kubestellar/hive#5617 item 2). It is deliberately a different file from
-	// reviewer-advisory.md, which belongs to the pack-defined on-demand reviewer
-	// described in the file header — that agent votes on HEALTHY PRs pre-merge
-	// and never touches the needs-human queue, so the two must never resolve to
-	// each other's prompt.
+	// reviewer-queue.md, which belongs to the pack-defined cadence reviewer
+	// (v4's, #8023) — that agent works the open PR queue and routes verdicts to
+	// the triage label itself, so the two must never resolve to each other's
+	// prompt.
 	//
 	// The lane reaches this template through buildReviewerMessage rather than the
 	// ordinary kick_template chain, because an operator enables the lane by ROLE
