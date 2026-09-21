@@ -29,7 +29,7 @@ func TestACMMPacksAgentCounts(t *testing.T) {
 	// It is defined only at the levels where a PR can reach merge without a
 	// mandatory human read (L5 gates on `hold`, L6 auto-merges on green).
 	expected := map[int]int{
-		1: 2, 2: 5, 3: 6, 4: 7, 5: 12, 6: 13,
+		1: 2, 2: 5, 3: 6, 4: 7, 5: 12, 6: 13, // reviewer joins at L5/L6 (#8023)
 	}
 	for _, p := range packs {
 		want, ok := expected[p.Level]
@@ -159,17 +159,53 @@ func TestACMMPackManagedAgentNames(t *testing.T) {
 	}
 	// The union must not grow beyond what the packs define: an agent listed
 	// here is one whose operator-set mode a pack apply is allowed to discard.
-	// (v5 ships `reviewer` in the L5/L6 packs, so check the reverse
-	// containment generically rather than by a fixed name.)
-	inPack := make(map[string]bool)
-	for _, p := range ACMMPacks() {
+	// reviewer joined the L5/L6 rosters in #8023; it is still absent below L5.
+	if !seen["reviewer"] {
+		t.Errorf("`reviewer` is in the L5/L6 packs (#8023) but missing from the managed set")
+	}
+	for _, lvl := range []int{1, 2, 3, 4} {
+		p, err := ACMMPackByLevel(lvl)
+		if err != nil {
+			t.Fatal(err)
+		}
 		for _, a := range p.Agents {
-			inPack[a.Name] = true
+			if a.Name == "reviewer" {
+				t.Errorf("L%d pack must not carry reviewer (L5/L6 only, #8023)", lvl)
+			}
 		}
 	}
-	for n := range seen {
-		if !inPack[n] {
-			t.Errorf("%q is in no pack yet appears in the managed set", n)
+}
+
+// The L5/L6 pack YAML declares `converse: true` on reviewer (#8023). Until
+// PackAgent carried the field, yaml.Unmarshal dropped it silently and a
+// pack-created reviewer landed with no converse — unable to post the reviews
+// that are its entire product. Pin that the value survives loading.
+func TestPackReviewerConverseSurvivesLoad(t *testing.T) {
+	for _, level := range []int{5, 6} {
+		p, err := ACMMPackByLevel(level)
+		if err != nil {
+			t.Fatalf("no pack for level %d: %v", level, err)
+		}
+		var found bool
+		for _, a := range p.Agents {
+			if a.Name != "reviewer" {
+				continue
+			}
+			found = true
+			if a.Converse == nil || !*a.Converse {
+				t.Errorf("L%d reviewer: converse = %v, want true", level, a.Converse)
+			}
+		}
+		if !found {
+			t.Fatalf("L%d pack has no reviewer", level)
+		}
+	}
+	for _, level := range []int{1, 2, 3, 4} {
+		p, _ := ACMMPackByLevel(level)
+		for _, a := range p.Agents {
+			if a.Converse != nil {
+				t.Errorf("L%d %s: pack sets converse=%v; converse is opt-in below L5", level, a.Name, *a.Converse)
+			}
 		}
 	}
 }

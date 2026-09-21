@@ -8,13 +8,14 @@ import (
 )
 
 func TestDashboardInternalImportCountRatchet(t *testing.T) {
-	// 38 = the v5 baseline of 34 plus pkg/fleetreport and pkg/hiveadvisor,
+	// 39 = the v5 baseline of 34 plus pkg/fleetreport and pkg/hiveadvisor,
 	// which the v4 fleet self-report and hive-owner-advice features import,
 	// plus pkg/scheduler for the kick_template provenance type the
 	// SchedulerControl seam now carries (hivecommons/hive#7390), plus
 	// pkg/review for the perspective-set config API that lets the hive
-	// choose its review perspectives (hivecommons/hive#7717).
-	const maxDashboardInternalImports = 38
+	// choose its review perspectives (hivecommons/hive#7717), plus
+	// pkg/ioscan for the design-gate plan handlers (RFC #7993).
+	const maxDashboardInternalImports = 39
 
 	entries, err := os.ReadDir(".")
 	if err != nil {
