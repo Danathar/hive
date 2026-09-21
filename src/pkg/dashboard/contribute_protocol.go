@@ -55,6 +55,14 @@ const (
 	// Self-reported, advisory, and backward-compatible: undeclared clients still
 	// receive work as before.
 	capCapabilityRouting = "capability_routing"
+	// capBlockedVerdict: the hub reads the OPTIONAL verdict_blocked marker on
+	// a no_work_needed task_complete (hivecommons/hive#7924) — the agent said
+	// nothing in the repo can move until something outside it lands — and
+	// holds the issue for the full with-PR cooldown instead of the escalating
+	// no-PR ladder. Purely additive: the relay spells the verdict as the
+	// no_work_needed a hub without this capability already books, so nothing
+	// on the wire depends on the hub advertising it.
+	capBlockedVerdict = "blocked_verdict"
 	// capTokenRefreshFailed: when a mid-task re-mint FAILS, the hub tells the
 	// relay so with a token_refresh_failed message instead of only logging it
 	// hub-side (#5447). Without it the relay's first evidence that its
@@ -86,6 +94,7 @@ func serverCapabilities() []string {
 		capCapabilityRouting,
 		capTokenRefreshFailed,
 		capQuotaPreflight,
+		capBlockedVerdict,
 	}
 }
 

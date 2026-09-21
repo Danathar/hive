@@ -34,8 +34,12 @@ const RELAY_PATH = path.join(__dirname, 'contributor-relay.js');
 // bash and no WebSocket are ever touched.
 // ---------------------------------------------------------------------------
 
-function loadRelay({ backend = 'copilot', backendBinary = null, backendPerm = '--allow-all', backendPermShell = null, model = '', reasoningEffort = '', cliStates = ['ready'], procAlive = true, mode = 'interactive', execFileResult = null, statusFile = null, paneText = null, env = null, cliVersion = null, attachedClients = false, attachedIdleMs = 0, clientActivityRaw = null, listClientsThrows = false, prMeta = null, sessionMissing = false, newSessionFails = false, gitStatus = '' } = {}) {
+function loadRelay({ backend = 'copilot', backendBinary = null, backendPerm = '--allow-all', backendPermShell = null, model = '', reasoningEffort = '', cliStates = ['ready'], procAlive = true, mode = 'interactive', execFileResult = null, statusFile = null, paneText = null, env = null, cliVersion = null, attachedClients = false, attachedIdleMs = 0, clientActivityRaw = null, listClientsThrows = false, prMeta = null, sessionMissing = false, newSessionFails = false, gitStatus = '', ghIssueEditFailures = 0 } = {}) {
   const commands = [];
+  // #7924: how many `gh issue edit` calls fail before one succeeds — models a
+  // label the repository does not define (the first add fails, the relay
+  // creates it, the retry lands) or a gh that is down for good.
+  let issueEditFailuresLeft = ghIssueEditFailures;
   const sent = [];
   // Records every execFile (headless one-shot) invocation: { bin, args, opts }.
   const execFileCalls = [];
@@ -153,6 +157,12 @@ function loadRelay({ backend = 'copilot', backendBinary = null, backendPerm = '-
       if (answer) return JSON.stringify(answer);
       return '';
     }
+    if (/gh issue edit/.test(cmd) && issueEditFailuresLeft > 0) {
+      issueEditFailuresLeft--;
+      const e = new Error('Command failed: gh issue edit');
+      e.stdout = "failed to update https://github.com/foo/bar/issues/100: 'blocked' not found";
+      throw e;
+    }
     return '';
   };
 
@@ -266,6 +276,13 @@ function loadRelay({ backend = 'copilot', backendBinary = null, backendPerm = '-
 
   const prevEnv = { ...process.env };
   process.env.HIVE_REGISTRATION_TOKEN = 'test-token';
+  // Pinned for the same hermetic-run reason as HIVE_WORKSPACE_DIR below: a
+  // developer running this suite inside a real contributor container inherits
+  // that container's multi-hub HIVE_HUB, which against the single test token
+  // set just above trips the relay's one-token-per-hub FATAL at require() time
+  // and takes the whole run down before its first assertion. A test that wants
+  // several hubs passes them through `env` (MULTI_HUB_ENV).
+  process.env.HIVE_HUB = '';
   process.env.AGENT_BACKEND = backend;
   process.env.AGENT_MODEL = model;
   process.env.AGENT_REASONING_EFFORT = reasoningEffort;
@@ -1159,6 +1176,58 @@ test('#7790 a revoke stashes the uncommitted leftovers in the task checkout, aft
   } finally { console.log = log; teardown(relay); fs.rmSync(ws, { recursive: true, force: true }); }
 });
 
+// ---------------------------------------------------------------------------
+// #7925: a repository's declared toolchain (`.hive/tools`) is installed into
+// the container BEFORE the prompt is typed, when the checkout already exists.
+// ---------------------------------------------------------------------------
+
+test('#7925 a checkout with .hive/tools gets its toolchain installed before the task prompt is typed', () => {
+  const { ws, checkout } = fakeWorkspaceWithCheckout('foo/bar');
+  fs.mkdirSync(path.join(checkout, '.hive'), { recursive: true });
+  fs.writeFileSync(path.join(checkout, '.hive', 'tools'), 'pip ruff==0.6.9\n');
+  const relay = loadRelay({ backend: 'claude', env: { HIVE_WORKSPACE_DIR: ws }, execFileResult: { stdout: 'repo-toolchain: installed 1 pip requirement(s)\n' } });
+  const log = console.log; const logged = []; console.log = (...a) => logged.push(a.join(' '));
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-7925');
+    const call = relay.__execFileCalls.find(c => c.bin === 'bash' && /repo-toolchain\.sh$/.test(c.args[0]));
+    assert.ok(call, `expected the relay to run repo-toolchain.sh; got ${JSON.stringify(relay.__execFileCalls.map(c => [c.bin, c.args]))}`);
+    assert.strictEqual(call.args[1], checkout, 'the script is pointed at the task checkout, nothing else');
+    // The prompt still goes out, after the install.
+    assert.ok(relay.__commands.some(c => /send-keys/.test(c) && /do the thing/.test(c)), 'the task prompt must still be typed');
+    assert.ok(logged.some(l => /declared toolchain/.test(l)) && logged.some(l => /installed 1 pip requirement/.test(l)),
+      `the install and the script's report are logged; got ${JSON.stringify(logged)}`);
+  } finally { console.log = log; teardown(relay); fs.rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('#7925 no manifest, no install: the checkout is left alone and the prompt goes straight out', () => {
+  const { ws } = fakeWorkspaceWithCheckout('foo/bar');
+  const relay = loadRelay({ backend: 'claude', env: { HIVE_WORKSPACE_DIR: ws } });
+  const log = console.log; console.log = () => {};
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-7925-none');
+    assert.ok(!relay.__execFileCalls.some(c => /repo-toolchain\.sh$/.test(String(c.args && c.args[0]))), 'no manifest means the script is not run');
+    assert.ok(relay.__commands.some(c => /send-keys/.test(c) && /do the thing/.test(c)), 'the task prompt is typed');
+  } finally { console.log = log; teardown(relay); fs.rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('#7925 a revoke that lands while the toolchain installs drops the dispatch', () => {
+  const { ws, checkout } = fakeWorkspaceWithCheckout('foo/bar');
+  fs.mkdirSync(path.join(checkout, '.hive'), { recursive: true });
+  fs.writeFileSync(path.join(checkout, '.hive', 'tools'), 'pip ruff\n');
+  const relay = loadRelay({ backend: 'claude', env: { HIVE_WORKSPACE_DIR: ws }, execFileResult: { defer: true } });
+  const log = console.log; console.log = () => {};
+  try {
+    relay.setCliReady(true);
+    assignTask(relay, 't-7925-revoked');
+    assert.ok(!relay.__commands.some(c => /send-keys/.test(c) && /do the thing/.test(c)), 'the prompt waits for the install');
+    relay.handleMessage(JSON.stringify({ type: 'task_revoke', task_id: 't-7925-revoked', reason: 'operator stop' }));
+    relay.__completeDeferredExecFile(null, 'repo-toolchain: installed 1 pip requirement(s)\n', '');
+    assert.ok(!relay.__commands.some(c => /send-keys/.test(c) && /do the thing/.test(c)), 'a revoked task must not be typed into the pane after the install finishes');
+  } finally { console.log = log; teardown(relay); fs.rmSync(ws, { recursive: true, force: true }); }
+});
+
 test('#7790 a clean checkout is inspected but not stashed', () => {
   const { ws, checkout } = fakeWorkspaceWithCheckout('foo/bar');
   const relay = loadRelay({ backend: 'claude', env: { HIVE_WORKSPACE_DIR: ws }, gitStatus: '' });
@@ -1491,10 +1560,24 @@ function makeFakeOmpHome(root, { providers = ['anthropic', 'openai-codex', 'goog
     id INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT NOT NULL, credential_type TEXT NOT NULL,
     data TEXT NOT NULL, disabled_cause TEXT DEFAULT NULL, identity_key TEXT DEFAULT NULL,
     created_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0)`);
+  // omp 18.2.x keeps a change counter that its triggers bump on every write
+  // to auth_credentials; a running omp polls it to notice a change made by
+  // another process. The write-back (#7922) must go through those triggers.
+  db.exec(`CREATE TABLE auth_change_revision (id INTEGER PRIMARY KEY CHECK (id = 1), revision INTEGER NOT NULL);
+    INSERT INTO auth_change_revision (id, revision) VALUES (1, 0);
+    CREATE TRIGGER auth_change_revision_auth_credentials_insert AFTER INSERT ON auth_credentials BEGIN UPDATE auth_change_revision SET revision = revision + 1 WHERE id = 1; END;
+    CREATE TRIGGER auth_change_revision_auth_credentials_update AFTER UPDATE ON auth_credentials BEGIN UPDATE auth_change_revision SET revision = revision + 1 WHERE id = 1; END;
+    CREATE TRIGGER auth_change_revision_auth_credentials_delete AFTER DELETE ON auth_credentials BEGIN UPDATE auth_change_revision SET revision = revision + 1 WHERE id = 1; END;`);
   const insert = db.prepare('INSERT INTO auth_credentials (provider, credential_type, data) VALUES (?, ?, ?)');
   for (const p of providers) insert.run(p, 'oauth', JSON.stringify({ access: `${p}-access-token`, refresh: `${p}-refresh-token` }));
   db.close();
   return agentDir;
+}
+
+function authChangeRevision(dbFile) {
+  const sqlite = require('node:sqlite');
+  const db = new sqlite.DatabaseSync(dbFile, { readOnly: true });
+  try { return db.prepare('SELECT revision FROM auth_change_revision WHERE id = 1').get().revision; } finally { db.close(); }
 }
 
 function providersIn(dbFile) {
@@ -1713,6 +1796,37 @@ test('omp sync-back writes the container-refreshed credential over the host row 
   }
 });
 
+test('omp sync-back never writes a credential the container disabled over a working host row', () => {
+  if (ompBackend.sqliteBackend() !== 'node:sqlite') { console.log('SKIP: node:sqlite unavailable on this Node; omp sync-back not exercised'); return; }
+  const sqlite = require('node:sqlite');
+  const tmpDir = fs.mkdtempSync(path.join(__dirname, '..', '.relay-test-tmp', 'omp-syncback-'));
+  try {
+    const hostOmp = path.join(tmpDir, 'host-omp');
+    const agentDir = makeFakeOmpHome(hostOmp, { configYml: OMP_CONFIG_YML });
+    const hostDb = path.join(agentDir, 'agent.db');
+    const stampHost = new sqlite.DatabaseSync(hostDb);
+    stampHost.exec('UPDATE auth_credentials SET updated_at = 1000');
+    stampHost.close();
+    const stage = path.join(tmpDir, 'stage', '.omp');
+    ompBackend.stageOmp(hostOmp, stage, 'anthropic/claude-opus-5');
+    // The host's omp refreshed first; the container's refresh then failed and
+    // omp in the container disabled its copy with a NEWER stamp.
+    const inContainer = new sqlite.DatabaseSync(path.join(stage, 'agent', 'agent.db'));
+    inContainer.prepare("UPDATE auth_credentials SET data = ?, disabled_cause = 'oauth refresh failed: invalid_grant', updated_at = 2000 WHERE provider = 'anthropic'")
+      .run(JSON.stringify({ access: 'dead', refresh: 'dead' }));
+    inContainer.close();
+    const report = ompBackend.syncBackOmp(hostOmp, stage, 'anthropic/claude-opus-5');
+    assert.deepStrictEqual(report.syncedProviders, []);
+    assert.ok(report.skipped.some((s) => /anthropic: .*disabled/.test(s)), report.skipped.join('; '));
+    const host = credentialRow(hostDb, 'anthropic');
+    assert.strictEqual(host.updated_at, 1000);
+    assert.strictEqual(host.disabled_cause, null, 'the host row must not inherit the container\'s disabled_cause');
+    assert.ok(String(host.data).includes('anthropic-refresh-token'), 'the host\'s working token was overwritten by the container\'s dead one');
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test('omp sync-back does not roll a host sign-in back to an older staged copy', () => {
   if (ompBackend.sqliteBackend() !== 'node:sqlite') { console.log('SKIP: node:sqlite unavailable on this Node; omp sync-back not exercised'); return; }
   const sqlite = require('node:sqlite');
@@ -1783,6 +1897,143 @@ test('omp preflight describes what container mode will stage, and names a missin
     assert.match(text, /container mode stages: openai-codex \(selected by AGENT_MODEL\)/);
     // Credential VALUES never appear in the preflight output.
     assert.ok(!/access-token|refresh-token/.test(text), text);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// hivecommons/hive#7922, the hardening around the sync-back above (#7931):
+// the timer-driven pass reads a store the container's omp is writing to
+// through the bind mount, the sqlite3 CLI fallback carries the credential
+// itself in its SQL, the disabled_cause text is the one column a container
+// can write that reaches the host's terminal, and an older omp store has no
+// disabled_cause column at all.
+// ---------------------------------------------------------------------------
+
+// disableOmpCredential marks every row of `provider` the way omp does after a
+// failed refresh.
+function disableOmpCredential(dbFile, provider, cause) {
+  const sqlite = require('node:sqlite');
+  const db = new sqlite.DatabaseSync(dbFile);
+  try {
+    db.prepare('UPDATE auth_credentials SET disabled_cause = ?, updated_at = ? WHERE provider = ?').run(cause, 1789760497, provider);
+  } finally { db.close(); }
+}
+
+// containerRefreshes models omp inside the container rotating the staged
+// OAuth record: a new access and refresh token, updated_at moved on.
+function containerRefreshes(stagedDb, provider, { data, updatedAt = 1789765000 } = {}) {
+  const sqlite = require('node:sqlite');
+  const db = new sqlite.DatabaseSync(stagedDb);
+  try {
+    db.prepare('UPDATE auth_credentials SET data = ?, updated_at = ? WHERE provider = ?')
+      .run(data ?? JSON.stringify({ access: `${provider}-access-token-2`, refresh: `${provider}-refresh-token-2`, expires: 1789770000000 }), updatedAt, provider);
+  } finally { db.close(); }
+}
+
+const OMP_INVALID_GRANT = 'oauth refresh failed: OAuthError: anthropic token refresh failed: 400 {"error": "invalid_grant", "error_description": "Refresh token not found or invalid"}';
+
+test('#7922: the sync-back works through the sqlite3 CLI, with the credential fed on stdin rather than argv', () => {
+  if (ompBackend.sqliteBackend() !== 'node:sqlite') { console.log('SKIP: node:sqlite unavailable on this Node; omp staging not exercised'); return; }
+  const cli = require('child_process').spawnSync('sqlite3', ['-version'], { encoding: 'utf8' });
+  if (cli.error || cli.status !== 0) { console.log('SKIP: no sqlite3 CLI on PATH; the omp sync-back fallback is not exercised'); return; }
+  const tmpDir = fs.mkdtempSync(path.join(__dirname, '..', '.relay-test-tmp', 'omp-sync-cli-'));
+  const prior = process.env.HIVE_OMP_BACKEND_SQLITE;
+  try {
+    const hostOmp = path.join(tmpDir, 'host-omp');
+    const agentDir = makeFakeOmpHome(hostOmp, { configYml: OMP_CONFIG_YML });
+    const hostDb = path.join(agentDir, 'agent.db');
+    disableOmpCredential(hostDb, 'anthropic', OMP_INVALID_GRANT);
+    process.env.HIVE_OMP_BACKEND_SQLITE = 'sqlite3';
+    assert.strictEqual(ompBackend.sqliteBackend(), 'sqlite3');
+    // The disabled row is visible through the CLI reader too, so the launch
+    // refusal does not depend on node:sqlite.
+    assert.throws(() => ompBackend.stageOmp(hostOmp, path.join(tmpDir, 'refused', '.omp'), 'anthropic/claude-sonnet-5'), /disabled on this host: anthropic .*invalid_grant/);
+    const stage = path.join(tmpDir, 'stage', '.omp');
+    ompBackend.stageOmp(hostOmp, stage, 'openai-codex/gpt-5.6-luna');
+    // A token with the one character that matters to a SQL literal.
+    const rotated = JSON.stringify({ access: "codex-access-it's", refresh: "codex-refresh-o'clock", expires: 1789770000000 });
+    containerRefreshes(path.join(stage, 'agent', 'agent.db'), 'openai-codex', { data: rotated });
+    const revisionBefore = authChangeRevision(hostDb);
+    const report = ompBackend.syncBackOmp(hostOmp, stage, 'openai-codex/gpt-5.6-luna');
+    assert.deepStrictEqual(report.syncedProviders, ['openai-codex'], JSON.stringify(report.skipped));
+    delete process.env.HIVE_OMP_BACKEND_SQLITE;
+    const row = credentialRow(hostDb, 'openai-codex');
+    assert.strictEqual(row.data, rotated);
+    assert.strictEqual(row.disabled_cause, null);
+    assert.strictEqual(row.updated_at, 1789765000);
+    // The write goes through omp's own change counter (its triggers fire on
+    // UPDATE), so a host omp that is running picks the new token up.
+    assert.strictEqual(authChangeRevision(hostDb), revisionBefore + 1);
+  } finally {
+    if (prior === undefined) delete process.env.HIVE_OMP_BACKEND_SQLITE; else process.env.HIVE_OMP_BACKEND_SQLITE = prior;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('#7922: a disabled_cause is printed without control characters and capped, wherever it came from', () => {
+  if (ompBackend.sqliteBackend() !== 'node:sqlite') { console.log('SKIP: node:sqlite unavailable on this Node; omp staging not exercised'); return; }
+  const tmpDir = fs.mkdtempSync(path.join(__dirname, '..', '.relay-test-tmp', 'omp-cause-'));
+  try {
+    const hostOmp = path.join(tmpDir, 'host-omp');
+    const agentDir = makeFakeOmpHome(hostOmp, { configYml: OMP_CONFIG_YML });
+    // The cause text can originate in the container (its staged copy is
+    // what --sync-back reads), so treat it as hostile: a terminal escape, a
+    // bell, and a kilobyte of padding.
+    const hostile = 'oauth refresh failed: 400 invalid_grant\x1b[2J\x07' + 'x'.repeat(1000);
+    disableOmpCredential(path.join(agentDir, 'agent.db'), 'anthropic', hostile);
+    const described = ompBackend.describeOmpHost(hostOmp, 'anthropic/claude-sonnet-5');
+    assert.deepStrictEqual(described.disabledProviders.map((d) => d.provider), ['anthropic']);
+    const text = ompBackend.describeLines(described).join('\n');
+    assert.match(text, /anthropic sign-in on this host is disabled — oauth refresh failed: 400 invalid_grant/);
+    // eslint-disable-next-line no-control-regex
+    assert.ok(!/[\x00-\x08\x0b-\x1f\x7f]/.test(text), 'control characters from the store must never reach the host terminal');
+    assert.ok(described.disabledProviders[0].cause.length <= 401, `the cause must be capped, got ${described.disabledProviders[0].cause.length} chars`);
+    let thrown;
+    try { ompBackend.stageOmp(hostOmp, path.join(tmpDir, 'stage', '.omp'), 'anthropic/claude-sonnet-5'); } catch (err) { thrown = err; }
+    assert.ok(thrown, 'staging a disabled sign-in must refuse');
+    // eslint-disable-next-line no-control-regex
+    assert.ok(!/[\x00-\x1f\x7f]/.test(thrown.message), thrown.message);
+    assert.ok(thrown.message.length < 700, `the refusal must be capped, got ${thrown.message.length} chars`);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('#7922: an omp store from before disabled_cause existed still describes, stages and syncs back', () => {
+  if (ompBackend.sqliteBackend() !== 'node:sqlite') { console.log('SKIP: node:sqlite unavailable on this Node; omp staging not exercised'); return; }
+  const sqlite = require('node:sqlite');
+  const tmpDir = fs.mkdtempSync(path.join(__dirname, '..', '.relay-test-tmp', 'omp-old-schema-'));
+  try {
+    const hostOmp = path.join(tmpDir, 'host-omp');
+    const agentDir = makeFakeOmpHome(hostOmp, { configYml: OMP_CONFIG_YML });
+    const hostDb = path.join(agentDir, 'agent.db');
+    // Rebuild auth_credentials the way an older omp laid it out: no
+    // disabled_cause column.
+    let db = new sqlite.DatabaseSync(hostDb);
+    db.exec(`CREATE TABLE old_auth AS SELECT id, provider, credential_type, data, identity_key, created_at, updated_at FROM auth_credentials;
+      DROP TABLE auth_credentials;
+      ALTER TABLE old_auth RENAME TO auth_credentials;
+      UPDATE auth_credentials SET updated_at = 1000`);
+    db.close();
+    const described = ompBackend.describeOmpHost(hostOmp, 'anthropic/claude-sonnet-5');
+    assert.deepStrictEqual(described.keptProviders, ['anthropic']);
+    assert.deepStrictEqual(described.disabledProviders, []);
+    const stage = path.join(tmpDir, 'stage', '.omp');
+    const staged = ompBackend.stageOmp(hostOmp, stage, 'anthropic/claude-sonnet-5');
+    assert.deepStrictEqual(staged.keptProviders, ['anthropic']);
+    const stagedDb = path.join(stage, 'agent', 'agent.db');
+    assert.deepStrictEqual(providersIn(stagedDb), ['anthropic']);
+    containerRefreshes(stagedDb, 'anthropic', { updatedAt: 2000 });
+    const report = ompBackend.syncBackOmp(hostOmp, stage, 'anthropic/claude-sonnet-5');
+    assert.deepStrictEqual(report.syncedProviders, ['anthropic'], JSON.stringify(report.skipped));
+    db = new sqlite.DatabaseSync(hostDb, { readOnly: true });
+    try {
+      const row = db.prepare("SELECT data, updated_at FROM auth_credentials WHERE provider = 'anthropic'").get();
+      assert.strictEqual(row.updated_at, 2000);
+      assert.ok(String(row.data).includes('anthropic-refresh-token-2'));
+    } finally { db.close(); }
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
@@ -4810,6 +5061,7 @@ test('#7760: omp primary and advisor are detected from config.yml and the sessio
     assert.deepStrictEqual(relay.detectOmpSelection(), {
       model: 'openai-codex/gpt-5.6-terra', effort: 'medium',
       advisorModel: 'anthropic/claude-opus-5', advisorEffort: 'high',
+      source: 'transcript',
     });
     assert.strictEqual(relay.refreshDetectedModel(), 'openai-codex/gpt-5.6-terra');
     assert.strictEqual(relay.effectiveReasoningEffort(), 'medium', 'the :level suffix is the effort, from the config spelling');
@@ -4915,6 +5167,199 @@ test('#7760: a mid-task /model switch in omp reaches task_progress, with the adv
     assert.strictEqual(prog.advisor_model, 'anthropic/claude-opus-5');
     assert.strictEqual(prog.advisor_reasoning_effort, 'high');
   } finally { teardown(relay); fs.rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+// ---------------------------------------------------------------------------
+// hivecommons/hive#7922, the relay half: omp with a DISABLED credential for
+// its configured provider draws a ready pane and quietly runs some other
+// provider's model, while the relay — reading config.yml because omp had not
+// written a session yet — told the hub `claude-sonnet-5` and advertised ready.
+// The credential store is the one thing that can tell the two apart.
+// ---------------------------------------------------------------------------
+
+// writeOmpCredentialStore creates agent.db next to an omp fixture's
+// config.yml, in omp's own schema, with one row per entry.
+function writeOmpCredentialStore(agentDir, rows) {
+  const sqlite = require('node:sqlite');
+  const db = new sqlite.DatabaseSync(path.join(agentDir, 'agent.db'));
+  try {
+    db.exec(`CREATE TABLE auth_credentials (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT NOT NULL, credential_type TEXT NOT NULL,
+      data TEXT NOT NULL, disabled_cause TEXT DEFAULT NULL, identity_key TEXT DEFAULT NULL,
+      created_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0)`);
+    const insert = db.prepare('INSERT INTO auth_credentials (provider, credential_type, data, disabled_cause) VALUES (?, ?, ?, ?)');
+    for (const r of rows) insert.run(r.provider, r.credentialType || 'oauth', JSON.stringify({ access: 'a', refresh: 'r' }), r.disabledCause ?? null);
+  } finally { db.close(); }
+}
+
+const OMP_READY_PANE = fs.readFileSync(path.join(__dirname, 'testdata', 'pane-fixtures', 'omp_ready.pane.txt'), 'utf8');
+const OMP_SONNET_CONFIG = 'modelRoles:\n  default: anthropic/claude-sonnet-5:high\n';
+const OMP_REVOKED = 'oauth refresh failed: OAuthError: anthropic token refresh failed: 400 {"error": "invalid_grant", "error_description": "Refresh token not found or invalid"}';
+
+test('#7922: a ready-looking omp whose configured provider credential is disabled is not ready, and no model is reported for it', () => {
+  let sqliteOk = true;
+  try { require('node:sqlite'); } catch (_) { sqliteOk = false; }
+  if (!sqliteOk) { console.log('SKIP: node:sqlite unavailable on this Node; the omp credential gate is not exercised'); return; }
+  const fx = makeOmpFixture({ config: OMP_SONNET_CONFIG });
+  writeOmpCredentialStore(fx.agentDir, [{ provider: 'anthropic', disabledCause: OMP_REVOKED }, { provider: 'openai-codex' }]);
+  const relay = loadRelay({ backend: 'omp', model: '', reasoningEffort: '', paneText: OMP_READY_PANE, env: { HIVE_OMP_AGENT_DIR: fx.agentDir } });
+  try {
+    assert.deepStrictEqual(relay.ompProviderCredentialState('anthropic'), { state: 'disabled', cause: OMP_REVOKED });
+    assert.deepStrictEqual(relay.ompProviderCredentialState('openai-codex'), { state: 'usable', cause: '' });
+    assert.deepStrictEqual(relay.ompProviderCredentialState('ollama'), { state: 'absent', cause: '' });
+    assert.deepStrictEqual(relay.ompConfiguredProviderBlocked(), { provider: 'anthropic', model: 'anthropic/claude-sonnet-5', cause: OMP_REVOKED });
+    // The pane alone says ready — it is the same chrome a working omp draws.
+    assert.strictEqual(paneClassifier.classifyReadiness(OMP_READY_PANE, 'omp'), 'ready');
+    // The relay does not take its word for it.
+    assert.strictEqual(relay.getCLIState(), 'needs-login', 'a disabled credential for the configured provider withholds ready, exactly as a login prompt does');
+    // And the hub is not told claude-sonnet-5 for an omp that cannot run it.
+    const sel = relay.detectOmpSelection();
+    assert.strictEqual(sel.model, '', 'the config.yml default is what omp is SET to run, not evidence that it is');
+    assert.strictEqual(sel.source, '');
+    relay.handleMessage(JSON.stringify({ type: 'auth_challenge' }));
+    const auth = relay.__sent.find(m => m.type === 'auth_response');
+    assert.strictEqual(auth.model, '');
+    assert.strictEqual(auth.reasoning_effort, undefined);
+  } finally { teardown(relay); fs.rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test('#7922: the omp credential gate stands aside whenever it lacks definitive evidence', () => {
+  let sqliteOk = true;
+  try { require('node:sqlite'); } catch (_) { sqliteOk = false; }
+  if (!sqliteOk) { console.log('SKIP: node:sqlite unavailable on this Node; the omp credential gate is not exercised'); return; }
+  // A usable row: ready, and the configured model is reported from config.
+  let fx = makeOmpFixture({ config: OMP_SONNET_CONFIG });
+  writeOmpCredentialStore(fx.agentDir, [{ provider: 'anthropic' }]);
+  let relay = loadRelay({ backend: 'omp', model: '', reasoningEffort: '', paneText: OMP_READY_PANE, env: { HIVE_OMP_AGENT_DIR: fx.agentDir } });
+  try {
+    assert.strictEqual(relay.ompConfiguredProviderBlocked(), null);
+    assert.strictEqual(relay.getCLIState(), 'ready');
+    assert.deepStrictEqual(relay.detectOmpSelection(), { model: 'anthropic/claude-sonnet-5', effort: 'high', advisorModel: '', advisorEffort: '', source: 'config' });
+  } finally { teardown(relay); fs.rmSync(fx.root, { recursive: true, force: true }); }
+
+  // No row at all for the provider: an API key in the environment may still
+  // serve it, so this is not evidence either way.
+  fx = makeOmpFixture({ config: OMP_SONNET_CONFIG });
+  writeOmpCredentialStore(fx.agentDir, [{ provider: 'openai-codex' }]);
+  relay = loadRelay({ backend: 'omp', model: '', reasoningEffort: '', paneText: OMP_READY_PANE, env: { HIVE_OMP_AGENT_DIR: fx.agentDir } });
+  try {
+    assert.strictEqual(relay.ompConfiguredProviderBlocked(), null);
+    assert.strictEqual(relay.getCLIState(), 'ready');
+    assert.strictEqual(relay.detectOmpSelection().model, 'anthropic/claude-sonnet-5');
+  } finally { teardown(relay); fs.rmSync(fx.root, { recursive: true, force: true }); }
+
+  // No store at all (omp never set up, or an image without node:sqlite's
+  // schema): unknown, and the pane classification stands as it was.
+  fx = makeOmpFixture({ config: OMP_SONNET_CONFIG });
+  relay = loadRelay({ backend: 'omp', model: '', reasoningEffort: '', paneText: OMP_READY_PANE, env: { HIVE_OMP_AGENT_DIR: fx.agentDir } });
+  try {
+    assert.deepStrictEqual(relay.ompProviderCredentialState('anthropic'), { state: 'unknown', cause: '' });
+    assert.strictEqual(relay.getCLIState(), 'ready');
+  } finally { teardown(relay); fs.rmSync(fx.root, { recursive: true, force: true }); }
+
+  // A second account for the same provider that still works keeps the
+  // provider usable: omp reads that row.
+  fx = makeOmpFixture({ config: OMP_SONNET_CONFIG });
+  writeOmpCredentialStore(fx.agentDir, [{ provider: 'anthropic', disabledCause: OMP_REVOKED }, { provider: 'anthropic' }]);
+  relay = loadRelay({ backend: 'omp', model: '', reasoningEffort: '', paneText: OMP_READY_PANE, env: { HIVE_OMP_AGENT_DIR: fx.agentDir } });
+  try {
+    assert.strictEqual(relay.ompConfiguredProviderBlocked(), null);
+    assert.strictEqual(relay.getCLIState(), 'ready');
+  } finally { teardown(relay); fs.rmSync(fx.root, { recursive: true, force: true }); }
+
+  // The gate is omp's alone: another backend with the same files sees nothing.
+  fx = makeOmpFixture({ config: OMP_SONNET_CONFIG });
+  writeOmpCredentialStore(fx.agentDir, [{ provider: 'anthropic', disabledCause: OMP_REVOKED }]);
+  relay = loadRelay({ backend: 'claude', model: '', paneText: 'bypass permissions · claude\n', env: { HIVE_OMP_AGENT_DIR: fx.agentDir } });
+  try {
+    assert.strictEqual(relay.getCLIState(), 'ready');
+  } finally { teardown(relay); fs.rmSync(fx.root, { recursive: true, force: true }); }
+
+  // The cause is the container's own text and is logged where the host tails
+  // it: control characters are stripped and it is capped.
+  fx = makeOmpFixture({ config: OMP_SONNET_CONFIG });
+  writeOmpCredentialStore(fx.agentDir, [{ provider: 'anthropic', disabledCause: 'oauth refresh failed:\x1b[2J\x07 ' + 'x'.repeat(1000) }]);
+  relay = loadRelay({ backend: 'omp', model: '', reasoningEffort: '', paneText: OMP_READY_PANE, env: { HIVE_OMP_AGENT_DIR: fx.agentDir } });
+  try {
+    const cred = relay.ompProviderCredentialState('anthropic');
+    assert.strictEqual(cred.state, 'disabled');
+    assert.ok(!/[\x00-\x1f\x7f]/.test(cred.cause), 'control characters from the store must never reach the log');
+    assert.ok(cred.cause.startsWith('oauth refresh failed:'), cred.cause.slice(0, 40));
+    assert.ok(cred.cause.length <= 401, `the cause must be capped at 400 code points plus an ellipsis, got ${cred.cause.length}`);
+  } finally { teardown(relay); fs.rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test('#7922: AGENT_MODEL names the provider the gate checks, and a session transcript still reports what omp actually resolved', () => {
+  let sqliteOk = true;
+  try { require('node:sqlite'); } catch (_) { sqliteOk = false; }
+  if (!sqliteOk) { console.log('SKIP: node:sqlite unavailable on this Node; the omp credential gate is not exercised'); return; }
+  // config.yml says anthropic (disabled), AGENT_MODEL says openai-codex
+  // (usable): the operator's explicit choice is what omp runs, so it is
+  // what is checked.
+  let fx = makeOmpFixture({ config: OMP_SONNET_CONFIG });
+  writeOmpCredentialStore(fx.agentDir, [{ provider: 'anthropic', disabledCause: OMP_REVOKED }, { provider: 'openai-codex' }]);
+  let relay = loadRelay({ backend: 'omp', model: 'openai-codex/gpt-5.6-terra', reasoningEffort: '', paneText: OMP_READY_PANE, env: { HIVE_OMP_AGENT_DIR: fx.agentDir } });
+  try {
+    assert.strictEqual(relay.ompConfiguredProviderBlocked(), null);
+    assert.strictEqual(relay.getCLIState(), 'ready');
+    assert.strictEqual(relay.refreshDetectedModel(), 'openai-codex/gpt-5.6-terra');
+  } finally { teardown(relay); fs.rmSync(fx.root, { recursive: true, force: true }); }
+  // ...and the other way round.
+  fx = makeOmpFixture({ config: 'modelRoles:\n  default: openai-codex/gpt-5.6-terra\n' });
+  writeOmpCredentialStore(fx.agentDir, [{ provider: 'anthropic', disabledCause: OMP_REVOKED }, { provider: 'openai-codex' }]);
+  relay = loadRelay({ backend: 'omp', model: 'anthropic/claude-sonnet-5', reasoningEffort: '', paneText: OMP_READY_PANE, env: { HIVE_OMP_AGENT_DIR: fx.agentDir } });
+  try {
+    assert.deepStrictEqual(relay.ompConfiguredProviderBlocked(), { provider: 'anthropic', model: 'anthropic/claude-sonnet-5', cause: OMP_REVOKED });
+    assert.strictEqual(relay.getCLIState(), 'needs-login');
+  } finally { teardown(relay); fs.rmSync(fx.root, { recursive: true, force: true }); }
+
+  // Once omp has written a session, its model_change record is what it
+  // resolved — the fallback model, in the incident — and that is reported
+  // as-is: true, and the opposite of the config default. The gate still
+  // holds, because the configured provider is still unusable.
+  fx = makeOmpFixture({ config: OMP_SONNET_CONFIG, session: [{ type: 'model_change', model: 'ollama/qwen3-coder:30b' }] });
+  writeOmpCredentialStore(fx.agentDir, [{ provider: 'anthropic', disabledCause: OMP_REVOKED }]);
+  relay = loadRelay({ backend: 'omp', model: '', reasoningEffort: '', paneText: OMP_READY_PANE, env: { HIVE_OMP_AGENT_DIR: fx.agentDir } });
+  try {
+    const sel = relay.detectOmpSelection();
+    assert.strictEqual(sel.model, 'ollama/qwen3-coder:30b');
+    assert.strictEqual(sel.source, 'transcript');
+    assert.strictEqual(sel.effort, '', 'the configured :high belonged to the configured model, not the one running');
+    assert.strictEqual(relay.getCLIState(), 'needs-login');
+  } finally { teardown(relay); fs.rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test('#7922: the detected-model log names config.yml as its source when no session transcript exists yet', () => {
+  const fx = makeOmpFixture({ config: 'modelRoles:\n  default: openai-codex/gpt-5.6-terra:medium\n' });
+  const relay = loadRelay({ backend: 'omp', model: '', reasoningEffort: '', env: { HIVE_OMP_AGENT_DIR: fx.agentDir } });
+  const logged = [];
+  const origLog = console.log;
+  console.log = (...args) => { logged.push(args.join(' ')); };
+  try {
+    assert.strictEqual(relay.refreshDetectedModel(), 'openai-codex/gpt-5.6-terra');
+    assert.ok(logged.some((l) => l === 'Detected running model from omp config.yml (no session transcript yet): openai-codex/gpt-5.6-terra'), JSON.stringify(logged));
+    fs.mkdirSync(path.join(fx.agentDir, 'sessions', 'x'), { recursive: true });
+    fs.writeFileSync(path.join(fx.agentDir, 'sessions', 'x', 's.jsonl'), JSON.stringify({ type: 'model_change', model: 'anthropic/claude-opus-5' }) + '\n');
+    assert.strictEqual(relay.refreshDetectedModel(), 'anthropic/claude-opus-5');
+    assert.ok(logged.some((l) => l === 'Detected running model from omp session transcript: anthropic/claude-opus-5'), JSON.stringify(logged));
+  } finally { console.log = origLog; teardown(relay); fs.rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test('#7922: omp\'s "No API key found for <provider>. Use /login" is a login wall, not a completed turn', () => {
+  const footer = '\n 󰵗  󰪣 Sonnet 5   ~/work  󰙺 ────2%────────────\n╰─\n';
+  const oneLine = 'Error: No API key found for anthropic. Use /login, set an API key environment variable, or create /home/dev/.omp/agent/agent.db' + footer;
+  const twoLines = 'Error: No API key found for anthropic.\nUse /login, set an API key environment variable, or create /home/dev/.omp/agent/agent.db' + footer;
+  assert.strictEqual(paneClassifier.paneShowsLoginRequiredError(oneLine), true);
+  assert.strictEqual(paneClassifier.paneShowsLoginRequiredError(twoLines), true, 'omp emits the message as two lines; a TUI may keep them apart');
+  // Both halves are required: prose about API keys, or a /login tip, is not
+  // the error.
+  assert.strictEqual(paneClassifier.paneShowsLoginRequiredError('I found no API key for anthropic in the repo, which is expected.' + footer), false);
+  assert.strictEqual(paneClassifier.paneShowsLoginRequiredError('Tip: use /login to add another account.' + footer), false);
+  const relay = loadRelay({ backend: 'omp', paneText: oneLine });
+  try {
+    assert.strictEqual(relay.classifyTmuxPane(oneLine), relay.PANE_STATE_BLOCKED_ON_HUMAN,
+      'a task whose turn died at the credential must wait for a person, not be booked complete');
+  } finally { teardown(relay); }
 });
 
 test('#7760: a backend without a selection detector reports no advisor fields', () => {
@@ -8433,6 +8878,10 @@ function runShutdownChild(exitVia) {
       CONTRIBUTOR_MODE: 'headless',
       AGENT_BACKEND: 'claude',
       HIVE_REGISTRATION_TOKEN: 'test-token',
+      // Same hermetic-run pin loadRelay makes: this child inherits the whole
+      // environment, and a real contributor container's multi-hub HIVE_HUB
+      // against the single token above is a FATAL at require() time.
+      HIVE_HUB: '',
       RELAY_UNDER_TEST: RELAY_PATH,
       RELAY_EXIT_VIA: exitVia,
       HIVE_GH_TOKEN_CACHE: tokenPath,
@@ -9269,6 +9718,131 @@ test('#7879 postVerdictNoteBlocks joins a note\'s continuation lines, skips nits
     assert.deepStrictEqual(relay.postVerdictNoteBlocks(lines, v, undefined), []);
     assert.strictEqual(relay.POST_VERDICT_REVIEW_MAX_FOLLOWUPS, 2);
   } finally { teardown(relay); }
+});
+
+// ---------------------------------------------------------------------------
+// #7935 — the follow-up names the notes, not just the event.
+//
+// projectbluefin/utah#24 → utah#225: the turn carried mid-turn ⟦blocker⟧s the
+// agent had already resolved AND two fresh ⟦concern⟧s under the verdict. The
+// nudge said only "advisor notes were posted after your verdict", the agent
+// read that as the notes it had already handled, searched the hub and the PR
+// for newer ones, found nothing and re-printed the verdict — and the wrong
+// file citation the advisor had flagged shipped.
+// ---------------------------------------------------------------------------
+
+test('#7935 postVerdictQuotableNotes returns the blocks the triggering concern lines belong to', () => {
+  const relay = loadRelay({ backend: 'omp' });
+  try {
+    const m = relay.POST_VERDICT_REVIEW_MARKERS.omp;
+    const v = 'HIVE_VERDICT: complete';
+    const lines = [
+      v,
+      ' ⓘ Advisor 1 note', '   ▎ ⟦concern⟧ first', '   ▎ continued',
+      ' ⓘ Advisor 2 note', '   ▎ ⟦blocker⟧ second',
+      ' ⓘ Advisor 3 note', '   ▎ ⟦nit⟧ ignored',
+    ];
+    const all = relay.postVerdictConcerns(lines, v, m);
+    assert.deepStrictEqual(relay.postVerdictQuotableNotes(lines, v, m, all),
+      ['⟦concern⟧ first continued', '⟦blocker⟧ second'], 'every triggering note, continuation lines joined');
+    // The #7879 second round narrows `concerns` to the new blockers; the
+    // quoted set must narrow with it rather than re-quoting the concern the
+    // agent has already been asked about once.
+    assert.deepStrictEqual(relay.postVerdictQuotableNotes(lines, v, m, all.filter(l => /blocker/.test(l))),
+      ['⟦blocker⟧ second']);
+    assert.deepStrictEqual(relay.postVerdictQuotableNotes(lines, v, m, []), [], 'nothing triggered, nothing quoted');
+    // A marker line the block parser did not attach to a block (here it is
+    // flush-left, so it never opens a body) still gets quoted, stripped of
+    // its gutter glyph — quoting something beats quoting nothing.
+    const flat = [v, ' ⓘ Advisor 1 note', '⟦concern⟧ flush left'];
+    assert.deepStrictEqual(relay.postVerdictQuotableNotes(flat, v, m, relay.postVerdictConcerns(flat, v, m)),
+      ['⟦concern⟧ flush left']);
+
+    const entries = relay.postVerdictNoteBlockEntries(lines, v, m);
+    assert.deepStrictEqual(entries.map(e => e.text), relay.postVerdictNoteBlocks(lines, v, m),
+      'postVerdictNoteBlocks is the same walk, text only');
+    assert.deepStrictEqual(entries[0].markerLines, ['   ▎ ⟦concern⟧ first']);
+  } finally { teardown(relay); }
+});
+
+test('#7935 buildPostVerdictReviewMessage quotes the notes, stays one line, and cannot echo a verdict', () => {
+  const relay = loadRelay({ backend: 'omp' });
+  try {
+    const msg = relay.buildPostVerdictReviewMessage(['⟦concern⟧ Wrong citation in building.md', '⟦blocker⟧ Base branch is wrong']);
+    assert.ok(msg.startsWith(relay.POST_VERDICT_REVIEW_ANCHOR),
+      'the anchor postVerdictReviewAnswered() matches stays a verbatim prefix');
+    assert.ok(msg.includes('Wrong citation in building.md') && msg.includes('Base branch is wrong'),
+      `both notes are named: ${JSON.stringify(msg)}`);
+    assert.ok(msg.endsWith(relay.POST_VERDICT_REVIEW_INSTRUCTION), 'and the instruction still closes it');
+    assert.ok(!/\n/.test(msg), 'typed as one line — tmuxSendNudge submits on newline');
+
+    // The message is echoed back onto the pane and a long echo wraps, so a
+    // quoted `HIVE_VERDICT: complete` could land at the start of a row and be
+    // read as the second verdict the follow-up is waiting for.
+    const withSentinel = relay.buildPostVerdictReviewMessage(['⟦blocker⟧ Your HIVE_VERDICT: complete line claims a PR that is not open']);
+    assert.ok(!/HIVE_VERDICT:/.test(withSentinel),
+      `the echoed request must not itself read as a verdict: ${JSON.stringify(withSentinel)}`);
+    assert.ok(withSentinel.includes('claims a PR that is not open'), 'the rest of the note survives');
+    assert.strictEqual(relay.sanitizePostVerdictNote('a\tb\ncd'), 'a b c d', 'control characters and newlines collapse to spaces');
+
+    // Bounds: long notes are truncated, and past the cap the count is stated
+    // rather than the notes silently dropped.
+    const long = `⟦concern⟧ ${'x'.repeat(relay.POST_VERDICT_NOTE_MAX_CHARS * 2)}`;
+    const truncated = relay.buildPostVerdictReviewMessage([long]);
+    assert.ok(truncated.includes('…'), 'an over-long note is truncated with an ellipsis');
+    assert.ok(!truncated.includes('x'.repeat(relay.POST_VERDICT_NOTE_MAX_CHARS)), 'and really is shorter than the note');
+    const many = Array.from({ length: relay.POST_VERDICT_NOTES_MAX_QUOTED + 2 }, (_, i) => `⟦concern⟧ note ${i}`);
+    const capped = relay.buildPostVerdictReviewMessage(many);
+    assert.ok(capped.includes('and 2 more notes'), `the omitted notes are counted: ${JSON.stringify(capped)}`);
+    assert.ok(!capped.includes(`note ${relay.POST_VERDICT_NOTES_MAX_QUOTED + 1}`), 'and are not quoted');
+
+    // Nothing quotable degrades to exactly the pre-#7935 wording.
+    assert.strictEqual(relay.buildPostVerdictReviewMessage([]), relay.POST_VERDICT_REVIEW_MESSAGE);
+    assert.strictEqual(relay.buildPostVerdictReviewMessage(['   ']), relay.POST_VERDICT_REVIEW_MESSAGE);
+    assert.strictEqual(relay.buildPostVerdictReviewMessage(undefined), relay.POST_VERDICT_REVIEW_MESSAGE);
+  } finally { teardown(relay); }
+});
+
+test('#7935 the follow-up the relay types names the notes below the verdict, not the ones already handled', () => {
+  // The utah#225 pane shape: a mid-turn blocker the agent resolved before
+  // printing the verdict, then the two concerns the relay is actually asking
+  // about. Pre-fix the relay typed POST_VERDICT_REVIEW_MESSAGE verbatim and
+  // the agent matched it to the note above.
+  const HANDLED_MID_TURN = [
+    ' ⓘ Advisor 1 note',
+    '   ▎ ⟦blocker⟧ The skill index under docs/skills is stale; regenerate it before you cite it.',
+  ];
+  const BELOW_THE_VERDICT = [
+    ' ⓘ Advisor 1 note',
+    '   ▎ ⟦concern⟧ Before picking a slice: there are 54 open PRs on this repo and several',
+    '   ▎ already target these files.',
+    ' ⓘ Advisor 2 note',
+    '   ▎ ⟦concern⟧ Wrong citation in the new building.md text: iso/scripts/luks-e2e.sh writes',
+    '   ▎ the record itself; scripts/update-e2e-readme.py does not refresh it.',
+  ];
+  let pane = ompPane(' ⠋ Editing docs/building.md', '╰─');
+  const relay = loadRelay({ backend: 'omp', paneText: () => pane, prMeta: new Error('gh: offline') });
+  const log = console.log; console.log = () => {};
+  try {
+    dispatchTask(relay, 'ct-7935-quoted-notes', 24);
+    const before = relay.__tmuxSends().length;
+    pane = ompPane(' Opened https://github.com/foo/bar/pull/225', HANDLED_MID_TURN,
+      OMP_UTAH14_VERDICT, BELOW_THE_VERDICT, OMP_UTAH14_TAIL);
+    relay.__crashTick();
+    const sends = relay.__tmuxSends().slice(before).filter(c => c.includes(relay.POST_VERDICT_REVIEW_ANCHOR));
+    assert.strictEqual(sends.length, 1, `exactly one follow-up is typed: ${JSON.stringify(relay.__tmuxSends().slice(before))}`);
+    const typed = sends[0];
+    assert.ok(typed.includes('Wrong citation in the new building.md text'),
+      `the flagged note is quoted into the prompt: ${JSON.stringify(typed)}`);
+    assert.ok(typed.includes('scripts/update-e2e-readme.py does not refresh it'),
+      'including its continuation lines, not just the marker line');
+    assert.ok(typed.includes('there are 54 open PRs on this repo'), 'both notes below the verdict are quoted');
+    assert.ok(!typed.includes('The skill index under docs/skills is stale'),
+      'the mid-turn note the agent already handled is above the verdict and must NOT be quoted');
+    assert.ok(!typed.includes(relay.POST_VERDICT_REVIEW_MESSAGE),
+      'the bare event-only wording is what #7935 replaced');
+    assert.ok(!/\n/.test(typed), 'still one line');
+  } finally { console.log = log; teardown(relay); }
 });
 
 test('#7759 postVerdictConcerns reads only bracketed concerns inside a note block below the verdict', () => {
@@ -10912,6 +11486,158 @@ test('#6717 a placeholder still on a pane that has since produced output does no
 });
 
 // ---------------------------------------------------------------------------
+// hivecommons/hive#7932 — a task_complete the hub cannot read is a task that
+// gets done twice.
+//
+// The hub reads contributor frames under a hard 64 KiB limit (wsMaxMessageSize,
+// src/pkg/dashboard/contribute_ws.go). gorilla/websocket does not truncate an
+// oversized message: it closes the connection with 1009 and the frame is gone.
+// The relay sent the captured-output tail as fifteen LINES with no byte bound,
+// and a JSON-streaming backend like pi puts a whole tool_execution_end event —
+// embedded diff and all — on one line, so a successful headless task reported
+// its completion in a frame the hub refused. The hub's lease outlived the
+// close, the same task came back, and the agent redid work it had already
+// shipped (four times over on the live Bluefin hub).
+// ---------------------------------------------------------------------------
+
+// The hub's own read limit, mirrored here deliberately rather than read off the
+// relay's exports: this is the number the SERVER enforces (wsMaxMessageSize,
+// src/pkg/dashboard/contribute_ws.go), and the assertion below is about what
+// the hub will accept, not about what the relay believes.
+const HUB_WS_MAX_MESSAGE_BYTES = 64 * 1024;
+
+// One pi-shaped output line: a single JSON event carrying a diff, far past the
+// hub's whole frame budget on its own.
+function hugeJSONEventLine(bytes) {
+  return JSON.stringify({ type: 'tool_execution_end', tool: 'edit', diff: 'x'.repeat(bytes) });
+}
+
+test('#7932 a headless task_complete fits the hub frame limit even when one output line is huge', () => {
+  const stdout = `${hugeJSONEventLine(400 * 1024)}\nopened https://github.com/foo/bar/pull/9\n`;
+  const relay = loadRelay({ backend: 'claude', mode: 'headless', execFileResult: { stdout } });
+  const warn = console.warn; console.warn = () => {};
+  try {
+    assignHeadlessTask(relay);
+    const complete = relay.__sent.find(m => m.type === 'task_complete');
+    assert.ok(complete, 'exit 0 must still report task_complete');
+    const bytes = Buffer.byteLength(JSON.stringify(complete), 'utf8');
+    assert.ok(bytes <= HUB_WS_MAX_MESSAGE_BYTES,
+      `the frame the hub reads is ${bytes} bytes, past its ${HUB_WS_MAX_MESSAGE_BYTES}-byte read limit — this is the 1009 close`);
+    assert.ok(bytes <= relay.WS_FRAME_BYTES, `frame is ${bytes} bytes, past the relay's own ${relay.WS_FRAME_BYTES}-byte budget`);
+    // What the frame MEANS survives the trim; only how much of the tail it
+    // carries is shortened.
+    assert.strictEqual(complete.task_id, 'ct-h-1');
+    assert.strictEqual(complete.result, 'completed');
+    assert.strictEqual(complete.pr_url, 'https://github.com/foo/bar/pull/9',
+      'the PR this task opened must survive — losing it is how a shipped task looks unshipped');
+    assert.strictEqual(complete.tmux_output[0], relay.OUTPUT_TAIL_TRUNCATED_MARKER,
+      'the trim must be visible in the audit tail, not silent');
+    assert.ok(complete.tmux_output.join('\n').includes('pull/9'),
+      'the tail keeps its END — the last thing printed is the part worth reporting');
+  } finally { console.warn = warn; teardown(relay); }
+});
+
+test('#7932 a frame that already fits is sent through untouched', () => {
+  const relay = loadRelay({});
+  try {
+    const msg = { type: 'task_progress', seq: 3, task_id: 't1', status: 'working', tmux_output: ['line one', 'line two'] };
+    assert.strictEqual(relay.clampFrame(msg, relay.WS_FRAME_BYTES), msg,
+      'the interactive path sends fifteen terminal rows: no copy, no marker, no behaviour change');
+  } finally { teardown(relay); }
+});
+
+test('#7932 clamping shortens payload and never protocol fields', () => {
+  const relay = loadRelay({});
+  try {
+    const msg = {
+      type: 'task_complete', seq: 4, task_id: 'ct-1', task_gen: 7, result: 'completed',
+      pr_url: 'https://github.com/foo/bar/pull/9', verdict: 'no_work_needed',
+      verdict_reason: 'merged PRs already cover it',
+      summary: 'Headless one-shot invocation exited 0',
+      tmux_output: [hugeJSONEventLine(300 * 1024)],
+    };
+    const out = relay.clampFrame(msg, relay.WS_FRAME_BYTES);
+    assert.ok(relay.frameByteLength(out) <= relay.WS_FRAME_BYTES);
+    for (const field of ['type', 'seq', 'task_id', 'task_gen', 'result', 'pr_url', 'verdict', 'verdict_reason', 'summary']) {
+      assert.deepStrictEqual(out[field], msg[field], `${field} is protocol, not payload — it must survive intact`);
+    }
+    assert.ok(relay.frameByteLength({ tmux_output: out.tmux_output }) <= relay.OUTPUT_TAIL_MAX_BYTES * 2,
+      'the tail is held to its own, much smaller bound: it is an audit trail, not a transcript');
+  } finally { teardown(relay); }
+});
+
+test('#7932 a single line bigger than the whole budget is kept as its tail, not dropped', () => {
+  const relay = loadRelay({});
+  try {
+    const line = `${'A'.repeat(4096)}THE-LAST-TWENTY-CHAR`;
+    const budget = Buffer.byteLength(relay.OUTPUT_TAIL_TRUNCATED_MARKER, 'utf8') + 21;
+    const out = relay.truncateTailLines([line], budget);
+    assert.deepStrictEqual(out, [relay.OUTPUT_TAIL_TRUNCATED_MARKER, 'THE-LAST-TWENTY-CHAR'],
+      'pi emits the whole event as ONE line — dropping it reports nothing at all');
+  } finally { teardown(relay); }
+});
+
+test('#7932 a frame oversized on a field other than the tail is trimmed too', () => {
+  const relay = loadRelay({});
+  try {
+    const msg = { type: 'task_failed', seq: 2, task_id: 'ct-2', task_gen: 3, reason: `boom: ${'z'.repeat(200 * 1024)}` };
+    const out = relay.clampFrame(msg, relay.WS_FRAME_BYTES);
+    assert.ok(relay.frameByteLength(out) <= relay.WS_FRAME_BYTES);
+    assert.strictEqual(out.task_id, 'ct-2');
+    assert.strictEqual(out.task_gen, 3);
+    assert.ok(out.reason.startsWith('boom: '),
+      'a failure reason keeps its HEAD: the opening words are the ones that say what happened');
+    assert.ok(out.reason.endsWith(relay.TEXT_TRUNCATED_SUFFIX), 'and the cut is marked');
+  } finally { teardown(relay); }
+});
+
+test('#7932 clamping an oversized field leaves the fields that already fit untouched', () => {
+  const relay = loadRelay({});
+  try {
+    const msg = {
+      type: 'task_failed', seq: 2, task_id: 'ct-3', task_gen: 3,
+      summary: 'short summary', tmux_output: ['a', 'b', 'c'],
+      reason: `boom: ${'z'.repeat(200 * 1024)}`,
+    };
+    const out = relay.clampFrame(msg, relay.WS_FRAME_BYTES);
+    assert.ok(relay.frameByteLength(out) <= relay.WS_FRAME_BYTES);
+    assert.deepStrictEqual(out.tmux_output, ['a', 'b', 'c'], 'a tail that already fit was emptied to pay for another field');
+    assert.strictEqual(out.summary, 'short summary', 'a summary that already fit was emptied to pay for another field');
+    assert.ok(out.reason.startsWith('boom: ') && out.reason.endsWith(relay.TEXT_TRUNCATED_SUFFIX), 'only the oversized field is cut, and the cut is marked');
+  } finally { teardown(relay); }
+});
+
+test('#7932 the relay clamps to the limit the hub advertises on auth_ok', () => {
+  const relay = loadRelay({ env: MULTI_HUB_ENV });
+  const log = console.log; console.log = () => {};
+  try {
+    const { hubs } = attachHubSinks(relay);
+    assert.strictEqual(relay.hubFrameBytes(hubs[0]), relay.WS_FRAME_BYTES,
+      'before auth_ok a hub gets the 64 KiB every released hub enforces');
+
+    relay.handleMessage(JSON.stringify({ type: 'auth_ok', contributor_id: 'c1', trust_tier: 'contributor', max_message_bytes: 256 * 1024 }), hubs[0]);
+    assert.strictEqual(relay.hubFrameBytes(hubs[0]), 256 * 1024 - relay.WS_FRAME_HEADROOM_BYTES,
+      'a hub that raises its ceiling raises the relay budget with it');
+
+    // A hub advertising less than the headroom must not leave a zero or
+    // negative budget — that would clamp every frame down to nothing.
+    relay.handleMessage(JSON.stringify({ type: 'auth_ok', contributor_id: 'c1', trust_tier: 'contributor', max_message_bytes: 1024 }), hubs[1]);
+    assert.strictEqual(relay.hubFrameBytes(hubs[1]), relay.MIN_WS_FRAME_BYTES);
+  } finally { console.log = log; teardown(relay); }
+});
+
+test('#7932 a hub that advertises no limit keeps the default budget', () => {
+  const relay = loadRelay({ env: MULTI_HUB_ENV });
+  const log = console.log; console.log = () => {};
+  try {
+    const { hubs } = attachHubSinks(relay);
+    relay.handleMessage(JSON.stringify({ type: 'auth_ok', contributor_id: 'c1', trust_tier: 'contributor' }), hubs[0]);
+    assert.strictEqual(relay.hubFrameBytes(hubs[0]), relay.WS_FRAME_BYTES,
+      'every hub released before #7932 states nothing and still reads exactly 64 KiB');
+  } finally { console.log = log; teardown(relay); }
+});
+
+// ---------------------------------------------------------------------------
 
 let failed = 0;
 // RELAY_TEST_ONLY=<substring> runs a single test, for debugging in isolation.
@@ -12351,5 +13077,184 @@ test('#7862 detectPRURLs synthesizes a candidate from "PR #N" on the verdict lin
       'no repo, nothing to synthesize against');
     assert.deepStrictEqual(relay.detectPRURLs(['HIVE_VERDICT: complete — fixes #198'], 'foo/bar'), [],
       'a bare #N is an issue reference');
+  } finally { teardown(relay); }
+});
+
+// ── hivecommons/hive#7924: the `blocked` verdict ─────────────────────────────
+//
+// utah#100 ended in a correct no_work_needed whose reason was "nothing here can
+// change until utah-packages' factory publishes an image" — a blocked-on-
+// another-repo state. Booked as an ordinary no-PR completion, the hub re-ran
+// the same research on the 4h backoff and learned nothing from the reason.
+// The relay now reads `HIVE_VERDICT: blocked — <reason>` (and the older
+// sentinel spelled `no_work_needed — blocked: <reason>`) as its own verdict,
+// reports it to the hub, and — when the task credential can write issues —
+// applies the repo's `blocked` label so the existing admission gate holds the
+// issue until a human clears it.
+
+const BLOCKED_REASON = "nautilus's dependency closure now has recipes on utah-packages main, but no factory build has published since they merged";
+
+test('#7924 HIVE_VERDICT: blocked is a verdict of its own, echo-guarded like the other two', () => {
+  const relay = loadRelay({});
+  try {
+    const v = relay.detectCompletionVerdict([`HIVE_VERDICT: blocked — ${BLOCKED_REASON}`], null);
+    assert.strictEqual(v.verdict, 'blocked');
+    assert.strictEqual(v.reason, BLOCKED_REASON);
+    assert.strictEqual(relay.detectNoWorkVerdict([`● HIVE_VERDICT: blocked — ${BLOCKED_REASON}`]).verdict, 'blocked',
+      'the "nothing to ship" scan the headless path uses sees it too');
+    assert.ok(relay.isNoWorkVerdict(v) && relay.isNoWorkVerdict({ verdict: 'no_work_needed' }) && !relay.isNoWorkVerdict({ verdict: 'complete' }));
+    // The prompt's own placeholder, wrapped to a line start, is not a verdict.
+    assert.strictEqual(relay.detectCompletionVerdict(['HIVE_VERDICT: blocked — <what it is waiting on>'], null), null);
+    // Token boundary: prose that starts with the word is not the sentinel.
+    assert.strictEqual(relay.detectCompletionVerdict(['HIVE_VERDICT: blockedness is a state of mind'], null), null);
+    assert.strictEqual(relay.detectCompletionVerdict(['blocked — waiting on the factory'], null), null, 'no marker, no verdict');
+    assert.deepStrictEqual(relay.HIVE_VERDICT_TOKENS, ['complete', 'no_work_needed', 'blocked']);
+  } finally { teardown(relay); }
+});
+
+test('#7924 no_work_needed — blocked: <reason> is the blocked verdict with the marker stripped', () => {
+  const relay = loadRelay({});
+  try {
+    for (const sep of [': ', ':', ' — ', ' - ', ' – ']) {
+      const v = relay.detectNoWorkVerdict([`HIVE_VERDICT: no_work_needed — blocked${sep}${BLOCKED_REASON}`]);
+      assert.strictEqual(v.verdict, 'blocked', `separator ${JSON.stringify(sep)}`);
+      assert.strictEqual(v.reason, BLOCKED_REASON, `separator ${JSON.stringify(sep)}`);
+    }
+    // Only the marker as the FIRST word promotes; a reason that merely
+    // mentions being blocked is still no_work_needed, verbatim.
+    const plain = relay.detectNoWorkVerdict(['HIVE_VERDICT: no_work_needed — the remainder is blocked on a maintainer decision']);
+    assert.strictEqual(plain.verdict, 'no_work_needed');
+    assert.strictEqual(plain.reason, 'the remainder is blocked on a maintainer decision');
+  } finally { teardown(relay); }
+});
+
+test('#7924 a blocked verdict followed by a narrated PR-less complete keeps blocked (#7861 rule)', () => {
+  const relay = loadRelay({});
+  try {
+    const v = relay.detectCompletionVerdict([
+      `HIVE_VERDICT: blocked — ${BLOCKED_REASON}`,
+      'HIVE_VERDICT: complete — done researching',
+    ], null);
+    assert.strictEqual(v.verdict, 'blocked');
+    assert.strictEqual(v.reason, BLOCKED_REASON);
+    // And a previous task's blocked line is a baseline, never this task's verdict.
+    const prev = 'HIVE_VERDICT: blocked — previous task';
+    const next = relay.detectCompletionVerdict([prev, 'work', 'HIVE_VERDICT: complete — shipped PR #9'], prev);
+    assert.strictEqual(next.verdict, 'complete');
+  } finally { teardown(relay); }
+});
+
+test('#7924 end to end: blocked reaches the hub as its own verdict and the relay applies the blocked label with the task credential', () => {
+  const PANE = `HIVE_VERDICT: blocked — ${BLOCKED_REASON}\n${IDLE_PANE}`;
+  const relay = loadRelay({ backend: 'copilot', paneText: PANE });
+  const log = console.log; console.log = () => {};
+  try {
+    // The hub says what the task credential can do (per trust tier, on auth_ok).
+    relay.handleMessage(JSON.stringify({ type: 'auth_ok', contributor_id: 'c1', trust_tier: 'newcomer', permissions: ['issues:write'] }));
+    dispatchTask(relay, 'ct-7924-blocked', 100);
+    relay.__crashTick();
+    const completed = relay.__sent.filter(m => m.type === 'task_complete');
+    assert.strictEqual(completed.length, 1, 'the verdict completes the task on the tick, like the other two');
+    // On the wire: the no_work_needed an older hub already books, plus the
+    // blocked marker a #7924 hub reads — never a token an old hub would
+    // normalize to idle.
+    assert.strictEqual(completed[0].verdict, 'no_work_needed');
+    assert.strictEqual(completed[0].verdict_blocked, true);
+    assert.strictEqual(completed[0].verdict_reason, BLOCKED_REASON);
+    assert.strictEqual(completed[0].completion_signal, 'verdict');
+    assert.ok(!completed[0].pr_url);
+    assert.match(completed[0].summary, /reported blocked/);
+    const edits = relay.__commands.filter(c => /gh issue edit/.test(c));
+    assert.strictEqual(edits.length, 1, `exactly one label call: ${JSON.stringify(edits)}`);
+    assert.ok(edits[0].includes("'https://github.com/foo/bar/issues/100'") && edits[0].includes(`--add-label '${relay.BLOCKED_WORKFLOW_LABEL}'`), edits[0]);
+    assert.strictEqual(relay.BLOCKED_WORKFLOW_LABEL, 'blocked', 'must match blockedWorkflowLabel in contribute_admission.go');
+    assert.strictEqual(relay.__commands.filter(c => /gh label create/.test(c)).length, 0, 'the label existed; nothing to create');
+    assert.strictEqual(relay.__commands.filter(c => /gh issue comment/.test(c)).length, 0, 'the reason comment is the agent\'s (prompt contract), not the relay\'s');
+    // The label is never lifted by the relay.
+    assert.ok(!relay.__commands.some(c => /--remove-label/.test(c)));
+  } finally { console.log = log; teardown(relay); }
+});
+
+test('#7924 without issues:write the relay leaves the label alone and the verdict still reaches the hub', () => {
+  const PANE = `HIVE_VERDICT: blocked — ${BLOCKED_REASON}\n${IDLE_PANE}`;
+  for (const perms of [undefined, [], ['metadata:read', 'pulls:read']]) {
+    const relay = loadRelay({ backend: 'copilot', paneText: PANE });
+    const log = console.log; console.log = () => {};
+    try {
+      const auth = { type: 'auth_ok', contributor_id: 'c1', trust_tier: 'advisor' };
+      if (perms) auth.permissions = perms;
+      relay.handleMessage(JSON.stringify(auth));
+      dispatchTask(relay, 'ct-7924-noperm', 101);
+      relay.__crashTick();
+      const completed = relay.__sent.filter(m => m.type === 'task_complete');
+      assert.strictEqual(completed.length, 1);
+      assert.strictEqual(completed[0].verdict, 'no_work_needed', `perms=${JSON.stringify(perms)}`);
+      assert.strictEqual(completed[0].verdict_blocked, true, `perms=${JSON.stringify(perms)}`);
+      assert.strictEqual(relay.__commands.filter(c => /gh (issue edit|label create)/.test(c)).length, 0,
+        `perms=${JSON.stringify(perms)}: no label attempt without issues:write`);
+    } finally { console.log = log; teardown(relay); }
+  }
+});
+
+test('#7924 a label the repository does not define is created once and the add retried once; a second failure costs only a log line', () => {
+  const PANE = `HIVE_VERDICT: blocked — ${BLOCKED_REASON}\n${IDLE_PANE}`;
+  // First add fails (label missing) → create → retry lands.
+  let relay = loadRelay({ backend: 'copilot', paneText: PANE, ghIssueEditFailures: 1 });
+  let log = console.log; console.log = () => {};
+  let err = console.error; console.error = () => {};
+  try {
+    relay.handleMessage(JSON.stringify({ type: 'auth_ok', contributor_id: 'c1', trust_tier: 'contributor', permissions: ['issues:write', 'contents:write', 'pulls:write'] }));
+    dispatchTask(relay, 'ct-7924-create', 102);
+    relay.__crashTick();
+    assert.strictEqual(relay.__sent.filter(m => m.type === 'task_complete').length, 1);
+    const cmds = relay.__commands.filter(c => /gh (issue edit|label create)/.test(c));
+    assert.deepStrictEqual(cmds.map(c => (/gh label create/.test(c) ? 'create' : 'edit')), ['edit', 'create', 'edit'], JSON.stringify(cmds));
+    assert.ok(cmds[1].includes("--repo 'foo/bar'") && cmds[1].includes("'blocked'"), cmds[1]);
+  } finally { console.log = log; console.error = err; teardown(relay); }
+
+  // Every add fails: bounded at one create + one retry, and the completion
+  // still goes out with the verdict.
+  relay = loadRelay({ backend: 'copilot', paneText: PANE, ghIssueEditFailures: 99 });
+  log = console.log; console.log = () => {};
+  err = console.error; const errors = []; console.error = (m) => errors.push(String(m));
+  try {
+    relay.handleMessage(JSON.stringify({ type: 'auth_ok', contributor_id: 'c1', trust_tier: 'contributor', permissions: ['issues:write'] }));
+    dispatchTask(relay, 'ct-7924-fail', 103);
+    relay.__crashTick();
+    const completed = relay.__sent.filter(m => m.type === 'task_complete');
+    assert.strictEqual(completed.length, 1, 'a refused label never costs the completion');
+    assert.strictEqual(completed[0].verdict_blocked, true);
+    assert.strictEqual(relay.__commands.filter(c => /gh issue edit/.test(c)).length, 2, 'one add, one retry, never more');
+    assert.ok(errors.some(m => /Could not apply the 'blocked' label to foo\/bar#103/.test(m)), JSON.stringify(errors));
+  } finally { console.log = log; console.error = err; teardown(relay); }
+});
+
+test('#7924 a plain no_work_needed carries no blocked marker and gets no label — the pre-#7924 wire shape is unchanged', () => {
+  const PANE = `HIVE_VERDICT: no_work_needed — already fixed on main by #12\n${IDLE_PANE}`;
+  const relay = loadRelay({ backend: 'copilot', paneText: PANE });
+  const log = console.log; console.log = () => {};
+  try {
+    relay.handleMessage(JSON.stringify({ type: 'auth_ok', contributor_id: 'c1', trust_tier: 'contributor', permissions: ['issues:write'] }));
+    dispatchTask(relay, 'ct-7924-plain', 105);
+    relay.__crashTick();
+    const completed = relay.__sent.filter(m => m.type === 'task_complete');
+    assert.strictEqual(completed.length, 1);
+    assert.strictEqual(completed[0].verdict, 'no_work_needed');
+    assert.ok(!('verdict_blocked' in completed[0]), `no marker on a plain no_work_needed: ${JSON.stringify(completed[0])}`);
+    assert.strictEqual(relay.__commands.filter(c => /gh (issue edit|label create)/.test(c)).length, 0);
+  } finally { console.log = log; teardown(relay); }
+});
+
+test('#7924 the label is for GitHub issue tasks only', () => {
+  const relay = loadRelay({});
+  try {
+    relay.handleMessage(JSON.stringify({ type: 'auth_ok', contributor_id: 'c1', trust_tier: 'contributor', permissions: ['issues:write'] }));
+    const before = relay.__commands.length;
+    // A Linear/Jira item projected through the GitHub-shaped assignment.
+    relay.markIssueBlocked({ task_id: 't', kind: 'issue', repo: 'foo/bar', number: 0, external_id: 'ENG-12', task_key: 'linear:ENG-12' }, 'r');
+    // A review cycle has no issue.
+    relay.markIssueBlocked({ task_id: 't', kind: 'review', repo: 'foo/bar', number: 0 }, 'r');
+    relay.markIssueBlocked(null, 'r');
+    assert.strictEqual(relay.__commands.slice(before).filter(c => /gh /.test(c)).length, 0);
   } finally { teardown(relay); }
 });
