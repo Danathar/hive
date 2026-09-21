@@ -29,7 +29,7 @@ func TestACMMPacksAgentCounts(t *testing.T) {
 	// It is defined only at the levels where a PR can reach merge without a
 	// mandatory human read (L5 gates on `hold`, L6 auto-merges on green).
 	expected := map[int]int{
-		1: 2, 2: 5, 3: 6, 4: 7, 5: 12, 6: 13,
+		1: 2, 2: 5, 3: 6, 4: 7, 5: 12, 6: 13, // reviewer joins at L5/L6 (#8023)
 	}
 	for _, p := range packs {
 		want, ok := expected[p.Level]
@@ -159,17 +159,19 @@ func TestACMMPackManagedAgentNames(t *testing.T) {
 	}
 	// The union must not grow beyond what the packs define: an agent listed
 	// here is one whose operator-set mode a pack apply is allowed to discard.
-	// (v5 ships `reviewer` in the L5/L6 packs, so check the reverse
-	// containment generically rather than by a fixed name.)
-	inPack := make(map[string]bool)
-	for _, p := range ACMMPacks() {
-		for _, a := range p.Agents {
-			inPack[a.Name] = true
-		}
+	// reviewer joined the L5/L6 rosters in #8023; it is still absent below L5.
+	if !seen["reviewer"] {
+		t.Errorf("`reviewer` is in the L5/L6 packs (#8023) but missing from the managed set")
 	}
-	for n := range seen {
-		if !inPack[n] {
-			t.Errorf("%q is in no pack yet appears in the managed set", n)
+	for _, lvl := range []int{1, 2, 3, 4} {
+		p, err := ACMMPackByLevel(lvl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, a := range p.Agents {
+			if a.Name == "reviewer" {
+				t.Errorf("L%d pack must not carry reviewer (L5/L6 only, #8023)", lvl)
+			}
 		}
 	}
 }

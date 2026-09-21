@@ -5,11 +5,11 @@ package config
 // The reviewer is unusual in two ways that each need pinning, because both are
 // easy to undo with a one-line pack edit that compiles and parses fine:
 //
-//  1. It is PR-TRIGGERED, not cadence-triggered. Every other agent wakes on a
-//     timer and hunts for work; this one is woken per-PR by the review
-//     dispatcher and judges the change it is handed. `on_demand: true` is what
-//     enforces that — the governor gates cadence kicks, event kicks, and resume
-//     kicks on it.
+//  1. It is CADENCE-TRIGGERED like every other agent (v4's reviewer, #8023):
+//     it wakes on a 30-minute timer, works the open PR queue through
+//     reviewer-queue.md, and routes requires_human / reject verdicts to a
+//     maintainer via the triage label. It is deliberately NOT on_demand — the
+//     governor must cadence-kick it, or the queue is never worked.
 //
 //  2. Its authority is capped BELOW the hive's ACMM level. It runs in ADVISORY
 //     mode and writes verdicts to the agent-report directory. It has no GitHub
@@ -53,8 +53,8 @@ func TestReviewerRoleDefinedAtHighTrustLevels(t *testing.T) {
 		if a.Role != "reviewer" {
 			t.Errorf("L%d: role = %q, want \"reviewer\"", lvl, a.Role)
 		}
-		if a.KickTemplate != "reviewer-advisory.md" {
-			t.Errorf("L%d: kick_template = %q, want reviewer-advisory.md", lvl, a.KickTemplate)
+		if a.KickTemplate != "reviewer-queue.md" {
+			t.Errorf("L%d: kick_template = %q, want reviewer-queue.md", lvl, a.KickTemplate)
 		}
 	}
 }
@@ -79,32 +79,30 @@ func TestReviewerAbsentBelowL5(t *testing.T) {
 // AllowResumeKick all consult AgentConfig.OnDemand). Dropping it would convert
 // the reviewer into yet another agent that wakes on a timer and hunts, which is
 // precisely the design this role rejects.
-func TestReviewerIsPRTriggeredNotCadenceTriggered(t *testing.T) {
+func TestReviewerIsCadenceTriggeredNotOnDemand(t *testing.T) {
 	for _, lvl := range reviewerLevels {
 		a, ok := reviewerIn(t, lvl)
 		if !ok {
 			t.Fatalf("L%d pack is missing the reviewer agent", lvl)
 		}
-		if !a.OnDemand {
-			t.Errorf("L%d: reviewer must be on_demand so the governor never cadence-kicks it; "+
-				"it is woken per-PR by the review dispatcher", lvl)
+		if a.OnDemand {
+			t.Errorf("L%d: reviewer must not be on_demand — the governor cadence-kicks it to work the PR queue", lvl)
 		}
 	}
 }
 
-// TestReviewerHasNoCadenceEntry pins the same property from the other side: a
-// cadence entry for an on-demand agent is dead configuration that misleads an
-// operator reading the pack into thinking the reviewer runs on a timer.
-func TestReviewerHasNoCadenceEntry(t *testing.T) {
+// TestReviewerHasCadenceEntry pins the same property from the other side: every
+// governor mode must schedule the reviewer, and its stale_timeout must exceed
+// that cadence so a slow review is not reaped mid-queue.
+func TestReviewerHasCadenceEntry(t *testing.T) {
 	for _, lvl := range reviewerLevels {
 		p, err := ACMMPackByLevel(lvl)
 		if err != nil {
 			t.Fatalf("ACMMPackByLevel(%d): %v", lvl, err)
 		}
 		for mode, cadences := range p.Governor.Cadences {
-			if v, ok := cadences["reviewer"]; ok {
-				t.Errorf("L%d governor cadence %q declares reviewer=%q, but the reviewer is PR-triggered; "+
-					"a cadence entry here is dead config", lvl, mode, v)
+			if _, ok := cadences["reviewer"]; !ok {
+				t.Errorf("L%d governor cadence %q has no reviewer entry; the queue reviewer runs on a timer", lvl, mode)
 			}
 		}
 	}
@@ -153,10 +151,10 @@ func TestReviewerCanReadTheRepo(t *testing.T) {
 	}
 }
 
-// TestReviewerIsOnDemandFleetWide pins that the shared on-demand registry sees
-// the role, so nothing auto-starts it regardless of which level is active.
-func TestReviewerIsOnDemandFleetWide(t *testing.T) {
-	if !OnDemandAgentsFromPacks()["reviewer"] {
-		t.Fatal("reviewer must appear in OnDemandAgentsFromPacks so it is never auto-started on a timer")
+// TestReviewerIsNotOnDemandFleetWide pins that the shared on-demand registry
+// does NOT see the role, so it is auto-started like every other pack agent.
+func TestReviewerIsNotOnDemandFleetWide(t *testing.T) {
+	if OnDemandAgentsFromPacks()["reviewer"] {
+		t.Fatal("reviewer must not appear in OnDemandAgentsFromPacks — it is started and cadence-kicked like every other pack agent")
 	}
 }

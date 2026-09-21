@@ -11,6 +11,16 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-21 (v4.72.1)
+
+### Changed
+
+- REPOSITORIES cards now lay out at most four across (three/two/one on narrower viewports) instead of packing six at 240px, and the pill title budget scales from the card's actual layout width — so issue/PR pill rows are readable instead of squashed to a few characters each.
+
+### Fixed
+
+- Apply the configured `review.human_decision_label` when the reviewer's aggregate verdict is `requires_human`. Previously only fixer-side exhaustion created a human hold, so reviewer-flagged PRs carried the marker in the review body but never got the triage label.
+
 ## 2026-09-21 (v4.72.0)
 
 ### Added
