@@ -1,1 +1,0 @@
-- Added contributor WebSocket close-correlation telemetry so relay logs carry hub connection ids, close codes/reasons, keepalive ages, and reconnect backoff state for production flap diagnosis.

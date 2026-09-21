@@ -1,1 +1,0 @@
-- Governor kicks that arrive during the startup stagger are deferred and delivered when the agent finishes launching, so queue-draining agents no longer sit idle until the next cadence cycle after a pod restart.
