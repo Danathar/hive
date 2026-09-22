@@ -342,7 +342,10 @@ type WSMessage struct {
 	Title   string   `json:"title,omitempty"`
 	URL     string   `json:"url,omitempty"`
 	Labels  []string `json:"labels,omitempty"`
-	Prompt  string   `json:"prompt,omitempty"`
+	// StandbyLane and StandbyTier mark donated standby assignments.
+	StandbyLane string `json:"standby_lane,omitempty"`
+	StandbyTier string `json:"standby_tier,omitempty"`
+	Prompt      string `json:"prompt,omitempty"`
 	// Requirements carries the hub-derived task-side capability requirements
 	// used by #2547 routing. Additive and advisory: older relays ignore it, and
 	// enforcement already happened server-side before assignment.
@@ -495,6 +498,11 @@ type WSTaskAssign struct {
 	Repo   string `json:"repo"`
 	Number int    `json:"number"`
 	Title  string `json:"title"`
+	// StandbyLane and StandbyTier mark a manually dispatched donated standby
+	// task. Empty on ordinary contributor assignments, so older relays and all
+	// non-standby work keep the existing envelope byte-for-byte.
+	StandbyLane string `json:"standby_lane,omitempty"`
+	StandbyTier string `json:"standby_tier,omitempty"`
 	// Key, SourceType, ExternalID and URL carry the assigned item's canonical,
 	// source-aware identity (kubestellar/hive#4245). Additive and omitempty: a
 	// GitHub assignment is byte-for-byte what it was, and Number keeps its
@@ -702,6 +710,7 @@ type ContributeWSHub struct {
 	// Guarded by completedMu; persisted in the same PVC-backed ledger dir as
 	// the cooldowns so a pod restart does not forget the verdict.
 	noWorkVerdicts     map[string]noWorkVerdictRecord
+	standbyOutcomes    []standbyOutcomeRecord
 	activityFilePath   string
 	completedTasksFile string
 	failedTasksFile    string
@@ -717,13 +726,19 @@ type ContributeWSHub struct {
 	// its work item (#5681); since #7773 every unexpired lease is a hold, so it is
 	// informational. Written once at construction and only read afterwards, so it
 	// needs no lock.
-	startedAt          time.Time
-	noWorkVerdictsFile string
-	asyncActivitySave  bool
-	persistActivity    bool
-	persistTaskLedgers bool
-	completedMu        sync.Mutex
-	selectMu           sync.Mutex
+	startedAt           time.Time
+	noWorkVerdictsFile  string
+	standbyOutcomesFile string
+	asyncActivitySave   bool
+	persistActivity     bool
+	persistTaskLedgers  bool
+	completedMu         sync.Mutex
+	// standbyDispatches records manual donated dispatches inside the rolling
+	// standby daily-cap window. The cap decrements at dispatch, not completion,
+	// so abandoned donated work still consumes a slot.
+	standbyDispatches map[string][]time.Time
+	standbyMu         sync.Mutex
+	selectMu          sync.Mutex
 	// assignmentTimes records, per contributor identity (identityOf), the wall-clock
 	// times of the task_assign messages that identity has been handed. It backs the
 	// #2436/#2566 per-tier rate gate: tier_limits.max_per_hour / max_per_day were
@@ -847,6 +862,7 @@ func NewContributeWSHub(logger *slog.Logger, server *Server) *ContributeWSHub {
 		consecutiveFailures:       make(map[string]int),
 		noPRStreaks:               make(map[string]noPRStreakRecord),
 		noWorkVerdicts:            make(map[string]noWorkVerdictRecord),
+		standbyOutcomes:           []standbyOutcomeRecord{},
 		activityFilePath:          contributorStatePath(contributorsDir, activityFilePath, "activity.json"),
 		completedTasksFile:        contributorStatePath(contributorsDir, completedTasksFile, "completed-tasks.json"),
 		failedTasksFile:           contributorStatePath(contributorsDir, failedTasksFile, "failed-tasks.json"),
@@ -856,9 +872,11 @@ func NewContributeWSHub(logger *slog.Logger, server *Server) *ContributeWSHub {
 		taskRunLogFile:            contributorStatePath(contributorsDir, taskRunLogPath, taskRunLogFileName),
 		startedAt:                 time.Now(),
 		noWorkVerdictsFile:        filepath.Join(contributorsDir, noWorkVerdictsFileName),
+		standbyOutcomesFile:       filepath.Join(contributorsDir, standbyOutcomesFileName),
 		asyncActivitySave:         asyncActivitySave,
 		persistActivity:           activityPersistenceEnabled,
 		persistTaskLedgers:        taskLedgerPersistenceEnabled,
+		standbyDispatches:         make(map[string][]time.Time),
 		assignmentTimes:           make(map[string][]time.Time),
 		contributorFailureStreaks: make(map[string]contributorFailureStreak),
 		leases:                    make(map[string]*taskLease),
@@ -874,6 +892,7 @@ func NewContributeWSHub(logger *slog.Logger, server *Server) *ContributeWSHub {
 	hub.loadFailedTasks()
 	hub.loadNoPRStreaks()
 	hub.loadNoWorkVerdicts()
+	hub.loadStandbyOutcomes()
 	hub.loadActivity()
 	// #5681: restore the leases the PREVIOUS process issued before any relay can
 	// reconnect, so an in-flight task survives the restart instead of being revoked
@@ -2438,6 +2457,16 @@ func (s *wsSession) handleStandbyDeclare(msg WSMessage) {
 	lanes := normalizeStandbyLanes(standby.Lanes)
 	now := time.Now().UTC()
 	accepted := make([]WSStandbyLane, 0, len(lanes))
+	rejected := []WSStandbyLane{}
+	config := standbyConfigFromConnection(s.contributor)
+	key := standbyOutcomeKey(s.contributor.profile.GitHubUsername, config)
+	if suspended, _ := s.h.standbySuspended(key); suspended {
+		for _, lane := range lanes {
+			rejected = append(rejected, WSStandbyLane{Lane: lane, Reason: string(standbypkg.ReasonSuspended)})
+		}
+		_ = s.contributor.send(WSMessage{Type: "standby_ack", Seq: msg.Seq, Standby: &WSStandby{Rejected: rejected}})
+		return
+	}
 	s.contributor.mu.Lock()
 	if s.contributor.standby == nil {
 		s.contributor.standby = map[string]StandbyConnectionState{}
@@ -2462,6 +2491,7 @@ func (s *wsSession) handleStandbyDeclare(msg WSMessage) {
 		Seq:  msg.Seq,
 		Standby: &WSStandby{
 			Accepted: accepted,
+			Rejected: rejected,
 		},
 	})
 }
@@ -2512,6 +2542,49 @@ func normalizeStandbyLanes(lanes []string) []string {
 	return out
 }
 
+func standbyDispatchKey(contributor, lane string) string {
+	return strings.ToLower(strings.TrimSpace(contributor)) + "\x00" + strings.ToLower(strings.TrimSpace(lane))
+}
+
+func (h *ContributeWSHub) standbyDispatchWindow(contributor, lane string, now time.Time) []time.Time {
+	if h == nil {
+		return nil
+	}
+	key := standbyDispatchKey(contributor, lane)
+	cutoff := now.Add(-rateLimitDayWindow)
+	h.standbyMu.Lock()
+	defer h.standbyMu.Unlock()
+	if h.standbyDispatches == nil {
+		h.standbyDispatches = map[string][]time.Time{}
+	}
+	times := h.standbyDispatches[key]
+	kept := times[:0]
+	for _, at := range times {
+		if !at.Before(cutoff) {
+			kept = append(kept, at)
+		}
+	}
+	if len(kept) == 0 {
+		delete(h.standbyDispatches, key)
+		return nil
+	}
+	h.standbyDispatches[key] = kept
+	return append([]time.Time(nil), kept...)
+}
+
+func (h *ContributeWSHub) recordStandbyDispatch(contributor, lane string, at time.Time) {
+	if h == nil {
+		return
+	}
+	key := standbyDispatchKey(contributor, lane)
+	h.standbyMu.Lock()
+	if h.standbyDispatches == nil {
+		h.standbyDispatches = map[string][]time.Time{}
+	}
+	h.standbyDispatches[key] = append(h.standbyDispatches[key], at)
+	h.standbyMu.Unlock()
+}
+
 // QualifiedStandbyCounts is the M in each paused lane's "N waiting, M qualify".
 //
 // laneItems carries each lane's queued work, keyed by lane, so the count can
@@ -2550,17 +2623,16 @@ func (h *ContributeWSHub) QualifiedStandbyCounts(lanes []string, laneItems map[s
 			if !ok {
 				continue
 			}
-			candidates = append(candidates, standbypkg.Candidate{
+			candidateConfig := standbyConfigFromState(state)
+			suspended, _ := h.standbySuspended(standbyOutcomeKey(conn.profile.GitHubUsername, candidateConfig))
+			candidate := standbypkg.Candidate{
 				Contributor: conn.profile.GitHubUsername,
 				Approved:    cfg.Hub.IsStandbyContributorApproved(conn.profile.GitHubUsername),
-				Config: standbypkg.Configuration{
-					Backend:         state.CLIBackend,
-					Model:           state.Model,
-					ReasoningEffort: state.ReasoningEffort,
-					AdvisorModel:    state.AdvisorModel,
-					AdvisorEffort:   state.AdvisorEffort,
-				},
-			})
+				Suspended:   suspended,
+				Dispatches:  h.standbyDispatchWindow(conn.profile.GitHubUsername, lane, now),
+				Config:      candidateConfig,
+			}
+			candidates = append(candidates, candidate)
 		}
 		queue := itemTiers.LaneQueue(laneItems[lane], standbyProposeItemTier)
 		out[lane] = standbypkg.QualifiedCountForQueue(candidates, policy, queue, tiers, now)
@@ -2616,6 +2688,40 @@ func standbyLaneItems(lanes []string, actionable *ghpkg.ActionableResult) map[st
 			items = append(items, standbypkg.Item{Repo: issue.Repo, Labels: issue.Labels})
 		}
 		out[lane] = items
+	}
+	return out
+}
+
+func (h *ContributeWSHub) SuspendedStandbyCounts(lanes []string) map[string]int {
+	if h == nil || len(lanes) == 0 {
+		return nil
+	}
+	out := make(map[string]int, len(lanes))
+	laneSet := map[string]bool{}
+	for _, lane := range lanes {
+		laneSet[lane] = true
+	}
+	byKey := map[string][]standbypkg.Outcome{}
+	keyLane := map[string]string{}
+	h.completedMu.Lock()
+	for _, rec := range h.standbyOutcomes {
+		if rec.Key == "" {
+			continue
+		}
+		byKey[rec.Key] = append(byKey[rec.Key], rec)
+		if rec.Lane != "" {
+			keyLane[rec.Key] = rec.Lane
+		}
+	}
+	h.completedMu.Unlock()
+	for key, rows := range byKey {
+		lane := keyLane[key]
+		if !laneSet[lane] {
+			continue
+		}
+		if suspended, _ := standbypkg.SuspendState(rows, standbypkg.DefaultSuspendThreshold); suspended {
+			out[lane]++
+		}
 	}
 	return out
 }
@@ -3167,27 +3273,54 @@ func (s *wsSession) handleTaskComplete(msg WSMessage) {
 			}
 			if prDetail.Verified {
 				verifiedPR = msg.PRURL
-				// Off the read loop, deliberately. This is cosmetic
-				// best-effort work that gates NOTHING — unlike
-				// verifyReportedPR above, whose result decides the cooldown
-				// and trust credit and so must be awaited. Inline it would
-				// add up to two GitHub round trips (bounded by the App
-				// client's 30s timeout, so ~60s worst case) to this
-				// contributor's message loop, during which its pongs are not
-				// read; wsHeartbeatTimeout is 90s, so a slow GitHub could
-				// push a perfectly healthy contributor to `Stale` in the
-				// fleet view for the sake of a PR-body edit.
-				go h.reconcilePRAttribution(msg.PRURL, s.contributor)
-				// A MERGED fix retires the finding it addresses, so the
-				// digest stops carrying work that is already done. Gated
-				// on prDetail.Merged, not on verification alone: a PR
-				// that merely exists is a fix in review, and closing
-				// findings on it would retire them before anything
-				// landed. The PR's OWN title is matched — the
-				// assignment's issue title would match the finding it
-				// was minted from on the mere existence of a PR.
-				if prDetail.Merged {
-					h.closeAdvisoryForMergedPR(prDetail.Title)
+				if completedTask != nil && completedTask.StandbyLane != "" {
+					if err := h.applyDonatedHold(msg.PRURL); err != nil {
+						h.logger.Warn("[contribute-ws] donated standby PR verified but hold label failed; completion will not settle as shipped",
+							"username", s.contributor.profile.GitHubUsername,
+							"task", msg.TaskID,
+							"pr_url", msg.PRURL,
+							"standby_lane", completedTask.StandbyLane,
+							"error", err)
+						h.recordDecision(s.contributor.profile.GitHubUsername, decisionRefused,
+							msg.TaskID, completedTask.Repo, completedTask.Number,
+							"donated standby PR verified but required hold label failed: "+err.Error())
+						verifiedPR = ""
+					}
+				}
+				if verifiedPR != "" {
+					// Off the read loop, deliberately. This is cosmetic
+					// best-effort work that gates NOTHING — unlike
+					// verifyReportedPR above, whose result decides the cooldown
+					// and trust credit and so must be awaited. Inline it would
+					// add up to two GitHub round trips (bounded by the App
+					// client's 30s timeout, so ~60s worst case) to this
+					// contributor's message loop, during which its pongs are not
+					// read; wsHeartbeatTimeout is 90s, so a slow GitHub could
+					// push a perfectly healthy contributor to `Stale` in the
+					// fleet view for the sake of a PR-body edit.
+					go h.reconcilePRAttribution(msg.PRURL, s.contributor)
+					// A MERGED fix retires the finding it addresses, so the
+					// digest stops carrying work that is already done. Gated
+					// on prDetail.Merged, not on verification alone: a PR
+					// that merely exists is a fix in review, and closing
+					// findings on it would retire them before anything
+					// landed. The PR's OWN title is matched — the
+					// assignment's issue title would match the finding it
+					// was minted from on the mere existence of a PR.
+					if prDetail.Merged {
+						if completedTask != nil && completedTask.StandbyLane != "" {
+							cfg := standbyConfigFromConnection(s.contributor)
+							h.appendStandbyOutcome(standbyOutcomeRecord{
+								Key:          standbyOutcomeKey(s.contributor.profile.GitHubUsername, cfg),
+								Lane:         completedTask.StandbyLane,
+								Repo:         completedTask.Repo,
+								Number:       standbyPRNumber(msg.PRURL),
+								DispatchedAt: taskAssignedAt.UTC(),
+								Kind:         standbypkg.OutcomeMerged,
+							})
+						}
+						h.closeAdvisoryForMergedPR(prDetail.Title)
+					}
 				}
 			}
 			// #3987: normalize the completion's verdict. A verified PR always

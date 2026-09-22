@@ -90,12 +90,57 @@ func (s *Service) cmdHelp() string {
 		"`!kick <agent> [prompt]` (`!k`) — kick an agent with optional prompt",
 		"`!pause <agent>` (`!p`) — pause an agent",
 		"`!resume <agent>` (`!r`) — resume an agent",
+		"`!standby <lane> [owner/repo#number]` — manually dispatch paused-lane work to a qualified standby contributor",
+		"`!standby-clear <contributor> <backend> <model> [effort]` — clear a standby suspension",
 		"`!<agent> [prompt]` — send prompt to agent (kick shorthand)",
 		"`!help` (`!h`, `!?`) — show this message",
 		"",
 		fmt.Sprintf("Valid agents: %s", strings.Join(agents, ", ")),
 	}
 	return strings.Join(lines, "\n")
+}
+
+func (s *Service) cmdStandbyDispatch(ctx context.Context, args string) (string, error) {
+	fields := strings.Fields(strings.TrimSpace(args))
+	if len(fields) == 0 {
+		return "❌ Usage: `!standby <lane> [owner/repo#number]`", nil
+	}
+	body, err := json.Marshal(map[string]string{"lane": fields[0], "key": func() string {
+		if len(fields) > 1 {
+			return fields[1]
+		}
+		return ""
+	}()})
+	if err != nil {
+		return fmt.Sprintf("❌ Failed to marshal standby payload: %s", err), nil
+	}
+	if err := s.dashboardPost(ctx, "/api/contribute/standby/dispatch", body); err != nil {
+		return fmt.Sprintf("❌ Failed to dispatch standby work: %s", err), nil
+	}
+	return fmt.Sprintf("✅ Dispatched standby work for %s", fields[0]), nil
+}
+
+func (s *Service) cmdStandbyClear(ctx context.Context, args string) (string, error) {
+	fields := strings.Fields(strings.TrimSpace(args))
+	if len(fields) < 3 {
+		return "❌ Usage: `!standby-clear <contributor> <backend> <model> [effort]`", nil
+	}
+	payload := map[string]string{
+		"contributor": fields[0],
+		"backend":     fields[1],
+		"model":       fields[2],
+	}
+	if len(fields) > 3 {
+		payload["reasoning_effort"] = fields[3]
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Sprintf("❌ Failed to marshal standby clear payload: %s", err), nil
+	}
+	if err := s.dashboardPost(ctx, "/api/contribute/standby/clear", body); err != nil {
+		return fmt.Sprintf("❌ Failed to clear standby suspension: %s", err), nil
+	}
+	return fmt.Sprintf("✅ Cleared standby suspension for %s", fields[0]), nil
 }
 
 func (s *Service) cmdAgentAction(ctx context.Context, action, args string) (string, error) {
