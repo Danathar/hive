@@ -93,7 +93,7 @@ Fix the JSON and resubmit. Do not invent a shorter shape — `{"repo","pr",
 One object per perspective you judged, or a JSON array of such objects:
 
 ```json
-{"lane":"review-swarm","kind":"review","perspective":"correctness","verdict":"requires_human","repo":"owner/repo","number":123,"head_sha":"<head commit sha>","summary":"one paragraph: the judgement and why","findings":[{"title":"short finding title","severity":"high","summary":"mechanism and consequence","file":"path/to/file.go","line":41}],"prs_opened":[],"beads_filed":[]}
+{"lane":"review-swarm","kind":"review","perspective":"correctness","verdict":"requires_human","repo":"owner/repo","number":123,"head_sha":"<head commit sha>","author_model":"<author model from PR_LIST when present>","review_model":"<the model you are running when known>","summary":"one paragraph: the judgement and why","findings":[{"title":"short finding title","severity":"high","summary":"mechanism and consequence","file":"path/to/file.go","line":41}],"prs_opened":[],"beads_filed":[]}
 ```
 
 - `lane` is always `"review-swarm"`; `kind` is always `"review"`.
@@ -103,6 +103,9 @@ One object per perspective you judged, or a JSON array of such objects:
   `intent-alignment`.
 - `repo` is `owner/name` and `number` is the PR you reviewed — the same ones you
   pass to `hive-review`. A verdict naming a different PR is discarded.
+- `author_model` and `review_model` are optional for old kicks, but when PR_LIST
+  names an independent review author model, copy that author model and name the
+  model doing this review so the hive can measure author/reviewer pair outcomes.
 - `findings` elements need `title`, `severity` (`info|low|medium|high|critical`)
   and `summary`; `file` and `line` are optional. Empty arrays are `[]`, never
   omitted.

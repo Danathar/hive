@@ -11,6 +11,34 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-22 (v5.7.0)
+
+### Added
+
+- Add reviewer `review_models` pools so scheduled PR review can choose an independent model from the PR author, record review model pairings, and export Prometheus counters.
+
+### Changed
+
+- The hub Reading List (home, Learn, and /reading pages plus `GET /api/reading-list`) now sources articles from the Hive Commons Substack RSS feed instead of scraping the KubeStellar Medium list page; cards carry a Hive Commons byline, the "View all" link points at https://substack.com/@hivecommons, and the fallback seed lists the articles currently on Substack (#8281).
+- Hub pages now identify Hive as a Hive Commons project: the footer, the home page project card, the docs links, and the CNCF reference-architecture page point at hivecommons.dev and docs.hivecommons.dev instead of KubeStellar (#8281).
+
+## 2026-09-22 (v5.6.1)
+
+### Fixed
+
+- The docs index now names v5 as the current line and uses branch-agnostic relative links for its local references, so v5 readers are no longer routed back to v4 content ([#8275](https://github.com/hivecommons/hive/issues/8275)).
+
+## 2026-09-22 (v5.6.0)
+
+### Added
+
+- Add a Governor PRs-by-model tile, cached attribution aggregation API, and Prometheus PR outcome series.
+- Settings → Features can now configure `governor.rotation`, including provider/backends mappings, agent tiers, thresholds, and live provider headroom readings, so operators can manage provider rotation without editing `hive.yaml` ([#8257](https://github.com/hivecommons/hive/issues/8257)).
+
+### Fixed
+
+- ACMM pack apply now reconciles `on_demand` for existing pack agents (like `kick_template` and `mode`), starting or stopping the process on a flip. A reviewer created by the older on-demand pack definition stayed on-demand after the pack moved to the cadenced queue design — the new template landed, nothing ever kicked it. An `on_demand` set from the agent settings dialog is operator-owned (`on_demand_owner`) and is not touched.
+
 ## 2026-09-22 (v5.5.0)
 
 ### Added

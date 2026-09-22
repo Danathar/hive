@@ -5,7 +5,24 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	ghpkg "github.com/hivecommons/hive/pkg/github"
+	"github.com/hivecommons/hive/pkg/review"
+	"github.com/hivecommons/hive/pkg/scheduler"
 )
+
+type metricsSchedulerStub struct{ actionable *ghpkg.ActionableResult }
+
+func (m metricsSchedulerStub) BuildAgentMessage(string, []ghpkg.Issue, *ghpkg.ActionableResult) string {
+	return ""
+}
+func (m metricsSchedulerStub) BuildAgentMessageFromLastActionable(string) string { return "" }
+func (m metricsSchedulerStub) GetLastActionable() *ghpkg.ActionableResult        { return m.actionable }
+func (m metricsSchedulerStub) ResolveTemplate(string) scheduler.TemplateResolution {
+	return scheduler.TemplateResolution{}
+}
+func (m metricsSchedulerStub) TemplateExists(string) (string, bool) { return "", false }
 
 func TestMetricsEnabledToggle(t *testing.T) {
 	for _, v := range []string{"1", "true", "TRUE", "yes", "on"} {
@@ -38,6 +55,7 @@ func TestHandleMetricsExposition(t *testing.T) {
 		"# TYPE hive_estimated_cost_usd_total counter",
 		"hive_estimated_cost_usd_total{hive_id=\"test-hive\"}",
 		"# HELP hive_model_input_tokens_total",
+		"# HELP hive_prs_by_model_total",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("exposition missing %q\n---\n%s", want, body)
@@ -45,6 +63,56 @@ func TestHandleMetricsExposition(t *testing.T) {
 	}
 	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
 		t.Errorf("Content-Type = %q, want text/plain exposition", ct)
+	}
+}
+
+func TestHandleMetricsPRsByModelExposition(t *testing.T) {
+	s := covApiServer(t)
+	s.deps.Config.HiveID = "test-hive"
+	now := time.Now()
+	s.deps.Scheduler = metricsSchedulerStub{actionable: &ghpkg.ActionableResult{
+		PRs: ghpkg.PRResult{Attributed: []ghpkg.PullRequest{
+			{HiveAttributed: true, HiveModel: "sonnet", CreatedAt: now, MergedAt: now},
+			{HiveAttributed: true, HiveModel: "auto", CreatedAt: now, State: "closed", ClosedAt: now},
+			{HiveAttributed: true, HiveModel: "sonnet", CreatedAt: now, State: "open"},
+		}},
+	}}
+	t.Setenv("HIVE_METRICS_TOKEN", "sk-metrics")
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req.Header.Set("Authorization", "Bearer sk-metrics")
+	rec := httptest.NewRecorder()
+	s.handleMetrics(rec, req)
+	body := rec.Body.String()
+	for _, want := range []string{
+		`hive_prs_by_model_total{hive_id="test-hive",model="sonnet",outcome="merged"} 1`,
+		`hive_prs_by_model_total{hive_id="test-hive",model="sonnet",outcome="open"} 1`,
+		`hive_prs_by_model_total{hive_id="test-hive",model="unknown",outcome="closed_unmerged"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("metrics missing %q\n---\n%s", want, body)
+		}
+	}
+}
+
+func TestHandleMetricsReviewModelPairExposition(t *testing.T) {
+	dir := t.TempDir()
+	orig := review.ReviewVerdictsPath
+	review.ReviewVerdictsPath = dir + "/review-verdicts.json"
+	t.Cleanup(func() { review.ReviewVerdictsPath = orig })
+	if err := review.WriteArtifact("", review.Artifact{Items: []review.Aggregate{{AuthorModel: "gpt-5.6-terra", ReviewModel: "gemini-3.7-flash", Verdict: review.VerdictApprove}}}); err != nil {
+		t.Fatalf("WriteArtifact: %v", err)
+	}
+	s := covApiServer(t)
+	s.deps.Config.HiveID = "test-hive"
+	t.Setenv("HIVE_METRICS_TOKEN", "sk-metrics")
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req.Header.Set("Authorization", "Bearer sk-metrics")
+	rec := httptest.NewRecorder()
+	s.handleMetrics(rec, req)
+	body := rec.Body.String()
+	want := `hive_reviews_by_model_pair_total{hive_id="test-hive",author_model="gpt-5.6-terra",review_model="gemini-3.7-flash",verdict="approve"} 1`
+	if !strings.Contains(body, want) {
+		t.Fatalf("metrics missing %q\n---\n%s", want, body)
 	}
 }
 

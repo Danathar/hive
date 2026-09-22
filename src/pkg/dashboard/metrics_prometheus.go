@@ -6,6 +6,9 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
+
+	"github.com/hivecommons/hive/pkg/review"
 )
 
 // metricsEnabled reports whether the /metrics Prometheus endpoint is turned on.
@@ -49,6 +52,8 @@ func metricsToken() string {
 //	hive_estimated_cost_usd_total{hive_id}          — grand total $
 //	hive_model_input_tokens_total{hive_id,model}    — per-model input tokens
 //	hive_model_output_tokens_total{hive_id,model}   — per-model output tokens
+//	hive_prs_by_model_total{hive_id,model,outcome}  — attributed PR outcomes
+//	hive_reviews_by_model_pair_total{hive_id,author_model,review_model,verdict} — review verdicts by author/reviewer model pair
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	// Mandatory bearer auth (#3399, hardened in #3785): the cost/agent series
 	// are business-sensitive, so /metrics FAILS CLOSED when metrics are enabled
@@ -112,9 +117,85 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	for _, m := range sortedByName(est.ByModel) {
 		fmt.Fprintf(&b, "hive_model_output_tokens_total{hive_id=%q,model=%q} %d\n", hiveID, m.Name, m.Output)
 	}
+	writeHeader("hive_prs_by_model_total",
+		"All-time cumulative agent-authored pull requests per model and outcome.", "counter")
+	for _, s := range s.prometheusPRModelSeries() {
+		fmt.Fprintf(&b, "hive_prs_by_model_total{hive_id=%q,model=%q,outcome=%q} %d\n", hiveID, s.Model, s.Outcome, s.Count)
+	}
+	writeHeader("hive_reviews_by_model_pair_total",
+		"All-time cumulative review verdicts by author model, review model, and verdict.", "counter")
+	for _, s := range prometheusReviewModelPairSeries() {
+		fmt.Fprintf(&b, "hive_reviews_by_model_pair_total{hive_id=%q,author_model=%q,review_model=%q,verdict=%q} %d\n", hiveID, s.AuthorModel, s.ReviewModel, s.Verdict, s.Count)
+	}
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	_, _ = w.Write([]byte(b.String()))
+}
+
+type prModelPrometheusSeries struct {
+	Model   string
+	Outcome string
+	Count   int
+}
+
+func (s *Server) prometheusPRModelSeries() []prModelPrometheusSeries {
+	actionable := s.lastActionableForPRModels()
+	resp := aggregateGovernorPRModels(actionable.PRs.Attributed, governorPRModelsWindowAll, time.Now())
+	var out []prModelPrometheusSeries
+	for _, b := range resp.Buckets {
+		out = append(out,
+			prModelPrometheusSeries{Model: b.Model, Outcome: "merged", Count: b.Merged},
+			prModelPrometheusSeries{Model: b.Model, Outcome: "open", Count: b.Open},
+			prModelPrometheusSeries{Model: b.Model, Outcome: "closed_unmerged", Count: b.ClosedUnmerged},
+		)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Model != out[j].Model {
+			return out[i].Model < out[j].Model
+		}
+		return out[i].Outcome < out[j].Outcome
+	})
+	return out
+}
+
+type reviewModelPairPrometheusSeries struct {
+	AuthorModel string
+	ReviewModel string
+	Verdict     string
+	Count       int
+}
+
+func prometheusReviewModelPairSeries() []reviewModelPairPrometheusSeries {
+	art, err := review.LoadArtifact("")
+	if err != nil {
+		return nil
+	}
+	counts := map[string]int{}
+	for _, item := range art.Items {
+		author := strings.TrimSpace(item.AuthorModel)
+		reviewer := strings.TrimSpace(item.ReviewModel)
+		if author == "" || reviewer == "" {
+			continue
+		}
+		verdict := strings.TrimSpace(string(item.Verdict))
+		key := author + "\x00" + reviewer + "\x00" + verdict
+		counts[key]++
+	}
+	out := make([]reviewModelPairPrometheusSeries, 0, len(counts))
+	for key, count := range counts {
+		parts := strings.Split(key, "\x00")
+		out = append(out, reviewModelPairPrometheusSeries{AuthorModel: parts[0], ReviewModel: parts[1], Verdict: parts[2], Count: count})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].AuthorModel != out[j].AuthorModel {
+			return out[i].AuthorModel < out[j].AuthorModel
+		}
+		if out[i].ReviewModel != out[j].ReviewModel {
+			return out[i].ReviewModel < out[j].ReviewModel
+		}
+		return out[i].Verdict < out[j].Verdict
+	})
+	return out
 }
 
 // sortedByName returns the entries sorted by Name so the exposition output is

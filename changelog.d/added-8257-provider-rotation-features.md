@@ -1,1 +1,0 @@
-- Settings → Features can now configure `governor.rotation`, including provider/backends mappings, agent tiers, thresholds, and live provider headroom readings, so operators can manage provider rotation without editing `hive.yaml` ([#8257](https://github.com/hivecommons/hive/issues/8257)).
