@@ -19,6 +19,7 @@ func (m metricsSchedulerStub) BuildAgentMessage(string, []ghpkg.Issue, *ghpkg.Ac
 }
 func (m metricsSchedulerStub) BuildAgentMessageFromLastActionable(string) string { return "" }
 func (m metricsSchedulerStub) GetLastActionable() *ghpkg.ActionableResult        { return m.actionable }
+func (m metricsSchedulerStub) GetLaneDepths() map[string]int                     { return nil }
 func (m metricsSchedulerStub) ResolveTemplate(string) scheduler.TemplateResolution {
 	return scheduler.TemplateResolution{}
 }
