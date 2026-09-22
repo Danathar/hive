@@ -1,1 +1,0 @@
-- Add the stage receipt agent report schema and validation contract for runs handoffs.
