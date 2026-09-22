@@ -11,6 +11,19 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-21 (v5.2.0)
+
+### Added
+
+- `hivectl hives export`, `import`, and `session` now move a named hive profile as a passphrase-encrypted bundle and create separate named session profiles for running two relays against one hive (#8127).
+- Add unit tests for the spoke `ProjectConfigCallback` (project-claim reconciliation over heartbeat) covering vanity-URL-only pushes, misconfigured repo-target refusal, idempotent echo, author/filter preservation, and wrong-forge `api_url` refusal (#8153).
+
+## 2026-09-21 (v5.1.0)
+
+### Added
+
+- `hivectl hives use` now switches a running contributor relay to the newly active hive without a restart by signaling the relay to reload its generated `contributor.env`; the relay records non-secret hub last-seen timestamps for `hives list` and lets any in-flight task finish on its original hive before soliciting from the new one (#8126).
+
 ## 2026-09-21 (v5.0.0)
 
 ### Added
