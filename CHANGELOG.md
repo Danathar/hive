@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-22 (v5.10.0)
+
+### Added
+
+- Add Hive-owned task lease stages with per-stage generations for staged runs.
+
 ## 2026-09-22 (v5.9.0)
 
 ### Added
