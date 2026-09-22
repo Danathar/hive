@@ -1,1 +1,0 @@
-- The docs index now names v5 as the current line and uses branch-agnostic relative links for its local references, so v5 readers are no longer routed back to v4 content ([#8275](https://github.com/hivecommons/hive/issues/8275)).
