@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-22 (v5.2.2)
+
+### Fixed
+
+- Harden hub SHA poller test isolation so leaked background pollers cannot mask first-tick cache changes.
+
 ## 2026-09-22 (v5.2.1)
 
 ### Fixed

@@ -17615,6 +17615,10 @@
                     },
                     "fixer_agent": {
                       "type": "string"
+                    },
+                    "confidence_score": {
+                      "type": "boolean",
+                      "description": "Append a derived 0-5 mergeability confidence line to each posted review comment (hivecommons/hive#8182)."
                     }
                   }
                 }
@@ -17659,6 +17663,11 @@
                   "fixer_agent": {
                     "type": "string",
                     "nullable": true
+                  },
+                  "confidence_score": {
+                    "type": "boolean",
+                    "nullable": true,
+                    "description": "Append a derived 0-5 mergeability confidence line to each posted review comment (hivecommons/hive#8182)."
                   }
                 }
               }
