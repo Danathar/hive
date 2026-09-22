@@ -11,6 +11,21 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-22 (v5.3.0)
+
+### Added
+
+- Added a derived 0–5 PR mergeability confidence score to every review aggregate (`confidence.score` / `confidence.reasons` in review-verdicts.json), computed from the perspectives' verdicts, finding severities and coverage rather than asked of the model. `review.confidence_score: true` appends one `**Confidence: N/5**` line to each posted review comment; dashboard toggle and API field included (#8182).
+- Add `just contribute-tui` and bootstrap checkout-local `hivectl` from the Hive image for contributor commands when no Go-built binary is present.
+
+### Fixed
+
+- Serialize the three GHCR prune jobs (kubestellar twin) behind one another and list package versions with `per_page=100`, so the shared `GHCR_PRUNE_TOKEN` no longer exhausts its hourly API budget mid-run (#8202).
+
+### Security
+
+- Pass `github.ref_name`, the gate SHA and the run number to `docker.yml` publish steps through step `env:` and quote them in the shell, and compare `github.ref` instead of `github.ref_name` in `dco-post-merge.yml` guards, closing OpenSSF Baseline OSPS-BR-01.02 reported by LFX Insights (#8208).
+
 ## 2026-09-22 (v5.2.2)
 
 ### Fixed
