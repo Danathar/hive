@@ -13,7 +13,7 @@ import (
 // backward-compatible by construction. Semantic: MAJOR.MINOR where a MINOR bump
 // is purely additive and a MAJOR bump would be a breaking change (none is made
 // here).
-const contributorProtocolVersion = "1.2"
+const contributorProtocolVersion = "1.3"
 
 // Server capability tokens advertised on auth_ok (#2567). Each names a message
 // type or feature this hub supports so a client can adapt without probing. They
@@ -81,6 +81,11 @@ const (
 	// and records per-connection standby availability. Purely additive: relays
 	// that never advertise or send standby frames see today's traffic.
 	capStandbyV1 = "standby_v1"
+
+	// capRunStage: the relay can receive stage-scoped run assignments. Unlike
+	// plain task metadata, a stage is load-bearing for per-stage generations, so
+	// opted-in run-stage work is offered only to relays that declare this token.
+	capRunStage = "run-stage"
 )
 
 // serverCapabilities returns the capability set this hub advertises on auth_ok.
@@ -100,7 +105,15 @@ func serverCapabilities() []string {
 		capQuotaPreflight,
 		capBlockedVerdict,
 		capStandbyV1,
+		capRunStage,
 	}
+}
+
+func relaySupportsRunStage(c *ContributorConnection) bool {
+	if c == nil || c.capabilities == nil {
+		return false
+	}
+	return c.capabilities.DeclaresCapability(capRunStage)
 }
 
 // Surface identifiers for the /api/contribute/status response (#2567). Two

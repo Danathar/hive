@@ -17,8 +17,9 @@ func TestDashboardInternalImportCountRatchet(t *testing.T) {
 	// pkg/ioscan for the design-gate plan handlers (RFC #7993), plus
 	// pkg/standby for the S4 qualified-standby tile count, plus pkg/taskmcp for
 	// the contributor task-scoped MCP adapter, plus pkg/mention for the shared
-	// GitHub Actions OIDC dispatch guard/dedupe path (hivecommons/hive#8221).
-	const maxDashboardInternalImports = 42
+	// GitHub Actions OIDC dispatch guard/dedupe path (hivecommons/hive#8221), plus
+	// pkg/celtrigger for run-stage handoff events (hivecommons/hive#8298).
+	const maxDashboardInternalImports = 43
 
 	entries, err := os.ReadDir(".")
 	if err != nil {
