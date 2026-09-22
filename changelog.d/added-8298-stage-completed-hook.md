@@ -1,1 +1,0 @@
-- Add the stage_completed hook transition and vetted kick action for run-stage handoffs.
