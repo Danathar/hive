@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-22 (v5.4.4)
+
+### Changed
+
+- Improve TUI readability with pane zoom, responsive grid layouts, leaner chrome, wider hives overlay columns, and expanded theme palette.
+
 ## 2026-09-22 (v5.4.3)
 
 ### Fixed
