@@ -156,7 +156,12 @@ func TestContributeMCPLeaseBearerScopesAndRefusesCrossTask(t *testing.T) {
 		currentTaskGen: 2,
 		taskAssignedAt: time.Now().Add(-time.Minute),
 	}
-	s.contributeHub.recordLeaseForKey("alice-id", assign.TaskID, assign.Repo, assign.Number, assign.identityKey(), "trusted", 2, time.Now())
+	// #8287: a persist failure now withdraws the grant, so point the registry at
+	// a writable path instead of the /data default the CI runner cannot create.
+	s.contributeHub.taskLeasesFile = filepath.Join(t.TempDir(), "task-leases.json")
+	if err := s.contributeHub.recordLeaseForKey("alice-id", assign.TaskID, assign.Repo, assign.Number, assign.identityKey(), "trusted", 2, time.Now()); err != nil {
+		t.Fatalf("recordLeaseForKey: %v", err)
+	}
 	mcp := s.contributeHub.mintTaskMCPForAssignment("alice-id", assign, time.Now().Add(leaseTTL), "alice")
 	if mcp == nil || mcp.Token == "" || mcp.URL != "https://hive.example"+taskmcp.EndpointPath {
 		t.Fatalf("mcp = %#v", mcp)
