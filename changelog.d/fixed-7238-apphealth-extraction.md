@@ -1,1 +1,0 @@
-- GitHub App credential verdicts moved from `package main` into a new `pkg/apphealth`, so they are testable and reusable outside the `hive` binary. No behavior change. (#7238)

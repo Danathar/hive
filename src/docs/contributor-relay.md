@@ -250,7 +250,7 @@ while keeping `--ask-for-approval`/`--sandbox` — prefer that over
 `HIVE_CODEX_DANGEROUSLY_BYPASS_APPROVALS_AND_SANDBOX=1`, which removes the
 sandbox altogether.
 
-To change hubs for direct Compose, re-run the registration/setup flow for the target hub or edit `${HOME}/.config/hive/contributor.env` so `HIVE_HUB` and `HIVE_REGISTRATION_TOKEN` stay matched.
+To change hubs for direct Compose, run `hivectl hives use <name>` (see [Named profiles](#named-profiles-instead-of-hand-edited-lists-hivectl-hives)), re-run the registration/setup flow for the target hub, or edit `${HOME}/.config/hive/contributor.env` so `HIVE_HUB` and `HIVE_REGISTRATION_TOKEN` stay matched.
 
 Backend credentials stay local to the contributor container. For example, `AGENT_BACKEND=bob` needs `BOBSHELL_API_KEY` in the container environment, while LiteLLM-style backends need their endpoint/key variables (`HIVE_LITELLM_ENDPOINT`, `HIVE_LITELLM_API_KEY` — exported locally, never sent to the hive).
 
@@ -294,6 +294,8 @@ HIVE_SESSION=claude-b just contribute-hive claude   # terminal 2
 ```
 
 The labels must be distinct: two same-backend relays with identical labels (including the identical *default* label) share one session identity and collide on a single active-task slot, exactly as if no label were set.
+
+With named profiles, use `hivectl hives session <name> --label <label>` to make the second session explicit in `profiles.yml` instead of exporting `HIVE_SESSION` by hand. The command copies the selected hive profile under a new name (default `<name>-<label>`) and stores the session label there; `hivectl hives use <session-profile>` projects that label as `HIVE_SESSION` for the active relay.
 
 What the session label does **not** scope: auth, trust tier, model admission, and rate-limit accounting all stay per-account. Extra sessions share your account's rate limits — this is a way to run several backends concurrently, not a way to get more throughput headroom.
 
@@ -391,6 +393,12 @@ Before this, the prompt mentioned a branch exactly once ("push your branch to yo
 
 Watching the pane, the base is the thing worth a glance: it is stated in the prompt, and the agent is asked to confirm it on the opened PR before reporting done.
 
+### The assigning hive's writing guide travels with the task
+
+If the hive that handed you the task sets [`project.writing_guide`](agent-configuration.md#writing-guide-how-issues-and-prs-should-read-projectwriting_guide), the assignment prompt carries it, immediately before the instruction to open the PR ([#8124](https://github.com/hivecommons/hive/issues/8124)). It is the repo owner's instruction for how the PR body should *read* — length, structure, register — and it never overrides what the repository's own `AGENTS.md` and `CONTRIBUTING` require, or what the prompt asks the body to contain.
+
+The guide belongs to the hive that owns the task, not to your relay, because `task_assign` is built by that hub. A relay subscribed to two hives therefore gets each hive's guide on that hive's tasks, which is the right shape: the owner of the repository the PR lands in is who decides how PRs there read. A hive that sets no guide ships the prompt it always has.
+
 ### An interrupted task's uncommitted edits are stashed, not inherited
 
 The same persistent checkout has a second thing to inherit besides its branch: its **working tree**. A task that is revoked or aborted mid-edit — the hub restarted, an operator yanked it, the CLI crashed — is stopped by the relay with an interrupt, and until [#7790](https://github.com/hivecommons/hive/issues/7790) nothing then touched the tree. Its half-done edits stayed on its branch, and because every later task on that repo is told to reuse the checkout, each of them started from another task's uncommitted changes. Observed on projectbluefin/utah: one task revoked in a hub-restart cascade left three modified files behind, and the next four tasks on that repo all began from them. `git checkout -b` carries a dirty tree onto the new branch silently, so a literal `git add -A` would have shipped someone else's half-finished change under this contributor's name; the PRs that followed leaked nothing only because that agent happened to choose `git worktree add` each time.
@@ -414,25 +422,49 @@ The lists are positional: the first token belongs to the first hub, the second t
 
 The relay keeps a WebSocket and heartbeat for each subscribed hub, but shares one CLI/tmux session and works on only one task at a time. It rotates to another hub when the active hub has no assignable work. A task that is blocked on human action stays with its owning hub; the relay does not mix task state across hubs.
 
+### Named profiles instead of hand-edited lists (`hivectl hives`)
+
+Positional lists have no names, and one hand-edit that drops a field transposes every hub/token pair after it. `hivectl hives` ([#8097](https://github.com/hivecommons/hive/issues/8097)) saves the same set as named profiles in `~/.config/hive/profiles.yml` (mode 0600) and **generates** `contributor.env` from them, so the lists are aligned by construction and the relay keeps reading exactly the variables documented above:
+
+```bash
+hivectl hives list                                        # which hives, and which one is active
+hivectl hives add hive-b --hub wss://hive-b.example.com/contribute
+hivectl hives use hive-b                                  # make it the hub the relay starts on
+hivectl hives rename hive-b staging
+hivectl hives remove staging                              # asks you to type the name
+```
+
+The active profile is written first in each list, which is the hub the relay solicits from when it starts. When a relay is **already running**, `hivectl hives use <name>` writes the projection and signals that relay to reload it, so the next solicitation goes to the new active hive without a restart. Work already in flight stays with the hub that assigned it and completes there.
+
+The relay writes two non-secret control files beside the profiles: `contributor-relay.pid`, so `hivectl hives use` can signal the native process or recorded docker/podman container, and `hubs-seen.json`, so `hivectl hives list` can show when each hub last authenticated or heartbeated successfully without probing every hub.
+
+The first `hivectl hives` command on a machine that still has a positional `contributor.env` migrates it in place — entries named after their hub host, the first hub still active — and leaves `contributor.env` untouched until a later command actually changes your hives. A legacy file whose three lists disagree in length is refused rather than guessed at.
+
+The same list is a pane in the terminal dashboard: `hivectl tui`, then `H`, opens the [Hives overlay](hivectl.md#hives-switching-the-hive-you-contribute-to) — the same rows in the same order, with `enter` to switch and `a`/`d`/`r` to add, remove and rename. It calls the same functions the commands above do, so either surface leaves `profiles.yml` and the generated `contributor.env` in the same state.
+
+See [hivectl.md](hivectl.md#hives--named-profiles-for-the-hives-you-contribute-to) for the full command reference, including adding a hive whose token you already hold (`--token-stdin`).
+
 ## Moving the relay to another machine
 
 Nothing binds a contributor identity to a machine. Authentication is a plain token-hash lookup — no device binding, no IP pinning, no session affinity — so the same `contributor.env` authenticates from anywhere. Only one relay should run at a time per identity, but *which* machine it runs on is yours to choose: a desktop today, a VM or a sandbox tomorrow, and back again.
 
 What you cannot do is re-run `contribute-setup` on the new machine. `POST /api/contribute/register` is unauthenticated and identifies you by a self-asserted GitHub username, so it will never hand back an existing contributor's token — otherwise POSTing someone else's username would be an account takeover. It answers "already registered" and stops. That is correct; the two supported ways round it are below.
 
-### Option 1 — copy the credential (keeps the old machine working)
+### Option 1 — export/import one named profile (keeps the old machine working)
 
-Copy both files. `contribute-hive` hard-requires each of them and refuses to start without either:
+Export the named hive profile on the old machine and import it on the new one:
 
 ```bash
-scp old-machine:~/.config/hive/contributor.env ~/.config/hive/
-scp old-machine:~/.config/hive/gh-auth.env     ~/.config/hive/
-chmod 600 ~/.config/hive/contributor.env ~/.config/hive/gh-auth.env
+hivectl hives export acme --out acme.hive-profile
+# copy acme.hive-profile by your normal file-transfer path
+hivectl hives import acme.hive-profile --name acme-laptop
 ```
 
-**Copying is the only way to *reuse* a registration token.** The hive stores only a SHA-256 hash of it and clears the plaintext after the first read, so no endpoint can print it again — not the dashboard, not the API, not the hive administrator.
+The bundle is passphrase-encrypted and contains one profile: hub URL, contributor id, optional session label and the registration token. The token is never printed in any `hivectl` output. You still need the backend and GitHub credentials on the new machine (`gh auth login`, backend CLI login, or your usual dotfile/bootstrap path); the profile bundle replaces hand-copying `contributor.env`.
 
-Use this when you want to switch back and forth, or to try the VM before committing to it. The cost is that the credential now exists in two places: delete both files on the machine you are moving off once the new one works.
+**Export/import is the only way to *reuse* a registration token without copying raw files.** The hive stores only a SHA-256 hash of the token and clears the plaintext after the first read, so no endpoint can print it again — not the dashboard, not the API, not the hive administrator.
+
+Use this when you want to switch back and forth, or to try the VM before committing to it. The cost is that the credential now exists in two places: remove the imported profile or the old profile once you no longer want both machines able to connect as the same contributor id.
 
 ### Option 2 — reissue the credential (`just contribute-move`)
 
@@ -465,6 +497,8 @@ Keys `contribute-move` does not manage — `HIVE_LITELLM_ENDPOINT`, for instance
 ### Adding another hive to an existing setup
 
 That is not a move: run `contribute-setup` against the new hive with `HIVE_HUB` pointing at it. It appends to the hub, token, and id lists already in `contributor.env` rather than replacing them, so a working multi-hive setup survives. The previous file is kept at `contributor.env.bak`.
+
+`hivectl hives add <name> --hub <url>` does the same append with a name attached, once the machine is already set up — it performs only the registration POST, not the `gh` login or the backend CLI preflight. See [Named profiles](#named-profiles-instead-of-hand-edited-lists-hivectl-hives).
 
 ## Acting as a spoke agent role
 

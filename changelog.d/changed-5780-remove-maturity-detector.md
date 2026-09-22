@@ -1,1 +1,0 @@
-- Removed the unused knowledge maturity detector and its self-contained tests so the package no longer exposes a dead repository-maturity analysis surface.

@@ -44,11 +44,11 @@ authoritative line policy). Pick your base branch by the kind of change:
 The `main` branch is not the active target for changes. When in doubt, or if a
 maintainer asks for a different base, follow the maintainer's guidance.
 
-Before starting work (substitute your chosen base branch for `v4`):
+Before starting work (substitute your chosen base branch for `v5`):
 
 ```bash
 git fetch origin
-git switch -c <topic-branch> origin/v4
+git switch -c <topic-branch> origin/v5
 ```
 
 ## Local development
@@ -73,6 +73,7 @@ The root [`Justfile`](Justfile) exposes the public contributor relay workflow. R
 | `just contribute-setup <backend>` | Checks the Justfile version, verifies the backend CLI, signs in with GitHub, registers with the configured hub, and writes `${HOME}/.config/hive/contributor.env`. |
 | `just contribute-hive [backend] [mode]` | Starts the contributor relay. The default mode is containerized; pass `local` as the mode to run natively when the local tools are installed. |
 | `just contribute-status` | Queries the configured hub for status and contributor profile information. |
+| `just contribute-hives [args]` | Manages the named hive profiles in `${HOME}/.config/hive/profiles.yml` — `list` (the default), `add`, `use`, `rename`, `remove`. A thin alias for `hivectl hives`; see [src/docs/hivectl.md](src/docs/hivectl.md#hives--named-profiles-for-the-hives-you-contribute-to). |
 | `just contribute-browse` | Discovers available public hive projects. |
 | `just contribute-stop` | Stops a background contributor relay if one is running. |
 | `just contribute-k8s [namespace] [outfile] [image_tag]` | Emits Kubernetes manifests for a headless contributor workload. It writes to stdout or the requested file; it does not apply the manifest. |
@@ -197,12 +198,12 @@ git push --force-with-lease
 To add sign-offs across a branch, rebase with sign-off and then force-push:
 
 ```bash
-git rebase --signoff origin/v4
+git rebase --signoff origin/v5
 git push --force-with-lease
 ```
 
 Only rewrite your own pull-request branch. Once bad DCO history lands on a
-protected branch such as `v4`, contributors cannot repair it in place: protected
+protected branch such as `v5`, contributors cannot repair it in place: protected
 branch history is not rewritten, and maintainers must not add a DCO sign-off on
 someone else's behalf. That is why the post-merge checker has narrow per-commit
 waivers for already-merged history; waivers record a maintainer disposition, but
@@ -301,7 +302,7 @@ A merged fix is not the same thing as a resolved symptom. Issue [#6500](https://
 
 ## Pull requests
 
-- Target `v4` for all code and documentation contributions (the active development branch).
+- Target `v5` for all code and documentation contributions (the active development branch). `v4` is feature-frozen and accepts security and critical fixes only (see the base-branch table above).
 - Start PR titles with the repository's emoji convention, for example `📖 docs: ...`, `🐛 fix: ...`, or `✨ feature: ...`.
 - Include `Fixes #<issue>` lines for issues the PR closes.
 - Credit the issue's author with a `Co-authored-by:` trailer on the commit when the PR resolves somebody else's issue — see [Crediting issue authors](#crediting-issue-authors).

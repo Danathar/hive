@@ -227,7 +227,7 @@ func (h *ContributeWSHub) assignStandbyTask(c *ContributorConnection, item Ready
 		return nil, fmt.Errorf("standby token mint failed: %w", err)
 	}
 	canPush := h.contributorCanPush(item.Repo, c.profile.GitHubUsername)
-	prompt := buildTaskPromptForContributor(ref, item.Title, canPush)
+	prompt := buildTaskPromptForContributor(ref, item.Title, canPush, h.writingGuideSection())
 	if policy := strings.TrimSpace(h.roleKickPrompt(lane)); policy != "" {
 		prompt = buildStandbyTaskPrompt(prompt, lane, policy)
 	} else {
