@@ -11,6 +11,16 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-22 (v5.2.1)
+
+### Fixed
+
+- Fixed review submissions stalling in retry with "operation effect is already applied": a second review whose text matched an earlier one on the same PR (the common "no findings" pass on a newer head) was refused as a replay. Each request file is now its own logical operation, the mutation boundary treats a genuine replay as idempotent success, and it releases the claim on every exit so one stuck mutation no longer exhausts the repo's writer slot.
+
+### Security
+
+- The legacy dashboard no longer serves each contributor's plaintext registration token to anonymous callers ([#8165](https://github.com/hivecommons/hive/issues/8165)). `GET /api/contributors` and `GET /api/contributors/:id` spread the raw stored profile — including `registration_token_plain` — into the response, so any local process (or any remote caller with `HIVE_DASHBOARD_BIND=0.0.0.0`) could enumerate every contributor's live credential in one request, defeating the earlier `/api/contribute/register` fix (#8102). Both endpoints now serve a sanitized view that strips the plaintext token, matching the Go dashboard's `TokenPlain` handling, and the unauthenticated `PUT /api/contributors/:id/trust` / `POST /api/contributors/:id/revoke` mutations are now gated by the same `requireLegacyOwnerRole` check the Nous endpoints gained in #8103 — anonymous callers can no longer promote themselves to a higher trust tier or revoke legitimate contributors.
+
 ## 2026-09-21 (v5.2.0)
 
 ### Added
