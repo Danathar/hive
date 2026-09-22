@@ -11,6 +11,13 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-22 (v5.4.3)
+
+### Fixed
+
+- Fix Esc in the hives-only contributor TUI so it quits instead of closing to a blank screen.
+- Review relay suppresses the comment (verdict still recorded) of a further top-level review on a PR head that already carries its quota of hive reviews (1 in combined mode, one per perspective otherwise, or `review.max_reviews_per_head`), exempting `--revise`, `--thread` and APPROVE; `review-links.json` now records the head each review was posted at, and `${PR_LIST}` marks `[hive-reviewed: …]` from that ledger too, so a review whose verdict could not bind to a dispatch no longer triggers a re-review every kick.
+
 ## 2026-09-22 (v5.4.2)
 
 ### Fixed
