@@ -1,12 +1,18 @@
 package dashboard
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
+	"github.com/hivecommons/hive/pkg/agent"
+	"github.com/hivecommons/hive/pkg/celtrigger"
+	"github.com/hivecommons/hive/pkg/hooks"
+	"github.com/hivecommons/hive/pkg/timeline"
 	"github.com/hivecommons/hive/pkg/worksource"
 )
 
@@ -39,9 +45,10 @@ type taskLease struct {
 	// Linear and Jira items deliberately carry Number == 0 and put their identity
 	// in Key (#4245), so every zero-numbered item in a repo would collide as
 	// "repo#0" (#5120).
-	key  string
-	tier string
-	gen  uint64
+	key   string
+	tier  string
+	stage string
+	gen   uint64
 	// restored marks a lease loadLeases read from disk at startup rather than one
 	// recordLease minted in this process (#5681). It is deliberately NOT persisted:
 	// it means "issued by the PREVIOUS process, whose holder has not reconnected
@@ -76,6 +83,32 @@ type taskLease struct {
 // A resume presented after this window is treated as a stale/forged claim and
 // rejected; the relay simply asks for fresh work via "ready".
 const leaseTTL = wsTaskTimeout
+
+const (
+	StageSpec      = "spec"
+	StagePlan      = "plan"
+	StageImplement = "implement"
+)
+
+var orderedLeaseStages = []string{StageSpec, StagePlan, StageImplement}
+
+func validStage(s string) bool {
+	for _, stage := range orderedLeaseStages {
+		if s == stage {
+			return true
+		}
+	}
+	return false
+}
+
+func nextLeaseStage(from string) string {
+	for i, stage := range orderedLeaseStages {
+		if stage == from && i+1 < len(orderedLeaseStages) {
+			return orderedLeaseStages[i+1]
+		}
+	}
+	return ""
+}
 
 // leaseKey is the registry key for one task held by one identity (#7774). The
 // separator is a control character neither half can contain: identities are
@@ -124,8 +157,15 @@ func (h *ContributeWSHub) recordLease(identity, taskID, repo string, number int,
 // refuses the grant instead of reporting success for a record that does not
 // exist. In-memory and on-disk state therefore never disagree about a grant.
 func (h *ContributeWSHub) recordLeaseForKey(identity, taskID, repo string, number int, key, tier string, gen uint64, now time.Time) error {
+	return h.recordLeaseForKeyStage(identity, taskID, repo, number, key, tier, "", gen, now)
+}
+
+func (h *ContributeWSHub) recordLeaseForKeyStage(identity, taskID, repo string, number int, key, tier, stage string, gen uint64, now time.Time) error {
 	if identity == "" || taskID == "" {
 		return nil
+	}
+	if stage != "" && !validStage(stage) {
+		return fmt.Errorf("invalid lease stage %q", stage)
 	}
 	if key == "" {
 		key = worksource.Ref{Repo: repo, Number: number}.Key()
@@ -144,6 +184,7 @@ func (h *ContributeWSHub) recordLeaseForKey(identity, taskID, repo string, numbe
 		number:    number,
 		key:       key,
 		tier:      tier,
+		stage:     stage,
 		gen:       gen,
 		expiresAt: now.Add(leaseTTL),
 	}
@@ -157,6 +198,140 @@ func (h *ContributeWSHub) recordLeaseForKey(identity, taskID, repo string, numbe
 		return fmt.Errorf("persisting lease for %s: %w", taskID, err)
 	}
 	return nil
+}
+
+func (h *ContributeWSHub) advanceLeaseStage(identity, taskID, to string, now time.Time) (taskLease, error) {
+	return h.mutateLeaseStage(identity, taskID, to, false, now)
+}
+
+func (h *ContributeWSHub) retryLeaseStage(identity, taskID string, now time.Time) (taskLease, error) {
+	return h.mutateLeaseStage(identity, taskID, "", true, now)
+}
+
+func (h *ContributeWSHub) mutateLeaseStage(identity, taskID, to string, retry bool, now time.Time) (taskLease, error) {
+	if identity == "" || taskID == "" {
+		return taskLease{}, fmt.Errorf("identity and taskID are required")
+	}
+	var out taskLease
+	var auditAction, from string
+
+	h.leaseMu.Lock()
+	l := h.leaseForLocked(identity, taskID)
+	if l == nil {
+		h.leaseMu.Unlock()
+		return taskLease{}, fmt.Errorf("lease not found for %s", taskID)
+	}
+	if l.expiresAt.IsZero() || now.After(l.expiresAt) {
+		h.leaseMu.Unlock()
+		return taskLease{}, fmt.Errorf("lease expired for %s", taskID)
+	}
+	if retry {
+		if l.stage == "" {
+			h.leaseMu.Unlock()
+			return taskLease{}, fmt.Errorf("cannot retry a lease with no stage")
+		}
+		to = l.stage
+		auditAction = agent.AuditLeaseStageRetried
+	} else {
+		if l.stage == "" {
+			h.leaseMu.Unlock()
+			return taskLease{}, fmt.Errorf("cannot advance a lease with no stage")
+		}
+		if !validStage(to) {
+			h.leaseMu.Unlock()
+			return taskLease{}, fmt.Errorf("invalid lease stage %q", to)
+		}
+		want := nextLeaseStage(l.stage)
+		if to != want {
+			h.leaseMu.Unlock()
+			return taskLease{}, fmt.Errorf("invalid lease stage advance from %q to %q", l.stage, to)
+		}
+		auditAction = agent.AuditLeaseStageAdvanced
+	}
+
+	prevStage, prevGen, prevExpires := l.stage, l.gen, l.expiresAt
+	from = prevStage
+	l.stage = to
+	l.gen = h.nextTaskGen()
+	for l.gen <= prevGen {
+		l.gen = h.nextTaskGen()
+	}
+	l.expiresAt = now.Add(leaseTTL)
+	if err := h.saveLeasesLocked(); err != nil {
+		l.stage, l.gen, l.expiresAt = prevStage, prevGen, prevExpires
+		h.leaseMu.Unlock()
+		return taskLease{}, fmt.Errorf("persisting lease stage for %s: %w", taskID, err)
+	}
+	out = *l
+	h.leaseMu.Unlock()
+
+	h.recordLeaseStageAudit(auditAction, taskID, from, to, out.gen)
+	h.emitLeaseStageCompleted(from, to, out)
+	return out, nil
+}
+
+func (h *ContributeWSHub) recordLeaseStageAudit(action, taskID, from, to string, gen uint64) {
+	if h == nil || h.server == nil {
+		return
+	}
+	h.server.AgentAuditSink().Record("system", action, taskID,
+		agent.Fields("stage_from", from, "stage_to", to, "gen", gen))
+}
+
+func (h *ContributeWSHub) emitLeaseStageCompleted(from, to string, l taskLease) {
+	if h == nil || h.server == nil {
+		return
+	}
+	attrs := map[string]string{
+		"stage_from": from,
+		"stage_to":   to,
+		"gen":        strconv.FormatUint(l.gen, 10),
+	}
+	if l.key != "" {
+		attrs["issue_ref"] = l.key
+	}
+	h.server.LifecycleTimeline().Record(timeline.Event{
+		IssueRef: firstNonEmptyString(l.key, worksource.Ref{Repo: l.repo, Number: l.number}.Key()),
+		Kind:     timeline.KindStageCompleted,
+		Agent:    l.identity,
+		Attrs:    attrs,
+	})
+	payload := hooks.Payload{
+		Transition: hooks.TransitionStageCompleted,
+		Run:        l.taskID,
+		StageFrom:  from,
+		StageTo:    to,
+		Gen:        l.gen,
+		Repo:       l.repo,
+		Agent:      l.identity,
+		Attrs:      attrs,
+	}
+	if h.server.deps != nil {
+		if h.server.deps.HookFire != nil {
+			h.server.deps.HookFire(context.Background(), payload)
+		}
+		if h.server.deps.CELTrigger != nil {
+			h.server.deps.CELTrigger(context.Background(), celtrigger.NormalizedEvent{
+				Kind:      celtrigger.KindStageCompleted,
+				Repo:      l.repo,
+				Number:    l.number,
+				State:     "completed",
+				Run:       l.taskID,
+				StageFrom: from,
+				StageTo:   to,
+				Gen:       int64(l.gen),
+			}, fmt.Sprintf("stage_completed %s→%s for %s", from, to, l.taskID))
+		}
+	}
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // renewLease extends an identity's server-issued lease window when the relay proves
@@ -288,6 +463,18 @@ func (h *ContributeWSHub) lookupLease(identity, taskID, repo string, number int,
 	return l
 }
 
+func (h *ContributeWSHub) leaseStageForDecision(identity, taskID string) string {
+	if h == nil || identity == "" || taskID == "" {
+		return ""
+	}
+	h.leaseMu.Lock()
+	defer h.leaseMu.Unlock()
+	if l := h.leaseForLocked(identity, taskID); l != nil {
+		return l.stage
+	}
+	return ""
+}
+
 // persistedLease is the on-disk form of a taskLease (#5681).
 //
 // It carries the lease and nothing else. There is no credential in it: the scoped
@@ -302,6 +489,7 @@ type persistedLease struct {
 	Number       int       `json:"number"`
 	Key          string    `json:"key,omitempty"`
 	Tier         string    `json:"tier"`
+	Stage        string    `json:"stage,omitempty"`
 	Gen          uint64    `json:"gen"`
 	ExpiresAt    time.Time `json:"expires_at"`
 	MCPTokenID   string    `json:"mcp_token_id,omitempty"`
@@ -356,6 +544,7 @@ func (h *ContributeWSHub) saveLeasesLocked() error {
 			Number:       l.number,
 			Key:          l.key,
 			Tier:         l.tier,
+			Stage:        l.stage,
 			Gen:          l.gen,
 			ExpiresAt:    l.expiresAt,
 			MCPTokenID:   l.mcpTokenID,
@@ -491,6 +680,7 @@ func (h *ContributeWSHub) loadLeases() {
 			number:       rec.Number,
 			key:          key,
 			tier:         rec.Tier,
+			stage:        rec.Stage,
 			gen:          rec.Gen,
 			restored:     true,
 			expiresAt:    rec.ExpiresAt,
