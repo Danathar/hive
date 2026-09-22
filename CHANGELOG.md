@@ -11,6 +11,17 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-22 (v5.6.0)
+
+### Added
+
+- Add a Governor PRs-by-model tile, cached attribution aggregation API, and Prometheus PR outcome series.
+- Settings → Features can now configure `governor.rotation`, including provider/backends mappings, agent tiers, thresholds, and live provider headroom readings, so operators can manage provider rotation without editing `hive.yaml` ([#8257](https://github.com/hivecommons/hive/issues/8257)).
+
+### Fixed
+
+- ACMM pack apply now reconciles `on_demand` for existing pack agents (like `kick_template` and `mode`), starting or stopping the process on a flip. A reviewer created by the older on-demand pack definition stayed on-demand after the pack moved to the cadenced queue design — the new template landed, nothing ever kicked it. An `on_demand` set from the agent settings dialog is operator-owned (`on_demand_owner`) and is not touched.
+
 ## 2026-09-22 (v5.5.0)
 
 ### Added
