@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-22 (v5.6.1)
+
+### Fixed
+
+- The docs index now names v5 as the current line and uses branch-agnostic relative links for its local references, so v5 readers are no longer routed back to v4 content ([#8275](https://github.com/hivecommons/hive/issues/8275)).
+
 ## 2026-09-22 (v5.6.0)
 
 ### Added
