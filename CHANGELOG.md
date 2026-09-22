@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-22 (v5.4.1)
+
+### Fixed
+
+- Review relay refuses a request whose `--verdict-file` fails validation **before** posting the comment, and reports the exact error plus a full example object in `.result.json`; `hive-review` runs the same key check client-side. `reviewer-queue.md` now carries the verdict schema it used to only refer to, and `${PR_LIST}` marks PRs already judged at their current head as `[hive-reviewed: <verdict>@<sha>]` so the cadence reviewer stops re-commenting the same PR every kick (one PR collected six duplicate notices in two hours).
+
 ## 2026-09-22 (v5.4.0)
 
 ### Added
