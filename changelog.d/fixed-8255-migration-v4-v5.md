@@ -1,1 +1,0 @@
-- Add the missing v4→v5 operator migration guide linked from ROADMAP.md, covering the v4 EOL window, channel re-base, additive config deltas, deployment upgrade steps, verification, and digest rollback guidance (#8255).

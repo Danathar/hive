@@ -11,6 +11,20 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-22 (v5.5.0)
+
+### Added
+
+- Settings -> Features now exposes the formal-verification quality-lane opt-in, including ACMM L5+ gating and durable `quality.formal` persistence ([#8256](https://github.com/hivecommons/hive/issues/8256)).
+
+### Fixed
+
+- Add the missing v4→v5 operator migration guide linked from ROADMAP.md, covering the v4 EOL window, channel re-base, additive config deltas, deployment upgrade steps, verification, and digest rollback guidance (#8255).
+
+### Security
+
+- Bump the bundled GitHub CLI from 2.74.0 to 2.101.0. The 2.74.0 binary was built with Go 1.23.5, golang.org/x/crypto v0.38.0 and google.golang.org/grpc v1.72.0, which cluster image scanners (Red Hat ACS) report as 8 Critical CVEs including CVE-2026-33186 and CVE-2026-46595. The CVEs live in the gh binary, not in hive's own module graph (hive has no x/crypto dependency and already builds against grpc v1.83.2). gh 2.101.0 is built with Go 1.27.1, x/crypto v0.57.0 and grpc v1.83.2, clearing every finding. Checksums pinned from the upstream `gh_2.101.0_checksums.txt`.
+
 ## 2026-09-22 (v5.4.4)
 
 ### Changed
