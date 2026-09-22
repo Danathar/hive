@@ -1,1 +1,0 @@
-- Reviewer independence now keeps one mixed PR queue kick and tells reviewers to delegate each PR to an in-session sub-agent with the annotated review model, instead of restarting the reviewer per model bucket.
