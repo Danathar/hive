@@ -73,6 +73,9 @@ const (
 	// (approved|changes_requested|commented). This makes reviews a first-class
 	// audited activity instead of an invisible agent-CLI write.
 	AuditActionPRReviewed = "agent_pr_reviewed"
+	// AuditActionReviewModelFallback is recorded when an adversarial reviewer
+	// pool has no independent candidate and the configured fallback is used.
+	AuditActionReviewModelFallback = "review_model_fallback"
 )
 
 // System "agent" names recorded for creations no single coding agent
@@ -237,6 +240,86 @@ func AppendTrailer(body string, m InvocationMeta) string {
 // PR has a human author, and a human's hand-written PR has the same one.
 func HasAttributionTrailer(body string) bool {
 	return strings.Contains(body, AttributionTrailerPrefix)
+}
+
+// ParseAttributionTrailer extracts the launch metadata from the final visible
+// `— hive:` line in a PR body. Mentions of the template earlier in the body are
+// deliberately ignored so docs and quoted examples do not count as agent PRs.
+func ParseAttributionTrailer(body string) (InvocationMeta, bool) {
+	lines := strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n")
+	trailer := ""
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, AttributionTrailerPrefix) {
+			trailer = line
+		}
+		break
+	}
+	if trailer == "" {
+		return InvocationMeta{}, false
+	}
+	meta := InvocationMeta{}
+	fields := strings.Fields(strings.TrimSpace(strings.TrimPrefix(trailer, AttributionTrailerPrefix)))
+	for _, field := range fields {
+		key, value, ok := strings.Cut(field, "=")
+		if !ok {
+			continue
+		}
+		value = NormalizeAttributionValue(value)
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "agent":
+			meta.Agent = value
+		case "backend":
+			meta.Backend = value
+		case "model":
+			meta.Model = value
+		}
+	}
+	meta.Agent = NormalizeAttributionValue(meta.Agent)
+	meta.Backend = NormalizeAttributionValue(meta.Backend)
+	meta.Model = NormalizeAttributionModel(meta.Model)
+	if meta.Agent == "unknown" {
+		meta.Agent = ""
+	}
+	if meta.Backend == "unknown" {
+		meta.Backend = ""
+	}
+	return meta, true
+}
+
+// NormalizeAttributionValue canonicalizes footer values for durable dashboard
+// cache fields: lowercase, strip quotes/backticks, and drop bracketed suffixes
+// such as "model[preview]".
+func NormalizeAttributionValue(value string) string {
+	v := strings.TrimSpace(strings.ToLower(value))
+	v = strings.Trim(v, "`'\"“”‘’")
+	if i := strings.Index(v, "["); i >= 0 {
+		v = strings.TrimSpace(v[:i])
+	}
+	v = strings.Trim(v, "`'\"“”‘’")
+	switch v {
+	case "", "auto", "<agent>", "<backend>", "<model>", "...", "…", "placeholder":
+		return "unknown"
+	}
+	return v
+}
+
+func NormalizeAttributionModel(model string) string {
+	return NormalizeAttributionValue(model)
+}
+
+func ModelFamily(model string) string {
+	m := NormalizeAttributionModel(model)
+	if m == "unknown" {
+		return "unknown"
+	}
+	if i := strings.Index(m, "-"); i >= 0 {
+		return m[:i]
+	}
+	return m
 }
 
 // RequestedModel normalizes the model recorded in the trail: bob has no model
