@@ -11,6 +11,17 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-22 (v5.7.0)
+
+### Added
+
+- Add reviewer `review_models` pools so scheduled PR review can choose an independent model from the PR author, record review model pairings, and export Prometheus counters.
+
+### Changed
+
+- The hub Reading List (home, Learn, and /reading pages plus `GET /api/reading-list`) now sources articles from the Hive Commons Substack RSS feed instead of scraping the KubeStellar Medium list page; cards carry a Hive Commons byline, the "View all" link points at https://substack.com/@hivecommons, and the fallback seed lists the articles currently on Substack (#8281).
+- Hub pages now identify Hive as a Hive Commons project: the footer, the home page project card, the docs links, and the CNCF reference-architecture page point at hivecommons.dev and docs.hivecommons.dev instead of KubeStellar (#8281).
+
 ## 2026-09-22 (v5.6.1)
 
 ### Fixed
