@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-22 (v5.7.1)
+
+### Changed
+
+- Reviewer independence now keeps one mixed PR queue kick and tells reviewers to delegate each PR to an in-session sub-agent with the annotated review model, instead of restarting the reviewer per model bucket.
+
 ## 2026-09-22 (v5.7.0)
 
 ### Added
