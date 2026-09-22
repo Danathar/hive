@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-22 (v5.4.2)
+
+### Fixed
+
+- Resolve hivectl bootstrap images from the checkout and refuse staged binaries that are stale for checkout-local hivectl changes.
+
 ## 2026-09-22 (v5.4.1)
 
 ### Fixed
