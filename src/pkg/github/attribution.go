@@ -214,6 +214,15 @@ func (m InvocationMeta) AuditDetail(extra ...string) string {
 	return strings.Join(parts, ", ")
 }
 
+// Run trailer keys (hivecommons/hive#8310). An implementation PR opened for a
+// long-running run carries `Hive-Run: <run key>` and `Hive-Plan: <plan ref>`
+// as git-style trailer lines in its body, so downstream consumers can find the
+// run and the approved plan the PR claims to implement.
+const (
+	RunTrailerKey  = "Hive-Run:"
+	PlanTrailerKey = "Hive-Plan:"
+)
+
 // AppendRunTrailers appends the long-running run identity trailers expected on
 // implementation PRs. The operation is idempotent so watcher retries do not
 // stack duplicate metadata.
@@ -227,19 +236,19 @@ func AppendRunTrailers(body, runKey, planRef string) string {
 	hasRun, hasPlan := false, false
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "Hive-Run:") {
+		if strings.HasPrefix(line, RunTrailerKey) {
 			hasRun = true
 		}
-		if strings.HasPrefix(line, "Hive-Plan:") {
+		if strings.HasPrefix(line, PlanTrailerKey) {
 			hasPlan = true
 		}
 	}
 	trailers := []string{}
 	if runKey != "" && !hasRun {
-		trailers = append(trailers, "Hive-Run: "+runKey)
+		trailers = append(trailers, RunTrailerKey+" "+runKey)
 	}
 	if planRef != "" && !hasPlan {
-		trailers = append(trailers, "Hive-Plan: "+planRef)
+		trailers = append(trailers, PlanTrailerKey+" "+planRef)
 	}
 	if len(trailers) == 0 {
 		return body
@@ -249,6 +258,21 @@ func AppendRunTrailers(body, runKey, planRef string) string {
 		return strings.Join(trailers, "\n")
 	}
 	return body + "\n\n" + strings.Join(trailers, "\n")
+}
+
+// ParseRunTrailers extracts the run key and plan ref from a PR body. Each is
+// the trimmed remainder of the first line that starts with its key.
+func ParseRunTrailers(body string) (runKey, planRef string) {
+	for _, line := range strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case runKey == "" && strings.HasPrefix(line, RunTrailerKey):
+			runKey = strings.TrimSpace(strings.TrimPrefix(line, RunTrailerKey))
+		case planRef == "" && strings.HasPrefix(line, PlanTrailerKey):
+			planRef = strings.TrimSpace(strings.TrimPrefix(line, PlanTrailerKey))
+		}
+	}
+	return runKey, planRef
 }
 
 // AppendTrailer appends the visible trailer to body, blank-line separated.

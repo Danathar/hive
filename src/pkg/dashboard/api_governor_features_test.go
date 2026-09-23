@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/hivecommons/hive/pkg/config"
+	"github.com/hivecommons/hive/pkg/issueclaim"
 )
 
 // TestCovGov_Features exercises PUT /api/config/governor/features: a bad body is
@@ -56,6 +57,8 @@ func TestCovGov_Features(t *testing.T) {
 		"planFromLabel":          planTrue,
 		"formalEnabled":          true,
 		"personaLearningEnabled": true,
+		"claimsEnabled":          true,
+		"claimsTtlS":             7200,
 	}); rec.Code != http.StatusOK {
 		t.Fatalf("features ok: %d", rec.Code)
 	}
@@ -63,6 +66,9 @@ func TestCovGov_Features(t *testing.T) {
 	cfg := s.deps.Config
 	if !cfg.Persona.Learning.Enabled {
 		t.Errorf("persona.learning.enabled not persisted from personaLearningEnabled")
+	}
+	if !cfg.Governor.Claims.Enabled || cfg.Governor.Claims.TTLS != 7200 {
+		t.Errorf("claims = %+v, want enabled with ttl_s 7200", cfg.Governor.Claims)
 	}
 	if !cfg.Ioscan.IsEnabled() {
 		t.Errorf("ioscan not enabled")
@@ -175,6 +181,57 @@ func TestCovGov_FeaturesFormalRoundTripAndGate(t *testing.T) {
 	}
 	if !payload.Features.FormalEnabled || payload.Features.FormalAvailable {
 		t.Fatalf("low-ACMM formal payload = %+v, want persisted enabled but unavailable", payload.Features)
+	}
+}
+
+// review.plan_match.enabled (#8317) follows the formal toggle's contract:
+// owner-only, absent key leaves it alone, explicit false turns it off, and
+// the GET reports it so the Features tab can prefill the switch.
+func TestCovGov_FeaturesPlanMatchToggle(t *testing.T) {
+	s := covApiServer(t)
+	if s.deps.Config.Review.PlanMatch.Enabled {
+		t.Fatal("plan_match must default off")
+	}
+	if rec := putFeatures(s, map[string]any{"planMatchEnabled": true}, func(r *http.Request) {
+		r.Header.Set("X-Hive-Role", "read-write")
+	}); rec.Code != http.StatusForbidden {
+		t.Fatalf("non-owner PUT planMatchEnabled = %d, want 403", rec.Code)
+	}
+	if rec := doPut(s, "/api/config/governor/features", map[string]any{"planMatchEnabled": true}); rec.Code != http.StatusOK {
+		t.Fatalf("plan_match toggle PUT: %d — %s", rec.Code, rec.Body.String())
+	}
+	if !s.deps.Config.Review.PlanMatch.Enabled {
+		t.Fatal("review.plan_match.enabled was not persisted into config")
+	}
+	// A PUT that does not mention the key leaves it as it was.
+	if rec := doPut(s, "/api/config/governor/features", map[string]any{"retroEnabled": true}); rec.Code != http.StatusOK {
+		t.Fatalf("unrelated PUT: %d", rec.Code)
+	}
+	if !s.deps.Config.Review.PlanMatch.Enabled {
+		t.Fatal("absent planMatchEnabled key cleared the toggle")
+	}
+
+	rec := doOwnerGet(s, "/api/config/governor")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET governor config: %d — %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Features struct {
+			PlanMatchEnabled bool `json:"planMatchEnabled"`
+		} `json:"features"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decoding governor payload: %v", err)
+	}
+	if !payload.Features.PlanMatchEnabled {
+		t.Fatalf("features payload does not report plan_match on: %s", rec.Body.String())
+	}
+
+	if rec := doPut(s, "/api/config/governor/features", map[string]any{"planMatchEnabled": false}); rec.Code != http.StatusOK {
+		t.Fatalf("plan_match off PUT: %d", rec.Code)
+	}
+	if s.deps.Config.Review.PlanMatch.Enabled {
+		t.Fatal("explicit false did not turn plan_match off")
 	}
 }
 
@@ -412,5 +469,113 @@ func TestCovGov_PersonaLearningToggleDefaultOffAndRoundTrips(t *testing.T) {
 	}
 	if rec := doPut(s, "/api/config/governor/features", map[string]any{"personaLearningEnabled": false}); rec.Code != http.StatusOK || s.deps.Config.Persona.Learning.Enabled {
 		t.Fatalf("persona learning toggle off: %d, enabled=%v", rec.Code, s.deps.Config.Persona.Learning.Enabled)
+	}
+}
+
+// #8380: the issue-claims toggle follows the formalEnabled pattern — off by
+// default, owner-writable, reported on the governor GET with the effective
+// TTL, and a negative TTL is refused.
+func TestGovernorFeatures_IssueClaimsToggle(t *testing.T) {
+	s := covApiServer(t)
+
+	rec := doOwnerGet(s, "/api/config/governor")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET governor config: %d — %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Features struct {
+			ClaimsEnabled bool `json:"claimsEnabled"`
+			ClaimsTTLS    int  `json:"claimsTtlS"`
+		} `json:"features"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decoding governor payload: %v", err)
+	}
+	if payload.Features.ClaimsEnabled {
+		t.Fatal("claims must report off by default")
+	}
+	if payload.Features.ClaimsTTLS != int(issueclaim.DefaultTTL.Seconds()) {
+		t.Fatalf("claimsTtlS = %d, want the default %d", payload.Features.ClaimsTTLS, int(issueclaim.DefaultTTL.Seconds()))
+	}
+
+	if rec := doPut(s, "/api/config/governor/features", map[string]any{"claimsTtlS": -1}); rec.Code != http.StatusBadRequest {
+		t.Fatalf("negative ttl accepted: %d", rec.Code)
+	}
+	if rec := doPut(s, "/api/config/governor/features", map[string]any{"claimsEnabled": true, "claimsTtlS": 600}); rec.Code != http.StatusOK {
+		t.Fatalf("PUT claims: %d — %s", rec.Code, rec.Body.String())
+	}
+	rec = doOwnerGet(s, "/api/config/governor")
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decoding governor payload: %v", err)
+	}
+	if !payload.Features.ClaimsEnabled || payload.Features.ClaimsTTLS != 600 {
+		t.Fatalf("claims payload = %+v, want enabled with 600s", payload.Features)
+	}
+}
+
+// TestCovGov_FeaturesPublicationRoundTripAndGate covers the audit issue
+// publisher toggle (#8353): owner-only, persisted into config, an unroutable
+// private channel rejected before anything is mutated, and the GET payload
+// reporting the ACMM L3 availability gate.
+func TestCovGov_FeaturesPublicationRoundTripAndGate(t *testing.T) {
+	s := covApiServer(t)
+	level := config.PublicationMinACMMLevel
+	s.deps.Config.ACMMLevel = &level
+
+	if rec := putFeatures(s, map[string]any{"publicationEnabled": true}, func(r *http.Request) {
+		r.Header.Set("X-Hive-Role", "read-write")
+	}); rec.Code != http.StatusForbidden {
+		t.Fatalf("non-owner PUT publicationEnabled = %d, want 403", rec.Code)
+	}
+	if rec := doPut(s, "/api/config/governor/features", map[string]any{
+		"publicationEnabled": true, "publicationPrivateChannel": "mailto:security@example.com",
+	}); rec.Code != http.StatusBadRequest {
+		t.Fatalf("unroutable private channel = %d, want 400", rec.Code)
+	}
+	if s.deps.Config.Publication.Enabled {
+		t.Fatal("a rejected body must not mutate publication.enabled")
+	}
+	if rec := doPut(s, "/api/config/governor/features", map[string]any{
+		"publicationEnabled": true, "publicationPrivateChannel": " repo:acme/security ", "publicationOwner": " maintainer ",
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("publication toggle PUT: %d — %s", rec.Code, rec.Body.String())
+	}
+	got := s.deps.Config.Publication
+	if !got.Enabled || got.PrivateChannel != "repo:acme/security" || got.Owner != "maintainer" {
+		t.Fatalf("publication config = %+v", got)
+	}
+
+	rec := doOwnerGet(s, "/api/config/governor")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET governor config: %d — %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Features struct {
+			PublicationEnabled        bool   `json:"publicationEnabled"`
+			PublicationPrivateChannel string `json:"publicationPrivateChannel"`
+			PublicationOwner          string `json:"publicationOwner"`
+			PublicationAvailable      bool   `json:"publicationAvailable"`
+			PublicationMinACMMLevel   int    `json:"publicationMinACMMLevel"`
+		} `json:"features"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decoding governor payload: %v", err)
+	}
+	f := payload.Features
+	if !f.PublicationEnabled || !f.PublicationAvailable || f.PublicationPrivateChannel != "repo:acme/security" || f.PublicationOwner != "maintainer" {
+		t.Fatalf("publication payload = %+v", f)
+	}
+	if f.PublicationMinACMMLevel != config.PublicationMinACMMLevel {
+		t.Fatalf("publication min level = %d, want %d", f.PublicationMinACMMLevel, config.PublicationMinACMMLevel)
+	}
+
+	low := config.PublicationMinACMMLevel - 1
+	s.deps.Config.ACMMLevel = &low
+	rec = doOwnerGet(s, "/api/config/governor")
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decoding low-ACMM governor payload: %v", err)
+	}
+	if !payload.Features.PublicationEnabled || payload.Features.PublicationAvailable {
+		t.Fatalf("low-ACMM publication payload = %+v, want persisted enabled but unavailable", payload.Features)
 	}
 }

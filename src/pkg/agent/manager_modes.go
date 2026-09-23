@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+
+	"github.com/hivecommons/hive/pkg/config"
 )
 
 // ClearModeOverrides clears Config.Mode for the NAMED agents so that
@@ -338,6 +340,12 @@ func (m *Manager) InvocationMetadata(agentName string) (backend, model, effort s
 //   - codex is launched with `-c model_reasoning_effort` only when an effort
 //     is configured; unset means codex's own default, which the hive does not
 //     resolve, so the honest answer is the configured value verbatim.
+//   - claude is launched with `--effort` only when the configured effort is
+//     one Claude Code accepts (claudeEffortFlag drops anything else), so the
+//     answer is the configured value when valid and "" otherwise — never a
+//     value the CLI was not actually given (hivecommons/hive#8377).
+//   - omp is launched with `--thinking` only when an effort is configured;
+//     unset means omp's per-model default, so report the configured value.
 //   - every other backend takes its effort from its own config, which the
 //     hive does not resolve here, so the honest answer is "".
 func ResolveReasoningEffort(backend, model, configured string) string {
@@ -347,8 +355,13 @@ func ResolveReasoningEffort(backend, model, configured string) string {
 			return agyLaunchEffort(configured)
 		}
 		return ""
-	case codexBackend:
+	case codexBackend, "omp":
 		return configured
+	case config.ClaudeBackend:
+		if config.ValidEffort(config.ClaudeBackend, configured) {
+			return configured
+		}
+		return ""
 	}
 	return ""
 }

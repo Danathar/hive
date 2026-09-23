@@ -11,6 +11,8 @@ import (
 	"github.com/hivecommons/hive/pkg/agent"
 	"github.com/hivecommons/hive/pkg/beads"
 	"github.com/hivecommons/hive/pkg/config"
+	"github.com/hivecommons/hive/pkg/convergence/outcome"
+	"github.com/hivecommons/hive/pkg/convergence/publish"
 	"github.com/hivecommons/hive/pkg/dashboard"
 	"github.com/hivecommons/hive/pkg/dashboard/collect"
 	"github.com/hivecommons/hive/pkg/dashchat"
@@ -102,6 +104,8 @@ type boot struct {
 	mentionStore                  *mention.Store
 	refreshDashboard              func()
 	mutationBoundary              effects.Boundary
+	findingPublisher              *publish.Publisher
+	outcomeLedger                 *outcome.Ledger
 	heartbeatFleetStats           func() (*int, *int, *int, string)
 	heartbeatRepoActivity         func() ([]spoke.RepoActivityWire, string, int, int)
 	heartbeatBudgetWindow         func() (*int64, *int64, *bool, string, string)

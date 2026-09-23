@@ -10,6 +10,7 @@ import (
 	"github.com/hivecommons/hive/pkg/github"
 	"github.com/hivecommons/hive/pkg/ioscan"
 	"github.com/hivecommons/hive/pkg/planning"
+	"github.com/hivecommons/hive/pkg/worksource"
 )
 
 // planEpicStore returns the bead store to mint issue-sourced epics into: the
@@ -269,7 +270,7 @@ func (s *Server) handlePlanDesignApprove(w http.ResponseWriter, r *http.Request)
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	s.auditFromRequest(r, "design_approved", auditDetail("epic", epicID, "label", label), agentName)
+	s.auditFromRequest(r, "design_approved", auditDetail("epic", epicID, "label", label, "run", repo+"#"+strconv.Itoa(number), "surface", "design"), agentName)
 	s.refreshAndPersist()
 	tree, _ := planning.GetPlanTree(store, epicID)
 	jsonResponse(w, map[string]interface{}{"ok": true, "status": "approved", "plan": tree})
@@ -455,11 +456,18 @@ func (s *Server) handlePlanApprove(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "epic not found in any bead store", http.StatusNotFound)
 		return
 	}
+	runKey := ""
+	if epic, err := store.Get(epicID); err == nil {
+		repo, number := epic.Meta(planning.MetaIssueRepo), epic.Meta(planning.MetaIssueNumber)
+		if repo != "" && number != "" {
+			runKey = repo + "#" + number
+		}
+	}
 	if err := planning.ApprovePlan(store, epicID); err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	s.auditFromRequest(r, "plan_approve", auditDetail("epic", epicID), agentName)
+	s.auditFromRequest(r, "plan_approve", auditDetail("epic", epicID, "run", runKey, "surface", "plan"), agentName)
 	s.refreshAndPersist()
 	tree, _ := planning.GetPlanTree(store, epicID)
 	mirrored := s.mirrorPlanToIssue(r, store, tree, agentName)
@@ -488,10 +496,39 @@ func (s *Server) handlePlanReject(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if err := s.resetRunLeaseAfterPlanReject(store, epicID); err != nil {
+		jsonError(w, err.Error(), runResetErrorStatus(err))
+		return
+	}
 	s.auditFromRequest(r, "plan_reject", auditDetail("epic", epicID), agentName)
 	s.refreshAndPersist()
 	tree, _ := planning.GetPlanTree(store, epicID)
 	jsonResponse(w, map[string]interface{}{"ok": true, "status": "draft", "plan": tree})
+}
+
+func (s *Server) resetRunLeaseAfterPlanReject(store *beads.Store, epicID string) error {
+	if s == nil || s.contributeHub == nil || store == nil {
+		return nil
+	}
+	epic, err := store.Get(epicID)
+	if err != nil || epic == nil {
+		return nil
+	}
+	repo, number := strings.TrimSpace(epic.Meta(planning.MetaIssueRepo)), strings.TrimSpace(epic.Meta(planning.MetaIssueNumber))
+	if repo == "" || number == "" {
+		return nil
+	}
+	key := worksource.Ref{Repo: repo, ExternalID: number}.Key()
+	if n, err := strconv.Atoi(number); err == nil && n > 0 {
+		key = worksource.Ref{Repo: repo, Number: n}.Key()
+	}
+	now := time.Now()
+	held, ok := s.contributeHub.runLeaseHolder(key, now)
+	if !ok || leaseStageIndex(held.stage) <= leaseStageIndex(StagePlan) {
+		return nil
+	}
+	_, err = s.contributeHub.resetLeaseStage(held.identity, held.taskID, StagePlan, "plan rejected", now)
+	return err
 }
 
 // handlePlanChild serves POST /api/plan/{epicID}/child/{childID}: edit a child

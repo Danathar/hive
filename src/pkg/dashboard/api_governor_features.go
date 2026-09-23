@@ -29,6 +29,13 @@ const (
 //     secret-free)
 //   - plan_from_label   (Config.Planning.PlanFromLabel, a *bool tri-state)
 //   - quality.formal    (Config.Quality.Formal opt-in, ACMM L5+ effective gate)
+//   - review.plan_match (Config.Review.PlanMatch.Enabled, the plan_match
+//     review perspective, hivecommons/hive#8317)
+//   - runs.spektacular  (Config.Runs.Spektacular.Enabled + Binary; the stage
+//     runner of hivecommons/hive#8303, default off)
+//   - publication       (Config.Publication: the audit campaign's authorized
+//     issue publisher, default off, ACMM L3+ effective gate, plus the private
+//     disclosure channel security-sensitive findings route to)
 //
 // Every field is a pointer so an absent key leaves the corresponding config
 // untouched — the same "only what you send is changed" contract the other
@@ -82,6 +89,16 @@ func (s *Server) handleGovernorFeatures(w http.ResponseWriter, r *http.Request) 
 		RunWaitTimeoutSeconds      *int    `json:"runWaitTimeoutSeconds"`
 		RunWaitSeverity            *string `json:"runWaitSeverity"`
 
+		PlanMatchEnabled          *bool   `json:"planMatchEnabled"`
+		SpektacularEnabled        *bool   `json:"spektacularEnabled"`
+		SpektacularBinary         *string `json:"spektacularBinary"`
+		PublicationEnabled        *bool   `json:"publicationEnabled"`
+		PublicationPrivateChannel *string `json:"publicationPrivateChannel"`
+		PublicationOwner          *string `json:"publicationOwner"`
+
+		ClaimsEnabled *bool `json:"claimsEnabled"`
+		ClaimsTTLS    *int  `json:"claimsTtlS"`
+
 		RotationEnabled            *bool                                     `json:"rotationEnabled"`
 		RotationThresholdPct       *int                                      `json:"rotationThresholdPct"`
 		RotationHighVolumeCadenceS *int                                      `json:"rotationHighVolumeCadenceS"`
@@ -112,6 +129,10 @@ func (s *Server) handleGovernorFeatures(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	}
+	if body.ClaimsTTLS != nil && *body.ClaimsTTLS < 0 {
+		jsonError(w, "claims ttl_s must be zero (default) or positive", http.StatusBadRequest)
+		return
+	}
 	if body.RotationThresholdPct != nil && (*body.RotationThresholdPct < 1 || *body.RotationThresholdPct > 100) {
 		jsonError(w, "rotation threshold must be between 1 and 100", http.StatusBadRequest)
 		return
@@ -137,6 +158,13 @@ func (s *Server) handleGovernorFeatures(w http.ResponseWriter, r *http.Request) 
 				jsonError(w, fmt.Sprintf("invalid rotation tier for %s: %s", agent, tier), http.StatusBadRequest)
 				return
 			}
+		}
+	}
+	if body.PublicationPrivateChannel != nil {
+		probe := config.PublicationConfig{PrivateChannel: strings.TrimSpace(*body.PublicationPrivateChannel)}
+		if err := probe.Validate(); err != nil {
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
 		}
 	}
 	if body.RotationProviders != nil {
@@ -221,6 +249,30 @@ func (s *Server) handleGovernorFeatures(w http.ResponseWriter, r *http.Request) 
 	if body.RunWaitSeverity != nil {
 		cfg.Runs.WaitSeverity = strings.ToLower(strings.TrimSpace(*body.RunWaitSeverity))
 	}
+	if body.PlanMatchEnabled != nil {
+		cfg.Review.PlanMatch.Enabled = *body.PlanMatchEnabled
+	}
+	if body.ClaimsEnabled != nil {
+		cfg.Governor.Claims.Enabled = *body.ClaimsEnabled
+	}
+	if body.ClaimsTTLS != nil {
+		cfg.Governor.Claims.TTLS = *body.ClaimsTTLS
+	}
+	if body.SpektacularEnabled != nil {
+		cfg.Runs.Spektacular.Enabled = *body.SpektacularEnabled
+	}
+	if body.SpektacularBinary != nil {
+		cfg.Runs.Spektacular.Binary = strings.TrimSpace(*body.SpektacularBinary)
+	}
+	if body.PublicationEnabled != nil {
+		cfg.Publication.Enabled = *body.PublicationEnabled
+	}
+	if body.PublicationPrivateChannel != nil {
+		cfg.Publication.PrivateChannel = strings.TrimSpace(*body.PublicationPrivateChannel)
+	}
+	if body.PublicationOwner != nil {
+		cfg.Publication.Owner = strings.TrimSpace(*body.PublicationOwner)
+	}
 	if body.RotationEnabled != nil {
 		cfg.Governor.Rotation.Enabled = *body.RotationEnabled
 	}
@@ -278,6 +330,7 @@ func featuresSectionResponse(cfg *config.Config) map[string]interface{} {
 		"mintIssuer":                      cfg.Mint.Issuer,
 		"planFromLabel":                   planFromLabel,
 		"formalEnabled":                   cfg.Quality.Formal,
+		"planMatchEnabled":                cfg.Review.PlanMatch.Enabled,
 		"formalAvailable":                 acmmLevel >= config.FormalQualityMinACMMLevel,
 		"formalMinACMMLevel":              config.FormalQualityMinACMMLevel,
 		"personaLearningEnabled":          cfg.Persona.Learning.Enabled,
@@ -288,7 +341,18 @@ func featuresSectionResponse(cfg *config.Config) map[string]interface{} {
 		"checkpointImplementMinACMMLevel": config.RunImplementCheckpointMinACMM,
 		"runWaitTimeoutSeconds":           cfg.Runs.EffectiveWaitTimeoutSeconds(),
 		"runWaitSeverity":                 cfg.Runs.EffectiveWaitSeverity(),
+		"claimsEnabled":                   cfg.Governor.Claims.Enabled,
+		"claimsTtlS":                      int(cfg.Governor.Claims.EffectiveTTL().Seconds()),
+		"publicationEnabled":              cfg.Publication.Enabled,
+		"publicationPrivateChannel":       cfg.Publication.PrivateChannel,
+		"publicationOwner":                cfg.Publication.Owner,
+		"publicationAvailable":            acmmLevel >= config.PublicationMinACMMLevel,
+		"publicationMinACMMLevel":         config.PublicationMinACMMLevel,
 		"acmmLevel":                       acmmLevel,
+		"spektacularEnabled":              cfg.Runs.Spektacular.Enabled,
+		"spektacularBinary":               cfg.Runs.Spektacular.Binary,
+		"spektacularPollS":                int(cfg.Runs.Spektacular.PollInterval().Seconds()),
+		"maxStageRetries":                 cfg.Runs.MaxStageRetriesOrDefault(),
 		"rotationEnabled":                 rotationCfg.Enabled,
 		"rotationThresholdPct":            rotationCfg.EffectiveThreshold(),
 		"rotationHighVolumeCadenceS":      rotationCfg.EffectiveHighVolumeCadenceS(),
@@ -317,7 +381,7 @@ func validRunWaitSeverity(severity string) bool {
 
 func governorFeatureBackendIDs() map[string]struct{} {
 	return map[string]struct{}{
-		"claude": {}, "copilot": {}, bobBackendID: {}, "gemini": {}, "goose": {}, agyBackendID: {},
+		"claude": {}, "copilot": {}, bobBackendID: {}, "gemini": {}, "goose": {}, agyBackendID: {}, ompBackendID: {},
 		"vllm": {}, "llm-d": {}, "litellm": {},
 	}
 }

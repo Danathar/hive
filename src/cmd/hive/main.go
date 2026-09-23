@@ -80,6 +80,7 @@ import (
 	"github.com/hivecommons/hive/pkg/watchdog"
 	"github.com/hivecommons/hive/pkg/watsonx"
 	"github.com/hivecommons/hive/pkg/worksource"
+	_ "github.com/hivecommons/hive/pkg/worksource/wavefront" // registers the additive Wavefront source (#8362)
 	"go.opentelemetry.io/otel/attribute"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
@@ -3387,6 +3388,7 @@ func (b *boot) bootDashboardAPI() { b.bootDashboardAPIWith(defaultBootDashboardA
 // injected; see bootDashboardAPIDeps.
 func (b *boot) bootDashboardAPIWith(deps bootDashboardAPIDeps) {
 	deps.registerAPI(b.dashSrv, b.dashboardDependencies())
+	wireSpektacularRunner(b.cfg, b.dashSrv, b.logger)
 	// Forge App tab inventory: the resolved active key path and the per-app-id
 	// PVC keys live here in cmd/hive, so they are injected as a provider (the
 	// SetGitHubAppRecheckFn pattern). Fingerprints and paths only — the
@@ -3631,6 +3633,11 @@ func (b *boot) bootPoliciesWith(deps bootPoliciesDeps) {
 			b.logger.Warn("policy watcher failed to start", "error", err)
 		}
 	}
+
+	// The authorized issue publisher (#8353) needs the ACMM level applied
+	// above, the mutation boundary from bootAdvisory, and the dashboard's
+	// audit sink, so it is composed here rather than beside the boundary.
+	b.wireFindingPublisher()
 }
 
 // bootWatchers starts the hive.yaml watcher with its reload handler, wires
@@ -6655,7 +6662,7 @@ func runEvalCycle(
 	kickActionable := applyConvergenceKickAdmission(cfg, dashSrv, actionable, notifier, logger)
 
 	sched.SetLastActionable(kickActionable)
-	reviewPlan := planReviewDispatch(cfg, actionable, agentMgr, logger)
+	reviewPlan := planReviewDispatch(cfg, actionable, agentMgr, beadStores, logger)
 	emitReviewHumanEscalations(reviewPlan)
 	applyHumanDecisionLabels(ctx, cfg, ghClient, actionable, reviewPlan, logger)
 	messages := sched.BuildKickMessages(kickActionable, agentsDue)
@@ -8168,6 +8175,15 @@ func applyDuplicatePRGuard(
 	actionable *github.ActionableResult,
 	logger *slog.Logger,
 ) {
+	// #8380: a LIVE issue claim covers an issue the same way an open PR does,
+	// for every kick prompt (the scanner's included). The claim fields are
+	// only ever set while governor.claims.enabled is on, so with the feature
+	// off this touches nothing.
+	if cfg != nil && cfg.Governor.Claims.Enabled {
+		if withheld := github.FilterLiveIssueClaims(actionable, time.Now(), logger); withheld > 0 {
+			logger.Info("issue-claim guard applied", "withheld", withheld)
+		}
+	}
 	ledger := getClaimLedger(logger)
 	if ledger == nil {
 		return
@@ -8258,6 +8274,12 @@ func installReviewRelaySettings(client *github.Client, cfg *config.Config, logge
 	client.SetReviseRepos(cfg.Review.ReviseRepos)
 	client.SetPerspectives(reviewPerspectiveSet(cfg, logger))
 	client.SetConfidenceScore(func() bool { return cfg.Review.ConfidenceScore })
+	// #8380: issue claims are read at enumeration time only while
+	// governor.claims.enabled is on; the setting is read live so the Features
+	// toggle applies without a client rebuild.
+	client.SetIssueClaims(func() (bool, time.Duration) {
+		return cfg.Governor.Claims.Enabled, cfg.Governor.Claims.EffectiveTTL()
+	})
 	client.SetReviewCadenceLimits(
 		func() bool { return cfg.Review.CombinedPerspectives },
 		func() int { return cfg.Review.MaxReviewsPerHead },
@@ -8444,9 +8466,33 @@ func reviewPerspectiveSet(cfg *config.Config, logger *slog.Logger) review.Perspe
 			logger.Warn("review.perspectives is invalid; reviewing with the built-in set until it is fixed",
 				"error", err)
 		}
-		return review.PerspectiveSet{}
+		set = review.PerspectiveSet{}
+	}
+	// plan_match (#8317) is a separate switch from the selection so turning
+	// it on never requires spelling out the whole set. Applied on the
+	// fallback path too: a typo elsewhere in the selection must not silently
+	// turn plan matching off.
+	if cfg.Review.PlanMatch.Enabled {
+		set = set.WithPlanMatch()
 	}
 	return set
+}
+
+// planWaveFor renders the approved plan a PR's run trailers name, for the
+// plan_match perspective (#8317). The Hive-Plan ref is tried first, then the
+// Hive-Run key, since either may carry the epic ID or the source issue ref.
+// Empty when plan_match is off, the PR has no trailer, or no store holds the
+// plan -- the kick tells the reviewer which of those it is.
+func planWaveFor(cfg *config.Config, stores map[string]*beads.Store, planRef, runKey string) string {
+	if cfg == nil || !cfg.Review.PlanMatch.Enabled {
+		return ""
+	}
+	for _, ref := range []string{planRef, runKey} {
+		if tree, ok := planning.FindPlanTree(stores, ref); ok {
+			return tree.WaveText()
+		}
+	}
+	return ""
 }
 
 func parseReviseCutoff(raw string, logger *slog.Logger) time.Time {
@@ -8465,7 +8511,7 @@ func parseReviseCutoff(raw string, logger *slog.Logger) time.Time {
 	return cutoff
 }
 
-func planReviewDispatch(cfg *config.Config, actionable *github.ActionableResult, agentMgr *agent.Manager, logger *slog.Logger) review.DispatchPlan {
+func planReviewDispatch(cfg *config.Config, actionable *github.ActionableResult, agentMgr *agent.Manager, beadStores map[string]*beads.Store, logger *slog.Logger) review.DispatchPlan {
 	if cfg == nil || actionable == nil || !cfg.Review.RequireApproval || !cfg.Review.FanOut {
 		return review.DispatchPlan{}
 	}
@@ -8496,6 +8542,12 @@ func planReviewDispatch(cfg *config.Config, actionable *github.ActionableResult,
 			// to read rather than being left to infer from the diff.
 			MergeBase:   pr.BaseSHA,
 			AuthorAgent: prAgents[fmt.Sprintf("%s#%d", fullRepo, pr.Number)],
+			// Run trailers (#8310) and the plan they name, for plan_match
+			// (#8317). Identifiers and planner output only: the PR body
+			// itself still never reaches the prompt.
+			RunKey:   pr.HiveRun,
+			PlanRef:  pr.HivePlan,
+			PlanWave: planWaveFor(cfg, beadStores, pr.HivePlan, pr.HiveRun),
 		})
 	}
 	agents := make([]review.AgentCapability, 0, len(cfg.Agents))
