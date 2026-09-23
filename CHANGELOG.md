@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-23 (v5.27.0)
+
+### Added
+
+- Operators can now send a short one-to-one message to a contributor from Operations; it appears in that contributor's relay terminal and signed-in `/contribute` pages until acknowledged ([#8461](https://github.com/hivecommons/hive/issues/8461)).
+
 ## 2026-09-23 (v5.26.0)
 
 ### Added
