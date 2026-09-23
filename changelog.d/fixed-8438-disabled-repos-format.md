@@ -1,1 +1,0 @@
-- Normalize contribute disabled repositories to owner/name across Governor Hub and Management toggles while preserving legacy short/full stored entries on read (#8438)
