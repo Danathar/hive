@@ -11,6 +11,19 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-23 (v5.22.0)
+
+### Added
+
+- Wire Spektacular multi-repo run plans to Wavefront fan-out when `governor.work_source.wavefront.enabled` is on, and surface the created wave ids on run details.
+- #8488 Contribute Operations now ranks the most effective model/CLI combinations with sample-size guards.
+- Activate convergence audit campaigns from the owner-only runs API, running inspection even when publication remains disabled.
+- Dispatch report-only external workflow assignments to their configured engine and attach authenticated OMP workbench peers.
+
+### Fixed
+
+- Comment and label contribute issues when agents verify they were already resolved, with a longer already-done hold to prevent repeat offers (#8477)
+
 ## 2026-09-23 (v5.21.0)
 
 ### Added
