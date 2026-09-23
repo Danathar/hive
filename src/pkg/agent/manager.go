@@ -1085,8 +1085,7 @@ func (m *Manager) waitForInputPromptForAgentUnless(agent *AgentProcess, abort fu
 			if paneShowsAgentWorking(visible) {
 				continue
 			}
-			output := m.captureTmuxPaneForAgent(agent)
-			if paneShowsInputPrompt(output) {
+			if paneShowsInputPrompt(visible) {
 				return true
 			}
 		}
