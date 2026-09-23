@@ -1558,6 +1558,36 @@ func (c *Client) GetPRAuthor(ctx context.Context, repo string, number int) (stri
 	return safeGetLogin(pr.GetUser()), nil
 }
 
+// PRState is the answer to "what became of this PR": GitHub's open/closed
+// state plus the merge and close timestamps that tell the two apart.
+type PRState struct {
+	State    string
+	MergedAt time.Time
+	ClosedAt time.Time
+}
+
+// GetPRState fetches a single PR's state. The review-outcome ledger calls it
+// for PRs that left the governor's open list, one GET each, so the ledger can
+// tell a merge from a close from a transient enumeration miss.
+func (c *Client) GetPRState(ctx context.Context, repo string, number int) (PRState, error) {
+	if c == nil {
+		return PRState{}, ErrNoGitHubClient
+	}
+	owner, repoName := c.splitRepo(repo)
+	pr, _, err := c.client.PullRequests.Get(ctx, owner, repoName, number)
+	if err != nil {
+		return PRState{}, err
+	}
+	st := PRState{State: pr.GetState()}
+	if !pr.GetMergedAt().IsZero() {
+		st.MergedAt = pr.GetMergedAt().Time
+	}
+	if !pr.GetClosedAt().IsZero() {
+		st.ClosedAt = pr.GetClosedAt().Time
+	}
+	return st, nil
+}
+
 // QueuePRAutoMerge approves a PR as the hive App and marks it for Hive's
 // auto-merge-on-green sweep. The approval body records who queued the PR so
 // the sweep can re-check the self-merge ban before it squashes anything.
@@ -1678,6 +1708,31 @@ func (c *Client) AddLabels(ctx context.Context, repo string, number int, labels 
 		Inputs: map[string]string{"labels": strings.Join(labels, ",")},
 	}, func(ctx context.Context) (effects.Result, error) {
 		_, _, apiErr := c.client.Issues.AddLabelsToIssue(ctx, owner, repoName, number, labels)
+		return effects.Result{Provenance: owner + "/" + repoName + "#" + strconv.Itoa(number)}, apiErr
+	})
+	return err
+}
+
+// RemoveLabel removes one label from an issue or PR. A label that is not
+// present (404) is not an error — the desired end state already holds.
+func (c *Client) RemoveLabel(ctx context.Context, repo string, number int, label string) error {
+	if c == nil {
+		return ErrNoGitHubClient
+	}
+	if label == "" {
+		return nil
+	}
+	owner, repoName := c.splitRepo(repo)
+	_, err := effects.Execute(ctx, c.mutationBoundary(), effects.Claim{
+		Repo:   owner + "/" + repoName,
+		Kind:   effects.KindLabelMutation,
+		Target: strconv.Itoa(number),
+		Inputs: map[string]string{"remove_label": label},
+	}, func(ctx context.Context) (effects.Result, error) {
+		_, apiErr := c.client.Issues.RemoveLabelForIssue(ctx, owner, repoName, number, url.PathEscape(label))
+		if githubStatusError(apiErr, http.StatusNotFound) {
+			apiErr = nil
+		}
 		return effects.Result{Provenance: owner + "/" + repoName + "#" + strconv.Itoa(number)}, apiErr
 	})
 	return err

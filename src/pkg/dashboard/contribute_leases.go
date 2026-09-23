@@ -548,7 +548,38 @@ func (h *ContributeWSHub) completeImplementStage(identity, taskID string, now ti
 
 	h.recordLeaseStageAudit(agent.AuditLeaseStageAdvanced, taskID, StageImplement, "completed", "", completed.gen)
 	h.emitLeaseStageTransitionAt(StageImplement, "completed", "", false, completed, now)
+	if err := removeRunStageWorktree(completed.identity, leaseWorkKey(&completed), completed.stage, completed.gen); err != nil {
+		h.logger.Warn("[contribute-ws] completed run-stage worktree cleanup failed",
+			"identity", completed.identity, "task", taskID, "error", err)
+	}
 	return true
+}
+
+func (h *ContributeWSHub) completeWavefrontTask(task *WSTaskAssign, labels []string, startedAt time.Time) {
+	if h == nil || h.server == nil || h.server.deps == nil || h.server.deps.WavefrontComplete == nil || task == nil {
+		return
+	}
+	if task.Stage != StageImplement || task.SourceType != worksource.SourceTypeRun || strings.TrimSpace(task.ExternalID) == "" {
+		return
+	}
+	revision, ok := wavefrontRevisionFromLabels(labels)
+	if !ok {
+		return
+	}
+	if err := h.server.deps.WavefrontComplete(context.Background(), task.identityKey(), task.ExternalID, revision, startedAt); err != nil {
+		h.logger.Warn("[contribute-ws] wavefront completion failed",
+			"task", task.TaskID, "key", task.identityKey(), "error", err)
+	}
+}
+
+func wavefrontRevisionFromLabels(labels []string) (string, bool) {
+	const prefix = "graph-rev/"
+	for _, label := range labels {
+		if rev, ok := strings.CutPrefix(label, prefix); ok && strings.TrimSpace(rev) != "" {
+			return strings.TrimSpace(rev), true
+		}
+	}
+	return "", false
 }
 
 // leaseStageTransitionSummary is the one-line CEL trigger description of a
@@ -574,7 +605,15 @@ func (h *ContributeWSHub) runLeaseHolder(key string, now time.Time) (taskLease, 
 	defer h.leaseMu.Unlock()
 	var best *taskLease
 	for _, l := range h.leases {
-		if l == nil || l.stage == "" || l.expiresAt.IsZero() || now.After(l.expiresAt) || l.runKey() != key {
+		if l == nil || l.stage == "" || l.expiresAt.IsZero() || now.After(l.expiresAt) {
+			continue
+		}
+		leaseKey := leaseWorkKey(l)
+		canonicalKey := ""
+		if h.server != nil {
+			canonicalKey = h.server.canonicalRunKey(l.repo, l.number, runKeyOfLease(leaseKey, l.repo), leaseKey)
+		}
+		if l.runKey() != key && leaseKey != key && canonicalKey != key {
 			continue
 		}
 		if best == nil || l.gen > best.gen {
@@ -610,18 +649,49 @@ func (h *ContributeWSHub) renewLease(identity, taskID string, now time.Time) err
 		return nil
 	}
 	h.leaseMu.Lock()
-	defer h.leaseMu.Unlock()
+	var renewed *taskLease
+	var saveErr error
 	if l := h.leaseForLocked(identity, taskID); l != nil {
 		l.expiresAt = now.Add(leaseTTL)
+		renewed = l
 		// #5681: persist the EXTENDED window. Without this a restart would restore
 		// the window as it stood at assignment, so a task that had been progressing
 		// for longer than leaseTTL — the exact case #4260 fixed in memory — would
 		// come back already expired and could not be resumed.
 		if err := h.saveLeasesLocked(); err != nil {
-			return fmt.Errorf("persisting renewed lease for %s: %w", taskID, err)
+			saveErr = fmt.Errorf("persisting renewed lease for %s: %w", taskID, err)
 		}
 	}
-	return nil
+	h.leaseMu.Unlock()
+	// #8380: the worker claim travels with the lease — renew it too, outside
+	// leaseMu, so a task that outlives the 30m claim TTL stays visibly held.
+	if renewed != nil && renewed.number > 0 {
+		h.renewClaimForLease(identity, renewed.repo, renewed.number)
+	}
+	return saveErr
+}
+
+// revokeLeaseForKey revokes whichever lease the identity holds on the given
+// item key, if any — the takeover path for a relay whose socket is down and
+// therefore has no connection to yank (#8380). Returns whether one was found.
+func (h *ContributeWSHub) revokeLeaseForKey(identity, key string) bool {
+	if identity == "" || key == "" {
+		return false
+	}
+	h.leaseMu.Lock()
+	taskID := ""
+	for _, l := range h.leases {
+		if l != nil && l.identity == identity && leaseClaimKey(l) == key {
+			taskID = l.taskID
+			break
+		}
+	}
+	h.leaseMu.Unlock()
+	if taskID == "" {
+		return false
+	}
+	h.revokeLease(identity, taskID)
+	return true
 }
 
 // revokeLease removes the server-authoritative lease for one task an identity holds,
@@ -638,14 +708,20 @@ func (h *ContributeWSHub) revokeLease(identity, taskID string) {
 	}
 	h.leaseMu.Lock()
 	revoked := false
+	// #8380: remember which items went so their worker claims go with them.
+	var releasedKeys []string
 	if taskID != "" {
-		if _, ok := h.leases[leaseKey(identity, taskID)]; ok {
+		if l, ok := h.leases[leaseKey(identity, taskID)]; ok {
+			if l != nil {
+				releasedKeys = append(releasedKeys, leaseClaimKey(l))
+			}
 			delete(h.leases, leaseKey(identity, taskID))
 			revoked = true
 		}
 	} else {
 		for k, l := range h.leases {
 			if l != nil && l.identity == identity {
+				releasedKeys = append(releasedKeys, leaseClaimKey(l))
 				delete(h.leases, k)
 				revoked = true
 			}
@@ -665,6 +741,18 @@ func (h *ContributeWSHub) revokeLease(identity, taskID string) {
 		}
 	}
 	h.leaseMu.Unlock()
+	for _, key := range releasedKeys {
+		h.releaseClaimForLease(identity, key, "lease revoked")
+	}
+}
+
+// leaseClaimKey is the ledger key for the item a lease holds: the canonical
+// worksource key when recorded (#5681), else the legacy repo#number spelling.
+func leaseClaimKey(l *taskLease) string {
+	if l.key != "" {
+		return l.key
+	}
+	return fmt.Sprintf("%s#%d", l.repo, l.number)
 }
 
 // lookupLease returns the active, unexpired server-issued lease for an identity that
@@ -1027,9 +1115,13 @@ func (h *ContributeWSHub) loadLeases() {
 // alongside the other stale-state reaping. Returns how many were dropped.
 func (h *ContributeWSHub) pruneExpiredLeases(now time.Time) int {
 	dropped := 0
+	var unknown []taskLease
 	h.leaseMu.Lock()
 	for k, l := range h.leases {
 		if l == nil || l.expiresAt.IsZero() || now.After(l.expiresAt) {
+			if l != nil && l.restored && l.stage == StageImplement {
+				unknown = append(unknown, *l)
+			}
 			delete(h.leases, k)
 			dropped++
 		}
@@ -1043,7 +1135,32 @@ func (h *ContributeWSHub) pruneExpiredLeases(now time.Time) int {
 		}
 	}
 	h.leaseMu.Unlock()
+	for _, l := range unknown {
+		h.recordWavefrontUnknown(l, now)
+	}
 	return dropped
+}
+
+func (h *ContributeWSHub) recordWavefrontUnknown(l taskLease, now time.Time) {
+	if h == nil || h.server == nil || h.server.deps == nil || h.server.deps.WavefrontUnknown == nil {
+		return
+	}
+	ref, ok := worksource.ParseKey(l.key)
+	if !ok || ref.ExternalID == "" {
+		return
+	}
+	externalID := ref.ExternalID
+	if i := strings.LastIndex(externalID, ":"); i > 0 && externalID[i+1:] == StageImplement {
+		externalID = externalID[:i]
+	}
+	started := l.expiresAt.Add(-leaseTTL)
+	if started.IsZero() || started.After(now) {
+		started = now
+	}
+	if err := h.server.deps.WavefrontUnknown(context.Background(), externalID, "stale in-flight lease after restart", started); err != nil {
+		h.logger.Warn("[contribute-ws] wavefront unknown transition failed",
+			"task", l.taskID, "key", l.key, "error", err)
+	}
 }
 
 // leasedIssueKeys returns the canonical work-item keys that an unexpired lease is

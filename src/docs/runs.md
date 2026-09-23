@@ -3,7 +3,8 @@
 Runs are long-lived, staged work items driven through the v5 HTTP API and the
 Spektacular stage runner. A live run is visible through `/api/runs`, individual
 run details are served at `/api/runs/{key}`, and approved plans release the
-`implement` stage through the existing plan approval API.
+`implement` stage through the existing plan approval API. The public run key is
+the canonical issue key, `<owner/repo>#<number>`, matching the contribute queue.
 
 ## Acceptance
 
@@ -39,11 +40,19 @@ Known #8460 gaps are guarded in the test rather than hidden:
 | gap 2 of #8460 | an HTTP-visible run-stage accessor / worksource feature probe | reclaim/lookupLease generation fencing and implement-stage queue listing |
 | gap 3 of #8460 | `plan_epic_id` plus successful plan approval and plan-stage advance | final plan import and `plan -> implement` advancement |
 | gap 7 of #8460 | terminal run state on `/api/runs/{key}` | implement completion ends the run |
+| gap 8 of #8460 | `wave_ids` on `/api/runs/{key}` for a multi-repo plan | approved plans fan out one implementation wave per declared repo |
 | gap 10 of #8460 | `burndown` field on `/api/runs/{key}` | satisfied/remaining/unknown/scope-changed burndown assertions |
+| gap 9 of #8460 | Wavefront receipts update when run-stage tasks finish | completed/unknown transitions and run worktree cleanup |
 
-`GET /api/runs` lists active staged runs from live leases and keeps the shape cheap for polling.
+`GET /api/runs` lists active staged runs from live leases and keeps the shape
+cheap for polling. Each item reports `key` as `<owner/repo>#<number>`, `repo` as
+`<owner/repo>`, and `lease_key` as the current stage lease key
+(`<repo>!<run-key>:<stage>`) while the run is active.
 
-`GET /api/runs/{key}` returns the same run detail plus timeline-derived stage history. When the run key maps to a wired convergence campaign, the detail response may include:
+`GET /api/runs/{key}` returns the same run detail plus timeline-derived stage
+history. `{key}` may be the canonical key (URL-escape `#` as `%23`) or, for
+backward compatibility with early v5 run leases, the lease-shaped key. When the
+run key maps to a wired convergence campaign, the detail response may include:
 
 ```json
 "burndown": {
@@ -139,6 +148,39 @@ Expected evidence: ready nodes advance by dependency wave, a dependent node only
 becomes ready after its upstream receipt lands, a graph revision change refuses
 stale work, crash reconciliation reports Unknown rather than duplicating a node,
 and burndown is read across waves.
+
+When `governor.work_source.wavefront.enabled` is true, a final Spektacular plan
+that declares repositories with `[repo:<owner/name>]` annotations fans out the
+implement stage into one Wavefront implementation wave per repo. The run detail
+exposes the minted wave ids as `wave_ids`. With Wavefront disabled (the
+default), importing the same plan is a no-op for fan-out and `wave_ids` is
+omitted.
+
+For Wavefront-backed implement items, a successful `task_complete` records the
+node receipt through the Wavefront adapter and removes that run-stage worktree.
+If Hive restarts and later finds a restored in-flight Wavefront lease stale, it
+records an `unknown` receipt for the node so the burndown distinguishes "lost
+in flight" from work that still has no evidence.
+
+## Scheduled engine smokes
+
+`wavefront-smoke.yml` is the scheduled Crustify/Wavefront canary for #8466. It
+uses two lanes: `latest` for the current checkout and `pinned` inside
+`ghcr.io/hivecommons/hive-contributor:latest`. The job exercises a real
+Wavefront graph only when all of the following repository settings exist:
+
+- repository variable `CRUSTIFY_WAVEFRONT_GRAPH_URL`: HTTPS URL of the pinned
+  Crustify/Wavefront graph JSON;
+- repository variable `CRUSTIFY_WAVEFRONT_REPO`: owner/name repo scoped by the
+  graph;
+- repository secret `CRUSTIFY_WAVEFRONT_TOKEN`: bearer token allowed to read the
+  graph URL.
+
+If any setting is absent, the workflow exits green with an explicit notice. That
+keeps forks and unprovisioned environments from failing while documenting the
+secret needed for the real smoke. Scheduled failures file one open
+`wavefront-smoke` issue per lane and add comments to the existing lane issue on
+subsequent reds.
 
 ## How long-running runs start
 

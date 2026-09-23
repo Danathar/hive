@@ -13,6 +13,7 @@ import (
 	"github.com/hivecommons/hive/pkg/agent"
 	"github.com/hivecommons/hive/pkg/beads"
 	"github.com/hivecommons/hive/pkg/celtrigger"
+	"github.com/hivecommons/hive/pkg/claims"
 	"github.com/hivecommons/hive/pkg/config"
 	convergenceaudit "github.com/hivecommons/hive/pkg/convergence/audit"
 	"github.com/hivecommons/hive/pkg/convergence/mutation"
@@ -193,12 +194,28 @@ type Dependencies struct {
 	// repo is tried in the same spellings as IssueClaimed; a nil func means
 	// "no churn data" and disables the guard.
 	IssueChurn func(repo string, number int) (ghpkg.IssueChurn, bool)
-	HookFire   func(context.Context, hooks.Payload)
-	CELTrigger func(context.Context, celtrigger.NormalizedEvent, string)
+	// IssueClaims is the worker-claim ledger (hivecommons/hive#8380): who is
+	// actively working an issue right now — a human session, a hub-kicked
+	// agent, a relay contributor, or an external author — ranked so a higher
+	// kind takes the issue over and the displaced holder is told to stop.
+	// Distinct from IssueClaimed (open-PR claims, rebuilt each scan). Nil
+	// disables recording, enforcement and the /api/claims routes.
+	IssueClaims *claims.Ledger
+	HookFire    func(context.Context, hooks.Payload)
+	CELTrigger  func(context.Context, celtrigger.NormalizedEvent, string)
 	// RunBurndown optionally projects cheap convergence progress for one run
 	// detail page. It is intentionally absent from the list path; sources may
 	// need to inspect a graph or in-memory campaign state for the requested key.
 	RunBurndown func(context.Context, string) (*RunBurndown, error)
+	// RunFanout optionally fans an approved multi-repo plan out into
+	// implementation waves. Nil is the default/off state.
+	RunFanout func(context.Context, string, []string) ([]string, error)
+	// WavefrontComplete records a completed Wavefront run-stage item. Nil means
+	// wavefront completion is not wired.
+	WavefrontComplete func(context.Context, string, string, string, time.Time) error
+	// WavefrontUnknown records a stale in-flight Wavefront item whose owner did
+	// not return after a restart/crash. Nil means unknown transitions are off.
+	WavefrontUnknown func(context.Context, string, string, time.Time) error
 	// ExternalExec reports which external-execution engines are compiled
 	// into this binary (#8361). cmd/hive backs it with the extwork registry;
 	// nil means none, and the Features panel says so.

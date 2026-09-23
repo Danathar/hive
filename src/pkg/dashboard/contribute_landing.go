@@ -514,6 +514,19 @@ code{background:var(--cc-bg);padding:2px 8px;border-radius:4px;font-size:.9rem}
 .policy-key{color:var(--cc-muted)}
 .policy-val{color:var(--cc-text);text-align:right;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-word}
 .ops-empty{padding:32px 20px;text-align:center;color:var(--cc-muted);font-size:.85rem}
+.effective-controls{display:flex;gap:6px;flex-wrap:wrap;padding:12px 20px;border-bottom:1px solid var(--cc-border-2)}
+.effective-chip{background:var(--cc-bg);border:1px solid var(--cc-border);color:var(--cc-muted);font-size:.72rem;padding:4px 10px;border-radius:999px;cursor:pointer;font-family:inherit}
+.effective-chip.active{background:#1f6feb;border-color:var(--cc-accent-fg);color:#fff}
+.effective-table{width:100%%;border-collapse:collapse;font-size:.76rem}
+.effective-table th,.effective-table td{padding:8px 10px;border-bottom:1px solid var(--cc-border-2);text-align:right;font-variant-numeric:tabular-nums;vertical-align:top}
+.effective-table th:first-child,.effective-table td:first-child{text-align:left}
+.effective-table th{color:var(--cc-muted);font-size:.64rem;text-transform:uppercase;letter-spacing:.05em;background:var(--cc-bg)}
+.effective-model{color:var(--cc-text);font-weight:600;overflow-wrap:anywhere}
+.effective-sub{color:var(--cc-muted);font-size:.68rem;margin-top:2px}
+.effective-muted{color:var(--cc-muted)}
+.effective-link{color:var(--cc-accent);text-decoration:none}
+.effective-link:hover{text-decoration:underline}
+.effective-section-title{padding:12px 20px 6px;color:var(--cc-muted);font-size:.68rem;text-transform:uppercase;letter-spacing:.08em;font-weight:700}
 .lb-row{display:grid;grid-template-columns:56px 1fr 120px 70px 70px 80px 72px;align-items:center;gap:8px;padding:10px 20px;border-bottom:1px solid var(--cc-border-2);font-size:.85rem}
 .lb-row:last-child{border-bottom:none}
 /* Subtle self-highlight for the logged-in viewer's own row: a faint tint + a left
@@ -865,6 +878,14 @@ code{background:var(--cc-bg);padding:2px 8px;border-radius:4px;font-size:.9rem}
 .admin-act{background:var(--cc-border-2);border:1px solid var(--cc-border);color:var(--cc-text-2);font-size:.7rem;padding:3px 9px;border-radius:6px;cursor:pointer;font-family:inherit}
 .admin-act:hover{border-color:var(--cc-muted)}
 .admin-act.danger:hover{border-color:var(--cc-red);color:var(--cc-red)}
+.op-msg-banner{border:1px solid var(--cc-amber);background:rgba(210,153,34,.10);border-radius:12px;padding:12px 14px;margin:0 0 16px;color:var(--cc-text-2);display:grid;gap:8px}
+.op-msg-banner b{color:var(--cc-text)}
+.op-msg-banner pre{white-space:pre-wrap;margin:0;font:inherit;color:var(--cc-text)}
+.op-msg-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.op-msg-reply{flex:1;min-width:220px;background:var(--cc-bg);border:1px solid var(--cc-border);border-radius:8px;color:var(--cc-text);padding:7px 9px;font-family:inherit}
+.op-msg-state{font-size:.7rem;color:var(--cc-muted);margin-left:4px}
+.op-msg-form{display:flex;gap:6px;flex-wrap:wrap;align-items:center;width:100%%}
+.op-msg-form textarea{flex:1;min-width:220px;min-height:44px;resize:vertical;background:var(--cc-bg);border:1px solid var(--cc-border);border-radius:8px;color:var(--cc-text);padding:7px 9px;font-family:inherit;font-size:.78rem}
 .admin-act select{background:var(--cc-bg);border:1px solid var(--cc-border);color:var(--cc-text-2);font-size:.7rem;border-radius:6px;padding:2px 4px;font-family:inherit}
 .agent-role-grants{display:flex;align-items:center;gap:6px;flex-wrap:wrap;width:100%%;font-size:.7rem;color:var(--cc-muted)}
 .agent-role-grants__label{font-weight:600;color:var(--cc-text-2)}
@@ -1289,6 +1310,12 @@ select.admin-act{min-width:0;max-width:100%%}
 .announcement-admin textarea{min-height:72px}
 .announcement-admin .ann-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:8px}
 .announcement-admin select,.announcement-admin input{background:var(--cc-bg);border:1px solid var(--cc-border);border-radius:6px;color:var(--cc-text);padding:7px 9px;font-family:inherit}
+.help-links{display:none;margin:12px 0 16px;background:var(--cc-surface);border:1px solid var(--cc-border);border-radius:10px;padding:12px 14px;color:var(--cc-text-2);font-size:.84rem;line-height:1.45}
+.help-links h4{margin:0 0 8px;color:var(--cc-text);font-size:.86rem}
+.help-links .links{display:flex;flex-wrap:wrap;gap:8px}
+.help-links a{display:inline-flex;align-items:center;gap:5px;color:var(--cc-accent);text-decoration:none;border:1px solid var(--cc-border);border-radius:999px;padding:4px 10px;background:var(--cc-bg)}
+.help-links a:hover{border-color:var(--cc-accent);text-decoration:none}
+.help-links-admin textarea{min-height:84px}
 .pb-copy{position:absolute;top:10px;right:12px;background:#238636;color:#fff;border:none;border-radius:4px;padding:4px 12px;cursor:pointer;font-size:.72rem;font-family:inherit}
 @media(prefers-reduced-motion:reduce){
   .client-tile{transition:none!important}
@@ -1940,6 +1967,7 @@ update();  // initial paint: copy block + branded UI in sync from first load
 </div>
 <p style="color:var(--cc-muted-2);font-size:.78rem;margin-top:8px">Containerized mode auto-detects docker, then podman &mdash; when both are present, Docker wins. Docker's daemon runs rootful (docker-group membership is effectively root on the host); Podman here runs rootless (user namespace via <code>--userns=keep-id</code>, SELinux labels). Force either explicitly with <code>export HIVE_CONTAINER_RUNTIME=podman</code> (or <code>docker</code>). Rootless Podman handling is best-effort today, not yet covered by CI &mdash; see <a href="https://github.com/hivecommons/hive/blob/HEAD/src/docs/podman-rootless-ci.md" target="_blank" style="color:var(--cc-accent)">docs/podman-rootless-ci.md</a>.</p>
 <p style="color:var(--cc-muted-2);font-size:.78rem;margin-top:8px">Don't see your CLI? <a href="https://github.com/hivecommons/hive/issues/new?title=CLI+request:+&labels=enhancement" target="_blank" style="color:var(--cc-accent)">Open an issue</a> and we'll add support for it.</p>
+<div id="onboarding-help-links" class="help-links" aria-label="Help and community links"><h4>Help &amp; community</h4><div class="links"></div></div>
 <div style="margin-top:20px;display:flex;gap:12px;flex-wrap:wrap">
 <button type="button" id="goto-leaderboard-tab" style="display:inline-block;padding:8px 20px;background:var(--cc-surface);border:1px solid var(--cc-border);border-radius:8px;color:var(--cc-accent);text-decoration:none;font-size:.9rem;font-family:inherit;cursor:pointer">🏆 View Leaderboard</button>
 </div>
@@ -1995,6 +2023,14 @@ update();  // initial paint: copy block + branded UI in sync from first load
 <textarea id="admin-announcement-text" maxlength="500" placeholder="e.g. Hive upgrade at 18:00 UTC; relays may reconnect automatically."></textarea>
 <div class="ann-row"><select id="admin-announcement-level"><option value="info">Info</option><option value="warning">Warning</option></select><input type="datetime-local" id="admin-announcement-expires"><button type="button" class="admin-save" id="admin-announcement-save">Save announcement</button></div>
 <div class="admin-toggle-sub">Stored as <code>hub.contribute_announcement</code>. The server rotates the announcement id when the text changes.</div>
+</div>
+<hr class="admin-hr">
+
+<div class="admin-field help-links-admin">
+<label>Help &amp; community links <span style="color:var(--cc-muted-2)">&mdash; one per line as <code>Label | https://example</code>.</span></label>
+<textarea id="admin-help-links-text" maxlength="1200" placeholder="Chat with other contributors | https://discord.gg/your-hive&#10;Contributor docs | https://github.com/hivecommons/hive/blob/v5/src/docs/contributor-relay.md"></textarea>
+<button type="button" class="admin-save" id="admin-help-links-save" style="margin-top:8px">Save help links</button>
+<div class="admin-toggle-sub">Stored as <code>contribute.help_links</code>. Use <code>https://discord.gg/...</code> invites for Discord; <code>https://discord.com/channels/server/channel</code> only opens for people already in that server.</div>
 </div>
 <hr class="admin-hr">
 
@@ -2069,8 +2105,10 @@ update();  // initial paint: copy block + branded UI in sync from first load
 <div class="tab-panel" id="tab-ops" role="tabpanel" aria-labelledby="ptab-ops">
 <div class="ops">
 <h1>Operations</h1>
+<div id="operator-message-banner-ops"></div>
 <p class="subtitle" style="font-size:.95rem">A live view over the contributor (&ldquo;clanker&rdquo;) fleet and its in-flight work. The panels below surface what this hive already knows; the per-clanker trust / revoke / remove controls are owner &amp; read-write only. Admin controls (suspend, admission filters) live under the <strong style="color:var(--cc-text)">Management</strong> tab.</p>
 <div id="ops-announcement" class="announcement-banner" role="status"><span class="ann-level"></span><span class="ann-text"></span><button type="button" data-action="dismiss-announcement" aria-label="Dismiss announcement">&times;</button></div>
+<div id="ops-help-links" class="help-links" aria-label="Help and community links"><h4>Help &amp; community</h4><div class="links"></div></div>
 
 <!-- Two-region shell: a MAIN area (fleet / pipeline / queue / my-work) beside a
      dedicated full-height DEV-LOG RAIL (chat/notifications-panel style). The rail is
@@ -2165,6 +2203,25 @@ Contributors subscribe to labels (e.g. <code>nvidia</code>) so matching issues a
 </form>
 <div class="runs-list" id="cc-wall-list"><div class="ops-empty">Loading wall&hellip;</div></div>
 </div>
+<!-- Most effective models (#8488): public-safe aggregate ranking built from the
+     Governor PR rework data (#8487) plus the contributor task-run log. It shows
+     only model/CLI aggregates — no contributor names or tokens — and splits
+     small samples into "Not enough data yet" so a one-lucky-PR model does not
+     lead the ranked list. -->
+<div class="ops-card" id="effective-models-card" style="margin-bottom:20px">
+<div class="ops-card-head"><span class="feed-dot"></span><h3>Most effective models</h3><span class="ops-card-count" id="effective-models-count"></span></div>
+<div class="effective-controls" role="group" aria-label="Effective model filters">
+  <button type="button" class="effective-chip active" data-eff-window="7d">7d</button>
+  <button type="button" class="effective-chip" data-eff-window="30d">30d</button>
+  <button type="button" class="effective-chip" data-eff-window="all">All</button>
+  <span class="ops-filters__sep" aria-hidden="true"></span>
+  <button type="button" class="effective-chip active" data-eff-filter="all">All work</button>
+  <button type="button" class="effective-chip" data-eff-filter="contributor">Contributor relays</button>
+  <button type="button" class="effective-chip" data-eff-filter="hive">Hive agents</button>
+</div>
+<div id="effective-models-ranked"><div class="ops-empty">Loading effective models&hellip;</div></div>
+<p class="ops-note" style="padding:10px 20px 14px;margin:0">Ranked by first-pass merge rate, then merged PR count. Rows below the sample threshold are listed under <b>Not enough data yet</b>; every number is an aggregate for model + CLI.</p>
+</div>
 <!-- Fleet work (#6945): this panel was titled "My work" while rendering the work
      of EVERY connected clanker to every visitor, anonymous ones included — the
      data comes from the public /api/contribute/fleet snapshot and renderWork
@@ -2205,6 +2262,7 @@ Contributors subscribe to labels (e.g. <code>nvidia</code>) so matching issues a
 <input type="text" id="runs-user" name="username" placeholder="GitHub login, e.g. from the log rail" aria-label="Contributor GitHub login" spellcheck="false">
 <button type="submit" class="admin-act" id="runs-go">Look up</button>
 </form>
+<div id="runs-message-actions"></div>
 <div class="runs-list" id="runs-list"><div class="ops-empty">Enter a contributor&rsquo;s login to see their recent runs: outcome, duration, the failure reason, and &mdash; for owners &mdash; what was on the agent&rsquo;s terminal when it stopped.</div></div>
 </div>
 <!-- Hub decisions (#7330, item 4 of #7317). The other half of the conversation:
@@ -2384,6 +2442,7 @@ It clears automatically when the period elapses. An operator can shorten or disa
      public route /contribute/dossier/{username}; owner-only controls are gated
      server-side there and by ME_IS_OWNER here. -->
 <div id="profile-announcement" class="announcement-banner" role="status"><span class="ann-level"></span><span class="ann-text"></span><button type="button" data-action="dismiss-announcement" aria-label="Dismiss announcement">&times;</button></div>
+<div id="operator-message-banner-profile"></div>
 <div id="me-card-mount"></div>
 <div class="ops-card" id="dossier-wall-card" style="display:none;margin-top:20px">
 <div class="ops-card-head"><h3>Recent wall posts</h3><span class="ops-card-count" id="dossier-wall-count"></span></div>
@@ -2499,7 +2558,7 @@ var ADMIN_TIER_ORDER=['newcomer','contributor','trusted','merger','advisor'];
 // in scope here. It is republished on window there; mirror it into this closure
 // as part of the same init-order discipline. renderMeCard's masthead reads it,
 // and a bare cross-IIFE reference threw ReferenceError on every dossier render.
-var ccProjectName=(typeof window!=='undefined'&&window.ccProjectName)||'Hive';
+var ccProjectName=(typeof window!=='undefined'&&window.ccProjectName)||"Hive";
 // ADMIN_COOLDOWN_DEFAULT_HOURS mirrors the server default (contributeCooldownDefaultHours,
 // 168h = one week) so the period input shows the effective default when unset.
 // ADMIN_COOLDOWN_MIN/MAX_HOURS mirror the server clamp bounds.
@@ -2556,6 +2615,30 @@ function ccLoadAnnouncement(){
   fetch('/api/contribute/status').then(function(r){return r.json();}).then(function(d){if(d)ccSetAnnouncement(d.announcement||null);}).catch(function(){});
   fetch('/api/contribute/me').then(function(r){return r.ok?r.json():null;}).then(function(d){if(d&&d.announcement_dismissed_id){ccAnnouncementDismissedID=d.announcement_dismissed_id;ccRenderAnnouncement();}}).catch(function(){});
 }
+var ccHelpLinks=[];
+function ccSetHelpLinks(links){ccHelpLinks=Array.isArray(links)?links.filter(function(l){return l&&l.label&&l.url;}):[];ccRenderHelpLinks();}
+function ccRenderHelpLinks(){
+  ['onboarding-help-links','ops-help-links'].forEach(function(id){
+    var box=document.getElementById(id);if(!box)return;
+    var links=box.querySelector('.links');if(!links)return;
+    links.textContent='';
+    if(!ccHelpLinks.length){box.style.display='none';return;}
+    ccHelpLinks.forEach(function(l){
+      var a=document.createElement('a');a.href=l.url;a.target='_blank';a.rel='noopener noreferrer';a.textContent=l.label;links.appendChild(a);
+    });
+    box.style.display='';
+  });
+}
+function ccLoadHelpLinks(){
+  fetch('/api/contribute/status').then(function(r){return r.json();}).then(function(d){if(d)ccSetHelpLinks(d.help_links||[]);}).catch(function(){});
+}
+// Tab switching for the /contribute page. Additive: leaves onboarding intact.
+var tabs=document.querySelectorAll('.page-tab');
+var panels=document.querySelectorAll('.tab-panel');
+var opsStarted=false;   // Operations fleet polling started
+var adminStarted=false; // /api/role gate resolved (adminEnabled set)
+var lbStarted=false;    // Leaderboard hydrated (fetches /api/leaderboard once)
+var profileStarted=false; // Profile tab hydrated (fetches the dossier once)
 // Tab switching for the /contribute page. Additive: leaves onboarding intact.
 var tabs=document.querySelectorAll('.page-tab');
 var panels=document.querySelectorAll('.tab-panel');
@@ -2631,6 +2714,7 @@ function activateTab(t,push){
     // identity lookup that throws must not leave the fleet panels on "Loading…".
     try{ccResolveViewer();}catch(e){console.error('ccResolveViewer failed',e);}
     try{ccLoadWall();ccInitWallForm();}catch(e){console.error('ccLoadWall failed',e);}
+    try{loadEffectiveModels();}catch(e){console.error('loadEffectiveModels failed',e);}
   }
   // Leaderboard hydrates client-side on first open — read-only, no role gate.
   // The standings and the standing strip are independent: a throw in one must
@@ -2640,6 +2724,7 @@ function activateTab(t,push){
     try{loadMeStanding();}catch(e){console.error('loadMeStanding failed',e);}
   }
   // Profile hydrates the full dossier on first open, on its own tab.
+  if(dp==='tab-ops'||dp==='tab-profile'){try{ccLoadOperatorMessages();}catch(e){}}
   if(dp==='tab-profile'&&!profileStarted){profileStarted=true;
     try{loadMeCard();}catch(e){console.error('loadMeCard failed',e);}
     try{ccLoadDossierWall();}catch(e){console.error('ccLoadDossierWall failed',e);}
@@ -2704,6 +2789,7 @@ function tabFromLocation(){
   // (bare /contribute = onboarding, no activateTab call). Guarded.
   try{ccUpdateReportLink((target&&target.getAttribute('data-panel'))||'tab-onboarding');}catch(e){}
   try{ccLoadAnnouncement();}catch(e){}
+  try{ccLoadHelpLinks();}catch(e){}
 })();
 // Back/Forward: re-derive the tab from the (now-updated) location and activate it
 // WITHOUT pushing — popstate already moved history, a push here would loop. When
@@ -2733,6 +2819,52 @@ function loadLeaderboard(){
     if(el)el.innerHTML='<div class="ops-empty">Could not load leaderboard.</div>';
   });
 }
+var effectiveModelsWindow='7d';
+var effectiveModelsFilter='all';
+function effectivePct(v){return ((Number(v)||0)*100).toFixed(0)+'%%';}
+function effectiveFixed(v){return (Number(v)||0).toFixed(1);}
+function loadEffectiveModels(){
+  var mount=document.getElementById('effective-models-ranked');if(!mount)return;
+  mount.innerHTML='<div class="ops-empty">Loading effective models&hellip;</div>';
+  var url='/api/contribute/effective-models?window='+encodeURIComponent(effectiveModelsWindow)+'&filter='+encodeURIComponent(effectiveModelsFilter);
+  fetch(url).then(function(r){return r.json();}).then(function(d){renderEffectiveModels(d||{});}).catch(function(){
+    mount.innerHTML='<div class="ops-empty">Could not load effective models.</div>';
+  });
+}
+function renderEffectiveModels(data){
+  var mount=document.getElementById('effective-models-ranked');if(!mount)return;
+  var ranked=data.ranked||[], insufficient=data.insufficient||[];
+  var count=document.getElementById('effective-models-count');
+  if(count)count.textContent=ranked.length+' ranked · min '+(data.min_merged_prs||5)+' merged PRs';
+  function rows(list, empty){
+    if(!list.length)return '<div class="ops-empty">'+empty+'</div>';
+    return '<table class="effective-table"><thead><tr><th>Model / CLI</th><th>Merged PRs</th><th>First-pass</th><th>Review rounds</th><th>Fix attempts</th><th>Runs</th><th>PR run rate</th><th>Failure</th><th>Nothing to ship</th><th>Worst PRs</th></tr></thead><tbody>'+
+      list.map(function(x){
+        var worst=(x.most_reworked||[]).slice(0,3).map(function(pr){
+          var label=(pr.repo||'')+'#'+(pr.number||'');
+          return pr.url?'<a class="effective-link" href="'+esc(pr.url)+'" target="_blank" rel="noopener">'+esc(label)+'</a>':esc(label);
+        }).join('<br>');
+        return '<tr><td><div class="effective-model">'+esc(x.model||'unknown')+'</div><div class="effective-sub">'+esc(x.backend||'unknown')+' · '+esc(x.runtime||'unknown')+'</div></td>'+
+          '<td>'+Number(x.merged_prs||0)+'<div class="effective-sub">'+Number(x.prs||0)+' PRs</div></td>'+
+          '<td>'+effectivePct(x.first_pass_merge_rate)+'</td>'+
+          '<td>'+effectiveFixed(x.avg_review_rounds)+'</td>'+
+          '<td>'+effectiveFixed(x.avg_fix_attempts)+'</td>'+
+          '<td>'+Number(x.runs||0)+'</td>'+
+          '<td>'+effectivePct(x.verified_pr_run_rate)+'<div class="effective-sub">'+Number(x.verified_pr_runs||0)+' PR runs</div></td>'+
+          '<td>'+effectivePct(x.failure_rate)+'</td>'+
+          '<td>'+effectivePct(x.nothing_to_ship_rate)+'</td>'+
+          '<td class="effective-muted">'+(worst||'—')+'</td></tr>';
+      }).join('')+'</tbody></table>';
+  }
+  mount.innerHTML='<div class="effective-section-title">Ranked</div>'+rows(ranked,'No models meet the sample threshold yet.')+
+    '<div class="effective-section-title">Not enough data yet</div>'+rows(insufficient,'Every model in this view meets the sample threshold.');
+}
+document.addEventListener('click',function(e){
+  var win=e.target&&e.target.closest&&e.target.closest('[data-eff-window]');
+  if(win){effectiveModelsWindow=win.getAttribute('data-eff-window')||'7d';document.querySelectorAll('[data-eff-window]').forEach(function(b){b.classList.toggle('active',b===win);});loadEffectiveModels();return;}
+  var filter=e.target&&e.target.closest&&e.target.closest('[data-eff-filter]');
+  if(filter){effectiveModelsFilter=filter.getAttribute('data-eff-filter')||'all';document.querySelectorAll('[data-eff-filter]').forEach(function(b){b.classList.toggle('active',b===filter);});loadEffectiveModels();}
+});
 // tierBadge renders a small tier medallion / rank badge from a REAL trust tier.
 // The five known tiers each get a muted metal-ish accent class; an unknown/blank
 // tier is treated as newcomer (neutral). extraCls lets callers request the compact
@@ -3974,6 +4106,19 @@ async function adminSaveAnnouncement(){
   }catch(e){toast('Save failed: '+(e&&e.message||'network error'),false);return;}
   if(ok){adminHub.contribute_announcement=ann;ccLoadAnnouncement();}
 }
+function formatHelpLinksForAdmin(links){return (links||[]).map(function(l){return (l.label||'')+' | '+(l.url||'');}).join('\n');}
+function parseAdminHelpLinks(v){return (v||'').split(/\r?\n/).map(function(line){line=line.trim();if(!line)return null;var i=line.indexOf('|');if(i<0)return {label:line,url:''};return {label:line.slice(0,i).trim(),url:line.slice(i+1).trim()};}).filter(Boolean);}
+function renderAdminHelpLinks(){
+  var txt=document.getElementById('admin-help-links-text');if(txt)txt.value=formatHelpLinksForAdmin((adminHub&&adminHub.contribute_help_links)||ccHelpLinks||[]);
+}
+async function adminSaveHelpLinks(){
+  var txt=document.getElementById('admin-help-links-text');
+  var links=parseAdminHelpLinks((txt&&txt.value)||'');
+  try{var res=await fetch('/api/contribute/help-links',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({help_links:links})});
+    if(!res.ok){var msg='Save failed ('+res.status+')';try{var d=await res.json();if(d&&d.error)msg=d.error;}catch(e){}toast(msg,false);return false;}
+    var data=await res.json();adminHub.contribute_help_links=(data&&data.help_links)||links;ccSetHelpLinks(adminHub.contribute_help_links);renderAdminHelpLinks();toast('Help links saved',true);return true;
+  }catch(e){toast('Save failed: '+(e&&e.message||'network error'),false);return false;}
+}
 async function adminSaveHub(patch,okMsg){
   try{
     var res=await fetch('/api/config/governor/hub',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(patch)});
@@ -4384,6 +4529,7 @@ onEl('clanker-list','click',function(e){
     updateContributorAgentRoleGrants(b.getAttribute('data-cid'),b.getAttribute('data-agent-role'),null);
     return;
   }
+  if(role==='message'){ccToggleMessageForm(b.getAttribute('data-cid'),b.getAttribute('data-user')||'this contributor',b);return;}
   if(role!=='revoke'&&role!=='remove'&&role!=='requeue')return;
   var cid=b.getAttribute('data-cid'),user=b.getAttribute('data-user')||'this contributor';
   if(role==='requeue'){
@@ -4454,6 +4600,8 @@ async function initAdmin(){
   renderAdminControls();
   renderAdminAnnouncement();
   var annBtn=document.getElementById('admin-announcement-save');if(annBtn&&!annBtn._wired){annBtn._wired=true;annBtn.addEventListener('click',adminSaveAnnouncement);}
+  renderAdminHelpLinks();
+  var helpBtn=document.getElementById('admin-help-links-save');if(helpBtn&&!helpBtn._wired){helpBtn._wired=true;helpBtn.addEventListener('click',adminSaveHelpLinks);}
   // Resume-all (#queue-hold): wire the header button once, now that we know the viewer
   // is owner/read-write. Visibility is still driven by ccRenderResumeAll (count-gated).
   var resumeAllBtn=document.getElementById('queue-resume-all-btn');
@@ -4708,7 +4856,8 @@ function renderClankers(list){
         '<select class="admin-act" title="Set trust tier (maintainer voucher)" data-cid="'+cid+'" data-role="tier">'+opts+'</select>'+
         '<label class="clanker-act-as">Acting as '+clankerActingAsControl(c,cid)+'</label>'+
         requeueBtn+
-        '<button type="button" class="admin-act danger" data-cid="'+cid+'" data-user="'+esc(user)+'" data-role="revoke">Revoke</button>'+
+        ccOperatorMessageStatus(c)+
+        '<button type="button" class="admin-act" data-cid="'+cid+'" data-user="'+esc(user)+'" data-role="message">Message</button>'+        '<button type="button" class="admin-act danger" data-cid="'+cid+'" data-user="'+esc(user)+'" data-role="revoke">Revoke</button>'+
         '<button type="button" class="admin-act danger" data-cid="'+cid+'" data-user="'+esc(user)+'" data-role="remove">Remove</button>'+
         clankerAgentRoleGrantControl(c,cid)+
         '</div>';
@@ -5023,6 +5172,7 @@ function ccLookupRuns(user){
   user=(user||'').trim().replace(/^@/,'');
   var input=document.getElementById('runs-user');
   if(input&&input.value!==user)input.value=user;
+  ccRenderRunsMessageAction(user);
   // One lookup fills both cards (#7330): the relay's side and the hub's side of
   // the same session. Hoisted declaration, so order in the file does not matter.
   ccLookupDecisions(user);
@@ -5036,6 +5186,37 @@ function ccLookupRuns(user){
     .catch(function(err){if(el)el.innerHTML='<div class="ops-empty">Could not load runs for '+esc(user)+' ('+esc(err.message)+').</div>';});
 }
 onEl('runs-lookup','submit',function(e){e.preventDefault();var i=document.getElementById('runs-user');ccLookupRuns(i?i.value:'');});
+function ccRenderRunsMessageAction(user){
+  var el=document.getElementById('runs-message-actions');if(!el)return;
+  user=(user||'').trim().replace(/^@/,'');
+  if(!adminEnabled||!user){el.innerHTML='';return;}
+  el.innerHTML='<div class="admin-actions"><button type="button" class="admin-act" data-user="'+esc(user)+'" data-role="message-runs">Message '+esc(user)+'</button></div><div id="runs-message-form"></div>';
+}
+onEl('runs-message-actions','click',function(e){var b=e.target;if(!adminEnabled||!b||b.getAttribute('data-role')!=='message-runs')return;ccToggleMessageForm(b.getAttribute('data-user'),b.getAttribute('data-user'),b);});
+
+function ccOperatorMessageStatus(c){
+  var msgs=(c&&c.operator_messages)||[]; if(!msgs.length)return '';
+  var pending=0,acked=0,delivered=0;
+  msgs.forEach(function(m){if(m.acknowledged_at)acked++;else pending++; if(m.delivered_at)delivered++;});
+  var txt=(pending?pending+' pending':'acked')+(delivered?' · delivered':'');
+  return '<span class="op-msg-state" title="Operator messages">'+esc(txt)+'</span>';
+}
+function ccToggleMessageForm(cid,user,btn){
+  var host=(btn&&btn.getAttribute('data-role')==='message-runs')?document.getElementById('runs-message-form'):(btn&&btn.parentNode);
+  if(!host)return;
+  var old=host.querySelector('.op-msg-form'); if(old){old.remove();return;}
+  var target=cid||user;
+  var form=document.createElement('div'); form.className='op-msg-form';
+  form.innerHTML='<textarea maxlength="1000" placeholder="Short note for '+esc(user)+'"></textarea><button type="button" class="admin-act">Send</button>';
+  form.querySelector('button').addEventListener('click',function(){
+    var text=form.querySelector('textarea').value;
+    fetch('/api/contribute/operators/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({contributor:target,text:text})})
+      .then(function(r){return r.json().then(function(d){return{ok:r.ok,d:d};});})
+      .then(function(x){if(x.ok){toast('Message sent to '+user,true);form.remove();opsPoll();ccLoadOperatorMessages();}else{toast((x.d&&x.d.error)||'Message failed',false);}})
+      .catch(function(){toast('Message failed',false);});
+  });
+  host.appendChild(form);
+}
 
 // ── Hub decisions (#7330, item 4 of #7317) ────────────────────────────────
 // The other half of the run history: what the HUB did, not what the relay
@@ -5138,6 +5319,29 @@ async function opsPoll(){
   var tab=document.getElementById('tab-ops');
   if(tab&&tab.classList.contains('active'))setTimeout(opsPoll,4000);
 }
+
+// ── Operator messages addressed to the signed-in contributor ────────────────
+function ccRenderOperatorMessages(messages){
+  var mounts=[document.getElementById('operator-message-banner-ops'),document.getElementById('operator-message-banner-profile')];
+  messages=(messages||[]).filter(function(m){return m&&!m.acknowledged_at;});
+  var html='';
+  if(messages.length){
+    html=messages.map(function(m){return '<div class="op-msg-banner"><b>Message from the hive operator</b><pre>'+esc(m.text||'')+'</pre><div class="op-msg-actions"><input class="op-msg-reply" data-id="'+esc(m.id)+'" placeholder="Optional short reply"><button type="button" class="admin-act" data-role="ack-operator-message" data-id="'+esc(m.id)+'">Acknowledge</button></div></div>';}).join('');
+  }
+  mounts.forEach(function(el){if(el)el.innerHTML=html;});
+}
+function ccLoadOperatorMessages(){
+  fetch('/api/contribute/operators/message').then(function(r){if(r.status===401||r.status===403)return {messages:[]}; if(!r.ok)throw new Error('HTTP '+r.status); return r.json();})
+    .then(function(d){ccRenderOperatorMessages(d&&d.messages);}).catch(function(){});
+}
+function ccAckOperatorMessage(id,reply){
+  fetch('/api/contribute/operators/message/ack',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id,reply:reply||''})})
+    .then(function(r){return r.json().then(function(d){return{ok:r.ok,d:d};});})
+    .then(function(x){if(x.ok){toast('Message acknowledged',true);ccLoadOperatorMessages();opsPoll();}else{toast((x.d&&x.d.error)||'Acknowledge failed',false);}})
+    .catch(function(){toast('Acknowledge failed',false);});
+}
+document.addEventListener('click',function(e){var b=e.target;if(!b||b.getAttribute('data-role')!=='ack-operator-message')return;var id=b.getAttribute('data-id')||'';var wrap=b.closest('.op-msg-banner');var inp=wrap&&wrap.querySelector('.op-msg-reply');ccAckOperatorMessage(id,inp?inp.value:'');});
+try{ccLoadOperatorMessages();}catch(e){}
 
 // ══ Operations command center: live SSE stream driving the ready-work queue, the
 //    task-assign travel animation, the dev-log narration, achievements, and army
@@ -6265,6 +6469,7 @@ function ccOnGap(ev){
 // ── SSE lifecycle with graceful fallback ───────────────────────────────────────
 function ccHydrate(payload){
   ccSetAnnouncement(payload.announcement||null);
+  ccSetHelpLinks(payload.help_links||[]);
   if(payload.queue){ccQueue=payload.queue.slice();ccRenderQueue();}
   if(payload.replay&&payload.replay.length){
     // Route the SSE replay through the SHARED store so it dedupes against the poll
@@ -6325,6 +6530,7 @@ function ccStart(){
       else if(ev.type==='activity'&&ev.activity)ccOnActivity(ev.activity);
       else if(ev.type==='announcement')ccSetAnnouncement(ev.announcement||null);
       else if((ev.type==='wall_post'||ev.type==='wall_hidden')&&ev.wall_post)ccOnWallEvent(ev);
+      else if(ev.type==='help_links')ccSetHelpLinks(ev.help_links||[]);
       else if(ev.type==='gap')ccOnGap(ev);
     };
     ccEs.onerror=function(){

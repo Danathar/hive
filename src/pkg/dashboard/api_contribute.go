@@ -141,6 +141,7 @@ func (s *Server) registerContributeRoutes() {
 	s.mux.HandleFunc("GET /api/contribute/status", s.handleContributeStatus)
 	s.mux.HandleFunc("PUT /api/contribute/announcement", s.handleContributeAnnouncement)
 	s.mux.HandleFunc("POST /api/contribute/announcement/dismiss", s.handleContributeAnnouncementDismiss)
+	s.mux.HandleFunc("PUT /api/contribute/help-links", s.handleContributeHelpLinks)
 	s.mux.HandleFunc("GET /api/contribute/activity", s.handleContributeActivity)
 	s.mux.HandleFunc("GET /api/contribute/fleet", s.handleContributeFleet)
 	// Read-only live event stream for the Operations command center. Under the
@@ -165,6 +166,10 @@ func (s *Server) registerContributeRoutes() {
 	// reads (only counts + already-public usernames; no tokens, no PII). GET only,
 	// no side effects. See contribute_metrics.go.
 	s.mux.HandleFunc("GET /api/contribute/metrics", s.handleContributeMetrics)
+	// Read-only effective-model ranking for the Operations page. Public-safe:
+	// aggregate model/CLI counts only, no contributor usernames, tokens, reasons,
+	// or per-contributor rows.
+	s.mux.HandleFunc("GET /api/contribute/effective-models", s.handleContributeEffectiveModels)
 	// Read-only SELF stats (#6543): the signed-in contributor's own issues-worked
 	// (24h + all-time), PRs produced, and failures. Self-service like interests /
 	// dossier above — the identity is resolved SERVER-SIDE and there is no
@@ -176,6 +181,9 @@ func (s *Server) registerContributeRoutes() {
 	// identity path as the rest of the contributor API.
 	s.mux.HandleFunc("POST /api/contribute/mcp", s.handleContributeMCP)
 	s.mux.HandleFunc("POST /api/contribute/actions/dispatch", s.handleActionsDispatch)
+	s.mux.HandleFunc("GET /api/contribute/operators/message", s.handleContributeOperatorMessage)
+	s.mux.HandleFunc("POST /api/contribute/operators/message", s.handleContributeOperatorMessage)
+	s.mux.HandleFunc("POST /api/contribute/operators/message/ack", s.handleContributeOperatorMessageAck)
 	// Read-only per-backend RUN SCENARIOS: aggregates over the durable task-run
 	// log (task_run_log.go) — scenario counts, sentinel-compliance share, and
 	// duration percentiles per backend. Public like the other /api/contribute*
@@ -603,6 +611,7 @@ func (s *Server) handleContributeStatus(w http.ResponseWriter, r *http.Request) 
 		"api_version":     contributorProtocolVersion,
 		"served_sha":      versionShort,
 		"announcement":    s.activeContributeAnnouncement(),
+		"help_links":      s.contributeHelpLinks(),
 	})
 }
 
@@ -827,9 +836,15 @@ func (s *Server) handleContributeFleet(w http.ResponseWriter, r *http.Request) {
 	// gets it, so the same rule applies whether the contributor is still
 	// connected or long gone.
 	paneVisible := s.paneTailViewer(r)
-	if !paneVisible {
+	operatorMessageVisible := r.Header.Get("X-Hive-Role") == config.RoleOwner || r.Header.Get("X-Hive-Role") == config.RoleReadWrite
+	if !paneVisible || !operatorMessageVisible {
 		for i := range snap.Clankers {
-			snap.Clankers[i].PaneTail = nil
+			if !paneVisible {
+				snap.Clankers[i].PaneTail = nil
+			}
+			if !operatorMessageVisible {
+				snap.Clankers[i].OperatorMessages = nil
+			}
 		}
 	}
 	jsonResponse(w, map[string]any{
