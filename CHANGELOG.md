@@ -11,6 +11,13 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-23 (v5.16.1)
+
+### Fixed
+
+- The dashboard agent model dropdown now filters provider/static catalogs through the model set accepted by the pinned agent CLIs, so unsupported selections are not offered or saved ([#8418](https://github.com/hivecommons/hive/issues/8418)).
+- Fixed watchdog production evidence so Claude/Codex/Copilot session-file scans use per-agent evidence roots instead of bridged fleet-shared dot-directories, with newest-by-age capped scans and regression coverage for isolated agent homes (#8422)
+
 ## 2026-09-23 (v5.16.0)
 
 ### Added
