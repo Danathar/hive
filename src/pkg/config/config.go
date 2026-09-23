@@ -4235,6 +4235,11 @@ type HubConfig struct {
 	ContributeLabelsMode  string   `yaml:"contribute_labels_mode,omitempty"`
 	ContributeAllowLabels []string `yaml:"contribute_allow_labels"`
 	ContributeDenyLabels  []string `yaml:"contribute_deny_labels"`
+	// ContributeNeedsDecisionLabel is applied by contributor relays when an agent
+	// concludes an issue is waiting on a maintainer decision. Nil means the default
+	// needs-decision label; an explicit empty string disables relay labelling and
+	// does not add a decision label to the skip set.
+	ContributeNeedsDecisionLabel *string `yaml:"contribute_needs_decision_label,omitempty"`
 	// ContributeSkipLabels is the hive-wide "not contributor work" label set.
 	// Matching is case-insensitive and uses path.Match-style glob patterns (not
 	// substring matching), so "discussion" matches that label and
@@ -4413,7 +4418,7 @@ func parseContributeSkipLabels(v string) []string {
 	return out
 }
 
-func normalizeContributeSkipLabels(labels []string) []string {
+func normalizeContributeSkipLabels(labels []string, needsDecisionLabel string) []string {
 	if len(labels) == 0 {
 		labels = DefaultContributeSkipLabels()
 	}
@@ -4434,17 +4439,31 @@ func normalizeContributeSkipLabels(labels []string) []string {
 		add(label)
 	}
 	add(blockedWorkflowSkipLabel)
+	add(needsDecisionLabel)
 	return out
 }
 
-const blockedWorkflowSkipLabel = "blocked"
+const (
+	blockedWorkflowSkipLabel  = "blocked"
+	defaultNeedsDecisionLabel = "needs-decision"
+)
+
+// ContributeNeedsDecisionLabelOrDefault resolves the label relays should apply
+// to issues that are waiting on a maintainer decision. An explicit empty string
+// disables label application; unset config uses the default label.
+func (h HubConfig) ContributeNeedsDecisionLabelOrDefault() string {
+	if h.ContributeNeedsDecisionLabel == nil {
+		return defaultNeedsDecisionLabel
+	}
+	return strings.TrimSpace(*h.ContributeNeedsDecisionLabel)
+}
 
 // ContributeSkipLabelPatterns resolves the effective hive-wide "not contributor
 // work" label patterns. It applies the default and the historical blocked-label
 // floor defensively so tests and direct HubConfig literals behave like loaded
 // config.
 func (h HubConfig) ContributeSkipLabelPatterns() []string {
-	return normalizeContributeSkipLabels(h.ContributeSkipLabels)
+	return normalizeContributeSkipLabels(h.ContributeSkipLabels, h.ContributeNeedsDecisionLabelOrDefault())
 }
 
 // MatchContributeSkipLabel returns the issue label that matches the configured

@@ -206,6 +206,7 @@ func (s *Server) handleGovernorConfigGet(w http.ResponseWriter, r *http.Request)
 			"contribute_allow_labels":            cfg.Hub.ContributeAllowLabels,
 			"contribute_deny_labels":             cfg.Hub.ContributeDenyLabels,
 			"contribute_skip_labels":             cfg.Hub.ContributeSkipLabelPatterns(),
+			"contribute_needs_decision_label":    cfg.Hub.ContributeNeedsDecisionLabelOrDefault(),
 			"contribute_deny_titles":             cfg.Hub.ContributeDenyTitles,
 			"contribute_deny_authors":            cfg.Hub.ContributeDenyAuthors,
 			"contribute_allow_models":            cfg.Hub.ContributeAllowModels,
@@ -870,6 +871,21 @@ func normalizeContributeDelegatableRoles(roles []string) []string {
 	return out
 }
 
+func withoutExactLabel(labels []string, remove string) []string {
+	remove = strings.ToLower(strings.TrimSpace(remove))
+	if remove == "" {
+		return labels
+	}
+	out := labels[:0]
+	for _, label := range labels {
+		if strings.ToLower(strings.TrimSpace(label)) == remove {
+			continue
+		}
+		out = append(out, label)
+	}
+	return out
+}
+
 func (s *Server) handleGovernorHub(w http.ResponseWriter, r *http.Request) {
 	if !requireOwnerRole(w, r) {
 		return
@@ -893,6 +909,7 @@ func (s *Server) handleGovernorHub(w http.ResponseWriter, r *http.Request) {
 		ContributeAllowLabels          []string                               `json:"contribute_allow_labels"`
 		ContributeDenyLabels           []string                               `json:"contribute_deny_labels"`
 		ContributeSkipLabels           []string                               `json:"contribute_skip_labels"`
+		ContributeNeedsDecisionLabel   *string                                `json:"contribute_needs_decision_label"`
 		ContributeDenyTitles           []string                               `json:"contribute_deny_titles"`
 		ContributeDenyAuthors          []string                               `json:"contribute_deny_authors"`
 		ContributeAllowModels          []string                               `json:"contribute_allow_models"`
@@ -975,7 +992,19 @@ func (s *Server) handleGovernorHub(w http.ResponseWriter, r *http.Request) {
 		cfg.Hub.ContributeDenyLabels = body.ContributeDenyLabels
 	}
 	if body.ContributeSkipLabels != nil {
-		cfg.Hub.ContributeSkipLabels = (config.HubConfig{ContributeSkipLabels: body.ContributeSkipLabels}).ContributeSkipLabelPatterns()
+		cfg.Hub.ContributeSkipLabels = (config.HubConfig{ContributeSkipLabels: body.ContributeSkipLabels, ContributeNeedsDecisionLabel: cfg.Hub.ContributeNeedsDecisionLabel}).ContributeSkipLabelPatterns()
+	}
+	if body.ContributeNeedsDecisionLabel != nil {
+		previous := cfg.Hub.ContributeNeedsDecisionLabelOrDefault()
+		v := strings.TrimSpace(*body.ContributeNeedsDecisionLabel)
+		if previous != v {
+			cfg.Hub.ContributeSkipLabels = withoutExactLabel(cfg.Hub.ContributeSkipLabels, previous)
+			if len(cfg.Hub.ContributeSkipLabels) == 0 {
+				cfg.Hub.ContributeSkipLabels = []string{"blocked"}
+			}
+		}
+		cfg.Hub.ContributeNeedsDecisionLabel = &v
+		cfg.Hub.ContributeSkipLabels = cfg.Hub.ContributeSkipLabelPatterns()
 	}
 	if body.ContributeDenyTitles != nil {
 		cfg.Hub.ContributeDenyTitles = body.ContributeDenyTitles
