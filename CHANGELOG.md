@@ -11,6 +11,13 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-23 (v5.25.0)
+
+### Added
+
+- Added a scheduled Wavefront smoke canary for a real Crustify graph, with latest/pinned lanes, missing-secret skip notices, and deduplicated failure issues for #8466.
+- Review effectiveness measurement: a review-outcome ledger records every open PR the hive sees and whether it later merged or closed, split by whether the hive reviewed it first, so the review gate's queue-reduction effect can be compared against an unreviewed control. Exposed on the Review gate card ("Load 30-day outcomes"), at `GET /api/review/outcomes?days=N`, and as `hive_review_outcome_prs` / `hive_review_outcome_median_hours_to_merge` metrics.
+
 ## 2026-09-23 (v5.24.0)
 
 ### Added
