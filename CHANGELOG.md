@@ -11,6 +11,18 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-23 (v5.21.0)
+
+### Added
+
+- ✨ Add the opt-in contributor wall for Operations with moderation, retention, model evidence, and live updates (#8456).
+- Label contributor issues waiting on maintainer decisions with the configured skip label so they leave the queue (#8470)
+- runs: completing an inception can admit an explicitly linked GitHub issue as the first spec-stage run when Spektacular runs are enabled
+
+### Fixed
+
+- contribute: restore bounded summary knowledge exports for contributor startup context after hosted relays began receiving the full export (#8500)
+
 ## 2026-09-23 (v5.20.0)
 
 ### Added
