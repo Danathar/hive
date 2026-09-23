@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-23 (v5.24.0)
+
+### Added
+
+- Add operator-managed contribute Help & community links for Onboarding, Operations, and relay terminal output (#8462)
+
 ## 2026-09-23 (v5.23.0)
 
 ### Added
