@@ -1,1 +1,0 @@
-- Measure stable promotion soak from the oldest un-promoted candidate generation so frequent v5 merges no longer reset the 24-hour gate.

@@ -1,1 +1,0 @@
-- Share one Hive-Run/Hive-Plan/Hive-Spec trailer parser between run provenance readers.
