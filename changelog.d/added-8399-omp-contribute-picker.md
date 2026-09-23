@@ -1,1 +1,0 @@
-- The `/contribute` onboarding picker now offers Oh My Pi (`omp`) with setup guidance and copy-paste contributor commands for omp users ([#8399](https://github.com/hivecommons/hive/issues/8399)).
