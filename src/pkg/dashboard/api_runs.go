@@ -52,6 +52,14 @@ type RunReviewWave struct {
 	ApproveAction string      `json:"approve_action,omitempty"`
 }
 
+type RunBurndown struct {
+	Source    string `json:"source"`
+	Satisfied int    `json:"satisfied"`
+	Remaining int    `json:"remaining"`
+	Unknown   int    `json:"unknown"`
+	Scope     int    `json:"scope"`
+}
+
 // runResetRequest is the body of POST /api/runs/{key}/reset (#8350).
 type runResetRequest struct {
 	To     string `json:"to"`
@@ -79,9 +87,11 @@ type Run struct {
 	Key            string       `json:"key"`
 	Title          string       `json:"title"`
 	Repo           string       `json:"repo"`
+	State          string       `json:"state,omitempty"`
 	Stage          string       `json:"stage"`
 	Gen            uint64       `json:"gen"`
 	StageStartedAt string       `json:"stage_started_at,omitempty"`
+	CompletedAt    string       `json:"completed_at,omitempty"`
 	WaitingOn      RunWaitingOn `json:"waiting_on"`
 	WaitingReason  string       `json:"waiting_reason,omitempty"`
 	WaitingSince   string       `json:"waiting_since,omitempty"`
@@ -97,6 +107,7 @@ type Run struct {
 	PlanEpicID      string          `json:"plan_epic_id,omitempty"`
 	Stages          []RunStage      `json:"stages"`
 	ReviewWaves     []RunReviewWave `json:"review_waves,omitempty"`
+	Burndown        *RunBurndown    `json:"burndown,omitempty"`
 	TriageVerdict   string          `json:"triage_verdict,omitempty"`
 	TriageRationale string          `json:"triage_rationale,omitempty"`
 }
@@ -174,11 +185,27 @@ func (s *Server) handleRunGet(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, run := range runs {
 		if run.Key == key {
+			if err := s.populateRunBurndown(r, &run); err != nil {
+				jsonError(w, err.Error(), http.StatusServiceUnavailable)
+				return
+			}
 			jsonResponse(w, run)
 			return
 		}
 	}
 	jsonError(w, "run not found", http.StatusNotFound)
+}
+
+func (s *Server) populateRunBurndown(r *http.Request, run *Run) error {
+	if s == nil || s.deps == nil || s.deps.RunBurndown == nil || run == nil {
+		return nil
+	}
+	burndown, err := s.deps.RunBurndown(r.Context(), run.Key)
+	if err != nil {
+		return err
+	}
+	run.Burndown = burndown
+	return nil
 }
 
 // handleRunReset serves POST /api/runs/{key}/reset (#8350): move a run's lease
@@ -288,7 +315,9 @@ func (s *Server) activeRuns(includeTimeline bool) ([]Run, error) {
 		cfg = s.deps.Config
 	}
 	runs := make([]Run, 0, len(leases))
+	active := map[string]bool{}
 	for _, lease := range leases {
+		active[lease.key] = true
 		run := runFromLease(lease, plans[lease.key], holds[lease.key], cfg)
 		if run.PlanEpicID != "" {
 			run.ReviewWaves = s.planReviewWaves(run.PlanEpicID)
@@ -302,6 +331,15 @@ func (s *Server) activeRuns(includeTimeline bool) ([]Run, error) {
 			run.Stages = mergeRunTimelineStages(run.Stages, events)
 		}
 		runs = append(runs, run)
+	}
+	for _, journey := range s.LifecycleTimeline().Journeys(0) {
+		if active[journey.Ref] {
+			continue
+		}
+		run, ok := completedRunFromJourney(journey, includeTimeline, plans[journey.Ref])
+		if ok {
+			runs = append(runs, run)
+		}
 	}
 	sort.Slice(runs, func(i, j int) bool {
 		if runs[i].StageStartedAt != runs[j].StageStartedAt {
@@ -419,7 +457,7 @@ func runFromLease(lease runLeaseSnapshot, plan runPlanSnapshot, hold runHumanRev
 	started := formatRunTime(lease.stageStarted)
 	run := Run{
 		Key: lease.key, Title: redactTokens(lease.title), Repo: lease.repo,
-		Stage: lease.stage, Gen: lease.gen, StageStartedAt: started,
+		State: "active", Stage: lease.stage, Gen: lease.gen, StageStartedAt: started,
 		WaitingOn: RunWaitingOnAgent, Assignee: lease.identity,
 		ClaimedBy: lease.claimedBy, ClaimExpiresAt: formatRunTime(lease.claimExpiresAt), ClaimPosted: lease.claimPosted,
 		PlanEpicID:    plan.epicID,
@@ -457,6 +495,33 @@ func runCheckpointBlocks(cfg *config.Config, stage string) bool {
 	return cfg.Runs.CheckpointBlocks(stage)
 }
 
+func completedRunFromJourney(j timeline.Journey, includeTimeline bool, plan runPlanSnapshot) (Run, bool) {
+	stage := j.Stages[timeline.KindStageCompleted]
+	if stage == nil || stage.Attrs == nil ||
+		stage.Attrs["stage_from"] != StageImplement || stage.Attrs["stage_to"] != "completed" {
+		return Run{}, false
+	}
+	gen, _ := strconv.ParseUint(stage.Attrs["gen"], 10, 64)
+	repo := ""
+	if ref, ok := worksource.ParseKey(j.Ref); ok {
+		repo = ref.Repo
+	}
+	run := Run{
+		Key: j.Ref, Title: j.Ref, Repo: repo,
+		State: "completed", Stage: "completed", Gen: gen,
+		StageStartedAt: formatRunTime(time.UnixMilli(stage.FirstAt)),
+		CompletedAt:    formatRunTime(time.UnixMilli(stage.LastAt)),
+		WaitingOn:      RunWaitingOnNone,
+		Assignee:       stage.Agent,
+		PlanEpicID:     plan.epicID,
+		Stages:         completedRunStages(gen),
+	}
+	if includeTimeline {
+		run.Stages = mergeRunTimelineStages(run.Stages, synthesizeRunJourneyEvents(j))
+	}
+	return run, true
+}
+
 func leaseRunStages(current string, gen uint64) []RunStage {
 	out := make([]RunStage, 0, len(orderedLeaseStages))
 	seenCurrent := false
@@ -474,6 +539,41 @@ func leaseRunStages(current string, gen uint64) []RunStage {
 		out = append(out, RunStage{Name: name, Status: status, Gen: stageGen})
 	}
 	return out
+}
+
+func completedRunStages(gen uint64) []RunStage {
+	out := make([]RunStage, 0, len(orderedLeaseStages))
+	for _, name := range orderedLeaseStages {
+		stageGen := uint64(0)
+		if name == StageImplement {
+			stageGen = gen
+		}
+		out = append(out, RunStage{Name: name, Status: "completed", Gen: stageGen})
+	}
+	return out
+}
+
+func synthesizeRunJourneyEvents(j timeline.Journey) []timeline.Event {
+	events := make([]timeline.Event, 0, len(j.Stages))
+	for kind, stage := range j.Stages {
+		if stage == nil {
+			continue
+		}
+		events = append(events, timeline.Event{
+			IssueRef: j.Ref,
+			Kind:     kind,
+			Agent:    stage.Agent,
+			At:       stage.LastAt,
+			Attrs:    stage.Attrs,
+		})
+	}
+	sort.Slice(events, func(i, k int) bool {
+		if events[i].At != events[k].At {
+			return events[i].At > events[k].At
+		}
+		return events[i].ID < events[k].ID
+	})
+	return events
 }
 
 func mergeRunTimelineStages(stages []RunStage, events []timeline.Event) []RunStage {
