@@ -11,6 +11,13 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-23 (v5.23.0)
+
+### Added
+
+- Drive Wavefront node completion from implement-stage `task_complete`, clean up run worktrees, and mark stale restored Wavefront leases unknown after restart.
+- Added scheduled Flue and OMP external-workflow smoke canaries with latest/pinned lanes, build-tagged Hive binary checks, integration smoke coverage, and deduplicated failure issues for #8466.
+
 ## 2026-09-23 (v5.22.0)
 
 ### Added

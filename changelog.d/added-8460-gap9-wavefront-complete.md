@@ -1,1 +1,0 @@
-- Drive Wavefront node completion from implement-stage `task_complete`, clean up run worktrees, and mark stale restored Wavefront leases unknown after restart.
