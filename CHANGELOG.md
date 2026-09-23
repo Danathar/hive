@@ -11,6 +11,34 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-23 (v5.16.2)
+
+### Fixed
+
+- Normalize contribute disabled repositories to owner/name across Governor Hub and Management toggles while preserving legacy short/full stored entries on read (#8438)
+
+## 2026-09-23 (v5.16.1)
+
+### Fixed
+
+- The dashboard agent model dropdown now filters provider/static catalogs through the model set accepted by the pinned agent CLIs, so unsupported selections are not offered or saved ([#8418](https://github.com/hivecommons/hive/issues/8418)).
+- Fixed watchdog production evidence so Claude/Codex/Copilot session-file scans use per-agent evidence roots instead of bridged fleet-shared dot-directories, with newest-by-age capped scans and regression coverage for isolated agent homes (#8422)
+
+## 2026-09-23 (v5.16.0)
+
+### Added
+
+- OMP workbench as the second external host behind the engine-neutral `pkg/extwork` adapter, answering the #6899 handoff question: an already-running OMP session takes a lease over the contributor relay channel it already holds (new `ext_*` frames, no new API), advertising `ext-exec/omp`; it receives the assignment summary only, must send an explicit accept or decline before the bounded context bundle is delivered, emits progress events (accepted, running, waiting, terminal, unknown) that land on the lease audit, and ends with a `stage-receipt/v1` receipt that Hive verifies by digest and binds to the lease and generation. Report-only: no repository credential, no dashboard token, publication stays Hive-side; because OMP is tier T3 (unconfined) the adapter refuses write-capable stages in code. Default off behind `runs.external.omp` with its own Features panel toggle beside the Flue one, linked into the binary only under the `extwork_omp` build tag, and proven by a conformance suite against a second-process workbench fixture (accept before context, decline audited, progress recorded, receipt bound, disconnect mid-stage stays unknown, dedup and conflict, cancel facts, shadow and off perform nothing, peer without the capability refused) ([#8361](https://github.com/hivecommons/hive/issues/8361))
+- The agent CLI pins in `src/Dockerfile` and `src/Dockerfile.contributor` now keep themselves current ([#8419](https://github.com/hivecommons/hive/issues/8419)). A daily workflow (`.github/workflows/cli-pin-bump.yml`, also dispatchable per CLI) runs `src/scripts/cli-pin-bump.sh` for each of claude, codex, copilot, pi, goose, agy, omp, muse, bob and gh: it resolves the latest release from the CLI's own source of truth (npm registry, GitHub releases, or the vendor's manifest), recomputes every per-architecture SHA-256/SHA-512 from the downloaded artifact and cross-checks it against the vendor-published digest where one exists, rewrites the `ARG` lines in both Dockerfiles, builds the hub image and runs `<cli> --version` (plus `claude --help`) inside it, and only then opens one PR per CLI labelled `security`, `dependencies` and `no-changelog`, with `needs-human` added for a major version change. The pins themselves stay (#2903): nothing floats to `@latest` and no hash check is removed. Operators get fresher CLIs through their normal image upgrade instead of waiting for someone to notice a stale pin, which is how #8417 sat for six weeks. See `src/docs/cli-pins.md`.
+
+### Changed
+
+- Aligned the Spektacular stage runner with the status contract as shipped by jumppad-labs/spektacular#45 and the maintainer answers of 2026-09-23: leases join artifacts by the bare artifact name (`000057_git-commit`, any `.md` or `/plan.md` spelling is reduced to it) instead of the rarely populated `spec:`/`plan:` cross-references; `updated_at` is no longer read for any progress, receipt or staleness decision (it is a file mtime whenever no workflow state matches, and may be absent); the `{"error":true,"code":"artifact_not_found","message":...}` envelope is parsed into the typed missing-document error and `closed_at: ""` on open documents no longer breaks the parse; the `--json` flag the CLI does not have is no longer passed; and `src/docs/spektacular.md` records which assumptions were confirmed, which changed, and that `plan export` is still an open ask (#8303)
+
+### Security
+
+- security: issue-claim markers are only honoured from the hub bot and their expiry is clamped to governor.claims.ttl_s (#8434)
+
 ## 2026-09-23 (v5.15.1)
 
 ### Fixed

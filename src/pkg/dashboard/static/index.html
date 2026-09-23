@@ -9671,6 +9671,7 @@
     // 2026-08-03 from a live /v1/models response, in API order, plus the bare
     // aliases the claude CLI accepts as --model values.
     const CLAUDE_CLI_MODELS = [
+      { value: 'claude-opus-5-5', label: 'Opus 5.5' },
       { value: 'claude-opus-5', label: 'Opus 5' },
       { value: 'claude-sonnet-5', label: 'Sonnet 5' },
       { value: 'claude-fable-5', label: 'Fable 5' },
@@ -9703,8 +9704,19 @@
       { value: 'claude-sonnet-4.5', label: 'Sonnet 4.5' },
       { value: 'claude-haiku-4.5', label: 'Haiku 4.5' },
       { value: 'gemini-flash-3.5', label: 'Gemini Flash 3.5' },
+      { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
+      { value: 'gpt-5.6-sol', label: 'GPT-5.6 Sol' },
+      { value: 'gpt-5.6-terra', label: 'GPT-5.6 Terra' },
+      { value: 'gpt-5.6-luna', label: 'GPT-5.6 Luna' },
+      { value: 'gpt-5.5', label: 'GPT-5.5' },
       { value: 'gpt-5.4', label: 'GPT-5.4' },
       { value: 'gpt-5.2', label: 'GPT-5.2' },
+    ];
+    const GEMINI_CLI_MODELS = [
+      { value: 'gemini-3-pro-preview', label: 'Gemini 3 Pro Preview' },
+      { value: 'gemini-3-flash-preview', label: 'Gemini 3 Flash Preview' },
+      { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
+      { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
     ];
     // Codex (OpenAI CLI) exposes its own OpenAI-only models. Claude models are
     // rejected by Codex with a ChatGPT account ("model is not supported when
@@ -9738,6 +9750,9 @@
     // placeholder, never a command-line argument.
     const BOB_CLI_MODELS = [
       { value: 'auto', label: 'Auto (bob picks)' },
+    ];
+    const GOOSE_CLI_MODELS = [
+      { value: 'default', label: 'Default' },
     ];
     // Google Antigravity exposes an account-aware catalog through `agy models`.
     // This is the first-paint / failed-probe fallback, captured from agy 1.1.18
@@ -9787,10 +9802,10 @@
       claude: CLAUDE_CLI_MODELS,
       copilot: COPILOT_CLI_MODELS,
       bob: BOB_CLI_MODELS,
-      gemini: COPILOT_CLI_MODELS,
+      gemini: GEMINI_CLI_MODELS,
       agy: AGY_CLI_MODELS,
       omp: OMP_CLI_MODELS,
-      goose: COPILOT_CLI_MODELS,
+      goose: GOOSE_CLI_MODELS,
       codex: CODEX_CLI_MODELS,
     };
     function backendLabel(b) {
@@ -21592,14 +21607,52 @@ function burnAreaChart() {
         </div>`;
     }
 
+    function contribRepoShortName(repoFull) {
+      return String(repoFull || '').split('/').pop();
+    }
+
+    function contribRepoWildcardMatch(text, pattern) {
+      text = String(text || '').toLowerCase();
+      pattern = String(pattern || '').toLowerCase();
+      if (pattern === '*') return true;
+      if (pattern.indexOf('*') < 0) return text.indexOf(pattern) >= 0;
+      var parts = pattern.split('*');
+      var idx = 0;
+      for (var i = 0; i < parts.length; i++) {
+        var part = parts[i];
+        if (!part) continue;
+        var found = text.indexOf(part, idx);
+        if (found < 0) return false;
+        idx = found + part.length;
+      }
+      if (pattern.charAt(0) !== '*' && text.indexOf(parts[0]) !== 0) return false;
+      var last = parts[parts.length - 1];
+      if (pattern.charAt(pattern.length - 1) !== '*' && last && text.slice(-last.length) !== last) return false;
+      return true;
+    }
+
+    function contribRepoDisabledEntryMatches(repoFull, entry) {
+      const full = String(repoFull || '');
+      const short = contribRepoShortName(full);
+      entry = String(entry || '').trim();
+      if (!entry) return false;
+      return contribRepoWildcardMatch(full, entry) || contribRepoWildcardMatch(short, entry);
+    }
+
+    function contribRepoMatchingDisabledEntries(repoFull, disabled) {
+      return (disabled || []).filter(function(entry) { return contribRepoDisabledEntryMatches(repoFull, entry); });
+    }
+
     function renderGovHub(hub) {
       const dashUrl = hub.dashboard_url || window.location.origin || '';
       const snapUrl = hub.snapshot_url || (hub.auto_snapshot && dashUrl ? dashUrl.replace(/\/$/, '') + '/snapshot' : '');
+      const disabledRepos = hub.disabled_repos || [];
       const repos = (_configState.data.repos || []).map(function(r) {
-        const name = r.split('/').pop();
-        const enabled = !(hub.disabled_repos || []).includes(name);
+        const name = contribRepoShortName(r);
+        const enabled = contribRepoMatchingDisabledEntries(r, disabledRepos).length === 0;
         return {name: name, full: r, enabled: enabled};
       });
+      const rawDisabledRepos = hub.disabled_repos_raw || disabledRepos;
       const tiers = ['newcomer', 'contributor', 'trusted', 'merger', 'advisor'];
       const denyLabels = (hub.contribute_deny_labels || []);
       const denyTitles = (hub.contribute_deny_titles || []);
@@ -21756,8 +21809,9 @@ function burnAreaChart() {
         <div class="config-field">
           <label>Repos for Contribute <span class="config-info">i<span class="config-tooltip">Toggle which repos serve work to contributors. New repos default to on.</span></span></label>
           <div style="display:flex;flex-direction:column;gap:4px">${repos.map(function(r) {
-            return '<div class="config-toggle" style="padding:2px 0"><div class="config-toggle-switch ' + (r.enabled ? 'on' : '') + '" data-action="toggleContribRepo" data-arg1="' + esc(r.name) + '" data-arg-types="t,s"></div><span style="font-size:0.78rem">' + esc(r.full) + '</span></div>';
+            return '<div class="config-toggle" style="padding:2px 0"><div class="config-toggle-switch ' + (r.enabled ? 'on' : '') + '" data-action="toggleContribRepo" data-arg1="' + esc(r.full) + '" data-arg-types="t,s"></div><span style="font-size:0.78rem">' + esc(r.full) + '</span></div>';
           }).join('')}</div>
+          <div style="font-size:0.65rem;color:var(--muted);margin-top:6px">Raw disabled_repos: <code>${esc(rawDisabledRepos.length ? rawDisabledRepos.join(', ') : 'none')}</code></div>
         </div>
 
         <div class="config-field">
@@ -22031,17 +22085,25 @@ function burnAreaChart() {
       markDirty('hub', 'tier_limits', _configState.data.hub.tier_limits);
     }
 
-    function toggleContribRepo(el, repoName) {
-      el.classList.toggle('on');
+    function toggleContribRepo(el, repoFull) {
       if (!_configState.data.hub) _configState.data.hub = {};
       var disabled = _configState.data.hub.disabled_repos || [];
-      if (el.classList.contains('on')) {
-        disabled = disabled.filter(function(r) { return r !== repoName; });
+      var isOn = el.classList.contains('on');
+      if (isOn) {
+        if (contribRepoMatchingDisabledEntries(repoFull, disabled).length === 0) disabled.push(repoFull);
       } else {
-        if (disabled.indexOf(repoName) === -1) disabled.push(repoName);
+        var blockers = contribRepoMatchingDisabledEntries(repoFull, disabled);
+        var wildcardBlockers = blockers.filter(function(r) { return String(r || '').indexOf('*') >= 0; });
+        if (wildcardBlockers.length) {
+          alert('This repo is disabled by wildcard disabled_repos entry: ' + wildcardBlockers.join(', '));
+          renderConfigTab('Hub');
+          return;
+        }
+        disabled = disabled.filter(function(r) { return !contribRepoDisabledEntryMatches(repoFull, r); });
       }
       _configState.data.hub.disabled_repos = disabled;
       markDirty('hub', 'disabled_repos', disabled);
+      renderConfigTab('Hub');
     }
 
     function toggleContribTier(el, tier) {
@@ -25225,6 +25287,11 @@ function burnAreaChart() {
             <span class="config-toggle-label">Flue binding (runs.external.flue) <span class="config-info">i<span class="config-tooltip">OFF by default. When on with no mode it runs in shadow: Hive persists admissions and observes but performs no external start and no external mutation. Only mode report-only dispatches, and only to relays that declare the ext-exec/flue capability; a relay without it is refused that work, never handed it as local work. Endpoint and workflow version are yaml-only. Requires a build with the extwork_flue tag; see src/docs/design/external-workflow-admission.md.</span></span></span>
           </div>
           <p style="font-size:0.72rem;color:var(--muted);margin:6px 0 0">Mode: <b>${esc(f.extFlueMode || 'off')}</b> · adapter ${f.extFlueLinked ? 'linked into this build' : 'not linked into this build (build tag extwork_flue); the toggle stays inert'} · endpoint ${f.extFlueEndpointSet ? 'configured' : 'not configured'}.</p>
+          <div class="config-toggle" style="margin-top:10px">
+            <div class="config-toggle-switch ${f.extOmpEnabled ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="features" data-key="extOmpEnabled"></div>
+            <span class="config-toggle-label">OMP workbench host (runs.external.omp) <span class="config-info">i<span class="config-tooltip">OFF by default and independent of the Flue toggle. An already-running OMP workbench takes a lease over the contributor relay it already holds: it sees the assignment summary, must accept before the bounded context bundle is delivered, reports progress, and ends with a stage receipt that Hive verifies. Report-only: no repository credential, no dashboard token; OMP is unconfined (T3), so write-capable stages are refused outright. Only relays declaring ext-exec/omp are offered this work. Requires a build with the extwork_omp tag; see src/docs/design/external-workflow-admission.md.</span></span></span>
+          </div>
+          <p style="font-size:0.72rem;color:var(--muted);margin:6px 0 0">Mode: <b>${esc(f.extOmpMode || 'off')}</b> · adapter ${f.extOmpLinked ? 'linked into this build' : 'not linked into this build (build tag extwork_omp); the toggle stays inert'} · workflow version ${f.extOmpVersionSet ? 'pinned' : 'not pinned'}.</p>
         </div>
 
         <div style="margin:18px 0;padding-top:14px;border-top:1px solid var(--border)">
