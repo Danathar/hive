@@ -5820,6 +5820,7 @@ func (s *Server) handleBackends(w http.ResponseWriter, r *http.Request) {
 	copilotCLI := s.queryCLIModels("copilot")
 	geminiCLI := s.queryCLIModels("gemini")
 	gooseCLI := s.queryCLIModels("goose")
+	codexCLI := s.queryCLIModels("codex")
 	agyCLI := s.queryCLIModels(agyBackendID)
 	ompCLI := s.queryCLIModels(ompBackendID)
 	// bob has no discovery source and no usable --model flag: it selects its
@@ -5869,6 +5870,7 @@ func (s *Server) handleBackends(w http.ResponseWriter, r *http.Request) {
 		cliBackendEntry(bobBackendID, "bob (IBM bobshell)", bobCLI),
 		cliBackendEntry("gemini", "Gemini", geminiCLI),
 		cliBackendEntry("goose", "Goose", gooseCLI),
+		cliBackendEntry("codex", "OpenAI Codex", codexCLI),
 		cliBackendEntry(agyBackendID, "Google Antigravity (agy)", agyCLI),
 		cliBackendEntry(ompBackendID, "Oh My Pi (omp)", ompCLI),
 		{"id": "vllm", "name": "vLLM (self-hosted)", "models": vllmModels, "inference": true},

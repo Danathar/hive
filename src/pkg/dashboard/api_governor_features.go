@@ -38,6 +38,8 @@ const (
 //     disclosure channel security-sensitive findings route to)
 //   - runs.external.flue (Enabled + Mode of the report-only Flue binding, #8361;
 //     endpoint and workflow version are yaml-only)
+//   - runs.external.omp  (Enabled + Mode of the report-only OMP workbench host,
+//     #8361 step 9; workflow version is yaml-only)
 //
 // Every field is a pointer so an absent key leaves the corresponding config
 // untouched — the same "only what you send is changed" contract the other
@@ -102,6 +104,10 @@ func (s *Server) handleGovernorFeatures(w http.ResponseWriter, r *http.Request) 
 		// and picks the mode.
 		ExtFlueEnabled *bool   `json:"extFlueEnabled"`
 		ExtFlueMode    *string `json:"extFlueMode"`
+		// #8361 step 9: the OMP workbench host, an independent toggle beside
+		// the Flue one. Workflow version stays yaml-only.
+		ExtOMPEnabled *bool   `json:"extOmpEnabled"`
+		ExtOMPMode    *string `json:"extOmpMode"`
 
 		ClaimsEnabled *bool `json:"claimsEnabled"`
 		ClaimsTTLS    *int  `json:"claimsTtlS"`
@@ -149,6 +155,10 @@ func (s *Server) handleGovernorFeatures(w http.ResponseWriter, r *http.Request) 
 	}
 	if body.ExtFlueMode != nil && !config.ValidFlueBindingMode(*body.ExtFlueMode) {
 		jsonError(w, fmt.Sprintf("extFlueMode must be one of %s", strings.Join(config.FlueBindingModes(), ", ")), http.StatusBadRequest)
+		return
+	}
+	if body.ExtOMPMode != nil && !config.ValidExternalBindingMode(*body.ExtOMPMode) {
+		jsonError(w, fmt.Sprintf("extOmpMode must be one of %s", strings.Join(config.ExternalBindingModes(), ", ")), http.StatusBadRequest)
 		return
 	}
 	if body.RotationThresholdPct != nil && (*body.RotationThresholdPct < 1 || *body.RotationThresholdPct > 100) {
@@ -335,6 +345,12 @@ func (s *Server) handleGovernorFeatures(w http.ResponseWriter, r *http.Request) 
 	if body.ExtFlueMode != nil {
 		cfg.Runs.External.Flue.Mode = strings.TrimSpace(*body.ExtFlueMode)
 	}
+	if body.ExtOMPEnabled != nil {
+		cfg.Runs.External.OMP.Enabled = *body.ExtOMPEnabled
+	}
+	if body.ExtOMPMode != nil {
+		cfg.Runs.External.OMP.Mode = strings.TrimSpace(*body.ExtOMPMode)
+	}
 	if body.RotationEnabled != nil {
 		cfg.Governor.Rotation.Enabled = *body.RotationEnabled
 	}
@@ -372,6 +388,7 @@ func (s *Server) handleGovernorFeatures(w http.ResponseWriter, r *http.Request) 
 func (s *Server) featuresLinkedView() map[string]interface{} {
 	return map[string]interface{}{
 		"extFlueLinked": s.externalExecLinked(extExecEngineFlue),
+		"extOmpLinked":  s.externalExecLinked(extExecEngineOMP),
 	}
 }
 
@@ -415,6 +432,10 @@ func featuresSectionResponse(cfg *config.Config) map[string]interface{} {
 		"extFlueMode":                     cfg.FlueBindingMode(),
 		"extFlueModes":                    config.FlueBindingModes(),
 		"extFlueEndpointSet":              strings.TrimSpace(cfg.Runs.External.Flue.Endpoint) != "",
+		"extOmpEnabled":                   cfg.Runs.External.OMP.Enabled,
+		"extOmpMode":                      cfg.OMPBindingMode(),
+		"extOmpModes":                     config.ExternalBindingModes(),
+		"extOmpVersionSet":                strings.TrimSpace(cfg.Runs.External.OMP.WorkflowVersion) != "",
 		"formalAvailable":                 acmmLevel >= config.FormalQualityMinACMMLevel,
 		"formalMinACMMLevel":              config.FormalQualityMinACMMLevel,
 		"personaLearningEnabled":          cfg.Persona.Learning.Enabled,
