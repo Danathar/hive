@@ -1,1 +1,0 @@
-- Wire Spektacular multi-repo run plans to Wavefront fan-out when `governor.work_source.wavefront.enabled` is on, and surface the created wave ids on run details.
