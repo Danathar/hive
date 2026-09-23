@@ -29,7 +29,9 @@ import (
 	"github.com/hivecommons/hive/pkg/celtrigger"
 	"github.com/hivecommons/hive/pkg/classify"
 	"github.com/hivecommons/hive/pkg/config"
+	convergenceaudit "github.com/hivecommons/hive/pkg/convergence/audit"
 	"github.com/hivecommons/hive/pkg/convergence/mutation"
+	"github.com/hivecommons/hive/pkg/convergence/outcome"
 	"github.com/hivecommons/hive/pkg/dashboard"
 	"github.com/hivecommons/hive/pkg/dashboard/collect"
 	"github.com/hivecommons/hive/pkg/dashchat"
@@ -1390,6 +1392,12 @@ func (b *boot) wireBootClosures() {
 	}
 
 	b.dashboardDependencies = func() *dashboard.Dependencies {
+		var auditLedger *mutation.Ledger
+		var auditJournal *mutation.Journal
+		if boundary, ok := b.mutationBoundary.(*mutation.Boundary); ok {
+			auditLedger = boundary.Executor.Ledger
+			auditJournal = boundary.Executor.Journal
+		}
 		return &dashboard.Dependencies{
 			Config:   b.cfg,
 			AgentMgr: b.agentMgr,
@@ -1435,6 +1443,14 @@ func (b *boot) wireBootClosures() {
 			BeadSynthesizer:       b.beadSynth,
 			BeadStores:            b.beadStores,
 			BeadStoreLoadFailures: b.beadStoreLoadFailures,
+			AuditLedger:           auditLedger,
+			AuditJournal:          auditJournal,
+			AuditPublisherFunc: func() convergenceaudit.FindingPublisher {
+				return b.findingPublisher
+			},
+			AuditOutcomesFunc: func() *outcome.Ledger {
+				return b.outcomeLedger
+			},
 			// RFC #4000 approval desk. Nil unless `tool_approval.enabled`, in which
 			// case the Approvals panel renders as "not enabled".
 			ApprovalDesk:  b.approvalDesk,
@@ -1495,9 +1511,10 @@ func (b *boot) wireBootClosures() {
 					Scope:     bd.Scope,
 				}, nil
 			},
-			// #8361: which external-execution engines this build links; the
-			// Flue adapter registers itself only under the extwork_flue tag.
-			ExternalExec: extworkStatus{registry: extwork.DefaultRegistry},
+			// #8361/#6899: external-execution linked-engine status plus
+			// lazy dispatch/peer attachment. Adapters register only under
+			// their extwork_* build tags.
+			ExternalExec: &extworkStatus{registry: extwork.DefaultRegistry, srv: b.dashSrv, cfg: b.cfg, now: time.Now},
 			CELTrigger: func(ctx context.Context, ev celtrigger.NormalizedEvent, reason string) {
 				celTriggerKickAgents(ctx, celEngineFor(b.cfg, b.logger), ev, b.cfg, b.gov, b.agentMgr.IsPaused, b.agentMgr, reason, b.logger)
 			},

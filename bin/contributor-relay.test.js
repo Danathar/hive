@@ -13484,7 +13484,7 @@ test('#7924 a label the repository does not define is created once and the add r
   } finally { console.log = log; console.error = err; teardown(relay); }
 });
 
-test('#7924 a plain no_work_needed carries no blocked marker and gets no label — the pre-#7924 wire shape is unchanged', () => {
+test('#7924/#8477 a plain already-done no_work_needed carries no blocked marker and gets the already-done label', () => {
   const PANE = `HIVE_VERDICT: no_work_needed — already fixed on main by #12\n${IDLE_PANE}`;
   const relay = loadRelay({ backend: 'copilot', paneText: PANE });
   const log = console.log; console.log = () => {};
@@ -13496,8 +13496,28 @@ test('#7924 a plain no_work_needed carries no blocked marker and gets no label �
     assert.strictEqual(completed.length, 1);
     assert.strictEqual(completed[0].verdict, 'no_work_needed');
     assert.ok(!('verdict_blocked' in completed[0]), `no marker on a plain no_work_needed: ${JSON.stringify(completed[0])}`);
-    assert.strictEqual(relay.__commands.filter(c => /gh (issue edit|label create)/.test(c)).length, 0);
+    assert.strictEqual(completed[0].verdict_reason_kind, 'already_done');
+    assert.strictEqual(relay.__commands.filter(c => /gh issue edit/.test(c)).length, 1);
+    assert.ok(relay.__commands.some(c => c.includes('--add-label') && c.includes('hive/already-done')), JSON.stringify(relay.__commands));
   } finally { console.log = log; teardown(relay); }
+});
+
+test('#8477 already-done no_work_needed carries structured reason kind and evidence', () => {
+  const relay = loadRelay({});
+  try {
+    let fields = relay.verdictWireFields({ verdict: 'no_work_needed', reason: 'merged PR #1297 already resolves this issue' });
+    assert.strictEqual(fields.verdict, 'no_work_needed');
+    assert.strictEqual(fields.verdict_reason_kind, 'already_done');
+    assert.deepStrictEqual(fields.evidence, { pr: 1297 });
+
+    fields = relay.verdictWireFields({ verdict: 'no_work_needed', reason: 'already fixed by commit e6d3de3' });
+    assert.strictEqual(fields.verdict_reason_kind, 'already_done');
+    assert.deepStrictEqual(fields.evidence, { commit: 'e6d3de3' });
+
+    fields = relay.verdictWireFields({ verdict: 'no_work_needed', reason: 'waiting on maintainer decision for #1297' });
+    assert.ok(!('verdict_reason_kind' in fields), JSON.stringify(fields));
+    assert.ok(!('evidence' in fields), JSON.stringify(fields));
+  } finally { teardown(relay); }
 });
 
 test('#7924 the label is for GitHub issue tasks only', () => {
@@ -13596,4 +13616,87 @@ test('hub announcements use reverse video on TTY when color is enabled', () => {
     Object.defineProperty(process.stdout, 'isTTY', { value: oldTTY, configurable: true });
     teardown(relay);
   }
+});
+
+test('#8470 decision verdict is classified as no_work_needed plus needs-decision marker', () => {
+  const relay = loadRelay({});
+  try {
+    let v = relay.detectNoWorkVerdict(['HIVE_VERDICT: no_work_needed — decision: maintainer must choose the auth default']);
+    assert.strictEqual(v.verdict, 'no_work_needed');
+    assert.strictEqual(v.needsDecision, true);
+    assert.strictEqual(v.reason, 'maintainer must choose the auth default');
+    v = relay.detectNoWorkVerdict(['HIVE_VERDICT: no_work_needed — blocked on unanswered maintainer decision']);
+    assert.strictEqual(v.verdict, 'no_work_needed', 'maintainer decisions are not outside-dependency blocked verdicts');
+    assert.strictEqual(v.needsDecision, true);
+    v = relay.detectNoWorkVerdict(['HIVE_VERDICT: no_work_needed — blocked on upstream release #12']);
+    assert.strictEqual(v.verdict, 'blocked', 'outside dependency wording remains blocked');
+    assert.ok(!v.needsDecision);
+    assert.strictEqual(v.reason, 'upstream release #12');
+  } finally { teardown(relay); }
+});
+
+test('#8470 end to end: decision verdict applies configured label and reports marker without comments', () => {
+  const PANE = `HIVE_VERDICT: no_work_needed — decision: maintainer must choose the rollout policy\n${IDLE_PANE}`;
+  const relay = loadRelay({ backend: 'copilot', paneText: PANE });
+  const log = console.log; console.log = () => {};
+  try {
+    relay.handleMessage(JSON.stringify({ type: 'auth_ok', contributor_id: 'c1', trust_tier: 'newcomer', permissions: ['issues:write'], contribute_needs_decision_label: '2-discussing' }));
+    dispatchTask(relay, 'ct-8470-decision', 8470);
+    relay.__crashTick();
+    const completed = relay.__sent.filter(m => m.type === 'task_complete');
+    assert.strictEqual(completed.length, 1);
+    assert.strictEqual(completed[0].verdict, 'no_work_needed');
+    assert.strictEqual(completed[0].verdict_needs_decision, true);
+    assert.ok(!completed[0].verdict_blocked);
+    assert.strictEqual(completed[0].verdict_reason, 'maintainer must choose the rollout policy');
+    const edits = relay.__commands.filter(c => /gh issue edit/.test(c));
+    assert.strictEqual(edits.length, 1, JSON.stringify(edits));
+    assert.ok(edits[0].includes("--add-label '2-discussing'"), edits[0]);
+    assert.strictEqual(relay.__commands.filter(c => /gh issue comment/.test(c)).length, 0, 'the relay posts no new comment');
+  } finally { console.log = log; teardown(relay); }
+});
+
+test('#8470 a verified PR suppresses a decision verdict and label', () => {
+  const PANE = [
+    'Opened https://github.com/foo/bar/pull/8470',
+    'HIVE_VERDICT: no_work_needed — decision: maintainer must choose the rollout policy',
+    IDLE_PANE,
+  ].join('\n');
+  const relay = loadRelay({
+    backend: 'copilot',
+    paneText: PANE,
+    env: { HIVE_CONTRIBUTOR_USERNAME: 'test-contributor' },
+    prMeta: {
+      url: 'https://github.com/foo/bar/pull/8470',
+      author: { login: 'test-contributor' },
+      createdAt: new Date().toISOString(),
+      mergedAt: null,
+      state: 'OPEN',
+    },
+  });
+  const log = console.log; console.log = () => {};
+  try {
+    relay.handleMessage(JSON.stringify({ type: 'auth_ok', contributor_id: 'c1', trust_tier: 'newcomer', permissions: ['issues:write'], contribute_needs_decision_label: '2-discussing' }));
+    dispatchTask(relay, 'ct-8470-pr-wins', 8470);
+    relay.__crashTick();
+    const completed = relay.__sent.filter(m => m.type === 'task_complete');
+    assert.strictEqual(completed.length, 1);
+    assert.strictEqual(completed[0].pr_url, 'https://github.com/foo/bar/pull/8470');
+    assert.ok(!completed[0].verdict_needs_decision);
+    assert.strictEqual(relay.__commands.filter(c => /gh (issue edit|label create|issue comment)/.test(c)).length, 0);
+  } finally { console.log = log; teardown(relay); }
+});
+
+test('#8470 an empty configured decision label disables relay labelling but keeps the verdict marker', () => {
+  const PANE = `HIVE_VERDICT: no_work_needed — decision: maintainer approval pending\n${IDLE_PANE}`;
+  const relay = loadRelay({ backend: 'copilot', paneText: PANE });
+  const log = console.log; console.log = () => {};
+  try {
+    relay.handleMessage(JSON.stringify({ type: 'auth_ok', contributor_id: 'c1', trust_tier: 'newcomer', permissions: ['issues:write'], contribute_needs_decision_label: '' }));
+    dispatchTask(relay, 'ct-8470-empty', 8471);
+    relay.__crashTick();
+    const completed = relay.__sent.filter(m => m.type === 'task_complete');
+    assert.strictEqual(completed[0].verdict_needs_decision, true);
+    assert.strictEqual(relay.__commands.filter(c => /gh (issue edit|label create|issue comment)/.test(c)).length, 0);
+  } finally { console.log = log; teardown(relay); }
 });
