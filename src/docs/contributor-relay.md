@@ -134,6 +134,7 @@ Important environment variables:
 | `AGENT_BACKEND` | `claude` | CLI/backend to run (`claude`, `copilot`, `goose`, `bob`, `codex`, `pi`, `aider`, `litellm`, `agy`, `opencode`, `kilo`, `muse`, `omp`, depending on image support and credentials). `omp` is interactive-only: Hive starts normal `omp --model <id>` in the prepared tmux cwd and passes no fabricated permission flags. It has no verified local confinement mechanism, so local mode refuses it without `HIVE_OMP_DANGEROUSLY_RUN_UNCONFINED=1`; container mode is the supported boundary. `agy` has the same confinement limit. `opencode`, `kilo`, and `muse` only run headless (`CONTRIBUTOR_MODE=headless`) — hive has no interactive-tmux wiring for them. |
 | `AGENT_MODEL` | unset (backend default) | Optional model override passed to the contributor agent (e.g. `claude-sonnet-4-6`, `gpt-4o`, `gemini-2.5-pro`). Declared to the hive when the relay connects. |
 | `AGENT_REASONING_EFFORT` | unset | Reasoning effort override. Consumed by `codex` (`-c model_reasoning_effort`), by `agy` (`--effort low\|medium\|high`, required whenever a model is set, else agy ignores the model), by `muse` (`--reasoning-effort none\|minimal\|low\|medium\|high\|xhigh\|max\|ultra`, applied with or without a model; a value outside that set is dropped rather than passed, because muse exits 2 on it), and by `claude` (`--effort low\|medium\|high\|xhigh\|max`, applied with or without a model; a value outside that set is dropped the same way, and unset leaves Claude Code at its own default - [#8377](https://github.com/hivecommons/hive/issues/8377)). Ignored by other backends, including inference routes such as `litellm` that drive the claude binary. |
+| `HIVE_CONTRIBUTOR_KNOWLEDGE_TOKEN_BUDGET` | `12000` | Estimated startup-token budget for the Hive knowledge file linked into backends that need a smaller context. Pi uses this budget for its auto-loaded `AGENTS.md`/`CLAUDE.md`: Hive keeps the full export at `~/agent.md`, writes a budgeted `~/agent.pi-context.md`, orders repo/task-matching entries first when those task env vars are present, appends a truncation marker when entries are omitted, and points the model at `hive knowledge` / the Hive MCP knowledge tool for on-demand lookup. |
 | `CONTRIBUTOR_MODE` | `interactive` | `interactive` keeps a tmux/TTY session. `headless` is for one-shot/no-TTY task delivery. |
 | `HIVE_AGENT_SESSION` | `contributor` | tmux session name for interactive mode. |
 | `HIVE_SESSION` | backend name (`AGENT_BACKEND`) | Optional session label for running multiple relays under one GitHub account (see [Running multiple backends under one account](#running-multiple-backends-under-one-account)). Relays with distinct labels get independent session-scoped identities (`ContributorID#session`) on the hub, so their task leases, assignment cooldowns, failure streaks, and ownership fences do not collide. Auth, trust tier, model admission, and rate-limit accounting stay per-account. Sanitized on the hub: only `[A-Za-z0-9._-]` survive, capped at 32 bytes; a label that sanitizes to empty counts as unset. Set it to the **empty string** to opt out — the relay then declares no session and keeps the bare per-account identity (the historical single-session behavior). |
@@ -176,7 +177,7 @@ mode fixed for Goose in [#2393](https://github.com/hivecommons/hive/issues/2393)
 | `copilot` | `copilot-instructions.md`, `COPILOT.md`, `CLAUDE.md` |
 | `goose` | `AGENTS.md`, `.goosehints`, `.goose-instructions.md`, `CLAUDE.md` |
 | `codex` | `AGENTS.md`, `CLAUDE.md` |
-| `pi` | `AGENTS.md`, `CLAUDE.md` |
+| `pi` | `AGENTS.md`, `CLAUDE.md` (linked to a budgeted `agent.pi-context.md`; full export stays at `agent.md`) |
 | `bob` | `.bob/AGENTS.md`, `CLAUDE.md` (compatibility) |
 | `agy` | `CLAUDE.md` |
 | `opencode` | `AGENTS.md`, `CLAUDE.md` |
@@ -544,6 +545,7 @@ Only issues that pass **all** of these filters are offered to contributors:
 | Control | Config key | Behavior |
 |---|---|---|
 | **Repos for Contribute** | `disabled_repos` | Per-repo toggle. A monitored repo serves work unless it is listed in `disabled_repos`; newly added repos default to **on**. |
+| **Repo Filters** | `contribute_repo_filters` | Optional full `owner/repo` overrides edited from each Repos-for-Contribute row. Each override has the same title, author, and label lists plus `deny`/`allow` modes. Hive-wide skip labels and hive-wide filters run first, so a repo can never re-admit work they denied; repo deny mode extends the hive-wide deny list and repo allow mode narrows only that repo. |
 | **Label filter** | `contribute_labels_mode` + `contribute_deny_labels` | Set `contribute_labels_mode` to `deny` (default) so listed labels exclude an issue (e.g. `hold`, `wontfix`, `duplicate`), or to `allow` so an issue must carry one of the listed labels to queue (e.g. `good-first-issue`, `help-wanted`). |
 | **Contribute skip labels** | `contribute_skip_labels` / `HIVE_CONTRIBUTE_SKIP_LABELS` | Hive-wide “not contributor work” labels that are never offered even before normal filters run. Default: `blocked,tracking,epic,discussion,question,needs-decision,needs-triage`; `blocked` is always added as a floor. Comma-separated entries are case-insensitive and use `path.Match`-style `*` globs, so projectbluefin can set `wayfinder:map,wayfinder:grilling,wayfinder:research` (or `wayfinder:*`) to keep decision briefs out of the relay. |
 | **Title filter** | `contribute_titles_mode` + `contribute_deny_titles` | Title patterns. With `contribute_titles_mode` set to `deny` (default) a matching title excludes the issue; set it to `allow` so only issues whose title matches one of the patterns queue. Supports `*`-wildcards (`*dashboard*`, `epic:*`) and slash-delimited regex (`/renovate/`, always case-insensitive). |
@@ -553,6 +555,21 @@ Only issues that pass **all** of these filters are offered to contributors:
 The legacy `contribute_allow_labels` field is retained only for one-time migration into `contribute_deny_labels` + `contribute_labels_mode`; configure the label filter through those two keys.
 
 The list keys keep their `deny_*` names in every mode for backward compatibility with existing on-disk config; the `*_mode` key decides whether the list is a denylist or an allowlist. An empty list in `allow` mode is treated as "filter off" rather than "nothing passes", so a half-configured filter never silently empties the queue.
+
+Per-repo filter entries are keyed by full repo name:
+
+```yaml
+hub:
+  contribute_repo_filters:
+    projectbluefin/common:
+      labels_mode: deny
+      deny_labels: ["2-discussing"]
+    projectbluefin/docs:
+      labels_mode: allow
+      deny_labels: ["good-first-issue"]
+```
+
+The Operations policy panel and withheld-work diagnostics show the effective repo filter when it is what kept an issue out of the queue.
 
 ### Cooldown
 
