@@ -50,12 +50,22 @@ const (
 	// detail's outcome= distinguishes "missing" from "invalid or expired".
 	AuditClaudeTokenMissing = "claude_token_missing"
 
-	// AuditLeaseStageAdvanced and AuditLeaseStageRetried record Hive-owned run
-	// stage transitions on the existing task lease record. They are system
-	// actions: no contributor can advance or retry a stage by editing client
-	// fields.
+	// AuditLeaseStageAdvanced, AuditLeaseStageRetried and AuditLeaseStageReset
+	// record Hive-owned run stage transitions on the existing task lease
+	// record. They are system actions: no contributor can advance, retry or
+	// reset a stage by editing client fields. A reset (#8350) is the only
+	// backwards move and is reachable solely through an owner-gated route;
+	// its detail carries the reason the owner gave.
 	AuditLeaseStageAdvanced = "lease_stage_advanced"
 	AuditLeaseStageRetried  = "lease_stage_retried"
+	AuditLeaseStageReset    = "lease_stage_reset"
+	// AuditLeaseStageRefused records the Spektacular runner declining to
+	// advance a stage (a final artifact went back to draft, or the artifact the
+	// lease is bound to vanished). AuditLeaseStageEscalated records the runner
+	// exhausting a stage's retry budget and raising a decision escalation
+	// (hivecommons/hive#8303).
+	AuditLeaseStageRefused   = "lease_stage_refused"
+	AuditLeaseStageEscalated = "lease_stage_escalated"
 
 	// AuditPersonaAdjusted records a user accepting, rejecting, or undoing a
 	// persona learning suggestion (hivecommons/hive#8363). The actor is the

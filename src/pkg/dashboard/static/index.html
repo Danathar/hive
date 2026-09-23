@@ -1269,6 +1269,7 @@
     .reco-crit .crit-detail { color: var(--muted); font-size: 0.72rem; margin-top: 3px; }
     .reco-advisory-note { margin-top: 12px; font-size: 0.68rem; color: var(--muted); font-style: italic; }
     .reco-calm { color: var(--muted); font-size: 0.85rem; }
+    .reco-fact-heading { margin-top: 12px; color: var(--muted); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 700; }
 
     .lc-fleet { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
     .lc-fleet-stat { flex: 1 1 100px; min-width: 90px; background: var(--bg); border: 1px solid var(--border);
@@ -9622,7 +9623,7 @@
     // 'openrouter' is a first-class inference method (an OpenAI-compatible gateway
     // preset), so it appears in every backend/method picker even before a matching
     // Model Gateway is configured — the user picks it, then funds/configures it.
-    const KNOWN_BACKENDS = ['claude', 'copilot', 'bob', 'gemini', 'agy', 'codex', 'goose', 'aider', 'vllm', 'llm-d', 'litellm', 'openrouter', 'watsonx'];
+    const KNOWN_BACKENDS = ['claude', 'copilot', 'bob', 'gemini', 'agy', 'omp', 'codex', 'goose', 'aider', 'vllm', 'llm-d', 'litellm', 'openrouter', 'watsonx'];
     const FREE_BACKENDS = ['copilot', 'goose'];
     const INFERENCE_BACKENDS = ['vllm', 'llm-d', 'litellm', 'openrouter', 'watsonx'];
     let CONFIG_BACKEND_OPTIONS = [];
@@ -9754,12 +9755,23 @@
       { value: 'claude-opus-4-6-thinking', label: 'Claude Opus 4.6 (Thinking)' },
       { value: 'gpt-oss-120b-medium', label: 'GPT-OSS 120B (Medium)' },
     ];
+    // Oh My Pi is a multi-provider CLI; selectors keep their provider prefix.
+    // Keep in sync with ompStaticModels in pkg/dashboard/cli_models_omp.go.
+    const OMP_CLI_MODELS = [
+      { value: 'openai-codex/gpt-5.6-terra', label: 'openai-codex/gpt-5.6-terra' },
+      { value: 'openai-codex/gpt-5.6-sol', label: 'openai-codex/gpt-5.6-sol' },
+      { value: 'openai-codex/gpt-5.6-luna', label: 'openai-codex/gpt-5.6-luna' },
+      { value: 'anthropic/claude-opus-5', label: 'anthropic/claude-opus-5' },
+      { value: 'anthropic/claude-fable-5', label: 'anthropic/claude-fable-5' },
+      { value: 'anthropic/claude-sonnet-5', label: 'anthropic/claude-sonnet-5' },
+      { value: 'google-antigravity/gemini-3.7-flash', label: 'google-antigravity/gemini-3.7-flash' },
+    ];
     const KNOWN_MODELS = COPILOT_CLI_MODELS;
     // CLI_BACKENDS gates which /api/config/backends entries populate
     // BACKEND_MODELS. Every CLI with a server-served inventory must appear
     // here; otherwise its entry is dropped and modelsForBackend falls back to
     // the pre-discovery catalog (or, for an omitted unknown CLI, Copilot's).
-    const CLI_BACKENDS = ['claude', 'copilot', 'bob', 'gemini', 'agy', 'goose', 'codex'];
+    const CLI_BACKENDS = ['claude', 'copilot', 'bob', 'gemini', 'agy', 'omp', 'goose', 'codex'];
     // BACKEND_MODELS holds the live-discovered model list for every backend
     // (inference AND cli), keyed by backend id. INFERENCE_MODELS is kept as
     // an alias to the same object for backward compatibility with existing
@@ -9776,6 +9788,7 @@
       bob: BOB_CLI_MODELS,
       gemini: COPILOT_CLI_MODELS,
       agy: AGY_CLI_MODELS,
+      omp: OMP_CLI_MODELS,
       goose: COPILOT_CLI_MODELS,
       codex: CODEX_CLI_MODELS,
     };
@@ -9784,6 +9797,7 @@
       // so they carry the same ⚡ marker as vllm/llm-d/litellm.
       if (isInferenceBackendName(b)) return b + ' ⚡';
       if (b === 'agy') return 'Google Antigravity (agy)';
+      if (b === 'omp') return 'Oh My Pi (omp)';
       return b;
     }
     // Auto-select sentinels: values meaning "let the CLI pick its own model"
@@ -9805,19 +9819,38 @@
     }
     // Backends with a reasoning-effort control and the values each accepts.
     // Mirrors config.ReasoningEffortsByBackend server-side: codex is launched
-    // with -c model_reasoning_effort="<v>", agy with --effort <v>. Backends
-    // absent here have no effort flag, so they get no dropdown at all.
+    // with -c model_reasoning_effort="<v>", agy with --effort <v>, and claude
+    // with --effort <v> (hivecommons/hive#8377; unset leaves Claude Code at
+    // its own default). Backends absent here have no effort flag, so they get
+    // no dropdown at all.
     const BACKEND_REASONING_EFFORTS = {
       codex: ['minimal', 'low', 'medium', 'high', 'xhigh'],
       agy: ['low', 'medium', 'high'],
+      claude: ['low', 'medium', 'high', 'xhigh', 'max'],
     };
+    const MODEL_REASONING_EFFORTS = {};
+
+    function reasoningEffortsForAgent(a) {
+      if (!a) return [];
+      if (a.cli === 'omp') {
+        const perModel = MODEL_REASONING_EFFORTS.omp || {};
+        const model = a.model || '';
+        if (perModel[model]) return perModel[model];
+        const tail = model.split('/').pop();
+        for (const [id, levels] of Object.entries(perModel)) {
+          if (id === model || id.split('/').pop() === tail) return levels || [];
+        }
+        return [];
+      }
+      return BACKEND_REASONING_EFFORTS[a.cli] || [];
+    }
     // effortSelectHtml renders the reasoning-effort dropdown beside the model
     // dropdown, only for backends that have an effort control. "default"
     // clears the stored effort back to the backend's own default (the server
     // treats the path value "default" as clear — a path segment cannot be
     // empty).
     function effortSelectHtml(a) {
-      const efforts = BACKEND_REASONING_EFFORTS[a.cli] || [];
+      const efforts = reasoningEffortsForAgent(a);
       if (!efforts.length) return '';
       const cur = a.reasoningEffort || '';
       return `<select class="btn backend-select" data-change-action="switchEffort" data-agent="${esc(a.name)}" title="Set this agent's reasoning effort (restarts the session). 'default' uses the backend's own default effort.">
@@ -10031,7 +10064,8 @@
             label: b.degraded ? 'model discovery degraded' : 'model discovery failed',
             detail: `⚠ model discovery ${b.degraded ? 'degraded' : 'failed'} — ${b.degraded ? 'this list is live but is not the catalog the CLI uses' : 'showing the static fallback list'}. ${b.discovery.error}`,
           } : null));
-          const models = (b.models || []).map(m => ({ value: m, label: m.split('/').pop() + labelSuffix }));
+          if (b.reasoning_efforts) MODEL_REASONING_EFFORTS[b.id] = b.reasoning_efforts;
+          const models = (b.models || []).map(m => ({ value: m, label: (b.id === 'omp' ? m : m.split('/').pop()) + labelSuffix }));
           if (!models.length) return; // keep prior (possibly fallback) list rather than blanking the dropdown
           BACKEND_MODELS[b.id] = models;
           // A degraded list is not authority either: absence from it proves
@@ -11513,6 +11547,23 @@ function burnAreaChart() {
       const tgt = Number.isFinite(Number(rec.TargetLevel)) ? Number(rec.TargetLevel) : null;
       const met = Array.isArray(rec.Met) ? rec.Met : [];
       const unmet = Array.isArray(rec.Unmet) ? rec.Unmet : [];
+      const signals = Array.isArray(rec.AutonomySignals) ? rec.AutonomySignals : [];
+      const signalHtml = signals.length
+        ? `<div class="reco-fact-heading">Retro autonomy signal facts</div><ul class="reco-checklist">` + signals.map((s) => {
+          s = s || {};
+          const dir = s.direction || '';
+          const mark = dir === 'should lose' ? '!' : '✓';
+          const cls = dir === 'should lose' ? 'unmet' : 'met';
+          const scope = [s.scopeType, s.scope].filter(Boolean).join(': ') || 'scope unknown';
+          const level = s.level || 'level pending';
+          const detail = s.detail ? `<div class="crit-detail">${escapeHtml(s.detail)}</div>` : '';
+          return `<li class="reco-crit ${cls}">
+            <span class="mark">${mark}</span>
+            <div class="crit-body"><div class="crit-name">${escapeHtml(scope)} ${escapeHtml(dir || 'signals')} ${escapeHtml(level)}</div>
+            ${detail}<div class="crit-cmp">fact only — no action button; automatic promotion/demotion is deferred.</div></div>
+          </li>`;
+        }).join('') + `</ul>`
+        : `<div class="reco-fact-heading">Retro autonomy signal facts</div><div class="reco-calm">No qualifying autonomy signals right now; that is an acceptable terminal state.</div>`;
 
       // Minimal calm state: no criteria to show and already advising stay
       // (e.g. topped out at L6 or a nil-status hive). Keep it quiet.
@@ -11521,7 +11572,7 @@ function burnAreaChart() {
         const flow = (cur !== null)
           ? `<div class="reco-level-flow">L${cur} <span class="reco-badge stay">stay</span></div>`
           : '';
-        card.innerHTML = `${flow}<div class="reco-calm">${escapeHtml(rec.Rationale || 'No level-up recommendation right now.')}</div>`;
+        card.innerHTML = `${flow}<div class="reco-calm">${escapeHtml(rec.Rationale || 'No level-up recommendation right now.')}</div>${signalHtml}`;
         applySectionCollapse('acmm-reco-section');
         return;
       }
@@ -11560,6 +11611,7 @@ function burnAreaChart() {
         : '';
 
       card.innerHTML = `${flowHtml}${rationaleHtml}${readyHtml}${checklistHtml}
+        ${signalHtml}
         <div class="reco-advisory-note">Advisory only — this does not change the maturity level.</div>`;
       applySectionCollapse('acmm-reco-section');
     }
@@ -14954,12 +15006,16 @@ function burnAreaChart() {
           const tierOptions = Object.keys(TRUST_TIER_COLORS).filter(t => t !== 'revoked').map(t =>
             `<option value="${t}"${t === c.trust_tier ? ' selected' : ''}>${t}</option>`
           ).join('');
+          const trustedEligibleBadge = c.eligible_for_trusted
+            ? '<span title="20+ PR tasks; use the tier dropdown to grant trusted" style="display:inline-block;padding:2px 8px;border-radius:999px;font-size:0.68rem;color:var(--yellow);border:1px solid color-mix(in srgb, var(--yellow) 45%, transparent);background:color-mix(in srgb, var(--yellow) 10%, transparent);flex-shrink:0">eligible for trusted</span>'
+            : '';
           return `<div style="background:var(--card-bg);border:1px solid var(--border);border-radius:8px;padding:16px">
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
               <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${dotColor};flex-shrink:0" title="${dotTitle}"></span>
               ${avatarHtml}
               <span style="font-weight:600">@${esc(c.github_username)}</span>
               <span style="flex-shrink:0">${trustTierBadge(c.trust_tier)}</span>
+              ${trustedEligibleBadge}
             </div>
             ${cliLine ? `<div style="font-size:0.75rem;color:var(--muted);margin-bottom:6px">${cliLine}${roleLine ? ' · ' + roleLine : ''}</div>` : (roleLine ? `<div style="font-size:0.75rem;color:var(--muted);margin-bottom:6px">${roleLine}</div>` : '')}
             <div style="display:flex;gap:16px;margin-bottom:6px;font-size:0.8rem;color:var(--muted)">
@@ -25018,6 +25074,8 @@ function burnAreaChart() {
       const formalMinACMMLevel = f.formalMinACMMLevel || 5;
       const checkpointImplementAvailable = f.checkpointImplementAvailable === true;
       const checkpointImplementMinACMMLevel = f.checkpointImplementMinACMMLevel || 5;
+      const publicationAvailable = f.publicationAvailable === true;
+      const publicationMinACMMLevel = f.publicationMinACMMLevel || 3;
       const amSelfOn = am.self_authored !== false; // nil/undefined = enabled
       const amChecks = Array.isArray(am.required_checks) ? am.required_checks : [];
       const rvAgents = Array.isArray(rv.reviewer_agents) ? rv.reviewer_agents : [];
@@ -25113,6 +25171,23 @@ function burnAreaChart() {
         </div>
 
         <div style="margin:18px 0;padding-top:14px;border-top:1px solid var(--border)">
+          <div style="font-size:0.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Audit publication <span class="config-info">i<span class="config-tooltip">The audit campaign's authorized issue publisher: files each validated finding as exactly one issue through the mutation journal, and routes security-sensitive findings to a private channel instead. Off by default; see src/docs/audit-campaign.md.</span></span></div>
+          <div class="config-toggle">
+            <div class="config-toggle-switch ${publicationAvailable && f.publicationEnabled ? 'on' : ''} ${publicationAvailable ? '' : 'disabled'}" data-action="${publicationAvailable ? 'toggleConfigSwitch' : ''}" data-section="features" data-key="publicationEnabled" data-disabled="${publicationAvailable ? 'false' : 'true'}" title="${publicationAvailable ? '' : 'Requires ACMM L' + publicationMinACMMLevel + '+'}"></div>
+            <span class="config-toggle-label">Audit issue publisher <span class="config-info">i<span class="config-tooltip">OFF by default; effective only at ACMM L3 and above and only in the enforce convergence mode (shadow and off never write). When on, each validated audit finding is filed once as an issue carrying its finding marker, Hive-Run trailer, and run link; a rerun replays the recorded issue instead of filing again. Requires a campaign owner below; see src/docs/audit-campaign.md.</span></span></span>
+          </div>
+          ${publicationAvailable ? '' : `<p style="font-size:0.72rem;color:var(--muted);margin:6px 0 0">Requires ACMM L${publicationMinACMMLevel}+</p>`}
+          <div class="config-field" style="margin-top:10px">
+            <label>Campaign owner <span class="config-info">i<span class="config-tooltip">The maintainer principal every publication runs under and the actor on the outcome ledger. Publication stays off until an owner is named; the engine identity is never used.</span></span></label>
+            <input type="text" value="${esc(f.publicationOwner || '')}" placeholder="maintainer login" data-change-action="markDirty" data-arg0="features" data-arg1="publicationOwner" data-arg-types="s,s,w">
+          </div>
+          <div class="config-field" style="margin-top:10px">
+            <label>Private disclosure channel <span class="config-info">i<span class="config-tooltip">Where security-sensitive findings go instead of a public issue: repo:owner/name files them in that private repository, notify sends only the title and finding hash to the operator notifier. A sensitive finding with no channel is refused and audited, never filed publicly.</span></span></label>
+            <input type="text" value="${esc(f.publicationPrivateChannel || '')}" placeholder="repo:owner/security-intake or notify" data-change-action="markDirty" data-arg0="features" data-arg1="publicationPrivateChannel" data-arg-types="s,s,w">
+          </div>
+        </div>
+
+        <div style="margin:18px 0;padding-top:14px;border-top:1px solid var(--border)">
           <div class="config-toggle">
             <div class="config-toggle-switch ${f.personaLearningEnabled ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="features" data-key="personaLearningEnabled"></div>
             <span class="config-toggle-label">Persona learning (chat summaries) <span class="config-info">i<span class="config-tooltip">OFF by default. When on, the chat spine counts three explicit signals per user (asked for more after a summary, decided without expanding, re-asked for the same summary) and proposes a one-step change to that user's persona depth or summary length once a threshold is passed. Nothing is applied until the user runs !persona accept; !persona reject dismisses, !persona undo reverts and pins. Persona is a presentation preference only and never changes what an agent may do. Threshold and window are yaml-only (persona.learning.threshold, persona.learning.window_days).</span></span></span>
@@ -25161,6 +25236,27 @@ function burnAreaChart() {
               <option value="decision" ${(f.runWaitSeverity || 'decision') === 'decision' ? 'selected' : ''}>decision</option>
               <option value="page" ${(f.runWaitSeverity || 'decision') === 'page' ? 'selected' : ''}>page</option>
             </select></div>
+          </div>
+        </div>
+
+        <div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--border)">
+          <div class="config-toggle">
+            <div class="config-toggle-switch ${f.claimsEnabled ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="features" data-key="claimsEnabled"></div>
+            <span class="config-toggle-label">Issue claims <span class="config-info">i<span class="config-tooltip">OFF by default. When on, the hub recognises a claim on an issue itself (a hive-claim marker comment, or an assignee) and withholds the issue from contributors and kick prompts while the claim is live; claims expire on their own after the TTL (default 4h). Relay agents post a claim comment when they take a lease, at tiers that may write issue comments; below that the claim is recorded on the lease only. Covers the window before a PR exists that the PR claim ledger cannot see; see src/docs/contributor-relay.md.</span></span></span>
+          </div>
+          <p style="font-size:0.72rem;color:var(--muted);margin:6px 0 0">Claims expire after ${Math.round(Number(f.claimsTtlS || 0) / 60)} minutes.</p>
+        </div>
+
+        <div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--border)">
+          <div style="font-size:0.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Long-running runs <span class="config-info">i<span class="config-tooltip">Spec, plan, and implement stages on one lease. Off by default; an absent runs block is zero behaviour change.</span></span></div>
+          <div class="config-toggle">
+            <div class="config-toggle-switch ${f.spektacularEnabled ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="features" data-key="spektacularEnabled"></div>
+            <span class="config-toggle-label">Spektacular stage runner <span class="config-info">i<span class="config-tooltip">Polls the spektacular status verb for every active stage lease and advances the lease when the artifact reaches document_status final. A lease that expires without final is retried up to runs.max_stage_retries (${esc(String(f.maxStageRetries || ''))}) and then escalated for a decision. Hive never opens a Spektacular file; see src/docs/spektacular.md.</span></span></span>
+          </div>
+          <div class="config-field" style="margin-top:10px">
+            <label>Spektacular binary <span class="config-info">i<span class="config-tooltip">Path of the spektacular executable the runner shells out to. Empty resolves spektacular through PATH.</span></span></label>
+            <input type="text" value="${esc(f.spektacularBinary || '')}" placeholder="spektacular" data-change-action="markDirty" data-arg0="features" data-arg1="spektacularBinary" data-arg-types="s,s,w">
+            <p style="font-size:0.72rem;color:var(--muted);margin:4px 0 0">Poll every ${esc(String(f.spektacularPollS || ''))}s (runs.spektacular.poll_interval_s, yaml only).</p>
           </div>
         </div>
 
@@ -25226,6 +25322,10 @@ function burnAreaChart() {
           <div class="config-toggle">
             <div class="config-toggle-switch ${rv.combined_perspectives ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="review" data-key="combined_perspectives"></div>
             <span class="config-toggle-label">Review every perspective in one session, one comment <span class="config-info">i<span class="config-tooltip">Off: each perspective is its own agent session and its own review comment, and &quot;Max perspectives per PR&quot; caps how many a PR gets &mdash; which is how a fleet ends up reviewing only correctness. On: ONE session judges every enabled perspective and leaves ONE comment, with findings grouped under the perspective they belong to. The diff and surrounding tree are read once instead of once per perspective. Each perspective still records its own verdict, so any one of them can still hold a PR for a human. The per-PR cap does not apply in this mode: it exists to bound comments, and a combined review is always exactly one.</span></span></span>
+          </div>
+          <div class="config-toggle" style="margin-top:10px">
+            <div class="config-toggle-switch ${f.planMatchEnabled ? 'on' : ''}" data-action="toggleConfigSwitch" data-section="features" data-key="planMatchEnabled"></div>
+            <span class="config-toggle-label">Match PRs against their approved plan (plan_match) <span class="config-info">i<span class="config-tooltip">OFF by default. Adds the built-in plan_match perspective, which reads the approved plan wave named by a PR&apos;s Hive-Run / Hive-Plan trailers and reports scope creep (changes no planned item covers) and planned items the diff leaves out. A high-severity scope finding holds the PR for a human like any other blocking finding. PRs without a run trailer get a not-applicable verdict that neither raises nor lowers their confidence score. Needs run trailers on implementation PRs and plans in this hive&apos;s bead stores; otherwise it costs a perspective for nothing.</span></span></span>
           </div>
           <div id="rv-perspectives" style="margin-top:10px">
             <p style="font-size:0.72rem;color:var(--muted);margin:0 0 4px">Which questions the reviewer asks of every PR, and what each one looks for. Edit the text to tell this hive&apos;s reviewer what matters in <em>your</em> repos &mdash; e.g. name the conventions doc for <code>style</code>. Blank means the built-in. Unchecking a perspective stops it running and stops its verdicts being accepted.</p>

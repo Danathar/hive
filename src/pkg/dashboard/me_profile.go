@@ -53,7 +53,8 @@ type ContributorProfileResponse struct {
 	AvatarURL      string `json:"avatar_url,omitempty"`
 
 	// ── Level (the trust tier IS the level) ──
-	TrustTier string `json:"trust_tier,omitempty"`
+	TrustTier          string `json:"trust_tier,omitempty"`
+	EligibleForTrusted bool   `json:"eligible_for_trusted,omitempty"`
 
 	// ── Stats (aggregated central counts) ──
 	TasksCompleted int `json:"tasks_completed"`
@@ -100,11 +101,13 @@ type ContributorProfileResponse struct {
 	// is pure attribution (never affects tier). Sessions + CurrentTask reflect
 	// the live hub connection state — CurrentTask carries only the safe summary
 	// (title + number), never tokens or repo internals.
-	CLIBackend  string              `json:"cli_backend,omitempty"`
-	Model       string              `json:"model,omitempty"`
-	InvitedBy   string              `json:"invited_by,omitempty"`
-	Sessions    int                 `json:"sessions,omitempty"`
-	CurrentTask *DossierTaskSummary `json:"current_task,omitempty"`
+	CLIBackend      string              `json:"cli_backend,omitempty"`
+	Model           string              `json:"model,omitempty"`
+	KnowledgeLoaded *bool               `json:"knowledge_loaded,omitempty"`
+	KnowledgeError  string              `json:"knowledge_error,omitempty"`
+	InvitedBy       string              `json:"invited_by,omitempty"`
+	Sessions        int                 `json:"sessions,omitempty"`
+	CurrentTask     *DossierTaskSummary `json:"current_task,omitempty"`
 	// LastCompletedTask is the safe summary of the most recent completion the
 	// hub recorded for this contributor — the honest seed for the Field Log
 	// zone (no synthetic activity is ever fabricated client-side).
@@ -333,6 +336,7 @@ func (s *Server) BuildContributorProfile(username string) ContributorProfileResp
 	resp.Found = true
 	resp.AvatarURL = avatarForUsername(p)
 	resp.TrustTier = p.TrustTier
+	resp.EligibleForTrusted = contributorEligibleForTrusted(p)
 	resp.TasksCompleted = p.TasksCompleted
 	resp.TasksWithPR = p.TasksWithPR
 	resp.TasksFailed = p.TasksFailed
@@ -347,6 +351,8 @@ func (s *Server) BuildContributorProfile(username string) ContributorProfileResp
 	// Loadout + sponsorship (already-stored public-safe profile data).
 	resp.CLIBackend = p.CLIBackend
 	resp.Model = p.Model
+	resp.KnowledgeLoaded = p.KnowledgeLoaded
+	resp.KnowledgeError = p.KnowledgeError
 	resp.InvitedBy = p.InvitedBy
 
 	// Dossier self-service fields (all optional; stored sanitised).

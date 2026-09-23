@@ -3,6 +3,7 @@ package dashboard
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/hivecommons/hive/pkg/agent"
 	"github.com/hivecommons/hive/pkg/celtrigger"
+	ghpkg "github.com/hivecommons/hive/pkg/github"
 	"github.com/hivecommons/hive/pkg/hooks"
 	"github.com/hivecommons/hive/pkg/mention"
 	"github.com/hivecommons/hive/pkg/timeline"
@@ -63,6 +65,13 @@ type taskLease struct {
 	expiresAt    time.Time
 	mcpTokenID   string
 	mcpTokenHash string
+	// claimedBy / claimExpiresAt / claimPosted record the issue claim the hub
+	// asserted for this task (hivecommons/hive#8380): who, until when, and
+	// whether the claim comment reached the forge or lives on this lease only
+	// (a tier below the comment rung). Zero when claims are off.
+	claimedBy      string
+	claimExpiresAt time.Time
+	claimPosted    bool
 }
 
 // leaseTTL is how long a hub-issued task lease remains re-adoptable after the last
@@ -95,13 +104,45 @@ const (
 
 var orderedLeaseStages = []string{StageSpec, StagePlan, StageImplement}
 
+// leaseStageMutation selects which stage move mutateLeaseStage performs. The
+// three moves share one locked read-validate-persist-audit-emit path and differ
+// only in which target stages they accept.
+type leaseStageMutation int
+
+const (
+	// leaseStageAdvance moves to exactly the next stage in orderedLeaseStages.
+	leaseStageAdvance leaseStageMutation = iota
+	// leaseStageRetry keeps the current stage and only re-mints the generation.
+	leaseStageRetry
+	// leaseStageReset moves to a strictly EARLIER stage (#8350). Owner-only:
+	// it is reachable solely through handleRunReset and the reason it records
+	// is the operator's, never a contributor's.
+	leaseStageReset
+)
+
+// Sentinel lease errors let the owner-facing route (handleRunReset) map a
+// refused move to the right status without parsing message text. They wrap
+// the task-specific detail with %w so errors.Is still matches.
+var (
+	errLeaseNotFound     = errors.New("lease not found")
+	errLeaseExpired      = errors.New("lease expired")
+	errLeaseStageInvalid = errors.New("invalid lease stage transition")
+	errLeaseResetReason  = errors.New("lease stage reset requires a reason")
+)
+
 func validStage(s string) bool {
-	for _, stage := range orderedLeaseStages {
+	return leaseStageIndex(s) >= 0
+}
+
+// leaseStageIndex is a stage's position in orderedLeaseStages, or -1 when the
+// name is not a stage. Ordering is what makes "earlier" and "next" checkable.
+func leaseStageIndex(s string) int {
+	for i, stage := range orderedLeaseStages {
 		if s == stage {
-			return true
+			return i
 		}
 	}
-	return false
+	return -1
 }
 
 func nextLeaseStage(from string) string {
@@ -120,6 +161,16 @@ func nextLeaseStage(from string) string {
 // has to parse a key back apart.
 func leaseKey(identity, taskID string) string {
 	return identity + "\x1f" + taskID
+}
+
+// runKey is the canonical work-item identity a lease holds: the source-aware
+// key when the assignment carried one, else the repo#number spelling. It is the
+// key the runs API exposes and the one handleRunReset resolves back to a lease.
+func (l *taskLease) runKey() string {
+	if l.key != "" {
+		return l.key
+	}
+	return worksource.Ref{Repo: l.repo, Number: l.number}.Key()
 }
 
 // leaseForLocked returns the lease this identity holds for taskID, or nil. It is
@@ -204,14 +255,41 @@ func (h *ContributeWSHub) recordLeaseForKeyStage(identity, taskID, repo string, 
 }
 
 func (h *ContributeWSHub) advanceLeaseStage(identity, taskID, to string, now time.Time) (taskLease, error) {
-	return h.mutateLeaseStage(identity, taskID, to, false, now)
+	return h.mutateLeaseStage(identity, taskID, to, leaseStageAdvance, "", now)
 }
 
 func (h *ContributeWSHub) retryLeaseStage(identity, taskID string, now time.Time) (taskLease, error) {
-	return h.mutateLeaseStage(identity, taskID, "", true, now)
+	return h.mutateLeaseStage(identity, taskID, "", leaseStageRetry, "", now)
 }
 
-func (h *ContributeWSHub) mutateLeaseStage(identity, taskID, to string, retry bool, now time.Time) (taskLease, error) {
+// resetLeaseStage moves a run's lease BACK to an earlier stage (#8350): for
+// example implement back to plan when the plan was rejected. It is the one
+// sanctioned backwards move; advanceLeaseStage refuses both skipping and going
+// back, and retryLeaseStage only re-mints the current stage.
+//
+// It is OWNER-ONLY by construction: nothing a contributor relay sends reaches
+// it. The caller (handleRunReset) has already passed requireOwnerRole, and the
+// reason is required so the record of WHY the run stepped back travels with
+// the transition into the agent audit sink, the lifecycle timeline, and the
+// hook payload, where the runs API surfaces it as stage history.
+//
+// Like every stage move it mints a new generation via the shared generator, so
+// the relay that held the run under the previous generation can no longer
+// resume it (lookupLease matches on the exact generation), renews the lease
+// window from now, and persists before anything observes the change: a save
+// failure rolls the in-memory record back and surfaces the error, so the
+// registry on disk and in memory never disagree about which stage a run is in.
+// `to` must be a strictly earlier stage; the same stage is refused (that is a
+// retry) and a later stage is refused (that is an advance).
+func (h *ContributeWSHub) resetLeaseStage(identity, taskID, to, reason string, now time.Time) (taskLease, error) {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return taskLease{}, errLeaseResetReason
+	}
+	return h.mutateLeaseStage(identity, taskID, to, leaseStageReset, reason, now)
+}
+
+func (h *ContributeWSHub) mutateLeaseStage(identity, taskID, to string, mode leaseStageMutation, reason string, now time.Time) (taskLease, error) {
 	if identity == "" || taskID == "" {
 		return taskLease{}, fmt.Errorf("identity and taskID are required")
 	}
@@ -222,34 +300,48 @@ func (h *ContributeWSHub) mutateLeaseStage(identity, taskID, to string, retry bo
 	l := h.leaseForLocked(identity, taskID)
 	if l == nil {
 		h.leaseMu.Unlock()
-		return taskLease{}, fmt.Errorf("lease not found for %s", taskID)
+		return taskLease{}, fmt.Errorf("%w for %s", errLeaseNotFound, taskID)
 	}
-	if l.expiresAt.IsZero() || now.After(l.expiresAt) {
+	// An ADVANCE or RESET needs a live lease: a stage can only complete, or be
+	// stepped back by an owner, while someone holds it. A RETRY is the reclaim
+	// path (#8303): it exists precisely because the generation lapsed without
+	// reaching final, so an expired lease is its expected input and gets a
+	// fresh window under its new generation.
+	if l.expiresAt.IsZero() || (mode != leaseStageRetry && now.After(l.expiresAt)) {
 		h.leaseMu.Unlock()
-		return taskLease{}, fmt.Errorf("lease expired for %s", taskID)
+		return taskLease{}, fmt.Errorf("%w for %s", errLeaseExpired, taskID)
 	}
-	if retry {
-		if l.stage == "" {
-			h.leaseMu.Unlock()
-			return taskLease{}, fmt.Errorf("cannot retry a lease with no stage")
-		}
+	if l.stage == "" {
+		h.leaseMu.Unlock()
+		return taskLease{}, fmt.Errorf("%w: lease for %s has no stage", errLeaseStageInvalid, taskID)
+	}
+	switch mode {
+	case leaseStageRetry:
 		to = l.stage
 		auditAction = agent.AuditLeaseStageRetried
-	} else {
-		if l.stage == "" {
-			h.leaseMu.Unlock()
-			return taskLease{}, fmt.Errorf("cannot advance a lease with no stage")
-		}
+	case leaseStageAdvance:
 		if !validStage(to) {
 			h.leaseMu.Unlock()
-			return taskLease{}, fmt.Errorf("invalid lease stage %q", to)
+			return taskLease{}, fmt.Errorf("%w: unknown stage %q", errLeaseStageInvalid, to)
 		}
-		want := nextLeaseStage(l.stage)
-		if to != want {
+		if want := nextLeaseStage(l.stage); to != want {
 			h.leaseMu.Unlock()
-			return taskLease{}, fmt.Errorf("invalid lease stage advance from %q to %q", l.stage, to)
+			return taskLease{}, fmt.Errorf("%w: advance from %q to %q", errLeaseStageInvalid, l.stage, to)
 		}
 		auditAction = agent.AuditLeaseStageAdvanced
+	case leaseStageReset:
+		if !validStage(to) {
+			h.leaseMu.Unlock()
+			return taskLease{}, fmt.Errorf("%w: unknown stage %q", errLeaseStageInvalid, to)
+		}
+		if leaseStageIndex(to) >= leaseStageIndex(l.stage) {
+			h.leaseMu.Unlock()
+			return taskLease{}, fmt.Errorf("%w: reset from %q to %q is not a move to an earlier stage", errLeaseStageInvalid, l.stage, to)
+		}
+		auditAction = agent.AuditLeaseStageReset
+	default:
+		h.leaseMu.Unlock()
+		return taskLease{}, fmt.Errorf("unknown lease stage mutation %d", mode)
 	}
 
 	prevStage, prevGen, prevExpires := l.stage, l.gen, l.expiresAt
@@ -268,20 +360,29 @@ func (h *ContributeWSHub) mutateLeaseStage(identity, taskID, to string, retry bo
 	out = *l
 	h.leaseMu.Unlock()
 
-	h.recordLeaseStageAudit(auditAction, taskID, from, to, out.gen)
-	h.emitLeaseStageCompleted(from, to, out)
+	h.recordLeaseStageAudit(auditAction, taskID, from, to, reason, out.gen)
+	h.emitLeaseStageTransition(from, to, reason, mode == leaseStageReset, out)
 	return out, nil
 }
 
-func (h *ContributeWSHub) recordLeaseStageAudit(action, taskID, from, to string, gen uint64) {
+// recordLeaseStageAudit books a stage move on the agent audit sink. reason is
+// only set for a reset; agent.Fields drops empty strings, so advance and retry
+// entries keep their original shape.
+func (h *ContributeWSHub) recordLeaseStageAudit(action, taskID, from, to, reason string, gen uint64) {
 	if h == nil || h.server == nil {
 		return
 	}
 	h.server.AgentAuditSink().Record("system", action, taskID,
-		agent.Fields("stage_from", from, "stage_to", to, "gen", gen))
+		agent.Fields("stage_from", from, "stage_to", to, "reason", reason, "gen", gen))
 }
 
-func (h *ContributeWSHub) emitLeaseStageCompleted(from, to string, l taskLease) {
+// emitLeaseStageTransition records a persisted stage move on the lifecycle
+// timeline and fires the stage_completed hook/CEL transition. A reset (#8350)
+// rides the same transition rather than a new catalog entry: it carries
+// `reason` and `attrs.reset = "true"` so a hook's `when:` can tell a step
+// back from a hand-off (`t.attrs.reset == "true"`), and the runs API reads
+// the reason back out of the timeline event as stage history.
+func (h *ContributeWSHub) emitLeaseStageTransition(from, to, reason string, reset bool, l taskLease) {
 	if h == nil || h.server == nil {
 		return
 	}
@@ -299,8 +400,14 @@ func (h *ContributeWSHub) emitLeaseStageCompleted(from, to string, l taskLease) 
 		// (#8349); the snapshot scrubs again before publishing.
 		attrs["title"] = scrubRunTitle(title)
 	}
+	if reason != "" {
+		attrs["reason"] = reason
+	}
+	if reset {
+		attrs["reset"] = "true"
+	}
 	h.server.LifecycleTimeline().Record(timeline.Event{
-		IssueRef: firstNonEmptyString(l.key, worksource.Ref{Repo: l.repo, Number: l.number}.Key()),
+		IssueRef: l.runKey(),
 		Kind:     timeline.KindStageCompleted,
 		Agent:    l.identity,
 		Attrs:    attrs,
@@ -313,6 +420,7 @@ func (h *ContributeWSHub) emitLeaseStageCompleted(from, to string, l taskLease) 
 		Gen:        l.gen,
 		Repo:       l.repo,
 		Agent:      l.identity,
+		Reason:     reason,
 		Attrs:      attrs,
 	}
 	if h.server.deps != nil {
@@ -330,7 +438,7 @@ func (h *ContributeWSHub) emitLeaseStageCompleted(from, to string, l taskLease) 
 				StageFrom: from,
 				StageTo:   to,
 				Gen:       int64(l.gen),
-			}, fmt.Sprintf("stage_completed %s→%s for %s", from, to, l.taskID))
+			}, leaseStageTransitionSummary(from, to, reason, reset, l.taskID))
 		}
 	}
 }
@@ -385,6 +493,42 @@ func firstNonEmptyString(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// leaseStageTransitionSummary is the one-line CEL trigger description of a
+// stage move; a reset names itself and carries the owner's reason.
+func leaseStageTransitionSummary(from, to, reason string, reset bool, taskID string) string {
+	if reset {
+		return fmt.Sprintf("stage_reset %s→%s for %s: %s", from, to, taskID, reason)
+	}
+	return fmt.Sprintf("stage_completed %s→%s for %s", from, to, taskID)
+}
+
+// runLeaseHolder resolves a run key (taskLease.runKey) to a copy of the live,
+// staged lease that holds it, so the owner-facing runs routes can address a run
+// by the key the runs API exposes rather than by {identity, task}. Expired and
+// unstaged leases are ignored, matching activeRunLeaseSnapshots; if more than
+// one live lease names the same item the highest generation wins, because that
+// is the one lookupLease would honor.
+func (h *ContributeWSHub) runLeaseHolder(key string, now time.Time) (taskLease, bool) {
+	if h == nil || key == "" {
+		return taskLease{}, false
+	}
+	h.leaseMu.Lock()
+	defer h.leaseMu.Unlock()
+	var best *taskLease
+	for _, l := range h.leases {
+		if l == nil || l.stage == "" || l.expiresAt.IsZero() || now.After(l.expiresAt) || l.runKey() != key {
+			continue
+		}
+		if best == nil || l.gen > best.gen {
+			best = l
+		}
+	}
+	if best == nil {
+		return taskLease{}, false
+	}
+	return *best, true
 }
 
 // renewLease extends an identity's server-issued lease window when the relay proves
@@ -547,6 +691,34 @@ type persistedLease struct {
 	ExpiresAt    time.Time `json:"expires_at"`
 	MCPTokenID   string    `json:"mcp_token_id,omitempty"`
 	MCPTokenHash string    `json:"mcp_token_hash,omitempty"`
+	// Claim fields (#8380); all omitempty so a registry written with claims
+	// off is byte-for-byte what it was.
+	ClaimedBy      string     `json:"claimed_by,omitempty"`
+	ClaimExpiresAt *time.Time `json:"claim_expires_at,omitempty"`
+	ClaimPosted    bool       `json:"claim_posted,omitempty"`
+}
+
+// setLeaseClaim records an issue claim on an existing lease (#8380). A lease
+// that is not there (already released, or never persisted) is left alone —
+// the claim has nothing to attach to. The persist failure policy matches
+// renewLease: the in-memory record keeps the claim and the error is logged,
+// because the claim's source of truth is the forge, not this file.
+func (h *ContributeWSHub) setLeaseClaim(identity, taskID string, claim ghpkg.IssueClaimMark, posted bool) {
+	if h == nil || identity == "" || taskID == "" {
+		return
+	}
+	h.leaseMu.Lock()
+	defer h.leaseMu.Unlock()
+	l := h.leases[leaseKey(identity, taskID)]
+	if l == nil {
+		return
+	}
+	l.claimedBy = claim.Identity
+	l.claimExpiresAt = claim.ExpiresAt
+	l.claimPosted = posted
+	if err := h.saveLeasesLocked(); err != nil {
+		h.logger.Warn("[contribute-ws] lease claim not persisted", "task", taskID, "error", err)
+	}
 }
 
 func (h *ContributeWSHub) taskLeasesPath() string {
@@ -590,7 +762,7 @@ func (h *ContributeWSHub) saveLeasesLocked() error {
 		if l == nil || l.expiresAt.IsZero() || now.After(l.expiresAt) {
 			continue
 		}
-		records = append(records, persistedLease{
+		rec := persistedLease{
 			Identity:     l.identity,
 			TaskID:       l.taskID,
 			Repo:         l.repo,
@@ -602,7 +774,14 @@ func (h *ContributeWSHub) saveLeasesLocked() error {
 			ExpiresAt:    l.expiresAt,
 			MCPTokenID:   l.mcpTokenID,
 			MCPTokenHash: l.mcpTokenHash,
-		})
+			ClaimedBy:    l.claimedBy,
+			ClaimPosted:  l.claimPosted,
+		}
+		if !l.claimExpiresAt.IsZero() {
+			exp := l.claimExpiresAt
+			rec.ClaimExpiresAt = &exp
+		}
+		records = append(records, rec)
 	}
 	data, err := json.Marshal(records)
 	if err != nil {
@@ -726,7 +905,7 @@ func (h *ContributeWSHub) loadLeases() {
 		// One record per task (#7774). A file written before that held at most
 		// one record per identity and loads unchanged; a file written after may
 		// hold several for one identity, each of which must come back.
-		h.leases[leaseKey(rec.Identity, rec.TaskID)] = &taskLease{
+		l := &taskLease{
 			identity:     rec.Identity,
 			taskID:       rec.TaskID,
 			repo:         rec.Repo,
@@ -739,7 +918,13 @@ func (h *ContributeWSHub) loadLeases() {
 			expiresAt:    rec.ExpiresAt,
 			mcpTokenID:   rec.MCPTokenID,
 			mcpTokenHash: rec.MCPTokenHash,
+			claimedBy:    rec.ClaimedBy,
+			claimPosted:  rec.ClaimPosted,
 		}
+		if rec.ClaimExpiresAt != nil {
+			l.claimExpiresAt = *rec.ClaimExpiresAt
+		}
+		h.leases[leaseKey(rec.Identity, rec.TaskID)] = l
 		if rec.Gen > maxGen {
 			maxGen = rec.Gen
 		}

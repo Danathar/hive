@@ -17,8 +17,11 @@
 //                           session transcript for claude/copilot/bob (#4117);
 //                           other backends report no model, as before.
 //   AGENT_REASONING_EFFORT — reasoning effort override (optional). Consumed by
-//                           codex (-c model_reasoning_effort) and by agy
-//                           (--effort low|medium|high); ignored elsewhere.
+//                           codex (-c model_reasoning_effort), by agy
+//                           (--effort low|medium|high), by muse
+//                           (--reasoning-effort) and by claude
+//                           (--effort low|medium|high|xhigh|max, #8377);
+//                           ignored elsewhere.
 //   HIVE_AGENT_ROLE        — optional spoke agent role to claim (scanner,
 //                           quality, outreach, etc.; hub-enforced)
 //   HIVE_AGENT_SESSION     — tmux session name for the agent (default: contributor)
@@ -1163,7 +1166,7 @@ const QUOTA_HOLD_GRACE_MS = RELAY_TEST_TIMING ? 10 : 30 * 1000;
 // (handled by the token_refresh case below) and left this at 1.1, so the relay
 // under-declared itself for months with nothing to notice. It is now pinned by
 // TestRelayProtocolVersionMatchesHub, which fails the build on the next drift.
-const RELAY_PROTOCOL_VERSION = '1.3';
+const RELAY_PROTOCOL_VERSION = '1.4';
 
 // RELAY_CAPABILITIES is this relay's OUTBOUND capability set — the mirror of the
 // hub's server_capabilities (kubestellar/hive#6954). It is DECLARED to the hub in
@@ -1181,6 +1184,44 @@ const RELAY_PROTOCOL_VERSION = '1.3';
 // bumped here and stays in step with the hub, keeping
 // TestRelayProtocolVersionMatchesHub honest.
 const RELAY_CAPABILITIES = ['quota_preflight_v1', 'standby_v1', 'run-stage'];
+
+const KNOWLEDGE_AGENT_MD = process.env.HIVE_AGENT_MD || path.join(process.env.HOME || require('os').homedir() || process.cwd(), 'agent.md');
+const KNOWLEDGE_STATE_POLL_MS = Number(process.env.HIVE_KNOWLEDGE_STATE_POLL_MS || (RELAY_TEST_TIMING ? 200 : 30000));
+const KNOWLEDGE_ERROR_MAX = 500;
+
+function boundKnowledgeError(reason) {
+  reason = String(reason || '').replace(/\s+/g, ' ').trim();
+  return reason.length > KNOWLEDGE_ERROR_MAX ? `${reason.slice(0, KNOWLEDGE_ERROR_MAX)}…` : reason;
+}
+
+function knowledgeExportLooksValid(file) {
+  let text;
+  try {
+    const st = fs.statSync(file);
+    if (!st.isFile() || st.size <= 0) return { ok: false, reason: `${file} is absent or empty` };
+    text = fs.readFileSync(file, 'utf8');
+  } catch (e) {
+    return { ok: false, reason: `${file} is not readable: ${e.message}` };
+  }
+  const lines = text.split(/\r?\n/);
+  if (lines[0] !== '# Agent Knowledge') return { ok: false, reason: `${file} is not a knowledge export (expected first line "# Agent Knowledge")` };
+  if (!lines.includes('This file is auto-generated from the hive knowledge base.')) {
+    return { ok: false, reason: `${file} is not a knowledge export (missing generated marker)` };
+  }
+  return { ok: true, reason: '' };
+}
+
+function currentKnowledgeState() {
+  const valid = knowledgeExportLooksValid(KNOWLEDGE_AGENT_MD);
+  return {
+    knowledge_loaded: !!valid.ok,
+    knowledge_error: valid.ok ? '' : boundKnowledgeError(valid.reason),
+  };
+}
+
+function knowledgeStateChanged(a, b) {
+  return !a || !b || a.knowledge_loaded !== b.knowledge_loaded || a.knowledge_error !== b.knowledge_error;
+}
 
 // Per-task CLI-crash retry budget. Issue #2203: a task whose CLI kept dying was
 // reassigned by the hub and failed identically forever (5+ times in ~20min),
@@ -1730,6 +1771,28 @@ function send(msg) {
   sendTo((currentTask && currentTask._hub) || hubs[activeHubIndex], msg);
 }
 
+let lastKnowledgeState = null;
+function knowledgeStateFrame(state) {
+  return {
+    type: 'knowledge_state',
+    seq: nextSeq(),
+    knowledge_loaded: state.knowledge_loaded,
+    knowledge_error: state.knowledge_error || undefined,
+  };
+}
+
+function broadcastKnowledgeStateIfChanged() {
+  const state = currentKnowledgeState();
+  if (!knowledgeStateChanged(lastKnowledgeState, state)) return;
+  lastKnowledgeState = state;
+  for (const hub of hubs) {
+    if (hub && hub.authenticated) sendTo(hub, knowledgeStateFrame(state));
+  }
+}
+
+let knowledgeStateTimer = setInterval(broadcastKnowledgeStateIfChanged, KNOWLEDGE_STATE_POLL_MS);
+if (typeof knowledgeStateTimer.unref === 'function') knowledgeStateTimer.unref();
+
 function currentTaskHub() {
   return (currentTask && currentTask._hub) || hubs[activeHubIndex];
 }
@@ -2250,12 +2313,21 @@ function setPiInvocationState(state) {
 // on anything else, so an unrecognised contributor value is dropped rather
 // than turned into a launch that cannot start.
 const MUSE_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+// Claude Code's `--effort` levels (claude --help, v2.1.273+), mirroring
+// config.ReasoningEffortsByBackend["claude"] hub-side (hivecommons/hive#8377).
+// Like muse, a value outside the set is dropped rather than passed — the CLI
+// would refuse the flag and the task would die at argv parsing — and unset
+// leaves Claude Code at its own default. Only the plain `claude` backend gets
+// the flag; inference routes (litellm) that drive the same binary do not.
+const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 function effectiveReasoningEffort() {
   // agy is the only backend whose effort is conditional on a model being passed.
   if (BACKEND === 'agy') return modelFlagFor() ? agyEffort : '';
   // muse applies effort with or without a model, but only for values it takes.
   if (BACKEND === 'muse') return MUSE_EFFORTS.includes(REASONING_EFFORT) ? REASONING_EFFORT : '';
+  // claude likewise: --effort with or without --model, only for its own levels.
+  if (BACKEND === 'claude') return CLAUDE_EFFORTS.includes(REASONING_EFFORT) ? REASONING_EFFORT : '';
   // omp takes its effort from its own config (the `:level` suffix on the model
   // selection), read by detectOmpSelection; the env var still wins when set,
   // the same precedence effectiveModel() applies (#7760).
@@ -2768,7 +2840,11 @@ function buildLaunchCommand() {
   const museEffortFlag = BACKEND === 'muse' && effectiveReasoningEffort()
     ? `--reasoning-effort ${effectiveReasoningEffort()}`
     : '';
-  cachedLaunchCommand = [cmd, perm, modelFlag, reasoningFlag, agyEffortFlag, museEffortFlag].filter(Boolean).join(' ');
+  // claude: `--effort <v>` only when a claude-valid effort is set (#8377).
+  const claudeEffortFlag = BACKEND === 'claude' && effectiveReasoningEffort()
+    ? `--effort ${effectiveReasoningEffort()}`
+    : '';
+  cachedLaunchCommand = [cmd, perm, modelFlag, reasoningFlag, agyEffortFlag, museEffortFlag, claudeEffortFlag].filter(Boolean).join(' ');
   return cachedLaunchCommand;
 }
 
@@ -2887,7 +2963,11 @@ function buildHeadlessArgv(prompt) {
   const museEffortArgs = BACKEND === 'muse' && effectiveReasoningEffort()
     ? ['--reasoning-effort', effectiveReasoningEffort()]
     : [];
-  const flagArgs = [...permArgs, ...modelArgs, ...reasoningArgs, ...agyEffortArgs, ...museEffortArgs];
+  // Same claude-valid-only rule as the interactive launch (#8377).
+  const claudeEffortArgs = BACKEND === 'claude' && effectiveReasoningEffort()
+    ? ['--effort', effectiveReasoningEffort()]
+    : [];
+  const flagArgs = [...permArgs, ...modelArgs, ...reasoningArgs, ...agyEffortArgs, ...museEffortArgs, ...claudeEffortArgs];
   // Sub-command-first CLIs parse their options on the sub-command, not the
   // root binary, so the one-shot token has to lead (see flagsAfterCommand).
   const args = spec.flagsAfterCommand
@@ -7232,6 +7312,7 @@ function handleMessage(data, hub) {
         // Multi-session-per-account: additive, optional. An older hub ignores
         // this unknown field and treats the relay as a single session.
         session: AGENT_SESSION || undefined,
+        ...currentKnowledgeState(),
         // #2547 declare half + #2567: additive, optional self-report of runtime
         // posture and protocol version. An older hub ignores these unknown fields.
         protocol_version: RELAY_PROTOCOL_VERSION,
@@ -7809,6 +7890,7 @@ function cleanup() {
     if (hub.heartbeatInterval) { clearInterval(hub.heartbeatInterval); hub.heartbeatInterval = null; }
   });
   if (progressInterval) { clearInterval(progressInterval); progressInterval = null; }
+  if (knowledgeStateTimer) { clearInterval(knowledgeStateTimer); knowledgeStateTimer = null; }
   stopVerdictWatch();
   // A shutdown with a task in flight must run the same task-exit contract as
   // every other way a task stops being ours (kubestellar/hive#5655, #5353).

@@ -2741,6 +2741,9 @@ func (s *Scheduler) reviewPerspectivesSection() string {
 	if err != nil {
 		set = review.PerspectiveSet{}
 	}
+	if s.cfg.Review.PlanMatch.Enabled {
+		set = set.WithPlanMatch()
+	}
 	var b strings.Builder
 	for _, p := range set.List() {
 		fmt.Fprintf(&b, "- `%s` — %s\n", p, set.Focus(p))

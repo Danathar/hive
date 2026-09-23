@@ -82,10 +82,11 @@ type Config struct {
 	Persona      PersonaConfig      `yaml:"persona,omitempty" json:"persona,omitempty"`
 	Intent       IntentConfig       `yaml:"intent,omitempty" json:"intent,omitempty"`
 	Escalation   EscalationConfig   `yaml:"escalation,omitempty" json:"escalation,omitempty"`
-	Runs         RunsConfig         `yaml:"runs,omitempty" json:"runs,omitempty"`
-	Retro        RetroConfig        `yaml:"retro,omitempty" json:"retro,omitempty"`
-	Review       ReviewConfig       `yaml:"review,omitempty" json:"review,omitempty"`
-	AutoMerge    AutoMergeConfig    `yaml:"auto_merge,omitempty" json:"auto_merge,omitempty"`
+	// Runs tunes long-running runs, checkpoints, and the opt-in Spektacular stage runner.
+	Runs      RunsConfig      `yaml:"runs,omitempty" json:"runs,omitempty"`
+	Retro     RetroConfig     `yaml:"retro,omitempty" json:"retro,omitempty"`
+	Review    ReviewConfig    `yaml:"review,omitempty" json:"review,omitempty"`
+	AutoMerge AutoMergeConfig `yaml:"auto_merge,omitempty" json:"auto_merge,omitempty"`
 	// DuplicateSweep gates the cross-PR duplicate suggestion pass
 	// (hivecommons/hive#7469 capability B). Default off → zero behaviour
 	// change and no GitHub traffic.
@@ -96,6 +97,9 @@ type Config struct {
 	// Convergence toggles the convergence-driven admission surfaces
 	// (kubestellar/hive#3845 follow-ons). Default off → zero behaviour change.
 	Convergence ConvergenceConfig `yaml:"convergence,omitempty" json:"convergence,omitempty"`
+	// Publication is the audit campaign's authorized issue publisher opt-in
+	// (hivecommons/hive#8353). Default off → nothing is ever filed.
+	Publication PublicationConfig `yaml:"publication,omitempty" json:"publication,omitempty"`
 	// Classification mirrors the Go-consumed subset of hive-project.yaml's
 	// `classification:` block (currently review_bots, hivecommons/hive#7360).
 	// Default empty → the review-thread reconciler is off.
@@ -1061,14 +1065,48 @@ func ValidateKickTemplateName(v string) error {
 	return nil
 }
 
+// Claude Code's reasoning-effort levels, the closed set `claude --effort`
+// accepts (claude --help, v2.1.273+). Named so the launch path, the
+// validator and the tests agree on the vocabulary (hivecommons/hive#8377).
+const (
+	ClaudeEffortLow    = "low"
+	ClaudeEffortMedium = "medium"
+	ClaudeEffortHigh   = "high"
+	ClaudeEffortXHigh  = "xhigh"
+	ClaudeEffortMax    = "max"
+)
+
+// ClaudeBackend is the backend name of the Claude Code CLI, the only backend
+// whose launch command carries `--effort` (hivecommons/hive#8377).
+const ClaudeBackend = "claude"
+
 // ReasoningEffortsByBackend lists the reasoning-effort values each CLI
 // backend accepts, for the backends that expose an effort control at all:
-// codex takes `-c model_reasoning_effort="<v>"` and agy takes `--effort <v>`.
-// Backends absent here have no effort flag; a configured effort is ignored
-// for them rather than breaking their launch command.
+// codex takes `-c model_reasoning_effort="<v>"`, agy takes `--effort <v>`,
+// and claude takes `--effort <v>` (hivecommons/hive#8377). Backends absent
+// here have no effort flag; a configured effort is ignored for them rather
+// than breaking their launch command.
 var ReasoningEffortsByBackend = map[string][]string{
-	"codex": {"minimal", "low", "medium", "high", "xhigh"},
-	"agy":   {"low", "medium", "high"},
+	"codex":       {"minimal", "low", "medium", "high", "xhigh"},
+	"agy":         {"low", "medium", "high"},
+	ClaudeBackend: {ClaudeEffortLow, ClaudeEffortMedium, ClaudeEffortHigh, ClaudeEffortXHigh, ClaudeEffortMax},
+}
+
+// ValidEffort reports whether effort is one of the values backend's effort
+// control accepts. An empty effort is never "valid" here — it means unset —
+// so callers that want "unset is fine" check for "" first
+// (ValidateReasoningEffort does). A backend with no effort control accepts
+// nothing.
+func ValidEffort(backend, effort string) bool {
+	if effort == "" {
+		return false
+	}
+	for _, v := range ReasoningEffortsByBackend[backend] {
+		if v == effort {
+			return true
+		}
+	}
+	return false
 }
 
 // ValidateReasoningEffort reports whether effort is settable for backend:
@@ -1084,10 +1122,8 @@ func ValidateReasoningEffort(backend, effort string) error {
 	if !ok {
 		return fmt.Errorf("backend %s has no reasoning-effort control", backend)
 	}
-	for _, v := range accepted {
-		if v == effort {
-			return nil
-		}
+	if ValidEffort(backend, effort) {
+		return nil
 	}
 	return fmt.Errorf("invalid reasoning effort %q for backend %s (accepted: %s)",
 		effort, backend, strings.Join(accepted, ", "))
@@ -1860,6 +1896,12 @@ type GovernorConfig struct {
 	// is dry-run: operators must explicitly set file_upstream=true before any
 	// report leaves the hive.
 	FleetReport FleetReportConfig `yaml:"fleet_report,omitempty" json:"fleet_report,omitempty"`
+
+	// Claims configures issue claims (hivecommons/hive#8380): the visible,
+	// expiring marker on an issue that says someone is already working it,
+	// covering the window before a PR exists. Zero value = off; see
+	// ClaimsConfig.
+	Claims ClaimsConfig `yaml:"claims,omitempty" json:"claims,omitempty"`
 }
 
 // FleetReportConfig controls upstream fleet self-reporting.
@@ -1875,55 +1917,6 @@ type FleetConfig struct {
 }
 
 func (f FleetReportConfig) DryRun() bool { return !f.FileUpstream }
-
-const (
-	DefaultRunsWaitTimeoutSeconds = 3600
-	DefaultRunsWaitSeverity       = "decision"
-	RunImplementCheckpointMinACMM = 5
-)
-
-// RunsConfig tunes long-running run checkpoints. The pointer booleans preserve
-// the rollout invariant: an absent checkpoint key keeps the historical
-// hold-gated behavior for that boundary, while an explicit false lets a stage
-// runner advance without recording a human approval.
-type RunsConfig struct {
-	Checkpoints        RunCheckpointConfig `yaml:"checkpoints,omitempty" json:"checkpoints,omitempty"`
-	WaitTimeoutSeconds int                 `yaml:"wait_timeout_seconds,omitempty" json:"wait_timeout_seconds,omitempty"`
-	WaitSeverity       string              `yaml:"wait_severity,omitempty" json:"wait_severity,omitempty"`
-}
-
-type RunCheckpointConfig struct {
-	Spec      *bool `yaml:"spec,omitempty" json:"spec,omitempty"`
-	Plan      *bool `yaml:"plan,omitempty" json:"plan,omitempty"`
-	Implement *bool `yaml:"implement,omitempty" json:"implement,omitempty"`
-}
-
-func (r RunsConfig) CheckpointBlocks(stage string) bool {
-	switch strings.TrimSpace(strings.ToLower(stage)) {
-	case "spec":
-		return boolDefaultTrue(r.Checkpoints.Spec)
-	case "plan":
-		return boolDefaultTrue(r.Checkpoints.Plan)
-	case "implement":
-		return boolDefaultTrue(r.Checkpoints.Implement)
-	default:
-		return true
-	}
-}
-
-func (r RunsConfig) EffectiveWaitTimeoutSeconds() int {
-	if r.WaitTimeoutSeconds > 0 {
-		return r.WaitTimeoutSeconds
-	}
-	return DefaultRunsWaitTimeoutSeconds
-}
-
-func (r RunsConfig) EffectiveWaitSeverity() string {
-	if s := strings.TrimSpace(strings.ToLower(r.WaitSeverity)); s != "" {
-		return s
-	}
-	return DefaultRunsWaitSeverity
-}
 
 func boolDefaultTrue(v *bool) bool {
 	return v == nil || *v
@@ -2225,6 +2218,53 @@ type WorkSourceConfig struct {
 	Linear LinearSourceConfig `yaml:"linear,omitempty" json:"linear,omitempty"`
 	// Jira configures the Jira Cloud REST v3 adapter.
 	Jira JiraSourceConfig `yaml:"jira,omitempty" json:"jira,omitempty"`
+	// Wavefront appends the ready nodes of an imported, versioned migration
+	// graph (Crustify/Wavefront) as run-stage work items. Default disabled
+	// preserves byte-identical ListIssues output.
+	Wavefront WavefrontSourceConfig `yaml:"wavefront,omitempty" json:"wavefront,omitempty"`
+}
+
+// WavefrontSourceConfig configures the additive Wavefront migration-graph work
+// source (hivecommons/hive#8362). Wavefront stays authoritative for its
+// semantic graph: Hive reads the graph, lists its ready nodes, and records
+// receipts when a node completes. It never re-derives the graph with an LLM.
+type WavefrontSourceConfig struct {
+	// Enabled turns the source on. Default false: nothing is read or listed.
+	Enabled bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// Path is a local JSON file holding the versioned migration graph. Exactly
+	// one of Path or URL must be set when Enabled is true.
+	Path string `yaml:"path,omitempty" json:"path,omitempty"`
+	// URL is an HTTP(S) endpoint that serves the same JSON document.
+	URL string `yaml:"url,omitempty" json:"url,omitempty"`
+	// Repo is the owner/name repository the migration happens against. It
+	// scopes every node key ("owner/name!<graph>:<node>").
+	Repo string `yaml:"repo,omitempty" json:"repo,omitempty"`
+	// ReceiptsDir is where node-completion receipts are written. Empty means
+	// receipts are kept only in memory for the life of the process.
+	ReceiptsDir string `yaml:"receipts_dir,omitempty" json:"receipts_dir,omitempty"`
+}
+
+// Validate checks the Wavefront source block. A disabled block is always valid
+// so an operator can stage settings before switching the source on.
+func (w WavefrontSourceConfig) Validate() error {
+	if !w.Enabled {
+		return nil
+	}
+	graphPath := strings.TrimSpace(w.Path)
+	endpoint := strings.TrimSpace(w.URL)
+	switch {
+	case graphPath == "" && endpoint == "":
+		return fmt.Errorf("work_source.wavefront: one of path or url is required when enabled")
+	case graphPath != "" && endpoint != "":
+		return fmt.Errorf("work_source.wavefront: path and url are mutually exclusive")
+	}
+	if endpoint != "" && !strings.HasPrefix(endpoint, "http://") && !strings.HasPrefix(endpoint, "https://") {
+		return fmt.Errorf("work_source.wavefront: url must start with http:// or https://")
+	}
+	if strings.TrimSpace(w.Repo) == "" {
+		return fmt.Errorf("work_source.wavefront: repo (owner/name) is required when enabled")
+	}
+	return nil
 }
 
 // IsZero reports whether no work source has been configured at all: no type
@@ -2235,7 +2275,8 @@ func (w WorkSourceConfig) IsZero() bool {
 		!w.RunStages &&
 		reflect.DeepEqual(w.GitHubProjects, GitHubProjectsSourceConfig{}) &&
 		reflect.DeepEqual(w.Linear, LinearSourceConfig{}) &&
-		reflect.DeepEqual(w.Jira, JiraSourceConfig{})
+		reflect.DeepEqual(w.Jira, JiraSourceConfig{}) &&
+		reflect.DeepEqual(w.Wavefront, WavefrontSourceConfig{})
 }
 
 // GitHubProjectsSourceConfig configures the GitHub Projects v2 work source.
@@ -7196,6 +7237,20 @@ type ReviewConfig struct {
 	// repository that answers "what should I merge next?" for a human working
 	// the queue by hand.
 	Recommendations RecommendationsConfig `yaml:"recommendations,omitempty" json:"recommendations,omitempty"`
+	// PlanMatch gates the plan_match review perspective
+	// (hivecommons/hive#8317), which scores a PR against the approved plan
+	// wave its Hive-Run / Hive-Plan trailers name.
+	PlanMatch PlanMatchConfig `yaml:"plan_match,omitempty" json:"plan_match,omitempty"`
+}
+
+// PlanMatchConfig is the switch for the plan_match review perspective
+// (hivecommons/hive#8317). Off by default: the perspective only earns its cost
+// on a hive whose implementation PRs carry run trailers and whose plans live
+// in its bead stores. When on, plan_match is appended to the hive's review
+// perspective set; a PR without a run trailer gets a not-applicable report
+// that neither helps nor hurts its confidence score.
+type PlanMatchConfig struct {
+	Enabled bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 }
 
 // DuplicateSweepConfig gates the cross-PR duplicate sweep

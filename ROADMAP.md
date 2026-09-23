@@ -98,6 +98,17 @@ soak-gated promotion workflow. Structural changes were gated by public
   flipped the violated properties to holding across millions of states.
   Goal: changes to modeled protocols update the corresponding model in
   the same PR.
+- **Long-running runs and convergence generality.** The runs vocabulary is now
+  documented in the
+  [reference architecture](src/docs/architecture.md#archetypes-for-long-running-work):
+  Oracle (`pkg/worksource`), Generator, Executor
+  (`pkg/convergence/mutation`), and Gate (`pkg/convergence`), with Proof and
+  Outcome as Gate inputs while the #8295 handoff/proof contract remains
+  provisional. The convergence rollout definition of done is not merely "opens
+  and merges PRs": the mutation, proof, and outcome path must be exercisable
+  end to end by a workload that never opens a pull request, with the report-only
+  audit campaign ([#8300](https://github.com/hivecommons/hive/issues/8300)) as
+  the proving workload.
 - **Channel-based release trains.** The three channels — `edge` (newest
   good build), `candidate` (awaiting soak), `stable` (promoted after
   soak) — exist as moving GHCR tags with enforced divergence: since the
@@ -259,6 +270,31 @@ discipline):
   matcher, manual dispatch, outcome ledger and suspend rule, item-tier
   matching: [#8083](https://github.com/hivecommons/hive/pull/8083)–[#8163](https://github.com/hivecommons/hive/pull/8163)).
   S8 waits on live-hive runbook evidence.
+- **Long-running runs** — a spec, plan or implement stage, or an audit
+  campaign, modelled as one task lease whose stage advances by generation,
+  with admission, verification and publication as three separate gates and
+  Unknown as a real state. Umbrella epic
+  [#8290](https://github.com/hivecommons/hive/issues/8290) gathers three
+  design homes that stay open:
+  [#7620](https://github.com/hivecommons/hive/issues/7620) archetype
+  vocabulary, [#8201](https://github.com/hivecommons/hive/issues/8201)
+  external-workflow admission contract, and
+  [#8227](https://github.com/hivecommons/hive/issues/8227) Spektacular under
+  Hive orchestration. **Spine landed on v5, surfaces landed on v6**: the
+  convergence-layer prerequisites
+  ([#8287](https://github.com/hivecommons/hive/issues/8287),
+  [#8288](https://github.com/hivecommons/hive/issues/8288)), the lease
+  `stage` field, the `stage_completed` hook handoff and the read-only
+  `GET /api/runs` projection are in v5; chat checkpoint approvals, the
+  dashboard and TUI Runs panes, hub-health run verdicts and the GitHub
+  status-comment/receipt surfaces are in v6. The #8201 Gate 0 option is
+  decided (contributor protocol plus a durable external-execution binding,
+  one bounded workflow, report-only, no publication credentials; record in
+  [#8302](https://github.com/hivecommons/hive/issues/8302)); the first
+  proving workload is a report-only audit campaign. Remaining constituents
+  (#8301–#8319, #8345–#8364) are ticked off on #8290 as they merge; no
+  store, CRD, DSL or GitHub credentials are added to the pilot and every
+  surface goes through the existing guard invariant.
 - Named for later, not scheduled: Jira (mirroring the Linear agent), an
   IDE extension over the dashboard API, a subscribable calendar feed of
   scheduled kicks.

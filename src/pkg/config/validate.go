@@ -47,6 +47,9 @@ func (c *Config) Validate() error {
 	if err := c.Governor.LiteLLM.Validate(); err != nil {
 		return err
 	}
+	if err := c.Publication.Validate(); err != nil {
+		return err
+	}
 	if normalized, err := ValidateSnapshotFrameAncestors(c.Dashboard.SnapshotFrameAncestors); err != nil {
 		return err
 	} else {
@@ -76,6 +79,9 @@ func (c *Config) Validate() error {
 	// dashboard would see explanation stay off with nothing saying why.
 	if !ValidateExplainMode(strings.TrimSpace(c.Governor.ExplainMode)) {
 		return fmt.Errorf("governor: invalid explain_mode %q (must be off, brief, or full, or empty to inherit %s)", c.Governor.ExplainMode, ExplainModeEnvVar)
+	}
+	if err := c.Governor.WorkSource.Wavefront.Validate(); err != nil {
+		return fmt.Errorf("governor: %w", err)
 	}
 	if !ValidateACMMIssueTracker(strings.TrimSpace(c.Governor.ACMM.IssueTracker)) {
 		return fmt.Errorf("governor: invalid acmm.issue_tracker %q (must be %s or %s, or empty for %s)", c.Governor.ACMM.IssueTracker, ACMMIssueTrackerGitHub, ACMMIssueTrackerWorkSource, ACMMIssueTrackerGitHub)

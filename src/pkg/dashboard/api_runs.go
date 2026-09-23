@@ -33,7 +33,45 @@ type RunStage struct {
 	Status  string `json:"status"`
 	Gen     uint64 `json:"gen"`
 	Receipt string `json:"receipt,omitempty"`
+	// Reason is the owner's explanation on a stage transition that carried one,
+	// today only an owner reset (#8350); it is read back from the timeline
+	// event so the run's history says why it stepped back.
+	Reason string `json:"reason,omitempty"`
 }
+
+type RunWavePR struct {
+	Repo  string `json:"repo"`
+	Role  string `json:"role,omitempty"`
+	URL   string `json:"url,omitempty"`
+	Title string `json:"title,omitempty"`
+}
+
+type RunReviewWave struct {
+	Wave          int         `json:"wave"`
+	PRs           []RunWavePR `json:"prs"`
+	ApproveAction string      `json:"approve_action,omitempty"`
+}
+
+// runResetRequest is the body of POST /api/runs/{key}/reset (#8350).
+type runResetRequest struct {
+	To     string `json:"to"`
+	Reason string `json:"reason"`
+}
+
+// runResetResponse is what POST /api/runs/{key}/reset returns on success.
+type runResetResponse struct {
+	OK        bool   `json:"ok"`
+	Key       string `json:"key"`
+	StageFrom string `json:"stage_from"`
+	Stage     string `json:"stage"`
+	Gen       uint64 `json:"gen"`
+	Reason    string `json:"reason"`
+}
+
+// auditActionRunStageReset is the dashboard audit action handleRunReset books
+// against the requesting owner (the agent audit sink separately records the
+// system-side lease_stage_reset with the same stage/gen fields).
+const auditActionRunStageReset = "run_stage_reset"
 
 type Run struct {
 	Key            string       `json:"key"`
@@ -43,11 +81,20 @@ type Run struct {
 	Gen            uint64       `json:"gen"`
 	StageStartedAt string       `json:"stage_started_at,omitempty"`
 	WaitingOn      RunWaitingOn `json:"waiting_on"`
+	WaitingReason  string       `json:"waiting_reason,omitempty"`
 	WaitingSince   string       `json:"waiting_since,omitempty"`
 	Assignee       string       `json:"assignee,omitempty"`
-	LastReceipt    string       `json:"last_receipt,omitempty"`
-	PlanEpicID     string       `json:"plan_epic_id,omitempty"`
-	Stages         []RunStage   `json:"stages"`
+	// ClaimedBy / ClaimExpiresAt expose the issue claim recorded on the run's
+	// lease (hivecommons/hive#8380). ClaimPosted says whether the claim
+	// comment reached the forge or lives on the lease only. All omitempty:
+	// absent while claims are off.
+	ClaimedBy      string          `json:"claimed_by,omitempty"`
+	ClaimExpiresAt string          `json:"claim_expires_at,omitempty"`
+	ClaimPosted    bool            `json:"claim_posted,omitempty"`
+	LastReceipt    string          `json:"last_receipt,omitempty"`
+	PlanEpicID     string          `json:"plan_epic_id,omitempty"`
+	Stages         []RunStage      `json:"stages"`
+	ReviewWaves    []RunReviewWave `json:"review_waves,omitempty"`
 }
 
 type RunSummary = Run
@@ -64,16 +111,19 @@ type RunWaitSnapshot struct {
 }
 
 type runLeaseSnapshot struct {
-	identity     string
-	taskID       string
-	repo         string
-	number       int
-	key          string
-	stage        string
-	gen          uint64
-	expiresAt    time.Time
-	title        string
-	stageStarted time.Time
+	identity       string
+	taskID         string
+	repo           string
+	number         int
+	key            string
+	stage          string
+	gen            uint64
+	expiresAt      time.Time
+	title          string
+	stageStarted   time.Time
+	claimedBy      string
+	claimExpiresAt time.Time
+	claimPosted    bool
 }
 
 type currentTaskRunInfo struct {
@@ -84,6 +134,7 @@ type currentTaskRunInfo struct {
 type runPlanSnapshot struct {
 	epicID       string
 	state        string
+	reason       string
 	waitingSince time.Time
 }
 
@@ -124,6 +175,75 @@ func (s *Server) handleRunGet(w http.ResponseWriter, r *http.Request) {
 	jsonError(w, "run not found", http.StatusNotFound)
 }
 
+// handleRunReset serves POST /api/runs/{key}/reset (#8350): move a run's lease
+// back to an earlier stage, minting a new generation so the relay working the
+// old generation cannot resume it, and record why.
+//
+// OWNER-ONLY. This is the only backwards stage move; a read-write member being
+// able to knock a run out of implement would undo an owner's plan approval
+// from the other side, so it sits behind the same gate as approve/reject. The
+// gate runs before anything else so an unverified caller learns nothing about
+// which runs exist. Body: {"to": "<stage>", "reason": "<why>"}; both required.
+func (s *Server) handleRunReset(w http.ResponseWriter, r *http.Request) {
+	if !requireOwnerRole(w, r) {
+		return
+	}
+	key := strings.TrimSpace(r.PathValue("key"))
+	if key == "" {
+		jsonError(w, "run key required", http.StatusBadRequest)
+		return
+	}
+	if s.contributeHub == nil {
+		jsonError(w, "run lease registry unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	var body runResetRequest
+	if err := decodeBody(r, &body); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	body.To = strings.TrimSpace(body.To)
+	body.Reason = sanitizeString(body.Reason)
+	if body.To == "" || body.Reason == "" {
+		jsonError(w, "to and reason are required", http.StatusBadRequest)
+		return
+	}
+	now := time.Now()
+	held, ok := s.contributeHub.runLeaseHolder(key, now)
+	if !ok {
+		jsonError(w, "run not found", http.StatusNotFound)
+		return
+	}
+	lease, err := s.contributeHub.resetLeaseStage(held.identity, held.taskID, body.To, body.Reason, now)
+	if err != nil {
+		jsonError(w, err.Error(), runResetErrorStatus(err))
+		return
+	}
+	s.auditFromRequest(r, auditActionRunStageReset, auditDetail(
+		"run", key, "stage_from", held.stage, "stage_to", lease.stage,
+		"reason", body.Reason, "gen", strconv.FormatUint(lease.gen, 10)), "")
+	jsonResponse(w, runResetResponse{
+		OK: true, Key: key, StageFrom: held.stage, Stage: lease.stage, Gen: lease.gen, Reason: body.Reason,
+	})
+}
+
+// runResetErrorStatus maps a refused reset to its HTTP status: a run that has
+// gone away is 404, one whose lease lapsed between lookup and reset is 409, a
+// bad target stage or missing reason is 400, and a persist failure is 500 so
+// the owner knows the registry, not the request, is the problem.
+func runResetErrorStatus(err error) int {
+	switch {
+	case errors.Is(err, errLeaseNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, errLeaseExpired):
+		return http.StatusConflict
+	case errors.Is(err, errLeaseStageInvalid), errors.Is(err, errLeaseResetReason):
+		return http.StatusBadRequest
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
 func (s *Server) activeRuns(includeTimeline bool) ([]Run, error) {
 	leases, err := s.activeRunLeaseSnapshots(time.Now())
 	if err != nil {
@@ -138,6 +258,9 @@ func (s *Server) activeRuns(includeTimeline bool) ([]Run, error) {
 	runs := make([]Run, 0, len(leases))
 	for _, lease := range leases {
 		run := runFromLease(lease, plans[lease.key], holds[lease.key], cfg)
+		if run.PlanEpicID != "" {
+			run.ReviewWaves = s.planReviewWaves(run.PlanEpicID)
+		}
 		events := s.LifecycleTimeline().ByIssue(lease.key)
 		run.LastReceipt = latestRunReceipt(events)
 		if run.StageStartedAt == "" {
@@ -157,6 +280,49 @@ func (s *Server) activeRuns(includeTimeline bool) ([]Run, error) {
 	return runs, nil
 }
 
+func (s *Server) planReviewWaves(epicID string) []RunReviewWave {
+	if s == nil || s.deps == nil || strings.TrimSpace(epicID) == "" {
+		return nil
+	}
+	byWave := map[int][]RunWavePR{}
+	for _, store := range s.deps.BeadStores {
+		if store == nil {
+			continue
+		}
+		tree, err := planning.GetPlanTree(store, epicID)
+		if err != nil || tree == nil {
+			continue
+		}
+		for _, child := range tree.Children {
+			wave, err := strconv.Atoi(strings.TrimSpace(child.Wave))
+			if err != nil || wave <= 0 || child.PRURL == "" {
+				continue
+			}
+			repo := strings.TrimSpace(child.Repo)
+			if repo == "" {
+				repo = strings.TrimSpace(child.Title)
+			}
+			byWave[wave] = append(byWave[wave], RunWavePR{
+				Repo: repo, Role: child.RepoRole, URL: child.PRURL, Title: child.Title,
+			})
+		}
+		break
+	}
+	if len(byWave) == 0 {
+		return nil
+	}
+	waves := make([]int, 0, len(byWave))
+	for wave := range byWave {
+		waves = append(waves, wave)
+	}
+	sort.Ints(waves)
+	out := make([]RunReviewWave, 0, len(waves))
+	for _, wave := range waves {
+		out = append(out, RunReviewWave{Wave: wave, PRs: byWave[wave], ApproveAction: "approve_plan_wave"})
+	}
+	return out
+}
+
 func (s *Server) activeRunLeaseSnapshots(now time.Time) ([]runLeaseSnapshot, error) {
 	if s == nil || s.contributeHub == nil {
 		return nil, errors.New("run lease registry unavailable")
@@ -170,10 +336,7 @@ func (s *Server) activeRunLeaseSnapshots(now time.Time) ([]runLeaseSnapshot, err
 		if l == nil || l.stage == "" || l.expiresAt.IsZero() || now.After(l.expiresAt) {
 			continue
 		}
-		key := l.key
-		if key == "" {
-			key = worksource.Ref{Repo: l.repo, Number: l.number}.Key()
-		}
+		key := l.runKey()
 		info := infos[leaseKey(l.identity, l.taskID)]
 		title := info.title
 		if title == "" {
@@ -183,6 +346,7 @@ func (s *Server) activeRunLeaseSnapshots(now time.Time) ([]runLeaseSnapshot, err
 			identity: l.identity, taskID: l.taskID, repo: l.repo, number: l.number,
 			key: key, stage: l.stage, gen: l.gen, expiresAt: l.expiresAt,
 			title: title, stageStarted: info.startedAt,
+			claimedBy: l.claimedBy, claimExpiresAt: l.claimExpiresAt, claimPosted: l.claimPosted,
 		})
 	}
 	return out, nil
@@ -211,12 +375,17 @@ func (h *ContributeWSHub) currentTaskInfos() map[string]currentTaskRunInfo {
 	return out
 }
 
-func runFromLease(lease runLeaseSnapshot, plan runPlanSnapshot, hold runHumanReviewHold, cfg *config.Config) Run {
+func runFromLease(lease runLeaseSnapshot, plan runPlanSnapshot, hold runHumanReviewHold, cfgs ...*config.Config) Run {
+	var cfg *config.Config
+	if len(cfgs) > 0 {
+		cfg = cfgs[0]
+	}
 	started := formatRunTime(lease.stageStarted)
 	run := Run{
 		Key: lease.key, Title: redactTokens(lease.title), Repo: lease.repo,
 		Stage: lease.stage, Gen: lease.gen, StageStartedAt: started,
 		WaitingOn: RunWaitingOnAgent, Assignee: lease.identity,
+		ClaimedBy: lease.claimedBy, ClaimExpiresAt: formatRunTime(lease.claimExpiresAt), ClaimPosted: lease.claimPosted,
 		PlanEpicID: plan.epicID,
 		Stages:     leaseRunStages(lease.stage, lease.gen),
 	}
@@ -224,8 +393,14 @@ func runFromLease(lease runLeaseSnapshot, plan runPlanSnapshot, hold runHumanRev
 		plan.state == planning.PlanStateStuck || plan.state == planning.PlanStateDesignReview || plan.state == planning.PlanStateDesignStuck) {
 		if runCheckpointBlocks(cfg, lease.stage) {
 			run.WaitingOn = RunWaitingOnHuman
+			run.WaitingReason = plan.reason
 			run.WaitingSince = formatRunTime(plan.waitingSince)
 		}
+	}
+	if plan.reason == planning.WaitingReasonStalePlan {
+		run.WaitingOn = RunWaitingOnHuman
+		run.WaitingReason = plan.reason
+		run.WaitingSince = formatRunTime(plan.waitingSince)
 	}
 	if !hold.UpdatedAt.IsZero() && runCheckpointBlocks(cfg, lease.stage) {
 		run.WaitingOn = RunWaitingOnHuman
@@ -275,14 +450,15 @@ func mergeRunTimelineStages(stages []RunStage, events []timeline.Event) []RunSta
 			continue
 		}
 		gen := uint64(0)
-		receipt := ""
+		receipt, reason := "", ""
 		if ev.Attrs != nil {
 			if raw := ev.Attrs["gen"]; raw != "" {
 				gen, _ = strconv.ParseUint(raw, 10, 64)
 			}
 			receipt = firstRunNonEmpty(ev.Attrs["receipt"], ev.Attrs["receipt_digest"], ev.Attrs["path"], ev.Attrs["digest"])
+			reason = ev.Attrs["reason"]
 		}
-		out = append(out, RunStage{Name: name, Status: "observed", Gen: gen, Receipt: receipt})
+		out = append(out, RunStage{Name: name, Status: "observed", Gen: gen, Receipt: receipt, Reason: reason})
 	}
 	return out
 }
@@ -333,6 +509,10 @@ func (s *Server) runPlanSnapshots() map[string]runPlanSnapshot {
 				continue
 			}
 			snap := out[repo+"#"+number]
+			snap.epicID = firstRunNonEmpty(snap.epicID, b.ID)
+			if reason := b.Meta(planning.MetaRunWaitingReason); reason != "" {
+				snap.reason = reason
+			}
 			snap.waitingSince = b.UpdatedAt.Time
 			out[repo+"#"+number] = snap
 		}

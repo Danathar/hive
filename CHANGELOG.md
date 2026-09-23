@@ -11,6 +11,22 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-23 (v5.12.0)
+
+### Added
+
+- Surface contributor relays that are running without a loaded knowledge export on the contribute dashboard.
+
+### Changed
+
+- Record the Gate 0 external workflow admission decision for #8201 and #8302.
+- Documented the provisional long-running-runs archetype vocabulary and clarified that the convergence rollout is done only when a non-PR workload can exercise the mutation, proof, and outcome path end to end ([#8345](https://github.com/hivecommons/hive/issues/8345)).
+- ROADMAP.md lists the long-running runs track (#8290: #7620, #8201, #8227) with its v5 spine / v6 surfaces status.
+
+### Fixed
+
+- Contributor trust docs and dashboards now clarify that trusted status is operator-granted, flag contributors who are eligible after about 20 PR tasks, and tell contributors when they are awaiting that grant ([#8358](https://github.com/hivecommons/hive/issues/8358)).
+
 ## 2026-09-23 (v5.11.1)
 
 ### Fixed

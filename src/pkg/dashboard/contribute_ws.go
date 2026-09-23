@@ -25,8 +25,9 @@ import (
 )
 
 const (
-	wsHeartbeatInterval = 30 * time.Second
-	wsHeartbeatTimeout  = 90 * time.Second
+	wsHeartbeatInterval            = 30 * time.Second
+	wsHeartbeatTimeout             = 90 * time.Second
+	contributorProfileSaveAttempts = 3
 	// wsTaskTimeout is the hub-owned LEASE TTL on task ownership (hivecommons/hive
 	// #2568). A task's lease is renewed on assignment and on every task_progress
 	// report; if a connection holds a task but the lease has not been renewed within
@@ -94,6 +95,8 @@ type ContributorConnection struct {
 	session         string
 	model           string
 	reasoningEffort string
+	knowledgeLoaded *bool
+	knowledgeError  string
 	// advisorModel / advisorEffort name the SECOND model that reviewed this
 	// contributor's work and the effort it ran at (hivecommons/hive#7760) —
 	// omp's --advisor today; any backend that grows a reviewer role can fill
@@ -307,6 +310,10 @@ type WSMessage struct {
 	// routing authority; Model remains the canonical selection transport.
 	Provider string `json:"provider,omitempty"`
 	Model    string `json:"model,omitempty"`
+	// KnowledgeLoaded is optional on auth_response/knowledge_state: nil means an
+	// old relay did not report whether ~/agent.md loaded, not false.
+	KnowledgeLoaded *bool  `json:"knowledge_loaded,omitempty"`
+	KnowledgeError  string `json:"knowledge_error,omitempty"`
 	// Session is an OPTIONAL client-declared session label (hivecommons/hive:
 	// multi-session-per-account). One GitHub account has ONE contributor profile
 	// (one ContributorID, one auth token, one trust tier), but a contributor may
@@ -608,6 +615,10 @@ func (c *ContributorConnection) advisor() advisorInfo {
 type ContributeWSHub struct {
 	connections map[string]*ContributorConnection
 	mu          sync.RWMutex
+	// claimCommenter is the forge seam issue claims are posted through
+	// (hivecommons/hive#8380). Nil means "use the wired GitHub client"; tests
+	// inject a recorder. See contribute_claims.go.
+	claimCommenter planIssueCommenter
 	// unmintableRepos maps "owner/repo" to the instant its post-mint-failure
 	// exclusion lapses (#7869); guarded by its own mutex because it is consulted
 	// inside selectTask's candidate scan, which runs under selectMu, and written
@@ -1822,6 +1833,37 @@ func (h *ContributeWSHub) SetContributorAgentRoleGrants(contributorID string, gr
 	}
 }
 
+func (h *ContributeWSHub) SetContributorTrustTier(contributorID, tier string) {
+	if h == nil || contributorID == "" {
+		return
+	}
+	version := 0
+	if p := findContributor(contributorID); p != nil {
+		version = p.Version
+	}
+	h.mu.RLock()
+	var targets []*ContributorConnection
+	for _, c := range h.connections {
+		c.mu.Lock()
+		matches := c.profile != nil && (c.profile.ContributorID == contributorID || strings.EqualFold(c.profile.GitHubUsername, contributorID))
+		c.mu.Unlock()
+		if matches {
+			targets = append(targets, c)
+		}
+	}
+	h.mu.RUnlock()
+	for _, c := range targets {
+		c.mu.Lock()
+		if c.profile != nil {
+			c.profile.TrustTier = tier
+			if version != 0 {
+				c.profile.Version = version
+			}
+		}
+		c.mu.Unlock()
+	}
+}
+
 const maxWSConnections = 50
 
 func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
@@ -1954,6 +1996,8 @@ func (h *ContributeWSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 			s.handleStandbyDeclare(msg)
 		case "standby_release":
 			s.handleStandbyRelease(msg)
+		case "knowledge_state":
+			s.handleKnowledgeState(msg)
 		case "pong":
 			if s.contributor != nil {
 				s.contributor.mu.Lock()
@@ -2290,6 +2334,16 @@ func (s *wsSession) handleAuthResponse(msg WSMessage) (stop bool) {
 	if msg.ReasoningEffort != "" {
 		profile.ReasoningEffort = msg.ReasoningEffort
 	}
+	knowledgeLoaded := msg.KnowledgeLoaded
+	knowledgeError := ""
+	if knowledgeLoaded != nil {
+		profile.KnowledgeLoaded = boolPtr(*knowledgeLoaded)
+		knowledgeError = sanitizeKnowledgeError(msg.KnowledgeError)
+		if *knowledgeLoaded {
+			knowledgeError = ""
+		}
+		profile.KnowledgeError = knowledgeError
+	}
 	// #7760: the advisor pair is client text. It is re-serialized into every
 	// fleet poll and lands in PR trailers, so it is HTML-stripped like every
 	// other stored contributor string AND bounded the way the declared
@@ -2366,6 +2420,8 @@ func (s *wsSession) handleAuthResponse(msg WSMessage) (stop bool) {
 		session:         sanitizeSessionLabel(msg.Session),
 		model:           msg.Model,
 		reasoningEffort: msg.ReasoningEffort,
+		knowledgeLoaded: knowledgeLoaded,
+		knowledgeError:  knowledgeError,
 		advisorModel:    advisorModel,
 		advisorEffort:   advisorEffort,
 		role:            requestedRole,
@@ -2758,6 +2814,154 @@ func standbyTierMapFromConfig(entries []config.StandbyModelTier) standbypkg.Tier
 		return standbypkg.TierMap{}
 	}
 	return tiers
+}
+
+func (s *wsSession) handleKnowledgeState(msg WSMessage) {
+	if s.contributor == nil || msg.KnowledgeLoaded == nil {
+		return
+	}
+	loaded := *msg.KnowledgeLoaded
+	errText := sanitizeKnowledgeError(msg.KnowledgeError)
+	if loaded {
+		errText = ""
+	}
+
+	c := s.contributor
+	username := ""
+	c.mu.Lock()
+	c.knowledgeLoaded = boolPtr(loaded)
+	c.knowledgeError = errText
+	if c.profile != nil {
+		c.profile.KnowledgeLoaded = boolPtr(loaded)
+		c.profile.KnowledgeError = errText
+		username = c.profile.GitHubUsername
+	}
+	c.mu.Unlock()
+	if username == "" {
+		return
+	}
+	profile, err := saveContributorKnowledgeState(username, loaded, errText)
+	if err != nil {
+		s.h.logger.Warn("[contribute-ws] failed to persist contributor knowledge state",
+			"username", username, "error", err)
+		return
+	}
+	if profile != nil {
+		c.mu.Lock()
+		if c.profile != nil && c.profile.GitHubUsername == username {
+			c.profile = profile
+		}
+		c.mu.Unlock()
+	}
+}
+
+func saveContributorKnowledgeState(username string, loaded bool, errText string) (*ContributorProfile, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		profile, err := loadContributorProfile(username)
+		if err != nil || profile == nil {
+			return profile, err
+		}
+		profile.KnowledgeLoaded = boolPtr(loaded)
+		profile.KnowledgeError = errText
+		if err := saveContributorProfile(profile); err != nil {
+			if errors.Is(err, errProfileConflict) {
+				continue
+			}
+			return nil, err
+		}
+		return profile, nil
+	}
+	return nil, errProfileConflict
+}
+
+func cloneContributorProfileForSave(p *ContributorProfile) *ContributorProfile {
+	if p == nil {
+		return nil
+	}
+	cp := *p
+	if p.KnowledgeLoaded != nil {
+		v := *p.KnowledgeLoaded
+		cp.KnowledgeLoaded = &v
+	}
+	if p.LastCompletedTask != nil {
+		v := *p.LastCompletedTask
+		cp.LastCompletedTask = &v
+	}
+	if p.CurrentTask != nil {
+		v := *p.CurrentTask
+		cp.CurrentTask = &v
+	}
+	cp.LabelInterests = append([]string(nil), p.LabelInterests...)
+	cp.AgentRoleGrants = append([]string(nil), p.AgentRoleGrants...)
+	cp.Specializations = append([]string(nil), p.Specializations...)
+	cp.Collaborators = append([]CollaboratorRecord(nil), p.Collaborators...)
+	cp.ActiveTasks = append([]WSTaskAssign(nil), p.ActiveTasks...)
+	return &cp
+}
+
+func refreshConnectionContributorProfile(dst, saved *ContributorProfile) {
+	if dst == nil || saved == nil {
+		return
+	}
+	dst.TrustTier = saved.TrustTier
+	dst.TasksCompleted = saved.TasksCompleted
+	dst.TasksWithPR = saved.TasksWithPR
+	dst.TasksFailed = saved.TasksFailed
+	dst.LastActive = saved.LastActive
+	if saved.LastCompletedTask != nil {
+		taskCopy := *saved.LastCompletedTask
+		dst.LastCompletedTask = &taskCopy
+	} else {
+		dst.LastCompletedTask = nil
+	}
+	dst.Version = saved.Version
+}
+
+func saveConnectionContributorProfile(c *ContributorConnection, update func(*ContributorProfile) bool) (string, bool, error) {
+	if c == nil {
+		return "", false, nil
+	}
+	var username string
+	var lastErr error
+	for attempt := 0; attempt < contributorProfileSaveAttempts; attempt++ {
+		var profile *ContributorProfile
+		var promoted bool
+		if attempt == 0 {
+			c.mu.Lock()
+			if c.profile == nil {
+				c.mu.Unlock()
+				return "", false, nil
+			}
+			promoted = update(c.profile)
+			profile = cloneContributorProfileForSave(c.profile)
+			username = profile.GitHubUsername
+			c.mu.Unlock()
+		} else {
+			if username == "" {
+				return "", false, lastErr
+			}
+			var err error
+			profile, err = loadContributorProfile(username)
+			if err != nil {
+				return username, false, err
+			}
+			promoted = update(profile)
+		}
+		if err := saveContributorProfile(profile); err != nil {
+			if errors.Is(err, errProfileConflict) {
+				lastErr = err
+				continue
+			}
+			return username, false, err
+		}
+		c.mu.Lock()
+		if c.profile != nil && strings.EqualFold(c.profile.GitHubUsername, username) {
+			refreshConnectionContributorProfile(c.profile, profile)
+		}
+		c.mu.Unlock()
+		return username, promoted, nil
+	}
+	return username, false, lastErr
 }
 
 // handleReady is the dispatch phase: a contributor with no task asks for work
@@ -3303,6 +3507,10 @@ func (s *wsSession) handleTaskComplete(msg WSMessage) {
 			}
 			if prDetail.Verified {
 				verifiedPR = msg.PRURL
+				if completedTask != nil {
+					taskCopy := *completedTask
+					go h.validatePRArtifactTrailers(&taskCopy, msg.PRURL)
+				}
 				if completedTask != nil && completedTask.StandbyLane != "" {
 					if err := h.applyDonatedHold(msg.PRURL); err != nil {
 						h.logger.Warn("[contribute-ws] donated standby PR verified but hold label failed; completion will not settle as shipped",
@@ -3446,7 +3654,7 @@ func (s *wsSession) handleTaskComplete(msg WSMessage) {
 			// #6450: a genuine completion proves the runtime works — clear
 			// the contributor's fast-failure streak.
 			h.resetContributorFailureStreak(identityOf(s.contributor))
-			s.contributor.mu.Lock()
+			completedAt := time.Now().UTC().Format(time.RFC3339)
 			// #7862: a completion with nothing behind it — no PR, no
 			// no_work_needed, from a relay that said how it decided (chrome
 			// inference or a bare `HIVE_VERDICT: complete`) — earns no
@@ -3454,44 +3662,51 @@ func (s *wsSession) handleTaskComplete(msg WSMessage) {
 			// still clears the failure streak: the runtime worked, the model
 			// just declared victory. The same predicate picks the short,
 			// non-escalating issue cooldown in markTaskCompletedVerdictKeySignal.
-			if !isEvidenceLessCompletion(verifiedPR, verdict, msg.CompletionSignal) {
-				s.contributor.profile.TasksCompleted++
-			}
-			// Trust credit is gated on the VERIFIED PR, not the reported one:
-			// counting the raw self-reported field would hand out
-			// contents:write / pulls:write for a PR that was never shown to
-			// exist, belongs to another repo, or was authored by someone else.
-			if verifiedPR != "" {
-				s.contributor.profile.TasksWithPR++
-			}
-			s.contributor.profile.LastActive = time.Now().UTC().Format(time.RFC3339)
-			if completedTask != nil {
-				s.contributor.profile.LastCompletedTask = completedTask
-			}
-			// Promote on completions that produced a VERIFIED pull request.
-			// Completion is self-reported, so counting bare task_complete
-			// messages — or unverified PR URLs — would hand out contents:write
-			// and pulls:write for work that was never shown to exist.
-			promoted := false
-			if s.contributor.profile.TrustTier == "newcomer" && s.contributor.profile.TasksWithPR >= contributorAutoPromoteAt {
-				s.contributor.profile.TrustTier = "contributor"
-				promoted = true
-				h.logger.Info("[contribute-ws] auto-promoted", "username", s.contributor.profile.GitHubUsername)
-			}
-			promotedUser := s.contributor.profile.GitHubUsername
 			promotedCLI := s.contributor.cliBackend
 			promotedModel := s.contributor.model
 			promotedEffort := s.contributor.reasoningEffort
-			s.contributor.mu.Unlock()
+			countCompletion := !isEvidenceLessCompletion(verifiedPR, verdict, msg.CompletionSignal)
+			promotedUser, promoted, saveErr := saveConnectionContributorProfile(s.contributor, func(p *ContributorProfile) bool {
+				if countCompletion {
+					p.TasksCompleted++
+				}
+				// Trust credit is gated on the VERIFIED PR, not the reported one:
+				// counting the raw self-reported field would hand out
+				// contents:write / pulls:write for a PR that was never shown to
+				// exist, belongs to another repo, or was authored by someone else.
+				if verifiedPR != "" {
+					tasksWithPRBefore := p.TasksWithPR
+					p.TasksWithPR++
+					logTrustedEligibilityIfCrossed(h.logger, p, tasksWithPRBefore)
+				}
+				p.LastActive = completedAt
+				if completedTask != nil {
+					taskCopy := *completedTask
+					p.LastCompletedTask = &taskCopy
+				}
+				// Promote on completions that produced a VERIFIED pull request.
+				// Completion is self-reported, so counting bare task_complete
+				// messages — or unverified PR URLs — would hand out contents:write
+				// and pulls:write for work that was never shown to exist.
+				if p.TrustTier == "newcomer" && p.TasksWithPR >= contributorAutoPromoteAt {
+					p.TrustTier = "contributor"
+					return true
+				}
+				return false
+			})
+			if saveErr != nil {
+				h.logger.Warn("[contribute-ws] failed to persist task_complete profile update",
+					"username", promotedUser, "error", saveErr)
+			}
 			// #2390-era command center: narrate the promotion as its own
 			// activity event so the Operations dev-log and achievement pops
 			// (contribute_sse.go broadcast) surface "promoted to contributor".
 			// Read-only signalling — it changes no control behaviour and is
 			// emitted only on the real newcomer -> contributor transition.
 			if promoted {
+				h.logger.Info("[contribute-ws] auto-promoted", "username", promotedUser)
 				h.addActivity(promotedUser, "promoted", "contributor", promotedCLI, promotedModel, promotedEffort, "contributor")
 			}
-			_ = saveContributorProfile(s.contributor.profile)
 		} else {
 			// N9: this is now literally true. It previously logged "ignored"
 			// after the handler had already cleared currentTask and the
@@ -3661,10 +3876,16 @@ func (s *wsSession) handleTaskFailed(msg WSMessage) {
 			if !taskAssignedAt.IsZero() {
 				h.recordContributorFastFailure(identityOf(s.contributor), time.Since(taskAssignedAt), msg.Reason)
 			}
-			s.contributor.mu.Lock()
-			s.contributor.profile.TasksFailed++
-			s.contributor.mu.Unlock()
-			_ = saveContributorProfile(s.contributor.profile)
+			failedAt := time.Now().UTC().Format(time.RFC3339)
+			username, _, saveErr := saveConnectionContributorProfile(s.contributor, func(p *ContributorProfile) bool {
+				p.TasksFailed++
+				p.LastActive = failedAt
+				return false
+			})
+			if saveErr != nil {
+				h.logger.Warn("[contribute-ws] failed to persist task_failed profile update",
+					"username", username, "error", saveErr)
+			}
 		} else {
 			h.recordDecision(s.contributor.profile.GitHubUsername, decisionUnassignedIgnored,
 				msg.TaskID, "", 0,
@@ -3910,6 +4131,13 @@ func (h *ContributeWSHub) cleanupLoop() {
 			// "connected but wedged" case the issue describes; this releases its task
 			// through the SAME cooldown+generation-bump path a manual requeue uses.
 			h.reclaimExpiredLeases(time.Now())
+
+			// #8303: drive the installed stage runner (advance on final, retry or
+			// escalate on expiry). Nothing is installed unless
+			// runs.spektacular.enabled was set at boot.
+			if h.server != nil {
+				h.server.tickStageRunner(time.Now())
+			}
 
 			// #5681: drop leases that aged out without ever being looked up — a relay
 			// that never came back after a restart leaves one behind, and it would

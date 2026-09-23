@@ -99,6 +99,16 @@ type Client struct {
 	perspectives review.PerspectiveSet
 	// confidenceScore gates the Confidence line on review comments.
 	confidenceScore func() bool
+	// issueClaims reports whether issue claims are recognised at enumeration
+	// time and the TTL an assignee-inferred claim runs for (#8380). Nil or
+	// false → no comment is fetched, no Issue carries claim fields. Read live
+	// so a Features-panel toggle applies without a client rebuild.
+	issueClaims func() (enabled bool, ttl time.Duration)
+	// issueClaimCache remembers the claim read for an issue at a given
+	// updated_at, so the per-issue comment fetch happens once per activity
+	// change rather than once per enumeration. Guarded by issueClaimMu.
+	issueClaimCache map[string]issueClaimCacheEntry
+	issueClaimMu    sync.Mutex
 	// combinedPerspectivesFn / maxReviewsPerHeadFn feed the per-head review
 	// backstop (perHeadReviewRefusal); read live so a dashboard change applies
 	// without a client rebuild. maxReviewsPerHeadFn returning 0 means derive;
@@ -377,6 +387,15 @@ type Issue struct {
 	// issue should be worked or triaged despite a related PR claim, but the
 	// downstream agent must know about that PR before deciding what remains.
 	ClaimContext *IssueClaimContext `json:"claim_context,omitempty"`
+	// ClaimedBy / ClaimExpiresAt / ClaimSource carry a LIVE issue claim
+	// (hivecommons/hive#8380) read at enumeration time: a `hive-claim` marker
+	// comment, or an assignee. All three are set together and only while
+	// governor.claims.enabled is on, so a hive with claims off emits an
+	// envelope byte-for-byte identical to before. ClaimSource is
+	// issueclaim.SourceMarker or issueclaim.SourceAssignee.
+	ClaimedBy      string     `json:"claimed_by,omitempty"`
+	ClaimExpiresAt *time.Time `json:"claim_expires_at,omitempty"`
+	ClaimSource    string     `json:"claim_source,omitempty"`
 }
 
 // IssueDependency is the transport form of a source-aware work dependency.
@@ -426,6 +445,13 @@ type PullRequest struct {
 	HiveAgent      string `json:"hive_agent,omitempty"`
 	HiveBackend    string `json:"hive_backend,omitempty"`
 	HiveModel      string `json:"hive_model,omitempty"`
+	// HiveRun and HivePlan are the `Hive-Run:` / `Hive-Plan:` trailer values
+	// (ParseRunTrailers, hivecommons/hive#8310), read from the same list
+	// payload as the attribution trailer so the plan_match review perspective
+	// (#8317) can name the run and plan a PR implements without keeping the
+	// body. Empty when the PR carries no run trailer.
+	HiveRun  string `json:"hive_run,omitempty"`
+	HivePlan string `json:"hive_plan,omitempty"`
 	// Mergeable is a tri-state: MergeableYes, MergeableNo, or MergeableUnknown.
 	// It is intentionally NOT a bool: a bool zero-values to false, which is
 	// indistinguishable from "GitHub says this PR cannot be merged" and would
@@ -976,6 +1002,9 @@ func (c *Client) fetchIssues(ctx context.Context, repo string, now time.Time) (a
 	if unclassified := totalIssues - breakdown.Total(); unclassified > 0 {
 		breakdown.Other += unclassified
 	}
+	// #8380: decorate the actionable set with any live issue claim. A no-op
+	// (no fetch, no fields) unless governor.claims.enabled is on.
+	c.annotateIssueClaims(ctx, owner, repoName, actionable, now)
 	return actionable, held, totalIssues, breakdown, nil
 }
 
@@ -1027,6 +1056,7 @@ func (c *Client) fetchPRs(ctx context.Context, repo string) (actionable []PullRe
 		totalPRs++
 		labels := extractPRLabels(pr.Labels)
 		attrMeta, hasAttr := ParseAttributionTrailer(pr.GetBody())
+		runKey, planRef := ParseRunTrailers(pr.GetBody())
 
 		if isHeld(labels) {
 			breakdown.Hold++
@@ -1065,6 +1095,8 @@ func (c *Client) fetchPRs(ctx context.Context, repo string) (actionable []PullRe
 					HiveAgent:      attrMeta.Agent,
 					HiveBackend:    attrMeta.Backend,
 					HiveModel:      attrMeta.Model,
+					HiveRun:        runKey,
+					HivePlan:       planRef,
 					HeadSHA:        prHeadSHA(pr),
 					HeadRef:        headRef,
 					HeadRepo:       headRepo,
@@ -1127,6 +1159,8 @@ func (c *Client) fetchPRs(ctx context.Context, repo string) (actionable []PullRe
 			HiveAgent:      attrMeta.Agent,
 			HiveBackend:    attrMeta.Backend,
 			HiveModel:      attrMeta.Model,
+			HiveRun:        runKey,
+			HivePlan:       planRef,
 			// Mergeable is deliberately NOT set here. The PullRequests.List
 			// endpoint never populates "mergeable" — GitHub computes it
 			// per-PR and returns it only from the single-PR GET. Reading it
@@ -1967,6 +2001,23 @@ func (c *Client) CommitMessage(ctx context.Context, owner, repo, sha string) (st
 		msg = msg[:idx]
 	}
 	return msg, nil
+}
+
+// FullCommitMessage returns the complete commit message for the given SHA,
+// including body and trailers. Artifact linkage uses this rather than
+// CommitMessage's one-line status summary.
+func (c *Client) FullCommitMessage(ctx context.Context, owner, repo, sha string) (string, error) {
+	if c == nil || c.client == nil {
+		return "", ErrNoGitHubClient
+	}
+	commit, _, err := c.client.Repositories.GetCommit(ctx, owner, repo, sha, nil)
+	if err != nil {
+		return "", fmt.Errorf("fetching commit %s/%s@%s: %w", owner, repo, sha, err)
+	}
+	if commit == nil || commit.GetCommit() == nil {
+		return "", fmt.Errorf("github returned no commit message for %s/%s@%s", owner, repo, sha)
+	}
+	return commit.GetCommit().GetMessage(), nil
 }
 
 func (c *Client) GetRepo(ctx context.Context, owner, repo string) (*gh.Repository, *gh.Response, error) {

@@ -1,5 +1,7 @@
 // Package proof implements the first exact-subject GitHub proof vertical
 // accepted on kubestellar/hive#4252 (parent epic #3845, issue #4253).
+// In the provisional long-running-run vocabulary, Proof records are inputs to a
+// Gate decision, not a peer archetype.
 //
 // It owns exactly one predicate — github.checks.exact-head-green/v1: "all
 // required (non-meta) check runs for exact head SHA X of PR N in repo R
@@ -45,6 +47,13 @@ const PredicateExactHeadGreen = "github.checks.exact-head-green/v1"
 // recorded for a pinned component scope without implying any publication.
 const PredicateInspectionRecorded = "hive.inspection.recorded/v1"
 
+// PredicateFindingPublished proves that one validated audit finding was
+// published exactly once (#8353): its evidence is the issue number the
+// publication produced plus the finding content hash it carried, so a receipt
+// for one finding can never vouch for another and a re-filed issue is a new
+// receipt, never a reinterpretation of this one.
+const PredicateFindingPublished = "hive.finding.published/v1"
+
 // ProducerGitHubChecksAPI is the sole accepted producer authority for the
 // exact-head-green predicate: the GitHub Checks API of the subject repository.
 // Producer identity is explicit — another vendor's checks, or Hive's own
@@ -55,6 +64,10 @@ const ProducerGitHubChecksAPI = "github-checks-api"
 // ProducerHiveAuditLane is the accepted producer for report-only audit
 // inspection receipts.
 const ProducerHiveAuditLane = "hive-audit-lane"
+
+// ProducerHivePublisher is the accepted producer for finding publication
+// receipts: the authorized issue publisher running under the campaign owner.
+const ProducerHivePublisher = "hive-publisher"
 
 // keyFieldSeparator joins the load-bearing fingerprint fields into the
 // receipt key. "|" cannot appear in an outcome key ("project/repo@outcome"
@@ -134,6 +147,12 @@ type Fingerprint struct {
 	// ReceiptDigest binds the report-only inspection predicate to the emitted
 	// StageReceipt digest for the component.
 	ReceiptDigest string `json:"receipt_digest,omitempty"`
+	// IssueNumber binds the finding publication predicate to the issue (or
+	// private disclosure record) the publication produced.
+	IssueNumber int `json:"issue_number,omitempty"`
+	// FindingHash binds the finding publication predicate to the content hash
+	// of the finding that was published.
+	FindingHash string `json:"finding_hash,omitempty"`
 }
 
 // Validate reports why a Fingerprint cannot serve as an immutable subject
@@ -146,9 +165,9 @@ func (f Fingerprint) Validate() error {
 	if strings.ContainsAny(f.OutcomeKey, keyFieldSeparator+" \t") {
 		return fmt.Errorf("outcome key %q may not contain %q or whitespace", f.OutcomeKey, keyFieldSeparator)
 	}
-	if f.PredicateID != PredicateExactHeadGreen && f.PredicateID != PredicateInspectionRecorded {
-		return fmt.Errorf("predicate %q is not implemented by this vertical (known: %s, %s)",
-			f.PredicateID, PredicateExactHeadGreen, PredicateInspectionRecorded)
+	if f.PredicateID != PredicateExactHeadGreen && f.PredicateID != PredicateInspectionRecorded && f.PredicateID != PredicateFindingPublished {
+		return fmt.Errorf("predicate %q is not implemented by this vertical (known: %s, %s, %s)",
+			f.PredicateID, PredicateExactHeadGreen, PredicateInspectionRecorded, PredicateFindingPublished)
 	}
 	if f.DesiredGeneration < 1 {
 		return fmt.Errorf("desired generation %d is impossible (generations start at 1)", f.DesiredGeneration)
@@ -168,6 +187,21 @@ func (f Fingerprint) Validate() error {
 		}
 		if f.Producer != ProducerHiveAuditLane {
 			return fmt.Errorf("producer %q is not the accepted authority %s", f.Producer, ProducerHiveAuditLane)
+		}
+		return nil
+	}
+	if f.PredicateID == PredicateFindingPublished {
+		if f.FindingHash == "" {
+			return fmt.Errorf("publication predicate requires a finding hash")
+		}
+		if strings.ContainsAny(f.FindingHash, keyFieldSeparator+" \t") {
+			return fmt.Errorf("finding hash %q may not contain %q or whitespace", f.FindingHash, keyFieldSeparator)
+		}
+		if f.IssueNumber < 1 {
+			return fmt.Errorf("publication predicate requires the published issue number, got %d", f.IssueNumber)
+		}
+		if f.Producer != ProducerHivePublisher {
+			return fmt.Errorf("producer %q is not the accepted authority %s", f.Producer, ProducerHivePublisher)
 		}
 		return nil
 	}
@@ -210,8 +244,11 @@ func (f Fingerprint) Key() string {
 }
 
 func (f Fingerprint) keySubject() string {
-	if f.PredicateID == PredicateInspectionRecorded {
+	switch f.PredicateID {
+	case PredicateInspectionRecorded:
 		return f.InspectionBeadID
+	case PredicateFindingPublished:
+		return f.FindingHash
 	}
 	return f.HeadSHA
 }
