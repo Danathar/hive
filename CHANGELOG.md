@@ -11,6 +11,16 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-23 (v5.15.1)
+
+### Fixed
+
+- The agent CLIs baked into the hub image (`src/Dockerfile`) and the contributor image (`src/Dockerfile.contributor`) are current again ([#8417](https://github.com/hivecommons/hive/issues/8417)). Claude Code 2.1.226 refused `claude-opus-5-5` ("version 2.1.280 or newer is required"), so every claude agent or contributor set to Opus 5.5 failed on each run; it is now 2.1.280. Codex moves 0.153.4 -> 0.156.1, whose bundled catalog adds GPT-6 Sol and GPT-6 Luna (the dashboard's static codex fallback list and `static/index.html` mirror are refreshed to the 0.156.1 catalog, which also retired `gpt-5.2` and `gpt-5.4-mini`). The other pins move with them: Copilot 1.0.78 (1.0.59 in the contributor image) -> 1.0.88, pi 0.84.1 -> 0.87.1, Goose 1.45.0 -> 1.51.0, Antigravity 1.1.19 / 1.1.22 -> 1.2.9, Oh My Pi 18.2.6 -> 18.2.11, Muse Code 1.0.3-R2198.1 -> 1.3.0-R3401.1, and bobshell 1.0.6 -> 2.0.4; gh 2.101.0 was already current. Every download-verified layer keeps its per-architecture SHA-256/SHA-512 check, with the digests recomputed from the published release artifacts.
+
+### Security
+
+- `review.all_authors` no longer lets the review-fix kick push commits onto PRs that Hive's own agents did not open: the fixer now runs an authorship check before every fix kick and, for a contributor's or maintainer's PR, the reviewer publishes its findings with the proposed fix as a suggestion or patch block instead, recording the withheld push on the audit log as `review_fix_withheld` with the PR, author, and setting. Pushing to other people's PR branches is a separate, owner-only, off-by-default opt-in, `review.fix_human_prs` ("Push fix commits to PRs Hive did not open" under Features -> Review Gate -> Reviewers); a hive that already ran with `all_authors: true` is migrated to `fix_human_prs: true` on load, logged once and shown as on, so an upgrade changes nothing it was doing ([#8421](https://github.com/hivecommons/hive/issues/8421)).
+
 ## 2026-09-23 (v5.15.0)
 
 ### Added
