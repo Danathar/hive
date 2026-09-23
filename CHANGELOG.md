@@ -11,6 +11,13 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-23 (v5.27.2)
+
+### Fixed
+
+- tests: give `TestStart_ServesEndpoints` 60s of readiness headroom so saturated shuffle runners no longer fail unrelated PRs with "server did not start within 15s" (#8542)
+- tests: redirect `auditLogPath` in `redirectContributeWSDisk` so pkg/dashboard tests on live hive hosts stop loading — and polluting — the real `/data/audit.jsonl` (#8545)
+
 ## 2026-09-23 (v5.27.1)
 
 ### Fixed

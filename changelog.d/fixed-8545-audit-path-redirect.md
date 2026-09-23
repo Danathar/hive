@@ -1,1 +1,0 @@
-- tests: redirect `auditLogPath` in `redirectContributeWSDisk` so pkg/dashboard tests on live hive hosts stop loading — and polluting — the real `/data/audit.jsonl` (#8545)
