@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-23 (v5.14.0)
+
+### Added
+
+- Retro can now automatically promote or demote ACMM levels from repo-scoped autonomy signals when the new default-off autonomy policy is enabled, recording every decision with evidence for the dashboard and audit log ([#8364](https://github.com/hivecommons/hive/issues/8364)).
+
 ## 2026-09-23 (v5.13.0)
 
 ### Added
