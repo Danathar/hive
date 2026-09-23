@@ -41,6 +41,21 @@ func TestInvocationMetadata(t *testing.T) {
 			wantEffort:  "",
 		},
 		{
+			name:        "claude with a configured effort reports it (#8377)",
+			agent:       &AgentProcess{Name: "a", Config: config.AgentConfig{Backend: "claude", Model: "claude-opus-4-6", ReasoningEffort: "xhigh"}},
+			wantBackend: "claude",
+			wantModel:   "claude-opus-4-6",
+			wantEffort:  "xhigh",
+		},
+		{
+			name: "backend override off claude drops the claude effort",
+			agent: &AgentProcess{Name: "a", Config: config.AgentConfig{Backend: "claude", Model: "claude-opus-4-6", ReasoningEffort: "xhigh"},
+				BackendOverride: "copilot"},
+			wantBackend: "copilot",
+			wantModel:   "claude-opus-4-6",
+			wantEffort:  "",
+		},
+		{
 			name:        "agy with model resolves default effort",
 			agent:       &AgentProcess{Name: "a", Config: config.AgentConfig{Backend: "agy", Model: "gemini-3.7-flash"}},
 			wantBackend: "agy",
@@ -114,11 +129,17 @@ func TestResolveReasoningEffort(t *testing.T) {
 		{"codex", "gpt-5.6-terra", "", ""},
 		{"codex", "gpt-5.6-terra", "xhigh", "xhigh"},
 		{"codex", "", "high", "high"},
+		// claude is launched with --effort only for a value Claude Code accepts
+		// (#8377): the configured value is the launch-time truth when valid,
+		// with or without a model; unset or dropped values report "".
+		{"claude", "claude-sonnet-5", "", ""},
+		{"claude", "claude-sonnet-5", "high", "high"},
+		{"claude", "", "max", "max"},
+		{"claude", "claude-sonnet-5", "minimal", ""}, // codex vocabulary, dropped at launch
 		// Every other backend takes effort from its own config, which the hive
 		// does not resolve — "" is the honest answer, and an omitted field.
-		{"claude", "claude-sonnet-5", "", ""},
-		{"claude", "claude-sonnet-5", "high", ""},
 		{"bob", "", "", ""},
+		{"copilot", "gpt-5.6-luna", "high", ""},
 		{"", "", "", ""},
 	}
 	for _, c := range cases {
