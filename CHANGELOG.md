@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-23 (v5.11.1)
+
+### Fixed
+
+- Cadence reviewer (`reviewer-queue.md`): the kick now lists the hive's configured review perspectives (`${REVIEW_PERSPECTIVES}`) and requires one verdict object per perspective every time, clean ones as `approve`. Previously the template offered "a whole-PR judgement is correctness", so clean PRs got a single-perspective verdict and a confidence line capped at `3/5 — 1 of 5 perspectives reported`.
+
 ## 2026-09-22 (v5.11.0)
 
 ### Added
