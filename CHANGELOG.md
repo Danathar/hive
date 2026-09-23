@@ -11,6 +11,22 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-23 (v5.19.0)
+
+### Added
+
+- runs: treat task_complete on an implement-stage lease as the terminal run completion, firing stage_completed hooks and surfacing completed_at in the runs API
+
+### Changed
+
+- Measure stable promotion soak from the oldest un-promoted candidate generation so frequent v5 merges no longer reset the 24-hour gate.
+- Share one Hive-Run/Hive-Plan/Hive-Spec trailer parser between run provenance readers.
+
+### Fixed
+
+- Run-stage work sources now use the live dashboard lease accessor, so hives with `governor.work_source.run_stages` enabled can offer pending spec/plan/implement run stages to relays instead of silently listing none (gap 2 of #8460, related to #8296).
+- Allow final Spektacular plans to advance through a documented tasks.json/plan.md fallback while the upstream plan export verb is unavailable.
+
 ## 2026-09-23 (v5.18.0)
 
 ### Added
