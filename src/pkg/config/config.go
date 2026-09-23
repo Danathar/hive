@@ -4503,6 +4503,18 @@ type DiscordConfig struct {
 	AllowedUsers []string `yaml:"allowed_users,omitempty"`
 }
 
+// ContributeAnnouncement is the operator-set message surfaced to contributors on
+// /contribute, the SSE stream, and connected relays. Text is plain, server-
+// sanitised display text; Level is "info" or "warning"; ExpiresAt is optional
+// RFC3339. ID is minted by the dashboard whenever Text changes so per-viewer
+// dismissals reset for a new announcement.
+type ContributeAnnouncement struct {
+	ID        string `yaml:"id,omitempty" json:"id,omitempty"`
+	Text      string `yaml:"text,omitempty" json:"text,omitempty"`
+	Level     string `yaml:"level,omitempty" json:"level,omitempty"`
+	ExpiresAt string `yaml:"expires_at,omitempty" json:"expires_at,omitempty"`
+}
+
 type HubConfig struct {
 	Enabled             bool   `yaml:"enabled"`
 	URL                 string `yaml:"url"`
@@ -4674,11 +4686,12 @@ type HubConfig struct {
 	// repositories. Default OFF: a standby contributor receives the full task
 	// context, which for a private repository is read access in substance.
 	// Resolve through IsStandbyPrivateReposAllowed().
-	StandbyAllowPrivateRepos bool                `yaml:"standby_allow_private_repos,omitempty"`
-	DisabledRepos            []string            `yaml:"disabled_repos"`
-	DisabledTiers            []string            `yaml:"disabled_tiers"`
-	TierLimits               map[string]TierRate `yaml:"tier_limits"`
-	SnapshotIntervalMin      int                 `yaml:"snapshot_interval_min"`
+	StandbyAllowPrivateRepos bool                   `yaml:"standby_allow_private_repos,omitempty"`
+	ContributeAnnouncement   ContributeAnnouncement `yaml:"contribute_announcement,omitempty" json:"contribute_announcement,omitempty"`
+	DisabledRepos            []string               `yaml:"disabled_repos"`
+	DisabledTiers            []string               `yaml:"disabled_tiers"`
+	TierLimits               map[string]TierRate    `yaml:"tier_limits"`
+	SnapshotIntervalMin      int                    `yaml:"snapshot_interval_min"`
 }
 
 // Contribute completion-cooldown defaults and clamp bounds. These live in the
