@@ -11,6 +11,34 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-23 (v5.13.0)
+
+### Added
+
+- Added the opt-in Spektacular stage runner (`runs.spektacular.enabled`, default off, Features toggle): it polls `spektacular {spec,plan} status --json` for every active stage lease, writes a stage receipt and advances the lease on `document_status: final`, retries an expired stage within `runs.max_stage_retries` (default 2) and then raises a decision escalation, admits a final plan as a draft Hive plan without LLM redecomposition, and refuses to advance a plan that went back to draft or a document that was replaced (#8303)
+- Retro now records progressive autonomy signal facts for first-pass plans, no-rework merged PRs, and rolled-back runs so the ACMM dashboard can show advisory scope signals without changing levels automatically ([#8313](https://github.com/hivecommons/hive/issues/8313)).
+- Runs can now fan out implementation waves across multiple repositories, refusing constellation repo-claim overlaps, holding later waves behind final/skipped barriers, and documenting forward-fix as the default for partial failures ([#8314](https://github.com/hivecommons/hive/issues/8314)).
+- Review gains an opt-in `plan_match` perspective (`review.plan_match.enabled`, Features panel toggle) that scores a PR against the approved plan wave its `Hive-Run` / `Hive-Plan` trailers name, reporting scope creep and missing planned items; trailer-less PRs get a not-applicable report that leaves their confidence score unchanged, and a high-severity scope finding holds the PR for a human ([#8317](https://github.com/hivecommons/hive/issues/8317)).
+- Isolate run-stage work in per-stage git worktrees and block stale implementation plans whose spec input_revision no longer matches the current spec revision.
+- Add the owner-only `POST /api/runs/{key}/reset` route and `resetLeaseStage`, which move a run back to an earlier stage with a new generation and a recorded reason (#8350)
+- Added the audit campaign's authorized issue publisher: one trusted publication effect that files each validated finding exactly once through the mutation journal (replay returns the recorded issue), routes security-sensitive findings to a configured private channel and never to a public issue, refuses with a typed error and audit entry below ACMM L3 or without a private channel, performs zero GitHub writes when disabled or in shadow mode, and wires `convergence/outcome` as the campaign's predicted-versus-actual repository outcome ledger; default off behind `publication.enabled` with a Features panel toggle ([#8353](https://github.com/hivecommons/hive/issues/8353), [#7281](https://github.com/hivecommons/hive/issues/7281))
+- Added the `wavefront` additive work source (`governor.work_source.wavefront`, default disabled) that lists the ready nodes of an imported, versioned Crustify/Wavefront migration graph as run-stage work items with dependency edges, withholds blocked nodes, refuses items minted at a stale graph revision, admits the graph as a plan through `DecomposeFromOutput` with no LLM call, and records a receipt per completed node with zero GitHub calls (#8362)
+- Per-agent reasoning effort for the claude backend: the dashboard effort dropdown now appears on claude agents and a stored `reasoning_effort` (low|medium|high|xhigh|max) is passed to Claude Code as `--effort <v>`; unset leaves the CLI at its own default, and the scripted and contributor-relay launches honor `AGENT_REASONING_EFFORT` for claude the same way (#8377)
+- Add Oh My Pi (`omp`) as a dashboard agent method with pinned hub-image install, model discovery, and per-model reasoning effort.
+- Issue claims: an issue someone has claimed on the issue itself (a `hive-claim` marker comment or an assignee) is withheld from the contribute queue and kick prompts until the claim expires (default 4h TTL); relay agents post a claim comment when they take a lease at a tier that may write issue comments and record it on the lease otherwise, exposed as `claimed_by`/`claim_expires_at` on the withheld listing and the runs API; default off behind `governor.claims.enabled` and the Features toggle ([#8380](https://github.com/hivecommons/hive/issues/8380)).
+- Add run artifact commit trailers and a trace reader that links commits to plan, spec, approval, and audit rationale.
+- The `/contribute` onboarding picker now offers Oh My Pi (`omp`) with setup guidance and copy-paste contributor commands for omp users ([#8399](https://github.com/hivecommons/hive/issues/8399)).
+
+### Changed
+
+- Add deterministic offline finding identity dedupe for retro advisories and duplicate sweep reporting.
+
+### Fixed
+
+- Fixed the mutation boundary dedup replay so a second execution of an already-applied logical operation returns the recorded typed result (status, provenance, and the PR number/URL in CreatePR) instead of an empty result with a nil error; an Unknown first attempt still replays as needs-reconciliation, never as an empty success ([#8347](https://github.com/hivecommons/hive/issues/8347)).
+- Pin with tests that hub-launched agents never receive the dashboard token in their environment, launch MCP flags, or project context; the v5 line has no task-MCP URL, so the reported leak does not reproduce there (#8348)
+- Fix live contributor profile sync for trust-tier changes and multi-relay task accounting.
+
 ## 2026-09-23 (v5.12.0)
 
 ### Added
