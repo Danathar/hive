@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-23 (v5.17.0)
+
+### Added
+
+- runs: triage incoming issues as fix, spec, or clarify before dispatch; spec admits a run at the spec stage, the decision is recorded on the lease and receipt (#8227 Epic 5)
+
 ## 2026-09-23 (v5.16.2)
 
 ### Fixed
