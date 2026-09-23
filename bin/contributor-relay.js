@@ -32,6 +32,7 @@ const WebSocket = require('ws');
 const { execSync, execFileSync, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const DEFAULT_NEEDS_DECISION_LABEL = 'needs-decision';
 const {
   parsePiModelSelection,
   redactPiCredentials,
@@ -1273,6 +1274,7 @@ function makeHub(url, token) {
     // this hub, so a reconnect loop does not repeat the same advisory line.
     protocolDriftReported: false,
     serverCapabilities: [],
+    contributeNeedsDecisionLabel: DEFAULT_NEEDS_DECISION_LABEL,
     announcementSeen: new Set(),
     // #7732: true from the moment a `ready` is actually transmitted to this hub
     // until the hub answers it (task_assign or task_unavailable), or the
@@ -3287,6 +3289,8 @@ function runHeadlessTask(task) {
       // #7924: the label goes on with the task credential, so it must be
       // applied BEFORE stopAgentForTaskExit drops it below.
       if (noWork && noWork.verdict === HIVE_VERDICT_BLOCKED) markIssueBlocked(task, noWork.reason);
+      if (noWork && noWork.needsDecision) markIssueNeedsDecision(task, noWork.reason);
+      if (isAlreadyDoneNoWork(noWork)) markIssueAlreadyDone(task, noWork.reason);
       // #5353: the one-shot child has already exited (this callback is its
       // exit), so there is no process to stop — but the task-scoped token it
       // was given stays valid for the rest of wsTokenTTL. Drop it with the
@@ -4560,7 +4564,14 @@ const HIVE_VERDICT_TOKENS = [HIVE_VERDICT_COMPLETE, HIVE_VERDICT_NO_WORK, HIVE_V
 // The `no_work_needed — blocked: <reason>` spelling (#7924): the older
 // sentinel with the blocked marker as the reason's first word. Read as the
 // blocked verdict, with the marker stripped from the reason.
-const NO_WORK_BLOCKED_REASON_RE = /^blocked\s*[:—–-]\s*/i;
+const NO_WORK_BLOCKED_REASON_RE = /^blocked\s*(?:(?:[:—–-])|(?:(?:on|by)\b))\s*/i;
+const NO_WORK_NEEDS_DECISION_REASON_RE = /^(?:decision|needs[_ -]?decision|maintainer[_ -]?decision)\s*[:—–-]\s*/i;
+const NATURAL_NEEDS_DECISION_REASON_RE = /(?:maintainer|design|policy|approval|\/approve).{0,80}(?:decision|approval|\/approve)|(?:decision|approval).{0,80}maintainer/i;
+const ALREADY_DONE_REASON_KIND = 'already_done';
+const ALREADY_DONE_MERGED_PR_RE = /\bmerged\s+(?:pull\s+request|PR)\s*#(\d+)\b/i;
+const ALREADY_DONE_TEXT_RE = /\b(?:already\s+(?:resolved|fixed|implemented|merged|done)|no[-\s]?op)\b/i;
+const COMMIT_SHA_RE = /\b[0-9a-f]{7,40}\b/i;
+const ALREADY_DONE_WORKFLOW_LABEL = process.env.HIVE_ALREADY_DONE_LABEL || 'hive/already-done';
 
 // isNoWorkVerdict says whether a verdict object is one of the "nothing to
 // ship" family — no_work_needed or blocked — which the hub books the same way
@@ -4580,11 +4591,33 @@ function isNoWorkVerdict(v) {
 // src/pkg/dashboard/contribute_ledgers.go).
 function verdictWireFields(noWork) {
   if (!isNoWorkVerdict(noWork)) return {};
+  const alreadyDone = alreadyDoneVerdictFields(noWork.reason);
   return {
     verdict: HIVE_VERDICT_NO_WORK,
     verdict_reason: noWork.reason,
+    ...alreadyDone,
     verdict_blocked: noWork.verdict === HIVE_VERDICT_BLOCKED ? true : undefined,
+    verdict_needs_decision: noWork.needsDecision ? true : undefined,
   };
+}
+
+function alreadyDoneVerdictFields(reason) {
+  reason = String(reason || '');
+  if (!ALREADY_DONE_MERGED_PR_RE.test(reason) && !ALREADY_DONE_TEXT_RE.test(reason)) return {};
+  const evidence = {};
+  const pr = ALREADY_DONE_MERGED_PR_RE.exec(reason);
+  if (pr) evidence.pr = Number(pr[1]);
+  const sha = COMMIT_SHA_RE.exec(reason);
+  if (sha && /[a-f]/i.test(sha[0])) evidence.commit = sha[0];
+  return {
+    verdict_reason_kind: ALREADY_DONE_REASON_KIND,
+    evidence: Object.keys(evidence).length ? evidence : undefined,
+  };
+}
+
+function isAlreadyDoneNoWork(noWork) {
+  if (!isNoWorkVerdict(noWork)) return false;
+  return alreadyDoneVerdictFields(noWork.reason).verdict_reason_kind === ALREADY_DONE_REASON_KIND;
 }
 
 // hiveVerdictLineRe builds the one regex that recognises a sentinel line, for
@@ -4640,7 +4673,9 @@ function detectHiveVerdict(lines, wanted) {
 // withoutPaneIndex drops the pane index detectHiveVerdicts() carries; the
 // single-verdict shape callers compare and log is { verdict, reason, line }.
 function withoutPaneIndex(v) {
-  return { verdict: v.verdict, reason: v.reason, line: v.line };
+  const out = { verdict: v.verdict, reason: v.reason, line: v.line };
+  if (v.needsDecision) out.needsDecision = true;
+  return out;
 }
 
 // detectHiveVerdicts is detectHiveVerdict for EVERY sentinel on the pane,
@@ -4677,7 +4712,11 @@ function detectHiveVerdicts(lines, wanted) {
     // the older sentinel's clothing. Promote it whenever the caller would
     // have accepted a no_work_needed at all: the two are booked as one
     // family (isNoWorkVerdict), so no caller that wants one rejects the other.
-    if (verdict === HIVE_VERDICT_NO_WORK && NO_WORK_BLOCKED_REASON_RE.test(reason)) {
+    let needsDecision = false;
+    if (verdict === HIVE_VERDICT_NO_WORK && (NO_WORK_NEEDS_DECISION_REASON_RE.test(reason) || NATURAL_NEEDS_DECISION_REASON_RE.test(reason))) {
+      needsDecision = true;
+      reason = reason.replace(NO_WORK_NEEDS_DECISION_REASON_RE, '').trim();
+    } else if (verdict === HIVE_VERDICT_NO_WORK && NO_WORK_BLOCKED_REASON_RE.test(reason)) {
       verdict = HIVE_VERDICT_BLOCKED;
       reason = reason.replace(NO_WORK_BLOCKED_REASON_RE, '').trim();
     }
@@ -4685,7 +4724,7 @@ function detectHiveVerdicts(lines, wanted) {
     // compares it against the line that was already on the pane when the task's
     // prompt was delivered, which is how a verdict gets attributed to a task at
     // all (#5650).
-    found.push({ verdict, reason, line: lines[i], index: i });
+    found.push({ verdict, reason, line: lines[i], index: i, needsDecision });
   }
   return found;
 }
@@ -6112,11 +6151,17 @@ function hubGrantsIssuesWrite(hub) {
 // a gh that is missing, offline or refused costs a log line, never the
 // completion. gh refuses to add a label the repository does not define, so a
 // first failure creates the label and retries exactly once.
-function markIssueBlocked(task, reason) {
+function markIssueLabel(task, reason, label, description, issueTag) {
+  label = String(label || '').trim();
+  if (!label) {
+    console.log(`Task ${task && task.task_id ? task.task_id : '(unknown)'}: ${issueTag} verdict configured with no label — the hub's cooldown holds the issue`);
+    return;
+  }
+
   if (!task || task.kind !== 'issue' || !task.repo || !(task.number > 0) || task.external_id) return;
   const hub = task._hub || hubs[activeHubIndex];
   if (!hubGrantsIssuesWrite(hub)) {
-    console.log(`Task ${task.task_id}: blocked verdict on ${task.repo}#${task.number}, but the task credential does not carry issues:write — leaving the '${BLOCKED_WORKFLOW_LABEL}' label to a human; the hub's cooldown holds the issue (#7924)`);
+    console.log(`Task ${task.task_id}: ${issueTag} verdict on ${task.repo}#${task.number}, but the task credential does not carry issues:write — leaving the '${label}' label to a human; the hub's cooldown holds the issue`);
     return;
   }
   let token = null;
@@ -6124,7 +6169,7 @@ function markIssueBlocked(task, reason) {
   const env = token ? { ...process.env, GH_TOKEN: token } : process.env;
   const issueURL = `https://github.com/${task.repo}/issues/${task.number}`;
   const addLabel = () => execSync(
-    `gh issue edit ${shellQuote(issueURL)} --add-label ${shellQuote(BLOCKED_WORKFLOW_LABEL)} 2>&1`,
+    `gh issue edit ${shellQuote(issueURL)} --add-label ${shellQuote(label)} 2>&1`,
     { encoding: 'utf8', timeout: 20000, env });
   const describe = e => ((e && (e.stdout || e.message)) || 'unknown error').toString().trim();
   try {
@@ -6132,17 +6177,60 @@ function markIssueBlocked(task, reason) {
   } catch (first) {
     try {
       execSync(
-        `gh label create ${shellQuote(BLOCKED_WORKFLOW_LABEL)} --repo ${shellQuote(task.repo)} ` +
-        `--description ${shellQuote('Waiting on something outside this repository; not contributor work until a human clears the label')} ` +
+        `gh label create ${shellQuote(label)} --repo ${shellQuote(task.repo)} ` +
+        `--description ${shellQuote(description)} ` +
         '--color d93f0b 2>&1',
         { encoding: 'utf8', timeout: 20000, env });
       addLabel();
     } catch (second) {
-      console.error(`Could not apply the '${BLOCKED_WORKFLOW_LABEL}' label to ${task.repo}#${task.number}: ${describe(first)}; after creating the label: ${describe(second)} — the hub's cooldown still holds the issue (#7924)`);
+      console.error(`Could not apply the '${label}' label to ${task.repo}#${task.number}: ${describe(first)}; after creating the label: ${describe(second)} — the hub's cooldown still holds the issue`);
       return;
     }
   }
-  console.log(`Applied the '${BLOCKED_WORKFLOW_LABEL}' label to ${task.repo}#${task.number} (#7924): ${reason || '(no reason given)'} — a human lifts it when the dependency clears`);
+  console.log(`Applied the '${label}' label to ${task.repo}#${task.number}: ${reason || '(no reason given)'} — a human lifts it when the condition clears`);
+}
+
+function markIssueBlocked(task, reason) {
+  markIssueLabel(task, reason, BLOCKED_WORKFLOW_LABEL, 'Waiting on something outside this repository; not contributor work until a human clears the label', 'blocked');
+}
+
+function markIssueNeedsDecision(task, reason) {
+  const hub = (task && task._hub) || hubs[activeHubIndex];
+  const label = hub && typeof hub.contributeNeedsDecisionLabel === 'string' ? hub.contributeNeedsDecisionLabel : DEFAULT_NEEDS_DECISION_LABEL;
+  markIssueLabel(task, reason, label, 'Waiting on a maintainer decision; not contributor work until a human clears the label', 'needs_decision');
+}
+
+function markIssueAlreadyDone(task, reason) {
+  if (!task || task.kind !== 'issue' || !task.repo || !(task.number > 0) || task.external_id) return;
+  const hub = task._hub || hubs[activeHubIndex];
+  if (!hubGrantsIssuesWrite(hub)) {
+    console.log(`Task ${task.task_id}: already-done verdict on ${task.repo}#${task.number}, but the task credential does not carry issues:write — leaving the '${ALREADY_DONE_WORKFLOW_LABEL}' label to the hub or a human; the hub's already-done hold suppresses re-offer (#8477)`);
+    return;
+  }
+  let token = null;
+  try { token = fs.readFileSync(GH_TOKEN_CACHE, 'utf8').trim() || null; } catch (_) {}
+  const env = token ? { ...process.env, GH_TOKEN: token } : process.env;
+  const issueURL = `https://github.com/${task.repo}/issues/${task.number}`;
+  const addLabel = () => execSync(
+    `gh issue edit ${shellQuote(issueURL)} --add-label ${shellQuote(ALREADY_DONE_WORKFLOW_LABEL)} 2>&1`,
+    { encoding: 'utf8', timeout: 20000, env });
+  const describe = e => ((e && (e.stdout || e.message)) || 'unknown error').toString().trim();
+  try {
+    addLabel();
+  } catch (first) {
+    try {
+      execSync(
+        `gh label create ${shellQuote(ALREADY_DONE_WORKFLOW_LABEL)} --repo ${shellQuote(task.repo)} ` +
+        `--description ${shellQuote('Hive contributor found this issue already resolved; remove if work remains')} ` +
+        '--color 8250df 2>&1',
+        { encoding: 'utf8', timeout: 20000, env });
+      addLabel();
+    } catch (second) {
+      console.error(`Could not apply the '${ALREADY_DONE_WORKFLOW_LABEL}' label to ${task.repo}#${task.number}: ${describe(first)}; after creating the label: ${describe(second)} — the hub's already-done hold still suppresses re-offer (#8477)`);
+      return;
+    }
+  }
+  console.log(`Applied the '${ALREADY_DONE_WORKFLOW_LABEL}' label to ${task.repo}#${task.number} (#8477): ${reason || '(no reason given)'} — a human removes it if work remains`);
 }
 
 function finishCurrentTask({ completionSignal, summary, tmuxLines, prURL, noWork, unaddressedNotes = [] }) {
@@ -6153,6 +6241,8 @@ function finishCurrentTask({ completionSignal, summary, tmuxLines, prURL, noWork
   // #7924: same ordering for the blocked label — it is applied with the task
   // credential, which is about to be dropped.
   if (noWork && noWork.verdict === HIVE_VERDICT_BLOCKED) markIssueBlocked(currentTask, noWork.reason);
+  if (noWork && noWork.needsDecision) markIssueNeedsDecision(currentTask, noWork.reason);
+  if (isAlreadyDoneNoWork(noWork)) markIssueAlreadyDone(currentTask, noWork.reason);
   // Cause B (#5353). "Idle" here is a verdict read off the pane's rendering
   // chrome, and it is wrong often enough to have produced thirteen separate
   // issues. When it is wrong, the agent is still mid-turn — and reporting
@@ -7405,6 +7495,7 @@ function handleMessage(data, hub) {
       // trust tier. Read by markIssueBlocked to decide whether a label call
       // can succeed at all. An older hub sends none → no label attempts.
       hub.permissions = Array.isArray(msg.permissions) ? msg.permissions.slice() : [];
+      hub.contributeNeedsDecisionLabel = typeof msg.contribute_needs_decision_label === 'string' ? msg.contribute_needs_decision_label.trim() : DEFAULT_NEEDS_DECISION_LABEL;
       hub.reconnectDelay = BASE_RECONNECT_DELAY_MS;
       // #7732: a fresh session. Whatever this hub was asked before it
       // re-authenticated is not a question it is still going to answer.
@@ -8150,8 +8241,15 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     HIVE_VERDICT_BLOCKED,
     HIVE_VERDICT_TOKENS,
     BLOCKED_WORKFLOW_LABEL,
+    DEFAULT_NEEDS_DECISION_LABEL,
+    ALREADY_DONE_WORKFLOW_LABEL,
     isNoWorkVerdict,
+    isAlreadyDoneNoWork,
+    verdictWireFields,
+    alreadyDoneVerdictFields,
     markIssueBlocked,
+    markIssueNeedsDecision,
+    markIssueAlreadyDone,
     detectHiveVerdict,
     detectHiveVerdicts,
     detectCompletionVerdict,

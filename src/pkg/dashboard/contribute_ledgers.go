@@ -1,12 +1,14 @@
 package dashboard
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	ghpkg "github.com/hivecommons/hive/pkg/github"
 	"github.com/hivecommons/hive/pkg/worksource"
 )
 
@@ -51,10 +53,11 @@ const noPRStreakResetAfter = 14 * 24 * time.Hour
 // cooldown instead (markTaskCompletedVerdictKeySignal) and its ledger row
 // carries the marker, so an operator can see what the issue is waiting on.
 const (
-	completionVerdictShipped      = "shipped"
-	completionVerdictIdle         = "idle"
-	completionVerdictNoWorkNeeded = "no_work_needed"
-	completionVerdictBlocked      = "blocked"
+	completionVerdictShipped       = "shipped"
+	completionVerdictIdle          = "idle"
+	completionVerdictNoWorkNeeded  = "no_work_needed"
+	completionVerdictBlocked       = "blocked"
+	completionVerdictNeedsDecision = "needs_decision"
 )
 
 // noWorkReasonMaxLen caps the client-supplied VerdictReason before it is stored
@@ -224,11 +227,16 @@ func (h *ContributeWSHub) noWorkVerdictsPath() string {
 // the reason names an external dependency the issue is waiting on, not a
 // settlement — an operator reading the ledger sees which it is.
 type noWorkVerdictRecord struct {
-	RecordedAt    time.Time `json:"recorded_at"`
-	SuppressHours float64   `json:"suppress_hours,omitempty"`
-	Reporter      string    `json:"reporter,omitempty"`
-	Reason        string    `json:"reason,omitempty"`
-	Blocked       bool      `json:"blocked,omitempty"`
+	RecordedAt            time.Time `json:"recorded_at"`
+	SuppressHours         float64   `json:"suppress_hours,omitempty"`
+	Reporter              string    `json:"reporter,omitempty"`
+	Reason                string    `json:"reason,omitempty"`
+	NeedsDecision         bool      `json:"needs_decision,omitempty"`
+	ReasonKind            string    `json:"reason_kind,omitempty"`
+	EvidencePR            int       `json:"evidence_pr,omitempty"`
+	EvidenceCommit        string    `json:"evidence_commit,omitempty"`
+	AlreadyDoneUnverified bool      `json:"already_done_unverified,omitempty"`
+	Blocked               bool      `json:"blocked,omitempty"`
 }
 
 // suppressWindow is how long, from RecordedAt, this verdict withholds the
@@ -238,6 +246,14 @@ func (r noWorkVerdictRecord) suppressWindow() time.Duration {
 		return time.Duration(r.SuppressHours * float64(time.Hour))
 	}
 	return completedTaskCooldownHours * time.Hour
+}
+
+func (h *ContributeWSHub) configuredAlreadyDoneUnverifiedHold() time.Duration {
+	days := 30
+	if h != nil && h.server != nil && h.server.deps != nil && h.server.deps.Config != nil {
+		days = h.server.deps.Config.Hub.ContributeAlreadyDoneHoldDaysOrDefault()
+	}
+	return time.Duration(days) * 24 * time.Hour
 }
 
 func (h *ContributeWSHub) loadNoWorkVerdicts() {
@@ -316,7 +332,7 @@ func (h *ContributeWSHub) saveNoWorkVerdicts() {
 // no_work_needed with the WSMessage.VerdictBlocked marker set. The relay sends
 // the second — a hub older than this one then still sees the no_work_needed it
 // already books, rather than an unknown token it would normalize to idle.
-func normalizeCompletionVerdict(reported string, blocked bool, verifiedPR string) string {
+func normalizeCompletionVerdict(reported string, blocked bool, needsDecision bool, verifiedPR string) string {
 	if verifiedPR != "" {
 		return completionVerdictShipped
 	}
@@ -328,6 +344,9 @@ func normalizeCompletionVerdict(reported string, blocked bool, verifiedPR string
 		if blocked {
 			return completionVerdictBlocked
 		}
+		if needsDecision {
+			return completionVerdictNeedsDecision
+		}
 		return completionVerdictNoWorkNeeded
 	}
 	return completionVerdictIdle
@@ -337,7 +356,7 @@ func normalizeCompletionVerdict(reported string, blocked bool, verifiedPR string
 // "nothing to ship" conclusion — no_work_needed or its blocked sibling — as
 // opposed to shipped work or a bare return to idle.
 func isNoWorkFamilyVerdict(verdict string) bool {
-	return verdict == completionVerdictNoWorkNeeded || verdict == completionVerdictBlocked
+	return verdict == completionVerdictNoWorkNeeded || verdict == completionVerdictBlocked || verdict == completionVerdictNeedsDecision
 }
 
 // Completion-signal vocabulary (kubestellar/hive#5376). Originally diagnostic
@@ -473,6 +492,16 @@ func (h *ContributeWSHub) isSuppressedByNoWorkVerdictKey(key string, issueUpdate
 		return false
 	}
 	return true
+}
+
+func (h *ContributeWSHub) noWorkVerdictRecordKey(key string) (noWorkVerdictRecord, bool) {
+	if h == nil || key == "" {
+		return noWorkVerdictRecord{}, false
+	}
+	h.completedMu.Lock()
+	defer h.completedMu.Unlock()
+	rec, ok := h.noWorkVerdicts[key]
+	return rec, ok
 }
 
 // issueUpdatedAtFromMap extracts the issue's GitHub updated_at from the
@@ -704,6 +733,44 @@ func (h *ContributeWSHub) markTaskCompletedVerdict(repo string, number int, prUR
 	h.markTaskCompletedVerdictKey(worksource.Ref{Repo: repo, Number: number}.Key(), prURL, verdict, reporter, reason)
 }
 
+func (h *ContributeWSHub) markAlreadyDoneUnverified(repo string, number int, reporter, reason string, evidence *VerdictEvidence) {
+	if h == nil || repo == "" || number <= 0 {
+		return
+	}
+	if len(reason) > noWorkReasonMaxLen {
+		reason = reason[:noWorkReasonMaxLen]
+	}
+	claim := ghpkg.IssueClaim{Repo: repo, Issue: number, Source: ghpkg.ClaimSourceVerdict, SourceReporter: reporter}
+	if evidence != nil {
+		claim.PRNumber = evidence.PR
+		if evidence.PR > 0 {
+			claim.PRRepo = repo
+		}
+	}
+	if err := h.markAlreadyDoneIssue(context.Background(), repo, number, claim, reporter, false); err != nil && h.logger != nil && err != ghpkg.ErrNoGitHubClient {
+		h.logger.Warn("[contribute-ws] already-done verdict label failed",
+			"repo", repo, "number", number, "error", err.Error())
+	}
+	hold := h.configuredAlreadyDoneUnverifiedHold()
+	rec := noWorkVerdictRecord{
+		RecordedAt:            time.Now(),
+		SuppressHours:         hold.Hours(),
+		Reporter:              reporter,
+		Reason:                reason,
+		ReasonKind:            verdictReasonKindAlreadyDone,
+		AlreadyDoneUnverified: true,
+	}
+	if evidence != nil {
+		rec.EvidencePR = evidence.PR
+		rec.EvidenceCommit = strings.TrimSpace(evidence.Commit)
+	}
+	key := worksource.Ref{Repo: repo, Number: number}.Key()
+	h.completedMu.Lock()
+	h.noWorkVerdicts[key] = rec
+	h.completedMu.Unlock()
+	h.saveNoWorkVerdicts()
+}
+
 // markTaskCompletedVerdictKey books completion against the canonical identity
 // (kubestellar/hive#4245), so a Linear or Jira task's cooldown and verdict land
 // on that item rather than on a shared "repo#0" record that would suppress
@@ -762,7 +829,7 @@ func (h *ContributeWSHub) markTaskCompletedVerdictKeySignal(key string, prURL, v
 		// A flat base cooldown keeps the issue out of a tight re-offer loop
 		// (#2492/#2557) while leaving it offerable.
 		cooldown = completedNoPRCooldownHours * time.Hour
-	} else if verdict == completionVerdictBlocked {
+	} else if verdict == completionVerdictBlocked || verdict == completionVerdictNeedsDecision {
 		// #7924: blocked on something outside the repo. Nothing a retry can
 		// do until that lands, so the no-PR ladder's first rungs (4h, 8h, …)
 		// are pure cost: every retry re-runs the same research to re-find the
@@ -782,7 +849,8 @@ func (h *ContributeWSHub) markTaskCompletedVerdictKeySignal(key string, prURL, v
 			SuppressHours: withPRCooldown.Hours(),
 			Reporter:      reporter,
 			Reason:        reason,
-			Blocked:       true,
+			Blocked:       verdict == completionVerdictBlocked,
+			NeedsDecision: verdict == completionVerdictNeedsDecision,
 		}
 		verdictLedgerDirty = true
 	} else {
