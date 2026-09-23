@@ -11,6 +11,15 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-23 (v5.27.1)
+
+### Fixed
+
+- Fixed #8528 so inference agents pre-trust their isolated Claude HOME workspaces and never type kick prompts into bash after Claude exits on a trust dialog.
+- The advisory digest now keeps the first resolved timestamp for Recently Resolved findings and backfills linked PR or issue closure dates so regenerated reports do not stamp old fixes with the render day ([#8529](https://github.com/hivecommons/hive/issues/8529)).
+- Expose run API entries under the canonical owner/repo#issue key while retaining the stage lease key for compatibility.
+- Stamp run stage audit entries with the canonical run key so live run acceptance can verify audit ownership.
+
 ## 2026-09-23 (v5.27.0)
 
 ### Added

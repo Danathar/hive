@@ -1,1 +1,0 @@
-- Stamp run stage audit entries with the canonical run key so live run acceptance can verify audit ownership.
