@@ -108,7 +108,6 @@ type Config struct {
 	// Turn gates the re-entrant conversation-as-state rollout (#5799). Default
 	// off leaves every agent on the legacy tmux loop until an operator opts in.
 	Turn TurnConfig `yaml:"turn,omitempty" json:"turn,omitempty"`
-
 	// RemovedAgents are agent names an operator deliberately deleted. It is a
 	// TOMBSTONE list, and it exists because deletion had no durable record
 	// anywhere: the delete handlers dropped the agent from the in-memory map

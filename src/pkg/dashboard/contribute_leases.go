@@ -577,18 +577,49 @@ func (h *ContributeWSHub) renewLease(identity, taskID string, now time.Time) err
 		return nil
 	}
 	h.leaseMu.Lock()
-	defer h.leaseMu.Unlock()
+	var renewed *taskLease
+	var saveErr error
 	if l := h.leaseForLocked(identity, taskID); l != nil {
 		l.expiresAt = now.Add(leaseTTL)
+		renewed = l
 		// #5681: persist the EXTENDED window. Without this a restart would restore
 		// the window as it stood at assignment, so a task that had been progressing
 		// for longer than leaseTTL — the exact case #4260 fixed in memory — would
 		// come back already expired and could not be resumed.
 		if err := h.saveLeasesLocked(); err != nil {
-			return fmt.Errorf("persisting renewed lease for %s: %w", taskID, err)
+			saveErr = fmt.Errorf("persisting renewed lease for %s: %w", taskID, err)
 		}
 	}
-	return nil
+	h.leaseMu.Unlock()
+	// #8380: the worker claim travels with the lease — renew it too, outside
+	// leaseMu, so a task that outlives the 30m claim TTL stays visibly held.
+	if renewed != nil && renewed.number > 0 {
+		h.renewClaimForLease(identity, renewed.repo, renewed.number)
+	}
+	return saveErr
+}
+
+// revokeLeaseForKey revokes whichever lease the identity holds on the given
+// item key, if any — the takeover path for a relay whose socket is down and
+// therefore has no connection to yank (#8380). Returns whether one was found.
+func (h *ContributeWSHub) revokeLeaseForKey(identity, key string) bool {
+	if identity == "" || key == "" {
+		return false
+	}
+	h.leaseMu.Lock()
+	taskID := ""
+	for _, l := range h.leases {
+		if l != nil && l.identity == identity && leaseClaimKey(l) == key {
+			taskID = l.taskID
+			break
+		}
+	}
+	h.leaseMu.Unlock()
+	if taskID == "" {
+		return false
+	}
+	h.revokeLease(identity, taskID)
+	return true
 }
 
 // revokeLease removes the server-authoritative lease for one task an identity holds,
@@ -605,14 +636,20 @@ func (h *ContributeWSHub) revokeLease(identity, taskID string) {
 	}
 	h.leaseMu.Lock()
 	revoked := false
+	// #8380: remember which items went so their worker claims go with them.
+	var releasedKeys []string
 	if taskID != "" {
-		if _, ok := h.leases[leaseKey(identity, taskID)]; ok {
+		if l, ok := h.leases[leaseKey(identity, taskID)]; ok {
+			if l != nil {
+				releasedKeys = append(releasedKeys, leaseClaimKey(l))
+			}
 			delete(h.leases, leaseKey(identity, taskID))
 			revoked = true
 		}
 	} else {
 		for k, l := range h.leases {
 			if l != nil && l.identity == identity {
+				releasedKeys = append(releasedKeys, leaseClaimKey(l))
 				delete(h.leases, k)
 				revoked = true
 			}
@@ -632,6 +669,18 @@ func (h *ContributeWSHub) revokeLease(identity, taskID string) {
 		}
 	}
 	h.leaseMu.Unlock()
+	for _, key := range releasedKeys {
+		h.releaseClaimForLease(identity, key, "lease revoked")
+	}
+}
+
+// leaseClaimKey is the ledger key for the item a lease holds: the canonical
+// worksource key when recorded (#5681), else the legacy repo#number spelling.
+func leaseClaimKey(l *taskLease) string {
+	if l.key != "" {
+		return l.key
+	}
+	return fmt.Sprintf("%s#%d", l.repo, l.number)
 }
 
 // lookupLease returns the active, unexpired server-issued lease for an identity that
