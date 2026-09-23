@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-23 (v5.16.2)
+
+### Fixed
+
+- Normalize contribute disabled repositories to owner/name across Governor Hub and Management toggles while preserving legacy short/full stored entries on read (#8438)
+
 ## 2026-09-23 (v5.16.1)
 
 ### Fixed
