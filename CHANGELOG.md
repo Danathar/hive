@@ -11,6 +11,18 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-23 (v5.17.1)
+
+### Fixed
+
+- Recognize OMP's boxed browser-login prompt in the agent pane and rebuild its boxed, hard-wrapped OAuth URL before the dashboard copy-login control filters it, so #8420 agents surface the login row and copy a complete sign-in URL.
+
+## 2026-09-23 (v5.17.0)
+
+### Added
+
+- runs: triage incoming issues as fix, spec, or clarify before dispatch; spec admits a run at the spec stage, the decision is recorded on the lease and receipt (#8227 Epic 5)
+
 ## 2026-09-23 (v5.16.2)
 
 ### Fixed

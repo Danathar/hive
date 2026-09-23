@@ -1,1 +1,0 @@
-- runs: triage incoming issues as fix, spec, or clarify before dispatch; spec admits a run at the spec stage, the decision is recorded on the lease and receipt (#8227 Epic 5)
