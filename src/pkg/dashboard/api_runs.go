@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -92,6 +93,7 @@ const defaultAuditScopeDir = "/data/convergence/audit/scope"
 
 type Run struct {
 	Key            string       `json:"key"`
+	LeaseKey       string       `json:"lease_key,omitempty"`
 	Title          string       `json:"title"`
 	Repo           string       `json:"repo"`
 	State          string       `json:"state,omitempty"`
@@ -114,6 +116,7 @@ type Run struct {
 	PlanEpicID      string          `json:"plan_epic_id,omitempty"`
 	Stages          []RunStage      `json:"stages"`
 	ReviewWaves     []RunReviewWave `json:"review_waves,omitempty"`
+	WaveIDs         []string        `json:"wave_ids,omitempty"`
 	Burndown        *RunBurndown    `json:"burndown,omitempty"`
 	TriageVerdict   string          `json:"triage_verdict,omitempty"`
 	TriageRationale string          `json:"triage_rationale,omitempty"`
@@ -173,6 +176,7 @@ type runLeaseSnapshot struct {
 	repo            string
 	number          int
 	key             string
+	leaseKey        string
 	stage           string
 	gen             uint64
 	expiresAt       time.Time
@@ -195,6 +199,7 @@ type runPlanSnapshot struct {
 	state        string
 	reason       string
 	waitingSince time.Time
+	waveIDs      []string
 }
 
 type runHumanReviewHold struct {
@@ -223,6 +228,9 @@ func (s *Server) handleRunsList(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRunGet(w http.ResponseWriter, r *http.Request) {
 	key := strings.TrimSpace(r.PathValue("key"))
+	if unescaped, err := url.PathUnescape(key); err == nil {
+		key = strings.TrimSpace(unescaped)
+	}
 	if key == "" {
 		jsonError(w, "run key required", http.StatusBadRequest)
 		return
@@ -233,7 +241,7 @@ func (s *Server) handleRunGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, run := range runs {
-		if run.Key == key {
+		if run.Key == key || run.LeaseKey == key {
 			if err := s.populateRunBurndown(r, &run); err != nil {
 				jsonError(w, err.Error(), http.StatusServiceUnavailable)
 				return
@@ -416,6 +424,9 @@ func (s *Server) handleRunReset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key := strings.TrimSpace(r.PathValue("key"))
+	if unescaped, err := url.PathUnescape(key); err == nil {
+		key = strings.TrimSpace(unescaped)
+	}
 	if key == "" {
 		jsonError(w, "run key required", http.StatusBadRequest)
 		return
@@ -512,11 +523,13 @@ func (s *Server) activeRuns(includeTimeline bool) ([]Run, error) {
 	active := map[string]bool{}
 	for _, lease := range leases {
 		active[lease.key] = true
-		run := runFromLease(lease, plans[lease.key], holds[lease.key], cfg)
+		active[lease.leaseKey] = true
+		plan := firstRunPlanSnapshot(plans[lease.key], plans[lease.leaseKey])
+		run := runFromLease(lease, plan, firstRunHold(holds[lease.key], holds[lease.leaseKey]), cfg)
 		if run.PlanEpicID != "" {
 			run.ReviewWaves = s.planReviewWaves(run.PlanEpicID)
 		}
-		events := s.LifecycleTimeline().ByIssue(lease.key)
+		events := append(s.LifecycleTimeline().ByIssue(lease.key), s.LifecycleTimeline().ByIssue(lease.leaseKey)...)
 		run.LastReceipt = latestRunReceipt(events)
 		if run.StageStartedAt == "" {
 			run.StageStartedAt = formatRunTime(timelineStageTime(events, lease.stage))
@@ -600,7 +613,9 @@ func (s *Server) activeRunLeaseSnapshots(now time.Time) ([]runLeaseSnapshot, err
 		if l == nil || l.stage == "" || l.expiresAt.IsZero() || now.After(l.expiresAt) {
 			continue
 		}
-		key := l.runKey()
+		stageLeaseKey := leaseWorkKey(l)
+		key := s.canonicalRunKey(l.repo, l.number, runKeyOfLease(stageLeaseKey, l.repo), stageLeaseKey)
+		repo := s.canonicalRunRepo(l.repo, key)
 		info := infos[leaseKey(l.identity, l.taskID)]
 		title := info.title
 		if title == "" {
@@ -610,8 +625,8 @@ func (s *Server) activeRunLeaseSnapshots(now time.Time) ([]runLeaseSnapshot, err
 			title = key
 		}
 		out = append(out, runLeaseSnapshot{
-			identity: l.identity, taskID: l.taskID, repo: l.repo, number: l.number,
-			key: key, stage: l.stage, gen: l.gen, expiresAt: l.expiresAt,
+			identity: l.identity, taskID: l.taskID, repo: repo, number: l.number,
+			key: key, leaseKey: stageLeaseKey, stage: l.stage, gen: l.gen, expiresAt: l.expiresAt,
 			title: title, stageStarted: info.startedAt,
 			claimedBy: l.claimedBy, claimExpiresAt: l.claimExpiresAt, claimPosted: l.claimPosted,
 			triageVerdict: l.triageVerdict, triageRationale: l.triageRationale,
@@ -650,11 +665,12 @@ func runFromLease(lease runLeaseSnapshot, plan runPlanSnapshot, hold runHumanRev
 	}
 	started := formatRunTime(lease.stageStarted)
 	run := Run{
-		Key: lease.key, Title: redactTokens(lease.title), Repo: lease.repo,
+		Key: lease.key, LeaseKey: lease.leaseKey, Title: redactTokens(lease.title), Repo: lease.repo,
 		State: "active", Stage: lease.stage, Gen: lease.gen, StageStartedAt: started,
 		WaitingOn: RunWaitingOnAgent, Assignee: lease.identity,
 		ClaimedBy: lease.claimedBy, ClaimExpiresAt: formatRunTime(lease.claimExpiresAt), ClaimPosted: lease.claimPosted,
 		PlanEpicID:    plan.epicID,
+		WaveIDs:       append([]string(nil), plan.waveIDs...),
 		Stages:        leaseRunStages(lease.stage, lease.gen),
 		TriageVerdict: lease.triageVerdict, TriageRationale: lease.triageRationale,
 	}
@@ -731,6 +747,7 @@ func completedRunFromJourney(j timeline.Journey, includeTimeline bool, plan runP
 		WaitingOn:      RunWaitingOnNone,
 		Assignee:       stage.Agent,
 		PlanEpicID:     plan.epicID,
+		WaveIDs:        append([]string(nil), plan.waveIDs...),
 		Stages:         completedRunStages(gen),
 	}
 	if includeTimeline {
@@ -847,7 +864,7 @@ func (s *Server) runPlanSnapshots() map[string]runPlanSnapshot {
 		if p.IssueRepo == "" || p.IssueNumber == "" {
 			continue
 		}
-		key := p.IssueRepo + "#" + p.IssueNumber
+		key := s.canonicalRunKey(p.IssueRepo, atoiOrZero(p.IssueNumber), "", "")
 		out[key] = runPlanSnapshot{epicID: p.EpicID, state: p.State}
 	}
 	for _, store := range s.deps.BeadStores {
@@ -858,17 +875,91 @@ func (s *Server) runPlanSnapshots() map[string]runPlanSnapshot {
 			if b.Type != beads.TypeEpic || b.Meta(planning.MetaPlanStatus) == "" {
 				continue
 			}
-			repo, number := b.Meta(planning.MetaIssueRepo), b.Meta(planning.MetaIssueNumber)
-			if repo == "" || number == "" {
+			repo, number, runKey := b.Meta(planning.MetaIssueRepo), b.Meta(planning.MetaIssueNumber), b.Meta(planning.MetaRunKey)
+			if repo == "" || (number == "" && runKey == "") {
 				continue
 			}
-			snap := out[repo+"#"+number]
+			key := s.canonicalRunKey(repo, atoiOrZero(number), runKey, "")
+			if number == "" {
+				key = s.qualifyRunRepo(repo) + "!" + runKey
+			}
+			snap := out[key]
 			snap.epicID = firstRunNonEmpty(snap.epicID, b.ID)
+			snap.waveIDs = splitRunWaveIDs(b.Meta(planning.MetaRunWaveIDs))
 			if reason := b.Meta(planning.MetaRunWaitingReason); reason != "" {
 				snap.reason = reason
 			}
 			snap.waitingSince = b.UpdatedAt.Time
-			out[repo+"#"+number] = snap
+			if number != "" {
+				out[s.canonicalRunKey(repo, atoiOrZero(number), "", "")] = snap
+			}
+			if runKey != "" && repo != "" {
+				qualifiedRepo := s.qualifyRunRepo(repo)
+				for _, stage := range orderedLeaseStages {
+					out[qualifiedRepo+"!"+runKey+":"+stage] = snap
+					out[repo+"!"+runKey+":"+stage] = snap
+				}
+				out[qualifiedRepo+"!"+runKey] = snap
+				out[repo+"!"+runKey] = snap
+			}
+		}
+	}
+	return out
+}
+
+func (s *Server) canonicalRunKey(repo string, number int, runKey, fallback string) string {
+	runKey = strings.TrimSpace(runKey)
+	if ref, ok := worksource.ParseKey(runKey); ok && ref.Number > 0 {
+		return worksource.Ref{Repo: s.qualifyRunRepo(ref.Repo), Number: ref.Number}.Key()
+	}
+	if number > 0 {
+		return worksource.Ref{Repo: s.qualifyRunRepo(repo), Number: number}.Key()
+	}
+	if strings.TrimSpace(fallback) != "" {
+		return strings.TrimSpace(fallback)
+	}
+	return runKey
+}
+
+func (s *Server) canonicalRunRepo(repo, key string) string {
+	if ref, ok := worksource.ParseKey(key); ok && ref.Repo != "" {
+		return ref.Repo
+	}
+	return s.qualifyRunRepo(repo)
+}
+
+func (s *Server) qualifyRunRepo(repo string) string {
+	repo = strings.TrimSpace(repo)
+	if repo == "" || strings.Contains(repo, "/") || s == nil || s.deps == nil || s.deps.Config == nil {
+		return repo
+	}
+	return config.QualifyRepo(s.deps.Config.Project.Org, repo)
+}
+
+func atoiOrZero(raw string) int {
+	n, _ := strconv.Atoi(strings.TrimSpace(raw))
+	return n
+}
+
+func firstRunPlanSnapshot(a, b runPlanSnapshot) runPlanSnapshot {
+	if a.epicID != "" || a.state != "" || a.reason != "" || !a.waitingSince.IsZero() || len(a.waveIDs) > 0 {
+		return a
+	}
+	return b
+}
+
+func firstRunHold(a, b runHumanReviewHold) runHumanReviewHold {
+	if !a.UpdatedAt.IsZero() {
+		return a
+	}
+	return b
+}
+
+func splitRunWaveIDs(raw string) []string {
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
 		}
 	}
 	return out

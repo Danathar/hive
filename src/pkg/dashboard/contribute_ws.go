@@ -478,15 +478,16 @@ func wsMessageFromExternal(msg ExternalExecutionMessage) WSMessage {
 }
 
 type WSMessage struct {
-	Type                         string   `json:"type"`
-	Seq                          int      `json:"seq,omitempty"`
-	Nonce                        string   `json:"nonce,omitempty"`
-	ContributorID                string   `json:"contributor_id,omitempty"`
-	TrustTier                    string   `json:"trust_tier,omitempty"`
-	Permissions                  []string `json:"permissions,omitempty"`
-	Reason                       string   `json:"reason,omitempty"`
-	State                        string   `json:"state,omitempty"`
-	ContributeNeedsDecisionLabel *string  `json:"contribute_needs_decision_label,omitempty"`
+	Type                         string                      `json:"type"`
+	Seq                          int                         `json:"seq,omitempty"`
+	Nonce                        string                      `json:"nonce,omitempty"`
+	ContributorID                string                      `json:"contributor_id,omitempty"`
+	TrustTier                    string                      `json:"trust_tier,omitempty"`
+	Permissions                  []string                    `json:"permissions,omitempty"`
+	Reason                       string                      `json:"reason,omitempty"`
+	State                        string                      `json:"state,omitempty"`
+	ContributeNeedsDecisionLabel *string                     `json:"contribute_needs_decision_label,omitempty"`
+	OperatorMessage              *ContributorOperatorMessage `json:"operator_message,omitempty"`
 	// FailureKind is the OPTIONAL, client-declared cause of a task_failed
 	// (#2547): "environment" (the client's runtime could not run the work) or
 	// "task" (the work was attempted and failed on its merits). Absent — which
@@ -616,6 +617,7 @@ type WSMessage struct {
 	// with it. Additive; a relay that ignores it keeps whatever default it ships.
 	MaxMessageBytes int                            `json:"max_message_bytes,omitempty"`
 	Announcement    *config.ContributeAnnouncement `json:"announcement,omitempty"`
+	HelpLinks       []config.ContributeHelpLink    `json:"help_links,omitempty"`
 	Role            string                         `json:"role,omitempty"`
 	Standby         *WSStandby                     `json:"standby,omitempty"`
 	// WorkbenchVersion and Incarnation are optional on auth_response for an
@@ -1499,7 +1501,7 @@ func (h *ContributeWSHub) verifyReportedPRDetail(assignedRepo, prURL, contributo
 // not want title-based closing can turn it off. Entirely best-effort: it never
 // affects the completion outcome, and a finding closed in error comes straight
 // back the next time an agent files it.
-func (h *ContributeWSHub) closeAdvisoryForMergedPR(prTitle string) {
+func (h *ContributeWSHub) closeAdvisoryForMergedPR(prTitle string, prMergedAt time.Time) {
 	if prTitle == "" || h.server == nil || h.server.deps == nil {
 		return
 	}
@@ -1510,9 +1512,9 @@ func (h *ContributeWSHub) closeAdvisoryForMergedPR(prTitle string) {
 	if deps.Config != nil && !deps.Config.Governor.Advisory.PRAutoCloseEnabled() {
 		return
 	}
-	if closed := advisory.ClosePRLinkedAdvisoryBeads(deps.BeadStores, prTitle); len(closed) > 0 {
+	if closed := advisory.ClosePRLinkedAdvisoryBeadsAt(deps.BeadStores, prTitle, prMergedAt); len(closed) > 0 {
 		h.logger.Info("[contribute-ws] closed advisory findings addressed by merged PR",
-			"pr_title", prTitle, "count", len(closed), "titles", strings.Join(closed, "; "))
+			"pr_title", prTitle, "pr_merged_at", prMergedAt, "count", len(closed), "titles", strings.Join(closed, "; "))
 	}
 }
 
@@ -1888,13 +1890,83 @@ func (h *ContributeWSHub) RequeueContributorTask(contributorID, reason string) (
 	if len(targets) == 0 {
 		return 0, nil
 	}
+	return h.yankAndReassign(targets, reason, "yanked by operator", "reassigned by yank")
+}
 
+// PreemptContributorIssue is the claim-takeover YANK (hivecommons/hive#8380): a
+// higher-ranked claimant (a human session or a hub-kicked agent) took over an
+// issue a relay contributor was working, so ONLY the connection holding THAT
+// issue is released and immediately handed different work — the contributor's
+// other sessions are untouched. holderID is the session-scoped identity the
+// claim was recorded under (identityOf). Returns the same pair as
+// RequeueContributorTask.
+func (h *ContributeWSHub) PreemptContributorIssue(holderID, repo string, number int, reason string) (released int, assigned *WSMessage) {
+	if holderID == "" || number <= 0 {
+		return 0, nil
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "preempted: claim taken over"
+	}
+	var targets []releaseTarget
+	h.mu.RLock()
+	for _, c := range h.connections {
+		c.mu.Lock()
+		match := identityOf(c) == holderID && c.currentTask != nil &&
+			c.currentTask.Number == number && sameRepoSpelling(c.currentTask.Repo, repo)
+		if match {
+			released := *c.currentTask
+			c.currentTask = nil
+			c.currentPrompt = ""
+			c.currentLabels = nil
+			c.tokenMintedAt = time.Time{}
+			c.pendingToken = ""
+			c.credentialDelivered = false
+			c.currentTaskGen = h.nextTaskGen()
+			c.lastLeaseRenew = time.Time{}
+			targets = append(targets, releaseTarget{conn: c, task: released})
+		}
+		c.mu.Unlock()
+	}
+	h.mu.RUnlock()
+	if len(targets) == 0 {
+		return 0, nil
+	}
+	return h.yankAndReassign(targets, reason, "preempted by claim takeover", "reassigned after preemption")
+}
+
+// sameRepoSpelling compares owner/repo forms case-insensitively and tolerates a
+// bare repo name on either side (the relay task carries repoFull, ledger
+// callers may pass either spelling).
+func sameRepoSpelling(a, b string) bool {
+	a, b = strings.ToLower(strings.TrimSpace(a)), strings.ToLower(strings.TrimSpace(b))
+	if a == b {
+		return true
+	}
+	tail := func(s string) string {
+		if i := strings.LastIndex(s, "/"); i >= 0 {
+			return s[i+1:]
+		}
+		return s
+	}
+	return tail(a) == tail(b) && (!strings.Contains(a, "/") || !strings.Contains(b, "/"))
+}
+
+// yankAndReassign is the shared tail of RequeueContributorTask and
+// PreemptContributorIssue: book the failure cooldown + push task_revoke for
+// every released session, self-exclude the released issue from that same
+// clanker, and hand it its next admissible item.
+func (h *ContributeWSHub) yankAndReassign(targets []releaseTarget, reason, revokeDetail, activity string) (released int, assigned *WSMessage) {
 	// Book the short cooldown + push task_revoke for every released session (the original
 	// requeue behaviour). The self-exclusion + reassignment below is the yank addition:
 	// the clanker is immediately handed different work rather than left idle.
-	released = h.bookAndRevokeReleased(targets, reason, "yanked by operator")
+	released = h.bookAndRevokeReleased(targets, reason, revokeDetail)
 
 	for _, tgt := range targets {
+		contributorID := ""
+		if tgt.conn.profile != nil {
+			contributorID = tgt.conn.profile.ContributorID
+		}
 		// Briefly self-exclude the just-yanked issue from THIS clanker so its immediate
 		// reassignment picks genuinely different work. Scoped to (contributor, issue) —
 		// other contributors are unaffected. Synthetic pr-review tasks (Number == 0) do
@@ -1943,8 +2015,8 @@ func (h *ContributeWSHub) RequeueContributorTask(contributorID, reason string) (
 			yankKey = worksource.Ref{Repo: msg.Repo, Number: msg.Number}.Key()
 		}
 		taskDesc := assignDesc(msg.Kind, yankKey, msg.Title, msg.TaskID)
-		h.addActivity(username, "reassigned by yank", tgt.conn.role, tgt.conn.cliBackend, tgt.conn.model, tgt.conn.reasoningEffort, taskDesc)
-		h.logger.Info("[contribute-ws] clanker reassigned after yank",
+		h.addActivity(username, activity, tgt.conn.role, tgt.conn.cliBackend, tgt.conn.model, tgt.conn.reasoningEffort, taskDesc)
+		h.logger.Info("[contribute-ws] clanker "+activity,
 			"username", username, "task", msg.TaskID, "repo", msg.Repo, "number", msg.Number)
 		if !h.requireExplicitAccept() {
 			h.deliverTaskCredential(tgt.conn, "yank_reassign")
@@ -2731,6 +2803,7 @@ func (s *wsSession) handleAuthResponse(msg WSMessage) (stop bool) {
 		MaxMessageBytes:              wsMaxMessageSize,
 		Announcement:                 announcement,
 		ContributeNeedsDecisionLabel: &needsDecisionLabel,
+		HelpLinks:                    h.server.contributeHelpLinks(),
 	}); err != nil {
 		h.logger.Warn("[contribute-ws] failed to send auth_ok", "username", profile.GitHubUsername, "error", err)
 		return true
@@ -2740,6 +2813,8 @@ func (s *wsSession) handleAuthResponse(msg WSMessage) (stop bool) {
 			s.contributor.startExternalPeer(context.Background(), h, strings.TrimSpace(msg.Incarnation), strings.TrimSpace(msg.WorkbenchVersion))
 		}
 	}
+
+	s.deliverPendingOperatorMessages()
 
 	h.logger.Info("[contribute-ws] authenticated",
 		"id", s.connID,
@@ -3751,6 +3826,7 @@ func (s *wsSession) handleTaskComplete(msg WSMessage) {
 		}
 		hasTask := s.contributor.currentTask != nil && s.contributor.currentTask.TaskID == msg.TaskID
 		completedTask := s.contributor.currentTask
+		completedLabels := append([]string(nil), s.contributor.currentLabels...)
 		// Captured before the clear below so the run log can record the
 		// task's wall-clock duration. Zero when the task was adopted
 		// without a fresh assignment; the record then omits duration.
@@ -3805,6 +3881,7 @@ func (s *wsSession) handleTaskComplete(msg WSMessage) {
 			// later task_progress for this task cannot resurrect ownership and be
 			// re-minted a credential.
 			if completedTask != nil {
+				h.completeWavefrontTask(completedTask, completedLabels, taskAssignedAt)
 				if !h.completeImplementStage(identityOf(s.contributor), completedTask.TaskID, time.Now()) {
 					h.revokeLease(identityOf(s.contributor), completedTask.TaskID)
 				}
@@ -3866,7 +3943,7 @@ func (s *wsSession) handleTaskComplete(msg WSMessage) {
 								Kind:         standbypkg.OutcomeMerged,
 							})
 						}
-						h.closeAdvisoryForMergedPR(prDetail.Title)
+						h.closeAdvisoryForMergedPR(prDetail.Title, prDetail.MergedAt)
 					}
 				}
 			}
@@ -4470,6 +4547,12 @@ func (h *ContributeWSHub) cleanupLoop() {
 			// otherwise keep its issue out of the assignment pool until the process
 			// ended.
 			h.pruneExpiredLeases(time.Now())
+
+			// #8380: lapse worker claims on the same cadence so their GitHub
+			// labels come off and the issue returns to the offer pool.
+			if n := h.claimsLedger().Expire(); n > 0 {
+				h.logger.Info("[claims] expired claims released", "count", n)
+			}
 
 			// Deregister under the lock; CLOSE outside it.
 			//

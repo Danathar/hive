@@ -3,6 +3,8 @@ package dashboard
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -515,6 +517,13 @@ func (h *ContributeWSHub) selectTaskPass(c *ContributorConnection, skippedUnmint
 	// hold for exactly as long as it can be resumed. (#5681 applied this to
 	// RESTORED leases during a post-restart grace; it is now the rule for all.)
 	for key := range h.leasedIssueKeys(identityOf(c), time.Now()) {
+		activeIssues[key] = true
+	}
+	// #8380: an item some OTHER holder has a live worker claim on — a human
+	// session, a hub agent, another contributor, or an external author — is
+	// not offerable either. The claim is what lets a person say "mine" before
+	// any PR exists; the relay must honour it exactly like a lease.
+	for key := range h.claimedIssueKeys(identityOf(c)) {
 		activeIssues[key] = true
 	}
 
@@ -1135,6 +1144,13 @@ func (h *ContributeWSHub) selectTaskPass(c *ContributorConnection, skippedUnmint
 	// gate.
 	h.recordAssignment(identityOf(c), assignedAt)
 
+	// #8380: mirror the lease into the worker-claim ledger so humans, hub
+	// agents and other hives can see this contributor holds the item. Issues
+	// only — synthetic pr-review and external items key a claim on nothing.
+	if chosen.number > 0 {
+		h.claimIssueForContributor(c, chosen.repoFull, chosen.number)
+	}
+
 	// The claim is committed and visible to every other selection; nothing below
 	// touches the shared selection state, so the fleet-wide lock is released
 	// BEFORE the GitHub round-trips (#7775).
@@ -1359,6 +1375,21 @@ func runStageWorktreePrompt(repoFull, runKey, stage string, gen uint64) string {
 	}
 	return fmt.Sprintf(" This is run stage %q generation %d for %s. After the shared checkout exists, create and use a per-stage worktree at '$HIVE_WORKSPACE_DIR/runs/%s/%s-%d' from the task's target base branch with 'mkdir -p \"$HIVE_WORKSPACE_DIR/runs/%s\"' and 'git -C \"$HIVE_WORKSPACE_DIR/%s\" worktree add --detach \"$HIVE_WORKSPACE_DIR/runs/%s/%s-%d\" upstream/<base-branch>'; do all edits and git status checks in that worktree, not in the shared checkout. ",
 		stage, gen, runKey, sanitizeRunPromptPath(runKey), sanitizeRunPromptPath(stage), gen, sanitizeRunPromptPath(runKey), repoFull, sanitizeRunPromptPath(runKey), sanitizeRunPromptPath(stage), gen)
+}
+
+func runStageWorktreePath(identity, runKey, stage string, gen uint64) string {
+	if identity == "" || runKey == "" || stage == "" || gen == 0 {
+		return ""
+	}
+	return filepath.Join(agentWorkspaceRoot, identity, "runs", sanitizeRunPromptPath(runKey), fmt.Sprintf("%s-%d", sanitizeRunPromptPath(stage), gen))
+}
+
+func removeRunStageWorktree(identity, runKey, stage string, gen uint64) error {
+	path := runStageWorktreePath(identity, runKey, stage, gen)
+	if path == "" {
+		return nil
+	}
+	return os.RemoveAll(path)
 }
 
 func sanitizeRunPromptPath(s string) string {

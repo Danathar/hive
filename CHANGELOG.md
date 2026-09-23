@@ -11,6 +11,51 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-23 (v5.27.0)
+
+### Added
+
+- Operators can now send a short one-to-one message to a contributor from Operations; it appears in that contributor's relay terminal and signed-in `/contribute` pages until acknowledged ([#8461](https://github.com/hivecommons/hive/issues/8461)).
+
+## 2026-09-23 (v5.26.0)
+
+### Added
+
+- Issue claims: a hub-side worker-claim ledger records who is on an issue right now — a human session, a hub-kicked agent, a relay contributor or an external author — ranked human > agent > contributor > external. `hivectl claim owner/repo#N` (and `POST /api/claims/{owner}/{repo}/{number}`) takes an issue over from an agent or a relay contributor and the displaced holder is told to stop: a relay session is yanked off that one task and handed different work immediately, others see a `🔁` comment with a `<!-- hive:preempt -->` marker and a `preempted:<login>` label. Same-rank claims warn unless `--force` (`hivectl takeover`); lower ranks are refused; `/claim` again renews. The relay auto-claims on lease and releases on revoke, the scheduler auto-claims every issue a kick names and withholds claimed issues, and `claims:` in `hive.yaml` sets per-kind TTLs or turns the mechanism off (hivecommons/hive#8443).
+
+## 2026-09-23 (v5.25.0)
+
+### Added
+
+- Added a scheduled Wavefront smoke canary for a real Crustify graph, with latest/pinned lanes, missing-secret skip notices, and deduplicated failure issues for #8466.
+- Review effectiveness measurement: a review-outcome ledger records every open PR the hive sees and whether it later merged or closed, split by whether the hive reviewed it first, so the review gate's queue-reduction effect can be compared against an unreviewed control. Exposed on the Review gate card ("Load 30-day outcomes"), at `GET /api/review/outcomes?days=N`, and as `hive_review_outcome_prs` / `hive_review_outcome_median_hours_to_merge` metrics.
+
+## 2026-09-23 (v5.24.0)
+
+### Added
+
+- Add operator-managed contribute Help & community links for Onboarding, Operations, and relay terminal output (#8462)
+
+## 2026-09-23 (v5.23.0)
+
+### Added
+
+- Drive Wavefront node completion from implement-stage `task_complete`, clean up run worktrees, and mark stale restored Wavefront leases unknown after restart.
+- Added scheduled Flue and OMP external-workflow smoke canaries with latest/pinned lanes, build-tagged Hive binary checks, integration smoke coverage, and deduplicated failure issues for #8466.
+
+## 2026-09-23 (v5.22.0)
+
+### Added
+
+- Wire Spektacular multi-repo run plans to Wavefront fan-out when `governor.work_source.wavefront.enabled` is on, and surface the created wave ids on run details.
+- #8488 Contribute Operations now ranks the most effective model/CLI combinations with sample-size guards.
+- Activate convergence audit campaigns from the owner-only runs API, running inspection even when publication remains disabled.
+- Dispatch report-only external workflow assignments to their configured engine and attach authenticated OMP workbench peers.
+
+### Fixed
+
+- Comment and label contribute issues when agents verify they were already resolved, with a longer already-done hold to prevent repeat offers (#8477)
+
 ## 2026-09-23 (v5.21.0)
 
 ### Added

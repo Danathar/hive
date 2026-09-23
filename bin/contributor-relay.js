@@ -1276,6 +1276,8 @@ function makeHub(url, token) {
     serverCapabilities: [],
     contributeNeedsDecisionLabel: DEFAULT_NEEDS_DECISION_LABEL,
     announcementSeen: new Set(),
+    helpLinksPrinted: false,
+    operatorMessageSeen: new Set(),
     // #7732: true from the moment a `ready` is actually transmitted to this hub
     // until the hub answers it (task_assign or task_unavailable), or the
     // conversation it belonged to ends (socket close, re-auth). While it is
@@ -2129,6 +2131,31 @@ function detectAgentCLIVersion() {
 // nudges and banners), strips control characters, collapses whitespace, and
 // truncates. The hub renders declarations into an operator row, so a multi-line
 // or unbounded value would be its problem rather than ours.
+function sanitizeRelayTerminalText(raw) {
+  return String(raw || '').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x1b]/g, '').trim();
+}
+
+function formatOperatorMessageLine(hub, msg) {
+  const text = sanitizeRelayTerminalText(msg && msg.text);
+  if (!msg || !msg.id || !text) return '';
+  const label = hub && (hub.sourceURL || hub.url) ? hubPublicURL(hub.sourceURL || hub.url) : 'hub';
+  return `${label}: Message from the hive operator: ${text}`;
+}
+
+function printOperatorMessageOnce(hub, msg) {
+  if (!hub || !msg || !msg.id) return false;
+  if (!hub.operatorMessageSeen) hub.operatorMessageSeen = new Set();
+  if (hub.operatorMessageSeen.has(msg.id)) return false;
+  const line = formatOperatorMessageLine(hub, msg);
+  if (!line) return false;
+  hub.operatorMessageSeen.add(msg.id);
+  const decorated = process.stdout && process.stdout.isTTY && !process.env.NO_COLOR
+    ? `[7m${line}[0m`
+    : line;
+  console.log(decorated);
+  return true;
+}
+
 function sanitizeDeclaredValue(raw) {
   if (typeof raw !== 'string') return '';
   const line = raw.split('\n').map(s => s.trim()).find(Boolean) || '';
@@ -2140,7 +2167,6 @@ function sanitizeDeclaredValue(raw) {
     ? points.slice(0, CLI_VERSION_MAX_LEN).join('').trim()
     : clean;
 }
-
 
 // sanitizeHubText neutralizes hub-supplied text before it reaches this
 // terminal. Frames arrive from every configured hub — including third-party
@@ -2179,9 +2205,26 @@ function printHubAnnouncementOnce(hub, ann) {
   if (!line) return false;
   hub.announcementSeen.add(ann.id);
   const decorated = process.stdout && process.stdout.isTTY && !process.env.NO_COLOR
-    ? `[7m${line}[0m`
+    ? `\x1b[7m${line}\x1b[0m`
     : line;
   console.log(decorated);
+  return true;
+}
+
+function formatHelpLinkLine(hub, link) {
+  const label = link && typeof link.label === 'string' ? link.label.trim() : '';
+  const url = link && typeof link.url === 'string' ? link.url.trim() : '';
+  if (!label || !url) return '';
+  const hubLabel = hub && (hub.sourceURL || hub.url) ? hubPublicURL(hub.sourceURL || hub.url) : 'hub';
+  return `${hubLabel}: Need help? ${label}: ${url}`;
+}
+
+function printHelpLinksOnce(hub, links) {
+  if (!hub || hub.helpLinksPrinted || !Array.isArray(links) || !links.length) return false;
+  const lines = links.map((l) => formatHelpLinkLine(hub, l)).filter(Boolean);
+  if (!lines.length) return false;
+  hub.helpLinksPrinted = true;
+  lines.forEach((line) => console.log(line));
   return true;
 }
 
@@ -7486,6 +7529,8 @@ function handleMessage(data, hub) {
       // difference that is, by the additive-versioning rule, usually harmless.
       warnOnProtocolDrift(hub, msg.protocol_version);
       printHubAnnouncementOnce(hub, msg.announcement);
+      printHelpLinksOnce(hub, msg.help_links);
+      printOperatorMessageOnce(hub, msg.operator_message);
       hub.authenticated = true;
       hub.authFailed = false;
       hub.connectionId = msg.connection_id || '';
@@ -7872,6 +7917,7 @@ function handleMessage(data, hub) {
 
     case 'notice':
       if (msg.announcement && printHubAnnouncementOnce(hub, msg.announcement)) break;
+      if (msg.operator_message && printOperatorMessageOnce(hub, msg.operator_message)) break;
       console.log(sanitizeHubText(msg.message) || sanitizeHubText(msg.reason) || 'Notice from hub');
       break;
 
@@ -8383,6 +8429,11 @@ if (process.env.HIVE_RELAY_TEST_MODE === '1') {
     formatHubAnnouncementLine,
     printHubAnnouncementOnce,
     sanitizeHubText,
+    formatHelpLinkLine,
+    printHelpLinksOnce,
+    sanitizeRelayTerminalText,
+    formatOperatorMessageLine,
+    printOperatorMessageOnce,
     describeWsClose,
     wsCloseCorrelation,
     // Headless (non-interactive) mode surface (kubestellar/hive#2538).

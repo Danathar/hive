@@ -1455,6 +1455,7 @@ func (b *boot) wireBootClosures() {
 			// case the Approvals panel renders as "not enabled".
 			ApprovalDesk:  b.approvalDesk,
 			ApprovalInbox: b.approvalInbox,
+			IssueClaims:   b.issueClaims,
 			Logger:        b.logger,
 			Ctx:           b.ctx,
 			RefreshFunc:   b.refreshDashboard,
@@ -1510,6 +1511,68 @@ func (b *boot) wireBootClosures() {
 					Unknown:   bd.Unknown,
 					Scope:     bd.Scope,
 				}, nil
+			},
+			RunFanout: func(ctx context.Context, runKey string, repos []string) ([]string, error) {
+				w := b.cfg.Governor.WorkSource.Wavefront
+				if !w.Enabled || b.dashSrv == nil {
+					return nil, nil
+				}
+				waveIDs := make([]string, 0, len(repos))
+				for i, repo := range repos {
+					wave := i + 1
+					status := &worksource.SpektacularRunStatus{
+						RunKey: runKey,
+						Waves: []worksource.RunWaveStatus{{
+							Wave: wave,
+							Repositories: []worksource.RunRepositoryStatus{{
+								Repo: repo,
+							}},
+						}},
+					}
+					result, err := (worksource.RunFanoutRunner{
+						Status: status,
+						Leases: b.dashSrv,
+					}).FanOutWave(ctx, runKey, wave)
+					if err != nil {
+						return nil, err
+					}
+					if len(result.Created) > 0 {
+						waveIDs = append(waveIDs, fmt.Sprintf("wave-%d:%s", wave, repo))
+					}
+				}
+				return waveIDs, nil
+			},
+			WavefrontComplete: func(ctx context.Context, key, externalID, revision string, startedAt time.Time) error {
+				w := b.cfg.Governor.WorkSource.Wavefront
+				if !w.Enabled {
+					return nil
+				}
+				ref, ok := worksource.ParseKey(key)
+				if !ok || ref.Repo != w.Repo {
+					return nil
+				}
+				src, err := wavefront.New(wavefront.Options{
+					Repo: w.Repo, Path: w.Path, URL: w.URL, ReceiptsDir: w.ReceiptsDir,
+				})
+				if err != nil {
+					return err
+				}
+				_, err = src.Complete(ctx, externalID, revision, nil, startedAt)
+				return err
+			},
+			WavefrontUnknown: func(ctx context.Context, externalID, reason string, startedAt time.Time) error {
+				w := b.cfg.Governor.WorkSource.Wavefront
+				if !w.Enabled {
+					return nil
+				}
+				src, err := wavefront.New(wavefront.Options{
+					Repo: w.Repo, Path: w.Path, URL: w.URL, ReceiptsDir: w.ReceiptsDir,
+				})
+				if err != nil {
+					return err
+				}
+				_, err = src.MarkUnknown(ctx, externalID, reason, startedAt)
+				return err
 			},
 			// #8361/#6899: external-execution linked-engine status plus
 			// lazy dispatch/peer attachment. Adapters register only under
@@ -2194,6 +2257,9 @@ func (b *boot) bootAgentsWith(deps bootAgentsDeps) {
 	// auto-merge sweep is started below, because the sweep is the one producer
 	// wired in this slice. Also handed to the dashboard for the Approvals panel.
 	b.approvalDesk, b.approvalInbox = buildApprovalDesk(b.cfg, b.logger)
+	// Issue claims (hivecommons/hive#8380): who is working what, ranked so a
+	// human or hub agent can take an issue over from a relay contributor.
+	b.issueClaims = buildClaimsLedger(b.cfg, b.logger)
 	// Create the agent-facing request queues REGARDLESS of App state. The
 	// watchers below stay gated (no App, no bot to author as), but the queues
 	// must exist either way or the "requests simply accumulate" behavior above
@@ -3414,7 +3480,10 @@ func (b *boot) bootSupervision() {
 	// In-flight ledger + session PR link (Linear GitHub-parity follow-ups):
 	// the scheduler withholds work a Linear session is already working, and
 	// the pr-request watcher narrates opened PRs into the session.
-	b.sched.SetInflightLookup(b.dashSrv.LinearSessionHolder)
+	// #8380: the worker-claim ledger is a second in-flight source — an issue a
+	// human, contributor or another agent holds is withheld from kicks too.
+	b.sched.SetInflightLookup(composeInflight(b.dashSrv.LinearSessionHolder,
+		claimsInflightLookup(b.issueClaims, b.cfg.Project.Org)))
 	if b.ghClient != nil {
 		b.ghClient.SetPROpenedHook(func(agentName, repo string, number int, url string) {
 			b.dashSrv.LinearAgentPROpened(agentName, repo, number, url)
@@ -3452,6 +3521,8 @@ func (b *boot) bootDashboardAPI() { b.bootDashboardAPIWith(defaultBootDashboardA
 func (b *boot) bootDashboardAPIWith(deps bootDashboardAPIDeps) {
 	deps.registerAPI(b.dashSrv, b.dashboardDependencies())
 	wireSpektacularRunner(b.cfg, b.dashSrv, b.logger)
+	// #8380: chain GitHub comments/labels behind the relay yank on takeover.
+	b.dashSrv.InstallClaimHooks(githubClaimHooks(b.ctx, b.cfg, func() *github.Client { return b.ghClient }, b.logger))
 	// Forge App tab inventory: the resolved active key path and the per-app-id
 	// PVC keys live here in cmd/hive, so they are injected as a provider (the
 	// SetGitHubAppRecheckFn pattern). Fingerprints and paths only — the
@@ -6532,6 +6603,7 @@ func runEvalCycle(
 
 	intentVerdicts := writeIntentVerdicts(ctx, cfg, ghClient, actionable, beadStores, logger)
 	refreshReviewVerdicts(cfg, logger)
+	recordReviewOutcomes(ctx, cfg, ghClient, actionable, logger)
 	requiredCheckSet, _ := cfg.AutoMerge.RequiredCheckSet()
 
 	// Hold guard (#5589): snapshot hold-gated PR heads, and when a hold lifts
@@ -6851,6 +6923,9 @@ func runEvalCycle(
 				// Record issue-scoped kicks into the lifecycle timeline. Cheap,
 				// guarded, and nil-safe (Record no-ops on a nil dashboard/store).
 				recordKick(ctx, dashSrv, msg.Agent, msg.IssueRefs...)
+				// #8380: the kicked agent now holds these issues; record the
+				// claims so contributors and other hives back off.
+				recordAgentKickClaims(dashSrv, cfg.Project.Org, msg.Agent, msg.IssueRefs, logger)
 
 				// Log token state at time of kick for cost attribution
 				if tokenCollector != nil {
@@ -8688,6 +8763,106 @@ func refreshReviewVerdicts(cfg *config.Config, logger *slog.Logger) {
 		return
 	}
 	logger.Info("review verdict artifact refreshed", "aggregates", len(artifact.Items))
+}
+
+// reviewOutcomeResolveCap bounds how many vanished PRs one eval cycle asks
+// GitHub about. A hive pointed at a busy org can see dozens of PRs merge
+// between cycles; the rest are resolved next cycle, and an unresolved PR
+// reads as still open, never as merged.
+const reviewOutcomeResolveCap = 40
+
+// prStateGetter is the slice of the GitHub client the outcome ledger needs.
+type prStateGetter interface {
+	GetPRState(ctx context.Context, repo string, number int) (github.PRState, error)
+}
+
+// recordReviewOutcomes folds this cycle's open-PR enumeration into the
+// review-outcome ledger (pkg/review/outcomes.go): every open PR is upserted,
+// review evidence from the verdict artifact and the posted-review ledger is
+// attached, and PRs that left the list are resolved to merged/closed with one
+// GET each. It is what lets the dashboard say whether reviewed PRs merge
+// faster than unreviewed ones on THIS hive, rather than counting verdicts.
+func recordReviewOutcomes(ctx context.Context, cfg *config.Config, gh prStateGetter, actionable *github.ActionableResult, logger *slog.Logger) {
+	if cfg == nil || actionable == nil {
+		return
+	}
+	recordReviewOutcomesAt(ctx, cfg, gh, actionable, "", time.Now().UTC(), logger)
+}
+
+func recordReviewOutcomesAt(ctx context.Context, cfg *config.Config, gh prStateGetter, actionable *github.ActionableResult, path string, now time.Time, logger *slog.Logger) {
+	ledger, err := review.LoadOutcomeLedger(path)
+	if err != nil {
+		logger.Warn("review outcomes: ledger unreadable, starting fresh", "error", err)
+	}
+	aiAuthor := cfg.EffectiveAIAuthor()
+	open := make([]review.OpenPR, 0, len(actionable.PRs.Items))
+	for _, pr := range actionable.PRs.Items {
+		full := config.QualifyRepo(cfg.Project.Org, pr.Repo)
+		open = append(open, review.OpenPR{
+			Repo:          full,
+			Number:        pr.Number,
+			Author:        pr.Author,
+			AgentAuthored: pr.HiveAttributed || pr.AppAuthored || (aiAuthor != "" && strings.EqualFold(pr.Author, aiAuthor)),
+			CreatedAt:     pr.CreatedAt,
+		})
+	}
+
+	// Review evidence: the verdict artifact knows the verdict; the links
+	// ledger knows a review was posted even when its verdict could not bind
+	// (queue-lane reviews of undispatched PRs). Earliest time wins.
+	signals := map[string]review.ReviewSignal{}
+	if art, err := review.LoadArtifact(""); err == nil {
+		for _, it := range art.Items {
+			key := it.Repo + "#" + strconv.Itoa(it.Number)
+			prev, ok := signals[key]
+			if !ok || (!it.RecordedAt.IsZero() && it.RecordedAt.Before(prev.At)) {
+				signals[key] = review.ReviewSignal{At: it.RecordedAt, Verdict: it.Verdict}
+			} else if ok && prev.Verdict == "" {
+				prev.Verdict = it.Verdict
+				signals[key] = prev
+			}
+		}
+	}
+	if links, err := github.LoadReviewLinks(""); err == nil {
+		for key, link := range links {
+			at := link.At
+			if at.IsZero() {
+				continue
+			}
+			prev, ok := signals[key]
+			if !ok {
+				signals[key] = review.ReviewSignal{At: at}
+			} else if at.Before(prev.At) {
+				prev.At = at
+				signals[key] = prev
+			}
+		}
+	}
+
+	missing := ledger.Observe(now, open, signals)
+	resolved := 0
+	if gh != nil {
+		for i, m := range missing {
+			if i >= reviewOutcomeResolveCap {
+				break
+			}
+			st, err := gh.GetPRState(ctx, m.Repo, m.Number)
+			if err != nil {
+				logger.Debug("review outcomes: could not resolve vanished PR", "repo", m.Repo, "number", m.Number, "error", err)
+				continue
+			}
+			ledger.Resolve(m.Repo, m.Number, st.State, st.MergedAt, st.ClosedAt)
+			resolved++
+		}
+	}
+	ledger.Snapshot(now)
+	if err := ledger.Save(path, now); err != nil {
+		logger.Warn("review outcomes: save failed", "error", err)
+		return
+	}
+	if len(missing) > 0 {
+		logger.Info("review outcomes recorded", "open", len(open), "left_queue", len(missing), "resolved", resolved)
+	}
 }
 
 // reviewFixAuditor is the slice of the dashboard the withheld-fix audit
