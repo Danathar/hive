@@ -11,6 +11,18 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-22 (v5.11.0)
+
+### Added
+
+- Add the stage_completed hook transition and vetted kick action for run-stage handoffs.
+- Add a read-only runs API that projects active staged runs from leases, plans, and lifecycle timeline data.
+
+### Fixed
+
+- A contributor running against a hosted hive now installs its `agent.md` knowledge export instead of silently starting without hive knowledge ([#8294](https://github.com/hivecommons/hive/issues/8294)). `/api/knowledge/export` was missing from the hub's auth-proxy allowlist, so the container's registration-token fetch was turned into a 302 to the login page before the spoke's own token check (#2438) could run; the path is now waved through to the spoke, which still answers 401 to anyone without a session, the shared token or a non-revoked registration token. When the fetch does fail, `contributor-agent.sh` now says why on one line - the URL, the HTTP status (or curl exit code) and the reason, including an explicit "HIVE_HUB points at the hub, not a hosted spoke" hint when the response is the hub's HTML landing page - and the 10-minute refresh loop logs every failure and the recovery instead of swallowing both. (#8294)
+- Dashboard Features → Review gate: perspective focus textareas and the new-perspective input now use the shared themed input recipe (they rendered white-on-dark); the Fixer agent placeholder reads `scanner (default)` instead of `fixer` (no such agent — the code default is scanner) and the tooltip says it is the agent ID.
+
 ## 2026-09-22 (v5.10.0)
 
 ### Added
