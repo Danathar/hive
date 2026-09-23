@@ -11,6 +11,17 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-23 (v5.18.0)
+
+### Added
+
+- Add operator-managed contribute announcements for dashboard banners, onboarding highlights, SSE/status payloads, and relay terminal notices (#8455)
+- Add an integration-tagged run-level acceptance test for live Hive runs and document its guarded #8460 gaps.
+
+### Fixed
+
+- Operations fleet cards now show old contributor relays that predate knowledge reporting as a neutral `knowledge: not reported — relay too old` badge instead of an orange unknown warning ([#8467](https://github.com/hivecommons/hive/issues/8467)).
+
 ## 2026-09-23 (v5.17.1)
 
 ### Fixed
