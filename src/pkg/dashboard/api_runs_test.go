@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -284,6 +285,92 @@ func TestRunDetailIncludesBurndownWhenSourceMatches(t *testing.T) {
 	}
 	if run.Key != key || run.LeaseKey != leaseKey || run.Repo != "myorg/repo1" {
 		t.Fatalf("run keys = key %q lease %q repo %q", run.Key, run.LeaseKey, run.Repo)
+	}
+}
+
+func TestWavefrontQueueItemHasRunBurndownDetail(t *testing.T) {
+	s, deps := runsTestServer(t)
+	const (
+		repo = "clubanderson/hive-runs-e2e"
+		key  = "clubanderson/hive-runs-e2e!crustify-fixture:parse-ast"
+	)
+	s.status = &StatusPayload{Repos: []FrontendRepo{{
+		Name: "hive-runs-e2e",
+		Full: repo,
+		ActionableIssues: []any{map[string]any{
+			"source_type": "run",
+			"external_id": "crustify-fixture:parse-ast",
+			"title":       "implement: Port the AST parser to Rust",
+			"labels":      []string{"hive-run", "stage/implement", "wavefront", "graph-rev/rev-7"},
+			"state":       "open",
+		}},
+	}}}
+	deps.RunBurndown = func(_ context.Context, got string) (*RunBurndown, error) {
+		if got != key {
+			t.Fatalf("burndown key = %q, want %q", got, key)
+		}
+		return &RunBurndown{Source: "wavefront", Satisfied: 2, Remaining: 22, Unknown: 0, Scope: 24}, nil
+	}
+
+	queueRec := doGet(s, "/api/contribute/queue")
+	if queueRec.Code != http.StatusOK {
+		t.Fatalf("GET queue = %d body=%s", queueRec.Code, queueRec.Body.String())
+	}
+	var queue struct {
+		Queue []ReadyQueueItem `json:"queue"`
+	}
+	if err := json.Unmarshal(queueRec.Body.Bytes(), &queue); err != nil {
+		t.Fatalf("decode queue: %v", err)
+	}
+	if len(queue.Queue) != 1 || queue.Queue[0].Key != key || queue.Queue[0].SourceType != "run" ||
+		!contains(queue.Queue[0].Labels, "wavefront") {
+		t.Fatalf("queue = %+v", queue.Queue)
+	}
+
+	detailRec := doGet(s, "/api/runs/"+url.PathEscape(key))
+	if detailRec.Code != http.StatusOK {
+		t.Fatalf("GET run detail = %d body=%s", detailRec.Code, detailRec.Body.String())
+	}
+	var run Run
+	if err := json.Unmarshal(detailRec.Body.Bytes(), &run); err != nil {
+		t.Fatalf("decode run: %v", err)
+	}
+	if run.Key != key || run.Repo != repo || run.Stage != StageImplement || run.State != "queued" {
+		t.Fatalf("run projection = %+v", run)
+	}
+	if run.Burndown == nil || run.Burndown.Source != "wavefront" || run.Burndown.Scope != 24 ||
+		run.Burndown.Satisfied != 2 || run.Burndown.Remaining != 22 {
+		t.Fatalf("burndown = %+v", run.Burndown)
+	}
+}
+
+func TestQueuedRunDetailLookupIsUnboundedAndSkipsHeld(t *testing.T) {
+	s, deps := runsTestServer(t)
+	const repo = "clubanderson/hive-runs-e2e"
+	items := make([]any, 0, readyQueueDefaultLimit+1)
+	for i := 0; i < readyQueueDefaultLimit+1; i++ {
+		items = append(items, map[string]any{
+			"source_type": "run",
+			"external_id": "crustify-fixture:node-" + strconv.Itoa(i),
+			"title":       "implement: node",
+			"labels":      []string{"hive-run", "stage/implement", "wavefront"},
+			"state":       "open",
+		})
+	}
+	s.status = &StatusPayload{Repos: []FrontendRepo{{
+		Name:             "hive-runs-e2e",
+		Full:             repo,
+		ActionableIssues: items,
+	}}}
+	key := repo + "!crustify-fixture:node-" + strconv.Itoa(readyQueueDefaultLimit)
+	deps.RunBurndown = func(context.Context, string) (*RunBurndown, error) { return nil, nil }
+	if rec := doGet(s, "/api/runs/"+url.PathEscape(key)); rec.Code != http.StatusOK {
+		t.Fatalf("detail for item beyond display limit = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	deps.Config.Hub.ContributeQueueHold = []string{key}
+	if rec := doGet(s, "/api/runs/"+url.PathEscape(key)); rec.Code != http.StatusNotFound {
+		t.Fatalf("held queued detail = %d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
