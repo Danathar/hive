@@ -11,6 +11,39 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-24 (v5.38.0)
+
+### Added
+
+- ✨ Add hub and hive notification settings for Discord factory feed event/repo selection, Slack visibility, and hot-reloaded GitHub activity filters (#8629).
+
+### Fixed
+
+- Fix bob-backed agents with bobshell 2.x by launching through `bob chat --auto-approve`, writing the v2 harness provider setting, and keeping the 1.x `--auth-method api-key` path for older images (#8640).
+
+## 2026-09-24 (v5.37.1)
+
+### Fixed
+
+- Fixed hub error pages so missing paths and status-carrying errors return their real status codes and point at hive.hivecommons.dev (#8628).
+- Fixed #8635 by serving embedded dashboard CSS assets through the Node proxy and returning 404 for unknown asset-looking SPA paths.
+
+## 2026-09-24 (v5.37.0)
+
+### Added
+
+- Add the compact run checkpoint payload and generation-fenced mobile decision endpoint.
+- Added dashboard repository-card hold toggles for issue #8620.
+- Publish two adopter reference-architecture pages on the hub, at `/cncf-reference-architecture/console` for KubeStellar Console and `/cncf-reference-architecture/bluefin` for Project Bluefin, alongside the existing Hive platform page, so operators evaluating Hive can read how each adopter's surrounding architecture actually works ([#8631](https://github.com/hivecommons/hive/issues/8631)).
+
+### Changed
+
+- Regrouped the operator dashboard sidebar, unified sidebar count badges, and documented the Agent/Contributor/Governor/Fleet glossary pending maintainer review.
+
+### Fixed
+
+- runs: fix a deadlock in `PendingRunStages` when a disabled implement checkpoint auto-approves a plan — the approval re-entered the lease registry while the visit callback still held `leaseMu`, hanging the run work source (introduced by #8570).
+
 ## 2026-09-24 (v5.36.1)
 
 ### Fixed

@@ -786,41 +786,6 @@ func TestAdvanceApprovedPlanLeaseMatchesCanonicalIssueKey(t *testing.T) {
 	}
 }
 
-func TestRunStageAccessorAutoApprovesDisabledImplementCheckpoint(t *testing.T) {
-	hub, s, store, _ := spekHub(t)
-	off := false
-	level := config.RunImplementCheckpointMinACMM
-	s.deps.Config.ACMMLevel = &level
-	s.deps.Config.SourcePath = "hive.yaml"
-	s.deps.Config.Runs.Checkpoints.Implement = &off
-	now := time.Now()
-	spekLease(t, hub, StageImplement, now)
-	epic, err := store.Create("bound", beads.TypeEpic, beads.PriorityMedium, "architect", spekRunKey)
-	if err != nil {
-		t.Fatalf("create epic: %v", err)
-	}
-	if err := store.Update(epic.ID, func(b *beads.Bead) {
-		b.Metadata[planning.MetaRunKey] = spekRunKey
-		b.Metadata[planning.MetaPlanStatus] = planning.PlanStatusDraft
-	}); err != nil {
-		t.Fatalf("update epic: %v", err)
-	}
-	listed := spekListed(t, s)
-	if len(listed) != 1 || listed[0].Stage != StageImplement {
-		t.Fatalf("listed = %+v, want auto-approved implement stage", listed)
-	}
-	if got, _ := store.Get(epic.ID); got.Meta(planning.MetaPlanStatus) != planning.PlanStatusApproved {
-		t.Fatalf("plan_status = %q, want approved", got.Meta(planning.MetaPlanStatus))
-	}
-	found := false
-	for _, e := range s.audit.Recent(10) {
-		found = found || (e.User == runCheckpointAutoActor && e.Action == "plan_approve" && strings.Contains(e.Detail, "stage=implement"))
-	}
-	if !found {
-		t.Fatalf("auto implement approval audit not recorded: %+v", s.audit.Recent(10))
-	}
-}
-
 func TestCovGov_FeaturesSpektacularRoundTrip(t *testing.T) {
 	s := covApiServer(t)
 	if s.deps.Config.Runs.Spektacular.Enabled {
@@ -1043,5 +1008,50 @@ func TestIssue8550RunCannotReachImplementWithDraftPlan(t *testing.T) {
 	}
 	if listed := spekListed(t, s); len(listed) != 1 || listed[0].Stage != StagePlan {
 		t.Fatalf("listed with a draft plan = %+v, want the held plan stage only", listed)
+	}
+}
+
+// Regression: PendingRunStages used to call ensureRunPlanApproved inside the
+// VisitActiveStageLeases callback; auto-approval re-enters the lease registry
+// for the generation and deadlocked on leaseMu.
+func TestRunStageAccessorAutoApprovesDisabledImplementCheckpoint(t *testing.T) {
+	hub, s, store, _ := spekHub(t)
+	off := false
+	level := config.RunImplementCheckpointMinACMM
+	s.deps.Config.ACMMLevel = &level
+	s.deps.Config.SourcePath = "hive.yaml"
+	s.deps.Config.Runs.Checkpoints.Implement = &off
+	now := time.Now()
+	spekLease(t, hub, StageImplement, now)
+	epic, err := store.Create("bound", beads.TypeEpic, beads.PriorityMedium, "architect", spekRunKey)
+	if err != nil {
+		t.Fatalf("create epic: %v", err)
+	}
+	if err := store.Update(epic.ID, func(b *beads.Bead) {
+		b.Metadata[planning.MetaRunKey] = spekRunKey
+		b.Metadata[planning.MetaPlanStatus] = planning.PlanStatusDraft
+	}); err != nil {
+		t.Fatalf("update epic: %v", err)
+	}
+	done := make(chan []worksource.Issue, 1)
+	go func() { done <- spekListed(t, s) }()
+	var listed []worksource.Issue
+	select {
+	case listed = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("PendingRunStages deadlocked on leaseMu during checkpoint auto-approval")
+	}
+	if len(listed) != 1 || listed[0].Stage != StageImplement {
+		t.Fatalf("listed = %+v, want auto-approved implement stage", listed)
+	}
+	if got, _ := store.Get(epic.ID); got.Meta(planning.MetaPlanStatus) != planning.PlanStatusApproved {
+		t.Fatalf("plan_status = %q, want approved", got.Meta(planning.MetaPlanStatus))
+	}
+	found := false
+	for _, e := range s.audit.Recent(10) {
+		found = found || (e.User == runCheckpointAutoActor && e.Action == "plan_approve" && strings.Contains(e.Detail, "stage=implement"))
+	}
+	if !found {
+		t.Fatalf("auto implement approval audit not recorded: %+v", s.audit.Recent(10))
 	}
 }

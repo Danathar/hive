@@ -6015,7 +6015,7 @@
           "Governor"
         ],
         "summary": "Update notification settings",
-        "description": "Updates ntfy server/topic and the Discord webhook. A value beginning with the masked-secret bullet character is treated as \"unchanged\" (the UI echoes masked values back), not a real update. Requires owner role.",
+        "description": "Updates ntfy, Discord, Slack and selected notify-hook events. Masked secret values are treated as unchanged. Requires owner role.",
         "requestBody": {
           "content": {
             "application/json": {
@@ -6030,6 +6030,15 @@
                   },
                   "discordWebhook": {
                     "type": "string"
+                  },
+                  "slackWebhook": {
+                    "type": "string"
+                  },
+                  "events": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
                   }
                 }
               }
@@ -6053,7 +6062,7 @@
             }
           },
           "400": {
-            "description": "Invalid ntfyServer or discordWebhook URL"
+            "description": "Invalid notification URL"
           },
           "403": {
             "description": "Requires owner role"
@@ -19282,6 +19291,166 @@
         }
       }
     },
+    "/api/repos/{owner}/{repo}/hold-permission": {
+      "get": {
+        "tags": [
+          "Status"
+        ],
+        "summary": "Check whether the signed-in user may toggle repository card hold chips",
+        "description": "Owners are allowed. Other signed-in GitHub users are allowed only when GitHub reports write, maintain, or admin permission on the repository; the result is cached briefly server-side.",
+        "parameters": [
+          {
+            "name": "owner",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "repo",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Permission result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "allowed": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid repository"
+          },
+          "401": {
+            "description": "GitHub user session required"
+          },
+          "503": {
+            "description": "GitHub client not configured"
+          }
+        }
+      }
+    },
+    "/api/repos/{owner}/{repo}/items/{number}/hold": {
+      "post": {
+        "tags": [
+          "Status"
+        ],
+        "summary": "Add or remove the hold for one issue or pull request",
+        "description": "Owners, repository owners, and users with GitHub write, maintain, or admin permission may toggle a dashboard hold chip. Adding applies the hive's canonical hive/<hive-id> label. Removing fetches the issue/PR labels and removes exactly the label(s) causing the hold.",
+        "parameters": [
+          {
+            "name": "owner",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "repo",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "number",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "held"
+                ],
+                "properties": {
+                  "held": {
+                    "type": "boolean",
+                    "description": "true to add the hold, false to remove the hold-causing labels"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Hold toggle result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "repo": {
+                      "type": "string"
+                    },
+                    "number": {
+                      "type": "integer"
+                    },
+                    "held": {
+                      "type": "boolean"
+                    },
+                    "hold_label": {
+                      "type": "string"
+                    },
+                    "removed": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "GitHub user session required"
+          },
+          "403": {
+            "description": "Repository write permission required"
+          },
+          "502": {
+            "description": "GitHub label mutation failed"
+          },
+          "503": {
+            "description": "GitHub client not configured"
+          }
+        }
+      }
+    },
     "/api/repos/pauses": {
       "get": {
         "tags": [
@@ -20719,6 +20888,261 @@
         }
       }
     },
+    "/api/runs/{key}/checkpoint": {
+      "get": {
+        "tags": [
+          "Status"
+        ],
+        "summary": "Get compact run checkpoint payload",
+        "description": "Returns the bounded mobile/chat review payload for a held run checkpoint. The payload includes the lease generation as the staleness fence and the verified-owner approver rule.",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "description": "URL-escaped canonical work-item key.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Compact checkpoint review payload.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "run_key",
+                    "stage",
+                    "gen",
+                    "repo",
+                    "title",
+                    "summary",
+                    "summary_max_bytes",
+                    "decisions",
+                    "dashboard_url",
+                    "staleness",
+                    "approvers"
+                  ],
+                  "properties": {
+                    "run_key": {
+                      "type": "string"
+                    },
+                    "stage": {
+                      "type": "string",
+                      "enum": [
+                        "spec",
+                        "plan",
+                        "implement"
+                      ]
+                    },
+                    "gen": {
+                      "type": "integer",
+                      "format": "int64"
+                    },
+                    "repo": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "plan_epic_id": {
+                      "type": "string"
+                    },
+                    "summary": {
+                      "type": "string",
+                      "description": "Plain-text summary capped by summary_max_bytes."
+                    },
+                    "summary_max_bytes": {
+                      "type": "integer"
+                    },
+                    "decisions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "action",
+                          "label",
+                          "method",
+                          "url"
+                        ],
+                        "properties": {
+                          "action": {
+                            "type": "string",
+                            "enum": [
+                              "approve",
+                              "reject"
+                            ]
+                          },
+                          "label": {
+                            "type": "string"
+                          },
+                          "method": {
+                            "type": "string"
+                          },
+                          "url": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "dashboard_url": {
+                      "type": "string"
+                    },
+                    "staleness": {
+                      "type": "object",
+                      "required": [
+                        "fence",
+                        "gen"
+                      ],
+                      "properties": {
+                        "fence": {
+                          "type": "string",
+                          "enum": [
+                            "lease_gen"
+                          ]
+                        },
+                        "gen": {
+                          "type": "integer",
+                          "format": "int64"
+                        }
+                      }
+                    },
+                    "approvers": {
+                      "type": "object",
+                      "required": [
+                        "role",
+                        "verified_owner_required"
+                      ],
+                      "properties": {
+                        "role": {
+                          "type": "string",
+                          "enum": [
+                            "owner"
+                          ]
+                        },
+                        "verified_owner_required": {
+                          "type": "boolean"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Run not found."
+          },
+          "409": {
+            "description": "Run exists but is not currently held for checkpoint review."
+          },
+          "503": {
+            "description": "Run lease registry unavailable or unreadable."
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Status"
+        ],
+        "summary": "Resolve a compact run checkpoint decision",
+        "description": "Owner-only. Applies an approve/reject decision from a mobile/chat checkpoint payload only if the submitted generation still matches the live held lease generation.",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "description": "URL-escaped canonical work-item key.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "action",
+                  "gen"
+                ],
+                "properties": {
+                  "action": {
+                    "type": "string",
+                    "enum": [
+                      "approve",
+                      "reject"
+                    ]
+                  },
+                  "gen": {
+                    "type": "integer",
+                    "format": "int64",
+                    "description": "Lease generation from the checkpoint payload."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Decision accepted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "status",
+                    "run_key",
+                    "gen"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "approve",
+                        "reject"
+                      ]
+                    },
+                    "run_key": {
+                      "type": "string"
+                    },
+                    "gen": {
+                      "type": "integer",
+                      "format": "int64"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid JSON, unsupported action, or planning state refused the decision."
+          },
+          "403": {
+            "description": "Caller is not a verified owner."
+          },
+          "404": {
+            "description": "Run or checkpoint plan not found."
+          },
+          "409": {
+            "description": "Stale generation, unheld checkpoint, or lease could not advance."
+          },
+          "503": {
+            "description": "Run lease registry unavailable or unreadable."
+          }
+        }
+      }
+    },
     "/api/runs/{key}": {
       "get": {
         "tags": [
@@ -21741,6 +22165,150 @@
           },
           "403": {
             "description": "Owner access required"
+          }
+        }
+      }
+    },
+    "/api/governor/notifications": {
+      "get": {
+        "tags": [
+          "Governor"
+        ],
+        "summary": "Get notification settings",
+        "description": "Returns masked notification channel settings and the selected hive notification event set. Requires owner role.",
+        "responses": {
+          "200": {
+            "description": "Notification settings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ntfyServer": {
+                      "type": "string"
+                    },
+                    "ntfyTopic": {
+                      "type": "string"
+                    },
+                    "discordWebhook": {
+                      "type": "string"
+                    },
+                    "slackWebhook": {
+                      "type": "string"
+                    },
+                    "hasNtfy": {
+                      "type": "boolean"
+                    },
+                    "hasDiscord": {
+                      "type": "boolean"
+                    },
+                    "hasSlack": {
+                      "type": "boolean"
+                    },
+                    "events": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Requires owner role"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Governor"
+        ],
+        "summary": "Update notification settings",
+        "description": "Updates ntfy, Discord, Slack and selected notify-hook events. Masked secret values are treated as unchanged. Requires owner role.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ntfyServer": {
+                    "type": "string"
+                  },
+                  "ntfyTopic": {
+                    "type": "string"
+                  },
+                  "discordWebhook": {
+                    "type": "string"
+                  },
+                  "slackWebhook": {
+                    "type": "string"
+                  },
+                  "events": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string"
+                    },
+                    "notifications": {
+                      "type": "object",
+                      "properties": {
+                        "ntfyServer": {
+                          "type": "string"
+                        },
+                        "ntfyTopic": {
+                          "type": "string"
+                        },
+                        "discordWebhook": {
+                          "type": "string"
+                        },
+                        "slackWebhook": {
+                          "type": "string"
+                        },
+                        "hasNtfy": {
+                          "type": "boolean"
+                        },
+                        "hasDiscord": {
+                          "type": "boolean"
+                        },
+                        "hasSlack": {
+                          "type": "boolean"
+                        },
+                        "events": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid notification URL"
+          },
+          "403": {
+            "description": "Requires owner role"
           }
         }
       }

@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// Every public page is reachable on the retired hive.kubestellar.io host, which
+// Every public page is reachable on the retired hub host, which
 // 301s to the current one — and that redirect DROPS THE PATH, so every legacy
 // URL lands on the homepage. Search engines and social unfurlers therefore need
 // an explicit self-referencing canonical on the current host; without one the
@@ -29,7 +29,9 @@ var staticPageCanonicals = map[string]string{
 	"reading.html":                     "/reading",
 	"api-docs.html":                    "/api/docs",
 	"cncf-reference-architecture.html": "/cncf-reference-architecture",
-	"my-hives.html":                    "/fleet",
+	"cncf-reference-architecture-console.html": "/cncf-reference-architecture/console",
+	"cncf-reference-architecture-bluefin.html": "/cncf-reference-architecture/bluefin",
+	"my-hives.html": "/fleet",
 }
 
 const canonicalOrigin = "https://hive.hivecommons.dev"
@@ -80,7 +82,7 @@ func TestStaticPagesDoNotAdvertiseTheRetiredHost(t *testing.T) {
 			continue
 		}
 		for i, line := range strings.Split(string(b), "\n") {
-			if !strings.Contains(line, "hive.kubestellar.io") {
+			if !strings.Contains(line, "hive."+"kubestellar.io") {
 				continue
 			}
 			// A comment may name the retired host to explain why something is
@@ -97,7 +99,7 @@ func TestStaticPagesDoNotAdvertiseTheRetiredHost(t *testing.T) {
 // The unfurl-bot fallback is the ONLY thing social crawlers see for /dashboard,
 // so a stale og:url there is the link preview every share of the dashboard gets.
 func TestOGFallbackNamesTheCurrentHost(t *testing.T) {
-	if strings.Contains(ogFallbackHTML, "hive.kubestellar.io") {
+	if strings.Contains(ogFallbackHTML, "hive."+"kubestellar.io") {
 		t.Error("ogFallbackHTML still names the retired host; this is the metadata every " +
 			"social unfurl of /dashboard renders from")
 	}
