@@ -11,6 +11,13 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-24 (v5.32.0)
+
+### Added
+
+- Add file-based dashboard theme presets, `/api/themes`, and theme preview CSS for Settings → Appearance (#8536).
+- Add the shared dashboard design-token stylesheet layer with compatibility aliases for zero visual change.
+
 ## 2026-09-24 (v5.31.0)
 
 ### Added
