@@ -3277,6 +3277,11 @@ const (
 	// an operator sets on the hive pod.
 	BobAPIKeyEnvVar = "BOBSHELL_API_KEY"
 
+	// BobV2APIKeyEnvVar is the renamed env var bobshell 2.x reads for the
+	// default `provider:"harness"` path. Verified in dist/bob.js 2.0.4:
+	// `t.apiKey??process.env.BOB_API_KEY`.
+	BobV2APIKeyEnvVar = "BOB_API_KEY"
+
 	// DefaultBobAPIKeyEnv is the hive-side env var consulted for the bob API
 	// key when governor.bob.api_key_env is not set in hive.yaml.
 	DefaultBobAPIKeyEnv = "HIVE_BOB_API_KEY"
@@ -3325,6 +3330,10 @@ const (
 	// It also suppresses the write-back that would otherwise persist a
 	// different value (`&&!globalThis.authMethodByCliArg`), so passing it
 	// makes hive's choice authoritative without bob rewriting the shared file.
+	//
+	// bobshell 2.0.4 removed this flag entirely (the only "auth-method" string
+	// left in dist/bob.js is ai-gateway-auth-method), so launch code must only
+	// pass it to 1.x.
 	BobAuthMethodFlag = "--auth-method"
 
 	// BobApprovalModeFlag / BobApprovalModeYolo set bob's tool-approval policy.
@@ -3345,6 +3354,7 @@ const (
 	// because it states the mode at the call site.
 	BobApprovalModeFlag = "--approval-mode"
 	BobApprovalModeYolo = "yolo"
+	BobAutoApproveFlag  = "--auto-approve"
 
 	// BobTrustFlag marks the agent's workspace as trusted. bobshell 1.0.6
 	// otherwise renders "This folder is not trusted. Some features may be
@@ -3368,6 +3378,14 @@ const (
 	// On a hive this resolves to /data/home/.bob/settings.json — a SHARED file,
 	// so one agent picking SSO at the prompt re-breaks every other bob agent.
 	BobSettingsRelPath = ".bob/settings.json"
+
+	// BobV2SettingsRelPath is bobshell 2.x's global settings file. From
+	// dist/bob.js (2.0.4): getGlobalBobDirectory() is
+	// path.join(os.homedir(), ".bob"), getGlobalSettingsDirectory() appends
+	// "settings", and the user config joins that directory with "settings.json".
+	BobV2SettingsRelPath = ".bob/settings/settings.json"
+	BobV2ProviderKey     = "provider"
+	BobV2ProviderHarness = "harness"
 
 	// BobSettingsAuthKey / BobSettingsSelectedTypeKey / BobSettingsEnforcedTypeKey
 	// are the nested JSON keys hive owns inside that file. Shape per bundle:
@@ -4423,6 +4441,7 @@ type NotificationsConfig struct {
 	MSTeams        *MSTeamsConfig        `yaml:"msteams,omitempty"`
 	Discord        *DiscordConfig        `yaml:"discord,omitempty"`
 	GitHubActivity *GitHubActivityConfig `yaml:"github_activity,omitempty"`
+	Events         []string              `yaml:"events,omitempty" json:"events,omitempty"`
 }
 
 type NtfyConfig struct {
@@ -4511,6 +4530,8 @@ type GitHubActivityConfig struct {
 	Org              string   `yaml:"org,omitempty" json:"org,omitempty"`
 	APIURL           string   `yaml:"api_url,omitempty" json:"api_url,omitempty"`
 	PollIntervalS    int      `yaml:"poll_interval_s,omitempty" json:"poll_interval_s,omitempty"`
+	Repos            []string `yaml:"repos,omitempty" json:"repos,omitempty"`
+	Events           []string `yaml:"events,omitempty" json:"events,omitempty"`
 	AllowAuthors     []string `yaml:"allow_authors,omitempty" json:"allow_authors,omitempty"`
 	DenyAuthors      []string `yaml:"deny_authors,omitempty" json:"deny_authors,omitempty"`
 	FilterBots       *bool    `yaml:"filter_bots,omitempty" json:"filter_bots,omitempty"`
