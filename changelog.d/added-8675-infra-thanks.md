@@ -1,1 +1,0 @@
-- The public Hive landing page now thanks Akamai (Linode), Oracle Cloud Infrastructure OKE, and the CNCF for donated infrastructure, with local partner logos in the footer area.
