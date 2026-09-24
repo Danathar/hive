@@ -95,6 +95,28 @@ the staleness window.
 - The close is recorded as
   `close_reason: auto-closed: a merged pull request addresses this finding`.
 
+### Agent closes are not resolutions
+
+Advisory agents re-check their own open findings each cycle and `bd close` the
+ones they judge fixed or invalid. That judgement is an LLM's, and it is
+routinely wrong: the digest of 2026-09-24 reported a still-undocumented
+feature as resolved because the `guide` agent closed its finding with no docs
+change behind it ([#6262](https://github.com/hivecommons/hive/issues/6262)).
+
+The digest therefore splits recently closed findings by what backs the close:
+
+- **✅ Recently Resolved** — struck through, "resolved <date>". Only closes
+  the hive has evidence for: a PR-linked auto-close, a healed App or repo-access
+  finding, or a finding whose referenced GitHub issues and PRs have all closed.
+- **☑️ Recently Closed by Agents — Fix Not Verified** — not struck through,
+  "closed by <agent> <date> — fix not verified". Every other close, including
+  `bd close` and `bd update --status done|closed`. The condition may still
+  hold.
+
+Both sections share the `max_findings` changelog cap described below. The
+zero-findings digest says "all previously reported findings are resolved" only
+when every listed close is evidence-backed.
+
 ### Evidence provenance
 
 The digest footer stamps one commit — `Analyzed at owner/repo@<sha>` — across

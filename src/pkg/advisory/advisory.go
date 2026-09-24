@@ -91,6 +91,14 @@ type ResolvedFinding struct {
 	Title    string    `json:"title"`
 	ClosedAt time.Time `json:"closed_at"`
 	File     string    `json:"file,omitempty"`
+	// AgentClosed marks a bead an agent closed itself with nothing the hive
+	// can check behind it: no hive auto-close reason (merged PR, healed
+	// access) and no referenced GitHub issue or PR that has closed. Advisory
+	// agents re-verify their own findings with an LLM and close the ones they
+	// judge gone or invalid; that judgement is routinely wrong (#6262), so the
+	// digest reports such entries as "closed by <agent>, fix not verified"
+	// instead of claiming the condition was resolved.
+	AgentClosed bool `json:"agent_closed,omitempty"`
 }
 
 // Digest is a consolidated summary of findings across agents.
@@ -312,19 +320,35 @@ func linkedResolvedAtForBead(b *beads.Bead, opts DigestOptions) (time.Time, bool
 	return latest, true
 }
 
-func resolvedAtForBead(store *beads.Store, b *beads.Bead, opts DigestOptions) time.Time {
+// hiveCloseReasons are the close_reason values the hive itself writes when it
+// closes a finding on evidence it observed. Any other close — an agent's
+// `bd close`, an operator's `bd update --status` — carries only the closer's
+// word.
+var hiveCloseReasons = map[string]bool{
+	appAuthHealedCloseReason:    true,
+	repoAccessHealedCloseReason: true,
+	prLinkedCloseReason:         true,
+}
+
+// resolvedAtForBead reports when a closed bead was resolved and whether that
+// resolution rests on evidence the hive observed (a hive auto-close, or every
+// GitHub reference the finding names having closed) rather than only on the
+// closer's say-so.
+func resolvedAtForBead(store *beads.Store, b *beads.Bead, opts DigestOptions) (time.Time, bool) {
 	persisted, hasPersisted := parseResolvedAt(b.Meta(resolvedAtMetadataKey))
+	evidenced := hiveCloseReasons[b.Meta(closeReasonMetadataKey)]
 	if hasPersisted && b.Meta(closeReasonMetadataKey) == prLinkedCloseReason {
-		return persisted
+		return persisted, true
 	}
 	if linkedAt, ok := linkedResolvedAtForBead(b, opts); ok {
 		if !hasPersisted || persisted.After(linkedAt) {
 			_ = store.SetMetadata(b.ID, resolvedAtMetadataKey, formatResolvedAt(linkedAt))
-			return linkedAt
+			return linkedAt, true
 		}
+		evidenced = true
 	}
 	if hasPersisted {
-		return persisted
+		return persisted, evidenced
 	}
 
 	resolvedAt := b.UpdatedAt.Time
@@ -334,7 +358,7 @@ func resolvedAtForBead(store *beads.Store, b *beads.Bead, opts DigestOptions) ti
 	if !resolvedAt.IsZero() {
 		_ = store.SetMetadata(b.ID, resolvedAtMetadataKey, formatResolvedAt(resolvedAt))
 	}
-	return resolvedAt
+	return resolvedAt, evidenced
 }
 
 // nearDuplicateThreshold is the Jaccard similarity at or above which two
@@ -758,13 +782,14 @@ func BuildDigestFromBeads(stores map[string]*beads.Store, mode string, opts Dige
 			// with either status, and a "done" finding lingering in the digest
 			// as if still open is exactly the staleness #2575 is about.
 			if b.Status == beads.StatusClosed || b.Status == beads.StatusDone {
-				resolvedAt := resolvedAtForBead(store, b, opts)
+				resolvedAt, evidenced := resolvedAtForBead(store, b, opts)
 				if resolvedAt.After(cutoff) {
 					resolved = append(resolved, ResolvedFinding{
-						Agent:    agentName,
-						Title:    b.Title,
-						ClosedAt: resolvedAt,
-						File:     b.ExternalRef,
+						Agent:       agentName,
+						Title:       b.Title,
+						ClosedAt:    resolvedAt,
+						File:        b.ExternalRef,
+						AgentClosed: !evidenced,
 					})
 				}
 				continue
@@ -1146,10 +1171,16 @@ func FormatDigestMarkdown(d *Digest, opts DigestOptions) string {
 		b.WriteString("> Automated code review findings from [Hive](https://github.com/hivecommons/hive) agents. ")
 		b.WriteString("This comment is updated periodically.\n\n")
 		writeAdviceSection(&b, opts.Advice)
-		if len(d.RecentlyResolved) == 0 {
+		_, agentClosed := splitResolved(d.RecentlyResolved)
+		switch {
+		case len(d.RecentlyResolved) == 0:
 			b.WriteString(fmt.Sprintf("**Findings:** 0 — ✅ No open advisory findings · evaluated %s.\n\n", d.GeneratedAt.Format(time.RFC3339)))
-		} else {
+		case len(agentClosed) == 0:
 			b.WriteString("**Findings:** 0 — all previously reported findings are resolved. ✅\n\n")
+		default:
+			// An agent closing its own finding is not evidence the condition
+			// is gone (#6262), so "all resolved" would overclaim here.
+			b.WriteString(fmt.Sprintf("**Findings:** 0 — no open advisory findings; %d recently closed by agents without a verified fix (listed below).\n\n", len(agentClosed)))
 		}
 		writeRecentlyResolved(&b, d, org, primaryRepo)
 		writeAnalyzedFooter(&b, d)
@@ -1333,24 +1364,62 @@ func writeCapNote(b *strings.Builder, d *Digest) {
 		d.TotalCount, d.OverflowCount)
 }
 
+// splitResolved partitions recently resolved entries into the ones backed by
+// evidence the hive observed and the ones an agent closed on its own word,
+// preserving order within each.
+func splitResolved(all []ResolvedFinding) (verified, agentClosed []ResolvedFinding) {
+	for _, r := range all {
+		if r.AgentClosed {
+			agentClosed = append(agentClosed, r)
+		} else {
+			verified = append(verified, r)
+		}
+	}
+	return verified, agentClosed
+}
+
 // writeRecentlyResolved renders the "Recently Resolved" digest section. Shared
 // by the normal and the zero-findings ("all clear") digest renderings.
+//
+// Findings the hive saw resolved (a merged PR, a closed referenced issue, a
+// healed access check) are struck through as resolved. Findings an agent
+// closed with no such evidence get their own section and are NOT struck
+// through: the agent's re-check is an LLM judgement, and presenting it as a
+// resolution is how the digest reported still-open gaps as fixed (#6262).
 func writeRecentlyResolved(b *strings.Builder, d *Digest, org, primaryRepo string) {
 	if len(d.RecentlyResolved) == 0 {
 		return
 	}
-	fmt.Fprintf(b, "### ✅ Recently Resolved (%d)\n\n", len(d.RecentlyResolved))
-	for _, r := range d.RecentlyResolved {
-		loc := formatFindingRef(r.File, 0, org, primaryRepo, r.Title)
-		fmt.Fprintf(b, "- ~~%s~~%s _%s — resolved %s_\n", linkifyRefs(logscrub.ScrubString(r.Title), org), loc, r.Agent, r.ClosedAt.Format("Jan 2"))
+	verified, agentClosed := splitResolved(d.RecentlyResolved)
+	if len(verified) > 0 {
+		fmt.Fprintf(b, "### ✅ Recently Resolved (%d)\n\n", len(verified))
+		for _, r := range verified {
+			loc := formatFindingRef(r.File, 0, org, primaryRepo, r.Title)
+			fmt.Fprintf(b, "- ~~%s~~%s _%s — resolved %s_\n", linkifyRefs(logscrub.ScrubString(r.Title), org), loc, r.Agent, r.ClosedAt.Format("Jan 2"))
+		}
+		if len(agentClosed) > 0 {
+			b.WriteString("\n")
+		}
+	}
+	if len(agentClosed) > 0 {
+		fmt.Fprintf(b, "### ☑️ Recently Closed by Agents — Fix Not Verified (%d)\n\n", len(agentClosed))
+		b.WriteString("> The reporting agent closed these on re-check. The hive saw no merged PR or closed issue behind the close, so the condition may still hold.\n\n")
+		for _, r := range agentClosed {
+			loc := formatFindingRef(r.File, 0, org, primaryRepo, r.Title)
+			fmt.Fprintf(b, "- %s%s _closed by %s %s — fix not verified_\n", linkifyRefs(logscrub.ScrubString(r.Title), org), loc, r.Agent, r.ClosedAt.Format("Jan 2"))
+		}
 	}
 	// The collapsed remainder is named, never merely absent: a changelog that
 	// quietly stops at the cap reads as "this is everything that healed".
 	if d.ResolvedOverflowCount > 0 {
+		what := "resolved"
+		if len(agentClosed) > 0 {
+			what = "resolved or closed by agents"
+		}
 		// The window is read from the constant, not written as "48h": the two
 		// drifting apart would misstate the period the count covers.
-		fmt.Fprintf(b, "- _…plus %d more resolved in the last %dh, collapsed so the open findings above stay readable_\n",
-			d.ResolvedOverflowCount, int(recentlyResolvedWindow.Hours()))
+		fmt.Fprintf(b, "- _…plus %d more %s in the last %dh, collapsed so the open findings above stay readable_\n",
+			d.ResolvedOverflowCount, what, int(recentlyResolvedWindow.Hours()))
 	}
 	b.WriteString("\n")
 }
