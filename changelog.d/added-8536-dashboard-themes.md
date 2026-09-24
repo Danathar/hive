@@ -1,1 +1,0 @@
-- Add dashboard theme configuration, built-in presets, and `/api/theme.css` for hive-wide dashboard appearance customization (#8536).
