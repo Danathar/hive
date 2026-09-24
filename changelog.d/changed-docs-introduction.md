@@ -1,1 +1,0 @@
-- Rewrite the Hive introduction as a reader-focused overview and move the full topic catalog to a documentation map.
