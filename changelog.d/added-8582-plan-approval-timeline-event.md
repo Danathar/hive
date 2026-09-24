@@ -1,1 +1,0 @@
-- Record human plan checkpoint approvals as distinct run timeline events surfaced in run detail responses (#8582).
