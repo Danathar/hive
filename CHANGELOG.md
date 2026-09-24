@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-24 (v5.27.3)
+
+### Fixed
+
+- Fix Wavefront campaign fixture runs so owner/repo-scoped Wavefront items appear in the contribution queue and `/api/runs/{key}` can return their burndown detail.
+
 ## 2026-09-23 (v5.27.2)
 
 ### Fixed
