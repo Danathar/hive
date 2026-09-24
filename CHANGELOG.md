@@ -11,6 +11,14 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-24 (v5.40.1)
+
+### Fixed
+
+- Fix #8674: normalize the renamed github.ibm.com Hive App slug while preserving legacy GHE App compatibility.
+- Fixed #8677 by giving every dashboard theme accessible light and dark palettes and keeping Appearance hover previews from resizing the settings modal.
+- Fixed the contributor Operations dashboard light/dark/auto theme control so it reuses the shared dashboard layout mode, persists choices, and follows system color-scheme changes in auto mode (#8677).
+
 ## 2026-09-24 (v5.40.0)
 
 ### Added
