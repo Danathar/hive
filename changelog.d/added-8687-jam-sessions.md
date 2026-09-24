@@ -1,1 +1,0 @@
-- Added Spektacular Jam Sessions phase 1 for campaign threads, suggestions, polls, decisions, and attributed spec revisions. Refs #8687.
