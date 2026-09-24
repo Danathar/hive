@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-24 (v5.33.0)
+
+### Added
+
+- Add dashboard style ratchet tests for inline styles and raw CSS values so design-system debt can only decrease.
+
 ## 2026-09-24 (v5.32.0)
 
 ### Added
