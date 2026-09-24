@@ -11,6 +11,13 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-24 (v5.43.1)
+
+### Fixed
+
+- The dashboard Appearance settings now visibly apply configured background images, opacity, and honeycomb watermarks instead of hiding the generated layer behind the page background.
+- Restore the v5 pkg/knowledge coverage floor by adding direct campaign archive unit coverage for handoff leases, revisions, restore, and validation paths.
+
 ## 2026-09-24 (v5.43.0)
 
 ### Added
