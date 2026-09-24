@@ -21,6 +21,14 @@ runs:
     poll_interval_s: 30       # default
 ```
 
+As of v6, the Hive hub/spoke image, hub image, and contributor-agent image
+ship a pinned `spektacular` release binary in `/usr/local/bin`, verified against
+the release `checksums.txt` during the image build. Operators may still override
+`runs.spektacular.binary` to point at another executable. At boot, when
+`runs.spektacular.enabled` is true, Hive probes `<binary> --version`, logs the
+found or missing binary, and exposes `spektacular: {present, version, binary}`
+in `/api/status`.
+
 Hosted hives with no config file can set this from **Settings → Extensions →
 Spektacular**. That card exposes the toggle, binary path, poll interval, stage
 retry budget, checkpoint gates, triage labels/options, and the run-stage work
@@ -80,7 +88,16 @@ runs:
 
 Every 30 seconds (the contribute hub's cleanup tick) the runner looks at every
 lease that carries a stage. For each `spec` or `plan` stage whose poll interval
-has elapsed it runs
+has elapsed it first resolves the lease's repository working directory: the
+per-stage worktree at
+`$HIVE_WORKSPACE_DIR/runs/<runKey>/<stage>-<generation>` when present, otherwise
+the contributor's shared checkout at `$HIVE_WORKSPACE_DIR/<owner>/<repo>`. The
+CLI is executed with that directory as `cmd.Dir`, so Spektacular finds the
+`.spektacular/` project belonging to the artifact instead of the hub process
+cwd. If neither checkout exists, Hive records a `missing_workdir` refusal and
+parks the lease for operator action rather than polling in an unrelated cwd.
+
+It then runs
 
 ```
 spektacular <spec|plan> status <name>
