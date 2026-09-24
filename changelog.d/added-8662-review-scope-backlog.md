@@ -1,1 +1,0 @@
-- Teach review verdicts to classify findings by linked-issue scope and file cited out-of-scope findings as capped from-review backlog issues (#8662).

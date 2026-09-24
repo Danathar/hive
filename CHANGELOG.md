@@ -11,6 +11,17 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-24 (v5.40.0)
+
+### Added
+
+- Teach review verdicts to classify findings by linked-issue scope and file cited out-of-scope findings as capped from-review backlog issues (#8662).
+- The public Hive landing page now thanks Akamai (Linode), Oracle Cloud Infrastructure OKE, and the CNCF for donated infrastructure, with local partner logos in the footer area.
+
+### Changed
+
+- notify: Discord alerts and the factory activity feed now send `SUPPRESS_EMBEDS` (and wrap factory URLs in `<>`), so links post without preview cards.
+
 ## 2026-09-24 (v5.39.3)
 
 ### Fixed

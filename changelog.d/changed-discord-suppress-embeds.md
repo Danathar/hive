@@ -1,1 +1,0 @@
-- notify: Discord alerts and the factory activity feed now send `SUPPRESS_EMBEDS` (and wrap factory URLs in `<>`), so links post without preview cards.
