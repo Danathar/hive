@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-24 (v5.34.0)
+
+### Added
+
+- Unify contributor profile styles with the shared dashboard theme catalog and scoped theme CSS (#8536).
+
 ## 2026-09-24 (v5.33.0)
 
 ### Added

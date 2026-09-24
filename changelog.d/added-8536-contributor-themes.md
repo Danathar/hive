@@ -1,1 +1,0 @@
-- Unify contributor profile styles with the shared dashboard theme catalog and scoped theme CSS (#8536).
