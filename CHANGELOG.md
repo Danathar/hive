@@ -11,6 +11,17 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-24 (v5.40.2)
+
+### Changed
+
+- The public Hive landing page now expands its infrastructure thanks to include Cloudflare, GitHub Copilot, and Bluehost alongside Akamai (Linode), Oracle Cloud OKE, and the CNCF.
+
+### Fixed
+
+- Hosted spokes now load the dashboard token from the mounted `hive-secrets/dashboard-token` file when token env vars are absent, restoring release-channel switching and self-upgrade proof for affected hosted hives ([#8690](https://github.com/hivecommons/hive/issues/8690)).
+- bob agents launch again: the bob version switch is now wrapped in `sh -c`, so the tmux launch line's `KEY='value'` env prefix no longer produces a bash syntax error (`unexpected token ')'`) that stopped bob from ever starting.
+
 ## 2026-09-24 (v5.40.1)
 
 ### Fixed
