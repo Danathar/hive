@@ -272,7 +272,7 @@ func (m *Manager) deliverKickLocked(agent *AgentProcess, message, trigger string
 		m.logger.Warn("kick delivery skipped: CLI is not at a ready prompt; refusing to type kick into shell",
 			"agent", agent.Name, "trigger", trigger, "has_cli_marker", paneHasCLIMarker(visible),
 			"consent_screen", paneShowsConsentScreen(visible), "working", paneShowsAgentWorking(visible))
-		return
+		return false
 	}
 
 	// Archive the PREVIOUS kick's scrollback and clear the history before any
