@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-24 (v5.35.3)
+
+### Changed
+
+- Split dashboard chip/pill/badge/status-dot styling into entity, status, action, and count recipes backed by status, ACMM, and vendor design tokens.
+
 ## 2026-09-24 (v5.35.2)
 
 ### Changed
