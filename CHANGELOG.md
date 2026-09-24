@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-24 (v5.29.0)
+
+### Added
+
+- Add Governor PRs-by-model effectiveness columns and ranking controls for #8557.
+
 ## 2026-09-24 (v5.28.0)
 
 ### Added
