@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-24 (v5.39.0)
+
+### Added
+
+- The three CNCF reference architecture pages now carry an "Edit this page" source link under the masthead, pointing at the page's HTML file in the GitHub web editor ([#8649](https://github.com/hivecommons/hive/issues/8649)). These pages are authored as HTML with no markdown original, so a reader who spotted a factual error previously had no route back to the source; the link uses GitHub's `/edit/v5/` form, which opens the editor directly and prompts a fork and branch for anyone without write access.
+
 ## 2026-09-24 (v5.38.0)
 
 ### Added
