@@ -420,11 +420,26 @@ a self-hosted spoke.
 
 So `GET /api/audit` will show *that* an agent was paused and *when*, but not that an assistant
 mediated it. An operator reconstructing a timeline cannot separate conversational actions from
-dashboard ones. Closing this would mean either sending an identity header — which
-`authenticate` strips, and which would be a forgery on any deployment where it is not
-stripped — or a Hive-side change to record a client identity, which is out of scope for a
-design whose premise is that Hive does not change. It is recorded here as a real limitation
-rather than papered over.
+dashboard ones.
+
+**This was decided, not overlooked.** #8697 settled it: accepted as a recorded limitation, and
+the write contract will not carry a client-identity record. Three reasons, in the order they
+matter:
+
+- The token holder is already the accountable party on this path — possession of the dashboard
+  token *is* the identity, per `authenticate`. A client-supplied name adds nothing to
+  accountability, because anyone holding the token can put whatever they like in it.
+- What is actually wanted is **diagnosis**, not attribution: "was this the assistant or a
+  person?". That does not need to be unforgeable, and conflating the two is how a trivially
+  spoofable field ends up being treated as proof.
+- It is not specific to this surface. `hivectl`, `curl` and the SPA on a self-hosted hive all
+  audit as `local` too. If recording the calling client is worth doing, it is worth doing for
+  all of them — which makes it its own change, recording the caller as a *claim* rather than an
+  identity, not a rider on this one.
+
+The alternative that is genuinely closed off is sending an identity header: `authenticate`
+strips inbound copies before auth, and on any deployment where it did not, doing so would be
+forgery.
 
 ## Relationship to `hivectl`
 
