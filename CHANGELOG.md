@@ -11,6 +11,12 @@ Hive did not historically maintain a complete changelog. This file starts a prag
 
 ## Unreleased
 
+## 2026-09-24 (v5.35.4)
+
+### Changed
+
+- Migrate dashboard, contributor, and hub type, spacing, and radius styling to shared design tokens and utilities.
+
 ## 2026-09-24 (v5.35.3)
 
 ### Changed
